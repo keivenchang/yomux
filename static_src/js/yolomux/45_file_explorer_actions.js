@@ -2010,7 +2010,7 @@ function showFileEditorPaneForPath(path, options = {}) {
   activeFile = path;
   const replacementSlots = setOpenFileOwner(path, item, options);
   syncFileLayoutItems();
-  scheduleFileExplorerActiveFileReveal(path);
+  scheduleFileExplorerActiveFileReveal(path, {explicit: options.userInitiated === true});
   if (replacementSlots) applyLayoutSlots(replacementSlots, {focusSession: item, prune: false});
   return openFileEditorPane(path, {...options, item});
 }
@@ -3106,6 +3106,7 @@ function ensureFileExplorerFilesystemWatchBaseline() {
   if (readOnlyMode || !fileExplorerTreePaneIsVisible() || fileExplorerFilesystemWatchToken) {
     return Boolean(fileExplorerFilesystemWatchToken);
   }
+  if (serverWatchRootsState.watchBaselinePromise) return serverWatchRootsState.watchBaselinePromise;
   if (!serverWatchRootsState.registered) {
     syncServerWatchRoots({immediate: true});
     return false;
@@ -3114,6 +3115,15 @@ function ensureFileExplorerFilesystemWatchBaseline() {
     await refreshFileExplorerFromWatchDiff({full: true}, {full: true});
     return Boolean(fileExplorerFilesystemWatchToken);
   })();
+  serverWatchRootsState.watchBaselinePromise = baseline;
+  baseline.then(
+    () => {
+      if (serverWatchRootsState.watchBaselinePromise === baseline) serverWatchRootsState.watchBaselinePromise = null;
+    },
+    () => {
+      if (serverWatchRootsState.watchBaselinePromise === baseline) serverWatchRootsState.watchBaselinePromise = null;
+    },
+  );
   return baseline;
 }
 

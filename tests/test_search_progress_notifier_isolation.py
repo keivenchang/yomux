@@ -19,9 +19,9 @@ def test_reset_clears_leaked_search_progress_notifier_and_coalescing():
 
 
 def test_leaked_late_notify_cannot_write_or_chmod_a_foreign_host_state_dir(tmp_path):
-    foreign_dir = tmp_path / "hosts" / "deadbeef" / "background-owner"
+    foreign_dir = tmp_path / "hosts" / "deadbeef" / "foreign-cache"
     foreign_dir.mkdir(parents=True)
-    foreign_target = foreign_dir / "client-events.json"
+    foreign_target = foreign_dir / "search-progress.json"
     touched: list[dict] = []
     def leaked_notifier(frame):
         foreign_dir.chmod(0o700)
@@ -69,13 +69,29 @@ def test_test_scope_cleanup_is_idempotent_and_body_failure_still_cleans():
     scope.cleanup(); scope.cleanup()
     try:
         with scope:
-            file_index.set_background_owner_checker(lambda _role: False)
+            file_index.set_build_authority_checker(lambda _role: False)
             raise RuntimeError("fixture failure")
     except RuntimeError as exc:
         assert str(exc) == "fixture failure"
     else:
         raise AssertionError("fixture failure was not propagated")
-    assert file_index.background_owner_can_build() is True
+    assert file_index.build_authorized() is True
+
+
+def test_old_app_cannot_clear_new_file_index_callback_owner():
+    old_owner = object()
+    new_owner = object()
+    try:
+        file_index.set_background_callback_owner(old_owner)
+        file_index.set_build_authority_checker(lambda _role: False)
+        file_index.set_background_callback_owner(new_owner)
+
+        assert file_index.clear_background_callbacks(old_owner) is False
+        assert file_index.build_authorized() is False
+        assert file_index.clear_background_callbacks(new_owner) is True
+        assert file_index.build_authorized() is True
+    finally:
+        file_index.FileIndexTestScope().cleanup()
 
 
 def test_test_scope_rejects_late_gate_and_clears_callbacks_in_order(monkeypatch):
@@ -101,9 +117,9 @@ def test_test_scope_rejects_late_gate_and_clears_callbacks_in_order(monkeypatch)
     publisher.join(timeout=5.0); assert not publisher.is_alive() and delivered == [] and errors == []
     observed = []
     setters = zip(file_index.FileIndexTestScope.CALLBACK_CLEAR_ORDER, (
-        "set_background_owner_checker", "set_background_owner_refresh_requester",
-        "set_background_index_search_requester", "set_background_owner_bytes_recorder",
-        "set_background_owner_done_notifier", "set_search_progress_notifier",
+        "set_build_authority_checker", "set_background_refresh_requester", "set_background_work_submitter",
+        "set_background_index_search_requester", "set_background_bytes_recorder",
+        "set_background_done_notifier", "set_search_progress_notifier",
     ))
     for label, name in setters:
         monkeypatch.setattr(file_index, name, lambda value, label=label: observed.append((label, value)))

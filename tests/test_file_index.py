@@ -444,8 +444,8 @@ def test_reindex_batch_coalesces_dirty_paths_once(monkeypatch, tmp_path, owner_c
         return original_coalesced_paths(paths)
 
     monkeypatch.setattr(file_index, "_coalesced_paths", record_coalesce)
-    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: owner_can_build)
-    monkeypatch.setattr(file_index, "request_background_owner_refresh", lambda _payload: {})
+    monkeypatch.setattr(file_index, "build_authorized", lambda: owner_can_build)
+    monkeypatch.setattr(file_index, "request_background_refresh", lambda _payload: {})
     monkeypatch.setattr(file_index, "schedule_refreshes", lambda: 0)
     monkeypatch.setattr(filesystem.search, "_ensure_search_index", lambda _root, operation="": (index, {}))
     try:
@@ -696,8 +696,8 @@ def test_cold_capped_full_tree_search_waits_for_index_instead_of_returning_false
     _clear_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
     monkeypatch.setattr(filesystem, "MAX_SEARCH_FILES", 2)
-    monkeypatch.setattr(file_index, "_BACKGROUND_OWNER_CHECKER", lambda _role: False)
-    monkeypatch.setattr(file_index, "_BACKGROUND_OWNER_REFRESH_REQUESTER", lambda _role, _payload: {"fallback": True})
+    monkeypatch.setattr(file_index, "_BUILD_AUTHORITY_CHECKER", lambda _role: False)
+    monkeypatch.setattr(file_index, "_BACKGROUND_REFRESH_REQUESTER", lambda _role, _payload: {"fallback": True})
     root = tmp_path / "root"
     (root / "a").mkdir(parents=True)
     (root / "a" / "fuzzy-t5t-notes.md").write_text("noise", encoding="utf-8")
@@ -709,51 +709,77 @@ def test_cold_capped_full_tree_search_waits_for_index_instead_of_returning_false
     try:
         payload = filesystem.search_files(str(root), query="t5t.md", limit=20, recursive=True)
     finally:
-        file_index.set_background_owner_checker(None)
-        file_index.set_background_owner_refresh_requester(None)
+        file_index.set_build_authority_checker(None)
+        file_index.set_background_refresh_requester(None)
 
     assert payload["truncated"] is True
-    assert payload["index_state"] == "warming"
+    assert payload["index_state"] == "fallback-skipped"
     assert payload["index_coverage"] == "pending"
     assert payload["files"] == []
 
 
-def test_read_only_search_uses_the_persistent_indexer_snapshot(tmp_path, monkeypatch):
+def test_search_does_not_report_warming_when_refresh_request_is_rejected(tmp_path, monkeypatch):
     _clear_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
-    monkeypatch.setattr(file_index, "_BACKGROUND_OWNER_CHECKER", lambda _role: False)
+    monkeypatch.setattr(file_index, "_BUILD_AUTHORITY_CHECKER", lambda _role: False)
+    monkeypatch.setattr(file_index, "_BACKGROUND_REFRESH_REQUESTER", lambda _role, _payload: {"accepted": False, "fallback": False})
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "target.md").write_text("target", encoding="utf-8")
+
+    try:
+        payload = filesystem.search_files(str(root), query="target.md", limit=20, recursive=True)
+    finally:
+        file_index.set_build_authority_checker(None)
+        file_index.set_background_refresh_requester(None)
+
+    assert payload["index_state"] != "warming"
+    assert payload["index_state"] == "fallback-skipped"
+
+
+def test_cold_read_only_search_queues_scheduler_refresh_without_persistent_rpc(tmp_path, monkeypatch):
+    _clear_registry()
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    monkeypatch.setattr(file_index, "_BUILD_AUTHORITY_CHECKER", lambda _role: False)
     root = tmp_path / "root"
     root.mkdir()
     requested = []
-    expected = {
-        "root": str(root),
-        "root_realpath": str(root),
-        "query": "t5t.md",
-        "limit": 20,
-        "truncated": False,
-        "index_state": "ready",
-        "index_coverage": "full",
-        "files": [{"name": "t5t.md", "path": str(root / "t5t.md"), "relative_path": "t5t.md", "kind": "file"}],
-    }
-    monkeypatch.setattr(file_index, "_BACKGROUND_INDEX_SEARCH_REQUESTER", lambda payload: requested.append(payload) or {"ok": True, "payload": expected})
-    monkeypatch.setattr(file_index, "_BACKGROUND_OWNER_REFRESH_REQUESTER", lambda _role, _payload: {"fallback": False})
+    refreshes = []
+    monkeypatch.setattr(file_index, "_BACKGROUND_INDEX_SEARCH_REQUESTER", lambda payload: requested.append(payload) or {"ok": False})
+    monkeypatch.setattr(
+        file_index,
+        "_BACKGROUND_REFRESH_REQUESTER",
+        lambda role, payload: refreshes.append((role, payload))
+        or {
+            "role": role,
+            "ok": True,
+            "accepted": False,
+            "deferred_acceptance": True,
+            "local": True,
+            "fallback": False,
+        },
+    )
 
     try:
         payload = filesystem.search_files(str(root), query="t5t.md", limit=20, recursive=True)
     finally:
-        file_index.set_background_owner_checker(None)
+        file_index.set_build_authority_checker(None)
         file_index.set_background_index_search_requester(None)
-        file_index.set_background_owner_refresh_requester(None)
+        file_index.set_background_refresh_requester(None)
 
-    assert len(requested) == 1
-    assert {key: requested[0][key] for key in ("root", "query", "limit")} == {
+    assert requested == [], "a cold read must not perform a synchronous indexer RPC"
+    assert len(refreshes) == 1
+    role, refresh_payload = refreshes[0]
+    assert role == file_index.SEARCH_INDEX_ROLE
+    assert refresh_payload == {
         "root": str(root),
         "query": "t5t.md",
-        "limit": 20,
+        "reason": "search-index-missing",
+        "advisory": True,
     }
-    assert requested[0][file_index.AUTHORIZED_ROOT_IDENTITY_FIELD] == file_index.root_identity(root.stat())
-    assert requested[0]["access_policy"]["version"] == 1
-    assert payload == expected
+    assert payload["index_state"] == "warming"
+    assert payload["refresh_requested"] is True
+    assert payload["files"] == []
 
 
 def test_read_only_search_uses_persisted_snapshot_before_persistent_rpc(tmp_path, monkeypatch):
@@ -761,7 +787,7 @@ def test_read_only_search_uses_persisted_snapshot_before_persistent_rpc(tmp_path
     # use different local-RPC framing, which turned an exact-filename lookup into a socket
     # retry storm (search.py:500-503). That rule is unchanged and asserted twice below.
     #
-    # M11 killed the OTHER thing this test used to encode - that a follower checks nothing
+    # M11 killed the OTHER thing this test used to encode - that a reader checks nothing
     # at all before calling a snapshot ready. It now proves the freshness check happened
     # (a file read plus a /proc epoch check, no socket), and that the same query with the
     # same zero RPCs reports the snapshot as stale once its producer is gone.
@@ -779,7 +805,7 @@ def test_read_only_search_uses_persisted_snapshot_before_persistent_rpc(tmp_path
             exclude_signature=filesystem.search.SEARCH_SECRET_EXCLUDE_SIGNATURE,
         )
         _clear_registry()
-        file_index.set_background_owner_checker(lambda _role: False)
+        file_index.set_build_authority_checker(lambda _role: False)
         calls = []
         file_index.set_background_index_search_requester(lambda payload: calls.append(payload) or {"ok": False, "error": "legacy peer"})
 
@@ -802,21 +828,73 @@ def test_read_only_search_uses_persisted_snapshot_before_persistent_rpc(tmp_path
 
         orphaned_payload = filesystem.search_files(str(root), query="t5t.md", limit=20, recursive=True)
     finally:
-        file_index.set_background_owner_checker(None)
+        file_index.set_build_authority_checker(None)
         file_index.set_background_index_search_requester(None)
         file_index.reset_producer_liveness_cache()
         _clear_registry()
 
     assert calls == [], "a persisted snapshot must never cost a per-query RPC to the producer"
     assert [entry["path"] for entry in payload["files"]] == [str(target)]
-    assert payload["index_state"] == "follower-ready"
+    assert payload["index_state"] == "ready"
     assert payload["producer_state"] == file_index.PRODUCER_RUNNING
     assert payload["freshness"] == file_index.FRESHNESS_FRESH
 
     assert calls == [], "and the stale verdict must not cost one either"
     assert [entry["path"] for entry in orphaned_payload["files"]] == [str(target)], "a stale snapshot is still served"
-    assert orphaned_payload["index_state"] == "follower-stale"
+    assert orphaned_payload["index_state"] == "stale"
     assert orphaned_payload["producer_state"] == file_index.PRODUCER_NOT_RUNNING
+
+
+def test_authorized_reload_does_not_promote_dead_persisted_snapshot(tmp_path, monkeypatch):
+    """A producer restart must rebuild a dead owner's snapshot instead of calling it fresh."""
+    _clear_registry()
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "target.md").write_text("target\n", encoding="utf-8")
+    try:
+        file_index.build_now(
+            root,
+            filesystem.SEARCH_SKIP_DIRS,
+            exclude_path=filesystem.search.paths._path_is_secret,
+            exclude_signature=filesystem.search.SEARCH_SECRET_EXCLUDE_SIGNATURE,
+        )
+        dead_epoch = f"{_absent_pid()}:proc:4242"
+        with sqlite3.connect(file_index._index_disk_path(root)) as conn:
+            conn.execute("UPDATE metadata SET value = ? WHERE key = 'producer_epoch'", (dead_epoch,))
+        manifest_path = file_index._index_manifest_path(root)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["producer_epoch"] = dead_epoch
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        file_index._producer_heartbeat_path(root).write_text(
+            json.dumps({"producer_epoch": dead_epoch, "at": time.time(), "root": str(root)}),
+            encoding="utf-8",
+        )
+        file_index.reset_producer_liveness_cache()
+        _clear_registry()
+        file_index.set_build_authority_checker(lambda _role: True)
+        monkeypatch.setattr(file_index, "_start_build", lambda *args, **kwargs: None)
+
+        reloaded = file_index.ensure_index(
+            root,
+            filesystem.SEARCH_SKIP_DIRS,
+            exclude_path=filesystem.search.paths._path_is_secret,
+            exclude_signature=filesystem.search.SEARCH_SECRET_EXCLUDE_SIGNATURE,
+        )
+        freshness = file_index.index_freshness(
+            reloaded,
+            root,
+            filesystem.SEARCH_SKIP_DIRS,
+            filesystem.search.SEARCH_SECRET_EXCLUDE_SIGNATURE,
+        )
+    finally:
+        file_index.set_build_authority_checker(None)
+        file_index.reset_producer_liveness_cache()
+        _clear_registry()
+
+    assert reloaded.ready is False
+    assert freshness.state == file_index.FRESHNESS_ORPHANED
+    assert freshness.reason == "producer_not_running"
 
 
 def _absent_pid() -> int:
@@ -847,11 +925,11 @@ def test_warming_parent_search_uses_persisted_child_index(tmp_path, monkeypatch)
             exclude_signature=filesystem.search.SEARCH_SECRET_EXCLUDE_SIGNATURE,
         )
         _clear_registry()
-        file_index.set_background_owner_checker(lambda _role: True)
+        file_index.set_build_authority_checker(lambda _role: True)
 
         payload = filesystem.search_files(str(root), query="t5t.md", limit=20, recursive=True)
     finally:
-        file_index.set_background_owner_checker(None)
+        file_index.set_build_authority_checker(None)
         _clear_registry()
 
     assert [entry["path"] for entry in payload["files"]] == [str(target)]
@@ -1063,8 +1141,8 @@ def _reindex_fixture(monkeypatch, root, *, exclude_rules=(), dirty_result=None):
         lambda: {"settings": {"file_explorer": {"index_exclude_paths": list(exclude_rules)}}},
     )
     monkeypatch.setattr(file_index, "_iter_candidate_index_roots", lambda: [root], raising=False)
-    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: False)
-    monkeypatch.setattr(file_index, "request_background_owner_refresh", lambda payload: {}, raising=False)
+    monkeypatch.setattr(file_index, "build_authorized", lambda: False)
+    monkeypatch.setattr(file_index, "request_background_refresh", lambda payload: {}, raising=False)
     dirty_calls = []
 
     def record_dirty(paths, **kwargs):
@@ -1149,7 +1227,7 @@ def test_indexer_restart_resumes_a_durable_partial_frontier_without_waiting_for_
     # + process_due must RESUME that generation's crawl, not wait out the safety TTL ("Indexing...").
     _reset_lifecycle_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
-    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: True)
+    monkeypatch.setattr(file_index, "build_authorized", lambda: True)
     root = tmp_path / "root"
     (root / "deep").mkdir(parents=True)
     (root / "top.txt").write_text("top", encoding="utf-8")

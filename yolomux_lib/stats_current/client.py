@@ -481,7 +481,7 @@ class StatsCurrentClient:
         owner_generation: int,
         control_socket: str,
     ) -> dict[str, Any]:
-        """Register the elected web identity and where to reach it."""
+        """Register this web instance identity and where to reach it."""
 
         return self._call(
             "collector_context",
@@ -536,7 +536,7 @@ class StatsCurrentClient:
         statsd declares NEITHER `demand_started` NOR `absence_expected_reason`, and that is the
         decision, not an omission. It is lazily created like the other five, but a background
         loop keeps it hot: `StatsCurrentRuntime._supervise` holds a statsd lease for as long as
-        this process is the elected background owner (`stats_current/runtime.py:365-368`) and
+        this process holds the local scheduler's statsd lease (`stats_current/runtime.py:365-368`) and
         the scheduler then appends over RPC at the `cpu` family's 1s cadence
         (`stats_current/families.py:130-134`), browser or no browser. A service a loop exercises
         every second is not demand-scoped, and flagging it `demand_started` would turn a real
@@ -544,8 +544,7 @@ class StatsCurrentClient:
 
         There is also no switched-off path to excuse. statsd has no user-facing disable, and its
         row is truthful from any port: identity comes from a live `status` RPC
-        (`StatsCurrentRuntime._service_status`), not from this process's lease, so a port that is
-        not the background owner still sees the statsd the owner is keeping up.
+        (`StatsCurrentRuntime._service_status`), not from this process's lease.
         """
         service = dict(status) if isinstance(status, Mapping) else self.status()
         pid = int(service.get("pid") or 0)

@@ -187,7 +187,7 @@ HOST_CPU_UNWATCHED_AFTER_SECONDS = 5.0
 #
 # It is deliberately LONGER than `HOST_CPU_SAMPLE_STALE_AFTER_SECONDS`, so while unwatched the
 # web process publishes its CPU sample as ABSENT rather than frozen at a stale value. That is
-# the existing staleness owner's own rule -- past the stale window a number "is no longer a
+# the existing staleness indexer's own rule -- past the stale window a number "is no longer a
 # measurement of the present and must be published as absent" -- and absence costs nothing when
 # nobody is reading. A watcher returning resumes the one-second cadence before its next frame.
 HOST_CPU_UNWATCHED_CADENCE_SECONDS = 10.0
@@ -294,7 +294,7 @@ CONTROL_FIELDS = {
     "browser_upload": FENCE_FIELDS | {"authenticated_username"},
     "lease": FENCE_FIELDS | {"client_pid", "lease_id"},
     "release": FENCE_FIELDS | {"lease_id"},
-    # The elected web owner may identify the process it owns, but statsd must
+    # The serving web instance identifies the process it owns, but statsd must
     # resolve roster, paths, pricing, and all measured facts itself.
     "collector_context": FENCE_FIELDS | {"pid", "port", "owner_generation", "control_socket"},
     "usage_atom_backfill": FENCE_FIELDS | {"state", "sources", "missing", "scan"},
@@ -2568,7 +2568,7 @@ class StatsCurrentService:
                 include_browser_diagnostics=False,
             )
             # sqlite3 connections are thread-owned. This connection belongs to
-            # the elected statsd worker; work_lock still serializes it with the
+            # the statsd writer worker; work_lock still serializes it with the
             # listener thread's append/prune connection.
             with self.work_lock:
                 publisher = self.store_opener(
@@ -2758,15 +2758,12 @@ class StatsCurrentService:
         return self._agent_token_scanner.status()
 
     def _web_push_target(self) -> tuple[dict[str, object] | None, str]:
-        """Resolve where to push this process's CPU sample, and say WHY when there is nowhere.
+        """Resolve this process's CPU-sample destination and explain an absent destination.
 
         The address comes from the `collector_context` handshake -- the web process tells this
         statsd, over this statsd's own control channel, both which process it serves and where
-        to reach it. It used to be re-discovered from `BACKGROUND_OWNER_DIR/owner.json`, which
-        is the distributed-ELECTION record and answers a different question. A managed instance
-        runs `DisabledBackgroundOwner` and holds no election, so no record was ever written and
-        the push was skipped forever: the whole reason the Daemons web row read "never measured"
-        for the life of the process.
+        to reach it. The handshake is the sole delivery address, so the push cannot disappear
+        when a local scheduler starts.
 
         This does not weaken who may receive a sample. The address is no longer read from a
         shared mutable file any co-rooted server can write; it is stated by the target process
@@ -2777,7 +2774,7 @@ class StatsCurrentService:
         """
 
         if not self.collector_control_socket:
-            return None, "web_owner_no_control_socket"
+            return None, "web_instance_no_control_socket"
         return {"control_socket": self.collector_control_socket}, ""
 
     def _record_host_push(self, kind: str, reason: str) -> None:
@@ -4925,7 +4922,7 @@ class StatsCurrentService:
         # delete while the observer's next sample waits on the same writer lock.
         #
         # Stamps last_rpc_at (RPC traffic), never last_client_at (the shared
-        # owner's claim clock) -- a bare status/ping/snapshot request must
+        # indexer's claim clock) -- a bare status/ping/snapshot request must
         # never count as demand. Only claim_gated_idle_due (via _idle) may
         # move last_client_at.
         now = self.monotonic()

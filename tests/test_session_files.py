@@ -101,7 +101,7 @@ def assert_e3_causal_ceilings(observed: dict[str, int], ceilings: dict[str, int]
 
 
 class SessionFilesDiskEventObserver:
-    """Read the kernel events for the two E3 durable owners, without product instrumentation."""
+    """Read session-files cache kernel events without product instrumentation."""
 
     _EVENT = struct.Struct("iIII")
     _IN_CLOSE_WRITE = 0x00000008
@@ -141,7 +141,7 @@ class SessionFilesDiskEventObserver:
         self.snapshot()
 
     def snapshot(self) -> dict[str, int]:
-        close_writes = renames = unlinks = payload_writes = metadata_writes = event_writes = 0
+        close_writes = renames = unlinks = payload_writes = metadata_writes = 0
         closed_paths: set[Path] = set()
         pending_moves: dict[int, bool] = {}
         while True:
@@ -166,9 +166,7 @@ class SessionFilesDiskEventObserver:
                     renames += 1
                     # Atomic writers close a randomized sibling then rename it. Classify the
                     # durable write by its destination, not that temporary sibling's name.
-                    if path.name == "client-events.json":
-                        event_writes += 1
-                    elif path.name.endswith(".manifest.json") or path.name.startswith("cache-index"):
+                    if path.name.endswith(".manifest.json") or path.name.startswith("cache-index"):
                         metadata_writes += 1
                     elif path.name.endswith(".json"):
                         payload_writes += 1
@@ -180,7 +178,6 @@ class SessionFilesDiskEventObserver:
             "unlinks": unlinks,
             "payload_writes": payload_writes,
             "metadata_writes": metadata_writes,
-            "event_writes": event_writes,
         }
 
     def close(self) -> None:
@@ -283,7 +280,7 @@ def test_session_files_payload_types_cover_builder_shapes_and_annotations():
         "uploaded",
     } <= set(SessionFileEntry.__annotations__)
     assert {"branch", "from_ref", "to_ref", "error", "error_message", "ahead", "behind"} <= set(RepoPayload.__annotations__)
-    assert {"hours", "warnings", "cache", "error", "refreshing_elsewhere"} <= set(SessionFilesPayload.__annotations__)
+    assert {"hours", "warnings", "cache", "error"} <= set(SessionFilesPayload.__annotations__)
 
     assert get_type_hints(session_files.session_file_entry)["return"] == SessionFileEntry | None
     assert get_type_hints(session_files.session_files_payload_for_info)["return"] is SessionFilesPayload
@@ -319,7 +316,7 @@ def test_session_files_scheduler_lease_keeps_batchd_alive_through_next_demand(
         assert int(webapp.job_client.registry._read_record().get("pid") or 0) == first_pid
         assert webapp.job_client.socket_path.exists()
 
-        server, thread = start_browser_server(monkeypatch, tmp_path, webapp, auth_bypass=True)
+        server, thread = start_browser_server(monkeypatch, tmp_path, webapp, auth_bypass=True, pin_batchd_scheduler=False)
         connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=10)
         connection.request("GET", "/api/session-files?fresh_git=1")
         response = connection.getresponse()
@@ -354,7 +351,7 @@ def test_session_files_public_start_failure_is_typed_terminal_not_queued(monkeyp
     monkeypatch.setattr(webapp.job_client.registry, "_spawn", lambda: None)
     server = thread = None
     try:
-        server, thread = start_browser_server(monkeypatch, tmp_path, webapp, auth_bypass=True)
+        server, thread = start_browser_server(monkeypatch, tmp_path, webapp, auth_bypass=True, pin_batchd_scheduler=False)
         connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=10)
         connection.request("GET", "/api/session-files?fresh_git=1")
         response = connection.getresponse()
@@ -634,14 +631,13 @@ def test_session_files_one_generation_physical_disk_gate(monkeypatch, tmp_path, 
         assert process_tmpdir(server.process.pid).is_relative_to(fixture_root)
         assert all(process_tmpdir(pid).is_relative_to(fixture_root) for pid in pids_before[2:])
         cache_dir = host_partitioned_state_dir(server_paths.state_dir) / "session-files-cache"
-        events_dir = host_partitioned_state_dir(server_paths.state_dir) / "background-owner"
         frozen_head = git(repo, "rev-parse", "HEAD").stdout.strip()
         session = runtime.sessions[0]
         # The measured boundary starts before the sole ordinary accepted request. Do not fabricate a
         # disk-only expiry while this real server retains a valid memory entry: users cannot make
         # that split state through the API.
         request_path = f"/api/session-files?session={quote(session, safe='')}&hours=24&from=HEAD&to=current"
-        observer = SessionFilesDiskEventObserver(cache_dir, events_dir)
+        observer = SessionFilesDiskEventObserver(cache_dir)
         observer.clear()
         io_before = {name: sum(process_io(pid)[name] for pid in pids_before) for name in ("write_bytes", "cancelled_write_bytes")}
         git_before = temp_footprint()
@@ -740,7 +736,6 @@ def test_session_files_one_generation_physical_disk_gate(monkeypatch, tmp_path, 
             "payload_bytes": int(work_after.get("result_bytes", 0)) - int(work_before.get("result_bytes", 0)),
             "cache_payload_writes": events["payload_writes"],
             "metadata_writes": events["metadata_writes"],
-            "event_writes": events["event_writes"],
             "close_writes": events["close_writes"],
             "renames": events["renames"],
             "unlinks": events["unlinks"],
@@ -760,7 +755,6 @@ def test_session_files_one_generation_physical_disk_gate(monkeypatch, tmp_path, 
             "payload_bytes": 256 * 1024,
             "cache_payload_writes": 4,
             "metadata_writes": 4,
-            "event_writes": 4,
             "close_writes": 17,
             "renames": 8,
             "unlinks": 8,
@@ -874,22 +868,11 @@ def test_session_files_browser_completion_is_bounded_to_one_opaque_cache_read(mo
         assert stale_response.status == HTTPStatus.OK
         stale_response.read()
         connection.close()
-        def completion_is_published():
-            manifests = list(server_paths.state_dir.rglob("background-owner/client-events.json"))
-            if len(manifests) != 1:
-                return False
-            events = json.loads(manifests[0].read_text(encoding="utf-8")).get("events", [])
-            return any(
-                event.get("type") == "background_refresh_done"
-                and event.get("payload", {}).get("role") == "session-files"
-                and event.get("payload", {}).get("cache_view_id") == view_id
-                for event in events
-            )
-        WebDriverWait(browser, 12).until(lambda _driver: completion_is_published())
         WebDriverWait(browser, 12).until(lambda driver: driver.execute_script("return clientEventTransportState?.connected === true;"))
         expected_cache_read = f"?from=HEAD&to=current&session={quote(session, safe='')}&hours=24&cache_only=1&cache_view={view_id}"
-        # This must be the connected browser's delivered EventSource completion, not merely a
-        # persisted event that a disconnected browser never handled.
+        # The local scheduler publishes directly to this instance's EventSource. A completion is
+        # proven by the one opaque cache read in each connected browser, not by a persisted
+        # cross-instance manifest.
         WebDriverWait(browser, 12).until(
             lambda driver: driver.execute_script("return window.__e3SessionFilesRequests.length === 1;")
         )
@@ -898,20 +881,6 @@ def test_session_files_browser_completion_is_bounded_to_one_opaque_cache_read(mo
         )
         requests = browser.execute_script("return [...window.__e3SessionFilesRequests];")
         assert requests == [expected_cache_read]
-        assert finder.execute_script("return [...window.__e3SessionFilesRequests];") == [expected_cache_read]
-        assert browser.execute_script("return window.__e3SessionFilesApplications;") <= 1
-        assert finder.execute_script("return window.__e3SessionFilesApplications;") <= 1
-        completion = next(
-            event["payload"]
-            for event in json.loads(next(server_paths.state_dir.rglob("background-owner/client-events.json")).read_text(encoding="utf-8")).get("events", [])
-            if event.get("type") == "background_refresh_done"
-            and event.get("payload", {}).get("role") == "session-files"
-            and event.get("payload", {}).get("cache_view_id") == view_id
-        )
-        browser.execute_script("handleClientPushEventNowByType('background_refresh_done', arguments[0]);", completion)
-        finder.execute_script("handleClientPushEventNowByType('background_refresh_done', arguments[0]);", completion)
-        browser.execute_async_script("const done = arguments[0]; requestAnimationFrame(() => requestAnimationFrame(done));")
-        assert browser.execute_script("return [...window.__e3SessionFilesRequests];") == [expected_cache_read]
         assert finder.execute_script("return [...window.__e3SessionFilesRequests];") == [expected_cache_read]
         assert browser.execute_script("return window.__e3SessionFilesApplications;") <= 1
         assert finder.execute_script("return window.__e3SessionFilesApplications;") <= 1
@@ -1003,7 +972,7 @@ def test_session_files_route_returns_operation_receipt_then_publishes_and_replay
     webapp.wake_client_event_watcher = lambda: None; webapp.stop_client_event_watcher_if_idle = lambda: True
     server = thread = None
     try:
-        server, thread = start_browser_server(monkeypatch, tmp_path, webapp, auth_bypass=True)
+        server, thread = start_browser_server(monkeypatch, tmp_path, webapp, auth_bypass=True, pin_batchd_scheduler=False)
         refs = {"/repo/z": {"to": " current ", "from": " HEAD~2 "}}
         canonical_refs = {"/repo/z": {"from": "HEAD~2", "to": "current"}}  # The HTTP boundary trims these before canonical publication.
         encoded_refs = quote(json.dumps(refs, separators=(",", ":")), safe="")
@@ -1069,7 +1038,7 @@ def test_session_files_route_returns_operation_receipt_then_publishes_and_replay
         cache_only_payload = json.loads(cache_only_response.read().decode("utf-8")); connection.close()
         assert cache_only_response.status == HTTPStatus.OK
         assert cache_only_payload["data"]["files"] == [{"path": "done.py"}]
-        assert len(submissions) == 2, f"a follower cache-only revalidation must not submit another producer: {submission_requesters}"
+        assert len(submissions) == 2, f"a cache-only revalidation must not submit another producer: {submission_requesters}"
         assert webapp.read_session_files_cache_view(cache_view, "5", 7.5, "other", "current", None) is None
         assert webapp.batchd_operation_service.wait_for_idle(5)
         submissions_before_mismatch = len(submissions)
@@ -1510,7 +1479,7 @@ def test_session_files_failure_attributes_one_terminal_producer(failure_stage, m
     webapp.publish_client_event = capture_publish
     server = thread = None
     try:
-        server, thread = start_browser_server(monkeypatch, tmp_path, webapp, auth_bypass=True)
+        server, thread = start_browser_server(monkeypatch, tmp_path, webapp, auth_bypass=True, pin_batchd_scheduler=False)
         connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
         connection.request("GET", "/api/session-files?session=5&force=1")
         response = connection.getresponse()
@@ -1554,7 +1523,7 @@ def test_session_files_failure_attributes_one_terminal_producer(failure_stage, m
             expected_code=expected_code,
         )
         assert len(retired) == 2
-        webapp.demote_background_owner()
+        webapp.stop_background_scheduler()
     finally:
         if server is not None:
             stop_browser_server(server, thread)

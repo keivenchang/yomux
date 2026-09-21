@@ -415,7 +415,6 @@ _POLL_AND_SETTLE_SCRIPT = """
 _ADVANCED_FIXTURE = {
     "ok": True,
     "generated_at": 1902,
-    "owner": {"debug": {"generation_count": 41}, "control": {}},
     "refresh": {"local_refreshing": {}, "coalescing": {"recent_pending_count": 0}, "counters": {"coalesced_refresh_requests": 7}, "recurring_work": [], "roles": {}},
     "top_endpoints": [{"surface": "/api/from-the-advanced-route", "count": 12, "compute_ms_max": 4, "payload_bytes_total": 2048}],
     "top_background_work": [],
@@ -431,7 +430,7 @@ def test_advanced_diagnostics_are_fetched_only_while_their_disclosure_is_open(br
     """The Advanced body has its own route, and the panel asks for it only when it is open.
 
     `/api/system-status` is now published from a retained background snapshot, and the diagnostics a
-    reader opens deliberately -- refresh coordination, the top-N folds, transcripts, `owner.debug` --
+    reader opens deliberately -- refresh coordination, the top-N folds, and transcripts --
     were split onto `/api/system-status/advanced` at their own cadence precisely so that transcript
     scans and top-N folds stop running on the five-second poll of a panel nobody has opened.
 
@@ -482,7 +481,7 @@ def test_advanced_diagnostics_are_fetched_only_while_their_disclosure_is_open(br
     assert "/api/from-the-advanced-route" in opened["text"], opened
     assert "decoy-from-the-core-body" not in opened["text"], opened
     # The label and value are adjacent cells of the one key/value list, so textContent joins them.
-    assert "Generations41" in opened["text"], opened
+    assert "Generations41" not in opened["text"], opened
     assert opened["state"] == "", opened
 
     # Closing it stops the demand: the next poll is a core-only read again.

@@ -74,19 +74,14 @@ def test_aged_state_eof_cursor_and_nonempty_wal_use_current_product_owners(aged_
     assert len(snapshot.observations) == wal_result.details["observations"]
 
 
-def test_aged_state_event_density_and_owner_epochs_are_selectable(aged_state_root):
-    event_counts = {"state_changed": 7, "stale_owner_heartbeat": 3}
+def test_aged_state_event_density_is_selectable(aged_state_root):
+    event_counts = {"state_changed": 7, "stale_cache_refresh": 3}
     events = aged_state_root.apply("event_history", counts=event_counts)
-    owners = aged_state_root.apply("stale_owner_epochs", epoch_count=3)
 
     lines = [json.loads(line) for line in events.paths[0].read_text(encoding="utf-8").splitlines()]
     assert len(lines) == 10
     assert {name: sum(row["type"] == name for row in lines) for name in event_counts} == event_counts
-    owner = json.loads(owners.paths[0].read_text(encoding="utf-8"))
-    index = json.loads(owners.paths[1].read_text(encoding="utf-8"))
-    assert owner["last_heartbeat"] == owners.details["stale_heartbeat"] - 2
-    assert len(index["records"]) == 3
-    assert set(aged_state_root.results) == {"event_history", "stale_owner_epochs"}
+    assert set(aged_state_root.results) == {"event_history"}
 
 
 def test_aged_state_finder_history_and_rpc_payloads_capture_real_boundaries(aged_state_root):

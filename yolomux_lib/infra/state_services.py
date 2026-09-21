@@ -322,7 +322,7 @@ class TabberActivityCacheRecord:
     stored_at: float | None = None
     payload: dict[str, Any] | None = None
     source_signature: str = ""
-    # The background owner publishes a compact invalidation only after a new
+    # The local scheduler publishes a compact invalidation only after a new
     # cache generation is readable. Keep that one delivery watermark beside the
     # cache rather than a parallel app-level signature map.
     published_source_signature: str = ""
@@ -1093,6 +1093,7 @@ class IndexedRepoDiscoveryRecord:
     roots: list[str] = field(default_factory=list)
     job_id: str = ""
     worker: threading.Thread | None = None
+    stop_event: threading.Event = field(default_factory=threading.Event)
     refreshed_at: float = 0.0
     retry_at: float = 0.0
     root_generations: dict[str, int] = field(default_factory=dict)

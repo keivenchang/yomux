@@ -282,13 +282,16 @@ class PersistentStatusService(LocalRpcServiceState):
     def _ensure_app(self, sessions: tuple[str, ...]) -> TmuxWebtermApp:
         if self.app is None:
             self.app = TmuxWebtermApp(list(sessions), status_service_mode=True)
-            if hasattr(self.app, "topology_generation"):
-                self.app.topology_generation = self.requested_topology_generation
         apply_roster = getattr(self.app, "apply_session_roster", None)
         if callable(apply_roster):
             apply_roster(list(sessions))
         else:
             self.app.sessions = list(sessions)
+        if hasattr(self.app, "topology_generation"):
+            self.app.topology_generation = max(
+                int(getattr(self.app, "topology_generation", 0)),
+                self.requested_topology_generation,
+            )
         self.session_names = sessions
         return self.app
 
@@ -790,8 +793,6 @@ class PersistentStatusService(LocalRpcServiceState):
             topology_generation = request.get("topology_generation")
             if topology_generation is not None:
                 self.requested_topology_generation = max(self.requested_topology_generation, topology_generation)
-                if self.app is not None and hasattr(self.app, "topology_generation"):
-                    self.app.topology_generation = max(self.app.topology_generation, topology_generation)
             if sessions is not None:
                 self._retain_refresh_request(sessions)
             self.lock.notify_all()

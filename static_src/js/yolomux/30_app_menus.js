@@ -959,7 +959,6 @@ let topbarPackingIsApplying = false;
 const topbarPackingStepOrder = Object.freeze([
   'hide-version',
   'compact-brand',
-  'hide-owner',
   'compact-search',
   'compact-activity',
   'hide-latency',
@@ -977,7 +976,6 @@ const topbarPackingVisualItemSelectors = Object.freeze([
   '.topbar-search',
   '.topbar-language-menu',
   '#backendHealthIndicator',
-  '#topbarOwnerStatus',
   '#topbarActivity',
   '.actions > :not(#topbarActivity):not(#status)',
 ]);
@@ -1257,7 +1255,6 @@ function renderSessionButtonsMeasured(options = {}) {
   // Topbar right group: Language | Activity (activity pinned far-right). #257: the theme switcher was
   // removed as redundant — theme is set via View -> Theme and the Preferences Global color theme.
   sessionButtons.appendChild(createTopbarRightTools());
-  updateTopbarOwnerStatus();
   updateTopbarActivityStatus();
   scheduleTopbarMetricsUpdate();
   installTopbarNavigationFitObserver();
@@ -1375,9 +1372,9 @@ function createTopbarRightTools() {
   // while healthy (data-backend-health=""). It is never inserted or removed on a health transition;
   // syncBackendHealthIndicator only repaints THIS same node (and its fallback re-mounts one solely
   // if this host is torn down and rebuilt at runtime). That keeps one permanent mount owner.
-  // Order contract (#257) for the switchers follows: Language, Ownership, Activity.
+  // Order contract (#257) for the switchers follows: Language, Activity.
   group.append(createBackendHealthIndicator());
-  group.append(createTopbarLanguageSwitcher(), createTopbarOwnerStatus(), createTopbarActivityStatus());
+  group.append(createTopbarLanguageSwitcher(), createTopbarActivityStatus());
   return group;
 }
 

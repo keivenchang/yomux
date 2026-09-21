@@ -1397,12 +1397,6 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
     assert calls == [("require_auth", "readonly")]
     assert writes == [("json", HTTPStatus.OK, {"hours": 0.5, "visible": False})]
 
-    app = SimpleNamespace(background_owner_status_payload=lambda: ({"status": "owner"}, HTTPStatus.OK))
-    handler, calls, writes = route_handler("/api/background/status", app)
-    Handler.do_GET(handler)
-    assert calls == [("require_auth", "readonly")]
-    assert writes == [("json", HTTPStatus.OK, {"status": "owner"})]
-
     # The route reads a published snapshot and writes its bytes; it never calls a payload builder.
     system_status_body = b'{"ok":true,"server":{"pid":123}}'
     app = SimpleNamespace(system_status_snapshot_response=lambda advanced=False: (system_status_body, {"length": len(system_status_body)}))
@@ -1410,13 +1404,6 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
     Handler.do_GET(handler)
     assert calls == [("require_auth", "readonly")]
     assert writes == [("product", HTTPStatus.OK, system_status_body)]
-
-    app = SimpleNamespace(background_owner_claim_payload=lambda: ({"ok": True, "claimed": True, "was_owner": False}, HTTPStatus.OK))
-    handler, calls, writes = route_handler("/api/background/claim", app)
-    handler.headers = {"Content-Length": "0"}
-    Handler.do_POST(handler)
-    assert calls == [("require_auth", "admin")]
-    assert writes == [("json", HTTPStatus.OK, {"ok": True, "claimed": True, "was_owner": False})]
 
     app = SimpleNamespace(tmux_signals_payload=lambda force=False, session="": ({"force": force, "session": session}, HTTPStatus.OK))
     handler, calls, writes = route_handler("/api/tmux-signals?force=1&session=5", app)
@@ -2685,7 +2672,7 @@ def test_indexed_search_stream_emits_typed_chunks_and_closes_authorized_handle(m
     payloads = iter((
         {
             "files": [{"path": "/repo/first.py", "name": "first.py"}],
-            "index_state": "follower-stale",
+            "index_state": "stale",
             "refresh_pending": True,
             "complete": False,
             "progressive_coverage": {"published_depth": 1, "full_coverage": False},

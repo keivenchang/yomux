@@ -7,6 +7,8 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -42,7 +44,6 @@ def test_boot_print_command_uses_any_configured_primary_port():
         "YOLOMUX_LOG_DIR": "/tmp",
         "YOLOMUX_PORT": "48123",
     }
-    env.pop("YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT", None)
     result = subprocess.run(
         [str(ROOT / "boot.sh"), "--print-command"],
         cwd=ROOT,
@@ -59,11 +60,7 @@ def test_boot_print_command_uses_any_configured_primary_port():
     assert "--dang --self-signed" in command
     assert "--dev" not in command
     assert "MALLOC_ARENA_MAX=2" in command
-    if platform.system() == "Darwin":
-        assert "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT" in command
-        assert "48123 /tmp/yolomux-48123.log --host 127.0.0.1" in command
-    else:
-        assert "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT=48123" in command
+    assert "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT" not in command
     clears_tmux_inline = "TMUX= TMUX_PANE=" in command
     clears_tmux_in_detacher = (
         'env.pop("TMUX", None)' in command
@@ -191,27 +188,28 @@ def test_boot_asset_check_uses_only_tracked_vendor_files_without_package_tools(t
 def test_boot_restart_waits_for_stable_listener_after_ready():
     source = (ROOT / "boot.sh").read_text(encoding="utf-8")
 
+    assert "listener_pid_is_forbidden()" in source
+    assert 'previous_listener_pids="$(port_listener_pids "$port")"' in source
     assert "verify_port_stable()" in source
     assert "became unstable after readiness" in source
-    assert "wait_for_port \"$port\"\n  verify_port_stable \"$port\"" in source
+    assert 'wait_for_port "$port" "$previous_listener_pids"' in source
+    assert 'verify_port_stable "$port" "$previous_listener_pids"' in source
+    assert 'local stable_pid=""' in source
+    assert 'stable_pid="$pids"' in source
 
 
-def test_boot_restart_requires_old_listener_to_stop_before_launch():
+def test_boot_restart_refuses_duplicate_without_blind_listener_kill():
     source = (ROOT / "boot.sh").read_text(encoding="utf-8")
     startup_common = STARTUP_COMMON.read_text(encoding="utf-8")
 
-    assert "wait_for_port_free()" in source
-    assert "listener still alive after SIGTERM; sending SIGKILL" in source
-    # Fail-closed ordering: listener teardown, then the ledger preflight
-    # (refuse a wedged live owner / reap a dead owner's verified orphans),
-    # then and only then the launch.
-    assert source.index('stop_port_listener "$port"') < source.index("yolomux_lib.local_services.preflight --port") < source.index("boot.sh launching port")
-    assert 'if ! "$python_bin" -m yolomux_lib.local_services.preflight --port "$port"; then' in source
-    assert "launch preflight refused" in source
+    assert "stop_port_listener" not in source
+    assert "wait_for_port_free" not in source
+    assert "--force" in source
+    assert "yolomux_lib.server_lease" not in source
+    assert "exec --plan-json" not in source
     assert "boot.sh launching port" in source
     assert " >> %q 2>&1 < /dev/null" in source
-    assert 'env.pop("TMUX", None)' in source
-    assert 'env.pop("TMUX_PANE", None)' in source
+    assert "TMUX= TMUX_PANE=" in source
     assert "acquire_port_restart_lock \"$port\"" in source
     assert "a YOLOmux restart for port $port is already in progress" in source
     assert "another YOLOmux stack start is already in progress" in startup_common
@@ -223,13 +221,163 @@ def test_boot_restart_requires_old_listener_to_stop_before_launch():
     assert "trap yolomux_release_start_lock EXIT" in source
     assert "skipping only the startup CPU/load capacity wait" in source
     assert 'yolomux_wait_for_system_capacity "$python_bin"' in source
-    assert 'yolomux_bootout_macos_server "$port"\n  fi\n  stop_port_listener "$port"' in source
+    assert 'if [[ "$force_start" -eq 1 ]]; then' in source
+    assert "already has listener(s)" in source
+    assert 'wait_for_port "$port" "$previous_listener_pids" "$launched_pid" "$log_path"' in source
+    assert "launch process" in source
+    assert "launch_process_is_alive" in source
+    assert 'mkdir -p "$restart_lock_base"' in source
+    assert 'launch_server "$log_path"' in source
     assert "yolomux_submit_macos_server" in source
     assert "yolomux_macos_server_launcher" in source
     assert "yolomux_macos_server_tmux_socket" in startup_common
     assert 'tmux -L "$socket_name" new-session' in startup_common
     assert "launchctl submit" not in startup_common
     assert 'cd "$repo"' in startup_common
+
+
+def test_boot_refuses_an_existing_listener_before_detached_launch():
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    try:
+        with tempfile.TemporaryDirectory(prefix="yolo-boot-", dir="/tmp") as workspace:
+            workspace_path = Path(workspace)
+            root = workspace_path / "root"
+            temp_dir = workspace_path / "tmp"
+            log_dir = workspace_path / "logs"
+            temp_dir.mkdir()
+            env = dict(os.environ)
+            env.update(
+                {
+                    "YOLOMUX_ROOT": str(root),
+                    "YOLOMUX_LOG_DIR": str(log_dir),
+                    "TMPDIR": str(temp_dir),
+                    "PYTHON": sys.executable,
+                    "YOLOMUX_START_LOAD_WAIT_SECONDS": "30",
+                }
+            )
+            for key in (
+                "YOLOMUX_CONFIG_DIR",
+                "YOLOMUX_STATE_DIR",
+                "YOLOMUX_RUNTIME_DIR",
+                "YOLOMUX_CACHE_DIR",
+                "YOLOMUX_CODEX_HOME",
+                "CODEX_HOME",
+                "YOLOMUX_START_LOCK_DIR",
+                "YOLOMUX_TOOL_LOCK_PATH",
+                "YOLOMUX_CA_DIR",
+                "YOLOMUX_WORKSPACE_BASE",
+            ):
+                env.pop(key, None)
+            env.pop("PYTHONPYCACHEPREFIX", None)
+            result = subprocess.run(
+                [
+                    str(ROOT / "boot.sh"),
+                    "--ignore-load",
+                    "--no-dev",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                ],
+                cwd=ROOT,
+                env=env,
+                check=False,
+                text=True,
+                capture_output=True,
+                timeout=5,
+            )
+    finally:
+        listener.close()
+
+    assert result.returncode == 2
+    assert f"port {port} already has listener(s)" in result.stderr
+    assert "--force" in result.stderr
+
+
+def test_boot_surfaces_same_root_duplicate_without_waiting_for_port_timeout():
+    with tempfile.TemporaryDirectory(prefix="yolo-boot-root-", dir="/tmp") as workspace:
+        workspace_path = Path(workspace)
+        root = workspace_path / "root"
+        ready = workspace_path / "ready"
+        temp_dir = root / "tmp"
+        port_socket = socket.socket()
+        port_socket.bind(("127.0.0.1", 0))
+        port = port_socket.getsockname()[1]
+        port_socket.close()
+        owner_code = (
+            "import sys,time; "
+            "from pathlib import Path; "
+            "from yolomux_lib.infra.root_paths import YolomuxRoots; "
+            "from yolomux_lib.server_lease import acquire_instance_root_lease; "
+            "root=Path(sys.argv[1]); "
+            "roots=YolomuxRoots(config_dir=root/'config', state_dir=root/'state', cache_dir=root/'cache', "
+            "codex_home=root/'codex', runtime_dir=root/'runtime'); "
+            "lease=acquire_instance_root_lease(roots); "
+            "Path(sys.argv[2]).write_text('ready'); "
+            "time.sleep(60)"
+        )
+        owner = subprocess.Popen(
+            [sys.executable, "-c", owner_code, str(root), str(ready)],
+            cwd=ROOT,
+            env={**os.environ, "PYTHONPYCACHEPREFIX": ""},
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while not ready.exists() and time.monotonic() < deadline:
+                assert owner.poll() is None
+                time.sleep(0.02)
+            assert ready.exists()
+            env = dict(os.environ)
+            env.update(
+                {
+                    "YOLOMUX_ROOT": str(root),
+                    "YOLOMUX_LOG_DIR": str(root / "logs"),
+                    "TMPDIR": str(temp_dir),
+                    "PYTHONPATH": str(ROOT),
+                }
+            )
+            for key in (
+                "YOLOMUX_CONFIG_DIR",
+                "YOLOMUX_STATE_DIR",
+                "YOLOMUX_RUNTIME_DIR",
+                "YOLOMUX_CACHE_DIR",
+                "YOLOMUX_CODEX_HOME",
+                "CODEX_HOME",
+                "YOLOMUX_START_LOCK_DIR",
+                "YOLOMUX_TOOL_LOCK_PATH",
+                "YOLOMUX_CA_DIR",
+                "YOLOMUX_WORKSPACE_BASE",
+            ):
+                env.pop(key, None)
+            env.pop("PYTHONPYCACHEPREFIX", None)
+            result = subprocess.run(
+                [
+                    str(ROOT / "boot.sh"),
+                    "--ignore-load",
+                    "--no-dev",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                ],
+                cwd=ROOT,
+                env=env,
+                check=False,
+                text=True,
+                capture_output=True,
+                timeout=5,
+            )
+        finally:
+            if owner.poll() is None:
+                owner.terminate()
+            owner.wait(timeout=5)
+
+    assert result.returncode != 0
+    assert "launch process" in result.stderr
+    assert "see log" in result.stderr
 
 
 def test_boot_ignore_load_is_explicit_and_preserves_other_startup_guards():
@@ -372,55 +520,6 @@ def test_startup_listener_boundary_uses_selected_interpreter_and_checkout_module
     ]
 
 
-@pytest.mark.parametrize(
-    ("failed_census_call", "expected_kills"),
-    (
-        (2, ["kill:123"]),
-        (11, ["kill:123", "kill:-KILL 123"]),
-    ),
-)
-def test_stop_port_listener_preserves_census_failure_at_each_wait_boundary(
-    tmp_path, failed_census_call, expected_kills
-):
-    events = tmp_path / "events"
-    functions = "\n\n".join(
-        boot_function_source(name) for name in ("wait_for_port_free", "stop_port_listener")
-    )
-    script = functions + r'''
-event_path="$1"
-failed_census_call="$2"
-port_listener_pids() {
-  printf 'census\n' >> "$event_path"
-  census_call_count="$(/usr/bin/grep -c '^census$' "$event_path")"
-  if [[ "$census_call_count" -eq "$failed_census_call" ]]; then
-    return 2
-  fi
-  printf '123\n'
-}
-kill() {
-  printf 'kill:%s\n' "$*" >> "$event_path"
-}
-sleep() {
-  :
-}
-stop_port_listener 48124
-stop_status="$?"
-printf 'status=%s\n' "$stop_status"
-'''
-
-    result = subprocess.run(
-        ["/bin/bash", "-c", script, "stop-probe", str(events), str(failed_census_call)],
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-
-    event_rows = events.read_text(encoding="utf-8").splitlines()
-    assert result.stdout == "status=2\n"
-    assert [row for row in event_rows if row.startswith("kill:")] == expected_kills
-    assert event_rows.count("census") == failed_census_call
-
-
 def test_macos_submit_uses_callers_row_plan_not_tmux_daemon_environment(tmp_path):
     tmux = shutil.which("tmux")
     if tmux is None:
@@ -498,7 +597,7 @@ subprocess.run(["tmux", "-L", sys.argv[2], "wait-for", "-S", "server-ready"], ch
                 "-c",
                 'source "$1"; test_socket="$2"; yolomux_macos_server_tmux_socket() { printf "%s" "$test_socket"; }; '
                 'export YOLOMUX_ROW_PLAN_FILE="$3"; '
-                'yolomux_submit_macos_server "$4" "$5" "$6" "$7" 48125 "$8" "" "$9" "$2"',
+                'yolomux_submit_macos_server "$4" "$5" "$6" "$7" 48125 "$8" "$9" "$2"',
                 "submit-clean-plan",
                 str(STARTUP_COMMON),
                 socket_name,

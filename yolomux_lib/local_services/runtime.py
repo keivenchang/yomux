@@ -21,7 +21,7 @@ from collections.abc import Callable
 from pathlib import Path
 from threading import Event
 
-from ..background_owner import pid_is_alive
+from ..background_scheduler import pid_is_alive
 from ..host_identity import HostIdentity
 from ..host_identity import LocalProcessReason
 from ..host_identity import current_host_identity

@@ -208,14 +208,14 @@ def test_real_chromium_markdown_split_native_sync_and_breaks(e2e_browser: Any) -
 
     text = panel.find_element(By.CSS_SELECTOR, '[data-editor-surface="text-editor"] .cm-content')
     text.click()
-    text.send_keys(Keys.END, " source")
+    text.send_keys(Keys.HOME, Keys.ARROW_UP, Keys.END, " source")
     immediate_text_state = e2e_browser.driver.execute_script(
         "const p=arguments[0]; return {source:fileEditorPanelState(p)?.content || '', cm:p._cmView?.state.doc.toString() || '', pm:p._pmView?.state.doc.textContent || ''};",
         panel,
     )
     assert immediate_text_state["source"] == view_state["source"], immediate_text_state
     assert immediate_text_state["pm"] == view_state["pm"], immediate_text_state
-    assert immediate_text_state["cm"].endswith(" source"), immediate_text_state
+    assert immediate_text_state["cm"].endswith(" source\n"), immediate_text_state
     text_state = WebDriverWait(e2e_browser.driver, 12).until(
         lambda driver: driver.execute_script(
             """
@@ -225,7 +225,7 @@ def test_real_chromium_markdown_split_native_sync_and_breaks(e2e_browser: Any) -
             const source = String(fileEditorPanelState(panel)?.content || '');
             const pm = panel?._pmView?.state?.doc?.textContent || '';
             const pmJson = panel?._pmView?.state?.doc?.toJSON?.() || null;
-            return source.endsWith(' source') && pm.includes('source')
+                return source.endsWith(' source\\n') && pm.includes('source')
               ? {source, pm, pmJson, connected: panel._pmView.dom.isConnected}
               : false;
             """,
@@ -233,7 +233,7 @@ def test_real_chromium_markdown_split_native_sync_and_breaks(e2e_browser: Any) -
         )
     )
     assert text_state["connected"] is True, text_state
-    assert text_state["source"].endswith("typed source"), text_state
+    assert text_state["source"].endswith("typed source\n"), text_state
     assert text_state["pm"].endswith("typed source"), text_state
     assert_browser_journey_error_free(e2e_browser.driver, server_log_boundary=e2e_browser.runtime.server_log_boundary)
 
@@ -489,12 +489,25 @@ def test_real_chromium_markdown_split_full_vieweditor_contract(e2e_browser: Any)
     view = panel.find_element(By.CSS_SELECTOR, '[data-editor-surface="view-editor"] .ProseMirror')
     text = panel.find_element(By.CSS_SELECTOR, '[data-editor-surface="text-editor"] .cm-content')
 
+    before_view_edit = e2e_browser.driver.execute_script(
+        "const p=arguments[0]; const state=fileEditorPanelState(p); return {source:state?.content || '', pm:p._pmView?.state?.doc?.textContent || '', cm:p._cmView?.state?.doc?.toString() || ''};",
+        panel,
+    )
     view.click()
     view.send_keys(Keys.HOME, Keys.DELETE, "hello")
     view.send_keys(Keys.END, Keys.ENTER, "world")
-    view_state = WebDriverWait(e2e_browser.driver, 12).until(lambda driver: driver.execute_script("const p=arguments[0]; const s=fileEditorPanelState(p).content; return s.includes('hello') && s.endsWith('world') && p._cmView.state.doc.toString()===s ? {source:s, pm:p._pmView.state.doc.textContent, cm:p._cmView.state.doc.toString()} : false", panel))
+    view_state = WebDriverWait(e2e_browser.driver, 12).until(lambda driver: driver.execute_script("""
+        const p = arguments[0];
+        const initial = arguments[1];
+        const s = fileEditorPanelState(p)?.content || '';
+        const serialized = typeof serializeProseMirrorSource === 'function' ? serializeProseMirrorSource(p) : '';
+        const canonical = s.endsWith('\\n') && !serialized.endsWith('\\n') ? `${serialized}\\n` : serialized;
+        return s !== initial && s.includes('hello') && s.endsWith('world\\n') && p._cmView.state.doc.toString() === s && canonical === s
+            ? {source: s, pm: p._pmView.state.doc.textContent, cm: p._cmView.state.doc.toString(), serialized}
+            : false;
+    """, panel, before_view_edit["source"]))
     assert "<br>" not in view_state["source"], view_state
-    assert view_state["source"].endswith("world"), view_state
+    assert view_state["source"].endswith("world\n"), {"before": before_view_edit, "settled": view_state}
 
     text.click()
     text.send_keys(Keys.END, " from-text")

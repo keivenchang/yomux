@@ -1372,6 +1372,9 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
               relative_path: path === repo ? '' : 'src',
               head: shaA,
               hosted_remote: {provider: 'github', base_url: 'https://github.com/example/project'},
+              branch: 'yo7110',
+              dirty_count: 2,
+              dirty_entries: [{status: ' M', path: 'README.md'}, {status: '??', path: 'new file.txt'}],
               snapshot_cursor: 'snapshot-zero',
               next_cursor: '',
               truncated: false,
@@ -1394,6 +1397,9 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
               relative_path: path === repo ? '' : 'src',
               head: shaA,
               hosted_remote: {provider: 'github', base_url: 'https://github.com/example/project'},
+              branch: 'yo7110',
+              dirty_count: 2,
+              dirty_entries: [{status: ' M', path: 'README.md'}, {status: '??', path: 'new file.txt'}],
               snapshot_cursor: 'snapshot-zero',
               next_cursor: 'page-2',
               truncated: false,
@@ -1403,6 +1409,7 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
                   short: shaA.slice(0, 9),
                   parents: [parentA, secondParent],
                   subject: 'Merge exact history #123',
+                  decorations: ['HEAD -> yo7110', 'tag: v0.8.8', 'origin/main'],
                   author: 'Keiven Chang',
                   authored_at: 1786931640,
                   files: 3,
@@ -1510,6 +1517,26 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
           });
           const rootRows = Array.from(rootPanel.querySelectorAll('.git-diff-commit-row'));
           const commitOrder = rootRows.map(row => row.dataset.gitDiffCommit);
+          const rootHistoryBody = rootPanel.querySelector('.git-diff-panel-body');
+          const dirtySummary = rootHistoryBody.querySelector('.git-diff-dirty-summary');
+          const repoSurface = {
+            meta: rootPanel.querySelector('.git-diff-meta')?.textContent || '',
+            dirtyCount: dirtySummary?.querySelector('.git-diff-dirty-count')?.textContent || '',
+            dirtyEntries: Array.from(dirtySummary?.querySelectorAll('.git-diff-dirty-entry') || []).map(row => row.textContent),
+            decorations: Array.from(rootRows[0].querySelectorAll('.git-diff-commit-decoration')).map(node => node.textContent),
+            summaryImmediatelyBeforeCommits: Array.from(rootHistoryBody.children).indexOf(dirtySummary)
+              === Array.from(rootHistoryBody.children).indexOf(rootHistoryBody.querySelector('.git-diff-commits')) - 1,
+          };
+          const rootState = gitDiffTabState.get(rootItem);
+          const savedDirtyCount = rootState.dirtyCount;
+          const savedDirtyEntries = rootState.dirtyEntries;
+          rootState.dirtyCount = 0;
+          rootState.dirtyEntries = [];
+          renderGitDiffPanel(rootItem);
+          const cleanSummaryText = rootPanel.querySelector('.git-diff-dirty-count')?.textContent || '';
+          rootState.dirtyCount = savedDirtyCount;
+          rootState.dirtyEntries = savedDirtyEntries;
+          renderGitDiffPanel(rootItem);
           const fieldOrder = Array.from(rootRows[0].children).map(node => node.className.split(' ')[0]);
           const shaLink = rootRows[0].querySelector('.git-diff-commit-sha');
           const changeLink = rootRows[0].querySelector('.git-diff-change-link');
@@ -1708,7 +1735,6 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
             workingDirty: fileStateFor(historicalPath)?.dirty === true,
           };
 
-          const rootHistoryBody = rootPanel.querySelector('.git-diff-panel-body');
           if (!rootHistoryBody) throw new Error('root diff history body is missing');
           rootHistoryBody.scrollTop = rootHistoryBody.scrollHeight;
           rootHistoryBody.dispatchEvent(new Event('scroll'));
@@ -1788,6 +1814,8 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
             rootItem,
             nestedItem,
             commitOrder,
+            repoSurface,
+            cleanSummaryText,
             loadedOrder,
             fieldOrder,
             hostedLinks,
@@ -1852,6 +1880,14 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
     )
     assert metrics["rootItem"] == root_item and metrics["nestedItem"] == nested_item, metrics
     assert metrics["commitOrder"] == [sha_a, sha_b], metrics
+    assert metrics["repoSurface"] == {
+        "meta": "Branch: yo7110 · Scope: repository root · 2 newest commits",
+        "dirtyCount": "2 dirty",
+        "dirtyEntries": ["[ M]README.md", "[??]new file.txt"],
+        "decorations": ["HEAD -> yo7110", "tag: v0.8.8", "origin/main"],
+        "summaryImmediatelyBeforeCommits": True,
+    }, metrics
+    assert metrics["cleanSummaryText"] == "clean", metrics
     assert metrics["loadedOrder"] == [sha_a, sha_b, "f" * 40], metrics
     assert metrics["fieldOrder"] == [
         "git-diff-commit-caret",
@@ -1944,7 +1980,7 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
     assert metrics["darkPaint"] != metrics["lightPaint"] and metrics["lightClass"] is True, metrics
     assert metrics["lightSeparator"] != metrics["lightPaint"], metrics
     assert metrics["lightSecondaryText"] != metrics["lightPaint"], metrics
-    assert metrics["french"]["heading"] == "ΔAfficher les différences" and metrics["french"]["meta"].startswith("Périmètre :"), metrics
+    assert metrics["french"]["heading"] == "ΔAfficher les différences" and metrics["french"]["meta"].startswith("Branche: yo7110 · Périmètre :"), metrics
     assert metrics["tabs"].count(root_item) == 1 and metrics["tabs"].count(nested_item) == 1, metrics
     assert metrics["tabLabels"] == {"root": "Δrepo", "nested": "Δrepo;src"}, metrics
     expected_history_requests = [

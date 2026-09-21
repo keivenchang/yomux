@@ -65,7 +65,7 @@ def _install_root_fd(index, root):
 def test_ensure_revalidates_ownership_atomically_when_installing_root_fd(tmp_path, monkeypatch):
     _reset_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
-    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: False)
+    monkeypatch.setattr(file_index, "build_authorized", lambda: False)
     root = tmp_path / "root"
     root.mkdir()
     checked = threading.Event()
@@ -110,7 +110,7 @@ def test_final_ownership_failure_leaves_assignment_for_finalizer(tmp_path, monke
     _reset_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
     monkeypatch.setattr(file_index, "CLEAR_WORKER_JOIN_TIMEOUT_SECONDS", 0.0)
-    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: True)
+    monkeypatch.setattr(file_index, "build_authorized", lambda: True)
     monkeypatch.setattr(file_index, "_next_bfs_generation", lambda _root: 1)
     root = tmp_path / "root"
     root.mkdir()
@@ -162,9 +162,9 @@ def test_failed_thread_start_after_retirement_finalizes_installed_assignment(tmp
     _reset_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
     monkeypatch.setattr(file_index, "CLEAR_WORKER_JOIN_TIMEOUT_SECONDS", 0.0)
-    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: True)
+    monkeypatch.setattr(file_index, "build_authorized", lambda: True)
     monkeypatch.setattr(file_index, "_next_bfs_generation", lambda _root: 1)
-    monkeypatch.setattr(file_index, "notify_background_owner_done", lambda _payload: None)
+    monkeypatch.setattr(file_index, "notify_background_done", lambda _payload: None)
     monkeypatch.setattr(file_index, "touch_producer_heartbeat", lambda *_args, **_kwargs: None)
     root = tmp_path / "root"
     root.mkdir()
@@ -198,7 +198,7 @@ def test_failed_thread_start_after_retirement_finalizes_installed_assignment(tmp
 def test_indexer_restart_resumes_a_durable_partial_frontier_without_waiting_for_ttl(tmp_path, monkeypatch):
     _reset_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
-    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: True)
+    monkeypatch.setattr(file_index, "build_authorized", lambda: True)
     root = tmp_path / "root"
     (root / "deep").mkdir(parents=True)
     (root / "top.txt").write_text("top", encoding="utf-8")
@@ -237,7 +237,7 @@ def test_indexer_restart_resumes_a_durable_partial_frontier_without_waiting_for_
 def test_tombstoned_snapshot_is_rejected_by_every_disk_read_surface(tmp_path, monkeypatch):
     _reset_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
-    file_index.set_background_owner_checker(lambda _role: True)
+    file_index.set_build_authority_checker(lambda _role: True)
     root = tmp_path / "root"
     root.mkdir()
     deleted = root / "deleted.txt"
@@ -283,7 +283,7 @@ def test_tombstoned_snapshot_is_rejected_by_every_disk_read_surface(tmp_path, mo
             "freshness_reason": "snapshot_tombstoned",
         }
     finally:
-        file_index.set_background_owner_checker(None)
+        file_index.set_build_authority_checker(None)
         _reset_registry()
 
 
@@ -328,7 +328,7 @@ def test_successful_bfs_publication_supersedes_a_pending_drop(tmp_path, monkeypa
     _reset_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
     monkeypatch.setattr(file_index, "CLEAR_WORKER_JOIN_TIMEOUT_SECONDS", 0.0)
-    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: True)
+    monkeypatch.setattr(file_index, "build_authorized", lambda: True)
     monkeypatch.setattr(file_index, "_BFS_FULL_BUILD_RUNNER", bfs_index.build_root_into_index)
     root = tmp_path / "root"
     root.mkdir()
@@ -396,7 +396,7 @@ def test_publication_cannot_supersede_an_unindex_requested_after_build_started(t
     _reset_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
     monkeypatch.setattr(file_index, "CLEAR_WORKER_JOIN_TIMEOUT_SECONDS", 0.0)
-    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: True)
+    monkeypatch.setattr(file_index, "build_authorized", lambda: True)
     monkeypatch.setattr(file_index, "_BFS_FULL_BUILD_RUNNER", None)
     root = tmp_path / "root"
     root.mkdir()
@@ -441,7 +441,7 @@ def test_publication_cannot_clear_a_tombstone_written_by_a_newer_unindex(tmp_pat
     _reset_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
     monkeypatch.setattr(file_index, "CLEAR_WORKER_JOIN_TIMEOUT_SECONDS", 0.0)
-    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: True)
+    monkeypatch.setattr(file_index, "build_authorized", lambda: True)
     monkeypatch.setattr(file_index, "_BFS_FULL_BUILD_RUNNER", None)
     root = tmp_path / "root"
     root.mkdir()
@@ -493,7 +493,7 @@ def test_publication_cannot_clear_a_tombstone_written_by_a_newer_unindex(tmp_pat
 def test_indexer_restart_finishes_the_exact_partial_generation(tmp_path, monkeypatch):
     _reset_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
-    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: True)
+    monkeypatch.setattr(file_index, "build_authorized", lambda: True)
     root = tmp_path / "root"
     (root / "deep").mkdir(parents=True)
     (root / "top.txt").write_text("top", encoding="utf-8")
@@ -549,7 +549,7 @@ def test_unindex_cannot_write_its_tombstone_after_a_superseding_rebuild(tmp_path
     _reset_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
     monkeypatch.setattr(file_index, "CLEAR_WORKER_JOIN_TIMEOUT_SECONDS", 3.0)
-    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: True)
+    monkeypatch.setattr(file_index, "build_authorized", lambda: True)
     monkeypatch.setattr(file_index, "_BFS_FULL_BUILD_RUNNER", None)
     root = tmp_path / "root"
     root.mkdir()
@@ -648,7 +648,7 @@ def test_restart_rebuilds_and_stamps_the_current_identity_while_the_tombstone_re
     # with the CURRENT tombstone identity and readable by `_read_sqlite_index` while the marker stands.
     _reset_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
-    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: True)
+    monkeypatch.setattr(file_index, "build_authorized", lambda: True)
     monkeypatch.setattr(file_index, "_BFS_FULL_BUILD_RUNNER", bfs_index.build_root_into_index)
     root = tmp_path / "root"
     root.mkdir()
@@ -694,7 +694,7 @@ def test_completed_snapshot_consumers_reject_a_tombstone(tmp_path, monkeypatch):
     explicit unindex of a COMPLETED snapshot (the sibling consumers that bypass `_load_disk`)."""
     _reset_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
-    file_index.set_background_owner_checker(lambda _role: True)
+    file_index.set_build_authority_checker(lambda _role: True)
     parent = tmp_path / "parent"
     root = parent / "child"
     root.mkdir(parents=True)
@@ -712,7 +712,7 @@ def test_completed_snapshot_consumers_reject_a_tombstone(tmp_path, monkeypatch):
         assert resolved not in set(file_index._iter_candidate_index_roots())
         assert resolved not in file_index.persisted_index_roots_within(parent)
     finally:
-        file_index.set_background_owner_checker(None)
+        file_index.set_build_authority_checker(None)
         _reset_registry()
 
 
@@ -721,7 +721,7 @@ def test_partial_frontier_resume_and_promote_reject_a_tombstone(tmp_path, monkey
     tombstoned: post-unindex work must start a fresh generation, never continue crawling a deleted store."""
     _reset_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
-    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: True)
+    monkeypatch.setattr(file_index, "build_authorized", lambda: True)
     root = tmp_path / "root"
     (root / "deep").mkdir(parents=True)
     (root / "top.txt").write_text("top", encoding="utf-8")
@@ -779,7 +779,7 @@ def test_build_started_before_cross_process_unindex_cannot_clear_new_tombstone(t
     # identity, so the newer marker survives and its snapshot is rejected by identity.
     _reset_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
-    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: True)
+    monkeypatch.setattr(file_index, "build_authorized", lambda: True)
     root = tmp_path / "root"
     root.mkdir()
     (root / "stale.txt").write_text("stale", encoding="utf-8")
@@ -814,7 +814,7 @@ def test_build_started_before_cross_process_unindex_cannot_clear_new_tombstone(t
         assert file_index._read_sqlite_index(root, set()) is None
         assert built.published_tombstone_identity in (None, "")
         assert file_index._root_index_is_tombstoned(built)
-        monkeypatch.setattr(file_index, "background_owner_can_build", lambda: False)
+        monkeypatch.setattr(file_index, "build_authorized", lambda: False)
         evicted = file_index.ensure_index(root, set())
         assert not evicted.ready, "ensure_index kept serving a tombstoned in-memory owner"
         served, _truncated = file_index.search_index(evicted, _match, 20)
@@ -867,11 +867,11 @@ def test_tombstone_arriving_during_publication_is_not_deleted(tmp_path, monkeypa
 
 
 def test_malformed_current_tombstone_fails_closed(tmp_path, monkeypatch):
-    # Repro 3: a PRESENT but unparseable marker is deletion authority, not absence. Every follower disk
+    # Repro 3: a PRESENT but unparseable marker is deletion authority, not absence. Every reader disk
     # read must fail closed on it rather than serve the deleted rows.
     _reset_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
-    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: True)
+    monkeypatch.setattr(file_index, "build_authorized", lambda: True)
     root = tmp_path / "root"
     root.mkdir()
     (root / "deleted.txt").write_text("deleted", encoding="utf-8")
@@ -953,7 +953,7 @@ def test_pre_unindex_stamp_is_rejected_and_post_unindex_clean_generation_is_acce
     #     tombstone STILL PRESENT (never cleared).
     _reset_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
-    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: True)
+    monkeypatch.setattr(file_index, "build_authorized", lambda: True)
     monkeypatch.setattr(file_index, "_BFS_FULL_BUILD_RUNNER", bfs_index.build_root_into_index)
     root = tmp_path / "root"
     root.mkdir()
@@ -1008,7 +1008,7 @@ def test_pre_build_remote_unindex_race_evicts_the_live_in_memory_owner(tmp_path,
     # from RAM. The in-memory owner must be judged by the SAME `_snapshot_is_tombstoned` verdict.
     _reset_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
-    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: True)
+    monkeypatch.setattr(file_index, "build_authorized", lambda: True)
     root = tmp_path / "root"
     root.mkdir()
     (root / "stale.txt").write_text("stale", encoding="utf-8")
@@ -1042,7 +1042,7 @@ def test_pre_build_remote_unindex_race_evicts_the_live_in_memory_owner(tmp_path,
         # Registry-root discovery must not advertise the invalid snapshot.
         assert root.resolve() not in set(file_index._iter_candidate_index_roots())
         # ensure_index must EVICT the tombstoned in-memory owner; disable rebuild to observe it cleanly.
-        monkeypatch.setattr(file_index, "background_owner_can_build", lambda: False)
+        monkeypatch.setattr(file_index, "build_authorized", lambda: False)
         evicted = file_index.ensure_index(root, set())
         assert not evicted.ready, "ensure_index kept a tombstoned in-memory owner ready"
         served, _ = file_index.search_index(evicted, _match, 20)
@@ -1233,7 +1233,7 @@ def test_serve_re_evicts_when_a_remote_unindex_lands_after_the_readiness_check(t
     # return stale rows: the ONE serving accessor re-applies the eviction verdict at read time.
     _reset_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
-    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: True)
+    monkeypatch.setattr(file_index, "build_authorized", lambda: True)
     root = tmp_path / "root"
     root.mkdir()
     (root / "stale.txt").write_text("stale", encoding="utf-8")
@@ -1437,7 +1437,7 @@ def test_serve_does_not_return_rows_republished_between_eviction_check_and_read(
     # a republish landing between the eviction check and the read can never make deleted rows servable.
     _reset_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
-    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: True)
+    monkeypatch.setattr(file_index, "build_authorized", lambda: True)
     root = tmp_path / "root"
     root.mkdir()
     (root / "stale.txt").write_text("stale", encoding="utf-8")

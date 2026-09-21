@@ -144,7 +144,7 @@ RMUX Web Share keeps the PTY local, supports separate operator and spectator rol
 
 2. **Terminal-native test primitives.** Add reusable visible-terminal assertions and quiet-state waits to the existing test helpers. These would complement—not replace—browser DOM tests: use terminal assertions for agent workflows and browser assertions for YOLOmux layout and controls. Record a bounded trace when an agent-routing test fails so failures can be reproduced without retaining unrestricted terminal history.
 
-3. **Explicit ownership semantics.** RMUX's owned-session cleanup and daemon leases are a useful model for short-lived agent workspaces. YOLOmux already uses port and background-owner leases; extend that discipline only where it closes a real lifecycle gap, such as an explicitly app-created temporary session with a clear preserve-versus-cleanup policy.
+3. **Explicit ownership semantics.** RMUX's owned-session cleanup and daemon leases are a useful model for short-lived agent workspaces. YOLOmux already uses port and instance leases; extend that discipline only where it closes a real lifecycle gap, such as an explicitly app-created temporary session with a clear preserve-versus-cleanup policy.
 
 4. **Capability negotiation.** RMUX advertises optional daemon capabilities and reports unsupported operations as typed diagnostics. YOLOmux can apply the same shape to optional tmux features, agent clients, and platform dependencies so the UI explains a missing capability rather than silently degrading or guessing.
 

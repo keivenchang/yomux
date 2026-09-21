@@ -4,13 +4,6 @@ set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$repo_root/tools/startup_common.sh"
 primary_port="${YOLOMUX_PORT:-${YOLOMUX_DEFAULT_PORT:-}}"
-# An explicit port names this launcher's primary owner. Do not let an inherited server's owner
-# port redirect a separately configured test/dev launch; without YOLOMUX_PORT, retain the override.
-if [[ -n "${YOLOMUX_PORT:-}" ]]; then
-  background_owner_primary_port="$primary_port"
-else
-  background_owner_primary_port="${YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT:-$primary_port}"
-fi
 default_port="$primary_port"
 host="${YOLOMUX_HOST:-0.0.0.0}"
 log_dir="${YOLOMUX_LOG_DIR:-/tmp}"
@@ -19,19 +12,22 @@ dev_mode="auto"
 print_command=0
 check_assets=0
 ignore_load=0
+force_start=0
+launched_pid=""
 ports=()
 python_bin="${PYTHON:-python3}"
 server_shell="${SHELL:-$(command -v bash)}"
 
 usage() {
   cat <<'EOF'
-Usage: boot.sh [--print-command|--check-assets] [--ignore-load] [--host HOST] [--log-dir DIR] [--dev|--no-dev] [--port PORT] [PORT ...]
+Usage: boot.sh [--print-command|--check-assets] [--ignore-load] [--force] [--host HOST] [--log-dir DIR] [--dev|--no-dev] [--port PORT] [PORT ...]
 
 Restart this checkout's YOLOmux server. YOLOMUX_PORT or an explicit port argument selects the primary port; a no-argument launch requires YOLOMUX_DEFAULT_PORT. Non-primary ports use --dev by default.
 
 Examples:
   ./boot.sh
   ./boot.sh <dev-port>
+  ./boot.sh --force <port>
   ./boot.sh --ignore-load <dev-port>
   ./boot.sh --port <port-a> --port <port-b>
 EOF
@@ -66,6 +62,10 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --ignore-load)
       ignore_load=1
+      shift
+      ;;
+    --force)
+      force_start=1
       shift
       ;;
     --host)
@@ -117,7 +117,6 @@ if [[ "${#ports[@]}" -eq 0 ]]; then
   fi
 elif [[ -z "$primary_port" ]]; then
   primary_port="${ports[0]}"
-  background_owner_primary_port="$primary_port"
   default_port="$primary_port"
 fi
 
@@ -154,7 +153,6 @@ except Exception:
 fi
 
 extra_env=()
-extra_env+=("YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT=${background_owner_primary_port}")
 extra_env+=("$(yolomux_default_server_optin)")
 if [[ -n "${YOLOMUX_TEST_AUTH_BYPASS:-}" ]]; then
   extra_env+=("YOLOMUX_TEST_AUTH_BYPASS=${YOLOMUX_TEST_AUTH_BYPASS}")
@@ -173,10 +171,10 @@ use_dev_mode() {
 server_args=()
 build_server_args() {
   local port="$1"
-  # Every non-default instance receives an independent state family, so its
-  # background owner must be itself rather than this launcher's primary port.
-  extra_env[0]="YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT=${port}"
   server_args=(--host "$host" --port "$port" --dang --self-signed)
+  if [[ "$force_start" -eq 1 ]]; then
+    server_args+=(--force)
+  fi
   if use_dev_mode "$port"; then
     server_args+=(--dev)
   fi
@@ -203,7 +201,7 @@ print_launch_command() {
     printf 'launchctl bootout %q 2>/dev/null || true\n' "$(yolomux_macos_launch_target "$port")"
     printf 'tmux -L %q kill-session -t %q 2>/dev/null || true\n' "$socket_name" "=$session_name"
     printf 'tmux -L %q new-session -d -s %q -c %q /bin/bash -c %q bash %q %q %q %q %q %q %q' \
-      "$socket_name" "$session_name" "$repo_root" "$launcher" "$repo_root" "$PATH" "$server_shell" "$python_bin" "$repo_root/yolomux.py" "$background_owner_primary_port" "$log_path"
+      "$socket_name" "$session_name" "$repo_root" "$launcher" "$repo_root" "$PATH" "$server_shell" "$python_bin" "$repo_root/yolomux.py" "$log_path"
     for item in "${server_args[@]}"; do
       printf ' %q' "$item"
     done
@@ -212,16 +210,7 @@ print_launch_command() {
   fi
   printf 'PATH=%s\n' "$PATH"
   printf 'cd %q\n' "$repo_root"
-  if supports_setsid_f; then
-    print_detach_prefix
-    printf 'bash -c %q > /dev/null 2>&1 < /dev/null & disown\n' "$(shell_command_for "$log_path")"
-  else
-    print_python_detach_command "$log_path"
-  fi
-}
-
-supports_setsid_f() {
-  command -v setsid >/dev/null 2>&1 && setsid -f true >/dev/null 2>&1
+  printf 'nohup bash -c %q > /dev/null 2>&1 < /dev/null & disown\n' "$(shell_command_for "$log_path")"
 }
 
 shell_command_for() {
@@ -240,79 +229,6 @@ shell_command_for() {
     printf ' %q' "$item"
   done
   printf ' >> %q 2>&1 < /dev/null' "$log_path"
-}
-
-python_detach_code='
-import os
-import subprocess
-import sys
-
-repo_root = sys.argv[1]
-log_path = sys.argv[2]
-separator = sys.argv.index("--")
-env = os.environ.copy()
-env.pop("TMUX", None)
-env.pop("TMUX_PANE", None)
-for item in sys.argv[3:separator]:
-    key, _, value = item.partition("=")
-    if key:
-        env[key] = value
-cmd = sys.argv[separator + 1:]
-with open(log_path, "ab", buffering=0) as log:
-    subprocess.Popen(
-        cmd,
-        cwd=repo_root,
-        stdin=subprocess.DEVNULL,
-        stdout=log,
-        stderr=subprocess.STDOUT,
-        env=env,
-        start_new_session=True,
-    )
-'
-
-python_detach_args=()
-build_python_detach_args() {
-  local log_path="$1"
-  python_detach_args=(
-    "$python_bin"
-    -c "$python_detach_code"
-    "$repo_root"
-    "$log_path"
-    "TERM=$TERM"
-    "PYTHONUNBUFFERED=$PYTHONUNBUFFERED"
-    "MALLOC_ARENA_MAX=$MALLOC_ARENA_MAX"
-    "PATH=$PATH"
-  )
-  for item in "${extra_env[@]}"; do
-    python_detach_args+=("$item")
-  done
-  python_detach_args+=(
-    --
-    "$python_bin"
-    "${repo_root}/yolomux.py"
-  )
-  for item in "${server_args[@]}"; do
-    python_detach_args+=("$item")
-  done
-}
-
-print_python_detach_command() {
-  local log_path="$1"
-  local item
-  build_python_detach_args "$log_path"
-  printf 'nohup'
-  for item in "${python_detach_args[@]}"; do
-    printf ' %q' "$item"
-  done
-  printf ' > /dev/null 2>&1 < /dev/null & disown\n'
-}
-
-print_detach_prefix() {
-  if supports_setsid_f; then
-    printf 'nohup setsid -f '
-  else
-    printf 'nohup '
-  fi
 }
 
 # Delegates to the one shared scanner in startup_common.sh (sourced above), so
@@ -337,67 +253,6 @@ wait_for_pid_exit() {
   return 1
 }
 
-wait_for_port_free() {
-  local port="$1"
-  local max_attempts="${2:-8}"
-  local attempt pids
-  for ((attempt = 0; attempt < max_attempts; attempt++)); do
-    pids="$(port_listener_pids "$port")" || return 2
-    if [[ -z "$pids" ]]; then
-      return 0
-    fi
-    sleep 1
-  done
-  return 1
-}
-
-stop_port_listener() {
-  local port="$1"
-  local existing_pids=()
-  local pid pids wait_status
-  pids="$(port_listener_pids "$port")" || return 2
-  while IFS= read -r pid; do
-    if [[ -n "$pid" ]]; then
-      existing_pids+=("$pid")
-    fi
-  done <<< "$pids"
-  if [[ "${#existing_pids[@]}" -eq 0 ]]; then
-    return
-  fi
-  kill "${existing_pids[@]}"
-  if wait_for_port_free "$port" 8; then
-    return
-  else
-    wait_status="$?"
-  fi
-  if [[ "$wait_status" -eq 2 ]]; then
-    return 2
-  fi
-
-  existing_pids=()
-  pids="$(port_listener_pids "$port")" || return 2
-  while IFS= read -r pid; do
-    if [[ -n "$pid" ]]; then
-      existing_pids+=("$pid")
-    fi
-  done <<< "$pids"
-  if [[ "${#existing_pids[@]}" -gt 0 ]]; then
-    printf 'port %s listener still alive after SIGTERM; sending SIGKILL to pid(s): %s\n' "$port" "${existing_pids[*]}" >&2
-    kill -KILL "${existing_pids[@]}" 2>/dev/null || true
-  fi
-  if wait_for_port_free "$port" 4; then
-    return
-  else
-    wait_status="$?"
-  fi
-  if [[ "$wait_status" -eq 2 ]]; then
-    return 2
-  fi
-  pids="$(port_listener_pids "$port")" || return 2
-  printf 'port %s still has listener pid(s) after stop: %s\n' "$port" "${pids//$'\n'/ }" >&2
-  return 1
-}
-
 port_restart_lock_dir() {
   local port="$1"
   printf '%s/yolomux-restart-%s.lock' "$restart_lock_base" "$port"
@@ -408,6 +263,7 @@ acquire_port_restart_lock() {
   local lock_dir
   local owner_pid
   lock_dir="$(port_restart_lock_dir "$port")"
+  mkdir -p "$restart_lock_base" || die "cannot create YOLOmux restart-lock directory: $restart_lock_base"
   if mkdir "$lock_dir" 2>/dev/null; then
     printf '%s\n' "$$" > "$lock_dir/pid"
     return 0
@@ -438,48 +294,90 @@ release_port_restart_lock() {
 # log errors. /healthz is registered PUBLIC and answers 200 from the HTTP listener alone, so 200
 # is the only acceptable code here: a 401 now means the auth boundary changed, not that the
 # server is up.
+listener_pid_is_forbidden() {
+  local listener_pid="$1"
+  local forbidden_pids="$2"
+  local forbidden_pid
+  for forbidden_pid in $forbidden_pids; do
+    if [[ "$forbidden_pid" == "$listener_pid" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+launch_process_is_alive() {
+  local launch_pid="$1"
+  local process_state
+  kill -0 "$launch_pid" 2>/dev/null || return 1
+  process_state="$(ps -p "$launch_pid" -o stat= 2>/dev/null || true)"
+  [[ -n "$process_state" && "$process_state" != Z* ]]
+}
+
 wait_for_port() {
   local port="$1"
+  local forbidden_pids="${2:-}"
+  local launch_pid="${3:-}"
+  local log_path="${4:-}"
   local code
+  local listener_pid
   local attempt
   for ((attempt = 0; attempt < 20; attempt++)); do
+    if [[ -n "$launch_pid" ]] && ! launch_process_is_alive "$launch_pid"; then
+      printf 'port %s launch process %s exited before readiness; see log: %s\n' "$port" "$launch_pid" "${log_path:-unavailable}" >&2
+      return 1
+    fi
     code="$(curl -sk -o /dev/null -w '%{http_code}' "https://localhost:${port}/healthz" 2>/dev/null || true)"
     if [[ "$code" == "200" ]]; then
-      printf 'port %s ready: /healthz -> %s\n' "$port" "$code"
-      return 0
+      listener_pid="$(port_listener_pids "$port")"
+      if [[ -n "$listener_pid" && "$listener_pid" != *$'\n'* && "$listener_pid" != *[!0-9]* ]]; then
+        if listener_pid_is_forbidden "$listener_pid" "$forbidden_pids"; then
+          :
+        else
+          printf 'port %s ready: listener=%s /healthz -> %s\n' "$port" "$listener_pid" "$code"
+          return 0
+        fi
+      fi
     fi
     sleep 1
   done
-  printf 'port %s did not become ready: /healthz -> %s\n' "$port" "${code:-curl failed}" >&2
+  printf 'port %s did not become ready: listener=%s /healthz -> %s\n' "$port" "${listener_pid:-none}" "${code:-curl failed}" >&2
   return 1
 }
 
 verify_port_stable() {
   local port="$1"
+  local forbidden_pids="${2:-}"
   local code
   local pids
+  local stable_pid=""
   local attempt
   for ((attempt = 0; attempt < 4; attempt++)); do
     sleep 1
-    pids="$(port_listener_pids "$port" | tr '\n' ' ')"
+    pids="$(port_listener_pids "$port")"
     code="$(curl -sk -o /dev/null -w '%{http_code}' "https://localhost:${port}/healthz" 2>/dev/null || true)"
-    if [[ -z "$pids" || "$code" != "200" ]]; then
+    if [[ -z "$pids" || "$pids" == *$'\n'* || "$pids" == *[!0-9]* || "$code" != "200" ]]; then
       printf 'port %s became unstable after readiness: listener=%s /healthz -> %s\n' "$port" "${pids:-none}" "${code:-curl failed}" >&2
       return 1
     fi
+    if listener_pid_is_forbidden "$pids" "$forbidden_pids"; then
+      printf 'port %s became unstable after readiness: replacement listener was not established: %s\n' "$port" "$pids" >&2
+      return 1
+    fi
+    if [[ -n "$stable_pid" && "$stable_pid" != "$pids" ]]; then
+      printf 'port %s changed listener after readiness: %s -> %s\n' "$port" "$stable_pid" "$pids" >&2
+      return 1
+    fi
+    stable_pid="$pids"
   done
 }
 
 launch_server() {
   local log_path="$1"
   local shell_command
-  if supports_setsid_f; then
-    shell_command="$(shell_command_for "$log_path")"
-    nohup setsid -f bash -c "$shell_command" > /dev/null 2>&1 < /dev/null &
-  else
-    build_python_detach_args "$log_path"
-    nohup "${python_detach_args[@]}" > /dev/null 2>&1 < /dev/null &
-  fi
+  shell_command="$(shell_command_for "$log_path")"
+  nohup bash -c "$shell_command" > /dev/null 2>&1 < /dev/null &
+  launched_pid="$!"
   disown 2>/dev/null || true
 }
 
@@ -508,45 +406,49 @@ preflight_log_sinks() {
 restart_port() {
   local port="$1"
   local log_path
+  local previous_listener_pids
   if ! yolomux_validate_instance_isolation "$repo_root" "$python_bin" "$port"; then
     die "port $port launch refused by instance-isolation preflight"
   fi
   log_path="$(log_path_for "$port")"
   acquire_port_restart_lock "$port"
+  previous_listener_pids="$(port_listener_pids "$port")"
   # Repeat under the restart lock: the load gate between the preflight and here
   # can block for minutes, and the sink can be removed or made read-only in that
-  # window. Still before stop_port_listener, so the listener survives either way.
+  # window. This remains before any replacement action.
   if ! ensure_log_sink_writable "$log_path"; then
     release_port_restart_lock "$port"
     die "log path is not writable: $log_path"
   fi
-  build_server_args "$port"
-
-  if [[ "$(uname -s)" == "Darwin" ]]; then
-    yolomux_bootout_macos_server "$port"
-  fi
-  stop_port_listener "$port"
-
-  # Fail closed: a wedged previous owner (alive but not listening, so the
-  # listener kill above never reached it) or identity-verified stale children
-  # of a dead owner must be resolved before another launch can stack on top.
-  if ! "$python_bin" -m yolomux_lib.local_services.preflight --port "$port"; then
+  if [[ -n "$previous_listener_pids" && "$force_start" -ne 1 ]]; then
     release_port_restart_lock "$port"
-    die "port $port launch preflight refused (wedged owner or stale tracked children; see message above)"
+    die "port $port already has listener(s) $previous_listener_pids; use --force to replace the existing YOLOmux instance"
+  fi
+  build_server_args "$port"
+  launched_pid=""
+
+  if [[ "$force_start" -eq 1 && "$(uname -s)" == "Darwin" ]]; then
+    # The Python launch path performs the one identity-checked replacement.
+    # Only remove the launchd wrapper here; a second force pass could kill a
+    # different instance after the first replacement has already completed.
+    yolomux_bootout_macos_server "$port"
   fi
 
   printf '\n[%s] boot.sh launching port %s from %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$port" "$repo_root" >> "$log_path"
   if [[ "$(uname -s)" == "Darwin" ]]; then
-    yolomux_submit_macos_server "$repo_root" "$python_bin" "$server_shell" "$PATH" "$port" "$log_path" "$background_owner_primary_port" "${server_args[@]}"
+    yolomux_submit_macos_server "$repo_root" "$python_bin" "$server_shell" "$PATH" "$port" "$log_path" "${server_args[@]}"
   else
-    (
-      cd "$repo_root"
-      launch_server "$log_path"
-    )
+    launch_server "$log_path"
   fi
   printf 'restarted port %s from %s; log: %s\n' "$port" "$repo_root" "$log_path"
-  wait_for_port "$port"
-  verify_port_stable "$port"
+  if ! wait_for_port "$port" "$previous_listener_pids" "$launched_pid" "$log_path"; then
+    release_port_restart_lock "$port"
+    return 1
+  fi
+  if ! verify_port_stable "$port" "$previous_listener_pids"; then
+    release_port_restart_lock "$port"
+    return 1
+  fi
   release_port_restart_lock "$port"
 }
 

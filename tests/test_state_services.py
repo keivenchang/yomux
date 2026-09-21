@@ -12,9 +12,10 @@ def test_session_files_service_owns_worker_until_target_returns_and_stop_joins_i
     class App:
         def __init__(self):
             self._session_files_coordinator = app_module.SessionFilesCoordinator(self)
+            self.background_scheduler = type("Scheduler", (), {"lock": threading.RLock()})()
 
         @staticmethod
-        def background_can_run(_role):
+        def scheduler_can_run(_role):
             return True
 
         @staticmethod

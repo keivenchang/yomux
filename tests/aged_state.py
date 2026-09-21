@@ -7,11 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 import json
 import os
-import time
 from typing import Any
 
 from yolomux_lib.infra import common
-from yolomux_lib.infra.host_identity import current_host_identity
 from yolomux_lib.infra.host_partition import host_partitioned_state_dir
 from yolomux_lib.local_services.rpc import encode_metadata
 from yolomux_lib.local_services.rpc import LOCAL_RPC_MAX_METADATA_BYTES
@@ -60,7 +58,6 @@ class AgedStateRoot:
             "eof_transcript_cursor",
             "stats_wal",
             "event_history",
-            "stale_owner_epochs",
             "finder_resource_history",
             "rpc_metadata_boundaries",
         )
@@ -78,7 +75,6 @@ class AgedStateRoot:
             "eof_transcript_cursor": self._eof_transcript_cursor,
             "stats_wal": self._stats_wal,
             "event_history": self._event_history,
-            "stale_owner_epochs": self._stale_owner_epochs,
             "finder_resource_history": self._finder_resource_history,
             "rpc_metadata_boundaries": self._rpc_metadata_boundaries,
         }
@@ -223,50 +219,6 @@ class AgedStateRoot:
             "event_history",
             (event_path,),
             {"counts": selected, "lines": sequence},
-        )
-
-    def _stale_owner_epochs(self, *, epoch_count: int = 4) -> AgedStateRecipeResult:
-        if epoch_count < 1:
-            raise ValueError("owner epoch count must be positive")
-        owner_dir = self.runtime_dir / "background-owner"
-        generations_dir = owner_dir / "generations"
-        generations_dir.mkdir(parents=True, exist_ok=True)
-        identity = current_host_identity()
-        records = {}
-        paths = []
-        stale_heartbeat = time.time() - 3_600.0
-        for index in range(epoch_count):
-            generation_id = f"170000000000000000{index}-2000000000-aged{index:02d}"
-            record = {
-                **identity.process_record_fields(
-                    pid=2_000_000_000,
-                    start_identity=f"aged-start-{index}",
-                    display_hostname="aged-fixture-host",
-                    instance_nonce=f"aged-nonce-{index}",
-                ),
-                "generation_id": generation_id,
-                "started_at_ns": 1_700_000_000_000_000_000 + index,
-                "nonce": f"aged-nonce-{index}",
-                "port": 79_000 + index,
-                "project_root": str(self.workspace_dir),
-                "control_socket": str(self.runtime_dir / "control" / f"aged-{index}.sock"),
-                "priority": 0,
-                "capabilities": {},
-                "roles": ["session-files", "watch-roots"],
-                "last_heartbeat": stale_heartbeat - index,
-                "owner": index == epoch_count - 1,
-                "status": "owner" if index == epoch_count - 1 else "released",
-                "counters": {"owner_acquired": 1, "owner_released": int(index < epoch_count - 1)},
-            }
-            path = self._write_json(generations_dir / f"{generation_id}.json", record)
-            paths.append(path)
-            records[generation_id] = record
-        index_path = self._write_json(generations_dir / "index.json", {"version": 1, "records": records})
-        owner_path = self._write_json(owner_dir / "owner.json", records[next(reversed(records))])
-        return AgedStateRecipeResult(
-            "stale_owner_epochs",
-            tuple([owner_path, index_path, *paths]),
-            {"epochs": epoch_count, "stale_heartbeat": stale_heartbeat},
         )
 
     def _finder_resource_history(

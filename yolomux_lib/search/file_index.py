@@ -114,16 +114,18 @@ FRESHNESS_MISSING = "missing"
 PRODUCER_RUNNING = "running"
 PRODUCER_NOT_RUNNING = "not_running"
 PRODUCER_UNRECORDED = "unrecorded"
-_BACKGROUND_OWNER_CHECKER: Callable[[str], bool] | None = None
-_BACKGROUND_OWNER_REFRESH_REQUESTER: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None
+_BUILD_AUTHORITY_CHECKER: Callable[[str], bool] | None = None
+_BACKGROUND_REFRESH_REQUESTER: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None
+_BACKGROUND_WORK_SUBMITTER: Callable[[str, Callable[[], None]], dict[str, bool]] | None = None
 _BACKGROUND_INDEX_SEARCH_REQUESTER: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+_BACKGROUND_CALLBACK_OWNER: object | None = None
 _BACKGROUND_INDEX_SEARCH_REQUEST: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
     "background_index_search_request",
     default=None,
 )
 AUTHORIZED_ROOT_IDENTITY_FIELD = "authorized_root_identity"
-_BACKGROUND_OWNER_BYTES_RECORDER: Callable[[int], None] | None = None
-_BACKGROUND_OWNER_DONE_NOTIFIER: Callable[[str, dict[str, Any]], None] | None = None
+_BACKGROUND_BYTES_RECORDER: Callable[[int], None] | None = None
+_BACKGROUND_DONE_NOTIFIER: Callable[[str, dict[str, Any]], None] | None = None
 # Streaming Quick Open (step 5): the signal-only progress notifier. `indexd` calls it after a
 # directory publication commits a NEW journal revision; app.py registers a sink that publishes a
 # redacted `{scope_id, generation, revision, coverage}` frame onto the shared background-client-
@@ -155,7 +157,7 @@ _SEARCH_PROGRESS_COVERAGE_KEYS: tuple[str, ...] = (
 # import time so a configured-root full build lists the root first and publishes each directory
 # independently, instead of the whole-tree DFS `_walk_root_with_metrics`. file_index cannot import
 # bfs_index at module scope (bfs_index imports file_index), so the one owner is injected the same
-# way as the background-owner checker rather than reached through a function-local import.
+# way as the build-authority checker rather than reached through a function-local import.
 _BFS_FULL_BUILD_RUNNER: Callable[..., bool] | None = None
 SEARCH_INDEX_ROLE = "search-index"
 LOGGER = logging.getLogger(__name__)
@@ -514,8 +516,8 @@ def _maybe_execute_pending_drop(root: Path) -> None:
     with _REGISTRY_LOCK:
         if key not in _PENDING_DROPS:
             return
-        # P1: compare against each owner's PRECOMPUTED canonical key rather than resolving every
-        # owner's path under the global lock on this hot path.
+        # P1: compare against each indexer's PRECOMPUTED canonical key rather than resolving every
+        # indexer's path under the global lock on this hot path.
         active = any(ri.root_key == key for ri in _REGISTRY.values())
         retiring = any(ri.root_key == key for ri in _RETIRING.values())
         if active or retiring:
@@ -681,7 +683,7 @@ def _pending_drop_retry_main(root: Path, key: str, token: str, completion: threa
             os.close(lock_fd)
         if not rearmed:
             # No successor owns the token now, so this chain has resolved (a confirmed drop, or a no-op
-            # because the token was superseded/replaced): retire this owner's registry entry and settle the
+            # because the token was superseded/replaced): retire this indexer's registry entry and settle the
             # shared completion event. A transient fault always re-arms instead, so it never lands here.
             with _REGISTRY_LOCK:
                 existing = _PENDING_DROP_RETRIES.get(key)
@@ -841,8 +843,8 @@ def _finalize_worker_exit(index: RootIndex, assignment: "_WorkerAssignment | Non
 
 
 def clear_memory_indexes() -> RetirementResult:
-    """Retire every in-memory index for a demoted background owner
-    (``app.py::demote_background_owner``). Returns a ``RetirementResult`` naming the roots requested,
+    """Retire every in-memory index when the local scheduler stops
+    (``app.py::stop_background_scheduler``). Returns a ``RetirementResult`` naming the roots requested,
     completed, and late; a late root's worker still owns its fd and finalizes on its own exit.
 
     History: closing the pinned root fd out from under a still-running build thread let a worker write
@@ -912,22 +914,17 @@ class FileIndexTestScope:
     """
 
     CALLBACK_CLEAR_ORDER = (
-        "background_owner_checker",
-        "background_owner_refresh_requester",
+        "build_authority_checker",
+        "background_refresh_requester",
+        "background_work_submitter",
         "background_index_search_requester",
-        "background_owner_bytes_recorder",
-        "background_owner_done_notifier",
+        "background_bytes_recorder",
+        "background_done_notifier",
         "search_progress_notifier",
     )
 
     def cleanup(self) -> RetirementResult:
-        set_background_owner_checker(None)
-        set_background_owner_refresh_requester(None)
-        set_background_index_search_requester(None)
-        set_background_owner_bytes_recorder(None)
-        set_background_owner_done_notifier(None)
-        set_search_progress_notifier(None)
-        _reset_search_progress_coalescing()
+        clear_background_callbacks()
         return clear_memory_indexes()
 
     def __enter__(self) -> FileIndexTestScope:
@@ -943,9 +940,37 @@ class FileIndexTestScope:
         return False
 
 
-def set_background_owner_checker(checker: Callable[[str], bool] | None) -> None:
-    global _BACKGROUND_OWNER_CHECKER
-    _BACKGROUND_OWNER_CHECKER = checker
+def set_build_authority_checker(checker: Callable[[str], bool] | None) -> None:
+    global _BUILD_AUTHORITY_CHECKER
+    _BUILD_AUTHORITY_CHECKER = checker
+
+
+def set_background_callback_owner(owner: object | None) -> None:
+    """Record the app that owns the process-global callback bundle."""
+    global _BACKGROUND_CALLBACK_OWNER
+    _BACKGROUND_CALLBACK_OWNER = owner
+
+
+def clear_background_callbacks(owner: object | None = None) -> bool:
+    """Clear callbacks only when they still belong to ``owner``.
+
+    File-index callbacks are process-global because the index module is also used by the
+    standalone indexer. An old app must not tear down callbacks already installed by a newer app
+    in the same test process or during an in-process restart.
+    """
+    global _BACKGROUND_CALLBACK_OWNER
+    if owner is not None and _BACKGROUND_CALLBACK_OWNER is not owner:
+        return False
+    set_build_authority_checker(None)
+    set_background_refresh_requester(None)
+    set_background_work_submitter(None)
+    set_background_index_search_requester(None)
+    set_background_bytes_recorder(None)
+    set_background_done_notifier(None)
+    set_search_progress_notifier(None)
+    _BACKGROUND_CALLBACK_OWNER = None
+    _reset_search_progress_coalescing()
+    return True
 
 
 def set_bfs_full_build_runner(runner: Callable[..., bool] | None) -> None:
@@ -960,9 +985,14 @@ def set_bfs_full_build_runner(runner: Callable[..., bool] | None) -> None:
     _BFS_FULL_BUILD_RUNNER = runner
 
 
-def set_background_owner_refresh_requester(requester: Callable[[str, dict[str, Any]], dict[str, Any]] | None) -> None:
-    global _BACKGROUND_OWNER_REFRESH_REQUESTER
-    _BACKGROUND_OWNER_REFRESH_REQUESTER = requester
+def set_background_refresh_requester(requester: Callable[[str, dict[str, Any]], dict[str, Any]] | None) -> None:
+    global _BACKGROUND_REFRESH_REQUESTER
+    _BACKGROUND_REFRESH_REQUESTER = requester
+
+
+def set_background_work_submitter(submitter: Callable[[str, Callable[[], None]], dict[str, bool]] | None) -> None:
+    global _BACKGROUND_WORK_SUBMITTER
+    _BACKGROUND_WORK_SUBMITTER = submitter
 
 
 def set_background_index_search_requester(requester: Callable[[dict[str, Any]], dict[str, Any]] | None) -> None:
@@ -1044,14 +1074,14 @@ def _current_root_identity(root: Path) -> tuple[int, int] | None:
             os.close(descriptor)
 
 
-def set_background_owner_bytes_recorder(recorder: Callable[[int], None] | None) -> None:
-    global _BACKGROUND_OWNER_BYTES_RECORDER
-    _BACKGROUND_OWNER_BYTES_RECORDER = recorder
+def set_background_bytes_recorder(recorder: Callable[[int], None] | None) -> None:
+    global _BACKGROUND_BYTES_RECORDER
+    _BACKGROUND_BYTES_RECORDER = recorder
 
 
-def set_background_owner_done_notifier(notifier: Callable[[str, dict[str, Any]], None] | None) -> None:
-    global _BACKGROUND_OWNER_DONE_NOTIFIER
-    _BACKGROUND_OWNER_DONE_NOTIFIER = notifier
+def set_background_done_notifier(notifier: Callable[[str, dict[str, Any]], None] | None) -> None:
+    global _BACKGROUND_DONE_NOTIFIER
+    _BACKGROUND_DONE_NOTIFIER = notifier
 
 
 def set_search_progress_notifier(notifier: Callable[[dict[str, Any]], None] | None) -> None:
@@ -1172,19 +1202,19 @@ def _reset_search_progress_coalescing() -> None:
             _SEARCH_PROGRESS_IDLE.wait()
 
 
-def background_owner_can_build() -> bool:
-    if _BACKGROUND_OWNER_CHECKER is None:
+def build_authorized() -> bool:
+    if _BUILD_AUTHORITY_CHECKER is None:
         return True
-    return bool(_BACKGROUND_OWNER_CHECKER(SEARCH_INDEX_ROLE))
+    return bool(_BUILD_AUTHORITY_CHECKER(SEARCH_INDEX_ROLE))
 
 
-def request_background_owner_refresh(payload: dict[str, Any]) -> dict[str, Any]:
-    if _BACKGROUND_OWNER_REFRESH_REQUESTER is None:
-        # No owner is wired at all, so nothing accepted this refresh. Callers used
-        # to read the falsy `fallback` here as "someone else is refreshing".
+def request_background_refresh(payload: dict[str, Any]) -> dict[str, Any]:
+    if _BACKGROUND_REFRESH_REQUESTER is None:
+        # No refresh requester is wired at all, so the persistent index service accepted nothing.
+        # Callers must not infer an in-flight refresh from a missing requester.
         record_accepted_refresh(str(payload.get("root") or ""), False)
-        return {"ok": False, "accepted": False, "fallback": False, "error": "no background owner refresh requester"}
-    result = _BACKGROUND_OWNER_REFRESH_REQUESTER(SEARCH_INDEX_ROLE, payload)
+        return {"ok": False, "accepted": False, "fallback": False, "error": "no background refresh requester"}
+    result = _BACKGROUND_REFRESH_REQUESTER(SEARCH_INDEX_ROLE, payload)
     record_accepted_refresh(str(payload.get("root") or ""), bool(result.get("accepted")))
     return result
 
@@ -1238,14 +1268,9 @@ def promote_frontier(
 
 
 def _dispatch_user_visible_promotion(payload: dict[str, Any]) -> None:
-    """Send one non-blocking user-visible promotion to the elected owner's indexer.
+    """Run one user-visible promotion from the local scheduler worker."""
 
-    Runs on a short-lived daemon thread so a Quick Open query never waits on the RPC. This is an
-    independent unit of work (a supervisor boundary per the error-handling policy): a transport
-    failure is recorded and dropped, never allowed to kill the query that scheduled it. The
-    breadth-first crawl still reaches the directory on its own cadence if the promotion is lost.
-    """
-    requester = _BACKGROUND_OWNER_REFRESH_REQUESTER
+    requester = _BACKGROUND_REFRESH_REQUESTER
     if requester is None:
         return
     try:
@@ -1258,12 +1283,12 @@ def request_user_visible_promotion(root: str, directory: str = "") -> bool:
     """Fire-and-forget: ask the indexer to promote a root's frontier to user-visible-demand.
 
     Item 5: a Quick Open query for a not-yet-fully-covered scope promotes that root's frontier
-    priority. It must NOT block the query, wait behind ``batchd``'s single interactive worker, or
-    launch a second crawl -- so the request is dispatched on a daemon thread and its result is
-    ignored, and repeated queries for the same root within a short window coalesce into one
-    dispatch. Returns whether a dispatch was scheduled (False when debounced or no owner is wired).
+    priority. The application-owned scheduler submitter enqueues the operation, so the query never
+    waits behind ``batchd``'s single interactive worker, performs the RPC itself, or launches a
+    second dispatch thread. Repeated queries for the same root within a short window coalesce into
+    one scheduler submission. Returns whether the operation was accepted for background dispatch.
     """
-    if _BACKGROUND_OWNER_REFRESH_REQUESTER is None:
+    if _BACKGROUND_REFRESH_REQUESTER is None or _BACKGROUND_WORK_SUBMITTER is None:
         return False
     key = str(root)
     expected_root_identity = _current_root_identity(Path(key))
@@ -1283,23 +1308,25 @@ def request_user_visible_promotion(root: str, directory: str = "") -> bool:
     }
     if directory:
         payload["directory"] = str(directory)
-    threading.Thread(
-        target=_dispatch_user_visible_promotion,
-        args=(payload,),
-        name="qopen-promote",
-        daemon=True,
-    ).start()
-    return True
+    try:
+        result = _BACKGROUND_WORK_SUBMITTER(
+            f"{SEARCH_INDEX_ROLE}:user-visible-promotion:{key}",
+            lambda: _dispatch_user_visible_promotion(payload),
+        )
+    except Exception:
+        LOGGER.debug("user-visible frontier promotion dispatch failed", exc_info=True)
+        return False
+    return bool(result.get("queued")) if isinstance(result, dict) else False
 
 
 def record_search_index_bytes_written(byte_count: int) -> None:
-    if _BACKGROUND_OWNER_BYTES_RECORDER is not None:
-        _BACKGROUND_OWNER_BYTES_RECORDER(byte_count)
+    if _BACKGROUND_BYTES_RECORDER is not None:
+        _BACKGROUND_BYTES_RECORDER(byte_count)
 
 
-def notify_background_owner_done(payload: dict[str, Any]) -> None:
-    if _BACKGROUND_OWNER_DONE_NOTIFIER is not None:
-        _BACKGROUND_OWNER_DONE_NOTIFIER(SEARCH_INDEX_ROLE, payload)
+def notify_background_done(payload: dict[str, Any]) -> None:
+    if _BACKGROUND_DONE_NOTIFIER is not None:
+        _BACKGROUND_DONE_NOTIFIER(SEARCH_INDEX_ROLE, payload)
 
 
 def _index_disk_path(root: Path) -> Path:
@@ -1362,7 +1389,7 @@ def _build_lock_path(root: Path) -> Path:
 
 def _producer_heartbeat_path(root: Path) -> Path:
     # M11: the producer's live custody claim for one root. Written by the single
-    # writer only, read by followers with a file read instead of an RPC.
+    # writer only, read by readers with a file read instead of an RPC.
     digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
     return INDEX_DIR / f"{digest}.producer.json"
 
@@ -1562,7 +1589,7 @@ def _root_index_is_tombstoned(ri: RootIndex) -> bool:
     The live serving path (`search_index`), own-index freshness, and registry-root discovery all trust
     an in-memory ``RootIndex``. Its validity must be judged by the same rule the disk read path uses, or
     a build that published AFTER a newer cross-process unindex marker keeps ``ready=True`` and serves
-    deleted rows from RAM. This synthesizes the tombstone-relevant metadata of the owner's published
+    deleted rows from RAM. This synthesizes the tombstone-relevant metadata of the indexer's published
     snapshot (the frozen identity it was published with plus its ``built_at``) and routes it through the
     ONE `_snapshot_is_tombstoned` owner -- no second time comparison: absent marker is valid, a malformed
     marker is invalid, a real identity is valid only when the frozen identity matches, and a legacy
@@ -1620,7 +1647,7 @@ def _root_index_generation_matches(ri: RootIndex) -> bool:
 def _evict_tombstoned_root_index(ri: RootIndex) -> bool:
     """Clear a ready in-memory snapshot the current durable tombstone invalidates; report the eviction.
 
-    Called before serving/freshness/discovery decisions and by ``ensure_index``. When the owner's frozen
+    Called before serving/freshness/discovery decisions and by ``ensure_index``. When the indexer's frozen
     published identity no longer matches the live marker (a newer unindex landed after this build froze
     its identity), its rows must not be served. P0-1: the verdict AND the field clear happen under ONE
     continuous ``ri.lock`` acquisition (the small tombstone-file read is done while the lock is held), so a
@@ -1720,7 +1747,7 @@ def touch_producer_heartbeat(root: Path, *, force: bool = False) -> None:
     most every PRODUCER_HEARTBEAT_INTERVAL_SECONDS per root, which is what lets a
     reader tell "idle producer still watching" from "producer gone".
     """
-    if not background_owner_can_build():
+    if not build_authorized():
         return
     key = str(root)
     now = time.monotonic()
@@ -1981,7 +2008,7 @@ def _sqlite_index_connection(root: Path) -> Iterator[sqlite3.Connection]:
 # change journal + opaque delta cursor. `indexd` is the SOLE writer/traverser;
 # HTTP processes are authenticated SQLite readers only. The journal records every
 # committed upsert/delete with a monotonic publication revision IN THE SAME
-# transaction as the entries+coverage write, so a follower can read the bounded
+# transaction as the entries+coverage write, so a reader can read the bounded
 # committed deltas since a cursor without ever traversing the tree.
 # --------------------------------------------------------------------------
 JOURNAL_OP_UPSERT = "upsert"
@@ -2214,7 +2241,7 @@ def _ensure_sqlite_schema(conn: sqlite3.Connection) -> None:
     # Streaming Quick Open (step 1): the bounded, monotonic-revision change journal. Added COMPATIBLY
     # to the v5 store (a `CREATE TABLE IF NOT EXISTS`, not a version bump) so an existing v5 database
     # keeps its rows and simply gains the table on the next open. `indexd` is the sole writer; a
-    # follower reads committed deltas since a cursor and never traverses. `revision` is monotonic and
+    # reader reads committed deltas since a cursor and never traverses. `revision` is monotonic and
     # unique per committed change; `generation`/`tombstone_identity` carry the same fence the entries
     # rows carry so a delta read can never serve a superseded/deleted generation.
     conn.execute(
@@ -2460,7 +2487,7 @@ def _apply_sqlite_delta(conn: sqlite3.Connection, ri: RootIndex) -> None:
     """Apply one coalesced set of path/subtree mutations without table rewrite.
 
     Step 2: every committed upsert/delete is also recorded in the change journal, in the SAME
-    transaction the caller (`_persist`) commits, so a follower streaming deltas sees exactly the rows
+    transaction the caller (`_persist`) commits, so a reader streaming deltas sees exactly the rows
     this delta committed. Deletes capture their `name`/`relative_path` BEFORE the row is removed so the
     journal delete can still be matched against a query."""
     journal_records: list[tuple[str, str, str, str, int, int]] = []
@@ -2756,9 +2783,8 @@ def _row_serving_snapshot_metadata(metadata: dict[str, Any]) -> bool:
 class SnapshotFreshness:
     """The one freshness verdict for one root: shape, producer custody, and age.
 
-    Every `index_state`, `index_coverage` and `refreshing_elsewhere` value in the
-    search payloads is derived from this record so the two files cannot grow
-    divergent copies of the same judgement.
+    Every `index_state` and `index_coverage` value in the search payloads is
+    derived from this record so the two files cannot grow divergent copies.
     """
 
     state: str
@@ -2781,10 +2807,6 @@ class SnapshotFreshness:
         return self.producer_state == PRODUCER_RUNNING
 
     @property
-    def refreshing_elsewhere(self) -> bool:
-        """A live producer AND an accepted refresh it has not yet completed."""
-        return bool(self.producer_alive and self.refresh_accepted)
-
     def payload_fields(self) -> dict[str, Any]:
         return {
             "freshness": self.state,
@@ -2793,7 +2815,6 @@ class SnapshotFreshness:
             "snapshot_age_seconds": self.snapshot_age_seconds,
             "stale": self.state in {FRESHNESS_STALE, FRESHNESS_ORPHANED},
             "refresh_requested": self.refresh_accepted,
-            "refreshing_elsewhere": self.refreshing_elsewhere,
         }
 
 
@@ -2918,7 +2939,7 @@ def index_freshness(
     owner is its own producer, so its ready in-memory index needs no disk proof.
     """
     wall_now = time.time() if now is None else float(now)
-    owner_process = background_owner_can_build()
+    local_build_authorized = build_authorized()
     accepted_at = accepted_refresh_at(root)
     # P0-1: an in-memory ready owner is trusted without disk proof ONLY while a newer cross-process
     # unindex has not invalidated it. A build that published after another process wrote a fresh marker
@@ -2927,7 +2948,7 @@ def index_freshness(
     if (
         index is not None
         and index.ready
-        and owner_process
+        and local_build_authorized
         and _root_index_generation_matches(index)
         and not _root_index_is_tombstoned(index)
     ):
@@ -3016,10 +3037,10 @@ def index_freshness(
         producer_state=producer_state,
         vouched_age_seconds=vouched_age,
         shape_matches=shape_matches,
-        # An owner's refresh runs in this process; only a follower's accepted
-        # request is evidence that another process is refreshing this root.
+        # The persistent index service is the producer. Only a reader's accepted
+        # request to that service is evidence that a refresh is in flight.
         refresh_accepted=bool(
-            not owner_process
+            not local_build_authorized
             and accepted_at
             and wall_now - accepted_at <= REFRESH_INFLIGHT_MAX_SECONDS
             and built_at < accepted_at
@@ -3080,7 +3101,7 @@ def _read_sqlite_index(
     *,
     expected_root_identity: tuple[int, int] | None = None,
 ) -> tuple[sqlite3.Connection, dict[str, Any]] | None:
-    """The tombstone-honoring read-only opener shared by follower search/recent and freshness reads."""
+    """The tombstone-honoring read-only opener shared by reader search/recent and freshness reads."""
     return _open_sqlite_snapshot(
         root,
         skip_dirs,
@@ -3136,7 +3157,7 @@ def search_disk_index(
     expected_root_identity: tuple[int, int] | None = None,
     include_metadata: bool = True,
 ) -> tuple[list[dict[str, Any]], bool] | None:
-    """Search a persisted index without making a follower own/build or deserialize it wholesale."""
+    """Search a persisted index without making a reader own/build or deserialize it wholesale."""
     opened = _read_sqlite_index(
         root,
         skip_dirs,
@@ -3416,7 +3437,7 @@ def recent_disk_entries(
     *,
     expected_root_identity: tuple[int, int] | None = None,
 ) -> tuple[list[dict[str, Any]], bool] | None:
-    """Return recent entries from a persisted index without loading all rows into follower memory."""
+    """Return recent entries from a persisted index without loading all rows into reader memory."""
     opened = _read_sqlite_index(
         root,
         skip_dirs,
@@ -3674,7 +3695,7 @@ def mark_path_dirty(
 
 def schedule_refreshes(now: float | None = None) -> int:
     """Start at most one refresh per dirty/stale root; queries never call this."""
-    if not background_owner_can_build():
+    if not build_authorized():
         return 0
     wall_now = time.time() if now is None else float(now)
     monotonic_now = time.monotonic()
@@ -3682,7 +3703,7 @@ def schedule_refreshes(now: float | None = None) -> int:
         indexes = list(_REGISTRY.values())
     started = 0
     for ri in indexes:
-        # M11: the owner's cheap custody claim. This is the tick that lets a
+        # M11: the indexer's cheap custody claim. This is the tick that lets a
         # reader distinguish "idle producer still watching this root" from
         # "producer gone", and it rebuilds nothing.
         touch_producer_heartbeat(ri.root)
@@ -3985,9 +4006,9 @@ def _run_bfs_full_build(
     """Full build for a configured root through the breadth-first, directory-at-a-time frontier.
 
     Replaces the DFS `_walk_root_with_metrics` full walk. The crawl publishes each directory's rows
-    to the per-root SQLite as it lists them, so a follower search sees layer 1 before deep
+    to the per-root SQLite as it lists them, so a reader search sees layer 1 before deep
     descendants finish. After the crawl (or a compatible-snapshot handoff) this seeds the in-memory
-    index from the same committed SQLite so the owner's ready read path and the follower's disk read
+    index from the same committed SQLite so the indexer's ready read path and the reader's disk read
     path serve identical rows.
     """
     def current() -> bool:
@@ -4044,7 +4065,7 @@ def _run_bfs_full_build(
                 root_fd=root_descriptor,
                 # Protocol #2/#3: the crawl stamps THIS frozen identity into every published directory's
                 # metadata and, when it differs from the persisted snapshot's stamp, establishes a clean
-                # generation in the claim transaction before publishing -- so a follower reading a partial
+                # generation in the claim transaction before publishing -- so a reader reading a partial
                 # mid-crawl sees the correct stamp and no deleted-store rows survive under it.
                 tombstone_identity=captured_tombstone_identity,
             )
@@ -4071,7 +4092,7 @@ def _run_bfs_full_build(
         cache_bytes = _sqlite_storage_size(ri.root)
         # Persist eligibility for a v5 typed partial snapshot (item 6). A breadth-first crawl that hits
         # the total-row cap publishes a TYPED partial store: `truncated=1`, `full_coverage=0`, every
-        # published row still searchable by both the owner and a follower, and the durable frontier
+        # published row still searchable by both the owner and a reader, and the durable frontier
         # recording exactly which directories remain. That is durable, valid coverage -- deleting it at
         # the cap (the old `not truncated` clause) blanked a large root's index on every build and left
         # it permanently "Indexing...". So truncation NO LONGER forces a drop. The INDEPENDENT budget
@@ -4134,7 +4155,7 @@ def _run_bfs_full_build(
             captured_tombstone_identity=captured_tombstone_identity,
             captured_root_identity=captured_root_identity,
         )
-        notify_background_owner_done({
+        notify_background_done({
             "root": str(ri.root),
             "entries": len(entries),
             "truncated": truncated,
@@ -4153,7 +4174,7 @@ def _run_bfs_full_build(
             with ri.lock:
                 if generation is None or ri.active_generation == generation:
                     ri.last_error = str(exc)
-            notify_background_owner_done({"root": str(ri.root), "state": "error", "generation": generation or ri.active_generation, "error": str(exc)})
+            notify_background_done({"root": str(ri.root), "state": "error", "generation": generation or ri.active_generation, "error": str(exc)})
     finally:
         with ri.lock:
             if generation is None or ri.active_generation == generation:
@@ -4327,7 +4348,7 @@ def _run_build(
             captured_tombstone_identity=captured_tombstone_identity,
             captured_root_identity=captured_root_identity,
         )
-        notify_background_owner_done({
+        notify_background_done({
             "root": str(ri.root),
             "entries": len(ri.entries),
             "truncated": ri.truncated,
@@ -4347,7 +4368,7 @@ def _run_build(
                 if generation is None or ri.active_generation == generation:
                     ri.building = False
                     ri.last_error = str(exc)
-            notify_background_owner_done({"root": str(ri.root), "state": "error", "generation": generation or ri.active_generation, "error": str(exc)})
+            notify_background_done({"root": str(ri.root), "state": "error", "generation": generation or ri.active_generation, "error": str(exc)})
     finally:
         with ri.lock:
             # Backstop: an off-list exception (e.g. a sqlite error from _persist, or a
@@ -4433,15 +4454,15 @@ def _start_build(
 ) -> bool:
     """Assign one build worker to ``ri``. Returns whether a worker was actually installed.
 
-    P0-3: ``retiring`` is a TERMINAL state. A retired object, a demoted background owner, or an object
+    P0-3: ``retiring`` is a TERMINAL state. A retired object, an inactive local scheduler, or an object
     that is no longer the registry's owner for its key must never start work -- checked BEFORE the
     expensive generation I/O and AGAIN under the assignment lock before a worker is installed, since a
     clear/unindex can land during the SQLite read. Returning ``False`` (rather than reviving a retired
     store) is what keeps a cleared object from running the runner once and reporting itself ready."""
     key = str(ri.root)
-    # Terminal-state, background-ownership, and registry-ownership gate BEFORE the expensive generation
-    # read. A demoted background owner must not start work even on an object still in the registry.
-    if not background_owner_can_build():
+    # Terminal-state, local-scheduler, and registry-ownership gate BEFORE the expensive generation
+    # read. An inactive local scheduler must not start work even on an object still in the registry.
+    if not build_authorized():
         return False
     if not _registry_owner_is(ri):
         return False
@@ -4513,19 +4534,19 @@ def _start_build(
         ri.assignment = assignment
         ri.thread = thread
     # Final ownership re-check AFTER the generation I/O: a clear/unindex that popped this object from
-    # the registry, or a demotion of the background owner, between the generation read and here must
+    # the registry, or a scheduler stop, between the generation read and here must
     # not leave a worker running. P0-2: DO NOT pre-clear the slot -- the still-installed assignment is
     # what makes the MATCHING finalizer recognize this worker (`is_my_slot`) and become the sole owner
     # that clears thread/assignment/building, closes any retiring fd, removes `_RETIRING`, and completes
     # the frozen lease. Pre-clearing `assignment` here made the finalizer read `is_my_slot` False and
     # skip the retiring fd close (a leaked fd + a stuck `(11, True)` retiree).
-    if not (background_owner_can_build() and _registry_owner_is(ri)):
+    if not (build_authorized() and _registry_owner_is(ri)):
         _finalize_worker_exit(ri, assignment)
         return False
     # A browser that already knows this root is building must not discover the
     # transition through its 1.5-second repair poll. The completion callback
     # publishes the matching ready state after the new index is readable.
-    notify_background_owner_done({"root": str(ri.root), "state": "building", "generation": generation})
+    notify_background_done({"root": str(ri.root), "state": "building", "generation": generation})
     # Claim custody before the first persist, so a reader of an older snapshot
     # sees a live producer as soon as this build starts rather than after it ends.
     touch_producer_heartbeat(ri.root, force=True)
@@ -4615,7 +4636,7 @@ def ensure_index(
             ri.skip_dirs = set(skip_dirs)
             ri.exclude_path = exclude_path
             ri.exclude_signature = exclude_signature
-            if background_owner_can_build() and ri.persist_enabled:
+            if build_authorized() and ri.persist_enabled:
                 disk = _load_disk(
                     root,
                     skip_dirs,
@@ -4642,8 +4663,9 @@ def ensure_index(
                     # P0-1: seed the in-memory published identity from the persisted snapshot's stamp so
                     # a later marker change evicts this owner by the same rule it would be rejected on disk.
                     ri.published_tombstone_identity = _persisted_tombstone_identity(root)
-                    ri.ready = True
-            elif not background_owner_can_build() and ri.persist_enabled:
+                    persisted_metadata = _raw_snapshot_metadata(root, skip_dirs, exclude_signature, expected_root_identity=requested_root_identity)
+                    ri.ready = persisted_metadata is not None and index_freshness(None, root, skip_dirs, exclude_signature, metadata=persisted_metadata).state == FRESHNESS_FRESH
+            elif not build_authorized() and ri.persist_enabled:
                 metadata = _load_disk_metadata(
                     root,
                     skip_dirs,
@@ -4661,7 +4683,7 @@ def ensure_index(
                     ri.too_large = ri.truncated
                     ri.disk_metadata_ready = True
                     ri.signature = expected_signature
-        elif not background_owner_can_build() and not ri.ready and ri.persist_enabled:
+        elif not build_authorized() and not ri.ready and ri.persist_enabled:
             metadata = _load_disk_metadata(
                 root,
                 skip_dirs,
@@ -4711,7 +4733,7 @@ def ensure_index(
         ri.skip_dirs = set(skip_dirs)
         ri.exclude_path = exclude_path
         ri.exclude_signature = exclude_signature
-    if background_owner_can_build() and not ri.persist_enabled:
+    if build_authorized() and not ri.persist_enabled:
         _drop_persisted_index(root)
         with ri.lock:
             ri.persisted = False
@@ -4724,7 +4746,7 @@ def ensure_index(
             ri.signature = ""
     # P0-1: if another process unindexed this root after our copy was built, drop the stale in-memory
     # index so we stop serving deleted-file results. This routes through the SAME `_snapshot_is_tombstoned`
-    # verdict as disk (`_evict_tombstoned_root_index`) -- comparing the owner's FROZEN published identity
+    # verdict as disk (`_evict_tombstoned_root_index`) -- comparing the indexer's FROZEN published identity
     # against the current marker -- so a build that published after the marker's time but stamped the OLD
     # identity is evicted here even though its `built_at` is newer than the deletion time. Eviction clears
     # readiness, so the scheduling below starts a fresh clean generation that freezes the CURRENT identity.
@@ -4737,7 +4759,7 @@ def ensure_index(
     # generation of that frontier rather than re-listing the root.
     with ri.lock:
         current_root_identity = ri.root_fd_identity
-    if background_owner_can_build() and (
+    if build_authorized() and (
         not ri.ready
         or _resumable_frontier_generation(
             root,

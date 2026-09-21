@@ -308,6 +308,7 @@ async function runLayoutAsyncSuite() {
       sha: 'a'.repeat(40), short: 'a'.repeat(9), authored_at: 1786931640,
       files: 3, added: 42, removed: 11, binary_files: 0,
       author: 'Keiven Chang', subject: 'Record release evidence #123', parents: ['b'.repeat(40)],
+      decorations: ['HEAD -> yo7110', 'tag: v0.8.8', 'origin/main'],
     });
     assert.deepStrictEqual([...row.children].map(child => child.className), [
       'git-diff-commit-caret ui-disclosure-triangle',
@@ -321,12 +322,14 @@ async function runLayoutAsyncSuite() {
     assert.equal(row.getAttribute('aria-expanded'), 'false');
     assert.equal(row.children[1].textContent, 'aaaaaaaaa', 'SHA is always rendered');
     assert.equal(row.children[1].href, `https://github.com/owner/project/commit/${'a'.repeat(40)}`);
+    assert.deepStrictEqual([...row.querySelectorAll('.git-diff-commit-decoration')].map(node => node.textContent), ['HEAD -> yo7110', 'tag: v0.8.8', 'origin/main']);
     assert.equal(row.querySelector('.git-diff-change-link').href, 'https://github.com/owner/project/pull/123');
     assert.deepStrictEqual([
       row.querySelector('.git-diff-commit-added').textContent,
       row.querySelector('.git-diff-commit-removed').textContent,
     ], ['+42', '-11']);
     assert.ok(row.getAttribute('aria-label').includes('Keiven Chang') && row.getAttribute('aria-label').includes('+42') && row.getAttribute('aria-label').includes('Record release evidence'), 'the accessible name retains every visible summary field');
+    assert.ok(row.getAttribute('aria-label').includes('HEAD -> yo7110') && row.getAttribute('aria-label').includes('tag: v0.8.8'), 'the accessible name retains Git decorations');
     const gitlabItem = api.gitDiffItemFor('/gitlab');
     api.setGitDiffTabStateForTest(gitlabItem, {hostedRemote: {provider: 'gitlab', base_url: 'https://gitlab.example.com/group/project'}});
     const gitlabRow = api.gitDiffCommitRowForTest(gitlabItem, {sha: 'b'.repeat(40), short: 'b'.repeat(9), subject: 'Merge #9'});
@@ -353,6 +356,8 @@ async function runLayoutAsyncSuite() {
     assert.match(css, /\.git-diff-commit-row\s*\{[\s\S]*white-space:\s*nowrap/);
     assert.match(css, /\.git-diff-commit-added\s*\{[\s\S]*color:\s*var\(--git-staged\)/);
     assert.match(css, /\.git-diff-commit-removed\s*\{[\s\S]*color:\s*var\(--git-deleted\)/);
+    assert.match(css, /\.git-diff-commit-decoration\s*\{[\s\S]*font:\s*var\(--ui-font-size-2xs\)/);
+    assert.match(css, /\.git-diff-dirty-entry\s*\{[\s\S]*overflow-wrap:\s*anywhere/);
     assert.match(css, /body\.theme-light \.git-diff-panel\s*\{[\s\S]*--git-diff-row-separator:\s*#[0-9a-f]+;[\s\S]*--git-diff-secondary-text:\s*#[0-9a-f]+/i);
     assert.match(css, /\.git-diff-commit\s*\{[\s\S]*box-shadow:\s*inset 0 -1px var\(--git-diff-row-separator\)/);
     assert.match(css, /\.git-diff-commit-detail\s*\{[\s\S]*margin-inline-start:/, 'commit detail indentation follows inline direction in RTL locales');
@@ -377,6 +382,34 @@ async function runLayoutAsyncSuite() {
     assert.equal(event.defaultPrevented, true, 'the shared tree keyboard owner consumes ArrowDown');
     assert.deepStrictEqual(rows.map(row => row.tabIndex), [-1, 0], 'ArrowDown moves the roving tab stop');
     assert.equal(rows[1].focused, true, 'ArrowDown moves DOM focus to the next commit');
+  });
+
+  test('Git history panel shows branch and dirty paths immediately above commits', () => {
+    const api = loadYolomux('', ['1']);
+    const item = api.gitDiffItemFor('/repo');
+    const sha = 'a'.repeat(40);
+    api.setGitDiffTabStateForTest(item, {
+      path: '/repo', repo: '/repo', relativePath: '', branch: 'yo7110', head: sha,
+      dirtyCount: 2,
+      dirtyEntries: [{status: ' M', path: 'README.md'}, {status: '??', path: 'new file.txt'}],
+      commits: [{sha, short: 'aaaaaaaaa', subject: 'top commit'}], visibleCommitCount: 1,
+      loaded: true, loadAttempted: true,
+    });
+    const panel = api.createGitDiffPanelForTest(item);
+    api.setPanelNodeForTest(item, panel);
+    api.renderGitDiffPanelForTest(item, {panel});
+    const body = panel.querySelector('.git-diff-panel-body');
+    const summary = body.querySelector('.git-diff-dirty-summary');
+    assert.equal(panel.querySelector('.git-diff-meta').textContent.includes('Branch: yo7110'), true);
+    assert.equal(summary.querySelector('.git-diff-dirty-count').textContent, '2 dirty');
+    assert.deepStrictEqual([...summary.querySelectorAll('.git-diff-dirty-entry')].map(row => [...row.children].map(child => child.textContent).join('')), ['[ M]README.md', '[??]new file.txt']);
+    assert.equal(body.children[body.children.length - 2], summary, 'dirty summary is immediately before the commit list');
+    assert.equal(body.lastElementChild.className, 'git-diff-commits');
+
+    api.setGitDiffTabStateForTest(item, {dirtyCount: 0, dirtyEntries: []});
+    api.renderGitDiffPanelForTest(item, {panel});
+    assert.equal(panel.querySelector('.git-diff-dirty-count').textContent, 'clean');
+    assert.equal(panel.querySelectorAll('.git-diff-dirty-entry').length, 0);
   });
 
   await testAsync('Git history refresh prunes old SHA caches and records a reload cursor', async () => {
@@ -3003,45 +3036,6 @@ async function runLayoutAsyncSuite() {
     }
   });
 
-  await testAsync('background-owner request record rejects stale HTTP completions and lets pushes win', async () => {
-    const pending = [];
-    const api = loadYolomux();
-    api.setFetchForTest(url => {
-      assert.equal(String(url), '/api/background/status');
-      const request = deferredFetch();
-      pending.push(request);
-      return request.promise;
-    });
-
-    const first = api.refreshBackgroundOwnerStatusForTest({force: true, render: false});
-    const second = api.refreshBackgroundOwnerStatusForTest({force: true, render: false});
-    assert.equal(pending.length, 1, 'a forced refresh joins the in-flight snapshot instead of starting a replacement generation');
-    pending[0].resolve(jsonResponse({marker: 'new-http'}));
-    await first;
-    assert.equal(api.backgroundOwnerStatusStateForTest().payload.marker, 'new-http', 'older HTTP completion cannot replace the newer generation');
-    assert.equal(api.backgroundOwnerStatusStateForTest().request, null, 'only the current request clears the record handle');
-
-    const third = api.refreshBackgroundOwnerStatusForTest({force: true, render: false});
-    api.applyBackgroundOwnerStatusPayloadForTest({marker: 'push'}, {render: false});
-    pending[1].resolve(jsonResponse({marker: 'stale-after-push'}));
-    await third;
-    assert.equal(api.backgroundOwnerStatusStateForTest().payload.marker, 'push', 'an SSE payload invalidates the older HTTP generation');
-
-    const fourth = api.refreshBackgroundOwnerStatusForTest({force: true, render: false});
-    pending[2].reject(new Error('owner offline'));
-    await fourth;
-    assert.ok(api.backgroundOwnerStatusStateForTest().error, 'the current request records its failure');
-    assert.equal(api.backgroundOwnerStatusStateForTest().request, null, 'current failure releases the request handle');
-  });
-
-  await testAsync('background-owner refresh keeps one Promise return contract on fresh fast paths', async () => {
-    const api = loadYolomux();
-    api.setBackgroundOwnerStatusPayloadForTest({marker: 'fresh'});
-    const refresh = api.refreshBackgroundOwnerStatusForTest({preferFresh: true, render: false});
-    assert.equal(typeof refresh?.then, 'function', 'ready-channel repair may always attach catch to a background-owner refresh');
-    assert.equal(await refresh, true, 'the fresh fast path preserves its fulfilled result');
-  });
-
   test('panel-body reconciliation restores named anchors before one afterReplace hook', () => {
     const api = loadYolomux();
     const order = [];
@@ -3081,23 +3075,22 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.fileIndexStatusFromPayloadForTest({state: 'error', error: 'walk failed'}), 'error');
   });
 
-  // M11: the live 7771 incident. A follower served a persisted snapshot whose `indexd` producer was
-  // dead; `ready_elsewhere` correctly went false, and the badge silently degraded to "building" -
-  // honest about readiness, silent about staleness. One derivation now answers both questions.
+  // M11: the live 7771 incident. A persisted snapshot whose `indexd` producer was dead silently
+  // degraded to "building" - honest about readiness, silent about staleness. One derivation now
+  // answers both questions.
   test('a snapshot whose producer is dead reads as stale, never as building or ready', () => {
     const api = loadYolomux();
     api.setFileExplorerIndexedDirsForTest(['/repo']);
     const orphaned = {
-      state: 'follower',
+      state: 'stale',
       ready: false,
-      ready_elsewhere: false,
       freshness: 'orphaned',
       freshness_reason: 'producer_not_running',
       producer_state: 'not_running',
       snapshot_age_seconds: 10800,
       stale: true,
       refresh_requested: false,
-      refreshing_elsewhere: false,
+      refreshing: false,
     };
     assert.equal(api.fileIndexStatusFromPayloadForTest(orphaned), 'stale', 'a dead producer is stale, not building');
     const derived = api.fileIndexFreshnessFromPayloadForTest(orphaned);
@@ -3115,16 +3108,15 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.fileExplorerIndexBadgeTitleForTest('/repo'), 'Index snapshot is out of date — newer files may be missing', 'the badge title explains the consequence');
 
     const vouched = {
-      state: 'follower',
-      ready: false,
-      ready_elsewhere: true,
+      state: 'ready',
+      ready: true,
       freshness: 'fresh',
       freshness_reason: '',
       producer_state: 'running',
       snapshot_age_seconds: 12,
       stale: false,
       refresh_requested: false,
-      refreshing_elsewhere: false,
+      refreshing: false,
     };
     assert.equal(api.fileIndexStatusFromPayloadForTest(vouched), 'ready', 'a vouched snapshot is still plainly ready');
     assert.equal(api.fileIndexFreshnessMessageForTest(api.fileIndexFreshnessFromPayloadForTest(vouched)), '', 'a vouched snapshot says nothing at all');
@@ -3151,7 +3143,7 @@ async function runLayoutAsyncSuite() {
         relative_path: 'notes/t5t/2026.md',
         kind: 'file',
       }],
-      index_state: 'follower-stale',
+      index_state: 'stale',
       index_coverage: 'unverified',
       freshness: 'orphaned',
       freshness_reason: 'producer_not_running',
@@ -3159,7 +3151,7 @@ async function runLayoutAsyncSuite() {
       snapshot_age_seconds: 10800,
       stale: true,
       refresh_requested: false,
-      refreshing_elsewhere: false,
+      refreshing: false,
     }, '/home/test/dynamo');
     assert.equal(stale.indexWarming, false, 'a stale snapshot is a completed answer, not a warming one');
     assert.equal(stale.freshness.stale, true, 'quick open reads the same derivation as the Finder index badge');
@@ -3201,7 +3193,7 @@ async function runLayoutAsyncSuite() {
     const fresh = freshApi.fileQuickOpenSearchPayloadResultForTest({
       root: '/home/test/dynamo',
       files: [{name: '2026.md', path: '/home/test/dynamo/notes/t5t/2026.md', relative_path: 'notes/t5t/2026.md', kind: 'file'}],
-      index_state: 'follower-ready',
+      index_state: 'ready',
       index_coverage: 'full',
       freshness: 'fresh',
       freshness_reason: '',
@@ -3209,7 +3201,7 @@ async function runLayoutAsyncSuite() {
       snapshot_age_seconds: 9,
       stale: false,
       refresh_requested: false,
-      refreshing_elsewhere: false,
+      refreshing: false,
     }, '/home/test/dynamo');
     freshApi.setFileQuickOpenCandidatesForTest(fresh.root, fresh.files);
     freshApi.setFileQuickOpenFreshnessForTest(freshApi.fileQuickOpenWorstFreshnessForTest([fresh.freshness]));
@@ -3229,8 +3221,8 @@ async function runLayoutAsyncSuite() {
     );
 
     // Several roots answer one blended list, so the worst freshness owns the sentence.
-    const unrecorded = {state: 'orphaned', reason: 'producer_epoch_unrecorded', producerState: 'unrecorded', ageSeconds: 90000, stale: true, refreshingElsewhere: false};
-    const behind = {state: 'stale', reason: 'producer_vouch_expired', producerState: 'running', ageSeconds: 600, stale: true, refreshingElsewhere: true};
+    const unrecorded = {state: 'orphaned', reason: 'producer_epoch_unrecorded', producerState: 'unrecorded', ageSeconds: 90000, stale: true, refreshing: false};
+    const behind = {state: 'stale', reason: 'producer_vouch_expired', producerState: 'running', ageSeconds: 600, stale: true, refreshing: true};
     assert.equal(staleApi.fileQuickOpenWorstFreshnessForTest([fresh.freshness, behind, unrecorded]), unrecorded, 'an orphaned root outranks a merely lagging one');
     assert.equal(staleApi.fileQuickOpenWorstFreshnessForTest([fresh.freshness]), null, 'all-vouched roots report no freshness problem');
     assert.equal(
@@ -3578,28 +3570,6 @@ async function runLayoutAsyncSuite() {
     await flushAsyncWork();
     assert.equal(searches.filter(target => target.includes('cursor=')).length, 0, 'a null-cursor root never issues a delta read');
     assert.ok(searches.filter(target => !target.includes('cursor=')).length > snapshotsBefore, 'it repairs from one full snapshot to pick up pre-cursor rows');
-  });
-
-  await testAsync('background-owner takeover revalidates visible indexed roots once', async () => {
-    const api = loadYolomux('', ['1']);
-    const requests = [];
-    api.setFetchForTest(url => {
-      requests.push(String(url));
-      return Promise.resolve(jsonResponse({state: 'ready', generation: 8}));
-    });
-    api.setFileExplorerIndexedDirsForTest(['/repo']);
-    api.installCommandPaletteFixtureForTest();
-    api.setCommandPaletteStateForTest('files', '');
-    assert.equal(api.handleClientPushEventForTest('background_owner_changed', {marker: 'takeover'}, {epoch: 'owner-b', resource: 'background-owner', resource_revision: 2}), true);
-    await flushAsyncWork();
-    assert.deepStrictEqual(requests, ['/api/fs/index-status?root=%2Frepo'], 'a takeover revalidates each visible indexed root exactly once');
-    assert.equal(api.fileExplorerIndexStatusForTest('/repo'), 'ready', 'legacy index lifecycle state remains data instead of being mistaken for a canonical API envelope');
-
-    requests.length = 0;
-    api.setDocumentVisibilityForTest('hidden');
-    assert.equal(api.handleClientPushEventForTest('background_owner_changed', {marker: 'hidden-takeover'}, {epoch: 'owner-b', resource: 'background-owner', resource_revision: 3}), true);
-    await flushAsyncWork();
-    assert.deepStrictEqual(requests, [], 'a hidden Finder does not pay for a takeover revalidation');
   });
 
   await testAsync('auto-approve startup snapshots share one in-flight request', async () => {
@@ -4282,12 +4252,11 @@ async function runLayoutAsyncSuite() {
   test('frontend request and transport records keep retired parallel globals absent', () => {
     const source = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
     for (const name of [
-      'backgroundOwnerStatusPayload', 'backgroundOwnerStatusLoading', 'backgroundOwnerStatusLoaded', 'backgroundOwnerStatusError', 'backgroundOwnerStatusRefreshPromise',
       'activitySummaryPayload', 'activitySummaryRefreshing', 'activitySummaryLastRefreshTs', 'activitySummaryGuard',
       'infoPanelRenderPending', 'infoPanelLastRenderSignature', 'infoPanelLastRenderHtml',
       'clientEventsSource', 'clientEventsConnected', 'clientPushEventQueue', 'clientPushEventFrame', 'reconnectResyncTimer',
     ]) assert.equal(source.includes(name), false, `${name} remains retired`);
-    for (const owner of ['backgroundOwnerStatusState', 'activitySummaryState', 'infoPanelRenderCache', 'clientEventTransportState']) {
+    for (const owner of ['activitySummaryState', 'infoPanelRenderCache', 'clientEventTransportState']) {
       assert.ok(source.includes(`const ${owner} = {`), `${owner} is the one owner`);
     }
   });
@@ -4564,17 +4533,19 @@ async function runLayoutAsyncSuite() {
     assert.equal(stateAfterDelayed.payload.sessions.old, undefined);
   });
 
-  await testAsync('the real rename flow survives a delayed pre-rename metadata response', async () => {
+  await testAsync('the real rename flow issues one forced metadata refresh and accepts later roster pushes', async () => {
     const api = loadYolomuxWithFileExplorerClosed(
       '?sessions=glm-5_3&layout=left&tabs=left:glm-5_3',
       ['glm-5_3'],
     );
     const pending = [];
+    let metadataReads = 0;
     api.setFetchForTest(url => {
       const parsed = new URL(String(url), 'http://localhost');
-      if (parsed.pathname === '/api/session-metadata' && !parsed.searchParams.has('force')) {
+      if (parsed.pathname === '/api/session-metadata') {
+        metadataReads += 1;
         const request = deferredFetch();
-        pending.push(request);
+        pending.push({request, force: parsed.searchParams.get('force') === '1'});
         return request.promise;
       }
       if (parsed.pathname === '/api/rename-session') {
@@ -4587,15 +4558,6 @@ async function runLayoutAsyncSuite() {
       }
       if (parsed.pathname === '/api/ensure-session') {
         return Promise.resolve(jsonResponse({session: '234-glm-5_3', created: false, ok: true}));
-      }
-      if (parsed.pathname === '/api/session-metadata' && parsed.searchParams.get('force') === '1') {
-        return Promise.resolve(jsonResponse({
-          metadata_identity: {epoch: 'rename-server', generation: 4},
-          cache: {pending_identity: {epoch: 'rename-server', generation: 4}},
-          topology_generation: 4,
-          session_order: ['234-glm-5_3'],
-          sessions: {'234-glm-5_3': {panes: [], marker: 'fresh-after-rename'}},
-        }));
       }
       if (parsed.pathname === '/api/auto-approve') {
         return Promise.resolve(jsonResponse({session_order: ['234-glm-5_3'], sessions: {}}));
@@ -4610,19 +4572,44 @@ async function runLayoutAsyncSuite() {
     assert.equal(pending.length, 1, 'the metadata request started before the rename');
     const rename = api.renameTmuxSessionForTest('glm-5_3', '234-glm-5_3');
     await flushAsyncWork();
+    await flushAsyncWork();
     assert.deepStrictEqual(canonical(api.sessionsForTest()), ['234-glm-5_3'], 'the real mutation commits the new roster before reconciliation');
-    pending[0].resolve(jsonResponse({
+    assert.equal(pending.length, 2, 'the rename starts one forced metadata refresh after the older request');
+    assert.equal(pending[1].force, true, 'the rename refresh is explicitly forced');
+    pending[0].request.resolve(jsonResponse({
       topology_generation: 3,
       session_order: ['glm-5_3'],
       sessions: {'glm-5_3': {panes: [], marker: 'stale-before-rename'}},
     }));
     await staleRequest;
     assert.equal(api.transcriptMetadataStateForTest().lastApply.reason, 'superseded_request');
+    pending[1].request.resolve(jsonResponse({
+      metadata_identity: {epoch: 'rename-server', generation: 4},
+      topology_generation: 4,
+      session_order: ['234-glm-5_3'],
+      sessions: {'234-glm-5_3': {panes: [], marker: 'fresh-after-rename'}},
+    }));
     assert.equal(await rename, true, 'the committed rename does not fail on stale reconciliation bytes');
+    assert.equal(metadataReads, 2, 'the rename performs exactly one forced metadata read after the older request');
     assert.deepStrictEqual(
       canonical(api.serialize(api.currentSlots()).panes),
       {left: {tabs: ['234-glm-5_3'], active: '234-glm-5_3'}},
     );
+
+    assert.equal(api.applyTmuxRosterPayloadForTest({
+      server_epoch: 'rename-server',
+      session_order: ['234-glm-5_3'],
+      roster_generation: 4,
+      topology_generation: 4,
+      renames: [{old_session: 'glm-5_3', new_session: '234-glm-5_3'}],
+    }), true, 'a later compact roster event remains accepted after the forced metadata refresh');
+    const fresh = await api.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'rename-server', generation: 4},
+      topology_generation: 4,
+      session_order: ['234-glm-5_3'],
+      sessions: {'234-glm-5_3': {panes: [], marker: 'fresh-after-rename'}},
+    }, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+    assert.equal(fresh, true, 'the later periodic metadata push is accepted');
     assert.equal(api.transcriptMetadataStateForTest().payload.sessions['234-glm-5_3'].marker, 'fresh-after-rename');
     assert.equal(api.transcriptMetadataStateForTest().payload.sessions['glm-5_3'], undefined);
   });
@@ -5246,25 +5233,27 @@ async function runLayoutAsyncSuite() {
 
   function createSessionFixture(sessionMetadataResponse) {
     const api = loadYolomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1', ['1'], 'http:', 'Linux x86_64', 'admin');
+    let metadataRequestCount = 0;
     api.setFetchForTest(url => {
       const parsed = new URL(String(url), 'http://localhost');
       if (parsed.pathname === '/api/create-session-plan') return Promise.resolve(jsonResponse({session: '2', generation: 7, ok: true}));
       if (parsed.pathname === '/api/create-session') return Promise.resolve(jsonResponse({session: '2', sessions: ['1', '2'], agent: 'codex', created: true, ok: true}));
       if (parsed.pathname === '/api/ensure-session') return Promise.resolve(jsonResponse({session: '2', created: false, ok: true}));
-      if (parsed.pathname === '/api/session-metadata') return sessionMetadataResponse(parsed);
+      if (parsed.pathname === '/api/session-metadata') {
+        metadataRequestCount += 1;
+        return sessionMetadataResponse(parsed);
+      }
       return Promise.resolve(jsonResponse({ok: true}));
     });
+    api.metadataRequestCountForTest = () => metadataRequestCount;
     return api;
   }
 
-  await testAsync('a committed session mutation survives a post-commit refresh that never converges', async () => {
-    // The mutation boundary's verdict used to be a discarded boolean: a forced refresh that never
-    // observed the promised build reported exactly the same success as one that did. It must now
-    // report a typed reason -- and it must still never undo a session the user really created,
-    // because the server mutation and the local commit have both already happened.
+  await testAsync('create mutation relies on backend metadata publication instead of polling', async () => {
+    // Create/remove lifecycle changes are published asynchronously by the backend. The client
+    // must not launch a competing forced read whose older response can race that publication.
     const api = createSessionFixture(() => Promise.resolve(jsonResponse(
-      // The post-mutation force is answered by a DIFFERENT server than the one that will build it.
-      metadataPayload(EPOCH_B, 4, {pending: {epoch: EPOCH_A, generation: 99}, sessions: {'1': {panes: []}, '2': {panes: []}}, session_order: ['1', '2']}),
+      metadataPayload(EPOCH_B, 4, {sessions: {'1': {panes: []}, '2': {panes: []}}, session_order: ['1', '2']}),
     )));
 
     await api.createNextSessionForTest('codex');
@@ -5275,41 +5264,61 @@ async function runLayoutAsyncSuite() {
     }, 'a non-converged reconciliation never rolls back the committed session');
     assert.equal(api.tmuxSessionLifecycleRecordForTest('2').phase !== 'retired', true, 'the committed lifecycle transaction is preserved');
     assert.ok(/created 2/.test(api.statusHtmlForTest()), api.statusHtmlForTest());
-    assert.equal(api.metadataConvergenceStatusForTest(), 'forced_settle_epoch_changed', 'the mutation boundary names why its view is not current');
-
-    // The release-blocking signal is a structured, owned diagnostic -- not an unowned console
-    // warning. It carries the machine-readable reason and the identity it was waiting on, and it
-    // is release-blocking through the same jsDebugFailureEvents() path every other client failure
-    // uses.
-    const failures = api.jsDebugFailureEventsForTest('error')
-      .filter(event => event.failure === 'session_metadata_convergence');
-    assert.equal(failures.length, 1, 'exactly one owned diagnostic is recorded for the non-convergence');
-    assert.deepStrictEqual(
-      {type: failures[0].type, reason: failures[0].reason, awaitedGeneration: failures[0].awaitedGeneration},
-      {type: 'client_failure', reason: 'forced_settle_epoch_changed', awaitedGeneration: 99},
-    );
-    assert.equal(api.vmConsoleErrorsForTest().some(entry => /did not converge/.test(entry)), false, 'the verdict no longer goes to console');
-  });
-
-  await testAsync('negative control: a converging post-commit refresh reports no outstanding repair', async () => {
-    // Same mutation, same code path, with the force answered by the server that built it. If this
-    // could not come back clean, the assertion above would be measuring the fixture, not the fix.
-    const api = createSessionFixture(() => Promise.resolve(jsonResponse(
-      metadataPayload(EPOCH_B, 4, {pending: {epoch: EPOCH_B, generation: 4}, sessions: {'1': {panes: []}, '2': {panes: []}}, session_order: ['1', '2']}),
-    )));
-
-    await api.createNextSessionForTest('codex');
-    await flushAsyncWork();
-
-    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {left: {tabs: ['1', '2'], active: '2'}});
-    assert.equal(api.metadataConvergenceStatusForTest(), '', 'a converged reconciliation leaves no repair marker behind');
-    // Negative control for the diagnostic above: a healthy mutation emits NO client_failure at all,
-    // so the assertion there is measuring the non-convergence and not the mutation.
+    assert.equal(api.metadataRequestCountForTest(), 0, 'create does not force-poll session metadata');
+    assert.equal(api.metadataConvergenceStatusForTest(), '', 'backend-async reconciliation leaves no client error');
     assert.equal(
       api.jsDebugFailureEventsForTest('error').filter(event => event.failure === 'session_metadata_convergence').length,
       0,
-      'a converged mutation emits no convergence diagnostic',
+      'create emits no forced-convergence diagnostic',
     );
+  });
+
+  await testAsync('explicit rename retains bounded forced metadata reconciliation', async () => {
+    const api = loadYolomux('', ['1', '2'], 'http:', 'Linux x86_64', 'admin');
+    let metadataRequests = 0;
+    api.setFetchForTest(url => {
+      const parsed = new URL(String(url), 'http://localhost');
+      if (parsed.pathname === '/api/session-metadata') {
+        metadataRequests += 1;
+        return Promise.resolve(jsonResponse(metadataPayload(EPOCH_B, 4, {
+          pending: {epoch: EPOCH_B, generation: 4},
+          sessions: {renamed: {panes: []}, '2': {panes: []}},
+          session_order: ['renamed', '2'],
+        })));
+      }
+      if (parsed.pathname === '/api/auto-approve') {
+        return Promise.resolve(jsonResponse({session_order: ['renamed', '2'], sessions: {}, rules: {}}));
+      }
+      return Promise.resolve(jsonResponse({ok: true}));
+    });
+    const result = await api.runTmuxSessionMutationForTest(
+      'rename',
+      {session: '1', newName: 'renamed'},
+      () => Promise.resolve({session: '1', new_session: 'renamed', sessions: ['renamed', '2'], ok: true}),
+      async () => {},
+    );
+
+    assert.equal(result.committed, true);
+    assert.equal(metadataRequests, 1, 'rename performs the bounded forced metadata read');
+    assert.equal(api.metadataConvergenceStatusForTest(), '', 'a converging rename leaves no repair marker');
+    assert.equal(
+      api.jsDebugFailureEventsForTest('error').filter(event => event.failure === 'session_metadata_convergence').length,
+      0,
+      'a converging rename emits no convergence diagnostic',
+    );
+  });
+
+  await testAsync('direct reconciliation still reports a metadata read that never converges', async () => {
+    // The explicit helper remains forced when called without a mutation kind, preserving a
+    // diagnostic path for callers that deliberately request an immediate repair read.
+    const api = createSessionFixture(() => Promise.resolve(jsonResponse(
+      metadataPayload(EPOCH_B, 4, {pending: {epoch: EPOCH_A, generation: 99}, sessions: {'1': {panes: []}, '2': {panes: []}}, session_order: ['1', '2']}),
+    )));
+
+    const result = await api.refreshTmuxSessionMutationStateForTest();
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'forced_settle_epoch_changed');
+    assert.equal(api.metadataConvergenceStatusForTest(), 'forced_settle_epoch_changed');
   });
 
   await testAsync('post-mutation reconciliation reports a typed reason for a metadata read that fails', async () => {
@@ -6787,7 +6796,7 @@ async function runLayoutAsyncSuite() {
     });
 
     await api.fetchSessionFilesForTest({destination: 'differ', session: '1', silent: true, force: true});
-    assert.equal(api.sessionFilesPayloadForTest().refreshing_elsewhere, true, 'the first accepted receipt paints queued state');
+    assert.equal(api.sessionFilesPayloadForTest().refreshing, true, 'the first accepted receipt paints local queued state');
     assert.equal(api.applyApiOperationTerminalForTest({
       operation: {id: receipt.operation.id, cursor: {epoch: 'session-files-retained', seq: 1}},
       result: {
@@ -6809,7 +6818,7 @@ async function runLayoutAsyncSuite() {
     await api.fetchSessionFilesForTest({destination: 'differ', session: '1', silent: true, force: true});
     const state = api.sessionFilesPayloadForTest();
     assert.equal(state.loaded, true, 'a duplicate receipt cannot regress ready state');
-    assert.equal(state.refreshing_elsewhere, false, 'a duplicate receipt cannot repaint queued state');
+    assert.equal(state.refreshing, false, 'a duplicate receipt cannot repaint queued state');
     assert.equal(state.files[0].path, 'DONE.md', 'the retained terminal product is reused');
     assert.equal(api.apiOperationStateForTest().handlerInvocations, 1, 'terminal feature handling remains exactly once');
   });
@@ -7317,6 +7326,49 @@ async function runLayoutAsyncSuite() {
       baseline.resolve(jsonResponse({mode: 'full', token: 'slow-baseline-token', directories: []}));
       await owner;
       assert.equal(api.fixtureLifecycleOperationStateForTest().watchRootsPending, false, 'fixture quiescence retires after the baseline applies');
+    });
+
+    await testAsync('ordinary watch-diff polling is not a startup baseline receipt', async () => {
+      const api = loadYolomux('', ['1']);
+      api.setClientEventsSourceForTest({readyState: 1});
+      api.setFileExplorerRootForTest('/repo');
+      api.setFilesystemWatchTokenForTest('existing-token');
+      const visibleSlots = api.emptyLayoutSlots();
+      visibleSlots[api.layoutTreeKey] = api.leafNode('left');
+      visibleSlots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
+      api.setLayoutSlotsForTest(visibleSlots);
+      api.setFetchForTest(url => {
+        const parsed = new URL(String(url), 'https://yolomux.test');
+        assert.equal(parsed.pathname, '/api/fs/watch-diff');
+        return Promise.resolve(jsonResponse({
+          state: 'queued',
+          request: {id: 'r-recurring-watch-diff'},
+          operation: {
+            id: 'op-recurring-watch-diff',
+            kind: 'fs_watch_diff',
+            status_url: '/api/operations/op-recurring-watch-diff',
+            events_url: '/api/client-events?operation_id=op-recurring-watch-diff',
+            cursor: {epoch: 'epoch', seq: 0},
+            context: {mode: 'diff'},
+          },
+        }, 202));
+      });
+
+      const refresh = api.refreshWatchedFilesystemForTest({full: false});
+      await flushAsyncWork();
+      assert.equal(api.serverWatchRootsStateForTest().baselinePending, false, 'a recurring watch request is not reported as the startup baseline');
+      assert.equal(api.fixtureLifecycleOperationStateForTest().watchRootsBaselinePending, false, 'ordinary watch polling does not block baseline teardown');
+
+      api.handleClientPushEventNowForTest('operation_terminal', {
+        operation: {id: 'op-recurring-watch-diff', cursor: {epoch: 'epoch', seq: 1}},
+        result: {
+          state: 'ready',
+          data: {mode: 'diff', token: 'next-token', since: 'existing-token', directories: []},
+          quality: {complete: true, stale: false},
+          warnings: [],
+        },
+      });
+      await refresh;
     });
 
     await testAsync('watch-root synchronization is SSE-identity scoped and reconnect-forced, not browser-renewed', async () => {

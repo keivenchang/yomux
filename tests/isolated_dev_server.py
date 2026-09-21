@@ -143,6 +143,12 @@ def build_environment(
     """
 
     env = dict(os.environ)
+    # The fixture names every product root explicitly below.  An inherited root would
+    # take precedence over YOLOMUX_RUNTIME_DIR in runtime_root() and silently place the
+    # child under the caller's instance, which can also exceed the Unix-socket path budget.
+    # Keep an explicitly requested rooted override available to callers.
+    if not env_overrides or "YOLOMUX_ROOT" not in env_overrides:
+        env.pop("YOLOMUX_ROOT", None)
     env.update(
         {
             "HOME": str(paths.home_dir),
@@ -165,7 +171,6 @@ def build_environment(
             "YOLOMUX_TEST_AUTH_BYPASS": "1" if auth_bypass else "0",
             "YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS": "0.2",
             "YOLOMUX_STARTUP_WATCHDOG_SECONDS": "0",
-            "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT": str(port),
             "PYTHONPATH": str(source_root),
             "PYTHONUNBUFFERED": "1",
         }
@@ -376,6 +381,7 @@ def start_isolated_dev_server(
     auth_bypass: bool = True,
     sessions: tuple[str, ...] = (),
     port: int | None = None,
+    force: bool = False,
     env_overrides: dict[str, str] | None = None,
     exec_plan_json: str | None = None,
 ) -> IsolatedDevServer:
@@ -420,6 +426,8 @@ def start_isolated_dev_server(
             "--",
             *command,
         ]
+    if force:
+        command.append("--force")
     release_lease()
     process = subprocess.Popen(
         command,

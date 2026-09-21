@@ -60,7 +60,6 @@ function repairClientEventReadyChannels(channels, watchRootsForceOptions = {}) {
     }
   }
   if (channels.has('status') || channels.has('attention')) refreshAutoStatuses({force: true}).catch(error => console.warn('client-events ready auto-status refresh failed', error));
-  if (channels.has('core')) refreshBackgroundOwnerStatus({preferFresh: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
   if (channels.has('chat') && typeof loadChatBootstrap === 'function') loadChatBootstrap({incoming: true});
   if (channels.has('transcripts') && typeof refreshSessionMetadataAfterCurrent === 'function') refreshSessionMetadataAfterCurrent({refreshAuto: false, refreshActivity: false}).catch(error => console.warn('client-events ready transcript refresh failed', error));
   if (channels.has('activity') && typeof refreshActivitySummary === 'function') refreshActivitySummary({force: true}).catch(error => console.warn('client-events ready activity refresh failed', error));
@@ -441,7 +440,7 @@ function clientPushEventSessionKey(payload = {}) {
 const clientServerPushEventTypes = Object.freeze([
   'settings_changed', 'pricing_catalog_changed', 'stats_sample', 'attention_acks_changed', 'auto_approve_changed',
   'backend_health_changed',
-  'background_owner_changed', 'background_refresh_done', 'background_refresh_requested', 'tmux_signals_changed',
+  'background_refresh_done', 'background_refresh_requested', 'tmux_signals_changed',
   'watched_prs_changed', 'files_changed', 'fs_changed', 'roots_changed', 'search_progress', 'session_files_ready', 'transcripts_changed', 'tmux_roster_changed',
   'operation_terminal',
   'context_changed', 'context_items_ready', 'activity_summary_ready', 'event_log_changed', 'update_available',
@@ -579,18 +578,7 @@ function handleClientPushEventNowByType(type, payload = {}, envelope = {}) {
     applyBackendHealthPayload(payload);
     return;
   }
-  if (type === 'background_owner_changed') {
-    if (!applyBackgroundOwnerStatusPayload(payload)) {
-      refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('background-owner status refresh failed', error));
-    } else if (typeof refreshAllIndexedDirsStatus === 'function') {
-      // A new owner may have rebuilt or invalidated an index while this client was
-      // following the previous owner. Revalidate only surfaces that are currently demanded.
-      refreshAllIndexedDirsStatus();
-    }
-    return;
-  }
   if (type === 'background_refresh_requested') {
-    refreshBackgroundOwnerStatus({preferFresh: true}).catch(error => console.warn('background refresh request status failed', error));
     return;
   }
   if (type === 'background_refresh_done') {
@@ -606,7 +594,7 @@ function handleClientPushEventNowByType(type, payload = {}, envelope = {}) {
       requeryOpenFileQuickOpenForIndexChange({force: true});
     }
     if (payload.role === 'session-files') {
-      // A local owner supplies the fresh data via session_files_ready. A follower
+      // The local scheduler supplies the fresh data via session_files_ready. A refresh
       // receives only this redacted completion, so the shared destination owner reads the
       // matching canonical cache once. It rejects wrong-session and replayed completions before
       // issuing a request and never turns a cache-only miss into a producer request.

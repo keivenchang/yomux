@@ -95,6 +95,8 @@ const fileExplorerHiddenToggle = document.getElementById('fileExplorerHiddenTogg
 const fileExplorerRootModeButton = document.getElementById('fileExplorerRootMode');
 const fileExplorerExpanded = new Set();
 const fileExplorerPendingExpansions = new Set();
+// Keep the public pending-path set, but identify the coalesced request allowed to settle it.
+const fileExplorerPendingExpansionOwners = new Map();
 const fileExplorerHiddenStorageKey = 'yolomux.fileExplorer.showHidden';
 const fileExplorerRootModeStorageKey = 'yolomux.fileExplorer.rootMode';
 const fileExplorerTreeShowDatesStorageKey = 'yolomux.fileExplorer.treeShowDates.v1';
@@ -752,6 +754,7 @@ const serverWatchRootsState = {
   registered: false,
   syncedAt: 0,
   watchDiffPromise: null,
+  watchBaselinePromise: null,
   watchDiffTrailing: null,
   timer: null,
   timerDelay: null,
@@ -1819,7 +1822,7 @@ window.__yolomuxFixtureLifecycle = Object.freeze({
   async awaitPendingOperationReceipts() {
     while (true) {
       const pending = Array.from(apiOperationState.pending.values());
-      const baseline = serverWatchRootsState.watchDiffPromise;
+      const baseline = serverWatchRootsState.watchBaselinePromise;
       await Promise.all([
         ...pending.map(record => record.completionPromise || Promise.resolve()),
         ...(baseline ? [Promise.resolve(baseline)] : []),
@@ -1834,7 +1837,7 @@ window.__yolomuxFixtureLifecycle = Object.freeze({
     const watchRootsTimerPending = Boolean(serverWatchRootsState.timer);
     const watchRootsRegistrationPending = serverWatchRootsState.registrationPending === true;
     const watchRootsInFlight = serverWatchRootsState.inFlight === true;
-    const watchRootsBaselinePending = serverWatchRootsState.watchDiffPromise !== null;
+    const watchRootsBaselinePending = serverWatchRootsState.watchBaselinePromise !== null;
     // The full watch-diff baseline parks its own operation record in apiOperationState.pending while
     // it awaits a 202 result (refreshFileExplorerFromWatchDiffOnce marks that record
     // terminalOwner='filesystem-watch-diff-refresh' in 40_file_explorer_files.js). Expose exactly
@@ -1894,14 +1897,6 @@ window.__yolomuxFixtureLifecycle = Object.freeze({
     };
   },
 });
-const backgroundOwnerStatusState = {
-  payload: null,
-  loading: false,
-  error: '',
-  request: null,
-  updatedAt: 0,
-  resource: null,
-};
 const yoagentStartupState = {
   activityPayload: null,
   prewarming: false,
@@ -2081,7 +2076,6 @@ const sessionContextMenu = createContextMenuController();
 const linkContextMenu = createContextMenuController();
 const markdownPreviewContextMenuController = createContextMenuController();
 const repoChipContextMenu = createContextMenuController();     // C9: per-pane "+N repos" detail-bar popover
-const backgroundOwnerContextMenu = createContextMenuController();
 let sessionRenameDialog = null;
 let fileExplorerManualSelectionActive = false;
 let fileTreeRenamePath = null;

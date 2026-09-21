@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """W1: the supported launcher resolves ONE clean row plan per row and reuses that
 exact captured plan for the server launch AND both authenticated probes, with no
-inherited global background-owner primary-port export.
+inherited global scheduler primary-port export.
 
 Two kinds of proof live here:
 
@@ -10,8 +10,8 @@ Two kinds of proof live here:
     retired globals are gone, the row plan is captured once, and both probes run
     through `instance_isolation.py exec --plan-file` with that same captured plan.
   * ONE EPHEMERAL-PORT INTEGRATION test that actually starts a server through the
-    exec mode, verifies it with the real `launcher_probe.py owner` subcommand bound
-    to the unique listener PID, and tears down by exact process identity.
+    exec mode, verifies its isolated tmux session through the real launcher probe,
+    and tears down by exact process identity.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ _LAUNCHER_MISSING = pytest.mark.skipif(
 
 @_LAUNCHER_MISSING
 def test_launcher_has_no_inherited_global_primary_port_export() -> None:
-    """The global background-owner primary-port export and the Darwin launchctl
+    """The global scheduler primary-port export and the Darwin launchctl
     setenv are both gone; each row now carries its own clean environment."""
     text = LAUNCHER.read_text(encoding="utf-8")
 
@@ -79,29 +79,22 @@ def test_launcher_captures_one_row_plan_and_reuses_it_for_server_and_both_probes
     assert 'instance_isolation.py exec --plan-file "$plan_file" --' in text
     assert "yolomux.py --host" in text
 
-    # Both probes take a plan-file argument and run the shared launcher_probe.py
-    # subcommands through the exec mode.
-    assert 'launcher_probe.py --scheme https owner' in text
+    # The session probe takes a plan-file argument and runs through the shared
+    # exec mode. Runtime ownership is enforced by the product-root lease, not a
+    # web-level peer probe.
     assert 'launcher_probe.py --scheme https sessions' in text
-    # verify_owner and verify_sessions both wrap launcher_probe.py in the exec mode.
-    assert text.count('instance_isolation.py exec --plan-file "$plan_file" --') >= 3
+    assert text.count('instance_isolation.py exec --plan-file "$plan_file" --') >= 2
 
-    # The captured plan reaches the server, the owner probe, and the sessions probe.
-    assert 'verify_owner "$dir" "$server_port" "$plan_file" "$listener_pid"' in text
+    # The captured plan reaches the server and the sessions probe.
     assert 'verify_sessions "$dir" "$server_port" "${ROW_PLAN[$name]:-}"' in text
-
-    # The owner probe is bound to the one unique listener PID.
-    assert 'listener_pid="$(yolomux_unique_listener_pid "$server_port")"' in text
 
 
 @_LAUNCHER_MISSING
 def test_launcher_macos_carries_the_plan_through_the_shared_launcher() -> None:
-    """The macOS row also launches through the exec plan (via the shared launcher),
-    passing the plan file and a primary port only for the default/durable row."""
+    """The macOS row also launches through the exec plan (via the shared launcher)."""
     text = LAUNCHER.read_text(encoding="utf-8")
 
     assert 'export YOLOMUX_ROW_PLAN_FILE="$plan_file"' in text
-    assert 'if [ "$server_port" = "$PLATFORM_DEFAULT_PORT" ]; then macos_primary="$server_port"; else macos_primary=""; fi' in text
 
 
 def test_shared_macos_launcher_execs_plan_when_present_and_stays_direct_otherwise() -> None:
@@ -109,22 +102,42 @@ def test_shared_macos_launcher_execs_plan_when_present_and_stays_direct_otherwis
     retained environment; both launch paths pass one plan as an argument."""
     text = STARTUP_COMMON.read_text(encoding="utf-8")
 
-    assert 'plan_json=$8; shift 8' in text
+    assert 'plan_json=$7; shift 7' in text
     assert 'instance_isolation.py" exec --plan-json "$plan_json" --' in text
     assert 'instance_isolation.py" plan-direct --port "$port"' in text
     assert 'YOLOMUX_ROW_PLAN_FILE:-' not in text.split("yolomux_macos_server_launcher()", 1)[1].split("yolomux_submit_macos_server()", 1)[0]
 
 
+def test_isolated_server_environment_does_not_inherit_a_parent_root(monkeypatch, tmp_path) -> None:
+    """Explicit fixture roots must not be replaced by the parent server's root."""
+    monkeypatch.setenv("YOLOMUX_ROOT", "/tmp/foreign-parent-root")
+    paths = build_paths(tmp_path / "instance")
+    runtime = start_isolated_tmux_runtime(monkeypatch, tmp_path, session_count=1)
+    try:
+        environment = build_environment(REPO_ROOT, paths, runtime, 7901)
+        assert "YOLOMUX_ROOT" not in environment
+        overridden = build_environment(
+            REPO_ROOT,
+            paths,
+            runtime,
+            7901,
+            env_overrides={"YOLOMUX_ROOT": str(tmp_path / "explicit-root")},
+        )
+        assert overridden["YOLOMUX_ROOT"] == str(tmp_path / "explicit-root")
+    finally:
+        stop_isolated_tmux_runtime(runtime)
+
+
 @pytest.mark.socket
 @pytest.mark.skipif(not Path("/proc").is_dir(), reason="teardown checks the process via /proc")
-def test_exec_launched_server_passes_the_real_owner_probe_and_tears_down_by_pid(
+def test_exec_launched_server_passes_the_real_session_probe_and_tears_down_by_pid(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """End to end on an ephemeral port: start a managed self-owner through the exec
-    mode, verify it with the real launcher_probe owner subcommand bound to the
-    unique listener PID (reusing the exact same captured plan file), tear down by
-    exact process identity, and confirm nothing survives."""
+    """End to end on an ephemeral port: start a managed instance through the exec
+    mode, verify its tmux session with the real launcher probe (reusing the exact
+    same captured plan file), tear down by exact process identity, and confirm
+    nothing survives."""
     root = tmp_path / "runtime"
     paths = build_paths(root)
     tmux_runtime = start_isolated_tmux_runtime(monkeypatch, root, session_count=1)
@@ -135,7 +148,7 @@ def test_exec_launched_server_passes_the_real_owner_probe_and_tears_down_by_pid(
     lease.release()
 
     # A no-strip plan that keeps the harness's explicit isolation roots but marks
-    # this row a managed self-owner, so the app runs DisabledBackgroundOwner.
+    # this row a managed self-owner, so the app runs BackgroundScheduler.
     plan = RowPlan(unset=(), assign={INSTANCE_ENV: f"{port}:managed"})
 
     server = None
@@ -150,8 +163,8 @@ def test_exec_launched_server_passes_the_real_owner_probe_and_tears_down_by_pid(
         )
         server.assert_serving()
 
-        # The exec chain preserves the PID, so the server process is the listener.
-        listener_pid = server.process.pid
+        # The isolated session is the launcher-visible readiness contract.
+        session_name = tmux_runtime.sessions[0]
 
         env = build_environment(REPO_ROOT, paths, tmux_runtime, port, auth_bypass=True)
         # Reuse the exact plan file the server launched under -- the same captured
@@ -173,11 +186,11 @@ def test_exec_launched_server_passes_the_real_owner_probe_and_tears_down_by_pid(
                 "127.0.0.1",
                 "--timeout",
                 "30",
-                "owner",
+                "sessions",
                 "--port",
                 str(port),
-                "--listener-pid",
-                str(listener_pid),
+                "--sessions",
+                session_name,
             ],
             env=env,
             capture_output=True,
@@ -185,7 +198,7 @@ def test_exec_launched_server_passes_the_real_owner_probe_and_tears_down_by_pid(
             timeout=90,
         )
         assert result.returncode == 0, (result.stdout, result.stderr, server.output[-20:])
-        assert f"owner {port} (managed)" in result.stdout, result.stdout
+        assert f"sessions {port}: all 1 visible" in result.stdout, result.stdout
 
         # Teardown by exact PID identity.
         reaped = stop_and_reap_daemons(server)

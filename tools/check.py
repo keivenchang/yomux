@@ -99,7 +99,7 @@ from tests.browser_helpers.webdriver_lease import process_start_key
 from tools import docker_image
 from tools import static_build
 from yolomux_lib.infra.atomic_file import atomic_write_text
-from yolomux_lib.background_owner import pid_is_alive
+from yolomux_lib.background_scheduler import pid_is_alive
 # Reuse the repo's existing ANSI owner rather than growing a second copy in the
 # gate. It sits here, below `validate_product_root_environment`, because that
 # gate is what establishes the environment; importing the product/TUI chain
@@ -486,10 +486,13 @@ def active_yolomux_server_records(
     stale_seconds: float = TOOL_GUARD_STATE_STALE_SECONDS,
 ) -> list[dict[str, object]]:
     root = Path(state_dir) if state_dir is not None else state_dir_from_env()
-    generations_dir = root / "background-owner" / "generations"
+    lock_paths = [root / "instance.lock"]
+    configured_root = os.environ.get("YOLOMUX_ROOT")
+    if configured_root:
+        lock_paths.append(Path(configured_root).expanduser().resolve(strict=False) / "instance.lock")
     timestamp = time.time() if now is None else float(now)
     try:
-        paths = sorted(generations_dir.glob("*.json"))
+        paths = [path for path in lock_paths if path.exists()]
     except OSError:
         return []
     records: list[dict[str, object]] = []
@@ -501,7 +504,7 @@ def active_yolomux_server_records(
             continue
         try:
             pid = int(record.get("pid") or 0)
-            heartbeat = float(record.get("last_heartbeat") or 0.0)
+            heartbeat = float(record.get("last_heartbeat") or timestamp)
         except (TypeError, ValueError):
             continue
         if not pid_is_alive(pid):

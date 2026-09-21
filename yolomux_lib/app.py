@@ -77,13 +77,13 @@ from .approval.approvald import ApprovalClient
 from .approval.auto_approve_worker import auto_approve_lock_message
 from .approval.auto_approve_worker import auto_approve_lock_message_fields
 from .approval.auto_approve_worker import auto_approve_lock_owner
-from .infra.background_owner import BACKGROUND_ROLE_SEARCH_INDEX
-from .infra.background_owner import BACKGROUND_ROLE_SESSION_FILES
-from .infra.background_owner import BACKGROUND_ROLE_STATS_SAMPLER
-from .infra.background_owner import BACKGROUND_ROLE_TABBER_ACTIVITY
-from .infra.background_owner import BACKGROUND_ROLE_WATCH_ROOTS
-from .infra.background_owner import BackgroundOwnerRegistry
-from .infra.background_owner import DisabledBackgroundOwner
+from .infra.background_scheduler import BACKGROUND_ROLE_SEARCH_INDEX
+from .infra.background_scheduler import BACKGROUND_ROLE_SESSION_FILES
+from .infra.background_scheduler import BACKGROUND_ROLE_STATS_SAMPLER
+from .infra.background_scheduler import BACKGROUND_ROLE_TABBER_ACTIVITY
+from .infra.background_scheduler import BACKGROUND_ROLE_WATCH_ROOTS
+from .infra.background_scheduler import BackgroundScheduler
+from .infra.background_scheduler import background_scheduler_admission
 from .infra.atomic_file import atomic_write_text
 from .infra.atomic_file import file_lock
 from .infra.cache import MISS as CACHE_MISS
@@ -309,7 +309,6 @@ from .yoagent.session_summaries import YoagentSummaryWorkerRecord
 
 
 logger = logging.getLogger(__name__)
-
 
 ACTIVITY_SUMMARY_READY_PUSH_TRIGGERS = {"manual", "refresh", "force"}
 METADATA_BADGES = ("main", "pr", "status", "ci")
@@ -640,13 +639,6 @@ def default_tabber_activity_cache_dir(state_dir: Path | None = None) -> Path:
     return host_partitioned_state_dir(root) / "activity-cache"
 
 
-def default_background_client_events_path(state_dir: Path | None = None) -> Path:
-    """Share follower replay events only among this host's web processes."""
-
-    root = common.STATE_DIR if state_dir is None else Path(state_dir)
-    return host_partitioned_state_dir(root) / "background-owner" / "client-events.json"
-
-
 def default_session_files_operation_state_path(state_dir: Path | None = None) -> Path:
     """Persist accepted-operation receipts and terminals inside this isolated instance root."""
     root = common.STATE_DIR if state_dir is None else Path(state_dir)
@@ -695,6 +687,13 @@ WATCHD_OPERATION_PRODUCT_LIMIT = 64
 WATCHD_FAILURE_ACTIONS = frozenset({"acquire", "upsert", "remove", "wait_revision"})
 WATCHD_FAILURE_CODES = frozenset({"deadline_expired", "handler_failed", "native_capacity_exceeded", "producer_failed", "service_unavailable", "stale_generation", "unknown_lease", "upgrade_required"})
 WATCHD_FAILURE_LOG_GRACE_SECONDS = 2.0
+# A reconfiguring watchd long-poll reserves the daemon's full transport margin. Teardown must
+# cover that same bound before replacing the record, or the old worker can outlive the app state.
+WATCHD_REVISION_STOP_JOIN_MARGIN_SECONDS = 1.0
+WATCHD_REVISION_STOP_JOIN_TIMEOUT_SECONDS = (
+    WatchClient.long_poll_transport_timeout(2.0, reconfiguring=True)
+    + WATCHD_REVISION_STOP_JOIN_MARGIN_SECONDS
+)
 SERVER_INTERACTIVE_EVENT_POLL_SECONDS = 1.5
 SERVER_INTERACTIVE_EVENT_POLL_JITTER_SECONDS = 0.5
 SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS = SERVER_INTERACTIVE_EVENT_POLL_SECONDS
@@ -722,14 +721,14 @@ ESSENTIAL_LOCAL_SERVICES = frozenset({"indexd", "batchd", "statusd", "statsd", "
 
 # THE ONE ABSENCE statsd MAY HAVE EXCUSED, AND ITS EXACT BOUND
 # ------------------------------------------------------------
-# statsd is pinned up by `StatsCurrentRuntime._supervise` in the elected background owner, so its
+# statsd is pinned up by `StatsCurrentRuntime._supervise` in this server's local scheduler, so its
 # absence is a verified outage -- once that pin has had its chance. It has not had it yet during
 # the boot window between `stats_current_runtime.start()` (called from
-# `handle_background_owner_acquired`) and the lease that actually spawns statsd.
+# `handle_background_scheduler_started`) and the lease that actually spawns statsd.
 #
 # MEASURED on real isolated starts (managed instance, this host), relative to process launch.
-# Before, with the observer armed ahead of the election (port 17781):
-#   +0.632s  background-owner generation created (the election is DECIDED here)
+# Before, with the observer armed before scheduler startup (port 17781):
+#   +0.632s  scheduler startup began
 #   +0.635s  observer's first completed cycle -> statsd published `down` / `service_absent`
 #   +1.136s  statsd child process spawned
 #   +1.622s  statsd wrote its service record and began serving
@@ -741,7 +740,7 @@ ESSENTIAL_LOCAL_SERVICES = frozenset({"indexd", "batchd", "statusd", "statsd", "
 #       +1.005s `stats_current_runtime.start()` had not run yet, so there was no pin owner to
 #       state the excuse. The ordering in `cli.main()` is what makes the fact available at all.
 #   the ordering alone, excuse removed (17784): first cycle at +2.911s, statsd already serving,
-#       no `down`. It closes the window on THIS host only because `start_background_owner()`
+#       no `down`. It closes the window on THIS host only because `start_background_scheduler()`
 #       synchronously takes batchd's scheduler lease (~2.2s) while statsd needs ~1.6s -- a 1.3s
 #       margin that is timing, not a guarantee.
 #   both (17782): first cycle at +2.738s, statsd `starting` -> `ready` at +4.750s, no `down`.
@@ -753,24 +752,20 @@ ESSENTIAL_LOCAL_SERVICES = frozenset({"indexd", "batchd", "statusd", "statsd", "
 # statsd is not demand-scoped, and saying it were would silence a real outage forever. The
 # excuse is bounded by `statsd_pin_pending()` below so it cannot outlive the pending start.
 STATSD_ABSENT_WHILE_PIN_PENDING = "stats_pin_pending"
-# The supervisor phases that mean "this process is actively taking the statsd pin and has not
-# taken it yet" (`stats_current/runtime.py:_supervise`). Deliberately NOT `waiting_owner`,
-# `demoting`, `stopping`, `stopped`, `backoff` or `blocked`: every one of those means this
-# process is not on its way to pinning statsd, and excusing them would let a statsd that died,
-# or that a demoted/losing process can no longer see, stay silent forever.
+# Only startup phases count as a pending statsd pin; all later phases mean absence is a failure.
 STATSD_PIN_PENDING_PHASES = frozenset({"starting", "acquiring_lease", "starting_scheduler"})
 
 
 def statsd_pin_pending(runtime_status: Mapping[str, Any]) -> bool:
     """Whether this process is mid-flight taking the statsd pin, so absence is not yet a failure.
 
-    The one owner of statsd's expected-absence claim, read from the pin owner's own live status
+    The one owner of statsd's expected-absence claim, read from the pin indexer's own live status
     (`StatsCurrentRuntime.status()`) rather than from a timer or a boot grace period. Four
     conditions, all of which must hold, and each of which closes one silent-excuse hole:
 
     * ``supervisor.alive`` -- the pin owner thread exists at all. A process that lost the
-      election never calls ``stats_current_runtime.start()``, so this is False there and an
-      absent statsd stays `down`, which is correct: the winner is supposed to be keeping it up.
+      server that never starts ``stats_current_runtime`` has no pending pin, so this is False
+      and an absent statsd stays `down`, which is correct.
     * ``leased is not True`` -- the pin has not taken effect yet. Once it has, statsd exists and
       any later absence is an outage.
     * ``failure_count == 0`` -- the pin owner has recorded no failure. A statsd that is
@@ -1231,19 +1226,13 @@ STATS_SAMPLE_UNDATED_REASON = (
     "the last CPU sample statsd pushed carries no timestamp, so it cannot be shown to describe the present"
 )
 BACKGROUND_REFRESH_EVENT_LOG_SAMPLE_EVERY = 25
-BACKGROUND_CLIENT_EVENTS_PATH = default_background_client_events_path()
-# The event's storage owner determines whether another server must be notified immediately.
-# Keep this table next to the transport rather than letting each write path choose between a
-# local publish and a poll-dependent refresh.
+# These events are local to the one leased instance and are delivered directly to its browsers.
 BACKGROUND_CLIENT_EVENT_POLICIES: dict[str, dict[str, str]] = {
     "attention_acks_changed": {"truth": "tmux-ai-status", "delivery": "push"},
     "auto_approve_changed": {"truth": "tmux workers and yolomux state", "delivery": "push"},
-    "background_owner_changed": {"truth": "background-owner", "delivery": "push"},
-    "background_refresh_done": {"truth": "background owner", "delivery": "push"},
-    # Streaming Quick Open (step 5): a signal-only per-root progress nudge. Push delivery so a
-    # FOLLOWER web process (not just the indexd-electing owner) receives it and can pull committed
-    # deltas by cursor. The truth is the committed change journal in SQLite; the signal carries no
-    # filesystem data, so persisting + fanning it out cannot disclose one client's paths to another.
+    "background_refresh_done": {"truth": "local background scheduler", "delivery": "push"},
+    # Streaming Quick Open: a signal-only per-root progress nudge. The client pulls committed
+    # deltas by cursor, and the signal carries no filesystem data.
     "search_progress": {"truth": "search change journal", "delivery": "push"},
     "chat_messages_changed": {"truth": "chat database", "delivery": "push"},
     "chat_typing_changed": {"truth": "chat database", "delivery": "push"},
@@ -1257,9 +1246,7 @@ BACKGROUND_CLIENT_EVENT_TYPES = frozenset(
     for event_type, policy in BACKGROUND_CLIENT_EVENT_POLICIES.items()
     if policy["delivery"] == "push"
 )
-BACKGROUND_CLIENT_EVENT_MANIFEST_LIMIT = 128
-BACKGROUND_CLIENT_EVENT_NOTIFY_TIMEOUT_SECONDS = 0.2
-# Streaming Quick Open follower drain: how often a web process with an open palette pulls indexd's
+# Streaming Quick Open reader drain: how often a web process with an open palette pulls indexd's
 # buffered progress frames while a crawl is active, and how long "active" lasts after the last kick or
 # unfinished frame. The window is bounded and only opens when the web itself enqueues/promotes a crawl,
 # so an idle terminal never polls the daemon and never keeps it hot past its own idle timeout.
@@ -1470,6 +1457,7 @@ class UpdateCheckRecord:
     """Bounded evidence for the one external self-update reconciler."""
 
     lock: threading.Lock = field(default_factory=threading.Lock)
+    stop_event: threading.Event = field(default_factory=threading.Event)
     enabled: bool = False
     attempts: int = 0
     useful: int = 0
@@ -1523,9 +1511,9 @@ class SharedWatchRootIndex:
         self._clock = clock or (lambda: time.time())
         self._truncated_signature: tuple[Any, ...] | None = None
         self.owner_dir = self.path.with_name(f"{self.path.name}.owners")
-        # Root interest is written per server, while only the elected background owner is
-        # allowed to sample the directories.  Keep that sample in a separate atomic record so
-        # followers can compare the owner's delta without lstat/iterdir work of their own.
+        # Root interest is written per server, while this server's scheduler samples the
+        # directories. Keep that sample in a separate atomic record so readers can compare the
+        # indexer's delta without lstat/iterdir work of their own.
         self.signature_path = self.path.with_name(f"{self.path.name}.signatures.json")
         owner_digest = hashlib.sha256(self.owner_id.encode("utf-8", errors="replace")).hexdigest()[:24]
         self.owner_path = self.owner_dir / f"{owner_digest}.json"
@@ -3170,7 +3158,7 @@ class WatchBridge:
             # root and either promotes the frontier or runs one bounded subtree repair.
             filesystem.reindex_roots_for_paths([str(path) for path in changed_paths], reason="watchd")
         if revision.get("attention_changed"):
-            events.extend(app.refresh_shared_attention_acks(trigger="watchd", notify_followers=True))
+            events.extend(app.refresh_shared_attention_acks(trigger="watchd"))
         if revision.get("settings_changed"):
             # Re-lease/enqueue when indexed-root settings change: added roots start layer-1 crawls,
             # removed roots release the scheduler obligation. Only the owner acts (guarded inside).
@@ -4042,7 +4030,7 @@ class WatchBridge:
                     )
                     outcome = FilesystemWatchCompletionOutcome(failure=failure)
                 # Another request may have joined after its own cache miss but before this recheck.
-                # Resolve the shared future before removing the flight so every accepted follower
+                # Resolve the shared future before removing the flight so every accepted reader
                 # terminalizes from the cached product instead of waiting on a producer we skip.
                 flight.cancel_owner()
                 flight.future.set_result(outcome)
@@ -4194,37 +4182,16 @@ class WatchBridge:
                 return
         try:
             started = time.perf_counter()
-            with app.activity_transcript_service.transcripts_payload_cache_lock:
-                payload_record = app.activity_transcript_service.transcripts_payload_cache_record
-                source_generation = payload_record.input_generation
-                cache_age = (
-                    time.monotonic() - payload_record.watch_refreshed_at
-                    if payload_record.watch_refreshed_at is not None
-                    else None
-                )
-                reusable_payload = (
-                    payload_record.payload is not None
-                    and payload_record.payload.get("metadata_loading") is not True
-                    and payload_record.committed_input_generation == source_generation
-                    and cache_age is not None
-                    and cache_age <= TRANSCRIPTS_PAYLOAD_WATCH_SAFETY_SECONDS
-                )
-                payload = copy.deepcopy(payload_record.payload) if reusable_payload else None
-            if payload is None:
-                payload = app.build_transcripts_payload()
-            if guarded and not app.client_watch_snapshot_is_current(record, worker):
-                return
             if (
                 not app.status_service_mode
                 and app.client_events.has_demand("transcripts")
             ):
                 live_sessions, _live_sessions_error = list_tmux_session_names()
                 if live_sessions:
-                    # A browser metadata watcher can be the first owner to observe a new tmux
-                    # roster. Register that exact roster with statusd before publishing metadata;
-                    # otherwise statusd keeps its old snapshot roster and the browser receives
-                    # transcript bytes for sessions whose status rows never get a new revision.
-                    app.sessions = list(live_sessions)
+                    # Admit the live roster before choosing or building the metadata payload. A
+                    # watch snapshot that discovers new sessions after its build would publish the
+                    # old session set and leave status and transcript consumers permanently split.
+                    app.apply_session_roster(live_sessions, refresh_metadata=False)
                     status_response, status_body = app.status_client.snapshot(live_sessions, timeout=5.0)
                     if status_response.get("ok") is True and status_body:
                         try:
@@ -4248,6 +4215,29 @@ class WatchBridge:
                     app.wake_client_event_watcher()
             with app.activity_transcript_service.transcripts_payload_cache_lock:
                 payload_record = app.activity_transcript_service.transcripts_payload_cache_record
+                source_generation = payload_record.input_generation
+                cache_age = (
+                    time.monotonic() - payload_record.watch_refreshed_at
+                    if payload_record.watch_refreshed_at is not None
+                    else None
+                )
+                reusable_payload = (
+                    payload_record.payload is not None
+                    and payload_record.payload.get("metadata_loading") is not True
+                    and payload_record.committed_input_generation == source_generation
+                    and cache_age is not None
+                    and cache_age <= TRANSCRIPTS_PAYLOAD_WATCH_SAFETY_SECONDS
+                )
+                payload = copy.deepcopy(payload_record.payload) if reusable_payload else None
+            if payload is None:
+                payload = app.build_transcripts_payload(session_roster=list(app.sessions))
+            if guarded and not app.client_watch_snapshot_is_current(record, worker):
+                return
+            if not app.metadata_payload_matches_session_roster(payload):
+                app.queue_transcripts_payload_rebuild(publish=True)
+                return
+            with app.activity_transcript_service.transcripts_payload_cache_lock:
+                payload_record = app.activity_transcript_service.transcripts_payload_cache_record
                 publish_requested = payload_record.publish_requested
             # An ordinary watch refresh may reuse a fresh payload without changing its identity.
             # A forced request that joined this worker is different: its promised generation must be
@@ -4257,6 +4247,8 @@ class WatchBridge:
                 payload,
                 generation,
                 input_generation=source_generation,
+                worker=worker,
+                rebuild_publish=True,
             ):
                 return
             with app.activity_transcript_service.transcripts_payload_cache_record.publication_lock:
@@ -4700,12 +4692,13 @@ class WatchBridge:
                     continue
                 read_failures = 0
                 previous = list(app.sessions)
-                if app.apply_session_roster(roster, refresh_metadata=False):
-                    removed = [session for session in previous if session not in roster]
-                    added = [session for session in roster if session not in previous]
+                removed = [session for session in previous if session not in roster]
+                added = [session for session in roster if session not in previous]
+                is_rename = rename_hint and len(removed) == 1 and len(added) == 1
+                if app.apply_session_roster(roster, refresh_metadata=not is_rename):
                     renames = (
                         [{"old_session": removed[0], "new_session": added[0]}]
-                        if rename_hint and len(removed) == 1 and len(added) == 1
+                        if is_rename
                         else []
                     )
                     app.publish_client_event(
@@ -4796,7 +4789,13 @@ class WatchBridge:
         retained_record = None
         with self.state.lock:
             current = self.state.event_watcher_record
-            if current.worker is not None and current.worker.is_alive():
+            current_workers = (
+                current.worker,
+                current.watchd_worker,
+                current.tmux_roster_worker,
+                current.status_generation_worker,
+            )
+            if any(worker is not None and worker.is_alive() for worker in current_workers):
                 retained_record = current
                 watchd_demanded = bool(self.state.descriptors)
             else:
@@ -4810,6 +4809,11 @@ class WatchBridge:
                 watchd_demanded = bool(self.state.descriptors)
 
         if retained_record is not None:
+            if retained_record.stop_event.is_set():
+                # A prior teardown is still waiting for a bounded child RPC. Keep the old record
+                # visible until its worker exits; replacing it here would let a stopped worker
+                # retain references to a torn-down app while a new worker starts on a new record.
+                return
             # A retained client-event worker must not make a previously failed child watcher
             # permanent. New SSE subscribers are the lifecycle re-entry point, while watchd is
             # repaired only when the descriptor owner says filesystem demand exists.
@@ -4836,10 +4840,6 @@ class WatchBridge:
             rollback()
             raise
         common.start_thread_with_rollback(worker, rollback)
-        # A follower has no local event retention across a web-process restart. Replay only
-        # after the first SSE subscriber exists; startup replay otherwise consumes the durable
-        # record before a client can receive it.
-        app.replay_shared_background_client_events()
         if watchd_demanded:
             try:
                 app.start_watchd_revision_watcher(record)
@@ -4875,12 +4875,25 @@ class WatchBridge:
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2.0)
         if watchd_worker is not None and watchd_worker is not threading.current_thread():
-            watchd_worker.join(timeout=5.0)
+            watchd_worker.join(timeout=WATCHD_REVISION_STOP_JOIN_TIMEOUT_SECONDS)
         if roster_worker is not None and roster_worker is not threading.current_thread():
             roster_worker.join(timeout=2.0)
         with self.state.lock:
-            if self.state.event_watcher_record is record:
+            current_workers = (
+                record.worker,
+                record.watchd_worker,
+                record.tmux_roster_worker,
+                record.status_generation_worker,
+            )
+            if self.state.event_watcher_record is record and not any(
+                worker is not None and worker.is_alive() for worker in current_workers
+            ):
                 self.state.event_watcher_record = ClientEventWatcherRecord()
+        # Snapshot publication is watcher-owned work. Fence only that worker when the last
+        # watcher leaves; HTTP/mutation-owned metadata work must keep its single-flight identity
+        # and any queued follow-up.
+        if hasattr(app, "fence_transcripts_payload_work"):
+            app.fence_transcripts_payload_work(worker=snapshot_worker, join_workers=False)
 
     def stop_client_event_watcher_if_idle(self, app) -> bool:
         with app.client_events.lock:
@@ -4942,7 +4955,7 @@ class WatchBridge:
 
 
 class OwnedStateAttribute:
-    """Expose one composed owner's state field through the compatibility facade."""
+    """Expose one composed indexer's state field through the compatibility facade."""
 
     def __init__(self, owner_name: str, state_name: str) -> None:
         self.owner_name = owner_name
@@ -5040,9 +5053,9 @@ class SessionFilesCoordinator:
         requested = freeze(payload.get("cache_key_data"))
         if not isinstance(requested, tuple) or len(requested) != len(fallback):
             return fallback
-        # The owner may observe newer tmux/transcript metadata or repository state than the follower,
+        # The owner may observe newer tmux/transcript metadata or repository state than the reader,
         # so the final info/repo signatures may differ. All request-controlled dimensions must match
-        # before the owner writes its current result under the follower's key.
+        # before the owner writes its current result under the reader's key.
         if requested[:-2] != fallback[:-2]:
             return fallback
         return requested
@@ -5277,7 +5290,7 @@ class SessionFilesCoordinator:
             version=SESSION_FILES_CACHE_VERSION,
             cache_dir=SESSION_FILES_CACHE_DIR,
             payload_signature=app.session_files_payload_signature,
-            owner_generation=lambda: app.background_owner.status_payload().get("generation", {}),
+            owner_generation=lambda: app.background_scheduler.process_payload(),
             record_phase=app.record_session_files_phase,
             request_prune=app.request_session_files_disk_cache_prune,
             clock=time.time,
@@ -5481,7 +5494,7 @@ class SessionFilesCoordinator:
                     app.complete_session_files_work(key, work_record, result=result)
                     return result
                 # Only a true cache miss enters the owner-wide queue.  Hits and
-                # followers remain cheap, while unrelated HTTP handlers never
+                # readers remain cheap, while unrelated HTTP handlers never
                 # contend for these transcript/Git slots.
                 queue_started = time.perf_counter()
                 self.state.acquire_compute_slot(app.session_files_max_workers())
@@ -5877,7 +5890,7 @@ class SessionFilesCoordinator:
             "Session-files background refresh started",
             refresh_details,
             message_key="events.message.backgroundRefresh.started",
-            message_params={"target": message_descriptor("backgroundOwner.sessionFiles", "Session files")},
+            message_params={"target": message_descriptor("tabber.sessionFiles", "Session files")},
         )
         try:
             payload, status, _cache_hit, _age_seconds = app.compute_session_files_cache_entry(
@@ -5911,7 +5924,7 @@ class SessionFilesCoordinator:
                 "Session-files background refresh finished",
                 done_details,
                 message_key="events.message.backgroundRefresh.finished",
-                message_params={"target": message_descriptor("backgroundOwner.sessionFiles", "Session files")},
+                message_params={"target": message_descriptor("tabber.sessionFiles", "Session files")},
             )
             app.publish_background_refresh_done(BACKGROUND_ROLE_SESSION_FILES, {**refresh_details, "compute_ms": compute_ms})
         except SessionFilesBatchedUnavailable as exc:
@@ -5922,37 +5935,36 @@ class SessionFilesCoordinator:
             logger.warning("session-files refresh failed for %s: %s", cache_key, exc)
             raise
     def start_session_files_cache_refresh(self, app, cache_key: tuple[Any, ...], target: Any, *args: Any) -> bool:
-        if not app.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
-            if target == app.refresh_session_files_cache and len(args) >= 6:
-                session, _infos, hours, from_ref, to_ref, repo_refs = args[:6]
-                request_payload = app.session_files_refresh_request_payload(cache_key, session, hours, from_ref, to_ref, repo_refs)
-            else:
-                request_payload = {"cache_key": repr(cache_key), "cache_key_data": cache_key}
-            app.request_background_refresh(BACKGROUND_ROLE_SESSION_FILES, request_payload)
-            return False
-        _path, stable_signature = app.session_files_disk_cache_path(cache_key)
-        record = self.state.reserve_work(cache_key, stable_signature)
-        if record is None:
-            return False
-        def run_reserved_worker() -> None:
+        # The scheduler lock is also the shutdown admission fence. Holding it through reservation
+        # and worker start prevents shutdown from stopping the scheduler between the lifecycle check
+        # and the worker's acceptance.
+        with app.background_scheduler.lock:
+            if not app.scheduler_can_run(BACKGROUND_ROLE_SESSION_FILES):
+                return False
+            _path, stable_signature = app.session_files_disk_cache_path(cache_key)
+            record = self.state.reserve_work(cache_key, stable_signature)
+            if record is None:
+                return False
+
+            def run_reserved_worker() -> None:
+                try:
+                    target(cache_key, *args)
+                except BaseException as exc:
+                    if not record.future.done():
+                        record.future.set_exception(exc)
+                    raise
+                finally:
+                    self.state.finish_reserved_worker(cache_key, record, threading.current_thread())
+
+            worker = threading.Thread(target=run_reserved_worker, daemon=True)
             try:
-                target(cache_key, *args)
-            except BaseException as exc:
+                if not self.state.start_reserved_worker(cache_key, record, worker):
+                    return False
+            except RuntimeError as exc:
                 if not record.future.done():
                     record.future.set_exception(exc)
                 raise
-            finally:
-                self.state.finish_reserved_worker(cache_key, record, threading.current_thread())
-
-        worker = threading.Thread(target=run_reserved_worker, daemon=True)
-        try:
-            if not self.state.start_reserved_worker(cache_key, record, worker):
-                return False
-        except RuntimeError as exc:
-            if not record.future.done():
-                record.future.set_exception(exc)
-            raise
-        return True
+            return True
     def start_requested_session_files_cache_refresh(self, app, payload: dict[str, Any]) -> bool:
         session = str(payload.get("session") or "").strip()
         scope = [session] if session else list(app.sessions)
@@ -5985,24 +5997,7 @@ class SessionFilesCoordinator:
         if cached:
             payload, _status, fresh, _age = cached
             if not fresh:
-                if app.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
-                    app.start_session_files_cache_refresh(key, app.refresh_session_files_cache, info.session, {info.session: info}, hours, from_ref, to_ref, repo_refs, "background-info-refresh", "background-info-refresh")
-                else:
-                    app.record_background_follower_stale_read(BACKGROUND_ROLE_SESSION_FILES)
-                    refresh_result = app.request_background_refresh(
-                        BACKGROUND_ROLE_SESSION_FILES,
-                        app.session_files_refresh_request_payload(key, info.session, hours, from_ref, to_ref, repo_refs),
-                    )
-                    app.record_background_avoided_recompute(BACKGROUND_ROLE_SESSION_FILES)
-                    if app.background_refresh_should_fallback(refresh_result):
-                        try:
-                            payload, _status, _hit, _age = app.compute_session_files_cache_entry(
-                                key,
-                                lambda: app.compute_session_files_payload_via_batchd(info.session, infos, hours, from_ref, to_ref, repo_refs, key, priority="interactive", requester="metadata-follower-fallback"),
-                            )
-                        except SessionFilesBatchedUnavailable:
-                            # Serve the stale bytes already read above; never resurrect inline git here.
-                            pass
+                app.start_session_files_cache_refresh(key, app.refresh_session_files_cache, info.session, {info.session: info}, hours, from_ref, to_ref, repo_refs, "background-info-refresh", "background-info-refresh")
             return payload
         if not wait_for_fresh:
             app.start_session_files_cache_refresh(
@@ -6023,24 +6018,7 @@ class SessionFilesCoordinator:
                 "files": [],
                 "repos": [],
                 "errors": [],
-                "refreshing_elsewhere": True,
             }
-        if not app.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
-            refresh_result = app.request_background_refresh(
-                BACKGROUND_ROLE_SESSION_FILES,
-                app.session_files_refresh_request_payload(key, info.session, hours, from_ref, to_ref, repo_refs),
-            )
-            app.record_background_avoided_recompute(BACKGROUND_ROLE_SESSION_FILES)
-            if app.background_refresh_should_fallback(refresh_result):
-                try:
-                    payload, _status, _hit, _age = app.compute_session_files_cache_entry(
-                        key,
-                        lambda: app.compute_session_files_payload_via_batchd(info.session, infos, hours, from_ref, to_ref, repo_refs, key, priority="interactive", requester="metadata-follower-fallback"),
-                    )
-                    return copy.deepcopy(payload)
-                except SessionFilesBatchedUnavailable:
-                    pass
-            return {"files": [], "repos": [], "errors": [], "refreshing_elsewhere": True}
         try:
             payload, _status, _hit, _age = app.compute_session_files_cache_entry(
                 key,
@@ -6048,11 +6026,8 @@ class SessionFilesCoordinator:
             )
             return copy.deepcopy(payload)
         except SessionFilesBatchedUnavailable:
-            return {"files": [], "repos": [], "errors": [], "refreshing_elsewhere": True}
+            return {"files": [], "repos": [], "errors": ["session files service unavailable"]}
     def warm_start_session_files_payload_cache(self, app) -> None:
-        if not app.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
-            app.request_background_refresh(BACKGROUND_ROLE_SESSION_FILES, {"reason": "warm-start"})
-            return
         sessions, _errors = discover_sessions(app.sessions)
         for session in app.sessions:
             info = sessions.get(session)
@@ -6073,9 +6048,6 @@ class SessionFilesCoordinator:
                         },
                     )
     def warm_start_tabber_activity_cache(self, app) -> None:
-        if not app.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
-            app.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "warm-start"})
-            return
         source_signature = app.tabber_activity_source_signature()
         app.get_tabber_activity_cache(float("inf"), allow_stale=True, hours=24.0, source_signature=source_signature)
     def cached_session_files_payloads_for_infos( self, app, infos: dict[str, SessionInfo], hours: float = 24.0, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, ) -> dict[str, SessionFilesPayload]:
@@ -6084,11 +6056,6 @@ class SessionFilesCoordinator:
         if len(infos) == 1:
             session, info = next(iter(infos.items()))
             return {session: app.cached_session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)}
-        if not app.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
-            return {
-                session: app.cached_session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
-                for session, info in infos.items()
-            }
         payloads: dict[str, SessionFilesPayload] = {}
         for session, info in infos.items():
             payloads[session] = app.cached_session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
@@ -6132,30 +6099,8 @@ class SessionFilesCoordinator:
                 "refresh_seconds": max_age,
             }
             if not fresh:
-                if app.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
-                    refreshing = app.start_session_files_cache_refresh(cache_key, app.refresh_session_files_cache, session, infos, hours, from_ref, to_ref, repo_refs, "background-refresh", "background-refresh")
-                    cache_meta["refreshing"] = refreshing
-                else:
-                    app.record_background_follower_stale_read(BACKGROUND_ROLE_SESSION_FILES)
-                    refresh_result = app.request_background_refresh(
-                        BACKGROUND_ROLE_SESSION_FILES,
-                        app.session_files_refresh_request_payload(cache_key, session, hours, from_ref, to_ref, repo_refs),
-                    )
-                    app.record_background_avoided_recompute(BACKGROUND_ROLE_SESSION_FILES)
-                    if app.background_refresh_should_fallback(refresh_result):
-                        try:
-                            payload, status, cache_hit, age_seconds = app.compute_session_files_cache_entry(cache_key, compute_via_batchd)
-                            cache_meta = {
-                                "hit": cache_hit,
-                                "stale": False,
-                                "age_seconds": round(age_seconds, 3),
-                                "refresh_seconds": max_age,
-                                "fallback": True,
-                            }
-                        except SessionFilesBatchedUnavailable:
-                            cache_meta["refreshing_elsewhere"] = True
-                    else:
-                        cache_meta["refreshing_elsewhere"] = True
+                refreshing = app.start_session_files_cache_refresh(cache_key, app.refresh_session_files_cache, session, infos, hours, from_ref, to_ref, repo_refs, "background-refresh", "background-refresh")
+                cache_meta["refreshing"] = refreshing
         else:
             if accepted_operation:
                 payload, status = app.start_session_files_operation(
@@ -6172,7 +6117,7 @@ class SessionFilesCoordinator:
                 cache_meta = {
                     "hit": False,
                     "stale": False,
-                    "refreshing_elsewhere": status == HTTPStatus.ACCEPTED,
+                    "refreshing": status == HTTPStatus.ACCEPTED,
                 }
             else:
                 try:
@@ -6187,7 +6132,7 @@ class SessionFilesCoordinator:
                 except SessionFilesBatchedUnavailable as error:
                     payload = {"ok": False, "status": "SERVICE_UNAVAILABLE", "reason": str(error), "terminal": True}
                     status = HTTPStatus.SERVICE_UNAVAILABLE
-                    cache_meta = {"hit": False, "stale": False, "refreshing_elsewhere": False}
+                    cache_meta = {"hit": False, "stale": False, "refreshing": False}
         payload = copy.deepcopy(payload)
         if status == HTTPStatus.ACCEPTED:
             app.record_performance_sample(
@@ -6197,7 +6142,7 @@ class SessionFilesCoordinator:
                 compute_ms=(time.perf_counter() - started) * 1000,
                 payload=payload,
                 cache_key=cache_key,
-                cache_status="refreshing-elsewhere",
+                cache_status="refreshing",
                 cache_hit=False,
                 cache_fresh=False,
                 details={"session": session or "", "status": int(status)},
@@ -6230,7 +6175,7 @@ class SessionFilesCoordinator:
             compute_ms=(time.perf_counter() - started) * 1000,
             payload=payload,
             cache_key=cache_key,
-            cache_status="hit:stale" if cache_meta.get("hit") and cache_meta.get("stale") else ("hit:fresh" if cache_meta.get("hit") else ("refreshing-elsewhere" if cache_meta.get("refreshing_elsewhere") else "miss:computed")),
+            cache_status="hit:stale" if cache_meta.get("hit") and cache_meta.get("stale") else ("hit:fresh" if cache_meta.get("hit") else ("refreshing" if cache_meta.get("refreshing") else "miss:computed")),
             cache_hit=bool(cache_meta.get("hit")),
             cache_fresh=not bool(cache_meta.get("stale")),
             details={"session": session or "", "status": int(status)},
@@ -6370,12 +6315,24 @@ class ActivityCache:
         self._app = app
         self.state = app.__dict__.pop("__owned_state__activity_cache_state", None) or app.__dict__.get("activity_transcript_service") or ActivityTranscriptService()
         self.watched_pr_truncated_signature: tuple[int, tuple[str, ...]] | None = app.__dict__.pop("__owned_state__activity_cache_watched_pr_truncated_signature", None)
-    def demote(self) -> None:
+    def stop(self) -> None:
         with self.state.tabber_cache_lock:
             record = self.state.tabber_warmer_record
-            self.state.tabber_warmer_record = TabberActivityWarmerRecord()
-            self.state.tabber_cache_record.refresh_worker = None
-        record.wake.set()
+            record.running = False
+            warmer = record.thread
+            refresh_worker = self.state.tabber_cache_record.refresh_worker
+            record.wake.set()
+        for worker in (refresh_worker, warmer):
+            if worker is None or worker is threading.current_thread():
+                continue
+            worker.join(timeout=30.0)
+            assert not worker.is_alive(), "Tabber background worker did not stop during scheduler shutdown"
+        with self.state.tabber_cache_lock:
+            if self.state.tabber_warmer_record is record:
+                record.thread = None
+                self.state.tabber_warmer_record = TabberActivityWarmerRecord()
+            if self.state.tabber_cache_record.refresh_worker is refresh_worker:
+                self.state.tabber_cache_record.refresh_worker = None
     def watched_prs_payload(self, app, allow_network: bool = True) -> dict[str, Any]: # resolve the github.watched_prs watchlist to live PR metadata, independent of any open # session's branch. The server-side SSE loop refreshes it on a fixed slow cadence so a big watchlist # does not exhaust the GitHub rate limit.
         settings = settings_payload().get("settings", {})
         refs = settings.get("github", {}).get("watched_prs", [])
@@ -6761,7 +6718,7 @@ class ActivityCache:
         return coalesce_key, generation
     def compute_tabber_activity_rows_via_batchd( self, app, changed_sessions: dict[str, SessionInfo], *, discovered_sessions: dict[str, SessionInfo], session_files_by_session: dict[str, Any], activity_snapshot: dict[str, Any], preclassified_by_session: dict[str, dict[str, dict[str, Any]]], owned_agent_rows: dict[tuple[str, str, str], dict[str, Any]], snapshot_revision: int, scope: str, bounded_hours: float, source_signature: str, locale: str = "en", ) -> dict[str, dict[str, Any]]:
         """Gather impure per-session inputs (tmux screen state, attention/cooldown, path/git) in the
-        web owner, then submit the WHOLE changed-session batch to batchd for pure assembly in one call.
+        server process, then submit the WHOLE changed-session batch to batchd for pure assembly in one call.
 
         All gathering happens here (a batchd spawn worker has no tmux/app-state access); the worker only
         reconstructs SessionInfo and runs assemble_agent_window_rows/build_recent_agents_payload.
@@ -7015,7 +6972,7 @@ class ActivityCache:
             }
         )
         return hashlib.sha256(key_text.encode("utf-8")).hexdigest()
-    def tabber_activity_cache_disk_path(self, app, hours: float, source_signature: str = "") -> tuple[Path, str]: # A source signature fences freshness inside the record; it must not become # part of the filename. Statusd revisions can legitimately advance while a # Tabber refresh is in flight, and the old design left one durable file per # short-lived signature, then made followers see an empty cache miss.
+    def tabber_activity_cache_disk_path(self, app, hours: float, source_signature: str = "") -> tuple[Path, str]: # A source signature fences freshness inside the record; it must not become # part of the filename. Statusd revisions can legitimately advance while a # Tabber refresh is in flight, and the old design left one durable file per # short-lived signature, then made readers see an empty cache miss.
         del source_signature
         key_text = json.dumps(
             {
@@ -7048,7 +7005,7 @@ class ActivityCache:
         return published_caches.tabber_cache(
             version=TABBER_ACTIVITY_CACHE_VERSION,
             payload_signature=app.session_files_payload_signature,
-            owner_generation=lambda: app.background_owner.status_payload().get("generation", {}),
+            owner_generation=lambda: app.background_scheduler.process_payload(),
             bounded_hours=lambda value: session_files.bounded_session_files_hours(app.float_value(value, 24.0)),
             clock=time.time,
             writer=atomic_write_text,
@@ -7191,34 +7148,6 @@ class ActivityCache:
                     self.state.tabber_cache_record.inflight_by_key.pop(inflight_key, None)
     def refresh_tabber_activity_cache_owner(self, app, bounded_hours: float, source_signature: str) -> dict[str, Any]:
         started = time.perf_counter()
-        if not app.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
-            app.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "refresh"})
-            cached = app.get_tabber_activity_cache(float("inf"), allow_stale=True, hours=bounded_hours, source_signature=source_signature)
-            if cached:
-                payload, _fresh, _age = cached
-                app.record_performance_sample(
-                    BACKGROUND_ROLE_TABBER_ACTIVITY,
-                    "refresh",
-                    trigger="follower-cache",
-                    compute_ms=(time.perf_counter() - started) * 1000,
-                    payload=payload,
-                    cache_key={"kind": "tabber-activity"},
-                    cache_status="hit:follower",
-                    cache_hit=True,
-                )
-                return payload
-            payload = {"activity": {}, "agents": [], "agent_windows": {}, "errors": [], "session_scope": "configured", "session_file_hours": bounded_hours}
-            app.record_performance_sample(
-                BACKGROUND_ROLE_TABBER_ACTIVITY,
-                "refresh",
-                trigger="follower-empty",
-                compute_ms=(time.perf_counter() - started) * 1000,
-                payload=payload,
-                cache_key={"kind": "tabber-activity"},
-                cache_status="refreshing-elsewhere",
-                cache_hit=False,
-            )
-            return payload
         with self.state.tabber_cache_lock:
             record = self.state.tabber_cache_record
             current_payload = copy.deepcopy(record.payload) if record.payload is not None else None
@@ -7298,50 +7227,61 @@ class ActivityCache:
                 if self.state.tabber_cache_record.refresh_worker is worker:
                     self.state.tabber_cache_record.refresh_worker = None
     def start_tabber_activity_cache_refresh(self, app) -> bool:
-        if not app.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+        with background_scheduler_admission(app, BACKGROUND_ROLE_TABBER_ACTIVITY) as admitted:
+            if not admitted:
+                should_request = True
+            else:
+                should_request = False
+                with self.state.tabber_cache_lock:
+                    if self.state.tabber_cache_record.refresh_worker is not None:
+                        return False
+                    worker: threading.Thread
+
+                    def run_refresh() -> None:
+                        app.run_tabber_activity_cache_refresh(worker)
+
+                    worker = threading.Thread(target=run_refresh, name="tabber-activity-refresh", daemon=True)
+                    self.state.tabber_cache_record.refresh_worker = worker
+
+                def rollback() -> None:
+                    with self.state.tabber_cache_lock:
+                        if self.state.tabber_cache_record.refresh_worker is worker:
+                            self.state.tabber_cache_record.refresh_worker = None
+
+                common.start_thread_with_rollback(worker, rollback)
+        if should_request:
             app.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "async-refresh"})
             return False
-        with self.state.tabber_cache_lock:
-            if self.state.tabber_cache_record.refresh_worker is not None:
-                return False
-            worker: threading.Thread
-
-            def run_refresh() -> None:
-                app.run_tabber_activity_cache_refresh(worker)
-
-            worker = threading.Thread(target=run_refresh, name="tabber-activity-refresh", daemon=True)
-            self.state.tabber_cache_record.refresh_worker = worker
-        def rollback() -> None:
-            with self.state.tabber_cache_lock:
-                if self.state.tabber_cache_record.refresh_worker is worker:
-                    self.state.tabber_cache_record.refresh_worker = None
-
-        common.start_thread_with_rollback(worker, rollback)
         return True
     def start_tabber_activity_cache_warmer(self, app) -> bool:
-        if not app.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+        with background_scheduler_admission(app, BACKGROUND_ROLE_TABBER_ACTIVITY) as admitted:
+            if not admitted:
+                should_request = True
+            else:
+                should_request = False
+                with self.state.tabber_cache_lock:
+                    current = self.state.tabber_warmer_record
+                    if current.running and current.thread is not None and current.thread.is_alive():
+                        return False
+                    record = TabberActivityWarmerRecord(running=True, consumer_until=current.consumer_until, refresh_due_at=current.refresh_due_at, refresh_triggers=set(current.refresh_triggers))
+                    worker = threading.Thread(target=app.tabber_activity_cache_warmer_loop, args=(record,), name="tabber-activity-cache", daemon=True)
+                    record.thread = worker
+                    self.state.tabber_warmer_record = record
+
+                    def rollback() -> None:
+                        # tabber_cache_lock is already held by this caller; clear the just-published thread
+                        # in place. capture_thread_owners reads tabber_warmer_record.thread under this same
+                        # lock and stop_tabber_warmer joins it, so publication and start must be atomic.
+                        if self.state.tabber_warmer_record is record and record.thread is worker:
+                            record.thread = None
+                            record.running = False
+
+                    # Start under the lock so a teardown capturing tabber_warmer_record.thread in the gap
+                    # cannot observe or join a published-but-unstarted warmer thread.
+                    common.start_thread_with_rollback(worker, rollback)
+        if should_request:
             app.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "warmer"})
             return False
-        with self.state.tabber_cache_lock:
-            current = self.state.tabber_warmer_record
-            if current.running and current.thread is not None and current.thread.is_alive():
-                return False
-            record = TabberActivityWarmerRecord(running=True, consumer_until=current.consumer_until, refresh_due_at=current.refresh_due_at, refresh_triggers=set(current.refresh_triggers))
-            worker = threading.Thread(target=app.tabber_activity_cache_warmer_loop, args=(record,), name="tabber-activity-cache", daemon=True)
-            record.thread = worker
-            self.state.tabber_warmer_record = record
-
-            def rollback() -> None:
-                # tabber_cache_lock is already held by this caller; clear the just-published thread
-                # in place. capture_thread_owners reads tabber_warmer_record.thread under this same
-                # lock and stop_tabber_warmer joins it, so publication and start must be atomic.
-                if self.state.tabber_warmer_record is record and record.thread is worker:
-                    record.thread = None
-                    record.running = False
-
-            # Start under the lock so a teardown capturing tabber_warmer_record.thread in the gap
-            # cannot observe or join a published-but-unstarted warmer thread.
-            common.start_thread_with_rollback(worker, rollback)
         return True
     def tabber_activity_cache_warmer_loop(self, app, record: TabberActivityWarmerRecord) -> None:
         try:
@@ -7349,7 +7289,7 @@ class ActivityCache:
                 with self.state.tabber_cache_lock:
                     if self.state.tabber_warmer_record is not record or not record.running:
                         return
-                if not app.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+                if not app.scheduler_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
                     return
                 with self.state.tabber_cache_lock:
                     due_at = record.refresh_due_at
@@ -7449,44 +7389,11 @@ class ActivityCache:
                 if not visible_consumer:
                     payload["cache"]["refreshing"] = False
                     payload["cache"]["idle_no_consumer"] = True
-                elif app.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
-                    payload["cache"]["refreshing"] = app.start_tabber_activity_cache_refresh()
                 else:
-                    app.record_background_follower_stale_read(BACKGROUND_ROLE_TABBER_ACTIVITY)
-                    refresh_result = app.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "activity-payload-stale"})
-                    app.record_background_avoided_recompute(BACKGROUND_ROLE_TABBER_ACTIVITY)
-                    if app.background_refresh_should_fallback(refresh_result):
-                        payload = app.build_activity_payload(hours=bounded_hours)
-                        app.set_tabber_activity_cache(payload, source_signature=source_signature)
-                        payload = copy.deepcopy(payload)
-                        payload["cache"] = {
-                            "hit": False,
-                            "stale": False,
-                            "age_seconds": 0,
-                            "refresh_seconds": refresh_seconds,
-                            "fallback": True,
-                        }
-                    else:
-                        payload["cache"]["refreshing_elsewhere"] = True
+                    payload["cache"]["refreshing"] = app.start_tabber_activity_cache_refresh()
             return payload, HTTPStatus.OK
         if not visible_consumer:
             return app.empty_tabber_activity_payload(bounded_hours, refresh_seconds, idle_no_consumer=True), HTTPStatus.OK
-        if not app.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
-            refresh_result = app.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "activity-payload"})
-            app.record_background_avoided_recompute(BACKGROUND_ROLE_TABBER_ACTIVITY)
-            if app.background_refresh_should_fallback(refresh_result):
-                payload = app.build_activity_payload(hours=bounded_hours)
-                app.set_tabber_activity_cache(payload, source_signature=source_signature)
-                payload = copy.deepcopy(payload)
-                payload["cache"] = {
-                    "hit": False,
-                    "stale": False,
-                    "age_seconds": 0,
-                    "refresh_seconds": refresh_seconds,
-                    "fallback": True,
-                }
-                return payload, HTTPStatus.OK
-            return app.empty_tabber_activity_payload(bounded_hours, refresh_seconds, refreshing_elsewhere=True), HTTPStatus.OK
         refreshing = app.start_tabber_activity_cache_refresh()
         return app.empty_tabber_activity_payload(bounded_hours, refresh_seconds, refreshing=refreshing), HTTPStatus.OK
 
@@ -7857,7 +7764,7 @@ class SystemStatusProjector:
         overload-evidence path — never command lines or payloads.
         """
         table = local_services_registry.bounded_process_table()
-        port = int(getattr(app.background_owner, "port", 0) or 0) if hasattr(self, "background_owner") else 0
+        port = int(getattr(app.background_scheduler, "port", 0) or 0) if hasattr(self, "background_scheduler") else 0
         port_group = local_services_registry.tracked_port_process_group(port, common.STATE_DIR, table) if port else {}
         service_dir = common.STATE_DIR / "services"
         tracked_groups = local_services_registry.tracked_local_service_groups(service_dir, table)
@@ -7908,7 +7815,7 @@ class SystemStatusProjector:
         the single control-server thread precisely while diagnosing a loaded server, so the CLI
         report uses this small in-memory projection instead.
         """
-        status = app.background_owner.status_payload()
+        status = app.background_scheduler.status_payload()
         diagnostics = app.performance_diagnostics_payload()
         metrics = diagnostics.get("perf") if isinstance(diagnostics.get("perf"), dict) else {}
         client_events = app.client_events.snapshot()
@@ -7925,15 +7832,12 @@ class SystemStatusProjector:
         return {
             "ok": True,
             "state_dir": str(common.STATE_DIR),
-            "owner": {
-                "current_owner": status.get("current_owner"),
+            "scheduler": {
                 "status": status.get("status"),
-                "owner": bool(status.get("owner")),
+                "process": status.get("process"),
                 "search_index": status.get("search_index"),
-                "debug": {},
-                "control": {"ok": True, "source": "live-owner-control"},
             },
-            "refresh": {"bounded": True, "roles": status.get("roles", {}), "counters": status.get("counters", {}), "coalescing": status.get("coalescing", {}), "local_refreshing": {}, "dependency_invalidations": {}, "recurring_work": []},
+            "refresh": {"bounded": True, "roles": status.get("roles", {}), "counters": status.get("counters", {}), "coalescing": status.get("refresh_queue", {}), "local_refreshing": {}, "dependency_invalidations": {}, "recurring_work": []},
             "caches": {
                 "session_files": bounded_cache(SESSION_FILES_CACHE_DIR),
                 "activity": bounded_cache(TABBER_ACTIVITY_CACHE_DIR),
@@ -7951,7 +7855,7 @@ class SystemStatusProjector:
             "transcripts_cache": {},
             "filesystem_batch": app.runtime_filesystem_batch_rows(metrics),
         }
-    def runtime_report_core( self, app, *, background_status: dict[str, Any] | None = None, owner_control_response: dict[str, Any] | None = None, local_services: dict[str, Any] | None = None, ) -> dict[str, Any]:
+    def runtime_report_core( self, app, *, background_status: dict[str, Any] | None = None, scheduler_control_response: dict[str, Any] | None = None, local_services: dict[str, Any] | None = None, ) -> dict[str, Any]:
         """The half of the report the Daemons roster SCANS: the service roster and its identity.
 
         Split from `runtime_report_advanced` because these two halves have different demand. This
@@ -7963,7 +7867,7 @@ class SystemStatusProjector:
         disclosure, and every key in the other half has either an Advanced-only reader or none.
         """
 
-        status = background_status if isinstance(background_status, dict) else app.background_owner.status_payload()
+        status = background_status if isinstance(background_status, dict) else app.background_scheduler.status_payload()
         client_events = app.client_events.snapshot()
         chat_events = {
             event_type: {
@@ -7976,10 +7880,9 @@ class SystemStatusProjector:
         return {
             "ok": True,
             "state_dir": str(common.STATE_DIR),
-            "owner": {
-                "current_owner": status.get("current_owner"),
+            "scheduler": {
                 "status": status.get("status"),
-                "owner": bool(status.get("owner")),
+                "process": status.get("process"),
                 "search_index": status.get("search_index"),
             },
             "caches": {
@@ -7988,8 +7891,8 @@ class SystemStatusProjector:
                 "search_index": app.runtime_cache_dir_stats(file_index.INDEX_DIR),
             },
             "search_index": (
-                owner_control_response.get("search_index_runtime")
-                if isinstance(owner_control_response, dict) and isinstance(owner_control_response.get("search_index_runtime"), dict)
+                scheduler_control_response.get("search_index_runtime")
+                if isinstance(scheduler_control_response, dict) and isinstance(scheduler_control_response.get("search_index_runtime"), dict)
                 else file_index.runtime_diagnostics()
             ),
             "local_services": services,
@@ -8001,7 +7904,7 @@ class SystemStatusProjector:
             },
             "tmux_signal_watcher": app.tmux_signal_event_watcher_status(),
         }
-    def runtime_report_advanced( self, app, *, background_status: dict[str, Any] | None = None, owner_debug: dict[str, Any] | None = None, owner_control_response: dict[str, Any] | None = None, force_transcripts: bool = True, local_services: dict[str, Any] | None = None, ) -> dict[str, Any]:
+    def runtime_report_advanced( self, app, *, background_status: dict[str, Any] | None = None, scheduler_debug: dict[str, Any] | None = None, scheduler_control_response: dict[str, Any] | None = None, force_transcripts: bool = True, local_services: dict[str, Any] | None = None, ) -> dict[str, Any]:
         """The half a reader consults deliberately: refresh coordination, top-N folds, transcripts.
 
         `local_services` is INJECTED rather than defaulted away. The approvald recurring-work row
@@ -8011,7 +7914,7 @@ class SystemStatusProjector:
         for its own collection.
         """
 
-        status = background_status if isinstance(background_status, dict) else app.background_owner.status_payload()
+        status = background_status if isinstance(background_status, dict) else app.background_scheduler.status_payload()
         # Remote control responses from older servers may still carry perf, while the current
         # topbar status deliberately does not.  Keep the report's diagnostics source explicit.
         diagnostic_status = dict(status)
@@ -8020,9 +7923,9 @@ class SystemStatusProjector:
         transcript_payload = app.transcripts_payload(force=force_transcripts)
         services = local_services if isinstance(local_services, dict) else app.runtime_local_services()
         return {
-            "owner": {
-                "debug": app.runtime_owner_debug_summary(owner_debug),
-                "control": app.runtime_owner_control_summary(owner_control_response),
+            "scheduler_diagnostics": {
+                "debug": app.runtime_scheduler_debug_summary(scheduler_debug),
+                "control": app.runtime_scheduler_control_summary(scheduler_control_response),
             },
             "refresh": app.runtime_refresh_state(status, services),
             "top_endpoints": app.runtime_top_endpoints(diagnostic_status),
@@ -8037,30 +7940,30 @@ class SystemStatusProjector:
             "largest_active_transcripts": app.runtime_largest_transcripts(transcript_payload),
             "transcripts_cache": transcript_payload.get("cache", {}) if isinstance(transcript_payload, dict) else {},
         }
-    def runtime_report_payload( self, app, *, background_status: dict[str, Any] | None = None, owner_debug: dict[str, Any] | None = None, owner_control_response: dict[str, Any] | None = None, force_transcripts: bool = True, ) -> dict[str, Any]:
+    def runtime_report_payload( self, app, *, background_status: dict[str, Any] | None = None, scheduler_debug: dict[str, Any] | None = None, scheduler_control_response: dict[str, Any] | None = None, force_transcripts: bool = True, ) -> dict[str, Any]:
         """The whole report: both halves, one local-service collection, one merge rule.
 
         The CLI/control report and the composed system-status payload both want everything, so the
         composition lives here once rather than as a second construction beside each caller.
         """
 
-        status = background_status if isinstance(background_status, dict) else app.background_owner.status_payload()
+        status = background_status if isinstance(background_status, dict) else app.background_scheduler.status_payload()
         local_services = app.runtime_local_services()
         core = app.runtime_report_core(
             background_status=status,
-            owner_control_response=owner_control_response,
+            scheduler_control_response=scheduler_control_response,
             local_services=local_services,
         )
         advanced = app.runtime_report_advanced(
             background_status=status,
-            owner_debug=owner_debug,
-            owner_control_response=owner_control_response,
+            scheduler_debug=scheduler_debug,
+            scheduler_control_response=scheduler_control_response,
             force_transcripts=force_transcripts,
             local_services=local_services,
         )
-        # `owner` is the one key both halves contribute to, so it is merged explicitly here rather
+        # `scheduler` is the one key both halves contribute to, so it is merged explicitly here rather
         # than letting a dict splat silently drop the cheap identity fields.
-        return {**core, **advanced, "owner": {**core["owner"], **advanced["owner"]}}
+        return {**core, **advanced}
     def system_status_server_block(self, app, sample: dict[str, Any], *, now: float | None = None) -> dict[str, Any]:
         """Publish the web process's own row through the ONE metric-envelope owner.
 
@@ -8132,7 +8035,7 @@ class SystemStatusProjector:
     def system_status_core_payload(self, app) -> dict[str, Any]:
         """The body the Daemons roster polls for. Produced in the background, never on a request.
 
-        This runs on the snapshot owner's thread; `/api/system-status` only reads what it
+        This runs on the snapshot indexer's thread; `/api/system-status` only reads what it
         published. That is the whole point of the split - the panel's five-second poll used to
         carry this entire assembly, so a server that was busy served its own diagnostics slowest.
         """
@@ -8186,7 +8089,6 @@ class SystemStatusProjector:
         return {
             **core,
             **{key: value for key, value in advanced.items() if key not in {"ok", "generated_at"}},
-            "owner": {**core["owner"], **advanced["owner"]},
         }
     def attach_system_status_snapshot_owner(self, app, owner: system_status_snapshot_module.SystemStatusSnapshotOwner) -> None:
         """Hold the ONE owner of the retained system-status bodies."""
@@ -8352,7 +8254,6 @@ class TmuxWebtermApp:
         )
         self.background_refresh_event_log_lock = threading.Lock()
         self.background_refresh_event_log_records: dict[tuple[str, str], BackgroundRefreshEventLogRecord] = {}
-        self.replayed_background_client_event_ids: set[str] = set()
         # The monotonic deadline until which the client-event loop drains indexd's buffered Quick Open
         # progress frames. Opened by `mark_search_progress_active` when this web process kicks a crawl,
         # extended while unfinished frames keep arriving, and left to lapse once a crawl settles.
@@ -8413,9 +8314,9 @@ class TmuxWebtermApp:
         self.event_log = EventLog(EVENT_LOG_PATH)
         self.run_history_store = RunHistoryStore(RUN_HISTORY_PATH)
         self.control_server = YolomuxControlServer(self.handle_control_request)
-        if not status_service_mode:
-            self.control_server.start()
-        self.background_owner: BackgroundOwnerRegistry | DisabledBackgroundOwner = DisabledBackgroundOwner()
+        self.background_scheduler: BackgroundScheduler = BackgroundScheduler(project_root=str(PROJECT_ROOT))
+        self._application_teardown_lock = threading.Lock()
+        self._application_teardown_done = False
         self.search_indexer = SearchIndexerClient()
         self.stats_current_client = StatsCurrentClient()
         self.stats_current_http = StatsHttpForwarder(
@@ -8436,12 +8337,16 @@ class TmuxWebtermApp:
         )
         # A persistent child owns all Quick Open builds and SQLite writes.
         # HTTP/WebSocket processes remain read-only index consumers.
-        file_index.set_background_owner_checker(self.search_index_can_build)
-        file_index.set_background_owner_refresh_requester(self.request_background_refresh)
+        file_index.set_background_callback_owner(self)
+        file_index.set_build_authority_checker(self.search_index_can_build)
+        file_index.set_background_refresh_requester(self.request_background_refresh)
+        file_index.set_background_work_submitter(self.background_scheduler.submit_work)
         file_index.set_background_index_search_requester(self.request_background_index_search)
-        file_index.set_background_owner_bytes_recorder(self.record_background_search_index_bytes_written)
-        file_index.set_background_owner_done_notifier(self.publish_background_refresh_done)
+        file_index.set_background_bytes_recorder(self.record_background_search_index_bytes_written)
+        file_index.set_background_done_notifier(self.publish_background_refresh_done)
         file_index.set_search_progress_notifier(self.publish_search_progress)
+        if not status_service_mode:
+            self.control_server.start()
 
     def require_known_session(self, session: str) -> tuple[dict[str, Any], HTTPStatus] | None:
         # The standard "unknown session -> 404" guard. Decorated handlers use requires_known_session();
@@ -8452,7 +8357,7 @@ class TmuxWebtermApp:
         return None
 
     def stats_current_process_identity(self) -> tuple[str, str, int]:
-        owner = self.background_owner.owner_payload()
+        owner = self.background_scheduler.process_payload()
         try:
             port = max(0, int(owner.get("port") or 0))
         except (TypeError, ValueError):
@@ -8463,12 +8368,11 @@ class TmuxWebtermApp:
         return key, label, port
 
     def stats_current_collector_context(self) -> dict[str, Any]:
-        """Expose the elected web identity AND where to reach it; statsd reads the rest itself.
+        """Expose this server's web identity AND where to reach it; statsd reads the rest itself.
 
         The control socket is part of this handshake because this process is the only one
-        that authoritatively knows it. statsd used to look the address up in the background
-        owner ELECTION record, which a managed instance never writes -- so its CPU/memory
-        sample was produced every second and silently dropped for the life of the process.
+        that authoritatively knows it. The local scheduler passes that endpoint directly;
+        statsd does not discover a separate web process; this server is its sole web owner.
         """
 
         _source_id, _label, port = self.stats_current_process_identity()
@@ -8579,7 +8483,7 @@ class TmuxWebtermApp:
         return rows
 
     def start_status_collector_lease(self) -> bool:
-        """Hold one statusd lease for this elected process's recurring status collectors."""
+        """Hold one statusd lease for this process's recurring status collectors."""
         if not getattr(self, "sessions", ()):
             return True
         status_client = self.__dict__.get("status_client")
@@ -8923,9 +8827,9 @@ class TmuxWebtermApp:
         return discovered_token_rows
 
     def stats_current_owner_generation(self) -> int | None:
-        if not self.background_can_run(BACKGROUND_ROLE_STATS_SAMPLER):
+        if not self.scheduler_can_run(BACKGROUND_ROLE_STATS_SAMPLER):
             return None
-        started_at_ns = self.background_owner.owner_payload().get("started_at_ns")
+        started_at_ns = self.background_scheduler.process_payload().get("started_at_ns")
         if isinstance(started_at_ns, bool) or not isinstance(started_at_ns, int):
             return None
         return started_at_ns if started_at_ns >= 0 else None
@@ -9048,7 +8952,7 @@ class TmuxWebtermApp:
                     self.stats_collection_state.agent_activity_state.pop(key, None)
         process_id, _label, _port = (
             self.stats_current_process_identity()
-            if hasattr(self, "background_owner")
+            if hasattr(self, "background_scheduler")
             else ("web-test", "web-test", 0)
         )
         return stats_current_collectors.agent_status_success(
@@ -9201,7 +9105,7 @@ class TmuxWebtermApp:
             rows_provider = lambda _inventory: self.stats_agent_token_rows(fixture_rows_value)
         source_identity_provider = (
             lambda: self.stats_current_process_identity()[0]
-            if hasattr(self, "background_owner")
+            if hasattr(self, "background_scheduler")
             else "web-test"
         )
         backfill_status_sink = (
@@ -9269,36 +9173,29 @@ class TmuxWebtermApp:
 
         return self.latest_stats_sample(), False
 
-    def start_background_owner(self, port: int | None = None, priority: int = 0, *, managed_instance: bool = False) -> bool:
-        # The server lease now exclusively owns the complete product root. There
-        # is no same-root follower or role election to perform: this process owns
-        # IDX, STATS, and SESS for its lifetime.
-        self.background_owner = DisabledBackgroundOwner(port=port, project_root=str(PROJECT_ROOT))
-        file_index.set_background_owner_checker(self.search_index_can_build)
-        self.background_owner.start()
-        self.handle_background_owner_acquired({"last_transition": "local", "generation": self.background_owner.owner_payload()})
+    def start_background_scheduler(self, port: int | None = None) -> bool:
+        """Start this server's local background services after root leasing."""
+        file_index.set_build_authority_checker(self.search_index_can_build)
+        if not self.background_scheduler.start(port=port, project_root=str(PROJECT_ROOT)):
+            return False
+        try:
+            started = self.handle_background_scheduler_started()
+        except BaseException:
+            # Startup is a transaction: a service that fails after the scheduler thread starts
+            # must not leave this instance publishing local work or retaining sidecar leases.
+            self.stop_background_scheduler()
+            raise
+        if not started:
+            self.stop_background_scheduler()
+            return False
         return True
 
-    def handle_background_owner_acquired(self, status: dict[str, Any]) -> None:
-        transition = str(status.get("last_transition") or "acquired")
-        if transition == "takeover":
-            self.log_event(
-                None,
-                "background_owner_takeover",
-                "Background owner moved to this server",
-                status.get("last_transition_details", {}),
-                message_key="events.message.backgroundOwner.takeover",
-            )
-        else:
-            self.log_event(
-                None,
-                "background_owner_acquired",
-                "Background owner acquired by this server",
-                status.get("generation", {}),
-                message_key="events.message.backgroundOwner.acquired",
-            )
-        # batchd is started only by the elected scheduler owner.  HTTP handlers
-        # can submit/read work but must never create a child process themselves.
+    def handle_background_scheduler_started(self, _status: dict[str, Any] | None = None) -> bool:
+        # These services start once per server after the product-root lease.
+        # Their return values describe individual service admission and are exposed through the
+        # service/status payloads; a transient sidecar lease refusal must not make the HTTP server
+        # fail startup while an old instance is releasing that sidecar. Exceptions still abort
+        # startup, and each service can retry through its normal local lifecycle.
         self.job_client.start_for_scheduler()
         composed_owner_for(self, "_session_files_coordinator", SessionFilesCoordinator).start()
         self.pricing_refresh_coordinator.start_periodic()
@@ -9312,41 +9209,34 @@ class TmuxWebtermApp:
         # their deferred batchd refresh after the listener is live instead.
         self.warm_start_tabber_activity_cache()
         self.start_tabber_activity_cache_warmer()
-        self.publish_background_client_event("background_owner_changed", self.background_owner.status_payload(), trigger="background-owner", cache="ready")
+        return True
 
     def refresh_search_indexer_schedule(self) -> dict[str, Any]:
         """Lease indexd and enqueue startup-depth-1 work for every configured indexed root (item 1).
 
-        Only the elected background owner leases and schedules. Called on owner acquisition and
+        This server leases and schedules its own configured roots. Called on startup and
         whenever indexed-root settings change while this server owns scheduling, so adding a root
         starts its layer-1 crawl proactively and removing every root releases the lease and lets the
         daemon idle out honestly. Reuses the one `indexd` service; it starts no second scheduler.
         """
-        if not self.background_owner.is_owner():
-            return {"ok": True, "owner": False, "scheduled_roots": [], "leased": False}
         settings = self.settings_payload().get("settings", {})
         file_explorer = settings.get("file_explorer", {}) if isinstance(settings, dict) else {}
         roots = list(self.indexed_repo_discovery_dirs(file_explorer))
         result = self.search_indexer.lease_configured_roots(roots)
-        return {**result, "owner": True}
+        return {**result, "scheduler": True}
 
-    def background_can_run(self, role: str) -> bool:
-        return self.background_owner.can_run(role)
+    def scheduler_can_run(self, role: str) -> bool:
+        return self.background_scheduler.can_run(role)
 
     def search_index_can_build(self, role: str) -> bool:
         """Only the persistent indexer child may mutate Quick Open indexes."""
-        return False if role == BACKGROUND_ROLE_SEARCH_INDEX else self.background_can_run(role)
+        return False if role == BACKGROUND_ROLE_SEARCH_INDEX else self.scheduler_can_run(role)
 
     def request_background_index_search(self, payload: dict[str, Any]) -> dict[str, Any]:
         root = str(payload.get("root") or "").strip()
         if not root:
             return {"ok": False, "error": "missing index search root"}
         return self.search_indexer.search(root, str(payload.get("query") or ""), int(payload.get("limit") or 400))
-
-    def background_owner_status_payload(self) -> tuple[dict[str, Any], HTTPStatus]:
-        # This path is polled by the topbar.  Diagnostics have a bounded, explicit admin
-        # endpoint so routine owner state never serializes the recent profiling ring.
-        return self.background_owner.status_payload(), HTTPStatus.OK
 
     def performance_diagnostics_payload(self, measurement_scope: str = "") -> dict[str, Any]:
         """Return bounded profiling summaries without making status polling expensive."""
@@ -9800,83 +9690,74 @@ class TmuxWebtermApp:
         self.queued_delivery_compaction_owner.stop()
         self.batchd_operation_service.stop()
 
-    def background_owner_claim_payload(self) -> tuple[dict[str, Any], HTTPStatus]:
-        was_owner = self.background_owner.is_owner()
-        ok = self.background_owner.attempt_takeover()
-        status_payload, _status = self.background_owner_status_payload()
-        payload = {
-            "ok": bool(ok),
-            "claimed": bool(ok and not was_owner),
-            "was_owner": bool(was_owner),
-            "status": status_payload,
-        }
-        if not ok:
-            diagnostic = str(status_payload.get("last_error") or "background owner takeover failed")
-            payload.update(user_message_payload("common.requestFailed", diagnostic))
-            payload["diagnostic"] = diagnostic
-            return payload, HTTPStatus.CONFLICT
-        return payload, HTTPStatus.OK
-
-    def demote_background_owner(self) -> None:
-        self.pricing_refresh_coordinator.stop_periodic()
-        self.stats_current_runtime.stop()
-        self.stop_status_collector_lease()
-        composed_owner_for(self, "_session_files_coordinator", SessionFilesCoordinator).stop()
-        self.job_client.stop_for_scheduler()
-        with self.metadata_warm_lock:
-            self.metadata_warm_record.stop_event.set()
-        composed_owner_for(self, "_activity_cache", ActivityCache).demote()
-        # Release the configured-root scheduler lease so the daemon may idle out honestly and its
-        # Daemons row stops reporting a scheduled obligation this demoted server no longer owns.
-        self.search_indexer.release_scheduler_lease()
-        file_index.clear_memory_indexes()
-        # Demotion/release is just as relevant to followers as acquisition.  Use
-        # the durable background fan-out parent so clients on another port do
-        # not keep displaying an owner that has already stopped its workers.
-        self.publish_background_client_event("background_owner_changed", self.background_owner.status_payload(), trigger="background-owner", cache="ready")
-
-    def background_release_owner(self, requester: dict[str, Any]) -> dict[str, Any]:
+    def stop_background_scheduler(self) -> None:
+        # Stop the one local scheduler before stopping any worker. The client-event bridge owns
+        # watchd revision RPCs, so closing scheduler admission first prevents a late watcher from
+        # racing teardown while index leases are released.
+        scheduler = getattr(self, "background_scheduler", None)
+        scheduler_stopped = False
+        if scheduler is not None:
+            scheduler_stop = getattr(scheduler, "stop", None)
+            if callable(scheduler_stop):
+                scheduler_stop()
+                scheduler_stopped = True
+            elif hasattr(scheduler, "begin_stop"):
+                scheduler.begin_stop()
         try:
-            requester_priority = int(requester.get("priority") or 0)
-        except (TypeError, ValueError):
-            requester_priority = 0
-        owner_priority = int(getattr(self.background_owner, "priority", 0) or 0)
-        if self.background_owner.is_owner() and requester_priority < owner_priority:
-            return {
-                "ok": False,
-                "owner": True,
-                "error": "lower-priority server cannot release the preferred background owner",
-                "status": self.background_owner.status_payload(),
-            }
-        was_owner = self.background_owner.is_owner()
-        self.background_owner.release_owner("control_release")
-        if was_owner:
-            self.log_event(
-                None,
-                "background_owner_released",
-                "Background owner released for another server",
-                {"requester": requester},
-                message_key="events.message.backgroundOwner.released",
-            )
-        return {"ok": True, "owner": False, "status": self.background_owner.status_payload()}
-
-    def background_refresh_should_fallback(self, result: dict[str, Any]) -> bool:
-        # The single classifier owns "must the caller compute locally?"; every
-        # consumer routes through it so no two derive contradictory verdicts.
-        return RefreshOutcome.from_result(result).fallback
-
-    def record_background_avoided_recompute(self, role: str) -> None:
-        recorder = getattr(self.background_owner, "record_avoided_recompute", None)
-        if callable(recorder):
-            recorder(role)
-
-    def record_background_follower_stale_read(self, role: str) -> None:
-        recorder = getattr(self.background_owner, "record_follower_stale_read", None)
-        if callable(recorder):
-            recorder(role)
-
+            if hasattr(self, "_watch_bridge"):
+                self.stop_client_event_watcher()
+            self.stop_update_check_thread()
+            activity_service = self.__dict__.get("activity_transcript_service")
+            if (
+                hasattr(self, "stop_transcripts_payload_work")
+                and activity_service is not None
+                and hasattr(activity_service, "transcripts_payload_cache_lock")
+            ):
+                self.stop_transcripts_payload_work()
+            if (
+                hasattr(self, "stop_metadata_warm")
+                and hasattr(self, "metadata_warm_lock")
+                and hasattr(self, "metadata_warm_record")
+            ):
+                self.stop_metadata_warm()
+            pricing = getattr(self, "pricing_refresh_coordinator", None)
+            if pricing is not None and hasattr(pricing, "stop_periodic"):
+                pricing.stop_periodic()
+            stats_runtime = getattr(self, "stats_current_runtime", None)
+            if stats_runtime is not None and hasattr(stats_runtime, "stop"):
+                stats_runtime.stop()
+            if hasattr(self, "stop_status_collector_lease"):
+                self.stop_status_collector_lease()
+            if "_session_files_coordinator" in self.__dict__ or hasattr(self, "session_files_service"):
+                composed_owner_for(self, "_session_files_coordinator", SessionFilesCoordinator).stop()
+            job_client = getattr(self, "job_client", None)
+            if job_client is not None and hasattr(job_client, "stop_for_scheduler"):
+                job_client.stop_for_scheduler()
+            metadata_lock = getattr(self, "metadata_warm_lock", None)
+            metadata_record = getattr(self, "metadata_warm_record", None)
+            if metadata_lock is not None and metadata_record is not None:
+                with metadata_lock:
+                    metadata_record.stop_event.set()
+            if hasattr(self, "activity_transcript_service") or "_activity_cache" in self.__dict__:
+                composed_owner_for(self, "_activity_cache", ActivityCache).stop()
+            if (
+                hasattr(self, "stop_indexed_repo_discovery")
+                and activity_service is not None
+                and hasattr(activity_service, "indexed_repo_lock")
+            ):
+                self.stop_indexed_repo_discovery()
+        finally:
+            if not scheduler_stopped and scheduler is not None and hasattr(scheduler, "finish_stop"):
+                scheduler.finish_stop()
+        # Release the configured-root scheduler lease so the daemon may idle out honestly and its
+        # Daemons row stops reporting a scheduled obligation during shutdown.
+        search_indexer = getattr(self, "search_indexer", None)
+        if search_indexer is not None and hasattr(search_indexer, "release_scheduler_lease"):
+            search_indexer.release_scheduler_lease()
+        file_index.clear_background_callbacks(self)
+        file_index.clear_memory_indexes()
     def record_background_search_index_bytes_written(self, byte_count: int) -> None:
-        recorder = getattr(self.background_owner, "record_search_index_bytes_written", None)
+        recorder = getattr(self.background_scheduler, "record_search_index_bytes_written", None)
         if callable(recorder):
             recorder(byte_count)
         self.record_performance_sample(
@@ -9888,69 +9769,179 @@ class TmuxWebtermApp:
         )
 
     def record_background_fallback(self, role: str, result: dict[str, Any], payload: dict[str, Any] | None = None) -> None:
-        recorder = getattr(self.background_owner, "record_fallback", None)
+        recorder = getattr(self.background_scheduler, "record_fallback", None)
         if callable(recorder):
             recorder(role)
         self.log_event(
             None,
             "background_refresh_fallback",
-            "Background owner refresh fallback engaged",
+            "Background scheduler refresh fallback engaged",
             {"role": role, "result": result, "payload": payload or {}},
-            message_key="events.message.backgroundOwner.refreshFallback",
+            message_key="events.message.backgroundRefresh.fallback",
         )
 
     def request_background_refresh(self, role: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        with self.background_scheduler.lock:
+            return self._request_background_refresh(role, payload)
+
+    def _perform_search_index_refresh(self, request_payload: dict[str, Any]) -> dict[str, Any]:
+        """Run the one indexer mutation used by both synchronous and advisory refreshes."""
+
+        search_root = str(request_payload.get("root") or "").strip()
+        if request_payload.get("operation") == "unindex":
+            return self.search_indexer.unindex(search_root)
+        if request_payload.get("operation") == "promote":
+            return self.search_indexer.promote_user_visible(
+                search_root,
+                str(request_payload.get("directory") or ""),
+                request_payload.get(file_index.AUTHORIZED_ROOT_IDENTITY_FIELD),
+            )
+        changed_paths = request_payload.get("paths")
+        if not isinstance(changed_paths, list):
+            changed_paths = [request_payload.get("path")] if request_payload.get("path") else []
+        normalized_changed_paths = [str(path) for path in changed_paths if isinstance(path, str) and path]
+        return self.search_indexer.enqueue(
+            search_root,
+            normalized_changed_paths,
+            reason=str(request_payload.get("reason") or "background-refresh"),
+        )
+
+    def _finish_search_index_refresh(
+        self,
+        request_payload: dict[str, Any],
+        indexer_result: dict[str, Any],
+        *,
+        admitted: bool = False,
+    ) -> dict[str, Any]:
+        """Publish one indexer result and record acceptance only after both owners agree."""
+
+        search_root = str(request_payload.get("root") or "").strip()
+        accepted = bool(indexer_result.get("accepted"))
+        if not accepted:
+            file_index.record_accepted_refresh(search_root, False)
+            with self.background_scheduler.lock:
+                self.background_scheduler.last_error = str(
+                    indexer_result.get("error") or "persistent indexer unavailable"
+                )
+            return {
+                "indexer": indexer_result,
+                "ok": False,
+                "accepted": False,
+                "error": str(indexer_result.get("error") or "persistent indexer unavailable"),
+            }
+
+        with self.background_scheduler.lock:
+            scheduler_acceptance = self.background_scheduler.accept_refresh(
+                BACKGROUND_ROLE_SEARCH_INDEX,
+                {"root": search_root} if request_payload.get("advisory") else request_payload,
+                allow_stopping=admitted,
+            )
+        if scheduler_acceptance.get("accepted"):
+            file_index.record_accepted_refresh(search_root, True)
+            self.mark_search_progress_active()
+            return {"indexer": indexer_result, **scheduler_acceptance}
+        file_index.record_accepted_refresh(search_root, False)
+        return {
+            "indexer": indexer_result,
+            "ok": False,
+            "accepted": False,
+            "local": False,
+            "fallback": True,
+            "error": str(scheduler_acceptance.get("error") or "background scheduler unavailable"),
+        }
+
+    def _run_deferred_search_refresh(self, request_payload: dict[str, Any]) -> None:
+        """Ask the persistent indexer to accept one queued refresh off the request thread."""
+
+        with self.background_scheduler.external_work_admission(BACKGROUND_ROLE_SEARCH_INDEX) as admitted:
+            if not admitted:
+                return
+            try:
+                indexer_result = self._perform_search_index_refresh(request_payload)
+            except filesystem.FilesystemError as exc:
+                indexer_result = {"ok": False, "accepted": False, "error": str(exc)}
+            self._finish_search_index_refresh(request_payload, indexer_result, admitted=True)
+
+    def _queue_deferred_search_refresh(
+        self,
+        request_payload: dict[str, Any],
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Queue cold indexer startup while keeping the HTTP/search path advisory."""
+
+        scheduler_payload = {"root": str(request_payload.get("root") or "")}
+        work_key = self.background_scheduler.refresh_request_key(
+            BACKGROUND_ROLE_SEARCH_INDEX,
+            scheduler_payload,
+        )
+        queued = self.background_scheduler.submit_work(
+            work_key,
+            lambda: self._run_deferred_search_refresh(dict(request_payload)),
+        )
+        if not queued["queued"]:
+            return {
+                **result,
+                "ok": False,
+                "accepted": False,
+                "local": False,
+                "fallback": True,
+                "deferred_acceptance": False,
+                "error": "background scheduler unavailable",
+            }
+        return {
+            **result,
+            "ok": True,
+            "accepted": False,
+            "local": True,
+            "fallback": False,
+            "deferred_acceptance": True,
+            "queued": True,
+            "coalesced": bool(queued["coalesced"]),
+        }
+
+    def _request_background_refresh(self, role: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         started = time.perf_counter()
         request_payload = payload or {}
-        if hasattr(self.background_owner, "request_owner_refresh"):
-            result = self.background_owner.request_owner_refresh(role, request_payload)
+        defer_scheduler_acceptance = role == BACKGROUND_ROLE_SEARCH_INDEX
+        search_root = str(request_payload.get("root") or "").strip()
+        if defer_scheduler_acceptance and not search_root:
+            result = {
+                "ok": False,
+                "accepted": False,
+                "role": role,
+                "local": False,
+                "fallback": False,
+                "error": "missing index refresh root",
+            }
         else:
-            self.background_owner.record_refresh_request(role)
-            result = {"ok": False, "accepted": False, "role": role, "fallback": False}
-        if result.get("local_owner") and not result.get("coalesced") and role == BACKGROUND_ROLE_SEARCH_INDEX:
-            root = str(request_payload.get("root") or "").strip()
-            if root:
+            scheduler_payload = request_payload
+            if role == BACKGROUND_ROLE_SEARCH_INDEX and request_payload.get("advisory"):
+                # Quick Open changes its query on every keystroke, but all cold queries for one
+                # root need the same indexer startup/refresh. Keep the scheduler's coalescing key
+                # rooted in the filesystem scope rather than the transient query text.
+                scheduler_payload = {"root": search_root}
+            result = self.background_scheduler.request_refresh(
+                role,
+                scheduler_payload,
+                defer_acceptance=defer_scheduler_acceptance,
+            )
+        outcome = RefreshOutcome.from_result(result)
+        if outcome.pending and not outcome.coalesced and role == BACKGROUND_ROLE_SEARCH_INDEX:
+            if request_payload.get("advisory"):
+                result = self._queue_deferred_search_refresh(request_payload, result)
+            else:
                 try:
-                    if request_payload.get("operation") == "unindex":
-                        result["indexer"] = self.search_indexer.unindex(root)
-                    elif request_payload.get("operation") == "promote":
-                        # Item 5: a Quick Open query for a not-yet-covered scope promotes that root's
-                        # existing frontier to user-visible-demand, never launching a second crawl.
-                        result["indexer"] = self.search_indexer.promote_user_visible(
-                            root,
-                            str(request_payload.get("directory") or ""),
-                            request_payload.get(file_index.AUTHORIZED_ROOT_IDENTITY_FIELD),
+                    result.update(
+                        self._finish_search_index_refresh(
+                            request_payload,
+                            self._perform_search_index_refresh(request_payload),
                         )
-                    else:
-                        changed_paths = request_payload.get("paths")
-                        if not isinstance(changed_paths, list):
-                            changed_paths = [request_payload.get("path")] if request_payload.get("path") else []
-                        normalized_changed_paths = [str(path) for path in changed_paths if isinstance(path, str) and path]
-                        result["indexer"] = self.search_indexer.enqueue(
-                            root,
-                            normalized_changed_paths,
-                            reason=str(request_payload.get("reason") or "owner-refresh"),
-                        )
-                    if result["indexer"].get("accepted"):
-                        # A crawl was accepted in the daemon; become the follower that drains its
-                        # redacted progress frames onto the shared bus while it runs.
-                        self.mark_search_progress_active()
-                    if not result["indexer"].get("accepted"):
-                        result.update({
-                            "ok": False,
-                            "accepted": False,
-                            "error": str(result["indexer"].get("error") or "persistent indexer unavailable"),
-                        })
+                    )
                 except filesystem.FilesystemError as exc:
                     result.update({"ok": False, "accepted": False, "error": str(exc)})
-        # Classify the raw result ONCE, on ingress. Every downstream decision --
-        # the performance-sample label, the owner/follower role, the fallback
-        # branch, and `refreshing_elsewhere` -- reads this single verdict instead
-        # of re-inspecting the raw booleans, so they cannot diverge. Stamp the
-        # derived `refreshing_elsewhere` so control-outcome consumers reading the
-        # returned dict (e.g. `_unindex_safe_root`) get the same judgement.
+        # Classify the raw result once on ingress. Every downstream decision reads
+        # this local-scheduler verdict instead of re-inspecting raw booleans.
         outcome = RefreshOutcome.from_result(result)
-        result["refreshing_elsewhere"] = outcome.refreshing_elsewhere
         self.record_performance_sample(
             role,
             "background-refresh-request",
@@ -9959,10 +9950,10 @@ class TmuxWebtermApp:
             payload=request_payload,
             cache_key=request_payload.get("cache_key", role),
             cache_status=outcome.cache_status,
-            owner_role="owner" if outcome.local_owner else "follower",
+            owner_role="scheduler",
             details={"accepted": outcome.accepted, "fallback": outcome.fallback, "coalesced": outcome.coalesced},
         )
-        if outcome.local_owner:
+        if outcome.accepted:
             if role == BACKGROUND_ROLE_STATS_SAMPLER and request_payload.get("family") == "agent_tokens":
                 result["refreshing"] = self.stats_current_runtime.wake("agent_tokens")
             if not outcome.coalesced:
@@ -10003,12 +9994,14 @@ class TmuxWebtermApp:
     ) -> bool:
         """Install one tmux-session roster and invalidate metadata on membership transitions."""
 
-        roster = list(dict.fromkeys(session.strip() for session in sessions if isinstance(session, str) and session.strip()))
-        membership_changed = set(roster) != set(self.sessions)
-        self.sessions = roster
-        if membership_changed:
-            self.topology_generation = getattr(self, "topology_generation", 0) + 1
-            if self.activity_transcript_service is not None:
+        record = self.activity_transcript_service.transcripts_payload_cache_record
+        with record.publication_lock:
+            roster = list(dict.fromkeys(session.strip() for session in sessions if isinstance(session, str) and session.strip()))
+            previous_roster = list(self.sessions)
+            membership_changed = set(roster) != set(self.sessions)
+            self.sessions = roster
+            if membership_changed:
+                self.topology_generation = getattr(self, "topology_generation", 0) + 1
                 self.advance_transcripts_payload_input_generation()
         if not roster:
             self.stop_status_collector_lease()
@@ -10021,7 +10014,7 @@ class TmuxWebtermApp:
                 self.status_client.invalidate("tmux-topology", self.sessions, self.topology_generation)
             # Record the transition only after installing the roster. A build that started before
             # this instant cannot have observed the new membership, so the existing single-flight
-            # web owner must either start now or queue one publishing follow-up behind that older
+            # server process must either start now or queue one publishing follow-up behind that older
             # build. statusd owns roster production only; it has no browser metadata consumer and
             # must not publish a second transcript-metadata stream from its internal app.
             if refresh_metadata:
@@ -10196,75 +10189,6 @@ class TmuxWebtermApp:
             event_payload.setdefault("compute_ms", round(max(0.0, compute_ms), 1))
         return self.client_events.publish(event_type, event_payload)
 
-    def shared_background_client_event_record(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "version": 1,
-            "id": uuid.uuid4().hex,
-            "time": time.time(),
-            "type": event_type,
-            "payload": dict(payload),
-            "source": self.background_owner.owner_payload(),
-        }
-
-    def write_shared_background_client_event(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
-        record = self.shared_background_client_event_record(event_type, payload)
-        with file_lock(BACKGROUND_CLIENT_EVENTS_PATH, dir_mode=0o700):
-            manifest = read_json_file(BACKGROUND_CLIENT_EVENTS_PATH, {}, exceptions=(OSError, json.JSONDecodeError, TypeError))
-            raw_events = manifest.get("events") if isinstance(manifest, dict) else []
-            events = [item for item in raw_events if isinstance(item, dict)] if isinstance(raw_events, list) else []
-            resource = client_event_resource(event_type, payload)
-            # The manifest is a bounded recovery snapshot, not an audit log. Retain only the
-            # newest event for each independently ordered resource so a returning follower repairs
-            # current state once instead of replaying stale transitions.
-            events = [item for item in events if client_event_resource(str(item.get("type") or ""), item.get("payload") if isinstance(item.get("payload"), dict) else {}) != resource]
-            events.append(record)
-            events = events[-BACKGROUND_CLIENT_EVENT_MANIFEST_LIMIT:]
-            payload_text = json.dumps({"version": 1, "events": events}, sort_keys=True, separators=(",", ":")) + "\n"
-            atomic_write_text(BACKGROUND_CLIENT_EVENTS_PATH, payload_text, mode=0o600)
-        return record
-
-    def replay_shared_background_client_events(self) -> int:
-        """Replay the durable latest-per-resource manifest after a follower was offline."""
-        with file_lock(BACKGROUND_CLIENT_EVENTS_PATH, dir_mode=0o700):
-            manifest = read_json_file(BACKGROUND_CLIENT_EVENTS_PATH, None, exceptions=(OSError, json.JSONDecodeError, TypeError))
-            if manifest is None:
-                return 0
-        raw_events = manifest.get("events") if isinstance(manifest, dict) else []
-        if not isinstance(raw_events, list):
-            return 0
-        replayed = 0
-        for record in raw_events:
-            if not isinstance(record, dict):
-                continue
-            event_id = str(record.get("id") or "")
-            event_type = str(record.get("type") or "")
-            payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
-            if not event_id or event_id in self.replayed_background_client_event_ids:
-                continue
-            if event_type not in BACKGROUND_CLIENT_EVENT_TYPES or event_type not in CLIENT_EVENT_TYPES:
-                continue
-            self.replayed_background_client_event_ids.add(event_id)
-            self.handle_background_client_event({"event_type": event_type, "payload": payload})
-            replayed += 1
-        return replayed
-
-    def notify_background_client_event_followers(self, event_type: str, payload: dict[str, Any], shared_event: dict[str, Any]) -> None:
-        source = self.background_owner.owner_payload()
-        source_generation = str(source.get("generation_id") or "")
-        request = {
-            "action": "background_client_event",
-            "event_type": event_type,
-            "payload": payload,
-            "shared_event": shared_event,
-            "requester": source,
-        }
-        for record in self.background_owner.live_generation_records():
-            if str(record.get("generation_id") or "") == source_generation:
-                continue
-            if not str(record.get("control_socket") or ""):
-                continue
-            send_yolomux_control_request(record, request, timeout=BACKGROUND_CLIENT_EVENT_NOTIFY_TIMEOUT_SECONDS)
-
     def publish_background_client_event(
         self,
         event_type: str,
@@ -10273,13 +10197,7 @@ class TmuxWebtermApp:
         trigger: str = "background-refresh",
         cache: str | None = "ready",
     ) -> dict[str, Any]:
-        if event_type not in BACKGROUND_CLIENT_EVENT_TYPES or event_type not in CLIENT_EVENT_TYPES:
-            return self.publish_client_event(event_type, payload, trigger=trigger, cache=cache)
-        event = self.publish_client_event(event_type, payload, trigger=trigger, cache=cache)
-        event_payload = event.get("payload") if isinstance(event, dict) else {}
-        shared_event = self.write_shared_background_client_event(event_type, event_payload if isinstance(event_payload, dict) else {})
-        self.notify_background_client_event_followers(event_type, event_payload if isinstance(event_payload, dict) else {}, shared_event)
-        return event
+        return self.publish_client_event(event_type, payload, trigger=trigger, cache=cache)
 
     def publish_background_refresh_done(self, role: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         event_payload = {"role": role}
@@ -10299,18 +10217,16 @@ class TmuxWebtermApp:
         """Fan out one redacted Quick Open progress signal over the shared background-client-events bus.
 
         The frame is already `{scope_id, generation, revision, coverage}` -- the writer (`indexd`)
-        redacted and coalesced it in `file_index.notify_search_progress`. This method only forwards it;
-        it MUST NOT enrich the payload with anything (a role, a root, a session), because every field
-        here is globally persisted, fanned out to all clients, and replayed on reconnect. Passing the
-        frame through unchanged is what keeps the security boundary fail-closed at the transport."""
+        redacted and coalesced it in `file_index.notify_search_progress`. This method only forwards it
+        unchanged to this instance's client-event bus.
+        """
         return self.publish_background_client_event("search_progress", dict(frame), trigger="search-progress", cache="ready")
 
     def mark_search_progress_active(self) -> None:
         """Open/extend the window in which the client-event loop drains indexd's progress frames.
 
-        The crawl runs in the `indexd` daemon, which cannot reach the shared client-events bus, so the
-        web process that kicked it (`request_background_refresh` enqueue/promote) becomes the follower
-        that drains the daemon's redacted frames and republishes them. Opening a bounded active window
+        The crawl runs in the `indexd` daemon, which cannot reach the client-events bus, so this web
+        process drains its redacted frames and republishes them. Opening a bounded active window
         and waking the loop delivers the first frame within one poll instead of waiting for an unrelated
         deadline; an idle terminal never opens the window, so the daemon is never polled or kept hot."""
         self.search_progress_active_until = time.monotonic() + SEARCH_PROGRESS_ACTIVE_WINDOW_SECONDS
@@ -10322,9 +10238,8 @@ class TmuxWebtermApp:
         """Forward one batch of indexd's buffered progress frames onto the shared client-events bus.
 
         `notify_search_progress` builds the redacted `{scope_id, generation, revision, coverage}` frame
-        inside the daemon but cannot publish it there (no App/broker). This FOLLOWER drains those frames
-        and republishes each UNCHANGED through the one forwarder (`publish_search_progress`) -- the same
-        path a same-process crawl would take -- so the palette receives the signal and pulls committed
+        inside the daemon but cannot publish it there (no App/broker). This process drains those frames
+        and republishes each UNCHANGED through the one forwarder (`publish_search_progress`) so the palette receives the signal and pulls committed
         deltas by cursor. A frame that reports full coverage does not extend the active window; an
         unfinished one does, so draining tracks the crawl and stops after it settles."""
         frames = self.search_indexer.drain_search_progress()
@@ -10334,40 +10249,6 @@ class TmuxWebtermApp:
                 self.search_progress_active_until = time.monotonic() + SEARCH_PROGRESS_ACTIVE_WINDOW_SECONDS
             self.publish_search_progress(frame)
         return len(frames)
-
-    def handle_background_client_event(self, request: dict[str, Any]) -> dict[str, Any]:
-        event_type = str(request.get("event_type") or "")
-        if event_type not in BACKGROUND_CLIENT_EVENT_TYPES or event_type not in CLIENT_EVENT_TYPES:
-            return {"ok": False, "error": f"unsupported background client event: {event_type}"}
-        if event_type == "attention_acks_changed":
-            with self.attention_ack_lock:
-                previous_keys = set(self.attention_ack_keys)
-            if not self.merge_shared_attention_acks():
-                return {"ok": True, "accepted": True, "noop": True}
-            self.invalidate_auto_approve_cache()
-            raw_payload = request.get("payload")
-            payload = raw_payload if isinstance(raw_payload, dict) else {}
-            raw_acknowledged = payload.get("acknowledged") if isinstance(payload.get("acknowledged"), list) else []
-            with self.attention_ack_lock:
-                current_keys = set(self.attention_ack_keys)
-                payload_keys = {str(key) for key in raw_acknowledged if str(key) in current_keys}
-                acknowledged = sorted(payload_keys | (current_keys - previous_keys))
-                acknowledged_at = {key: self.attention_ack_keys[key] for key in acknowledged}
-            self.publish_client_event(
-                "attention_acks_changed",
-                {"acknowledged": acknowledged, "acknowledged_at": acknowledged_at},
-                trigger="background-fanout",
-                cache="ready",
-            )
-            return {"ok": True, "accepted": True, "event": {"type": event_type}}
-        if event_type == "auto_approve_changed":
-            # The worker records are process-local, but every status response is cached. A
-            # follower must discard that cache before it tells its SSE clients to refresh.
-            self.invalidate_auto_approve_cache()
-        raw_payload = request.get("payload")
-        payload = raw_payload if isinstance(raw_payload, dict) else {}
-        event = self.publish_client_event(event_type, payload, trigger="background-fanout", cache="ready")
-        return {"ok": True, "accepted": True, "event": {"id": event.get("id"), "type": event_type}}
 
     def client_event_payload_signature(self, payload: Any) -> str:
         try:
@@ -10971,11 +10852,12 @@ class TmuxWebtermApp:
         # Re-reads settings every iteration so the notification threshold takes effect without a
         # restart. When disabled, idles cheaply. Publishes update_available only when the available
         # target changes, so admins are nudged once per new version, not every interval.
-        while True:
+        record = self.update_check_record
+        while not record.stop_event.is_set():
             section = self.updates_settings()
             if self.update_notify_level(section) == "none":
                 self.note_update_check(useful=False, next_due_seconds=60.0, enabled=False)
-                time.sleep(60)
+                record.stop_event.wait(60)
                 continue
             interval_minutes = section.get("check_interval_minutes", 60)
             try:
@@ -10988,15 +10870,38 @@ class TmuxWebtermApp:
             except Exception as exc:
                 logging.exception("update check failed: %s", exc)
                 self.note_update_check(useful=False, failed=True, next_due_seconds=interval)
-            time.sleep(interval)
+            record.stop_event.wait(interval)
 
     def start_update_check_thread(self) -> bool:
-        if self.update_check_thread is not None:
+        record = self.update_check_record
+        if record.stop_event.is_set():
             return False
+        if self.update_check_thread is not None:
+            if self.update_check_thread.is_alive():
+                return False
+            self.update_check_thread = None
         worker = threading.Thread(target=self.update_check_loop, name="update-check", daemon=True)
         self.update_check_thread = worker
-        worker.start()
+        def rollback() -> None:
+            if getattr(self, "update_check_thread", None) is worker:
+                self.update_check_thread = None
+
+        common.start_thread_with_rollback(worker, rollback)
         return True
+
+    def stop_update_check_thread(self) -> None:
+        """Fence and join the update worker as part of application teardown."""
+        record = getattr(self, "update_check_record", None)
+        if record is None:
+            return
+        record.stop_event.set()
+        worker = getattr(self, "update_check_thread", None)
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=30.0)
+            if worker.is_alive():
+                raise RuntimeError("update check worker did not stop during application teardown")
+        if getattr(self, "update_check_thread", None) is worker:
+            self.update_check_thread = None
 
     def tabber_activity_refresh_seconds(self) -> float:
         return self.performance_setting_ms_as_seconds("tabber_activity_refresh_ms", 1.0, 60.0)
@@ -11016,7 +10921,7 @@ class TmuxWebtermApp:
         """Coalesce producer changes onto the owner-owned Tabber cache worker."""
         if not self.tabber_activity_has_recent_consumer():
             return False
-        if not self.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+        if not self.scheduler_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
             self.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "producer", "trigger": trigger})
             return False
         self.start_tabber_activity_cache_warmer()
@@ -11674,28 +11579,82 @@ class TmuxWebtermApp:
         generation: int,
         *,
         input_generation: int | None = None,
+        worker: object | None = None,
+        rebuild_publish: bool = False,
     ) -> bool:
+        record = self.activity_transcript_service.transcripts_payload_cache_record
+        # Roster mutation uses this same lock. Without one publication boundary, a payload can
+        # pass the roster check, then a tmux event can advance topology, and the old payload can
+        # still be committed/pushed after the browser has already learned the newer roster.
+        with record.publication_lock:
+            with self.activity_transcript_service.transcripts_payload_cache_lock:
+                committed_input_generation = record.input_generation if input_generation is None else input_generation
+                roster_matches = self._metadata_payload_matches_session_roster_locked(payload)
+                if (
+                    generation <= 0
+                    or record.generation != generation
+                    or committed_input_generation != record.input_generation
+                    or not roster_matches
+                ):
+                    if (
+                        worker is not None
+                        and record.generation == generation
+                        and record.worker is worker
+                        and (committed_input_generation != record.input_generation or not roster_matches)
+                    ):
+                        # The worker observed a roster that changed while it was building. Preserve
+                        # one follow-up request under this same lock; otherwise finish() can release
+                        # the worker and leave the stale cache as the only response forever.
+                        record.rebuild_requested = True
+                        record.rebuild_publish = record.rebuild_publish or rebuild_publish
+                    return False
+                # Stamp the committing identity into the payload itself, not beside it. Every consumer
+                # -- the HTTP cache hit, the client-events push, and a direct build -- carries the same
+                # identity, so a browser can tell whether the model it rendered came from a build that
+                # observed the state it asked about, instead of inferring it from arrival order.
+                self.stamp_metadata_identity(payload, generation)
+                record.stored_at = time.monotonic()
+                record.payload = copy.deepcopy(payload)
+                record.committed_input_generation = committed_input_generation
+                record.watch_refreshed_at = record.stored_at
+                if record.lightweight_future is not None and record.lightweight_future.done():
+                    record.lightweight_future = None
+                return True
+
+    def _metadata_payload_matches_session_roster_locked(self, payload: dict[str, Any]) -> bool:
+        """Check the roster contract while the publication lock is held."""
+
+        if not isinstance(payload, dict) or not {"session_order", "sessions", "topology_generation"}.issubset(payload):
+            # Small object-backed fixtures use marker-only payloads to exercise the single-flight
+            # guard. They are not browser metadata and have no roster contract to validate.
+            return True
+        expected = list(self.sessions)
+        actual_order = payload.get("session_order") if isinstance(payload, dict) else None
+        actual_sessions = payload.get("sessions") if isinstance(payload, dict) else None
+        if not isinstance(actual_order, list) or not isinstance(actual_sessions, dict):
+            return False
+        return (
+            actual_order == expected
+            and set(actual_sessions) == set(expected)
+            and payload["topology_generation"] == getattr(self, "topology_generation", 0)
+        )
+
+    def metadata_payload_matches_session_roster(self, payload: dict[str, Any]) -> bool:
+        """Accept a full metadata payload only when it describes the current roster."""
+
+        record = self.activity_transcript_service.transcripts_payload_cache_record
+        with record.publication_lock:
+            return self._metadata_payload_matches_session_roster_locked(payload)
+
+    def queue_transcripts_payload_rebuild(self, *, publish: bool) -> None:
+        """Queue one publishing rebuild after a producer returned a stale roster."""
+
         with self.activity_transcript_service.transcripts_payload_cache_lock:
             record = self.activity_transcript_service.transcripts_payload_cache_record
-            committed_input_generation = record.input_generation if input_generation is None else input_generation
-            if (
-                generation <= 0
-                or record.generation != generation
-                or committed_input_generation != record.input_generation
-            ):
-                return False
-            # Stamp the committing identity into the payload itself, not beside it. Every consumer
-            # -- the HTTP cache hit, the client-events push, and a direct build -- carries the same
-            # identity, so a browser can tell whether the model it rendered came from a build that
-            # observed the state it asked about, instead of inferring it from arrival order.
-            self.stamp_metadata_identity(payload, generation)
-            record.stored_at = time.monotonic()
-            record.payload = copy.deepcopy(payload)
-            record.committed_input_generation = committed_input_generation
-            record.watch_refreshed_at = record.stored_at
-            if record.lightweight_future is not None and record.lightweight_future.done():
-                record.lightweight_future = None
-            return True
+            if record.stopped:
+                return
+            record.rebuild_requested = True
+            record.rebuild_publish = record.rebuild_publish or publish
 
     def finish_transcripts_payload_work(
         self,
@@ -11708,6 +11667,8 @@ class TmuxWebtermApp:
             record = self.activity_transcript_service.transcripts_payload_cache_record
             record.active_workers.discard(worker)
             if record.generation != generation or record.worker is not worker:
+                if record.worker is worker:
+                    record.release_worker()
                 record.superseded_workers.discard(worker)
                 return False
             if invalidate:
@@ -11745,20 +11706,23 @@ class TmuxWebtermApp:
             worker.join(timeout=30)
             assert not worker.is_alive(), "transcript payload rebuild did not stop"
 
-    def fence_transcripts_payload_work(self) -> None:
-        """Fence watcher-owned payload work without disabling future HTTP refreshes."""
+    def fence_transcripts_payload_work(self, worker: object | None = None, *, join_workers: bool = True) -> None:
+        """Fence one watcher-owned payload worker without disabling future HTTP refreshes."""
         with self.activity_transcript_service.transcripts_payload_cache_lock:
             record = self.activity_transcript_service.transcripts_payload_cache_record
-            record.generation += 1
-            workers = tuple(record.active_workers)
-            record.release_worker()
-            record.rebuild_requested = False
-            record.rebuild_publish = False
-        for worker in workers:
-            if worker is threading.current_thread():
-                continue
-            worker.join(timeout=30)
-            assert not worker.is_alive(), "transcript payload rebuild did not stop"
+            if worker is None or worker not in record.active_workers:
+                return
+            workers = (worker,)
+            if record.worker is worker:
+                record.generation += 1
+                record.release_worker()
+        if join_workers:
+            for worker in workers:
+                if worker is threading.current_thread():
+                    continue
+                worker.join(timeout=30)
+                assert not worker.is_alive(), "transcript payload rebuild did not stop"
+            self.start_queued_transcripts_payload_rebuild()
 
     def start_queued_transcripts_payload_rebuild(self) -> bool:
         """Run the rebuild a forced refresh could not start because an older build held the guard.
@@ -11785,6 +11749,36 @@ class TmuxWebtermApp:
         self.commit_transcripts_payload_cache(payload, generation)
 
     def start_transcripts_payload_refresh(
+        self,
+        publish: bool = False,
+        defer: bool = False,
+        *,
+        not_before: float | None = None,
+        lifecycle_owner: bool = False,
+        pending_generation_out: list[int] | None = None,
+    ) -> bool:
+        scheduler = self.__dict__.get("background_scheduler")
+        admit = getattr(scheduler, "external_work_admission", None)
+        if not callable(admit):
+            return self._start_transcripts_payload_refresh(
+                publish,
+                defer,
+                not_before=not_before,
+                lifecycle_owner=lifecycle_owner,
+                pending_generation_out=pending_generation_out,
+            )
+        with admit(BACKGROUND_ROLE_WATCH_ROOTS, allow_not_started=True) as admitted:
+            if not admitted:
+                return False
+            return self._start_transcripts_payload_refresh(
+                publish,
+                defer,
+                not_before=not_before,
+                lifecycle_owner=lifecycle_owner,
+                pending_generation_out=pending_generation_out,
+            )
+
+    def _start_transcripts_payload_refresh(
         self,
         publish: bool = False,
         defer: bool = False,
@@ -11864,12 +11858,17 @@ class TmuxWebtermApp:
             with self.activity_transcript_service.transcripts_payload_cache_lock:
                 input_generation = self.activity_transcript_service.transcripts_payload_cache_record.input_generation
             payload = self.build_transcripts_payload()
+            if not self.metadata_payload_matches_session_roster(payload):
+                self.queue_transcripts_payload_rebuild(publish=publish)
+                return
             record = self.activity_transcript_service.transcripts_payload_cache_record
             with record.publication_lock:
                 if not self.commit_transcripts_payload_cache(
                     payload,
                     generation,
                     input_generation=input_generation,
+                    worker=current_worker,
+                    rebuild_publish=publish,
                 ):
                     return
                 with self.activity_transcript_service.transcripts_payload_cache_lock:
@@ -12367,7 +12366,7 @@ class TmuxWebtermApp:
         self.sync_tmux_theme_from_settings(payload, force=patch_updates_active_color(patch))
         # Re-lease/enqueue promptly when indexed-root settings change: added roots start their
         # layer-1 crawl and removed roots release the scheduler obligation, without waiting for the
-        # asynchronous watchd settings revision. Guarded to the background owner inside.
+        # asynchronous watchd settings revision. Guarded to the local scheduler inside.
         if isinstance(patch, dict) and isinstance(patch.get("file_explorer"), dict) and "indexed_dirs" in patch["file_explorer"]:
             self.refresh_search_indexer_schedule()
         self.publish_background_client_event("settings_changed", {"mtime_ns": payload.get("mtime_ns", 0), "data": payload}, trigger="manual", cache="ready")
@@ -12431,7 +12430,7 @@ class TmuxWebtermApp:
             message_params=message_params,
         )
         # The append is durable before this small invalidation is published.  A
-        # follower can therefore refetch the same log file immediately; the
+        # reader can therefore refetch the same log file immediately; the
         # existing background manifest/control fan-out covers its SSE clients.
         self.publish_background_client_event(
             "event_log_changed",
@@ -12545,9 +12544,9 @@ class TmuxWebtermApp:
                     return value[:80]
         return str(cache_key or "")[:80]
 
-    def performance_owner_role(self, role: str) -> str:
+    def performance_scheduler_role(self, role: str) -> str:
         if role in {BACKGROUND_ROLE_SESSION_FILES, BACKGROUND_ROLE_STATS_SAMPLER, BACKGROUND_ROLE_TABBER_ACTIVITY, BACKGROUND_ROLE_SEARCH_INDEX, BACKGROUND_ROLE_WATCH_ROOTS}:
-            return "owner" if self.background_can_run(role) else "follower"
+            return "scheduler" if self.scheduler_can_run(role) else "service"
         return ""
 
     def record_performance_sample(
@@ -12575,7 +12574,7 @@ class TmuxWebtermApp:
             "role": str(role or "")[:80],
             "surface": str(surface or "")[:120],
             "trigger": str(trigger or "")[:120],
-            "owner_role": str(owner_role or self.performance_owner_role(str(role or "")))[:40],
+            "owner_role": str(owner_role or self.performance_scheduler_role(str(role or "")))[:40],
             "compute_ms": round(max(0.0, float(compute_ms or 0.0)), 3),
             "payload_bytes": max(0, int(payload_bytes or 0)),
             "cache_key_kind": self.performance_cache_key_kind(cache_key),
@@ -12704,7 +12703,7 @@ class TmuxWebtermApp:
         limit: int = 3,
         window_seconds: float = SERVER_CPU_BUDGET_SUSTAINED_SECONDS,
     ) -> list[dict[str, Any]]:
-        """Return bounded endpoint/background owners ranked by aggregate compute.
+        """Return bounded endpoint/scheduler consumers ranked by aggregate compute.
 
         The window must be the breach window the caller is explaining. This defaulted to
         PERFORMANCE_SUMMARY_WINDOW_SECONDS (60s) while the warning it feeds described a 300s
@@ -13083,20 +13082,17 @@ class TmuxWebtermApp:
             "recurring_work": recurring_work,
         }
 
-    def runtime_owner_debug_summary(self, owner_debug: dict[str, Any] | None) -> dict[str, Any]:
-        if not isinstance(owner_debug, dict):
+    def runtime_scheduler_debug_summary(self, scheduler_debug: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(scheduler_debug, dict):
             return {}
-        generations = owner_debug.get("generations")
-        return {
-            "owner_dir": str(owner_debug.get("owner_dir") or ""),
-            "generation_count": len(generations) if isinstance(generations, list) else 0,
-        }
+        status = str(scheduler_debug.get("status") or "")
+        return {"status": status} if status else {}
 
-    def runtime_owner_control_summary(self, owner_control_response: dict[str, Any] | None) -> dict[str, Any]:
-        if not isinstance(owner_control_response, dict):
+    def runtime_scheduler_control_summary(self, scheduler_control_response: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(scheduler_control_response, dict):
             return {}
-        summary = {"ok": bool(owner_control_response.get("ok"))}
-        error = str(owner_control_response.get("error") or "")
+        summary = {"ok": bool(scheduler_control_response.get("ok"))}
+        error = str(scheduler_control_response.get("error") or "")
         if error:
             summary["error"] = error
         return summary
@@ -13156,14 +13152,14 @@ class TmuxWebtermApp:
     def runtime_control_report_payload(self) -> dict[str, Any]:
         return system_status_projector_for(self).runtime_control_report_payload(self)
 
-    def runtime_report_core( self, *, background_status: dict[str, Any] | None = None, owner_control_response: dict[str, Any] | None = None, local_services: dict[str, Any] | None = None, ) -> dict[str, Any]:
-        return system_status_projector_for(self).runtime_report_core(self, background_status=background_status, owner_control_response=owner_control_response, local_services=local_services)
+    def runtime_report_core( self, *, background_status: dict[str, Any] | None = None, scheduler_control_response: dict[str, Any] | None = None, local_services: dict[str, Any] | None = None, ) -> dict[str, Any]:
+        return system_status_projector_for(self).runtime_report_core(self, background_status=background_status, scheduler_control_response=scheduler_control_response, local_services=local_services)
 
-    def runtime_report_advanced( self, *, background_status: dict[str, Any] | None = None, owner_debug: dict[str, Any] | None = None, owner_control_response: dict[str, Any] | None = None, force_transcripts: bool = True, local_services: dict[str, Any] | None = None, ) -> dict[str, Any]:
-        return system_status_projector_for(self).runtime_report_advanced(self, background_status=background_status, owner_debug=owner_debug, owner_control_response=owner_control_response, force_transcripts=force_transcripts, local_services=local_services)
+    def runtime_report_advanced( self, *, background_status: dict[str, Any] | None = None, scheduler_debug: dict[str, Any] | None = None, scheduler_control_response: dict[str, Any] | None = None, force_transcripts: bool = True, local_services: dict[str, Any] | None = None, ) -> dict[str, Any]:
+        return system_status_projector_for(self).runtime_report_advanced(self, background_status=background_status, scheduler_debug=scheduler_debug, scheduler_control_response=scheduler_control_response, force_transcripts=force_transcripts, local_services=local_services)
 
-    def runtime_report_payload( self, *, background_status: dict[str, Any] | None = None, owner_debug: dict[str, Any] | None = None, owner_control_response: dict[str, Any] | None = None, force_transcripts: bool = True, ) -> dict[str, Any]:
-        return system_status_projector_for(self).runtime_report_payload(self, background_status=background_status, owner_debug=owner_debug, owner_control_response=owner_control_response, force_transcripts=force_transcripts)
+    def runtime_report_payload( self, *, background_status: dict[str, Any] | None = None, scheduler_debug: dict[str, Any] | None = None, scheduler_control_response: dict[str, Any] | None = None, force_transcripts: bool = True, ) -> dict[str, Any]:
+        return system_status_projector_for(self).runtime_report_payload(self, background_status=background_status, scheduler_debug=scheduler_debug, scheduler_control_response=scheduler_control_response, force_transcripts=force_transcripts)
 
     def system_status_server_block(self, sample: dict[str, Any], *, now: float | None = None) -> dict[str, Any]:
         return system_status_projector_for(self).system_status_server_block(self, sample, now=now)
@@ -13512,7 +13508,7 @@ class TmuxWebtermApp:
     def tabber_activity_source_signature(self, session_scope: Any = "configured") -> str: # Acknowledgements change agent-window visibility without changing the process or # transcript identity below. Fold the durable revision into this cache key so every # server stops serving an earlier unacknowledged Tabber snapshot immediately.
         return self._activity_cache.tabber_activity_source_signature(self, session_scope)
 
-    def tabber_activity_cache_disk_path(self, hours: float, source_signature: str = "") -> tuple[Path, str]: # A source signature fences freshness inside the record; it must not become # part of the filename. Statusd revisions can legitimately advance while a # Tabber refresh is in flight, and the old design left one durable file per # short-lived signature, then made followers see an empty cache miss.
+    def tabber_activity_cache_disk_path(self, hours: float, source_signature: str = "") -> tuple[Path, str]: # A source signature fences freshness inside the record; it must not become # part of the filename. Statusd revisions can legitimately advance while a # Tabber refresh is in flight, and the old design left one durable file per # short-lived signature, then made readers see an empty cache miss.
         return self._activity_cache.tabber_activity_cache_disk_path(self, hours, source_signature)
 
     def tabber_activity_cache_manifest_path(self, signature: str) -> Path:
@@ -13708,7 +13704,7 @@ class TmuxWebtermApp:
     def restore_auto_approve(self) -> list[str]:
         restored: list[str] = []
         for session in self.persisted_auto_sessions():
-            payload, status = self.set_auto_approve(session, True, persist=False, takeover=False)
+            payload, status = self.set_auto_approve(session, True, persist=False)
             if status == HTTPStatus.OK and payload.get("enabled") is True:
                 restored.append(session)
         return restored
@@ -13791,16 +13787,6 @@ class TmuxWebtermApp:
                 normalized["process_memory_bytes"] = process_memory_bytes
                 record.cached_payload = normalized
             return {"ok": True}
-        if action == "disable_auto_approve":
-            session = request.get("session")
-            requester = request.get("requester")
-            return self.disable_auto_approve_for_takeover(session, requester if isinstance(requester, dict) else {})
-        if action == "background_release_owner":
-            requester = request.get("requester")
-            return self.background_release_owner(requester if isinstance(requester, dict) else {})
-        if action == "background_status":
-            payload, _status = self.background_owner_status_payload()
-            return {"ok": True, "status": payload, "search_index_runtime": file_index.runtime_diagnostics()}
         if action == "runtime_profile":
             return {
                 "ok": True,
@@ -13811,60 +13797,12 @@ class TmuxWebtermApp:
             if scope != "capture":
                 return {"ok": False, "error": "unsupported measurement scope"}
             return {"ok": True, "performance": self.performance_metrics_payload(measurement_scope=scope)}
-        if action == "background_ping":
-            return {"ok": True, "status": self.background_owner.status_payload()}
         if action == "runtime_report":
             # Serves --print-runtime-report over the existing control socket so the
             # CLI never constructs a second TmuxWebtermApp (whose startup could
             # stall on an overloaded host) just to render this JSON.
             return {"ok": True, "report": self.runtime_control_report_payload()}
-        if action == "background_client_event":
-            return self.handle_background_client_event(request)
-        if action == "background_refresh":
-            role = str(request.get("role") or "")
-            payload = request.get("payload") if isinstance(request, dict) else {}
-            self.request_background_refresh(role, payload if isinstance(payload, dict) else {})
-            return {"ok": True, "accepted": True, "role": role}
         return {"ok": False, "error": f"unknown action: {action}"}
-
-    def disable_auto_approve_for_takeover(self, session: Any, requester: dict[str, Any]) -> dict[str, Any]:
-        if not isinstance(session, str) or session not in self.sessions:
-            diagnostic = f"unknown session: {session}"
-            return {"ok": False, **user_message_payload("status.sessionEnded", diagnostic, session=session)}
-        records = self.approval_client.status_session(session)
-        if not records:
-            diagnostic = "YOLO was not enabled here"
-            return {
-                "ok": True,
-                "session": session,
-                "enabled": False,
-                **user_message_payload("status.yoloAlreadyDisabledFor", diagnostic, session=session),
-            }
-        # approvald confirms the worker thread exited and released its flock before returning ok.
-        released = bool(self.approval_client.stop_session(session).get("ok"))
-        if not released:
-            diagnostic = "YOLO worker did not stop in time"
-            self.log_event(
-                session,
-                "yolo_release_timeout",
-                diagnostic,
-                {"requester": requester},
-                message_key="events.message.yolo.releaseTimeout",
-            )
-            return {
-                "ok": False,
-                "session": session,
-                **user_message_payload("status.yoloReleaseFailed", diagnostic, session=session),
-            }
-        self.log_event(
-            session,
-            "yolo_released",
-            "YOLO released for another server",
-            {"requester": requester},
-            message_key="events.message.yolo.released",
-        )
-        self.commit_auto_approve_change(session, enabled=False, trigger="takeover-release")
-        return {"ok": True, "session": session, "enabled": False}
 
     @property
     def server_epoch(self) -> str:
@@ -13948,9 +13886,25 @@ class TmuxWebtermApp:
             "pending_identity": self.metadata_identity(pending_generation),
         }
 
-    def build_session_metadata_payload(self, lightweight: bool = False) -> dict[str, Any]:
-        refresh_errors = self.refresh_sessions(maintenance=not lightweight)
-        sessions, errors = discover_sessions(self.sessions)
+    def build_session_metadata_payload(
+        self,
+        lightweight: bool = False,
+        *,
+        session_roster: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, Any]:
+        if session_roster is None:
+            refresh_errors = self.refresh_sessions(maintenance=not lightweight)
+            session_order = list(self.sessions)
+        else:
+            refresh_errors = []
+            session_order = list(
+                dict.fromkeys(
+                    session.strip()
+                    for session in session_roster
+                    if isinstance(session, str) and session.strip()
+                )
+            )
+        sessions, errors = discover_sessions(session_order)
         with metadata_build_cache():
             session_payloads = {
                 name: session_to_json(
@@ -13974,7 +13928,7 @@ class TmuxWebtermApp:
             "client_revision": yolomux_client_revision(),
             "server_started_at": SERVER_STARTED_AT,
             "server_uptime_seconds": max(0.0, time.time() - SERVER_STARTED_AT),
-            "session_order": self.sessions,
+            "session_order": session_order,
             "sessions": session_payloads,
             "indexed_repos": indexed_repos,
             # refresh agent login status on the metadata poll (cached server-side) so the
@@ -14072,38 +14026,51 @@ class TmuxWebtermApp:
         indexed_dirs = self.indexed_repo_discovery_dirs(file_explorer)
         service = self.activity_transcript_service
         now = time.monotonic()
-        with service.indexed_repo_lock:
-            record = service.indexed_repo_record
-            if record.indexed_dirs != indexed_dirs:
-                record.indexed_dirs = indexed_dirs
-                record.roots = []
-                record.refreshed_at = 0.0
-                record.retry_at = 0.0
-                record.root_generations = {root: 0 for root in indexed_dirs}
-                record.completed_generation_signature = ()
-            else:
-                for root in indexed_dirs:
-                    record.root_generations.setdefault(root, 0)
-            generation_signature = tuple((root, record.root_generations[root]) for root in indexed_dirs)
-            watcher_healthy = self.indexed_repo_discovery_watcher_healthy()
-            roots = list(record.roots)
-            should_start = (
-                record.worker is None
-                and now >= record.retry_at
-                and (
-                    record.completed_generation_signature != generation_signature
-                    or (not watcher_healthy and (record.refreshed_at <= 0.0 or now - record.refreshed_at >= INDEXED_REPO_ROOTS_CACHE_SECONDS))
+        with background_scheduler_admission(self, BACKGROUND_ROLE_WATCH_ROOTS) as admitted:
+            with service.indexed_repo_lock:
+                record = service.indexed_repo_record
+                if record.indexed_dirs != indexed_dirs:
+                    record.indexed_dirs = indexed_dirs
+                    record.roots = []
+                    record.refreshed_at = 0.0
+                    record.retry_at = 0.0
+                    record.root_generations = {root: 0 for root in indexed_dirs}
+                    record.completed_generation_signature = ()
+                else:
+                    for root in indexed_dirs:
+                        record.root_generations.setdefault(root, 0)
+                generation_signature = tuple((root, record.root_generations[root]) for root in indexed_dirs)
+                watcher_healthy = self.indexed_repo_discovery_watcher_healthy()
+                roots = list(record.roots)
+                should_start = (
+                    admitted
+                    and record.worker is None
+                    and now >= record.retry_at
+                    and (
+                        record.completed_generation_signature != generation_signature
+                        or (not watcher_healthy and (record.refreshed_at <= 0.0 or now - record.refreshed_at >= INDEXED_REPO_ROOTS_CACHE_SECONDS))
+                    )
                 )
-            )
-            if should_start:
-                worker = threading.Thread(
-                    target=self.refresh_indexed_repo_roots_worker,
-                    args=(indexed_dirs, generation_signature),
-                    name="yolomux-indexed-repos",
-                    daemon=True,
-                )
-                record.worker = worker
-                worker.start()
+                if should_start:
+                    record.stop_event = threading.Event()
+                    worker = threading.Thread(
+                        target=self.refresh_indexed_repo_roots_worker,
+                        args=(indexed_dirs, generation_signature, record.stop_event),
+                        name="yolomux-indexed-repos",
+                        daemon=True,
+                    )
+                    record.worker = worker
+
+                    def rollback() -> None:
+                        # Thread startup can fail after the worker has been published. Clear
+                        # the installed record while this lock is held so shutdown never sees
+                        # an unstarted worker and attempts to join it.
+                        if service.indexed_repo_record is record and record.worker is worker:
+                            record.stop_event.set()
+                            record.worker = None
+                            record.job_id = ""
+
+                    common.start_thread_with_rollback(worker, rollback)
         return roots
 
     @staticmethod
@@ -14129,34 +14096,53 @@ class TmuxWebtermApp:
                 if any(filesystem_paths_intersect(root_path, path) for path in changed_paths):
                     record.root_generations[root] = record.root_generations.get(root, 0) + 1
 
-    def refresh_indexed_repo_roots_worker(self, indexed_dirs: tuple[str, ...], generation_signature: tuple[tuple[str, int], ...]) -> None:
+    def refresh_indexed_repo_roots_worker(
+        self,
+        indexed_dirs: tuple[str, ...],
+        generation_signature: tuple[tuple[str, int], ...],
+        stop_event: threading.Event | None = None,
+    ) -> None:
         """Submit and observe one discovery job without blocking metadata requests."""
         service = self.activity_transcript_service
         worker = threading.current_thread()
+        stop_event = stop_event or threading.Event()
         succeeded = False
         try:
+            if stop_event.is_set():
+                return
             signature = json.dumps(generation_signature, separators=(",", ":")).encode("utf-8")
             generation = max(1, int(hashlib.sha256(signature).hexdigest()[:12], 16))
-            response = self.job_client.submit(
-                "indexed_repo_roots",
-                {"indexed_dirs": list(indexed_dirs)},
-                priority="maintenance",
-                launch=False,  # maintenance never cold-starts batchd; see batchd.BatchClient.submit
-                generation=generation,
-                coalesce_key=f"indexed-repos:{hashlib.sha256(signature).hexdigest()[:24]}:{generation}",
-                deadline_ms=120_000,
-            )
+            def submit_discovery_job() -> dict[str, Any]:
+                return self.job_client.submit(
+                    "indexed_repo_roots",
+                    {"indexed_dirs": list(indexed_dirs)},
+                    priority="maintenance",
+                    launch=False,  # maintenance never cold-starts batchd; see batchd.BatchClient.submit
+                    generation=generation,
+                    coalesce_key=f"indexed-repos:{hashlib.sha256(signature).hexdigest()[:24]}:{generation}",
+                    deadline_ms=120_000,
+                )
+
+            scheduler = self.__dict__.get("background_scheduler")
+            admit = getattr(scheduler, "external_work_admission", None)
+            if callable(admit):
+                with admit(BACKGROUND_ROLE_WATCH_ROOTS, allow_not_started=True) as admitted:
+                    if not admitted or stop_event.is_set():
+                        return
+                    response = submit_discovery_job()
+            else:
+                response = submit_discovery_job()
             job = response.get("job") if isinstance(response.get("job"), dict) else {}
             job_id = job.get("job_id") if response.get("ok") and isinstance(job.get("job_id"), str) else ""
             if not job_id:
                 return
             with service.indexed_repo_lock:
-                if service.indexed_repo_record.indexed_dirs != indexed_dirs or tuple((root, service.indexed_repo_record.root_generations.get(root, 0)) for root in indexed_dirs) != generation_signature:
+                if stop_event.is_set() or service.indexed_repo_record.indexed_dirs != indexed_dirs or tuple((root, service.indexed_repo_record.root_generations.get(root, 0)) for root in indexed_dirs) != generation_signature:
                     return
                 service.indexed_repo_record.job_id = job_id
             while True:
                 with service.indexed_repo_lock:
-                    if service.indexed_repo_record.indexed_dirs != indexed_dirs or tuple((root, service.indexed_repo_record.root_generations.get(root, 0)) for root in indexed_dirs) != generation_signature:
+                    if stop_event.is_set() or service.indexed_repo_record.indexed_dirs != indexed_dirs or tuple((root, service.indexed_repo_record.root_generations.get(root, 0)) for root in indexed_dirs) != generation_signature:
                         return
                 response = self.job_client.result(job_id)
                 job = response.get("job") if isinstance(response.get("job"), dict) else {}
@@ -14173,7 +14159,8 @@ class TmuxWebtermApp:
                     return
                 if status in {"failed", "cancelled", "superseded", "timed_out"} or not response.get("ok"):
                     return
-                time.sleep(0.1)
+                if stop_event.wait(0.1):
+                    return
         finally:
             with service.indexed_repo_lock:
                 record = service.indexed_repo_record
@@ -14183,8 +14170,29 @@ class TmuxWebtermApp:
                     if not succeeded:
                         record.retry_at = time.monotonic() + 5.0
 
-    def build_transcripts_payload(self, lightweight: bool = False) -> dict[str, Any]:
-        return self.build_session_metadata_payload(lightweight=lightweight)
+    def stop_indexed_repo_discovery(self) -> None:
+        """Fence and join the one asynchronous indexed-repository discovery worker."""
+
+        service = self.activity_transcript_service
+        with service.indexed_repo_lock:
+            record = service.indexed_repo_record
+            record.stop_event.set()
+            worker = record.worker
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=30.0)
+            assert not worker.is_alive(), "indexed-repository discovery worker did not stop during scheduler shutdown"
+        with service.indexed_repo_lock:
+            if service.indexed_repo_record is record and record.worker is worker:
+                record.worker = None
+                record.job_id = ""
+
+    def build_transcripts_payload(
+        self,
+        lightweight: bool = False,
+        *,
+        session_roster: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, Any]:
+        return self.build_session_metadata_payload(lightweight=lightweight, session_roster=session_roster)
 
     def cold_lightweight_metadata_payload(self) -> dict[str, Any]:
         """Share the one cold lightweight read without making callers wait for the full rebuild."""
@@ -14441,31 +14449,49 @@ class TmuxWebtermApp:
         }
 
     def warm_metadata_cache_async(self, sessions: dict[str, SessionInfo]) -> None:
-        if not self.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+        with background_scheduler_admission(self, BACKGROUND_ROLE_TABBER_ACTIVITY) as admitted:
+            if not admitted:
+                should_request = True
+            else:
+                should_request = False
+                with self.metadata_warm_lock:
+                    if self.metadata_warm_record.worker is not None:
+                        return
+                    snapshot = dict(sessions)
+                    stop_event = threading.Event()
+                    worker = threading.Thread(target=self.warm_metadata_cache, args=(snapshot, stop_event), name="metadata-warm", daemon=True)
+                    record = self.metadata_warm_record
+                    record.worker = worker
+                    record.stop_event = stop_event
+
+                    def rollback() -> None:
+                        # Thread.start failed while metadata_warm_lock is still held by this caller; clear
+                        # the just-published worker in place so no observer ever joins an unstarted worker.
+                        # Do NOT reacquire metadata_warm_lock here — this is a plain Lock and re-entry would
+                        # deadlock the very caller performing the rollback.
+                        if self.metadata_warm_record is record and record.worker is worker:
+                            record.stop_event.set()
+                            record.worker = None
+
+                    # Publish-and-start under one lock hold: a teardown that acquires metadata_warm_lock in
+                    # the gap can only see a not-yet-published worker or a worker that is already started.
+                    common.start_thread_with_rollback(worker, rollback)
+        if should_request:
             self.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "metadata-warm"})
-            return
+
+    def stop_metadata_warm(self) -> None:
+        """Fence and join the one metadata warm worker before scheduler teardown continues."""
+
         with self.metadata_warm_lock:
-            if self.metadata_warm_record.worker is not None:
-                return
-            snapshot = dict(sessions)
-            stop_event = threading.Event()
-            worker = threading.Thread(target=self.warm_metadata_cache, args=(snapshot, stop_event), name="metadata-warm", daemon=True)
             record = self.metadata_warm_record
-            record.worker = worker
-            record.stop_event = stop_event
-
-            def rollback() -> None:
-                # Thread.start failed while metadata_warm_lock is still held by this caller; clear
-                # the just-published worker in place so no observer ever joins an unstarted thread.
-                # Do NOT reacquire metadata_warm_lock here — this is a plain Lock and re-entry would
-                # deadlock the very caller performing the rollback.
-                if self.metadata_warm_record is record and record.worker is worker:
-                    record.stop_event.set()
-                    record.worker = None
-
-            # Publish-and-start under one lock hold: a teardown that acquires metadata_warm_lock in
-            # the gap can only see a not-yet-published record or a worker that is already started.
-            common.start_thread_with_rollback(worker, rollback)
+            record.stop_event.set()
+            worker = record.worker
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=30.0)
+            assert not worker.is_alive(), "metadata warm worker did not stop during scheduler shutdown"
+        with self.metadata_warm_lock:
+            if self.metadata_warm_record is record and record.worker is worker:
+                record.worker = None
 
     def metadata_warm_view_coalesce_identity(self, source_signature: str) -> tuple[str, int]:
         """Cross-port product identity for `metadata_warm_view`, so two web ports warming the same
@@ -14566,7 +14592,7 @@ class TmuxWebtermApp:
                     if completion is not None and completion[0] == signature and completion[1] > now:
                         continue
                     # One batchd round trip per session (not one batched submission for the whole
-                    # sessions dict) so a demotion between sessions stops here, before the NEXT
+                    # sessions dict) so shutdown between sessions stops here, before the NEXT
                     # session's network/git work is ever submitted -- the same between-session
                     # granularity the old inline loop had.
                     try:
@@ -16270,7 +16296,6 @@ class TmuxWebtermApp:
 
         self.stop_auto_approve_worker(session)
         self.refresh_sessions()
-        self.advance_topology_generation()
         self.status_client.invalidate("tmux-topology", self.sessions, self.topology_generation)
         self.log_event(
             new_name,
@@ -16782,7 +16807,7 @@ class TmuxWebtermApp:
         return target, "central_user_uploads"
 
     @requires_known_session()
-    def set_auto_approve(self, session: str, enabled: bool, persist: bool = True, takeover: bool = True) -> tuple[AutoApproveState, HTTPStatus]:
+    def set_auto_approve(self, session: str, enabled: bool, persist: bool = True) -> tuple[AutoApproveState, HTTPStatus]:
         changed = False
         if enabled:
             if not tmux_has_exact_session(session):
@@ -16792,7 +16817,7 @@ class TmuxWebtermApp:
                     "enabled": False,
                     **user_message_payload("status.sessionEnded", diagnostic, session=session),
                 }, HTTPStatus.NOT_FOUND
-            started, status = self.ensure_auto_approve_agent_workers(session, takeover=takeover)
+            started, status = self.ensure_auto_approve_agent_workers(session)
             if not started:
                 return status, HTTPStatus.CONFLICT
             if persist:
@@ -16898,7 +16923,7 @@ class TmuxWebtermApp:
                 return owner
         return None
 
-    def ensure_auto_approve_agent_workers(self, session: str, takeover: bool) -> tuple[bool, AutoApproveState]:
+    def ensure_auto_approve_agent_workers(self, session: str) -> tuple[bool, AutoApproveState]:
         desired_targets = self.auto_approve_agent_targets(session) or [session]
         desired = set(desired_targets)
         existing_statuses = self.approval_client.status_session(session)
@@ -16913,7 +16938,7 @@ class TmuxWebtermApp:
             if existing is not None:
                 started_any = True
                 continue
-            started, status = self.start_auto_approve_worker(session, takeover=takeover, target=target)
+            started, status = self.start_auto_approve_worker(session, target=target)
             if not started:
                 if first_error is None:
                     first_error = status
@@ -16923,12 +16948,12 @@ class TmuxWebtermApp:
             return True, {"session": session, "target": session, "enabled": True}
         return False, first_error or {"session": session, "enabled": False, "error": "failed to start YOLO worker"}
 
-    def sync_auto_approve_agent_workers(self, takeover: bool = False) -> None:
+    def sync_auto_approve_agent_workers(self) -> None:
         for session in self.persisted_auto_sessions():
             if session in self.sessions:
-                self.ensure_auto_approve_agent_workers(session, takeover=takeover)
+                self.ensure_auto_approve_agent_workers(session)
 
-    def start_auto_approve_worker(self, session: str, takeover: bool, target: str | None = None) -> tuple[object | None, AutoApproveState]:
+    def start_auto_approve_worker(self, session: str, target: str | None = None) -> tuple[object | None, AutoApproveState]:
         worker_target = str(target or session)
         owner_extra = self.control_server.owner_payload()
         owner_extra["session"] = session
@@ -16942,37 +16967,6 @@ class TmuxWebtermApp:
             status["session"] = session
             return worker, status
         owner = status.get("lock_owner") if isinstance(status.get("lock_owner"), dict) else None
-        locked_owner = owner
-        if takeover and self.request_auto_approve_release(session, owner):
-            # #69: re-acquire with the SINGLE atomic non-blocking flock (worker.start), retried briefly to
-            # absorb any lag between the owner's ok and its flock release. Each attempt is atomic, so a
-            # third instance grabbing the lock in the gap simply fails the acquire (reported locked) —
-            # never a double-owner.
-            deadline = time.monotonic() + 2.0
-            while True:
-                owner_extra = self.control_server.owner_payload()
-                owner_extra["session"] = session
-                worker, retry_status = self.approval_client.start_worker(
-                    session=session,
-                    target=worker_target,
-                    owner_extra=owner_extra,
-                    dangerously_yolo=self.dangerously_yolo,
-                )
-                if worker is not None:
-                    self.log_event(
-                        session,
-                        "yolo_takeover",
-                        "YOLO moved from another server",
-                        {"owner": locked_owner or {}},
-                        message_key="events.message.yolo.takeover",
-                    )
-                    status = retry_status
-                    status["session"] = session
-                    return worker, status
-                owner = retry_status.get("lock_owner") if isinstance(retry_status.get("lock_owner"), dict) else None
-                if time.monotonic() >= deadline:
-                    break
-                time.sleep(0.05)
         payload: AutoApproveState = dict(status)
         payload.update({
             "session": session,
@@ -16990,33 +16984,6 @@ class TmuxWebtermApp:
             message_key="events.message.yolo.locked",
         )
         return None, payload
-
-    def request_auto_approve_release(self, session: str, owner: dict[str, Any] | None) -> bool:
-        request = {
-            "action": "disable_auto_approve",
-            "session": session,
-            "requester": {
-                "pid": os.getpid(),
-                "hostname": SERVER_HOSTNAME,
-                "project_root": str(PROJECT_ROOT),
-                "control_socket": str(self.control_server.path),
-            },
-        }
-        response = send_yolomux_control_request(owner, request)
-        if response.get("ok") is not True:
-            self.log_event(
-                session,
-                "yolo_takeover_failed",
-                "YOLO owner did not release",
-                {"owner": owner or {}, "response": response},
-                message_key="events.message.yolo.takeoverFailed",
-            )
-            return False
-        # the owner stopped its worker and released the flock before replying ok (it joins the
-        # thread first, #70). Do NOT probe-and-poll the lock to "infer" we may take it — that LOCK_EX
-        # probe momentarily acquires the lock and races a third instance. Trust the owner's ok; the
-        # caller re-acquires with a single atomic non-blocking flock, which is the only safe arbiter.
-        return True
 
     def auto_approve_capture_target(self, session: str, discovered_sessions: dict[str, SessionInfo] | None = None) -> str:
         if discovered_sessions is None:
@@ -17298,7 +17265,7 @@ class TmuxWebtermApp:
                 previous_generation = 0
             # A process can begin watching after another YOLOmux server observed the
             # working->idle transition. Hydrate that durable identity before using the
-            # local shadow state, otherwise this follower renders ordinary idle while
+            # local shadow state, otherwise this reader renders ordinary idle while
             # the owner correctly renders the shared yellow completion.
             shared_generation, shared_stopped_ts, shared_idle_since = self.shared_agent_window_cooldown_state(
                 session,
@@ -17806,7 +17773,7 @@ class TmuxWebtermApp:
                     "rev": rev,
                     "updated_at": now,
                     "keys": merged,
-                    "writer": self.background_owner.owner_payload(),
+                    "writer": self.background_scheduler.process_payload(),
                     **({"legacy_rev": attention.get("legacy_rev")} if isinstance(attention, dict) and attention.get("legacy_rev") else {}),
                 }
                 self._write_shared_tmux_ai_status_locked(status)
@@ -17843,7 +17810,7 @@ class TmuxWebtermApp:
                     "rev": rev,
                     "updated_at": now,
                     "keys": file_keys,
-                    "writer": self.background_owner.owner_payload(),
+                    "writer": self.background_scheduler.process_payload(),
                     **({"legacy_rev": attention.get("legacy_rev")} if isinstance(attention, dict) and attention.get("legacy_rev") else {}),
                 }
                 self._write_shared_tmux_ai_status_locked(status)
@@ -17856,7 +17823,7 @@ class TmuxWebtermApp:
                 self.attention_ack_keys = dict(file_keys)
         return changed
 
-    def refresh_shared_attention_acks(self, *, trigger: str, notify_followers: bool = False) -> list[str]:
+    def refresh_shared_attention_acks(self, *, trigger: str) -> list[str]:
         with self.attention_ack_lock:
             previous_keys = set(self.attention_ack_keys)
         if not self.merge_shared_attention_acks():
@@ -17866,12 +17833,6 @@ class TmuxWebtermApp:
             acknowledged = sorted(set(self.attention_ack_keys) - previous_keys)
             acknowledged_at = {key: self.attention_ack_keys[key] for key in acknowledged}
         payload = {"acknowledged": acknowledged, "acknowledged_at": acknowledged_at}
-        if notify_followers:
-            self.notify_background_client_event_followers(
-                "attention_acks_changed",
-                payload,
-                self.shared_background_client_event_record("attention_acks_changed", payload),
-            )
         self.publish_client_event(
             "attention_acks_changed",
             payload,
@@ -17916,11 +17877,6 @@ class TmuxWebtermApp:
             "acknowledged": newly_acknowledged,
             "acknowledged_at": {key: acknowledged_at[key] for key in newly_acknowledged},
         }
-        self.notify_background_client_event_followers(
-            "attention_acks_changed",
-            event_payload,
-            self.shared_background_client_event_record("attention_acks_changed", event_payload),
-        )
         self.invalidate_auto_approve_cache()
         self.publish_client_event("attention_acks_changed", event_payload, trigger="attention_ack", cache="ready")
         return result, HTTPStatus.OK
@@ -18411,7 +18367,7 @@ class TmuxWebtermApp:
         removed = False
         if sync_workers:
             worker_started = time.perf_counter()
-            self.sync_auto_approve_agent_workers(takeover=False)
+            self.sync_auto_approve_agent_workers()
             add_phase_timing(timings, "worker_sync", worker_started)
         if removed:
             self.persist_auto_sessions()
@@ -18513,15 +18469,24 @@ class TmuxWebtermApp:
         return body, HTTPStatus(metadata.status)
 
     def stop_auto_approve_all(self) -> None:
-        self.pricing_refresh_coordinator.stop_periodic()
-        self.stats_current_runtime.stop()
-        self.stop_batchd_operation_service()
-        self.stop_status_collector_lease()
-        self.job_client.stop_for_scheduler()
-        self.approval_client.request({"action": "shutdown"}, timeout=2.5)
-        port = int(self.background_owner.port or 0)
-        if port:
-            local_services_registry.shutdown_owned_local_services(port, common.RUNTIME_DIR / "services")
-        self.background_owner.stop()
-        self.yoagent_controller.close_yoagent_codex_app_server()
-        self.control_server.stop()
+        # The CLI historically used this method as its whole-process teardown. Keep that
+        # entrypoint, but route scheduler-owned cleanup through the one shared lifecycle owner so
+        # session files, metadata warmers, Tabber, and the indexer lease cannot be skipped.
+        teardown_lock = getattr(self, "_application_teardown_lock", None)
+        if teardown_lock is None:
+            teardown_lock = threading.Lock()
+            self._application_teardown_lock = teardown_lock
+        with teardown_lock:
+            if getattr(self, "_application_teardown_done", False):
+                return
+            self.stop_background_scheduler()
+            self.stop_batchd_operation_service()
+            shutdown_request = getattr(self.approval_client, "request", None)
+            if callable(shutdown_request):
+                shutdown_request({"action": "shutdown"}, timeout=2.5)
+            port = int(self.background_scheduler.port or 0)
+            if port:
+                local_services_registry.shutdown_owned_local_services(port, common.RUNTIME_DIR / "services")
+            self.yoagent_controller.close_yoagent_codex_app_server()
+            self.control_server.stop()
+            self._application_teardown_done = True

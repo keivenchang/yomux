@@ -121,18 +121,17 @@ BATCHD_DEFAULT_IDLE_SECONDS = 60.0
 BATCHD_PRODUCT_RPC_TIMEOUT_SECONDS = 0.5
 BATCHD_SERVICE_NAME = "batchd"
 
-# batchd is NOT demand-scoped, so it must never declare `demand_started`. The elected background
-# owner pins it up with a registry lease (`BatchClient.start_for_scheduler`, called at
-# `app.py:2962` when this process acquires background ownership and released at `app.py:3381`
-# on demote), and `_idle_should_stop` refuses to retire the broker while any lease is held. A
-# process that owns scheduling and cannot see batchd is looking at a real outage.
+# batchd is NOT demand-scoped, so it must never declare `demand_started`. This server pins it up
+# with a registry lease (`BatchClient.start_for_scheduler`), and `_idle_should_stop` refuses to
+# retire the broker while any lease is held. A server that owns scheduling and cannot see batchd
+# is looking at a real outage.
 #
-# The one legitimate absence is the other side of that same lease: before this process wins the
-# election, or when it never does, nothing here is scheduling and batchd is expected to be absent.
-# That is a DYNAMIC fact about this process, not a static property of the service, so it is
-# published as a bounded `absence_expected_reason` token and NOT as `demand_started` -- see
+# The one legitimate absence is the other side of that same lease: while this server has not
+# started its scheduler, nothing here is scheduling and batchd is expected to be absent. That is
+# a DYNAMIC fact about this process, not a static property of the service, so it is published as a
+# bounded `absence_expected_reason` token and NOT as `demand_started` -- see
 # `yolomux_lib/backend_health/observer.py:ABSENCE_EXPECTED_REASON_FIELD`.
-BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE = "scheduler_not_owned"
+BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE = "scheduler_inactive"
 # No batchd handler waits by contract anymore: every action is zero-wait.  `produce` atomically
 # submits and inspects the product store and returns a receipt; the web process polls `product`
 # for cold work on its own side (the former blocking `relay` action, which held one handler slot
@@ -140,7 +139,7 @@ BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE = "scheduler_not_owned"
 # watchd and statusd, and no cheap last-known-good `product` read is charged for another client's
 # in-flight job.
 BATCHD_CONCURRENT_HANDLER_LIMIT = LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT
-# One scheduler owner, three explicitly bounded lanes.  Every declared priority maps to exactly
+# One local scheduler, three explicitly bounded lanes. Every declared priority maps to exactly
 # one executor through BATCHD_PRIORITY_LANES, and BATCHD_PRIORITIES is derived from that same table so
 # a priority can never exist without a lane that runs it.
 #
@@ -187,7 +186,7 @@ BATCHD_LANE_WORKERS: dict[str, int] = {
 }
 BATCHD_SESSION_FILES_REQUESTERS = frozenset({
     "api-session-files", "api-session-files-batch", "background-refresh",
-    "background-info-refresh", "metadata-cache-miss", "metadata-follower-fallback",
+    "background-info-refresh", "metadata-cache-miss", "metadata-cache-fallback",
 })
 BATCHD_MAX_QUEUE = 64
 BATCHD_MAX_PAYLOAD_BYTES = 256 * 1024
@@ -391,7 +390,7 @@ def _session_files_view(payload: bytes) -> bytes:
 def _tabber_activity_view(payload: bytes) -> bytes:
     """Assemble bounded Tabber rows for changed sessions from pre-gathered data in a worker.
 
-    Pure assembly only (dict merge/sort) -- the web owner does all impure gathering (tmux capture,
+    Pure assembly only (dict merge/sort) -- the server process does all impure gathering (tmux capture,
     live attention/cooldown, git) before submitting. The orchestrator lives in ``activity_summary``
     (import-safe, no app/web) so it is unit-testable without a broker socket.
     """
@@ -2453,7 +2452,7 @@ class BatchClient(LocalServiceClient):
         return bool(self._scheduler_lease_id)
 
     def stop_for_scheduler(self) -> bool:
-        """Release the scheduler lease when this process is demoted."""
+        """Release the scheduler lease during server shutdown."""
         with self._scheduler_lease_lock:
             if not self._scheduler_lease_id:
                 return True
@@ -2551,7 +2550,7 @@ class BatchClient(LocalServiceClient):
     def _runtime_status_for_service(self, service_name: str) -> dict[str, Any]:
         """Build this broker's whole System/health row.
 
-        No ``demand_started`` here on purpose: the scheduler lease pins batchd up, so its absence
+        No ``demand_started`` here on purpose: the local scheduler lease pins batchd up, so its absence
         while this process owns scheduling is a verified outage, not idleness. See
         ``BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE`` for the one absence that is expected instead.
         """

@@ -557,7 +557,7 @@ def test_mock_git_differ_pending_producer_without_publish_ends_in_visible_deadli
         "session": session,
         "loaded": True,
         "errors": [],
-        "refreshing_elsewhere": True,
+        "refreshing": True,
         "refs_by_repo": {str(repo.root): {"from_ref": "HEAD", "to_ref": "current"}},
         "repos": [{"repo": str(repo.root), "count": 0, "added": 0, "removed": 0, "behind": 0, "ahead": 0}],
         "files": [],
@@ -609,7 +609,7 @@ def test_mock_git_differ_pending_producer_without_publish_ends_in_visible_deadli
               loading: loading?.textContent?.trim() || '',
               ariaBusy: loading?.getAttribute('aria-busy') || '',
               stateLoading: fileExplorerSessionFilesState.loading,
-              payloadRefreshing: fileExplorerSessionFilesState.payload?.refreshing_elsewhere === true,
+              payloadRefreshing: fileExplorerSessionFilesState.payload?.refreshing === true,
               payloadErrors: fileExplorerSessionFilesState.payload?.errors || [],
               panelText: panel.innerText || '',
               errors: jsDebugFailureEvents('error'),
@@ -626,8 +626,8 @@ def test_mock_git_differ_pending_producer_without_publish_ends_in_visible_deadli
     observed = metrics.get("elapsedMs", -1) / 1000
     terminal = metrics.get("terminal") or {}
     assert_terminal_transition(
-        contract_id="differ-refreshing-elsewhere",
-        pending_observed=payload["refreshing_elsewhere"] is True,
+        contract_id="differ-pending-producer",
+        pending_observed=payload["refreshing"] is True,
         terminal_observed=(
             terminal.get("kind") == "error"
             and metrics.get("loading") == ""
@@ -719,11 +719,11 @@ def test_mock_git_differ_queued_producer_completion_settles_every_visible_surfac
           try {
             await openFileSurface(differItemId);
             await window.__yolomuxTestWaitFor(() => (
-              fileExplorerSessionFilesState.payload?.refreshing_elsewhere === true
+              fileExplorerSessionFilesState.payload?.refreshing === true
               && fileExplorerSessionFilesState.loading === false
             ) ? true : false, {timeoutMs, description: 'queued session-files acknowledgement'});
             const pending = {
-              refreshing: fileExplorerSessionFilesState.payload?.refreshing_elsewhere === true,
+              refreshing: fileExplorerSessionFilesState.payload?.refreshing === true,
               loading: fileExplorerSessionFilesState.loading,
               key: fileExplorerSessionFilesState.payload?.pending_key || '',
               epoch: fileExplorerSessionFilesState.payload?.pending_epoch || '',
@@ -740,7 +740,7 @@ def test_mock_git_differ_queued_producer_completion_settles_every_visible_surfac
               },
             });
             await window.__yolomuxTestWaitFor(() => (
-              fileExplorerSessionFilesState.payload?.refreshing_elsewhere !== true
+              fileExplorerSessionFilesState.payload?.refreshing !== true
               && fileExplorerSessionFilesState.loading === false
             ) ? true : false, {timeoutMs, description: 'queued session-files terminal completion'});
             const surfaces = [...document.querySelectorAll('.file-explorer-changes-panel')].map(panel => ({
@@ -768,7 +768,7 @@ def test_mock_git_differ_queued_producer_completion_settles_every_visible_surfac
             done({
               pending,
               terminal: {
-                refreshing: fileExplorerSessionFilesState.payload?.refreshing_elsewhere === true,
+                refreshing: fileExplorerSessionFilesState.payload?.refreshing === true,
                 loading: fileExplorerSessionFilesState.loading,
                 loaded: fileExplorerSessionFilesState.payload?.loaded === true,
                 surfaces,

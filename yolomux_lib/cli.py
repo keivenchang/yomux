@@ -20,8 +20,6 @@ from .backend_health.observer import BACKEND_HEALTH_OBSERVE_SECONDS
 from .backend_health.observer import BackendHealthObserver
 from .backend_health.store import BackendHealthDiagnostic
 from .backend_health.store import BackendHealthStore
-from .infra.background_owner import background_owner_priority
-from .infra.background_owner import read_background_owner_debug_status
 from .infra.common import _YOLOMUX_ROOTS
 from .infra.common import AUTH_CONFIG_PATH
 from .infra.common import SERVER_HOSTNAME
@@ -44,8 +42,8 @@ from .ptrace import allow_diagnostic_ptrace
 from tools.tls_san import self_signed_interface_ips as discover_self_signed_interface_ips
 from tools.tls_san import self_signed_san as build_self_signed_san
 from .server import TmuxWebtermHTTPServer
-from .server_lease import acquire_server_port_lease
-from .server_lease import acquire_instance_root_lease
+from .server_lease import acquire_instance_and_port_leases
+from .server_lease import InstanceLeaseError
 from .server_logs import emit_server_log
 from .server_logs import install_server_log_handler
 from .tmux.tmux_utils import cmd_error
@@ -86,6 +84,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--port", type=int, default=9998)
     parser.add_argument(
+        "--force",
+        action="store_true",
+        help="terminate the verified existing YOLOmux instance for this product root before starting",
+    )
+    parser.add_argument(
         "--sessions",
         nargs="*",
         default=None,
@@ -113,7 +116,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cert", type=Path, default=None, help="TLS certificate PEM path")
     parser.add_argument("--key", type=Path, default=None, help="TLS private key PEM path")
     parser.add_argument("--print-transcripts", action="store_true")
-    parser.add_argument("--print-background-owner", action="store_true", help="print the shared background-owner status JSON and exit")
     parser.add_argument("--print-runtime-report", action="store_true", help="print runtime owner/cache/endpoint/event/transcript diagnostics JSON and exit")
     parser.add_argument(
         "--dev",
@@ -269,31 +271,6 @@ def print_transcripts(app: TmuxWebtermApp) -> int:
     return 1 if payload["errors"] else 0
 
 
-def print_background_owner_status() -> int:
-    print(json.dumps(read_background_owner_debug_status(), sort_keys=True, indent=2))
-    return 0
-
-
-def runtime_report_background_status() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    owner_debug = read_background_owner_debug_status()
-    owner_control_response = send_yolomux_control_request(
-        owner_debug.get("current_owner") if isinstance(owner_debug, dict) else None,
-        {"action": "background_status"},
-    )
-    status = owner_control_response.get("status") if owner_control_response.get("ok") else None
-    if not isinstance(status, dict):
-        status = {
-            "owner": False,
-            "status": "unreachable",
-            "current_owner": owner_debug.get("current_owner") if isinstance(owner_debug, dict) else None,
-            "roles": {},
-            "counters": {},
-            "refresh_queue": {},
-            "perf": {},
-        }
-    return owner_debug, owner_control_response, status
-
-
 def print_runtime_report(sessions: list[str], dangerously_yolo: bool = False) -> int:
     """Print runtime diagnostics via bounded record/socket lookups only.
 
@@ -305,12 +282,11 @@ def print_runtime_report(sessions: list[str], dangerously_yolo: bool = False) ->
     records instead of starting anything.
     """
     del sessions, dangerously_yolo  # the bounded report never constructs an app
-    owner_debug = read_background_owner_debug_status()
-    owner = owner_debug.get("current_owner") if isinstance(owner_debug, dict) else None
-    response = send_yolomux_control_request(owner, {"action": "runtime_report"})
+    scheduler_debug = {"status": "local-only"}
+    response = send_yolomux_control_request(None, {"action": "runtime_report"})
     report = response.get("report") if response.get("ok") else None
     if isinstance(report, dict):
-        report.setdefault("owner_debug", owner_debug)
+        report.setdefault("scheduler_diagnostics", {"debug": scheduler_debug})
         print(json.dumps(report, sort_keys=True, indent=2))
         return 0
     table = bounded_process_table()
@@ -326,8 +302,8 @@ def print_runtime_report(sessions: list[str], dangerously_yolo: bool = False) ->
     payload = {
         "mode": "bounded-records",
         "reason": "no live server answered the control socket; report built from ledger records only",
-        "owner_debug": owner_debug,
-        "owner_control_response": response,
+        "scheduler_diagnostics": {"debug": scheduler_debug},
+        "control_response": response,
         "port_groups": port_groups,
         "local_service_groups": tracked_local_service_groups(RUNTIME_DIR / "services", table),
     }
@@ -389,21 +365,18 @@ def start_backend_health_observer(port: int, app: TmuxWebtermApp) -> BackendHeal
     """Arm the continuous backend-health observer for this leased port.
 
     Started here, after the port lease, because the retained history file is port-scoped and the
-    lease is what makes it single-writer. It deliberately does NOT depend on the background-owner
-    or stats-collector role, on an open System panel, or on any SSE subscriber: health has to be
+    lease is what makes it single-writer. It deliberately does NOT depend on another server role,
+    on an open System panel, or on any SSE subscriber: health has to be
     observed while every diagnostics panel is hidden, which is the whole point of the milestone.
     Set the env var to 0 to disable, matching the startup watchdog above.
 
-    `main()` calls this AFTER `start_background_owner()` returns, so the election is DECIDED --
-    either way -- and this process's statsd pin owner has been started, before the first cycle
-    reads a row. Armed first, the first cycle beat the election by 2.4ms and published a
+    `main()` calls this AFTER `start_background_scheduler()` returns, so this process's local
+    statsd service has been started before the first cycle
+    reads a row. Armed first, an early cycle once ran before statsd was ready and published a
     `down` statsd that was simply not spawned yet; the measured ablation of both halves is in
     `app.STATSD_ABSENT_WHILE_PIN_PENDING`.
 
-    The order is NOT conditional on the outcome. `start_background_owner()` returns True when
-    this process wins and False when it loses or is blocked by an unreachable owner, and the
-    observer is armed identically in every case, because a monitor that only runs on the
-    winning process would be a worse defect than the flash it was reordered for.
+    The observer is armed identically for every leased instance.
     """
 
     raw = os.environ.get(BACKEND_HEALTH_OBSERVE_SECONDS_ENV, "")
@@ -525,8 +498,6 @@ def main() -> int:
     install_server_log_handler()
     configure_dang_diagnostic_ptrace(args.dangerously_yolo)
     warn_unavailable_agent_commands_once()
-    if args.print_background_owner:
-        return print_background_owner_status()
     sessions = unique_session_names(split_csv(args.sessions)) if args.sessions is not None else default_session_names()
     if args.print_runtime_report:
         return print_runtime_report(sessions, dangerously_yolo=args.dangerously_yolo)
@@ -539,14 +510,24 @@ def main() -> int:
         print(f"TLS setup failed: {error}", file=sys.stderr)
         return 2
 
-    lease = acquire_server_port_lease(args.port)
-    if lease is None:
-        print(f"YOLOmux port {args.port} is already owned by another server launch; refusing a duplicate.", file=sys.stderr)
-        return 1
-    root_lease = acquire_instance_root_lease(_YOLOMUX_ROOTS.root or _YOLOMUX_ROOTS.state_dir)
+    try:
+        root_lease, lease = acquire_instance_and_port_leases(
+            _YOLOMUX_ROOTS,
+            args.port,
+            force=bool(getattr(args, "force", False)),
+        )
+    except InstanceLeaseError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 2
     if root_lease is None:
-        lease.release()
-        print("YOLOmux product root is already owned by another server; refusing shared IDX/STATS/SESS state.", file=sys.stderr)
+        print(
+            "Another YOLOmux instance is already running for this product root/config; refusing a duplicate.",
+            file=sys.stderr,
+        )
+        return 1
+    if lease is None:
+        root_lease.release()
+        print(f"YOLOmux port {args.port} is already owned by another server launch; refusing a duplicate.", file=sys.stderr)
         return 1
     # Ledger provenance + bounded startup protection: services spawned from
     # here on are stamped with this port, and a runaway during the launch
@@ -566,13 +547,9 @@ def main() -> int:
                 return 2
             return print_transcripts(app)
 
-        # Unconditional and outcome-independent: the election is decided first only so the
-        # observer's first cycle cannot race it, never so the observer depends on winning it.
-        app.start_background_owner(
-            port=args.port,
-            priority=background_owner_priority(args.port),
-            managed_instance=True,
-        )
+        if not app.start_background_scheduler(port=args.port):
+            print("ERROR: local background scheduler failed to start", file=sys.stderr)
+            return 2
         backend_health = start_backend_health_observer(args.port, app)
         server = TmuxWebtermHTTPServer((args.host, args.port), app, tls_context=tls_context, dev=args.dev)
         if hasattr(app, "start_yoagent_backend_prewarm"):
@@ -628,10 +605,13 @@ def main() -> int:
                         # CPython can finalize while that native thread is still alive.
                         server.server_close()
                     elif app is not None:
-                        if hasattr(app, "background_owner"):
-                            app.background_owner.stop()
+                        if hasattr(app, "background_scheduler"):
+                            app.background_scheduler.stop()
                         if hasattr(app, "control_server"):
                             app.control_server.stop()
                 finally:
-                    root_lease.release()
+                    # Release the listener lease before the product-root lease. A replacement
+                    # must never observe the root as free while the old server still owns its
+                    # port and is finishing shutdown.
                     lease.release()
+                    root_lease.release()

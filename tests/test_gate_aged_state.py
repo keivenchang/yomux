@@ -694,7 +694,7 @@ def test_browser_journey_error_gate_fails_closed_on_unreadable_log_ring(
 
 def test_aged_server_restart_preserves_selected_state_and_private_identity(aged_state_root, stateful_journey):
     caches = aged_state_root.apply("coexisting_transcript_caches", shared_count=4, host_count=3)
-    events = aged_state_root.apply("event_history", counts={"state_changed": 5, "stale_owner_heartbeat": 2})
+    events = aged_state_root.apply("event_history", counts={"state_changed": 5, "stale_cache_refresh": 2})
     before_cache_names = tuple(tuple(path.name for path in sorted(directory.glob("*.json"))) for directory in caches.paths)
     before_event_lines = events.paths[0].read_text(encoding="utf-8").splitlines()
 
@@ -713,7 +713,7 @@ def test_nested_finder_journey_retains_each_phase_without_duplicate_work(browser
     finder = aged_state_root.apply("finder_resource_history", top_level_entries=99, nested_entries=8)
     aged_state_root.apply("coexisting_transcript_caches", shared_count=12, host_count=8)
     aged_state_root.apply("eof_transcript_cursor")
-    aged_state_root.apply("event_history", counts={"state_changed": 40, "stale_owner_heartbeat": 8})
+    aged_state_root.apply("event_history", counts={"state_changed": 40, "stale_cache_refresh": 8})
     runtime = stateful_journey.start()
     _load_browser_error_gate(browser, runtime)
     runtime = stateful_journey.restart()

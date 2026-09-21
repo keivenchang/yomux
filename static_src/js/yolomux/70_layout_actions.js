@@ -2171,32 +2171,14 @@ function tmuxSessionMutationReconciliation(metadata, autoStatuses) {
 // Reconciliation NEVER throws. It runs after the server mutation and the local commit, so a
 // rejection here is a stale view, not a failed mutation, and letting it propagate would put a
 // post-commit failure on a path whose only handler rolls the mutation back.
-const tmuxRosterMutationPollMs = 50;
-const tmuxRosterMutationTimeoutMs = 1500;
-
-function tmuxRosterMutationConverged(payload) {
-  const expectedOrder = tmuxRosterEventOrder(payload);
-  if (!expectedOrder) return false;
-  const expectedGeneration = tmuxRosterEventGeneration(payload);
-  return expectedGeneration <= tmuxTopologyGeneration
-    && expectedOrder.length === sessions.length
-    && expectedOrder.every((session, index) => session === sessions[index]);
-}
-
-async function waitForTmuxRosterMutation(payload) {
-  const deadline = Date.now() + tmuxRosterMutationTimeoutMs;
-  while (true) {
-    if (tmuxRosterMutationConverged(payload)) return sessionMetadataResult(true, 'roster_converged');
-    if (Date.now() >= deadline) {
-      return noteForcedSessionMetadataSettleOutcome('roster_generation_never_arrived', tmuxRosterEventGeneration(payload));
-    }
-    await new Promise(resolve => setTimeout(resolve, tmuxRosterMutationPollMs));
-  }
-}
-
 async function refreshTmuxSessionMutationState(options = {}) {
-  const metadataPromise = options.kind === 'rename'
-    ? waitForTmuxRosterMutation(options.payload)
+  // Create/remove mutations are reconciled by the backend's asynchronous
+  // `transcripts_changed` publication. Only an explicit rename needs the
+  // short, bounded forced read because tmux can report the old and new names
+  // across separate events. Keep the no-kind path forced for direct callers
+  // and focused diagnostics that explicitly request reconciliation.
+  const metadataPromise = options.kind && options.kind !== 'rename'
+    ? Promise.resolve({ok: true, reason: 'backend_async'})
     : refreshTranscripts({force: true, refreshActivity: false});
   const [metadata, autoStatuses] = await Promise.allSettled([
     metadataPromise,

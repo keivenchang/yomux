@@ -43,7 +43,7 @@ from ..local_services.runtime import run_local_rpc_service
 # The persistent indexer is the process that actually runs those builds, so importing it wires the
 # one runner `file_index._run_build` consults; a process that never imports this module (a pure
 # file_index unit test) keeps the DFS fallback. This is the injector pattern `file_index` already
-# uses for the background-owner checker, not a function-local import.
+# uses for the build-authority checker, not a function-local import.
 file_index.set_bfs_full_build_runner(bfs_index.build_root_into_index)
 
 # The bounded token the health observer reads when a configured/scheduled obligation, not demand,
@@ -59,7 +59,9 @@ INDEXER_PROTOCOL_VERSION = 1
 INDEXER_CAPABILITIES = frozenset({"search"})
 INDEXER_DEBOUNCE_SECONDS = 2.0
 INDEXER_DEFAULT_IDLE_SECONDS = 60.0
-INDEXER_SEARCH_RPC_TIMEOUT_SECONDS = 0.5
+# Interactive Quick Open and refresh requests share one bounded transport budget. A refresh is
+# advisory work, so it must not consume the request path's whole half-second local-RPC default.
+INDEXER_INTERACTIVE_RPC_TIMEOUT_SECONDS = 0.2
 INDEXER_SOCKET_NAME = "indexer.sock"
 INDEXER_LOCK_NAME = "indexer.lock"
 INDEXER_COMMAND_ROUTER = LocalServiceCommandRouter({
@@ -99,7 +101,7 @@ class PersistentSearchIndexer:
         # crawl runs in THIS daemon, so `bfs_index._emit_progress_signal` -> `file_index.notify_search_progress`
         # builds its redacted `{scope_id, generation, revision, coverage}` frame here; registering the
         # notifier below deposits that frame into this buffer. The daemon holds no App/broker and cannot
-        # reach the shared client-events bus itself, so a follower web process drains these over the
+        # reach the shared client-events bus itself, so a web process drains these over the
         # existing indexd RPC and republishes each UNCHANGED via `app.publish_search_progress`. Latest per
         # scope is sufficient -- the client pulls every ordered delta by cursor, so only the newest
         # revision must survive a coalescing window; the buffer is bounded by the number of roots.
@@ -117,7 +119,7 @@ class PersistentSearchIndexer:
     def drain_search_progress(self) -> dict[str, Any]:
         """Hand the web the progress frames committed since its last drain, newest-per-scope, then clear.
 
-        A passive read for a FOLLOWER web process: it takes no lease and starts no work, it only moves
+        A passive read for a web process: it takes no lease and starts no work, it only moves
         the already-redacted frames this daemon built onto the caller so the caller can fan them out over
         the shared client-events bus. Clearing on drain delivers each latest frame once; the client's
         cursor read, not this signal, is what guarantees the stream is complete."""
@@ -371,8 +373,8 @@ class SearchIndexerClient:
             socket_path=self.socket_path,
             service_dir=requested_service_dir,
         )
-        # The configured-root scheduler obligation this process is holding. Set by the elected
-        # background owner in `app.handle_background_owner_acquired`, cleared on demotion/shutdown.
+        # The configured-root scheduler obligation this process is holding. Set by the local
+        # background coordinator during startup, cleared on shutdown.
         # `runtime_status()` reads it to report measured scheduled work instead of demand-only idle.
         self.scheduled_roots: list[str] = []
         self.scheduler_lease_id: str | None = None
@@ -410,7 +412,7 @@ class SearchIndexerClient:
     def lease_configured_roots(self, roots: Any) -> dict[str, Any]:
         """Reconcile the configured indexed roots against the running schedule, DELTA-based.
 
-        Item 1 of DOIT.fs-interactivity: the elected background owner keeps `indexd` alive past its
+        Item 1 of DOIT.fs-interactivity: the local scheduler keeps `indexd` alive past its
         60-second idle timeout and enqueues a `startup-depth-1` listing for each configured root,
         instead of waiting for a Quick Open query. This runs on acquisition and on settings changes,
         so it must be idempotent: enqueue only ADDED roots, leave UNCHANGED roots alone (never
@@ -442,11 +444,22 @@ class SearchIndexerClient:
         # cross-service client. indexd's lease handler reads exactly one spelling; a
         # private second one here would mint a fresh row on every reconcile.
         lease = self.request({"action": "lease", "client_pid": os.getpid(), "lease_id": self.scheduler_lease_id or ""})
-        if lease.get("ok"):
-            lease_id = str(lease.get("lease_id") or "")
-            if lease_id:
-                self.scheduler_lease_id = lease_id
-                self.scheduler_leased_at = time.time()
+        lease_id = str(lease.get("lease_id") or "") if lease.get("ok") else ""
+        if not lease_id:
+            # Never enqueue work without the daemon-side lease that keeps this scheduler
+            # obligation alive.  A rejected lease used to fall through to the enqueue loop and
+            # return ``ok: True`` while indexd could immediately idle out underneath the caller.
+            return {
+                "ok": False,
+                "error": str(lease.get("error") or lease.get("status") or "indexer scheduler lease unavailable"),
+                "scheduled_roots": sorted(old_roots - (removed - self._pending_removals)),
+                "requested_roots": clean,
+                "leased": self.scheduler_lease_id is not None,
+                "enqueued": [],
+                "removed": sorted(removed - new_roots - self._pending_removals),
+            }
+        self.scheduler_lease_id = lease_id
+        self.scheduler_leased_at = time.time()
         added = sorted(new_roots - old_roots)
         enqueued: list[str] = []
         for root in added:
@@ -463,7 +476,7 @@ class SearchIndexerClient:
         }
 
     def release_scheduler_lease(self) -> dict[str, Any]:
-        """Release the scheduler lease on demotion/shutdown so the daemon may idle out honestly.
+        """Release the scheduler lease on shutdown so the daemon may idle out honestly.
 
         A failed release (transport error, daemon momentarily unreachable) PRESERVES the lease id so
         a later call can retry it; erasing the only handle would strand the lease on the daemon and
@@ -634,13 +647,19 @@ class SearchIndexerClient:
     def enqueue(self, root: str, paths: list[str], reason: str = "") -> dict[str, Any]:
         if not self.ensure_started():
             return {"ok": False, "accepted": False, "error": "persistent indexer unavailable"}
-        response = self.request({"action": "enqueue", "root": root, "paths": paths, "reason": reason})
+        response = self.request(
+            {"action": "enqueue", "root": root, "paths": paths, "reason": reason},
+            timeout=INDEXER_INTERACTIVE_RPC_TIMEOUT_SECONDS,
+        )
         return {**response, "accepted": bool(response.get("ok"))}
 
     def unindex(self, root: str) -> dict[str, Any]:
         if not self.ensure_started():
             return {"ok": False, "accepted": False, "error": "persistent indexer unavailable"}
-        response = self.request({"action": "unindex", "root": root})
+        response = self.request(
+            {"action": "unindex", "root": root},
+            timeout=INDEXER_INTERACTIVE_RPC_TIMEOUT_SECONDS,
+        )
         return {**response, "accepted": bool(response.get("ok"))}
 
     def promote_user_visible(
@@ -664,13 +683,13 @@ class SearchIndexerClient:
         }
         if directory:
             payload["directory"] = directory
-        response = self.request(payload)
+        response = self.request(payload, timeout=INDEXER_INTERACTIVE_RPC_TIMEOUT_SECONDS)
         return {**response, "accepted": bool(response.get("ok"))}
 
     def drain_search_progress(self) -> list[dict[str, Any]]:
         """Drain the daemon's buffered Quick Open progress frames WITHOUT starting or leasing it.
 
-        A passive follower read: it never `ensure_started` (draining must not spin indexd up) and uses a
+        A passive reader read: it never `ensure_started` (draining must not spin indexd up) and uses a
         short timeout so an absent or idle daemon fails closed to an empty list instead of blocking the
         web's client-event loop. The web republishes each returned frame onto the shared client-events
         bus through the one forwarder (`app.publish_search_progress`)."""
@@ -685,7 +704,7 @@ class SearchIndexerClient:
             if field in forwarded:
                 payload[field] = forwarded[field]
         if self.supports("search"):
-            return self.request(payload, timeout=INDEXER_SEARCH_RPC_TIMEOUT_SECONDS)
+            return self.request(payload, timeout=INDEXER_INTERACTIVE_RPC_TIMEOUT_SECONDS)
         if not self.ensure_started():
             return {
                 "ok": False,
@@ -701,7 +720,7 @@ class SearchIndexerClient:
                     "error_code": "service_unavailable",
                     "reason": "persistent indexer lacks search capability",
                 }
-        return self.request(payload, timeout=INDEXER_SEARCH_RPC_TIMEOUT_SECONDS)
+        return self.request(payload, timeout=INDEXER_INTERACTIVE_RPC_TIMEOUT_SECONDS)
 
 
 def main(argv: list[str] | None = None) -> int:

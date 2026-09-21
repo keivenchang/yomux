@@ -111,7 +111,7 @@ def make_tmux_webterm_app(monkeypatch):
     yield factory
 
     for app in created:
-        app.background_owner.stop()
+        app.background_scheduler.stop()
         app.control_server.stop()
 
 

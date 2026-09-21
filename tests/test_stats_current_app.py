@@ -163,7 +163,7 @@ def test_agent_tokens_collector_fails_closed_when_statusd_lease_is_unavailable(m
         "kind": "opencode", "agent_session_id": "ses-current", "cwd": "/repo",
     }]
     webapp.stats_agent_token_rows = lambda rows: rows
-    webapp.background_owner = SimpleNamespace(owner_payload=lambda: {"port": 7110, "owner_generation": 1})
+    webapp.background_scheduler = SimpleNamespace(process_payload=lambda: {"port": 7110, "started_at_ns": 1}, can_run=lambda _role: True)
     webapp.stats_current_transcript_usage = SimpleNamespace(scan=lambda _rows: SimpleNamespace(items=(), tombstones=(), unavailable_spans=(), coverage_epochs=(), budget_exhausted=False, receipt_id="test"), usage_atom_backfill_status_for_scan=lambda _scan, atoms_accepted, rejection_reasons: None, commit=lambda _id: None, rollback=lambda _id: None)
     monkeypatch.setattr(webapp, "start_status_collector_lease", lambda: False)
     monkeypatch.setattr(app_module.stats_current_opencode, "read_usage", lambda **_kwargs: app_module.stats_current_opencode.OpenCodeUnavailable("test"))
@@ -2316,11 +2316,11 @@ def test_token_adapter_does_not_claim_zero_coverage_when_roster_is_cold():
     assert facts.receipt is None
 
 
-def test_background_owner_starts_only_the_current_stats_runtime():
+def test_background_scheduler_starts_only_the_current_stats_runtime():
     calls = []
     webapp = object.__new__(app_module.TmuxWebtermApp)
-    webapp.background_owner = SimpleNamespace(status_payload=lambda: {"owner": True}, can_run=lambda _role: True, is_owner=lambda: True)
-    # Slice B: owner acquisition also leases indexd via refresh_search_indexer_schedule; with no
+    webapp.background_scheduler = SimpleNamespace(status_payload=lambda: {"status": "local"}, can_run=lambda _role: True)
+    # The local scheduler also leases indexd via refresh_search_indexer_schedule; with no
     # configured roots the lease is a bounded no-op and must not perturb the private-worker call order.
     webapp.search_indexer = SimpleNamespace(lease_configured_roots=lambda roots: {"ok": True, "leased": False})
     webapp.settings_payload = lambda: {"settings": {"file_explorer": {"indexed_dirs": []}}}
@@ -2340,25 +2340,26 @@ def test_background_owner_starts_only_the_current_stats_runtime():
     webapp.start_tabber_activity_cache_warmer = lambda: calls.append("tabber-worker")
     webapp.publish_background_client_event = lambda *args, **kwargs: calls.append("publish")
 
-    webapp.handle_background_owner_acquired({"last_transition": "acquired", "generation": {}})
+    webapp.handle_background_scheduler_started()
 
-    assert calls == ["event", "job", "pricing", "current", "tabber", "tabber-worker", "publish"]
+    assert calls == ["job", "pricing", "current", "tabber", "tabber-worker"]
 
 
-def test_background_owner_advertises_current_stats_writer_build(monkeypatch, tmp_path):
+def test_background_services_use_the_local_coordinator(monkeypatch, tmp_path):
     captured = {}
 
     class Owner:
-        status = "follower"
-
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
-        def start(self):
+
+        def start(self, **kwargs):
+            captured.update(kwargs)
             return True
 
-    monkeypatch.setattr(app_module, "BackgroundOwnerRegistry", Owner)
+    monkeypatch.setattr(app_module, "BackgroundScheduler", Owner)
     webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.background_scheduler = Owner(project_root=str(tmp_path))
     webapp.control_server = SimpleNamespace(path=tmp_path / "control.sock")
     webapp.event_log = SimpleNamespace(append=lambda *args, **kwargs: {})
     webapp.client_events = SimpleNamespace(publish=lambda *args, **kwargs: {})
@@ -2371,10 +2372,11 @@ def test_background_owner_advertises_current_stats_writer_build(monkeypatch, tmp
     webapp.search_indexer = SimpleNamespace(lease_configured_roots=lambda _roots: {"ok": True})
     webapp.settings_payload = lambda: {"settings": {}}
 
-    assert webapp.start_background_owner(port=7111, priority=0) is True
+    assert webapp.start_background_scheduler(port=7111) is True
+    assert captured["port"] == 7111
 
 
-def test_background_owner_demotion_stops_current_runtime_not_legacy_scheduler(monkeypatch):
+def test_background_scheduler_demotion_stops_current_runtime_not_legacy_scheduler(monkeypatch):
     calls = []
     webapp = object.__new__(app_module.TmuxWebtermApp)
     webapp.pricing_refresh_coordinator = SimpleNamespace(
@@ -2384,27 +2386,27 @@ def test_background_owner_demotion_stops_current_runtime_not_legacy_scheduler(mo
     webapp.job_client = SimpleNamespace(stop_for_scheduler=lambda: calls.append("batchd"))
     webapp.stop_stats_metric_scheduler = lambda: pytest.fail("legacy scheduler must not stop")
     webapp.metadata_warm_lock = threading.Lock()
-    webapp.metadata_warm_record = SimpleNamespace(stop_event=threading.Event())
+    webapp.metadata_warm_record = SimpleNamespace(worker=None, stop_event=threading.Event())
     webapp.activity_transcript_service = SimpleNamespace(
         tabber_cache_lock=threading.Lock(),
         # The real record type: demotion sets its wake event so a parked warmer
         # exits promptly instead of waiting forever.
         tabber_warmer_record=app_module.TabberActivityWarmerRecord(),
-        tabber_cache_record=SimpleNamespace(refresh_worker=object()),
+        tabber_cache_record=SimpleNamespace(refresh_worker=None),
     )
     webapp.session_files_service = app_module.SessionFilesService()
     reserved = webapp.session_files_service.reserve_work(("active",), "stable")
     assert reserved is not None
-    webapp.background_owner = SimpleNamespace(status_payload=lambda: {"owner": False})
+    webapp.background_scheduler = SimpleNamespace(status_payload=lambda: {"status": "local"})
     # Slice B: demotion releases the indexd scheduler lease; a bounded no-op here that must not
     # perturb the asserted stop order.
     webapp.search_indexer = SimpleNamespace(release_scheduler_lease=lambda: None)
     webapp.publish_background_client_event = lambda *args, **kwargs: calls.append("publish")
     monkeypatch.setattr(app_module.file_index, "clear_memory_indexes", lambda: calls.append("indexes"))
 
-    webapp.demote_background_owner()
+    webapp.stop_background_scheduler()
 
-    assert calls == ["pricing", "current", "batchd", "indexes", "publish"]
+    assert calls == ["pricing", "current", "batchd", "indexes"]
     assert webapp.activity_transcript_service.tabber_warmer_record.wake.is_set() is False  # fresh replacement record
     assert webapp.metadata_warm_record.stop_event.is_set()
     assert webapp.session_files_service.work_records == {}
@@ -2425,8 +2427,8 @@ def test_app_shutdown_stops_current_runtime_not_legacy_scheduler():
     webapp.approval_client = SimpleNamespace(
         request=lambda *args, **kwargs: calls.append("approval"),
     )
-    webapp.background_owner = app_module.DisabledBackgroundOwner()
-    webapp.background_owner.stop = lambda: calls.append("owner")
+    webapp.background_scheduler = app_module.BackgroundScheduler()
+    webapp.background_scheduler.stop = lambda: calls.append("owner")
     webapp.yoagent_controller = SimpleNamespace(
         close_yoagent_codex_app_server=lambda: calls.append("yoagent"),
     )
@@ -2434,7 +2436,29 @@ def test_app_shutdown_stops_current_runtime_not_legacy_scheduler():
 
     webapp.stop_auto_approve_all()
 
-    assert calls == ["pricing", "current", "compaction", "operations", "batchd", "approval", "owner", "yoagent", "control"]
+    assert calls == ["owner", "pricing", "current", "batchd", "compaction", "operations", "approval", "yoagent", "control"]
+
+
+def test_app_shutdown_is_idempotent_for_cli_then_server_close():
+    calls = []
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp._application_teardown_lock = threading.Lock()
+    webapp._application_teardown_done = False
+    webapp.pricing_refresh_coordinator = SimpleNamespace(stop_periodic=lambda: calls.append("pricing"))
+    webapp.stats_current_runtime = SimpleNamespace(stop=lambda: calls.append("current"))
+    webapp.queued_delivery_compaction_owner = SimpleNamespace(stop=lambda: calls.append("compaction"))
+    webapp.batchd_operation_service = SimpleNamespace(stop=lambda: calls.append("operations"))
+    webapp.job_client = SimpleNamespace(stop_for_scheduler=lambda: calls.append("batchd"))
+    webapp.approval_client = SimpleNamespace(request=lambda *args, **kwargs: calls.append("approval"))
+    webapp.background_scheduler = app_module.BackgroundScheduler()
+    webapp.background_scheduler.stop = lambda: calls.append("owner")
+    webapp.yoagent_controller = SimpleNamespace(close_yoagent_codex_app_server=lambda: calls.append("yoagent"))
+    webapp.control_server = SimpleNamespace(stop=lambda: calls.append("control"))
+
+    webapp.stop_auto_approve_all()
+    webapp.stop_auto_approve_all()
+
+    assert calls == ["owner", "pricing", "current", "batchd", "compaction", "operations", "approval", "yoagent", "control"]
 
 
 def test_legacy_stats_handlers_and_scheduler_bodies_are_deleted():
@@ -2497,7 +2521,7 @@ def test_retired_stats_runtime_files_and_production_imports_are_deleted():
         "agent_token_consumer_until",
         "agent_token_bootstrap_pending",
         "agent_token_worker",
-        "scheduler_diagnostics",
+        "owner_diagnostics",
     ):
         assert retired not in app_source
         assert retired not in state_source

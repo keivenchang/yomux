@@ -567,6 +567,9 @@ def test_editor_autosave_uses_the_last_edited_panel_and_serializes_its_writes(ga
             const secondPanel = panels.find(panel => panel.dataset.layoutItem === secondItem);
             replaceDocument(firstPanel, 'first panel\\n');
             await window.__yolomuxTestWaitFor(() => fileState.get(path)?.content === 'first panel\\n', {timeoutMs: 5000, description: 'first panel edit'});
+            // Use the real settings path so deferred metadata refreshes cannot overwrite the
+            // short test delay with the six-second default.
+            await saveSettingsPatch({editor: {autosave: true, autosave_delay_seconds: 0.5}});
             fileEditorAutosaveEnabled = true;
             fileEditorAutosaveDelaySeconds = 0.5;
             rescheduleAllFileAutosaves();
@@ -596,7 +599,7 @@ def test_editor_autosave_uses_the_last_edited_panel_and_serializes_its_writes(ga
               errors: jsDebugFailureEvents('error'),
               rejections: jsDebugFailureEvents('rejection'),
             });
-          } catch (error) {
+            } catch (error) {
             done({error: String(error?.stack || error), writes});
           } finally {
             window.fetch = nativeFetch;

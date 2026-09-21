@@ -247,7 +247,7 @@ body.app-phone-single-pane .panel {
   background: var(--pane-bar-bg, var(--panel2));
   border-color: var(--pane-inactive-tab-border);
 }
-body.theme-light .yolomux-dockview .dv-tab > .dockview-pane-tab {
+body.theme-light .yolomux-dockview .dv-tab:not(.dv-active-tab) > .dockview-pane-tab {
   color: var(--light-readable-text) !important;
 }
 .yolomux-dockview .dv-tab.dv-drop-target .dv-drop-target-selection.dv-drop-target-left,
@@ -1412,15 +1412,6 @@ body.layout-resizing {
   min-width: 0;
   max-width: none;
 }
-.yolomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab:not(.file-missing),
-.tmux-pane-tab-token.active,
-.panel.active-pane .pane-tab.active:not(.file-missing),
-.panel.file-explorer-panel .pane-tab.active:not(.file-missing) {
-  color: var(--pane-tab-active-text);
-  background: var(--pane-tab-active-bg);
-  border-color: var(--pane-tab-active-border);
-  border-bottom-color: var(--pane-tab-active-bg);
-}
 .yolomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab .session-button-name,
 .yolomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab .session-button-dir,
 .yolomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab .session-button-detail,
@@ -1439,6 +1430,15 @@ body.layout-resizing {
   border-bottom-color: var(--pane-tab-unfocused-active-bg);
   font-weight: 500;
   box-shadow: none;
+}
+.yolomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab:not(.file-missing),
+.tmux-pane-tab-token.active,
+.panel.active-pane .pane-tab.active:not(.file-missing),
+.panel.file-explorer-panel .pane-tab.active:not(.file-missing) {
+  color: var(--pane-tab-active-text);
+  background: var(--pane-tab-active-bg);
+  border-color: var(--pane-tab-active-border);
+  border-bottom-color: var(--pane-tab-active-bg);
 }
 /* every pane keeps its active tab clearly green (no dimming) so you can tell which session
    each pane shows; the focused pane's extra cue is its brighter lime active tab + the pane ring. */
@@ -1477,7 +1477,6 @@ body.layout-resizing {
 }
 body.theme-light .panel .pane-tab:not(.active) {
   color: var(--light-readable-text) !important;
-  background: var(--light-readable-bg);
   border-color: var(--light-readable-line);
 }
 body.theme-light .panel .pane-tab:not(.active) .session-button-name,
@@ -1485,6 +1484,10 @@ body.theme-light .panel .pane-tab:not(.active) .session-button-dir,
 body.theme-light .panel .pane-tab:not(.active) .session-button-detail,
 body.theme-light .panel .pane-tab:not(.active) .pane-tab-close {
   color: var(--light-readable-text) !important;
+}
+body.theme-light .panel :is(.pane-tab, .tmux-pane-tab-token-action):not(.active):is(:hover, :focus-visible) {
+  background: var(--pane-inactive-tab-bg-hover);
+  border-color: var(--40-layout-panes-tabs-pane-tab-border-26);
 }
 .pane-tab:not(.active):hover,
 .pane-tab:not(.active):focus-visible,

@@ -361,7 +361,7 @@ async function runCrossSurfaceStateSuite() {
     }
     assert.equal(api.tabTypeForItem(api.yocostItemId), null, 'the retired YO!cost item id is not a duplicate live tab type');
     assert.equal(api.fileIndexStatusFromPayloadForTest({ready: true, state: 'ready'}), 'ready', 'ready file indexes stop polling');
-    assert.equal(api.fileIndexStatusFromPayloadForTest({ready: false, state: 'follower', ready_elsewhere: true}), 'ready', 'follower-owned ready file indexes stop polling');
+    assert.equal(api.fileIndexStatusFromPayloadForTest({ready: true, state: 'ready', freshness: 'fresh'}), 'ready', 'ready file indexes stop polling');
     assert.equal(api.fileIndexStatusFromPayloadForTest({ready: true, state: 'too_large', too_large: true, coverage: 'partial'}), 'too_large', 'capped file indexes remain visibly partial');
     assert.equal(api.fileIndexStatusFromPayloadForTest({ready: false, state: 'building'}), 'building', 'building file indexes keep polling');
     // YO!info and YO!agent are independent virtual tabs; legacy yoagent/yosup aliases open YO!agent.
@@ -454,28 +454,28 @@ async function runCrossSurfaceStateSuite() {
     api.setSessionFilesPayloadForTest({
       session: '3',
       loaded: true,
-      refreshing_elsewhere: true,
+      refreshing: true,
       errors: [],
       refs_by_repo: {},
       repos: [{repo: '/home/test/frontend-crates3', count: 0, touched_count: 0, added: 0, removed: 0}],
       files: [],
     });
     api.setSessionFilesLoadingForTest(false);
-    const refreshingElsewhereHtml = api.fileExplorerChangesPanelHtml();
-    assert.ok(/changes-loading[\s\S]*loading 3[\s\S]*moving-ellipsis changes-loading-dots/.test(refreshingElsewhereHtml), 'Differ rooted follower placeholders render as loading until real results arrive');
-    assert.equal(refreshingElsewhereHtml.includes('No Differ results for this session.'), false, 'Differ rooted follower placeholders do not claim the dirty repo has a completed empty result');
+    const refreshingHtml = api.fileExplorerChangesPanelHtml();
+    assert.ok(/changes-loading[\s\S]*loading 3[\s\S]*moving-ellipsis changes-loading-dots/.test(refreshingHtml), 'Differ rooted local-refresh placeholders render as loading until real results arrive');
+    assert.equal(refreshingHtml.includes('No Differ results for this session.'), false, 'Differ rooted local-refresh placeholders do not claim the dirty repo has a completed empty result');
     api.setSessionFilesPayloadForTest({
       session: '4',
       loaded: true,
-      refreshing_elsewhere: true,
+      refreshing: true,
       errors: [],
       refs_by_repo: {},
       repos: [],
       files: [],
     });
-    const rootlessRefreshingElsewhereHtml = api.fileExplorerChangesPanelHtml();
-    assert.ok(/changes-loading[\s\S]*loading 4[\s\S]*moving-ellipsis changes-loading-dots/.test(rootlessRefreshingElsewhereHtml), 'Differ rootless follower placeholders still render as loading instead of a misleading empty result');
-    assert.equal(rootlessRefreshingElsewhereHtml.includes('No Differ results for this session.'), false, 'Differ rootless follower placeholders do not render a completed empty state');
+    const rootlessRefreshingHtml = api.fileExplorerChangesPanelHtml();
+    assert.ok(/changes-loading[\s\S]*loading 4[\s\S]*moving-ellipsis changes-loading-dots/.test(rootlessRefreshingHtml), 'Differ rootless local-refresh placeholders still render as loading instead of a misleading empty result');
+    assert.equal(rootlessRefreshingHtml.includes('No Differ results for this session.'), false, 'Differ rootless local-refresh placeholders do not render a completed empty state');
     api.setSessionFilesLoadingForTest(false);
     api.setFileExplorerModeForTest('diff');
     api.setFileExplorerChangesSelectedSessionForTest('1');
@@ -1967,13 +1967,13 @@ async function runCrossSurfaceStateSuite() {
     ), true, 'rootless worktree push can update Finder without blanking a loaded same-session Differ repo');
     assert.equal(rootlessDifferApi.sessionFilesPayloadForTest().repos[0].repo, yolomuxRepo, 'rootless Finder push leaves the yolomux.dev8002 Differ repo visible');
     assert.equal(rootlessDifferApi.applySessionFilesPayloadFromPushForTest(
-      {session: '8002', loaded: true, refreshing_elsewhere: true, files: [], repos: [{repo: yolomuxRepo, count: 0, touched_count: 0, added: 0, removed: 0}], errors: []},
+      {session: '8002', loaded: true, refreshing: true, files: [], repos: [{repo: yolomuxRepo, count: 0, touched_count: 0, added: 0, removed: 0}], errors: []},
       {session: '8002', hours: 24, from_ref: 'HEAD', to_ref: 'current'},
-    ), true, 'follower worktree placeholder can update Finder without replacing a loaded same-session Differ repo');
-    assert.equal(rootlessDifferApi.sessionFilesPayloadForTest().repos[0].added, 4, 'Finder follower placeholder leaves the visible Differ payload intact');
+    ), true, 'local-refresh worktree placeholder can update Finder without replacing a loaded same-session Differ repo');
+    assert.equal(rootlessDifferApi.sessionFilesPayloadForTest().repos[0].added, 4, 'Finder local-refresh placeholder leaves the visible Differ payload intact');
     assert.equal(rootlessDifferApi.sessionFilesPanelIsLoadingForTest(
-      {session: '8002', loaded: true, refreshing_elsewhere: true, files: [], repos: [{repo: yolomuxRepo, count: 0, touched_count: 0, added: 0, removed: 0}], errors: []},
-    ), true, 'a rooted follower placeholder renders as loading instead of a completed zero-diff result');
+      {session: '8002', loaded: true, refreshing: true, files: [], repos: [{repo: yolomuxRepo, count: 0, touched_count: 0, added: 0, removed: 0}], errors: []},
+    ), true, 'a rooted local-refresh placeholder renders as loading instead of a completed zero-diff result');
     assert.equal(rootlessDifferApi.applySessionFilesPayloadFromPushForTest(
       {session: '8002', loaded: true, files: [], repos: [{repo: yolomuxRepo, count: 0, touched_count: 0, added: 0, removed: 0}], errors: []},
       {session: '8002', hours: 24, from_ref: 'HEAD', to_ref: 'current'},
@@ -2001,8 +2001,8 @@ async function runCrossSurfaceStateSuite() {
     assert.deepStrictEqual(sessionFilesRefs[yolomuxRepo], {from: 'abc1234', to: 'current'}, 'the current repo override remains intact');
     assert.ok(/function sessionFilesPayloadIsFinderWorktree\([\s\S]*from_ref \|\| 'HEAD'[\s\S]*to_ref \|\| 'current'/.test(appSource), 'Finder file mode can preserve an already-loaded HEAD/current payload for sync planning');
     assert.ok(/function sessionFilesPayloadShouldPreserveCurrent\([\s\S]*sessionFilesPayloadIsRootlessEmpty\(nextPayload\)[\s\S]*sessionFilesRepoRoots\(current\)\.length > 0/.test(appSource), 'Differ ignores rootless empty session-files pushes after a rooted payload is already visible');
-    assert.ok(/function sessionFilesPayloadShouldPreserveCurrent\([\s\S]*sessionFilesPayloadIsRefreshingElsewhere\(nextPayload\)[\s\S]*sessionFilesRepoRoots\(current\)\.length > 0/.test(appSource), 'Differ ignores follower refresh placeholders after a rooted payload is already visible');
-    assert.ok(/function sessionFilesPayloadHasVisibleDifferResult\(payload, files = null\)[\s\S]*sessionFilesPayloadIsRefreshingElsewhere\(payload\)[\s\S]*return false/.test(appSource), 'a rooted follower-refresh placeholder remains loading until real files, warnings, or errors arrive');
+    assert.ok(/function sessionFilesPayloadShouldPreserveCurrent\([\s\S]*sessionFilesPayloadIsRefreshing\(nextPayload\)[\s\S]*sessionFilesRepoRoots\(current\)\.length > 0/.test(appSource), 'Differ ignores local-refresh placeholders after a rooted payload is already visible');
+    assert.ok(/function sessionFilesPayloadHasVisibleDifferResult\(payload, files = null\)[\s\S]*sessionFilesPayloadIsRefreshing\(payload\)[\s\S]*return false/.test(appSource), 'a rooted local-refresh placeholder remains loading until real files, warnings, or errors arrive');
     assert.ok(/function applySessionFilesPayloadToDestination\(destination, payload, request, session, completionIdentity = ''\)[\s\S]*const wasLoading = sessionFilesLoadingForDestination\(destination\);[\s\S]*setSessionFilesLoadingForDestination\(destination, false\)/.test(appSource), 'accepted session-files pushes clear each destination stale foreground loading flag before rerendering');
     assert.ok(/if \(backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent\(nextPayload, destination\)\) return;/.test(appSource), 'background refreshes cannot blank a rooted destination payload with a rootless empty result');
     assert.ok(/function sessionFilesRelevantDiffRefRepos\([\s\S]*sessionFilesRepoRoots\(payload\)[\s\S]*function sessionFilesRefsQuery\([\s\S]*relevantRepos\.has\(normalizedRepo\)[\s\S]*nextRefs\.from === globalRefs\.from/.test(appSource), 'session-files requests prune stale per-repo refs before calling the API');

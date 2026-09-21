@@ -162,6 +162,13 @@ def test_retired_share_surface_guard_never_reads_churning_document_lock_control_
     assert architecture_budgets._retired_share_surface_violations(tmp_path) == ()
 
 
+def test_retired_share_surface_guard_skips_core_dump_artifacts(tmp_path):
+    (tmp_path / "core").write_bytes(b"/api/" + ("sha" + "re").encode())
+    (tmp_path / "core.1234").write_bytes(b"/api/" + ("sha" + "re").encode())
+
+    assert architecture_budgets._retired_share_surface_violations(tmp_path) == ()
+
+
 def test_evaluate_and_cli_add_retired_share_guard_without_losing_budget_results(tmp_path, monkeypatch):
     manifest = current_manifest()
     manifest_path = tmp_path / "manifest.json"

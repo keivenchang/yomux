@@ -383,7 +383,7 @@ def test_e2e_yo_auto_approves_mock_yesno(monkeypatch, tmp_path, agent, steps):
 
         # Start the REAL app + auto-approve worker. dangerously_yolo=True mirrors a `--dang` server.
         app = TmuxWebtermApp([session], dangerously_yolo=True)
-        worker, status = app.start_auto_approve_worker(session, takeover=True)
+        worker, status = app.start_auto_approve_worker(session)
         assert worker is not None, f"auto-approve worker did not start: {status}"
 
         # Claude can paint its completion line before the worker observes the final queued prompt.

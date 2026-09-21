@@ -335,6 +335,18 @@ class _QuietHttpFixtureHandler(http.server.SimpleHTTPRequestHandler):
             return
         super().do_GET()
 
+    def do_POST(self):  # noqa: N802 - inherited HTTP handler API
+        parsed = urlsplit(self.path)
+        if parsed.path == "/api/fs/batch":
+            body = json.dumps({"responses": []}).encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_error(HTTPStatus.NOT_IMPLEMENTED, "Unsupported method (%s)" % self.command)
+
     def log_message(self, *args):  # keep the pytest output clean
         pass
 
@@ -800,7 +812,7 @@ def stop_isolated_browser_app(runtime):
     FixtureRuntime(runtime.app, list(getattr(runtime, "sessions", ())), runtime.tmux, runtime.paths).close()
 
 
-def start_browser_server(monkeypatch, tmp_path, app, *, tls_context=None, auth_bypass=False):
+def start_browser_server(monkeypatch, tmp_path, app, *, tls_context=None, auth_bypass=False, pin_batchd_scheduler=None):
     auth_path = tmp_path / "auth.yaml"
     auth_path.write_text(browser_auth_yaml(), encoding="utf-8")
     monkeypatch.setattr(common, "AUTH_CONFIG_PATH", auth_path)
@@ -816,7 +828,7 @@ def start_browser_server(monkeypatch, tmp_path, app, *, tls_context=None, auth_b
             # Browser fixtures also serve small HTTP-only app doubles.  Pin batchd only when the
             # app actually owns that scheduler seam; otherwise the fixture has no producer to
             # protect and must not manufacture a batchd dependency.
-            pin_batchd_scheduler=hasattr(app, "job_client"),
+            pin_batchd_scheduler=(hasattr(app, "job_client") if pin_batchd_scheduler is None else pin_batchd_scheduler),
         ),
     )
     runtime.server._fixture_server_log_boundary = runtime.server_log_boundary
@@ -2399,7 +2411,6 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
     auto_approve_payload = dict(scenario.auto_approve_payload) if scenario.auto_approve_payload is not None else None
     wrap_app_root = scenario.wrap_app_root
     yoagent_chat_mode = scenario.yoagent_chat_mode
-    background_status_payload = dict(scenario.background_status_payload) if scenario.background_status_payload is not None else None
     hold_auto_approve = scenario.hold_auto_approve
     css = app_css()
     brand_css = (REPO_ROOT / "static" / "brand.css").read_text(encoding="utf-8")
@@ -3045,17 +3056,6 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
           });
         }
         if (url.pathname === '/api/activity-summary') return jsonResponse({sessions: {}, global: {lines: []}, session_order: window.__fixtureSessions});
-        if (url.pathname === '/api/background/status') return jsonResponse(window.__fixtureBackgroundStatusPayload || {
-          owner: true,
-          status: 'disabled',
-          generation: {},
-          current_owner: {},
-          roles: {
-            'search-index': {role: 'search-index', owner: true, status: 'disabled'},
-            'stats-sampler': {role: 'stats-sampler', owner: true, status: 'disabled'},
-          },
-          search_index: {role: 'search-index', owner: true, mode: 'indexing-server', current_server: {}, owner_server: {}, status: 'disabled'},
-        });
         if (url.pathname === '/api/session-files') {
           const session = url.searchParams.get('session') || window.__fixtureSessions[0] || '1';
           return jsonResponse((window.__fixtureSessionFilesPayloads || {})[session] || window.__fixtureSessionFilesPayload || {session, files: [], repos: [], errors: [], loaded: true});
@@ -3183,7 +3183,6 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
           window.__fixtureHoldAutoApprove = {json.dumps(bool(hold_auto_approve))};
           window.__fixtureReleaseAutoApprove = null;
           window.__fixtureYoagentChatMode = {json.dumps(yoagent_chat_mode)};
-          window.__fixtureBackgroundStatusPayload = {json.dumps(background_status_payload, separators=(",", ":")) if background_status_payload is not None else "null"};
           window.__fixtureStatsCapabilities = {json.dumps(stats_capabilities, separators=(",", ":"))};
         </script>
         <script>{file_explorer_intent_script}</script>
@@ -3196,7 +3195,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
     """)
 
 
-def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", auth_username="alice", wrap_app_root=False, yoagent_chat_mode=None, available_agents=None, agent_auth=None, background_status_payload=None, runtime_script_uri=None, dangerously_yolo=False, hold_auto_approve=False):
+def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", auth_username="alice", wrap_app_root=False, yoagent_chat_mode=None, available_agents=None, agent_auth=None, runtime_script_uri=None, dangerously_yolo=False, hold_auto_approve=False):
     """Compatibility facade for existing callers; BrowserBootScenario owns the fixture."""
 
     return render_browser_boot_scenario(BrowserBootScenario(
@@ -3219,7 +3218,6 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
         yoagent_chat_mode=yoagent_chat_mode,
         available_agents=tuple(available_agents) if available_agents is not None else None,
         agent_auth=agent_auth,
-        background_status_payload=background_status_payload,
         runtime_script_uri=runtime_script_uri,
         dangerously_yolo=dangerously_yolo,
         hold_auto_approve=hold_auto_approve,

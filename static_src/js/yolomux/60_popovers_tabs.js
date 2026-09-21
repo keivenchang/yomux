@@ -94,6 +94,7 @@ function settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, entries) {
 function collapseDirectoryRowsAcrossSurfaces(row, fullPath) {
   fileExplorerExpanded.delete(fullPath);
   fileExplorerPendingExpansions.delete(fullPath);
+  fileExplorerPendingExpansionOwners.delete(fullPath);
   liveDirectoryRows(fullPath, row).forEach(currentRow => {
     syncDirectoryRowExpansionVisual(currentRow, false, false);
     Array.from(currentRow.parentElement?.children || [])
@@ -126,22 +127,28 @@ async function expandDirectoryRow(row, fullPath, options = {}) {
     });
     return;
   }
+  const expansionOwner = Symbol(fullPath);
   fileExplorerPendingExpansions.add(fullPath);
+  fileExplorerPendingExpansionOwners.set(fullPath, expansionOwner);
   syncDirectoryRowExpansionVisual(row, true, true);
   let entries;
   try {
     entries = await fetchDirectory(fullPath, {user: options.user === true});
   } catch (error) {
-    const ownsExpansion = fileExplorerPendingExpansions.delete(fullPath);
+    const ownsExpansion = fileExplorerPendingExpansionOwners.get(fullPath) === expansionOwner;
     if (!ownsExpansion) return;
+    fileExplorerPendingExpansionOwners.delete(fullPath);
+    fileExplorerPendingExpansions.delete(fullPath);
     setFileExplorerListError(fullPath, error, Number(error?.status) || 0);
     settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, null);
     return;
   }
   // collapseDirectoryRow() deletes the pending path to cancel this reveal. The response may still
   // arrive, but it no longer owns this row and must not restore children the user just hid.
-  const ownsExpansion = fileExplorerPendingExpansions.delete(fullPath);
+  const ownsExpansion = fileExplorerPendingExpansionOwners.get(fullPath) === expansionOwner;
   if (!ownsExpansion) return;
+  fileExplorerPendingExpansionOwners.delete(fullPath);
+  fileExplorerPendingExpansions.delete(fullPath);
   if (!generationIsCurrent()) return;
   if (!entries) {
     settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, null);

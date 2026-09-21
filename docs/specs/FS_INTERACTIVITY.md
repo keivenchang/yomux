@@ -17,7 +17,7 @@ When a user marks a directory as indexed, YOLOmux makes its direct children sear
 
 ## Required lifecycle
 
-1. The elected background scheduler loads the configured indexed roots at startup and acquires one scheduler lease on the existing `indexd`; do not add another filesystem daemon or move recursive work into an HTTP process.
+1. The local background scheduler loads the configured indexed roots at startup and acquires one scheduler lease on the existing `indexd`; do not add another filesystem daemon or move recursive work into an HTTP process.
 2. `indexd` opens each compatible persisted snapshot immediately. A valid snapshot is available for reads before any crawl starts, even when stale or only partially covered.
 3. For every configured root, `indexd` enqueues a `startup-depth-1` item that lists only that root directory. This item has the highest indexing priority and is not delayed behind a safety refresh, deep frontier work, or a cached Quick Open lookup.
 4. Each root's layer-1 transaction is published atomically as soon as its root listing finishes. The transaction updates direct files, direct child-directory metadata, deletions from the previous layer-1 snapshot, frontier entries for layer 2, generation, freshness, and coverage together.
@@ -65,7 +65,7 @@ One owner coalesces recent change evidence by canonical indexed subtree. Native 
 - Guarantee background progress with a tested starvation bound: after a bounded number or time slice of hot items, run an eligible shallow breadth-expansion item.
 - Keep the 5-minute interval as a safety net. It may enqueue a new low-priority root generation or reconciliation frontier, but it never invalidates the readable previous snapshot before replacement coverage is published.
 
-Proven cadence and open question. For a root that already holds an `indexd` scheduler lease, item 6 live-proved that a create or delete reflects in the index in about 2.5 seconds (a 2-second debounce plus one bounded repair), against the 5-minute safety interval. Seconds-level freshness is therefore proven for lease-scheduled roots, not unconditional: a mutation driven through the full `POST /api/fs/write`→`batchd` chain does NOT refresh in-window for a root with no active indexer lease. A server owns its own indexer; another server cannot become a follower or share the same IDX state because the product-root lease rejects that launch.
+Proven cadence and open question. For a root that already holds an `indexd` scheduler lease, item 6 live-proved that a create or delete reflects in the index in about 2.5 seconds (a 2-second debounce plus one bounded repair), against the 5-minute safety interval. Seconds-level freshness is therefore proven for lease-scheduled roots, not unconditional: a mutation driven through the full `POST /api/fs/write`→`batchd` chain does NOT refresh in-window for a root with no active indexer lease. A server owns its own indexer, and the product-root lease rejects a second server using the same IDX state.
 
 ## Persistence and recovery
 

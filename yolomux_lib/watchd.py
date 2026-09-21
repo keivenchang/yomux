@@ -28,7 +28,7 @@ from .filesystem.exclusions import CompiledExclusionPolicy
 from .filesystem.exclusions import ExclusionPolicy
 from .filesystem.exclusions import ExclusionVerdict
 from .filesystem.exclusions import path_exclusion_verdict
-from .background_owner import pid_is_alive
+from .background_scheduler import pid_is_alive
 from .host_identity import process_start_identity
 from .infra import common
 from .local_services.rpc import safe_socket_path

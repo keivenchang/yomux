@@ -34,7 +34,7 @@ from ..types import AutoApproveState
 
 # stop() joins for at least this long so an in-flight capture + keystroke walk (~0.6s) and
 # the post-approval / max-interval sleep (interruptible via stop_event, but the send is not) can finish
-# and the thread can release its flock before a takeover re-acquires.
+# and the thread can release its flock before a later local enable attempt.
 AUTO_APPROVE_STOP_JOIN_SECONDS = 5.0
 AUTO_APPROVE_MISSING_CAPTURE_LIMIT = 3
 
@@ -214,8 +214,8 @@ class AutoApproveWorker:
     def stop(self) -> bool:
         # join long enough for the thread to finish any in-flight capture/send (the relative
         # keystroke walk alone is ~0.6s) and exit + release its flock. A 1.0s join could return while the
-        # thread is still alive and about to fire ONE more keystroke after a takeover (two workers, one
-        # session). Returns True only when the thread has actually exited.
+        # thread is still alive and about to fire ONE more keystroke after a stop. Returns True only
+        # when the thread has actually exited.
         self.stop_event.set()
         self.thread.join(timeout=AUTO_APPROVE_STOP_JOIN_SECONDS)
         return not self.thread.is_alive()

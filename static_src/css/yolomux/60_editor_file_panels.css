@@ -770,6 +770,21 @@ body.editor-theme-light .file-editor-image {
   cursor: text;
   white-space: pre-wrap;
 }
+.prosemirror-editor .mermaid-preview-host {
+  overflow: visible;
+  overscroll-behavior: contain;
+  cursor: default;
+}
+.prosemirror-editor .mermaid-preview-host .file-editor-preview-zoom-viewport {
+  overflow: visible;
+  overscroll-behavior: contain;
+}
+.prosemirror-editor .mermaid-preview-host .file-editor-preview-zoom-stage {
+  overflow: visible;
+}
+.prosemirror-editor .mermaid-preview-host .mermaid-preview-image {
+  pointer-events: none;
+}
 .prosemirror-editor .ProseMirror-selectednode { outline: 2px solid var(--active-control-border); }
 .prosemirror-editor p { min-height: 1.4em; }
 .markdown-preview-editor-toolbar {
@@ -1124,6 +1139,8 @@ body.editor-preview-vanilla .prosemirror-editor :is(h1, h2, h3, h4, h5, h6) {
 }
 .prosemirror-editor.vanilla-preview-body a { color: var(--vanilla-preview-link); }
 .prosemirror-editor.vanilla-preview-body :is(strong, em) { color: inherit; }
+.file-editor-preview-pane.vanilla-preview-body :is(code, pre),
+.file-editor-preview-pane-panel.vanilla-preview-body :is(code, pre),
 .prosemirror-editor.vanilla-preview-body :is(code, pre) {
   color: var(--markdown-html-light-text);
   background: var(--lt-panel);
@@ -2369,6 +2386,16 @@ body.editor-scheme-yolomux-light .file-editor-content .markdown-body.vanilla-pre
   color: var(--code-inline) !important;
   background: var(--code-inline-bg);
   border-color: var(--light-readable-line);
+}
+body.theme-light .file-editor-content .markdown-body.vanilla-preview-body pre,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre,
+body.editor-scheme-yolomux-light .file-editor-content .markdown-body.vanilla-preview-body pre,
+body.theme-light .file-editor-content .markdown-body.vanilla-preview-body code:not(pre code),
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body code:not(pre code),
+body.editor-scheme-yolomux-light .file-editor-content .markdown-body.vanilla-preview-body code:not(pre code) {
+  color: var(--markdown-html-light-text) !important;
+  background: var(--lt-panel) !important;
+  border-color: var(--lt-line) !important;
 }
 body.editor-theme-light .file-editor-content .markdown-body pre {
   color: var(--lt-text);

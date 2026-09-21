@@ -33,7 +33,7 @@ from tools import test_plan
 from tools import pytest_catalog_plugin
 from tools.test_catalog import discover_pytest_phase_files
 from tools.tool_guard import container_command_with_host_tool_guard
-from yolomux_lib.background_owner import pid_is_alive as background_owner_pid_is_alive
+from yolomux_lib.background_scheduler import pid_is_alive as background_scheduler_pid_is_alive
 from yolomux_lib.stats_current import service as service_module
 
 
@@ -94,9 +94,9 @@ def test_runtime_and_tool_function_bodies_are_not_exact_duplicates():
     assert duplicates == []
 
 
-def test_check_runner_reuses_background_owner_process_liveness():
+def test_check_runner_reuses_background_scheduler_process_liveness():
     check = load_check_module()
-    assert check.pid_is_alive is background_owner_pid_is_alive
+    assert check.pid_is_alive is background_scheduler_pid_is_alive
 
 
 def test_check_lock_is_one_per_user_across_worktrees_and_tmpdirs(monkeypatch, tmp_path):
@@ -662,19 +662,27 @@ def test_non_drag_browser_actions_use_the_shared_fast_pointer_helper():
     assert direct_uses == []
 
 
-def test_active_yolomux_server_records_uses_generation_heartbeats(monkeypatch, tmp_path):
+def test_active_yolomux_server_records_reads_the_instance_lease(monkeypatch, tmp_path):
     check = load_check_module()
-    generations_dir = tmp_path / "background-owner" / "generations"
-    generations_dir.mkdir(parents=True)
-    (generations_dir / "live.json").write_text(json.dumps({"pid": 100, "last_heartbeat": 50.0, "port": 8002}), encoding="utf-8")
-    (generations_dir / "stale.json").write_text(json.dumps({"pid": 101, "last_heartbeat": 10.0, "port": 8001}), encoding="utf-8")
-    (generations_dir / "dead.json").write_text(json.dumps({"pid": 102, "last_heartbeat": 50.0, "port": 8003}), encoding="utf-8")
-    (generations_dir / "bad.json").write_text("{not json", encoding="utf-8")
+    (tmp_path / "instance.lock").write_text(json.dumps({"pid": 100, "paths": {"root": str(tmp_path)}}), encoding="utf-8")
     monkeypatch.setattr(check, "pid_is_alive", lambda pid: pid != 102)
 
     records = check.active_yolomux_server_records(state_dir=tmp_path, now=55.0, stale_seconds=30.0)
 
-    assert records == [{"pid": 100, "last_heartbeat": 50.0, "port": 8002}]
+    assert records == [{"pid": 100, "paths": {"root": str(tmp_path)}}]
+
+
+def test_active_yolomux_server_records_reads_the_root_compatibility_lease(monkeypatch, tmp_path):
+    check = load_check_module()
+    product_root = tmp_path / "product"
+    product_root.mkdir()
+    (product_root / "instance.lock").write_text(json.dumps({"pid": 101, "paths": {"root": str(product_root)}}), encoding="utf-8")
+    monkeypatch.setenv("YOLOMUX_ROOT", str(product_root))
+    monkeypatch.setattr(check, "pid_is_alive", lambda pid: pid == 101)
+
+    records = check.active_yolomux_server_records(state_dir=product_root / "state")
+
+    assert records == [{"pid": 101, "paths": {"root": str(product_root)}}]
 
 
 def test_default_check_gate_uses_guard_and_lowers_priority_when_servers_are_active(monkeypatch, capsys):

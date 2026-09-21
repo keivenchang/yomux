@@ -929,13 +929,13 @@ function normalizedSessionFilesPayload(payload = {}, defaults = {}) {
     cache: payload.cache && typeof payload.cache === 'object' ? {...payload.cache} : {},
     from_ref: payload.from_ref || defaults.from_ref || diffRefFrom,
     to_ref: payload.to_ref || defaults.to_ref || diffRefTo,
-    refreshing_elsewhere: payload.refreshing_elsewhere === true,
+    refreshing: payload.refreshing === true,
     loaded: defaults.loaded === false ? false : true,
   };
 }
 
-function sessionFilesPayloadIsRefreshingElsewhere(payload) {
-  return payload?.refreshing_elsewhere === true;
+function sessionFilesPayloadIsRefreshing(payload) {
+  return payload?.refreshing === true;
 }
 
 function sessionFilesPayloadIsFinderWorktree(payload, session = '') {
@@ -963,14 +963,14 @@ function sessionFilesPayloadHasVisibleDifferResult(payload, files = null) {
   if (visibleFiles.length) return true;
   if ((Array.isArray(payload.errors) ? payload.errors : []).length) return true;
   if ((Array.isArray(payload.warnings) ? payload.warnings : []).length) return true;
-  if (sessionFilesPayloadIsRefreshingElsewhere(payload)) return false;
+  if (sessionFilesPayloadIsRefreshing(payload)) return false;
   if (sessionFilesRepoRoots(payload).length > 0) return true;
-  return !sessionFilesPayloadIsRefreshingElsewhere(payload) && sessionFilesPayloadIsRootlessEmpty(payload);
+  return !sessionFilesPayloadIsRefreshing(payload) && sessionFilesPayloadIsRootlessEmpty(payload);
 }
 
 function sessionFilesPanelIsLoading(payload, files = null) {
   if (fileExplorerSessionFilesState.loading) return true;
-  if (!sessionFilesPayloadIsRefreshingElsewhere(payload)) return false;
+  if (!sessionFilesPayloadIsRefreshing(payload)) return false;
   return !sessionFilesPayloadHasVisibleDifferResult(payload, files);
 }
 
@@ -979,7 +979,7 @@ function sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination = 'di
   const current = sessionFilesPayloadForDestination(destination);
   if (!session) return false;
   if (!sessionFilesPayloadIsLoadedForSession(current, session)) return false;
-  if (sessionFilesPayloadIsRefreshingElsewhere(nextPayload)) return sessionFilesRepoRoots(current).length > 0;
+  if (sessionFilesPayloadIsRefreshing(nextPayload)) return sessionFilesRepoRoots(current).length > 0;
   if (!sessionFilesPayloadIsRootlessEmpty(nextPayload)) return false;
   return sessionFilesRepoRoots(current).length > 0;
 }
@@ -1062,7 +1062,7 @@ const sessionFilesProducerDeadlineMs = 5000;
 const sessionFilesCompletionRevalidations = new Map();
 
 function scheduleSessionFilesProducerDeadline(destination, payload) {
-  if (!sessionFilesPayloadIsRefreshingElsewhere(payload)) return;
+  if (!sessionFilesPayloadIsRefreshing(payload)) return;
   if (payload?.pending_operation_id) return;
   setTimeout(() => {
     if (sessionFilesPayloadForDestination(destination) !== payload) return;
@@ -1070,7 +1070,7 @@ function scheduleSessionFilesProducerDeadline(destination, payload) {
     const deadline = apiFetchDeadlineError(sessionFilesProducerDeadlineMs, 'session-files producer');
     const nextPayload = {
       ...payload,
-      refreshing_elsewhere: false,
+      refreshing: false,
       errors: [...(Array.isArray(payload.errors) ? payload.errors : []), deadline.message],
       loaded: true,
     };
@@ -1155,7 +1155,7 @@ function sessionFilesPayloadSignatureForPayload(payload) {
   return JSON.stringify({
     session: payload?.session || '',
     loaded: payload?.loaded === true,
-    refreshing_elsewhere: sessionFilesPayloadIsRefreshingElsewhere(payload),
+    refreshing: sessionFilesPayloadIsRefreshing(payload),
     from: payload?.from_ref || '',
     to: payload?.to_ref || '',
     errors: Array.isArray(payload?.errors) ? payload.errors : [],
@@ -1307,7 +1307,7 @@ async function fetchSessionFiles(options = {}) {
     if (isApiPendingResponse(err)) {
       const nextPayload = {
         ...emptySessionFilesPayload(session, false, destination),
-        refreshing_elsewhere: true,
+        refreshing: true,
         pending_key: err.key,
         pending_epoch: err.epoch,
         pending_operation_id: err.operationId,
@@ -1512,7 +1512,7 @@ function applySessionFilesOperationFailureToDestination(destination, result, con
     : userMessageSnapshot(result, 'session-files request failed').user_message;
   const nextPayload = {
     ...emptySessionFilesPayload(session, true, destination),
-    refreshing_elsewhere: false,
+    refreshing: false,
     errors: [issue],
     operation_error: error,
   };
@@ -3739,7 +3739,7 @@ function createFileEditorPanel(item) {
   panel.addEventListener('click', event => {
     if (event.defaultPrevented) return;
     if (event.target?.closest?.('button, a, input, textarea, select, [data-diff-ref-input]')) return;
-    scheduleFileExplorerActiveFileReveal(path);
+    scheduleFileExplorerActiveFileReveal(path, {explicit: true});
   });
   delegate(panel, 'pointerdown', 'button', event => event.stopPropagation());
   bindActionDispatcher(panel, {

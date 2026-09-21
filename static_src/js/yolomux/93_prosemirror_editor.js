@@ -107,6 +107,13 @@ function prosemirrorMarkdownSchema(api) {
       bullet: {default: '*'},
     },
   });
+  nodes = nodes.update('image', {
+    ...nodes.get('image'),
+    attrs: {
+      ...nodes.get('image').attrs,
+      width: {default: null},
+    },
+  });
   nodes = nodes.addBefore('blockquote', 'details', {
     group: 'block',
     content: 'block+',
@@ -209,6 +216,7 @@ function prosemirrorMarkdownParser(api, schema) {
         src: image.getAttribute('src'),
         alt: image.getAttribute('alt'),
         title: image.getAttribute('title'),
+        width: prosemirrorImageWidth(image.getAttribute('width')),
       };
     };
     const ignoredCommentLines = new Set();
@@ -394,6 +402,11 @@ function prosemirrorMarkdownParser(api, schema) {
   return new api.MarkdownParser(schema, tokenizer, tokens);
 }
 
+function prosemirrorImageWidth(value) {
+  const width = String(value || '').trim();
+  return /^[1-9]\d*$/.test(width) ? width : null;
+}
+
 const PROSEMIRROR_SAFE_HTML_TAGS = new Set(['u', 'mark', 'kbd', 'sup', 'br', 'img', 'details', 'summary']);
 const PROSEMIRROR_KNOWN_HTML_TAGS = new Set([
   'a', 'abbr', 'address', 'article', 'aside', 'audio', 'b', 'bdi', 'bdo', 'blockquote', 'body', 'button',
@@ -420,6 +433,21 @@ function prosemirrorUnsupportedHtmlSource(source) {
 function prosemirrorMarkdownSerializer(api) {
   return new api.MarkdownSerializer({
     ...api.defaultMarkdownSerializer.nodes,
+    image(state, node) {
+      if (!node.attrs.width) {
+        api.defaultMarkdownSerializer.nodes.image(state, node);
+        return;
+      }
+      const attr = value => String(value || '').replace(/[&<>"']/g, character => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;',
+      }[character]));
+      const title = node.attrs.title ? ` title="${attr(node.attrs.title)}"` : '';
+      state.write(`<img src="${attr(node.attrs.src)}" alt="${attr(node.attrs.alt)}"${title} width="${node.attrs.width}">`);
+    },
     paragraph(state, node) {
       if (node.content.size) {
         state.renderInline(node);
@@ -512,6 +540,8 @@ function prosemirrorImageNodeView(node, panel, markdownPath) {
   image.className = 'markdown-preview-image prosemirror-image';
   image.alt = node.attrs.alt || '';
   if (node.attrs.title) image.title = node.attrs.title;
+  const width = prosemirrorImageWidth(node.attrs.width);
+  if (width) image.setAttribute('width', width);
   image.dataset.originalSrc = original;
   image.loading = 'eager';
   image.decoding = 'async';

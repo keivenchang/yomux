@@ -42,9 +42,10 @@ from yolomux_lib.tmux_utils import YOLOMUX_TMUX_SOCKET_ENV
 class FakeStatusApp:
     builds = 0
     fail = False
+    topology_generation = 0
 
-    def __init__(self, sessions, **_kwargs):
-        self.sessions = list(sessions)
+    def __init__(self, sessions, **_kwargs): self.sessions = list(sessions)
+    def apply_session_roster(self, sessions): self.topology_generation += int(set(sessions) != set(self.sessions)); self.sessions = list(sessions)
 
     def build_auto_approve_status(self, *, timings, sync_workers, **_kwargs):
         assert sync_workers is False
@@ -832,12 +833,11 @@ def test_statusd_app_advances_topology_generation_for_roster_changes(monkeypatch
     monkeypatch.setattr(statusd, "TmuxWebtermApp", FakeStatusApp)
     service = statusd.PersistentStatusService(tmp_path / "statusd.sock")
     app = service._ensure_app(("1",))
-    if not hasattr(app, "topology_generation"):
-        service.stop_event.set()
-        return
     assert app.topology_generation == 0
-    service._ensure_app(("1", "2"))
-    assert app.topology_generation == 1
+    service._handle_invalidate(
+        {"reason": "tmux-topology", "sessions": ["1", "2"], "topology_generation": 1},
+        b"",
+    )
     service._ensure_app(("1", "2"))
     assert app.topology_generation == 1
     service.stop_event.set()

@@ -96,6 +96,8 @@ const fileExplorerHiddenToggle = document.getElementById('fileExplorerHiddenTogg
 const fileExplorerRootModeButton = document.getElementById('fileExplorerRootMode');
 const fileExplorerExpanded = new Set();
 const fileExplorerPendingExpansions = new Set();
+// Keep the public pending-path set, but identify the coalesced request allowed to settle it.
+const fileExplorerPendingExpansionOwners = new Map();
 const fileExplorerHiddenStorageKey = 'yolomux.fileExplorer.showHidden';
 const fileExplorerRootModeStorageKey = 'yolomux.fileExplorer.rootMode';
 const fileExplorerTreeShowDatesStorageKey = 'yolomux.fileExplorer.treeShowDates.v1';
@@ -753,6 +755,7 @@ const serverWatchRootsState = {
   registered: false,
   syncedAt: 0,
   watchDiffPromise: null,
+  watchBaselinePromise: null,
   watchDiffTrailing: null,
   timer: null,
   timerDelay: null,
@@ -1820,7 +1823,7 @@ window.__yolomuxFixtureLifecycle = Object.freeze({
   async awaitPendingOperationReceipts() {
     while (true) {
       const pending = Array.from(apiOperationState.pending.values());
-      const baseline = serverWatchRootsState.watchDiffPromise;
+      const baseline = serverWatchRootsState.watchBaselinePromise;
       await Promise.all([
         ...pending.map(record => record.completionPromise || Promise.resolve()),
         ...(baseline ? [Promise.resolve(baseline)] : []),
@@ -1835,7 +1838,7 @@ window.__yolomuxFixtureLifecycle = Object.freeze({
     const watchRootsTimerPending = Boolean(serverWatchRootsState.timer);
     const watchRootsRegistrationPending = serverWatchRootsState.registrationPending === true;
     const watchRootsInFlight = serverWatchRootsState.inFlight === true;
-    const watchRootsBaselinePending = serverWatchRootsState.watchDiffPromise !== null;
+    const watchRootsBaselinePending = serverWatchRootsState.watchBaselinePromise !== null;
     // The full watch-diff baseline parks its own operation record in apiOperationState.pending while
     // it awaits a 202 result (refreshFileExplorerFromWatchDiffOnce marks that record
     // terminalOwner='filesystem-watch-diff-refresh' in 40_file_explorer_files.js). Expose exactly
@@ -1895,14 +1898,6 @@ window.__yolomuxFixtureLifecycle = Object.freeze({
     };
   },
 });
-const backgroundOwnerStatusState = {
-  payload: null,
-  loading: false,
-  error: '',
-  request: null,
-  updatedAt: 0,
-  resource: null,
-};
 const yoagentStartupState = {
   activityPayload: null,
   prewarming: false,
@@ -2082,7 +2077,6 @@ const sessionContextMenu = createContextMenuController();
 const linkContextMenu = createContextMenuController();
 const markdownPreviewContextMenuController = createContextMenuController();
 const repoChipContextMenu = createContextMenuController();     // C9: per-pane "+N repos" detail-bar popover
-const backgroundOwnerContextMenu = createContextMenuController();
 let sessionRenameDialog = null;
 let fileExplorerManualSelectionActive = false;
 let fileTreeRenamePath = null;
@@ -6662,7 +6656,7 @@ function applyUserInitiatedPanelFocus(item, previousItem, options = {}) {
   }
   if (isFileEditorItem(item)) {
     activeFile = fileItemPath(item);
-    scheduleFileExplorerActiveFileReveal(activeFile);
+    scheduleFileExplorerActiveFileReveal(activeFile, {explicit: true});
   }
   const explicitFinderSync = isTmuxSession(item) || isFileEditorItem(item);
   if (!isFileExplorerItem(item)) scheduleFileExplorerActiveTabSync(item, {explicit: explicitFinderSync});
@@ -9264,8 +9258,16 @@ function appendUrlContextMenuItems(menu, href, closeMenu, options = {}) {
   return true;
 }
 
+function clipboardImageSourceUrl(image) {
+  const direct = String(image?.currentSrc || image?.src || '').trim();
+  if (direct) return direct;
+  const resolvedPath = String(image?.dataset?.resolvedPath || '').trim();
+  if (resolvedPath && typeof rawFileUrl === 'function') return rawFileUrl(resolvedPath);
+  return String(image?.dataset?.originalSrc || '').trim();
+}
+
 async function copyMarkdownPreviewImageToClipboard(image, button) {
-  const url = String(image?.currentSrc || image?.src || '');
+  const url = clipboardImageSourceUrl(image);
   if (!url || !globalThis.ClipboardItem || !navigator?.clipboard?.write) {
     await copyTextWithFeedback(image?.dataset?.originalSrc || url, {button});
     return;
@@ -10273,7 +10275,6 @@ const COMMAND_ROUTES = Object.freeze({
 // pre-network guard covers it instead of granting a blanket exception to internal POST requests.
 const INTERNAL_COMMAND_ROUTES = Object.freeze({
   'terminal-file-resolve': commandRoute({id: 'terminal-file-resolve', method: 'POST', path: '/api/fs/resolve-file-candidates', contractClass: 'background'}),
-  'background-owner-claim': commandRoute({id: 'background-owner-claim', method: 'POST', path: '/api/background/claim', contractClass: 'background'}),
   'operation-terminal-ack': commandRoute({id: 'operation-terminal-ack', method: 'POST', path: '/api/operations/ack', contractClass: 'background'}),
 });
 
@@ -14156,161 +14157,6 @@ function updateTopbarActivityStatus() {
   syncTopbarActivityPlacement();
   scheduleTopbarActionCapacity();
   if (typeof scheduleAgentWindowActivityAnimationSync === 'function') scheduleAgentWindowActivityAnimationSync(node);
-}
-
-function topbarOwnerStatusCombinedHtml(summaries = []) {
-  const activeSummaries = summaries.filter(item => item && typeof item === 'object');
-  if (!activeSummaries.length) return '';
-  const state = activeSummaries.every(item => item.ownsRole === true || item.ownsIndex === true) ? 'leader' : 'follower';
-  const labels = activeSummaries.map(item => String(item.label || '')).filter(Boolean).join('|');
-  const stateLabel = t(`backgroundOwner.role.${state}`);
-  return `<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="${esc(state)}"><span class="topbar-owner-status-key">${esc(labels)}</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">${esc(stateLabel)}</span></span>`;
-}
-
-function topbarOwnerStatusTitle(indexSummary = {}, statsSummary = {}, sessionSummary = {}) {
-  const roleExplainers = [
-    {abbr: 'IDX', role: t('backgroundOwner.index'), description: t('backgroundOwner.desc.index'), summary: indexSummary},
-    {abbr: 'STATS', role: t('tab.debug.short'), description: t('backgroundOwner.desc.stats'), summary: statsSummary},
-    {abbr: 'SESS', role: t('backgroundOwner.sessionFiles'), description: t('backgroundOwner.desc.sessionFiles'), summary: sessionSummary},
-  ];
-  const roleDefinitionLines = roleExplainers.map(item => t('backgroundOwner.summaryRole', {
-    abbr: item.abbr,
-    role: item.role,
-    description: item.description,
-  }));
-  const roleStateLines = roleExplainers.map(item => {
-    const state = item.summary?.mode;
-    const stateLabel = state === 'leader' || state === 'follower' ? t(`backgroundOwner.role.${state}`) : state;
-    return state ? t('backgroundOwner.roleState', {abbr: item.abbr, state: stateLabel}) : '';
-  });
-  const lines = [
-    t('backgroundOwner.connectedServer', {server: indexSummary.currentLabel || statsSummary.currentLabel || sessionSummary.currentLabel || t('backgroundOwner.thisServer')}),
-    ...roleDefinitionLines,
-    t('backgroundOwner.desc.leaderFollower'),
-    indexSummary.ownerLabel ? t('backgroundOwner.leader', {role: 'IDX', server: indexSummary.ownerLabel}) : '',
-    statsSummary.ownerLabel ? t('backgroundOwner.leader', {role: 'STATS', server: statsSummary.ownerLabel}) : '',
-    sessionSummary.ownerLabel ? t('backgroundOwner.leader', {role: 'SESS', server: sessionSummary.ownerLabel}) : '',
-    ...roleStateLines,
-    indexSummary.status ? t('backgroundOwner.status', {role: t('backgroundOwner.index'), status: indexSummary.status}) : '',
-    statsSummary.status ? t('backgroundOwner.status', {role: t('tab.debug'), status: statsSummary.status}) : '',
-    sessionSummary.status ? t('backgroundOwner.status', {role: t('backgroundOwner.sessionFiles'), status: sessionSummary.status}) : '',
-    t('backgroundOwner.desc.takeOver'),
-    indexSummary.error || statsSummary.error || sessionSummary.error || '',
-  ];
-  return lines.filter(Boolean).join('\n');
-}
-
-function topbarOwnerStatusSummaries(payload = backgroundOwnerStatusState.payload) {
-  if (!payload || typeof payload !== 'object' || typeof backgroundOwnerSearchIndexSummary !== 'function' || typeof backgroundOwnerStatsSummary !== 'function' || typeof backgroundOwnerSessionFilesSummary !== 'function') return [];
-  return [
-    {...backgroundOwnerSearchIndexSummary(payload), label: 'IDX'},
-    {...backgroundOwnerStatsSummary(payload), label: 'STATS'},
-    {...backgroundOwnerSessionFilesSummary(payload), label: 'SESS'},
-  ];
-}
-
-function backgroundOwnerOwnsAllRoles(payload = backgroundOwnerStatusState.payload) {
-  const summaries = topbarOwnerStatusSummaries(payload).filter(item => item && typeof item === 'object');
-  return Boolean(summaries.length) && summaries.every(item => item.ownsRole === true || item.ownsIndex === true);
-}
-
-function backgroundOwnerCurrentOwnerLive(payload = backgroundOwnerStatusState.payload, nowSeconds = Date.now() / 1000) {
-  const data = payload && typeof payload === 'object' ? payload : {};
-  const owner = data.current_owner && typeof data.current_owner === 'object' ? data.current_owner : {};
-  const latest = data.latest_generation && typeof data.latest_generation === 'object' ? data.latest_generation : {};
-  if (owner.generation_id && latest.generation_id && owner.generation_id === latest.generation_id) return true;
-  const heartbeat = Number(owner.last_heartbeat || 0);
-  return Number.isFinite(heartbeat) && heartbeat > 0 && Number(nowSeconds) - heartbeat <= 10;
-}
-
-async function claimBackgroundOwnerLeader() {
-  try {
-    const result = await apiFetchJson('/api/background/claim', {method: 'POST'});
-    if (result?.status && typeof applyBackgroundOwnerStatusPayload === 'function') {
-      applyBackgroundOwnerStatusPayload(result.status, {render: false});
-    }
-    if (typeof refreshBackgroundOwnerStatus === 'function') {
-      await refreshBackgroundOwnerStatus({force: true, render: false});
-    }
-    statusOk(localizedHtml(result?.was_owner ? 'status.backgroundOwnerAlreadyLeader' : 'status.backgroundOwnerClaimed'));
-  } catch (error) {
-    statusErr(localizedHtml('status.backgroundOwnerClaimFailed', {error}));
-    if (typeof refreshBackgroundOwnerStatus === 'function') {
-      refreshBackgroundOwnerStatus({force: true, render: false}).catch(refreshError => console.warn('background-owner status refresh failed', refreshError));
-    }
-  }
-}
-
-function showBackgroundOwnerContextMenu(event) {
-  event.preventDefault();
-  event.stopPropagation();
-  const menu = document.createElement('div');
-  menu.className = 'terminal-context-menu background-owner-context-menu';
-  menu.setAttribute('role', 'menu');
-  const alreadyLeader = backgroundOwnerOwnsAllRoles();
-  if (alreadyLeader || readOnlyMode) {
-    appendContextMenuButton(menu, t(alreadyLeader ? 'backgroundOwner.alreadyLeader' : 'common.notAvailable'), () => {}, () => backgroundOwnerContextMenu.close(), {disabled: true});
-  } else {
-    appendContextMenuButton(menu, t('backgroundOwner.takeOver'), () => {
-      const payload = backgroundOwnerStatusState.payload && typeof backgroundOwnerStatusState.payload === 'object' ? backgroundOwnerStatusState.payload : {};
-      const owner = payload.current_owner && typeof payload.current_owner === 'object' ? payload.current_owner : {};
-      if (backgroundOwnerCurrentOwnerLive(payload)) {
-        const label = backgroundServerLabel(owner, t('common.unknown'));
-        const message = t('backgroundOwner.takeoverConfirm', {server: label});
-        if (typeof window.confirm === 'function' && !window.confirm(message)) return;
-      }
-      claimBackgroundOwnerLeader();
-    }, () => backgroundOwnerContextMenu.close());
-  }
-  backgroundOwnerContextMenu.open(menu, event.clientX, event.clientY);
-}
-
-function topbarOwnerStatusHtml() {
-  if (backgroundOwnerStatusState.loading && !backgroundOwnerStatusState.payload) {
-    return '<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="loading"><span class="topbar-owner-status-key">IDX|STATS|SESS</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">...</span></span>';
-  }
-  if (backgroundOwnerStatusState.error && !backgroundOwnerStatusState.payload) {
-    return '<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="error"><span class="topbar-owner-status-key">IDX|STATS|SESS</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">?</span></span>';
-  }
-  return topbarOwnerStatusCombinedHtml(topbarOwnerStatusSummaries(backgroundOwnerStatusState.payload));
-}
-
-function createTopbarOwnerStatus() {
-  return makeButton({
-    id: 'topbarOwnerStatus',
-    className: 'topbar-owner-status topbar-status-surface',
-    title: t('backgroundOwner.refresh'),
-    ariaLabel: t('backgroundOwner.aria'),
-    onClick: () => {
-      if (typeof refreshBackgroundOwnerStatus === 'function') {
-        refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('background-owner status refresh failed', error));
-      }
-    },
-    events: {contextmenu: showBackgroundOwnerContextMenu},
-  });
-}
-
-function updateTopbarOwnerStatus() {
-  const node = document.getElementById('topbarOwnerStatus');
-  if (!node) return;
-  const html = topbarOwnerStatusHtml();
-  node.innerHTML = html;
-  node.hidden = !html;
-  node.classList.toggle('has-follower', /\bdata-owner-role="follower"/.test(html));
-  node.classList.toggle('has-error', /\bdata-owner-role="error"/.test(html));
-  const summaries = topbarOwnerStatusSummaries(backgroundOwnerStatusState.payload);
-  if (summaries.length) {
-    const [indexSummary, statsSummary, sessionSummary] = summaries;
-    node.title = topbarOwnerStatusTitle(indexSummary, statsSummary, sessionSummary) || t('backgroundOwner.refresh');
-  } else if (backgroundOwnerStatusState.error) {
-    node.title = userMessageText(backgroundOwnerStatusState.error, t('common.requestFailed'));
-  } else {
-    node.title = t('backgroundOwner.refresh');
-  }
-  // The owner label grows after the background status request resolves. Route that dynamic
-  // content change through the same measured packer as activity updates so it cannot overlap
-  // the adjacent action rail at a narrow CSS viewport or high browser zoom.
-  if (typeof scheduleTopbarPacking === 'function') scheduleTopbarPacking();
 }
 
 const attentionAnimationDelayProperty = '--attention-animation-delay';
@@ -18934,7 +18780,6 @@ let topbarPackingIsApplying = false;
 const topbarPackingStepOrder = Object.freeze([
   'hide-version',
   'compact-brand',
-  'hide-owner',
   'compact-search',
   'compact-activity',
   'hide-latency',
@@ -18952,7 +18797,6 @@ const topbarPackingVisualItemSelectors = Object.freeze([
   '.topbar-search',
   '.topbar-language-menu',
   '#backendHealthIndicator',
-  '#topbarOwnerStatus',
   '#topbarActivity',
   '.actions > :not(#topbarActivity):not(#status)',
 ]);
@@ -19232,7 +19076,6 @@ function renderSessionButtonsMeasured(options = {}) {
   // Topbar right group: Language | Activity (activity pinned far-right). #257: the theme switcher was
   // removed as redundant — theme is set via View -> Theme and the Preferences Global color theme.
   sessionButtons.appendChild(createTopbarRightTools());
-  updateTopbarOwnerStatus();
   updateTopbarActivityStatus();
   scheduleTopbarMetricsUpdate();
   installTopbarNavigationFitObserver();
@@ -19350,9 +19193,9 @@ function createTopbarRightTools() {
   // while healthy (data-backend-health=""). It is never inserted or removed on a health transition;
   // syncBackendHealthIndicator only repaints THIS same node (and its fallback re-mounts one solely
   // if this host is torn down and rebuilt at runtime). That keeps one permanent mount owner.
-  // Order contract (#257) for the switchers follows: Language, Ownership, Activity.
+  // Order contract (#257) for the switchers follows: Language, Activity.
   group.append(createBackendHealthIndicator());
-  group.append(createTopbarLanguageSwitcher(), createTopbarOwnerStatus(), createTopbarActivityStatus());
+  group.append(createTopbarLanguageSwitcher(), createTopbarActivityStatus());
   return group;
 }
 
@@ -22969,7 +22812,10 @@ function retireFileExplorerDirectoryDemand(path) {
     if (retires(candidate)) changed = fileExplorerExpanded.delete(candidate) || changed;
   }
   for (const candidate of Array.from(fileExplorerPendingExpansions)) {
-    if (retires(candidate)) changed = fileExplorerPendingExpansions.delete(candidate) || changed;
+    if (retires(candidate)) {
+      fileExplorerPendingExpansionOwners.delete(candidate);
+      changed = fileExplorerPendingExpansions.delete(candidate) || changed;
+    }
   }
   for (const candidate of Array.from(fileExplorerSyncUserExpansionState.keys())) {
     if (retires(candidate)) changed = fileExplorerSyncUserExpansionState.delete(candidate) || changed;
@@ -24298,7 +24144,12 @@ function childPath(parent, name) {
 async function ensureDirectoryRowExpanded(row, fullPath, options = {}) {
   if (!row || row.dataset?.kind !== 'dir') return null;
   const existing = childContainerForRow(row, fullPath);
-  if (existing) return existing;
+  const cachedEntries = cachedFileExplorerFsResourceValue('list', fullPath);
+  if (existing && Array.isArray(cachedEntries)) {
+    if (!fileTreeDirectRows(existing).length && cachedEntries.length) renderExpandedDirectoryRowChildren(row, fullPath, cachedEntries);
+    return existing;
+  }
+  if (existing && fileTreeDirectRows(existing).length) return existing;
   await expandDirectoryRow(row, fullPath, options);
   return childContainerForRow(row, fullPath);
 }
@@ -24339,12 +24190,7 @@ async function expandFileTreeContainerToPath(container, root, path, generation =
     row = directFileTreeRow(scope, fullPath);
     if (!row) return false;
     if (row.dataset?.kind === 'dir') {
-      // An automatic reveal (following the active tab/file) must not resurrect an ancestor directory
-      // the user manually collapsed in sync mode -- the active path is often inside a repo the user
-      // just collapsed, and the deferred reveal would re-expand it, fighting the user. Stop at the
-      // collapsed ancestor. Route through the same fileExplorerSyncPathSuppressed predicate the sync
-      // expand-loop and remembered-state restore use, so all three honor one source of truth.
-      // Explicit reveals (auto !== true, e.g. the user clicked the file) still expand through.
+      // Automatic reveals honor sync-mode manual collapse; explicit reveals still expand through.
       if (options.auto === true && fullPath !== path && fileExplorerRootMode === 'sync' && fileExplorerSyncPathSuppressed(fullPath)) {
         return false;
       }
@@ -24707,13 +24553,9 @@ function sortedFileTreeEntries(entries, sortMode = fileExplorerTreeSortModeForVi
   });
 }
 
-// one source for the git-status row classes (the toggle loop hardcoded this 5-element list in
-// two places — updateFileTreeRow + updateFileTreeGitStatusRows — so a status that maps elsewhere or a row
-// that changes status could leave a stale class behind on one path but not the other). applyGitStatusRowClass
-// toggles exactly this set so the stale class is always cleared.
+// One source for the git-status row classes; applyGitStatusRowClass clears stale classes on both paths.
 const GIT_STATUS_ROW_CLASSES = Object.freeze(['git-modified', 'git-untracked', 'git-deleted', 'git-staged', 'git-transcript']);
-// The session-highlight row classes (sync-expanded / session-repo / session-touched), likewise toggled in
-// two places (applyFileExplorerSessionHighlightRow + updateFileTreeRow).
+// Session-highlight row classes are likewise toggled through one helper.
 const SESSION_HIGHLIGHT_ROW_CLASSES = Object.freeze(['file-tree-row--sync-expanded', 'file-tree-row--session-repo', 'file-tree-row--session-touched']);
 
 function updateFileTreeSyncTargetMarker(row, active, title = '') {
@@ -25504,7 +25346,7 @@ function updateFileExplorerCurrentFileHighlight() {
   });
 }
 
-function scheduleFileExplorerActiveFileReveal(path = activeFile) {
+function scheduleFileExplorerActiveFileReveal(path = activeFile, options = {}) {
   if (!path) {
     updateFileExplorerCurrentFileHighlight();
     return;
@@ -25519,7 +25361,7 @@ function scheduleFileExplorerActiveFileReveal(path = activeFile) {
   const schedule = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : callback => setTimeout(callback, 0);
   schedule(() => {
     if (generation !== fileExplorerSyncState.generation) return;
-    expandFileExplorerTreesToPath(target, root, generation, {auto: true}).catch(error => {
+    expandFileExplorerTreesToPath(target, root, generation, options.explicit === true ? {user: true} : {auto: true}).catch(error => {
       console.warn('Finder active file reveal failed', error);
     });
   });
@@ -25527,9 +25369,7 @@ function scheduleFileExplorerActiveFileReveal(path = activeFile) {
 
 function updateFileTreeGitStatusRows(targetRows = null) {
   const changedAncestorStats = fileTreeChangedAncestorStats();
-  // Exclude Tabber rows: their data-path is a synthetic node path (/s_<id>...), so the finder's
-  // git-status/name refresh would rewrite the label to the path basename (s_1/w_0/r_00000) and clobber
-  // the Tabber's own render. The Tabber owns its rows via updateTabberRow / refreshTabberPanels.
+  // Tabber rows have synthetic paths; its own renderer owns their labels and status.
   const rows = targetRows === null
     ? document.querySelectorAll('.file-tree-row[data-path]:not([data-tabber-type])')
     : targetRows;
@@ -26045,9 +25885,9 @@ function fileIndexFreshnessFromPayload(payload) {
     // them; `missing` is deliberately not stale, because nothing was served to mislabel.
     stale: source.stale === true
       || FILE_INDEX_STALE_FRESHNESS_STATES.includes(state)
-      || String(source.index_state || '') === 'follower-stale'
+      || String(source.index_state || '') === 'stale'
       || String(source.index_coverage || '') === 'unverified',
-    refreshingElsewhere: source.refreshing_elsewhere === true,
+    refreshing: source.refreshing === true,
   };
 }
 
@@ -26061,7 +25901,7 @@ function fileIndexFreshnessMessage(freshness) {
   if (freshness.producerState === 'not_running') lines.push(t('finder.index.staleProducerNotRunning'));
   else if (freshness.producerState === 'unrecorded') lines.push(t('finder.index.staleProducerUnrecorded'));
   else if (freshness.reason === 'producer_vouch_expired') lines.push(t('finder.index.staleProducerBehind'));
-  if (freshness.refreshingElsewhere) lines.push(t('finder.index.staleRefreshRunning'));
+  if (freshness.refreshing) lines.push(t('finder.index.staleRefreshRunning'));
   return lines.join(' ');
 }
 
@@ -26103,7 +25943,7 @@ function fileIndexStatusFromPayload(payload) {
   if (state === 'error' || payload.error) return 'error';
   // A served-but-unvouched snapshot is neither ready nor building: it answers, and it says so.
   if (freshness.stale) return 'stale';
-  if (payload.ready === true || payload.ready_elsewhere === true || state === 'ready') return 'ready';
+  if (payload.ready === true || state === 'ready') return 'ready';
   return 'building';
 }
 
@@ -26195,6 +26035,13 @@ function refreshBuildingFileIndexStatuses() {
 }
 
 function syncFileIndexStatusPollInterval() {
+  if (clientEventTransportState.connected === true || fileExplorerIndexRefreshSeconds <= 0) {
+    clearRuntimeInterval('file-index-refresh');
+  } else {
+    // Status polling is a disconnected-transport repair path. Do not leave a timer alive that
+    // wakes up and returns null on every tick while SSE is already authoritative.
+    resetRuntimeInterval('file-index-refresh', refreshAllIndexedDirsStatus, fileExplorerIndexRefreshSeconds * 1000);
+  }
   if (!fileIndexStatusPollRoots.size || clientEventTransportState.connected === true) {
     clearRuntimeInterval('file-index-building');
     return;
@@ -26239,9 +26086,8 @@ function markFileIndexRootsRefreshing(roots = []) {
   if (changed) updateFileExplorerIndexedDirectoryRows();
 }
 
-// Proactive periodic re-check: re-fetches index-status for every indexed root even if already
-// 'ready', so stale indexes (TTL expired server-side) get rebuilt without waiting for a search.
 function refreshAllIndexedDirsStatus() {
+  if (clientEventTransportState.connected === true) return null; // SSE is authoritative; repair only while disconnected.
   const finderVisible = document.visibilityState !== 'hidden'
     && itemIsActivePaneTab(finderItemId);
   const fileSearchVisible = document.visibilityState !== 'hidden'
@@ -26588,7 +26434,7 @@ function tabberActivityPayloadHasUsefulData(payload) {
 }
 
 function tabberActivityPayloadIsRefreshPlaceholder(payload) {
-  return payload?.cache?.refreshing_elsewhere === true && !tabberActivityPayloadHasUsefulData(payload);
+  return payload?.cache?.refreshing === true && !tabberActivityPayloadHasUsefulData(payload);
 }
 
 function applyTabberActivityPayload(payload, requestGeneration = 0) {
@@ -26601,7 +26447,7 @@ function applyTabberActivityPayload(payload, requestGeneration = 0) {
   if (refreshPlaceholder && tabberActivityPayloadHasUsefulData(tabberActivityPayload)) return false;
   tabberActivityPayload = payload;
   tabberActivityState.loaded = true;
-  // A follower placeholder is not an authoritative snapshot. Let an older in-flight full response
+  // A refresh placeholder is not an authoritative snapshot. Let an older in-flight full response
   // replace it, while an accepted full response prevents older requests from rolling data back.
   if (!refreshPlaceholder && generation > tabberActivityState.appliedGeneration) {
     tabberActivityState.appliedGeneration = generation;
@@ -29511,7 +29357,7 @@ function showFileEditorPaneForPath(path, options = {}) {
   activeFile = path;
   const replacementSlots = setOpenFileOwner(path, item, options);
   syncFileLayoutItems();
-  scheduleFileExplorerActiveFileReveal(path);
+  scheduleFileExplorerActiveFileReveal(path, {explicit: options.userInitiated === true});
   if (replacementSlots) applyLayoutSlots(replacementSlots, {focusSession: item, prune: false});
   return openFileEditorPane(path, {...options, item});
 }
@@ -30607,6 +30453,7 @@ function ensureFileExplorerFilesystemWatchBaseline() {
   if (readOnlyMode || !fileExplorerTreePaneIsVisible() || fileExplorerFilesystemWatchToken) {
     return Boolean(fileExplorerFilesystemWatchToken);
   }
+  if (serverWatchRootsState.watchBaselinePromise) return serverWatchRootsState.watchBaselinePromise;
   if (!serverWatchRootsState.registered) {
     syncServerWatchRoots({immediate: true});
     return false;
@@ -30615,6 +30462,15 @@ function ensureFileExplorerFilesystemWatchBaseline() {
     await refreshFileExplorerFromWatchDiff({full: true}, {full: true});
     return Boolean(fileExplorerFilesystemWatchToken);
   })();
+  serverWatchRootsState.watchBaselinePromise = baseline;
+  baseline.then(
+    () => {
+      if (serverWatchRootsState.watchBaselinePromise === baseline) serverWatchRootsState.watchBaselinePromise = null;
+    },
+    () => {
+      if (serverWatchRootsState.watchBaselinePromise === baseline) serverWatchRootsState.watchBaselinePromise = null;
+    },
+  );
   return baseline;
 }
 
@@ -33777,7 +33633,10 @@ function refreshMetaButtonChrome() {
 function applySettingsPayload(payload, options = {}) {
   if (!payload?.settings) return false;
   const nextMtime = Number(payload.mtime_ns || 0);
-  if (!options.force && nextMtime && nextMtime === clientSettingsMtimeNs) return false;
+  // A deferred refresh or duplicate push may arrive after a settings write. A revision is a
+  // complete snapshot, so an equal revision is already applied; `force` may repaint callers but
+  // must never let an older/equal payload roll back the accepted settings values.
+  if (!options.initial && clientSettingsMtimeNs && (!nextMtime || nextMtime <= clientSettingsMtimeNs)) return false;
   const previousLocale = i18nActiveLocaleId();
   const previousDateTimeHourCycle = dateTimeHourCycle;
   const previousAgentStatusPulsePeriodMs = agentStatusPulsePeriodMs;
@@ -33917,7 +33776,7 @@ const runtimeIntervalCatalog = Object.freeze({
   'events-fallback': Object.freeze({classes: Object.freeze(['fallback']), source: 'event_log_changed SSE is authoritative while connected; HTTP repairs an open log after transport loss.'}),
   'auto-approve': Object.freeze({classes: Object.freeze(['fallback']), source: 'auto-approve SSE/status revisions are authoritative while connected; visible pages repair after transport loss.'}),
   'tabber-activity-fallback': Object.freeze({classes: Object.freeze(['fallback']), source: 'Tabber cache completion normally arrives through the shared SSE stream; this repairs an active Tabber only while that stream is disconnected.'}),
-  'file-index-refresh': Object.freeze({classes: Object.freeze(['poll:no-change']), source: 'The index service owns staleness/rebuild state; a visible Finder/search periodically asks for that external state.'}),
+  'file-index-refresh': Object.freeze({classes: Object.freeze(['fallback']), source: 'Index lifecycle events are authoritative while SSE is connected; visible Finder/search uses this status repair path only after transport loss.'}),
   'file-index-building': Object.freeze({classes: Object.freeze(['fallback']), source: 'Search-index lifecycle invalidations are authoritative while SSE is connected; a building root is repaired only after transport loss.'}),
   'debug-stats': Object.freeze({classes: Object.freeze(['fallback']), source: 'Exact YO!stats SSE owns a live short range; HTTP supplies initial, legacy, coarse, and disconnected repair data.'}),
   'debug-system': Object.freeze({classes: Object.freeze(['poll:no-change']), source: 'System diagnostics aggregate independently changing local-service state without a producer revision.'}),
@@ -34044,11 +33903,7 @@ function installRuntimeIntervals() {
   } else {
     clearRuntimeInterval('tabber-activity-fallback');
   }
-  if (fileExplorerIndexRefreshSeconds > 0) {
-    resetRuntimeInterval('file-index-refresh', refreshAllIndexedDirsStatus, fileExplorerIndexRefreshSeconds * 1000);
-  } else {
-    clearRuntimeInterval('file-index-refresh');
-  }
+  syncFileIndexStatusPollInterval();
 }
 
 function yolomuxFontSpecsForCurrentSettings() {
@@ -34197,6 +34052,7 @@ function settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, entries) {
 function collapseDirectoryRowsAcrossSurfaces(row, fullPath) {
   fileExplorerExpanded.delete(fullPath);
   fileExplorerPendingExpansions.delete(fullPath);
+  fileExplorerPendingExpansionOwners.delete(fullPath);
   liveDirectoryRows(fullPath, row).forEach(currentRow => {
     syncDirectoryRowExpansionVisual(currentRow, false, false);
     Array.from(currentRow.parentElement?.children || [])
@@ -34229,22 +34085,28 @@ async function expandDirectoryRow(row, fullPath, options = {}) {
     });
     return;
   }
+  const expansionOwner = Symbol(fullPath);
   fileExplorerPendingExpansions.add(fullPath);
+  fileExplorerPendingExpansionOwners.set(fullPath, expansionOwner);
   syncDirectoryRowExpansionVisual(row, true, true);
   let entries;
   try {
     entries = await fetchDirectory(fullPath, {user: options.user === true});
   } catch (error) {
-    const ownsExpansion = fileExplorerPendingExpansions.delete(fullPath);
+    const ownsExpansion = fileExplorerPendingExpansionOwners.get(fullPath) === expansionOwner;
     if (!ownsExpansion) return;
+    fileExplorerPendingExpansionOwners.delete(fullPath);
+    fileExplorerPendingExpansions.delete(fullPath);
     setFileExplorerListError(fullPath, error, Number(error?.status) || 0);
     settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, null);
     return;
   }
   // collapseDirectoryRow() deletes the pending path to cancel this reveal. The response may still
   // arrive, but it no longer owns this row and must not restore children the user just hid.
-  const ownsExpansion = fileExplorerPendingExpansions.delete(fullPath);
+  const ownsExpansion = fileExplorerPendingExpansionOwners.get(fullPath) === expansionOwner;
   if (!ownsExpansion) return;
+  fileExplorerPendingExpansionOwners.delete(fullPath);
+  fileExplorerPendingExpansions.delete(fullPath);
   if (!generationIsCurrent()) return;
   if (!entries) {
     settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, null);
@@ -38270,32 +38132,14 @@ function tmuxSessionMutationReconciliation(metadata, autoStatuses) {
 // Reconciliation NEVER throws. It runs after the server mutation and the local commit, so a
 // rejection here is a stale view, not a failed mutation, and letting it propagate would put a
 // post-commit failure on a path whose only handler rolls the mutation back.
-const tmuxRosterMutationPollMs = 50;
-const tmuxRosterMutationTimeoutMs = 1500;
-
-function tmuxRosterMutationConverged(payload) {
-  const expectedOrder = tmuxRosterEventOrder(payload);
-  if (!expectedOrder) return false;
-  const expectedGeneration = tmuxRosterEventGeneration(payload);
-  return expectedGeneration <= tmuxTopologyGeneration
-    && expectedOrder.length === sessions.length
-    && expectedOrder.every((session, index) => session === sessions[index]);
-}
-
-async function waitForTmuxRosterMutation(payload) {
-  const deadline = Date.now() + tmuxRosterMutationTimeoutMs;
-  while (true) {
-    if (tmuxRosterMutationConverged(payload)) return sessionMetadataResult(true, 'roster_converged');
-    if (Date.now() >= deadline) {
-      return noteForcedSessionMetadataSettleOutcome('roster_generation_never_arrived', tmuxRosterEventGeneration(payload));
-    }
-    await new Promise(resolve => setTimeout(resolve, tmuxRosterMutationPollMs));
-  }
-}
-
 async function refreshTmuxSessionMutationState(options = {}) {
-  const metadataPromise = options.kind === 'rename'
-    ? waitForTmuxRosterMutation(options.payload)
+  // Create/remove mutations are reconciled by the backend's asynchronous
+  // `transcripts_changed` publication. Only an explicit rename needs the
+  // short, bounded forced read because tmux can report the old and new names
+  // across separate events. Keep the no-kind path forced for direct callers
+  // and focused diagnostics that explicitly request reconciliation.
+  const metadataPromise = options.kind && options.kind !== 'rename'
+    ? Promise.resolve({ok: true, reason: 'backend_async'})
     : refreshTranscripts({force: true, refreshActivity: false});
   const [metadata, autoStatuses] = await Promise.allSettled([
     metadataPromise,
@@ -56810,6 +56654,7 @@ function recordJsDebugClientEventsConnectionState(connected) {
   const nextConnected = connected === true;
   if (jsDebugStatsClientConnected === nextConnected) return;
   jsDebugStatsClientConnected = nextConnected;
+  if (typeof syncFileIndexStatusPollInterval === 'function') syncFileIndexStatusPollInterval();
   if (typeof setBadConnectionCursorState === 'function') setBadConnectionCursorState(!nextConnected);
   const nowMs = Date.now();
   if (!nextConnected) {
@@ -62563,11 +62408,10 @@ function debugSystemRolesHtml(roles = {}) {
   const rows = Object.entries(roles && typeof roles === 'object' ? roles : {});
   if (!rows.length) return `<p class="js-debug-system-empty">${esc(t('common.notAvailable'))}</p>`;
   return `<div class="js-debug-system-table-wrap"><table class="js-debug-system-table">
-    <thead><tr><th>Role</th><th>Status</th><th>Refreshes</th><th>Fallbacks</th><th>Stale reads</th></tr></thead>
+    <thead><tr><th>Role</th><th>Status</th><th>Refreshes</th><th>Fallbacks</th></tr></thead>
     <tbody>${rows.map(([name, role]) => `<tr>
-      <td>${esc(name)}</td><td>${esc(role?.status || (role?.owner ? 'owner' : 'follower'))}</td>
+    <td>${esc(name)}</td><td>${esc(role?.status || 'unavailable')}</td>
       <td>${esc(debugSystemNumber(role?.refresh_requests))}</td><td>${esc(debugSystemNumber(role?.fallback_count))}</td>
-      <td>${esc(debugSystemNumber(role?.follower_stale_reads))}</td>
     </tr>`).join('')}</tbody>
   </table></div>`;
 }
@@ -62848,7 +62692,6 @@ function debugSystemCpuBudgetCardHtml(budget = {}) {
 // own render region precisely so a moving timestamp cannot rewrite it.
 function debugSystemSummaryStripHtml(payload = {}) {
   const counts = debugSystemRosterSummary(debugSystemRosterRows(payload));
-  const owner = payload.owner && typeof payload.owner === 'object' ? payload.owner : {};
   const generatedAgo = debugSystemGeneratedAge(payload.generated_at);
   // NO CPU BUDGET DENOMINATOR HERE. The strip used to print `CPU 172.5% / 30%`: a POPULATION sum
   // over every roster row, divided by `SERVER_CPU_BUDGET_PERCENT`, which is the budget for the WEB
@@ -62895,9 +62738,6 @@ function debugSystemSummaryStripHtml(payload = {}) {
     }), cpuCoverage],
     ['memory', t('debug.system.roster.summary.memory', {value: counts.rssMeasured > 0 ? debugGraphTerseBytesText(counts.rssBytes) : '—'}),
       memoryCoverage],
-    ['owner', t('debug.system.roster.summary.owner', {
-      value: owner.owner ? t('backgroundOwner.thisServer') : (Number(owner.current_owner?.port) > 0 ? `:${owner.current_owner.port}` : t('common.notAvailable')),
-    })],
     ['updated', `${t('debug.system.roster.summary.updated', {time: generatedAgo})}${jsDebugSystemState.error ? ` · ${jsDebugSystemState.error}` : ''}`],
   ];
   // The Refresh control is `aria-disabled` while a refresh is in flight, never `disabled`. A
@@ -62959,21 +62799,12 @@ function debugSystemAdvancedHtml(payload = {}, advanced = {}) {
   const summary = `<summary data-js-debug-system-advanced-summary data-js-debug-system-focus-key="advanced-summary">${esc(t('debug.system.roster.advanced'))}</summary>`;
   if (!open) return `<details class="js-debug-system-advanced" data-js-debug-system-advanced>${summary}</details>`;
   const body = advanced.payload && typeof advanced.payload === 'object' ? advanced.payload : null;
-  const owner = payload.owner && typeof payload.owner === 'object' ? payload.owner : {};
-  const currentOwner = owner.current_owner || {};
-  const advancedOwner = body && body.owner && typeof body.owner === 'object' ? body.owner : {};
   const refresh = body && body.refresh && typeof body.refresh === 'object' ? body.refresh : {};
   const localRefreshing = refresh.local_refreshing || {};
   const coalescing = refresh.coalescing || {};
   const totals = debugSystemRenderableLocalServices(payload).totals || {};
   const cards = [
     debugSystemCpuBudgetCardHtml(payload.cpu_budget || {}),
-    debugSystemCardHtml('Distributed owner', debugSystemRowsHtml([
-      ['Status', owner.status], ['This server owns work', owner.owner ? 'Yes' : 'No'],
-      ['Owner port', currentOwner.port], ['Owner PID', currentOwner.pid],
-      ['Index mode', owner.search_index?.mode],
-      ...(body ? [['Generations', advancedOwner.debug?.generation_count]] : []),
-    ])),
     ...(body ? [
       debugSystemCardHtml('Refresh coordination', debugSystemRowsHtml([
         ['Processes', totals.processes],
@@ -62981,7 +62812,7 @@ function debugSystemAdvancedHtml(payload = {}, advanced = {}) {
         ['Pending refreshes', coalescing.recent_pending_count ?? 0], ['Coalesced requests', refresh.counters?.coalesced_refresh_requests ?? 0],
       ])),
       debugSystemCardHtml('Recurring work', debugSystemRecurringWorkHtml(Array.isArray(refresh.recurring_work) ? refresh.recurring_work : []), {wide: true}),
-      debugSystemCardHtml('Distributed roles', debugSystemRolesHtml(refresh.roles), {wide: true}),
+      debugSystemCardHtml('Background roles', debugSystemRolesHtml(refresh.roles), {wide: true}),
       debugSystemCardHtml('Top API endpoints', debugSystemPerformanceTableHtml(body.top_endpoints, 'endpoint'), {wide: true}),
       debugSystemCardHtml('Top background work', debugSystemPerformanceTableHtml(body.top_background_work, 'worker'), {wide: true}),
     ] : []),
@@ -64828,6 +64659,11 @@ function newGitDiffTabState(item, defaults = {}) {
     repo: '',
     relativePath: '',
     hostedRemote: null,
+    branch: '',
+    detached: false,
+    dirtyCount: null,
+    dirtyEntries: [],
+    dirtyEntriesTruncated: false,
     head: '',
     snapshotCursor: '',
     commits: [],
@@ -64947,6 +64783,11 @@ function gitDiffHistoryPayloadIsValid(payload) {
       && typeof payload.hosted_remote.base_url === 'string'
     ))
     && (payload.snapshot_cursor === undefined || typeof payload.snapshot_cursor === 'string')
+    && (payload.branch === undefined || typeof payload.branch === 'string')
+    && (payload.detached === undefined || typeof payload.detached === 'boolean')
+    && (payload.dirty_count === undefined || payload.dirty_count === null || (Number.isSafeInteger(payload.dirty_count) && payload.dirty_count >= 0))
+    && (payload.dirty_entries === undefined || (Array.isArray(payload.dirty_entries) && payload.dirty_entries.every(entry => entry && typeof entry.status === 'string' && typeof entry.path === 'string' && (entry.old_path === undefined || typeof entry.old_path === 'string'))))
+    && (payload.dirty_entries_truncated === undefined || typeof payload.dirty_entries_truncated === 'boolean')
     && Array.isArray(payload.commits)
     && typeof payload.next_cursor === 'string');
 }
@@ -65025,6 +64866,11 @@ async function refreshGitDiffHistory(item, options = {}) {
     state.repo = normalizeDirectoryPath(payload.repo);
     state.relativePath = payload.relative_path;
     state.hostedRemote = payload.hosted_remote || null;
+    state.branch = typeof payload.branch === 'string' ? payload.branch : '';
+    state.detached = payload.detached === true;
+    state.dirtyCount = Number.isSafeInteger(payload.dirty_count) && payload.dirty_count >= 0 ? payload.dirty_count : null;
+    state.dirtyEntries = Array.isArray(payload.dirty_entries) ? payload.dirty_entries : [];
+    state.dirtyEntriesTruncated = payload.dirty_entries_truncated === true;
     state.head = payload.head;
     state.commits = append ? mergeGitDiffCommits(state.commits, payload.commits) : mergeGitDiffCommits([], payload.commits);
        if (append) state.visibleCommitCount = Math.min(state.commits.length, state.visibleCommitCount + pageSize);
@@ -65246,6 +65092,15 @@ function gitDiffHostedAnchor(className, text, href) {
 
 function gitDiffCommitSubjectNode(commit, remote) {
   const node = gitDiffTextNode('git-diff-commit-description');
+  const decorations = Array.isArray(commit?.decorations)
+    ? commit.decorations.map(value => String(value || '').trim()).filter(Boolean)
+    : [];
+  if (decorations.length) {
+    const refs = document.createElement('span');
+    refs.className = 'git-diff-commit-decorations';
+    for (const decoration of decorations) refs.append(gitDiffTextNode('git-diff-commit-decoration', decoration));
+    node.append(refs, document.createTextNode(' '));
+  }
   const subject = String(commit?.subject || '');
   let offset = 0;
   for (const match of subject.matchAll(/#([1-9][0-9]*)\b/g)) {
@@ -65270,6 +65125,9 @@ function gitDiffCommitDateText(commit) {
 function gitDiffCommitRow(item, commit, row = null) {
   const state = ensureGitDiffTabState(item);
   const sha = String(commit?.sha || '');
+  const decorationLabels = Array.isArray(commit?.decorations)
+    ? commit.decorations.map(value => String(value || '').trim()).filter(Boolean)
+    : [];
   const expanded = state?.expanded?.has(sha) === true;
   const control = row?.localName === 'div' ? row : document.createElement('div');
   control.className = 'git-diff-commit-row';
@@ -65294,7 +65152,7 @@ function gitDiffCommitRow(item, commit, row = null) {
   const changes = gitDiffCommitChangesNode(commit);
   const author = gitDiffTextNode('git-diff-commit-author', commit?.author || '');
   const description = gitDiffCommitSubjectNode(commit, state?.hostedRemote);
-  control.setAttribute('aria-label', [shortShaText, date.textContent, changes.getAttribute('aria-label'), author.textContent, commit?.subject || ''].filter(Boolean).join(' '));
+  control.setAttribute('aria-label', [shortShaText, date.textContent, changes.getAttribute('aria-label'), author.textContent, decorationLabels.join(' '), commit?.subject || ''].filter(Boolean).join(' '));
   control.replaceChildren(caret, shortSha, date, changes, author, description);
   return control;
 }
@@ -65484,6 +65342,41 @@ function gitDiffStatusNode(className, text, role = '') {
   return node;
 }
 
+function gitDiffDirtySummaryNode(state) {
+  const summary = document.createElement('section');
+  summary.className = 'git-diff-dirty-summary';
+  const dirtyCount = state?.dirtyCount;
+  const summaryText = dirtyCount === 0
+    ? t('git.clean')
+    : Number.isSafeInteger(dirtyCount) && dirtyCount >= 0
+      ? t('git.dirty', {count: dirtyCount})
+      : t('common.notAvailable');
+  summary.setAttribute('aria-label', summaryText);
+  summary.append(gitDiffTextNode('git-diff-dirty-count', summaryText));
+  const entries = Array.isArray(state?.dirtyEntries) ? state.dirtyEntries : [];
+  if (entries.length) {
+    const list = document.createElement('div');
+    list.className = 'git-diff-dirty-entries';
+    for (const entry of entries) {
+      const row = document.createElement('div');
+      row.className = 'git-diff-dirty-entry';
+      row.append(
+        gitDiffTextNode('git-diff-dirty-status', `[${String(entry?.status || '')}]`),
+        gitDiffTextNode('git-diff-dirty-path', String(entry?.path || '')),
+      );
+      if (entry?.old_path !== undefined) {
+        row.append(
+          gitDiffTextNode('git-diff-dirty-rename-arrow', ' ← '),
+          gitDiffTextNode('git-diff-dirty-old-path', String(entry.old_path || '')),
+        );
+      }
+      list.append(row);
+    }
+    summary.append(list);
+  }
+  return summary;
+}
+
 function gitDiffLoadingStatusNode(className = 'git-diff-state git-diff-state-loading') {
   const node = gitDiffStatusNode(className, '', 'status');
   node.innerHTML = textWithMovingEllipsisHtml(t('common.loading'), 'git-diff-loading-dots');
@@ -65608,7 +65501,9 @@ function renderGitDiffPanel(item, options = {}) {
   const meta = panel.querySelector?.('.git-diff-meta');
   if (meta) {
     const scope = state.relativePath ? state.relativePath : t('gitDiff.repositoryRoot');
-    meta.textContent = `${t('gitDiff.scope', {scope})} · ${t('gitDiff.newestCommits', {count: state.visibleCommitCount || gitDiffHistoryMinimumPageSize})}`;
+    const branch = state.detached ? t('git.detached') : (state.branch || t('common.notAvailable'));
+    const branchPrefix = state.detached || state.branch ? `${t('common.branchLabel')}: ${branch} · ` : '';
+    meta.textContent = `${branchPrefix}${t('gitDiff.scope', {scope})} · ${t('gitDiff.newestCommits', {count: state.visibleCommitCount || gitDiffHistoryMinimumPageSize})}`;
   }
   const body = panel.querySelector?.('.git-diff-panel-body');
   if (!body) return state;
@@ -65620,6 +65515,7 @@ function renderGitDiffPanel(item, options = {}) {
   const nodes = [];
   if (state.loading) nodes.push(gitDiffLoadingStatusNode());
   if (state.error) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-error', userMessageText(state.error, t('common.requestFailed')), 'alert'));
+  if (state.loaded) nodes.push(gitDiffDirtySummaryNode(state));
   if (state.commits.length) nodes.push(list);
   else if (state.loaded && !state.loading) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-empty', t('gitDiff.empty'), 'status'));
   if (state.loadingOlder) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-loading', t('common.loading'), 'status', {movingEllipsis: true}));
@@ -66644,13 +66540,13 @@ function normalizedSessionFilesPayload(payload = {}, defaults = {}) {
     cache: payload.cache && typeof payload.cache === 'object' ? {...payload.cache} : {},
     from_ref: payload.from_ref || defaults.from_ref || diffRefFrom,
     to_ref: payload.to_ref || defaults.to_ref || diffRefTo,
-    refreshing_elsewhere: payload.refreshing_elsewhere === true,
+    refreshing: payload.refreshing === true,
     loaded: defaults.loaded === false ? false : true,
   };
 }
 
-function sessionFilesPayloadIsRefreshingElsewhere(payload) {
-  return payload?.refreshing_elsewhere === true;
+function sessionFilesPayloadIsRefreshing(payload) {
+  return payload?.refreshing === true;
 }
 
 function sessionFilesPayloadIsFinderWorktree(payload, session = '') {
@@ -66678,14 +66574,14 @@ function sessionFilesPayloadHasVisibleDifferResult(payload, files = null) {
   if (visibleFiles.length) return true;
   if ((Array.isArray(payload.errors) ? payload.errors : []).length) return true;
   if ((Array.isArray(payload.warnings) ? payload.warnings : []).length) return true;
-  if (sessionFilesPayloadIsRefreshingElsewhere(payload)) return false;
+  if (sessionFilesPayloadIsRefreshing(payload)) return false;
   if (sessionFilesRepoRoots(payload).length > 0) return true;
-  return !sessionFilesPayloadIsRefreshingElsewhere(payload) && sessionFilesPayloadIsRootlessEmpty(payload);
+  return !sessionFilesPayloadIsRefreshing(payload) && sessionFilesPayloadIsRootlessEmpty(payload);
 }
 
 function sessionFilesPanelIsLoading(payload, files = null) {
   if (fileExplorerSessionFilesState.loading) return true;
-  if (!sessionFilesPayloadIsRefreshingElsewhere(payload)) return false;
+  if (!sessionFilesPayloadIsRefreshing(payload)) return false;
   return !sessionFilesPayloadHasVisibleDifferResult(payload, files);
 }
 
@@ -66694,7 +66590,7 @@ function sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination = 'di
   const current = sessionFilesPayloadForDestination(destination);
   if (!session) return false;
   if (!sessionFilesPayloadIsLoadedForSession(current, session)) return false;
-  if (sessionFilesPayloadIsRefreshingElsewhere(nextPayload)) return sessionFilesRepoRoots(current).length > 0;
+  if (sessionFilesPayloadIsRefreshing(nextPayload)) return sessionFilesRepoRoots(current).length > 0;
   if (!sessionFilesPayloadIsRootlessEmpty(nextPayload)) return false;
   return sessionFilesRepoRoots(current).length > 0;
 }
@@ -66777,7 +66673,7 @@ const sessionFilesProducerDeadlineMs = 5000;
 const sessionFilesCompletionRevalidations = new Map();
 
 function scheduleSessionFilesProducerDeadline(destination, payload) {
-  if (!sessionFilesPayloadIsRefreshingElsewhere(payload)) return;
+  if (!sessionFilesPayloadIsRefreshing(payload)) return;
   if (payload?.pending_operation_id) return;
   setTimeout(() => {
     if (sessionFilesPayloadForDestination(destination) !== payload) return;
@@ -66785,7 +66681,7 @@ function scheduleSessionFilesProducerDeadline(destination, payload) {
     const deadline = apiFetchDeadlineError(sessionFilesProducerDeadlineMs, 'session-files producer');
     const nextPayload = {
       ...payload,
-      refreshing_elsewhere: false,
+      refreshing: false,
       errors: [...(Array.isArray(payload.errors) ? payload.errors : []), deadline.message],
       loaded: true,
     };
@@ -66870,7 +66766,7 @@ function sessionFilesPayloadSignatureForPayload(payload) {
   return JSON.stringify({
     session: payload?.session || '',
     loaded: payload?.loaded === true,
-    refreshing_elsewhere: sessionFilesPayloadIsRefreshingElsewhere(payload),
+    refreshing: sessionFilesPayloadIsRefreshing(payload),
     from: payload?.from_ref || '',
     to: payload?.to_ref || '',
     errors: Array.isArray(payload?.errors) ? payload.errors : [],
@@ -67022,7 +66918,7 @@ async function fetchSessionFiles(options = {}) {
     if (isApiPendingResponse(err)) {
       const nextPayload = {
         ...emptySessionFilesPayload(session, false, destination),
-        refreshing_elsewhere: true,
+        refreshing: true,
         pending_key: err.key,
         pending_epoch: err.epoch,
         pending_operation_id: err.operationId,
@@ -67227,7 +67123,7 @@ function applySessionFilesOperationFailureToDestination(destination, result, con
     : userMessageSnapshot(result, 'session-files request failed').user_message;
   const nextPayload = {
     ...emptySessionFilesPayload(session, true, destination),
-    refreshing_elsewhere: false,
+    refreshing: false,
     errors: [issue],
     operation_error: error,
   };
@@ -69454,7 +69350,7 @@ function createFileEditorPanel(item) {
   panel.addEventListener('click', event => {
     if (event.defaultPrevented) return;
     if (event.target?.closest?.('button, a, input, textarea, select, [data-diff-ref-input]')) return;
-    scheduleFileExplorerActiveFileReveal(path);
+    scheduleFileExplorerActiveFileReveal(path, {explicit: true});
   });
   delegate(panel, 'pointerdown', 'button', event => event.stopPropagation());
   bindActionDispatcher(panel, {
@@ -70468,7 +70364,18 @@ function markdownPreviewCopySelectionWithStyle(context) {
   const range = context?.range || selection.getRangeAt(0);
   const wrapper = document.createElement('div');
   wrapper.append(range.cloneContents());
-  const images = [...wrapper.querySelectorAll('img[src]')];
+  let images = [...wrapper.querySelectorAll('img[src], img[data-original-src], img[data-resolved-path]')];
+  const block = context?.block;
+  if (!images.length && block?.querySelector?.('img') && typeof Range !== 'undefined') {
+    const blockRange = document.createRange();
+    blockRange.selectNodeContents(block);
+    const wholeBlockSelected = range.compareBoundaryPoints(Range.START_TO_START, blockRange) <= 0
+      && range.compareBoundaryPoints(Range.END_TO_END, blockRange) >= 0;
+    if (wholeBlockSelected) {
+      wrapper.replaceChildren(block.cloneNode(true));
+      images = [...wrapper.querySelectorAll('img[src], img[data-original-src], img[data-resolved-path]')];
+    }
+  }
   // Let the browser serialize ordinary selections. Image selections need explicit data URLs:
   // Google Docs cannot fetch this app's authenticated raw-file URLs from clipboard HTML.
   if (!images.length && document.execCommand?.('copy') === true) {
@@ -70479,7 +70386,7 @@ function markdownPreviewCopySelectionWithStyle(context) {
   if (!wrapper.innerHTML || (!text && !images.length)) return false;
   const clipboard = globalThis.navigator?.clipboard;
   if (globalThis.isSecureContext !== false && clipboard?.write && globalThis.ClipboardItem) {
-    const imageData = images.map(image => fetch(image.currentSrc || image.src, {credentials: 'same-origin'})
+    const imageData = images.map(image => fetch(clipboardImageSourceUrl(image), {credentials: 'same-origin'})
       .then(response => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.blob(); })
       .then(blob => new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -71931,7 +71838,15 @@ function applyMarkdownFenceHighlight(block) {
   }
   if (fileEditorPreviewDisplayMode === 'vanilla') return;
   if (typeof window.hljs !== 'undefined') {
-    try { window.hljs.highlightElement(block); } catch (_) {}
+    // Marked can leave literal HTML in a fence's DOM. Highlight.js treats that as already
+    // trusted markup and warns; code fences are text, so normalize through textContent before
+    // handing the block to the highlighter. This also keeps the warning-free path shared by
+    // Markdown preview, Differ, and the editor's vanilla code surface.
+    try {
+      const source = block.textContent || '';
+      block.textContent = source;
+      window.hljs.highlightElement(block);
+    } catch (_) {}
   }
   applyMarkdownFenceFallbackHighlight(block);
 }
@@ -72716,7 +72631,7 @@ function hydratePreviewZoomSurface(shell, content = null, options = null) {
     return applied;
   };
   const ResizeObserverCtor = ownerWindow?.ResizeObserver || (typeof ResizeObserver === 'function' ? ResizeObserver : null);
-  if (ResizeObserverCtor) {
+  if (ResizeObserverCtor && resolvedOptions.controlsOnly !== true) {
     const resizeObserver = new ResizeObserverCtor(() => {
       // Coalesce to one apply per frame. applyPreviewZoomSurface resizes the content inside the
       // observed viewport (and can toggle a scrollbar, which changes the viewport content-box),
@@ -72773,6 +72688,7 @@ function installPreviewZoomSurface(shell, content, options = {}) {
   toolbar.appendChild(value);
   const viewport = document.createElement('div');
   viewport.className = 'file-editor-preview-zoom-viewport';
+  if (options.controlsOnly === true) viewport.dataset.previewZoomControlsOnly = '1';
   const stage = document.createElement('div');
   stage.className = 'file-editor-preview-zoom-stage';
   stage.appendChild(content);
@@ -72787,6 +72703,52 @@ function previewZoomSurfaceNode(content, options = {}) {
 }
 
 let mermaidPreviewRenderSeq = 0;
+const mermaidRenderCache = new Map();
+const mermaidRenderInflight = new Map();
+const MERMAID_RENDER_CACHE_LIMIT = 64;
+
+function mermaidRenderCacheKey(source) {
+  const text = String(source || '').trim();
+  const config = typeof mermaidPreviewConfig === 'function' ? mermaidPreviewConfig() : {};
+  return JSON.stringify({text, config, cacheVersion: 1});
+}
+
+function mermaidCachedSvg(source) {
+  const key = mermaidRenderCacheKey(source);
+  const cached = mermaidRenderCache.get(key);
+  if (cached) {
+    mermaidRenderCache.delete(key);
+    mermaidRenderCache.set(key, cached);
+    return {key, value: cached};
+  }
+  return {key, value: null};
+}
+
+function rememberMermaidSvg(key, svg) {
+  mermaidRenderCache.delete(key);
+  mermaidRenderCache.set(key, svg);
+  while (mermaidRenderCache.size > MERMAID_RENDER_CACHE_LIMIT) {
+    mermaidRenderCache.delete(mermaidRenderCache.keys().next().value);
+  }
+  return svg;
+}
+
+function mermaidSvgForRender(api, key, text, seq) {
+  const existing = mermaidRenderInflight.get(key);
+  if (existing) return existing;
+  const id = `yolomux-mermaid-${Date.now()}-${seq}`;
+  const promise = Promise.resolve()
+    .then(() => api.render(id, text))
+    .then(result => {
+      const rawSvg = typeof result === 'string' ? result : result?.svg;
+      return rememberMermaidSvg(key, sanitizeStandaloneSvg(rawSvg));
+    })
+    .finally(() => {
+      if (mermaidRenderInflight.get(key) === promise) mermaidRenderInflight.delete(key);
+    });
+  mermaidRenderInflight.set(key, promise);
+  return promise;
+}
 
 function mermaidErrorNode(source, error) {
   const node = document.createElement('div');
@@ -72847,27 +72809,38 @@ async function renderMermaidSourceInto(container, source, options = {}) {
   try {
     const api = await loadMermaidApi();
     if (!isCurrent() || container.dataset.mermaidRenderSeq !== String(seq)) return false;
-    const id = `yolomux-mermaid-${Date.now()}-${seq}`;
-    const result = await api.render(id, text);
+    const cached = mermaidCachedSvg(text);
+    let svg = cached.value;
+    if (!svg) svg = await mermaidSvgForRender(api, cached.key, text, seq);
     if (!isCurrent() || container.dataset.mermaidRenderSeq !== String(seq)) return false;
-    const rawSvg = typeof result === 'string' ? result : result?.svg;
-    const svg = sanitizeStandaloneSvg(rawSvg);
     if (!svg) throw new Error(t('preview.mermaid.noSvg'));
     const fullPreview = Object.prototype.hasOwnProperty.call(options, 'full')
       ? options.full !== false
       : container.classList.contains('file-editor-preview-pane-panel');
     return await schedulePreviewDeferredWorkAfterUserScroll(container, 'mermaid-completion', () => {
       if (!isCurrent() || container.dataset.mermaidRenderSeq !== String(seq)) return false;
-      const img = document.createElement('img');
-      img.className = 'mermaid-preview-image';
-      img.alt = t('preview.mermaid.alt');
-      img.src = svgImageUrl(svg);
-      installPreviewZoomSurface(container, img, previewZoomOptionsForKind(fullPreview ? 'mermaidFull' : 'mermaidInline', {
-        ...options,
-        path: options.path || '',
-        full: fullPreview,
-      }));
-      return true;
+       const img = document.createElement('img');
+       img.className = 'mermaid-preview-image';
+       img.alt = t('preview.mermaid.alt');
+       img.src = svgImageUrl(svg);
+       if (options.controlsOnly === true) {
+         installPreviewZoomSurface(container, img, previewZoomOptionsForKind(fullPreview ? 'mermaidFull' : 'mermaidInline', {
+           ...options,
+           panDrag: false,
+           path: options.path || '',
+           full: fullPreview,
+         }));
+       } else if (options.interactive === false) {
+         container.replaceChildren(img);
+         container.classList.add('mermaid-preview');
+       } else {
+         installPreviewZoomSurface(container, img, previewZoomOptionsForKind(fullPreview ? 'mermaidFull' : 'mermaidInline', {
+           ...options,
+           path: options.path || '',
+           full: fullPreview,
+         }));
+       }
+       return true;
     });
   } catch (error) {
     return await schedulePreviewDeferredWorkAfterUserScroll(container, 'mermaid-completion', () => {
@@ -74623,6 +74596,20 @@ function applyPreviewSnapshotRoot(root, snapshot) {
 function previewSnapshotScratch(path, text, options = {}) {
   const scratch = document.createElement('div');
   scratch.className = 'file-editor-preview-pane-panel';
+  if (options.attach === true && document.body) {
+    scratch.dataset.previewSnapshotScratch = '1';
+    Object.assign(scratch.style, {
+      position: 'fixed',
+      left: '-100000px',
+      top: '0',
+      width: '1px',
+      height: '1px',
+      overflow: 'hidden',
+      visibility: 'hidden',
+      pointerEvents: 'none',
+    });
+    document.body.appendChild(scratch);
+  }
   renderEditorPreviewPane(scratch, path, text, {context: options.context || 'popout'});
   scratch.hidden = false;
   return scratch;
@@ -74633,11 +74620,16 @@ function renderedPreviewSnapshot(path, text) {
 }
 
 async function renderedPreviewSnapshotAsync(path, text) {
-  const scratch = previewSnapshotScratch(path, text, {context: 'popout'});
-  if (scratch._previewAsync && typeof scratch._previewAsync.then === 'function') {
-    await scratch._previewAsync;
+  const scratch = previewSnapshotScratch(path, text, {context: 'popout', attach: true});
+  try {
+    if (scratch._previewAsync && typeof scratch._previewAsync.then === 'function') {
+      await scratch._previewAsync;
+    }
+    return snapshotRenderedPreviewContainer(scratch);
+  } finally {
+    releasePreviewSurfaceResources(scratch);
+    scratch.remove();
   }
-  return snapshotRenderedPreviewContainer(scratch);
 }
 
 function applyFilePreviewPopoutAsync(path, previewWindow, previewGeneration, promise, apply) {
@@ -78154,6 +78146,13 @@ function prosemirrorMarkdownSchema(api) {
       bullet: {default: '*'},
     },
   });
+  nodes = nodes.update('image', {
+    ...nodes.get('image'),
+    attrs: {
+      ...nodes.get('image').attrs,
+      width: {default: null},
+    },
+  });
   nodes = nodes.addBefore('blockquote', 'details', {
     group: 'block',
     content: 'block+',
@@ -78256,6 +78255,7 @@ function prosemirrorMarkdownParser(api, schema) {
         src: image.getAttribute('src'),
         alt: image.getAttribute('alt'),
         title: image.getAttribute('title'),
+        width: prosemirrorImageWidth(image.getAttribute('width')),
       };
     };
     const ignoredCommentLines = new Set();
@@ -78441,6 +78441,11 @@ function prosemirrorMarkdownParser(api, schema) {
   return new api.MarkdownParser(schema, tokenizer, tokens);
 }
 
+function prosemirrorImageWidth(value) {
+  const width = String(value || '').trim();
+  return /^[1-9]\d*$/.test(width) ? width : null;
+}
+
 const PROSEMIRROR_SAFE_HTML_TAGS = new Set(['u', 'mark', 'kbd', 'sup', 'br', 'img', 'details', 'summary']);
 const PROSEMIRROR_KNOWN_HTML_TAGS = new Set([
   'a', 'abbr', 'address', 'article', 'aside', 'audio', 'b', 'bdi', 'bdo', 'blockquote', 'body', 'button',
@@ -78467,6 +78472,21 @@ function prosemirrorUnsupportedHtmlSource(source) {
 function prosemirrorMarkdownSerializer(api) {
   return new api.MarkdownSerializer({
     ...api.defaultMarkdownSerializer.nodes,
+    image(state, node) {
+      if (!node.attrs.width) {
+        api.defaultMarkdownSerializer.nodes.image(state, node);
+        return;
+      }
+      const attr = value => String(value || '').replace(/[&<>"']/g, character => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;',
+      }[character]));
+      const title = node.attrs.title ? ` title="${attr(node.attrs.title)}"` : '';
+      state.write(`<img src="${attr(node.attrs.src)}" alt="${attr(node.attrs.alt)}"${title} width="${node.attrs.width}">`);
+    },
     paragraph(state, node) {
       if (node.content.size) {
         state.renderInline(node);
@@ -78559,6 +78579,8 @@ function prosemirrorImageNodeView(node, panel, markdownPath) {
   image.className = 'markdown-preview-image prosemirror-image';
   image.alt = node.attrs.alt || '';
   if (node.attrs.title) image.title = node.attrs.title;
+  const width = prosemirrorImageWidth(node.attrs.width);
+  if (width) image.setAttribute('width', width);
   image.dataset.originalSrc = original;
   image.loading = 'eager';
   image.decoding = 'async';
@@ -80581,130 +80603,6 @@ function infoMetadataLoadingHtml() {
     <span class="info-loading-spinner" aria-hidden="true"></span>
     <span>${esc(t('info.loadingRepo'))}</span>
   </div>`;
-}
-
-function backgroundServerPortText(record) {
-  const port = Number(record?.port);
-  return Number.isFinite(port) && port > 0 ? `:${Math.trunc(port)}` : '';
-}
-
-function backgroundServerLabel(record, fallback = '') {
-  const source = record && typeof record === 'object' ? record : {};
-  const host = String(source.hostname || fallback || serverHostname || '').trim();
-  const endpoint = host ? `${host}${backgroundServerPortText(source)}` : '';
-  const root = compactHomePath(source.project_root || '');
-  const pid = Number(source.pid);
-  return [
-    endpoint,
-    root,
-    Number.isFinite(pid) && pid > 0 ? t('backgroundOwner.pid', {pid: Math.trunc(pid)}) : '',
-  ].filter(Boolean).join(' · ') || t('backgroundOwner.thisServer');
-}
-
-function backgroundOwnerRoleSummary(roleName, payload = backgroundOwnerStatusState.payload, options = {}) {
-  const data = payload && typeof payload === 'object' ? payload : {};
-  const roles = data.roles && typeof data.roles === 'object' ? data.roles : {};
-  const role = roles[roleName] && typeof roles[roleName] === 'object' ? roles[roleName] : {};
-  const ownsRole = role.owner === true;
-  const current = data.generation && typeof data.generation === 'object' ? data.generation : {};
-  const owner = data.current_owner && typeof data.current_owner === 'object' ? data.current_owner : null;
-  return {
-    ownsRole,
-    mode: ownsRole ? (options.ownerMode || 'leader') : (options.followerMode || 'follower'),
-    state: ownsRole ? 'leader' : 'follower',
-    currentLabel: backgroundServerLabel(current),
-    ownerLabel: owner ? backgroundServerLabel(owner) : '',
-    status: String(role.status || data.status || ''),
-    error: String(data.last_error || ''),
-  };
-}
-
-function backgroundOwnerSearchIndexSummary(payload = backgroundOwnerStatusState.payload) {
-  const data = payload && typeof payload === 'object' ? payload : {};
-  const searchIndex = data.search_index && typeof data.search_index === 'object' ? data.search_index : {};
-  const summary = backgroundOwnerRoleSummary('search-index', payload);
-  const ownsIndex = searchIndex.owner === true || summary.ownsRole === true;
-  const current = searchIndex.current_server && typeof searchIndex.current_server === 'object' ? searchIndex.current_server : data.generation;
-  const owner = searchIndex.owner_server && typeof searchIndex.owner_server === 'object' ? searchIndex.owner_server : data.current_owner;
-  return {
-    ...summary,
-    ownsIndex,
-    ownsRole: ownsIndex,
-    mode: ownsIndex ? 'leader' : 'follower',
-    state: ownsIndex ? 'leader' : 'follower',
-    currentLabel: backgroundServerLabel(current),
-    ownerLabel: owner && typeof owner === 'object' ? backgroundServerLabel(owner) : '',
-    status: String(searchIndex.status || summary.status || data.status || ''),
-  };
-}
-
-function backgroundOwnerStatsSummary(payload = backgroundOwnerStatusState.payload) {
-  return backgroundOwnerRoleSummary('stats-sampler', payload);
-}
-
-function backgroundOwnerSessionFilesSummary(payload = backgroundOwnerStatusState.payload) {
-  return backgroundOwnerRoleSummary('session-files', payload);
-}
-
-function applyBackgroundOwnerStatusPayload(payload = {}, options = {}) {
-  if (!payload || typeof payload !== 'object') return false;
-  backgroundOwnerStatusState.payload = payload;
-  if (options.source !== 'request' && options.source !== 'resource-replace') {
-    backgroundOwnerStatusResource().replace(payload, 'background-owner-push', {...options, source: 'resource-replace'});
-  }
-  backgroundOwnerStatusState.updatedAt = Date.now();
-  backgroundOwnerStatusState.error = '';
-  backgroundOwnerStatusState.loading = false;
-  if (options.render !== false) renderInfoPanel();
-  if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
-  return true;
-}
-
-const startupSnapshotFreshnessMs = 5_000;
-
-function backgroundOwnerStatusIsFresh() {
-  return Boolean(backgroundOwnerStatusState.payload)
-    && Date.now() - Number(backgroundOwnerStatusState.updatedAt || 0) < startupSnapshotFreshnessMs;
-}
-
-function syncBackgroundOwnerStatusResource(snapshot, event) {
-  backgroundOwnerStatusState.request = snapshot.request;
-  backgroundOwnerStatusState.loading = snapshot.loading && !backgroundOwnerStatusState.payload;
-  backgroundOwnerStatusState.error = snapshot.error ? userMessageSnapshot(snapshot.error) : '';
-  const options = event.context || {};
-  if (event.phase === 'loading' || event.phase === 'failed') {
-    if (options.render !== false) renderInfoPanel();
-    if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
-  }
-}
-
-function backgroundOwnerStatusResource() {
-  if (backgroundOwnerStatusState.resource) return backgroundOwnerStatusState.resource;
-  backgroundOwnerStatusState.resource = createLatestResource({
-    initial: backgroundOwnerStatusState.payload,
-    load: () => apiFetchJson('/api/background/status', {cache: 'no-store'}),
-    apply(payload, {context}) {
-      applyBackgroundOwnerStatusPayload(payload, {...(context || {}), source: 'request'});
-      return payload;
-    },
-    result: () => true,
-    staleResult: () => false,
-    failureResult: () => false,
-    onState: syncBackgroundOwnerStatusResource,
-  });
-  return backgroundOwnerStatusState.resource;
-}
-
-function refreshBackgroundOwnerStatus(options = {}) {
-  // Every consumer observes the same current snapshot. A reconnect may require a new request
-  // after this settles, but must not discard and duplicate the request boot already owns.
-  if (backgroundOwnerStatusState.request) return backgroundOwnerStatusState.request;
-  if (options.preferFresh === true && backgroundOwnerStatusIsFresh()) return Promise.resolve(true);
-  backgroundOwnerStatusState.loading = !backgroundOwnerStatusState.payload;
-  backgroundOwnerStatusState.error = '';
-  if (options.render !== false) renderInfoPanel();
-  if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
-  return backgroundOwnerStatusResource().read('background-owner-status', options);
 }
 
 // client-side mirror of the backend parse_pull_request_ref — normalize a watched-PR entry
@@ -85030,6 +84928,8 @@ async function refreshAutoStatuses(options = {}) {
   refreshOpenEventLogs();
 }
 
+const startupSnapshotFreshnessMs = 5_000;
+
 function autoApproveSnapshotIsFresh() {
   return loadAutoStatuses.lastResult !== null
     && Date.now() - Number(loadAutoStatuses.updatedAt || 0) < startupSnapshotFreshnessMs;
@@ -85755,6 +85655,10 @@ async function applySessionMetadataPayload(payload, options = {}) {
   const previousActive = activeSessions.slice();
   const sessionsChanged = updateSessionList(transcriptMetadataState.payload.session_order || []);
   finalizeSessionMetadataOutcome(true, 'applied', payload);
+  // The payload is committed before the slower auto-status refresh. Refresh only the cached rows
+  // now so an open Tabs menu reflects this accepted metadata generation without waiting for that
+  // unrelated request or losing the render tail to a newer refresh.
+  if (typeof refreshOpenTabsMenuRows === 'function') refreshOpenTabsMenuRows();
   if (options.refreshAuto !== false) {
     await loadAutoStatuses();
   }
@@ -85763,10 +85667,6 @@ async function applySessionMetadataPayload(payload, options = {}) {
   if (!requestIsCurrent()) return finalizeSessionMetadataOutcome(false, 'committed_render_superseded', payload, {committed: true});
   transcriptMetadataState.loading = false;
   if (sessionsChanged) renderPanels(previousActive);
-  // Keep a user-open Tabs menu alive while its background list-sessions refresh completes. The
-  // topbar renderer intentionally defers all full rebuilds during an open menu so pointer/click
-  // targets cannot disappear; this shared owner updates just the cache-backed menu rows instead.
-  if (typeof refreshOpenTabsMenuRows === 'function') refreshOpenTabsMenuRows();
   renderSessionButtons();
   renderInfoPanel();
   renderYoagentPanel();
@@ -86700,7 +86600,6 @@ function refreshAll() {
   resyncVisibleTerminalRemoteSizes('refresh');
   refreshVisibleTerminalScreens('manual-refresh');
   refreshTranscripts({force: true});
-  refreshBackgroundOwnerStatus({force: true});
   refreshAutoStatuses();
   if (typeof retryNetworkFailedFileExplorerExpansion === 'function') void retryNetworkFailedFileExplorerExpansion();
   refreshWatchedFilesystem({full: true});
@@ -86780,10 +86679,6 @@ async function boot() {
   syncInitialLayoutUrl();
   statusEl.textContent = t('status.yoloLoading');
   loadNotificationDelivery();
-  refreshBackgroundOwnerStatus({render: false}).catch(error => {
-    console.warn('initial background-owner status refresh failed', error);
-    return false;
-  });
   const initialAutoStatusesPromise = loadAutoStatuses().catch(error => {
     console.warn('initial auto-status refresh failed', error);
     return false;
@@ -86878,7 +86773,6 @@ function repairClientEventReadyChannels(channels, watchRootsForceOptions = {}) {
     }
   }
   if (channels.has('status') || channels.has('attention')) refreshAutoStatuses({force: true}).catch(error => console.warn('client-events ready auto-status refresh failed', error));
-  if (channels.has('core')) refreshBackgroundOwnerStatus({preferFresh: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
   if (channels.has('chat') && typeof loadChatBootstrap === 'function') loadChatBootstrap({incoming: true});
   if (channels.has('transcripts') && typeof refreshSessionMetadataAfterCurrent === 'function') refreshSessionMetadataAfterCurrent({refreshAuto: false, refreshActivity: false}).catch(error => console.warn('client-events ready transcript refresh failed', error));
   if (channels.has('activity') && typeof refreshActivitySummary === 'function') refreshActivitySummary({force: true}).catch(error => console.warn('client-events ready activity refresh failed', error));
@@ -87259,7 +87153,7 @@ function clientPushEventSessionKey(payload = {}) {
 const clientServerPushEventTypes = Object.freeze([
   'settings_changed', 'pricing_catalog_changed', 'stats_sample', 'attention_acks_changed', 'auto_approve_changed',
   'backend_health_changed',
-  'background_owner_changed', 'background_refresh_done', 'background_refresh_requested', 'tmux_signals_changed',
+  'background_refresh_done', 'background_refresh_requested', 'tmux_signals_changed',
   'watched_prs_changed', 'files_changed', 'fs_changed', 'roots_changed', 'search_progress', 'session_files_ready', 'transcripts_changed', 'tmux_roster_changed',
   'operation_terminal',
   'context_changed', 'context_items_ready', 'activity_summary_ready', 'event_log_changed', 'update_available',
@@ -87397,18 +87291,7 @@ function handleClientPushEventNowByType(type, payload = {}, envelope = {}) {
     applyBackendHealthPayload(payload);
     return;
   }
-  if (type === 'background_owner_changed') {
-    if (!applyBackgroundOwnerStatusPayload(payload)) {
-      refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('background-owner status refresh failed', error));
-    } else if (typeof refreshAllIndexedDirsStatus === 'function') {
-      // A new owner may have rebuilt or invalidated an index while this client was
-      // following the previous owner. Revalidate only surfaces that are currently demanded.
-      refreshAllIndexedDirsStatus();
-    }
-    return;
-  }
   if (type === 'background_refresh_requested') {
-    refreshBackgroundOwnerStatus({preferFresh: true}).catch(error => console.warn('background refresh request status failed', error));
     return;
   }
   if (type === 'background_refresh_done') {
@@ -87424,7 +87307,7 @@ function handleClientPushEventNowByType(type, payload = {}, envelope = {}) {
       requeryOpenFileQuickOpenForIndexChange({force: true});
     }
     if (payload.role === 'session-files') {
-      // A local owner supplies the fresh data via session_files_ready. A follower
+      // The local scheduler supplies the fresh data via session_files_ready. A refresh
       // receives only this redacted completion, so the shared destination owner reads the
       // matching canonical cache once. It rejects wrong-session and replayed completions before
       // issuing a request and never turns a cache-only miss into a producer request.

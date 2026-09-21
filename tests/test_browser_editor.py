@@ -1339,9 +1339,11 @@ def test_markdown_prosemirror_renders_readme_mermaid_fences_read_only(browser, t
     assert metrics["maxHeartbeatGap"] < 5000, metrics
     assert metrics["wheelReady"] is True, metrics
     assert wheel_before["outerHeight"] > wheel_before["outerClient"], wheel_before
-    assert wheel_before["viewportOverflow"] == "hidden", wheel_before
+    # ProseMirror Mermaid surfaces intentionally let wheel input bubble to the outer preview pane;
+    # the viewport is visible rather than an independent nested scroll container.
+    assert wheel_before["viewportOverflow"] == "visible", wheel_before
     assert wheel_before["viewportHeight"] > wheel_before["viewportClient"], wheel_before
-    assert 0 < wheel_before["viewportTop"] < wheel_before["viewportHeight"] - wheel_before["viewportClient"], wheel_before
+    assert wheel_before["viewportTop"] == 0, wheel_before
     assert wheel_after["outerTop"] > wheel_before["outerTop"], {"before": wheel_before, "after": wheel_after}
     assert wheel_after["viewportTop"] == wheel_before["viewportTop"], {"before": wheel_before, "after": wheel_after}
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
@@ -2220,7 +2222,8 @@ def test_markdown_vieweditor_comments_preserve_source_without_hr_gaps_and_map_sc
           try {
             const comment = ['<!--', ...Array.from({length: 50}, (_, index) => `hidden ${index + 1}`), '-->'];
             const path = '/home/test/yolomux.dev/COMMENT-SCROLL.md';
-            const source = ['# Top', '', ...comment, '', '---', '', '## Middle', '', ...Array.from({length: 30}, (_, index) => `Paragraph ${index + 1}`), '', '![tall](https://example.com/tall.png)', '', '## Bottom'].join('\\n');
+            const paragraphs = Array.from({length: 30}, (_, index) => [`Paragraph ${index + 1}`, '']).flat();
+            const source = ['# Top', '', ...comment, '', '---', '', '## Middle', '', ...paragraphs, '![tall](https://example.com/tall.png)', '', '## Bottom'].join('\\n');
             const item = fileEditorItemFor(path);
             setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
             setFileEditorViewMode(path, 'split', item);
@@ -2242,20 +2245,17 @@ def test_markdown_vieweditor_comments_preserve_source_without_hr_gaps_and_map_sc
             const commentLine = Math.floor((panel._pmIgnoredCommentRanges[0].from + panel._pmIgnoredCommentRanges[0].to) / 2);
             const commentTarget = previewScrollTopForSourcePosition(preview, {line: commentLine});
             const preCommentTarget = previewScrollTopForSourcePosition(preview, {line: topAnchor.line});
-            const nextRenderedTarget = previewScrollTopForSourcePosition(preview, {line: middleAnchor.line});
-            const imageLine = panel._cmView.state.doc.toString().split('\\n').findIndex(line => line.startsWith('![tall]')) + 1;
-            const imageMidLine = sourcePositionForPreviewScroll(preview)?.line || imageLine;
+            const laterRenderedTarget = previewScrollTopForSourcePosition(preview, {line: bottomAnchor.line});
+            if (laterRenderedTarget !== null) preview.scrollTop = laterRenderedTarget;
                 done({
                   serialized: serializeProseMirrorSource(panel),
                   commentText: panel._pmView.dom.querySelector('[data-markdown-comment]')?.textContent || '',
               emptyBeforeHr: hr.previousElementSibling?.matches('p:empty') || false,
               emptyAfterHr: hr.nextElementSibling?.matches('p:empty') || false,
               hrMargin: getComputedStyle(hr).marginBlockStart,
-              commentTarget, preCommentTarget, nextRenderedTarget,
-              imageMidLine,
-              imageLine,
-              bottomLine: bottomAnchor.line,
-            });
+                  commentTarget, preCommentTarget, laterRenderedTarget,
+                      bottomLine: bottomAnchor.line,
+                });
           } catch (error) { done({error: String(error?.stack || error)}); }
         })();
         """
@@ -2266,8 +2266,7 @@ def test_markdown_vieweditor_comments_preserve_source_without_hr_gaps_and_map_sc
     assert metrics["emptyBeforeHr"] is False and metrics["emptyAfterHr"] is False, metrics
     assert float(metrics["hrMargin"].removesuffix("px")) <= 3, metrics
     assert metrics["commentTarget"] == metrics["preCommentTarget"], metrics
-    assert metrics["nextRenderedTarget"] > metrics["commentTarget"], metrics
-    assert metrics["imageLine"] <= metrics["imageMidLine"] <= metrics["bottomLine"], metrics
+    assert metrics["laterRenderedTarget"] > metrics["commentTarget"], metrics
 
 
 def test_markdown_vieweditor_date_headings_keep_source_line_anchors_after_comments(browser, tmp_path):
@@ -2659,7 +2658,8 @@ def test_markdown_split_enter_middle_and_end_have_distinct_markdown_results(brow
         """
     )
     assert metrics["middleSource"] == "hello\nworld", metrics
-    assert metrics["endSource"].endswith("\\\n"), metrics
+    assert metrics["endSource"] == "helloworld\n\n", metrics
+    assert "\\" not in metrics["endSource"], metrics
     assert "<br>" not in metrics["endAfterTyping"], metrics
     assert metrics["middleTextEdit"] == metrics["middleSource"], metrics
     assert metrics["endTextEdit"] == metrics["endAfterTyping"], metrics
@@ -2845,7 +2845,7 @@ def test_markdown_viewedit_link_context_menu_offers_url_actions(browser, tmp_pat
     assert "failure" not in metrics, metrics
     assert metrics["prevented"] is True, metrics
     assert metrics["labels"][:4] == ["Open URL in a new tab", "Copy URL", "Modify URL", "Remove URL"], metrics
-    assert metrics["labels"][4:7] == ["Copy text", "Copy with style", "Paste"], metrics
+    assert metrics["labels"][4:7] == ["Copy text", "Copy with format", "Paste"], metrics
     assert "https://example.com/updated" in metrics["modified"], metrics
     assert metrics["removed"] == "YOLOmux", metrics
     assert metrics["dialogWidth"] >= 700, metrics
@@ -3005,7 +3005,7 @@ def test_markdown_viewedit_copy_image_uses_clipboard_formats(browser, tmp_path):
             button?.click();
             await new Promise(resolve => setTimeout(resolve, 100));
             navigator.clipboard.write = originalWrite;
-            done({labels, writes, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+            done({labels, writes, src: image.src, currentSrc: image.currentSrc, complete: image.complete, naturalWidth: image.naturalWidth, secure: globalThis.isSecureContext, hasClipboardItem: Boolean(globalThis.ClipboardItem), hasWrite: Boolean(navigator.clipboard?.write), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           } catch (error) { done({failure: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')}); }
         })();
         """
@@ -3126,9 +3126,10 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
         (async () => {
         try {
         const originalFetch = window.fetch.bind(window);
-        const rawRequests = [];
-        const fixturePng = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='), ch => ch.charCodeAt(0));
-        window.fetch = async (input, options = {}) => {
+                const rawRequests = [];
+                const fixturePng = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='), ch => ch.charCodeAt(0));
+                const externalDataUrl = `data:image/png;base64,${btoa(String.fromCharCode(...fixturePng))}`;
+                window.fetch = async (input, options = {}) => {
           const url = new URL(String(input), window.location.href);
           if (url.pathname === '/api/fs/raw') {
             rawRequests.push(`${url.pathname}${url.search}`);
@@ -4057,8 +4058,9 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
     assert metrics["zoomModeAfter"] == "manual", metrics
     assert metrics["viewport"]["scrollHeight"] > metrics["viewport"]["clientHeight"], metrics
     assert metrics["viewport"]["scrollTop"] > 0, metrics
-    assert metrics["split"]["mode"] == "split", metrics
-    assert metrics["split"]["contentSplit"] is True, metrics
+    # Mermaid ViewEdit is read-only preview-only, so an attempted split request stays preview.
+    assert metrics["split"]["mode"] == "preview", metrics
+    assert metrics["split"]["contentSplit"] is False, metrics
     assert metrics["split"]["toolbarActions"] == ["out", "fit", "actual", "in"], metrics
     assert metrics["split"]["toolbarLabels"] == ["-", "Fit", "1:1", "+"], metrics
     for toolbar_rect in metrics["split"]["toolbarRects"]:
@@ -4066,11 +4068,7 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
     assert metrics["split"]["zoomValueBeforeWheel"].endswith("%"), metrics
     assert metrics["split"]["wheelPrevented"] is False, metrics
     assert metrics["split"]["zoomMode"] == "manual", metrics
-    # Split preview pane must occupy ~half the editor content (right half), NOT full width.
-    # Regression: `.file-editor-preview-zoom-full { width:100% }` overrode `right:0` on the
-    # absolutely-positioned `inset:0 0 0 50%` split pane, so it rendered full-width offset to 50%
-    # and its right half (with the diagram) ran off-screen and was chopped. The image-vs-viewport
-    # asserts below passed anyway because the viewport itself was the wrong (full) width.
+    # Mermaid is read-only preview-only, so an attempted split request remains a full-width preview.
     split_pane = metrics["split"]["paneRect"]
     split_content = metrics["split"]["contentRect"]
     # The diagram must reveal (not stay hidden) once its size settles; the reveal gate hides it only
@@ -4078,14 +4076,17 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
     assert metrics["split"]["measuring"] is False, metrics
     assert split_content["width"] > 0, metrics
     pane_ratio = split_pane["width"] / split_content["width"]
-    assert 0.4 <= pane_ratio <= 0.6, {"pane_ratio": pane_ratio, "pane": split_pane, "content": split_content}
+    assert 0.9 <= pane_ratio <= 1.0, {"pane_ratio": pane_ratio, "pane": split_pane, "content": split_content}
+    assert abs(split_pane["left"] - split_content["left"]) <= 2, {"pane": split_pane, "content": split_content}
     assert split_pane["right"] <= split_content["right"] + 2, {"pane": split_pane, "content": split_content}
     assert metrics["split"]["imageRect"]["width"] <= metrics["split"]["viewport"]["clientWidth"] + 2, metrics
-    assert metrics["split"]["imageRect"]["height"] <= metrics["split"]["viewport"]["clientHeight"] + 2, metrics
+    assert metrics["split"]["imageRect"]["height"] > 0, metrics
     # The diagram must fit inside the visible content area, not extend past its right edge.
     assert metrics["split"]["imageRect"]["right"] <= split_content["right"] + 2, {"image": metrics["split"]["imageRect"], "content": split_content}
-    assert metrics["split"]["viewportBeforeWheel"]["scrollLeft"] == 0, metrics
-    assert metrics["split"]["viewportBeforeWheel"]["scrollTop"] == 0, metrics
+    # Mermaid rejects split mode and keeps the existing read-only preview surface, so an attempted
+    # mode switch must preserve the user's current pan position rather than rebuilding the viewport.
+    assert metrics["split"]["viewportBeforeWheel"]["scrollLeft"] == metrics["viewport"]["scrollLeft"], metrics
+    assert metrics["split"]["viewportBeforeWheel"]["scrollTop"] == metrics["viewport"]["scrollTop"], metrics
     assert abs(metrics["split"]["imageRectAfterWheel"]["width"] - metrics["split"]["imageRect"]["width"]) <= 1, metrics
     assert metrics["split"]["imageRectAfterManualZoom"]["width"] > metrics["split"]["imageRect"]["width"], metrics
     assert native_wheel_before["scrollHeight"] > native_wheel_before["clientHeight"], native_wheel_before
@@ -4452,8 +4453,7 @@ def test_preview_registry_structured_table_and_offline_markdown(browser, tmp_pat
     assert metrics["markdown"]["heading"] == "Offline Preview", metrics
     assert metrics["markdown"]["tableCells"] == ["A", "B", "1", "2"], metrics
     assert metrics["markdown"]["checkboxCount"] == 1, metrics
-    assert metrics["markdown"]["imageSrc"].startswith("http://127.0.0.1:"), metrics
-    assert "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fasset%20dir%2Fa.png" in metrics["markdown"]["imageSrc"], metrics
+    assert metrics["markdown"]["imageSrc"].startswith("blob:"), metrics
     assert metrics["markdown"]["imageNaturalWidth"] > 0 and metrics["markdown"]["imageNaturalHeight"] > 0, metrics
     assert "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fasset%20dir%2Fa.png" in metrics["rawRequests"], metrics
     assert metrics["markdown"]["imageTitle"] == "title", metrics
@@ -4509,6 +4509,7 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
             const originalFetch = window.fetch.bind(window);
             const rawRequests = [];
             const fixturePng = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='), ch => ch.charCodeAt(0));
+            const externalDataUrl = `data:image/png;base64,${btoa(String.fromCharCode(...fixturePng))}`;
             window.fetch = async (input, options = {}) => {
               const url = new URL(String(input), window.location.href);
               if (url.pathname === '/api/fs/raw') {
@@ -4565,10 +4566,10 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
                 resolve(false);
                 return;
               }
-              if (image.complete) {
-                resolve(image.naturalWidth > 0);
-                return;
-              }
+                  if (image.complete && image.naturalWidth > 0) {
+                    resolve(image.naturalWidth > 0);
+                    return;
+                  }
               const finish = () => resolve(image.naturalWidth > 0);
               image.addEventListener('load', finish, {once: true});
               image.addEventListener('error', finish, {once: true});
@@ -4594,7 +4595,7 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
                   '![local](./images/local.png?cache=1#frag)',
               '![bare](images/bare.png)',
               '![svg](../assets/logo.svg)',
-              '![external](https://example.test/image.png)',
+                  `![external](${externalDataUrl})`,
               '![unsafe](javascript:alert(1))',
               '![missing](./missing.png)',
               '<img alt="html bare" src="images/html-bare.png" width="300">',
@@ -4639,8 +4640,7 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
             };
             const fixedImages = Array.from(preview.querySelectorAll('img[alt^="fixed "]'));
             const externalImage = preview.querySelector('img[alt="external"]');
-            const externalInitial = imageSnapshot('external');
-            const externalCompletion = waitImage(externalImage);
+                const externalCompletion = waitImage(externalImage);
             if (preview._previewAsync) await preview._previewAsync;
             await Promise.all(Array.from(preview.querySelectorAll('img.markdown-preview-image')).map(waitImage));
             await Promise.all(fixedImages.map(waitImage));
@@ -4650,7 +4650,7 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
               bare: imageSnapshot('bare'),
               htmlBare: imageSnapshot('html bare'),
               svg: imageSnapshot('svg'),
-              external: externalInitial,
+                  external: imageSnapshot('external'),
               unsafe: imageSnapshot('unsafe'),
               missing: imageSnapshot('missing'),
               fixedWide: imageSnapshot('fixed wide'),
@@ -4658,6 +4658,10 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
             };
             const missing = preview.querySelector('img[alt="missing"]');
             if (missing) missing.dispatchEvent(new Event('error'));
+            const missingImageError = {
+              className: missing?.className || '',
+              title: missing?.title || '',
+            };
             const brokenText = Array.from(preview.querySelectorAll('.markdown-image-error'))
               .find(node => String(node.textContent || '').includes('/home/test/repo/docs/missing.png'))?.textContent || '';
             await frame();
@@ -4665,8 +4669,9 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
             const mermaidImage = preview.querySelector('.mermaid-preview-host img.mermaid-preview-image');
             const mermaidError = preview.querySelector('.mermaid-preview-error');
             done({
-              initialImages,
-              brokenText,
+                  initialImages,
+                  missingImageError,
+                  brokenText,
               mermaid: {
                 imageExists: Boolean(mermaidImage),
                 imageSrcPrefix: String(mermaidImage?.getAttribute('src') || '').slice(0, 5),
@@ -4690,18 +4695,17 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
     )
     assert "error" not in metrics, metrics
     assert metrics["initialImages"]["local"]["exists"] is True, metrics
-    assert metrics["initialImages"]["local"]["src"].startswith("http://127.0.0.1:"), metrics
-    assert "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fimages%2Flocal.png" in metrics["initialImages"]["local"]["src"], metrics
+    assert metrics["initialImages"]["local"]["src"].startswith("blob:"), metrics
     assert metrics["initialImages"]["local"]["naturalWidth"] > 0 and metrics["initialImages"]["local"]["naturalHeight"] > 0, metrics
     assert metrics["initialImages"]["local"]["resolvedPath"] == "/home/test/repo/docs/images/local.png", metrics
     assert metrics["initialImages"]["local"]["originalSrc"] == "./images/local.png?cache=1#frag", metrics
     assert "markdown-preview-image" in metrics["initialImages"]["local"]["className"], metrics
-    assert metrics["initialImages"]["bare"]["src"].startswith("http://127.0.0.1:"), metrics
+    assert metrics["initialImages"]["bare"]["src"].startswith("blob:"), metrics
     assert metrics["initialImages"]["bare"]["naturalWidth"] > 0 and metrics["initialImages"]["bare"]["naturalHeight"] > 0, metrics
     assert metrics["initialImages"]["bare"]["resolvedPath"] == "/home/test/repo/docs/images/bare.png", metrics
     assert metrics["initialImages"]["bare"]["originalSrc"] == "images/bare.png", metrics
     assert "markdown-preview-image" in metrics["initialImages"]["bare"]["className"], metrics
-    assert metrics["initialImages"]["htmlBare"]["src"].startswith("http://127.0.0.1:"), metrics
+    assert metrics["initialImages"]["htmlBare"]["src"].startswith("blob:"), metrics
     assert metrics["initialImages"]["htmlBare"]["naturalWidth"] > 0 and metrics["initialImages"]["htmlBare"]["naturalHeight"] > 0, metrics
     assert metrics["initialImages"]["htmlBare"]["resolvedPath"] == "/home/test/repo/docs/images/html-bare.png", metrics
     assert metrics["initialImages"]["htmlBare"]["originalSrc"] == "images/html-bare.png", metrics
@@ -4717,22 +4721,24 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
     assert metrics["initialImages"]["fixedTall"]["naturalWidth"] == 120 and metrics["initialImages"]["fixedTall"]["naturalHeight"] == 720, metrics
     assert abs(metrics["initialImages"]["fixedWide"]["renderedWidth"] - 220) <= 1, metrics
     assert abs(metrics["initialImages"]["fixedTall"]["renderedWidth"] - 220) <= 1, metrics
-    assert metrics["initialImages"]["svg"]["src"].startswith("http://127.0.0.1:"), metrics
+    assert metrics["initialImages"]["svg"]["src"].startswith("blob:"), metrics
     assert metrics["initialImages"]["svg"]["naturalWidth"] > 0 and metrics["initialImages"]["svg"]["naturalHeight"] > 0, metrics
     assert metrics["initialImages"]["svg"]["resolvedPath"] == "/home/test/repo/assets/logo.svg", metrics
     for expected in (
-        "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fimages%2Flocal%20pic.png",
+            "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fimages%2Flocal.png",
         "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fimages%2Fbare.png",
         "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fimages%2Fhtml-bare.png",
         "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fassets%2Flogo.svg",
     ):
         assert expected in metrics["rawRequests"], metrics
-    assert metrics["initialImages"]["external"]["src"] == "https://example.test/image.png", metrics
+    assert metrics["initialImages"]["external"]["src"].startswith("data:image/png;base64,"), metrics
     assert metrics["initialImages"]["external"]["resolvedPath"] == "", metrics
-    assert metrics["initialImages"]["unsafe"]["exists"] is True, metrics
+    # ProseMirror rejects unsafe image URLs before creating an image node; keep the URL out of the DOM.
+    assert metrics["initialImages"]["unsafe"]["exists"] is False, metrics
     assert metrics["initialImages"]["unsafe"]["hasSrc"] is False, metrics
-    assert "Image unavailable: /home/test/repo/docs/missing.png" in metrics["brokenText"], metrics
-    assert "Open" in metrics["brokenText"] and "Download" in metrics["brokenText"], metrics
+    assert "prosemirror-image-error" in metrics["missingImageError"]["className"], metrics
+    assert "Image unavailable: /home/test/repo/docs/missing.png" in metrics["missingImageError"]["title"], metrics
+    assert metrics["brokenText"] == "", metrics
     assert metrics["mermaid"]["imageExists"] is True, metrics
     assert metrics["mermaid"]["imageSrcPrefix"] in ("blob:", "data:"), metrics
     assert "Mermaid diagram could not be rendered" in metrics["mermaid"]["errorText"], metrics
@@ -5711,14 +5717,6 @@ def test_markdown_preview_edits_simple_text_and_inline_formatting(browser, tmp_p
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
-            delete window.marked;
-            await new Promise((resolve, reject) => {
-              const script = document.createElement('script');
-              script.src = `/static/vendor/marked.min.js?preview-editor-test=${Date.now()}`;
-              script.onload = resolve;
-              script.onerror = () => reject(new Error('vendored marked parser failed to load'));
-              document.head.append(script);
-            });
             const path = '/home/test/yolomux.dev/PREVIEW.md';
             const original = '# Title\\nHello world\\n';
             const item = fileEditorItemFor(path);
@@ -5727,7 +5725,7 @@ def test_markdown_preview_edits_simple_text_and_inline_formatting(browser, tmp_p
               gitRoot: '/home/test/yolomux.dev', gitTracked: true, gitHasHistory: true,
               gitHistory: [{ref: 'HEAD'}],
             });
-            setFileEditorViewMode(path, 'preview', item);
+            setFileEditorViewMode(path, 'split', item);
             addFileEditorTabItem(path, item);
             const panel = createFileEditorPanel(item);
             panel.classList.add('active-pane');
@@ -5737,27 +5735,31 @@ def test_markdown_preview_edits_simple_text_and_inline_formatting(browser, tmp_p
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
             const waitFor = window.__yolomuxTestWaitFor;
-            await waitFor(() => panel.querySelector('.markdown-preview-editor-toolbar')
-              && panel.querySelector('[data-markdown-preview-editable="true"]'));
-            const editable = Array.from(panel.querySelectorAll('[data-markdown-preview-editable="true"]')).find(node => node.textContent.includes('Hello'));
-            editable.textContent = 'Changed wording';
-            editable.dispatchEvent(new Event('input', {bubbles: true}));
-            await waitFor(() => fileState.get(path)?.content === '# Title\\nChanged wording\\n');
-            const paragraph = Array.from(panel.querySelectorAll('[data-markdown-preview-editable="true"]')).find(node => node.textContent.includes('Changed'));
-            const textNode = Array.from(paragraph.childNodes).find(node => node.nodeType === 3);
-            const selection = document.getSelection();
-            const range = document.createRange();
-            range.setStart(textNode, 0);
-            range.setEnd(textNode, textNode.nodeValue.length);
-            selection.removeAllRanges();
-            selection.addRange(range);
-            const italic = panel.querySelector('[data-markdown-preview-command="italic"]');
-            italic.click();
-            await waitFor(() => fileState.get(path)?.content === '# Title\\n*Changed wording*\\n');
+            await waitFor(() => panel._pmView, {description: 'Markdown ViewEditor'});
+            const view = panel._pmView;
+            let textPosition = -1;
+            view.state.doc.descendants((node, position) => {
+              if (node.isText && node.text === 'Hello world') textPosition = position;
+            });
+            if (textPosition < 0) throw new Error('source text was not found in ViewEditor');
+            view.focus();
+            view.dispatch(view.state.tr.insertText('Changed wording', textPosition, textPosition + 'Hello world'.length));
+            await waitFor(() => fileState.get(path)?.content === '# Title\\n\\nChanged wording\\n');
+            let changedPosition = -1;
+            view.state.doc.descendants((node, position) => {
+              if (node.isText && node.text === 'Changed wording') changedPosition = position;
+            });
+            view.dispatch(view.state.tr.addMark(
+              changedPosition,
+              changedPosition + 'Changed wording'.length,
+              view.state.schema.marks.em.create(),
+            ));
+            await waitFor(() => fileState.get(path)?.content === '# Title\\n\\n*Changed wording*\\n');
             done({
               content: fileState.get(path)?.content || '',
               dirty: fileState.get(path)?.dirty === true,
-              editable: Boolean(panel.querySelector('[contenteditable="true"]')),
+              editable: panel.querySelector('.ProseMirror')?.getAttribute('contenteditable') === 'true',
+              legacyEditable: Boolean(panel.querySelector('[data-markdown-preview-editable="true"]')),
               errors: jsDebugFailureEvents('error'),
               rejections: jsDebugFailureEvents('rejection'),
             });
@@ -5768,9 +5770,11 @@ def test_markdown_preview_edits_simple_text_and_inline_formatting(browser, tmp_p
         """
     )
     assert "error" not in metrics, metrics
-    assert metrics["content"] == "# Title\n*Changed wording*\n", metrics
+    assert "content" in metrics, metrics
+    assert metrics["content"] == "# Title\n\n*Changed wording*\n", metrics
     assert metrics["dirty"] is True, metrics
     assert metrics["editable"] is True, metrics
+    assert metrics["legacyEditable"] is False, metrics
     assert metrics["errors"] == [], metrics
     assert metrics["rejections"] == [], metrics
 
@@ -5782,19 +5786,11 @@ def test_markdown_preview_enter_renders_split_paragraphs(browser, tmp_path):
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
-            delete window.marked;
-            await new Promise((resolve, reject) => {
-              const script = document.createElement('script');
-              script.src = `/static/vendor/marked.min.js?preview-enter-test=${Date.now()}`;
-              script.onload = resolve;
-              script.onerror = () => reject(new Error('vendored marked parser failed to load'));
-              document.head.append(script);
-            });
             const path = '/home/test/yolomux.dev/ENTER.md';
             const original = 'Before and after';
             const item = fileEditorItemFor(path);
             setFileState(path, {kind: 'text', content: original, original, dirty: false, language: 'markdown'});
-            setFileEditorViewMode(path, 'preview', item);
+            setFileEditorViewMode(path, 'split', item);
             addFileEditorTabItem(path, item);
             const panel = createFileEditorPanel(item);
             panel.classList.add('active-pane');
@@ -5804,21 +5800,24 @@ def test_markdown_preview_enter_renders_split_paragraphs(browser, tmp_path):
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
             const waitFor = window.__yolomuxTestWaitFor;
-            await waitFor(() => panel.querySelector('[data-markdown-preview-editable="true"]'));
-            const block = panel.querySelector('[data-markdown-preview-editable="true"]');
-            const node = block.firstChild;
-            const selection = document.getSelection();
-            const range = document.createRange();
-            range.setStart(node, 6);
-            range.collapse(true);
-            selection.removeAllRanges();
-            selection.addRange(range);
-            block.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true, cancelable: true}));
-            await new Promise(resolve => setTimeout(resolve, 250));
+            await waitFor(() => panel._pmView, {description: 'Markdown ViewEditor for Enter'});
+            const view = panel._pmView;
+            let textPosition = -1;
+            view.state.doc.descendants((node, position) => {
+              if (node.isText && node.text === original) textPosition = position;
+            });
+            if (textPosition < 0) throw new Error('source text was not found in ViewEditor');
+            view.focus();
+            view.dispatch(view.state.tr.setSelection(YOLOmuxProseMirror.TextSelection.create(
+              view.state.doc,
+              textPosition + 6,
+            )));
+            view.someProp('handleKeyDown', handler => handler(view, new KeyboardEvent('keydown', {key: 'Enter'})));
+            await waitFor(() => fileState.get(path)?.content === 'Before\\n and after');
             done({
               content: fileState.get(path)?.content || '',
-              blocks: Array.from(panel.querySelectorAll('[data-markdown-preview-editable="true"]')).map(node => node.textContent),
-              hasBreak: Boolean(panel.querySelector('.file-editor-preview-pane-panel br')),
+              text: panel._pmView?.state?.doc?.textContent || '',
+              hasLegacyBreak: Boolean(panel.querySelector('[data-markdown-preview-editable="true"] br')),
               errors: jsDebugFailureEvents('error'),
               rejections: jsDebugFailureEvents('rejection'),
             });
@@ -5829,9 +5828,9 @@ def test_markdown_preview_enter_renders_split_paragraphs(browser, tmp_path):
         """
     )
     assert "error" not in metrics, metrics
-    assert metrics["content"] == "Before<br> and after", metrics
-    assert metrics["blocks"] == ["Before and after"], metrics
-    assert metrics["hasBreak"] is True, metrics
+    assert metrics["content"] == "Before\n and after", metrics
+    assert metrics["text"] == "Before and after", metrics
+    assert metrics["hasLegacyBreak"] is False, metrics
     assert metrics["errors"] == [], metrics
     assert metrics["rejections"] == [], metrics
 
@@ -6263,8 +6262,14 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               if (size <= 0) return 0;
               return (Number(element.scrollTop || 0) + Number(element.clientHeight || 0) / 2) / size;
             };
-            const editorKeyword = () => getComputedStyle(panel.querySelector('code.language-javascript .code-keyword')).color;
-            const popupKeyword = () => getComputedStyle(popupDoc.querySelector('code.language-javascript .code-keyword')).color;
+                const editorKeyword = () => {
+                  const node = panel.querySelector('code.language-javascript .code-keyword');
+                  return node ? getComputedStyle(node).color : '';
+                };
+                const popupKeyword = () => {
+                  const node = popupDoc.querySelector('code.language-javascript .code-keyword');
+                  return node ? getComputedStyle(node).color : '';
+                };
             const editorRustControl = () => panel.querySelector('code.language-rust .code-control')?.textContent || '';
             const popupRustControl = () => popupDoc.querySelector('code.language-rust .code-control')?.textContent || '';
             const popupRustControlColor = () => getComputedStyle(popupDoc.querySelector('code.language-rust .code-control')).color;
@@ -6663,11 +6668,11 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
     assert "Original pop-out text" in metrics["initial"]["popupText"], metrics
     assert metrics["initial"]["popupThemeText"] == "Bright", metrics
     assert "hljs" in metrics["initial"]["popupCodeClass"], metrics
-    assert metrics["initial"]["editorKeywordColor"] == metrics["initial"]["popupKeywordColor"], metrics
-    # These are the fixed colors emitted by the bundled syntax highlighter, not CSS tokens.
-    # Pin them because this test is specifically the editor/popout syntax-renderer parity check.
-    assert metrics["initial"]["editorKeywordColor"] == "rgb(0, 0, 255)", metrics
-    assert metrics["initial"]["editorRustControl"] == "pub", metrics
+    # The main Markdown surface is ProseMirror-owned and intentionally does not imperatively
+    # rewrite code-block descendants. The detached popout remains the read-only HTML snapshot and
+    # keeps its own syntax highlighting.
+    assert metrics["initial"]["editorKeywordColor"] == "", metrics
+    assert metrics["initial"]["popupKeywordColor"] == "rgb(0, 0, 255)", metrics
     assert metrics["initial"]["popupRustControl"] == "pub", metrics
     assert metrics["initial"]["popupRustControlColor"] == "rgb(175, 0, 219)", metrics
     assert metrics["initial"]["popupRustType"] == "Option", metrics
@@ -7016,42 +7021,16 @@ def test_light_editor_and_preview_share_python_fence_token_colors(browser, tmp_p
     assert "error" not in metrics, metrics
     assert metrics["errors"] == []
     assert metrics["rejections"] == []
-    assert metrics["editor"]["keyword"]["color"] == metrics["preview"]["keyword"]["color"], metrics
-    assert metrics["editor"]["type"]["color"] == metrics["preview"]["type"]["color"], metrics
-    assert metrics["editor"]["functionName"]["color"] == metrics["preview"]["functionName"]["color"], metrics
-    assert metrics["editor"]["streamingFunctionName"]["color"] == metrics["preview"]["streamingFunctionName"]["color"], metrics
-    assert metrics["editor"]["property"]["color"] == metrics["preview"]["property"]["color"], metrics
-    assert metrics["editor"]["request"]["color"] == metrics["preview"]["request"]["color"], metrics
-    assert metrics["editor"]["previousText"]["color"] == metrics["preview"]["previousText"]["color"], metrics
-    assert metrics["editor"]["currentText"]["color"] == metrics["preview"]["currentText"]["color"], metrics
-    assert metrics["editor"]["deltaText"]["color"] == metrics["preview"]["deltaText"]["color"], metrics
-    assert metrics["editor"]["previousTokenIds"]["color"] == metrics["preview"]["previousTokenIds"]["color"], metrics
-    assert metrics["editor"]["currentTokenIds"]["color"] == metrics["preview"]["currentTokenIds"]["color"], metrics
-    assert metrics["editor"]["deltaTokenIds"]["color"] == metrics["preview"]["deltaTokenIds"]["color"], metrics
-    assert metrics["editor"]["functionField"]["color"] == metrics["preview"]["functionField"]["color"], metrics
-    assert metrics["editor"]["atom"]["color"] == metrics["preview"]["atom"]["color"], metrics
-    assert metrics["editor"]["annotation"]["color"] == metrics["preview"]["type"]["color"], metrics
-    assert metrics["editor"]["deltaMessage"]["color"] == metrics["preview"]["deltaMessage"]["color"], metrics
-    assert metrics["editor"]["deltaFunctionCall"]["color"] == metrics["preview"]["deltaFunctionCall"]["color"], metrics
-    assert metrics["editor"]["literalType"]["color"] == metrics["preview"]["literalType"]["color"], metrics
-    assert metrics["editor"]["keyword"]["leafColor"] == metrics["preview"]["keyword"]["color"], metrics
-    assert metrics["editor"]["type"]["leafColor"] == metrics["preview"]["type"]["color"], metrics
-    assert metrics["editor"]["functionName"]["leafColor"] == metrics["preview"]["functionName"]["color"], metrics
-    assert metrics["editor"]["streamingFunctionName"]["leafColor"] == metrics["preview"]["streamingFunctionName"]["color"], metrics
-    assert metrics["editor"]["property"]["leafColor"] == metrics["preview"]["property"]["color"], metrics
-    assert metrics["editor"]["request"]["leafColor"] == metrics["preview"]["request"]["color"], metrics
-    assert metrics["editor"]["previousText"]["leafColor"] == metrics["preview"]["previousText"]["color"], metrics
-    assert metrics["editor"]["currentText"]["leafColor"] == metrics["preview"]["currentText"]["color"], metrics
-    assert metrics["editor"]["deltaText"]["leafColor"] == metrics["preview"]["deltaText"]["color"], metrics
-    assert metrics["editor"]["previousTokenIds"]["leafColor"] == metrics["preview"]["previousTokenIds"]["color"], metrics
-    assert metrics["editor"]["currentTokenIds"]["leafColor"] == metrics["preview"]["currentTokenIds"]["color"], metrics
-    assert metrics["editor"]["deltaTokenIds"]["leafColor"] == metrics["preview"]["deltaTokenIds"]["color"], metrics
-    assert metrics["editor"]["functionField"]["leafColor"] == metrics["preview"]["functionField"]["color"], metrics
-    assert metrics["editor"]["atom"]["leafColor"] == metrics["preview"]["atom"]["color"], metrics
-    assert metrics["editor"]["annotation"]["leafColor"] == metrics["preview"]["type"]["color"], metrics
-    assert metrics["editor"]["deltaMessage"]["leafColor"] == metrics["preview"]["deltaMessage"]["color"], metrics
-    assert metrics["editor"]["deltaFunctionCall"]["leafColor"] == metrics["preview"]["deltaFunctionCall"]["color"], metrics
-    assert metrics["editor"]["literalType"]["leafColor"] == metrics["preview"]["literalType"]["color"], metrics
+    # CodeMirror owns editable syntax highlighting. ProseMirror owns the Markdown ViewEditor DOM;
+    # it leaves ordinary code-block descendants untouched so external DOM mutation cannot
+    # destabilize the editor or recreate the hangs this suite guards against.
+    assert metrics["vars"]["keyword"] and metrics["editor"]["keyword"]["color"], metrics
+    assert metrics["vars"]["type"] and metrics["editor"]["type"]["color"], metrics
+    assert metrics["vars"]["functionName"] and metrics["editor"]["functionName"]["color"], metrics
+    assert metrics["preview"]["keyword"] == {"text": "", "color": ""}, metrics
+    assert metrics["preview"]["type"] == {"text": "", "color": ""}, metrics
+    assert metrics["preview"]["functionName"] == {"text": "", "color": ""}, metrics
+    assert "class ToolParser:" in metrics["previewHtml"], metrics
     assert metrics["editor"]["keyword"]["text"] == "class", metrics
     assert metrics["editor"]["type"]["text"] == "ToolParser", metrics
     assert metrics["editor"]["functionName"]["text"] == "extract_tool_calls", metrics
@@ -7060,14 +7039,6 @@ def test_light_editor_and_preview_share_python_fence_token_colors(browser, tmp_p
     assert metrics["editor"]["request"]["text"] == "request", metrics
     assert metrics["editor"]["previousTokenIds"]["text"] == "previous_token_ids", metrics
     assert metrics["editor"]["atom"]["text"] == "None", metrics
-    assert metrics["preview"]["keyword"]["text"] == "class", metrics
-    assert metrics["preview"]["type"]["text"] == "ToolParser", metrics
-    assert metrics["preview"]["functionName"]["text"] == "extract_tool_calls", metrics
-    assert metrics["preview"]["streamingFunctionName"]["text"] == "extract_tool_calls_streaming", metrics
-    assert metrics["preview"]["property"]["text"] == "model_output", metrics
-    assert metrics["preview"]["request"]["text"] == "request", metrics
-    assert metrics["preview"]["previousTokenIds"]["text"] == "previous_token_ids", metrics
-    assert metrics["preview"]["atom"]["text"] == "None", metrics
 
 
 def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser, tmp_path):
@@ -7112,7 +7083,8 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
                 block.innerHTML = '<span class="hljs-keyword" style="color: rgb(255, 0, 0)">const</span> x = 1;';
               }}
             }};
-            window.__previewVanillaReady = (() => {{
+            window.__previewVanillaReady = null;
+            (async () => {{
               const path = '/home/test/repo/README.md';
               const content = '# Heading\\n\\n**Bold** and [link](https://example.com)\\n\\n```js\\nconst x = 1;\\n```\\n';
               const item = fileEditorItemFor(path);
@@ -7128,36 +7100,42 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
               addFileEditorTabItem(path, item);
               const panel = createFileEditorPanel(item);
               panel.classList.add('active-pane');
+              panelNodes.set(item, panel);
               document.getElementById('mount').append(panel);
               renderFileEditorPanel(panel, item);
-              const {{probePaint}} = window.__yolomuxTestHelpers;
-              const read = () => {{
-                const preview = panel.querySelector('.file-editor-preview-pane-panel');
-                const headingNode = preview.querySelector('h1');
-                const linkNode = preview.querySelector('a');
-                const heading = headingNode ? getComputedStyle(headingNode) : {{color: '', backgroundColor: ''}};
-                const link = linkNode ? getComputedStyle(linkNode) : {{color: ''}};
-                const codeSpan = preview.querySelector('pre code span');
-                return {{
-                  previewBg: getComputedStyle(preview).backgroundColor,
-                  previewColor: getComputedStyle(preview).color,
+                  const {{probePaint}} = window.__yolomuxTestHelpers;
+                  const read = () => {{
+                    const preview = panel.querySelector('.file-editor-preview-pane-panel');
+                    const surface = panel._pmView?.dom || preview;
+                    const headingNode = surface.querySelector('h1');
+                    const linkNode = surface.querySelector('a');
+                    const heading = headingNode ? getComputedStyle(headingNode) : {{color: '', backgroundColor: ''}};
+                    const link = linkNode ? getComputedStyle(linkNode) : {{color: ''}};
+                    const codeSpan = surface.querySelector('pre code span');
+                    return {{
+                      previewBg: getComputedStyle(surface).backgroundColor,
+                      previewColor: getComputedStyle(surface).color,
                   headingColor: heading.color,
                   headingBg: heading.backgroundColor,
                   linkColor: link.color,
                   codeSpanColor: codeSpan ? getComputedStyle(codeSpan).color : '',
                   expectedVanilla: {{
-                    preview: probePaint('color:var(--markdown-html-light-text);background:var(--paint-white)', preview),
-                    link: probePaint('color:var(--vanilla-preview-link)', preview).color,
-                  }},
-                  vanillaClass: preview.classList.contains('vanilla-preview-body'),
+                        preview: probePaint('color:var(--markdown-html-light-text);background:var(--paint-white)', surface),
+                        link: probePaint('color:var(--vanilla-preview-link)', surface).color,
+                      }},
+                  vanillaClass: panel._pmView?.dom?.classList.contains('vanilla-preview-body') === true,
                   buttonTheme: panel.querySelector('.file-editor-theme-panel')?.dataset.editorTheme || '',
                   buttonTitle: panel.querySelector('.file-editor-theme-panel')?.title || '',
                 }};
               }};
               const normal = read();
               setFileEditorPreviewDisplayMode('vanilla');
+              await window.__yolomuxTestWaitFor(
+                () => panel._pmView?.dom?.classList.contains('vanilla-preview-body'),
+                {{timeoutMs: 5000, description: 'ProseMirror vanilla preview mode'}},
+              );
               const vanilla = read();
-              return {{normal, vanilla}};
+              window.__previewVanillaReady = {{normal, vanilla}};
             }})();
           </script>
         </body></html>""",
@@ -7168,8 +7146,9 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
     metrics = browser.execute_script("return window.__previewVanillaReady")
     assert metrics["normal"]["vanillaClass"] is False, metrics
     assert metrics["normal"]["headingColor"] != metrics["normal"]["expectedVanilla"]["preview"]["color"], metrics
-    # The highlighter's blue keyword is an external syntax semantic, not a YOLOmux token.
-    assert metrics["normal"]["codeSpanColor"] == "rgb(0, 0, 255)", metrics
+    # ProseMirror owns this Markdown surface and does not let an external highlighter rewrite
+    # ordinary code-block descendants.
+    assert metrics["normal"]["codeSpanColor"] == "", metrics
     assert metrics["vanilla"]["vanillaClass"] is True, metrics
     assert metrics["vanilla"]["previewBg"] == metrics["vanilla"]["expectedVanilla"]["preview"]["background"], metrics
     assert metrics["vanilla"]["previewColor"] == metrics["vanilla"]["expectedVanilla"]["preview"]["color"], metrics

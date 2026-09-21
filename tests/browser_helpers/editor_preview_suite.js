@@ -36,6 +36,14 @@ const {
 
 require('./editor_preview_info_graph_suite');
 
+registerTest('settings refresh cannot replace a known revision with unknown metadata', () => {
+  const api = loadYolomux('', ['settings-revision']);
+  assert.equal(api.applySettingsPayloadForTest({settings: {}, mtime_ns: 100}, {force: true}), true, 'a newer settings revision applies');
+  assert.equal(api.applySettingsPayloadForTest({settings: {editor: {autosave_delay_seconds: 0}}, mtime_ns: 100}, {force: true}), false, 'a duplicate revision cannot overwrite the accepted snapshot');
+  assert.equal(api.applySettingsPayloadForTest({settings: {}, mtime_ns: 0}, {force: true}), false, 'an unknown revision cannot overwrite a known revision');
+  assert.equal(api.clientSettingsMtimeNsForTest(), 100, 'the accepted revision remains authoritative');
+});
+
 registerTest('YO!info focus changes only select a different canonical worktree and do not mutate graph membership', () => {
   const api = loadYolomux('', ['focus-graph']);
   const graph = {
@@ -825,7 +833,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/const topbarPackingStepOrder = Object\.freeze\(\[[\s\S]*?'hide-version',[\s\S]*?'compact-brand',[\s\S]*?'compact-search',[\s\S]*?'compact-activity',[\s\S]*?'hide-latency',[\s\S]*?'hide-logout',[\s\S]*?'hide-notify',[\s\S]*?'hide-language',[\s\S]*?'hide-owner',[\s\S]*?'hide-nav',[\s\S]*?'compact-menu'/.test(source) && /function applyTopbarPackingSteps\(steps = \[\]\)[\s\S]*topbarPackingSyncNavigation\(steps\)[\s\S]*updateTopbarActivityStatus\(\)/.test(source) && /function syncTopbarPacking\(\)[\s\S]*const applied = topbarPackingStepOrder\.filter\(topbarPackingHasStep\)[\s\S]*while \(topbarPackingOverflows\(\)[\s\S]*applied\.push\(topbarPackingStepOrder\[applied\.length\]\)[\s\S]*applyTopbarPackingSteps\(applied\)[\s\S]*while \(applied\.length\)[\s\S]*candidate = applied\.slice\(0, -1\)[\s\S]*if \(topbarPackingOverflows\(\)\)[\s\S]*break;/.test(source), 'topbar packing measures each compact representation, reduces in the requested semantic order, and restores only a contiguous reverse prefix');
     assert.ok(/function createAppMenu\(menu\)[\s\S]*wrapper\.classList\.contains\('app-menu--nested-root'\)[\s\S]*closeAppMenus\(\)/.test(source), 'the compact phone Menus root is an immediate open/close disclosure, not a delayed reopen');
     */
-    assert.ok(source.includes("'hide-owner',\n  'compact-search'") && source.includes("'hide-nav',\n  'icon-search',\n  'compact-menu'"), 'topbar packing preserves the requested priority order before compacting menus');
+    assert.ok(source.includes("'compact-search',\n  'compact-activity'") && source.includes("'hide-nav',\n  'icon-search',\n  'compact-menu'"), 'topbar packing preserves the requested priority order before compacting menus');
     assert.ok(/function applyTopbarPackingSteps\(steps = \[\]\)[\s\S]*topbarPackingSyncNavigation\(steps\)[\s\S]*updateTopbarActivityStatus\(\)/.test(source) && /function syncTopbarPacking\(\)[\s\S]*const applied = \[\];[\s\S]*applyTopbarPackingSteps\(applied\)[\s\S]*while \(topbarPackingOverflows\(\) && applied\.length < topbarPackingStepOrder\.length\)[\s\S]*applied\.push\(topbarPackingStepOrder\[applied\.length\]\)/.test(source), 'topbar packing starts from the full representation on every pass, then reduces in one contiguous priority prefix');
     assert.ok(/function renderSessionButtonsMeasured\(options = \{\}\)[\s\S]*document\.querySelectorAll\('\.actions > #topbarActivity'\)\.forEach\(activity => activity\.remove\(\)\)[\s\S]*sessionButtons\.innerHTML = ''/.test(source), 'a re-render removes the phone-reparented activity control before replacing the menu subtree, preventing duplicate status balls');
     assert.ok(/function menuCommand\(label, action, options = \{\}\)[\s\S]*return \{type: 'command', label, action, \.\.\.options\};/.test(source) && /function fileSurfaceMenuItems\(\)[\s\S]*menuCommand\(itemLabel\(item\), \(\) => openFileSurfaceFromMenu\(item\), \{[\s\S]*checked:[\s\S]*targetItem:[\s\S]*\}\)/.test(source) && !/function menuCommand\(label, action, options = \{\}\)[\s\S]{0,320}command\.keepOpen/.test(source), 'checked File navigation commands close the menu by default; only actual View toggles opt into keep-open');
@@ -8127,142 +8135,6 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(activitySource.includes('maybeNotifyWorkingAgentTransition('), false, 'status renderers do not own notification delivery');
   });
 
-  test('background owner status reports leaders followers and takeover', () => {
-    const api = loadYolomux();
-    const ownerPayload = {
-      generation: {hostname: 'devhost', port: 8002, project_root: '/home/keivenc/yolomux.dev8002', pid: 111},
-      current_owner: {hostname: 'devhost', port: 8002, project_root: '/home/keivenc/yolomux.dev8002', pid: 111},
-      roles: {
-        'search-index': {owner: true, status: 'owner'},
-        'stats-sampler': {owner: true, status: 'owner'},
-      },
-      search_index: {
-        owner: true,
-        status: 'owner',
-        current_server: {hostname: 'devhost', port: 8002, project_root: '/home/keivenc/yolomux.dev8002', pid: 111},
-        owner_server: {hostname: 'devhost', port: 8002, project_root: '/home/keivenc/yolomux.dev8002', pid: 111},
-      },
-    };
-    const readerPayload = {
-      generation: {hostname: 'devhost', port: 8003, project_root: '/home/keivenc/yolomux.dev8003', pid: 222},
-      current_owner: {hostname: 'devhost', port: 8002, project_root: '/home/keivenc/yolomux.dev8002', pid: 111},
-      roles: {
-        'search-index': {owner: false, status: 'follower'},
-        'stats-sampler': {owner: false, status: 'follower'},
-      },
-      search_index: {
-        owner: false,
-        status: 'follower',
-        current_server: {hostname: 'devhost', port: 8003, project_root: '/home/keivenc/yolomux.dev8003', pid: 222},
-        owner_server: {hostname: 'devhost', port: 8002, project_root: '/home/keivenc/yolomux.dev8002', pid: 111},
-      },
-    };
-    assert.equal(api.backgroundOwnerSearchIndexSummaryForTest(ownerPayload).mode, 'leader', 'background-owner summary names the connected indexing leader');
-    assert.equal(api.backgroundOwnerSearchIndexSummaryForTest(readerPayload).mode, 'follower', 'background-owner summary names a search-index follower');
-    assert.equal(api.backgroundOwnerStatsSummaryForTest(ownerPayload).mode, 'leader', 'background-owner summary names the connected YO!stats leader');
-    assert.equal(api.backgroundOwnerStatsSummaryForTest(readerPayload).mode, 'follower', 'background-owner summary names a YO!stats follower');
-    assert.equal(api.backgroundOwnerSessionFilesSummaryForTest(readerPayload).mode, 'follower', 'background-owner summary names a session-files follower');
-    api.setBackgroundOwnerStatusPayloadForTest({
-      ...readerPayload,
-      roles: {
-        'search-index': {owner: true, status: 'owner'},
-        'stats-sampler': {owner: false, status: 'follower'},
-        'session-files': {owner: false, status: 'follower'},
-      },
-      search_index: {...readerPayload.search_index, owner: true, current_server: readerPayload.generation, owner_server: readerPayload.generation},
-    });
-    const topbarOwnerHtml = api.topbarOwnerStatusHtmlForTest();
-    assert.ok(topbarOwnerHtml.includes('topbar-owner-status-shared') && topbarOwnerHtml.includes('IDX|STATS|SESS') && topbarOwnerHtml.includes('follower'), 'topbar owner chip shows shared background follower status');
-    const ownerTitle = api.topbarOwnerStatusTitleForTest(api.backgroundOwnerSearchIndexSummaryForTest(readerPayload), api.backgroundOwnerStatsSummaryForTest(readerPayload), api.backgroundOwnerSessionFilesSummaryForTest(readerPayload));
-    assert.ok(ownerTitle.includes('IDX = Index: Search / Quick Open index owner; builds the file index.'), 'topbar title defines the IDX abbreviation');
-    assert.ok(ownerTitle.includes('STATS = Stats: Stats sampler (statsd / YO!stats); samples usage and metrics history.'), 'topbar title defines the STATS abbreviation');
-    assert.ok(ownerTitle.includes('SESS = Session files: Session-file owner; stores session-file state.'), 'topbar title defines the SESS abbreviation');
-    assert.ok(ownerTitle.includes('Leader means this server owns the role; follower means another connected server owns it.'), 'topbar title explains leader/follower state');
-    assert.ok(ownerTitle.includes('STATS leader: devhost:8002'), 'topbar title names the YO!stats leader');
-    assert.ok(ownerTitle.includes('IDX state: follower') && ownerTitle.includes('STATS state: follower') && ownerTitle.includes('SESS state: follower'), 'topbar title includes payload-derived state for every owner role');
-    assert.ok(ownerTitle.includes('Right-click this status to take over as leader.'), 'topbar title explains the right-click takeover affordance');
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.ok(source.includes("new EventSource(`/api/client-events?${params.toString()}`)"), 'client subscribes to the demand-filtered server event stream');
-    assert.ok(source.includes('function clientEventDemandDescriptor()') && source.includes("channels.add('files')") && source.includes("channels.add('yoagent')"), 'one browser demand descriptor owns pane-specific channels');
-    assert.ok(source.includes("installRuntimeIntervals();") && source.includes("installClientEventStream();"), 'SSE is installed alongside the remaining local ping/log timers');
-    assert.equal(source.includes('function clientPushSuppressesPolling()'), false, 'expensive client polling gate is removed');
-    assert.equal(source.includes('refreshTranscriptsFromRuntime'), false, 'metadata fallback poll wrapper is removed');
-    assert.equal(source.includes('refreshWatchedFilesystemFromRuntime'), false, 'filesystem fallback poll wrapper is removed');
-    assert.equal(source.includes("resetRuntimeInterval('filesystem'"), false, 'Finder must not restore the removed client filesystem polling interval');
-    assert.equal(source.includes('refreshSettingsFromRuntime'), false, 'settings fallback poll wrapper is removed');
-    assert.ok(source.includes('syncServerWatchRoots({immediate: true, force: true, ...watchRootsForceOptions})'), 'SSE ready/reconnect restores watched roots through the generation-keyed registration owner');
-    assert.ok(source.includes('function clientEventReadyWatchRootsGeneration(envelope = {}, recoveryEpisodeId = 0)') && source.includes('clientEventReadyWatchRootsGeneration(envelope, recoveryEpisodeId)'), 'SSE ready repairs use the stable epoch/resource generation plus genuine recovery episode identity');
-    assert.ok(source.includes('clientEventTransportState.disconnectEpisode?.source === source') && !source.includes('watchRootsReadyGeneration'), 'duplicate ready frames cannot mint force generations while real disconnect recovery remains distinct');
-    assert.ok(source.includes("...clientEventWatchRootsForceOptions('roots-changed', clientEventEnvelopeForceGeneration(envelope))"), 'roots_changed supplies its exact event envelope as the force generation');
-    assert.ok(source.includes("apiFetch('/api/watch/roots'"), 'client registers watched roots for server-side SSE polling');
-    assert.ok(source.includes('function clientServerWatchRootDescriptor()'), 'client derives watched directory roots and requesting surfaces from Finder/session-file state');
-    assert.ok(/function visibleFileEditorWatchFiles\(\)[\s\S]*?activePaneItems\(\)/.test(source), 'client reports active visible editor files separately from directory roots');
-    assert.ok(/function backgroundFileEditorWatchFiles\(\)[\s\S]*?paneItems\(\)[\s\S]*?!visible\.has\(path\)[\s\S]*?fileStateFor\(path\)\?\.dirty === true/.test(source), 'client reports only dirty background editor files separately from active visible editor files');
-    assert.ok(source.includes('files: visibleFileEditorWatchFiles()'), 'watch state includes visible editor file paths for the fast files_changed stream');
-    assert.ok(source.includes('background_files: backgroundFileEditorWatchFiles()'), 'watch state includes background editor file paths for the slower files_changed stream');
-    assert.ok(/function transcriptPreviewPaneIsActive\(session\)[\s\S]*pane\?\.classList\?\.contains\(CLS\.active\)[\s\S]*preview\?\.isConnected/.test(source), 'transcript context previews only subscribe when their transcript pane is active');
-    assert.ok(/function transcriptContextWatchRequests\(\)[\s\S]*activeSessions[\s\S]*filter\(transcriptPreviewPaneIsActive\)[\s\S]*messages: transcriptPreviewMessages/.test(source), 'watch state derives context-item requests from visible transcript previews');
-    assert.ok(source.includes("const clientPushEventHandlers = Object.freeze(") && source.includes("for (const type of Object.keys(clientPushEventHandlers))"), 'one browser dispatch table drives every EventSource listener');
-    assert.ok(/if \(type === 'attention_acks_changed'\)[\s\S]{0,120}applyAttentionAcknowledgementResponse\(payload\)/.test(source), 'attention acknowledgement pushes apply scoped key patches without refetching every session status');
-    assert.ok(/function repairClientEventReadyChannels\(channels, watchRootsForceOptions = \{\}\)[\s\S]*refreshAutoStatuses\(\{force: true\}\)\.catch/.test(source), 'client-events ready re-fetches auto status through its scoped repair owner');
-    assert.ok(/function repairClientEventReadyChannels\(channels, watchRootsForceOptions = \{\}\)[\s\S]*refreshBackgroundOwnerStatus\(\{preferFresh: true\}\)\.catch/.test(source), 'client-events ready re-fetches background owner status through its scoped repair owner');
-    assert.ok(/function installReconnectResyncHandlers\(\)[\s\S]*document\.addEventListener\('visibilitychange'[\s\S]*document\.visibilityState === 'visible'[\s\S]*scheduleReconnectResync\('visible'\)[\s\S]*window\.addEventListener\('online'[\s\S]*scheduleReconnectResync\('online'\)/.test(source), 'page wake and network restore schedule a shared refreshAll resync');
-    assert.ok(/function scheduleReconnectResync\(reason = ''\)[\s\S]*setTimeout\(\(\) => \{[\s\S]*refreshAll\(\)/.test(source), 'wake/network reconnect resync is debounced before refreshAll');
-    const runtimeSrc = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
-    assert.ok(runtimeSrc.includes("resetRuntimeInterval('auto-approve', () => {\n    if (!clientCanUseUnscopedHostRequests()) return null;\n    if (document.visibilityState === 'hidden') return null;\n    if (clientEventTransportState.connected === true) return null;\n    return refreshAutoStatuses();\n  }, autoApproveDisconnectedPollMs);"), 'auto-approve fallback poll runs only for host-capable visible pages while client-events is disconnected');
-    assert.ok(/if \(type === 'settings_changed'\)[\s\S]{0,220}applySettingsPayload\(payload\.data, \{force: true\}\)/.test(source), 'settings_changed applies direct payloads without polling settings again');
-    assert.ok(/if \(type === 'auto_approve_changed'\)[\s\S]{0,120}applyAutoApprovePayload\(payload\.data\)/.test(source), 'auto_approve_changed applies direct payloads');
-    assert.ok(/if \(type === 'background_owner_changed'\)[\s\S]{0,280}applyBackgroundOwnerStatusPayload\(payload\)[\s\S]{0,240}else if \(typeof refreshAllIndexedDirsStatus === 'function'\)[\s\S]{0,360}refreshAllIndexedDirsStatus\(\)/.test(source), 'background_owner_changed applies direct owner status and revalidates only demanded index roots');
-    assert.ok(/if \(type === 'background_refresh_done'\)[\s\S]{0,240}payload\.role === 'search-index'[\s\S]{0,260}applyFileIndexStatusPayload\(payload\.root, payload\)[\s\S]{0,260}if \(payload\.root && !applied\) refreshFileIndexStatus\(payload\.root\)/.test(source), 'search-index completion applies its lifecycle payload and only falls back to a root read when it cannot apply it');
-    assert.ok(/payload\.role === 'search-index'[\s\S]{0,700}requeryOpenFileQuickOpenForIndexChange\(\{force: true\}\)/.test(source), 'search-index refresh completion reruns an open file search against the rebuilt index through the one re-query owner');
-    assert.ok(/if \(payload\.role === 'session-files'\)[\s\S]{0,650}refreshSessionFilesCompletionSurfaces\(payload\)/.test(source), 'a redacted session-files completion is routed through the generation-aware opaque cache-view owner without opening another producer');
-    assert.ok(/if \(payload\.role === 'tabber-activity' && typeof itemIsActivePaneTab === 'function' && itemIsActivePaneTab\(tabberItemId\) && document\.visibilityState !== 'hidden'\)[\s\S]{0,180}fetchTabberActivity\(\)/.test(source), 'Tabber refresh completion refetches only an active visible Tabber from its readable shared cache');
-    assert.ok(/if \(type === 'tmux_signals_changed'\)[\s\S]{0,120}applyTmuxSignalsPayload\(payload\)/.test(source), 'tmux_signals_changed applies direct payloads');
-    assert.ok(/if \(type === 'watched_prs_changed'\)[\s\S]{0,120}applyWatchedPrsPayload\(payload\.data\)/.test(source), 'watched_prs_changed applies direct payloads');
-    assert.ok(/if \(type === 'transcripts_changed'\)[\s\S]{0,220}applyTranscriptsPayload\(payload\.data, \{refreshAuto: false, refreshContext: false, refreshActivity: false\}\)/.test(source), 'transcripts_changed applies direct metadata payloads');
-    assert.ok(/if \(type === 'context_items_ready'\)[\s\S]{0,160}applyContextItemsPayloadFromPush\(payload\.data/.test(source), 'context_items_ready applies direct context payloads');
-    const contextPreviewRefresh = source.slice(source.indexOf('async function refreshTranscriptPreview'), source.indexOf('function applyContextItemsPayloadFromPush'));
-    assert.ok(contextPreviewRefresh.includes('if (isApiPendingResponse(error))') && contextPreviewRefresh.includes('apiOperationState.terminal.has(error.operationId)'), 'context-items accepts a durable operation receipt without overwriting a raced terminal result');
-    assert.equal(contextPreviewRefresh.includes('setTimeout'), false, 'context-items completion comes from operation SSE without a browser retry timer');
-    assert.ok(/function handleApiOperationTerminalResult\(record, result = \{\}\)[\s\S]{0,700}record\?\.kind === 'context_items'[\s\S]{0,220}applyContextProductOperationResult\(record, result\)/.test(source), 'operation terminal dispatch routes context product completions through the shared handler');
-    const contextTailRequest = source.slice(source.indexOf('async function showContext'), source.indexOf('function relocalizeModalChrome'));
-    assert.ok(contextTailRequest.includes('renderContextTailPayload(session, payload)') && contextTailRequest.includes('if (isApiPendingResponse(error)) return'), 'context tail keeps its modal loading until the accepted operation completes');
-    assert.ok(/if \(type === 'activity_summary_ready'\)[\s\S]{0,120}applyActivitySummaryPayloadFromPush\(payload\.data\)/.test(source), 'activity_summary_ready applies direct summary payloads');
-    assert.ok(/if \(type === 'yoagent_skills_changed'\)[\s\S]{0,160}refreshActivitySummary\(\{force: true/.test(source), 'yoagent_skills_changed refreshes YO!agent context');
-    assert.ok(/if \(type === 'yoagent_jobs_changed'\)[\s\S]*loadYoagentJobs\(\{force: true, silent: true, render: yoagentPanelIsActive\(\)[\s\S]*maybeNotifyYoagentJob\(payload\.notification/.test(source), 'yoagent_jobs_changed refreshes jobs and can notify from server-fired jobs');
-    assert.ok(/if \(type === 'session_files_ready'\)[\s\S]{0,280}apiPendingResponseFromNestedEnvelope[\s\S]{0,180}registerApiOperationReceipt\(receipt\)[\s\S]{0,220}applySessionFilesPayloadFromPush\(payload\.data, payload\.request/.test(source), 'session_files_ready registers accepted receipts before applying direct session-files payloads');
-    assert.equal(source.includes('session_files_changed'), false, 'stale session_files_changed refetch event path is removed');
-    assert.ok(/if \(type === 'files_changed'\)[\s\S]{0,180}refreshOpenFilesFromPush\(payload\)/.test(source), 'files_changed refreshes visible editor files without waiting for directory payloads');
-    const filePushHelper = source.slice(source.indexOf('async function refreshOpenFilesFromPush'), source.indexOf('async function refreshFileExplorerFromPush'));
-    assert.equal(filePushHelper.includes('fetchDirectory'), false, 'files_changed uses the server file signature directly, not a parent-directory listing');
-    assert.equal(filePushHelper.includes('refreshOpenFilesIfChanged'), false, 'files_changed does not route through the directory-backed polling helper');
-    assert.equal(source.includes('function scheduleSessionFilesPushRefresh()'), false, 'session-files push no longer triggers a client refetch helper');
-    assert.ok(source.includes("apiFetchJson('/api/background/status'"), 'client fetches background-owner status for connected-server indicators');
-    assert.ok(source.includes('createTopbarOwnerStatus()') && source.includes('updateTopbarOwnerStatus()'), 'topbar renders the connected-server owner indicator');
-    assert.ok(source.includes("backgroundOwnerRoleSummary('stats-sampler'") && source.includes("backgroundOwnerRoleSummary('session-files'"), 'topbar owner indicator uses the shared stats-sampler and session-files roles');
-    assert.equal(source.includes('function infoServerRoleHtml()'), false, 'YO!info does not render a server-role strip');
-    assert.equal(source.includes('info-server-role'), false, 'YO!info server-role markup is removed');
-    const watchRootsHelper = source.slice(source.indexOf('function clientServerWatchRootDescriptor()'), source.indexOf('function clientServerWatchState()'));
-    assert.equal(watchRootsHelper.includes('fileState.keys()'), false, 'open editor file dirs are not folded into the slower directory watch roots');
-    assert.ok(/function applyLayoutSlots[\s\S]*?syncServerWatchRoots\(\)/.test(source), 'layout/tab changes immediately resync the server watch state');
-    const fsPushHelper = source.slice(source.indexOf('async function refreshFileExplorerFromPush'), source.indexOf('function expandUserPath'));
-    assert.equal(fsPushHelper.includes('fetchSessionFiles'), false, 'fs_changed refreshes Finder/open-file state without also fetching session-files');
-    assert.ok(/if \(type === 'fs_changed'\)[\s\S]{0,180}refreshFileExplorerFromPush\(payload\)/.test(source), 'fs_changed refreshes Finder/open-file state through the shared push helper');
-    const renameSource = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
-    const indexSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
-    assert.ok(/async function renameFileTreePath\([\s\S]*apiFetchJson\('\/api\/fs\/rename'[\s\S]*markFileIndexRootsRefreshing\(payload\.reindex_roots\)/.test(renameSource), 'Finder rename marks every backend-invalidated index root as rebuilding');
-    assert.ok(/function markFileIndexRootsRefreshing\(roots = \[\]\)[\s\S]*fileExplorerIndexStatus\.set\(normalized, 'building'\)[\s\S]*refreshFileIndexStatus\(normalized\)/.test(indexSource), 'renamed-path index refresh uses the shared index-status owner instead of a duplicate search cache');
-    assert.ok(source.includes('function clientServerWatchState()'), 'client reports rich watched state, not only filesystem roots');
-    assert.ok(source.includes('context_items: transcriptContextWatchRequests()'), 'watch state includes visible transcript context previews only');
-    assert.ok(source.includes('state.session_files = clientSessionFilesWatchRequests()'), 'watch state includes the current session-files request');
-    assert.ok(source.includes("recordJsDebugEvent('sse'"), 'SSE events are captured in JS Debug');
-    assert.ok(source.includes('const backgroundOwnerContextMenu = createContextMenuController()'), 'topbar owner takeover menu uses the shared context-menu controller');
-    assert.ok(/function topbarOwnerStatusSummaries\(payload = backgroundOwnerStatusState\.payload\)[\s\S]*backgroundOwnerSearchIndexSummary[\s\S]*backgroundOwnerStatsSummary[\s\S]*backgroundOwnerSessionFilesSummary/.test(source), 'topbar owner chip and menu share one summary owner for IDX/STATS/SESS state');
-    assert.ok(/function backgroundOwnerOwnsAllRoles\(payload = backgroundOwnerStatusState\.payload\)[\s\S]*summaries\.every\(item => item\.ownsRole === true \|\| item\.ownsIndex === true\)/.test(source), 'topbar owner takeover detects already-leader state from the shared summaries');
-    assert.ok(/function showBackgroundOwnerContextMenu\(event\)[\s\S]*appendContextMenuButton\(menu, t\('backgroundOwner\.takeOver'\)/.test(source) && /async function claimBackgroundOwnerLeader\(\)[\s\S]*apiFetchJson\('\/api\/background\/claim', \{method: 'POST'\}\)/.test(source), 'right-clicking the owner chip offers a shared-menu Take over as leader action wired to the claim API');
-    assert.ok(/function backgroundOwnerCurrentOwnerLive\(payload = backgroundOwnerStatusState\.payload[\s\S]*last_heartbeat[\s\S]*<= 10/.test(source) && /window\.confirm\(message\)/.test(source), 'live owner takeover prompts before asking the current leader to step down');
-  });
-
   test('client-event demand follows visibility, pane, and notification state', () => {
     const api = loadYolomux();
     const slots = api.emptyLayoutSlots();
@@ -8303,99 +8175,6 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.deepEqual(state.demand.channels, ['activity', 'chat', 'core', 'status', 'transcripts', 'yoagent']);
   });
 
-
-  await testAsync('background owner context menu claims follower leadership', async () => {
-    const api = loadYolomux();
-    const currentServer = {hostname: 'devhost', port: 8001, project_root: '/home/keivenc/yolomux.dev8001', pid: 101, generation_id: 'current-gen'};
-    const ownerServer = {hostname: 'devhost', port: 8002, project_root: '/home/keivenc/yolomux.dev8002', pid: 202, generation_id: 'owner-gen', last_heartbeat: Date.now() / 1000};
-    const followerPayload = {
-      generation: currentServer,
-      current_owner: ownerServer,
-      latest_generation: {generation_id: 'owner-gen'},
-      roles: {
-        'search-index': {owner: false, status: 'follower'},
-        'stats-sampler': {owner: false, status: 'follower'},
-        'session-files': {owner: false, status: 'follower'},
-      },
-      search_index: {
-        owner: false,
-        status: 'follower',
-        current_server: currentServer,
-        owner_server: ownerServer,
-      },
-    };
-    const leaderPayload = {
-      ...followerPayload,
-      current_owner: currentServer,
-      latest_generation: {generation_id: 'current-gen'},
-      roles: {
-        'search-index': {owner: true, status: 'owner'},
-        'stats-sampler': {owner: true, status: 'owner'},
-        'session-files': {owner: true, status: 'owner'},
-      },
-      search_index: {
-        owner: true,
-        status: 'owner',
-        current_server: currentServer,
-        owner_server: currentServer,
-      },
-    };
-    const menuEvent = () => ({
-      target: api.testElementForId('body'),
-      clientX: 33,
-      clientY: 44,
-      preventDefault() { this.defaultPrevented = true; },
-      stopPropagation() { this.propagationStopped = true; },
-    });
-    const clickEvent = () => ({
-      preventDefault() { this.defaultPrevented = true; },
-      stopPropagation() { this.propagationStopped = true; },
-    });
-    const ownerMenu = () => api.testElementForId('appOverlayRoot').children.find(child => child.classList?.contains('background-owner-context-menu'));
-
-    api.setBackgroundOwnerStatusPayloadForTest(followerPayload);
-    assert.equal(api.backgroundOwnerOwnsAllRolesForTest(followerPayload), false, 'follower payload is not already leader');
-    assert.equal(api.backgroundOwnerCurrentOwnerLiveForTest(followerPayload, ownerServer.last_heartbeat + 1), true, 'fresh owner heartbeat requires confirm');
-    const fetchCalls = [];
-    const confirmMessages = [];
-    api.setFetchForTest((url, options = {}) => {
-      fetchCalls.push({url: String(url), method: options.method || 'GET'});
-      if (String(url) === '/api/background/claim') return Promise.resolve(jsonResponse({ok: true, claimed: true, was_owner: false, status: leaderPayload}));
-      if (String(url) === '/api/background/status') return Promise.resolve(jsonResponse(leaderPayload));
-      return Promise.resolve(jsonResponse({ok: true}));
-    });
-    api.setConfirmForTest(message => {
-      confirmMessages.push(String(message));
-      return false;
-    });
-
-    const cancelEvent = menuEvent();
-    api.showBackgroundOwnerContextMenuForTest(cancelEvent);
-    const cancelMenu = ownerMenu();
-    assert.equal(cancelEvent.defaultPrevented, true, 'right-click suppresses the browser context menu');
-    assert.ok(cancelMenu?.firstElementChild?.textContent.includes('Take over as leader'), 'follower menu offers takeover');
-    cancelMenu.firstElementChild.listeners.get('click')[0](clickEvent());
-    await flushAsyncWork();
-    assert.equal(confirmMessages.length, 1, 'live owner takeover asks for confirmation');
-    assert.ok(confirmMessages[0].includes('devhost:8002'), 'confirm names the current leader');
-    assert.equal(fetchCalls.length, 0, 'canceling the confirm does not claim ownership');
-
-    api.setConfirmForTest(message => {
-      confirmMessages.push(String(message));
-      return true;
-    });
-    api.showBackgroundOwnerContextMenuForTest(menuEvent());
-    ownerMenu().firstElementChild.listeners.get('click')[0](clickEvent());
-    for (let i = 0; i < 4; i += 1) await flushAsyncWork();
-    assert.deepStrictEqual(fetchCalls.map(call => `${call.method} ${call.url}`), ['POST /api/background/claim', 'GET /api/background/status'], 'takeover POSTs then refreshes background status');
-    assert.ok(api.topbarOwnerStatusHtmlForTest().includes('leader'), 'claim response and refresh flip the topbar state to leader');
-
-    api.setBackgroundOwnerStatusPayloadForTest(leaderPayload);
-    api.showBackgroundOwnerContextMenuForTest(menuEvent());
-    const leaderMenu = ownerMenu();
-    assert.ok(leaderMenu?.firstElementChild?.textContent.includes('Already leader'), 'already-leader menu does not offer takeover');
-    assert.equal(leaderMenu.firstElementChild.disabled, true, 'already-leader item is disabled');
-  });
 
   test('file tree row state preserves symlink and index metadata', () => {
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
@@ -8804,8 +8583,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/\.topbar-language\s*\{/.test(fs.readFileSync('static/yolomux.css', 'utf8')), 'Phase 1: the language switcher has topbar styling');
     // #256: topbar theme switcher (auto/dark/light) mirrors the language switcher and sits right of it;
     // order ends Language, Theme, Activity (activity pinned far-right).
-    // #257: the topbar theme switcher was REMOVED (redundant). Order is Language, Ownership, then Activity (far right).
-    assert.ok(/function createTopbarCenterTools\(\)[\s\S]*?group\.append\(createTopbarNav\(\), createTopbarSearch\(\)\)/.test(src) && /function createTopbarRightTools\(\)[\s\S]*?group\.append\(createTopbarLanguageSwitcher\(\), createTopbarOwnerStatus\(\), createTopbarActivityStatus\(\)\)/.test(src) && /sessionButtons\.appendChild\(createAppMenuBar\(\)\)[\s\S]*?sessionButtons\.appendChild\(createTopbarCenterTools\(\)\)[\s\S]*?sessionButtons\.appendChild\(createTopbarRightTools\(\)/.test(src), '#257: File/View/tmux/Tabs/Help precede the arrows/search group, which precedes Language, Ownership, and Activity');
+    // #257: the topbar theme and distributed-owner controls were removed. Language and Activity
+    // remain in the right group, with Activity pinned at the far right.
+    assert.ok(/function createTopbarCenterTools\(\)[\s\S]*?group\.append\(createTopbarNav\(\), createTopbarSearch\(\)\)/.test(src) && /function createTopbarRightTools\(\)[\s\S]*?group\.append\(createTopbarLanguageSwitcher\(\), createTopbarActivityStatus\(\)\)/.test(src) && /sessionButtons\.appendChild\(createAppMenuBar\(\)\)[\s\S]*?sessionButtons\.appendChild\(createTopbarCenterTools\(\)\)[\s\S]*?sessionButtons\.appendChild\(createTopbarRightTools\(\)/.test(src), '#257: File/View/tmux/Tabs/Help precede the arrows/search group, which precedes Language and Activity');
+    assert.equal(/createTopbarOwnerStatus/.test(src), false, '#257: the distributed-owner status control is gone with the owner/follower model');
     assert.ok(/function topbarControlIsActive\(\)[\s\S]*document\.activeElement[\s\S]*sessionButtons\?\.contains\(active\)[\s\S]*active\.matches\?\.\('select, input, \.topbar-language, \.app-menu-button'\)/.test(src), '#62: topbar detects focused controls before passive rebuilds');
     assert.ok(/if \(!options\.force && topbarControlIsActive\(\)\) \{[\s\S]*pendingSessionButtonsRender = true[\s\S]*return;\s*\}/.test(src), '#62: passive topbar renders defer while a topbar control is focused');
     assert.ok(/button\.addEventListener\('blur', flushPendingSessionButtonsRender\)/.test(src), '#62: language button blur flushes a deferred topbar render');

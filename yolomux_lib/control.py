@@ -32,7 +32,7 @@ CONTROL_MAX_BYTES = LOCAL_RPC_MAX_METADATA_BYTES
 CONTROL_SOCKET_PATH_LIMIT = 96
 CONTROL_OWNER_SUFFIX = ".owner.json"
 # Distinguishes two control servers that legitimately coexist in one process
-# (two `TmuxWebtermApp` instances electing a background owner between them).
+# (two `TmuxWebtermApp` instances sharing one product-root lease).
 _CONTROL_SERVER_SEQUENCE = itertools.count(1)
 LOGGER = logging.getLogger(__name__)
 
@@ -52,7 +52,12 @@ class ControlRequestError(Exception):
 def control_socket_path(token: str | None = None, pid: int | None = None) -> Path:
     suffix = f"-{token}" if token else ""
     filename = f"yolomux-{pid or os.getpid()}{suffix}.sock"
-    return safe_socket_path(CONTROL_SOCKET_DIR / filename, prefix="ycs", fallback_name=filename)
+    return safe_socket_path(
+        CONTROL_SOCKET_DIR / filename,
+        prefix="ycs",
+        fallback_name=filename,
+        max_bytes=CONTROL_SOCKET_PATH_LIMIT - 1,
+    )
 
 
 def send_yolomux_control_request(owner: dict[str, Any] | None, request: dict[str, Any], timeout: float = 2.0) -> dict[str, Any]:
@@ -330,7 +335,12 @@ class YolomuxControlServer:
                 client.connect(str(self.path))
         except OSError:
             pass
-        self.thread.join(timeout=1.0)
+        # Status-service fixtures and lightweight app tests can construct a control
+        # server without starting its listener.  Joining an unstarted Thread raises
+        # and turns an otherwise successful server teardown into a test/application
+        # failure; an unstarted listener has nothing to reap.
+        if self.thread.is_alive():
+            self.thread.join(timeout=1.0)
         for path in (self.path, self.owner_path):
             try:
                 path.unlink()

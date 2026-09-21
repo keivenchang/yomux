@@ -2454,8 +2454,8 @@ def test_browser_server_start_rolls_back_each_acquired_owner(monkeypatch, tmp_pa
         def stop_batchd_operation_service(self):
             calls.append("batchd-operations")
 
-        def demote_background_owner(self):
-            calls.append("background-owner")
+        def stop_background_scheduler(self):
+            calls.append("background-scheduler")
 
         def stop_auto_approve_all(self):
             calls.append("auto-approve")
@@ -2495,7 +2495,7 @@ def test_browser_server_start_rolls_back_each_acquired_owner(monkeypatch, tmp_pa
     with pytest.raises((OSError, RuntimeError), match=failure_stage.replace("-", " ")):
         browser_layout.start_browser_server(monkeypatch, tmp_path, App())
 
-    assert calls[:4] == ["client-watcher", "batchd-operations", "background-owner", "auto-approve"]
+    assert calls[:4] == ["client-watcher", "batchd-operations", "background-scheduler", "auto-approve"]
     assert ("server-close" in calls) is (failure_stage != "bind")
 
 
@@ -2524,12 +2524,12 @@ def test_stateful_journey_stop_preserves_gate_failure_when_port_reacquire_fails(
     assert caught.value.__cause__ is reacquire_failure
 
 
-def test_stateful_journey_start_rolls_back_background_owner_failure_and_reacquires_port(monkeypatch):
+def test_stateful_journey_start_rolls_back_background_scheduler_failure_and_reacquires_port(monkeypatch):
     calls = []
 
     class App:
-        def start_background_owner(self, **_kwargs):
-            raise RuntimeError("injected background owner failure")
+        def start_background_scheduler(self, **_kwargs):
+            raise RuntimeError("injected background scheduler failure")
 
         def stop_client_event_watcher(self):
             calls.append("client-watcher")
@@ -2537,8 +2537,8 @@ def test_stateful_journey_start_rolls_back_background_owner_failure_and_reacquir
         def stop_batchd_operation_service(self):
             calls.append("batchd-operations")
 
-        def demote_background_owner(self):
-            calls.append("background-owner")
+        def stop_background_scheduler(self):
+            calls.append("background-scheduler")
 
         def stop_auto_approve_all(self):
             calls.append("auto-approve")
@@ -2570,11 +2570,11 @@ def test_stateful_journey_start_rolls_back_background_owner_failure_and_reacquir
     monkeypatch.setattr(gate_harness_module, "track_fixture_http_requests", lambda _server: None)
     monkeypatch.setattr(gate_harness_module, "prepare_fixture_http_app", lambda *_args: None)
 
-    with pytest.raises(RuntimeError, match="injected background owner failure"):
+    with pytest.raises(RuntimeError, match="injected background scheduler failure"):
         journey.start()
 
     assert calls == [
-        "release", "client-watcher", "batchd-operations", "background-owner", "auto-approve", "server-close", "reacquire",
+        "release", "client-watcher", "batchd-operations", "background-scheduler", "auto-approve", "server-close", "reacquire",
     ]
     assert journey.app is None and journey.server is None and journey.thread is None
 
@@ -2594,11 +2594,11 @@ def test_gate_server_start_rolls_back_thread_creation_failure_and_reacquires_por
         def stop_batchd_operation_service(self):
             calls.append("batchd-operations")
 
-        def demote_background_owner(self):
-            # Production's ``demote_background_owner`` releases the batchd scheduler lease here; the
+        def stop_background_scheduler(self):
+            # Production's ``stop_background_scheduler`` releases the batchd scheduler lease here; the
             # fake models that release so the rollback teardown cannot leak the pinned lease.
             self.job_client.stop_for_scheduler()
-            calls.append("background-owner")
+            calls.append("background-scheduler")
 
         def stop_auto_approve_all(self):
             # ``stop_auto_approve_all`` also calls ``stop_for_scheduler`` in production; the fake
@@ -2648,7 +2648,7 @@ def test_gate_server_start_rolls_back_thread_creation_failure_and_reacquires_por
         next(generator)
 
     assert calls == [
-        "release", "client-watcher", "batchd-operations", "background-owner", "auto-approve", "server-close", "reacquire",
+        "release", "client-watcher", "batchd-operations", "background-scheduler", "auto-approve", "server-close", "reacquire",
     ]
     # The pin was taken before the thread-construction failure, and the rollback released it
     # exactly once -- no leaked lease, no double release -- even though two teardown owners each
@@ -2852,7 +2852,7 @@ def test_fixture_stops_accepted_batchd_operations_before_demoting_local_services
         def stop_batchd_operation_service(self):
             calls.append("batchd-operations")
 
-        def demote_background_owner(self):
+        def stop_background_scheduler(self):
             calls.append("background-demotion")
 
         def stop_auto_approve_all(self):
@@ -2894,7 +2894,7 @@ def test_fixture_joins_metadata_product_worker_after_retiring_local_services():
         def stop_batchd_operation_service(self):
             assert not worker_finished.is_set()
 
-        def demote_background_owner(self):
+        def stop_background_scheduler(self):
             # The worker runs in batchd. It must stay joinable while batchd and its
             # local services retire, then be joined before fixture teardown returns.
             assert not worker_finished.is_set()
@@ -2987,7 +2987,7 @@ def test_fixture_app_writers_stop_before_single_pass_root_removal(tmp_path, monk
         def stop_batchd_operation_service(self):
             pass
 
-        def demote_background_owner(self):
+        def stop_background_scheduler(self):
             pass
 
         def stop_auto_approve_all(self):
@@ -3048,7 +3048,7 @@ def test_fixture_runtime_seals_local_service_demand_before_late_producer_can_rep
         def stop_batchd_operation_service(self):
             pass
 
-        def demote_background_owner(self):
+        def stop_background_scheduler(self):
             assert registry.ensure_started() is False
 
         def stop_auto_approve_all(self):
@@ -3098,7 +3098,7 @@ def test_fixture_runtime_seals_every_sibling_local_service_registry_before_demot
         def stop_batchd_operation_service(self):
             pass
 
-        def demote_background_owner(self):
+        def stop_background_scheduler(self):
             assert all(registry.starts_sealed for registry in registries)
 
         def stop_auto_approve_all(self):
@@ -3147,7 +3147,7 @@ def test_fixture_stops_whole_owned_local_service_group_before_waiting(monkeypatc
         def stop_batchd_operation_service(self):
             pass
 
-        def demote_background_owner(self):
+        def stop_background_scheduler(self):
             pass
 
         def stop_auto_approve_all(self):
@@ -3188,7 +3188,7 @@ def test_fixture_runtime_keeps_each_processless_registry_owner(monkeypatch):
         def stop_batchd_operation_service(self):
             pass
 
-        def demote_background_owner(self):
+        def stop_background_scheduler(self):
             pass
 
         def stop_auto_approve_all(self):
@@ -3236,7 +3236,7 @@ def test_fixture_stops_retained_service_group_after_its_leader_already_exited(mo
         def stop_batchd_operation_service(self):
             pass
 
-        def demote_background_owner(self):
+        def stop_background_scheduler(self):
             pass
 
         def stop_auto_approve_all(self):
@@ -3523,7 +3523,7 @@ def test_fixture_escalates_stubborn_owned_service_group_within_original_bound(mo
         def stop_batchd_operation_service(self):
             pass
 
-        def demote_background_owner(self):
+        def stop_background_scheduler(self):
             pass
 
         def stop_auto_approve_all(self):
@@ -3672,7 +3672,7 @@ def test_fixture_runtime_attempts_every_later_owner_after_one_phase_fails(monkey
         def stop_batchd_operation_service(self):
             self.phase("batchd-operations")
 
-        def demote_background_owner(self):
+        def stop_background_scheduler(self):
             self.phase("background-demotion")
 
         def stop_auto_approve_all(self):
@@ -3704,7 +3704,7 @@ def test_fixture_runtime_raises_structured_group_after_attempting_all_failed_pha
         def stop_batchd_operation_service(self):
             self.fail("batchd-operations")
 
-        def demote_background_owner(self):
+        def stop_background_scheduler(self):
             self.fail("background-demotion")
 
         def stop_auto_approve_all(self):
@@ -3761,7 +3761,7 @@ def test_fixture_runtime_attempts_each_captured_service_after_one_process_stop_f
         def stop_batchd_operation_service(self):
             pass
 
-        def demote_background_owner(self):
+        def stop_background_scheduler(self):
             pass
 
         def stop_auto_approve_all(self):
@@ -3815,7 +3815,7 @@ def test_fixture_refuses_recycled_foreign_service_group_without_signalling(monke
         def stop_batchd_operation_service(self):
             pass
 
-        def demote_background_owner(self):
+        def stop_background_scheduler(self):
             pass
 
         def stop_auto_approve_all(self):
@@ -3905,7 +3905,7 @@ def test_fixture_real_registry_refuses_foreign_generation_group_without_signalli
         def stop_batchd_operation_service(self):
             pass
 
-        def demote_background_owner(self):
+        def stop_background_scheduler(self):
             pass
 
         def stop_auto_approve_all(self):
@@ -3955,7 +3955,7 @@ def test_fixture_refuses_service_process_without_spawn_ownership(monkeypatch):
         def stop_batchd_operation_service(self):
             pass
 
-        def demote_background_owner(self):
+        def stop_background_scheduler(self):
             pass
 
         def stop_auto_approve_all(self):
@@ -4158,8 +4158,8 @@ def test_browser_boot_route_registry_has_one_handler_and_matches_gate_contract()
         browser_layout.BROWSER_BOOT_PRESETS["default"]
     )
 
-    assert len(browser_layout.BROWSER_BOOT_ROUTES) == 34
-    assert len({route.path for route in browser_layout.BROWSER_BOOT_ROUTES}) == 34
+    assert len(browser_layout.BROWSER_BOOT_ROUTES) == 33
+    assert len({route.path for route in browser_layout.BROWSER_BOOT_ROUTES}) == 33
     for route in browser_layout.BROWSER_BOOT_ROUTES:
         assert fixture.count(f"url.pathname === '{route.path}'") == 1
         assert json.dumps(route.path) in fixture

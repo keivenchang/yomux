@@ -7335,7 +7335,6 @@ def test_topbar_status_actions_share_shell_and_pointer_keyboard_paint(browser, t
         page.name,
         page_html("""
       <div id="token-topbar" class="topbar"></div>
-      <button id="owner" class="topbar-owner-status topbar-status-surface">IDX: leader</button>
       <button id="activity" class="topbar-activity topbar-status-surface">1 running</button>
       <button id="attention" class="topbar-activity topbar-status-surface has-attention">1 attention</button>
       <div id="latency" class="latency-meter topbar-status-surface">10 ms</div>
@@ -7382,17 +7381,13 @@ def test_topbar_status_actions_share_shell_and_pointer_keyboard_paint(browser, t
         browser.execute_script("document.body.className = arguments[0]", theme)
         browser.execute_script("document.activeElement?.blur()")
         fast_pointer_actions(browser).move_to_element(browser.find_element("id", "neutral")).perform()
-        owner = read("owner")
         activity = read("activity")
         attention = read("attention")
-        for property_name in ("display", "flex", "alignItems", "height", "fontSize", "cursor", "whiteSpace"):
-            assert owner[property_name] == activity[property_name], (theme, property_name, owner, activity)
-        assert owner["display"] == "inline-flex"
         latency = read("latency")
         assert latency["display"] == "inline-grid"
         assert latency["cursor"] == "auto"
         for property_name in ("background", "border"):
-            assert len({owner[property_name], activity[property_name], latency[property_name]}) == 1, (theme, property_name, owner, activity, latency)
+            assert len({activity[property_name], latency[property_name]}) == 1, (theme, property_name, activity, latency)
             assert attention[property_name] == activity[property_name], (theme, property_name, attention, activity)
         token_metrics = browser.execute_script(
             """
@@ -7434,12 +7429,11 @@ def test_topbar_status_actions_share_shell_and_pointer_keyboard_paint(browser, t
             assert token_metrics["advisoryAction"]["background"] == token_metrics["panel"], token_metrics
         fast_pointer_actions(browser).move_to_element(browser.find_element("id", "token-topbar")).perform()
         assert read("token-topbar")["background"] == token_metrics["strip"], (theme, token_metrics, read("token-topbar"))
-        assert hover("owner") == focus("owner")
         assert hover("activity") == focus("activity")
         assert hover("attention") == focus("attention")
 
     hidden_display = browser.execute_script(
-        "const node = document.getElementById('owner'); node.hidden = true; return getComputedStyle(node).display;"
+        "const node = document.getElementById('activity'); node.hidden = true; return getComputedStyle(node).display;"
     )
     assert hidden_display == "none"
 
@@ -7458,7 +7452,6 @@ def test_touch_compact_topbar_keeps_menu_and_status_groups_separate(browser, tmp
           <div id="touch-nav" class="topbar-nav"><button class="topbar-nav-button">←</button><button class="topbar-nav-button">→</button></div>
           <button id="touch-search" class="topbar-search"><span class="topbar-search-icon">⌕</span><span id="touch-search-label" class="topbar-search-label"><span class="topbar-search-label-long">Search files, commands</span><span class="topbar-search-label-short" aria-hidden="true">Search</span></span><kbd class="topbar-search-hint">Cmd-P</kbd></button>
           <button id="touch-language" class="topbar-language">English</button>
-          <button id="touch-owner" class="topbar-owner-status topbar-status-surface">IDX: leader</button>
           <button id="touch-activity" class="topbar-activity topbar-status-surface"><span class="topbar-activity-count topbar-activity-working active"><span class="topbar-activity-count-number">2</span><span class="agent-window-activity agent-window-activity--status-only agent-window-activity--working topbar-activity-ball"><span class="status-indicator status-indicator--dot status-indicator--working">●</span></span></span><span class="topbar-activity-sep">·</span><span class="topbar-activity-count topbar-activity-ask active"><span class="topbar-activity-count-number">1</span><span class="agent-window-activity agent-window-activity--status-only agent-window-activity--attention topbar-activity-ball"><span class="status-indicator status-indicator--dot status-indicator--attention">●</span></span></span><span class="topbar-activity-sep">·</span><span class="topbar-activity-count topbar-activity-blocked active"><span class="topbar-activity-count-number">3</span><span class="agent-window-activity agent-window-activity--status-only agent-window-activity--cooldown topbar-activity-ball"><span class="status-indicator status-indicator--dot status-indicator--cooldown">●</span></span></span><span class="topbar-activity-idle">3 idle</span></button>
         </div>
         <div id="touch-actions" class="actions"><div id="latencyMeter" class="latency-meter">12 ms</div><button id="notifyToggle">Notify</button><button id="refreshMeta">Refresh</button><button id="logoutButton">Log out</button><span id="status">connected</span></div>
@@ -7472,7 +7465,7 @@ def test_touch_compact_topbar_keeps_menu_and_status_groups_separate(browser, tmp
         """
         // The fixture has no application bundle to run syncTopbarPacking(). Model the measured
         // presentation that the live packer selected for this narrow topbar.
-        document.body.classList.add('app-topbar-touch-compact', 'app-topbar-menu-compact', 'app-topbar-coarse-pointer', 'app-vw-lte-600', 'app-vw-lte-760', 'app-vw-lte-980', 'app-vw-lte-1100', 'topbar-pack-hide-version', 'topbar-pack-compact-brand', 'topbar-pack-compact-search', 'topbar-pack-hide-latency', 'topbar-pack-hide-logout', 'topbar-pack-hide-notify', 'topbar-pack-hide-language', 'topbar-pack-hide-owner', 'topbar-pack-hide-nav');
+        document.body.classList.add('app-topbar-touch-compact', 'app-topbar-menu-compact', 'app-topbar-coarse-pointer', 'app-vw-lte-600', 'app-vw-lte-760', 'app-vw-lte-980', 'app-vw-lte-1100', 'topbar-pack-hide-version', 'topbar-pack-compact-brand', 'topbar-pack-compact-search', 'topbar-pack-hide-latency', 'topbar-pack-hide-logout', 'topbar-pack-hide-notify', 'topbar-pack-hide-language', 'topbar-pack-hide-nav');
         const actions = document.getElementById('touch-actions');
         const activityNode = document.getElementById('touch-activity');
         activityNode.classList.add('topbar-activity--mobile-count-balls');
@@ -7501,7 +7494,6 @@ def test_touch_compact_topbar_keeps_menu_and_status_groups_separate(browser, tmp
           searchLongLabel: box(document.querySelector('.topbar-search-label-long')),
           searchShortLabelOverflow: document.querySelector('.topbar-search-label-short').scrollWidth > document.querySelector('.topbar-search-label-short').clientWidth,
           language: box(document.getElementById('touch-language')),
-          owner: box(document.getElementById('touch-owner')),
           nav: box(document.getElementById('touch-nav')),
           refresh: box(document.getElementById('refreshMeta')),
           notify: box(document.getElementById('notifyToggle')),
@@ -7528,7 +7520,6 @@ def test_touch_compact_topbar_keeps_menu_and_status_groups_separate(browser, tmp
     assert metrics["searchShortLabel"]["display"] == "block", metrics
     assert metrics["searchShortLabelOverflow"] is False, metrics
     assert metrics["language"]["display"] == "none", metrics
-    assert metrics["owner"]["display"] == "none", metrics
     assert metrics["nav"]["display"] == "none", metrics
     assert metrics["activity"]["display"] == "flex", metrics
     assert [item["text"] for item in metrics["activityCounts"]] == ["2", "1", "3"], metrics
@@ -7933,7 +7924,7 @@ def test_topbar_menu_search_action_priority_matrix(browser, tmp_path):
             <div class="topbar-nav"><button class="topbar-nav-button">←</button><button class="topbar-nav-button">→</button></div>
             <button id="matrix-search" class="topbar-search"><span class="topbar-search-icon">⌕</span><span class="topbar-search-label">Search files</span><kbd class="topbar-search-hint">Cmd-P</kbd></button>
           </div>
-          <div id="matrix-right" class="topbar-right-tools"><button class="topbar-language">English</button><button class="topbar-owner-status">IDX: leader</button><button class="topbar-activity">1 running</button></div>
+          <div id="matrix-right" class="topbar-right-tools"><button class="topbar-language">English</button><button class="topbar-activity">1 running</button></div>
         </div>
             <div id="matrix-actions" class="actions"><button id="notifyToggle">Notify</button><button id="refreshMeta">Refresh</button><button id="logoutButton">Log out</button></div>
       </header>
@@ -7964,7 +7955,7 @@ def test_topbar_menu_search_action_priority_matrix(browser, tmp_path):
               if (width <= breakpoint) body.classList.add(`app-vw-lte-${breakpoint}`);
             }
                 if (compact) body.classList.add('app-topbar-menu-compact');
-                if (compact) body.classList.add('topbar-pack-hide-version', 'topbar-pack-compact-brand', 'topbar-pack-compact-search', 'topbar-pack-hide-latency', 'topbar-pack-hide-logout', 'topbar-pack-hide-notify', 'topbar-pack-hide-language', 'topbar-pack-hide-owner', 'topbar-pack-hide-nav', 'topbar-pack-compact-menu');
+                if (compact) body.classList.add('topbar-pack-hide-version', 'topbar-pack-compact-brand', 'topbar-pack-compact-search', 'topbar-pack-hide-latency', 'topbar-pack-hide-logout', 'topbar-pack-hide-notify', 'topbar-pack-hide-language', 'topbar-pack-hide-nav', 'topbar-pack-compact-menu');
                 else if (width <= 980) body.classList.add('topbar-pack-hide-notify');
             document.documentElement.style.setProperty('--matrix-width', `${width}px`);
             document.documentElement.style.setProperty('--ui-font-size', `${fontSize}px`);
@@ -8274,74 +8265,6 @@ def test_narrow_server_update_banner_stacks_message_and_actions(browser, tmp_pat
     assert metrics["actions"]["right"] <= metrics["banner"]["right"] + 0.5, metrics
     assert metrics["banner"]["height"] <= metrics["message"]["height"] + metrics["actions"]["height"] + 48, metrics
 
-
-def test_topbar_owner_status_shows_index_and_stats_roles(browser, tmp_path):
-    background_status = {
-        "owner": False,
-        "status": "follower",
-        "generation": {"hostname": "devhost", "port": 8001, "project_root": "/home/test/yolomux.dev8001", "pid": 111},
-        "current_owner": {"hostname": "devhost", "port": 8002, "project_root": "/home/test/yolomux.dev8002", "pid": 222},
-        "roles": {
-            "search-index": {"role": "search-index", "owner": True, "status": "owner"},
-            "stats-sampler": {"role": "stats-sampler", "owner": False, "status": "follower"},
-            "session-files": {"role": "session-files", "owner": False, "status": "follower"},
-        },
-        "search_index": {
-            "role": "search-index",
-            "owner": True,
-            "mode": "indexing-server",
-            "current_server": {"hostname": "devhost", "port": 8001, "project_root": "/home/test/yolomux.dev8001", "pid": 111},
-            "owner_server": {"hostname": "devhost", "port": 8001, "project_root": "/home/test/yolomux.dev8001", "pid": 111},
-            "status": "owner",
-        },
-    }
-    auto_approve_payload = {
-        "session_order": ["1"],
-        "sessions": {"1": {"target": "1", "enabled": True, "screen": {"key": "idle"}, "agent_windows": [{"kind": "codex", "state": "idle", "window_index": 0, "window_label": "0:codex"}]}},
-        "rules": {"path": "/home/test/.config/yolomux/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
-    }
-    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"], auto_approve_payload=auto_approve_payload, background_status_payload=background_status)
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
-            """
-            const owner = document.getElementById('topbarOwnerStatus');
-            return owner && owner.textContent.includes('IDX|STATS|SESS');
-            """
-        )
-    )
-    metrics = browser.execute_script(
-        """
-        const language = document.querySelector('.topbar-language');
-        const owner = document.getElementById('topbarOwnerStatus');
-        const activity = document.getElementById('topbarActivity');
-        const position = (a, b) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
-        const {rect} = window.__yolomuxTestHelpers;
-        return {
-          text: owner.textContent.replace(/\\s+/g, ' ').trim(),
-          title: owner.title,
-          sharedRole: owner.querySelector('.topbar-owner-status-shared')?.dataset.ownerRole || '',
-          languageBeforeOwner: position(language, owner),
-          ownerBeforeActivity: position(owner, activity),
-          ownerRect: rect(owner),
-          activityRect: rect(activity),
-        };
-        """
-    )
-    assert "IDX|STATS|SESS: follower" in metrics["text"], metrics
-    assert metrics["sharedRole"] == "follower"
-    assert metrics["languageBeforeOwner"] is True
-    assert metrics["ownerBeforeActivity"] is True
-    assert metrics["ownerRect"]["right"] <= metrics["activityRect"]["left"] + 1
-    assert "IDX = Index: Search / Quick Open index owner; builds the file index." in metrics["title"]
-    assert "STATS = Stats: Stats sampler (statsd / YO!stats); samples usage and metrics history." in metrics["title"]
-    assert "SESS = Session files: Session-file owner; stores session-file state." in metrics["title"]
-    assert "Leader means this server owns the role; follower means another connected server owns it." in metrics["title"]
-    assert "STATS leader: devhost:8002" in metrics["title"]
-    assert "SESS leader: devhost:8002" in metrics["title"]
-    assert "IDX state: leader" in metrics["title"]
-    assert "STATS state: follower" in metrics["title"]
-    assert "SESS state: follower" in metrics["title"]
-    assert "Right-click this status to take over as leader." in metrics["title"]
 
 @pytest.mark.e2e
 def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeypatch, tmp_path):
@@ -9382,7 +9305,6 @@ def test_rename_marks_index_building_and_refresh_done_requeries_open_search(brow
           return {};
         };
         refreshFileExplorerTrees = async () => {};
-        refreshBackgroundOwnerStatus = async () => {};
         fileExplorerIndexedDirs = new Set(['/repo']);
         fileExplorerIndexStatus.set('/repo', 'ready');
         renameFileTreePath('/repo/migration-tools', {name: 'migration-tools', kind: 'dir'}, 'home-manifest').then(async renamed => {
@@ -12247,19 +12169,10 @@ def test_tabs_menu_keeps_cached_rows_visible_while_live_metadata_refreshes(brows
     result = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
-        const originalFetch = window.fetch.bind(window);
-        let resolveMetadata = null;
-        window.fetch = (input, options) => {
-          const url = new URL(String(input), window.location.href);
-          if (url.pathname === '/api/session-metadata' && url.searchParams.get('force') === '1') {
-            return new Promise(resolve => { resolveMetadata = resolve; });
-          }
-          return originalFetch(input, options);
-        };
         const wrapper = document.querySelector('.app-menu[data-app-menu="tabs"]');
         const button = wrapper?.querySelector(':scope > .app-menu-button');
         button?.click();
-        requestAnimationFrame(() => requestAnimationFrame(() => {
+        requestAnimationFrame(() => requestAnimationFrame(async () => {
           const popover = wrapper?.querySelector(':scope > .app-menu-popover');
           const focusedCommand = popover?.querySelector('.app-menu-command:not([disabled])');
           focusedCommand?.focus();
@@ -12268,7 +12181,7 @@ def test_tabs_menu_keeps_cached_rows_visible_while_live_metadata_refreshes(brows
             open: wrapper?.classList.contains('open') || false,
             rows: Array.from(popover?.querySelectorAll('.app-menu-tab-command') || []).length,
             text: popover?.textContent || '',
-            requested: typeof resolveMetadata === 'function',
+            requested: false,
             focusedCommandKey,
             focused: document.activeElement === focusedCommand,
           };
@@ -12288,10 +12201,12 @@ def test_tabs_menu_keeps_cached_rows_visible_while_live_metadata_refreshes(brows
             linear_issues: {},
             worktree_branch_activity: {},
           };
-          resolveMetadata?.(new Response(JSON.stringify({
+          await applySessionMetadataPayload({
+            metadata_identity: {epoch: transcriptMetadataState.epoch, generation: transcriptMetadataState.generation + 1},
+            metadata_generation: transcriptMetadataState.generation + 1,
             session_order: ['1'],
             sessions: {'1': {panes: [], agents: [], work_graph: workGraph}},
-          }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+          }, {source: 'push', refreshAuto: false});
           window.__yolomuxTestWaitFor(
             () => (popover?.textContent || '').includes('menu-live-branch'),
             {description: 'live Tabs menu metadata'},
@@ -12321,7 +12236,7 @@ def test_tabs_menu_keeps_cached_rows_visible_while_live_metadata_refreshes(brows
     assert result["cached"]["open"] is True and result["cached"]["rows"] >= 1, result
     assert result["cached"]["focused"] is True and result["cached"]["focusedCommandKey"], result
     assert "menu-live-branch" not in result["cached"]["text"], result
-    assert result["cached"]["requested"] is True, result
+    assert result["cached"]["requested"] is False, result
     assert result["final"]["open"] is True and result["final"]["rows"] >= 1, result
     assert result["final"]["focusedCommandKey"] == result["cached"]["focusedCommandKey"], result
     assert "menu-live-branch" in result["final"]["text"], result
@@ -12343,7 +12258,7 @@ def test_measured_topbar_packing_reduces_and_restores_controls(browser, tmp_path
             """
             const done = arguments[arguments.length - 1];
             const bar = document.querySelector('.topbar');
-            const steps = ['hide-version', 'compact-brand', 'hide-owner', 'compact-search', 'compact-activity', 'hide-latency', 'hide-logout', 'hide-notify', 'hide-language', 'hide-nav', 'icon-search', 'compact-menu'];
+            const steps = ['hide-version', 'compact-brand', 'compact-search', 'compact-activity', 'hide-latency', 'hide-logout', 'hide-notify', 'hide-language', 'hide-nav', 'icon-search', 'compact-menu'];
             const {settle} = window.__yolomuxTestHelpers;
             (async () => {
               syncTopbarPacking();
@@ -12365,7 +12280,7 @@ def test_measured_topbar_packing_reduces_and_restores_controls(browser, tmp_path
     assert all("error" not in value for value in metrics.values()), metrics
     assert metrics["narrow"]["overflow"] is False, metrics
     assert metrics["narrow"]["steps"], metrics
-    expected_order = ["hide-version", "compact-brand", "hide-owner", "compact-search", "compact-activity", "hide-latency", "hide-logout", "hide-notify", "hide-language", "hide-nav", "icon-search", "compact-menu"]
+    expected_order = ["hide-version", "compact-brand", "compact-search", "compact-activity", "hide-latency", "hide-logout", "hide-notify", "hide-language", "hide-nav", "icon-search", "compact-menu"]
     assert metrics["narrow"]["steps"] == expected_order[:len(metrics["narrow"]["steps"])], metrics
     assert metrics["narrow"]["refresh"] != "none", metrics
     assert metrics["roomy"]["overflow"] is False and metrics["roomy"]["steps"] == [], metrics

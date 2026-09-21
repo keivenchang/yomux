@@ -1497,7 +1497,10 @@ function retireFileExplorerDirectoryDemand(path) {
     if (retires(candidate)) changed = fileExplorerExpanded.delete(candidate) || changed;
   }
   for (const candidate of Array.from(fileExplorerPendingExpansions)) {
-    if (retires(candidate)) changed = fileExplorerPendingExpansions.delete(candidate) || changed;
+    if (retires(candidate)) {
+      fileExplorerPendingExpansionOwners.delete(candidate);
+      changed = fileExplorerPendingExpansions.delete(candidate) || changed;
+    }
   }
   for (const candidate of Array.from(fileExplorerSyncUserExpansionState.keys())) {
     if (retires(candidate)) changed = fileExplorerSyncUserExpansionState.delete(candidate) || changed;
@@ -2826,7 +2829,12 @@ function childPath(parent, name) {
 async function ensureDirectoryRowExpanded(row, fullPath, options = {}) {
   if (!row || row.dataset?.kind !== 'dir') return null;
   const existing = childContainerForRow(row, fullPath);
-  if (existing) return existing;
+  const cachedEntries = cachedFileExplorerFsResourceValue('list', fullPath);
+  if (existing && Array.isArray(cachedEntries)) {
+    if (!fileTreeDirectRows(existing).length && cachedEntries.length) renderExpandedDirectoryRowChildren(row, fullPath, cachedEntries);
+    return existing;
+  }
+  if (existing && fileTreeDirectRows(existing).length) return existing;
   await expandDirectoryRow(row, fullPath, options);
   return childContainerForRow(row, fullPath);
 }
@@ -2867,12 +2875,7 @@ async function expandFileTreeContainerToPath(container, root, path, generation =
     row = directFileTreeRow(scope, fullPath);
     if (!row) return false;
     if (row.dataset?.kind === 'dir') {
-      // An automatic reveal (following the active tab/file) must not resurrect an ancestor directory
-      // the user manually collapsed in sync mode -- the active path is often inside a repo the user
-      // just collapsed, and the deferred reveal would re-expand it, fighting the user. Stop at the
-      // collapsed ancestor. Route through the same fileExplorerSyncPathSuppressed predicate the sync
-      // expand-loop and remembered-state restore use, so all three honor one source of truth.
-      // Explicit reveals (auto !== true, e.g. the user clicked the file) still expand through.
+      // Automatic reveals honor sync-mode manual collapse; explicit reveals still expand through.
       if (options.auto === true && fullPath !== path && fileExplorerRootMode === 'sync' && fileExplorerSyncPathSuppressed(fullPath)) {
         return false;
       }
@@ -3235,13 +3238,9 @@ function sortedFileTreeEntries(entries, sortMode = fileExplorerTreeSortModeForVi
   });
 }
 
-// one source for the git-status row classes (the toggle loop hardcoded this 5-element list in
-// two places — updateFileTreeRow + updateFileTreeGitStatusRows — so a status that maps elsewhere or a row
-// that changes status could leave a stale class behind on one path but not the other). applyGitStatusRowClass
-// toggles exactly this set so the stale class is always cleared.
+// One source for the git-status row classes; applyGitStatusRowClass clears stale classes on both paths.
 const GIT_STATUS_ROW_CLASSES = Object.freeze(['git-modified', 'git-untracked', 'git-deleted', 'git-staged', 'git-transcript']);
-// The session-highlight row classes (sync-expanded / session-repo / session-touched), likewise toggled in
-// two places (applyFileExplorerSessionHighlightRow + updateFileTreeRow).
+// Session-highlight row classes are likewise toggled through one helper.
 const SESSION_HIGHLIGHT_ROW_CLASSES = Object.freeze(['file-tree-row--sync-expanded', 'file-tree-row--session-repo', 'file-tree-row--session-touched']);
 
 function updateFileTreeSyncTargetMarker(row, active, title = '') {
@@ -4032,7 +4031,7 @@ function updateFileExplorerCurrentFileHighlight() {
   });
 }
 
-function scheduleFileExplorerActiveFileReveal(path = activeFile) {
+function scheduleFileExplorerActiveFileReveal(path = activeFile, options = {}) {
   if (!path) {
     updateFileExplorerCurrentFileHighlight();
     return;
@@ -4047,7 +4046,7 @@ function scheduleFileExplorerActiveFileReveal(path = activeFile) {
   const schedule = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : callback => setTimeout(callback, 0);
   schedule(() => {
     if (generation !== fileExplorerSyncState.generation) return;
-    expandFileExplorerTreesToPath(target, root, generation, {auto: true}).catch(error => {
+    expandFileExplorerTreesToPath(target, root, generation, options.explicit === true ? {user: true} : {auto: true}).catch(error => {
       console.warn('Finder active file reveal failed', error);
     });
   });
@@ -4055,9 +4054,7 @@ function scheduleFileExplorerActiveFileReveal(path = activeFile) {
 
 function updateFileTreeGitStatusRows(targetRows = null) {
   const changedAncestorStats = fileTreeChangedAncestorStats();
-  // Exclude Tabber rows: their data-path is a synthetic node path (/s_<id>...), so the finder's
-  // git-status/name refresh would rewrite the label to the path basename (s_1/w_0/r_00000) and clobber
-  // the Tabber's own render. The Tabber owns its rows via updateTabberRow / refreshTabberPanels.
+  // Tabber rows have synthetic paths; its own renderer owns their labels and status.
   const rows = targetRows === null
     ? document.querySelectorAll('.file-tree-row[data-path]:not([data-tabber-type])')
     : targetRows;
@@ -4573,9 +4570,9 @@ function fileIndexFreshnessFromPayload(payload) {
     // them; `missing` is deliberately not stale, because nothing was served to mislabel.
     stale: source.stale === true
       || FILE_INDEX_STALE_FRESHNESS_STATES.includes(state)
-      || String(source.index_state || '') === 'follower-stale'
+      || String(source.index_state || '') === 'stale'
       || String(source.index_coverage || '') === 'unverified',
-    refreshingElsewhere: source.refreshing_elsewhere === true,
+    refreshing: source.refreshing === true,
   };
 }
 
@@ -4589,7 +4586,7 @@ function fileIndexFreshnessMessage(freshness) {
   if (freshness.producerState === 'not_running') lines.push(t('finder.index.staleProducerNotRunning'));
   else if (freshness.producerState === 'unrecorded') lines.push(t('finder.index.staleProducerUnrecorded'));
   else if (freshness.reason === 'producer_vouch_expired') lines.push(t('finder.index.staleProducerBehind'));
-  if (freshness.refreshingElsewhere) lines.push(t('finder.index.staleRefreshRunning'));
+  if (freshness.refreshing) lines.push(t('finder.index.staleRefreshRunning'));
   return lines.join(' ');
 }
 
@@ -4631,7 +4628,7 @@ function fileIndexStatusFromPayload(payload) {
   if (state === 'error' || payload.error) return 'error';
   // A served-but-unvouched snapshot is neither ready nor building: it answers, and it says so.
   if (freshness.stale) return 'stale';
-  if (payload.ready === true || payload.ready_elsewhere === true || state === 'ready') return 'ready';
+  if (payload.ready === true || state === 'ready') return 'ready';
   return 'building';
 }
 
@@ -4723,6 +4720,13 @@ function refreshBuildingFileIndexStatuses() {
 }
 
 function syncFileIndexStatusPollInterval() {
+  if (clientEventTransportState.connected === true || fileExplorerIndexRefreshSeconds <= 0) {
+    clearRuntimeInterval('file-index-refresh');
+  } else {
+    // Status polling is a disconnected-transport repair path. Do not leave a timer alive that
+    // wakes up and returns null on every tick while SSE is already authoritative.
+    resetRuntimeInterval('file-index-refresh', refreshAllIndexedDirsStatus, fileExplorerIndexRefreshSeconds * 1000);
+  }
   if (!fileIndexStatusPollRoots.size || clientEventTransportState.connected === true) {
     clearRuntimeInterval('file-index-building');
     return;
@@ -4767,9 +4771,8 @@ function markFileIndexRootsRefreshing(roots = []) {
   if (changed) updateFileExplorerIndexedDirectoryRows();
 }
 
-// Proactive periodic re-check: re-fetches index-status for every indexed root even if already
-// 'ready', so stale indexes (TTL expired server-side) get rebuilt without waiting for a search.
 function refreshAllIndexedDirsStatus() {
+  if (clientEventTransportState.connected === true) return null; // SSE is authoritative; repair only while disconnected.
   const finderVisible = document.visibilityState !== 'hidden'
     && itemIsActivePaneTab(finderItemId);
   const fileSearchVisible = document.visibilityState !== 'hidden'
@@ -5116,7 +5119,7 @@ function tabberActivityPayloadHasUsefulData(payload) {
 }
 
 function tabberActivityPayloadIsRefreshPlaceholder(payload) {
-  return payload?.cache?.refreshing_elsewhere === true && !tabberActivityPayloadHasUsefulData(payload);
+  return payload?.cache?.refreshing === true && !tabberActivityPayloadHasUsefulData(payload);
 }
 
 function applyTabberActivityPayload(payload, requestGeneration = 0) {
@@ -5129,7 +5132,7 @@ function applyTabberActivityPayload(payload, requestGeneration = 0) {
   if (refreshPlaceholder && tabberActivityPayloadHasUsefulData(tabberActivityPayload)) return false;
   tabberActivityPayload = payload;
   tabberActivityState.loaded = true;
-  // A follower placeholder is not an authoritative snapshot. Let an older in-flight full response
+  // A refresh placeholder is not an authoritative snapshot. Let an older in-flight full response
   // replace it, while an accepted full response prevents older requests from rolling data back.
   if (!refreshPlaceholder && generation > tabberActivityState.appliedGeneration) {
     tabberActivityState.appliedGeneration = generation;

@@ -11,17 +11,22 @@ from yolomux_lib import agent_tui
 from yolomux_lib import app
 from yolomux_lib import common
 from yolomux_lib import session_files
+from yolomux_lib import version
 from yolomux_lib import web
 from yolomux_lib.filesystem import git_ops
 from yolomux_lib.tmux import process_group_ownership
 from yolomux_lib.yoagent import conversation
 
 
-def test_package_and_runtime_versions_match():
-    package_source = (Path(common.PROJECT_ROOT) / "yolomux_lib" / "common.py").read_text(encoding="utf-8")
-    package_match = common.YOLOMUX_VERSION_ASSIGNMENT_RE.search(package_source)
-    assert package_match is not None
-    assert package_match.group(1) == common.YOLOMUX_VERSION
+def test_package_and_runtime_versions_use_one_source():
+    root = Path(common.PROJECT_ROOT)
+    version_source = (root / "yolomux_lib" / "version.py").read_text(encoding="utf-8")
+    version_match = common.YOLOMUX_VERSION_ASSIGNMENT_RE.search(version_source)
+    assert version_match is not None
+    assert version_match.group(1) == version.YOLOMUX_VERSION == common.YOLOMUX_VERSION
+    assert 'version = { attr = "yolomux_lib.version.YOLOMUX_VERSION" }' in (root / "pyproject.toml").read_text(encoding="utf-8")
+    assert "YOLOMUX_VERSION = \"" not in (root / "yolomux_lib" / "common.py").read_text(encoding="utf-8")
+    assert "YOLOMUX_VERSION = \"" not in (root / "yolomux_lib" / "infra" / "common.py").read_text(encoding="utf-8")
 
 
 def test_record_owned_thread_starts_use_shared_rollback_owner():
@@ -33,7 +38,9 @@ def test_record_owned_thread_starts_use_shared_rollback_owner():
             "start_input_heartbeat_worker",
             "start_tabber_activity_cache_refresh",
             "start_tabber_activity_cache_warmer",
+            "indexed_repo_roots_snapshot",
             "warm_metadata_cache_async",
+            "start_update_check_thread",
         },
         "yolomux_lib/search/file_index.py": {"_start_build"},
         "yolomux_lib/yoagent/controller.py": {
@@ -108,13 +115,14 @@ def test_main_process_cpu_work_has_named_allowlist():
         "start_client_watch_snapshot_publish",
         "start_input_heartbeat_worker",
         "start_watchd_revision_watcher",
-            "start_session_files_cache_refresh",
-            "start_status_generation_watcher",
-            "start_tabber_activity_cache_refresh",
+        "start_session_files_cache_refresh",
+        "start_status_generation_watcher",
+        "start_tabber_activity_cache_refresh",
         "start_tabber_activity_cache_warmer",
-        "start_transcripts_payload_refresh",
+        "_start_transcripts_payload_refresh",
         "start_update_check_thread",
         "warm_metadata_cache_async",
+        "schedule_tmux_roster_rebuild",
     }
 
     retired_patterns = (

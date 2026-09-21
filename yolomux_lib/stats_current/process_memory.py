@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""Bounded host process-memory census for the elected stats owner."""
+"""Bounded host process-memory census for the local stats writer."""
 
 from __future__ import annotations
 

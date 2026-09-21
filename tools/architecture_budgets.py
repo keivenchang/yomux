@@ -42,7 +42,7 @@ CLASS_TARGETS: Final[tuple[tuple[str, str], ...]] = (
     ("yolomux_lib/watchd.py", "PersistentWatchService"),
     ("yolomux_lib/infra/batchd.py", "PersistentJobBroker"),
     ("yolomux_lib/infra/batchd.py", "JobProductStore"),
-    ("yolomux_lib/infra/background_owner.py", "BackgroundOwnerRegistry"),
+    ("yolomux_lib/infra/background_scheduler.py", "BackgroundScheduler"),
     ("yolomux_lib/infra/state_services.py", "SessionFilesOperationLifecycle"),
 )
 PRODUCTION_LINE_TARGETS: Final[tuple[str, ...]] = (
@@ -103,6 +103,12 @@ RETIRED_SHARE_SKIPPED_PARTS: Final[frozenset[str]] = frozenset((
     ".git", ".claude", ".venv", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
 ))
 RETIRED_SHARE_SKIPPED_SUFFIXES: Final[tuple[str, ...]] = (".agent-edit.lock",)
+
+
+def _is_core_dump_filename(filename: str) -> bool:
+    """Keep the source scan from loading a process core dump into memory."""
+
+    return filename == "core" or (filename.startswith("core.") and filename[5:].isdigit())
 
 
 @dataclass(frozen=True)
@@ -355,6 +361,8 @@ def _retired_share_surface_violations(root: Path) -> tuple[str, ...]:
             and not directory.endswith(RETIRED_SHARE_SKIPPED_SUFFIXES)
         )
         for filename in sorted(filenames):
+            if _is_core_dump_filename(filename):
+                continue
             path = Path(parent) / filename
             relative = path.relative_to(root).as_posix()
             parts = Path(relative).parts

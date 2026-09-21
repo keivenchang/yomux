@@ -423,7 +423,7 @@ function hydratePreviewZoomSurface(shell, content = null, options = null) {
     return applied;
   };
   const ResizeObserverCtor = ownerWindow?.ResizeObserver || (typeof ResizeObserver === 'function' ? ResizeObserver : null);
-  if (ResizeObserverCtor) {
+  if (ResizeObserverCtor && resolvedOptions.controlsOnly !== true) {
     const resizeObserver = new ResizeObserverCtor(() => {
       // Coalesce to one apply per frame. applyPreviewZoomSurface resizes the content inside the
       // observed viewport (and can toggle a scrollbar, which changes the viewport content-box),
@@ -480,6 +480,7 @@ function installPreviewZoomSurface(shell, content, options = {}) {
   toolbar.appendChild(value);
   const viewport = document.createElement('div');
   viewport.className = 'file-editor-preview-zoom-viewport';
+  if (options.controlsOnly === true) viewport.dataset.previewZoomControlsOnly = '1';
   const stage = document.createElement('div');
   stage.className = 'file-editor-preview-zoom-stage';
   stage.appendChild(content);
@@ -494,6 +495,52 @@ function previewZoomSurfaceNode(content, options = {}) {
 }
 
 let mermaidPreviewRenderSeq = 0;
+const mermaidRenderCache = new Map();
+const mermaidRenderInflight = new Map();
+const MERMAID_RENDER_CACHE_LIMIT = 64;
+
+function mermaidRenderCacheKey(source) {
+  const text = String(source || '').trim();
+  const config = typeof mermaidPreviewConfig === 'function' ? mermaidPreviewConfig() : {};
+  return JSON.stringify({text, config, cacheVersion: 1});
+}
+
+function mermaidCachedSvg(source) {
+  const key = mermaidRenderCacheKey(source);
+  const cached = mermaidRenderCache.get(key);
+  if (cached) {
+    mermaidRenderCache.delete(key);
+    mermaidRenderCache.set(key, cached);
+    return {key, value: cached};
+  }
+  return {key, value: null};
+}
+
+function rememberMermaidSvg(key, svg) {
+  mermaidRenderCache.delete(key);
+  mermaidRenderCache.set(key, svg);
+  while (mermaidRenderCache.size > MERMAID_RENDER_CACHE_LIMIT) {
+    mermaidRenderCache.delete(mermaidRenderCache.keys().next().value);
+  }
+  return svg;
+}
+
+function mermaidSvgForRender(api, key, text, seq) {
+  const existing = mermaidRenderInflight.get(key);
+  if (existing) return existing;
+  const id = `yolomux-mermaid-${Date.now()}-${seq}`;
+  const promise = Promise.resolve()
+    .then(() => api.render(id, text))
+    .then(result => {
+      const rawSvg = typeof result === 'string' ? result : result?.svg;
+      return rememberMermaidSvg(key, sanitizeStandaloneSvg(rawSvg));
+    })
+    .finally(() => {
+      if (mermaidRenderInflight.get(key) === promise) mermaidRenderInflight.delete(key);
+    });
+  mermaidRenderInflight.set(key, promise);
+  return promise;
+}
 
 function mermaidErrorNode(source, error) {
   const node = document.createElement('div');
@@ -554,27 +601,38 @@ async function renderMermaidSourceInto(container, source, options = {}) {
   try {
     const api = await loadMermaidApi();
     if (!isCurrent() || container.dataset.mermaidRenderSeq !== String(seq)) return false;
-    const id = `yolomux-mermaid-${Date.now()}-${seq}`;
-    const result = await api.render(id, text);
+    const cached = mermaidCachedSvg(text);
+    let svg = cached.value;
+    if (!svg) svg = await mermaidSvgForRender(api, cached.key, text, seq);
     if (!isCurrent() || container.dataset.mermaidRenderSeq !== String(seq)) return false;
-    const rawSvg = typeof result === 'string' ? result : result?.svg;
-    const svg = sanitizeStandaloneSvg(rawSvg);
     if (!svg) throw new Error(t('preview.mermaid.noSvg'));
     const fullPreview = Object.prototype.hasOwnProperty.call(options, 'full')
       ? options.full !== false
       : container.classList.contains('file-editor-preview-pane-panel');
     return await schedulePreviewDeferredWorkAfterUserScroll(container, 'mermaid-completion', () => {
       if (!isCurrent() || container.dataset.mermaidRenderSeq !== String(seq)) return false;
-      const img = document.createElement('img');
-      img.className = 'mermaid-preview-image';
-      img.alt = t('preview.mermaid.alt');
-      img.src = svgImageUrl(svg);
-      installPreviewZoomSurface(container, img, previewZoomOptionsForKind(fullPreview ? 'mermaidFull' : 'mermaidInline', {
-        ...options,
-        path: options.path || '',
-        full: fullPreview,
-      }));
-      return true;
+       const img = document.createElement('img');
+       img.className = 'mermaid-preview-image';
+       img.alt = t('preview.mermaid.alt');
+       img.src = svgImageUrl(svg);
+       if (options.controlsOnly === true) {
+         installPreviewZoomSurface(container, img, previewZoomOptionsForKind(fullPreview ? 'mermaidFull' : 'mermaidInline', {
+           ...options,
+           panDrag: false,
+           path: options.path || '',
+           full: fullPreview,
+         }));
+       } else if (options.interactive === false) {
+         container.replaceChildren(img);
+         container.classList.add('mermaid-preview');
+       } else {
+         installPreviewZoomSurface(container, img, previewZoomOptionsForKind(fullPreview ? 'mermaidFull' : 'mermaidInline', {
+           ...options,
+           path: options.path || '',
+           full: fullPreview,
+         }));
+       }
+       return true;
     });
   } catch (error) {
     return await schedulePreviewDeferredWorkAfterUserScroll(container, 'mermaid-completion', () => {

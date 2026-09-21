@@ -495,6 +495,20 @@ function applyPreviewSnapshotRoot(root, snapshot) {
 function previewSnapshotScratch(path, text, options = {}) {
   const scratch = document.createElement('div');
   scratch.className = 'file-editor-preview-pane-panel';
+  if (options.attach === true && document.body) {
+    scratch.dataset.previewSnapshotScratch = '1';
+    Object.assign(scratch.style, {
+      position: 'fixed',
+      left: '-100000px',
+      top: '0',
+      width: '1px',
+      height: '1px',
+      overflow: 'hidden',
+      visibility: 'hidden',
+      pointerEvents: 'none',
+    });
+    document.body.appendChild(scratch);
+  }
   renderEditorPreviewPane(scratch, path, text, {context: options.context || 'popout'});
   scratch.hidden = false;
   return scratch;
@@ -505,11 +519,16 @@ function renderedPreviewSnapshot(path, text) {
 }
 
 async function renderedPreviewSnapshotAsync(path, text) {
-  const scratch = previewSnapshotScratch(path, text, {context: 'popout'});
-  if (scratch._previewAsync && typeof scratch._previewAsync.then === 'function') {
-    await scratch._previewAsync;
+  const scratch = previewSnapshotScratch(path, text, {context: 'popout', attach: true});
+  try {
+    if (scratch._previewAsync && typeof scratch._previewAsync.then === 'function') {
+      await scratch._previewAsync;
+    }
+    return snapshotRenderedPreviewContainer(scratch);
+  } finally {
+    releasePreviewSurfaceResources(scratch);
+    scratch.remove();
   }
-  return snapshotRenderedPreviewContainer(scratch);
 }
 
 function applyFilePreviewPopoutAsync(path, previewWindow, previewGeneration, promise, apply) {

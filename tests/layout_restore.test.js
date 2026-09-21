@@ -1005,6 +1005,13 @@ async function runLayoutRestoreSuite() {
     const replacement = api.beginTmuxSessionLifecycleMutationForTest('kill', {session: '2'});
     api.commitTmuxSessionLifecycleMutationForTest(replacement);
     resolveRequest({new_session: 'renamed', sessions: ['renamed', '2']});
+    assert.equal(api.applyTmuxRosterPayloadForTest({
+      server_epoch: 'rename-server',
+      session_order: ['renamed', '2'],
+      roster_generation: 1,
+      topology_generation: 1,
+      renames: [{old_session: '1', new_session: 'renamed'}],
+    }), true, 'the backend roster push converges the committed rename');
     const outcome = await result;
     assert.equal(outcome.committed, true, 'the successful server response remains committed');
     assert.equal(outcome.clientCommitted, false, 'the superseded client transaction does not overwrite newer topology');
@@ -2105,6 +2112,7 @@ async function runLayoutRestoreSuite() {
     for (const timerClass of ['poll:no-change', 'sample', 'lease', 'external-reconcile', 'repair', 'fallback', 'local-display']) {
       assert.equal(typeof api.runtimeTimerClassCatalogForTest()[timerClass], 'string', `${timerClass} remains a distinct timer class`);
     }
+    assert.ok(/function syncFileIndexStatusPollInterval\(\)[\s\S]*clientEventTransportState\.connected === true[\s\S]*clearRuntimeInterval\('file-index-refresh'\)[\s\S]*resetRuntimeInterval\('file-index-refresh', refreshAllIndexedDirsStatus/.test(source), 'indexed-root status polling is installed only while the push transport is disconnected');
     assert.deepStrictEqual(canonical(api.runtimeIntervalCatalogForTest('events')), null, 'the normal event-log discovery loop remains retired');
   });
 
@@ -2418,7 +2426,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes("status === 'too_large' ? '!' : (status === 'error' ? '×' : (status === 'stale' ? t('finder.index.staleBadge') : t('finder.index.indexed')))"), 'the indexed badge distinguishes partial coverage, terminal index errors, and a snapshot nobody is updating');
     assert.equal(/function fileExplorerIndexBadgeText\(path\) \{[\s\S]*?fileExplorerTreeDateMode !== 'none'[\s\S]*?return ''/.test(source), false, '#31: Date/Ago rows retain the readable index status beside the date');
     assert.ok(/function fileExplorerIndexBadgeTitle\(path\)[\s\S]*?status === 'too_large'[\s\S]*?finder\.index\.partial/.test(source), 'the indexed badge title reports partial coverage');
-    assert.ok(/function fileIndexStatusFromPayload\(payload\)[\s\S]*payload\.too_large === true[\s\S]*payload\.ready === true[\s\S]*payload\.ready_elsewhere === true/.test(source), 'partial coverage wins over the generic ready state');
+    assert.ok(/function fileIndexStatusFromPayload\(payload\)[\s\S]*payload\.too_large === true[\s\S]*if \(payload\.ready === true \|\| state === 'ready'\) return 'ready'/.test(source), 'partial coverage wins over the generic ready state');
     assert.ok(/function showFileIndexPartialCoverageWarning[\s\S]*emitNotification\('indexCoverage'[\s\S]*finder\.index\.partialBody/.test(source), 'capped indexes emit a persistent user-facing warning');
     assert.ok(/payload\.role === 'search-index'[\s\S]*payload\.root[\s\S]*refreshFileIndexStatus\(payload\.root\)/.test(source), 'search-index build completion checks coverage even when Finder and Quick Open are closed');
     assert.ok(/function reconcileIndexedDirsFromSetting[\s\S]*options\.initial[\s\S]*for \(const root of desired\)[\s\S]*refreshFileIndexStatus\(root\)/.test(source), 'initial browser startup checks every configured index for partial coverage');
@@ -2785,8 +2793,6 @@ async function runLayoutRestoreSuite() {
     assert.equal(/status-indicator[^"]*topbar-activity-blocked[^"]*attention-pulse/.test(html), false, 'topbar blocked count stays static when continuous status pulsing is disabled');
     assert.ok(/1 idle/.test(html), 'status line shows the idle count');
     assert.ok(/\.topbar-activity\s*\{/.test(css), 'the top-bar activity line is styled');
-	    assert.ok(/\.topbar-owner-status\s*\{/.test(css), 'the top-bar ownership indicator is styled');
-	    assert.ok(/\.topbar-owner-status-part\[data-owner-role="leader"\]/.test(css), 'topbar ownership indicator highlights leader state');
 	    assert.ok(/\.topbar-activity\s*\{[\s\S]*gap:\s*var\(--space-4\)[\s\S]*padding:\s*0 var\(--space-6\)/.test(css), 'topbar activity pill uses the narrower shared spacing contract');
 	    assert.ok(/\.topbar-activity-count\s*\{[\s\S]*display:\s*inline-flex/.test(css), 'activity counts align their number and shared status ball');
 	    assert.ok(/\.topbar-activity-count\s*\{[\s\S]*gap:\s*var\(--space-2\)/.test(css), 'topbar activity count keeps number-to-dot spacing compact');
@@ -3966,6 +3972,55 @@ async function runLayoutRestoreSuite() {
     held.forEach(timer => timer.callback());
     await Promise.all([first, second]);
     assert.deepStrictEqual(applied, ['first', 'second']);
+  });
+
+  await testAsync('Mermaid SVG cache retries rejected renders and reuses completed SVG', async () => {
+    let renderCalls = 0;
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin');
+    api.setMermaidApiForTest({
+      initialize() {},
+      render() {
+        renderCalls += 1;
+        if (renderCalls === 1) return Promise.reject(new Error('transient Mermaid failure'));
+        return {svg: '<svg xmlns="http://www.w3.org/2000/svg"><text>cached</text></svg>'};
+      },
+    });
+    const source = 'graph TD; RetryA-->RetryB';
+    const failedHost = new TestElement('mermaid-rejected-first');
+    const retryHost = new TestElement('mermaid-rejected-retry');
+    const cachedHost = new TestElement('mermaid-cached-retry');
+    assert.equal(await api.renderMermaidSourceIntoForTest(failedHost, source), false);
+    assert.equal(await api.renderMermaidSourceIntoForTest(retryHost, source), true);
+    assert.equal(await api.renderMermaidSourceIntoForTest(cachedHost, source), true);
+    assert.equal(renderCalls, 2, 'a rejected render is removed and completed SVG is cached');
+  });
+
+  await testAsync('Mermaid SVG cache coalesces concurrent identical renders', async () => {
+    let renderCalls = 0;
+    let resolveRenderStarted;
+    let resolveRenderResult;
+    const renderStarted = new Promise(resolve => { resolveRenderStarted = resolve; });
+    const renderResult = new Promise(resolve => { resolveRenderResult = resolve; });
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin');
+    api.setMermaidApiForTest({
+      initialize() {},
+      render() {
+        renderCalls += 1;
+        resolveRenderStarted();
+        return renderResult;
+      },
+    });
+    const firstHost = new TestElement('mermaid-concurrent-first');
+    const secondHost = new TestElement('mermaid-concurrent-second');
+    const first = api.renderMermaidSourceIntoForTest(firstHost, 'graph TD; SameA-->SameB');
+    const second = api.renderMermaidSourceIntoForTest(secondHost, 'graph TD; SameA-->SameB');
+
+    await renderStarted;
+    assert.equal(renderCalls, 1, 'identical concurrent Mermaid renders share one in-flight promise');
+    resolveRenderResult({svg: '<svg xmlns="http://www.w3.org/2000/svg"><text>concurrent</text></svg>'});
+    assert.deepEqual(await Promise.all([first, second]), [true, true]);
+    assert.ok(firstHost.querySelector('.mermaid-preview-image'));
+    assert.ok(secondHost.querySelector('.mermaid-preview-image'));
   });
 
   await testAsync('raw image failure fallback waits for native Preview touch ownership', async () => {

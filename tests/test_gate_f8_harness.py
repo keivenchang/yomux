@@ -330,6 +330,31 @@ def _quiescent_state():
     return state
 
 
+def test_quiescence_does_not_wait_for_the_recurring_watch_diff_receipt():
+    class RecurringWatchDriver:
+        def __init__(self):
+            self.receipt_scripts = []
+
+        def execute_script(self, _script):
+            state = _blocked_by_baseline_state()
+            state["pending"] = ["op-recurring-watch"]
+            state["watchDiffPendingOperationIds"] = ["op-recurring-watch"]
+            state["watchRootsPending"] = False
+            state["watchRootsBaselinePending"] = False
+            return state
+
+        def execute_async_script(self, script, *_args):
+            self.receipt_scripts.append(script)
+            return clean_browser_receipt_barrier(accepted=1)
+
+    driver = RecurringWatchDriver()
+    settled = wait_for_fixture_api_quiescence(driver, timeout=0.05)
+
+    assert settled["pending"] == ["op-recurring-watch"], "the recurring receipt remains diagnostic state"
+    assert settled["watchDiffPendingOperationIds"] == ["op-recurring-watch"]
+    assert settled["watchRootsBaselinePending"] is False
+
+
 def test_quiescence_waits_out_the_in_flight_watch_diff_baseline_receipt():
     class BaselineReceiptDriver:
         def __init__(self):

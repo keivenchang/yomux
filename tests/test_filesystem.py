@@ -104,7 +104,7 @@ def test_reindex_batch_skips_blocked_paths_without_starving_safe_paths(monkeypat
         "mark_paths_dirty",
         lambda paths, include_root, prepare_root=None: dirty.extend(paths) or {},
     )
-    monkeypatch.setattr(filesystem_search.file_index, "background_owner_can_build", lambda: True)
+    monkeypatch.setattr(filesystem_search.file_index, "build_authorized", lambda: True)
     monkeypatch.setattr(filesystem_search.file_index, "schedule_refreshes", lambda: 0)
     filesystem_search._LOGGED_BLOCKED_REINDEX_PATHS.clear()
 
@@ -1045,28 +1045,27 @@ def test_filesystem_entrypoints_route_through_the_shared_safe_path_primitive():
     assert bypasses == []
 
 
-def test_unindex_follower_derives_refreshing_elsewhere_from_the_one_verdict(tmp_path, monkeypatch):
-    # W6: the follower unindex path is a background-refresh control outcome, so
-    # its `ok`/`refreshing_elsewhere` must come from the single classifier, not
-    # from reading the raw `accepted` boolean twice. A live remote owner that
-    # accepts the unindex is refreshing elsewhere; a rejected one is not.
-    monkeypatch.setattr(filesystem_search.file_index, "background_owner_can_build", lambda: False)
+def test_unindex_uses_the_one_local_refresh_verdict(tmp_path, monkeypatch):
+    # The local scheduler owns the refresh request directly. The public result
+    # reports only whether the request was accepted; it no longer exposes a
+    # peer-owned `refreshing` state.
+    monkeypatch.setattr(filesystem_search.file_index, "build_authorized", lambda: False)
 
     monkeypatch.setattr(
         filesystem_search.file_index,
-        "request_background_owner_refresh",
+        "request_background_refresh",
         lambda _payload: {"ok": True, "accepted": True, "role": "search-index", "fallback": False},
     )
     accepted = filesystem_search.unindex_root(str(tmp_path))
-    assert accepted == {"root": str(tmp_path), "ok": True, "refreshing_elsewhere": True}
+    assert accepted == {"root": str(tmp_path), "ok": True}
 
     monkeypatch.setattr(
         filesystem_search.file_index,
-        "request_background_owner_refresh",
+        "request_background_refresh",
         lambda _payload: {"ok": False, "accepted": False, "role": "search-index", "fallback": True},
     )
     rejected = filesystem_search.unindex_root(str(tmp_path))
-    assert rejected == {"root": str(tmp_path), "ok": False, "refreshing_elsewhere": False}
+    assert rejected == {"root": str(tmp_path), "ok": False}
 
 
 def test_listing_reports_stage_timings_without_exposing_entry_names(tmp_path):
@@ -3068,6 +3067,31 @@ def test_git_history_page_freezes_head_scope_and_constant_git_calls(tmp_path, mo
     assert [item["sha"] for item in older["commits"]] == expected[2:4]
 
 
+def test_git_history_exposes_refs_branch_and_worktree_status(tmp_path):
+    repo = create_git_history_repository(tmp_path / "history")
+    branch = repo.git("branch", "--show-current").stdout.strip()
+    repo.git("tag", "-m", "v0.8.8", "v0.8.8", repo.merge_sha)
+    repo.git("update-ref", "refs/remotes/origin/main", repo.merge_sha)
+    (repo.root / "root.txt").write_text("working tree change\n", encoding="utf-8")
+    untracked = repo.root / "scope" / "new file.txt"
+    untracked.write_text("untracked\n", encoding="utf-8")
+
+    history = filesystem.git_history(str(repo.root), limit=1)
+
+    assert history["branch"] == branch
+    assert history.get("detached", False) is False
+    assert history["dirty_count"] == 2
+    assert {entry["status"]: entry["path"] for entry in history["dirty_entries"]} == {
+        " M": "root.txt",
+        "??": "scope/new file.txt",
+    }
+    assert history.get("dirty_entries_truncated", False) is False
+    decorations = history["commits"][0]["decorations"]
+    assert f"HEAD -> {branch}" in decorations
+    assert "tag: v0.8.8" in decorations
+    assert "origin/main" in decorations
+
+
 def test_pinned_git_view_reuses_warm_loose_objects_without_the_cross_process_writer_lock(tmp_path, monkeypatch):
     runtime_root = tmp_path / "runtime"
     runtime_root.mkdir()
@@ -3933,9 +3957,20 @@ def test_git_history_does_not_materialize_objects_or_retain_descriptors(tmp_path
         "_pinned_git_object_store",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("history must not materialize Git objects")),
     )
-    before_descriptors = len(os.listdir("/proc/self/fd"))
+    def repo_descriptors():
+        owned = {}
+        for fd_name in os.listdir("/proc/self/fd"):
+            try:
+                target = os.readlink(f"/proc/self/fd/{fd_name}")
+            except FileNotFoundError:
+                continue
+            if target == str(repo.root) or target.startswith(f"{repo.root}/"):
+                owned[fd_name] = target
+        return owned
+
+    before_descriptors = repo_descriptors()
     history = filesystem.git_history(str(repo.root), limit=1)
-    after_descriptors = len(os.listdir("/proc/self/fd"))
+    after_descriptors = repo_descriptors()
 
     assert history["commits"][0]["sha"] == repo.merge_sha
     assert after_descriptors == before_descriptors
@@ -4350,6 +4385,20 @@ def test_git_history_numstat_parser_handles_git_framing_empty_commit_and_newline
     assert commits[1]["added"] == 0
     assert commits[1]["removed"] == 0
     assert commits[1]["binary_files"] == 0
+
+
+def test_git_status_parser_preserves_nul_delimited_rename_and_path_statuses():
+    entries, truncated = git_ops._parse_git_status_porcelain_z(
+        b" M tracked.txt\0R  renamed.txt\0old.txt\0?? name\nwith-newline.txt\0",
+        output_truncated=False,
+    )
+
+    assert truncated is False
+    assert entries == [
+        {"status": " M", "path": "tracked.txt"},
+        {"status": "R ", "path": "renamed.txt", "old_path": "old.txt"},
+        {"status": "??", "path": "name\nwith-newline.txt"},
+    ]
 
 
 @pytest.mark.parametrize(

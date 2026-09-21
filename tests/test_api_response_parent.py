@@ -372,7 +372,7 @@ def test_response_parent_same_caller_request_id_frames_identical_retained_produc
     )
     first, _first_writes = _capturing_handler(route)
     second, _second_writes = _capturing_handler(route)
-    headers = {"X-YOLOmux-Request-ID": "r-owner-follower-parity"}
+    headers = {"X-YOLOmux-Request-ID": "r-same-request-id-parity"}
     first.headers = headers
     second.headers = headers
     product = b'{"cache_generation":7,"source_generation":5}'
@@ -380,7 +380,7 @@ def test_response_parent_same_caller_request_id_frames_identical_retained_produc
     first_id = first.api_request_id()
     second_id = second.api_request_id()
 
-    assert first_id == second_id == "r-owner-follower-parity"
+    assert first_id == second_id == "r-same-request-id-parity"
     assert server.ready_response_envelope_bytes(
         product,
         first_id,

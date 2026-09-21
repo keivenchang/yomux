@@ -1723,7 +1723,7 @@ async function runTabberSuite() {
     assert.equal(idleClaudeWindow.mtime, 2000, 'after the live working state clears, Tabber returns to the historical transcript clock');
   });
 
-  test('Tabber preserves Ago timestamps across follower refresh placeholders', () => {
+  test('Tabber preserves Ago timestamps across local refresh placeholders', () => {
     const api = loadYolomux('', ['4']);
     api.setFileExplorerModeForTest('tabber');
     api.setFileExplorerTreeDateModeForTest('date');
@@ -1748,9 +1748,9 @@ async function runTabberSuite() {
     assert.equal(originalDates['/s_4/w_0'], api.sessionFileTimeText(Date.now() / 1000), 'a live working row shows the current liveness clock instead of stale transcript history');
     assert.equal(originalDates['/s_4/w_1'], api.sessionFileTimeText(3000), 'full snapshot shows the shell timestamp');
 
-    const placeholder = {activity: {}, agents: [], agent_windows: {}, cache: {refreshing_elsewhere: true}};
-    assert.equal(api.applyTabberActivityPayloadForTest(placeholder, 2), false, 'empty follower refresh is not authoritative over useful activity');
-    assert.deepEqual(windowDates(), originalDates, 'follower refresh cannot make several Tabber timestamps disappear');
+    const placeholder = {activity: {}, agents: [], agent_windows: {}, cache: {refreshing: true}};
+    assert.equal(api.applyTabberActivityPayloadForTest(placeholder, 2), false, 'empty local refresh is not authoritative over useful activity');
+    assert.deepEqual(windowDates(), originalDates, 'a local refresh cannot make several Tabber timestamps disappear');
 
     const replacement = {
       activity: {'4:1': {active_recency_ts: 5000}},
@@ -1762,7 +1762,7 @@ async function runTabberSuite() {
     assert.equal(api.applyTabberActivityPayloadForTest({...replacement, activity: {'4:1': {active_recency_ts: 7000}}}, 1), false, 'an older overlapping request cannot roll back an accepted snapshot');
     assert.equal(windowDates()['/s_4/w_1'], api.sessionFileTimeText(5000), 'stale response ordering leaves the accepted timestamp intact');
 
-    assert.equal(api.applyTabberActivityPayloadForTest({activity: {}, agents: [], agent_windows: {}, cache: {refreshing_elsewhere: false}}, 4), true, 'a genuine non-placeholder empty snapshot remains authoritative');
+    assert.equal(api.applyTabberActivityPayloadForTest({activity: {}, agents: [], agent_windows: {}, cache: {refreshing: false}}, 4), true, 'a genuine non-placeholder empty snapshot remains authoritative');
     assert.deepEqual(windowDates(), {'/s_4/w_0': api.sessionFileTimeText(Date.now() / 1000), '/s_4/w_1': ''}, 'legitimate activity expiry removes historical rows without hiding a current working status');
   });
 

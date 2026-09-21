@@ -27,7 +27,7 @@ BROWSER_BOOT_ROUTES = tuple(
         ("/api/attention-ack", ("POST",)), ("/api/auto-approve", ("GET", "POST")),
         ("/api/session-metadata", ("GET",)),
         ("/api/transcripts", ("GET",)), ("/api/activity-summary", ("GET",)),
-        ("/api/background/status", ("GET",)), ("/api/session-files", ("GET",)),
+        ("/api/session-files", ("GET",)),
         ("/api/stats-capabilities", ("GET",)), ("/api/stats-observations", ("POST",)),
         ("/api/stats-snapshot", ("GET",)), ("/api/ping", ("GET",)),
         ("/api/event", ("POST",)), ("/api/events", ("GET",)),
@@ -58,13 +58,12 @@ class BrowserBootScenario:
     yoagent_chat_mode: str | None = None
     available_agents: tuple[str, ...] | None = None
     agent_auth: Mapping | None = None
-    background_status_payload: Mapping | None = None
     runtime_script_uri: str | None = None
     dangerously_yolo: bool = False
     hold_auto_approve: bool = False
 
     def __post_init__(self) -> None:
-        for name in ("settings", "fs_entries", "transcript_sessions", "session_files_payloads", "session_files_payload", "auto_approve_payload", "agent_auth", "background_status_payload"):
+        for name in ("settings", "fs_entries", "transcript_sessions", "session_files_payloads", "session_files_payload", "auto_approve_payload", "agent_auth"):
             value = getattr(self, name)
             if value is not None:
                 object.__setattr__(self, name, MappingProxyType(dict(value)))

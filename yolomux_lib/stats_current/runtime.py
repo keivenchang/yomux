@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""Background-owner lifecycle for current YO!stats collection."""
+"""Local statsd lifecycle for current YO!stats collection."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from .client import StatsCurrentClient, iter_append_batches
 
 
 class CurrentRuntimeError(RuntimeError):
-    """The elected current stats collector runtime could not proceed."""
+    """The local current stats collector runtime could not proceed."""
 
 
 Collector = Callable[[scheduler.CollectorAttempt], collectors.CollectorFacts]
@@ -54,7 +54,7 @@ def _bounded_kind(value: object, fallback: str) -> str:
 
 
 class StatsCurrentRuntime:
-    """Tie one elected owner, one service lease, and independent collectors together."""
+    """Tie one local service lease and independent collectors together."""
 
     def __init__(
         self,
@@ -493,7 +493,7 @@ class StatsCurrentRuntime:
                     self._phase = "stopped"
 
     def start(self) -> bool:
-        """Start one non-blocking lease supervisor for the elected owner."""
+        """Start one non-blocking lease supervisor for this instance."""
 
         with self._lock:
             if self._phase == "blocked":

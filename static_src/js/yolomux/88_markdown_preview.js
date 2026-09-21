@@ -543,7 +543,18 @@ function markdownPreviewCopySelectionWithStyle(context) {
   const range = context?.range || selection.getRangeAt(0);
   const wrapper = document.createElement('div');
   wrapper.append(range.cloneContents());
-  const images = [...wrapper.querySelectorAll('img[src]')];
+  let images = [...wrapper.querySelectorAll('img[src], img[data-original-src], img[data-resolved-path]')];
+  const block = context?.block;
+  if (!images.length && block?.querySelector?.('img') && typeof Range !== 'undefined') {
+    const blockRange = document.createRange();
+    blockRange.selectNodeContents(block);
+    const wholeBlockSelected = range.compareBoundaryPoints(Range.START_TO_START, blockRange) <= 0
+      && range.compareBoundaryPoints(Range.END_TO_END, blockRange) >= 0;
+    if (wholeBlockSelected) {
+      wrapper.replaceChildren(block.cloneNode(true));
+      images = [...wrapper.querySelectorAll('img[src], img[data-original-src], img[data-resolved-path]')];
+    }
+  }
   // Let the browser serialize ordinary selections. Image selections need explicit data URLs:
   // Google Docs cannot fetch this app's authenticated raw-file URLs from clipboard HTML.
   if (!images.length && document.execCommand?.('copy') === true) {
@@ -554,7 +565,7 @@ function markdownPreviewCopySelectionWithStyle(context) {
   if (!wrapper.innerHTML || (!text && !images.length)) return false;
   const clipboard = globalThis.navigator?.clipboard;
   if (globalThis.isSecureContext !== false && clipboard?.write && globalThis.ClipboardItem) {
-    const imageData = images.map(image => fetch(image.currentSrc || image.src, {credentials: 'same-origin'})
+    const imageData = images.map(image => fetch(clipboardImageSourceUrl(image), {credentials: 'same-origin'})
       .then(response => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.blob(); })
       .then(blob => new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -2006,7 +2017,15 @@ function applyMarkdownFenceHighlight(block) {
   }
   if (fileEditorPreviewDisplayMode === 'vanilla') return;
   if (typeof window.hljs !== 'undefined') {
-    try { window.hljs.highlightElement(block); } catch (_) {}
+    // Marked can leave literal HTML in a fence's DOM. Highlight.js treats that as already
+    // trusted markup and warns; code fences are text, so normalize through textContent before
+    // handing the block to the highlighter. This also keeps the warning-free path shared by
+    // Markdown preview, Differ, and the editor's vanilla code surface.
+    try {
+      const source = block.textContent || '';
+      block.textContent = source;
+      window.hljs.highlightElement(block);
+    } catch (_) {}
   }
   applyMarkdownFenceFallbackHighlight(block);
 }

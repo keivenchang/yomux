@@ -126,8 +126,7 @@ class FixtureLeaseRecordBuilder:
 
     def write(self, state_dir: Path, *, host_id: str = "") -> Path:
         lease_dir = state_dir / "server-leases"
-        if host_id:
-            lease_dir /= host_id
+        lease_dir /= host_id or current_host_identity().stable_host_id
         lease_dir.mkdir(parents=True, exist_ok=True)
         path = lease_dir / f"{self.port}.lock"
         path.write_text(json.dumps(self.build()), encoding="utf-8")

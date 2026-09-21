@@ -15,10 +15,10 @@ flowchart LR
   server -->|"fenced read-only snapshot"| db
 ```
 
-- The existing background-owner election chooses the server that supervises the indexer child.
-- When the owner is elected it leases `indexd` for every configured indexed root (`file_explorer.indexed_dirs`) and enqueues one `startup-depth-1` item per root, so a configured deployment starts indexing without waiting for a query. With no configured root the child still starts lazily on the first Quick Open/index invalidation request. Either way it is long-lived and owns every SQLite write connection; it exits after 60 seconds only when no lease, client, or queued work remains.
+- Each exclusive product-root server supervises its own indexer child.
+- The server leases `indexd` for every configured indexed root (`file_explorer.indexed_dirs`) and enqueues one `startup-depth-1` item per root, so a configured deployment starts indexing without waiting for a query. With no configured root the child still starts lazily on the first Quick Open/index invalidation request. Either way it is long-lived and owns every SQLite write connection; it exits after 60 seconds only when no lease, client, or queued work remains.
 - `indexd` is the sole index writer. Servers may read a fenced committed SQLite snapshot directly, and use its RPC service for lifecycle and unavailable-state handling; no HTTP server becomes a writer.
-- If ownership changes, the new owner starts/reuses one indexer and re-leases the configured roots on the new daemon; no HTTP server becomes a database writer.
+- A server restart starts/reuses one indexer and re-leases the configured roots on the new daemon; no HTTP server becomes a database writer.
 
 Quick Open request modes are separate from index ownership. An empty Cmd-P query does not consult the index or filesystem; it lists the newest opened file paths from the bounded browser-memory history, newest first, with each row's last-opened date/time. An absolute or `~` query uses the authorized containing directory only, never recursive index search; the browser obtains one direct listing through `GET /api/fs/fast/list`, caches it, and filters names locally. A non-absolute query searches the configured indexed roots through the committed SQLite snapshots and may stream bounded result chunks. Indexed admission must prioritize exact and prefix basename matches and must not fill the bounded result page with matches assembled only from unrelated absolute-path fragments. The browser merges roots by path, rejects rows outside the producing root, and applies the visible priority order: currently open tabs, the newest 100 browser-memory file-history paths, files under the active Claude or Codex working directory, then the remaining indexed matches.
 
@@ -35,7 +35,7 @@ flowchart TB
 
 - Only paths explicitly reported by a visible Finder or Differ receive native watch handling and the two-second refresh target.
 - File editors, transcript/activity views, and hidden browser tabs retain their independent lightweight file/status policies; they do not make an entire Quick Open root hot.
-- Configured indexed roots are indexed proactively at background-owner election (layer 1 first, then breadth-first), not only on an explicit Quick Open request. Change evidence for a configured root refreshes on the hot cadence while the lease keeps `indexd` alive; the long safety interval reconciles anything stronger evidence missed.
+- Configured indexed roots are indexed proactively at server startup (layer 1 first, then breadth-first), not only on an explicit Quick Open request. Change evidence for a configured root refreshes on the hot cadence while the lease keeps `indexd` alive; the long safety interval reconciles anything stronger evidence missed.
 
 ## SQLite model
 
@@ -60,7 +60,7 @@ File changes use one upsert/delete. A single-file hot repair updates or deletes 
 
 ## Breadth-first lifecycle, hot path, and safety refresh
 
-The startup layer-1 publication order, breadth-first frontier priorities (`startup-depth-1`, `hot-change`, `user-visible-demand`, `breadth-expansion`, `full-safety-refresh`), the one hot-path change-evidence owner, the lowest-priority `file_explorer.index_refresh_seconds` safety reconciliation (default 300 seconds, lease-driven and independent of queries), and the truthful `progressive_coverage`/`snapshot_state` status contract are specified in [`FS_INTERACTIVITY.md`](FS_INTERACTIVITY.md), shipped in 0.7.3. Only explicitly configured indexed roots are scheduled; `~/` is never implicit. Each server owns its indexer within an exclusive product root; there is no multi-server/follower producer topology. and the bounded read path reuses the existing 30-second SQLite connect timeout. Indexed-search metadata is no longer a caveat: the scan opens every child relative to its pinned parent descriptor through `paths.safe_child()`, and `SafePathHandle.descriptor_path()` returns only a per-descriptor magic path or fails closed.
+The startup layer-1 publication order, breadth-first frontier priorities (`startup-depth-1`, `hot-change`, `user-visible-demand`, `breadth-expansion`, `full-safety-refresh`), the one hot-path change-evidence owner, the lowest-priority `file_explorer.index_refresh_seconds` safety reconciliation (default 300 seconds, lease-driven and independent of queries), and the truthful `progressive_coverage`/`snapshot_state` status contract are specified in [`FS_INTERACTIVITY.md`](FS_INTERACTIVITY.md), shipped in 0.7.3. Only explicitly configured indexed roots are scheduled; `~/` is never implicit. Each server owns its indexer within an exclusive product root, so there is no multi-server producer topology; the bounded read path reuses the existing 30-second SQLite connect timeout. Indexed-search metadata is no longer a caveat: the scan opens every child relative to its pinned parent descriptor through `paths.safe_child()`, and `SafePathHandle.descriptor_path()` returns only a per-descriptor magic path or fails closed.
 
 ## Verification
 

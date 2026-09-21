@@ -165,16 +165,16 @@ def test_client_event_broker_keeps_background_role_scopes_as_independent_resourc
     broker.unsubscribe(subscriber_id)
 
 
-def test_search_progress_fans_out_to_a_core_follower_scoped_by_opaque_digest():
-    # Step 5: the signal reaches any page on the `core` channel (a follower web process), keyed per
+def test_search_progress_fans_out_to_a_core_subscriber_scoped_by_opaque_digest():
+    # Step 5: the signal reaches any page on the `core` channel, keyed per
     # root by the OPAQUE scope digest -- two roots stay independent resources, and no path appears.
     broker = ClientEventBroker(max_queue_size=4)
-    _subscriber_id, follower_queue = broker.subscribe(channels={"core"})
+    _subscriber_id, subscriber_queue = broker.subscribe(channels={"core"})
 
     one = broker.publish("search_progress", {"scope_id": "aaaa1111", "generation": 3, "revision": 12, "coverage": {"full_coverage": False}})
     two = broker.publish("search_progress", {"scope_id": "bbbb2222", "generation": 3, "revision": 5, "coverage": {"full_coverage": True}})
 
-    assert [follower_queue.get_nowait(), follower_queue.get_nowait()] == [one, two]
+    assert [subscriber_queue.get_nowait(), subscriber_queue.get_nowait()] == [one, two]
     assert one["resource"] == "search_progress:aaaa1111"
     assert two["resource"] == "search_progress:bbbb2222"
     assert one["resource"] != two["resource"]
@@ -203,6 +203,22 @@ def test_search_progress_latest_revision_is_retained_and_replayed_to_a_reconnect
     with pytest.raises(queue.Empty):
         files_queue.get_nowait()
     assert latest["payload"]["revision"] == 40
+
+
+def test_background_refresh_completion_is_retained_per_resource_and_replayed_to_a_reconnecting_page():
+    broker = ClientEventBroker(max_queue_size=4)
+    broker.publish("background_refresh_done", {"role": "session-files", "session": "1", "cache_view_id": "old"})
+    latest = broker.publish("background_refresh_done", {"role": "session-files", "session": "1", "cache_view_id": "new"})
+    other = broker.publish("background_refresh_done", {"role": "session-files", "session": "2", "cache_view_id": "other"})
+
+    _late_id, late_queue = broker.subscribe(channels={"core"})
+    replayed = [late_queue.get_nowait(), late_queue.get_nowait()]
+    replayed_by_resource = {event["resource"]: event for event in replayed}
+
+    assert replayed_by_resource[latest["resource"]]["payload"]["cache_view_id"] == "new"
+    assert replayed_by_resource[other["resource"]]["payload"]["cache_view_id"] == "other"
+    assert all(event["replay"] is True for event in replayed)
+    assert latest["resource"] != other["resource"]
 
 
 def test_client_event_broker_releases_resource_after_server_dequeues_it():
@@ -328,14 +344,14 @@ def test_update_available_is_a_known_client_event():
     assert "update_available" in CLIENT_EVENT_TYPES
 
 
-def test_search_progress_emitted_in_the_indexd_daemon_reaches_a_web_follower(make_tmux_webterm_app, tmp_path):
+def test_search_progress_emitted_in_the_indexd_daemon_reaches_a_web_client(make_tmux_webterm_app, tmp_path):
     # Step 9 LIVE DEFECT: the breadth-first crawl runs in the `indexd` DAEMON, so
     # `file_index.notify_search_progress` fires INSIDE that process. Before this fix only the WEB App
     # registered a `search_progress` notifier, so in the daemon `_SEARCH_PROGRESS_NOTIFIER` was None and
     # every frame was dropped at the source -- the client never heard the signal and never pumped cursor
     # deltas. This exercises the daemon<->web boundary no unit test covered: a frame emitted in the
     # indexd producer context must be BUFFERED by the daemon, DRAINED over the RPC, and republished
-    # UNCHANGED onto a WEB follower's client-events bus.
+    # UNCHANGED onto the web instance's local client-events bus.
     file_index._reset_search_progress_coalescing()
     # Prove the registration comes from the daemon object itself: start from no notifier.
     file_index.set_search_progress_notifier(None)
@@ -385,15 +401,15 @@ def test_search_progress_emitted_in_the_indexd_daemon_reaches_a_web_follower(mak
         app = make_tmux_webterm_app(["1"])
         app.search_indexer = _InProcessIndexerClient(indexer)
         app.search_progress_active_until = 0.0
-        _subscriber_id, follower_queue = app.client_events.subscribe(channels={"core"})
+        _subscriber_id, subscriber_queue = app.client_events.subscribe(channels={"core"})
 
         forwarded = app.drain_and_publish_search_progress()
         assert forwarded == 1
 
-        event = follower_queue.get_nowait()
+        event = subscriber_queue.get_nowait()
         assert event["type"] == "search_progress"
         assert event["resource"] == f"search_progress:{scope_id}"
-        # The frame reached the follower UNCHANGED and redacted: four opaque keys, no path leak.
+        # The frame reached the local subscriber UNCHANGED and redacted: four opaque keys, no path leak.
         assert set(event["payload"]) >= {"scope_id", "generation", "revision", "coverage"}
         assert event["payload"]["scope_id"] == scope_id
         assert event["payload"]["generation"] == 7 and event["payload"]["revision"] == 55
@@ -404,7 +420,7 @@ def test_search_progress_emitted_in_the_indexd_daemon_reaches_a_web_follower(mak
         # The buffer was cleared by the forward: a second drain publishes nothing.
         assert app.drain_and_publish_search_progress() == 0
         with pytest.raises(queue.Empty):
-            follower_queue.get_nowait()
+            subscriber_queue.get_nowait()
     finally:
         file_index.set_search_progress_notifier(None)
         file_index._reset_search_progress_coalescing()

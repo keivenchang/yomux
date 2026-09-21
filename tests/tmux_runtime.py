@@ -15,7 +15,7 @@ import uuid
 
 import pytest
 
-from yolomux_lib.infra.background_owner import pid_is_alive
+from yolomux_lib.background_scheduler import pid_is_alive
 from yolomux_lib.host_identity import process_start_identity
 from yolomux_lib.tmux_utils import YOLOMUX_TMUX_SOCKET_ENV
 

@@ -2892,6 +2892,7 @@ function recordJsDebugClientEventsConnectionState(connected) {
   const nextConnected = connected === true;
   if (jsDebugStatsClientConnected === nextConnected) return;
   jsDebugStatsClientConnected = nextConnected;
+  if (typeof syncFileIndexStatusPollInterval === 'function') syncFileIndexStatusPollInterval();
   if (typeof setBadConnectionCursorState === 'function') setBadConnectionCursorState(!nextConnected);
   const nowMs = Date.now();
   if (!nextConnected) {

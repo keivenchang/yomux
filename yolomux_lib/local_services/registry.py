@@ -33,7 +33,7 @@ from time import time as wall_clock
 
 from ..atomic_file import atomic_write_text
 from ..atomic_file import file_lock
-from ..background_owner import pid_is_alive
+from ..background_scheduler import pid_is_alive
 from ..common import MANAGED_PRIVATE_ROOT
 from ..common import STATE_DIR
 from ..host_identity import HostIdentity
@@ -1397,7 +1397,7 @@ def _terminate_group_member(
 
 
 def shutdown_owned_local_services(
-    port: int,
+    port: int | None,
     service_dir: Path,
     *,
     launcher_pid: int | None = None,
@@ -1413,6 +1413,7 @@ def shutdown_owned_local_services(
     # drivable by whoever is telling it what it is allowed to see.
     generation_reader: Callable[[int], str | None] = process_spawn_generation,
     process_group_reader: Callable[[int], int | None] = live_process_group,
+    namespace_resolver: Callable[[dict[str, Any]], Path] | None = None,
 ) -> dict[str, list[int]]:
     """Stop only sidecars whose ledger proves this live launcher created them.
 
@@ -1434,7 +1435,7 @@ def shutdown_owned_local_services(
     groups = [
         group
         for group in tracked_local_service_groups(service_dir, initial)
-        if group["launcher_port"] == int(port) and group["launcher_pid"] == owner_pid
+        if (port is None or group["launcher_port"] == int(port)) and group["launcher_pid"] == owner_pid
     ]
     retained_pids = retained_claim_pids(claims_reader() if claims_reader is not None else [])
     signalled: list[int] = []
@@ -1451,7 +1452,8 @@ def shutdown_owned_local_services(
         # The directory the record itself names, not the one this loop globbed.
         # Restamping made the expected value and the recorded value the same
         # expression, so the namespace dimension could never disagree.
-        record["namespace"], expected_namespace = namespace_dimension(group["namespace"], Path(service_dir))
+        namespace_root = namespace_resolver(group) if namespace_resolver is not None else Path(service_dir)
+        record["namespace"], expected_namespace = namespace_dimension(group["namespace"], namespace_root)
         # The generation the RECORD was published with, not one re-read from the
         # live process at the decision site. Re-reading it here and again inside
         # the authorization made recorded and observed the same measurement, so
@@ -1548,16 +1550,11 @@ def shutdown_owned_local_services(
 
 
 def read_server_port_lease_record(port: int, state_dir: Path) -> dict[str, Any]:
-    """Read the existing per-port ownership record written by acquire_server_port_lease."""
+    """Read the existing per-port ownership record written by the server lease owner."""
     identity = current_host_identity()
     root = Path(state_dir) / "server-leases"
     record = read_json_file(root / identity.stable_host_id / f"{int(port)}.lock", None)
-    if isinstance(record, dict):
-        return record
-    # Read-only rollout compatibility: never write or unlink the legacy lease,
-    # but a live v0.6.10 owner must still block a new launch.
-    legacy = read_json_file(root / f"{int(port)}.lock", {})
-    return legacy if isinstance(legacy, dict) else {}
+    return record if isinstance(record, dict) else {}
 
 
 def record_live_port_members(

@@ -990,130 +990,6 @@ function infoMetadataLoadingHtml() {
   </div>`;
 }
 
-function backgroundServerPortText(record) {
-  const port = Number(record?.port);
-  return Number.isFinite(port) && port > 0 ? `:${Math.trunc(port)}` : '';
-}
-
-function backgroundServerLabel(record, fallback = '') {
-  const source = record && typeof record === 'object' ? record : {};
-  const host = String(source.hostname || fallback || serverHostname || '').trim();
-  const endpoint = host ? `${host}${backgroundServerPortText(source)}` : '';
-  const root = compactHomePath(source.project_root || '');
-  const pid = Number(source.pid);
-  return [
-    endpoint,
-    root,
-    Number.isFinite(pid) && pid > 0 ? t('backgroundOwner.pid', {pid: Math.trunc(pid)}) : '',
-  ].filter(Boolean).join(' · ') || t('backgroundOwner.thisServer');
-}
-
-function backgroundOwnerRoleSummary(roleName, payload = backgroundOwnerStatusState.payload, options = {}) {
-  const data = payload && typeof payload === 'object' ? payload : {};
-  const roles = data.roles && typeof data.roles === 'object' ? data.roles : {};
-  const role = roles[roleName] && typeof roles[roleName] === 'object' ? roles[roleName] : {};
-  const ownsRole = role.owner === true;
-  const current = data.generation && typeof data.generation === 'object' ? data.generation : {};
-  const owner = data.current_owner && typeof data.current_owner === 'object' ? data.current_owner : null;
-  return {
-    ownsRole,
-    mode: ownsRole ? (options.ownerMode || 'leader') : (options.followerMode || 'follower'),
-    state: ownsRole ? 'leader' : 'follower',
-    currentLabel: backgroundServerLabel(current),
-    ownerLabel: owner ? backgroundServerLabel(owner) : '',
-    status: String(role.status || data.status || ''),
-    error: String(data.last_error || ''),
-  };
-}
-
-function backgroundOwnerSearchIndexSummary(payload = backgroundOwnerStatusState.payload) {
-  const data = payload && typeof payload === 'object' ? payload : {};
-  const searchIndex = data.search_index && typeof data.search_index === 'object' ? data.search_index : {};
-  const summary = backgroundOwnerRoleSummary('search-index', payload);
-  const ownsIndex = searchIndex.owner === true || summary.ownsRole === true;
-  const current = searchIndex.current_server && typeof searchIndex.current_server === 'object' ? searchIndex.current_server : data.generation;
-  const owner = searchIndex.owner_server && typeof searchIndex.owner_server === 'object' ? searchIndex.owner_server : data.current_owner;
-  return {
-    ...summary,
-    ownsIndex,
-    ownsRole: ownsIndex,
-    mode: ownsIndex ? 'leader' : 'follower',
-    state: ownsIndex ? 'leader' : 'follower',
-    currentLabel: backgroundServerLabel(current),
-    ownerLabel: owner && typeof owner === 'object' ? backgroundServerLabel(owner) : '',
-    status: String(searchIndex.status || summary.status || data.status || ''),
-  };
-}
-
-function backgroundOwnerStatsSummary(payload = backgroundOwnerStatusState.payload) {
-  return backgroundOwnerRoleSummary('stats-sampler', payload);
-}
-
-function backgroundOwnerSessionFilesSummary(payload = backgroundOwnerStatusState.payload) {
-  return backgroundOwnerRoleSummary('session-files', payload);
-}
-
-function applyBackgroundOwnerStatusPayload(payload = {}, options = {}) {
-  if (!payload || typeof payload !== 'object') return false;
-  backgroundOwnerStatusState.payload = payload;
-  if (options.source !== 'request' && options.source !== 'resource-replace') {
-    backgroundOwnerStatusResource().replace(payload, 'background-owner-push', {...options, source: 'resource-replace'});
-  }
-  backgroundOwnerStatusState.updatedAt = Date.now();
-  backgroundOwnerStatusState.error = '';
-  backgroundOwnerStatusState.loading = false;
-  if (options.render !== false) renderInfoPanel();
-  if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
-  return true;
-}
-
-const startupSnapshotFreshnessMs = 5_000;
-
-function backgroundOwnerStatusIsFresh() {
-  return Boolean(backgroundOwnerStatusState.payload)
-    && Date.now() - Number(backgroundOwnerStatusState.updatedAt || 0) < startupSnapshotFreshnessMs;
-}
-
-function syncBackgroundOwnerStatusResource(snapshot, event) {
-  backgroundOwnerStatusState.request = snapshot.request;
-  backgroundOwnerStatusState.loading = snapshot.loading && !backgroundOwnerStatusState.payload;
-  backgroundOwnerStatusState.error = snapshot.error ? userMessageSnapshot(snapshot.error) : '';
-  const options = event.context || {};
-  if (event.phase === 'loading' || event.phase === 'failed') {
-    if (options.render !== false) renderInfoPanel();
-    if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
-  }
-}
-
-function backgroundOwnerStatusResource() {
-  if (backgroundOwnerStatusState.resource) return backgroundOwnerStatusState.resource;
-  backgroundOwnerStatusState.resource = createLatestResource({
-    initial: backgroundOwnerStatusState.payload,
-    load: () => apiFetchJson('/api/background/status', {cache: 'no-store'}),
-    apply(payload, {context}) {
-      applyBackgroundOwnerStatusPayload(payload, {...(context || {}), source: 'request'});
-      return payload;
-    },
-    result: () => true,
-    staleResult: () => false,
-    failureResult: () => false,
-    onState: syncBackgroundOwnerStatusResource,
-  });
-  return backgroundOwnerStatusState.resource;
-}
-
-function refreshBackgroundOwnerStatus(options = {}) {
-  // Every consumer observes the same current snapshot. A reconnect may require a new request
-  // after this settles, but must not discard and duplicate the request boot already owns.
-  if (backgroundOwnerStatusState.request) return backgroundOwnerStatusState.request;
-  if (options.preferFresh === true && backgroundOwnerStatusIsFresh()) return Promise.resolve(true);
-  backgroundOwnerStatusState.loading = !backgroundOwnerStatusState.payload;
-  backgroundOwnerStatusState.error = '';
-  if (options.render !== false) renderInfoPanel();
-  if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
-  return backgroundOwnerStatusResource().read('background-owner-status', options);
-}
-
 // client-side mirror of the backend parse_pull_request_ref — normalize a watched-PR entry
 // ("owner/repo#N", "owner/repo/N", or a github.com PR URL) to the canonical "owner/repo#N", else ''.
 // Used to dedupe and to match a stored entry (which may be a URL) against a PR's canonical ref.
@@ -5437,6 +5313,8 @@ async function refreshAutoStatuses(options = {}) {
   refreshOpenEventLogs();
 }
 
+const startupSnapshotFreshnessMs = 5_000;
+
 function autoApproveSnapshotIsFresh() {
   return loadAutoStatuses.lastResult !== null
     && Date.now() - Number(loadAutoStatuses.updatedAt || 0) < startupSnapshotFreshnessMs;
@@ -6162,6 +6040,10 @@ async function applySessionMetadataPayload(payload, options = {}) {
   const previousActive = activeSessions.slice();
   const sessionsChanged = updateSessionList(transcriptMetadataState.payload.session_order || []);
   finalizeSessionMetadataOutcome(true, 'applied', payload);
+  // The payload is committed before the slower auto-status refresh. Refresh only the cached rows
+  // now so an open Tabs menu reflects this accepted metadata generation without waiting for that
+  // unrelated request or losing the render tail to a newer refresh.
+  if (typeof refreshOpenTabsMenuRows === 'function') refreshOpenTabsMenuRows();
   if (options.refreshAuto !== false) {
     await loadAutoStatuses();
   }
@@ -6170,10 +6052,6 @@ async function applySessionMetadataPayload(payload, options = {}) {
   if (!requestIsCurrent()) return finalizeSessionMetadataOutcome(false, 'committed_render_superseded', payload, {committed: true});
   transcriptMetadataState.loading = false;
   if (sessionsChanged) renderPanels(previousActive);
-  // Keep a user-open Tabs menu alive while its background list-sessions refresh completes. The
-  // topbar renderer intentionally defers all full rebuilds during an open menu so pointer/click
-  // targets cannot disappear; this shared owner updates just the cache-backed menu rows instead.
-  if (typeof refreshOpenTabsMenuRows === 'function') refreshOpenTabsMenuRows();
   renderSessionButtons();
   renderInfoPanel();
   renderYoagentPanel();
@@ -7107,7 +6985,6 @@ function refreshAll() {
   resyncVisibleTerminalRemoteSizes('refresh');
   refreshVisibleTerminalScreens('manual-refresh');
   refreshTranscripts({force: true});
-  refreshBackgroundOwnerStatus({force: true});
   refreshAutoStatuses();
   if (typeof retryNetworkFailedFileExplorerExpansion === 'function') void retryNetworkFailedFileExplorerExpansion();
   refreshWatchedFilesystem({full: true});
@@ -7187,10 +7064,6 @@ async function boot() {
   syncInitialLayoutUrl();
   statusEl.textContent = t('status.yoloLoading');
   loadNotificationDelivery();
-  refreshBackgroundOwnerStatus({render: false}).catch(error => {
-    console.warn('initial background-owner status refresh failed', error);
-    return false;
-  });
   const initialAutoStatusesPromise = loadAutoStatuses().catch(error => {
     console.warn('initial auto-status refresh failed', error);
     return false;

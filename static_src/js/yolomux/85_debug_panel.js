@@ -5662,11 +5662,10 @@ function debugSystemRolesHtml(roles = {}) {
   const rows = Object.entries(roles && typeof roles === 'object' ? roles : {});
   if (!rows.length) return `<p class="js-debug-system-empty">${esc(t('common.notAvailable'))}</p>`;
   return `<div class="js-debug-system-table-wrap"><table class="js-debug-system-table">
-    <thead><tr><th>Role</th><th>Status</th><th>Refreshes</th><th>Fallbacks</th><th>Stale reads</th></tr></thead>
+    <thead><tr><th>Role</th><th>Status</th><th>Refreshes</th><th>Fallbacks</th></tr></thead>
     <tbody>${rows.map(([name, role]) => `<tr>
-      <td>${esc(name)}</td><td>${esc(role?.status || (role?.owner ? 'owner' : 'follower'))}</td>
+    <td>${esc(name)}</td><td>${esc(role?.status || 'unavailable')}</td>
       <td>${esc(debugSystemNumber(role?.refresh_requests))}</td><td>${esc(debugSystemNumber(role?.fallback_count))}</td>
-      <td>${esc(debugSystemNumber(role?.follower_stale_reads))}</td>
     </tr>`).join('')}</tbody>
   </table></div>`;
 }
@@ -5947,7 +5946,6 @@ function debugSystemCpuBudgetCardHtml(budget = {}) {
 // own render region precisely so a moving timestamp cannot rewrite it.
 function debugSystemSummaryStripHtml(payload = {}) {
   const counts = debugSystemRosterSummary(debugSystemRosterRows(payload));
-  const owner = payload.owner && typeof payload.owner === 'object' ? payload.owner : {};
   const generatedAgo = debugSystemGeneratedAge(payload.generated_at);
   // NO CPU BUDGET DENOMINATOR HERE. The strip used to print `CPU 172.5% / 30%`: a POPULATION sum
   // over every roster row, divided by `SERVER_CPU_BUDGET_PERCENT`, which is the budget for the WEB
@@ -5994,9 +5992,6 @@ function debugSystemSummaryStripHtml(payload = {}) {
     }), cpuCoverage],
     ['memory', t('debug.system.roster.summary.memory', {value: counts.rssMeasured > 0 ? debugGraphTerseBytesText(counts.rssBytes) : '—'}),
       memoryCoverage],
-    ['owner', t('debug.system.roster.summary.owner', {
-      value: owner.owner ? t('backgroundOwner.thisServer') : (Number(owner.current_owner?.port) > 0 ? `:${owner.current_owner.port}` : t('common.notAvailable')),
-    })],
     ['updated', `${t('debug.system.roster.summary.updated', {time: generatedAgo})}${jsDebugSystemState.error ? ` · ${jsDebugSystemState.error}` : ''}`],
   ];
   // The Refresh control is `aria-disabled` while a refresh is in flight, never `disabled`. A
@@ -6058,21 +6053,12 @@ function debugSystemAdvancedHtml(payload = {}, advanced = {}) {
   const summary = `<summary data-js-debug-system-advanced-summary data-js-debug-system-focus-key="advanced-summary">${esc(t('debug.system.roster.advanced'))}</summary>`;
   if (!open) return `<details class="js-debug-system-advanced" data-js-debug-system-advanced>${summary}</details>`;
   const body = advanced.payload && typeof advanced.payload === 'object' ? advanced.payload : null;
-  const owner = payload.owner && typeof payload.owner === 'object' ? payload.owner : {};
-  const currentOwner = owner.current_owner || {};
-  const advancedOwner = body && body.owner && typeof body.owner === 'object' ? body.owner : {};
   const refresh = body && body.refresh && typeof body.refresh === 'object' ? body.refresh : {};
   const localRefreshing = refresh.local_refreshing || {};
   const coalescing = refresh.coalescing || {};
   const totals = debugSystemRenderableLocalServices(payload).totals || {};
   const cards = [
     debugSystemCpuBudgetCardHtml(payload.cpu_budget || {}),
-    debugSystemCardHtml('Distributed owner', debugSystemRowsHtml([
-      ['Status', owner.status], ['This server owns work', owner.owner ? 'Yes' : 'No'],
-      ['Owner port', currentOwner.port], ['Owner PID', currentOwner.pid],
-      ['Index mode', owner.search_index?.mode],
-      ...(body ? [['Generations', advancedOwner.debug?.generation_count]] : []),
-    ])),
     ...(body ? [
       debugSystemCardHtml('Refresh coordination', debugSystemRowsHtml([
         ['Processes', totals.processes],
@@ -6080,7 +6066,7 @@ function debugSystemAdvancedHtml(payload = {}, advanced = {}) {
         ['Pending refreshes', coalescing.recent_pending_count ?? 0], ['Coalesced requests', refresh.counters?.coalesced_refresh_requests ?? 0],
       ])),
       debugSystemCardHtml('Recurring work', debugSystemRecurringWorkHtml(Array.isArray(refresh.recurring_work) ? refresh.recurring_work : []), {wide: true}),
-      debugSystemCardHtml('Distributed roles', debugSystemRolesHtml(refresh.roles), {wide: true}),
+      debugSystemCardHtml('Background roles', debugSystemRolesHtml(refresh.roles), {wide: true}),
       debugSystemCardHtml('Top API endpoints', debugSystemPerformanceTableHtml(body.top_endpoints, 'endpoint'), {wide: true}),
       debugSystemCardHtml('Top background work', debugSystemPerformanceTableHtml(body.top_background_work, 'worker'), {wide: true}),
     ] : []),

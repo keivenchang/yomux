@@ -130,9 +130,9 @@ Downtime is different from quiet time. If the daemon is off for two hours, it do
 
 ## Ownership
 
-The stats daemon singleton remains the only process with a mutable `Store` handle. The elected background owner is the only web process that runs collectors and appends facts through its service lease; followers neither collect nor publish ring rows. Followers and request handlers read through the daemon or `Store.open_reader()`, and `publish_ring_buckets()` must reject a read-only store.
+The stats daemon singleton remains the only process with a mutable `Store` handle. The server that holds the exclusive product-root lease runs collectors and appends facts through its local service lease; request handlers read through the daemon or `Store.open_reader()`, and `publish_ring_buckets()` must reject a read-only store.
 
-Owner demotion stops the scheduler before releasing its lease, as it does today. The daemon may still flush facts it accepted before demotion because it is the sole database writer. The host-partitioned database path, schema-specific socket identity, writer fence, and local-service singleton remain the protection against a second stats daemon; owner election alone is not the SQLite writer lock.
+Server shutdown stops the scheduler before releasing its lease, as it does today. The daemon may still flush facts it accepted before shutdown because it is the sole database writer. The host-partitioned database path, schema-specific socket identity, writer fence, and local-service singleton remain the protection against a second stats daemon; the instance lease is the protection against a second web server using the same product root.
 
 ## Migration and coexistence
 
@@ -161,7 +161,7 @@ Implementation must rerun G4b with the realistic 8,929-row fixture and report me
 - A persisted quiet bucket is zero and distinct from a never-written gap.
 - A window crossing the write head validates and orders every expected timestamp.
 - A restarted read-only store serves persisted buckets while the materializer builder is forbidden.
-- A read-only follower cannot publish ring rows.
+- A request-only read path cannot publish ring rows.
 - Schema v8 creation leaves an existing v7 database byte-for-byte untouched.
 
 These tests define the storage seam as `resolution.RING_CAPACITIES`, `storage.RingBucketWrite`, `Store.publish_ring_buckets(buckets=..., source_generation=..., published_at=...)`, and `Store.read_ring_window(range_seconds=..., resolution_seconds=..., window_end=...)`. `read_ring_window()` returns rows in timestamp order plus exact `missing_bucket_starts`; absence and zero are not inferred from payload truthiness.

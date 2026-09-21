@@ -137,7 +137,7 @@ def test_http_client_rpc_cache_and_browser_render_every_exact_matrix_cell(
     )
     service_thread = threading.Thread(target=service.run, daemon=True)
     service_thread.start()
-    http_server = http_thread = follower_server = follower_thread = None
+    http_server = http_thread = second_server = second_thread = None
     try:
         assert service.cache_ready_event.wait(5), service._status()
         client = stats_client.StatsCurrentClient(socket_path, database)
@@ -245,37 +245,37 @@ def test_http_client_rpc_cache_and_browser_render_every_exact_matrix_cell(
         )
         assert status["requests"]["snapshot"] >= expected_requests
 
-        follower_client = stats_client.StatsCurrentClient(socket_path, database)
+        second_client = stats_client.StatsCurrentClient(socket_path, database)
         exact_request = {
             "range_seconds": 300,
             "resolution": 1,
             "client_id": "browser-current-fixture",
         }
-        owner_metadata, owner_body = client.snapshot(exact_request)
-        follower_metadata, follower_body = follower_client.snapshot(exact_request)
-        assert owner_metadata["cache_generation"] == follower_metadata["cache_generation"]
-        assert owner_metadata["source_generation"] == follower_metadata["source_generation"]
-        assert owner_body == follower_body
+        first_metadata, first_body = client.snapshot(exact_request)
+        second_metadata, second_body = second_client.snapshot(exact_request)
+        assert first_metadata["cache_generation"] == second_metadata["cache_generation"]
+        assert first_metadata["source_generation"] == second_metadata["source_generation"]
+        assert first_body == second_body
 
-        follower_app = SimpleNamespace(
+        second_app = SimpleNamespace(
             sessions=[],
             dangerously_yolo=False,
             stats_current_http=stats_http.StatsHttpForwarder(
-                follower_client,
+                second_client,
                 client_binding_secret=b"stats-e2e-client-binding-secret",
             ),
         )
-        follower_server, follower_thread = start_browser_server(
+        second_server, second_thread = start_browser_server(
             monkeypatch,
             tmp_path,
-            follower_app,
+            second_app,
             auth_bypass=True,
         )
         query = (
             "/api/stats-snapshot?range_seconds=300&resolution=1&"
             "client_id=browser-current-fixture"
         )
-        request_headers = {"X-YOLOmux-Request-ID": "r-stats-owner-follower-parity"}
+        request_headers = {"X-YOLOmux-Request-ID": "r-stats-reader-parity"}
         with urlopen(
             Request(
                 f"http://127.0.0.1:{http_server.server_address[1]}{query}",
@@ -283,23 +283,23 @@ def test_http_client_rpc_cache_and_browser_render_every_exact_matrix_cell(
             ),
             timeout=3,
         ) as response:
-            owner_http_body = response.read()
+            first_http_body = response.read()
         with urlopen(
             Request(
-                f"http://127.0.0.1:{follower_server.server_address[1]}{query}",
+            f"http://127.0.0.1:{second_server.server_address[1]}{query}",
                 headers=request_headers,
             ),
             timeout=3,
         ) as response:
-            follower_http_body = response.read()
-        assert owner_http_body == follower_http_body, {
-            "owner": json.loads(owner_http_body),
-            "follower": json.loads(follower_http_body),
+            second_http_body = response.read()
+        assert first_http_body == second_http_body, {
+            "first": json.loads(first_http_body),
+            "second": json.loads(second_http_body),
         }
-        assert json.loads(owner_http_body)["cache_generation"] == owner_metadata["cache_generation"]
+        assert json.loads(first_http_body)["cache_generation"] == first_metadata["cache_generation"]
     finally:
-        if follower_server is not None and follower_thread is not None:
-            stop_browser_server(follower_server, follower_thread)
+        if second_server is not None and second_thread is not None:
+            stop_browser_server(second_server, second_thread)
         if http_server is not None and http_thread is not None:
             stop_browser_server(http_server, http_thread, browser=browser)
         service.stop_event.set()

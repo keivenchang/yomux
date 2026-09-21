@@ -12,7 +12,6 @@ This is a source-only inventory for the `phase2-infrastructure` baseline. `STATE
 | shared config | `~/.config/yolomux/state.json` | event preference state | `yolomux_lib/infra/common.py:69`, `yolomux_lib/observability/events.py:36-51` |
 | host-local runtime | `RUNTIME_DIR/server-leases/<host>/<port>.lock` | port lease/flock record | `yolomux_lib/server_lease.py`, `yolomux_lib/infra/common.py` |
 | host-local runtime | `RUNTIME_DIR/services/*.sock`, locks, aliases | local RPC runtime | `yolomux_lib/local_services/runtime.py`, `yolomux_lib/local_services/registry.py` |
-| host-local runtime | `RUNTIME_DIR/background-owner/` | generation/owner records and lock | `yolomux_lib/infra/background_owner.py` |
 | host-local runtime | `RUNTIME_DIR/locks/auto-approve-*.lock` | approval target lock | `yolomux_lib/infra/common.py`, `yolomux_lib/approval/auto_approve_worker.py` |
 | host-local runtime | `RUNTIME_DIR/control/` | local Unix control endpoint | `yolomux_lib/infra/common.py` |
 | host-local runtime | `/tmp/yolomux.<user>/uploads/<session>/` | upload reservation and retention sweep | `yolomux_lib/workspace/uploads.py:22`, `:45-61`, `:81-128` |
@@ -27,7 +26,7 @@ This is a source-only inventory for the `phase2-infrastructure` baseline. `STATE
 | host-local cache | `YOLOMUX_CACHE_DIR/model-pricing/pricing.sqlite3` | pricing catalog refresh | `yolomux_lib/infra/common.py:65-67`, `yolomux_lib/observability/pricing_catalog.py:292-298` |
 | host-local cache | `STATE_DIR/hosts/<stable-host-id>/transcript-scan-cache-v*` | transcript scan cache; legacy unpartitioned cursors are retained and never adopted by a fresh partition | `yolomux_lib/workspace/session_files.py:561-567` |
 | host-local cache | `STATE_DIR/hosts/<stable-host-id>/session-files-repository-snapshots/*.json` | repository snapshot cache; legacy shared cache is retained and never adopted | `yolomux_lib/workspace/session_files.py:repository_snapshot_cache_path`, `:2480` |
-| host-local cache | `STATE_DIR/hosts/<stable-host-id>/{session-files-cache,activity-cache,background-owner/client-events.json}` | session-files/tabber caches and per-server client events; no cross-server leader/follower replay | `yolomux_lib/app.py:default_session_files_cache_dir`, `:default_tabber_activity_cache_dir`, `:default_background_client_events_path` |
+| host-local cache | `STATE_DIR/hosts/<stable-host-id>/{session-files-cache,activity-cache}` | session-files/tabber caches; each exclusive server consumes only its own local events | `yolomux_lib/app.py:default_session_files_cache_dir`, `:default_tabber_activity_cache_dir` |
 | host-local cache | `STATE_DIR/search_index` lock/metadata | search index coordination | `yolomux_lib/search/file_index.py:260-267` |
 | shared read-only | `~/.claude/{sessions,projects}`, `~/.codex/sessions` | transcript readers; no writer established here | `yolomux_lib/tmux/sessions.py:479-480`, `:698-721` |
 | shared read-only | repository/source trees | readers and Git metadata discovery; builds must be single-writer | `yolomux_lib/workspace/session_files.py:2337`, `yolomux_lib/workspace/metadata.py:148-187` |

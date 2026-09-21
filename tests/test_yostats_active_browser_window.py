@@ -446,7 +446,7 @@ def test_active_browser_window_reads_only_generic_capture_metrics_from_the_authe
         "runtime_status",
         "service_status",
         "send_yolomux_control_request",
-        "read_background_owner_debug_status",
+        "read_background_scheduler_debug_status",
     ):
         assert forbidden not in source
     scripts = []
@@ -488,7 +488,7 @@ def test_active_browser_window_reads_only_generic_capture_metrics_from_the_authe
             },
         },
     )
-    assert not hasattr(tool, "read_background_owner_debug_status")
+    assert not hasattr(tool, "read_background_scheduler_debug_status")
     assert not hasattr(tool, "send_yolomux_control_request")
 
     assert tool.capture_measurement_metrics(driver, require_owner_counters=True) == {

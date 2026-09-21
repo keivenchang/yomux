@@ -288,7 +288,7 @@ AGENT_WINDOW_STATE_RANK = {"working": 0, "approval": 1, "blocked": 2, "needs-inp
 def assemble_agent_window_rows(gathered_agents: list[dict[str, Any]], *, snapshot_revision: int = 0) -> list[dict[str, Any]]:
     """Build and sort agent-window rows from pre-gathered per-agent data.
 
-    Pure over its inputs so the identical assembly runs in the web owner and in a
+    Pure over its inputs so the identical assembly runs in the server process and in a
     batchd worker: every impure value (screen state, working-stopped timestamp,
     attention keys, acknowledgements, path/git, and the statusd-owned overwrite
     row) is gathered by the caller and passed in as plain data.
@@ -448,7 +448,7 @@ def tabber_activity_view_result(payload: dict[str, Any], *, max_bytes: int) -> d
     """Assemble bounded Tabber rows for a batch of CHANGED sessions from pre-gathered data.
 
     This task is deliberately pure: it never captures a tmux pane, reads live attention/cooldown
-    state, or spawns git -- the web owner gathers all of that (impure, cannot run in a spawn worker)
+    state, or spawns git -- the server process gathers all of that (impure, cannot run in a spawn worker)
     and this worker only reconstructs SessionInfo from JSON, then runs the same pure
     `build_recent_agents_payload` + `assemble_agent_window_rows` the web process used before this
     migration. The caller merges the returned changed-session rows with its own locally-retained

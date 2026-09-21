@@ -4444,7 +4444,7 @@ def session_files_view_result(payload: dict[str, Any], *, max_bytes: int) -> dic
     raw_repo_refs = payload.get("repo_refs")
     repo_refs = canonical_repository_refs(raw_repo_refs if isinstance(raw_repo_refs, dict) else None)
     include_cross = bool(payload.get("include_cross_session_attribution", not bool(session)))
-    # The worker has no settings access and looks nothing up: the policy the web owner signed the
+    # The worker has no settings access and looks nothing up: the policy the requesting server signed the
     # cache identity with is the policy this task judges by, or the answer could disagree with its
     # own key.  When it did not arrive, fall back to the shipped defaults -- never to an empty
     # policy, which would admit everything -- and say so in the product so the fallback is

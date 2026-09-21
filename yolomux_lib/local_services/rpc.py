@@ -565,7 +565,13 @@ class LocalRpcEnvelope:
         return result
 
 
-def safe_socket_path(path: Path, prefix: str = "yolomux", fallback_name: str | None = None) -> Path:
+def safe_socket_path(
+    path: Path,
+    prefix: str = "yolomux",
+    fallback_name: str | None = None,
+    *,
+    max_bytes: int | None = None,
+) -> Path:
     """Keep Unix-domain paths portable without leaking a long state directory.
 
     The fallback always nests inside the server-owned `yolomux-server-<uid>/shared/s/`
@@ -586,7 +592,11 @@ def safe_socket_path(path: Path, prefix: str = "yolomux", fallback_name: str | N
     ._write_record` already does.
     """
     candidate = path.expanduser()
-    if len(os.fsencode(str(candidate))) <= LOCAL_RPC_SOCKET_PATH_BYTES:
+    path_budget = LOCAL_RPC_SOCKET_PATH_BYTES if max_bytes is None else min(
+        LOCAL_RPC_SOCKET_PATH_BYTES,
+        max(1, int(max_bytes)),
+    )
+    if len(os.fsencode(str(candidate))) <= path_budget:
         return candidate
     digest = hashlib.sha256(os.fsencode(str(candidate))).hexdigest()[:20]
     uid = getattr(os, "getuid", lambda: "nouid")()
@@ -601,7 +611,7 @@ def safe_socket_path(path: Path, prefix: str = "yolomux", fallback_name: str | N
     else:
         fallback_base = Path("/tmp") / f"yolomux-server-{uid}" / "shared" / "s"
     fallback = fallback_base / digest[:8] / bounded_name
-    if len(os.fsencode(str(fallback))) <= LOCAL_RPC_SOCKET_PATH_BYTES:
+    if len(os.fsencode(str(fallback))) <= path_budget:
         return fallback
     # Test and rooted runtime directories can themselves be long enough to make a
     # bounded child exceed sockaddr_un's limit. Keep the digest identity, but

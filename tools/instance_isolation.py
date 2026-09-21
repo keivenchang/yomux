@@ -296,10 +296,7 @@ def resolve_instance_environment(port: int | None, environ: Mapping[str, str], *
         # One authoritative identity carrier - no separate same-valued vars. It is
         # an assertion made only by the managed launcher: a caller-set YOLOMUX_ROOT
         # reaches the early return above and never gets this descriptor, so a bare
-        # path cannot grant the local-owner capability. A managed row does NOT
-        # carry YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT: it uses DisabledBackgroundOwner
-        # (which never reads that election var); shared/default servers still get
-        # their primary from startup_common.sh.
+        # path cannot grant the local-owner capability.
         INSTANCE_ENV: format_instance(InstanceIdentity(port=port, managed=True)),
     }
     try:
@@ -316,7 +313,6 @@ _INHERITED_INSTANCE_KEYS = (
     INSTANCE_ENV,
     EARLY_PORT_ENV,
     MANAGED_INSTANCE_PORT_ENV,
-    "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT",
     *PRODUCT_ROOT_KEYS,
     GENERATED_PYTHON_CACHE_PREFIX_ENV,
     "XDG_CONFIG_HOME",
@@ -388,13 +384,13 @@ def _apply_instance_resolution(port: int | None, target: dict[str, str], *, plat
 def resolve_direct_launch_plan(port: int | None, base_environ: Mapping[str, str], *, platform: str | None = None, tempdir: Path | None = None) -> RowPlan:
     """Capture direct-launch root semantics without trusting a service daemon's
     retained environment. Explicit caller roots survive; stale instance identity
-    and background-owner authority do not."""
+    and local-scheduler authority do not."""
     platform_name = platform or os.uname().sysname
     values = dict(base_environ)
     has_explicit_root = bool(values.get(YOLOMUX_ROOT_ENV) or any(values.get(key) for key in ROOT_KEYS))
     if port is not None and port != default_port(platform_name) and not has_explicit_root:
         return resolve_row_plan(port, values, platform=platform_name, tempdir=tempdir)
-    for key in (INSTANCE_ENV, EARLY_PORT_ENV, MANAGED_INSTANCE_PORT_ENV, "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT", "YOLOMUX_ROW_PLAN_FILE"):
+    for key in (INSTANCE_ENV, EARLY_PORT_ENV, MANAGED_INSTANCE_PORT_ENV, "YOLOMUX_ROW_PLAN_FILE"):
         values.pop(key, None)
     _apply_instance_resolution(port, values, platform=platform_name, tempdir=tempdir)
     assign = {key: values[key] for key in _INHERITED_INSTANCE_KEYS if values.get(key)}

@@ -49,7 +49,7 @@ Re-pointed after M2 and M3, each change verified against source here before it w
   M4's health contract re-decided the demand/health split PER SERVICE instead of flagging all
   six. The previous freeze here said "only two of six declare demand_started" and explained it
   with a comment claiming all six were demand-started in fact. That claim was false: statsd and
-  batchd are each pinned up by a background owner in this process, so their absence is a verified
+  batchd are each pinned up by the local scheduler in this process, so their absence is a verified
   outage and neither may carry the flag. statusd and approvald genuinely are demand-scoped and
   now declare it, taking the count to four. batchd's one legitimate absence -- this process does
   not own background scheduling -- is expressed by a separate typed field with its own named
@@ -311,8 +311,8 @@ CATALOG: dict[str, ServiceOwners] = {
         # excuse is not a boot grace period and not a timer: `statsd_pin_pending` reads the pin
         # owner's own live status and requires ALL FOUR of supervisor.alive, leased is not True,
         # failure_count == 0, and a phase in {starting, acquiring_lease, starting_scheduler}.
-        # Every one of those closes a hole -- a lost election, a pin already taken, a recorded
-        # failure, or a demoting/stopping/backoff/blocked process -- so the excuse cannot outlive
+        # Every one of those closes a hole -- a scheduler that has not started yet, a pin already
+        # taken, a recorded failure, or a demoting/stopping/backoff/blocked process -- so the excuse cannot outlive
         # the pending start and a statsd that actually died still alarms.
         absence_expected_reason="stats_pin_pending",
         absence_expected_owner="yolomux_lib.app:statsd_pin_pending",
@@ -338,13 +338,13 @@ CATALOG: dict[str, ServiceOwners] = {
         recovery_client_entrypoint="yolomux_lib.local_services.client:LocalServiceClient.retry",
         # M9. The observer's control maps batchd to this wrapper, so a batchd that is down while
         # THIS process holds the scheduler lease is retried; a batchd absent because the lease is
-        # held elsewhere still publishes `retry_blocked_scheduler_not_owned` and is not touched.
+        # inactive still publishes `retry_blocked_scheduler_inactive` and is not touched.
         recovery_wired_today=True,
         essential=True,
         demand_started_declared=False,
         # Pinned up by the scheduler lease, so NOT demand_started. The one expected absence is
         # the other side of that lease: this process does not own background scheduling.
-        absence_expected_reason="scheduler_not_owned",
+    absence_expected_reason="scheduler_inactive",
         absence_expected_owner="yolomux_lib.infra.batchd:BatchClient._runtime_status_for_service",
         absence_expected_constant="BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE",
     ),
@@ -1215,11 +1215,11 @@ def test_demand_started_is_declared_by_exactly_the_four_services_nothing_keeps_h
     comment was wrong, and the four remaining rows were NOT one uniform gap:
 
       statsd   is lazily created but a background loop keeps it hot. `StatsCurrentRuntime`
-               holds a statsd lease for as long as this process is the elected background owner
+               holds a statsd lease for as long as this process's local scheduler is active
                (`stats_current/runtime.py:365-368`) and the scheduler appends over RPC at the
                `cpu` family's 1s cadence (`families.py:130-134`). Flagging it `demand_started`
                would have turned a real statsd outage into silence.
-      batchd     is pinned by the scheduler lease `start_for_scheduler()` takes on background
+      batchd     is pinned by the local scheduler lease `start_for_scheduler()` takes on startup
                ownership (`infra/batchd.py:1377-1385`, called at `app.py:2962`); the broker's
                idle rule refuses to retire while any lease is held (`infra/batchd.py:1330-1337`).
                Same verdict as statsd, different keeper.
@@ -1270,7 +1270,7 @@ def test_every_typed_expected_absence_is_declared_once_and_has_a_named_owner():
     for each one the symbol whose state decides it is resolved and the constant that spells the
     token is read out of production source, so neither claim can become free-floating prose.
 
-    Re-pointed at M7. batchd's `scheduler_not_owned` is a STEADY-STATE fact about a lost election.
+    Re-pointed at M7. batchd's `scheduler_inactive` is a steady-state fact about an inactive local scheduler.
     statsd's `stats_pin_pending` is a BOUNDED in-flight window: this process is on its way to
     taking the statsd pin and has not taken it yet, which is why the token has to be withdrawn by
     the owner's own live status rather than by a timer. The freeze below is deliberately exact --
@@ -1278,7 +1278,7 @@ def test_every_typed_expected_absence_is_declared_once_and_has_a_named_owner():
     of these is a path by which a real outage becomes silent.
     """
     declared = {name: owners.absence_expected_reason for name, owners in CATALOG.items() if owners.absence_expected_reason}
-    assert declared == {"statsd": "stats_pin_pending", "batchd": "scheduler_not_owned"}, declared
+    assert declared == {"statsd": "stats_pin_pending", "batchd": "scheduler_inactive"}, declared
     for service, owners in CATALOG.items():
         status_source = _source(owners.status_owner)
         expected = 1 if owners.absence_expected_reason else 0

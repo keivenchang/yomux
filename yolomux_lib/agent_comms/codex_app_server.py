@@ -25,15 +25,7 @@ from .stream_events import normalize_codex_app_server_message
 
 CODEX_APP_SERVER_TIMEOUT_SECONDS = 120.0
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-YOLOMUX_VERSION_ASSIGNMENT_RE = re.compile(r"^\s*YOLOMUX_VERSION\s*=\s*['\"]([^'\"]+)['\"]\s*$", re.MULTILINE)
-
-
-def _read_yolomux_version() -> str:
-    match = YOLOMUX_VERSION_ASSIGNMENT_RE.search((PROJECT_ROOT / "yolomux_lib" / "common.py").read_text(encoding="utf-8"))
-    return match.group(1) if match else "0.0.0"
-
-
-YOLOMUX_VERSION = _read_yolomux_version()
+from ..version import YOLOMUX_VERSION
 
 
 def codex_runtime_env(base_env: dict[str, str] | None = None) -> dict[str, str]:

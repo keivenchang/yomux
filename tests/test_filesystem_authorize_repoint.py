@@ -279,7 +279,7 @@ def repoint_tree(monkeypatch):
         paths.invalidate_path_policy_caches()
 
 
-@pytest.mark.parametrize("index_state", ["ready", "follower", "warming"])
+@pytest.mark.parametrize("index_state", ["ready", "warming"])
 def test_indexed_search_drops_a_complete_repointed_secret_row(repoint_tree, monkeypatch, tmp_path, index_state):
     """Every in-memory, persisted, warming, and recent result drops a row that no longer authorizes."""
     root, blocked = repoint_tree
@@ -297,10 +297,7 @@ def test_indexed_search_drops_a_complete_repointed_secret_row(repoint_tree, monk
         policy["exclude_signature"],
     )
     assert index.ready is True
-    if index_state == "follower":
-        file_index.clear_memory_indexes()
-        monkeypatch.setattr(file_index, "background_owner_can_build", lambda: False)
-    elif index_state == "warming":
+    if index_state == "warming":
         index.ready = False
         monkeypatch.setattr(file_index, "_start_build", lambda *_args, **_kwargs: True)
 
@@ -353,19 +350,10 @@ def test_indexed_search_annotation_consumes_the_authorized_root_generation(repoi
     assert payload["files"][0]["size"] != len(BLOCKED_SENTINEL)
 
 
-@pytest.mark.parametrize(
-    ("follower", "expected_state"),
-    [
-        pytest.param(False, "warming", id="ready"),
-        pytest.param(True, "follower", id="follower-ready"),
-    ],
-)
 def test_indexed_search_rejects_rows_from_a_replaced_root_generation(
     repoint_tree,
     monkeypatch,
     tmp_path,
-    follower,
-    expected_state,
 ):
     """A pathname reused for another directory may not inherit the prior directory's index rows."""
     root, _blocked = repoint_tree
@@ -381,11 +369,7 @@ def test_indexed_search_rejects_rows_from_a_replaced_root_generation(
     )
     assert built.ready is True
 
-    if follower:
-        file_index.clear_memory_indexes()
-        monkeypatch.setattr(file_index, "background_owner_can_build", lambda: False)
-    else:
-        monkeypatch.setattr(file_index, "_start_build", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(file_index, "_start_build", lambda *_args, **_kwargs: True)
 
     old_root = root.with_name(f"{root.name}-old-generation")
     root.rename(old_root)
@@ -395,7 +379,7 @@ def test_indexed_search_rejects_rows_from_a_replaced_root_generation(
     payload = filesystem.search_files(str(root), BLOCKED_SENTINEL, recursive=True)
 
     assert payload["files"] == []
-    assert payload["index_state"] == expected_state
+    assert payload["index_state"] == "warming"
     assert all(BLOCKED_SENTINEL not in repr(row) for row in payload["files"])
 
 

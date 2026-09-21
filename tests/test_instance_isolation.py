@@ -63,7 +63,6 @@ def test_clean_row_environment_strips_inherited_and_resolves_the_row(tmp_path: P
         "PATH": "/usr/bin",
         YOLOMUX_ROOT_ENV: "/tmp/foreign/p9999",
         INSTANCE_ENV: "9999:managed",
-        "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT": "9999",
         "YOLOMUX_STATE_DIR": "/tmp/foreign/state",
         "YOLOMUX_CODEX_HOME": "/tmp/foreign/codex",
         "CODEX_HOME": "relative-codex",
@@ -138,7 +137,6 @@ def test_direct_launch_plan_preserves_explicit_root_but_drops_stale_authority(tm
             YOLOMUX_ROOT_ENV: str(root),
             "PYTHONPYCACHEPREFIX": str(root / "pycache"),
             INSTANCE_ENV: "9999:managed",
-            "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT": "9999",
             "YOLOMUX_ROW_PLAN_FILE": "/tmp/stale-plan.json",
             "XDG_RUNTIME_DIR": str(tmp_path / "foreign-runtime"),
         },
@@ -148,7 +146,6 @@ def test_direct_launch_plan_preserves_explicit_root_but_drops_stale_authority(tm
     assert plan.assign[YOLOMUX_ROOT_ENV] == str(root)
     assert plan.assign["PYTHONPYCACHEPREFIX"] == str(root / "pycache")
     assert INSTANCE_ENV not in plan.assign
-    assert "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT" not in plan.assign
     assert "YOLOMUX_ROW_PLAN_FILE" not in plan.assign
     assert "XDG_RUNTIME_DIR" not in plan.assign
 
@@ -330,7 +327,7 @@ def test_nondefault_ports_receive_disjoint_single_roots(tmp_path: Path):
     assert is_managed_instance_port(7111, one.environment)
 
 
-def test_caller_set_root_never_selects_the_managed_local_owner_adapter(tmp_path: Path):
+def test_caller_set_root_never_selects_the_managed_local_adapter(tmp_path: Path):
     explicit = {YOLOMUX_ROOT_ENV: str(tmp_path / "root")}
 
     assert is_managed_instance_port(7111, explicit) is False
@@ -353,7 +350,6 @@ def test_same_root_is_the_single_instance_identity():
 def test_explicit_private_7111_root_needs_no_shared_flag():
     exact = {
         YOLOMUX_ROOT_ENV: str(Path.home() / "dev" / "yolomux-verify-7111"),
-        "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT": "7111",
     }
     assert resolve_instance_environment(7111, exact, platform="Linux").error == ""
 
@@ -415,6 +411,6 @@ def test_early_port_mismatch_refuses(monkeypatch):
 
 def test_cli_refuses_when_early_port_disagrees_with_argparse(monkeypatch, capsys):
     monkeypatch.setenv(INSTANCE_ENV, "7111:managed")
-    monkeypatch.setattr(sys, "argv", ["yolomux.py", "--port", "7112", "--print-background-owner"])
+    monkeypatch.setattr(sys, "argv", ["yolomux.py", "--port", "7112", "--print-runtime-report"])
     assert cli.main() == 2
     assert "early instance port 7111 disagrees with parsed --port 7112" in capsys.readouterr().err

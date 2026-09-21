@@ -29,7 +29,7 @@ class SchedulerError(RuntimeError):
 
 
 class RetiredOwnerError(SchedulerError):
-    """A collector result belongs to a retired background-owner generation."""
+    """A collector result belongs to a retired local-scheduler generation."""
 
 
 @dataclass(frozen=True, slots=True)

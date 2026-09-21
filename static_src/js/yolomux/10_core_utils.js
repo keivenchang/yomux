@@ -4107,7 +4107,7 @@ function applyUserInitiatedPanelFocus(item, previousItem, options = {}) {
   }
   if (isFileEditorItem(item)) {
     activeFile = fileItemPath(item);
-    scheduleFileExplorerActiveFileReveal(activeFile);
+    scheduleFileExplorerActiveFileReveal(activeFile, {explicit: true});
   }
   const explicitFinderSync = isTmuxSession(item) || isFileEditorItem(item);
   if (!isFileExplorerItem(item)) scheduleFileExplorerActiveTabSync(item, {explicit: explicitFinderSync});
@@ -6709,8 +6709,16 @@ function appendUrlContextMenuItems(menu, href, closeMenu, options = {}) {
   return true;
 }
 
+function clipboardImageSourceUrl(image) {
+  const direct = String(image?.currentSrc || image?.src || '').trim();
+  if (direct) return direct;
+  const resolvedPath = String(image?.dataset?.resolvedPath || '').trim();
+  if (resolvedPath && typeof rawFileUrl === 'function') return rawFileUrl(resolvedPath);
+  return String(image?.dataset?.originalSrc || '').trim();
+}
+
 async function copyMarkdownPreviewImageToClipboard(image, button) {
-  const url = String(image?.currentSrc || image?.src || '');
+  const url = clipboardImageSourceUrl(image);
   if (!url || !globalThis.ClipboardItem || !navigator?.clipboard?.write) {
     await copyTextWithFeedback(image?.dataset?.originalSrc || url, {button});
     return;

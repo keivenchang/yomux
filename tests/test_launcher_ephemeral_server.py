@@ -66,12 +66,12 @@ def test_row_probe_endpoint_authenticates_against_its_own_root_not_a_foreign_coo
         assert users, "row auth config produced no users"
         user = users[0]
         correct = hmac.new(secret, f"{user.username}:{user.password}".encode("utf-8"), hashlib.sha256).hexdigest()
-        assert _get(port, "/api/background/status", cookie=f"{AUTH_COOKIE_NAME}_{port}={correct}") == HTTPStatus.OK
+        assert _get(port, "/api/ping", cookie=f"{AUTH_COOKIE_NAME}_{port}={correct}") == HTTPStatus.OK
 
         # A wrong cookie (same user, wrong password -> wrong HMAC) is refused, not silently
         # accepted. A cookie minted from a foreign root's secret would fail identically.
         wrong = hmac.new(secret, f"{user.username}:not-the-password".encode("utf-8"), hashlib.sha256).hexdigest()
-        assert _get(port, "/api/background/status", cookie=f"{AUTH_COOKIE_NAME}_{port}={wrong}") != HTTPStatus.OK
+        assert _get(port, "/api/ping", cookie=f"{AUTH_COOKIE_NAME}_{port}={wrong}") != HTTPStatus.OK
     finally:
         if server is not None:
             server.stop()

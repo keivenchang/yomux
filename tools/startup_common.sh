@@ -277,7 +277,7 @@ yolomux_macos_server_launcher() {
   # The plan JSON is a positional argument, not inherited state: a long-lived
   # tmux server cannot substitute a stale root or stale plan-file path. Both the
   # direct boot path and supported multi-row launcher use this same exec path.
-  printf '%s' 'repo=$1; launch_path=$2; shell_bin=$3; python_bin=$4; script=$5; primary_port=$6; log_path=$7; plan_json=$8; shift 8; cd "$repo" && export PATH="$launch_path" SHELL="$shell_bin" PYTHONUNBUFFERED=1 TERM=xterm-256color MALLOC_ARENA_MAX=2 '"$(yolomux_default_server_optin)"' && unset TMUX TMUX_PANE; if [ -n "$primary_port" ]; then set -- env YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT="$primary_port" "$python_bin" -u "$script" "$@"; else set -- "$python_bin" -u "$script" "$@"; fi; exec "$python_bin" "$repo/tools/instance_isolation.py" exec --plan-json "$plan_json" -- "$@" >> "$log_path" 2>&1'
+  printf '%s' 'repo=$1; launch_path=$2; shell_bin=$3; python_bin=$4; script=$5; log_path=$6; plan_json=$7; shift 7; cd "$repo" && export PATH="$launch_path" SHELL="$shell_bin" PYTHONUNBUFFERED=1 TERM=xterm-256color MALLOC_ARENA_MAX=2 '"$(yolomux_default_server_optin)"' && unset TMUX TMUX_PANE; exec "$python_bin" "$repo/tools/instance_isolation.py" exec --plan-json "$plan_json" -- "$python_bin" -u "$script" "$@" >> "$log_path" 2>&1'
 }
 
 yolomux_submit_macos_server() {
@@ -287,8 +287,7 @@ yolomux_submit_macos_server() {
   local launch_path="$4"
   local port="$5"
   local log_path="$6"
-  local primary_port="$7"
-  shift 7
+  shift 6
   local launcher socket_name session_name plan_json
   launcher="$(yolomux_macos_server_launcher)"
   socket_name="$(yolomux_macos_server_tmux_socket)"
@@ -299,5 +298,5 @@ yolomux_submit_macos_server() {
     plan_json="$("$python_bin" "$repo_root/tools/instance_isolation.py" plan-direct --port "$port")" || return
   fi
   tmux -L "$socket_name" new-session -d -s "$session_name" -c "$repo_root" \
-    /bin/bash -c "$launcher" bash "$repo_root" "$launch_path" "$shell_bin" "$python_bin" "$repo_root/yolomux.py" "$primary_port" "$log_path" "$plan_json" "$@"
+    /bin/bash -c "$launcher" bash "$repo_root" "$launch_path" "$shell_bin" "$python_bin" "$repo_root/yolomux.py" "$log_path" "$plan_json" "$@"
 }

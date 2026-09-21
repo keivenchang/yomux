@@ -361,8 +361,12 @@ def gate_runtime_paths(
     # fixture redirects TMPDIR into its disposable product root; otherwise tearing down one gate
     # deletes pytest's cached base and every later tmp_path fixture fails during setup.
     tmp_path_factory.getbasetemp()
-    root = Path(os.environ["YOLOMUX_TEST_ROOT"]) / f"g-{os.getpid()}-{uuid.uuid4().hex[:4]}"
-    root.mkdir(mode=0o700)
+    # The gate run root carries a long per-run namespace.  It is a suitable parent for
+    # test evidence and tmux sockets, but using it as YOLOMUX_ROOT leaves too little room
+    # for the product's longest rooted local-service socket.  Keep this fixture's product
+    # root independently short; every path it owns remains below this root and cleanup
+    # still removes it as one unit.
+    root = Path(tempfile.mkdtemp(prefix=f"y{os.getpid()}-", dir="/tmp"))
     ledger = install_fixture_local_service_ledger(monkeypatch)
     self_baseline = capture_fixture_self_baseline()
     home_dir = root / "home"
@@ -931,7 +935,7 @@ def prepare_fixture_http_app(monkeypatch: pytest.MonkeyPatch, app: Any) -> None:
     for method_name in (
         "stop_client_event_watcher",
         "stop_batchd_operation_service",
-        "demote_background_owner",
+        "stop_background_scheduler",
         "stop_auto_approve_all",
     ):
         if not callable(getattr(app, method_name, None)):
@@ -963,7 +967,7 @@ class FixtureSchedulerApp(Protocol):
 
     Both the real gate ``TmuxWebtermApp`` and the rollback fake app satisfy this one contract, so
     the pin routes through a typed seam rather than an ad-hoc attribute assumption, and the same
-    ``job_client`` that setup pins is the one teardown's ``demote_background_owner`` releases.
+    ``job_client`` that setup pins is the one teardown's ``stop_background_scheduler`` releases.
     """
 
     job_client: FixtureSchedulerClient
@@ -975,7 +979,7 @@ class RecordingSchedulerClient:
     It satisfies ``FixtureSchedulerClient`` so a fixture app with no real broker still exercises
     the exact pin/release seam, and its counters prove exactly-once release on the rollback
     teardown path.  It models the real ``BatchClient.stop_for_scheduler`` idempotence: teardown
-    calls the release from two owners (``demote_background_owner`` and ``stop_auto_approve_all``),
+    calls the release from two owners (``stop_background_scheduler`` and ``stop_auto_approve_all``),
     but only the first, while a lease is held, actually releases -- so ``releases`` counts the one
     effective release, not the two idempotent calls.
     """
@@ -1005,14 +1009,13 @@ class RecordingSchedulerClient:
 
 
 def pin_fixture_batchd_scheduler(app: FixtureSchedulerApp) -> None:
-    """Pin batchd for the whole fixture window, exactly as the elected owner does in production.
+    """Pin batchd for the whole fixture window, exactly as the local scheduler does in production.
 
-    The gate app is a local background owner: ``DisabledBackgroundOwner.is_owner()`` and
-    ``can_run(role)`` both return True, so a Finder/session-files interaction starts the
-    owner-side session-files background refresh worker, and that worker submits
+    The gate app uses one process-local scheduler, so ``can_run(role)`` returns True and a
+    Finder/session-files interaction starts the local session-files refresh worker, which submits
     ``session_files_view`` to batchd (``submit_session_files_job`` -> ``job_client.submit``).
-    In production the owner first takes the scheduler lease
-    (``handle_background_owner_acquired`` -> ``job_client.start_for_scheduler``), which spawns
+    In production the local scheduler first takes the scheduler lease
+    (``handle_background_scheduler_started`` -> ``job_client.start_for_scheduler``), which spawns
     batchd and keeps its Unix socket present and warm before any refresh worker submits.  Without
     this pin the fixture served those owner-side producers against an unpinned batchd, so every
     batchd interaction was an on-demand cold start that, under -n16 CPU contention, raced an
@@ -1020,12 +1023,21 @@ def pin_fixture_batchd_scheduler(app: FixtureSchedulerApp) -> None:
     budget -- and the strict browser-journey gate caught the emitted ``local-service:batchd``
     transport error.  The 5s spawn budget of this single setup pin, plus the 60s idle the
     fixture sets, guarantees the socket stays present for the bounded window.  Teardown already
-    releases the lease symmetrically via ``demote_background_owner`` -> ``stop_for_scheduler``;
+    releases the lease symmetrically via ``stop_background_scheduler`` -> ``stop_for_scheduler``;
     only setup was missing its half.  ``start_for_scheduler`` is the same primitive the stateful
-    journey reaches through ``start_background_owner``, so there is one batchd-pin owner, not two.
+    journey reaches through ``start_background_scheduler``, so there is one batchd-pin operation, not two.
     """
 
-    app.job_client.start_for_scheduler()
+    if not app.job_client.start_for_scheduler():
+        status = app.job_client.registry.status()
+        raise AssertionError(
+            "fixture could not start local batchd scheduler lease: "
+            f"socket={app.job_client.registry.socket_path} "
+            f"service_dir={app.job_client.registry.service_dir} "
+            f"status={status.get('status') or status.get('error')} "
+            f"failure={status.get('failure_reason')} terminal={status.get('terminal_failure')} "
+            f"process={status.get('process_diagnostic')}"
+        )
 
 
 @dataclass
@@ -2270,7 +2282,7 @@ def stop_fixture_app_runtime(app: Any, *, label: str) -> None:
     # those workers instead of losing the only owner record with the leader.
     attempt(capture_local_services)
     attempt(app.stop_batchd_operation_service)
-    attempt(app.demote_background_owner)
+    attempt(app.stop_background_scheduler)
     attempt(capture_local_services)
     attempt(stop_tabber_warmer)
     attempt(app.stop_auto_approve_all)
@@ -2432,7 +2444,8 @@ class GateStatefulJourney:
         try:
             server = TmuxWebtermHTTPServer(("127.0.0.1", self.port), app)
             track_fixture_http_requests(server)
-            app.start_background_owner(port=self.port, managed_instance=True)
+            if not app.start_background_scheduler(port=self.port):
+                raise RuntimeError("local background scheduler failed to start")
             thread = threading.Thread(
                 target=server.serve_forever,
                 name=f"aged-state-http-{self.starts + 1}",
@@ -2899,10 +2912,20 @@ def _read_fixture_operation_state(driver) -> dict[str, Any]:
 
 
 def _fixture_operation_state_quiescent(state: Mapping[str, Any]) -> bool:
-    """Return whether every owned operation surface has reached terminal state."""
+    """Return whether every teardown-blocking operation surface has reached terminal state.
+
+    A visible Finder keeps one coalesced watch-diff receipt alive as its normal change stream. That
+    receipt remains diagnostic state, but it is not teardown-blocking once the one-shot startup
+    baseline has completed; otherwise every reused browser ends its test waiting for the next
+    filesystem change. Startup baseline receipts stay blocking and use the bounded receipt path.
+    """
+
+    pending = set(state.get("pending") or [])
+    if state.get("watchRootsBaselinePending", False) is not True:
+        pending -= set(state.get("watchDiffPendingOperationIds") or [])
 
     return (
-        not state.get("pending")
+        not pending
         and int(state.get("batchQueued") or 0) == 0
         and int(state.get("batchPending") or 0) == 0
         and int(state.get("batchOperations") or 0) == 0

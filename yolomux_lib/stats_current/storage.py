@@ -2300,7 +2300,7 @@ class Store:
             _initialize_ring_schema(connection)
             if include_browser_diagnostics:
                 _initialize_browser_diagnostics(connection)
-            # A clean writer takeover must not inherit the largest WAL allocation
+            # A fresh writer startup must not inherit the largest WAL allocation
             # a prior large transaction left behind. The service singleton lock
             # makes this the safe startup boundary before worker readers exist.
             _truncate_wal(connection)

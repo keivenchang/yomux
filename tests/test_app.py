@@ -95,6 +95,20 @@ POINT_LANE_EDITOR_OPEN_BUDGET_SECONDS = 15.0
 pytestmark = pytest.mark.usefixtures("no_control_socket", "isolated_yoagent_conversation_state", "isolated_tmux_socket")
 
 
+def _search_refresh_test_app(enqueue, mark_progress=None):
+    scheduler = app_module.BackgroundScheduler()
+    assert scheduler.start() is True
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.background_scheduler, webapp.search_indexer = scheduler, SimpleNamespace(enqueue=enqueue)
+    webapp.record_performance_sample = webapp.background_refresh_event_details = webapp.log_sampled_background_refresh_event = lambda *_args, **_kwargs: None
+    webapp.mark_search_progress_active = mark_progress or (lambda: None)
+    return webapp, scheduler
+
+
+def _request_search_refresh(webapp):
+    return webapp.request_background_refresh(app_module.BACKGROUND_ROLE_SEARCH_INDEX, {"root": "/repo", "paths": ["/repo/file.md"]})
+
+
 def test_darwin_memory_details_match_one_native_vm_snapshot(monkeypatch): app_darwin_memory.assert_darwin_memory_details_match_one_native_vm_snapshot(monkeypatch)
 def test_darwin_memory_details_leave_unavailable_swap_and_pressure_empty(monkeypatch): app_darwin_memory.assert_darwin_memory_details_leave_unavailable_swap_and_pressure_empty(monkeypatch)
 @pytest.mark.parametrize(("native_level", "expected"), [(1, 1), (2, 2), (4, 4), (0, None), (3, None), (5, None)])
@@ -119,27 +133,6 @@ def test_batchd_busy_failure_result_remains_retryable_after_client_budget_exhaus
     )
 
     assert result["error"]["retryable"] is True
-
-
-class StatsRoleOwner:
-    def __init__(self, *, owner: bool, port: int):
-        self.owner = owner
-        self.port = port
-        self.follower_stale_reads = []
-        self.refresh_requests = []
-
-    def can_run(self, role):
-        return self.owner and role == app_module.BACKGROUND_ROLE_STATS_SAMPLER
-
-    def owner_payload(self):
-        return {"port": self.port}
-
-    def record_follower_stale_read(self, role):
-        self.follower_stale_reads.append(role)
-
-    def request_owner_refresh(self, role, payload):
-        self.refresh_requests.append((role, payload))
-        return {"ok": True, "accepted": True, "role": role, "local_owner": self.owner, "fallback": False}
 
 
 def test_record_owned_direct_image_usage_preserves_structured_image_token_classes():
@@ -1442,7 +1435,7 @@ def test_the_system_status_server_block_publishes_a_real_push_as_measured():
 def test_a_sample_for_another_process_is_refused_by_the_receiver():
     """Where the wrong-process guarantee actually lives.
 
-    statsd no longer reads the shared background-owner ELECTION record to find the web
+    statsd no longer reads a shared scheduler record to find the web
     process; the address is handed to it by that process over its own control channel. The
     protection against a sample landing in the WRONG web process is therefore this check, at
     the receiver, which cannot be forged by a stale or hostile file: a sample whose pid is not
@@ -1667,7 +1660,7 @@ def test_an_absent_sample_does_not_cancel_a_cpu_budget_breach():
 # `host_collectors.CpuSampler` rather than a fake that returns non-zero.
 
 
-def test_background_status_includes_performance_summary():
+def test_removed_background_status_action_does_not_expose_peer_state():
     webapp = app_module.TmuxWebtermApp([])
     try:
         webapp.record_performance_sample(
@@ -1682,7 +1675,6 @@ def test_background_status_includes_performance_summary():
             cache_fresh=True,
             owner_role="owner",
         )
-        payload, status = webapp.background_owner_status_payload()
         diagnostics_calls = []
         profile_payload = {
             "ok": True,
@@ -1703,8 +1695,6 @@ def test_background_status_includes_performance_summary():
     finally:
         webapp.control_server.stop()
 
-    assert status == HTTPStatus.OK
-    assert "perf" not in payload
     perf = diagnostics["perf"]
     assert diagnostics["browser_profiles"] == {
         "retained": 1,
@@ -1731,76 +1721,7 @@ def test_background_status_includes_performance_summary():
         "payload_bytes_total": len(json.dumps({"files": [{"path": "/repo/a.py"}]}, sort_keys=True, separators=(",", ":")).encode("utf-8")),
         "cache": {"hit:fresh": 1},
     }]
-    assert control_response["ok"] is True
-    assert "perf" not in control_response["status"]
-    assert set(control_response["search_index_runtime"]) >= {
-        "build_count",
-        "full_build_count",
-        "incremental_build_count",
-        "scanned_entries",
-        "ignored_entries",
-        "cache_bytes",
-        "write_bytes",
-        "truncated_roots",
-        "roots",
-    }
-
-
-def test_background_owner_claim_payload_reports_claim_noop_and_conflict():
-    class ClaimOwner:
-        def __init__(self, *, owner=False, takeover=True, error="") -> None:
-            self.owner = owner
-            self.takeover = takeover
-            self.error = error
-            self.calls = 0
-
-        def is_owner(self):
-            return self.owner
-
-        def attempt_takeover(self):
-            self.calls += 1
-            if self.takeover:
-                self.owner = True
-            return self.takeover
-
-        def status_payload(self):
-            return {
-                "owner": self.owner,
-                "last_error": self.error,
-                "roles": {
-                    "search-index": {"owner": self.owner, "status": "owner" if self.owner else "follower"},
-                    "stats-sampler": {"owner": self.owner, "status": "owner" if self.owner else "follower"},
-                    "session-files": {"owner": self.owner, "status": "owner" if self.owner else "follower"},
-                },
-            }
-
-    webapp = object.__new__(app_module.TmuxWebtermApp)
-    webapp.performance_metrics_payload = lambda: {"record_count": 0}
-
-    webapp.background_owner = ClaimOwner(owner=False, takeover=True)
-    payload, status = webapp.background_owner_claim_payload()
-    assert status == HTTPStatus.OK
-    assert payload["ok"] is True
-    assert payload["claimed"] is True
-    assert payload["was_owner"] is False
-    assert payload["status"]["owner"] is True
-
-    webapp.background_owner = ClaimOwner(owner=True, takeover=True)
-    payload, status = webapp.background_owner_claim_payload()
-    assert status == HTTPStatus.OK
-    assert payload["ok"] is True
-    assert payload["claimed"] is False
-    assert payload["was_owner"] is True
-
-    webapp.background_owner = ClaimOwner(owner=False, takeover=False, error="owner lock is held")
-    payload, status = webapp.background_owner_claim_payload()
-    assert status == HTTPStatus.CONFLICT
-    assert payload["ok"] is False
-    assert payload["claimed"] is False
-    assert payload["was_owner"] is False
-    assert payload["error"] == "owner lock is held"
-    assert payload["user_message"]["key"] == "common.requestFailed"
-    assert payload["diagnostic"] == "owner lock is held"
+    assert control_response == {"ok": False, "error": "unknown action: background_status"}
 
 
 def test_log_event_publishes_shared_event_log_invalidation_after_append(tmp_path):
@@ -1830,7 +1751,7 @@ def test_sampled_background_event_forwards_one_shared_descriptor_parent():
     calls = []
     webapp.log_event = lambda *args, **kwargs: calls.append((args, kwargs)) or {"time": "event-1"}
     target = {
-        "key": "backgroundOwner.sessionFiles",
+        "key": "tabber.sessionFiles",
         "params": {},
         "fallback": "Session files",
     }
@@ -2057,7 +1978,7 @@ def test_runtime_control_report_returns_only_safe_in_memory_filesystem_batch_att
 
     assert response["ok"] is True
     report = response["report"]
-    assert {"state_dir", "owner", "refresh", "caches", "search_index", "local_services", "top_endpoints", "top_background_work", "top_event_types", "client_events", "chat", "login_throttle", "largest_active_transcripts", "transcripts_cache", "filesystem_batch"} <= report.keys()
+    assert {"state_dir", "scheduler", "refresh", "caches", "search_index", "local_services", "top_endpoints", "top_background_work", "top_event_types", "client_events", "chat", "login_throttle", "largest_active_transcripts", "transcripts_cache", "filesystem_batch"} <= report.keys()
     assert report["refresh"]["bounded"] is True
     assert report["caches"]["session_files"]["truncated"] is True
     assert len(report["filesystem_batch"]) == 1
@@ -2074,6 +1995,83 @@ def test_runtime_control_report_returns_only_safe_in_memory_filesystem_batch_att
         "client_scope": "browser",
     }
     assert "credential.txt" not in json.dumps(report, sort_keys=True)
+
+
+def test_search_refresh_retry_is_not_suppressed_by_rejected_indexer(monkeypatch):
+    responses = iter((
+        {"ok": False, "accepted": False, "error": "indexer unavailable"},
+        {"ok": True, "accepted": True},
+    ))
+    webapp, scheduler = _search_refresh_test_app(lambda *_args, **_kwargs: next(responses))
+
+    first = _request_search_refresh(webapp)
+    second = _request_search_refresh(webapp)
+
+    assert first["accepted"] is False
+    assert second["accepted"] is True
+    assert second.get("coalesced") is not True
+    assert scheduler.refresh_queue_payload()["recent_pending_count"] == 1
+    scheduler.stop()
+
+
+def test_search_refresh_without_root_is_rejected_before_scheduler_admission():
+    webapp, scheduler = _search_refresh_test_app(
+        lambda *_args, **_kwargs: pytest.fail("missing root must not reach indexd"),
+        lambda: pytest.fail("missing root must not start search progress"),
+    )
+
+    result = webapp.request_background_refresh(app_module.BACKGROUND_ROLE_SEARCH_INDEX, {})
+
+    assert result["accepted"] is False
+    assert result["error"] == "missing index refresh root"
+    assert scheduler.refresh_queue_payload()["recent_pending_count"] == 0
+    scheduler.stop()
+
+
+def test_search_refresh_admission_is_serialized_with_scheduler_shutdown(monkeypatch):
+    enqueue_started = threading.Event()
+    release_enqueue = threading.Event()
+    shutdown_finished = threading.Event()
+    request_result = []
+
+    def enqueue(*_args, **_kwargs):
+        enqueue_started.set()
+        assert release_enqueue.wait(1.0)
+        return {"ok": True, "accepted": True}
+
+    webapp, scheduler = _search_refresh_test_app(enqueue)
+    monkeypatch.setattr(app_module.file_index, "clear_memory_indexes", lambda: None)
+
+    request_thread = threading.Thread(
+        target=lambda: request_result.append(_request_search_refresh(webapp)),
+    )
+    request_thread.start()
+    assert enqueue_started.wait(1.0)
+
+    shutdown_thread = threading.Thread(target=lambda: (webapp.stop_background_scheduler(), shutdown_finished.set()))
+    shutdown_thread.start()
+    assert not shutdown_finished.wait(0.05)
+
+    release_enqueue.set()
+    request_thread.join(timeout=1.0)
+    shutdown_thread.join(timeout=1.0)
+
+    assert request_result[0]["accepted"] is True
+    assert shutdown_finished.is_set()
+    assert scheduler.lifecycle == "stopped"
+
+
+def test_deferred_search_refresh_does_not_enqueue_after_scheduler_shutdown(monkeypatch):
+    calls = []
+    webapp, scheduler = _search_refresh_test_app(
+        lambda *_args, **_kwargs: calls.append("enqueue") or {"ok": True, "accepted": True},
+    )
+    monkeypatch.setattr(app_module.file_index, "record_accepted_refresh", lambda *_args: None)
+
+    scheduler.stop()
+    webapp._run_deferred_search_refresh({"root": "/repo", "paths": ["/repo/file.md"]})
+
+    assert calls == []
 
 
 def test_runtime_report_payload_reports_owner_cache_endpoints_events_and_transcripts(monkeypatch, tmp_path):
@@ -2114,11 +2112,10 @@ def test_runtime_report_payload_reports_owner_cache_endpoints_events_and_transcr
         "cache": {"hit": False},
     }
     background_status = {
-        "owner": True,
-        "status": "owner",
-        "current_owner": {"port": 8002},
+        "status": "local",
+        "process": {"port": 8002, "scope": "local"},
         "search_index": {"mode": "indexing-server"},
-        "roles": {"session-files": {"status": "owner"}},
+        "roles": {"session-files": {"status": "local"}},
         "counters": {"coalesced_refresh_requests": 3},
         "refresh_queue": {"recent_pending_count": 2, "recent_pending_by_role": {"session-files": 2}},
         "perf": {
@@ -2163,11 +2160,13 @@ def test_runtime_report_payload_reports_owner_cache_endpoints_events_and_transcr
         monkeypatch.setattr(webapp.approval_client, "runtime_status", lambda: {
             "service": "approvald", "pid": 0, "resources": {"cpu_percent": None, "rss_bytes": None},
         })
-        payload = webapp.runtime_report_payload(background_status=background_status, owner_debug={"generations": []}, owner_control_response={"ok": True})
+        payload = webapp.runtime_report_payload(background_status=background_status, scheduler_debug={"generations": []}, scheduler_control_response={"ok": True})
     finally:
         webapp.control_server.stop()
 
-    assert payload["owner"]["current_owner"] == {"port": 8002}
+    assert payload["scheduler"]["process"] == {"port": 8002, "scope": "local"}
+    assert "owner" not in payload
+    assert "current_owner" not in json.dumps(payload, sort_keys=True)
     assert payload["refresh"]["coalescing"]["recent_pending_count"] == 2
     recurring = payload["refresh"]["recurring_work"]
     assert {row["owner"] for row in recurring} == {*app_module.CLIENT_EVENT_RECURRING_WORK_SPECS, "sse_heartbeat", "update_check", "approvald_auto_approve"}
@@ -2260,24 +2259,6 @@ def test_system_status_payload_is_live_and_does_not_force_transcript_refresh(mon
         webapp.client_events.unsubscribe(subscriber_id)
     assert demanded["state"] == "never-started"
     assert demanded["demanded"] is True
-
-
-def test_background_refresh_control_uses_nested_payload(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    calls = []
-    monkeypatch.setattr(webapp, "request_background_refresh", lambda role, payload: calls.append((role, payload)) or {"ok": True, "accepted": True})
-    try:
-        response = webapp.handle_control_request({
-            "action": "background_refresh",
-            "role": app_module.BACKGROUND_ROLE_SESSION_FILES,
-            "payload": {"cache_key": "same", "reason": "follower"},
-            "requester": {"pid": 123},
-        })
-    finally:
-        webapp.control_server.stop()
-
-    assert response == {"ok": True, "accepted": True, "role": app_module.BACKGROUND_ROLE_SESSION_FILES}
-    assert calls == [(app_module.BACKGROUND_ROLE_SESSION_FILES, {"cache_key": "same", "reason": "follower"})]
 
 
 def test_stats_agent_idle_means_not_ask_run_or_transition(monkeypatch):
@@ -3627,51 +3608,6 @@ def test_save_settings_retention_reduction_prunes_chat_immediately(monkeypatch):
     assert calls == [{"retention_days": 7, "previous_retention_days": 30}]
 
 
-def test_two_webapps_reconcile_chat_from_shared_database_and_fanout_once(monkeypatch, tmp_path):
-    class FakeControlServer:
-        def __init__(self, _handler):
-            pass
-
-        def start(self):
-            pass
-
-        def stop(self):
-            pass
-
-    monkeypatch.setattr(app_module.common, "STATE_DIR", tmp_path)
-    monkeypatch.setattr(app_module, "YolomuxControlServer", FakeControlServer)
-    app1 = app_module.TmuxWebtermApp([])
-    app2 = app_module.TmuxWebtermApp([])
-    subscriber_id, subscriber_queue = app2.client_events.subscribe("chat", "browser-b")
-
-    def fanout(event_type, payload=None, **_kwargs):
-        app2.handle_background_client_event({"event_type": event_type, "payload": payload or {}})
-        return {"type": event_type, "payload": payload or {}}
-
-    monkeypatch.setattr(app1, "publish_background_client_event", fanout)
-    try:
-        sent = app1.chat_send(
-            "alice",
-            {"browser_instance_id": "browser-a", "client_message_uuid": "message-a", "body": "cross-process 😀"},
-            "en",
-        )
-        event = subscriber_queue.get_nowait()
-        assert event["type"] == "chat_messages_changed"
-        assert subscriber_queue.empty()
-        delta = app2.chat_delta("bob", after="")
-        assert [message["body"] for message in delta["messages"]] == ["cross-process 😀"]
-        assert delta["revision"] == sent["revision"]
-
-        app1.chat_typing("alice", "browser-a", True)
-        assert subscriber_queue.get_nowait()["type"] == "chat_typing_changed"
-        bootstrap = app2.chat_bootstrap("bob", "browser-b")
-        assert [lease["username"] for lease in bootstrap["typing"]] == ["alice"]
-    finally:
-        app2.client_events.unsubscribe(subscriber_id)
-        app1.control_server.stop()
-        app2.control_server.stop()
-
-
 def test_chat_yoagent_delegates_to_existing_controller_and_publishes_reply(monkeypatch):
     source = SimpleNamespace(id=17)
     calls = []
@@ -3885,6 +3821,9 @@ def test_start_client_event_watcher_defers_expensive_timer_polls(monkeypatch):
 
         def join(self, timeout=None):
             return None
+
+        def is_alive(self):
+            return False
 
     monkeypatch.setattr(app_module.time, "monotonic", lambda: 100.0)
     monkeypatch.setattr(app_module.threading, "Thread", FakeThread)
@@ -4529,7 +4468,7 @@ def test_auto_approve_fans_out_to_server_wide_agent_panes(monkeypatch):
     try:
         payload, status = webapp.set_auto_approve("6", True, persist=False)
         record_sessions = {target: item["session"] for target, item in approval_client.statuses.items()}
-        released = webapp.disable_auto_approve_for_takeover("6", {"pid": 123})
+        disabled, disabled_status = webapp.set_auto_approve("6", False, persist=False)
     finally:
         webapp.control_server.stop()
 
@@ -4540,7 +4479,8 @@ def test_auto_approve_fans_out_to_server_wide_agent_panes(monkeypatch):
     assert payload["worker_targets"] == ["%11", "%12"]
     assert payload["approved"] == 3
     assert payload["enabled"] is True
-    assert released["ok"] is True
+    assert disabled_status == HTTPStatus.OK
+    assert disabled["enabled"] is False
     assert approval_client.statuses == {}
 
 
@@ -5006,7 +4946,6 @@ def test_activity_summary_cold_session_files_schedules_refresh_without_waiting(m
         "files": [],
         "repos": [],
         "errors": [],
-        "refreshing_elsewhere": True,
     }
     assert len(refreshes) == 1
     assert refreshes[0][1] == webapp.refresh_session_files_cache
@@ -5546,6 +5485,28 @@ def test_transcripts_payload_returns_stale_cache_and_refreshes(monkeypatch):
     assert refreshes == [(False, False)]
 
 
+def test_metadata_payload_admission_rejects_stale_topology_with_same_roster():
+    webapp = app_module.TmuxWebtermApp(["5"])
+    try:
+        webapp.topology_generation = 4
+        current = {
+            "topology_generation": 4,
+            "session_order": ["5"],
+            "sessions": {"5": {"session": "5"}},
+        }
+        stale = dict(current)
+        stale["topology_generation"] = 3
+
+        assert webapp.metadata_payload_matches_session_roster(current) is True
+        assert webapp.metadata_payload_matches_session_roster(stale) is False
+
+        generation = webapp.begin_transcripts_payload_work(object())
+        webapp.topology_generation = 5
+        assert webapp.commit_transcripts_payload_cache(current, generation, input_generation=0) is False
+    finally:
+        webapp.control_server.stop()
+
+
 def test_forced_metadata_refresh_runs_a_build_that_starts_after_the_request(monkeypatch):
     """A forced metadata read must be answered by a build that can see the state it asks about.
 
@@ -5603,7 +5564,7 @@ def test_forced_metadata_refresh_runs_a_build_that_starts_after_the_request(monk
         assert ("transcripts_changed", pending) in published, published
     finally:
         release.set()
-        webapp.background_owner.stop()
+        webapp.background_scheduler.stop()
         webapp.control_server.stop()
 
 
@@ -5644,7 +5605,7 @@ def test_forced_metadata_refresh_queues_behind_lifecycle_owned_build(monkeypatch
         assert pending in published
     finally:
         release.set()
-        webapp.background_owner.stop()
+        webapp.background_scheduler.stop()
         webapp.control_server.stop()
 
 
@@ -5724,11 +5685,12 @@ def test_tmux_roster_signal_burst_coalesces_behind_one_worker(monkeypatch):
         return (["1", "3"], None)
 
     published = []
+    refreshes = []
     thread_errors = []
     monkeypatch.setattr(threading, "excepthook", lambda args: thread_errors.append(args.exc_value))
     monkeypatch.setattr(app_module, "list_tmux_session_names", list_roster)
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload, **kwargs: published.append((event_type, payload)))
-    monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda **kwargs: pytest.fail("coalesced roster rebuild must not start metadata refresh"))
+    monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda **kwargs: refreshes.append(kwargs) or True)
     try:
         assert webapp.schedule_tmux_roster_rebuild() is True
         assert entered.wait(timeout=2.0)
@@ -5748,6 +5710,10 @@ def test_tmux_roster_signal_burst_coalesces_behind_one_worker(monkeypatch):
     assert len(published) == 1
     assert published[0][1]["sessions"] == ["1", "3"]
     assert published[0][1]["renames"] == [], "a create/remove burst must not be labeled as a rename"
+    assert len(refreshes) == 1
+    assert refreshes[0]["publish"] is True
+    assert refreshes[0]["lifecycle_owner"] is True
+    assert refreshes[0]["not_before"] is not None
     assert webapp.sessions == ["1", "3"]
 
 
@@ -5817,7 +5783,7 @@ def test_forced_metadata_refresh_reuses_a_build_that_already_started_after_the_r
         assert builds == [1]
     finally:
         release.set()
-        webapp.background_owner.stop()
+        webapp.background_scheduler.stop()
         webapp.control_server.stop()
 
 
@@ -5954,7 +5920,8 @@ def test_forced_session_metadata_returns_cached_payload_without_superseding_live
     returned = threading.Event()
     events = []
 
-    def blocked_build():
+    def blocked_build(*args, **kwargs):
+        del args, kwargs
         old_started.set()
         assert release_old.wait(timeout=3)
         return {"marker": "old"}
@@ -6016,7 +5983,8 @@ def test_clear_transcript_caches_invalidates_blocked_refresh(monkeypatch):
     old_started = threading.Event()
     release_old = threading.Event()
 
-    def blocked_build():
+    def blocked_build(*args, **kwargs):
+        del args, kwargs
         old_started.set()
         assert release_old.wait(timeout=3)
         return {"marker": "old"}
@@ -6251,7 +6219,7 @@ def test_forced_session_metadata_on_a_cold_cache_names_a_build_identity():
         assert payload["metadata_identity"]["generation"] == 0
         assert payload["metadata_generation"] == 0
     finally:
-        webapp.background_owner.stop()
+        webapp.background_scheduler.stop()
         webapp.control_server.stop()
 
 
@@ -6269,7 +6237,7 @@ def test_unforced_session_metadata_on_a_cold_cache_names_no_build_identity():
         assert "pending_identity" not in cache, cache
         assert "pending_generation" not in cache, cache
     finally:
-        webapp.background_owner.stop()
+        webapp.background_scheduler.stop()
         webapp.control_server.stop()
 
 
@@ -6344,8 +6312,8 @@ def test_cold_lightweight_metadata_invalidation_releases_waiters(monkeypatch):
 
     monkeypatch.setattr(webapp, "build_session_metadata_payload", blocking_build)
     owner_errors = []
-    follower_result = []
-    follower_errors = []
+    joined_result = []
+    joined_errors = []
 
     def call_owner():
         try:
@@ -6353,28 +6321,28 @@ def test_cold_lightweight_metadata_invalidation_releases_waiters(monkeypatch):
         except BaseException as error:
             owner_errors.append(error)
 
-    def call_follower():
+    def call_joined_request():
         try:
-            follower_result.append(webapp.cold_lightweight_metadata_payload())
+            joined_result.append(webapp.cold_lightweight_metadata_payload())
         except BaseException as error:
-            follower_errors.append(error)
+            joined_errors.append(error)
 
     owner = threading.Thread(target=call_owner, daemon=True)
     owner.start()
     assert entered.wait(timeout=5)
-    follower = threading.Thread(target=call_follower, daemon=True)
-    follower.start()
+    joined_request = threading.Thread(target=call_joined_request, daemon=True)
+    joined_request.start()
     webapp.clear_transcript_caches()
-    follower.join(timeout=5)
+    joined_request.join(timeout=5)
     release.set()
     owner.join(timeout=5)
 
-    assert not follower.is_alive()
-    assert follower_result == []
+    assert not joined_request.is_alive()
+    assert joined_result == []
     assert len(owner_errors) == 1
-    assert len(follower_errors) == 1
+    assert len(joined_errors) == 1
     assert str(owner_errors[0]) == "transcript metadata cache invalidated"
-    assert str(follower_errors[0]) == "transcript metadata cache invalidated"
+    assert str(joined_errors[0]) == "transcript metadata cache invalidated"
     assert record.lightweight_future is None
 
 
@@ -6402,7 +6370,7 @@ def test_metadata_identity_epoch_is_per_process_and_survives_invalidation():
         assert other.metadata_identity(0)["generation"] == 0
     finally:
         for instance in (webapp, other):
-            instance.background_owner.stop()
+            instance.background_scheduler.stop()
             instance.control_server.stop()
 
 
@@ -6737,6 +6705,8 @@ def test_two_app_session_files_callers_share_batchd_product_until_watcher_genera
     worker.start()
     first = app_module.TmuxWebtermApp(["5"])
     second = app_module.TmuxWebtermApp(["5"])
+    assert first.background_scheduler.start() is True
+    assert second.background_scheduler.start() is True
     pane = PaneInfo("5", "0", "0", "%5", "5:0.0", str(repo), "claude", True, True, "claude", 5)
     working = SessionInfo("5", [pane], pane, [AgentInfo("5", "claude", 5, "%5", "claude", str(repo), "working", "agent-5", None, None)])
     idle = SessionInfo("5", [pane], pane, [AgentInfo("5", "claude", 5, "%5", "claude", str(repo), "idle", "agent-5", None, None)])
@@ -6758,6 +6728,8 @@ def test_two_app_session_files_callers_share_batchd_product_until_watcher_genera
         assert first.session_files_service.wait_for_idle(2.0)
         status_after = first.job_client.request({"action": "status"})
     finally:
+        first.background_scheduler.stop()
+        second.background_scheduler.stop()
         first.control_server.stop()
         second.control_server.stop()
         first.job_client.request({"action": "shutdown"})
@@ -6802,7 +6774,8 @@ def test_client_watch_snapshot_skips_volatile_transcript_payload_push(monkeypatc
         "session_order": ["5"],
         "sessions": {"5": {"session": "5", "work_graph": graph}},
     }
-    def build_payload():
+    def build_payload(*, session_roster=None):
+        del session_roster
         builds.append(1)
         return copy.deepcopy(payload)
 
@@ -6811,7 +6784,7 @@ def test_client_watch_snapshot_skips_volatile_transcript_payload_push(monkeypatc
     monkeypatch.setattr(webapp, "publish_activity_summary_ready_events", lambda trigger="watch": [])
     monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="watch": [])
     monkeypatch.setattr(webapp, "client_watch_roots_snapshot", lambda: [])
-    monkeypatch.setattr(webapp, "background_can_run", lambda role: False)
+    monkeypatch.setattr(webapp, "scheduler_can_run", lambda role: False)
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **kwargs: events.append((event_type, payload or {}, kwargs)))
     try:
         webapp.publish_client_watch_snapshot()
@@ -6830,7 +6803,11 @@ def test_client_watch_snapshot_safety_deadline_allows_one_rebuild(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     builds = []
     payload = {"session_order": [], "sessions": {}}
-    monkeypatch.setattr(webapp, "build_transcripts_payload", lambda: builds.append(1) or copy.deepcopy(payload))
+    monkeypatch.setattr(
+        webapp,
+        "build_transcripts_payload",
+        lambda *, session_roster=None: builds.append(1) or copy.deepcopy(payload),
+    )
     monkeypatch.setattr(webapp, "publish_context_items_ready_events", lambda trigger="watch": [])
     monkeypatch.setattr(webapp, "publish_activity_summary_ready_events", lambda trigger="watch": [])
     monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="watch": [])
@@ -6878,11 +6855,21 @@ def test_transcript_watch_invalidations_coalesce_behind_one_full_build(monkeypat
             cached = webapp.activity_transcript_service.transcripts_payload_cache_record.payload
     finally:
         release.set()
-        webapp.background_owner.stop()
+        webapp.background_scheduler.stop()
         webapp.control_server.stop()
 
     assert builds == [1, 2]
     assert cached["marker"] == "new"
+
+
+def test_transcript_refresh_cannot_start_after_scheduler_shutdown():
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        assert webapp.background_scheduler.start() is True
+        webapp.background_scheduler.stop()
+        assert webapp.start_transcripts_payload_refresh() is False
+    finally:
+        webapp.control_server.stop()
 
 
 def test_client_watch_snapshot_replacement_rejects_retired_worker(monkeypatch):
@@ -6894,7 +6881,8 @@ def test_client_watch_snapshot_replacement_rejects_retired_worker(monkeypatch):
     events = []
     build_count = 0
 
-    def build_payload():
+    def build_payload(*, session_roster=None):
+        del session_roster
         nonlocal build_count
         build_count += 1
         if build_count == 1:
@@ -6910,7 +6898,7 @@ def test_client_watch_snapshot_replacement_rejects_retired_worker(monkeypatch):
     monkeypatch.setattr(webapp, "publish_activity_summary_ready_events", lambda trigger="watch": [])
     monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="watch": [])
     monkeypatch.setattr(webapp, "client_watch_roots_snapshot", lambda: [])
-    monkeypatch.setattr(webapp, "background_can_run", lambda role: False)
+    monkeypatch.setattr(webapp, "scheduler_can_run", lambda role: False)
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **kwargs: events.append((event_type, payload or {}, kwargs)))
     try:
         old_record = webapp.client_watch_service.event_watcher_record
@@ -6922,14 +6910,12 @@ def test_client_watch_snapshot_replacement_rejects_retired_worker(monkeypatch):
         webapp.stop_client_event_watcher()
         replacement = webapp.client_watch_service.event_watcher_record
         assert replacement is not old_record
-        assert webapp.start_client_watch_snapshot_publish() is False
-
-        release_old.set()
-        old_worker.join(timeout=2)
         assert webapp.start_client_watch_snapshot_publish() is True
         assert replacement_started.wait(timeout=2)
         replacement_worker = replacement.snapshot_worker
         assert replacement_worker is not None
+        release_old.set()
+        old_worker.join(timeout=2)
         release_replacement.set()
         replacement_worker.join(timeout=2)
         with webapp.activity_transcript_service.transcripts_payload_cache_lock:
@@ -6974,7 +6960,8 @@ def test_client_watch_snapshot_thread_start_failure_allows_retry(monkeypatch):
             assert webapp.activity_transcript_service.transcripts_payload_cache_record.worker is None
 
         monkeypatch.setattr(app_module.threading, "Thread", real_thread)
-        def retry_build():
+        def retry_build(*, session_roster=None):
+            del session_roster
             retry_started.set()
             assert release_retry.wait(timeout=3)
             return {"marker": "retry"}
@@ -6984,7 +6971,7 @@ def test_client_watch_snapshot_thread_start_failure_allows_retry(monkeypatch):
         monkeypatch.setattr(webapp, "publish_activity_summary_ready_events", lambda trigger="watch": [])
         monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="watch": [])
         monkeypatch.setattr(webapp, "client_watch_roots_snapshot", lambda: [])
-        monkeypatch.setattr(webapp, "background_can_run", lambda role: False)
+        monkeypatch.setattr(webapp, "scheduler_can_run", lambda role: False)
         assert webapp.start_client_watch_snapshot_publish() is True
         assert retry_started.wait(timeout=2)
         worker = webapp.client_watch_service.event_watcher_record.snapshot_worker
@@ -7005,7 +6992,8 @@ def test_stop_client_event_watcher_does_not_wait_for_uncancellable_snapshot(monk
     webapp = app_module.TmuxWebtermApp([])
     release = threading.Event()
 
-    def blocked_build():
+    def blocked_build(*, session_roster=None):
+        del session_roster
         assert release.wait(timeout=5)
         return {"sessions": {}, "session_order": []}
 
@@ -7014,7 +7002,7 @@ def test_stop_client_event_watcher_does_not_wait_for_uncancellable_snapshot(monk
     monkeypatch.setattr(webapp, "publish_activity_summary_ready_events", lambda trigger="watch": [])
     monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="watch": [])
     monkeypatch.setattr(webapp, "client_watch_roots_snapshot", lambda: [])
-    monkeypatch.setattr(webapp, "background_can_run", lambda role: False)
+    monkeypatch.setattr(webapp, "scheduler_can_run", lambda role: False)
     try:
         assert webapp.start_client_watch_snapshot_publish() is True
         worker = webapp.client_watch_service.event_watcher_record.snapshot_worker
@@ -7568,7 +7556,7 @@ def test_tabber_activity_cache_record_owns_signature_and_refresh(monkeypatch):
 
     webapp = app_module.TmuxWebtermApp([])
     monkeypatch.setattr(app_module.threading, "Thread", FakeThread)
-    monkeypatch.setattr(webapp, "background_can_run", lambda _role: True)
+    monkeypatch.setattr(webapp, "scheduler_can_run", lambda _role: True)
     monkeypatch.setattr(webapp, "read_tabber_activity_disk_cache", lambda *_args, **_kwargs: None)
     payload = {"activity": {}, "agents": [], "session_file_hours": 24.0}
     try:
@@ -7637,7 +7625,7 @@ def test_tabber_activity_cache_refresh_failed_start_allows_retry(monkeypatch):
 
     webapp = app_module.TmuxWebtermApp([])
     monkeypatch.setattr(app_module.threading, "Thread", FakeThread)
-    monkeypatch.setattr(webapp, "background_can_run", lambda _role: True)
+    monkeypatch.setattr(webapp, "scheduler_can_run", lambda _role: True)
     try:
         with pytest.raises(RuntimeError, match="thread unavailable"):
             webapp.start_tabber_activity_cache_refresh()
@@ -7668,7 +7656,7 @@ def test_retired_tabber_activity_cache_refresh_cannot_clear_replacement(monkeypa
         webapp.control_server.stop()
 
 
-def test_activity_warm_takeover_reads_disk_cache_without_rebuild_or_rewrite(monkeypatch, tmp_path):
+def test_activity_warm_cache_reads_disk_cache_without_rebuild_or_rewrite(monkeypatch, tmp_path):
     monkeypatch.setattr(app_module, "TABBER_ACTIVITY_CACHE_DIR", tmp_path / "activity-cache")
     payload = {
         "activity": {"5": {"last_user_input_ts": 100}},
@@ -7685,7 +7673,7 @@ def test_activity_warm_takeover_reads_disk_cache_without_rebuild_or_rewrite(monk
         seed_app.set_tabber_activity_cache(payload, source_signature=source_signature)
         path, signature = seed_app.tabber_activity_cache_disk_path(24.0, source_signature)
         payload_mtime = path.stat().st_mtime_ns
-        monkeypatch.setattr(webapp, "build_activity_payload", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("warm takeover must not rebuild activity")))
+        monkeypatch.setattr(webapp, "build_activity_payload", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("warm cache must not rebuild activity")))
 
         webapp.warm_start_tabber_activity_cache()
         cached = webapp.get_tabber_activity_cache(float("inf"), allow_stale=True, hours=24.0, source_signature=source_signature)
@@ -7906,6 +7894,7 @@ def test_tabber_activity_refresh_seconds_uses_performance_setting(monkeypatch):
 def test_tabber_activity_cache_warmer_refreshes_snapshot(monkeypatch):
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     webapp = app_module.TmuxWebtermApp(["5"])
+    monkeypatch.setattr(webapp, "scheduler_can_run", lambda _role: True)
     refreshes = []
     events = []
 
@@ -7953,6 +7942,7 @@ def test_tabber_activity_cache_warmer_parks_without_visible_consumer(monkeypatch
     and a returning consumer must unpark it via mark_tabber_activity_consumer."""
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     webapp = app_module.TmuxWebtermApp(["5"])
+    monkeypatch.setattr(webapp, "scheduler_can_run", lambda _role: True)
     refreshes = []
     sleeps = []
 
@@ -7996,7 +7986,7 @@ def test_tabber_activity_producer_refresh_is_demand_gated_and_debounced(monkeypa
     webapp = app_module.TmuxWebtermApp([])
     try:
         record = webapp.activity_transcript_service.tabber_warmer_record
-        monkeypatch.setattr(webapp, "background_can_run", lambda _role: True)
+        monkeypatch.setattr(webapp, "scheduler_can_run", lambda _role: True)
         monkeypatch.setattr(webapp, "start_tabber_activity_cache_warmer", lambda: False)
         assert webapp.request_tabber_activity_refresh("tmux") is False
         webapp.mark_tabber_activity_consumer()
@@ -8027,7 +8017,7 @@ def test_tabber_activity_warmer_record_reuses_worker_and_protects_replacement(mo
 
     webapp = app_module.TmuxWebtermApp([])
     monkeypatch.setattr(app_module.threading, "Thread", FakeThread)
-    monkeypatch.setattr(webapp, "background_can_run", lambda _role: True)
+    monkeypatch.setattr(webapp, "scheduler_can_run", lambda _role: True)
     now = [100.0]
     monkeypatch.setattr(app_module.time, "monotonic", lambda: now[0])
     try:
@@ -8395,7 +8385,7 @@ def test_session_files_cold_miss_never_calls_inline_compute_on_request_thread(mo
 
 def test_session_files_batchd_unavailable_returns_typed_terminal_error_never_inline_git(monkeypatch):
     # Checkbox 9: when batchd cannot produce the product, the request thread must
-    # serve the bounded "refreshing elsewhere" shape, never fall back to inline git.
+    # serve the bounded pending-producer shape, never fall back to inline git.
     info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
 
@@ -8414,7 +8404,7 @@ def test_session_files_batchd_unavailable_returns_typed_terminal_error_never_inl
 
     assert status == HTTPStatus.SERVICE_UNAVAILABLE
     assert {key: payload[key] for key in ("ok", "status", "reason", "terminal")} == {"ok": False, "status": "SERVICE_UNAVAILABLE", "reason": "batchd down", "terminal": True}
-    assert payload["cache"]["refreshing_elsewhere"] is False
+    assert payload["cache"]["refreshing"] is False
 
 
 def test_session_files_payload_returns_stale_cache_and_refreshes(monkeypatch):
@@ -8832,7 +8822,7 @@ def test_record_owned_threads_rollback_failed_start_and_retry(monkeypatch, tmp_p
     signal_starts = []
     signal_stops = []
     monkeypatch.setattr(app_module.threading, "Thread", FakeThread)
-    monkeypatch.setattr(webapp, "background_can_run", lambda _role: True)
+    monkeypatch.setattr(webapp, "scheduler_can_run", lambda _role: True)
     monkeypatch.setattr(webapp, "start_tmux_signal_event_watcher", lambda: signal_starts.append(True))
     monkeypatch.setattr(webapp, "stop_tmux_signal_event_watcher", lambda: signal_stops.append(True))
     monkeypatch.setattr(webapp, "publish_yoagent_conversation_changed", lambda reason: None)
@@ -8863,9 +8853,9 @@ def test_record_owned_threads_rollback_failed_start_and_retry(monkeypatch, tmp_p
 
         root_index = app_module.file_index.RootIndex(tmp_path)
         # `_start_build` now (P0-3) only installs a worker on the registry owner for the key AND only
-        # when the background owner can build; register the owner and (this app is not the elected
-        # owner in this test) allow builds, as every real caller's precondition does.
-        monkeypatch.setattr(app_module.file_index, "background_owner_can_build", lambda: True)
+        # when this process is authorized to build; register the owner and allow builds, as every
+        # real caller's precondition does.
+        monkeypatch.setattr(app_module.file_index, "build_authorized", lambda: True)
         with app_module.file_index._REGISTRY_LOCK:
             app_module.file_index._REGISTRY[str(tmp_path)] = root_index
         try:
@@ -8907,11 +8897,11 @@ def test_metadata_warm_publish_and_start_are_atomic_under_fixture_teardown(monke
             self.metadata_warm_lock = threading.Lock()
             self.metadata_warm_record = app_module.MetadataWarmRecord()
 
-        def background_can_run(self, _role):
+        def scheduler_can_run(self, _role):
             return True
 
         def request_background_refresh(self, _role, _detail):  # pragma: no cover - unreached here
-            raise AssertionError("background owner should be able to run in this test")
+            raise AssertionError("local scheduler should be able to run in this test")
 
         def warm_metadata_cache(self, _sessions, _stop_event):
             # Model the production worker's terminal self-eviction so the record retains no worker
@@ -8928,7 +8918,7 @@ def test_metadata_warm_publish_and_start_are_atomic_under_fixture_teardown(monke
         def stop_batchd_operation_service(self):
             pass
 
-        def demote_background_owner(self):
+        def stop_background_scheduler(self):
             pass
 
         def stop_auto_approve_all(self):
@@ -8991,6 +8981,7 @@ def test_transcripts_payload_refresh_start_is_atomic_with_fixture_teardown(monke
         stop_transcripts_payload_work = app_module.TmuxWebtermApp.stop_transcripts_payload_work
         start_queued_transcripts_payload_rebuild = app_module.TmuxWebtermApp.start_queued_transcripts_payload_rebuild
         start_transcripts_payload_refresh = app_module.TmuxWebtermApp.start_transcripts_payload_refresh
+        _start_transcripts_payload_refresh = app_module.TmuxWebtermApp._start_transcripts_payload_refresh
         refresh_transcripts_payload_cache = app_module.TmuxWebtermApp.refresh_transcripts_payload_cache
 
         def __init__(self) -> None:
@@ -9001,20 +8992,21 @@ def test_transcripts_payload_refresh_start_is_atomic_with_fixture_teardown(monke
                 transcripts_payload_cache_record=state_services.TranscriptsPayloadCacheRecord(),
             )
 
-        def build_transcripts_payload(self):
+        def build_transcripts_payload(self, *, session_roster=None):
+            del session_roster
             return {"sessions": {}}
 
-        def commit_transcripts_payload_cache(self, _payload, _generation, *, input_generation=None):
-            assert input_generation is not None
+        def metadata_payload_matches_session_roster(self, _payload): return True
+
+        def commit_transcripts_payload_cache(self, _payload, _generation, **kwargs):
+            assert kwargs["input_generation"] is not None
             return False
 
-        def stop_client_event_watcher(self):
-            pass
+        def stop_client_event_watcher(self): pass
 
-        def stop_batchd_operation_service(self):
-            pass
+        def stop_batchd_operation_service(self): pass
 
-        def demote_background_owner(self):
+        def stop_background_scheduler(self):
             pass
 
         def stop_auto_approve_all(self):
@@ -9075,7 +9067,7 @@ def test_client_watch_snapshot_does_not_start_after_transcript_teardown(monkeypa
         assert watcher.start_client_watch_snapshot_publish(webapp) is False
         watcher.publish_client_watch_snapshot(webapp)
     finally:
-        webapp.background_owner.stop()
+        webapp.background_scheduler.stop()
         webapp.control_server.stop()
 
     assert started == []
@@ -9097,11 +9089,11 @@ def test_tabber_warmer_publish_and_start_are_atomic_under_fixture_teardown(monke
                 tabber_warmer_record=state_services.TabberActivityWarmerRecord(),
             )
 
-        def background_can_run(self, _role):
+        def scheduler_can_run(self, _role):
             return True
 
         def request_background_refresh(self, _role, _detail):  # pragma: no cover - unreached here
-            raise AssertionError("background owner should be able to run in this test")
+            raise AssertionError("local scheduler should be able to run in this test")
 
         def tabber_activity_cache_warmer_loop(self, record):
             # Model the production warmer's terminal self-eviction so no thread survives cleanup.
@@ -9119,7 +9111,7 @@ def test_tabber_warmer_publish_and_start_are_atomic_under_fixture_teardown(monke
         def stop_batchd_operation_service(self):
             pass
 
-        def demote_background_owner(self):
+        def stop_background_scheduler(self):
             pass
 
         def stop_auto_approve_all(self):
@@ -9907,7 +9899,7 @@ def test_equivalent_inflight_filesystem_watch_diff_requests_share_one_completion
         webapp.control_server.stop()
 
 
-def test_watch_diff_cache_recheck_terminalizes_a_follower_that_joined_the_new_flight(monkeypatch, tmp_path):
+def test_watch_diff_cache_recheck_terminalizes_a_joined_request(monkeypatch, tmp_path):
     """A cache publication racing a new claim cannot strand a joined accepted receipt."""
 
     monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
@@ -9931,7 +9923,7 @@ def test_watch_diff_cache_recheck_terminalizes_a_follower_that_joined_the_new_fl
     second_at_claim = threading.Event()
     cache_published = threading.Event()
     owner_claimed = threading.Event()
-    follower_claimed = threading.Event()
+    joined_claimed = threading.Event()
     claim_count = 0
 
     def claim_after_both_cache_misses(lane, key, deadline_at):
@@ -9945,13 +9937,13 @@ def test_watch_diff_cache_recheck_terminalizes_a_follower_that_joined_the_new_fl
             cache_published.set()
             claimed = original_claim(lane, key, deadline_at)
             owner_claimed.set()
-            assert follower_claimed.wait(1.0), "second request did not join the newly claimed flight"
+            assert joined_claimed.wait(1.0), "second request did not join the newly claimed flight"
             return claimed
         second_at_claim.set()
         assert cache_published.wait(1.0), "cache was not published between the initial miss and claim"
         assert owner_claimed.wait(1.0), "first request did not own the new flight"
         claimed = original_claim(lane, key, deadline_at)
-        follower_claimed.set()
+        joined_claimed.set()
         return claimed
 
     monkeypatch.setattr(webapp.batchd_operation_service, "claim", claim_after_both_cache_misses)
@@ -9972,7 +9964,7 @@ def test_watch_diff_cache_recheck_terminalizes_a_follower_that_joined_the_new_fl
 
     requests = [
         threading.Thread(target=request, args=("r-cache-owner",)),
-        threading.Thread(target=request, args=("r-cache-follower",)),
+        threading.Thread(target=request, args=("r-cache-joined",)),
     ]
     try:
         for worker in requests:
@@ -10666,8 +10658,8 @@ def test_context_http_boundaries_accept_one_batchd_product_without_request_threa
         method = webapp.context_tail if method_name == "context_tail" else webapp.context_items
         payload, status = method("5", 20)
     finally:
-        webapp.stop_batchd_operation_service()
-        webapp.control_server.stop()
+        webapp.stop_transcripts_payload_work()
+        webapp.stop_batchd_operation_service(); webapp.control_server.stop()
 
     assert status == HTTPStatus.ACCEPTED
     assert payload["state"] == "queued"
@@ -18720,17 +18712,40 @@ def test_update_notification_iteration_deduplicates_initialized_target():
 
 def test_update_check_loop_logs_iteration_failure(monkeypatch, caplog):
     webapp = app_module.TmuxWebtermApp.__new__(app_module.TmuxWebtermApp)
-    webapp.update_check_record = app_module.UpdateCheckRecord()
+    record = app_module.UpdateCheckRecord()
+    webapp.update_check_record = record
     webapp.updates_settings = lambda: {"notify_level": "patch", "check_interval_minutes": 1}
     webapp.update_notify_level = lambda _section: "patch"
     webapp.publish_update_notification_if_available = lambda: (_ for _ in ()).throw(RuntimeError("update probe exploded"))
-    monkeypatch.setattr(app_module.time, "sleep", lambda _seconds: (_ for _ in ()).throw(StopIteration))
 
-    with caplog.at_level("ERROR"), pytest.raises(StopIteration):
+    def stop_after_wait(_seconds):
+        record.stop_event.set()
+        return True
+
+    monkeypatch.setattr(record.stop_event, "wait", stop_after_wait)
+
+    with caplog.at_level("ERROR"):
         webapp.update_check_loop()
 
     assert any("update check failed: update probe exploded" in record.message for record in caplog.records)
     assert webapp.update_check_recurring_work_snapshot()["failures"] == 1
+
+
+def test_update_check_worker_is_fenced_and_joined_during_scheduler_teardown():
+    webapp = app_module.TmuxWebtermApp.__new__(app_module.TmuxWebtermApp)
+    webapp.update_check_record = app_module.UpdateCheckRecord()
+    webapp.update_check_thread = None
+    webapp.updates_settings = lambda: {"notify_level": "none"}
+    webapp.update_notify_level = lambda _section: "none"
+
+    assert webapp.start_update_check_thread() is True
+    worker = webapp.update_check_thread
+    assert worker is not None
+    webapp.stop_update_check_thread()
+
+    assert not worker.is_alive()
+    assert webapp.update_check_thread is None
+    assert webapp.start_update_check_thread() is False
 
 
 def test_update_check_recurring_work_excludes_disabled_idle_sleep():
@@ -18748,7 +18763,7 @@ def test_update_check_recurring_work_excludes_disabled_idle_sleep():
 def test_visible_session_and_upload_errors_keep_diagnostics_with_locale_keys(monkeypatch):
     webapp = app_module.TmuxWebtermApp.__new__(app_module.TmuxWebtermApp)
     webapp.sessions = ["1", "2"]
-    webapp.status_service_mode = False
+    webapp.status_service_mode = False; webapp.activity_transcript_service = app_module.ActivityTranscriptService()
     webapp.status_client = SimpleNamespace(invalidate=lambda *_args, **_kwargs: {"ok": True})
     webapp.start_transcripts_payload_refresh = lambda **_kwargs: True
     webapp.refresh_sessions = lambda maintenance=True: []
@@ -18952,7 +18967,7 @@ def _fake_update_git(remote_version="0.3.25", remote_sha="remoteabcdef1"):
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if args == ["rev-parse", "--short=12", "origin/main"]:
             return SimpleNamespace(returncode=0, stdout=f"{remote_sha}\n", stderr="")
-        if args == ["show", "origin/main:yolomux_lib/common.py"]:
+        if args == ["show", "origin/main:yolomux_lib/version.py"]:
             return SimpleNamespace(returncode=0, stdout=f'YOLOMUX_VERSION = "{remote_version}"\n', stderr="")
         raise AssertionError(f"unexpected git args: {args}")
     return fake_git
@@ -19103,6 +19118,30 @@ def test_indexed_repo_discovery_reuses_healthy_generation_until_a_descendant_cha
     assert webapp.job_client.submissions[0][2]["generation"] != webapp.job_client.submissions[1][2]["generation"]
 
 
+def test_indexed_repo_discovery_rolls_back_when_worker_start_fails(tmp_path, monkeypatch):
+    class FakeBatchClient:
+        def submit(self, task, payload, **options):
+            raise AssertionError("the worker must not submit after Thread.start fails")
+
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.activity_transcript_service = app_module.ActivityTranscriptService()
+    webapp.job_client = FakeBatchClient()
+    webapp.settings_payload = lambda: {"settings": {"file_explorer": {"indexed_dirs": [str(tmp_path)]}}}
+
+    def fail_start(worker, rollback):
+        rollback()
+        raise RuntimeError("cannot start indexed-repository worker")
+
+    monkeypatch.setattr(app_module.common, "start_thread_with_rollback", fail_start)
+
+    with pytest.raises(RuntimeError, match="cannot start indexed-repository worker"):
+        webapp.indexed_repo_roots_snapshot()
+
+    record = webapp.activity_transcript_service.indexed_repo_record
+    assert record.worker is None
+    assert record.stop_event.is_set()
+
+
 def test_session_files_index_updates_append_a_journal_instead_of_rewriting_the_base(tmp_path, monkeypatch):
     """A durable cache write must not read and rewrite the whole O(historical
     entries) JSON index; it appends one journal line, reads merge base+journal,
@@ -19188,6 +19227,7 @@ def test_stale_session_files_survive_a_failing_refresh_and_never_go_empty(monkey
     later read still returns the populated payload — never an empty placeholder."""
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     webapp = app_module.TmuxWebtermApp(["1"])
+    assert webapp.background_scheduler.start() is True
     try:
         info = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
         key = webapp.session_files_cache_key("payload", {"1": info}, "1", 24.0, None, None, None)
@@ -19221,6 +19261,7 @@ def test_stale_session_files_survive_a_failing_refresh_and_never_go_empty(monkey
         cached = webapp.get_session_files_cache(key, max_age_seconds=None, allow_stale=True)
         assert cached is not None and cached[0]["files"] == populated["files"]
     finally:
+        webapp.background_scheduler.stop()
         webapp.control_server.stop()
 
 
@@ -19275,8 +19316,7 @@ def test_statsd_absence_is_excused_only_while_this_process_is_taking_the_pin():
 
     # The pin landed: statsd exists from here on, so absence is an outage.
     assert app_module.statsd_pin_pending({**taking, "leased": True}) is False
-    # No pin owner in this process at all -- it lost the election, and the winner is supposed to
-    # be keeping statsd up. An absent statsd here is the winner's outage, not routine idleness.
+    # No pin lease in this process at all -- an absent statsd here is an outage, not routine idleness.
     assert app_module.statsd_pin_pending(_statsd_pin_status(alive=False, phase="stopped")) is False
     # The pin owner recorded a failure. This is the boot-time dead-statsd case.
     assert app_module.statsd_pin_pending(_statsd_pin_status(failure_count=1)) is False
@@ -19293,7 +19333,7 @@ def test_statsd_absence_is_excused_only_while_this_process_is_taking_the_pin():
 def test_an_absent_statsd_reads_starting_while_this_process_is_still_taking_its_pin(monkeypatch):
     """The boot flash. Measured before this fix on a real isolated start (port 17781):
 
-        +0.632s  background-owner generation created -- the election is DECIDED
+        +0.632s  local scheduler startup began
         +0.635s  observer's first cycle -> statsd published `down` / `service_absent`
         +1.622s  statsd actually began serving
         +4.696s  statsd published `ready`
@@ -19335,11 +19375,11 @@ def test_a_statsd_that_is_genuinely_dead_at_boot_is_never_excused(monkeypatch):
 
 
 def test_a_process_that_does_not_own_the_statsd_pin_still_reports_it_down(monkeypatch):
-    """A losing or demoted process must not go quiet about the statsd the owner should be running."""
+    """A process without a statsd pin must not go quiet about an absent statsd."""
     for runtime_status in (
-        # Never elected: `stats_current_runtime.start()` was never called.
+        # The local stats runtime never started.
         _statsd_pin_status(alive=False, phase="stopped"),
-        # Demoted: the supervisor is alive but has no valid owner generation.
+        # The supervisor is alive but has no valid local scheduler generation.
         _statsd_pin_status(phase="waiting_owner"),
         _statsd_pin_status(phase="demoting"),
     ):
@@ -19373,12 +19413,8 @@ def test_a_recorded_statsd_failure_alarms_even_while_the_pin_is_pending(monkeypa
     assert panel["reason"] == "stats database migration failed", panel
 
 
-def test_the_health_observer_is_armed_after_the_election_and_never_depends_on_winning(monkeypatch, capsys, request):
-    """The observer arms after the election is DECIDED, whatever it decided.
-
-    A monitor that only runs on the process that won the background-owner election would be a
-    worse defect than the flash it was reordered for, so both outcomes are proven here.
-    """
+def test_the_health_observer_is_armed_after_the_local_scheduler_starts(monkeypatch, capsys, request):
+    """Every leased instance arms health observation after starting its local scheduler."""
     root_logger = logging.getLogger()
     original_handlers = tuple(root_logger.handlers)
 
@@ -19388,75 +19424,77 @@ def test_the_health_observer_is_armed_after_the_election_and_never_depends_on_wi
                 root_logger.removeHandler(handler)
 
     request.addfinalizer(restore_root_handlers)
-    for acquired in (True, False):
-        order: list[str] = []
+    order: list[str] = []
 
-        class FakeApp:
-            def __init__(self, *_args, **_kwargs):
-                pass
+    class FakeApp:
+        def __init__(self, *_args, **_kwargs):
+            pass
 
-            def start_background_owner(self, **_kwargs):
-                order.append("election")
-                return acquired
+        def start_background_scheduler(self, **_kwargs):
+            order.append("scheduler")
+            return True
 
-            def start_yoagent_backend_prewarm(self, **_kwargs):
-                return {"ok": True}, 202
+        def start_yoagent_backend_prewarm(self, **_kwargs):
+            return {"ok": True}, 202
 
-            def restore_auto_approve(self):
-                return []
+        def restore_auto_approve(self):
+            return []
 
-            def stop_auto_approve_all(self):
-                pass
+        def stop_auto_approve_all(self):
+            pass
 
-        class FakeServer:
-            def __init__(self, *_args, **_kwargs):
-                pass
+    class FakeServer:
+        def __init__(self, *_args, **_kwargs):
+            pass
 
-            def serve_forever(self):
-                order.append("serve")
+        def serve_forever(self):
+            order.append("serve")
 
-            def server_close(self):
-                pass
+        def server_close(self):
+            pass
 
-        stopped: list[str] = []
-        observer = SimpleNamespace(stop=lambda: stopped.append("stop"))
+    stopped: list[str] = []
+    observer = SimpleNamespace(stop=lambda: stopped.append("stop"))
 
-        def arm(port, app):
-            order.append("observer")
-            return observer
+    def arm(port, app):
+        order.append("observer")
+        return observer
 
-        args = argparse.Namespace(
-            host="127.0.0.1",
-            port=19771,
-            sessions=[],
-            dangerously_yolo=False,
-            self_signed=False,
-            http=True,
-            cert=None,
-            key=None,
-            print_transcripts=False,
-            print_background_owner=False,
-            print_runtime_report=False,
-            dev=False,
-        )
-        monkeypatch.setattr(cli_module, "parse_args", lambda: args)
-        monkeypatch.setattr(cli_module, "tls_context_for_args", lambda _args: (None, ""))
-        monkeypatch.setattr(cli_module, "TmuxWebtermApp", FakeApp)
-        monkeypatch.setattr(cli_module, "TmuxWebtermHTTPServer", FakeServer)
-        monkeypatch.setattr(cli_module, "start_backend_health_observer", arm)
-        monkeypatch.setattr(cli_module, "startup_path_line", lambda _port: "YOLOmux paths: test")
-        monkeypatch.setattr(cli_module, "acquire_server_port_lease", lambda _port: SimpleNamespace(release=lambda: None))
-        monkeypatch.setattr(cli_module, "set_local_service_launch_context", lambda _port: None)
-        monkeypatch.setattr(cli_module, "start_startup_overload_watchdog", lambda _port: None)
-        monkeypatch.setattr(cli_module, "auth_setup_required", lambda: False)
-        monkeypatch.setattr(cli_module, "report_worktree_writer_warning", lambda: True)
+    args = argparse.Namespace(
+        host="127.0.0.1",
+        port=19771,
+        sessions=[],
+        dangerously_yolo=False,
+        self_signed=False,
+        http=True,
+        cert=None,
+        key=None,
+        print_transcripts=False,
+        print_background_scheduler=False,
+        print_runtime_report=False,
+        dev=False,
+    )
+    monkeypatch.setattr(cli_module, "parse_args", lambda: args)
+    monkeypatch.setattr(cli_module, "tls_context_for_args", lambda _args: (None, ""))
+    monkeypatch.setattr(cli_module, "TmuxWebtermApp", FakeApp)
+    monkeypatch.setattr(cli_module, "TmuxWebtermHTTPServer", FakeServer)
+    monkeypatch.setattr(cli_module, "start_backend_health_observer", arm)
+    monkeypatch.setattr(cli_module, "startup_path_line", lambda _port: "YOLOmux paths: test")
+    monkeypatch.setattr(
+        cli_module,
+        "acquire_instance_and_port_leases",
+        lambda *_args, **_kwargs: (SimpleNamespace(release=lambda: None), SimpleNamespace(release=lambda: None)),
+    )
+    monkeypatch.setattr(cli_module, "set_local_service_launch_context", lambda _port: None)
+    monkeypatch.setattr(cli_module, "start_startup_overload_watchdog", lambda _port: None)
+    monkeypatch.setattr(cli_module, "auth_setup_required", lambda: False)
+    monkeypatch.setattr(cli_module, "report_worktree_writer_warning", lambda: True)
 
-        assert cli_module.main() == 0
-        capsys.readouterr()
+    assert cli_module.main() == 0
+    capsys.readouterr()
 
-        assert order == ["election", "observer", "serve"], (acquired, order)
-        # Armed on the losing process too, and still stopped before the backend clients close.
-        assert stopped == ["stop"], (acquired, stopped)
+    assert order == ["scheduler", "observer", "serve"], order
+    assert stopped == ["stop"], stopped
 
 
 def test_the_system_panel_and_the_health_indicator_never_disagree_about_one_row():
@@ -19480,9 +19518,9 @@ def test_the_system_panel_and_the_health_indicator_never_disagree_about_one_row(
         {"service": "approvald", "pid": 0, "terminal_failure": True},
         {"service": "batchd", "pid": 0, "absence_expected_reason": batchd.BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE},
         {"service": "batchd", "pid": 4242, "healthy": True, "absence_expected_reason": batchd.BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE},
-        {"service": "batchd", "pid": 0, "absence_expected_reason": "scheduler_not_owned", "last_failure": "batchd exited (1)"},
+        {"service": "batchd", "pid": 0, "absence_expected_reason": "scheduler_inactive", "last_failure": "batchd exited (1)"},
         # Both excuses at once, and an unreadable one: contract errors that must fail closed.
-        {"service": "batchd", "pid": 0, "demand_started": True, "absence_expected_reason": "scheduler_not_owned"},
+        {"service": "batchd", "pid": 0, "demand_started": True, "absence_expected_reason": "scheduler_inactive"},
         {"service": "batchd", "pid": 0, "absence_expected_reason": "NOT A TOKEN"},
         {"service": "statsd", "pid": 0, "upgrade_required": {"required_protocol_version": 24}},
         {"service": "statsd", "pid": 0},
@@ -19507,7 +19545,7 @@ def test_an_absent_batchd_without_the_scheduler_lease_is_quiet_in_both_owners():
     """
     row = {"service": "batchd", "pid": 0, "absence_expected_reason": batchd.BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE}
 
-    assert observed_health(row) == ("starting", "scheduler_not_owned")
+    assert observed_health(row) == ("starting", "scheduler_inactive")
     panel = _classify_service(row)
     assert panel["state"] == "idle", panel
     assert panel["reason_code"] == "not_started", panel

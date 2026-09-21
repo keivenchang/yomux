@@ -494,11 +494,16 @@ def git_branch_state(
     """Return the checked-out branch and whether Git positively reported detached HEAD."""
     symbolic = runner(["symbolic-ref", "--quiet", "--short", "HEAD"])
     if symbolic.returncode == 0:
-        return symbolic.stdout.strip(), False
+        name = symbolic.stdout
+        if isinstance(name, bytes):
+            name = name.decode("utf-8", errors="replace")
+        return str(name).strip(), False
     resolved = runner(["rev-parse", "--abbrev-ref", "HEAD"])
     if resolved.returncode != 0:
         return "", False
     name = resolved.stdout.strip()
+    if isinstance(name, bytes):
+        name = name.decode("utf-8", errors="replace")
     return ("", True) if name == "HEAD" else (name, False)
 
 
@@ -901,6 +906,7 @@ def optional_pinned_file_git_metadata(
 GIT_HISTORY_DEFAULT_LIMIT = 100
 GIT_HISTORY_MAX_LIMIT = 100
 GIT_HISTORY_MAX_OUTPUT_BYTES = 4 * 1024 * 1024
+GIT_HISTORY_MAX_STATUS_OUTPUT_BYTES = 4 * 1024 * 1024
 GIT_HISTORY_MAX_PAYLOAD_BYTES = 384 * 1024
 GIT_HISTORY_MAX_TEXT_BYTES = 8 * 1024
 GIT_HISTORY_CURSOR_MAX_BYTES = 2048
@@ -4214,6 +4220,51 @@ def _decode_git_path(value: bytes) -> str:
         ) from error
 
 
+def _parse_git_status_porcelain_z(
+    raw: bytes,
+    *,
+    output_truncated: bool,
+) -> tuple[list[dict[str, str]], bool]:
+    """Parse NUL-delimited porcelain-v1 status without losing unusual path bytes."""
+    if not raw:
+        return [], output_truncated
+    records = raw.split(b"\0")
+    truncated = output_truncated
+    if raw.endswith(b"\0"):
+        records.pop()
+    elif output_truncated:
+        records.pop()
+        truncated = True
+    else:
+        raise _history_error("malformed Git status output", key="fs.error.gitHistoryFailed", status=500)
+    entries: list[dict[str, str]] = []
+    index = 0
+    while index < len(records):
+        record = records[index]
+        if len(record) < 3 or record[2:3] != b" ":
+            if output_truncated:
+                truncated = True
+                break
+            raise _history_error("malformed Git status output", key="fs.error.gitHistoryFailed", status=500)
+        status = _decode_git_text(record[:2])
+        entry = {"status": status, "path": _decode_git_path(record[3:])}
+        index += 1
+        if "R" in status or "C" in status:
+            if index >= len(records):
+                if output_truncated:
+                    truncated = True
+                    break
+                raise _history_error("malformed Git status output", key="fs.error.gitHistoryFailed", status=500)
+            entry["old_path"] = _decode_git_path(records[index])
+            index += 1
+        entries.append(entry)
+    return entries, truncated
+
+
+def _parse_git_decorations(value: bytes) -> list[str]:
+    return [item.strip() for item in _decode_git_text(value).split(",") if item.strip()]
+
+
 def _parse_git_timestamp(value: bytes, *, operation: str) -> int:
     try:
         return int(value)
@@ -4438,17 +4489,17 @@ def _parse_history_metadata(raw: bytes, *, output_truncated: bool) -> tuple[list
                 truncated = True
                 break
             raise _history_error("malformed Git history metadata", key="fs.error.gitHistoryFailed", status=500)
-        if index + 6 >= len(tokens):
+        if index + 7 >= len(tokens):
             if output_truncated:
                 truncated = True
                 break
             raise _history_error("malformed Git history metadata", key="fs.error.gitHistoryFailed", status=500)
-        sha, short, parents, author, authored_at, subject = tokens[index + 1:index + 7]
-        index += 7
+        sha, short, parents, author, authored_at, subject, decorations = tokens[index + 1:index + 8]
+        index += 8
         authored_at_value = _parse_git_timestamp(authored_at, operation="gitHistory")
         author_text, author_was_truncated = _bounded_utf8(author, GIT_HISTORY_MAX_TEXT_BYTES)
         subject_text, subject_was_truncated = _bounded_utf8(subject, GIT_HISTORY_MAX_TEXT_BYTES)
-        commits.append({
+        commit = {
             "sha": _decode_git_text(sha),
             "short": _decode_git_text(short),
             "parents": _decode_git_text(parents).split() if parents else [],
@@ -4456,7 +4507,11 @@ def _parse_history_metadata(raw: bytes, *, output_truncated: bool) -> tuple[list
             "author": author_text,
             "authored_at": authored_at_value,
             "metadata_truncated": author_was_truncated or subject_was_truncated,
-        })
+        }
+        parsed_decorations = _parse_git_decorations(decorations)
+        if parsed_decorations:
+            commit["decorations"] = parsed_decorations
+        commits.append(commit)
     return commits, truncated, False
 
 
@@ -4529,11 +4584,72 @@ def _ensure_current_head_object(
         _raise_history_git_failure(result, operation=operation)
 
 
+def _git_history_repo_metadata(scope: BoundedGitReadScope) -> dict[str, Any]:
+    """Return the small live repository view shown above a history page."""
+    def run(args: list[str], timeout: float, *, binary: bool = False) -> PinnedGitResult:
+        return _run_direct_bounded_git(
+            scope,
+            args,
+            operation="gitHistory",
+            timeout=timeout,
+            binary=binary,
+            max_output_bytes=GIT_HISTORY_MAX_STATUS_OUTPUT_BYTES,
+            allow_failure=True,
+        )
+
+    status = run(["status", "--porcelain=v1", "--branch", "-z", "--untracked-files=all"], 2.0, binary=True)
+    status_raw = status.stdout if isinstance(status.stdout, bytes) else status.stdout.encode("utf-8")
+    branch = ""
+    detached = False
+    if status_raw:
+        header, separator, status_raw = status_raw.partition(b"\0")
+        if header.startswith(b"## "):
+            header_text = _decode_git_text(header[3:])
+            if header_text == "HEAD (no branch)":
+                detached = True
+            elif header_text.startswith("No commits yet on "):
+                branch = header_text.removeprefix("No commits yet on ")
+            else:
+                branch = header_text.split("...", 1)[0].split(" [", 1)[0]
+        elif separator:
+            status_raw = header + b"\0" + status_raw
+    dirty_entries: list[dict[str, str]] = []
+    dirty_entries_truncated = False
+    if status.returncode == 0 or status_raw:
+        dirty_entries, dirty_entries_truncated = _parse_git_status_porcelain_z(
+            status_raw,
+            output_truncated=status.stdout_truncated,
+        )
+    return {
+        "branch": branch,
+        "detached": detached,
+        "dirty_count": len(dirty_entries) if status.returncode == 0 else None,
+        "dirty_entries": dirty_entries,
+        "dirty_entries_truncated": dirty_entries_truncated,
+    }
+
+
+def _git_history_repo_metadata_payload(metadata: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "branch": metadata.get("branch", ""),
+        "dirty_count": metadata.get("dirty_count"),
+    }
+    if metadata.get("detached") is True:
+        payload["detached"] = True
+    if metadata.get("dirty_entries"):
+        payload["dirty_entries"] = metadata["dirty_entries"]
+    if metadata.get("dirty_entries_truncated") is True:
+        payload["dirty_entries_truncated"] = True
+    return payload
+
+
 def git_history(raw_path: str, limit: int | str | None = None, cursor: str | None = None) -> dict[str, Any]:
     page_limit = _bounded_history_limit(limit)
     cursor_text = str(cursor or "")
     with _bounded_git_read_scope(raw_path, operation="git_history") as scope:
         current_head = _current_head(scope, operation="gitHistory")
+        repo_metadata = _git_history_repo_metadata(scope)
+        repo_metadata_payload = _git_history_repo_metadata_payload(repo_metadata)
         if not current_head:
             if cursor:
                 raise _history_error("Git history snapshot is stale", key="fs.error.gitHistoryStale", status=409)
@@ -4547,6 +4663,7 @@ def git_history(raw_path: str, limit: int | str | None = None, cursor: str | Non
                 "commits": [],
                 "next_cursor": "",
                 "truncated": False,
+                **repo_metadata_payload,
             }
         _ensure_current_head_object(scope, operation="gitHistory")
         if cursor:
@@ -4583,6 +4700,7 @@ def git_history(raw_path: str, limit: int | str | None = None, cursor: str | Non
         )
         cached = _git_history_cache_get(cache_key)
         if cached is not None:
+            cached.update(repo_metadata_payload)
             return cached
         snapshot_cursor = _encode_history_cursor(scope, frozen_head, 0)
         snapshot_cursor_limited = len(snapshot_cursor) > GIT_HISTORY_CURSOR_MAX_BYTES
@@ -4599,10 +4717,11 @@ def git_history(raw_path: str, limit: int | str | None = None, cursor: str | Non
             "--no-textconv",
             "--no-renames",
             "--no-patch",
+            "--decorate=short",
             "-z",
             f"--max-count={page_limit + 1}",
             f"--skip={offset}",
-            "--format=commit%x00%H%x00%h%x00%P%x00%an%x00%at%x00%s",
+            "--format=commit%x00%H%x00%h%x00%P%x00%an%x00%at%x00%s%x00%D",
             frozen_head,
             *_literal_scope_args(scope.relative_path),
         ]
@@ -4628,6 +4747,7 @@ def git_history(raw_path: str, limit: int | str | None = None, cursor: str | Non
         visible = commits[:page_limit]
         payload_bytes_truncated = False
         snapshot_cursor_truncated = False
+        truncation_reason_omitted = False
         while True:
             has_more = output_truncated or payload_bytes_truncated or len(commits) > len(visible)
             next_offset = offset + len(visible)
@@ -4662,8 +4782,9 @@ def git_history(raw_path: str, limit: int | str | None = None, cursor: str | Non
                 "commits": visible,
                 "next_cursor": next_cursor,
                 "truncated": bool(reasons),
+                **repo_metadata_payload,
             }
-            if reasons:
+            if reasons and not truncation_reason_omitted:
                 payload["truncation_reason"] = ",".join(reasons)
             if len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= GIT_HISTORY_MAX_PAYLOAD_BYTES:
                 break
@@ -4671,6 +4792,12 @@ def git_history(raw_path: str, limit: int | str | None = None, cursor: str | Non
                 snapshot_cursor = ""
                 snapshot_cursor_truncated = True
                 payload_bytes_truncated = True
+                continue
+            # Continuation is more useful than the explanatory string when a caller deliberately
+            # sets a very small payload cap. Keep the one visible commit and its cursor instead
+            # of dropping every commit merely to retain a few bytes of diagnostic prose.
+            if "truncation_reason" in payload:
+                truncation_reason_omitted = True
                 continue
             if not visible:
                 raise _history_error(

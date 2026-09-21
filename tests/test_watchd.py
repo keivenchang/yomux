@@ -2427,6 +2427,33 @@ def test_web_defers_watchd_bridge_without_descriptor_demand(monkeypatch):
         webapp.stop_client_event_watcher()
 
 
+def test_watchd_teardown_keeps_record_until_bounded_worker_exit(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
+
+    class StuckWorker:
+        def __init__(self):
+            self.join_timeouts = []
+
+        def is_alive(self):
+            return True
+
+        def join(self, timeout):
+            self.join_timeouts.append(timeout)
+
+    watchd_worker = StuckWorker()
+    record = ClientEventWatcherRecord(watchd_worker=watchd_worker)
+    webapp.client_watch_service.event_watcher_record = record
+    monkeypatch.setattr(webapp, "stop_tmux_signal_event_watcher", lambda: None)
+    monkeypatch.setattr(webapp, "stop_status_generation_watcher", lambda _record: None)
+    monkeypatch.setattr(webapp, "fence_transcripts_payload_work", lambda **_kwargs: None)
+
+    webapp.stop_client_event_watcher()
+
+    assert record.watchd_stop_event.is_set()
+    assert watchd_worker.join_timeouts == [app_module.WATCHD_REVISION_STOP_JOIN_TIMEOUT_SECONDS]
+    assert webapp.client_watch_service.event_watcher_record is record
+
+
 def test_local_service_record_persists_opaque_watchd_source_epoch(tmp_path):
     registry = LocalServiceRegistry(
         tmp_path,

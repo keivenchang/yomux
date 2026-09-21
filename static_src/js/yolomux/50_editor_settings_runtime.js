@@ -1282,7 +1282,10 @@ function refreshMetaButtonChrome() {
 function applySettingsPayload(payload, options = {}) {
   if (!payload?.settings) return false;
   const nextMtime = Number(payload.mtime_ns || 0);
-  if (!options.force && nextMtime && nextMtime === clientSettingsMtimeNs) return false;
+  // A deferred refresh or duplicate push may arrive after a settings write. A revision is a
+  // complete snapshot, so an equal revision is already applied; `force` may repaint callers but
+  // must never let an older/equal payload roll back the accepted settings values.
+  if (!options.initial && clientSettingsMtimeNs && (!nextMtime || nextMtime <= clientSettingsMtimeNs)) return false;
   const previousLocale = i18nActiveLocaleId();
   const previousDateTimeHourCycle = dateTimeHourCycle;
   const previousAgentStatusPulsePeriodMs = agentStatusPulsePeriodMs;
@@ -1422,7 +1425,7 @@ const runtimeIntervalCatalog = Object.freeze({
   'events-fallback': Object.freeze({classes: Object.freeze(['fallback']), source: 'event_log_changed SSE is authoritative while connected; HTTP repairs an open log after transport loss.'}),
   'auto-approve': Object.freeze({classes: Object.freeze(['fallback']), source: 'auto-approve SSE/status revisions are authoritative while connected; visible pages repair after transport loss.'}),
   'tabber-activity-fallback': Object.freeze({classes: Object.freeze(['fallback']), source: 'Tabber cache completion normally arrives through the shared SSE stream; this repairs an active Tabber only while that stream is disconnected.'}),
-  'file-index-refresh': Object.freeze({classes: Object.freeze(['poll:no-change']), source: 'The index service owns staleness/rebuild state; a visible Finder/search periodically asks for that external state.'}),
+  'file-index-refresh': Object.freeze({classes: Object.freeze(['fallback']), source: 'Index lifecycle events are authoritative while SSE is connected; visible Finder/search uses this status repair path only after transport loss.'}),
   'file-index-building': Object.freeze({classes: Object.freeze(['fallback']), source: 'Search-index lifecycle invalidations are authoritative while SSE is connected; a building root is repaired only after transport loss.'}),
   'debug-stats': Object.freeze({classes: Object.freeze(['fallback']), source: 'Exact YO!stats SSE owns a live short range; HTTP supplies initial, legacy, coarse, and disconnected repair data.'}),
   'debug-system': Object.freeze({classes: Object.freeze(['poll:no-change']), source: 'System diagnostics aggregate independently changing local-service state without a producer revision.'}),
@@ -1549,11 +1552,7 @@ function installRuntimeIntervals() {
   } else {
     clearRuntimeInterval('tabber-activity-fallback');
   }
-  if (fileExplorerIndexRefreshSeconds > 0) {
-    resetRuntimeInterval('file-index-refresh', refreshAllIndexedDirsStatus, fileExplorerIndexRefreshSeconds * 1000);
-  } else {
-    clearRuntimeInterval('file-index-refresh');
-  }
+  syncFileIndexStatusPollInterval();
 }
 
 function yolomuxFontSpecsForCurrentSettings() {
