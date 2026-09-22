@@ -1,5 +1,8 @@
 import os
+import shlex
 import time
+from urllib.parse import quote
+from urllib.parse import urlencode
 
 from tests.browser_helpers.browser_console import acknowledge_and_consume_only_expected_js_debug_failures
 from tests.browser_helpers.browser_console import consume_only_expected_js_debug_api_error
@@ -7,6 +10,7 @@ from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 from tests.gate_harness import assert_fixture_client_event_demand_claimed
 from tests.gate_harness import claim_fixture_client_event_demand
+from tests.tmux_runtime import run_isolated_tmux
 
 
 def test_dockview_representative_light_retina_visual_profile(browser, tmp_path):
@@ -128,6 +132,324 @@ def test_dockview_active_tab_switch_uses_mounted_panel_without_layout_reload(bro
     assert result["fromJsonCalls"] == 0, result
     assert result["firstPanelPreserved"] is True and result["secondPanelPreserved"] is True and result["secondPanelConnected"] is True, result
     assert result["elapsedMs"] < 300, result
+
+
+def test_dockview_clicking_xterm_tab_mounts_visible_terminal(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
+    wait_for_dockview(browser, min_tabs=2)
+
+    click_visible_selector(browser, '.dockview-pane-tab[data-pane-tab="2"]')
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          try {
+            const result = await window.__yolomuxTestWaitFor(() => {
+              const panel = document.getElementById('panel-2');
+              const container = document.getElementById('term-2');
+              const surface = container?.querySelector('.xterm');
+              const rect = surface?.getBoundingClientRect();
+              if (!(activeItemForSide('left') === '2'
+                && panel?.isConnected === true
+                && panel?.classList.contains('active-pane') === true
+                && container?.isConnected === true
+                && surface
+                && terminals.get('2')?.term
+                && terminalIsVisible('2', container)
+                && rect?.width > 40
+                && rect?.height > 40)) return false;
+              const style = getComputedStyle(surface);
+              return {
+                active: activeItemForSide('left'),
+                panelConnected: panel.isConnected === true,
+                panelActive: panel.classList.contains('active-pane') === true,
+                containerConnected: container.isConnected === true,
+                xterm: true,
+                terminal: true,
+                visible: terminalIsVisible('2', container),
+                surfaceVisible: style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0',
+                layout: dockviewLayoutState.api?.toJSON?.(),
+              };
+            }, {timeoutMs: 5000, description: 'Dockview xterm tab mount'});
+            done(result);
+          } catch (error) {
+            done({error: String(error?.stack || error)});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["active"] == "2" and metrics["panelActive"] and metrics["xterm"] and metrics["terminal"] and metrics["visible"] and metrics["surfaceVisible"], {
+        key: metrics[key] for key in ("active", "panelConnected", "panelActive", "containerConnected", "xterm", "terminal", "visible", "surfaceVisible")
+    }
+
+
+def test_dockview_real_xterm_tab_switch_accepts_input_and_output(browser, monkeypatch, tmp_path):
+    runtime = start_isolated_browser_app(monkeypatch, tmp_path, session_count=2)
+    server, thread = start_browser_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
+    try:
+        first, second = runtime.sessions
+        query = urlencode({
+            "sessions": ",".join(runtime.sessions),
+            "layout": "left",
+            "tabs": f"left:{first},{second}",
+        })
+        browser.get(f"http://127.0.0.1:{server.server_address[1]}/?{query}")
+        assert_live_runtime_boot_healthy(browser, "real-xterm-dockview-switch", timeout=12)
+        for index, session in enumerate((second, first, second)):
+            click_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{session}"]')
+            WebDriverWait(browser, 12).until(
+                lambda driver: driver.execute_script(
+                    """
+                    const item = terminals.get(arguments[0]);
+                    const screen = item?.container?.querySelector('.xterm-screen');
+                    const textarea = item?.container?.querySelector('.xterm-helper-textarea');
+                    return item?.socket?.readyState === WebSocket.OPEN
+                      && Boolean(textarea)
+                      && Boolean(screen)
+                      && screen.getBoundingClientRect().width > 40
+                      && screen.getBoundingClientRect().height > 40;
+                    """,
+                    session,
+                )
+            )
+            WebDriverWait(browser, 5).until(
+                lambda driver: driver.execute_script(
+                    "return document.activeElement === terminals.get(arguments[0])?.term?.textarea;",
+                    session,
+                )
+            )
+            marker = f"dockview-switch-input-{index}"
+            ready_path = tmp_path / f"dockview-switch-{index}.ready"
+            acknowledgment_path = tmp_path / f"dockview-switch-{index}.ack"
+            command = (
+                f"printf ready > {shlex.quote(str(ready_path))}; "
+                f"IFS= read -r terminal_value; "
+                f"printf '%s\\n' \"$terminal_value\" > {shlex.quote(str(acknowledgment_path))}; "
+                "printf 'backend-ack\\n'"
+            )
+            armed = run_isolated_tmux(runtime.tmux, "send-keys", "-t", f"{session}:", command, "Enter")
+            assert armed.returncode == 0, armed.stderr or armed.stdout
+            WebDriverWait(browser, 12).until(lambda _driver: ready_path.is_file())
+            browser.execute_cdp_cmd("Input.insertText", {"text": marker})
+            browser.execute_cdp_cmd(
+                "Input.dispatchKeyEvent",
+                {"type": "keyDown", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13, "text": "\r", "unmodifiedText": "\r"},
+            )
+            browser.execute_cdp_cmd(
+                "Input.dispatchKeyEvent",
+                {"type": "keyUp", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13},
+            )
+            WebDriverWait(browser, 12).until(
+                lambda driver: driver.execute_script(
+                    """
+                    const item = terminals.get(arguments[0]);
+                    const buffer = item?.term?.buffer?.active;
+                    const lines = buffer
+                      ? Array.from({length: buffer.length}, (_, row) => buffer.getLine(row)?.translateToString(true) || '')
+                      : [];
+                    return lines.some(line => line.trim() === 'backend-ack');
+                    """,
+                    session,
+                )
+            )
+            WebDriverWait(browser, 12).until(lambda _driver: acknowledgment_path.is_file())
+            assert acknowledgment_path.read_text(encoding="utf-8") == f"{marker}\n"
+    finally:
+        stop_browser_server(server, thread, browser=browser)
+        stop_isolated_browser_app(runtime)
+
+
+def test_dockview_delayed_tab_activation_still_focuses_terminal(browser, monkeypatch, tmp_path):
+    runtime = start_isolated_browser_app(monkeypatch, tmp_path, session_count=2)
+    server, thread = start_browser_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
+    try:
+        first, second = runtime.sessions
+        query = urlencode({
+            "sessions": ",".join(runtime.sessions),
+            "layout": "left",
+            "tabs": f"left:{first},{second}",
+        })
+        browser.get(f"http://127.0.0.1:{server.server_address[1]}/?{query}")
+        assert_live_runtime_boot_healthy(browser, "delayed-dockview-tab-focus", timeout=12)
+        WebDriverWait(browser, 8).until(
+            lambda driver: driver.execute_script(
+                "return Array.from(document.querySelectorAll('.dockview-pane-tab')).some(node => node.dataset.paneTab === arguments[0]);",
+                second,
+            )
+        )
+        metrics = browser.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1];
+            const target = arguments[0];
+            (async () => {
+              try {
+                const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(target)}"]`);
+                tab.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, cancelable: true, pointerId: 7, pointerType: 'mouse', button: 0, buttons: 1}));
+                await window.__yolomuxTestWaitFor(
+                  () => !panelNodes.get(focusedPanelItem)?._dockviewPreActivationCaptured,
+                  {timeoutMs: 5000, description: 'pre-activation capture expiry'},
+                );
+                tab.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, button: 0}));
+                dockviewLayoutState.api?.getPanel?.(target)?.api?.setActive?.();
+                await window.__yolomuxTestWaitFor(
+                  () => document.activeElement === terminals.get(target)?.term?.textarea,
+                  {timeoutMs: 5000, description: 'delayed Dockview tab terminal focus'},
+                );
+                done({active: activeItemForSide('left'), focused: document.activeElement === terminals.get(target)?.term?.textarea});
+              } catch (error) {
+                done({error: String(error?.stack || error)});
+              }
+            })();
+            """,
+            second,
+        )
+        assert "error" not in metrics and metrics == {"active": second, "focused": True}, metrics
+    finally:
+        stop_browser_server(server, thread, browser=browser)
+        stop_isolated_browser_app(runtime)
+
+
+def test_dockview_prosemirror_failure_does_not_block_xterm_switch(browser, monkeypatch, tmp_path):
+    runtime = start_isolated_browser_app(monkeypatch, tmp_path, session_count=2)
+    server, thread = start_browser_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
+    try:
+        first, second = runtime.sessions
+        path = "/home/test/yolomux.dev/DOCKVIEW-PM-FAILURE.md"
+        query = "?" + urlencode({
+            "sessions": ",".join(runtime.sessions),
+            "layout": "left",
+            "tabs": f"left:{first},{second}",
+        })
+        browser.get(f"http://127.0.0.1:{server.server_address[1]}/{query}")
+        assert_live_runtime_boot_healthy(browser, "dockview-prosemirror-failure-switch", timeout=12)
+        metrics = browser.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1];
+            const path = arguments[0];
+            (async () => {
+              try {
+                const item = fileEditorItemFor(path);
+                const source = '<span class="unsupported">View failure</span>';
+                setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+                setFileEditorViewMode(path, 'preview', item);
+                addFileEditorTabItem(path, item);
+                const panel = createFileEditorPanel(item);
+                panel.classList.add('active-pane');
+                panel.style.width = '980px';
+                panel.style.height = '560px';
+                panelNodes.set(item, panel);
+                document.getElementById('grid').append(panel);
+                const originalLoader = window.loadProseMirrorApi;
+                window.loadProseMirrorApi = () => Promise.reject(new Error('ProseMirror did not initialize'));
+                renderFileEditorPanel(panel, item);
+                await window.__yolomuxTestWaitFor(() => panel._pmError && panel.querySelector('.file-editor-prosemirror-error'), {timeoutMs: 12000, description: 'failed ViewEditor state'});
+                window.loadProseMirrorApi = originalLoader;
+                done({item, error: panel._pmError, state: panel.querySelector('.file-editor-preview-pane-panel')?.dataset.prosemirrorState || ''});
+              } catch (error) {
+                done({failure: String(error?.stack || error)});
+              }
+            })();
+            """,
+            path,
+        )
+        assert "failure" not in metrics and "ProseMirror ViewEditor failed" in metrics["error"] and metrics["state"] == "error", metrics
+        click_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{first}"]')
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return activeItemForSide('left') === arguments[0];", first))
+        WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
+                "return terminalIsVisible(arguments[0], terminals.get(arguments[0])?.container) && document.activeElement === terminals.get(arguments[0])?.term?.textarea;",
+                first,
+            )
+        )
+        result = browser.execute_script(
+            """
+            const panel = panelNodes.get(arguments[0]);
+            return {
+              error: panel?._pmError || '',
+              state: panel?.querySelector('.file-editor-preview-pane-panel')?.dataset.prosemirrorState || '',
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            };
+            """,
+            metrics["item"],
+        )
+        assert "ProseMirror ViewEditor failed" in result["error"] and result["state"] == "error", result
+        assert result["errors"] == [] and result["rejections"] == [], result
+    finally:
+        stop_browser_server(server, thread, browser=browser)
+        stop_isolated_browser_app(runtime)
+
+
+def test_dockview_tmux_menu_retargets_after_terminal_tab_click(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=row@50(left,right)&tabs=left:1;right:2", sessions=["1", "2"])
+    wait_for_dockview(browser, min_tabs=2)
+    click_visible_selector(browser, '#term-1')
+    click_visible_selector(browser, '#term-2')
+    click_visible_selector(browser, '[data-app-menu="tmux"] > .app-menu-button')
+    result = browser.execute_script(
+        """
+        const rename = Array.from(document.querySelectorAll('[data-app-menu="tmux"] .app-menu-command'))
+          .find(node => node.textContent.trim().startsWith('Rename'));
+        return {target: currentTmuxMenuTarget(), label: rename?.textContent.trim() || ''};
+        """
+    )
+    assert result == {"target": "2", "label": "Rename tmux session '2'"}, result
+
+
+def test_dockview_tab_click_captures_editor_scroll_before_dockview_detach(browser, tmp_path):
+    path = "/home/test/yolomux.dev/IMMEDIATE-SCROLL.md"
+    item = f"file:{path}"
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        f"?sessions=1&layout=right&tabs=right:{quote(item, safe='')},__prefs__",
+        sessions=["1"],
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    setup = browser.execute_async_script(
+        """
+        const item = arguments[0];
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const path = fileItemPath(item);
+          const source = '# Immediate scroll\\n\\n' + Array.from({length: 1800}, (_, index) => `- row ${index}`).join('\\n');
+          setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+          setFileEditorViewMode(path, 'preview', item);
+          const panel = panelNodes.get(item);
+          destroyProseMirrorPanel(panel);
+          delete panel._pmError;
+          renderFileEditorPanel(panel, item);
+          await window.__yolomuxTestWaitFor(() => panel._pmView || panel._pmError, {timeoutMs: 5000});
+          const preview = panel.querySelector('.file-editor-preview-pane-panel');
+          preview.scrollTop = 100;
+          capturePaneViewState(item, panel);
+          preview.scrollTop = 1000;
+          const actualBeforeSwitch = preview.scrollTop;
+          done({actualBeforeSwitch, baselineSaved: paneViewState.get(item)?.scrollContainers?.[0]?.scrollTop || 0});
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """,
+        item,
+    )
+    assert setup.get("error") is None, setup
+    assert setup["actualBeforeSwitch"] == 1000 and setup["baselineSaved"] == 100, setup
+    click_visible_selector(browser, '.dockview-pane-tab[data-pane-tab="__prefs__"]')
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return activeItemForSide('right') === '__prefs__';"))
+    click_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{item}"]')
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return activeItemForSide('right') === arguments[0];", item))
+    result = browser.execute_async_script(
+        """
+        const item = arguments[0];
+        const done = arguments[arguments.length - 1];
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const panel = panelNodes.get(item);
+          const preview = panel?.querySelector('.file-editor-preview-pane-panel');
+          done({restored: preview?.scrollTop || 0, saved: paneViewState.get(item)?.scrollContainers?.[0]?.scrollTop || 0});
+        }));
+        """,
+        item,
+    )
+    assert result["restored"] == 1000 and result["saved"] == 1000, result
 
 
 def test_dockview_quick_open_keeps_distinct_notes_files_open(browser, tmp_path):
@@ -4507,6 +4829,9 @@ def test_differ_reopen_keeps_dragged_file_tab_home(browser, tmp_path):
         };
         const waitFor = window.__yolomuxTestWaitFor;
         (async () => {
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          activatePaneTab('slot1', '1', {userInitiated: true});
+          await waitFor(() => lastActiveNonFileExplorerPaneItem === '1');
           activatePaneTab(slotForItem(differItemId), differItemId, {userInitiated: true});
           renderFileExplorerChangesPanels({force: true});
           const row = await waitFor(() => document.querySelector(`.file-explorer-differ [data-open-change-file="${path}"]`));
@@ -4517,7 +4842,22 @@ def test_differ_reopen_keeps_dragged_file_tab_home(browser, tmp_path):
             mode: editorViewModeFor(path, `filediff:${path}`),
             rows: document.querySelectorAll(`[data-open-change-file="${path}"]`).length,
           });
-        })().catch(error => done({error: String(error && error.stack || error)}));
+        })().catch(error => done({
+          error: String(error && error.stack || error),
+          diagnostics: {
+            focusedPanelItem,
+            focusedTerminal,
+            lastActiveNonFileExplorerPaneItem,
+            activationSlot: fileEditorActivationSlot(),
+            activeItems: activePaneItems(),
+            slots: Object.fromEntries(layoutSlotKeys().map(slot => [slot, {
+              active: activeItemForSide(slot),
+              tabs: paneTabs(slot),
+            }])),
+            diffItemSlot: slotForItem(`filediff:${path}`),
+            diffItemInLayout: itemInLayout(`filediff:${path}`),
+          },
+        }));
         """,
         path,
     )

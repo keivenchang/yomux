@@ -4696,6 +4696,17 @@ async function runLayoutRestoreSuite() {
     api.captureFileEditorPanelViewStateForTest(item, panel);
     assert.equal(api.fileEditorViewStateForTest(item).scrollTop, 420, 'the focused editor saves its real scroll before tab switch');
     assert.equal(api.fileEditorViewStateForTest(item).scrollLeft, 7);
+    const hiddenPath = '/home/test/hidden-first-capture.md';
+    const hiddenItem = api.registerFileEditorLayoutItemForTest(hiddenPath);
+    const hiddenPanel = new TestElement('hidden-editor-panel');
+    hiddenPanel.dataset.layoutItem = hiddenItem;
+    hiddenPanel.dataset.filePath = hiddenPath;
+    hiddenPanel._cmView = {
+      scrollDOM: {clientHeight: 0, clientWidth: 0, scrollTop: 999, scrollLeft: 17},
+      state: {doc, selection: {main: {anchor: 11, head: 13}}},
+    };
+    api.captureFileEditorPanelViewStateForTest(hiddenItem, hiddenPanel);
+    assert.equal(api.fileEditorViewStateForTest(hiddenItem), null, 'a first capture from a hidden zero-height editor is ignored');
     panel.isConnected = false;
     scrollDOM.clientHeight = 0;
     scrollDOM.scrollTop = 0;

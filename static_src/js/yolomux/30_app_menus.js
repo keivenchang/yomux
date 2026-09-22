@@ -1938,6 +1938,7 @@ function openAppMenu(wrapper, options = {}) {
   closeOtherSessionPopovers(null, {force: true});
   closeFileImagePreview();
   closeAppMenus(wrapper);
+  refreshAppMenuForOpen(wrapper);
   fitAppMenuPopover(wrapper.querySelector(':scope > .app-menu-popover'));
   wrapper.querySelectorAll(':scope > .app-menu-popover .app-submenu-popover').forEach(fitAppMenuPopover);
   wrapper.classList.add(CLS.open);
@@ -1953,6 +1954,15 @@ function openAppMenu(wrapper, options = {}) {
   wrapper.querySelector('.app-menu-button')?.setAttribute('aria-expanded', 'true');
   if (openAppMenuId === 'tabs') refreshTabsMenuMetadataOnOpen();
   if (options.focusFirst) requestAnimationFrame(() => focusFirstAppMenuCommand(wrapper));
+}
+
+function refreshAppMenuForOpen(wrapper) {
+  if (wrapper?.dataset?.appMenu !== 'tmux') return;
+  const menu = appMenuTree().find(item => item.id === 'tmux');
+  const popover = wrapper.querySelector(':scope > .app-menu-popover');
+  if (!menu || !popover) return;
+  popover.replaceChildren(...menu.items.map(createAppMenuItem));
+  fitAppMenuPopover(popover);
 }
 
 function closeAppMenus(keepOpen = null) {

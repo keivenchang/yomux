@@ -19904,6 +19904,7 @@ function openAppMenu(wrapper, options = {}) {
   closeOtherSessionPopovers(null, {force: true});
   closeFileImagePreview();
   closeAppMenus(wrapper);
+  refreshAppMenuForOpen(wrapper);
   fitAppMenuPopover(wrapper.querySelector(':scope > .app-menu-popover'));
   wrapper.querySelectorAll(':scope > .app-menu-popover .app-submenu-popover').forEach(fitAppMenuPopover);
   wrapper.classList.add(CLS.open);
@@ -19919,6 +19920,15 @@ function openAppMenu(wrapper, options = {}) {
   wrapper.querySelector('.app-menu-button')?.setAttribute('aria-expanded', 'true');
   if (openAppMenuId === 'tabs') refreshTabsMenuMetadataOnOpen();
   if (options.focusFirst) requestAnimationFrame(() => focusFirstAppMenuCommand(wrapper));
+}
+
+function refreshAppMenuForOpen(wrapper) {
+  if (wrapper?.dataset?.appMenu !== 'tmux') return;
+  const menu = appMenuTree().find(item => item.id === 'tmux');
+  const popover = wrapper.querySelector(':scope > .app-menu-popover');
+  if (!menu || !popover) return;
+  popover.replaceChildren(...menu.items.map(createAppMenuItem));
+  fitAppMenuPopover(popover);
 }
 
 function closeAppMenus(keepOpen = null) {
@@ -37741,7 +37751,10 @@ function activatePaneTab(side, session, options = {}) {
   }
   recordTabActivation(session);
   const previous = activeItemForSide(side);
-  if (previous && previous !== session && !dockviewLayoutActive()) capturePaneViewStateForItemIfPresent(previous);
+  if (previous && previous !== session) {
+    if (dockviewLayoutActive() && typeof captureDockviewPaneBeforeDetach === 'function') captureDockviewPaneBeforeDetach(previous);
+    else capturePaneViewStateForItemIfPresent(previous);
+  }
   if (isFileEditorItem(session)) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight();
@@ -40928,6 +40941,8 @@ const SPLIT_PCT_EPSILON = 0.01;          // split-percent diffs below this are t
 const SERIALIZED_WEIGHT_BASE = 1000;     // Dockview gridview node weight base for serialization
 const DOCKVIEW_MIN_LAYOUT_WIDTH = 640;   // enough room for a serialized Finder + content pane snapshot
 const DOCKVIEW_MIN_LAYOUT_HEIGHT = 240;  // prevents sleep/hidden-tab 1px layouts from serializing
+const DOCKVIEW_PRE_ACTIVATION_CAPTURE_TTL_MS = 1000;
+const DOCKVIEW_PENDING_ACTIVATION_TTL_MS = 1000;
 const dockviewLayoutState = {
   api: null,
   host: null,
@@ -40950,6 +40965,7 @@ const dockviewLayoutState = {
   tabDropHandledAt: 0,
   tabActivationPerf: null,
   pendingUserPanelActivation: '',
+  pendingUserPanelActivationTimer: 0,
   theme: null,
 };
 
@@ -40994,15 +41010,40 @@ function dockviewCommitPanelActivation(item, options = {}) {
   const panelItem = String(item || '');
   if (!panelItem) return false;
   const pendingUserGesture = dockviewLayoutState.pendingUserPanelActivation === panelItem;
-  if (pendingUserGesture) dockviewLayoutState.pendingUserPanelActivation = '';
+  if (pendingUserGesture) dockviewClearPendingUserPanelActivation();
   const userInitiated = options.userInitiated === true || pendingUserGesture;
+  const focusOptions = isTmuxSession(panelItem) && userInitiated
+    ? {...options, acknowledgeAgentWindow: false, acknowledgePromptAttention: false}
+    : options;
   if (isTmuxSession(panelItem) && userInitiated) {
     noteFileExplorerChangesSessionInteraction(panelItem);
     scheduleFileExplorerActiveTabSync(panelItem, {explicit: true});
   }
-  setFocusedPanelItem(panelItem, {userInitiated});
+  setFocusedPanelItem(panelItem, {...options, userInitiated});
+  if (isTmuxSession(panelItem) && userInitiated && typeof focusTerminalFromUserAction === 'function') {
+    focusTerminalFromUserAction(panelItem, 25, {...focusOptions, userInitiated: true});
+  }
   dockviewFinishTabActivationPerf(panelItem);
   return true;
+}
+
+function dockviewSetPendingUserPanelActivation(item) {
+  dockviewClearPendingUserPanelActivation();
+  const panelItem = String(item || '');
+  if (!panelItem) return;
+  dockviewLayoutState.pendingUserPanelActivation = panelItem;
+  dockviewLayoutState.pendingUserPanelActivationTimer = window.setTimeout(() => {
+    if (dockviewLayoutState.pendingUserPanelActivation === panelItem) dockviewClearPendingUserPanelActivation();
+  }, DOCKVIEW_PENDING_ACTIVATION_TTL_MS);
+}
+
+function dockviewClearPendingUserPanelActivation(item = '') {
+  if (item && dockviewLayoutState.pendingUserPanelActivation !== String(item)) return;
+  if (dockviewLayoutState.pendingUserPanelActivationTimer) {
+    window.clearTimeout(dockviewLayoutState.pendingUserPanelActivationTimer);
+    dockviewLayoutState.pendingUserPanelActivationTimer = 0;
+  }
+  dockviewLayoutState.pendingUserPanelActivation = '';
 }
 
 function dockviewCommitTouchTabActivation(event) {
@@ -42002,7 +42043,10 @@ function dockviewFinishTabPointerDrag(event) {
   const releaseEvent = dockviewTabPointerEvent(event, state);
   const classification = dockviewDropClassification(releaseEvent, {state});
   const releaseRegion = classification.region;
+  const canceled = ['pointercancel', 'touchcancel', 'dragend'].includes(event?.type);
   dockviewLayoutState.tabPointerDrag = null;
+  if (canceled || state?.dragged === true) dockviewClearPendingUserPanelActivation(state?.item || '');
+  if (canceled) dockviewClearPreActivationCapture(state?.item || '');
   dockviewClearTabInsertionPreview();
   dockviewSetInvalidTabDropPreview(false);
   clearDropPreview();
@@ -42577,6 +42621,8 @@ function dockviewInit() {
       if (dockviewLayoutState.applyingFromLayout) return;
       const item = panel?.id || '';
       if (!item) return;
+      const pendingUserGesture = dockviewLayoutState.pendingUserPanelActivation === item;
+      if (!pendingUserGesture && focusedPanelItem && itemIsActivePaneTab(focusedPanelItem)) return;
       dockviewCommitPanelActivation(item);
     }),
     api.onWillShowOverlay(event => {
@@ -42800,7 +42846,9 @@ function renderPanelsDockview(previousActive = [], options = {}) {
   let layoutReloaded = false;
   let layoutLoadDeferred = false;
   let layoutCompletionDeferred = false;
+  let activeOnlyTransitionItems = new Set();
   if (!dockviewLayoutState.adoptingFromDockview && dockviewLayoutState.lastAppliedLayoutSignature !== signature) {
+    activeOnlyTransitionItems = dockviewActiveTabTransitionItems(layoutSlots);
     if (dockviewLayoutState.lastAppliedActiveOnlySignature !== activeOnlySignature || !dockviewActivateLayoutTabs(layoutSlots)) {
       if (options.deferDockviewLoad === true) {
         dockviewScheduleDeferredLoad(previousActive, options);
@@ -42820,9 +42868,12 @@ function renderPanelsDockview(previousActive = [], options = {}) {
   if (activeOnlyChange) {
     dockviewLayoutState.lastAppliedLayoutSignature = signature;
     // Dockview's setActive path already hides/pools the old panel, mounts the new panel, updates
-    // active-tab chrome, and fires the focus callbacks. Only the app-owned stream lifecycle and
-    // mutation acknowledgement remain; walking every tab and mounted panel here repeats the
+    // active-tab chrome, and fires the focus callbacks. Refresh the lightweight tab/panel shell
+    // state that Dockview does not own; skip attached-content rendering because that repeats the
     // complete switch and makes large editors block unrelated tab activation.
+    const activeItems = new Set(layoutSlotKeys().map(slot => activeItemForSide(slot)).filter(Boolean));
+    dockviewRefreshTabs({items: activeOnlyTransitionItems});
+    dockviewSyncMountedPanels({items: activeItems, renderAttached: false, ensureMounted: true});
     syncPanelVisibility(previousActive);
     completeLayoutMutationGeneration(options.completionGeneration);
     return true;
@@ -42906,7 +42957,9 @@ function dockviewActivateLayoutTabs(slots = layoutSlots) {
   if (!activeItems.length && paneItems(slots).length) return false;
   const panels = activeItems.map(item => api.getPanel?.(item));
   if (panels.some(panel => typeof panel?.api?.setActive !== 'function')) return false;
-  for (const panel of panels) panel.api.setActive();
+  for (const panel of panels) {
+    if (panel.api.isActive !== true) panel.api.setActive();
+  }
   return true;
 }
 
@@ -43302,6 +43355,10 @@ function createDockviewPanelRenderer() {
     }
     if (!isLayoutItem(item)) return;
     panel = getOrCreatePanel(item);
+    if (panel._dockviewPreActivationCaptured?.consumed) {
+      if (panel._dockviewPreActivationCaptured.timer) window.clearTimeout(panel._dockviewPreActivationCaptured.timer);
+      delete panel._dockviewPreActivationCaptured;
+    }
     element.replaceChildren(panel);
     if (dockviewLayoutState.applyingFromLayout) return;
     const slot = slotForItem(item) || dockviewSlotForGroupId(params?.api?.group?.id || '');
@@ -43312,7 +43369,10 @@ function createDockviewPanelRenderer() {
   };
   const pool = () => {
     if (!panel || panel.parentElement !== element) return;
-    capturePaneViewState(item, panel);
+    const capture = panel._dockviewPreActivationCaptured;
+    if (capture) {
+      capture.consumed = true;
+    } else capturePaneViewState(item, panel);
     panel.classList.remove('active-pane');
     panel.dataset.slot = '';
     panelPool.appendChild(panel);
@@ -43502,20 +43562,24 @@ function createDockviewTabRenderer() {
     for (const disposable of disposables) disposable?.dispose?.();
     disposables = [];
   };
-  const commitExplicitTabInteraction = () => {
-    dockviewCommitPanelActivation(item, {userInitiated: true});
+  const commitExplicitTabInteraction = (options = {}) => {
+    dockviewCommitPanelActivation(item, {userInitiated: true, ...options});
   };
   element.__yolomuxDockviewRefresh = render;
   element.addEventListener('pointerdown', event => {
     if (event.target.closest('[data-pane-tab-close], [data-auto-session]')) event.stopPropagation();
     else {
+      captureDockviewPreviousPaneBeforeTabActivation(element, item);
       dockviewBeginTabActivationPerf(item);
-      dockviewLayoutState.pendingUserPanelActivation = item;
+      dockviewSetPendingUserPanelActivation(item);
       dockviewBeginTabPointerDrag(event, item);
     }
   });
   element.addEventListener('mousedown', event => {
     if (event.target.closest('[data-pane-tab-close], [data-auto-session]')) return;
+    if (dockviewLayoutState.pendingUserPanelActivation !== item) {
+      captureDockviewPreviousPaneBeforeTabActivation(element, item);
+    }
     dockviewBeginTabPointerDrag(event, item);
   });
   element.addEventListener('click', async event => {
@@ -43543,7 +43607,8 @@ function createDockviewTabRenderer() {
   element.addEventListener('keydown', event => {
     if (!['Enter', ' '].includes(event.key)) return;
     event.preventDefault();
-    commitExplicitTabInteraction();
+    captureDockviewPreviousPaneBeforeTabActivation(element, item);
+    commitExplicitTabInteraction({focusTerminal: true});
     api?.setActive?.();
   });
   element.addEventListener('dblclick', event => {
@@ -43576,6 +43641,37 @@ function createDockviewTabRenderer() {
   };
 }
 
+function captureDockviewPreviousPaneBeforeTabActivation(tabElement, targetItem) {
+  const group = tabElement?.closest?.('.dv-groupview');
+  const slot = group && typeof dockviewSlotForGroupElement === 'function'
+    ? dockviewSlotForGroupElement(group)
+    : null;
+  const previous = slot ? activeItemForSide(slot) : focusedPanelItem;
+  if (previous && previous !== targetItem) captureDockviewPaneBeforeDetach(previous);
+}
+
+function captureDockviewPaneBeforeDetach(item) {
+  const panel = panelNodes.get(item);
+  if (!panel) return false;
+  if (panel._dockviewPreActivationCaptured) return true;
+  capturePaneViewState(item, panel);
+  const capture = {timer: 0, consumed: false};
+  panel._dockviewPreActivationCaptured = capture;
+  capture.timer = window.setTimeout(() => {
+    if (panel._dockviewPreActivationCaptured === capture) delete panel._dockviewPreActivationCaptured;
+  }, DOCKVIEW_PRE_ACTIVATION_CAPTURE_TTL_MS);
+  return true;
+}
+
+function dockviewClearPreActivationCapture(item = '') {
+  const panel = panelNodes.get(String(item || ''));
+  const capture = panel?._dockviewPreActivationCaptured;
+  if (!capture) return false;
+  if (capture.timer) window.clearTimeout(capture.timer);
+  delete panel._dockviewPreActivationCaptured;
+  return true;
+}
+
 function syncDockviewTabShell(tab, item, api = null) {
   tab.dataset.paneTab = item;
   syncDockviewTabActiveClass(tab, api);
@@ -43596,13 +43692,36 @@ function dockviewTabAriaLabel(item) {
   return paneTabAriaLabel(item);
 }
 
-function dockviewRefreshTabs() {
+function dockviewActiveTabTransitionItems(slots = layoutSlots) {
+  const affected = new Set();
+  const groups = Array.from(dockviewLayoutState.host?.querySelectorAll?.('.dv-groupview') || []);
+  for (const slot of layoutSlotKeys(slots)) {
+    const desired = activeItemForSide(slot, slots);
+    const group = groups.find(candidate => dockviewSlotForGroupElement(candidate) === slot);
+    const current = group?.querySelector?.('.dv-tab.dv-active-tab .dockview-pane-tab')?.dataset?.paneTab || '';
+    if (current && current !== desired) affected.add(current);
+    if (desired) affected.add(desired);
+  }
+  return affected;
+}
+
+function dockviewRefreshTabs(options = {}) {
   if (!dockviewLayoutActive()) return;
-  document.querySelectorAll('.dockview-pane-tab').forEach(tab => {
+  const itemSet = options.items instanceof Set ? options.items : null;
+  const tabs = itemSet
+    ? Array.from(itemSet).map(item => dockviewLayoutState.host?.querySelector?.(`.dockview-pane-tab[data-pane-tab="${CSS.escape(item)}"]`)).filter(Boolean)
+    : Array.from(document.querySelectorAll('.dockview-pane-tab'));
+  const groups = new Set();
+  tabs.forEach(tab => {
     syncDockviewTabActiveClass(tab);
     tab.__yolomuxDockviewRefresh?.();
+    const group = tab.closest?.('.dv-groupview');
+    if (group) groups.add(group);
   });
-  document.querySelectorAll('.dockview-pane-header-actions').forEach(actions => {
+  const headerActions = itemSet
+    ? Array.from(groups).map(group => group.querySelector('.dockview-pane-header-actions')).filter(Boolean)
+    : Array.from(document.querySelectorAll('.dockview-pane-header-actions'));
+  headerActions.forEach(actions => {
     actions.__yolomuxDockviewRefresh?.();
   });
   dockviewSyncHeaderBackgroundDragSources();
@@ -43617,12 +43736,13 @@ function syncDockviewTabActiveClass(tab, api = null) {
 
 function dockviewSyncMountedPanels(options = {}) {
   if (!dockviewLayoutActive()) return;
-  for (const item of activePaneItems()) {
+  const items = options.items instanceof Set ? options.items : new Set(activePaneItems());
+  for (const item of items) {
     const panel = panelNodes.get(item);
     if (!panel?.isConnected) continue;
     const slot = slotForItem(item);
     if (slot) {
-      updatePanelSlot(panel, item, slot);
+      updatePanelSlot(panel, item, slot, {renderEditor: options.renderAttached !== false});
       syncPaneRoleDom(panel.closest?.('.dv-groupview'), slot);
     }
     if (options.renderAttached !== false) renderAttachedPanelContent(item);
@@ -71275,7 +71395,7 @@ function captureFileEditorPanelViewState(item, panel) {
   const view = panel?._cmView;
   const scrollDOM = view?.scrollDOM;
   if (!isFileEditorItem(item) || !view || !scrollDOM) return;
-  if (fileEditorViewState.has(item) && !fileEditorPanelViewStateCaptureHasLayout(panel, scrollDOM)) return;
+  if (!fileEditorPanelViewStateCaptureHasLayout(panel, scrollDOM)) return;
   const selection = view.state?.selection?.main;
   fileEditorViewState.set(item, {
     scrollTop: scrollDOM.scrollTop || 0,
@@ -85787,13 +85907,15 @@ function hideUploadResult(session) {
   }
 }
 
-function updatePanelSlot(panel, session, slot) {
+function updatePanelSlot(panel, session, slot, options = {}) {
   panel.dataset.slot = slot;
   panel.dataset.layoutItem = session;
   syncPaneRoleDom(panel, slot);
   const head = panel.querySelector('.panel-head');
   if (head) head.dataset.dragSlot = slot;
-  if (isFileEditorItem(session)) renderFileEditorPanel(panel, session, {updateActiveFile: !dockviewLayoutActive(), captureViewState: false});
+  if (isFileEditorItem(session) && options.renderEditor !== false) {
+    renderFileEditorPanel(panel, session, {updateActiveFile: !dockviewLayoutActive(), captureViewState: false});
+  }
   updatePaneExpandButton(panel, session);
   if (!hideDockviewInnerPaneTabs(panel)) updatePaneTabStrip(panel, slot);
 }

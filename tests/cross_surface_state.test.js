@@ -1856,6 +1856,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(appSource.includes('data-file-explorer-new-folder'), 'Finder header exposes new-folder action');
     const focusPanelBody = appSource.slice(appSource.indexOf('function setFocusedPanelItem('), appSource.indexOf('let autoFocusNavTimer'));
     assert.equal(/switchFileExplorerChangesSession/.test(focusPanelBody), false, 'passive focus/hover no longer switches the Finder Modified-files session');
+    assert.ok(focusPanelBody.includes('previousItem !== item && !dockviewLayoutActive()'), 'global focus changes do not mark a different Dockview pane as pre-detached');
     assert.equal(appSource.includes('sessionFilesTargetSession({followActive: true})'), false, 'Finder Modified-files session selection never follows passive hover/autofocus');
     assert.ok(/function noteFileExplorerChangesSessionInteraction\(session\)/.test(appSource), 'explicit session interactions can commit the Finder Modified-files target');
     assert.ok(/function fileExplorerSelectedSessionForView\(view\)[\s\S]*surface === 'finder' \? fileExplorerFinderSelectedSession : fileExplorerChangesSelectedSession[\s\S]*function fileExplorerFinderTargetSession\(\)[\s\S]*fileExplorerSelectedSessionForView\('finder'\)[\s\S]*function fileExplorerSessionFilesTargetSession\(\)[\s\S]*fileExplorerSelectedSessionForView\('differ'\)/.test(appSource), 'Finder and Differ resolve only from their separate explicit selection state');
@@ -1870,10 +1871,22 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(dockviewTabRendererStart > 0, 'Dockview tab renderer is locatable');
     const dockviewTabRendererBody = appSource.slice(dockviewTabRendererStart, appSource.indexOf('function createDockviewPanelRenderer()', dockviewTabRendererStart));
     assert.ok(/const pool = \(\) => \{[\s\S]*capturePaneViewState\(item, panel\);[\s\S]*panelPool\.appendChild\(panel\)/.test(appSource), 'Dockview panel hide has one pre-detach pane-state capture owner');
-    assert.equal(appSource.includes('captureDockviewPreviousPaneBeforeTabActivation'), false, 'Dockview pointer, mouse, click, and keyboard handlers do not duplicate the onHide capture');
-    assert.ok(/const commitExplicitTabInteraction = \(\) => \{[\s\S]*?dockviewCommitPanelActivation\(item, \{userInitiated: true\}\);[\s\S]*?\};/.test(dockviewTabRendererBody), 'Dockview tab gestures commit tmux Differ context through the shared explicit-activation owner');
+    assert.ok(/if \(canceled\) dockviewClearPreActivationCapture\(state\?\.item \|\| ''\)/.test(appSource), 'canceled Dockview gestures discard their unused pre-detach capture');
+    assert.ok(/function captureDockviewPreviousPaneBeforeTabActivation\([\s\S]*?captureDockviewPaneBeforeDetach\(previous(?:, [^)]+)?\)[\s\S]*?function captureDockviewPaneBeforeDetach\([\s\S]*?capturePaneViewState\(item, panel\)/.test(appSource), 'Dockview tab activation has one pre-detach pane-state capture helper');
+    assert.ok(/element\.addEventListener\('pointerdown'[\s\S]*?captureDockviewPreviousPaneBeforeTabActivation\(element, item(?:, [^)]+)?\)/.test(dockviewTabRendererBody), 'pointer tab activation captures editor state before Dockview detaches the old panel');
+    assert.ok(/element\.addEventListener\('mousedown'[\s\S]*?captureDockviewPreviousPaneBeforeTabActivation\(element, item(?:, [^)]+)?\)/.test(dockviewTabRendererBody), 'mouse tab activation captures editor state before Dockview detaches the old panel');
+    assert.ok(/element\.addEventListener\('keydown'[\s\S]*?captureDockviewPreviousPaneBeforeTabActivation\(element, item(?:, [^)]+)?\)/.test(dockviewTabRendererBody), 'keyboard tab activation captures editor state before Dockview detaches the old panel');
+    assert.ok(/const commitExplicitTabInteraction = \([^)]*\) => \{[\s\S]*?dockviewCommitPanelActivation\(item, \{userInitiated: true, \.\.\.options\}\);[\s\S]*?\};/.test(dockviewTabRendererBody), 'Dockview tab gestures commit tmux Differ context through the shared explicit-activation owner');
     assert.ok(/element\.addEventListener\('click', async event => \{[\s\S]*?commitExplicitTabInteraction\(\);[\s\S]*?\}\);/.test(dockviewTabRendererBody), 'Dockview tab click commits an explicit interaction without relying on active-panel changes');
-    assert.ok(/element\.addEventListener\('keydown', event => \{[\s\S]*?\['Enter', ' '\]\.includes\(event\.key\)[\s\S]*?commitExplicitTabInteraction\(\);[\s\S]*?api\?\.setActive\?\.\(\);[\s\S]*?\}\);/.test(dockviewTabRendererBody), 'Dockview tab Enter/Space activation commits an explicit interaction before setting the active panel');
+    assert.ok(dockviewTabRendererBody.includes("element.addEventListener('keydown', event => {") && dockviewTabRendererBody.includes('commitExplicitTabInteraction({focusTerminal: true});') && dockviewTabRendererBody.includes('api?.setActive?.();'), 'Dockview tab Enter/Space activation commits an explicit interaction before setting the active panel');
+    assert.ok(/if \(isTmuxSession\(panelItem\) && userInitiated && typeof focusTerminalFromUserAction === 'function'\)/.test(appSource), 'every explicit Dockview activation focuses tmux input even after pending-gesture expiry');
+    const dockviewCommitStart = appSource.indexOf('function dockviewCommitPanelActivation(');
+    const dockviewCommitBody = appSource.slice(dockviewCommitStart, appSource.indexOf('function dockviewSetPendingUserPanelActivation', dockviewCommitStart));
+    assert.ok(dockviewCommitBody.includes('const focusOptions = isTmuxSession(panelItem) && userInitiated')
+      && dockviewCommitBody.includes('acknowledgeAgentWindow: false')
+      && dockviewCommitBody.includes('acknowledgePromptAttention: false')
+      && dockviewCommitBody.includes('setFocusedPanelItem(panelItem, {...options, userInitiated})')
+      && dockviewCommitBody.includes('focusTerminalFromUserAction(panelItem, 25, {...focusOptions, userInitiated: true})'), 'Dockview focus reuses the already-acknowledged click and does not acknowledge terminal attention twice');
     assert.ok(/function activatePaneTab\([^]*?noteFileExplorerChangesSessionInteraction\(session\)/.test(appSource), 'clicking a tmux pane tab commits the Finder Modified-files target');
     assert.ok(/function activatePaneTab\([^]*?isFileEditorItem\(session\)[^]*?changedFileOwnerSessionForPath\(path, \{owners\}\)[^]*?owners\.length === 1[^]*?noteFileExplorerChangesSessionInteraction\(owner\)/.test(appSource), 'clicking a file tab commits an exact-path Differ owner, falling back to a single owner only');
     const exactOwnerApi = loadYolomux('', ['1', '2', '5']);

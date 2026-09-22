@@ -1059,8 +1059,8 @@ def test_markdown_prosemirror_delayed_load_survives_real_dockview_tab_switch(bro
         "capturePaneViewState": 1,
         "renderPanels": 0,
         "renderPanelsDockview": 1,
-        "dockviewRefreshTabs": 0,
-        "dockviewSyncMountedPanels": 0,
+        "dockviewRefreshTabs": 1,
+        "dockviewSyncMountedPanels": 1,
         "finishPanelLayoutRender": 0,
         "renderAutoApproveButtons": 0,
     }, first_switch
@@ -1111,8 +1111,8 @@ def test_markdown_prosemirror_delayed_load_survives_real_dockview_tab_switch(bro
         "capturePaneViewState": 1,
         "renderPanels": 0,
         "renderPanelsDockview": 1,
-        "dockviewRefreshTabs": 0,
-        "dockviewSyncMountedPanels": 0,
+        "dockviewRefreshTabs": 1,
+        "dockviewSyncMountedPanels": 1,
         "finishPanelLayoutRender": 0,
         "renderAutoApproveButtons": 0,
     }, metrics

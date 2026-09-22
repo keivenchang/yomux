@@ -4556,13 +4556,15 @@ function hideUploadResult(session) {
   }
 }
 
-function updatePanelSlot(panel, session, slot) {
+function updatePanelSlot(panel, session, slot, options = {}) {
   panel.dataset.slot = slot;
   panel.dataset.layoutItem = session;
   syncPaneRoleDom(panel, slot);
   const head = panel.querySelector('.panel-head');
   if (head) head.dataset.dragSlot = slot;
-  if (isFileEditorItem(session)) renderFileEditorPanel(panel, session, {updateActiveFile: !dockviewLayoutActive(), captureViewState: false});
+  if (isFileEditorItem(session) && options.renderEditor !== false) {
+    renderFileEditorPanel(panel, session, {updateActiveFile: !dockviewLayoutActive(), captureViewState: false});
+  }
   updatePaneExpandButton(panel, session);
   if (!hideDockviewInnerPaneTabs(panel)) updatePaneTabStrip(panel, slot);
 }

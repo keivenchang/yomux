@@ -1228,7 +1228,10 @@ function activatePaneTab(side, session, options = {}) {
   }
   recordTabActivation(session);
   const previous = activeItemForSide(side);
-  if (previous && previous !== session && !dockviewLayoutActive()) capturePaneViewStateForItemIfPresent(previous);
+  if (previous && previous !== session) {
+    if (dockviewLayoutActive() && typeof captureDockviewPaneBeforeDetach === 'function') captureDockviewPaneBeforeDetach(previous);
+    else capturePaneViewStateForItemIfPresent(previous);
+  }
   if (isFileEditorItem(session)) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight();
