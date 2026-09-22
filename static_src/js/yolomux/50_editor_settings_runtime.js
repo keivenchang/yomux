@@ -1188,6 +1188,7 @@ function applyGlobalThemeMode(options = {}) {
   document.body?.classList.add(themeBodyClass(resolved), themeResolvedBodyClass(resolved));
   if (globalThemeMode === 'system') document.body?.classList.add(themeBodyClass('system'));
   if (document.documentElement?.style) document.documentElement.style.colorScheme = resolved;
+  if (typeof syncDockviewTheme === 'function') syncDockviewTheme();
   if (options.updateEditor !== false) applyEditorThemeMode({refreshEditors: options.refreshEditors !== false});
   if (options.updateTerminals) applyTerminalRuntimeSettings({fit: false});
   // the active-color presets are theme-specific, so re-apply on every theme switch.

@@ -1087,9 +1087,9 @@ async function runCrossSurfaceStateSuite() {
     }
     const perf = Object.fromEntries(acknowledgementApi.clientPerfSummaryForTest().map(counter => [counter.name, counter]));
     assert.deepStrictEqual(fetchCalls.filter(call => call.url === '/api/attention-ack'), [{url: '/api/attention-ack', body: {keys: [attentionKey]}}], 'an unresolved acknowledgement suppresses duplicate POSTs for the same attention event');
-    assert.equal(perf.renderPanels?.count, 1, 'an acknowledgement burst rebuilds the pane surfaces only for the first input');
-    assert.equal(perf.renderPaneTabStrips?.count, 1, 'an acknowledgement burst rebuilds pane-tab status only for the first input');
-    assert.equal(perf.renderSessionButtons?.count, 1, 'an acknowledgement burst rebuilds topbar session buttons only for the first input');
+    assert.equal(perf.renderPanels?.count || 0, 0, 'an acknowledgement burst does not rebuild pane surfaces');
+    assert.equal(perf.renderPaneTabStrips?.count || 0, 0, 'an acknowledgement burst does not rebuild complete pane-tab strips');
+    assert.ok((perf.renderSessionButtons?.count || 0) <= 1, 'an acknowledgement burst permits at most one layout-induced topbar menu rebuild');
   });
   test('cross-surface host state 05: C15/C6: the redundant global "N files changed in \'1\'" summary and global comparison...', () => {
     // C15/C6: the redundant global "N files changed in '1'" summary and global comparison line are gone;
@@ -1869,8 +1869,8 @@ async function runCrossSurfaceStateSuite() {
     const dockviewTabRendererStart = appSource.indexOf('function createDockviewTabRenderer()');
     assert.ok(dockviewTabRendererStart > 0, 'Dockview tab renderer is locatable');
     const dockviewTabRendererBody = appSource.slice(dockviewTabRendererStart, appSource.indexOf('function createDockviewPanelRenderer()', dockviewTabRendererStart));
-    assert.ok(/function captureDockviewPreviousPaneBeforeTabActivation\(tabElement, targetItem\)[\s\S]*activeItemForSide\(slot\)[\s\S]*capturePaneViewStateForItemIfPresent\(previous\)/.test(appSource), 'Dockview tab activation captures the previously visible pane before Dockview hides it');
-    assert.ok(/element\.addEventListener\('pointerdown', event => \{[\s\S]*captureDockviewPreviousPaneBeforeTabActivation\(element, item\);[\s\S]*dockviewBeginTabPointerDrag\(event, item\)/.test(dockviewTabRendererBody), 'Dockview pointer tab activation captures pane viewport before native Dockview switching');
+    assert.ok(/const pool = \(\) => \{[\s\S]*capturePaneViewState\(item, panel\);[\s\S]*panelPool\.appendChild\(panel\)/.test(appSource), 'Dockview panel hide has one pre-detach pane-state capture owner');
+    assert.equal(appSource.includes('captureDockviewPreviousPaneBeforeTabActivation'), false, 'Dockview pointer, mouse, click, and keyboard handlers do not duplicate the onHide capture');
     assert.ok(/const commitExplicitTabInteraction = \(\) => \{[\s\S]*?dockviewCommitPanelActivation\(item, \{userInitiated: true\}\);[\s\S]*?\};/.test(dockviewTabRendererBody), 'Dockview tab gestures commit tmux Differ context through the shared explicit-activation owner');
     assert.ok(/element\.addEventListener\('click', async event => \{[\s\S]*?commitExplicitTabInteraction\(\);[\s\S]*?\}\);/.test(dockviewTabRendererBody), 'Dockview tab click commits an explicit interaction without relying on active-panel changes');
     assert.ok(/element\.addEventListener\('keydown', event => \{[\s\S]*?\['Enter', ' '\]\.includes\(event\.key\)[\s\S]*?commitExplicitTabInteraction\(\);[\s\S]*?api\?\.setActive\?\.\(\);[\s\S]*?\}\);/.test(dockviewTabRendererBody), 'Dockview tab Enter/Space activation commits an explicit interaction before setting the active panel');

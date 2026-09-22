@@ -759,13 +759,13 @@ def test_markdown_prosemirror_async_failure_survives_transient_tab_detach(browse
             rejectLoad(new Error('specific transient-detach parser failure'));
             await heldLoad.catch(() => {});
             await Promise.resolve();
-            document.getElementById('grid').append(panel);
+            document.getElementById('grid').append(panel); const previewPane = panel.querySelector('.file-editor-preview-pane-panel'); const failureNode = previewPane?.querySelector('.file-editor-prosemirror-error'); const previewGeneration = previewPane?._markdownPreviewGeneration || 0; const ensureGeneration = panel._pmEnsureGeneration || 0; renderFileEditorPanel(panel, item); renderFileEditorPanel(panel, item);
             window.loadProseMirrorApi = originalLoader;
             done({
               registered: panelNodes.get(item) === panel,
               connected: panel.isConnected,
               error: panel._pmError || '',
-              status: panel.querySelector('.file-editor-preview-pane-panel')?.dataset.prosemirrorState || '',
+              status: previewPane?.dataset.prosemirrorState || '', stableFailure: previewPane?.querySelector('.file-editor-prosemirror-error') === failureNode, previewGeneration, previewGenerationAfter: previewPane?._markdownPreviewGeneration || 0, ensureGeneration, ensureGenerationAfter: panel._pmEnsureGeneration || 0,
               errors: jsDebugFailureEvents('error'),
               rejections: jsDebugFailureEvents('rejection'),
             });
@@ -779,7 +779,7 @@ def test_markdown_prosemirror_async_failure_survives_transient_tab_detach(browse
     assert "failure" not in metrics, metrics
     assert metrics["registered"] is True and metrics["connected"] is True, metrics
     assert "specific transient-detach parser failure" in metrics["error"], metrics
-    assert metrics["status"] == "error", metrics
+    assert metrics["status"] == "error" and metrics["stableFailure"] is True and metrics["previewGenerationAfter"] == metrics["previewGeneration"] and metrics["ensureGenerationAfter"] == metrics["ensureGeneration"], metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
@@ -968,7 +968,9 @@ def test_markdown_prosemirror_delayed_load_survives_real_dockview_tab_switch(bro
             const items = arguments[0];
             for (const [index, item] of items.entries()) {
               const path = fileItemPath(item);
-              const source = `# File ${index + 1}\\n\\nDockview tab content ${index + 1}.`;
+              const source = index === 0
+                ? `# File 1\\n\\n${Array.from({length: 1800}, (_, row) => `- Large ViewEditor row ${row + 1}`).join('\\n')}`
+                : '# File 2\\n\\nDockview tab content 2.';
               setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
               setFileEditorViewMode(path, 'preview', item);
               const panel = panelNodes.get(item);
@@ -997,7 +999,49 @@ def test_markdown_prosemirror_delayed_load_survives_real_dockview_tab_switch(bro
     assert "failure" not in initialized and initialized["ready"] is True, initialized
     assert initialized["error"] == "" and initialized["panels"] == [True, True], initialized
 
-    browser.find_element(By.CSS_SELECTOR, f'[data-pane-tab="{items[1]}"]').click()
+    probe = browser.execute_script(
+        """
+        const names = [
+          'capturePaneViewState',
+          'renderPanels',
+          'renderPanelsDockview',
+          'dockviewRefreshTabs',
+          'dockviewSyncMountedPanels',
+          'finishPanelLayoutRender',
+          'renderAutoApproveButtons',
+        ];
+        const counts = Object.fromEntries(names.map(name => [name, 0]));
+        const originals = Object.fromEntries(names.map(name => [name, window[name]]));
+        for (const name of names) {
+          window[name] = (...args) => {
+            counts[name] += 1;
+            return originals[name](...args);
+          };
+        }
+        window.__dockviewSwitchProbe = {
+          counts,
+          originals,
+          reset() { for (const name of names) counts[name] = 0; },
+          snapshot() { return {...counts}; },
+          restore() { for (const name of names) window[name] = originals[name]; },
+        };
+        const panel = panelNodes.get(arguments[0]);
+        const preview = panel.querySelector('.file-editor-preview-pane-panel');
+        preview.scrollTop = Math.min(800, preview.scrollHeight - preview.clientHeight);
+        return {
+          descendants: panel.querySelectorAll('.ProseMirror *').length,
+          scrollTop: preview.scrollTop,
+        };
+        """,
+        items[0],
+    )
+    assert probe["descendants"] >= 3000 and probe["scrollTop"] > 0, probe
+    browser.execute_async_script(
+        "const done = arguments[arguments.length - 1]; requestAnimationFrame(() => requestAnimationFrame(done));"
+    )
+    browser.execute_script("window.__dockviewSwitchProbe.reset()")
+
+    click_visible_selector(browser, f'[data-pane-tab="{items[1]}"]')
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script("return activeItemForSide('left') === arguments[0]", items[1])
     )
@@ -1007,6 +1051,19 @@ def test_markdown_prosemirror_delayed_load_survives_real_dockview_tab_switch(bro
             items[1],
         )
     )
+    browser.execute_async_script(
+        "const done = arguments[arguments.length - 1]; requestAnimationFrame(() => requestAnimationFrame(done));"
+    )
+    first_switch = browser.execute_script("return window.__dockviewSwitchProbe.snapshot()")
+    assert first_switch == {
+        "capturePaneViewState": 1,
+        "renderPanels": 0,
+        "renderPanelsDockview": 1,
+        "dockviewRefreshTabs": 0,
+        "dockviewSyncMountedPanels": 0,
+        "finishPanelLayoutRender": 0,
+        "renderAutoApproveButtons": 0,
+    }, first_switch
     browser.execute_script("window.__releaseDockviewProseMirrorLoad()")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
@@ -1014,16 +1071,26 @@ def test_markdown_prosemirror_delayed_load_survives_real_dockview_tab_switch(bro
             items[1],
         )
     )
-    browser.find_element(By.CSS_SELECTOR, f'[data-pane-tab="{items[0]}"]').click()
+    browser.execute_async_script(
+        "const done = arguments[arguments.length - 1]; requestAnimationFrame(() => requestAnimationFrame(done));"
+    )
+    browser.execute_script("window.__dockviewSwitchProbe.reset()")
+    click_visible_selector(browser, f'[data-pane-tab="{items[0]}"]')
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script("return activeItemForSide('left') === arguments[0]", items[0])
     )
+    browser.execute_async_script(
+        "const done = arguments[arguments.length - 1]; requestAnimationFrame(() => requestAnimationFrame(done));"
+    )
     metrics = browser.execute_script(
         """
+        const switchCounts = window.__dockviewSwitchProbe.snapshot();
+        window.__dockviewSwitchProbe.restore();
+        delete window.__dockviewSwitchProbe;
         window.loadProseMirrorApi = window.__dockviewOriginalProseMirrorLoader;
         delete window.__dockviewOriginalProseMirrorLoader;
         delete window.__releaseDockviewProseMirrorLoad;
-        return arguments[0].map(item => {
+        const panels = arguments[0].map(item => {
           const panel = panelNodes.get(item);
           return {
             ready: Boolean(panel?._pmView),
@@ -1032,13 +1099,56 @@ def test_markdown_prosemirror_delayed_load_survives_real_dockview_tab_switch(bro
             error: panel?._pmError || '',
           };
         });
+        return {
+          switchCounts,
+          panels,
+          restoredScrollTop: panelNodes.get(arguments[0][0])?.querySelector('.file-editor-preview-pane-panel')?.scrollTop || 0,
+        };
         """,
         items,
     )
-    assert metrics == [
+    assert metrics["switchCounts"] == {
+        "capturePaneViewState": 1,
+        "renderPanels": 0,
+        "renderPanelsDockview": 1,
+        "dockviewRefreshTabs": 0,
+        "dockviewSyncMountedPanels": 0,
+        "finishPanelLayoutRender": 0,
+        "renderAutoApproveButtons": 0,
+    }, metrics
+    assert metrics["restoredScrollTop"] == probe["scrollTop"], metrics
+    assert metrics["panels"] == [
         {"ready": True, "connected": True, "roots": 1, "error": ""},
         {"ready": True, "connected": True, "roots": 1, "error": ""},
     ], metrics
+    app_driven_switch = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const target = arguments[0];
+        const api = dockviewLayoutState.api;
+        const originalFromJSON = api.fromJSON.bind(api);
+        let fromJSONCalls = 0;
+        api.fromJSON = (...args) => { fromJSONCalls += 1; return originalFromJSON(...args); };
+        activatePaneTab('left', target);
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          api.fromJSON = originalFromJSON;
+          const panel = panelNodes.get(target);
+          done({
+            active: activeItemForSide('left'),
+            fromJSONCalls,
+            ready: Boolean(panel?._pmView),
+            roots: panel?.querySelectorAll('.ProseMirror')?.length || 0,
+          });
+        }));
+        """,
+        items[1],
+    )
+    assert app_driven_switch == {
+        "active": items[1],
+        "fromJSONCalls": 0,
+        "ready": True,
+        "roots": 1,
+    }, app_driven_switch
     failures = browser.execute_script(
         "return {errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')};"
     )

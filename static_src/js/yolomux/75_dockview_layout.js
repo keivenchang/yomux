@@ -32,6 +32,7 @@ const dockviewLayoutState = {
   tabDropHandledAt: 0,
   tabActivationPerf: null,
   pendingUserPanelActivation: '',
+  theme: null,
 };
 
 function dockviewEmptyPaneItem(slot) {
@@ -123,6 +124,15 @@ function dockviewThemeForApp() {
   const core = dockviewCore();
   if (!core) return undefined;
   return document.body?.classList?.contains(themeBodyClass('light')) ? core.themeLight : core.themeDark;
+}
+
+function syncDockviewTheme(api = dockviewLayoutState.api) {
+  if (!api) return false;
+  const theme = dockviewThemeForApp();
+  if (!theme || dockviewLayoutState.theme === theme) return false;
+  dockviewLayoutState.theme = theme;
+  api.updateOptions?.({theme});
+  return true;
 }
 
 function dockviewSplitLayoutHasMinimumSize(zone, rect = dockviewLayoutState.host?.getBoundingClientRect?.()) {
@@ -1618,6 +1628,7 @@ function dockviewInit() {
   if (dockviewLayoutState.api || !dockviewLayoutEnabled()) return dockviewLayoutState.api;
   const core = dockviewCore();
   const host = dockviewEnsureHost();
+  const theme = dockviewThemeForApp();
   const api = core.createDockview(host, {
     className: 'yolomux-dockview-core',
     createComponent: () => createDockviewPanelRenderer(),
@@ -1630,11 +1641,12 @@ function dockviewInit() {
     scrollbars: 'native',
     singleTabMode: 'default',
     tabGroupAccent: 'off',
-    theme: dockviewThemeForApp(),
+    theme,
     getTabContextMenuItems: () => [],
     getTabGroupChipContextMenuItems: () => [],
   });
   dockviewLayoutState.api = api;
+  dockviewLayoutState.theme = theme;
   dockviewLayoutToHost(api, host);
   dockviewLayoutState.disposables = [
     dockviewInstallRootBoundaryDropFallback(),
@@ -1861,15 +1873,16 @@ function renderPanelsDockview(previousActive = [], options = {}) {
   const activePaneCount = layoutSlotKeys().filter(side => activeItemForSide(side) || paneIsPlaceholder(side)).length;
   grid.className = `grid dockview-grid ${activePaneCount === 1 ? 'full' : ''} ${activePaneCount === 0 ? 'empty' : ''}`.trim();
   dockviewEnsureHost();
-  api.updateOptions?.({theme: dockviewThemeForApp()});
-  dockviewLayoutToHost(api);
   const signature = layoutSlotsSignature(layoutSlots);
-  let activeOnlyChange = false;
+  const activeOnlySignature = dockviewLayoutActiveOnlySignature(layoutSlots);
+  let activeOnlyChange = (
+    dockviewLayoutState.adoptingFromDockview
+    && dockviewLayoutState.lastAppliedActiveOnlySignature === activeOnlySignature
+  );
   let layoutReloaded = false;
   let layoutLoadDeferred = false;
   let layoutCompletionDeferred = false;
   if (!dockviewLayoutState.adoptingFromDockview && dockviewLayoutState.lastAppliedLayoutSignature !== signature) {
-    const activeOnlySignature = dockviewLayoutActiveOnlySignature(layoutSlots);
     if (dockviewLayoutState.lastAppliedActiveOnlySignature !== activeOnlySignature || !dockviewActivateLayoutTabs(layoutSlots)) {
       if (options.deferDockviewLoad === true) {
         dockviewScheduleDeferredLoad(previousActive, options);
@@ -1883,9 +1896,18 @@ function renderPanelsDockview(previousActive = [], options = {}) {
         layoutReloaded = true;
       }
     } else {
-      dockviewLayoutState.lastAppliedLayoutSignature = signature;
       activeOnlyChange = true;
     }
+  }
+  if (activeOnlyChange) {
+    dockviewLayoutState.lastAppliedLayoutSignature = signature;
+    // Dockview's setActive path already hides/pools the old panel, mounts the new panel, updates
+    // active-tab chrome, and fires the focus callbacks. Only the app-owned stream lifecycle and
+    // mutation acknowledgement remain; walking every tab and mounted panel here repeats the
+    // complete switch and makes large editors block unrelated tab activation.
+    syncPanelVisibility(previousActive);
+    completeLayoutMutationGeneration(options.completionGeneration);
+    return true;
   }
   // dockviewLoadLayout already refreshes these once after fromJSON. Repeating
   // the same mounted-panel walk on a whole-pane swap made the drop path a
@@ -1899,10 +1921,14 @@ function renderPanelsDockview(previousActive = [], options = {}) {
     }
     const mountedPerf = clientPerfStart('dockviewSyncMountedPanels');
     try {
-      dockviewSyncMountedPanels({renderAttached: !activeOnlyChange});
+      dockviewSyncMountedPanels();
     } finally {
       clientPerfEnd(mountedPerf, {nodes: activePaneCount});
     }
+  }
+  if (dockviewLayoutState.adoptingFromDockview) {
+    dockviewLayoutState.lastAppliedLayoutSignature = signature;
+    dockviewLayoutState.lastAppliedActiveOnlySignature = activeOnlySignature;
   }
   if (!layoutLoadDeferred && !layoutCompletionDeferred) {
     finishPanelLayoutRender(previousActive, options);
@@ -2520,13 +2546,6 @@ function createDockviewHeaderActionsRenderer() {
   };
 }
 
-function captureDockviewPreviousPaneBeforeTabActivation(tabElement, targetItem) {
-  const group = tabElement?.closest?.('.dv-groupview');
-  const slot = group && typeof dockviewSlotForGroupElement === 'function' ? dockviewSlotForGroupElement(group) : null;
-  const previous = slot ? activeItemForSide(slot) : focusedPanelItem;
-  if (previous && previous !== targetItem) capturePaneViewStateForItemIfPresent(previous);
-}
-
 function createDockviewTabRenderer() {
   const element = document.createElement('div');
   element.className = 'pane-tab dockview-pane-tab';
@@ -2574,13 +2593,11 @@ function createDockviewTabRenderer() {
     else {
       dockviewBeginTabActivationPerf(item);
       dockviewLayoutState.pendingUserPanelActivation = item;
-      captureDockviewPreviousPaneBeforeTabActivation(element, item);
       dockviewBeginTabPointerDrag(event, item);
     }
   });
   element.addEventListener('mousedown', event => {
     if (event.target.closest('[data-pane-tab-close], [data-auto-session]')) return;
-    captureDockviewPreviousPaneBeforeTabActivation(element, item);
     dockviewBeginTabPointerDrag(event, item);
   });
   element.addEventListener('click', async event => {
@@ -2602,14 +2619,12 @@ function createDockviewTabRenderer() {
       if (shouldRefocus) focusPanel(item);
       return;
     }
-    captureDockviewPreviousPaneBeforeTabActivation(element, item);
     commitExplicitTabInteraction();
     dockviewFinishTabActivationPerf(item);
   });
   element.addEventListener('keydown', event => {
     if (!['Enter', ' '].includes(event.key)) return;
     event.preventDefault();
-    captureDockviewPreviousPaneBeforeTabActivation(element, item);
     commitExplicitTabInteraction();
     api?.setActive?.();
   });

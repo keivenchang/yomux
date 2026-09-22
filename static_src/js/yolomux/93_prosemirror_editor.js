@@ -1379,14 +1379,14 @@ function renderProseMirrorPreviewMode(panel, item, path, state, parts) {
   if (!prosemirrorSupportedSource(path, state)) return false;
   if (parts.previewPane) parts.previewPane.hidden = false;
   panel._pmRequired = true;
+  if (panel._pmError) {
+    renderProseMirrorFailure(panel, path, parts, panel._pmError);
+    return true;
+  }
   const ensureGeneration = Number(panel._pmEnsureGeneration || 0) + 1;
   panel._pmEnsureGeneration = ensureGeneration;
   if (!panel._pmView) {
     renderProseMirrorLoading(parts);
-  }
-  if (panel._pmError) {
-    renderProseMirrorFailure(panel, path, parts, panel._pmError);
-    return true;
   }
   const ensurePromise = ensureProseMirrorPanel(panel, item, path, state, parts, ensureGeneration);
   parts.previewPane._previewAsync = ensurePromise;

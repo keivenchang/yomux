@@ -1228,7 +1228,7 @@ function activatePaneTab(side, session, options = {}) {
   }
   recordTabActivation(session);
   const previous = activeItemForSide(side);
-  if (previous && previous !== session) capturePaneViewStateForItemIfPresent(previous);
+  if (previous && previous !== session && !dockviewLayoutActive()) capturePaneViewStateForItemIfPresent(previous);
   if (isFileEditorItem(session)) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight();
@@ -2746,6 +2746,7 @@ function refreshTerminal(session) {
 }
 
 function terminalIsVisible(session, container) {
+  if (!container) return false;
   const pane = document.getElementById(`terminal-pane-${session}`);
   return Boolean(
     pane?.classList.contains(CLS.active)
@@ -3194,8 +3195,8 @@ function scheduleTerminalAttentionHighlight(session) {
   });
 }
 
-function syncTerminalAttentionHighlights() {
-  for (const session of sessions.filter(isTmuxSession)) syncTerminalAttentionHighlight(session);
+function syncTerminalAttentionHighlights(sessionNames = sessions) {
+  for (const session of sessionNames.filter(isTmuxSession)) syncTerminalAttentionHighlight(session);
 }
 
 const terminalBlankScreenRefreshDelaysMs = Object.freeze([220, 650, 1400, 2800]);

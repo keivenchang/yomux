@@ -858,6 +858,9 @@ async function runTabberSuite() {
     assert.match(layoutState, /deferDockviewLoad: renderRequest\.options\.deferDockviewLoad,[\s\S]*?deferDockviewLoadAfterPaint: renderRequest\.options\.deferDockviewLoadAfterPaint/, 'the scheduler forwards deferred Dockview-load timing to the panel renderer');
     assert.match(dragSrc, /function swapPaneSlots[\s\S]*?sessionButtons: false,[\s\S]*?deferDockviewLoad: dockviewLayoutActive\(\),[\s\S]*?forceFull: dockviewLayoutActive\(\)/, 'Dockview pane swaps avoid unrelated global session-button work and defer only the safe topology load');
     const dockviewSource = fs.readFileSync('static_src/js/yolomux/75_dockview_layout.js', 'utf8');
+    const focusSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+    const explicitFocusBody = focusSource.slice(focusSource.indexOf('function setExplicitPaneFocusItem('), focusSource.indexOf('function visualActivePaneItem('));
+    assert.equal(explicitFocusBody.includes('renderSessionButtons('), false, 'a pane-focus change updates state only; menus read that state when opened instead of rebuilding the complete topbar');
     assert.match(dockviewSource, /function dockviewTrackTabPointerDrag[\s\S]*?if \(Math\.max\(dx, dy\) < DRAG_HYSTERESIS_PX\) return;[\s\S]*?beginLayoutMutationCompletion\(state\)/, 'one completion generation begins when a tab pointer gesture becomes a drag, before either app or native topology commits');
     assert.match(dockviewSource, /function dockviewScheduleDeferredLoad[\s\S]*?requestAnimationFrame[\s\S]*?renderPanelsDockview\(deferredActive, deferredOptions\)/, 'a pane swap schedules the mandatory public Dockview reload in a coalesced follow-up frame');
     assert.match(dockviewSource, /if \(options\.deferDockviewLoad === true\)[\s\S]*?dockviewScheduleDeferredLoad\(previousActive, options\)/, 'only explicitly deferred callers split the Dockview load');
@@ -866,7 +869,7 @@ async function runTabberSuite() {
 
   test('whole-pane Dockview reload reconciles mounted panels once', () => {
     const source = fs.readFileSync('static_src/js/yolomux/75_dockview_layout.js', 'utf8');
-    assert.match(source, /let layoutReloaded = false;[\s\S]*?if \(options\.deferDockviewLoad === true\)[\s\S]*?dockviewScheduleDeferredLoad\(previousActive, options\)[\s\S]*?dockviewLoadLayout\(layoutSlots, \{[\s\S]*?layoutReloaded = true;[\s\S]*?if \(!layoutReloaded && !layoutLoadDeferred\) \{[\s\S]*?clientPerfStart\('dockviewRefreshTabs'\)[\s\S]*?dockviewRefreshTabs\(\);[\s\S]*?clientPerfStart\('dockviewSyncMountedPanels'\)[\s\S]*?dockviewSyncMountedPanels\(\{renderAttached: !activeOnlyChange\}\);/);
+    assert.match(source, /let layoutReloaded = false;[\s\S]*?if \(options\.deferDockviewLoad === true\)[\s\S]*?dockviewScheduleDeferredLoad\(previousActive, options\)[\s\S]*?dockviewLoadLayout\(layoutSlots, \{[\s\S]*?layoutReloaded = true;[\s\S]*?if \(activeOnlyChange\) \{[\s\S]*?syncPanelVisibility\(previousActive\);[\s\S]*?return true;[\s\S]*?if \(!layoutReloaded && !layoutLoadDeferred\) \{[\s\S]*?clientPerfStart\('dockviewRefreshTabs'\)[\s\S]*?dockviewRefreshTabs\(\);[\s\S]*?clientPerfStart\('dockviewSyncMountedPanels'\)[\s\S]*?dockviewSyncMountedPanels\(\);/);
     const loadBody = source.slice(source.indexOf('function dockviewLoadLayout'), source.indexOf('function dockviewActivateLayoutTabs'));
     assert.match(loadBody, /clientPerfStart\('dockviewFromJson'\)[\s\S]*?api\.fromJSON\([\s\S]*?dockviewRefreshLoadedLayout\(items\);/);
     assert.match(loadBody, /clientPerfStart\('dockviewLoadLayout'\)[\s\S]*?dockviewScheduleLoadedLayoutCompletion\([\s\S]*?dockviewRefreshLoadedLayout\(items\)[\s\S]*?clientPerfEnd\(/, 'the shared Dockview load owner measures both immediate and deferred completion');

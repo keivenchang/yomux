@@ -319,6 +319,10 @@ function agentWindowSnapshotRevision(payload) {
   return Number.isInteger(revision) && revision > 0 ? revision : 0;
 }
 
+function agentWindowSnapshotRevisionsMismatch(hasStateRows, stateRevision, activityRevision) {
+  return hasStateRows && stateRevision > 0 && activityRevision > 0 && stateRevision !== activityRevision;
+}
+
 function sessionAgentWindowStatusModel(session, info = null, autoPayload = null) {
   const statePayload = autoPayload || autoApproveStates.get(session) || {};
   const activityPayload = tabberActivityPayload?.agent_windows && typeof tabberActivityPayload.agent_windows === 'object'
@@ -347,7 +351,7 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
   // A positive generation is an immutable statusd snapshot. Never enrich its rows from a
   // different Tabber generation: stale metadata is acceptable, stale state-adjacent fields are
   // not. Old clients have no revision and retain the established compatibility behavior.
-  const revisionMismatch = stateRows.length > 0 && stateRevision > 0 && activityRevision > 0 && stateRevision !== activityRevision;
+  const revisionMismatch = agentWindowSnapshotRevisionsMismatch(stateRows.length > 0, stateRevision, activityRevision);
   const trustedActivityRows = revisionMismatch ? [] : activityRows;
   const infoRows = agentWindowPayloadRows(info?.agent_windows);
   // `/api/auto-approve` owns every visible agent-status field. Tabber and transcript
@@ -531,6 +535,8 @@ function agentWindowActivityRecord(key, create = false) {
 const agentWindowActivityAcknowledgeDelayMs = 700;
 let agentWindowActivityAnimationSyncFrame = 0;
 let agentWindowActivityMutationObserver = null;
+let agentWindowActivityAnimationSyncDocument = false;
+const agentWindowActivityAnimationSyncRoots = new Set();
 // Include the dot itself as well as its wrapper. A renderer can replace only the status marker
 // inside a retained window row; observing/synchronizing just the wrapper would then leave that
 // new play/stop/pause animation on its own start time for a frame.
@@ -578,7 +584,7 @@ function scheduleAgentWindowStatusGlowRefresh(key, startedAt, options = {}) {
   if (options.scheduleRefresh === false || !key || start <= 0 || durationSeconds <= 0) return;
   const untilMs = (start + durationSeconds) * 1000;
   if (untilMs <= Date.now()) return;
-  scheduleAgentWindowStoppedRefresh(key, untilMs);
+  scheduleAgentWindowStoppedRefresh(key, untilMs, options);
 }
 
 function scheduleAgentWindowTransitionPulseRefresh(key, startedAt, options = {}) {
@@ -589,6 +595,7 @@ function scheduleAgentWindowTransitionPulseRefresh(key, startedAt, options = {})
   const untilMs = (start + durationSeconds) * 1000;
   if (untilMs <= Date.now()) return;
   const record = agentWindowActivityRecord(key, true);
+  const refreshSessions = agentWindowActivityRefreshSessions(options);
   const previous = record.transitionPulseRefresh;
   if (previous?.untilMs === untilMs) return;
   if (previous?.timer) clearTimeout(previous.timer);
@@ -597,7 +604,7 @@ function scheduleAgentWindowTransitionPulseRefresh(key, startedAt, options = {})
     const current = currentRecord?.transitionPulseRefresh;
     if (!current || current.untilMs !== untilMs) return;
     currentRecord.transitionPulseRefresh = null;
-    refreshAgentWindowActivityDisplays();
+    refreshAgentWindowActivityDisplays(refreshSessions);
   }, Math.max(0, untilMs - Date.now()));
   record.transitionPulseRefresh = {timer, untilMs};
 }
@@ -702,14 +709,22 @@ function restartAgentWindowActivityPulseAnimations(root = document) {
 
 function scheduleAgentWindowActivityAnimationSync(root = document) {
   ensureAgentWindowActivityMutationObserver();
-  syncAgentWindowActivityAnimationDelays(root);
-  if (agentWindowActivityAnimationSyncFrame && typeof cancelAnimationFrame === 'function') {
-    cancelAnimationFrame(agentWindowActivityAnimationSyncFrame);
+  if (root === document || !root?.querySelectorAll) {
+    agentWindowActivityAnimationSyncDocument = true;
+    agentWindowActivityAnimationSyncRoots.clear();
+  } else if (!agentWindowActivityAnimationSyncDocument) {
+    agentWindowActivityAnimationSyncRoots.add(root);
   }
+  if (agentWindowActivityAnimationSyncFrame) return;
   if (typeof requestAnimationFrame !== 'function') return;
   agentWindowActivityAnimationSyncFrame = requestAnimationFrame(() => {
     agentWindowActivityAnimationSyncFrame = 0;
-    syncAgentWindowActivityAnimationDelays(root);
+    const roots = agentWindowActivityAnimationSyncDocument
+      ? [document]
+      : Array.from(agentWindowActivityAnimationSyncRoots);
+    agentWindowActivityAnimationSyncDocument = false;
+    agentWindowActivityAnimationSyncRoots.clear();
+    for (const pendingRoot of roots) syncAgentWindowActivityAnimationDelays(pendingRoot);
   });
 }
 
@@ -727,9 +742,10 @@ function agentWindowActivityTransitionKey(agentKey, options = {}) {
   return [session, windowIndex ?? '', windowIndex === null ? pane : '', kind].join(':');
 }
 
-function scheduleAgentWindowStoppedRefresh(key, untilMs) {
+function scheduleAgentWindowStoppedRefresh(key, untilMs, options = {}) {
   if (!key || !Number.isFinite(untilMs) || untilMs <= 0) return;
   const record = agentWindowActivityRecord(key, true);
+  const refreshSessions = agentWindowActivityRefreshSessions(options);
   const previous = record.stoppedRefresh;
   if (previous?.untilMs === untilMs) return;
   if (previous?.timer) clearTimeout(previous.timer);
@@ -739,9 +755,7 @@ function scheduleAgentWindowStoppedRefresh(key, untilMs) {
     const current = currentRecord?.stoppedRefresh;
     if (!current || current.untilMs !== untilMs) return;
     currentRecord.stoppedRefresh = null;
-    if (typeof renderPanels === 'function' && typeof activePaneItems === 'function') {
-      renderPanels(activePaneItems());
-    }
+    refreshAgentWindowActivityDisplays(refreshSessions);
   }, delay);
   record.stoppedRefresh = {timer, untilMs};
 }
@@ -814,12 +828,13 @@ function clearAgentWindowActivityRecordsForSession(session) {
 function showAgentWindowAcknowledgementVisual(key, options = {}) {
   if (!key) return false;
   const acknowledgementKey = String(options.acknowledgementKey || '');
+  const refreshSessions = agentWindowActivityRefreshSessions(options);
   const record = agentWindowActivityRecord(key, true);
   const current = record.acknowledgementVisual;
   if (agentWindowAcknowledgementVisualActive(key) && String(current?.acknowledgementKey || '') === acknowledgementKey) {
     if (options.refresh !== false && current?.refreshed !== true) {
       current.refreshed = true;
-      refreshAgentWindowActivityDisplays();
+      refreshAgentWindowActivityDisplays(refreshSessions);
     }
     return true;
   }
@@ -830,7 +845,7 @@ function showAgentWindowAcknowledgementVisual(key, options = {}) {
   const timer = setTimeout(() => {
     // The browser must retire the gray marker at the promised time even if the acknowledgement
     // request is slow; a later explicit server false still re-arms a genuinely new prompt.
-    if (retireAgentWindowAcknowledgementVisual(key, untilMs)) refreshAgentWindowActivityDisplays();
+    if (retireAgentWindowAcknowledgementVisual(key, untilMs)) refreshAgentWindowActivityDisplays(refreshSessions);
   }, durationMs);
   const sourceAgent = options.agent && typeof options.agent === 'object' ? options.agent : null;
   const visualAgent = sourceAgent ? {
@@ -841,7 +856,7 @@ function showAgentWindowAcknowledgementVisual(key, options = {}) {
     working_stopped_ts: Number(options.stoppedAt || sourceAgent.working_stopped_ts || sourceAgent.workingStoppedTs || 0),
   } : null;
   record.acknowledgementVisual = {startedAtMs, untilMs, durationMs, timer, acknowledgementKey, refreshed: options.refresh !== false, agent: visualAgent};
-  if (options.refresh !== false) refreshAgentWindowActivityDisplays();
+  if (options.refresh !== false) refreshAgentWindowActivityDisplays(refreshSessions);
   return true;
 }
 
@@ -874,24 +889,39 @@ function agentWindowActivityAcknowledgementKeyIsRecorded(key, options = {}) {
     : false;
 }
 
-function refreshAgentWindowActivityDisplays() {
-  if (typeof renderPanels === 'function' && typeof activePaneItems === 'function') {
-    renderPanels(activePaneItems(), {reason: 'agent-window-activity'});
+function agentWindowActivityRefreshSessions(options = {}) {
+  const session = String(options.session || options.agent?.session || '').trim();
+  return session ? [session] : (typeof sessions === 'undefined' ? [] : sessions);
+}
+
+function refreshAgentWindowActivityDisplays(sessionNames = sessions) {
+  const changedSessions = [...new Set((Array.isArray(sessionNames) ? sessionNames : []).map(String).filter(Boolean))];
+  if (!changedSessions.length) return;
+  if (typeof updateSessionStateClasses === 'function') {
+    updateSessionStateClasses(changedSessions);
+    if (typeof refreshPaneTabSessionPopovers === 'function') refreshPaneTabSessionPopovers(changedSessions);
+    if (typeof syncSessionTabLeadingActivityChrome === 'function') syncSessionTabLeadingActivityChrome(changedSessions);
   }
-  if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
-  if (typeof updatePanelWindowStepButtons === 'function' && typeof activePaneItems === 'function') {
-    for (const session of activePaneItems()) {
+  else {
+    if (typeof updateTopbarActivityStatus === 'function') updateTopbarActivityStatus();
+    if (typeof refreshPaneTabSessionPopovers === 'function') refreshPaneTabSessionPopovers(changedSessions);
+    if (typeof syncSessionTabLeadingActivityChrome === 'function') syncSessionTabLeadingActivityChrome(changedSessions);
+  }
+  if (typeof updatePanelWindowStepButtons === 'function') {
+    for (const session of changedSessions) {
       if (typeof isTmuxSession === 'function' && !isTmuxSession(session)) continue;
       updatePanelWindowStepButtons(session, transcriptMetadataState.payload.sessions?.[session]);
     }
   }
   if (typeof renderSessionButtons === 'function') renderSessionButtons({force: true});
-  if (typeof renderInfoPanel === 'function') renderInfoPanel();
+  if (typeof renderInfoPanel === 'function'
+      && (typeof infoPanelRenderVisible !== 'function' || infoPanelRenderVisible())) renderInfoPanel({force: true});
   if (typeof refreshTabberPanels === 'function'
       && typeof itemInLayout === 'function'
       && typeof tabberItemId !== 'undefined'
       && itemInLayout(tabberItemId)) refreshTabberPanels();
   if (typeof syncSessionTabLeadingActivityChrome === 'function') syncSessionTabLeadingActivityChrome();
+  scheduleAgentWindowActivityAnimationSync();
 }
 
 function acknowledgeAgentWindowStoppedTransition(transitionKey, stoppedAt = null, options = {}) {
@@ -907,7 +937,7 @@ function acknowledgeAgentWindowStoppedTransition(transitionKey, stoppedAt = null
   record.acknowledgedStoppedAt = stoppedAtNumber;
   clearAgentWindowStoppedRefresh(key);
   clearAgentWindowTransitionPulseRefresh(key);
-  if (options.refresh !== false) refreshAgentWindowActivityDisplays();
+  if (options.refresh !== false) refreshAgentWindowActivityDisplays(agentWindowActivityRefreshSessions(options));
   return true;
 }
 
@@ -962,7 +992,7 @@ function acknowledgeAgentWindowActivity(session, windowIndex = null, options = {
   const delayMs = Math.max(0, Number(options.delayMs) || 0);
   const acknowledgeStoppedTransition = () => (
     target.state === 'cooldown'
-      ? acknowledgeAgentWindowStoppedTransition(target.transitionKey, target.stoppedAt, {...options, delayMs: 0})
+      ? acknowledgeAgentWindowStoppedTransition(target.transitionKey, target.stoppedAt, {...options, delayMs: 0, refresh: false, session})
       : false
   );
   if (target.ackKey && typeof acknowledgeAttentionKeys === 'function') {

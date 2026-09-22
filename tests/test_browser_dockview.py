@@ -2998,9 +2998,9 @@ def test_dockview_red_window_ball_xterm_data_acknowledges_after_delay(browser, t
         "ackPosts": 0,
         "newSocketFrames": 25,
         "unrelatedBallStable": True,
-        "renderPanels": 1,
-        "renderPaneTabStrips": 1,
-        "renderSessionButtons": 1,
+        "renderPanels": 0,
+        "renderPaneTabStrips": 0,
+        "renderSessionButtons": 0,
         "terminalInputs": 25,
     }
     WebDriverWait(browser, 5).until(

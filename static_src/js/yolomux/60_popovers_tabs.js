@@ -195,12 +195,23 @@ if (fileExplorerHiddenToggle) {
   fileExplorerHiddenToggle.addEventListener('click', toggleHiddenFiles);
 }
 
-function updateSessionButtonStates() {
-  // YO ownership is rendered into pane-tab markup, so a restored/changed worker state must
-  // rebuild the shared tab strip as well as the popovers that describe it.
+function updateSessionButtonStates(sessionNames = sessions) {
   updateTopbarActivityStatus();
-  renderPaneTabStrips();
-  refreshPaneTabSessionPopovers();
+  updateSessionStateClasses(sessionNames);
+  refreshPaneTabSessionPopovers(sessionNames);
+  syncSessionTabLeadingActivityChrome(sessionNames);
+}
+
+function updateSessionStateClasses(sessionNames = sessions) {
+  const included = new Set(sessionNames);
+  for (const tab of document.querySelectorAll('.pane-tab[data-pane-tab], .dockview-pane-tab[data-pane-tab]')) {
+    const session = String(tab.dataset?.paneTab || '').trim();
+    if (!session || !included.has(session) || !isTmuxSession(session)) continue;
+    const state = sessionState(session, transcriptMetadataState.payload.sessions?.[session]);
+    applySessionStateClasses(tab, state);
+    applyPanelStateClasses(document.getElementById(panelDomId(session)), state);
+    applyPanelHeaderState(document.getElementById(paneTabDomId(session)), state, autoApproveStates.get(session)?.enabled === true);
+  }
 }
 
 function sessionPopoverNodeFromHtml(html) {
@@ -234,10 +245,11 @@ function refreshSessionPopoverContent(popover, html) {
   popover.innerHTML = fresh.innerHTML;
 }
 
-function refreshPaneTabSessionPopovers() {
+function refreshPaneTabSessionPopovers(sessionNames = sessions) {
+  const included = new Set(sessionNames);
   document.querySelectorAll('.pane-tab[data-pane-tab], .dockview-pane-tab[data-pane-tab]').forEach(tab => {
     const session = String(tab?.dataset?.paneTab || '').trim();
-    if (!session || tabTypeForItem(session)) return;
+    if (!session || !included.has(session) || tabTypeForItem(session)) return;
     const popover = typeof paneTabPopoverForAnchor === 'function'
       ? paneTabPopoverForAnchor(tab)
       : tab?.querySelector?.(':scope > .session-popover');
@@ -811,12 +823,13 @@ function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
 
 // Hovering a tab keeps its popover DOM mounted. Do not let that presentation concern freeze the
 // status marker: its color is shared live state and must agree with the Tabber row immediately.
-function syncSessionTabLeadingActivityChrome() {
+function syncSessionTabLeadingActivityChrome(sessionNames = sessions) {
   if (typeof document === 'undefined') return 0;
+  const included = new Set(sessionNames);
   let updated = 0;
   for (const tab of document.querySelectorAll('.pane-tab[data-pane-tab], .tmux-pane-tab-token[data-pane-tab]')) {
     const session = String(tab.dataset?.paneTab || '').trim();
-    if (!session || !isTmuxSession(session)) continue;
+    if (!session || !included.has(session) || !isTmuxSession(session)) continue;
     const leading = tab.querySelector?.(':scope > .session-tab-leading-activity, .pane-tab-core > .session-tab-leading-activity');
     if (!leading) continue;
     const info = transcriptMetadataState.payload.sessions?.[session];
@@ -839,11 +852,27 @@ function pullRequestCompactBadgesHtml(session, pr) {
 }
 
 function applySessionStateClasses(node, state) {
+  if (!node) return;
   node.classList.toggle(STATE_CLASS.needsAttention, state?.attention === true);
   node.classList.toggle(STATE_CLASS.needsInput, state?.key === STATE_KEY.needsInput && state?.attention === true);
   node.classList.toggle(STATE_CLASS.needsExec, state?.key === STATE_KEY.needsApproval && state?.attention === true);
   node.classList.toggle(STATE_CLASS.needsBlocked, state?.key === STATE_KEY.blocked);
   syncAttentionAnimation(node, state?.attention === true);
+}
+
+function applyPanelStateClasses(node, state) {
+  if (!node) return;
+  node.classList.toggle(STATE_CLASS.needsInputPane, state.key === STATE_KEY.needsInput && state.attention === true);
+  node.classList.toggle(STATE_CLASS.needsExecPane, state.key === STATE_KEY.needsApproval && state.attention === true);
+  node.classList.toggle(STATE_CLASS.needsBlockedPane, state.key === STATE_KEY.blocked);
+}
+
+function applyPanelHeaderState(node, state, auto = false) {
+  if (!node) return;
+  node.classList.toggle('auto', auto === true);
+  node.classList.toggle(STATE_CLASS.needsAttention, state?.attention === true);
+  syncAttentionAnimation(node, state?.attention === true);
+  node.innerHTML = panelHeaderStateHtml(state);
 }
 
 function panelHeaderStateHtml(state) {

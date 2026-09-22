@@ -5480,23 +5480,21 @@ function autoApproveStateWithSnapshotRevision(state, revision = agentWindowSnaps
 
 function renderAutoApproveStatusSurfaces(result = {}) {
   const perf = clientPerfStart('autoStatusRender');
+  const changedSessions = Array.isArray(result?.changedSessions) ? result.changedSessions : sessions;
   try {
     if (result?.sessionsChanged) renderPanels(result.previousActive || activeSessions.slice());
-    else if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
     if (typeof refreshDebugAgentWindowLiveDetails === 'function') refreshDebugAgentWindowLiveDetails();
     updateDocumentTitle();
   // Re-toggle the YO markers' working class from the fresh states on the SAME poll the title updates,
   // so a finished/idle pane's marker stops spinning instead of lingering (the transcript poll path
   // updated the title but never re-synced the markers).
-    renderAutoApproveButtons();
-    updateSessionButtonStates();
-    if (typeof syncSessionTabLeadingActivityChrome === 'function') syncSessionTabLeadingActivityChrome();
-    refreshActivePanelHeaders();
-    trackSessionStateChanges();
-    syncTerminalAttentionHighlights();
+    renderAutoApproveButtons(changedSessions);
+    updateSessionButtonStates(changedSessions);
+    trackSessionStateChanges(changedSessions);
+    syncTerminalAttentionHighlights(changedSessions);
     if (result && typeof result === 'object') result.rendered = true;
   } finally {
-    clientPerfEnd(perf, {sessions: sessions.length});
+    clientPerfEnd(perf, {sessions: changedSessions.length});
   }
 }
 
@@ -5607,7 +5605,13 @@ function applyAutoApprovePayload(payload, options = {}) {
   if (Number.isFinite(Number(options.topologyEpoch)) && Number(options.topologyEpoch) !== tmuxTopologyEpoch) {
     return {applied: false, staleTopology: true, sessionsChanged: false, previousActive: activeSessions.slice()};
   }
+  let changedSessions = null;
+  let rulesChanged = payload.rules !== undefined;
   if (payload.patch === true) {
+    rulesChanged = Object.prototype.hasOwnProperty.call(payload.fields || {}, 'rules');
+    if (payload.collection === 'sessions') {
+      changedSessions = [...new Set([...Object.keys(payload.changes || {}), ...(payload.removed_keys || []).map(String)])].filter(Boolean);
+    }
     payload = applyClientEventKeyedPatch({
       session_order: sessions.slice(),
       sessions: Object.fromEntries(autoApproveStates),
@@ -5627,22 +5631,30 @@ function applyAutoApprovePayload(payload, options = {}) {
     ? payload.session_order.filter(tmuxSessionLifecycleAllowsTopologySession)
     : null;
   const sessionsChanged = topologySessions ? updateSessionList(topologySessions) : false;
-  if (payload.rules) {
+  if (rulesChanged && payload.rules) {
     yoloRulesPayload = payload.rules;
     renderPreferencesPanels();
   }
+  if (sessionsChanged || changedSessions === null) changedSessions = sessions.slice();
+  const changedSessionSet = new Set(changedSessions);
   const snapshotRevision = agentWindowSnapshotRevision(payload);
+  const activityRevision = agentWindowSnapshotRevision(tabberActivityPayload);
   for (const session of sessions) {
+    const previousState = autoApproveStates.get(session) || {};
     const state = autoApproveStateWithSnapshotRevision(payload.sessions?.[session] || {target: session, enabled: false, last_action: 'off'}, snapshotRevision);
+    const previousMismatch = agentWindowSnapshotRevisionsMismatch(agentWindowPayloadRows(previousState.agent_windows).length > 0, agentWindowSnapshotRevision(previousState), activityRevision);
+    const nextMismatch = agentWindowSnapshotRevisionsMismatch(agentWindowPayloadRows(state.agent_windows).length > 0, snapshotRevision, activityRevision);
+    if (previousMismatch !== nextMismatch) changedSessionSet.add(session);
     autoApproveStates.set(session, state);
-    reconcileTmuxWindowMetadataFromAgentWindows(session, state);
+    if (changedSessionSet.has(session)) reconcileTmuxWindowMetadataFromAgentWindows(session, state);
   }
-  const result = {applied: true, sessionsChanged, previousActive, workingAgentTransitionNotifications: 0};
+  changedSessions = Array.from(changedSessionSet);
+  const result = {applied: true, sessionsChanged, previousActive, changedSessions, workingAgentTransitionNotifications: 0};
   if (options.render !== false) renderAutoApproveStatusSurfaces(result);
   // Deliver after the status render. Rendering may rebuild a pane and its toast stack; inserting a
   // transition toast before that pass makes it disappear immediately even though classification ran.
   if (typeof reconcileWorkingAgentTransitionNotifications === 'function') {
-    for (const session of sessions) {
+    for (const session of changedSessions) {
       const state = autoApproveStates.get(session) || {target: session, enabled: false, last_action: 'off'};
       result.workingAgentTransitionNotifications += reconcileWorkingAgentTransitionNotifications(session, state);
     }
@@ -5700,8 +5712,8 @@ function autoApproveOwnerLabel(payload) {
   return [pid, root].filter(Boolean).join(' ') || structuredMessageText(payload, 'last_action', t('yolo.ownerFallback'));
 }
 
-function renderAutoApproveButtons() {
-  for (const session of sessions) {
+function renderAutoApproveButtons(sessionNames = sessions) {
+  for (const session of sessionNames) {
     const state = autoApproveStates.get(session) || {target: session, enabled: false, last_action: 'off'};
     renderAutoApproveButton(session, state);
   }
@@ -6147,7 +6159,8 @@ async function applySessionMetadataPayload(payload, options = {}) {
   if (!requestIsCurrent()) return finalizeSessionMetadataOutcome(false, 'committed_render_superseded', payload, {committed: true});
   transcriptMetadataState.loading = false;
   if (sessionsChanged) renderPanels(previousActive);
-  renderSessionButtons();
+  if (sessionsChanged) renderSessionButtons();
+  else updateTopbarActivityStatus();
   renderInfoPanel();
   renderYoagentPanel();
   if (options.refreshActivity !== false) refreshActivitySummary({silent: true});
@@ -6589,9 +6602,8 @@ function updatePanelHeader(session, info) {
   updatePanelControlLabels(session, info);
   syncAttentionAnimation(panel, state.attention === true);
   if (tab) {
-    tab.className = ['panel-session-label', auto ? 'auto' : '', state.attention ? STATE_CLASS.needsAttention : ''].filter(Boolean).join(' ');
-    syncAttentionAnimation(tab, state.attention === true);
-    tab.innerHTML = panelHeaderStateHtml(state);
+    tab.className = 'panel-session-label';
+    applyPanelHeaderState(tab, state, auto);
     tab.removeAttribute('title');
   }
   scheduleAgentWindowActivityAnimationSync(panel || document);
@@ -6603,9 +6615,7 @@ function updatePanelHeader(session, info) {
     wrapper.innerHTML = sessionPopoverHtml(session, info, agentKind, auto, state);
     popover.replaceWith(wrapper.firstElementChild);
   }
-  panel?.classList.toggle(STATE_CLASS.needsInputPane, state.key === STATE_KEY.needsInput && state.attention === true);
-  panel?.classList.toggle(STATE_CLASS.needsExecPane, state.key === STATE_KEY.needsApproval && state.attention === true);
-  panel?.classList.toggle(STATE_CLASS.needsBlockedPane, state.key === STATE_KEY.blocked);
+  applyPanelStateClasses(panel, state);
 }
 
 function refreshSessionChrome(session) {
