@@ -4021,7 +4021,22 @@ func (s *server) fsGitHistory(w http.ResponseWriter, r *http.Request) {
 	limit := r.URL.Query().Get("limit")
 	cursor := r.URL.Query().Get("cursor")
 	withStats := r.URL.Query().Get("stats") == "1"
+	if r.URL.Query().Get("worktree") == "only" {
+		payload, finderErr := s.finder.GitHistoryWorktree(r.Context(), path)
+		finderHTTPJSON(w, finderRequestIDForHTTP(), payload, finderErr)
+		return
+	}
 	statsOffsetRaw := r.URL.Query().Get("stats_offset")
+	startOffsetRaw := r.URL.Query().Get("start_offset")
+	startOffset := -1
+	if startOffsetRaw != "" {
+		parsed, err := strconv.Atoi(startOffsetRaw)
+		if err != nil || parsed < 0 || parsed > finder.MaxGitHistoryOffset() || cursor == "" || withStats || statsOffsetRaw != "" {
+			finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.invalidQuery", Path: path, Message: "start_offset requires a frozen cursor and a valid offset"})
+			return
+		}
+		startOffset = parsed
+	}
 	statsOffset := -1
 	if statsOffsetRaw != "" {
 		if !withStats {
@@ -4039,7 +4054,15 @@ func (s *server) fsGitHistory(w http.ResponseWriter, r *http.Request) {
 	if withStats {
 		scheduler = s.finderBackgroundScheduler()
 	}
+	if !withStats && r.URL.Query().Get("worktree") == "0" {
+		payload, finderErr := s.finder.GitHistoryMetadata(r.Context(), path, limit, cursor, startOffset)
+		finderHTTPJSON(w, finderRequestIDForHTTP(), payload, finderErr)
+		return
+	}
 	s.enqueueFinderJSONWithScheduler(w, r.Context(), scheduler, r.URL.Path, "git_history", path, 0, func(ctx context.Context) (map[string]any, *finder.Error) {
+		if startOffset >= 0 {
+			return s.finder.GitHistoryPageAtOffset(ctx, path, limit, cursor, startOffset)
+		}
 		if statsOffset >= 0 {
 			return s.finder.GitHistoryAtOffset(ctx, path, limit, cursor, statsOffset)
 		}
@@ -4086,6 +4109,16 @@ func (s *server) fsGitHistoryStatsStream(w http.ResponseWriter, r *http.Request)
 	}
 	count, err := strconv.Atoi(r.URL.Query().Get("count"))
 	batchSizes, scheduleErr := parseGitHistoryBatchSizes(r.URL.Query().Get("batch_sizes"))
+	offsetRaw := r.URL.Query().Get("offset")
+	offset := -1
+	if offsetRaw != "" {
+		parsed, parseErr := strconv.Atoi(offsetRaw)
+		if parseErr != nil || parsed < 0 || parsed > finder.MaxGitHistoryOffset() || len(batchSizes) == 0 {
+			finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusBadRequest, Code: "invalid_request", MessageKey: "request.error.invalidQuery", Path: path, Message: "offset requires batch_sizes and a valid offset"})
+			return
+		}
+		offset = parsed
+	}
 	if scheduleErr != nil || (len(batchSizes) == 0 && (err != nil || count < 1 || count > finder.MaxGitHistoryOffset())) {
 		message := "count must be a positive integer"
 		if r.URL.Query().Get("batch_sizes") != "" {
@@ -4125,6 +4158,9 @@ func (s *server) fsGitHistoryStatsStream(w http.ResponseWriter, r *http.Request)
 	startPayload := map[string]any{"path": path}
 	if len(batchSizes) > 0 {
 		startPayload["batch_sizes"] = batchSizes
+		if offset >= 0 {
+			startPayload["offset"] = offset
+		}
 	} else {
 		startPayload["count"], startPayload["batch_size"] = count, batchSize
 	}
@@ -4141,7 +4177,11 @@ func (s *server) fsGitHistoryStatsStream(w http.ResponseWriter, r *http.Request)
 		}
 		var finderErr *finder.Error
 		if len(batchSizes) > 0 {
-			nextCursor, finderErr = s.finder.GitHistoryStatsScheduled(ctx, path, cursor, batchSizes, emit)
+			if offset >= 0 {
+				nextCursor, finderErr = s.finder.GitHistoryStatsScheduled(ctx, path, cursor, batchSizes, emit, offset)
+			} else {
+				nextCursor, finderErr = s.finder.GitHistoryStatsScheduled(ctx, path, cursor, batchSizes, emit)
+			}
 		} else {
 			finderErr = s.finder.GitHistoryStatsStream(ctx, path, cursor, count, batchSize, func(payload map[string]any) error {
 				nextCursor, _ = payload["next_cursor"].(string)

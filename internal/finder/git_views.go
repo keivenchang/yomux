@@ -91,6 +91,7 @@ type gitNamespace struct {
 	alternates   string
 	alternateID  descriptorIdentity
 	alternateSet bool
+	layoutCache  *gitObjectLayoutCache
 }
 
 func (namespace *gitNamespace) identity() string {
@@ -114,35 +115,6 @@ func (namespace *gitNamespace) identity() string {
 
 func isGitLooseObjectDirectory(name string) bool {
 	return len(name) == 2 && strings.ContainsRune("0123456789abcdef", rune(name[0])) && strings.ContainsRune("0123456789abcdef", rune(name[1]))
-}
-
-func validateGitObjectLayout(objects string) error {
-	entries, err := os.ReadDir(objects)
-	if err != nil {
-		return errGitNamespaceChanged
-	}
-	for _, entry := range entries {
-		if entry.Type()&os.ModeSymlink != 0 {
-			return errGitNamespaceChanged
-		}
-		name := entry.Name()
-		if !entry.IsDir() || (name != "info" && name != "pack" && !isGitLooseObjectDirectory(name)) {
-			continue
-		}
-		walkErr := filepath.WalkDir(filepath.Join(objects, name), func(_ string, item os.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return walkErr
-			}
-			if item.Type()&os.ModeSymlink != 0 {
-				return errGitNamespaceChanged
-			}
-			return nil
-		})
-		if walkErr != nil {
-			return errGitNamespaceChanged
-		}
-	}
-	return nil
 }
 
 func (namespace *gitNamespace) close() {
@@ -177,7 +149,7 @@ func (namespace *gitNamespace) validate() error {
 			return errGitNamespaceChanged
 		}
 	}
-	if err := validateGitObjectLayout(namespace.objectsPath); err != nil {
+	if err := namespace.layoutCache.validate(namespace.objectsPath); err != nil {
 		return err
 	}
 	info, err := os.Lstat(namespace.alternates)
@@ -328,11 +300,11 @@ func (s *Service) openGitNamespace(directory *os.File, workingDirectory, request
 	if objectsInfo.Mode()&os.ModeSymlink != 0 || !objectsInfo.IsDir() {
 		return nil, forbidden(requested, "fs.error.outsideRoots", "Git object store is not a local directory")
 	}
-	if err := validateGitObjectLayout(objects); err != nil {
+	if err := s.gitObjectLayouts.validate(objects); err != nil {
 		return nil, gitNamespaceChanged(requested)
 	}
 	alternates := filepath.Join(objects, "info", "alternates")
-	namespace := &gitNamespace{gitDirPath: gitDir, commonPath: commonDir, objectsPath: objects, alternates: alternates}
+	namespace := &gitNamespace{gitDirPath: gitDir, commonPath: commonDir, objectsPath: objects, alternates: alternates, layoutCache: &s.gitObjectLayouts}
 	for _, item := range []struct {
 		path      string
 		directory **os.File

@@ -130,6 +130,7 @@ type Service struct {
 	gitCommitCache             map[string]map[string]any
 	gitHistoryStatsCache       map[string]gitHistoryStatsInfo
 	gitHistoryStatsCacheOrder  []string
+	gitObjectLayouts           gitObjectLayoutCache
 }
 
 type watchRecord struct {

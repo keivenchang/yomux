@@ -483,10 +483,11 @@ func gitProductCacheKey(parts ...string) string {
 }
 
 type gitHistoryStatsInfo struct {
-	files       int
-	added       int
-	removed     int
-	binaryFiles int
+	files           int
+	added           int
+	removed         int
+	binaryFiles     int
+	signatureStatus string
 }
 
 func gitHistoryStatsCacheKey(scope *gitHistoryScope, sha string) string {
@@ -534,6 +535,21 @@ func (s *Service) cacheGitHistoryStats(key string, value gitHistoryStatsInfo) {
 	}
 	s.gitHistoryStatsCache[key] = value
 	s.gitHistoryStatsCacheOrder = append(s.gitHistoryStatsCacheOrder, key)
+}
+
+func (s *Service) attachCachedGitHistoryStats(scope *gitHistoryScope, commits []map[string]any) {
+	for _, commit := range commits {
+		sha, _ := commit["sha"].(string)
+		if sha == "" {
+			continue
+		}
+		if stats, ok := s.cachedGitHistoryStats(gitHistoryStatsCacheKey(scope, sha)); ok {
+			commit["files"], commit["added"], commit["removed"], commit["binary_files"] = stats.files, stats.added, stats.removed, stats.binaryFiles
+			if stats.signatureStatus != "" {
+				commit["signature_status"] = stats.signatureStatus
+			}
+		}
+	}
 }
 
 func (s *Service) cachedGitHistory(key string) (map[string]any, bool) {
@@ -832,7 +848,8 @@ func (s *Service) gitWorktreeDiffStats(ctx context.Context, scope *gitHistorySco
 }
 
 func (s *Service) gitWorktreeStatus(ctx context.Context, scope *gitHistoryScope) map[string]any {
-	raw, _, gitErr := runGitBounded(ctx, scope.directory, nil, []string{"status", "--porcelain=v1", "-z", "--untracked-files=all"}, gitHistoryMaxOutput, scope.namespace)
+	args := append([]string{"status", "--porcelain=v1", "-z", "--untracked-files=all"}, historyPathArgs(scope.relative)...)
+	raw, _, gitErr := runGitBounded(ctx, scope.directory, nil, args, gitHistoryMaxOutput, scope.namespace)
 	if gitErr != nil {
 		return map[string]any{"available": false, "dirty": false, "entries": []map[string]any{}, "truncated": false}
 	}
@@ -908,9 +925,38 @@ func (s *Service) GitHistory(ctx context.Context, raw, limitRaw, cursorRaw strin
 	return s.gitHistory(ctx, raw, limitRaw, cursorRaw, withStats, nil)
 }
 
-// GitHistoryAtOffset reads one stats row from a frozen cursor position without requiring the
-// caller to walk the preceding rows. It is used only by the Go browser's small first-paint
-// backfill window; the normal cursor walk remains the shared path for later history.
+// Metadata and mutable worktree status have separate request lifetimes so the list can paint
+// before scanning modified and untracked files.
+func (s *Service) GitHistoryMetadata(ctx context.Context, raw, limitRaw, cursorRaw string, offset int) (map[string]any, *Error) {
+	var requestedOffset *int
+	if offset >= 0 {
+		if cursorRaw == "" || offset > gitHistoryMaxOffset {
+			return nil, invalid(raw, "start_offset requires a valid frozen Git history cursor")
+		}
+		requestedOffset = &offset
+	}
+	return s.gitHistory(ctx, raw, limitRaw, cursorRaw, false, requestedOffset, false)
+}
+
+func (s *Service) GitHistoryWorktree(ctx context.Context, raw string) (map[string]any, *Error) {
+	scope, finderErr := s.openGitHistoryScope(raw)
+	if finderErr != nil {
+		return nil, finderErr
+	}
+	defer scope.close()
+	gitCtx, cancel := gitViewContext(ctx)
+	defer cancel()
+	return s.attachGitWorktreeStatus(gitCtx, scope, map[string]any{"path": scope.path, "repository_identity": scope.identity}), nil
+}
+
+func (s *Service) GitHistoryPageAtOffset(ctx context.Context, raw, limitRaw, cursorRaw string, offset int) (map[string]any, *Error) {
+	if cursorRaw == "" || offset < 0 || offset > gitHistoryMaxOffset {
+		return nil, invalid(raw, "start_offset requires a valid frozen Git history cursor")
+	}
+	return s.gitHistory(ctx, raw, limitRaw, cursorRaw, false, &offset)
+}
+
+// GitHistoryAtOffset reads stats at a frozen cursor position without walking preceding rows.
 func (s *Service) GitHistoryAtOffset(ctx context.Context, raw, limitRaw, cursorRaw string, offset int) (map[string]any, *Error) {
 	if cursorRaw == "" || offset < 0 || offset > gitHistoryMaxOffset {
 		return nil, invalid(raw, "stats_offset requires a valid frozen Git history cursor")
@@ -944,7 +990,7 @@ func (s *Service) GitHistoryStatsStream(ctx context.Context, raw, cursorRaw stri
 // disjoint offsets from one frozen cursor and are calculated concurrently, so a fast batch can
 // backfill the UI before a slower batch finishes. The returned cursor advances past the highest
 // offset that was actually available.
-func (s *Service) GitHistoryStatsScheduled(ctx context.Context, raw, cursorRaw string, batchSizes []int, emit func(map[string]any) error) (string, *Error) {
+func (s *Service) GitHistoryStatsScheduled(ctx context.Context, raw, cursorRaw string, batchSizes []int, emit func(map[string]any) error, startOffset ...int) (string, *Error) {
 	if cursorRaw == "" || len(batchSizes) == 0 || len(batchSizes) > gitHistoryMaxScheduledBatches {
 		return "", invalid(raw, "invalid Git history stats schedule parameters")
 	}
@@ -961,7 +1007,7 @@ func (s *Service) GitHistoryStatsScheduled(ctx context.Context, raw, cursorRaw s
 	if emit == nil {
 		return "", invalid(raw, "Git history stats stream callback is required")
 	}
-	return s.gitHistoryStatsBatches(ctx, raw, cursorRaw, batchSizes, true, emit)
+	return s.gitHistoryStatsBatches(ctx, raw, cursorRaw, batchSizes, true, emit, startOffset...)
 }
 
 type gitHistoryStatsBatch struct {
@@ -976,7 +1022,7 @@ type gitHistoryStatsResult struct {
 	nextCursor string
 }
 
-func (s *Service) gitHistoryStatsBatches(ctx context.Context, raw, cursorRaw string, batchSizes []int, concurrent bool, emit func(map[string]any) error) (string, *Error) {
+func (s *Service) gitHistoryStatsBatches(ctx context.Context, raw, cursorRaw string, batchSizes []int, concurrent bool, emit func(map[string]any) error, startOffset ...int) (string, *Error) {
 	scope, finderErr := s.openGitHistoryScope(raw)
 	if finderErr != nil {
 		return "", finderErr
@@ -1013,6 +1059,12 @@ func (s *Service) gitHistoryStatsBatches(ctx context.Context, raw, cursorRaw str
 		}
 	}
 	offset := cursor.Offset
+	if len(startOffset) > 0 {
+		if len(startOffset) != 1 || startOffset[0] < 0 || startOffset[0] > gitHistoryMaxOffset {
+			return "", invalid(raw, "invalid Git history stats offset")
+		}
+		offset = startOffset[0]
+	}
 	batches := make([]gitHistoryStatsBatch, 0, len(batchSizes))
 	for _, limit := range batchSizes {
 		if offset > gitHistoryMaxOffset-limit {
@@ -1102,92 +1154,62 @@ func (s *Service) gitHistoryStatsConcurrent(ctx context.Context, scope *gitHisto
 	return nextCursor, nil
 }
 
-// gitHistoryStatsAtOffset keeps the first-paint stats request from asking Git to calculate
-// numstat for every commit before the requested offset. The metadata walk still uses Git's
-// history ordering, but only the returned commits get a diff-tree calculation.
+func gitHistoryReadError(path string, err error) *Error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return cancelled(path)
+	}
+	if errors.Is(err, errGitNamespaceChanged) {
+		return gitNamespaceChanged(path)
+	}
+	if errors.Is(err, errGitOutputLimit) {
+		return &Error{Status: http.StatusRequestEntityTooLarge, Code: "too_large", MessageKey: "fs.error.gitHistoryTooLarge", Path: path, Message: "Git history is too large"}
+	}
+	return &Error{Status: http.StatusInternalServerError, Code: "git_history_failed", MessageKey: "fs.error.gitHistoryFailed", Path: path, Retryable: true, Message: err.Error()}
+}
+
+// Fetch metadata first so pagination and cache hits never calculate unused diffs.
 func (s *Service) gitHistoryStatsAtOffset(ctx context.Context, scope *gitHistoryScope, frozenHead string, offset, limit int, cacheKey string) (map[string]any, *Error) {
-	args := []string{"-c", "core.quotePath=false", "log", "--topo-order", "--root", "--diff-merges=first-parent", "--no-ext-diff", "--no-textconv", "--no-patch", "--decorate=short", "-z", "--max-count=" + strconv.Itoa(limit+1), "--skip=" + strconv.Itoa(offset), "--format=" + gitHistoryFormat, frozenHead}
+	if cached, ok := s.cachedGitHistory(cacheKey); ok {
+		return cached, nil
+	}
+	args := []string{"log", "--topo-order", "--no-patch", "--decorate=short", "-z", "--max-count=" + strconv.Itoa(limit+1), "--skip=" + strconv.Itoa(offset), "--format=" + strings.ReplaceAll(gitHistoryFormat, "%G?", ""), frozenHead}
 	args = append(args, historyPathArgs(scope.relative)...)
-	output, stderr, gitErr := runGitBounded(ctx, scope.directory, nil, args, gitHistoryMaxOutput, scope.namespace)
-	if errors.Is(gitErr, context.Canceled) || errors.Is(gitErr, context.DeadlineExceeded) {
-		return nil, cancelled(scope.path)
-	}
-	outputTruncated := false
-	if errors.Is(gitErr, errGitOutputLimit) && len(stderr) == 0 && len(output) > 0 {
-		outputTruncated = true
-		gitErr = nil
-	}
+	output, _, gitErr := runGitBounded(ctx, scope.directory, nil, args, gitHistoryMaxOutput, scope.namespace)
 	if gitErr != nil {
-		if errors.Is(gitErr, errGitNamespaceChanged) {
-			return nil, gitNamespaceChanged(scope.path)
-		}
-		if errors.Is(gitErr, errGitOutputLimit) {
-			return nil, &Error{Status: http.StatusRequestEntityTooLarge, Code: "too_large", MessageKey: "fs.error.gitHistoryTooLarge", Path: scope.path, Message: "Git history is too large"}
-		}
-		message := "Git history failed"
-		if strings.TrimSpace(string(stderr)) != "" {
-			message = strings.TrimSpace(string(stderr))
-		}
-		return nil, &Error{Status: http.StatusInternalServerError, Code: "git_history_failed", MessageKey: "fs.error.gitHistoryFailed", Path: scope.path, Retryable: true, Message: message}
+		return nil, gitHistoryReadError(scope.path, gitErr)
 	}
-	commits, outputTruncated, parseErr := parseGitHistory(output, outputTruncated)
+	commits, outputTruncated, parseErr := parseGitHistory(output, false)
 	if parseErr != nil {
-		return nil, &Error{Status: http.StatusInternalServerError, Code: "git_history_failed", MessageKey: "fs.error.gitHistoryFailed", Path: scope.path, Retryable: true, Message: parseErr.Error()}
+		return nil, gitHistoryReadError(scope.path, parseErr)
 	}
 	visible := commits
 	if len(visible) > limit {
 		visible = visible[:limit]
 	}
+	s.attachCachedGitHistoryStats(scope, visible)
+	missing := make([]string, 0, len(visible))
 	for _, commit := range visible {
-		sha := commit["sha"].(string)
-		if cachedStats, ok := s.cachedGitHistoryStats(gitHistoryStatsCacheKey(scope, sha)); ok {
-			commit["files"], commit["added"], commit["removed"], commit["binary_files"] = cachedStats.files, cachedStats.added, cachedStats.removed, cachedStats.binaryFiles
-			continue
+		if _, complete := commit["files"]; !complete {
+			missing = append(missing, commit["sha"].(string))
 		}
-		parents, _ := commit["parents"].([]string)
-		parent := ""
-		if len(parents) > 0 {
-			parent = parents[0]
+	}
+	if len(missing) > 0 {
+		// Explicit SHAs avoid calculating counts for the pagination sentinel or cached rows.
+		args = []string{"-c", "core.quotePath=false", "show", "--root", "--diff-merges=first-parent", "--no-ext-diff", "--no-textconv", "--no-renames", "--numstat", "-z", "--format=" + gitHistoryFormat}
+		args = append(args, missing...)
+		args = append(args, historyPathArgs(scope.relative)...)
+		output, _, gitErr = runGitBounded(ctx, scope.directory, nil, args, gitHistoryMaxOutput, scope.namespace)
+		if gitErr != nil {
+			return nil, gitHistoryReadError(scope.path, gitErr)
 		}
-		diffRaw, diffStderr, diffErr := runGitBounded(ctx, scope.directory, nil, gitHistoryStatsDiffArgs(parent, sha, scope.relative), gitHistoryMaxOutput, scope.namespace)
-		if errors.Is(diffErr, context.Canceled) || errors.Is(diffErr, context.DeadlineExceeded) {
-			return nil, cancelled(scope.path)
-		}
-		diffOutputTruncated := false
-		if diffErr != nil {
-			if errors.Is(diffErr, errGitNamespaceChanged) {
-				return nil, gitNamespaceChanged(scope.path)
-			}
-			if errors.Is(diffErr, errGitOutputLimit) && len(diffStderr) == 0 && len(diffRaw) > 0 {
-				diffOutputTruncated = true
-			} else {
-				message := "Git history stats failed"
-				if strings.TrimSpace(string(diffStderr)) != "" {
-					message = strings.TrimSpace(string(diffStderr))
-				}
-				return nil, &Error{Status: http.StatusInternalServerError, Code: "git_history_failed", MessageKey: "fs.error.gitHistoryFailed", Path: scope.path, Retryable: true, Message: message}
-			}
-		}
-		counts, countsTruncated, parseErr := parseGitNumstat(diffRaw, diffOutputTruncated)
+		stats, _, parseErr := parseGitHistoryStats(output, false)
 		if parseErr != nil {
-			return nil, &Error{Status: http.StatusInternalServerError, Code: "git_history_failed", MessageKey: "fs.error.gitHistoryFailed", Path: scope.path, Retryable: true, Message: parseErr.Error()}
+			return nil, gitHistoryReadError(scope.path, parseErr)
 		}
-		if countsTruncated {
-			outputTruncated = true
-			continue
+		for _, commit := range stats {
+			s.cacheGitHistoryStats(gitHistoryStatsCacheKey(scope, commit["sha"].(string)), gitHistoryStatsInfo{files: commit["files"].(int), added: commit["added"].(int), removed: commit["removed"].(int), binaryFiles: commit["binary_files"].(int), signatureStatus: commit["signature_status"].(string)})
 		}
-		files, added, removed, binaryFiles := 0, 0, 0, 0
-		for _, count := range counts {
-			files++
-			if count.binary {
-				binaryFiles++
-				continue
-			}
-			added += count.added.(int)
-			removed += count.removed.(int)
-		}
-		commit["files"], commit["added"], commit["removed"], commit["binary_files"] = files, added, removed, binaryFiles
-		s.cacheGitHistoryStats(gitHistoryStatsCacheKey(scope, sha), gitHistoryStatsInfo{files: files, added: added, removed: removed, binaryFiles: binaryFiles})
+		s.attachCachedGitHistoryStats(scope, visible)
 	}
 
 	snapshotCursor, _ := encodeGitHistoryCursor(gitHistoryCursor{Repo: scope.repo, Identity: scope.identity, Relative: scope.relative, Head: frozenHead, Offset: 0})
@@ -1219,7 +1241,7 @@ func (s *Service) gitHistoryStatsAtOffset(ctx context.Context, scope *gitHistory
 	if cursorLimited {
 		reasons = append(reasons, "cursor_limit")
 	}
-	payload := map[string]any{"path": scope.path, "repo": scope.repo, "repository_identity": scope.identity, "relative_path": scope.relative, "branch": scope.branch, "head": frozenHead, "hosted_remote": scope.hostedRemote, "snapshot_cursor": snapshotCursor, "commits": visible, "next_cursor": nextCursor, "truncated": len(reasons) > 0}
+	payload := map[string]any{"path": scope.path, "repo": scope.repo, "repository_identity": scope.identity, "relative_path": scope.relative, "branch": scope.branch, "head": frozenHead, "hosted_remote": scope.hostedRemote, "snapshot_cursor": snapshotCursor, "start_offset": offset, "commits": visible, "next_cursor": nextCursor, "truncated": len(reasons) > 0}
 	if len(reasons) > 0 {
 		payload["truncation_reason"] = strings.Join(reasons, ",")
 	}
@@ -1231,7 +1253,8 @@ func (s *Service) gitHistoryStatsAtOffset(ctx context.Context, scope *gitHistory
 	return payload, nil
 }
 
-func (s *Service) gitHistory(ctx context.Context, raw, limitRaw, cursorRaw string, withStats bool, requestedOffset *int) (map[string]any, *Error) {
+func (s *Service) gitHistory(ctx context.Context, raw, limitRaw, cursorRaw string, withStats bool, requestedOffset *int, worktree ...bool) (map[string]any, *Error) {
+	withWorktree := len(worktree) == 0 || worktree[0]
 	limit, err := gitHistoryLimit(limitRaw)
 	if err != nil {
 		return nil, invalid(raw, err.Error())
@@ -1252,7 +1275,10 @@ func (s *Service) gitHistory(ctx context.Context, raw, limitRaw, cursorRaw strin
 			return nil, &Error{Status: http.StatusConflict, Code: "git_history_stale", MessageKey: "fs.error.gitHistoryStale", Path: scope.path, Message: "Git history snapshot is stale"}
 		}
 		payload := map[string]any{"path": scope.path, "repo": scope.repo, "repository_identity": scope.identity, "relative_path": scope.relative, "branch": scope.branch, "head": "", "hosted_remote": scope.hostedRemote, "snapshot_cursor": "", "commits": []map[string]any{}, "next_cursor": "", "truncated": false}
-		return s.attachGitWorktreeStatus(gitCtx, scope, payload), nil
+		if withWorktree {
+			s.attachGitWorktreeStatus(gitCtx, scope, payload)
+		}
+		return payload, nil
 	}
 	if finderErr := ensureCurrentHeadObject(gitCtx, scope, "fs.error.gitHistoryFailed"); finderErr != nil {
 		return nil, finderErr
@@ -1282,6 +1308,9 @@ func (s *Service) gitHistory(ctx context.Context, raw, limitRaw, cursorRaw strin
 		offset = *requestedOffset
 	}
 	statsKey := "metadata"
+	if !withWorktree {
+		statsKey = "metadata-fast"
+	}
 	if withStats {
 		statsKey = "stats"
 	}
@@ -1289,21 +1318,30 @@ func (s *Service) gitHistory(ctx context.Context, raw, limitRaw, cursorRaw strin
 	// The browser persists the offset-zero snapshot cursor in the layout URL. That cursor is
 	// still the first visible page, so it needs the same live dirty-path summary as an uncursored
 	// request. Later history pages and stats backfills do not need to repeat this Git status scan.
-	includeWorktreeStatus := !withStats && requestedOffset == nil && (cursorRaw == "" || offset == 0)
+	includeWorktreeStatus := withWorktree && !withStats && (cursorRaw == "" || offset == 0)
 	if cached, ok := s.cachedGitHistory(cacheKey); ok {
+		if !withWorktree {
+			delete(cached, "worktree_status")
+		}
+		if !withStats {
+			commits, _ := cached["commits"].([]map[string]any)
+			s.attachCachedGitHistoryStats(scope, commits)
+		}
 		if includeWorktreeStatus {
 			s.attachGitWorktreeStatus(gitCtx, scope, cached)
 		}
 		return cached, nil
 	}
-	if requestedOffset != nil {
+	if withStats {
 		return s.gitHistoryStatsAtOffset(gitCtx, scope, frozenHead, offset, limit, cacheKey)
 	}
 	args := []string{"-c", "core.quotePath=false", "log", "--topo-order", "--root", "--diff-merges=first-parent", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-patch", "--decorate=short"}
-	if withStats {
-		args = append(args, "--numstat")
+	format := gitHistoryFormat
+	if !withWorktree {
+		// Signature verification is enrichment; it must not delay first paint.
+		format = strings.ReplaceAll(format, "%G?", "")
 	}
-	args = append(args, "-z", "--max-count="+strconv.Itoa(limit+1), "--skip="+strconv.Itoa(offset), "--format="+gitHistoryFormat, frozenHead)
+	args = append(args, "-z", "--max-count="+strconv.Itoa(limit+1), "--skip="+strconv.Itoa(offset), "--format="+format, frozenHead)
 	args = append(args, historyPathArgs(scope.relative)...)
 	output, stderr, gitErr := runGitBounded(gitCtx, scope.directory, nil, args, gitHistoryMaxOutput, scope.namespace)
 	if errors.Is(gitErr, context.Canceled) || errors.Is(gitErr, context.DeadlineExceeded) {
@@ -1327,19 +1365,16 @@ func (s *Service) gitHistory(ctx context.Context, raw, limitRaw, cursorRaw strin
 		}
 		return nil, &Error{Status: http.StatusInternalServerError, Code: "git_history_failed", MessageKey: "fs.error.gitHistoryFailed", Path: scope.path, Retryable: true, Message: message}
 	}
-	var commits []map[string]any
-	var parseErr error
-	if withStats {
-		commits, outputTruncated, parseErr = parseGitHistoryStats(output, outputTruncated)
-	} else {
-		commits, outputTruncated, parseErr = parseGitHistory(output, outputTruncated)
-	}
+	commits, outputTruncated, parseErr := parseGitHistory(output, outputTruncated)
 	if parseErr != nil {
 		return nil, &Error{Status: http.StatusInternalServerError, Code: "git_history_failed", MessageKey: "fs.error.gitHistoryFailed", Path: scope.path, Retryable: true, Message: parseErr.Error()}
 	}
 	visible := commits
 	if len(visible) > limit {
 		visible = visible[:limit]
+	}
+	if !withStats {
+		s.attachCachedGitHistoryStats(scope, visible)
 	}
 	snapshotCursor, _ := encodeGitHistoryCursor(gitHistoryCursor{Repo: scope.repo, Identity: scope.identity, Relative: scope.relative, Head: frozenHead, Offset: 0})
 	snapshotCursorLimited := len(snapshotCursor) > gitHistoryMaxCursor
@@ -1382,7 +1417,7 @@ func (s *Service) gitHistory(ctx context.Context, raw, limitRaw, cursorRaw strin
 		if cursorLimited {
 			reasons = append(reasons, "cursor_limit")
 		}
-		payload = map[string]any{"path": scope.path, "repo": scope.repo, "repository_identity": scope.identity, "relative_path": scope.relative, "branch": scope.branch, "head": frozenHead, "hosted_remote": scope.hostedRemote, "snapshot_cursor": snapshotCursor, "commits": visible, "next_cursor": nextCursor, "truncated": len(reasons) > 0}
+		payload = map[string]any{"path": scope.path, "repo": scope.repo, "repository_identity": scope.identity, "relative_path": scope.relative, "branch": scope.branch, "head": frozenHead, "hosted_remote": scope.hostedRemote, "snapshot_cursor": snapshotCursor, "start_offset": offset, "commits": visible, "next_cursor": nextCursor, "truncated": len(reasons) > 0}
 		if len(reasons) > 0 {
 			payload["truncation_reason"] = strings.Join(reasons, ",")
 		}
@@ -1642,10 +1677,6 @@ func parseGitNumstat(raw []byte, outputTruncated bool) (map[string]gitCommitCoun
 
 func gitCommitDiffArgs(parent, commit, relative string) []string {
 	return gitDiffTreeArgs(parent, commit, relative, "--raw", "--numstat", "-z", "--find-renames", "--find-copies-harder", "--no-ext-diff", "--no-textconv")
-}
-
-func gitHistoryStatsDiffArgs(parent, commit, relative string) []string {
-	return gitDiffTreeArgs(parent, commit, relative, "--numstat", "-z", "--no-renames", "--no-ext-diff", "--no-textconv")
 }
 
 func gitDiffTreeArgs(parent, commit, relative string, options ...string) []string {

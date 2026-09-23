@@ -52,15 +52,20 @@ function newGitDiffTabState(item, defaults = {}) {
     focusedFilePaths: new Map(),
     historyGuard: makeGenerationGuard(),
     historyController: null,
+    worktreeController: null,
+    viewportObserver: null,
     statsGuard: makeGenerationGuard(),
     statsController: null,
     statsControllers: new Set(),
     statsLoading: false,
-    statsNextCursor: '',
     statsExhausted: false,
-    statsInitialWindowDone: false,
+    statsStage: 0,
+    statsError: null,
     statsBackfillTimer: null,
     statsBySha: new Map(),
+    statsViewportStart: -1,
+    statsViewportEnd: -1,
+    statsFailedRanges: new Set(),
     historyRefreshTimer: null,
     focusedSha: '',
     ...defaults,
@@ -92,6 +97,8 @@ function cleanupGitDiffTab(item) {
   if (state?.historyRefreshTimer) clearTimeout(state.historyRefreshTimer);
   if (state?.statsBackfillTimer) clearTimeout(state.statsBackfillTimer);
   state?.historyController?.abort?.();
+  state?.worktreeController?.abort?.();
+  state?.viewportObserver?.disconnect?.();
   state?.historyGuard?.invalidate?.();
   state?.statsController?.abort?.();
   for (const controller of state?.statsControllers || []) controller.abort?.();
@@ -101,8 +108,7 @@ function cleanupGitDiffTab(item) {
 }
 
 const gitDiffHistoryRefreshIntervalMs = 10000;
-const gitDiffHistoryStatsInitialSchedule = [1, 2, 4];
-const gitDiffHistoryStatsLaterSchedule = [4, 4, 4, 4];
+const gitDiffHistoryStatsSchedules = [[1], [1, 2], [4, 4, 4, 4]];
 
 function gitDiffStatsWindowSupported() {
   return /^Go(?:\s|$)/.test(String(bootstrap.backendLabel || ''));
@@ -135,11 +141,12 @@ function gitDiffHistoryPageSize(body) {
   return Math.max(gitDiffHistoryMinimumPageSize, Math.ceil(availableHeight / rowHeight));
 }
 
-function gitDiffHistoryUrl(path, cursor = '', limit = gitDiffHistoryMinimumPageSize, includeStats = false, statsOffset = null) {
+function gitDiffHistoryUrl(path, cursor = '', limit = gitDiffHistoryMinimumPageSize, includeStats = false, statsOffset = null, startOffset = null) {
   const suffix = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
-  const statsSuffix = includeStats ? '&stats=1' : '';
+  const statsSuffix = includeStats ? '&stats=1' : (gitDiffStatsWindowSupported() ? '&worktree=0' : '');
   const offsetSuffix = Number.isSafeInteger(statsOffset) && statsOffset >= 0 ? `&stats_offset=${statsOffset}` : '';
-  return `/api/fs/git-history?path=${encodeURIComponent(path)}&limit=${Math.max(gitDiffHistoryMinimumPageSize, Math.floor(limit))}${suffix}${statsSuffix}${offsetSuffix}`;
+  const startSuffix = Number.isSafeInteger(startOffset) && startOffset >= 0 ? `&start_offset=${startOffset}` : '';
+  return `/api/fs/git-history?path=${encodeURIComponent(path)}&limit=${Math.max(gitDiffHistoryMinimumPageSize, Math.floor(limit))}${suffix}${statsSuffix}${offsetSuffix}${startSuffix}`;
 }
 
 function gitDiffCommitUrl(path, sha, head, repositoryIdentity = '') {
@@ -228,7 +235,7 @@ function mergeGitDiffHistoryCommits(current, incoming) {
   return mergeGitDiffCommits([], incoming).map(commit => {
     const old = prior.get(String(commit?.sha || ''));
     if (!old || gitDiffCommitStatsComplete(commit)) return commit;
-    return {...commit, ...Object.fromEntries(['files', 'added', 'removed', 'binary_files']
+    return {...commit, ...Object.fromEntries(['files', 'added', 'removed', 'binary_files', 'signature_status']
       .filter(key => Object.prototype.hasOwnProperty.call(old, key)).map(key => [key, old[key]]))};
   });
 }
@@ -242,7 +249,7 @@ function applyGitDiffStatsCache(state) {
   state.commits = state.commits.map(commit => {
     const stats = state.statsBySha.get(String(commit?.sha || ''));
     if (!stats || !gitDiffCommitStatsComplete(stats)) return commit;
-    return {...commit, files: stats.files, added: stats.added, removed: stats.removed, binary_files: stats.binary_files};
+    return {...commit, files: stats.files, added: stats.added, removed: stats.removed, binary_files: stats.binary_files, signature_status: stats.signature_status || commit.signature_status};
   });
 }
 
@@ -266,6 +273,8 @@ async function refreshGitDiffHistory(item, options = {}) {
   const frozenHead = state.head;
   const cursor = append ? state.nextCursor : (!options.refresh && !state.loaded ? state.snapshotCursor : '');
   if (!append) {
+    state.worktreeController?.abort?.();
+    state.worktreeController = null;
     invalidateGitDiffDetailRequests(state);
     state.statsController?.abort?.();
     for (const controller of state.statsControllers) controller.abort?.();
@@ -275,10 +284,13 @@ async function refreshGitDiffHistory(item, options = {}) {
     state.statsLoading = false;
     if (state.statsBackfillTimer) clearTimeout(state.statsBackfillTimer);
     state.statsBackfillTimer = null;
-    state.statsNextCursor = '';
     state.statsExhausted = false;
-    state.statsInitialWindowDone = false;
+    state.statsStage = 0;
+    state.statsError = null;
     state.statsBySha.clear();
+    state.statsViewportStart = -1;
+    state.statsViewportEnd = -1;
+    state.statsFailedRanges.clear();
     state.loadAttempted = true;
     state.loading = true;
   } else {
@@ -319,10 +331,6 @@ async function refreshGitDiffHistory(item, options = {}) {
     if (append) state.visibleCommitCount = Math.min(state.commits.length, state.visibleCommitCount + pageSize);
     else state.visibleCommitCount = Math.min(state.commits.length, pageSize);
     state.snapshotCursor = String(payload.snapshot_cursor || (!append ? cursor : state.snapshotCursor) || '');
-    if (!append) {
-      state.statsNextCursor = state.snapshotCursor;
-      state.statsInitialWindowDone = false;
-    }
     state.nextCursor = payload.next_cursor;
     state.truncated = payload.truncated === true;
     state.truncationReason = String(payload.truncation_reason || '');
@@ -362,6 +370,31 @@ async function refreshGitDiffHistory(item, options = {}) {
       state.loadingOlder = false;
       if (state.historyController === controller) state.historyController = null;
       renderGitDiffPanel(item);
+      if (!append && state.loaded && !state.error && gitDiffStatsWindowSupported()) void refreshGitDiffWorktree(item);
+    }
+  }
+}
+
+async function refreshGitDiffWorktree(item) {
+  const state = gitDiffTabState.get(item);
+  if (!state) return;
+  state.worktreeController?.abort?.();
+  const controller = new AbortController();
+  state.worktreeController = controller;
+  const identity = state.repositoryIdentity;
+  const isCurrent = () => gitDiffTabState.get(item) === state && state.worktreeController === controller && state.repositoryIdentity === identity;
+  try {
+    const payload = await apiFetchJson(`/api/fs/git-history?path=${encodeURIComponent(state.path)}&worktree=only`, {cache: 'no-store', signal: controller.signal});
+    if (!isCurrent()) return;
+    if (payload.repository_identity !== identity || !gitDiffWorktreeStatusIsValid(payload.worktree_status)) throw gitDiffInvalidResponseError();
+    state.worktreeStatus = payload.worktree_status;
+  } catch (error) {
+    if (!isCurrent() || error?.name === 'AbortError') return;
+    state.error = gitDiffErrorSnapshot(error);
+  } finally {
+    if (isCurrent()) {
+      state.worktreeController = null;
+      renderGitDiffPanel(item);
     }
   }
 }
@@ -376,8 +409,8 @@ function applyGitDiffStatsPayload(item, state, payload) {
     const stats = state.statsBySha.get(String(commit?.sha || ''));
     if (!stats || !gitDiffCommitStatsComplete(stats)) return commit;
     changed = changed || !gitDiffCommitStatsComplete(commit)
-      || ['files', 'added', 'removed', 'binary_files'].some(key => commit[key] !== stats[key]);
-    return {...commit, files: stats.files, added: stats.added, removed: stats.removed, binary_files: stats.binary_files};
+      || ['files', 'added', 'removed', 'binary_files', 'signature_status'].some(key => commit[key] !== stats[key]);
+    return {...commit, files: stats.files, added: stats.added, removed: stats.removed, binary_files: stats.binary_files, signature_status: stats.signature_status || commit.signature_status};
   });
   if (changed) renderGitDiffPanel(item);
   return changed;
@@ -448,40 +481,123 @@ function gitDiffStatsStreamRequest(state, url, onChunk) {
   });
 }
 
+function gitDiffHistoryViewportIndices(item, state) {
+  const body = panelNodes.get(item)?.querySelector?.('.git-diff-panel-body');
+  if (!body?.isConnected || !body.clientHeight) return null;
+  const viewport = body.getBoundingClientRect();
+  const indices = new Map(state.commits.map((commit, index) => [String(commit?.sha || ''), index]));
+  let first = -1;
+  let last = -1;
+  for (const group of body.querySelectorAll('.git-diff-commit[data-git-diff-commit-group]')) {
+    const index = indices.get(group.dataset.gitDiffCommitGroup);
+    if (index === undefined) continue;
+    const rect = group.getBoundingClientRect();
+    if (rect.bottom <= viewport.top || rect.top >= viewport.bottom) continue;
+    if (first < 0) first = index;
+    last = index;
+  }
+  if (first < 0) return null;
+  return {first: Math.max(0, first - 2), visibleFirst: first, visibleLast: last, last: Math.min(state.commits.length - 1, last + 2)};
+}
+
+async function backfillGitDiffHistoryViewportStats(item) {
+  const state = ensureGitDiffTabState(item);
+  if (!state?.loaded || state.loading || !state.head || !state.snapshotCursor) return false;
+  const viewport = gitDiffHistoryViewportIndices(item, state);
+  if (!viewport) {
+    state.statsController?.abort?.();
+    state.statsGuard.invalidate();
+    state.statsLoading = false;
+    return false;
+  }
+  const missing = index => !state.statsFailedRanges.has(index) && !gitDiffCommitStatsComplete(state.commits[index]);
+  let target = -1;
+  for (let index = viewport.visibleFirst; index <= viewport.visibleLast; index++) {
+    if (missing(index)) { target = index; break; }
+  }
+  if (target < 0) {
+    for (let index = viewport.first; index <= viewport.last; index++) {
+      if (missing(index)) { target = index; break; }
+    }
+  }
+  if (target < 0) {
+    state.statsController?.abort?.();
+    state.statsGuard.invalidate();
+    state.statsLoading = false;
+    state.statsViewportStart = -1;
+    return false;
+  }
+  if (state.statsLoading && target >= state.statsViewportStart && target < state.statsViewportEnd) return false;
+  const start = target;
+  const batchSizes = [];
+  let end = start;
+  for (const size of gitDiffHistoryStatsSchedules[Math.min(state.statsStage, 2)]) {
+    let count = 0;
+    while (count < size && end <= viewport.last && missing(end)) { count++; end++; }
+    if (count) batchSizes.push(count);
+    if (count < size) break;
+  }
+  const batches = new Map();
+  let offset = start;
+  for (const size of batchSizes) { batches.set(offset, size); offset += size; }
+  state.statsController?.abort?.();
+  const isCurrent = state.statsGuard.begin();
+  const requestedHead = state.head;
+  const identity = state.repositoryIdentity;
+  const expected = state.commits.slice(start, end).map(commit => String(commit?.sha || ''));
+  state.statsLoading = true;
+  state.statsViewportStart = start;
+  state.statsViewportEnd = end;
+  let received = false;
+  try {
+    await gitDiffStatsStreamRequest(
+      state,
+      `/api/fs/git-history-stats-stream?path=${encodeURIComponent(state.path)}&cursor=${encodeURIComponent(state.snapshotCursor)}&offset=${start}&batch_sizes=${batchSizes.join(',')}`,
+      payload => {
+        if (!isCurrent() || state.head !== requestedHead) return;
+        const commits = payload?.commits;
+        if (!gitDiffHistoryPayloadIsValid(payload) || payload.head !== requestedHead || payload.repository_identity !== identity
+          || !batches.has(payload.start_offset) || !Array.isArray(commits) || commits.length !== batches.get(payload.start_offset)
+          || commits.some((commit, index) => !gitDiffCommitStatsComplete(commit) || commit?.sha !== expected[payload.start_offset - start + index])) throw gitDiffInvalidResponseError();
+        received = true;
+        applyGitDiffStatsPayload(item, state, payload);
+      },
+    );
+    if (isCurrent()) {
+      if (expected.some((sha, index) => !gitDiffCommitStatsComplete(state.commits[start + index]))) throw gitDiffInvalidResponseError();
+      state.statsStage++;
+    }
+    return received;
+  } catch (error) {
+    if (isCurrent() && error?.name !== 'AbortError') {
+      for (let index = start; index < end; index++) if (!gitDiffCommitStatsComplete(state.commits[index])) state.statsFailedRanges.add(index);
+      state.statsError = gitDiffErrorSnapshot(error);
+      renderGitDiffPanel(item);
+    }
+    return false;
+  } finally {
+    if (isCurrent()) {
+      state.statsLoading = false;
+      state.statsViewportStart = -1;
+      state.statsViewportEnd = -1;
+      scheduleGitDiffHistoryStatsBackfill(item);
+    }
+  }
+}
+
 async function backfillGitDiffHistoryStats(item) {
   const state = ensureGitDiffTabState(item);
   if (!state || !state.loaded || !state.head || state.statsExhausted || !gitDiffHistoryNeedsStats(state) || state.statsLoading) return false;
   const isCurrent = state.statsGuard.begin();
   const requestedHead = state.head;
-  const useInitialWindow = gitDiffStatsWindowSupported() && !state.statsInitialWindowDone;
-  const requestedCursor = state.statsNextCursor || state.snapshotCursor;
-  let continueBackfill = false;
   let changed = false;
   state.statsLoading = true;
   try {
-    if (!gitDiffStatsWindowSupported()) {
-      const payload = await gitDiffStatsRequest(state, gitDiffHistoryUrl(state.path, '', 200, true));
-      if (!isCurrent() || state.head !== requestedHead) return false;
-      if (!gitDiffHistoryPayloadIsValid(payload) || payload.head !== requestedHead) throw gitDiffInvalidResponseError();
-      changed = applyGitDiffStatsPayload(item, state, payload);
-      state.statsExhausted = true;
-      return changed;
-    }
-    const batchSizes = useInitialWindow ? gitDiffHistoryStatsInitialSchedule : gitDiffHistoryStatsLaterSchedule;
-    if (useInitialWindow) state.statsInitialWindowDone = true;
-    const donePayload = await gitDiffStatsStreamRequest(
-      state,
-      `/api/fs/git-history-stats-stream?path=${encodeURIComponent(state.path)}&cursor=${encodeURIComponent(requestedCursor)}&batch_sizes=${batchSizes.join(',')}`,
-      payload => {
-        if (!isCurrent() || state.head !== requestedHead) return;
-        if (!gitDiffHistoryPayloadIsValid(payload) || payload.head !== requestedHead) throw gitDiffInvalidResponseError();
-        changed = applyGitDiffStatsPayload(item, state, payload) || changed;
-      },
-    );
-    if (!isCurrent() || state.head !== requestedHead) return changed;
-    state.statsNextCursor = String(donePayload?.next_cursor || '');
-    state.statsExhausted = !state.statsNextCursor;
-    continueBackfill = !state.statsExhausted && gitDiffHistoryNeedsStats(state);
+    const payload = await gitDiffStatsRequest(state, gitDiffHistoryUrl(state.path, '', 200, true));
+    if (!isCurrent() || state.head !== requestedHead) return false;
+    if (!gitDiffHistoryPayloadIsValid(payload) || payload.head !== requestedHead) throw gitDiffInvalidResponseError();
+    changed = applyGitDiffStatsPayload(item, state, payload);
+    state.statsExhausted = true;
     return changed;
   } catch (error) {
     if (!isCurrent() || error?.name === 'AbortError') return false;
@@ -491,19 +607,18 @@ async function backfillGitDiffHistoryStats(item) {
       state.statsLoading = false;
       state.statsController = null;
       renderGitDiffPanel(item);
-      if (continueBackfill && state.loaded && state.head === requestedHead) {
-        scheduleGitDiffHistoryStatsBackfill(item);
-      }
     }
   }
 }
 
 function scheduleGitDiffHistoryStatsBackfill(item) {
   const state = ensureGitDiffTabState(item);
-  if (!state || state.statsBackfillTimer || state.statsLoading || state.statsExhausted || !gitDiffHistoryNeedsStats(state)) return false;
+  if (!state || state.loading || state.statsBackfillTimer || !gitDiffHistoryNeedsStats(state)) return false;
+  if (!gitDiffStatsWindowSupported() && (state.statsLoading || state.statsExhausted)) return false;
   state.statsBackfillTimer = setTimeout(() => {
     state.statsBackfillTimer = null;
-    void backfillGitDiffHistoryStats(item);
+    if (gitDiffStatsWindowSupported()) void backfillGitDiffHistoryViewportStats(item);
+    else void backfillGitDiffHistoryStats(item);
   }, 0);
   return true;
 }
@@ -532,6 +647,7 @@ function gitDiffHistoryNearEnd(body) {
 function bindGitDiffHistoryInfiniteScroll(item, body) {
   bindScopedOnce(body, 'git-diff-history-infinite-scroll', scope => {
     scope.ownEvent('scroll', body, 'scroll', () => {
+      if (gitDiffStatsWindowSupported()) scheduleGitDiffHistoryStatsBackfill(item);
       if (!gitDiffHistoryNearEnd(body)) return;
       void loadOlderGitDiffHistory(item);
     }, {passive: true});
@@ -1124,6 +1240,7 @@ function gitDiffWorktreeStatusNode(item, state) {
   details.addEventListener('toggle', () => {
     const current = ensureGitDiffTabState(item);
     if (current) current.worktreeStatusExpanded = details.open;
+    scheduleGitDiffHistoryStatsBackfill(item);
     summary.setAttribute('aria-expanded', details.open ? 'true' : 'false');
     const caret = summary.querySelector('.git-diff-commit-caret');
     if (caret) {
@@ -1255,7 +1372,12 @@ function createGitDiffPanel(item) {
   body.setAttribute('aria-label', gitDiffTabLabel(item));
   bindGitDiffHistoryInfiniteScroll(item, body);
   panel.append(toolbar, meta, body);
-  ensureGitDiffTabState(item);
+  const state = ensureGitDiffTabState(item);
+  if (typeof ResizeObserver === 'function') {
+    state.viewportObserver?.disconnect?.();
+    state.viewportObserver = new ResizeObserver(() => scheduleGitDiffHistoryStatsBackfill(item));
+    state.viewportObserver.observe(body);
+  }
   return panel;
 }
 
@@ -1295,6 +1417,7 @@ function renderGitDiffPanel(item, options = {}) {
   const nodes = [];
   if (state.loading) nodes.push(gitDiffLoadingStatusNode());
   if (state.error) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-error', userMessageText(state.error, t('common.requestFailed')), 'alert'));
+  if (state.statsError) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-error', userMessageText(state.statsError, t('common.requestFailed')), 'alert'));
   if (state.loaded && !gitDiffWorktreeStatusIsValid(state.worktreeStatus)) nodes.push(gitDiffDirtySummaryNode(state));
   if (state.commits.length || gitDiffWorktreeStatusIsValid(state.worktreeStatus) && state.worktreeStatus.dirty === true) nodes.push(list);
   else if (state.loaded && !state.loading) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-empty', t('gitDiff.empty'), 'status'));
@@ -1304,6 +1427,7 @@ function renderGitDiffPanel(item, options = {}) {
   }
   body.replaceChildren(...nodes);
   scheduleGitDiffHistoryInfiniteScroll(item, body);
+  if (state.loaded && !state.statsLoading && gitDiffStatsWindowSupported()) scheduleGitDiffHistoryStatsBackfill(item);
   if (restoreCommitFocus && body.contains(list)) gitDiffCommitTreeInteractionController.applyState(list, {focusLead: true});
   if (!state.loadAttempted) void refreshGitDiffHistory(item);
   return state;
