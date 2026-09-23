@@ -791,6 +791,8 @@ function destroyProseMirrorPanel(panel, options = {}) {
   delete panel._pmSource;
   delete panel._pmPlugins;
   delete panel._pmSourceLinePlugin;
+  delete panel._pmSourceDocument;
+  delete panel._pmDocumentChanged;
   delete panel._pmPreviewPane;
 }
 
@@ -832,6 +834,7 @@ function syncProseMirrorPanelSource(panel, path, state, options = {}) {
     panel._pmSerializeTimer = null;
     panel._pmSerializeGeneration = Number(panel._pmSerializeGeneration || 0) + 1;
     panel._pmSource = null;
+    panel._pmDocumentChanged = false;
   }
   if (panel._pmSource === next) return true;
   if (!textEditorCommit && panel._pmSerializeTimer && panel._pmSource === null) return true;
@@ -851,6 +854,8 @@ function syncProseMirrorPanelSource(panel, path, state, options = {}) {
     if (nextSelection) options.selection = nextSelection;
     panel._pmView.updateState(api.EditorState.create(options));
     panel._pmSource = next;
+    panel._pmSourceDocument = doc;
+    panel._pmDocumentChanged = false;
     return true;
   } catch (error) {
     renderProseMirrorFailure(panel, path, editorPanelParts(panel), error);
@@ -882,10 +887,13 @@ function clearProseMirrorFallback(parts) {
 
 function serializeProseMirrorSource(panel) {
   if (!panel?._pmSerializer || !panel._pmView) return null;
-  return panel._pmSerializer.serialize(panel._pmView.state.doc).replace(
+  let source = panel._pmSerializer.serialize(panel._pmView.state.doc).replace(
     /^(\s*[-+*]\s+\[[ x]\]\s+)(\d+)\\\.(?=\s)/gm,
     '$1$2.',
   );
+  const state = fileEditorPanelState(panel);
+  if (state?.content?.endsWith('\n') && !source.endsWith('\n')) source += '\n';
+  return source;
 }
 
 function refreshProseMirrorSourceLines(panel, source) {
@@ -921,6 +929,14 @@ function refreshProseMirrorSourceLines(panel, source) {
 
 function commitProseMirrorSource(panel, path, options = {}) {
   if (!panel?._pmView || panel._pmPath !== path) return false;
+  // Markdown parsing is intentionally semantic, so serializing a document that has only been
+  // viewed can rewrite valid source spelling. Keep the source baseline authoritative until a
+  // real ProseMirror document transaction changes the document.
+  if (panel._pmDocumentChanged !== true) return true;
+  if (panel._pmSourceDocument?.eq(panel._pmView.state.doc)) {
+    panel._pmDocumentChanged = false;
+    return true;
+  }
   let next = normalizeProseMirrorEndBreakSource(serializeProseMirrorSource(panel));
   if (next === null) return false;
   const state = fileEditorPanelState(panel);
@@ -929,6 +945,8 @@ function commitProseMirrorSource(panel, path, options = {}) {
   refreshProseMirrorSourceLines(panel, next);
   if (next === state.content) {
     panel._pmSource = next;
+    panel._pmSourceDocument = panel._pmView.state.doc;
+    panel._pmDocumentChanged = false;
     return true;
   }
   panel._pmSource = next;
@@ -940,6 +958,8 @@ function commitProseMirrorSource(panel, path, options = {}) {
     deferAutosave: options.deferAutosave === true,
   });
   syncCodeMirrorToCanonicalPanels(path, next, panel, 'view-editor');
+  panel._pmSourceDocument = panel._pmView.state.doc;
+  panel._pmDocumentChanged = false;
   return true;
 }
 
@@ -1310,6 +1330,7 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
       view.updateState(nextState);
       if (transaction.docChanged && transaction.getMeta('yolomuxSourceLineRefresh') !== true) {
         panel._pmSource = null;
+        panel._pmDocumentChanged = true;
         updateProseMirrorSource(panel, path);
         scheduleProseMirrorAutosave(panel, path);
       }
@@ -1327,6 +1348,8 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   panel._pmPlugins = plugins;
   panel._pmSourceLinePlugin = sourceLinePlugin;
   panel._pmSource = normalizeLegacyBreakMarkup(state.content || '');
+  panel._pmSourceDocument = doc;
+  panel._pmDocumentChanged = false;
   panel._pmSourceLines = panel._pmSourceLineMetadata.topLevel;
   panel._pmIgnoredCommentRanges = parseEnvironment.yolomuxIgnoredCommentRanges || [];
   delete panel._pmError;

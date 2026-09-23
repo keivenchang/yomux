@@ -1837,6 +1837,63 @@ def test_markdown_prosemirror_preserves_empty_paragraph_spacing_round_trip(brows
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
+def test_markdown_viewedit_noop_flush_preserves_source_and_skips_autosave(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const path = '/home/test/yolomux.dev/TECHBLOG-5403-private.md';
+            const original = '# Planning\\n\\nPer the thread, this is ~5 days before publish.\\n\\n1. **First item**\\n2. **Second item**\\n\\nThe TECHBLOG-* ticket is private.\\n';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: original, original, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panel.style.width = '980px';
+            panel.style.height = '560px';
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await window.__yolomuxTestWaitFor(() => panel._pmView, {timeoutMs: 12000, description: 'no-op ViewEdit'});
+            const writes = [];
+            const originalFetch = window.fetch.bind(window);
+            window.fetch = async (input, options = {}) => {
+              if (new URL(String(input), window.location.href).pathname === '/api/fs/write') writes.push(options.body || '');
+              return originalFetch(input, options);
+            };
+            const view = panel._pmView;
+            view.focus();
+            view.dispatch(view.state.tr.setSelection(YOLOmuxProseMirror.TextSelection.near(view.state.doc.resolve(1))));
+            flushProseMirrorSource(panel, path);
+            destroyProseMirrorPanel(panel);
+            await new Promise(resolve => setTimeout(resolve, 50));
+            const state = fileState.get(path);
+            done({
+              content: state?.content || '',
+              original: state?.original || '',
+              dirty: state?.dirty === true,
+              writes: writes.length,
+              serialized: panel._pmView ? serializeProseMirrorSource(panel) : null,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            done({error: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["content"] == metrics["original"], metrics
+    assert metrics["content"].startswith("# Planning"), metrics
+    assert metrics["dirty"] is False, metrics
+    assert metrics["writes"] == 0, metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
 def test_markdown_prosemirror_renders_single_source_newlines_as_soft_spaces(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(

@@ -2363,6 +2363,49 @@ func TestFinderMutationsConflictAndCandidateResolution(t *testing.T) {
 	}
 }
 
+func TestRenameNoReplacePublishesRegularFilesWhenRenameat2IsUnsupported(t *testing.T) {
+	root := t.TempDir()
+	directory, err := os.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	if err := os.WriteFile(filepath.Join(root, "source.txt"), []byte("source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishRegularNoReplace(directory, "source.txt", "target.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "source.txt")); !os.IsNotExist(err) {
+		t.Fatalf("source remains after publication: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "target.txt"))
+	if err != nil || string(data) != "source" {
+		t.Fatalf("published target = %q, error = %v", data, err)
+	}
+}
+
+func TestRenameNoReplaceDoesNotOverwriteExistingTarget(t *testing.T) {
+	root := t.TempDir()
+	directory, err := os.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	for name, content := range map[string]string{"source.txt": "source", "target.txt": "target"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := publishRegularNoReplace(directory, "source.txt", "target.txt"); !errors.Is(err, syscall.EEXIST) {
+		t.Fatalf("existing target error = %v, want EEXIST", err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "target.txt"))
+	if err != nil || string(data) != "target" {
+		t.Fatalf("existing target = %q, error = %v", data, err)
+	}
+}
+
 func TestRecursiveDeleteReportsPartialProgressAfterRestoringQuarantine(t *testing.T) {
 	service, root := newTestService(t, nil)
 	subtree := filepath.Join(root, "partial")
