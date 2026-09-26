@@ -1249,28 +1249,123 @@ async function fetchFileEntry(path) {
 }
 
 async function fetchFileEntryStatus(path) {
-  // A direct file inspection is user-facing even when Finder is closed or SSE owns background
-  // directory refreshes; suppressing this request makes an existing editor target look missing.
-  const entries = await fetchDirectory(dirnameOf(path), {user: true});
-  if (!Array.isArray(entries)) {
-    const error = fileExplorerLastListError;
+  const normalized = normalizeDirectoryPath(path);
+  const cached = freshCachedFileEntryStatus(normalized);
+  if (cached) return cached;
+
+  const {record} = fileExplorerFsResourceRecord('status', normalized);
+  if (record.request) return record.request;
+  const request = fetchFileEntryStatusUncached(normalized);
+  record.request = request;
+  try {
+    return await request;
+  } finally {
+    if (record.request === request) record.request = null;
+  }
+}
+
+async function fetchFileEntryStatusUncached(normalized) {
+  const statusRecord = fileExplorerFsResourceRecords.get(fileExplorerFsBatchKey('status', normalized));
+  const parentRecord = fileExplorerFsResourceRecords.get(fileExplorerFsBatchKey('list', dirnameOf(normalized)));
+  const revisionsAtRequest = {
+    status: Number(statusRecord?.revision) || 0,
+    parent: Number(parentRecord?.revision) || 0,
+    deleted: Number(fileExplorerDeletedPathRevisions.get(normalized)) || 0,
+    isDeleted: fileExplorerDeletedPathTombstones.has(normalized),
+  };
+  const fetched = await fetchFileInfoStatus(normalized);
+  const latestStatusRecord = fileExplorerFsResourceRecords.get(fileExplorerFsBatchKey('status', normalized));
+  const latestParentRecord = fileExplorerFsResourceRecords.get(fileExplorerFsBatchKey('list', dirnameOf(normalized)));
+  const latestDeletedRevision = Number(fileExplorerDeletedPathRevisions.get(normalized)) || 0;
+  const isDeleted = fileExplorerDeletedPathTombstones.has(normalized);
+  const tombstoneChanged = latestDeletedRevision !== revisionsAtRequest.deleted || isDeleted !== revisionsAtRequest.isDeleted;
+  const superseded = Number(latestStatusRecord?.revision) > revisionsAtRequest.status
+    || Number(latestParentRecord?.revision) > revisionsAtRequest.parent
+    || tombstoneChanged;
+  if (superseded) {
+    if (tombstoneChanged && isDeleted) {
+      return {entry: null, missing: true, error: null, network: false};
+    }
+    const latest = freshCachedFileEntryStatus(normalized);
+    return latest || {entry: null, missing: false, error: null, network: false, superseded: true};
+  }
+  if (!fetched.info) {
     return {
       entry: null,
-      missing: error?.status === 404,
-      error: fileErrorMessageSnapshot(error?.source || error, 'preview.openFailed', {path}),
-      network: error?.network === true,
+      missing: fetched.missing,
+      error: fetched.missing
+        ? fileErrorMessageSnapshot(null, 'common.pathNotFound', {path: normalized})
+        : fetched.error,
+      network: fetched.network,
     };
   }
-  const name = basenameOf(path);
-  const entry = entries.find(entry => entry.name === name) || null;
-  return {entry, missing: !entry, error: entry ? null : fileErrorMessageSnapshot(null, 'common.pathNotFound', {path}), network: false};
+  const info = fetched.info;
+  const entry = {
+    ...info,
+    name: info.name || basenameOf(normalized),
+    kind: info.kind || 'file',
+    is_dir: info.kind === 'dir',
+  };
+  if (entry.kind !== 'file') {
+    return {
+      entry: null,
+      missing: false,
+      error: fileErrorMessageSnapshot(null, 'editor.fileLoadFailed'),
+      network: false,
+    };
+  }
+  clearFileExplorerDeletedPaths([normalized]);
+  setFileExplorerFsResourceValue('status', normalized, entry);
+  return {entry, missing: false, error: null, network: false};
+}
+
+function freshCachedFileEntryStatus(path) {
+  const normalized = normalizeDirectoryPath(path);
+  if (!normalized || fileExplorerDeletedPathTombstones.has(normalized)) return null;
+  const ttl = fileExplorerFsCacheTtlMs();
+  const statusRecord = fileExplorerFsResourceRecords.get(fileExplorerFsBatchKey('status', normalized));
+  const statusFresh = statusRecord?.value?.kind === 'file'
+    && ttl > 0
+    && Date.now() - statusRecord.storedAt < ttl;
+  const directory = dirnameOf(normalized);
+  const key = fileExplorerFsBatchKey('list', directory);
+  const record = fileExplorerFsResourceRecords.get(key);
+  const directoryFresh = Array.isArray(record?.value)
+    && ttl > 0
+    && Date.now() - record.storedAt < ttl;
+  if (statusFresh && (!directoryFresh || statusRecord.revision >= record.revision)) {
+    const entry = cachedFileExplorerFsResourceValue('status', normalized);
+    return {entry, missing: false, error: null, network: false};
+  }
+  if (directoryFresh) {
+    const entries = cachedFileExplorerFsResourceValue('list', directory);
+    const name = basenameOf(normalized);
+    const entry = entries.find(candidate => candidate?.name === name) || null;
+    if (entry?.kind === 'file') {
+      setFileExplorerFsResourceValue('status', normalized, entry);
+      return {entry, missing: false, error: null, network: false};
+    }
+  }
+  return null;
 }
 
 async function fetchFileInfoStatus(path) {
   try {
-    return {info: await apiFetchJson(`/api/fs/info?path=${encodeURIComponent(path)}`), error: null};
+    // Keep each open-file status independent; the shared /api/fs/batch handler settles its items serially.
+    return {
+      info: await apiFetchJson(`/api/fs/info?path=${encodeURIComponent(path)}`, {}, {quietStatuses: [404]}),
+      error: null,
+      missing: false,
+      network: false,
+    };
   } catch (error) {
-    return {info: null, error: fileErrorMessageSnapshot(error, 'editor.fileLoadFailed')};
+    const status = Number(error?.status) || 0;
+    return {
+      info: null,
+      error: fileErrorMessageSnapshot(error, 'editor.fileLoadFailed'),
+      missing: status === 404,
+      network: status === 0,
+    };
   }
 }
 
@@ -2536,6 +2631,7 @@ function preserveDeferredFileGitMetadata(state, previous, payload) {
 async function openFileStateFromDisk(path, entry = null) {
   const fetched = entry ? {entry, missing: false, error: '', network: false} : await fetchFileEntryStatus(path);
   const fileEntry = fetched.entry;
+  if (fetched.superseded) return {superseded: true};
   if (!fileEntry) {
     if (fetched.missing) return {missing: true};
     return {state: fileErrorState(fetched.error)};
@@ -2740,6 +2836,7 @@ async function loadOpenFileStateFromDisk(path, entry = null) {
     return {item, panel, mode: editorViewModeFor(path, item)};
   });
   const loaded = await openFileStateFromDisk(path, entry);
+  if (loaded.superseded) return false;
   if (loaded.missing) {
     // A directory-listing omission is not proof of absence -- confirm through the shared guard, which
     // only reports missing on an authoritative exact-path 404 and fences it against a newer render.
@@ -2828,6 +2925,7 @@ async function reloadOpenFileFromDisk(path, options = {}) {
 }
 
 async function refreshOpenFileFromFetchedStatus(path, state, fetched) {
+  if (fetched.superseded) return;
   const entry = fetched.entry;
   if (!entry) {
     if (fetched.missing) {
@@ -2885,6 +2983,7 @@ async function refreshOpenFilesIfChanged(options = {}) {
   const requestedPaths = new Set((Array.isArray(options.paths) ? options.paths : [])
     .map(path => String(path || ''))
     .filter(Boolean));
+  const refreshes = [];
   for (const [path, state] of Array.from(fileState.entries())) {
     const requested = requestedPaths.has(path);
     if (requestedPaths.size && !requested) continue;
@@ -2893,9 +2992,12 @@ async function refreshOpenFilesIfChanged(options = {}) {
     // background tab does not need ~1/sec polling (it is re-checked when activated). Dirty files are always
     // polled — external-change conflict detection and autosave must never be skipped just because hidden.
     if (!requested && !state.dirty && !itemIsActivePaneTab(fileEditorItemPrefix + path)) continue;
-    const fetched = await fetchFileEntryStatus(path);
-    await refreshOpenFileFromFetchedStatus(path, state, fetched);
+    refreshes.push((async () => {
+      const fetched = await fetchFileEntryStatus(path);
+      await refreshOpenFileFromFetchedStatus(path, state, fetched);
+    })());
   }
+  await Promise.all(refreshes);
 }
 
 function watchedFileExplorerDirectories() {

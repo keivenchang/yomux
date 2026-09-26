@@ -607,13 +607,93 @@ class FilesystemHttpAdapter(_HandlerAdapter):
             self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
             return
         cursor = str(query_one(qs, "cursor", "") or "")
+        worktree = str(query_one(qs, "worktree", "inline") or "inline")
+        if worktree not in {"inline", "0", "only"}:
+            self.write_json(
+                error_payload("invalid Git worktree mode", message_key="common.requestFailed"),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
         try:
             self.write_json(
-                filesystem.git_history(raw_path, limit=limit, cursor=cursor or None),
+                filesystem.git_history(raw_path, limit=limit, cursor=cursor or None, worktree=worktree),
                 status=HTTPStatus.OK,
             )
         except filesystem.FilesystemError as error:
             self.write_json(error.payload(), status=HTTPStatus(error.status))
+
+    def stream_git_history_stats(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = str(query_one(qs, "path", "") or "")
+        cursor = str(query_one(qs, "cursor", "") or "")
+        offset, error = parse_query_int(
+            qs,
+            "offset",
+            0,
+            min_value=0,
+        )
+        batch_raw = str(query_one(qs, "batch_sizes", "") or "")
+        try:
+            batch_sizes = [int(field) for field in re.split(r"[\s,+]+", batch_raw.strip()) if field]
+        except ValueError:
+            batch_sizes = []
+        if error or offset is None or not raw_path or not cursor:
+            payload = error.payload() if error else error_payload(
+                "path, cursor, offset and batch_sizes are required",
+                message_key="common.requestFailed",
+            )
+            self.write_json(payload, status=HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            filesystem.git_ops.validate_git_history_stats_schedule(int(offset), batch_sizes)
+            # Keep first-batch failures as ordinary HTTP errors; later batches stream after each flush.
+            chunks = filesystem.git_history_stats_batches(
+                raw_path,
+                cursor=cursor,
+                offset=int(offset),
+                batch_sizes=[batch_sizes[0]],
+            )
+        except filesystem.FilesystemError as filesystem_error:
+            self.write_json(filesystem_error.payload(), status=HTTPStatus(filesystem_error.status))
+            return
+
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_auth_cookie_if_needed()
+        self.end_headers()
+        self.write_sse_json("start", {"path": raw_path, "batch_sizes": batch_sizes, "offset": int(offset)})
+        emitted = 0
+        next_cursor = ""
+        for chunk in chunks:
+            emitted += len(chunk["commits"])
+            next_cursor = chunk["next_cursor"]
+            self.write_sse_json("chunk", chunk)
+        if chunks and emitted == batch_sizes[0] and next_cursor:
+            next_offset = int(offset) + emitted
+            for batch_size in batch_sizes[1:]:
+                try:
+                    chunks = filesystem.git_history_stats_batches(
+                        raw_path,
+                        cursor=cursor,
+                        offset=next_offset,
+                        batch_sizes=[batch_size],
+                    )
+                except filesystem.FilesystemError as filesystem_error:
+                    self.write_sse_json("error", filesystem_error.payload())
+                    return
+                if not chunks:
+                    break
+                for chunk in chunks:
+                    emitted += len(chunk["commits"])
+                    next_offset += len(chunk["commits"])
+                    next_cursor = chunk["next_cursor"]
+                    self.write_sse_json("chunk", chunk)
+                if not next_cursor or len(chunks[-1]["commits"]) < batch_size:
+                    break
+        self.write_sse_json("done", {"count": emitted, "next_cursor": next_cursor})
 
     def handle_fs_git_commit(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -2339,6 +2419,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
 
     def handle_fs_git_history(self, parsed: Any) -> None:
         return FilesystemHttpAdapter.handle_fs_git_history(self, parsed)
+
+    def stream_git_history_stats(self, parsed: Any) -> None:
+        return FilesystemHttpAdapter.stream_git_history_stats(self, parsed)
 
     def handle_fs_git_commit(self, parsed: Any) -> None:
         return FilesystemHttpAdapter.handle_fs_git_commit(self, parsed)

@@ -10,8 +10,61 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
+
+func TestSessionFilesRepoRefsChooseEquivalentKeysDeterministically(t *testing.T) {
+	repo := filepath.Clean(filepath.Join(t.TempDir(), "repo"))
+	refs := map[string]map[string]string{
+		repo + string(os.PathSeparator) + ".": {"from": "alias", "to": "alias-to"},
+		repo:                                  {"from": "exact", "to": "exact-to"},
+	}
+	from, to := sessionFilesRefsForRepo(repo, "default", "base", refs)
+	if from != "exact" || to != "exact-to" {
+		t.Fatalf("selected refs = (%q, %q), want the exact repository key", from, to)
+	}
+}
+
+func TestSessionFilesRepoRefsIgnoreUnmatchedEmptyKey(t *testing.T) {
+	from, to := sessionFilesRefsForRepo("/repo", "HEAD", "current", map[string]map[string]string{
+		"": {"from": "v1", "to": "v2"},
+	})
+	if from != "HEAD" || to != "current" {
+		t.Fatalf("unmatched empty-key refs = (%q, %q), want request refs unchanged", from, to)
+	}
+}
+
+func TestAggregateSessionFilesPreservesEffectiveComparisonRefs(t *testing.T) {
+	payload := map[string]any{
+		"repos": []map[string]any{
+			{"repo": "/repo-a", "from_ref": "v1", "to_ref": "v2", "comparison_from_ref": "base-a", "comparison_to_ref": "current"},
+			{"repo": "/repo-b", "from_ref": "v3", "to_ref": "v4", "comparison_from_ref": "base-b", "comparison_to_ref": "current"},
+		},
+		"files": []map[string]any{}, "refs_by_repo": map[string]any{},
+		"errors": []any{}, "warnings": []any{},
+	}
+	aggregate := AggregateSessionFiles([]map[string]any{payload}, 24, "", "")
+	rows := aggregate["repos"].([]map[string]any)
+	if len(rows) != 2 {
+		t.Fatalf("aggregate effective comparison = %#v", rows)
+	}
+	byRepo := map[string]map[string]any{rows[0]["repo"].(string): rows[0], rows[1]["repo"].(string): rows[1]}
+	for repo, want := range map[string][4]string{
+		"/repo-a": {"v1", "v2", "base-a", "current"},
+		"/repo-b": {"v3", "v4", "base-b", "current"},
+	} {
+		row := byRepo[repo]
+		got := [4]string{
+			fmt.Sprint(row["from_ref"]), fmt.Sprint(row["to_ref"]),
+			fmt.Sprint(row["comparison_from_ref"]), fmt.Sprint(row["comparison_to_ref"]),
+		}
+		if got != want {
+			t.Errorf("%s comparison refs = %#v, want %#v", repo, got, want)
+		}
+	}
+}
 
 func sessionFileRows(payload map[string]any) map[string]map[string]any {
 	rows := make(map[string]map[string]any)
@@ -21,7 +74,31 @@ func sessionFileRows(payload map[string]any) map[string]map[string]any {
 	return rows
 }
 
+func TestSessionFilesRepositoryResolverAcceptsFileAndDirectoryTargets(t *testing.T) {
+	root, _ := newCommittedTestRepo(t)
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	for _, target := range []string{root, filepath.Join(root, "note.txt")} {
+		repo, finderErr := service.sessionFilesRepositoryForPath(context.Background(), target)
+		if finderErr != nil || repo != root {
+			t.Fatalf("repository for %q = %q, error=%#v; want %q", target, repo, finderErr, root)
+		}
+	}
+	repo, finderErr := service.sessionFilesRepositoryForTouchedPath(context.Background(), filepath.Join(root, "missing.txt"))
+	if finderErr != nil || repo != root {
+		t.Fatalf("repository for missing transcript file = %q, error=%#v; want %q", repo, finderErr, root)
+	}
+	if _, finderErr := service.sessionFilesRepositoryForPath(context.Background(), filepath.Join(root, "missing-directory")); finderErr == nil || finderErr.Code != "path_not_found" {
+		t.Fatalf("missing candidate root error = %#v, want path_not_found", finderErr)
+	}
+}
+
 func TestSessionFilesProjectsDefaultAndExplicitGitChanges(t *testing.T) {
+	isolateSessionFilesTestHome(t)
 	root, _ := newCommittedTestRepo(t)
 	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("two\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -50,6 +127,9 @@ func TestSessionFilesProjectsDefaultAndExplicitGitChanges(t *testing.T) {
 	if len(repo) != 1 || repo[0]["repo"] != root || repo[0]["count"] != 2 || repo[0]["from_ref"] != "default" || repo[0]["to_ref"] != "base" {
 		t.Fatalf("default repository = %#v", defaultPayload["repos"])
 	}
+	if repo[0]["comparison_from_ref"] == "" || repo[0]["comparison_from_ref"] == "default" || repo[0]["comparison_to_ref"] != "current" {
+		t.Fatalf("default repository comparison refs = %#v", repo[0])
+	}
 	if rows["note.txt"]["added"] != 1 || rows["note.txt"]["removed"] != 1 {
 		t.Fatalf("numstat row = %#v", rows["note.txt"])
 	}
@@ -62,12 +142,13 @@ func TestSessionFilesProjectsDefaultAndExplicitGitChanges(t *testing.T) {
 		t.Fatalf("explicit envelope = %#v", explicitPayload)
 	}
 	explicitRepo := explicitPayload["repos"].([]map[string]any)
-	if len(explicitRepo) != 1 || explicitRepo[0]["from_ref"] != "HEAD" || explicitRepo[0]["to_ref"] != "current" {
+	if len(explicitRepo) != 1 || explicitRepo[0]["from_ref"] != "HEAD" || explicitRepo[0]["to_ref"] != "current" || explicitRepo[0]["comparison_from_ref"] != "HEAD" || explicitRepo[0]["comparison_to_ref"] != "current" {
 		t.Fatalf("explicit repository = %#v", explicitPayload["repos"])
 	}
 }
 
 func TestSessionFilesWithAgentsKeepsCleanTranscriptTouchedFilesAndWindowAttribution(t *testing.T) {
+	isolateSessionFilesTestHome(t)
 	root, _ := newCommittedTestRepo(t)
 	tracked := filepath.Join(root, "note.txt")
 	transcript := filepath.Join(t.TempDir(), "claude.jsonl")
@@ -102,6 +183,7 @@ func TestSessionFilesWithAgentsKeepsCleanTranscriptTouchedFilesAndWindowAttribut
 }
 
 func TestSessionFilesWithAgentsMergesTranscriptAttributionIntoGitRows(t *testing.T) {
+	isolateSessionFilesTestHome(t)
 	root, _ := newCommittedTestRepo(t)
 	tracked := filepath.Join(root, "note.txt")
 	if err := os.WriteFile(tracked, []byte("working\n"), 0o600); err != nil {
@@ -134,6 +216,7 @@ func TestSessionFilesWithAgentsMergesTranscriptAttributionIntoGitRows(t *testing
 }
 
 func TestSessionFilesWithAgentsStreamEmitsOneChunkPerRepository(t *testing.T) {
+	isolateSessionFilesTestHome(t)
 	firstRoot, _ := newCommittedTestRepo(t)
 	secondRoot, _ := newCommittedTestRepo(t)
 	for _, root := range []string{firstRoot, secondRoot} {
@@ -188,7 +271,350 @@ func TestSessionFilesWithAgentsStreamEmitsOneChunkPerRepository(t *testing.T) {
 	}
 }
 
+func TestSessionFilesWithAgentsStreamEmitsInitialChunkBeforeRefEnrichment(t *testing.T) {
+	isolateSessionFilesTestHome(t)
+	root, _ := newCommittedTestRepo(t)
+	if err := os.WriteFile(filepath.Join(root, "changed.txt"), []byte("changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	refLogStarted := make(chan struct{})
+	refLogRelease := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseRefLog := func() { releaseOnce.Do(func() { close(refLogRelease) }) }
+	t.Cleanup(releaseRefLog)
+	originalExec := execCommandContext
+	t.Cleanup(func() { execCommandContext = originalExec })
+	var startedOnce sync.Once
+	execCommandContext = func(ctx context.Context, args []string, extraFiles []*os.File) *exec.Cmd {
+		for _, arg := range args {
+			if arg == "--max-count=200" {
+				startedOnce.Do(func() { close(refLogStarted) })
+				select {
+				case <-refLogRelease:
+				case <-ctx.Done():
+				}
+				break
+			}
+		}
+		command := exec.CommandContext(ctx, "git", args...)
+		command.ExtraFiles = extraFiles
+		command.Env = gitCommandEnvironment()
+		return command
+	}
+
+	firstChunk := make(chan map[string]any, 1)
+	streamDone := make(chan struct{})
+	streamContext, cancelStream := context.WithCancel(context.Background())
+	defer cancelStream()
+	var payload map[string]any
+	var finderErr *Error
+	go func() {
+		payload, finderErr = service.SessionFilesWithAgentsStream(streamContext, "s1", []string{root}, nil, 24, "", "", nil, func(chunk map[string]any) error {
+			select {
+			case firstChunk <- chunk:
+			default:
+			}
+			return nil
+		})
+		close(streamDone)
+	}()
+
+	select {
+	case <-refLogStarted:
+		releaseRefLog()
+		cancelStream()
+		<-streamDone
+		t.Fatalf("Git ref enrichment started before the first repository chunk")
+	case chunk := <-firstChunk:
+		repos, ok := chunk["repos"].([]map[string]any)
+		if !ok || len(repos) != 1 || repos[0]["branch"] != "" {
+			releaseRefLog()
+			cancelStream()
+			<-streamDone
+			t.Fatalf("initial repository chunk = %#v, want one repository with deferred Git metadata", chunk)
+		}
+		files, ok := chunk["files"].([]map[string]any)
+		if !ok || len(files) != 1 || files[0]["mtime"] != int64(0) || files[0]["size"] != nil {
+			releaseRefLog()
+			cancelStream()
+			<-streamDone
+			t.Fatalf("initial file metadata = %#v, want deferred filesystem fields", chunk["files"])
+		}
+		releaseRefLog()
+		cancelStream()
+		<-streamDone
+		if finderErr == nil || finderErr.Code != "cancelled" || payload != nil {
+			t.Fatalf("cancelled stream result = payload %#v, error %#v", payload, finderErr)
+		}
+	}
+}
+
+func TestSessionFilesStagedEnrichmentAdvancesRepositoriesIndependently(t *testing.T) {
+	service := &Service{}
+	slowFilesStarted := make(chan struct{})
+	releaseSlowFiles := make(chan struct{})
+	fastGitStarted := make(chan struct{})
+	var slowFilesOnce sync.Once
+	var fastGitOnce sync.Once
+	views := []sessionFilesRepositoryView{
+		{repo: map[string]any{"repo": "/slow"}, files: []map[string]any{{"path": "slow.txt"}}},
+		{repo: map[string]any{"repo": "/fast"}, files: []map[string]any{{"path": "fast.txt"}}},
+	}
+	stages := []sessionFilesViewEnricher{
+		func(ctx context.Context, view sessionFilesRepositoryView, _ *gitHistoryScope) sessionFilesRepositoryView {
+			if sessionFilesRepositoryPath(view) == "/slow" {
+				slowFilesOnce.Do(func() { close(slowFilesStarted) })
+				select {
+				case <-releaseSlowFiles:
+				case <-ctx.Done():
+				}
+			}
+			view.repo["filesystem_ready"] = true
+			return view
+		},
+		func(_ context.Context, view sessionFilesRepositoryView, _ *gitHistoryScope) sessionFilesRepositoryView {
+			if sessionFilesRepositoryPath(view) == "/fast" {
+				fastGitOnce.Do(func() { close(fastGitStarted) })
+			}
+			view.repo["git_ready"] = true
+			return view
+		},
+	}
+	type event struct {
+		repo  string
+		stage string
+	}
+	events := make([]event, 0, 4)
+	done := make(chan error, 1)
+	go func() {
+		done <- service.enrichSessionFilesViewsStagedBounded(context.Background(), views, stages, func(_ int, view sessionFilesRepositoryView) error {
+			repo := sessionFilesRepositoryPath(view)
+			stage := "filesystem"
+			if view.repo["git_ready"] == true {
+				stage = "git"
+			}
+			events = append(events, event{repo: repo, stage: stage})
+			return nil
+		})
+	}()
+	select {
+	case <-slowFilesStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("slow repository did not enter filesystem enrichment")
+	}
+	select {
+	case <-fastGitStarted:
+	case <-time.After(2 * time.Second):
+		close(releaseSlowFiles)
+		<-done
+		t.Fatalf("fast repository did not reach Git enrichment while slow filesystem enrichment was blocked; events=%#v", events)
+	}
+	close(releaseSlowFiles)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	seen := make(map[string][]string)
+	for _, item := range events {
+		seen[item.repo] = append(seen[item.repo], item.stage)
+	}
+	if got := strings.Join(seen["/fast"], ","); got != "filesystem,git" {
+		t.Fatalf("fast repository stages = %q, want filesystem,git; events=%#v", got, events)
+	}
+	if got := strings.Join(seen["/slow"], ","); got != "filesystem,git" {
+		t.Fatalf("slow repository stages = %q, want filesystem,git; events=%#v", got, events)
+	}
+}
+
+func TestSessionFilesStagedEnrichmentStopsEmittingAfterCancellation(t *testing.T) {
+	service := &Service{}
+	views := []sessionFilesRepositoryView{
+		{repo: map[string]any{"repo": "/one"}},
+		{repo: map[string]any{"repo": "/two"}},
+		{repo: map[string]any{"repo": "/three"}},
+	}
+	stageDone := make(chan struct{}, len(views))
+	stages := []sessionFilesViewEnricher{
+		func(_ context.Context, view sessionFilesRepositoryView, _ *gitHistoryScope) sessionFilesRepositoryView {
+			stageDone <- struct{}{}
+			return view
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	emitted := 0
+	err := service.enrichSessionFilesViewsStagedBounded(ctx, views, stages, func(_ int, _ sessionFilesRepositoryView) error {
+		emitted++
+		for range len(views) {
+			<-stageDone
+		}
+		cancel()
+		return nil
+	})
+	if err != context.Canceled {
+		t.Fatalf("enrichment error = %v, want context cancellation", err)
+	}
+	if emitted != 1 {
+		t.Fatalf("emitted %d staged chunks after cancellation, want only the first", emitted)
+	}
+}
+
+func TestSessionFilesStreamRecomputesAttributionOncePerRepository(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root, _ := newCommittedTestRepo(t)
+	parent := filepath.Dir(root)
+	second := filepath.Join(root, "nested", "second.txt")
+	nested := filepath.Join(root, "nested", "old.txt")
+	agentCWD := filepath.Join(parent, "agent")
+	if err := os.MkdirAll(filepath.Dir(nested), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(agentCWD, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, []byte("second\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nested, []byte("nested\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"-C", root, "add", "--", "nested/second.txt", "nested/old.txt"}, {"-C", root, "commit", "-qm", "add nested files"}} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v (%s)", strings.Join(args, " "), err, output)
+		}
+	}
+	if err := os.RemoveAll(filepath.Dir(nested)); err != nil {
+		t.Fatal(err)
+	}
+	transcript := filepath.Join(t.TempDir(), "claude.jsonl")
+	agent := SessionFileAgent{Kind: "claude", CWD: agentCWD, Transcript: transcript}
+	lines := []string{
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"` + nested + `"}}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"` + second + `"}}]}}`,
+	}
+	if err := os.WriteFile(transcript, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if attributed, ok := scanSessionTranscript(transcript, agent, time.Now().Add(-24*time.Hour)); !ok || len(attributed) != 2 {
+		t.Fatalf("transcript fixture attributions = %#v, parsed=%t", attributed, ok)
+	}
+	if attributed := collectSessionFileAttributions(context.Background(), []SessionFileAgent{agent}, []string{parent}, 24); len(attributed) != 2 {
+		t.Fatalf("session attribution scan = %#v, want both transcript paths", attributed)
+	}
+	service, err := New(parent, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	combinedDiffCalls := 0
+	originalExec := execCommandContext
+	execCommandContext = func(ctx context.Context, args []string, extraFiles []*os.File) *exec.Cmd {
+		isDiff, hasRaw, hasNumstat := false, false, false
+		for _, arg := range args {
+			isDiff = isDiff || arg == "diff"
+			hasRaw = hasRaw || arg == "--raw"
+			hasNumstat = hasNumstat || arg == "--numstat"
+		}
+		if isDiff && hasRaw && hasNumstat {
+			combinedDiffCalls++
+		}
+		command := exec.CommandContext(ctx, "git", args...)
+		command.ExtraFiles = extraFiles
+		command.Env = gitCommandEnvironment()
+		return command
+	}
+	t.Cleanup(func() { execCommandContext = originalExec })
+
+	chunks := make([]map[string]any, 0, 1)
+	payload, finderErr := service.SessionFilesWithAgentsStream(context.Background(), "s1", []string{parent}, []SessionFileAgent{agent}, 24, "", "", nil, func(chunk map[string]any) error {
+		chunks = append(chunks, chunk)
+		return nil
+	})
+	if finderErr != nil {
+		t.Fatalf("session-files stream: %#v", finderErr)
+	}
+	if combinedDiffCalls != 1 || len(chunks) != 3 || chunks[0]["replace_repo"] != false || chunks[1]["replace_repo"] != true || chunks[2]["replace_repo"] != true {
+		t.Fatalf("combined repository diff commands/stages = %d/%#v, want one initial plus two staged repository views; files=%#v", combinedDiffCalls, chunks, payload["files"])
+	}
+	for index, chunk := range chunks {
+		if _, present := chunk["repo_index"]; present {
+			t.Fatalf("chunk %d exposes unused repo_index metadata: %#v", index, chunk)
+		}
+		if _, present := chunk["repo_total"]; present {
+			t.Fatalf("chunk %d exposes unused repo_total metadata: %#v", index, chunk)
+		}
+	}
+	rows := sessionFileRows(payload)
+	deleted := rows["nested/old.txt"]
+	if len(rows) != 2 || deleted["status"] != "D" || deleted["agent"] != "claude" || rows["nested/second.txt"]["agent"] != "claude" {
+		t.Fatalf("attributed repository rows = %#v", payload["files"])
+	}
+}
+
+func TestSessionFilesStreamReplacesEachAttributedRepositoryOnce(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root, _ := newCommittedTestRepo(t)
+	second := filepath.Join(root, "second.txt")
+	if err := os.WriteFile(second, []byte("two\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"-C", root, "add", "second.txt"}, {"-C", root, "commit", "-qm", "second"}} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, []byte("changed too\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	transcript := filepath.Join(t.TempDir(), "rollout.jsonl")
+	transcriptData := fmt.Sprintf(`{"msg":%q}\n`, "*** Begin Patch\n*** Update File: "+filepath.Join(root, "note.txt")+"\n*** Update File: "+second+"\n")
+	if err := os.WriteFile(transcript, []byte(transcriptData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	chunks := make([]map[string]any, 0, 4)
+	_, finderErr := service.SessionFilesWithAgentsStream(context.Background(), "s1", []string{root}, []SessionFileAgent{{
+		Kind: "codex", CWD: root, Transcript: transcript,
+	}}, 24, "", "", nil, func(chunk map[string]any) error {
+		chunks = append(chunks, chunk)
+		return nil
+	})
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if len(chunks) != 4 {
+		t.Fatalf("stream chunks = %d, want initial plus metadata, Git-ref, and attribution replacements: %#v", len(chunks), chunks)
+	}
+	for index := 1; index < len(chunks); index++ {
+		if chunks[index]["replace_repo"] != true {
+			t.Fatalf("replacement chunk %d = %#v, want replace_repo=true", index, chunks[index])
+		}
+	}
+	for index, chunk := range chunks {
+		if _, present := chunk["repo_index"]; present {
+			t.Fatalf("chunk %d exposes unused repo_index progress metadata: %#v", index, chunk)
+		}
+		if _, present := chunk["repo_total"]; present {
+			t.Fatalf("chunk %d exposes unused repo_total progress metadata: %#v", index, chunk)
+		}
+	}
+}
+
 func TestSessionFilesWithAgentsStreamEmitsEarlierRepositoryBeforeLaterDiscoveryFails(t *testing.T) {
+	isolateSessionFilesTestHome(t)
 	firstRoot, _ := newCommittedTestRepo(t)
 	missingRoot := filepath.Join(firstRoot, "does-not-exist")
 	service, err := New(firstRoot, nil)
@@ -218,6 +644,7 @@ func TestSessionFilesWithAgentsStreamEmitsEarlierRepositoryBeforeLaterDiscoveryF
 }
 
 func TestSessionFilesWithAgentsExcludesDefaultIgnoredTranscriptPaths(t *testing.T) {
+	isolateSessionFilesTestHome(t)
 	root, _ := newCommittedTestRepo(t)
 	visible := filepath.Join(root, "visible.txt")
 	ignored := filepath.Join(root, ".cache", "hidden.txt")
@@ -251,9 +678,13 @@ func TestSessionFilesWithAgentsExcludesDefaultIgnoredTranscriptPaths(t *testing.
 }
 
 func TestSessionFilesPreservesDeletedRowsAndRefFallback(t *testing.T) {
+	isolateSessionFilesTestHome(t)
 	root, _ := newCommittedTestRepo(t)
 	deleted := filepath.Join(root, "note.txt")
 	if err := os.Remove(deleted); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "new.txt"), []byte("untracked\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	service, err := New(root, nil)
@@ -271,13 +702,20 @@ func TestSessionFilesPreservesDeletedRowsAndRefFallback(t *testing.T) {
 	if row == nil || row["status"] != "D" || row["missing"] != true || row["diff_tracked"] != true {
 		t.Fatalf("deleted row = %#v", payload)
 	}
+	if rows["new.txt"] == nil || rows["new.txt"]["status"] != "?" {
+		t.Fatalf("invalid-ref fallback did not include untracked files: %#v", payload["files"])
+	}
 	repos := payload["repos"].([]map[string]any)
 	if len(repos) != 1 || repos[0]["error"] != "requested refs not found in this repo; showing default" || repos[0]["from_ref"] != "default" || repos[0]["to_ref"] != "base" {
 		t.Fatalf("fallback repository = %#v", payload["repos"])
 	}
+	if repos[0]["comparison_from_ref"] == "" || repos[0]["comparison_from_ref"] == "default" || repos[0]["comparison_to_ref"] != "current" {
+		t.Fatalf("fallback comparison refs = %#v", repos[0])
+	}
 }
 
 func TestSessionFilesHandlesNoHistoryAndAllowsAnyRepositoryPath(t *testing.T) {
+	isolateSessionFilesTestHome(t)
 	root := t.TempDir()
 	if output, err := exec.Command("git", "init", "-q", root).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v (%s)", err, output)
@@ -316,6 +754,7 @@ func TestSessionFilesHandlesNoHistoryAndAllowsAnyRepositoryPath(t *testing.T) {
 }
 
 func TestSessionFilesCountsUntrackedLinesAndLeavesBinaryNumstatNil(t *testing.T) {
+	isolateSessionFilesTestHome(t)
 	root, _ := newCommittedTestRepo(t)
 	if err := os.WriteFile(filepath.Join(root, "untracked.txt"), []byte("one\ntwo\nthree"), 0o600); err != nil {
 		t.Fatal(err)
@@ -351,6 +790,7 @@ func TestSessionFilesCountsUntrackedLinesAndLeavesBinaryNumstatNil(t *testing.T)
 }
 
 func TestSessionFilesAppliesCanonicalPerRepositoryRefsAndAheadBehind(t *testing.T) {
+	isolateSessionFilesTestHome(t)
 	root, first := newCommittedTestRepo(t)
 	tracked := filepath.Join(root, "note.txt")
 	if err := os.WriteFile(tracked, []byte("two\n"), 0o600); err != nil {
@@ -389,6 +829,7 @@ func TestSessionFilesAppliesCanonicalPerRepositoryRefsAndAheadBehind(t *testing.
 }
 
 func TestSessionFilesNormalizesLookbackBounds(t *testing.T) {
+	isolateSessionFilesTestHome(t)
 	root, _ := newCommittedTestRepo(t)
 	service, err := New(root, nil)
 	if err != nil {
@@ -413,6 +854,7 @@ func TestSessionFilesNormalizesLookbackBounds(t *testing.T) {
 }
 
 func TestSessionFilesExposesRecentRefsAndAliases(t *testing.T) {
+	isolateSessionFilesTestHome(t)
 	root, _ := newCommittedTestRepo(t)
 	for index := 0; index < 24; index++ {
 		if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte(fmt.Sprintf("revision %d\n", index)), 0o600); err != nil {

@@ -91,6 +91,7 @@ type gitNamespace struct {
 	alternates   string
 	alternateID  descriptorIdentity
 	alternateSet bool
+	layoutCache  *gitObjectLayoutCache
 }
 
 func (namespace *gitNamespace) identity() string {
@@ -114,35 +115,6 @@ func (namespace *gitNamespace) identity() string {
 
 func isGitLooseObjectDirectory(name string) bool {
 	return len(name) == 2 && strings.ContainsRune("0123456789abcdef", rune(name[0])) && strings.ContainsRune("0123456789abcdef", rune(name[1]))
-}
-
-func validateGitObjectLayout(objects string) error {
-	entries, err := os.ReadDir(objects)
-	if err != nil {
-		return errGitNamespaceChanged
-	}
-	for _, entry := range entries {
-		if entry.Type()&os.ModeSymlink != 0 {
-			return errGitNamespaceChanged
-		}
-		name := entry.Name()
-		if !entry.IsDir() || (name != "info" && name != "pack" && !isGitLooseObjectDirectory(name)) {
-			continue
-		}
-		walkErr := filepath.WalkDir(filepath.Join(objects, name), func(_ string, item os.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return walkErr
-			}
-			if item.Type()&os.ModeSymlink != 0 {
-				return errGitNamespaceChanged
-			}
-			return nil
-		})
-		if walkErr != nil {
-			return errGitNamespaceChanged
-		}
-	}
-	return nil
 }
 
 func (namespace *gitNamespace) close() {
@@ -177,7 +149,7 @@ func (namespace *gitNamespace) validate() error {
 			return errGitNamespaceChanged
 		}
 	}
-	if err := validateGitObjectLayout(namespace.objectsPath); err != nil {
+	if err := namespace.layoutCache.validate(namespace.objectsPath); err != nil {
 		return err
 	}
 	info, err := os.Lstat(namespace.alternates)
@@ -297,27 +269,52 @@ func resolveGitNamespacePath(raw, base string) (string, error) {
 }
 
 func (s *Service) openGitNamespace(directory *os.File, workingDirectory, requested string) (*gitNamespace, *Error) {
-	gitDirBytes, _, err := runGitBounded(context.Background(), directory, nil, []string{"rev-parse", "--git-dir"}, 4096)
-	if err != nil {
-		return nil, &Error{Status: http.StatusBadRequest, Code: "not_git_repo", MessageKey: "fs.error.notGitRepo", Path: requested, Message: "path is not in a Git repository"}
+	return s.openGitNamespaceContext(context.Background(), directory, workingDirectory, requested)
+}
+
+func (s *Service) openGitNamespaceContext(ctx context.Context, directory *os.File, workingDirectory, requested string) (*gitNamespace, *Error) {
+	paths, _, err := runGitBounded(ctx, directory, nil, []string{"rev-parse", "--git-dir", "--git-common-dir", "--git-path", "objects"}, 3*4096)
+	if err != nil && ctx.Err() != nil {
+		return nil, cancelled(requested)
 	}
-	gitDir, err := resolveGitNamespacePath(string(gitDirBytes), workingDirectory)
+	var pathLines []string
+	if err == nil {
+		combined := strings.Split(strings.TrimSuffix(string(paths), "\n"), "\n")
+		if len(combined) == 3 {
+			pathLines = combined
+		}
+	}
+	if pathLines == nil {
+		// A legal filesystem path can contain newlines, so retain the individual commands when
+		// combined output cannot be separated unambiguously.
+		pathLines = make([]string, 3)
+		commands := [][]string{{"rev-parse", "--git-dir"}, {"rev-parse", "--git-common-dir"}, {"rev-parse", "--git-path", "objects"}}
+		for index, args := range commands {
+			output, _, commandErr := runGitBounded(ctx, directory, nil, args, 4096)
+			if commandErr != nil {
+				if ctx.Err() != nil {
+					return nil, cancelled(requested)
+				}
+				if index == 0 {
+					return nil, &Error{Status: http.StatusBadRequest, Code: "not_git_repo", MessageKey: "fs.error.notGitRepo", Path: requested, Message: "path is not in a Git repository"}
+				}
+				if index == 1 {
+					return nil, &Error{Status: http.StatusBadRequest, Code: "not_git_repo", MessageKey: "fs.error.notGitRepo", Path: requested, Message: "Git common directory is unavailable"}
+				}
+				return nil, &Error{Status: http.StatusBadRequest, Code: "not_git_repo", MessageKey: "fs.error.notGitRepo", Path: requested, Message: "Git object store is unavailable"}
+			}
+			pathLines[index] = strings.TrimSpace(string(output))
+		}
+	}
+	gitDir, err := resolveGitNamespacePath(pathLines[0], workingDirectory)
 	if err != nil {
 		return nil, filesystemError(requested, err)
 	}
-	commonBytes, _, err := runGitBounded(context.Background(), directory, nil, []string{"rev-parse", "--git-common-dir"}, 4096)
-	if err != nil {
-		return nil, &Error{Status: http.StatusBadRequest, Code: "not_git_repo", MessageKey: "fs.error.notGitRepo", Path: requested, Message: "Git common directory is unavailable"}
-	}
-	commonDir, err := resolveGitNamespacePath(string(commonBytes), workingDirectory)
+	commonDir, err := resolveGitNamespacePath(pathLines[1], workingDirectory)
 	if err != nil {
 		return nil, filesystemError(requested, err)
 	}
-	objectsBytes, _, err := runGitBounded(context.Background(), directory, nil, []string{"rev-parse", "--git-path", "objects"}, 4096)
-	if err != nil {
-		return nil, &Error{Status: http.StatusBadRequest, Code: "not_git_repo", MessageKey: "fs.error.notGitRepo", Path: requested, Message: "Git object store is unavailable"}
-	}
-	objects, err := resolveGitNamespacePath(string(objectsBytes), workingDirectory)
+	objects, err := resolveGitNamespacePath(pathLines[2], workingDirectory)
 	if err != nil {
 		return nil, filesystemError(requested, err)
 	}
@@ -328,11 +325,11 @@ func (s *Service) openGitNamespace(directory *os.File, workingDirectory, request
 	if objectsInfo.Mode()&os.ModeSymlink != 0 || !objectsInfo.IsDir() {
 		return nil, forbidden(requested, "fs.error.outsideRoots", "Git object store is not a local directory")
 	}
-	if err := validateGitObjectLayout(objects); err != nil {
+	if err := s.gitObjectLayouts.validate(objects); err != nil {
 		return nil, gitNamespaceChanged(requested)
 	}
 	alternates := filepath.Join(objects, "info", "alternates")
-	namespace := &gitNamespace{gitDirPath: gitDir, commonPath: commonDir, objectsPath: objects, alternates: alternates}
+	namespace := &gitNamespace{gitDirPath: gitDir, commonPath: commonDir, objectsPath: objects, alternates: alternates, layoutCache: &s.gitObjectLayouts}
 	for _, item := range []struct {
 		path      string
 		directory **os.File

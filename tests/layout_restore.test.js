@@ -2439,7 +2439,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/fileExplorerIndexStatus\.set\(normalized, 'building'\);\s*refreshFileIndexStatus\(normalized\)/.test(source), '#30: indexing a directory eagerly warms its backend index (no cold first-query live walk)');
     const loadAutoStatusesFn = source.slice(source.indexOf('function loadAutoStatuses'), source.indexOf('function renderAutoApproveStatusSurfaces'));
     const autoStatusRenderFn = source.slice(source.indexOf('function renderAutoApproveStatusSurfaces'), source.indexOf('function applyAutoApprovePayload'));
-    assert.ok(loadAutoStatusesFn.includes('renderAutoApproveStatusSurfaces(result)') && autoStatusRenderFn.includes('updateDocumentTitle();') && autoStatusRenderFn.includes('renderAutoApproveButtons();'), '#46: the auto-status poll routes through the shared status renderer, which re-syncs the title and YO markers together so a done pane stops spinning on the same poll');
+    assert.ok(loadAutoStatusesFn.includes('renderAutoApproveStatusSurfaces(result)') && autoStatusRenderFn.includes('updateDocumentTitle();') && autoStatusRenderFn.includes('renderAutoApproveButtons(changedSessions);') && source.includes('const result = {applied: true, sessionsChanged, previousActive, changedSessions,'), '#46: the auto-status poll preserves keyed changed-session scope through the shared renderer, which re-syncs the title and changed YO markers together so a done pane stops spinning on the same poll');
     assert.ok(/preferenceSettingItem\('file_explorer\.indexed_dirs', \{type: 'list'\}\)/.test(source), '#32: Preferences exposes indexed directories through the shared setting builder');
     assert.equal(/preferenceSettingItem\('file_explorer\.index_exclude_dir_names'/.test(source), false, 'Preferences does not expose a second directory-name exclusion control');
     assert.ok(/preferenceSettingItem\('file_explorer\.index_exclude_paths', \{type: 'list', wide: true, rows: 20, autosize: true\}\)/.test(source), 'Preferences exposes one autosizing Quick Open exclusions control');
@@ -4696,6 +4696,17 @@ async function runLayoutRestoreSuite() {
     api.captureFileEditorPanelViewStateForTest(item, panel);
     assert.equal(api.fileEditorViewStateForTest(item).scrollTop, 420, 'the focused editor saves its real scroll before tab switch');
     assert.equal(api.fileEditorViewStateForTest(item).scrollLeft, 7);
+    const hiddenPath = '/home/test/hidden-first-capture.md';
+    const hiddenItem = api.registerFileEditorLayoutItemForTest(hiddenPath);
+    const hiddenPanel = new TestElement('hidden-editor-panel');
+    hiddenPanel.dataset.layoutItem = hiddenItem;
+    hiddenPanel.dataset.filePath = hiddenPath;
+    hiddenPanel._cmView = {
+      scrollDOM: {clientHeight: 0, clientWidth: 0, scrollTop: 999, scrollLeft: 17},
+      state: {doc, selection: {main: {anchor: 11, head: 13}}},
+    };
+    api.captureFileEditorPanelViewStateForTest(hiddenItem, hiddenPanel);
+    assert.equal(api.fileEditorViewStateForTest(hiddenItem), null, 'a first capture from a hidden zero-height editor is ignored');
     panel.isConnected = false;
     scrollDOM.clientHeight = 0;
     scrollDOM.scrollTop = 0;

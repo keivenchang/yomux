@@ -229,12 +229,9 @@ func (s *server) enqueueFinderJSONWithScheduler(w http.ResponseWriter, ctx conte
 		case completed := <-result:
 			cancel()
 			terminal, status := finderJSONCompletion(requestID, completed)
-			if status == http.StatusOK && terminal["state"] == "ready" {
-				_, _ = s.terminalizeOperation(id, terminal, status)
-				jsonResponse(w, status, terminal)
-				return
-			}
 			_, _ = s.terminalizeOperation(id, terminal, status)
+			jsonResponse(w, status, terminal)
+			return
 		case <-timer.C:
 		}
 	}
@@ -476,11 +473,11 @@ func (s *server) runFinderStreamProduct(ctx context.Context, task func(context.C
 }
 
 func (s *server) runFinderProductWithScheduler(ctx context.Context, scheduler *work.Scheduler, deadline time.Duration, task func(context.Context) (finderProduct, *finder.Error)) (finderProduct, *finder.Error) {
-	if scheduler == nil {
-		return task(ctx)
-	}
 	jobContext, cancel := newFinderJobContext(ctx, deadline)
 	defer cancel()
+	if scheduler == nil {
+		return task(jobContext)
+	}
 	result, err := scheduler.Submit(jobContext, "", func(jobCtx context.Context) (any, error) {
 		product, finderErr := task(jobCtx)
 		if finderErr != nil {

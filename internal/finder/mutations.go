@@ -335,7 +335,7 @@ func (s *Service) Write(ctx context.Context, raw, content string, expectedMtime 
 		}
 	}
 	if existing == nil {
-		if err := renameNoReplace(parent.directory, temporaryName, parent.name); err != nil {
+		if err := publishRegularNoReplace(parent.directory, temporaryName, parent.name); err != nil {
 			if errors.Is(err, syscall.EEXIST) {
 				return nil, changed(requested)
 			}
@@ -365,7 +365,7 @@ func (s *Service) Write(ctx context.Context, raw, content string, expectedMtime 
 			_ = restoreMutationTarget(parent, quarantine)
 			return nil, cancelled(requested)
 		}
-		if err := renameNoReplace(parent.directory, temporaryName, parent.name); err != nil {
+		if err := publishRegularNoReplace(parent.directory, temporaryName, parent.name); err != nil {
 			_ = restoreMutationTarget(parent, quarantine)
 			if errors.Is(err, syscall.EEXIST) || errors.Is(err, syscall.ENOENT) {
 				return nil, changed(requested)
@@ -376,6 +376,7 @@ func (s *Service) Write(ctx context.Context, raw, content string, expectedMtime 
 			return nil, filesystemError(requested, err)
 		}
 	}
+
 	removeTemporary = false
 	if err := parent.directory.Sync(); err != nil {
 		return nil, filesystemError(requested, err)

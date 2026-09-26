@@ -4904,6 +4904,17 @@ async function runLayoutAsyncSuite() {
     assert.equal(requests.filter(url => url === '/api/auto-approve').length - httpBefore, 0, 'a revision-only patch performs no HTTP refetch');
   });
 
+  test('auto-approve patches retain changed-session scope while stamping every revision', () => {
+    const api = loadYolomux('', ['1', '2']);
+    api.applyAutoApprovePayloadForTest({agent_window_snapshot_revision: 10, session_order: ['1', '2'], sessions: {'1': {target: '1', agent_windows: [{kind: 'codex', window_index: 0}]}, '2': {target: '2'}}}, {render: false});
+    api.setTabberActivityForTest({agent_window_snapshot_revision: 11, agent_windows: {'1': [{kind: 'codex', window_index: 0, path: '/fresh/path'}]}});
+    assert.equal(api.sessionAgentWindowStatusModelForTest('1').agents[0].path || '', '');
+    const result = api.applyAutoApprovePayloadForTest({patch: true, collection: 'sessions', changes: {'2': {target: '2', enabled: true}}, fields: {agent_window_snapshot_revision: 11}}, {render: false});
+    assert.deepStrictEqual([...result.changedSessions].sort(), ['1', '2']);
+    assert.deepStrictEqual(['1', '2'].map(session => api.autoApproveStateForTest(session).agent_window_snapshot_revision), [11, 11]);
+    assert.equal(api.sessionAgentWindowStatusModelForTest('1').agents[0].path, '/fresh/path');
+  });
+
   test('client-event queue overflow maps every dropped resource to a scoped repair owner', () => {
     const source = fs.readFileSync('static_src/js/yolomux/99_client_event_transport.js', 'utf8');
     assert.ok(/function clientEventRepairChannels\(resources = \[\]\)[\s\S]*fs_changed[\s\S]*channels\.add\('files'\)[\s\S]*event_log_changed[\s\S]*channels\.add\('events'\)[\s\S]*return channels/.test(source), 'overflow maps files/event logs to their own repair channels');

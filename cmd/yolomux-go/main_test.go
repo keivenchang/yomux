@@ -18,10 +18,12 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/keivenchang/yolomux/internal/cache"
 	"github.com/keivenchang/yolomux/internal/capabilities"
 	"github.com/keivenchang/yolomux/internal/finder"
 	"github.com/keivenchang/yolomux/internal/stats"
@@ -70,6 +72,95 @@ func TestUseMachineTmuxPreservesExplicitFixtureSocket(t *testing.T) {
 	}
 }
 
+func TestClaudeTranscriptPathCacheAvoidsWalkAndRecoversFromRemoval(t *testing.T) {
+	root := t.TempDir()
+	transcript := filepath.Join(root, "project", "session-1.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(transcript, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	walks := 0
+	lookup := newClaudeTranscriptLookupCache(func(root, sessionID string) string {
+		walks++
+		return findClaudeTranscriptOnDisk(root, sessionID)
+	})
+	if got := lookup.transcriptPath(root, "session-1"); got != transcript || walks != 1 {
+		t.Fatalf("first lookup = (%q, walks=%d), want transcript and one walk", got, walks)
+	}
+	if got := lookup.transcriptPath(root, "session-1"); got != transcript || walks != 1 {
+		t.Fatalf("cached lookup = (%q, walks=%d), want transcript and no additional walk", got, walks)
+	}
+	if err := os.Remove(transcript); err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(root, "replacement", "session-1.jsonl")
+	if err := os.MkdirAll(filepath.Dir(replacement), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(replacement, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := lookup.transcriptPath(root, "session-1"); got != replacement || walks != 2 {
+		t.Fatalf("lookup after removal = (%q, walks=%d), want replacement and a new walk", got, walks)
+	}
+	if got := lookup.transcriptPath(root, "appears-later"); got != "" || walks != 3 {
+		t.Fatalf("missing lookup = (%q, walks=%d), want uncached miss", got, walks)
+	}
+	later := filepath.Join(root, "later", "appears-later.jsonl")
+	if err := os.MkdirAll(filepath.Dir(later), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(later, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := lookup.transcriptPath(root, "appears-later"); got != later || walks != 4 {
+		t.Fatalf("lookup after transcript appears = (%q, walks=%d), want new transcript and a walk", got, walks)
+	}
+}
+
+func TestClaudeTranscriptPathCacheDoesNotBlockWarmLookupsOnMiss(t *testing.T) {
+	root := t.TempDir()
+	warmPath := filepath.Join(root, "warm.jsonl")
+	if err := os.WriteFile(warmPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	lookup := newClaudeTranscriptLookupCache(func(root, sessionID string) string {
+		if sessionID == "blocked" {
+			close(entered)
+			<-release
+			return ""
+		}
+		return warmPath
+	})
+	if got := lookup.transcriptPath(root, "warm"); got != warmPath {
+		t.Fatalf("initial warm lookup = %q, want %q", got, warmPath)
+	}
+	missDone := make(chan struct{})
+	go func() {
+		lookup.transcriptPath(root, "blocked")
+		close(missDone)
+	}()
+	<-entered
+	warmDone := make(chan string, 1)
+	go func() { warmDone <- lookup.transcriptPath(root, "warm") }()
+	select {
+	case got := <-warmDone:
+		close(release)
+		<-missDone
+		if got != warmPath {
+			t.Fatalf("warm lookup during miss = %q, want %q", got, warmPath)
+		}
+	case <-time.After(time.Second):
+		close(release)
+		<-missDone
+		t.Fatal("warm cache hit blocked behind a transcript search")
+	}
+}
+
 func TestTmuxCommandContextClearsInheritedNestedClientForGlobalRoster(t *testing.T) {
 	t.Setenv("TMUX", "/tmp/private-supervisor,123,0")
 	t.Setenv("TMUX_PANE", "%7")
@@ -78,7 +169,7 @@ func TestTmuxCommandContextClearsInheritedNestedClientForGlobalRoster(t *testing
 	t.Setenv("LC_ALL", "")
 	t.Setenv("LC_CTYPE", "")
 
-	command := (&server{}).tmuxCommand("list-sessions", "-F", "#{session_name}")
+	command := (&server{}).tmuxCommand("list-sessions", "-F", "#{session_name}\t#{session_id}\t#{session_created}\t#{pid}")
 	for _, value := range command.Env {
 		if strings.HasPrefix(value, "TMUX=") || strings.HasPrefix(value, "TMUX_PANE=") {
 			t.Fatalf("global tmux command inherited nested client variable %q", value)
@@ -1469,8 +1560,9 @@ func TestActivityRouteIncludesEveryGlobalTmuxSession(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
 
+	s := &server{}
 	record := httptest.NewRecorder()
-	(&server{}).activity(record, httptest.NewRequest(http.MethodGet, "/api/activity?hours=48&visible=0&scope=all", nil))
+	s.activity(record, httptest.NewRequest(http.MethodGet, "/api/activity?hours=48&visible=0&scope=all", nil))
 	if record.Code != http.StatusOK {
 		t.Fatalf("activity status = %d, body=%s", record.Code, record.Body.String())
 	}
@@ -1504,8 +1596,19 @@ func TestActivityRouteIncludesEveryGlobalTmuxSession(t *testing.T) {
 			t.Fatalf("activity payload session %q identity = %#v", session, map[string]any{"session": info["session"], "label": info["label"]})
 		}
 		panes, ok := info["panes"].([]any)
-		if !ok || len(panes) != 1 {
-			t.Fatalf("activity payload session %q panes = %#v", session, info["panes"])
+		if !ok || len(panes) != 0 || info["work_graph"].(map[string]any)["loading"] != true {
+			t.Fatalf("cold activity response did not return a lightweight loading row for %q: %#v", session, info)
+		}
+	}
+	waitForMetadataGeneration(t, s, 1)
+	s.metadataMu.Lock()
+	publishedSessions := s.metadataPayload["sessions"].(map[string]any)
+	s.metadataMu.Unlock()
+	for _, session := range []string{"synthetic-activity-a", "synthetic-activity-b"} {
+		info := publishedSessions[session].(map[string]any)
+		panes := info["panes"].([]map[string]any)
+		if len(panes) != 1 {
+			t.Fatalf("background metadata refresh published %d panes for %q, want 1", len(panes), session)
 		}
 	}
 }
@@ -1623,6 +1726,25 @@ func TestActivityRoutePublishesPerWindowTmuxRecency(t *testing.T) {
 	}
 }
 
+func waitForMetadataGeneration(t *testing.T, s *server, want uint64) {
+	t.Helper()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	for {
+		s.metadataMu.Lock()
+		generation := s.metadataGeneration
+		s.metadataMu.Unlock()
+		if generation >= want {
+			return
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("metadata generation did not publish: got %d, want at least %d", generation, want)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
 func TestSessionMetadataDoesNotClearRosterOnInitialDiscoveryFailure(t *testing.T) {
 	s := &server{tmuxSessionRosterFn: func() ([]string, error) {
 		return nil, errors.New("synthetic initial tmux roster failure")
@@ -1654,6 +1776,12 @@ func TestSessionMetadataKeepsRosterAndReportsPaneInventoryFailure(t *testing.T) 
 	order, ok := payload["session_order"].([]any)
 	if !ok || len(order) != 1 || order[0] != "synthetic-pane-failure" {
 		t.Fatalf("pane inventory failure cleared roster: %#v", payload["session_order"])
+	}
+	waitForMetadataGeneration(t, s, 1)
+	record = httptest.NewRecorder()
+	s.sessionMetadata(record, httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil))
+	if err := json.Unmarshal(record.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
 	}
 	errorsPayload, ok := payload["errors"].([]any)
 	if !ok || len(errorsPayload) == 0 || strings.TrimSpace(fmt.Sprint(errorsPayload[0])) == "" {
@@ -2272,6 +2400,7 @@ func TestPhase45FinderGitRoutesExposeDiffAndBlameContracts(t *testing.T) {
 func TestPhase8SessionFilesRoutesExposeParityEnvelopes(t *testing.T) {
 	root := t.TempDir()
 	config := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
 	if err := os.WriteFile(filepath.Join(config, "auth.yaml"), []byte("users:\n  - username: readonly\n    password: readonly\n    role: readonly\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -2296,6 +2425,28 @@ func TestPhase8SessionFilesRoutesExposeParityEnvelopes(t *testing.T) {
 	if err := os.WriteFile(path, []byte("working\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	visibleRepo := filepath.Join(root, "visible-subrepo")
+	if err := os.Mkdir(visibleRepo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	visibleFile := filepath.Join(visibleRepo, "visible.txt")
+	if err := os.WriteFile(visibleFile, []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"init", "-q", visibleRepo},
+		{"-C", visibleRepo, "config", "user.email", "test@example.invalid"},
+		{"-C", visibleRepo, "config", "user.name", "Finder Test"},
+		{"-C", visibleRepo, "add", "visible.txt"},
+		{"-C", visibleRepo, "commit", "-qm", "initial"},
+	} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("visible repo git %v: %v (%s)", args, err, output)
+		}
+	}
+	if err := os.WriteFile(visibleFile, []byte("visible working\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	// Bazel's TEST_TMPDIR can be deeply nested. Keep the Unix socket itself under /tmp;
 	// tmux rejects a longer pathname before the test reaches the route under test.
@@ -2311,13 +2462,36 @@ func TestPhase8SessionFilesRoutesExposeParityEnvelopes(t *testing.T) {
 		t.Fatalf("tmux new-session: %v (%s)", err, output)
 	}
 	t.Cleanup(func() { _ = exec.Command("tmux", "-S", tmuxSocket, "kill-server").Run() })
+	tmuxBinary, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmuxLog := filepath.Join(tmuxSocketDir, "tmux-calls.txt")
+	tmuxWrapperDir := filepath.Join(tmuxSocketDir, "bin")
+	if err := os.Mkdir(tmuxWrapperDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tmuxWrapper := filepath.Join(tmuxWrapperDir, "tmux")
+	wrapperBody := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$YOLOMUX_TEST_TMUX_LOG\"\nexec " + tmuxBinary + " \"$@\"\n"
+	if err := os.WriteFile(tmuxWrapper, []byte(wrapperBody), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("YOLOMUX_TEST_TMUX_LOG", tmuxLog)
+	t.Setenv("PATH", tmuxWrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	service, err := finder.New(root, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer service.Close()
-	s := &server{root: root, config: config, finder: service, capabilities: capabilities.New("go-test")}
+	processEntryScans := 0
+	s := &server{
+		root: root, config: config, finder: service, capabilities: capabilities.New("go-test"),
+		processEntriesFn: func() ([]procEntry, error) {
+			processEntryScans++
+			return nil, nil
+		},
+	}
 	mux := http.NewServeMux()
 	s.registerFilesystemRoutes(mux)
 	serve := func(requestURL string) *httptest.ResponseRecorder {
@@ -2343,16 +2517,130 @@ func TestPhase8SessionFilesRoutesExposeParityEnvelopes(t *testing.T) {
 	}
 
 	refs := url.QueryEscape(`{"` + root + `":{"from":"HEAD","to":"current"}}`)
-	single := decode(serve("/api/session-files?session=" + url.QueryEscape(session) + "&hours=7.5&from=HEAD&to=current&refs=" + refs))
+	singleURL := "/api/session-files?session=" + url.QueryEscape(session) + "&hours=7.5&from=HEAD&to=current&refs=" + refs + "&repo_path=" + url.QueryEscape(visibleRepo)
+	single := decode(serve(singleURL))
 	data, ok := single["data"].(map[string]any)
 	if !ok || data["session"] != session || data["hours"] != 7.5 || data["from_ref"] != "HEAD" || data["to_ref"] != "current" {
 		t.Fatalf("single session-files data = %#v", single)
 	}
-	if files, ok := data["files"].([]any); !ok || len(files) != 1 {
+	files, ok := data["files"].([]any)
+	if !ok {
 		t.Fatalf("single session-files files = %#v", data["files"])
 	}
-
-	batch := decode(serve("/api/session-files-batch?session=" + url.QueryEscape(session) + "&session=" + url.QueryEscape(session)))
+	hasVisibleFile := false
+	for _, rawFile := range files {
+		file, _ := rawFile.(map[string]any)
+		if file["repo"] == visibleRepo && file["path"] == "visible.txt" {
+			hasVisibleFile = true
+		}
+	}
+	if !hasVisibleFile {
+		t.Fatalf("JSON omitted explicitly visible file %q: %#v", visibleFile, files)
+	}
+	hasVisibleRepo := false
+	for _, rawRepo := range data["repos"].([]any) {
+		repo, _ := rawRepo.(map[string]any)
+		if repo["repo"] == visibleRepo {
+			hasVisibleRepo = true
+		}
+	}
+	if !hasVisibleRepo {
+		t.Fatalf("JSON omitted explicitly visible repository %q: %#v", visibleRepo, data["repos"])
+	}
+	if processEntryScans == 0 {
+		t.Fatal("cold session-files request did not inspect pane processes")
+	}
+	coldProcessEntryScans := processEntryScans
+	if err := os.WriteFile(tmuxLog, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	warmSingle := decode(serve(singleURL))
+	warmData := warmSingle["data"].(map[string]any)
+	cacheMetadata := warmData["cache"].(map[string]any)
+	if cacheMetadata["hit"] != true {
+		t.Fatalf("warm session-files cache metadata = %#v", cacheMetadata)
+	}
+	if processEntryScans != coldProcessEntryScans {
+		t.Fatalf("warm session-files rescanned pane processes: before=%d after=%d", coldProcessEntryScans, processEntryScans)
+	}
+	tmuxCalls, err := os.ReadFile(tmuxLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(tmuxCalls), "list-panes") || strings.Contains(string(tmuxCalls), "has-session") || strings.Count(string(tmuxCalls), "display-message") != 1 {
+		t.Fatalf("warm cache tmux calls = %q, want one lightweight incarnation lookup", tmuxCalls)
+	}
+	if err := os.WriteFile(tmuxLog, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	freshSingle := decode(serve(singleURL + "&fresh_git=1"))
+	freshSingleData := freshSingle["data"].(map[string]any)
+	freshSingleCache := freshSingleData["cache"].(map[string]any)
+	if freshSingleCache["hit"] != false {
+		t.Fatalf("fresh_git session-files cache metadata = %#v", freshSingleCache)
+	}
+	tmuxCalls, err = os.ReadFile(tmuxLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(tmuxCalls), "list-panes") {
+		t.Fatalf("fresh_git session-files reused cached panes; tmux calls = %q", tmuxCalls)
+	}
+	if err := os.WriteFile(tmuxLog, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	forcedSingle := decode(serve(singleURL + "&force=1"))
+	forcedSingleCache := forcedSingle["data"].(map[string]any)["cache"].(map[string]any)
+	if forcedSingleCache["hit"] != false {
+		t.Fatalf("forced session-files cache metadata = %#v", forcedSingleCache)
+	}
+	tmuxCalls, err = os.ReadFile(tmuxLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(tmuxCalls), "list-panes") {
+		t.Fatalf("force=1 session-files reused cached panes; tmux calls = %q", tmuxCalls)
+	}
+	if err := os.WriteFile(tmuxLog, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	streamURL := strings.Replace(singleURL, "/api/session-files?", "/api/session-files-stream?", 1)
+	beforeWarmStreamScans := processEntryScans
+	warmStream := serve(streamURL)
+	if warmStream.Code != http.StatusOK || !strings.Contains(warmStream.Body.String(), "event: repo") || !strings.Contains(warmStream.Body.String(), "event: done") || !strings.Contains(warmStream.Body.String(), visibleRepo) {
+		t.Fatalf("warm session-files stream = %d %s", warmStream.Code, warmStream.Body.String())
+	}
+	if processEntryScans != beforeWarmStreamScans {
+		t.Fatalf("warm session-files stream rescanned pane processes: before=%d after=%d", beforeWarmStreamScans, processEntryScans)
+	}
+	tmuxCalls, err = os.ReadFile(tmuxLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(tmuxCalls), "list-panes") || strings.Contains(string(tmuxCalls), "has-session") || strings.Count(string(tmuxCalls), "display-message") != 1 {
+		t.Fatalf("warm stream cache tmux calls = %q, want one lightweight incarnation lookup", tmuxCalls)
+	}
+	if err := os.WriteFile(tmuxLog, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	forcedStream := serve(streamURL + "&force=1")
+	if forcedStream.Code != http.StatusOK || !strings.Contains(forcedStream.Body.String(), "event: done") {
+		t.Fatalf("forced session-files stream = %d %s", forcedStream.Code, forcedStream.Body.String())
+	}
+	tmuxCalls, err = os.ReadFile(tmuxLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(tmuxCalls), "list-panes") {
+		t.Fatalf("force=1 stream reused cached panes; tmux calls = %q", tmuxCalls)
+	}
+	missingStreamURL := strings.Replace(streamURL, url.QueryEscape(session), "missing-session", 1)
+	missingStream := serve(missingStreamURL)
+	if missingStream.Code != http.StatusOK || !strings.Contains(missingStream.Body.String(), "event: start") || !strings.Contains(missingStream.Body.String(), "event: error") {
+		t.Fatalf("missing session stream = %d %s, want a terminal SSE error event", missingStream.Code, missingStream.Body.String())
+	}
+	batchURL := "/api/session-files-batch?session=" + url.QueryEscape(session) + "&session=" + url.QueryEscape(session) + "&repo_path=" + url.QueryEscape(visibleRepo)
+	batch := decode(serve(batchURL))
 	batchData, ok := batch["data"].(map[string]any)
 	if !ok {
 		t.Fatalf("batch session-files data = %#v", batch)
@@ -2365,14 +2653,109 @@ func TestPhase8SessionFilesRoutesExposeParityEnvelopes(t *testing.T) {
 	if !ok || statuses[session] != float64(http.StatusOK) {
 		t.Fatalf("batch statuses = %#v", batchData["statuses"])
 	}
-
-	aggregate := decode(serve("/api/session-files?hours=7.5&from=HEAD&to=current"))
+	batchSession := sessions[session].(map[string]any)
+	batchHasVisibleFile := false
+	for _, rawFile := range batchSession["files"].([]any) {
+		file, _ := rawFile.(map[string]any)
+		if file["repo"] == visibleRepo && file["path"] == "visible.txt" {
+			batchHasVisibleFile = true
+		}
+	}
+	if !batchHasVisibleFile {
+		t.Fatalf("batch JSON omitted explicitly visible file %q: %#v", visibleFile, batchSession["files"])
+	}
+	partialBatch := decode(serve("/api/session-files-batch?session=missing-session&session=" + url.QueryEscape(session) + "&repo_path=" + url.QueryEscape(visibleRepo) + "&fresh_git=1"))
+	partialData := partialBatch["data"].(map[string]any)
+	partialSessions := partialData["sessions"].(map[string]any)
+	partialStatuses := partialData["statuses"].(map[string]any)
+	if partialStatuses["missing-session"] != float64(http.StatusNotFound) || partialStatuses[session] != float64(http.StatusOK) {
+		t.Fatalf("partial batch statuses = %#v", partialStatuses)
+	}
+	if _, ok := partialSessions[session]; !ok {
+		t.Fatalf("failed session discarded its successful sibling: %#v", partialSessions)
+	}
+	beforeWarmBatchScans := processEntryScans
+	if err := os.WriteFile(tmuxLog, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	warmBatch := decode(serve(batchURL))
+	warmBatchData := warmBatch["data"].(map[string]any)
+	warmBatchSessions := warmBatchData["sessions"].(map[string]any)
+	warmBatchSession := warmBatchSessions[session].(map[string]any)
+	warmBatchCache := warmBatchSession["cache"].(map[string]any)
+	if warmBatchCache["hit"] != true {
+		t.Fatalf("warm batch cache metadata = %#v", warmBatchCache)
+	}
+	if processEntryScans != beforeWarmBatchScans {
+		t.Fatalf("warm batch rescanned pane processes: before=%d after=%d", beforeWarmBatchScans, processEntryScans)
+	}
+	tmuxCalls, err = os.ReadFile(tmuxLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(tmuxCalls), "list-panes") || strings.Contains(string(tmuxCalls), "has-session") || strings.Count(string(tmuxCalls), "display-message") != 1 {
+		t.Fatalf("warm batch cache tmux calls = %q, want one lightweight incarnation lookup", tmuxCalls)
+	}
+	if err := os.WriteFile(tmuxLog, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	freshBatch := decode(serve("/api/session-files-batch?session=" + url.QueryEscape(session) + "&fresh_git=1"))
+	freshBatchData := freshBatch["data"].(map[string]any)
+	freshBatchSessions := freshBatchData["sessions"].(map[string]any)
+	freshBatchSession := freshBatchSessions[session].(map[string]any)
+	freshBatchCache := freshBatchSession["cache"].(map[string]any)
+	if freshBatchCache["hit"] != false {
+		t.Fatalf("fresh_git batch cache metadata = %#v", freshBatchCache)
+	}
+	tmuxCalls, err = os.ReadFile(tmuxLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(tmuxCalls), "list-panes") {
+		t.Fatalf("fresh_git batch reused cached panes; tmux calls = %q", tmuxCalls)
+	}
+	if err := os.WriteFile(tmuxLog, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	forcedBatch := decode(serve("/api/session-files-batch?session=" + url.QueryEscape(session) + "&force=1"))
+	forcedBatchCache := forcedBatch["data"].(map[string]any)["sessions"].(map[string]any)[session].(map[string]any)["cache"].(map[string]any)
+	if forcedBatchCache["hit"] != false {
+		t.Fatalf("force=1 batch cache metadata = %#v", forcedBatchCache)
+	}
+	tmuxCalls, err = os.ReadFile(tmuxLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(tmuxCalls), "list-panes") {
+		t.Fatalf("force=1 batch reused cached panes; tmux calls = %q", tmuxCalls)
+	}
+	aggregateURL := "/api/session-files?hours=7.5&from=HEAD&to=current&repo_path=" + url.QueryEscape(visibleRepo)
+	aggregate := decode(serve(aggregateURL))
 	aggregateData, ok := aggregate["data"].(map[string]any)
 	if !ok || aggregateData["session"] != "" || aggregateData["hours"] != 7.5 || aggregateData["from_ref"] != "HEAD" || aggregateData["to_ref"] != "current" {
 		t.Fatalf("aggregate session-files data = %#v", aggregate)
 	}
-	if files, ok := aggregateData["files"].([]any); !ok || len(files) != 1 {
+	aggregateFiles, ok := aggregateData["files"].([]any)
+	if !ok {
 		t.Fatalf("aggregate session-files files = %#v", aggregateData["files"])
+	}
+	aggregateHasVisibleFile := false
+	for _, rawFile := range aggregateFiles {
+		file, _ := rawFile.(map[string]any)
+		if file["repo"] == visibleRepo && file["path"] == "visible.txt" {
+			aggregateHasVisibleFile = true
+		}
+	}
+	if !aggregateHasVisibleFile {
+		t.Fatalf("aggregate JSON omitted explicitly visible file %q: %#v", visibleFile, aggregateFiles)
+	}
+	aggregateWarm := decode(serve(aggregateURL))["data"].(map[string]any)
+	if aggregateWarm["cache"].(map[string]any)["hit"] != true {
+		t.Fatalf("warm aggregate cache metadata = %#v", aggregateWarm["cache"])
+	}
+	forcedAggregate := decode(serve(aggregateURL + "&force=1"))["data"].(map[string]any)
+	if forcedAggregate["cache"].(map[string]any)["hit"] != false {
+		t.Fatalf("force=1 aggregate cache metadata = %#v", forcedAggregate["cache"])
 	}
 
 	cacheOnly := serve("/api/session-files?session=" + url.QueryEscape(session) + "&hours=7.5&cache_only=1&cache_view=" + strings.Repeat("0", 64))
@@ -2385,6 +2768,94 @@ func TestPhase8SessionFilesRoutesExposeParityEnvelopes(t *testing.T) {
 	}
 	if cacheOnlyPayload["state"] != "queued" || cacheOnlyPayload["status"] != "pending" || cacheOnlyPayload["terminal"] != false {
 		t.Fatalf("cache-only missing view envelope = %#v", cacheOnlyPayload)
+	}
+	cachedRequest := sessionFilesRequest{
+		session: session, hours: 7.5, fromRef: "HEAD", toRef: "current",
+		repoRefs: map[string]map[string]string{root: {"from": "HEAD", "to": "current"}}, repoPaths: []string{visibleRepo},
+	}
+	cachedViewID := sessionFilesCacheViewID(sessionFilesRequestDescriptor(cachedRequest))
+	cachedFilePath := filepath.Join(s.sessionFilesCacheDirectory(), cachedViewID+".json")
+	if err := os.WriteFile(tmuxLog, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	durableReader := &server{root: root, config: config}
+	durableWarm := httptest.NewRecorder()
+	durableReader.sessionFiles(durableWarm, httptest.NewRequest(http.MethodGet, singleURL, nil))
+	durableEnvelope := decode(durableWarm)
+	durableData := durableEnvelope["data"].(map[string]any)
+	durableCache := durableData["cache"].(map[string]any)
+	if durableCache["hit"] != true {
+		t.Fatalf("fresh server did not admit the durable session-files cache: %#v", durableCache)
+	}
+	tmuxCalls, err = os.ReadFile(tmuxLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(tmuxCalls), "list-panes") || strings.Contains(string(tmuxCalls), "has-session") || strings.Count(string(tmuxCalls), "display-message") != 2 {
+		t.Fatalf("fresh-server durable cache tmux calls = %q, want pre-read and post-read incarnation checks only", tmuxCalls)
+	}
+	oldCacheInfo, err := os.Stat(cachedFilePath)
+	if err != nil {
+		t.Fatalf("stat durable cache record before incarnation change: %v", err)
+	}
+	if output, err := exec.Command("tmux", "-S", tmuxSocket, "new-session", "-d", "-s", "cache-identity-keeper", "-c", root).CombinedOutput(); err != nil {
+		t.Fatalf("tmux keeper session: %v (%s)", err, output)
+	}
+	if err := os.WriteFile(tmuxLog, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("tmux", "-S", tmuxSocket, "kill-session", "-t", session).CombinedOutput(); err != nil {
+		t.Fatalf("tmux kill-session: %v (%s)", err, output)
+	}
+	if output, err := exec.Command("tmux", "-S", tmuxSocket, "new-session", "-d", "-s", session, "-c", root).CombinedOutput(); err != nil {
+		t.Fatalf("tmux recreate session: %v (%s)", err, output)
+	}
+	diskReader := &server{config: config}
+	if _, _, ok := diskReader.readLiveSessionFilesCache(cachedRequest, cachedViewID); ok {
+		t.Fatal("disk cache admitted the old record for a recreated session")
+	}
+	newCacheInfo, err := os.Stat(cachedFilePath)
+	if err != nil {
+		t.Fatalf("stat cache record after incarnation rejection: %v", err)
+	}
+	if !newCacheInfo.ModTime().Equal(oldCacheInfo.ModTime()) {
+		t.Fatalf("rejected old incarnation refreshed disk recency: before=%s after=%s", oldCacheInfo.ModTime(), newCacheInfo.ModTime())
+	}
+	cacheOnlyURL := singleURL + "&cache_only=1&cache_view=" + cachedViewID
+	cacheOnlyRecreated := serve(cacheOnlyURL)
+	if cacheOnlyRecreated.Code != http.StatusAccepted {
+		t.Fatalf("cache-only read for recreated session = %d %s, want pending", cacheOnlyRecreated.Code, cacheOnlyRecreated.Body.String())
+	}
+	tmuxCalls, err = os.ReadFile(tmuxLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(tmuxCalls), "list-panes") || strings.Contains(string(tmuxCalls), "has-session") {
+		t.Fatalf("cache-only incarnation check performed rich discovery: %q", tmuxCalls)
+	}
+	_ = decode(serve(singleURL))
+	tmuxCalls, err = os.ReadFile(tmuxLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(tmuxCalls), "list-panes") {
+		t.Fatalf("recreated session reused cached pane data; tmux calls = %q", tmuxCalls)
+	}
+	if err := os.WriteFile(tmuxLog, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recreatedWarm := decode(serve(singleURL))
+	recreatedWarmData := recreatedWarm["data"].(map[string]any)
+	recreatedWarmCache := recreatedWarmData["cache"].(map[string]any)
+	if recreatedWarmCache["hit"] != true {
+		t.Fatalf("recreated session did not publish its own cache entry: %#v", recreatedWarmCache)
+	}
+	tmuxCalls, err = os.ReadFile(tmuxLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(tmuxCalls), "list-panes") || strings.Contains(string(tmuxCalls), "has-session") {
+		t.Fatalf("recreated session warm read repeated pane discovery: %q", tmuxCalls)
 	}
 }
 
@@ -2407,17 +2878,31 @@ func TestPhase8CacheOnlySessionFilesReadSkipsSessionDiscovery(t *testing.T) {
 
 func TestPhase8SessionFilesCachePersistsAndRejectsMismatchedViews(t *testing.T) {
 	config := t.TempDir()
-	request := sessionFilesRequest{session: "session-1", hours: 24, fromRef: "HEAD", toRef: "current"}
+	request := sessionFilesRequest{session: "session-1", hours: 24, fromRef: "HEAD", toRef: "current", sessionIdentity: "test-incarnation"}
 	descriptor := sessionFilesRequestDescriptor(request)
 	viewID := sessionFilesCacheViewID(descriptor)
 	payload := map[string]any{"session": request.session, "files": []any{"changed.py"}, "loaded": true}
 	writer := &server{config: config}
 	writer.writeSessionFilesCache(request, viewID, payload, http.StatusOK)
+	payload["session"] = "caller-mutation"
+	payload["files"].([]any)[0] = "caller-mutation.py"
+	memoryRecord, ok := writer.readSessionFilesCache(request, viewID)
+	if !ok || memoryRecord.Payload["session"] != request.session || memoryRecord.Payload["files"].([]any)[0] != "changed.py" {
+		t.Fatalf("cache publication retained caller-owned payload data: %#v, ok=%t", memoryRecord.Payload, ok)
+	}
 
 	reader := &server{config: config}
 	record, ok := reader.readSessionFilesCache(request, viewID)
 	if !ok || record.Payload["session"] != request.session {
 		t.Fatalf("persisted cache read = %#v, ok=%t", record, ok)
+	}
+	responsePayload := sessionFilesPayloadWithCache(record, descriptor, viewID, true, false, false, time.Now())
+	responsePayload["session"] = "response-only"
+	if record.Payload["session"] != request.session {
+		t.Fatalf("response envelope mutation changed cached payload: %#v", record.Payload)
+	}
+	if _, exists := record.Payload["cache"]; exists {
+		t.Fatalf("cache metadata was added to the immutable cached payload: %#v", record.Payload)
 	}
 	mismatched := request
 	mismatched.fromRef = "other"
@@ -2426,9 +2911,333 @@ func TestPhase8SessionFilesCachePersistsAndRejectsMismatchedViews(t *testing.T) 
 	}
 }
 
+func TestSessionFilesWarmMemoryReadDoesNotWaitForDiskPublication(t *testing.T) {
+	request := sessionFilesRequest{session: "session-1", hours: 24}
+	descriptor := sessionFilesRequestDescriptor(request)
+	viewID := sessionFilesCacheViewID(descriptor)
+	records := cache.NewLRU[string, sessionFilesCacheRecord](sessionFilesCacheMaxEntries)
+	records.Set(viewID, sessionFilesCacheRecord{
+		RequestDescriptor: descriptor,
+		CacheViewID:       viewID,
+		StoredAt:          time.Now().UnixNano(),
+		Status:            http.StatusOK,
+		Payload:           map[string]any{"files": []any{}},
+	})
+	s := &server{sessionFilesCache: sessionFilesCacheState{records: records}}
+	s.sessionFilesCache.publicationMu.Lock()
+	defer s.sessionFilesCache.publicationMu.Unlock()
+	s.sessionFilesCache.recencyMu.Lock()
+	defer s.sessionFilesCache.recencyMu.Unlock()
+
+	read := make(chan bool, 1)
+	go func() {
+		_, ok := s.readSessionFilesCache(request, viewID)
+		read <- ok
+	}()
+	select {
+	case ok := <-read:
+		if !ok {
+			t.Fatal("warm memory cache read missed its published record")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("warm memory cache read waited on a disk cache lock")
+	}
+}
+
+func TestSessionFilesRejectedIncarnationDoesNotRefreshMemoryRecency(t *testing.T) {
+	request := sessionFilesRequest{session: "session-1", hours: 24, sessionIdentity: "current-incarnation"}
+	descriptor := sessionFilesRequestDescriptor(request)
+	viewID := sessionFilesCacheViewID(descriptor)
+	otherView := strings.Repeat("a", 64)
+	records := cache.NewLRU[string, sessionFilesCacheRecord](2)
+	records.Set(viewID, sessionFilesCacheRecord{
+		RequestDescriptor: descriptor, CacheViewID: viewID, StoredAt: time.Now().UnixNano(), Status: http.StatusOK,
+		SessionIdentity: "old-incarnation", Payload: map[string]any{"files": []any{}},
+	})
+	records.Set(otherView, sessionFilesCacheRecord{
+		RequestDescriptor: "other", CacheViewID: otherView, StoredAt: time.Now().UnixNano(), Status: http.StatusOK,
+		Payload: map[string]any{"files": []any{}},
+	})
+	wantOrder := records.KeysLeastRecentFirst()
+	s := &server{sessionFilesCache: sessionFilesCacheState{records: records}}
+	if _, ok := s.readSessionFilesCache(request, viewID); ok {
+		t.Fatal("cache admitted the old session incarnation")
+	}
+	if got := records.KeysLeastRecentFirst(); !reflect.DeepEqual(got, wantOrder) {
+		t.Fatalf("rejected incarnation changed memory LRU order: got %v, want %v", got, wantOrder)
+	}
+}
+
+func TestSessionFilesCacheRejectsLateWriteFromOtherIncarnation(t *testing.T) {
+	config := t.TempDir()
+	t.Setenv("YOLOMUX_TMUX_SOCKET", filepath.Join(t.TempDir(), "missing-tmux.sock"))
+	newRequest := sessionFilesRequest{session: "session-1", hours: 24, sessionIdentity: "new-incarnation"}
+	viewID := sessionFilesCacheViewID(sessionFilesRequestDescriptor(newRequest))
+	cacheServer := &server{config: config}
+	cacheServer.writeSessionFilesCache(newRequest, viewID, map[string]any{"session": "session-1", "files": []any{"new.py"}}, http.StatusOK)
+
+	oldRequest := newRequest
+	oldRequest.sessionIdentity = "old-incarnation"
+	cacheServer.writeSessionFilesCache(oldRequest, viewID, map[string]any{"session": "session-1", "files": []any{"old.py"}}, http.StatusOK)
+
+	reader := &server{config: config}
+	record, ok := reader.readSessionFilesCache(newRequest, viewID)
+	if !ok || record.SessionIdentity != "new-incarnation" || record.Payload["files"].([]any)[0] != "new.py" {
+		t.Fatalf("late old-incarnation cache write replaced current record: %#v, ok=%t", record, ok)
+	}
+}
+
+func TestSessionFilesDiskPromotionPreservesNewerMemoryPublication(t *testing.T) {
+	request := sessionFilesRequest{session: "session-1", hours: 24}
+	descriptor := sessionFilesRequestDescriptor(request)
+	viewID := sessionFilesCacheViewID(descriptor)
+	newRecord := sessionFilesCacheRecord{
+		RequestDescriptor: descriptor, CacheViewID: viewID, StoredAt: time.Now().UnixNano(), Status: http.StatusOK,
+		SessionIdentity: "new-incarnation", Payload: map[string]any{"files": []any{"new.py"}},
+	}
+	oldDiskRecord := sessionFilesCacheRecord{
+		RequestDescriptor: descriptor, CacheViewID: viewID, StoredAt: newRecord.StoredAt - int64(time.Second), Status: http.StatusOK,
+		SessionIdentity: "old-incarnation", Payload: map[string]any{"files": []any{"old.py"}},
+	}
+	cacheServer := &server{config: t.TempDir(), host: "127.0.0.1", port: 7220}
+	directory := cacheServer.sessionFilesCacheDirectory()
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	diskBytes, err := json.Marshal(oldDiskRecord)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, viewID+".json"), diskBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Hold the older disk snapshot, then publish the new incarnation before its
+	// promotion step, matching a disk read racing a refresh completion.
+	diskFile, ok := openSessionFilesCacheFile(directory, viewID)
+	if !ok {
+		t.Fatal("older disk cache record could not be opened")
+	}
+	var loadedDiskRecord sessionFilesCacheRecord
+	decodeErr := json.NewDecoder(diskFile).Decode(&loadedDiskRecord)
+	if closeErr := diskFile.Close(); decodeErr == nil {
+		decodeErr = closeErr
+	}
+	if decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	newRequest := request
+	newRequest.sessionIdentity = "new-incarnation"
+	if !cacheServer.writeSessionFilesCache(newRequest, viewID, newRecord.Payload, http.StatusOK) {
+		t.Fatal("new incarnation cache publication failed")
+	}
+	loaded := cacheServer.publishLoadedSessionFilesCacheRecord(descriptor, viewID, loadedDiskRecord, "old-incarnation")
+	if loaded.SessionIdentity != "new-incarnation" || loaded.Payload["files"].([]any)[0] != "new.py" {
+		t.Fatalf("late disk promotion replaced newer memory publication: %#v", loaded)
+	}
+}
+
+func TestSessionFilesMemoryCacheEvictsLeastRecentlyUsedView(t *testing.T) {
+	requests := make([]sessionFilesRequest, sessionFilesCacheMaxEntries)
+	viewIDs := make([]string, sessionFilesCacheMaxEntries)
+	records := cache.NewLRU[string, sessionFilesCacheRecord](sessionFilesCacheMaxEntries)
+	for index := range requests {
+		requests[index] = sessionFilesRequest{session: fmt.Sprintf("session-cache-%d", index), hours: 24}
+		descriptor := sessionFilesRequestDescriptor(requests[index])
+		viewIDs[index] = sessionFilesCacheViewID(descriptor)
+		records.Set(viewIDs[index], sessionFilesCacheRecord{
+			RequestDescriptor: descriptor, CacheViewID: viewIDs[index], StoredAt: time.Now().UnixNano(),
+			Status: http.StatusOK, Payload: map[string]any{"files": []any{}},
+		})
+	}
+	cacheServer := &server{sessionFilesCache: sessionFilesCacheState{records: records}}
+	if _, ok := cacheServer.readSessionFilesCache(requests[0], viewIDs[0]); !ok {
+		t.Fatal("oldest memory cache view could not be read")
+	}
+
+	newRequest := sessionFilesRequest{session: "session-cache-new", hours: 24}
+	newDescriptor := sessionFilesRequestDescriptor(newRequest)
+	newViewID := sessionFilesCacheViewID(newDescriptor)
+	cacheServer.sessionFilesCache.mu.Lock()
+	cacheServer.sessionFilesCache.records.Set(newViewID, sessionFilesCacheRecord{
+		RequestDescriptor: newDescriptor, CacheViewID: newViewID, StoredAt: time.Now().UnixNano(),
+		Status: http.StatusOK, Payload: map[string]any{"files": []any{}},
+	})
+	cacheServer.sessionFilesCache.mu.Unlock()
+	if _, ok := cacheServer.readSessionFilesCache(requests[0], viewIDs[0]); !ok {
+		t.Fatal("recently read memory cache view was evicted")
+	}
+	if _, ok := cacheServer.readSessionFilesCache(requests[1], viewIDs[1]); ok {
+		t.Fatal("least-recently-used memory cache view remained")
+	}
+}
+
+func TestSessionFilesCacheDirectorySeparatesListenerIdentityWithSharedState(t *testing.T) {
+	sharedState := t.TempDir()
+	first := &server{state: sharedState, host: "127.0.0.1", port: 7220}
+	second := &server{state: sharedState, host: "127.0.0.1", port: 7221}
+	otherHost := &server{state: sharedState, host: "0.0.0.0", port: 7220}
+	inheritedListener := &server{state: sharedState, host: "127.0.0.1", port: 7220, sessionFilesListener: "0.0.0.0:7220"}
+	otherCheckout := &server{root: "/checkout/other", state: sharedState, host: "127.0.0.1", port: 7220}
+	firstDirectory := first.sessionFilesCacheDirectory()
+	secondDirectory := second.sessionFilesCacheDirectory()
+	if firstDirectory == secondDirectory || firstDirectory == otherHost.sessionFilesCacheDirectory() || firstDirectory == inheritedListener.sessionFilesCacheDirectory() || firstDirectory == otherCheckout.sessionFilesCacheDirectory() {
+		t.Fatalf("distinct listener cache directories overlap: first=%q second=%q other_host=%q inherited=%q other_checkout=%q", firstDirectory, secondDirectory, otherHost.sessionFilesCacheDirectory(), inheritedListener.sessionFilesCacheDirectory(), otherCheckout.sessionFilesCacheDirectory())
+	}
+	if firstDirectory != (&server{state: sharedState, host: "127.0.0.1", port: 7220}).sessionFilesCacheDirectory() {
+		t.Fatalf("first port cache directory = %q", firstDirectory)
+	}
+	if secondDirectory != (&server{state: sharedState, host: "127.0.0.1", port: 7221}).sessionFilesCacheDirectory() {
+		t.Fatalf("second port cache directory = %q", secondDirectory)
+	}
+}
+
+func TestSessionFilesCacheHitsRefreshDurableEvictionRecency(t *testing.T) {
+	for _, hitKind := range []string{"memory", "disk"} {
+		t.Run(hitKind, func(t *testing.T) {
+			config := t.TempDir()
+			cacheServer := &server{config: config, host: "127.0.0.1", port: 7220}
+			directory := cacheServer.sessionFilesCacheDirectory()
+			if err := os.MkdirAll(directory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(directory, "state.json"), []byte("keep"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			base := time.Now().Add(-time.Hour)
+			requests := make([]sessionFilesRequest, sessionFilesCacheMaxEntries)
+			viewIDs := make([]string, sessionFilesCacheMaxEntries)
+			records := cache.NewLRU[string, sessionFilesCacheRecord](sessionFilesCacheMaxEntries)
+			for index := range requests {
+				requests[index] = sessionFilesRequest{hours: float64(index + 1)}
+				descriptor := sessionFilesRequestDescriptor(requests[index])
+				viewIDs[index] = sessionFilesCacheViewID(descriptor)
+				record := sessionFilesCacheRecord{
+					RequestDescriptor: descriptor, CacheViewID: viewIDs[index], StoredAt: time.Now().UnixNano(),
+					Status: http.StatusOK, Payload: map[string]any{"files": []any{}},
+				}
+				data, err := json.Marshal(record)
+				if err != nil {
+					t.Fatal(err)
+				}
+				path := filepath.Join(directory, viewIDs[index]+".json")
+				if err := os.WriteFile(path, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				oldTime := base.Add(time.Duration(index) * time.Millisecond)
+				if err := os.Chtimes(path, oldTime, oldTime); err != nil {
+					t.Fatal(err)
+				}
+				if index == 0 && hitKind == "memory" {
+					records.Set(viewIDs[index], record)
+				}
+			}
+			cacheServer.sessionFilesCache = sessionFilesCacheState{records: records}
+			if _, ok := cacheServer.readSessionFilesCache(requests[0], viewIDs[0]); !ok {
+				t.Fatalf("%s cache read did not return the oldest durable record", hitKind)
+			}
+			if hitKind == "disk" {
+				cacheServer.sessionFilesCache.mu.Lock()
+				cacheServer.sessionFilesCache.records = nil
+				cacheServer.sessionFilesCache.mu.Unlock()
+			}
+
+			newRequest := sessionFilesRequest{hours: 1000}
+			newDescriptor := sessionFilesRequestDescriptor(newRequest)
+			newViewID := sessionFilesCacheViewID(newDescriptor)
+			cacheServer.writeSessionFilesCache(newRequest, newViewID, map[string]any{"files": []any{}}, http.StatusOK)
+			if _, err := os.Stat(filepath.Join(directory, viewIDs[0]+".json")); err != nil {
+				t.Fatalf("recently read durable record was evicted: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(directory, viewIDs[1]+".json")); !os.IsNotExist(err) {
+				t.Fatalf("least-recently-used durable record remained: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(directory, "state.json")); err != nil {
+				t.Fatalf("unrelated state file was removed: %v", err)
+			}
+		})
+	}
+}
+
+func TestSessionFilesMemoryCacheReadPreservesDiskEvictionRecency(t *testing.T) {
+	config := t.TempDir()
+	cacheServer := &server{config: config, host: "127.0.0.1", port: 7220}
+	directory := cacheServer.sessionFilesCacheDirectory()
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().Add(-time.Hour)
+	requests := make([]sessionFilesRequest, sessionFilesCacheMaxEntries)
+	viewIDs := make([]string, sessionFilesCacheMaxEntries)
+	records := cache.NewLRU[string, sessionFilesCacheRecord](sessionFilesCacheMaxEntries)
+	for index := range requests {
+		requests[index] = sessionFilesRequest{hours: float64(index + 1)}
+		descriptor := sessionFilesRequestDescriptor(requests[index])
+		viewIDs[index] = sessionFilesCacheViewID(descriptor)
+		record := sessionFilesCacheRecord{
+			RequestDescriptor: descriptor, CacheViewID: viewIDs[index], StoredAt: time.Now().UnixNano(),
+			Status: http.StatusOK, Payload: map[string]any{"files": []any{}},
+		}
+		data, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(directory, viewIDs[index]+".json")
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		oldTime := base.Add(time.Duration(index) * time.Millisecond)
+		if err := os.Chtimes(path, oldTime, oldTime); err != nil {
+			t.Fatal(err)
+		}
+		if index == 0 {
+			records.Set(viewIDs[index], record)
+		}
+	}
+	cacheServer.sessionFilesCache = sessionFilesCacheState{records: records}
+	oldestPath := filepath.Join(directory, viewIDs[0]+".json")
+	oldestBefore, err := os.Stat(oldestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheServer.sessionFilesCache.recencyMu.Lock()
+	if _, ok := cacheServer.readSessionFilesCache(requests[0], viewIDs[0]); !ok {
+		cacheServer.sessionFilesCache.recencyMu.Unlock()
+		t.Fatal("warm memory cache read missed its published record")
+	}
+	cacheServer.sessionFilesCache.mu.Lock()
+	recencyDone := cacheServer.sessionFilesCache.recencyTouch[viewIDs[0]]
+	cacheServer.sessionFilesCache.mu.Unlock()
+	cacheServer.sessionFilesCache.recencyMu.Unlock()
+	if recencyDone == nil {
+		t.Fatal("memory cache hit did not schedule durable recency")
+	}
+	select {
+	case <-recencyDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("durable recency update did not finish")
+	}
+	oldestAfter, err := os.Stat(oldestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !oldestAfter.ModTime().After(oldestBefore.ModTime()) {
+		t.Fatalf("warm memory hit did not persist durable recency: before=%s after=%s", oldestBefore.ModTime(), oldestAfter.ModTime())
+	}
+	newRequest := sessionFilesRequest{hours: 1000}
+	newViewID := sessionFilesCacheViewID(sessionFilesRequestDescriptor(newRequest))
+	writer := &server{config: config, host: "127.0.0.1", port: 7220}
+	writer.writeSessionFilesCache(newRequest, newViewID, map[string]any{"files": []any{}}, http.StatusOK)
+	if _, err := os.Stat(filepath.Join(directory, viewIDs[0]+".json")); err != nil {
+		t.Fatalf("recently read durable record was evicted: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(directory, viewIDs[1]+".json")); !os.IsNotExist(err) {
+		t.Fatalf("least-recently-used durable record remained: %v", err)
+	}
+}
+
 func TestPhase8SessionFilesStaleRefreshIsSingleFlight(t *testing.T) {
 	config := t.TempDir()
-	request := sessionFilesRequest{session: "session-1", hours: 24}
+	request := sessionFilesRequest{hours: 24}
 	viewID := sessionFilesCacheViewID(sessionFilesRequestDescriptor(request))
 	server := &server{config: config, finderBackgroundJobs: newFinderBackgroundJobScheduler()}
 	defer server.finderBackgroundJobs.Close()
@@ -2463,6 +3272,53 @@ func TestPhase8SessionFilesStaleRefreshIsSingleFlight(t *testing.T) {
 		case <-deadline.C:
 			t.Fatalf("stale refresh did not publish cache: %#v", record)
 		}
+	}
+}
+
+func TestSessionFilesStaleRefreshCannotOverwriteNewerForegroundWrite(t *testing.T) {
+	config := t.TempDir()
+	request := sessionFilesRequest{hours: 24}
+	viewID := sessionFilesCacheViewID(sessionFilesRequestDescriptor(request))
+	server := &server{config: config, finderBackgroundJobs: newFinderBackgroundJobScheduler()}
+	defer server.finderBackgroundJobs.Close()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	task := func(ctx context.Context) (map[string]any, *finder.Error) {
+		close(started)
+		select {
+		case <-release:
+			return map[string]any{"files": []any{"stale.py"}}, nil
+		case <-ctx.Done():
+			return nil, &finder.Error{Status: http.StatusServiceUnavailable, Code: "cancelled", Message: ctx.Err().Error()}
+		}
+	}
+	if !server.scheduleSessionFilesRefresh(request, viewID, task) {
+		t.Fatal("stale refresh was not admitted")
+	}
+	<-started
+	server.writeSessionFilesCache(request, viewID, map[string]any{"files": []any{"fresh.py"}}, http.StatusOK)
+	close(release)
+
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for {
+		server.sessionFilesCache.mu.Lock()
+		refreshing := server.sessionFilesCache.refresh[viewID] != 0
+		server.sessionFilesCache.mu.Unlock()
+		if !refreshing {
+			break
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatal("stale refresh did not finish")
+		}
+	}
+	record, ok := server.readSessionFilesCache(request, viewID)
+	if !ok || record.Payload["files"].([]any)[0] != "fresh.py" {
+		t.Fatalf("stale refresh replaced newer foreground cache payload: %#v, ok=%t", record, ok)
 	}
 }
 
@@ -2623,7 +3479,7 @@ func TestSessionMetadataRouteProvidesBootIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity, ok := payload["metadata_identity"].(map[string]any)
-	if !ok || identity["epoch"] == "" || identity["generation"] != float64(1) {
+	if !ok || identity["epoch"] == "" || identity["generation"] != float64(0) {
 		t.Fatalf("metadata identity = %#v", payload["metadata_identity"])
 	}
 	cache, ok := payload["cache"].(map[string]any)
@@ -2635,6 +3491,598 @@ func TestSessionMetadataRouteProvidesBootIdentity(t *testing.T) {
 	servedGeneration, servedGenerationOK := identity["generation"].(float64)
 	if !ok || !pendingGenerationOK || !servedGenerationOK || pending["epoch"] != identity["epoch"] || pendingGeneration <= servedGeneration {
 		t.Fatalf("forced metadata pending identity = %#v, served = %#v", pending, identity)
+	}
+}
+
+func TestSessionMetadataWarmReadUsesPublishedEnrichment(t *testing.T) {
+	var enrichmentMu sync.Mutex
+	enrichmentCalls := 0
+	rosterCalls := 0
+	var gitSnapshotCalls atomic.Int64
+	s := &server{
+		gitMetadataSnapshotFn: func(string) (goGitSnapshot, bool) {
+			gitSnapshotCalls.Add(1)
+			return goGitSnapshot{}, false
+		},
+		metadataEnrichmentFn: func([]string) (map[string]map[string]any, error) {
+			enrichmentMu.Lock()
+			enrichmentCalls++
+			enrichmentMu.Unlock()
+			return nil, nil
+		},
+		metadataGeneration:         7,
+		metadataTopologyGeneration: 7,
+		metadataTopologySignature:  tmuxTopologySignature([]string{"cached"}, map[string]string{"cached": "cached"}),
+		metadataPayload: map[string]any{
+			"sessions": map[string]any{"cached": map[string]any{
+				"session_identity": goTmuxSessionIdentity("cached", "cached"),
+				"work_graph":       map[string]any{"marker": "cached-work-graph"},
+			}},
+			"session_order": []string{"cached"}, "session_scope": "all",
+			"metadata_generation": uint64(7), "metadata_identity": map[string]any{"epoch": "test-epoch", "generation": uint64(7)},
+			"topology_generation": uint64(7), "published_marker": "cached-enrichment",
+		},
+		metadataBuiltAt:      time.Now(),
+		tmuxRoster:           []string{"cached"},
+		tmuxRosterIdentities: map[string]string{"cached": "cached"},
+		tmuxRosterKnown:      true,
+		tmuxRosterSampledAt:  time.Now(),
+		tmuxSessionRosterFn: func() ([]string, error) {
+			rosterCalls++
+			return []string{"cached"}, nil
+		},
+	}
+	response := httptest.NewRecorder()
+	s.sessionMetadata(response, httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("session metadata status = %d %s", response.Code, response.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	sessions := payload["sessions"].(map[string]any)
+	info := sessions["cached"].(map[string]any)
+	graph := info["work_graph"].(map[string]any)
+	if graph["marker"] != "cached-work-graph" {
+		t.Fatalf("warm metadata response discarded published work graph: %#v", graph)
+	}
+	if got := payload["metadata_generation"]; got != float64(7) {
+		t.Fatalf("warm metadata generation = %#v, want cached generation 7", got)
+	}
+	if rosterCalls != 0 {
+		t.Fatalf("warm metadata read ran %d synchronous roster lookups, want zero", rosterCalls)
+	}
+	if s.metadataRefreshInFlight() {
+		t.Fatal("warm metadata read started an enrichment refresh")
+	}
+	enrichmentMu.Lock()
+	defer enrichmentMu.Unlock()
+	if enrichmentCalls != 0 {
+		t.Fatalf("warm metadata read performed %d enrichment passes, want zero", enrichmentCalls)
+	}
+	if calls := gitSnapshotCalls.Load(); calls != 0 {
+		t.Fatalf("warm metadata read performed %d Git snapshot reads, want zero", calls)
+	}
+}
+
+func TestActivityWarmReadUsesPublishedMetadata(t *testing.T) {
+	socket := shortSyntheticTmuxSocket(t)
+	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
+	if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", "different").CombinedOutput(); err != nil {
+		t.Fatalf("create private tmux session: %v (%s)", err, output)
+	}
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
+	s := &server{
+		metadataGeneration:         7,
+		metadataTopologyGeneration: 7,
+		metadataTopologySignature:  tmuxTopologySignature([]string{"cached"}, map[string]string{"cached": "cached"}),
+		metadataPayload: map[string]any{
+			"sessions": map[string]any{"cached": map[string]any{
+				"session_identity": goTmuxSessionIdentity("cached", "cached"),
+				"panes":            []map[string]any{{"pane_id": "%7", "current_path": "/cached/repo"}},
+				"agents":           []map[string]any{{"window_index": 3, "pane_target": "%7", "kind": "codex", "status": "working"}},
+				"work_graph":       map[string]any{"marker": "published"},
+			}},
+			"topology_generation": uint64(7), "errors": []string{},
+		},
+		metadataBuiltAt:       time.Now(),
+		tmuxRoster:            []string{"cached"},
+		tmuxRosterIdentities:  map[string]string{"cached": "cached"},
+		tmuxRosterKnown:       true,
+		tmuxRosterSampledAt:   time.Now(),
+		tmuxSessionActivityFn: func() (map[string]float64, error) { return map[string]float64{}, nil },
+		tmuxWindowActivityFn:  func() (map[string]float64, error) { return map[string]float64{}, nil },
+	}
+	record := httptest.NewRecorder()
+	s.activity(record, httptest.NewRequest(http.MethodGet, "/api/activity?scope=all", nil))
+	if record.Code != http.StatusOK {
+		t.Fatalf("activity status = %d, body=%s", record.Code, record.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(record.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	info := payload["sessions"].(map[string]any)["cached"].(map[string]any)
+	if info["work_graph"].(map[string]any)["marker"] != "published" {
+		t.Fatalf("activity discarded published session metadata: %#v", info)
+	}
+	panes := info["panes"].([]any)
+	if len(panes) != 1 || panes[0].(map[string]any)["current_path"] != "/cached/repo" {
+		t.Fatalf("activity discarded published panes: %#v", panes)
+	}
+	if rows := payload["agents"].([]any); len(rows) != 1 || rows[0].(map[string]any)["kind"] != "codex" {
+		t.Fatalf("activity discarded published agent rows: %#v", payload["agents"])
+	}
+	cache := payload["cache"].(map[string]any)
+	if cache["hit"] != true || cache["stale"] != false {
+		t.Fatalf("warm activity cache state = %#v", cache)
+	}
+}
+
+func TestActivityUsesFreshPublishedAgentStatusInsteadOfMetadataCache(t *testing.T) {
+	ctx := context.Background()
+	writer, err := stats.OpenWriter(ctx, filepath.Join(t.TempDir(), "stats.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	service := stats.NewStatsService(writer, stats.StatsServiceConfig{
+		AgentStatus: func(context.Context) (stats.AgentStatusSnapshot, error) {
+			return stats.AgentStatusSnapshot{Available: true, Agents: []any{map[string]any{
+				"kind": "codex", "state": "run", "session": "cached", "pane": "%7",
+			}}}, nil
+		},
+	})
+	if err := service.RefreshAgentStatus(ctx); err != nil {
+		t.Fatal(err)
+	}
+	s := &server{
+		statsService:       service,
+		metadataGeneration: 7, metadataTopologyGeneration: 7,
+		metadataTopologySignature: tmuxTopologySignature([]string{"cached"}, map[string]string{"cached": "cached"}),
+		metadataPayload: map[string]any{
+			"sessions": map[string]any{"cached": map[string]any{
+				"session_identity": goTmuxSessionIdentity("cached", "cached"),
+				"agents":           []map[string]any{{"window_index": 3, "pane_target": "%7", "kind": "codex", "status": "idle", "window_active": true, "current": true}},
+			}},
+			"topology_generation": uint64(7), "errors": []string{},
+		},
+		metadataBuiltAt:       time.Now(),
+		tmuxSessionRosterFn:   func() ([]string, error) { return []string{"cached"}, nil },
+		tmuxSessionActivityFn: func() (map[string]float64, error) { return map[string]float64{}, nil },
+		tmuxWindowActivityFn:  func() (map[string]float64, error) { return map[string]float64{}, nil },
+	}
+	response := httptest.NewRecorder()
+	s.activity(response, httptest.NewRequest(http.MethodGet, "/api/activity", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("activity status = %d, body=%s", response.Code, response.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	agents := payload["agents"].([]any)
+	if len(agents) != 1 || agents[0].(map[string]any)["state"] != "working" {
+		t.Fatalf("activity used stale metadata agent state instead of latest stats publication: %#v", agents)
+	}
+}
+
+func TestActivityTopologyChangeQueuesMetadataAfterHeldBuild(t *testing.T) {
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondStarted := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	var releaseFirstOnce, releaseSecondOnce sync.Once
+	defer releaseFirstOnce.Do(func() { close(releaseFirst) })
+	defer releaseSecondOnce.Do(func() { close(releaseSecond) })
+	var enrichmentMu sync.Mutex
+	enrichmentCalls := 0
+	s := &server{
+		metadataGeneration:         1,
+		metadataNextGeneration:     1,
+		metadataTopologyGeneration: 1,
+		metadataTopologySignature:  tmuxTopologySignature([]string{"old"}, map[string]string{"old": "old"}),
+		metadataPayload: map[string]any{
+			"sessions":            map[string]any{"old": map[string]any{"session_identity": goTmuxSessionIdentity("old", "old")}},
+			"topology_generation": uint64(1), "errors": []string{},
+		},
+		metadataBuiltAt: time.Now(),
+		tmuxRoster:      []string{"old"},
+		tmuxRosterIdentities: map[string]string{
+			"old": "old",
+		},
+		tmuxRosterKnown:     true,
+		tmuxRosterSampledAt: time.Now(),
+		tmuxSessionRosterFn: func() ([]string, error) { return []string{"new"}, nil },
+		tmuxSessionActivityFn: func() (map[string]float64, error) {
+			return map[string]float64{}, nil
+		},
+		tmuxWindowActivityFn: func() (map[string]float64, error) {
+			return map[string]float64{}, nil
+		},
+		metadataEnrichmentFn: func(sessions []string) (map[string]map[string]any, error) {
+			enrichmentMu.Lock()
+			enrichmentCalls++
+			call := enrichmentCalls
+			enrichmentMu.Unlock()
+			switch call {
+			case 1:
+				close(firstStarted)
+				<-releaseFirst
+			case 2:
+				close(secondStarted)
+				<-releaseSecond
+			default:
+				t.Errorf("unexpected metadata enrichment call %d for %v", call, sessions)
+			}
+			return map[string]map[string]any{}, nil
+		},
+	}
+	if generation := s.queueMetadataRefresh(false, []string{"old"}, map[string]string{"old": "old"}, nil, 1); generation != 2 {
+		t.Fatalf("initial refresh generation = %d, want 2", generation)
+	}
+	<-firstStarted
+	record := httptest.NewRecorder()
+	s.activity(record, httptest.NewRequest(http.MethodGet, "/api/activity?scope=all", nil))
+	if record.Code != http.StatusOK {
+		t.Fatalf("activity status = %d, body=%s", record.Code, record.Body.String())
+	}
+	cache := map[string]any{}
+	if err := json.Unmarshal(record.Body.Bytes(), &cache); err != nil {
+		t.Fatal(err)
+	}
+	if cache["topology_generation"] != float64(2) {
+		t.Fatalf("activity topology generation = %#v, want 2", cache["topology_generation"])
+	}
+	releaseFirstOnce.Do(func() { close(releaseFirst) })
+	select {
+	case <-secondStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("activity topology change did not queue replacement metadata build")
+	}
+	s.metadataMu.Lock()
+	if s.metadataGeneration != 1 || metadataPayloadTopologyGeneration(s.metadataPayload) != 1 {
+		s.metadataMu.Unlock()
+		t.Fatalf("obsolete metadata build published after activity observed newer topology: generation=%d payload=%#v", s.metadataGeneration, s.metadataPayload)
+	}
+	s.metadataMu.Unlock()
+	releaseSecondOnce.Do(func() { close(releaseSecond) })
+	waitForMetadataGeneration(t, s, 3)
+	s.metadataMu.Lock()
+	publishedTopology := metadataPayloadTopologyGeneration(s.metadataPayload)
+	s.metadataMu.Unlock()
+	if publishedTopology != 2 {
+		t.Fatalf("replacement metadata topology generation = %d, want 2", publishedTopology)
+	}
+}
+
+func TestColdForcedSessionMetadataDoesNotClaimAnUnpublishedBuild(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseEnrichment := func() { releaseOnce.Do(func() { close(release) }) }
+	s := &server{
+		events:              newEventBroker(),
+		tmuxSessionRosterFn: func() ([]string, error) { return []string{"held"}, nil },
+		tmuxSessionActivityFn: func() (map[string]float64, error) {
+			return map[string]float64{}, nil
+		},
+		tmuxWindowActivityFn: func() (map[string]float64, error) {
+			return map[string]float64{}, nil
+		},
+		metadataEnrichmentFn: func(sessions []string) (map[string]map[string]any, error) {
+			close(started)
+			<-release
+			return map[string]map[string]any{"held": {"panes": []map[string]any{}, "agents": []map[string]any{}}}, nil
+		},
+	}
+	defer releaseEnrichment()
+	first := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		s.sessionMetadata(first, httptest.NewRequest(http.MethodGet, "/api/session-metadata?force=1", nil))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("cold metadata request waited for enrichment")
+	}
+	<-started
+	if first.Code != http.StatusOK {
+		t.Fatalf("cold metadata status = %d %s", first.Code, first.Body.String())
+	}
+	var firstPayload map[string]any
+	if err := json.Unmarshal(first.Body.Bytes(), &firstPayload); err != nil {
+		t.Fatal(err)
+	}
+	firstIdentity := firstPayload["metadata_identity"].(map[string]any)
+	firstCache := firstPayload["cache"].(map[string]any)
+	pending := firstCache["pending_identity"].(map[string]any)
+	if firstIdentity["generation"] != float64(0) || pending["generation"] != float64(1) {
+		t.Fatalf("cold forced identity = %#v, pending = %#v", firstIdentity, pending)
+	}
+	second := httptest.NewRecorder()
+	s.sessionMetadata(second, httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil))
+	var secondPayload map[string]any
+	if err := json.Unmarshal(second.Body.Bytes(), &secondPayload); err != nil {
+		t.Fatal(err)
+	}
+	secondIdentity := secondPayload["metadata_identity"].(map[string]any)
+	if secondIdentity["generation"] != float64(0) {
+		t.Fatalf("poll reported unpublished generation as applied: %#v", secondIdentity)
+	}
+	info := secondPayload["sessions"].(map[string]any)["held"].(map[string]any)
+	if info["work_graph"].(map[string]any)["loading"] != true {
+		t.Fatalf("cold route did not return a loading graph: %#v", info["work_graph"])
+	}
+	activity := httptest.NewRecorder()
+	s.activity(activity, httptest.NewRequest(http.MethodGet, "/api/activity?scope=all", nil))
+	var activityPayload map[string]any
+	if err := json.Unmarshal(activity.Body.Bytes(), &activityPayload); err != nil {
+		t.Fatal(err)
+	}
+	if activityPayload["topology_generation"] != float64(1) {
+		t.Fatalf("unchanged activity topology generation = %#v, want 1", activityPayload["topology_generation"])
+	}
+	releaseEnrichment()
+	waitForMetadataGeneration(t, s, 1)
+	s.metadataMu.Lock()
+	published := cloneMap(s.metadataPayload)
+	s.metadataMu.Unlock()
+	if published["topology_generation"] != uint64(1) {
+		t.Fatalf("published metadata topology generation = %#v, want 1", published["topology_generation"])
+	}
+}
+
+func TestSessionMetadataRosterAdditionSchedulesEnrichment(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	s := &server{
+		metadataGeneration:         5,
+		metadataNextGeneration:     5,
+		metadataTopologyGeneration: 1,
+		metadataTopologySignature:  tmuxTopologySignature([]string{"existing"}, map[string]string{"existing": "existing"}),
+		metadataPayload: map[string]any{
+			"sessions": map[string]any{"existing": map[string]any{
+				"session_identity": goTmuxSessionIdentity("existing", "existing"),
+				"panes":            []map[string]any{{"pane_id": "%1"}}, "agents": []map[string]any{{"kind": "codex"}},
+				"window_metadata": []map[string]any{{"window_index": 0}}, "work_graph": emptyGoWorkGraph(5),
+			}},
+			"session_order": []string{"existing"}, "topology_generation": uint64(1), "errors": []string{},
+		},
+		metadataBuiltAt:     time.Now(),
+		tmuxSessionRosterFn: func() ([]string, error) { return []string{"existing", "added"}, nil },
+		metadataEnrichmentFn: func(sessions []string) (map[string]map[string]any, error) {
+			close(started)
+			<-release
+			return map[string]map[string]any{"added": {"panes": []map[string]any{}}}, nil
+		},
+	}
+	defer close(release)
+	response := httptest.NewRecorder()
+	s.sessionMetadata(response, httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil))
+	<-started
+	var payload map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	cache := payload["cache"].(map[string]any)
+	if cache["stale"] != true || cache["refreshing"] != true {
+		t.Fatalf("new roster cache state = %#v", cache)
+	}
+	info := payload["sessions"].(map[string]any)["added"].(map[string]any)
+	if info["work_graph"].(map[string]any)["loading"] != true {
+		t.Fatalf("new session graph = %#v", info["work_graph"])
+	}
+	existing := payload["sessions"].(map[string]any)["existing"].(map[string]any)
+	if panes, ok := existing["panes"].([]any); !ok || len(panes) != 1 {
+		t.Fatalf("unrelated roster addition cleared existing panes: %#v", existing["panes"])
+	}
+	if agents, ok := existing["agents"].([]any); !ok || len(agents) != 1 {
+		t.Fatalf("unrelated roster addition cleared existing agents: %#v", existing["agents"])
+	}
+	if windows, ok := existing["window_metadata"].([]any); !ok || len(windows) != 1 {
+		t.Fatalf("unrelated roster addition cleared existing windows: %#v", existing["window_metadata"])
+	}
+}
+
+func TestOrdinarySessionMetadataRefreshesExpiredRoster(t *testing.T) {
+	roster := []string{"before"}
+	s := &server{
+		tmuxSessionRosterFn: func() ([]string, error) { return append([]string(nil), roster...), nil },
+		metadataEnrichmentFn: func(sessions []string) (map[string]map[string]any, error) {
+			result := make(map[string]map[string]any, len(sessions))
+			for _, session := range sessions {
+				result[session] = map[string]any{"panes": []map[string]any{}, "agents": []map[string]any{}, "window_metadata": []map[string]any{}}
+			}
+			return result, nil
+		},
+	}
+	first := httptest.NewRecorder()
+	s.sessionMetadata(first, httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil))
+	waitForMetadataGeneration(t, s, 1)
+	roster = []string{"after"}
+	s.tmuxRosterMu.Lock()
+	s.tmuxRosterSampledAt = time.Now().Add(-goProcessMetricsCacheTTL - time.Second)
+	s.tmuxRosterMu.Unlock()
+	second := httptest.NewRecorder()
+	s.sessionMetadata(second, httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil))
+	if second.Code != http.StatusOK {
+		t.Fatalf("second metadata status = %d, body=%s", second.Code, second.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(second.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	order := payload["session_order"].([]any)
+	if len(order) != 1 || order[0] != "after" {
+		t.Fatalf("ordinary metadata read retained expired roster: %#v", order)
+	}
+}
+
+func TestForcedMetadataQueueKeepsNewestCapturedRoster(t *testing.T) {
+	s := &server{
+		metadataBuilding:                 true,
+		metadataBuildingGeneration:       10,
+		metadataNextGeneration:           10,
+		metadataQueuedGeneration:         11,
+		metadataQueuedSessions:           []string{"new"},
+		metadataQueuedTopologyGeneration: 2,
+	}
+	if got := s.queueMetadataRefresh(true, []string{"old"}, nil, nil, 1); got != 11 {
+		t.Fatalf("queued generation = %d, want existing queued generation 11", got)
+	}
+	if s.metadataQueuedTopologyGeneration != 2 || len(s.metadataQueuedSessions) != 1 || s.metadataQueuedSessions[0] != "new" {
+		t.Fatalf("older forced request replaced queued roster: generation=%d sessions=%v", s.metadataQueuedTopologyGeneration, s.metadataQueuedSessions)
+	}
+	changed := &server{metadataBuilding: true, metadataBuildingTopologyGeneration: 1, metadataNextGeneration: 4}
+	if got := changed.queueMetadataRefresh(false, []string{"added"}, nil, nil, 2); got != 5 {
+		t.Fatalf("changed topology queued generation = %d, want 5", got)
+	}
+	if changed.metadataQueuedTopologyGeneration != 2 || len(changed.metadataQueuedSessions) != 1 || changed.metadataQueuedSessions[0] != "added" {
+		t.Fatalf("topology change was not queued behind active build: generation=%d sessions=%v", changed.metadataQueuedTopologyGeneration, changed.metadataQueuedSessions)
+	}
+	activeNewer := &server{metadataBuilding: true, metadataBuildingGeneration: 20, metadataBuildingTopologyGeneration: 2, metadataNextGeneration: 20}
+	if got := activeNewer.queueMetadataRefresh(true, []string{"old"}, nil, nil, 1); got != 20 || activeNewer.metadataQueuedGeneration != 0 {
+		t.Fatalf("old force queued behind newer active build: returned=%d queued=%d", got, activeNewer.metadataQueuedGeneration)
+	}
+	idleNewer := &server{
+		metadataGeneration:     20,
+		metadataNextGeneration: 20,
+		metadataPayload:        map[string]any{"topology_generation": uint64(2)},
+	}
+	if got := idleNewer.queueMetadataRefresh(true, []string{"old"}, nil, nil, 1); got != 20 || idleNewer.metadataBuilding {
+		t.Fatalf("old force started stale refresh after newer publication: returned=%d building=%t", got, idleNewer.metadataBuilding)
+	}
+}
+
+func TestMetadataRefreshSkipsPublicationWhenNewerTopologyIsQueued(t *testing.T) {
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondStarted := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	var releaseFirstOnce, releaseSecondOnce sync.Once
+	releaseFirstBuild := func() { releaseFirstOnce.Do(func() { close(releaseFirst) }) }
+	releaseSecondBuild := func() { releaseSecondOnce.Do(func() { close(releaseSecond) }) }
+	calls := 0
+	s := &server{
+		metadataPayload:            map[string]any{"marker": "previous", "topology_generation": uint64(1)},
+		metadataGeneration:         4,
+		metadataNextGeneration:     4,
+		metadataTopologyGeneration: 1,
+		events:                     newEventBroker(),
+		metadataEnrichmentFn: func(sessions []string) (map[string]map[string]any, error) {
+			calls++
+			switch calls {
+			case 1:
+				close(firstStarted)
+				<-releaseFirst
+			case 2:
+				close(secondStarted)
+				<-releaseSecond
+			default:
+				t.Error("unexpected metadata build")
+			}
+			return map[string]map[string]any{}, nil
+		},
+	}
+	defer releaseFirstBuild()
+	defer releaseSecondBuild()
+	if generation := s.queueMetadataRefresh(false, []string{"old"}, nil, nil, 1); generation != 5 {
+		t.Fatalf("first metadata generation = %d, want 5", generation)
+	}
+	<-firstStarted
+	s.metadataTopologyMu.Lock()
+	s.metadataTopologyGeneration = 2
+	s.metadataTopologyMu.Unlock()
+	if generation := s.queueMetadataRefresh(false, []string{"new"}, nil, nil, 2); generation != 6 {
+		t.Fatalf("queued metadata generation = %d, want 6", generation)
+	}
+	releaseFirstBuild()
+	<-secondStarted
+	s.metadataMu.Lock()
+	if s.metadataGeneration != 4 || s.metadataPayload["marker"] != "previous" {
+		s.metadataMu.Unlock()
+		t.Fatalf("obsolete build published before newer build: generation=%d payload=%#v", s.metadataGeneration, s.metadataPayload)
+	}
+	s.metadataMu.Unlock()
+	s.events.mu.Lock()
+	if len(s.events.events) != 0 {
+		events := append([]clientEvent(nil), s.events.events...)
+		s.events.mu.Unlock()
+		t.Fatalf("obsolete build published events: %#v", events)
+	}
+	s.events.mu.Unlock()
+	releaseSecondBuild()
+	waitForMetadataGeneration(t, s, 6)
+	s.metadataMu.Lock()
+	publishedTopology, _ := s.metadataPayload["topology_generation"].(uint64)
+	s.metadataMu.Unlock()
+	if publishedTopology != 2 {
+		t.Fatalf("published topology generation = %d, want 2", publishedTopology)
+	}
+	s.events.mu.Lock()
+	defer s.events.mu.Unlock()
+	if len(s.events.events) != 1 || s.events.events[0].Type != "transcripts_changed" {
+		t.Fatalf("published events = %#v, want only the current build", s.events.events)
+	}
+}
+
+func TestFailedRosterReadReconcilesNewerCachedSnapshot(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	calls := 0
+	s := &server{
+		metadataGeneration:         5,
+		metadataNextGeneration:     5,
+		metadataTopologyGeneration: 1,
+		metadataTopologySignature:  tmuxTopologySignature([]string{"existing"}, map[string]string{"existing": "existing"}),
+		metadataPayload: map[string]any{
+			"sessions":      map[string]any{"existing": map[string]any{"work_graph": emptyGoWorkGraph(5)}},
+			"session_order": []string{"existing"}, "topology_generation": uint64(1), "errors": []string{},
+		},
+		metadataBuiltAt: time.Now(),
+		tmuxSessionRosterFn: func() ([]string, error) {
+			calls++
+			if calls == 1 {
+				return []string{"existing", "added"}, nil
+			}
+			return nil, errors.New("synthetic roster outage")
+		},
+		metadataEnrichmentFn: func(sessions []string) (map[string]map[string]any, error) {
+			close(started)
+			<-release
+			return map[string]map[string]any{"added": {"panes": []map[string]any{}}}, nil
+		},
+		tmuxSessionActivityFn: func() (map[string]float64, error) {
+			return map[string]float64{}, nil
+		},
+		tmuxWindowActivityFn: func() (map[string]float64, error) {
+			return map[string]float64{}, nil
+		},
+	}
+	defer close(release)
+	if _, err := s.tmuxSessionRoster(); err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	s.activity(response, httptest.NewRequest(http.MethodGet, "/api/activity?scope=all", nil))
+	<-started
+	var payload map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["topology_generation"] != float64(2) {
+		t.Fatalf("cached roster topology generation = %#v, want 2", payload["topology_generation"])
+	}
+	cache := payload["cache"].(map[string]any)
+	if cache["stale"] != true || cache["refreshing"] != true {
+		t.Fatalf("failed-read cache state = %#v", cache)
+	}
+	if _, exists := payload["sessions"].(map[string]any)["added"]; !exists {
+		t.Fatalf("new cached session missing from response: %#v", payload["sessions"])
 	}
 }
 
@@ -2674,6 +4122,36 @@ func TestForcedSessionMetadataRefreshPublishesThePendingGeneration(t *testing.T)
 	}
 }
 
+func TestFinderJSONEarlyCancellationConsumesOneResultAndReturnsTerminalReceipt(t *testing.T) {
+	scheduler := work.New(1, 1)
+	defer scheduler.Close()
+	s := &server{events: newEventBroker(), operations: map[string]*goOperation{}}
+	started := make(chan struct{})
+	response := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		s.enqueueFinderJSONWithScheduler(response, context.Background(), scheduler, "GET /api/fs/batch", "batch", "/tmp", time.Second, func(ctx context.Context) (map[string]any, *finder.Error) {
+			close(started)
+			<-ctx.Done()
+			return nil, &finder.Error{Status: http.StatusServiceUnavailable, Code: "cancelled", Message: "cancelled"}
+		})
+		close(done)
+	}()
+	<-started
+	scheduler.Close()
+	<-done
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("early cancellation response = %d %s, want terminal 503", response.Code, response.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["state"] != "failed" {
+		t.Fatalf("early cancellation response = %#v, want terminal failed result", payload)
+	}
+}
+
 func TestSessionMetadataIncludesEveryGlobalTmuxSessionAsTabSource(t *testing.T) {
 	socket := shortSyntheticTmuxSocket(t)
 	root := t.TempDir()
@@ -2685,8 +4163,26 @@ func TestSessionMetadataIncludesEveryGlobalTmuxSessionAsTabSource(t *testing.T) 
 	}
 	t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
 
+	s := &server{events: newEventBroker()}
 	record := httptest.NewRecorder()
-	(&server{events: newEventBroker()}).sessionMetadata(record, httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil))
+	s.sessionMetadata(record, httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil))
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	for {
+		s.metadataMu.Lock()
+		published := s.metadataGeneration > 0
+		s.metadataMu.Unlock()
+		if published {
+			break
+		}
+		select {
+		case <-deadline.C:
+			t.Fatal("session metadata enrichment did not publish")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	record = httptest.NewRecorder()
+	s.sessionMetadata(record, httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil))
 	if record.Code != http.StatusOK {
 		t.Fatalf("session metadata status = %d, body=%s", record.Code, record.Body.String())
 	}
@@ -2744,8 +4240,290 @@ func TestSessionMetadataIncludesEveryGlobalTmuxSessionAsTabSource(t *testing.T) 
 	if err := json.Unmarshal(secondShared.Body.Bytes(), &secondSharedPayload); err != nil {
 		t.Fatal(err)
 	}
-	if firstSharedPayload["topology_generation"] != float64(1) || secondSharedPayload["topology_generation"] != float64(2) {
-		t.Fatalf("shared metadata topology generations = %#v then %#v, want 1 then 2", firstSharedPayload["topology_generation"], secondSharedPayload["topology_generation"])
+	if firstSharedPayload["topology_generation"] != float64(1) || secondSharedPayload["topology_generation"] != float64(1) {
+		t.Fatalf("unchanged roster topology generations = %#v then %#v, want stable generation 1", firstSharedPayload["topology_generation"], secondSharedPayload["topology_generation"])
+	}
+}
+
+func TestTmuxTopologyGenerationTracksSessionRecreationWithSameName(t *testing.T) {
+	socket := shortSyntheticTmuxSocket(t)
+	root := t.TempDir()
+	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
+	const session = "synthetic-recreated"
+	create := func() {
+		t.Helper()
+		if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", session, "-c", root).CombinedOutput(); err != nil {
+			t.Fatalf("create synthetic tmux session: %v (%s)", err, output)
+		}
+	}
+	if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", "synthetic-keeper", "-c", root).CombinedOutput(); err != nil {
+		t.Fatalf("create keeper tmux session: %v (%s)", err, output)
+	}
+	create()
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
+	enrichmentStarted := make(chan struct{})
+	releaseEnrichment := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseEnrichment) }) }
+	defer release()
+	s := &server{metadataEnrichmentFn: func(sessions []string) (map[string]map[string]any, error) {
+		close(enrichmentStarted)
+		<-releaseEnrichment
+		return map[string]map[string]any{}, nil
+	}}
+	firstTopology, firstErr := s.tmuxTopologySnapshot()
+	if firstErr != nil || len(firstTopology.sessions) != 2 || firstTopology.generation != 1 {
+		t.Fatalf("first topology = %v, %v, generation %d", firstTopology.sessions, firstErr, firstTopology.generation)
+	}
+	publishedSessions := make(map[string]any, len(firstTopology.sessions))
+	for _, name := range firstTopology.sessions {
+		publishedSessions[name] = map[string]any{
+			"session_identity": goTmuxSessionIdentity(name, firstTopology.identities[name]),
+			"panes":            []map[string]any{{"pane_id": "%old"}}, "agents": []map[string]any{}, "window_metadata": []map[string]any{},
+			"work_graph": map[string]any{"marker": "published-before-recreation"},
+		}
+	}
+	s.metadataGeneration = 1
+	s.metadataNextGeneration = 1
+	s.metadataTopologyGeneration = firstTopology.generation
+	s.metadataTopologySignature = tmuxTopologySignature(firstTopology.sessions, firstTopology.identities)
+	s.metadataPayload = map[string]any{"sessions": publishedSessions, "topology_generation": firstTopology.generation, "errors": []string{}}
+	s.metadataBuiltAt = time.Now()
+	oldIdentity := goTmuxSessionIdentity(session, firstTopology.identities[session])
+	if output, err := exec.Command("tmux", "-S", socket, "kill-session", "-t", session).CombinedOutput(); err != nil {
+		t.Fatalf("kill synthetic tmux session: %v (%s)", err, output)
+	}
+	create()
+	secondTopology, secondErr := s.tmuxTopologySnapshot(true)
+	containsSession := false
+	for _, name := range secondTopology.sessions {
+		containsSession = containsSession || name == session
+	}
+	if secondErr != nil || len(secondTopology.sessions) != 2 || !containsSession {
+		t.Fatalf("second topology = %v, %v", secondTopology.sessions, secondErr)
+	}
+	if secondTopology.generation != firstTopology.generation+1 {
+		t.Fatalf("same-name session recreation kept topology generation %d, want %d", secondTopology.generation, firstTopology.generation+1)
+	}
+	if goTmuxSessionIdentity(session, secondTopology.identities[session]) == oldIdentity {
+		t.Fatal("same-name recreation reused the browser-visible session identity")
+	}
+	response := httptest.NewRecorder()
+	s.sessionMetadata(response, httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil))
+	<-enrichmentStarted
+	var payload map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	info := payload["sessions"].(map[string]any)[session].(map[string]any)
+	if info["session_identity"] == oldIdentity || info["work_graph"].(map[string]any)["loading"] != true {
+		t.Fatalf("recreated same-name session was served old metadata: %#v", info)
+	}
+	if panes, ok := info["panes"].([]any); !ok || len(panes) != 0 {
+		t.Fatalf("recreated session retained old panes: %#v", info["panes"])
+	}
+	release()
+	waitForMetadataGeneration(t, s, 2)
+}
+
+func TestForcedTopologyReadStartsAfterAnOlderRosterRead(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var callsMu sync.Mutex
+	calls := 0
+	s := &server{tmuxSessionRosterFn: func() ([]string, error) {
+		callsMu.Lock()
+		calls++
+		call := calls
+		callsMu.Unlock()
+		if call == 1 {
+			close(started)
+			<-release
+			return []string{"before-mutation"}, nil
+		}
+		return []string{"after-mutation"}, nil
+	}}
+	firstDone := make(chan struct{})
+	go func() {
+		s.tmuxSessionRoster()
+		close(firstDone)
+	}()
+	<-started
+	forcedDone := make(chan struct{})
+	var forcedTopology goTmuxTopology
+	var forcedErr error
+	go func() {
+		forcedTopology, forcedErr = s.tmuxTopologySnapshot(true)
+		close(forcedDone)
+	}()
+	select {
+	case <-forcedDone:
+		t.Fatal("forced roster read passed a pre-mutation roster read")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	<-firstDone
+	<-forcedDone
+	if forcedErr != nil || len(forcedTopology.sessions) != 1 || forcedTopology.sessions[0] != "after-mutation" || forcedTopology.generation == 0 {
+		t.Fatalf("forced topology = %v, %v, generation %d", forcedTopology.sessions, forcedErr, forcedTopology.generation)
+	}
+}
+
+func TestBlockedTopologyRosterReadDoesNotBlockMetadataSnapshot(t *testing.T) {
+	rosterStarted := make(chan struct{})
+	releaseRoster := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseRoster) }) }
+	defer release()
+	s := &server{
+		metadataPayload:    map[string]any{"marker": "warm"},
+		metadataGeneration: 7,
+		tmuxSessionRosterFn: func() ([]string, error) {
+			close(rosterStarted)
+			<-releaseRoster
+			return []string{"synthetic"}, nil
+		},
+	}
+	topologyDone := make(chan struct{})
+	go func() {
+		_, _ = s.tmuxTopologySnapshot()
+		close(topologyDone)
+	}()
+	<-rosterStarted
+
+	type snapshotResult struct {
+		payload    map[string]any
+		generation uint64
+	}
+	snapshotDone := make(chan snapshotResult, 1)
+	go func() {
+		payload, generation, _ := s.metadataSnapshot()
+		snapshotDone <- snapshotResult{payload: payload, generation: generation}
+	}()
+	select {
+	case snapshot := <-snapshotDone:
+		release()
+		<-topologyDone
+		if snapshot.payload["marker"] != "warm" || snapshot.generation != 7 {
+			t.Fatalf("metadata snapshot = %#v, generation %d", snapshot.payload, snapshot.generation)
+		}
+	case <-time.After(time.Second):
+		release()
+		<-topologyDone
+		t.Fatal("warm metadata snapshot waited for the tmux roster read")
+	}
+}
+
+func TestForcedRosterReadDoesNotBlockWarmSessionMetadataRoute(t *testing.T) {
+	rosterStarted := make(chan struct{})
+	releaseRoster := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseRoster) }) }
+	defer release()
+	const session = "warm-session"
+	s := &server{
+		metadataPayload: map[string]any{
+			"sessions": map[string]any{session: map[string]any{
+				"session_identity": goTmuxSessionIdentity(session, session),
+				"work_graph":       map[string]any{"marker": "warm"},
+			}},
+			"session_order": []string{session}, "topology_generation": uint64(1), "errors": []string{},
+		},
+		metadataGeneration:         4,
+		metadataTopologyGeneration: 1,
+		metadataTopologySignature:  tmuxTopologySignature([]string{session}, map[string]string{session: session}),
+		metadataBuiltAt:            time.Now(),
+		tmuxRoster:                 []string{session},
+		tmuxRosterIdentities:       map[string]string{session: session},
+		tmuxRosterKnown:            true,
+		tmuxRosterSampledAt:        time.Now(),
+		tmuxSessionRosterFn: func() ([]string, error) {
+			close(rosterStarted)
+			<-releaseRoster
+			return []string{session}, nil
+		},
+	}
+	forcedReadDone := make(chan struct{})
+	go func() {
+		_, _ = s.tmuxTopologySnapshot(true)
+		close(forcedReadDone)
+	}()
+	<-rosterStarted
+
+	routeDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		response := httptest.NewRecorder()
+		s.sessionMetadata(response, httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil))
+		routeDone <- response
+	}()
+	select {
+	case response := <-routeDone:
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"marker":"warm"`) {
+			t.Fatalf("warm metadata response = %d %s", response.Code, response.Body.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("warm session-metadata route waited for an unrelated forced tmux roster read")
+	}
+	release()
+	<-forcedReadDone
+}
+
+func TestForcedTopologyReadBypassesWarmTmuxRosterCache(t *testing.T) {
+	socket := shortSyntheticTmuxSocket(t)
+	root := t.TempDir()
+	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
+	create := func(name string) {
+		t.Helper()
+		if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", name, "-c", root).CombinedOutput(); err != nil {
+			t.Fatalf("create synthetic tmux session %q: %v (%s)", name, err, output)
+		}
+	}
+	create("before-force")
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
+	s := &server{}
+	warm, err := s.tmuxSessionRoster()
+	if err != nil || len(warm) != 1 || warm[0] != "before-force" {
+		t.Fatalf("warm roster = %v, %v", warm, err)
+	}
+	if output, err := exec.Command("tmux", "-S", socket, "kill-session", "-t", "before-force").CombinedOutput(); err != nil {
+		t.Fatalf("kill synthetic tmux session: %v (%s)", err, output)
+	}
+	create("after-force")
+	forced, forceErr := s.tmuxTopologySnapshot(true)
+	if forceErr != nil || len(forced.sessions) != 1 || forced.sessions[0] != "after-force" {
+		t.Fatalf("forced roster reused warm cache: %v, %v", forced.sessions, forceErr)
+	}
+}
+
+func TestTmuxServerRestartChangesTopologyForSameSessionNameAndID(t *testing.T) {
+	socket := shortSyntheticTmuxSocket(t)
+	root := t.TempDir()
+	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
+	create := func() {
+		t.Helper()
+		if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", "same-name", "-c", root).CombinedOutput(); err != nil {
+			t.Fatalf("create same-name tmux session: %v (%s)", err, output)
+		}
+	}
+	create()
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
+	s := &server{}
+	firstTopology, firstErr := s.tmuxTopologySnapshot(true)
+	firstSnapshot, _ := s.tmuxSessionRosterSnapshot(false)
+	if firstErr != nil || len(firstTopology.sessions) != 1 || firstTopology.generation != 1 {
+		t.Fatalf("first topology = %v, %v, generation %d", firstTopology.sessions, firstErr, firstTopology.generation)
+	}
+	if output, err := exec.Command("tmux", "-S", socket, "kill-server").CombinedOutput(); err != nil {
+		t.Fatalf("restart private tmux server: %v (%s)", err, output)
+	}
+	create()
+	secondTopology, secondErr := s.tmuxTopologySnapshot(true)
+	secondSnapshot, _ := s.tmuxSessionRosterSnapshot(false)
+	if secondErr != nil || len(secondTopology.sessions) != 1 || secondTopology.sessions[0] != "same-name" {
+		t.Fatalf("second topology = %v, %v", secondTopology.sessions, secondErr)
+	}
+	if firstSnapshot.identities["same-name"] == secondSnapshot.identities["same-name"] || secondTopology.generation != firstTopology.generation+1 {
+		t.Fatalf("server restart reused topology identity: before=%q after=%q generation=%d", firstSnapshot.identities["same-name"], secondSnapshot.identities["same-name"], secondTopology.generation)
 	}
 }
 

@@ -6657,7 +6657,6 @@ function setExplicitPaneFocusItem(item, options = {}) {
   if (explicitPaneFocusState.item === (next || null) && explicitPaneFocusState.tmuxSession === nextTmuxSession) return false;
   explicitPaneFocusState.item = next || null;
   explicitPaneFocusState.tmuxSession = nextTmuxSession;
-  if (options.renderMenu !== false && typeof renderSessionButtons === 'function') renderSessionButtons();
   return true;
 }
 
@@ -6751,7 +6750,7 @@ function setFocusedTerminalMeasured(session, options = {}) {
     }
     return;
   }
-  if (previousItem !== session) capturePaneViewStateForItemIfPresent(previousItem);
+  if (previousItem !== session && !dockviewLayoutActive()) capturePaneViewStateForItemIfPresent(previousItem);
   focusedTerminal = session;
   focusedPanelItem = session;
   rememberActivePaneItem(session);
@@ -6803,7 +6802,7 @@ function setFocusedPanelItem(item, options = {}) {
     }
     return;
   }
-  if (previousItem !== item) capturePaneViewStateForItemIfPresent(previousItem);
+  if (previousItem !== item && !dockviewLayoutActive()) capturePaneViewStateForItemIfPresent(previousItem);
   if (focusedTerminal !== item) focusedTerminal = null;
   focusedPanelItem = item;
   rememberActivePaneItem(item);
@@ -12133,7 +12132,7 @@ function applyLayoutUrlFinderSeed(finder = {}) {
   }
   if ('session' in finder && isTmuxSession(String(finder.session || '').trim())) {
     fileExplorerFinderSelectedSession = String(finder.session || '').trim();
-    setExplicitPaneFocusItem(fileExplorerFinderSelectedSession, {allowInactive: true, renderMenu: false});
+    setExplicitPaneFocusItem(fileExplorerFinderSelectedSession, {allowInactive: true});
   }
   if ('differSession' in finder && isTmuxSession(String(finder.differSession || '').trim())) {
     fileExplorerChangesSelectedSession = String(finder.differSession || '').trim();
@@ -12196,14 +12195,7 @@ function maybeAdoptLayoutStateDeepLink(params) {
   applyLayoutUrlStateSeed(state);
 }
 
-function layoutUrlCaptureCurrentPaneState() {
-  for (const item of paneItems(layoutSlots)) {
-    capturePaneViewStateForItemIfPresent(item);
-  }
-}
-
 function layoutUrlStateSnapshot() {
-  layoutUrlCaptureCurrentPaneState();
   const state = {v: 1};
   if (paneItems(layoutSlots).some(isFileExplorerItem)) state.finder = layoutUrlFinderStateSnapshot();
   const editor = layoutUrlEditorStateSnapshot();
@@ -13042,9 +13034,11 @@ function restorePaneElementScrollState(panel, state) {
   setTimeout(restore, 0);
 }
 
-function capturePaneViewState(item, panel) {
+function capturePaneViewState(item, panel, options = {}) {
   if (!item || !panel) return false;
-  const scrollContainers = capturePaneElementScrollState(panel);
+  const scrollContainers = Array.isArray(options.scrollContainers)
+    ? options.scrollContainers
+    : capturePaneElementScrollState(panel);
   if (scrollContainers.length) {
     paneViewState.set(item, {
       scrollContainers,
@@ -13070,7 +13064,19 @@ function schedulePaneViewStateCapture(item, panel) {
   requestAnimationFrame(() => {
     pendingPaneViewStateCaptures.delete(item);
     const currentPanel = panelNodes.get(item) || panel;
-    capturePaneViewState(item, currentPanel);
+    const scrollContainers = capturePaneElementScrollState(currentPanel);
+    const savedScrollContainers = paneViewState.get(item)?.scrollContainers || [];
+    const unchanged = scrollContainers.length === savedScrollContainers.length
+      && scrollContainers.every((entry, index) => {
+        const saved = savedScrollContainers[index];
+        return entry.key === saved?.key
+          && entry.scrollTop === Number(saved.scrollTop || 0)
+          && entry.scrollLeft === Number(saved.scrollLeft || 0);
+      });
+    // Restoring a saved scroll position emits a scroll event. Do not turn that programmatic write
+    // into a second full editor-state capture; a real user scroll necessarily changes a coordinate.
+    if (unchanged) return;
+    capturePaneViewState(item, currentPanel, {scrollContainers});
     refreshLayoutUrlStateSoon();
   });
 }
@@ -17312,8 +17318,8 @@ function stateSignature(state) {
   return `${state.key}:${state.reason || ''}`;
 }
 
-function trackSessionStateChanges() {
-  for (const session of sessions.filter(isTmuxSession)) {
+function trackSessionStateChanges(sessionNames = sessions) {
+  for (const session of sessionNames.filter(isTmuxSession)) {
     const state = sessionState(session, transcriptMetadataState.payload.sessions?.[session]);
     const record = sessionStatusRecord(session, true);
     const previous = record?.state || null;
@@ -19898,6 +19904,7 @@ function openAppMenu(wrapper, options = {}) {
   closeOtherSessionPopovers(null, {force: true});
   closeFileImagePreview();
   closeAppMenus(wrapper);
+  refreshAppMenuForOpen(wrapper);
   fitAppMenuPopover(wrapper.querySelector(':scope > .app-menu-popover'));
   wrapper.querySelectorAll(':scope > .app-menu-popover .app-submenu-popover').forEach(fitAppMenuPopover);
   wrapper.classList.add(CLS.open);
@@ -19913,6 +19920,15 @@ function openAppMenu(wrapper, options = {}) {
   wrapper.querySelector('.app-menu-button')?.setAttribute('aria-expanded', 'true');
   if (openAppMenuId === 'tabs') refreshTabsMenuMetadataOnOpen();
   if (options.focusFirst) requestAnimationFrame(() => focusFirstAppMenuCommand(wrapper));
+}
+
+function refreshAppMenuForOpen(wrapper) {
+  if (wrapper?.dataset?.appMenu !== 'tmux') return;
+  const menu = appMenuTree().find(item => item.id === 'tmux');
+  const popover = wrapper.querySelector(':scope > .app-menu-popover');
+  if (!menu || !popover) return;
+  popover.replaceChildren(...menu.items.map(createAppMenuItem));
+  fitAppMenuPopover(popover);
 }
 
 function closeAppMenus(keepOpen = null) {
@@ -20253,6 +20269,10 @@ function agentWindowSnapshotRevision(payload) {
   return Number.isInteger(revision) && revision > 0 ? revision : 0;
 }
 
+function agentWindowSnapshotRevisionsMismatch(hasStateRows, stateRevision, activityRevision) {
+  return hasStateRows && stateRevision > 0 && activityRevision > 0 && stateRevision !== activityRevision;
+}
+
 function sessionAgentWindowStatusModel(session, info = null, autoPayload = null) {
   const statePayload = autoPayload || autoApproveStates.get(session) || {};
   const activityPayload = tabberActivityPayload?.agent_windows && typeof tabberActivityPayload.agent_windows === 'object'
@@ -20281,7 +20301,7 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
   // A positive generation is an immutable statusd snapshot. Never enrich its rows from a
   // different Tabber generation: stale metadata is acceptable, stale state-adjacent fields are
   // not. Old clients have no revision and retain the established compatibility behavior.
-  const revisionMismatch = stateRows.length > 0 && stateRevision > 0 && activityRevision > 0 && stateRevision !== activityRevision;
+  const revisionMismatch = agentWindowSnapshotRevisionsMismatch(stateRows.length > 0, stateRevision, activityRevision);
   const trustedActivityRows = revisionMismatch ? [] : activityRows;
   const infoRows = agentWindowPayloadRows(info?.agent_windows);
   // `/api/auto-approve` owns every visible agent-status field. Tabber and transcript
@@ -20465,6 +20485,8 @@ function agentWindowActivityRecord(key, create = false) {
 const agentWindowActivityAcknowledgeDelayMs = 700;
 let agentWindowActivityAnimationSyncFrame = 0;
 let agentWindowActivityMutationObserver = null;
+let agentWindowActivityAnimationSyncDocument = false;
+const agentWindowActivityAnimationSyncRoots = new Set();
 // Include the dot itself as well as its wrapper. A renderer can replace only the status marker
 // inside a retained window row; observing/synchronizing just the wrapper would then leave that
 // new play/stop/pause animation on its own start time for a frame.
@@ -20512,7 +20534,7 @@ function scheduleAgentWindowStatusGlowRefresh(key, startedAt, options = {}) {
   if (options.scheduleRefresh === false || !key || start <= 0 || durationSeconds <= 0) return;
   const untilMs = (start + durationSeconds) * 1000;
   if (untilMs <= Date.now()) return;
-  scheduleAgentWindowStoppedRefresh(key, untilMs);
+  scheduleAgentWindowStoppedRefresh(key, untilMs, options);
 }
 
 function scheduleAgentWindowTransitionPulseRefresh(key, startedAt, options = {}) {
@@ -20523,6 +20545,7 @@ function scheduleAgentWindowTransitionPulseRefresh(key, startedAt, options = {})
   const untilMs = (start + durationSeconds) * 1000;
   if (untilMs <= Date.now()) return;
   const record = agentWindowActivityRecord(key, true);
+  const refreshSessions = agentWindowActivityRefreshSessions(options);
   const previous = record.transitionPulseRefresh;
   if (previous?.untilMs === untilMs) return;
   if (previous?.timer) clearTimeout(previous.timer);
@@ -20531,7 +20554,7 @@ function scheduleAgentWindowTransitionPulseRefresh(key, startedAt, options = {})
     const current = currentRecord?.transitionPulseRefresh;
     if (!current || current.untilMs !== untilMs) return;
     currentRecord.transitionPulseRefresh = null;
-    refreshAgentWindowActivityDisplays();
+    refreshAgentWindowActivityDisplays(refreshSessions);
   }, Math.max(0, untilMs - Date.now()));
   record.transitionPulseRefresh = {timer, untilMs};
 }
@@ -20636,14 +20659,22 @@ function restartAgentWindowActivityPulseAnimations(root = document) {
 
 function scheduleAgentWindowActivityAnimationSync(root = document) {
   ensureAgentWindowActivityMutationObserver();
-  syncAgentWindowActivityAnimationDelays(root);
-  if (agentWindowActivityAnimationSyncFrame && typeof cancelAnimationFrame === 'function') {
-    cancelAnimationFrame(agentWindowActivityAnimationSyncFrame);
+  if (root === document || !root?.querySelectorAll) {
+    agentWindowActivityAnimationSyncDocument = true;
+    agentWindowActivityAnimationSyncRoots.clear();
+  } else if (!agentWindowActivityAnimationSyncDocument) {
+    agentWindowActivityAnimationSyncRoots.add(root);
   }
+  if (agentWindowActivityAnimationSyncFrame) return;
   if (typeof requestAnimationFrame !== 'function') return;
   agentWindowActivityAnimationSyncFrame = requestAnimationFrame(() => {
     agentWindowActivityAnimationSyncFrame = 0;
-    syncAgentWindowActivityAnimationDelays(root);
+    const roots = agentWindowActivityAnimationSyncDocument
+      ? [document]
+      : Array.from(agentWindowActivityAnimationSyncRoots);
+    agentWindowActivityAnimationSyncDocument = false;
+    agentWindowActivityAnimationSyncRoots.clear();
+    for (const pendingRoot of roots) syncAgentWindowActivityAnimationDelays(pendingRoot);
   });
 }
 
@@ -20661,9 +20692,10 @@ function agentWindowActivityTransitionKey(agentKey, options = {}) {
   return [session, windowIndex ?? '', windowIndex === null ? pane : '', kind].join(':');
 }
 
-function scheduleAgentWindowStoppedRefresh(key, untilMs) {
+function scheduleAgentWindowStoppedRefresh(key, untilMs, options = {}) {
   if (!key || !Number.isFinite(untilMs) || untilMs <= 0) return;
   const record = agentWindowActivityRecord(key, true);
+  const refreshSessions = agentWindowActivityRefreshSessions(options);
   const previous = record.stoppedRefresh;
   if (previous?.untilMs === untilMs) return;
   if (previous?.timer) clearTimeout(previous.timer);
@@ -20673,9 +20705,7 @@ function scheduleAgentWindowStoppedRefresh(key, untilMs) {
     const current = currentRecord?.stoppedRefresh;
     if (!current || current.untilMs !== untilMs) return;
     currentRecord.stoppedRefresh = null;
-    if (typeof renderPanels === 'function' && typeof activePaneItems === 'function') {
-      renderPanels(activePaneItems());
-    }
+    refreshAgentWindowActivityDisplays(refreshSessions);
   }, delay);
   record.stoppedRefresh = {timer, untilMs};
 }
@@ -20748,12 +20778,13 @@ function clearAgentWindowActivityRecordsForSession(session) {
 function showAgentWindowAcknowledgementVisual(key, options = {}) {
   if (!key) return false;
   const acknowledgementKey = String(options.acknowledgementKey || '');
+  const refreshSessions = agentWindowActivityRefreshSessions(options);
   const record = agentWindowActivityRecord(key, true);
   const current = record.acknowledgementVisual;
   if (agentWindowAcknowledgementVisualActive(key) && String(current?.acknowledgementKey || '') === acknowledgementKey) {
     if (options.refresh !== false && current?.refreshed !== true) {
       current.refreshed = true;
-      refreshAgentWindowActivityDisplays();
+      refreshAgentWindowActivityDisplays(refreshSessions);
     }
     return true;
   }
@@ -20764,7 +20795,7 @@ function showAgentWindowAcknowledgementVisual(key, options = {}) {
   const timer = setTimeout(() => {
     // The browser must retire the gray marker at the promised time even if the acknowledgement
     // request is slow; a later explicit server false still re-arms a genuinely new prompt.
-    if (retireAgentWindowAcknowledgementVisual(key, untilMs)) refreshAgentWindowActivityDisplays();
+    if (retireAgentWindowAcknowledgementVisual(key, untilMs)) refreshAgentWindowActivityDisplays(refreshSessions);
   }, durationMs);
   const sourceAgent = options.agent && typeof options.agent === 'object' ? options.agent : null;
   const visualAgent = sourceAgent ? {
@@ -20775,7 +20806,7 @@ function showAgentWindowAcknowledgementVisual(key, options = {}) {
     working_stopped_ts: Number(options.stoppedAt || sourceAgent.working_stopped_ts || sourceAgent.workingStoppedTs || 0),
   } : null;
   record.acknowledgementVisual = {startedAtMs, untilMs, durationMs, timer, acknowledgementKey, refreshed: options.refresh !== false, agent: visualAgent};
-  if (options.refresh !== false) refreshAgentWindowActivityDisplays();
+  if (options.refresh !== false) refreshAgentWindowActivityDisplays(refreshSessions);
   return true;
 }
 
@@ -20808,24 +20839,39 @@ function agentWindowActivityAcknowledgementKeyIsRecorded(key, options = {}) {
     : false;
 }
 
-function refreshAgentWindowActivityDisplays() {
-  if (typeof renderPanels === 'function' && typeof activePaneItems === 'function') {
-    renderPanels(activePaneItems(), {reason: 'agent-window-activity'});
+function agentWindowActivityRefreshSessions(options = {}) {
+  const session = String(options.session || options.agent?.session || '').trim();
+  return session ? [session] : (typeof sessions === 'undefined' ? [] : sessions);
+}
+
+function refreshAgentWindowActivityDisplays(sessionNames = sessions) {
+  const changedSessions = [...new Set((Array.isArray(sessionNames) ? sessionNames : []).map(String).filter(Boolean))];
+  if (!changedSessions.length) return;
+  if (typeof updateSessionStateClasses === 'function') {
+    updateSessionStateClasses(changedSessions);
+    if (typeof refreshPaneTabSessionPopovers === 'function') refreshPaneTabSessionPopovers(changedSessions);
+    if (typeof syncSessionTabLeadingActivityChrome === 'function') syncSessionTabLeadingActivityChrome(changedSessions);
   }
-  if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
-  if (typeof updatePanelWindowStepButtons === 'function' && typeof activePaneItems === 'function') {
-    for (const session of activePaneItems()) {
+  else {
+    if (typeof updateTopbarActivityStatus === 'function') updateTopbarActivityStatus();
+    if (typeof refreshPaneTabSessionPopovers === 'function') refreshPaneTabSessionPopovers(changedSessions);
+    if (typeof syncSessionTabLeadingActivityChrome === 'function') syncSessionTabLeadingActivityChrome(changedSessions);
+  }
+  if (typeof updatePanelWindowStepButtons === 'function') {
+    for (const session of changedSessions) {
       if (typeof isTmuxSession === 'function' && !isTmuxSession(session)) continue;
       updatePanelWindowStepButtons(session, transcriptMetadataState.payload.sessions?.[session]);
     }
   }
   if (typeof renderSessionButtons === 'function') renderSessionButtons({force: true});
-  if (typeof renderInfoPanel === 'function') renderInfoPanel();
+  if (typeof renderInfoPanel === 'function'
+      && (typeof infoPanelRenderVisible !== 'function' || infoPanelRenderVisible())) renderInfoPanel({force: true});
   if (typeof refreshTabberPanels === 'function'
       && typeof itemInLayout === 'function'
       && typeof tabberItemId !== 'undefined'
       && itemInLayout(tabberItemId)) refreshTabberPanels();
   if (typeof syncSessionTabLeadingActivityChrome === 'function') syncSessionTabLeadingActivityChrome();
+  scheduleAgentWindowActivityAnimationSync();
 }
 
 function acknowledgeAgentWindowStoppedTransition(transitionKey, stoppedAt = null, options = {}) {
@@ -20841,7 +20887,7 @@ function acknowledgeAgentWindowStoppedTransition(transitionKey, stoppedAt = null
   record.acknowledgedStoppedAt = stoppedAtNumber;
   clearAgentWindowStoppedRefresh(key);
   clearAgentWindowTransitionPulseRefresh(key);
-  if (options.refresh !== false) refreshAgentWindowActivityDisplays();
+  if (options.refresh !== false) refreshAgentWindowActivityDisplays(agentWindowActivityRefreshSessions(options));
   return true;
 }
 
@@ -20896,7 +20942,7 @@ function acknowledgeAgentWindowActivity(session, windowIndex = null, options = {
   const delayMs = Math.max(0, Number(options.delayMs) || 0);
   const acknowledgeStoppedTransition = () => (
     target.state === 'cooldown'
-      ? acknowledgeAgentWindowStoppedTransition(target.transitionKey, target.stoppedAt, {...options, delayMs: 0})
+      ? acknowledgeAgentWindowStoppedTransition(target.transitionKey, target.stoppedAt, {...options, delayMs: 0, refresh: false, session})
       : false
   );
   if (target.ackKey && typeof acknowledgeAttentionKeys === 'function') {
@@ -34023,6 +34069,7 @@ function applyGlobalThemeMode(options = {}) {
   document.body?.classList.add(themeBodyClass(resolved), themeResolvedBodyClass(resolved));
   if (globalThemeMode === 'system') document.body?.classList.add(themeBodyClass('system'));
   if (document.documentElement?.style) document.documentElement.style.colorScheme = resolved;
+  if (typeof syncDockviewTheme === 'function') syncDockviewTheme();
   if (options.updateEditor !== false) applyEditorThemeMode({refreshEditors: options.refreshEditors !== false});
   if (options.updateTerminals) applyTerminalRuntimeSettings({fit: false});
   // the active-color presets are theme-specific, so re-apply on every theme switch.
@@ -34639,12 +34686,23 @@ if (fileExplorerHiddenToggle) {
   fileExplorerHiddenToggle.addEventListener('click', toggleHiddenFiles);
 }
 
-function updateSessionButtonStates() {
-  // YO ownership is rendered into pane-tab markup, so a restored/changed worker state must
-  // rebuild the shared tab strip as well as the popovers that describe it.
+function updateSessionButtonStates(sessionNames = sessions) {
   updateTopbarActivityStatus();
-  renderPaneTabStrips();
-  refreshPaneTabSessionPopovers();
+  updateSessionStateClasses(sessionNames);
+  refreshPaneTabSessionPopovers(sessionNames);
+  syncSessionTabLeadingActivityChrome(sessionNames);
+}
+
+function updateSessionStateClasses(sessionNames = sessions) {
+  const included = new Set(sessionNames);
+  for (const tab of document.querySelectorAll('.pane-tab[data-pane-tab], .dockview-pane-tab[data-pane-tab]')) {
+    const session = String(tab.dataset?.paneTab || '').trim();
+    if (!session || !included.has(session) || !isTmuxSession(session)) continue;
+    const state = sessionState(session, transcriptMetadataState.payload.sessions?.[session]);
+    applySessionStateClasses(tab, state);
+    applyPanelStateClasses(document.getElementById(panelDomId(session)), state);
+    applyPanelHeaderState(document.getElementById(paneTabDomId(session)), state, autoApproveStates.get(session)?.enabled === true);
+  }
 }
 
 function sessionPopoverNodeFromHtml(html) {
@@ -34678,10 +34736,11 @@ function refreshSessionPopoverContent(popover, html) {
   popover.innerHTML = fresh.innerHTML;
 }
 
-function refreshPaneTabSessionPopovers() {
+function refreshPaneTabSessionPopovers(sessionNames = sessions) {
+  const included = new Set(sessionNames);
   document.querySelectorAll('.pane-tab[data-pane-tab], .dockview-pane-tab[data-pane-tab]').forEach(tab => {
     const session = String(tab?.dataset?.paneTab || '').trim();
-    if (!session || tabTypeForItem(session)) return;
+    if (!session || !included.has(session) || tabTypeForItem(session)) return;
     const popover = typeof paneTabPopoverForAnchor === 'function'
       ? paneTabPopoverForAnchor(tab)
       : tab?.querySelector?.(':scope > .session-popover');
@@ -35255,12 +35314,13 @@ function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
 
 // Hovering a tab keeps its popover DOM mounted. Do not let that presentation concern freeze the
 // status marker: its color is shared live state and must agree with the Tabber row immediately.
-function syncSessionTabLeadingActivityChrome() {
+function syncSessionTabLeadingActivityChrome(sessionNames = sessions) {
   if (typeof document === 'undefined') return 0;
+  const included = new Set(sessionNames);
   let updated = 0;
   for (const tab of document.querySelectorAll('.pane-tab[data-pane-tab], .tmux-pane-tab-token[data-pane-tab]')) {
     const session = String(tab.dataset?.paneTab || '').trim();
-    if (!session || !isTmuxSession(session)) continue;
+    if (!session || !included.has(session) || !isTmuxSession(session)) continue;
     const leading = tab.querySelector?.(':scope > .session-tab-leading-activity, .pane-tab-core > .session-tab-leading-activity');
     if (!leading) continue;
     const info = transcriptMetadataState.payload.sessions?.[session];
@@ -35283,11 +35343,27 @@ function pullRequestCompactBadgesHtml(session, pr) {
 }
 
 function applySessionStateClasses(node, state) {
+  if (!node) return;
   node.classList.toggle(STATE_CLASS.needsAttention, state?.attention === true);
   node.classList.toggle(STATE_CLASS.needsInput, state?.key === STATE_KEY.needsInput && state?.attention === true);
   node.classList.toggle(STATE_CLASS.needsExec, state?.key === STATE_KEY.needsApproval && state?.attention === true);
   node.classList.toggle(STATE_CLASS.needsBlocked, state?.key === STATE_KEY.blocked);
   syncAttentionAnimation(node, state?.attention === true);
+}
+
+function applyPanelStateClasses(node, state) {
+  if (!node) return;
+  node.classList.toggle(STATE_CLASS.needsInputPane, state.key === STATE_KEY.needsInput && state.attention === true);
+  node.classList.toggle(STATE_CLASS.needsExecPane, state.key === STATE_KEY.needsApproval && state.attention === true);
+  node.classList.toggle(STATE_CLASS.needsBlockedPane, state.key === STATE_KEY.blocked);
+}
+
+function applyPanelHeaderState(node, state, auto = false) {
+  if (!node) return;
+  node.classList.toggle('auto', auto === true);
+  node.classList.toggle(STATE_CLASS.needsAttention, state?.attention === true);
+  syncAttentionAnimation(node, state?.attention === true);
+  node.innerHTML = panelHeaderStateHtml(state);
 }
 
 function panelHeaderStateHtml(state) {
@@ -37675,7 +37751,10 @@ function activatePaneTab(side, session, options = {}) {
   }
   recordTabActivation(session);
   const previous = activeItemForSide(side);
-  if (previous && previous !== session) capturePaneViewStateForItemIfPresent(previous);
+  if (previous && previous !== session) {
+    if (dockviewLayoutActive() && typeof captureDockviewPaneBeforeDetach === 'function') captureDockviewPaneBeforeDetach(previous);
+    else capturePaneViewStateForItemIfPresent(previous);
+  }
   if (isFileEditorItem(session)) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight();
@@ -39193,6 +39272,7 @@ function refreshTerminal(session) {
 }
 
 function terminalIsVisible(session, container) {
+  if (!container) return false;
   const pane = document.getElementById(`terminal-pane-${session}`);
   return Boolean(
     pane?.classList.contains(CLS.active)
@@ -39641,8 +39721,8 @@ function scheduleTerminalAttentionHighlight(session) {
   });
 }
 
-function syncTerminalAttentionHighlights() {
-  for (const session of sessions.filter(isTmuxSession)) syncTerminalAttentionHighlight(session);
+function syncTerminalAttentionHighlights(sessionNames = sessions) {
+  for (const session of sessionNames.filter(isTmuxSession)) syncTerminalAttentionHighlight(session);
 }
 
 const terminalBlankScreenRefreshDelaysMs = Object.freeze([220, 650, 1400, 2800]);
@@ -40861,6 +40941,8 @@ const SPLIT_PCT_EPSILON = 0.01;          // split-percent diffs below this are t
 const SERIALIZED_WEIGHT_BASE = 1000;     // Dockview gridview node weight base for serialization
 const DOCKVIEW_MIN_LAYOUT_WIDTH = 640;   // enough room for a serialized Finder + content pane snapshot
 const DOCKVIEW_MIN_LAYOUT_HEIGHT = 240;  // prevents sleep/hidden-tab 1px layouts from serializing
+const DOCKVIEW_PRE_ACTIVATION_CAPTURE_TTL_MS = 1000;
+const DOCKVIEW_PENDING_ACTIVATION_TTL_MS = 1000;
 const dockviewLayoutState = {
   api: null,
   host: null,
@@ -40883,6 +40965,8 @@ const dockviewLayoutState = {
   tabDropHandledAt: 0,
   tabActivationPerf: null,
   pendingUserPanelActivation: '',
+  pendingUserPanelActivationTimer: 0,
+  theme: null,
 };
 
 function dockviewEmptyPaneItem(slot) {
@@ -40926,15 +41010,40 @@ function dockviewCommitPanelActivation(item, options = {}) {
   const panelItem = String(item || '');
   if (!panelItem) return false;
   const pendingUserGesture = dockviewLayoutState.pendingUserPanelActivation === panelItem;
-  if (pendingUserGesture) dockviewLayoutState.pendingUserPanelActivation = '';
+  if (pendingUserGesture) dockviewClearPendingUserPanelActivation();
   const userInitiated = options.userInitiated === true || pendingUserGesture;
+  const focusOptions = isTmuxSession(panelItem) && userInitiated
+    ? {...options, acknowledgeAgentWindow: false, acknowledgePromptAttention: false}
+    : options;
   if (isTmuxSession(panelItem) && userInitiated) {
     noteFileExplorerChangesSessionInteraction(panelItem);
     scheduleFileExplorerActiveTabSync(panelItem, {explicit: true});
   }
-  setFocusedPanelItem(panelItem, {userInitiated});
+  setFocusedPanelItem(panelItem, {...options, userInitiated});
+  if (isTmuxSession(panelItem) && userInitiated && typeof focusTerminalFromUserAction === 'function') {
+    focusTerminalFromUserAction(panelItem, 25, {...focusOptions, userInitiated: true});
+  }
   dockviewFinishTabActivationPerf(panelItem);
   return true;
+}
+
+function dockviewSetPendingUserPanelActivation(item) {
+  dockviewClearPendingUserPanelActivation();
+  const panelItem = String(item || '');
+  if (!panelItem) return;
+  dockviewLayoutState.pendingUserPanelActivation = panelItem;
+  dockviewLayoutState.pendingUserPanelActivationTimer = window.setTimeout(() => {
+    if (dockviewLayoutState.pendingUserPanelActivation === panelItem) dockviewClearPendingUserPanelActivation();
+  }, DOCKVIEW_PENDING_ACTIVATION_TTL_MS);
+}
+
+function dockviewClearPendingUserPanelActivation(item = '') {
+  if (item && dockviewLayoutState.pendingUserPanelActivation !== String(item)) return;
+  if (dockviewLayoutState.pendingUserPanelActivationTimer) {
+    window.clearTimeout(dockviewLayoutState.pendingUserPanelActivationTimer);
+    dockviewLayoutState.pendingUserPanelActivationTimer = 0;
+  }
+  dockviewLayoutState.pendingUserPanelActivation = '';
 }
 
 function dockviewCommitTouchTabActivation(event) {
@@ -40974,6 +41083,15 @@ function dockviewThemeForApp() {
   const core = dockviewCore();
   if (!core) return undefined;
   return document.body?.classList?.contains(themeBodyClass('light')) ? core.themeLight : core.themeDark;
+}
+
+function syncDockviewTheme(api = dockviewLayoutState.api) {
+  if (!api) return false;
+  const theme = dockviewThemeForApp();
+  if (!theme || dockviewLayoutState.theme === theme) return false;
+  dockviewLayoutState.theme = theme;
+  api.updateOptions?.({theme});
+  return true;
 }
 
 function dockviewSplitLayoutHasMinimumSize(zone, rect = dockviewLayoutState.host?.getBoundingClientRect?.()) {
@@ -41925,7 +42043,10 @@ function dockviewFinishTabPointerDrag(event) {
   const releaseEvent = dockviewTabPointerEvent(event, state);
   const classification = dockviewDropClassification(releaseEvent, {state});
   const releaseRegion = classification.region;
+  const canceled = ['pointercancel', 'touchcancel', 'dragend'].includes(event?.type);
   dockviewLayoutState.tabPointerDrag = null;
+  if (canceled || state?.dragged === true) dockviewClearPendingUserPanelActivation(state?.item || '');
+  if (canceled) dockviewClearPreActivationCapture(state?.item || '');
   dockviewClearTabInsertionPreview();
   dockviewSetInvalidTabDropPreview(false);
   clearDropPreview();
@@ -42469,6 +42590,7 @@ function dockviewInit() {
   if (dockviewLayoutState.api || !dockviewLayoutEnabled()) return dockviewLayoutState.api;
   const core = dockviewCore();
   const host = dockviewEnsureHost();
+  const theme = dockviewThemeForApp();
   const api = core.createDockview(host, {
     className: 'yolomux-dockview-core',
     createComponent: () => createDockviewPanelRenderer(),
@@ -42481,11 +42603,12 @@ function dockviewInit() {
     scrollbars: 'native',
     singleTabMode: 'default',
     tabGroupAccent: 'off',
-    theme: dockviewThemeForApp(),
+    theme,
     getTabContextMenuItems: () => [],
     getTabGroupChipContextMenuItems: () => [],
   });
   dockviewLayoutState.api = api;
+  dockviewLayoutState.theme = theme;
   dockviewLayoutToHost(api, host);
   dockviewLayoutState.disposables = [
     dockviewInstallRootBoundaryDropFallback(),
@@ -42498,6 +42621,8 @@ function dockviewInit() {
       if (dockviewLayoutState.applyingFromLayout) return;
       const item = panel?.id || '';
       if (!item) return;
+      const pendingUserGesture = dockviewLayoutState.pendingUserPanelActivation === item;
+      if (!pendingUserGesture && focusedPanelItem && itemIsActivePaneTab(focusedPanelItem)) return;
       dockviewCommitPanelActivation(item);
     }),
     api.onWillShowOverlay(event => {
@@ -42712,15 +42837,18 @@ function renderPanelsDockview(previousActive = [], options = {}) {
   const activePaneCount = layoutSlotKeys().filter(side => activeItemForSide(side) || paneIsPlaceholder(side)).length;
   grid.className = `grid dockview-grid ${activePaneCount === 1 ? 'full' : ''} ${activePaneCount === 0 ? 'empty' : ''}`.trim();
   dockviewEnsureHost();
-  api.updateOptions?.({theme: dockviewThemeForApp()});
-  dockviewLayoutToHost(api);
   const signature = layoutSlotsSignature(layoutSlots);
-  let activeOnlyChange = false;
+  const activeOnlySignature = dockviewLayoutActiveOnlySignature(layoutSlots);
+  let activeOnlyChange = (
+    dockviewLayoutState.adoptingFromDockview
+    && dockviewLayoutState.lastAppliedActiveOnlySignature === activeOnlySignature
+  );
   let layoutReloaded = false;
   let layoutLoadDeferred = false;
   let layoutCompletionDeferred = false;
+  let activeOnlyTransitionItems = new Set();
   if (!dockviewLayoutState.adoptingFromDockview && dockviewLayoutState.lastAppliedLayoutSignature !== signature) {
-    const activeOnlySignature = dockviewLayoutActiveOnlySignature(layoutSlots);
+    activeOnlyTransitionItems = dockviewActiveTabTransitionItems(layoutSlots);
     if (dockviewLayoutState.lastAppliedActiveOnlySignature !== activeOnlySignature || !dockviewActivateLayoutTabs(layoutSlots)) {
       if (options.deferDockviewLoad === true) {
         dockviewScheduleDeferredLoad(previousActive, options);
@@ -42734,9 +42862,21 @@ function renderPanelsDockview(previousActive = [], options = {}) {
         layoutReloaded = true;
       }
     } else {
-      dockviewLayoutState.lastAppliedLayoutSignature = signature;
       activeOnlyChange = true;
     }
+  }
+  if (activeOnlyChange) {
+    dockviewLayoutState.lastAppliedLayoutSignature = signature;
+    // Dockview's setActive path already hides/pools the old panel, mounts the new panel, updates
+    // active-tab chrome, and fires the focus callbacks. Refresh the lightweight tab/panel shell
+    // state that Dockview does not own; skip attached-content rendering because that repeats the
+    // complete switch and makes large editors block unrelated tab activation.
+    const activeItems = new Set(layoutSlotKeys().map(slot => activeItemForSide(slot)).filter(Boolean));
+    dockviewRefreshTabs({items: activeOnlyTransitionItems});
+    dockviewSyncMountedPanels({items: activeItems, renderAttached: false, ensureMounted: true});
+    syncPanelVisibility(previousActive);
+    completeLayoutMutationGeneration(options.completionGeneration);
+    return true;
   }
   // dockviewLoadLayout already refreshes these once after fromJSON. Repeating
   // the same mounted-panel walk on a whole-pane swap made the drop path a
@@ -42750,10 +42890,14 @@ function renderPanelsDockview(previousActive = [], options = {}) {
     }
     const mountedPerf = clientPerfStart('dockviewSyncMountedPanels');
     try {
-      dockviewSyncMountedPanels({renderAttached: !activeOnlyChange});
+      dockviewSyncMountedPanels();
     } finally {
       clientPerfEnd(mountedPerf, {nodes: activePaneCount});
     }
+  }
+  if (dockviewLayoutState.adoptingFromDockview) {
+    dockviewLayoutState.lastAppliedLayoutSignature = signature;
+    dockviewLayoutState.lastAppliedActiveOnlySignature = activeOnlySignature;
   }
   if (!layoutLoadDeferred && !layoutCompletionDeferred) {
     finishPanelLayoutRender(previousActive, options);
@@ -42813,7 +42957,9 @@ function dockviewActivateLayoutTabs(slots = layoutSlots) {
   if (!activeItems.length && paneItems(slots).length) return false;
   const panels = activeItems.map(item => api.getPanel?.(item));
   if (panels.some(panel => typeof panel?.api?.setActive !== 'function')) return false;
-  for (const panel of panels) panel.api.setActive();
+  for (const panel of panels) {
+    if (panel.api.isActive !== true) panel.api.setActive();
+  }
   return true;
 }
 
@@ -43209,6 +43355,10 @@ function createDockviewPanelRenderer() {
     }
     if (!isLayoutItem(item)) return;
     panel = getOrCreatePanel(item);
+    if (panel._dockviewPreActivationCaptured?.consumed) {
+      if (panel._dockviewPreActivationCaptured.timer) window.clearTimeout(panel._dockviewPreActivationCaptured.timer);
+      delete panel._dockviewPreActivationCaptured;
+    }
     element.replaceChildren(panel);
     if (dockviewLayoutState.applyingFromLayout) return;
     const slot = slotForItem(item) || dockviewSlotForGroupId(params?.api?.group?.id || '');
@@ -43219,7 +43369,10 @@ function createDockviewPanelRenderer() {
   };
   const pool = () => {
     if (!panel || panel.parentElement !== element) return;
-    capturePaneViewState(item, panel);
+    const capture = panel._dockviewPreActivationCaptured;
+    if (capture) {
+      capture.consumed = true;
+    } else capturePaneViewState(item, panel);
     panel.classList.remove('active-pane');
     panel.dataset.slot = '';
     panelPool.appendChild(panel);
@@ -43371,13 +43524,6 @@ function createDockviewHeaderActionsRenderer() {
   };
 }
 
-function captureDockviewPreviousPaneBeforeTabActivation(tabElement, targetItem) {
-  const group = tabElement?.closest?.('.dv-groupview');
-  const slot = group && typeof dockviewSlotForGroupElement === 'function' ? dockviewSlotForGroupElement(group) : null;
-  const previous = slot ? activeItemForSide(slot) : focusedPanelItem;
-  if (previous && previous !== targetItem) capturePaneViewStateForItemIfPresent(previous);
-}
-
 function createDockviewTabRenderer() {
   const element = document.createElement('div');
   element.className = 'pane-tab dockview-pane-tab';
@@ -43416,22 +43562,24 @@ function createDockviewTabRenderer() {
     for (const disposable of disposables) disposable?.dispose?.();
     disposables = [];
   };
-  const commitExplicitTabInteraction = () => {
-    dockviewCommitPanelActivation(item, {userInitiated: true});
+  const commitExplicitTabInteraction = (options = {}) => {
+    dockviewCommitPanelActivation(item, {userInitiated: true, ...options});
   };
   element.__yolomuxDockviewRefresh = render;
   element.addEventListener('pointerdown', event => {
     if (event.target.closest('[data-pane-tab-close], [data-auto-session]')) event.stopPropagation();
     else {
-      dockviewBeginTabActivationPerf(item);
-      dockviewLayoutState.pendingUserPanelActivation = item;
       captureDockviewPreviousPaneBeforeTabActivation(element, item);
+      dockviewBeginTabActivationPerf(item);
+      dockviewSetPendingUserPanelActivation(item);
       dockviewBeginTabPointerDrag(event, item);
     }
   });
   element.addEventListener('mousedown', event => {
     if (event.target.closest('[data-pane-tab-close], [data-auto-session]')) return;
-    captureDockviewPreviousPaneBeforeTabActivation(element, item);
+    if (dockviewLayoutState.pendingUserPanelActivation !== item) {
+      captureDockviewPreviousPaneBeforeTabActivation(element, item);
+    }
     dockviewBeginTabPointerDrag(event, item);
   });
   element.addEventListener('click', async event => {
@@ -43453,7 +43601,6 @@ function createDockviewTabRenderer() {
       if (shouldRefocus) focusPanel(item);
       return;
     }
-    captureDockviewPreviousPaneBeforeTabActivation(element, item);
     commitExplicitTabInteraction();
     dockviewFinishTabActivationPerf(item);
   });
@@ -43461,7 +43608,7 @@ function createDockviewTabRenderer() {
     if (!['Enter', ' '].includes(event.key)) return;
     event.preventDefault();
     captureDockviewPreviousPaneBeforeTabActivation(element, item);
-    commitExplicitTabInteraction();
+    commitExplicitTabInteraction({focusTerminal: true});
     api?.setActive?.();
   });
   element.addEventListener('dblclick', event => {
@@ -43494,6 +43641,37 @@ function createDockviewTabRenderer() {
   };
 }
 
+function captureDockviewPreviousPaneBeforeTabActivation(tabElement, targetItem) {
+  const group = tabElement?.closest?.('.dv-groupview');
+  const slot = group && typeof dockviewSlotForGroupElement === 'function'
+    ? dockviewSlotForGroupElement(group)
+    : null;
+  const previous = slot ? activeItemForSide(slot) : focusedPanelItem;
+  if (previous && previous !== targetItem) captureDockviewPaneBeforeDetach(previous);
+}
+
+function captureDockviewPaneBeforeDetach(item) {
+  const panel = panelNodes.get(item);
+  if (!panel) return false;
+  if (panel._dockviewPreActivationCaptured) return true;
+  capturePaneViewState(item, panel);
+  const capture = {timer: 0, consumed: false};
+  panel._dockviewPreActivationCaptured = capture;
+  capture.timer = window.setTimeout(() => {
+    if (panel._dockviewPreActivationCaptured === capture) delete panel._dockviewPreActivationCaptured;
+  }, DOCKVIEW_PRE_ACTIVATION_CAPTURE_TTL_MS);
+  return true;
+}
+
+function dockviewClearPreActivationCapture(item = '') {
+  const panel = panelNodes.get(String(item || ''));
+  const capture = panel?._dockviewPreActivationCaptured;
+  if (!capture) return false;
+  if (capture.timer) window.clearTimeout(capture.timer);
+  delete panel._dockviewPreActivationCaptured;
+  return true;
+}
+
 function syncDockviewTabShell(tab, item, api = null) {
   tab.dataset.paneTab = item;
   syncDockviewTabActiveClass(tab, api);
@@ -43514,13 +43692,36 @@ function dockviewTabAriaLabel(item) {
   return paneTabAriaLabel(item);
 }
 
-function dockviewRefreshTabs() {
+function dockviewActiveTabTransitionItems(slots = layoutSlots) {
+  const affected = new Set();
+  const groups = Array.from(dockviewLayoutState.host?.querySelectorAll?.('.dv-groupview') || []);
+  for (const slot of layoutSlotKeys(slots)) {
+    const desired = activeItemForSide(slot, slots);
+    const group = groups.find(candidate => dockviewSlotForGroupElement(candidate) === slot);
+    const current = group?.querySelector?.('.dv-tab.dv-active-tab .dockview-pane-tab')?.dataset?.paneTab || '';
+    if (current && current !== desired) affected.add(current);
+    if (desired) affected.add(desired);
+  }
+  return affected;
+}
+
+function dockviewRefreshTabs(options = {}) {
   if (!dockviewLayoutActive()) return;
-  document.querySelectorAll('.dockview-pane-tab').forEach(tab => {
+  const itemSet = options.items instanceof Set ? options.items : null;
+  const tabs = itemSet
+    ? Array.from(itemSet).map(item => dockviewLayoutState.host?.querySelector?.(`.dockview-pane-tab[data-pane-tab="${CSS.escape(item)}"]`)).filter(Boolean)
+    : Array.from(document.querySelectorAll('.dockview-pane-tab'));
+  const groups = new Set();
+  tabs.forEach(tab => {
     syncDockviewTabActiveClass(tab);
     tab.__yolomuxDockviewRefresh?.();
+    const group = tab.closest?.('.dv-groupview');
+    if (group) groups.add(group);
   });
-  document.querySelectorAll('.dockview-pane-header-actions').forEach(actions => {
+  const headerActions = itemSet
+    ? Array.from(groups).map(group => group.querySelector('.dockview-pane-header-actions')).filter(Boolean)
+    : Array.from(document.querySelectorAll('.dockview-pane-header-actions'));
+  headerActions.forEach(actions => {
     actions.__yolomuxDockviewRefresh?.();
   });
   dockviewSyncHeaderBackgroundDragSources();
@@ -43535,12 +43736,13 @@ function syncDockviewTabActiveClass(tab, api = null) {
 
 function dockviewSyncMountedPanels(options = {}) {
   if (!dockviewLayoutActive()) return;
-  for (const item of activePaneItems()) {
+  const items = options.items instanceof Set ? options.items : new Set(activePaneItems());
+  for (const item of items) {
     const panel = panelNodes.get(item);
     if (!panel?.isConnected) continue;
     const slot = slotForItem(item);
     if (slot) {
-      updatePanelSlot(panel, item, slot);
+      updatePanelSlot(panel, item, slot, {renderEditor: options.renderAttached !== false});
       syncPaneRoleDom(panel.closest?.('.dv-groupview'), slot);
     }
     if (options.renderAttached !== false) renderAttachedPanelContent(item);
@@ -65582,15 +65784,20 @@ function newGitDiffTabState(item, defaults = {}) {
     focusedFilePaths: new Map(),
     historyGuard: makeGenerationGuard(),
     historyController: null,
+    worktreeController: null,
+    viewportObserver: null,
     statsGuard: makeGenerationGuard(),
     statsController: null,
     statsControllers: new Set(),
     statsLoading: false,
-    statsNextCursor: '',
     statsExhausted: false,
-    statsInitialWindowDone: false,
+    statsStage: 0,
+    statsError: null,
     statsBackfillTimer: null,
     statsBySha: new Map(),
+    statsViewportStart: -1,
+    statsViewportEnd: -1,
+    statsFailedRanges: new Set(),
     historyRefreshTimer: null,
     focusedSha: '',
     ...defaults,
@@ -65622,6 +65829,8 @@ function cleanupGitDiffTab(item) {
   if (state?.historyRefreshTimer) clearTimeout(state.historyRefreshTimer);
   if (state?.statsBackfillTimer) clearTimeout(state.statsBackfillTimer);
   state?.historyController?.abort?.();
+  state?.worktreeController?.abort?.();
+  state?.viewportObserver?.disconnect?.();
   state?.historyGuard?.invalidate?.();
   state?.statsController?.abort?.();
   for (const controller of state?.statsControllers || []) controller.abort?.();
@@ -65631,8 +65840,7 @@ function cleanupGitDiffTab(item) {
 }
 
 const gitDiffHistoryRefreshIntervalMs = 10000;
-const gitDiffHistoryStatsInitialSchedule = [1, 2, 4];
-const gitDiffHistoryStatsLaterSchedule = [4, 4, 4, 4];
+const gitDiffHistoryStatsSchedules = [[1], [1, 2], [4, 4, 4, 4]];
 
 function gitDiffStatsWindowSupported() {
   return /^Go(?:\s|$)/.test(String(bootstrap.backendLabel || ''));
@@ -65665,11 +65873,12 @@ function gitDiffHistoryPageSize(body) {
   return Math.max(gitDiffHistoryMinimumPageSize, Math.ceil(availableHeight / rowHeight));
 }
 
-function gitDiffHistoryUrl(path, cursor = '', limit = gitDiffHistoryMinimumPageSize, includeStats = false, statsOffset = null) {
+function gitDiffHistoryUrl(path, cursor = '', limit = gitDiffHistoryMinimumPageSize, includeStats = false, statsOffset = null, startOffset = null) {
   const suffix = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
-  const statsSuffix = includeStats ? '&stats=1' : '';
+  const statsSuffix = includeStats ? '&stats=1' : (gitDiffStatsWindowSupported() ? '&worktree=0' : '');
   const offsetSuffix = Number.isSafeInteger(statsOffset) && statsOffset >= 0 ? `&stats_offset=${statsOffset}` : '';
-  return `/api/fs/git-history?path=${encodeURIComponent(path)}&limit=${Math.max(gitDiffHistoryMinimumPageSize, Math.floor(limit))}${suffix}${statsSuffix}${offsetSuffix}`;
+  const startSuffix = Number.isSafeInteger(startOffset) && startOffset >= 0 ? `&start_offset=${startOffset}` : '';
+  return `/api/fs/git-history?path=${encodeURIComponent(path)}&limit=${Math.max(gitDiffHistoryMinimumPageSize, Math.floor(limit))}${suffix}${statsSuffix}${offsetSuffix}${startSuffix}`;
 }
 
 function gitDiffCommitUrl(path, sha, head, repositoryIdentity = '') {
@@ -65758,7 +65967,7 @@ function mergeGitDiffHistoryCommits(current, incoming) {
   return mergeGitDiffCommits([], incoming).map(commit => {
     const old = prior.get(String(commit?.sha || ''));
     if (!old || gitDiffCommitStatsComplete(commit)) return commit;
-    return {...commit, ...Object.fromEntries(['files', 'added', 'removed', 'binary_files']
+    return {...commit, ...Object.fromEntries(['files', 'added', 'removed', 'binary_files', 'signature_status']
       .filter(key => Object.prototype.hasOwnProperty.call(old, key)).map(key => [key, old[key]]))};
   });
 }
@@ -65772,7 +65981,7 @@ function applyGitDiffStatsCache(state) {
   state.commits = state.commits.map(commit => {
     const stats = state.statsBySha.get(String(commit?.sha || ''));
     if (!stats || !gitDiffCommitStatsComplete(stats)) return commit;
-    return {...commit, files: stats.files, added: stats.added, removed: stats.removed, binary_files: stats.binary_files};
+    return {...commit, files: stats.files, added: stats.added, removed: stats.removed, binary_files: stats.binary_files, signature_status: stats.signature_status || commit.signature_status};
   });
 }
 
@@ -65796,6 +66005,8 @@ async function refreshGitDiffHistory(item, options = {}) {
   const frozenHead = state.head;
   const cursor = append ? state.nextCursor : (!options.refresh && !state.loaded ? state.snapshotCursor : '');
   if (!append) {
+    state.worktreeController?.abort?.();
+    state.worktreeController = null;
     invalidateGitDiffDetailRequests(state);
     state.statsController?.abort?.();
     for (const controller of state.statsControllers) controller.abort?.();
@@ -65805,10 +66016,13 @@ async function refreshGitDiffHistory(item, options = {}) {
     state.statsLoading = false;
     if (state.statsBackfillTimer) clearTimeout(state.statsBackfillTimer);
     state.statsBackfillTimer = null;
-    state.statsNextCursor = '';
     state.statsExhausted = false;
-    state.statsInitialWindowDone = false;
+    state.statsStage = 0;
+    state.statsError = null;
     state.statsBySha.clear();
+    state.statsViewportStart = -1;
+    state.statsViewportEnd = -1;
+    state.statsFailedRanges.clear();
     state.loadAttempted = true;
     state.loading = true;
   } else {
@@ -65849,10 +66063,6 @@ async function refreshGitDiffHistory(item, options = {}) {
     if (append) state.visibleCommitCount = Math.min(state.commits.length, state.visibleCommitCount + pageSize);
     else state.visibleCommitCount = Math.min(state.commits.length, pageSize);
     state.snapshotCursor = String(payload.snapshot_cursor || (!append ? cursor : state.snapshotCursor) || '');
-    if (!append) {
-      state.statsNextCursor = state.snapshotCursor;
-      state.statsInitialWindowDone = false;
-    }
     state.nextCursor = payload.next_cursor;
     state.truncated = payload.truncated === true;
     state.truncationReason = String(payload.truncation_reason || '');
@@ -65892,6 +66102,31 @@ async function refreshGitDiffHistory(item, options = {}) {
       state.loadingOlder = false;
       if (state.historyController === controller) state.historyController = null;
       renderGitDiffPanel(item);
+      if (!append && state.loaded && !state.error && gitDiffStatsWindowSupported()) void refreshGitDiffWorktree(item);
+    }
+  }
+}
+
+async function refreshGitDiffWorktree(item) {
+  const state = gitDiffTabState.get(item);
+  if (!state) return;
+  state.worktreeController?.abort?.();
+  const controller = new AbortController();
+  state.worktreeController = controller;
+  const identity = state.repositoryIdentity;
+  const isCurrent = () => gitDiffTabState.get(item) === state && state.worktreeController === controller && state.repositoryIdentity === identity;
+  try {
+    const payload = await apiFetchJson(`/api/fs/git-history?path=${encodeURIComponent(state.path)}&worktree=only`, {cache: 'no-store', signal: controller.signal});
+    if (!isCurrent()) return;
+    if (payload.repository_identity !== identity || !gitDiffWorktreeStatusIsValid(payload.worktree_status)) throw gitDiffInvalidResponseError();
+    state.worktreeStatus = payload.worktree_status;
+  } catch (error) {
+    if (!isCurrent() || error?.name === 'AbortError') return;
+    state.error = gitDiffErrorSnapshot(error);
+  } finally {
+    if (isCurrent()) {
+      state.worktreeController = null;
+      renderGitDiffPanel(item);
     }
   }
 }
@@ -65906,8 +66141,8 @@ function applyGitDiffStatsPayload(item, state, payload) {
     const stats = state.statsBySha.get(String(commit?.sha || ''));
     if (!stats || !gitDiffCommitStatsComplete(stats)) return commit;
     changed = changed || !gitDiffCommitStatsComplete(commit)
-      || ['files', 'added', 'removed', 'binary_files'].some(key => commit[key] !== stats[key]);
-    return {...commit, files: stats.files, added: stats.added, removed: stats.removed, binary_files: stats.binary_files};
+      || ['files', 'added', 'removed', 'binary_files', 'signature_status'].some(key => commit[key] !== stats[key]);
+    return {...commit, files: stats.files, added: stats.added, removed: stats.removed, binary_files: stats.binary_files, signature_status: stats.signature_status || commit.signature_status};
   });
   if (changed) renderGitDiffPanel(item);
   return changed;
@@ -65978,40 +66213,123 @@ function gitDiffStatsStreamRequest(state, url, onChunk) {
   });
 }
 
+function gitDiffHistoryViewportIndices(item, state) {
+  const body = panelNodes.get(item)?.querySelector?.('.git-diff-panel-body');
+  if (!body?.isConnected || !body.clientHeight) return null;
+  const viewport = body.getBoundingClientRect();
+  const indices = new Map(state.commits.map((commit, index) => [String(commit?.sha || ''), index]));
+  let first = -1;
+  let last = -1;
+  for (const group of body.querySelectorAll('.git-diff-commit[data-git-diff-commit-group]')) {
+    const index = indices.get(group.dataset.gitDiffCommitGroup);
+    if (index === undefined) continue;
+    const rect = group.getBoundingClientRect();
+    if (rect.bottom <= viewport.top || rect.top >= viewport.bottom) continue;
+    if (first < 0) first = index;
+    last = index;
+  }
+  if (first < 0) return null;
+  return {first: Math.max(0, first - 2), visibleFirst: first, visibleLast: last, last: Math.min(state.commits.length - 1, last + 2)};
+}
+
+async function backfillGitDiffHistoryViewportStats(item) {
+  const state = ensureGitDiffTabState(item);
+  if (!state?.loaded || state.loading || !state.head || !state.snapshotCursor) return false;
+  const viewport = gitDiffHistoryViewportIndices(item, state);
+  if (!viewport) {
+    state.statsController?.abort?.();
+    state.statsGuard.invalidate();
+    state.statsLoading = false;
+    return false;
+  }
+  const missing = index => !state.statsFailedRanges.has(index) && !gitDiffCommitStatsComplete(state.commits[index]);
+  let target = -1;
+  for (let index = viewport.visibleFirst; index <= viewport.visibleLast; index++) {
+    if (missing(index)) { target = index; break; }
+  }
+  if (target < 0) {
+    for (let index = viewport.first; index <= viewport.last; index++) {
+      if (missing(index)) { target = index; break; }
+    }
+  }
+  if (target < 0) {
+    state.statsController?.abort?.();
+    state.statsGuard.invalidate();
+    state.statsLoading = false;
+    state.statsViewportStart = -1;
+    return false;
+  }
+  if (state.statsLoading && target >= state.statsViewportStart && target < state.statsViewportEnd) return false;
+  const start = target;
+  const batchSizes = [];
+  let end = start;
+  for (const size of gitDiffHistoryStatsSchedules[Math.min(state.statsStage, 2)]) {
+    let count = 0;
+    while (count < size && end <= viewport.last && missing(end)) { count++; end++; }
+    if (count) batchSizes.push(count);
+    if (count < size) break;
+  }
+  const batches = new Map();
+  let offset = start;
+  for (const size of batchSizes) { batches.set(offset, size); offset += size; }
+  state.statsController?.abort?.();
+  const isCurrent = state.statsGuard.begin();
+  const requestedHead = state.head;
+  const identity = state.repositoryIdentity;
+  const expected = state.commits.slice(start, end).map(commit => String(commit?.sha || ''));
+  state.statsLoading = true;
+  state.statsViewportStart = start;
+  state.statsViewportEnd = end;
+  let received = false;
+  try {
+    await gitDiffStatsStreamRequest(
+      state,
+      `/api/fs/git-history-stats-stream?path=${encodeURIComponent(state.path)}&cursor=${encodeURIComponent(state.snapshotCursor)}&offset=${start}&batch_sizes=${batchSizes.join(',')}`,
+      payload => {
+        if (!isCurrent() || state.head !== requestedHead) return;
+        const commits = payload?.commits;
+        if (!gitDiffHistoryPayloadIsValid(payload) || payload.head !== requestedHead || payload.repository_identity !== identity
+          || !batches.has(payload.start_offset) || !Array.isArray(commits) || commits.length !== batches.get(payload.start_offset)
+          || commits.some((commit, index) => !gitDiffCommitStatsComplete(commit) || commit?.sha !== expected[payload.start_offset - start + index])) throw gitDiffInvalidResponseError();
+        received = true;
+        applyGitDiffStatsPayload(item, state, payload);
+      },
+    );
+    if (isCurrent()) {
+      if (expected.some((sha, index) => !gitDiffCommitStatsComplete(state.commits[start + index]))) throw gitDiffInvalidResponseError();
+      state.statsStage++;
+    }
+    return received;
+  } catch (error) {
+    if (isCurrent() && error?.name !== 'AbortError') {
+      for (let index = start; index < end; index++) if (!gitDiffCommitStatsComplete(state.commits[index])) state.statsFailedRanges.add(index);
+      state.statsError = gitDiffErrorSnapshot(error);
+      renderGitDiffPanel(item);
+    }
+    return false;
+  } finally {
+    if (isCurrent()) {
+      state.statsLoading = false;
+      state.statsViewportStart = -1;
+      state.statsViewportEnd = -1;
+      scheduleGitDiffHistoryStatsBackfill(item);
+    }
+  }
+}
+
 async function backfillGitDiffHistoryStats(item) {
   const state = ensureGitDiffTabState(item);
   if (!state || !state.loaded || !state.head || state.statsExhausted || !gitDiffHistoryNeedsStats(state) || state.statsLoading) return false;
   const isCurrent = state.statsGuard.begin();
   const requestedHead = state.head;
-  const useInitialWindow = gitDiffStatsWindowSupported() && !state.statsInitialWindowDone;
-  const requestedCursor = state.statsNextCursor || state.snapshotCursor;
-  let continueBackfill = false;
   let changed = false;
   state.statsLoading = true;
   try {
-    if (!gitDiffStatsWindowSupported()) {
-      const payload = await gitDiffStatsRequest(state, gitDiffHistoryUrl(state.path, '', 200, true));
-      if (!isCurrent() || state.head !== requestedHead) return false;
-      if (!gitDiffHistoryPayloadIsValid(payload) || payload.head !== requestedHead) throw gitDiffInvalidResponseError();
-      changed = applyGitDiffStatsPayload(item, state, payload);
-      state.statsExhausted = true;
-      return changed;
-    }
-    const batchSizes = useInitialWindow ? gitDiffHistoryStatsInitialSchedule : gitDiffHistoryStatsLaterSchedule;
-    if (useInitialWindow) state.statsInitialWindowDone = true;
-    const donePayload = await gitDiffStatsStreamRequest(
-      state,
-      `/api/fs/git-history-stats-stream?path=${encodeURIComponent(state.path)}&cursor=${encodeURIComponent(requestedCursor)}&batch_sizes=${batchSizes.join(',')}`,
-      payload => {
-        if (!isCurrent() || state.head !== requestedHead) return;
-        if (!gitDiffHistoryPayloadIsValid(payload) || payload.head !== requestedHead) throw gitDiffInvalidResponseError();
-        changed = applyGitDiffStatsPayload(item, state, payload) || changed;
-      },
-    );
-    if (!isCurrent() || state.head !== requestedHead) return changed;
-    state.statsNextCursor = String(donePayload?.next_cursor || '');
-    state.statsExhausted = !state.statsNextCursor;
-    continueBackfill = !state.statsExhausted && gitDiffHistoryNeedsStats(state);
+    const payload = await gitDiffStatsRequest(state, gitDiffHistoryUrl(state.path, '', 200, true));
+    if (!isCurrent() || state.head !== requestedHead) return false;
+    if (!gitDiffHistoryPayloadIsValid(payload) || payload.head !== requestedHead) throw gitDiffInvalidResponseError();
+    changed = applyGitDiffStatsPayload(item, state, payload);
+    state.statsExhausted = true;
     return changed;
   } catch (error) {
     if (!isCurrent() || error?.name === 'AbortError') return false;
@@ -66021,19 +66339,18 @@ async function backfillGitDiffHistoryStats(item) {
       state.statsLoading = false;
       state.statsController = null;
       renderGitDiffPanel(item);
-      if (continueBackfill && state.loaded && state.head === requestedHead) {
-        scheduleGitDiffHistoryStatsBackfill(item);
-      }
     }
   }
 }
 
 function scheduleGitDiffHistoryStatsBackfill(item) {
   const state = ensureGitDiffTabState(item);
-  if (!state || state.statsBackfillTimer || state.statsLoading || state.statsExhausted || !gitDiffHistoryNeedsStats(state)) return false;
+  if (!state || state.loading || state.statsBackfillTimer || !gitDiffHistoryNeedsStats(state)) return false;
+  if (!gitDiffStatsWindowSupported() && (state.statsLoading || state.statsExhausted)) return false;
   state.statsBackfillTimer = setTimeout(() => {
     state.statsBackfillTimer = null;
-    void backfillGitDiffHistoryStats(item);
+    if (gitDiffStatsWindowSupported()) void backfillGitDiffHistoryViewportStats(item);
+    else void backfillGitDiffHistoryStats(item);
   }, 0);
   return true;
 }
@@ -66062,6 +66379,7 @@ function gitDiffHistoryNearEnd(body) {
 function bindGitDiffHistoryInfiniteScroll(item, body) {
   bindScopedOnce(body, 'git-diff-history-infinite-scroll', scope => {
     scope.ownEvent('scroll', body, 'scroll', () => {
+      if (gitDiffStatsWindowSupported()) scheduleGitDiffHistoryStatsBackfill(item);
       if (!gitDiffHistoryNearEnd(body)) return;
       void loadOlderGitDiffHistory(item);
     }, {passive: true});
@@ -66654,6 +66972,7 @@ function gitDiffWorktreeStatusNode(item, state) {
   details.addEventListener('toggle', () => {
     const current = ensureGitDiffTabState(item);
     if (current) current.worktreeStatusExpanded = details.open;
+    scheduleGitDiffHistoryStatsBackfill(item);
     summary.setAttribute('aria-expanded', details.open ? 'true' : 'false');
     const caret = summary.querySelector('.git-diff-commit-caret');
     if (caret) {
@@ -66785,7 +67104,12 @@ function createGitDiffPanel(item) {
   body.setAttribute('aria-label', gitDiffTabLabel(item));
   bindGitDiffHistoryInfiniteScroll(item, body);
   panel.append(toolbar, meta, body);
-  ensureGitDiffTabState(item);
+  const state = ensureGitDiffTabState(item);
+  if (typeof ResizeObserver === 'function') {
+    state.viewportObserver?.disconnect?.();
+    state.viewportObserver = new ResizeObserver(() => scheduleGitDiffHistoryStatsBackfill(item));
+    state.viewportObserver.observe(body);
+  }
   return panel;
 }
 
@@ -66825,6 +67149,7 @@ function renderGitDiffPanel(item, options = {}) {
   const nodes = [];
   if (state.loading) nodes.push(gitDiffLoadingStatusNode());
   if (state.error) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-error', userMessageText(state.error, t('common.requestFailed')), 'alert'));
+  if (state.statsError) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-error', userMessageText(state.statsError, t('common.requestFailed')), 'alert'));
   if (state.loaded && !gitDiffWorktreeStatusIsValid(state.worktreeStatus)) nodes.push(gitDiffDirtySummaryNode(state));
   if (state.commits.length || gitDiffWorktreeStatusIsValid(state.worktreeStatus) && state.worktreeStatus.dirty === true) nodes.push(list);
   else if (state.loaded && !state.loading) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-empty', t('gitDiff.empty'), 'status'));
@@ -66834,6 +67159,7 @@ function renderGitDiffPanel(item, options = {}) {
   }
   body.replaceChildren(...nodes);
   scheduleGitDiffHistoryInfiniteScroll(item, body);
+  if (state.loaded && !state.statsLoading && gitDiffStatsWindowSupported()) scheduleGitDiffHistoryStatsBackfill(item);
   if (restoreCommitFocus && body.contains(list)) gitDiffCommitTreeInteractionController.applyState(list, {focusLead: true});
   if (!state.loadAttempted) void refreshGitDiffHistory(item);
   return state;
@@ -71193,7 +71519,7 @@ function captureFileEditorPanelViewState(item, panel) {
   const view = panel?._cmView;
   const scrollDOM = view?.scrollDOM;
   if (!isFileEditorItem(item) || !view || !scrollDOM) return;
-  if (fileEditorViewState.has(item) && !fileEditorPanelViewStateCaptureHasLayout(panel, scrollDOM)) return;
+  if (!fileEditorPanelViewStateCaptureHasLayout(panel, scrollDOM)) return;
   const selection = view.state?.selection?.main;
   fileEditorViewState.set(item, {
     scrollTop: scrollDOM.scrollTop || 0,
@@ -80364,6 +80690,8 @@ function destroyProseMirrorPanel(panel, options = {}) {
   delete panel._pmSource;
   delete panel._pmPlugins;
   delete panel._pmSourceLinePlugin;
+  delete panel._pmSourceDocument;
+  delete panel._pmDocumentChanged;
   delete panel._pmPreviewPane;
 }
 
@@ -80405,6 +80733,7 @@ function syncProseMirrorPanelSource(panel, path, state, options = {}) {
     panel._pmSerializeTimer = null;
     panel._pmSerializeGeneration = Number(panel._pmSerializeGeneration || 0) + 1;
     panel._pmSource = null;
+    panel._pmDocumentChanged = false;
   }
   if (panel._pmSource === next) return true;
   if (!textEditorCommit && panel._pmSerializeTimer && panel._pmSource === null) return true;
@@ -80424,6 +80753,8 @@ function syncProseMirrorPanelSource(panel, path, state, options = {}) {
     if (nextSelection) options.selection = nextSelection;
     panel._pmView.updateState(api.EditorState.create(options));
     panel._pmSource = next;
+    panel._pmSourceDocument = doc;
+    panel._pmDocumentChanged = false;
     return true;
   } catch (error) {
     renderProseMirrorFailure(panel, path, editorPanelParts(panel), error);
@@ -80455,10 +80786,13 @@ function clearProseMirrorFallback(parts) {
 
 function serializeProseMirrorSource(panel) {
   if (!panel?._pmSerializer || !panel._pmView) return null;
-  return panel._pmSerializer.serialize(panel._pmView.state.doc).replace(
+  let source = panel._pmSerializer.serialize(panel._pmView.state.doc).replace(
     /^(\s*[-+*]\s+\[[ x]\]\s+)(\d+)\\\.(?=\s)/gm,
     '$1$2.',
   );
+  const state = fileEditorPanelState(panel);
+  if (state?.content?.endsWith('\n') && !source.endsWith('\n')) source += '\n';
+  return source;
 }
 
 function refreshProseMirrorSourceLines(panel, source) {
@@ -80494,6 +80828,14 @@ function refreshProseMirrorSourceLines(panel, source) {
 
 function commitProseMirrorSource(panel, path, options = {}) {
   if (!panel?._pmView || panel._pmPath !== path) return false;
+  // Markdown parsing is intentionally semantic, so serializing a document that has only been
+  // viewed can rewrite valid source spelling. Keep the source baseline authoritative until a
+  // real ProseMirror document transaction changes the document.
+  if (panel._pmDocumentChanged !== true) return true;
+  if (panel._pmSourceDocument?.eq(panel._pmView.state.doc)) {
+    panel._pmDocumentChanged = false;
+    return true;
+  }
   let next = normalizeProseMirrorEndBreakSource(serializeProseMirrorSource(panel));
   if (next === null) return false;
   const state = fileEditorPanelState(panel);
@@ -80502,6 +80844,8 @@ function commitProseMirrorSource(panel, path, options = {}) {
   refreshProseMirrorSourceLines(panel, next);
   if (next === state.content) {
     panel._pmSource = next;
+    panel._pmSourceDocument = panel._pmView.state.doc;
+    panel._pmDocumentChanged = false;
     return true;
   }
   panel._pmSource = next;
@@ -80513,6 +80857,8 @@ function commitProseMirrorSource(panel, path, options = {}) {
     deferAutosave: options.deferAutosave === true,
   });
   syncCodeMirrorToCanonicalPanels(path, next, panel, 'view-editor');
+  panel._pmSourceDocument = panel._pmView.state.doc;
+  panel._pmDocumentChanged = false;
   return true;
 }
 
@@ -80883,6 +81229,7 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
       view.updateState(nextState);
       if (transaction.docChanged && transaction.getMeta('yolomuxSourceLineRefresh') !== true) {
         panel._pmSource = null;
+        panel._pmDocumentChanged = true;
         updateProseMirrorSource(panel, path);
         scheduleProseMirrorAutosave(panel, path);
       }
@@ -80900,6 +81247,8 @@ function createProseMirrorPanel(panel, item, path, state, parts, api) {
   panel._pmPlugins = plugins;
   panel._pmSourceLinePlugin = sourceLinePlugin;
   panel._pmSource = normalizeLegacyBreakMarkup(state.content || '');
+  panel._pmSourceDocument = doc;
+  panel._pmDocumentChanged = false;
   panel._pmSourceLines = panel._pmSourceLineMetadata.topLevel;
   panel._pmIgnoredCommentRanges = parseEnvironment.yolomuxIgnoredCommentRanges || [];
   delete panel._pmError;
@@ -80952,14 +81301,14 @@ function renderProseMirrorPreviewMode(panel, item, path, state, parts) {
   if (!prosemirrorSupportedSource(path, state)) return false;
   if (parts.previewPane) parts.previewPane.hidden = false;
   panel._pmRequired = true;
+  if (panel._pmError) {
+    renderProseMirrorFailure(panel, path, parts, panel._pmError);
+    return true;
+  }
   const ensureGeneration = Number(panel._pmEnsureGeneration || 0) + 1;
   panel._pmEnsureGeneration = ensureGeneration;
   if (!panel._pmView) {
     renderProseMirrorLoading(parts);
-  }
-  if (panel._pmError) {
-    renderProseMirrorFailure(panel, path, parts, panel._pmError);
-    return true;
   }
   const ensurePromise = ensureProseMirrorPanel(panel, item, path, state, parts, ensureGeneration);
   parts.previewPane._previewAsync = ensurePromise;
@@ -85705,13 +86054,15 @@ function hideUploadResult(session) {
   }
 }
 
-function updatePanelSlot(panel, session, slot) {
+function updatePanelSlot(panel, session, slot, options = {}) {
   panel.dataset.slot = slot;
   panel.dataset.layoutItem = session;
   syncPaneRoleDom(panel, slot);
   const head = panel.querySelector('.panel-head');
   if (head) head.dataset.dragSlot = slot;
-  if (isFileEditorItem(session)) renderFileEditorPanel(panel, session, {updateActiveFile: !dockviewLayoutActive(), captureViewState: false});
+  if (isFileEditorItem(session) && options.renderEditor !== false) {
+    renderFileEditorPanel(panel, session, {updateActiveFile: !dockviewLayoutActive(), captureViewState: false});
+  }
   updatePaneExpandButton(panel, session);
   if (!hideDockviewInnerPaneTabs(panel)) updatePaneTabStrip(panel, slot);
 }
@@ -86629,23 +86980,21 @@ function autoApproveStateWithSnapshotRevision(state, revision = agentWindowSnaps
 
 function renderAutoApproveStatusSurfaces(result = {}) {
   const perf = clientPerfStart('autoStatusRender');
+  const changedSessions = Array.isArray(result?.changedSessions) ? result.changedSessions : sessions;
   try {
     if (result?.sessionsChanged) renderPanels(result.previousActive || activeSessions.slice());
-    else if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
     if (typeof refreshDebugAgentWindowLiveDetails === 'function') refreshDebugAgentWindowLiveDetails();
     updateDocumentTitle();
   // Re-toggle the YO markers' working class from the fresh states on the SAME poll the title updates,
   // so a finished/idle pane's marker stops spinning instead of lingering (the transcript poll path
   // updated the title but never re-synced the markers).
-    renderAutoApproveButtons();
-    updateSessionButtonStates();
-    if (typeof syncSessionTabLeadingActivityChrome === 'function') syncSessionTabLeadingActivityChrome();
-    refreshActivePanelHeaders();
-    trackSessionStateChanges();
-    syncTerminalAttentionHighlights();
+    renderAutoApproveButtons(changedSessions);
+    updateSessionButtonStates(changedSessions);
+    trackSessionStateChanges(changedSessions);
+    syncTerminalAttentionHighlights(changedSessions);
     if (result && typeof result === 'object') result.rendered = true;
   } finally {
-    clientPerfEnd(perf, {sessions: sessions.length});
+    clientPerfEnd(perf, {sessions: changedSessions.length});
   }
 }
 
@@ -86756,7 +87105,13 @@ function applyAutoApprovePayload(payload, options = {}) {
   if (Number.isFinite(Number(options.topologyEpoch)) && Number(options.topologyEpoch) !== tmuxTopologyEpoch) {
     return {applied: false, staleTopology: true, sessionsChanged: false, previousActive: activeSessions.slice()};
   }
+  let changedSessions = null;
+  let rulesChanged = payload.rules !== undefined;
   if (payload.patch === true) {
+    rulesChanged = Object.prototype.hasOwnProperty.call(payload.fields || {}, 'rules');
+    if (payload.collection === 'sessions') {
+      changedSessions = [...new Set([...Object.keys(payload.changes || {}), ...(payload.removed_keys || []).map(String)])].filter(Boolean);
+    }
     payload = applyClientEventKeyedPatch({
       session_order: sessions.slice(),
       sessions: Object.fromEntries(autoApproveStates),
@@ -86776,22 +87131,30 @@ function applyAutoApprovePayload(payload, options = {}) {
     ? payload.session_order.filter(tmuxSessionLifecycleAllowsTopologySession)
     : null;
   const sessionsChanged = topologySessions ? updateSessionList(topologySessions) : false;
-  if (payload.rules) {
+  if (rulesChanged && payload.rules) {
     yoloRulesPayload = payload.rules;
     renderPreferencesPanels();
   }
+  if (sessionsChanged || changedSessions === null) changedSessions = sessions.slice();
+  const changedSessionSet = new Set(changedSessions);
   const snapshotRevision = agentWindowSnapshotRevision(payload);
+  const activityRevision = agentWindowSnapshotRevision(tabberActivityPayload);
   for (const session of sessions) {
+    const previousState = autoApproveStates.get(session) || {};
     const state = autoApproveStateWithSnapshotRevision(payload.sessions?.[session] || {target: session, enabled: false, last_action: 'off'}, snapshotRevision);
+    const previousMismatch = agentWindowSnapshotRevisionsMismatch(agentWindowPayloadRows(previousState.agent_windows).length > 0, agentWindowSnapshotRevision(previousState), activityRevision);
+    const nextMismatch = agentWindowSnapshotRevisionsMismatch(agentWindowPayloadRows(state.agent_windows).length > 0, snapshotRevision, activityRevision);
+    if (previousMismatch !== nextMismatch) changedSessionSet.add(session);
     autoApproveStates.set(session, state);
-    reconcileTmuxWindowMetadataFromAgentWindows(session, state);
+    if (changedSessionSet.has(session)) reconcileTmuxWindowMetadataFromAgentWindows(session, state);
   }
-  const result = {applied: true, sessionsChanged, previousActive, workingAgentTransitionNotifications: 0};
+  changedSessions = Array.from(changedSessionSet);
+  const result = {applied: true, sessionsChanged, previousActive, changedSessions, workingAgentTransitionNotifications: 0};
   if (options.render !== false) renderAutoApproveStatusSurfaces(result);
   // Deliver after the status render. Rendering may rebuild a pane and its toast stack; inserting a
   // transition toast before that pass makes it disappear immediately even though classification ran.
   if (typeof reconcileWorkingAgentTransitionNotifications === 'function') {
-    for (const session of sessions) {
+    for (const session of changedSessions) {
       const state = autoApproveStates.get(session) || {target: session, enabled: false, last_action: 'off'};
       result.workingAgentTransitionNotifications += reconcileWorkingAgentTransitionNotifications(session, state);
     }
@@ -86849,8 +87212,8 @@ function autoApproveOwnerLabel(payload) {
   return [pid, root].filter(Boolean).join(' ') || structuredMessageText(payload, 'last_action', t('yolo.ownerFallback'));
 }
 
-function renderAutoApproveButtons() {
-  for (const session of sessions) {
+function renderAutoApproveButtons(sessionNames = sessions) {
+  for (const session of sessionNames) {
     const state = autoApproveStates.get(session) || {target: session, enabled: false, last_action: 'off'};
     renderAutoApproveButton(session, state);
   }
@@ -87296,7 +87659,8 @@ async function applySessionMetadataPayload(payload, options = {}) {
   if (!requestIsCurrent()) return finalizeSessionMetadataOutcome(false, 'committed_render_superseded', payload, {committed: true});
   transcriptMetadataState.loading = false;
   if (sessionsChanged) renderPanels(previousActive);
-  renderSessionButtons();
+  if (sessionsChanged) renderSessionButtons();
+  else updateTopbarActivityStatus();
   renderInfoPanel();
   renderYoagentPanel();
   if (options.refreshActivity !== false) refreshActivitySummary({silent: true});
@@ -87738,9 +88102,8 @@ function updatePanelHeader(session, info) {
   updatePanelControlLabels(session, info);
   syncAttentionAnimation(panel, state.attention === true);
   if (tab) {
-    tab.className = ['panel-session-label', auto ? 'auto' : '', state.attention ? STATE_CLASS.needsAttention : ''].filter(Boolean).join(' ');
-    syncAttentionAnimation(tab, state.attention === true);
-    tab.innerHTML = panelHeaderStateHtml(state);
+    tab.className = 'panel-session-label';
+    applyPanelHeaderState(tab, state, auto);
     tab.removeAttribute('title');
   }
   scheduleAgentWindowActivityAnimationSync(panel || document);
@@ -87752,9 +88115,7 @@ function updatePanelHeader(session, info) {
     wrapper.innerHTML = sessionPopoverHtml(session, info, agentKind, auto, state);
     popover.replaceWith(wrapper.firstElementChild);
   }
-  panel?.classList.toggle(STATE_CLASS.needsInputPane, state.key === STATE_KEY.needsInput && state.attention === true);
-  panel?.classList.toggle(STATE_CLASS.needsExecPane, state.key === STATE_KEY.needsApproval && state.attention === true);
-  panel?.classList.toggle(STATE_CLASS.needsBlockedPane, state.key === STATE_KEY.blocked);
+  applyPanelStateClasses(panel, state);
 }
 
 function refreshSessionChrome(session) {

@@ -30,6 +30,10 @@ const capabilityRequestSource = bootstrapSource.slice(
   bootstrapSource.indexOf('function capabilityNameForRequest('),
   bootstrapSource.indexOf('\nconst statsWriterFence', bootstrapSource.indexOf('function capabilityNameForRequest(')),
 );
+const canonicalJsonValueSource = bootstrapSource.slice(
+  bootstrapSource.indexOf('function canonicalJsonValue('),
+  bootstrapSource.indexOf('\nfunction statsOnlyBootEnabled(', bootstrapSource.indexOf('function canonicalJsonValue(')),
+);
 const terminalSource = [
   'static_src/js/yolomux/99_terminal_boot.js',
   'static_src/js/yolomux/99_client_event_transport.js',
@@ -1958,6 +1962,7 @@ testAsync('browser observation writer fences acknowledge, retry authentication, 
       const jsDebugCurrentObservationState = {queue: [], keys: new Set(), nextHealthId: 1, timer: null, inFlight: false, retryMs: 10000, epoch: ${JSON.stringify(epoch)}, highWaterDepth: 0, drops: 0, retries: 0, instrumentationCostMs: 0, receipts: new Map()};
       let observationLifecycleCurrent = true;
       function currentObservationLifecycleScope() { return {current() { return observationLifecycleCurrent; }, ownTimer() {}, release() { return false; }}; }
+      ${canonicalJsonValueSource}
       ${endpointSource}
       ${byteLengthSource}
       ${failureClassifierSource}

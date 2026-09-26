@@ -2327,17 +2327,8 @@ function jsDebugCurrentObservationReceiptJournalValid(saved) {
   return true;
 }
 
-function jsDebugCurrentObservationReceiptRecordCanonical(value) {
-  if (Array.isArray(value)) return value.map(jsDebugCurrentObservationReceiptRecordCanonical);
-  if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(Object.keys(value).sort().map(key => [
-    key, jsDebugCurrentObservationReceiptRecordCanonical(value[key]),
-  ]));
-}
-
 function jsDebugCurrentObservationReceiptRecordsEqual(left, right) {
-  return JSON.stringify(jsDebugCurrentObservationReceiptRecordCanonical(left))
-    === JSON.stringify(jsDebugCurrentObservationReceiptRecordCanonical(right));
+  return JSON.stringify(canonicalJsonValue(left)) === JSON.stringify(canonicalJsonValue(right));
 }
 
 function trimJsDebugCurrentObservationReceipts() {

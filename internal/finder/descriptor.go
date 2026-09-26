@@ -311,6 +311,43 @@ func renameNoReplace(directory *os.File, oldName, newName string) error {
 	return renameAt2(directory, oldName, newName, 1)
 }
 
+func publishRegularNoReplace(directory *os.File, oldName, newName string) error {
+	err := renameNoReplace(directory, oldName, newName)
+	if err == nil || !isRenameNoReplaceUnsupported(err) {
+		return err
+	}
+	info, statErr := os.Lstat(descriptorChildPath(directory, oldName))
+	if statErr != nil {
+		return statErr
+	}
+	if !info.Mode().IsRegular() {
+		return err
+	}
+	return linkNoReplace(directory, oldName, newName)
+}
+
+func isRenameNoReplaceUnsupported(err error) bool {
+	return errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EOPNOTSUPP)
+}
+
+// linkat publishes a regular temporary file without replacing an existing destination. Removing
+// the source name afterwards is safe: a competing destination can only make linkat return EEXIST.
+// This is the NFS-compatible equivalent of renameat2(..., RENAME_NOREPLACE) for regular files.
+func linkNoReplace(directory *os.File, oldName, newName string) error {
+	oldBytes := append([]byte(oldName), 0)
+	newBytes := append([]byte(newName), 0)
+	_, _, errno := syscall.Syscall6(
+		syscall.SYS_LINKAT,
+		directory.Fd(), uintptr(unsafe.Pointer(&oldBytes[0])),
+		directory.Fd(), uintptr(unsafe.Pointer(&newBytes[0])), 0,
+		0,
+	)
+	if errno != 0 {
+		return errno
+	}
+	return unlinkAt(directory, oldName, false)
+}
+
 func renameAt2(directory *os.File, oldName, newName string, flags uintptr) error {
 	oldBytes := append([]byte(oldName), 0)
 	newBytes := append([]byte(newName), 0)

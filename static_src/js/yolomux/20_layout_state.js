@@ -1459,7 +1459,7 @@ function applyLayoutUrlFinderSeed(finder = {}) {
   }
   if ('session' in finder && isTmuxSession(String(finder.session || '').trim())) {
     fileExplorerFinderSelectedSession = String(finder.session || '').trim();
-    setExplicitPaneFocusItem(fileExplorerFinderSelectedSession, {allowInactive: true, renderMenu: false});
+    setExplicitPaneFocusItem(fileExplorerFinderSelectedSession, {allowInactive: true});
   }
   if ('differSession' in finder && isTmuxSession(String(finder.differSession || '').trim())) {
     fileExplorerChangesSelectedSession = String(finder.differSession || '').trim();
@@ -1522,14 +1522,7 @@ function maybeAdoptLayoutStateDeepLink(params) {
   applyLayoutUrlStateSeed(state);
 }
 
-function layoutUrlCaptureCurrentPaneState() {
-  for (const item of paneItems(layoutSlots)) {
-    capturePaneViewStateForItemIfPresent(item);
-  }
-}
-
 function layoutUrlStateSnapshot() {
-  layoutUrlCaptureCurrentPaneState();
   const state = {v: 1};
   if (paneItems(layoutSlots).some(isFileExplorerItem)) state.finder = layoutUrlFinderStateSnapshot();
   const editor = layoutUrlEditorStateSnapshot();
@@ -2368,9 +2361,11 @@ function restorePaneElementScrollState(panel, state) {
   setTimeout(restore, 0);
 }
 
-function capturePaneViewState(item, panel) {
+function capturePaneViewState(item, panel, options = {}) {
   if (!item || !panel) return false;
-  const scrollContainers = capturePaneElementScrollState(panel);
+  const scrollContainers = Array.isArray(options.scrollContainers)
+    ? options.scrollContainers
+    : capturePaneElementScrollState(panel);
   if (scrollContainers.length) {
     paneViewState.set(item, {
       scrollContainers,
@@ -2396,7 +2391,19 @@ function schedulePaneViewStateCapture(item, panel) {
   requestAnimationFrame(() => {
     pendingPaneViewStateCaptures.delete(item);
     const currentPanel = panelNodes.get(item) || panel;
-    capturePaneViewState(item, currentPanel);
+    const scrollContainers = capturePaneElementScrollState(currentPanel);
+    const savedScrollContainers = paneViewState.get(item)?.scrollContainers || [];
+    const unchanged = scrollContainers.length === savedScrollContainers.length
+      && scrollContainers.every((entry, index) => {
+        const saved = savedScrollContainers[index];
+        return entry.key === saved?.key
+          && entry.scrollTop === Number(saved.scrollTop || 0)
+          && entry.scrollLeft === Number(saved.scrollLeft || 0);
+      });
+    // Restoring a saved scroll position emits a scroll event. Do not turn that programmatic write
+    // into a second full editor-state capture; a real user scroll necessarily changes a coordinate.
+    if (unchanged) return;
+    capturePaneViewState(item, currentPanel, {scrollContainers});
     refreshLayoutUrlStateSoon();
   });
 }
@@ -6638,8 +6645,8 @@ function stateSignature(state) {
   return `${state.key}:${state.reason || ''}`;
 }
 
-function trackSessionStateChanges() {
-  for (const session of sessions.filter(isTmuxSession)) {
+function trackSessionStateChanges(sessionNames = sessions) {
+  for (const session of sessionNames.filter(isTmuxSession)) {
     const state = sessionState(session, transcriptMetadataState.payload.sessions?.[session]);
     const record = sessionStatusRecord(session, true);
     const previous = record?.state || null;

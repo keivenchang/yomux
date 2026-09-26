@@ -4016,7 +4016,6 @@ function setExplicitPaneFocusItem(item, options = {}) {
   if (explicitPaneFocusState.item === (next || null) && explicitPaneFocusState.tmuxSession === nextTmuxSession) return false;
   explicitPaneFocusState.item = next || null;
   explicitPaneFocusState.tmuxSession = nextTmuxSession;
-  if (options.renderMenu !== false && typeof renderSessionButtons === 'function') renderSessionButtons();
   return true;
 }
 
@@ -4110,7 +4109,7 @@ function setFocusedTerminalMeasured(session, options = {}) {
     }
     return;
   }
-  if (previousItem !== session) capturePaneViewStateForItemIfPresent(previousItem);
+  if (previousItem !== session && !dockviewLayoutActive()) capturePaneViewStateForItemIfPresent(previousItem);
   focusedTerminal = session;
   focusedPanelItem = session;
   rememberActivePaneItem(session);
@@ -4162,7 +4161,7 @@ function setFocusedPanelItem(item, options = {}) {
     }
     return;
   }
-  if (previousItem !== item) capturePaneViewStateForItemIfPresent(previousItem);
+  if (previousItem !== item && !dockviewLayoutActive()) capturePaneViewStateForItemIfPresent(previousItem);
   if (focusedTerminal !== item) focusedTerminal = null;
   focusedPanelItem = item;
   rememberActivePaneItem(item);

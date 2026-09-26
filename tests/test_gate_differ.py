@@ -1456,6 +1456,127 @@ def test_c4_dirty_editor_survives_differ_open_and_external_refresh(gate_browser_
 
 
 @pytest.mark.browser
+def test_go_differ_paints_repository_stream_before_attribution_finishes(gate_browser_runtime, tmp_path):
+    """Go Differ must show each completed repository while transcript attribution is still running."""
+    repo, target = _make_changed_repo(tmp_path)
+    _configure_differ_payload(gate_browser_runtime, repo, target)
+    _open_differ(gate_browser_runtime, target)
+    metrics = gate_browser_runtime.browser.execute_async_script(
+        """
+        const target = arguments[0];
+        const session = arguments[1];
+        const repo = arguments[2];
+        const streamPath = `${repo}/progressive-only.txt`;
+        const secondRepo = `${repo}-second`;
+        const secondStreamPath = `${secondRepo}/later.txt`;
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const nativeFetch = window.fetch.bind(window);
+          let controller = null;
+          let firstRepoObserver = null;
+          bootstrap.backendLabel = 'Go test';
+          window.fetch = (input, options = {}) => {
+            const url = new URL(String(input), location.href);
+            if (url.pathname !== '/api/session-files-stream') return nativeFetch(input, options);
+            return Promise.resolve(new Response(new ReadableStream({
+              start(value) { controller = value; },
+            }), {headers: {'Content-Type': 'text/event-stream'}}));
+          };
+          const frame = (event, payload) => controller.enqueue(new TextEncoder().encode(`event: ${event}\\ndata: ${JSON.stringify(payload)}\\n\\n`));
+          try {
+            const request = fetchSessionFiles({destination: 'differ', session, force: true, silent: true});
+            await window.__yolomuxTestWaitFor(() => controller, {timeoutMs: 3000, description: 'Go Differ stream request'});
+            const existingRow = Array.from(document.querySelectorAll('#panel-__differ__ [data-open-change-file]')).find(item => item.dataset.openChangeFile === streamPath);
+            if (existingRow) throw new Error(`stream-only file unexpectedly existed before its chunk: ${streamPath}`);
+            const refControls = Array.from(document.querySelectorAll('#panel-__differ__ [data-diff-ref-controls]')).find(item => item.dataset.diffRefRepo === repo);
+            const refInput = refControls?.querySelector('[data-diff-ref-from]');
+            if (!refInput) throw new Error(`repository comparison input was not rendered: ${repo}`);
+            refInput.value = 'draft kept during stream';
+            refInput.focus();
+            const priorSection = refInput.closest('.changes-repo-group');
+            const groups = document.querySelector('#panel-__differ__ .changes-groups');
+            const refInputBefore = {
+              connected: refInput.isConnected,
+              focused: document.activeElement === refInput,
+              sectionRepo: priorSection?.dataset?.changesRepo || '',
+              sectionParentClass: priorSection?.parentElement?.className || '',
+              sectionIsDirectChild: priorSection?.parentElement === groups,
+            };
+            frame('start', {session});
+            frame('repo', {
+              session, hours: 24, loaded: false, from_ref: 'HEAD', to_ref: 'current',
+              repos: [{repo, branch: 'feature/stream', count: 1, added: 5, removed: 2}],
+              files: [
+                {session, repo, path: 'progressive-only.txt', abs_path: streamPath, status: 'M', added: 5, removed: 2},
+                {session, repo, path: 'transcript-only.txt', abs_path: `${repo}/transcript-only.txt`, status: 'T'},
+              ],
+              refs_by_repo: {[repo]: []}, errors: [], warnings: [],
+            });
+            const row = await window.__yolomuxTestWaitFor(
+              () => Array.from(document.querySelectorAll('#panel-__differ__ [data-open-change-file]')).find(item => item.dataset.openChangeFile === streamPath),
+              {timeoutMs: 3000, description: 'Differ repository row before stream completion'},
+            );
+            const paintedBeforeDone = row.isConnected && row.textContent.includes('progressive-only.txt');
+            const firstRepoSection = row.closest('.changes-repo-group');
+            const firstRepoMutations = [];
+            firstRepoObserver = new MutationObserver(records => firstRepoMutations.push(...records));
+            if (firstRepoSection) firstRepoObserver.observe(firstRepoSection, {subtree: true, childList: true, attributes: true, characterData: true});
+            const transcriptOnlyRow = Array.from(document.querySelectorAll('#panel-__differ__ [data-open-change-file]')).find(item => item.dataset.openChangeFile === `${repo}/transcript-only.txt`);
+            frame('repo', {
+              session, hours: 24, loaded: false, from_ref: 'HEAD', to_ref: 'current',
+              repos: [{repo: secondRepo, branch: 'feature/second', count: 1, added: 2, removed: 1}],
+              files: [{session, repo: secondRepo, path: 'later.txt', abs_path: secondStreamPath, status: 'A', added: 2, removed: 1}],
+              refs_by_repo: {[secondRepo]: []}, errors: [], warnings: [],
+            });
+            const secondRow = await window.__yolomuxTestWaitFor(
+              () => Array.from(document.querySelectorAll('#panel-__differ__ [data-open-change-file]')).find(item => item.dataset.openChangeFile === secondStreamPath),
+              {timeoutMs: 3000, description: 'second Differ repository row before stream completion'},
+            );
+            firstRepoMutations.push(...firstRepoObserver.takeRecords());
+            firstRepoObserver.disconnect();
+            firstRepoObserver = null;
+            const firstRepoUntouched = Boolean(firstRepoSection?.isConnected && firstRepoSection.contains(row) && row.isConnected && firstRepoMutations.length === 0);
+            const repoSections = Array.from(document.querySelectorAll('#panel-__differ__ .changes-groups > .changes-repo-group'));
+            const firstRepoIndex = repoSections.findIndex(item => item.dataset.changesRepo === repo);
+            const secondRepoIndex = repoSections.findIndex(item => item.dataset.changesRepo === secondRepo);
+            const secondPaintedBeforeDone = secondRow.isConnected && secondRow.textContent.includes('later.txt');
+            const refInputPreserved = refInput.isConnected
+              && document.activeElement === refInput
+              && refInput.value === 'draft kept during stream';
+            const refInputState = {
+              connected: refInput.isConnected,
+              focused: document.activeElement === refInput,
+              value: refInput.value,
+              activeTag: document.activeElement?.tagName || '',
+              activeClass: document.activeElement?.className || '',
+            };
+            frame('done', {session, loaded: true, from_ref: 'HEAD', to_ref: 'current', errors: [], warnings: []});
+            controller.close();
+            await request;
+            done({paintedBeforeDone, secondPaintedBeforeDone, firstRepoUntouched, repoOrderPreserved: firstRepoIndex >= 0 && secondRepoIndex > firstRepoIndex, transcriptOnlyHiddenBeforeDone: !transcriptOnlyRow, refInputPreserved, refInputBefore, refInputState, rowPath: row.dataset.openChangeFile, errors: jsDebugFailureEvents('error')});
+          } catch (error) {
+            controller?.error(error);
+            done({error: String(error?.stack || error)});
+          } finally {
+            firstRepoObserver?.disconnect();
+            window.fetch = nativeFetch;
+          }
+        })();
+        """,
+        str(target),
+        gate_browser_runtime.session,
+        str(repo),
+    )
+    assert not metrics.get("error"), metrics
+    assert metrics["paintedBeforeDone"] is True and metrics["rowPath"] == f"{repo}/progressive-only.txt", metrics
+    assert metrics["secondPaintedBeforeDone"] is True and metrics["repoOrderPreserved"] is True, metrics
+    assert metrics["firstRepoUntouched"] is True, metrics
+    assert metrics["transcriptOnlyHiddenBeforeDone"] is True, metrics
+    assert metrics["refInputPreserved"] is True, metrics
+    assert metrics["errors"] == [], metrics
+
+
+@pytest.mark.browser
 def test_c5_diff_list_generation_precedes_file_open_without_retry(gate_browser_runtime, tmp_path):
     """C5: the observable diff-list-to-file-open transition must prove the listed revision is ready before the browser issues its one file-open request, with no retry masking an ordering race."""
     repo, target = _make_changed_repo(tmp_path)

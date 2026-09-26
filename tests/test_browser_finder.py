@@ -1234,6 +1234,7 @@ def test_finder_repo_context_menu_and_diff_tab_are_immediate_while_metadata_is_d
         const jsonResponse = payload => new Response(JSON.stringify(payload), {headers: {'Content-Type': 'application/json'}});
         const batchResolvers = [];
         const historyResolvers = [];
+        const worktreeResolvers = [];
         const requests = [];
         window.fetch = (input, options = {}) => {
           const url = new URL(String(input), location.href);
@@ -1243,8 +1244,11 @@ def test_finder_repo_context_menu_and_diff_tab_are_immediate_while_metadata_is_d
             const payload = {responses: requests.map((request, index) => ({id: request.id ?? index, ok: true, status: 200, payload: {path: request.path, name: 'notes', kind: 'dir', realpath: request.path, repo_root: repo}}))};
             batchResolvers.push(() => resolve(jsonResponse(payload)));
           });
-          if (url.pathname === '/api/fs/git-history') return new Promise(resolve => {
-            const payload = {path: repo, repo, branch: 'feature/notes', relative_path: '', head: sha, snapshot_cursor: 'notes-snapshot', next_cursor: '', truncated: false, commits: [{sha, short: sha.slice(0, 9), parents: [], subject: 'Immediate tab test', author: 'Test', authored_at: 0, files: 1, added: 1, removed: 1, binary_files: 0}]};
+          if (url.pathname === '/api/fs/git-history' && url.searchParams.get('worktree') === 'only') return new Promise(resolve => {
+            worktreeResolvers.push(() => resolve(jsonResponse({path: repo, repository_identity: '', worktree_status: {available: true, dirty: true, entries: [{status: 'M', path: 'dirty.txt'}], files: 1, status_counts: {M: 1}}})));
+          });
+           if (url.pathname === '/api/fs/git-history') return new Promise(resolve => {
+            const payload = {path: repo, repo, branch: 'feature/notes', relative_path: '', shallow_boundary: 'complete', head: sha, snapshot_cursor: 'notes-snapshot', next_cursor: '', truncated: false, commits: [{sha, short: sha.slice(0, 9), parents: [], subject: 'Immediate tab test', author: 'Test', authored_at: 0, files: 1, added: 1, removed: 1, binary_files: 0, signature_status: ''}]};
             historyResolvers.push(() => resolve(jsonResponse(payload)));
           });
           return originalFetch(input, options);
@@ -1265,12 +1269,17 @@ def test_finder_repo_context_menu_and_diff_tab_are_immediate_while_metadata_is_d
           batchResolvers.shift()();
           historyResolvers.shift()();
           const infoRequestsAfterClick = requests.filter(request => request.startsWith('/api/fs/batch')).length;
-          const historyRequest = requests.find(request => request.startsWith('/api/fs/git-history')) || '';
+          const historyRequest = requests.find(request => request.startsWith('/api/fs/git-history?') && !request.includes('worktree=only')) || '';
           const pathNode = await waitFor(() => {
             const candidate = panelNodes.get(item)?.querySelector('.git-diff-path');
             return candidate?.querySelector('.git-diff-branch')?.textContent === '[feature/notes]' ? candidate : null;
           });
-          done({nativeSuppressed: event.defaultPrevented, item, immediateLabel, active: itemIsActivePaneTab(item), loadingText: loading.textContent, movingEllipsis: Boolean(loading.querySelector('.moving-ellipsis')), pathLabel: pathNode.textContent, pathTitle: pathNode.title, infoRequestsBeforeClick, infoRequestsAfterClick, historyRequests: requests.filter(request => request.startsWith('/api/fs/git-history')).length, historyRequest, requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          const paintedBeforeDirty = Boolean(await waitFor(() => panelNodes.get(item)?.querySelector(`[data-git-diff-commit-group="${sha}"] .git-diff-commit-row`)));
+          if (worktreeResolvers.length !== 1) throw new Error('the Dirty request was not issued independently after the history response');
+          worktreeResolvers.shift()();
+          const dirtyRow = await waitFor(() => panelNodes.get(item)?.querySelector('.git-diff-worktree-status'));
+          const historyUrls = requests.filter(request => request.startsWith('/api/fs/git-history?') && !request.includes('worktree=only'));
+          done({nativeSuppressed: event.defaultPrevented, item, immediateLabel, active: itemIsActivePaneTab(item), loadingText: loading.textContent, movingEllipsis: Boolean(loading.querySelector('.moving-ellipsis')), pathLabel: pathNode.textContent, pathTitle: pathNode.title, infoRequestsBeforeClick, infoRequestsAfterClick, historyRequests: historyUrls.length, historyUrls, historyRequest, paintedBeforeDirty, dirtyPainted: Boolean(dirtyRow), requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
         })().catch(error => done({error: String(error?.stack || error), requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')})).finally(() => { window.fetch = originalFetch; });
         """,
         repo,
@@ -1283,8 +1292,9 @@ def test_finder_repo_context_menu_and_diff_tab_are_immediate_while_metadata_is_d
     assert metrics["pathTitle"] == "/home/test/notes [feature/notes]", metrics
     assert metrics["active"] is True and metrics["loadingText"] == "loading..." and metrics["movingEllipsis"] is True, metrics
     assert metrics["infoRequestsBeforeClick"] == metrics["infoRequestsAfterClick"] == 1, metrics
-    assert metrics["historyRequests"] == 1, metrics
+    assert metrics["historyRequests"] == 1, metrics["historyUrls"]
     assert metrics["historyRequest"].startswith("/api/fs/git-history?path=%2Fhome%2Ftest%2Fnotes"), metrics
+    assert "worktree=0" in metrics["historyRequest"] and metrics["paintedBeforeDirty"] is True and metrics["dirtyPainted"] is True, metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
@@ -1317,8 +1327,9 @@ def test_finder_diff_dirty_worktree_is_commit_shaped_and_expandable(browser, tmp
           requests.push(url.pathname + url.search);
           if (url.pathname === '/api/fs/git-history') return jsonResponse({
             path: repo,
-            repo,
-            relative_path: '',
+             repo,
+             relative_path: '',
+             shallow_boundary: 'complete',
             head: sha,
             snapshot_cursor: 'dirty-snapshot',
             next_cursor: '',
@@ -1657,13 +1668,16 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
               },
             }))});
           }
+          if (url.pathname === '/api/fs/git-history' && url.searchParams.get('worktree') === 'only') {
+            return jsonResponse({path: url.searchParams.get('path'), repository_identity: '', dirty_count: 2, dirty_entries: [{status: ' M', path: 'README.md'}, {status: '??', path: 'new file.txt'}], dirty_entries_truncated: false});
+          }
           if (url.pathname === '/api/fs/git-history') {
             const path = url.searchParams.get('path');
             if (url.searchParams.get('cursor') === 'page-2') return jsonResponse({
               path,
-              repo,
-              branch: 'feature/history',
-              relative_path: path === repo ? '' : 'src',
+               repo,
+               relative_path: path === repo ? '' : 'src',
+               shallow_boundary: 'complete',
               head: shaA,
               hosted_remote: {provider: 'github', base_url: 'https://github.com/example/project'},
               branch: 'yo7110',
@@ -1687,9 +1701,9 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
             });
             return jsonResponse({
               path,
-              repo,
-              branch: 'feature/history',
-              relative_path: path === repo ? '' : 'src',
+             repo,
+             relative_path: path === repo ? '' : 'src',
+             shallow_boundary: 'complete',
               head: shaA,
               hosted_remote: {provider: 'github', base_url: 'https://github.com/example/project'},
               branch: 'yo7110',
@@ -1730,8 +1744,9 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
           if (url.pathname === '/api/fs/git-commit') {
             const sha = url.searchParams.get('commit');
             if (sha === shaA) return jsonResponse({
-              repo,
-              scope_path: '',
+               repo,
+               scope_path: '',
+               shallow_boundary: 'complete',
               sha: shaA,
               parents: [parentA, secondParent],
               from_ref: parentA,
@@ -1749,8 +1764,9 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
               ],
             });
             return jsonResponse({
-              repo,
-              scope_path: '',
+               repo,
+               scope_path: '',
+               shallow_boundary: 'complete',
               sha: shaB,
               parents: [parentB],
               from_ref: parentB,
@@ -2082,7 +2098,13 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
           renderGitDiffPanel(rootItem);
           await waitFor(() => {
             const state = gitDiffTabState.get(rootItem);
-            return state?.loaded === true && state.details.size === 2;
+            const firstDetail = state?.commitRecords.get(shaA)?.detail;
+            const secondDetail = state?.commitRecords.get(shaB)?.detail;
+            return state?.loaded === true
+              && firstDetail?.sha === shaA
+              && firstDetail.files.some(file => file.path === 'src/new.js')
+              && secondDetail?.sha === shaB
+              && secondDetail.files.some(file => file.path === 'README.md');
           });
           const restoredRootState = gitDiffTabState.get(rootItem);
           rootPanel = panelNodes.get(rootItem);
@@ -2094,6 +2116,10 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
             expanded: Array.from(restoredRootState.expanded),
             tabStop: rootPanel.querySelector('.git-diff-commit-row[tabindex="0"]')?.dataset?.gitDiffCommit || '',
           };
+          const restoredRootHistoryBody = rootPanel.querySelector('.git-diff-panel-body');
+          restoredRootHistoryBody.scrollTop = restoredRootHistoryBody.scrollHeight;
+          restoredRootHistoryBody.dispatchEvent(new Event('scroll'));
+          await waitFor(() => rootPanel.querySelector('.git-diff-commit-row[data-git-diff-commit="' + 'f'.repeat(40) + '"]'));
 
           await selectSession(fileExplorerItemId, {userInitiated: true});
           const finderRepoRow = await waitFor(() => document.querySelector(
@@ -2104,10 +2130,14 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
           await waitFor(() => document.querySelector('#panel-__finder__ .file-tree-row[data-path="' + nested + '"]'));
           await chooseFinderAction(nested, 'ΔShow Diff');
           const nestedItem = gitDiffItemFor(nested);
-          await waitFor(() => {
+          const nestedPanel = await waitFor(() => {
             const panel = panelNodes.get(nestedItem);
-            return panel && panel.querySelectorAll('.git-diff-commit-row').length === 2;
+            return panel && panel.querySelectorAll('.git-diff-commit-row').length >= 2 ? panel : null;
           });
+          const nestedHistoryBody = nestedPanel.querySelector('.git-diff-panel-body');
+          nestedHistoryBody.scrollTop = nestedHistoryBody.scrollHeight;
+          nestedHistoryBody.dispatchEvent(new Event('scroll'));
+          await waitFor(() => nestedPanel.querySelector('.git-diff-commit-row[data-git-diff-commit="' + 'f'.repeat(40) + '"]'));
           const tabLabels = {
             root: document.querySelector('[data-pane-tab="' + CSS.escape(rootItem) + '"] .session-button-dir')?.textContent || '',
             nested: document.querySelector('[data-pane-tab="' + CSS.escape(nestedItem) + '"] .session-button-dir')?.textContent || '',
@@ -2160,7 +2190,7 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
             french,
             tabs,
             tabLabels,
-            historyRequests: requests.filter(request => request.startsWith('/api/fs/git-history')),
+            historyRequests: requests.filter(request => request.startsWith('/api/fs/git-history?') && !request.includes('worktree=only')),
             detailRequests: requests.filter(request => request.startsWith('/api/fs/git-commit')),
             diffRequests: requests.filter(request => request.startsWith('/api/fs/diff')),
             errors: jsDebugFailureEvents('error'),
@@ -2212,7 +2242,7 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
         "expandedAfterLink": "false",
     }, metrics
     assert metrics["summaryColors"]["added"] != metrics["summaryColors"]["removed"], metrics
-    assert metrics["branchText"] == "[feature/history]", metrics
+    assert metrics["branchText"] == "[yo7110]", metrics
     assert metrics["branchWeight"] == "800", metrics
     assert metrics["branchColor"] != metrics["summaryColors"]["added"] and metrics["branchColor"] != metrics["summaryColors"]["removed"], metrics
     assert all(metrics["alignedColumnVisibility"].values()), metrics["alignedColumnVisibility"]
@@ -2302,12 +2332,12 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
     assert metrics["tabs"].count(root_item) == 1 and metrics["tabs"].count(nested_item) == 1, metrics
     assert metrics["tabLabels"] == {"root": "Δrepo", "nested": "Δrepo;src"}, metrics
     expected_history_requests = [
-        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=22",
-        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=22&cursor=page-2",
-        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=22&cursor=snapshot-zero",
-        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo%2Fsrc&limit=22",
-        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo%2Fsrc&limit=22&cursor=page-2",
-        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=22&cursor=page-2",
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=22&worktree=0",
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=22&cursor=page-2&worktree=0",
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=22&cursor=snapshot-zero&worktree=0",
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo%2Fsrc&limit=22&worktree=0",
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo%2Fsrc&limit=22&cursor=page-2&worktree=0",
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=22&cursor=page-2&worktree=0",
     ]
     assert sorted(metrics["historyRequests"]) == sorted(expected_history_requests), metrics
     assert len(metrics["detailRequests"]) == 4, metrics
@@ -2315,6 +2345,64 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
         f"/api/fs/diff?path=%2Fhome%2Ftest%2Frepo%2Fsrc%2Fnew.js&from={parent_a}&to={sha_a}"
     ], metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_git_diff_stats_chunk_patches_only_changed_rows_in_chromium(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=left&tabs=left:files",
+        settings={"file_explorer": {"root_mode": "fixed"}},
+        fs_entries={"/home/test": [{"name": "repo", "kind": "dir"}]},
+    )
+    metrics = browser.execute_script(
+        """
+        const item = gitDiffItemFor('/home/test/repo');
+        const commits = Array.from({length: 6}, (_, index) => ({
+          sha: String(index + 1).padStart(40, '0'),
+          short: String(index + 1).padStart(9, '0'),
+          subject: `commit ${index + 1}`,
+          authored_at: 1700000000 + index,
+        }));
+        const state = ensureGitDiffTabState(item, {
+          path: '/home/test/repo', repo: '/home/test/repo', head: 'f'.repeat(40), shallowBoundary: 'complete', commits,
+          visibleCommitCount: commits.length, loaded: true, loadAttempted: true,
+        });
+        state.commits = commits;
+        const expandedSha = commits[5].sha;
+        state.expanded.add(expandedSha);
+        gitDiffCommitRecordFor(state, expandedSha).detail = {
+          repo: '/home/test/repo', sha: expandedSha, parents: [], from_ref: '0'.repeat(40), to_ref: expandedSha,
+          message: 'expanded unrelated commit', files: [{status: 'M', path: 'src/expanded.go'}],
+          message_truncated: false, files_truncated: false, truncated: false,
+        };
+        const panel = createGitDiffPanel(item);
+        panelNodes.set(item, panel);
+        document.body.append(panel);
+        renderGitDiffPanel(item, {panel});
+        const fileRow = panel.querySelector('.git-diff-commit-detail .file-tree-row');
+        const untouchedCountCell = panel.querySelector(`[data-git-diff-commit-group="${expandedSha}"] .git-diff-commit-changes`);
+        applyGitDiffStatsPayload(item, state, {
+          shallow_boundary: 'complete',
+          commits: commits.slice(0, 4).map((commit, index) => ({
+            ...commit, files: 1, added: index + 2, removed: 1, binary_files: 0,
+            signature_status: index === 0 ? 'G' : '',
+          })),
+        });
+        return {
+          expandedTreeRowPreserved: panel.querySelector('.git-diff-commit-detail .file-tree-row') === fileRow,
+          untouchedCountCellPreserved: panel.querySelector(`[data-git-diff-commit-group="${expandedSha}"] .git-diff-commit-changes`) === untouchedCountCell,
+          changedCount: panel.querySelector(`[data-git-diff-commit-group="${commits[0].sha}"] .git-diff-commit-added`)?.textContent || '',
+          changedSignature: panel.querySelector(`[data-git-diff-commit-group="${commits[0].sha}"] .git-diff-commit-signature`)?.textContent || '',
+        };
+        """
+    )
+    assert metrics == {
+        "expandedTreeRowPreserved": True,
+        "untouchedCountCellPreserved": True,
+        "changedCount": "+2",
+        "changedSignature": "G",
+    }, metrics
 
 
 def test_finder_context_copy_image_fetches_bytes_and_writes_image_clipboard(browser, tmp_path):
@@ -2512,7 +2600,7 @@ def test_legacy_changes_url_opens_differ(browser, tmp_path, legacy_token):
           visibleDateButtons: visible('[data-file-explorer-tree-dates]').length,
           visibleReloadButtons: visible('[data-session-files-refresh], [data-file-explorer-refresh]').length,
           sessionOptionTexts: Array.from(panel.querySelectorAll('[data-session-files-session] option')).map(option => option.textContent.trim()),
-          sessionFilesFetches: window.__bootFetches.filter(item => item.path === '/api/session-files').length,
+          sessionFilesFetches: window.__bootFetches.filter(item => item.path === '/api/session-files' || item.path === '/api/session-files-stream').length,
         };
         """
     )
@@ -2545,7 +2633,7 @@ def test_differ_controls_use_real_session_reload_sort_and_date_events(browser, t
         """
         const done = arguments[0];
         const panel = document.querySelector('#panel-__differ__');
-        const fetches = () => window.__bootFetches.filter(item => item.path === '/api/session-files').length;
+        const fetches = () => window.__bootFetches.filter(item => item.path === '/api/session-files' || item.path === '/api/session-files-stream').length;
         const select = panel.querySelector('[data-session-files-session]');
         const before = fetches();
         select.value = '2';
@@ -2636,13 +2724,13 @@ def test_differ_ref_input_change_uses_its_own_repository_context(browser, tmp_pa
         const done = arguments[0];
         const panel = document.querySelector('#panel-__differ__');
         const input = panel.querySelector('[data-diff-ref-controls][data-diff-ref-repo="/repo/app"] [data-diff-ref-from]');
-        const before = window.__bootFetches.filter(item => item.path === '/api/session-files').length;
+        const before = window.__bootFetches.filter(item => item.path === '/api/session-files' || item.path === '/api/session-files-stream').length;
         input.value = 'abc123def456';
         input.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
         const deadline = performance.now() + 2000;
         const inspect = () => {
           const selected = diffRefsByRepo['/repo/app']?.from || '';
-          const fetches = window.__bootFetches.filter(item => item.path === '/api/session-files').length;
+          const fetches = window.__bootFetches.filter(item => item.path === '/api/session-files' || item.path === '/api/session-files-stream').length;
           if (selected === 'abc123def456' && fetches > before) return done({selected, before, fetches, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           if (performance.now() >= deadline) return done({error: 'repo-scoped ref did not commit', selected, before, fetches, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           requestAnimationFrame(inspect);
@@ -3303,16 +3391,25 @@ def test_fetch_file_entry_status_succeeds_for_existing_preview_sample(browser, t
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
-        fetchFileEntryStatus('/home/test/yolomux.dev3/tests/fixtures/preview-samples/03-mixed.md')
-          .then(result => done({
+        const fetchStart = window.__bootFetches.length;
+        const path = '/home/test/yolomux.dev3/tests/fixtures/preview-samples/03-mixed.md';
+        fetchFileEntryStatus(path)
+          .then(result => {
+            setFileExplorerFsResourceValue('list', '/home/test/yolomux.dev3/tests/fixtures/preview-samples', [
+              {name: '03-mixed.md', kind: 'file', size: 129, mtime: 1781300001, mtime_ns: 1781300001000000000},
+            ]);
+            const newer = freshCachedFileEntryStatus(path);
+            done({
             entry: result.entry,
             missing: result.missing,
             lookupError: result.error,
             network: result.network,
-            fsFetches: window.__bootFetches
-              .filter(item => item.path === '/api/fs/list' || item.path === '/api/fs/fast/list' || item.path === '/api/fs/batch')
+            newerListMtime: newer?.entry?.mtime,
+            fsFetches: window.__bootFetches.slice(fetchStart)
+              .filter(item => item.path === '/api/fs/info' || item.path === '/api/fs/list' || item.path === '/api/fs/fast/list' || item.path === '/api/fs/batch')
               .map(item => ({path: item.path, body: item.body, search: item.search})),
-          }))
+            });
+          })
           .catch(error => done({error: String(error), stack: String(error?.stack || '')}));
         """
     )
@@ -3323,7 +3420,8 @@ def test_fetch_file_entry_status_succeeds_for_existing_preview_sample(browser, t
     assert metrics["missing"] is False, metrics
     assert metrics["network"] is False, metrics
     assert metrics["lookupError"] is None, metrics
-    assert metrics["fsFetches"], metrics
+    assert metrics["newerListMtime"] == 1781300001, metrics
+    assert all(item["path"] == "/api/fs/info" for item in metrics["fsFetches"]), metrics
 
 
 def test_sync_finder_follows_clicked_editor_file_to_repo(browser, tmp_path):
@@ -4655,7 +4753,7 @@ def test_sync_mode_session_switch_uses_transcript_root_before_session_files_refr
             let releaseFetch = null;
             window.fetch = (input, options = {}) => {
               const url = new URL(String(input), location.href);
-              if (url.pathname === '/api/session-files' && url.searchParams.get('session') === '6') {
+              if (['/api/session-files', '/api/session-files-stream'].includes(url.pathname) && url.searchParams.get('session') === '6') {
                 heldFetch = true;
                 return new Promise(resolve => {
                   releaseFetch = () => originalFetch(input, options).then(resolve);
@@ -4773,7 +4871,7 @@ def test_sync_mode_session_switch_uses_cached_payload_before_refresh(browser, tm
             let releaseFetch = null;
             window.fetch = (input, options = {}) => {
               const url = new URL(String(input), location.href);
-              if (url.pathname === '/api/session-files' && url.searchParams.get('session') === '6') {
+              if (['/api/session-files', '/api/session-files-stream'].includes(url.pathname) && url.searchParams.get('session') === '6') {
                 heldFetch = true;
                 return new Promise(resolve => {
                   releaseFetch = () => originalFetch(input, options).then(resolve);
