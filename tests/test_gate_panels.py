@@ -156,6 +156,7 @@ def test_h2_system_status_metrics_are_not_null(monkeypatch, gate_runtime_paths):
     """The System API reports five real services and qualifies every unavailable metric."""
     now = 1_785_600_000.0
     webapp = app_module.TmuxWebtermApp([])
+    gate_runtime_paths.fixture_apps.append(webapp)
     try:
         webapp.stats_current_client.database_path = gate_runtime_paths.state_dir / "services" / "stats-v7.sqlite3"
         monkeypatch.setattr(webapp.search_indexer, "runtime_status", lambda: {

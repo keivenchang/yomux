@@ -259,7 +259,7 @@ print_launch_command() {
   fi
   printf 'PATH=%s\n' "$PATH"
   printf 'cd %q\n' "$repo_root"
-  printf 'nohup bash -c %q > /dev/null 2>&1 < /dev/null & disown\n' "$(shell_command_for "$log_path")"
+  printf 'nohup setsid bash -c %q > /dev/null 2>&1 < /dev/null & disown\n' "$(shell_command_for "$log_path")"
 }
 
 shell_command_for() {
@@ -426,7 +426,7 @@ launch_server() {
   local log_path="$1"
   local shell_command
   shell_command="$(shell_command_for "$log_path")"
-  nohup bash -c "$shell_command" > /dev/null 2>&1 < /dev/null &
+  nohup setsid bash -c "$shell_command" > /dev/null 2>&1 < /dev/null &
   launched_pid="$!"
   disown 2>/dev/null || true
 }
@@ -534,13 +534,11 @@ yolomux_acquire_start_lock || die "startup lock unavailable"
 trap yolomux_release_start_lock EXIT
 if [[ "$ignore_load" -eq 1 ]]; then
   printf 'WARNING: --ignore-load requested; skipping only the startup CPU/load capacity wait\n' >&2
-else
-  yolomux_wait_for_system_capacity "$python_bin"
 fi
 ensure_xterm_assets
 
 for port in "${ports[@]}"; do
-  if [[ "$ignore_load" -ne 1 ]]; then
+  if [[ "$ignore_load" -ne 1 ]] && ! use_dev_mode "$port"; then
     yolomux_wait_for_system_capacity "$python_bin"
   fi
   restart_port "$port"

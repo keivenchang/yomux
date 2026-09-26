@@ -60,6 +60,8 @@ def test_boot_print_command_uses_any_configured_primary_port():
     assert "--dang --self-signed" in command
     assert "--dev" not in command
     assert "MALLOC_ARENA_MAX=2" in command
+    if platform.system() != "Darwin":
+        assert "nohup setsid bash -c" in command
     assert "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT" not in command
     clears_tmux_inline = "TMUX= TMUX_PANE=" in command
     clears_tmux_in_detacher = (
@@ -436,6 +438,29 @@ def test_boot_ignore_load_is_explicit_and_preserves_other_startup_guards():
     assert 'yolomux_acquire_start_lock || die "startup lock unavailable"' in source
     assert 'restart_port "$port"' in source
     assert 'yolomux_wait_for_system_capacity "$python_bin"' in source
+
+
+@pytest.mark.parametrize(
+    ("mode", "ignored", "expected_waits"),
+    [("always", 0, 0), ("never", 0, 2), ("auto", 0, 1), ("never", 1, 0)],
+)
+def test_boot_development_ports_do_not_wait_for_resource_pressure(mode, ignored, expected_waits):
+    source = (ROOT / "boot.sh").read_text(encoding="utf-8")
+    mode_function = source[source.index("use_dev_mode() {"):source.index("\nserver_args=()")]
+    launch_loop = source[source.rindex('for port in "${ports[@]}"; do'):]
+    script = mode_function + """
+primary_port=7220
+ports=(7220 7221)
+python_bin=python3
+dev_mode="$1"
+ignore_load="$2"
+yolomux_wait_for_system_capacity() { printf 'wait\\n'; }
+restart_port() { printf 'restart %s\\n' "$1"; }
+""" + launch_loop
+    result = subprocess.run(["bash", "-c", script, "boot-resource-test", mode, str(ignored)], capture_output=True, text=True, check=True)
+    lines = result.stdout.splitlines()
+    assert lines.count("wait") == expected_waits
+    assert [line for line in lines if line.startswith("restart ")] == ["restart 7220", "restart 7221"]
 
 
 def test_startup_listener_boundary_returns_the_exact_owned_listener_pid(tmp_path):

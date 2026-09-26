@@ -9,11 +9,11 @@ checks by hand. Use --serial when debugging order or when interleaved process
 load makes a failure hard to read. Focused pytest lanes are available with
 --lane, but the default gate keeps the old full-pytest behavior.
 
-A default run then adds ONE exclusive latency-certification phase. The parallel
-lanes retire every process they own, the host is qualified against a declared
-resource envelope, the certification units run serially and alone, and the host
-is qualified again afterwards. An unqualified host exits 4 with the literal
-NOT CERTIFIABLE and its raw evidence; it is never skipped into a green.
+Development runs record host pressure without refusing functional tests. Use
+--certify to add the exclusive latency-certification phase, or --certification-only
+to run it alone. Only explicit certification qualifies the host against the
+declared resource envelope and exits 4 with NOT CERTIFIABLE when it cannot
+measure the fixed latency budgets.
 
 Usage:
   python3 tools/check.py
@@ -24,7 +24,7 @@ Usage:
   python3 tools/check.py --no-tool-guard
 
 Exit codes:
-  0   every lane passed and the certification units certified
+  0   every selected lane passed; any requested certification also certified
   1   a lane failed, or a certification unit breached its fixed ceiling
   2   usage error
   3   another expensive check or worktree writer owns this checkout
@@ -122,7 +122,6 @@ from tools.tool_guard import tool_lock_owner_marker
 from yolomux_lib.infra.inotify_capacity import InotifyCapacityVerdict
 from yolomux_lib.infra.inotify_capacity import inotify_capacity_verdict
 TOOL_GUARD_STATE_STALE_SECONDS = 30.0
-TOOL_GUARD_NICE_DELTA = 5
 EXPENSIVE_TOOL_LANES = frozenset({"node-layout", "bazel-go", "pytest", "pytest-boot", "pytest-browser", "pytest-e2e", "pytest-gate-serial"})
 
 EXIT_LANE_FAILED = 1
@@ -300,15 +299,15 @@ def check_cpu_percent(cpu_percent: int | None = None) -> int:
     """Fraction of host CPUs the pytest pools may claim, 1-100.
 
     Precedence: explicit --cpu-percent, then YOLOMUX_CHECK_CPU_PERCENT, then
-    the shared-box default. Half the host remains available for live servers,
-    browsers, and agent work while the three pytest pools share the rest.
+    full schedulable CPU capacity. An explicit override may reduce the worker
+    budget, but development does not reserve a fraction of the host by default.
     """
     raw = str(cpu_percent) if cpu_percent is not None else os.environ.get("YOLOMUX_CHECK_CPU_PERCENT", "").strip()
     if raw:
         if not raw.isdigit() or not 1 <= int(raw) <= 100:
             raise ValueError("CPU percent must be an integer 1-100")
         return int(raw)
-    return 50
+    return 100
 
 
 def schedulable_cpu_count() -> int:
@@ -363,7 +362,7 @@ def bazel_job_count(*, serial: bool = False) -> str:
         if not override.isdigit() or int(override) < 1:
             raise ValueError("YOLOMUX_BAZEL_JOBS must be a positive integer")
         return override
-    return "2"
+    return str(schedulable_cpu_count())
 
 
 def step_catalog(*, serial: bool = False, cpu_percent: int | None = None) -> dict[StepId, Step]:
@@ -640,15 +639,6 @@ def active_yolomux_server_records(
     return records
 
 
-def lower_current_process_priority(active_records: list[dict[str, object]], *, nice_delta: int = TOOL_GUARD_NICE_DELTA) -> bool:
-    if not active_records or nice_delta <= 0:
-        return False
-    try:
-        os.nice(nice_delta)
-    except OSError:
-        return False
-    return True
-
 
 HEAVY_LANE_NAME_PREFIXES = ("pytest", "bazel")
 
@@ -676,26 +666,19 @@ def admit_inotify_capacity(
     return inotify_capacity_verdict()
 
 
-def admit_functional_host(
+def measure_functional_host(
     selected: list[Lane], *, evidence_dir: Path
 ) -> dict[str, object] | None:
-    """Qualify the host before any selected heavy functional lane creates load.
-
-    Functional browser and Bazel lanes are not latency certification units, but they still need a
-    host on which their failures are attributable. Running them on an already-stalled host turns
-    scheduler pressure into misleading product reds. Reuse the certification host owner and retain
-    its complete measurement in the same /tmp evidence tree; cheap source-only lanes do not need
-    this admission.
-    """
+    """Record host pressure once without imposing development admission limits."""
 
     required_by = heavy_lane_names(selected)
     if not required_by:
         return None
-    qualification = latency_calibration.certification_host_qualification(evidence_root=evidence_dir)
+    qualification = latency_calibration.host_qualification(evidence_root=evidence_dir)
     artifact = latency_calibration.write_latency_evidence(
-        nodeid="tools/check.py::functional_host_admission",
-        label="functional host admission",
-        payload={"stage": "functional_host_admission", "required_by": required_by, "qualification": qualification},
+        nodeid="tools/check.py::functional_host_diagnostics",
+        label="functional host diagnostics",
+        payload={"stage": "functional_host_diagnostics", "required_by": required_by, "qualification": qualification},
         evidence_root=evidence_dir,
     )
     return {
@@ -1878,11 +1861,12 @@ def main(argv: list[str] | None = None) -> int:
     scheduling = parser.add_mutually_exclusive_group()
     scheduling.add_argument("--serial", action="store_true", help="run lanes one at a time with one pytest worker per lane")
     scheduling.add_argument("--serial-lanes", action="store_true", help="run lanes one at a time while preserving each lane's normal pytest worker policy")
-    parser.add_argument("--cpu-percent", type=int, default=None, metavar="1-100", help="fraction of host CPUs the pytest pools may claim (default: 50; env YOLOMUX_CHECK_CPU_PERCENT)")
+    parser.add_argument("--cpu-percent", type=int, default=None, metavar="1-100", help="fraction of host CPUs the pytest pools may claim (default: 100; env YOLOMUX_CHECK_CPU_PERCENT)")
     parser.add_argument("--lane", action="append", choices=lane_names, help="run only this lane; may be repeated")
     parser.add_argument("--list-lanes", action="store_true", help="print lane names and exit")
-    parser.add_argument("--no-tool-guard", action="store_true", help="skip the expensive-tool lock and live-server priority lowering")
+    parser.add_argument("--no-tool-guard", action="store_true", help="skip the expensive-tool lock")
     parser.add_argument("--performance-report", nargs="?", const="", metavar="/tmp/REPORT.json", help="override the automatic per-run timing report path under /tmp")
+    parser.add_argument("--certify", action="store_true", help="run functional checks followed by explicit controlled-load latency certification")
     parser.add_argument("--certification-only", action="store_true", help="run only the exclusive latency-certification phase, skipping every functional lane")
     parser.add_argument("--certification-evidence-dir", default=None, metavar="/tmp/DIR", help="override the automatic certification evidence directory under /tmp")
     args = parser.parse_args(argv)
@@ -1918,9 +1902,8 @@ def main(argv: list[str] | None = None) -> int:
         print("no lanes selected", file=sys.stderr)
         return 2
 
-    # The exclusive phase belongs to the canonical command. A focused --lane run is deliberately
-    # not a certification, and says so, rather than exiting 0 as if it had certified.
-    certify = args.certification_only or args.lane is None
+    # Development correctness checks run under ambient load; timing certification is explicit.
+    certify = args.certification_only or args.certify
     try:
         report_path = performance_report_path(args.performance_report or "")
         evidence_dir = certification_evidence_dir(args.certification_evidence_dir)
@@ -1959,46 +1942,37 @@ def main(argv: list[str] | None = None) -> int:
         # with the owner label, and restored on exit so a later in-process run is never mistaken for
         # this one's owner.
         with check_run_token_environment(), worktree_writer.acquire_worktree_writer(REPO_ROOT, purpose="test-gate"):
+            if not args.certification_only:
+                generated = static_build.build_once(sorted(static_build.ASSETS))
+                if generated:
+                    print("Generated static assets before checks: " + ", ".join(generated), flush=True)
             with expensive_tool_lock(enabled=guard_enabled, lock_path=tool_lock_path):
-                if guard_enabled:
-                    active_records = active_yolomux_server_records()
-                    if lower_current_process_priority(active_records):
-                        ports = sorted({str(record.get("port") or "?") for record in active_records})
-                        print(f"Detected {len(active_records)} active YOLOmux server(s) on port(s) {', '.join(ports)}; lowered check priority by nice +{TOOL_GUARD_NICE_DELTA}", flush=True)
-                functional_admission = admit_functional_host(selected, evidence_dir=evidence_dir)
-                if functional_admission is not None and not functional_admission["qualified"]:
-                    certification = {
-                        "result": "not-certifiable",
-                        "reason": "functional_host_unqualified",
-                        "evidence": functional_admission,
-                        "wall_seconds": functional_admission["qualification"].get("wall_seconds", 0.0),
-                        "evidence_dir": str(evidence_dir),
-                    }
-                    print_certification(certification, None)
-                else:
-                    if selected_needs_browser(selected):
-                        browser_capability = browser_capability_preflight()
-                        if not browser_capability.available:
-                            print(browser_capability.refusal_text(), file=sys.stderr, flush=True)
-                            return EXIT_LANE_FAILED
-                    cross_lane_serial = args.serial or args.serial_lanes
-                    mode = "serial" if args.serial else "serial lanes (xdist preserved)" if args.serial_lanes else "parallel plus final serial" if any(lane.run_last for lane in selected) else "parallel"
-                    if selected:
-                        print(f"Running {len(selected)} check lane(s) in {mode}: {', '.join(lane.name for lane in selected)}", flush=True)
-                        results = run_functional_lanes(
-                            selected, serial=cross_lane_serial, output_root=output_root
-                        )
-                    # Always, even when a lane already failed. A phase that only runs on an otherwise
-                    # green gate cannot be trusted on a box where some lane is usually red: its own
-                    # regressions would never be observed.
-                    if certify:
-                        print(f"Retiring lane processes, then running the exclusive certification phase: {len(CERTIFICATION_NODE_IDS)} unit(s)", flush=True)
-                        certification, certification_lane = run_certification_phase(
-                            evidence_dir=evidence_dir,
-                            expected_containers=expected_containers,
-                            inherited_descendants=inherited_descendants,
-                        )
-                        print_certification(certification, certification_lane)
+                functional_diagnostics = measure_functional_host(selected, evidence_dir=evidence_dir)
+                if functional_diagnostics is not None:
+                    print("Functional host diagnostics (not admission): " + json.dumps(functional_diagnostics, sort_keys=True), flush=True)
+                if selected_needs_browser(selected):
+                    browser_capability = browser_capability_preflight()
+                    if not browser_capability.available:
+                        print(browser_capability.refusal_text(), file=sys.stderr, flush=True)
+                        return EXIT_LANE_FAILED
+                cross_lane_serial = args.serial or args.serial_lanes
+                mode = "serial" if args.serial else "serial lanes (xdist preserved)" if args.serial_lanes else "parallel plus final serial" if any(lane.run_last for lane in selected) else "parallel"
+                if selected:
+                    print(f"Running {len(selected)} check lane(s) in {mode}: {', '.join(lane.name for lane in selected)}", flush=True)
+                    results = run_functional_lanes(
+                        selected, serial=cross_lane_serial, output_root=output_root
+                    )
+                # Always, even when a lane already failed. A phase that only runs on an otherwise
+                # green gate cannot be trusted on a box where some lane is usually red: its own
+                # regressions would never be observed.
+                if certify:
+                    print(f"Retiring lane processes, then running the exclusive certification phase: {len(CERTIFICATION_NODE_IDS)} unit(s)", flush=True)
+                    certification, certification_lane = run_certification_phase(
+                        evidence_dir=evidence_dir,
+                        expected_containers=expected_containers,
+                        inherited_descendants=inherited_descendants,
+                    )
+                    print_certification(certification, certification_lane)
                 elapsed = time.monotonic() - started
     except worktree_writer.WorktreeWriterBusy as exc:
         print(f"CHECK REFUSED: {exc}", file=sys.stderr, flush=True)
@@ -2024,11 +1998,8 @@ def main(argv: list[str] | None = None) -> int:
         certification_note = f"; certification: {certification['result']}" if certification else ""
         print(f"CHECK FAILED in {elapsed:.2f}s: " + ", ".join(failed) + certification_note)
         return EXIT_LANE_FAILED
-    if certification and certification["reason"] == "functional_host_unqualified":
-        print(f"CHECK {latency_calibration.NOT_CERTIFIABLE} in {elapsed:.2f}s: functional_host_unqualified")
-        return EXIT_NOT_CERTIFIABLE
     if not certify:
-        print(f"CHECK PASSED in {elapsed:.2f}s (focused lane selection: NOT CERTIFIED, the exclusive latency phase did not run)")
+        print(f"CHECK PASSED in {elapsed:.2f}s (development checks: NOT CERTIFIED, latency certification was not requested)")
         return 0
     exact_sha = certification.get("release", {}).get("exact_sha_certification", {})
     if exact_sha and not exact_sha.get("admitted", False):

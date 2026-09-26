@@ -278,14 +278,22 @@ if [ -n "${YOLOMUX_CHECK_RUN_TOKEN:-}" ]; then
   owner_label+=(--label "yolomux.check.run=$YOLOMUX_CHECK_RUN_TOKEN")
 fi
 
+shared_memory_bytes="$(docker info --format '{{.MemTotal}}')"
+case "$shared_memory_bytes" in
+  ''|*[!0-9]*|0)
+    echo "Docker daemon physical memory is unavailable: cannot size private shared memory" >&2
+    exit 1
+    ;;
+esac
+
 # --rm provides a fresh writable layer and HOME. Do not tmpfs-mount /home/runner: that
 # would hide image-owned ~/.local/bin. --init reaps tmux/chromium children; the enlarged
-# shared-memory segment prevents Chromium renderer crashes. Network access is disabled for
+# shared-memory segment can grow to the daemon's physical RAM without reserving it. Network access is disabled for
 # test execution; the explicit dead proxies prevent libraries from bypassing that boundary.
 set +e
 docker run --rm --init \
   --network none \
-  --shm-size=1g \
+  --shm-size="$shared_memory_bytes" \
   "${owner_label[@]+"${owner_label[@]}"}" \
   -v "$REPO_ROOT:/w:ro" \
   "${git_mount[@]+"${git_mount[@]}"}" \

@@ -177,7 +177,7 @@ def test_default_check_lanes_keep_full_pytest_gate():
     assert "pytest-unit" not in {lane.name for lane in lanes}
     assert "pytest-socket" not in {lane.name for lane in lanes}
     bazel_lane = next(lane for lane in lanes if lane.name == "bazel-go")
-    assert bazel_lane.steps[0].args == ["tools/run_bazel_tests.sh", "--jobs", "2"]
+    assert bazel_lane.steps[0].args == ["tools/run_bazel_tests.sh", "--jobs", str(check.schedulable_cpu_count())]
 
 
 def test_heavy_lane_admission_includes_bazel_from_the_shared_lane_name_rule(monkeypatch):
@@ -196,7 +196,7 @@ def test_heavy_lane_admission_includes_bazel_from_the_shared_lane_name_rule(monk
     assert check.admit_inotify_capacity(selected) is verdict
 
 
-def test_functional_host_admission_reuses_shared_qualification_and_retains_evidence(monkeypatch, tmp_path):
+def test_functional_host_diagnostics_reuses_shared_qualification_and_retains_evidence(monkeypatch, tmp_path):
     check = load_check_module()
     selected = [check.Lane("bazel-go", "Bazel", ())]
     qualification = {
@@ -210,8 +210,8 @@ def test_functional_host_admission_reuses_shared_qualification_and_retains_evide
         calls.append(evidence_root)
         return qualification
 
-    monkeypatch.setattr(check.latency_calibration, "certification_host_qualification", qualify)
-    admission = check.admit_functional_host(selected, evidence_dir=tmp_path)
+    monkeypatch.setattr(check.latency_calibration, "host_qualification", qualify)
+    admission = check.measure_functional_host(selected, evidence_dir=tmp_path)
 
     assert admission is not None
     assert admission["required_by"] == ["bazel-go"]
@@ -220,10 +220,10 @@ def test_functional_host_admission_reuses_shared_qualification_and_retains_evide
     artifact = Path(admission["artifact"])
     assert artifact.is_file()
     assert json.loads(artifact.read_text(encoding="utf-8")) == {
-        "nodeid": "tools/check.py::functional_host_admission",
+        "nodeid": "tools/check.py::functional_host_diagnostics",
         "required_by": ["bazel-go"],
         "qualification": qualification,
-        "stage": "functional_host_admission",
+        "stage": "functional_host_diagnostics",
     }
 
 
@@ -435,7 +435,7 @@ def test_browser_capability_preflight_reports_container_probe_failure(monkeypatc
 
 def test_requested_browser_lane_preflight_refuses_before_any_step(monkeypatch, capsys):
     check = load_check_module()
-    monkeypatch.setattr(check, "admit_functional_host", lambda _selected, *, evidence_dir: {"qualified": True})
+    monkeypatch.setattr(check, "measure_functional_host", lambda _selected, *, evidence_dir: {"qualified": True})
     monkeypatch.setattr(
         check,
         "browser_capability_preflight",
@@ -459,12 +459,12 @@ def test_check_runner_scales_one_concurrent_pytest_budget_from_schedulable_cpus(
     monkeypatch.delenv("YOLOMUX_CHECK_CPU_PERCENT", raising=False)
     monkeypatch.setattr(check.platform, "system", lambda: "Linux")
 
-    # Linux and macOS both leave half the host for live servers and agent work.
+    # Development uses all schedulable CPUs on Linux and macOS.
     expected = {
-        4: ("1", "1", "1"),
-        10: ("2", "1", "2"),
-        14: ("3", "2", "2"),
-        32: ("8", "5", "3"),
+        4: ("2", "1", "1"),
+        10: ("5", "3", "2"),
+        14: ("7", "4", "3"),
+        32: ("16", "10", "6"),
     }
     for cores, counts in expected.items():
         monkeypatch.setattr(check.os, "cpu_count", lambda: 64)
@@ -479,10 +479,10 @@ def test_check_runner_scales_one_concurrent_pytest_budget_from_schedulable_cpus(
     monkeypatch.setattr(check.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(check.os, "cpu_count", lambda: 8)
     monkeypatch.setattr(check.os, "sched_getaffinity", lambda _pid: set(range(8)))
-    assert check.pytest_worker_counts() == ("2", "1", "1")
+    assert check.pytest_worker_counts() == ("4", "2", "2")
 
     monkeypatch.setattr(check.os, "sched_getaffinity", lambda _pid: (_ for _ in ()).throw(OSError("unavailable")))
-    assert check.pytest_worker_counts() == ("2", "1", "1")
+    assert check.pytest_worker_counts() == ("4", "2", "2")
 
 
 def test_check_runner_cpu_percent_knob_tunes_the_worker_budget(monkeypatch):
@@ -517,7 +517,8 @@ def test_check_runner_cpu_percent_knob_tunes_the_worker_budget(monkeypatch):
 def test_bazel_job_count_is_explicit_and_serializable(monkeypatch):
     check = load_check_module()
     monkeypatch.delenv("YOLOMUX_BAZEL_JOBS", raising=False)
-    assert check.bazel_job_count() == "2"
+    monkeypatch.setattr(check, "schedulable_cpu_count", lambda: 24)
+    assert check.bazel_job_count() == "24"
     assert check.bazel_job_count(serial=True) == "1"
 
     monkeypatch.setenv("YOLOMUX_BAZEL_JOBS", "4")
@@ -932,7 +933,7 @@ def test_active_yolomux_server_records_reads_the_root_compatibility_lease(monkey
     assert records == [{"pid": 101, "paths": {"root": str(product_root)}}]
 
 
-def test_default_check_gate_uses_guard_and_lowers_priority_when_servers_are_active(monkeypatch, capsys):
+def test_explicit_certification_uses_guard_without_lowering_priority(monkeypatch, capsys):
     check = load_check_module()
     events = []
 
@@ -961,49 +962,50 @@ def test_default_check_gate_uses_guard_and_lowers_priority_when_servers_are_acti
 
     monkeypatch.setattr(check, "expensive_tool_lock", fake_expensive_tool_lock)
     monkeypatch.setattr(check, "active_yolomux_server_records", lambda: [{"port": 7772}, {"port": 7770}])
-    monkeypatch.setattr(check, "lower_current_process_priority", lambda records: events.append(("nice", records)) or True)
+    monkeypatch.setattr(check.os, "nice", lambda _value: pytest.fail("development must not lower process priority"))
     monkeypatch.setattr(check, "run_parallel", fake_run_parallel)
     monkeypatch.setattr(check, "run_serial", fake_run_serial)
     monkeypatch.setattr(check, "run_certification_phase", fake_certification_phase)
-    monkeypatch.setattr(check, "admit_functional_host", lambda _selected, *, evidence_dir: {"qualified": True})
+    monkeypatch.setattr(check, "measure_functional_host", lambda _selected, *, evidence_dir: {"qualified": True})
 
-    assert check.main([]) == 0
+    assert check.main(["--certify"]) == 0
 
     assert events[0] == ("lock", True, check.DEFAULT_TOOL_LOCK_PATH)
-    assert events[1] == ("nice", [{"port": 7772}, {"port": 7770}])
-    assert events[2][0] == "run"
-    assert events[2][1] == ["pytest-browser", "pytest-e2e", "pytest", "bazel-go", "node-layout", "static", "node-syntax", "py-compile", "whitespace"]
-    assert events[3] == ("serial", ["pytest-gate-serial"])
+    assert events[1][0] == "run"
+    assert events[1][1] == ["pytest-browser", "pytest-e2e", "pytest", "bazel-go", "node-layout", "static", "node-syntax", "py-compile", "whitespace"]
+    assert events[2] == ("serial", ["pytest-gate-serial"])
     # The exclusive phase belongs to the canonical command, and it runs after the parallel lanes.
-    assert events[4][0] == "certify", events
+    assert events[3][0] == "certify", events
     output = capsys.readouterr().out
     assert "Acquiring YOLOmux expensive-tool lock" in output
-    assert "lowered check priority by nice +5" in output
+    assert "lowered check priority" not in output
     assert "CERTIFIED" in output
 
 
-def test_default_check_gate_exits_not_certifiable_when_the_host_is_unqualified(monkeypatch, capsys):
-    """An unqualified host refuses before any functional lane can create misleading reds."""
-
+def test_development_checks_run_under_pressure_without_latency_certification(monkeypatch, capsys):
     check = load_check_module()
-    monkeypatch.setattr(check, "active_yolomux_server_records", lambda: [])
-    monkeypatch.setattr(check, "run_parallel", lambda *_args, **_kwargs: pytest.fail("functional lanes must not start"))
-    monkeypatch.setattr(check, "run_serial", lambda *_args, **_kwargs: pytest.fail("functional lanes must not start"))
-    monkeypatch.setattr(check, "run_certification_phase", lambda **_kwargs: pytest.fail("certification must not start"))
-    admission = {
-        "required_by": ["pytest-browser", "pytest-e2e", "bazel-go"],
-        "qualified": False,
-        "reasons": [{"signal": "memory_stall_full_fraction", "measured": 0.6, "limit": 0.01}],
-        "qualification": {"qualified": False, "reasons": [{"signal": "memory_stall_full_fraction"}]},
-        "artifact": "/tmp/functional-host-admission.json",
-    }
-    monkeypatch.setattr(check, "admit_functional_host", lambda _selected, *, evidence_dir: admission)
+    ran = []
 
-    assert check.main(["--no-tool-guard"]) == check.EXIT_NOT_CERTIFIABLE
+    def run_lanes(selected, **_kwargs):
+        ran.extend(lane.name for lane in selected)
+        return [check.LaneResult(lane.name, lane.label, True, 0.0, "") for lane in selected]
+
+    monkeypatch.setattr(check, "run_parallel", run_lanes)
+    monkeypatch.setattr(check, "run_serial", run_lanes)
+    monkeypatch.setattr(check, "run_certification_phase", lambda **_kwargs: pytest.fail("development must not request certification"))
+    diagnostics = {
+        "qualified": False,
+        "reasons": [{"signal": "cpu_stall_some_fraction", "measured": 0.9, "limit": 0.067}],
+        "artifact": "/tmp/functional-host-diagnostics.json",
+    }
+    monkeypatch.setattr(check, "measure_functional_host", lambda _selected, *, evidence_dir: diagnostics)
+    assert check.main(["--no-tool-guard"]) == 0
+    assert set(ran) == {lane.name for lane in check.lanes() if lane.default}
     output = capsys.readouterr().out
-    assert latency_calibration.NOT_CERTIFIABLE in output
-    assert "functional_host_unqualified" in output
-    assert "CHECK PASSED" not in output
+    assert "Functional host diagnostics (not admission)" in output
+    assert "cpu_stall_some_fraction" in output
+    assert "CHECK PASSED" in output
+    assert "NOT CERTIFIED" in output
 
 
 @pytest.mark.parametrize("reason", ["dirty_start_checkout", "start_state_unobservable"])
@@ -1012,7 +1014,7 @@ def test_default_check_gate_exits_nonzero_when_exact_sha_is_not_admitted(monkeyp
     monkeypatch.setattr(check, "active_yolomux_server_records", lambda: [])
     monkeypatch.setattr(check, "run_parallel", lambda selected, **_kwargs: [check.LaneResult(lane.name, lane.label, True, 0.0, "") for lane in selected])
     monkeypatch.setattr(check, "run_serial", lambda selected, **_kwargs: [check.LaneResult(lane.name, lane.label, True, 0.0, "") for lane in selected])
-    monkeypatch.setattr(check, "admit_functional_host", lambda _selected, *, evidence_dir: {"qualified": True})
+    monkeypatch.setattr(check, "measure_functional_host", lambda _selected, *, evidence_dir: {"qualified": True})
     monkeypatch.setattr(
         check,
         "run_certification_phase",
@@ -1029,7 +1031,7 @@ def test_default_check_gate_exits_nonzero_when_exact_sha_is_not_admitted(monkeyp
         ),
     )
 
-    assert check.main(["--no-tool-guard"]) == check.EXIT_NOT_CERTIFIABLE
+    assert check.main(["--no-tool-guard", "--certify"]) == check.EXIT_NOT_CERTIFIABLE
     output = capsys.readouterr().out
     assert "exact_sha_certification_rejected" in output
     assert "CHECK PASSED" not in output
@@ -2455,6 +2457,19 @@ def test_host_qualification_refuses_over_limit_signals_and_names_each_one():
     assert unavailable["reasons"] == [{"signal": "io_stall_some_fraction", "measured": None, "limit": limits["io_stall_some_fraction"], "reason": "signal_unavailable"}]
 
 
+def test_global_memory_psi_is_diagnostic_and_does_not_refuse_the_host():
+    limits = dict(latency_calibration.HOST_QUALIFICATION_LIMITS)
+    measurement = {signal: limit / 2 for signal, limit in limits.items()}
+    measurement["memory_stall_full_fraction"] = 0.9
+
+    qualification = latency_calibration.host_qualification(measurement, limits=limits)
+
+    assert qualification["qualified"] is True, qualification
+    assert qualification["reasons"] == []
+    assert "memory_stall_full_fraction" not in qualification["limits"]
+    assert qualification["evidence_only"]["memory_stall_full_fraction"].startswith("unvalidated_global_signal:")
+
+
 def test_host_qualification_measures_this_host_with_windowed_and_instantaneous_signals():
     """The real probe must return every asserted signal; a decaying average is evidence only."""
 
@@ -2493,7 +2508,10 @@ def test_host_qualification_measures_this_host_with_windowed_and_instantaneous_s
     # A caller that supplies its own limits covering one of these names DID assert it, so the
     # payload must stop claiming it was left unasserted rather than repeat the module constant.
     asserted_instead = latency_calibration.host_qualification(measurement, limits={"disk_in_flight_max": 8.0})
-    assert asserted_instead["evidence_only"] == {}, asserted_instead["evidence_only"]
+    assert asserted_instead["evidence_only"] == {
+        signal: reason for signal, reason in latency_calibration.HOST_QUALIFICATION_EVIDENCE_ONLY.items()
+        if signal != "disk_in_flight_max"
+    }, asserted_instead["evidence_only"]
 
 
 def test_host_qualification_initializes_storage_probe_before_measured_counters(monkeypatch, tmp_path):
@@ -2720,6 +2738,10 @@ def test_every_asserted_limit_keeps_its_declared_margin_over_the_post_lane_popul
         floor = margin * populations["post_lane"][signal][1]
         saturated_high = populations["saturated"][signal][1]
         if signal in evidence_only:
+            if evidence_only[signal].startswith("unvalidated_global_signal:"):
+                assert signal == "memory_stall_full_fraction", signal
+                assert saturated_high == 0.0, (signal, saturated_high)
+                continue
             # The rule itself makes the drop, so the drop cannot be a preference. Both halves are
             # asserted: no safe limit is reachable, AND the inversion that causes it is recorded.
             assert floor >= saturated_high, (signal, floor, saturated_high)
@@ -2736,13 +2758,7 @@ def test_every_asserted_limit_keeps_its_declared_margin_over_the_post_lane_popul
     # Every asserted limit the negative control's load can reach must still be reachable by it, so
     # nothing survives here as a threshold that can no longer refuse anything.
     for signal in sorted(limits):
-        saturated_low, saturated_high = populations["saturated"][signal]
-        if saturated_high == 0.0:
-            # The one exemption, and it is not a judgement call: this load never moved the signal
-            # at all, so it is a fail-closed guard on a mode the negative control does not create.
-            assert [saturated_low, saturated_high] == [0.0, 0.0], signal
-            assert signal == "memory_stall_full_fraction", signal
-            continue
+        saturated_high = populations["saturated"][signal][1]
         assert limits[signal] < saturated_high, (signal, limits[signal], saturated_high)
 
 
@@ -3204,7 +3220,7 @@ def test_run_tests_sh_rejects_a_workdir_that_escapes_the_source_mount(tmp_path):
     fake_docker.write_text(
         "#!/bin/sh\n"
         "case \"$1\" in\n"
-        "  info) printf '%s\\n' '[]' ;;\n"
+        "  info) case \"$*\" in *MemTotal*) printf '%s\\n' 8589934592 ;; *) printf '%s\\n' '[]' ;; esac ;;\n"
         "  image) exit 0 ;;\n"
         "  run) echo 'docker run must not be reached' >&2; exit 99 ;;\n"
         "  *) echo \"unexpected docker command: $*\" >&2; exit 99 ;;\n"
@@ -3237,7 +3253,7 @@ def test_run_tests_sh_rejects_a_symlinked_test_root_before_creating_outside_it(t
     fake_docker.write_text(
         "#!/bin/sh\n"
         "case \"$1\" in\n"
-        "  info) printf '%s\\n' '[]' ;;\n"
+        "  info) case \"$*\" in *MemTotal*) printf '%s\\n' 8589934592 ;; *) printf '%s\\n' '[]' ;; esac ;;\n"
         "  image) exit 0 ;;\n"
         "  run) echo 'docker run must not be reached' >&2; exit 99 ;;\n"
         "  *) echo \"unexpected docker command: $*\" >&2; exit 99 ;;\n"
@@ -3284,7 +3300,7 @@ def test_run_tests_sh_retains_auto_evidence_only_after_a_failed_container(tmp_pa
     fake_docker.write_text(
         "#!/bin/sh\n"
         "case \"$1\" in\n"
-        "  info) printf '%s\\n' '[]' ;;\n"
+        "  info) case \"$*\" in *MemTotal*) printf '%s\\n' 8589934592 ;; *) printf '%s\\n' '[]' ;; esac ;;\n"
         "  image) exit 0 ;;\n"
         "  run)\n"
         "    if printf '%s\\n' \"$*\" | grep -q -- '--user=0:0'; then\n"
@@ -3353,7 +3369,7 @@ def test_run_tests_sh_fails_when_successful_run_evidence_cleanup_fails(tmp_path)
     fake_docker.write_text(
         "#!/bin/sh\n"
         "case \"$1\" in\n"
-        "  info) printf '%s\\n' '[]' ;;\n"
+        "  info) case \"$*\" in *MemTotal*) printf '%s\\n' 8589934592 ;; *) printf '%s\\n' '[]' ;; esac ;;\n"
         "  image) exit 0 ;;\n"
         "  run)\n"
         "    if printf '%s\\n' \"$*\" | grep -q -- '--user=0:0'; then\n"
@@ -3760,12 +3776,7 @@ def test_container_detection_does_not_trust_a_generic_dockerenv_marker(monkeypat
 
 
 def test_linux_cpu_budget_is_the_same_number_in_code_help_text_and_docs(monkeypatch, capsys):
-    """One worker contract, four surfaces. They previously disagreed on the shared-box default.
-
-    Resolved by same-tree A/B, not by picking a side. The current 100% baseline reached peak load
-    76.016 and failed timing-sensitive lanes; 50% reduced peak load to 49.380 while preserving the
-    exact canonical phase ownership and leaving explicit overrides available.
-    """
+    """Development consumes the same full CPU budget advertised in help and docs."""
 
     check = load_check_module()
     monkeypatch.delenv("YOLOMUX_PYTEST_WORKERS", raising=False)
@@ -3776,9 +3787,9 @@ def test_linux_cpu_budget_is_the_same_number_in_code_help_text_and_docs(monkeypa
 
     percent = check.check_cpu_percent()
     counts = check.pytest_worker_counts()
-    assert percent == 50
-    assert counts == ("6", "4", "2")
-    assert sum(int(count) for count in counts) == 12
+    assert percent == 100
+    assert counts == ("12", "8", "4")
+    assert sum(int(count) for count in counts) == 24
 
     with pytest.raises(SystemExit):
         check.main(["--help"])

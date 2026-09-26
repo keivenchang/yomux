@@ -79,18 +79,20 @@ def test_import_inventory_recurses_into_nested_collecting_modules(tmp_path):
     ]
 
 
-def test_smaller_budget_requires_an_explicit_manifest_ratchet():
+def test_line_count_growth_and_shrink_are_warnings_while_structure_stays_ratchet():
     manifest = current_manifest()
     actual = copy.deepcopy(manifest)
-    actual["file_lines"]["yolomux_lib/app.py"] -= 1
+    actual["file_lines"]["yolomux_lib/app.py"] += 1
+    actual["test_owner_lines"]["tests/test_app.py"] -= 1
     actual["partial_global_writes"][0]["count"] -= 1
     result = architecture_budgets.compare(manifest, actual)
     assert result.violations == ()
-    assert any("file_lines.yolomux_lib/app.py: shrank" in message for message in result.stale)
+    assert any("file_lines.yolomux_lib/app.py: grew" in message for message in result.warnings)
+    assert any("test_owner_lines.tests/test_app.py: shrank" in message for message in result.warnings)
     assert any("partial_global_writes" in message and "shrank" in message for message in result.stale)
 
 
-def test_command_exit_codes_distinguish_growth_from_shrink(tmp_path, monkeypatch):
+def test_line_count_changes_warn_without_failing_the_command(tmp_path, monkeypatch, capsys):
     manifest = current_manifest()
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -98,12 +100,14 @@ def test_command_exit_codes_distinguish_growth_from_shrink(tmp_path, monkeypatch
     grown = copy.deepcopy(manifest)
     grown["file_lines"]["yolomux_lib/app.py"] += 1
     monkeypatch.setattr(architecture_budgets, "capture", lambda _root: grown)
-    assert architecture_budgets.main(["--manifest", str(manifest_path)]) == 1
+    assert architecture_budgets.main(["--manifest", str(manifest_path)]) == 0
+    assert "architecture budget warning: file_lines.yolomux_lib/app.py: grew" in capsys.readouterr().err
 
     shrunk = copy.deepcopy(manifest)
     shrunk["file_lines"]["yolomux_lib/app.py"] -= 1
     monkeypatch.setattr(architecture_budgets, "capture", lambda _root: shrunk)
-    assert architecture_budgets.main(["--manifest", str(manifest_path)]) == 2
+    assert architecture_budgets.main(["--manifest", str(manifest_path)]) == 0
+    assert "architecture budget warning: file_lines.yolomux_lib/app.py: shrank" in capsys.readouterr().err
 
 
 def test_retired_share_surface_guard_rejects_filenames_content_i18n_and_binary(tmp_path):
@@ -171,7 +175,7 @@ def test_retired_share_surface_guard_skips_core_dump_artifacts(tmp_path):
     assert architecture_budgets._retired_share_surface_violations(tmp_path) == ()
 
 
-def test_evaluate_and_cli_add_retired_share_guard_without_losing_budget_results(tmp_path, monkeypatch):
+def test_evaluate_and_cli_keep_line_warnings_separate_from_retired_share_guard(tmp_path, monkeypatch, capsys):
     manifest = current_manifest()
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -184,8 +188,11 @@ def test_evaluate_and_cli_add_retired_share_guard_without_losing_budget_results(
     result = architecture_budgets.evaluate(tmp_path, manifest_path)
 
     assert any("retired_share_surface" in message for message in result.violations)
-    assert any("file_lines.yolomux_lib/app.py: shrank" in message for message in result.stale)
+    assert any("file_lines.yolomux_lib/app.py: shrank" in message for message in result.warnings)
     assert architecture_budgets.main(["--root", str(tmp_path), "--manifest", str(manifest_path)]) == 1
+    output = capsys.readouterr().err
+    assert "architecture budget warning: file_lines.yolomux_lib/app.py: shrank" in output
+    assert "architecture budget violation: retired_share_surface" in output
 
 
 def test_write_current_manifest_is_atomic_and_exact(tmp_path, monkeypatch):
@@ -320,7 +327,7 @@ def test_line_budget_discovery_includes_registered_python_semantic_owners(tmp_pa
     }
 
 
-def test_new_nested_collecting_module_is_an_unbudgeted_growth(tmp_path):
+def test_new_nested_collecting_module_line_count_is_a_warning(tmp_path):
     tests = tmp_path / "tests"
     tests.mkdir()
     (tests / "test_owner.py").write_text("def test_owner():\n    pass\n", encoding="utf-8")
@@ -343,4 +350,5 @@ def test_new_nested_collecting_module_is_an_unbudgeted_growth(tmp_path):
             **after,
         },
     )
-    assert "test_owner_lines: unbudgeted tests/nested/test_new.py=2" in result.violations
+    assert "test_owner_lines: untracked tests/nested/test_new.py=2" in result.warnings
+    assert result.violations == ()

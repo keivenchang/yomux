@@ -52,6 +52,10 @@ fi
 
 set -- "$target" "$@"
 
+# The Go Chromium fixture copies the served frontend into its isolated source root. Generate it
+# from the checked-out partials first so a source-only commit works without a tracked bundle.
+python3 "$REPO_ROOT/tools/static_build.py"
+
 # Every invocation gets private Bazel and Go writable roots. The module and repository caches are
 # image-owned and read-only; only these per-run directories may be mutated, so parallel check runs
 # cannot corrupt one another or accidentally write into the checkout.

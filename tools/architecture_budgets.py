@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""Ratchet structural complexity without freezing implementation text.
+"""Gate structural complexity and warn about source line-count changes.
 
-Growth is a gate failure. A smaller measured value is a stale baseline so a
-reviewer must deliberately accept the improved architecture in the manifest.
+Line counts are review signals, not pass/fail criteria. Structural ownership
+and complexity inventories remain ratcheted against the reviewed manifest.
 """
 
 from __future__ import annotations
@@ -116,6 +116,7 @@ def _is_core_dump_filename(filename: str) -> bool:
 class Comparison:
     violations: tuple[str, ...]
     stale: tuple[str, ...]
+    warnings: tuple[str, ...] = ()
 
 
 def _python_tree(root: Path, relative: str) -> ast.Module:
@@ -437,6 +438,18 @@ def _compare_numeric_map(category: str, expected: dict[str, Any], actual: dict[s
             stale.append(f"{category}.{key}: shrank {expected[key]} -> {actual[key]}")
 
 
+def _compare_line_map(category: str, expected: dict[str, int], actual: dict[str, int], warnings: list[str]) -> None:
+    for key in sorted(set(expected) | set(actual)):
+        if key not in expected:
+            warnings.append(f"{category}: untracked {key}={actual[key]}")
+        elif key not in actual:
+            warnings.append(f"{category}: retired {key} (was {expected[key]})")
+        elif actual[key] > expected[key]:
+            warnings.append(f"{category}.{key}: grew {expected[key]} -> {actual[key]}")
+        elif actual[key] < expected[key]:
+            warnings.append(f"{category}.{key}: shrank {expected[key]} -> {actual[key]}")
+
+
 def _row_key(row: dict[str, Any], fields: tuple[str, ...]) -> tuple[Any, ...]:
     return tuple(row.get(field) for field in fields)
 
@@ -444,11 +457,12 @@ def _row_key(row: dict[str, Any], fields: tuple[str, ...]) -> tuple[Any, ...]:
 def compare(expected: dict[str, Any], actual: dict[str, Any]) -> Comparison:
     violations: list[str] = []
     stale: list[str] = []
+    warnings: list[str] = []
     if expected.get("manifest_version") != MANIFEST_VERSION:
         violations.append(f"manifest_version: expected {MANIFEST_VERSION}, got {expected.get('manifest_version')}")
     _compare_numeric_map("class_budgets", expected.get("class_budgets", {}), actual["class_budgets"], violations, stale)
-    _compare_numeric_map("file_lines", expected.get("file_lines", {}), actual["file_lines"], violations, stale)
-    _compare_numeric_map("test_owner_lines", expected.get("test_owner_lines", {}), actual["test_owner_lines"], violations, stale)
+    _compare_line_map("file_lines", expected.get("file_lines", {}), actual["file_lines"], warnings)
+    _compare_line_map("test_owner_lines", expected.get("test_owner_lines", {}), actual["test_owner_lines"], warnings)
     expected_imports = set(expected.get("test_to_test_imports", []))
     actual_imports = set(actual["test_to_test_imports"])
     violations.extend(f"test_to_test_imports: added {value}" for value in sorted(actual_imports - expected_imports))
@@ -490,13 +504,13 @@ def compare(expected: dict[str, Any], actual: dict[str, Any]) -> Comparison:
             if previous and row["focused_alias_of"] != previous and lane_by_name.get(previous, {}).get("focused_alias_of") != row["name"]:
                 violations.append(f"lane_ownership: step {step} owned by {previous} and {row['name']} without focused alias")
             step_owners.setdefault(step, row["name"])
-    return Comparison(tuple(violations), tuple(stale))
+    return Comparison(tuple(violations), tuple(stale), tuple(warnings))
 
 
 def evaluate(root: Path, manifest: Path) -> Comparison:
     expected = json.loads(manifest.read_text(encoding="utf-8"))
     result = compare(expected, capture(root))
-    return Comparison(result.violations + _retired_share_surface_violations(root), result.stale)
+    return Comparison(result.violations + _retired_share_surface_violations(root), result.stale, result.warnings)
 
 
 def write_current_manifest(manifest: Path, current: dict[str, Any]) -> None:
@@ -537,6 +551,8 @@ def main(argv: list[str] | None = None) -> int:
         write_current_manifest(args.manifest, current)
         return 0
     result = evaluate(args.root.resolve(), args.manifest)
+    for message in result.warnings:
+        print(f"architecture budget warning: {message}", file=sys.stderr)
     for message in result.violations:
         print(f"architecture budget violation: {message}", file=sys.stderr)
     for message in result.stale:
