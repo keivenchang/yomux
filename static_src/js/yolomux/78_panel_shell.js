@@ -1802,10 +1802,28 @@ function sessionMetadataIsLightweight(info) {
   return Boolean(workGraph && typeof workGraph === 'object' && workGraph.loading === true);
 }
 
+function sessionMetadataIncarnationMatches(nextInfo, previousInfo) {
+  const nextIdentity = nextInfo?.session_identity;
+  const previousIdentity = previousInfo?.session_identity;
+  if (!nextIdentity && !previousIdentity) return true;
+  return typeof nextIdentity === 'string' && nextIdentity === previousIdentity;
+}
+
 function mergeSessionMetadataDuringLightweightRefresh(nextInfo, previousInfo) {
-  if (!sessionMetadataIsLightweight(nextInfo) || !previousInfo || typeof previousInfo !== 'object') return nextInfo;
+  if (!sessionMetadataIsLightweight(nextInfo)
+      || !previousInfo || typeof previousInfo !== 'object'
+      || !sessionMetadataIncarnationMatches(nextInfo, previousInfo)) return nextInfo;
+  const preservePublishedDetails = nextInfo.work_graph?.loading === true
+    && typeof nextInfo.session_identity === 'string'
+    && nextInfo.session_identity === previousInfo.session_identity;
   return {
     ...nextInfo,
+    ...(preservePublishedDetails ? {
+      panes: Array.isArray(previousInfo.panes) ? previousInfo.panes : nextInfo.panes,
+      selected_pane: Object.prototype.hasOwnProperty.call(previousInfo, 'selected_pane') ? previousInfo.selected_pane : nextInfo.selected_pane,
+      agents: Array.isArray(previousInfo.agents) ? previousInfo.agents : nextInfo.agents,
+      window_metadata: Array.isArray(previousInfo.window_metadata) ? previousInfo.window_metadata : nextInfo.window_metadata,
+    } : {}),
     work_graph: previousInfo.work_graph || nextInfo.work_graph,
     metadata_loading: true,
   };

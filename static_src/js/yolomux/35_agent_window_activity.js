@@ -913,9 +913,6 @@ function refreshAgentWindowActivityDisplays(sessionNames = sessions) {
       updatePanelWindowStepButtons(session, transcriptMetadataState.payload.sessions?.[session]);
     }
   }
-  if (typeof renderSessionButtons === 'function') renderSessionButtons({force: true});
-  if (typeof renderInfoPanel === 'function'
-      && (typeof infoPanelRenderVisible !== 'function' || infoPanelRenderVisible())) renderInfoPanel({force: true});
   if (typeof refreshTabberPanels === 'function'
       && typeof itemInLayout === 'function'
       && typeof tabberItemId !== 'undefined'

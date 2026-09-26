@@ -844,10 +844,12 @@ def test_session_files_browser_completion_is_bounded_to_one_opaque_cache_read(mo
             surface.execute_script(
             "window.__e3SessionFilesRequests = [];"
             "window.__e3SessionFilesApplications = 0;"
+            "window.__e3SessionFilesApplicationCalls = [];"
             "const originalFetch = window.fetch.bind(window);"
             "const originalApply = setSessionFilesPayloadForDestination;"
             "setSessionFilesPayloadForDestination = (...args) => {"
             " window.__e3SessionFilesApplications += 1;"
+            " window.__e3SessionFilesApplicationCalls.push({destination: args[0], session: args[1]?.session || '', loaded: args[1]?.loaded === true, refreshing: args[1]?.refreshing === true});"
             " return originalApply(...args);"
             "};"
             "window.fetch = (...args) => {"
@@ -898,11 +900,22 @@ def test_session_files_browser_completion_is_bounded_to_one_opaque_cache_read(mo
                 "};"
             )
             raise AssertionError(f"Finder missed session-files completion: {finder_state}") from error
+        for surface in (browser, finder):
+            settled = surface.execute_async_script(
+                "const callback = arguments[0];"
+                "const pending = [...sessionFilesCompletionRevalidations.values()]"
+                " .filter(state => state.acknowledged !== true)"
+                " .map(state => state.promise);"
+                "Promise.all(pending).then(() => callback({ok: true}), error => callback({ok: false, error: String(error)}));"
+            )
+            assert settled["ok"], settled
         requests = browser.execute_script("return [...window.__e3SessionFilesRequests];")
         assert requests == [expected_cache_read]
         assert finder.execute_script("return [...window.__e3SessionFilesRequests];") == [expected_cache_read]
-        assert browser.execute_script("return window.__e3SessionFilesApplications;") <= 1
-        assert finder.execute_script("return window.__e3SessionFilesApplications;") <= 1
+        browser_applications = browser.execute_script("return window.__e3SessionFilesApplicationCalls;")
+        finder_applications = finder.execute_script("return window.__e3SessionFilesApplicationCalls;")
+        assert len(browser_applications) <= 1, browser_applications
+        assert len(finder_applications) <= 1, finder_applications
         assert browser.execute_script("return document.querySelector('#panel-__differ__')?.dataset.fileExplorerMode === 'diff';")
         assert finder.execute_script("return fileExplorerFinderSessionFilesState?.payload?.loaded === true;")
         for surface, state_expression in (

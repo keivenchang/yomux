@@ -46,6 +46,7 @@ filegroup(
         "//cmd/fake-llm:docker_source_files",
         "//cmd/yolomux-go:docker_source_files",
         "//internal/capabilities:docker_source_files",
+        "//internal/cache:docker_source_files",
         "//internal/fakellm:docker_source_files",
         "//internal/finder:docker_source_files",
         "//internal/stats:docker_source_files",
@@ -70,6 +71,7 @@ test_suite(
     tests = [
         "//cmd/yolomux-go:yolomux_go_test",
         "//internal/capabilities:capabilities_test",
+        "//internal/cache:cache_test",
         "//internal/fakellm:fakellm_test",
         "//internal/finder:finder_test",
         "//internal/stats:stats_test",

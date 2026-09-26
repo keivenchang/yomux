@@ -16,13 +16,15 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
 const (
-	maxSessionFileRoots       = 64
-	minSessionFilesHours      = 0.25
-	maxUntrackedLineCountSize = 2 * 1024 * 1024
+	maxSessionFileRoots           = 64
+	sessionFilesRepositoryWorkers = 4
+	minSessionFilesHours          = 0.25
+	maxUntrackedLineCountSize     = 2 * 1024 * 1024
 )
 
 // SessionFiles projects the Git changes belonging to the supplied live session roots. The
@@ -34,14 +36,21 @@ func (s *Service) SessionFiles(ctx context.Context, session string, roots []stri
 }
 
 type sessionFilesDiscovery struct {
-	session        string
-	hours          float64
-	fromRef        string
-	toRef          string
-	repoRefs       map[string]map[string]string
-	candidateRoots []string
-	repositories   []string
-	touched        map[string]*sessionFileAttribution
+	session          string
+	hours            float64
+	fromRef          string
+	toRef            string
+	repoRefs         map[string]map[string]string
+	candidateRoots   []string
+	repositories     []string
+	touched          map[string]*sessionFileAttribution
+	repositoryScopes map[string]*gitHistoryScope
+}
+
+func (discovery sessionFilesDiscovery) closeRepositoryScopes() {
+	for _, scope := range discovery.repositoryScopes {
+		scope.close()
+	}
 }
 
 func sessionFilesCandidateRoots(roots []string, agents []SessionFileAgent) []string {
@@ -73,15 +82,50 @@ func sessionFilesDiscoveryInputs(ctx context.Context, roots []string, agents []S
 	return candidateRoots, touched
 }
 
-func (s *Service) sessionFilesRepositoryForPath(ctx context.Context, rawRoot string) (string, *Error) {
-	if ctx.Err() != nil {
-		return "", cancelled(rawRoot)
+func sessionFilesRepositoryScopePath(rawPath string, missingIsFile bool) string {
+	path := strings.TrimSpace(rawPath)
+	if path == "" {
+		return ""
 	}
-	root := strings.TrimSpace(rawRoot)
+	info, err := os.Stat(path)
+	if err == nil && info.IsDir() {
+		return path
+	}
+	if err == nil || missingIsFile && os.IsNotExist(err) {
+		return filepath.Dir(path)
+	}
+	return path
+}
+
+func (s *Service) sessionFilesRepositoryForPath(ctx context.Context, rawRoot string) (string, *Error) {
+	return s.sessionFilesRepositoryForTarget(ctx, rawRoot, false)
+}
+
+func (s *Service) sessionFilesRepositoryForTouchedPath(ctx context.Context, rawPath string) (string, *Error) {
+	root := sessionFilesRepositoryScopePath(rawPath, true)
+	for root != "" {
+		repo, finderErr := s.sessionFilesRepositoryForTarget(ctx, root, false)
+		if finderErr == nil || finderErr.Code != "path_not_found" {
+			return repo, finderErr
+		}
+		parent := filepath.Dir(root)
+		if parent == root {
+			return "", finderErr
+		}
+		root = parent
+	}
+	return "", notFound(rawPath)
+}
+
+func (s *Service) sessionFilesRepositoryForTarget(ctx context.Context, rawPath string, missingIsFile bool) (string, *Error) {
+	if ctx.Err() != nil {
+		return "", cancelled(rawPath)
+	}
+	root := sessionFilesRepositoryScopePath(rawPath, missingIsFile)
 	if root == "" {
 		return "", nil
 	}
-	scope, finderErr := s.openGitHistoryScope(root)
+	scope, finderErr := s.openGitHistoryScopeWithOptions(ctx, root, gitHistoryScopeOptions{})
 	if finderErr != nil {
 		return "", finderErr
 	}
@@ -119,7 +163,7 @@ func (s *Service) discoverSessionFiles(ctx context.Context, session string, root
 		if ctx.Err() != nil {
 			break
 		}
-		repo, finderErr := s.sessionFilesRepositoryForPath(ctx, path)
+		repo, finderErr := s.sessionFilesRepositoryForTouchedPath(ctx, path)
 		if finderErr != nil {
 			continue
 		}
@@ -132,27 +176,310 @@ func (s *Service) discoverSessionFiles(ctx context.Context, session string, root
 	return sessionFilesDiscovery{
 		session: session, hours: hours, fromRef: fromRef, toRef: toRef, repoRefs: repoRefs,
 		candidateRoots: candidateRoots, repositories: repositories, touched: touched,
+		repositoryScopes: make(map[string]*gitHistoryScope),
 	}, nil
 }
 
-func (s *Service) sessionFilesRepositoryViews(ctx context.Context, discovery sessionFilesDiscovery, emit func(int, int, sessionFilesRepositoryView) error) ([]sessionFilesRepositoryView, *Error) {
-	views := make([]sessionFilesRepositoryView, 0, len(discovery.repositories))
-	for index, repo := range discovery.repositories {
-		view, finderErr := s.sessionFilesRepository(ctx, discovery.session, repo, discovery.fromRef, discovery.toRef, discovery.repoRefs, discovery.touched)
-		if finderErr != nil {
-			return nil, finderErr
-		}
-		views = append(views, view)
-		if emit != nil {
-			if err := emit(index, len(discovery.repositories), view); err != nil {
-				if ctx.Err() != nil {
-					return nil, cancelled(repo)
+func (s *Service) sessionFilesRepositoryViewsBounded(ctx context.Context, discovery sessionFilesDiscovery, paths []string, emit func(int, sessionFilesRepositoryView) error) ([]sessionFilesRepositoryView, map[string]int, *Error) {
+	if len(paths) == 0 {
+		return []sessionFilesRepositoryView{}, make(map[string]int), nil
+	}
+	type result struct {
+		view       sessionFilesRepositoryView
+		err        *Error
+		duplicate  bool
+		ownedScope *gitHistoryScope
+	}
+	if discovery.repositoryScopes == nil {
+		discovery.repositoryScopes = make(map[string]*gitHistoryScope)
+	}
+	workerCount := min(sessionFilesRepositoryWorkers, len(paths))
+	workerContext, cancel := context.WithCancel(ctx)
+	defer cancel()
+	jobs := make(chan string, len(paths))
+	results := make(chan result, len(paths))
+	var workers sync.WaitGroup
+	var claimMu sync.Mutex
+	claimed := make(map[string]bool, len(paths))
+	for range workerCount {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for {
+				var path string
+				var ok bool
+				select {
+				case <-workerContext.Done():
+					return
+				case path, ok = <-jobs:
+					if !ok {
+						return
+					}
 				}
-				return nil, &Error{Status: http.StatusInternalServerError, Code: "session_files_stream_failed", MessageKey: "common.requestFailed", Path: repo, Retryable: true, Message: err.Error()}
+				if workerContext.Err() != nil {
+					return
+				}
+				scopePath := sessionFilesRepositoryScopePath(path, false)
+				scope := discovery.repositoryScopes[filepath.Clean(scopePath)]
+				ownedScope := false
+				if scope == nil {
+					var finderErr *Error
+					scope, finderErr = s.openGitHistoryScopeWithOptions(workerContext, scopePath, gitHistoryScopeOptions{})
+					if finderErr != nil {
+						results <- result{err: finderErr}
+						continue
+					}
+					ownedScope = true
+				}
+				repo := filepath.Clean(scope.repo)
+				claimMu.Lock()
+				duplicate := claimed[repo]
+				if !duplicate {
+					claimed[repo] = true
+				}
+				claimMu.Unlock()
+				if duplicate {
+					if ownedScope {
+						scope.close()
+					}
+					results <- result{duplicate: true}
+					continue
+				}
+				view, repositoryErr := s.sessionFilesRepositoryWithScope(workerContext, discovery.session, repo, discovery.fromRef, discovery.toRef, discovery.repoRefs, discovery.touched, scope)
+				if repositoryErr != nil {
+					if ownedScope {
+						scope.close()
+					}
+					results <- result{err: repositoryErr}
+					continue
+				}
+				view.scope = scope
+				item := result{view: view}
+				if ownedScope {
+					item.ownedScope = scope
+				}
+				results <- item
+			}
+		}()
+	}
+	for _, path := range paths {
+		jobs <- path
+	}
+	close(jobs)
+	go func() {
+		workers.Wait()
+		close(results)
+	}()
+
+	views := make([]sessionFilesRepositoryView, 0, len(paths))
+	indexes := make(map[string]int, len(paths))
+	ownedScopes := make(map[string]*gitHistoryScope, len(paths))
+	var firstError *Error
+	var emitError error
+	for item := range results {
+		if item.err != nil {
+			if item.ownedScope != nil {
+				item.ownedScope.close()
+			}
+			if item.err.Code != "not_git_repo" && firstError == nil {
+				firstError = item.err
+			}
+			continue
+		}
+		if item.duplicate || item.view.repo == nil {
+			if item.ownedScope != nil {
+				item.ownedScope.close()
+			}
+			continue
+		}
+		repo, _ := item.view.repo["repo"].(string)
+		if item.ownedScope != nil {
+			ownedScopes[repo] = item.ownedScope
+		}
+		index := len(views)
+		indexes[repo] = index
+		views = append(views, item.view)
+		if emit != nil && emitError == nil && ctx.Err() == nil {
+			if err := emit(index, item.view); err != nil {
+				emitError = err
+				cancel()
 			}
 		}
 	}
-	return views, nil
+	for repo, scope := range ownedScopes {
+		if existing := discovery.repositoryScopes[repo]; existing != nil {
+			scope.close()
+			continue
+		}
+		discovery.repositoryScopes[repo] = scope
+	}
+	if ctx.Err() != nil {
+		return nil, nil, cancelled(discovery.session)
+	}
+	if emitError != nil {
+		return nil, nil, &Error{Status: http.StatusInternalServerError, Code: "session_files_stream_failed", MessageKey: "common.requestFailed", Path: discovery.session, Retryable: true, Message: emitError.Error()}
+	}
+	if firstError != nil {
+		return nil, nil, firstError
+	}
+	return views, indexes, nil
+}
+
+type sessionFilesViewEnricher func(context.Context, sessionFilesRepositoryView, *gitHistoryScope) sessionFilesRepositoryView
+
+func cloneSessionFilesRepositoryView(view sessionFilesRepositoryView) sessionFilesRepositoryView {
+	cloned := view
+	cloned.files = make([]map[string]any, 0, len(view.files))
+	for _, file := range view.files {
+		clonedFile := make(map[string]any, len(file))
+		for key, value := range file {
+			clonedFile[key] = value
+		}
+		cloned.files = append(cloned.files, clonedFile)
+	}
+	cloned.repo = make(map[string]any, len(view.repo))
+	for key, value := range view.repo {
+		cloned.repo[key] = value
+	}
+	cloned.refs = append([]map[string]any(nil), view.refs...)
+	return cloned
+}
+
+func (s *Service) enrichSessionFilesViewsStagedBounded(ctx context.Context, views []sessionFilesRepositoryView, stages []sessionFilesViewEnricher, emit func(int, sessionFilesRepositoryView) error) error {
+	if len(views) == 0 || len(stages) == 0 {
+		return nil
+	}
+	workerCount := min(sessionFilesRepositoryWorkers, len(views))
+	workerContext, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type result struct {
+		index int
+		view  sessionFilesRepositoryView
+	}
+	jobs := make(chan int, len(views))
+	results := make(chan result, len(views)*len(stages))
+	var workers sync.WaitGroup
+	for range workerCount {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for {
+				var index int
+				var ok bool
+				select {
+				case <-workerContext.Done():
+					return
+				case index, ok = <-jobs:
+					if !ok {
+						return
+					}
+				}
+				if workerContext.Err() != nil {
+					return
+				}
+				view := cloneSessionFilesRepositoryView(views[index])
+				for _, stage := range stages {
+					if workerContext.Err() != nil {
+						return
+					}
+					view = stage(workerContext, view, view.scope)
+					results <- result{index: index, view: cloneSessionFilesRepositoryView(view)}
+				}
+			}
+		}()
+	}
+	for index := range views {
+		jobs <- index
+	}
+	close(jobs)
+	go func() {
+		workers.Wait()
+		close(results)
+	}()
+
+	var emitError error
+	for item := range results {
+		views[item.index] = cloneSessionFilesRepositoryView(item.view)
+		if emit == nil || emitError != nil || ctx.Err() != nil {
+			continue
+		}
+		if err := emit(item.index, item.view); err != nil {
+			emitError = err
+			cancel()
+		}
+	}
+	if emitError != nil {
+		return emitError
+	}
+	return ctx.Err()
+}
+
+func (s *Service) enrichSessionFilesFileMetadata(ctx context.Context, view sessionFilesRepositoryView, _ *gitHistoryScope) sessionFilesRepositoryView {
+	files := make([]map[string]any, 0, len(view.files))
+	addedTotal, removedTotal := 0, 0
+	repo, _ := view.repo["repo"].(string)
+	for _, entry := range view.files {
+		if ctx.Err() != nil {
+			return view
+		}
+		relative, _ := entry["path"].(string)
+		status, _ := entry["status"].(string)
+		path := filepath.Join(repo, filepath.FromSlash(relative))
+		info, finderErr := s.Info(ctx, path, false)
+		if finderErr != nil {
+			if finderErr.Status != http.StatusNotFound || status == "?" || status == "T" {
+				continue
+			}
+			entry["missing"] = true
+			entry["mtime"] = int64(0)
+			entry["size"] = nil
+		} else {
+			entry["missing"] = false
+			if value, ok := info["mtime"].(int64); ok {
+				entry["mtime"] = value
+			} else if value, ok := info["mtime"].(float64); ok {
+				entry["mtime"] = int64(value)
+			}
+			entry["size"] = info["size"]
+		}
+		if status == "?" && entry["added"] == nil && entry["removed"] == nil {
+			added, binary := s.untrackedLineCount(ctx, repo, relative)
+			if binary {
+				entry["added"] = nil
+				entry["removed"] = nil
+			} else {
+				entry["added"] = added
+				entry["removed"] = 0
+			}
+		}
+		if status != "?" {
+			addedTotal += sessionFilesNumber(entry["added"])
+			removedTotal += sessionFilesNumber(entry["removed"])
+		}
+		files = append(files, entry)
+	}
+	view.files = files
+	view.repo["count"] = countVisibleSessionFiles(files)
+	view.repo["touched_count"] = len(files)
+	view.repo["added"] = addedTotal
+	view.repo["removed"] = removedTotal
+	return view
+}
+
+func (s *Service) enrichSessionFilesRepository(ctx context.Context, view sessionFilesRepositoryView, scope *gitHistoryScope) sessionFilesRepositoryView {
+	if scope == nil || ctx.Err() != nil {
+		return view
+	}
+	gitCtx, cancel := gitViewContext(ctx)
+	defer cancel()
+	if output, _, err := runGitBounded(gitCtx, scope.directory, nil, []string{"symbolic-ref", "--quiet", "--short", "HEAD"}, 4096, scope.namespace); err == nil {
+		view.repo["branch"] = strings.TrimSpace(string(output))
+	}
+	view.refs = gitRecentRefs(gitCtx, scope)
+	for key, value := range gitAheadBehind(gitCtx, scope, view.selectedFrom, view.selectedTo, view.refsActive) {
+		view.repo[key] = value
+	}
+	return view
 }
 
 func sessionFilesPayloadFromViews(discovery sessionFilesDiscovery, views []sessionFilesRepositoryView) map[string]any {
@@ -193,7 +520,7 @@ func sessionFilesPayloadFromViews(discovery sessionFilesDiscovery, views []sessi
 	}
 }
 
-func sessionFilesRepositoryChunk(discovery sessionFilesDiscovery, index, total int, view sessionFilesRepositoryView, replace bool) map[string]any {
+func sessionFilesRepositoryChunk(discovery sessionFilesDiscovery, view sessionFilesRepositoryView, replace bool) map[string]any {
 	repo, _ := view.repo["repo"].(string)
 	warnings := []any{}
 	if view.warning != "" {
@@ -206,7 +533,6 @@ func sessionFilesRepositoryChunk(discovery sessionFilesDiscovery, index, total i
 		"to_ref":   sessionFilesPayloadRef(discovery.toRef, "base"),
 		"warnings": warnings, "errors": []any{}, "loaded": false,
 		"replace_repo": replace,
-		"repo_index":   index, "repo_total": total,
 	}
 }
 
@@ -214,15 +540,7 @@ func sessionFilesRepositoryChunk(discovery sessionFilesDiscovery, index, total i
 // filesystem scope; agents provide transcript evidence. The legacy SessionFiles wrapper remains
 // intentionally equivalent for callers that only have pane roots.
 func (s *Service) SessionFilesWithAgents(ctx context.Context, session string, roots []string, agents []SessionFileAgent, hours float64, fromRef, toRef string, repoRefs map[string]map[string]string) (map[string]any, *Error) {
-	discovery, finderErr := s.discoverSessionFiles(ctx, session, roots, agents, hours, fromRef, toRef, repoRefs)
-	if finderErr != nil {
-		return nil, finderErr
-	}
-	views, finderErr := s.sessionFilesRepositoryViews(ctx, discovery, nil)
-	if finderErr != nil {
-		return nil, finderErr
-	}
-	return sessionFilesPayloadFromViews(discovery, views), nil
+	return s.SessionFilesWithAgentsStream(ctx, session, roots, agents, hours, fromRef, toRef, repoRefs, nil)
 }
 
 // SessionFilesWithAgentsStream uses the same discovery and repository computation owner as the
@@ -237,43 +555,36 @@ func (s *Service) SessionFilesWithAgentsStream(ctx context.Context, session stri
 	touched := make(map[string]*sessionFileAttribution)
 	discovery := sessionFilesDiscovery{
 		session: session, hours: boundedHours, fromRef: fromRef, toRef: toRef, repoRefs: repoRefs,
-		candidateRoots: candidateRoots, touched: touched,
+		candidateRoots: candidateRoots, touched: touched, repositoryScopes: make(map[string]*gitHistoryScope),
 	}
-	views := make([]sessionFilesRepositoryView, 0, len(candidateRoots))
-	seen := make(map[string]bool)
 	candidates := append([]string(nil), candidateRoots...)
 	for path := range touched {
 		candidates = append(candidates, path)
 	}
-	for _, rawRoot := range candidates {
+	defer discovery.closeRepositoryScopes()
+	views, viewIndexByRepo, finderErr := s.sessionFilesRepositoryViewsBounded(ctx, discovery, candidates, func(_ int, view sessionFilesRepositoryView) error {
+		if emit == nil {
+			return nil
+		}
+		return emit(sessionFilesRepositoryChunk(discovery, view, false))
+	})
+	if finderErr != nil {
+		return nil, finderErr
+	}
+	enrichmentErr := s.enrichSessionFilesViewsStagedBounded(ctx, views, []sessionFilesViewEnricher{
+		s.enrichSessionFilesFileMetadata,
+		s.enrichSessionFilesRepository,
+	}, func(_ int, view sessionFilesRepositoryView) error {
+		if emit == nil {
+			return nil
+		}
+		return emit(sessionFilesRepositoryChunk(discovery, view, true))
+	})
+	if enrichmentErr != nil {
 		if ctx.Err() != nil {
 			return nil, cancelled(session)
 		}
-		repo, finderErr := s.sessionFilesRepositoryForPath(ctx, rawRoot)
-		if finderErr != nil {
-			if finderErr.Code == "not_git_repo" {
-				continue
-			}
-			return nil, finderErr
-		}
-		if seen[repo] {
-			continue
-		}
-		seen[repo] = true
-		view, finderErr := s.sessionFilesRepository(ctx, session, repo, fromRef, toRef, repoRefs, touched)
-		if finderErr != nil {
-			return nil, finderErr
-		}
-		index := len(views)
-		views = append(views, view)
-		if emit != nil {
-			if err := emit(sessionFilesRepositoryChunk(discovery, index, 0, view, false)); err != nil {
-				if ctx.Err() != nil {
-					return nil, cancelled(repo)
-				}
-				return nil, &Error{Status: http.StatusInternalServerError, Code: "session_files_stream_failed", MessageKey: "common.requestFailed", Path: repo, Retryable: true, Message: err.Error()}
-			}
-		}
+		return nil, &Error{Status: http.StatusInternalServerError, Code: "session_files_stream_failed", MessageKey: "common.requestFailed", Path: session, Retryable: true, Message: enrichmentErr.Error()}
 	}
 	// Attribution is deliberately a second phase. It can discover a repository that is no longer
 	// represented by a live pane, or add agent/window metadata to files already emitted above. Those
@@ -283,33 +594,40 @@ func (s *Service) SessionFilesWithAgentsStream(ctx context.Context, session stri
 		return nil, cancelled(session)
 	}
 	discovery.touched = touched
+	touchedRepos := make(map[string]bool)
+	repoByDirectory := make(map[string]string)
 	for path := range touched {
 		if ctx.Err() != nil {
 			return nil, cancelled(session)
 		}
-		repo, finderErr := s.sessionFilesRepositoryForPath(ctx, path)
-		if finderErr != nil {
-			continue
-		}
-		if seen[repo] {
-			index := -1
-			for candidateIndex, view := range views {
-				currentRepo, _ := view.repo["repo"].(string)
-				if currentRepo == repo {
-					index = candidateIndex
-					break
-				}
-			}
-			if index < 0 || len(sessionFileAttributionsForRepo(touched, repo)) == 0 {
+		directory := sessionFilesRepositoryScopePath(path, true)
+		repo, resolved := repoByDirectory[directory]
+		if !resolved {
+			var finderErr *Error
+			repo, finderErr = s.sessionFilesRepositoryForTouchedPath(ctx, path)
+			if finderErr != nil {
 				continue
 			}
-			view, repositoryErr := s.sessionFilesRepository(ctx, session, repo, fromRef, toRef, repoRefs, touched)
+			repoByDirectory[directory] = repo
+		}
+		touchedRepos[repo] = true
+	}
+	reposWithAttributions := make([]string, 0, len(touchedRepos))
+	for repo := range touchedRepos {
+		reposWithAttributions = append(reposWithAttributions, repo)
+	}
+	sort.Strings(reposWithAttributions)
+	newRepos := make([]string, 0, len(reposWithAttributions))
+	for _, repo := range reposWithAttributions {
+		index, alreadyVisible := viewIndexByRepo[repo]
+		if alreadyVisible {
+			view, repositoryErr := s.sessionFilesRepositoryViewWithAttribution(ctx, session, cloneSessionFilesRepositoryView(views[index]), touched)
 			if repositoryErr != nil {
 				return nil, repositoryErr
 			}
 			views[index] = view
 			if emit != nil {
-				if err := emit(sessionFilesRepositoryChunk(discovery, index, 0, view, true)); err != nil {
+				if err := emit(sessionFilesRepositoryChunk(discovery, view, true)); err != nil {
 					if ctx.Err() != nil {
 						return nil, cancelled(repo)
 					}
@@ -318,22 +636,36 @@ func (s *Service) SessionFilesWithAgentsStream(ctx context.Context, session stri
 			}
 			continue
 		}
-		seen[repo] = true
-		view, repositoryErr := s.sessionFilesRepository(ctx, session, repo, fromRef, toRef, repoRefs, touched)
-		if repositoryErr != nil {
-			return nil, repositoryErr
-		}
-		index := len(views)
-		views = append(views, view)
-		if emit != nil {
-			if err := emit(sessionFilesRepositoryChunk(discovery, index, 0, view, false)); err != nil {
-				if ctx.Err() != nil {
-					return nil, cancelled(repo)
-				}
-				return nil, &Error{Status: http.StatusInternalServerError, Code: "session_files_stream_failed", MessageKey: "common.requestFailed", Path: repo, Retryable: true, Message: err.Error()}
-			}
-		}
+		newRepos = append(newRepos, repo)
 	}
+	newViewBase := len(views)
+	newViews, newViewIndexes, finderErr := s.sessionFilesRepositoryViewsBounded(ctx, discovery, newRepos, func(index int, view sessionFilesRepositoryView) error {
+		if emit == nil {
+			return nil
+		}
+		return emit(sessionFilesRepositoryChunk(discovery, view, false))
+	})
+	if finderErr != nil {
+		return nil, finderErr
+	}
+	for repo, index := range newViewIndexes {
+		viewIndexByRepo[repo] = newViewBase + index
+	}
+	if enrichmentErr := s.enrichSessionFilesViewsStagedBounded(ctx, newViews, []sessionFilesViewEnricher{
+		s.enrichSessionFilesFileMetadata,
+		s.enrichSessionFilesRepository,
+	}, func(_ int, view sessionFilesRepositoryView) error {
+		if emit == nil {
+			return nil
+		}
+		return emit(sessionFilesRepositoryChunk(discovery, view, true))
+	}); enrichmentErr != nil {
+		if ctx.Err() != nil {
+			return nil, cancelled(session)
+		}
+		return nil, &Error{Status: http.StatusInternalServerError, Code: "session_files_stream_failed", MessageKey: "common.requestFailed", Path: session, Retryable: true, Message: enrichmentErr.Error()}
+	}
+	views = append(views, newViews...)
 	sort.SliceStable(views, func(i, j int) bool {
 		left, _ := views[i].repo["repo"].(string)
 		right, _ := views[j].repo["repo"].(string)
@@ -385,22 +717,29 @@ func AggregateSessionFiles(payloads []map[string]any, hours float64, fromRef, to
 			if !present {
 				existing = map[string]any{
 					"repo": key, "count": 0, "touched_count": 0, "added": 0, "removed": 0,
-					"from_ref": sessionFilesPayloadRef(fromRef, "default"),
-					"to_ref":   sessionFilesPayloadRef(toRef, "base"), "error": "",
+					"error": "",
 				}
 				repos[key] = existing
 			}
 			for _, field := range []string{"count", "touched_count", "added", "removed"} {
 				existing[field] = sessionFilesNumber(existing[field]) + sessionFilesNumber(row[field])
 			}
-			for _, field := range []string{"branch", "from_ref", "to_ref", "error", "error_message"} {
-				if _, already := existing[field]; already && fmt.Sprint(existing[field]) != "" {
+			for _, field := range []string{"branch", "from_ref", "to_ref", "comparison_from_ref", "comparison_to_ref", "error", "error_message"} {
+				if value, already := existing[field]; already && value != nil && strings.TrimSpace(fmt.Sprint(value)) != "" {
 					continue
 				}
-				if value, present := row[field]; present {
+				if value, present := row[field]; present && strings.TrimSpace(fmt.Sprint(value)) != "" {
 					existing[field] = value
 				}
 			}
+		}
+	}
+	for _, row := range repos {
+		if value, ok := row["from_ref"].(string); !ok || strings.TrimSpace(value) == "" {
+			row["from_ref"] = sessionFilesPayloadRef(fromRef, "default")
+		}
+		if value, ok := row["to_ref"].(string); !ok || strings.TrimSpace(value) == "" {
+			row["to_ref"] = sessionFilesPayloadRef(toRef, "base")
 		}
 	}
 	sort.SliceStable(files, func(i, j int) bool {
@@ -448,10 +787,19 @@ func sessionFilesNumber(value any) int {
 }
 
 type sessionFilesRepositoryView struct {
-	files   []map[string]any
-	repo    map[string]any
-	refs    []map[string]any
-	warning string
+	files        []map[string]any
+	repo         map[string]any
+	refs         []map[string]any
+	warning      string
+	scope        *gitHistoryScope
+	refsActive   bool
+	selectedFrom string
+	selectedTo   string
+}
+
+func sessionFilesRepositoryPath(view sessionFilesRepositoryView) string {
+	repo, _ := view.repo["repo"].(string)
+	return repo
 }
 
 func sessionFilesPayloadRef(raw, fallback string) string {
@@ -496,10 +844,25 @@ func sessionFilesRepoRefMatches(key, repo string) bool {
 
 func sessionFilesRefsForRepo(repo string, fromRef, toRef string, repoRefs map[string]map[string]string) (string, string) {
 	if repoRefs != nil {
-		for key, refs := range repoRefs {
-			if !sessionFilesRepoRefMatches(key, repo) {
+		canonicalRepo := canonicalSessionFilesPath(repo)
+		matchedKey := ""
+		matchedRank := 3
+		for key := range repoRefs {
+			if canonicalSessionFilesPath(key) != canonicalRepo {
 				continue
 			}
+			rank := 2
+			if key == repo {
+				rank = 0
+			} else if filepath.Clean(strings.TrimSpace(key)) == filepath.Clean(strings.TrimSpace(repo)) {
+				rank = 1
+			}
+			if rank < matchedRank || rank == matchedRank && (matchedKey == "" || key < matchedKey) {
+				matchedKey, matchedRank = key, rank
+			}
+		}
+		if matchedRank < 3 {
+			refs := repoRefs[matchedKey]
 			if value := strings.TrimSpace(refs["from"]); value != "" {
 				fromRef = value
 			}
@@ -517,12 +880,7 @@ func sessionFilesRefsForRepo(repo string, fromRef, toRef string, repoRefs map[st
 	return fromRef, toRef
 }
 
-func (s *Service) sessionFilesRepository(ctx context.Context, session, repo, fromRef, toRef string, repoRefs map[string]map[string]string, touched map[string]*sessionFileAttribution) (sessionFilesRepositoryView, *Error) {
-	scope, finderErr := s.openGitHistoryScope(repo)
-	if finderErr != nil {
-		return sessionFilesRepositoryView{}, finderErr
-	}
-	defer scope.close()
+func (s *Service) sessionFilesRepositoryWithScope(ctx context.Context, session, repo, fromRef, toRef string, repoRefs map[string]map[string]string, touched map[string]*sessionFileAttribution, scope *gitHistoryScope) (sessionFilesRepositoryView, *Error) {
 	gitCtx, cancel := gitViewContext(ctx)
 	defer cancel()
 
@@ -555,6 +913,7 @@ func (s *Service) sessionFilesRepository(ctx context.Context, session, repo, fro
 				base := sessionFilesDefaultBase(gitCtx, scope)
 				diffArgs = []string{base}
 				selectedFrom, selectedTo = "", ""
+				refsActive = false
 				warning = refError
 			} else if selectedTo == "current" {
 				diffArgs = []string{selectedFrom}
@@ -565,18 +924,26 @@ func (s *Service) sessionFilesRepository(ctx context.Context, session, repo, fro
 			diffArgs = []string{sessionFilesDefaultBase(gitCtx, scope)}
 		}
 	}
+	effectiveFrom, effectiveTo := "HEAD", "current"
+	if len(diffArgs) > 0 {
+		effectiveFrom = diffArgs[0]
+	}
+	if len(diffArgs) > 1 {
+		effectiveTo = diffArgs[1]
+	}
 
 	statuses := make(map[string]string)
 	numstat := make(map[string]gitCommitCount)
 	if len(diffArgs) > 0 {
-		statusRaw, stderr, statusErr := runGitBounded(gitCtx, scope.directory, nil, append([]string{"diff", "--name-status", "-z", "--find-renames"}, diffArgs...), gitCommitMaxOutput, scope.namespace)
-		if statusErr != nil {
-			if errors.Is(statusErr, errGitNamespaceChanged) {
+		diffOptions := []string{"diff", "--raw", "--numstat", "-z", "--find-renames", "--no-ext-diff", "--no-textconv"}
+		diffRaw, stderr, diffErr := runGitBounded(gitCtx, scope.directory, nil, append(diffOptions, diffArgs...), gitCommitMaxOutput, scope.namespace)
+		if diffErr != nil {
+			if errors.Is(diffErr, errGitNamespaceChanged) {
 				return sessionFilesRepositoryView{}, gitNamespaceChanged(repo)
 			}
 			return sessionFilesRepositoryView{}, &Error{Status: http.StatusInternalServerError, Code: "git_diff_failed", MessageKey: "fs.error.gitDiffFailed", Path: repo, Retryable: true, Message: strings.TrimSpace(string(stderr))}
 		}
-		rows, _, parseErr := parseGitNameStatus(statusRaw, false)
+		rows, counts, _, parseErr := parseGitRawNumstat(diffRaw, false)
 		if parseErr != nil {
 			return sessionFilesRepositoryView{}, &Error{Status: http.StatusInternalServerError, Code: "git_diff_failed", MessageKey: "fs.error.gitDiffFailed", Path: repo, Retryable: true, Message: parseErr.Error()}
 		}
@@ -586,13 +953,7 @@ func (s *Service) sessionFilesRepository(ctx context.Context, session, repo, fro
 				statuses[path] = sessionFilesStatus(row["status"])
 			}
 		}
-		numstatRaw, _, numstatErr := runGitBounded(gitCtx, scope.directory, nil, append([]string{"diff", "--numstat", "-z", "--find-renames"}, diffArgs...), gitCommitMaxOutput, scope.namespace)
-		if numstatErr == nil {
-			parsed, _, parseErr := parseGitNumstat(numstatRaw, false)
-			if parseErr == nil {
-				numstat = parsed
-			}
-		}
+		numstat = counts
 	}
 	if selectedTo == "current" || (!refsActive && head != "") || head == "" {
 		untrackedRaw, _, untrackedErr := runGitBounded(gitCtx, scope.directory, nil, []string{"ls-files", "--others", "--exclude-standard", "-z"}, gitCommitMaxOutput, scope.namespace)
@@ -608,16 +969,13 @@ func (s *Service) sessionFilesRepository(ctx context.Context, session, repo, fro
 	touchedByRel := sessionFileAttributionsForRepo(touched, repo)
 	files := make([]map[string]any, 0, len(statuses)+len(touchedByRel))
 	addedTotal, removedTotal := 0, 0
+	numstatIndex := indexGitCommitCounts(numstat)
 	for _, path := range sortedSessionFilePaths(statuses) {
 		status := statuses[path]
-		added, removed, binary := numstatForPath(numstat, path)
-		if status == "?" && added == nil && removed == nil && !binary {
-			added, binary = s.untrackedLineCount(ctx, repo, path)
-			removed = 0
-		}
+		added, removed, binary := numstatForPath(numstatIndex, path)
 		counts := gitCommitCount{added: added, removed: removed, binary: binary}
 		attribution := touchedByRel[path]
-		entry, rowAdded, rowRemoved := s.sessionFileEntryWithAttribution(ctx, session, repo, path, status, counts, attribution, "git")
+		entry, rowAdded, rowRemoved := s.sessionFileEntryWithAttributionMode(ctx, session, repo, path, status, counts, attribution, "git", sessionFileMetadataDeferred)
 		if entry == nil {
 			continue
 		}
@@ -632,33 +990,26 @@ func (s *Service) sessionFilesRepository(ctx context.Context, session, repo, fro
 			continue
 		}
 		attribution := touchedByRel[path]
-		entry, _, _ := s.sessionFileEntryWithAttribution(ctx, session, repo, path, "T", gitCommitCount{}, attribution, "transcript")
+		entry, _, _ := s.sessionFileEntryWithAttributionMode(ctx, session, repo, path, "T", gitCommitCount{}, attribution, "transcript", sessionFileMetadataDeferred)
 		if entry != nil {
 			files = append(files, entry)
 		}
 	}
-	branch := ""
-	if output, _, err := runGitBounded(gitCtx, scope.directory, nil, []string{"symbolic-ref", "--quiet", "--short", "HEAD"}, 4096, scope.namespace); err == nil {
-		branch = strings.TrimSpace(string(output))
-	}
-	refs := gitRecentRefs(gitCtx, scope)
-	aheadBehind := gitAheadBehind(gitCtx, scope, selectedFrom, selectedTo, refsActive)
 	displayFrom, displayTo := "default", "base"
 	if refsActive && warning == "" {
 		displayFrom, displayTo = selectedFrom, selectedTo
 	}
 	repositoryPayload := map[string]any{
-		"repo": repo, "branch": branch, "count": countVisibleSessionFiles(files), "touched_count": len(files),
+		"repo": repo, "branch": "", "count": countVisibleSessionFiles(files), "touched_count": len(files),
 		"added": addedTotal, "removed": removedTotal, "from_ref": displayFrom,
-		"to_ref": displayTo, "error": warning,
-	}
-	for key, value := range aheadBehind {
-		repositoryPayload[key] = value
+		"to_ref": displayTo, "comparison_from_ref": effectiveFrom,
+		"comparison_to_ref": effectiveTo, "error": warning,
 	}
 	return sessionFilesRepositoryView{
 		files: files,
 		repo:  repositoryPayload,
-		refs:  refs, warning: warning,
+		refs:  []map[string]any{}, warning: warning,
+		refsActive: refsActive, selectedFrom: selectedFrom, selectedTo: selectedTo,
 	}, nil
 }
 
@@ -900,14 +1251,12 @@ func countVisibleSessionFiles(files []map[string]any) int {
 	return count
 }
 
-func numstatForPath(numstat map[string]gitCommitCount, path string) (any, any, bool) {
-	for key, counts := range numstat {
-		parts := strings.SplitN(key, "\x00", 2)
-		if len(parts) == 2 && (parts[1] == path || parts[0] == path) {
-			return counts.added, counts.removed, counts.binary
-		}
+func numstatForPath(numstat gitCommitCountIndex, path string) (any, any, bool) {
+	counts, ok := numstat[path]
+	if !ok {
+		return nil, nil, false
 	}
-	return nil, nil, false
+	return counts.added, counts.removed, counts.binary
 }
 
 func (s *Service) untrackedLineCount(ctx context.Context, repo, relative string) (any, bool) {
@@ -949,8 +1298,18 @@ func (s *Service) sessionFileEntry(ctx context.Context, session, repo, relative,
 }
 
 func (s *Service) sessionFileEntryWithAttribution(ctx context.Context, session, repo, relative, status string, counts gitCommitCount, attribution *sessionFileAttribution, source string) (map[string]any, int, int) {
+	return s.sessionFileEntryWithAttributionMode(ctx, session, repo, relative, status, counts, attribution, source, sessionFileMetadataComplete)
+}
+
+type sessionFileMetadataMode uint8
+
+const (
+	sessionFileMetadataDeferred sessionFileMetadataMode = iota
+	sessionFileMetadataComplete
+)
+
+func (s *Service) sessionFileEntryWithAttributionMode(ctx context.Context, session, repo, relative, status string, counts gitCommitCount, attribution *sessionFileAttribution, source string, metadataMode sessionFileMetadataMode) (map[string]any, int, int) {
 	path := filepath.Join(repo, filepath.FromSlash(relative))
-	info, finderErr := s.Info(ctx, path, false)
 	agents := []any{}
 	windows := []map[string]any{}
 	mtime := int64(0)
@@ -972,21 +1331,24 @@ func (s *Service) sessionFileEntryWithAttribution(ctx context.Context, session, 
 	if len(agents) > 0 {
 		entry["agent"] = agents[0]
 	}
-	if finderErr != nil {
-		if finderErr.Status != http.StatusNotFound || status == "?" || status == "T" {
-			return nil, 0, 0
+	if metadataMode == sessionFileMetadataComplete {
+		info, finderErr := s.Info(ctx, path, false)
+		if finderErr != nil {
+			if finderErr.Status != http.StatusNotFound || status == "?" || status == "T" {
+				return nil, 0, 0
+			}
+			entry["missing"] = true
+		} else {
+			if value, ok := info["mtime"].(int64); ok {
+				entry["mtime"] = value
+			} else if value, ok := info["mtime"].(float64); ok {
+				entry["mtime"] = int64(value)
+			}
+			entry["size"] = info["size"]
 		}
-		entry["missing"] = true
-	} else {
-		if value, ok := info["mtime"].(int64); ok {
-			entry["mtime"] = value
-		} else if value, ok := info["mtime"].(float64); ok {
-			entry["mtime"] = int64(value)
+		if finderErr != nil && attribution == nil {
+			entry["mtime"] = int64(0)
 		}
-		entry["size"] = info["size"]
-	}
-	if finderErr != nil && attribution == nil {
-		entry["mtime"] = int64(0)
 	}
 	if !counts.binary {
 		entry["added"] = counts.added
@@ -995,4 +1357,74 @@ func (s *Service) sessionFileEntryWithAttribution(ctx context.Context, session, 
 	added, _ := counts.added.(int)
 	removed, _ := counts.removed.(int)
 	return entry, added, removed
+}
+
+func (s *Service) sessionFilesRepositoryViewWithAttribution(ctx context.Context, session string, view sessionFilesRepositoryView, touched map[string]*sessionFileAttribution) (sessionFilesRepositoryView, *Error) {
+	repo, _ := view.repo["repo"].(string)
+	touchedByRel := sessionFileAttributionsForRepo(touched, repo)
+	if len(touchedByRel) == 0 {
+		return view, nil
+	}
+	filesByPath := make(map[string]map[string]any, len(view.files))
+	for _, entry := range view.files {
+		path, _ := entry["path"].(string)
+		if path != "" {
+			filesByPath[path] = entry
+		}
+	}
+	added := sessionFilesNumber(view.repo["added"])
+	removed := sessionFilesNumber(view.repo["removed"])
+	for path, attribution := range touchedByRel {
+		entry, present := filesByPath[path]
+		if present {
+			oldStatus, _ := entry["status"].(string)
+			status := oldStatus
+			if attribution.status != "" {
+				status = sessionFileStatusMerge(status, attribution.status)
+			}
+			if oldStatus == "?" && status != "?" {
+				added += sessionFilesNumber(entry["added"])
+				removed += sessionFilesNumber(entry["removed"])
+			}
+			entry["status"] = status
+			agents := make([]any, 0, len(attribution.agents))
+			for _, agent := range attribution.agents {
+				agents = append(agents, agent)
+			}
+			entry["agents"] = agents
+			if len(attribution.agents) > 0 {
+				entry["agent"] = attribution.agents[0]
+			} else {
+				entry["agent"] = ""
+			}
+			entry["agent_windows"] = append([]map[string]any(nil), attribution.windows...)
+			if attribution.mtime > int64(sessionFilesNumber(entry["mtime"])) {
+				entry["mtime"] = attribution.mtime
+			}
+			entry["diff_tracked"] = entry["source"] == "git" && status != "?"
+			continue
+		}
+		if view.refsActive {
+			continue
+		}
+		entry, _, _ = s.sessionFileEntryWithAttribution(ctx, session, repo, path, "T", gitCommitCount{}, attribution, "transcript")
+		if entry != nil {
+			view.files = append(view.files, entry)
+		}
+	}
+	sort.SliceStable(view.files, func(left, right int) bool {
+		leftMtime := sessionFilesNumber(view.files[left]["mtime"])
+		rightMtime := sessionFilesNumber(view.files[right]["mtime"])
+		if leftMtime != rightMtime {
+			return leftMtime > rightMtime
+		}
+		leftPath, _ := view.files[left]["path"].(string)
+		rightPath, _ := view.files[right]["path"].(string)
+		return leftPath < rightPath
+	})
+	view.repo["count"] = countVisibleSessionFiles(view.files)
+	view.repo["touched_count"] = len(view.files)
+	view.repo["added"] = added
+	view.repo["removed"] = removed
+	return view, nil
 }

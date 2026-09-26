@@ -5,10 +5,7 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"io"
 	"math"
 	"net/http"
 	"net/url"
@@ -17,17 +14,61 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
+	"sync"
 	"time"
 
+	"github.com/keivenchang/yolomux/internal/cache"
 	"github.com/keivenchang/yolomux/internal/finder"
 )
 
 const maxSessionFilesHours = 24.0 * 14.0
 const maxClaudeTranscriptLookupEntries = 512
-const sessionFilesCacheMaxEntries = 128
-const sessionFilesCacheTTL = 30 * time.Second
+const maxClaudeTranscriptPathCacheEntries = 512
 const maxSessionFilesRepositoryPaths = 128
+
+type claudeTranscriptLookupCache struct {
+	mu    sync.Mutex
+	paths *cache.LRU[string, string]
+	find  func(string, string) string
+}
+
+func newClaudeTranscriptLookupCache(find func(string, string) string) *claudeTranscriptLookupCache {
+	return &claudeTranscriptLookupCache{
+		paths: cache.NewLRU[string, string](maxClaudeTranscriptPathCacheEntries),
+		find:  find,
+	}
+}
+
+func (lookup *claudeTranscriptLookupCache) transcriptPath(root, sessionID string) string {
+	root = filepath.Clean(strings.TrimSpace(root))
+	sessionID = strings.TrimSpace(sessionID)
+	if root == "." || root == "" || sessionID == "" {
+		return ""
+	}
+	key := root + "\x00" + sessionID
+	lookup.mu.Lock()
+	cachedPath, ok := lookup.paths.Get(key)
+	lookup.mu.Unlock()
+	if ok {
+		if info, err := os.Stat(cachedPath); err == nil && !info.IsDir() {
+			return cachedPath
+		}
+		lookup.mu.Lock()
+		if current, exists := lookup.paths.Get(key); exists && current == cachedPath {
+			lookup.paths.Delete(key)
+		}
+		lookup.mu.Unlock()
+	}
+	path := lookup.find(root, sessionID)
+	if path != "" {
+		lookup.mu.Lock()
+		lookup.paths.Set(key, path)
+		lookup.mu.Unlock()
+	}
+	return path
+}
+
+var claudeTranscriptPaths = newClaudeTranscriptLookupCache(findClaudeTranscriptOnDisk)
 
 type sessionFilesRequest struct {
 	session   string
@@ -40,14 +81,9 @@ type sessionFilesRequest struct {
 	freshGit  bool
 	cacheOnly bool
 	cacheView string
-}
-
-type sessionFilesCacheRecord struct {
-	RequestDescriptor string         `json:"request_descriptor"`
-	CacheViewID       string         `json:"cache_view_id"`
-	StoredAt          int64          `json:"stored_at"`
-	Status            int            `json:"status"`
-	Payload           map[string]any `json:"payload"`
+	// sessionIdentity is filled from tmux immediately before session-scoped work. It is
+	// deliberately excluded from the browser request descriptor.
+	sessionIdentity string
 }
 
 type claudeSessionMetadata struct {
@@ -72,6 +108,10 @@ func findClaudeTranscript(transcriptsRoot, sessionID string) string {
 	if strings.TrimSpace(transcriptsRoot) == "" || strings.TrimSpace(sessionID) == "" {
 		return ""
 	}
+	return claudeTranscriptPaths.transcriptPath(transcriptsRoot, sessionID)
+}
+
+func findClaudeTranscriptOnDisk(transcriptsRoot, sessionID string) string {
 	wanted := sessionID + ".jsonl"
 	entries := 0
 	var found string
@@ -135,18 +175,37 @@ func sessionFilesRequestFromQuery(query url.Values) (sessionFilesRequest, *finde
 	if hoursErr != nil {
 		return sessionFilesRequest{}, hoursErr
 	}
+	fromRaw, hasFrom := query["from"]
+	if !hasFrom {
+		fromRaw = query["from_ref"]
+	}
+	toRaw, hasTo := query["to"]
+	if !hasTo {
+		toRaw = query["to_ref"]
+	}
+	refsRaw, hasRefs := query["refs"]
+	if !hasRefs {
+		refsRaw = query["repo_refs"]
+	}
 	return sessionFilesRequest{
 		session:   strings.TrimSpace(query.Get("session")),
 		hours:     hours,
-		fromRef:   strings.TrimSpace(query.Get("from")),
-		toRef:     strings.TrimSpace(query.Get("to")),
-		repoRefs:  parseSessionFilesRepoRefs(query.Get("refs")),
+		fromRef:   firstQueryValue(fromRaw),
+		toRef:     firstQueryValue(toRaw),
+		repoRefs:  parseSessionFilesRepoRefs(firstQueryValue(refsRaw)),
 		repoPaths: sessionFilesRepositoryPaths(query["repo_path"]),
 		force:     queryTrue(query.Get("force")),
 		freshGit:  queryTrue(query.Get("fresh_git")),
 		cacheOnly: queryTrue(query.Get("cache_only")),
 		cacheView: strings.TrimSpace(query.Get("cache_view")),
 	}, nil
+}
+
+func firstQueryValue(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(values[0])
 }
 
 func sessionFilesRepositoryPaths(values []string) []string {
@@ -186,259 +245,6 @@ func sessionFilesStreamRoots(visiblePaths, liveRoots []string) []string {
 	return roots
 }
 
-func sessionFilesRequestDescriptor(request sessionFilesRequest) string {
-	hours := request.hours
-	if hours == math.Trunc(hours) {
-		// Match the browser/Python descriptor's JSON number normalization: 24 and 24.0
-		// identify the same logical session-files view.
-		hours = math.Trunc(hours)
-	}
-	canonical := struct {
-		Kind      string                       `json:"kind"`
-		Session   string                       `json:"session"`
-		Hours     float64                      `json:"hours"`
-		FromRef   string                       `json:"from_ref"`
-		ToRef     string                       `json:"to_ref"`
-		RepoRefs  map[string]map[string]string `json:"repo_refs,omitempty"`
-		RepoPaths []string                     `json:"repo_paths,omitempty"`
-	}{
-		Kind: "session-files-request", Session: request.session, Hours: hours,
-		FromRef: request.fromRef, ToRef: request.toRef, RepoRefs: request.repoRefs,
-		RepoPaths: append([]string(nil), request.repoPaths...),
-	}
-	encoded, _ := json.Marshal(canonical)
-	digest := sha256.Sum256(encoded)
-	return hex.EncodeToString(digest[:])
-}
-
-func sessionFilesCacheViewID(requestDescriptor string) string {
-	digest := sha256.Sum256([]byte("session-files-view\x1f" + requestDescriptor))
-	return hex.EncodeToString(digest[:])
-}
-
-func cloneSessionFilesPayload(payload map[string]any) map[string]any {
-	if payload == nil {
-		return nil
-	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return cloneFinderMap(payload)
-	}
-	var cloned map[string]any
-	if json.Unmarshal(encoded, &cloned) != nil {
-		return cloneFinderMap(payload)
-	}
-	return cloned
-}
-
-func sessionFilesCacheAge(record sessionFilesCacheRecord, now time.Time) float64 {
-	if record.StoredAt <= 0 {
-		return 0
-	}
-	age := now.Sub(time.Unix(0, record.StoredAt)).Seconds()
-	if age < 0 {
-		return 0
-	}
-	return age
-}
-
-func sessionFilesCacheMetadata(record sessionFilesCacheRecord, requestDescriptor, viewID string, hit, stale bool, now time.Time) map[string]any {
-	return map[string]any{
-		"hit":                hit,
-		"stale":              stale,
-		"age_seconds":        math.Round(sessionFilesCacheAge(record, now)*1000) / 1000,
-		"refresh_seconds":    sessionFilesCacheTTL.Seconds(),
-		"request_descriptor": requestDescriptor,
-		"cache_view_id":      viewID,
-	}
-}
-
-func (s *server) sessionFilesCacheDirectory() string {
-	state := strings.TrimSpace(s.state)
-	if state == "" {
-		state = strings.TrimSpace(s.config)
-	}
-	if state == "" {
-		return ""
-	}
-	return filepath.Join(state, "session-files-cache")
-}
-
-func (s *server) readSessionFilesCache(request sessionFilesRequest, viewID string) (sessionFilesCacheRecord, bool) {
-	descriptor := sessionFilesRequestDescriptor(request)
-	if len(viewID) != 64 || strings.Trim(viewID, "0123456789abcdef") != "" {
-		return sessionFilesCacheRecord{}, false
-	}
-	s.sessionFilesCacheMu.Lock()
-	record, ok := s.sessionFilesCache[viewID]
-	s.sessionFilesCacheMu.Unlock()
-	if ok && record.RequestDescriptor == descriptor && record.CacheViewID == viewID && record.StoredAt > 0 && record.Status >= http.StatusOK && record.Status < http.StatusMultipleChoices && record.Payload != nil {
-		return sessionFilesCacheRecord{RequestDescriptor: record.RequestDescriptor, CacheViewID: record.CacheViewID, StoredAt: record.StoredAt, Status: record.Status, Payload: cloneSessionFilesPayload(record.Payload)}, true
-	}
-	directory := s.sessionFilesCacheDirectory()
-	if directory == "" {
-		return sessionFilesCacheRecord{}, false
-	}
-	path := filepath.Join(directory, viewID+".json")
-	fileDescriptor, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return sessionFilesCacheRecord{}, false
-	}
-	file := os.NewFile(uintptr(fileDescriptor), path)
-	if file == nil {
-		_ = syscall.Close(fileDescriptor)
-		return sessionFilesCacheRecord{}, false
-	}
-	fileInfo, statErr := file.Stat()
-	if statErr != nil || !fileInfo.Mode().IsRegular() {
-		_ = file.Close()
-		return sessionFilesCacheRecord{}, false
-	}
-	data, err := io.ReadAll(io.LimitReader(file, 16<<20))
-	closeErr := file.Close()
-	if err != nil || closeErr != nil {
-		return sessionFilesCacheRecord{}, false
-	}
-	var diskRecord sessionFilesCacheRecord
-	if json.Unmarshal(data, &diskRecord) != nil || diskRecord.RequestDescriptor != descriptor || diskRecord.CacheViewID != viewID || diskRecord.Payload == nil {
-		return sessionFilesCacheRecord{}, false
-	}
-	if diskRecord.StoredAt <= 0 || diskRecord.Status < http.StatusOK || diskRecord.Status >= http.StatusMultipleChoices {
-		return sessionFilesCacheRecord{}, false
-	}
-	s.sessionFilesCacheMu.Lock()
-	if s.sessionFilesCache == nil {
-		s.sessionFilesCache = make(map[string]sessionFilesCacheRecord)
-	}
-	if len(s.sessionFilesCache) >= sessionFilesCacheMaxEntries {
-		clear(s.sessionFilesCache)
-	}
-	s.sessionFilesCache[viewID] = sessionFilesCacheRecord{RequestDescriptor: diskRecord.RequestDescriptor, CacheViewID: diskRecord.CacheViewID, StoredAt: diskRecord.StoredAt, Status: diskRecord.Status, Payload: cloneSessionFilesPayload(diskRecord.Payload)}
-	s.sessionFilesCacheMu.Unlock()
-	return diskRecord, true
-}
-
-func sessionFilesPayloadWithCache(record sessionFilesCacheRecord, requestDescriptor, viewID string, hit, stale, refreshing bool, now time.Time) map[string]any {
-	payload := cloneSessionFilesPayload(record.Payload)
-	if payload == nil {
-		payload = make(map[string]any)
-	}
-	metadata := sessionFilesCacheMetadata(record, requestDescriptor, viewID, hit, stale, now)
-	if refreshing {
-		metadata["refreshing"] = true
-	}
-	payload["cache"] = metadata
-	return payload
-}
-
-func (s *server) beginSessionFilesRefresh(viewID string) bool {
-	s.sessionFilesCacheMu.Lock()
-	defer s.sessionFilesCacheMu.Unlock()
-	if s.sessionFilesRefresh == nil {
-		s.sessionFilesRefresh = make(map[string]bool)
-	}
-	if s.sessionFilesRefresh[viewID] {
-		return false
-	}
-	s.sessionFilesRefresh[viewID] = true
-	return true
-}
-
-func (s *server) finishSessionFilesRefresh(viewID string) {
-	s.sessionFilesCacheMu.Lock()
-	delete(s.sessionFilesRefresh, viewID)
-	s.sessionFilesCacheMu.Unlock()
-}
-
-func (s *server) scheduleSessionFilesRefresh(request sessionFilesRequest, viewID string, task func(context.Context) (map[string]any, *finder.Error)) bool {
-	if !s.beginSessionFilesRefresh(viewID) {
-		return false
-	}
-	finish := func() { s.finishSessionFilesRefresh(viewID) }
-	parent, cancel := newFinderJobContext(context.Background(), finderJobDeadline)
-	scheduler := s.finderBackgroundScheduler()
-	if scheduler == nil {
-		go func() {
-			defer cancel()
-			defer finish()
-			payload, finderErr := task(parent)
-			if finderErr == nil {
-				s.writeSessionFilesCache(request, viewID, payload, http.StatusOK)
-			}
-		}()
-		return true
-	}
-	result, err := scheduler.Submit(parent, "", func(ctx context.Context) (any, error) {
-		payload, finderErr := task(ctx)
-		if finderErr != nil {
-			return finderErr, nil
-		}
-		return payload, nil
-	})
-	if err != nil {
-		cancel()
-		finish()
-		return false
-	}
-	go func() {
-		defer cancel()
-		defer finish()
-		completed := <-result
-		if completed.Err != nil {
-			return
-		}
-		payload, ok := completed.Value.(map[string]any)
-		if ok {
-			s.writeSessionFilesCache(request, viewID, payload, http.StatusOK)
-		}
-	}()
-	return true
-}
-
-func (s *server) writeSessionFilesCache(request sessionFilesRequest, viewID string, payload map[string]any, status int) {
-	directory := s.sessionFilesCacheDirectory()
-	if directory == "" || payload == nil || status < http.StatusOK || status >= http.StatusMultipleChoices {
-		return
-	}
-	record := sessionFilesCacheRecord{
-		RequestDescriptor: sessionFilesRequestDescriptor(request), CacheViewID: viewID,
-		StoredAt: time.Now().UnixNano(), Status: status, Payload: cloneSessionFilesPayload(payload),
-	}
-	s.sessionFilesCacheMu.Lock()
-	if s.sessionFilesCache == nil {
-		s.sessionFilesCache = make(map[string]sessionFilesCacheRecord)
-	}
-	if len(s.sessionFilesCache) >= sessionFilesCacheMaxEntries {
-		clear(s.sessionFilesCache)
-	}
-	s.sessionFilesCache[viewID] = sessionFilesCacheRecord{RequestDescriptor: record.RequestDescriptor, CacheViewID: record.CacheViewID, StoredAt: record.StoredAt, Status: record.Status, Payload: cloneSessionFilesPayload(record.Payload)}
-	s.sessionFilesCacheMu.Unlock()
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return
-	}
-	data, err := json.Marshal(record)
-	if err != nil {
-		return
-	}
-	temporary, err := os.CreateTemp(directory, ".session-files-*.tmp")
-	if err != nil {
-		return
-	}
-	temporaryName := temporary.Name()
-	defer os.Remove(temporaryName)
-	if err := temporary.Chmod(0o600); err == nil {
-		if _, err = temporary.Write(data); err == nil {
-			err = temporary.Sync()
-		}
-	}
-	if closeErr := temporary.Close(); err == nil {
-		err = closeErr
-	}
-	if err == nil {
-		_ = os.Rename(temporaryName, filepath.Join(directory, viewID+".json"))
-	}
-}
-
 func sessionFilesPendingEnvelope(session string) map[string]any {
 	return map[string]any{
 		"state": "queued", "request": map[string]any{"id": finderRequestID("session-files-cache")},
@@ -459,9 +265,13 @@ func parseSessionFilesRepoRefs(raw string) map[string]map[string]string {
 	result := make(map[string]map[string]string)
 	for repo, values := range decoded {
 		refs := make(map[string]string, 2)
-		for _, key := range []string{"from", "to"} {
-			if value, ok := values[key].(string); ok && strings.TrimSpace(value) != "" {
-				refs[key] = strings.TrimSpace(value)
+		for _, keys := range [][2]string{{"from", "from_ref"}, {"to", "to_ref"}} {
+			value, exists := values[keys[0]]
+			if !exists {
+				value = values[keys[1]]
+			}
+			if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+				refs[keys[0]] = strings.TrimSpace(text)
 			}
 		}
 		if len(refs) > 0 {
@@ -477,6 +287,42 @@ func parseSessionFilesRepoRefs(raw string) map[string]map[string]string {
 func (s *server) sessionFilesPaneRoots(session string) ([]string, *finder.Error) {
 	roots, _, finderErr := s.sessionFilesPaneInputs(session)
 	return roots, finderErr
+}
+
+func (s *server) sessionFilesSessionIdentity(session string) (string, bool) {
+	if strings.TrimSpace(session) == "" {
+		return "", false
+	}
+	output, err := s.tmuxCommand("display-message", "-p", "-t", s.exactTarget(session), "#{session_id}\t#{session_created}\t#{pid}").Output()
+	if err != nil {
+		return "", false
+	}
+	fields := strings.SplitN(strings.TrimSpace(string(output)), "\t", 3)
+	if len(fields) != 3 || strings.TrimSpace(fields[0]) == "" || strings.TrimSpace(fields[1]) == "" || strings.TrimSpace(fields[2]) == "" {
+		return "", false
+	}
+	return goTmuxSessionIdentity(session, strings.Join([]string{
+		strings.TrimSpace(fields[0]), strings.TrimSpace(fields[1]), strings.TrimSpace(fields[2]),
+	}, "\x1f")), true
+}
+
+func (s *server) sessionFilesIdentityMatches(session, expected string) bool {
+	if expected == "" {
+		return false
+	}
+	current, ok := s.sessionFilesSessionIdentity(session)
+	return ok && current == expected
+}
+
+func sessionFilesIncarnationChangedError(session string) *finder.Error {
+	return &finder.Error{Status: http.StatusServiceUnavailable, Code: "session_incarnation_changed", MessageKey: "common.requestFailed", Path: session, Retryable: true, Message: "session changed while session files were being read"}
+}
+
+func (s *server) sessionFilesIdentityUnavailableError(session string) *finder.Error {
+	if s.tmuxCommand("has-session", "-t", s.exactTarget(session)).Run() != nil {
+		return &finder.Error{Status: http.StatusNotFound, Code: "unknown_session", MessageKey: "status.sessionEnded", Path: session, Message: "unknown session"}
+	}
+	return sessionFilesIncarnationChangedError(session)
 }
 
 func (s *server) sessionFilesPaneInputs(session string) ([]string, []finder.SessionFileAgent, *finder.Error) {
@@ -540,20 +386,23 @@ func (s *server) sessionFilesPaneInputs(session string) ([]string, []finder.Sess
 	return roots, agents, nil
 }
 
-func (s *server) aggregateSessionFiles(ctx context.Context, sessions []string, hours float64, fromRef, toRef string, repoRefs map[string]map[string]string) (map[string]any, *finder.Error) {
+func (s *server) aggregateSessionFiles(ctx context.Context, sessions []string, request sessionFilesRequest) (map[string]any, *finder.Error) {
 	payloads := make([]map[string]any, 0, len(sessions))
 	for _, session := range sessions {
-		roots, agents, rootErr := s.sessionFilesPaneInputs(session)
+		itemRequest := request
+		itemRequest.session = session
+		plan := newSessionFilesPlan(itemRequest)
+		roots, agents, rootErr := s.sessionFilesPlanInputs(plan)
 		if rootErr != nil {
 			return nil, rootErr
 		}
-		payload, finderErr := s.finder.SessionFilesWithAgents(ctx, session, roots, agents, hours, fromRef, toRef, repoRefs)
+		payload, finderErr := s.sessionFilesPlanTaskWithInputs(plan, roots, agents)(ctx)
 		if finderErr != nil {
 			return nil, finderErr
 		}
 		payloads = append(payloads, payload)
 	}
-	return finder.AggregateSessionFiles(payloads, hours, fromRef, toRef), nil
+	return finder.AggregateSessionFiles(payloads, request.hours, request.fromRef, request.toRef), nil
 }
 
 func (s *server) sessionFiles(w http.ResponseWriter, r *http.Request) {
@@ -566,10 +415,16 @@ func (s *server) sessionFiles(w http.ResponseWriter, r *http.Request) {
 		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, requestErr)
 		return
 	}
-	descriptor := sessionFilesRequestDescriptor(request)
-	viewID := sessionFilesCacheViewID(descriptor)
+	plan := newSessionFilesPlan(request)
+	descriptor, viewID := plan.descriptor, plan.viewID
 	if request.cacheOnly {
-		record, ok := s.readSessionFilesCache(request, request.cacheView)
+		var record sessionFilesCacheRecord
+		var ok bool
+		if request.session != "" {
+			request, record, ok = s.readLiveSessionFilesCache(request, request.cacheView)
+		} else {
+			record, ok = s.readSessionFilesCache(request, request.cacheView)
+		}
 		if !ok || sessionFilesCacheAge(record, time.Now()) > sessionFilesCacheTTL.Seconds() {
 			jsonResponse(w, http.StatusAccepted, sessionFilesPendingEnvelope(request.session))
 			return
@@ -578,25 +433,48 @@ func (s *server) sessionFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if request.session != "" {
+		admission := s.admitLiveSessionFilesCache(request, viewID)
+		request = admission.request
+		if admission.hit {
+			finderHTTPJSON(w, finderRequestIDForHTTP(), sessionFilesPayloadWithCache(admission.record, descriptor, viewID, true, admission.stale, admission.refreshing, time.Now()), nil)
+			return
+		}
+	}
+
 	var task func(context.Context) (map[string]any, *finder.Error)
+	var planRoots []string
+	var planAgents []finder.SessionFileAgent
 	if request.session == "" {
 		sessions := s.sessionNames()
 		task = func(ctx context.Context) (map[string]any, *finder.Error) {
-			return s.aggregateSessionFiles(ctx, sessions, request.hours, request.fromRef, request.toRef, request.repoRefs)
+			return s.aggregateSessionFiles(ctx, sessions, request)
 		}
 	} else {
-		roots, agents, rootErr := s.sessionFilesPaneInputs(request.session)
+		if request.sessionIdentity == "" {
+			identity, ok := s.sessionFilesSessionIdentity(request.session)
+			if !ok {
+				finderHTTPJSON(w, finderRequestIDForHTTP(), nil, s.sessionFilesIdentityUnavailableError(request.session))
+				return
+			}
+			request.sessionIdentity = identity
+		}
+		var rootErr *finder.Error
+		planRoots, planAgents, rootErr = s.sessionFilesPlanInputs(plan)
 		if rootErr != nil {
 			finderHTTPJSON(w, finderRequestIDForHTTP(), nil, rootErr)
 			return
 		}
-		task = func(ctx context.Context) (map[string]any, *finder.Error) {
-			return s.finder.SessionFilesWithAgents(ctx, request.session, roots, agents, request.hours, request.fromRef, request.toRef, request.repoRefs)
+		if request.sessionIdentity != "" && !s.sessionFilesIdentityMatches(request.session, request.sessionIdentity) {
+			finderHTTPJSON(w, finderRequestIDForHTTP(), nil, sessionFilesIncarnationChangedError(request.session))
+			return
 		}
+		plan.request = request
+		task = s.sessionFilesPlanTaskWithInputs(plan, planRoots, planAgents)
 	}
 
-	if !request.freshGit {
-		if record, ok := s.readSessionFilesCache(request, viewID); ok {
+	if !request.freshGit && !request.force && request.session == "" {
+		if record, ok := s.readSessionFilesCache(request, viewID); ok && sessionFilesCacheRecordMatchesRequestIdentity(request, record) {
 			stale := sessionFilesCacheAge(record, time.Now()) > sessionFilesCacheTTL.Seconds()
 			refreshing := false
 			if stale {
@@ -608,12 +486,21 @@ func (s *server) sessionFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	compute := func(ctx context.Context) (map[string]any, *finder.Error) {
-		payload, finderErr := task(ctx)
+		var payload map[string]any
+		var finderErr *finder.Error
+		if request.session != "" {
+			payload, finderErr = s.sessionFilesPlanProduceAndCacheWithInputs(ctx, plan, planRoots, planAgents, nil)
+		} else {
+			generation := s.beginSessionFilesCacheWrite(viewID)
+			payload, finderErr = task(ctx)
+			if finderErr == nil {
+				s.writeSessionFilesCache(request, viewID, payload, http.StatusOK, generation)
+			}
+		}
 		if finderErr != nil {
 			return payload, finderErr
 		}
-		s.writeSessionFilesCache(request, viewID, payload, http.StatusOK)
-		if record, ok := s.readSessionFilesCache(request, viewID); ok {
+		if record, ok := s.readSessionFilesCache(request, viewID); ok && sessionFilesCacheRecordMatchesRequestIdentity(request, record) {
 			return sessionFilesPayloadWithCache(record, descriptor, viewID, false, false, false, time.Now()), nil
 		}
 		payload["cache"] = sessionFilesCacheMetadata(sessionFilesCacheRecord{StoredAt: time.Now().UnixNano()}, descriptor, viewID, false, false, time.Now())
@@ -644,9 +531,9 @@ func sessionFilesCachedChunks(payload map[string]any) []map[string]any {
 		filesByRepo[repo] = append(filesByRepo[repo], file)
 	}
 	refsByRepo, _ := payload["refs_by_repo"].(map[string]any)
-	chunks := make([]map[string]any, 0)
 	repos := sessionFilesPayloadRows(payload, "repos")
-	for index, repo := range repos {
+	chunks := make([]map[string]any, 0, len(repos))
+	for _, repo := range repos {
 		repoPath, _ := repo["repo"].(string)
 		refs := any(nil)
 		if refsByRepo != nil {
@@ -658,10 +545,17 @@ func sessionFilesCachedChunks(payload map[string]any) []map[string]any {
 			"refs_by_repo": map[string]any{repoPath: refs},
 			"from_ref":     payload["from_ref"], "to_ref": payload["to_ref"],
 			"warnings": payload["warnings"], "errors": []any{}, "loaded": false,
-			"repo_index": index, "repo_total": len(repos),
 		})
 	}
 	return chunks
+}
+
+func sessionFilesStreamCacheMetadata(record sessionFilesCacheRecord, requestDescriptor, viewID string, stale, refreshing bool, now time.Time) map[string]any {
+	metadata := sessionFilesCacheMetadata(record, requestDescriptor, viewID, true, stale, now)
+	if refreshing {
+		metadata["refreshing"] = true
+	}
+	return metadata
 }
 
 func (s *server) sessionFilesStream(w http.ResponseWriter, r *http.Request) {
@@ -681,58 +575,54 @@ func (s *server) sessionFilesStream(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	roots, agents, rootErr := s.sessionFilesPaneInputs(request.session)
-	if rootErr != nil {
-		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, rootErr)
-		return
-	}
-	// Finder supplies repository directories that were visible in its cheap first listing. Put those
-	// explicit paths before live pane roots so an unrelated non-Git CWD cannot delay the first visible
-	// repository chunk. The initial /api/fs/fast/list remains completely independent of this work.
-	streamRoots := sessionFilesStreamRoots(request.repoPaths, roots)
-	descriptor := sessionFilesRequestDescriptor(request)
-	viewID := sessionFilesCacheViewID(descriptor)
-	flusher, ok := w.(http.Flusher)
+	plan := newSessionFilesPlan(request)
+	descriptor, viewID := plan.descriptor, plan.viewID
+	stream, ok := newJSONSSEWriter(w)
 	if !ok {
 		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, &finder.Error{Status: http.StatusInternalServerError, Code: "streaming_unavailable", MessageKey: "common.requestFailed", Message: "streaming unavailable"})
 		return
 	}
-	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-	writeEvent := func(event string, payload any) error {
-		data, marshalErr := json.Marshal(payload)
-		if marshalErr != nil {
-			return marshalErr
-		}
-		if _, writeErr := io.WriteString(w, "event: "+event+"\ndata: "+string(data)+"\n\n"); writeErr != nil {
-			return writeErr
-		}
-		flusher.Flush()
-		return nil
-	}
+	writeEvent := stream.write
 	if err := writeEvent("start", map[string]any{"session": request.session, "from_ref": request.fromRef, "to_ref": request.toRef}); err != nil {
 		return
 	}
 
-	if !request.freshGit {
-		if record, cacheHit := s.readSessionFilesCache(request, viewID); cacheHit && sessionFilesCacheAge(record, time.Now()) <= sessionFilesCacheTTL.Seconds() {
-			for _, chunk := range sessionFilesCachedChunks(record.Payload) {
-				if err := writeEvent("repo", chunk); err != nil {
-					return
-				}
+	admission := s.admitLiveSessionFilesCache(request, viewID)
+	request = admission.request
+	if admission.hit {
+		for _, chunk := range sessionFilesCachedChunks(admission.record.Payload) {
+			if err := writeEvent("repo", chunk); err != nil {
+				return
 			}
-			_ = writeEvent("done", map[string]any{
-				"session": request.session, "loaded": true, "errors": []any{}, "warnings": record.Payload["warnings"],
-				"from_ref": record.Payload["from_ref"], "to_ref": record.Payload["to_ref"],
-				"cache": sessionFilesCacheMetadata(record, descriptor, viewID, true, false, time.Now()),
-			})
+		}
+		_ = writeEvent("done", map[string]any{
+			"session": request.session, "loaded": true, "errors": []any{}, "warnings": admission.record.Payload["warnings"],
+			"from_ref": admission.record.Payload["from_ref"], "to_ref": admission.record.Payload["to_ref"],
+			"cache": sessionFilesStreamCacheMetadata(admission.record, descriptor, viewID, admission.stale, admission.refreshing, time.Now()),
+		})
+		return
+	}
+	if request.sessionIdentity == "" {
+		identity, ok := s.sessionFilesSessionIdentity(request.session)
+		if !ok {
+			_ = writeEvent("error", s.sessionFilesIdentityUnavailableError(request.session).Payload())
 			return
 		}
+		request.sessionIdentity = identity
 	}
-
-	payload, finderErr := s.finder.SessionFilesWithAgentsStream(r.Context(), request.session, streamRoots, agents, request.hours, request.fromRef, request.toRef, request.repoRefs, func(chunk map[string]any) error {
+	plan.request = request
+	roots, agents, rootErr := s.sessionFilesPlanInputs(plan)
+	if rootErr != nil {
+		_ = writeEvent("error", rootErr.Payload())
+		return
+	}
+	if !s.sessionFilesIdentityMatches(request.session, request.sessionIdentity) {
+		_ = writeEvent("error", sessionFilesIncarnationChangedError(request.session).Payload())
+		return
+	}
+	// sessionFilesPlanInputs puts explicitly visible repositories before pane roots for every
+	// producer of this cache view. The initial /api/fs/fast/list remains independent of this work.
+	payload, finderErr := s.sessionFilesPlanProduceAndCacheWithInputs(r.Context(), plan, roots, agents, func(chunk map[string]any) error {
 		return writeEvent("repo", chunk)
 	})
 	if finderErr != nil {
@@ -741,7 +631,6 @@ func (s *server) sessionFilesStream(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	s.writeSessionFilesCache(request, viewID, payload, http.StatusOK)
 	_ = writeEvent("done", map[string]any{
 		"session": request.session, "loaded": true, "errors": payload["errors"], "warnings": payload["warnings"],
 		"from_ref": payload["from_ref"], "to_ref": payload["to_ref"],
@@ -779,57 +668,50 @@ func (s *server) sessionFilesBatch(w http.ResponseWriter, r *http.Request) {
 	sessions = deduped
 	request.session = ""
 	s.enqueueFinderJSONWithScheduler(w, r.Context(), s.finderBackgroundScheduler(), r.URL.Path, "session_files_batch", s.root, 0, func(ctx context.Context) (map[string]any, *finder.Error) {
-		payloads := make(map[string]any, len(sessions))
-		statuses := make(map[string]any, len(sessions))
-		for _, rawSession := range sessions {
+		payloads, statuses, batchErr := runSessionFilesBatch(ctx, sessions, func(ctx context.Context, rawSession string) (map[string]any, int) {
 			name := strings.TrimSpace(rawSession)
 			if name == "" {
-				continue
-			}
-			roots, agents, rootErr := s.sessionFilesPaneInputs(name)
-			if rootErr != nil {
-				messageKey := rootErr.MessageKey
-				if rootErr.Code != "unknown_session" {
-					messageKey = "diff.error.sessionUnavailable"
-				}
-				payloads[name] = map[string]any{
-					"session": name,
-					"errors":  []any{},
-					"error":   rootErr.Message,
-					"user_message": map[string]any{
-						"key": messageKey, "params": map[string]any{"session": name}, "fallback": rootErr.Message,
-					},
-				}
-				statuses[name] = rootErr.Status
-				continue
+				return nil, 0
 			}
 			itemRequest := request
 			itemRequest.session = name
 			descriptor := sessionFilesRequestDescriptor(itemRequest)
 			viewID := sessionFilesCacheViewID(descriptor)
-			if record, ok := s.readSessionFilesCache(itemRequest, viewID); ok {
-				stale := sessionFilesCacheAge(record, time.Now()) > sessionFilesCacheTTL.Seconds()
-				refreshing := false
-				itemTask := func(refreshCtx context.Context) (map[string]any, *finder.Error) {
-					return s.finder.SessionFilesWithAgents(refreshCtx, name, roots, agents, itemRequest.hours, itemRequest.fromRef, itemRequest.toRef, itemRequest.repoRefs)
+			if !itemRequest.freshGit && !itemRequest.force {
+				admission := s.admitLiveSessionFilesCache(itemRequest, viewID)
+				itemRequest = admission.request
+				if admission.hit {
+					return sessionFilesPayloadWithCache(admission.record, descriptor, viewID, true, admission.stale, admission.refreshing, time.Now()), http.StatusOK
 				}
-				if stale {
-					refreshing = s.scheduleSessionFilesRefresh(itemRequest, viewID, itemTask)
-				}
-				payloads[name] = sessionFilesPayloadWithCache(record, descriptor, viewID, true, stale, refreshing, time.Now())
-				statuses[name] = http.StatusOK
-				continue
 			}
-			payload, finderErr := s.finder.SessionFilesWithAgents(ctx, name, roots, agents, itemRequest.hours, itemRequest.fromRef, itemRequest.toRef, itemRequest.repoRefs)
+			if itemRequest.sessionIdentity == "" {
+				identity, alive := s.sessionFilesSessionIdentity(name)
+				if !alive {
+					rootErr := s.sessionFilesIdentityUnavailableError(name)
+					return sessionFilesBatchErrorPayload(name, rootErr), rootErr.Status
+				}
+				itemRequest.sessionIdentity = identity
+			}
+			itemPlan := newSessionFilesPlan(itemRequest)
+			roots, agents, rootErr := s.sessionFilesPlanInputs(itemPlan)
+			if rootErr != nil {
+				return sessionFilesBatchErrorPayload(name, rootErr), rootErr.Status
+			}
+			if !s.sessionFilesIdentityMatches(name, itemRequest.sessionIdentity) {
+				rootErr = sessionFilesIncarnationChangedError(name)
+				return sessionFilesBatchErrorPayload(name, rootErr), rootErr.Status
+			}
+			payload, finderErr := s.sessionFilesPlanProduceAndCacheWithInputs(ctx, itemPlan, roots, agents, nil)
 			if finderErr != nil {
-				return nil, finderErr
+				return sessionFilesBatchErrorPayload(name, finderErr), finderErr.Status
 			}
-			s.writeSessionFilesCache(itemRequest, viewID, payload, http.StatusOK)
-			if record, ok := s.readSessionFilesCache(itemRequest, viewID); ok {
+			if record, ok := s.readSessionFilesCache(itemRequest, viewID); ok && sessionFilesCacheRecordMatchesRequestIdentity(itemRequest, record) {
 				payload = sessionFilesPayloadWithCache(record, descriptor, viewID, false, false, false, time.Now())
 			}
-			payloads[name] = payload
-			statuses[name] = http.StatusOK
+			return payload, http.StatusOK
+		})
+		if batchErr != nil {
+			return nil, &finder.Error{Status: http.StatusRequestTimeout, Code: "cancelled", MessageKey: "request.error.cancelled", Retryable: true, Message: batchErr.Error()}
 		}
 		return map[string]any{"sessions": payloads, "statuses": statuses, "errors": []any{}, "loaded": true}, nil
 	})

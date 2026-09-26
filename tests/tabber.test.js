@@ -131,7 +131,7 @@ async function runTabberSuite() {
   });
 
   test('shared tree controller is the Finder, Tabber, Differ, and Git history interaction parent', () => {
-    const source = fs.readFileSync('static_src/js/yolomux/86_changes_editor.js', 'utf8');
+    const source = fs.readFileSync('static_src/js/yolomux/86_changes_20_differ.js', 'utf8');
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
     const api = loadYolomux('', ['1']);
     assert.deepStrictEqual(canonical(api.sharedTreeControllerNamesForTest()), ['differ', 'finder', 'git-diff-commits', 'git-diff-files', 'tabber'], 'Finder, Tabber, Differ, and both Git history trees register through the shared interaction controller');
@@ -154,7 +154,7 @@ async function runTabberSuite() {
     const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
     const actionsSource = fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8');
     const menuSource = fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8');
-    const panelSource = fs.readFileSync('static_src/js/yolomux/86_changes_editor.js', 'utf8');
+    const panelSource = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.ok(/const finderItemId = '__finder__';[\s\S]*const differItemId = '__differ__';[\s\S]*const tabberItemId = '__tabber__';[\s\S]*const fileExplorerItemIds = Object\.freeze\(\[finderItemId, differItemId, tabberItemId\]\)/.test(bootstrapSource), 'the triplet has three stable layout identities in one registry');
     assert.ok(/function fileExplorerViewForItem\(item\)[\s\S]*function isFileExplorerItem\(item\)/.test(bootstrapSource), 'identity-to-view and shared triplet predicate have one bootstrap owner');
     assert.ok(/function sidePaneSlots[\s\S]*function layoutWithSidePaneItems[\s\S]*function layoutWithDefaultLeftSidePane/.test(layoutSource), 'Side Pane detection, insertion, and default seeding share the layout owner');
@@ -780,7 +780,7 @@ async function runTabberSuite() {
     assert.equal(api.terminalThemeSettingForGlobalMode('light'), 'light', 'light maps to light');
     assert.equal(source.includes('patch.appearance.terminal_theme = terminalThemeSettingForGlobalMode(next)'), false, '#261: the View theme toggle no longer pins the terminal palette (terminal follows the app)');
     // #10: a global-theme change re-themes live editors via the compartment swap.
-    assert.ok(/previousEditorSchemeId !== activeEditorScheme\(\)\.id \|\| previousCursorColor !== fileEditorCursorColor\)\s*\{[^}]*refreshOpenEditorThemePanels\(\)/.test(source), '#10: theme or cursor-color change re-themes open editors');
+    assert.ok(/const editorThemeChanged = previousEditorSchemeId !== activeEditorScheme\(\)\.id;\s*const editorCursorColorChanged = previousCursorColor !== fileEditorCursorColor;\s*if \(editorThemeChanged \|\| editorCursorColorChanged\) \{[\s\S]*?refreshOpenEditorThemePanels\(\)/.test(source), '#10: theme or cursor-color change re-themes open editors');
     // #12: Preferences field renamed. (Phase 0: the label is now i18n-keyed; en.json holds the text.)
     assert.ok(source.includes("preferenceSettingItem('appearance.theme'") && source.includes('label: t(localeKeys.label, labelParams)'), '#12: the global theme field is i18n-keyed through the shared setting builder');
     assert.ok(source.includes("'appearance.date_time_hour_cycle': '24'") && source.includes("initialSetting('appearance.date_time_hour_cycle')"), 'date/time clock defaults through the shared setting fallback table');
@@ -2012,7 +2012,7 @@ async function runTabberSuite() {
     assert.equal(/@container[\s\S]*tabber-row \.file-tree-date[\s\S]*display:\s*none/.test(css), false, 'Tabber never hides the <time> ago recency column for narrow panes');
     assert.ok(/function tabberActivityVisibleConsumer\(\)[\s\S]*fileExplorerMode === 'tabber'[\s\S]*document\.visibilityState !== 'hidden'/.test(source), 'Tabber activity polling only marks visible Tabber panes as subscribers');
     assert.ok(/async function fetchTabberActivity\(options = \{\}\)[\s\S]*params\.set\('visible', visible \? '1' : '0'\)/.test(source), 'Tabber activity requests include the visible-consumer flag');
-    assert.ok(/function refreshAgentWindowActivityDisplays\(\)[\s\S]*typeof itemInLayout === 'function'[\s\S]*itemInLayout\(tabberItemId\)[\s\S]*refreshTabberPanels\(\)/.test(source), 'activity changes repaint a mounted Tabber pane even when Dockview does not set the legacy Tabber mode flag');
+    assert.ok(/function refreshAgentWindowActivityDisplays\([^)]*\)[\s\S]*typeof itemInLayout === 'function'[\s\S]*itemInLayout\(tabberItemId\)[\s\S]*refreshTabberPanels\(\)/.test(source), 'activity changes repaint a mounted Tabber pane even when Dockview does not set the legacy Tabber mode flag');
     assert.ok(/function warmTabberDataOnLaunch\(\)[\s\S]*!tabberActivityVisibleConsumer\(\)[\s\S]*tabberLaunchWarmupStarted = true;[\s\S]*fetchTabberActivity\(\);[\s\S]*return true;/.test(source), 'Tabber launch warmup primes cached activity only for visible Tabber panes');
     assert.ok(/function tabberSessionPopoverRefreshIsUnsafe\(\)[\s\S]*\.tabber-session-tab\[data-popover-hover-state="open"\][\s\S]*popoverLifecycleActive\(tab, popover\)/.test(source), 'Tabber refresh detects active session-popover hover lifecycle before rebuilding rows');
     assert.ok(/function refreshTabberPanels\(\)[\s\S]*tabberSessionPopoverRefreshIsUnsafe\(\)[\s\S]*scheduleDeferredTabberRefresh\(\)[\s\S]*return/.test(source), 'Tabber activity refresh defers instead of replacing hovered session-tab DOM');

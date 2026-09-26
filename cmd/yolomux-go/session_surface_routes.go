@@ -140,6 +140,41 @@ func appendStringValue(values map[string]any, key, value string) {
 }
 
 func (s *server) sessionWorkGraph(session string, info map[string]any, generation uint64) map[string]any {
+	return s.sessionWorkGraphWithGitCache(session, info, generation, map[string]goGitSnapshotResult{})
+}
+
+type goGitSnapshotResult struct {
+	snapshot  goGitSnapshot
+	available bool
+}
+
+func (s *server) gitSnapshot(path string) (goGitSnapshot, bool) {
+	if s.gitMetadataSnapshotFn != nil {
+		return s.gitMetadataSnapshotFn(path)
+	}
+	return gitSnapshotForPath(path)
+}
+
+func gitWorktreePathHint(path string) string {
+	resolved, err := filepath.Abs(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	if realPath, err := filepath.EvalSymlinks(resolved); err == nil {
+		resolved = realPath
+	}
+	for candidate := filepath.Clean(resolved); ; candidate = filepath.Dir(candidate) {
+		if _, err := os.Stat(filepath.Join(candidate, ".git")); err == nil {
+			return candidate
+		}
+		parent := filepath.Dir(candidate)
+		if parent == candidate {
+			return filepath.Clean(resolved)
+		}
+	}
+}
+
+func (s *server) sessionWorkGraphWithGitCache(session string, info map[string]any, generation uint64, gitCache map[string]goGitSnapshotResult) map[string]any {
 	graph := emptyGoWorkGraph(generation)
 	sessionID := goGraphID("tmux-session", session)
 	tmuxSessions := graph["tmux_sessions"].(map[string]any)
@@ -155,7 +190,6 @@ func (s *server) sessionWorkGraph(session string, info map[string]any, generatio
 		"id": sessionID, "name": session, "tmux_window_ids": []string{}, "tmux_pane_ids": []string{}, "runtime_actor_ids": []string{}, "path_observation_ids": []string{},
 	}
 	panes, _ := info["panes"].([]map[string]any)
-	gitCache := map[string]goGitSnapshot{}
 	paneIDs := map[string]string{}
 	observationIDs := map[string]string{}
 	for _, pane := range panes {
@@ -187,16 +221,16 @@ func (s *server) sessionWorkGraph(session string, info map[string]any, generatio
 		appendStringValue(tmuxPanes[paneID].(map[string]any), "path_observation_ids", observationID)
 		appendStringValue(tmuxSessions[sessionID].(map[string]any), "path_observation_ids", observationID)
 
-		snapshot, cached := gitCache[path]
+		cacheKey := gitWorktreePathHint(path)
+		result, cached := gitCache[cacheKey]
 		if !cached {
-			snapshot, cached = gitSnapshotForPath(path)
-			if cached {
-				gitCache[path] = snapshot
-			}
+			result.snapshot, result.available = s.gitSnapshot(cacheKey)
+			gitCache[cacheKey] = result
 		}
-		if !cached {
+		if !result.available {
 			continue
 		}
+		snapshot := result.snapshot
 		worktreeID := goGraphID("git-worktree", snapshot.Root)
 		repositoryID := goGraphID("local-repository", snapshot.Root)
 		branchID := goGraphID("local-branch", snapshot.Root+"|"+snapshot.Branch)
@@ -760,25 +794,13 @@ func (s *server) contextStream(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"session": session, "error": "transcript read failed"})
 		return
 	}
-	flusher, ok := w.(http.Flusher)
+	stream, ok := newJSONSSEWriter(w)
 	if !ok {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": "streaming unavailable"})
 		return
 	}
-	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
 	writeSSE := func(event string, value any) bool {
-		data, marshalErr := json.Marshal(value)
-		if marshalErr != nil {
-			return false
-		}
-		if _, writeErr := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data); writeErr != nil {
-			return false
-		}
-		flusher.Flush()
-		return true
+		return stream.write(event, value) == nil
 	}
 	if !writeSSE("reset", map[string]any{"session": session, "path": path, "items": items, "pending": false, "stale": false, "agent": agent, "errors": []any{}}) {
 		return
@@ -1263,6 +1285,32 @@ func liveAgentWindowState(status stats.AgentStatus) string {
 	default:
 		return "idle"
 	}
+}
+
+func activityAgentStatusKey(session, pane, kind string) string {
+	return strings.Join([]string{session, pane, strings.ToLower(strings.TrimSpace(kind))}, "\x00")
+}
+
+func activityAgentStatusOverrides(snapshot stats.AgentStatusSnapshot) map[string]string {
+	if !snapshot.Available {
+		return nil
+	}
+	result := make(map[string]string, len(snapshot.Agents))
+	for _, raw := range snapshot.Agents {
+		row, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		session := stringValue(row["session"])
+		pane := stringValue(row["pane"])
+		kind := stringValue(row["kind"])
+		state := stats.AgentStatus(stringValue(row["state"]))
+		if session == "" || pane == "" || kind == "" || state == "" {
+			continue
+		}
+		result[activityAgentStatusKey(session, pane, kind)] = liveAgentWindowState(state)
+	}
+	return result
 }
 
 func goTmuxSignalFields(line string, want int) ([]string, bool) {

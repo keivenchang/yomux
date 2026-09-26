@@ -5,19 +5,28 @@ package finder
 
 import (
 	"bufio"
+	"container/heap"
 	"context"
 	"encoding/json"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/keivenchang/yolomux/internal/cache"
 )
 
 const (
-	maxSessionTranscriptLineBytes = 4 * 1024 * 1024
-	maxHistoricalCodexFiles       = 256
+	maxSessionTranscriptLineBytes             = 4 * 1024 * 1024
+	maxHistoricalCodexFiles                   = 256
+	maxHistoricalCodexCachedTranscriptBytes   = 2 * 1024 * 1024
+	maxHistoricalCodexAttributionCacheEntries = maxHistoricalCodexFiles
+	maxHistoricalCodexAttributionCacheBytes   = 8 * 1024 * 1024
 )
 
 var codexPatchHeader = regexp.MustCompile(`\*\*\* (Add|Update|Delete) File: ([^"\\\n]+)`)
@@ -130,6 +139,13 @@ func recordSessionTranscriptPath(changes map[string]*sessionFileAttribution, raw
 }
 
 func scanSessionTranscript(path string, agent SessionFileAgent, cutoff time.Time) (map[string]*sessionFileAttribution, bool) {
+	return scanSessionTranscriptContext(context.Background(), path, agent, cutoff)
+}
+
+func scanSessionTranscriptContext(ctx context.Context, path string, agent SessionFileAgent, cutoff time.Time) (map[string]*sessionFileAttribution, bool) {
+	if ctx.Err() != nil {
+		return nil, false
+	}
 	stat, err := os.Stat(path)
 	if err != nil || stat.ModTime().Before(cutoff) {
 		return map[string]*sessionFileAttribution{}, false
@@ -139,19 +155,35 @@ func scanSessionTranscript(path string, agent SessionFileAgent, cutoff time.Time
 		return map[string]*sessionFileAttribution{}, false
 	}
 	defer file.Close()
+	return scanSessionTranscriptReader(ctx, file, agent, stat.ModTime().Unix())
+}
+
+func scanSessionTranscriptReader(ctx context.Context, source io.Reader, agent SessionFileAgent, mtime int64) (map[string]*sessionFileAttribution, bool) {
 	changes := make(map[string]*sessionFileAttribution)
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64*1024), maxSessionTranscriptLineBytes)
-	for scanner.Scan() {
-		line := scanner.Bytes()
+	complete := scanTranscriptLines(ctx, source, func(line []byte) {
 		switch strings.ToLower(strings.TrimSpace(agent.Kind)) {
 		case "claude":
-			scanClaudeTranscriptLine(line, agent, stat.ModTime().Unix(), changes)
+			scanClaudeTranscriptLine(line, agent, mtime, changes)
 		case "codex":
-			scanCodexTranscriptLine(line, agent, stat.ModTime().Unix(), changes)
+			scanCodexTranscriptLine(line, agent, mtime, changes)
 		}
+	})
+	if !complete {
+		return nil, false
 	}
 	return changes, true
+}
+
+func scanTranscriptLines(ctx context.Context, source io.Reader, visit func([]byte)) bool {
+	scanner := bufio.NewScanner(contextReader{ctx: ctx, source: source})
+	scanner.Buffer(make([]byte, 64*1024), maxSessionTranscriptLineBytes)
+	for scanner.Scan() {
+		if ctx.Err() != nil {
+			return false
+		}
+		visit(scanner.Bytes())
+	}
+	return scanner.Err() == nil && ctx.Err() == nil
 }
 
 func scanClaudeTranscriptLine(line []byte, agent SessionFileAgent, mtime int64, changes map[string]*sessionFileAttribution) {
@@ -180,37 +212,77 @@ func scanClaudeTranscriptLine(line []byte, agent SessionFileAgent, mtime int64, 
 }
 
 func scanCodexTranscriptLine(line []byte, agent SessionFileAgent, mtime int64, changes map[string]*sessionFileAttribution) {
-	text := string(line)
-	for _, match := range codexPatchHeader.FindAllStringSubmatch(text, -1) {
+	applyCodexTranscriptOperations(changes, agent, mtime, parseCodexTranscriptOperations(line))
+}
+
+type codexTranscriptPatch struct {
+	path   string
+	marker string
+}
+
+type codexTranscriptOperations struct {
+	patches []codexTranscriptPatch
+	command string
+	cwd     string
+}
+
+type historicalCodexTranscript struct {
+	recordedCWD string
+	operations  []codexTranscriptOperations
+}
+
+func parseCodexTranscriptOperations(line []byte) codexTranscriptOperations {
+	operations := codexTranscriptOperations{}
+	for _, match := range codexPatchHeader.FindAllStringSubmatch(string(line), -1) {
 		marker := map[string]string{"Add": "A", "Update": "M", "Delete": "D"}[match[1]]
-		recordSessionTranscriptPath(changes, match[2], agent.CWD, agent, marker, mtime)
+		operations.patches = append(operations.patches, codexTranscriptPatch{path: strings.Clone(match[2]), marker: marker})
 	}
 	var record map[string]any
 	if json.Unmarshal(line, &record) != nil {
-		return
+		return operations
 	}
 	payload, _ := record["payload"].(map[string]any)
 	toolType := stringValue(payload["type"])
 	if toolType != "function_call" && toolType != "custom_tool_call" {
-		return
+		return operations
 	}
 	tool := stringValue(payload["name"])
 	if tool != "exec_command" && tool != "shell_command" && tool != "shell" {
-		return
+		return operations
 	}
 	arguments := codexArguments(payload["arguments"])
-	command := stringValue(arguments["cmd"])
-	if command == "" {
-		command = stringValue(arguments["command"])
+	operations.command = stringValue(arguments["cmd"])
+	if operations.command == "" {
+		operations.command = stringValue(arguments["command"])
 	}
-	cwd := stringValue(arguments["workdir"])
-	if cwd == "" {
-		cwd = stringValue(arguments["cwd"])
+	operations.cwd = stringValue(arguments["workdir"])
+	if operations.cwd == "" {
+		operations.cwd = stringValue(arguments["cwd"])
 	}
+	return operations
+}
+
+func parseCodexTranscriptRecordedCWD(line []byte) string {
+	var record map[string]any
+	if json.Unmarshal(line, &record) != nil || stringValue(record["type"]) != "session_meta" {
+		return ""
+	}
+	payload, _ := record["payload"].(map[string]any)
+	return strings.TrimSpace(stringValue(payload["cwd"]))
+}
+
+func applyCodexTranscriptOperations(changes map[string]*sessionFileAttribution, agent SessionFileAgent, mtime int64, operations codexTranscriptOperations) {
+	for _, patch := range operations.patches {
+		recordSessionTranscriptPath(changes, patch.path, agent.CWD, agent, patch.marker, mtime)
+	}
+	if operations.command == "" {
+		return
+	}
+	cwd := operations.cwd
 	if cwd == "" {
 		cwd = agent.CWD
 	}
-	for path, markers := range scanShellChanges(command, cwd) {
+	for path, markers := range scanShellChanges(operations.command, cwd) {
 		for _, marker := range markers {
 			recordSessionTranscriptPath(changes, path, cwd, agent, marker, mtime)
 		}
@@ -492,24 +564,20 @@ func collectSessionFileAttributions(ctx context.Context, agents []SessionFileAge
 			continue
 		}
 		seenTranscripts[path] = true
-		for touchedPath, attribution := range mustScanSessionTranscript(path, agent, cutoff) {
+		for touchedPath, attribution := range mustScanSessionTranscript(ctx, path, agent, cutoff) {
 			mergeSessionFileAttribution(changes, touchedPath, attribution)
 		}
 	}
-	// A session can retain a clean repository after its Codex pane has exited. Match the bounded
-	// recent rollout window by cwd so historical edits remain visible without scanning arbitrary old
-	// transcripts forever.
-	for _, cwd := range sessionFileTranscriptCWDs(agents, roots) {
-		if ctx.Err() != nil {
-			break
-		}
-		for _, transcript := range recentHistoricalCodexTranscripts(cwd, cutoff) {
-			if seenTranscripts[transcript] {
-				continue
-			}
-			seenTranscripts[transcript] = true
-			agent := SessionFileAgent{Kind: "codex", CWD: cwd}
-			for touchedPath, attribution := range mustScanSessionTranscript(transcript, agent, cutoff) {
+	// A session can retain a clean repository after its Codex pane has exited. Enumerate the
+	// bounded archive once, parse each selected rollout once, and project its commands against the
+	// session CWDs that can supply their missing working directory.
+	if len(roots) > 0 && ctx.Err() == nil {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			historical := collectHistoricalCodexAttributions(ctx, filepath.Join(home, ".codex", "sessions"), sessionFileTranscriptCWDs(agents, roots), cutoff, seenTranscripts, func(path string) (io.ReadCloser, error) {
+				return os.Open(path)
+			})
+			for touchedPath, attribution := range historical {
 				mergeSessionFileAttribution(changes, touchedPath, attribution)
 			}
 		}
@@ -517,8 +585,8 @@ func collectSessionFileAttributions(ctx context.Context, agents []SessionFileAge
 	return changes
 }
 
-func mustScanSessionTranscript(path string, agent SessionFileAgent, cutoff time.Time) map[string]*sessionFileAttribution {
-	changes, _ := scanSessionTranscript(path, agent, cutoff)
+func mustScanSessionTranscript(ctx context.Context, path string, agent SessionFileAgent, cutoff time.Time) map[string]*sessionFileAttribution {
+	changes, _ := scanSessionTranscriptContext(ctx, path, agent, cutoff)
 	return changes
 }
 
@@ -547,7 +615,11 @@ func mergeSessionFileAttribution(target map[string]*sessionFileAttribution, path
 			}
 		}
 		if !found {
-			existing.windows = append(existing.windows, window)
+			copy := make(map[string]any, len(window))
+			for key, value := range window {
+				copy[key] = value
+			}
+			existing.windows = append(existing.windows, copy)
 		}
 	}
 	existing.status = sessionFileStatusMerge(existing.status, incoming.status)
@@ -556,44 +628,313 @@ func mergeSessionFileAttribution(target map[string]*sessionFileAttribution, path
 	}
 }
 
-func recentHistoricalCodexTranscripts(cwd string, cutoff time.Time) []string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil
+type historicalCodexTranscriptCandidate struct {
+	path  string
+	mtime time.Time
+	info  os.FileInfo
+}
+
+type historicalCodexAttributionRecord struct {
+	info       os.FileInfo
+	transcript historicalCodexTranscript
+	weight     int64
+}
+
+type historicalCodexAttributionCache struct {
+	mu      sync.Mutex
+	records *cache.LRU[string, historicalCodexAttributionRecord]
+	bytes   int64
+}
+
+func newHistoricalCodexAttributionCache() *historicalCodexAttributionCache {
+	return &historicalCodexAttributionCache{
+		records: cache.NewLRU[string, historicalCodexAttributionRecord](maxHistoricalCodexAttributionCacheEntries),
 	}
-	root := filepath.Join(home, ".codex", "sessions")
-	type candidate struct {
-		path  string
-		mtime time.Time
+}
+
+var historicalCodexAttributions = newHistoricalCodexAttributionCache()
+
+type historicalCodexCandidateHeap []historicalCodexTranscriptCandidate
+
+func (candidates historicalCodexCandidateHeap) Len() int { return len(candidates) }
+
+func (candidates historicalCodexCandidateHeap) Less(i, j int) bool {
+	left, right := candidates[i], candidates[j]
+	if left.mtime.Equal(right.mtime) {
+		return left.path > right.path
 	}
-	candidates := make([]candidate, 0)
-	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil || len(candidates) >= maxHistoricalCodexFiles || entry.IsDir() {
+	return left.mtime.Before(right.mtime)
+}
+
+func (candidates historicalCodexCandidateHeap) Swap(i, j int) {
+	candidates[i], candidates[j] = candidates[j], candidates[i]
+}
+
+func (candidates *historicalCodexCandidateHeap) Push(value any) {
+	*candidates = append(*candidates, value.(historicalCodexTranscriptCandidate))
+}
+
+func (candidates *historicalCodexCandidateHeap) Pop() any {
+	last := len(*candidates) - 1
+	value := (*candidates)[last]
+	*candidates = (*candidates)[:last]
+	return value
+}
+
+func historicalCodexTranscriptCandidates(ctx context.Context, root string, cutoff time.Time) ([]historicalCodexTranscriptCandidate, bool) {
+	return historicalCodexTranscriptCandidatesWithWalker(ctx, root, cutoff, filepath.WalkDir)
+}
+
+func historicalCodexTranscriptCandidatesWithWalker(ctx context.Context, root string, cutoff time.Time, walk func(string, fs.WalkDirFunc) error) ([]historicalCodexTranscriptCandidate, bool) {
+	candidates := make(historicalCodexCandidateHeap, 0, maxHistoricalCodexFiles)
+	complete := true
+	err := walk(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if ctx.Err() != nil {
+			complete = false
+			return ctx.Err()
+		}
+		if walkErr != nil {
+			complete = false
+			return nil
+		}
+		if entry.IsDir() {
 			return nil
 		}
 		if !strings.HasPrefix(entry.Name(), "rollout-") || !strings.HasSuffix(entry.Name(), ".jsonl") {
 			return nil
 		}
 		info, infoErr := entry.Info()
-		if infoErr == nil && !info.ModTime().Before(cutoff) {
-			candidates = append(candidates, candidate{path: path, mtime: info.ModTime()})
+		if infoErr != nil {
+			complete = false
+			return nil
+		}
+		if !info.ModTime().Before(cutoff) {
+			candidate := historicalCodexTranscriptCandidate{path: path, mtime: info.ModTime(), info: info}
+			if len(candidates) < maxHistoricalCodexFiles {
+				heap.Push(&candidates, candidate)
+			} else if historicalCodexCandidateIsNewer(candidate, candidates[0]) {
+				candidates[0] = candidate
+				heap.Fix(&candidates, 0)
+			}
 		}
 		return nil
 	})
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].mtime.After(candidates[j].mtime) })
-	result := make([]string, 0, len(candidates))
+	if err != nil {
+		complete = false
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return historicalCodexCandidateIsNewer(candidates[i], candidates[j])
+	})
+	return []historicalCodexTranscriptCandidate(candidates), complete && ctx.Err() == nil
+}
+
+func historicalCodexCandidateIsNewer(left, right historicalCodexTranscriptCandidate) bool {
+	if left.mtime.Equal(right.mtime) {
+		return left.path < right.path
+	}
+	return left.mtime.After(right.mtime)
+}
+
+func collectHistoricalCodexAttributions(ctx context.Context, archiveRoot string, cwds []string, cutoff time.Time, seen map[string]bool, openFile func(string) (io.ReadCloser, error)) map[string]*sessionFileAttribution {
+	return collectHistoricalCodexAttributionsWithCache(ctx, historicalCodexAttributions, archiveRoot, cwds, cutoff, seen, openFile)
+}
+
+func collectHistoricalCodexAttributionsWithCache(ctx context.Context, transcripts *historicalCodexAttributionCache, archiveRoot string, cwds []string, cutoff time.Time, seen map[string]bool, openFile func(string) (io.ReadCloser, error)) map[string]*sessionFileAttribution {
+	return collectHistoricalCodexAttributionsWithWalker(ctx, transcripts, archiveRoot, cwds, cutoff, seen, openFile, filepath.WalkDir)
+}
+
+func collectHistoricalCodexAttributionsWithWalker(ctx context.Context, transcripts *historicalCodexAttributionCache, archiveRoot string, cwds []string, cutoff time.Time, seen map[string]bool, openFile func(string) (io.ReadCloser, error), walk func(string, fs.WalkDirFunc) error) map[string]*sessionFileAttribution {
+	result := make(map[string]*sessionFileAttribution)
+	if len(cwds) == 0 || ctx.Err() != nil {
+		return result
+	}
+	candidates, _ := historicalCodexTranscriptCandidatesWithWalker(ctx, archiveRoot, cutoff, walk)
 	for _, candidate := range candidates {
-		agent := SessionFileAgent{Kind: "codex", CWD: cwd}
-		changes, available := scanSessionTranscript(candidate.path, agent, cutoff)
-		if !available {
+		if ctx.Err() != nil {
+			break
+		}
+		if seen[candidate.path] {
 			continue
 		}
-		for path := range changes {
-			absolute, _ := filepath.Abs(path)
-			relative, relErr := filepath.Rel(cwd, absolute)
-			if relErr == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
-				result = append(result, candidate.path)
-				break
+		transcript, complete := transcripts.scan(ctx, candidate, openFile)
+		if !complete {
+			continue
+		}
+		seen[candidate.path] = true
+		if recordedCWD := resolveSessionTranscriptPath(transcript.recordedCWD, ""); recordedCWD != "" {
+			changes := projectHistoricalCodexOperations(ctx, transcript.operations, recordedCWD, candidate.mtime.Unix())
+			for path, attribution := range historicalCodexChangesForRoots(changes, cwds) {
+				mergeSessionFileAttribution(result, path, attribution)
+			}
+			continue
+		}
+		for _, cwd := range cwds {
+			if ctx.Err() != nil {
+				return result
+			}
+			changes := projectHistoricalCodexOperations(ctx, transcript.operations, cwd, candidate.mtime.Unix())
+			if ctx.Err() != nil {
+				return result
+			}
+			if !historicalCodexChangesTouchRoot(changes, cwd) {
+				continue
+			}
+			for path, attribution := range changes {
+				mergeSessionFileAttribution(result, path, attribution)
+			}
+			break
+		}
+	}
+	return result
+}
+
+func (c *historicalCodexAttributionCache) scan(ctx context.Context, candidate historicalCodexTranscriptCandidate, openFile func(string) (io.ReadCloser, error)) (historicalCodexTranscript, bool) {
+	key := candidate.path
+	c.mu.Lock()
+	record, ok := c.records.Get(key)
+	if ok && sameTranscriptFile(record.info, candidate.info) {
+		c.mu.Unlock()
+		return record.transcript, true
+	}
+	if ok {
+		c.deleteLocked(key)
+	}
+	c.mu.Unlock()
+
+	if ctx.Err() != nil {
+		return historicalCodexTranscript{}, false
+	}
+	file, err := openFile(candidate.path)
+	if err != nil {
+		return historicalCodexTranscript{}, false
+	}
+	openedInfo := candidate.info
+	if statter, ok := file.(interface{ Stat() (os.FileInfo, error) }); ok {
+		openedInfo, err = statter.Stat()
+		if err != nil || !sameTranscriptFile(candidate.info, openedInfo) {
+			_ = file.Close()
+			return historicalCodexTranscript{}, false
+		}
+	}
+	transcript, weight, complete := scanHistoricalCodexOperations(ctx, file)
+	if statter, ok := file.(interface{ Stat() (os.FileInfo, error) }); ok {
+		after, statErr := statter.Stat()
+		complete = complete && statErr == nil && sameTranscriptFile(openedInfo, after)
+	}
+	_ = file.Close()
+	if !complete {
+		return historicalCodexTranscript{}, false
+	}
+	currentInfo, err := os.Stat(candidate.path)
+	if err != nil || !sameTranscriptFile(openedInfo, currentInfo) {
+		return historicalCodexTranscript{}, false
+	}
+	if candidate.info.Size() <= maxHistoricalCodexCachedTranscriptBytes {
+		c.set(key, historicalCodexAttributionRecord{info: currentInfo, transcript: transcript, weight: weight})
+	}
+	return transcript, true
+}
+
+func sameTranscriptFile(left, right os.FileInfo) bool {
+	return left != nil && right != nil && os.SameFile(left, right) && left.Size() == right.Size() && left.ModTime().Equal(right.ModTime())
+}
+
+func (c *historicalCodexAttributionCache) deleteLocked(key string) {
+	if record, ok := c.records.Peek(key); ok {
+		c.bytes -= record.weight
+	}
+	c.records.Delete(key)
+}
+
+func (c *historicalCodexAttributionCache) set(key string, record historicalCodexAttributionRecord) {
+	if record.info == nil || record.weight < 0 || record.weight > maxHistoricalCodexAttributionCacheBytes {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.deleteLocked(key)
+	for c.records.Len() >= maxHistoricalCodexAttributionCacheEntries || c.bytes+record.weight > maxHistoricalCodexAttributionCacheBytes {
+		keys := c.records.KeysLeastRecentFirst()
+		if len(keys) == 0 {
+			return
+		}
+		c.deleteLocked(keys[0])
+	}
+	c.records.Set(key, record)
+	c.bytes += record.weight
+}
+
+func scanHistoricalCodexOperations(ctx context.Context, source io.Reader) (historicalCodexTranscript, int64, bool) {
+	transcript := historicalCodexTranscript{operations: make([]codexTranscriptOperations, 0)}
+	var weight int64
+	complete := scanTranscriptLines(ctx, source, func(line []byte) {
+		if cwd := parseCodexTranscriptRecordedCWD(line); cwd != "" {
+			transcript.recordedCWD = cwd
+			weight += int64(len(cwd))
+		}
+		operations := parseCodexTranscriptOperations(line)
+		if len(operations.patches) == 0 && operations.command == "" {
+			return
+		}
+		transcript.operations = append(transcript.operations, operations)
+		weight += 128 + int64(len(operations.command)+len(operations.cwd)) + int64(len(operations.patches))*48
+		for _, patch := range operations.patches {
+			weight += int64(len(patch.path))
+		}
+	})
+	if !complete {
+		return historicalCodexTranscript{}, 0, false
+	}
+	return transcript, weight, true
+}
+
+type contextReader struct {
+	ctx    context.Context
+	source io.Reader
+}
+
+func (reader contextReader) Read(buffer []byte) (int, error) {
+	if err := reader.ctx.Err(); err != nil {
+		return 0, err
+	}
+	if len(buffer) > 64*1024 {
+		buffer = buffer[:64*1024]
+	}
+	return reader.source.Read(buffer)
+}
+
+func projectHistoricalCodexOperations(ctx context.Context, operations []codexTranscriptOperations, cwd string, mtime int64) map[string]*sessionFileAttribution {
+	changes := make(map[string]*sessionFileAttribution)
+	agent := SessionFileAgent{Kind: "codex", CWD: cwd}
+	for _, item := range operations {
+		if ctx.Err() != nil {
+			break
+		}
+		applyCodexTranscriptOperations(changes, agent, mtime, item)
+	}
+	return changes
+}
+
+func historicalCodexChangesTouchRoot(changes map[string]*sessionFileAttribution, root string) bool {
+	for path := range changes {
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			continue
+		}
+		relative, err := filepath.Rel(root, absolute)
+		if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
+}
+
+func historicalCodexChangesForRoots(changes map[string]*sessionFileAttribution, roots []string) map[string]*sessionFileAttribution {
+	result := make(map[string]*sessionFileAttribution)
+	for _, root := range roots {
+		for path, attribution := range changes {
+			if historicalCodexChangesTouchRoot(map[string]*sessionFileAttribution{path: attribution}, root) {
+				result[path] = attribution
 			}
 		}
 	}

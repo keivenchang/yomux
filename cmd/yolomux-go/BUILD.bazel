@@ -16,6 +16,7 @@ go_library(
     srcs = glob(["*.go"], exclude = ["*_test.go"]),
     importpath = "github.com/keivenchang/yolomux/cmd/yolomux-go",
     deps = [
+        "//internal/cache:cache_lib",
         "//internal/capabilities:capabilities_lib",
         "//internal/finder:finder_lib",
         "//internal/stats:stats_lib",
@@ -32,7 +33,7 @@ go_test(
     name = "yolomux_go_test",
     srcs = glob(["*_test.go"]),
     data = ["//:go_test_support"],
-    deps = ["//internal/testsupport:testsupport_lib", SQLITE],
+    deps = ["//internal/cache:cache_lib", "//internal/testsupport:testsupport_lib", SQLITE],
     embed = [":yolomux_go_lib"],
 )
 
@@ -40,7 +41,7 @@ go_test(
     name = "yolomux_go_race_test",
     srcs = glob(["*_test.go"]),
     data = ["//:go_test_support"],
-    deps = ["//internal/testsupport:testsupport_lib", SQLITE],
+    deps = ["//internal/cache:cache_lib", "//internal/testsupport:testsupport_lib", SQLITE],
     embed = [":yolomux_go_lib"],
     race = "on",
 )

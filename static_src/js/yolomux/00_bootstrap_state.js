@@ -1,5 +1,10 @@
 const pageLoadBundleEvalStartedAt = Number(globalThis.performance?.now?.()) || 0;
 const bootstrap = JSON.parse(document.getElementById('yolomux-bootstrap').textContent);
+function canonicalJsonValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalJsonValue);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalJsonValue(value[key])]));
+}
 function statsOnlyBootEnabled() {
   return bootstrap.statsOnly === true;
 }
@@ -619,6 +624,7 @@ let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
 // historical comparison can never repaint live working-tree annotations.
 const fileExplorerSessionFilesState = {
   payload: {session: '', files: [], repos: [], errors: []},
+  streamRepos: null,
   signature: '',
   loading: false,
   guard: makeGenerationGuard(),
@@ -627,6 +633,7 @@ const fileExplorerSessionFilesState = {
 };
 const fileExplorerFinderSessionFilesState = {
   payload: {session: '', files: [], repos: [], errors: [], from_ref: 'HEAD', to_ref: 'current'},
+  streamRepos: null,
   signature: '',
   loading: false,
   diffBackfillPending: false,

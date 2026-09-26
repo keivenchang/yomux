@@ -2250,18 +2250,14 @@ func (s *server) statsStream(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, statsHTTPErrorEnvelope(r, http.StatusBadRequest, failure))
 		return
 	}
-	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-	streamWriter := &statsSSEWriter{writer: w, startedAt: time.Now()}
-	s.statsDemand.Add(1)
-	defer s.statsDemand.Add(-1)
-	flusher, ok := w.(http.Flusher)
+	frameWriter, ok := newJSONSSEWriter(w)
 	if !ok {
 		return
 	}
-	flusher.Flush()
+	streamWriter := &statsSSEWriter{stream: frameWriter, startedAt: time.Now()}
+	s.statsDemand.Add(1)
+	defer s.statsDemand.Add(-1)
+	frameWriter.flush()
 	heartbeat := s.statsHeartbeat
 	if heartbeat <= 0 {
 		// Python schedules one unchanged ready frame per min(resolution, 60)
@@ -2348,7 +2344,6 @@ func (s *server) statsStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	streamWriter.write("ready", map[string]any{"cache_generation": snapshot.CacheGeneration, "revision": 0})
-	flusher.Flush()
 	cacheGeneration := snapshot.CacheGeneration
 	// The initial ready frame establishes revision zero for this cache cursor.
 	// Cache generations and delivery revisions are independent: a generation can
@@ -2448,22 +2443,18 @@ type bufferResponseWriter struct {
 // statsSSEWriter assigns a process-relative monotonic millisecond id to every
 // frame, including acknowledgement, heartbeat, and terminal error frames.
 type statsSSEWriter struct {
-	writer    http.ResponseWriter
+	stream    *jsonSSEWriter
 	startedAt time.Time
 	lastID    int64
 }
 
 func (s *statsSSEWriter) write(event string, payload any) {
-	data, _ := json.Marshal(payload)
 	id := time.Since(s.startedAt).Milliseconds()
 	if id <= s.lastID {
 		id = s.lastID + 1
 	}
 	s.lastID = id
-	fmt.Fprintf(s.writer, "id: %d\nevent: %s\ndata: %s\n\n", id, event, data)
-	if flusher, ok := s.writer.(http.Flusher); ok {
-		flusher.Flush()
-	}
+	_ = s.stream.writeWithID(strconv.FormatInt(id, 10), event, payload)
 }
 
 func (w *bufferResponseWriter) Header() http.Header    { return w.header }
@@ -2473,14 +2464,6 @@ func (w *bufferResponseWriter) Write(data []byte) (int, error) {
 		w.status = http.StatusOK
 	}
 	return w.body.Write(data)
-}
-
-func writeSSE(w http.ResponseWriter, event string, payload any) {
-	data, _ := json.Marshal(payload)
-	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data)
-	if flusher, ok := w.(http.Flusher); ok {
-		flusher.Flush()
-	}
 }
 
 func (s *server) pricingCatalog(w http.ResponseWriter, r *http.Request) {

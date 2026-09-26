@@ -160,8 +160,15 @@ def main(binary: str) -> None:
         subprocess.run(("git", "-C", str(git_root), "branch", "-M", "e2e-feature"), check=True)
         git_note.write_text("changed\n", encoding="utf-8")
         subprocess.run(("git", "-C", str(git_root), "commit", "-qam", "changed"), check=True)
-        git_head = subprocess.check_output(("git", "-C", str(git_root), "rev-parse", "HEAD"), text=True).strip()
+        for index in range(64):
+            (git_root / "history.txt").write_text(f"history {index}\n", encoding="utf-8")
+            subprocess.run(("git", "-C", str(git_root), "add", "history.txt"), check=True)
+            subprocess.run(("git", "-C", str(git_root), "commit", "-qm", f"history {index}"), check=True)
+        git_note.write_text("changed 63\n", encoding="utf-8")
+        subprocess.run(("git", "-C", str(git_root), "add", "note.txt"), check=True)
+        subprocess.run(("git", "-C", str(git_root), "commit", "-qm", "restore note baseline"), check=True)
         git_note.write_text("working\n", encoding="utf-8")
+        git_head = subprocess.check_output(("git", "-C", str(git_root), "rev-parse", "HEAD"), text=True).strip()
         unreadable_file = root / "unreadable.txt"
         unreadable_file.write_text("permission denied\n", encoding="utf-8")
         unreadable_file.chmod(0)
@@ -646,15 +653,150 @@ exec /bin/sleep 300
                 recorded = set()
                 for command in expected_launch_commands:
                     recorded = wait_for_recorded_command(command)
+                reload_trace_source = f"""
+                    (() => {{
+                      const targetSession = {json.dumps(session)};
+                      const trace = {{requests: [], activity: null, firstRowAt: null, firstRowText: ''}};
+                      window.__tabberReloadTrace = trace;
+                      const markRow = () => {{
+                        if (trace.firstRowAt !== null) return;
+                        const row = Array.from(document.querySelectorAll('#panel-__tabber__ .file-tree-row[data-tabber-type="session"]'))
+                          .find(candidate => candidate.textContent.includes(targetSession));
+                        if (row) {{
+                          trace.firstRowAt = performance.now();
+                          trace.firstRowText = row.textContent;
+                        }}
+                      }};
+                      new MutationObserver(markRow).observe(document, {{subtree: true, childList: true}});
+                      const originalFetch = window.fetch.bind(window);
+                      window.fetch = async (...args) => {{
+                        const requestUrl = new URL(typeof args[0] === 'string' ? args[0] : args[0].url, location.href);
+                        const isTracked = requestUrl.pathname === '/api/activity' || requestUrl.pathname === '/api/session-metadata';
+                        if (!isTracked) return originalFetch(...args);
+                        const startedAt = performance.now();
+                        const request = {{path: requestUrl.pathname, startedAt, responseAt: null, status: null, body: null}};
+                        trace.requests.push(request);
+                        const response = await originalFetch(...args);
+                        request.responseAt = performance.now();
+                        request.status = response.status;
+                        if (request.path === '/api/activity') trace.activity = request;
+                        response.clone().json().then(body => {{ request.body = body; }});
+                        return response;
+                      }};
+                      markRow();
+                    }})();
+                """
+                driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": reload_trace_source})
+                tabber_reload_url = (
+                    f"https://127.0.0.1:{port}/?sessions=__tabber__,{session}"
+                    f"&layout=row@34(left,right)&tabs=left:__tabber__;right:{session}"
+                )
+                driver.get(tabber_reload_url)
+                driver.refresh()
+                try:
+                    WebDriverWait(driver, 12).until(lambda browser: browser.execute_script("""
+                        const trace = window.__tabberReloadTrace;
+                        const session = new URLSearchParams(location.search).get('sessions')?.split(',')[1];
+                        return Boolean(trace?.activity?.body && trace.firstRowAt !== null
+                          && trace.requests.some(request => request.body?.sessions?.[session]));
+                    """))
+                except TimeoutException as error:
+                    trace = driver.execute_script("""
+                        const session = new URLSearchParams(location.search).get('sessions')?.split(',')[1];
+                        const current = window.__tabberReloadTrace;
+                        return {
+                          url: location.href,
+                          readyState: document.readyState,
+                          firstRowAt: current?.firstRowAt ?? null,
+                          firstRowText: current?.firstRowText || '',
+                          requests: (current?.requests || []).map(request => ({
+                            path: request.path,
+                            status: request.status,
+                            responseAt: request.responseAt,
+                            hasSession: Boolean(request.body?.sessions?.[session]),
+                            cache: request.body?.cache,
+                            graphVersion: request.body?.sessions?.[session]?.work_graph?.version,
+                          })),
+                        };
+                    """)
+                    raise SystemExit(f"Tabber reload trace timed out: {json.dumps(trace, sort_keys=True)}") from error
+                tabber_reload_trace = driver.execute_script("return window.__tabberReloadTrace")
+                tabber_reload_activity = tabber_reload_trace["activity"]
+                tabber_reload_duration_ms = tabber_reload_activity["responseAt"] - tabber_reload_activity["startedAt"]
+                tabber_reload_sources = [
+                    request for request in tabber_reload_trace["requests"]
+                    if request["responseAt"] <= tabber_reload_trace["firstRowAt"]
+                    and request.get("body", {}).get("sessions", {}).get(session)
+                ]
+                tabber_reload_source = min(tabber_reload_sources, key=lambda request: request["responseAt"], default=None)
+                if tabber_reload_source is None:
+                    raise SystemExit(f"Tabber row appeared without a preceding matching metadata response: {tabber_reload_trace}")
+                tabber_reload_source_duration_ms = tabber_reload_source["responseAt"] - tabber_reload_source["startedAt"]
+                tabber_reload_first_paint_ms = tabber_reload_trace["firstRowAt"] - tabber_reload_source["startedAt"]
+                tabber_reload_body = tabber_reload_source["body"]
+                tabber_reload_session = tabber_reload_body.get("sessions", {}).get(session, {})
+                tabber_reload_fresh_sources = [
+                    request for request in tabber_reload_trace["requests"]
+                    if request.get("body", {}).get("cache", {}).get("stale") is False
+                    and request.get("body", {}).get("sessions", {}).get(session)
+                ]
+                tabber_reload_fresh_source = min(tabber_reload_fresh_sources, key=lambda request: request["responseAt"], default=None)
+                if (
+                    tabber_reload_activity["status"] != 200
+                    or tabber_reload_activity["responseAt"] - tabber_reload_activity["startedAt"] >= 500
+                    or tabber_reload_body.get("cache", {}).get("hit") is not True
+                    or tabber_reload_first_paint_ms < tabber_reload_source_duration_ms
+                    or tabber_reload_source_duration_ms >= 500
+                    or tabber_reload_duration_ms >= 500
+                    or tabber_reload_first_paint_ms >= 500
+                    or tabber_reload_session.get("work_graph", {}).get("version") != 1
+                    or tabber_reload_fresh_source is None
+                    or tabber_reload_fresh_source["responseAt"] >= 500
+                    or tabber_reload_fresh_source["body"].get("cache", {}).get("refreshing") is not False
+                ):
+                    raise SystemExit(
+                        "Chromium reload did not render cached Tabber data and converge within 500ms: "
+                        + json.dumps({
+                            "row_source": tabber_reload_source["path"],
+                            "row_source_ms": tabber_reload_source_duration_ms,
+                            "activity_ms": tabber_reload_duration_ms,
+                            "first_row_ms": tabber_reload_first_paint_ms,
+                            "cache": tabber_reload_body.get("cache"),
+                            "graph_version": tabber_reload_session.get("work_graph", {}).get("version"),
+                            "fresh_metadata_response_ms": tabber_reload_fresh_source["responseAt"] if tabber_reload_fresh_source else None,
+                            "fresh_cache": tabber_reload_fresh_source["body"].get("cache") if tabber_reload_fresh_source else None,
+                        }, sort_keys=True)
+                    )
+                print(f"Go browser Tabber reload: {json.dumps({'cached_source_ms': tabber_reload_source_duration_ms, 'first_row_ms': tabber_reload_first_paint_ms, 'fresh_metadata_response_ms': tabber_reload_fresh_source['responseAt']}, sort_keys=True)}")
                 surfaces = driver.execute_async_script("""
                     const done = arguments[arguments.length - 1];
                     const session = arguments[0];
                     const expectedPath = arguments[1];
+                    const tabberReloadDurationMs = Number(arguments[2]);
+                    const tabberReloadFirstPaintMs = Number(arguments[3]);
+                    const activityTrace = window.__tabberReloadTrace?.activity || null;
+                    const tabberActivityResponse = activityTrace ? {
+                      status: activityTrace.status,
+                      body: activityTrace.body,
+                    } : null;
+                    const tabberFirstPaintMs = tabberReloadFirstPaintMs;
                     const waitFor = (predicate, description, timeoutMs = 12000) => new Promise((resolve, reject) => {
                       const deadline = performance.now() + timeoutMs;
                       const poll = () => {
                         try {
                           const value = predicate();
+                          if (value) { resolve(value); return; }
+                        } catch (error) { reject(error); return; }
+                        if (performance.now() >= deadline) { reject(new Error(`${description} timed out`)); return; }
+                        setTimeout(poll, 40);
+                      };
+                      poll();
+                    });
+                    const waitForAsync = (predicate, description, timeoutMs = 12000) => new Promise((resolve, reject) => {
+                      const deadline = performance.now() + timeoutMs;
+                      const poll = async () => {
+                        try {
+                          const value = await predicate();
                           if (value) { resolve(value); return; }
                         } catch (error) { reject(error); return; }
                         if (performance.now() >= deadline) { reject(new Error(`${description} timed out`)); return; }
@@ -669,7 +811,7 @@ exec /bin/sleep 300
                     };
                     (async () => {
                       try {
-                        const metadata = await json('/api/session-metadata?force=1');
+                        let metadata = await json('/api/session-metadata?force=1');
                         if (metadata.status !== 200) throw new Error(`session metadata status ${metadata.status}`);
                         // This direct probe owns the same response that the production refresh path
                         // applies. Apply it before inspecting rendered surfaces; otherwise the test
@@ -677,6 +819,27 @@ exec /bin/sleep 300
                         // bootstrap snapshot.
                         if (typeof applyTranscriptsPayload !== 'function') throw new Error('session metadata apply helper is unavailable');
                         await applyTranscriptsPayload(metadata.body, {refreshAuto: false, refreshContext: false, refreshActivity: false, source: 'e2e-probe'});
+                        const hasRepository = payload => Object.values(payload?.sessions?.[session]?.work_graph?.git_worktrees || {}).length > 0;
+                        const pending = metadata.body.cache?.pending_identity || {};
+                        const pendingGeneration = Number(pending.generation || 0);
+                        if (pendingGeneration) {
+                          metadata = await waitForAsync(async () => {
+                            const current = await json('/api/session-metadata');
+                            const identity = current.body.metadata_identity || {};
+                            return current.status === 200 && identity.epoch === pending.epoch && Number(identity.generation || 0) >= pendingGeneration && hasRepository(current.body) ? current : null;
+                          }, 'published session work graph');
+                          await applyTranscriptsPayload(metadata.body, {refreshAuto: false, refreshContext: false, refreshActivity: false, source: 'e2e-probe'});
+                        }
+                        const activitySession = tabberActivityResponse.body.sessions?.[session] || {};
+                        if (tabberActivityResponse.status !== 200
+                            || tabberActivityResponse.body.cache?.hit !== true
+                            || tabberActivityResponse.body.cache?.stale !== false
+                            || activitySession.work_graph?.version !== 1
+                            || tabberReloadDurationMs >= 500
+                            || tabberFirstPaintMs === null
+                            || tabberFirstPaintMs >= 500) {
+                          throw new Error(`warm Tabber activity did not return and render within 500ms: ${JSON.stringify({status: tabberActivityResponse.status, durationMs: tabberReloadDurationMs, firstPaintMs: tabberFirstPaintMs, cache: tabberActivityResponse.body.cache, graphVersion: activitySession.work_graph?.version})}`);
+                        }
                         const info = metadata.body.sessions?.[session] || {};
                         const graph = info.work_graph || {};
                         const repos = Object.values(graph.git_worktrees || {});
@@ -722,15 +885,16 @@ exec /bin/sleep 300
                         await waitFor(() => document.querySelector(`#events-${CSS.escape(session)} .event-item`)?.textContent?.includes('Docker event surface ready'), 'Event Log');
                         activateTab(session, 'transcript', {userInitiated: true});
                         await waitFor(() => document.querySelector(`#transcript-${CSS.escape(session)} .transcript-item`)?.textContent?.includes('Docker transcript first'), 'Transcript');
-                        done({graphVersion: graph.version, repositoryCount: repos.length, infoBar: document.getElementById(`meta-${session}`)?.textContent || '', moreDescription, statusCycle, eventLoaded: true, transcriptLoaded: true, expectedPath});
+                        done({graphVersion: graph.version, repositoryCount: repos.length, tabberActivityMs: tabberReloadDurationMs, tabberFirstPaintMs, tabberCacheHit: tabberActivityResponse.body.cache.hit, tabberSessionRow: true, infoBar: document.getElementById(`meta-${session}`)?.textContent || '', moreDescription, statusCycle, eventLoaded: true, transcriptLoaded: true, expectedPath});
                       } catch (error) {
                         done({error: String(error?.stack || error), body: document.body.innerText.slice(0, 1200), console: 'see browser log'});
                       }
                     })();
-                """, session, str(git_root))
+                """, session, str(git_root), tabber_reload_duration_ms, tabber_reload_first_paint_ms)
                 if surfaces.get("error") or surfaces.get("eventLoaded") is not True or surfaces.get("transcriptLoaded") is not True:
                     surfaces["browser_log"] = driver.get_log("browser")
                     raise SystemExit(f"Go Chromium session surface E2E failed: {surfaces}")
+                print(f"Go browser warm Tabber activity: {json.dumps({key: surfaces[key] for key in ('tabberActivityMs', 'tabberFirstPaintMs', 'tabberCacheHit', 'tabberSessionRow')}, sort_keys=True)}")
                 phase3 = driver.execute_async_script("""
                     const done = arguments[arguments.length - 1];
                     const events = new EventSource('/api/client-events?channels=core,events&client_id=phase3-e2e');
@@ -1413,13 +1577,15 @@ exec /bin/sleep 300
                       if (!gitRow) throw new Error('Finder Git repository row is missing');
                       const gitDiffButton = await waitFor(() => Array.from(document.querySelectorAll('.file-context-menu button')).find(button => button.textContent.trim() === 'ΔShow Diff'), 'context-menu Diff action');
                       if (!gitDiffButton || gitDiffButton.disabled) throw new Error('Finder Git repository Diff action is missing or disabled');
+                      const historyListStartedAt = performance.now();
                       gitDiffButton.click();
                       const gitDiffItem = gitDiffItemFor(gitRoot);
                       let gitDiffPanel;
                       try {
                         gitDiffPanel = await waitFor(() => {
                           const panel = panelNodes.get(gitDiffItem);
-                          return panel && panel.querySelectorAll('.git-diff-commit-row').length >= 2 ? panel : null;
+                           const rows = panel?.querySelectorAll('.git-diff-commit-row[data-git-diff-commit]') || [];
+                           return panel && rows.length >= 2 ? panel : null;
                         }, 'Git history rows');
                       } catch (error) {
                         const historyState = gitDiffTabState.get(gitDiffItem);
@@ -1436,16 +1602,62 @@ exec /bin/sleep 300
                           gitHistoryRequests: performance.getEntriesByType('resource').map(entry => entry.name).filter(name => name.includes('/api/fs/git-history')),
                         })}`, {cause: error});
                       }
+                      const historyListReadyMs = performance.now() - historyListStartedAt;
                       const gitRows = Array.from(gitDiffPanel.querySelectorAll('.git-diff-commit-row'));
                       const shaRows = gitRows.filter(row => row.dataset.gitDiffCommit);
+                      const topCommit = shaRows[0];
+                      let topStats = '';
+                      try {
+                        topStats = await waitFor(() => {
+                          const changes = topCommit?.querySelector('.git-diff-commit-changes');
+                          const label = String(changes?.getAttribute('aria-label') || '');
+                          return label && !changes.hasAttribute('aria-hidden') ? label : null;
+                        }, 'top Git commit stats');
+                      } catch (error) {
+                        const historyState = gitDiffTabState.get(gitDiffItem);
+                        throw new Error(`${error.message}: ${JSON.stringify({
+                          state: historyState ? {
+                            loaded: historyState.loaded,
+                            loading: historyState.loading,
+                            statsLoading: historyState.statsLoading,
+                            statsStage: historyState.statsStage,
+                            commits: historyState.commits?.slice(0, 3).map(commit => ({sha: commit.sha, files: commit.files, added: commit.added, removed: commit.removed, binary_files: commit.binary_files})),
+                          } : null,
+                          topRow: topCommit?.outerHTML || '',
+                          statsRequests: performance.getEntriesByType('resource').map(entry => entry.name).filter(name => name.includes('/api/fs/git-history-stats-stream')),
+                        })}`, {cause: error});
+                      }
+                      const statsRequests = performance.getEntriesByType('resource')
+                        .map(entry => entry.name)
+                        .filter(name => name.includes('/api/fs/git-history-stats-stream'));
+                      const historyRequests = performance.getEntriesByType('resource')
+                        .map(entry => entry.name)
+                        .filter(name => name.includes('/api/fs/git-history?'));
+                      const historyRequest = historyRequests.length ? new URL(historyRequests[0], location.href) : null;
+                      const historyRequestEntry = historyRequests.length
+                        ? performance.getEntriesByName(historyRequests[0]).at(-1)
+                        : null;
+                      const firstStatsRequest = statsRequests.length ? new URL(statsRequests[0], location.href) : null;
+                      topCommit.click();
+                      const topDetail = await waitFor(() => {
+                        const detail = gitDiffTabState.get(gitDiffItem)?.commitRecords?.get(gitHead)?.detail;
+                        return detail?.sha === gitHead && Array.isArray(detail.files) ? detail : null;
+                      }, 'loaded top Git commit detail');
+                      const renderedTopDetail = gitDiffPanel.querySelector('.git-diff-commit-detail .git-diff-file-tree');
                       const gitHistory = {
                         nativeSuppressed: Boolean(window.__yolomuxFinderContextMenuProbe?.defaultPrevented),
                         item: gitDiffItem,
                         active: itemIsActivePaneTab(gitDiffItem),
                         head: shaRows[0]?.dataset.gitDiffCommit || '',
                         commits: shaRows.length,
+                        historyListReadyMs,
+                        historyRequestMs: historyRequestEntry?.duration ?? null,
+                        topStats,
+                        firstStatsBatchSizes: firstStatsRequest?.searchParams.get('batch_sizes') || '',
+                        detailFiles: topDetail.files.map(file => file.path),
+                        detailRendered: Boolean(renderedTopDetail),
                       };
-                      if (!gitHistory.nativeSuppressed || !gitHistory.active || gitHistory.head !== gitHead) throw new Error('Finder Git repository Diff tab contract mismatch: ' + JSON.stringify(gitHistory));
+                      if (!gitHistory.nativeSuppressed || !gitHistory.active || gitHistory.head !== gitHead || gitHistory.commits < 2 || gitHistory.historyListReadyMs >= 500 || !historyRequest || !gitHistory.topStats || gitHistory.firstStatsBatchSizes !== '1' || !gitHistory.detailFiles.length || !gitHistory.detailRendered) throw new Error('Finder Git repository Diff tab contract mismatch: ' + JSON.stringify(gitHistory));
                       const removable = row(root + '/ui-remove-me.txt');
                       if (!removable) throw new Error('Finder delete fixture row is missing');
                       const originalConfirm = window.confirm;
@@ -1462,8 +1674,9 @@ exec /bin/sleep 300
                       done({initial: setup.initial, expanded: setup.expanded, reexpanded: setup.reexpanded, initialRepo: setup.initialRepo, repoEnriched: setup.repoEnriched, gitHistory, deletedViaFinder: true});
                     })().catch(error => done({error: String(error?.stack || error)}));
                 """, str(finder_root), str(git_root), git_head, finder_setup)
-                if finder_ui.get('error') or finder_ui.get('initial', {}).get('panel') is not True or finder_ui.get('expanded', {}).get('needle') is not True or finder_ui.get('reexpanded', {}).get('needle') is not True or finder_ui.get('repoEnriched') is not True or finder_ui.get('gitHistory', {}).get('nativeSuppressed') is not True or finder_ui.get('gitHistory', {}).get('active') is not True or finder_ui.get('gitHistory', {}).get('head') != git_head or finder_ui.get('gitHistory', {}).get('commits', 0) < 2 or finder_ui.get('deletedViaFinder') is not True:
+                if finder_ui.get('error') or finder_ui.get('initial', {}).get('panel') is not True or finder_ui.get('expanded', {}).get('needle') is not True or finder_ui.get('reexpanded', {}).get('needle') is not True or finder_ui.get('repoEnriched') is not True or finder_ui.get('gitHistory', {}).get('nativeSuppressed') is not True or finder_ui.get('gitHistory', {}).get('active') is not True or finder_ui.get('gitHistory', {}).get('head') != git_head or finder_ui.get('gitHistory', {}).get('commits', 0) < 2 or finder_ui.get('gitHistory', {}).get('historyListReadyMs', 500) >= 500 or not finder_ui.get('gitHistory', {}).get('topStats') or finder_ui.get('gitHistory', {}).get('firstStatsBatchSizes') != '1' or not finder_ui.get('gitHistory', {}).get('detailFiles') or finder_ui.get('gitHistory', {}).get('detailRendered') is not True or finder_ui.get('deletedViaFinder') is not True:
                     raise SystemExit(f"Go Phase 4/5 Finder UI Chromium E2E failed: {finder_ui}")
+                print(f"Go browser Git history readiness: {json.dumps(finder_ui['gitHistory'], sort_keys=True)}")
                 git_views = driver.execute_async_script("""
                     const done = arguments[arguments.length - 1];
                     const path = arguments[0];
@@ -1554,7 +1767,7 @@ exec /bin/sleep 300
                       const diffContainer = currentPanel?.querySelector('.file-editor-diff-codemirror');
                       const mergeView = diffContainer?.querySelector('.cm-editor');
                       const renderedText = diffContainer?.textContent || '';
-                      if (currentState?.diffFromRef !== 'HEAD' || currentState?.diffToRef !== 'current' || currentState?.diffOriginal !== 'changed\\n' || currentState?.diffWorking !== 'working\\n' || !String(currentState?.diff).includes('-changed') || !String(currentState?.diff).includes('+working') || !renderedText.includes('working') || !mergeView) {
+                       if (currentState?.diffFromRef !== 'HEAD' || currentState?.diffToRef !== 'current' || !String(currentState?.diffOriginal).includes('changed') || currentState?.diffWorking !== 'working\\n' || !String(currentState?.diff).includes('-changed') || !String(currentState?.diff).includes('+working') || !renderedText.includes('working') || !mergeView) {
                         throw new Error('TextEdit Git rendered Differ contract mismatch: ' + JSON.stringify({
                           beforeMode,
                           mode: editorViewModeFor(path, item),

@@ -433,6 +433,46 @@ func TestSessionWorkGraphContainsTmuxPathAndActorEdges(t *testing.T) {
 	}
 }
 
+func TestMetadataRefreshReadsGitSnapshotOncePerWorktree(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "nested")
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	makeInfo := func(target string, cwd string) map[string]any {
+		return map[string]any{
+			"panes": []map[string]any{{
+				"target": target, "window": "0", "pane": "0", "window_name": "repo", "pid": 1,
+				"command": "bash", "current_path": cwd, "active": true, "window_active": true,
+			}},
+			"agents": []map[string]any{},
+		}
+	}
+	gitCalls := 0
+	s := &server{
+		gitMetadataSnapshotFn: func(path string) (goGitSnapshot, bool) {
+			gitCalls++
+			if path != root {
+				t.Fatalf("Git snapshot path = %q, want shared worktree root %q", path, root)
+			}
+			return goGitSnapshot{Root: root, Branch: "main", HeadSHA: "abc", Head: "subject"}, true
+		},
+		metadataEnrichmentFn: func([]string) (map[string]map[string]any, error) {
+			return map[string]map[string]any{
+				"first":  makeInfo("%1", root),
+				"second": makeInfo("%2", nested),
+			}, nil
+		},
+	}
+	s.buildMetadataPayload(1, []string{"first", "second"}, map[string]string{"first": "first", "second": "second"}, nil, 1)
+	if gitCalls != 1 {
+		t.Fatalf("Git snapshot calls = %d, want one per worktree in the refresh", gitCalls)
+	}
+}
+
 func TestSessionWorkGraphCarriesPanePIDToShellActor(t *testing.T) {
 	info := map[string]any{"panes": []map[string]any{{"target": "%1", "window": "2", "pane": "0", "window_name": "shell|window", "pid": 4242, "command": "bash -lc 'printf a|b'", "current_path": "/tmp"}}}
 	graph := (&server{}).sessionWorkGraph("yo", info, 1)
