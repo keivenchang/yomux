@@ -202,7 +202,7 @@ def test_launchers_declare_the_default_server_intent_for_control_mode(monkeypatc
         text=True,
         check=True,
     ).stdout
-    assert "YOLOMUX_TMUX_SOCKET=" in launcher
+    assert '"$repo/tools/instance_isolation.py" exec --plan-json "$plan_json"' in launcher
     boot_source = (root / "boot.sh").read_text(encoding="utf-8")
     assert 'extra_env+=("$(yolomux_default_server_optin)")' in boot_source
     assert 'extra_env+=("YOLOMUX_TMUX_SOCKET=")' in boot_source

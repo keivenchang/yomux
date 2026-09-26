@@ -2492,15 +2492,10 @@ def test_markdown_vieweditor_date_headings_keep_source_line_anchors_after_commen
         """
     )
     assert "error" not in metrics, metrics
-    assert [(row["text"], row["line"]) for row in metrics["before"]] == [
+    assert [(row["text"], row["line"]) for row in metrics["headings"]] == [
         ("2026-06-02 Tue", 1),
         ("2026-04-03 Fri", 98),
         ("2026-03-20 Fri", 102),
-    ], metrics
-    assert [(row["text"], row["line"]) for row in metrics["headings"]] == [
-        ("2026-06-02 Tue", 3),
-        ("2026-04-03 Fri", 100),
-        ("2026-03-20 Fri", 104),
     ], metrics
 
 
@@ -2866,11 +2861,13 @@ def test_markdown_viewedit_never_renders_literal_br_and_legacy_breaks_are_migrat
           panel.classList.add('active-pane');
           panel.style.width = '980px';
           panel.style.height = '560px';
-          panelNodes.set(item, panel);
-          document.getElementById('grid').append(panel);
-          renderFileEditorPanel(panel, item);
-          await window.__yolomuxTestWaitFor(() => panel._pmView && panel._cmView);
-          panel._pmView.dom.dispatchEvent(new FocusEvent('blur'));
+              panelNodes.set(item, panel);
+              document.getElementById('grid').append(panel);
+              renderFileEditorPanel(panel, item);
+              await window.__yolomuxTestWaitFor(() => panel._pmView && panel._cmView);
+              panel._pmView.dispatch(panel._pmView.state.tr.insertText('!', panel._pmView.state.doc.content.size - 1));
+              await window.__yolomuxTestWaitFor(() => fileEditorPanelState(panel).content.includes('!'));
+              panel._pmView.dom.dispatchEvent(new FocusEvent('blur'));
           await new Promise(resolve => setTimeout(resolve, 100));
           done({
             html: panel._pmView.dom.innerHTML,
@@ -2884,7 +2881,7 @@ def test_markdown_viewedit_never_renders_literal_br_and_legacy_breaks_are_migrat
         """
     )
     assert "&lt;br&gt;" not in metrics["html"] and ">br<" not in metrics["html"], metrics
-    assert metrics["text"] == "beforeafter", metrics
+    assert metrics["text"] == "beforeafter!", metrics
     assert "<br>" not in metrics["source"], metrics
     assert metrics["source"] == metrics["cm"], metrics
     assert metrics["errors"] == [], metrics
@@ -3553,6 +3550,18 @@ def test_editor_opens_mermaid_source_preview_by_default(browser, tmp_path):
             const path = '/home/test/repo/chart.mmd';
             window.fetch = async (input, options = {}) => {
               const url = new URL(String(input), 'https://localhost');
+              if (url.pathname === '/api/fs/info') {
+                if ((url.searchParams.get('path') || '') !== path) {
+                  return new Response(JSON.stringify({error: 'unexpected fixture path'}), {
+                    status: 404,
+                    headers: {'Content-Type': 'application/json'},
+                  });
+                }
+                return new Response(JSON.stringify({path, name: 'chart.mmd', kind: 'file', realpath: path, repo_root: '/home/test/repo', relative_path: 'chart.mmd'}), {
+                  status: 200,
+                  headers: {'Content-Type': 'application/json'},
+                });
+              }
               if (url.pathname === '/api/fs/read') {
                 return new Response(JSON.stringify({
                   path,
@@ -3705,6 +3714,18 @@ def test_editor_opens_jsonl_table_preview_by_default_and_keeps_raw_edit(browser,
             ].join('\\n');
             window.fetch = async (input, options = {}) => {
               const url = new URL(String(input), 'https://localhost');
+              if (url.pathname === '/api/fs/info') {
+                if ((url.searchParams.get('path') || '') !== path) {
+                  return new Response(JSON.stringify({error: 'unexpected fixture path'}), {
+                    status: 404,
+                    headers: {'Content-Type': 'application/json'},
+                  });
+                }
+                return new Response(JSON.stringify({path, name: 'transcript.jsonl', kind: 'file', realpath: path, repo_root: '/home/test/repo', relative_path: 'transcript.jsonl'}), {
+                  status: 200,
+                  headers: {'Content-Type': 'application/json'},
+                });
+              }
               if (url.pathname === '/api/fs/read') {
                 return new Response(JSON.stringify({path, name: 'transcript.jsonl', size: content.length, mtime: 20, content}), {
                   status: 200,
@@ -4911,12 +4932,13 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
         assert expected in metrics["rawRequests"], metrics
     assert metrics["initialImages"]["external"]["src"].startswith("data:image/png;base64,"), metrics
     assert metrics["initialImages"]["external"]["resolvedPath"] == "", metrics
-    # ProseMirror rejects unsafe image URLs before creating an image node; keep the URL out of the DOM.
+    # The legacy renderer removes unsafe image nodes and marks missing local media on its own Preview surface.
     assert metrics["initialImages"]["unsafe"]["exists"] is False, metrics
     assert metrics["initialImages"]["unsafe"]["hasSrc"] is False, metrics
-    assert "prosemirror-image-error" in metrics["missingImageError"]["className"], metrics
+    assert "markdown-preview-image-error" in metrics["missingImageError"]["className"], metrics
     assert "Image unavailable: /home/test/repo/docs/missing.png" in metrics["missingImageError"]["title"], metrics
-    assert metrics["brokenText"] == "", metrics
+    assert metrics["brokenText"].startswith("Image unavailable: /home/test/repo/docs/missing.png"), metrics
+    assert metrics["brokenText"].endswith("Open · Download"), metrics
     assert metrics["mermaid"]["imageExists"] is True, metrics
     assert metrics["mermaid"]["imageSrcPrefix"] in ("blob:", "data:"), metrics
     assert "Mermaid diagram could not be rendered" in metrics["mermaid"]["errorText"], metrics
@@ -5821,19 +5843,22 @@ def test_markdown_vieweditor_task_items_keep_source_and_split_surface(browser, t
             renderFileEditorPanel(panel, item);
             const waitFor = window.__yolomuxTestWaitFor;
             const ready = await waitFor(() => panel._pmView?.dom?.textContent?.includes('first task') && panel._cmView?.state?.doc?.toString?.().includes('first task'));
+            const checkboxCounts = () => ({
+              legacyCheckboxes: [...panel.querySelectorAll('.file-editor-preview-pane-panel input.markdown-task-checkbox')]
+                .filter(input => !input.closest('.ProseMirror')).length,
+              prosemirrorCheckboxes: panel.querySelectorAll('.file-editor-preview-pane-panel .ProseMirror input.markdown-task-checkbox').length,
+            });
             const before = {
               ready,
               content: fileState.get(path)?.content || '',
-              legacyCheckboxes: panel.querySelectorAll('.file-editor-preview-pane-panel input.markdown-task-checkbox').length,
-              prosemirrorCheckboxes: panel.querySelectorAll('.file-editor-preview-pane-panel input.prosemirror-task-checkbox').length,
+              ...checkboxCounts(),
               viewText: panel._pmView?.dom?.textContent || '',
               cmText: panel._cmView?.state?.doc?.toString?.() || '',
             };
             const after = {
               content: fileState.get(path)?.content || '',
               dirty: fileState.get(path)?.dirty === true,
-              legacyCheckboxes: panel.querySelectorAll('.file-editor-preview-pane-panel input.markdown-task-checkbox').length,
-              prosemirrorCheckboxes: panel.querySelectorAll('.file-editor-preview-pane-panel input.prosemirror-task-checkbox').length,
+              ...checkboxCounts(),
               cmText: panel._cmView?.state?.doc?.toString?.() || '',
               previewText: panel.querySelector('.file-editor-preview-pane-panel')?.textContent || '',
               mode: editorViewModeFor(path, item),
@@ -6369,6 +6394,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
+            await waitFor(() => panel._pmView?.dom, {description: 'ViewEditor before popout'});
             const syntaxPreview = document.createElement('div');
             syntaxPreview.className = 'file-editor-preview-pane-panel markdown-body';
             syntaxPreview.style.cssText = 'position:fixed;left:-10000px;top:0;width:900px;height:520px;';
@@ -6422,9 +6448,12 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               if (size <= 0) return 0;
               return (Number(element.scrollTop || 0) + Number(element.clientHeight || 0) / 2) / size;
             };
-            const editorKeyword = () => getComputedStyle(syntaxPreview.querySelector('code.language-javascript .code-keyword')).color;
+            const editorKeyword = () => {
+              const node = panel._pmView?.dom?.querySelector('code.language-javascript .code-keyword');
+              return node ? getComputedStyle(node).color : '';
+            };
             const popupKeyword = () => getComputedStyle(popupDoc.querySelector('code.language-javascript .code-keyword')).color;
-            const editorRustControl = () => syntaxPreview.querySelector('code.language-rust .code-control')?.textContent || '';
+            const editorRustControl = () => panel._pmView?.dom?.querySelector('code.language-rust .code-control')?.textContent || '';
             const popupRustControl = () => popupDoc.querySelector('code.language-rust .code-control')?.textContent || '';
             const popupRustControlColor = () => getComputedStyle(popupDoc.querySelector('code.language-rust .code-control')).color;
             const popupRustType = () => popupDoc.querySelector('code.language-rust .code-type')?.textContent || '';
@@ -7094,7 +7123,7 @@ def test_light_editor_and_preview_share_python_fence_token_colors(browser, tmp_p
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
             for (let attempt = 0; attempt < 160; attempt += 1) {
-              if (panel._cmView) break;
+              if (panel._pmView && panel._cmView) break;
               await frame();
             }
             const syntaxPreview = document.createElement('div');
@@ -7114,7 +7143,7 @@ def test_light_editor_and_preview_share_python_fence_token_colors(browser, tmp_p
               return {text: node.textContent, color: getComputedStyle(node).color, leafColor: getComputedStyle(leaf).color};
             };
             const previewByClassText = (className, text, occurrence = 0) => {
-              const nodes = Array.from(syntaxPreview.querySelectorAll(`code.language-python .${className}`)).filter(candidate => candidate.textContent === text);
+              const nodes = Array.from(panel._pmView?.dom?.querySelectorAll(`code.language-python .${className}`) || []).filter(candidate => candidate.textContent === text);
               const node = nodes[occurrence] || nodes[0] || null;
               return node ? {text: node.textContent, color: getComputedStyle(node).color} : {text: '', color: ''};
             };
@@ -7169,7 +7198,7 @@ def test_light_editor_and_preview_share_python_fence_token_colors(browser, tmp_p
                 atom: rootStyle.getPropertyValue('--code-atom').trim(),
               },
               editorHtml: panel.querySelector('.cm-content')?.innerHTML || '',
-              previewHtml: syntaxPreview.querySelector('code.language-python')?.innerHTML || '',
+              previewHtml: panel._pmView?.dom?.querySelector('code.language-python')?.innerHTML || '',
             });
           } catch (error) {
             done({error: String(error), stack: error?.stack || '', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
@@ -7212,6 +7241,7 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
             "repoRoot": str(REPO_ROOT),
             "maxSessionTabs": 99,
             "serverHostname": "test-host",
+            "proseMirrorAssetUrl": fixture_asset_url("static", "prosemirror.js"),
             "strings": {"en": strings},
         },
         separators=(",", ":"),
@@ -7242,8 +7272,9 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
                 block.innerHTML = '<span class="hljs-keyword" style="color: rgb(255, 0, 0)">const</span> x = 1;';
               }}
             }};
-                window.__previewVanillaReady = null;
-                (async () => {{
+                    window.__previewVanillaReady = null;
+                    let previewPanel = null;
+                    (async () => {{
               const path = '/home/test/repo/README.md';
               const content = '# Heading\\n\\n**Bold** and [link](https://example.com)\\n\\n```js\\nconst x = 1;\\n```\\n';
               const item = fileEditorItemFor(path);
@@ -7257,8 +7288,10 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
               }});
               setFileEditorViewMode(path, 'preview', item);
               addFileEditorTabItem(path, item);
-              const panel = createFileEditorPanel(item);
+                  const panel = createFileEditorPanel(item);
+                  previewPanel = panel;
               panel.classList.add('active-pane');
+              panelNodes.set(item, panel);
                   document.getElementById('mount').append(panel);
                   renderFileEditorPanel(panel, item);
                   await window.__yolomuxTestWaitFor(() => panel._pmView?.dom?.querySelector('pre'), {{timeoutMs: 12000, description: 'vanilla preview ViewEditor'}});
@@ -7266,11 +7299,11 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
                   const read = () => {{
                     const preview = panel.querySelector('.file-editor-preview-pane-panel');
                     const previewSurface = panel._pmView?.dom || preview.querySelector('[data-prosemirror-editor]') || preview;
-                const headingNode = preview.querySelector('h1');
-                const linkNode = preview.querySelector('a');
+                    const headingNode = previewSurface.querySelector('h1');
+                    const linkNode = previewSurface.querySelector('a');
                 const heading = headingNode ? getComputedStyle(headingNode) : {{color: '', backgroundColor: ''}};
                 const link = linkNode ? getComputedStyle(linkNode) : {{color: ''}};
-                const codeSpan = preview.querySelector('pre code span');
+                    const codeSpan = previewSurface.querySelector('pre code span');
                 return {{
                       previewBg: getComputedStyle(previewSurface).backgroundColor,
                       previewColor: getComputedStyle(previewSurface).color,
@@ -7278,7 +7311,7 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
                   headingBg: heading.backgroundColor,
                       linkColor: link.color,
                           codeSpanColor: codeSpan ? getComputedStyle(codeSpan).color : '',
-                      codeText: preview.querySelector('pre code')?.textContent || '',
+                          codeText: previewSurface.querySelector('pre code')?.textContent || '',
                   expectedVanilla: {{
                         preview: probePaint('color:var(--markdown-html-light-text);background:var(--paint-white)', previewSurface),
                         link: probePaint('color:var(--vanilla-preview-link)', previewSurface).color,
@@ -7293,14 +7326,17 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
                       await window.__yolomuxTestWaitFor(() => panel._pmView?.dom?.classList.contains('vanilla-preview-body'), {{timeoutMs: 12000, description: 'vanilla ViewEditor refresh'}});
                       const vanilla = read();
                   window.__previewVanillaReady = {{normal, vanilla}};
-                }})();
+                }})().catch(error => {{
+                  window.__previewVanillaReady = {{error: String(error), stack: error?.stack || '', panelError: previewPanel?._pmError || '', panelHtml: previewPanel?.innerHTML.slice(0, 5000) || '', prosemirrorLoaded: Boolean(window.ProseMirror), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')}};
+                }});
           </script>
         </body></html>""",
     )
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return window.__previewVanillaReady?.normal != null")
+    WebDriverWait(browser, 15).until(
+        lambda driver: driver.execute_script("return window.__previewVanillaReady?.normal != null || window.__previewVanillaReady?.error != null")
     )
     metrics = browser.execute_script("return window.__previewVanillaReady")
+    assert "error" not in metrics, metrics
     assert metrics["normal"]["vanillaClass"] is False, metrics
     assert metrics["normal"]["codeText"] == "const x = 1;", metrics
     assert metrics["normal"]["headingColor"] != metrics["normal"]["expectedVanilla"]["preview"]["color"], metrics

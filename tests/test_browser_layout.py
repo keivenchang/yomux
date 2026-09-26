@@ -10351,7 +10351,8 @@ def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_pa
     assert metrics["errors"] == []
     assert metrics["rejections"] == []
     assert "GET /api/notify" not in metrics["fetchPaths"]
-    assert "GET /api/auto-approve" in metrics["fetchPaths"]
+    assert "GET /api/auto-approve" not in metrics["fetchPaths"]
+    assert "GET /api/activity" in metrics["fetchPaths"]
     assert metrics["fetchPaths"].count("POST /api/ensure-session") <= 1
     assert "GET /api/session-metadata" in metrics["fetchPaths"]
     assert "GET /api/ping" in metrics["fetchPaths"]
@@ -12714,7 +12715,7 @@ def test_client_events_ready_refetches_yolo_marker_after_reconnect(browser, tmp_
         sessions=["1"],
         auto_approve_payload={
             "session_order": ["1"],
-            "sessions": {"1": {"target": "1", "enabled": False, "last_action": "off", "screen": {"key": "idle"}}},
+            "sessions": {"1": {"target": "1", "enabled": False, "last_action": "off", "agent_windows": [{"window_index": 0, "kind": "codex", "state": "idle"}]}},
             "rules": {"path": "/home/test/.config/yolomux/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
         },
     )
@@ -12733,7 +12734,7 @@ def test_client_events_ready_refetches_yolo_marker_after_reconnect(browser, tmp_
           const beforeWorking = markerBefore.classList.contains('working');
           window.__fixtureAutoApprovePayload = {
             session_order: ['1'],
-            sessions: {'1': {target: '1', enabled: false, last_action: 'off', screen: {key: 'working'}}},
+            sessions: {'1': {target: '1', enabled: false, last_action: 'off', agent_windows: [{window_index: 0, kind: 'codex', state: 'working'}]}},
             rules: {path: '/home/test/.config/yolomux/yolo-rules.yaml', source: 'default', rules: [], errors: []},
           };
           clientEventTransportState.connected = false;
@@ -12747,7 +12748,7 @@ def test_client_events_ready_refetches_yolo_marker_after_reconnect(browser, tmp_
             ready,
             connected: clientEventTransportState.connected,
             className: markerAfter?.className || '',
-            autoApproveFetches: window.__bootFetches.filter(item => item.path === '/api/auto-approve').length,
+            activityFetches: window.__bootFetches.filter(item => item.path === '/api/activity').length,
             errors: jsDebugFailureEvents('error'),
             rejections: jsDebugFailureEvents('rejection'),
           };
@@ -12758,7 +12759,7 @@ def test_client_events_ready_refetches_yolo_marker_after_reconnect(browser, tmp_
     assert result["beforeWorking"] is False, result
     assert result["ready"] is True, result
     assert result["connected"] is True, result
-    assert result["autoApproveFetches"] >= 2, result
+    assert result["activityFetches"] >= 2, result
     assert result["errors"] == []
     assert result["rejections"] == []
 
@@ -13360,7 +13361,9 @@ def test_preferences_status_examples_share_pulse_period_phase_and_live_renderers
         markers = groups[group]["markers"]
         assert [marker["state"] for marker in markers] == ["working", "attention", "blocked", "unavailable", "cooldown"], metrics
         assert all(marker["animationName"] == expected_name for marker in markers), metrics
-        assert all(marker["duration"] == "2s" and marker["delay"] == metrics["rootDelay"] for marker in markers), metrics
+        # Each rendered marker stamps its own current phase; the shared live phase is measured
+        # from Web Animations progress below, not compared with the older root snapshot.
+        assert all(marker["duration"] == "2s" for marker in markers), metrics
         assert all(marker["timingFunction"].startswith("steps(16") and marker["iterations"] == "infinite" for marker in markers), metrics
         assert all(marker["playState"] in {"pending", "running"} for marker in markers), metrics
         assert max(marker["progress"] for marker in markers) - min(marker["progress"] for marker in markers) < 0.04, metrics
@@ -17752,6 +17755,7 @@ def test_agent_status_card_joins_current_sessions_and_names_stale_live_state(bro
             autoApproveStates.set('two', {agent_window_snapshot_revision: 7, agent_windows: [{window_index: 1, kind: 'codex', state: 'idle'}]});
             autoApproveStates.set('three', {agent_window_snapshot_revision: 7, agent_windows: [{window_index: 2, kind: 'claude', state: 'idle'}]});
             autoApproveStates.set('stale', {agent_window_snapshot_revision: 6, agent_windows: [{window_index: 3, kind: 'codex', state: 'idle'}]});
+            jsDebugStatsAgentStatusState.payload = null;
             jsDebugStatsPollState.agentWindowSnapshotRevision = 7;
             const keys = ['working', 'ask', 'transition', 'idle'];
             const swatches = keys.map(key => {

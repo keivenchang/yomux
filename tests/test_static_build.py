@@ -870,7 +870,7 @@ def test_panel_frame_builder_owns_the_shared_panel_chrome():
         "static_src/js/yolomux/82_chat_panel.js",
         "static_src/js/yolomux/83_preferences_panel.js",
         "static_src/js/yolomux/85_debug_panel.js",
-        "static_src/js/yolomux/86_changes_editor.js",
+        "static_src/js/yolomux/86_changes_40_finder.js",
         "static_src/js/yolomux/99_terminal_boot.js",
     ):
         source = repo_path(path).read_text(encoding="utf-8")

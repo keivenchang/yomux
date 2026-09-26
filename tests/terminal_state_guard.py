@@ -32,7 +32,7 @@ TERMINAL_STATE_CONTRACTS = (
     ),
     TerminalStateContract(
         contract_id="differ-pending-producer",
-        owner_path=Path("static_src/js/yolomux/86_changes_editor.js"),
+        owner_path=Path("static_src/js/yolomux/86_changes_10_session_files.js"),
         owner_token="function scheduleSessionFilesProducerDeadline(destination, payload)",
         proof_path=Path("tests/test_gate_differ.py"),
         proof_test="test_mock_git_differ_pending_producer_without_publish_ends_in_visible_deadline_error",

@@ -7486,6 +7486,7 @@ def test_activity_payload_returns_indefinite_stale_cache_and_refreshes(monkeypat
     ]
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     webapp = app_module.TmuxWebtermApp(["5"])
+    monkeypatch.setattr(webapp, "scheduler_can_run", lambda _role: True)
     try:
         calls = []
 
@@ -7522,6 +7523,7 @@ def test_activity_payload_returns_indefinite_stale_cache_and_refreshes(monkeypat
 def test_owner_activity_payload_without_cache_queues_one_shared_refresh(monkeypatch):
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     webapp = app_module.TmuxWebtermApp(["5"])
+    monkeypatch.setattr(webapp, "scheduler_can_run", lambda _role: True)
     starts = iter([True, False])
     try:
         monkeypatch.setattr(webapp, "get_tabber_activity_cache", lambda *_args, **_kwargs: None)
@@ -7583,6 +7585,7 @@ def test_activity_payload_keeps_last_good_cache_during_source_generation_change(
     try:
         webapp.set_tabber_activity_cache(payload, write_disk=False, source_signature="generation-one")
         monkeypatch.setattr(webapp, "tabber_activity_source_signature", lambda: "generation-two")
+        monkeypatch.setattr(webapp, "scheduler_can_run", lambda _role: True)
         monkeypatch.setattr(webapp, "start_tabber_activity_cache_refresh", lambda: True)
 
         result, status = webapp.activity_payload()
@@ -7607,7 +7610,7 @@ def test_activity_payload_does_not_reuse_configured_cache_for_global_scope(monke
     }
     try:
         monkeypatch.setattr(webapp, "get_tabber_activity_cache", lambda *_args, **_kwargs: (configured_payload, False, 1.0))
-        monkeypatch.setattr(webapp, "background_can_run", lambda _role: True)
+        monkeypatch.setattr(webapp, "scheduler_can_run", lambda _role: True)
         monkeypatch.setattr(webapp, "start_tabber_activity_cache_refresh", lambda **kwargs: kwargs.get("session_scope") == "all")
         payload, status = webapp.activity_payload(session_scope="all")
     finally:

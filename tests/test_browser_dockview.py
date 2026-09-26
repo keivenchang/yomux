@@ -476,6 +476,20 @@ def test_dockview_quick_open_keeps_distinct_notes_files_open(browser, tmp_path):
               : [{name: 't5t.md', path: t5tPath, relative_path: 't5t/t5t.md', size: 79334, mtime_ns: 1}];
             return new Response(JSON.stringify({root: '/home/test/dynamo/notes', files}), {status: 200, headers: {'Content-Type': 'application/json'}});
           }
+          if (url.pathname === '/api/fs/info') {
+            const path = url.searchParams.get('path') || '';
+            if (path !== t5tPath && path !== yearPath) {
+              return new Response(JSON.stringify({error: 'unexpected fixture path'}), {status: 404, headers: {'Content-Type': 'application/json'}});
+            }
+            return new Response(JSON.stringify({
+              path,
+              name: path.split('/').filter(Boolean).pop() || '/',
+              kind: 'file',
+              realpath: path,
+              repo_root: '/home/test/dynamo/notes',
+              relative_path: path === t5tPath ? 't5t/t5t.md' : 't5t/2026.md',
+            }), {status: 200, headers: {'Content-Type': 'application/json'}});
+          }
           if (url.pathname === '/api/fs/read') {
             const path = url.searchParams.get('path') || '';
             return new Response(JSON.stringify({
@@ -3045,7 +3059,6 @@ def test_dockview_yellow_window_ball_click_switches_and_acknowledges(browser, tm
 
 
 def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_path):
-    prompt_key = '["prompt","1","waiting"]'
     attention_key = '["agent-window","1","2","","claude","needs-input","waiting"]'
     cooldown_key = '["agent-window","1","3","","codex","cooldown","1234"]'
     transcript_sessions = {
@@ -3064,9 +3077,6 @@ def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_p
             "1": {
                 "target": "1",
                 "enabled": True,
-                "prompt": {"visible": True, "question_text": "waiting", "text": "waiting", "attention_key": prompt_key},
-                "screen": {"key": "needs-input", "text": "waiting", "question_text": "waiting"},
-                "prompt_attention_key": prompt_key,
                 "agent_windows": [
                     {"kind": "claude", "state": "needs-input", "window_index": 2, "window_label": "2:claude", "screen_text": "waiting", "attention_key": attention_key},
                     {"kind": "codex", "state": "idle", "window_index": 3, "window_label": "3:codex", "working_stopped_ts": 1234, "cooldown_attention_key": cooldown_key},
@@ -3162,7 +3172,7 @@ def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_p
         """
     )
     acked_keys = {key for body in ack_bodies for key in body.get("keys", [])}
-    assert acked_keys == {prompt_key, attention_key}
+    assert acked_keys == {attention_key}
 
 
 def test_dockview_red_window_ball_keypress_acknowledges_after_delay(browser, tmp_path):
@@ -3880,12 +3890,9 @@ def test_dockview_working_glyph_stays_distinct_under_reduced_motion(browser, tmp
         browser.execute_cdp_cmd("Emulation.setEmulatedMedia", {"features": []})
 
 
-def test_dockview_tab_working_ball_shows_when_session_works_via_screen_proxy(browser, tmp_path):
-    # Regression for "Tab 7 is YO'ing but the AI symbol is not blinking". The YO ball spins on
-    # sessionYoloIsWorking (per-window 'working' OR screen.key==='working'), but the dock-tab AI symbol
-    # used to render only when a per-window agent row reported state==='working' exactly. When the working
-    # signal arrives via the screen-state proxy (no per-window 'working' row), the ball spun while the
-    # symbol vanished. Both must now pulse on the same condition.
+def test_dockview_tab_working_ball_shows_for_activity_working_row(browser, tmp_path):
+    # Go activity is the live status owner in this checkout, so a working window arrives as an
+    # agent_windows row rather than the retired Python screen-state proxy.
     transcript_sessions = {
         "1": {
             "panes": [
@@ -3900,11 +3907,8 @@ def test_dockview_tab_working_ball_shows_when_session_works_via_screen_proxy(bro
             "1": {
                 "target": "1",
                 "enabled": True,
-                "screen": {"key": "working"},
                 "agent_windows": [
-                    # Note: the claude window is idle/current, NOT state=='working' — the working signal
-                    # comes only from screen.key above, which is exactly the case that lost the symbol.
-                    {"kind": "claude", "state": "idle", "window_index": 1, "window_label": "1:claude", "current": True, "window_active": True, "idle_since": 1},
+                    {"kind": "claude", "state": "working", "window_index": 1, "window_label": "1:claude", "current": True, "window_active": True},
                 ],
             },
         },
@@ -3920,7 +3924,7 @@ def test_dockview_tab_working_ball_shows_when_session_works_via_screen_proxy(bro
     )
     wait_for_dockview(browser, min_tabs=1)
     WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return !!document.querySelector('.dockview-pane-tab .session-yolo-marker, .pane-tab .session-yolo-marker')")
+        lambda driver: driver.execute_script("return !!document.querySelector('.dockview-pane-tab .session-agent-activity-marker .agent-window-status-dot.status-indicator--working, .pane-tab .session-agent-activity-marker .agent-window-status-dot.status-indicator--working')")
     )
     data = browser.execute_script(
         """
@@ -3937,8 +3941,8 @@ def test_dockview_tab_working_ball_shows_when_session_works_via_screen_proxy(bro
         };
         """
     )
-    # The working tab indicator renders as a green ball even when working comes only from the
-    # screen-state proxy; pane tabs omit the Claude/Codex symbol to reduce clutter.
+    # The working tab indicator renders as a green ball for the shared activity row; pane tabs omit
+    # the Claude/Codex symbol to reduce clutter.
     assert data["tabFound"] is True, data
     assert data["hasMarker"] is True, data
     assert data["hasAgentIcon"] is False, data
@@ -4254,6 +4258,7 @@ def test_dockview_new_virtual_and_file_tabs_open_in_focused_pane(browser, tmp_pa
         tmp_path,
         "?sessions=1,2&layout=row@50(left,slot1)&tabs=left:1;slot1:2",
         sessions=["1", "2"],
+        fs_entries={"/home/test/yolomux.dev": [{"name": "NEWTAB.md", "kind": "file"}]},
     )
     wait_for_dockview(browser, min_tabs=2)
     metrics = browser.execute_async_script(
@@ -8166,12 +8171,14 @@ def test_dockview_moving_finder_resumes_newly_visible_differ(browser, tmp_path):
     result = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
-        const originalApiFetchJson = apiFetchJson;
+        const originalFetch = window.fetch;
         const requests = [];
-        apiFetchJson = async url => {
-          if (!String(url).startsWith('/api/session-files?')) return originalApiFetchJson(url);
-          requests.push(String(url));
-          return {session: '1', loaded: true, files: [], repos: [], refs_by_repo: {}, errors: [], warnings: []};
+        window.fetch = async (input, options = {}) => {
+          const url = new URL(String(input), location.href);
+          if (url.pathname !== '/api/session-files-stream') return originalFetch(input, options);
+          requests.push(url.pathname + url.search);
+          const payload = {session: '1', loaded: true, files: [], repos: [], refs_by_repo: {}, errors: [], warnings: []};
+          return new Response(`event: done\ndata: ${JSON.stringify(payload)}\n\n`, {headers: {'Content-Type': 'text/event-stream'}});
         };
         // Differ owns its own session-files record, so unloading Finder no longer unloads
         // Differ. Seed the surface under test: a newly visible Differ with no payload must
@@ -8185,7 +8192,7 @@ def test_dockview_moving_finder_resumes_newly_visible_differ(browser, tmp_path):
             const panel = panelNodes.get(differItemId);
             const loaded = sessionFilesPayloadIsLoadedForSession(fileExplorerSessionFilesState.payload, '1');
             if ((loaded && requests.length) || performance.now() >= deadline) {
-              apiFetchJson = originalApiFetchJson;
+              window.fetch = originalFetch;
               done({
                 moved,
                 requests,
@@ -8202,7 +8209,7 @@ def test_dockview_moving_finder_resumes_newly_visible_differ(browser, tmp_path):
           };
           requestAnimationFrame(poll);
         }).catch(error => {
-          apiFetchJson = originalApiFetchJson;
+          window.fetch = originalFetch;
           done({error: String(error?.stack || error)});
         });
         """

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Refuse a staged static-source change whose staged generated assets are stale.
+# Build and validate staged static source in an isolated candidate tree. Generated bundles stay out
+# of Git; this proves the committed source can produce the files each serving path consumes.
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
-if git -C "$repo_root" diff --cached --quiet -- static_src/; then
+if git -C "$repo_root" diff --cached --quiet -- static_src/ tools/static_build.py .githooks/pre-commit static/yolomux.js; then
     exit 0
 fi
 
@@ -17,4 +18,5 @@ index_tree="$(git -C "$repo_root" write-tree)"
 git -C "$repo_root" archive --format=tar "$index_tree" | tar -xf - -C "$index_root"
 git_dir="$(git -C "$repo_root" rev-parse --absolute-git-dir)"
 printf 'gitdir: %s\n' "$git_dir" > "$index_root/.git"
+python3 "$index_root/tools/static_build.py"
 python3 "$index_root/tools/static_build.py" --check

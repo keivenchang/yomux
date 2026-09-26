@@ -934,6 +934,13 @@ def test_real_xterm_mobile_input_survives_pan_preview_pane_accessory_keyboard_an
             preview_item["item"],
         )
         assert editor_upload_point and abs(editor_upload_point["width"] - 20) <= 1 and abs(editor_upload_point["height"] - 20) <= 1, editor_upload_point
+        editor_upload_hit = browser.execute_script(
+            "const upload = panelNodes.get(arguments[0])?.querySelector('.file-editor-upload-panel:not([hidden])'); return document.elementFromPoint(arguments[1], arguments[2])?.closest('.file-editor-upload-panel') === upload;",
+            preview_item["item"],
+            editor_upload_point["x"],
+            editor_upload_point["y"],
+        )
+        assert editor_upload_hit is True, editor_upload_point
         touch_tap(editor_upload_point, 25)
         editor_chooser = WebDriverWait(browser, 5).until(
             lambda driver: driver.find_element("css selector", '.file-upload-chooser[type="file"]')
