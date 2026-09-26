@@ -83,6 +83,7 @@ from tests.tmux_runtime import wait_for_isolated_tmux_panes
 BROWSER_BOOT_ROUTES = (
     *BROWSER_BOOT_ROUTES,
     BrowserBootRoute("/api/fs/fast/list", ("GET",)),
+    BrowserBootRoute("/api/fs/info", ("GET",)),
 )
 
 pytestmark = [pytest.mark.browser, pytest.mark.socket]
@@ -3235,6 +3236,15 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
           const path = url.searchParams.get('path') || '/home/test';
           const entries = (window.__fixtureFsEntries || {})[path] || [];
           return jsonResponse({path, entries});
+        }
+        if (url.pathname === '/api/fs/info') {
+          const path = url.searchParams.get('path') || '/home/test';
+          const entriesByPath = window.__fixtureFsEntries || {};
+          const parent = path.slice(0, Math.max(1, path.lastIndexOf('/'))) || '/';
+          const name = path.split('/').filter(Boolean).pop() || '/';
+          const entry = (entriesByPath[parent] || []).find(candidate => candidate.name === name);
+          if (!entry) return jsonResponse({path}, 404);
+          return jsonResponse({path, name, kind: entry.kind || (entriesByPath[path] ? 'dir' : 'file'), size: entry.size ?? null, mtime: entry.mtime ?? null, mtime_ns: entry.mtime_ns ?? null, realpath: path});
         }
         if (url.pathname === '/api/fs/batch') {
           const entriesByPath = window.__fixtureFsEntries || {};

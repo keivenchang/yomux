@@ -1,6 +1,6 @@
 // Regression for the 0.7.3 P0 "open file flops to (missing on disk)" defect. A stale or racing
-// directory listing (/api/fs/batch) that OMITS an already-open file must NEVER mark that editor
-// missing: only an authoritative exact-path /api/fs/read 404 (genuine deletion) may, and that 404 is
+// directory listing or exact-path /api/fs/info result must NEVER mark an already-open text editor
+// missing by itself: only an authoritative exact-path /api/fs/read 404 (genuine deletion) may, and that 404 is
 // fenced against a newer per-path render so a stale/late 404 cannot overwrite valid content.
 //
 // Both reload lanes are covered SEPARATELY, each with the same three cases (red-before/green-after):
@@ -20,6 +20,7 @@ const {
 } = require('./browser_helpers/layout_test_helper');
 
 const MD = '/repo/app/notes/big.md';
+const OTHER_MD = '/repo/app/notes/other.md';
 const CONTENT = '# Title\n\nbody '.padEnd(18943, 'x') + '\n';
 const ENTRY = {name: 'big.md', realpath: MD, file_id: 'dev:1:ino:42'};
 
@@ -29,6 +30,10 @@ function readOkResponse(mtime = 5) {
     realpath: MD, file_id: 'dev:1:ino:42', git_root: '/repo/app', git_tracked: true,
     git_history: [], git_has_history: false,
   });
+}
+
+function infoOkResponse(mtime = 5) {
+  return jsonResponse({path: MD, name: 'big.md', kind: 'file', size: 18943, mtime, mtime_ns: mtime, realpath: MD});
 }
 
 function batchListResponse(reqBody, {includeFile, name = 'big.md', size = 18943, mtime = 5}) {
@@ -75,6 +80,11 @@ function stateOf(api) {
   return {present: true, kind: s.kind, externalMissing: s.externalMissing === true, contentLen: (s.content || '').length};
 }
 
+function currentStateOf(api, path) {
+  const s = api.currentFileStateForTest(path);
+  return s ? {...s} : null;
+}
+
 // Open MD to a valid loaded editor. Passing an entry means the open reads the exact path directly
 // (no directory listing), matching the real "already open, rendering content" starting point.
 async function openValid(api) {
@@ -89,10 +99,11 @@ async function openValid(api) {
 }
 
 // Drive one explicit reload whose directory listing OMITS MD, with a chosen /api/fs/read handler.
-async function reloadWithOmittedListing(api, readHandler) {
+async function reloadWithOmittedListing(api, readHandler, infoHandler = () => Promise.resolve(infoOkResponse(6))) {
   api.setFetchForTest((url, options = {}) => {
     const text = String(url);
     if (text.startsWith('/api/fs/read')) return readHandler(text, options);
+    if (text.startsWith('/api/fs/info')) return infoHandler(text, options);
     if (text.startsWith('/api/fs/batch')) return Promise.resolve(batchListResponse(options.body, {includeFile: false}));
     return Promise.resolve(jsonResponse({ok: true}));
   });
@@ -117,51 +128,223 @@ async function applyNewerValidRender(api, mtime) {
 }
 
 async function runOpenFileMissingGuardSuite() {
+  await testAsync('poll lane: exact-path status checks progress independently', async () => {
+    const api = loadYolomux('', ['1']);
+    for (const path of [MD, OTHER_MD]) {
+      api.setOpenFileStateForTest(path, {
+        kind: 'text', mtime: 5, size: 100, dirty: true, content: 'local', original: 'disk',
+      });
+    }
+    const held = deferredFetch();
+    const requests = [];
+    api.setFetchForTest((url) => {
+      const text = String(url);
+      requests.push(text);
+      if (text.startsWith('/api/fs/info?') && text.includes(encodeURIComponent(MD))) return held.promise;
+      if (text.startsWith('/api/fs/info?') && text.includes(encodeURIComponent(OTHER_MD))) {
+        return Promise.resolve(jsonResponse({path: OTHER_MD, name: 'other.md', kind: 'file', size: 100, mtime: 6, mtime_ns: 6}));
+      }
+      return Promise.resolve(jsonResponse({ok: true}));
+    });
+
+    const poll = api.refreshOpenFilesIfChangedForTest({paths: [MD, OTHER_MD]});
+    await flush(5);
+    const other = currentStateOf(api, OTHER_MD);
+    assert.ok(requests.some(url => url.startsWith('/api/fs/info?') && url.includes(encodeURIComponent(MD))), 'first file uses exact-path info');
+    assert.ok(requests.some(url => url.startsWith('/api/fs/info?') && url.includes(encodeURIComponent(OTHER_MD))), 'second file uses exact-path info');
+    assert.equal(requests.some(url => url.startsWith('/api/fs/fast/list') || url.startsWith('/api/fs/list')), false, 'status checks do not list a parent directory');
+    assert.equal(other?.externalChanged?.mtime, 6, 'the second file status applies while the first response is still held');
+
+    held.resolve(jsonResponse({path: MD, name: 'big.md', kind: 'file', size: 100, mtime: 5, mtime_ns: 5}));
+    await poll;
+    await flush();
+  });
+
+  await testAsync('poll lane: a fresh cached directory row supplies exact file status', async () => {
+    const api = loadYolomux('', ['1']);
+    api.setOpenFileStateForTest(MD, {
+      kind: 'text', mtime: 5, size: 100, dirty: true, content: 'local', original: 'disk',
+    });
+    api.setFetchForTest(url => {
+      assert.ok(String(url).startsWith('/api/fs/fast/list?'), 'the cache is seeded by one direct directory read');
+      return Promise.resolve(jsonResponse({entries: [{name: 'big.md', kind: 'file', size: 100, mtime: 5, mtime_ns: 5}]}));
+    });
+    await api.fetchDirectoryForTest('/repo/app/notes', {user: true, enrich: false});
+
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      return Promise.resolve(jsonResponse({ok: true}));
+    });
+    await api.refreshOpenFilesIfChangedForTest({paths: [MD]});
+    assert.deepEqual(requests, [], 'a fresh positive listing row avoids another filesystem request');
+  });
+
+  await testAsync('poll lane: an exact status that becomes a directory keeps loaded file content', async () => {
+    const api = loadYolomux('', ['1']);
+    api.setOpenFileStateForTest(MD, {
+      kind: 'text', mtime: 5, size: 100, dirty: false, content: 'loaded text', original: 'loaded text',
+    });
+    api.setFetchForTest(url => {
+      assert.ok(String(url).startsWith('/api/fs/info?'), 'the poll verifies the exact changed path');
+      return Promise.resolve(jsonResponse({path: MD, name: 'big.md', kind: 'dir', size: null}));
+    });
+
+    await api.refreshOpenFilesIfChangedForTest({paths: [MD]});
+    const state = currentStateOf(api, MD);
+    assert.equal(state.kind, 'text', 'a directory replacement does not replace loaded editor content with a read error');
+    assert.equal(state.content, 'loaded text', 'the last valid text remains available');
+    assert.equal(state.externalMissing, undefined, 'a directory is not reported as a deleted path');
+    assert.ok(state.externalError, 'the editor reports that the path can no longer be inspected as a file');
+  });
+
+  await testAsync('poll lane: exact status clears a deletion tombstone and seeds the next cache read', async () => {
+    const api = loadYolomux('', ['1']);
+    api.setOpenFileStateForTest(MD, {
+      kind: 'text', mtime: 5, size: 100, dirty: true, content: 'local', original: 'disk',
+    });
+    api.markFileExplorerDeletedPathsForTest([MD]);
+    let requests = 0;
+    api.setFetchForTest(url => {
+      requests += 1;
+      assert.ok(String(url).startsWith('/api/fs/info?'), 'tombstoned status uses authoritative exact-path info');
+      return Promise.resolve(infoOkResponse(5));
+    });
+
+    await api.refreshOpenFilesIfChangedForTest({paths: [MD]});
+    assert.deepEqual(api.fileExplorerDeletedPathTombstonesForTest(), [], 'a successful exact-path stat clears the tombstone');
+    assert.equal(requests, 1, 'the first poll performs one exact-path request');
+    await api.refreshOpenFilesIfChangedForTest({paths: [MD]});
+    assert.equal(requests, 1, 'the next poll reuses the bounded positive status cache');
+  });
+
+  await testAsync('poll lane: a newer directory listing supersedes an older cached exact status', async () => {
+    const api = loadYolomux('', ['1']);
+    api.setOpenFileStateForTest(MD, {
+      kind: 'text', mtime: 5, size: 100, dirty: true, content: 'local', original: 'disk',
+    });
+    let infoRequests = 0;
+    api.setFetchForTest(url => {
+      assert.ok(String(url).startsWith('/api/fs/info?'), 'only the initial uncached status reaches the server');
+      infoRequests += 1;
+      return Promise.resolve(infoOkResponse(5));
+    });
+
+    await api.refreshOpenFilesIfChangedForTest({paths: [MD]});
+    api.setFileExplorerFsResourceValueForTest('/repo/app/notes', [
+      {name: 'big.md', kind: 'file', size: 100, mtime: 6, mtime_ns: 6, realpath: MD},
+    ]);
+    await api.refreshOpenFilesIfChangedForTest({paths: [MD]});
+
+    const state = currentStateOf(api, MD);
+    assert.equal(infoRequests, 1, 'the newer listing row supplies status without another request');
+    assert.equal(state.externalChanged?.mtime, 6, 'the newer directory metadata wins over the older status cache');
+  });
+
+  await testAsync('poll lane: a listing published during exact status lookup fences the older response', async () => {
+    const api = loadYolomux('', ['1']);
+    api.setOpenFileStateForTest(MD, {
+      kind: 'text', mtime: 5, size: 100, dirty: true, content: 'local', original: 'disk',
+    });
+    const info = deferredFetch();
+    api.setFetchForTest(url => {
+      assert.ok(String(url).startsWith('/api/fs/info?'), 'the poll has one exact-path request in flight');
+      return info.promise;
+    });
+
+    const poll = api.refreshOpenFilesIfChangedForTest({paths: [MD]});
+    await flush(3);
+    api.setFileExplorerFsResourceValueForTest('/repo/app/notes', [
+      {name: 'big.md', kind: 'file', size: 100, mtime: 6, mtime_ns: 6, realpath: MD},
+    ]);
+    info.resolve(jsonResponse({path: MD, name: 'big.md', kind: 'file', size: 100, mtime: 5, mtime_ns: 5}));
+    await poll;
+
+    assert.equal(currentStateOf(api, MD).externalChanged?.mtime, 6, 'the older response cannot overwrite newer filesystem evidence');
+  });
+
+  await testAsync('poll lane: a status response cannot clear a newer deletion tombstone', async () => {
+    const api = loadYolomux('', ['1']);
+    api.setOpenFileStateForTest(MD, {
+      kind: 'text', mtime: 5, size: 100, dirty: true, content: 'local', original: 'disk',
+    });
+    const info = deferredFetch();
+    api.setFetchForTest(url => {
+      assert.ok(String(url).startsWith('/api/fs/info?'), 'the poll has one exact-path request in flight');
+      return info.promise;
+    });
+
+    const poll = api.refreshOpenFilesIfChangedForTest({paths: [MD]});
+    await flush(3);
+    api.markFileExplorerDeletedPathsForTest([MD]);
+    info.resolve(jsonResponse({path: MD, name: 'big.md', kind: 'file', size: 100, mtime: 5, mtime_ns: 5}));
+    await poll;
+
+    assert.ok(api.fileExplorerDeletedPathTombstonesForTest().includes(MD), 'an older response cannot erase a newer deletion event');
+  });
+
+  await testAsync('poll lane: overlapping status checks for one path share one in-flight request', async () => {
+    const api = loadYolomux('', ['1']);
+    api.setOpenFileStateForTest(MD, {
+      kind: 'text', mtime: 5, size: 100, dirty: true, content: 'local', original: 'disk',
+    });
+    const info = deferredFetch();
+    let requests = 0;
+    api.setFetchForTest(url => {
+      assert.ok(String(url).startsWith('/api/fs/info?'), 'the overlapping polls share exact-path status');
+      requests += 1;
+      return info.promise;
+    });
+
+    const first = api.refreshOpenFilesIfChangedForTest({paths: [MD]});
+    const second = api.refreshOpenFilesIfChangedForTest({paths: [MD]});
+    await flush(3);
+    assert.equal(requests, 1, 'only one lookup owns the path while status is in flight');
+    info.resolve(jsonResponse({path: MD, name: 'big.md', kind: 'file', size: 100, mtime: 6, mtime_ns: 6}));
+    await Promise.all([first, second]);
+
+    assert.equal(currentStateOf(api, MD).externalChanged?.mtime, 6, 'the shared result reaches the open editor');
+  });
+
   // ---------- Lane A: explicit/background reload (loadOpenFileStateFromDisk) ----------
 
-  await testAsync('reload lane: a directory-listing omission alone does NOT mark an open editor missing', async () => {
+  await testAsync('reload lane: an exact-path status result that says present keeps the editor loaded', async () => {
     const api = loadYolomux('', ['1']);
     await openValid(api);
-    // Listing omits MD, but the exact-path read still returns its bytes -> file is present.
     await reloadWithOmittedListing(api, () => Promise.resolve(readOkResponse(6)));
     await flush();
     const st = stateOf(api);
-    assert.equal(st.externalMissing, false, 'omission alone must not flip the editor to (missing on disk)');
-    assert.equal(st.kind, 'text', 'editor still renders text content after a stale omitting listing');
+    assert.equal(st.externalMissing, false, 'present exact-path status must not flip the editor to (missing on disk)');
+    assert.equal(st.kind, 'text', 'editor still renders text content after a present status result');
     assert.ok(st.contentLen > 0, 'loaded content is preserved');
   });
 
-  // A late/stale directory listing that OMITS the path, arriving after a newer valid render, must not
-  // overwrite it. The unfixed owner marks missing straight off the omission (red); the fix confirms the
-  // exact path first, sees its bytes, and keeps the newer render (green).
-  await testAsync('reload lane: a late/stale omitting listing cannot overwrite a newer valid read', async () => {
+  // A late/stale exact-path status response must not overwrite a newer valid render.
+  await testAsync('reload lane: a late/stale status response cannot overwrite a newer valid read', async () => {
     const api = loadYolomux('', ['1']);
     await openValid(api);
     await applyNewerValidRender(api, 6); // a newer valid render lands first (content mtime 6)
-    const listD = deferredFetch();
-    let lastBatchBody = null;
+    const infoD = deferredFetch();
     api.setFetchForTest((url, options = {}) => {
       const text = String(url);
       if (text.startsWith('/api/fs/read')) return Promise.resolve(readOkResponse(6)); // exact path present
-      if (text.startsWith('/api/fs/batch')) { lastBatchBody = options.body; return listD.promise; } // listing held
+      if (text.startsWith('/api/fs/info')) return infoD.promise;
       return Promise.resolve(jsonResponse({ok: true}));
     });
     const reloadP = api.reloadOpenFileFromDiskForTest(MD);
     await flush(2);
-    api.flushFileExplorerFsBatchForTest();
-    await flush(2);
-    listD.resolve(batchListResponse(lastBatchBody, {includeFile: false})); // LATE omitting listing
+    infoD.resolve(infoOkResponse(6));
     await reloadP.catch(() => {});
     await flush();
     const st = stateOf(api);
-    assert.equal(st.externalMissing, false, 'a late omitting listing must not overwrite the newer valid read');
-    assert.equal(st.kind, 'text', 'the newer valid content survives a stale listing');
+    assert.equal(st.externalMissing, false, 'a late status result must not overwrite the newer valid read');
+    assert.equal(st.kind, 'text', 'the newer valid content survives a stale status result');
   });
 
   await testAsync('reload lane: a genuine exact-path 404 STILL marks the editor missing', async () => {
     const api = loadYolomux('', ['1']);
     await openValid(api);
-    await reloadWithOmittedListing(api, () => Promise.resolve(jsonResponse({}, 404)));
+    await reloadWithOmittedListing(api, () => Promise.resolve(jsonResponse({}, 404)), () => Promise.resolve(jsonResponse({}, 404)));
     await flush();
     const st = stateOf(api);
     assert.equal(st.externalMissing, true, 'a real exact-path 404 (deletion) marks the editor missing');
@@ -181,44 +364,42 @@ async function runOpenFileMissingGuardSuite() {
     return p;
   }
 
-  await testAsync('poll lane: a directory-listing omission alone does NOT mark an open editor missing', async () => {
+  await testAsync('poll lane: an exact-path status result that says present keeps the editor loaded', async () => {
     const api = loadYolomux('', ['1']);
     await openValid(api);
     api.setFetchForTest((url, options = {}) => {
       const text = String(url);
       if (text.startsWith('/api/fs/read')) return Promise.resolve(readOkResponse(6));
+      if (text.startsWith('/api/fs/info')) return Promise.resolve(infoOkResponse(6));
       if (text.startsWith('/api/fs/batch')) return Promise.resolve(batchListResponse(options.body, {includeFile: false}));
       return Promise.resolve(jsonResponse({ok: true}));
     });
     await poll(api);
     await flush();
     const st = stateOf(api);
-    assert.equal(st.externalMissing, false, 'poll must not flip an open editor missing on a listing omission');
-    assert.equal(st.kind, 'text', 'poll preserves rendered content when the exact path still reads');
+    assert.equal(st.externalMissing, false, 'poll must not flip an open editor missing on a present exact-path status');
+    assert.equal(st.kind, 'text', 'poll preserves rendered content when the exact path still exists');
   });
 
-  await testAsync('poll lane: a late/stale omitting listing cannot overwrite a newer valid read', async () => {
+  await testAsync('poll lane: a late/stale status response cannot overwrite a newer valid read', async () => {
     const api = loadYolomux('', ['1']);
     await openValid(api);
     await applyNewerValidRender(api, 6);
-    const listD = deferredFetch();
-    let lastBatchBody = null;
+    const infoD = deferredFetch();
     api.setFetchForTest((url, options = {}) => {
       const text = String(url);
       if (text.startsWith('/api/fs/read')) return Promise.resolve(readOkResponse(6));
-      if (text.startsWith('/api/fs/batch')) { lastBatchBody = options.body; return listD.promise; }
+      if (text.startsWith('/api/fs/info')) return infoD.promise;
       return Promise.resolve(jsonResponse({ok: true}));
     });
     const pollP = api.refreshOpenFilesIfChangedForTest({paths: [MD]});
     await flush(2);
-    api.flushFileExplorerFsBatchForTest();
-    await flush(2);
-    listD.resolve(batchListResponse(lastBatchBody, {includeFile: false}));
+    infoD.resolve(infoOkResponse(6));
     await pollP.catch(() => {});
     await flush();
     const st = stateOf(api);
-    assert.equal(st.externalMissing, false, 'poll-lane late omitting listing must not overwrite the newer valid read');
-    assert.equal(st.kind, 'text', 'the newer valid content survives a stale poll listing');
+    assert.equal(st.externalMissing, false, 'poll-lane late status must not overwrite the newer valid read');
+    assert.equal(st.kind, 'text', 'the newer valid content survives a stale status response');
   });
 
   await testAsync('poll lane: a genuine exact-path 404 STILL marks the editor missing', async () => {
@@ -227,6 +408,7 @@ async function runOpenFileMissingGuardSuite() {
     api.setFetchForTest((url, options = {}) => {
       const text = String(url);
       if (text.startsWith('/api/fs/read')) return Promise.resolve(jsonResponse({}, 404));
+      if (text.startsWith('/api/fs/info')) return Promise.resolve(jsonResponse({}, 404));
       if (text.startsWith('/api/fs/batch')) return Promise.resolve(batchListResponse(options.body, {includeFile: false}));
       return Promise.resolve(jsonResponse({ok: true}));
     });

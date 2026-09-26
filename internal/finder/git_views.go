@@ -269,27 +269,52 @@ func resolveGitNamespacePath(raw, base string) (string, error) {
 }
 
 func (s *Service) openGitNamespace(directory *os.File, workingDirectory, requested string) (*gitNamespace, *Error) {
-	gitDirBytes, _, err := runGitBounded(context.Background(), directory, nil, []string{"rev-parse", "--git-dir"}, 4096)
-	if err != nil {
-		return nil, &Error{Status: http.StatusBadRequest, Code: "not_git_repo", MessageKey: "fs.error.notGitRepo", Path: requested, Message: "path is not in a Git repository"}
+	return s.openGitNamespaceContext(context.Background(), directory, workingDirectory, requested)
+}
+
+func (s *Service) openGitNamespaceContext(ctx context.Context, directory *os.File, workingDirectory, requested string) (*gitNamespace, *Error) {
+	paths, _, err := runGitBounded(ctx, directory, nil, []string{"rev-parse", "--git-dir", "--git-common-dir", "--git-path", "objects"}, 3*4096)
+	if err != nil && ctx.Err() != nil {
+		return nil, cancelled(requested)
 	}
-	gitDir, err := resolveGitNamespacePath(string(gitDirBytes), workingDirectory)
+	var pathLines []string
+	if err == nil {
+		combined := strings.Split(strings.TrimSuffix(string(paths), "\n"), "\n")
+		if len(combined) == 3 {
+			pathLines = combined
+		}
+	}
+	if pathLines == nil {
+		// A legal filesystem path can contain newlines, so retain the individual commands when
+		// combined output cannot be separated unambiguously.
+		pathLines = make([]string, 3)
+		commands := [][]string{{"rev-parse", "--git-dir"}, {"rev-parse", "--git-common-dir"}, {"rev-parse", "--git-path", "objects"}}
+		for index, args := range commands {
+			output, _, commandErr := runGitBounded(ctx, directory, nil, args, 4096)
+			if commandErr != nil {
+				if ctx.Err() != nil {
+					return nil, cancelled(requested)
+				}
+				if index == 0 {
+					return nil, &Error{Status: http.StatusBadRequest, Code: "not_git_repo", MessageKey: "fs.error.notGitRepo", Path: requested, Message: "path is not in a Git repository"}
+				}
+				if index == 1 {
+					return nil, &Error{Status: http.StatusBadRequest, Code: "not_git_repo", MessageKey: "fs.error.notGitRepo", Path: requested, Message: "Git common directory is unavailable"}
+				}
+				return nil, &Error{Status: http.StatusBadRequest, Code: "not_git_repo", MessageKey: "fs.error.notGitRepo", Path: requested, Message: "Git object store is unavailable"}
+			}
+			pathLines[index] = strings.TrimSpace(string(output))
+		}
+	}
+	gitDir, err := resolveGitNamespacePath(pathLines[0], workingDirectory)
 	if err != nil {
 		return nil, filesystemError(requested, err)
 	}
-	commonBytes, _, err := runGitBounded(context.Background(), directory, nil, []string{"rev-parse", "--git-common-dir"}, 4096)
-	if err != nil {
-		return nil, &Error{Status: http.StatusBadRequest, Code: "not_git_repo", MessageKey: "fs.error.notGitRepo", Path: requested, Message: "Git common directory is unavailable"}
-	}
-	commonDir, err := resolveGitNamespacePath(string(commonBytes), workingDirectory)
+	commonDir, err := resolveGitNamespacePath(pathLines[1], workingDirectory)
 	if err != nil {
 		return nil, filesystemError(requested, err)
 	}
-	objectsBytes, _, err := runGitBounded(context.Background(), directory, nil, []string{"rev-parse", "--git-path", "objects"}, 4096)
-	if err != nil {
-		return nil, &Error{Status: http.StatusBadRequest, Code: "not_git_repo", MessageKey: "fs.error.notGitRepo", Path: requested, Message: "Git object store is unavailable"}
-	}
-	objects, err := resolveGitNamespacePath(string(objectsBytes), workingDirectory)
+	objects, err := resolveGitNamespacePath(pathLines[2], workingDirectory)
 	if err != nil {
 		return nil, filesystemError(requested, err)
 	}

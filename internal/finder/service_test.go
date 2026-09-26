@@ -4,14 +4,17 @@
 package finder
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -60,11 +63,41 @@ func newCommittedTestRepo(t *testing.T) (string, string) {
 	return root, strings.TrimSpace(string(head))
 }
 
+func TestGitCommitCountIndexLooksUpBothRenamePaths(t *testing.T) {
+	index := indexGitCommitCounts(map[string]gitCommitCount{"old.txt\x00new.txt": {added: 3, removed: 1}})
+	for _, path := range []string{"old.txt", "new.txt"} {
+		added, removed, binary := numstatForPath(index, path)
+		if added != 3 || removed != 1 || binary {
+			t.Fatalf("numstat for %q = (%v, %v, %v), want (3, 1, false)", path, added, removed, binary)
+		}
+	}
+	if added, removed, binary := numstatForPath(index, "missing.txt"); added != nil || removed != nil || binary {
+		t.Fatalf("missing numstat = (%v, %v, %v), want (nil, nil, false)", added, removed, binary)
+	}
+}
+
 type fakeNativeWatcher struct {
 	events chan nativeWatchEvent
 	status nativeWatchStatus
 	roots  []string
 }
+
+type countingNativeWatcher struct {
+	events chan nativeWatchEvent
+	status nativeWatchStatus
+	roots  []string
+	calls  int
+}
+
+func (w *countingNativeWatcher) SetRoots(_ context.Context, roots []string) nativeWatchStatus {
+	w.calls++
+	w.roots = append([]string(nil), roots...)
+	return w.status
+}
+
+func (w *countingNativeWatcher) Events() <-chan nativeWatchEvent { return w.events }
+
+func (w *countingNativeWatcher) Close() { close(w.events) }
 
 type serializedNativeWatcher struct {
 	events        chan nativeWatchEvent
@@ -738,6 +771,53 @@ func TestWatchRootsPublishesExternalChange(t *testing.T) {
 	}
 }
 
+func TestWatchSignaturePathsKeepAllExplicitRootsAndFiles(t *testing.T) {
+	got := watchSignaturePaths(
+		[]string{"/repo/src", "/other", "/repo/src", "/repo"},
+		[]string{"/repo/src/file.txt", "/outside/file.txt"},
+		[]string{"/repo/generated.txt", "/outside/background.txt"},
+	)
+	want := []string{
+		"/other", "/outside/background.txt", "/outside/file.txt", "/repo", "/repo/generated.txt", "/repo/src", "/repo/src/file.txt",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("watchSignaturePaths() = %#v, want %#v", got, want)
+	}
+}
+
+func TestWatchRootsPollsExplicitFileBeyondTruncatedRootSignature(t *testing.T) {
+	fake := &fakeNativeWatcher{events: make(chan nativeWatchEvent), status: nativeWatchStatus{available: true}}
+	service, root := newTestServiceWithNative(t, nil, fake, fake.status)
+	for index := 0; index <= maxWatchSignatureEntries; index++ {
+		path := filepath.Join(root, fmt.Sprintf("a-%05d.txt", index))
+		if err := os.WriteFile(path, []byte("padding\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := filepath.Join(root, "z-explicit.txt")
+	if err := os.WriteFile(target, []byte("before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	registration, finderErr := service.WatchRoots(context.Background(), map[string]any{
+		"client_id": "truncated-root", "roots": []any{root}, "files": []any{target},
+	})
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	baseline := registration["watch_token"].(string)
+	if err := os.WriteFile(target, []byte("after\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service.pollWatches()
+	diff, finderErr := service.WatchDiff(context.Background(), baseline, false)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if diff["mode"] != "delta" || diff["token"] == baseline {
+		t.Fatalf("explicit file change beyond root signature was missed: %#v", diff)
+	}
+}
+
 func TestWatchChangeOwnerCoalescesDuplicateSignals(t *testing.T) {
 	service, root := newTestService(t, nil)
 	path := filepath.Join(root, "note.md")
@@ -798,6 +878,38 @@ func TestWatchRootsUsesNativeWatcherAndAdmitsNestedDirectories(t *testing.T) {
 	}
 }
 
+func TestWatchRootsSkipsUnchangedNativeConfigurationAndRetriesUnhealthyWatcher(t *testing.T) {
+	t.Run("unchanged roots", func(t *testing.T) {
+		watcher := &countingNativeWatcher{events: make(chan nativeWatchEvent), status: nativeWatchStatus{available: true}}
+		service, root := newTestServiceWithNative(t, nil, watcher, watcher.status)
+		payload := map[string]any{"client_id": "same-roots", "roots": []any{root}}
+		for index := 0; index < 2; index++ {
+			if _, finderErr := service.WatchRoots(context.Background(), payload); finderErr != nil {
+				t.Fatal(finderErr)
+			}
+		}
+		if watcher.calls != 1 || len(watcher.roots) != 1 || watcher.roots[0] != root {
+			t.Fatalf("native SetRoots calls/roots = %d/%v, want one call with %q", watcher.calls, watcher.roots, root)
+		}
+	})
+
+	t.Run("unhealthy watcher retries", func(t *testing.T) {
+		watcher := &countingNativeWatcher{events: make(chan nativeWatchEvent)}
+		service, root := newTestServiceWithNative(t, nil, watcher, watcher.status)
+		payload := map[string]any{"client_id": "retry-roots", "roots": []any{root}}
+		if _, finderErr := service.WatchRoots(context.Background(), payload); finderErr != nil {
+			t.Fatal(finderErr)
+		}
+		watcher.status = nativeWatchStatus{available: true}
+		if _, finderErr := service.WatchRoots(context.Background(), payload); finderErr != nil {
+			t.Fatal(finderErr)
+		}
+		if watcher.calls != 2 {
+			t.Fatalf("unhealthy native watcher SetRoots calls = %d, want retry on identical roots", watcher.calls)
+		}
+	})
+}
+
 func TestWatchLifecycleExpiresDormantClientsAndReportsCapacityDegradation(t *testing.T) {
 	fake := &fakeNativeWatcher{events: make(chan nativeWatchEvent, 2), status: nativeWatchStatus{available: true}}
 	service, root := newTestServiceWithNative(t, nil, fake, fake.status)
@@ -832,13 +944,16 @@ func TestWatchLifecycleExpiresDormantClientsAndReportsCapacityDegradation(t *tes
 }
 
 func TestWatchOverflowInvalidatesTheAffectedRoot(t *testing.T) {
-	fake := &fakeNativeWatcher{events: make(chan nativeWatchEvent, 2), status: nativeWatchStatus{available: true}}
+	fake := &countingNativeWatcher{events: make(chan nativeWatchEvent, 2), status: nativeWatchStatus{available: true}}
 	service, root := newTestServiceWithNative(t, nil, fake, fake.status)
 	baseline, finderErr := service.WatchRoots(context.Background(), map[string]any{"client_id": "overflow", "roots": []any{root}})
 	if finderErr != nil {
 		t.Fatal(finderErr)
 	}
 	service.handleNativeEvent(nativeWatchEvent{root: root, overflow: true})
+	if fake.calls != 2 {
+		t.Fatalf("native SetRoots calls after overflow = %d, want initial registration plus forced reconciliation", fake.calls)
+	}
 	diff, finderErr := service.WatchDiff(context.Background(), baseline["watch_token"].(string), false)
 	if finderErr != nil || diff["mode"] != "delta" || diff["refresh"] != false {
 		t.Fatalf("overflow diff = %#v, error = %v", diff, finderErr)
@@ -911,7 +1026,7 @@ func TestGitHistoryAndCommitRequireCurrentHeadObject(t *testing.T) {
 			t.Cleanup(func() { execCommandContext = original })
 			execCommandContext = func(ctx context.Context, args []string, extraFiles []*os.File) *exec.Cmd {
 				for _, arg := range args {
-					if arg == "cat-file" {
+					if arg == "HEAD^{commit}" {
 						command := exec.CommandContext(ctx, "false")
 						command.ExtraFiles = extraFiles
 						command.Env = gitCommandEnvironment()
@@ -1071,6 +1186,244 @@ func TestGitHistoryAndCommitBindRepositoryIdentity(t *testing.T) {
 	commit := page["commits"].([]map[string]any)[0]["sha"].(string)
 	if _, finderErr = service.GitCommit(context.Background(), root, commit, page["head"].(string), "replaced-repository"); finderErr == nil || finderErr.Status != http.StatusConflict {
 		t.Fatalf("forged repository detail identity = %v", finderErr)
+	}
+}
+
+func TestGitHistoryCacheInvalidatesWhenDecoratingRefMoves(t *testing.T) {
+	root, _ := newCommittedTestRepo(t)
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	first, finderErr := service.GitHistory(context.Background(), root, "10", "")
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	firstCommit := first["commits"].([]map[string]any)[0]
+	if strings.Contains(firstCommit["decorations"].(string), "tag: moved-ref") {
+		t.Fatalf("tag unexpectedly present before ref creation: %#v", firstCommit)
+	}
+	if output, err := exec.Command("git", "-C", root, "tag", "-m", "moved-ref", "moved-ref").CombinedOutput(); err != nil {
+		t.Fatalf("create moved-ref: %v (%s)", err, output)
+	}
+	t.Cleanup(func() { _ = exec.Command("git", "-C", root, "tag", "-d", "moved-ref").Run() })
+
+	second, finderErr := service.GitHistory(context.Background(), root, "10", "")
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	secondCommit := second["commits"].([]map[string]any)[0]
+	if !strings.Contains(secondCommit["decorations"].(string), "tag: moved-ref") {
+		t.Fatalf("history cache did not observe new tag: %#v", secondCommit)
+	}
+
+	if output, err := exec.Command("git", "-C", root, "tag", "-d", "moved-ref").CombinedOutput(); err != nil {
+		t.Fatalf("delete moved-ref: %v (%s)", err, output)
+	}
+	third, finderErr := service.GitHistory(context.Background(), root, "10", "")
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	thirdCommit := third["commits"].([]map[string]any)[0]
+	if strings.Contains(thirdCommit["decorations"].(string), "tag: moved-ref") {
+		t.Fatalf("history cache retained deleted tag: %#v", thirdCommit)
+	}
+}
+
+func TestGitHistoryRefSignatureIncludesStash(t *testing.T) {
+	root, head := newCommittedTestRepo(t)
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	scope, finderErr := service.openGitHistoryScopeContext(context.Background(), root)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	defer scope.close()
+	before, finderErr := gitHistoryRefSignature(context.Background(), scope)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if output, err := exec.Command("git", "-C", root, "update-ref", "refs/stash", head).CombinedOutput(); err != nil {
+		t.Fatalf("create stash ref: %v (%s)", err, output)
+	}
+	t.Cleanup(func() { _ = exec.Command("git", "-C", root, "update-ref", "-d", "refs/stash").Run() })
+
+	after, finderErr := gitHistoryRefSignature(context.Background(), scope)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if before == after {
+		t.Fatalf("history ref signature did not change when refs/stash moved: %s", before)
+	}
+}
+
+func TestGitHistoryCacheRefreshesConfigDependentMetadata(t *testing.T) {
+	t.Run("hosted remote", func(t *testing.T) {
+		root, _ := newCommittedTestRepo(t)
+		for _, args := range [][]string{{"-C", root, "remote", "add", "origin", "git@github.com:owner/old.git"}} {
+			if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+				t.Fatalf("git %v: %v (%s)", args, err, output)
+			}
+		}
+		service, err := New(root, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer service.Close()
+
+		first, finderErr := service.GitHistory(context.Background(), root, "10", "")
+		if finderErr != nil {
+			t.Fatal(finderErr)
+		}
+		if got := first["hosted_remote"].(map[string]string)["base_url"]; got != "https://github.com/owner/old" {
+			t.Fatalf("initial hosted remote = %q", got)
+		}
+		if output, err := exec.Command("git", "-C", root, "remote", "set-url", "origin", "git@github.com:owner/new.git").CombinedOutput(); err != nil {
+			t.Fatalf("update hosted remote: %v (%s)", err, output)
+		}
+		second, finderErr := service.GitHistory(context.Background(), root, "10", "")
+		if finderErr != nil {
+			t.Fatal(finderErr)
+		}
+		if got := second["hosted_remote"].(map[string]string)["base_url"]; got != "https://github.com/owner/new" {
+			t.Fatalf("cached hosted remote after config update = %q", got)
+		}
+	})
+
+	t.Run("decoration exclusions", func(t *testing.T) {
+		root, _ := newCommittedTestRepo(t)
+		service, err := New(root, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer service.Close()
+
+		first, finderErr := service.GitHistory(context.Background(), root, "10", "")
+		if finderErr != nil {
+			t.Fatal(finderErr)
+		}
+		firstDecoration := first["commits"].([]map[string]any)[0]["decorations"].(string)
+		if !strings.Contains(firstDecoration, "master") {
+			t.Fatalf("initial decoration = %q, want master branch", firstDecoration)
+		}
+		if output, err := exec.Command("git", "-C", root, "config", "log.excludeDecoration", "refs/heads").CombinedOutput(); err != nil {
+			t.Fatalf("exclude branch decorations: %v (%s)", err, output)
+		}
+		second, finderErr := service.GitHistory(context.Background(), root, "10", "")
+		if finderErr != nil {
+			t.Fatal(finderErr)
+		}
+		secondDecoration := second["commits"].([]map[string]any)[0]["decorations"].(string)
+		if strings.Contains(secondDecoration, "master") {
+			t.Fatalf("cached decoration after config update = %q, still contains excluded branch", secondDecoration)
+		}
+	})
+}
+
+func TestGitHistoryCachedMetadataRefreshesSignatureStatus(t *testing.T) {
+	root, head := newCommittedTestRepo(t)
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	scope, finderErr := service.openGitHistoryScopeContext(context.Background(), root)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	defer scope.close()
+	commits := []map[string]any{{"sha": head, "decorations": "stale", "signature_status": "G"}}
+	if finderErr := service.refreshGitHistoryCachedMetadata(context.Background(), scope, commits, true); finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if commits[0]["signature_status"] != "N" || !strings.Contains(commits[0]["decorations"].(string), "master") {
+		t.Fatalf("refreshed cached commit metadata = %#v, want unsigned status and current branch decoration", commits[0])
+	}
+}
+
+func TestGitHistoryStatsCacheInvalidatesWhenDecoratingRefMoves(t *testing.T) {
+	root, _ := newCommittedTestRepo(t)
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	first, finderErr := service.GitHistory(context.Background(), root, "10", "", true)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	firstCommit := first["commits"].([]map[string]any)[0]
+	if strings.Contains(firstCommit["decorations"].(string), "tag: moved-ref") {
+		t.Fatalf("tag unexpectedly present before ref creation: %#v", firstCommit)
+	}
+	if output, err := exec.Command("git", "-C", root, "tag", "-m", "moved-ref", "moved-ref").CombinedOutput(); err != nil {
+		t.Fatalf("create moved-ref: %v (%s)", err, output)
+	}
+	t.Cleanup(func() { _ = exec.Command("git", "-C", root, "tag", "-d", "moved-ref").Run() })
+
+	second, finderErr := service.GitHistory(context.Background(), root, "10", "", true)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	secondCommit := second["commits"].([]map[string]any)[0]
+	if !strings.Contains(secondCommit["decorations"].(string), "tag: moved-ref") {
+		t.Fatalf("stats history cache did not observe new tag: %#v", secondCommit)
+	}
+}
+
+func TestGitHistoryStatsStreamsInvalidateWhenDecoratingRefMoves(t *testing.T) {
+	for _, mode := range []string{"sequential", "scheduled"} {
+		t.Run(mode, func(t *testing.T) {
+			root, _ := newCommittedTestRepo(t)
+			service, err := New(root, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer service.Close()
+
+			page, finderErr := service.GitHistory(context.Background(), root, "10", "")
+			if finderErr != nil {
+				t.Fatal(finderErr)
+			}
+			cursor := page["snapshot_cursor"].(string)
+			stream := func() map[string]any {
+				var result map[string]any
+				emit := func(payload map[string]any) error {
+					result = payload
+					return nil
+				}
+				if mode == "scheduled" {
+					_, finderErr = service.GitHistoryStatsScheduled(context.Background(), root, cursor, []int{1}, emit)
+				} else {
+					finderErr = service.GitHistoryStatsStream(context.Background(), root, cursor, 1, 1, emit)
+				}
+				if finderErr != nil {
+					t.Fatal(finderErr)
+				}
+				return result
+			}
+
+			first := stream()["commits"].([]map[string]any)[0]
+			if strings.Contains(first["decorations"].(string), "tag: moved-ref") {
+				t.Fatalf("tag unexpectedly present before ref creation: %#v", first)
+			}
+			if output, err := exec.Command("git", "-C", root, "tag", "-m", "moved-ref", "moved-ref").CombinedOutput(); err != nil {
+				t.Fatalf("create moved-ref: %v (%s)", err, output)
+			}
+			t.Cleanup(func() { _ = exec.Command("git", "-C", root, "tag", "-d", "moved-ref").Run() })
+
+			second := stream()["commits"].([]map[string]any)[0]
+			if !strings.Contains(second["decorations"].(string), "tag: moved-ref") {
+				t.Fatalf("%s stats stream cache did not observe new tag: %#v", mode, second)
+			}
+		})
 	}
 }
 
@@ -1631,6 +1984,45 @@ func TestGitHistoryAndCommitContracts(t *testing.T) {
 	if !ok || len(continuedCommits) != 1 || continuedCommits[0]["subject"] != "first" {
 		t.Fatalf("ancestor history page after HEAD advance = %#v", continued)
 	}
+	showCallsAfterHeadAdvance := 0
+	mergeBaseCallsAfterHeadAdvance := 0
+	headObjectValidationsAfterHeadAdvance := 0
+	commitObjectLookupsAfterHeadAdvance := 0
+	originalCommand := execCommandContext
+	t.Cleanup(func() { execCommandContext = originalCommand })
+	execCommandContext = func(ctx context.Context, args []string, extraFiles []*os.File) *exec.Cmd {
+		for _, arg := range args {
+			if arg == "show" {
+				showCallsAfterHeadAdvance++
+			}
+			if arg == "merge-base" {
+				mergeBaseCallsAfterHeadAdvance++
+			}
+			if arg == "HEAD^{commit}" {
+				headObjectValidationsAfterHeadAdvance++
+			} else if strings.HasSuffix(arg, "^{commit}") {
+				commitObjectLookupsAfterHeadAdvance++
+			}
+		}
+		command := exec.CommandContext(ctx, "git", args...)
+		command.ExtraFiles = extraFiles
+		command.Env = gitCommandEnvironment()
+		return command
+	}
+	advancedDetail, finderErr := service.GitCommit(context.Background(), root, commits[0]["sha"].(string), latestHead)
+	if finderErr != nil {
+		t.Fatalf("cached commit detail after HEAD advance = %v", finderErr)
+	}
+	advancedFiles, ok := advancedDetail["files"].([]map[string]any)
+	if !ok || len(advancedFiles) != len(files) || advancedDetail["to_ref"] != commits[0]["sha"] {
+		t.Fatalf("commit detail after HEAD advance = %#v", advancedDetail)
+	}
+	if showCallsAfterHeadAdvance != 0 {
+		t.Fatalf("cached commit detail after HEAD advance ran %d Git show commands", showCallsAfterHeadAdvance)
+	}
+	if mergeBaseCallsAfterHeadAdvance != 0 || headObjectValidationsAfterHeadAdvance != 1 || commitObjectLookupsAfterHeadAdvance != 0 {
+		t.Fatalf("cached detail validation after HEAD advance used %d merge-base, %d HEAD validation, and %d candidate object lookup commands", mergeBaseCallsAfterHeadAdvance, headObjectValidationsAfterHeadAdvance, commitObjectLookupsAfterHeadAdvance)
+	}
 	if _, finderErr = service.GitCommit(context.Background(), root, strings.Repeat("0", 40), latestHead); finderErr == nil || finderErr.Status != http.StatusNotFound {
 		t.Fatalf("unknown commit = %v", finderErr)
 	}
@@ -1712,25 +2104,81 @@ func TestGitHistoryAtOffsetUsesTargetedStatsForRootRenameAndBinaryCommits(t *tes
 	if rows[2]["subject"] != "root" || rows[2]["files"] != 1 || rows[2]["added"] != 1 || rows[2]["removed"] != 0 || rows[2]["binary_files"] != 0 {
 		t.Fatalf("root stats = %#v", rows[2])
 	}
-	seenTargetedDiff := false
+	var targetedStatsSHAs []string
 	for _, args := range calls {
 		isLog := false
-		isDiffTree := false
+		isShow := false
 		hasNumstat := false
 		for _, arg := range args {
 			isLog = isLog || arg == "log"
-			isDiffTree = isDiffTree || arg == "diff-tree"
+			isShow = isShow || arg == "show"
 			hasNumstat = hasNumstat || arg == "--numstat"
 		}
 		if isLog && hasNumstat {
 			t.Fatalf("offset stats used history-wide numstat: %v", args)
 		}
-		if isDiffTree && hasNumstat {
-			seenTargetedDiff = true
+		if isShow && hasNumstat {
+			for _, row := range rows {
+				sha, _ := row["sha"].(string)
+				for _, arg := range args {
+					if arg == sha {
+						targetedStatsSHAs = append(targetedStatsSHAs, sha)
+					}
+				}
+			}
 		}
 	}
-	if !seenTargetedDiff {
-		t.Fatalf("offset stats did not run a targeted diff-tree: %v", calls)
+	if len(targetedStatsSHAs) != len(rows) {
+		t.Fatalf("offset stats did not run one targeted batched-show product per visible SHA: SHAs=%v rows=%v calls=%v", targetedStatsSHAs, rows, calls)
+	}
+	historyHead, ok := metadata["head"].(string)
+	if !ok || historyHead == "" {
+		t.Fatalf("history head = %#v", metadata["head"])
+	}
+	for _, testCase := range []struct {
+		name        string
+		row         map[string]any
+		wantPaths   map[string]struct{}
+		wantAdded   int
+		wantRemoved int
+		wantBinary  int
+	}{
+		{name: "binary", row: rows[0], wantPaths: map[string]struct{}{"binary.bin": {}}, wantBinary: 1},
+		{name: "rename", row: rows[1], wantPaths: map[string]struct{}{"old.txt": {}, "new.txt": {}}, wantAdded: 1, wantRemoved: 1},
+		{name: "root", row: rows[2], wantPaths: map[string]struct{}{"old.txt": {}}, wantAdded: 1},
+	} {
+		sha, _ := testCase.row["sha"].(string)
+		detail, detailErr := service.GitCommit(context.Background(), root, sha, historyHead)
+		if detailErr != nil {
+			t.Fatalf("%s commit detail: %v", testCase.name, detailErr)
+		}
+		files, ok := detail["files"].([]map[string]any)
+		if !ok || len(files) != len(testCase.wantPaths) {
+			t.Fatalf("%s detail files = %#v", testCase.name, detail["files"])
+		}
+		gotPaths := make(map[string]struct{}, len(files))
+		added, removed, binary := 0, 0, 0
+		for _, file := range files {
+			path, _ := file["path"].(string)
+			gotPaths[path] = struct{}{}
+			if file["binary"] == true {
+				binary++
+			}
+			if count, ok := file["added"].(int); ok {
+				added += count
+			}
+			if count, ok := file["removed"].(int); ok {
+				removed += count
+			}
+		}
+		pathsMatch := len(gotPaths) == len(testCase.wantPaths)
+		for path := range testCase.wantPaths {
+			_, present := gotPaths[path]
+			pathsMatch = pathsMatch && present
+		}
+		if detail["to_ref"] != sha || !pathsMatch || added != testCase.wantAdded || removed != testCase.wantRemoved || binary != testCase.wantBinary {
+			t.Fatalf("%s detail = %#v, paths=%v added=%d removed=%d binary=%d", testCase.name, detail, gotPaths, added, removed, binary)
+		}
 	}
 }
 
@@ -1751,6 +2199,51 @@ func TestGitHistoryDefaultAndMaximumLimitsMatchPythonContract(t *testing.T) {
 	}
 }
 
+func TestGitCommitCountsIgnoreLocalDiffAlgorithm(t *testing.T) {
+	root, _ := newCommittedTestRepo(t)
+	for _, content := range []string{"d\nc\nd\na\nd\na\n", "d\nc\nc\nd\nd\na\n"} {
+		if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, args := range [][]string{{"add", "note.txt"}, {"commit", "-m", "ambiguous change"}} {
+			if output, err := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput(); err != nil {
+				t.Fatalf("git %v: %v (%s)", args, err, output)
+			}
+		}
+	}
+	for _, initial := range []string{"histogram", "myers"} {
+		t.Run(initial, func(t *testing.T) {
+			service, err := New(root, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer service.Close()
+			for _, algorithm := range []string{initial, "patience", "histogram", "myers"} {
+				if output, err := exec.Command("git", "-C", root, "config", "diff.algorithm", algorithm).CombinedOutput(); err != nil {
+					t.Fatalf("set diff algorithm: %v (%s)", err, output)
+				}
+				history, finderErr := service.GitHistory(context.Background(), root, "1", "", true)
+				if finderErr != nil {
+					t.Fatal(finderErr)
+				}
+				row := history["commits"].([]map[string]any)[0]
+				if row["added"] != 1 || row["removed"] != 1 {
+					t.Fatalf("%s history counts = %#v, want 1 added and 1 removed", algorithm, row)
+				}
+				sha := row["sha"].(string)
+				detail, finderErr := service.GitCommit(context.Background(), root, sha, sha)
+				if finderErr != nil {
+					t.Fatal(finderErr)
+				}
+				files := detail["files"].([]map[string]any)
+				if len(files) != 1 || files[0]["added"] != 1 || files[0]["removed"] != 1 {
+					t.Fatalf("%s detail counts = %#v, want 1 added and 1 removed", algorithm, files)
+				}
+			}
+		})
+	}
+}
+
 func TestGitHistoryAndCommitCacheImmutableProducts(t *testing.T) {
 	root, head := newCommittedTestRepo(t)
 	service, err := New(root, nil)
@@ -1759,13 +2252,33 @@ func TestGitHistoryAndCommitCacheImmutableProducts(t *testing.T) {
 	}
 	defer service.Close()
 	calls := map[string]int{}
+	historyProducts, metadataRefreshes := 0, 0
 	original := execCommandContext
 	t.Cleanup(func() { execCommandContext = original })
 	execCommandContext = func(ctx context.Context, args []string, extraFiles []*os.File) *exec.Cmd {
+		showProduct := false
+		hasRaw, hasNumstat := false, false
 		for _, arg := range args {
 			if arg == "log" || arg == "show" {
 				calls[arg]++
 			}
+			if arg == "--topo-order" {
+				historyProducts++
+			}
+			if arg == "--no-walk" {
+				metadataRefreshes++
+			}
+			if arg == "show" {
+				showProduct = true
+			}
+			hasRaw = hasRaw || arg == "--raw"
+			hasNumstat = hasNumstat || arg == "--numstat"
+			if arg == "diff" || arg == "diff-tree" {
+				calls["diff"]++
+			}
+		}
+		if showProduct && hasRaw && hasNumstat {
+			calls["commit_product"]++
 		}
 		command := exec.CommandContext(ctx, "git", args...)
 		command.ExtraFiles = extraFiles
@@ -1782,8 +2295,8 @@ func TestGitHistoryAndCommitCacheImmutableProducts(t *testing.T) {
 	if finderErr != nil {
 		t.Fatal(finderErr)
 	}
-	if calls["log"] != 1 || secondHistory["commits"].([]map[string]any)[0]["subject"] != "initial" {
-		t.Fatalf("history cache calls=%#v payload=%#v", calls, secondHistory)
+	if historyProducts != 1 || metadataRefreshes != 1 || secondHistory["commits"].([]map[string]any)[0]["subject"] != "initial" {
+		t.Fatalf("history cache product calls=%d metadata refreshes=%d commands=%#v payload=%#v", historyProducts, metadataRefreshes, calls, secondHistory)
 	}
 
 	firstCommit, finderErr := service.GitCommit(context.Background(), root, head, head)
@@ -1795,8 +2308,136 @@ func TestGitHistoryAndCommitCacheImmutableProducts(t *testing.T) {
 	if finderErr != nil {
 		t.Fatal(finderErr)
 	}
-	if calls["show"] != 1 || secondCommit["subject"] != "initial" {
+	if calls["show"] != 1 || calls["commit_product"] != 1 || calls["diff"] != 0 || secondCommit["subject"] != "initial" {
 		t.Fatalf("commit cache calls=%#v payload=%#v", calls, secondCommit)
+	}
+}
+
+func TestGitCommitCacheReusesValidatedAncestryForFrozenSHA(t *testing.T) {
+	root, oldHead := newCommittedTestRepo(t)
+	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("next\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "--", "note.txt"}, {"commit", "-m", "next"}} {
+		command := exec.Command("git", append([]string{"-C", root}, args...)...)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v (%s)", strings.Join(args, " "), err, output)
+		}
+	}
+	output, err := exec.Command("git", "-C", root, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentHead := strings.TrimSpace(string(output))
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	mergeBaseCalls, commitProductCalls := 0, 0
+	original := execCommandContext
+	execCommandContext = func(ctx context.Context, args []string, extraFiles []*os.File) *exec.Cmd {
+		for index, arg := range args {
+			if arg == "merge-base" && index+1 < len(args) && args[index+1] == "--is-ancestor" {
+				mergeBaseCalls++
+			}
+		}
+		hasShow, hasRaw, hasNumstat := false, false, false
+		for _, arg := range args {
+			hasShow = hasShow || arg == "show"
+			hasRaw = hasRaw || arg == "--raw"
+			hasNumstat = hasNumstat || arg == "--numstat"
+		}
+		if hasShow && hasRaw && hasNumstat {
+			commitProductCalls++
+		}
+		command := exec.CommandContext(ctx, "git", args...)
+		command.ExtraFiles = extraFiles
+		command.Env = gitCommandEnvironment()
+		return command
+	}
+	t.Cleanup(func() { execCommandContext = original })
+
+	for range 2 {
+		if _, finderErr := service.GitCommit(context.Background(), root, oldHead, currentHead); finderErr != nil {
+			t.Fatal(finderErr)
+		}
+	}
+	if mergeBaseCalls != 1 || commitProductCalls != 1 {
+		t.Fatalf("cached immutable detail commands = ancestry %d, product %d; want one of each", mergeBaseCalls, commitProductCalls)
+	}
+}
+
+func TestGitCommitDoesNotRequireDisplayOnlyRemoteMetadata(t *testing.T) {
+	root, head := newCommittedTestRepo(t)
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	padding := bytes.Repeat([]byte("#"+strings.Repeat("x", 1022)+"\n"), (gitConfigMaxBytes/1024)+2)
+	config, err := os.OpenFile(filepath.Join(root, ".git", "config"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.Write(padding); err != nil {
+		_ = config.Close()
+		t.Fatal(err)
+	}
+	if err := config.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, finderErr := service.sessionFilesRepositoryForTarget(context.Background(), root, false); finderErr != nil {
+		t.Fatalf("session-files repository discovery depended on display-only remote metadata: %v", finderErr)
+	}
+	if _, finderErr := service.GitHistoryWorktree(context.Background(), root); finderErr != nil {
+		t.Fatalf("worktree status depended on display-only remote metadata: %v", finderErr)
+	}
+	detail, finderErr := service.GitCommit(context.Background(), root, head, head)
+	if finderErr != nil {
+		t.Fatalf("commit detail depended on display-only remote metadata: %v", finderErr)
+	}
+	if detail["sha"] != head {
+		t.Fatalf("commit detail SHA = %#v, want %s", detail["sha"], head)
+	}
+}
+
+func TestGitCommitStillRejectsSymlinkedGitMetadataFiles(t *testing.T) {
+	for _, name := range []string{"config", "HEAD"} {
+		t.Run(name, func(t *testing.T) {
+			root, head := newCommittedTestRepo(t)
+			service, err := New(root, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer service.Close()
+
+			path := filepath.Join(root, ".git", name)
+			regularPath := path + ".regular"
+			target := filepath.Base(regularPath)
+			if name == "HEAD" {
+				ref, err := exec.Command("git", "-C", root, "symbolic-ref", "HEAD").Output()
+				if err != nil {
+					t.Fatal(err)
+				}
+				target = strings.TrimSpace(string(ref))
+			}
+			if err := os.Rename(path, regularPath); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, path); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+
+			if _, finderErr := service.GitCommit(context.Background(), root, head, head); finderErr == nil {
+				t.Fatalf("Git commit accepted symlinked Git %s", name)
+			} else if finderErr.Code != "git_repository_changed" {
+				t.Fatalf("symlinked Git %s result = %v, want git_repository_changed", name, finderErr)
+			}
+		})
 	}
 }
 
@@ -1815,13 +2456,13 @@ func TestGitHistoryStatsCacheReusesSHAStatsAcrossHistoryProducts(t *testing.T) {
 	if !ok || cursor == "" {
 		t.Fatalf("history snapshot cursor = %#v", firstPage["snapshot_cursor"])
 	}
-	diffTreeCalls := 0
+	statsProductCalls := 0
 	original := execCommandContext
 	t.Cleanup(func() { execCommandContext = original })
 	execCommandContext = func(ctx context.Context, args []string, extraFiles []*os.File) *exec.Cmd {
 		for _, arg := range args {
-			if arg == "diff-tree" {
-				diffTreeCalls++
+			if arg == "--numstat" {
+				statsProductCalls++
 				break
 			}
 		}
@@ -1836,8 +2477,394 @@ func TestGitHistoryStatsCacheReusesSHAStatsAcrossHistoryProducts(t *testing.T) {
 	if _, finderErr = service.GitHistoryAtOffset(context.Background(), root, "2", cursor, 0); finderErr != nil {
 		t.Fatal(finderErr)
 	}
-	if diffTreeCalls != 1 {
-		t.Fatalf("diff-tree calls after changing only the history product shape = %d, want 1", diffTreeCalls)
+	if statsProductCalls != 1 {
+		t.Fatalf("numstat products after changing only the history product shape = %d, want one cached SHA product", statsProductCalls)
+	}
+}
+
+func TestGitHistoryStatsStreamPreservesSignatureStatusAcrossSHACacheHits(t *testing.T) {
+	root, _ := newCommittedTestRepo(t)
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	firstPage, finderErr := service.GitHistory(context.Background(), root, "1", "")
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	cursor := firstPage["snapshot_cursor"].(string)
+	statsProductCalls := 0
+	original := execCommandContext
+	t.Cleanup(func() { execCommandContext = original })
+	execCommandContext = func(ctx context.Context, args []string, extraFiles []*os.File) *exec.Cmd {
+		for _, arg := range args {
+			if arg == "--numstat" {
+				statsProductCalls++
+				break
+			}
+		}
+		command := exec.CommandContext(ctx, "git", args...)
+		command.ExtraFiles = extraFiles
+		command.Env = gitCommandEnvironment()
+		return command
+	}
+	for _, limit := range []string{"1", "2"} {
+		payload, finderErr := service.GitHistoryAtOffset(context.Background(), root, limit, cursor, 0)
+		if finderErr != nil {
+			t.Fatal(finderErr)
+		}
+		commit := payload["commits"].([]map[string]any)[0]
+		if status, ok := commit["signature_status"].(string); !ok || status == "" {
+			t.Fatalf("stats signature status = %#v, want a nonempty Git status", commit["signature_status"])
+		}
+	}
+	if statsProductCalls != 1 {
+		t.Fatalf("numstat products across differently shaped stats pages = %d, want one cached SHA product", statsProductCalls)
+	}
+}
+
+func TestGitHistoryStatsCacheInvalidatesWhenShallowBoundaryMoves(t *testing.T) {
+	source, _ := newCommittedTestRepo(t)
+	addedPath := filepath.Join(source, "added.txt")
+	if err := os.WriteFile(addedPath, []byte("two\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"-C", source, "add", "--", "added.txt"}, {"-C", source, "commit", "-qm", "second"}} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	shallow := filepath.Join(t.TempDir(), "shallow")
+	sourceURL := (&url.URL{Scheme: "file", Path: source}).String()
+	if output, err := exec.Command("git", "clone", "--quiet", "--depth=1", sourceURL, shallow).CombinedOutput(); err != nil {
+		t.Fatalf("shallow clone: %v (%s)", err, output)
+	}
+	service, err := New(shallow, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	before, finderErr := service.GitHistory(context.Background(), shallow, "1", "", true)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	beforeCommit := before["commits"].([]map[string]any)[0]
+	if beforeCommit["files"] != 2 || beforeCommit["added"] != 2 {
+		t.Fatalf("shallow commit stats = (%v files, %v added), want (2, 2)", beforeCommit["files"], beforeCommit["added"])
+	}
+	beforeDetail, finderErr := service.GitCommit(context.Background(), shallow, beforeCommit["sha"].(string), before["head"].(string))
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if files := beforeDetail["files"].([]map[string]any); len(files) != 2 {
+		t.Fatalf("shallow commit detail files = %d, want 2: %#v", len(files), files)
+	}
+	if output, err := exec.Command("git", "-C", shallow, "fetch", "--quiet", "--unshallow").CombinedOutput(); err != nil {
+		t.Fatalf("unshallow fetch: %v (%s)", err, output)
+	}
+	after, finderErr := service.GitHistory(context.Background(), shallow, "2", "", true)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	afterCommit := after["commits"].([]map[string]any)[0]
+	if afterCommit["sha"] != beforeCommit["sha"] {
+		t.Fatalf("latest commit changed across deepen: before=%v after=%v", beforeCommit["sha"], afterCommit["sha"])
+	}
+	if afterCommit["files"] != 1 || afterCommit["added"] != 1 {
+		t.Fatalf("deepened commit stats = (%v files, %v added), want (1, 1)", afterCommit["files"], afterCommit["added"])
+	}
+	afterDetail, finderErr := service.GitCommit(context.Background(), shallow, afterCommit["sha"].(string), after["head"].(string))
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if before["shallow_boundary"] == "" || before["shallow_boundary"] == after["shallow_boundary"] {
+		t.Fatalf("history must expose changed shallow boundary: before=%v after=%v", before["shallow_boundary"], after["shallow_boundary"])
+	}
+	if beforeDetail["shallow_boundary"] != before["shallow_boundary"] || afterDetail["shallow_boundary"] != after["shallow_boundary"] {
+		t.Fatal("commit detail and history must share the shallow boundary")
+	}
+	if files := afterDetail["files"].([]map[string]any); len(files) != 1 {
+		t.Fatalf("deepened commit detail files = %d, want 1: %#v", len(files), files)
+	}
+}
+
+func TestGitHistoryStatsRejectsShallowBoundaryChangeDuringProduct(t *testing.T) {
+	root, _ := newCommittedTestRepo(t)
+	if err := os.WriteFile(filepath.Join(root, "second.txt"), []byte("two\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"-C", root, "add", "--", "second.txt"}, {"-C", root, "commit", "-qm", "second"}} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	page, finderErr := service.GitHistory(context.Background(), root, "1", "")
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	shallowPath := filepath.Join(root, ".git", "shallow")
+	original := execCommandContext
+	changed := false
+	t.Cleanup(func() { execCommandContext = original })
+	execCommandContext = func(ctx context.Context, args []string, extraFiles []*os.File) *exec.Cmd {
+		for _, arg := range args {
+			if arg == "--numstat" && !changed {
+				changed = true
+				if err := os.WriteFile(shallowPath, []byte(page["head"].(string)+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				break
+			}
+		}
+		command := exec.CommandContext(ctx, "git", args...)
+		command.ExtraFiles = extraFiles
+		command.Env = gitCommandEnvironment()
+		return command
+	}
+	if _, finderErr := service.GitHistoryAtOffset(context.Background(), root, "1", page["snapshot_cursor"].(string), 0); finderErr == nil || finderErr.Code != "git_repository_changed" {
+		t.Fatalf("stats during shallow-boundary change = %v, want git_repository_changed", finderErr)
+	}
+	if err := os.Remove(shallowPath); err != nil {
+		t.Fatal(err)
+	}
+	execCommandContext = original
+	recovered, finderErr := service.GitHistoryAtOffset(context.Background(), root, "1", page["snapshot_cursor"].(string), 0)
+	if finderErr != nil {
+		t.Fatalf("stats after restoring the original shallow boundary: %v", finderErr)
+	}
+	commit := recovered["commits"].([]map[string]any)[0]
+	if commit["files"] != 1 || commit["added"] != 1 {
+		t.Fatalf("stats cache retained rejected shallow-boundary product: files=%v added=%v, want (1, 1)", commit["files"], commit["added"])
+	}
+}
+
+func TestGitCommitReachabilityRejectsShallowBoundaryChangeWithoutCaching(t *testing.T) {
+	root, ancestor := newCommittedTestRepo(t)
+	if err := os.WriteFile(filepath.Join(root, "second.txt"), []byte("two\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"-C", root, "add", "--", "second.txt"}, {"-C", root, "commit", "-qm", "second"}} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	headRaw, err := exec.Command("git", "-C", root, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := strings.TrimSpace(string(headRaw))
+	shallowPath := filepath.Join(root, ".git", "shallow")
+	if err := os.WriteFile(shallowPath, []byte(head+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	original := execCommandContext
+	changed := false
+	t.Cleanup(func() { execCommandContext = original })
+	execCommandContext = func(ctx context.Context, args []string, extraFiles []*os.File) *exec.Cmd {
+		for _, arg := range args {
+			if arg == "merge-base" && !changed {
+				changed = true
+				if err := os.Remove(shallowPath); err != nil {
+					t.Fatal(err)
+				}
+				break
+			}
+		}
+		command := exec.CommandContext(ctx, "git", args...)
+		command.ExtraFiles = extraFiles
+		command.Env = gitCommandEnvironment()
+		return command
+	}
+	if _, finderErr := service.GitCommit(context.Background(), root, ancestor, head); finderErr == nil || finderErr.Code != "git_repository_changed" {
+		t.Fatalf("detail during shallow-boundary change = %v, want git_repository_changed", finderErr)
+	}
+	if err := os.WriteFile(shallowPath, []byte(head+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	execCommandContext = original
+	if _, finderErr := service.GitCommit(context.Background(), root, ancestor, head); finderErr == nil || finderErr.Code != "unknown_commit" {
+		t.Fatalf("detail after restoring shallow boundary = %v, want unknown_commit", finderErr)
+	}
+}
+
+func TestGitHistoryMetadataLeavesDeferredSignatureStatusIncompleteAfterSHAStatsCacheHit(t *testing.T) {
+	root, _ := newCommittedTestRepo(t)
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	page, finderErr := service.GitHistory(context.Background(), root, "1", "")
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	cursor := page["snapshot_cursor"].(string)
+	stats, finderErr := service.GitHistoryAtOffset(context.Background(), root, "1", cursor, 0)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	statsCommit := stats["commits"].([]map[string]any)[0]
+	if status, ok := statsCommit["signature_status"].(string); !ok || status == "" {
+		t.Fatalf("stats signature status = %#v, want complete nonempty status", statsCommit["signature_status"])
+	}
+	for _, request := range []struct {
+		name string
+		call func() (map[string]any, *Error)
+	}{
+		{name: "cold", call: func() (map[string]any, *Error) {
+			return service.GitHistoryMetadata(context.Background(), root, "1", cursor, 0)
+		}},
+		{name: "cached", call: func() (map[string]any, *Error) {
+			return service.GitHistoryMetadata(context.Background(), root, "1", cursor, 0)
+		}},
+	} {
+		metadata, finderErr := request.call()
+		if finderErr != nil {
+			t.Fatalf("%s metadata request: %v", request.name, finderErr)
+		}
+		commit := metadata["commits"].([]map[string]any)[0]
+		if status, ok := commit["signature_status"]; ok {
+			t.Fatalf("%s metadata-only signature status = %#v, want omitted so the browser requests enrichment", request.name, status)
+		}
+		if commit["files"] != 1 || commit["added"] != 1 || commit["removed"] != 0 {
+			t.Fatalf("%s metadata did not reuse numeric SHA stats: %#v", request.name, commit)
+		}
+	}
+}
+
+func TestGitHistoryStatsCacheRefreshesSignatureStatusOnJSONPageHit(t *testing.T) {
+	root, _ := newCommittedTestRepo(t)
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	signatureRefreshes := 0
+	original := execCommandContext
+	t.Cleanup(func() { execCommandContext = original })
+	execCommandContext = func(ctx context.Context, args []string, extraFiles []*os.File) *exec.Cmd {
+		for _, arg := range args {
+			if strings.Contains(arg, "%G?") {
+				signatureRefreshes++
+				break
+			}
+		}
+		command := exec.CommandContext(ctx, "git", args...)
+		command.ExtraFiles = extraFiles
+		command.Env = gitCommandEnvironment()
+		return command
+	}
+	firstRefreshes := 0
+	for index := 0; index < 2; index++ {
+		payload, finderErr := service.GitHistory(context.Background(), root, "1", "", true)
+		if finderErr != nil {
+			t.Fatalf("stats request %d: %v", index+1, finderErr)
+		}
+		commit := payload["commits"].([]map[string]any)[0]
+		if status, ok := commit["signature_status"].(string); !ok || status == "" {
+			t.Fatalf("stats request %d signature status = %#v, want a current Git status", index+1, commit["signature_status"])
+		}
+		if index == 0 {
+			firstRefreshes = signatureRefreshes
+		}
+	}
+	if signatureRefreshes <= firstRefreshes {
+		t.Fatalf("signature refresh commands across cold and cached JSON stats pages = %d after first request=%d, want the cached page to refresh signature status", signatureRefreshes, firstRefreshes)
+	}
+}
+
+func TestGitReachabilityCacheInvalidatesWhenShallowBoundaryChanges(t *testing.T) {
+	root, ancestor := newCommittedTestRepo(t)
+	if err := os.WriteFile(filepath.Join(root, "second.txt"), []byte("two\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"-C", root, "add", "--", "second.txt"}, {"-C", root, "commit", "-qm", "second"}} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	headRaw, err := exec.Command("git", "-C", root, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := strings.TrimSpace(string(headRaw))
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	if _, finderErr := service.GitCommit(context.Background(), root, ancestor, head); finderErr != nil {
+		t.Fatalf("ancestor detail before shallow boundary: %v", finderErr)
+	}
+	sourceURL := (&url.URL{Scheme: "file", Path: root}).String()
+	if output, err := exec.Command("git", "-C", root, "fetch", "--quiet", "--depth=1", sourceURL, "HEAD").CombinedOutput(); err != nil {
+		t.Fatalf("shallow fetch: %v (%s)", err, output)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".git", "shallow")); err != nil {
+		t.Fatalf("shallow boundary was not created: %v", err)
+	}
+	if _, finderErr := service.GitCommit(context.Background(), root, ancestor, head); finderErr == nil || finderErr.Code != "unknown_commit" {
+		t.Fatalf("ancestor detail after shallow boundary = %v, want unknown_commit", finderErr)
+	}
+}
+
+func TestGitHistoryAndCommitCacheRefreshRepositoryPathsAfterMove(t *testing.T) {
+	root, head := newCommittedTestRepo(t)
+	parent := filepath.Dir(root)
+	service, err := New(parent, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	firstHistory, finderErr := service.GitHistory(context.Background(), root, "10", "")
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	firstStats, finderErr := service.GitHistory(context.Background(), root, "10", "", true)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if _, finderErr = service.GitCommit(context.Background(), root, head, head); finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	moved := filepath.Join(parent, "moved-repo")
+	if err := os.Rename(root, moved); err != nil {
+		t.Fatal(err)
+	}
+
+	secondHistory, finderErr := service.GitHistory(context.Background(), moved, "10", "")
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if secondHistory["path"] != moved || secondHistory["repo"] != moved {
+		t.Fatalf("history after repository move has stale paths: before=%#v after=%#v", firstHistory, secondHistory)
+	}
+	secondStats, finderErr := service.GitHistory(context.Background(), moved, "10", "", true)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if secondStats["path"] != moved || secondStats["repo"] != moved {
+		t.Fatalf("stats history after repository move has stale paths: before=%#v after=%#v", firstStats, secondStats)
+	}
+	secondCommit, finderErr := service.GitCommit(context.Background(), moved, head, head)
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if secondCommit["repo"] != moved {
+		t.Fatalf("commit detail after repository move has stale repo path: %#v", secondCommit)
 	}
 }
 
@@ -1846,8 +2873,8 @@ func TestGitHistoryStatsCacheEvictsOldestSHAAndKeepsRecentEntries(t *testing.T) 
 	for index := 0; index < maxGitHistoryStatsCacheEntries; index++ {
 		service.cacheGitHistoryStats(fmt.Sprintf("sha-%d", index), gitHistoryStatsInfo{files: index})
 	}
-	if len(service.gitHistoryStatsCache) != maxGitHistoryStatsCacheEntries {
-		t.Fatalf("stats cache size = %d, want %d", len(service.gitHistoryStatsCache), maxGitHistoryStatsCacheEntries)
+	if service.gitHistoryStatsCache.Len() != maxGitHistoryStatsCacheEntries {
+		t.Fatalf("stats cache size = %d, want %d", service.gitHistoryStatsCache.Len(), maxGitHistoryStatsCacheEntries)
 	}
 	if _, ok := service.cachedGitHistoryStats("sha-0"); !ok {
 		t.Fatal("oldest entry was unexpectedly missing before the cache became full")
@@ -1884,6 +2911,86 @@ func TestGitHistoryAndCommitAllowExternalLinkedWorktree(t *testing.T) {
 	detail, finderErr := service.GitCommit(context.Background(), linked, head, head, history["repository_identity"].(string))
 	if finderErr != nil || detail["sha"] != head || len(detail["files"].([]map[string]any)) != 1 {
 		t.Fatalf("external linked-worktree detail = %#v, error = %v", detail, finderErr)
+	}
+}
+
+func TestGitHistoryEmptyRepositoryExposesShallowBoundary(t *testing.T) {
+	root := t.TempDir()
+	if output, err := exec.Command("git", "init", "-q", root).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v (%s)", err, output)
+	}
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	history, finderErr := service.GitHistory(context.Background(), root, "1", "")
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	if history["head"] != "" || len(history["commits"].([]map[string]any)) != 0 {
+		t.Fatalf("empty repository history = %#v", history)
+	}
+	if boundary, ok := history["shallow_boundary"].(string); !ok || boundary == "" {
+		t.Fatalf("empty repository shallow boundary = %#v", history["shallow_boundary"])
+	}
+}
+
+func TestGitHistoryNamespacePathWithNewline(t *testing.T) {
+	workspace := t.TempDir()
+	root := filepath.Join(workspace, "repo\nwith-newline")
+	linked := filepath.Join(workspace, "linked")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("one\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"init", "-q", root}, {"-C", root, "config", "user.email", "test@example.invalid"}, {"-C", root, "config", "user.name", "Finder Test"}, {"-C", root, "add", "--", "note.txt"}, {"-C", root, "commit", "-qm", "initial"}} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	head, err := exec.Command("git", "-C", root, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("git", "-C", root, "worktree", "add", "--detach", linked, strings.TrimSpace(string(head))).CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v (%s)", err, output)
+	}
+	pathDiscoveryCalls := 0
+	original := execCommandContext
+	t.Cleanup(func() { execCommandContext = original })
+	execCommandContext = func(ctx context.Context, args []string, extraFiles []*os.File) *exec.Cmd {
+		hasGitPath := false
+		for index, arg := range args {
+			if arg == "--git-path" && index+1 < len(args) && args[index+1] == "objects" {
+				hasGitPath = true
+			}
+		}
+		if hasGitPath {
+			pathDiscoveryCalls++
+		}
+		command := exec.CommandContext(ctx, "git", args...)
+		command.ExtraFiles = extraFiles
+		command.Env = gitCommandEnvironment()
+		return command
+	}
+	service, err := New(workspace, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	history, finderErr := service.GitHistory(context.Background(), linked, "1", "")
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	commits, ok := history["commits"].([]map[string]any)
+	if !ok || len(commits) != 1 || commits[0]["subject"] != "initial" {
+		t.Fatalf("history for repository path with newline = %#v", history["commits"])
+	}
+	if pathDiscoveryCalls != 2 {
+		t.Fatalf("object path discovery commands = %d, want combined command plus newline-safe fallback", pathDiscoveryCalls)
 	}
 }
 
@@ -2192,10 +3299,16 @@ func TestGitRawNumstatParserCombinesStatusAndCounts(t *testing.T) {
 	}
 }
 
+func gitCommitProductFixture(commit string, diff []byte) []byte {
+	metadata := []byte(fmt.Sprintf("%s\x00\x00Finder Test\x001\x00initial\x00initial\n\x00\x00\n", commit))
+	return append(metadata, diff...)
+}
+
 func TestGitCommitReturnsTooLargeWhenTruncatedStatusHasNoCompleteRows(t *testing.T) {
 	root, head := newCommittedTestRepo(t)
 	diffPath := filepath.Join(root, "diff-output")
-	if err := os.WriteFile(diffPath, []byte(":"+strings.Repeat("x", gitCommitMaxOutput)), 0o600); err != nil {
+	product := gitCommitProductFixture(head, []byte(":"+strings.Repeat("x", gitCommitProductMaxOutput)))
+	if err := os.WriteFile(diffPath, product, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	original := execCommandContext
@@ -2240,7 +3353,7 @@ func TestGitCommitTrimsRowsToPayloadLimit(t *testing.T) {
 		status = append(status, []byte(fmt.Sprintf(":100644 100644 %040x %040x M\x00%s\x00", index+1, index+2, path))...)
 		numstat = append(numstat, []byte("1\t2\t"+path+"\x00")...)
 	}
-	combined := append(status, numstat...)
+	combined := gitCommitProductFixture(head, append(status, numstat...))
 	if err := os.WriteFile(diffPath, combined, 0o600); err != nil {
 		t.Fatal(err)
 	}

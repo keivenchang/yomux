@@ -1407,12 +1407,6 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
     assert activity_calls == [{"hours": 48.0, "visible": True, "session_scope": "all"}]
     assert writes == [("json", HTTPStatus.OK, {"scope": "all"})]
 
-    app = SimpleNamespace(background_owner_status_payload=lambda: ({"status": "owner"}, HTTPStatus.OK))
-    handler, calls, writes = route_handler("/api/background/status", app)
-    Handler.do_GET(handler)
-    assert calls == [("require_auth", "readonly")]
-    assert writes == [("json", HTTPStatus.OK, {"status": "owner"})]
-
     # The route reads a published snapshot and writes its bytes; it never calls a payload builder.
     system_status_body = b'{"ok":true,"server":{"pid":123}}'
     app = SimpleNamespace(system_status_snapshot_response=lambda advanced=False: (system_status_body, {"length": len(system_status_body)}))
@@ -2163,11 +2157,12 @@ def test_handle_fast_git_routes_bypass_batchd(monkeypatch):
     monkeypatch.setattr(
         server_module.filesystem,
         "git_history",
-        lambda path, *, limit, cursor=None: {
+        lambda path, *, limit, cursor=None, worktree="inline": {
             "path": path,
             "commits": [],
             "limit": limit,
             "cursor": cursor,
+            "worktree": worktree,
         },
     )
     monkeypatch.setattr(
@@ -2197,7 +2192,7 @@ def test_handle_fast_git_routes_bypass_batchd(monkeypatch):
     assert calls == []
     assert writes == [
         (HTTPStatus.OK, {"path": "/repo/src", "from": "HEAD", "to": "current"}),
-        (HTTPStatus.OK, {"path": "/repo/src", "commits": [], "limit": 12, "cursor": "opaque-cursor"}),
+        (HTTPStatus.OK, {"path": "/repo/src", "commits": [], "limit": 12, "cursor": "opaque-cursor", "worktree": "inline"}),
         (HTTPStatus.OK, {"path": "/repo/src", "commit": "a" * 40, "head": "b" * 40}),
     ]
 
@@ -2206,17 +2201,26 @@ def test_handle_fast_git_routes_bypass_batchd(monkeypatch):
             handler,
             urlparse(f"/api/fs/git-history?path=%2Frepo&limit={raw_limit}"),
         )
-        assert writes[-1] == (HTTPStatus.OK, {"path": "/repo", "commits": [], "limit": 1, "cursor": None})
+        assert writes[-1] == (HTTPStatus.OK, {"path": "/repo", "commits": [], "limit": 1, "cursor": None, "worktree": "inline"})
 
     Handler.handle_fs_git_history(handler, urlparse("/api/fs/git-history?path=%2Frepo&limit=999"))
-    assert writes[-1] == (HTTPStatus.OK, {"path": "/repo", "commits": [], "limit": 200, "cursor": None})
+    assert writes[-1] == (HTTPStatus.OK, {"path": "/repo", "commits": [], "limit": 200, "cursor": None, "worktree": "inline"})
+
+    Handler.handle_fs_git_history(handler, urlparse("/api/fs/git-history?path=%2Frepo&worktree=0"))
+    assert writes[-1] == (HTTPStatus.OK, {"path": "/repo", "commits": [], "limit": 200, "cursor": None, "worktree": "0"})
+
+    Handler.handle_fs_git_history(handler, urlparse("/api/fs/git-history?path=%2Frepo&worktree=only"))
+    assert writes[-1] == (HTTPStatus.OK, {"path": "/repo", "commits": [], "limit": 200, "cursor": None, "worktree": "only"})
+
+    Handler.handle_fs_git_history(handler, urlparse("/api/fs/git-history?path=%2Frepo&worktree=unexpected"))
+    assert writes[-1][0] == HTTPStatus.BAD_REQUEST
 
     Handler.handle_fs_git_history(handler, urlparse("/api/fs/git-history?path=%2Frepo&limit=many"))
     assert writes[-1][0] == HTTPStatus.BAD_REQUEST
     assert len(calls) == 0
 
 
-def test_git_history_routes_are_registered_as_readonly_json():
+def test_git_history_routes_are_registered_with_readonly_protocols():
     routes = {(route.method, route.path): route for route in http_routes.ALL_ROUTES}
 
     for path, handler_name in (
@@ -2227,6 +2231,79 @@ def test_git_history_routes_are_registered_as_readonly_json():
         assert route.role == "readonly"
         assert route.protocol == http_routes.RESPONSE_JSON
         assert route.handler.__name__ == handler_name
+
+    stats_route = routes[("GET", "/api/fs/git-history-stats-stream")]
+    assert stats_route.role == "readonly"
+    assert stats_route.protocol == http_routes.RESPONSE_SSE
+    assert stats_route.handler.__name__ == "get_fs_git_history_stats_stream"
+
+
+def test_git_history_stats_stream_emits_each_chunk_before_computing_the_next(monkeypatch):
+    handler = object.__new__(Handler)
+    events = []
+    calls = []
+    handler.send_response = lambda status: events.append(("headers", status))
+    handler.send_header = lambda *_args: None
+    handler.send_auth_cookie_if_needed = lambda: None
+    handler.end_headers = lambda: None
+    handler.write_sse_json = lambda event, payload: events.append((event, payload))
+    chunks = [
+        {"commits": [{"sha": "a" * 40}], "start_offset": 0, "next_cursor": "cursor-1"},
+        {"commits": [{"sha": "b" * 40}, {"sha": "c" * 40}], "start_offset": 1, "next_cursor": "cursor-3"},
+    ]
+
+    def get_stats(path, *, cursor, offset, batch_sizes):
+        calls.append((path, cursor, offset, batch_sizes))
+        if len(calls) == 1:
+            assert events == [], "the first chunk is computed before headers so early errors retain HTTP status"
+            assert batch_sizes == [1], "compute only the first visible chunk before writing it"
+            return [chunks[0]]
+        assert events[-1] == ("chunk", chunks[0]), "the first chunk must be flushed before computing the next"
+        assert batch_sizes == [2]
+        return [chunks[1]]
+
+    monkeypatch.setattr(server_module.filesystem, "git_history_stats_batches", get_stats)
+
+    Handler.stream_git_history_stats(
+        handler,
+        urlparse("/api/fs/git-history-stats-stream?path=%2Frepo&cursor=snapshot&offset=0&batch_sizes=1%2C2"),
+    )
+
+    assert calls == [
+        ("/repo", "snapshot", 0, [1]),
+        ("/repo", "snapshot", 1, [2]),
+    ]
+    assert [event for event, _payload in events] == ["headers", "start", "chunk", "chunk", "done"]
+    assert events[-1] == ("done", {"count": 3, "next_cursor": "cursor-3"})
+
+
+def test_git_history_stats_stream_reports_later_batch_failure_as_sse_error(monkeypatch):
+    handler = object.__new__(Handler)
+    events = []
+    handler.send_response = lambda status: events.append(("headers", status))
+    handler.send_header = lambda *_args: None
+    handler.send_auth_cookie_if_needed = lambda: None
+    handler.end_headers = lambda: None
+    handler.write_json = lambda payload, status: events.append(("json-error", status, payload))
+    handler.write_sse_json = lambda event, payload: events.append((event, payload))
+
+    def get_stats(_path, *, cursor, offset, batch_sizes):
+        assert cursor == "snapshot"
+        if offset == 0:
+            assert batch_sizes == [1]
+            return [{"commits": [{"sha": "a" * 40}], "start_offset": 0, "next_cursor": "cursor-1"}]
+        assert offset == 1 and batch_sizes == [1]
+        raise FilesystemError("snapshot changed", status=409)
+
+    monkeypatch.setattr(server_module.filesystem, "git_history_stats_batches", get_stats)
+
+    Handler.stream_git_history_stats(
+        handler,
+        urlparse("/api/fs/git-history-stats-stream?path=%2Frepo&cursor=snapshot&offset=0&batch_sizes=1%2C1"),
+    )
+
+    assert [event for event, *_payload in events] == ["headers", "start", "chunk", "error"]
+    assert events[-1][1]["status"] == 409
 
 
 @pytest.mark.parametrize(

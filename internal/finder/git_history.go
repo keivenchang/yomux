@@ -24,6 +24,8 @@ import (
 	"sync"
 	"syscall"
 	"unicode/utf8"
+
+	"github.com/keivenchang/yolomux/internal/cache"
 )
 
 const (
@@ -38,6 +40,7 @@ const (
 	gitCommitMaxMessage        = 64 * 1024
 	gitCommitMetadataOverhead  = 64 * 1024
 	gitCommitMaxOutput         = 8 * 1024 * 1024
+	gitCommitProductMaxOutput  = gitCommitMaxOutput + gitCommitMaxMessage + gitCommitMetadataOverhead
 	gitCommitMaxPayload        = 384 * 1024
 	gitConfigMaxBytes          = 1024 * 1024
 	gitHistoryMaxStatusEntries = 1000
@@ -62,14 +65,19 @@ var gitRemoteHostPattern = regexp.MustCompile(`^[a-z0-9.-]+$`)
 var gitRemotePathSegmentPattern = regexp.MustCompile(`^[A-Za-z0-9._~-]+$`)
 
 type gitHistoryScope struct {
-	path         string
-	repo         string
-	identity     string
-	relative     string
-	branch       string
-	hostedRemote map[string]string
-	directory    *os.File
-	namespace    *gitNamespace
+	path            string
+	repo            string
+	identity        string
+	relative        string
+	branch          string
+	shallowBoundary string
+	hostedRemote    map[string]string
+	directory       *os.File
+	namespace       *gitNamespace
+}
+
+type gitHistoryScopeOptions struct {
+	readHostedRemote bool
 }
 
 func (scope *gitHistoryScope) close() {
@@ -90,6 +98,19 @@ type gitHistoryCursor struct {
 }
 
 func (s *Service) openGitHistoryScope(raw string) (*gitHistoryScope, *Error) {
+	return s.openGitHistoryScopeContext(context.Background(), raw)
+}
+
+func (s *Service) openGitHistoryScopeContext(ctx context.Context, raw string) (*gitHistoryScope, *Error) {
+	return s.openGitHistoryScopeWithOptions(ctx, raw, gitHistoryScopeOptions{
+		readHostedRemote: true,
+	})
+}
+
+func (s *Service) openGitHistoryScopeWithOptions(ctx context.Context, raw string, options gitHistoryScopeOptions) (*gitHistoryScope, *Error) {
+	if ctx.Err() != nil {
+		return nil, cancelled(raw)
+	}
 	// Authorize with allowMissing first so the parent is resolved before the descriptor open. The
 	// subsequent descriptor open keeps the normal 404 behavior for a missing path.
 	if _, _, finderErr := s.authorize(raw, true); finderErr != nil {
@@ -103,9 +124,12 @@ func (s *Service) openGitHistoryScope(raw string) (*gitHistoryScope, *Error) {
 		}
 		return nil, finderErr
 	}
-	rootBytes, _, gitErr := runGitBounded(context.Background(), directory, nil, []string{"rev-parse", "--show-toplevel"}, 4096)
+	rootBytes, _, gitErr := runGitBounded(ctx, directory, nil, []string{"rev-parse", "--show-toplevel"}, 4096)
 	if gitErr != nil {
 		_ = directory.Close()
+		if ctx.Err() != nil {
+			return nil, cancelled(requested)
+		}
 		return nil, &Error{Status: http.StatusBadRequest, Code: "not_git_repo", MessageKey: "fs.error.notGitRepo", Path: requested, Message: "path is not in a Git repository"}
 	}
 	root, err := filepath.Abs(filepath.Clean(strings.TrimSpace(string(rootBytes))))
@@ -113,13 +137,20 @@ func (s *Service) openGitHistoryScope(raw string) (*gitHistoryScope, *Error) {
 		_ = directory.Close()
 		return nil, filesystemError(requested, err)
 	}
-	namespace, finderErr := s.openGitNamespace(directory, resolved, requested)
+	namespace, finderErr := s.openGitNamespaceContext(ctx, directory, resolved, requested)
 	if finderErr != nil {
 		_ = directory.Close()
 		return nil, finderErr
 	}
-	hostedRemote, finderErr := readHostedGitRemote(namespace, requested)
-	if finderErr != nil {
+	var hostedRemote map[string]string
+	if options.readHostedRemote {
+		hostedRemote, finderErr = readHostedGitRemote(namespace, requested)
+		if finderErr != nil {
+			namespace.close()
+			_ = directory.Close()
+			return nil, finderErr
+		}
+	} else if finderErr = validateGitConfigFile(namespace, requested); finderErr != nil {
 		namespace.close()
 		_ = directory.Close()
 		return nil, finderErr
@@ -277,19 +308,44 @@ func hostedGitRemote(config []byte) map[string]string {
 	return selected
 }
 
-func readHostedGitRemote(namespace *gitNamespace, requested string) (map[string]string, *Error) {
+func openHostedGitConfig(namespace *gitNamespace, requested string) (*os.File, os.FileInfo, *Error) {
+	if namespace == nil || namespace.validate() != nil {
+		return nil, nil, gitNamespaceChanged(requested)
+	}
 	config, err := openAt(namespace.commonDir, "config", syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if err != nil {
-		return nil, &Error{Status: http.StatusConflict, Code: "git_repository_changed", MessageKey: "fs.error.gitRepositoryChanged", Path: requested, Message: "Git configuration is unavailable"}
+		return nil, nil, &Error{Status: http.StatusConflict, Code: "git_repository_changed", MessageKey: "fs.error.gitRepositoryChanged", Path: requested, Message: "Git configuration is unavailable"}
 	}
-	defer config.Close()
 	before, err := config.Stat()
 	if err != nil || !before.Mode().IsRegular() {
-		return nil, &Error{Status: http.StatusConflict, Code: "git_repository_changed", MessageKey: "fs.error.gitRepositoryChanged", Path: requested, Message: "Git configuration is not a regular file"}
+		_ = config.Close()
+		return nil, nil, &Error{Status: http.StatusConflict, Code: "git_repository_changed", MessageKey: "fs.error.gitRepositoryChanged", Path: requested, Message: "Git configuration is not a regular file"}
 	}
+	return config, before, nil
+}
+
+func validateGitConfigFile(namespace *gitNamespace, requested string) *Error {
+	config, before, finderErr := openHostedGitConfig(namespace, requested)
+	if finderErr != nil || config == nil {
+		return finderErr
+	}
+	defer config.Close()
+	after, err := config.Stat()
+	if err != nil || identityFor(before) != identityFor(after) || namespace.validate() != nil {
+		return &Error{Status: http.StatusConflict, Code: "git_repository_changed", MessageKey: "fs.error.gitRepositoryChanged", Path: requested, Message: "Git configuration changed during history read"}
+	}
+	return nil
+}
+
+func readHostedGitRemote(namespace *gitNamespace, requested string) (map[string]string, *Error) {
+	config, before, finderErr := openHostedGitConfig(namespace, requested)
+	if finderErr != nil || config == nil {
+		return nil, finderErr
+	}
+	defer config.Close()
 	data, err := io.ReadAll(io.LimitReader(config, gitConfigMaxBytes+1))
 	if err != nil {
 		return nil, &Error{Status: http.StatusConflict, Code: "git_repository_changed", MessageKey: "fs.error.gitRepositoryChanged", Path: requested, Message: "Git configuration changed during history read"}
@@ -298,7 +354,7 @@ func readHostedGitRemote(namespace *gitNamespace, requested string) (map[string]
 		return nil, &Error{Status: http.StatusRequestEntityTooLarge, Code: "too_large", MessageKey: "fs.error.gitHistoryTooLarge", Path: requested, Message: "Git configuration exceeds the metadata limit"}
 	}
 	after, err := config.Stat()
-	if err != nil || identityFor(before) != identityFor(after) {
+	if err != nil || identityFor(before) != identityFor(after) || namespace.validate() != nil {
 		return nil, &Error{Status: http.StatusConflict, Code: "git_repository_changed", MessageKey: "fs.error.gitRepositoryChanged", Path: requested, Message: "Git configuration changed during history read"}
 	}
 	return hostedGitRemote(data), nil
@@ -408,22 +464,80 @@ func gitHistoryHead(ctx context.Context, scope *gitHistoryScope) (string, *Error
 	return "", &Error{Status: http.StatusInternalServerError, Code: "git_history_failed", MessageKey: "fs.error.gitHistoryFailed", Path: scope.path, Retryable: true, Message: "Git history failed"}
 }
 
-func ensureCurrentHeadObject(ctx context.Context, scope *gitHistoryScope, messageKey string) *Error {
-	output, stderr, err := runGitBounded(ctx, scope.directory, nil, []string{"cat-file", "-e", "HEAD^{commit}"}, 512, scope.namespace)
+func gitVerifiedHistoryHead(ctx context.Context, scope *gitHistoryScope, messageKey string) (string, *Error) {
+	output, stderr, err := runGitBounded(ctx, scope.directory, nil, []string{"rev-parse", "--verify", "--quiet", "HEAD^{commit}"}, 512, scope.namespace)
+	if err == nil {
+		return strings.TrimSpace(string(output)), nil
+	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return cancelled(scope.path)
+		return "", cancelled(scope.path)
 	}
 	if errors.Is(err, errGitNamespaceChanged) {
-		return gitNamespaceChanged(scope.path)
+		return "", gitNamespaceChanged(scope.path)
 	}
-	if err != nil || len(output) != 0 {
-		message := "Git HEAD object lookup failed"
-		if strings.TrimSpace(string(stderr)) != "" {
-			message = strings.TrimSpace(string(stderr))
+	if gitExitStatus(err, 1) && len(output) == 0 && len(stderr) == 0 {
+		// An empty repository and a dangling HEAD both fail this peel quietly. Only the
+		// uncommon failure path needs the unpeeled ref lookup to distinguish them.
+		head, headErr := gitHistoryHead(ctx, scope)
+		if headErr != nil {
+			return "", headErr
 		}
-		return &Error{Status: http.StatusInternalServerError, Code: "git_history_failed", MessageKey: messageKey, Path: scope.path, Retryable: true, Message: message}
+		if head == "" {
+			return "", nil
+		}
+		return "", &Error{Status: http.StatusInternalServerError, Code: "git_history_failed", MessageKey: messageKey, Path: scope.path, Retryable: true, Message: "Git HEAD object lookup failed"}
+	}
+	message := "Git HEAD object lookup failed"
+	if strings.TrimSpace(string(stderr)) != "" {
+		message = strings.TrimSpace(string(stderr))
+	}
+	return "", &Error{Status: http.StatusInternalServerError, Code: "git_history_failed", MessageKey: messageKey, Path: scope.path, Retryable: true, Message: message}
+}
+
+// A Git snapshot is request-local so a later request cannot reuse stale refs or repository identity.
+type gitSnapshot struct {
+	scope        *gitHistoryScope
+	head         string
+	refSignature string
+}
+
+func (s *Service) captureGitSnapshot(ctx context.Context, scope *gitHistoryScope, headObjectMessageKey string) (gitSnapshot, *Error) {
+	snapshot := gitSnapshot{scope: scope}
+	head, finderErr := gitVerifiedHistoryHead(ctx, scope, headObjectMessageKey)
+	if finderErr != nil {
+		return gitSnapshot{}, finderErr
+	}
+	snapshot.head = head
+	return snapshot, nil
+}
+
+func (s *Service) validateFrozenGitHistoryHead(ctx context.Context, snapshot gitSnapshot, frozenHead string) *Error {
+	if snapshot.scope == nil || frozenHead == snapshot.head {
+		return nil
+	}
+	found, ancestor, finderErr := s.gitCommitReachability(ctx, snapshot.scope, frozenHead, snapshot.head)
+	if finderErr != nil {
+		return finderErr
+	}
+	if !found || !ancestor {
+		return &Error{Status: http.StatusConflict, Code: "git_history_stale", MessageKey: "fs.error.gitHistoryStale", Path: snapshot.scope.path, Message: "Git history snapshot is stale"}
 	}
 	return nil
+}
+
+func (s *Service) validateGitHistoryCursor(ctx context.Context, snapshot gitSnapshot, raw string) (gitHistoryCursor, *Error) {
+	cursor, cursorErr := decodeGitHistoryCursor(raw)
+	if cursorErr != nil || snapshot.scope == nil || cursor.Repo != snapshot.scope.repo || cursor.Identity != snapshot.scope.identity || cursor.Relative != snapshot.scope.relative {
+		path := ""
+		if snapshot.scope != nil {
+			path = snapshot.scope.path
+		}
+		return gitHistoryCursor{}, &Error{Status: http.StatusBadRequest, Code: "invalid_cursor", MessageKey: "fs.error.gitHistoryCursor", Path: path, Message: "invalid Git history cursor"}
+	}
+	if finderErr := s.validateFrozenGitHistoryHead(ctx, snapshot, cursor.Head); finderErr != nil {
+		return gitHistoryCursor{}, finderErr
+	}
+	return cursor, nil
 }
 
 func historyPathArgs(relative string) []string {
@@ -483,58 +597,107 @@ func gitProductCacheKey(parts ...string) string {
 }
 
 type gitHistoryStatsInfo struct {
-	files           int
-	added           int
-	removed         int
-	binaryFiles     int
-	signatureStatus string
+	files       int
+	added       int
+	removed     int
+	binaryFiles int
 }
 
 func gitHistoryStatsCacheKey(scope *gitHistoryScope, sha string) string {
-	return gitProductCacheKey("history-sha-stats", scope.repo, scope.identity, scope.relative, sha)
+	return gitProductCacheKey("history-sha-stats", scope.repo, scope.identity, scope.relative, scope.shallowBoundary, sha)
 }
 
-func (s *Service) touchGitHistoryStatsCacheKey(key string) {
-	for index, cachedKey := range s.gitHistoryStatsCacheOrder {
-		if cachedKey != key {
+func gitHistoryStatsPageCacheKey(scope *gitHistoryScope, currentHead, frozenHead, refSignature string, offset, limit int) string {
+	return gitProductCacheKey("history", "stats", scope.repo, scope.path, scope.identity, scope.relative, currentHead, frozenHead, refSignature, strconv.Itoa(offset), strconv.Itoa(limit))
+}
+
+func gitHistoryRefSignature(ctx context.Context, scope *gitHistoryScope) (string, *Error) {
+	// Decorations are part of the cached history rows, and refs can move without HEAD moving.
+	args := []string{"for-each-ref", "--sort=refname", "--format=%(refname)%x00%(objectname)%x00"}
+	output, stderr, err := runGitBounded(ctx, scope.directory, nil, args, gitHistoryMaxOutput, scope.namespace)
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "", cancelled(scope.path)
+	}
+	if errors.Is(err, errGitNamespaceChanged) {
+		return "", gitNamespaceChanged(scope.path)
+	}
+	if err != nil {
+		message := "Git history ref snapshot failed"
+		if strings.TrimSpace(string(stderr)) != "" {
+			message = strings.TrimSpace(string(stderr))
+		}
+		return "", &Error{Status: http.StatusInternalServerError, Code: "git_history_failed", MessageKey: "fs.error.gitHistoryFailed", Path: scope.path, Retryable: true, Message: message}
+	}
+	shallowSignature, shallowErr := gitHistoryShallowBoundarySignature(scope.namespace)
+	if shallowErr != nil {
+		return "", gitNamespaceChanged(scope.path)
+	}
+	scope.shallowBoundary = shallowSignature
+	signatureInput := make([]byte, 0, len(scope.branch)+1+len(output)+1+len(shallowSignature))
+	signatureInput = append(signatureInput, scope.branch...)
+	signatureInput = append(signatureInput, 0)
+	signatureInput = append(signatureInput, output...)
+	signatureInput = append(signatureInput, 0)
+	signatureInput = append(signatureInput, shallowSignature...)
+	digest := sha256.Sum256(signatureInput)
+	return fmt.Sprintf("%x", digest[:]), nil
+}
+
+func gitHistoryShallowBoundarySignature(namespace *gitNamespace) (string, error) {
+	boundary, err := gitHistoryShallowBoundary(namespace)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(boundary)
+	return fmt.Sprintf("%x", digest[:]), nil
+}
+
+func gitHistoryShallowBoundaryMatches(namespace *gitNamespace, expected string) bool {
+	current, err := gitHistoryShallowBoundarySignature(namespace)
+	return err == nil && current == expected
+}
+
+func gitHistoryShallowBoundary(namespace *gitNamespace) ([]byte, error) {
+	if namespace == nil {
+		return nil, errGitNamespaceChanged
+	}
+	for _, directory := range []*os.File{namespace.commonDir, namespace.gitDir} {
+		if directory == nil {
 			continue
 		}
-		copy(s.gitHistoryStatsCacheOrder[index:], s.gitHistoryStatsCacheOrder[index+1:])
-		s.gitHistoryStatsCacheOrder[len(s.gitHistoryStatsCacheOrder)-1] = key
-		return
+		file, err := openAt(directory, "shallow", syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, errGitNamespaceChanged
+		}
+		before, statErr := file.Stat()
+		if statErr != nil || !before.Mode().IsRegular() || before.Size() > gitHistoryMaxOutput {
+			_ = file.Close()
+			return nil, errGitNamespaceChanged
+		}
+		data, readErr := io.ReadAll(io.LimitReader(file, gitHistoryMaxOutput+1))
+		after, afterErr := file.Stat()
+		closeErr := file.Close()
+		if readErr != nil || afterErr != nil || closeErr != nil || len(data) > gitHistoryMaxOutput || !sameDescriptorIdentity(identityFor(before), identityFor(after)) {
+			return nil, errGitNamespaceChanged
+		}
+		return data, nil
 	}
-	s.gitHistoryStatsCacheOrder = append(s.gitHistoryStatsCacheOrder, key)
+	return nil, nil
 }
 
 func (s *Service) cachedGitHistoryStats(key string) (gitHistoryStatsInfo, bool) {
 	s.gitProductMu.Lock()
 	defer s.gitProductMu.Unlock()
-	value, ok := s.gitHistoryStatsCache[key]
-	if !ok {
-		return gitHistoryStatsInfo{}, false
-	}
-	s.touchGitHistoryStatsCacheKey(key)
-	return value, true
+	return s.gitHistoryStatsCache.Get(key)
 }
 
 func (s *Service) cacheGitHistoryStats(key string, value gitHistoryStatsInfo) {
 	s.gitProductMu.Lock()
 	defer s.gitProductMu.Unlock()
-	if s.gitHistoryStatsCache == nil {
-		s.gitHistoryStatsCache = make(map[string]gitHistoryStatsInfo)
-	}
-	if _, exists := s.gitHistoryStatsCache[key]; exists {
-		s.gitHistoryStatsCache[key] = value
-		s.touchGitHistoryStatsCacheKey(key)
-		return
-	}
-	if len(s.gitHistoryStatsCacheOrder) >= maxGitHistoryStatsCacheEntries {
-		evictedKey := s.gitHistoryStatsCacheOrder[0]
-		delete(s.gitHistoryStatsCache, evictedKey)
-		s.gitHistoryStatsCacheOrder = s.gitHistoryStatsCacheOrder[1:]
-	}
-	s.gitHistoryStatsCache[key] = value
-	s.gitHistoryStatsCacheOrder = append(s.gitHistoryStatsCacheOrder, key)
+	s.gitHistoryStatsCache.Set(key, value)
 }
 
 func (s *Service) attachCachedGitHistoryStats(scope *gitHistoryScope, commits []map[string]any) {
@@ -545,17 +708,64 @@ func (s *Service) attachCachedGitHistoryStats(scope *gitHistoryScope, commits []
 		}
 		if stats, ok := s.cachedGitHistoryStats(gitHistoryStatsCacheKey(scope, sha)); ok {
 			commit["files"], commit["added"], commit["removed"], commit["binary_files"] = stats.files, stats.added, stats.removed, stats.binaryFiles
-			if stats.signatureStatus != "" {
-				commit["signature_status"] = stats.signatureStatus
-			}
 		}
 	}
+}
+
+// Git config and signature trust can change while commit SHAs stay fixed, so cached rows refresh those fields.
+func (s *Service) refreshGitHistoryCachedMetadata(ctx context.Context, scope *gitHistoryScope, commits []map[string]any, includeSignatureStatus bool) *Error {
+	shas := make([]string, 0, len(commits))
+	for _, commit := range commits {
+		sha, _ := commit["sha"].(string)
+		if gitObjectIDPattern.MatchString(sha) {
+			shas = append(shas, sha)
+		}
+	}
+	if len(shas) == 0 {
+		return nil
+	}
+	format := "%H%x00%D"
+	if includeSignatureStatus {
+		format = "%H%x00%G?%x00%D"
+	}
+	args := []string{"log", "--no-walk", "--format=" + format}
+	args = append(args, shas...)
+	output, _, err := runGitBounded(ctx, scope.directory, nil, args, gitHistoryMaxOutput, scope.namespace)
+	if err != nil {
+		return gitHistoryReadError(scope.path, err)
+	}
+	records := bytes.Split(bytes.TrimSuffix(output, []byte("\n")), []byte("\n"))
+	metadata := make(map[string][]string, len(records))
+	for _, record := range records {
+		fields := bytes.Split(record, []byte{0})
+		if includeSignatureStatus && len(fields) == 3 {
+			metadata[string(fields[0])] = []string{string(fields[1]), string(fields[2])}
+		} else if !includeSignatureStatus && len(fields) == 2 {
+			metadata[string(fields[0])] = []string{string(fields[1])}
+		} else {
+			return gitHistoryReadError(scope.path, errors.New("malformed cached Git history metadata"))
+		}
+	}
+	for _, commit := range commits {
+		sha, _ := commit["sha"].(string)
+		fields, ok := metadata[sha]
+		if !ok {
+			return gitHistoryReadError(scope.path, errors.New("cached Git history commit disappeared"))
+		}
+		if includeSignatureStatus {
+			commit["signature_status"] = fields[0]
+			commit["decorations"] = fields[1]
+		} else {
+			commit["decorations"] = fields[0]
+		}
+	}
+	return nil
 }
 
 func (s *Service) cachedGitHistory(key string) (map[string]any, bool) {
 	s.gitProductMu.Lock()
 	defer s.gitProductMu.Unlock()
-	value, ok := s.gitHistoryCache[key]
+	value, ok := s.gitHistoryCache.Get(key)
 	if !ok {
 		return nil, false
 	}
@@ -565,19 +775,13 @@ func (s *Service) cachedGitHistory(key string) (map[string]any, bool) {
 func (s *Service) cacheGitHistory(key string, value map[string]any) {
 	s.gitProductMu.Lock()
 	defer s.gitProductMu.Unlock()
-	if s.gitHistoryCache == nil {
-		s.gitHistoryCache = make(map[string]map[string]any)
-	}
-	if _, exists := s.gitHistoryCache[key]; !exists && len(s.gitHistoryCache) >= maxGitProductCacheEntries {
-		clear(s.gitHistoryCache)
-	}
-	s.gitHistoryCache[key] = cloneGitProductValue(value).(map[string]any)
+	s.gitHistoryCache.Set(key, cloneGitProductValue(value).(map[string]any))
 }
 
 func (s *Service) cachedGitCommit(key string) (map[string]any, bool) {
 	s.gitProductMu.Lock()
 	defer s.gitProductMu.Unlock()
-	value, ok := s.gitCommitCache[key]
+	value, ok := s.gitCommitCache.Get(key)
 	if !ok {
 		return nil, false
 	}
@@ -587,13 +791,30 @@ func (s *Service) cachedGitCommit(key string) (map[string]any, bool) {
 func (s *Service) cacheGitCommit(key string, value map[string]any) {
 	s.gitProductMu.Lock()
 	defer s.gitProductMu.Unlock()
-	if s.gitCommitCache == nil {
-		s.gitCommitCache = make(map[string]map[string]any)
+	s.gitCommitCache.Set(key, cloneGitProductValue(value).(map[string]any))
+}
+
+func gitReachabilityCacheKey(scope *gitHistoryScope, ancestor, descendant string) string {
+	return gitProductCacheKey("git-ancestor", scope.repo, scope.identity, scope.relative, scope.shallowBoundary, ancestor, descendant)
+}
+
+func (s *Service) cachedGitReachability(key string) bool {
+	s.gitProductMu.Lock()
+	defer s.gitProductMu.Unlock()
+	if s.gitReachabilityCache == nil {
+		s.gitReachabilityCache = cache.NewLRU[string, struct{}](maxGitHistoryStatsCacheEntries)
 	}
-	if _, exists := s.gitCommitCache[key]; !exists && len(s.gitCommitCache) >= maxGitProductCacheEntries {
-		clear(s.gitCommitCache)
+	_, ok := s.gitReachabilityCache.Get(key)
+	return ok
+}
+
+func (s *Service) cacheGitReachability(key string) {
+	s.gitProductMu.Lock()
+	defer s.gitProductMu.Unlock()
+	if s.gitReachabilityCache == nil {
+		s.gitReachabilityCache = cache.NewLRU[string, struct{}](maxGitHistoryStatsCacheEntries)
 	}
-	s.gitCommitCache[key] = cloneGitProductValue(value).(map[string]any)
+	s.gitReachabilityCache.Set(key, struct{}{})
 }
 
 const gitHistoryFormat = "record%x00%H%x00%h%x00%P%x00%G?%x00%an%x00%at%x00%D%x00%s%x00"
@@ -882,9 +1103,10 @@ func (s *Service) gitWorktreeStatus(ctx context.Context, scope *gitHistoryScope)
 			fileCounts = map[string]gitCommitCount{}
 		}
 	}
+	fileCountIndex := indexGitCommitCounts(fileCounts)
 	for _, entry := range entries {
 		path, _ := entry["path"].(string)
-		added, removed, binary := numstatForPath(fileCounts, path)
+		added, removed, binary := numstatForPath(fileCountIndex, path)
 		countsAvailable := added != nil || removed != nil || binary
 		statusCode, _ := entry["status"].(string)
 		if statusCode == "??" && !countsAvailable {
@@ -939,7 +1161,7 @@ func (s *Service) GitHistoryMetadata(ctx context.Context, raw, limitRaw, cursorR
 }
 
 func (s *Service) GitHistoryWorktree(ctx context.Context, raw string) (map[string]any, *Error) {
-	scope, finderErr := s.openGitHistoryScope(raw)
+	scope, finderErr := s.openGitHistoryScopeWithOptions(ctx, raw, gitHistoryScopeOptions{})
 	if finderErr != nil {
 		return nil, finderErr
 	}
@@ -1023,41 +1245,26 @@ type gitHistoryStatsResult struct {
 }
 
 func (s *Service) gitHistoryStatsBatches(ctx context.Context, raw, cursorRaw string, batchSizes []int, concurrent bool, emit func(map[string]any) error, startOffset ...int) (string, *Error) {
-	scope, finderErr := s.openGitHistoryScope(raw)
+	scope, finderErr := s.openGitHistoryScopeContext(ctx, raw)
 	if finderErr != nil {
 		return "", finderErr
 	}
 	defer scope.close()
 	gitCtx, cancel := gitViewContext(ctx)
 	defer cancel()
-	currentHead, finderErr := gitHistoryHead(gitCtx, scope)
+	snapshot, finderErr := s.captureGitSnapshot(gitCtx, scope, "fs.error.gitHistoryFailed")
 	if finderErr != nil {
 		return "", finderErr
 	}
+	currentHead := snapshot.head
 	if currentHead == "" {
 		return "", &Error{Status: http.StatusConflict, Code: "git_history_stale", MessageKey: "fs.error.gitHistoryStale", Path: scope.path, Message: "Git history snapshot is stale"}
 	}
-	if finderErr := ensureCurrentHeadObject(gitCtx, scope, "fs.error.gitHistoryFailed"); finderErr != nil {
-		return "", finderErr
-	}
-	cursor, cursorErr := decodeGitHistoryCursor(cursorRaw)
-	if cursorErr != nil || cursor.Repo != scope.repo || cursor.Identity != scope.identity || cursor.Relative != scope.relative {
-		return "", &Error{Status: http.StatusBadRequest, Code: "invalid_cursor", MessageKey: "fs.error.gitHistoryCursor", Path: scope.path, Message: "invalid Git history cursor"}
+	cursor, cursorErr := s.validateGitHistoryCursor(gitCtx, snapshot, cursorRaw)
+	if cursorErr != nil {
+		return "", cursorErr
 	}
 	frozenHead := cursor.Head
-	if frozenHead != currentHead {
-		found, findErr := s.gitCommitExists(gitCtx, scope, frozenHead)
-		if findErr != nil {
-			return "", findErr
-		}
-		ancestor, ancestorErr := s.gitCommitAncestor(gitCtx, scope, frozenHead, currentHead)
-		if ancestorErr != nil && found {
-			return "", ancestorErr
-		}
-		if !found || !ancestor {
-			return "", &Error{Status: http.StatusConflict, Code: "git_history_stale", MessageKey: "fs.error.gitHistoryStale", Path: scope.path, Message: "Git history snapshot is stale"}
-		}
-	}
 	offset := cursor.Offset
 	if len(startOffset) > 0 {
 		if len(startOffset) != 1 || startOffset[0] < 0 || startOffset[0] > gitHistoryMaxOffset {
@@ -1073,12 +1280,16 @@ func (s *Service) gitHistoryStatsBatches(ctx context.Context, raw, cursorRaw str
 		batches = append(batches, gitHistoryStatsBatch{offset: offset, limit: limit})
 		offset += limit
 	}
+	snapshot.refSignature, finderErr = gitHistoryRefSignature(gitCtx, scope)
+	if finderErr != nil {
+		return "", finderErr
+	}
 	if concurrent {
-		return s.gitHistoryStatsConcurrent(gitCtx, scope, currentHead, frozenHead, batches, emit)
+		return s.gitHistoryStatsConcurrent(gitCtx, scope, currentHead, frozenHead, snapshot.refSignature, batches, emit)
 	}
 	var nextCursor string
 	for _, batch := range batches {
-		cacheKey := gitProductCacheKey("history", "stats", scope.identity, scope.relative, currentHead, frozenHead, strconv.Itoa(batch.offset), strconv.Itoa(batch.limit))
+		cacheKey := gitHistoryStatsPageCacheKey(scope, currentHead, frozenHead, snapshot.refSignature, batch.offset, batch.limit)
 		payload, payloadErr := s.gitHistoryStatsAtOffset(gitCtx, scope, frozenHead, batch.offset, batch.limit, cacheKey)
 		if payloadErr != nil {
 			return "", payloadErr
@@ -1101,7 +1312,7 @@ func (s *Service) gitHistoryStatsBatches(ctx context.Context, raw, cursorRaw str
 	return nextCursor, nil
 }
 
-func (s *Service) gitHistoryStatsConcurrent(ctx context.Context, scope *gitHistoryScope, currentHead, frozenHead string, batches []gitHistoryStatsBatch, emit func(map[string]any) error) (string, *Error) {
+func (s *Service) gitHistoryStatsConcurrent(ctx context.Context, scope *gitHistoryScope, currentHead, frozenHead, refSignature string, batches []gitHistoryStatsBatch, emit func(map[string]any) error) (string, *Error) {
 	batchContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 	results := make(chan gitHistoryStatsResult, len(batches))
@@ -1111,7 +1322,7 @@ func (s *Service) gitHistoryStatsConcurrent(ctx context.Context, scope *gitHisto
 		waitGroup.Add(1)
 		go func() {
 			defer waitGroup.Done()
-			cacheKey := gitProductCacheKey("history", "stats", scope.identity, scope.relative, currentHead, frozenHead, strconv.Itoa(batch.offset), strconv.Itoa(batch.limit))
+			cacheKey := gitHistoryStatsPageCacheKey(scope, currentHead, frozenHead, refSignature, batch.offset, batch.limit)
 			payload, finderErr := s.gitHistoryStatsAtOffset(batchContext, scope, frozenHead, batch.offset, batch.limit, cacheKey)
 			result := gitHistoryStatsResult{offset: batch.offset, payload: payload, finderErr: finderErr}
 			if payload != nil {
@@ -1170,6 +1381,14 @@ func gitHistoryReadError(path string, err error) *Error {
 // Fetch metadata first so pagination and cache hits never calculate unused diffs.
 func (s *Service) gitHistoryStatsAtOffset(ctx context.Context, scope *gitHistoryScope, frozenHead string, offset, limit int, cacheKey string) (map[string]any, *Error) {
 	if cached, ok := s.cachedGitHistory(cacheKey); ok {
+		cached["hosted_remote"] = scope.hostedRemote
+		commits, _ := cached["commits"].([]map[string]any)
+		if finderErr := s.refreshGitHistoryCachedMetadata(ctx, scope, commits, true); finderErr != nil {
+			return nil, finderErr
+		}
+		if !gitHistoryShallowBoundaryMatches(scope.namespace, scope.shallowBoundary) {
+			return nil, gitNamespaceChanged(scope.path)
+		}
 		return cached, nil
 	}
 	args := []string{"log", "--topo-order", "--no-patch", "--decorate=short", "-z", "--max-count=" + strconv.Itoa(limit+1), "--skip=" + strconv.Itoa(offset), "--format=" + strings.ReplaceAll(gitHistoryFormat, "%G?", ""), frozenHead}
@@ -1195,7 +1414,8 @@ func (s *Service) gitHistoryStatsAtOffset(ctx context.Context, scope *gitHistory
 	}
 	if len(missing) > 0 {
 		// Explicit SHAs avoid calculating counts for the pagination sentinel or cached rows.
-		args = []string{"-c", "core.quotePath=false", "show", "--root", "--diff-merges=first-parent", "--no-ext-diff", "--no-textconv", "--no-renames", "--numstat", "-z", "--format=" + gitHistoryFormat}
+		args = []string{"-c", "core.quotePath=false", "show", "--root", "--diff-merges=first-parent", "--no-renames", "--numstat", "-z", "--format=" + gitHistoryFormat}
+		args = append(args, gitCommitDiffOptions()...)
 		args = append(args, missing...)
 		args = append(args, historyPathArgs(scope.relative)...)
 		output, _, gitErr = runGitBounded(ctx, scope.directory, nil, args, gitHistoryMaxOutput, scope.namespace)
@@ -1206,10 +1426,19 @@ func (s *Service) gitHistoryStatsAtOffset(ctx context.Context, scope *gitHistory
 		if parseErr != nil {
 			return nil, gitHistoryReadError(scope.path, parseErr)
 		}
+		if !gitHistoryShallowBoundaryMatches(scope.namespace, scope.shallowBoundary) {
+			return nil, gitNamespaceChanged(scope.path)
+		}
 		for _, commit := range stats {
-			s.cacheGitHistoryStats(gitHistoryStatsCacheKey(scope, commit["sha"].(string)), gitHistoryStatsInfo{files: commit["files"].(int), added: commit["added"].(int), removed: commit["removed"].(int), binaryFiles: commit["binary_files"].(int), signatureStatus: commit["signature_status"].(string)})
+			s.cacheGitHistoryStats(gitHistoryStatsCacheKey(scope, commit["sha"].(string)), gitHistoryStatsInfo{files: commit["files"].(int), added: commit["added"].(int), removed: commit["removed"].(int), binaryFiles: commit["binary_files"].(int)})
 		}
 		s.attachCachedGitHistoryStats(scope, visible)
+	}
+	if finderErr := s.refreshGitHistoryCachedMetadata(ctx, scope, visible, true); finderErr != nil {
+		return nil, finderErr
+	}
+	if !gitHistoryShallowBoundaryMatches(scope.namespace, scope.shallowBoundary) {
+		return nil, gitNamespaceChanged(scope.path)
 	}
 
 	snapshotCursor, _ := encodeGitHistoryCursor(gitHistoryCursor{Repo: scope.repo, Identity: scope.identity, Relative: scope.relative, Head: frozenHead, Offset: 0})
@@ -1241,7 +1470,7 @@ func (s *Service) gitHistoryStatsAtOffset(ctx context.Context, scope *gitHistory
 	if cursorLimited {
 		reasons = append(reasons, "cursor_limit")
 	}
-	payload := map[string]any{"path": scope.path, "repo": scope.repo, "repository_identity": scope.identity, "relative_path": scope.relative, "branch": scope.branch, "head": frozenHead, "hosted_remote": scope.hostedRemote, "snapshot_cursor": snapshotCursor, "start_offset": offset, "commits": visible, "next_cursor": nextCursor, "truncated": len(reasons) > 0}
+	payload := map[string]any{"path": scope.path, "repo": scope.repo, "repository_identity": scope.identity, "shallow_boundary": scope.shallowBoundary, "relative_path": scope.relative, "branch": scope.branch, "head": frozenHead, "hosted_remote": scope.hostedRemote, "snapshot_cursor": snapshotCursor, "start_offset": offset, "commits": visible, "next_cursor": nextCursor, "truncated": len(reasons) > 0}
 	if len(reasons) > 0 {
 		payload["truncation_reason"] = strings.Join(reasons, ",")
 	}
@@ -1259,53 +1488,47 @@ func (s *Service) gitHistory(ctx context.Context, raw, limitRaw, cursorRaw strin
 	if err != nil {
 		return nil, invalid(raw, err.Error())
 	}
-	scope, finderErr := s.openGitHistoryScope(raw)
+	scope, finderErr := s.openGitHistoryScopeContext(ctx, raw)
 	if finderErr != nil {
 		return nil, finderErr
 	}
 	defer scope.close()
 	gitCtx, cancel := gitViewContext(ctx)
 	defer cancel()
-	currentHead, finderErr := gitHistoryHead(gitCtx, scope)
+	snapshot, finderErr := s.captureGitSnapshot(gitCtx, scope, "fs.error.gitHistoryFailed")
 	if finderErr != nil {
 		return nil, finderErr
 	}
+	currentHead := snapshot.head
 	if currentHead == "" {
 		if cursorRaw != "" {
 			return nil, &Error{Status: http.StatusConflict, Code: "git_history_stale", MessageKey: "fs.error.gitHistoryStale", Path: scope.path, Message: "Git history snapshot is stale"}
 		}
-		payload := map[string]any{"path": scope.path, "repo": scope.repo, "repository_identity": scope.identity, "relative_path": scope.relative, "branch": scope.branch, "head": "", "hosted_remote": scope.hostedRemote, "snapshot_cursor": "", "commits": []map[string]any{}, "next_cursor": "", "truncated": false}
+		shallowBoundary, boundaryErr := gitHistoryShallowBoundarySignature(scope.namespace)
+		if boundaryErr != nil {
+			return nil, gitNamespaceChanged(scope.path)
+		}
+		scope.shallowBoundary = shallowBoundary
+		payload := map[string]any{"path": scope.path, "repo": scope.repo, "repository_identity": scope.identity, "shallow_boundary": scope.shallowBoundary, "relative_path": scope.relative, "branch": scope.branch, "head": "", "hosted_remote": scope.hostedRemote, "snapshot_cursor": "", "commits": []map[string]any{}, "next_cursor": "", "truncated": false}
 		if withWorktree {
 			s.attachGitWorktreeStatus(gitCtx, scope, payload)
 		}
 		return payload, nil
 	}
-	if finderErr := ensureCurrentHeadObject(gitCtx, scope, "fs.error.gitHistoryFailed"); finderErr != nil {
-		return nil, finderErr
-	}
 	frozenHead, offset := currentHead, 0
 	if cursorRaw != "" {
-		cursor, cursorErr := decodeGitHistoryCursor(cursorRaw)
-		if cursorErr != nil || cursor.Repo != scope.repo || cursor.Identity != scope.identity || cursor.Relative != scope.relative {
-			return nil, &Error{Status: http.StatusBadRequest, Code: "invalid_cursor", MessageKey: "fs.error.gitHistoryCursor", Path: scope.path, Message: "invalid Git history cursor"}
-		}
-		if cursor.Head != currentHead {
-			found, findErr := s.gitCommitExists(gitCtx, scope, cursor.Head)
-			if findErr != nil {
-				return nil, findErr
-			}
-			ancestor, ancestorErr := s.gitCommitAncestor(gitCtx, scope, cursor.Head, currentHead)
-			if ancestorErr != nil && found {
-				return nil, ancestorErr
-			}
-			if !found || !ancestor {
-				return nil, &Error{Status: http.StatusConflict, Code: "git_history_stale", MessageKey: "fs.error.gitHistoryStale", Path: scope.path, Message: "Git history snapshot is stale"}
-			}
+		cursor, cursorErr := s.validateGitHistoryCursor(gitCtx, snapshot, cursorRaw)
+		if cursorErr != nil {
+			return nil, cursorErr
 		}
 		frozenHead, offset = cursor.Head, cursor.Offset
 	}
 	if requestedOffset != nil {
 		offset = *requestedOffset
+	}
+	snapshot.refSignature, finderErr = gitHistoryRefSignature(gitCtx, scope)
+	if finderErr != nil {
+		return nil, finderErr
 	}
 	statsKey := "metadata"
 	if !withWorktree {
@@ -1314,21 +1537,38 @@ func (s *Service) gitHistory(ctx context.Context, raw, limitRaw, cursorRaw strin
 	if withStats {
 		statsKey = "stats"
 	}
-	cacheKey := gitProductCacheKey("history", statsKey, scope.identity, scope.relative, currentHead, frozenHead, strconv.Itoa(offset), strconv.Itoa(limit))
+	cacheKey := ""
+	if withStats {
+		cacheKey = gitHistoryStatsPageCacheKey(scope, currentHead, frozenHead, snapshot.refSignature, offset, limit)
+	} else {
+		cacheKey = gitProductCacheKey("history", statsKey, scope.repo, scope.path, scope.identity, scope.relative, currentHead, frozenHead, snapshot.refSignature, strconv.Itoa(offset), strconv.Itoa(limit))
+	}
 	// The browser persists the offset-zero snapshot cursor in the layout URL. That cursor is
 	// still the first visible page, so it needs the same live dirty-path summary as an uncursored
 	// request. Later history pages and stats backfills do not need to repeat this Git status scan.
 	includeWorktreeStatus := withWorktree && !withStats && (cursorRaw == "" || offset == 0)
 	if cached, ok := s.cachedGitHistory(cacheKey); ok {
+		cached["hosted_remote"] = scope.hostedRemote
 		if !withWorktree {
 			delete(cached, "worktree_status")
 		}
+		commits, _ := cached["commits"].([]map[string]any)
+		if !withWorktree {
+			for _, commit := range commits {
+				delete(commit, "signature_status")
+			}
+		}
 		if !withStats {
-			commits, _ := cached["commits"].([]map[string]any)
 			s.attachCachedGitHistoryStats(scope, commits)
 		}
 		if includeWorktreeStatus {
 			s.attachGitWorktreeStatus(gitCtx, scope, cached)
+		}
+		if finderErr := s.refreshGitHistoryCachedMetadata(gitCtx, scope, commits, withWorktree); finderErr != nil {
+			return nil, finderErr
+		}
+		if !gitHistoryShallowBoundaryMatches(scope.namespace, scope.shallowBoundary) {
+			return nil, gitNamespaceChanged(scope.path)
 		}
 		return cached, nil
 	}
@@ -1368,6 +1608,11 @@ func (s *Service) gitHistory(ctx context.Context, raw, limitRaw, cursorRaw strin
 	commits, outputTruncated, parseErr := parseGitHistory(output, outputTruncated)
 	if parseErr != nil {
 		return nil, &Error{Status: http.StatusInternalServerError, Code: "git_history_failed", MessageKey: "fs.error.gitHistoryFailed", Path: scope.path, Retryable: true, Message: parseErr.Error()}
+	}
+	if !withWorktree {
+		for _, commit := range commits {
+			delete(commit, "signature_status")
+		}
 	}
 	visible := commits
 	if len(visible) > limit {
@@ -1417,7 +1662,7 @@ func (s *Service) gitHistory(ctx context.Context, raw, limitRaw, cursorRaw strin
 		if cursorLimited {
 			reasons = append(reasons, "cursor_limit")
 		}
-		payload = map[string]any{"path": scope.path, "repo": scope.repo, "repository_identity": scope.identity, "relative_path": scope.relative, "branch": scope.branch, "head": frozenHead, "hosted_remote": scope.hostedRemote, "snapshot_cursor": snapshotCursor, "start_offset": offset, "commits": visible, "next_cursor": nextCursor, "truncated": len(reasons) > 0}
+		payload = map[string]any{"path": scope.path, "repo": scope.repo, "repository_identity": scope.identity, "shallow_boundary": scope.shallowBoundary, "relative_path": scope.relative, "branch": scope.branch, "head": frozenHead, "hosted_remote": scope.hostedRemote, "snapshot_cursor": snapshotCursor, "start_offset": offset, "commits": visible, "next_cursor": nextCursor, "truncated": len(reasons) > 0}
 		if len(reasons) > 0 {
 			payload["truncation_reason"] = strings.Join(reasons, ",")
 		}
@@ -1426,6 +1671,9 @@ func (s *Service) gitHistory(ctx context.Context, raw, limitRaw, cursorRaw strin
 		}
 		encoded, _ := json.Marshal(payload)
 		if len(encoded) <= gitHistoryMaxPayload {
+			if !gitHistoryShallowBoundaryMatches(scope.namespace, scope.shallowBoundary) {
+				return nil, gitNamespaceChanged(scope.path)
+			}
 			s.cacheGitHistory(cacheKey, payload)
 			return payload, nil
 		}
@@ -1479,21 +1727,55 @@ func (s *Service) gitCommitExists(ctx context.Context, scope *gitHistoryScope, o
 	return false, nil
 }
 
-func (s *Service) gitCommitAncestor(ctx context.Context, scope *gitHistoryScope, ancestor, descendant string) (bool, *Error) {
+// gitCommitReachability combines the common existence and ancestry checks. A successful or
+// non-ancestor merge-base result proves the candidate object exists; only an unknown-object error
+// needs a second lookup to preserve the established unknown-versus-outside-history response.
+func (s *Service) gitCommitReachability(ctx context.Context, scope *gitHistoryScope, ancestor, descendant string) (bool, bool, *Error) {
+	if err := ctx.Err(); err != nil {
+		return false, false, cancelled(scope.path)
+	}
+	shallowBoundary, boundaryErr := gitHistoryShallowBoundarySignature(scope.namespace)
+	if boundaryErr != nil {
+		return false, false, gitNamespaceChanged(scope.path)
+	}
+	scope.shallowBoundary = shallowBoundary
+	cacheKey := gitReachabilityCacheKey(scope, ancestor, descendant)
+	if s.cachedGitReachability(cacheKey) {
+		return true, true, nil
+	}
 	_, stderr, err := runGitBounded(ctx, scope.directory, nil, []string{"merge-base", "--is-ancestor", ancestor, descendant}, 512, scope.namespace)
 	if err == nil {
-		return true, nil
+		if !gitHistoryShallowBoundaryMatches(scope.namespace, scope.shallowBoundary) {
+			return false, false, gitNamespaceChanged(scope.path)
+		}
+		s.cacheGitReachability(cacheKey)
+		return true, true, nil
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return false, cancelled(scope.path)
+		return false, false, cancelled(scope.path)
 	}
 	if errors.Is(err, errGitNamespaceChanged) {
-		return false, gitNamespaceChanged(scope.path)
+		return false, false, gitNamespaceChanged(scope.path)
 	}
 	if gitExitStatus(err, 1) && len(stderr) == 0 {
-		return false, nil
+		if !gitHistoryShallowBoundaryMatches(scope.namespace, scope.shallowBoundary) {
+			return false, false, gitNamespaceChanged(scope.path)
+		}
+		return true, false, nil
 	}
-	return false, &Error{Status: http.StatusInternalServerError, Code: "git_commit_failed", MessageKey: "fs.error.gitCommitFailed", Path: scope.path, Retryable: true, Message: "Git ancestry lookup failed"}
+	if gitExitStatus(err, 128) {
+		found, finderErr := s.gitCommitExists(ctx, scope, ancestor)
+		if finderErr != nil {
+			return false, false, finderErr
+		}
+		if !gitHistoryShallowBoundaryMatches(scope.namespace, scope.shallowBoundary) {
+			return false, false, gitNamespaceChanged(scope.path)
+		}
+		if !found {
+			return false, false, nil
+		}
+	}
+	return false, false, &Error{Status: http.StatusInternalServerError, Code: "git_commit_failed", MessageKey: "fs.error.gitCommitFailed", Path: scope.path, Retryable: true, Message: "Git ancestry lookup failed"}
 }
 
 func boundedGitCommitMessage(raw []byte) (string, bool) {
@@ -1548,6 +1830,25 @@ func gitEmptyTreeOID(commit string) string {
 type gitCommitCount struct {
 	added, removed any
 	binary         bool
+}
+
+type gitCommitCountIndex map[string]gitCommitCount
+
+func indexGitCommitCounts(counts map[string]gitCommitCount) gitCommitCountIndex {
+	index := make(gitCommitCountIndex, len(counts)*2)
+	for key, count := range counts {
+		oldPath, newPath, found := strings.Cut(key, "\x00")
+		if !found {
+			continue
+		}
+		if _, exists := index[oldPath]; !exists {
+			index[oldPath] = count
+		}
+		if _, exists := index[newPath]; !exists {
+			index[newPath] = count
+		}
+	}
+	return index
 }
 
 func parseGitNameStatus(raw []byte, outputTruncated bool) ([]map[string]string, bool, error) {
@@ -1675,8 +1976,31 @@ func parseGitNumstat(raw []byte, outputTruncated bool) (map[string]gitCommitCoun
 	return counts, truncated, nil
 }
 
-func gitCommitDiffArgs(parent, commit, relative string) []string {
-	return gitDiffTreeArgs(parent, commit, relative, "--raw", "--numstat", "-z", "--find-renames", "--find-copies-harder", "--no-ext-diff", "--no-textconv")
+const gitCommitMetadataFormat = "%H%x00%P%x00%an%x00%at%x00%s%x00%B%x00"
+
+// Counts cached by SHA must use the same algorithm regardless of local diff preferences.
+func gitCommitDiffOptions() []string {
+	return []string{"--diff-algorithm=myers", "--no-indent-heuristic", "--no-ext-diff", "--no-textconv"}
+}
+
+func gitCommitProductArgs(commit, relative string) []string {
+	args := []string{"show", "--root", "--diff-merges=first-parent", "--raw", "--numstat", "-z", "--find-renames", "--find-copies-harder", "--format=" + gitCommitMetadataFormat}
+	args = append(args, gitCommitDiffOptions()...)
+	args = append(args, commit)
+	return append(args, historyPathArgs(relative)...)
+}
+
+// splitGitCommitProduct separates commit metadata from raw status and numstat rows emitted by
+// one bounded `git show`, then restores the terminator expected by the existing metadata parser.
+func splitGitCommitProduct(raw []byte) ([]byte, []byte, bool) {
+	separator := bytes.Index(raw, []byte("\n\x00\x00\n"))
+	if separator < 0 {
+		return nil, nil, false
+	}
+	metadata := make([]byte, 0, separator+3)
+	metadata = append(metadata, raw[:separator+2]...)
+	metadata = append(metadata, '\n')
+	return metadata, raw[separator+4:], true
 }
 
 func gitDiffTreeArgs(parent, commit, relative string, options ...string) []string {
@@ -1789,111 +2113,89 @@ func (s *Service) GitCommit(ctx context.Context, raw, commitRaw, headRaw string,
 	if finderErr := validateGitObjectID(headRaw, "fs.error.gitHistoryStale"); finderErr != nil {
 		return nil, finderErr
 	}
-	scope, finderErr := s.openGitHistoryScope(raw)
+	scope, finderErr := s.openGitHistoryScopeWithOptions(ctx, raw, gitHistoryScopeOptions{})
 	if finderErr != nil {
 		return nil, finderErr
 	}
 	defer scope.close()
 	gitCtx, cancel := gitViewContext(ctx)
 	defer cancel()
-	currentHead, finderErr := gitHistoryHead(gitCtx, scope)
+	snapshot, finderErr := s.captureGitSnapshot(gitCtx, scope, "fs.error.gitCommitFailed")
 	if finderErr != nil {
 		return nil, finderErr
 	}
+	currentHead := snapshot.head
 	if currentHead == "" {
 		return nil, &Error{Status: http.StatusConflict, Code: "git_history_stale", MessageKey: "fs.error.gitHistoryStale", Path: scope.path, Message: "Git history snapshot is stale"}
-	}
-	if finderErr := ensureCurrentHeadObject(gitCtx, scope, "fs.error.gitCommitFailed"); finderErr != nil {
-		return nil, finderErr
 	}
 	if len(repositoryIdentity) > 0 && strings.TrimSpace(repositoryIdentity[0]) != "" && repositoryIdentity[0] != scope.identity {
 		return nil, &Error{Status: http.StatusConflict, Code: "git_history_stale", MessageKey: "fs.error.gitHistoryStale", Path: scope.path, Message: "Git repository snapshot is stale"}
 	}
-	frozenFound, frozenErr := s.gitCommitExists(gitCtx, scope, headRaw)
-	if frozenErr != nil {
-		return nil, frozenErr
-	}
-	frozenAncestor, frozenAncestorErr := s.gitCommitAncestor(gitCtx, scope, headRaw, currentHead)
-	if frozenAncestorErr != nil && frozenFound {
-		return nil, frozenAncestorErr
-	}
-	if !frozenFound || !frozenAncestor {
-		return nil, &Error{Status: http.StatusConflict, Code: "git_history_stale", MessageKey: "fs.error.gitHistoryStale", Path: scope.path, Message: "Git history snapshot is stale"}
-	}
-	found, finderErr := s.gitCommitExists(gitCtx, scope, commitRaw)
-	if finderErr != nil {
+	if finderErr := s.validateFrozenGitHistoryHead(gitCtx, snapshot, headRaw); finderErr != nil {
 		return nil, finderErr
 	}
-	if !found {
-		return nil, &Error{Status: http.StatusNotFound, Code: "unknown_commit", MessageKey: "fs.error.gitCommitUnknown", Path: scope.path, Message: "unknown Git commit"}
+	// Git treats shallow commits as roots, so a changed boundary changes their diff product.
+	shallowBoundary, boundaryErr := gitHistoryShallowBoundarySignature(scope.namespace)
+	if boundaryErr != nil {
+		return nil, gitNamespaceChanged(scope.path)
 	}
-	inHistory, finderErr := s.gitCommitAncestor(gitCtx, scope, commitRaw, headRaw)
-	if finderErr != nil {
-		return nil, finderErr
+	scope.shallowBoundary = shallowBoundary
+	if commitRaw != headRaw {
+		found, inHistory, reachabilityErr := s.gitCommitReachability(gitCtx, scope, commitRaw, headRaw)
+		if reachabilityErr != nil {
+			return nil, reachabilityErr
+		}
+		if !found {
+			return nil, &Error{Status: http.StatusNotFound, Code: "unknown_commit", MessageKey: "fs.error.gitCommitUnknown", Path: scope.path, Message: "unknown Git commit"}
+		}
+		if !inHistory {
+			return nil, &Error{Status: http.StatusNotFound, Code: "unknown_commit", MessageKey: "fs.error.gitCommitUnknown", Path: scope.path, Message: "commit is outside the selected history"}
+		}
 	}
-	if !inHistory {
-		return nil, &Error{Status: http.StatusNotFound, Code: "unknown_commit", MessageKey: "fs.error.gitCommitUnknown", Path: scope.path, Message: "commit is outside the selected history"}
-	}
-	cacheKey := gitProductCacheKey("commit", scope.identity, scope.relative, currentHead, headRaw, commitRaw)
+	// Reuse commit detail across HEADs while the repository identity and shallow boundary stay fixed.
+	cacheKey := gitProductCacheKey("commit", scope.repo, scope.path, scope.identity, scope.relative, scope.shallowBoundary, commitRaw)
 	if cached, ok := s.cachedGitCommit(cacheKey); ok {
 		return cached, nil
 	}
-	metadataRaw, stderr, err := runGitBounded(gitCtx, scope.directory, nil, []string{"show", "--no-patch", "--format=%H%x00%P%x00%an%x00%at%x00%s%x00%B%x00", commitRaw}, gitCommitMaxMessage+gitCommitMetadataOverhead, scope.namespace)
+	productRaw, stderr, err := runGitBounded(gitCtx, scope.directory, nil, gitCommitProductArgs(commitRaw, scope.relative), gitCommitProductMaxOutput, scope.namespace)
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return nil, cancelled(scope.path)
 	}
-	var metadata map[string]any
-	var parseErr error
-	if err != nil {
-		if errors.Is(err, errGitNamespaceChanged) {
-			return nil, gitNamespaceChanged(scope.path)
-		}
-		if errors.Is(err, errGitOutputLimit) && len(stderr) == 0 && len(metadataRaw) > 0 {
-			metadata, parseErr = parseGitCommitMetadata(metadataRaw, true)
-			if parseErr != nil || metadata["sha"] != commitRaw {
-				return nil, &Error{Status: http.StatusRequestEntityTooLarge, Code: "too_large", MessageKey: "fs.error.gitCommitTooLarge", Path: scope.path, Message: "Git commit metadata is too large"}
-			}
-		} else {
-			if errors.Is(err, errGitOutputLimit) {
-				return nil, &Error{Status: http.StatusRequestEntityTooLarge, Code: "too_large", MessageKey: "fs.error.gitCommitTooLarge", Path: scope.path, Message: "Git commit is too large"}
-			}
-			message := "Git commit metadata failed"
-			if strings.TrimSpace(string(stderr)) != "" {
-				message = strings.TrimSpace(string(stderr))
-			}
-			return nil, &Error{Status: http.StatusInternalServerError, Code: "git_commit_failed", MessageKey: "fs.error.gitCommitFailed", Path: scope.path, Retryable: true, Message: message}
-		}
-	} else {
-		metadata, parseErr = parseGitCommitMetadata(metadataRaw)
-		if parseErr != nil || metadata["sha"] != commitRaw {
-			return nil, &Error{Status: http.StatusNotFound, Code: "unknown_commit", MessageKey: "fs.error.gitCommitUnknown", Path: scope.path, Message: "unknown Git commit"}
-		}
+	if errors.Is(err, errGitNamespaceChanged) {
+		return nil, gitNamespaceChanged(scope.path)
 	}
-
+	productOutputTruncated := false
+	if errors.Is(err, errGitOutputLimit) && len(stderr) == 0 && len(productRaw) > 0 {
+		productOutputTruncated = true
+		err = nil
+	}
+	if err != nil {
+		if errors.Is(err, errGitOutputLimit) {
+			return nil, &Error{Status: http.StatusRequestEntityTooLarge, Code: "too_large", MessageKey: "fs.error.gitCommitTooLarge", Path: scope.path, Message: "Git commit is too large"}
+		}
+		message := "Git commit detail failed"
+		if strings.TrimSpace(string(stderr)) != "" {
+			message = strings.TrimSpace(string(stderr))
+		}
+		return nil, &Error{Status: http.StatusInternalServerError, Code: "git_commit_failed", MessageKey: "fs.error.gitCommitFailed", Path: scope.path, Retryable: true, Message: message}
+	}
+	metadataRaw, diffRaw, productFound := splitGitCommitProduct(productRaw)
+	if !productFound {
+		if productOutputTruncated {
+			return nil, &Error{Status: http.StatusRequestEntityTooLarge, Code: "too_large", MessageKey: "fs.error.gitCommitTooLarge", Path: scope.path, Message: "Git commit metadata is too large"}
+		}
+		return nil, &Error{Status: http.StatusInternalServerError, Code: "git_commit_failed", MessageKey: "fs.error.gitCommitFailed", Path: scope.path, Retryable: true, Message: "Git commit detail output was malformed"}
+	}
+	metadata, parseErr := parseGitCommitMetadata(metadataRaw)
+	if parseErr != nil || metadata["sha"] != commitRaw {
+		return nil, &Error{Status: http.StatusNotFound, Code: "unknown_commit", MessageKey: "fs.error.gitCommitUnknown", Path: scope.path, Message: "unknown Git commit"}
+	}
 	parents, _ := metadata["parents"].([]string)
 	parent := ""
 	if len(parents) > 0 {
 		parent = parents[0]
 	}
-	diffRaw, diffStderr, diffErr := runGitBounded(gitCtx, scope.directory, nil, gitCommitDiffArgs(parent, commitRaw, scope.relative), gitCommitMaxOutput, scope.namespace)
-	if errors.Is(diffErr, context.Canceled) || errors.Is(diffErr, context.DeadlineExceeded) {
-		return nil, cancelled(scope.path)
-	}
-	diffOutputTruncated := false
-	if diffErr != nil {
-		if errors.Is(diffErr, errGitNamespaceChanged) {
-			return nil, gitNamespaceChanged(scope.path)
-		}
-		if errors.Is(diffErr, errGitOutputLimit) {
-			if len(diffStderr) != 0 || len(diffRaw) == 0 {
-				return nil, &Error{Status: http.StatusRequestEntityTooLarge, Code: "too_large", MessageKey: "fs.error.gitCommitTooLarge", Path: scope.path, Message: "Git commit is too large"}
-			}
-			diffOutputTruncated = true
-		} else {
-			return nil, &Error{Status: http.StatusInternalServerError, Code: "git_commit_failed", MessageKey: "fs.error.gitCommitFailed", Path: scope.path, Retryable: true, Message: strings.TrimSpace(string(diffStderr))}
-		}
-	}
-	statusRows, counts, diffTruncated, parseErr := parseGitRawNumstat(diffRaw, diffOutputTruncated)
+	statusRows, counts, diffTruncated, parseErr := parseGitRawNumstat(diffRaw, productOutputTruncated)
 	if parseErr != nil {
 		if errors.Is(parseErr, errGitPathEncoding) {
 			return nil, &Error{Status: http.StatusUnprocessableEntity, Code: "git_path_encoding", MessageKey: "fs.error.gitPathEncoding", Path: scope.path, Message: parseErr.Error()}
@@ -1947,6 +2249,7 @@ func (s *Service) GitCommit(ctx context.Context, raw, commitRaw, headRaw string,
 		return nil, &Error{Status: http.StatusNotFound, Code: "commit_outside_scope", MessageKey: "fs.error.gitCommitScope", Path: scope.path, Message: "commit does not change the selected history scope"}
 	}
 	metadata["repo"] = scope.repo
+	metadata["shallow_boundary"] = scope.shallowBoundary
 	metadata["scope_path"] = scope.relative
 	metadata["from_ref"] = parent
 	if parent == "" {
@@ -1977,6 +2280,9 @@ func (s *Service) GitCommit(ctx context.Context, raw, commitRaw, headRaw string,
 		if len(encoded) > gitCommitMaxPayload {
 			return nil, &Error{Status: http.StatusRequestEntityTooLarge, Code: "too_large", MessageKey: "fs.error.gitCommitTooLarge", Path: scope.path, Message: "Git commit metadata is too large"}
 		}
+	}
+	if !gitHistoryShallowBoundaryMatches(scope.namespace, scope.shallowBoundary) {
+		return nil, gitNamespaceChanged(scope.path)
 	}
 	s.cacheGitCommit(cacheKey, metadata)
 	return metadata, nil

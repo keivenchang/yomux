@@ -147,12 +147,14 @@ async function saveFileExplorerRootMode(mode) {
 // (one request per dir per render — the cause of the 8001 fs/list loop). Repeated fetches of the same dir
 // within the TTL reuse the listing; the change-detection sweep and explicit reloads pass {fresh:true}.
 const fileExplorerFsResourceRecords = new Map();
+let fileExplorerFsResourceRevision = 0;
 const fileExplorerFsNegativeBackoffBaseMs = 30_000;
 const fileExplorerFsNegativeBackoffMaxMs = 5 * 60_000;
 const fileExplorerFsBatchQueue = [];
 const fileExplorerFsBatchPending = new Map();
 const fileExplorerFsBatchOperations = new Map();
 const fileExplorerDeletedPathTombstones = new Set();
+const fileExplorerDeletedPathRevisions = new Map();
 const fileExplorerRepoInfoEnrichmentState = {
   pending: new Set(),
   inFlight: new Set(),
@@ -291,6 +293,7 @@ function fileExplorerFsResourceRecord(type, path) {
     record = {
       value: undefined,
       storedAt: 0,
+      revision: 0,
       request: null,
       requestUserInitiated: false,
       generation: 0,
@@ -335,14 +338,21 @@ function setFileExplorerFsResourceValue(type, path, value) {
   record.request = null;
   record.value = value;
   record.storedAt = Date.now();
+  record.revision = ++fileExplorerFsResourceRevision;
   clearFileExplorerFsResourceFailure(record);
   return value;
+}
+
+function bumpFileExplorerDeletedPathRevision(path) {
+  setLimitedMapEntry(fileExplorerDeletedPathRevisions, path, ++fileExplorerFsResourceRevision, fileExplorerMemoryCacheLimit);
 }
 
 function markFileExplorerDeletedPaths(paths = []) {
   for (const path of paths) {
     const normalized = normalizeDirectoryPath(path);
-    if (normalized) fileExplorerDeletedPathTombstones.add(normalized);
+    if (!normalized) continue;
+    fileExplorerDeletedPathTombstones.add(normalized);
+    bumpFileExplorerDeletedPathRevision(normalized);
   }
 }
 
@@ -351,12 +361,17 @@ function reconcileFileExplorerDeletedPathTombstones(directory, entries, authorit
   const normalizedDirectory = normalizeDirectoryPath(directory);
   const listed = new Set(entries.map(entry => childPath(normalizedDirectory, entry?.name)));
   for (const path of Array.from(fileExplorerDeletedPathTombstones)) {
-    if (dirnameOf(path) === normalizedDirectory && !listed.has(path)) fileExplorerDeletedPathTombstones.delete(path);
+    if (dirnameOf(path) === normalizedDirectory && !listed.has(path) && fileExplorerDeletedPathTombstones.delete(path)) {
+      bumpFileExplorerDeletedPathRevision(path);
+    }
   }
 }
 
 function clearFileExplorerDeletedPaths(paths = []) {
-  for (const path of paths) fileExplorerDeletedPathTombstones.delete(normalizeDirectoryPath(path));
+  for (const path of paths) {
+    const normalized = normalizeDirectoryPath(path);
+    if (normalized && fileExplorerDeletedPathTombstones.delete(normalized)) bumpFileExplorerDeletedPathRevision(normalized);
+  }
 }
 
 function filterFileExplorerDeletedPathTombstones(directory, entries) {
@@ -431,6 +446,7 @@ function requestFileExplorerFsResource(type, path, options, makeRequest, lifecyc
       if (fileExplorerFsResourceCurrent(key, record, generation) && value !== undefined && value !== null) {
         record.value = value;
         record.storedAt = Date.now();
+        record.revision = ++fileExplorerFsResourceRevision;
         clearFileExplorerFsResourceFailure(record);
         lifecycle.onPublish?.(value);
       }

@@ -460,9 +460,23 @@ def git_history(
     raw_path: str,
     limit: int | str | None = None,
     cursor: str | None = None,
+    *,
+    worktree: str = "inline",
 ) -> dict[str, Any]:
     _sync_package_overrides()
-    return git_ops.git_history(raw_path, limit=limit, cursor=cursor)
+    return git_ops.git_history(raw_path, limit=limit, cursor=cursor, worktree=worktree)
+
+
+@normalize_os_errors
+def git_history_stats_batches(
+    raw_path: str,
+    *,
+    cursor: str,
+    offset: int,
+    batch_sizes: list[int],
+) -> list[dict[str, Any]]:
+    _sync_package_overrides()
+    return git_ops.git_history_stats_batches(raw_path, cursor=cursor, offset=offset, batch_sizes=batch_sizes)
 
 
 @normalize_os_errors

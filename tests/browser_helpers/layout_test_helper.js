@@ -669,6 +669,62 @@ function deferredFetch() {
   return {promise, resolve, reject};
 }
 
+function sseFrame(event, payload) {
+  return `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
+}
+
+function controllableSseResponse() {
+  const reads = [];
+  const queued = [];
+  let cancelled = false;
+  let closed = false;
+  const settleRead = () => {
+    if (!reads.length) return;
+    if (queued.length) reads.shift()({done: false, value: queued.shift()});
+    else if (closed) reads.shift()({done: true});
+  };
+  const response = {
+    ok: true,
+    status: 200,
+    statusText: 'OK',
+    body: {
+      getReader() {
+        return {
+          read() {
+            if (queued.length) return Promise.resolve({done: false, value: queued.shift()});
+            if (closed) return Promise.resolve({done: true});
+            return new Promise(resolve => reads.push(resolve));
+          },
+          cancel() {
+            cancelled = true;
+            closed = true;
+            queued.length = 0;
+            while (reads.length) reads.shift()({done: true});
+            return Promise.resolve();
+          },
+        };
+      },
+    },
+  };
+  return {
+    response,
+    push(text) {
+      queued.push(new TextEncoder().encode(text));
+      settleRead();
+    },
+    close() {
+      closed = true;
+      while (reads.length) reads.shift()({done: true});
+    },
+    bindSignal(signal) {
+      signal?.addEventListener?.('abort', () => {
+        cancelled = true;
+      }, {once: true});
+    },
+    cancelled() { return cancelled; },
+  };
+}
+
 async function apiTransportRetirementScenario() {
   const outcome = promise => promise.then(() => 'resolved', error => String(error?.message || error));
   const api = loadYolomux();
@@ -1201,6 +1257,10 @@ globalThis.__layoutTestApi = {
   setFileExplorerFinderSelectedSessionForTest(value) { fileExplorerFinderSelectedSession = String(value || ''); },
   changesGroupsSnapshotHtmlForTest: changesGroupsSnapshotHtml,
   fetchSessionFilesForTest: fetchSessionFiles,
+  mergeSessionFilesStreamChunkForTest: mergeSessionFilesStreamChunk,
+  finalizeSessionFilesStreamPayloadForTest(payload, requestIsCurrent) {
+    return finalizeSessionFilesStreamPayload(fileExplorerSessionFilesState, payload, requestIsCurrent);
+  },
   fileExplorerSessionFilesStateForTest() { return {...fileExplorerSessionFilesState}; },
   fileExplorerFinderSessionFilesStateForTest() { return {...fileExplorerFinderSessionFilesState}; },
   sessionFilesRequestForDestinationForTest: sessionFilesRequestForDestination,
@@ -1443,6 +1503,7 @@ globalThis.__layoutTestApi = {
   bindPaneFrameControlsForTest: bindPaneFrameControls,
   bindSearchHistoryPanelForTest: bindSearchHistoryPanel,
   fetchDirectoryForTest: fetchDirectory,
+  markFileExplorerDeletedPathsForTest: markFileExplorerDeletedPaths,
   fileExplorerEntriesByWatchedDirectoryForTest: fileExplorerEntriesByWatchedDirectory,
   refreshFileExplorerFromPushForTest: refreshFileExplorerFromPush,
   refreshWatchedFilesystemForTest: refreshWatchedFilesystem,
@@ -1650,6 +1711,17 @@ globalThis.__layoutTestApi = {
     const state = gitDiffTabState.get(item);
     return state ? {...state} : null;
   },
+  gitDiffCommitRecordForTest: gitDiffCommitRecordFor,
+  applyGitDiffStatsPayloadForTest: applyGitDiffStatsPayload,
+  gitDiffHistorySnapshotIsStaleForTest: gitDiffHistorySnapshotIsStale,
+  observeRenderTreeChildrenForTest(observer) {
+    const original = renderTreeChildren;
+    renderTreeChildren = (...args) => {
+      observer(...args);
+      return original(...args);
+    };
+    return () => { renderTreeChildren = original; };
+  },
   gitDiffCommitRowForTest: gitDiffCommitRow,
   gitDiffWorktreeStatusNodeForTest: gitDiffWorktreeStatusNode,
   gitDiffCommitMessageForTest: gitDiffCommitMessage,
@@ -1662,6 +1734,7 @@ globalThis.__layoutTestApi = {
   relocalizeGitDiffPanelForTest: relocalizeGitDiffPanel,
   refreshGitDiffHistoryForTest: refreshGitDiffHistory,
   loadOlderGitDiffHistoryForTest: loadOlderGitDiffHistory,
+  backfillGitDiffVisibleCommitDetailsForTest: backfillGitDiffVisibleCommitDetails,
   loadGitDiffCommitDetailForTest: loadGitDiffCommitDetail,
   setGitDiffCommitExpandedForTest: setGitDiffCommitExpanded,
   createLifecycleScopeForTest: createLifecycleScope,
@@ -2280,6 +2353,7 @@ globalThis.__layoutTestApi = {
   invalidateFileExplorerFsCachesForTest: invalidateFileExplorerFsCaches,
   invalidateFileExplorerRootsForTest: invalidateFileExplorerRoots,
   setFileExplorerFsResourceValueForTest(path, entries) { setFileExplorerFsResourceValue('list', path, entries); },
+  fileExplorerDeletedPathTombstonesForTest() { return [...fileExplorerDeletedPathTombstones]; },
   fileExplorerFsResourceRecordsForTest() {
     return [...fileExplorerFsResourceRecords.entries()].map(([key, record]) => ({
       key,
@@ -2638,6 +2712,60 @@ globalThis.__layoutTestApi = {
     clientSettingsPayload = {...clientSettingsPayload, ...(patch || {})};
   },
   applySettingsPayloadForTest: applySettingsPayload,
+  settingsStateForTest() { return {settings: clientSettings, defaults: clientSettingsDefaults}; },
+  settingsApplyDependenciesForTest: SETTINGS_APPLY_DEPENDENCIES,
+  settingsDependencyChangedForTest: settingsDependencyChanged,
+  observeSettingsApplyOwnersForTest(observer) {
+    const originals = {
+      applyCssSettings,
+      applyGlobalThemeMode,
+      applyEditorThemeMode,
+      applyEditorCursorStyle,
+      applyTerminalRuntimeSettings,
+      applyEditorWrapPreference,
+      renderFileExplorerRootModeControls,
+      renderPreferencesPanels,
+      renderSessionButtons,
+      renderPaneTabStrips,
+      rescheduleAllFileAutosaves,
+      updateEditorPreviewFontControls,
+      refreshFilePreviewPopouts,
+      refreshOpenEditorThemePanels,
+      installRuntimeIntervals,
+    };
+    applyCssSettings = (...args) => { observer('applyCssSettings'); return originals.applyCssSettings(...args); };
+    applyGlobalThemeMode = (...args) => { observer('applyGlobalThemeMode'); return originals.applyGlobalThemeMode(...args); };
+    applyEditorThemeMode = (...args) => { observer('applyEditorThemeMode'); return originals.applyEditorThemeMode(...args); };
+    applyEditorCursorStyle = (...args) => { observer('applyEditorCursorStyle'); return originals.applyEditorCursorStyle(...args); };
+    applyTerminalRuntimeSettings = (...args) => { observer('applyTerminalRuntimeSettings'); return originals.applyTerminalRuntimeSettings(...args); };
+    applyEditorWrapPreference = (...args) => { observer('applyEditorWrapPreference'); return originals.applyEditorWrapPreference(...args); };
+    renderFileExplorerRootModeControls = (...args) => { observer('renderFileExplorerRootModeControls'); return originals.renderFileExplorerRootModeControls(...args); };
+    renderPreferencesPanels = (...args) => { observer('renderPreferencesPanels'); return originals.renderPreferencesPanels(...args); };
+    renderSessionButtons = (...args) => { observer('renderSessionButtons'); return originals.renderSessionButtons(...args); };
+    renderPaneTabStrips = (...args) => { observer('renderPaneTabStrips'); return originals.renderPaneTabStrips(...args); };
+    rescheduleAllFileAutosaves = (...args) => { observer('rescheduleAllFileAutosaves'); return originals.rescheduleAllFileAutosaves(...args); };
+    updateEditorPreviewFontControls = (...args) => { observer('updateEditorPreviewFontControls'); return originals.updateEditorPreviewFontControls(...args); };
+    refreshFilePreviewPopouts = (...args) => { observer('refreshFilePreviewPopouts'); return originals.refreshFilePreviewPopouts(...args); };
+    refreshOpenEditorThemePanels = (...args) => { observer('refreshOpenEditorThemePanels'); return originals.refreshOpenEditorThemePanels(...args); };
+    installRuntimeIntervals = (...args) => { observer('installRuntimeIntervals'); return originals.installRuntimeIntervals(...args); };
+    return () => {
+      applyCssSettings = originals.applyCssSettings;
+      applyGlobalThemeMode = originals.applyGlobalThemeMode;
+      applyEditorThemeMode = originals.applyEditorThemeMode;
+      applyEditorCursorStyle = originals.applyEditorCursorStyle;
+      applyTerminalRuntimeSettings = originals.applyTerminalRuntimeSettings;
+      applyEditorWrapPreference = originals.applyEditorWrapPreference;
+      renderFileExplorerRootModeControls = originals.renderFileExplorerRootModeControls;
+      renderPreferencesPanels = originals.renderPreferencesPanels;
+      renderSessionButtons = originals.renderSessionButtons;
+      renderPaneTabStrips = originals.renderPaneTabStrips;
+      rescheduleAllFileAutosaves = originals.rescheduleAllFileAutosaves;
+      updateEditorPreviewFontControls = originals.updateEditorPreviewFontControls;
+      refreshFilePreviewPopouts = originals.refreshFilePreviewPopouts;
+      refreshOpenEditorThemePanels = originals.refreshOpenEditorThemePanels;
+      installRuntimeIntervals = originals.installRuntimeIntervals;
+    };
+  },
   clientSettingsMtimeNsForTest() { return clientSettingsMtimeNs; },
   setWindowConfirmForTest(fn) {
     window.confirm = fn;
@@ -3611,6 +3739,8 @@ module.exports = {
   sourceBetween,
   makeCatalogT,
   deferredFetch,
+  sseFrame,
+  controllableSseResponse,
   apiTransportRetirementScenario,
   settingsOverride,
   loadYolomux,

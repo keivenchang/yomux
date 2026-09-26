@@ -1209,6 +1209,11 @@ def get_fs_git_history(request: Any, parsed: Any, route: Route) -> None:
     request.handle_fs_git_history(parsed)
 
 
+def get_fs_git_history_stats_stream(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.stream_git_history_stats(parsed)
+
+
 def get_fs_git_commit(request: Any, parsed: Any, route: Route) -> None:
     del route
     request.handle_fs_git_commit(parsed)
@@ -1701,6 +1706,7 @@ FILESYSTEM_ROUTES = (
     Route("GET", "/api/fs/info", "readonly", get_fs_info, protocol=RESPONSE_JSON, group="filesystem"),
     Route("GET", "/api/fs/diff", "readonly", get_fs_diff, protocol=RESPONSE_JSON, group="filesystem"),
     Route("GET", "/api/fs/git-history", "readonly", get_fs_git_history, protocol=RESPONSE_JSON, group="filesystem"),
+    Route("GET", "/api/fs/git-history-stats-stream", "readonly", get_fs_git_history_stats_stream, protocol=RESPONSE_SSE, group="filesystem"),
     Route("GET", "/api/fs/git-commit", "readonly", get_fs_git_commit, protocol=RESPONSE_JSON, group="filesystem"),
     Route("GET", "/api/fs/watch-diff", "readonly", get_fs_watch_diff, protocol=RESPONSE_JSON, group="filesystem"),
     Route("GET", "/api/fs/raw", "readonly", get_fs_raw, protocol=RESPONSE_BINARY, group="filesystem"),

@@ -21,6 +21,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/keivenchang/yolomux/internal/cache"
 )
 
 const (
@@ -105,19 +107,21 @@ func changed(path string) *Error {
 }
 
 type Service struct {
-	root                       string
-	uploadMu                   sync.RWMutex
-	uploadLimits               UploadLimits
-	publish                    EventPublisher
-	mu                         sync.Mutex
-	nativeMu                   sync.Mutex
-	watches                    map[string]watchRecord
-	watchGeneration            uint64
-	epoch                      string
-	revision                   uint64
-	changes                    []watchChange
-	native                     nativeWatchController
-	nativeStatus               nativeWatchStatus
+	root            string
+	uploadMu        sync.RWMutex
+	uploadLimits    UploadLimits
+	publish         EventPublisher
+	mu              sync.Mutex
+	nativeMu        sync.Mutex
+	watches         map[string]watchRecord
+	watchGeneration uint64
+	epoch           string
+	revision        uint64
+	changes         []watchChange
+	native          nativeWatchController
+	nativeStatus    nativeWatchStatus
+	// nativeRoots remembers the last healthy configuration to avoid rebuilding the same watch tree.
+	nativeRoots                []string
 	publishGitRename           func(context.Context, *gitRenamePlan, string) error
 	beforeWriteConflictRecheck func()
 	stop                       chan struct{}
@@ -126,15 +130,16 @@ type Service struct {
 	lastChangeAt               time.Time
 	lastChangePaths            []string
 	gitProductMu               sync.Mutex
-	gitHistoryCache            map[string]map[string]any
-	gitCommitCache             map[string]map[string]any
-	gitHistoryStatsCache       map[string]gitHistoryStatsInfo
-	gitHistoryStatsCacheOrder  []string
+	gitHistoryCache            *cache.LRU[string, map[string]any]
+	gitCommitCache             *cache.LRU[string, map[string]any]
+	gitReachabilityCache       *cache.LRU[string, struct{}]
+	gitHistoryStatsCache       *cache.LRU[string, gitHistoryStatsInfo]
 	gitObjectLayouts           gitObjectLayoutCache
 }
 
 type watchRecord struct {
 	Roots           []string
+	SignaturePaths  []string
 	Files           []string
 	BackgroundFiles []string
 	RootSurfaces    []map[string]any
@@ -278,7 +283,15 @@ func NewWithLimits(root string, publish EventPublisher, uploadLimits UploadLimit
 }
 
 func newService(root string, publish EventPublisher, native nativeWatchController, nativeStatus nativeWatchStatus, uploadLimits UploadLimits) *Service {
-	s := &Service{root: root, uploadLimits: uploadLimits, publish: publish, watches: make(map[string]watchRecord), native: native, nativeStatus: nativeStatus, epoch: fmt.Sprintf("finder-%d", time.Now().UnixNano()), stop: make(chan struct{}), done: make(chan struct{})}
+	s := &Service{
+		root: root, uploadLimits: uploadLimits, publish: publish, watches: make(map[string]watchRecord),
+		native: native, nativeStatus: nativeStatus, epoch: fmt.Sprintf("finder-%d", time.Now().UnixNano()),
+		stop: make(chan struct{}), done: make(chan struct{}),
+		gitHistoryCache:      cache.NewLRU[string, map[string]any](maxGitProductCacheEntries),
+		gitCommitCache:       cache.NewLRU[string, map[string]any](maxGitProductCacheEntries),
+		gitReachabilityCache: cache.NewLRU[string, struct{}](maxGitHistoryStatsCacheEntries),
+		gitHistoryStatsCache: cache.NewLRU[string, gitHistoryStatsInfo](maxGitHistoryStatsCacheEntries),
+	}
 	go s.watchLoop()
 	return s
 }
@@ -960,7 +973,7 @@ func (s *Service) WatchRoots(ctx context.Context, payload map[string]any) (map[s
 	if err := ctx.Err(); err != nil {
 		return nil, cancelled("")
 	}
-	signaturePaths := append(append(append([]string{}, normalized...), files...), watchPayload.BackgroundFiles...)
+	signaturePaths := watchSignaturePaths(normalized, files, watchPayload.BackgroundFiles)
 	signatures := make(map[string]string, len(signaturePaths))
 	for _, path := range signaturePaths {
 		if err := ctx.Err(); err != nil {
@@ -996,7 +1009,7 @@ func (s *Service) WatchRoots(ctx context.Context, payload map[string]any) (map[s
 	s.watchGeneration++
 	generation := s.watchGeneration
 	s.watches[clientID] = watchRecord{
-		Roots: normalized, Files: files, BackgroundFiles: watchPayload.BackgroundFiles,
+		Roots: normalized, SignaturePaths: signaturePaths, Files: files, BackgroundFiles: watchPayload.BackgroundFiles,
 		RootSurfaces: watchPayload.RootSurfaces, ContextItems: watchPayload.ContextItems,
 		SessionFiles: watchPayload.SessionFiles, ActivitySummary: watchPayload.ActivitySummary,
 		Signatures: signatures, UpdatedAt: now, ExpiresAt: now.Add(watchLeaseDuration), Generation: generation,
@@ -1014,7 +1027,7 @@ func (s *Service) WatchRoots(ctx context.Context, payload map[string]any) (map[s
 	result["watch_degraded"] = s.nativeStatus.degraded
 	result["watch_degradation_reason"] = s.nativeStatus.reason
 	s.mu.Unlock()
-	if err := s.reconfigureNative(ctx); err != nil {
+	if err := s.reconfigureNative(ctx, false); err != nil {
 		s.mu.Lock()
 		current, exists := s.watches[clientID]
 		if exists && current.Generation == generation {
@@ -1027,7 +1040,7 @@ func (s *Service) WatchRoots(ctx context.Context, payload map[string]any) (map[s
 		s.mu.Unlock()
 		// SetRoots may have applied a partial registration before observing cancellation. Restore
 		// the native state for the surviving watch set before returning the cancelled request.
-		_ = s.reconfigureNative(context.Background())
+		_ = s.reconfigureNative(context.Background(), true)
 		return nil, cancelled("")
 	}
 	s.mu.Lock()
@@ -1100,6 +1113,17 @@ func uniqueWatchPaths(paths []string) []string {
 		unique = append(unique, path)
 	}
 	return unique
+}
+
+// Keep every explicit root and file because a recursive signature can truncate; deduplicate only
+// exact paths before the request and polling loop compute the same signature set.
+func watchSignaturePaths(roots, files, backgroundFiles []string) []string {
+	paths := append([]string(nil), roots...)
+	paths = append(paths, files...)
+	paths = append(paths, backgroundFiles...)
+	paths = uniqueWatchPaths(paths)
+	sort.Strings(paths)
+	return paths
 }
 
 func (s *Service) WatchDiff(ctx context.Context, since string, forceFull bool) (map[string]any, *Error) {
@@ -1197,7 +1221,7 @@ func (s *Service) WatchDiff(ctx context.Context, since string, forceFull bool) (
 			return nil, cancelled(path)
 		default:
 		}
-		payload, finderErr := s.List(ctx, path)
+		payload, finderErr := s.FastList(ctx, path)
 		if finderErr != nil {
 			if finderErr.Status == http.StatusNotFound {
 				continue
@@ -1341,7 +1365,7 @@ func (s *Service) handleNativeEvent(event nativeWatchEvent) {
 	// every registration for ordinary file changes makes a high-churn tree spend its event reader
 	// doing repeated full walks; overflow is the explicit signal that requires reconciliation.
 	if event.overflow {
-		s.reconfigureNative(context.Background())
+		s.reconfigureNative(context.Background(), true)
 	}
 }
 
@@ -1355,9 +1379,7 @@ func (s *Service) pollWatches() {
 	events := make([]map[string]any, 0)
 	for clientID, record := range snapshots {
 		changedPaths := []string{}
-		watchedPaths := append(append([]string{}, record.Roots...), record.Files...)
-		watchedPaths = append(watchedPaths, record.BackgroundFiles...)
-		for _, path := range watchedPaths {
+		for _, path := range record.SignaturePaths {
 			signature := s.signature(context.Background(), path)
 			if previous := record.Signatures[path]; previous != signature {
 				record.Signatures[path] = signature
@@ -1419,11 +1441,11 @@ func (s *Service) pruneExpiredWatches(now time.Time) {
 	}
 	s.mu.Unlock()
 	if removed {
-		s.reconfigureNative(context.Background())
+		s.reconfigureNative(context.Background(), false)
 	}
 }
 
-func (s *Service) reconfigureNative(ctx context.Context) error {
+func (s *Service) reconfigureNative(ctx context.Context, force bool) error {
 	if s.native == nil {
 		return nil
 	}
@@ -1431,10 +1453,21 @@ func (s *Service) reconfigureNative(ctx context.Context) error {
 	defer s.nativeMu.Unlock()
 	s.mu.Lock()
 	roots := s.activeWatchRootsLocked()
+	status := s.nativeStatus
+	changed := !sameWatchRoots(s.nativeRoots, roots)
 	s.mu.Unlock()
-	status := s.native.SetRoots(ctx, roots)
+	if !force && !changed && status.available && !status.degraded {
+		if ctx != nil && ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return nil
+	}
+	status = s.native.SetRoots(ctx, roots)
 	s.mu.Lock()
 	s.nativeStatus = status
+	if status.available && !status.degraded {
+		s.nativeRoots = append([]string(nil), roots...)
+	}
 	s.mu.Unlock()
 	if ctx != nil && ctx.Err() != nil {
 		return ctx.Err()

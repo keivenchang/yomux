@@ -19,6 +19,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from dataclasses import field as dataclasses_field
@@ -937,6 +938,14 @@ GIT_VIEW_MAX_REF_BYTES = 32 * 1024 * 1024
 GIT_VIEW_MAX_REF_DEPTH = 32
 GIT_HISTORY_CACHE_TTL_SECONDS = 10.0
 GIT_HISTORY_CACHE_MAX_ENTRIES = 128
+GIT_HISTORY_STATS_CACHE_MAX_ENTRIES = 256
+GIT_HISTORY_STATS_CACHE_MAX_BYTES = 32 * 1024 * 1024
+GIT_HISTORY_SHA_STATS_CACHE_MAX_ENTRIES = 4096
+GIT_HISTORY_SHA_STATS_CACHE_MAX_BYTES = 1024 * 1024
+GIT_COMMIT_CACHE_MAX_ENTRIES = 256
+GIT_COMMIT_CACHE_MAX_BYTES = 32 * 1024 * 1024
+GIT_HISTORY_STATS_MAX_BATCHES = 16
+GIT_HISTORY_STATS_MAX_BATCH_SIZE = 200
 _GIT_OBJECT_ID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 _GIT_PACK_FILE_RE = re.compile(
     r"(?:pack-[0-9a-f]{40,64}\.(?:pack|idx|rev|bitmap|keep|promisor)|"
@@ -946,10 +955,17 @@ _GIT_OBJECT_FILE_RE = re.compile(r"[0-9a-f]{38,62}")
 _GIT_INCREMENTAL_MIDX_RE = re.compile(r"multi-pack-index-[0-9a-f]{40,64}\.midx")
 
 _GIT_HISTORY_CACHE_LOCK = threading.Lock()
-_GIT_HISTORY_CACHE: dict[tuple[str, int, str, str, int], tuple[float, dict[str, Any]]] = {}
+_GIT_HISTORY_CACHE: dict[tuple[str, ...], tuple[float, dict[str, Any]]] = {}
+_GIT_HISTORY_STATS_CACHE_LOCK = threading.Lock()
+_GIT_HISTORY_STATS_CACHE: OrderedDict[tuple[str, ...], tuple[list[dict[str, Any]], bool, int]] = OrderedDict()
+_GIT_HISTORY_STATS_CACHE_BYTES = 0
+_GIT_HISTORY_SHA_STATS_CACHE: OrderedDict[tuple[str, ...], tuple[tuple[int, int, int, int], int]] = OrderedDict()
+_GIT_HISTORY_SHA_STATS_CACHE_BYTES = 0
+_GIT_COMMIT_CACHE: OrderedDict[tuple[str, ...], tuple[dict[str, Any], int]] = OrderedDict()
+_GIT_COMMIT_CACHE_BYTES = 0
 
 
-def _git_history_cache_get(key: tuple[str, int, str, str, int]) -> dict[str, Any] | None:
+def _git_history_cache_get(key: tuple[str, ...]) -> dict[str, Any] | None:
     now = time.monotonic()
     with _GIT_HISTORY_CACHE_LOCK:
         cached = _GIT_HISTORY_CACHE.get(key)
@@ -962,7 +978,7 @@ def _git_history_cache_get(key: tuple[str, int, str, str, int]) -> dict[str, Any
         return copy.deepcopy(payload)
 
 
-def _git_history_cache_put(key: tuple[str, int, str, str, int], payload: dict[str, Any]) -> None:
+def _git_history_cache_put(key: tuple[str, ...], payload: dict[str, Any]) -> None:
     with _GIT_HISTORY_CACHE_LOCK:
         _GIT_HISTORY_CACHE[key] = (time.monotonic() + GIT_HISTORY_CACHE_TTL_SECONDS, copy.deepcopy(payload))
         while len(_GIT_HISTORY_CACHE) > GIT_HISTORY_CACHE_MAX_ENTRIES:
@@ -4655,13 +4671,62 @@ def _git_history_repo_metadata_payload(metadata: dict[str, Any]) -> dict[str, An
     return payload
 
 
-def git_history(raw_path: str, limit: int | str | None = None, cursor: str | None = None) -> dict[str, Any]:
+def _git_history_worktree_status(metadata: dict[str, Any]) -> dict[str, Any]:
+    entries = [
+        {
+            "status": entry.get("status", "").strip() or "M",
+            "path": entry.get("path", ""),
+            **({"old_path": entry["old_path"]} if entry.get("old_path") else {}),
+        }
+        for entry in metadata.get("dirty_entries", [])
+        if entry.get("path")
+    ]
+    status_counts: dict[str, int] = {}
+    for entry in entries:
+        status = entry["status"]
+        status_counts[status] = status_counts.get(status, 0) + 1
+    available = metadata.get("dirty_count") is not None
+    return {
+        "available": available,
+        "dirty": bool(entries),
+        "entries": entries,
+        "truncated": metadata.get("dirty_entries_truncated") is True,
+        "files": len(entries),
+        "stats_available": False,
+        "status_counts": status_counts,
+    }
+
+
+def git_history(
+    raw_path: str,
+    limit: int | str | None = None,
+    cursor: str | None = None,
+    *,
+    worktree: str = "inline",
+) -> dict[str, Any]:
     page_limit = _bounded_history_limit(limit)
     cursor_text = str(cursor or "")
+    if worktree not in {"inline", "0", "only"}:
+        raise _history_error("invalid Git worktree mode", key="common.requestFailed")
     with _bounded_git_read_scope(raw_path, operation="git_history") as scope:
+        if worktree == "only":
+            head = _current_head(scope, operation="gitHistory")
+            metadata = _git_history_repo_metadata(scope)
+            return {
+                "path": str(scope.path),
+                "repo": str(scope.repo),
+                "relative_path": scope.relative_path,
+                "shallow_boundary": scope.shallow_snapshot,
+                "branch": metadata.get("branch", ""),
+                "head": head,
+                "hosted_remote": scope.hosted_remote,
+                "repository_identity": _git_repository_identity(scope),
+                "worktree_status": _git_history_worktree_status(metadata),
+            }
         current_branch = _current_branch(scope)
         current_head = _current_head(scope, operation="gitHistory")
-        repo_metadata = _git_history_repo_metadata(scope)
+        include_worktree = worktree == "inline"
+        repo_metadata = _git_history_repo_metadata(scope) if include_worktree else {}
         repo_metadata_payload = _git_history_repo_metadata_payload(repo_metadata)
         if not current_head:
             if cursor:
@@ -4670,6 +4735,8 @@ def git_history(raw_path: str, limit: int | str | None = None, cursor: str | Non
                 "path": str(scope.path),
                 "repo": str(scope.repo),
                 "relative_path": scope.relative_path,
+                "shallow_boundary": scope.shallow_snapshot,
+                "repository_identity": _git_repository_identity(scope),
                 "branch": current_branch,
                 "head": "",
                 "hosted_remote": scope.hosted_remote,
@@ -4679,7 +4746,6 @@ def git_history(raw_path: str, limit: int | str | None = None, cursor: str | Non
                 "truncated": False,
                 **repo_metadata_payload,
             }
-        _ensure_current_head_object(scope, operation="gitHistory")
         if cursor:
             frozen_head, offset = _cursor_snapshot(scope, cursor)
             _ensure_commit_exists(
@@ -4704,18 +4770,16 @@ def git_history(raw_path: str, limit: int | str | None = None, cursor: str | Non
         else:
             frozen_head = current_head
             offset = 0
-        namespace_identity = hashlib.sha256(repr(scope.read_namespace).encode("utf-8")).hexdigest()
-        cache_key = (
-            str(scope.repo),
-            scope.relative_path,
-            page_limit,
-            cursor_text or frozen_head,
-            f"{namespace_identity}:{GIT_HISTORY_MAX_PAYLOAD_BYTES}",
+        cache_key = _git_history_page_cache_key(scope, frozen_head, offset, page_limit) + (
+            str(GIT_HISTORY_MAX_PAYLOAD_BYTES), worktree,
         )
         cached = _git_history_cache_get(cache_key)
         if cached is not None:
             cached.update(repo_metadata_payload)
+            cached["branch"] = current_branch
             return cached
+        if include_worktree:
+            _ensure_current_head_object(scope, operation="gitHistory")
         snapshot_cursor = _encode_history_cursor(scope, frozen_head, 0)
         snapshot_cursor_limited = len(snapshot_cursor) > GIT_HISTORY_CURSOR_MAX_BYTES
         if snapshot_cursor_limited:
@@ -4790,6 +4854,8 @@ def git_history(raw_path: str, limit: int | str | None = None, cursor: str | Non
                 "path": str(scope.path),
                 "repo": str(scope.repo),
                 "relative_path": scope.relative_path,
+                "shallow_boundary": scope.shallow_snapshot,
+                "repository_identity": _git_repository_identity(scope),
                 "branch": current_branch,
                 "head": frozen_head,
                 "hosted_remote": scope.hosted_remote,
@@ -4824,6 +4890,314 @@ def git_history(raw_path: str, limit: int | str | None = None, cursor: str | Non
             payload_bytes_truncated = True
         _git_history_cache_put(cache_key, payload)
         return payload
+
+
+def _git_history_page_cache_key(
+    scope: BoundedGitReadScope,
+    frozen_head: str,
+    offset: int,
+    count: int,
+) -> tuple[str, ...]:
+    return (
+        str(scope.repo),
+        scope.relative_path,
+        _git_read_namespace_key(scope),
+        scope.shallow_snapshot,
+        frozen_head,
+        str(offset),
+        str(count),
+    )
+
+
+def _git_history_stats_cache_get(key: tuple[str, ...]) -> tuple[list[dict[str, Any]], bool] | None:
+    with _GIT_HISTORY_STATS_CACHE_LOCK:
+        cached = _GIT_HISTORY_STATS_CACHE.get(key)
+        if cached is None:
+            return None
+        _GIT_HISTORY_STATS_CACHE.move_to_end(key)
+        commits, has_more, _ = cached
+        value = (commits, has_more)
+    return copy.deepcopy(value)
+
+
+def _git_history_stats_cache_put(key: tuple[str, ...], value: tuple[list[dict[str, Any]], bool]) -> None:
+    global _GIT_HISTORY_STATS_CACHE_BYTES
+    serialized_size = len(json.dumps(value[0], ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    if serialized_size > GIT_HISTORY_STATS_CACHE_MAX_BYTES:
+        return
+    copied = copy.deepcopy(value)
+    with _GIT_HISTORY_STATS_CACHE_LOCK:
+        previous = _GIT_HISTORY_STATS_CACHE.pop(key, None)
+        if previous is not None:
+            _GIT_HISTORY_STATS_CACHE_BYTES -= previous[2]
+        _GIT_HISTORY_STATS_CACHE[key] = (copied[0], copied[1], serialized_size)
+        _GIT_HISTORY_STATS_CACHE_BYTES += serialized_size
+        _GIT_HISTORY_STATS_CACHE.move_to_end(key)
+        while len(_GIT_HISTORY_STATS_CACHE) > GIT_HISTORY_STATS_CACHE_MAX_ENTRIES or _GIT_HISTORY_STATS_CACHE_BYTES > GIT_HISTORY_STATS_CACHE_MAX_BYTES:
+            _, evicted = _GIT_HISTORY_STATS_CACHE.popitem(last=False)
+            _GIT_HISTORY_STATS_CACHE_BYTES -= evicted[2]
+
+
+def _git_history_sha_stats_cache_key(scope: BoundedGitReadScope, sha: str) -> tuple[str, ...]:
+    return (str(scope.repo), scope.relative_path, _git_repository_identity_key(scope), scope.shallow_snapshot, sha)
+
+
+def _git_read_namespace_key(scope: BoundedGitReadScope) -> str:
+    config_digest = ""
+    try:
+        descriptor = os.open(
+            "config",
+            os.O_RDONLY | paths.nofollow_flag(),
+            dir_fd=scope.git_common_dir_handle.descriptor,
+        )
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        raise _history_error("Git config is unavailable or unsafe", key="fs.error.gitRepositoryChanged", status=409, diagnostic=error) from error
+    else:
+        try:
+            metadata = os.fstat(descriptor)
+            config = os.read(descriptor, GIT_CONFIG_MAX_BYTES + 1)
+        finally:
+            os.close(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or len(config) > GIT_CONFIG_MAX_BYTES:
+            raise _history_error("Git config is unavailable or unsafe", key="fs.error.gitRepositoryChanged", status=409)
+        config_digest = hashlib.sha256(config).hexdigest()
+    return hashlib.sha256(repr((scope.read_namespace, config_digest)).encode("utf-8")).hexdigest()
+
+
+def _git_repository_identity_key(scope: BoundedGitReadScope) -> str:
+    identity = tuple(
+        (handle.stat_result.st_dev, handle.stat_result.st_ino)
+        for handle in (
+            scope.repo_handle,
+            scope.git_marker_handle,
+            scope.git_dir_handle,
+            scope.git_common_dir_handle,
+            scope.git_objects_handle,
+        )
+    )
+    return hashlib.sha256(repr(identity).encode("ascii")).hexdigest()
+
+
+def _git_repository_identity(scope: BoundedGitReadScope) -> str:
+    return _git_repository_identity_key(scope)
+
+
+def _git_commit_cache_key(scope: BoundedGitReadScope, sha: str) -> tuple[str, ...]:
+    return (str(scope.repo), scope.relative_path, _git_repository_identity_key(scope), scope.shallow_snapshot, sha)
+
+
+def _git_commit_cache_get(key: tuple[str, ...]) -> dict[str, Any] | None:
+    with _GIT_HISTORY_STATS_CACHE_LOCK:
+        cached = _GIT_COMMIT_CACHE.get(key)
+        if cached is None:
+            return None
+        _GIT_COMMIT_CACHE.move_to_end(key)
+        return copy.deepcopy(cached[0])
+
+
+def _git_commit_cache_put(key: tuple[str, ...], payload: dict[str, Any]) -> None:
+    global _GIT_COMMIT_CACHE_BYTES
+    serialized_size = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    if serialized_size > GIT_COMMIT_CACHE_MAX_BYTES:
+        return
+    copied = copy.deepcopy(payload)
+    with _GIT_HISTORY_STATS_CACHE_LOCK:
+        previous = _GIT_COMMIT_CACHE.pop(key, None)
+        if previous is not None:
+            _GIT_COMMIT_CACHE_BYTES -= previous[1]
+        _GIT_COMMIT_CACHE[key] = (copied, serialized_size)
+        _GIT_COMMIT_CACHE_BYTES += serialized_size
+        _GIT_COMMIT_CACHE.move_to_end(key)
+        while len(_GIT_COMMIT_CACHE) > GIT_COMMIT_CACHE_MAX_ENTRIES or _GIT_COMMIT_CACHE_BYTES > GIT_COMMIT_CACHE_MAX_BYTES:
+            _, evicted = _GIT_COMMIT_CACHE.popitem(last=False)
+            _GIT_COMMIT_CACHE_BYTES -= evicted[1]
+
+
+def _git_history_sha_stats_cache_get(key: tuple[str, ...]) -> tuple[int, int, int, int] | None:
+    with _GIT_HISTORY_STATS_CACHE_LOCK:
+        cached = _GIT_HISTORY_SHA_STATS_CACHE.get(key)
+        if cached is None:
+            return None
+        _GIT_HISTORY_SHA_STATS_CACHE.move_to_end(key)
+        return cached[0]
+
+
+def _git_history_sha_stats_cache_put(key: tuple[str, ...], value: tuple[int, int, int, int]) -> None:
+    global _GIT_HISTORY_SHA_STATS_CACHE_BYTES
+    serialized_size = len(json.dumps(value, separators=(",", ":")).encode("ascii"))
+    with _GIT_HISTORY_STATS_CACHE_LOCK:
+        previous = _GIT_HISTORY_SHA_STATS_CACHE.pop(key, None)
+        if previous is not None:
+            _GIT_HISTORY_SHA_STATS_CACHE_BYTES -= previous[1]
+        _GIT_HISTORY_SHA_STATS_CACHE[key] = (value, serialized_size)
+        _GIT_HISTORY_SHA_STATS_CACHE_BYTES += serialized_size
+        _GIT_HISTORY_SHA_STATS_CACHE.move_to_end(key)
+        while len(_GIT_HISTORY_SHA_STATS_CACHE) > GIT_HISTORY_SHA_STATS_CACHE_MAX_ENTRIES or _GIT_HISTORY_SHA_STATS_CACHE_BYTES > GIT_HISTORY_SHA_STATS_CACHE_MAX_BYTES:
+            _, evicted = _GIT_HISTORY_SHA_STATS_CACHE.popitem(last=False)
+            _GIT_HISTORY_SHA_STATS_CACHE_BYTES -= evicted[1]
+
+
+def _clear_git_history_stats_cache() -> None:
+    global _GIT_HISTORY_STATS_CACHE_BYTES, _GIT_HISTORY_SHA_STATS_CACHE_BYTES, _GIT_COMMIT_CACHE_BYTES
+    with _GIT_HISTORY_STATS_CACHE_LOCK:
+        _GIT_HISTORY_STATS_CACHE.clear()
+        _GIT_HISTORY_SHA_STATS_CACHE.clear()
+        _GIT_COMMIT_CACHE.clear()
+        _GIT_HISTORY_STATS_CACHE_BYTES = 0
+        _GIT_HISTORY_SHA_STATS_CACHE_BYTES = 0
+        _GIT_COMMIT_CACHE_BYTES = 0
+
+
+def validate_git_history_stats_schedule(offset: int, batch_sizes: list[int]) -> int:
+    if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= GIT_HISTORY_MAX_CURSOR_OFFSET:
+        raise _history_error("invalid Git history stats offset", key="common.requestFailed", status=400)
+    if not batch_sizes or len(batch_sizes) > GIT_HISTORY_STATS_MAX_BATCHES:
+        raise _history_error("invalid Git history stats schedule", key="common.requestFailed", status=400)
+    if any(isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= GIT_HISTORY_STATS_MAX_BATCH_SIZE for size in batch_sizes):
+        raise _history_error("invalid Git history stats schedule", key="common.requestFailed", status=400)
+    total = sum(batch_sizes)
+    if offset > GIT_HISTORY_MAX_CURSOR_OFFSET - total:
+        raise _history_error("Git history stats schedule is too large", key="common.requestFailed", status=400)
+    return total
+
+
+def git_history_stats_batches(
+    raw_path: str,
+    *,
+    cursor: str,
+    offset: int,
+    batch_sizes: list[int],
+) -> list[dict[str, Any]]:
+    """Return frozen history statistics in caller-sized chunks with page and SHA caches."""
+    if not cursor:
+        raise _history_error("path and cursor are required", key="common.requestFailed", status=400)
+    total = validate_git_history_stats_schedule(offset, batch_sizes)
+
+    with _bounded_git_read_scope(raw_path, operation="git_history_stats") as scope:
+        current_head = _current_head(scope, operation="gitHistoryStats")
+        frozen_head, _ = _cursor_snapshot(scope, cursor)
+        if not current_head:
+            raise _history_error("Git history snapshot is stale", key="fs.error.gitHistoryStale", status=409)
+        ancestry = _run_direct_bounded_git(
+            scope,
+            ["merge-base", "--is-ancestor", frozen_head, current_head],
+            operation="gitHistoryStats",
+            timeout=5.0,
+            max_output_bytes=512,
+            allow_failure=True,
+        )
+        if ancestry.returncode not in {0, 1}:
+            _raise_history_git_failure(ancestry, operation="gitHistoryStats")
+        if ancestry.returncode == 1:
+            raise _history_error("Git history snapshot is stale", key="fs.error.gitHistoryStale", status=409)
+
+        cache_key = _git_history_page_cache_key(scope, frozen_head, offset, total)
+        cached = _git_history_stats_cache_get(cache_key)
+        if cached is None:
+            result = _run_direct_bounded_git(
+                scope,
+                [
+                    "-c",
+                    "core.quotePath=false",
+                    "log",
+                    "--topo-order",
+                    "--root",
+                    "--diff-merges=first-parent",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--no-renames",
+                    "--no-patch",
+                    "--decorate=short",
+                    "-z",
+                    "--format=commit%x00%H%x00%h%x00%P%x00%an%x00%at%x00%s%x00%D",
+                    f"--max-count={total + 1}",
+                    f"--skip={offset}",
+                    frozen_head,
+                    *_literal_scope_args(scope.relative_path),
+                ],
+                operation="gitHistoryStats",
+                timeout=10.0,
+                binary=True,
+                max_output_bytes=GIT_HISTORY_MAX_OUTPUT_BYTES,
+            )
+            raw = result.stdout if isinstance(result.stdout, bytes) else result.stdout.encode("utf-8")
+            commits, output_truncated, _ = _parse_history_metadata(raw, output_truncated=result.stdout_truncated)
+            if output_truncated and len(commits) < total:
+                raise _history_error("Git history statistics exceed the output limit", key="fs.error.gitHistoryTooLarge", status=413)
+            visible = commits[:total]
+            missing = [
+                commit["sha"]
+                for commit in visible
+                if _git_history_sha_stats_cache_get(_git_history_sha_stats_cache_key(scope, commit["sha"])) is None
+            ]
+            if missing:
+                stats_result = _run_direct_bounded_git(
+                    scope,
+                    [
+                        "-c",
+                        "core.quotePath=false",
+                        "show",
+                        "--root",
+                        "--diff-merges=first-parent",
+                        "--no-ext-diff",
+                        "--no-textconv",
+                        "--no-renames",
+                        "--numstat",
+                        "-z",
+                        "--format=commit%x00%H%x00%h%x00%P%x00%an%x00%at%x00%s",
+                        *missing,
+                        *_literal_scope_args(scope.relative_path),
+                    ],
+                    operation="gitHistoryStats",
+                    timeout=10.0,
+                    binary=True,
+                    max_output_bytes=GIT_HISTORY_MAX_OUTPUT_BYTES,
+                )
+                stats_raw = stats_result.stdout if isinstance(stats_result.stdout, bytes) else stats_result.stdout.encode("utf-8")
+                stats_commits, _, _ = _parse_history_numstat(stats_raw, output_truncated=stats_result.stdout_truncated)
+                stats_by_sha = {commit["sha"]: commit for commit in stats_commits}
+                if any(sha not in stats_by_sha for sha in missing):
+                    raise _history_error("Git history statistics exceed the output limit", key="fs.error.gitHistoryTooLarge", status=413)
+                for sha in missing:
+                    commit = stats_by_sha[sha]
+                    _git_history_sha_stats_cache_put(
+                        _git_history_sha_stats_cache_key(scope, sha),
+                        (commit["files"], commit["added"], commit["removed"], commit["binary_files"]),
+                    )
+            for commit in visible:
+                stats = _git_history_sha_stats_cache_get(_git_history_sha_stats_cache_key(scope, commit["sha"]))
+                if stats is None:
+                    raise _history_error("Git history statistics are incomplete", key="fs.error.gitHistoryFailed", status=500)
+                commit["files"], commit["added"], commit["removed"], commit["binary_files"] = stats
+            cached = (visible, len(commits) > total or output_truncated)
+            _git_history_stats_cache_put(cache_key, cached)
+
+        commits, has_more = cached
+        chunks = []
+        relative_offset = 0
+        for size in batch_sizes:
+            batch = commits[relative_offset:relative_offset + size]
+            if not batch:
+                break
+            start_offset = offset + relative_offset
+            next_offset = start_offset + len(batch)
+            chunks.append({
+                "path": str(scope.path),
+                "repo": str(scope.repo),
+                "relative_path": scope.relative_path,
+                "shallow_boundary": scope.shallow_snapshot,
+                "repository_identity": _git_repository_identity(scope),
+                "head": frozen_head,
+                "snapshot_cursor": cursor,
+                "start_offset": start_offset,
+                "commits": copy.deepcopy(batch),
+                "next_cursor": _encode_history_cursor(scope, frozen_head, next_offset) if has_more else "",
+                "truncated": False,
+            })
+            relative_offset += len(batch)
+        return chunks
 
 
 def _validated_history_oid(value: str, *, key: str) -> str:
@@ -5073,27 +5447,6 @@ def git_commit(raw_path: str, *, commit: str, head: str) -> dict[str, Any]:
             missing_status=409,
         )
         _ensure_commit_exists(scope, requested_commit)
-        metadata_result = _run_direct_bounded_git(
-            scope,
-            [
-                "show",
-                "--no-patch",
-                "--format=%H%x00%P%x00%an%x00%at%x00%s%x00%B%x00",
-                requested_commit,
-            ],
-            operation="gitCommit",
-            timeout=5.0,
-            binary=True,
-            max_output_bytes=GIT_COMMIT_MAX_MESSAGE_BYTES + GIT_COMMIT_METADATA_OVERHEAD_BYTES,
-            allow_failure=True,
-        )
-        if metadata_result.returncode != 0:
-            if not _was_killed_for_output_cap(metadata_result):
-                _raise_history_git_failure(metadata_result, operation="gitCommit")
-        metadata_raw = metadata_result.stdout if isinstance(metadata_result.stdout, bytes) else metadata_result.stdout.encode("utf-8")
-        metadata = _parse_commit_metadata(metadata_raw, output_truncated=metadata_result.stdout_truncated)
-        if metadata["sha"] != requested_commit:
-            raise _history_error("unknown Git commit", key="fs.error.gitCommitUnknown", status=404)
         for ancestor, descendant, key in (
             (frozen_head, current_head, "fs.error.gitHistoryStale"),
             (requested_commit, frozen_head, "fs.error.gitCommitUnknown"),
@@ -5116,6 +5469,31 @@ def git_commit(raw_path: str, *, commit: str, head: str) -> dict[str, Any]:
                     status=409 if key == "fs.error.gitHistoryStale" else 404,
                     diagnostic=_git_result_error_text(relation),
                 )
+        cache_key = _git_commit_cache_key(scope, requested_commit)
+        cached = _git_commit_cache_get(cache_key)
+        if cached is not None:
+            return cached
+        metadata_result = _run_direct_bounded_git(
+            scope,
+            [
+                "show",
+                "--no-patch",
+                "--format=%H%x00%P%x00%an%x00%at%x00%s%x00%B%x00",
+                requested_commit,
+            ],
+            operation="gitCommit",
+            timeout=5.0,
+            binary=True,
+            max_output_bytes=GIT_COMMIT_MAX_MESSAGE_BYTES + GIT_COMMIT_METADATA_OVERHEAD_BYTES,
+            allow_failure=True,
+        )
+        if metadata_result.returncode != 0:
+            if not _was_killed_for_output_cap(metadata_result):
+                _raise_history_git_failure(metadata_result, operation="gitCommit")
+        metadata_raw = metadata_result.stdout if isinstance(metadata_result.stdout, bytes) else metadata_result.stdout.encode("utf-8")
+        metadata = _parse_commit_metadata(metadata_raw, output_truncated=metadata_result.stdout_truncated)
+        if metadata["sha"] != requested_commit:
+            raise _history_error("unknown Git commit", key="fs.error.gitCommitUnknown", status=404)
         parents = metadata["parents"]
         from_ref = parents[0] if parents else _empty_tree_oid(requested_commit)
         status_result = _run_direct_bounded_git(
@@ -5188,7 +5566,9 @@ def git_commit(raw_path: str, *, commit: str, head: str) -> dict[str, Any]:
         visible_rows = rows[:GIT_COMMIT_MAX_FILES]
         payload = {
             "repo": str(scope.repo),
+            "repository_identity": _git_repository_identity(scope),
             "scope_path": scope.relative_path,
+            "shallow_boundary": scope.shallow_snapshot,
             "sha": metadata["sha"],
             "parents": parents,
             "from_ref": from_ref,
@@ -5227,6 +5607,7 @@ def git_commit(raw_path: str, *, commit: str, head: str) -> dict[str, Any]:
                 key="fs.error.gitCommitTooLarge",
                 status=413,
             )
+        _git_commit_cache_put(cache_key, payload)
         return payload
 
 

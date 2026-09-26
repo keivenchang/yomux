@@ -1,4 +1,5 @@
 import base64
+from dataclasses import replace
 import errno
 import fcntl
 import inspect
@@ -3093,6 +3094,38 @@ def test_git_history_exposes_refs_branch_and_worktree_status(tmp_path):
     assert "origin/main" in decorations
 
 
+def test_git_history_can_list_commits_without_waiting_for_worktree_status(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    (repo.root / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+    calls = []
+    original = git_ops._run_direct_bounded_git
+
+    def counted(scope, args, **kwargs):
+        calls.append(tuple(args))
+        return original(scope, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_run_direct_bounded_git", counted)
+    listing = filesystem.git_history(str(repo.root), limit=2, worktree="0")
+
+    assert [commit["sha"] for commit in listing["commits"]] == repo.git("rev-list", "--topo-order", repo.merge_sha).stdout.splitlines()[:2]
+    assert listing["dirty_count"] is None
+    assert "dirty_entries" not in listing
+    assert not any("status" in args for args in calls)
+    assert not any("cat-file" in args for args in calls)
+    assert any("log" in args for args in calls)
+
+    calls.clear()
+    cached = filesystem.git_history(str(repo.root), limit=2, worktree="0")
+    assert cached["commits"] == listing["commits"]
+    assert not any("status" in args or "log" in args or "cat-file" in args for args in calls)
+
+    calls.clear()
+    worktree = filesystem.git_history(str(repo.root), worktree="only")
+    assert worktree["worktree_status"]["dirty"] is True
+    assert worktree["worktree_status"]["entries"][0]["path"] == "dirty.txt"
+    assert not any("log" in args or "cat-file" in args for args in calls)
+
+
 def test_pinned_git_view_reuses_warm_loose_objects_without_the_cross_process_writer_lock(tmp_path, monkeypatch):
     runtime_root = tmp_path / "runtime"
     runtime_root.mkdir()
@@ -3142,6 +3175,185 @@ def test_git_history_snapshot_cursor_reloads_the_frozen_first_page(tmp_path):
     assert restored["snapshot_cursor"] == first["snapshot_cursor"]
     assert [item["sha"] for item in restored["commits"]] == [item["sha"] for item in first["commits"]]
     assert restored["next_cursor"] == first["next_cursor"]
+
+
+def test_git_history_stats_batches_reuse_frozen_stats_across_browser_reload(tmp_path, monkeypatch):
+    git_ops._clear_git_history_stats_cache()
+    repo = create_git_history_repository(tmp_path / "history")
+    history = filesystem.git_history(str(repo.root), limit=4)
+    calls = []
+    original_git = git_ops._git_with_pinned_repo
+
+    def counted_git(repo_handle, args, **kwargs):
+        calls.append(tuple(args))
+        return original_git(repo_handle, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", counted_git)
+    first = filesystem.git_history_stats_batches(
+        str(repo.root), cursor=history["snapshot_cursor"], offset=0, batch_sizes=[1, 2],
+    )
+    numstat_calls = sum("--numstat" in args for args in calls)
+
+    assert [len(chunk["commits"]) for chunk in first] == [1, 2]
+    assert [chunk["start_offset"] for chunk in first] == [0, 1]
+    assert [commit["sha"] for chunk in first for commit in chunk["commits"]] == [commit["sha"] for commit in history["commits"][:3]]
+    assert first[0]["commits"][0]["files"] == 1
+    assert first[0]["commits"][0]["added"] == 1
+    assert numstat_calls == 1
+
+    first[0]["commits"][0]["added"] = 999
+    restored = filesystem.git_history_stats_batches(
+        str(repo.root), cursor=history["snapshot_cursor"], offset=0, batch_sizes=[1, 2],
+    )
+
+    assert sum("--numstat" in args for args in calls) == numstat_calls
+    assert restored[0]["commits"][0]["added"] == 1
+    assert restored[0]["commits"][0]["sha"] == history["commits"][0]["sha"]
+
+    repartitioned = filesystem.git_history_stats_batches(
+        str(repo.root), cursor=history["snapshot_cursor"], offset=0, batch_sizes=[3],
+    )
+    assert [len(chunk["commits"]) for chunk in repartitioned] == [3]
+    assert sum("--numstat" in args for args in calls) == numstat_calls
+
+
+def test_git_history_stats_cache_reuses_unchanged_sha_after_head_moves(tmp_path, monkeypatch):
+    git_ops._clear_git_history_stats_cache()
+    repo = create_git_history_repository(tmp_path / "history")
+    first_history = filesystem.git_history(str(repo.root), limit=4, worktree="0")
+    calls = []
+    original_git = git_ops._git_with_pinned_repo
+
+    def counted_git(repo_handle, args, **kwargs):
+        calls.append(tuple(args))
+        return original_git(repo_handle, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", counted_git)
+    first_stats = filesystem.git_history_stats_batches(
+        str(repo.root), cursor=first_history["snapshot_cursor"], offset=0, batch_sizes=[1],
+    )
+    first_commit = first_stats[0]["commits"][0]
+    assert sum("--numstat" in args for args in calls) == 1
+
+    (repo.root / "new-head.txt").write_text("new head\n", encoding="utf-8")
+    repo.git("add", "--", "new-head.txt")
+    repo.git("commit", "-q", "-m", "new head after cached SHA")
+    second_history = filesystem.git_history(str(repo.root), limit=4, worktree="0")
+    assert second_history["commits"][1]["sha"] == first_commit["sha"]
+    calls.clear()
+
+    second_stats = filesystem.git_history_stats_batches(
+        str(repo.root), cursor=second_history["snapshot_cursor"], offset=1, batch_sizes=[1],
+    )
+
+    assert second_stats[0]["commits"][0]["sha"] == first_commit["sha"]
+    assert (second_stats[0]["commits"][0]["files"], second_stats[0]["commits"][0]["added"], second_stats[0]["commits"][0]["removed"]) == (
+        first_commit["files"], first_commit["added"], first_commit["removed"],
+    )
+    assert sum("--numstat" in args for args in calls) == 0
+
+
+def test_git_history_stats_truncated_lookahead_keeps_continuation_cursor(tmp_path, monkeypatch):
+    git_ops._clear_git_history_stats_cache()
+    repo = create_git_history_repository(tmp_path / "history")
+    history = filesystem.git_history(str(repo.root), limit=4)
+    original = git_ops._run_direct_bounded_git
+    truncated_once = False
+
+    def truncate_after_first_complete_commit(scope, args, **kwargs):
+        nonlocal truncated_once
+        result = original(scope, args, **kwargs)
+        if not truncated_once and "--no-patch" in args:
+            raw = result.stdout if isinstance(result.stdout, bytes) else result.stdout.encode("utf-8")
+            boundary = raw.find(b"\0commit\0")
+            assert boundary >= 0, "fixture must contain a lookahead commit"
+            truncated_once = True
+            return replace(result, stdout=raw[:boundary], stdout_truncated=True)
+        return result
+
+    monkeypatch.setattr(git_ops, "_run_direct_bounded_git", truncate_after_first_complete_commit)
+
+    first = filesystem.git_history_stats_batches(
+        str(repo.root), cursor=history["snapshot_cursor"], offset=0, batch_sizes=[1],
+    )
+    assert first[0]["commits"][0]["sha"] == history["commits"][0]["sha"]
+    assert first[0]["next_cursor"]
+
+    second = filesystem.git_history_stats_batches(
+        str(repo.root), cursor=history["snapshot_cursor"], offset=1, batch_sizes=[1],
+    )
+    assert second[0]["commits"][0]["sha"] == history["commits"][1]["sha"]
+
+
+def test_git_history_stats_cache_key_tracks_shallow_snapshot(tmp_path):
+    repo = create_git_history_repository(tmp_path / "history")
+    with git_ops._bounded_git_read_scope(str(repo.root), operation="git_history_stats") as scope:
+        original = git_ops._git_history_sha_stats_cache_key(scope, repo.merge_sha)
+        changed_shallow_boundary = git_ops._git_history_sha_stats_cache_key(
+            replace(scope, shallow_snapshot="different-shallow-snapshot"), repo.merge_sha,
+        )
+
+    assert original != changed_shallow_boundary
+
+
+def test_git_history_page_cache_key_tracks_config_decorations(tmp_path):
+    repo = create_git_history_repository(tmp_path / "history")
+    with git_ops._bounded_git_read_scope(str(repo.root), operation="git_history") as scope:
+        original = git_ops._git_history_page_cache_key(scope, repo.merge_sha, 0, 1)
+    repo.git("config", "log.excludeDecoration", "refs/heads")
+    with git_ops._bounded_git_read_scope(str(repo.root), operation="git_history") as scope:
+        changed = git_ops._git_history_page_cache_key(scope, repo.merge_sha, 0, 1)
+
+    assert original != changed
+
+
+def test_git_history_sha_stats_cache_key_tracks_repository_generation(tmp_path):
+    repo = create_git_history_repository(tmp_path / "history")
+    replacement = create_git_history_repository(tmp_path / "replacement")
+    with git_ops._bounded_git_read_scope(str(repo.root), operation="git_history_stats") as scope:
+        original = git_ops._git_history_sha_stats_cache_key(scope, repo.merge_sha)
+    with git_ops._bounded_git_read_scope(str(replacement.root), operation="git_history_stats") as replacement_scope:
+        changed_generation = git_ops._git_history_sha_stats_cache_key(
+            replace(replacement_scope, repo=repo.root), repo.merge_sha,
+        )
+
+    assert original != changed_generation
+
+
+def test_git_commit_cache_key_tracks_repository_scope_namespace_and_shallow_boundary(tmp_path):
+    repo = create_git_history_repository(tmp_path / "history")
+    replacement = create_git_history_repository(tmp_path / "replacement")
+    with git_ops._bounded_git_read_scope(str(repo.root), operation="git_commit") as scope:
+        original = git_ops._git_commit_cache_key(scope, repo.merge_sha)
+        changed = {
+            git_ops._git_commit_cache_key(replace(scope, relative_path="scope"), repo.merge_sha),
+            git_ops._git_commit_cache_key(replace(scope, shallow_snapshot="different-shallow-snapshot"), repo.merge_sha),
+        }
+        with git_ops._bounded_git_read_scope(str(replacement.root), operation="git_commit") as replacement_scope:
+            changed.add(git_ops._git_commit_cache_key(replace(replacement_scope, repo=repo.root), repo.merge_sha))
+
+    assert len(changed) == 3
+    assert original not in changed
+
+
+def test_git_history_products_expose_the_same_shallow_boundary(tmp_path):
+    repo = create_git_history_repository(tmp_path / "history")
+    boundaries = []
+    for shallow in [False, True]:
+        if shallow:
+            (repo.root / ".git" / "shallow").write_text(f"{repo.merge_sha}\n", encoding="ascii")
+        history = filesystem.git_history(str(repo.root), limit=1, worktree="0")
+        stats = filesystem.git_history_stats_batches(
+            str(repo.root), cursor=history["snapshot_cursor"], offset=0, batch_sizes=[1],
+        )[0]
+        detail = filesystem.git_commit(str(repo.root), commit=repo.merge_sha, head=history["head"])
+        boundary = history["shallow_boundary"]
+        assert boundary
+        assert stats["shallow_boundary"] == detail["shallow_boundary"] == boundary
+        assert history["repository_identity"]
+        assert stats["repository_identity"] == detail["repository_identity"] == history["repository_identity"]
+        boundaries.append(boundary)
+    assert boundaries[0] != boundaries[1]
 
 
 @pytest.mark.parametrize(
@@ -3222,6 +3434,29 @@ def test_git_commit_detail_preserves_root_merge_rename_copy_binary_mode_and_host
     assert change_call_count == 9
 
 
+def test_git_commit_reuses_immutable_detail_across_reload(tmp_path, monkeypatch):
+    git_ops._clear_git_history_stats_cache()
+    repo = create_git_history_repository(tmp_path / "history")
+    calls = []
+    original_git = git_ops._git_with_pinned_repo
+
+    def counted_git(repo_handle, args, **kwargs):
+        calls.append(tuple(args))
+        return original_git(repo_handle, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", counted_git)
+    first = filesystem.git_commit(str(repo.scope), commit=repo.changes_sha, head=repo.merge_sha)
+    product_calls = sum(("show" in args and "--no-patch" in args) or "diff-tree" in args for args in calls)
+    assert product_calls == 3
+
+    first["files"][0]["path"] = "caller-mutation"
+    calls.clear()
+    second = filesystem.git_commit(str(repo.scope), commit=repo.changes_sha, head=repo.merge_sha)
+
+    assert second["files"][0]["path"] != "caller-mutation"
+    assert not any(("show" in args and "--no-patch" in args) or "diff-tree" in args for args in calls)
+
+
 def test_git_history_rejects_stale_cursor_rewritten_repo_repoint_and_bounds(tmp_path, monkeypatch):
     repo = create_git_history_repository(tmp_path / "history")
     first = filesystem.git_history(str(repo.root), limit=1)
@@ -3244,9 +3479,9 @@ def test_git_history_rejects_stale_cursor_rewritten_repo_repoint_and_bounds(tmp_
     assert len(limited["commits"]) <= git_ops.GIT_HISTORY_MAX_LIMIT == 200
     assert len(clamped["commits"]) == 1
 
-    monkeypatch.setattr(git_ops, "GIT_HISTORY_MAX_PAYLOAD_BYTES", 1400)
+    monkeypatch.setattr(git_ops, "GIT_HISTORY_MAX_PAYLOAD_BYTES", 1800)
     history_bounded = filesystem.git_history(str(repo.root), limit=50)
-    assert len(json.dumps(history_bounded, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= 1400
+    assert len(json.dumps(history_bounded, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= 1800
     assert history_bounded["truncated"] is True
     assert history_bounded["next_cursor"]
 
