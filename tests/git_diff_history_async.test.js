@@ -528,6 +528,59 @@ async function runGitDiffHistorySuite() {
     assert.equal(api.gitDiffTabStateForTest(item).snapshotCursor, 'fresh-cursor');
   });
 
+  await testAsync('Git history drops a saved cursor when its snapshot is stale', async () => {
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Python test'}});
+    const item = api.gitDiffItemFor('/repo');
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      if (requests.length === 1) {
+        const error = new Error('Git history snapshot is stale');
+        error.status = 409;
+        error.payload = {user_message: {key: 'fs.error.gitHistoryStale', params: {}, fallback: error.message}};
+        return Promise.reject(error);
+      }
+      return Promise.resolve(jsonResponse({
+        path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40),
+        snapshot_cursor: 'fresh-cursor', commits: [], next_cursor: '', truncated: false,
+      }));
+    });
+    api.setGitDiffTabStateForTest(item, {snapshotCursor: 'rewritten-history-cursor'});
+    assert.equal(await api.refreshGitDiffHistoryForTest(item), true);
+    assert.deepStrictEqual(requests, [
+      '/api/fs/git-history?path=%2Frepo&limit=1&cursor=rewritten-history-cursor&worktree=0',
+      '/api/fs/git-history?path=%2Frepo&limit=1&worktree=0',
+      '/api/fs/git-history?path=%2Frepo&worktree=only',
+    ]);
+    assert.equal(api.gitDiffTabStateForTest(item).snapshotCursor, 'fresh-cursor');
+  });
+
+  await testAsync('Git history stops after one cursor-free retry when the new snapshot is also stale', async () => {
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
+    const item = api.gitDiffItemFor('/repo');
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      const error = new Error('Git history snapshot is stale');
+      error.status = 409;
+      error.code = 'git_history_stale';
+      error.payload = {
+        error_code: 'git_history_stale', message_key: 'fs.error.gitHistoryStale',
+        user_message: {key: 'fs.error.gitHistoryStale', params: {}, fallback: error.message},
+      };
+      return Promise.reject(error);
+    });
+    const state = api.setGitDiffTabStateForTest(item, {snapshotCursor: 'rewritten-history-cursor'});
+    assert.equal(await api.refreshGitDiffHistoryForTest(item), false);
+    assert.deepStrictEqual(requests, [
+      '/api/fs/git-history?path=%2Frepo&limit=1&cursor=rewritten-history-cursor&worktree=0',
+      '/api/fs/git-history?path=%2Frepo&limit=1&worktree=0',
+    ]);
+    assert.equal(state.snapshotCursor, '');
+    assert.equal(state.loading, false);
+    assert.equal(state.error?.user_message?.key, 'fs.error.gitHistoryStale');
+  });
+
   await testAsync('Git commit detail refreshes history once when its frozen head is stale', async () => {
     const api = loadYolomux('', ['1']);
     const item = api.gitDiffItemFor('/repo');

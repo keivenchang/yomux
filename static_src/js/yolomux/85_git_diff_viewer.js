@@ -499,9 +499,9 @@ async function refreshGitDiffHistory(item, options = {}) {
       state.error = null;
       return refreshGitDiffHistory(item, {refresh: true});
     }
-    if (!append && cursor && gitDiffHistoryCursorIsInvalid(error)) {
-      // A saved layout can outlive the server's cursor format. Drop that opaque cursor once and
-      // reload the current snapshot instead of leaving the restored Diff tab permanently failed.
+    if (!append && cursor && (gitDiffHistoryCursorIsInvalid(error) || gitDiffHistorySnapshotIsStale(error))) {
+      // A saved layout can outlive the server's cursor format or Git history. Drop that opaque
+      // cursor once and reload the current snapshot instead of leaving the restored Diff tab failed.
       state.snapshotCursor = '';
       state.nextCursor = '';
       state.error = null;
