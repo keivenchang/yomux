@@ -125,13 +125,12 @@ def test_retired_share_surface_guard_rejects_filenames_content_i18n_and_binary(t
     assert any("binary.bin:1" in message for message in violations)
 
 
-def test_retired_share_surface_guard_allows_only_named_paths_and_done_archive(tmp_path):
+def test_retired_share_surface_guard_allows_only_named_paths(tmp_path):
     retired = "sha" + "re"
     allowed = (
         "DOIT.075.2." + "yo" + "share-removal.md",
         "yolomux_lib/infra/" + "shared_config_lock.py",
         "tests/test_" + "shared_config_lock.py",
-        "docs/DONE/old-" + retired + ".md",
     )
     for relative in allowed:
         path = tmp_path / relative

@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """Pure prompt detection, approval state, and command safety helpers.
 
-Keep the detector contract and raw prompt examples synced with
-docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md.
+Detector behavior is exercised by ``tests/test_auto_approve_detector.py`` and
+the captures in ``tests/fixtures/prompt_corpus/``.
 """
 
 from __future__ import annotations
@@ -1124,7 +1124,7 @@ def _is_working_line(line: str) -> bool:
 def visible_agent_working(visible_text: str) -> bool:
     """Return True when the visible pane is showing an active thinking/working row.
 
-    Spec: docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#detector-principles
+    See ``tests/test_auto_approve_detector.py`` for detector cases.
     """
     return bool(visible_agent_working_state(visible_text)["working"])
 
@@ -1986,7 +1986,7 @@ def agent_screen_state(
 
     Approval detection and auto-approval use the same visible pane text as this
     UI state, so the browser does not need its own stale scrollback parser.
-    Spec: docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#state-model
+    See ``tests/test_auto_approve_detector.py`` for state-classification cases.
     """
     if str(agent_kind or "").strip().lower() == "opencode":
         opencode_state = _opencode_visible_screen_state(
@@ -2138,8 +2138,7 @@ def approval_prompt_state(visible_text: str, pane_text: str | None = None) -> di
     ``visible_text`` must be captured with ``visible_only=True``. ``pane_text``
     may include scrollback and is used only to extract command context after a
     visible bash prompt has already been confirmed.
-    Spec: docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#claude-approval-patterns
-    and docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#codex-approval-patterns.
+    See ``tests/test_auto_approve_detector.py`` and the prompt corpus for approval cases.
     """
     visible_text = normalize_capture_text(visible_text)
     pane_text = normalize_capture_text(pane_text) if pane_text is not None else None

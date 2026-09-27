@@ -1,5 +1,0 @@
-# 2026-07-19 Terminal touch, Claude scrolling, and narrow YO!stats zoom
-
-- Completed and removed `DOIT.claude-altscreen-scroll.md`. The single GUI routing matrix now covers wheel, hardware and palette PgUp/PgDn, and finger pan across normal, mouse-tracking alternate, and non-mouse alternate panes. Claude's mouse-tracking alternate pane receives negotiated wheel reports instead of history-navigation arrows; the real iPhone and desktop checks passed.
-- Completed and removed `DOIT.mobile-touch-copy.md`. Long-press uses the existing context-menu timer to select a terminal word, drag extends that public xterm selection, and the established menu/accessory copy path writes it. A trusted real-xterm touch fixture proves the menu Copy payload, and the real iPhone copied/pasted it.
-- Completed and removed `DOIT.yostats-zoom-reset-ux.md`. Ordinary horizontal pan returns to live without creating a zoom; deliberate hold-drag zoom retains a visible Reset and compact non-overlapping Range controls. Focused geometry/touch coverage, the niced gate, guarded 7772 leader restart, and real-iPhone verification passed.

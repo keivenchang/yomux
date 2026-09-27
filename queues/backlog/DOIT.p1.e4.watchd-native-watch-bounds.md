@@ -4,7 +4,7 @@
 
 Split out of `DOIT.p1.e5.memory-hog.md` on 2026-08-25 for this v0.7.16 candidate because the old queue mixed watchd registration work with statsd resource work. The v0.7.22 release decision closed the former P0 resource queue without claiming its unfinished measurements passed. This queue remains the sole watchd native-registration owner.
 
-`STATUS-REPORT.md` goal item 4 now spans both queues rather than the retired mixed queue.
+This queue is independent of the other deferred filesystem work; its acceptance criteria apply to the legacy Python watcher unless they are separately revalidated for Go.
 
 ## Goal
 
@@ -30,7 +30,7 @@ A 2026-08-19 cardinality run measured released recursive watch registrations of 
 - [ ] **Verify the full topology matrix**: overlapping descriptors, symlinks, VCS/cache/dependency exclusions, root add, remove and repoint, policy changes, Linux and Darwin behaviour, native failure and recovery, daemon restart, and no lost visible-directory or exact-file updates.
 - [ ] **Expose measured registration readiness.** Report native registration count, cap, and fallback state in the same side-effect-free projection that carries process identity, threads, and FDs. `/readyz` fails closed until the registration cap or a typed fallback is satisfied; `/livez` stays a narrow progress check. Readiness must not depend only on a listener or a process existing.
 - [ ] **Add a resource gate that counts registrations, not instances.** Count `inotify wd:` entries, never inotify instance count or host maxima. Fail on descriptor count, swap, readiness latency, and a positive post-settle watch slope. Include a negative control that runs the released recursive-registration path and proves the gate fails for the incident class. Cover startup, incremental change, idle, crash and restart, stale descriptor cleanup, failed native registration with bounded fallback, web restart while daemons exist, and full owned-watch retirement.
-- [ ] **Document and archive.** Update `README.md`, `docs/DEVELOPMENT.md`, the watchd and search specifications, and the GUI coverage map with the shallow-native versus reconciliation split, the registration budget, `/livez` versus `/readyz`, and supported recovery behaviour. Record before and after measurements and the frozen release identity in `docs/DONE/`, then remove this queue.
+- [ ] **Document and close out.** Update `README.md`, `docs/DEVELOPMENT.md`, the watchd and search specifications, and the GUI coverage map with the shallow-native versus reconciliation split, the registration budget, `/livez` versus `/readyz`, and supported recovery behaviour. Record before/after measurements and the frozen release identity in the queue closeout or handoff, then remove this queue.
 
 ## Gotchas
 
@@ -48,4 +48,4 @@ A 2026-08-19 cardinality run measured released recursive watch registrations of 
 - The released recursive path fails the new gate and the final candidate passes it, with recorded fixture and artifact identities.
 - `/readyz` proves registration cap or typed fallback before browser launch; `/livez` remains a distinct progress signal.
 - Fresh clean Linux and Darwin checks pass on the same frozen SHA, and the authorised deployment proves identity, settle, soak, negative control, exact Filesystem user paths, and full watch retirement.
-- Documentation and `docs/DONE/` record the before and after measurements, budget, and architecture before this queue is removed.
+- Documentation and the queue closeout record the before/after measurements, budget, and architecture before this queue is removed.

@@ -1,6 +1,6 @@
 # YOLOmux Work Queues
 
-`STATUS-REPORT.md` is a historical release ledger; the current v0.7.22 P0 closure decision is recorded in `docs/DONE/2026-08/DONE.v0.7.22-p0-release-decision.md`. It declares no active STATUS-scoped DOIT inventory. Unfinished post-release work lives in `backlog/DOIT.p1.e*.*.md` and `backlog/DOIT.p2.e*.*.md`, while completed or explicitly closed work lives in `docs/DONE/`. Queue filenames use `DOIT.p<num>.e<num>.<desc>.md`: priority ranges from `p0` urgent through `p2` deferred, and effort ranges from `e1` small or bounded through `e5` architecture-scale, cross-system, or long-soak work.
+Active work lives in concrete `backlog/DOIT*.md` files; there is no separate historical `STATUS-REPORT.md` ledger. Queue filenames use `DOIT.p<num>.e<num>.<desc>.md`: priority ranges from `p0` urgent through `p2` deferred, and effort ranges from `e1` small or bounded through `e5` architecture-scale, cross-system, or long-soak work. Shipped behavior belongs in current user documentation and specifications; release summaries group scope by minor version.
 
 Existing queue bodies preserve the Python architecture and evidence in effect when they were written unless a queue explicitly names Go. Do not rewrite a paused queue to pretend its `statsd`, `watchd`, descriptor, or service-lifetime findings were measured against the Go modular monolith. When work resumes, revalidate the reproduction on the selected backend and either update the queue with a dated backend-specific finding or create the one concrete Go owner for a distinct requirement.
 
@@ -8,4 +8,4 @@ There is no broad TODO backlog. Every newly authorized open requirement must hav
 
 YOLOmux remains a lightweight workspace for managing AI work: agent state and control, editing and viewing, collaboration, repository and file context, and low-friction attach/reply. Borrowed features must improve that local control loop. Event and audit data precede timeline UI; broad multi-machine orchestration, visual canvases, and pipeline boards remain deferred until the local product has a measured need.
 
-When a queue is complete, verify its current evidence, archive the result in `docs/DONE/`, update user-facing docs and specifications where required, and remove the queue. Requirements must not survive in both an active queue and a DONE record.
+When a queue is complete, verify its current evidence, update user-facing docs and specifications where required, and remove the queue. Do not create a separate DONE archive. Keep unfinished requirements in exactly one active queue.

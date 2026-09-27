@@ -85,14 +85,14 @@ grep -cE '^FAILED|^ERROR' /tmp/yop-046-resume-sweep.log || true
 
 ## Done Criteria
 
-- [ ] The DONE note records the implementation HEAD, the complete authority matrix, exact focused node IDs, commands/exit codes, numeric graceful/forced budgets, and `/tmp` evidence; every current backend/sidecar and coordination caller appears exactly once.
+- [ ] The queue closeout records the implementation HEAD, the complete authority matrix, exact focused node IDs, commands/exit codes, numeric graceful/forced budgets, and `/tmp` evidence; every current backend/sidecar and coordination caller appears exactly once.
 - [ ] `python3 -m pytest -q tests/test_local_services_watchdog.py tests/test_local_services_launch.py tests/test_local_service_registry_state.py tests/test_local_services_host_identity.py` exits 0 with a controllable clock and covers every topology and lifecycle case named in the Plan.
 - [ ] For every non-retained service, removing the last valid external claim produces graceful exit no later than the declared grace deadline plus one supervision pass; a deliberately wedged child is force-terminated no later than the declared force deadline plus one pass, with both deadlines asserted without sleeps.
 - [ ] Managed private-root fixtures perform zero cross-root election, reuse, signal, unlink, reclaim, or adoption; caller-shared-root fixtures retain exactly one compatible owner only where the matrix says `caller-shared-root-retain`, and incompatible generations fail typed and isolated.
 - [ ] PID/PGID reuse, stale leases, old generations, ambiguous foreign identity, and two co-tenant deployments receive exactly zero signals and zero unlinks; each ambiguous survivor emits one typed orphan record within one supervision pass rather than remaining silent.
-- [ ] The removed-fixture-directory regression terminates or fences the exact child before its next write and produces no `atomic_write_text`/`chmod` after fixture teardown; any different reproduced owner is named in the DONE note instead of preserving the historical hypothesis.
+- [ ] The removed-fixture-directory regression terminates or fences the exact child before its next write and produces no `atomic_write_text`/`chmod` after fixture teardown; any different reproduced owner is named in the queue closeout instead of preserving the historical hypothesis.
 - [ ] An unmodified `python3 tools/check.py` exits 0; after restarting two isolated fixture servers, the recorded runtime report lists every expected retained service and zero dead-owner or silent-orphan rows, and stopping either instance leaves the other's roster and files byte-for-byte unchanged.
 
 ## Completion
 
-When every checkbox is checked, summarize the merged lifecycle/root-ownership contract in `docs/DONE/`, remove this queue, and do not retain the absorbed `DOIT.p2.same-root-coordination-simplification.md` as a second source.
+When every checkbox is checked, summarize the merged lifecycle/root-ownership contract in current documentation and the queue closeout, then remove this queue. Do not retain the absorbed `DOIT.p2.same-root-coordination-simplification.md` as a second source.

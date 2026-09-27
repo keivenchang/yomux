@@ -378,8 +378,6 @@ def _retired_share_surface_violations(root: Path) -> tuple[str, ...]:
                 for part in parts
             ):
                 continue
-            if len(parts) >= 2 and parts[0] == "docs" and parts[1] == "DONE":
-                continue
             if RETIRED_SHARE_FILENAME_FRAGMENT in relative.lower() and relative not in RETIRED_SHARE_FILENAME_EXCEPTIONS:
                 violations.append(f"retired_share_surface: forbidden filename {relative}")
             if relative in RETIRED_SHARE_CONTENT_EXCEPTIONS:

@@ -1,4 +1,0 @@
-# 2026-07-19 Token/cpu recording outage recovery
-
-- Completed `DOIT.token-recording-outage.md`. The apparent epoch-immutable collector loop was version skew from a stale web process, followed by a statusd lightweight-roster defect that supplied no transcript paths to agent-token collection. A guarded 8881 restart and enriched token-only session discovery restored token atoms; System now surfaces sustained collector failure and stale-atom health instead of silently leaving charts empty. The newer store was verified as an existing migration rather than an 11:11 data rebuild, and the v2 store regained deferred, persistent periodic VACUUM.
-- Verification: focused status/token, System-health, and stats-store tests recorded in the queue; live post-restart collection resumed with no new immutable/append/path errors during the ten-minute watch.

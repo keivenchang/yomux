@@ -1,6 +1,6 @@
 # YOLOmux Go Backend Status
 
-This document describes the experimental Go backend as implemented in the current tree. It replaces the earlier phase proposal. Python remains the default and complete-feature backend; Go is selected explicitly and exposes only the capabilities and routes it owns.
+This document records the Go backend capabilities implemented in this tree. The 0.9.x line is migrating runtime ownership from Python to Go. Python remains available as the broader legacy backend while Go capability and operational gaps are addressed; Python is scheduled for deprecation, but no removal date is set. Go exposes only the capabilities and routes it owns.
 
 ## Launch And Backend Selection
 
@@ -10,7 +10,7 @@ The Python launch is unchanged:
 python3 yolomux.py --dang
 ```
 
-Build, validate, and start the Go preview with:
+Build, validate, and start a Go instance with:
 
 ```bash
 make setup
@@ -22,12 +22,11 @@ YOLOMUX_START_LOAD_WAIT_SECONDS=30 ./boot.sh --golang 7221
 `boot.sh --golang` is equivalent to `boot.sh --backend go`. It finds the canonical Bazel output at `bazel-bin/cmd/yolomux-go/yolomux_go_/yolomux_go`, applies the shared startup/load/port lifecycle, invokes `python3 yolomux.py --backend go`, and then the Python CLI replaces itself with the Go process while carrying host, port, checkout root, and environment-selected config/state. Managed startup binds `0.0.0.0` by default. Direct execution of the Go binary defaults to `127.0.0.1`, so use the launcher for operator runs.
 
 Go owns TLS after the `exec`: by default it generates a self-signed certificate with Go's crypto library under `${TMPDIR:-/tmp}/yolomux-go-tls-<port>/`. The managed Python launcher forwards `--dang` as Go's `--dangerously-yolo`; Python `--cert`, `--key`, `--http`, and `--dev` behavior still does not carry over. The Go binary accepts its own `--cert`, `--key`, `--http`, and `--dangerously-yolo` flags for fixture/direct use, but a direct launch does not replace `boot.sh` lifecycle and isolation checks.
- All operator launch forms use the machine-wide default tmux server for the launching Unix user. Managed launchers remove inherited `TMUX`, `TMUX_PANE`, and `YOLOMUX_TMUX_SOCKET` routing before starting Python or Go, so `tmux list-sessions` and the Go/Python session APIs see every session on that server. Direct Python, Go, and companion-tool entrypoints apply the same normalization for ordinary launches; an explicit `YOLOMUX_TMUX_SOCKET` is preserved only when an isolated test or fixture deliberately supplies it. A different Unix user's tmux server is not implicitly accessible.
-Go owns TLS after the `exec`: by default it generates a self-signed certificate with Go's crypto library under `${TMPDIR:-/tmp}/yolomux-go-tls-<port>/`. The managed Python launcher forwards `--dang` as Go's `--dangerously-yolo`; Python `--cert`, `--key`, `--http`, and `--dev` behavior still does not carry over. The Go binary accepts its own `--cert`, `--key`, `--http`, and `--dangerously-yolo` flags for fixture/direct use, but a direct launch does not replace `boot.sh` lifecycle and isolation checks.
+All operator launch forms use the machine-wide default tmux server for the launching Unix user. Managed launchers remove inherited `TMUX`, `TMUX_PANE`, and `YOLOMUX_TMUX_SOCKET` routing before starting Python or Go, so `tmux list-sessions` and the Go/Python session APIs see every session on that server. Direct Python, Go, and companion-tool entrypoints apply the same normalization for ordinary launches; an explicit `YOLOMUX_TMUX_SOCKET` is preserved only when an isolated test or fixture deliberately supplies it. A different Unix user's tmux server is not implicitly accessible.
 
 The Go server still requires Python runtime dependencies and this checkout's generated static assets. It invokes `python3` to render `login_html()` and `html_page()` from `yolomux_lib.web`; it does not contain a second HTML shell.
 
-Automated tests must not use an operator port. `tools/run_bazel_tests.sh` starts disposable Docker state and fixture-owned ports. Port 7221 is reserved for a final manual check after the Dockerized gate; port 7220 is outside this preview workflow.
+Automated tests must not use an operator port. `tools/run_bazel_tests.sh` starts disposable Docker state and fixture-owned ports. Port 7221 is reserved for a final manual check after the Dockerized gate. The operator runtime on port 7220 is outside automated test workflows and should only be restarted or smoke-tested as an explicit operator action.
 
 ## Architecture Decision
 
@@ -88,13 +87,11 @@ The current catalog marks these capabilities available:
 
 * `session.roster.v1`, `session.create.v1`, `session.kill.v1`, `session.rename.v1`
 
-* `pane.finder.v1`, `pane.differ.v1`, `pane.stats.v1`
+* `pane.finder.v1`, `pane.differ.v1`, `pane.stats.v1`, `pane.tabber.v1`
 
 * `finder.read.v1`, `finder.watch.v1`, `finder.write.v1`, `finder.search.v1`, `finder.batch.v1`, `finder.git.v1`, `finder.preview.v1`
 
 The current catalog marks these pane capabilities unavailable:
-
-* `pane.tabber.v1`
 
 * `pane.chat.v1`
 
@@ -148,11 +145,11 @@ The shared browser must capability-gate other Python terminal/session paths. Aut
 
 * `/api/fs/batch`, `/api/fs/resolve-file-candidates`
 
-* `/api/fs/diff`, `/api/fs/git-history`, `/api/fs/git-commit`
+* `/api/fs/diff`, `/api/fs/git-history`, `/api/fs/git-history-stats-stream`, `/api/fs/git-commit`
 
 * `/api/batch/search`, `/api/batch/blame`, `/api/batch/zip`, `/api/batch/count`, `/api/batch/html-preview`
 
-* `/api/session-files`, `/api/session-files-batch`
+* `/api/session-files`, `/api/session-files-stream`, `/api/session-files-batch`
 
 TextEdit and ViewEdit use the shared browser implementation and these Finder read/write/raw/upload/preview routes. There is no separate Go editor daemon or editor capability family.
 
@@ -170,7 +167,7 @@ Tabber's Go API is separate from YO!stats storage: `/api/activity?scope=all` ret
 
 * `/api/pricing-catalog`
 
-The Go process opens `stats-v9.sqlite3` directly and owns its writer lock. It does not use the Python statsd RPC protocol. See [`GO_MIGRATION_YOSTATS.md`](GO_MIGRATION_YOSTATS.md) and [`docs/specs/STATS_API.md`](docs/specs/STATS_API.md) for the storage/wire split and remaining parity gaps.
+The Go process opens `stats-v9.sqlite3` directly and owns its writer lock. It does not use the Python statsd RPC protocol. The current storage, wire, and parity gaps are listed in this guide's YO!stats section and current-gaps list.
 
 ## Completed Delivery Slices
 
@@ -185,7 +182,7 @@ The Go process opens `stats-v9.sqlite3` directly and owns its writer lock. It do
 | YO!stats | Go SQLite ownership, snapshots/deltas/SSE, collectors/materialization/rings, pricing, agent status, tokens, OpenCode, and Docker browser coverage |
 | Phase 8 | Differ session-file caches, quick history followed by numstat backfill, consolidated commit detail, diff, history, commit, and blame routes |
 
-The transcript compatibility routes are intentionally implemented through one Go selector and remain covered by the consolidation TODO at [`queues/backlog/DOIT.p1.e3.transcript-api-consolidation.md`](queues/backlog/DOIT.p1.e3.transcript-api-consolidation.md). The long-term goal is one language-neutral transcript contract rather than two independently evolving discovery and parser stacks.
+The transcript compatibility routes remain distinct wire contracts. Their current Go behavior is owned by the registered route handlers and tests; no separate consolidation queue is active.
 
 Phase numbers are migration history, not runtime configuration. The capability catalog and registered routes determine current behavior.
 
@@ -257,9 +254,9 @@ The wrapper accepts an optional positive integer `--jobs`; when the flag is omit
 
 * Go consumes `YOLOMUX_CONFIG_DIR`, `YOLOMUX_STATE_DIR`, `YOLOMUX_ROOT`, and `YOLOMUX_STATS_DATABASE`, but it does not implement Python's `YOLOMUX_RUNTIME_DIR`/`YOLOMUX_CACHE_DIR` service topology or root-policy validation. Event/operation journals, auth material, background-owner records, and the default stats database are config-rooted; the session-files cache uses the state root. Use the managed launcher so each preview gets private local roots.
 
-* Go YO!stats is not a drop-in implementation of Python statsd RPC/lifecycle ownership. Python remains the reference and rollback backend.
+* Go YO!stats owns its storage and collectors in process; it does not implement the legacy Python statsd RPC/lifecycle topology. Keep both backends on isolated roots while comparing them.
 
-* Transcript scan state is process memory except for the OpenCode cursor sidecar; restart behavior therefore differs from Python's mature collector state.
+* Large Claude/Codex transcript cursors and OpenCode cursors use durable sidecars; small transcript scans remain process-local. Exact Python-versus-Go recovery and output parity remain incomplete.
 
 * Runtime agent/OpenCode discovery currently uses Linux adapters. Cross-platform parity is not established.
 
@@ -279,7 +276,7 @@ The wrapper accepts an optional positive integer `--jobs`; when the flag is omit
 
 5. Verify the listener, `/healthz`, capability snapshot, and exact browser workflow against the rebuilt bundle.
 
-6. Keep Python as the rollback/default backend until missing capabilities and parity evidence are closed.
+6. Close the documented capability and operational gaps before deprecating the Python backend. Until then, keep Python available as a compatibility path and use capability admission to avoid presenting unsupported Go behavior.
 
 ## Related Documents
 
@@ -287,16 +284,6 @@ The wrapper accepts an optional positive integer `--jobs`; when the flag is omit
 
 * [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md): prerequisites, source layout, build, tests, and restart commands.
 
-* [`GO_MIGRATION_YOSTATS.md`](GO_MIGRATION_YOSTATS.md): Go YO!stats implementation and gaps.
+* [`docs/specs/BACKEND_ARCHITECTURE.md`](docs/specs/BACKEND_ARCHITECTURE.md): concise Python and Go process ownership overview.
 
-* [`docs/specs/BACKEND_ARCHITECTURE.md`](docs/specs/BACKEND_ARCHITECTURE.md): current Python and Go process ownership.
-
-* [`docs/specs/BACKEND_TEST_CONTRACT.md`](docs/specs/BACKEND_TEST_CONTRACT.md): test isolation and acceptance rules.
-
-* [`docs/specs/API_RESPONSE_CONTRACT.md`](docs/specs/API_RESPONSE_CONTRACT.md): response envelope and typed-error rules.
-
-* [`docs/specs/ASYNC_INTERACTION.md`](docs/specs/ASYNC_INTERACTION.md): accepted-operation lifecycle.
-
-* [`docs/specs/FS_INTERACTIVITY.md`](docs/specs/FS_INTERACTIVITY.md): Finder scheduling and fast-path behavior.
-
-* [`docs/specs/STATS_API.md`](docs/specs/STATS_API.md): Python and Go YO!stats wire/storage contracts.
+* [`docs/specs/GUI.md`](docs/specs/GUI.md): shared user-interface behavior and verification rules.

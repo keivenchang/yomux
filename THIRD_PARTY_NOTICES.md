@@ -10,7 +10,7 @@ Do not replace third-party notices with the YOLOmux project license. They are no
 
 ## Runtime Go Dependency
 
-- `github.com/mattn/go-sqlite3` 1.14.24 - SQLite driver used by the experimental Go backend and declared in `go.mod`; its upstream `LICENSE` is MIT.
+- `github.com/mattn/go-sqlite3` 1.14.24 - SQLite driver used by the Go backend and declared in `go.mod`; its upstream `LICENSE` is MIT.
 
 ## Vendored Browser Assets
 

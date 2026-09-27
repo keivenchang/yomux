@@ -4,9 +4,9 @@ Lightweight, powerful browser workspace for managing AI work.
 
 Text files provide TextEdit for raw source editing. Markdown also provides ProseMirror-powered ViewEdit. In Split mode the left surface is labeled TextEditor and the right rendered Markdown WYSIWYG surface is labeled ViewEditor. Typing stays local to the active surface, then synchronizes both surfaces and canonical Markdown after 1.25 seconds without further input; saving, blur, mode changes, and close flush immediately. In ViewEditor, ordinary Enter creates a Markdown paragraph break; Shift-Enter alone creates an explicit hard break. Markdown image paste saves the image in a directory named for the Markdown file without its extension, then inserts a relative image reference at the original caret or selected range: `/a/b/file.md` becomes `/a/b/file/upload.png` and `![upload](file/upload.png)`.
 
-The default Python backend brings AI management, editing and viewing, collaboration, file and Git context, and observability into one interactive UI. It integrates with local tmux sessions through browser xterm.js terminals while keeping the workspace focused on directing, reviewing, and completing AI-assisted work. An experimental Go backend now serves the same browser bundle with terminal, Finder, Differ, editor, and YO!stats support, while capability negotiation hides product areas that have not moved yet. Two Python companion tools ship alongside the server: `tools/auto_approve_tmux.py` (YOLO auto-approval without the UI) and `tools/tmux_wall.py` (a read-only snapshot wall).
+YOLOmux brings AI session management, editing, filesystem and Git context, and observability into one browser workspace backed by local tmux sessions. The 0.9.x release line is migrating the server to Go, which now owns terminal/session, Finder/Differ, editor, operation/event, and YO!stats paths. Python remains available as the broader legacy backend while capability gaps are closed; it is scheduled for deprecation, with no removal date set. Go feature access is capability-gated, so review [`GO_MIGRATION.md`](GO_MIGRATION.md) before relying on a specific route. Python companion tools remain available: `tools/auto_approve_tmux.py` and `tools/tmux_wall.py`.
 
-Contributor and build instructions live in [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md). AI-agent conventions live in [`AGENTS.md`](AGENTS.md), detailed product behavior lives under [`docs/specs/`](docs/specs/), and peer findings live in [`docs/RESEARCH.md`](docs/RESEARCH.md).
+Contributor and build instructions live in [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md). AI-agent conventions live in [`AGENTS.md`](AGENTS.md), the concise UI contract and grouped release notes are indexed in [`docs/README.md`](docs/README.md).
 
 ## Requirements
 
@@ -18,11 +18,11 @@ Contributor and build instructions live in [`docs/DEVELOPMENT.md`](docs/DEVELOPM
 
 * Linux full-gate hosts: `fs.inotify.max_user_instances=1024`, `fs.inotify.max_user_watches=1048576`, and `fs.inotify.max_queued_events=65536`. Managed startup reports the current capacity and warns when it is below the gate floor; see the development guide for the persistent `sysctl` setup.
 
-* Experimental Go builds: Bazel 7.6.1; Docker is required for the isolated Go/Bazel/Chromium gate. The repository-pinned Go toolchain is resolved by Bazel, so a host Go installation is not required for the canonical build.
+* Go builds: Bazel 7.6.1; Docker is required for the isolated Go/Bazel/Chromium gate. The repository-pinned Go toolchain is resolved by Bazel, so a host Go installation is not required for the canonical build.
 
 ## Quickstart
 
-Recommended local run: HTTPS, login-gated, all tmux sessions visible, and YOLO-enabled for new Claude/Codex sessions created from the UI.
+Existing Python installation launch: HTTPS, login-gated, all tmux sessions visible, and YOLO-enabled for new Claude/Codex sessions created from the UI. Python is scheduled for deprecation; check the Go capability list before migrating an installation.
 
 ```bash
 git clone https://github.com/keivenchang/yolomux.git
@@ -34,13 +34,13 @@ python3 yolomux.py --dang   # or: make run
 
 `make setup` checks for Python 3.10+ before doing any build work, then pip automatically installs every runtime dependency, including the native `watchfiles` filesystem-event backend. On an externally managed system Python (PEP 668), create and activate a virtualenv first (`python3 -m venv .venv && . .venv/bin/activate`), then `make setup`. The source and editable-install runtime serves the tracked xterm files under `static/vendor/`; npm is not needed to start YOLOmux. Contributors can run `make xterm` to install the pinned upstream packages and verify that their bytes still match the tracked files. The Python wheel does not currently package these static assets.
 
-### Go backend preview
+### Go backend
 
-The opt-in Go backend is a modular monolith, not a port of Python's web-process-plus-local-daemons topology. One `yolomux-go` process owns HTTPS/auth, the tmux PTY/WebSocket path, events and durable operation receipts, Finder and Differ, bounded in-process work queues, and the Go YO!stats writer/readers/materializers and collectors. It serves the shared browser bundle and calls `python3` only to render the existing login and application HTML from `yolomux_lib.web`, so the preview still requires `make setup` and the generated frontend assets.
+The Go backend is a modular monolith, not a port of Python's web-process-plus-local-daemons topology. One `yolomux-go` process owns HTTPS/auth, the tmux PTY/WebSocket path, events and durable operation receipts, Finder and Differ, bounded in-process work queues, and the Go YO!stats writer/readers/materializers and collectors. It serves the shared browser bundle and calls `python3` to render the existing login and application HTML from `yolomux_lib.web`, so Python remains a runtime dependency during this migration.
 
-Available Go routes include terminal/session create, kill and status; Finder list/read/raw/info/watch/search/batch/upload/write/delete/rename/mkdir/preview; Git diff, history, commit detail and blame; Differ session-file views; Tabber's global tmux roster/activity API; editor file APIs; diagnostics; and YO!stats HTTP/SSE data. The capability catalog currently advertises session rename even though `/api/rename-session` has no Go handler; the migration guide records that mismatch and the UI must not present rename as working. YO!chat and YO!agent are declared unavailable, and unknown `/api/*` routes return a typed `501 feature_unavailable` response. Python remains the default and complete-feature backend. [`GO_MIGRATION.md`](GO_MIGRATION.md) owns the route/capability status, and [`GO_MIGRATION_YOSTATS.md`](GO_MIGRATION_YOSTATS.md) owns the remaining YO!stats differences.
+Available Go routes include terminal/session, Finder, Git, Differ, editor, diagnostics, and YO!stats operations. The capability catalog currently advertises session rename although `/api/rename-session` has no Go handler; the migration guide records that mismatch. YO!chat and YO!agent remain unavailable in Go, and unknown `/api/*` routes return typed `501 feature_unavailable` errors. Python remains the broader legacy backend while required Go gaps close; it is scheduled for deprecation, with no removal date set. [`GO_MIGRATION.md`](GO_MIGRATION.md) owns route, capability, and YO!stats status.
 
-Go Finder accepts any absolute path the server process can access. It does not apply Python's configured-root or credential-name denylist. OS permissions, descriptor identity checks, bounded operation limits, role checks, and the protected product-root mutation guard still apply.
+Go Finder accepts any absolute path the server process can access. It does not apply the legacy Python backend's configured-root or credential-name denylist. OS permissions, descriptor identity checks, bounded operation limits, role checks, and the protected product-root mutation guard still apply.
 
 Build, validate, and then start the preview:
 
@@ -57,9 +57,9 @@ All YOLOmux operator launches (`boot.sh`, `make run`, `yolo-dev-start`, the inst
 
 The Go process generates and reuses its own self-signed certificate under `${TMPDIR:-/tmp}/yolomux-go-tls-<port>/`; it does not reuse Python's state-root certificate or local-CA helper. The managed launcher forwards host, port, checkout root, environment-selected config/state, and `--dang` as Go's `--dangerously-yolo`; Python-only `--cert`, `--key`, `--http`, and `--dev` semantics still do not carry over. Direct Go flags exist for fixtures and diagnostics, but operator starts should keep the managed `boot.sh --golang` lifecycle.
 
-Automated Go validation runs inside isolated Docker state with fixture-owned test ports and Chromium. The listener at `0.0.0.0:7221` is reserved for a final manual inspection after those checks; production port 7220 is not part of the Go preview workflow.
+Automated Go validation runs inside isolated Docker state with fixture-owned test ports and Chromium. Port 7221 is reserved for a manual smoke after those checks. Automated checks never connect to the operator runtime on port 7220; use the managed operator workflow for an explicitly requested live restart or smoke.
 
-Contributors should use `make dev`. Its `dev` extra installs the complete Python gate toolchain: mypy, Pillow, pytest, pytest-timeout, pytest-xdist, and Selenium. Browser lanes additionally require Chrome or Chromium plus a compatible chromedriver; the xterm provenance check requires Node.js and npm. [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md#gate-prerequisites) owns the complete gate and Linux host-capacity requirements.
+Contributors should use `make dev`. Its `dev` extra installs the Python gate toolchain. Browser lanes additionally require Chrome or Chromium plus a compatible chromedriver; the xterm provenance check requires Node.js and npm. [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) lists the development checks and Go test lane.
 
 Python native filesystem watching is validated on macOS and Linux. Native events reduce invalidation latency but do not replace bounded reconciliation: the elected Python web owner still scans at most 1,000 visible names per watched root and retains at most 512 in each directory signature. If Python `watchfiles` cannot start or loses events, it uses the same bounded polling path as its correctness fallback. Go uses a separate in-process Finder watcher: native events are Linux-only, and other platforms use the bounded polling fallback.
 
@@ -67,9 +67,9 @@ Open `https://localhost:9998/` for the Python quickstart. The first launch shows
 
 ## Runtime architecture
 
-The Python and Go servers share browser contracts, static assets, authentication semantics, and tmux-facing behavior where the Go capability catalog reports support. Their process and state ownership are deliberately different:
+The Python and Go servers share the browser bundle and selected browser contracts. Authentication and route support differ by backend; capability admission controls which Go features are exposed. Their process and state ownership are deliberately different:
 
-| Area | Default Python backend | Experimental Go backend |
+| Area | Legacy Python backend | Go backend |
 | --- | --- | --- |
 | Entry point | `python3 yolomux.py` | `./boot.sh --golang <port>` -> `python3 yolomux.py --backend go` -> `exec` of the Bazel-built binary |
 | Process shape | One web process per port plus same-host Unix RPC services | One Go process with bounded in-process schedulers |
@@ -80,7 +80,7 @@ The Python and Go servers share browser contracts, static assets, authentication
 
 ### Python runtime topology
 
-The default Python backend runs one lightweight `yolomux.py` web process per listening port. On one host, shared work moves to six local Unix RPC services: supervised `statsd`; lazy `indexd`, `batchd`, `statusd`, and `watchd`; and zero or one `approvald` while YO targets are enabled. Service sockets, transport locks, control endpoints, and background-owner records live under `YOLOMUX_RUNTIME_DIR`; the default runtime layout is host- and boot-scoped, while an explicit `YOLOMUX_ROOT` uses that root's private `runtime/` directory. Durable databases, caches, and journals live under the local `YOLOMUX_STATE_DIR`. Do not point servers on different hosts at one shared runtime or state directory. `statsd` is the sole Python YO!stats database writer and history-serving owner. It stores originals, usage atoms, coverage epochs, unavailable spans, and bounded aggregate rings in a schema-versioned database, then serves exact cached snapshots and deltas while Python web processes authenticate and forward. [`docs/specs/STATS_API.md`](docs/specs/STATS_API.md) owns both backend contracts and their differences. A restarted Python `statsd` serves from the persisted ring and rebuilds only buckets an invalidation ledger records as owed. `/readyz` requires authentication and fails closed until statsd can serve a correct snapshot; `/livez` is public and answers only whether statsd can make progress; and `boot.sh` uses the separate public `/healthz` listener probe for restart readiness. `statusd` owns the same-host public session/agent-status snapshot and private session inventory; Python web processes forward its bytes. `batchd` is the bounded CPU broker for stateless registered tasks and typed materialized products that serve last-known-good bytes while a newer generation builds. Extra Python ports reuse services only when they share a runtime root; normal isolated ports use private runtime roots and therefore private services.
+Python runs a web process plus host-local services for stats, indexing, file work, status, watches, and optional auto-approval. Its runtime sockets and locks belong under a private runtime root; durable state belongs on local storage. Keep this legacy backend's state separate from Go's files. Go owns stats storage and collectors in its process; current differences and migration gaps are listed in [`GO_MIGRATION.md`](GO_MIGRATION.md).
 
 The broker gives terminal candidate probes and base file reads a bounded foreground point path ahead of freshness and maintenance work. File bytes do not wait for optional Git history/capability enrichment. Its runtime rows name the accepting instance and state root, queue/phase, active task, broker and worker memory, journal bytes, and file-backed artifact bytes. A malformed queued-operation journal is preserved, reported once, and circuit-broken for that physical source generation instead of retrying it forever.
 
@@ -337,7 +337,7 @@ To add a read-only guest account, uncomment (or add) a `readonly` entry:
 
 YOLOmux is not a shared-state cluster. The safe current shape is one independent YOLOmux deployment per machine, with each machine using local configuration, state, cache, tmux, sockets, databases, and writable worktrees. A mounted home may supply read-only source or transcript files, but two hosts must not use one shared `YOLOMUX_STATE_DIR`, one writable worktree, or concurrently writable configuration files.
 
-The detailed variables and support matrix below describe the default Python backend. The Go preview has no Python service/runtime/cache topology and does not implement Python's complete host-partition and network-filesystem preflight. Give each Go process private host-local `YOLOMUX_CONFIG_DIR` and `YOLOMUX_STATE_DIR` roots through `boot.sh --golang`; do not share its config-rooted journals, background-owner records, auth material, or default stats database between hosts.
+The detailed variables and support matrix below describe the legacy Python backend. Go has no Python service/runtime/cache topology and does not implement the legacy backend's complete host-partition and network-filesystem preflight. Give each Go process private host-local `YOLOMUX_CONFIG_DIR` and `YOLOMUX_STATE_DIR` roots through `boot.sh --golang`; do not share its config-rooted journals, background-owner records, auth material, or default stats database between hosts.
 
 ### Safe launch shape
 
@@ -410,7 +410,7 @@ Adoption choices differ by store:
 | Quick Open and model pricing | Rebuild these reconstructible caches instead of adopting them. Preserve the old files until the new host is verified. |
 | YO!chat | The production app uses a host-partitioned room. Preserve legacy unpartitioned database and `yochat-history/` artifacts unchanged; they are not auto-adopted. |
 
-Implementation details, exact unresolved gates, and developer-facing path owners are documented in [Multi-host shared-home implementation status](docs/DEVELOPMENT.md#multi-host-shared-home-implementation-status).
+Implementation details and current Go migration gaps are documented in [`GO_MIGRATION.md`](GO_MIGRATION.md).
 
 ## Concepts
 
@@ -428,7 +428,7 @@ YOLOmux addresses tmux sessions with the exact target `=<session>:`. The leading
 
 ## Daily use
 
-Open YOLOmux after setup. Existing tmux sessions appear as tabs. The list describes the complete Python backend unless a bullet explicitly states shared or Go behavior; unavailable Go capabilities stay hidden. (The detailed pane/tab/Finder/Differ behavior contract lives in [`docs/specs/GUI.md`](docs/specs/GUI.md); this list is the daily-driver essentials.)
+Open YOLOmux after setup. Existing tmux sessions appear as tabs. The list describes shared browser behavior where the selected backend advertises the required capabilities; unsupported Go capabilities stay hidden. See [`docs/specs/GUI.md`](docs/specs/GUI.md) for durable interaction rules.
 
 * Click a tab to show it in that pane. Use the `Tabs` menu to activate minimized or inactive tabs.
 
@@ -454,13 +454,13 @@ Open YOLOmux after setup. Existing tmux sessions appear as tabs. The list descri
 
 * File -> `YO!info` opens a grouped relationship tree over `TmuxSession`, `TmuxWindow`, `TmuxPane`, `RuntimeActor`, observed paths, Git worktrees, local/hosted repositories, branches, pull requests, and Linear work. One worktree and branch inventory is shared by all observed paths and actors that use it; search accepts combinations such as a tmux target plus a branch or PR. A tab with exactly one focused PR shows that PR; when several focused PRs apply it shows an explicit count instead of choosing one arbitrarily.
 
-* File -> `YO!stats` uses the shared `Graphs`, `Cost`, `API/SSE`, `Daemons`, and `Logs` shell on both backends when `pane.stats.v1` is available. The browser keeps one Range/Resolution selection, accepts only `1s`, `10s`, `60s`, and `300s` plus AUTO from server capabilities, and replaces one complete generation at a time. The retained chart controls, responsive layout, no-data rendering, zoom, Cost migration, and visible-only subview work are specified in [`docs/specs/GUI.md`](docs/specs/GUI.md).
+* File -> `YO!stats` uses the shared `Graphs`, `Cost`, `API/SSE`, `Daemons`, and `Logs` shell on both backends when `pane.stats.v1` is available. The browser uses server capabilities and complete snapshots; backend parity gaps are listed in [`GO_MIGRATION.md`](GO_MIGRATION.md).
 
-* On Python, `statsd` is the sole database writer and exact cache/materializer owner. It supplies retained bounded deltas with tombstones, full model/agent/evidence cost attribution, the six-service `Daemons` roster, mature migration/recovery diagnostics, and the detailed collector/cadence behavior documented in [`docs/specs/STATS_API.md`](docs/specs/STATS_API.md).
+* On Python, `statsd` is the sole database writer and cache/materializer owner. Its retained deltas, cost attribution, daemon roster, and recovery behavior differ from Go; see [`GO_MIGRATION.md`](GO_MIGRATION.md).
 
-* On Go, the one `yolomux-go` process owns `stats-v9.sqlite3`, collectors, materialization, routes, and SSE. It emits the shared `ack`/snapshot/`ready` envelope, then checks source generation every 100 ms; a changed generation currently produces a full replacement delta with no tombstones. Snapshots are built from a read-only database view in the request path, and Cost resolves the shared packaged pricing catalog into model, agent, evidence, marginal-cost, and API-list-price fields. The `Daemons` chart exposes the Go process CPU series, while the expanded Daemons disclosure exposes process count, goroutines, OS threads, and verified descendant-process PID, CPU, RSS, and state. Python-only observer counters remain explicitly unavailable. Readiness does not yet prove Python's complete cache/ring state. [`GO_MIGRATION_YOSTATS.md`](GO_MIGRATION_YOSTATS.md) owns the remaining differences.
+* On Go, one `yolomux-go` process owns `stats-v9.sqlite3`, collectors, materialization, routes, and SSE. Snapshot/delta, attribution, readiness, and diagnostics still differ from Python. The current status is in [`GO_MIGRATION.md`](GO_MIGRATION.md).
 
-* Python and Go stats writers must use isolated config/state roots; never point both backends at one live database. Go runtime discovery and current Docker evidence are Linux-first, while Python remains the reference and rollback backend.
+* Python and Go stats writers must use isolated config/state roots; never point both backends at one live database. Go runtime discovery and current Docker evidence are Linux-first. Python remains a legacy comparison path during the migration.
 
 * The pane header pop-out button opens supported file previews, YO!info, and YO!stats in a detached browser window.
 
@@ -490,7 +490,7 @@ Open YOLOmux after setup. Existing tmux sessions appear as tabs. The list descri
 
 * For a real-device mobile diagnostic, open YOLOmux with `?debug=1`, reproduce the Preview or terminal input problem once, then open `YO!stats` -> `API/SSE` and press `Copy Events`. That debug-only action copies raw JSON containing the Preview touch/viewport/write owners and generations plus terminal tap/focus/input stages; normal sessions do not retain this mobile trace.
 
-For exact UI behavior, edge cases, and coverage, see [`docs/specs/GUI.md`](docs/specs/GUI.md).
+For durable UI rules, see [`docs/specs/GUI.md`](docs/specs/GUI.md); current browser tests own exact edge cases and assertions.
 
 ### Copying terminal text
 
@@ -561,7 +561,7 @@ Go issues a port-scoped 90-day cookie backed by its config-rooted secret, but it
 
 On Python, every password path (the browser login form and HTTP Basic auth) is throttled before the password is ever hashed, so brute force, credential stuffing, and password spraying are bounded and cannot burn the server's password-hash CPU. Two independent limits apply together: a per-username limit (5 failed attempts, then escalating waits of 30s, 1m, 2m, 5m, 10m, 30m, up to 1h, reset on a successful login, with a hard lock after 100 consecutive failures) and per-network limits keyed on the client address at several prefix widths (a single address, its /24 or /64 neighborhood, and its /16 or /48 provider block) plus one global emergency limit. When a limit is hit the response is a generic `429 Too Many Requests` that says only "wait a few minutes" or "wait a few hours" — it never reveals which limit fired, whether the username exists, how many attempts remain, or an exact retry time. Correct credentials for an account that is not itself locked always work. The limiter lives in one SQLite file under `YOLOMUX_STATE_DIR`, so the policy holds across every Python port that shares a state directory and survives restarts.
 
-The experimental Go backend uses a weaker login limiter. Its browser form uses a process-local in-memory counter keyed by socket peer and username, blocks after five failed verifications for a one-minute window, and forgets the counter on restart. Go Basic auth does not use that limiter, and Go has no durable HMAC keys, hierarchical network buckets, hard username lock, shared-port state, policy override, recovery database, or optional edge escalation. Keep Go on a trusted network or loopback tunnel until that gap is closed.
+Go login-rate limiting is less complete than the legacy Python backend. Its browser form uses a process-local in-memory counter keyed by socket peer and username, blocks after five failed verifications for a one-minute window, and forgets the counter on restart. Go Basic auth does not use that limiter, and Go has no durable HMAC keys, hierarchical network buckets, hard username lock, shared-port state, policy override, recovery database, or optional edge escalation. Keep Go on a trusted network or loopback tunnel until that gap is closed.
 
 For Python, the client address is the socket peer. Python deliberately does not trust `X-Forwarded-For`/`Forwarded` headers (any client can forge them). Behind a reverse proxy or an SSH tunnel all clients therefore share the proxy/tunnel address and one network bucket — safe, but intentionally coarser; run YOLOmux with a trusted edge if you need per-client network limits from a real reverse proxy.
 
@@ -624,7 +624,7 @@ The optional `risk:` field is a label shown in the YOLO event log. Keep it to th
 
 Python and `boot.sh --golang` bind `--host 0.0.0.0` (all interfaces) by default, on purpose: the product is built for reaching your sessions from a phone or another machine on a trusted LAN, and every product request is gated by the login layer. The Go binary itself defaults to `127.0.0.1` when run directly. If you use the managed all-interface launch, restrict the port to trusted IPs at the firewall:
 
-For the Go preview, this firewall/tunnel boundary is required rather than optional hardening because its login throttling is not at Python parity.
+For Go, this firewall/tunnel boundary is required rather than optional hardening because login throttling is not yet at legacy Python parity.
 
 ```bash
 sudo ufw allow from <client-ip> to any port 9998 proto tcp
