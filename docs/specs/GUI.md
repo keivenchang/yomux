@@ -17,6 +17,7 @@ This page keeps the durable user-visible rules. The selected backend's capabilit
 ## Finder, Differ, and editor
 
 - Finder and Differ share tree-row, sorting, status, selection, and toolbar behavior.
+- Read-only users can open a repository's Repo Diff tab directly, expand commits and the Dirty row, and view file comparisons without editing. General filesystem actions retain their backend permissions.
 - Show file content as soon as the bounded read completes; optional Git decoration may arrive later. Keep authorization and filesystem failures visible instead of painting stale or replacement content.
 - Text editing stays distinct from preview. Markdown ViewEdit uses the supported ProseMirror path; if parsing fails, keep the source preview read-only and show the error. Saving, mode changes, close, and blur must not discard pending edits.
 - Uploads and pasted images use the active editor's file-relative path and the original selection or caret captured for that operation.

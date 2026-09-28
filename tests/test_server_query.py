@@ -7,6 +7,7 @@ import json
 import os
 import socket
 import threading
+from dataclasses import replace
 from http import HTTPStatus
 from pathlib import Path
 from types import MethodType
@@ -1260,7 +1261,15 @@ def route_handler(path, app=None, readonly=False):
     handler.path = path
     handler.server = SimpleNamespace(app=app or SimpleNamespace(), dev=False)
     handler.close_connection = False
-    handler.require_auth = lambda role="readonly": calls.append(("require_auth", role)) or True
+
+    def require_auth(role="readonly"):
+        calls.append(("require_auth", role))
+        if readonly and role == "admin":
+            handler.reject_forbidden(handler.auth_identity(), role)
+            return False
+        return True
+
+    handler.require_auth = require_auth
     handler.auth_readonly = lambda: readonly
     handler.auth_identity = lambda: SimpleNamespace(role="readonly" if readonly else "admin")
     handler.write_json = lambda value, status=HTTPStatus.OK: writes.append(("json", status, value))
@@ -1321,10 +1330,10 @@ def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
     assert route_by_path("POST", "/api/yoagent/waits/*/clear").handler is http_routes.post_yoagent_wait_clear
     assert route_by_path("POST", "/api/fs/batch").role == "admin"
     assert route_by_path("GET", "/api/fs/fast/list").handler is http_routes.get_fs_fast_list
-    assert route_by_path("GET", "/api/fs/fast/list").role == "readonly"
+    assert route_by_path("GET", "/api/fs/fast/list").role == "admin"
     search_stream = route_by_path("GET", "/api/fs/search-stream")
     assert search_stream.handler is http_routes.get_fs_search_stream
-    assert search_stream.role == "readonly"
+    assert search_stream.role == "admin"
     assert search_stream.protocol == http_routes.RESPONSE_SSE
     assert route_by_path("POST", "/api/operations/ack").role == "readonly"
     assert route_by_path("GET", "/api/fs/watch-diff").handler is http_routes.get_fs_watch_diff
@@ -1333,7 +1342,7 @@ def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
     assert route_by_path("GET", "/api/tmux-session-exists").role == "readonly"
 
 
-def test_indexed_search_stream_requires_the_registered_authenticated_role():
+def test_indexed_search_stream_requires_admin_authentication():
     handler, calls, writes = route_handler("/api/fs/search-stream?root=%2Frepo&query=x")
     handler.require_auth = lambda role="readonly": calls.append(("require_auth", role)) or False
     handler.stream_indexed_search = lambda _parsed: writes.append(("stream",))
@@ -1341,7 +1350,7 @@ def test_indexed_search_stream_requires_the_registered_authenticated_role():
 
     http_routes.dispatch_http_route(handler, "GET")
 
-    assert calls == [("require_auth", "readonly")]
+    assert calls == [("require_auth", "admin")]
     assert writes == []
 
 
@@ -1465,7 +1474,7 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
     handler, calls, writes = route_handler("/api/fs/fast/list?path=/repo", app)
     handler.handle_fs_fast_list = lambda parsed: writes.append(("fs-fast-list", parsed.path))
     Handler.do_GET(handler)
-    assert calls == [("require_auth", "readonly")]
+    assert calls == [("require_auth", "admin")]
     assert writes == [("fs-fast-list", "/api/fs/fast/list")]
 
     handler, calls, writes = route_handler("/api/summary-stream", app)
@@ -1481,7 +1490,7 @@ def test_do_get_fs_routes_reject_readonly_before_file_handlers():
 
     Handler.do_GET(handler)
 
-    assert calls == [("require_auth", "readonly")]
+    assert calls == [("require_auth", "admin")]
     assert writes == [("forbidden", HTTPStatus.FORBIDDEN, "readonly", "admin")]
     handler, calls, writes = route_handler("/api/batch/zip?path=/repo", readonly=True)
     handler.handle_fs_zip = lambda parsed: writes.append(("fs-zip", parsed.path))
@@ -1519,7 +1528,7 @@ def test_do_get_fs_watch_diff_uses_client_since_token_without_tracking_clients()
 
     Handler.do_GET(handler)
 
-    assert calls == [("require_auth", "readonly")]
+    assert calls == [("require_auth", "admin")]
     assert requests == [("old-token", False, "r-web-watch-diff")]
     assert writes == [("json", HTTPStatus.ACCEPTED, {
         "since": "old-token",
@@ -2238,12 +2247,47 @@ def test_git_history_routes_are_registered_with_readonly_protocols():
     assert stats_route.handler.__name__ == "get_fs_git_history_stats_stream"
 
 
+@pytest.mark.parametrize("path,method", [
+    ("/api/fs/git-history?path=/repo&worktree=0", "handle_fs_git_history"),
+    ("/api/fs/git-history?path=/repo&worktree=only", "handle_fs_git_history"),
+    ("/api/fs/git-history-stats-stream?path=/repo", "stream_git_history_stats"),
+    ("/api/fs/git-commit?path=/repo&commit=HEAD", "handle_fs_git_commit"),
+    ("/api/fs/diff?path=/repo/file&from=HEAD&to=current", "handle_fs_diff"),
+])
+def test_readonly_repo_diff_dispatches_to_read_handlers(path, method):
+    handler, calls, writes = route_handler(path, readonly=True)
+    setattr(handler, method, lambda parsed: writes.append(("repo-diff", parsed.path)))
+
+    Handler.do_GET(handler)
+
+    assert calls == [("require_auth", "readonly")]
+    assert writes == [("repo-diff", urlparse(path).path)]
+
+
+@pytest.mark.parametrize("route", http_routes.FILESYSTEM_ROUTES + http_routes.BATCH_ROUTES, ids=lambda route: f"{route.method} {route.path}")
+def test_filesystem_route_permissions_are_owned_by_route_roles(route):
+    viewer_routes = {"/api/fs/git-history", "/api/fs/git-history-stats-stream", "/api/fs/git-commit", "/api/fs/diff"}
+    allowed = route.method == "GET" and route.path in viewer_routes
+    handler, calls, writes = route_handler(route.path, readonly=True)
+    probe_route = replace(route, handler=lambda *_args: writes.append(("handled",)))
+
+    http_routes._dispatch_route_handler(handler, urlparse(route.path), probe_route)
+
+    assert calls == [("require_auth", "readonly" if allowed else "admin")]
+    assert writes == ([("handled",)] if allowed else [("forbidden", HTTPStatus.FORBIDDEN, "readonly", "admin")])
+    writes.clear()
+    handler.require_auth = lambda _role: False
+    http_routes._dispatch_route_handler(handler, urlparse(route.path), probe_route)
+    assert writes == [], "unauthenticated requests must never reach a filesystem handler"
+
+
 def test_git_history_stats_stream_emits_each_chunk_before_computing_the_next(monkeypatch):
     handler = object.__new__(Handler)
     events = []
     calls = []
+    headers = {}
     handler.send_response = lambda status: events.append(("headers", status))
-    handler.send_header = lambda *_args: None
+    handler.send_header = lambda name, value: headers.__setitem__(name, value)
     handler.send_auth_cookie_if_needed = lambda: None
     handler.end_headers = lambda: None
     handler.write_sse_json = lambda event, payload: events.append((event, payload))
@@ -2275,6 +2319,8 @@ def test_git_history_stats_stream_emits_each_chunk_before_computing_the_next(mon
     ]
     assert [event for event, _payload in events] == ["headers", "start", "chunk", "chunk", "done"]
     assert events[-1] == ("done", {"count": 3, "next_cursor": "cursor-3"})
+    assert headers["Connection"] == "close"
+    assert handler.close_connection is True
 
 
 def test_git_history_stats_stream_reports_later_batch_failure_as_sse_error(monkeypatch):

@@ -1577,6 +1577,40 @@ exec /bin/sleep 300
                       if (!gitRow) throw new Error('Finder Git repository row is missing');
                       const gitDiffButton = await waitFor(() => Array.from(document.querySelectorAll('.file-context-menu button')).find(button => button.textContent.trim() === 'ΔShow Diff'), 'context-menu Diff action');
                       if (!gitDiffButton || gitDiffButton.disabled) throw new Error('Finder Git repository Diff action is missing or disabled');
+                      const originalFetch = window.fetch.bind(window);
+                      let heldStatsResponse = false;
+                      window.fetch = async (input, init) => {
+                        const response = await originalFetch(input, init);
+                        const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+                        if (url.pathname !== '/api/fs/git-history-stats-stream' || heldStatsResponse || !response.body) return response;
+                        heldStatsResponse = true;
+                        const sourceReader = response.body.getReader();
+                        let eventTail = '';
+                        let statsStreamText = '';
+                        const heldBody = new ReadableStream({
+                          start(controller) {
+                            (async () => {
+                              const decoder = new TextDecoder();
+                              while (true) {
+                                const result = await sourceReader.read();
+                                if (result.done) { controller.close(); return; }
+                                const text = decoder.decode(result.value, {stream: true});
+                                statsStreamText = (statsStreamText + text).slice(-1000);
+                                eventTail += text;
+                                window.__yolomuxGoStatsStreamText = statsStreamText;
+                                controller.enqueue(result.value);
+                                if (eventTail.includes('event: done')) {
+                                  window.__yolomuxGoStatsDoneHeldOpen = true;
+                                  return;
+                                }
+                                eventTail = eventTail.slice(-128);
+                              }
+                            })().catch(error => controller.error(error));
+                          },
+                          cancel(reason) { return sourceReader.cancel(reason); },
+                        });
+                        return new Response(heldBody, {status: response.status, statusText: response.statusText, headers: response.headers});
+                      };
                       const historyListStartedAt = performance.now();
                       gitDiffButton.click();
                       const gitDiffItem = gitDiffItemFor(gitRoot);
@@ -1627,6 +1661,25 @@ exec /bin/sleep 300
                           statsRequests: performance.getEntriesByType('resource').map(entry => entry.name).filter(name => name.includes('/api/fs/git-history-stats-stream')),
                         })}`, {cause: error});
                       }
+                      let doneCompletion;
+                      try {
+                        doneCompletion = await waitFor(() => {
+                          const historyState = gitDiffTabState.get(gitDiffItem);
+                          return window.__yolomuxGoStatsDoneHeldOpen === true && historyState?.statsStage >= 1 && !historyState.statsLoading
+                            ? {statsStage: historyState.statsStage, statsLoading: historyState.statsLoading}
+                            : null;
+                        }, 'Git stats done event completion while response stays open');
+                      } catch (error) {
+                        const historyState = gitDiffTabState.get(gitDiffItem);
+                        throw new Error(`${error.message}: ${JSON.stringify({
+                          heldStatsResponse,
+                          doneEventResponseHeldOpen: window.__yolomuxGoStatsDoneHeldOpen === true,
+                          statsStreamText: window.__yolomuxGoStatsStreamText || '',
+                          state: historyState ? {statsLoading: historyState.statsLoading, statsStage: historyState.statsStage, statsError: historyState.statsError, commits: historyState.commits?.slice(0, 2)} : null,
+                          statsRequests: performance.getEntriesByType('resource').map(entry => entry.name).filter(name => name.includes('/api/fs/git-history-stats-stream')),
+                        })}`, {cause: error});
+                      }
+                      window.fetch = originalFetch;
                       const statsRequests = performance.getEntriesByType('resource')
                         .map(entry => entry.name)
                         .filter(name => name.includes('/api/fs/git-history-stats-stream'));
@@ -1653,11 +1706,13 @@ exec /bin/sleep 300
                         historyListReadyMs,
                         historyRequestMs: historyRequestEntry?.duration ?? null,
                         topStats,
+                        doneCompletion,
+                        doneEventResponseHeldOpen: window.__yolomuxGoStatsDoneHeldOpen === true,
                         firstStatsBatchSizes: firstStatsRequest?.searchParams.get('batch_sizes') || '',
                         detailFiles: topDetail.files.map(file => file.path),
                         detailRendered: Boolean(renderedTopDetail),
                       };
-                      if (!gitHistory.nativeSuppressed || !gitHistory.active || gitHistory.head !== gitHead || gitHistory.commits < 2 || gitHistory.historyListReadyMs >= 500 || !historyRequest || !gitHistory.topStats || gitHistory.firstStatsBatchSizes !== '1' || !gitHistory.detailFiles.length || !gitHistory.detailRendered) throw new Error('Finder Git repository Diff tab contract mismatch: ' + JSON.stringify(gitHistory));
+                      if (!gitHistory.nativeSuppressed || !gitHistory.active || gitHistory.head !== gitHead || gitHistory.commits < 2 || gitHistory.historyListReadyMs >= 500 || !historyRequest || !gitHistory.topStats || !gitHistory.doneEventResponseHeldOpen || gitHistory.doneCompletion?.statsStage < 1 || gitHistory.doneCompletion?.statsLoading !== false || gitHistory.firstStatsBatchSizes !== '1' || !gitHistory.detailFiles.length || !gitHistory.detailRendered) throw new Error('Finder Git repository Diff tab contract mismatch: ' + JSON.stringify(gitHistory));
                       const removable = row(root + '/ui-remove-me.txt');
                       if (!removable) throw new Error('Finder delete fixture row is missing');
                       const originalConfirm = window.confirm;

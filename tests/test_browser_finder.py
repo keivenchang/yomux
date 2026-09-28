@@ -2405,6 +2405,97 @@ def test_git_diff_stats_chunk_patches_only_changed_rows_in_chromium(browser, tmp
     }, metrics
 
 
+def test_git_diff_stats_done_event_finishes_before_stream_eof_in_chromium(browser, tmp_path):
+    repo = "/home/test/repo"
+    head = "f" * 40
+    commits = [
+        {"sha": f"{index:040x}", "short": f"{index:09x}", "subject": f"commit {index}", "author": "Test", "authored_at": 0}
+        for index in range(1, 2)
+    ]
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=left&tabs=left:files",
+        settings={"file_explorer": {"root_mode": "fixed"}},
+        fs_entries={"/home/test": [{"name": "repo", "kind": "dir"}], repo: []},
+    )
+    metrics = browser.execute_async_script(
+        """
+        const repo = arguments[0];
+        const head = arguments[1];
+        const commits = arguments[2];
+        const done = arguments[arguments.length - 1];
+        const originalFetch = window.fetch.bind(window);
+        const requests = [];
+        const jsonResponse = payload => new Response(JSON.stringify(payload), {headers: {'Content-Type': 'application/json'}});
+        const eventFrame = (event, payload) => `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
+        window.fetch = async (input, options = {}) => {
+          const url = new URL(String(input), location.href);
+          if (url.pathname === '/api/fs/git-history' && url.searchParams.get('worktree') === 'only') {
+            return jsonResponse({path: repo, repository_identity: '', worktree_status: {available: true, dirty: false, entries: []}});
+          }
+          if (url.pathname === '/api/fs/git-history' && url.searchParams.get('worktree') === '0') {
+            return jsonResponse({path: repo, repo, relative_path: '', shallow_boundary: 'complete', repository_identity: '', head,
+              snapshot_cursor: 'snapshot-zero', next_cursor: '', truncated: false, commits});
+          }
+          if (url.pathname === '/api/fs/git-history-stats-stream') {
+            const batchSizes = (url.searchParams.get('batch_sizes') || '').split(',').map(Number);
+            const startOffset = Number(url.searchParams.get('offset'));
+            requests.push(batchSizes.join(','));
+            let offset = startOffset;
+            const frames = [eventFrame('start', {path: repo, batch_sizes: batchSizes, offset: startOffset})];
+            for (const size of batchSizes) {
+              const batch = commits.slice(offset, offset + size).map(commit => ({
+                ...commit, files: 1, added: 2, removed: 1, binary_files: 0, signature_status: 'N',
+              }));
+              frames.push(eventFrame('chunk', {path: repo, repo, relative_path: '', shallow_boundary: 'complete',
+                repository_identity: '', head, snapshot_cursor: 'snapshot-zero', start_offset: offset,
+                commits: batch, next_cursor: '', truncated: false}));
+              offset += size;
+            }
+            frames.push(eventFrame('done', {count: offset - startOffset, next_cursor: ''}));
+            const bytes = new TextEncoder().encode(frames.join(''));
+            return new Response(new ReadableStream({
+              start(controller) { controller.enqueue(bytes); },
+            }), {headers: {'Content-Type': 'text/event-stream'}});
+          }
+          return originalFetch(input, options);
+        };
+        (async () => {
+          const item = gitDiffItemFor(repo);
+          openGitDiffTab(repo, {userInitiated: true});
+          const deadline = performance.now() + 2000;
+          let state = null;
+          while (performance.now() < deadline) {
+            state = gitDiffTabState.get(item);
+            if (state?.statsStage >= 1 && state.commits.length === commits.length && !state.statsLoading) break;
+            await new Promise(resolve => setTimeout(resolve, 10));
+          }
+          state = gitDiffTabState.get(item);
+          done({
+            requests,
+            loaded: state?.loaded === true,
+            statsLoading: state?.statsLoading === true,
+            statsStage: state?.statsStage ?? -1,
+            complete: state?.commits.filter(commit => Number.isSafeInteger(commit.files) && typeof commit.signature_status === 'string' && commit.signature_status).length ?? 0,
+            error: state?.statsError?.error || state?.statsError?.user_message?.fallback || '',
+            panelErrors: Array.from(document.querySelectorAll('.git-diff-state-error')).map(node => node.textContent),
+          });
+        })().catch(error => done({error: String(error?.stack || error), requests}))
+          .finally(() => { window.fetch = originalFetch; });
+        """,
+        repo,
+        head,
+        commits,
+    )
+    assert not metrics.get("error"), metrics
+    assert metrics["loaded"] is True, metrics
+    assert metrics["requests"] == ["1"], metrics
+    assert metrics["statsStage"] == 1 and metrics["statsLoading"] is False, metrics
+    assert metrics["complete"] == len(commits), metrics
+    assert metrics["error"] == "" and metrics["panelErrors"] == [], metrics
+
+
 def test_finder_context_copy_image_fetches_bytes_and_writes_image_clipboard(browser, tmp_path):
     load_live_runtime_boot_fixture(
         browser,

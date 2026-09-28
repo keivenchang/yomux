@@ -551,7 +551,9 @@ The role names and browser login flow are shared. The cookie, Basic-auth, bypass
 | Role | Can do |
 | --- | --- |
 | `admin` | Type into tmux panes, create sessions, upload files, toggle `YO`, switch tmux sub-windows, run AI summaries. |
-| `readonly` | View panes, transcripts, branch metadata, logs, and YOLO status. Terminals are read-only. |
+| `readonly` | View panes, transcripts, branch metadata, logs, YOLO status, and Repo Diff history, statistics, changed-file lists, and file comparisons. Terminals and Repo Diff file views are read-only. |
+
+On Python, Repo Diff permits repository content reads, including working-tree comparisons. General filesystem browsing, raw downloads, and file mutations still require `admin` access.
 
 Cookies have a 90-day sliding lifetime and survive server restarts. Cookies are scoped by port, so dev and production servers on the same host do not overwrite each other. Changing a user's password invalidates existing cookies for that user.
 
