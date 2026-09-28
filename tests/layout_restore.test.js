@@ -935,6 +935,30 @@ async function runLayoutRestoreSuite() {
     }, 'the realized layout publishes the same receipt generation');
   });
 
+  await testAsync('session rename does not create a client session absent from the returned roster', async () => {
+    const api = loadYolomuxWithFileExplorerClosed('?sessions=source&layout=left&tabs=left:source', ['source']);
+    api.setFetchForTest(url => {
+      const parsed = new URL(String(url), 'http://localhost');
+      if (parsed.pathname === '/api/rename-session') {
+        return Promise.resolve(jsonResponse({new_session: 'missing-target', sessions: ['unrelated'], ok: true}));
+      }
+      if (parsed.pathname === '/api/session-metadata') {
+        return Promise.resolve(jsonResponse({session_order: ['unrelated'], sessions: {unrelated: {panes: []}}}));
+      }
+      if (parsed.pathname === '/api/auto-approve') {
+        return Promise.resolve(jsonResponse({session_order: ['unrelated'], sessions: {}, rules: {}}));
+      }
+      return Promise.resolve(jsonResponse({ok: true}));
+    });
+
+    const result = await api.renameTmuxSessionForTest('source', 'missing-target');
+    assert.ok(result?.error, 'the client rejects a success response whose roster omits the renamed identity');
+    assert.deepStrictEqual(canonical(api.sessionsForTest()), ['source'], 'the missing target is not inserted into the client session roster');
+    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
+      left: {tabs: ['source'], active: 'source'},
+    }, 'the missing target is not added to or focused in the client layout');
+  });
+
   await testAsync('successful session rename closes its dialog after layout realization', async () => {
     const source = fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8');
     assert.ok(
@@ -3218,6 +3242,44 @@ async function runLayoutRestoreSuite() {
     assert.equal(renamed.entries.length, 1, 'rename preserves upload entries under the new session');
     assert.notEqual(renamed.cleanupTimer, 77, 'rename replaces the stale old-session timer');
     assert.equal(cleared.includes(77), true, 'rename clears the old-session platform timer before teardown');
+  });
+
+  await testAsync('rename that resolves to the original session preserves metadata and lifecycle state', async () => {
+    const api = loadYolomux('?sessions=source&layout=left&tabs=left:source', ['source']);
+    const sourceInfo = {panes: [{pane_id: '%1'}], session_identity: 'stable-source', marker: 'keep'};
+    await api.applySessionMetadataPayloadForTest({
+      session_order: ['source'],
+      sessions: {source: sourceInfo},
+    }, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+    api.seedSessionLifecycleStateForTest('source');
+    const metadataBefore = canonical(api.transcriptMetadataStateForTest().payload.sessions.source);
+    const {trackedState: _trackedStateBefore, ...lifecycleBefore} = canonical(api.sessionLifecycleStateForTest('source'));
+    api.setFetchForTest(url => {
+      const parsed = new URL(String(url), 'http://localhost');
+      if (parsed.pathname === '/api/rename-session') {
+        return Promise.resolve(jsonResponse({session: 'source', new_session: 'source', renamed: true, sessions: ['source'], topology_generation: 2, ok: true}));
+      }
+      if (parsed.pathname === '/api/ensure-session') return Promise.resolve(jsonResponse({session: 'source', created: false, ok: true}));
+      if (parsed.pathname === '/api/session-metadata') {
+        return Promise.resolve(jsonResponse({session_order: ['source'], sessions: {source: sourceInfo}}));
+      }
+      if (parsed.pathname === '/api/auto-approve') return Promise.resolve(jsonResponse({session_order: ['source'], sessions: {}, rules: {}}));
+      return Promise.resolve(jsonResponse({ok: true}));
+    });
+
+    assert.equal(await api.renameTmuxSessionForTest('source', 'intermediate'), true, 'the server can report that the live identity returned to its original name');
+
+    assert.deepStrictEqual(canonical(api.transcriptMetadataStateForTest().payload.sessions.source), metadataBefore, 'A to B to A reconciliation keeps the original transcript metadata');
+    const {trackedState: _trackedStateAfter, ...lifecycleAfter} = canonical(api.sessionLifecycleStateForTest('source'));
+    assert.deepStrictEqual(lifecycleAfter, lifecycleBefore, 'same-name reconciliation leaves keyed lifecycle state intact');
+    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
+      left: {tabs: ['source'], active: 'source'},
+    }, 'same-name reconciliation leaves the existing tab in place');
+    assert.deepStrictEqual(canonical(api.layoutMutationSnapshotForTest()), {
+      generation: 1,
+      completed: 1,
+      pending: 0,
+    }, 'same-name reconciliation completes the rename layout receipt');
   });
 
   test('session rename migrates the one lifecycle record instead of deleting or partially rekeying it', () => {

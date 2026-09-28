@@ -140,6 +140,7 @@ type server struct {
 	tmuxRoster                         []string
 	tmuxRosterIdentities               map[string]string
 	tmuxRosterKnown                    bool
+	tmuxRosterRevision                 uint64
 	tmuxRosterSampledAt                time.Time
 	tmuxSessionRosterFn                func() ([]string, error)
 	tmuxSessionActivityFn              func() (map[string]float64, error)
@@ -189,12 +190,14 @@ type tmuxSessionRosterSnapshot struct {
 	sessions   []string
 	identities map[string]string
 	known      bool
+	revision   uint64
 }
 
 type goTmuxTopology struct {
-	sessions   []string
-	identities map[string]string
-	generation uint64
+	sessions       []string
+	identities     map[string]string
+	generation     uint64
+	rosterRevision uint64
 }
 
 const goPerformanceRecordLimit = 4096
@@ -2711,6 +2714,14 @@ func (s *server) registerFilesystemRoutes(mux *http.ServeMux) {
 	mux.Handle("/api/batch/html-preview", s.protected(http.HandlerFunc(s.fsHTMLPreview), "admin"))
 }
 
+func (s *server) registerSessionRoutes(mux *http.ServeMux) {
+	mux.Handle("/api/ensure-session", s.protected(http.HandlerFunc(s.ensureSession), "admin"))
+	mux.Handle("/api/create-session-plan", s.protected(http.HandlerFunc(s.createSessionPlan), "admin"))
+	mux.Handle("/api/create-session", s.protected(http.HandlerFunc(s.createSession), "admin"))
+	mux.Handle("/api/rename-session", s.protected(http.HandlerFunc(s.renameSession), "admin"))
+	mux.Handle("/api/kill-session", s.protected(http.HandlerFunc(s.killSession), "admin"))
+}
+
 // explicitCollectorPaths is deliberately fail-closed. Collector inputs are
 // mutable host state, so deriving them from HOME, CODEX_HOME, or XDG_DATA_HOME
 // would let a development/test process read an operator's real client data.
@@ -2889,10 +2900,7 @@ func main() {
 	mux.Handle("/api/tmux", s.protected(http.HandlerFunc(s.tmux), "readonly"))
 	mux.Handle("/api/tmux-window", s.protected(http.HandlerFunc(s.tmuxWindow), "admin"))
 	mux.Handle("/api/tmux-session-exists", s.protected(http.HandlerFunc(s.sessionExists), "readonly"))
-	mux.Handle("/api/ensure-session", s.protected(http.HandlerFunc(s.ensureSession), "admin"))
-	mux.Handle("/api/create-session-plan", s.protected(http.HandlerFunc(s.createSessionPlan), "admin"))
-	mux.Handle("/api/create-session", s.protected(http.HandlerFunc(s.createSession), "admin"))
-	mux.Handle("/api/kill-session", s.protected(http.HandlerFunc(s.killSession), "admin"))
+	s.registerSessionRoutes(mux)
 	mux.Handle("/api/operations/", s.protected(http.HandlerFunc(s.operation), "readonly"))
 	// Keep stale clients on a typed capability error instead of an unexplained 404. More specific
 	// handlers above win under ServeMux's longest-pattern rule.
@@ -7106,6 +7114,10 @@ func (s *server) buildMetadataRefresh(generation uint64, sessions []string, iden
 func (s *server) tmuxTopologySnapshot(forceFresh ...bool) (goTmuxTopology, error) {
 	force := len(forceFresh) != 0 && forceFresh[0]
 	roster, err := s.tmuxSessionRosterSnapshot(force)
+	return s.tmuxTopologyFromRoster(roster, err)
+}
+
+func (s *server) tmuxTopologyFromRoster(roster tmuxSessionRosterSnapshot, err error) (goTmuxTopology, error) {
 	// Never hold the topology lock while waiting for tmux. The roster fetch has
 	// its own serialization; reconcile the latest published roster afterward so
 	// a slower caller cannot overwrite a snapshot another read already published.
@@ -7117,13 +7129,13 @@ func (s *server) tmuxTopologySnapshot(forceFresh ...bool) (goTmuxTopology, error
 	if err != nil {
 		if roster.known {
 			s.observeMetadataTopology(roster)
-			topology = goTmuxTopology{sessions: roster.sessions, identities: roster.identities, generation: s.metadataTopologyGeneration}
+			topology = goTmuxTopology{sessions: roster.sessions, identities: roster.identities, generation: s.metadataTopologyGeneration, rosterRevision: roster.revision}
 		} else {
 			topology = goTmuxTopology{generation: s.metadataTopologyGeneration}
 		}
 	} else {
 		s.observeMetadataTopology(roster)
-		topology = goTmuxTopology{sessions: roster.sessions, identities: roster.identities, generation: s.metadataTopologyGeneration}
+		topology = goTmuxTopology{sessions: roster.sessions, identities: roster.identities, generation: s.metadataTopologyGeneration, rosterRevision: roster.revision}
 	}
 	s.metadataTopologyMu.Unlock()
 	return topology, err
@@ -7133,7 +7145,7 @@ func (s *server) cachedTmuxTopologySnapshot() (goTmuxTopology, bool) {
 	s.metadataTopologyMu.Lock()
 	defer s.metadataTopologyMu.Unlock()
 	roster := s.cachedTmuxSessionRosterSnapshot()
-	return goTmuxTopology{sessions: roster.sessions, identities: roster.identities, generation: s.metadataTopologyGeneration}, roster.known
+	return goTmuxTopology{sessions: roster.sessions, identities: roster.identities, generation: s.metadataTopologyGeneration, rosterRevision: roster.revision}, roster.known
 }
 
 func (s *server) observeMetadataTopology(roster tmuxSessionRosterSnapshot) {
@@ -7444,6 +7456,157 @@ func (s *server) killSession(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "session": name})
 }
 
+func (s *server) renameSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	session := strings.TrimSpace(r.URL.Query().Get("session"))
+	if session == "" {
+		session = strings.TrimSpace(r.FormValue("session"))
+	}
+	newName := r.URL.Query().Get("new_name")
+	if newName == "" {
+		newName = r.FormValue("new_name")
+	}
+	newName = strings.NewReplacer(".", "_", ":", "_").Replace(strings.TrimSpace(newName))
+	writeRenameError := func(status int, key, fallback string, params map[string]any) {
+		jsonResponse(w, status, map[string]any{
+			"session": session, "new_name": newName,
+			"user_message": map[string]any{"key": key, "params": params, "fallback": fallback},
+		})
+	}
+	if session == "" {
+		writeRenameError(http.StatusBadRequest, "session.error.required", "session is required", map[string]any{})
+		return
+	}
+	if newName == "" {
+		writeRenameError(http.StatusBadRequest, "rename.error.required", "session name is required", map[string]any{})
+		return
+	}
+	if len(newName) > 64 {
+		writeRenameError(http.StatusBadRequest, "rename.error.tooLong", "session name must be 64 characters or fewer", map[string]any{})
+		return
+	}
+	for _, character := range newName {
+		if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == ' ' || character == '-' || character == '_') {
+			writeRenameError(http.StatusBadRequest, "rename.error.invalidChars", "session name may contain only letters, numbers, spaces, dot, dash, and underscore", map[string]any{})
+			return
+		}
+	}
+	// Keep roster reads serialized across the rename command and its confirming
+	// read. A publication revision alone cannot distinguish a read that happened
+	// before the command from a newer tmux state observed after it.
+	s.tmuxRosterFetchMu.Lock()
+	defer s.tmuxRosterFetchMu.Unlock()
+	roster, err := s.tmuxSessionRosterSnapshotLocked(true)
+	topology, err := s.tmuxTopologyFromRoster(roster, err)
+	if err != nil {
+		jsonResponse(w, http.StatusServiceUnavailable, typedError("session list unavailable", "common.requestFailed", true))
+		return
+	}
+	sourceIdentity := topology.identities[session]
+	if sourceIdentity == "" {
+		sourceIdentity = session
+	}
+	sourceRosterRevision := topology.rosterRevision
+	sessionFound := false
+	nameExists := false
+	for _, existing := range topology.sessions {
+		sessionFound = sessionFound || existing == session
+		nameExists = nameExists || existing == newName
+	}
+	if !sessionFound {
+		writeRenameError(http.StatusNotFound, "common.requestFailed", "unknown session", map[string]any{})
+		return
+	}
+	if newName == session {
+		jsonResponse(w, http.StatusOK, map[string]any{
+			"session": session, "new_session": newName, "renamed": false, "sessions": topology.sessions,
+			"topology_generation": topology.generation, "ok": true,
+		})
+		return
+	}
+	if nameExists {
+		writeRenameError(http.StatusConflict, "rename.error.exists", "session already exists: "+newName, map[string]any{"name": newName})
+		return
+	}
+	commandContext, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	output, err := s.tmuxCommandContext(commandContext, tmuxRenameCommandArgs(topology, session, newName)...).CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(output))
+		if message == "" {
+			message = err.Error()
+		}
+		writeRenameError(http.StatusInternalServerError, "status.sessionRenameFailed", "session rename failed: "+message, map[string]any{"error": message})
+		return
+	}
+	roster, refreshErr := s.tmuxSessionRosterSnapshotLocked(true)
+	topology, refreshErr = s.tmuxTopologyFromRoster(roster, refreshErr)
+	if refreshErr != nil {
+		slog.Warn("tmux topology refresh failed after session rename", "session", newName, "error", refreshErr)
+		cached := s.cachedTmuxSessionRosterSnapshot()
+		if cached.revision == sourceRosterRevision && tmuxSessionNameForIdentity(goTmuxTopology{identities: cached.identities}, sourceIdentity) == session {
+			s.publishTmuxSessionRenameAfterRosterFailureLocked(session, newName, cached)
+			topology, _ = s.tmuxTopologyFromRoster(s.cachedTmuxSessionRosterSnapshot(), nil)
+		}
+	}
+	currentName := tmuxSessionNameForIdentity(topology, sourceIdentity)
+	if currentName == "" {
+		writeRenameError(http.StatusConflict, "status.sessionRenameFailed", "session changed during rename; refresh and try again", map[string]any{"error": "renamed session is no longer present"})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"session": session, "new_session": currentName, "renamed": true, "sessions": topology.sessions,
+		"topology_generation": topology.generation, "ok": true,
+	})
+}
+
+func tmuxSessionNameForIdentity(topology goTmuxTopology, identity string) string {
+	for name, currentIdentity := range topology.identities {
+		if currentIdentity == identity {
+			return name
+		}
+	}
+	return ""
+}
+
+func tmuxRenameCommandArgs(topology goTmuxTopology, session, newName string) []string {
+	identity := strings.Fields(strings.NewReplacer("\x1f", "\t").Replace(topology.identities[session]))
+	if len(identity) == 3 && strings.HasPrefix(identity[0], "$") {
+		_, sessionIDErr := strconv.ParseUint(strings.TrimPrefix(identity[0], "$"), 10, 64)
+		_, createdErr := strconv.ParseUint(identity[1], 10, 64)
+		_, pidErr := strconv.ParseUint(identity[2], 10, 64)
+		if sessionIDErr == nil && createdErr == nil && pidErr == nil {
+			condition := fmt.Sprintf(
+				"#{&&:#{==:#{session_id},%s},#{&&:#{==:#{session_created},%s},#{==:#{pid},%s}}}",
+				identity[0], identity[1], identity[2],
+			)
+			command := "rename-session -t " + strconv.Quote("="+session+":") + " -- " + strconv.Quote(newName)
+			return []string{"if-shell", "-F", "-t", "=" + session + ":", condition, command, "run-shell \"exit 1\""}
+		}
+	}
+	return []string{"rename-session", "-t", "=" + session + ":", "--", newName}
+}
+
+func (s *server) publishTmuxSessionRenameAfterRosterFailureLocked(session, newName string, cached tmuxSessionRosterSnapshot) {
+	renamedSessions := make([]string, 0, len(cached.sessions))
+	renamedIdentities := make(map[string]string, len(cached.identities))
+	for _, existing := range cached.sessions {
+		if existing == session {
+			if identity := cached.identities[existing]; identity != "" {
+				renamedIdentities[newName] = identity
+			}
+			existing = newName
+		} else if identity := cached.identities[existing]; identity != "" {
+			renamedIdentities[existing] = identity
+		}
+		renamedSessions = append(renamedSessions, existing)
+	}
+	s.rememberTmuxSessionRoster(renamedSessions, renamedIdentities)
+}
+
 func (s *server) index(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -7521,7 +7684,7 @@ func (s *server) cachedTmuxSessionRosterSnapshot() tmuxSessionRosterSnapshot {
 		identities[session] = id
 	}
 	return tmuxSessionRosterSnapshot{
-		sessions: append([]string(nil), s.tmuxRoster...), identities: identities, known: s.tmuxRosterKnown,
+		sessions: append([]string(nil), s.tmuxRoster...), identities: identities, known: s.tmuxRosterKnown, revision: s.tmuxRosterRevision,
 	}
 }
 
@@ -7545,6 +7708,7 @@ func (s *server) rememberTmuxSessionRoster(sessions []string, identities map[str
 		s.tmuxRosterIdentities[session] = identity
 	}
 	s.tmuxRosterKnown = true
+	s.tmuxRosterRevision++
 	s.tmuxRosterSampledAt = time.Now()
 	s.tmuxRosterMu.Unlock()
 }
@@ -7557,6 +7721,10 @@ func (s *server) tmuxSessionRoster() ([]string, error) {
 func (s *server) tmuxSessionRosterSnapshot(forceFresh bool) (tmuxSessionRosterSnapshot, error) {
 	s.tmuxRosterFetchMu.Lock()
 	defer s.tmuxRosterFetchMu.Unlock()
+	return s.tmuxSessionRosterSnapshotLocked(forceFresh)
+}
+
+func (s *server) tmuxSessionRosterSnapshotLocked(forceFresh bool) (tmuxSessionRosterSnapshot, error) {
 	if s.tmuxSessionRosterFn != nil {
 		sessions, err := s.tmuxSessionRosterFn()
 		if err == nil {
@@ -7569,7 +7737,7 @@ func (s *server) tmuxSessionRosterSnapshot(forceFresh bool) (tmuxSessionRosterSn
 	s.tmuxRosterMu.RLock()
 	if !forceFresh && s.tmuxRosterKnown && !s.tmuxRosterSampledAt.IsZero() && time.Since(s.tmuxRosterSampledAt) < goProcessMetricsCacheTTL {
 		roster := tmuxSessionRosterSnapshot{
-			sessions: append([]string(nil), s.tmuxRoster...), identities: make(map[string]string, len(s.tmuxRosterIdentities)), known: true,
+			sessions: append([]string(nil), s.tmuxRoster...), identities: make(map[string]string, len(s.tmuxRosterIdentities)), known: true, revision: s.tmuxRosterRevision,
 		}
 		for session, id := range s.tmuxRosterIdentities {
 			roster.identities[session] = id

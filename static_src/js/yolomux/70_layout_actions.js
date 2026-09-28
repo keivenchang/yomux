@@ -2382,12 +2382,19 @@ function replaceSessionMetadata(oldSession, newSession) {
 }
 
 function replaceTmuxSessionInClient(oldSession, newSession, nextSessions, options = {}) {
-  clearPendingTmuxSession(oldSession);
-  markPendingTmuxSession(newSession);
+  // A concurrent rename may return to the original name; preserve keyed state
+  // but still apply the layout so its mutation-completion receipt is consumed.
+  const sameSession = oldSession === newSession;
+  if (!sameSession) {
+    clearPendingTmuxSession(oldSession);
+    markPendingTmuxSession(newSession);
+  }
   const next = normalizedSessionOrder(nextSessions) || sessions.map(item => item === oldSession ? newSession : item);
-  moveUploadResultRecord(oldSession, newSession);
-  detachSessionUi(oldSession);
-  replaceSessionMetadata(oldSession, newSession);
+  if (!sameSession) {
+    moveUploadResultRecord(oldSession, newSession);
+    detachSessionUi(oldSession);
+    replaceSessionMetadata(oldSession, newSession);
+  }
   setSessionOrder(next);
   if (focusedTerminal === oldSession) focusedTerminal = newSession;
   if (focusedPanelItem === oldSession) focusedPanelItem = newSession;
@@ -2500,7 +2507,14 @@ async function renameTmuxSession(session, proposedName) {
     const mutation = await runTmuxSessionMutation(
       'rename',
       {session, newName},
-      () => apiFetchJson(`/api/rename-session?session=${encodeURIComponent(session)}&new_name=${encodeURIComponent(newName)}`, {method: 'POST', lifecycleBypass: true}),
+      async () => {
+        const payload = await apiFetchJson(`/api/rename-session?session=${encodeURIComponent(session)}&new_name=${encodeURIComponent(newName)}`, {method: 'POST', lifecycleBypass: true});
+        const renamed = payload.new_session || newName;
+        if (Array.isArray(payload.sessions) && !payload.sessions.includes(renamed)) {
+          throw new Error(`renamed session ${renamed} is missing from the authoritative tmux roster`);
+        }
+        return payload;
+      },
       async payload => {
         const renamed = payload.new_session || newName;
         adoptTopologyGeneration(payload);

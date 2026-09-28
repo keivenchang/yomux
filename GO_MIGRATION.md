@@ -97,8 +97,6 @@ The current catalog marks these pane capabilities unavailable:
 
 * `pane.agent.v1`
 
-There is one known catalog/handler mismatch: `session.rename.v1` is marked available, but the Go server does not register `/api/rename-session`. A stale client reaches the generic typed `501 feature_unavailable` handler. Until the implementation or catalog is corrected, documentation and UI code must not claim that Go session rename works.
-
 Any unregistered `/api/*` request receives HTTP `501` with `error: feature_unavailable` and the mapped capability name. Unsupported product code must not silently return an empty Python-shaped payload.
 
 ## Registered Go Routes
@@ -127,7 +125,7 @@ The following routes have concrete handlers in `cmd/yolomux-go`.
 
 * `/api/session-metadata`, `/api/activity`
 
-* `/api/ensure-session`, `/api/create-session-plan`, `/api/create-session`, `/api/kill-session`
+* `/api/ensure-session`, `/api/create-session-plan`, `/api/create-session`, `/api/rename-session`, `/api/kill-session`
 
 * `/api/transcripts`, `/api/transcript`, `/api/context`, `/api/context-items`, `/api/context-stream`
 
@@ -243,8 +241,6 @@ The wrapper accepts an optional positive integer `--jobs`; when the flag is omit
 ## Remaining Gaps
 
 * YO!chat and YO!agent remain Python-only; Go now serves the global tmux roster/activity API used by Tabber.
-
-* The Go catalog currently overstates session rename, as described above.
 
 * Python self-update/restart and several Python diagnostic/automation routes are not implemented in Go.
 

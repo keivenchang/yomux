@@ -66,8 +66,8 @@ def test_generated_static_assets_are_current():
 
 
 def test_application_bundles_are_ignored_and_untracked():
-    for asset in ("yolomux.css", "yolomux.js"):
-        relative_path = f"static/{asset}"
+    generated_paths = ("static/yolomux.css", "static/yolomux.js", "yolomux-go")
+    for relative_path in generated_paths:
         tracked = subprocess.run(
             ["git", "ls-files", "--error-unmatch", "--", relative_path],
             cwd=sb.REPO_ROOT,

@@ -6,6 +6,7 @@ __pycache__/
 node_modules/
 bazel-*
 /instance.lock
+/yolomux-go
 /static/yolomux.css
 /static/yolomux.js
 
