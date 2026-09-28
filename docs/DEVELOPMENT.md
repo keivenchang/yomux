@@ -30,7 +30,7 @@ Run `python3 tools/check.py --lane bazel-go` for validation. `tools/run_bazel_te
 
 ## Local servers
 
-After a change, restart the active development server before reporting it ready. Start Python with `python3 yolomux.py --host 0.0.0.0 --port <port> --dang --dev`, or start Go with `./boot.sh --golang <port>` after building it. The `yolo-dev-start` workflow owns configured numbered checkouts; use it when restarting one of those stacks.
+After a change, restart the active development server before reporting it ready. `./boot.sh <port>` starts Go by default after the Bazel binary is built. Use `./boot.sh --deprecated-python <port>` only when validating the legacy Python backend. The `yolo-dev-start` workflow owns configured numbered checkouts; use it when restarting one of those stacks.
 
 Port 7220 is the operator runtime. Port 7221 is reserved for a manual Go preview. Automated tests must use fixture-owned ports. Restart production only when explicitly requested.
 

@@ -48,8 +48,9 @@ import (
 	"github.com/keivenchang/yolomux/internal/work"
 )
 
-const version = "0.9.3"
+const version = "0.9.4"
 const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+const maxYolomuxSessionTabs = 99
 
 func goRuntimeLabel() string {
 	return fmt.Sprintf("Go %s %s/%s", strings.TrimPrefix(runtime.Version(), "go"), runtime.GOOS, runtime.GOARCH)
@@ -7231,14 +7232,46 @@ func (s *server) createSession(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		name = r.FormValue("session")
 	}
+	hasRequestedName := name != ""
+	roster, err := s.tmuxSessionRosterSnapshot(true)
+	if err != nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "tmux session roster is unavailable"})
+		return
+	}
+	if len(roster.sessions) >= maxYolomuxSessionTabs {
+		jsonResponse(w, http.StatusConflict, map[string]any{
+			"ok": false, "error": "maximum session tabs reached: 99",
+		})
+		return
+	}
+	nextName := nextNumberedSessionName(roster.sessions)
+	if nextName == "" {
+		jsonResponse(w, http.StatusConflict, map[string]any{
+			"ok": false, "error": "no available numbered session names from 1 to 99",
+		})
+		return
+	}
 	if name == "" {
-		name = "yo-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		name = nextName
+	} else if name != nextName {
+		jsonResponse(w, http.StatusConflict, map[string]any{
+			"ok": false, "error": "create-session lifecycle reservation no longer matches the next available name",
+		})
+		return
 	}
 	generation := int64(0)
 	if rawGeneration := strings.TrimSpace(r.URL.Query().Get("generation")); rawGeneration != "" {
 		generation, err = strconv.ParseInt(rawGeneration, 10, 64)
 		if err != nil || generation < 0 {
 			jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "generation must be a non-negative integer"})
+			return
+		}
+	}
+	if hasRequestedName {
+		if generation <= 0 {
+			jsonResponse(w, http.StatusConflict, map[string]any{
+				"ok": false, "error": "create-session lifecycle reservation no longer matches the next available name",
+			})
 			return
 		}
 	}
@@ -7309,11 +7342,46 @@ func (s *server) createSessionPlan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	name := "yo-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	name, err := s.nextAvailableSessionName()
+	if err != nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "tmux session roster is unavailable"})
+		return
+	}
+	if name == "" {
+		jsonResponse(w, http.StatusConflict, map[string]any{
+			"ok": false, "error": "no available numbered session names from 1 to 99",
+		})
+		return
+	}
 	generation := s.nextSessionPlanGeneration()
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"ok": true, "session": name, "generation": generation, "backend": "go",
 	})
+}
+
+func (s *server) nextAvailableSessionName() (string, error) {
+	roster, err := s.tmuxSessionRosterSnapshot(true)
+	if err != nil {
+		return "", err
+	}
+	return nextNumberedSessionName(roster.sessions), nil
+}
+
+func nextNumberedSessionName(existing []string) string {
+	if len(existing) >= maxYolomuxSessionTabs {
+		return ""
+	}
+	present := make(map[string]struct{}, len(existing))
+	for _, session := range existing {
+		present[session] = struct{}{}
+	}
+	for number := 1; number <= maxYolomuxSessionTabs; number++ {
+		name := strconv.Itoa(number)
+		if _, exists := present[name]; !exists {
+			return name
+		}
+	}
+	return ""
 }
 
 // settings delegates persistence to the repository's Python settings owner. Keeping one owner for

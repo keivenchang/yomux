@@ -595,10 +595,14 @@ exec /bin/sleep 300
                     (async () => {
                       try {
                         const launches = [];
-                        for (const item of cases) {
+                        for (const [index, item] of cases.entries()) {
                           const plan = await json('/api/create-session-plan');
                           if (plan.status !== 200 || !Number.isSafeInteger(Number(plan.body?.generation))) {
                             throw new Error(`unsafe create-session plan: ${JSON.stringify(plan)}`);
+                          }
+                          const expectedSession = String(index + 1);
+                          if (plan.body?.session !== expectedSession) {
+                            throw new Error(`Go create-session plan chose ${JSON.stringify(plan.body?.session)}, want ${expectedSession}`);
                           }
                           const params = new URLSearchParams({
                             agent: item.agent,

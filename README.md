@@ -22,14 +22,16 @@ Contributor and build instructions live in [`docs/DEVELOPMENT.md`](docs/DEVELOPM
 
 ## Quickstart
 
-Existing Python installation launch: HTTPS, login-gated, all tmux sessions visible, and YOLO-enabled for new Claude/Codex sessions created from the UI. Python is scheduled for deprecation; check the Go capability list before migrating an installation.
+The managed launcher uses Go by default. Python remains available with `--deprecated-python` while its remaining capabilities are migrated.
 
 ```bash
 git clone https://github.com/keivenchang/yolomux.git
 cd yolomux
 make setup          # pip install -e ".[yoagent]" + build the bundle  (run `make help` for more)
+bazel --bazelrc=/dev/null build --jobs=auto //cmd/yolomux-go:yolomux_go
 tmux new-session -A -s project1     # optional: create one if you do not already have tmux sessions
-python3 yolomux.py --dang   # or: make run
+./boot.sh 9998
+# Legacy backend: ./boot.sh --deprecated-python 9998
 ```
 
 `make setup` checks for Python 3.10+ before doing any build work, then pip automatically installs every runtime dependency, including the native `watchfiles` filesystem-event backend. On an externally managed system Python (PEP 668), create and activate a virtualenv first (`python3 -m venv .venv && . .venv/bin/activate`), then `make setup`. Setup generates the ignored `static/yolomux.js` and `static/yolomux.css` bundles from `static_src/`; they are recreated when missing or stale. The runtime serves the tracked xterm files under `static/vendor/`, so npm is not needed to start YOLOmux. Contributors can run `make xterm` to install the pinned upstream packages and verify that their bytes still match the tracked files. The Python wheel does not currently package these static assets.
@@ -48,14 +50,14 @@ Build, validate, and then start the preview:
 make setup
 bazel --bazelrc=/dev/null build --jobs=auto //cmd/yolomux-go:yolomux_go
 tools/run_bazel_tests.sh --jobs "$(getconf _NPROCESSORS_ONLN)"
-YOLOMUX_START_LOAD_WAIT_SECONDS=30 ./boot.sh --golang 7221
+YOLOMUX_START_LOAD_WAIT_SECONDS=30 ./boot.sh 7221
 ```
 
-`boot.sh --golang` discovers `bazel-bin/cmd/yolomux-go/yolomux_go_/yolomux_go` and binds `0.0.0.0` unless `--host` or `YOLOMUX_HOST` says otherwise. The Python launch remains `python3 yolomux.py --dang` or `make run`; no backend flag is needed for Python. Use `boot.sh` (or `make run`/`yolo-dev-start`) for the managed operator lifecycle; direct Python and Go entrypoints still apply the same machine-wide tmux routing, but do not provide the managed restart and ownership checks.
+`boot.sh` defaults to Go, discovers `bazel-bin/cmd/yolomux-go/yolomux_go_/yolomux_go`, and binds `0.0.0.0` unless `--host` or `YOLOMUX_HOST` says otherwise. `--golang` and `--backend go` remain Go aliases. Select the legacy Python server with `boot.sh --deprecated-python`; `--backend python` is rejected so Python has one explicit managed opt-in. Use `boot.sh` (or `make run`/`yolo-dev-start`) for the managed operator lifecycle; direct Python and Go entrypoints still apply the same machine-wide tmux routing, but do not provide the managed restart and ownership checks.
 
 All YOLOmux operator launches (`boot.sh`, `make run`, `yolo-dev-start`, the installed `yolomux` command, direct `python3 yolomux.py`, the Go binary, and the tmux companion tools) use the same global tmux server as `tmux list-sessions` for the launching Unix user. Here, “global” means that user's default server: every session on that roster is eligible for discovery, regardless of which checkout created it; separately named `tmux -L`/`-S` servers are independent and are not merged into one roster. For normal operator launches, an explicit `--sessions` filter is the only YOLOmux narrowing option. Managed launchers clear inherited `YOLOMUX_TMUX_SOCKET`, `TMUX`, and `TMUX_PANE`, so starting YOLOmux from inside another tmux client cannot silently select that client's server. Direct entrypoints preserve a nonempty `YOLOMUX_TMUX_SOCKET` only when an isolated test or fixture explicitly supplies it; otherwise they apply the same global-server normalization. A different Unix user's tmux server is outside the user's permissions and is not implicitly merged. On macOS, `yolomux-services` is only the private supervisor socket for the wrapper; the YOLOmux process inside it still uses the global server.
 
-The Go process generates and reuses its own self-signed certificate under `${TMPDIR:-/tmp}/yolomux-go-tls-<port>/`; it does not reuse Python's state-root certificate or local-CA helper. The managed launcher forwards host, port, checkout root, environment-selected config/state, and `--dang` as Go's `--dangerously-yolo`; Python-only `--cert`, `--key`, `--http`, and `--dev` semantics still do not carry over. Direct Go flags exist for fixtures and diagnostics, but operator starts should keep the managed `boot.sh --golang` lifecycle.
+The Go process generates and reuses its own self-signed certificate under `${TMPDIR:-/tmp}/yolomux-go-tls-<port>/`; it does not reuse Python's state-root certificate or local-CA helper. The managed launcher forwards host, port, checkout root, environment-selected config/state, and `--dang` as Go's `--dangerously-yolo`; Python-only `--cert`, `--key`, `--http`, and `--dev` semantics still do not carry over. Direct Go flags exist for fixtures and diagnostics, but operator starts should keep the managed `boot.sh` lifecycle.
 
 Automated Go validation runs inside isolated Docker state with fixture-owned test ports and Chromium. Port 7221 is reserved for a manual smoke after those checks. Automated checks never connect to the operator runtime on port 7220; use the managed operator workflow for an explicitly requested live restart or smoke.
 
@@ -71,7 +73,7 @@ The Python and Go servers share the browser bundle and selected browser contract
 
 | Area | Legacy Python backend | Go backend |
 | --- | --- | --- |
-| Entry point | `python3 yolomux.py` | `./boot.sh --golang <port>` -> `python3 yolomux.py --backend go` -> `exec` of the Bazel-built binary |
+| Entry point | `./boot.sh --deprecated-python <port>` | `./boot.sh <port>` -> `python3 yolomux.py --backend go` -> `exec` of the Bazel-built binary |
 | Process shape | One web process per port plus same-host Unix RPC services | One Go process with bounded in-process schedulers |
 | Finder/Differ | Python filesystem adapters plus `indexd`, `watchd`, and `batchd` ownership where applicable | `internal/finder`, `cmd/yolomux-go/finder_jobs.go`, and `cmd/yolomux-go/differ_routes.go` |
 | YO!stats | Web collector clients plus `statsd` as the sole database writer/materializer | Direct `internal/stats` ownership of `stats-v9.sqlite3` and in-process collectors/materializers |
@@ -337,7 +339,7 @@ To add a read-only guest account, uncomment (or add) a `readonly` entry:
 
 YOLOmux is not a shared-state cluster. The safe current shape is one independent YOLOmux deployment per machine, with each machine using local configuration, state, cache, tmux, sockets, databases, and writable worktrees. A mounted home may supply read-only source or transcript files, but two hosts must not use one shared `YOLOMUX_STATE_DIR`, one writable worktree, or concurrently writable configuration files.
 
-The detailed variables and support matrix below describe the legacy Python backend. Go has no Python service/runtime/cache topology and does not implement the legacy backend's complete host-partition and network-filesystem preflight. Give each Go process private host-local `YOLOMUX_CONFIG_DIR` and `YOLOMUX_STATE_DIR` roots through `boot.sh --golang`; do not share its config-rooted journals, background-owner records, auth material, or default stats database between hosts.
+The detailed variables and support matrix below describe the legacy Python backend. Go has no Python service/runtime/cache topology and does not implement the legacy backend's complete host-partition and network-filesystem preflight. Give each Go process private host-local `YOLOMUX_CONFIG_DIR` and `YOLOMUX_STATE_DIR` roots through `boot.sh`; do not share its config-rooted journals, background-owner records, auth material, or default stats database between hosts.
 
 ### Safe launch shape
 
@@ -624,7 +626,7 @@ The optional `risk:` field is a label shown in the YOLO event log. Keep it to th
 
 ## Remote access
 
-Python and `boot.sh --golang` bind `--host 0.0.0.0` (all interfaces) by default, on purpose: the product is built for reaching your sessions from a phone or another machine on a trusted LAN, and every product request is gated by the login layer. The Go binary itself defaults to `127.0.0.1` when run directly. If you use the managed all-interface launch, restrict the port to trusted IPs at the firewall:
+The managed Go launcher and the legacy Python backend bind `--host 0.0.0.0` (all interfaces) by default: YOLOmux supports reaching sessions from another machine on a trusted LAN, and every product request is gated by login. The Go binary itself defaults to `127.0.0.1` when run directly. If you use the managed all-interface launch, restrict the port to trusted IPs at the firewall:
 
 For Go, this firewall/tunnel boundary is required rather than optional hardening because login throttling is not yet at legacy Python parity.
 
