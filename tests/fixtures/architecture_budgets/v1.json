@@ -25,7 +25,7 @@
       "self_fields": 34
     },
     "yolomux_lib/server.py:Handler": {
-      "methods": 96,
+      "methods": 97,
       "self_fields": 22
     },
     "yolomux_lib/stats_current/service.py:StatsCurrentService": {
@@ -176,14 +176,14 @@
     "static_src/css/yolomux/60_editor_file_panels.css": 3618,
     "static_src/js/yolomux/10_core_utils.js": 7688,
     "static_src/js/yolomux/20_layout_state.js": 7293,
-    "static_src/js/yolomux/40_file_explorer_files.js": 6324,
+    "static_src/js/yolomux/40_file_explorer_files.js": 6340,
     "static_src/js/yolomux/85_debug_panel.js": 8258,
     "static_src/js/yolomux/99_terminal_boot.js": 7261,
     "yolomux_lib/app.py": 18605,
     "yolomux_lib/infra/listener_census.py": 656,
     "yolomux_lib/infra/state_services.py": 1220,
     "yolomux_lib/search/file_index.py": 5034,
-    "yolomux_lib/server.py": 3719,
+    "yolomux_lib/server.py": 3802,
     "yolomux_lib/stats_current/service.py": 5915,
     "yolomux_lib/workspace/session_files.py": 4572
   },
@@ -1457,87 +1457,87 @@
     },
     {
       "count": 1,
-      "name": "changesFolderCollapsed",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/86_changes_editor.js"
-    },
-    {
-      "count": 2,
-      "name": "changesRepoCollapsed",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/86_changes_editor.js"
-    },
-    {
-      "count": 1,
-      "name": "collapsedPreferenceSections",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/86_changes_editor.js"
-    },
-    {
-      "count": 1,
       "name": "diffRefFrom",
       "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/86_changes_editor.js"
+      "writer": "static_src/js/yolomux/86_changes_00_refs.js"
     },
     {
       "count": 1,
       "name": "diffRefTo",
       "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/86_changes_editor.js"
+      "writer": "static_src/js/yolomux/86_changes_00_refs.js"
     },
     {
       "count": 1,
-      "name": "editorPreviewFontSize",
+      "name": "changesFolderCollapsed",
       "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/86_changes_editor.js"
+      "writer": "static_src/js/yolomux/86_changes_10_session_files.js"
+    },
+    {
+      "count": 2,
+      "name": "changesRepoCollapsed",
+      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yolomux/86_changes_10_session_files.js"
     },
     {
       "count": 2,
       "name": "fileExplorerChangesSelectedSession",
       "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/86_changes_editor.js"
+      "writer": "static_src/js/yolomux/86_changes_10_session_files.js"
     },
     {
       "count": 1,
       "name": "fileExplorerFinderSelectedSession",
       "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/86_changes_editor.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerMode",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/86_changes_editor.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerSelectionLead",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/86_changes_editor.js"
-    },
-    {
-      "count": 1,
-      "name": "globalThemeMode",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/86_changes_editor.js"
-    },
-    {
-      "count": 1,
-      "name": "preferencesResetConfirmVisible",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/86_changes_editor.js"
-    },
-    {
-      "count": 1,
-      "name": "preferencesSearchText",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/86_changes_editor.js"
+      "writer": "static_src/js/yolomux/86_changes_10_session_files.js"
     },
     {
       "count": 1,
       "name": "repoRoot",
       "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/86_changes_editor.js"
+      "writer": "static_src/js/yolomux/86_changes_10_session_files.js"
+    },
+    {
+      "count": 1,
+      "name": "fileExplorerMode",
+      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yolomux/86_changes_20_differ.js"
+    },
+    {
+      "count": 1,
+      "name": "fileExplorerSelectionLead",
+      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yolomux/86_changes_20_differ.js"
+    },
+    {
+      "count": 1,
+      "name": "collapsedPreferenceSections",
+      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yolomux/86_changes_30_preferences.js"
+    },
+    {
+      "count": 1,
+      "name": "editorPreviewFontSize",
+      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yolomux/86_changes_30_preferences.js"
+    },
+    {
+      "count": 1,
+      "name": "globalThemeMode",
+      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yolomux/86_changes_30_preferences.js"
+    },
+    {
+      "count": 1,
+      "name": "preferencesResetConfirmVisible",
+      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yolomux/86_changes_30_preferences.js"
+    },
+    {
+      "count": 1,
+      "name": "preferencesSearchText",
+      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yolomux/86_changes_30_preferences.js"
     },
     {
       "count": 2,
@@ -2056,22 +2056,23 @@
     "tests/backend_health_indicator.test.js": 447,
     "tests/browser_helpers/cross_surface_quick_open_suite.js": 86,
     "tests/browser_helpers/editor_preview_info_graph_suite.js": 72,
-    "tests/browser_helpers/editor_preview_suite.js": 9761,
+    "tests/browser_helpers/editor_preview_suite.js": 9817,
     "tests/cross_surface_state.test.js": 6471,
     "tests/diagnostic_redaction.test.js": 146,
     "tests/drop_action_result.test.js": 58,
     "tests/editor_preview_core.test.js": 263,
-    "tests/editor_preview_prosemirror.test.js": 138,
+    "tests/editor_preview_prosemirror.test.js": 143,
     "tests/editor_preview_settings.test.js": 4,
     "tests/editor_preview_tmux.test.js": 4,
     "tests/file_surface_menu.test.js": 150,
+    "tests/git_diff_history_async.test.js": 912,
     "tests/helpers/fixture_http_server.py": 161,
     "tests/i18n_locale_registry.test.js": 270,
     "tests/i18n_structured_message.test.js": 267,
-    "tests/layout_async.test.js": 11861,
-    "tests/layout_restore.test.js": 5229,
+    "tests/layout_async.test.js": 11815,
+    "tests/layout_restore.test.js": 5240,
     "tests/open_file_413_reason.test.js": 154,
-    "tests/open_file_missing_guard.test.js": 368,
+    "tests/open_file_missing_guard.test.js": 550,
     "tests/operation_receipt_repair.test.js": 148,
     "tests/side_panes.test.js": 737,
     "tests/stats_current_panel.test.js": 4833,
@@ -2090,7 +2091,7 @@
     "tests/test_agent_status_docker.py": 1161,
     "tests/test_agent_tui.py": 978,
     "tests/test_api_response_parent.py": 1117,
-    "tests/test_app.py": 19686,
+    "tests/test_app.py": 19689,
     "tests/test_approvald.py": 254,
     "tests/test_architecture_budgets.py": 346,
     "tests/test_atomic_file.py": 16,
@@ -2113,21 +2114,21 @@
     "tests/test_batchd_failure_isolation.py": 346,
     "tests/test_bfs_index.py": 1294,
     "tests/test_boot_healthz_probe.py": 397,
-    "tests/test_browser_boot.py": 1364,
+    "tests/test_browser_boot.py": 1371,
     "tests/test_browser_daemons_theme.py": 151,
-    "tests/test_browser_dockview.py": 9936,
-    "tests/test_browser_editor.py": 7864,
-    "tests/test_browser_finder.py": 5065,
+    "tests/test_browser_dockview.py": 9943,
+    "tests/test_browser_editor.py": 7957,
+    "tests/test_browser_finder.py": 5155,
     "tests/test_browser_finder_fs_repro.py": 46,
     "tests/test_browser_golden.py": 78,
-    "tests/test_browser_layout.py": 17792,
+    "tests/test_browser_layout.py": 17796,
     "tests/test_browser_ring_landing_verify.py": 1339,
     "tests/test_browser_stats_coverage.py": 870,
     "tests/test_browser_stats_widen.py": 3032,
     "tests/test_cache.py": 39,
     "tests/test_chat_service.py": 214,
     "tests/test_chat_store.py": 916,
-    "tests/test_check_runner.py": 4128,
+    "tests/test_check_runner.py": 4139,
     "tests/test_claude_permission_hook.py": 149,
     "tests/test_client_event_broker_backlog_disambiguation.py": 955,
     "tests/test_client_events.py": 426,
@@ -2135,9 +2136,9 @@
     "tests/test_control.py": 236,
     "tests/test_cross_layer_matrix.py": 146,
     "tests/test_defect2_harness.py": 551,
-    "tests/test_dev_restart_script.py": 876,
+    "tests/test_dev_restart_script.py": 901,
     "tests/test_diagnostic_redaction.py": 1018,
-    "tests/test_docker_image.py": 68,
+    "tests/test_docker_image.py": 83,
     "tests/test_drop_actions.py": 160,
     "tests/test_e2e_api_errors.py": 490,
     "tests/test_e2e_auto_approve.py": 405,
@@ -2147,7 +2148,7 @@
     "tests/test_events_state.py": 42,
     "tests/test_fake_llm_server.py": 89,
     "tests/test_file_index.py": 1280,
-    "tests/test_filesystem.py": 5206,
+    "tests/test_filesystem.py": 5441,
     "tests/test_filesystem_access_policy.py": 368,
     "tests/test_filesystem_authorize_repoint.py": 1777,
     "tests/test_filesystem_delete_cooperation.py": 244,
@@ -2173,7 +2174,7 @@
     "tests/test_gate_cross_host_views.py": 213,
     "tests/test_gate_daemon_monitor_acceptance.py": 451,
     "tests/test_gate_daemon_monitor_statsd_recovery.py": 295,
-    "tests/test_gate_differ.py": 1557,
+    "tests/test_gate_differ.py": 1678,
     "tests/test_gate_editor.py": 948,
     "tests/test_gate_f8_harness.py": 896,
     "tests/test_gate_finder.py": 1134,
@@ -2262,7 +2263,7 @@
     "tests/test_search_progress_notifier_isolation.py": 143,
     "tests/test_server_lease.py": 464,
     "tests/test_server_logs.py": 125,
-    "tests/test_server_query.py": 3178,
+    "tests/test_server_query.py": 3255,
     "tests/test_server_static.py": 329,
     "tests/test_service_failure_matrix.py": 256,
     "tests/test_session_actions.py": 406,

@@ -1,9 +1,9 @@
 """Breadth-first, directory-at-a-time Quick Open index builder.
 
-This module implements the traversal mechanism required by
-``docs/specs/FS_INTERACTIVITY.md``: a bounded, typed, generation-fenced
-breadth-first frontier and a scanner that lists exactly one directory per work
-item and never recurses. It is NOT a second daemon or a second SQLite writer.
+This module implements a bounded, typed, generation-fenced breadth-first
+frontier. It lists exactly one directory per work item and never recurses. It
+is not a second daemon or a second SQLite writer. Its traversal contract is
+covered by ``tests/test_search_indexer_bfs_cutover.py``.
 The one existing owner (``search_indexer.py::PersistentSearchIndexer`` running as
 ``indexd``) drives it, and every write goes through the same
 ``file_index._connect_sqlite_index`` / ``file_index._ensure_sqlite_schema``

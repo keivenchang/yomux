@@ -13,6 +13,8 @@ const {
   assertNoStandalonePrBadge,
   assertSingleCiBadge,
   deferredFetch, apiTransportRetirementScenario,
+  sseFrame,
+  controllableSseResponse,
   settingsOverride,
   loadYolomux,
   fileExplorerClosedOptions,
@@ -63,62 +65,6 @@ function ambientDateStamp() {
   return `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`;
 }
 
-function sseFrame(event, payload) {
-  return `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
-}
-
-function controllableSseResponse() {
-  const reads = [];
-  const queued = [];
-  let cancelled = false;
-  let closed = false;
-  const settleRead = () => {
-    if (!reads.length) return;
-    if (queued.length) reads.shift()({done: false, value: queued.shift()});
-    else if (closed) reads.shift()({done: true});
-  };
-  const response = {
-    ok: true,
-    status: 200,
-    statusText: 'OK',
-    body: {
-      getReader() {
-        return {
-          read() {
-            if (queued.length) return Promise.resolve({done: false, value: queued.shift()});
-            if (closed) return Promise.resolve({done: true});
-            return new Promise(resolve => reads.push(resolve));
-          },
-          cancel() {
-            cancelled = true;
-            closed = true;
-            queued.length = 0;
-            while (reads.length) reads.shift()({done: true});
-            return Promise.resolve();
-          },
-        };
-      },
-    },
-  };
-  return {
-    response,
-    push(text) {
-      queued.push(new TextEncoder().encode(text));
-      settleRead();
-    },
-    close() {
-      closed = true;
-      while (reads.length) reads.shift()({done: true});
-    },
-    bindSignal(signal) {
-      signal?.addEventListener?.('abort', () => {
-        cancelled = true;
-      }, {once: true});
-    },
-    cancelled() { return cancelled; },
-  };
-}
-
 function summarizedHangingShard(closeOnSignal) {
   const signals = [];
   const child = new EventEmitter();
@@ -134,6 +80,54 @@ function summarizedHangingShard(closeOnSignal) {
 }
 
 async function runLayoutAsyncSuite() {
+  await testAsync('ordinary foreground session-files fetch applies its accepted payload', async () => {
+    const api = loadYolomux('', ['1']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
+    slots.left = api.paneStateWithTabs([api.finderItemId, api.differItemId], api.differItemId);
+    slots.right = api.paneStateWithTabs(['1'], '1');
+    api.setLayoutSlotsForTest(slots);
+    api.setFileExplorerModeForTest('diff');
+    api.setFileExplorerChangesSelectedSessionForTest('1');
+    api.setFetchForTest(() => Promise.resolve(jsonResponse({
+      session: '1', loaded: true, repos: [{repo: '/foreground', count: 1}],
+      files: [{session: '1', repo: '/foreground', path: 'result.py', abs_path: '/foreground/result.py', status: 'M'}],
+      errors: [],
+    })));
+
+    await api.fetchSessionFilesForTest({destination: 'differ', session: '1'});
+
+    assert.equal(api.sessionFilesPayloadForTest().repos[0].repo, '/foreground', 'a foreground response replaces the Differ payload');
+    assert.equal(api.sessionFilesPayloadForTest().files[0].path, 'result.py', 'the accepted file rows remain available to the renderer');
+  });
+
+  await testAsync('identical cache-only session-files responses settle loading without replacing canonical payload', async () => {
+    const api = loadYolomux('', ['1']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
+    slots.left = api.paneStateWithTabs([api.finderItemId, api.differItemId], api.differItemId);
+    slots.right = api.paneStateWithTabs(['1'], '1');
+    api.setLayoutSlotsForTest(slots);
+    api.setFileExplorerModeForTest('diff');
+    api.setFileExplorerChangesSelectedSessionForTest('1');
+    const payload = {
+      session: '1', loaded: true, repos: [{repo: '/same', count: 1}],
+      files: [{session: '1', repo: '/same', path: 'same.py', abs_path: '/same/same.py', status: 'M'}],
+      errors: [], from_ref: 'HEAD', to_ref: 'current',
+    };
+    assert.equal(api.applySessionFilesPayloadFromPushForTest(payload,
+      {session: '1', hours: 24, from_ref: 'HEAD', to_ref: 'current'}), true,
+    'the ready payload establishes the canonical signature');
+    const canonicalPayload = api.sessionFilesPayloadForTest();
+    api.setFetchForTest(() => Promise.resolve(jsonResponse(payload)));
+
+    await api.fetchSessionFilesForTest({destination: 'differ', session: '1', silent: true, cacheOnly: true});
+
+    assert.strictEqual(api.sessionFilesPayloadForTest(), canonicalPayload,
+      'an identical cache-only revalidation settles loading without replacing canonical payload');
+    assert.equal(api.fileExplorerSessionFilesStateForTest().loading, false, 'the cache-only response still settles the loading state');
+  });
+
   test('Quick Open SSE parser accepts split event frames and joins data lines', () => {
     const api = loadYolomux('', ['1']);
     const events = [];
@@ -379,6 +373,52 @@ async function runLayoutAsyncSuite() {
     assert.doesNotMatch(css, /\.git-diff-worktree-entries\s*\{[^}]*overflow:\s*auto/, 'dirty file details are not independently scrollable');
   });
 
+  await testAsync('Git stats chunks patch only changed commit rows', async () => {
+    const api = loadYolomux('', ['1']);
+    const item = api.gitDiffItemFor('/repo');
+    const commits = Array.from({length: 6}, (_, index) => ({
+      sha: String(index + 1).padStart(40, '0'),
+      short: String(index + 1).padStart(9, '0'),
+      subject: `commit ${index + 1}`,
+      authored_at: 1_700_000_000 + index,
+    }));
+    const state = api.setGitDiffTabStateForTest(item, {
+      path: '/repo', repo: '/repo', shallowBoundary: 'complete', head: 'f'.repeat(40), commits,
+      visibleCommitCount: commits.length, loaded: true, loadAttempted: true,
+    });
+    const expandedSha = commits[5].sha;
+    state.expanded.add(expandedSha);
+    const expandedDetail = {
+      repo: '/repo', sha: expandedSha, parents: [], from_ref: '0'.repeat(40), to_ref: expandedSha,
+      message: 'expanded unrelated commit', files: [{status: 'M', path: 'src/expanded.go'}],
+      message_truncated: false, files_truncated: false, truncated: false,
+    };
+    if (state.commitRecords) api.gitDiffCommitRecordForTest(state, expandedSha).detail = expandedDetail;
+    else state.details.set(expandedSha, expandedDetail);
+    const panel = api.createGitDiffPanelForTest(item);
+    api.setPanelNodeForTest(item, panel);
+    api.renderGitDiffPanelForTest(item, {panel});
+    const expandedFileRow = panel.querySelector('.git-diff-commit-detail .file-tree-row');
+    const untouchedCountCell = panel.querySelector(`[data-git-diff-commit-group="${expandedSha}"] .git-diff-commit-changes`);
+    const treeRenderTargets = [];
+    const stopObserving = api.observeRenderTreeChildrenForTest((container, parentPath) => { treeRenderTargets.push(`${container?.className}:${parentPath}`); });
+
+    api.applyGitDiffStatsPayloadForTest(item, state, {
+      shallow_boundary: 'complete',
+      commits: commits.slice(0, 4).map((commit, index) => ({
+        ...commit, files: 1, added: index + 2, removed: 1, binary_files: 0,
+        signature_status: index === 0 ? 'G' : '',
+      })),
+    });
+    stopObserving();
+
+    assert.deepStrictEqual(treeRenderTargets, [], `a four-SHA stats chunk does not rerender an unrelated expanded file tree (calls: ${treeRenderTargets.join(', ')})`);
+    assert.strictEqual(panel.querySelector('.git-diff-commit-detail .file-tree-row'), expandedFileRow, 'the expanded file row keeps its DOM identity');
+    assert.strictEqual(panel.querySelector(`[data-git-diff-commit-group="${expandedSha}"] .git-diff-commit-changes`), untouchedCountCell, 'an unrelated count cell keeps its DOM identity');
+    assert.equal(panel.querySelector(`[data-git-diff-commit-group="${commits[0].sha}"] .git-diff-commit-added`)?.textContent, '+2', 'the changed row paints its new count');
+    assert.equal(panel.querySelector(`[data-git-diff-commit-group="${commits[0].sha}"] .git-diff-commit-signature`)?.textContent, 'G', 'the changed row paints its signature status');
+  });
+
   test('Git worktree status is a clickable first-line dirty summary with path details', () => {
     const api = loadYolomux('', ['1']);
     const item = api.gitDiffItemFor('/repo');
@@ -481,376 +521,6 @@ async function runLayoutAsyncSuite() {
     assert.equal(panel.querySelectorAll('.git-diff-dirty-entry').length, 0);
   });
 
-  await testAsync('Git history refresh prunes old SHA caches and records a reload cursor', async () => {
-    const api = loadYolomux('', ['1']);
-    const item = api.gitDiffItemFor('/repo');
-    const oldSha = 'a'.repeat(40), freshSha = 'b'.repeat(40), head = 'f'.repeat(40);
-    const state = api.setGitDiffTabStateForTest(item, {path: '/repo', head: oldSha, commits: [{sha: oldSha}], loaded: true, loadAttempted: true});
-    state.expanded.add(oldSha);
-    state.details.set(oldSha, {sha: oldSha});
-    state.detailCollapsedDirectories.set(oldSha, new Set(['/repo/old']));
-    api.setFetchForTest(() => Promise.resolve(jsonResponse({path: '/repo', repo: '/repo', relative_path: '', head, snapshot_cursor: 'snapshot-zero', commits: [{sha: freshSha, short: 'bbbbbbbbb'}], next_cursor: '', truncated: false})));
-    assert.equal(await api.refreshGitDiffHistoryForTest(item, {refresh: true}), true);
-    const refreshed = api.gitDiffTabStateForTest(item);
-    assert.equal(refreshed.snapshotCursor, 'snapshot-zero', 'the first page retains an opaque offset-zero cursor for exact reload');
-    assert.deepStrictEqual([...refreshed.expanded], [], 'Refresh drops disclosures outside the new bounded snapshot');
-    assert.equal(refreshed.details.has(oldSha), false, 'Refresh retires stale detail payloads');
-    assert.equal(refreshed.detailCollapsedDirectories.has(oldSha), false, 'Refresh retires stale per-SHA folder state');
-  });
-
-  await testAsync('Git history fills the viewport and exposes two viewport pages without another Git request', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Python test'}, fireTimeoutDelays: [0]});
-    const item = api.gitDiffItemFor('/repo');
-    const commits = Array.from({length: 40}, (_, index) => ({
-      sha: String(index).padStart(40, '0'), short: String(index).padStart(9, '0'), subject: `commit ${index}`,
-    }));
-    const requests = [];
-    api.setFetchForTest(url => {
-      requests.push(String(url));
-      const stats = String(url).includes('stats=1');
-      return Promise.resolve(jsonResponse({path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40), snapshot_cursor: 'snapshot-zero', commits: stats ? commits.map(commit => ({...commit, files: 1, added: 2, removed: 1, binary_files: 0})) : commits, next_cursor: stats ? '' : 'next-page', truncated: false}));
-    });
-    const panel = api.createGitDiffPanelForTest(item);
-    api.setPanelNodeForTest(item, panel);
-    Object.defineProperty(panel.querySelector('.git-diff-panel-body'), 'clientHeight', {configurable: true, value: 48});
-    assert.equal(await api.refreshGitDiffHistoryForTest(item, {refresh: true}), true);
-    assert.equal(panel.querySelectorAll('.git-diff-commit-row').length, 2, 'the first paint includes the available rows in the test viewport');
-    assert.deepStrictEqual(requests, ['/api/fs/git-history?path=%2Frepo&limit=2'], 'the first request is sized to the visible viewport');
-    assert.equal(panel.querySelector('.git-diff-commit-changes')?.textContent, '', 'the first paint does not block on or display unavailable stats');
-    assert.equal(panel.querySelector('.git-diff-commit-changes')?.getAttribute('aria-hidden'), 'true', 'unavailable stats are visually empty');
-    await new Promise(resolve => setTimeout(resolve, 0));
-    await flushAsyncWork();
-    await flushAsyncWork();
-    assert.deepStrictEqual(requests, [
-      '/api/fs/git-history?path=%2Frepo&limit=2',
-      '/api/fs/git-history?path=%2Frepo&limit=200&stats=1',
-    ], 'stats backfill is deferred and bounded to ten commits');
-    assert.equal(panel.querySelector('.git-diff-commit-added')?.textContent, '+2', 'stats backfill updates the painted commit row');
-    assert.equal(panel.querySelector('.git-diff-commit-removed')?.textContent, '-1', 'stats backfill updates the removed count too');
-    assert.equal(api.loadOlderGitDiffHistoryForTest(item), true);
-    assert.equal(panel.querySelectorAll('.git-diff-commit-row').length, 3, 'Load older paints the retained reserve immediately');
-    assert.equal(requests.filter(request => !request.includes('stats=1')).length, 2, 'reaching the second visible page starts the next five-page fetch');
-  });
-
-  await testAsync('Python Git history backfills stats through the compatibility JSON request', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Python test'}, fireTimeoutDelays: [0]});
-    const item = api.gitDiffItemFor('/repo');
-    const commits = Array.from({length: 25}, (_, index) => ({
-      sha: String(index).padStart(40, '0'), short: String(index).padStart(9, '0'), subject: `commit ${index}`,
-    }));
-    const requests = [];
-    api.setFetchForTest(url => {
-      const parsed = new URL(String(url), 'http://localhost');
-      requests.push(parsed);
-      if (parsed.searchParams.get('stats') === '1') {
-        return Promise.resolve(jsonResponse({
-          path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40), snapshot_cursor: 'snapshot-zero',
-          commits: commits.map((commit, index) => ({...commit, files: 1, added: index + 2, removed: 1, binary_files: 0})),
-          next_cursor: '', truncated: false,
-        }));
-      }
-      return Promise.resolve(jsonResponse({
-        path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40), snapshot_cursor: 'snapshot-zero',
-        commits, next_cursor: '', truncated: false,
-      }));
-    });
-    const panel = api.createGitDiffPanelForTest(item);
-    api.setPanelNodeForTest(item, panel);
-    Object.defineProperty(panel.querySelector('.git-diff-panel-body'), 'clientHeight', {configurable: true, value: 48});
-    assert.equal(await api.refreshGitDiffHistoryForTest(item, {refresh: true}), true);
-    assert.deepStrictEqual(requests.map(request => request.toString()), [
-      'http://localhost/api/fs/git-history?path=%2Frepo&limit=2',
-    ], 'metadata paints before any stats request');
-    assert.equal(panel.querySelector('.git-diff-commit-changes').textContent, '', 'the first paint keeps stats empty');
-
-    await new Promise(resolve => setTimeout(resolve, 0));
-    await flushAsyncWork();
-    const statsRequests = requests.filter(request => request.searchParams.get('stats') === '1');
-    assert.deepStrictEqual(statsRequests.map(request => ({limit: request.searchParams.get('limit'), cursor: request.searchParams.get('cursor')})), [
-      {limit: '200', cursor: null},
-    ], 'Python keeps one compatibility stats request');
-    const state = api.gitDiffTabStateForTest(item);
-    assert.equal(state.commits[24].added, 26, 'the compatibility response fills commits beyond the first viewport');
-    assert.equal(state.statsExhausted, true, 'stats backfill stops at the end of the frozen history');
-  });
-
-  await testAsync('Go Git history pushes scheduled chunks and fills every visible commit', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}, fireTimeoutDelays: [0]});
-    const item = api.gitDiffItemFor('/repo');
-    const commits = Array.from({length: 17}, (_, index) => ({
-      sha: String(index).padStart(40, '0'), short: String(index).padStart(9, '0'), subject: `commit ${index}`,
-    }));
-    const requests = [];
-    const streams = [controllableSseResponse(), controllableSseResponse()];
-    let streamIndex = -1;
-    api.setFetchForTest((url, options = {}) => {
-      const parsed = new URL(String(url), 'http://localhost');
-      requests.push(parsed);
-      if (parsed.pathname.endsWith('git-history-stats-stream')) {
-        streamIndex += 1;
-        const stream = streams[streamIndex];
-        assert.ok(stream, `unexpected stats stream ${streamIndex + 1}`);
-        stream.bindSignal(options.signal);
-        return Promise.resolve(stream.response);
-      }
-      return Promise.resolve(jsonResponse({path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40), snapshot_cursor: 'snapshot-zero', commits, next_cursor: '', truncated: false}));
-    });
-    const panel = api.createGitDiffPanelForTest(item);
-    api.setPanelNodeForTest(item, panel);
-    Object.defineProperty(panel.querySelector('.git-diff-panel-body'), 'clientHeight', {configurable: true, value: 48});
-    assert.equal(await api.refreshGitDiffHistoryForTest(item, {refresh: true}), true);
-    await new Promise(resolve => setTimeout(resolve, 0));
-    await flushAsyncWork();
-    assert.deepStrictEqual(requests.map(request => ({path: request.pathname, limit: request.searchParams.get('limit'), batchSizes: request.searchParams.get('batch_sizes'), cursor: request.searchParams.get('cursor')})), [
-      {path: '/api/fs/git-history', limit: '2', batchSizes: null, cursor: null},
-      {path: '/api/fs/git-history-stats-stream', limit: null, batchSizes: '1,2,4', cursor: 'snapshot-zero'},
-    ], 'the first backfill is one scheduled stream request');
-
-    const streamPayload = (offset, size, nextCursor) => ({
-      path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40), snapshot_cursor: 'snapshot-zero',
-      commits: commits.slice(offset, offset + size).map(commit => ({...commit, files: 1, added: offset + 1, removed: 1, binary_files: 0})), next_cursor: nextCursor, truncated: false,
-    });
-    streams[0].push(sseFrame('start', {path: '/repo', batch_sizes: [1, 2, 4]}));
-    streams[0].push(sseFrame('chunk', streamPayload(3, 4, 'cursor-7')));
-    await flushAsyncWork();
-    assert.equal(api.gitDiffTabStateForTest(item).commits[6].added, 4, 'a completed later batch paints before earlier batches');
-    streams[0].push(sseFrame('chunk', streamPayload(0, 1, 'cursor-1')));
-    streams[0].push(sseFrame('chunk', streamPayload(1, 2, 'cursor-3')));
-    streams[0].push(sseFrame('chunk', streamPayload(3, 4, 'cursor-7')));
-    await flushAsyncWork();
-    streams[0].push(sseFrame('done', {count: 7, next_cursor: 'cursor-7'}));
-    streams[0].close();
-    await flushAsyncWork();
-    await new Promise(resolve => setTimeout(resolve, 0));
-    await flushAsyncWork();
-    assert.deepStrictEqual(requests.filter(request => request.pathname.endsWith('stats-stream')).map(request => ({batchSizes: request.searchParams.get('batch_sizes'), cursor: request.searchParams.get('cursor')})), [
-      {batchSizes: '1,2,4', cursor: 'snapshot-zero'},
-      {batchSizes: '4,4,4,4', cursor: 'cursor-7'},
-    ], 'the second request switches to 4-commit batches from the pushed cursor');
-    streams[1].push(sseFrame('start', {path: '/repo', batch_sizes: [4, 4, 4, 4]}));
-    streams[1].push(sseFrame('chunk', streamPayload(7, 10, '')));
-    await flushAsyncWork();
-    assert.equal(api.gitDiffTabStateForTest(item).commits[16].added, 8, 'the later batch applies as soon as it arrives');
-    streams[1].push(sseFrame('done', {count: 10, next_cursor: ''}));
-    streams[1].close();
-    await flushAsyncWork();
-    await flushAsyncWork();
-    const state = api.gitDiffTabStateForTest(item);
-    assert.ok(state.commits.every(commit => Number.isSafeInteger(commit.added) && Number.isSafeInteger(commit.removed) && Number.isSafeInteger(commit.files) && Number.isSafeInteger(commit.binary_files)), 'every commit on the loaded page has complete stats');
-    assert.equal(state.statsExhausted, true, 'stats backfill stops after the final scheduled batch');
-  });
-
-  await testAsync('Git history refresh cancels an in-flight stats backfill before applying stale counts', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}, fireTimeoutDelays: [0]});
-    const item = api.gitDiffItemFor('/repo');
-    const sha = 'a'.repeat(40);
-    const statsStream = controllableSseResponse();
-    const statsSignals = [];
-    api.setFetchForTest((url, options = {}) => {
-      const parsed = new URL(String(url), 'http://localhost');
-      if (parsed.pathname.endsWith('git-history-stats-stream')) {
-        statsSignals.push(options.signal);
-        statsStream.bindSignal(options.signal);
-        return Promise.resolve(statsStream.response);
-      }
-      return Promise.resolve(jsonResponse({
-        path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40), snapshot_cursor: 'snapshot-zero',
-        commits: [{sha, short: 'aaaaaaaaa', subject: 'fresh'}], next_cursor: '', truncated: false,
-      }));
-    });
-    const panel = api.createGitDiffPanelForTest(item);
-    api.setPanelNodeForTest(item, panel);
-    await api.refreshGitDiffHistoryForTest(item, {refresh: true});
-    await new Promise(resolve => setTimeout(resolve, 0));
-    await flushAsyncWork();
-    assert.equal(api.gitDiffTabStateForTest(item).statsLoading, true, 'the first stats request is in flight');
-
-    api.setFetchForTest(url => {
-      const parsed = new URL(String(url), 'http://localhost');
-      assert.equal(parsed.pathname, '/api/fs/git-history', 'refresh does not wait for stale stats before fetching metadata');
-      return Promise.resolve(jsonResponse({
-        path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40), snapshot_cursor: 'fresh-snapshot',
-        commits: [{sha, short: 'aaaaaaaaa', subject: 'fresh', files: 1, added: 7, removed: 0, binary_files: 0}], next_cursor: '', truncated: false,
-      }));
-    });
-    assert.equal(await api.refreshGitDiffHistoryForTest(item, {refresh: true}), true);
-    statsStream.push(sseFrame('chunk', {
-      path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40), snapshot_cursor: 'snapshot-zero',
-      commits: [{sha, short: 'aaaaaaaaa', subject: 'stale', files: 1, added: 99, removed: 99, binary_files: 0}], next_cursor: '', truncated: false,
-    }));
-    statsStream.close();
-    await flushAsyncWork();
-    assert.equal(statsSignals.length, 1, 'the Go first window has one in-flight stream');
-    assert.ok(statsSignals[0]?.aborted, 'refresh aborts the old stats stream');
-    assert.equal(api.gitDiffTabStateForTest(item).commits[0].added, 7, 'stale stats cannot overwrite refreshed metadata');
-  });
-
-  await testAsync('Git history auto-loads when the initial rows do not create a scrollbar', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Python test'}});
-    const item = api.gitDiffItemFor('/repo');
-    const commits = Array.from({length: 8}, (_, index) => ({
-      sha: String(index).padStart(40, '0'), short: String(index).padStart(9, '0'), subject: `commit ${index}`,
-    }));
-    const requests = [];
-    api.setFetchForTest(url => {
-      requests.push(String(url));
-      const stats = String(url).includes('stats=1');
-      const historyRequestCount = requests.filter(request => !request.includes('stats=1')).length;
-      return Promise.resolve(jsonResponse({path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40), snapshot_cursor: 'snapshot-zero', commits: stats ? commits.map(commit => ({...commit, files: 1, added: 2, removed: 1, binary_files: 0})) : commits, next_cursor: stats ? '' : historyRequestCount === 1 ? 'next-page' : '', truncated: false}));
-    });
-    const panel = api.createGitDiffPanelForTest(item);
-    api.setPanelNodeForTest(item, panel);
-    const body = panel.querySelector('.git-diff-panel-body');
-    Object.defineProperties(body, {
-      clientHeight: {configurable: true, value: 480},
-      scrollHeight: {configurable: true, get: () => Math.max(1, body.querySelectorAll('.git-diff-commit-row').length * 24)},
-    });
-    await api.refreshGitDiffHistoryForTest(item, {refresh: true});
-    await new Promise(resolve => setTimeout(resolve, 0));
-    await new Promise(resolve => setTimeout(resolve, 0));
-    assert.equal(requests.filter(request => !request.includes('stats=1')).length, 2, 'a short initial list requests its next page without waiting for an impossible scroll event');
-    assert.equal(panel.querySelectorAll('.git-diff-commit-row').length, 8, 'auto-loaded history renders the complete available result');
-  });
-
-  await testAsync('Git history freezes pagination and fences stale refresh generations without dropping valid rows', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Python test'}});
-    const item = api.gitDiffItemFor('/repo/src');
-    const stale = deferredFetch();
-    const fresh = deferredFetch();
-    const older = deferredFetch();
-    const requests = [];
-    api.setFetchForTest((url, options = {}) => {
-      requests.push({url: String(url), signal: options.signal});
-      const parsed = new URL(String(url), 'http://localhost');
-      if (parsed.searchParams.get('stats') === '1') return Promise.resolve(jsonResponse({path: '/repo/src', repo: '/repo', relative_path: 'src', head: 'f'.repeat(40), commits: [{sha: 'f'.repeat(40), short: 'fffffffff', subject: 'fresh', files: 1, added: 1, removed: 0, binary_files: 0}], next_cursor: '', truncated: false}));
-      const historyRequests = requests.filter(request => !request.url.includes('stats=1')).length;
-      if (historyRequests === 1) return stale.promise;
-      if (historyRequests === 2) return fresh.promise;
-      return older.promise;
-    });
-    const staleLoad = api.refreshGitDiffHistoryForTest(item, {refresh: true});
-    const freshLoad = api.refreshGitDiffHistoryForTest(item, {refresh: true});
-    fresh.resolve(jsonResponse({path: '/repo/src', repo: '/repo', relative_path: 'src', head: 'f'.repeat(40), commits: [{sha: 'f'.repeat(40), short: 'fffffffff', subject: 'fresh'}], next_cursor: 'frozen-cursor', truncated: false}));
-    await freshLoad;
-    stale.resolve(jsonResponse({path: '/repo/src', repo: '/repo', relative_path: 'src', head: 'e'.repeat(40), commits: [{sha: 'e'.repeat(40), short: 'eeeeeeeee', subject: 'stale'}], next_cursor: '', truncated: false}));
-    await staleLoad;
-    let state = api.gitDiffTabStateForTest(item);
-    assert.equal(state.head, 'f'.repeat(40), 'late refresh data cannot replace the newer generation');
-    assert.deepStrictEqual([...state.commits.map(commit => commit.subject)], ['fresh']);
-    assert.match(requests.find(request => !request.url.includes('stats=1')).url, /^\/api\/fs\/git-history\?path=%2Frepo%2Fsrc&limit=1$/);
-
-    const append = api.loadOlderGitDiffHistoryForTest(item);
-    assert.ok(requests.find(request => request.url.includes('cursor=frozen-cursor')).url, 'pagination uses the frozen snapshot cursor');
-    older.resolve(jsonResponse({path: '/repo/src', repo: '/repo', relative_path: 'src', head: 'f'.repeat(40), commits: [{sha: 'd'.repeat(40), short: 'ddddddddd', subject: 'older'}], next_cursor: '', truncated: true, truncation_reason: 'cursor_limit'}));
-    await append;
-    state = api.gitDiffTabStateForTest(item);
-    assert.deepStrictEqual([...state.commits.map(commit => commit.subject)], ['fresh', 'older']);
-    assert.equal(state.truncated, true, 'bounded pagination remains visibly partial');
-
-    api.setFetchForTest(() => Promise.reject(new Error('offline')));
-    assert.equal(await api.refreshGitDiffHistoryForTest(item, {refresh: true}), false);
-    state = api.gitDiffTabStateForTest(item);
-    assert.deepStrictEqual([...state.commits.map(commit => commit.subject)], ['fresh', 'older'], 'refresh failure retains the prior valid snapshot');
-    assert.ok(state.error, 'refresh failure is presented instead of silently clearing the list');
-  });
-
-  await testAsync('Git history retries once without a stale saved cursor', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Python test'}});
-    const item = api.gitDiffItemFor('/repo');
-    const requests = [];
-    api.setFetchForTest(url => {
-      requests.push(String(url));
-      if (requests.length === 1) {
-        const error = new Error('invalid Git history cursor');
-        error.status = 400;
-        error.payload = {user_message: {key: 'fs.error.gitHistoryCursor', params: {}, fallback: 'invalid Git history cursor'}};
-        return Promise.reject(error);
-      }
-      return Promise.resolve(jsonResponse({
-        path: '/repo', repo: '/repo', relative_path: '', head: 'f'.repeat(40),
-        snapshot_cursor: 'fresh-cursor', commits: [], next_cursor: '', truncated: false,
-      }));
-    });
-    api.setGitDiffTabStateForTest(item, {snapshotCursor: 'old-cursor'});
-    assert.equal(await api.refreshGitDiffHistoryForTest(item), true);
-    assert.deepStrictEqual(requests, [
-      '/api/fs/git-history?path=%2Frepo&limit=1&cursor=old-cursor',
-      '/api/fs/git-history?path=%2Frepo&limit=1',
-    ]);
-    assert.equal(api.gitDiffTabStateForTest(item).snapshotCursor, 'fresh-cursor');
-  });
-
-  await testAsync('Git commit detail refreshes history once when its frozen head is stale', async () => {
-    const api = loadYolomux('', ['1']);
-    const item = api.gitDiffItemFor('/repo');
-    const sha = 'a'.repeat(40);
-    const head = 'b'.repeat(40);
-    const requests = [];
-    api.setFetchForTest(url => {
-      requests.push(String(url));
-      if (requests.length === 1) {
-        const error = new Error('Git history snapshot is stale');
-        error.status = 409;
-        error.payload = {user_message: {key: 'fs.error.gitHistoryStale', params: {}, fallback: error.message}};
-        return Promise.reject(error);
-      }
-      if (requests.length === 2) {
-        return Promise.resolve(jsonResponse({path: '/repo', repo: '/repo', relative_path: '', head, commits: [{sha, short: 'aaaaaaaaa', subject: 'fresh', files: 1, added: 1, removed: 0, binary_files: 0}], next_cursor: '', truncated: false}));
-      }
-      return Promise.resolve(jsonResponse({sha, repo: '/repo', parents: [], from_ref: '0'.repeat(40), to_ref: sha, message: 'fresh detail', files: [], message_truncated: false, files_truncated: false, truncated: false}));
-    });
-    api.setGitDiffTabStateForTest(item, {path: '/repo', head, commits: [{sha, short: 'aaaaaaaaa', subject: 'fresh'}], visibleCommitCount: 1, loaded: true, loadAttempted: true});
-    assert.equal(await api.loadGitDiffCommitDetailForTest(item, sha), true);
-    assert.deepStrictEqual(requests, [
-      `/api/fs/git-commit?path=%2Frepo&commit=${sha}&head=${head}`,
-      '/api/fs/git-history?path=%2Frepo&limit=1',
-      `/api/fs/git-commit?path=%2Frepo&commit=${sha}&head=${head}`,
-    ]);
-    assert.equal(api.gitDiffTabStateForTest(item).detailErrors.has(sha), false);
-  });
-
-  test('Git commit messages render escaped newline markers as actual returns', () => {
-    const api = loadYolomux('', ['1']);
-    const message = api.gitDiffCommitMessageForTest({message: 'subject\\n\\nbody'});
-    assert.equal(message.textContent, 'subject\n\nbody');
-  });
-
-  await testAsync('Git commit disclosures load independently and changed files retain status, rename, binary, and exact refs', async () => {
-    const api = loadYolomux('', ['1']);
-    const item = api.gitDiffItemFor('/repo');
-    const shaA = 'a'.repeat(40);
-    const shaB = 'b'.repeat(40);
-    const head = 'f'.repeat(40);
-    api.setGitDiffTabStateForTest(item, {path: '/repo', repo: '/repo', relativePath: '', head, commits: [{sha: shaA, short: 'aaaaaaaaa'}, {sha: shaB, short: 'bbbbbbbbb'}], loaded: true});
-    const detailA = deferredFetch();
-    const detailB = deferredFetch();
-    api.setFetchForTest(url => String(url).includes(`commit=${shaA}`) ? detailA.promise : detailB.promise);
-    const loadA = api.setGitDiffCommitExpandedForTest(item, shaA, true);
-    const loadB = api.setGitDiffCommitExpandedForTest(item, shaB, true);
-    detailB.resolve(jsonResponse({repo: '/repo', sha: shaB, parents: [shaA], from_ref: shaA, to_ref: shaB, message: 'second\n\nbody', message_truncated: false, files: [{status: 'M', path: 'b.js', old_path: '', added: 1, removed: 0, binary: false, counts_available: true}], files_truncated: false, truncated: false}));
-    detailA.resolve(jsonResponse({
-      repo: '/repo', sha: shaA, parents: [], from_ref: '0'.repeat(40), to_ref: shaA,
-      message: '<script>first</script>\n\nbody', message_truncated: true,
-      files: [
-        {status: 'R', path: 'src/new.js', old_path: 'old.js', added: 5, removed: 2, binary: false, counts_available: true},
-        {status: 'M', path: 'assets/data.bin', old_path: '', added: null, removed: null, binary: true, counts_available: true},
-        {status: 'D', path: 'gone.txt', old_path: '', added: 0, removed: 4, binary: false, counts_available: true},
-      ], files_truncated: true, truncated: true,
-    }));
-    await Promise.all([loadA, loadB]);
-    const state = api.gitDiffTabStateForTest(item);
-    assert.deepStrictEqual([...state.expanded].sort(), [shaA, shaB], 'multiple commits remain expanded');
-    assert.equal(state.details.size, 2, 'one detail request does not invalidate another SHA');
-    const model = api.gitDiffCommitFileTreeForTest(state.details.get(shaA));
-    assert.equal(model.sessionFilesMap.get('/repo/src/new.js').status, 'R');
-    assert.equal(model.sessionFilesMap.get('/repo/src/new.js').old_path, 'old.js');
-    assert.equal(model.sessionFilesMap.get('/repo/assets/data.bin').binary, true);
-    assert.equal(model.sessionFilesMap.get('/repo/gone.txt').status, 'D');
-    const historicalItem = api.gitDiffHistoricalFileItemForTest(state.details.get(shaA), model.sessionFilesMap.get('/repo/src/new.js'));
-    assert.deepStrictEqual(canonical(api.historicalFileEditorIdentity(historicalItem)), {path: '/repo/src/new.js', fromRef: '0'.repeat(40), toRef: shaA});
-    assert.equal(api.gitDiffCommitMessageForTest(state.details.get(shaA)).textContent, '<script>first</script>\n\nbody', 'commit messages are rendered as text');
-  });
-
   await testAsync('historical file selection paints its exact loading tab before comparison completion', async () => {
     const api = loadYolomux('', ['1']);
     const path = '/repo/src/app.js';
@@ -891,13 +561,13 @@ async function runLayoutAsyncSuite() {
       requests.push(parsed.pathname);
       if (parsed.pathname === '/api/fs/git-history') {
         return Promise.resolve(jsonResponse({
-          path: '/repo/src', repo: '/repo', relative_path: 'src', head: 'f'.repeat(40), next_cursor: '', truncated: false,
+          path: '/repo/src', repo: '/repo', relative_path: 'src', shallow_boundary: 'complete', head: 'f'.repeat(40), next_cursor: '', truncated: false,
           commits: [{sha, short: 'aaaaaaaaa', parents: [firstParent, secondParent], subject: 'Merge exact history', author: 'Keiven Chang', authored_at: 1786931640, files: 1, added: 3, removed: 1, binary_files: 0}],
         }));
       }
       if (parsed.pathname === '/api/fs/git-commit') {
         return Promise.resolve(jsonResponse({
-          repo: '/repo', scope_path: 'src', sha, parents: [firstParent, secondParent], from_ref: firstParent, to_ref: sha,
+          repo: '/repo', scope_path: 'src', shallow_boundary: 'complete', sha, parents: [firstParent, secondParent], from_ref: firstParent, to_ref: sha,
           subject: 'Merge exact history', message: 'Merge exact history\n\nBody text', authored_at: 1786931640,
           files: [{status: 'M', path: 'src/app.js', old_path: '', added: 3, removed: 1, binary: false, counts_available: true}],
           message_truncated: false, files_truncated: false, truncated: false,
@@ -975,7 +645,7 @@ async function runLayoutAsyncSuite() {
     const item = api.gitDiffItemFor('/repo');
     const state = api.setGitDiffTabStateForTest(item, {path: '/repo', repo: '/repo', branch: 'go_release', relativePath: '', head: 'f'.repeat(40), commits: [commit], visibleCommitCount: 1, loaded: true, loadAttempted: true});
     state.expanded.add(commit.sha);
-    state.details.set(commit.sha, {repo: '/repo', sha: commit.sha, parents: commit.parents, from_ref: commit.parents[0], to_ref: commit.sha, message: 'Locale state', files: []});
+    api.gitDiffCommitRecordForTest(state, commit.sha).detail = {repo: '/repo', sha: commit.sha, parents: commit.parents, from_ref: commit.parents[0], to_ref: commit.sha, message: 'Locale state', files: []};
     const panel = api.createGitDiffPanelForTest(item);
     api.setPanelNodeForTest(item, panel);
     api.renderGitDiffPanelForTest(item, {panel});
@@ -984,7 +654,7 @@ async function runLayoutAsyncSuite() {
     assert.equal(panel.querySelector('.git-diff-path').title, '/repo [go_release]');
     const body = panel.querySelector('.git-diff-panel-body');
     body.scrollTop = 73;
-    const detailsIdentity = state.details;
+    const detailsIdentity = state.commitRecords;
     const expandedIdentity = state.expanded;
     panel.querySelector('.git-diff-heading').textContent = 'stale heading';
     panel.querySelector('.git-diff-commit-date').textContent = 'stale date';
@@ -992,7 +662,7 @@ async function runLayoutAsyncSuite() {
     assert.equal(panel.querySelector('.git-diff-heading').textContent, frCatalog['contextmenu.showDiff']);
     assert.notEqual(panel.querySelector('.git-diff-commit-date').textContent, enDate, 'visible date/time uses the active locale');
     assert.equal(panel.querySelector('.git-diff-commit-date').title.length > 0, true, 'localized date retains an absolute-time tooltip');
-    assert.equal(state.details, detailsIdentity);
+    assert.equal(state.commitRecords, detailsIdentity);
     assert.equal(state.expanded, expandedIdentity);
     assert.equal(state.expanded.has(commit.sha), true);
     assert.equal(body.scrollTop, 73, 'relocalization preserves the tab scroll position');
@@ -1700,6 +1370,166 @@ async function runLayoutAsyncSuite() {
     api.updateFileTreeGitStatusRowsForTest([firstRow, secondRow]);
     assert.equal(secondRow.querySelector(':scope > .file-tree-diff').innerHTML, '<span class="changes-diff-add">+8</span> <span class="changes-diff-remove">-2</span>', 'the later repository paints when its own chunk arrives');
     assert.equal(api.fileExplorerFinderSessionFilesStateForTest().diffBackfillPending, false, 'the stream completion releases the Finder backfill gate');
+  });
+
+  test('Differ stream map handles fallback chunks and stale finalization without losing the current owner', () => {
+    const api = loadYolomux('', ['1']);
+    const current = () => true;
+    const repositoryChunk = (repo, path) => ({
+      session: '1', hours: 24, loaded: false, from_ref: 'HEAD', to_ref: 'current',
+      repos: [{repo, branch: 'main', count: 1}],
+      files: [{session: '1', repo, path, abs_path: `${repo}/${path}`, status: 'M'}],
+      refs_by_repo: {[repo]: []}, errors: [], warnings: [],
+    });
+    assert.equal(api.mergeSessionFilesStreamChunkForTest('differ', '1', repositoryChunk('/repos/old', 'old.txt'), current), true);
+    assert.equal(api.mergeSessionFilesStreamChunkForTest('differ', '1', {
+      session: '1', hours: 24, loaded: false, from_ref: 'HEAD', to_ref: 'current',
+      repos: [{repo: '/repos/two', branch: 'main', count: 1}, {repo: '/repos/three', branch: 'main', count: 1}],
+      files: [
+        {session: '1', repo: '/repos/two', path: 'two.txt', abs_path: '/repos/two/two.txt', status: 'M'},
+        {session: '1', repo: '/repos/three', path: 'three.txt', abs_path: '/repos/three/three.txt', status: 'M'},
+      ],
+      refs_by_repo: {'/repos/two': [], '/repos/three': []}, errors: [], warnings: [],
+    }, current), true, 'a multi-repository chunk falls back to aggregate merge');
+    assert.deepStrictEqual([...api.fileExplorerSessionFilesStateForTest().payload.files.map(file => file.abs_path)], [
+      '/repos/old/old.txt', '/repos/two/two.txt', '/repos/three/three.txt',
+    ], 'fallback materializes the prior map before merging');
+
+    api.mergeSessionFilesStreamChunkForTest('differ', '1', repositoryChunk('/repos/current', 'current.txt'), current);
+    const newerFiles = [...api.fileExplorerSessionFilesStateForTest().payload.files.map(file => file.abs_path)];
+    const staleResult = api.finalizeSessionFilesStreamPayloadForTest({session: '1', loaded: true}, () => false);
+    assert.equal(staleResult, null, 'an obsolete request cannot finalize shared state');
+    assert.deepStrictEqual([...api.fileExplorerSessionFilesStateForTest().payload.files.map(file => file.abs_path)], newerFiles, 'the current repository map remains available after stale completion');
+  });
+
+  await testAsync('Go Differ can supersede a partially painted repository stream', async () => {
+    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
+    slots.left = api.paneStateWithTabs([api.differItemId], api.differItemId);
+    slots.right = api.paneStateWithTabs(['1'], '1');
+    api.setLayoutSlotsForTest(slots);
+    api.setFileExplorerModeForTest('diff');
+    api.setFileExplorerChangesSelectedSessionForTest('1');
+    const streams = [controllableSseResponse(), controllableSseResponse()];
+    const calls = [];
+    api.setFetchForTest((url, options = {}) => {
+      const parsed = new URL(String(url), 'https://localhost');
+      calls.push(parsed.pathname);
+      const stream = streams[calls.length - 1];
+      stream?.bindSignal(options.signal);
+      return Promise.resolve(stream.response);
+    });
+
+    const first = api.fetchSessionFilesForTest({destination: 'differ', session: '1', silent: true, force: true});
+    streams[0].push(sseFrame('start', {session: '1'}));
+    streams[0].push(sseFrame('repo', {
+      session: '1', hours: 24, loaded: false, from_ref: 'HEAD', to_ref: 'current',
+      repos: [{repo: '/repos/project', branch: 'main', count: 1}],
+      files: [{session: '1', repo: '/repos/project', path: 'partial.txt', abs_path: '/repos/project/partial.txt', status: 'M'}],
+      refs_by_repo: {'/repos/project': []}, errors: [], warnings: [],
+    }));
+    await flushAsyncWork();
+    assert.equal(api.fileExplorerSessionFilesStateForTest().streamRepos.size, 1);
+
+    let supersededError;
+    const second = api.fetchSessionFilesForTest({destination: 'differ', session: '1', silent: false, force: true});
+    second.catch(error => { supersededError = error; });
+    await flushAsyncWork();
+    assert.deepStrictEqual(calls, ['/api/session-files-stream', '/api/session-files-stream'], 'the replacement reaches its stream request');
+
+    streams[1].push(sseFrame('start', {session: '1'}));
+    streams[1].push(sseFrame('repo', {
+      session: '1', hours: 24, loaded: false, from_ref: 'HEAD', to_ref: 'current',
+      repos: [{repo: '/repos/project', branch: 'main', count: 1}],
+      files: [{session: '1', repo: '/repos/project', path: 'replacement.txt', abs_path: '/repos/project/replacement.txt', status: 'M'}],
+      refs_by_repo: {'/repos/project': []}, errors: [], warnings: [],
+    }));
+    streams[1].push(sseFrame('done', {session: '1', loaded: true, errors: [], warnings: []}));
+    streams[1].close();
+    await second;
+    streams[0].close();
+    await first;
+    assert.equal(supersededError, undefined, `replacement request failed: ${String(supersededError)}`);
+    assert.deepStrictEqual([...api.fileExplorerSessionFilesStateForTest().payload.files.map(file => file.abs_path)], ['/repos/project/replacement.txt']);
+  });
+
+  await testAsync('Go Differ applies repository chunks before the attribution stream completes', async () => {
+    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
+    slots.left = api.paneStateWithTabs([api.differItemId], api.differItemId);
+    slots.right = api.paneStateWithTabs(['1'], '1');
+    api.setLayoutSlotsForTest(slots);
+    api.setFileExplorerModeForTest('diff');
+    api.setFileExplorerChangesSelectedSessionForTest('1');
+    const stream = controllableSseResponse();
+    const calls = [];
+    api.setFetchForTest((url, options = {}) => {
+      const parsed = new URL(String(url), 'https://localhost');
+      calls.push(parsed.pathname);
+      if (parsed.pathname === '/api/session-files-stream') {
+        stream.bindSignal(options.signal);
+        return Promise.resolve(stream.response);
+      }
+      throw new Error(`unexpected Differ request: ${parsed.pathname}`);
+    });
+
+    const request = api.fetchSessionFilesForTest({destination: 'differ', session: '1', silent: true, force: true});
+    assert.deepStrictEqual(calls, ['/api/session-files-stream'], 'Go Differ uses the repository stream directly');
+    stream.push(sseFrame('start', {session: '1'}));
+    stream.push(sseFrame('repo', {
+      session: '1', hours: 24, loaded: false, from_ref: 'HEAD', to_ref: 'current',
+      repos: [{repo: '/repos/project', branch: 'feature/project', count: 1, added: 5, removed: 2}],
+      files: [
+        {session: '1', repo: '/repos/project', path: 'changed.txt', abs_path: '/repos/project/changed.txt', status: 'M', added: 5, removed: 2},
+        {session: '1', repo: '/repos/project', path: 'transcript-only.txt', abs_path: '/repos/project/transcript-only.txt', status: 'T'},
+      ],
+      refs_by_repo: {'/repos/project': []}, errors: [], warnings: [],
+    }));
+    await flushAsyncWork();
+    const partial = api.fileExplorerSessionFilesStateForTest().payload;
+    assert.equal(partial.streaming, true, 'Differ retains the in-progress marker while the stream is open');
+    assert.equal(partial.files[0]?.abs_path, '/repos/project/changed.txt', 'the first repository result is available before attribution completes');
+    assert.ok(api.fileExplorerChangesPanelHtml().includes('data-open-change-file="/repos/project/changed.txt"'), 'the Differ renderer exposes the changed-file row before the stream closes');
+    assert.equal(api.fileExplorerChangesPanelHtml().includes('data-open-change-file="/repos/project/transcript-only.txt"'), false, 'transcript-only rows stay hidden during incremental rendering');
+    const stateDuringStream = api.fileExplorerSessionFilesStateForTest();
+    assert.equal(stateDuringStream.streamRepos.size, 1, 'Differ keeps one repository record instead of rebuilding the whole file aggregate per chunk');
+    const replacement = {
+      session: '1', hours: 24, loaded: false, from_ref: 'HEAD', to_ref: 'current', replace_repo: true,
+      repos: [{repo: '/repos/project', branch: 'feature/project', count: 1, added: 8, removed: 3}],
+      files: [{session: '1', repo: '/repos/project', path: 'new.txt', abs_path: '/repos/project/new.txt', status: 'A', added: 8, removed: 3}],
+      refs_by_repo: {'/repos/project': []}, errors: [], warnings: [],
+    };
+    stream.push(sseFrame('repo', replacement));
+    await flushAsyncWork();
+    assert.deepStrictEqual([...api.fileExplorerSessionFilesStateForTest().payload.files.map(file => file.abs_path)], ['/repos/project/new.txt'], 'a repository replacement drops its prior rows in the canonical stream record');
+    const firstRepoRecord = api.fileExplorerSessionFilesStateForTest().streamRepos.get('/repos/project');
+    const firstRepoFiles = firstRepoRecord.files;
+    let unrelatedRepoRowsRead = 0;
+    firstRepoRecord.files = new Proxy(firstRepoFiles, {
+      get(target, property, receiver) {
+        if (typeof property === 'string' && /^\d+$/.test(property)) unrelatedRepoRowsRead += 1;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    stream.push(sseFrame('repo', {
+      session: '1', hours: 24, loaded: false, from_ref: 'HEAD', to_ref: 'current',
+      repos: [{repo: '/repos/other', branch: 'main', count: 1, added: 2, removed: 1}],
+      files: [{session: '1', repo: '/repos/other', path: 'other.txt', abs_path: '/repos/other/other.txt', status: 'M', added: 2, removed: 1}],
+      refs_by_repo: {'/repos/other': []}, errors: [], warnings: [],
+    }));
+    await flushAsyncWork();
+    assert.equal(unrelatedRepoRowsRead, 0, 'a later repository chunk does not traverse prior repositories’ file rows');
+    firstRepoRecord.files = firstRepoFiles;
+    stream.push(sseFrame('done', {session: '1', loaded: true, errors: [], warnings: []}));
+    stream.close();
+    await request;
+    const complete = api.fileExplorerSessionFilesStateForTest().payload;
+    assert.notEqual(complete.streaming, true, 'the final event clears the transient streaming state');
+    assert.equal(complete.loaded, true, 'the final event marks the Differ payload complete');
+    assert.deepStrictEqual([...complete.files.map(file => file.abs_path)], ['/repos/project/new.txt', '/repos/other/other.txt'], 'final completion flattens the latest repository records once and preserves other repos');
+    assert.equal(api.fileExplorerSessionFilesStateForTest().streamRepos, null, 'the temporary repository index is released after finalization');
   });
 
   await testAsync('Finder expansion keeps +/- counts deferred while session-files backfill is pending', async () => {
@@ -5038,6 +4868,87 @@ async function runLayoutAsyncSuite() {
     assert.ok(api.vmConsoleErrorsForTest().some(message => message.includes('session metadata fetch failed')), 'the expected transport diagnostic is captured by this test instead of printed in a green run');
   });
 
+  await testAsync('lightweight metadata preserves only the same session incarnation', async () => {
+    const api = loadYolomux('', ['1']);
+    const quiet = {refreshAuto: false, refreshActivity: false, refreshContext: false};
+    const originalInfo = {
+      session_identity: 'tmux-session-A',
+      panes: [{pane_id: '%1', current_path: '/repo/a'}],
+      agents: [{kind: 'codex', status: 'working'}],
+      window_metadata: [{window_index: 0, window_name: 'work'}],
+      work_graph: {generation: 1, marker: 'session-A-graph'},
+    };
+    await api.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'server-a', generation: 1},
+      topology_generation: 1,
+      session_order: ['A'], sessions: {A: originalInfo},
+    }, quiet);
+
+    await api.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'server-a', generation: 2},
+      topology_generation: 2,
+      session_order: ['A', 'B'],
+      sessions: {
+        A: {session_identity: 'tmux-session-A', metadata_loading: true, panes: [], agents: [], window_metadata: [], work_graph: {generation: 2, loading: true}},
+        B: {session_identity: 'tmux-session-B', metadata_loading: true, panes: [], agents: [], window_metadata: [], work_graph: {generation: 2, loading: true}},
+      },
+    }, quiet);
+    let sessions = api.transcriptMetadataStateForTest().payload.sessions;
+    assert.deepStrictEqual(sessions.A.panes.map(pane => pane.pane_id), ['%1'], 'adding another tmux session retains panes for the unchanged incarnation');
+    assert.deepStrictEqual(sessions.A.agents.map(agent => agent.kind), ['codex'], 'the unchanged incarnation retains its current agents');
+    assert.deepStrictEqual(sessions.A.window_metadata.map(window => window.window_name), ['work'], 'the unchanged incarnation retains its window metadata');
+    assert.equal(sessions.A.work_graph.marker, 'session-A-graph');
+    assert.equal(sessions.B.work_graph.loading, true, 'a new session cannot borrow another session graph');
+
+    await api.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'server-a', generation: 3},
+      topology_generation: 3,
+      session_order: ['A'],
+      sessions: {
+        A: {session_identity: 'tmux-session-A-recreated', metadata_loading: true, panes: [], agents: [], window_metadata: [], work_graph: {generation: 3, loading: true}},
+      },
+    }, quiet);
+    sessions = api.transcriptMetadataStateForTest().payload.sessions;
+    assert.equal(sessions.A.work_graph.loading, true, 'a recreated same-name session cannot inherit the old work graph');
+    assert.equal(sessions.A.work_graph.marker, undefined);
+    assert.deepStrictEqual(sessions.A.panes, []);
+  });
+
+  await testAsync('identity-less Python metadata applies fresh pane fields during graph loading', async () => {
+    const api = loadYolomux('', ['1']);
+    const quiet = {refreshAuto: false, refreshActivity: false, refreshContext: false};
+    await api.applySessionMetadataPayloadForTest({
+      session_order: ['1'],
+      sessions: {
+        '1': {
+          panes: [{target: '1:0.0', current_path: '/repo/old'}],
+          selected_pane: {target: '1:0.0', current_path: '/repo/old'},
+          agents: [{kind: 'claude', status: 'working'}],
+          window_metadata: [{window_index: 0, window_name: 'old'}],
+          work_graph: {generation: 1, marker: 'old'},
+        },
+      },
+    }, quiet);
+    await api.applySessionMetadataPayloadForTest({
+      metadata_loading: true,
+      session_order: ['1'],
+      sessions: {
+        '1': {
+          panes: [{target: '1:0.1', current_path: '/repo/new'}],
+          selected_pane: {target: '1:0.1', current_path: '/repo/new'},
+          agents: [{kind: 'codex', status: 'working'}],
+          window_metadata: [{window_index: 0, window_name: 'new'}],
+          work_graph: {generation: 2, loading: true},
+        },
+      },
+    }, quiet);
+    const info = api.transcriptMetadataStateForTest().payload.sessions['1'];
+    assert.equal(info.panes[0].target, '1:0.1', 'fresh Python pane discovery is applied');
+    assert.equal(info.selected_pane.target, '1:0.1', 'fresh Python selection is applied');
+    assert.equal(info.agents[0].kind, 'codex', 'fresh Python agent discovery is applied');
+    assert.equal(info.window_metadata[0].window_name, 'new', 'fresh Python window metadata is applied');
+  });
+
   await testAsync('a transcripts revision during an older metadata request owns one follow-up cache read', async () => {
     const pending = [];
     const api = loadYolomux('', ['1']);
@@ -7351,6 +7262,35 @@ async function runLayoutAsyncSuite() {
     assert.deepStrictEqual(requests, [`/api/session-files?from=HEAD&to=current&session=1&hours=24&cache_only=1&cache_view=${cacheView}`], 'an exact replay and a wrong-session completion perform zero cache-view reads');
   });
 
+  await testAsync('a later session-files refresh revalidates the same cache view under a new completion generation', async () => {
+    const api = loadYolomux('', ['1']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.leafNode('left');
+    slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
+    api.setLayoutSlotsForTest(slots);
+    api.setFileExplorerRootForTest('/repo');
+    api.setFileExplorerFinderSelectedSessionForTest('1');
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      return Promise.resolve(jsonResponse({session: '1', loaded: true, repos: [], files: [], errors: []}));
+    });
+    const cacheView = 'a'.repeat(64);
+    const completion = {
+      role: 'session-files', session: '1', cache_key_hash: cacheView, cache_view_id: cacheView,
+      request_descriptor: '2fc357e15260b25bb94dbee3151934bb8e25b2a7beadd9192701f9070013c88e',
+    };
+
+    api.handleClientPushEventNowForTest('background_refresh_done', {...completion, completion_generation: '1'});
+    await flushAsyncWork();
+    api.handleClientPushEventNowForTest('background_refresh_done', {...completion, completion_generation: '2'});
+    await flushAsyncWork();
+    assert.equal(requests.length, 2, 'a second successful refresh of the same cache view must open a new cache-only read');
+    api.handleClientPushEventNowForTest('background_refresh_done', {...completion, completion_generation: '2'});
+    await flushAsyncWork();
+    assert.equal(requests.length, 2, 'replay of the second completion remains deduplicated');
+  });
+
   await testAsync('a cache-only pending response consumes its session-files completion once', async () => {
     const api = loadYolomux('', ['1']);
     const slots = api.emptyLayoutSlots();
@@ -7360,7 +7300,7 @@ async function runLayoutAsyncSuite() {
     api.setLayoutSlotsForTest(slots);
     api.setFileExplorerModeForTest('diff');
     api.setFileExplorerFinderSelectedSessionForTest('1');
-    api.applySessionFilesPayloadFromPushForTest({session: '1', loaded: true, repos: [{repo: '/preserved'}], files: [], errors: [], from_ref: 'HEAD', to_ref: 'current'}, {session: '1', from_ref: 'HEAD', to_ref: 'current'});
+    api.setFinderSessionFilesPayloadForTest({session: '1', loaded: true, repos: [{repo: '/preserved'}], files: [], errors: [], from_ref: 'HEAD', to_ref: 'current'});
     const requests = [];
     api.setFetchForTest(url => {
       requests.push(String(url));
@@ -7374,6 +7314,26 @@ async function runLayoutAsyncSuite() {
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(requests.length, 1, 'a bounded cache-only 202 consumes its completion so an EventSource replay cannot create a disk-read loop');
     assert.equal(api.fileExplorerFinderSessionFilesStateForTest().payload.repos[0].repo, '/preserved', 'a cache miss preserves the current browser state');
+  });
+
+  await testAsync('Go cache-only revalidation uses the bounded JSON endpoint', async () => {
+    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.leafNode('left');
+    slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
+    api.setLayoutSlotsForTest(slots);
+    api.setFileExplorerRootForTest('/repo');
+    api.setFileExplorerFinderSelectedSessionForTest('1');
+    api.applySessionFilesPayloadFromPushForTest({session: '1', loaded: true, repos: [{repo: '/preserved'}], files: [], errors: [], from_ref: 'HEAD', to_ref: 'current'}, {session: '1', from_ref: 'HEAD', to_ref: 'current'});
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      return Promise.resolve(jsonResponse({session: '1', state: 'queued', status: 'pending'}, 202));
+    });
+
+    await api.fetchSessionFilesForTest({destination: 'finder', session: '1', silent: true, force: true, cacheOnly: true, cacheView: 'c'.repeat(64)});
+    assert.equal(requests.length, 1, 'the cache view is checked once');
+    assert.ok(requests[0].startsWith('/api/session-files?'), 'cache-only revalidation stays on the bounded JSON route when Go streaming is enabled');
   });
 
   await testAsync('a newer session-files completion queues behind its in-flight older cache view', async () => {
@@ -7759,6 +7719,48 @@ async function runLayoutAsyncSuite() {
       assert.ok(source.includes(`const ${owner} = {`), `${owner} is the one owner`);
     }
   });
+
+    await testAsync('changed-file open uses repository comparison refs alongside recent-ref rows', async () => {
+      const api = loadYolomux('', ['1']);
+      const path = '/repo/app/src/main.py';
+      const calls = [];
+      api.setSessionFilesPayloadForTest({
+        session: '1', loaded: true, errors: [], warnings: [],
+        files: [{session: '1', repo: '/repo/app', path: 'src/main.py', abs_path: path, status: 'M'}],
+        repos: [{
+          repo: '/repo/app', from_ref: 'default', to_ref: 'base',
+          comparison_from_ref: 'merge-base-sha', comparison_to_ref: 'current',
+        }],
+        refs_by_repo: {'/repo/app': [{ref: 'HEAD', short: 'HEAD', subject: 'base commit'}]},
+      });
+      api.setFetchForTest(url => {
+        const request = String(url);
+        calls.push(request);
+        const requestedPath = decodeURIComponent((request.match(/path=([^&]+)/) || [])[1] || '');
+        if (request.startsWith('/api/fs/read')) {
+          return Promise.resolve(jsonResponse({
+            path: requestedPath, content: 'print("current")\n', size: 16, mtime: 1,
+            realpath: requestedPath, file_id: 'dev:10:ino:20', git_root: '/repo/app',
+            git_tracked: true, git_history: [{ref: 'a'}, {ref: 'b'}], git_has_history: true,
+          }));
+        }
+        if (request.startsWith('/api/fs/diff')) {
+          return Promise.resolve(jsonResponse({
+            repo: '/repo/app', relative_path: 'src/main.py', from_ref: 'base-sha', to_ref: 'topic-sha',
+            diff: '@@ -1 +1 @@\n-print("base")\n+print("current")\n',
+            original: 'print("base")\n', working: 'print("current")\n',
+          }));
+        }
+        return Promise.resolve(jsonResponse({ok: true}));
+      });
+
+      await api.openChangedFileInDiffForTest(path, '1', 'M', '/repo/app', {userInitiated: true});
+
+      const diffRequest = calls.find(request => request.startsWith('/api/fs/diff'));
+      const query = new URL(diffRequest, 'http://localhost').searchParams;
+      assert.equal(query.get('from'), 'merge-base-sha', 'the changed-file opener uses the effective FROM ref behind the default label');
+      assert.equal(query.get('to'), 'current', 'the changed-file opener uses the effective TO ref behind the base label');
+    });
 
     {
       const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin');

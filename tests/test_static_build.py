@@ -1,6 +1,7 @@
 import ast
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -62,6 +63,27 @@ def _grouped_css_selectors(css):
 def test_generated_static_assets_are_current():
     for asset in ASSETS:
         assert (repo_path("static") / asset).read_text(encoding="utf-8") == build_asset(asset)
+
+
+def test_application_bundles_are_ignored_and_untracked():
+    generated_paths = ("static/yolomux.css", "static/yolomux.js", "yolomux-go")
+    for relative_path in generated_paths:
+        tracked = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--", relative_path],
+            cwd=sb.REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        ignored = subprocess.run(
+            ["git", "check-ignore", "--quiet", "--no-index", "--", relative_path],
+            cwd=sb.REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert tracked.returncode == 1, f"{relative_path} is still tracked"
+        assert ignored.returncode == 0, f"{relative_path} is not ignored: {ignored.stderr}"
 
 
 def test_markdown_source_change_invalidates_derived_preview_artifacts():
@@ -833,28 +855,14 @@ def test_shared_ui_ownership_lint_tree_is_clean():
     assert sb.lint_shared_ui_ownership() == []
 
 
-def test_shared_ui_ownership_map_and_agent_reuse_protocol_remain_routable():
+def test_shared_ui_reuse_protocol_stays_in_agent_guide():
     development = repo_path("docs/DEVELOPMENT.md").read_text(encoding="utf-8")
     agents = repo_path("AGENTS.md").read_text(encoding="utf-8")
     readme = repo_path("README.md").read_text(encoding="utf-8")
-    assert "## Shared UI Ownership Map" in development
-    for symbol in (
-        "TAB_TYPES",
-        "bindPanelShell()",
-        "bindActionDispatcher()",
-        "sessionAgentWindowStatusSummary()",
-        "createSharedTreeInteractionController()",
-        "createHoverPopover()",
-        "notificationEventDefinitions",
-        "conversationMessageShellHtml()",
-        "jsDebugGraphChartGroups",
-        "dragPayload()",
-        "YoagentController",
-        "### Central State Containers",
-    ):
-        assert symbol in development
     assert "Before an implementation edit: search for existing behavior owners" in agents
-    assert "Existing parent checked: <symbol>" in development
+    assert "ONE shared parent" in agents
+    assert "rather than copy-pasting a parallel one" in agents
+    assert "Shared UI Ownership Map" not in development
     assert "Shared UI Ownership Map" not in readme
 
 
@@ -870,7 +878,7 @@ def test_panel_frame_builder_owns_the_shared_panel_chrome():
         "static_src/js/yolomux/82_chat_panel.js",
         "static_src/js/yolomux/83_preferences_panel.js",
         "static_src/js/yolomux/85_debug_panel.js",
-        "static_src/js/yolomux/86_changes_editor.js",
+        "static_src/js/yolomux/86_changes_40_finder.js",
         "static_src/js/yolomux/99_terminal_boot.js",
     ):
         source = repo_path(path).read_text(encoding="utf-8")

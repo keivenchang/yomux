@@ -71,13 +71,13 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.openFileStateForTest(path).content, 'working', 'historical URL restoration cannot overwrite unsaved working-tree content');
   });
 
-  test('layout URL state restores the frozen Git history identity and disclosure focus', () => {
+  await testAsync('layout URL state restores the frozen Git history identity and disclosure focus through first scope binding', async () => {
     const api = loadYolomux('', ['1']);
     const item = api.gitDiffItemFor('/repo/src');
     const sha = 'a'.repeat(40), head = 'f'.repeat(40);
     const state = api.setGitDiffTabStateForTest(item, {path: '/repo/src', head, snapshotCursor: 'opaque-zero', focusedSha: sha, loaded: true, loadAttempted: true});
     state.expanded.add(sha);
-    state.detailCollapsedDirectories.set(sha, new Set(['/repo/src/lib']));
+    api.gitDiffCommitRecordForTest(state, sha).collapsedDirectories = new Set(['/repo/src/lib']);
     api.resolveLayoutItem(item);
     api.applyLayoutSlotsForTest(api.layoutWithItems(api.emptyLayoutSlots(), [item]), {focusSession: item, prune: false});
     const snapshot = api.layoutUrlStateSnapshotForTest();
@@ -88,7 +88,18 @@ async function runLayoutRestoreSuite() {
     const restoredState = restored.gitDiffTabStateForTest(item);
     assert.deepStrictEqual([restoredState.head, restoredState.snapshotCursor, restoredState.focusedSha], [head, 'opaque-zero', sha]);
     assert.deepStrictEqual([...restoredState.expanded], [sha]);
-    assert.deepStrictEqual([...restoredState.detailCollapsedDirectories.get(sha)], ['/repo/src/lib']);
+    assert.deepStrictEqual([...restoredState.commitRecords.get(sha).collapsedDirectories], ['/repo/src/lib']);
+    assert.equal(restoredState.commitRecords.get(sha).detailKey, JSON.stringify(['', '', '', sha, '']));
+    restored.setFetchForTest(() => Promise.resolve(jsonResponse({
+      path: '/repo/src', repo: '/repo', relative_path: 'src', shallow_boundary: 'first-boundary', head,
+      commits: [{sha, short: 'aaaaaaaaa', subject: 'restored'}], next_cursor: '', truncated: false,
+    })));
+    await restored.refreshGitDiffHistoryForTest(item, {refresh: true});
+    const refined = restored.gitDiffTabStateForTest(item);
+    assert.deepStrictEqual([...refined.expanded], [sha], 'the first history payload can bind an unresolved restored record without a repository identity');
+    assert.deepStrictEqual([...refined.commitRecords.get(sha).collapsedDirectories], ['/repo/src/lib'], 'scope binding preserves restored directory disclosure state');
+    assert.equal(refined.focusedSha, sha, 'scope binding preserves restored commit focus');
+    assert.equal(refined.commitRecords.get(sha).detail, null, 'the unresolved scope has no detail payload to carry into the bound scope');
   });
 
   test('server-projected agent auth availability preserves the client tri-state decision', () => {
@@ -638,7 +649,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(panelSource.includes("window.prompt(t('common.renameNamed', {name: currentName}), currentName)"), 'fallback file rename prompt reuses the existing localized rename title');
     assert.ok(panelSource.includes("t('finder.close', {name: itemLabel(item)})") && panelSource.includes("t('finder.hideFromLayout', {name: itemLabel(item)})") && panelSource.includes('title: closeLabel') && panelSource.includes('ariaLabel: closeLabel'), 'pane-tab close and hide labels share existing localized templates for title and aria text');
     assert.equal(/`(?:Close|hide|Hide) \$\{itemLabel\(item\)\}/.test(panelSource), false, 'pane-tab controls retain no raw-English close or hide label');
-    assert.ok(fileActionsSource.includes("fileErrorMessageSnapshot(null, 'common.pathNotFound', {path})"), 'file inspection retains the shared missing-path locale descriptor for relocalization');
+    assert.ok(fileActionsSource.includes("fileErrorMessageSnapshot(null, 'common.pathNotFound', {path: normalized})"), 'file inspection retains the shared missing-path locale descriptor for relocalization');
     assert.equal(fileActionsSource.includes('`path not found: ${path}`'), false, 'file inspection retains no raw-English missing-path copy');
     assert.ok(fileActionsSource.includes("tPlural('editor.status.selections', selections)") && fileActionsSource.includes("tPlural('editor.status.selectedChars', selectedChars)"), 'cursor selection counts use plural-aware locale families');
     assert.ok(fileActionsSource.includes("tPlural('editor.status.characters', count)"), 'text-file status uses the shared plural character family');
@@ -662,7 +673,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(agentSource.includes("t('yoagent.tooltip.cwd'") && agentSource.includes("t('yoagent.tooltip.tmuxSilenceAlert')"), 'YO!agent recent-session tooltip fields are localized');
     assert.ok(/const errorDescriptor = userMessageSnapshot[\s\S]*detail_messages: \[\{[\s\S]*key: 'status\.activitySummaryFailed',[\s\S]*params: \{error: errorDescriptor\}/.test(agentSource), 'activity-summary failures retain the shared localized status descriptor and nested server error');
     assert.equal(agentSource.includes('`activity summary unavailable: ${String(error)}`'), false, 'activity-summary fallback retains no raw-English headline');
-    assert.ok(markdownSource.includes("t('preview.markdown.imageUnavailable', {path: target.path || original})"), 'Markdown image failure reuses the existing localized image fallback');
+    assert.ok(/function markdownImageUnavailableMessage\(path\)[\s\S]*t\('preview\.markdown\.imageUnavailable', \{path\}\)/.test(markdownSource), 'Markdown image failures share the existing localized fallback owner');
     assert.equal(markdownSource.includes('`Image unavailable: ${target.path || original}`'), false, 'Markdown image fallback retains no raw-English duplicate');
     assert.ok(previewSource.includes("doc.title = t('preview.popout.title', {name: basenameOf(path)});"), 'preview popout title reuses its existing locale key');
     assert.ok(/function panePopoutDefaultTitle[\s\S]*t\('pane\.popout\.title'[\s\S]*function writePanePopoutDocument[\s\S]*panePopoutDefaultTitle\(\)/.test(panePopoutSource), 'generic pane popouts share one localized fallback-title owner');
@@ -922,6 +933,30 @@ async function runLayoutRestoreSuite() {
       completed: 1,
       pending: 0,
     }, 'the realized layout publishes the same receipt generation');
+  });
+
+  await testAsync('session rename does not create a client session absent from the returned roster', async () => {
+    const api = loadYolomuxWithFileExplorerClosed('?sessions=source&layout=left&tabs=left:source', ['source']);
+    api.setFetchForTest(url => {
+      const parsed = new URL(String(url), 'http://localhost');
+      if (parsed.pathname === '/api/rename-session') {
+        return Promise.resolve(jsonResponse({new_session: 'missing-target', sessions: ['unrelated'], ok: true}));
+      }
+      if (parsed.pathname === '/api/session-metadata') {
+        return Promise.resolve(jsonResponse({session_order: ['unrelated'], sessions: {unrelated: {panes: []}}}));
+      }
+      if (parsed.pathname === '/api/auto-approve') {
+        return Promise.resolve(jsonResponse({session_order: ['unrelated'], sessions: {}, rules: {}}));
+      }
+      return Promise.resolve(jsonResponse({ok: true}));
+    });
+
+    const result = await api.renameTmuxSessionForTest('source', 'missing-target');
+    assert.ok(result?.error, 'the client rejects a success response whose roster omits the renamed identity');
+    assert.deepStrictEqual(canonical(api.sessionsForTest()), ['source'], 'the missing target is not inserted into the client session roster');
+    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
+      left: {tabs: ['source'], active: 'source'},
+    }, 'the missing target is not added to or focused in the client layout');
   });
 
   await testAsync('successful session rename closes its dialog after layout realization', async () => {
@@ -3207,6 +3242,44 @@ async function runLayoutRestoreSuite() {
     assert.equal(renamed.entries.length, 1, 'rename preserves upload entries under the new session');
     assert.notEqual(renamed.cleanupTimer, 77, 'rename replaces the stale old-session timer');
     assert.equal(cleared.includes(77), true, 'rename clears the old-session platform timer before teardown');
+  });
+
+  await testAsync('rename that resolves to the original session preserves metadata and lifecycle state', async () => {
+    const api = loadYolomux('?sessions=source&layout=left&tabs=left:source', ['source']);
+    const sourceInfo = {panes: [{pane_id: '%1'}], session_identity: 'stable-source', marker: 'keep'};
+    await api.applySessionMetadataPayloadForTest({
+      session_order: ['source'],
+      sessions: {source: sourceInfo},
+    }, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+    api.seedSessionLifecycleStateForTest('source');
+    const metadataBefore = canonical(api.transcriptMetadataStateForTest().payload.sessions.source);
+    const {trackedState: _trackedStateBefore, ...lifecycleBefore} = canonical(api.sessionLifecycleStateForTest('source'));
+    api.setFetchForTest(url => {
+      const parsed = new URL(String(url), 'http://localhost');
+      if (parsed.pathname === '/api/rename-session') {
+        return Promise.resolve(jsonResponse({session: 'source', new_session: 'source', renamed: true, sessions: ['source'], topology_generation: 2, ok: true}));
+      }
+      if (parsed.pathname === '/api/ensure-session') return Promise.resolve(jsonResponse({session: 'source', created: false, ok: true}));
+      if (parsed.pathname === '/api/session-metadata') {
+        return Promise.resolve(jsonResponse({session_order: ['source'], sessions: {source: sourceInfo}}));
+      }
+      if (parsed.pathname === '/api/auto-approve') return Promise.resolve(jsonResponse({session_order: ['source'], sessions: {}, rules: {}}));
+      return Promise.resolve(jsonResponse({ok: true}));
+    });
+
+    assert.equal(await api.renameTmuxSessionForTest('source', 'intermediate'), true, 'the server can report that the live identity returned to its original name');
+
+    assert.deepStrictEqual(canonical(api.transcriptMetadataStateForTest().payload.sessions.source), metadataBefore, 'A to B to A reconciliation keeps the original transcript metadata');
+    const {trackedState: _trackedStateAfter, ...lifecycleAfter} = canonical(api.sessionLifecycleStateForTest('source'));
+    assert.deepStrictEqual(lifecycleAfter, lifecycleBefore, 'same-name reconciliation leaves keyed lifecycle state intact');
+    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
+      left: {tabs: ['source'], active: 'source'},
+    }, 'same-name reconciliation leaves the existing tab in place');
+    assert.deepStrictEqual(canonical(api.layoutMutationSnapshotForTest()), {
+      generation: 1,
+      completed: 1,
+      pending: 0,
+    }, 'same-name reconciliation completes the rename layout receipt');
   });
 
   test('session rename migrates the one lifecycle record instead of deleting or partially rekeying it', () => {

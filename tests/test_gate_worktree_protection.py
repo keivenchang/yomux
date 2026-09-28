@@ -490,19 +490,13 @@ def test_server_start_reports_writer_but_keeps_read_only_start_allowed(monkeypat
     assert warnings == ["foreign writer on lin1; read-only"]
 
 
-def test_docs_separate_relocated_artifacts_from_single_writer_generated_source() -> None:
+def test_docs_keep_gate_state_local_to_nfs_checkouts() -> None:
     root = Path(__file__).resolve().parents[1]
-    inventory = (root / "docs" / "MUTABLE-PATH-INVENTORY.md").read_text(encoding="utf-8")
     development = (root / "docs" / "DEVELOPMENT.md").read_text(encoding="utf-8")
 
-    assert "detect and warn" in development
-    assert "refuse writer tools" in development
-    assert "PYTHONPYCACHEPREFIX" in inventory
-    assert ".pytest_cache" in inventory
-    assert "uploads" in inventory and "logs" in inventory
-    assert "generated static" in inventory
-    assert "package metadata" in inventory
-    assert "GIT_OPTIONAL_LOCKS=0" in development
+    assert "host-local temporary storage" in development
+    assert "fixture-owned state and ports" in development
+    assert "operator server on port 7220" in development
 
 
 def test_a_writer_killed_mid_heartbeat_does_not_strand_the_next_writer(tmp_path: Path) -> None:

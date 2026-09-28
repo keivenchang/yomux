@@ -44,6 +44,64 @@ registerTest('settings refresh cannot replace a known revision with unknown meta
   assert.equal(api.clientSettingsMtimeNsForTest(), 100, 'the accepted revision remains authoritative');
 });
 
+registerTest('notification duration changes do not refresh unrelated runtime surfaces', () => {
+  const api = loadYolomux('', ['settings-notification-only']);
+  const settings = JSON.parse(JSON.stringify(DEFAULT_TEST_SETTINGS));
+  api.applySettingsPayloadForTest({settings, defaults: settings, mtime_ns: 1}, {initial: true});
+  const previous = api.settingsStateForTest();
+  const calls = [];
+  const restoreOwners = api.observeSettingsApplyOwnersForTest(name => calls.push(name));
+  try {
+    const nextSettings = JSON.parse(JSON.stringify(settings));
+    nextSettings.notifications.toast_duration_ms = 9000;
+    const nextMtime = Math.max(1, api.clientSettingsMtimeNsForTest() + 1);
+    assert.equal(api.applySettingsPayloadForTest({
+      settings: nextSettings,
+      defaults: settings,
+      mtime_ns: nextMtime,
+    }), true, 'the newer notification setting is accepted');
+  } finally {
+    restoreOwners();
+  }
+  const current = api.settingsStateForTest();
+  const changedGroups = Object.keys(api.settingsApplyDependenciesForTest).filter(group => api.settingsDependencyChangedForTest(
+    group, previous.settings, previous.defaults, current.settings, current.defaults,
+  ));
+  assert.deepStrictEqual(calls.filter(name => name !== 'renderPreferencesPanels'), [], `a notification-only change leaves terminal, editor, preview, autosave, CSS, theme, layout and interval owners untouched; changed groups: ${changedGroups.join(', ')}`);
+});
+
+registerTest('settings refresh dispatches only the affected runtime owners', () => {
+  const api = loadYolomux('', ['settings-owner-dispatch']);
+  const settings = JSON.parse(JSON.stringify(DEFAULT_TEST_SETTINGS));
+  api.applySettingsPayloadForTest({settings, defaults: settings, mtime_ns: 1}, {initial: true});
+  const terminalSettings = JSON.parse(JSON.stringify(settings));
+  terminalSettings.appearance.terminal_font_size = 15;
+  const terminalCalls = [];
+  const restoreTerminalOwners = api.observeSettingsApplyOwnersForTest(name => terminalCalls.push(name));
+  try {
+    assert.equal(api.applySettingsPayloadForTest({settings: terminalSettings, defaults: settings, mtime_ns: 2}), true);
+  } finally {
+    restoreTerminalOwners();
+  }
+  assert.ok(terminalCalls.includes('applyCssSettings'), 'terminal font changes update their shared CSS values');
+  assert.ok(terminalCalls.includes('applyTerminalRuntimeSettings'), 'terminal font changes reconfigure existing terminals');
+  assert.ok(!terminalCalls.includes('applyEditorWrapPreference'), 'terminal font changes do not reconfigure editor wrapping');
+  assert.ok(!terminalCalls.includes('rescheduleAllFileAutosaves'), 'terminal font changes preserve pending autosave deadlines');
+  assert.ok(!terminalCalls.includes('refreshFilePreviewPopouts'), 'terminal font changes do not rerender previews');
+
+  const autosaveSettings = JSON.parse(JSON.stringify(terminalSettings));
+  autosaveSettings.editor.autosave_delay_seconds = 7;
+  const autosaveCalls = [];
+  const restoreAutosaveOwners = api.observeSettingsApplyOwnersForTest(name => autosaveCalls.push(name));
+  try {
+    assert.equal(api.applySettingsPayloadForTest({settings: autosaveSettings, defaults: settings, mtime_ns: 3}), true);
+  } finally {
+    restoreAutosaveOwners();
+  }
+  assert.ok(autosaveCalls.includes('rescheduleAllFileAutosaves'), 'autosave delay changes retime pending saves');
+  assert.ok(!autosaveCalls.includes('applyTerminalRuntimeSettings'), 'autosave delay changes do not touch terminals');
+});
+
 registerTest('YO!info focus changes only select a different canonical worktree and do not mutate graph membership', () => {
   const api = loadYolomux('', ['focus-graph']);
   const graph = {
@@ -1448,12 +1506,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(api.statusHtmlForTest().includes('THEME-T SETTINGS-T theme'), 'settings catches interpolate the localized structured message instead of the raw Error object');
     assert.equal(api.statusHtmlForTest().includes('raw settings diagnostic'), false, 'settings catches do not leak raw backend diagnostics when a descriptor is available');
 
-    const settingsSources = [
-      'static_src/js/yolomux/20_layout_state.js',
-      'static_src/js/yolomux/30_app_menus.js',
-      'static_src/js/yolomux/80_info_panel.js',
-      'static_src/js/yolomux/86_changes_editor.js',
-    ].map(path => fs.readFileSync(path, 'utf8')).join('\n');
+    const settingsSources = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.equal(/status\.(?:settingsSaveFailed|settingsResetFailed|themeSaveFailed)', \{error\}\)/.test(settingsSources), false, 'settings save/reset/theme catches have no raw Error interpolation path');
   });
 
@@ -1668,7 +1721,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       fs.readFileSync('static_src/js/yolomux/39_raw_file_media.js', 'utf8'),
       fs.readFileSync('static_src/js/yolomux/88_markdown_preview.js', 'utf8'),
       fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8'),
-      fs.readFileSync('static_src/js/yolomux/86_changes_editor.js', 'utf8'),
+      ...fs.readdirSync('static_src/js/yolomux')
+        .filter(name => name.startsWith('86_changes_'))
+        .sort()
+        .map(name => fs.readFileSync(`static_src/js/yolomux/${name}`, 'utf8')),
       fs.readFileSync('static_src/js/yolomux/89_preview_renderers.js', 'utf8'),
     ].join('\n');
     assert.equal((sources.match(/function fetchRawFileBlob\(/g) || []).length, 1, 'one shared raw-byte fetch owner serves every preview surface');
@@ -1739,7 +1795,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/session-agent-kind">\$\{activityHtml\}<\/span>\$\{esc\(label\)\}/.test(popoverSource), 'session popover keeps state/AI controls inline with the window text instead of wrapping the full label in a fixed control group');
     const activityRefreshBody = activitySource.slice(activitySource.indexOf('function refreshAgentWindowActivityDisplays('), activitySource.indexOf('function acknowledgeAgentWindowStoppedTransition('));
     assert.ok(activityRefreshBody.includes('refreshPaneTabSessionPopovers(changedSessions)') && activityRefreshBody.includes('syncSessionTabLeadingActivityChrome(changedSessions)') && activityRefreshBody.includes('updatePanelWindowStepButtons(session,'), 'sub-window activity refreshes only the changed session surfaces');
-    assert.equal(activityRefreshBody.includes('renderPanels(') || activityRefreshBody.includes('renderSessionButtons(') || activityRefreshBody.includes('renderPaneTabStrips('), false, 'sub-window acknowledgements never rebuild panels, menus, or complete tab strips');
+    assert.equal(activityRefreshBody.includes('renderPanels(') || activityRefreshBody.includes('renderInfoPanel(') || activityRefreshBody.includes('renderSessionButtons(') || activityRefreshBody.includes('renderPaneTabStrips('), false, 'sub-window acknowledgements update targeted surfaces without rebuilding panels, menus, or complete tab strips');
     const sessionButtonStateBody = popoverSource.slice(popoverSource.indexOf('function updateSessionButtonStates('), popoverSource.indexOf('function sessionPopoverNodeFromHtml('));
     assert.ok(sessionButtonStateBody.includes('applySessionStateClasses(tab,') && sessionButtonStateBody.includes('refreshPaneTabSessionPopovers(sessionNames)') && sessionButtonStateBody.includes('syncSessionTabLeadingActivityChrome(sessionNames)'), 'status refreshes update only the changed tab classes, popovers, and leading markers');
     assert.equal(sessionButtonStateBody.includes('renderPaneTabStrips(') || sessionButtonStateBody.includes('dockviewRefreshTabs(') || sessionButtonStateBody.includes('dockviewSyncMountedPanels('), false, 'periodic status refreshes never reconcile complete Dockview tab or panel trees');
@@ -2026,7 +2082,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.setFileExplorerViewSettingForTest('differ', 'treeDateMode', 'relative');
     assert.equal(dateText(render()), '', 'Finder none remains independent from Differ Ago');
     assert.match(dateText(render({differMode: true})), /ago$/, 'Differ Ago renders through the differMode-aware fallback');
-    const changesSource = fs.readFileSync('static_src/js/yolomux/86_changes_editor.js', 'utf8');
+    const changesSource = fs.readFileSync('static_src/js/yolomux/86_changes_10_session_files.js', 'utf8');
     const finderSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
     assert.ok(/fileExplorerTreeDateModeForView\(options\.view \|\| \(options\.differMode \? 'differ' : 'finder'\)\)/.test(changesSource), 'date text fallback mirrors the recency path instead of defaulting missing view to Differ');
     assert.ok(/renderTreeChildren\(fileExplorerTree, fileExplorerRoot, entries, 0, \{view: 'finder', deferSessionFilesDiff: true\}\)/.test(finderSource) && /renderTreeChildren\(container, root, entries, 0, \{view: 'finder'\}\)/.test(finderSource), 'Finder top-level renders thread their view into shared row rendering');

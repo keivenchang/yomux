@@ -770,7 +770,7 @@ function normalizeProseMirrorEndBreakSource(text) {
 function normalizeLegacyBreakMarkup(text) {
   // Files produced by the earlier adapter may contain literal `<br>` markers. Treat only the
   // standalone marker as a Markdown hard break; ordinary prose containing that text stays text.
-  return String(text || '').replace(/(^|\n)([^\n]*?)<br\s*\/?>\s*(?=\n|$)/gi, '$1$2\\\n');
+  return String(text || '').replace(/(^|\n)([^\n]*?)<br\s*\/?>\r?\n|(^|\n)([^\n]*?)<br\s*\/?>$/gi, '$1$2$3$4\\\n');
 }
 
 function destroyProseMirrorPanel(panel, options = {}) {

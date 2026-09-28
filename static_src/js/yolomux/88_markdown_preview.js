@@ -842,27 +842,29 @@ function markdownPreviewUrlAllowed(value, tagName) {
 
 function sanitizeMarkdownPreviewAttribute(element, attr) {
   const name = String(attr?.name || '').toLowerCase();
-  if (!name) return;
+  if (!name) return true;
   const tagName = String(element.tagName || '').toLowerCase();
   if (tagName === 'input' && !MARKDOWN_PREVIEW_INPUT_ATTRS.has(name)) {
     element.removeAttribute(attr.name);
-    return;
+    return true;
   }
   if (name.startsWith('on') || name === 'style' || name === 'srcdoc' || name === 'srcset' || name === 'formaction') {
     element.removeAttribute(attr.name);
-    return;
+    return true;
   }
   if (name.includes(':') && name !== 'xlink:href') {
     element.removeAttribute(attr.name);
-    return;
+    return true;
   }
   if (MARKDOWN_PREVIEW_URL_ATTRS.has(name) && !markdownPreviewUrlAllowed(attr.value, tagName)) {
+    if (tagName === 'img' && name === 'src') return false;
     element.removeAttribute(attr.name);
-    return;
+    return true;
   }
   if (name === 'target' && element.getAttribute('target') === '_blank') {
     element.setAttribute('rel', 'noopener noreferrer');
   }
+  return true;
 }
 
 function markdownPreviewInputAllowed(element) {
@@ -900,8 +902,12 @@ function sanitizeMarkdownPreviewNode(root) {
         child.removeAttribute(attr.name);
         continue;
       }
-      sanitizeMarkdownPreviewAttribute(child, attr);
+      if (!sanitizeMarkdownPreviewAttribute(child, attr)) {
+        child.remove();
+        break;
+      }
     }
+    if (!child.parentNode) continue;
     sanitizeMarkdownPreviewNode(child);
   }
 }
@@ -1213,6 +1219,10 @@ function markdownPreviewImageTarget(src, markdownPath) {
   return {src: rawFileUrl(resolved), path: resolved, external: false};
 }
 
+function markdownImageUnavailableMessage(path) {
+  return t('preview.markdown.imageUnavailable', {path});
+}
+
 function prosemirrorPreviewImageSource(image, path, options = {}) {
   if (!image || !path) return Promise.resolve(false);
   const target = markdownPreviewImageTarget(image.dataset.originalSrc || image.getAttribute('src') || '', path);
@@ -1221,11 +1231,11 @@ function prosemirrorPreviewImageSource(image, path, options = {}) {
     isCurrent: options.isCurrent,
     onFailure: error => {
       image.classList.add('prosemirror-image-error');
-      image.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: target.path}));
+      image.title = markdownImageUnavailableMessage(target.path);
     },
     onDecodeFailure: error => {
       image.classList.add('prosemirror-image-error');
-      image.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: target.path}));
+      image.title = markdownImageUnavailableMessage(target.path);
     },
   }).then(result => result.ok === true);
 }
@@ -1234,7 +1244,7 @@ function markdownImageFallbackNode(path, label = '') {
   const node = document.createElement('span');
   node.className = 'markdown-image-error';
   const text = document.createElement('span');
-  text.textContent = label || t('preview.markdown.imageUnavailable', {path});
+  text.textContent = label || markdownImageUnavailableMessage(path);
   node.appendChild(text);
   node.append(...previewFileActionLinks(path, {leadingSeparator: ' '}));
   return node;
@@ -1264,7 +1274,7 @@ function rewriteMarkdownPreviewImages(root, markdownPath, options = {}) {
       img.setAttribute('src', target.src);
       img.addEventListener('error', () => {
         void scheduleMarkdownImageFallbackAfterUserScroll(options.previewContainer, img, () => (
-          markdownImageFallbackNode(target.path, t('preview.markdown.imageUnavailable', {path: target.path || original}))
+          markdownImageFallbackNode(target.path, markdownImageUnavailableMessage(target.path || original))
         ));
       }, {once: true});
       continue;
@@ -1275,8 +1285,11 @@ function rewriteMarkdownPreviewImages(root, markdownPath, options = {}) {
     img.removeAttribute('src');
     img.addEventListener('error', () => {
       if (options.isCurrent?.() === false) return;
+      const message = markdownImageUnavailableMessage(target.path || original);
+      img.classList.add('markdown-preview-image-error');
+      img.title = message;
       void scheduleMarkdownImageFallbackAfterUserScroll(options.previewContainer, img, () => (
-        markdownImageFallbackNode(target.path, t('preview.markdown.imageUnavailable', {path: target.path || original}))
+        markdownImageFallbackNode(target.path, message)
       ));
     }, {once: true});
   }
@@ -1969,11 +1982,11 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
         isCurrent: () => container._markdownPreviewGeneration === generation && img.isConnected,
         onFailure: error => {
           img.classList.add('markdown-preview-image-error');
-          img.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: rawPath}));
+          img.title = markdownImageUnavailableMessage(rawPath);
         },
         onDecodeFailure: error => {
           img.classList.add('markdown-preview-image-error');
-          img.title = userMessageText(error, t('preview.markdown.imageUnavailable', {path: rawPath}));
+          img.title = markdownImageUnavailableMessage(rawPath);
         },
       }));
     }

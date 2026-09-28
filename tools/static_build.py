@@ -190,7 +190,7 @@ SHARED_UI_OWNERSHIP_REQUIREMENTS = {
     "static_src/js/yolomux/45_file_explorer_actions.js": (
         ("Finder tree controller registration", "const finderTreeInteractionController = createSharedTreeInteractionController({"),
     ),
-    "static_src/js/yolomux/86_changes_editor.js": (
+    "static_src/js/yolomux/86_changes_20_differ.js": (
         ("Differ tree controller registration", "const differTreeInteractionController = createSharedTreeInteractionController({"),
     ),
 }
@@ -211,11 +211,11 @@ NORMALIZED_PRODUCTION_CLONE_ALLOWLIST: dict[str, str] = {
     "yolomux_lib/stats_current/migration.py, yolomux_lib/stats_current/storage.py:08ee56a6d225": "SQLite migration and storage transaction wrappers are separate boundaries",
     "yolomux_lib/stats_current/migration.py, yolomux_lib/stats_current/storage.py:197895be7a90": "SQLite migration and storage transaction wrappers are separate boundaries",
     "yolomux_lib/stats_current/migration.py, yolomux_lib/stats_current/storage.py:566ab5821680": "SQLite migration and storage transaction wrappers are separate boundaries",
-    "static_src/js/yolomux/85_git_diff_viewer.js, static_src/js/yolomux/86_changes_editor.js:09d8f565dfb2": "Differ and changes editor each own separate SSE stream consumers",
-    "static_src/js/yolomux/85_git_diff_viewer.js, static_src/js/yolomux/86_changes_editor.js:0b8d97565a93": "Differ and changes editor each own separate SSE stream consumers",
-    "static_src/js/yolomux/85_git_diff_viewer.js, static_src/js/yolomux/86_changes_editor.js:0fa488303097": "Differ and changes editor each own separate SSE stream consumers",
-    "static_src/js/yolomux/85_git_diff_viewer.js, static_src/js/yolomux/86_changes_editor.js:5fc7ee95ca7c": "Differ and changes editor each own separate SSE stream consumers",
-    "static_src/js/yolomux/85_git_diff_viewer.js, static_src/js/yolomux/86_changes_editor.js:6cdd8a05e7db": "Differ and changes editor each own separate SSE stream consumers",
+    "static_src/js/yolomux/85_git_diff_viewer.js, static_src/js/yolomux/86_changes_10_session_files.js:09d8f565dfb2": "Differ and changes editor each own separate SSE stream consumers",
+    "static_src/js/yolomux/85_git_diff_viewer.js, static_src/js/yolomux/86_changes_10_session_files.js:0b8d97565a93": "Differ and changes editor each own separate SSE stream consumers",
+    "static_src/js/yolomux/85_git_diff_viewer.js, static_src/js/yolomux/86_changes_10_session_files.js:0fa488303097": "Differ and changes editor each own separate SSE stream consumers",
+    "static_src/js/yolomux/85_git_diff_viewer.js, static_src/js/yolomux/86_changes_10_session_files.js:5fc7ee95ca7c": "Differ and changes editor each own separate SSE stream consumers",
+    "static_src/js/yolomux/85_git_diff_viewer.js, static_src/js/yolomux/86_changes_10_session_files.js:6cdd8a05e7db": "Differ and changes editor each own separate SSE stream consumers",
 }
 CSS_COLOR_LITERAL_PATTERN = r"#[0-9a-fA-F]{3,8}\b|rgba?\([^)]+\)"
 CSS_COLOR_LITERAL_RE = re.compile(CSS_COLOR_LITERAL_PATTERN)
@@ -767,6 +767,11 @@ ASSETS: dict[str, list[str]] = {
         "static_src/js/yolomux/84_debug_observation.js",
         "static_src/js/yolomux/85_debug_panel.js",
         "static_src/js/yolomux/85_git_diff_viewer.js",
+        "static_src/js/yolomux/86_changes_00_refs.js",
+        "static_src/js/yolomux/86_changes_10_session_files.js",
+        "static_src/js/yolomux/86_changes_20_differ.js",
+        "static_src/js/yolomux/86_changes_30_preferences.js",
+        "static_src/js/yolomux/86_changes_40_finder.js",
         "static_src/js/yolomux/86_changes_editor.js",
         "static_src/js/yolomux/87_editor_nav.js",
         "static_src/js/yolomux/88_markdown_preview.js",

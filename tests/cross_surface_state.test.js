@@ -65,7 +65,7 @@ async function runCrossSurfaceStateSuite() {
     assert.deepEqual(cacheApi.sessionFilesCacheSizesForTest(), {finder: 1, differ: 1});
     cacheApi.setRepoDiffRefsForTest('/repo/app', 'v0.7.4', 'current');
     assert.deepEqual(cacheApi.sessionFilesCacheSizesForTest(), {finder: 1, differ: 0}, 'changing Differ refs invalidates only the Differ cache');
-    assert.match(fs.readFileSync('static_src/js/yolomux/86_changes_editor.js', 'utf8'), /function setRepoDiffRefs[\s\S]*invalidateSessionFilesCaches\('differ'\)[\s\S]*fetchSessionFiles\(\{destination: 'differ'/, 'the ref transition refreshes only Differ');
+    assert.match(fs.readFileSync('static_src/js/yolomux/86_changes_00_refs.js', 'utf8'), /function setRepoDiffRefs[\s\S]*invalidateSessionFilesCaches\('differ'\)[\s\S]*fetchSessionFiles\(\{destination: 'differ'/, 'the ref transition refreshes only Differ');
   });
 
   test('initial URL Git history state is applied before layout construction without a temporal-dead-zone failure', () => {
@@ -696,7 +696,7 @@ async function runCrossSurfaceStateSuite() {
     for (const listener of api.documentListenersForTest('scroll')) listener({target: new TestElement('outside')});
     assert.equal(api.diffRefPopoverStateForTest().input, null, 'scroll cleanup drops a detached owning input');
     for (const name of ['diffRefPopoverInput', 'diffRefPopoverItemsCurrent', 'diffRefPopoverActiveIndex', 'diffRefPopoverListenersInstalled']) {
-      assert.equal(fs.readFileSync('static_src/js/yolomux/86_changes_editor.js', 'utf8').includes(name), false, `${name} remains retired`);
+      assert.equal(fs.readFileSync('static/yolomux.js', 'utf8').includes(name), false, `${name} remains retired`);
     }
     assert.equal(changedFilesSource.includes('.showPicker('), false, 'diff refs do not use the browser-native popup API');
     api.setFileExplorerSessionFilesPayloadForTest({
@@ -847,6 +847,54 @@ async function runCrossSurfaceStateSuite() {
     assert.notEqual(api.sessionFilesPayloadSignatureForPayloadForTest(liveFile),
       api.sessionFilesPayloadSignatureForPayloadForTest(goneFile),
       'a file that just went missing changes the payload signature');
+    const comparedPayload = {
+      session: '1', loaded: true, files: [{...baseFile, old_path: 'before.py', binary: false, counts_available: true, diff_tracked: true}],
+      repos: [{...baseRepo, comparison_from_ref: 'aaaaaaaa', comparison_to_ref: 'current'}],
+      refs_by_repo: {'/repo/app': [{ref: 'aaaaaaaa', short: 'aaaaaaa', subject: 'old branch'}]}, errors: [], warnings: [],
+    };
+    const updatedComparison = {
+      ...comparedPayload,
+      files: [{...comparedPayload.files[0], old_path: 'renamed.py', binary: true, counts_available: false, diff_tracked: false}],
+      repos: [{...comparedPayload.repos[0], comparison_from_ref: 'bbbbbbbb'}],
+      refs_by_repo: {'/repo/app': [{ref: 'bbbbbbbb', short: 'bbbbbbb', subject: 'new branch'}]},
+    };
+    assert.notEqual(api.sessionFilesPayloadSignatureForPayloadForTest(comparedPayload),
+      api.sessionFilesPayloadSignatureForPayloadForTest(updatedComparison),
+      'comparison refs, ref suggestions, and file display metadata participate in the canonical payload signature');
+    assert.notEqual(api.sessionFilesPayloadSignatureForPayloadForTest({...comparedPayload, cache: {request_descriptor: 'a'.repeat(64)}}),
+      api.sessionFilesPayloadSignatureForPayloadForTest({...comparedPayload, cache: {request_descriptor: 'b'.repeat(64)}}),
+      'the request descriptor used by later push matching participates in the canonical payload signature');
+    assert.equal(api.sessionFilesPayloadSignatureForPayloadForTest({...comparedPayload, cache: {request_descriptor: 'a'.repeat(64), hit: true, age_seconds: 0.2, refresh_seconds: 2}}),
+      api.sessionFilesPayloadSignatureForPayloadForTest({...comparedPayload, cache: {request_descriptor: 'a'.repeat(64)}}),
+      'volatile cache telemetry differences between HTTP and cache-view responses do not reapply identical canonical data');
+    const reverseObjectKeys = value => {
+      if (Array.isArray(value)) return value.map(reverseObjectKeys);
+      if (!value || typeof value !== 'object') return value;
+      return Object.fromEntries(Object.keys(value).reverse().map(key => [key, reverseObjectKeys(value[key])]));
+    };
+    const keyReorderedPayload = reverseObjectKeys(comparedPayload);
+    assert.equal(api.sessionFilesPayloadSignatureForPayloadForTest(comparedPayload),
+      api.sessionFilesPayloadSignatureForPayloadForTest(keyReorderedPayload),
+      'disk-cache key sorting preserves signatures when nested object keys are reordered');
+    const twoFilePayload = {...comparedPayload, files: [...comparedPayload.files, {...comparedPayload.files[0], path: 'b.py'}]};
+    const reversedFiles = {...twoFilePayload, files: [...twoFilePayload.files].reverse()};
+    assert.notEqual(api.sessionFilesPayloadSignatureForPayloadForTest(twoFilePayload),
+      api.sessionFilesPayloadSignatureForPayloadForTest(reversedFiles),
+      'disk-cache key sorting preserves file array order');
+
+    const updatedApi = loadYolomux('', ['1']);
+    updatedApi.setFileExplorerModeForTest('diff');
+    updatedApi.setFileExplorerChangesSelectedSessionForTest('1');
+    const comparisonRequest = {session: '1', hours: 24, from_ref: 'HEAD', to_ref: 'current'};
+    assert.equal(updatedApi.applySessionFilesPayloadFromPushForTest(comparedPayload, comparisonRequest), true,
+      'the initial comparison payload establishes the accepted signature');
+    assert.equal(updatedApi.applySessionFilesPayloadFromPushForTest(updatedComparison,
+      comparisonRequest), true,
+    'a payload that changes only comparison metadata is accepted');
+    assert.equal(updatedApi.sessionFilesPayloadForTest().repos[0].comparison_from_ref, 'bbbbbbbb',
+      'the visible Differ adopts the updated comparison SHA');
+    assert.equal(updatedApi.sessionFilesPayloadForTest().refs_by_repo['/repo/app'][0].subject, 'new branch',
+      'the visible ref suggestions follow the accepted payload');
   });
 
   test('cross-surface host state 04: C5: agent attribution renders 0-to-N icons from item.agents (Claude before Codex), with...', () => {
@@ -2011,7 +2059,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/function sessionFilesPayloadShouldPreserveCurrent\([\s\S]*sessionFilesPayloadIsRootlessEmpty\(nextPayload\)[\s\S]*sessionFilesRepoRoots\(current\)\.length > 0/.test(appSource), 'Differ ignores rootless empty session-files pushes after a rooted payload is already visible');
     assert.ok(/function sessionFilesPayloadShouldPreserveCurrent\([\s\S]*sessionFilesPayloadIsRefreshing\(nextPayload\)[\s\S]*sessionFilesRepoRoots\(current\)\.length > 0/.test(appSource), 'Differ ignores local-refresh placeholders after a rooted payload is already visible');
     assert.ok(/function sessionFilesPayloadHasVisibleDifferResult\(payload, files = null\)[\s\S]*sessionFilesPayloadIsRefreshing\(payload\)[\s\S]*return false/.test(appSource), 'a rooted local-refresh placeholder remains loading until real files, warnings, or errors arrive');
-    assert.ok(/function applySessionFilesPayloadToDestination\(destination, payload, request, session\)[\s\S]*const wasLoading = sessionFilesLoadingForDestination\(destination\);[\s\S]*setSessionFilesLoadingForDestination\(destination, false\)/.test(appSource), 'accepted session-files pushes clear each destination stale foreground loading flag before rerendering');
+    assert.ok(/function applySessionFilesPayloadToDestination\(destination, payload, request, session, options = \{\}\)[\s\S]*const wasLoading = sessionFilesLoadingForDestination\(destination\);[\s\S]*options\.clearLoading !== false && wasLoading[\s\S]*setSessionFilesLoadingForDestination\(destination, false\)/.test(appSource), 'accepted session-files pushes clear each destination stale foreground loading flag before rerendering');
     assert.ok(/if \(backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent\(nextPayload, destination\)\) return;/.test(appSource), 'background refreshes cannot blank a rooted destination payload with a rootless empty result');
     assert.ok(/function sessionFilesRelevantDiffRefRepos\([\s\S]*sessionFilesRepoRoots\(payload\)[\s\S]*function sessionFilesRefsQuery\([\s\S]*relevantRepos\.has\(normalizedRepo\)[\s\S]*nextRefs\.from === globalRefs\.from/.test(appSource), 'session-files requests prune stale per-repo refs before calling the API');
     assert.ok(/function noteFileExplorerChangesSessionInteraction\(session\)[\s\S]*fileExplorerChangesSelectedSession = session;[\s\S]*document\.querySelector\('\.file-explorer-changes-panel'\)[\s\S]*switchFileExplorerChangesSession\(session\)/.test(appSource), 'committing a session refreshes the mounted Finder/Differ surface without a parallel global-mode branch');

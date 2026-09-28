@@ -1,7 +1,7 @@
 """Transcript parsing helpers for agent activity and approval fallback state.
 
-Keep transcript recency and pending-tool rules synced with
-docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#transcript-signals.
+Transcript recency and pending-tool behavior is exercised by
+``tests/test_transcripts.py`` and ``tests/test_auto_approve_detector.py``.
 """
 
 from __future__ import annotations

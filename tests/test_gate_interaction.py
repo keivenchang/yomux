@@ -66,7 +66,7 @@ def _load_toggle_fixture(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
     run_when_browser_ready(
         browser,
-        "return document.querySelector('[data-yolo-session=\"1\"]') !== null;",
+        "const marker = document.querySelector('[data-yolo-session=\"1\"]'); return marker !== null && marker.hasAttribute('aria-pressed');",
         globals_required={"toggleAutoApprove": "function"},
         dom_anchors=("[data-yolo-session=\"1\"]", "#status"),
     )
@@ -752,17 +752,17 @@ def test_k4_yolo_toggle_reverts_its_optimistic_state_on_failure(browser, tmp_pat
         """
         const done = arguments[arguments.length - 1];
         const button = document.querySelector('[data-yolo-session="1"]');
-        const before = button.getAttribute('aria-pressed');
+        const before = button.classList.contains('active');
         let rejectRequest;
         const restoreFetch = window.__fixtureInterceptAutoApproveFetch(
           () => new Promise((_resolve, reject) => { rejectRequest = reject; }),
         );
         const request = toggleAutoApprove('1');
         requestAnimationFrame(async () => {
-          const pending = button.getAttribute('aria-pressed');
+          const pending = button.classList.contains('active');
           rejectRequest(new TypeError('fixture mutation failure'));
           await request;
-          const after = button.getAttribute('aria-pressed');
+          const after = button.classList.contains('active');
           restoreFetch();
           done({before, pending, after});
         });
@@ -857,7 +857,7 @@ def test_k7_overdue_mutation_keeps_its_control_disabled_without_abort_and_conver
         const outcome = arguments[0];
         const done = arguments[arguments.length - 1];
         const button = document.querySelector('[data-yolo-session="1"]');
-        const before = button.getAttribute('aria-pressed');
+        const before = button.classList.contains('active');
         let settleRequest;
         let signal = null;
         const restoreFetch = window.__fixtureInterceptAutoApproveFetch((_url, options = {}) => (
@@ -906,8 +906,8 @@ def test_k7_overdue_mutation_keeps_its_control_disabled_without_abort_and_conver
               pending,
               enabled: button.disabled === false && button.getAttribute('aria-busy') !== 'true',
               overdueRevoked: !overdueAfter,
-              committed: button.getAttribute('aria-pressed') !== before,
-              rolledBack: button.getAttribute('aria-pressed') === before,
+              committed: button.classList.contains('active') !== before,
+              rolledBack: button.classList.contains('active') === before,
               errorVisible,
             });
           }));

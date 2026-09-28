@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -311,6 +312,405 @@ func TestGoCreateSessionLaunchesShellAndAgentsWithExplicitDangerousFlags(t *test
 	denied.createSession(record, request)
 	if record.Code != http.StatusForbidden || !bytes.Contains(record.Body.Bytes(), []byte("--dangerously-yolo")) {
 		t.Fatalf("dangerous launch without opt-in = %d %s", record.Code, record.Body.String())
+	}
+}
+
+func TestGoRenameSessionRouteValidatesAndRenamesExactTmuxSession(t *testing.T) {
+	tmuxDir, err := os.MkdirTemp("/tmp", "yo7220-session-rename-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmuxDir) })
+	tmuxSocket := filepath.Join(tmuxDir, "tmux.sock")
+	t.Setenv("YOLOMUX_TMUX_SOCKET", tmuxSocket)
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", tmuxSocket, "kill-server").Run() })
+	for _, name := range []string{"yo-rename-source", "yo-rename-source-extra", "yo-rename-keeper"} {
+		if output, err := exec.Command("tmux", "-S", tmuxSocket, "new-session", "-d", "-s", name).CombinedOutput(); err != nil {
+			t.Fatalf("create private tmux session %q: %v (%s)", name, err, output)
+		}
+	}
+
+	config := t.TempDir()
+	if err := os.WriteFile(filepath.Join(config, "auth.yaml"), []byte("users:\n  - username: admin\n    password: secret\n    role: admin\n  - username: reader\n    password: secret\n    role: readonly\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := &server{config: config, capabilities: capabilities.New("go-test")}
+	mux := http.NewServeMux()
+	srv.registerSessionRoutes(mux)
+	mux.Handle("/api/", srv.protected(http.HandlerFunc(srv.unsupported), "readonly"))
+	request := func(username, query string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/rename-session?"+query, nil)
+		req.SetBasicAuth(username, "secret")
+		record := httptest.NewRecorder()
+		mux.ServeHTTP(record, req)
+		return record
+	}
+
+	if got := request("reader", "session=yo-rename-source&new_name=forbidden"); got.Code != http.StatusForbidden {
+		t.Fatalf("readonly rename status = %d, body=%s", got.Code, got.Body.String())
+	}
+	if got := request("admin", "session=yo-rename-source&new_name=yo-rename-keeper"); got.Code != http.StatusConflict {
+		t.Fatalf("duplicate rename status = %d, body=%s", got.Code, got.Body.String())
+	}
+	if got := request("admin", "session=yo-rename-source&new_name=bad%2Fname"); got.Code != http.StatusBadRequest {
+		t.Fatalf("invalid rename status = %d, body=%s", got.Code, got.Body.String())
+	}
+
+	response := request("admin", "session=yo-rename-source&new_name=-yo-rename-target.dev")
+	if response.Code != http.StatusOK {
+		t.Fatalf("rename status = %d, body=%s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		NewSession string   `json:"new_session"`
+		Renamed    bool     `json:"renamed"`
+		Sessions   []string `json:"sessions"`
+		Generation uint64   `json:"topology_generation"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.NewSession != "-yo-rename-target_dev" || !payload.Renamed || payload.Generation == 0 {
+		t.Fatalf("rename payload = %#v, want sanitized name and topology generation", payload)
+	}
+	if !slices.Contains(payload.Sessions, "-yo-rename-target_dev") || slices.Contains(payload.Sessions, "yo-rename-source") || !slices.Contains(payload.Sessions, "yo-rename-source-extra") {
+		t.Fatalf("renamed session list = %#v, want exact source renamed and prefix neighbor preserved", payload.Sessions)
+	}
+	if err := exec.Command("tmux", "-S", tmuxSocket, "has-session", "-t", "=-yo-rename-target_dev:").Run(); err != nil {
+		t.Fatalf("renamed exact tmux session missing: %v", err)
+	}
+	if err := exec.Command("tmux", "-S", tmuxSocket, "has-session", "-t", "=yo-rename-source-extra:").Run(); err != nil {
+		t.Fatalf("prefix-neighbor tmux session changed: %v", err)
+	}
+	if output, err := exec.Command("tmux", "-S", tmuxSocket, "new-session", "-d", "-s", "yo rename source").CombinedOutput(); err != nil {
+		t.Fatalf("create spaced-name fixture session: %v (%s)", err, output)
+	}
+	spacedResponse := request("admin", "session="+url.QueryEscape("yo rename source")+"&new_name="+url.QueryEscape("yo rename target"))
+	if spacedResponse.Code != http.StatusOK {
+		t.Fatalf("rename with spaces in the source and destination status = %d, body=%s", spacedResponse.Code, spacedResponse.Body.String())
+	}
+	if err := exec.Command("tmux", "-S", tmuxSocket, "has-session", "-t", "=yo rename target:").Run(); err != nil {
+		t.Fatalf("spaced source did not rename to the spaced destination: %v", err)
+	}
+	if output, err := exec.Command("tmux", "-S", tmuxSocket, "new-session", "-d", "-s", "yo-refresh-source").CombinedOutput(); err != nil {
+		t.Fatalf("create roster-refresh fixture session: %v (%s)", err, output)
+	}
+	rosterReads := 0
+	concurrentRosterRead := make(chan struct{})
+	srv.tmuxSessionRosterFn = func() ([]string, error) {
+		rosterReads++
+		if rosterReads == 1 {
+			go func() {
+				_, _ = srv.tmuxTopologySnapshot(true)
+				close(concurrentRosterRead)
+			}()
+			return []string{"-yo-rename-target_dev", "yo-rename-source-extra", "yo-rename-keeper", "yo-refresh-source"}, nil
+		}
+		return nil, errors.New("simulated roster read failure")
+	}
+	refreshResponse := request("admin", "session=yo-refresh-source&new_name=yo-refresh-target")
+	if refreshResponse.Code != http.StatusOK {
+		t.Fatalf("rename with failed follow-up roster read status = %d, body=%s", refreshResponse.Code, refreshResponse.Body.String())
+	}
+	var refreshedPayload struct {
+		Sessions   []string `json:"sessions"`
+		Generation uint64   `json:"topology_generation"`
+	}
+	if err := json.Unmarshal(refreshResponse.Body.Bytes(), &refreshedPayload); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(refreshedPayload.Sessions, "yo-refresh-target") || slices.Contains(refreshedPayload.Sessions, "yo-refresh-source") || refreshedPayload.Generation <= payload.Generation {
+		t.Fatalf("rename fallback payload = %#v, want new name and advanced topology generation", refreshedPayload)
+	}
+	select {
+	case <-concurrentRosterRead:
+	case <-time.After(time.Second):
+		t.Fatal("concurrent roster read did not resume after rename confirmation")
+	}
+	liveTopology, liveErr := srv.tmuxTopologySnapshot()
+	if liveErr == nil || !slices.Contains(liveTopology.sessions, "yo-refresh-target") || slices.Contains(liveTopology.sessions, "yo-refresh-source") || liveTopology.generation != refreshedPayload.Generation {
+		t.Fatalf("cached topology after refresh failure = %#v, err=%v; want published renamed roster and generation", liveTopology, liveErr)
+	}
+	if output, err := exec.Command("tmux", "-S", tmuxSocket, "new-session", "-d", "-s", "yo-race-source").CombinedOutput(); err != nil {
+		t.Fatalf("create superseded-rename fixture session: %v (%s)", err, output)
+	}
+	supersessionReads := 0
+	srv.tmuxSessionRosterFn = func() ([]string, error) {
+		supersessionReads++
+		if supersessionReads == 1 {
+			return []string{"-yo-rename-target_dev", "yo-rename-source-extra", "yo-rename-keeper", "yo-refresh-target", "yo-race-source"}, nil
+		}
+		if supersessionReads == 2 {
+			if err := exec.Command("tmux", "-S", tmuxSocket, "rename-session", "-t", "=yo-race-intermediate:", "--", "yo-race-latest").Run(); err != nil {
+				return nil, err
+			}
+			srv.rememberTmuxSessionRoster(
+				[]string{"-yo-rename-target_dev", "yo-rename-source-extra", "yo-rename-keeper", "yo-refresh-target", "yo-race-latest"},
+				map[string]string{"-yo-rename-target_dev": "-yo-rename-target_dev", "yo-rename-source-extra": "yo-rename-source-extra", "yo-rename-keeper": "yo-rename-keeper", "yo-refresh-target": "yo-refresh-target", "yo-race-latest": "yo-race-source"},
+			)
+		}
+		return nil, errors.New("simulated stale roster read")
+	}
+	supersededResponse := request("admin", "session=yo-race-source&new_name=yo-race-intermediate")
+	if supersededResponse.Code != http.StatusOK {
+		t.Fatalf("rename with newer roster publication status = %d, body=%s", supersededResponse.Code, supersededResponse.Body.String())
+	}
+	var supersededPayload struct {
+		NewSession string   `json:"new_session"`
+		Sessions   []string `json:"sessions"`
+		Generation uint64   `json:"topology_generation"`
+	}
+	if err := json.Unmarshal(supersededResponse.Body.Bytes(), &supersededPayload); err != nil {
+		t.Fatal(err)
+	}
+	if supersededPayload.NewSession != "yo-race-latest" || !slices.Contains(supersededPayload.Sessions, "yo-race-latest") || slices.Contains(supersededPayload.Sessions, "yo-race-intermediate") || supersededPayload.Generation <= refreshedPayload.Generation {
+		t.Fatalf("superseded rename payload = %#v, want latest name without resurrecting intermediate name", supersededPayload)
+	}
+	if output, err := exec.Command("tmux", "-S", tmuxSocket, "new-session", "-d", "-s", "yo-return-source").CombinedOutput(); err != nil {
+		t.Fatalf("create return-to-original fixture session: %v (%s)", err, output)
+	}
+	returnReads := 0
+	srv.tmuxSessionRosterFn = func() ([]string, error) {
+		returnReads++
+		if returnReads == 1 {
+			return []string{"-yo-rename-target_dev", "yo-rename-source-extra", "yo-rename-keeper", "yo-refresh-target", "yo-race-latest", "yo-return-source"}, nil
+		}
+		if returnReads == 2 {
+			if err := exec.Command("tmux", "-S", tmuxSocket, "rename-session", "-t", "=yo-return-intermediate:", "--", "yo-return-source").Run(); err != nil {
+				return nil, err
+			}
+			srv.rememberTmuxSessionRoster(
+				[]string{"-yo-rename-target_dev", "yo-rename-source-extra", "yo-rename-keeper", "yo-refresh-target", "yo-race-latest", "yo-return-source"},
+				map[string]string{"-yo-rename-target_dev": "-yo-rename-target_dev", "yo-rename-source-extra": "yo-rename-source-extra", "yo-rename-keeper": "yo-rename-keeper", "yo-refresh-target": "yo-refresh-target", "yo-race-latest": "yo-race-source", "yo-return-source": "yo-return-source"},
+			)
+		}
+		return nil, errors.New("simulated stale roster read")
+	}
+	returnedResponse := request("admin", "session=yo-return-source&new_name=yo-return-intermediate")
+	if returnedResponse.Code != http.StatusOK {
+		t.Fatalf("rename with return-to-original publication status = %d, body=%s", returnedResponse.Code, returnedResponse.Body.String())
+	}
+	var returnedPayload struct {
+		NewSession string   `json:"new_session"`
+		Sessions   []string `json:"sessions"`
+	}
+	if err := json.Unmarshal(returnedResponse.Body.Bytes(), &returnedPayload); err != nil {
+		t.Fatal(err)
+	}
+	if returnedPayload.NewSession != "yo-return-source" || !slices.Contains(returnedPayload.Sessions, "yo-return-source") || slices.Contains(returnedPayload.Sessions, "yo-return-intermediate") {
+		t.Fatalf("return-to-original rename payload = %#v, want original live name without stale intermediate", returnedPayload)
+	}
+	if output, err := exec.Command("tmux", "-S", tmuxSocket, "new-session", "-d", "-s", "yo-lock-source").CombinedOutput(); err != nil {
+		t.Fatalf("create roster-lock fixture session: %v (%s)", err, output)
+	}
+	lockTmuxBinary, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockBinDir := t.TempDir()
+	readyFIFO := filepath.Join(lockBinDir, "rename-ready")
+	releaseFIFO := filepath.Join(lockBinDir, "rename-release")
+	if err := syscall.Mkfifo(readyFIFO, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(releaseFIFO, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lockTmuxWrapper := filepath.Join(lockBinDir, "tmux")
+	lockWrapperScript := fmt.Sprintf("#!/bin/sh\nfor arg do\n  if [ \"$arg\" = \"rename-session\" ]; then\n    printf 'ready\\n' > '%s'\n    IFS= read -r _ < '%s'\n    break\n  fi\ndone\nexec %s \"$@\"\n", readyFIFO, releaseFIFO, lockTmuxBinary)
+	if err := os.WriteFile(lockTmuxWrapper, []byte(lockWrapperScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	originalTmuxPath := os.Getenv("PATH")
+	t.Setenv("PATH", lockBinDir+string(os.PathListSeparator)+originalTmuxPath)
+	var lockReads atomic.Int32
+	var commandBlocked atomic.Bool
+	var confirmationRead atomic.Bool
+	commandBlocked.Store(true)
+	readerStarted := make(chan struct{})
+	readerDone := make(chan struct{})
+	srv.tmuxSessionRosterFn = func() ([]string, error) {
+		switch lockReads.Add(1) {
+		case 1:
+			go func() {
+				close(readerStarted)
+				_, _ = srv.tmuxTopologySnapshot(true)
+				close(readerDone)
+			}()
+			<-readerStarted
+			return []string{"-yo-rename-target_dev", "yo-rename-source-extra", "yo-rename-keeper", "yo-refresh-target", "yo-race-latest", "yo-return-source", "yo-lock-source"}, nil
+		default:
+			if commandBlocked.Load() {
+				return []string{"-yo-rename-target_dev", "yo-rename-source-extra", "yo-rename-keeper", "yo-refresh-target", "yo-race-latest", "yo-return-source", "yo-lock-source"}, nil
+			}
+			if !confirmationRead.Swap(true) {
+				return nil, errors.New("simulated confirmation read failure")
+			}
+			return []string{"-yo-rename-target_dev", "yo-rename-source-extra", "yo-rename-keeper", "yo-refresh-target", "yo-race-latest", "yo-return-source", "yo-lock-target"}, nil
+		}
+	}
+	readyReader := make(chan error, 1)
+	go func() {
+		ready, err := os.Open(readyFIFO)
+		if err != nil {
+			readyReader <- err
+			return
+		}
+		defer ready.Close()
+		_, err = bufio.NewReader(ready).ReadString('\n')
+		readyReader <- err
+	}()
+	lockedResponseResult := make(chan *httptest.ResponseRecorder, 1)
+	go func() { lockedResponseResult <- request("admin", "session=yo-lock-source&new_name=yo-lock-target") }()
+	select {
+	case err := <-readyReader:
+		if err != nil {
+			t.Fatalf("read tmux command barrier: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("rename command did not reach the held tmux barrier")
+	}
+	select {
+	case <-readerDone:
+		t.Fatal("concurrent successful roster read passed the held rename command")
+	case <-time.After(100 * time.Millisecond):
+	}
+	commandBlocked.Store(false)
+	release, err := os.OpenFile(releaseFIFO, os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := release.WriteString("continue\n"); err != nil {
+		_ = release.Close()
+		t.Fatal(err)
+	}
+	if err := release.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var lockedResponse *httptest.ResponseRecorder
+	select {
+	case lockedResponse = <-lockedResponseResult:
+	case <-time.After(2 * time.Second):
+		t.Fatal("rename response did not complete after releasing the tmux command")
+	}
+	if lockedResponse.Code != http.StatusOK {
+		t.Fatalf("rename with a waiting successful roster reader status = %d, body=%s", lockedResponse.Code, lockedResponse.Body.String())
+	}
+	var lockedPayload struct {
+		NewSession string   `json:"new_session"`
+		Sessions   []string `json:"sessions"`
+	}
+	if err := json.Unmarshal(lockedResponse.Body.Bytes(), &lockedPayload); err != nil {
+		t.Fatal(err)
+	}
+	if lockedPayload.NewSession != "yo-lock-target" || !slices.Contains(lockedPayload.Sessions, "yo-lock-target") {
+		t.Fatalf("rename response lost its new name to a concurrent roster publication: %#v", lockedPayload)
+	}
+	select {
+	case <-readerDone:
+	case <-time.After(time.Second):
+		t.Fatal("successful concurrent roster read did not complete after rename response")
+	}
+	t.Setenv("PATH", originalTmuxPath)
+	if output, err := exec.Command("tmux", "-S", tmuxSocket, "new-session", "-d", "-s", "yo-vanish-source").CombinedOutput(); err != nil {
+		t.Fatalf("create vanished-identity fixture session: %v (%s)", err, output)
+	}
+	vanishReads := 0
+	srv.tmuxSessionRosterFn = func() ([]string, error) {
+		vanishReads++
+		if vanishReads == 1 {
+			return []string{"yo-vanish-source", "yo-vanish-unrelated"}, nil
+		}
+		if err := exec.Command("tmux", "-S", tmuxSocket, "kill-session", "-t", "=yo-vanish-target:").Run(); err != nil {
+			return nil, err
+		}
+		return []string{"yo-vanish-unrelated"}, nil
+	}
+	vanishedResponse := request("admin", "session=yo-vanish-source&new_name=yo-vanish-target")
+	if vanishedResponse.Code != http.StatusConflict {
+		t.Fatalf("rename whose identity disappears before confirmation status = %d, body=%s", vanishedResponse.Code, vanishedResponse.Body.String())
+	}
+	var vanishedPayload map[string]any
+	if err := json.Unmarshal(vanishedResponse.Body.Bytes(), &vanishedPayload); err != nil {
+		t.Fatal(err)
+	}
+	if _, advertisesMissingSession := vanishedPayload["new_session"]; advertisesMissingSession {
+		t.Fatalf("vanished identity response advertises a nonexistent session: %#v", vanishedPayload)
+	}
+	srv.tmuxSessionRosterFn = nil
+	if output, err := exec.Command("tmux", "-S", tmuxSocket, "new-session", "-d", "-s", "yo-reuse-source").CombinedOutput(); err != nil {
+		t.Fatalf("create reused-name fixture session: %v (%s)", err, output)
+	}
+	idBefore, err := exec.Command("tmux", "-S", tmuxSocket, "display-message", "-p", "-t", "=yo-reuse-source:", "#{session_id}").Output()
+	if err != nil {
+		t.Fatalf("read original reused-name session ID: %v", err)
+	}
+	tmuxBinary, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	tmuxWrapper := filepath.Join(binDir, "tmux")
+	wrapper := fmt.Sprintf("#!/bin/sh\nfor arg do\n  if [ \"$arg\" = \"if-shell\" ]; then\n    %s -S \"$YOLOMUX_TMUX_SOCKET\" kill-session -t '=yo-reuse-source:' || exit $?\n    %s -S \"$YOLOMUX_TMUX_SOCKET\" new-session -d -s yo-reuse-source || exit $?\n    break\n  fi\ndone\nexec %s \"$@\"\n", tmuxBinary, tmuxBinary, tmuxBinary)
+	if err := os.WriteFile(tmuxWrapper, []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	reusedResponse := request("admin", "session=yo-reuse-source&new_name=yo-reuse-target")
+	if reusedResponse.Code != http.StatusInternalServerError && reusedResponse.Code != http.StatusConflict {
+		t.Fatalf("rename of a deleted-and-recreated source status = %d, body=%s", reusedResponse.Code, reusedResponse.Body.String())
+	}
+	idAfter, err := exec.Command(tmuxBinary, "-S", tmuxSocket, "display-message", "-p", "-t", "=yo-reuse-source:", "#{session_id}").Output()
+	if err != nil {
+		t.Fatalf("replacement session disappeared after rejected rename: %v", err)
+	}
+	if strings.TrimSpace(string(idBefore)) == strings.TrimSpace(string(idAfter)) {
+		t.Fatalf("replacement session reused original tmux ID %q", strings.TrimSpace(string(idBefore)))
+	}
+	if err := exec.Command(tmuxBinary, "-S", tmuxSocket, "has-session", "-t", "=yo-reuse-source:").Run(); err != nil {
+		t.Fatalf("replacement kept the source name after stale-ID rename rejection: %v", err)
+	}
+}
+
+func TestGoRenameSessionTmuxCommandHasRequestBoundedTimeout(t *testing.T) {
+	binDir := t.TempDir()
+	fakeTmux := filepath.Join(binDir, "tmux")
+	if err := os.WriteFile(fakeTmux, []byte("#!/bin/sh\ncase \"$*\" in *rename-session*|*if-shell*) exec /bin/sleep 30 ;; esac\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("YOLOMUX_TMUX_SOCKET", "")
+	config := t.TempDir()
+	if err := os.WriteFile(filepath.Join(config, "auth.yaml"), []byte("users:\n  - username: admin\n    password: secret\n    role: admin\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := &server{
+		config:       config,
+		capabilities: capabilities.New("go-test"),
+		tmuxSessionRosterFn: func() ([]string, error) {
+			return []string{"source"}, nil
+		},
+	}
+	mux := http.NewServeMux()
+	srv.registerSessionRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost, "/api/rename-session?session=source&new_name=-target", nil)
+	req.SetBasicAuth("admin", "secret")
+	record := httptest.NewRecorder()
+	done := make(chan struct{})
+	started := time.Now()
+	go func() {
+		mux.ServeHTTP(record, req)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(6 * time.Second):
+		t.Fatal("rename handler did not stop after the bounded tmux command timeout")
+	}
+	if elapsed := time.Since(started); elapsed > 6*time.Second {
+		t.Fatalf("rename handler took %s, want the command timeout to bound it", elapsed)
+	}
+	if record.Code != http.StatusInternalServerError {
+		t.Fatalf("stalled tmux rename status = %d, body=%s", record.Code, record.Body.String())
 	}
 }
 

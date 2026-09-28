@@ -1,4 +1,0 @@
-# 2026-07-09 Focused editor autosave stability
-
-- Completed and removed `DOIT.editor_autosave_cursor.md`. Ordinary autosave, filesystem-watch, metadata, and chrome rerenders now treat a connected focused CodeMirror view as the cursor/selection/scroll authority instead of replaying an older cached tab snapshot. Explicit disk replacement remains the only path that restores the focused pre-reload snapshot it captured.
-- A real CodeMirror browser regression reproduced a live `180→420` selection at scroll `5200` snapping to stale `12→48` at `1600` before the fix and now proves the live values survive deferred measure/animation frames. The recreated-editor scroll test, 63 Node layout tests, generated-asset check, and full canonical gate passed; port 7773 restarted from the changed worktree and serves the rebuilt guard.

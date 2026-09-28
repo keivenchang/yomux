@@ -304,6 +304,7 @@
   --pane-resizer-hit-inset: 5px;
   --pane-resizer-touch-handle-size: 44px;
   --touch-target-min-size: var(--pane-resizer-touch-handle-size);
+  --pane-control-touch-target-size: 36px;
   /* Touch: the grab zone spans the full divider length (see @media pointer:coarse in
      40_layout_panes_tabs.css); the visible affordance is a small centered grip pill —
      length runs ALONG the divider, thickness runs ACROSS it — not a big filled disc. */

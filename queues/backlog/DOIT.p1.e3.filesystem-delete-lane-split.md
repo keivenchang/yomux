@@ -51,7 +51,7 @@ STILL FLAGGED NOT MADE: deleting a symlink still reports `kind: "file"`. Introdu
 
 ## Completion
 
-Record the classification boundary, red/green evidence, tests, and runtime proof in `docs/DONE/`, then remove this queue.
+Record the classification boundary, red/green evidence, tests, and runtime proof in the queue closeout or handoff, then remove this queue.
 
 ## Open Correctness Requirements (2026-08-18) - NOT Closed By The Lane Split
 

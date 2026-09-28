@@ -347,12 +347,8 @@ class SchemaMismatchError(StatsCurrentError):
     """The database is not the exact schema this store understands."""
 
 
-# The four bounds an exact rebuild runs under. Every number is a measurement, not a guess. The
-# long-form derivations live in `docs/specs/STATS_BOUNDED_REBUILD.md`, which arrives with the
-# process-binary-cache work and is absent while this branch stands alone -- the arithmetic below is
-# the whole story until then. Two of these end a BATCH and two of them end the REBUILD, which is
-# the distinction that keeps a bound from becoming a truncation: a full batch is a normal event,
-# an over-budget process is not.
+# The four measured bounds for an exact rebuild. Two end a batch and two end the rebuild, so a full
+# batch is a normal event while an over-budget process is not.
 #
 # 32 MiB is past the knee of the measured chunk-size sweep (397 -> 32.7 -> 28.1 -> 27.2 MiB peak at
 # 600k / 10k / 2.5k / 1k rows) and stays smaller than the 53 MiB retained generation, so a batch can

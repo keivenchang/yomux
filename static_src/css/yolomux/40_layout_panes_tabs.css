@@ -1575,24 +1575,28 @@ body.theme-light .pane-tab-close {
 /* Keep the compact minus glyph, but make its actual target reliable on touch. Narrow tab strips
    are where an 18px desktop hit box is easiest to miss; this remains one shared tab-close owner. */
 body.app-topbar-touch-compact .pane-tab-close {
-  flex-basis: 36px;
-  width: 36px;
-  min-width: 36px;
-  height: 36px;
+  flex-basis: var(--pane-control-touch-target-size);
+  width: var(--pane-control-touch-target-size);
+  min-width: var(--pane-control-touch-target-size);
+  height: var(--pane-control-touch-target-size);
   touch-action: manipulation;
 }
 /* Pane-frame actions use Dockview's separate header-actions strip, so the tab-close rule above
    does not reach the actual minimize button. Give that button the same one-tap touch target while
    leaving the desktop 20px geometry unchanged. */
 body.app-topbar-touch-compact .tabs .pane-minimize {
-  flex-basis: 36px;
-  width: 36px;
-  min-width: 36px;
-  max-width: 36px;
-  height: 36px;
-  min-height: 36px;
-  max-height: 36px;
+  flex-basis: var(--pane-control-touch-target-size);
+  width: var(--pane-control-touch-target-size);
+  min-width: var(--pane-control-touch-target-size);
+  max-width: var(--pane-control-touch-target-size);
+  height: var(--pane-control-touch-target-size);
+  min-height: var(--pane-control-touch-target-size);
+  max-height: var(--pane-control-touch-target-size);
   touch-action: manipulation;
+}
+body.app-topbar-touch-compact .yolomux-dockview .dv-tabs-and-actions-container,
+body.app-topbar-touch-compact .yolomux-dockview .dv-right-actions-container {
+  min-height: max(var(--pane-tab-height), var(--pane-control-touch-target-size));
 }
 /* Keep this selector list in sync with platformCloseButtonClass() callers in yolomux.js. */
 .file-explorer-close.pc-window-control,

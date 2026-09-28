@@ -229,10 +229,6 @@ HOST_QUALIFICATION_LIMITS: dict[str, float] = {
     # 0.1053, so this refuses 1 of 12 saturated probes. It is placed only so it stops refusing the
     # post-lane host, where it was the single most frequent false refusal - 6 of 84 probes.
     "io_stall_full_fraction": 0.051,  # 2.02x post-lane max 0.025212; reachable below saturated max 0.1053
-    # 153x the highest value 84 post-lane probes produced, and the 96-worker negative control never
-    # moved it off 0.0 at all. Kept because it fails closed on a mode nothing else here measures -
-    # a thrashing host - not because it separates these populations.
-    "memory_stall_full_fraction": 0.010,  # 153.85x post-lane max 6.5e-05; not exercised by saturation
     "disk_busy_fraction_max": 0.900,  # 2.01x post-lane max 0.448324; 1.02x below saturated min 0.9177
     "cpu_work_median_ms": 33.0,  # 2.02x post-lane max 16.318; reachable below saturated max 60.8
     "storage_work_median_ms": 13.0,  # 2.25x post-lane max 5.778; reachable below saturated max 16.0
@@ -242,6 +238,11 @@ HOST_QUALIFICATION_LIMITS: dict[str, float] = {
 # the machine-readable reason travelling beside the signal, because a signal dropped silently is
 # the same defect as a failure swallowed silently.
 HOST_QUALIFICATION_EVIDENCE_ONLY: dict[str, str] = {
+    "memory_stall_full_fraction": (
+        "unvalidated_global_signal: /proc/pressure/memory is system-wide and does not attribute stalls "
+        "to the test process or its cgroup; the retained saturation control never exercised this "
+        "signal. Keep it as diagnostic evidence, not a host admission threshold."
+    ),
     "disk_in_flight_max": (
         "populations_inverted: a fit host reaches HIGHER values than a saturated one, so no limit "
         "can sit above the post-lane maximum and still be reachable by real saturation. Measured "

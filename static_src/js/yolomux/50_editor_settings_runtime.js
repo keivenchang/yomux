@@ -1277,6 +1277,61 @@ function refreshMetaButtonChrome() {
   refreshMeta.setAttribute('aria-label', loading ? t('info.loadingRepo') : t('meta.refreshAria'));
 }
 
+const SETTINGS_APPLY_DEPENDENCIES = Object.freeze({
+  css: [
+    'appearance.global_font_size', 'appearance.ui_font_size', 'appearance.sync_font_sizes', 'appearance.terminal_font_size',
+    'appearance.editor_font_size', 'appearance.preview_font_size', 'appearance.file_explorer_font_size', 'appearance.tab_width',
+    'appearance.pane_spacing', 'appearance.pane_ring_opacity', 'appearance.inactive_pane_opacity',
+    'appearance.active_color', 'appearance.separator_color', 'appearance.editor_cursor_color',
+    'performance.agent_status_pulse_period_ms', 'performance.popover_show_delay_ms', 'performance.popover_hide_delay_ms',
+    'file_explorer.image_preview_max_px',
+  ],
+  globalTheme: ['appearance.theme'],
+  editorTheme: ['appearance.theme', 'appearance.editor_dark_color_scheme', 'appearance.editor_light_color_scheme'],
+  editorCursor: ['appearance.editor_cursor_style'],
+  terminal: [
+    'appearance.theme', 'appearance.terminal_theme', 'appearance.terminal_font_size', 'appearance.global_font_size',
+    'appearance.sync_font_sizes', 'appearance.editor_cursor_color', 'terminal_editor.scrollback',
+  ],
+  editorWrap: ['terminal_editor.word_wrap', 'terminal_editor.line_numbers'],
+  explorerRoot: ['file_explorer.root_mode'],
+  indexedDirs: ['file_explorer.indexed_dirs'],
+  indexExcludes: ['file_explorer.index_exclude_paths'],
+  metaChrome: ['performance.latency_refresh_ms', 'performance.event_log_refresh_ms', 'performance.tabber_activity_refresh_ms'],
+  runtimeIntervals: [
+    'performance.latency_refresh_ms', 'performance.event_log_refresh_ms', 'performance.tabber_activity_refresh_ms',
+    'performance.agent_status_pulse_period_ms', 'file_explorer.index_refresh_seconds',
+  ],
+  previewControls: ['appearance.preview_font_size', 'appearance.editor_font_size', 'appearance.global_font_size', 'appearance.sync_font_sizes'],
+  previewPopouts: [
+    'appearance.preview_font_size', 'appearance.editor_font_size', 'appearance.global_font_size', 'appearance.sync_font_sizes',
+    'appearance.theme', 'appearance.editor_dark_color_scheme', 'appearance.editor_light_color_scheme',
+  ],
+  autosave: ['editor.autosave', 'editor.autosave_delay_seconds'],
+  locale: ['general.language'],
+  chrome: [
+    'appearance.theme', 'appearance.terminal_theme',
+    'appearance.editor_dark_color_scheme', 'appearance.editor_light_color_scheme',
+  ],
+});
+
+function settingsPathValue(source, defaults, path) {
+  return nestedSetting(source, path, nestedSetting(defaults, path, settingFallback(path)));
+}
+
+function settingsPathValuesEqual(left, right) {
+  if (Object.is(left, right)) return true;
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function settingsDependencyChanged(group, previousSettings, previousDefaults, nextSettings, nextDefaults) {
+  return (SETTINGS_APPLY_DEPENDENCIES[group] || []).some(path => !settingsPathValuesEqual(
+    settingsPathValue(previousSettings, previousDefaults, path),
+    settingsPathValue(nextSettings, nextDefaults, path),
+  ));
+}
+
 function applySettingsPayload(payload, options = {}) {
   if (!payload?.settings) return false;
   const nextMtime = Number(payload.mtime_ns || 0);
@@ -1284,13 +1339,23 @@ function applySettingsPayload(payload, options = {}) {
   // complete snapshot, so an equal revision is already applied; `force` may repaint callers but
   // must never let an older/equal payload roll back the accepted settings values.
   if (!options.initial && clientSettingsMtimeNs && (!nextMtime || nextMtime <= clientSettingsMtimeNs)) return false;
+  const previousSettings = clientSettings;
+  const previousDefaults = clientSettingsDefaults;
+  const nextDefaults = payload.defaults || previousDefaults;
+  const nextSettings = mergeSettingObjects(nextDefaults, payload.settings || {});
+  const settingsChanged = JSON.stringify(previousSettings) !== JSON.stringify(nextSettings);
+  const groupChanged = Object.fromEntries(Object.keys(SETTINGS_APPLY_DEPENDENCIES).map(group => [
+    group,
+    options.initial === true || settingsDependencyChanged(group, previousSettings, previousDefaults, nextSettings, nextDefaults),
+  ]));
+  if (options.applyEditorDefaults === true) groupChanged.editorWrap = true;
   const previousLocale = i18nActiveLocaleId();
   const previousDateTimeHourCycle = dateTimeHourCycle;
   const previousAgentStatusPulsePeriodMs = agentStatusPulsePeriodMs;
   clientSettingsPayload = payload;
   clientSettingsMetadataDeferred = payload.deferred_metadata === true;
-  clientSettingsDefaults = payload.defaults || clientSettingsDefaults;
-  clientSettings = mergeSettingObjects(clientSettingsDefaults, payload.settings || {});
+  clientSettingsDefaults = nextDefaults;
+  clientSettings = nextSettings;
   clientSettingsMtimeNs = nextMtime;
   remoteResizeDelayMs = numberSetting('performance.remote_resize_delay_ms');
   latencyRefreshMs = numberSetting('performance.latency_refresh_ms');
@@ -1305,8 +1370,8 @@ function applySettingsPayload(payload, options = {}) {
   fileExplorerNewEntryHighlightMs = numberSetting('file_explorer.new_entry_highlight_ms');
   fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px');
   fileExplorerImageOpenMode = normalizedImageOpenMode(initialSetting('file_explorer.image_open_mode'));
-  reconcileIndexedDirsFromSetting({initial: options.initial === true});
-  reconcileIndexExcludePathsFromSetting();
+  if (options.initial || groupChanged.indexedDirs) reconcileIndexedDirsFromSetting({initial: options.initial === true});
+  if (options.initial || groupChanged.indexExcludes) reconcileIndexExcludePathsFromSetting();
   uploadMaxBytes = numberSetting('uploads.max_bytes');
   terminalFontSize = numberSetting('appearance.terminal_font_size', 14);
   editorFontSize = numberSetting('appearance.editor_font_size', 14);
@@ -1332,34 +1397,39 @@ function applySettingsPayload(payload, options = {}) {
     fileEditorLineNumbersEnabled = boolSetting('terminal_editor.line_numbers', fileEditorLineNumbersEnabled);
   }
   fileExplorerRootMode = initialSetting('file_explorer.root_mode', fileExplorerRootMode) === 'sync' ? 'sync' : 'fixed';
-  applyCssSettings();
+  if (groupChanged.css) applyCssSettings();
   if (previousAgentStatusPulsePeriodMs !== agentStatusPulsePeriodMs) {
     // Retiming an existing stepped CSS animation is browser-dependent. Reuse the status owner to
     // clear phase state and restart only these animations after the new duration is on :root.
     if (typeof restartAgentWindowActivityPulseAnimations === 'function') restartAgentWindowActivityPulseAnimations();
     else if (typeof scheduleAgentWindowActivityAnimationSync === 'function') scheduleAgentWindowActivityAnimationSync();
   }
-  if (typeof updateEditorPreviewFontControls === 'function') updateEditorPreviewFontControls();
-  if (typeof refreshFilePreviewPopouts === 'function') refreshFilePreviewPopouts();
-  applyGlobalThemeMode({updateEditor: false, updateTerminals: false});
-  applyEditorThemeMode({refreshEditors: false});
-  applyEditorCursorStyle();
-  applyTerminalRuntimeSettings();
-  applyEditorWrapPreference();
-  renderFileExplorerRootModeControls();
-  refreshMetaButtonChrome();
-   renderPreferencesPanels({force: options.forcePreferences === true});
-  renderSessionButtons();
-  renderPaneTabStrips();
-  rescheduleAllFileAutosaves();
+  if (groupChanged.globalTheme) applyGlobalThemeMode({updateEditor: false, updateTerminals: false});
+  if (groupChanged.editorTheme || groupChanged.globalTheme) applyEditorThemeMode({refreshEditors: false});
+  if (groupChanged.editorCursor) applyEditorCursorStyle();
+  if (groupChanged.terminal) applyTerminalRuntimeSettings();
+  if (groupChanged.editorWrap) applyEditorWrapPreference();
+  if (groupChanged.explorerRoot) renderFileExplorerRootModeControls();
+  if (groupChanged.metaChrome) refreshMetaButtonChrome();
+  if (settingsChanged || options.initial || options.forcePreferences === true) renderPreferencesPanels({force: options.forcePreferences === true});
+  if (groupChanged.chrome && !groupChanged.locale) {
+    renderSessionButtons();
+    renderPaneTabStrips();
+  }
+  if (groupChanged.autosave) rescheduleAllFileAutosaves();
+  if (groupChanged.previewControls) updateEditorPreviewFontControls();
   if (previousDateTimeHourCycle !== dateTimeHourCycle) {
     rerenderDateTimeFormatSurfaces();
   }
-  if (previousEditorSchemeId !== activeEditorScheme().id || previousCursorColor !== fileEditorCursorColor) {
+  const editorThemeChanged = previousEditorSchemeId !== activeEditorScheme().id;
+  const editorCursorColorChanged = previousCursorColor !== fileEditorCursorColor;
+  if (editorThemeChanged || editorCursorColorChanged) {
     // re-theme LIVE editors via the compartment swap (preserves scroll/selection). A plain
     // renderFileEditorPanel short-circuits because codeMirrorConfigSignature omits the scheme, so the
     // CM view would keep its old theme; refreshOpenEditorThemePanels reconfigures the theme directly.
     refreshOpenEditorThemePanels();
+  } else if (groupChanged.previewPopouts) {
+    refreshFilePreviewPopouts();
   }
   // the blame ViewPlugin decorates per fileEditorBlameAllLines at build time + the editor
   // config signature carries it, so re-render open editors when the toggle changes (only matters while
@@ -1368,7 +1438,7 @@ function applySettingsPayload(payload, options = {}) {
   // i18n: when general.language changes, load the new catalog and re-render localized surfaces.
   const nextLocale = resolveLocalePref(initialSetting('general.language', 'system'));
   if (nextLocale !== previousLocale) applyLocale(nextLocale);
-  if (!options.initial) {
+  if (!options.initial && groupChanged.runtimeIntervals) {
     installRuntimeIntervals();
   }
   return true;
