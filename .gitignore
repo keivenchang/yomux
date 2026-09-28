@@ -6,6 +6,8 @@ __pycache__/
 node_modules/
 bazel-*
 /instance.lock
+/static/yolomux.css
+/static/yolomux.js
 
 # Scratch worklists — never committed (kept local only)
 DOIT*.md

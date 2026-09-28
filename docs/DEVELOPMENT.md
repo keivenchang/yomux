@@ -18,7 +18,7 @@ The default gate is development validation, not latency certification. Use `pyth
 
 Use `python3 -m pytest <path-or-test>` for a focused Python test. `node tests/layout_url.test.js` runs the focused Node/browser-source shards. Automated browser and Go tests use fixture-owned state and ports; they never use the operator server on port 7220.
 
-Frontend source lives in `static_src/`. After frontend changes, run `python3 tools/static_build.py`; use `python3 tools/static_build.py --check` to detect stale generated assets. Generated `static/` files are build output and are not committed by the normal workflow.
+Frontend source lives in `static_src/`. `static/yolomux.js` and `static/yolomux.css` are ignored build outputs and are not tracked by Git. `make setup`, `make dev`, and `tools/check.py` generate them when missing or stale; after frontend source changes, run `python3 tools/static_build.py`. Use `python3 tools/static_build.py --check` to verify the generated files without writing them. Focused browser and Node tests need the generated bundles; run `make dev` or the builder first on a fresh checkout.
 
 Build Go with:
 

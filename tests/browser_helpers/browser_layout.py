@@ -1083,7 +1083,7 @@ _BUNDLE_FRESHNESS_CHECKED = False
 def _require_current_generated_bundle() -> None:
     """Refuse to run a browser gate against a stale generated bundle.
 
-    Most browser gates serve the checked-in `static/yolomux.js` rather than
+    Most browser gates serve the generated `static/yolomux.js` rather than
     building from `static_src/`. If that bundle is stale they exercise the
     previous build: a fixed source can stay red, and a broken source can stay
     green. `tools/check.py` has a `static_build --check` lane, but agents are

@@ -32,7 +32,7 @@ tmux new-session -A -s project1     # optional: create one if you do not already
 python3 yolomux.py --dang   # or: make run
 ```
 
-`make setup` checks for Python 3.10+ before doing any build work, then pip automatically installs every runtime dependency, including the native `watchfiles` filesystem-event backend. On an externally managed system Python (PEP 668), create and activate a virtualenv first (`python3 -m venv .venv && . .venv/bin/activate`), then `make setup`. The source and editable-install runtime serves the tracked xterm files under `static/vendor/`; npm is not needed to start YOLOmux. Contributors can run `make xterm` to install the pinned upstream packages and verify that their bytes still match the tracked files. The Python wheel does not currently package these static assets.
+`make setup` checks for Python 3.10+ before doing any build work, then pip automatically installs every runtime dependency, including the native `watchfiles` filesystem-event backend. On an externally managed system Python (PEP 668), create and activate a virtualenv first (`python3 -m venv .venv && . .venv/bin/activate`), then `make setup`. Setup generates the ignored `static/yolomux.js` and `static/yolomux.css` bundles from `static_src/`; they are recreated when missing or stale. The runtime serves the tracked xterm files under `static/vendor/`, so npm is not needed to start YOLOmux. Contributors can run `make xterm` to install the pinned upstream packages and verify that their bytes still match the tracked files. The Python wheel does not currently package these static assets.
 
 ### Go backend
 
