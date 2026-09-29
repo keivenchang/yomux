@@ -1682,6 +1682,7 @@ body.editor-theme-light {
 .app-menu-setting-control,
 .session-button-text,
 .js-debug-legend-item,
+.js-debug-daemons-chart .js-debug-legend-item,
 .changes-control,
 .diff-ref-controls,
 .preferences-radio,

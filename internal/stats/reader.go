@@ -3,18 +3,23 @@ package stats
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math"
+	"strings"
+	"time"
 )
 
 const MaxFactReadLimit = 10000
 
-// FactPageSize is deliberately small so a lifecycle pass never retains a
-// whole history range merely to fold one ring cell. Callers may issue as many
-// pages as their explicit row/byte/time budget allows.
-const FactPageSize = 256
+// FactPageSize bounds the rows retained while folding one ring cell. A
+// thousand-row page is still below the reader's hard fact limit, but removes
+// most per-page SQLite/CGO transitions for ordinary synthetic and production
+// workloads. The lifecycle's row, byte, and runtime budgets remain the outer
+// safety bounds.
+const FactPageSize = 1024
 
 type observationPageCursor struct {
 	ObservedAt       float64
@@ -64,12 +69,37 @@ FROM observations WHERE observed_at >= ? AND observed_at < ?`
 	}
 	query += ` ORDER BY observed_at ASC, family ASC, source_id ASC, event_id ASC LIMIT ?`
 	args = append(args, limit)
+	result := make([]Observation, 0, limit)
+	var cursor *observationPageCursor
+	if used, err := d.queryTypedRows(ctx, query, args, func(rows *sql.Rows) error {
+		for index := 0; rows.Next(); index++ {
+			var eventID, family, sourceID string
+			var observed float64
+			var epochID, payloadJSON string
+			var generation int64
+			if err := rows.Scan(&eventID, &family, &sourceID, &observed, &epochID, &generation, &payloadJSON); err != nil {
+				return err
+			}
+			item, decodeErr := decodeObservationColumns(eventID, family, sourceID, observed, epochID, generation, payloadJSON)
+			if decodeErr != nil {
+				return fmt.Errorf("observations page row %d: %w", index, decodeErr)
+			}
+			result = append(result, item)
+			cursor = &observationPageCursor{ObservedAt: item.ObservedAt, Family: item.Family, SourceID: item.SourceID, EventID: item.EventID}
+		}
+		return rows.Err()
+	}); used {
+		if err != nil {
+			return nil, nil, fmt.Errorf("read observation page: %w", err)
+		}
+		return result, cursor, nil
+	}
 	rows, err := d.reader.Rows(ctx, query, args...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read observation page: %w", err)
 	}
-	result := make([]Observation, 0, len(rows))
-	var cursor *observationPageCursor
+	result = result[:0]
+	cursor = nil
 	for i, row := range rows {
 		item, decodeErr := decodeObservation(row)
 		if decodeErr != nil {
@@ -97,12 +127,37 @@ FROM coverage_epochs WHERE started_at < ? AND (ended_at IS NULL OR ended_at > ?)
 	}
 	query += ` ORDER BY started_at ASC, family ASC, source_id ASC, epoch_id ASC LIMIT ?`
 	args = append(args, limit)
+	result := make([]CoverageEpoch, 0, limit)
+	var cursor *coveragePageCursor
+	if used, err := d.queryTypedRows(ctx, query, args, func(rows *sql.Rows) error {
+		for index := 0; rows.Next(); index++ {
+			var family, sourceID, epochID string
+			var started, cadence float64
+			var ended sql.NullFloat64
+			var generation int64
+			if err := rows.Scan(&family, &sourceID, &epochID, &started, &ended, &cadence, &generation); err != nil {
+				return err
+			}
+			item, decodeErr := decodeCoverageEpochColumns(family, sourceID, epochID, started, ended, cadence, generation)
+			if decodeErr != nil {
+				return fmt.Errorf("coverage page row %d: %w", index, decodeErr)
+			}
+			result = append(result, item)
+			cursor = &coveragePageCursor{StartedAt: item.StartedAt, Family: item.Family, SourceID: item.SourceID, EpochID: item.EpochID}
+		}
+		return rows.Err()
+	}); used {
+		if err != nil {
+			return nil, nil, fmt.Errorf("read coverage epoch page: %w", err)
+		}
+		return result, cursor, nil
+	}
 	rows, err := d.reader.Rows(ctx, query, args...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read coverage epoch page: %w", err)
 	}
-	result := make([]CoverageEpoch, 0, len(rows))
-	var cursor *coveragePageCursor
+	result = result[:0]
+	cursor = nil
 	for i, row := range rows {
 		item, decodeErr := decodeCoverageEpoch(row)
 		if decodeErr != nil {
@@ -122,20 +177,50 @@ func (d *Database) ReadUnavailableSpansPage(ctx context.Context, start, end floa
 		return nil, nil, err
 	}
 	query := `SELECT family, source_id, epoch_id, started_at, ended_at, native_cadence_seconds, reason, owner_generation
-FROM unavailable_spans WHERE ended_at > ? AND started_at < ?`
-	args := []any{start, end}
-	if after != nil {
-		query += ` AND (started_at > ? OR (started_at = ? AND (family > ? OR (family = ? AND (source_id > ? OR (source_id = ? AND (epoch_id > ? OR (epoch_id = ? AND ended_at > ?))))))))`
-		args = append(args, after.StartedAt, after.StartedAt, after.Family, after.Family, after.SourceID, after.SourceID, after.EpochID, after.EpochID, after.EndedAt)
+FROM unavailable_spans`
+	args := make([]any, 0, 7)
+	if after == nil {
+		query += ` WHERE ended_at > ? AND started_at < ?`
+		args = append(args, start, end)
+	} else {
+		// The overlap index is ordered by ended_at. Keeping the cursor on that
+		// column lets each page continue from the prior key instead of rescanning
+		// and resorting every unavailable span that overlaps the full window.
+		query += ` WHERE (ended_at, started_at, family, source_id, epoch_id) > (?, ?, ?, ?, ?) AND started_at < ?`
+		args = append(args, after.EndedAt, after.StartedAt, after.Family, after.SourceID, after.EpochID, end)
 	}
-	query += ` ORDER BY started_at ASC, family ASC, source_id ASC, epoch_id ASC, ended_at ASC LIMIT ?`
+	query += ` ORDER BY ended_at ASC, started_at ASC, family ASC, source_id ASC, epoch_id ASC LIMIT ?`
 	args = append(args, limit)
+	result := make([]UnavailableSpan, 0, limit)
+	var cursor *unavailablePageCursor
+	if used, err := d.queryTypedRows(ctx, query, args, func(rows *sql.Rows) error {
+		for index := 0; rows.Next(); index++ {
+			var family, sourceID, epochID, reason string
+			var started, ended, cadence float64
+			var generation int64
+			if err := rows.Scan(&family, &sourceID, &epochID, &started, &ended, &cadence, &reason, &generation); err != nil {
+				return err
+			}
+			item, decodeErr := decodeUnavailableSpanColumns(family, sourceID, epochID, started, ended, cadence, reason, generation)
+			if decodeErr != nil {
+				return fmt.Errorf("unavailable page row %d: %w", index, decodeErr)
+			}
+			result = append(result, item)
+			cursor = &unavailablePageCursor{StartedAt: item.StartedAt, Family: item.Family, SourceID: item.SourceID, EpochID: item.EpochID, EndedAt: item.EndedAt}
+		}
+		return rows.Err()
+	}); used {
+		if err != nil {
+			return nil, nil, fmt.Errorf("read unavailable page: %w", err)
+		}
+		return result, cursor, nil
+	}
 	rows, err := d.reader.Rows(ctx, query, args...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read unavailable page: %w", err)
 	}
-	result := make([]UnavailableSpan, 0, len(rows))
-	var cursor *unavailablePageCursor
+	result = result[:0]
+	cursor = nil
 	for i, row := range rows {
 		item, decodeErr := decodeUnavailableSpan(row)
 		if decodeErr != nil {
@@ -163,12 +248,36 @@ FROM usage_atoms WHERE observed_at >= ? AND observed_at < ?`
 	}
 	query += ` ORDER BY observed_at ASC, event_id ASC, direction ASC, modality ASC, cache_role ASC, unit ASC LIMIT ?`
 	args = append(args, limit)
+	result := make([]UsageAtom, 0, limit)
+	var cursor *usagePageCursor
+	if used, err := d.queryTypedRows(ctx, query, args, func(rows *sql.Rows) error {
+		for index := 0; rows.Next(); index++ {
+			var eventID, direction, modality, cacheRole, unit string
+			var observed float64
+			var payloadJSON string
+			if err := rows.Scan(&eventID, &direction, &modality, &cacheRole, &unit, &observed, &payloadJSON); err != nil {
+				return err
+			}
+			item, decodeErr := decodeUsageAtomColumns(eventID, direction, modality, cacheRole, unit, observed, payloadJSON)
+			if decodeErr != nil {
+				return fmt.Errorf("usage page row %d: %w", index, decodeErr)
+			}
+			result = append(result, item)
+			cursor = &usagePageCursor{ObservedAt: item.ObservedAt, EventID: item.EventID, Direction: item.Direction, Modality: item.Modality, CacheRole: item.CacheRole, Unit: item.Unit}
+		}
+		return rows.Err()
+	}); used {
+		if err != nil {
+			return nil, nil, fmt.Errorf("read usage page: %w", err)
+		}
+		return result, cursor, nil
+	}
 	rows, err := d.reader.Rows(ctx, query, args...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read usage page: %w", err)
 	}
-	result := make([]UsageAtom, 0, len(rows))
-	var cursor *usagePageCursor
+	result = result[:0]
+	cursor = nil
 	for i, row := range rows {
 		item, decodeErr := decodeUsageAtom(row)
 		if decodeErr != nil {
@@ -280,6 +389,80 @@ func validateReadRange(start, end float64, limit int) error {
 	return nil
 }
 
+func (d *Database) queryTypedRows(ctx context.Context, query string, args []any, visit func(*sql.Rows) error) (bool, error) {
+	reader, ok := d.reader.(typedRowReader)
+	if !ok {
+		return false, nil
+	}
+	started := time.Now()
+	err := reader.QueryRows(ctx, query, visit, args...)
+	// Lifecycle counters already report decoded fact rows. Keeping this metric
+	// query-scoped avoids changing the narrow database/sql visitor contract.
+	d.recordRead(time.Since(started))
+	return true, err
+}
+
+func decodePayloadText(raw string) (map[string]any, int, error) {
+	if len(raw) == 0 || len(raw) > MaxPayloadBytes {
+		return nil, 0, fmt.Errorf("invalid payload_json size")
+	}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	var payload map[string]any
+	if err := decoder.Decode(&payload); err != nil {
+		return nil, 0, fmt.Errorf("malformed payload_json: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return nil, 0, fmt.Errorf("malformed payload_json: trailing data")
+	}
+	if payload == nil {
+		return nil, 0, fmt.Errorf("payload_json must be a JSON object")
+	}
+	return payload, len(raw), nil
+}
+
+func decodeObservationColumns(eventID, family, sourceID string, observed float64, epochID string, generation int64, payloadJSON string) (Observation, error) {
+	if generation < 0 {
+		return Observation{}, fmt.Errorf("invalid unsigned integer")
+	}
+	payload, payloadBytes, err := decodePayloadText(payloadJSON)
+	if err != nil {
+		return Observation{}, err
+	}
+	item := Observation{EventID: eventID, Family: family, SourceID: sourceID, ObservedAt: observed, EpochID: epochID, OwnerGeneration: uint64(generation), Payload: payload, payloadBytes: payloadBytes}
+	return item, item.Validate()
+}
+
+func decodeCoverageEpochColumns(family, sourceID, epochID string, started float64, ended sql.NullFloat64, cadence float64, generation int64) (CoverageEpoch, error) {
+	if generation < 0 {
+		return CoverageEpoch{}, fmt.Errorf("invalid unsigned integer")
+	}
+	var endedAt *float64
+	if ended.Valid {
+		value := ended.Float64
+		endedAt = &value
+	}
+	item := CoverageEpoch{Family: family, SourceID: sourceID, EpochID: epochID, StartedAt: started, EndedAt: endedAt, NativeCadenceSeconds: cadence, OwnerGeneration: uint64(generation)}
+	return item, item.Validate()
+}
+
+func decodeUnavailableSpanColumns(family, sourceID, epochID string, started, ended, cadence float64, reason string, generation int64) (UnavailableSpan, error) {
+	if generation < 0 {
+		return UnavailableSpan{}, fmt.Errorf("invalid unsigned integer")
+	}
+	item := UnavailableSpan{Family: family, SourceID: sourceID, EpochID: epochID, StartedAt: started, EndedAt: ended, NativeCadenceSeconds: cadence, Reason: reason, OwnerGeneration: uint64(generation)}
+	return item, item.Validate()
+}
+
+func decodeUsageAtomColumns(eventID, direction, modality, cacheRole, unit string, observed float64, payloadJSON string) (UsageAtom, error) {
+	payload, payloadBytes, err := decodePayloadText(payloadJSON)
+	if err != nil {
+		return UsageAtom{}, err
+	}
+	item := UsageAtom{EventID: eventID, Direction: direction, Modality: modality, CacheRole: cacheRole, Unit: unit, ObservedAt: observed, Payload: payload, payloadBytes: payloadBytes}
+	return item, item.Validate()
+}
+
 func decodeObservation(row []any) (Observation, error) {
 	if len(row) != 7 {
 		return Observation{}, fmt.Errorf("expected 7 columns, got %d", len(row))
@@ -349,10 +532,11 @@ func decodePayload(value any) (map[string]any, error) {
 }
 
 func decodePayloadWithSize(value any) (map[string]any, int, error) {
+	if text, ok := value.(string); ok {
+		return decodePayloadText(text)
+	}
 	var raw []byte
 	switch value := value.(type) {
-	case string:
-		raw = []byte(value)
 	case []byte:
 		raw = value
 	default:

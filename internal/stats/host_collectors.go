@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -35,6 +36,16 @@ type HostFactContext struct {
 // MacMemoryDetails contains optional macOS counters. Nil values are omitted.
 type MacMemoryDetails map[string]any
 
+// ServiceLoadSample is one bounded sample for a locally owned service. The
+// service-load family is persisted by the background collector, so its history
+// remains available even when no browser has YO!stats open.
+type ServiceLoadSample struct {
+	SourceID   string
+	Running    bool
+	CPUPercent *float64
+	RSSBytes   *float64
+}
+
 // BuildCPUFacts converts a measured CPU delta into current YO!stats facts.
 // A non-valid sample produces an unavailable span rather than a fabricated zero.
 func BuildCPUFacts(sample CPUSample, processCPUPercent map[string]float64, context HostFactContext) AppendBatch {
@@ -49,7 +60,7 @@ func BuildCPUFacts(sample CPUSample, processCPUPercent map[string]float64, conte
 		"process_percent": sample.Process.Value,
 		"system_percent":  sample.Host.Value,
 	}
-	if processCPUPercent != nil {
+	if processCPUPercent != nil && !sample.ProcessCensusIncomplete {
 		series := make(map[string]any, len(processCPUPercent))
 		for binary, value := range processCPUPercent {
 			if !finite(value) {
@@ -107,7 +118,7 @@ func BuildSystemMemoryFacts(memory MemoryCounters, rows []ProcessCensusRow, mac 
 		return BuildUnavailableFacts("system_memory", context, "invalid_sample")
 	}
 	payload := map[string]any{"used_bytes": memory.UsedBytes, "capacity_bytes": memory.CapacityBytes}
-	if len(rows) > 0 {
+	if len(rows) > 0 && !memory.ProcessCensusIncomplete {
 		processMemory := map[string]any{}
 		for _, row := range topProcessMemory(rows) {
 			if row.Binary != "" && row.RSSBytes > 0 {
@@ -124,6 +135,43 @@ func BuildSystemMemoryFacts(memory MemoryCounters, rows []ProcessCensusRow, mac 
 		}
 	}
 	return singleHostFacts("system_memory", context, payload)
+}
+
+// BuildServiceLoadFacts converts measured service samples into the shared
+// service_load family. Invalid samples are skipped; an empty result means the
+// owner had no usable service measurements for this cadence.
+func BuildServiceLoadFacts(samples []ServiceLoadSample, context HostFactContext) AppendBatch {
+	result := AppendBatch{}
+	for _, sample := range samples {
+		if strings.TrimSpace(sample.SourceID) == "" {
+			continue
+		}
+		if sample.CPUPercent == nil && sample.RSSBytes == nil {
+			continue
+		}
+		if sample.CPUPercent != nil && (!finite(*sample.CPUPercent) || *sample.CPUPercent < 0) {
+			continue
+		}
+		if sample.RSSBytes != nil && (!finite(*sample.RSSBytes) || *sample.RSSBytes < 0) {
+			continue
+		}
+		itemContext := context
+		itemContext.SourceID = sample.SourceID
+		payload := map[string]any{
+			"running":   sample.Running,
+			"rss_bytes": nil,
+		}
+		if sample.CPUPercent != nil {
+			payload["cpu_percent"] = *sample.CPUPercent
+		}
+		if sample.RSSBytes != nil {
+			payload["rss_bytes"] = *sample.RSSBytes
+		}
+		item := singleHostFacts("service_load", itemContext, payload)
+		result.Observations = append(result.Observations, item.Observations...)
+		result.CoverageEpochs = append(result.CoverageEpochs, item.CoverageEpochs...)
+	}
+	return result
 }
 
 // BuildUnavailableFacts records the next cadence as unknown data.
@@ -314,8 +362,9 @@ type ProcessCensusRow struct {
 }
 
 type MemoryCounters struct {
-	UsedBytes     uint64
-	CapacityBytes uint64
+	UsedBytes               uint64
+	CapacityBytes           uint64
+	ProcessCensusIncomplete bool
 }
 
 type GPUDevice struct {
@@ -364,9 +413,6 @@ func ParseLinuxProcessStat(text, executable string, pageSize, clockTicks uint64)
 	if pageSize == 0 {
 		pageSize = pageSizeBytes
 	}
-	if clockTicks == 0 {
-		clockTicks = clockTicksPerSec
-	}
 	close := strings.LastIndex(text, ") ")
 	open := strings.Index(text, " (")
 	if open < 1 || close < open {
@@ -398,7 +444,10 @@ func ParseLinuxProcessStat(text, executable string, pageSize, clockTicks uint64)
 	if pageSize != 0 && uint64(rss) > ^uint64(0)/pageSize || utime > ^uint64(0)-stime {
 		return ProcessCensusRow{}, false
 	}
-	cpu := float64(utime+stime) / float64(clockTicks)
+	cpu := float64(0)
+	if clockTicks > 0 {
+		cpu = float64(utime+stime) / float64(clockTicks)
+	}
 	if !finite(cpu) {
 		return ProcessCensusRow{}, false
 	}
@@ -422,12 +471,16 @@ func LinuxProcessCensus(inputs HostCollectorInputs, procRoot string) ([]ProcessC
 	sort.Strings(names)
 	rows := make([]ProcessCensusRow, 0, len(names))
 	retainedBinaries := make(map[string]string, len(names))
+	complete := true
 	for _, name := range names {
 		if _, err := strconv.Atoi(name); err != nil {
 			continue
 		}
 		data, err := boundedRead(inputs.ReadFile, path.Join(procRoot, name, "stat"))
 		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				complete = false
+			}
 			continue
 		}
 		// Parse once without an executable path to obtain the stable process
@@ -435,6 +488,7 @@ func LinuxProcessCensus(inputs HostCollectorInputs, procRoot string) ([]ProcessC
 		// samples but changes when a PID is reused or a process renames itself.
 		candidate, ok := ParseLinuxProcessStat(string(data), "", inputs.PageSize, inputs.ClockTick)
 		if !ok {
+			complete = false
 			continue
 		}
 		cacheKey := candidate.Identity + "\x00" + candidate.Binary
@@ -452,6 +506,8 @@ func LinuxProcessCensus(inputs HostCollectorInputs, procRoot string) ([]ProcessC
 		if row, rowOK := ParseLinuxProcessStat(string(data), executable, inputs.PageSize, inputs.ClockTick); rowOK {
 			retainedBinaries[cacheKey] = row.Binary
 			rows = append(rows, row)
+		} else {
+			complete = false
 		}
 	}
 	if inputs.BinaryCache != nil {
@@ -465,7 +521,7 @@ func LinuxProcessCensus(inputs HostCollectorInputs, procRoot string) ([]ProcessC
 	if len(names) > 0 && len(rows) == 0 {
 		return nil, false
 	}
-	return rows, true
+	return rows, complete
 }
 
 func ParseLinuxMeminfo(text string) (MemoryCounters, bool) {
@@ -596,12 +652,16 @@ func topProcessMemory(rows []ProcessCensusRow) []ProcessCensusRow {
 	for _, row := range rows {
 		binary := normalizeHostBinary(row.Binary)
 		if binary != "" && row.RSSBytes > 0 {
-			totals[binary] += row.RSSBytes
+			key := binary
+			if isYoloMuxGoBinary(binary) && row.Identity != "" {
+				key = hostProcessInstanceSeriesKey(binary, row.Identity)
+			}
+			totals[key] += row.RSSBytes
 		}
 	}
 	result := make([]ProcessCensusRow, 0, len(totals))
-	for binary, rss := range totals {
-		result = append(result, ProcessCensusRow{Binary: binary, RSSBytes: rss})
+	for series, rss := range totals {
+		result = append(result, ProcessCensusRow{Binary: series, RSSBytes: rss})
 	}
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].RSSBytes != result[j].RSSBytes {
@@ -815,14 +875,16 @@ func firstObject(payload map[string]any, key string) map[string]any {
 var binarySafe = regexp.MustCompile(`[^a-z0-9._+-]+`)
 var pythonBinary = regexp.MustCompile(`(?i)^python(?:\d+(?:\.\d+)*)?$`)
 var versionBinary = regexp.MustCompile(`^\d+(?:\.\d+){1,3}$`)
+var deletedHostBinarySuffix = regexp.MustCompile(`(?i)\s+\(deleted\)$`)
 
 func normalizeHostBinary(value string) string {
-	name := path.Base(strings.TrimSuffix(strings.TrimSpace(value), " (deleted)"))
+	raw := deletedHostBinarySuffix.ReplaceAllString(strings.TrimSpace(value), "")
+	name := path.Base(raw)
 	if name == "" {
 		return ""
 	}
 	if versionBinary.MatchString(name) {
-		parts := strings.Split(strings.TrimSuffix(strings.TrimSpace(value), " (deleted)"), "/")
+		parts := strings.Split(raw, "/")
 		for index, part := range parts {
 			if part == "versions" && index > 0 {
 				return normalizeHostBinary(parts[index-1])

@@ -15,6 +15,7 @@ import (
 const (
 	linuxProcessCommandWidth      = 256
 	opencodeTmuxAnnotationTimeout = 100 * time.Millisecond
+	syntheticOpenCodeSession      = "ses-synthetic"
 )
 
 // AgentProcess and AgentTmuxPane are deliberately small snapshots. Keeping the
@@ -415,7 +416,12 @@ func LinuxAgentInventorySources() AgentInventorySources {
 // and never scans the host process table or /proc; the pane PID is only an
 // opaque fixture identity used to join the two synthetic snapshots.
 func SyntheticAgentInventorySources() AgentInventorySources {
-	panes := func(ctx context.Context) ([]AgentTmuxPane, error) { return linuxTmuxPanes(ctx) }
+	panes := func(ctx context.Context) ([]AgentTmuxPane, error) {
+		if !syntheticTmuxSocketConfigured() {
+			return nil, errSyntheticTmuxSocketUnset
+		}
+		return linuxTmuxPanes(ctx)
+	}
 	return AgentInventorySources{
 		Processes: func(ctx context.Context) ([]AgentProcess, error) {
 			rows, err := panes(ctx)
@@ -424,17 +430,27 @@ func SyntheticAgentInventorySources() AgentInventorySources {
 			}
 			processes := make([]AgentProcess, 0, len(rows))
 			for _, pane := range rows {
-				kind := syntheticPaneAgentKind(pane.Session)
-				switch kind {
-				case "claude", "codex":
-					processes = append(processes, AgentProcess{PID: pane.PID, Command: kind, Executable: kind})
-				case "opencode":
-					processes = append(processes, AgentProcess{PID: pane.PID, Command: "opencode --mock --session ses-live", Executable: "python3"})
+				if process, ok := syntheticAgentProcess(pane); ok {
+					processes = append(processes, process)
 				}
 			}
 			return processes, nil
 		},
 		Panes: panes,
+	}
+}
+
+func syntheticAgentProcess(pane AgentTmuxPane) (AgentProcess, bool) {
+	kind := syntheticPaneAgentKind(pane.Session)
+	switch kind {
+	case "claude", "codex":
+		return AgentProcess{PID: pane.PID, Command: kind, Executable: kind}, true
+	case "opencode":
+		// Keep this command aligned with the session seeded by the Go synthetic
+		// fixture. A stale token makes status unavailable and drops valid rows.
+		return AgentProcess{PID: pane.PID, Command: "opencode --mock --session " + syntheticOpenCodeSession, Executable: "python3"}, true
+	default:
+		return AgentProcess{}, false
 	}
 }
 
@@ -462,17 +478,17 @@ func LinuxOpenCodeInventorySources() OpenCodeInventorySources {
 func linuxProcesses(ctx context.Context) ([]AgentProcess, error) {
 	commandContext, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	return linuxProcessesFromProc(commandContext, "/proc", os.ReadDir, boundedProcReadFile, os.Readlink)
+	return linuxProcessesFromProc(commandContext, "/proc", readDirNames, boundedProcReadFile, os.Readlink)
 }
 
 func linuxOpenCodeProcesses(ctx context.Context) ([]AgentProcess, error) {
-	return linuxOpenCodeProcessesFromProc(ctx, "/proc", os.ReadDir, boundedProcReadFile, os.Readlink)
+	return linuxOpenCodeProcessesFromProc(ctx, "/proc", readDirNames, boundedProcReadFile, os.Readlink)
 }
 
 func linuxOpenCodeProcessesFromProc(
 	ctx context.Context,
 	procRoot string,
-	readDir func(string) ([]os.DirEntry, error),
+	readDir func(string) ([]string, error),
 	readFile func(string) ([]byte, error),
 	readLink func(string) (string, error),
 ) ([]AgentProcess, error) {
@@ -487,15 +503,15 @@ func linuxOpenCodeProcessesFromProc(
 		return nil, errors.New("process inventory bound exceeded")
 	}
 	processes := make([]AgentProcess, 0)
-	for _, entry := range entries {
+	for _, name := range entries {
 		if err := ctx.Err(); err != nil {
 			return processes, err
 		}
-		pid, err := strconv.Atoi(entry.Name())
+		pid, err := strconv.Atoi(name)
 		if err != nil || pid <= 0 {
 			continue
 		}
-		pidRoot := filepath.Join(procRoot, entry.Name())
+		pidRoot := filepath.Join(procRoot, name)
 		statData, err := readFile(filepath.Join(pidRoot, "stat"))
 		if err != nil {
 			continue
@@ -535,7 +551,7 @@ func linuxOpenCodeProcessesFromProc(
 func linuxProcessesFromProc(
 	ctx context.Context,
 	procRoot string,
-	readDir func(string) ([]os.DirEntry, error),
+	readDir func(string) ([]string, error),
 	readFile func(string) ([]byte, error),
 	readLink func(string) (string, error),
 ) ([]AgentProcess, error) {
@@ -550,15 +566,15 @@ func linuxProcessesFromProc(
 		return nil, errors.New("process inventory bound exceeded")
 	}
 	processes := make([]AgentProcess, 0, len(entries))
-	for _, entry := range entries {
+	for _, name := range entries {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		pid, err := strconv.Atoi(entry.Name())
+		pid, err := strconv.Atoi(name)
 		if err != nil || pid <= 0 {
 			continue
 		}
-		pidRoot := filepath.Join(procRoot, entry.Name())
+		pidRoot := filepath.Join(procRoot, name)
 		statData, err := readFile(filepath.Join(pidRoot, "stat"))
 		if err != nil {
 			// Processes can exit between enumeration and the first read.

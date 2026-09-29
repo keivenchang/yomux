@@ -935,12 +935,12 @@ async function runLayoutRestoreSuite() {
     }, 'the realized layout publishes the same receipt generation');
   });
 
-  await testAsync('session rename does not create a client session absent from the returned roster', async () => {
+  await testAsync('session rename keeps a target pending when the returned roster is stale', async () => {
     const api = loadYolomuxWithFileExplorerClosed('?sessions=source&layout=left&tabs=left:source', ['source']);
     api.setFetchForTest(url => {
       const parsed = new URL(String(url), 'http://localhost');
       if (parsed.pathname === '/api/rename-session') {
-        return Promise.resolve(jsonResponse({new_session: 'missing-target', sessions: ['unrelated'], ok: true}));
+        return Promise.resolve(jsonResponse({new_session: 'missing-target', sessions: ['source'], ok: true}));
       }
       if (parsed.pathname === '/api/session-metadata') {
         return Promise.resolve(jsonResponse({session_order: ['unrelated'], sessions: {unrelated: {panes: []}}}));
@@ -952,11 +952,27 @@ async function runLayoutRestoreSuite() {
     });
 
     const result = await api.renameTmuxSessionForTest('source', 'missing-target');
-    assert.ok(result?.error, 'the client rejects a success response whose roster omits the renamed identity');
-    assert.deepStrictEqual(canonical(api.sessionsForTest()), ['source'], 'the missing target is not inserted into the client session roster');
+    assert.equal(result, true, 'the successful rename commits while its roster confirmation is pending');
+    // A roster read that started before the rename can complete after it with the old name.
+    api.replaceTmuxSessionInClient('source', 'missing-target', ['source', 'missing-target']);
+    assert.deepStrictEqual(canonical(api.sessionsForTest()), ['missing-target'], 'the stale source identity is retired while the new target remains pending');
+    assert.deepStrictEqual(canonical(api.pendingTmuxSessionNamesForTest()), ['missing-target'], 'the renamed identity stays pending until an authoritative roster arrives');
+    await api.applySessionMetadataPayloadForTest({
+      session_order: ['source'],
+      sessions: {source: {panes: []}},
+    }, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+    assert.deepStrictEqual(canonical(api.sessionsForTest()), ['missing-target'], 'a delayed stale metadata response cannot restore the retired source');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
-      left: {tabs: ['source'], active: 'source'},
-    }, 'the missing target is not added to or focused in the client layout');
+      left: {tabs: ['missing-target'], active: 'missing-target'},
+    }, 'the renamed tab remains usable while roster confirmation is pending');
+  });
+
+  test('authoritative rename roster drops the retired source identity', () => {
+    const api = loadYolomuxWithFileExplorerClosed('?sessions=source&layout=left&tabs=left:source', ['source']);
+    const mutation = api.beginTmuxSessionLifecycleMutationForTest('rename', {session: 'source', newName: 'missing-target'});
+    api.commitTmuxSessionLifecycleMutationForTest(mutation, {newName: 'missing-target'});
+    api.replaceTmuxSessionInClient('source', 'missing-target', ['source', 'missing-target'], {authoritativeRoster: true});
+    assert.deepStrictEqual(canonical(api.sessionsForTest()), ['missing-target'], 'the retired source is filtered while the renamed target remains pending');
   });
 
   await testAsync('successful session rename closes its dialog after layout realization', async () => {

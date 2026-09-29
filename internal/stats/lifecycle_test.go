@@ -11,6 +11,46 @@ import (
 	"time"
 )
 
+func TestLifecycleCountersRetainLastPhaseDurations(t *testing.T) {
+	var counters lifecycleCounters
+	counters.recordSelection(60, 3*time.Millisecond)
+	counters.recordMaterialization(60, 7*time.Millisecond, 4, 128, 2)
+
+	snapshot := counters.snapshot()
+	if snapshot.LastSelectionDuration != 3*time.Millisecond {
+		t.Fatalf("last selection duration = %s, want 3ms", snapshot.LastSelectionDuration)
+	}
+	if snapshot.LastMaterializationDuration != 7*time.Millisecond {
+		t.Fatalf("last materialization duration = %s, want 7ms", snapshot.LastMaterializationDuration)
+	}
+	resolution := snapshot.ByResolution[60]
+	if resolution.LastSelectionDuration != 3*time.Millisecond || resolution.LastMaterializationDuration != 7*time.Millisecond {
+		t.Fatalf("resolution phase durations = %+v", resolution)
+	}
+}
+
+func TestLifecycleDemandRefreshDoesNotReselectExistingProduct(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+
+	lifecycle := NewLifecycle(writer, LifecycleConfig{Now: func() time.Time { return time.Unix(1000, 0) }})
+	lifecycle.DemandProduct(900, 10)
+	first := lifecycle.demandRevision.Load()
+	lifecycle.DemandProduct(900, 10)
+	if got := lifecycle.demandRevision.Load(); got != first {
+		t.Fatalf("repeated demand changed revision: first=%d got=%d", first, got)
+	}
+	lifecycle.DemandProduct(300, 1)
+	if got := lifecycle.demandRevision.Load(); got != first+1 {
+		t.Fatalf("new product demand did not change revision: first=%d got=%d", first, got)
+	}
+}
+
 func emptyRingBucketPayload(t *testing.T, start, duration float64, generation int64, generatedAt float64) string {
 	t.Helper()
 	payload, err := encodeRingBucketPayload(MaterializedBucket{Start: start, Duration: duration, Complete: true}, nil, generation, generatedAt)
@@ -151,6 +191,70 @@ func TestFactPagesUseStableKeysetsAcrossEqualTimestamps(t *testing.T) {
 	if len(seen) != 600 {
 		t.Fatalf("paged observations = %d, want 600", len(seen))
 	}
+	readMetrics := database.ReadMetrics()
+	if readMetrics.Queries == 0 {
+		t.Fatalf("typed SQLite read metrics recorded no queries: %+v", readMetrics)
+	}
+	if readMetrics.Duration < 0 || readMetrics.LastDuration < 0 {
+		t.Fatalf("typed SQLite read metrics contain negative duration: %+v", readMetrics)
+	}
+}
+
+func TestUnavailableSpanPagesUseStableEndTimeKeysets(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	spans := make([]UnavailableSpan, 600)
+	for index := range spans {
+		spans[index] = UnavailableSpan{
+			Family: "cpu", SourceID: fmt.Sprintf("host-%03d", index), EpochID: "epoch", StartedAt: float64(index), EndedAt: 1000,
+			NativeCadenceSeconds: 1, Reason: "fixture gap", OwnerGeneration: 1,
+		}
+	}
+	if _, err := writer.AppendBatch(ctx, AppendBatch{UnavailableSpans: spans}); err != nil {
+		t.Fatal(err)
+	}
+	database, err := OpenReadOnly(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var cursor *unavailablePageCursor
+	seen := make(map[float64]bool)
+	lastStartedAt := -1.0
+	for {
+		page, next, pageErr := database.ReadUnavailableSpansPage(ctx, 0, 1001, cursor, 17)
+		if pageErr != nil {
+			t.Fatal(pageErr)
+		}
+		if len(page) > 17 {
+			t.Fatalf("page length = %d", len(page))
+		}
+		for _, item := range page {
+			if item.EndedAt != 1000 || item.StartedAt <= lastStartedAt {
+				t.Fatalf("unavailable span order regressed: %+v after started_at=%v", item, lastStartedAt)
+			}
+			if seen[item.StartedAt] {
+				t.Fatalf("duplicate unavailable span started_at=%v", item.StartedAt)
+			}
+			seen[item.StartedAt] = true
+			lastStartedAt = item.StartedAt
+		}
+		if len(page) < 17 {
+			break
+		}
+		if next == nil {
+			t.Fatal("full unavailable-span page did not return a cursor")
+		}
+		cursor = next
+	}
+	if len(seen) != len(spans) {
+		t.Fatalf("paged unavailable spans = %d, want %d", len(seen), len(spans))
+	}
 }
 
 func TestLifecyclePublishesFactsAndRepairsMutation(t *testing.T) {
@@ -168,6 +272,9 @@ func TestLifecyclePublishesFactsAndRepairsMutation(t *testing.T) {
 	}
 	if err := lifecycle.RunOnce(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if metrics := lifecycle.ReadMetrics(); metrics.Queries == 0 {
+		t.Fatalf("lifecycle SQLite read metrics recorded no queries: %+v", metrics)
 	}
 	window, err := writer.ReadRingWindow(ctx, 10, 10, 2000)
 	if err != nil {
@@ -1122,6 +1229,45 @@ func TestLifecycleFactBudgetLeavesOversizedCellUnpublished(t *testing.T) {
 	}
 }
 
+func TestLifecycleCompletesOneBoundedCoarseCellPastRunBudget(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+
+	if _, err := writer.AppendBatch(ctx, AppendBatch{Observations: []Observation{{
+		EventID: "coarse-cell", Family: "cpu", SourceID: "host", ObservedAt: 199900, EpochID: "epoch",
+		Payload: map[string]any{"process_percent": 12},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(200000, 0)
+	lifecycle := NewLifecycle(writer, LifecycleConfig{
+		WindowSeconds: RetentionSeconds,
+		MaxCells:      1,
+		MaxRunTime:    time.Nanosecond,
+		Now:           func() time.Time { return now },
+	})
+	lifecycle.DemandProduct(3600, 300)
+	if err := lifecycle.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	window, err := writer.ReadRingWindow(ctx, 3600, 300, NextWindowEnd(now, 300))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(window.Rows) != 1 {
+		t.Fatalf("one bounded coarse cell should publish even when it exceeds the pass budget: rows=%d missing=%d", len(window.Rows), len(window.MissingBucketStarts))
+	}
+	if len(window.MissingBucketStarts) != 11 {
+		t.Fatalf("one-cell pass should leave the other 11 product buckets for later passes: missing=%d rows=%d", len(window.MissingBucketStarts), len(window.Rows))
+	}
+}
+
 func TestLifecycleFactBudgetDoesNotStarveLaterCells(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "stats.sqlite3")
@@ -1297,13 +1443,27 @@ func TestLifecycleDemandedCoarseRangeSplitsOversizedFold(t *testing.T) {
 		Products: []ProductKey{{RangeSeconds: 86400, ResolutionSeconds: 300}},
 		Now:      func() time.Time { return now },
 	})
-	for attempt := 0; attempt < 64 && !service.State().Ready; attempt++ {
+	for attempt := 0; attempt < 64; attempt++ {
 		if err := lifecycle.RunOnce(ctx); err != nil {
 			t.Fatal(err)
 		}
 		if err := service.Refresh(ctx); err != nil && !errors.Is(err, ErrProductPending) {
 			t.Fatal(err)
 		}
+		window, err := writer.ReadRingWindowMetadata(ctx, 86400, 300, NextWindowEnd(now, 300))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(window.MissingBucketStarts) == 0 && len(window.PendingInvalidations) == 0 {
+			break
+		}
+	}
+	window, err := writer.ReadRingWindowMetadata(ctx, 86400, 300, NextWindowEnd(now, 300))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(window.MissingBucketStarts) != 0 || len(window.PendingInvalidations) != 0 {
+		t.Fatalf("24-hour coarse ring remains incomplete: missing=%d pending=%d", len(window.MissingBucketStarts), len(window.PendingInvalidations))
 	}
 	if !service.State().Ready {
 		t.Fatalf("24-hour coarse product did not converge: state=%+v counters=%+v", service.State(), lifecycle.Counters())
@@ -1322,7 +1482,7 @@ func TestLifecycleDemandedCoarseRangeSplitsOversizedFold(t *testing.T) {
 	if counters.SelectedCells == 0 || counters.MaterializedBuckets == 0 || counters.FactRowsRead < uint64(len(observations)) || counters.DecodedBytes == 0 {
 		t.Fatalf("large-backlog work counters = %+v", counters)
 	}
-	if counters.SelectionDuration <= 0 || counters.MaterializationDuration <= 0 {
+	if counters.SelectionDuration <= 0 || counters.MaterializationDuration <= 0 || counters.FactReadDuration <= 0 || counters.LastFactReadDuration <= 0 {
 		t.Fatalf("large-backlog timing counters = %+v", counters)
 	}
 	resolutionCounters, ok := counters.ByResolution[300]
@@ -1384,7 +1544,7 @@ func TestLifecycleVacuumFailureHonorsRetryDeadline(t *testing.T) {
 	}
 }
 
-func TestLifecycleVacuumDefersForBusyReaderThenPersistsCompletion(t *testing.T) {
+func TestLifecycleVacuumDefersOnActiveReaderDemandThenPersistsCompletion(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "stats.sqlite3")
 	writer, err := OpenWriter(ctx, path)
@@ -1399,16 +1559,34 @@ func TestLifecycleVacuumDefersForBusyReaderThenPersistsCompletion(t *testing.T) 
 	if _, err := writer.AppendBatch(ctx, AppendBatch{Observations: seed}); err != nil {
 		t.Fatal(err)
 	}
+	reader, err := OpenReadOnly(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	snapshot, closeSnapshot, err := reader.beginReadSnapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(closeSnapshot)
+	if rows, err := snapshot.ReadObservations(ctx, 0, 2, MaxFactReadLimit); err != nil || len(rows) != 512 {
+		t.Fatalf("pin synthetic reader snapshot before vacuum: rows=%d err=%v", len(rows), err)
+	}
 	if _, err := writer.db.ExecContext(ctx, "DELETE FROM observations"); err != nil {
 		t.Fatal(err)
 	}
-
-	busy := true
+	if rows, err := snapshot.ReadObservations(ctx, 0, 2, MaxFactReadLimit); err != nil || len(rows) != 512 {
+		t.Fatalf("held synthetic reader snapshot lost pre-delete rows: rows=%d err=%v", len(rows), err)
+	}
+	// The lifecycle's busy callback represents active read demand. Hold the
+	// actual SQLite snapshot at the same time so the deferral/retry transition
+	// runs while an older reader can still observe pre-delete facts.
+	snapshotHeld := true
 	lifecycle := NewLifecycle(writer, LifecycleConfig{
 		VacuumCadence:  time.Second,
 		VacuumMaxDefer: 10 * time.Second,
 		VacuumRetry:    time.Second,
-		Busy:           func() bool { return busy },
+		Busy:           func() bool { return snapshotHeld },
 		Now:            func() time.Time { return time.Unix(100, 0) },
 	})
 	if err := lifecycle.vacuumIfDue(ctx, 100); err != nil {
@@ -1425,7 +1603,11 @@ func TestLifecycleVacuumDefersForBusyReaderThenPersistsCompletion(t *testing.T) 
 		t.Fatalf("busy-reader vacuum persisted completion marker %v", marker)
 	}
 
-	busy = false
+	snapshotHeld = false
+	closeSnapshot()
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if err := lifecycle.vacuumIfDue(ctx, 101); err != nil {
 		t.Fatalf("idle-reader vacuum failed: %v", err)
 	}

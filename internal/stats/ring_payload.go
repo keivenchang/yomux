@@ -280,21 +280,23 @@ func attributionToWire(item MaterializedCostAttribution) ringCostAttributionWire
 	return ringCostAttributionWire{Key: item.Key, Provider: item.Provider, Model: item.Model, Source: item.Source, Label: item.Label, Dimensions: dimensionsToWire(item.Dimensions), Priced: coverageToWire(item.PricedAtoms, item.PricedTokens), Unpriced: coverageToWire(item.UnpricedAtoms, item.UnpricedTokens), Sources: sources}
 }
 
-func attributionFromWire(item ringCostAttributionWire) MaterializedCostAttribution {
+func attributionFromWire(item ringCostAttributionWire) (MaterializedCostAttribution, error) {
 	result := MaterializedCostAttribution{Key: item.Key, Provider: item.Provider, Model: item.Model, Source: item.Source, Label: item.Label, Dimensions: dimensionsFromWire(item.Dimensions), PricedAtoms: item.Priced.Atoms, PricedTokens: item.Priced.Tokens, UnpricedAtoms: item.Unpriced.Atoms, UnpricedTokens: item.Unpriced.Tokens}
 	// Python's persisted attribution shape derives totals from dimensions and
 	// therefore does not duplicate total_tokens/price totals on the row. Rebuild
 	// those aggregates while decoding so the public cost validator sees the same
 	// invariant after a ring restart.
-	for _, dimension := range result.Dimensions {
-		result.TotalTokens += dimension.Tokens
-		result.MicroUSD += dimension.MicroUSD
-		result.APIListMicroUSD += dimension.APIListMicroUSD
+	dimensions, err := materializedCostDimensionSums(result.Dimensions, "ring cost attribution dimensions")
+	if err != nil {
+		return MaterializedCostAttribution{}, err
 	}
+	result.TotalTokens = dimensions.tokens
+	result.MicroUSD = dimensions.microUSD
+	result.APIListMicroUSD = dimensions.apiListMicroUSD
 	for _, source := range item.Sources {
 		result.Sources = append(result.Sources, sourceFromWire(source))
 	}
-	return result
+	return result, nil
 }
 
 func costDetailToWire(item MaterializedCostDetail) ringCostDetailWire {
@@ -321,15 +323,30 @@ func costDetailFromWire(item ringCostDetailWire) (MaterializedCostDetail, error)
 	// aggregate fields while decoding so the request-facing cost report retains
 	// those totals without changing the Python wire shape.
 	for _, dimension := range dimensions {
-		result.Tokens += dimension.Tokens
-		result.MicroUSD += dimension.MicroUSD
-		result.APIListMicroUSD += dimension.APIListMicroUSD
+		var err error
+		if result.Tokens, err = addSafeJSONInteger(result.Tokens, dimension.Tokens, "ring cost tokens"); err != nil {
+			return MaterializedCostDetail{}, err
+		}
+		if result.MicroUSD, err = addSafeJSONInteger(result.MicroUSD, dimension.MicroUSD, "ring cost micro_usd"); err != nil {
+			return MaterializedCostDetail{}, err
+		}
+		if result.APIListMicroUSD, err = addSafeJSONInteger(result.APIListMicroUSD, dimension.APIListMicroUSD, "ring cost API-list micro_usd"); err != nil {
+			return MaterializedCostDetail{}, err
+		}
 	}
 	for _, model := range item.Models {
-		result.Models = append(result.Models, attributionFromWire(model))
+		attribution, err := attributionFromWire(model)
+		if err != nil {
+			return MaterializedCostDetail{}, err
+		}
+		result.Models = append(result.Models, attribution)
 	}
 	for _, agent := range item.Agents {
-		result.Agents = append(result.Agents, attributionFromWire(agent))
+		attribution, err := attributionFromWire(agent)
+		if err != nil {
+			return MaterializedCostDetail{}, err
+		}
+		result.Agents = append(result.Agents, attribution)
 	}
 	for _, value := range item.Evidence {
 		result.Evidence = append(result.Evidence, PriceEvidence{Key: value.Key, Provider: value.Provider, Model: value.Model, Dimension: value.Dimension, Direction: value.Direction, Modality: value.Modality, CacheRole: value.CacheRole, Unit: value.Unit, PricingProfile: value.PricingProfile, ServiceTier: value.ServiceTier, CatalogModel: value.CatalogModel, RateUSD: value.RateUSD, RateScale: value.RateScale, EffectiveFrom: value.EffectiveFrom, SourceKind: value.SourceKind, SourceURL: value.SourceURL, CatalogRevision: value.CatalogRevision, Tokens: value.Tokens, MicroUSD: value.MicroUSD, APIListMicroUSD: value.APIListMicroUSD, PricedAtoms: value.PricedAtoms})

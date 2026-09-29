@@ -467,16 +467,18 @@ type AgentStatusCollectorCounters struct {
 	Errors               uint64
 	LastDuration         time.Duration
 	DurationTotal        time.Duration
+	LastCadence          time.Duration
 }
 
 type agentStatusCounters struct {
 	cycles, accepted, unavailable, errors atomic.Uint64
 	lastDuration                          atomic.Int64
 	durationTotal                         atomic.Uint64
+	lastCadence                           atomic.Int64
 }
 
 func (c *agentStatusCounters) snapshot() AgentStatusCollectorCounters {
-	return AgentStatusCollectorCounters{Cycles: c.cycles.Load(), AcceptedObservations: c.accepted.Load(), UnavailableSpans: c.unavailable.Load(), Errors: c.errors.Load(), LastDuration: time.Duration(c.lastDuration.Load()), DurationTotal: time.Duration(c.durationTotal.Load())}
+	return AgentStatusCollectorCounters{Cycles: c.cycles.Load(), AcceptedObservations: c.accepted.Load(), UnavailableSpans: c.unavailable.Load(), Errors: c.errors.Load(), LastDuration: time.Duration(c.lastDuration.Load()), DurationTotal: time.Duration(c.durationTotal.Load()), LastCadence: time.Duration(c.lastCadence.Load())}
 }
 
 // AgentStatusCollector owns one collection goroutine. RunOnce is intended for
@@ -538,20 +540,22 @@ func (c *AgentStatusCollector) Start(parent context.Context) error {
 }
 
 func (c *AgentStatusCollector) loop(ctx context.Context) {
-	defer func() { c.mu.Lock(); c.run = false; close(c.done); c.mu.Unlock() }()
-	first := true
-	for {
-		if !first {
-			if !waitCollectorCadence(ctx, c.clock, c.config.ActiveCadence, c.config.IdleCadence, c.config.ActiveFunc) {
+	runWithStatsProfileLabels(ctx, "agent_status_collector", "", func(ctx context.Context) {
+		defer func() { c.mu.Lock(); c.run = false; close(c.done); c.mu.Unlock() }()
+		first := true
+		for {
+			if !first {
+				if !waitCollectorCadence(ctx, c.clock, c.config.ActiveCadence, c.config.IdleCadence, c.config.ActiveFunc) {
+					return
+				}
+			}
+			first = false
+			if ctx.Err() != nil {
 				return
 			}
+			c.runOnce(ctx)
 		}
-		first = false
-		if ctx.Err() != nil {
-			return
-		}
-		c.runOnce(ctx)
-	}
+	})
 }
 
 func (c *AgentStatusCollector) Stop() {
@@ -576,40 +580,63 @@ func (c *AgentStatusCollector) runOnce(parent context.Context) {
 		cadence = c.config.IdleCadence
 	}
 	c.stateMu.Lock()
-	if c.lastCadence != 0 && c.lastCadence != cadence.Seconds() {
+	epochID, epochStart, hadSuccess, lastCadence := c.epochID, c.epochStart, c.hadSuccess, c.lastCadence
+	if lastCadence != 0 && lastCadence != cadence.Seconds() {
 		// Native cadence is immutable within a coverage epoch. Demand can
 		// switch a collector between idle and active cadence, so begin a new
 		// epoch instead of attempting to rewrite the old metadata row.
-		c.epochID = fmt.Sprintf("%s-%d", c.config.EpochID, started.UnixNano())
-		c.epochStart = float64(started.UnixNano()) / 1e9
-		c.hadSuccess = false
+		epochID = fmt.Sprintf("%s-%d", c.config.EpochID, started.UnixNano())
+		epochStart = float64(started.UnixNano()) / 1e9
+		hadSuccess = false
 	}
-	c.lastCadence = cadence.Seconds()
-	fact := HostFactContext{EpochID: c.epochID, EpochStartedAt: c.epochStart, ObservedAt: float64(started.UnixNano()) / 1e9, CadenceSeconds: cadence.Seconds(), OwnerGeneration: c.config.OwnerGeneration, SourceID: c.config.SourceID}
+	c.counters.lastCadence.Store(cadence.Nanoseconds())
+	fact := HostFactContext{EpochID: epochID, EpochStartedAt: epochStart, ObservedAt: float64(started.UnixNano()) / 1e9, CadenceSeconds: cadence.Seconds(), OwnerGeneration: c.config.OwnerGeneration, SourceID: c.config.SourceID}
 	c.stateMu.Unlock()
-	batch := c.collect(parent, fact)
+	// collect updates the status cache and revision only as it builds the next
+	// batch. Keep a rollback copy until the writer acknowledges the batch; a
+	// failed append must not make the next successful sample inherit state that
+	// was never persisted.
+	statusCache, lastSignature, lastRevision, revisionSet := c.statusStateSnapshot()
+	var batch AppendBatch
+	runWithStatsProfilePhase(parent, "agent_status_collector", "agent_status", "collection", func(phaseCtx context.Context) {
+		batch = c.collect(phaseCtx, fact)
+	})
+	nextEpochID, nextEpochStart, nextHadSuccess := epochID, epochStart, hadSuccess
+	nextCadence := cadence.Seconds()
 	if len(batch.UnavailableSpans) > 0 {
-		c.stateMu.Lock()
-		if c.hadSuccess {
+		if hadSuccess {
 			ended := fact.ObservedAt
 			batch.CoverageEpochs = append(batch.CoverageEpochs, CoverageEpoch{Family: "agent_status", SourceID: fact.SourceID, EpochID: fact.EpochID, StartedAt: fact.EpochStartedAt, EndedAt: &ended, NativeCadenceSeconds: fact.CadenceSeconds, OwnerGeneration: fact.OwnerGeneration})
 		}
-		c.hadSuccess = false
-		c.epochID = fmt.Sprintf("%s-%d", c.config.EpochID, started.UnixNano())
-		c.epochStart = fact.ObservedAt + fact.CadenceSeconds
-		c.stateMu.Unlock()
+		nextHadSuccess = false
+		nextEpochID = fmt.Sprintf("%s-%d", c.config.EpochID, started.UnixNano())
+		nextEpochStart = fact.ObservedAt + fact.CadenceSeconds
 	} else if len(batch.Observations) > 0 {
-		c.stateMu.Lock()
-		c.hadSuccess = true
-		c.stateMu.Unlock()
+		nextHadSuccess = true
 	}
+	appendSucceeded := false
 	if c.writer == nil {
 		c.counters.errors.Add(1)
-	} else if result, err := c.writer.AppendBatch(parent, batch); err != nil {
-		c.counters.errors.Add(1)
 	} else {
-		c.counters.accepted.Add(uint64(result.ObservationsAccepted))
-		c.counters.unavailable.Add(uint64(result.UnavailableAccepted))
+		var result AppendResult
+		var appendErr error
+		runWithStatsProfilePhase(parent, "agent_status_collector", "agent_status", "append", func(phaseCtx context.Context) {
+			result, appendErr = c.writer.AppendBatch(phaseCtx, batch)
+		})
+		if appendErr != nil {
+			c.counters.errors.Add(1)
+		} else {
+			appendSucceeded = true
+			c.counters.accepted.Add(uint64(result.ObservationsAccepted))
+			c.counters.unavailable.Add(uint64(result.UnavailableAccepted))
+		}
+	}
+	if appendSucceeded {
+		c.stateMu.Lock()
+		c.epochID, c.epochStart, c.hadSuccess, c.lastCadence = nextEpochID, nextEpochStart, nextHadSuccess, nextCadence
+		c.stateMu.Unlock()
+	} else {
+		c.restoreStatusState(statusCache, lastSignature, lastRevision, revisionSet)
 	}
 	elapsed := c.clock.Now().Sub(started)
 	if elapsed < 0 {
@@ -619,6 +646,25 @@ func (c *AgentStatusCollector) runOnce(parent context.Context) {
 	c.counters.durationTotal.Add(uint64(elapsed.Nanoseconds()))
 }
 
+func (c *AgentStatusCollector) statusStateSnapshot() (map[string]agentStatusCacheEntry, string, uint64, bool) {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	cache := make(map[string]agentStatusCacheEntry, len(c.statusCache))
+	for key, value := range c.statusCache {
+		cache[key] = value
+	}
+	return cache, c.lastSignature, c.lastRevision, c.revisionSet
+}
+
+func (c *AgentStatusCollector) restoreStatusState(cache map[string]agentStatusCacheEntry, signature string, revision uint64, revisionSet bool) {
+	c.stateMu.Lock()
+	c.statusCache = cache
+	c.lastSignature = signature
+	c.lastRevision = revision
+	c.revisionSet = revisionSet
+	c.stateMu.Unlock()
+}
+
 func (c *AgentStatusCollector) collect(parent context.Context, fact HostFactContext) AppendBatch {
 	if c.inventory == nil {
 		c.counters.errors.Add(1)
@@ -626,8 +672,15 @@ func (c *AgentStatusCollector) collect(parent context.Context, fact HostFactCont
 	}
 	records, inventoryErrors := c.inventory(parent)
 	if len(inventoryErrors) > 0 {
+		// Inventory adapters may return a usable process/pane snapshot together
+		// with a best-effort enrichment error. Preserve the admitted records so
+		// one ambiguous pane or transient annotation failure does not erase the
+		// whole roster; the per-record classifier still publishes unavailable
+		// when that record's evidence cannot be established.
 		c.counters.errors.Add(1)
-		return BuildUnavailableFacts("agent_status", fact, "inventory-unavailable")
+		if len(records) == 0 {
+			return BuildUnavailableFacts("agent_status", fact, "inventory-unavailable")
+		}
 	}
 	if len(records) > MaxAgentStatusEntries {
 		return BuildUnavailableFacts("agent_status", fact, "agent-status-bound-exceeded")

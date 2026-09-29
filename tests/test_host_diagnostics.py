@@ -181,6 +181,25 @@ def test_no_argument_diagnostics_reports_late_override_without_raising(monkeypat
     current_host_identity.cache_clear()
 
 
+def test_synthetic_host_diagnostics_never_reads_machine_state(monkeypatch):
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("synthetic host diagnostics read machine state")
+
+    monkeypatch.setattr("yolomux_lib.infra.host_diagnostics.RootLayout.current", forbidden)
+    monkeypatch.setattr("yolomux_lib.infra.host_diagnostics.current_host_identity", forbidden)
+    monkeypatch.setattr("yolomux_lib.infra.host_diagnostics.classify_filesystem", forbidden)
+    monkeypatch.setattr("yolomux_lib.infra.host_diagnostics.current_database_partitions", forbidden)
+
+    payload = collect_host_diagnostics(environ={"YOLOMUX_STATS_SYNTHETIC_HOST": "1"}).payload(admin=True)
+
+    assert payload["identity_reason_code"] == "synthetic_host_diagnostics"
+    assert payload["identity"]["stable_host_id"]["value"] is None
+    assert len(payload["roots"]) == 4
+    assert payload["database_partitions"] == []
+    assert payload["rejected_mutable_paths"] == []
+    assert payload["network_filesystem_escape_hatch"] is False
+
+
 def test_current_database_partitions_reports_host_partitioned_stats_path(tmp_path):
     roots = RootLayout(config=tmp_path / "config", state=tmp_path / "state", cache=tmp_path / "cache", runtime=tmp_path / "run")
     stats_path = roots.state / "hosts" / "machine-123" / DATABASE_FILENAME

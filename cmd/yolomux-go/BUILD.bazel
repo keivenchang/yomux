@@ -21,6 +21,7 @@ go_library(
         "//internal/finder:finder_lib",
         "//internal/stats:stats_lib",
         "//internal/work:work_lib",
+        SQLITE,
     ],
 )
 

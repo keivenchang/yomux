@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -14,6 +15,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/mattn/go-sqlite3"
 )
 
 const (
@@ -69,9 +72,17 @@ type Writer struct {
 	sourceGeneration        atomic.Int64
 	dataVersion             int64
 	dataVersionReady        bool
-	pendingMu               sync.RWMutex
-	pending                 map[[2]int64]int64
-	pendingReady            bool
+	// Startup reconciliation may deliberately leave the in-memory publication
+	// floor below schema_meta. Remember the fully scanned generation so the
+	// first append can avoid repeating that scan when SQLite has not changed.
+	startupReconciledGeneration   int64
+	startupReconciledDataVersion  int64
+	startupReconciledTotalChanges int64
+	startupReconciledDataReady    bool
+	corruptRecoveryName           string
+	pendingMu                     sync.RWMutex
+	pending                       map[[2]int64]int64
+	pendingReady                  bool
 }
 
 // MigrationStatus is the small, read-only projection needed by the HTTP
@@ -161,17 +172,67 @@ func OpenWriter(ctx context.Context, path string) (*Writer, error) {
 		_ = lease.close()
 		return nil, err
 	}
+	corruptRecoveryName := ""
 	// Validate an existing database through an immutable read-only connection
 	// before opening it writable. In particular, do not enable WAL, create
 	// schema objects, or repair triggers for a database that will subsequently
 	// be rejected as incompatible. This is the same destructive-open boundary
 	// used by the Python owner and keeps DB/WAL/SHM untouched on failure.
-	if info, statErr := os.Stat(path); statErr == nil && info.Size() > 0 {
-		if preflightErr := validateWriterDatabaseReadOnly(ctx, path); preflightErr != nil {
+	if info, statErr := os.Stat(path); statErr == nil {
+		sidecars, sidecarErr := sqliteDatabaseSidecarsPresent(path)
+		if sidecarErr != nil {
 			_ = lease.close()
-			return nil, preflightErr
+			return nil, sidecarErr
 		}
-	} else if statErr != nil && !os.IsNotExist(statErr) {
+		// A truncated main file can be empty while its WAL still contains the
+		// last committed state. Opening it writable would let SQLite discard the
+		// WAL, so preserve the whole artifact set before creating a replacement.
+		if info.Size() == 0 && sidecars {
+			quarantinePath, quarantineErr := quarantineCorruptDatabase(path)
+			if quarantineErr != nil {
+				_ = lease.close()
+				return nil, fmt.Errorf("quarantine corrupt YO!stats database: %w", quarantineErr)
+			}
+			corruptRecoveryName = filepath.Base(quarantinePath)
+		} else if info.Size() > 0 {
+			preflightErr := error(nil)
+			// A damaged header can make SQLite report a secondary read-only error
+			// while it examines a stale journal. Check the immutable header before
+			// opening the read-only connection so all physical-corruption shapes use
+			// the same recoverable path.
+			headerCorrupt := sqliteDatabaseHeaderCorrupt(path)
+			if !headerCorrupt {
+				preflightErr = validateWriterDatabaseReadOnly(ctx, path)
+			}
+			if headerCorrupt || (preflightErr != nil && sqlitePreflightCorrupt(preflightErr)) {
+				quarantinePath, quarantineErr := quarantineCorruptDatabase(path)
+				if quarantineErr != nil {
+					_ = lease.close()
+					return nil, fmt.Errorf("quarantine corrupt YO!stats database: %w", quarantineErr)
+				}
+				corruptRecoveryName = filepath.Base(quarantinePath)
+			} else if preflightErr != nil {
+				_ = lease.close()
+				return nil, preflightErr
+			}
+		}
+	} else if statErr != nil && os.IsNotExist(statErr) {
+		// Orphaned sidecars beside a missing main file are also unsafe to let
+		// SQLite reinterpret as a new database; retain them for forensics first.
+		sidecars, sidecarErr := sqliteDatabaseSidecarsPresent(path)
+		if sidecarErr != nil {
+			_ = lease.close()
+			return nil, sidecarErr
+		}
+		if sidecars {
+			quarantinePath, quarantineErr := quarantineCorruptDatabase(path)
+			if quarantineErr != nil {
+				_ = lease.close()
+				return nil, fmt.Errorf("quarantine orphaned YO!stats database sidecars: %w", quarantineErr)
+			}
+			corruptRecoveryName = filepath.Base(quarantinePath)
+		}
+	} else if statErr != nil {
 		_ = lease.close()
 		return nil, fmt.Errorf("stat YO!stats database before open: %w", statErr)
 	}
@@ -187,13 +248,16 @@ func OpenWriter(ctx context.Context, path string) (*Writer, error) {
 		_ = lease.close()
 		return nil, err
 	}
-	for _, pragma := range []string{"PRAGMA busy_timeout = 5000", "PRAGMA foreign_keys = ON", "PRAGMA query_only = OFF", "PRAGMA journal_mode = WAL", "PRAGMA synchronous = NORMAL", "PRAGMA wal_autocheckpoint = 1000"} {
+	for _, pragma := range []string{"PRAGMA busy_timeout = 5000", "PRAGMA foreign_keys = ON", "PRAGMA query_only = OFF", "PRAGMA journal_mode = WAL", "PRAGMA synchronous = NORMAL", "PRAGMA wal_autocheckpoint = 1000", fmt.Sprintf("PRAGMA journal_size_limit = %d", WALAllocationCeilingBytes)} {
 		if _, err = db.ExecContext(ctx, pragma); err != nil {
 			return closeOnError(fmt.Errorf("configure YO!stats writer: %w", err))
 		}
 	}
 	if err = initializeSchema(ctx, db); err != nil {
 		return closeOnError(err)
+	}
+	if err = initializeMissingRingSchema(ctx, db); err != nil {
+		return closeOnError(fmt.Errorf("initialize YO!stats ring schema: %w", err))
 	}
 	if err = ensureRingTriggers(ctx, db); err != nil {
 		return closeOnError(fmt.Errorf("ensure YO!stats ring triggers: %w", err))
@@ -204,7 +268,7 @@ func OpenWriter(ctx context.Context, path string) (*Writer, error) {
 	if err := publishWriterFence(path); err != nil {
 		return closeOnError(fmt.Errorf("publish YO!stats writer fence: %w", err))
 	}
-	writer := &Writer{db: db, lease: lease, pending: make(map[[2]int64]int64)}
+	writer := &Writer{db: db, lease: lease, corruptRecoveryName: corruptRecoveryName, pending: make(map[[2]int64]int64)}
 	if err := writer.initializeDataVersion(ctx); err != nil {
 		return closeOnError(fmt.Errorf("read YO!stats data version: %w", err))
 	}
@@ -219,6 +283,7 @@ func OpenWriter(ctx context.Context, path string) (*Writer, error) {
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM ring_invalidations WHERE applied_at IS NULL").Scan(&pendingInvalidations); err != nil {
 		return closeOnError(fmt.Errorf("read YO!stats pending invalidations: %w", err))
 	}
+	startupReconciledGeneration := int64(0)
 	if publishedGeneration < sourceGeneration {
 		// A prior owner advanced source_generation without recording per-cell
 		// invalidations. Recreate those bounded invalidations while the writer
@@ -236,6 +301,7 @@ func OpenWriter(ctx context.Context, path string) (*Writer, error) {
 		if txErr = tx.Commit(); txErr != nil {
 			return closeOnError(fmt.Errorf("commit YO!stats startup reconciliation: %w", txErr))
 		}
+		startupReconciledGeneration = sourceGeneration
 	} else if publishedGeneration == sourceGeneration && pendingInvalidations == 0 {
 		// A prior owner may have advanced both watermarks while omitting the
 		// cell-level invalidation. Scan the bounded populated ring once at
@@ -257,17 +323,44 @@ func OpenWriter(ctx context.Context, path string) (*Writer, error) {
 	// The publication is the last generation whose ring cells are known to be
 	// materialized. Start the in-memory reconciliation floor there, rather than
 	// blindly trusting schema_meta after a legacy/direct writer changed facts
-	// without recording ring invalidations while this process was down. The next
-	// append then enters the existing external-generation reconciliation path;
-	// lifecycle selection also sees the mismatch before that append arrives.
+	// without recording ring invalidations while this process was down. The first
+	// append still sees the mismatch, but skips the duplicate scan when the
+	// connection's SQLite data_version proves no outside writer changed facts.
 	if publishedGeneration < sourceGeneration {
 		sourceGeneration = publishedGeneration
 	}
 	writer.sourceGeneration.Store(sourceGeneration)
+	if startupReconciledGeneration > 0 && writer.dataVersionReady {
+		var totalChanges int64
+		if err := db.QueryRowContext(ctx, "SELECT total_changes()").Scan(&totalChanges); err != nil {
+			return closeOnError(fmt.Errorf("read YO!stats connection changes: %w", err))
+		}
+		writer.startupReconciledGeneration = startupReconciledGeneration
+		writer.startupReconciledDataVersion = writer.dataVersion
+		writer.startupReconciledTotalChanges = totalChanges
+		writer.startupReconciledDataReady = true
+		// Do not refresh this baseline from a later post-commit observation:
+		// an external same-generation commit before a writer-owned maintenance
+		// mutation must remain visible and force the next append to reconcile.
+	}
 	if err := writer.refreshPendingCache(ctx); err != nil {
 		return closeOnError(fmt.Errorf("read YO!stats pending invalidations: %w", err))
 	}
+	if err := truncateStatsWAL(ctx, db); err != nil {
+		return closeOnError(fmt.Errorf("truncate inherited YO!stats WAL on writer startup: %w", err))
+	}
 	return writer, nil
+}
+
+func truncateStatsWAL(ctx context.Context, db *sql.DB) error {
+	var busy, logFrames, checkpointedFrames int64
+	if err := db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &checkpointedFrames); err != nil {
+		return fmt.Errorf("checkpoint WAL: %w", err)
+	}
+	if busy != 0 {
+		return fmt.Errorf("truncate WAL remained busy (%d of %d frames checkpointed)", checkpointedFrames, logFrames)
+	}
+	return nil
 }
 
 // initializeDataVersion records SQLite's connection-local external-commit
@@ -361,8 +454,12 @@ func validateWriterDatabaseReadOnly(ctx context.Context, path string) error {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	defer db.Close()
-	if _, err := db.ExecContext(ctx, "PRAGMA query_only = ON"); err != nil {
-		return fmt.Errorf("enable YO!stats read-only preflight: %w", err)
+	var integrity string
+	if err := db.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&integrity); err != nil {
+		return fmt.Errorf("run YO!stats integrity preflight: %w", err)
+	}
+	if integrity != "ok" {
+		return &sqliteCorruptionError{detail: integrity}
 	}
 	// Missing ring-protection triggers are repaired immediately after this
 	// read-only shape check, while the writer lease is held. The read-only
@@ -374,6 +471,150 @@ func validateWriterDatabaseReadOnly(ctx context.Context, path string) error {
 	return nil
 }
 
+const sqliteDatabaseHeader = "SQLite format 3\x00"
+
+type sqliteCorruptionError struct{ detail string }
+
+func (e *sqliteCorruptionError) Error() string {
+	return fmt.Sprintf("YO!stats SQLite integrity check failed: %s", e.detail)
+}
+
+// sqliteDatabaseHeaderCorrupt identifies a non-empty file that cannot be a
+// SQLite database without treating an I/O or permission failure as proof of
+// corruption. The latter must remain a fail-closed startup error.
+func sqliteDatabaseHeaderCorrupt(path string) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	header := make([]byte, len(sqliteDatabaseHeader))
+	if _, err := io.ReadFull(file, header); err != nil {
+		return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+	}
+	return string(header) != sqliteDatabaseHeader
+}
+
+func sqliteDatabaseSidecarsPresent(path string) (bool, error) {
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		_, err := os.Lstat(path + suffix)
+		if err == nil {
+			return true, nil
+		}
+		if !os.IsNotExist(err) {
+			return false, fmt.Errorf("inspect YO!stats database sidecar %q: %w", filepath.Base(path+suffix), err)
+		}
+	}
+	return false, nil
+}
+
+func sqlitePreflightCorrupt(err error) bool {
+	var integrityErr *sqliteCorruptionError
+	if errors.As(err, &integrityErr) {
+		return true
+	}
+	var sqliteErr sqlite3.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	return sqliteErr.Code == sqlite3.ErrCorrupt || sqliteErr.Code == sqlite3.ErrNotADB
+}
+
+type quarantineMove struct{ source, target string }
+
+func quarantineCorruptDatabase(path string) (string, error) {
+	return quarantineCorruptDatabaseWithSync(path, syncQuarantineDirectory)
+}
+
+func quarantineCorruptDatabaseWithSync(path string, syncDirectory func(string) error) (string, error) {
+	if syncDirectory == nil {
+		syncDirectory = syncQuarantineDirectory
+	}
+	target, err := freeCorruptDatabaseTarget(path)
+	if err != nil {
+		return "", err
+	}
+	suffixes := []string{"", "-wal", "-shm", "-journal"}
+	moves := make([]quarantineMove, 0, len(suffixes))
+	for _, suffix := range suffixes {
+		source := path + suffix
+		info, statErr := os.Lstat(source)
+		if os.IsNotExist(statErr) {
+			continue
+		}
+		if statErr != nil {
+			return "", fmt.Errorf("inspect corrupt database artifact %q: %w", source, statErr)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return "", fmt.Errorf("corrupt database artifact is not a regular file: %s", filepath.Base(source))
+		}
+		moves = append(moves, quarantineMove{source: source, target: target + suffix})
+	}
+	if len(moves) == 0 {
+		return "", errors.New("corrupt YO!stats database disappeared before quarantine")
+	}
+	moved := make([]quarantineMove, 0, len(moves))
+	for _, item := range moves {
+		if err := os.Rename(item.source, item.target); err != nil {
+			return "", errors.Join(fmt.Errorf("move corrupt database artifact %q: %w", item.source, err), rollbackQuarantineMoves(moved))
+		}
+		moved = append(moved, item)
+	}
+	if err := syncDirectory(filepath.Dir(path)); err != nil {
+		return "", errors.Join(fmt.Errorf("sync database directory after quarantine: %w", err), rollbackQuarantineMoves(moved))
+	}
+	return target, nil
+}
+
+func rollbackQuarantineMoves(moved []quarantineMove) error {
+	var rollbackErr error
+	for i := len(moved) - 1; i >= 0; i-- {
+		if err := os.Rename(moved[i].target, moved[i].source); err != nil {
+			rollbackErr = errors.Join(rollbackErr, err)
+		}
+	}
+	return rollbackErr
+}
+
+func syncQuarantineDirectory(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open database directory after quarantine: %w", err)
+	}
+	syncErr := directory.Sync()
+	closeErr := directory.Close()
+	if syncErr != nil {
+		return fmt.Errorf("sync database directory after quarantine: %w", syncErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close database directory after quarantine: %w", closeErr)
+	}
+	return nil
+}
+
+func freeCorruptDatabaseTarget(path string) (string, error) {
+	base := fmt.Sprintf("%s.corrupt-%d-%d", path, time.Now().UnixNano(), os.Getpid())
+	for attempt := 0; attempt < 100; attempt++ {
+		candidate := base
+		if attempt > 0 {
+			candidate = fmt.Sprintf("%s.%d", base, attempt)
+		}
+		occupied := false
+		for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+			if _, err := os.Lstat(candidate + suffix); err == nil {
+				occupied = true
+				break
+			} else if !os.IsNotExist(err) {
+				return "", fmt.Errorf("inspect quarantine target %q: %w", candidate+suffix, err)
+			}
+		}
+		if !occupied {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("no free corrupt database quarantine name beside %s", filepath.Base(path))
+}
+
 // SourceGeneration returns the latest generation observed by the writer
 // owner. Request paths use this lock-free value to reject an immutable
 // product that has already been superseded, without opening SQLite.
@@ -382,6 +623,17 @@ func (w *Writer) SourceGeneration() int64 {
 		return 0
 	}
 	return w.sourceGeneration.Load()
+}
+
+// CorruptRecoveryName returns the basename of the forensic artifact created
+// during this writer's startup, or an empty string when no recovery occurred.
+// The name is intentionally basename-only so diagnostics do not expose the
+// configured state-directory path.
+func (w *Writer) CorruptRecoveryName() string {
+	if w == nil {
+		return ""
+	}
+	return w.corruptRecoveryName
 }
 
 // ProductFresh reports whether the published product may be served for the
@@ -485,6 +737,21 @@ func (w *Writer) Close() error {
 	return leaseErr
 }
 
+// statsDatabaseIdentity returns the current file incarnation for the database
+// owned by this writer. It deliberately uses only device/inode identity so
+// ordinary database writes do not invalidate external collector cursors.
+func (w *Writer) statsDatabaseIdentity() (string, error) {
+	if w == nil || w.lease == nil || w.lease.path == "" {
+		return "", errors.New("YO!stats database identity is unavailable")
+	}
+	info, err := os.Stat(w.lease.path)
+	if err != nil {
+		return "", fmt.Errorf("stat YO!stats database identity: %w", err)
+	}
+	device, inode := fileIdentity(info)
+	return fmt.Sprintf("%d:%d", device, inode), nil
+}
+
 // AppendBatch applies all facts and tombstones atomically. Tombstones are
 // intentionally not persisted as rows: their proof is the matching atom's
 // deletion, and replay of an already-applied tombstone is a duplicate.
@@ -531,8 +798,24 @@ func (w *Writer) AppendBatch(ctx context.Context, batch AppendBatch) (AppendResu
 	if err := tx.QueryRowContext(ctx, "SELECT source_generation FROM aggregate_publication WHERE singleton = 1").Scan(&publishedGeneration); err != nil {
 		return rollback(fmt.Errorf("read published stats generation: %w", err))
 	}
+	connectionDataVersionBeforeAppend := int64(0)
+	connectionChangesBeforeAppend := int64(0)
+	if w.startupReconciledDataReady {
+		if err := tx.QueryRowContext(ctx, "PRAGMA data_version").Scan(&connectionDataVersionBeforeAppend); err != nil {
+			return rollback(fmt.Errorf("read stats data version: %w", err))
+		}
+		if err := tx.QueryRowContext(ctx, "SELECT total_changes()").Scan(&connectionChangesBeforeAppend); err != nil {
+			return rollback(fmt.Errorf("read stats connection changes: %w", err))
+		}
+	}
 	if publishedGeneration > generation {
 		generation = publishedGeneration
+	}
+	startupExternalMutation := false
+	if w.startupReconciledDataReady {
+		startupExternalMutation = w.startupReconciledGeneration != generation ||
+			connectionDataVersionBeforeAppend != w.startupReconciledDataVersion ||
+			connectionChangesBeforeAppend != w.startupReconciledTotalChanges
 	}
 	result.Generation = generation
 	acceptedTimestamps := make([]float64, 0, len(batch.Observations)+len(batch.UsageAtoms)+len(batch.UsageTombstones))
@@ -639,10 +922,20 @@ func (w *Writer) AppendBatch(ctx context.Context, batch AppendBatch) (AppendResu
 			acceptedTimestamps = append(acceptedTimestamps, item.ObservedAt)
 		} else if err != nil {
 			return rollback(err)
-		} else if oldAt == item.ObservedAt && oldPayload == payloadJSON {
-			result.UsageDuplicate++
 		} else {
-			return rollback(errors.New("usage atom identity conflicts with stored data"))
+			updatedPayload, repaired, compatible := usageReplayPayloadChange(item.EventID, oldAt, oldPayload, item.ObservedAt, payloadJSON)
+			if !compatible {
+				return rollback(errors.New("usage atom identity conflicts with stored data"))
+			}
+			if repaired {
+				if _, err = tx.ExecContext(ctx, "UPDATE usage_atoms SET payload_json=? WHERE event_id=? AND direction=? AND modality=? AND cache_role=? AND unit=?", updatedPayload, item.EventID, item.Direction, item.Modality, item.CacheRole, item.Unit); err != nil {
+					return rollback(fmt.Errorf("repair unknown usage model: %w", err))
+				}
+				result.UsageAccepted++
+				acceptedTimestamps = append(acceptedTimestamps, item.ObservedAt)
+			} else {
+				result.UsageDuplicate++
+			}
 		}
 	}
 	for _, item := range batch.UsageTombstones {
@@ -681,15 +974,26 @@ func (w *Writer) AppendBatch(ctx context.Context, batch AppendBatch) (AppendResu
 			return rollback(err)
 		}
 	}
-	if externalGenerationAdvanced {
-		if err = recordExternalGenerationInvalidations(ctx, tx, result.Generation, commitAt); err != nil {
-			return rollback(fmt.Errorf("record external-generation invalidations: %w", err))
+	if externalGenerationAdvanced || startupExternalMutation {
+		reconciled := false
+		if !startupExternalMutation && w.startupReconciledDataReady && w.startupReconciledGeneration == generation {
+			var dataVersion int64
+			if err = tx.QueryRowContext(ctx, "PRAGMA data_version").Scan(&dataVersion); err != nil {
+				return rollback(fmt.Errorf("read stats data version: %w", err))
+			}
+			reconciled = dataVersion == w.startupReconciledDataVersion && connectionChangesBeforeAppend == w.startupReconciledTotalChanges
+		}
+		if !reconciled {
+			if err = recordExternalGenerationInvalidations(ctx, tx, result.Generation, commitAt); err != nil {
+				return rollback(fmt.Errorf("record external-generation invalidations: %w", err))
+			}
 		}
 	}
 	if err = tx.Commit(); err != nil {
 		return AppendResult{}, fmt.Errorf("commit stats append: %w", err)
 	}
 	w.sourceGeneration.Store(result.Generation)
+	w.startupReconciledDataReady = false
 	// Keep the request-side contradiction index synchronized after durability.
 	// A failed refresh leaves the index fail-closed until the lifecycle owner
 	// reloads it from SQLite.
@@ -978,12 +1282,6 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		"CREATE TABLE usage_atoms(event_id TEXT NOT NULL,direction TEXT NOT NULL,modality TEXT NOT NULL,cache_role TEXT NOT NULL,unit TEXT NOT NULL,observed_at REAL NOT NULL,payload_json TEXT NOT NULL,PRIMARY KEY(event_id,direction,modality,cache_role,unit)) WITHOUT ROWID",
 		"CREATE TABLE migration_reconciliation(migration_id TEXT PRIMARY KEY,completed_at REAL NOT NULL,source_digest TEXT NOT NULL,details_json TEXT NOT NULL) WITHOUT ROWID",
 		"CREATE INDEX observations_time ON observations(observed_at)", "CREATE INDEX coverage_epochs_end ON coverage_epochs(ended_at)", "CREATE INDEX unavailable_spans_end ON unavailable_spans(ended_at)", "CREATE INDEX usage_atoms_time ON usage_atoms(observed_at)",
-		"CREATE TABLE aggregate_publication(singleton INTEGER PRIMARY KEY CHECK(singleton=1), ring_generation INTEGER NOT NULL CHECK(ring_generation>=0), source_generation INTEGER NOT NULL CHECK(source_generation>=0), published_at REAL NOT NULL CHECK(published_at>=0))",
-		"CREATE TABLE aggregate_rings(resolution_seconds INTEGER PRIMARY KEY, slot_count INTEGER NOT NULL CHECK(slot_count>0), newest_bucket_start INTEGER, CHECK(resolution_seconds>0), CHECK(newest_bucket_start IS NULL OR newest_bucket_start>=0), CHECK(newest_bucket_start IS NULL OR newest_bucket_start % resolution_seconds=0)) WITHOUT ROWID",
-		"CREATE TABLE aggregate_ring_slots(resolution_seconds INTEGER NOT NULL, slot_index INTEGER NOT NULL CHECK(slot_index>=0), bucket_start INTEGER, bucket_json TEXT, complete INTEGER NOT NULL DEFAULT 0 CHECK(complete IN (0,1)), source_generation INTEGER NOT NULL DEFAULT 0 CHECK(source_generation>=0), ring_generation INTEGER NOT NULL DEFAULT 0 CHECK(ring_generation>=0), published_at REAL NOT NULL DEFAULT 0 CHECK(published_at>=0), payload_version INTEGER NOT NULL DEFAULT 0 CHECK(payload_version>=0), PRIMARY KEY(resolution_seconds,slot_index), FOREIGN KEY(resolution_seconds) REFERENCES aggregate_rings(resolution_seconds), CHECK(bucket_start IS NULL OR bucket_start>=0), CHECK(bucket_start IS NULL OR bucket_start % resolution_seconds=0), CHECK((bucket_start IS NULL AND bucket_json IS NULL AND complete=0 AND source_generation=0 AND ring_generation=0 AND published_at=0 AND payload_version=0) OR (bucket_start IS NOT NULL AND bucket_json IS NOT NULL AND payload_version>0))) WITHOUT ROWID",
-		"CREATE TABLE ring_replay_cursor(resolution_seconds INTEGER PRIMARY KEY, folded_through_observed_at REAL NOT NULL DEFAULT 0 CHECK(folded_through_observed_at>=0), folded_source_generation INTEGER NOT NULL DEFAULT 0 CHECK(folded_source_generation>=0), updated_at REAL NOT NULL DEFAULT 0 CHECK(updated_at>=0), CHECK(resolution_seconds>0), FOREIGN KEY(resolution_seconds) REFERENCES aggregate_rings(resolution_seconds)) WITHOUT ROWID",
-		"CREATE TABLE ring_invalidations(resolution_seconds INTEGER NOT NULL, bucket_start INTEGER NOT NULL CHECK(bucket_start>=0), source_generation INTEGER NOT NULL CHECK(source_generation>=0), reason TEXT NOT NULL, created_at REAL NOT NULL CHECK(created_at>=0), applied_at REAL, PRIMARY KEY(resolution_seconds,bucket_start,source_generation), FOREIGN KEY(resolution_seconds) REFERENCES aggregate_rings(resolution_seconds), CHECK(bucket_start % resolution_seconds=0), CHECK(applied_at IS NULL OR applied_at>=0)) WITHOUT ROWID",
-		"CREATE INDEX ring_invalidations_pending ON ring_invalidations(resolution_seconds,bucket_start) WHERE applied_at IS NULL",
 	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -995,37 +1293,83 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("initialize stats schema: %w", err)
 		}
 	}
-	for resolution, capacity := range ringCapacities {
-		if _, err = tx.ExecContext(ctx, "INSERT INTO aggregate_rings(resolution_seconds,slot_count) VALUES(?,?)", resolution, capacity); err != nil {
-			_ = tx.Rollback()
+	if err := createRingSchema(ctx, tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("initialize YO!stats ring schema: %w", err)
+	}
+	return tx.Commit()
+}
+
+type schemaExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+// initializeMissingRingSchema upgrades a valid legacy core-only store. The
+// read-only preflight in OpenWriter has already rejected partial or malformed
+// extensions before the writable connection is opened; this check keeps the
+// migration itself all-or-nothing if the schema changes unexpectedly.
+func initializeMissingRingSchema(ctx context.Context, db *sql.DB) error {
+	var count int
+	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('aggregate_publication','aggregate_rings','aggregate_ring_slots','ring_replay_cursor','ring_invalidations')").Scan(&count); err != nil {
+		return err
+	}
+	if count == len(ringColumns) {
+		return nil
+	}
+	if count != 0 {
+		return &ValidationError{"ring schema is partially present"}
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := createRingSchema(ctx, tx); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func createRingSchema(ctx context.Context, execer schemaExecer) error {
+	statements := []string{
+		"CREATE TABLE aggregate_publication(singleton INTEGER PRIMARY KEY CHECK(singleton=1), ring_generation INTEGER NOT NULL CHECK(ring_generation>=0), source_generation INTEGER NOT NULL CHECK(source_generation>=0), published_at REAL NOT NULL CHECK(published_at>=0))",
+		"CREATE TABLE aggregate_rings(resolution_seconds INTEGER PRIMARY KEY, slot_count INTEGER NOT NULL CHECK(slot_count>0), newest_bucket_start INTEGER, CHECK(resolution_seconds>0), CHECK(newest_bucket_start IS NULL OR newest_bucket_start>=0), CHECK(newest_bucket_start IS NULL OR newest_bucket_start % resolution_seconds=0)) WITHOUT ROWID",
+		"CREATE TABLE aggregate_ring_slots(resolution_seconds INTEGER NOT NULL, slot_index INTEGER NOT NULL CHECK(slot_index>=0), bucket_start INTEGER, bucket_json TEXT, complete INTEGER NOT NULL DEFAULT 0 CHECK(complete IN (0,1)), source_generation INTEGER NOT NULL DEFAULT 0 CHECK(source_generation>=0), ring_generation INTEGER NOT NULL DEFAULT 0 CHECK(ring_generation>=0), published_at REAL NOT NULL DEFAULT 0 CHECK(published_at>=0), payload_version INTEGER NOT NULL DEFAULT 0 CHECK(payload_version>=0), PRIMARY KEY(resolution_seconds,slot_index), FOREIGN KEY(resolution_seconds) REFERENCES aggregate_rings(resolution_seconds), CHECK(bucket_start IS NULL OR bucket_start>=0), CHECK(bucket_start IS NULL OR bucket_start % resolution_seconds=0), CHECK((bucket_start IS NULL AND bucket_json IS NULL AND complete=0 AND source_generation=0 AND ring_generation=0 AND published_at=0 AND payload_version=0) OR (bucket_start IS NOT NULL AND bucket_json IS NOT NULL AND payload_version>0))) WITHOUT ROWID",
+		"CREATE TABLE ring_replay_cursor(resolution_seconds INTEGER PRIMARY KEY, folded_through_observed_at REAL NOT NULL DEFAULT 0 CHECK(folded_through_observed_at>=0), folded_source_generation INTEGER NOT NULL DEFAULT 0 CHECK(folded_source_generation>=0), updated_at REAL NOT NULL DEFAULT 0 CHECK(updated_at>=0), CHECK(resolution_seconds>0), FOREIGN KEY(resolution_seconds) REFERENCES aggregate_rings(resolution_seconds)) WITHOUT ROWID",
+		"CREATE TABLE ring_invalidations(resolution_seconds INTEGER NOT NULL, bucket_start INTEGER NOT NULL CHECK(bucket_start>=0), source_generation INTEGER NOT NULL CHECK(source_generation>=0), reason TEXT NOT NULL, created_at REAL NOT NULL CHECK(created_at>=0), applied_at REAL, PRIMARY KEY(resolution_seconds,bucket_start,source_generation), FOREIGN KEY(resolution_seconds) REFERENCES aggregate_rings(resolution_seconds), CHECK(bucket_start % resolution_seconds=0), CHECK(applied_at IS NULL OR applied_at>=0)) WITHOUT ROWID",
+		"CREATE INDEX ring_invalidations_pending ON ring_invalidations(resolution_seconds,bucket_start) WHERE applied_at IS NULL",
+	}
+	for _, statement := range statements {
+		if _, err := execer.ExecContext(ctx, statement); err != nil {
 			return err
 		}
-		if _, err = tx.ExecContext(ctx, "INSERT INTO ring_replay_cursor(resolution_seconds) VALUES(?)", resolution); err != nil {
-			_ = tx.Rollback()
+	}
+	for resolution, capacity := range ringCapacities {
+		if _, err := execer.ExecContext(ctx, "INSERT INTO aggregate_rings(resolution_seconds,slot_count) VALUES(?,?)", resolution, capacity); err != nil {
+			return err
+		}
+		if _, err := execer.ExecContext(ctx, "INSERT INTO ring_replay_cursor(resolution_seconds) VALUES(?)", resolution); err != nil {
 			return err
 		}
 		for slot := 0; slot < capacity; slot++ {
-			if _, err = tx.ExecContext(ctx, "INSERT INTO aggregate_ring_slots(resolution_seconds,slot_index) VALUES(?,?)", resolution, slot); err != nil {
-				_ = tx.Rollback()
+			if _, err := execer.ExecContext(ctx, "INSERT INTO aggregate_ring_slots(resolution_seconds,slot_index) VALUES(?,?)", resolution, slot); err != nil {
 				return err
 			}
 		}
 	}
-	if _, err = tx.ExecContext(ctx, "INSERT INTO aggregate_publication(singleton,ring_generation,source_generation,published_at) VALUES(1,0,0,0)"); err != nil {
-		_ = tx.Rollback()
+	if _, err := execer.ExecContext(ctx, "INSERT INTO aggregate_publication(singleton,ring_generation,source_generation,published_at) VALUES(1,0,0,0)"); err != nil {
 		return err
 	}
 	for _, table := range []string{"aggregate_publication", "aggregate_rings", "aggregate_ring_slots"} {
 		for _, operation := range []string{"INSERT", "DELETE"} {
 			trigger := fmt.Sprintf("%s_reject_%s", table, strings.ToLower(operation))
 			statement := fmt.Sprintf("CREATE TRIGGER %s BEFORE %s ON %s BEGIN SELECT RAISE(ABORT, 'aggregate ring rows are fixed'); END", trigger, operation, table)
-			if _, err = tx.ExecContext(ctx, statement); err != nil {
-				_ = tx.Rollback()
+			if _, err := execer.ExecContext(ctx, statement); err != nil {
 				return err
 			}
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 func ensureRingTriggers(ctx context.Context, db *sql.DB) error {
@@ -1074,6 +1418,9 @@ func validateWriterSchema(ctx context.Context, db *sql.DB, requireRingTriggers b
 	}
 	if app != int64(ApplicationID) || version != SchemaVersion {
 		return fmt.Errorf("YO!stats database is incompatible: expected application %#x/schema %d", ApplicationID, SchemaVersion)
+	}
+	if err := validateCoreShape(ctx, &sqliteReadOnlyDB{db: db}); err != nil {
+		return err
 	}
 	var protocol, build int64
 	if err := db.QueryRowContext(ctx, "SELECT minimum_writer_protocol,minimum_writer_build FROM schema_meta WHERE singleton=1").Scan(&protocol, &build); err != nil {

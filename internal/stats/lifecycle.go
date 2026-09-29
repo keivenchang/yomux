@@ -24,6 +24,9 @@ type Lifecycle struct {
 	readDatabase   *Database
 	trigger        chan struct{}
 	mu             sync.Mutex
+	completionMu   sync.Mutex
+	completedRuns  uint64
+	completionWake chan struct{}
 	stop           context.CancelFunc
 	done           chan struct{}
 	running        bool
@@ -44,23 +47,25 @@ type Lifecycle struct {
 	// consumes a concrete resolution at min(resolution, 60s). Retain the last
 	// successful fold so a 300s bucket is not rescanned once per second.
 	lastMaterializedAt          map[[2]int64]time.Time
+	windowMetadataCache         map[int]lifecycleWindowMetadataCache
 	backgroundBackfillNotBefore time.Time
 	lastBackgroundBackfillAt    time.Time
 	counters                    lifecycleCounters
 }
 
 type LifecycleConfig struct {
-	Cadence         time.Duration
-	PruneCadence    time.Duration
-	VacuumCadence   time.Duration
-	VacuumRetry     time.Duration
-	VacuumMaxDefer  time.Duration
-	Busy            func() bool
-	WindowSeconds   int64
-	MaxCells        int
-	MaxFactRows     int
-	MaxDecodedBytes int
-	MaxRunTime      time.Duration
+	Cadence           time.Duration
+	PruneCadence      time.Duration
+	VacuumCadence     time.Duration
+	VacuumRetry       time.Duration
+	VacuumMaxDefer    time.Duration
+	Busy              func() bool
+	WindowSeconds     int64
+	MaxCells          int
+	MaxFactRows       int // maximum decoded rows for 1s, 10s, and 60s folds
+	MaxCoarseFactRows int // maximum decoded rows for an individual 300s fold
+	MaxDecodedBytes   int
+	MaxRunTime        time.Duration
 	// BackgroundBackfillCadence limits low-priority cold-ring repair when no
 	// product is being requested. A zero value preserves the library's eager
 	// behavior for fixtures and callers that explicitly want full convergence.
@@ -77,11 +82,13 @@ type LifecycleCounters struct {
 	Runs, Publications, Repairs, Errors, Prunes, Vacuums           uint64
 	BackgroundBackfillDeferrals                                    uint64
 	SelectedCells, MaterializedBuckets, FactRowsRead, DecodedBytes uint64
-	SelectionDuration, MaterializationDuration                     time.Duration
-	LastGeneration                                                 int64
-	LastRunSucceeded                                               bool
-	LastRunError                                                   string
-	ByResolution                                                   map[int]LifecycleResolutionCounters
+	SelectionDuration, MaterializationDuration, FactReadDuration   time.Duration
+	LastDuration, LastFactReadDuration, LastSelectionDuration,
+	LastMaterializationDuration time.Duration
+	LastGeneration   int64
+	LastRunSucceeded bool
+	LastRunError     string
+	ByResolution     map[int]LifecycleResolutionCounters
 }
 
 // LifecycleResolutionCounters attributes bounded materializer work to the
@@ -89,23 +96,30 @@ type LifecycleCounters struct {
 // a CPU spike came from the one-second ring or a coarse cost ring.
 type LifecycleResolutionCounters struct {
 	SelectionRuns, MaterializationRuns                             uint64
+	SelectionCacheHits                                             uint64
 	SelectedCells, MaterializedBuckets, FactRowsRead, DecodedBytes uint64
 	SelectionDuration, MaterializationDuration                     time.Duration
+	LastSelectionDuration, LastMaterializationDuration             time.Duration
 }
 
 type lifecycleResolutionCounters struct {
 	selectionRuns, materializationRuns                             atomic.Uint64
+	selectionCacheHits                                             atomic.Uint64
 	selectedCells, materializedBuckets, factRowsRead, decodedBytes atomic.Uint64
 	selectionDuration, materializationDuration                     atomic.Uint64
+	lastSelectionDuration, lastMaterializationDuration             atomic.Uint64
 }
 
 func (c *lifecycleResolutionCounters) snapshot() LifecycleResolutionCounters {
 	return LifecycleResolutionCounters{
 		SelectionRuns: c.selectionRuns.Load(), MaterializationRuns: c.materializationRuns.Load(),
-		SelectedCells: c.selectedCells.Load(), MaterializedBuckets: c.materializedBuckets.Load(),
+		SelectionCacheHits: c.selectionCacheHits.Load(),
+		SelectedCells:      c.selectedCells.Load(), MaterializedBuckets: c.materializedBuckets.Load(),
 		FactRowsRead: c.factRowsRead.Load(), DecodedBytes: c.decodedBytes.Load(),
-		SelectionDuration:       time.Duration(c.selectionDuration.Load()),
-		MaterializationDuration: time.Duration(c.materializationDuration.Load()),
+		SelectionDuration:           time.Duration(c.selectionDuration.Load()),
+		MaterializationDuration:     time.Duration(c.materializationDuration.Load()),
+		LastSelectionDuration:       time.Duration(c.lastSelectionDuration.Load()),
+		LastMaterializationDuration: time.Duration(c.lastMaterializationDuration.Load()),
 	}
 }
 
@@ -113,12 +127,14 @@ type lifecycleCounters struct {
 	runs, publications, repairs, errors, prunes, vacuums           atomic.Uint64
 	backgroundBackfillDeferrals                                    atomic.Uint64
 	selectedCells, materializedBuckets, factRowsRead, decodedBytes atomic.Uint64
-	selectionDuration, materializationDuration                     atomic.Uint64
-	byResolution                                                   [4]lifecycleResolutionCounters
-	lastGeneration                                                 atomic.Int64
-	lastRunSucceeded                                               atomic.Bool
-	lastRunErrorMu                                                 sync.RWMutex
-	lastRunError                                                   string
+	selectionDuration, materializationDuration, factReadDuration   atomic.Uint64
+	lastDuration, lastFactReadDuration, lastSelectionDuration,
+	lastMaterializationDuration atomic.Uint64
+	byResolution     [4]lifecycleResolutionCounters
+	lastGeneration   atomic.Int64
+	lastRunSucceeded atomic.Bool
+	lastRunErrorMu   sync.RWMutex
+	lastRunError     string
 }
 
 func (c *lifecycleCounters) snapshot() LifecycleCounters {
@@ -133,7 +149,9 @@ func (c *lifecycleCounters) snapshot() LifecycleCounters {
 		Runs: c.runs.Load(), Publications: c.publications.Load(), Repairs: c.repairs.Load(), Errors: c.errors.Load(), Prunes: c.prunes.Load(), Vacuums: c.vacuums.Load(),
 		BackgroundBackfillDeferrals: c.backgroundBackfillDeferrals.Load(),
 		SelectedCells:               c.selectedCells.Load(), MaterializedBuckets: c.materializedBuckets.Load(), FactRowsRead: c.factRowsRead.Load(), DecodedBytes: c.decodedBytes.Load(),
-		SelectionDuration: time.Duration(c.selectionDuration.Load()), MaterializationDuration: time.Duration(c.materializationDuration.Load()),
+		SelectionDuration: time.Duration(c.selectionDuration.Load()), MaterializationDuration: time.Duration(c.materializationDuration.Load()), FactReadDuration: time.Duration(c.factReadDuration.Load()),
+		LastDuration: time.Duration(c.lastDuration.Load()), LastFactReadDuration: time.Duration(c.lastFactReadDuration.Load()),
+		LastSelectionDuration: time.Duration(c.lastSelectionDuration.Load()), LastMaterializationDuration: time.Duration(c.lastMaterializationDuration.Load()),
 		LastGeneration: c.lastGeneration.Load(), LastRunSucceeded: c.lastRunSucceeded.Load(), LastRunError: lastRunError, ByResolution: byResolution,
 	}
 }
@@ -148,20 +166,36 @@ func (c *lifecycleCounters) resolution(resolution int) *lifecycleResolutionCount
 }
 
 func (c *lifecycleCounters) recordSelection(resolution int, elapsed time.Duration) {
+	nanoseconds := uint64(nonNegativeDuration(elapsed).Nanoseconds())
+	c.lastSelectionDuration.Store(nanoseconds)
 	if counters := c.resolution(resolution); counters != nil {
 		counters.selectionRuns.Add(1)
-		counters.selectionDuration.Add(uint64(nonNegativeDuration(elapsed).Nanoseconds()))
+		counters.selectionDuration.Add(nanoseconds)
+		counters.lastSelectionDuration.Store(nanoseconds)
 	}
 }
 
 func (c *lifecycleCounters) recordMaterialization(resolution int, elapsed time.Duration, rows, bytes, buckets int) {
+	nanoseconds := uint64(nonNegativeDuration(elapsed).Nanoseconds())
+	c.lastMaterializationDuration.Store(nanoseconds)
 	if counters := c.resolution(resolution); counters != nil {
 		counters.materializationRuns.Add(1)
-		counters.materializationDuration.Add(uint64(nonNegativeDuration(elapsed).Nanoseconds()))
+		counters.materializationDuration.Add(nanoseconds)
+		counters.lastMaterializationDuration.Store(nanoseconds)
 		counters.factRowsRead.Add(uint64(nonNegativeInt(rows)))
 		counters.decodedBytes.Add(uint64(nonNegativeInt(bytes)))
 		counters.materializedBuckets.Add(uint64(nonNegativeInt(buckets)))
 	}
+}
+
+// recordFactRead measures the phase that pulls and decodes persisted facts
+// before the in-memory materializer folds them. It includes SQLite stepping,
+// database/sql row conversion, and JSON decoding; it deliberately does not
+// call that whole interval CPU because SQLite may be waiting on storage.
+func (c *lifecycleCounters) recordFactRead(elapsed time.Duration) {
+	nanoseconds := uint64(nonNegativeDuration(elapsed).Nanoseconds())
+	c.factReadDuration.Add(nanoseconds)
+	c.lastFactReadDuration.Store(nanoseconds)
 }
 
 func nonNegativeDuration(value time.Duration) time.Duration {
@@ -212,13 +246,16 @@ func NewLifecycle(writer *Writer, config LifecycleConfig) *Lifecycle {
 		config.MaxCells = 64
 	}
 	if config.MaxFactRows <= 0 {
-		config.MaxFactRows = MaxFactReadLimit
+		config.MaxFactRows = defaultLifecycleMaxFactRows
+	}
+	if config.MaxCoarseFactRows <= 0 {
+		config.MaxCoarseFactRows = defaultLifecycleMaxCoarseFactRows
 	}
 	if config.MaxDecodedBytes <= 0 {
 		config.MaxDecodedBytes = 8 * 1024 * 1024
 	}
 	if config.MaxRunTime <= 0 {
-		config.MaxRunTime = 500 * time.Millisecond
+		config.MaxRunTime = defaultLifecycleMaxRunTime
 	}
 	if config.Now == nil {
 		config.Now = time.Now
@@ -238,9 +275,72 @@ func NewLifecycle(writer *Writer, config LifecycleConfig) *Lifecycle {
 			lastVacuumAt = persisted
 		}
 	}
-	return &Lifecycle{writer: writer, config: config, materializer: Materializer{Price: config.Price}, trigger: make(chan struct{}, 1), pruneEvery: config.PruneCadence, lastPruneAt: lastPruneAt, vacuumEvery: config.VacuumCadence, vacuumRetry: config.VacuumRetry, vacuumMaxDefer: config.VacuumMaxDefer, lastVacuumAt: lastVacuumAt, busy: config.Busy, demands: make(map[ProductKey]time.Time), lastMaterializedAt: make(map[[2]int64]time.Time), backgroundBackfillNotBefore: backgroundBackfillNotBefore}
+	return &Lifecycle{writer: writer, config: config, materializer: Materializer{Price: config.Price}, trigger: make(chan struct{}, 1), completionWake: make(chan struct{}), pruneEvery: config.PruneCadence, lastPruneAt: lastPruneAt, vacuumEvery: config.VacuumCadence, vacuumRetry: config.VacuumRetry, vacuumMaxDefer: config.VacuumMaxDefer, lastVacuumAt: lastVacuumAt, busy: config.Busy, demands: make(map[ProductKey]time.Time), lastMaterializedAt: make(map[[2]int64]time.Time), windowMetadataCache: make(map[int]lifecycleWindowMetadataCache), backgroundBackfillNotBefore: backgroundBackfillNotBefore}
 }
 func (l *Lifecycle) Counters() LifecycleCounters { return l.counters.snapshot() }
+
+func (l *Lifecycle) CompletedRuns() uint64 {
+	if l == nil {
+		return 0
+	}
+	l.completionMu.Lock()
+	defer l.completionMu.Unlock()
+	return l.completedRuns
+}
+
+// WaitForRunAfter waits until a complete lifecycle pass, including StateFunc,
+// has finished after the supplied completion sequence.
+func (l *Lifecycle) WaitForRunAfter(ctx context.Context, sequence uint64) error {
+	if l == nil {
+		return errors.New("nil stats lifecycle")
+	}
+	for {
+		l.completionMu.Lock()
+		if l.completedRuns > sequence {
+			l.completionMu.Unlock()
+			return nil
+		}
+		wake := l.completionWake
+		l.completionMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-wake:
+		}
+	}
+}
+
+func (l *Lifecycle) markRunComplete() {
+	l.completionMu.Lock()
+	l.completedRuns++
+	wake := l.completionWake
+	l.completionWake = make(chan struct{})
+	l.completionMu.Unlock()
+	close(wake)
+}
+
+// ReadMetrics returns measurements from the lifecycle's long-lived validated
+// SQLite reader. It is a diagnostic snapshot only; a zero value is expected
+// before the first materialization pass or after shutdown closes the reader.
+func (l *Lifecycle) ReadMetrics() ReadMetrics {
+	if l == nil {
+		return ReadMetrics{}
+	}
+	l.readMu.Lock()
+	database := l.readDatabase
+	l.readMu.Unlock()
+	if database == nil {
+		return ReadMetrics{}
+	}
+	return database.ReadMetrics()
+}
+
+func (l *Lifecycle) Cadence() time.Duration {
+	if l == nil || l.config.Cadence <= 0 {
+		return time.Second
+	}
+	return l.config.Cadence
+}
 func (l *Lifecycle) NotifyAppend() {
 	select {
 	case l.trigger <- struct{}{}:
@@ -269,6 +369,7 @@ func (l *Lifecycle) DemandProduct(rangeSeconds, resolutionSeconds int) {
 			delete(l.demands, demanded)
 		}
 	}
+	_, alreadyDemanded := l.demands[key]
 	// Product keys are a fixed finite catalog, but keep the map bounded if a
 	// caller supplies a future catalog extension before this owner is updated.
 	if len(l.demands) >= 64 {
@@ -284,7 +385,13 @@ func (l *Lifecycle) DemandProduct(rangeSeconds, resolutionSeconds int) {
 		}
 	}
 	l.demands[key] = now.Add(2 * time.Minute)
-	l.demandRevision.Add(1)
+	// Refreshing an existing browser demand only extends its lease. It does not
+	// change the selected product, so avoid forcing an in-flight bounded pass to
+	// reselect on every polling request. A new key still interrupts cold-ring
+	// work so the newly requested product reaches the front of the queue.
+	if !alreadyDemanded {
+		l.demandRevision.Add(1)
+	}
 	l.demandMu.Unlock()
 	l.NotifyAppend()
 }
@@ -345,28 +452,36 @@ func (l *Lifecycle) Stop() {
 	l.closeReadDatabase()
 }
 func (l *Lifecycle) loop(ctx context.Context) {
-	defer func() { l.mu.Lock(); l.running = false; close(l.done); l.mu.Unlock() }()
-	ticker := time.NewTicker(l.config.Cadence)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			l.runAndCount(ctx)
-			// Append notifications are deliberately coalesced. The ticker is the
-			// sole scheduler, so a burst of collectors or a large repair backlog
-			// cannot create a busy loop of back-to-back SQLite materializations.
+	runWithStatsProfileLabels(ctx, "stats_lifecycle", "", func(ctx context.Context) {
+		defer func() { l.mu.Lock(); l.running = false; close(l.done); l.mu.Unlock() }()
+		ticker := time.NewTicker(l.config.Cadence)
+		defer ticker.Stop()
+		for {
 			select {
-			case <-l.trigger:
-			default:
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				l.runAndCount(ctx)
+				// Append notifications are deliberately coalesced. The ticker is the
+				// sole scheduler, so a burst of collectors or a large repair backlog
+				// cannot create a busy loop of back-to-back SQLite materializations.
+				select {
+				case <-l.trigger:
+				default:
+				}
 			}
 		}
-	}
+	})
 }
 
 func (l *Lifecycle) runAndCount(ctx context.Context) {
+	started := time.Now()
 	err := l.RunOnce(ctx)
+	elapsed := time.Since(started)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	l.counters.lastDuration.Store(uint64(elapsed.Nanoseconds()))
 	if err != nil && !errors.Is(err, context.Canceled) {
 		l.counters.errors.Add(1)
 	}
@@ -377,6 +492,7 @@ func (l *Lifecycle) runAndCount(ctx context.Context) {
 	if l.config.StateFunc != nil {
 		l.config.StateFunc(l.Counters())
 	}
+	l.markRunComplete()
 }
 
 func (l *Lifecycle) RunOnce(ctx context.Context) error {
@@ -437,10 +553,14 @@ func (l *Lifecycle) RunOnce(ctx context.Context) error {
 	// pre-snapshot watermark as an external generation event so a retry can
 	// reconcile interval facts even when a fixture or older owner reused a
 	// lower generation number.
-	cells, err := l.selectCellsFromSnapshotWithReconciliation(ctx, now, generation, snapshotDatabase, sourceGenerationBeforeMaintenance != generation)
+	var cells []lifecycleCell
+	var selectionErr error
+	runWithStatsProfilePhase(ctx, "stats_lifecycle", "stats", "selection", func(phaseCtx context.Context) {
+		cells, selectionErr = l.selectCellsFromSnapshotWithReconciliation(phaseCtx, now, generation, snapshotDatabase, sourceGenerationBeforeMaintenance != generation)
+	})
 	l.counters.selectionDuration.Add(uint64(time.Since(selectionStarted).Nanoseconds()))
-	if err != nil {
-		return err
+	if selectionErr != nil {
+		return selectionErr
 	}
 	l.counters.selectedCells.Add(uint64(len(cells)))
 	for _, cell := range cells {
@@ -452,8 +572,10 @@ func (l *Lifecycle) RunOnce(ctx context.Context) error {
 	processed := make(map[[2]int64]bool, len(cells))
 	demandRevision := l.demandRevision.Load()
 	started := time.Now()
-	materializeCtx, cancel := context.WithTimeout(ctx, l.config.MaxRunTime)
-	defer cancel()
+	// MaxRunTime schedules bounded cells; it must not cancel a cell midway.
+	// Row and decoded-byte limits bound each atomic fold, and the parent context
+	// still cancels promptly during shutdown.
+	materializeCtx := ctx
 	decodedBytes := 0
 	for index := 0; index < len(cells); {
 		// HTTP demand can arrive after this pass selected its cold-start repair
@@ -487,13 +609,14 @@ func (l *Lifecycle) RunOnce(ctx context.Context) error {
 			index = 0
 			demandRevision = currentRevision
 		}
-		if len(allBuckets) >= l.config.MaxCells || time.Since(started) >= l.config.MaxRunTime {
+		if len(allBuckets) >= l.config.MaxCells || (len(processed) > 0 && time.Since(started) >= l.config.MaxRunTime) {
 			break
 		}
 		cell := cells[index]
 		runEnd := cell.BucketStart + int64(cell.ResolutionSeconds)
 		runLimit := index + 1
-		for runLimit < len(cells) && runLimit-index < maxMaterializationRunCells && cells[runLimit].ResolutionSeconds == cell.ResolutionSeconds && cells[runLimit].BucketStart == runEnd {
+		maxRunCells := maxMaterializationRunCells
+		for runLimit < len(cells) && runLimit-index < maxRunCells && cells[runLimit].ResolutionSeconds == cell.ResolutionSeconds && cells[runLimit].BucketStart == runEnd {
 			runEnd += int64(cell.ResolutionSeconds)
 			runLimit++
 		}
@@ -502,7 +625,9 @@ func (l *Lifecycle) RunOnce(ctx context.Context) error {
 		var err error
 		for {
 			materializationStarted := time.Now()
-			buckets, bytesRead, rowsRead, err = l.materializeResolution(materializeCtx, snapshotDatabase, cell.BucketStart, runEnd, cell.ResolutionSeconds, cacheGeneration, publishedAt)
+			runWithStatsProfilePhase(materializeCtx, "stats_lifecycle", "stats", "materialization", func(phaseCtx context.Context) {
+				buckets, bytesRead, rowsRead, err = l.materializeResolution(phaseCtx, snapshotDatabase, cell.BucketStart, runEnd, cell.ResolutionSeconds, cacheGeneration, publishedAt)
+			})
 			materializationElapsed := time.Since(materializationStarted)
 			l.counters.materializationDuration.Add(uint64(nonNegativeDuration(materializationElapsed).Nanoseconds()))
 			l.counters.factRowsRead.Add(uint64(rowsRead))
@@ -554,8 +679,12 @@ func (l *Lifecycle) RunOnce(ctx context.Context) error {
 		index = runLimit
 	}
 	if len(allBuckets) > 0 {
-		if _, err := l.writer.PublishRingBuckets(ctx, allBuckets, publicationGeneration, publishedAt, true); err != nil {
-			return err
+		var publishErr error
+		runWithStatsProfilePhase(ctx, "stats_lifecycle", "stats", "publication", func(phaseCtx context.Context) {
+			_, publishErr = l.writer.PublishRingBuckets(phaseCtx, allBuckets, publicationGeneration, publishedAt, true)
+		})
+		if publishErr != nil {
+			return publishErr
 		}
 		for _, bucket := range allBuckets {
 			l.lastMaterializedAt[[2]int64{int64(bucket.ResolutionSeconds), bucket.BucketStart}] = now
@@ -606,6 +735,14 @@ type lifecycleCell struct {
 	BucketStart       int64
 }
 
+type lifecycleWindowMetadataCache struct {
+	Horizon      int64
+	End          int64
+	Publications uint64
+	Rows         map[int64]RingBucketRow
+	Missing      []int64
+}
+
 func openCellMaterializationCadence(resolution int) time.Duration {
 	// Fine resolutions are cheap enough to repair immediately when their
 	// invalidation is explicit. The expensive open 300s fold is the measured
@@ -618,12 +755,12 @@ func openCellMaterializationCadence(resolution int) time.Duration {
 
 func (l *Lifecycle) openCellDue(now time.Time, cell lifecycleCell) bool {
 	cadence := openCellMaterializationCadence(cell.ResolutionSeconds)
-	if cadence <= 0 {
-		return true
-	}
 	if now.Before(time.Unix(cell.BucketStart+int64(cell.ResolutionSeconds), 0)) {
 		last, ok := l.lastMaterializedAt[[2]int64{int64(cell.ResolutionSeconds), cell.BucketStart}]
-		return !ok || now.Sub(last) >= cadence
+		if !ok {
+			return true
+		}
+		return cadence <= 0 || now.Sub(last) >= cadence
 	}
 	return true
 }
@@ -652,6 +789,20 @@ const maxStaleRowsPerResolution = 4
 // range can otherwise exceed MaxFactRows and remain pending forever.
 const maxMaterializationRunCells = 4
 
+// Live service-load history can contain one observation per OS thread each
+// second. A 300-second cell can exceed the public 10,000-row read limit while
+// still fitting the lifecycle's bounded 8 MiB decoded-byte budget.
+const defaultLifecycleMaxFactRows = 25000
+
+// MaxRunTime limits how much work a pass starts. A bounded cell already in
+// progress is allowed to finish atomically before the next pass yields.
+const defaultLifecycleMaxRunTime = 500 * time.Millisecond
+
+// A five-minute CPU bucket can hold one process/thread observation per second.
+// Give that single coarse fold room for dense hosts while retaining the decoded
+// byte and wall-time limits that bound its memory and foreground cost.
+const defaultLifecycleMaxCoarseFactRows = 50000
+
 // selectCells is the sole restart/rebuild work selector. Pending ledger rows
 // are authoritative contradictions; missing slots are durable work even when
 // no ledger row exists; the current carrier keeps the visible tail fresh.
@@ -673,8 +824,10 @@ func (l *Lifecycle) selectCellsFromSnapshotWithReconciliation(ctx context.Contex
 		return nil, err
 	}
 	pendingKeys := make(map[[2]int64]bool, len(pending))
+	pendingResolutions := make(map[int]bool)
 	for _, cell := range pending {
 		pendingKeys[[2]int64{int64(cell.ResolutionSeconds), cell.BucketStart}] = true
+		pendingResolutions[cell.ResolutionSeconds] = true
 	}
 	// A direct/legacy writer can advance schema_meta without updating this
 	// writer's in-memory generation or recording cell-level invalidations. Keep
@@ -718,15 +871,34 @@ func (l *Lifecycle) selectCellsFromSnapshotWithReconciliation(ctx context.Contex
 			}
 			start -= remainder
 		}
-		selectionStarted := time.Now()
-		window, err := l.writer.ReadRingWindowMetadata(ctx, int(horizon), resolution, end)
-		l.counters.recordSelection(resolution, time.Since(selectionStarted))
-		if err != nil {
-			return nil, err
+		var rows map[int64]RingBucketRow
+		var missing []int64
+		cacheable := !generationMismatch && !pendingResolutions[resolution]
+		publicationCount := l.counters.publications.Load()
+		if cacheable {
+			if cached, ok := l.windowMetadataCache[resolution]; ok && cached.Horizon == horizon && cached.End == end && cached.Publications == publicationCount {
+				rows = cached.Rows
+				missing = cached.Missing
+				if counters := l.counters.resolution(resolution); counters != nil {
+					counters.selectionCacheHits.Add(1)
+				}
+			}
 		}
-		rows := make(map[int64]RingBucketRow, len(window.Rows))
-		for _, row := range window.Rows {
-			rows[row.BucketStart] = row
+		if rows == nil {
+			selectionStarted := time.Now()
+			window, readErr := l.writer.ReadRingWindowMetadata(ctx, int(horizon), resolution, end)
+			l.counters.recordSelection(resolution, time.Since(selectionStarted))
+			if readErr != nil {
+				return nil, readErr
+			}
+			rows = make(map[int64]RingBucketRow, len(window.Rows))
+			for _, row := range window.Rows {
+				rows[row.BucketStart] = row
+			}
+			missing = window.MissingBucketStarts
+			if cacheable {
+				l.windowMetadataCache[resolution] = lifecycleWindowMetadataCache{Horizon: horizon, End: end, Publications: publicationCount, Rows: rows, Missing: missing}
+			}
 		}
 		stale := make([]int64, 0, len(rows))
 		// A source generation is global, but a normal append records the exact
@@ -738,19 +910,27 @@ func (l *Lifecycle) selectCellsFromSnapshotWithReconciliation(ctx context.Contex
 		// mutations are selected by their precise pending cells below.
 		generationFallback := len(pending) == 0 || untrackedGeneration
 		for bucket, row := range rows {
-			// An incomplete historical bucket is not itself evidence of new work:
-			// no-data/partial coverage can remain incomplete forever. A changed
-			// source generation or a durable pending cell is the retry signal;
-			// otherwise selecting the same 300s gaps every cadence rescans them
-			// without changing the result.
-			if generationFallback && row.SourceGeneration < generation {
+			// A ring cell published before its bucket ended stays incomplete after
+			// it ages out of the live edge. Fold that elapsed cell once more so its
+			// final facts are retained without a synthetic persisted-ring gap. The
+			// publication time distinguishes that lifecycle cutoff from legacy
+			// incomplete rows that were intentionally retained after their interval.
+			bucketEnd := bucket + int64(resolution)
+			elapsedIncomplete := !row.Complete && bucketEnd <= now.Unix() && row.PublishedAt < float64(bucketEnd)
+			if elapsedIncomplete || (generationFallback && row.SourceGeneration < generation) {
 				stale = append(stale, bucket)
 			}
 		}
 		sort.Slice(stale, func(i, j int) bool { return stale[i] > stale[j] })
-		windows[resolution] = ringWindow{start: start, end: end, missing: window.MissingBucketStarts, stale: stale, rows: rows}
+		windows[resolution] = ringWindow{start: start, end: end, missing: missing, stale: stale, rows: rows}
 	}
 	seen := make(map[[2]int64]bool)
+	carrierNeedsWork := func(rows map[int64]RingBucketRow, carrier int64) bool {
+		row, present := rows[carrier]
+		// An open bucket can remain incomplete without any new source facts.
+		// Explicit contradictions are selected separately from the ledger.
+		return !present || row.SourceGeneration < generation
+	}
 	add := func(result *[]lifecycleCell, resolution int, start int64) {
 		key := [2]int64{int64(resolution), start}
 		if seen[key] {
@@ -805,7 +985,7 @@ func (l *Lifecycle) selectCellsFromSnapshotWithReconciliation(ctx context.Contex
 		}
 		if !intervalSpanLoaded[demand.ResolutionSeconds] {
 			selectionStarted := time.Now()
-			spans, readErr := sourceSnapshot.ReadUnavailableSpans(ctx, float64(bounds.start), float64(bounds.end), l.config.MaxFactRows)
+			spans, readErr := sourceSnapshot.ReadUnavailableSpans(ctx, float64(bounds.start), float64(bounds.end), min(l.config.MaxFactRows, MaxFactReadLimit))
 			l.counters.recordSelection(demand.ResolutionSeconds, time.Since(selectionStarted))
 			if readErr != nil {
 				return nil, readErr
@@ -879,8 +1059,7 @@ func (l *Lifecycle) selectCellsFromSnapshotWithReconciliation(ctx context.Contex
 			break
 		}
 		carrier := bounds.end - int64(demand.ResolutionSeconds)
-		row, present := bounds.rows[carrier]
-		if !present || row.SourceGeneration < generation || !row.Complete {
+		if carrierNeedsWork(bounds.rows, carrier) {
 			demandNeedsWork = true
 			break
 		}
@@ -1078,8 +1257,7 @@ func (l *Lifecycle) selectCellsFromSnapshotWithReconciliation(ctx context.Contex
 			}
 		}
 		carrier := bounds.end - int64(resolution)
-		row, present := bounds.rows[carrier]
-		if !present || row.SourceGeneration < generation || !row.Complete {
+		if carrierNeedsWork(bounds.rows, carrier) {
 			add(&selected, resolution, carrier)
 		}
 	}
@@ -1134,30 +1312,49 @@ func (l *Lifecycle) selectCellsFromSnapshotWithReconciliation(ctx context.Contex
 			return selected[i].BucketStart < selected[j].BucketStart
 		})
 	} else {
-		priority := make(map[int]int, len(demands)+len(pending))
-		for _, demand := range demands {
-			if current, ok := priority[demand.ResolutionSeconds]; !ok || current > 0 {
-				priority[demand.ResolutionSeconds] = 0
-			}
-		}
+		pendingCells := make(map[[2]int64]bool, len(pending))
 		for _, cell := range pending {
-			if _, demanded := priority[cell.ResolutionSeconds]; demanded {
-				continue
+			pendingCells[[2]int64{int64(cell.ResolutionSeconds), cell.BucketStart}] = true
+		}
+		cellPriority := func(cell lifecycleCell) int {
+			for _, demand := range demands {
+				if cell.ResolutionSeconds != demand.ResolutionSeconds {
+					continue
+				}
+				bounds := windows[demand.ResolutionSeconds]
+				windowStart := bounds.end - int64(demand.RangeSeconds)
+				if cell.BucketStart < windowStart || cell.BucketStart >= bounds.end {
+					continue
+				}
+				key := [2]int64{int64(cell.ResolutionSeconds), cell.BucketStart}
+				if demandedBuckets[demand][cell.BucketStart] || intervalBuckets[demand][cell.BucketStart] {
+					return 0
+				}
+				for _, bucket := range bounds.missing {
+					if bucket == cell.BucketStart {
+						return 0
+					}
+				}
+				for _, bucket := range bounds.stale {
+					if bucket == cell.BucketStart {
+						return 1
+					}
+				}
+				if pendingCells[key] || cell.BucketStart == bounds.end-int64(cell.ResolutionSeconds) {
+					return 1
+				}
+				if carrierNeedsWork(bounds.rows, cell.BucketStart) {
+					return 1
+				}
 			}
-			if current, ok := priority[cell.ResolutionSeconds]; !ok || current > 1 {
-				priority[cell.ResolutionSeconds] = 1
+			if pendingCells[[2]int64{int64(cell.ResolutionSeconds), cell.BucketStart}] {
+				return 2
 			}
+			return 3
 		}
 		sort.SliceStable(selected, func(i, j int) bool {
 			left, right := selected[i], selected[j]
-			leftPriority, leftKnown := priority[left.ResolutionSeconds]
-			rightPriority, rightKnown := priority[right.ResolutionSeconds]
-			if !leftKnown {
-				leftPriority = 2
-			}
-			if !rightKnown {
-				rightPriority = 2
-			}
+			leftPriority, rightPriority := cellPriority(left), cellPriority(right)
 			if leftPriority != rightPriority {
 				return leftPriority < rightPriority
 			}
@@ -1171,13 +1368,24 @@ func (l *Lifecycle) selectCellsFromSnapshotWithReconciliation(ctx context.Contex
 }
 
 func (l *Lifecycle) materializeResolution(ctx context.Context, database *Database, start, end int64, resolution int, cacheGeneration int64, publishedAt float64) ([]RingBucketWrite, int, int, error) {
-	accumulator, err := newMaterializerAccumulator(MaterializeRequest{Start: float64(start), End: float64(end), Resolution: float64(resolution)}, l.materializer.Price)
+	accumulator, err := newMaterializerAccumulator(MaterializeRequest{Start: float64(start), End: float64(end), Resolution: float64(resolution), ObservedUntil: &publishedAt}, l.materializer.Price)
 	if err != nil {
 		return nil, 0, 0, err
 	}
 	rowsRead, decodedBytes := 0, 0
+	maxFactRows := l.config.MaxFactRows
+	if resolution == 300 {
+		maxFactRows = l.config.MaxCoarseFactRows
+	}
+	factReadStarted := time.Now()
+	factReadRecorded := false
+	defer func() {
+		if !factReadRecorded {
+			l.counters.recordFactRead(time.Since(factReadStarted))
+		}
+	}()
 	account := func(count, bytes int) error {
-		if count < 0 || bytes < 0 || rowsRead > l.config.MaxFactRows-count || decodedBytes > l.config.MaxDecodedBytes-bytes {
+		if count < 0 || bytes < 0 || rowsRead > maxFactRows-count || decodedBytes > l.config.MaxDecodedBytes-bytes {
 			return errLifecycleBudget
 		}
 		rowsRead += count
@@ -1254,6 +1462,8 @@ func (l *Lifecycle) materializeResolution(ctx context.Context, database *Databas
 		}
 		usageCursor = next
 	}
+	l.counters.recordFactRead(time.Since(factReadStarted))
+	factReadRecorded = true
 	layer := accumulator.finish()
 	if len(layer.Buckets) == 0 {
 		return nil, decodedBytes, rowsRead, nil

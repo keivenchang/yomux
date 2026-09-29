@@ -17,6 +17,7 @@ import urllib.request
 
 REPO = Path(__file__).resolve().parents[1]
 CLIENTS = ("claude", "codex", "opencode")
+SYNTHETIC_OPENCODE_SESSION_ID = "ses-synthetic"
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
@@ -89,7 +90,7 @@ def write_synthetic_codex_token_usage_jsonl(destination: Path, now: float) -> No
     )
 
 
-def make_opencode_database(path: Path, now_ms: int) -> None:
+def make_opencode_database(path: Path, now_ms: int, session_id: str = "ses-live") -> None:
     connection = sqlite3.connect(path)
     connection.executescript(
         """
@@ -102,9 +103,9 @@ def make_opencode_database(path: Path, now_ms: int) -> None:
     # The mock process inherits the repository cwd, matching the directory OpenCode
     # persists for a live project session. A database temp directory is not the
     # process identity boundary and made directory-based resolution miss.
-    connection.execute("INSERT INTO session VALUES (?, ?, ?, ?, ?, ?, ?)", ("ses-live", str(REPO), "build", '{"providerID":"openai","id":"gpt-5.6-luna"}', now_ms - 45000, now_ms - 5000, 0))
-    connection.execute("INSERT INTO message VALUES (?, ?, ?, ?, ?)", ("msg-live", "ses-live", now_ms - 30000, now_ms - 30000, '{"role":"assistant","providerID":"openai","modelID":"gpt-5.6-luna"}'))
-    connection.execute("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)", ("part-live", "msg-live", "ses-live", now_ms - 30000, now_ms - 30000, '{"type":"step-finish","tokens":{"total":10,"input":3,"output":5,"cache":{"read":2,"write":0}}}'))
+    connection.execute("INSERT INTO session VALUES (?, ?, ?, ?, ?, ?, ?)", (session_id, str(REPO), "build", '{"providerID":"openai","id":"gpt-5.6-luna"}', now_ms - 45000, now_ms - 5000, 0))
+    connection.execute("INSERT INTO message VALUES (?, ?, ?, ?, ?)", ("msg-live", session_id, now_ms - 30000, now_ms - 30000, '{"role":"assistant","providerID":"openai","modelID":"gpt-5.6-luna"}'))
+    connection.execute("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)", ("part-live", "msg-live", session_id, now_ms - 30000, now_ms - 30000, '{"type":"step-finish","tokens":{"total":10,"input":3,"output":5,"cache":{"read":2,"write":0}}}'))
     connection.commit()
     connection.close()
 

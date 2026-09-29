@@ -4,7 +4,7 @@ Python remains the legacy runtime while the Go migration closes required capabil
 
 ## Setup and checks
 
-Install the Python runtime and development dependencies with `make dev`. Python 3.10 or newer is required. The Go build uses the Bazel version pinned in `.bazelversion`; Docker is required for the isolated Go test lane.
+Install the Python runtime and development dependencies with `make dev`. Python 3.10 or newer is required. Runtime dependencies, including `watchfiles>=1.2.0`, and the `dev` extra (`mypy`, `pillow`, `pytest`, `pytest-timeout`, `pytest-xdist`, and `selenium`) are declared in `pyproject.toml`. The Go build uses the Bazel version pinned in `.bazelversion`; Docker is required for the isolated Go test lane.
 
 Run the canonical gate before landing a change:
 
@@ -12,7 +12,7 @@ Run the canonical gate before landing a change:
 python3 tools/check.py
 ```
 
-The runner lists available lanes with `python3 tools/check.py --list-lanes` and runs independent lanes in parallel by default. For focused work, use `python3 tools/check.py --lane <name>`. The `bazel-go` lane owns the complete Go suite; do not run the full gate and the Go wrapper back-to-back on the same tree.
+The runner lists available lanes with `python3 tools/check.py --list-lanes` and runs independent lanes in parallel by default. For focused work, use `python3 tools/check.py --lane <name>`. The `bazel-go` lane owns the complete Go suite; do not run the full gate and the Go wrapper back-to-back on the same tree. Linux makes 100% of that capacity available to pytest by default; `--cpu-percent` and `YOLOMUX_CHECK_CPU_PERCENT` can lower the share. For example, 32 logical but 24 schedulable Linux CPUs produce 12/8/4 non-browser/browser/e2e workers.
 
 The default gate is development validation, not latency certification. Use `python3 tools/check.py --certify` for the explicit certification run or `python3 tools/check.py --certification-only` when certification is the only requested lane; a normal green gate reports `NOT CERTIFIED`.
 

@@ -54,7 +54,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
     "tests/test_dev_restart_script.py:test_startup_capacity_uses_portable_eight_cpu_macos_ceiling": "The startup load predicate is an operator safety contract best checked against the launch script source and its measured output.",
     "tests/test_filesystem.py:test_filesystem_implementations_leave_os_error_normalization_to_package_facade": "The package facade is the deliberate sole owner of OS-error normalization.",
     "tests/test_gate_stats_range.py:test_debug_stats_sample_endpoint_is_not_a_live_client_contract": "The debug endpoint must stay absent from shipped client source.",
-    "tests/test_gate_worktree_protection.py:test_docs_separate_relocated_artifacts_from_single_writer_generated_source": "The written worktree ownership policy is an explicit repository contract.",
+    "tests/test_gate_worktree_protection.py:test_docs_keep_gate_state_local_to_nfs_checkouts": "The contributor guide must state that automated gates use host-local temporary storage, fixture-owned state and ports, and avoid the operator server; these are operator instructions rather than runtime behavior.",
     "tests/test_install_metadata.py:test_install_metadata_owns_python_floor_and_watchfiles_dependency": "Packaging metadata is itself the install-time product contract.",
     "tests/test_local_services_launch.py:test_pyproject_package_discovery_includes_local_service_subpackages": "Package discovery configuration is an install-time source contract.",
     "tests/test_login_auth.py:test_login_page_uses_saved_theme_and_active_color": "The pre-login template needs its static theme bootstrap before JavaScript is available.",
@@ -81,7 +81,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
     "tests/test_static_build.py:test_tokenized_component_base_rules_have_no_identical_light_restatements": "Theme CSS must use tokens rather than duplicate light-mode declarations.",
     "tests/test_static_build.py:test_compact_overflow_strips_have_one_shared_layout_owner": "Compact overflow layout must have one shared CSS owner.",
     "tests/test_static_build.py:test_audited_css_families_have_one_grouped_owner": "Audited CSS families intentionally enforce a single grouped owner.",
-    "tests/test_static_build.py:test_shared_ui_ownership_map_and_agent_reuse_protocol_remain_routable": "The shared UI ownership document is a repository routing contract.",
+    "tests/test_static_build.py:test_shared_ui_reuse_protocol_stays_in_agent_guide": "The agent guide owns implementation search and shared-parent rules, while contributor and user guides must not duplicate the UI ownership map.",
     "tests/test_static_build.py:test_panel_frame_builder_owns_the_shared_panel_chrome": "Shared panel chrome must route through the sole frame builder.",
     "tests/test_static_build.py:test_node_shard_launcher_has_unique_behavior_owners_and_a_terminal_summary": "The node shard launcher requires static unique-owner and terminal-summary wiring.",
     "tests/test_static_build.py:test_opaque_white_has_one_css_paint_owner": "Opaque white paint must have one tokenized CSS owner.",
@@ -124,7 +124,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
 # text-shape assertion to an already allowlisted function still fails the guard
 # until a reviewer deliberately updates this value and its reason. The sequence
 # is stable when unrelated code moves an assertion to a different source line.
-TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "884dd4740d431275d9cb9629409ecdaff5f897dd1a9ae56a30eceaaea4cbd70d"
+TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "546ff2ad3b52a3355cc4fac4c3d50c3bb9438c1b124f086d0888fb24ef967e96"
 
 
 @dataclass(frozen=True, slots=True)

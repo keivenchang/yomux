@@ -6045,7 +6045,7 @@ func TestPhase3EventBrokerMatchesPythonDemandAndResourceContracts(t *testing.T) 
 
 func TestTmuxRosterWatcherPublishesExternalRemovalAndStops(t *testing.T) {
 	broker := newEventBroker()
-	stream, unsubscribe := broker.subscribe("core", "transcripts")
+	stream, unsubscribe := broker.subscribe("core")
 	defer unsubscribe()
 	var reads atomic.Int32
 	srv := &server{
@@ -6060,16 +6060,28 @@ func TestTmuxRosterWatcherPublishesExternalRemovalAndStops(t *testing.T) {
 			return map[string]map[string]any{}, nil
 		},
 	}
+	// The watcher's initial sample contains session 1 and establishes generation 1.
+	const initialGeneration = uint64(1)
 	ctx, cancel := context.WithCancel(context.Background())
 	srv.startTmuxRosterWatcherWithInterval(ctx, 5*time.Millisecond)
-	defer cancel()
 	select {
 	case event := <-stream:
 		if event.Type != "tmux_roster_changed" {
 			t.Fatalf("event type = %q, want tmux_roster_changed", event.Type)
 		}
-		if got, ok := event.Payload["session_order"].([]string); !ok || len(got) != 0 {
-			t.Fatalf("removed session order = %#v, want empty list", event.Payload["session_order"])
+		for _, field := range []string{"sessions", "session_order"} {
+			if got, ok := event.Payload[field].([]string); !ok || len(got) != 0 {
+				t.Fatalf("removed session %s = %#v, want empty list", field, event.Payload[field])
+			}
+		}
+		for _, field := range []string{"roster_generation", "topology_generation"} {
+			generation, ok := event.Payload[field].(uint64)
+			if !ok || generation <= initialGeneration {
+				t.Fatalf("removed session %s = %#v, want generation newer than %d", field, event.Payload[field], initialGeneration)
+			}
+		}
+		if event.Payload["roster_generation"] != event.Payload["topology_generation"] {
+			t.Fatalf("roster/topology generations disagree: %#v / %#v", event.Payload["roster_generation"], event.Payload["topology_generation"])
 		}
 		if event.Payload["server_epoch"] != broker.epoch {
 			t.Fatalf("event server epoch = %#v, want %q", event.Payload["server_epoch"], broker.epoch)
@@ -6077,19 +6089,27 @@ func TestTmuxRosterWatcherPublishesExternalRemovalAndStops(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("watcher did not publish the externally removed session")
 	}
-	select {
-	case event := <-stream:
-		if event.Type != "transcripts_changed" {
-			t.Fatalf("event after roster transition = %q, want transcripts_changed", event.Type)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("metadata refresh did not publish after the roster transition")
-	}
 	cancel()
 	select {
 	case <-srv.tmuxRosterWatchDone:
 	case <-time.After(time.Second):
 		t.Fatal("roster watcher did not stop after cancellation")
+	}
+	broker.mu.Lock()
+	rosterEvents := 0
+	for _, event := range broker.events {
+		if event.Type == "tmux_roster_changed" {
+			rosterEvents++
+		}
+	}
+	broker.mu.Unlock()
+	if rosterEvents != 1 {
+		t.Fatalf("published roster events = %d, want exactly one", rosterEvents)
+	}
+	select {
+	case event := <-stream:
+		t.Fatalf("core-only subscriber received unexpected event %q", event.Type)
+	default:
 	}
 }
 

@@ -155,12 +155,25 @@ func TestCurrentFamilyValidationIsWriteOnlyAndCompatibilityAware(t *testing.T) {
 		BuildSystemMemoryFacts(MemoryCounters{UsedBytes: 100, CapacityBytes: 200}, nil, nil, HostFactContext{EpochID: "memory", EpochStartedAt: 0, ObservedAt: 3, CadenceSeconds: 60, SourceID: "host"}),
 		BuildAgentStatusFacts(map[string]any{"agent": "run"}, map[string]AgentStatus{"session": AgentStatusIdle}, 4, AgentStatusCounts{Total: 1, Running: 0}, []map[string]any{{"id": "agent", "kind": "codex", "state": "idle", "session": "work", "pane": "%1"}}, HostFactContext{EpochID: "agents", EpochStartedAt: 0, ObservedAt: 4, CadenceSeconds: 10, SourceID: "host"}),
 		{Observations: []Observation{{EventID: "service-load", Family: "service_load", SourceID: "statsd", ObservedAt: 5, EpochID: "service", Payload: map[string]any{"running": true, "cpu_percent": 2.0, "rss_bytes": nil}}}},
+		{Observations: []Observation{{EventID: "service-load-rss-only", Family: "service_load", SourceID: "yolomux-go", ObservedAt: 5.5, EpochID: "service", Payload: map[string]any{"running": true, "rss_bytes": 1024.0}}}},
 		{Observations: []Observation{{EventID: "browser-api", Family: "browser", SourceID: "browser:a", ObservedAt: 6, EpochID: "browser", Payload: map[string]any{"kind": "api", "latency_ms": 2.0, "status": 200}}}},
 	}
 	for _, batch := range validBatches {
 		if _, err := currentWriter.AppendBatch(context.Background(), batch); err != nil {
 			t.Fatalf("current writer rejected Python-shaped payload: %v", err)
 		}
+	}
+	if _, err := currentWriter.AppendBatch(context.Background(), AppendBatch{Observations: []Observation{{
+		EventID: "service-load-empty", Family: "service_load", SourceID: "yolomux-go", ObservedAt: 5.75,
+		EpochID: "service", Payload: map[string]any{"running": true},
+	}}}); err == nil || !strings.Contains(err.Error(), "requires cpu_percent or non-null rss_bytes") {
+		t.Fatalf("current writer accepted service load without a resource: %v", err)
+	}
+	if _, err := currentWriter.AppendBatch(context.Background(), AppendBatch{Observations: []Observation{{
+		EventID: "service-load-null-rss", Family: "service_load", SourceID: "yolomux-go", ObservedAt: 5.8,
+		EpochID: "service", Payload: map[string]any{"running": true, "rss_bytes": nil},
+	}}}); err == nil || !strings.Contains(err.Error(), "requires cpu_percent or non-null rss_bytes") {
+		t.Fatalf("current writer accepted service load with no measured resource: %v", err)
 	}
 	if _, err := currentWriter.AppendBatch(context.Background(), malformed); err == nil || !strings.Contains(err.Error(), "missing field") {
 		t.Fatalf("current writer accepted malformed current payload: %v", err)

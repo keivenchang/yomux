@@ -1,6 +1,7 @@
 package stats
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -8,9 +9,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/keivenchang/yolomux/internal/testsupport"
 	_ "github.com/mattn/go-sqlite3"
@@ -665,39 +668,199 @@ func TestFakeClientUsagePersistsAndProjectsTokens(t *testing.T) {
 	_ = runPython(t, pythonExecutable(t), script, "check-fake-stats", path)
 }
 
+func TestSystemMemoryCollectorPayloadMatchesPythonTopFiveTieContract(t *testing.T) {
+	python := pythonExecutable(t)
+	root := t.TempDir()
+	inputPath := filepath.Join(root, "memory-input.json")
+	scriptPath := filepath.Join(root, "memory-oracle.py")
+	type processRow struct {
+		Binary   string `json:"binary"`
+		RSSBytes uint64 `json:"rss_bytes"`
+	}
+	rows := []processRow{
+		{Binary: "/usr/bin/python3.12", RSSBytes: 40},
+		{Binary: "/venv/bin/python", RSSBytes: 30},
+		{Binary: "zeta", RSSBytes: 20},
+		{Binary: "alpha", RSSBytes: 20},
+		{Binary: "/usr/bin/nodejs (DELETED)", RSSBytes: 15},
+		{Binary: "beta", RSSBytes: 10},
+		{Binary: "delta", RSSBytes: 10},
+		{Binary: "epsilon", RSSBytes: 8},
+		{Binary: "gamma", RSSBytes: 7},
+	}
+	input := map[string]any{
+		"epoch_id": "memory-parity-epoch", "epoch_started_at": 100.0,
+		"observed_at": 160.0, "cadence_seconds": 60.0,
+		"owner_generation": uint64(7), "source_id": "host",
+		"used_bytes": uint64(123), "capacity_bytes": uint64(456),
+		"rows": rows,
+	}
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(inputPath, inputJSON, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const oracle = `import json, sys
+from pathlib import Path
+from yolomux_lib.stats_current import collectors
+from yolomux_lib.stats_current.process_memory import aggregate_process_memory_by_binary
+
+source = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+process_memory = aggregate_process_memory_by_binary(
+    (row["binary"], row["rss_bytes"]) for row in source["rows"]
+)
+facts = collectors.system_memory_success(
+    epoch_id=source["epoch_id"], epoch_started_at=source["epoch_started_at"],
+    observed_at=source["observed_at"], cadence_seconds=source["cadence_seconds"],
+    owner_generation=source["owner_generation"], source_id=source["source_id"],
+    used_bytes=source["used_bytes"], capacity_bytes=source["capacity_bytes"],
+    process_memory_bytes=process_memory,
+)
+observation = facts.observations[0]
+coverage_epoch = facts.coverage_epochs[0]
+print(json.dumps({
+    "observation": {
+        "event_id": observation.event_id, "family": observation.family,
+        "source_id": observation.source_id, "observed_at": observation.observed_at,
+        "epoch_id": observation.epoch_id, "owner_generation": observation.owner_generation,
+        "payload": dict(observation.payload),
+    },
+    "coverage_epoch": {
+        "family": coverage_epoch.family, "source_id": coverage_epoch.source_id,
+        "epoch_id": coverage_epoch.epoch_id, "started_at": coverage_epoch.started_at,
+        "ended_at": coverage_epoch.ended_at,
+        "native_cadence_seconds": coverage_epoch.native_cadence_seconds,
+        "owner_generation": coverage_epoch.owner_generation,
+    },
+}, sort_keys=True, separators=(",", ":")))
+`
+	if err := os.WriteFile(scriptPath, []byte(oracle), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pythonOutput := strings.TrimSpace(runPython(t, python, scriptPath, inputPath))
+	var want map[string]any
+	if err := json.Unmarshal([]byte(pythonOutput), &want); err != nil {
+		t.Fatalf("decode Python memory facts %q: %v", pythonOutput, err)
+	}
+	processRows := make([]ProcessCensusRow, 0, len(rows))
+	for index, row := range rows {
+		processRows = append(processRows, ProcessCensusRow{
+			Identity: fmt.Sprintf("synthetic-%d", index), Binary: row.Binary, RSSBytes: row.RSSBytes,
+		})
+	}
+	context := HostFactContext{
+		EpochID: "memory-parity-epoch", EpochStartedAt: 100, ObservedAt: 160,
+		CadenceSeconds: 60, OwnerGeneration: 7, SourceID: "host",
+	}
+	facts := BuildSystemMemoryFacts(MemoryCounters{UsedBytes: 123, CapacityBytes: 456}, processRows, nil, context)
+	if len(facts.Observations) != 1 || len(facts.CoverageEpochs) != 1 || len(facts.UnavailableSpans) != 0 {
+		t.Fatalf("valid synthetic memory sample facts = %+v", facts)
+	}
+	observation := facts.Observations[0]
+	coverage := facts.CoverageEpochs[0]
+	got := map[string]any{
+		"observation": map[string]any{
+			"event_id": observation.EventID, "family": observation.Family,
+			"source_id": observation.SourceID, "observed_at": observation.ObservedAt,
+			"epoch_id": observation.EpochID, "owner_generation": observation.OwnerGeneration,
+			"payload": observation.Payload,
+		},
+		"coverage_epoch": map[string]any{
+			"family": coverage.Family, "source_id": coverage.SourceID, "epoch_id": coverage.EpochID,
+			"started_at": coverage.StartedAt, "ended_at": coverage.EndedAt,
+			"native_cadence_seconds": coverage.NativeCadenceSeconds,
+			"owner_generation":       coverage.OwnerGeneration,
+		},
+	}
+	gotJSON, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var normalizedGot map[string]any
+	if err := json.Unmarshal(gotJSON, &normalizedGot); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(normalizedGot, want) {
+		t.Fatalf("Go system-memory facts differ from Python collector\nGo:     %s\nPython: %s", gotJSON, pythonOutput)
+	}
+	processMemory := observation.Payload["process_memory_bytes"]
+	wantProcessMemory := map[string]any{
+		"python": uint64(70), "alpha": uint64(20), "zeta": uint64(20),
+		"node": uint64(15), "beta": uint64(10),
+	}
+	if !reflect.DeepEqual(processMemory, wantProcessMemory) {
+		t.Fatalf("process-memory top-five series = %#v, want Python's tied cutoff %#v", processMemory, wantProcessMemory)
+	}
+}
+
 func TestPythonGeneratedDeclaredFamilyFixtureMaterializesInGo(t *testing.T) {
 	python := pythonExecutable(t)
 	root := t.TempDir()
-	path := filepath.Join(root, "families.sqlite3")
+	path := filepath.Join(root, "stats-v9.sqlite3")
 	script := filepath.Join(root, "families.py")
-	const fixture = `import json, sqlite3, sys
+	const fixture = `import sys
+from yolomux_lib.stats_current import collectors
+from yolomux_lib.stats_current.storage import Store, UsageAtom
+
 path = sys.argv[1]
-c = sqlite3.connect(path)
-c.executescript("""
-PRAGMA application_id = 0x594F5354; PRAGMA user_version = 9;
-CREATE TABLE schema_meta (singleton INTEGER PRIMARY KEY, minimum_writer_protocol INTEGER NOT NULL, minimum_writer_build INTEGER NOT NULL, source_generation INTEGER NOT NULL, last_vacuumed_at REAL NOT NULL DEFAULT 0);
-CREATE TABLE observations (event_id TEXT NOT NULL, family TEXT NOT NULL, source_id TEXT NOT NULL, observed_at REAL NOT NULL, epoch_id TEXT NOT NULL, owner_generation INTEGER NOT NULL, payload_json TEXT NOT NULL, PRIMARY KEY(family, source_id, event_id)) WITHOUT ROWID;
-CREATE TABLE coverage_epochs (family TEXT NOT NULL, source_id TEXT NOT NULL, epoch_id TEXT NOT NULL, started_at REAL NOT NULL, ended_at REAL, native_cadence_seconds REAL NOT NULL, owner_generation INTEGER NOT NULL, PRIMARY KEY(family, source_id, epoch_id)) WITHOUT ROWID;
-CREATE TABLE unavailable_spans (family TEXT NOT NULL, source_id TEXT NOT NULL, epoch_id TEXT NOT NULL, started_at REAL NOT NULL, ended_at REAL NOT NULL, native_cadence_seconds REAL NOT NULL, reason TEXT NOT NULL, owner_generation INTEGER NOT NULL, PRIMARY KEY(family, source_id, epoch_id, started_at, ended_at)) WITHOUT ROWID;
-CREATE TABLE usage_atoms (event_id TEXT NOT NULL, direction TEXT NOT NULL, modality TEXT NOT NULL, cache_role TEXT NOT NULL, unit TEXT NOT NULL, observed_at REAL NOT NULL, payload_json TEXT NOT NULL, PRIMARY KEY(event_id, direction, modality, cache_role, unit)) WITHOUT ROWID;
-CREATE TABLE migration_reconciliation (migration_id TEXT PRIMARY KEY, completed_at REAL NOT NULL, source_digest TEXT NOT NULL, details_json TEXT NOT NULL) WITHOUT ROWID;
-INSERT INTO schema_meta VALUES (1,25,8,1,0);
-""")
-def add(event, family, source, at, payload):
-    c.execute("INSERT INTO observations VALUES (?,?,?,?,?,?,?)", (event, family, source, at, "epoch-"+family, 1, json.dumps(payload, separators=(",", ":"), sort_keys=True)))
-families = [
-	("cpu", "host", {"process_percent": 20, "system_percent": 40, "process_cpu_percent": {"python": 4}}),
-    ("agent_status", "host", {"states": {"a": "run", "b": "idle"}, "session_states": {"s": "run"}}),
-    ("gpu", "host", {"util_percent": 50, "memory_used_bytes": 100, "memory_capacity_bytes": 200, "label": "gpu"}),
-    ("service_load", "statsd", {"running": True, "cpu_percent": 3, "rss_bytes": 1000}),
-    ("system_memory", "host", {"used_bytes": 100, "capacity_bytes": 200}),
-    ("browser", "client", {"kind": "api", "latency_ms": 8, "bytes": 100}),
+store = Store.open(path)
+context = {
+    "epoch_started_at": 0,
+    "owner_generation": 1,
+}
+facts = [
+    collectors.cpu_success(
+        **context, epoch_id="epoch-cpu", observed_at=1,
+        cadence_seconds=1, source_id="host", process_percent=20,
+        system_percent=40, process_cpu_percent={"python": 4},
+    ),
+    collectors.agent_status_success(
+        **context, epoch_id="epoch-agent_status", observed_at=2,
+        cadence_seconds=10, source_id="host", states={"a": "run", "b": "idle"},
+        session_states={"s": "run"},
+    ),
+    collectors.gpu_devices_success(
+        [collectors.GpuDeviceSample("gpu:0", 50, 100, 200, "gpu")],
+        **context, epoch_id="epoch-gpu", observed_at=3,
+        cadence_seconds=10,
+    ),
+    collectors.service_load_success(
+        [collectors.ServiceLoadSample("statsd", True, 3, 1000)],
+        **context, epoch_id="epoch-service_load", observed_at=4,
+        cadence_seconds=1,
+    ),
+    collectors.system_memory_success(
+        **context, epoch_id="epoch-system_memory", observed_at=5,
+        cadence_seconds=60, source_id="host", used_bytes=100,
+        capacity_bytes=200,
+    ),
+    collectors.browser_event_success(
+        **context, epoch_id="epoch-browser", observed_at=6,
+        cadence_seconds=1, source_id="client", event_key="api-1",
+        kind="api", latency_ms=8, bytes_count=100,
+    ),
+    collectors.usage_scan_success(
+        [UsageAtom("usage-1", "input", "text", "none", "tokens", 3,
+                   {"quantity": 10, "agent_id": "a", "model": "m", "provider": "p",
+                    "telemetry_complete": False})],
+        epoch_id="epoch-agent_tokens", epoch_started_at=0, observed_at=6,
+        cadence_seconds=10, owner_generation=1, source_id="host",
+    ),
+    collectors.collector_unavailable(
+        family="gpu", source_id="gpu-gap", epoch_id="epoch-gpu-gap",
+        epoch_started_at=0, observed_at=5, cadence_seconds=10,
+        owner_generation=1, reason="driver unavailable",
+    ),
 ]
-for i, (family, source, payload) in enumerate(families): add(f"{family}-{i}", family, source, i + 1, payload)
-c.execute("INSERT INTO coverage_epochs VALUES ('cpu','host','epoch-cpu',0,20,1,1)")
-c.execute("INSERT INTO unavailable_spans VALUES ('gpu','host','epoch-gpu',5,15,10,'driver unavailable',1)")
-c.execute("INSERT INTO usage_atoms VALUES ('usage-1','input','text','none','tokens',3,?)", (json.dumps({'quantity': 10, 'agent_id': 'a', 'model': 'm', 'provider': 'p'}, separators=(',', ':'), sort_keys=True),))
-c.commit(); c.close()
+store.append_batch(
+    observations=(item for fact in facts for item in fact.observations),
+    coverage_epochs=(item for fact in facts for item in fact.coverage_epochs),
+    usage_atoms=(item for fact in facts for item in fact.usage_atoms),
+    unavailable_spans=(item for fact in facts for item in fact.unavailable_spans),
+)
+store.close()
 `
 	if err := os.WriteFile(script, []byte(fixture), 0o600); err != nil {
 		t.Fatal(err)
@@ -716,6 +879,19 @@ c.commit(); c.close()
 	if err != nil {
 		t.Fatal(err)
 	}
+	epochEnd := func(value float64) *float64 { return &value }
+	expectedEpochs := []CoverageEpoch{
+		{Family: "agent_status", SourceID: "host", EpochID: "epoch-agent_status", StartedAt: 0, EndedAt: epochEnd(12), NativeCadenceSeconds: 10, OwnerGeneration: 1},
+		{Family: "agent_tokens", SourceID: "host", EpochID: "epoch-agent_tokens", StartedAt: 0, EndedAt: epochEnd(16), NativeCadenceSeconds: 10, OwnerGeneration: 1},
+		{Family: "browser", SourceID: "client", EpochID: "epoch-browser", StartedAt: 0, EndedAt: epochEnd(7), NativeCadenceSeconds: 1, OwnerGeneration: 1},
+		{Family: "cpu", SourceID: "host", EpochID: "epoch-cpu", StartedAt: 0, EndedAt: epochEnd(2), NativeCadenceSeconds: 1, OwnerGeneration: 1},
+		{Family: "gpu", SourceID: "gpu:0", EpochID: "epoch-gpu", StartedAt: 0, EndedAt: epochEnd(13), NativeCadenceSeconds: 10, OwnerGeneration: 1},
+		{Family: "service_load", SourceID: "statsd", EpochID: "epoch-service_load", StartedAt: 0, EndedAt: epochEnd(5), NativeCadenceSeconds: 1, OwnerGeneration: 1},
+		{Family: "system_memory", SourceID: "host", EpochID: "epoch-system_memory", StartedAt: 0, EndedAt: epochEnd(65), NativeCadenceSeconds: 60, OwnerGeneration: 1},
+	}
+	if !reflect.DeepEqual(epochs, expectedEpochs) {
+		t.Fatalf("Python collector coverage epochs = %+v, want %+v", epochs, expectedEpochs)
+	}
 	spans, err := database.ReadUnavailableSpans(context.Background(), 0, 20, MaxFactReadLimit)
 	if err != nil {
 		t.Fatal(err)
@@ -728,8 +904,16 @@ c.commit(); c.close()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(layer.NoData) != 1 || layer.NoData[0].Reason != "driver unavailable" {
-		t.Fatalf("no-data parity = %+v", layer.NoData)
+	wantNoData := []MaterializedNoData{
+		{Family: "agent_status", SourceID: "host", EpochID: "epoch-agent_status", Start: 12, End: 20, NativeCadenceSeconds: 10, Reason: "coverage_gap"},
+		{Family: "browser", SourceID: "client", EpochID: "epoch-browser", Start: 7, End: 20, NativeCadenceSeconds: 1, Reason: "coverage_gap"},
+		{Family: "cpu", SourceID: "host", EpochID: "epoch-cpu", Start: 2, End: 20, NativeCadenceSeconds: 1, Reason: "coverage_gap"},
+		{Family: "gpu", SourceID: "gpu-gap", EpochID: "epoch-gpu-gap", Start: 5, End: 15, NativeCadenceSeconds: 10, Reason: "driver unavailable"},
+		{Family: "gpu", SourceID: "gpu:0", EpochID: "epoch-gpu", Start: 13, End: 20, NativeCadenceSeconds: 10, Reason: "coverage_gap"},
+		{Family: "service_load", SourceID: "statsd", EpochID: "epoch-service_load", Start: 5, End: 20, NativeCadenceSeconds: 1, Reason: "coverage_gap"},
+	}
+	if !reflect.DeepEqual(layer.NoData, wantNoData) {
+		t.Fatalf("Python collector no-data parity = %+v, want %+v", layer.NoData, wantNoData)
 	}
 	if got := seriesValue(layer.Buckets[0], "cpu_percent:host"); got != 20 {
 		t.Fatalf("CPU parity = %v", got)
@@ -740,6 +924,630 @@ c.commit(); c.close()
 	if got := seriesValue(layer.Buckets[0], "model_tokens_per_minute:input:m"); got != 60 {
 		t.Fatalf("token parity = %v", got)
 	}
+	for _, check := range []struct {
+		series string
+		want   float64
+	}{
+		{series: "run_agents", want: 1},
+		{series: "idle_agents", want: 1},
+		{series: "run_sessions", want: 1},
+		{series: "gpu_util_percent:gpu:0", want: 50},
+		{series: "gpu_memory_bytes:gpu:0", want: 100},
+		{series: "service_cpu_percent:statsd", want: 3},
+		{series: "service_rss_bytes:statsd", want: 1000},
+		{series: "system_memory_used_bytes", want: 100},
+		{series: "system_memory_capacity_bytes", want: 200},
+		{series: "system_cpu_percent", want: 40},
+		{series: "browser_api_per_second", want: .1},
+		{series: "browser_bandwidth_bytes_per_second", want: 10},
+		{series: "browser_latency_ms", want: 8},
+	} {
+		if got := seriesValue(layer.Buckets[0], check.series); got != check.want {
+			t.Errorf("Python collector family %s materialized as %v, want %v", check.series, got, check.want)
+		}
+	}
+}
+
+func TestPythonAndGoTranscriptScannersMatchSyntheticAtoms(t *testing.T) {
+	type parityAtom struct {
+		EventID         string  `json:"event_id"`
+		Provider        string  `json:"provider"`
+		ExecutionSource string  `json:"execution_source"`
+		Endpoint        string  `json:"endpoint"`
+		Model           string  `json:"model"`
+		ModelEvidence   string  `json:"model_evidence"`
+		Effort          string  `json:"effort"`
+		PricingProfile  string  `json:"pricing_profile"`
+		ServiceTier     string  `json:"service_tier"`
+		AgentID         string  `json:"agent_id"`
+		ThreadID        string  `json:"thread_id"`
+		Direction       string  `json:"direction"`
+		Modality        string  `json:"modality"`
+		CacheRole       string  `json:"cache_role"`
+		Unit            string  `json:"unit"`
+		Quantity        float64 `json:"quantity"`
+		ObservedAt      float64 `json:"observed_at"`
+	}
+	type parityTombstone struct {
+		EventID    string  `json:"event_id"`
+		Provider   string  `json:"provider"`
+		Model      string  `json:"model"`
+		ThreadID   string  `json:"thread_id"`
+		Direction  string  `json:"direction"`
+		Modality   string  `json:"modality"`
+		CacheRole  string  `json:"cache_role"`
+		Unit       string  `json:"unit"`
+		Quantity   float64 `json:"quantity"`
+		ObservedAt float64 `json:"observed_at"`
+	}
+	type parityResult struct {
+		Atoms     []parityAtom      `json:"atoms"`
+		Tombstone []parityTombstone `json:"tombstones"`
+	}
+	pythonScript := filepath.Join(t.TempDir(), "scan_transcript.py")
+	const script = `import json, sys
+from pathlib import Path
+from yolomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
+from yolomux_lib.stats_current.usage import legacy_fork_usage_tombstone_from_source, usage_atom_from_source
+
+path, kind, split_at, byte_budget = Path(sys.argv[1]), sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+lines = path.read_bytes().splitlines(keepends=True)
+path.write_bytes(b"".join(lines[:split_at]))
+scanner = StatsCurrentTranscriptUsageScanner(
+    max_bytes_per_scan=byte_budget or 4 * 1024 * 1024,
+    max_records_per_scan=1 if byte_budget else 4096,
+)
+tmux_key = "synthetic|0|" + kind
+rows = [{"key": tmux_key, "kind": kind, "transcript": str(path)}]
+all_items, all_tombstones = [], []
+first = scanner.scan(rows)
+scanner.commit(first.receipt_id)
+all_items.extend(first.items)
+all_tombstones.extend(first.tombstones)
+with path.open("ab") as transcript:
+    transcript.write(b"".join(lines[split_at:]))
+for cycle in range(64):
+    result = scanner.scan(rows)
+    scanner.commit(result.receipt_id)
+    all_items.extend(result.items)
+    all_tombstones.extend(result.tombstones)
+    if not result.budget_exhausted:
+        break
+else:
+    raise RuntimeError("bounded Python transcript scan did not converge")
+def atom_row(item):
+    fields = dict(vars(item.atom))
+    fields["tmux_key"] = item.tmux_key
+    fields["agent_kind"] = item.agent_kind
+    atom = usage_atom_from_source(fields)
+    return {
+        "event_id": atom.event_id,
+        "provider": atom.payload["provider"],
+        "execution_source": atom.payload.get("execution_source", ""),
+        "endpoint": fields.get("endpoint", ""),
+        "model": atom.payload["model"],
+        "model_evidence": atom.payload.get("model_evidence", "unknown"),
+        "effort": atom.payload.get("effort", "unknown"),
+        "pricing_profile": atom.payload.get("pricing_profile", "default"),
+        "service_tier": atom.payload.get("service_tier", "default"),
+        "agent_id": atom.payload["agent_id"],
+        "thread_id": atom.payload.get("thread_id", ""),
+        "direction": atom.direction,
+        "modality": atom.modality,
+        "cache_role": atom.cache_role,
+        "unit": atom.unit,
+        "quantity": atom.payload["quantity"],
+        "observed_at": atom.observed_at,
+    }
+def tombstone_row(item):
+    fields = dict(vars(item.atom))
+    fields["tmux_key"] = item.tmux_key
+    fields["agent_kind"] = item.agent_kind
+    tombstone = legacy_fork_usage_tombstone_from_source(fields)
+    return {
+        "event_id": tombstone.event_id,
+        "provider": tombstone.provider,
+        "model": tombstone.model,
+        "thread_id": tombstone.thread_id,
+        "direction": tombstone.direction,
+        "modality": tombstone.modality,
+        "cache_role": tombstone.cache_role,
+        "unit": tombstone.unit,
+        "quantity": tombstone.quantity,
+        "observed_at": tombstone.observed_at,
+    }
+payload = {
+    "atoms": sorted((atom_row(item) for item in all_items), key=lambda row: (row["event_id"], row["direction"], row["cache_role"])),
+    "tombstones": sorted((tombstone_row(item) for item in all_tombstones), key=lambda row: (row["event_id"], row["direction"], row["cache_role"])),
+}
+json.dump(payload, sys.stdout, sort_keys=True, separators=(",", ":"))
+`
+	if err := os.WriteFile(pythonScript, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	fixtures := []struct {
+		name       string
+		provider   string
+		path       string
+		splitAt    int
+		byteBudget int64
+		records    []map[string]any
+	}{
+		{
+			name: "claude cumulative message revision", provider: "claude",
+			path:    filepath.Join(root, "claude", "session.jsonl"),
+			splitAt: 1,
+			records: []map[string]any{
+				{"type": "user", "timestamp": 0.5, "message": map[string]any{"id": "ignored-user", "model": "claude-sonnet-synthetic", "usage": map[string]any{"input_tokens": 9, "output_tokens": 9}}},
+				{"type": "assistant", "message": map[string]any{"id": "missing-timestamp", "model": "claude-sonnet-synthetic", "usage": map[string]any{"input_tokens": 8, "output_tokens": 8}}},
+				{"type": "assistant", "timestamp": "2026-09-23T10:00:00", "message": map[string]any{"id": "naive-iso-timestamp", "model": "claude-sonnet-synthetic", "usage": map[string]any{"input_tokens": 11, "output_tokens": 3}}},
+				usageClaude(1, "message-one", 20, 10),
+				usageClaude(2, "message-one", 25, 15),
+			},
+		},
+		{
+			name: "codex fork handoff and cumulative usage", provider: "codex",
+			path:       filepath.Join(root, "codex", "rollout-synthetic.jsonl"),
+			splitAt:    4,
+			byteBudget: 1024,
+			records: []map[string]any{
+				{"type": "session_meta", "timestamp": 1, "payload": map[string]any{"id": "child-thread", "forked_from_id": "parent-thread", "thread_source": "subagent"}},
+				{"type": "session_meta", "timestamp": 1.5, "payload": map[string]any{"id": "parent-thread"}},
+				{"type": "turn_context", "timestamp": 2, "payload": map[string]any{"model": "gpt-parent", "effort": "high", "pricing_profile": "subscription", "service_tier": "flex"}},
+				usageCodex(3, 100, 40, 10),
+				{"type": "turn_context", "timestamp": 3.5, "payload": map[string]any{"effort": "", "pricing_profile": "", "service_tier": ""}},
+				usageCodex(4, 150, 70, 25),
+				{"type": "turn_context", "timestamp": 5, "payload": map[string]any{"model": "gpt-child", "effort": "medium", "pricing_profile": "batch", "service_tier": "scale"}},
+				{"type": "inter_agent_communication_metadata", "timestamp": 6, "payload": map[string]any{}},
+				usageCodex(7, 160, 75, 30),
+				{"type": "event_msg", "timestamp": 7.5, "payload": map[string]any{"type": "thread_settings_applied", "thread_settings": map[string]any{"reasoning_effort": "", "pricing_profile": "", "service_tier": ""}}},
+				usageCodex(8, 170, 80, 35),
+			},
+		},
+	}
+	for _, fixture := range fixtures {
+		t.Run(fixture.name, func(t *testing.T) {
+			if fixture.byteBudget > 0 {
+				fixture.records[fixture.splitAt]["padding"] = strings.Repeat("x", 8*1024)
+			}
+			source := TranscriptSource{Path: fixture.path, Provider: fixture.provider, AgentID: "synthetic|0|" + fixture.provider}
+			writeJSONL(t, fixture.path, fixture.records[:fixture.splitAt]...)
+			state := &TranscriptScannerState{}
+			firstOptions := TranscriptScanOptions{}
+			if fixture.byteBudget > 0 {
+				firstOptions = TranscriptScanOptions{MaxBytes: fixture.byteBudget, MaxRecords: 1}
+			}
+			first, err := ScanTranscript(source, state, firstOptions)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if first.Receipt == nil {
+				t.Fatal("initial scan returned no cursor receipt")
+			}
+			cursorPath := filepath.Join(root, fixture.provider+"-cursor.json")
+			cursor := NewTranscriptCursorStore(cursorPath)
+			if err := cursor.Prepare(source, first.Receipt.before, first.Receipt.after); err != nil {
+				t.Fatal(err)
+			}
+			if err := cursor.Commit(source, first.Receipt.after); err != nil {
+				t.Fatal(err)
+			}
+			first.Receipt.Commit()
+			for _, record := range fixture.records[fixture.splitAt:] {
+				appendJSONL(t, fixture.path, record, false)
+			}
+			secondAtoms := make([]UsageAtom, 0)
+			secondTombstones := make([]UsageTombstone, 0)
+			if fixture.byteBudget > 0 {
+				for cycle := 0; cycle < 64; cycle++ {
+					cursor = NewTranscriptCursorStore(cursorPath)
+					before, stateErr := cursor.State(source)
+					if stateErr != nil {
+						t.Fatalf("reload synthetic cursor on cycle %d: %v", cycle, stateErr)
+					}
+					if before.Offset == transcriptFixtureSize(t, fixture.path) && len(before.PendingLine) == 0 {
+						break
+					}
+					partial, scanErr := ScanTranscript(source, &before, TranscriptScanOptions{MaxBytes: fixture.byteBudget, MaxRecords: 1})
+					if scanErr != nil {
+						t.Fatalf("bounded scan cycle %d: %v", cycle, scanErr)
+					}
+					if partial.BytesRead > fixture.byteBudget {
+						t.Fatalf("bounded scan cycle %d read %d bytes with budget %d", cycle, partial.BytesRead, fixture.byteBudget)
+					}
+					after := partial.Receipt.after
+					fixtureBytes, readErr := os.ReadFile(fixture.path)
+					if readErr != nil {
+						t.Fatal(readErr)
+					}
+					if len(after.ParsedTail) > 0 {
+						tailStart := after.Offset - int64(len(after.ParsedTail))
+						if tailStart < 0 || after.Offset > int64(len(fixtureBytes)) || !bytes.Equal(fixtureBytes[tailStart:after.Offset], after.ParsedTail) {
+							t.Fatalf("parsed tail does not match bytes before the committed cursor on cycle %d: offset=%d tail=%d file=%d", cycle, after.Offset, len(after.ParsedTail), len(fixtureBytes))
+						}
+					}
+					if len(after.PendingLine) > 0 {
+						// A scan can finish and commit the prior pending record, then
+						// retain the next incomplete record. Offset therefore advances
+						// whenever the complete prefix advances; it is not required to
+						// remain equal to before.Offset while PendingLine is non-empty.
+						if after.Offset < before.Offset {
+							info, statErr := os.Stat(fixture.path)
+							if statErr != nil {
+								t.Fatal(statErr)
+							}
+							device, inode := fileIdentity(info)
+							fileBytes, readErr := os.ReadFile(fixture.path)
+							if readErr != nil {
+								t.Fatal(readErr)
+							}
+							sampleBytes := int(fixture.byteBudget / 8)
+							prefixLength := min(len(before.Prefix), sampleBytes)
+							tailLength := min(len(before.ParsedTail), sampleBytes)
+							pendingTailLength := min(len(before.PendingLine), sampleBytes)
+							prefixMatches := prefixLength == 0 || len(fileBytes) >= prefixLength && bytes.Equal(fileBytes[:prefixLength], before.Prefix[:prefixLength])
+							tailStart := before.Offset - int64(tailLength)
+							tailMatches := tailLength == 0 || tailStart >= 0 && int64(len(fileBytes)) >= before.Offset && bytes.Equal(fileBytes[tailStart:before.Offset], before.ParsedTail[len(before.ParsedTail)-tailLength:])
+							pendingStart := before.Offset + int64(len(before.PendingLine)-pendingTailLength)
+							pendingMatches := pendingTailLength == 0 || int64(len(fileBytes)) >= pendingStart+int64(pendingTailLength) && bytes.Equal(fileBytes[pendingStart:pendingStart+int64(pendingTailLength)], before.PendingLine[len(before.PendingLine)-pendingTailLength:])
+							t.Fatalf("bounded cursor reset on cycle %d: reset=%t prefix_matches=%t parsed_tail_matches=%t pending_matches=%t identity_changed=%t before={offset:%d size:%d mtime:%d device:%d inode:%d pending:%d} after={offset:%d size:%d mtime:%d device:%d inode:%d pending:%d} file={size:%d mtime:%d device:%d inode:%d}", cycle, partial.Reset, prefixMatches, tailMatches, pendingMatches, identityChanged(before, info), before.Offset, before.FileSize, before.FileModTimeNS, before.Device, before.Inode, len(before.PendingLine), after.Offset, after.FileSize, after.FileModTimeNS, after.Device, after.Inode, len(after.PendingLine), info.Size(), info.ModTime().UnixNano(), device, inode)
+						}
+						pendingEnd := after.Offset + int64(len(after.PendingLine))
+						if pendingEnd > int64(len(fixtureBytes)) || !bytes.Equal(fixtureBytes[after.Offset:pendingEnd], after.PendingLine) {
+							t.Fatalf("pending record does not match the uncommitted file suffix on cycle %d: offset=%d pending=%d file=%d", cycle, after.Offset, len(after.PendingLine), len(fixtureBytes))
+						}
+						if bytes.ContainsAny(after.PendingLine, "\r\n") || after.Offset > 0 && fixtureBytes[after.Offset-1] != '\n' {
+							t.Fatalf("cursor boundary splits a complete record on cycle %d: offset=%d pending=%d", cycle, after.Offset, len(after.PendingLine))
+						}
+						if after.Offset == before.Offset && len(after.PendingLine) <= len(before.PendingLine) {
+							t.Fatalf("partial record made no forward progress on cycle %d: before offset=%d pending=%d after offset=%d pending=%d", cycle, before.Offset, len(before.PendingLine), after.Offset, len(after.PendingLine))
+						}
+					}
+					secondAtoms = append(secondAtoms, partial.Atoms...)
+					secondTombstones = append(secondTombstones, partial.Tombstones...)
+					if partial.Receipt != nil {
+						if err := cursor.Prepare(source, partial.Receipt.before, partial.Receipt.after); err != nil {
+							t.Fatalf("prepare cursor on cycle %d: %v", cycle, err)
+						}
+						if err := cursor.Commit(source, partial.Receipt.after); err != nil {
+							t.Fatalf("commit cursor on cycle %d: %v", cycle, err)
+						}
+						partial.Receipt.Commit()
+					}
+					if cycle == 63 {
+						t.Fatal("bounded transcript scan did not converge")
+					}
+				}
+			} else {
+				restartedState, stateErr := NewTranscriptCursorStore(cursorPath).State(source)
+				if stateErr != nil {
+					t.Fatal(stateErr)
+				}
+				second, scanErr := ScanTranscript(source, &restartedState, TranscriptScanOptions{})
+				if scanErr != nil {
+					t.Fatal(scanErr)
+				}
+				secondAtoms = append(secondAtoms, second.Atoms...)
+				secondTombstones = append(secondTombstones, second.Tombstones...)
+				if second.Receipt != nil {
+					second.Receipt.Commit()
+				}
+			}
+			result := TranscriptScanResult{
+				Atoms:      append(append([]UsageAtom{}, first.Atoms...), secondAtoms...),
+				Tombstones: append(append([]UsageTombstone{}, first.Tombstones...), secondTombstones...),
+			}
+			goResult := parityResult{Atoms: make([]parityAtom, 0), Tombstone: make([]parityTombstone, 0)}
+			for _, atom := range result.Atoms {
+				quantity, _ := atom.Payload["quantity"].(float64)
+				goResult.Atoms = append(goResult.Atoms, parityAtom{
+					EventID: atom.EventID, Provider: stringPayload(atom.Payload, "provider"), ExecutionSource: stringPayload(atom.Payload, "execution_source"), Endpoint: stringPayload(atom.Payload, "endpoint"), Model: stringPayload(atom.Payload, "model"),
+					ModelEvidence: stringPayload(atom.Payload, "model_evidence"), Effort: stringPayload(atom.Payload, "effort"),
+					PricingProfile: stringPayload(atom.Payload, "pricing_profile"), ServiceTier: stringPayload(atom.Payload, "service_tier"),
+					AgentID: stringPayload(atom.Payload, "agent_id"), ThreadID: stringPayload(atom.Payload, "thread_id"),
+					Direction: atom.Direction, Modality: atom.Modality, CacheRole: atom.CacheRole, Unit: atom.Unit,
+					Quantity: quantity, ObservedAt: atom.ObservedAt,
+				})
+			}
+			for _, tombstone := range result.Tombstones {
+				goResult.Tombstone = append(goResult.Tombstone, parityTombstone{
+					EventID: tombstone.EventID, Provider: tombstone.Provider, Model: tombstone.Model, ThreadID: tombstone.ThreadID,
+					Direction: tombstone.Direction, Modality: tombstone.Modality, CacheRole: tombstone.CacheRole,
+					Unit: tombstone.Unit, Quantity: tombstone.Quantity, ObservedAt: tombstone.ObservedAt,
+				})
+			}
+			pythonOutput := runPython(t, pythonExecutable(t), pythonScript, fixture.path, fixture.provider, fmt.Sprintf("%d", fixture.splitAt), fmt.Sprintf("%d", fixture.byteBudget))
+			var pythonResult parityResult
+			if err := json.Unmarshal([]byte(pythonOutput), &pythonResult); err != nil {
+				t.Fatalf("decode Python scanner result %q: %v", pythonOutput, err)
+			}
+			parityKey := func(left, right parityAtom) bool {
+				if left.EventID != right.EventID {
+					return left.EventID < right.EventID
+				}
+				if left.Direction != right.Direction {
+					return left.Direction < right.Direction
+				}
+				return left.CacheRole < right.CacheRole
+			}
+			parityTombstoneKey := func(left, right parityTombstone) bool {
+				if left.EventID != right.EventID {
+					return left.EventID < right.EventID
+				}
+				if left.Direction != right.Direction {
+					return left.Direction < right.Direction
+				}
+				return left.CacheRole < right.CacheRole
+			}
+			sort.Slice(goResult.Atoms, func(i, j int) bool { return parityKey(goResult.Atoms[i], goResult.Atoms[j]) })
+			sort.Slice(goResult.Tombstone, func(i, j int) bool { return parityTombstoneKey(goResult.Tombstone[i], goResult.Tombstone[j]) })
+			for index := 1; index < len(goResult.Atoms); index++ {
+				previous, current := goResult.Atoms[index-1], goResult.Atoms[index]
+				if previous.EventID == current.EventID && previous.Direction == current.Direction && previous.CacheRole == current.CacheRole {
+					t.Fatalf("Go emitted duplicate atom after cursor reload: %+v", current)
+				}
+			}
+			if !reflect.DeepEqual(goResult, pythonResult) {
+				t.Fatalf("Python/Go transcript outputs differ\nGo:     %+v\nPython: %+v", goResult, pythonResult)
+			}
+		})
+	}
+}
+
+func TestPythonAndGoTranscriptSchedulersMatchSyntheticLiveHistoryOrder(t *testing.T) {
+	const pythonScanScript = `import json, sys
+from yolomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
+
+live_path, h0_path, h1_path = sys.argv[1:4]
+rows = [
+    {"key": "live", "kind": "codex", "transcript": live_path},
+    {"key": "h0", "kind": "claude", "transcript": h0_path},
+    {"key": "h1", "kind": "claude", "transcript": h1_path},
+]
+scanner = StatsCurrentTranscriptUsageScanner(max_bytes_per_scan=1 << 20, max_records_per_scan=1)
+selected = []
+for cycle in range(6):
+    result = scanner.scan(rows)
+    if not result.items:
+        raise RuntimeError(f"cycle {cycle} selected no usage source")
+    selected.append(result.items[0].tmux_key)
+    scanner.commit(result.receipt_id)
+    if cycle < 5:
+        record = {
+            "timestamp": cycle + 2,
+            "type": "event_msg",
+            "payload": {"info": {"total_token_usage": {
+                "input_tokens": (cycle + 2) * 10,
+                "cached_input_tokens": 0,
+                "output_tokens": cycle + 2,
+            }}},
+        }
+        with open(live_path, "a", encoding="utf-8") as transcript:
+            transcript.write(json.dumps(record, separators=(",", ":")) + "\n")
+json.dump(selected, sys.stdout, separators=(",", ":"))
+`
+	pythonRoot := t.TempDir()
+	goRoot := t.TempDir()
+	pythonScript := filepath.Join(pythonRoot, "scan_scheduler.py")
+	if err := os.WriteFile(pythonScript, []byte(pythonScanScript), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pythonPaths := []string{
+		filepath.Join(pythonRoot, "live", "session.jsonl"),
+		filepath.Join(pythonRoot, "h0", "session.jsonl"),
+		filepath.Join(pythonRoot, "h1", "session.jsonl"),
+	}
+	goPaths := []string{
+		filepath.Join(goRoot, "live", "session.jsonl"),
+		filepath.Join(goRoot, "h0", "session.jsonl"),
+		filepath.Join(goRoot, "h1", "session.jsonl"),
+	}
+	initialRecords := [][]map[string]any{
+		{usageCodex(1, 10, 0, 1)},
+		{usageClaude(1, "history-0", 20, 2)},
+		{usageClaude(1, "history-1", 30, 3)},
+	}
+	for index := range pythonPaths {
+		writeJSONL(t, pythonPaths[index], initialRecords[index]...)
+		writeJSONL(t, goPaths[index], initialRecords[index]...)
+	}
+
+	pythonEnvRoot := filepath.Join(pythonRoot, "instance")
+	pythonHome := filepath.Join(pythonRoot, "home")
+	pythonTemp := filepath.Join(pythonRoot, "tmp")
+	pythonXDG := filepath.Join(pythonRoot, "xdg")
+	for _, directory := range []string{pythonEnvRoot, pythonHome, pythonTemp, pythonXDG} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	python := exec.Command(pythonExecutable(t), append([]string{pythonScript}, pythonPaths...)...)
+	python.Dir = repositoryRoot(t)
+	python.Env = testsupport.SyntheticEnvironment(
+		"PYTHONDONTWRITEBYTECODE=1",
+		"PYTHONPATH="+repositoryRoot(t),
+		"HOME="+pythonHome,
+		"TMPDIR="+pythonTemp,
+		"YOLOMUX_CONFIG_DIR="+filepath.Join(pythonEnvRoot, "config"),
+		"YOLOMUX_STATE_DIR="+filepath.Join(pythonEnvRoot, "state"),
+		"YOLOMUX_CACHE_DIR="+filepath.Join(pythonEnvRoot, "cache"),
+		"YOLOMUX_RUNTIME_DIR="+filepath.Join(pythonEnvRoot, "runtime"),
+		"XDG_CONFIG_HOME="+filepath.Join(pythonXDG, "config"),
+		"XDG_CACHE_HOME="+filepath.Join(pythonXDG, "cache"),
+		"XDG_STATE_HOME="+filepath.Join(pythonXDG, "state"),
+		"XDG_DATA_HOME="+filepath.Join(pythonXDG, "data"),
+	)
+	pythonOutputBytes, err := python.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run synthetic Python transcript scheduler: %v\n%s", err, pythonOutputBytes)
+	}
+	pythonOutput := string(pythonOutputBytes)
+	var pythonSelected []string
+	if err := json.Unmarshal([]byte(pythonOutput), &pythonSelected); err != nil {
+		t.Fatalf("decode Python scheduler result %q: %v", pythonOutput, err)
+	}
+
+	sources := []TranscriptSource{
+		{Path: goPaths[0], Provider: "codex", SourceID: "live", ThreadID: "live", LiveCandidate: true},
+		{Path: goPaths[1], Provider: "claude", SourceID: "h0", ThreadID: "history-0"},
+		{Path: goPaths[2], Provider: "claude", SourceID: "h1", ThreadID: "history-1"},
+	}
+	collector := NewAgentTokenCollector(nil, nil, AgentTokenCollectorConfig{
+		TranscriptSources: func(context.Context, []AgentRecord) ([]TranscriptSource, error) {
+			return sources, nil
+		},
+		TranscriptCursorPath:         filepath.Join(goRoot, "transcript-cursors.json"),
+		TranscriptMaxBytesPerCycle:   1 << 20,
+		TranscriptMaxRecordsPerCycle: 1,
+	})
+	goSelected := make([]string, 0, 6)
+	for cycle := 0; cycle < 6; cycle++ {
+		batch, receipts, err := collector.collectTranscripts(context.Background(), float64(cycle+10), 1, nil, nil, AppendBatch{}, nil)
+		if err != nil {
+			t.Fatalf("Go scheduler cycle %d: %v", cycle, err)
+		}
+		if len(batch.UsageAtoms) == 0 || len(batch.CoverageEpochs) != 1 {
+			t.Fatalf("Go scheduler cycle %d did not serve exactly one synthetic source: atoms=%d coverage=%+v", cycle, len(batch.UsageAtoms), batch.CoverageEpochs)
+		}
+		goSelected = append(goSelected, batch.CoverageEpochs[0].SourceID)
+		if err := commitReceipts(receipts); err != nil {
+			t.Fatalf("commit Go scheduler cycle %d: %v", cycle, err)
+		}
+		if cycle < 5 {
+			appendJSONL(t, goPaths[0], usageCodex(float64(cycle+2), float64((cycle+2)*10), 0, float64(cycle+2)), false)
+		}
+	}
+	want := []string{"live", "live", "h0", "live", "live", "h1"}
+	if !reflect.DeepEqual(pythonSelected, want) {
+		t.Fatalf("Python scheduler source order = %v, want %v", pythonSelected, want)
+	}
+	if !reflect.DeepEqual(goSelected, want) {
+		t.Fatalf("Go scheduler source order = %v, want %v", goSelected, want)
+	}
+}
+
+func TestPythonAndGoTranscriptContextNormalizationMatchSyntheticUnicode(t *testing.T) {
+	root := t.TempDir()
+	scriptPath := filepath.Join(root, "normalize_transcript_context.py")
+	const script = `import json
+from yolomux_lib.workspace.session_files import transcript_effort, transcript_pricing_context
+
+value = "\u0130" + "A" * 63
+print(json.dumps([transcript_effort(value), transcript_pricing_context(value)], ensure_ascii=False))
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output := runPython(t, pythonExecutable(t), scriptPath)
+	var pythonValues []string
+	if err := json.Unmarshal([]byte(output), &pythonValues); err != nil {
+		t.Fatalf("decode Python transcript normalization %q: %v", output, err)
+	}
+	input := "\u0130" + strings.Repeat("A", 63)
+	goValues := []string{normalizeTranscriptEffort(input), normalizeTranscriptPricingContext(input)}
+	if !reflect.DeepEqual(goValues, pythonValues) {
+		t.Fatalf("transcript context normalization differs: Go=%q Python=%q", goValues, pythonValues)
+	}
+}
+
+func TestPythonAndGoTranscriptSchedulersPrioritizeRecentClaudeHistory(t *testing.T) {
+	root := t.TempDir()
+	oldPath := filepath.Join(root, "aaa-old.jsonl")
+	newPath := filepath.Join(root, "zzz-new.jsonl")
+	writeJSONL(t, oldPath, usageClaude(1, "old-history", 10, 1))
+	writeJSONL(t, newPath, usageClaude(2, "new-history", 20, 2))
+	oldTime := time.Unix(1_700_000_000, 0)
+	newTime := time.Unix(1_700_001_000, 0)
+	if err := os.Chtimes(oldPath, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(newPath, newTime, newTime); err != nil {
+		t.Fatal(err)
+	}
+
+	pythonScript := filepath.Join(t.TempDir(), "scan_claude_priority.py")
+	const script = `import json, sys
+from yolomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
+
+old_path, new_path = sys.argv[1:3]
+scanner = StatsCurrentTranscriptUsageScanner(max_bytes_per_scan=1 << 20, max_records_per_scan=1)
+rows = [
+    {"key": "old", "kind": "claude", "transcript": old_path},
+    {"key": "new", "kind": "claude", "transcript": new_path},
+]
+result = scanner.scan(rows)
+if not result.items:
+    raise RuntimeError("Python scanner selected no synthetic Claude history")
+json.dump(result.items[0].tmux_key, sys.stdout)
+scanner.commit(result.receipt_id)
+`
+	if err := os.WriteFile(pythonScript, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pythonOutput := strings.TrimSpace(runPython(t, pythonExecutable(t), pythonScript, oldPath, newPath))
+	var pythonSelected string
+	if err := json.Unmarshal([]byte(pythonOutput), &pythonSelected); err != nil {
+		t.Fatalf("decode Python source priority %q: %v", pythonOutput, err)
+	}
+	if pythonSelected != "new" {
+		t.Fatalf("Python selected Claude history %q, want newest source", pythonSelected)
+	}
+
+	for _, scenario := range []struct {
+		name    string
+		records []AgentRecord
+	}{
+		{
+			name:    "fallback histories",
+			records: []AgentRecord{{Kind: "claude", TmuxSession: "synthetic"}},
+		},
+		{
+			name: "direct old history and fallback",
+			records: []AgentRecord{
+				{Kind: "claude", TmuxSession: "direct", TranscriptPath: oldPath},
+				{Kind: "claude", TmuxSession: "fallback"},
+			},
+		},
+		{
+			name: "direct histories",
+			records: []AgentRecord{
+				{Kind: "claude", TmuxSession: "old-direct", TranscriptPath: oldPath},
+				{Kind: "claude", TmuxSession: "new-direct", TranscriptPath: newPath},
+			},
+		},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			collector := NewAgentTokenCollector(nil, nil, AgentTokenCollectorConfig{
+				TranscriptSources: func(ctx context.Context, records []AgentRecord) ([]TranscriptSource, error) {
+					return defaultAgentTokenSourcesBounded(ctx, records, transcriptDiscoveryBounds{
+						maxFiles: 10,
+						maxDirs:  10,
+						maxBytes: 1 << 20,
+					}, root)
+				},
+				TranscriptCursorPath:         filepath.Join(t.TempDir(), "transcript-cursors.json"),
+				TranscriptMaxBytesPerCycle:   1 << 20,
+				TranscriptMaxRecordsPerCycle: 1,
+			})
+			batch, _, err := collector.collectTranscripts(context.Background(), 10, 1, scenario.records, nil, AppendBatch{}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(batch.CoverageEpochs) != 1 {
+				t.Fatalf("Go scheduler coverage = %+v, want one selected historical source", batch.CoverageEpochs)
+			}
+			wantSourceID := "claude:" + newPath
+			if batch.CoverageEpochs[0].SourceID != wantSourceID {
+				t.Fatalf("Go selected Claude history %q, want newest source %q", batch.CoverageEpochs[0].SourceID, wantSourceID)
+			}
+		})
+	}
+}
+
+func stringPayload(payload map[string]any, key string) string {
+	value, _ := payload[key].(string)
+	return value
 }
 
 func pythonExecutable(t *testing.T) string {

@@ -1581,13 +1581,26 @@ exec /bin/sleep 300
                     const gitHead = arguments[2];
                     const setup = arguments[3];
                     const waitFor = (predicate, description, timeoutMs = 12000) => new Promise((resolve, reject) => {
-                      const deadline = performance.now() + timeoutMs;
-                      const poll = () => {
+                      let settled = false;
+                      const controller = new AbortController();
+                      const timeout = setTimeout(() => {
+                        settled = true;
+                        controller.abort();
+                        reject(new Error(`Finder UI condition timed out: ${description}`));
+                      }, timeoutMs);
+                      const finish = (callback, value) => {
+                        if (settled) return;
+                        settled = true;
+                        clearTimeout(timeout);
+                        callback(value);
+                      };
+                      const poll = async () => {
+                        if (settled) return;
                         try {
-                          const value = predicate();
-                          if (value) { resolve(value); return; }
-                        } catch (error) { reject(error); return; }
-                        if (performance.now() >= deadline) { reject(new Error(`Finder UI condition timed out: ${description}`)); return; }
+                          const value = await predicate(controller.signal);
+                          if (value) { finish(resolve, value); return; }
+                        } catch (error) { finish(reject, error); return; }
+                        if (settled) return;
                         setTimeout(poll, 50);
                       };
                       poll();
@@ -1745,8 +1758,13 @@ exec /bin/sleep 300
                       deleteButton.click();
                       await waitFor(() => !row(root + '/ui-remove-me.txt'), 'Finder delete convergence');
                       window.confirm = originalConfirm;
-                      const deletedInfo = await fetch('/api/fs/info?path=' + encodeURIComponent(root + '/ui-remove-me.txt'), {cache: 'no-store', credentials: 'same-origin'});
-                      if (deletedInfo.status !== 404) throw new Error(`Finder delete did not remove the file: ${deletedInfo.status}`);
+                      const deletedInfoStatus = await waitFor(async signal => {
+                        const response = await fetch('/api/fs/info?path=' + encodeURIComponent(root + '/ui-remove-me.txt'), {cache: 'no-store', credentials: 'same-origin', signal});
+                        if (response.status === 404) return response.status;
+                        if (response.status !== 200) throw new Error(`Finder delete info returned unexpected status ${response.status}`);
+                        return null;
+                      }, 'Finder delete filesystem convergence');
+                      if (deletedInfoStatus !== 404) throw new Error(`Finder delete did not remove the file: ${deletedInfoStatus}`);
                       done({initial: setup.initial, expanded: setup.expanded, reexpanded: setup.reexpanded, initialRepo: setup.initialRepo, repoEnriched: setup.repoEnriched, gitHistory, deletedViaFinder: true});
                     })().catch(error => done({error: String(error?.stack || error)}));
                 """, str(finder_root), str(git_root), git_head, finder_setup)
@@ -2106,6 +2124,15 @@ exec /bin/sleep 300
                             };
                         """, exited_session)
                         raise SystemExit(f"Go roster-exit E2E could not mount its clean fixture pane: {mount_state}") from error
+                    roster_channels = roster_driver.execute_script("""
+                        const source = clientEventTransportState.source;
+                        if (!source?.url) return [];
+                        return new URL(source.url, location.href).searchParams.get('channels')?.split(',') || [];
+                    """)
+                    if "core" not in roster_channels or "transcripts" in roster_channels:
+                        raise SystemExit(
+                            f"Go roster-exit E2E has the wrong client-event demand: {roster_channels}"
+                        )
                     exited_slot = roster_driver.execute_script("return slotForItem(arguments[0], layoutSlots);", exited_session)
                     kill_result = subprocess.run(
                         (*tmux, "kill-session", "-t", f"={exited_session}"),
@@ -2155,6 +2182,7 @@ exec /bin/sleep 300
                     """, exited_session, exited_slot)
                     if not roster_exit.get("ok"):
                         raise SystemExit(f"Go roster-exit E2E left an exited pane visible: {roster_exit}")
+                    roster_exit["eventChannels"] = roster_channels
                     print(f"Go external tmux exit convergence: {json.dumps(roster_exit, sort_keys=True)}")
                 finally:
                     retirement = roster_lease.retire()

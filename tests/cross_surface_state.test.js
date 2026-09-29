@@ -3049,6 +3049,7 @@ async function runCrossSurfaceStateSuite() {
     api.cycleEditorThemeMode();
     assert.equal(api.editorPreviewThemeStateForTest(), 'vanilla', 'theme toggle moves light preview to vanilla preview');
     assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'vanilla');
+    assert.equal(api.editorThemeLabel(), 'Vanilla preview');
     api.cycleEditorThemeMode();
     assert.equal(api.editorPreviewThemeStateForTest(), 'dark', 'theme toggle moves vanilla preview back to dark preview');
     assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'theme');

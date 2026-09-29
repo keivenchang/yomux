@@ -31,7 +31,12 @@ func LinuxAgentStatusSources(database string) AgentStatusSources {
 // admitted command/executable; no host /proc lookup is allowed in fixtures.
 func SyntheticAgentStatusSources(database string) AgentStatusSources {
 	return AgentStatusSources{
-		CapturePane: linuxCaptureAgentPane,
+		CapturePane: func(ctx context.Context, target string) (AgentStatusPane, error) {
+			if !syntheticTmuxSocketConfigured() {
+				return AgentStatusPane{}, errSyntheticTmuxSocketUnset
+			}
+			return linuxCaptureAgentPane(ctx, target)
+		},
 		Process: func(ctx context.Context, pid int) (AgentStatusProcess, error) {
 			if err := ctx.Err(); err != nil || pid <= 0 {
 				if err != nil {

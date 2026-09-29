@@ -4,9 +4,13 @@
 package stats
 
 import (
+	"bytes"
+	"compress/zlib"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -41,12 +45,63 @@ type ringBucketCacheKey struct {
 }
 
 type ringBucketCacheEntry struct {
-	ringGeneration  int64
-	bucket          MaterializedBucket
-	noData          []MaterializedNoData
-	cacheGeneration int64
-	generatedAt     float64
-	hasMetadata     bool
+	ringGeneration   int64
+	bucket           MaterializedBucket
+	noDataCompressed []byte
+	cacheBytes       int
+	cacheGeneration  int64
+	generatedAt      float64
+	hasMetadata      bool
+}
+
+const (
+	maxRingBucketCacheEncodedBytes  = 256 * 1024 * 1024
+	maxSnapshotEnvelopeReserveBytes = 8 * 1024 * 1024
+	maxSnapshotBucketReserveBytes   = 64 * 1024
+	maxSnapshotChunkReserveBytes    = 64 * 1024
+)
+
+func compressRingBucketNoData(spans []MaterializedNoData) ([]byte, error) {
+	raw, err := json.Marshal(spans)
+	if err != nil {
+		return nil, err
+	}
+	var buffer bytes.Buffer
+	writer, err := zlib.NewWriterLevel(&buffer, zlib.BestSpeed)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := writer.Write(raw); err != nil {
+		_ = writer.Close()
+		return nil, err
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+	return buffer.Bytes(), nil
+}
+
+func decompressRingBucketNoData(compressed []byte) ([]MaterializedNoData, error) {
+	reader, err := zlib.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		return nil, err
+	}
+	raw, readErr := io.ReadAll(io.LimitReader(reader, MaxRingBucketBytes+1))
+	closeErr := reader.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if len(raw) > MaxRingBucketBytes {
+		return nil, fmt.Errorf("cached ring no-data exceeds %d bytes", MaxRingBucketBytes)
+	}
+	var spans []MaterializedNoData
+	if err := json.Unmarshal(raw, &spans); err != nil {
+		return nil, err
+	}
+	return spans, nil
 }
 
 // ServiceState is the lock-free status projection used by readiness and
@@ -105,6 +160,7 @@ type StatsService struct {
 	state                   ServiceState
 	keys                    []ProductKey
 	ringBucketCache         map[ringBucketCacheKey]ringBucketCacheEntry
+	ringBucketCacheBytes    int
 	lastRingGeneration      int64
 	lastPublishedAt         float64
 	ringStateReady          bool
@@ -167,6 +223,10 @@ func persistedRingGapNoData(start int64, resolution int, ringGeneration int64) [
 // remain visible as separate gaps.
 func mergeAdjacentNoData(spans []MaterializedNoData) []MaterializedNoData {
 	ordered := append([]MaterializedNoData(nil), spans...)
+	return mergeAdjacentNoDataInPlace(ordered)
+}
+
+func mergeAdjacentNoDataInPlace(ordered []MaterializedNoData) []MaterializedNoData {
 	sort.SliceStable(ordered, func(i, j int) bool {
 		left, right := ordered[i], ordered[j]
 		if left.Family != right.Family {
@@ -183,10 +243,10 @@ func mergeAdjacentNoData(spans []MaterializedNoData) []MaterializedNoData {
 		}
 		return left.EpochID < right.EpochID
 	})
-	merged := make([]MaterializedNoData, 0, len(ordered))
+	mergedCount := 0
 	for _, span := range ordered {
-		if len(merged) > 0 {
-			previous := &merged[len(merged)-1]
+		if mergedCount > 0 {
+			previous := &ordered[mergedCount-1]
 			if previous.Family == span.Family && previous.SourceID == span.SourceID &&
 				previous.EpochID == span.EpochID && previous.Reason == span.Reason &&
 				previous.NativeCadenceSeconds == span.NativeCadenceSeconds && previous.End == span.Start {
@@ -194,9 +254,188 @@ func mergeAdjacentNoData(spans []MaterializedNoData) []MaterializedNoData {
 				continue
 			}
 		}
-		merged = append(merged, span)
+		ordered[mergedCount] = span
+		mergedCount++
 	}
-	return merged
+	return ordered[:mergedCount]
+}
+
+type materializedNoDataKey struct {
+	family, sourceID, epochID, reason string
+	cadence                           float64
+}
+
+// materializedNoDataAccumulator merges adjacent bucket fragments as they are
+// read. A long history can repeat the same unavailable source in every bucket;
+// retaining all fragments until the final sort made the request path grow with
+// bucketCount*sourceCount even though the response contains one span per source.
+type materializedNoDataAccumulator struct {
+	spans          []MaterializedNoData
+	lastByKey      map[materializedNoDataKey]int
+	estimatedBytes int
+}
+
+func newMaterializedNoDataAccumulator() materializedNoDataAccumulator {
+	return materializedNoDataAccumulator{lastByKey: make(map[materializedNoDataKey]int)}
+}
+
+func (a *materializedNoDataAccumulator) Append(spans []MaterializedNoData) {
+	for _, span := range spans {
+		key := materializedNoDataKey{family: span.Family, sourceID: span.SourceID, epochID: span.EpochID, reason: span.Reason, cadence: span.NativeCadenceSeconds}
+		if index, exists := a.lastByKey[key]; exists && a.spans[index].End == span.Start {
+			a.spans[index].End = span.End
+			continue
+		}
+		a.lastByKey[key] = len(a.spans)
+		a.spans = append(a.spans, span)
+		a.estimatedBytes += estimatedNoDataSpanBytes(span)
+	}
+}
+
+func estimatedNoDataSpanBytes(span MaterializedNoData) int {
+	encoded, err := json.Marshal(map[string]any{
+		"family": span.Family, "source_id": span.SourceID, "start": span.Start, "end": span.End,
+		"epoch": span.EpochID, "reason": span.Reason, "source_cadence_seconds": span.NativeCadenceSeconds,
+	})
+	if err == nil {
+		return len(encoded) + 1
+	}
+	// Invalid floats cannot be emitted as JSON. Keep admission conservative so
+	// the normal snapshot validation reports the malformed materialized value.
+	return 1 + 6*(len(span.Family)+len(span.SourceID)+len(span.EpochID)+len(span.Reason)) + 128
+}
+
+func estimatedNoDataBytesInRange(spans []MaterializedNoData, sizes []int, start, end float64) int {
+	total := 0
+	for index, span := range spans {
+		if span.End > start && span.Start < end {
+			total += sizes[index]
+		}
+	}
+	return total
+}
+
+func statsCostReportBytes(cost MaterializedCostDetail, seenEvidence map[string]struct{}) (int, error) {
+	// Snapshot buckets carry series and coverage on the wire; cost is folded into
+	// one shared report. Keep the per-bucket attribution bound, but account for
+	// price evidence once because the wire report merges it by evidence key.
+	evidenceRows := cost.Evidence
+	cost.Evidence = nil
+	encodedCost, err := json.Marshal(cost)
+	if err != nil {
+		return 0, err
+	}
+	total := len(encodedCost)
+	const maxInt64 = int64(1<<63 - 1)
+	for _, evidence := range evidenceRows {
+		if _, exists := seenEvidence[evidence.Key]; exists {
+			continue
+		}
+		seenEvidence[evidence.Key] = struct{}{}
+		evidence.Tokens, evidence.MicroUSD, evidence.APIListMicroUSD, evidence.PricedAtoms = maxInt64, maxInt64, maxInt64, maxInt64
+		encodedEvidence, marshalErr := json.Marshal(evidence)
+		if marshalErr != nil {
+			return 0, marshalErr
+		}
+		total += len(encodedEvidence) + 1
+	}
+	return total, nil
+}
+
+func statsSnapshotChunksFit(bucketSizes []int, bucketStarts []int64, resolution int, noData []MaterializedNoData, costReportBytes int) bool {
+	if len(bucketSizes) == 0 || len(bucketStarts) != len(bucketSizes) || resolution <= 0 || costReportBytes < 0 {
+		return false
+	}
+	noDataSizes := make([]int, len(noData))
+	noDataBytes := 0
+	for index, span := range noData {
+		noDataSizes[index] = estimatedNoDataSpanBytes(span)
+		noDataBytes += noDataSizes[index]
+	}
+	totalBytes := noDataBytes + costReportBytes
+	for _, size := range bucketSizes {
+		if size < 0 {
+			return false
+		}
+		totalBytes += size
+	}
+	if totalBytes <= MaxStatsSnapshotChunkTargetBytes {
+		return true
+	}
+	chunkLimit := min(len(bucketSizes), MaxStatsSnapshotChunks)
+	chunkCount := max(2, (totalBytes+MaxStatsSnapshotChunkTargetBytes-1)/MaxStatsSnapshotChunkTargetBytes)
+	if chunkCount > chunkLimit {
+		chunkCount = chunkLimit
+	}
+	for {
+		largest := 0
+		for index := 0; index < chunkCount; index++ {
+			first := index * len(bucketSizes) / chunkCount
+			last := (index + 1) * len(bucketSizes) / chunkCount
+			chunkStart := float64(bucketStarts[first])
+			chunkEnd := float64(bucketStarts[last-1] + int64(resolution))
+			chunkBytes := estimatedNoDataBytesInRange(noData, noDataSizes, chunkStart, chunkEnd) + costReportBytes + maxSnapshotChunkReserveBytes
+			for _, size := range bucketSizes[first:last] {
+				chunkBytes += size
+			}
+			if chunkBytes > largest {
+				largest = chunkBytes
+			}
+		}
+		if largest <= MaxStatsSnapshotChunkBytes {
+			return true
+		}
+		if chunkCount == chunkLimit {
+			if chunkCount != len(bucketSizes) {
+				return false
+			}
+			fragmentCount := chunkCount
+			for index, bucketSize := range bucketSizes {
+				chunkStart := float64(bucketStarts[index])
+				chunkEnd := float64(bucketStarts[index] + int64(resolution))
+				fixedBytes := bucketSize + costReportBytes + maxSnapshotChunkReserveBytes
+				availableBytes := MaxStatsSnapshotChunkBytes - fixedBytes
+				if availableBytes <= 0 {
+					return false
+				}
+				bucketFragments := 1
+				currentBytes := 2
+				for spanIndex, span := range noData {
+					if span.End <= chunkStart || span.Start >= chunkEnd {
+						continue
+					}
+					spanBytes := noDataSizes[spanIndex] - 1
+					itemBytes := spanBytes
+					if currentBytes > 2 {
+						itemBytes++
+					}
+					if currentBytes+itemBytes > availableBytes {
+						bucketFragments++
+						currentBytes = 2
+						itemBytes = spanBytes
+					}
+					if currentBytes+itemBytes > availableBytes {
+						return false
+					}
+					currentBytes += itemBytes
+				}
+				fragmentCount += bucketFragments - 1
+				if fragmentCount > MaxStatsSnapshotChunks {
+					return false
+				}
+			}
+			return fragmentCount <= MaxStatsSnapshotChunks
+		}
+		next := (chunkCount*largest + MaxStatsSnapshotChunkTargetBytes - 1) / MaxStatsSnapshotChunkTargetBytes
+		if next <= chunkCount {
+			next = chunkCount + 1
+		}
+		chunkCount = min(next, chunkLimit)
+	}
+}
+
+func (a materializedNoDataAccumulator) Sorted() []MaterializedNoData {
+	return mergeAdjacentNoDataInPlace(a.spans)
 }
 
 func NewStatsService(writer *Writer, config StatsServiceConfig) *StatsService {
@@ -337,6 +576,19 @@ func (s *StatsService) Refresh(ctx context.Context) (refreshErr error) {
 		}
 	}()
 	now := s.now()
+	retryRingRefresh := false
+	markCorruptPayload := func(row RingBucketRow, payload string, cause error) error {
+		marked, markErr := s.writer.InvalidateCorruptRingPayload(ctx, row, payload, float64(now.UnixNano())/1e9)
+		if markErr != nil {
+			retryRingRefresh = true
+			return errors.Join(cause, fmt.Errorf("persist ring repair request: %w", markErr))
+		}
+		if !marked {
+			retryRingRefresh = true
+			return errors.Join(cause, errors.New("ring slot changed before its repair request could be recorded"))
+		}
+		return cause
+	}
 	// Status is a stats-owner projection, refreshed alongside ring products. The
 	// lifecycle ticks every second, while the status product normally needs a
 	// ten-second read and a bounded one-second retry after an error. A status
@@ -396,6 +648,7 @@ func (s *StatsService) Refresh(ctx context.Context) (refreshErr error) {
 		s.refreshCounters.ringReads.Add(1)
 		baseWindow, err := s.writer.ReadRingWindowMetadata(ctx, maxRange, resolution, alignedEnd)
 		if err != nil {
+			retryRingRefresh = true
 			for _, key := range keys {
 				pending[key] = err.Error()
 			}
@@ -407,9 +660,13 @@ func (s *StatsService) Refresh(ctx context.Context) (refreshErr error) {
 		if baseWindow.StoreSourceGeneration > storeGeneration {
 			storeGeneration = baseWindow.StoreSourceGeneration
 		}
-		s.refreshCounters.ringRows.Add(uint64(len(baseWindow.Rows)))
-		payloadStarts := make([]int64, 0, len(baseWindow.Rows))
-		for _, row := range baseWindow.Rows {
+		cacheRows := make([]RingBucketRow, 0, len(baseWindow.Rows)+len(baseWindow.PendingRows))
+		cacheRows = append(cacheRows, baseWindow.Rows...)
+		cacheRows = append(cacheRows, baseWindow.PendingRows...)
+		s.pruneRingBucketCache(resolution, cacheRows)
+		s.refreshCounters.ringRows.Add(uint64(len(baseWindow.Rows) + len(baseWindow.PendingRows)))
+		payloadStarts := make([]int64, 0, len(baseWindow.Rows)+len(baseWindow.PendingRows))
+		for _, row := range cacheRows {
 			cacheKey := ringBucketCacheKey{resolution: resolution, bucket: row.BucketStart}
 			cached, cacheHit := s.ringBucketCache[cacheKey]
 			if !cacheHit || cached.ringGeneration != row.RingGeneration {
@@ -418,6 +675,7 @@ func (s *StatsService) Refresh(ctx context.Context) (refreshErr error) {
 		}
 		payloads, err := s.writer.readRingBucketPayloads(ctx, resolution, payloadStarts)
 		if err != nil {
+			retryRingRefresh = true
 			for _, key := range keys {
 				pending[key] = err.Error()
 			}
@@ -429,30 +687,59 @@ func (s *StatsService) Refresh(ctx context.Context) (refreshErr error) {
 		for _, key := range keys {
 			window := narrowRingWindow(baseWindow, key.RangeSeconds)
 			if len(window.PendingInvalidations) != 0 || len(window.MissingBucketStarts) != 0 {
-				pending[key] = fmt.Sprintf("ring has %d missing or pending buckets", len(window.MissingBucketStarts))
-				continue
+				carrier, allowed := pendingOpenCarrier(window, now)
+				if !allowed {
+					// Missing slots are lifecycle backfill work even without a ledger
+					// entry. Publishing them as no-data would make a partial startup
+					// pass look complete despite facts available to rebuild the window.
+					pending[key] = fmt.Sprintf("ring has %d missing buckets and %d pending invalidations", len(window.MissingBucketStarts), len(window.PendingInvalidations))
+					continue
+				}
+				window.Rows = append(window.Rows, carrier)
 			}
 			buckets := make([]MaterializedBucket, 0, len(window.Rows))
-			layerNoData := make([]MaterializedNoData, 0)
+			layerNoData := newMaterializedNoDataAccumulator()
+			bucketSizes := make([]int, 0, len(window.Rows))
+			bucketStarts := make([]int64, 0, len(window.Rows))
 			cacheGeneration := int64(0)
 			generatedAt := window.PublishedAt
+			windowBucketBytes := 0
+			windowCostBytes := 0
+			windowCostEvidence := make(map[string]struct{})
 			for _, row := range window.Rows {
 				cacheKey := ringBucketCacheKey{resolution: resolution, bucket: row.BucketStart}
 				cached, cacheHit := s.ringBucketCache[cacheKey]
+				var bucketNoData []MaterializedNoData
+				var bucketJSONBytes int
 				if !cacheHit || cached.ringGeneration != row.RingGeneration {
+					if cacheHit {
+						s.ringBucketCacheBytes -= cached.cacheBytes
+						delete(s.ringBucketCache, cacheKey)
+					}
 					s.refreshCounters.bucketDecodes.Add(1)
-					rawPayload, payloadPresent := payloads[row.BucketStart]
+					payload, payloadPresent := payloads[row.BucketStart]
 					if !payloadPresent {
 						err := fmt.Errorf("ring bucket %d payload was not returned", row.BucketStart)
+						retryRingRefresh = true
 						pending[key] = err.Error()
 						if firstErr == nil {
 							firstErr = err
 						}
 						break
 					}
-					payloadJSON, outerDecodeErr := decodeRingBucket(rawPayload)
+					if !ringBucketPayloadMatchesMetadata(row, payload) {
+						retryRingRefresh = true
+						err := fmt.Errorf("ring bucket %d changed while its payload was being read", row.BucketStart)
+						pending[key] = err.Error()
+						if firstErr == nil {
+							firstErr = err
+						}
+						break
+					}
+					payloadJSON, outerDecodeErr := decodeRingBucket(payload.Value)
 					if outerDecodeErr != nil {
 						pending[key] = fmt.Sprintf("decode ring bucket %d: %v", row.BucketStart, outerDecodeErr)
+						outerDecodeErr = markCorruptPayload(row, payload.Value, outerDecodeErr)
 						if firstErr == nil {
 							firstErr = outerDecodeErr
 						}
@@ -462,25 +749,108 @@ func (s *StatsService) Refresh(ctx context.Context) (refreshErr error) {
 					decoded, decodeErr := decodeRingBucketPayloadWithMetadata(payloadJSON)
 					if decodeErr != nil {
 						pending[key] = fmt.Sprintf("decode ring bucket %d: %v", row.BucketStart, decodeErr)
+						decodeErr = markCorruptPayload(row, payload.Value, decodeErr)
 						if firstErr == nil {
 							firstErr = decodeErr
 						}
 						break
 					}
 					bucket, noData := decoded.bucket, decoded.noData
+					bucketNoData = noData
+					bucketJSON, marshalErr := json.Marshal(bucket)
+					if marshalErr != nil {
+						pending[key] = fmt.Sprintf("encode ring bucket %d: %v", row.BucketStart, marshalErr)
+						if firstErr == nil {
+							firstErr = marshalErr
+						}
+						break
+					}
+					bucketJSONBytes = len(bucketJSON)
 					payloadCache, payloadGeneratedAt, hasMetadata := decoded.cacheGeneration, decoded.generatedAt, decoded.hasMetadata
 					if !hasMetadata {
 						payloadCache = derivedCacheGeneration(row.PublishedAt, row.RingGeneration)
 						payloadGeneratedAt = row.PublishedAt
 					}
-					cached = ringBucketCacheEntry{ringGeneration: row.RingGeneration, bucket: bucket, noData: noData, cacheGeneration: payloadCache, generatedAt: payloadGeneratedAt, hasMetadata: hasMetadata}
-					s.ringBucketCache[cacheKey] = cached
+					compressedNoData, compressErr := compressRingBucketNoData(noData)
+					if compressErr != nil {
+						pending[key] = fmt.Sprintf("cache ring bucket %d no-data: %v", row.BucketStart, compressErr)
+						if firstErr == nil {
+							firstErr = compressErr
+						}
+						break
+					}
+					cacheBytes := bucketJSONBytes + len(compressedNoData)
+					if cacheBytes <= maxRingBucketCacheEncodedBytes-s.ringBucketCacheBytes {
+						cached = ringBucketCacheEntry{ringGeneration: row.RingGeneration, bucket: bucket, noDataCompressed: compressedNoData, cacheBytes: cacheBytes, cacheGeneration: payloadCache, generatedAt: payloadGeneratedAt, hasMetadata: hasMetadata}
+						s.ringBucketCache[cacheKey] = cached
+						s.ringBucketCacheBytes += cacheBytes
+					} else {
+						cached = ringBucketCacheEntry{ringGeneration: row.RingGeneration, bucket: bucket, noDataCompressed: compressedNoData, cacheGeneration: payloadCache, generatedAt: payloadGeneratedAt, hasMetadata: hasMetadata}
+					}
+				} else {
+					var cacheErr error
+					bucketNoData, cacheErr = decompressRingBucketNoData(cached.noDataCompressed)
+					if cacheErr != nil {
+						pending[key] = fmt.Sprintf("decode cached ring bucket %d no-data: %v", row.BucketStart, cacheErr)
+						if firstErr == nil {
+							firstErr = cacheErr
+						}
+						break
+					}
+					bucketJSON, marshalErr := json.Marshal(cached.bucket)
+					if marshalErr != nil {
+						pending[key] = fmt.Sprintf("encode cached ring bucket %d: %v", row.BucketStart, marshalErr)
+						if firstErr == nil {
+							firstErr = marshalErr
+						}
+						break
+					}
+					bucketJSONBytes = len(bucketJSON)
 				}
-				bucket, noData := cached.bucket, cached.noData
+				bucket := cached.bucket
+				wireBucket := bucket
+				wireBucket.Cost = MaterializedCostDetail{}
+				bucketWireJSON, marshalErr := json.Marshal(wireBucket)
+				if marshalErr != nil {
+					pending[key] = fmt.Sprintf("encode ring bucket %d wire payload: %v", row.BucketStart, marshalErr)
+					if firstErr == nil {
+						firstErr = marshalErr
+					}
+					break
+				}
+				bucketJSONBytes = len(bucketWireJSON)
+				costBytes, costErr := statsCostReportBytes(bucket.Cost, windowCostEvidence)
+				if costErr != nil {
+					pending[key] = fmt.Sprintf("encode ring bucket %d cost report: %v", row.BucketStart, costErr)
+					if firstErr == nil {
+						firstErr = costErr
+					}
+					break
+				}
+				windowCostBytes += costBytes
+				costReportBytes := windowCostBytes
+				if bucketJSONBytes > MaxStatsSnapshotChunkBytes-maxSnapshotBucketReserveBytes {
+					transportErr := fmt.Errorf("ring bucket %d exceeds the stats snapshot transport chunk limit", row.BucketStart)
+					pending[key] = transportErr.Error()
+					if firstErr == nil {
+						firstErr = transportErr
+					}
+					break
+				}
+				windowBucketBytes += bucketJSONBytes + 1
+				if windowBucketBytes+layerNoData.estimatedBytes+costReportBytes > MaxStatsSnapshotBytes-maxSnapshotEnvelopeReserveBytes {
+					transportErr := errors.New("materialized stats snapshot exceeds the transport size limit")
+					pending[key] = transportErr.Error()
+					if firstErr == nil {
+						firstErr = transportErr
+					}
+					break
+				}
 				if bucket.Start != float64(row.BucketStart) || bucket.Duration != float64(key.ResolutionSeconds) || bucket.Complete != row.Complete {
 					pending[key] = fmt.Sprintf("ring bucket %d has inconsistent bounds", row.BucketStart)
+					boundErr := markCorruptPayload(row, payloads[row.BucketStart].Value, errors.New("inconsistent ring bucket bounds"))
 					if firstErr == nil {
-						firstErr = errors.New("inconsistent ring bucket bounds")
+						firstErr = boundErr
 					}
 					break
 				}
@@ -491,25 +861,52 @@ func (s *StatsService) Refresh(ctx context.Context) (refreshErr error) {
 				if !bucket.Complete && row.BucketStart != window.WindowEnd-int64(key.ResolutionSeconds) {
 					// An open bit records that this row was the right edge when it was
 					// published. Once it is interior to a later window, its values are
-					// stale and must not be presented as historical truth. Keep the
-					// dense bucket shape, but project an explicit persisted-ring gap.
-					bucket = MaterializedBucket{Start: float64(row.BucketStart), Duration: float64(key.ResolutionSeconds), Complete: true}
-					noData = append(noData, persistedRingGapNoData(row.BucketStart, key.ResolutionSeconds, window.RingGeneration)...)
+					// known facts remain valid lower bounds; only the unobserved tail is
+					// unknown. Close the bucket while retaining its series and cost, then
+					// project an explicit persisted-ring gap for every family.
+					bucket.Complete = true
+					bucketNoData = append(bucketNoData, persistedRingGapNoData(row.BucketStart, key.ResolutionSeconds, row.RingGeneration)...)
 				}
 				buckets = append(buckets, bucket)
-				layerNoData = append(layerNoData, noData...)
+				bucketSizes = append(bucketSizes, bucketJSONBytes)
+				bucketStarts = append(bucketStarts, row.BucketStart)
+				layerNoData.Append(bucketNoData)
+				if windowBucketBytes+layerNoData.estimatedBytes+costReportBytes > MaxStatsSnapshotBytes-maxSnapshotEnvelopeReserveBytes {
+					transportErr := errors.New("materialized stats snapshot exceeds the transport size limit")
+					pending[key] = transportErr.Error()
+					if firstErr == nil {
+						firstErr = transportErr
+					}
+					break
+				}
 			}
 			if _, blocked := pending[key]; blocked {
 				continue
 			}
+			if !statsSnapshotChunksFit(bucketSizes, bucketStarts, key.ResolutionSeconds, layerNoData.spans, windowCostBytes) {
+				transportErr := errors.New("materialized stats snapshot exceeds the transport chunk limit")
+				pending[key] = transportErr.Error()
+				if firstErr == nil {
+					firstErr = transportErr
+				}
+				continue
+			}
+			sort.Slice(buckets, func(i, j int) bool { return buckets[i].Start < buckets[j].Start })
 			if cacheGeneration == 0 {
 				cacheGeneration = derivedCacheGeneration(window.PublishedAt, window.RingGeneration)
 			}
 			snapshot := StatsSnapshot{
 				SourceGeneration: window.SourceGeneration, CacheGeneration: cacheGeneration, GeneratedAt: generatedAt,
 				Request:      SnapshotRequest{Start: float64(window.WindowStart), End: float64(window.WindowEnd), Resolution: float64(key.ResolutionSeconds)},
-				Materialized: MaterializedLayer{Resolution: float64(key.ResolutionSeconds), Start: float64(window.WindowStart), End: float64(window.WindowEnd), Buckets: buckets, NoData: mergeAdjacentNoData(layerNoData)},
+				Materialized: MaterializedLayer{Resolution: float64(key.ResolutionSeconds), Start: float64(window.WindowStart), End: float64(window.WindowEnd), Buckets: buckets, NoData: layerNoData.Sorted()},
 				Unavailable:  SnapshotAvailability{State: SnapshotAvailable},
+			}
+			if err := validateMaterializedCostRange(snapshot.Materialized); err != nil {
+				pending[key] = err.Error()
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
 			}
 			refreshed[key] = statsProduct{key: key, windowEnd: window.WindowEnd, sourceGeneration: window.SourceGeneration, ringGeneration: window.RingGeneration, cacheGeneration: cacheGeneration, publishedAt: window.PublishedAt, snapshot: snapshot}
 			s.refreshCounters.productsBuilt.Add(1)
@@ -544,12 +941,32 @@ func (s *StatsService) Refresh(ctx context.Context) (refreshErr error) {
 	s.lastPublishedAt = publishedAt
 	s.ringStateReady = true
 	s.lastPendingSignature = pendingSignature
-	s.pendingStateReady = true
+	// If the exact corruption report could not be durably recorded, do not let
+	// this failure become an unchanged-state cache hit. The next owner refresh
+	// must retry the durable mark before lifecycle can repair the slot.
+	s.pendingStateReady = !retryRingRefresh
 	oldNotify := s.notify
 	s.notify = make(chan struct{})
 	s.mu.Unlock()
 	close(oldNotify)
 	return firstErr
+}
+
+func (s *StatsService) pruneRingBucketCache(resolution int, rows []RingBucketRow) {
+	retained := make(map[int64]int64, len(rows))
+	for _, row := range rows {
+		retained[row.BucketStart] = row.RingGeneration
+	}
+	for key, cached := range s.ringBucketCache {
+		if key.resolution != resolution {
+			continue
+		}
+		if generation, exists := retained[key.bucket]; exists && generation == cached.ringGeneration {
+			continue
+		}
+		s.ringBucketCacheBytes -= cached.cacheBytes
+		delete(s.ringBucketCache, key)
+	}
 }
 
 // narrowRingWindow derives a shorter product from a single widest read for a
@@ -567,6 +984,12 @@ func narrowRingWindow(base RingWindow, rangeSeconds int) RingWindow {
 			window.Rows = append(window.Rows, row)
 		}
 	}
+	window.PendingRows = make([]RingBucketRow, 0, len(base.PendingRows))
+	for _, row := range base.PendingRows {
+		if row.BucketStart >= start && row.BucketStart < base.WindowEnd {
+			window.PendingRows = append(window.PendingRows, row)
+		}
+	}
 	window.MissingBucketStarts = filterRingBuckets(base.MissingBucketStarts, start, base.WindowEnd)
 	window.PendingInvalidations = filterRingBuckets(base.PendingInvalidations, start, base.WindowEnd)
 	return window
@@ -580,6 +1003,22 @@ func filterRingBuckets(values []int64, start, end int64) []int64 {
 		}
 	}
 	return filtered
+}
+
+func pendingOpenCarrier(window RingWindow, now time.Time) (RingBucketRow, bool) {
+	if window.ResolutionSeconds <= 0 || now.Unix() >= window.WindowEnd || len(window.MissingBucketStarts) != 1 || len(window.PendingInvalidations) != 1 {
+		return RingBucketRow{}, false
+	}
+	carrierStart := window.WindowEnd - int64(window.ResolutionSeconds)
+	if window.MissingBucketStarts[0] != carrierStart || window.PendingInvalidations[0] != carrierStart {
+		return RingBucketRow{}, false
+	}
+	for _, row := range window.PendingRows {
+		if row.BucketStart == carrierStart && !row.Complete {
+			return row, true
+		}
+	}
+	return RingBucketRow{}, false
 }
 
 func invalidationCellsSignature(cells []InvalidationCell) uint64 {
@@ -610,6 +1049,9 @@ func (s *StatsService) WaitForPublication(ctx context.Context, afterGeneration i
 	timer := time.NewTimer(timeout)
 	defer stopTimer(timer)
 	for {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
 		s.mu.RLock()
 		if s.state.CacheGeneration > afterGeneration {
 			s.mu.RUnlock()
@@ -644,6 +1086,9 @@ func (s *StatsService) WaitForProductPublication(ctx context.Context, key Produc
 	timer := time.NewTimer(timeout)
 	defer stopTimer(timer)
 	for {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
 		s.mu.RLock()
 		product, ok := s.products[key]
 		notify := s.notify
@@ -660,6 +1105,26 @@ func (s *StatsService) WaitForProductPublication(ctx context.Context, key Produc
 			return false, nil
 		}
 	}
+}
+
+func (s *StatsService) PricingRebuildComplete(generation int64) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.lastRingGeneration < generation {
+		return false
+	}
+	for _, key := range s.keys {
+		if s.pending[key] != "" {
+			return false
+		}
+		if _, ok := s.products[key]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func stopTimer(timer *time.Timer) {
@@ -709,6 +1174,18 @@ func (s *StatsService) Snapshot(_ context.Context, request SnapshotRequest) (Sta
 // cache useful instead of turning a normal rollover into a false pending
 // response. Snapshot remains strict for callers that explicitly supply bounds.
 func (s *StatsService) CurrentSnapshot(_ context.Context, rangeSeconds, resolutionSeconds int) (StatsSnapshot, error) {
+	return s.currentSnapshot(rangeSeconds, resolutionSeconds, false)
+}
+
+// CurrentSnapshotReady rejects a cached product while its requested range is
+// being rebuilt. Pricing refreshes use this boundary so a catalog-wide refresh
+// does not block unrelated, already-current windows or serve stale prices for
+// a window with outstanding invalidations.
+func (s *StatsService) CurrentSnapshotReady(_ context.Context, rangeSeconds, resolutionSeconds int) (StatsSnapshot, error) {
+	return s.currentSnapshot(rangeSeconds, resolutionSeconds, true)
+}
+
+func (s *StatsService) currentSnapshot(rangeSeconds, resolutionSeconds int, requireReady bool) (StatsSnapshot, error) {
 	if s == nil {
 		return StatsSnapshot{}, errors.New("nil YO!stats service")
 	}
@@ -717,6 +1194,9 @@ func (s *StatsService) CurrentSnapshot(_ context.Context, rangeSeconds, resoluti
 	product, ok := s.products[key]
 	reason := s.pending[key]
 	s.mu.RUnlock()
+	if requireReady && reason != "" {
+		return StatsSnapshot{}, fmt.Errorf("%w: %s", ErrProductPending, reason)
+	}
 	if !ok {
 		if reason == "" {
 			reason = "product has not been published"

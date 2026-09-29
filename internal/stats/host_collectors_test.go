@@ -6,12 +6,114 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 )
 
 func hostFactContext() HostFactContext {
 	return HostFactContext{EpochID: "epoch-1", EpochStartedAt: 100, ObservedAt: 101, CadenceSeconds: 1, OwnerGeneration: 7, SourceID: "host"}
+}
+
+func TestParseLinuxOnlineCPUCountUsesSyntheticTopology(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		text string
+		want int
+	}{
+		{name: "ranges and individual CPUs", text: "0-3,5,7-8\n", want: 7},
+		{name: "single CPU", text: "0", want: 1},
+		{name: "empty", text: "", want: 0},
+		{name: "overlap", text: "0-2,2-4", want: 0},
+		{name: "reversed", text: "4-2", want: 0},
+		{name: "invalid token", text: "0-3,x", want: 0},
+		{name: "excessive range", text: "0-65536", want: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ParseLinuxOnlineCPUCount([]byte(test.text)); got != test.want {
+				t.Fatalf("ParseLinuxOnlineCPUCount(%q) = %d, want %d", test.text, got, test.want)
+			}
+		})
+	}
+}
+
+func TestReadDirNamesBoundedStopsAtRequestedSyntheticLimit(t *testing.T) {
+	root := t.TempDir()
+	for index := range 9 {
+		if err := os.Mkdir(filepath.Join(root, fmt.Sprintf("entry-%02d", index)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	names, err := ReadDirNamesBounded(root, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 4 {
+		t.Fatalf("bounded directory names = %d, want at most 4", len(names))
+	}
+	allNames, err := ReadDirNamesBounded(root, 12)
+	if err != nil || len(allNames) != 9 {
+		t.Fatalf("complete synthetic directory names = %d, err=%v, want 9", len(allNames), err)
+	}
+}
+
+func TestLinuxClockTickRateUsesSyntheticGetconfOutput(t *testing.T) {
+	run := func(ctx context.Context, args []string) (CommandOutput, error) {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatal("getconf fixture was not given a bounded context")
+		}
+		if !reflect.DeepEqual(args, []string{"getconf", "CLK_TCK"}) {
+			t.Fatalf("getconf fixture args = %#v", args)
+		}
+		return CommandOutput{Stdout: []byte("250\n")}, nil
+	}
+	if got := linuxClockTickRate(run); got != 250 {
+		t.Fatalf("synthetic Linux clock tick rate = %d, want 250", got)
+	}
+	for _, result := range []CommandOutput{
+		{ExitCode: 1, Stdout: []byte("250\n")},
+		{Stdout: []byte("0\n")},
+		{Stdout: []byte("not-a-rate\n")},
+		{Stdout: []byte(strings.Repeat("2", 65))},
+	} {
+		if got := linuxClockTickRate(func(context.Context, []string) (CommandOutput, error) { return result, nil }); got != 0 {
+			t.Fatalf("invalid synthetic getconf result %#v produced rate %d", result, got)
+		}
+	}
+	if got := linuxClockTickRate(nil); got != 0 {
+		t.Fatalf("missing getconf owner produced rate %d", got)
+	}
+}
+
+func TestLinuxSystemLogicalCPUsUsesInjectedOnlineList(t *testing.T) {
+	reads := 0
+	got := linuxSystemLogicalCPUs(func(path string) ([]byte, error) {
+		reads++
+		if path != "/sys/devices/system/cpu/online" {
+			t.Fatalf("CPU topology read path = %q", path)
+		}
+		return []byte("0-7"), nil
+	})
+	if got != 8 || reads != 1 {
+		t.Fatalf("synthetic Linux topology = CPUs:%d reads:%d, want 8 CPUs from one injected read", got, reads)
+	}
+}
+
+func TestRunBoundedPSUsesStableSyntheticLocale(t *testing.T) {
+	root := t.TempDir()
+	ps := filepath.Join(root, "ps")
+	if err := os.WriteFile(ps, []byte("#!/bin/sh\nprintf '%s\\n' \"$LC_ALL\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("LC_ALL", "fr_FR.UTF-8")
+
+	result, err := runBoundedCommand(context.Background(), []string{"ps", "-axo", "synthetic"})
+	if err != nil || result.ExitCode != 0 || string(result.Stdout) != "C\n" {
+		t.Fatalf("synthetic ps locale = %q, err=%v exit=%d; want C locale", result.Stdout, err, result.ExitCode)
+	}
 }
 
 func TestBuildCPUFactsMatchesPythonShape(t *testing.T) {
@@ -57,6 +159,9 @@ func hostMeasurement(value float64) CPUMeasurement {
 
 func TestSyntheticHostSourcesUseOnlyReproducibleFixtureValues(t *testing.T) {
 	sources := NewSyntheticHostSources("7222:", "yolomux-go")
+	if topology, ok := sources.(HostCPUTopology); !ok || topology.SystemLogicalCPUs() != 8 {
+		t.Fatalf("synthetic system CPU topology = %T/%v, want deterministic 8 CPUs", sources, topology)
+	}
 	first, err := sources.CPU(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -94,6 +199,42 @@ func TestBuildHostFactsValidPayloads(t *testing.T) {
 	}
 	if raw, err := json.Marshal(memory.Observations[0].Payload); err != nil || len(raw) > MaxPayloadBytes {
 		t.Fatalf("memory payload bound: %v (%d bytes)", err, len(raw))
+	}
+}
+
+func TestBuildServiceLoadFactsFiltersInvalidSamplesAndKeepsNullableRSS(t *testing.T) {
+	context := hostFactContext()
+	rss := 4096.0
+	cpu := 12.5
+	agentCPU := 2.0
+	emptyCPU := 1.0
+	nanCPU := math.NaN()
+	negativeCPU := -1.0
+	batch := BuildServiceLoadFacts([]ServiceLoadSample{
+		{SourceID: "runtime:stats_lifecycle", Running: true, CPUPercent: &cpu, RSSBytes: &rss},
+		{SourceID: "runtime:agent_status", Running: true, CPUPercent: &agentCPU},
+		{SourceID: "", Running: true, CPUPercent: &emptyCPU},
+		{SourceID: "runtime:nan", Running: true, CPUPercent: &nanCPU},
+		{SourceID: "runtime:negative", Running: true, CPUPercent: &negativeCPU},
+		{SourceID: "yolomux-go:rss-only", Running: true, RSSBytes: func() *float64 { value := 2048.0; return &value }()},
+	}, context)
+	if len(batch.Observations) != 3 || len(batch.CoverageEpochs) != 3 {
+		t.Fatalf("service facts = %#v", batch)
+	}
+	if got := batch.Observations[0].Payload; !reflect.DeepEqual(got, map[string]any{"running": true, "cpu_percent": 12.5, "rss_bytes": 4096.0}) {
+		t.Fatalf("measured service payload = %#v", got)
+	}
+	if got := batch.Observations[1].Payload; !reflect.DeepEqual(got, map[string]any{"running": true, "cpu_percent": 2.0, "rss_bytes": nil}) {
+		t.Fatalf("nullable RSS payload = %#v", got)
+	}
+	if got := batch.Observations[2].Payload; !reflect.DeepEqual(got, map[string]any{"running": true, "rss_bytes": 2048.0}) {
+		t.Fatalf("RSS-only payload = %#v", got)
+	}
+	if batch.Observations[0].SourceID != "runtime:stats_lifecycle" || batch.Observations[1].SourceID != "runtime:agent_status" {
+		t.Fatalf("service sources = %#v", batch.Observations)
+	}
+	if _, err := batch.Validate(); err != nil {
+		t.Fatalf("service batch does not validate: %v", err)
 	}
 }
 
@@ -156,6 +297,20 @@ func TestParseLinuxProcessStat(t *testing.T) {
 		if _, ok := ParseLinuxProcessStat(input, "", 4096, 100); ok {
 			t.Errorf("malformed stat accepted: %q", input)
 		}
+	}
+}
+
+func TestParseLinuxProcessStatDoesNotGuessUnknownClockTickRate(t *testing.T) {
+	stat := "123 (worker) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22"
+	got, ok := ParseLinuxProcessStat(stat, "/usr/bin/python3.12", 4096, 0)
+	if !ok {
+		t.Fatal("valid synthetic proc stat was rejected when CPU tick units were unknown")
+	}
+	if got.CPUSeconds != 0 {
+		t.Fatalf("unknown CPU tick rate produced %.3f CPU seconds, want no fabricated CPU value", got.CPUSeconds)
+	}
+	if got.RSSBytes != 21*4096 {
+		t.Fatalf("unknown CPU tick rate suppressed independent RSS: got %d bytes", got.RSSBytes)
 	}
 }
 
@@ -223,8 +378,214 @@ func TestLinuxHostSourcesKeepsProcessCounterRateWithSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.ProcessTicksPerSecond != 250 || snapshot.Processes["123:19"].CPU != 23 {
+	if sources.ProcessTicksPerSecond() != 250 || snapshot.ProcessTicksPerSecond != 250 || snapshot.Processes["123:19"].CPU != 23 {
 		t.Fatalf("snapshot = %#v, want 250 Hz and 23 ticks", snapshot)
+	}
+}
+
+func TestLinuxHostSourcesKeepsHostCPUWhenClockTickRateIsUnavailable(t *testing.T) {
+	sources := &LinuxHostSources{
+		procRoot: "/synthetic-proc", clockTick: 0,
+		readFile: func(name string) ([]byte, error) {
+			if name != "/synthetic-proc/stat" {
+				t.Fatalf("unexpected synthetic host read %q", name)
+			}
+			return []byte("cpu  100 0 0 900 0\n"), nil
+		},
+		readDir: func(string) ([]string, error) {
+			t.Fatal("process census ran without a known clock tick rate")
+			return nil, nil
+		},
+	}
+	snapshot, err := sources.CPU(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Host != (CPUHostCounters{Busy: 100, Total: 1000}) || !snapshot.ProcessCensusIncomplete || len(snapshot.Processes) != 0 || snapshot.ProcessTicksPerSecond != 0 {
+		t.Fatalf("unknown clock tick rate published an invalid sample: %#v", snapshot)
+	}
+}
+
+func TestLinuxHostSourcesKeepsOwnedProcessWhenCensusIsTooLarge(t *testing.T) {
+	const ownerPID = 4242
+	ownerStat := []byte("4242 (yolomux-go) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22")
+	sources := &LinuxHostSources{
+		procRoot: "/proc", processPID: ownerPID,
+		readFile: func(name string) ([]byte, error) {
+			switch name {
+			case "/proc/stat":
+				return []byte("cpu  100 0 0 900 0\n"), nil
+			case "/proc/4242/stat":
+				return ownerStat, nil
+			default:
+				return nil, os.ErrNotExist
+			}
+		},
+		readDir: func(string) ([]string, error) {
+			// The oversized host list is synthetic; no host process table is read
+			// by this test. The owner fallback must be the only retained row.
+			return append([]string{"4242"}, make([]string, maxProcessEntries)...), nil
+		},
+		readLink: func(name string) (string, error) {
+			if name != "/proc/4242/exe" {
+				t.Fatalf("unexpected owner link %q", name)
+			}
+			return "/usr/bin/yolomux-go", nil
+		},
+		pageSize: 4096, clockTick: 100,
+	}
+	snapshot, err := sources.CPU(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Processes) != 1 {
+		t.Fatalf("oversized census retained %d process rows, want only owner: %#v", len(snapshot.Processes), snapshot.Processes)
+	}
+	row, ok := snapshot.Processes["4242:19"]
+	if !ok || row.Binary != "yolomux-go" || row.CPU != 23 {
+		t.Fatalf("owned fallback row = %#v, want yolomux-go with 23 ticks", snapshot.Processes)
+	}
+	next := *cloneCPUSnapshot(snapshot)
+	next.Host.Busy += 10
+	next.Host.Total += 100
+	process := next.Processes["4242:19"]
+	process.CPU += 10
+	next.Processes["4242:19"] = process
+	sampler := NewCPUDeltaSampler("yolomux-go", nil, 1)
+	sampler.processIdentity = "4242:19"
+	sampler.Sample(snapshot, time.Second)
+	sample := sampler.Sample(next, time.Second)
+	facts := BuildCPUFacts(sample, sample.ProcessCPUPercent, hostFactContext())
+	if got := facts.Observations[0].Payload["process_cpu_percent"]; got != nil {
+		t.Fatalf("owner-only fallback was published as the complete host process CPU breakdown: %#v", got)
+	}
+	owned, ok := facts.Observations[0].Payload["owned_process_cpu_percent"].(map[string]any)
+	ownedCPU, valueOK := owned["yolomux-go"].(float64)
+	if !ok || !valueOK || math.Abs(ownedCPU-10) > 1e-9 {
+		t.Fatalf("owned process CPU measurement = %#v, want yolomux-go=10%%", facts.Observations[0].Payload["owned_process_cpu_percent"])
+	}
+}
+
+func TestLinuxHostSourcesMemoryKeepsOwnedProcessWhenCensusIsTooLarge(t *testing.T) {
+	const ownerPID = 4242
+	ownerStat := []byte("4242 (yolomux-go) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22")
+	sources := &LinuxHostSources{
+		procRoot: "/proc", processPID: ownerPID,
+		readFile: func(name string) ([]byte, error) {
+			switch name {
+			case "/proc/meminfo":
+				return []byte("MemTotal: 1024 kB\nMemAvailable: 512 kB\n"), nil
+			case "/proc/4242/stat":
+				return ownerStat, nil
+			default:
+				return nil, os.ErrNotExist
+			}
+		},
+		readDir: func(string) ([]string, error) {
+			return append([]string{"4242"}, make([]string, maxProcessEntries)...), nil
+		},
+		readLink: func(name string) (string, error) {
+			if name != "/proc/4242/exe" {
+				t.Fatalf("unexpected owner link %q", name)
+			}
+			return "/usr/bin/yolomux-go", nil
+		},
+		pageSize: 4096, clockTick: 100,
+	}
+	memory, rows, err := sources.Memory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if memory.CapacityBytes != 1024*1024 || memory.UsedBytes != 512*1024 || !memory.ProcessCensusIncomplete {
+		t.Fatalf("memory counters = %+v", memory)
+	}
+	if len(rows) != 1 || rows[0].PID != ownerPID || rows[0].Binary != "yolomux-go" || rows[0].RSSBytes == 0 {
+		t.Fatalf("oversized memory census rows = %#v, want the owned Go process", rows)
+	}
+	facts := BuildSystemMemoryFacts(memory, rows, nil, hostFactContext())
+	if got := facts.Observations[0].Payload["process_memory_bytes"]; got != nil {
+		t.Fatalf("owner-only fallback was published as the complete host process memory breakdown: %#v", got)
+	}
+}
+
+func TestLinuxHostSourcesReplacesPartialCensusWhenOwnerRowIsMissing(t *testing.T) {
+	const ownerPID = 4242
+	ownerStat := []byte("4242 (yolomux-go) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22")
+	ownerReads := 0
+	sources := &LinuxHostSources{
+		procRoot: "/proc", processPID: ownerPID,
+		readFile: func(name string) ([]byte, error) {
+			switch name {
+			case "/proc/stat":
+				return []byte("cpu  100 0 0 900 0\n"), nil
+			case "/proc/4242/stat":
+				ownerReads++
+				if ownerReads == 1 {
+					return nil, os.ErrNotExist
+				}
+				return ownerStat, nil
+			case "/proc/99/stat":
+				return []byte("99 (worker) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22"), nil
+			default:
+				return nil, os.ErrNotExist
+			}
+		},
+		readDir: func(string) ([]string, error) { return []string{"99", "4242"}, nil },
+		readLink: func(name string) (string, error) {
+			if name == "/proc/4242/exe" {
+				return "/usr/bin/yolomux-go", nil
+			}
+			return "/usr/bin/worker", nil
+		},
+		pageSize: 4096, clockTick: 100,
+	}
+	snapshot, err := sources.CPU(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Processes) != 1 || ownerReads != 2 {
+		t.Fatalf("partial census fallback = rows=%#v owner_reads=%d, want owner-only after retry", snapshot.Processes, ownerReads)
+	}
+	if _, ok := snapshot.Processes["4242:19"]; !ok {
+		t.Fatalf("owner row missing after partial census fallback: %#v", snapshot.Processes)
+	}
+	if !snapshot.ProcessCensusIncomplete {
+		t.Fatal("partial Linux census was marked complete after the owner fallback")
+	}
+}
+
+func TestLinuxHostSourcesMarksPartialCensusIncompleteWhenOwnerWasFound(t *testing.T) {
+	const ownerPID = 4242
+	ownerStat := []byte("4242 (yolomux-go) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22")
+	sources := &LinuxHostSources{
+		procRoot: "/proc", processPID: ownerPID,
+		readFile: func(name string) ([]byte, error) {
+			switch name {
+			case "/proc/stat":
+				return []byte("cpu  100 0 0 900 0\n"), nil
+			case "/proc/4242/stat":
+				return ownerStat, nil
+			case "/proc/99/stat":
+				return []byte("malformed process row"), nil
+			default:
+				return nil, os.ErrNotExist
+			}
+		},
+		readDir: func(string) ([]string, error) { return []string{"4242", "99"}, nil },
+		readLink: func(name string) (string, error) {
+			if name == "/proc/4242/exe" {
+				return "/usr/bin/yolomux-go", nil
+			}
+			return "/usr/bin/worker", nil
+		},
+		pageSize: 4096, clockTick: 100,
+	}
+	snapshot, err := sources.CPU(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.ProcessCensusIncomplete || len(snapshot.Processes) != 1 {
+		t.Fatalf("partial census with owner present = incomplete:%t processes:%#v, want incomplete owner-only fallback", snapshot.ProcessCensusIncomplete, snapshot.Processes)
 	}
 }
 
@@ -327,6 +688,30 @@ func TestBuildSystemMemoryFactsAggregatesAndBoundsProcessMemory(t *testing.T) {
 	}
 	if len(ordered) != 5 {
 		t.Fatalf("ranked process memory length = %d, want five", len(ordered))
+	}
+}
+
+func TestBuildSystemMemoryFactsKeepsYoloMuxGoInstancesSeparate(t *testing.T) {
+	rows := []ProcessCensusRow{
+		{PID: 101, Identity: "101:10", Binary: "yolomux_go", RSSBytes: 400},
+		{PID: 202, Identity: "202:20", Binary: "yolomux_go", RSSBytes: 600},
+	}
+	batch := BuildSystemMemoryFacts(MemoryCounters{UsedBytes: 1000, CapacityBytes: 2000}, rows, nil, hostFactContext())
+	series := batch.Observations[0].Payload["process_memory_bytes"].(map[string]any)
+	want := map[string]any{
+		hostProcessInstanceSeriesKey("yolomux_go", "101:10"): uint64(400),
+		hostProcessInstanceSeriesKey("yolomux_go", "202:20"): uint64(600),
+	}
+	if !reflect.DeepEqual(series, want) {
+		t.Fatalf("Go instance memory series = %#v, want %#v", series, want)
+	}
+}
+
+func TestNormalizeHostBinaryStripsDeletedSuffixCaseInsensitively(t *testing.T) {
+	for _, value := range []string{"/usr/bin/nodejs (deleted)", "/usr/bin/nodejs (DELETED)"} {
+		if got := normalizeHostBinary(value); got != "node" {
+			t.Errorf("normalizeHostBinary(%q) = %q, want node", value, got)
+		}
 	}
 }
 

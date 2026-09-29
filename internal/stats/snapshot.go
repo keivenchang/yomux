@@ -83,7 +83,7 @@ func BuildSnapshotWithPricing(ctx context.Context, database *Database, request S
 			return StatsSnapshot{}, fmt.Errorf("begin snapshot read: %w", err)
 		}
 		defer transaction.Rollback()
-		readDatabase = &Database{Header: database.Header, reader: transactionReader{tx: transaction}}
+		readDatabase = &Database{Header: database.Header, reader: transactionReader{tx: transaction}, readMetricsOwner: &database.reads}
 	}
 
 	generation, err := readDatabase.snapshotGeneration(ctx)
@@ -258,7 +258,7 @@ func (d *Database) beginReadSnapshot(ctx context.Context) (*Database, func(), er
 	if err != nil {
 		return nil, nil, fmt.Errorf("begin stats read snapshot: %w", err)
 	}
-	snapshot := &Database{Header: d.Header, reader: transactionReader{tx: tx}}
+	snapshot := &Database{Header: d.Header, reader: transactionReader{tx: tx}, readMetricsOwner: &d.reads}
 	closeSnapshot := func() { _ = tx.Rollback() }
 	return snapshot, closeSnapshot, nil
 }
@@ -294,6 +294,22 @@ func (r transactionReader) Rows(ctx context.Context, query string, args ...any) 
 		result = append(result, values)
 	}
 	return result, rows.Err()
+}
+
+// QueryRows keeps lifecycle materialization on the typed database/sql path
+// even while the read is pinned to a transaction. The surrounding Database
+// records the elapsed query/row-stepping time and forwards it to the owner
+// reader's metrics, so transactional reads remain visible to diagnostics.
+func (r transactionReader) QueryRows(ctx context.Context, query string, visit func(*sql.Rows) error, args ...any) error {
+	rows, err := r.tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	if err := visit(rows); err != nil {
+		return err
+	}
+	return rows.Err()
 }
 
 func (transactionReader) QueryOnly(context.Context) error { return nil }

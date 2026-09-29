@@ -2398,7 +2398,11 @@ function replaceTmuxSessionsInClient(renameEntries, nextSessions, options = {}) 
   for (const [oldSession, newSession] of Array.from(replacements)) {
     if (!oldSession || !newSession || oldSession === newSession) replacements.delete(oldSession);
   }
-  const next = normalizedSessionOrder(nextSessions) || sessions.map(item => replacements.get(item) || item);
+  const roster = normalizedSessionOrder(nextSessions);
+  const eligibleSessions = (roster || sessions).filter(tmuxSessionLifecycleAllowsTopologySession);
+  const next = options.authoritativeRoster === true
+    ? eligibleSessions
+    : normalizedSessionOrder(eligibleSessions.map(item => replacements.get(item) || item)) || [];
   for (const oldSession of replacements.keys()) {
     clearPendingTmuxSession(oldSession);
     detachSessionUi(oldSession);
@@ -2531,18 +2535,17 @@ async function renameTmuxSession(session, proposedName) {
       'rename',
       {session, newName},
       async () => {
-        const payload = await apiFetchJson(`/api/rename-session?session=${encodeURIComponent(session)}&new_name=${encodeURIComponent(newName)}`, {method: 'POST', lifecycleBypass: true});
-        const renamed = payload.new_session || newName;
-        if (Array.isArray(payload.sessions) && !payload.sessions.includes(renamed)) {
-          throw new Error(`renamed session ${renamed} is missing from the authoritative tmux roster`);
-        }
-        return payload;
+        return apiFetchJson(`/api/rename-session?session=${encodeURIComponent(session)}&new_name=${encodeURIComponent(newName)}`, {method: 'POST', lifecycleBypass: true});
       },
       async payload => {
         const renamed = payload.new_session || newName;
         adoptTopologyGeneration(payload);
         const layoutGeneration = beginLayoutMutationCompletion();
-        replaceTmuxSessionInClient(session, renamed, payload.sessions, {completionGeneration: layoutGeneration});
+        const authoritativeRoster = Array.isArray(payload.sessions) && payload.sessions.includes(renamed);
+        replaceTmuxSessionInClient(session, renamed, payload.sessions, {
+          completionGeneration: layoutGeneration,
+          authoritativeRoster,
+        });
         await Promise.all([
           waitForLayoutMutationCompletion(layoutGeneration),
           promiseWithDeadline(ensureTerminalRunning(renamed), 5000, `terminal startup for ${renamed}`),

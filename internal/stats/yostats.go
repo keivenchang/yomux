@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"sort"
+	"sync/atomic"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -70,6 +73,66 @@ type Database struct {
 	close  func() error
 	sqlDB  *sql.DB
 	reader ReadOnlyDB
+	reads  readMetrics
+	// readMetricsOwner lets a transaction-scoped Database report its typed page
+	// timings to the long-lived lifecycle reader that owns the transaction.
+	// Without this shared owner, lifecycle reads were measured on a temporary
+	// wrapper and the Daemons runtime load omitted SQLite query/row stepping.
+	readMetricsOwner *readMetrics
+}
+
+// ReadMetrics is a bounded, cumulative view of the real SQLite fact-reader.
+// It deliberately reports elapsed query time, not SQL text or payloads.
+// Lifecycle counters separately report fact rows, JSON, and materialization.
+type ReadMetrics struct {
+	Queries      uint64
+	Duration     time.Duration
+	LastDuration time.Duration
+}
+
+type readMetrics struct {
+	queries      atomic.Uint64
+	durationNS   atomic.Uint64
+	lastDuration atomic.Uint64
+}
+
+func (m *readMetrics) record(duration time.Duration) {
+	if duration < 0 {
+		duration = 0
+	}
+	m.queries.Add(1)
+	m.durationNS.Add(uint64(duration))
+	m.lastDuration.Store(uint64(duration))
+}
+
+func (m *readMetrics) snapshot() ReadMetrics {
+	return ReadMetrics{
+		Queries:  m.queries.Load(),
+		Duration: time.Duration(m.durationNS.Load()), LastDuration: time.Duration(m.lastDuration.Load()),
+	}
+}
+
+// ReadMetrics returns cumulative SQLite fact-reader measurements for this
+// validated read connection. A zero value means no fact page has been read.
+func (d *Database) ReadMetrics() ReadMetrics {
+	if d == nil {
+		return ReadMetrics{}
+	}
+	if d.readMetricsOwner != nil {
+		return d.readMetricsOwner.snapshot()
+	}
+	return d.reads.snapshot()
+}
+
+func (d *Database) recordRead(duration time.Duration) {
+	if d == nil {
+		return
+	}
+	if d.readMetricsOwner != nil {
+		d.readMetricsOwner.record(duration)
+		return
+	}
+	d.reads.record(duration)
 }
 
 func (d *Database) Close() error {
@@ -86,6 +149,15 @@ type ReadOnlyDB interface {
 	Rows(context.Context, string, ...any) ([][]any, error)
 	QueryOnly(context.Context) error
 	Close() error
+}
+
+// typedRowReader is an optional fast path for the real SQLite owner. The
+// compatibility interface above intentionally stays small so synthetic test
+// readers do not need to emulate database/sql.Rows. Lifecycle readers can use
+// this callback to scan directly into typed fields and avoid a retained
+// [][]any plus one pointer slice per row.
+type typedRowReader interface {
+	QueryRows(context.Context, string, func(*sql.Rows) error, ...any) error
 }
 
 type OpenFunc func(string) (ReadOnlyDB, error)
@@ -149,10 +221,21 @@ func validateOptionalRingShape(ctx context.Context, db ReadOnlyDB) error {
 		}
 	}
 	if seen == 0 {
-		return nil
+		rows, err := db.Rows(ctx, "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+		if err != nil {
+			return &ValidationError{"cannot inspect YO!stats tables"}
+		}
+		return validateExactTableNames(rows, false)
 	}
 	if seen != len(ringColumns) {
 		return &ValidationError{"ring schema is partially present"}
+	}
+	tableRows, err := db.Rows(ctx, "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+	if err != nil {
+		return &ValidationError{"cannot inspect YO!stats tables"}
+	}
+	if err := validateExactTableNames(tableRows, true); err != nil {
+		return err
 	}
 	// The ReadOnlyDB abstraction is intentionally query-only; validate the
 	// complete shape through the same PRAGMA/row contract used by core tables.
@@ -170,6 +253,133 @@ func validateOptionalRingShape(ctx context.Context, db ReadOnlyDB) error {
 				return &ValidationError{fmt.Sprintf("ring table %q is missing column %q", table, expected[i])}
 			}
 		}
+	}
+	resolutions := make([]int, 0, len(ringCapacities))
+	for resolution := range ringCapacities {
+		resolutions = append(resolutions, resolution)
+	}
+	sort.Ints(resolutions)
+	publicationRows, err := db.Rows(ctx, "SELECT singleton FROM aggregate_publication ORDER BY singleton")
+	if err != nil || len(publicationRows) != 1 || len(publicationRows[0]) != 1 {
+		return &ValidationError{"aggregate publication row set is invalid"}
+	}
+	publicationID, err := integer(publicationRows[0][0])
+	if err != nil || publicationID != 1 {
+		return &ValidationError{"aggregate publication row set is invalid"}
+	}
+	for _, table := range []string{"aggregate_rings", "ring_replay_cursor"} {
+		rows, err := db.Rows(ctx, "SELECT resolution_seconds FROM "+table+" ORDER BY resolution_seconds")
+		if err != nil || len(rows) != len(resolutions) {
+			return &ValidationError{fmt.Sprintf("ring table %q has invalid fixed rows", table)}
+		}
+		for index, row := range rows {
+			if len(row) != 1 {
+				return &ValidationError{fmt.Sprintf("ring table %q has invalid fixed rows", table)}
+			}
+			resolution, err := integer(row[0])
+			if err != nil || resolution != int64(resolutions[index]) {
+				return &ValidationError{fmt.Sprintf("ring table %q has invalid fixed rows", table)}
+			}
+		}
+	}
+	ringRows, err := db.Rows(ctx, "SELECT resolution_seconds, slot_count, newest_bucket_start FROM aggregate_rings ORDER BY resolution_seconds")
+	if err != nil || len(ringRows) != len(resolutions) {
+		return &ValidationError{"aggregate rings do not match the exact capacities"}
+	}
+	for index, row := range ringRows {
+		if len(row) != 3 {
+			return &ValidationError{"aggregate rings do not match the exact capacities"}
+		}
+		resolution, resolutionErr := integer(row[0])
+		capacity, capacityErr := integer(row[1])
+		if resolutionErr != nil || capacityErr != nil || resolution != int64(resolutions[index]) || capacity != int64(ringCapacities[resolutions[index]]) {
+			return &ValidationError{"aggregate rings do not match the exact capacities"}
+		}
+		if row[2] != nil {
+			newest, newestErr := integer(row[2])
+			if newestErr != nil || newest%resolution != 0 {
+				return &ValidationError{"aggregate ring head is not resolution-aligned"}
+			}
+		}
+	}
+	slotCounts, err := db.Rows(ctx, "SELECT resolution_seconds, count(*) FROM aggregate_ring_slots GROUP BY resolution_seconds ORDER BY resolution_seconds")
+	if err != nil || len(slotCounts) != len(resolutions) {
+		return &ValidationError{"aggregate ring slot counts do not match the exact capacities"}
+	}
+	for index, row := range slotCounts {
+		if len(row) != 2 {
+			return &ValidationError{"aggregate ring slot counts do not match the exact capacities"}
+		}
+		resolution, resolutionErr := integer(row[0])
+		count, countErr := integer(row[1])
+		if resolutionErr != nil || countErr != nil || resolution != int64(resolutions[index]) || count != int64(ringCapacities[resolutions[index]]) {
+			return &ValidationError{"aggregate ring slot counts do not match the exact capacities"}
+		}
+	}
+	for resolution, capacity := range ringCapacities {
+		indexes, err := db.Rows(ctx, "SELECT slot_index FROM aggregate_ring_slots WHERE resolution_seconds=? ORDER BY slot_index", resolution)
+		if err != nil || len(indexes) != capacity {
+			return &ValidationError{fmt.Sprintf("ring %ds slots are not contiguous", resolution)}
+		}
+		for index, row := range indexes {
+			if len(row) != 1 {
+				return &ValidationError{fmt.Sprintf("ring %ds slots are not contiguous", resolution)}
+			}
+			slot, err := integer(row[0])
+			if err != nil || slot != int64(index) {
+				return &ValidationError{fmt.Sprintf("ring %ds slots are not contiguous", resolution)}
+			}
+		}
+	}
+	triggerRows, err := db.Rows(ctx, "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN (SELECT name FROM sqlite_master WHERE type='table')")
+	if err != nil {
+		return &ValidationError{"cannot inspect ring triggers"}
+	}
+	expectedTriggers := ringTriggerNames()
+	if len(triggerRows) != len(expectedTriggers) {
+		return &ValidationError{"ring trigger set is not exact"}
+	}
+	for _, row := range triggerRows {
+		if len(row) != 1 {
+			return &ValidationError{"ring trigger set is not exact"}
+		}
+		name, ok := row[0].(string)
+		if !ok {
+			return &ValidationError{"ring trigger set is not exact"}
+		}
+		if _, exists := expectedTriggers[name]; !exists {
+			return &ValidationError{"ring trigger set is not exact"}
+		}
+	}
+	return nil
+}
+
+func validateExactTableNames(rows [][]any, includeRings bool) error {
+	expected := make(map[string]struct{}, len(coreColumns)+len(ringColumns))
+	for table := range coreColumns {
+		expected[table] = struct{}{}
+	}
+	if includeRings {
+		for table := range ringColumns {
+			expected[table] = struct{}{}
+		}
+	}
+	seen := make(map[string]struct{}, len(rows))
+	for _, row := range rows {
+		if len(row) != 1 {
+			return &ValidationError{"YO!stats table set does not match the exact schema"}
+		}
+		name, ok := row[0].(string)
+		if !ok {
+			return &ValidationError{"YO!stats table set does not match the exact schema"}
+		}
+		if _, exists := expected[name]; !exists {
+			return &ValidationError{"YO!stats table set does not match the exact schema"}
+		}
+		seen[name] = struct{}{}
+	}
+	if len(seen) != len(expected) {
+		return &ValidationError{"YO!stats table set does not match the exact schema"}
 	}
 	return nil
 }
@@ -219,6 +429,18 @@ func (d *sqliteReadOnlyDB) Rows(ctx context.Context, query string, args ...any) 
 		return nil, err
 	}
 	return result, nil
+}
+
+func (d *sqliteReadOnlyDB) QueryRows(ctx context.Context, query string, visit func(*sql.Rows) error, args ...any) error {
+	rows, err := d.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	if err := visit(rows); err != nil {
+		return err
+	}
+	return rows.Err()
 }
 
 func (d *sqliteReadOnlyDB) QueryOnly(ctx context.Context) error {

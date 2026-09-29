@@ -61,7 +61,7 @@ The Go process generates and reuses its own self-signed certificate under `${TMP
 
 Automated Go validation runs inside isolated Docker state with fixture-owned test ports and Chromium. Port 7221 is reserved for a manual smoke after those checks. Automated checks never connect to the operator runtime on port 7220; use the managed operator workflow for an explicitly requested live restart or smoke.
 
-Contributors should use `make dev`. Its `dev` extra installs the Python gate toolchain. Browser lanes additionally require Chrome or Chromium plus a compatible chromedriver; the xterm provenance check requires Node.js and npm. [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) lists the development checks and Go test lane.
+Contributors should use `make dev`. Its `dev` extra installs `mypy`, `pillow`, `pytest`, `pytest-timeout`, `pytest-xdist`, and `selenium` for the Python gate. Browser lanes additionally require Chrome or Chromium plus a compatible chromedriver; the xterm provenance check requires Node.js and npm. [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) lists the development checks and Go test lane.
 
 Python native filesystem watching is validated on macOS and Linux. Native events reduce invalidation latency but do not replace bounded reconciliation: the elected Python web owner still scans at most 1,000 visible names per watched root and retains at most 512 in each directory signature. If Python `watchfiles` cannot start or loses events, it uses the same bounded polling path as its correctness fallback. Go uses a separate in-process Finder watcher: native events are Linux-only, and other platforms use the bounded polling fallback.
 

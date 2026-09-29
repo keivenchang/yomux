@@ -20,7 +20,7 @@ const debugRuntimeState = {
   graphRangeSeconds: 15 * 60,
   graphResolutionOverrideSeconds: 0,
   graphChartLayout: 0,
-  serviceLoadMode: 'auto',
+  serviceLoadMode: 'max',
   graphHiddenCharts: null,
   graphVisibleCharts: null,
   statsUiPreferencesLoaded: false,
@@ -76,7 +76,8 @@ function loadJsDebugStatsUiPreferences() {
   debugRuntimeState.graphRangeSeconds = normalizedJsDebugGraphRange(saved.rangeSeconds);
   debugRuntimeState.graphResolutionOverrideSeconds = Math.max(0, Number(saved.resolutionOverrideSeconds) || 0);
   debugRuntimeState.graphChartLayout = Math.max(0, Math.min(4, Math.round(Number(saved.chartLayout) || 0)));
-  debugRuntimeState.serviceLoadMode = normalizedDebugGraphServiceLoadPreference(saved.serviceLoadMode);
+  const savedServiceLoadMode = normalizedDebugGraphServiceLoadPreference(saved.serviceLoadMode);
+  debugRuntimeState.serviceLoadMode = savedServiceLoadMode === 'auto' ? 'max' : savedServiceLoadMode;
   const hidden = new Set(jsDebugGraphDefaultHiddenChartKeys);
   const visible = new Set(Array.isArray(saved.visibleCharts) ? saved.visibleCharts.map(value => String(value || '')) : []);
   for (const key of visible) hidden.delete(key);

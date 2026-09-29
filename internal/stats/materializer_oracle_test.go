@@ -25,6 +25,7 @@ func TestMaterializerMatchesPythonAcrossCurrentMatrix(t *testing.T) {
 		{EventID: "cpu-b", Family: "cpu", SourceID: "host", ObservedAt: 100.5, EpochID: "cpu", OwnerGeneration: 1, Payload: map[string]any{"process_percent": 30.0, "system_percent": 50.0, "process_cpu_percent": map[string]any{"python": 6.0}}},
 		{EventID: "cpu-c", Family: "cpu", SourceID: "host-2", ObservedAt: 101, EpochID: "cpu-2", OwnerGeneration: 1, Payload: map[string]any{"process_percent": 10.0, "system_percent": 20.0, "process_cpu_percent": map[string]any{"python": 2.0}}},
 		{EventID: "service", Family: "service_load", SourceID: "statsd", ObservedAt: 102, EpochID: "service", OwnerGeneration: 1, Payload: map[string]any{"running": true, "cpu_percent": 3.0, "rss_bytes": 1000.0}},
+		{EventID: "service-rss-only", Family: "service_load", SourceID: "yolomux-go", ObservedAt: 102.5, EpochID: "service", OwnerGeneration: 1, Payload: map[string]any{"running": true, "rss_bytes": 2048.0}},
 		{EventID: "gpu", Family: "gpu", SourceID: "gpu:0", ObservedAt: 103, EpochID: "gpu", OwnerGeneration: 1, Payload: map[string]any{"util_percent": 50.0, "memory_used_bytes": 100.0, "memory_capacity_bytes": 200.0, "label": "GPU 0"}},
 		{EventID: "memory", Family: "system_memory", SourceID: "host", ObservedAt: 104, EpochID: "memory", OwnerGeneration: 1, Payload: map[string]any{"used_bytes": 100.0, "capacity_bytes": 200.0, "process_memory_bytes": map[string]any{"python": 7.0}}},
 		{EventID: "agents", Family: "agent_status", SourceID: "host", ObservedAt: 105, EpochID: "agents", OwnerGeneration: 1, Payload: map[string]any{"states": map[string]any{"ask": "ask", "run": "run", "idle": "idle"}, "session_states": map[string]any{"session": "run"}, "snapshot_revision": 4.0}},
@@ -38,7 +39,7 @@ func TestMaterializerMatchesPythonAcrossCurrentMatrix(t *testing.T) {
 	}
 	coverage := make([]CoverageEpoch, 0, 8)
 	for _, item := range []struct{ family, source string }{
-		{"cpu", "host"}, {"service_load", "statsd"}, {"gpu", "gpu:0"},
+		{"cpu", "host"}, {"service_load", "statsd"}, {"service_load", "yolomux-go"}, {"gpu", "gpu:0"},
 		{"system_memory", "host"}, {"agent_status", "host"}, {"browser", "browser:a"}, {"browser", "browser:b"},
 	} {
 		cadence := 1.0
@@ -236,6 +237,126 @@ print(json.dumps({"memory": memory_values["system_memory_used_bytes"], "cpu": cp
 	}
 	if !reflect.DeepEqual(got, expected) {
 		t.Fatalf("fold arithmetic mismatch\nGo: %#v\nPython: %#v", got, expected)
+	}
+}
+
+func TestMemoryNoDataMatchesPythonOracle(t *testing.T) {
+	python := pythonExecutable(t)
+	root := t.TempDir()
+	fixturePath := filepath.Join(root, "memory-no-data-fixture.json")
+	scriptPath := filepath.Join(root, "memory-no-data-oracle.py")
+	fixture := map[string]any{
+		"observations": []Observation{{
+			EventID: "memory-before-window", Family: "system_memory", SourceID: "host",
+			ObservedAt: 60, EpochID: "memory", OwnerGeneration: 1,
+			Payload: map[string]any{"used_bytes": 8.0, "capacity_bytes": 16.0},
+		}},
+		"coverage": []CoverageEpoch{{
+			Family: "system_memory", SourceID: "host", EpochID: "memory",
+			StartedAt: 0, EndedAt: floatPointer(120), NativeCadenceSeconds: 60, OwnerGeneration: 1,
+		}},
+		"ranges": []int{300, 900},
+	}
+	data, err := json.Marshal(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixturePath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const oracle = `import dataclasses, json, sys
+from yolomux_lib.stats_current import materializer, storage
+
+fixture = json.loads(open(sys.argv[1], encoding="utf-8").read())
+observations = tuple(storage.Observation(
+    item["EventID"], item["Family"], item["SourceID"], item["ObservedAt"],
+    item["EpochID"], item["OwnerGeneration"], item["Payload"],
+) for item in fixture["observations"])
+coverage = tuple(storage.CoverageEpoch(
+    item["Family"], item["SourceID"], item["EpochID"], item["StartedAt"],
+    item.get("EndedAt"), item["NativeCadenceSeconds"], item["OwnerGeneration"],
+) for item in fixture["coverage"])
+result = {}
+for range_seconds in fixture["ranges"]:
+    window_end = 120 + range_seconds
+    resolution = 10 if range_seconds == 300 else 60
+    for name in ("coverage_gap", "source_unavailable"):
+        unavailable = ()
+        if name == "source_unavailable":
+            unavailable = (storage.UnavailableSpan(
+                "system_memory", "host", "memory-unavailable", 120, window_end,
+                60, "source_unavailable", 1,
+            ),)
+        snapshot = storage.StoreSnapshot(storage.SchemaMetadata(9, 25, 8, 1), observations, coverage, (), (), unavailable)
+        generation = materializer.build_generation(snapshot, source_generation=1, cache_generation=1, generated_at=window_end, observed_until=window_end - 1e-6)
+        layer = materializer.slice_generation(generation, range_seconds, resolution)
+        spans = [dataclasses.asdict(item) for item in layer.no_data]
+        for item in spans:
+            if abs(item["end"] - window_end) < 1e-5:
+                item["end"] = window_end
+        result[f"{range_seconds}/{name}"] = spans
+print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+`
+	if err := os.WriteFile(scriptPath, []byte(oracle), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var expected map[string]any
+	if err := json.Unmarshal([]byte(runPython(t, python, scriptPath, fixturePath)), &expected); err != nil {
+		t.Fatal(err)
+	}
+	observations := fixture["observations"].([]Observation)
+	coverage := fixture["coverage"].([]CoverageEpoch)
+	for _, rangeSeconds := range fixture["ranges"].([]int) {
+		for _, name := range []string{"coverage_gap", "source_unavailable"} {
+			name := name
+			t.Run(fmt.Sprintf("%d/%s", rangeSeconds, name), func(t *testing.T) {
+				windowEnd := float64(120 + rangeSeconds)
+				resolution := 10.0
+				if rangeSeconds == 900 {
+					resolution = 60
+				}
+				var unavailable []UnavailableSpan
+				if name == "source_unavailable" {
+					unavailable = []UnavailableSpan{{
+						Family: "system_memory", SourceID: "host", EpochID: "memory-unavailable",
+						StartedAt: 120, EndedAt: windowEnd, NativeCadenceSeconds: 60,
+						Reason: "source_unavailable", OwnerGeneration: 1,
+					}}
+				}
+				layer, err := (Materializer{}).Build(MaterializeRequest{Start: 120, End: windowEnd, Resolution: resolution}, observations, coverage, unavailable, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantReason := name
+				if len(layer.NoData) != 1 {
+					t.Fatalf("memory no-data spans = %+v, want exactly one span", layer.NoData)
+				}
+				span := layer.NoData[0]
+				if span.Family != "system_memory" || span.SourceID != "host" || span.Start != 120 || span.End != windowEnd || span.NativeCadenceSeconds != 60 || span.Reason != wantReason {
+					t.Fatalf("memory no-data span = %+v, want system_memory/host %v-%v cadence=60 reason=%s", span, 120, windowEnd, wantReason)
+				}
+				gotData := make([]map[string]any, len(layer.NoData))
+				for index, item := range layer.NoData {
+					gotData[index] = map[string]any{
+						"family": item.Family, "source_id": item.SourceID, "epoch_id": item.EpochID,
+						"reason": item.Reason, "start": item.Start, "end": item.End,
+						"native_cadence_seconds": item.NativeCadenceSeconds,
+					}
+				}
+				gotJSON, err := json.Marshal(gotData)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var got any
+				if err := json.Unmarshal(gotJSON, &got); err != nil {
+					t.Fatal(err)
+				}
+				key := fmt.Sprintf("%d/%s", rangeSeconds, name)
+				if !reflect.DeepEqual(got, expected[key]) {
+					t.Fatalf("memory no-data differs from Python %s\nGo: %s\nPython: %s", key, gotJSON, oracleJSON(expected[key]))
+				}
+			})
+		}
 	}
 }
 

@@ -574,6 +574,7 @@ def _wait_for_mock_state(
     client: str,
     expected: set[str],
     timeout: float = 5.0,
+    pane_markers: tuple[str, ...] = (),
 ) -> tuple[str, dict[str, object]]:
     deadline = time.monotonic() + timeout
     pane = ""
@@ -581,7 +582,8 @@ def _wait_for_mock_state(
     while time.monotonic() < deadline:
         pane = _capture(tmux_binary, socket_path, session)
         state = prompt_detector.agent_screen_state(pane, pane_target=f"%{session}", agent_kind=client)
-        if state.get("key") in expected:
+        markers_ready = not pane_markers or any(marker in pane.lower() for marker in pane_markers)
+        if state.get("key") in expected and markers_ready:
             return pane, state
         time.sleep(0.1)
     return pane, state
@@ -639,24 +641,16 @@ def test_mock_tmux_state_lane_classifies_active_done_ask_and_query(client: str, 
         _wait_for_mock_input_ready(ready_file)
         _wait_for_mock_state(tmux_binary, socket_path, session, client, {"idle"})
         _send_mock_input(tmux_binary, socket_path, session, "What model are you using?")
-        pane, state = _wait_for_mock_state(tmux_binary, socket_path, session, client, {"idle"})
+        response_marker = "i'm running" if client == "opencode" else "i don't know how to handle"
+        pane, state = _wait_for_mock_state(
+            tmux_binary, socket_path, session, client, {"idle"}, pane_markers=(response_marker,)
+        )
         evidence["query"] = {"key": state.get("key"), "pane": pane}
         assert state.get("key") == "idle", evidence
-        assert any(marker in pane.lower() for marker in ("model", "mock", "using")), evidence
+        assert response_marker in pane.lower(), evidence
     finally:
         _cleanup_all_tmux_sessions(tmux_binary, socket_path)
         _remove_owned_directory(socket_dir, "tmux socket directory")
-
-
-def _wait_for_pane_text(tmux_binary: str, socket_path: Path, session: str, marker: str, timeout: float = 8.0) -> str:
-    deadline = time.monotonic() + timeout
-    pane = ""
-    while time.monotonic() < deadline:
-        pane = _capture(tmux_binary, socket_path, session)
-        if marker in pane:
-            return pane
-        time.sleep(0.1)
-    return pane
 
 
 def _request_records(log: Path) -> list[dict]:

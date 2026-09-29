@@ -227,6 +227,21 @@ def collect_host_diagnostics(
     environ: Mapping[str, str] | None = None,
 ) -> HostDiagnosticsReport:
     """Collect current diagnostics without creating directories or mutable state."""
+    values = os.environ if environ is None else environ
+    if values.get("YOLOMUX_STATS_SYNTHETIC_HOST") == "1":
+        reason = "Synthetic host diagnostics are active"
+        return HostDiagnosticsReport(
+            identity=None,
+            identity_reason=reason,
+            identity_reason_code="synthetic_host_diagnostics",
+            roots=tuple(
+                _RootDiagnostic(kind, None, None, reason)
+                for kind in ("config", "state", "cache", "runtime")
+            ),
+            database_partitions=(),
+            rejected_paths=(),
+            escape_hatch_enabled=False,
+        )
     layout = roots or RootLayout.current()
     if identity is None:
         try:
@@ -256,7 +271,6 @@ def collect_host_diagnostics(
         if layout.runtime is None
         else _RootDiagnostic("runtime", layout.runtime.expanduser().resolve(strict=False), active_classifier(layout.runtime))
     )
-    values = os.environ if environ is None else environ
     if database_partitions is None:
         try:
             resolved_partitions = current_database_partitions(layout, identity=resolved_identity)

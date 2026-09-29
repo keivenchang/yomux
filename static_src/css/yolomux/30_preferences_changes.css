@@ -584,6 +584,9 @@
    rows. Packing the pairs into measured columns keeps each label beside its own value, and the
    indent lines the block up under the service name that owns it. */
 .js-debug-roster-detail {
+  box-sizing: border-box;
+  min-inline-size: 0;
+  max-inline-size: calc(100cqw - 1rem);
   padding-inline-start: var(--space-10);
   border-inline-start: 2px solid var(--line);
 }
@@ -850,7 +853,8 @@
   transform: rotate(90deg);
 }
 .js-debug-graph-view,
-.js-yocost-graphs {
+.js-yocost-graphs,
+.js-debug-daemons-chart {
   --js-debug-idle-agent-status: var(--30-preferences-changes-js-debug-graph-view-js-debug-idle-agent-status-1);
   --js-debug-agent-attention: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-attention-2);
   --js-debug-agent-working: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-working-3);
@@ -860,7 +864,6 @@
   --js-debug-api-series: var(--link-soft);
   --js-debug-sse-series: var(--accent-gold);
   --js-debug-client-comparison-opacity: 0.68;
-  --js-debug-process-area-opacity: 0.52;
   --js-debug-bad-connection-rgb: 220 38 38;
   --js-debug-agent-token-cyan: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-cyan-5);
   --js-debug-agent-token-orange: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-orange-6);
@@ -1241,6 +1244,24 @@
 .js-debug-chart-shell > .js-debug-chart-grid > .js-debug-chart {
   max-height: var(--js-debug-chart-max-height);
 }
+.js-debug-go-memory-legend {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: var(--space-5) var(--space-10);
+  margin-block: var(--space-6);
+}
+.js-debug-go-memory-legend-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  min-width: 0;
+  color: var(--muted);
+  font: 600 var(--ui-font-size-xs)/1.2 var(--ui-font);
+}
+.js-debug-go-memory-legend-item svg { width: 18px; height: 8px; flex: 0 0 18px; }
+[data-go-memory-chart] > svg { display: block; width: 100%; height: 220px; color: var(--text); }
+[data-heap-stack-chart] > svg { display: block; width: 100%; height: 220px; color: var(--text); }
+
 .js-debug-hover-tooltip {
   position: absolute;
   z-index: var(--z-layer-control);
@@ -2101,9 +2122,13 @@
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+.js-debug-singleton-marker {
+  fill: var(--js-debug-series-color, var(--text));
+  stroke: var(--bg);
+  stroke-width: 0.8;
+}
 body.theme-light :is(.js-debug-graph-view, .js-yocost-graphs) {
   --js-debug-client-comparison-opacity: 0.9;
-  --js-debug-process-area-opacity: 0.52;
 }
 body.theme-light .js-debug-line {
   stroke-width: 1.6;
@@ -2153,10 +2178,14 @@ body.theme-light .js-debug-line--moving-average {
 }
 .js-debug-area {
   fill: var(--js-debug-series-color, var(--accent-sky-strong));
-  opacity: 0.18;
+  opacity: 1;
 }
-:is(.js-debug-chart[data-js-debug-chart="cpu"], .js-debug-chart[data-js-debug-chart="memory"]) .js-debug-area {
-  opacity: var(--js-debug-process-area-opacity);
+.js-debug-chart[data-js-debug-chart="serversLoad"] .js-debug-area {
+  stroke-width: 1.4;
+}
+.js-debug-chart[data-js-debug-chart="serversLoad"] .js-debug-line {
+  opacity: 0.9;
+  stroke-width: 1.4;
 }
 .js-debug-bar {
   fill: var(--js-debug-series-color, var(--accent-sky-strong));
@@ -2279,6 +2308,20 @@ body.theme-light .js-debug-line--moving-average {
   color: var(--muted);
   font: 600 var(--js-debug-legend-font-size)/1 var(--ui-font);
 }
+.js-debug-daemons-chart .js-debug-chart-shell > .js-debug-chart-grid {
+  height: auto;
+  grid-auto-rows: auto;
+}
+.js-debug-daemons-chart .js-debug-chart-shell > .js-debug-chart-grid > .js-debug-chart {
+  max-height: none;
+  min-height: 330px;
+  grid-template-rows: auto minmax(180px, 1fr);
+}
+.js-debug-daemons-chart .js-debug-chart[data-js-debug-chart="serversLoad"] .js-debug-legend {
+  max-height: none;
+  overflow: visible;
+  align-content: start;
+}
 .js-debug-legend-item--hovered {
   color: var(--text);
 }
@@ -2306,7 +2349,7 @@ body.theme-light .js-debug-line--moving-average {
   flex: 0 0 auto;
   border-radius: 1px;
   background: var(--js-debug-series-color, var(--accent-sky-strong));
-  opacity: 0.68;
+  opacity: 1;
 }
 .js-debug-legend-swatch--api {
   color: var(--js-debug-api-series);

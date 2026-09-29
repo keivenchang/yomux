@@ -59,7 +59,7 @@ function capabilityNameForRequest(url, options = {}) {
     return 'finder.read.v1';
   }
   if (pathname.startsWith('/api/stats') || pathname === '/api/pricing-catalog' || pathname === '/api/pricing-catalog/refresh') return 'pane.stats.v1';
-  if (pathname.startsWith('/api/yoagent/') || pathname === '/api/agent-auth') return 'pane.agent.v1';
+  if (pathname.startsWith('/api/yoagent/') || pathname === '/api/agent-auth' || pathname === '/api/yolo-rules' || pathname.startsWith('/api/yolo-rules/')) return 'pane.agent.v1';
   if (pathname.startsWith('/api/chat/')) return 'pane.chat.v1';
   return '';
 }

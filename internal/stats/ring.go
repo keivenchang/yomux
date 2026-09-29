@@ -18,7 +18,7 @@ import (
 
 const (
 	RingPayloadVersion        = 2
-	MaxRingBucketBytes        = 256 * 1024
+	MaxRingBucketBytes        = 8 * 1024 * 1024
 	RetentionSeconds          = 2 * 24 * 60 * 60
 	RetiredInvalidationLimit  = 5000
 	WALAutocheckpointPages    = 1000
@@ -76,15 +76,33 @@ type RingBucketRow struct {
 	SourceGeneration, RingGeneration int64
 	PublishedAt                      float64
 }
+type ringBucketStoredPayload struct {
+	Value                            string
+	Complete                         bool
+	SourceGeneration, RingGeneration int64
+	PublishedAt                      float64
+	PayloadVersion                   int
+}
+
+func ringBucketPayloadMatchesMetadata(row RingBucketRow, payload ringBucketStoredPayload) bool {
+	return row.Complete == payload.Complete && row.SourceGeneration == payload.SourceGeneration &&
+		row.RingGeneration == payload.RingGeneration && row.PublishedAt == payload.PublishedAt &&
+		payload.PayloadVersion == RingPayloadVersion
+}
+
 type RingPublication struct {
 	RingGeneration, SourceGeneration int64
 	PublishedAt                      float64
 	BucketsUpdated                   int
 }
+type WALCheckpointResult struct {
+	Busy, LogFrames, CheckpointedFrames int64
+}
 type RingWindow struct {
 	RangeSeconds, ResolutionSeconds  int
 	WindowStart, WindowEnd           int64
 	Rows                             []RingBucketRow
+	PendingRows                      []RingBucketRow
 	MissingBucketStarts              []int64
 	SourceGeneration, RingGeneration int64
 	PublishedAt                      float64
@@ -223,15 +241,16 @@ func decodeRingBucket(value any) (string, error) {
 		if len(raw) < 5 || string(raw[:5]) != "YRB1\x00" {
 			return "", fmt.Errorf("invalid ring bucket encoding")
 		}
+		compressed := bytes.NewReader(raw[5:])
 		var zr ringZlibReader
 		if pooled := ringDecompressionPool.Get(); pooled != nil {
 			candidate := pooled.(ringZlibReader)
-			if err := candidate.Reset(bytes.NewReader(raw[5:]), nil); err == nil {
+			if err := candidate.Reset(compressed, nil); err == nil {
 				zr = candidate
 			}
 		}
 		if zr == nil {
-			reader, err := zlib.NewReader(bytes.NewReader(raw[5:]))
+			reader, err := zlib.NewReader(compressed)
 			if err != nil {
 				return "", fmt.Errorf("invalid ring bucket compression: %w", err)
 			}
@@ -246,7 +265,7 @@ func decodeRingBucket(value any) (string, error) {
 		decoded, readErr := io.ReadAll(limited)
 		closeErr := zr.Close()
 		ringDecompressionPool.Put(zr)
-		if readErr != nil || closeErr != nil || len(decoded) > MaxRingBucketBytes {
+		if readErr != nil || closeErr != nil || len(decoded) > MaxRingBucketBytes || compressed.Len() != 0 {
 			return "", fmt.Errorf("invalid ring bucket compression")
 		}
 		return string(decoded), nil
@@ -267,6 +286,41 @@ func rawRingBucketString(value any) (string, error) {
 }
 
 func validateRingShape(ctx context.Context, db *sql.DB, requireTriggers bool) error {
+	tableRows, err := db.QueryContext(ctx, "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+	if err != nil {
+		return err
+	}
+	tableNames := make([][]any, 0, len(coreColumns)+len(ringColumns))
+	for tableRows.Next() {
+		var name string
+		if err := tableRows.Scan(&name); err != nil {
+			_ = tableRows.Close()
+			return err
+		}
+		tableNames = append(tableNames, []any{name})
+	}
+	if err := tableRows.Err(); err != nil {
+		_ = tableRows.Close()
+		return err
+	}
+	if err := tableRows.Close(); err != nil {
+		return err
+	}
+	if !requireTriggers {
+		ringTables := 0
+		for _, row := range tableNames {
+			name, _ := row[0].(string)
+			if _, exists := ringColumns[name]; exists {
+				ringTables++
+			}
+		}
+		if ringTables == 0 {
+			return validateExactTableNames(tableNames, false)
+		}
+	}
+	if err := validateExactTableNames(tableNames, true); err != nil {
+		return err
+	}
 	for table, expected := range ringColumns {
 		rows, err := db.QueryContext(ctx, "PRAGMA table_info("+table+")")
 		if err != nil {
@@ -292,6 +346,77 @@ func validateRingShape(ctx context.Context, db *sql.DB, requireTriggers bool) er
 			}
 		}
 	}
+	var publicationCount int
+	var publicationSingleton int
+	if err := db.QueryRowContext(ctx, "SELECT count(*), COALESCE(min(singleton),0) FROM aggregate_publication").Scan(&publicationCount, &publicationSingleton); err != nil || publicationCount != 1 || publicationSingleton != 1 {
+		return &ValidationError{Reason: "aggregate publication row set is invalid"}
+	}
+	resolutions := make([]int, 0, len(ringCapacities))
+	for resolution := range ringCapacities {
+		resolutions = append(resolutions, resolution)
+	}
+	sort.Ints(resolutions)
+	for _, table := range []string{"aggregate_rings", "ring_replay_cursor"} {
+		rows, err := db.QueryContext(ctx, "SELECT resolution_seconds FROM "+table+" ORDER BY resolution_seconds")
+		if err != nil {
+			return err
+		}
+		valid := true
+		for _, want := range resolutions {
+			var got int
+			if !rows.Next() || rows.Scan(&got) != nil || got != want {
+				valid = false
+				break
+			}
+		}
+		if valid && rows.Next() {
+			valid = false
+		}
+		if err := rows.Err(); err != nil {
+			valid = false
+		}
+		_ = rows.Close()
+		if !valid {
+			return &ValidationError{Reason: fmt.Sprintf("ring table %q has invalid fixed rows", table)}
+		}
+	}
+	ringRows, err := db.QueryContext(ctx, "SELECT resolution_seconds, slot_count, newest_bucket_start FROM aggregate_rings ORDER BY resolution_seconds")
+	if err != nil {
+		return err
+	}
+	for _, resolution := range resolutions {
+		var gotResolution, gotCapacity int
+		var newest sql.NullInt64
+		if !ringRows.Next() || ringRows.Scan(&gotResolution, &gotCapacity, &newest) != nil || gotResolution != resolution || gotCapacity != ringCapacities[resolution] {
+			_ = ringRows.Close()
+			return &ValidationError{Reason: "aggregate rings do not match the exact capacities"}
+		}
+		if newest.Valid && newest.Int64%int64(resolution) != 0 {
+			_ = ringRows.Close()
+			return &ValidationError{Reason: "aggregate ring head is not resolution-aligned"}
+		}
+	}
+	if ringRows.Next() || ringRows.Err() != nil {
+		_ = ringRows.Close()
+		return &ValidationError{Reason: "aggregate rings do not match the exact capacities"}
+	}
+	_ = ringRows.Close()
+	slotCounts, err := db.QueryContext(ctx, "SELECT resolution_seconds,count(*) FROM aggregate_ring_slots GROUP BY resolution_seconds ORDER BY resolution_seconds")
+	if err != nil {
+		return err
+	}
+	for _, resolution := range resolutions {
+		var gotResolution, gotCount int
+		if !slotCounts.Next() || slotCounts.Scan(&gotResolution, &gotCount) != nil || gotResolution != resolution || gotCount != ringCapacities[resolution] {
+			_ = slotCounts.Close()
+			return &ValidationError{Reason: "aggregate ring slot counts do not match the exact capacities"}
+		}
+	}
+	if slotCounts.Next() || slotCounts.Err() != nil {
+		_ = slotCounts.Close()
+		return &ValidationError{Reason: "aggregate ring slot counts do not match the exact capacities"}
+	}
+	_ = slotCounts.Close()
 	for resolution, capacity := range ringCapacities {
 		var count int
 		if err := db.QueryRowContext(ctx, "SELECT count(*) FROM aggregate_ring_slots WHERE resolution_seconds=?", resolution).Scan(&count); err != nil || count != capacity {
@@ -308,12 +433,13 @@ func validateRingShape(ctx context.Context, db *sql.DB, requireTriggers bool) er
 				return &ValidationError{Reason: fmt.Sprintf("ring %ds slots are not contiguous", resolution)}
 			}
 		}
+		if rows.Next() || rows.Err() != nil {
+			_ = rows.Close()
+			return &ValidationError{Reason: fmt.Sprintf("ring %ds slots are not contiguous", resolution)}
+		}
 		_ = rows.Close()
 	}
-	if !requireTriggers {
-		return nil
-	}
-	rows, err := db.QueryContext(ctx, "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('aggregate_publication','aggregate_rings','aggregate_ring_slots')")
+	rows, err := db.QueryContext(ctx, "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN (SELECT name FROM sqlite_master WHERE type='table')")
 	if err != nil {
 		return err
 	}
@@ -333,21 +459,38 @@ func validateRingShape(ctx context.Context, db *sql.DB, requireTriggers bool) er
 	if err := rows.Close(); err != nil {
 		return err
 	}
-	for _, table := range []string{"aggregate_publication", "aggregate_rings", "aggregate_ring_slots"} {
-		for _, operation := range []string{"insert", "delete"} {
-			name := table + "_reject_" + operation
+	expectedTriggers := ringTriggerNames()
+	for name := range triggers {
+		if _, expected := expectedTriggers[name]; !expected {
+			return &ValidationError{Reason: "ring trigger set is not exact"}
+		}
+	}
+	if requireTriggers {
+		for name := range expectedTriggers {
 			if !triggers[name] {
 				return &ValidationError{Reason: fmt.Sprintf("ring trigger %q is missing", name)}
 			}
 		}
-	}
-	if len(triggers) != 6 {
-		return &ValidationError{Reason: "ring trigger set is not exact"}
+		if len(triggers) != len(expectedTriggers) {
+			return &ValidationError{Reason: "ring trigger set is not exact"}
+		}
 	}
 	return nil
 }
 
+func ringTriggerNames() map[string]struct{} {
+	result := make(map[string]struct{}, 6)
+	for _, table := range []string{"aggregate_publication", "aggregate_rings", "aggregate_ring_slots"} {
+		for _, operation := range []string{"insert", "delete"} {
+			result[table+"_reject_"+operation] = struct{}{}
+		}
+	}
+	return result
+}
+
 func (w *Writer) PublishRingBuckets(ctx context.Context, buckets []RingBucketWrite, sourceGeneration int64, publishedAt float64, advancePublication bool) (RingPublication, error) {
+	w.mutationMu.Lock()
+	defer w.mutationMu.Unlock()
 	if len(buckets) == 0 || sourceGeneration < 0 || math.IsNaN(publishedAt) || math.IsInf(publishedAt, 0) || publishedAt < 0 {
 		return RingPublication{}, fmt.Errorf("invalid ring publication")
 	}
@@ -465,6 +608,46 @@ func (w *Writer) PendingInvalidationCells(ctx context.Context) ([]InvalidationCe
 	return result, nil
 }
 
+// InvalidateCorruptRingPayload records repair work only while the exact
+// published slot observed by a reader is still current. The byte comparison
+// and both generations fence a concurrent replacement so a stale decode error
+// cannot invalidate a healthy publication.
+func (w *Writer) InvalidateCorruptRingPayload(ctx context.Context, row RingBucketRow, payload string, now float64) (bool, error) {
+	if w == nil || w.db == nil {
+		return false, errors.New("nil YO!stats writer")
+	}
+	if _, ok := ringCapacities[row.ResolutionSeconds]; !ok || row.BucketStart < 0 || row.BucketStart%int64(row.ResolutionSeconds) != 0 || row.SourceGeneration < 0 || row.RingGeneration <= 0 || math.IsNaN(now) || math.IsInf(now, 0) || now < 0 {
+		return false, errors.New("invalid corrupt ring payload identity")
+	}
+	w.mutationMu.Lock()
+	defer w.mutationMu.Unlock()
+	result, err := w.db.ExecContext(ctx, `INSERT INTO ring_invalidations(
+		resolution_seconds,bucket_start,source_generation,reason,created_at,applied_at)
+		SELECT ?,?,MAX(meta.source_generation,?),'corrupt_ring_payload',?,NULL
+		FROM schema_meta AS meta, aggregate_ring_slots AS slots
+		WHERE meta.singleton=1 AND slots.resolution_seconds=? AND slots.bucket_start=?
+		  AND slots.ring_generation=? AND slots.source_generation=? AND slots.bucket_json IS NOT NULL
+		  AND CAST(slots.bucket_json AS BLOB)=CAST(? AS BLOB)
+		ON CONFLICT(resolution_seconds,bucket_start,source_generation) DO UPDATE SET
+			reason=excluded.reason,created_at=excluded.created_at,applied_at=NULL`,
+		row.ResolutionSeconds, row.BucketStart, row.SourceGeneration, now,
+		row.ResolutionSeconds, row.BucketStart, row.RingGeneration, row.SourceGeneration, payload)
+	if err != nil {
+		return false, fmt.Errorf("record corrupt ring payload invalidation: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("count corrupt ring payload invalidation: %w", err)
+	}
+	if changed == 0 {
+		return false, nil
+	}
+	if err := w.refreshPendingCache(ctx); err != nil {
+		return false, fmt.Errorf("refresh corrupt ring payload invalidation: %w", err)
+	}
+	return true, nil
+}
+
 func (w *Writer) ReadRingWindow(ctx context.Context, rangeSeconds, resolutionSeconds int, windowEnd int64) (RingWindow, error) {
 	return w.readRingWindow(ctx, rangeSeconds, resolutionSeconds, windowEnd, true, true)
 }
@@ -551,6 +734,12 @@ func (w *Writer) readRingWindow(ctx context.Context, rangeSeconds, resolutionSec
 		if _, pending := pendingBuckets[bucket]; pending {
 			result.MissingBucketStarts = append(result.MissingBucketStarts, bucket)
 			result.PendingInvalidations = append(result.PendingInvalidations, bucket)
+			if row, exists := slots[bucket]; exists {
+				result.PendingRows = append(result.PendingRows, row)
+				if row.RingGeneration > result.RingGeneration {
+					result.RingGeneration, result.SourceGeneration, result.PublishedAt = row.RingGeneration, row.SourceGeneration, row.PublishedAt
+				}
+			}
 			continue
 		}
 		row, exists := slots[bucket]
@@ -570,8 +759,8 @@ func (w *Writer) readRingWindow(ctx context.Context, rangeSeconds, resolutionSec
 // since the service's last immutable product. Metadata and pending state stay
 // bounded by the fixed ring shape; this second query avoids copying every
 // compressed bucket through cgo on each one-second publication.
-func (w *Writer) readRingBucketPayloads(ctx context.Context, resolution int, bucketStarts []int64) (map[int64]string, error) {
-	payloads := make(map[int64]string, len(bucketStarts))
+func (w *Writer) readRingBucketPayloads(ctx context.Context, resolution int, bucketStarts []int64) (map[int64]ringBucketStoredPayload, error) {
+	payloads := make(map[int64]ringBucketStoredPayload, len(bucketStarts))
 	if len(bucketStarts) == 0 {
 		return payloads, nil
 	}
@@ -593,22 +782,24 @@ func (w *Writer) readRingBucketPayloads(ctx context.Context, resolution int, buc
 	for _, bucket := range unique {
 		args = append(args, bucket)
 	}
-	rows, err := w.db.QueryContext(ctx, "SELECT bucket_start,bucket_json FROM aggregate_ring_slots WHERE resolution_seconds=? AND bucket_start IN ("+placeholders+")", args...)
+	rows, err := w.db.QueryContext(ctx, "SELECT bucket_start,bucket_json,complete,source_generation,ring_generation,published_at,payload_version FROM aggregate_ring_slots WHERE resolution_seconds=? AND bucket_start IN ("+placeholders+")", args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var bucket int64
-		var payload any
-		if err := rows.Scan(&bucket, &payload); err != nil {
+		var raw any
+		var payload ringBucketStoredPayload
+		if err := rows.Scan(&bucket, &raw, &payload.Complete, &payload.SourceGeneration, &payload.RingGeneration, &payload.PublishedAt, &payload.PayloadVersion); err != nil {
 			return nil, err
 		}
-		value, err := rawRingBucketString(payload)
+		value, err := rawRingBucketString(raw)
 		if err != nil {
 			return nil, err
 		}
-		payloads[bucket] = value
+		payload.Value = value
+		payloads[bucket] = payload
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -640,12 +831,19 @@ func (w *Writer) pendingRingBuckets(ctx context.Context, resolutionSeconds int) 
 	return pending, nil
 }
 
-func (w *Writer) Checkpoint(ctx context.Context) error {
+// Checkpoint runs a non-blocking PASSIVE checkpoint and reports its progress.
+// A successful call may leave frames uncheckpointed while readers pin an older
+// WAL snapshot; callers that require a complete checkpoint must inspect the
+// returned frame counts or use the stricter truncateStatsWAL path.
+func (w *Writer) Checkpoint(ctx context.Context) (WALCheckpointResult, error) {
 	if w == nil || w.db == nil {
-		return fmt.Errorf("nil YO!stats writer")
+		return WALCheckpointResult{}, fmt.Errorf("nil YO!stats writer")
 	}
-	_, err := w.db.ExecContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)")
-	return err
+	var result WALCheckpointResult
+	if err := w.db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)").Scan(&result.Busy, &result.LogFrames, &result.CheckpointedFrames); err != nil {
+		return WALCheckpointResult{}, err
+	}
+	return result, nil
 }
 func (w *Writer) Vacuum(ctx context.Context, completedAt float64) error {
 	if w == nil || w.db == nil {
@@ -662,14 +860,14 @@ func (w *Writer) Vacuum(ctx context.Context, completedAt float64) error {
 	if _, err := w.db.ExecContext(ctx, "PRAGMA optimize"); err != nil {
 		return err
 	}
-	if _, err := w.db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-		return err
+	if err := truncateStatsWAL(ctx, w.db); err != nil {
+		return fmt.Errorf("truncate stats WAL after vacuum optimization: %w", err)
 	}
 	if _, err := w.db.ExecContext(ctx, "UPDATE schema_meta SET last_vacuumed_at=? WHERE singleton=1", completedAt); err != nil {
 		return err
 	}
-	if _, err := w.db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-		return err
+	if err := truncateStatsWAL(ctx, w.db); err != nil {
+		return fmt.Errorf("truncate stats WAL after vacuum completion: %w", err)
 	}
 	ratio, err := w.ReclaimableRatio(ctx)
 	if err != nil {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,6 +16,19 @@ type HostSources interface {
 	CPU(context.Context) (CPUSnapshot, error)
 	Memory(context.Context) (MemoryCounters, []ProcessCensusRow, error)
 	GPU(context.Context) ([]GPUDevice, error)
+}
+
+// HostCPUTopology supplies the system-wide logical CPU count used to normalize
+// grouped process CPU. Sources that cannot measure it leave the series absent
+// instead of substituting the process affinity count.
+type HostCPUTopology interface {
+	SystemLogicalCPUs() int
+}
+
+// HostProcessTickRate supplies the measured unit for platform process CPU
+// counters when another runtime view needs to interpret the same /proc rows.
+type HostProcessTickRate interface {
+	ProcessTicksPerSecond() uint64
 }
 
 // BatchWriter is satisfied by Writer and makes the collector independently
@@ -112,14 +124,17 @@ type HostCollectorConfig struct {
 	ActiveFunc      func() bool
 }
 
-const DefaultHostMemoryCadence = time.Minute
+const (
+	DefaultHostCPUBackgroundCadence = 5 * time.Second
+	DefaultHostMemoryCadence        = time.Minute
+)
 
 func (c HostCollectorConfig) withDefaults() HostCollectorConfig {
 	if c.ActiveCadence <= 0 {
 		c.ActiveCadence = time.Second
 	}
 	if c.IdleCadence <= 0 {
-		c.IdleCadence = time.Minute
+		c.IdleCadence = DefaultHostCPUBackgroundCadence
 	}
 	if c.SourceTimeout <= 0 {
 		c.SourceTimeout = c.ActiveCadence
@@ -208,10 +223,31 @@ type HostCollector struct {
 	stateMu      sync.Mutex
 	familyEpochs map[string]hostEpochState
 	counters     hostCollectorCounters
+	latestMu     sync.RWMutex
+	latest       HostTelemetry
 	mu           sync.Mutex
 	run          bool
 	stop         context.CancelFunc
 	done         chan struct{}
+}
+
+// HostTelemetry is the latest measured host sample retained by the collector.
+// It is a read-only status projection; durable history remains owned by the
+// stats writer/materializer. Valid flags are explicit so an initial CPU sample
+// or a failed source read cannot be mistaken for measured zero.
+type HostTelemetry struct {
+	CPUPercent          float64
+	SystemCPUPercent    float64
+	CPUValid            bool
+	CPUObservedAt       float64
+	CPUReason           string
+	ProcessCPUPercent   map[string]float64
+	MemoryUsedBytes     uint64
+	MemoryCapacityBytes uint64
+	MemoryValid         bool
+	MemoryObservedAt    float64
+	MemoryReason        string
+	ProcessMemoryBytes  map[string]uint64
 }
 
 type hostEpochState struct {
@@ -229,14 +265,76 @@ func NewHostCollector(sources HostSources, writer BatchWriter, clock HostCollect
 	config = config.withDefaults()
 	logicalCPUs := config.LogicalCPUs
 	if logicalCPUs <= 0 {
-		logicalCPUs = runtime.NumCPU()
+		if topology, ok := sources.(HostCPUTopology); ok {
+			logicalCPUs = topology.SystemLogicalCPUs()
+		}
 	}
-	sampler := NewCPUDeltaSampler(config.ProcessKey, config.GroupKeys, logicalCPUs)
+	var sampler *CPUDeltaSampler
+	if logicalCPUs > 0 {
+		sampler = NewCPUDeltaSampler(config.ProcessKey, config.GroupKeys, logicalCPUs)
+	} else {
+		sampler = NewCPUDeltaSampler(config.ProcessKey, config.GroupKeys)
+	}
 	sampler.processIdentity = config.ProcessIdentity
 	return &HostCollector{sources: sources, writer: writer, clock: clock, config: config, sampler: sampler, familyEpochs: make(map[string]hostEpochState)}
 }
 
 func (c *HostCollector) Counters() HostCollectorCounters { return c.counters.snapshot() }
+
+// FamilyCadence returns the configured native cadence for one host collector
+// family. It is a read-only projection used by runtime diagnostics to express
+// the family's measured wall-time occupancy without exposing collector state.
+func (c *HostCollector) FamilyCadence(family string) time.Duration {
+	if c == nil {
+		return 0
+	}
+	return c.familyCadence(family)
+}
+
+// FamilyDemanded reports whether a host family currently runs. CPU and system
+// memory keep background history; GPU remains gated by stats-view demand.
+func (c *HostCollector) FamilyDemanded(family string) bool {
+	if c == nil {
+		return false
+	}
+	if family != "gpu" || c.config.ActiveFunc == nil {
+		return true
+	}
+	return c.config.ActiveFunc()
+}
+
+// Latest returns a defensive copy of the newest host samples. Callers may use
+// it to build a lightweight status response without reading the host again.
+func (c *HostCollector) Latest() HostTelemetry {
+	c.latestMu.RLock()
+	defer c.latestMu.RUnlock()
+	latest := c.latest
+	latest.ProcessCPUPercent = cloneFloatMap(latest.ProcessCPUPercent)
+	latest.ProcessMemoryBytes = cloneUintMap(latest.ProcessMemoryBytes)
+	return latest
+}
+
+func cloneFloatMap(values map[string]float64) map[string]float64 {
+	if len(values) == 0 {
+		return nil
+	}
+	copyValues := make(map[string]float64, len(values))
+	for key, value := range values {
+		copyValues[key] = value
+	}
+	return copyValues
+}
+
+func cloneUintMap(values map[string]uint64) map[string]uint64 {
+	if len(values) == 0 {
+		return nil
+	}
+	copyValues := make(map[string]uint64, len(values))
+	for key, value := range values {
+		copyValues[key] = value
+	}
+	return copyValues
+}
 
 // Start launches the sole owner goroutine. Calling Start twice is an error.
 func (c *HostCollector) Start(parent context.Context) error {
@@ -260,14 +358,23 @@ func (c *HostCollector) loop(ctx context.Context) {
 	}()
 	var workers sync.WaitGroup
 	workers.Add(3)
-	go func() { defer workers.Done(); c.familyLoop(ctx, "cpu", c.config.ActiveCadence, c.config.IdleCadence) }()
 	go func() {
 		defer workers.Done()
-		c.familyLoop(ctx, "system_memory", c.config.MemoryCadence, c.config.MemoryCadence)
+		runWithStatsProfileLabels(ctx, "host_collector", "cpu", func(ctx context.Context) {
+			c.familyLoop(ctx, "cpu", c.config.ActiveCadence, c.config.IdleCadence)
+		})
 	}()
 	go func() {
 		defer workers.Done()
-		c.familyLoop(ctx, "gpu", c.config.GPUActiveCadence, c.config.GPUIdleCadence)
+		runWithStatsProfileLabels(ctx, "host_collector", "system_memory", func(ctx context.Context) {
+			c.familyLoop(ctx, "system_memory", c.config.MemoryCadence, c.config.MemoryCadence)
+		})
+	}()
+	go func() {
+		defer workers.Done()
+		runWithStatsProfileLabels(ctx, "host_collector", "gpu", func(ctx context.Context) {
+			c.familyLoop(ctx, "gpu", c.config.GPUActiveCadence, c.config.GPUIdleCadence)
+		})
 	}()
 	workers.Wait()
 }
@@ -284,11 +391,9 @@ func (c *HostCollector) familyLoop(ctx context.Context, family string, active, i
 		if ctx.Err() != nil {
 			return
 		}
-		// CPU and GPU are demand-driven. Do not persist an unavailable span for
-		// an idle period: its idle cadence would overlap the first active
-		// coverage epoch when a stats stream opens before that cadence expires.
-		// The cadence wait above still polls for demand and wakes promptly.
-		if family != "system_memory" && c.config.ActiveFunc != nil && !c.config.ActiveFunc() {
+		// GPU remains demand-driven. CPU keeps a low-rate background history so
+		// long-range charts do not depend on someone leaving YO!stats open.
+		if family == "gpu" && c.config.ActiveFunc != nil && !c.config.ActiveFunc() {
 			continue
 		}
 		c.runFamily(ctx, family)
@@ -324,26 +429,55 @@ func (c *HostCollector) runFamilyWithCadence(parent context.Context, family stri
 			cadence = c.familyIdleCadence(family)
 		}
 	}
+	c.stateMu.Lock()
+	previousEpoch, hadPreviousEpoch := c.familyEpochs[family]
+	c.stateMu.Unlock()
 	fact := c.familyFactContext(family, started, cadence)
 	var batch AppendBatch
+	var cpuSampled bool
+	var samplerBefore *CPUDeltaSampler
+	var lastSampleBefore time.Time
+	if family == "cpu" {
+		samplerBefore = c.sampler.clone()
+		lastSampleBefore = c.lastSample
+	}
 	sourceStarted = time.Now()
-	if c.sources == nil {
-		c.counters.errors.Add(1)
-		batch = BuildUnavailableFacts(family, fact, "source_unavailable")
-	} else {
+	runWithStatsProfilePhase(parent, "host_collector", family, "source", func(ctx context.Context) {
+		if c.sources == nil {
+			c.counters.errors.Add(1)
+			batch = BuildUnavailableFacts(family, fact, "source_unavailable")
+			return
+		}
 		switch family {
 		case "cpu":
-			batch = c.collectCPU(parent, fact, started.Sub(c.lastSample))
-			c.lastSample = started
+			batch, cpuSampled = c.collectCPU(ctx, fact, started.Sub(lastSampleBefore))
 		case "system_memory":
-			batch = c.collectMemory(parent, fact)
+			batch = c.collectMemory(ctx, fact)
 		case "gpu":
-			batch = c.collectGPU(parent, fact)
+			batch = c.collectGPU(ctx, fact)
 		}
-	}
+	})
 	sourceDuration = time.Since(sourceStarted)
-	batch = c.finishFamilyBatch(family, fact, batch)
-	c.append(parent, batch)
+	runWithStatsProfilePhase(parent, "host_collector", family, "append", func(ctx context.Context) {
+		batch = c.finishFamilyBatch(family, fact, batch)
+		if c.append(ctx, batch) {
+			if family == "cpu" && cpuSampled {
+				c.lastSample = started
+			}
+			return
+		}
+		if family == "cpu" {
+			c.sampler.restore(samplerBefore)
+			c.lastSample = lastSampleBefore
+		}
+		c.stateMu.Lock()
+		if hadPreviousEpoch {
+			c.familyEpochs[family] = previousEpoch
+		} else {
+			delete(c.familyEpochs, family)
+		}
+		c.stateMu.Unlock()
+	})
 	if family == "cpu" {
 		c.counters.cycles.Add(1)
 	}
@@ -450,31 +584,52 @@ func (c *HostCollector) familyIdleCadence(family string) time.Duration {
 	return c.config.IdleCadence
 }
 
-func (c *HostCollector) append(ctx context.Context, batch AppendBatch) {
+func (c *HostCollector) append(ctx context.Context, batch AppendBatch) bool {
 	if c.writer == nil {
 		c.counters.errors.Add(1)
-		return
+		return false
 	}
 	result, err := c.writer.AppendBatch(ctx, batch)
 	if err != nil {
 		c.counters.errors.Add(1)
-		return
+		return false
 	}
 	c.counters.accepted.Add(uint64(result.ObservationsAccepted))
 	c.counters.unavailable.Add(uint64(result.UnavailableAccepted))
+	return true
 }
 
-func (c *HostCollector) collectCPU(parent context.Context, fact HostFactContext, sampleDuration time.Duration) AppendBatch {
+func (c *HostCollector) collectCPU(parent context.Context, fact HostFactContext, sampleDuration time.Duration) (AppendBatch, bool) {
 	ctx, cancel := context.WithTimeout(parent, c.config.SourceTimeout)
 	defer cancel()
 	snapshot, err := c.sources.CPU(ctx)
 	if err != nil {
 		c.counters.errors.Add(1)
-		return BuildUnavailableFacts("cpu", fact, sourceReason(ctx, err))
+		reason := sourceReason(ctx, err)
+		c.latestMu.Lock()
+		c.latest.CPUObservedAt = fact.ObservedAt
+		c.latest.CPUValid = false
+		c.latest.CPUReason = reason
+		c.latest.ProcessCPUPercent = nil
+		c.latestMu.Unlock()
+		return BuildUnavailableFacts("cpu", fact, reason), false
 	}
 	c.counters.lastCPUProcessRows.Store(uint64(len(snapshot.Processes)))
 	sample := c.sampler.Sample(snapshot, sampleDuration)
-	return BuildCPUFacts(sample, sample.ProcessCPUPercent, fact)
+	c.latestMu.Lock()
+	c.latest.CPUObservedAt = fact.ObservedAt
+	c.latest.CPUValid = sample.Reason == CPUValid && sample.Host.Valid && sample.Process.Valid
+	c.latest.CPUReason = ""
+	c.latest.ProcessCPUPercent = nil
+	if !c.latest.CPUValid {
+		c.latest.CPUReason = string(sample.Reason)
+	} else {
+		c.latest.CPUPercent = sample.Process.Value
+		c.latest.SystemCPUPercent = sample.Host.Value
+		c.latest.ProcessCPUPercent = cloneFloatMap(sample.ProcessCPUPercent)
+	}
+	c.latestMu.Unlock()
+	return BuildCPUFacts(sample, sample.ProcessCPUPercent, fact), true
 }
 
 func (c *HostCollector) collectMemory(parent context.Context, fact HostFactContext) AppendBatch {
@@ -483,9 +638,37 @@ func (c *HostCollector) collectMemory(parent context.Context, fact HostFactConte
 	memory, rows, err := c.sources.Memory(ctx)
 	if err != nil {
 		c.counters.errors.Add(1)
+		c.latestMu.Lock()
+		c.latest.MemoryObservedAt = fact.ObservedAt
+		c.latest.MemoryValid = false
+		c.latest.MemoryReason = sourceReason(ctx, err)
+		c.latest.ProcessMemoryBytes = nil
+		c.latestMu.Unlock()
 		return BuildUnavailableFacts("system_memory", fact, sourceReason(ctx, err))
 	}
 	c.counters.lastMemoryProcessRows.Store(uint64(len(rows)))
+	c.latestMu.Lock()
+	c.latest.MemoryObservedAt = fact.ObservedAt
+	c.latest.MemoryValid = memory.CapacityBytes > 0 && memory.UsedBytes <= memory.CapacityBytes
+	c.latest.MemoryReason = ""
+	c.latest.ProcessMemoryBytes = nil
+	if c.latest.MemoryValid {
+		c.latest.MemoryUsedBytes = memory.UsedBytes
+		c.latest.MemoryCapacityBytes = memory.CapacityBytes
+		if !memory.ProcessCensusIncomplete {
+			for _, row := range topProcessMemory(rows) {
+				if row.Binary != "" && row.RSSBytes > 0 {
+					if c.latest.ProcessMemoryBytes == nil {
+						c.latest.ProcessMemoryBytes = make(map[string]uint64)
+					}
+					c.latest.ProcessMemoryBytes[row.Binary] = row.RSSBytes
+				}
+			}
+		}
+	} else {
+		c.latest.MemoryReason = "invalid_sample"
+	}
+	c.latestMu.Unlock()
 	return BuildSystemMemoryFacts(memory, rows, nil, fact)
 }
 

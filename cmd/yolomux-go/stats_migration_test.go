@@ -134,7 +134,7 @@ func TestPricingCatalogHTTPRetainsRefreshFailureForExistingJSStatusPoll(t *testi
 	}
 }
 
-func TestStatsQueryMatchesPythonBounds(t *testing.T) {
+func TestStatsQueryBounds(t *testing.T) {
 	for _, raw := range []string{
 		"range_seconds=300&resolution=AUTO&client_id=browser-a",
 		"range_seconds=900&resolution=10&client_id=browser-a",
@@ -161,10 +161,14 @@ func TestStatsQueryMatchesPythonBounds(t *testing.T) {
 	if !ok || failure != nil || !chunked.hasChunkIndex || chunked.chunkIndex != 1 || chunked.chunkGeneration != 7 {
 		t.Fatalf("accepted chunk query = %+v failure=%v", chunked, failure)
 	}
+	chunked, failure, ok = parseStatsQuery(httptest.NewRequest(http.MethodGet, "/?range_seconds=900&resolution=10&client_id=browser-a&chunk_index=511&chunk_generation=7", nil), false)
+	if !ok || failure != nil || !chunked.hasChunkIndex || chunked.chunkIndex != stats.MaxStatsSnapshotChunks-1 {
+		t.Fatalf("accepted final snapshot chunk query = %+v failure=%v", chunked, failure)
+	}
 	for _, raw := range []string{
 		"range_seconds=900&resolution=10&client_id=browser-a&chunk_index=1",
 		"range_seconds=900&resolution=10&client_id=browser-a&chunk_generation=7",
-		"range_seconds=900&resolution=10&client_id=browser-a&chunk_index=64&chunk_generation=7",
+		"range_seconds=900&resolution=10&client_id=browser-a&chunk_index=512&chunk_generation=7",
 		"range_seconds=900&resolution=10&client_id=browser-a&chunk_index=1&chunk_generation=0",
 	} {
 		if _, failure, ok := parseStatsQuery(httptest.NewRequest(http.MethodGet, "/?"+raw, nil), false); ok || failure == nil {
@@ -333,6 +337,113 @@ func TestSnapshotChunkWirePreservesBoundsAndClipsNoData(t *testing.T) {
 	}
 }
 
+func TestSnapshotChunkAllowsSingleBucketUpToTransportLimit(t *testing.T) {
+	buildSnapshot := func(spanCount int) stats.StatsSnapshot {
+		noData := make([]stats.MaterializedNoData, spanCount)
+		for index := range noData {
+			noData[index] = stats.MaterializedNoData{
+				Family: "agent_tokens", SourceID: fmt.Sprintf("retired-unavailable:source-%05d", index),
+				EpochID: fmt.Sprintf("epoch-%02d", index%69), Reason: "transcript cursor state exceeds its size bound",
+				Start: 0, End: 300, NativeCadenceSeconds: 60,
+			}
+		}
+		return stats.StatsSnapshot{
+			SourceGeneration: 1, CacheGeneration: 1,
+			Request: stats.SnapshotRequest{Start: 0, End: 600, Resolution: 300},
+			Materialized: stats.MaterializedLayer{
+				Start: 0, End: 600, Resolution: 300,
+				Buckets: []stats.MaterializedBucket{
+					{Start: 0, Duration: 300, Complete: true},
+					{Start: 300, Duration: 300, Complete: true},
+				},
+				NoData: noData,
+			},
+		}
+	}
+	query := statsQuery{rangeSeconds: 600, resolution: 300, resolutionAuto: true}
+
+	first, chunkCount, err := snapshotPayloadForQuery(buildSnapshot(14_000), query)
+	if err != nil {
+		t.Fatalf("chunk a single oversized bucket below the transport limit: %v", err)
+	}
+	encoded, err := json.Marshal(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) <= statsSnapshotChunkTargetBytes || len(encoded) > statsSnapshotChunkMaxBytes {
+		t.Fatalf("large first chunk bytes = %d, want (%d, %d]", len(encoded), statsSnapshotChunkTargetBytes, statsSnapshotChunkMaxBytes)
+	}
+	if chunkCount != 2 || first["chunk_count"] != 2 {
+		t.Fatalf("chunk count = %d, payload=%#v; want two bucket-aligned chunks", chunkCount, first["chunk_count"])
+	}
+	if got := len(first["no_data"].([]map[string]any)); got != 14_000 {
+		t.Fatalf("large first chunk no-data entries = %d, want 14000", got)
+	}
+
+	first, chunkCount, err = snapshotPayloadForQuery(buildSnapshot(30_000), query)
+	if err != nil {
+		t.Fatalf("split an oversized bucket's no-data spans: %v", err)
+	}
+	if chunkCount < 3 || first["chunk_count"] != chunkCount {
+		t.Fatalf("fragmented chunk count = %d, first payload=%#v; want multiple fragments", chunkCount, first["chunk_count"])
+	}
+	spanCount := 0
+	for index := 0; index < chunkCount; index++ {
+		query.hasChunkIndex = true
+		query.chunkIndex = index
+		query.chunkGeneration = 1
+		fragment, actualCount, fragmentErr := snapshotPayloadForQuery(buildSnapshot(30_000), query)
+		if fragmentErr != nil {
+			t.Fatalf("load fragment %d: %v", index, fragmentErr)
+		}
+		if actualCount != chunkCount {
+			t.Fatalf("fragment %d count = %d, want %d", index, actualCount, chunkCount)
+		}
+		encodedFragment, marshalErr := json.Marshal(fragment)
+		if marshalErr != nil || len(encodedFragment) > statsSnapshotChunkMaxBytes {
+			t.Fatalf("fragment %d bytes = %d, marshal error = %v", index, len(encodedFragment), marshalErr)
+		}
+		spanCount += len(fragment["no_data"].([]map[string]any))
+	}
+	if spanCount != 30_000 {
+		t.Fatalf("fragmented no-data spans = %d, want 30000", spanCount)
+	}
+}
+
+func TestSingleBucketSnapshotUsesOneValidTransportPayload(t *testing.T) {
+	noData := make([]stats.MaterializedNoData, 14_000)
+	for index := range noData {
+		noData[index] = stats.MaterializedNoData{
+			Family: "agent_tokens", SourceID: fmt.Sprintf("retired-unavailable:source-%05d", index),
+			EpochID: fmt.Sprintf("epoch-%02d", index%69), Reason: "transcript cursor state exceeds its size bound",
+			Start: 0, End: 300, NativeCadenceSeconds: 60,
+		}
+	}
+	snapshot := stats.StatsSnapshot{
+		CacheGeneration: 1,
+		Request:         stats.SnapshotRequest{Start: 0, End: 300, Resolution: 300},
+		Materialized: stats.MaterializedLayer{
+			Start: 0, End: 300, Resolution: 300,
+			Buckets: []stats.MaterializedBucket{{Start: 0, Duration: 300, Complete: true}},
+			NoData:  noData,
+		},
+	}
+	payload, chunks, err := snapshotPayloadForQuery(snapshot, statsQuery{rangeSeconds: 300, resolution: 300, resolutionAuto: true})
+	if err != nil {
+		t.Fatalf("single-bucket snapshot did not fit one transport payload: %v", err)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chunks != 1 || len(encoded) <= statsSnapshotChunkTargetBytes || len(encoded) > statsSnapshotChunkMaxBytes {
+		t.Fatalf("single-bucket payload count=%d bytes=%d, want one payload in (%d,%d]", chunks, len(encoded), statsSnapshotChunkTargetBytes, statsSnapshotChunkMaxBytes)
+	}
+	if _, isChunk := payload["chunk_count"]; isChunk {
+		t.Fatal("single-bucket payload advertised chunk metadata that the browser cannot assemble")
+	}
+}
+
 func TestChunkedStreamSeedsCompleteSnapshotForTheNextDelta(t *testing.T) {
 	buckets := make([]stats.MaterializedBucket, 300)
 	largeSeriesName := "series-" + strings.Repeat("x", 5000)
@@ -349,13 +460,15 @@ func TestChunkedStreamSeedsCompleteSnapshotForTheNextDelta(t *testing.T) {
 		Materialized:    stats.MaterializedLayer{Start: 0, End: 300, Resolution: 1, Buckets: buckets},
 	}
 	query := statsQuery{rangeSeconds: 300, resolution: 1, resolutionAuto: true}
-	first, seed, chunkCount, err := streamSnapshotPayloads(snapshot, query)
+	payloads, seed, err := streamSnapshotPayloads(snapshot, query)
 	if err != nil {
 		t.Fatal(err)
 	}
+	chunkCount := len(payloads)
 	if chunkCount < 2 {
 		t.Fatalf("large snapshot was not chunked: chunks=%d", chunkCount)
 	}
+	first := payloads[0]
 	firstBuckets, ok := first["buckets"].([]map[string]any)
 	if !ok || len(firstBuckets) >= len(buckets) {
 		t.Fatalf("first stream payload did not contain one chunk: %T len=%d", first["buckets"], len(firstBuckets))
@@ -363,6 +476,12 @@ func TestChunkedStreamSeedsCompleteSnapshotForTheNextDelta(t *testing.T) {
 	seedBuckets, ok := seed["buckets"].([]map[string]any)
 	if !ok || len(seedBuckets) != len(buckets) {
 		t.Fatalf("delta predecessor lost buckets: %T len=%d want=%d", seed["buckets"], len(seedBuckets), len(buckets))
+	}
+	for index := 1; index < chunkCount; index++ {
+		chunkBuckets, ok := payloads[index]["buckets"].([]map[string]any)
+		if !ok || len(chunkBuckets) == 0 {
+			t.Fatalf("prepared stream chunk %d is empty: %T", index, payloads[index]["buckets"])
+		}
 	}
 
 	next := snapshot

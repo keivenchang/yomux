@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -161,7 +162,7 @@ func TestStatsServiceSkipsRingDecodeWhenPublicationAndBacklogAreUnchanged(t *tes
 	payload, err := encodeRingBucketPayload(MaterializedBucket{
 		Start: 90, Duration: 10, Complete: true,
 		Series: []MaterializedSeries{{Name: "cpu_percent:host", Value: 7, SourceCount: 1, FirstObservedAt: 95, LastObservedAt: 95}},
-	}, nil, 1, 100)
+	}, nil, 1, 99)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,6 +191,99 @@ func TestStatsServiceSkipsRingDecodeWhenPublicationAndBacklogAreUnchanged(t *tes
 	}
 }
 
+func TestStatsServiceDurablyInvalidatesCorruptRingPayloadForLifecycleRepair(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	if _, err := writer.AppendBatch(ctx, AppendBatch{Observations: []Observation{{
+		EventID: "synthetic-cpu", Family: "cpu", SourceID: "host", ObservedAt: 95,
+		EpochID: "cpu", OwnerGeneration: 1, Payload: map[string]any{"process_percent": 2.0},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	wrongPayload, err := encodeRingBucketPayload(MaterializedBucket{
+		Start: 90, Duration: 10, Complete: true,
+		Series: []MaterializedSeries{{Name: "process_cpu_percent:host", Value: 7}},
+	}, nil, 1, 99)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.PublishRingBuckets(ctx, []RingBucketWrite{{ResolutionSeconds: 10, BucketStart: 90, BucketJSON: wrongPayload, Complete: true}}, 1, 99, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.db.ExecContext(ctx, "UPDATE aggregate_ring_slots SET bucket_json=? WHERE resolution_seconds=? AND bucket_start=?", "not-json", 10, 90); err != nil {
+		t.Fatal(err)
+	}
+	corruptWindow, err := writer.ReadRingWindowMetadata(ctx, 10, 10, 100)
+	if err != nil || len(corruptWindow.Rows) != 1 {
+		t.Fatalf("read corrupt ring metadata: rows=%+v err=%v", corruptWindow.Rows, err)
+	}
+	corruptPayloads, err := writer.readRingBucketPayloads(ctx, 10, []int64{90})
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleCorruptRow := corruptWindow.Rows[0]
+	staleCorruptPayload := corruptPayloads[90].Value
+	if _, err := writer.db.ExecContext(ctx, `CREATE TRIGGER reject_corrupt_ring_invalidation
+		BEFORE INSERT ON ring_invalidations WHEN NEW.reason='corrupt_ring_payload'
+		BEGIN SELECT RAISE(ABORT, 'synthetic invalidation failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+
+	service := NewStatsService(writer, StatsServiceConfig{
+		Products: []ProductKey{{RangeSeconds: 10, ResolutionSeconds: 10}},
+		Now:      func() time.Time { return time.Unix(99, 0) },
+	})
+	if err := service.Refresh(ctx); err == nil {
+		t.Fatal("cold service accepted a malformed persisted ring payload")
+	}
+	if pending, err := writer.PendingInvalidationCells(ctx); err != nil || len(pending) != 0 {
+		t.Fatalf("failed synthetic invalidation unexpectedly persisted repair work: pending=%+v err=%v", pending, err)
+	}
+	if _, err := writer.db.ExecContext(ctx, "DROP TRIGGER reject_corrupt_ring_invalidation"); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Refresh(ctx); err == nil {
+		t.Fatal("service did not retry the failed durable corruption mark")
+	}
+	pending, err := writer.PendingInvalidationCells(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].ResolutionSeconds != 10 || pending[0].BucketStart != 90 {
+		t.Fatalf("corrupt ring payload did not create one exact durable repair request: %+v", pending)
+	}
+
+	lifecycle := NewLifecycle(writer, LifecycleConfig{
+		WindowSeconds: 10, MaxCells: 1, Now: func() time.Time { return time.Unix(99, 0) },
+	})
+	lifecycle.DemandProduct(10, 10)
+	if err := lifecycle.RunOnce(ctx); err != nil {
+		t.Fatalf("lifecycle repair: %v", err)
+	}
+	if err := service.Refresh(ctx); err != nil {
+		t.Fatalf("service refresh after durable repair: %v", err)
+	}
+	snapshot, err := service.Snapshot(ctx, SnapshotRequest{Start: 90, End: 100, Resolution: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := seriesValue(snapshot.Materialized.Buckets[0], "cpu_percent:host"); got != 2 {
+		t.Fatalf("repaired synthetic bucket value = %v, want source-fact value 2: %+v", got, snapshot.Materialized.Buckets[0])
+	}
+	if marked, err := writer.InvalidateCorruptRingPayload(ctx, staleCorruptRow, staleCorruptPayload, 100); err != nil || marked {
+		t.Fatalf("stale corruption report invalidated the repaired slot: marked=%t err=%v", marked, err)
+	}
+	pending, err = writer.PendingInvalidationCells(ctx)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("stale corruption report recreated invalidation after repair: pending=%+v err=%v", pending, err)
+	}
+}
+
 func TestStatsServiceCachesAgentStatusOutsideRequestPath(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "stats.sqlite3")
@@ -214,6 +308,38 @@ func TestStatsServiceCachesAgentStatusOutsideRequestPath(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("agent status callback calls = %d, want one owner refresh", calls)
+	}
+}
+
+func TestPricingRebuildRequiresEveryConfiguredProductToBePublished(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	validPayload, err := encodeRingBucketPayload(MaterializedBucket{Start: 90, Duration: 10, Complete: true}, nil, 1, 99)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.PublishRingBuckets(ctx, []RingBucketWrite{{
+		ResolutionSeconds: 10, BucketStart: 90, BucketJSON: validPayload, Complete: true,
+	}}, 1, 99, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.db.ExecContext(ctx, "UPDATE aggregate_ring_slots SET bucket_json=? WHERE resolution_seconds=? AND bucket_start=?", "not-json", 10, 90); err != nil {
+		t.Fatal(err)
+	}
+	service := NewStatsService(writer, StatsServiceConfig{
+		Products: []ProductKey{{RangeSeconds: 10, ResolutionSeconds: 10}},
+		Now:      func() time.Time { return time.Unix(99, 0) },
+	})
+	if err := service.Refresh(ctx); err == nil {
+		t.Fatal("malformed synthetic product unexpectedly refreshed")
+	}
+	if service.PricingRebuildComplete(1) {
+		t.Fatal("pricing rebuild reported complete while its configured product is pending and unpublished")
 	}
 }
 
@@ -355,7 +481,11 @@ func TestStatsServiceProjectsInteriorOpenRingBucketAsPersistedGap(t *testing.T) 
 	defer writer.Close()
 	key := ProductKey{RangeSeconds: 20, ResolutionSeconds: 10}
 	service := NewStatsService(writer, StatsServiceConfig{Products: []ProductKey{key}, Now: func() time.Time { return time.Unix(99, 0) }})
-	interior, err := encodeRingBucketPayload(MaterializedBucket{Start: 80, Duration: 10, Complete: false, SourceCount: 1, Series: []MaterializedSeries{{Name: "process_cpu_percent", Value: 4, SourceCount: 1, FirstObservedAt: 85, LastObservedAt: 85}}}, nil, 1, 100)
+	interior, err := encodeRingBucketPayload(MaterializedBucket{
+		Start: 80, Duration: 10, Complete: false, SourceCount: 1,
+		Series: []MaterializedSeries{{Name: "process_cpu_percent", Value: 4, SourceCount: 1, FirstObservedAt: 85, LastObservedAt: 85}},
+		Cost:   MaterializedCostDetail{Tokens: 12, UnpricedTokens: 12, Dimensions: []MaterializedCostDimension{{Dimension: "input", Tokens: 12}}},
+	}, nil, 1, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,8 +509,9 @@ func TestStatsServiceProjectsInteriorOpenRingBucketAsPersistedGap(t *testing.T) 
 	if len(snapshot.Materialized.Buckets) != 2 {
 		t.Fatalf("bucket count = %d, want 2", len(snapshot.Materialized.Buckets))
 	}
-	if !snapshot.Materialized.Buckets[0].Complete || len(snapshot.Materialized.Buckets[0].Series) != 0 || snapshot.Materialized.Buckets[0].SourceCount != 0 {
-		t.Fatalf("interior bucket was not projected to an empty closed gap: %+v", snapshot.Materialized.Buckets[0])
+	interiorBucket := snapshot.Materialized.Buckets[0]
+	if !interiorBucket.Complete || len(interiorBucket.Series) != 1 || interiorBucket.Series[0].Name != "process_cpu_percent" || interiorBucket.Series[0].Value != 4 || interiorBucket.SourceCount != 1 || interiorBucket.Cost.Tokens != 12 {
+		t.Fatalf("interior bucket did not retain known facts while closing its unknown tail: %+v", interiorBucket)
 	}
 	if snapshot.Materialized.Buckets[1].Complete != true {
 		t.Fatalf("right-edge bucket changed unexpectedly: %+v", snapshot.Materialized.Buckets[1])
@@ -439,6 +570,309 @@ func TestStatsServiceMergesAdjacentNoDataAcrossRingBuckets(t *testing.T) {
 	}
 	if got := snapshot.Materialized.NoData; len(got) != 1 || got[0].Family != "gpu" || got[0].SourceID != "gpu:0" || got[0].EpochID != "epoch" || got[0].Start != 82 || got[0].End != 94 || got[0].Reason != "driver unavailable" {
 		t.Fatalf("merged ring no-data = %+v", got)
+	}
+}
+
+func TestStatsServiceBuilds24HourProductWithLargeUnavailableHistory(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+
+	const now = int64(2_000_000_100)
+	const bucketCount = 288
+	const sourceCount = 2000
+	costDetail := MaterializedCostDetail{Evidence: make([]PriceEvidence, 4)}
+	for index := range costDetail.Evidence {
+		costDetail.Evidence[index] = PriceEvidence{
+			Key: fmt.Sprintf("fixture-price-evidence-%d", index), Provider: "provider", Model: "model", Dimension: "input", Direction: "input",
+			Modality: "text", CacheRole: "none", Unit: "tokens", PricingProfile: "default", ServiceTier: "standard",
+			CatalogModel: "model", RateUSD: "0", EffectiveFrom: "1970-01-01T00:00:00Z", SourceKind: "fixture",
+			SourceURL: strings.Repeat("x", 4096),
+		}
+	}
+	costJSON, err := json.Marshal(costDetail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bucketSizes := make([]int, bucketCount)
+	bucketStarts := make([]int64, bucketCount)
+	costEvidence := make(map[string]struct{})
+	costReportBytes := 0
+	for index := range bucketSizes {
+		start := now - int64(bucketCount-index)*300
+		bucketStarts[index] = start
+		bucket := MaterializedBucket{Start: float64(start), Duration: 300, Complete: true}
+		bucketJSON, marshalErr := json.Marshal(bucket)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		bucketSizes[index] = len(bucketJSON)
+		costBytes, costErr := statsCostReportBytes(costDetail, costEvidence)
+		if costErr != nil {
+			t.Fatal(costErr)
+		}
+		costReportBytes += costBytes
+	}
+	mergedNoData := make([]MaterializedNoData, sourceCount)
+	for sourceIndex := range mergedNoData {
+		mergedNoData[sourceIndex] = MaterializedNoData{
+			Family: "agent_tokens", SourceID: fmt.Sprintf("source-%04d", sourceIndex), EpochID: "epoch",
+			Start: float64(now - bucketCount*300), End: float64(now), NativeCadenceSeconds: 60,
+			Reason: "transcript cursor state exceeds its size bound",
+		}
+	}
+	if bucketCount*len(costJSON) <= MaxStatsSnapshotChunkBytes {
+		t.Fatal("fixture does not distinguish repeated evidence from the shared report")
+	}
+	if !statsSnapshotChunksFit(bucketSizes, bucketStarts, 300, mergedNoData, costReportBytes) {
+		t.Fatalf("24-hour product with repeated cost evidence did not fit its shared report bound: report=%d bytes", costReportBytes)
+	}
+	rows := make([]RingBucketWrite, 0, bucketCount)
+	for bucketIndex := 0; bucketIndex < bucketCount; bucketIndex++ {
+		start := now - int64(bucketCount-bucketIndex)*300
+		noData := make([]MaterializedNoData, 0, sourceCount)
+		for sourceIndex := 0; sourceIndex < sourceCount; sourceIndex++ {
+			noData = append(noData, MaterializedNoData{
+				Family: "agent_tokens", SourceID: fmt.Sprintf("source-%04d", sourceIndex), EpochID: "epoch",
+				Start: float64(start), End: float64(start + 300), NativeCadenceSeconds: 60,
+				Reason: "transcript cursor state exceeds its size bound",
+			})
+		}
+		payload, err := encodeRingBucketPayload(MaterializedBucket{Start: float64(start), Duration: 300, Complete: true, Cost: costDetail}, noData, 1, float64(now))
+		if err != nil {
+			t.Fatalf("encode bucket %d: %v", bucketIndex, err)
+		}
+		rows = append(rows, RingBucketWrite{ResolutionSeconds: 300, BucketStart: start, BucketJSON: payload, Complete: true})
+	}
+	if _, err := writer.PublishRingBuckets(ctx, rows, 1, float64(now), true); err != nil {
+		t.Fatal(err)
+	}
+	service := NewStatsService(writer, StatsServiceConfig{
+		Products: []ProductKey{{RangeSeconds: 86400, ResolutionSeconds: 300}, {RangeSeconds: 7200, ResolutionSeconds: 300}},
+		Now:      func() time.Time { return time.Unix(now-1, 0) },
+	})
+	if err := service.Refresh(ctx); err != nil {
+		t.Fatalf("refresh 24-hour product: %v", err)
+	}
+	snapshot, err := service.CurrentSnapshot(ctx, 86400, 300)
+	if err != nil {
+		t.Fatalf("read 24-hour product: %v (state=%+v)", err, service.State())
+	}
+	if got := len(snapshot.Materialized.Buckets); got != bucketCount {
+		t.Fatalf("24-hour bucket count = %d, want %d", got, bucketCount)
+	}
+	if got := len(snapshot.Materialized.NoData); got != sourceCount {
+		t.Fatalf("merged unavailable spans = %d, want %d", got, sourceCount)
+	}
+	cachedNoDataBytes := 0
+	for _, entry := range service.ringBucketCache {
+		if len(entry.noDataCompressed) == 0 {
+			t.Fatal("ring cache retained uncompressed or missing no-data")
+		}
+		cachedNoDataBytes += len(entry.noDataCompressed)
+	}
+	if cachedNoDataBytes >= MaxRingBucketBytes*4 {
+		t.Fatalf("compressed 24-hour no-data cache = %d bytes, want below 32 MiB", cachedNoDataBytes)
+	}
+	shortSnapshot, err := service.CurrentSnapshot(ctx, 7200, 300)
+	if err != nil {
+		t.Fatalf("read shared-cache 2-hour product: %v", err)
+	}
+	if got := len(shortSnapshot.Materialized.NoData); got != sourceCount {
+		t.Fatalf("2-hour unavailable spans decoded from cache = %d, want %d", got, sourceCount)
+	}
+}
+
+func TestStatsServiceRejectsIndivisibleBucketBeyondTransportLimit(t *testing.T) {
+	ctx := context.Background()
+	writer, err := OpenWriter(ctx, filepath.Join(t.TempDir(), "stats.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+
+	const now = int64(2_000_000_100)
+	start := now - 10
+	payload, err := encodeRingBucketPayload(MaterializedBucket{
+		Start: float64(start), Duration: 10, Complete: true,
+		Series: []MaterializedSeries{{Name: strings.Repeat("x", MaxStatsSnapshotChunkBytes), Value: 1}},
+	}, nil, 1, float64(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.PublishRingBuckets(ctx, []RingBucketWrite{{ResolutionSeconds: 10, BucketStart: start, BucketJSON: payload, Complete: true}}, 1, float64(now), true); err != nil {
+		t.Fatal(err)
+	}
+	service := NewStatsService(writer, StatsServiceConfig{
+		Products: []ProductKey{{RangeSeconds: 10, ResolutionSeconds: 10}},
+		Now:      func() time.Time { return time.Unix(now-1, 0) },
+	})
+	if err := service.Refresh(ctx); err == nil || !strings.Contains(err.Error(), "transport chunk limit") {
+		t.Fatalf("oversized bucket refresh error = %v, want transport chunk limit", err)
+	}
+	state := service.State()
+	if state.PendingProducts != 1 || !strings.Contains(state.LastError, "transport chunk limit") {
+		t.Fatalf("oversized bucket state = %+v, want an explicit pending transport-limit error", state)
+	}
+}
+
+func TestStatsSnapshotChunkFitUsesBucketGroupsAndSharedCost(t *testing.T) {
+	buckets := make([]int, 288)
+	starts := make([]int64, len(buckets))
+	for index := range buckets {
+		buckets[index] = 810 * 1024
+		starts[index] = int64(index * 300)
+	}
+	if !statsSnapshotChunksFit(buckets, starts, 300, nil, 0) {
+		t.Fatal("rejected 810 KiB buckets that fit when the expanded chunk limit allows finer bucket groups")
+	}
+	for index := range buckets {
+		buckets[index] = 700 * 1024
+	}
+	if !statsSnapshotChunksFit(buckets, starts, 300, nil, 0) {
+		t.Fatal("rejected bucket groups that fit when no shared cost report is present")
+	}
+	if statsSnapshotChunksFit(buckets, starts, 300, nil, 3500*1024) {
+		t.Fatal("accepted a shared cost report that pushes one-bucket chunks over the transport limit")
+	}
+}
+
+func TestStatsSnapshotChunkFitLocalizesDistributedNoData(t *testing.T) {
+	buckets := make([]int, 288)
+	starts := make([]int64, len(buckets))
+	noData := make([]MaterializedNoData, len(buckets))
+	for index := range buckets {
+		buckets[index] = 64 * 1024
+		starts[index] = int64(index * 300)
+		noData[index] = MaterializedNoData{
+			Family: "daemon", SourceID: fmt.Sprintf("source-%03d-%s", index, strings.Repeat("x", 30_000)),
+			EpochID: "epoch", Start: float64(starts[index]), End: float64(starts[index] + 300),
+			NativeCadenceSeconds: 300, Reason: "unavailable",
+		}
+	}
+	if !statsSnapshotChunksFit(buckets, starts, 300, noData, 0) {
+		t.Fatal("rejected distributed no-data spans that fit after per-chunk clipping")
+	}
+}
+
+func TestStatsSnapshotChunkFitUsesEncodedNoDataSize(t *testing.T) {
+	singleBucketNoData := make([]MaterializedNoData, 14_000)
+	for index := range singleBucketNoData {
+		singleBucketNoData[index] = MaterializedNoData{
+			Family: "agent_tokens", SourceID: fmt.Sprintf("retired-unavailable:source-%05d", index),
+			EpochID: fmt.Sprintf("go-token-retired-%05d", index), Start: 0, End: 300,
+			NativeCadenceSeconds: 1, Reason: "transcript cursor state exceeds its size bound",
+		}
+	}
+	if !statsSnapshotChunksFit([]int{358}, []int64{0}, 300, singleBucketNoData, 0) {
+		t.Fatal("rejected a single-bucket snapshot that fits in one transport payload")
+	}
+
+	buckets := make([]int, 288)
+	starts := make([]int64, len(buckets))
+	for index := range buckets {
+		buckets[index] = 64 * 1024
+		starts[index] = int64(index * 300)
+	}
+	noData := make([]MaterializedNoData, 14_000)
+	for index := range noData {
+		noData[index] = MaterializedNoData{
+			Family: "agent_tokens", SourceID: fmt.Sprintf("retired-unavailable:source-%05d", index),
+			EpochID: fmt.Sprintf("go-token-retired-%05d", index), Start: float64(starts[1]), End: float64(starts[1] + 300),
+			NativeCadenceSeconds: 1, Reason: "transcript cursor state exceeds its size bound",
+		}
+	}
+	if !statsSnapshotChunksFit(buckets, starts, 300, noData, 0) {
+		t.Fatal("rejected 14,000 normally encoded no-data spans that fit in their one transport chunk")
+	}
+	noData = make([]MaterializedNoData, 30_000)
+	for index := range noData {
+		noData[index] = MaterializedNoData{
+			Family: "agent_tokens", SourceID: fmt.Sprintf("retired-unavailable:source-%05d", index),
+			EpochID: fmt.Sprintf("go-token-retired-%05d", index), Start: float64(starts[1]), End: float64(starts[1] + 300),
+			NativeCadenceSeconds: 1, Reason: "transcript cursor state exceeds its size bound",
+		}
+	}
+	if !statsSnapshotChunksFit(buckets, starts, 300, noData, 0) {
+		t.Fatal("rejected no-data spans that can be split across transport fragments for one bucket")
+	}
+}
+
+func TestStatsSnapshotChunkFitCountsIndivisibleNoDataFragments(t *testing.T) {
+	const bucketCount = 511
+	buckets := make([]int, bucketCount)
+	starts := make([]int64, bucketCount)
+	for index := range buckets {
+		buckets[index] = 980 * 1024
+		starts[index] = int64(index * 300)
+	}
+	noData := make([]MaterializedNoData, 3)
+	for index := range noData {
+		noData[index] = MaterializedNoData{
+			Family: "agent_tokens", SourceID: strings.Repeat("s", 2*1024*1024),
+			EpochID: fmt.Sprintf("epoch-%d", index), Start: 0, End: 300,
+			NativeCadenceSeconds: 5, Reason: "cursor unavailable",
+		}
+	}
+	if statsSnapshotChunksFit(buckets, starts, 300, noData, 0) {
+		t.Fatal("admitted 511 bucket chunks plus three indivisible no-data fragments, which exceeds the 512 chunk limit")
+	}
+
+	for index := range buckets {
+		buckets[index] = 117
+	}
+	for index := range noData {
+		noData[index] = MaterializedNoData{
+			Family: "agent_tokens", SourceID: strings.Repeat("s", 2*1024*1024+135),
+			EpochID: fmt.Sprintf("epoch-%d", index), Start: 0, End: 300,
+			NativeCadenceSeconds: 5, Reason: "cursor unavailable",
+		}
+	}
+	if statsSnapshotChunksFit(buckets, starts, 300, noData, 0) {
+		t.Fatal("admitted a 511-bucket snapshot whose three large no-data fragments raise the chunk count to 513")
+	}
+}
+
+func TestStatsServicePrunesExpiredBucketCacheEntries(t *testing.T) {
+	ctx := context.Background()
+	writer, err := OpenWriter(ctx, filepath.Join(t.TempDir(), "stats.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	now := time.Unix(99, 0)
+	service := NewStatsService(writer, StatsServiceConfig{
+		Products: []ProductKey{{RangeSeconds: 10, ResolutionSeconds: 10}},
+		Now:      func() time.Time { return now },
+	})
+	publish := func(start int64, generation int64) {
+		t.Helper()
+		payload, err := encodeRingBucketPayload(MaterializedBucket{Start: float64(start), Duration: 10, Complete: true}, nil, generation, float64(start+10))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writer.PublishRingBuckets(ctx, []RingBucketWrite{{ResolutionSeconds: 10, BucketStart: start, BucketJSON: payload, Complete: true}}, generation, float64(start+10), true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	publish(90, 1)
+	if err := service.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(service.ringBucketCache) != 1 {
+		t.Fatalf("initial cache entries = %d, want 1", len(service.ringBucketCache))
+	}
+	now = time.Unix(109, 0)
+	publish(100, 2)
+	if err := service.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(service.ringBucketCache) != 1 || service.ringBucketCacheBytes != service.ringBucketCache[ringBucketCacheKey{resolution: 10, bucket: 100}].cacheBytes {
+		t.Fatalf("cache retained expired bucket: entries=%d bytes=%d cache=%+v", len(service.ringBucketCache), service.ringBucketCacheBytes, service.ringBucketCache)
 	}
 }
 
@@ -641,6 +1075,63 @@ func TestStatsServiceWaitForProductPublicationIgnoresUnrelatedGeneration(t *test
 	}
 }
 
+func TestStatsServiceWaitForProductPublicationHonorsCancellationBeforeNewGeneration(t *testing.T) {
+	key := ProductKey{RangeSeconds: 10, ResolutionSeconds: 10}
+	service := NewStatsService(nil, StatsServiceConfig{Products: []ProductKey{key}})
+	service.mu.Lock()
+	service.products[key] = statsProduct{key: key, cacheGeneration: 4}
+	service.notify = make(chan struct{})
+	service.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	changed, err := service.WaitForProductPublication(ctx, key, 3, time.Second)
+	if changed || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled product wait = changed:%v err:%v, want canceled without reporting a publication", changed, err)
+	}
+}
+
+func TestStatsServiceWaitForProductPublicationCancellationInterruptsWait(t *testing.T) {
+	key := ProductKey{RangeSeconds: 10, ResolutionSeconds: 10}
+	service := NewStatsService(nil, StatsServiceConfig{Products: []ProductKey{key}})
+	service.mu.Lock()
+	service.products[key] = statsProduct{key: key, cacheGeneration: 3}
+	service.notify = make(chan struct{})
+	service.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	done := make(chan struct {
+		changed bool
+		err     error
+	}, 1)
+	go func() {
+		close(started)
+		changed, err := service.WaitForProductPublication(ctx, key, 3, 5*time.Second)
+		done <- struct {
+			changed bool
+			err     error
+		}{changed: changed, err: err}
+	}()
+	<-started
+	activeWait := time.NewTimer(20 * time.Millisecond)
+	select {
+	case result := <-done:
+		activeWait.Stop()
+		t.Fatalf("product wait returned before cancellation: changed=%v err=%v", result.changed, result.err)
+	case <-activeWait.C:
+	}
+	cancel()
+	select {
+	case result := <-done:
+		if result.changed || !errors.Is(result.err, context.Canceled) {
+			t.Fatalf("canceled active product wait = changed:%v err:%v", result.changed, result.err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("active product wait did not stop promptly after cancellation")
+	}
+}
+
 func TestStatsServiceWaitForProductPublicationHeartbeatDeadlineIsAbsolute(t *testing.T) {
 	service := NewStatsService(nil, StatsServiceConfig{Products: []ProductKey{{RangeSeconds: 10, ResolutionSeconds: 10}}})
 	key := ProductKey{RangeSeconds: 10, ResolutionSeconds: 10}
@@ -722,6 +1213,26 @@ func TestRingBucketPayloadUsesPythonWireShapeAndRoundTripsCostEvidence(t *testin
 	}
 	if len(gaps) != 1 || gaps[0].Reason != "driver unavailable" {
 		t.Fatalf("decoded ring no-data = %+v", gaps)
+	}
+}
+
+func TestDecodeRingBucketPayloadRejectsUnsafeAttributionDimensionTotals(t *testing.T) {
+	payload := ringBucketPayload{
+		Version: RingPayloadVersion, GeneratedAt: 1, CacheGeneration: 1,
+		Bucket: ringBucketWire{Start: 0, Duration: 10},
+		CostDetail: ringCostDetailWire{Models: []ringCostAttributionWire{{
+			Dimensions: []ringCostDimensionWire{
+				{Dimension: "input", Tokens: maxSafeJSONInteger},
+				{Dimension: "output", Tokens: 1},
+			},
+		}}},
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := decodeRingBucketPayload(string(encoded)); err == nil {
+		t.Fatal("ring decoder accepted attribution token dimensions above the JSON-safe integer limit")
 	}
 }
 

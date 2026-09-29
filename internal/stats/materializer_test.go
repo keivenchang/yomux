@@ -117,6 +117,58 @@ func TestMaterializerNilPriceResolverPreservesUnpricedCoverage(t *testing.T) {
 	}
 }
 
+func TestMaterializerRejectsUnsafeResolverCostsAndBucketTotals(t *testing.T) {
+	atom := func(eventID string) UsageAtom {
+		return UsageAtom{
+			EventID: eventID, Direction: "input", Modality: "text", CacheRole: "none",
+			Unit: "tokens", ObservedAt: 1,
+			Payload: map[string]any{
+				"quantity": 1.0, "agent_id": "synthetic-agent", "model": "synthetic-model", "provider": "synthetic-provider",
+			},
+		}
+	}
+
+	t.Run("resolver output above safe integer", func(t *testing.T) {
+		_, err := (Materializer{Price: func(UsageAtom) (int64, int64, *PriceEvidence, bool, error) {
+			return maxSafeJSONInteger + 1, 0, nil, true, nil
+		}}).Build(MaterializeRequest{Start: 0, End: 10, Resolution: 10}, nil, nil, nil, []UsageAtom{atom("unsafe-resolver")})
+		if err == nil {
+			t.Fatal("materializer accepted a resolver cost above the JSON-safe integer limit")
+		}
+	})
+
+	t.Run("same bucket total above safe integer", func(t *testing.T) {
+		costs := map[string]int64{"first": maxSafeJSONInteger, "second": 2}
+		_, err := (Materializer{Price: func(atom UsageAtom) (int64, int64, *PriceEvidence, bool, error) {
+			cost := costs[atom.EventID]
+			return cost, cost, nil, true, nil
+		}}).Build(MaterializeRequest{Start: 0, End: 10, Resolution: 10}, nil, nil, nil, []UsageAtom{atom("first"), atom("second")})
+		if err == nil {
+			t.Fatal("materializer accepted a same-bucket cost total above the JSON-safe integer limit")
+		}
+	})
+}
+
+func TestMaterializerRejectsUnsafeCostTotalAcrossBuckets(t *testing.T) {
+	atom := func(eventID string, observedAt float64) UsageAtom {
+		return UsageAtom{
+			EventID: eventID, Direction: "input", Modality: "text", CacheRole: "none",
+			Unit: "tokens", ObservedAt: observedAt,
+			Payload: map[string]any{
+				"quantity": 1.0, "agent_id": "synthetic-agent", "model": "synthetic-model", "provider": "synthetic-provider",
+			},
+		}
+	}
+	costs := map[string]int64{"first": maxSafeJSONInteger, "second": 2}
+	_, err := (Materializer{Price: func(atom UsageAtom) (int64, int64, *PriceEvidence, bool, error) {
+		cost := costs[atom.EventID]
+		return cost, cost, nil, true, nil
+	}}).Build(MaterializeRequest{Start: 0, End: 20, Resolution: 10}, nil, nil, nil, []UsageAtom{atom("first", 1), atom("second", 11)})
+	if err == nil {
+		t.Fatal("materializer accepted a range cost total above the JSON-safe integer limit")
+	}
+}
+
 func TestMaterializerDeduplicatesUsageAtomsBeforeProjection(t *testing.T) {
 	atom := UsageAtom{
 		EventID: "duplicate-usage", Direction: "input", Modality: "text",
@@ -315,6 +367,63 @@ func TestMaterializerEmitsSystemAndProcessMemorySeries(t *testing.T) {
 	}
 	if len(layer.NoData) != 0 || !layer.Buckets[0].Complete {
 		t.Fatalf("memory coverage = no_data=%+v bucket=%+v", layer.NoData, layer.Buckets[0])
+	}
+}
+
+func TestMemoryWindowDistinguishesCoverageGapFromUnavailableHost(t *testing.T) {
+	request := MaterializeRequest{Start: 120, End: 180, Resolution: 60}
+	observations := []Observation{{
+		EventID: "memory-before-window", Family: "system_memory", SourceID: "host",
+		ObservedAt: 60, EpochID: "memory", Payload: map[string]any{
+			"used_bytes": uint64(8), "capacity_bytes": uint64(16),
+		},
+	}}
+	coverage := []CoverageEpoch{{
+		Family: "system_memory", SourceID: "host", EpochID: "memory",
+		StartedAt: 0, EndedAt: floatPointer(120), NativeCadenceSeconds: 60,
+	}}
+	withoutSample, err := (Materializer{}).Build(request, observations, coverage, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(withoutSample.NoData) != 1 {
+		t.Fatalf("missing memory sample no-data = %+v, want one selected-window gap", withoutSample.NoData)
+	}
+	gap := withoutSample.NoData[0]
+	if gap.Family != "system_memory" || gap.SourceID != "host" || gap.Start != 120 || gap.End != 180 || gap.Reason != "coverage_gap" {
+		t.Fatalf("missing memory sample gap = %+v", gap)
+	}
+
+	withUnavailable, err := (Materializer{}).Build(request, observations, coverage, []UnavailableSpan{{
+		Family: "system_memory", SourceID: "host", EpochID: "memory-unavailable",
+		StartedAt: 120, EndedAt: 180, NativeCadenceSeconds: 60, Reason: "source_unavailable",
+	}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(withUnavailable.NoData) != 1 {
+		t.Fatalf("unavailable memory no-data = %+v, want one explicit span", withUnavailable.NoData)
+	}
+	unavailable := withUnavailable.NoData[0]
+	if unavailable.Family != "system_memory" || unavailable.SourceID != "host" || unavailable.Start != 120 || unavailable.End != 180 || unavailable.Reason != "source_unavailable" {
+		t.Fatalf("unavailable memory span = %+v", unavailable)
+	}
+}
+
+func TestMaterializerEmitsRSSOnlyServiceLoadWithoutCPU(t *testing.T) {
+	layer, err := (Materializer{}).Build(MaterializeRequest{Start: 100, End: 160, Resolution: 60}, []Observation{
+		{EventID: "service-rss-only", Family: "service_load", SourceID: "yolomux-go", ObservedAt: 120, EpochID: "service", Payload: map[string]any{
+			"running": true, "rss_bytes": uint64(2048),
+		}},
+	}, []CoverageEpoch{{Family: "service_load", SourceID: "yolomux-go", EpochID: "service", StartedAt: 0, EndedAt: nil, NativeCadenceSeconds: 1}}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := seriesValue(layer.Buckets[0], "service_rss_bytes:yolomux-go"); got != 2048 {
+		t.Fatalf("service RSS = %v", got)
+	}
+	if got := seriesValue(layer.Buckets[0], "service_cpu_percent:yolomux-go"); got != -1 {
+		t.Fatalf("RSS-only observation fabricated service CPU = %v", got)
 	}
 }
 

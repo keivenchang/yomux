@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -17,11 +16,10 @@ import (
 )
 
 // This test deliberately keeps a private tmux server and live-like client panes
-// alive for the full integration budget while using the production adapters.
-func TestAgentStatusLinuxAdaptersWithMockClient(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("Linux /proc and tmux integration test")
-	}
+// alive for the full integration budget while using synthetic process identity
+// and status seams. The tmux server is fixture-owned; no host /proc snapshot is
+// admitted into development or test runs.
+func TestAgentStatusWithSyntheticInventoryAndMockClient(t *testing.T) {
 	// tmux's control-format delimiters are locale-sensitive. Pin the adapter's process environment
 	// so this fixture exercises the same UTF-8 contract in a Bazel action and a direct Go run.
 	t.Setenv("LANG", "C.UTF-8")
@@ -48,13 +46,7 @@ func TestAgentStatusLinuxAdaptersWithMockClient(t *testing.T) {
 		t.Fatal(err)
 	}
 	socket := filepath.Join(root, "tmux.sock")
-	originalSocket := os.Getenv("YOLOMUX_TMUX_SOCKET")
-	if err := os.Setenv("YOLOMUX_TMUX_SOCKET", socket); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = os.Setenv("YOLOMUX_TMUX_SOCKET", originalSocket)
-	})
+	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
 
 	sessionPrefix := "yolo-go-status-" + strings.ToLower(strings.ReplaceAll(filepath.Base(root), "_", "-"))
 	claudeSession := sessionPrefix + "-claude"
@@ -110,8 +102,9 @@ func TestAgentStatusLinuxAdaptersWithMockClient(t *testing.T) {
 	recordsBySession := make(map[string]AgentRecord)
 	var inventoryErrors []error
 	deadline := time.Now().Add(30 * time.Second)
+	inventorySources := SyntheticAgentInventorySources()
 	for time.Now().Before(deadline) {
-		inventory, errorsOut := BuildAgentInventory(ctx, LinuxAgentInventorySources())
+		inventory, errorsOut := BuildAgentInventory(ctx, inventorySources)
 		inventoryErrors = errorsOut
 		for _, candidate := range inventory {
 			if candidate.TmuxSession == claudeSession || candidate.TmuxSession == codexSession {
@@ -126,15 +119,8 @@ func TestAgentStatusLinuxAdaptersWithMockClient(t *testing.T) {
 	if len(recordsBySession) != 2 || recordsBySession[claudeSession].TmuxPaneID == "" || recordsBySession[codexSession].TmuxPaneID == "" {
 		diagnosticCtx := context.Background()
 		panes, paneErr := linuxTmuxPanes(diagnosticCtx)
-		processes, processErr := linuxProcesses(diagnosticCtx)
-		candidates := make([]AgentProcess, 0)
-		for _, process := range processes {
-			if ClassifyAgent(process.Command, process.Executable) != "" {
-				candidates = append(candidates, process)
-			}
-		}
 		rawPanes, rawPaneErr := exec.Command(tmux, "-S", socket, "list-panes", "-a", "-F", "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}\t#{pane_pid}").CombinedOutput()
-		t.Fatalf("mock clients were not discovered in live inventory (errors=%v panes=%+v paneErr=%v candidates=%+v processErr=%v records=%+v rawPanes=%q rawPaneErr=%v)", inventoryErrors, panes, paneErr, candidates, processErr, recordsBySession, rawPanes, rawPaneErr)
+		t.Fatalf("mock clients were not discovered in synthetic inventory (errors=%v panes=%+v paneErr=%v records=%+v rawPanes=%q rawPaneErr=%v)", inventoryErrors, panes, paneErr, recordsBySession, rawPanes, rawPaneErr)
 	}
 	if got := len(recordsBySession); got != 2 {
 		t.Fatalf("persistent-pane agent count = %d, want 2", got)
@@ -145,30 +131,30 @@ func TestAgentStatusLinuxAdaptersWithMockClient(t *testing.T) {
 	for _, session := range []string{claudeSession, codexSession} {
 		record := recordsBySession[session]
 		if !strings.HasPrefix(record.TmuxPaneID, "%") {
-			t.Fatalf("live pane ID session=%s target=%q", session, record.TmuxPaneID)
+			t.Fatalf("fixture pane ID session=%s target=%q", session, record.TmuxPaneID)
 		}
 		captureArgs := append([]string{"-S", socket}, linuxAgentPaneCaptureArgs(record.TmuxPaneID)...)
 		if output, err := exec.Command(tmux, captureArgs...).CombinedOutput(); err != nil || strings.TrimSpace(string(output)) == "" {
-			t.Fatalf("direct PaneID capture session=%s target=%q err=%v output=%q", session, record.TmuxPaneID, err, output)
+			t.Fatalf("direct fixture PaneID capture session=%s target=%q err=%v output=%q", session, record.TmuxPaneID, err, output)
 		}
 	}
 	for _, session := range []string{claudeSession, codexSession} {
 		record := recordsBySession[session]
 		if got, err := linuxCaptureAgentPane(ctx, record.TmuxPaneID); err != nil {
-			t.Fatalf("live pane capture session=%s target=%q: %v", session, record.TmuxPaneID, err)
+			t.Fatalf("fixture pane capture session=%s target=%q: %v", session, record.TmuxPaneID, err)
 		} else {
-			t.Logf("tmux args=%q inventory=%+v pane target=%q capture bytes=%d", tmuxCommandArgs(linuxAgentPaneCaptureArgs(record.TmuxPaneID)...), record, got.Target, len(got.VisibleText))
+			t.Logf("fixture tmux args=%q inventory=%+v pane target=%q capture bytes=%d", tmuxCommandArgs(linuxAgentPaneCaptureArgs(record.TmuxPaneID)...), record, got.Target, len(got.VisibleText))
 			if strings.TrimSpace(got.VisibleText) == "" {
-				t.Fatalf("live pane capture was empty for %s", session)
+				t.Fatalf("fixture pane capture was empty for %s", session)
 			}
 		}
 	}
 	for _, session := range []string{claudeSession, codexSession} {
 		record := recordsBySession[session]
-		classified := ClassifyAgentStatus(ctx, AgentStatusRequest{Kind: record.Kind, PID: record.PID, Command: record.Command, Executable: record.Executable, PaneTarget: record.TmuxPaneID}, LinuxAgentStatusSources(filepath.Join(root, "missing-opencode.sqlite3")))
+		classified := ClassifyAgentStatus(ctx, AgentStatusRequest{Kind: record.Kind, PID: record.PID, Command: record.Command, Executable: record.Executable, PaneTarget: record.TmuxPaneID}, SyntheticAgentStatusSources(filepath.Join(root, "missing-opencode.sqlite3")))
 		if classified.Status == AgentStatusUnavailable || classified.Reason == "pane-capture-failed" {
 			pane, paneErr := linuxCaptureAgentPane(ctx, record.TmuxPaneID)
-			t.Fatalf("live agent status classification failed for %s: %+v pane_err=%v visible=%q", session, classified, paneErr, pane.VisibleText)
+			t.Fatalf("fixture agent status classification failed for %s: %+v pane_err=%v visible=%q", session, classified, paneErr, pane.VisibleText)
 		}
 	}
 
@@ -182,7 +168,7 @@ func TestAgentStatusLinuxAdaptersWithMockClient(t *testing.T) {
 			return []AgentRecord{recordsBySession[claudeSession], recordsBySession[codexSession]}, nil
 		},
 		func(ctx context.Context, request AgentStatusRequest) AgentStatusResult {
-			return ClassifyAgentStatus(ctx, request, LinuxAgentStatusSources(databasePath))
+			return ClassifyAgentStatus(ctx, request, SyntheticAgentStatusSources(databasePath))
 		},
 		writer,
 		nil,

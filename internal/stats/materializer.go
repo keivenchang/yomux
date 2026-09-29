@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const materializerMaxSafeInteger = float64((1 << 53) - 1)
+const materializerMaxSafeInteger = float64(maxSafeJSONInteger)
 
 // Materializer is the pure, read-only current-facts fold. It intentionally
 // takes decoded storage records so callers can use it with SQLite snapshots,
@@ -31,6 +31,9 @@ type PriceEvidence struct {
 type MaterializeRequest struct {
 	Start, End float64
 	Resolution float64
+	// ObservedUntil distinguishes an aligned output window from the last
+	// instant observed by its producer. Nil means the entire window is known.
+	ObservedUntil *float64
 }
 
 type MaterializedLayer struct {
@@ -122,9 +125,16 @@ func newMaterializerAccumulator(req MaterializeRequest, price PriceResolver) (*m
 	if count < 1 || count > MaxProjectionInputs {
 		return nil, fmt.Errorf("invalid materialization bucket count")
 	}
+	observedUntil := req.End
+	if req.ObservedUntil != nil {
+		observedUntil = *req.ObservedUntil
+		if math.IsNaN(observedUntil) || math.IsInf(observedUntil, 0) {
+			return nil, fmt.Errorf("invalid materialization observation cutoff")
+		}
+	}
 	layer := MaterializedLayer{Resolution: req.Resolution, Start: req.Start, End: req.End, Buckets: make([]MaterializedBucket, count)}
 	for i := range layer.Buckets {
-		layer.Buckets[i] = MaterializedBucket{Start: req.Start + float64(i)*req.Resolution, Duration: math.Min(req.Resolution, req.End-(req.Start+float64(i)*req.Resolution)), Complete: req.Start+float64(i+1)*req.Resolution <= req.End}
+		layer.Buckets[i] = MaterializedBucket{Start: req.Start + float64(i)*req.Resolution, Duration: math.Min(req.Resolution, req.End-(req.Start+float64(i)*req.Resolution)), Complete: req.Start+float64(i+1)*req.Resolution <= math.Min(req.End, observedUntil)}
 	}
 	return &materializerAccumulator{req: req, price: price, layer: layer}, nil
 }
@@ -230,7 +240,195 @@ func (m Materializer) Build(req MaterializeRequest, observations []Observation, 
 		return MaterializedLayer{}, err
 	}
 	accumulator.addCoverage(epochs)
-	return accumulator.finish(), nil
+	layer := accumulator.finish()
+	if err := validateMaterializedCostRange(layer); err != nil {
+		return MaterializedLayer{}, err
+	}
+	return layer, nil
+}
+
+type materializedCostSums struct {
+	tokens, microUSD, apiListMicroUSD int64
+	pricedAtoms, unpricedAtoms        int64
+	pricedTokens, unpricedTokens      int64
+}
+
+func (s *materializedCostSums) add(tokens, microUSD, apiListMicroUSD, pricedAtoms, unpricedAtoms, pricedTokens, unpricedTokens int64, name string) error {
+	var err error
+	if s.tokens, err = addSafeJSONInteger(s.tokens, tokens, name+" tokens"); err != nil {
+		return err
+	}
+	if s.microUSD, err = addSafeJSONInteger(s.microUSD, microUSD, name+" micro_usd"); err != nil {
+		return err
+	}
+	if s.apiListMicroUSD, err = addSafeJSONInteger(s.apiListMicroUSD, apiListMicroUSD, name+" api_list_micro_usd"); err != nil {
+		return err
+	}
+	if s.pricedAtoms, err = addSafeJSONInteger(s.pricedAtoms, pricedAtoms, name+" priced atoms"); err != nil {
+		return err
+	}
+	if s.unpricedAtoms, err = addSafeJSONInteger(s.unpricedAtoms, unpricedAtoms, name+" unpriced atoms"); err != nil {
+		return err
+	}
+	if s.pricedTokens, err = addSafeJSONInteger(s.pricedTokens, pricedTokens, name+" priced tokens"); err != nil {
+		return err
+	}
+	if s.unpricedTokens, err = addSafeJSONInteger(s.unpricedTokens, unpricedTokens, name+" unpriced tokens"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func materializedCostDimensionSums(dimensions []MaterializedCostDimension, name string) (materializedCostSums, error) {
+	var sums materializedCostSums
+	for _, dimension := range dimensions {
+		if err := sums.add(dimension.Tokens, dimension.MicroUSD, dimension.APIListMicroUSD, 0, 0, 0, 0, name); err != nil {
+			return materializedCostSums{}, err
+		}
+	}
+	return sums, nil
+}
+
+func validateCostTotalsWithin(actual, bound materializedCostSums, name string) error {
+	if actual.tokens > bound.tokens || actual.microUSD > bound.microUSD || actual.apiListMicroUSD > bound.apiListMicroUSD || actual.pricedAtoms > bound.pricedAtoms || actual.unpricedAtoms > bound.unpricedAtoms || actual.pricedTokens > bound.pricedTokens || actual.unpricedTokens > bound.unpricedTokens {
+		return fmt.Errorf("%s exceed their enclosing cost totals", name)
+	}
+	return nil
+}
+
+func validateMaterializedCostSource(source MaterializedCostSource, name string) (materializedCostSums, error) {
+	var sums materializedCostSums
+	if err := sums.add(source.TotalTokens, source.MicroUSD, source.APIListMicroUSD, int64(source.PricedAtoms), int64(source.UnpricedAtoms), source.PricedTokens, source.UnpricedTokens, name); err != nil {
+		return materializedCostSums{}, err
+	}
+	dimensions, err := materializedCostDimensionSums(source.Dimensions, name+" dimensions")
+	if err != nil {
+		return materializedCostSums{}, err
+	}
+	if len(source.Dimensions) > 0 && (dimensions.tokens != source.TotalTokens || dimensions.microUSD != source.MicroUSD || dimensions.apiListMicroUSD != source.APIListMicroUSD) {
+		return materializedCostSums{}, fmt.Errorf("%s dimensions disagree with totals", name)
+	}
+	return sums, nil
+}
+
+func validateMaterializedCostAttribution(attribution MaterializedCostAttribution, name string) (materializedCostSums, error) {
+	var sums materializedCostSums
+	if err := sums.add(attribution.TotalTokens, attribution.MicroUSD, attribution.APIListMicroUSD, int64(attribution.PricedAtoms), int64(attribution.UnpricedAtoms), attribution.PricedTokens, attribution.UnpricedTokens, name); err != nil {
+		return materializedCostSums{}, err
+	}
+	dimensions, err := materializedCostDimensionSums(attribution.Dimensions, name+" dimensions")
+	if err != nil {
+		return materializedCostSums{}, err
+	}
+	if len(attribution.Dimensions) > 0 && (dimensions.tokens != attribution.TotalTokens || dimensions.microUSD != attribution.MicroUSD || dimensions.apiListMicroUSD != attribution.APIListMicroUSD) {
+		return materializedCostSums{}, fmt.Errorf("%s dimensions disagree with totals", name)
+	}
+	var sources materializedCostSums
+	for _, source := range attribution.Sources {
+		sourceSums, err := validateMaterializedCostSource(source, name+" source")
+		if err != nil {
+			return materializedCostSums{}, err
+		}
+		if err := sources.add(sourceSums.tokens, sourceSums.microUSD, sourceSums.apiListMicroUSD, sourceSums.pricedAtoms, sourceSums.unpricedAtoms, sourceSums.pricedTokens, sourceSums.unpricedTokens, name+" sources"); err != nil {
+			return materializedCostSums{}, err
+		}
+	}
+	if err := validateCostTotalsWithin(sources, sums, name+" sources"); err != nil {
+		return materializedCostSums{}, err
+	}
+	return sums, nil
+}
+
+func validateMaterializedCostRange(layer MaterializedLayer) error {
+	var rangeTotals materializedCostSums
+	var seriesTotals = map[string]int64{}
+	seriesSeen := map[string]bool{}
+	for bucketIndex, bucket := range layer.Buckets {
+		var bucketTotals materializedCostSums
+		bucketSeriesSeen := map[string]bool{}
+		cost := bucket.Cost
+		if err := bucketTotals.add(cost.Tokens, cost.MicroUSD, cost.APIListMicroUSD, int64(cost.PricedAtoms), int64(cost.UnpricedAtoms), cost.PricedTokens, cost.UnpricedTokens, "cost bucket"); err != nil {
+			return err
+		}
+		if err := rangeTotals.add(bucketTotals.tokens, bucketTotals.microUSD, bucketTotals.apiListMicroUSD, bucketTotals.pricedAtoms, bucketTotals.unpricedAtoms, bucketTotals.pricedTokens, bucketTotals.unpricedTokens, "cost report"); err != nil {
+			return err
+		}
+		for _, item := range bucket.Series {
+			if item.Name != "usage_tokens" && item.Name != "cost_micro_usd" && item.Name != "api_list_cost_micro_usd" {
+				continue
+			}
+			if math.IsNaN(item.Value) || math.IsInf(item.Value, 0) || item.Value < 0 || item.Value > materializerMaxSafeInteger || item.Value != math.Trunc(item.Value) {
+				return fmt.Errorf("%s must be an exact JSON-safe integer", item.Name)
+			}
+			if bucketSeriesSeen[item.Name] {
+				return fmt.Errorf("duplicate cost series %q", item.Name)
+			}
+			bucketSeriesSeen[item.Name] = true
+			seriesSeen[item.Name] = true
+			value := int64(item.Value)
+			var total int64
+			var err error
+			if total, err = addSafeJSONInteger(seriesTotals[item.Name], value, "cost report "+item.Name); err != nil {
+				return err
+			}
+			seriesTotals[item.Name] = total
+			var typed int64
+			switch item.Name {
+			case "usage_tokens":
+				typed = cost.Tokens
+			case "cost_micro_usd":
+				typed = cost.MicroUSD
+			case "api_list_cost_micro_usd":
+				typed = cost.APIListMicroUSD
+			}
+			if value != typed {
+				return fmt.Errorf("bucket %d %s disagrees with typed cost detail", bucketIndex, item.Name)
+			}
+		}
+		dimensionSums, err := materializedCostDimensionSums(cost.Dimensions, "cost bucket dimensions")
+		if err != nil {
+			return err
+		}
+		if len(cost.Dimensions) > 0 && (dimensionSums.tokens != cost.Tokens || dimensionSums.microUSD != cost.MicroUSD || dimensionSums.apiListMicroUSD != cost.APIListMicroUSD) {
+			return fmt.Errorf("bucket %d cost dimensions disagree with typed cost totals", bucketIndex)
+		}
+		for _, family := range []struct {
+			name string
+			rows []MaterializedCostAttribution
+		}{{"models", cost.Models}, {"agents", cost.Agents}} {
+			var familySums materializedCostSums
+			for _, row := range family.rows {
+				rowSums, err := validateMaterializedCostAttribution(row, "cost "+family.name)
+				if err != nil {
+					return err
+				}
+				if err := familySums.add(rowSums.tokens, rowSums.microUSD, rowSums.apiListMicroUSD, rowSums.pricedAtoms, rowSums.unpricedAtoms, rowSums.pricedTokens, rowSums.unpricedTokens, "cost "+family.name); err != nil {
+					return err
+				}
+			}
+			if err := validateCostTotalsWithin(familySums, bucketTotals, "cost "+family.name); err != nil {
+				return err
+			}
+		}
+		var evidenceSums materializedCostSums
+		for _, evidence := range cost.Evidence {
+			if err := evidenceSums.add(evidence.Tokens, evidence.MicroUSD, evidence.APIListMicroUSD, evidence.PricedAtoms, 0, evidence.Tokens, 0, "cost evidence"); err != nil {
+				return err
+			}
+		}
+		if err := validateCostTotalsWithin(evidenceSums, bucketTotals, "cost evidence"); err != nil {
+			return err
+		}
+	}
+	for seriesName, typed := range map[string]int64{
+		"usage_tokens": rangeTotals.tokens, "cost_micro_usd": rangeTotals.microUSD,
+		"api_list_cost_micro_usd": rangeTotals.apiListMicroUSD,
+	} {
+		if seriesSeen[seriesName] && seriesTotals[seriesName] != typed {
+			return fmt.Errorf("cost report %s disagrees with typed cost totals", seriesName)
+		}
+	}
+	return nil
 }
 
 // coverageGapFamilies are the Python families whose series represent sampled
@@ -781,7 +979,11 @@ func addUsage(b *MaterializedBucket, a UsageAtom, price PriceResolver) (bool, er
 		b.costDimensions[dimension] = costDimension
 	}
 	if a.Unit == "tokens" {
-		b.Cost.Tokens += int64(q)
+		tokens, err := addSafeJSONInteger(b.Cost.Tokens, int64(q), "cost bucket tokens")
+		if err != nil {
+			return false, err
+		}
+		b.Cost.Tokens = tokens
 		costDimension.Tokens += int64(q)
 		if model != "" {
 			if b.costModels == nil {
@@ -836,10 +1038,21 @@ func addUsage(b *MaterializedBucket, a UsageAtom, price PriceResolver) (bool, er
 		}
 	}
 	if ok {
+		if m < 0 || m > maxSafeJSONInteger || l < 0 || l > maxSafeJSONInteger {
+			return false, fmt.Errorf("price resolver must return non-negative JSON-safe integer micro-USD")
+		}
+		bucketMicroUSD, err := addSafeJSONInteger(b.Cost.MicroUSD, m, "cost bucket micro_usd")
+		if err != nil {
+			return false, err
+		}
+		bucketAPIListMicroUSD, err := addSafeJSONInteger(b.Cost.APIListMicroUSD, l, "cost bucket API-list micro_usd")
+		if err != nil {
+			return false, err
+		}
 		add("cost_micro_usd", "sum", float64(m))
 		add("api_list_cost_micro_usd", "sum", float64(l))
-		b.Cost.MicroUSD += m
-		b.Cost.APIListMicroUSD += l
+		b.Cost.MicroUSD = bucketMicroUSD
+		b.Cost.APIListMicroUSD = bucketAPIListMicroUSD
 		costDimension.MicroUSD += m
 		costDimension.APIListMicroUSD += l
 		b.Cost.PricedAtoms++
@@ -876,6 +1089,13 @@ func addUsage(b *MaterializedBucket, a UsageAtom, price PriceResolver) (bool, er
 		}
 	}
 	return added, nil
+}
+
+func addSafeJSONInteger(total, value int64, name string) (int64, error) {
+	if total < 0 || total > maxSafeJSONInteger || value < 0 || value > maxSafeJSONInteger-total {
+		return 0, fmt.Errorf("%s exceeds the exact JSON integer range", name)
+	}
+	return total + value, nil
 }
 func finalizeBucket(b *MaterializedBucket) {
 	if m := b.folds; m != nil {

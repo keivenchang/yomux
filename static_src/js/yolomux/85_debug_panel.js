@@ -67,6 +67,34 @@ function debugGraphApplyServerRecord(record) {
   if (record.cost_report) jsDebugCurrentCostReport = record.cost_report;
 }
 
+// Runtime-owner occupancy is mutable telemetry for the current one-second bucket. It is not
+// written to the durable stats database. Keep each accepted SSE sample in the same bounded client
+// graph cache as durable records so the Daemons/System chart has real history instead of one
+// marker repeatedly replaced in the newest server bucket.
+function applyJsDebugCurrentRuntimeLoad(load = {}) {
+  if (!load || typeof load !== 'object' || Array.isArray(load)) return false;
+  const bucket = debugGraphBucketForTime(Date.now());
+  if (!bucket) return false;
+  const records = {};
+  for (const [key, value] of Object.entries(load)) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const percent = Number(value.load_percent);
+    if (!Number.isFinite(percent) || percent < 0) continue;
+    const source = `runtime:${key}`;
+    records[source] = {
+      label: debugGraphServiceLoadLabel(source),
+      cpu_total_percent: percent,
+      cpu_samples: 1,
+      cpu_min_percent: percent,
+      cpu_max_percent: percent,
+    };
+  }
+  if (!Object.keys(records).length) return false;
+  debugGraphApplyHostMetrics(bucket, {service_load: records}, {runtimeSse: true});
+  refreshDebugGraphSurfaces();
+  return true;
+}
+
 function debugGraphDeleteServerRecord(startSeconds, durationSeconds) {
   const startMs = Number(startSeconds) * 1000;
   const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(durationSeconds) * 1000);
@@ -105,7 +133,7 @@ function debugGraphApplyHostMetricProcesses(target, source, valueKey = 'totalPer
   }
 }
 
-function debugGraphApplyHostMetrics(bucket, source) {
+function debugGraphApplyHostMetrics(bucket, source, {runtimeSse = false} = {}) {
   if (!source || typeof source !== 'object' || Array.isArray(source)) return;
   const target = bucket.hostMetrics || (bucket.hostMetrics = debugGraphNewHostMetrics());
   target.systemMemoryUsedTotalBytes = Math.max(target.systemMemoryUsedTotalBytes, Number(source.system_memory_used_total_bytes || 0));
@@ -142,7 +170,7 @@ function debugGraphApplyHostMetrics(bucket, source) {
         const sourceUnit = prefix === 'cpu' ? 'percent' : 'bytes';
         const samplesKey = `${prefix}Samples`;
         const sourceSamples = Math.max(0, Number(record[`${prefix}_samples`] || 0));
-        if (sourceSamples < Number(item[samplesKey] || 0)) continue;
+        if (sourceSamples < Number(item[samplesKey] || 0) && !(runtimeSse && prefix === 'cpu')) continue;
         item[`${prefix}Total${unit}`] = Math.max(0, Number(record[`${prefix}_total_${sourceUnit}`] || 0));
         item[samplesKey] = sourceSamples;
         item[`${prefix}Min${unit}`] = Math.max(0, Number(record[`${prefix}_min_${sourceUnit}`] || 0));
@@ -811,11 +839,11 @@ function debugGraphNiceAxisMax(value, unit) {
   if (unit === 'bytesPerSecond') return debugGraphNiceBytesPerSecondAxisMax(value);
   if (unit === 'tokens') return Math.max(1, debugGraphNiceCeil(value));
   if (unit === 'tokensPerMinute') return Math.max(1, debugGraphNiceCeil(value));
-  // Percent charts without a fixed 0-100 axis (e.g. Daemons load, where a single
-  // multi-core service can exceed 100%) still need round tick steps. A 1/2/5
+  // Percent/occupancy charts without a fixed 0-100 axis (e.g. Daemons load, where
+  // cumulative owner occupancy can exceed 100%) still need round tick steps. A 1/2/5
   // ceil keeps the max and its half-step both round (100->50, 50->25, 20->10)
   // instead of the raw data max (the 88.3% / 44.1% ticks in the report).
-  if (unit === 'percent') return Math.max(1, debugGraphNiceCeil(value));
+  if (unit === 'percent' || unit === 'runtimeOccupancy') return Math.max(1, debugGraphNiceCeil(value));
   return value;
 }
 
@@ -857,6 +885,7 @@ function debugGraphValueText(value, unit) {
   }
   if (unit === 'tokens') return debugGraphTokensText(number);
   if (unit === 'tokensPerMinute') return debugGraphTokensPerMinuteText(number);
+  if (unit === 'runtimeOccupancy') return `${number >= 100 ? number.toFixed(0) : number.toFixed(1)}% occ`;
   if (unit === 'percent') return `${number >= 100 ? number.toFixed(0) : number.toFixed(1)}%`;
   return number >= 10 ? number.toFixed(1) : number.toFixed(2);
 }
@@ -888,6 +917,7 @@ function debugGraphAxisValueText(value, unit) {
     if (unit === 'bytesPerSecond') return '0';
     if (unit === 'tokens') return '0';
     if (unit === 'tokensPerMinute') return '0';
+    if (unit === 'runtimeOccupancy') return '0% occ';
     if (unit === 'percent') return '0%';
     return '0';
   }
@@ -1151,13 +1181,20 @@ function debugGraphStablePaletteIndex(identity, count) {
   return hash % size;
 }
 
-function debugGraphVisualCombinations(patternCount = jsDebugGraphAgentTokenPatternCount) {
-  const colorCount = Math.max(1, jsDebugGraphAgentTokenColors.length);
+function debugGraphVisualCombinations(patternCount = jsDebugGraphAgentTokenPatternCount, colorCount = jsDebugGraphAgentTokenColors.length, uniqueColorsFirst = false) {
+  const normalizedColorCount = Math.max(1, Math.floor(Number(colorCount) || 0));
   const normalizedPatternCount = Math.max(1, Math.floor(Number(patternCount) || 0));
   const combinations = [];
-  const pairedCount = Math.min(colorCount, normalizedPatternCount);
+  if (uniqueColorsFirst) {
+    for (let colorIndex = 0; colorIndex < normalizedColorCount; colorIndex += 1) combinations.push([colorIndex, 0]);
+    for (let patternIndex = 1; patternIndex < normalizedPatternCount; patternIndex += 1) {
+      for (let colorIndex = 0; colorIndex < normalizedColorCount; colorIndex += 1) combinations.push([colorIndex, patternIndex]);
+    }
+    return combinations;
+  }
+  const pairedCount = Math.min(normalizedColorCount, normalizedPatternCount);
   for (let index = 0; index < pairedCount; index += 1) combinations.push([index, index]);
-  for (let colorIndex = 0; colorIndex < colorCount; colorIndex += 1) {
+  for (let colorIndex = 0; colorIndex < normalizedColorCount; colorIndex += 1) {
     for (let patternIndex = 0; patternIndex < normalizedPatternCount; patternIndex += 1) {
       if (colorIndex === patternIndex && colorIndex < pairedCount) continue;
       combinations.push([colorIndex, patternIndex]);
@@ -1179,37 +1216,43 @@ function debugGraphDisplayedTokenVisuals(items, identityForItem = item => item?.
 }
 
 const jsDebugGraphServiceLoadLinePatterns = Object.freeze(['solid', 'dash', 'dot', 'dash-dot', 'long-dash', 'dense-dot', 'long-short']);
-// Daemons enter and leave retained buckets independently. Keep each assigned visual for the page
-// lifetime so one disappearing service cannot recolor every later legend row; reclaim absent slots
-// only after all 49 color/pattern pairs have been used.
+// Daemons enter and leave retained buckets independently. Keep each assigned visual per metric for
+// the page lifetime so another chart cannot consume its colors and one disappearing service cannot
+// recolor later legend rows; reclaim absent slots only after that metric's combinations are used.
 const jsDebugGraphServiceLoadVisualAssignments = new Map();
 
-function debugGraphStableServiceLoadVisuals(items) {
-  const combinations = debugGraphVisualCombinations(jsDebugGraphServiceLoadLinePatterns.length);
+function debugGraphStableServiceLoadVisuals(items, metric = 'cpu') {
+  const colors = jsDebugGraphAgentTokenColors;
+  const combinations = debugGraphVisualCombinations(jsDebugGraphServiceLoadLinePatterns.length, colors.length, true);
+  let assignments = jsDebugGraphServiceLoadVisualAssignments.get(metric);
+  if (!assignments) {
+    assignments = new Map();
+    jsDebugGraphServiceLoadVisualAssignments.set(metric, assignments);
+  }
   const activeKeys = new Set((items || []).map(([key]) => String(key)));
-  if (jsDebugGraphServiceLoadVisualAssignments.size >= combinations.length) {
-    for (const key of jsDebugGraphServiceLoadVisualAssignments.keys()) {
-      if (!activeKeys.has(key)) jsDebugGraphServiceLoadVisualAssignments.delete(key);
-      if (jsDebugGraphServiceLoadVisualAssignments.size < combinations.length) break;
+  if (assignments.size >= combinations.length) {
+    for (const key of assignments.keys()) {
+      if (!activeKeys.has(key)) assignments.delete(key);
+      if (assignments.size < combinations.length) break;
     }
   }
-  const used = new Set(jsDebugGraphServiceLoadVisualAssignments.values());
+  const used = new Set(assignments.values());
   return (items || []).map(([rawKey]) => {
     const key = String(rawKey);
-    let combinationIndex = jsDebugGraphServiceLoadVisualAssignments.get(key);
+    let combinationIndex = assignments.get(key);
     if (!Number.isFinite(combinationIndex)) {
       combinationIndex = debugGraphStablePaletteIndex(key, combinations.length);
       for (let candidate = 0; candidate < combinations.length; candidate += 1) {
         if (!used.has(candidate)) {
           combinationIndex = candidate;
-          jsDebugGraphServiceLoadVisualAssignments.set(key, candidate);
+          assignments.set(key, candidate);
           used.add(candidate);
           break;
         }
       }
     }
     const [colorIndex, patternIndex] = combinations[combinationIndex];
-    return {color: jsDebugGraphAgentTokenColors[colorIndex], colorIndex, patternIndex};
+    return {color: colors[colorIndex], colorIndex, patternIndex};
   });
 }
 
@@ -1401,7 +1444,9 @@ function debugGraphHostProcessSeriesDefs(buckets, metric) {
       const value = Number(item[valueKey] || 0) / Number(item.samples || 1);
       const current = processes.get(key);
       if (!current || value > current.peakValue) {
-        processes.set(key, {label: String(item.label || key), peakValue: value});
+        const rawLabel = String(item.label || key);
+        const goInstance = /^yolomux[-_]go-pid-(\d+)-[0-9a-f]{8}$/.exec(rawLabel);
+        processes.set(key, {label: goInstance ? `yolomux-go (PID ${goInstance[1]})` : rawLabel, peakValue: value});
       }
     }
   }
@@ -1436,6 +1481,11 @@ function debugGraphHostProcessSeriesDefs(buckets, metric) {
   }));
 }
 
+function debugGraphServiceLoadAxisDescriptor(group, plotSeries, lineSeries) {
+  const values = [...plotSeries, ...lineSeries].flatMap(debugGraphSeriesPlotValues);
+  return debugGraphSpikeCompressedAxisDescriptor(group, values);
+}
+
 function debugGraphMemoryProcessSeriesDefs(buckets) {
   return debugGraphHostProcessSeriesDefs(buckets, 'memory');
 }
@@ -1460,38 +1510,78 @@ function normalizedDebugGraphServiceLoadMode(value) {
 const debugGraphServiceLoadModes = Object.freeze(['avg', 'max', 'min']);
 
 function normalizedDebugGraphServiceLoadPreference(value) {
-  return debugGraphServiceLoadModes.includes(value) ? value : 'auto';
+  return debugGraphServiceLoadModes.includes(value) || value === 'auto' ? value : 'auto';
+}
+
+// Runtime owners are in-process work, not extra Unix daemons. They share the
+// Daemons load renderer so the chart can show the measured collector breakdown
+// without changing the roster's process ownership contract.
+function debugGraphServiceLoadLabel(source) {
+  const labels = {
+    'runtime:stats_lifecycle': 'stats lifecycle (goroutine, in-process)',
+    'runtime:agent_tokens': 'agent token collector (goroutine, in-process)',
+    'runtime:agent_status': 'agent status collector (goroutine, in-process)',
+    'runtime:host_collector:cpu': 'host CPU collector (runtime occupancy)',
+    'runtime:host_collector:system_memory': 'host memory collector (runtime occupancy)',
+    'runtime:host_collector:gpu': 'host GPU collector (runtime occupancy)',
+  };
+  if (labels[source]) return labels[source];
+  if (source.startsWith('yolomux-go:thread:')) {
+    return `Go OS thread ${source.slice('yolomux-go:thread:'.length).split(':', 1)[0]}`;
+  }
+  if (source.startsWith('yolomux-go:child:')) {
+    return `Go child process ${source.slice('yolomux-go:child:'.length).split(':', 1)[0]}`;
+  }
+  if (source.startsWith('runtime:agent_tokens:opencode:')) {
+    return `OpenCode ${source.slice('runtime:agent_tokens:opencode:'.length)} (goroutine, in-process)`;
+  }
+  return source;
 }
 
 function debugGraphDefaultServiceLoadMode(buckets) {
   return (buckets || []).some(bucket => Number(bucket?.durationMs || 0) >= 60000) ? 'max' : 'avg';
 }
 
-function debugGraphVisibleServiceLoadItems(buckets) {
+function debugGraphServiceLoadMetric(group = null) {
+  return group?.serviceMetric === 'rss' ? 'rss' : 'cpu';
+}
+
+function debugGraphServiceLoadSampleCount(item, metric = 'cpu') {
+  return Number(item?.[metric === 'rss' ? 'rssSamples' : 'cpuSamples'] || 0);
+}
+
+function debugGraphVisibleServiceLoadItems(buckets, group = null) {
+  const metric = debugGraphServiceLoadMetric(group);
   const items = [];
   for (const bucket of buckets || []) {
     for (const [key, item] of bucket?.hostMetrics?.serviceLoad?.entries?.() || []) {
       // Old retained buckets contain the synthetic web row. Its PID is already shown by CPU.
-      if (key === 'web' || Number(item?.cpuSamples || 0) <= 0) continue;
+      if (key === 'web' || debugGraphServiceLoadSampleCount(item, metric) <= 0) continue;
+      const runtimeKey = String(key);
+      if (group?.runtimeOnly === true && !runtimeKey.startsWith('runtime:')) continue;
+      // Earlier collectors exported nested phases beside their parent. Keep those history
+      // buckets out of the stacked chart even though current samples omit the duplicates.
+      if (group?.runtimeOnly === true && (runtimeKey.startsWith('runtime:stats_lifecycle:') || runtimeKey.startsWith('runtime:agent_tokens:opencode'))) continue;
+      if (group?.processOnly === true && String(key).startsWith('runtime:')) continue;
       items.push([key, item]);
     }
   }
   return items;
 }
 
-function debugGraphServiceLoadRangeAvailable(buckets) {
+function debugGraphServiceLoadRangeAvailable(buckets, group = null) {
   let sampled = 0;
-  for (const [, item] of debugGraphVisibleServiceLoadItems(buckets)) {
+  for (const [, item] of debugGraphVisibleServiceLoadItems(buckets, group)) {
     sampled += 1;
     if (item.cpuRangeAvailable !== true) return false;
   }
   return sampled > 0;
 }
 
-function debugGraphServiceLoadEffectiveMode(buckets, mode = debugRuntimeState.serviceLoadMode) {
+function debugGraphServiceLoadEffectiveMode(buckets, mode = debugRuntimeState.serviceLoadMode, group = null) {
   const preferred = normalizedDebugGraphServiceLoadPreference(mode);
   const normalized = preferred === 'auto' ? debugGraphDefaultServiceLoadMode(buckets) : preferred;
-  return normalized === 'avg' || debugGraphServiceLoadRangeAvailable(buckets) ? normalized : 'avg';
+  return normalized === 'avg' || debugGraphServiceLoadRangeAvailable(buckets, group) ? normalized : 'avg';
 }
 
 function debugGraphServiceLoadValue(item, mode = debugRuntimeState.serviceLoadMode) {
@@ -1503,28 +1593,37 @@ function debugGraphServiceLoadValue(item, mode = debugRuntimeState.serviceLoadMo
   return Math.max(0, Number(item.cpuTotalPercent || 0)) / samples;
 }
 
-function debugGraphServiceLoadSeriesDefs(buckets) {
-  const mode = debugGraphServiceLoadEffectiveMode(buckets);
+function debugGraphServiceMemoryValue(item) {
+  const samples = Number(item?.rssSamples || 0);
+  if (samples <= 0) return 0;
+  return Math.max(0, Number(item?.rssTotalBytes || 0)) / samples;
+}
+
+function debugGraphServiceLoadSeriesDefs(buckets, group = null) {
+  const metric = debugGraphServiceLoadMetric(group);
+  const memory = metric === 'rss';
+  const mode = debugGraphServiceLoadEffectiveMode(buckets, undefined, group);
   const services = new Map();
-  for (const [key, item] of debugGraphVisibleServiceLoadItems(buckets)) {
+  for (const [key, item] of debugGraphVisibleServiceLoadItems(buckets, group)) {
     services.set(key, String(item.label || key));
   }
   const items = [...services.entries()].sort((left, right) => left[1].localeCompare(right[1]) || left[0].localeCompare(right[0]));
-  const visuals = debugGraphStableServiceLoadVisuals(items);
+  const visuals = debugGraphStableServiceLoadVisuals(items, metric);
   return items.map(([key, label], index) => ({
-    key: `serviceLoad:${key}`, label, unit: 'percent', serviceLoad: true,
-    color: visuals[index].color, linePattern: jsDebugGraphServiceLoadLinePatterns[visuals[index].patternIndex],
+    key: `${memory ? 'serviceMemory' : 'serviceLoad'}:${key}`, label, unit: memory ? 'bytes' : (group?.runtimeOnly === true ? 'runtimeOccupancy' : 'percent'), serviceLoad: true, serviceMetric: metric,
+    runtimeDetail: false,
+    color: visuals[index].color, patternIndex: visuals[index].patternIndex, linePattern: jsDebugGraphServiceLoadLinePatterns[visuals[index].patternIndex],
     value: bucket => {
       const item = bucket?.hostMetrics?.serviceLoad?.get?.(key);
-      return debugGraphServiceLoadValue(item, mode);
+      return memory ? debugGraphServiceMemoryValue(item) : debugGraphServiceLoadValue(item, mode);
     },
-    hasData: bucket => Number(bucket?.hostMetrics?.serviceLoad?.get?.(key)?.cpuSamples || 0) > 0,
-    sampleCount: bucket => Number(bucket?.hostMetrics?.serviceLoad?.get?.(key)?.cpuSamples || 0),
+    hasData: bucket => debugGraphServiceLoadSampleCount(bucket?.hostMetrics?.serviceLoad?.get?.(key), metric) > 0,
+    sampleCount: bucket => debugGraphServiceLoadSampleCount(bucket?.hostMetrics?.serviceLoad?.get?.(key), metric),
     // Same fix as the CPU/memory per-process series: absence requires a real census that covered
     // THIS service and did not find it, not merely "some service had data this bucket".
     familyHasData: bucket => {
       const source = bucket?.hostMetrics?.serviceLoad;
-      return source instanceof Map && source.size > 0 && !(Number(source.get(key)?.cpuSamples || 0) > 0);
+      return source instanceof Map && source.size > 0 && !(debugGraphServiceLoadSampleCount(source.get(key), metric) > 0);
     },
     displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.tenSecondGauge,
   }));
@@ -1584,7 +1683,7 @@ function debugGraphProjectSeriesSamples(def, buckets) {
 function debugGraphSeriesData(buckets) {
   const times = buckets.map(bucket => Number(bucket.startMs) || 0);
   const durations = buckets.map(bucket => Math.max(jsDebugGraphRawBucketMs, Number(bucket.durationMs) || jsDebugGraphRawBucketMs));
-  const defs = [...jsDebugGraphSeries, ...debugGraphClientMetricSeriesDefs(buckets), ...debugGraphProcessCpuSeriesDefs(buckets), ...debugGraphHostMetricSeriesDefs(buckets), ...debugGraphServiceLoadSeriesDefs(buckets), ...debugGraphAgentTokenSeriesDefs(buckets), ...debugGraphModelTokenSeriesDefs(buckets)];
+  const defs = [...jsDebugGraphSeries, ...debugGraphClientMetricSeriesDefs(buckets), ...debugGraphProcessCpuSeriesDefs(buckets), ...debugGraphHostMetricSeriesDefs(buckets), ...jsDebugGraphDaemonsSeriesGroups.flatMap(group => debugGraphServiceLoadSeriesDefs(buckets, group)), ...debugGraphAgentTokenSeriesDefs(buckets), ...debugGraphModelTokenSeriesDefs(buckets)];
   return defs.map(def => {
     const localizedDef = {...def, label: debugGraphLocalizedLabel(def)};
     const {values, hasDataValues, observedDataValues, provenanceValues} = debugGraphProjectSeriesSamples(def, buckets);
@@ -1686,9 +1785,9 @@ function debugGraphServiceLoadModeLabel(mode) {
   return t(`debug.graph.serviceLoad.mode.${normalizedDebugGraphServiceLoadMode(mode)}`);
 }
 
-function debugGraphServiceLoadModeControlsHtml(buckets = []) {
-  const rangeAvailable = debugGraphServiceLoadRangeAvailable(buckets);
-  const selected = debugGraphServiceLoadEffectiveMode(buckets);
+function debugGraphServiceLoadModeControlsHtml(buckets = [], group = null) {
+  const rangeAvailable = debugGraphServiceLoadRangeAvailable(buckets, group);
+  const selected = debugGraphServiceLoadEffectiveMode(buckets, undefined, group);
   const label = t('debug.graph.chart.serversLoad');
   return `<fieldset class="js-debug-service-load-mode-control" role="radiogroup" aria-label="${esc(label)}">${debugGraphServiceLoadModes.map(mode => {
     const checked = mode === selected;
@@ -2222,11 +2321,12 @@ function debugGraphSeriesDisplayColor(series) {
   return '';
 }
 
-function debugGraphSeriesStyleAttr(series, {barPattern = false} = {}) {
+function debugGraphSeriesStyleAttr(series, {barPattern = false, areaPatternId = ''} = {}) {
   const color = debugGraphSeriesDisplayColor(series);
   const declarations = color ? [`--js-debug-series-color: ${color}`] : [];
   const patternId = barPattern ? debugGraphAgentTokenPatternId(series) : '';
   if (patternId) declarations.push(`fill: url(#${patternId})`);
+  if (areaPatternId) declarations.push(`fill: url(#${areaPatternId})`);
   return declarations.length ? ` style="${esc(`${declarations.join('; ')};`)}"` : '';
 }
 
@@ -2295,7 +2395,27 @@ function debugGraphPolylineHtml(series, chartMax, domain, logScale = false, noDa
   }).join('');
 }
 
-function debugGraphAreaPathHtml(series, chartMax, domain, noDataRanges = null) {
+// Any line series can have an isolated valid sample during warmup or across a
+// genuine no-data span. SVG polylines do not paint a singleton, so keep each
+// measurement visible as a marker without carrying it forward in time.
+function debugGraphSingletonLineMarkersHtml(series, chartMax, domain, logScale = false, noDataRanges = null) {
+  const values = debugGraphSeriesPlotValues(series);
+  const times = series.times || [];
+  const hasData = debugGraphSeriesPlotHasDataValues(series);
+  const durations = series.durations || [];
+  const segments = debugGraphPolylinePointSegments(
+    values, times, chartMax, domain, hasData, durations, 0, logScale,
+    Array.isArray(noDataRanges) ? noDataRanges : null,
+    Array.isArray(noDataRanges) ? debugGraphSeriesPlotObservedValues(series) : null,
+  );
+  return segments.filter(segment => segment.length === 1).map(([point]) => {
+    const [x, y] = String(point).split(',').map(Number);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return '';
+    return `<circle class="${esc(debugGraphSeriesLineClassName(series, 'js-debug-singleton-marker'))}" data-js-debug-singleton-series="${esc(series.key)}" cx="${esc(x.toFixed(1))}" cy="${esc(y.toFixed(1))}" r="2.6"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.fullLabel || series.label)}</title></circle>`;
+  }).join('');
+}
+
+function debugGraphAreaPathHtml(series, chartMax, domain, noDataRanges = null, patternScope = 'graphs') {
   const values = debugGraphSeriesPlotValues(series);
   const hasDataValues = debugGraphSeriesPlotHasDataValues(series);
   const lowerValues = Array.isArray(series.stackBaseValues) ? series.stackBaseValues : null;
@@ -2334,7 +2454,8 @@ function debugGraphAreaPathHtml(series, chartMax, domain, noDataRanges = null) {
     const plotCurrent = values[lastCell.index];
     const total = Number.isFinite(Number(plotCurrent)) ? ` data-js-debug-area-total="${esc(Number(plotCurrent))}"` : '';
     const path = [`M ${firstLower[0]},${firstLower[1]}`, ...upperPoints.map(point => `L ${point[0]},${point[1]}`), ...lowerPoints.map(point => `L ${point[0]},${point[1]}`), 'Z'].join(' ');
-    return `<path class="js-debug-area js-debug-area--${esc(debugGraphSeriesClassKey(series))}" data-js-debug-area-series="${esc(series.key)}" data-js-debug-area-shape="linear"${debugGraphSeriesTokenAgentAttrs(series)}${stacked}${total} d="${esc(path)}" stroke="var(--js-debug-series-color, var(--accent-sky-strong))" stroke-linejoin="round" stroke-width="1.1" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.fullLabel || series.label)}</title></path>`;
+    const areaPatternId = series.serviceLoad === true ? debugGraphServiceLoadPatternId(series, patternScope) : '';
+    return `<path class="js-debug-area js-debug-area--${esc(debugGraphSeriesClassKey(series))}" data-js-debug-area-series="${esc(series.key)}" data-js-debug-area-shape="linear"${debugGraphSeriesTokenAgentAttrs(series)}${stacked}${total} d="${esc(path)}" fill="var(--js-debug-series-color, var(--accent-sky-strong))" stroke="var(--js-debug-series-color, var(--accent-sky-strong))" stroke-linejoin="round" stroke-width="1.1" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series, {areaPatternId})}><title>${esc(series.fullLabel || series.label)}</title></path>`;
   }).join('');
 }
 
@@ -2407,11 +2528,41 @@ function debugGraphLegendHtml(seriesItems, {kind = ''} = {}) {
 }
 
 function debugGraphSeriesUsesArea(series, kind = '') {
-  return kind === 'area' && Boolean(series?.hostMetric && series?.hostProcessId);
+  return kind === 'area' && (Boolean(series?.hostMetric && series?.hostProcessId) || series?.serviceLoad === true);
+}
+
+function debugGraphServiceLoadPatternId(series, scope = '') {
+  return `js-debug-service-pattern-${String(scope).replace(/[^A-Za-z0-9_-]/g, '-')}-${debugGraphSeriesClassKey(series)}`;
+}
+
+// Area paths and legend keys share opaque paint; only vertical marks and dots remain
+// recognizable inside a short legend swatch.
+function debugGraphAreaPatternHtml(id, color, patternIndex = 0) {
+  const marks = [
+    '',
+    '<path shape-rendering="crispEdges" d="M2 0V8M6 0V8"/>',
+    '<circle cx="2" cy="2" r="0.8"/><circle cx="6" cy="6" r="0.8"/>',
+    '<path shape-rendering="crispEdges" d="M1 0V8M4 0V8M7 0V8"/>',
+    '<circle cx="2" cy="2" r="1.4"/><circle cx="6" cy="6" r="1.4"/>',
+    '<path shape-rendering="crispEdges" d="M2 0V3M6 5V8"/>',
+    '<path shape-rendering="crispEdges" d="M2 0V8"/><circle cx="6" cy="4" r="0.8"/>',
+  ][Math.max(0, Math.floor(Number(patternIndex) || 0)) % 7];
+  return `<pattern id="${esc(id)}" patternUnits="userSpaceOnUse" width="8" height="8"><rect width="8" height="8" fill="${esc(color || 'currentColor')}"/>${marks ? `<g fill="var(--text)" stroke="var(--text)" stroke-width="1">${marks}</g>` : ''}</pattern>`;
+}
+
+function debugGraphServiceLoadPatternHtml(series, scope, legend = false) {
+  if (series?.serviceLoad !== true) return '';
+  const id = debugGraphServiceLoadPatternId(series, `${scope}${legend ? '-legend' : ''}`);
+  return debugGraphAreaPatternHtml(id, series.color, series.patternIndex);
+}
+
+function debugGraphServiceLoadPatternDefinitionsHtml(seriesItems, scope) {
+  return `<defs>${seriesItems.map(series => debugGraphServiceLoadPatternHtml(series, scope)).join('')}</defs>`;
 }
 
 function debugGraphLegendSwatchHtml(series, kind = '') {
   if (series?.tokenPatternSeries === true) return debugGraphAgentTokenLegendSwatchHtml(series);
+  if (series?.serviceLoad === true) { const id = debugGraphServiceLoadPatternId(series, `${series.agentTokenPatternScope || 'graphs'}-legend`); return `<svg class="js-debug-legend-area" viewBox="0 0 18 8" preserveAspectRatio="none" aria-hidden="true"><defs>${debugGraphServiceLoadPatternHtml(series, series.agentTokenPatternScope || 'graphs', true)}</defs><rect width="18" height="8" fill="url(#${esc(id)})" stroke="${esc(series.color || 'currentColor')}"/></svg>`; }
   if (debugGraphSeriesUsesArea(series, kind)) return `<span class="js-debug-legend-area" aria-hidden="true"${debugGraphSeriesStyleAttr(series)}></span>`;
   if (series?.clientMetric === true || series?.processCpu === true || series?.key === 'systemCpu' || series?.key === 'systemMemory' || debugGraphSeriesLinePattern(series)) {
     return `<svg class="js-debug-legend-line" viewBox="0 0 18 4" aria-hidden="true"><line class="${esc(debugGraphSeriesLineClassName(series))}"${debugGraphSeriesLinePatternAttrs(series)} x1="0" y1="2" x2="18" y2="2" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}></line></svg>`;
@@ -2528,19 +2679,17 @@ function debugGraphXAxisHtml(domain) {
   </div>`;
 }
 
-// The yolomux.py web process is a daemon like the other six, so its CPU line belongs on the daemon
-// chart rather than beside unrelated host processes. Only the rendering moves: the CPU family stays
-// the single owner of that PID and samples it at its own cadence, and the service-load family still
-// carries no `web` row, so one process is never sampled twice at two cadences. The consequence is
-// that this line reports a bucket average and does not follow the chart's Avg/Max/Min control,
-// which needs the per-bucket range only the service-load family records.
-function debugGraphSeriesIsWebProcessCpu(series) {
-  return series?.processCpu === true;
-}
-
 function debugGraphGroupSeriesItems(group, seriesItems) {
   if (group.serviceLoad === true) {
-    return seriesItems.filter(series => series.serviceLoad === true || debugGraphSeriesIsWebProcessCpu(series));
+    const metric = debugGraphServiceLoadMetric(group);
+    const serviceSeries = seriesItems.filter(series => series.serviceLoad === true
+      && (series.serviceMetric || 'cpu') === metric
+      && (group.runtimeOnly !== true || String(series.key).startsWith('serviceLoad:runtime:')));
+    if (metric === 'cpu' && group.key === 'serversLoad'
+      && group.runtimeOnly !== true) {
+      return [...serviceSeries, ...seriesItems.filter(series => series.processCpu === true)];
+    }
+    return serviceSeries;
   }
   if (group.dynamicAgentTokens === true) return seriesItems.filter(series => series.agentTokenSeries === true);
   if (group.dynamicTokenDimension) return seriesItems.filter(series => series.tokenDimension === group.dynamicTokenDimension);
@@ -2550,14 +2699,14 @@ function debugGraphGroupSeriesItems(group, seriesItems) {
   if (group.hostMetric) {
     const hostSeries = seriesItems.filter(series => series.hostMetric === group.hostMetric);
     if (group.hostMetric === 'cpu') {
-      return [...hostSeries, ...seriesItems.filter(series => series.key === 'cpu' || series.key === 'systemCpu')];
+      return [...hostSeries, ...seriesItems.filter(series => series.key === 'cpu' || series.key === 'systemCpu' || series.processCpu === true)];
     }
     if (hostSeries.length || group.hostMetric !== 'cpu') {
       return [...hostSeries, ...seriesItems.filter(series => group.hostMetric === 'memory' && series.key === 'systemMemory')];
     }
     // Existing history predates host process sampling. Keep it readable until those one-second
-    // buckets age out instead of rendering an empty CPU chart. The per-YOLOmux lines are not
-    // recalled here; they render on the daemon chart now.
+    // buckets age out instead of rendering an empty CPU chart. Current process CPU series stay
+    // on this card; Daemons Load is available only in System -> Daemons.
     return seriesItems.filter(series => series.key === 'cpu' || series.key === 'systemCpu');
   }
   const seriesKeys = new Set(group.series);
@@ -2569,6 +2718,23 @@ function debugGraphMacMemoryCardAvailable(buckets) {
 }
 
 function debugGraphResolvedChartGroup(group, buckets) {
+  if (group?.key === 'serversLoad' && group.serviceLoad === true) {
+    const goOwnedSample = (buckets || []).some(bucket => {
+      for (const [key, item] of bucket?.hostMetrics?.serviceLoad?.entries?.() || []) {
+        if (debugGraphServiceLoadSampleCount(item, 'cpu') <= 0) continue;
+        if (String(key).startsWith('runtime:') || key === 'yolomux-go') return true;
+      }
+      return false;
+    });
+    if (!goOwnedSample) {
+      return {
+        ...group,
+        descKey: 'debug.graph.chart.serversLoad.desc',
+        runtimeOnly: false,
+        unit: 'percent',
+      };
+    }
+  }
   if (group?.key !== 'memory' || !debugGraphMacMemoryCardAvailable(buckets)) return group;
   return {
     ...group,
@@ -2786,18 +2952,18 @@ function debugGraphNearestHoverSeriesAtTime(chart, timestamp, event, groupKey) {
 }
 
 function debugGraphServiceLoadHoverSeriesAtTime(chart, timestamp, event) {
-  return debugGraphNearestHoverSeriesAtTime(chart, timestamp, event, 'serversLoad');
+  return debugGraphNearestHoverSeriesAtTime(chart, timestamp, event, String(chart?.dataset?.jsDebugChart || ''));
 }
 
 function debugGraphHoverDetailAtTime(chart, timestamp, event) {
   const key = String(chart?.dataset?.jsDebugChart || '');
   const data = jsDebugGraphHoverChartData.get(key);
-  if (data?.group?.key === 'serversLoad') {
+  if (data?.group?.serviceLoad === true) {
     const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
     const series = debugGraphServiceLoadHoverSeriesAtTime(chart, timestamp, event);
     if (index < 0 || !series) return {text: debugGraphValueText(0, data.group.unit), seriesKey: ''};
     return {
-      text: `${series.label}: ${debugGraphValueText(series.values?.[index], 'percent')}`,
+      text: `${series.label}: ${debugGraphValueText(series.values?.[index], data.group.unit)}`,
       seriesKey: series.key,
     };
   }
@@ -3173,7 +3339,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
   const renderedPlotSeries = plotSeries.map(scopedPatternSeries);
   const spikeAxis = (group.key === 'agentTokens' || group.key === 'modelTokens')
     ? options.spikeAxis
-    : (group.key === 'serversLoad' ? debugGraphSpikeCompressedAxisDescriptor(group, plotSeries.flatMap(debugGraphSeriesPlotValues)) : null);
+    : (group.key === 'serversLoad' ? debugGraphServiceLoadAxisDescriptor(group, plotSeries, lineSeries) : null);
   const plotScale = spikeAxis?.scale || debugGraphUsesLogScale(group, plotSeries);
   const movingAverageSeries = groupSeries.filter(series => Number(series.movingAverageSamples || 0) > 0);
   const rawMax = Math.max(0, ...plotSeries.map(series => Number(series.plotMax ?? series.max) || 0), ...lineSeries.map(series => Number(series.max) || 0), debugGraphChartCapacityMax(group, buckets));
@@ -3216,8 +3382,8 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
       <div class="js-debug-chart-head">
       <div class="js-debug-chart-heading-row">
         <span class="js-debug-chart-title"${groupTitleAttrs}>${esc(groupLabel)}</span>
-        ${group.key === 'serversLoad' ? debugGraphServiceLoadModeControlsHtml(buckets) : displayedSummaryHtml}
-        <button type="button" class="js-debug-chart-close control-active-hover" data-js-debug-chart-close="${esc(group.key)}" aria-label="${esc(t('common.close'))} ${esc(groupLabel)}" title="${esc(t('common.close'))}">×</button>
+        ${group.key === 'serversLoad' ? debugGraphServiceLoadModeControlsHtml(buckets, group) : displayedSummaryHtml}
+        ${options.closable === false ? '' : `<button type="button" class="js-debug-chart-close control-active-hover" data-js-debug-chart-close="${esc(group.key)}" aria-label="${esc(t('common.close'))} ${esc(groupLabel)}" title="${esc(t('common.close'))}">×</button>`}
       </div>
       ${group.key === 'activity' ? debugGraphLiveAgentWindowDetailHtml(group.key) : ''}
       ${chartUnavailable ? '' : debugGraphLegendHtml(renderedLegendSeries, {kind: group.kind})}
@@ -3228,7 +3394,8 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
       <div class="js-debug-plot">
         <svg class="js-debug-line-chart" viewBox="0 0 ${esc(jsDebugGraphGeometry.width)} ${esc(jsDebugGraphGeometry.height)}" role="img" aria-label="${esc(groupLabel)}" preserveAspectRatio="none">
           ${group.kind === 'bar' ? debugGraphAgentTokenPatternDefsHtml(renderedPlotSeries) : ''}
-          ${group.kind === 'area' ? plotSeries.map(series => debugGraphAreaPathHtml(series, Math.max(axisMax, 1), domain, genuineNoDataRanges)).join('') : ''}
+          ${group.kind === 'area' && group.serviceLoad === true ? debugGraphServiceLoadPatternDefinitionsHtml(renderedPlotSeries, patternScope) : ''}
+          ${group.kind === 'area' ? renderedPlotSeries.map(series => debugGraphAreaPathHtml(series, Math.max(axisMax, 1), domain, genuineNoDataRanges, patternScope)).join('') : ''}
           ${group.kind === 'bar' ? renderedPlotSeries.map(series => debugGraphBarRectsHtml({...series, zeroBar: group.zeroBar === true}, Math.max(axisMax, 1), domain, plotScale)).join('') : ''}
           ${debugGraphGridLinesHtml({...group, scale: plotScale}, axisMax)}
           ${plotScale?.mode === 'broken-linear' ? debugGraphAxisBreakHtml(group, axisMax, plotScale) : ''}
@@ -3236,6 +3403,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
           ${group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRectsHtml(overlayBuckets, domain) : ''}
            ${debugGraphHistoryCoverageGapRectsHtml(group, domain, group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRuns(overlayBuckets, domain) : [], groupSeries)}
           ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale, genuineNoDataRanges)).join('')}
+          ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphSingletonLineMarkersHtml(series, Math.max(axisMax, 1), domain, plotScale, genuineNoDataRanges)).join('')}
           ${overlayLineSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale, genuineNoDataRanges)).join('')}
           ${movingAverageSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${debugGraphLivePulseHtml(groupSeries, buckets, domain)}
@@ -3254,6 +3422,7 @@ function debugGraphUsesLogScale(group, seriesItems) {
   const values = candidates.map(Number).filter(value => Number.isFinite(value) && value > 0);
   if (!values.length) return false;
   const max = Math.max(...values);
+  if (group?.key === 'serversLoad') return false;
   if (group?.key === 'latency') return max > 1000;
   return false;
 }
@@ -3952,7 +4121,11 @@ function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisible
   const tokenBuckets = debugGraphAgentTokenDisplayBuckets(nowMs);
   const spikeAxis = debugGraphTokenSpikeAxisDescriptor(tokenBuckets);
   const visibleGroupKeys = new Set(chartGroups.map(group => group.key));
-  const gridHtml = jsDebugGraphChartGroups.flatMap(group => {
+  // `chartGroups` normally contains members of the top-level Graphs manifest, but Daemons/System
+  // supplies its standalone runtime-owner group explicitly. Preserve manifest order and append
+  // supplied groups that are intentionally outside Graphs.
+  const requestedGroups = [...jsDebugGraphChartGroups, ...(chartGroups || []).filter(group => !jsDebugGraphChartGroups.some(item => item.key === group.key))];
+  const gridHtml = requestedGroups.flatMap(group => {
       const groupBuckets = debugGraphBucketsForChartGroup(group, buckets, nowMs);
       const groupSeriesItems = groupBuckets === buckets ? seriesItems : debugGraphSeriesData(groupBuckets);
       const items = visibleGroupKeys.has(group.key)
@@ -4187,6 +4360,9 @@ function ensureJsDebugCurrentStatsClient() {
       },
       onDelta(snapshot, delta) {
         paintJsDebugCurrentStatsDelta(snapshot, delta);
+      },
+      onRuntime(load) {
+        applyJsDebugCurrentRuntimeLoad(load);
       },
     },
     onState(state, error) {
@@ -4424,7 +4600,7 @@ function jsDebugCurrentServiceLoadItem(record, source) {
   const serviceLoad = record.host_metrics.service_load;
   if (!serviceLoad[source]) {
     serviceLoad[source] = {
-      label: source,
+      label: debugGraphServiceLoadLabel(source),
       cpu_total_percent: 0,
       cpu_samples: 0,
       cpu_min_percent: null,
@@ -5002,10 +5178,10 @@ const DEBUG_SYSTEM_HEALTH_REASON_TEXT = Object.freeze({
   history_port_mismatch: 'the retained history belonged to another port and was reset',
   // The roster's two STRUCTURAL absences. Neither is a failure and neither is a zero: the
   // observer watches the six local services from this web process, so it has no restart,
-  // request, error or latency series for the web process itself, and the tmux signal watcher
-  // is an in-process subsystem with no separate process to measure.
+  // request, error or latency series for the web process itself. The Go child row is an
+  // in-process label for the same PID and therefore has no independent process sample.
   web_process_not_observed: 'the backend-health observer watches the local services from this web process, so it has never observed this web process itself',
-  resource_metrics_owned_by_nested_service: 'this process is represented by the nested service row, so its CPU and memory are shown there once',
+  resource_metrics_owned_by_parent_web: 'this in-process row shares the YOLOmux web PID, so its CPU and memory are shown on the parent row once',
   subsystem_not_observed: 'this is an in-process subsystem, not a separate process, so it has no independent process or traffic measurement',
   schema_unsupported: 'the backend published a local-services schema this panel does not render',
   // Diagnostics the sampler and the watcher publish only once they have run. Before that the field
@@ -5477,17 +5653,7 @@ function debugSystemRosterStatusHtml(state, toneOverride = '') {
 // with its reason code rather than letting the cell fall back to a bare zero.
 function debugSystemRosterWebRow(payload = {}, port = '') {
   const server = payload.server && typeof payload.server === 'object' ? payload.server : {};
-  const serverPid = Number(server.pid || 0);
-  const localServices = debugSystemRenderableLocalServices(payload);
-  const nestedServiceOwnsProcess = serverPid > 0
-    && Array.isArray(localServices.services)
-    && localServices.services.some(service => (
-      String(service?.parent_id || service?.parentId || '') === DEBUG_SYSTEM_ROSTER_WEB_ID
-      && Number(service?.pid || 0) === serverPid
-    ));
-  const absent = debugSystemAbsentMetric(
-    nestedServiceOwnsProcess ? 'resource_metrics_owned_by_nested_service' : 'web_process_not_observed',
-  );
+  const absent = debugSystemAbsentMetric('web_process_not_observed');
   return {
     id: DEBUG_SYSTEM_ROSTER_WEB_ID,
     kind: 'web',
@@ -5497,12 +5663,12 @@ function debugSystemRosterWebRow(payload = {}, port = '') {
     state: payload.ok === false ? 'issue' : 'running',
     reason: payload.ok === false ? String(jsDebugSystemState.error || '') : '',
     metrics: {
-      // Typed envelopes straight from the backend, exactly like a service row. They were built
-      // here from raw floats until the producer started publishing the envelope, which is what
-      // let an unsampled `0` render as `measured 0.0B` / `measured 0%` and be summed into the
-      // strip's Memory and CPU totals while ~160MB of real RSS went uncounted.
-      cpu_now_percent: nestedServiceOwnsProcess ? absent : server.cpu_percent,
-      rss_bytes: nestedServiceOwnsProcess ? absent : server.rss_bytes,
+      // The web process is the resource owner for the Go monolith. The nested
+      // YO!stats row is an in-process label and is made structural-only below,
+      // so CPU/RSS appear on the row users identify as YOLOmux web without
+      // counting the same PID twice in the summary.
+      cpu_now_percent: server.cpu_percent || absent,
+      rss_bytes: server.rss_bytes || absent,
       uptime_seconds: server.uptime_seconds,
       // The backend-health observer runs IN this web process and observes the six local services;
       // it has never observed this process, so these four have no series at all. Rendering them as
@@ -5561,7 +5727,7 @@ function debugSystemRosterUnsupportedSchemaRow() {
   };
 }
 
-function debugSystemRosterServiceRow(service = {}) {
+function debugSystemRosterServiceRow(service = {}, {structuralResourceMetrics = false} = {}) {
   const id = String(service?.id || service?.service || '');
   const metrics = service?.metrics && typeof service.metrics === 'object' ? service.metrics : {};
   const health = service?.health && typeof service.health === 'object' ? service.health : {};
@@ -5571,6 +5737,7 @@ function debugSystemRosterServiceRow(service = {}) {
   // Guarding field by field made the rule graded rather than absolute: it left the row trusting
   // the unknown payload's `id`, `label` and shape while refusing its numbers, which is a
   // half-trust that has to be re-decided every time a field is added.
+  const structuralAbsent = debugSystemAbsentMetric('resource_metrics_owned_by_parent_web');
   return {
     id,
     kind: 'service',
@@ -5581,8 +5748,8 @@ function debugSystemRosterServiceRow(service = {}) {
     reason: String(service?.reason || ''),
     pid: Number(service?.pid || 0),
     metrics: {
-      cpu_now_percent: metrics.cpu_now_percent,
-      rss_bytes: metrics.rss_bytes,
+      cpu_now_percent: structuralResourceMetrics ? structuralAbsent : metrics.cpu_now_percent,
+      rss_bytes: structuralResourceMetrics ? structuralAbsent : metrics.rss_bytes,
       uptime_seconds: metrics.uptime_seconds,
       process_start_count: healthMetrics.process_start_count,
       unexpected_restart_count: healthMetrics.unexpected_restart_count,
@@ -5665,13 +5832,17 @@ function debugSystemRosterRows(payload = {}) {
   for (const id of inventory) {
     // A service in the inventory with no row is a MISSING row, not an absent service: it renders
     // unavailable with a reason rather than silently disappearing from the roster.
-    rows.push(debugSystemRosterServiceRow(servicesById.get(id) || {
+    const service = servicesById.get(id) || {
       id,
       label: id,
       state: 'unavailable',
       reason: 'Service status is missing',
       metrics: {},
-    }));
+    };
+    const serverPid = Number(payload.server?.pid || 0);
+    const structuralResourceMetrics = String(service?.parent_id || service?.parentId || '') === DEBUG_SYSTEM_ROSTER_WEB_ID
+      && serverPid > 0 && Number(service?.pid || 0) === serverPid;
+    rows.push(debugSystemRosterServiceRow(service, {structuralResourceMetrics}));
   }
   return rows;
 }
@@ -5712,7 +5883,7 @@ function debugSystemRosterSummary(rows = []) {
   );
   const resourceOwner = row => {
     if (!row?.parentId) {
-      return row?.metrics?.cpu_now_percent?.reason_code !== 'resource_metrics_owned_by_nested_service';
+      return row?.metrics?.cpu_now_percent?.reason_code !== 'resource_metrics_owned_by_parent_web';
     }
     const parent = rows.find(candidate => String(candidate?.id || '') === String(row.parentId));
     // A nested row is an independent resource owner only when its parent has no
@@ -6127,11 +6298,20 @@ function debugSystemWebProcessDetailHtml(payload = {}) {
   // the ONE envelope renderer with its reason like every other unmeasured value in a disclosure.
   const systemCpu = server.system_cpu_percent && typeof server.system_cpu_percent === 'object' ? server.system_cpu_percent : {};
   const systemCpuText = debugSystemScalar(systemCpu.value, '', value => `${debugSystemNumber(value, 1)}%`);
+  const systemMemoryUsed = server.system_memory_used_bytes && typeof server.system_memory_used_bytes === 'object' ? server.system_memory_used_bytes : {};
+  const systemMemoryCapacity = server.system_memory_capacity_bytes && typeof server.system_memory_capacity_bytes === 'object' ? server.system_memory_capacity_bytes : {};
+  const systemMemoryUsedText = debugSystemScalar(systemMemoryUsed.value, '', value => debugGraphTerseBytesText(value));
+  const systemMemoryCapacityText = debugSystemScalar(systemMemoryCapacity.value, '', value => debugGraphTerseBytesText(value));
+  const systemMemoryText = systemMemoryUsedText.text === '—'
+    ? '—'
+    : `${systemMemoryUsedText.text} / ${systemMemoryCapacityText.text}`;
+  const systemMemoryReason = systemMemoryUsedText.reason || systemMemoryCapacityText.reason;
   const identity = debugSystemRowsHtml([
     ['Version', server.version],
     ['PID', server.pid],
     ['State directory', payload.state_dir],
     ['System CPU', systemCpuText.text, systemCpuText.text === '—' ? String(systemCpu.reason || '') : ''],
+    ['System memory', systemMemoryText, systemMemoryReason],
   ]);
   const events = debugSystemRowsHtml([
     ['SSE subscribers', Object.values(clientEvents.channel_counts || {}).reduce((sum, value) => sum + Number(value || 0), 0)],
@@ -6188,6 +6368,153 @@ const DEBUG_SYSTEM_ROSTER_SERVICE_DETAIL = Object.freeze({
   indexd: payload => debugSystemSearchCachesDetailHtml(payload),
 });
 
+function debugSystemRuntimeMemoryChartHtml(profile = {}) {
+  const samples = Array.isArray(profile.history) ? profile.history.filter(item => item && item.categories && typeof item.categories === 'object') : [];
+  const categories = ['Heap objects', 'Heap unused spans', 'Heap free retained', 'Goroutine stacks', 'OS stacks', 'Runtime metadata', 'Profiling buckets', 'Other runtime'];
+  const colors = ['#46b86c', '#64a6e8', '#d9a441', '#b279d4', '#39b7ad', '#e17777', '#7786dd', '#9b9b9b'];
+  if (!samples.length) return '<p data-go-memory-empty>Go runtime memory samples are not available yet.</p>';
+  const width = 800, height = 180, left = 54, right = 8, plotTop = 8, bottom = 26;
+  const sampleHasClasses = sample => categories.every(key => Object.hasOwn(sample.categories, key) && Number.isFinite(Number(sample.categories[key])));
+  const completeIndexes = samples.flatMap((sample, index) => sampleHasClasses(sample) && Number.isFinite(Number(sample.at)) ? [index] : []);
+  const completeSamples = completeIndexes.map(index => samples[index]);
+  const totals = completeSamples.map(sample => categories.reduce((sum, key) => sum + Number(sample.categories[key]), 0));
+  const max = Math.max(1, ...totals);
+  const timestamps = samples.map(sample => Number(sample.at)).filter(Number.isFinite);
+  const startAt = Math.min(...timestamps), endAt = Math.max(...timestamps);
+  const maxSampleGapSeconds = Math.max(1, Number(profile.sample_interval_seconds) || 5) * 3;
+  const xForSample = sample => startAt < endAt
+    ? left + (Number(sample.at) - startAt) * (width - left - right) / (endAt - startAt)
+    : (left + width - right) / 2;
+  const yForValue = value => height - bottom - value * (height - plotTop - bottom) / max;
+  const runs = [];
+  for (const index of completeIndexes) {
+    const previousIndex = runs.at(-1)?.at(-1);
+    const elapsed = previousIndex === undefined ? 0 : Number(samples[index].at) - Number(samples[previousIndex].at);
+    if (previousIndex === undefined || index !== previousIndex + 1 || elapsed > maxSampleGapSeconds) runs.push([]);
+    runs.at(-1).push(index);
+  }
+  const defs = categories.map((_key, i) => debugGraphAreaPatternHtml(`go-memory-pattern-${i}`, colors[i])).join('');
+  const paths = categories.map((key, categoryIndex) => runs.map(run => {
+    const upper = [], lower = [];
+    for (const index of run) {
+      const sample = samples[index];
+      const before = categories.slice(0, categoryIndex).reduce((sum, name) => sum + Number(sample.categories[name]), 0);
+      const value = Number(sample.categories[key]);
+      const x = xForSample(sample);
+      upper.push(`${x.toFixed(1)},${yForValue(before + value).toFixed(1)}`);
+      lower.push(`${x.toFixed(1)},${yForValue(before).toFixed(1)}`);
+    }
+    return `<path data-go-memory-area="${esc(key)}" d="M${upper.join(' L')} L${lower.reverse().join(' L')} Z" fill="url(#go-memory-pattern-${categoryIndex})" stroke="${colors[categoryIndex]}" stroke-width="1"><title>${esc(key)}</title></path>`;
+  }).join('')).join('');
+  const gridPaths = [0, 0.5, 1].map(fraction => {
+    const value = max * fraction, y = yForValue(value);
+    return `<path d="M${left} ${y.toFixed(1)}H${width - right}" stroke="currentColor" stroke-opacity="0.18"/><text fill="currentColor" x="${left - 5}" y="${(y + 3).toFixed(1)}" text-anchor="end">${esc(debugGraphTerseBytesText(value))}</text>`;
+  }).join('');
+  const timeLabels = `<text fill="currentColor" x="${left}" y="${height - 4}">${esc(new Date(startAt * 1000).toLocaleTimeString())}</text><text fill="currentColor" x="${width - right}" y="${height - 4}" text-anchor="end">${esc(new Date(endAt * 1000).toLocaleTimeString())}</text>`;
+  const sampleInterval = Math.max(1, Number(profile.sample_interval_seconds) || 5);
+  const nominalHalfWidth = startAt < endAt ? (width - left - right) * sampleInterval / (endAt - startAt) / 2 : 12;
+  const sampleReadouts = runs.flatMap(run => run.map((index, runPosition) => {
+    const x = xForSample(samples[index]);
+    const previousX = runPosition > 0 ? xForSample(samples[run[runPosition - 1]]) : x - nominalHalfWidth;
+    const nextX = runPosition < run.length - 1 ? xForSample(samples[run[runPosition + 1]]) : x + nominalHalfWidth;
+    const x1 = Math.max(left, runPosition === 0 ? previousX : (previousX + x) / 2);
+    const x2 = Math.min(width - right, runPosition === run.length - 1 ? nextX : (x + nextX) / 2);
+    const sample = samples[index];
+    const total = categories.reduce((sum, key) => sum + Number(sample.categories[key]), 0);
+    const values = categories.map(key => `${key}: ${debugGraphTerseBytesText(sample.categories[key])}`).join(' · ');
+    return `<rect data-go-memory-sample="${esc(sample.at)}" x="${x1.toFixed(1)}" y="${plotTop}" width="${Math.max(1, x2 - x1).toFixed(1)}" height="${height - plotTop - bottom}" fill="transparent"><title>${esc(new Date(Number(sample.at) * 1000).toLocaleString())} · Go memory classes ${debugGraphTerseBytesText(total)} total · ${values}</title></rect>`;
+  })).join('');
+  const legend = categories.map((key, i) => `<span class="js-debug-go-memory-legend-item"><svg viewBox="0 0 18 8" aria-hidden="true"><rect width="18" height="8" fill="url(#go-memory-pattern-${i})" stroke="${colors[i]}"/></svg>${esc(key)}</span>`).join('');
+  const sample = samples.at(-1);
+  const stamp = new Date(Number(sample.at || 0) * 1000).toLocaleTimeString();
+  const top = categories.filter(key => Object.hasOwn(sample.categories, key) && Number.isFinite(Number(sample.categories[key])))
+    .map(key => [key, Number(sample.categories[key])]).sort((a,b) => b[1]-a[1])[0];
+  const gaugeLabels = [
+    ['/memory/classes/total:bytes', 'Go memory total', 'bytes'],
+    ['/memory/classes/heap/released:bytes', 'Heap released', 'bytes'],
+    ['/gc/heap/live:bytes', 'Live heap', 'bytes'],
+    ['/gc/heap/goal:bytes', 'Heap goal', 'bytes'],
+    ['/gc/cycles/total:gc-cycles', 'GC cycles', 'count'],
+    ['/sched/goroutines:goroutines', 'Goroutines', 'count'],
+  ];
+  const gauges = gaugeLabels.map(([key, label, unit]) => {
+    const value = sample.gauges?.[key];
+    return [label, value === undefined ? 'Unavailable' : unit === 'bytes' ? debugGraphTerseBytesText(value) : debugSystemNumber(value)];
+  });
+  const unavailable = Array.isArray(sample.unavailable) && sample.unavailable.length ? `<p>Unavailable runtime metrics: ${esc(sample.unavailable.join(', '))}</p>` : '';
+  const topText = top ? `${esc(top[0])}: ${esc(debugGraphTerseBytesText(top[1]))}` : 'No complete class values';
+  const chartSamples = completeSamples.length < samples.length ? `<p data-go-memory-missing-samples>${samples.length - completeSamples.length} samples have incomplete class data and are shown as gaps.</p>` : '';
+  return `<section data-go-memory-chart data-process-pid="${esc(sample.pid)}"><h5>Go memory classes over time</h5><p>Latest sample ${esc(stamp)} · largest class ${topText} · ${completeSamples.length} complete samples</p>${debugSystemRowsHtml(gauges)}<div class="js-debug-go-memory-legend">${legend}</div><svg width="100%" height="220" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="Stacked Go runtime memory classes; byte values on the vertical axis and capture time on the horizontal axis. Hover a sample for its class values.">${defs}${gridPaths}${paths}${sampleReadouts}${timeLabels}</svg>${chartSamples}${unavailable}<p>Classes partition Go-managed unreleased memory. Process RSS and native memory use a different accounting source.</p></section>`;
+}
+
+function debugSystemHeapStackChartHtml(captures = [], processPid = 0) {
+  const samples = (Array.isArray(captures) ? captures : []).filter(sample =>
+    Number.isFinite(Number(sample?.at)) && Array.isArray(sample?.top_inuse)).slice().sort((left, right) => Number(left.at) - Number(right.at));
+  if (samples.length < 2) return '<p data-heap-stack-chart-empty>Capture at least two profiles to compare retained allocation stacks over time.</p>';
+  const totals = new Map();
+  const appearances = new Map();
+  for (const sample of samples) {
+    for (const row of sample.top_inuse) {
+      if (!row || typeof row.key !== 'string') continue;
+      totals.set(row.key, (totals.get(row.key) || 0) + Math.max(0, Number(row.inuse_bytes) || 0));
+      appearances.set(row.key, (appearances.get(row.key) || 0) + 1);
+    }
+  }
+  const keys = [...totals.entries()].filter(([key]) => appearances.get(key) === samples.length)
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0])).slice(0, 5).map(([key]) => key);
+  const colors = ['#46b86c', '#64a6e8', '#d9a441', '#b279d4', '#39b7ad', '#9b9b9b'];
+  const series = [...keys.map(key => {
+    const row = samples[0].top_inuse.find(item => item?.key === key);
+    const stack = Array.isArray(row?.stack) ? row.stack.join('\n') : key;
+    return {key, label: `${String(row?.function || 'unknown')} · ${key.slice(0, 8)}`, title: `${key}\n${stack}`, value: sample => Number(sample.top_inuse.find(item => item?.key === key)?.inuse_bytes)};
+  }), {
+    key: 'other', label: 'Other or unranked sampled stacks', title: 'Other visible ranked stacks plus the backend aggregate, including stacks outside the retained top twelve.', value: sample => {
+      const selected = new Set(keys);
+      const hiddenRows = sample.top_inuse.filter(row => row && !selected.has(row.key));
+      return Math.max(0, Number(sample.other_inuse_bytes) || 0) + hiddenRows.reduce((sum, row) => sum + Math.max(0, Number(row.inuse_bytes) || 0), 0);
+    },
+  }];
+  const width = 800, height = 180, left = 52, right = 8, top = 8, bottom = 24;
+  const scope = `go-heap-stack-${Number(processPid) || 'process'}`;
+  const startAt = Number(samples[0].at), endAt = Number(samples.at(-1).at);
+  const x = index => startAt < endAt ? left + (Number(samples[index].at) - startAt) * (width - left - right) / (endAt - startAt) : (left + width - right) / 2;
+  const values = samples.map(sample => series.map(item => item.value(sample)));
+  const max = Math.max(1, ...values.map(row => row.reduce((sum, value) => sum + value, 0)));
+  const y = value => height - bottom - value * (height - top - bottom) / max;
+  const runs = [];
+  for (let index = 0; index < samples.length; index += 1) {
+    if (!runs.length || Number(samples[index].at) - Number(samples[index - 1]?.at) > 180) runs.push([]);
+    runs.at(-1).push(index);
+  }
+  const defs = series.map((_item, index) => debugGraphAreaPatternHtml(`${scope}-pattern-${index}`, colors[index])).join('');
+  const areas = series.map((item, seriesIndex) => {
+    let lower = samples.map(() => 0);
+    for (let index = 0; index < seriesIndex; index += 1) lower = lower.map((value, sampleIndex) => value + values[sampleIndex][index]);
+    const upper = lower.map((value, sampleIndex) => value + values[sampleIndex][seriesIndex]);
+    return runs.map(run => {
+      const points = [...run.map(index => `${x(index).toFixed(1)},${y(upper[index]).toFixed(1)}`), ...run.slice().reverse().map(index => `${x(index).toFixed(1)},${y(lower[index]).toFixed(1)}`)];
+      return `<path data-heap-stack-area="${esc(item.key)}" d="M${points.join(' L')} Z" fill="url(#${scope}-pattern-${seriesIndex})" stroke="${colors[seriesIndex]}" stroke-width="1"><title>${esc(item.title)}</title></path>`;
+    }).join('');
+  }).join('');
+  const gridPaths = [0, 0.5, 1].map(fraction => {
+    const value = max * fraction, position = y(value);
+    return `<path d="M${left} ${position.toFixed(1)}H${width - right}" stroke="currentColor" stroke-opacity="0.18"/><text fill="currentColor" x="${left - 5}" y="${(position + 3).toFixed(1)}" text-anchor="end">${esc(debugGraphTerseBytesText(value))}</text>`;
+  }).join('');
+  const legend = series.map((item, index) => `<span class="js-debug-go-memory-legend-item" title="${esc(item.title)}"><svg viewBox="0 0 18 8" aria-hidden="true"><rect width="18" height="8" fill="url(#${scope}-pattern-${index})" stroke="${colors[index]}"/></svg><span>${esc(item.label)}</span></span>`).join('');
+  return `<section data-heap-stack-chart><h5>Sampled retained allocation stacks</h5><p>Stacks listed in every capture are shown individually; stacks outside the retained top twelve are included in Other. ${samples.length} captures · byte axis · capture times on the horizontal axis</p><div class="js-debug-go-memory-legend">${legend}</div><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Cumulative sampled retained heap by allocation stack">${defs}${gridPaths}${areas}<text fill="currentColor" x="${left}" y="${height - 4}">${esc(new Date(startAt * 1000).toLocaleTimeString())}</text><text fill="currentColor" x="${width - right}" y="${height - 4}" text-anchor="end">${esc(new Date(endAt * 1000).toLocaleTimeString())}</text></svg></section>`;
+}
+
+function debugSystemPprofCaptureHtml(memory = {}) {
+  if (!memory || typeof memory !== 'object' || memory.available !== true) return '';
+  const captureButton = '<button type="button" class="control-active-hover" data-js-debug-heap-capture>Capture heap profile</button>';
+  const artifactLink = memory.last ? '<a data-js-debug-heap-download href="/api/diagnostics/heap">Download pprof</a>' : '';
+  const status = memory.error ? `<p role="alert">${esc(memory.error)}</p>` : '';
+  const last = memory.last && typeof memory.last === 'object' ? memory.last : null;
+  const stackRows = (title, rows, field) => `<h5>${title}</h5><ol data-heap-rank="${field}">${rows.map(row => `<li data-heap-stack="${esc(row.key)}"><strong>${esc(row.function || 'unknown')}</strong> · ${esc(debugGraphTerseBytesText(row[field]))}<details data-heap-stack-disclosure="${esc(`${field}:${row.key}`)}"><summary>Sampled stack</summary><code>${esc((row.stack || []).join('\n'))}</code></details></li>`).join('') || '<li>No attributed stacks yet</li>'}</ol>`;
+  const completed = last ? `<div data-heap-capture data-process-pid="${esc(last.pid)}" data-binary="${esc(last.binary)}" data-binary-sha256="${esc(last.binary_sha256 || '')}">Captured ${esc(new Date(Number(last.at || 0) * 1000).toLocaleString())} · PID ${esc(last.pid)} · revision ${esc(last.build)} · Go ${esc(last.go_version || 'unknown')} · binary SHA-256 ${esc(last.binary_sha256 || 'unavailable')} · ${esc(last.sample_rate_bytes)} byte sample rate · ${esc(debugGraphTerseBytesText(last.inuse_bytes))} sampled in-use · ${esc(debugGraphTerseBytesText(last.alloc_bytes))} cumulative allocation · ${esc(last.artifact_bytes)} byte pprof</div><p data-heap-snapshot-times>Ranked stacks sampled ${esc(new Date(Number(last.ranked_at || last.at || 0) * 1000).toLocaleTimeString())} · pprof capture started ${esc(new Date(Number(last.artifact_at || last.at || 0) * 1000).toLocaleTimeString())}</p>${debugSystemHeapStackChartHtml(memory.captures || [last], last.pid)}${stackRows('Largest sampled retained stacks', last.top_inuse || [], 'inuse_bytes')}${stackRows('Largest cumulative allocation stacks', last.top_alloc || [], 'alloc_bytes')}<p data-heap-other-inuse>Other sampled stacks: ${esc(debugGraphTerseBytesText(last.other_inuse_bytes))}</p>` : `<p>${memory.active === true ? 'Heap profile capture is active.' : 'No heap profile has been captured.'}</p>`;
+  return `<h4 class="js-debug-roster-detail-title">Go memory and heap profile</h4>${captureButton}${artifactLink}${status}${debugSystemRuntimeMemoryChartHtml(memory)}${completed}<p class="js-debug-roster-note">Runtime classes partition Go-managed unreleased memory and do not equal process RSS. Heap stacks are sampled estimates, may lag two GC cycles, and do not expose exact object or struct sizes. Rankings and the downloadable pprof come from adjacent runtime snapshots, so allocations and frees during capture can make their totals differ. Cumulative allocation bytes are lifetime traffic, not retained RAM. Native allocations are outside this profile. Capture has a one minute cooldown and does not force GC.</p>`;
+}
+
 function debugSystemGoRuntimeDetailHtml(runtimeDiagnostics = {}) {
   if (!runtimeDiagnostics || typeof runtimeDiagnostics !== 'object') return '';
   const runtimeDuration = value => {
@@ -6200,6 +6527,9 @@ function debugSystemGoRuntimeDetailHtml(runtimeDiagnostics = {}) {
     ? runtimeDiagnostics.collectors : {};
   const lifecycle = runtimeDiagnostics.lifecycle && typeof runtimeDiagnostics.lifecycle === 'object'
     ? runtimeDiagnostics.lifecycle : {};
+  const runtimeLoad = runtimeDiagnostics.runtime_load && typeof runtimeDiagnostics.runtime_load === 'object'
+    ? runtimeDiagnostics.runtime_load : {};
+  const profileHtml = debugSystemPprofCaptureHtml(runtimeDiagnostics.memory);
   const processRows = debugSystemRowsHtml([
     ['Roster rows', process.last_roster_rows],
     ['Roster cache', `${debugSystemNumber(process.roster_cache_hits)} hits / ${debugSystemNumber(process.roster_cache_misses)} misses`],
@@ -6211,6 +6541,8 @@ function debugSystemGoRuntimeDetailHtml(runtimeDiagnostics = {}) {
     ['Thread rows', process.last_thread_rows],
     ['Child rows', process.last_child_rows],
   ]);
+  const runtimeLoadEntries = Object.entries(runtimeLoad).filter(([, value]) => value && typeof value === 'object').sort(([left], [right]) => left.localeCompare(right));
+  const runtimeLoadHtml = runtimeLoadEntries.length ? `<h4 class="js-debug-roster-detail-title">Runtime-owner occupancy</h4><div data-go-runtime-load><table class="js-debug-system-table js-debug-system-fixed-table"><thead><tr><th>Owner</th><th>Occupancy</th><th>Duration</th><th>Cadence</th></tr></thead><tbody>${runtimeLoadEntries.map(([name, value]) => { const occupancy = debugSystemScalar(value.load_percent, 'runtime_load_unavailable', current => `${debugSystemNumber(current, 1)}%`); return `<tr data-go-runtime-load-owner="${esc(name)}"><th scope="row">${esc(value.label || name)}</th><td${occupancy.reason ? ` title="${esc(occupancy.reason)}"` : ''}>${esc(occupancy.text)}</td><td>${esc(runtimeDuration(value.duration_ms))}</td><td>${esc(runtimeDuration(value.cadence_ms))}</td></tr>`; }).join('')}</tbody></table><p class="js-debug-roster-note">Occupancy is elapsed owner time divided by its cadence; stacked owners can exceed 100% because collectors run concurrently. It includes waits and I/O and is not process CPU. Nested phase timers remain in this table and are excluded from the cumulative owner chart.</p></div>` : '';
   const collectorEntries = Object.entries(collectors).filter(([, value]) => value && typeof value === 'object');
   const collectorHtml = collectorEntries.length ? `<h4 class="js-debug-roster-detail-title">Collector work</h4><div data-go-runtime-collectors><table class="js-debug-system-table js-debug-system-fixed-table"><thead><tr><th>Owner</th><th>Runs</th><th>Last</th><th>Total</th><th>Rows</th></tr></thead><tbody>${collectorEntries.map(([name, value]) => {
     const families = value.families && typeof value.families === 'object' ? Object.entries(value.families) : [];
@@ -6218,7 +6550,10 @@ function debugSystemGoRuntimeDetailHtml(runtimeDiagnostics = {}) {
     const opencode = name === 'agent_tokens' && ('opencode_database_opens' in value || 'opencode_database_reuses' in value || 'opencode_collection_last_duration_ms' in value)
       ? `<tr data-go-runtime-owner="agent_tokens:opencode"><th scope="row">agent_tokens:opencode</th><td>${esc(`${debugSystemNumber(value.opencode_database_opens)} opens / ${debugSystemNumber(value.opencode_database_reuses)} reuses`)}</td><td>${esc(runtimeDuration(value.opencode_database_last_open_duration_ms))}</td><td>${esc(runtimeDuration(value.opencode_collection_duration_total_ms))}</td><td>—</td></tr>`
       : '';
-    return rows + opencode;
+    const sqlite = name === 'agent_tokens' && ('opencode_sqlite_queries' in value || 'opencode_sqlite_duration_total_ms' in value)
+      ? `<tr data-go-runtime-owner="agent_tokens:sqlite"><th scope="row">agent_tokens:sqlite</th><td>${esc(`${debugSystemNumber(value.opencode_sqlite_queries)} queries`)}</td><td>${esc(runtimeDuration(value.opencode_sqlite_last_duration_ms))}</td><td>${esc(runtimeDuration(value.opencode_sqlite_duration_total_ms))}</td><td>—</td></tr>`
+      : '';
+    return rows + opencode + sqlite;
   }).join('')}</tbody></table></div>` : '';
   const serviceRefresh = runtimeDiagnostics.service_refresh && typeof runtimeDiagnostics.service_refresh === 'object'
     ? runtimeDiagnostics.service_refresh : null;
@@ -6230,7 +6565,22 @@ function debugSystemGoRuntimeDetailHtml(runtimeDiagnostics = {}) {
   const resolutions = lifecycle.by_resolution && typeof lifecycle.by_resolution === 'object'
     ? (Array.isArray(lifecycle.by_resolution) ? lifecycle.by_resolution : Object.values(lifecycle.by_resolution)) : [];
   const lifecycleHtml = resolutions.length ? `<h4 class="js-debug-roster-detail-title">SQLite/materialization work</h4><div data-go-runtime-lifecycle><table class="js-debug-system-table js-debug-system-fixed-table"><thead><tr><th>Resolution</th><th>Cells</th><th>Rows</th><th>Select</th><th>Materialize</th></tr></thead><tbody>${resolutions.map(value => `<tr data-go-runtime-resolution="${esc(value.resolution_seconds || '')}"><th scope="row">${esc(`${value.resolution_seconds || '?'}s`)}</th><td>${esc(debugSystemNumber(value.selected_cells))}</td><td>${esc(debugSystemNumber(value.fact_rows_read))}</td><td>${esc(debugGraphTerseTimeText(Number(value.selection_duration_ms || 0)))}</td><td>${esc(debugGraphTerseTimeText(Number(value.materialization_duration_ms || 0)))}</td></tr>`).join('')}</tbody></table></div>` : '';
-  return `<h4 class="js-debug-roster-detail-title">Measured runtime work</h4>${processRows}${collectorHtml}${serviceRefreshHtml}${phaseHtml}${lifecycleHtml}`;
+  const sqliteRead = runtimeDiagnostics.sqlite_read && typeof runtimeDiagnostics.sqlite_read === 'object' ? runtimeDiagnostics.sqlite_read : null;
+  const sqliteReadHtml = sqliteRead && (Number(sqliteRead.queries || 0) > 0 || Number(sqliteRead.rows || 0) > 0)
+    ? `<div data-go-runtime-sqlite-read>${debugSystemRowsHtml([
+      ['SQLite page queries', sqliteRead.queries],
+      ['SQLite query/row time', runtimeDuration(sqliteRead.duration_total_ms)],
+      ['Last SQLite read', runtimeDuration(sqliteRead.last_duration_ms)],
+      ['Fact rows (lifecycle)', sqliteRead.rows],
+    ])}<p class="js-debug-roster-note">Query time includes SQLite and database/sql row stepping; fact read/decode and bucket folding are reported separately.</p></div>` : '';
+  const factReadHtml = lifecycle.fact_read_duration_ms || lifecycle.last_fact_read_duration_ms || lifecycle.fact_rows_read || lifecycle.decoded_bytes
+    ? `<div data-go-runtime-fact-read>${debugSystemRowsHtml([
+      ['Fact read/decode total', runtimeDuration(lifecycle.fact_read_duration_ms)],
+      ['Last fact read/decode', runtimeDuration(lifecycle.last_fact_read_duration_ms)],
+      ['Rows decoded', lifecycle.fact_rows_read],
+      ['Decoded payload', lifecycle.decoded_bytes == null ? '—' : debugGraphTerseBytesText(Number(lifecycle.decoded_bytes))],
+    ])}<p class="js-debug-roster-note">Fact read/decode includes SQLite row stepping, database/sql conversion, and JSON decoding; it is elapsed work, not a CPU percentage.</p></div>` : '';
+  return `<h4 class="js-debug-roster-detail-title">Measured runtime work</h4>${processRows}${runtimeLoadHtml}${profileHtml}${collectorHtml}${serviceRefreshHtml}${phaseHtml}${sqliteReadHtml}${factReadHtml}${lifecycleHtml}`;
 }
 
 function debugSystemServiceDetailHtml(row, payload = {}, nowSeconds = Date.now() / 1000) {
@@ -6241,6 +6591,7 @@ function debugSystemServiceDetailHtml(row, payload = {}, nowSeconds = Date.now()
   const goroutineScopeReason = String(processDetails.goroutine_scope_reason || '').trim();
   const cpuScope = String(processDetails.cpu_scope || '').trim();
   const cpuNormalization = String(processDetails.cpu_normalization || '').trim();
+  const threadDetailsStatus = String(processDetails.thread_details_status || '');
   const goRuntimeHtml = row.id === 'yolomux-go' ? debugSystemGoRuntimeDetailHtml(processDetails.stats_runtime) : '';
   const threads = Array.isArray(processDetails.threads) ? processDetails.threads : [];
   const childProcesses = Array.isArray(processDetails.child_processes) ? processDetails.child_processes : [];
@@ -6261,6 +6612,11 @@ function debugSystemServiceDetailHtml(row, payload = {}, nowSeconds = Date.now()
       ['State', thread?.state || '—'], ['CPU', debugSystemMetricText(cpu, 'cpu_now_percent')],
     ])}</div>`;
   }).join('')}</div>` : '';
+  const threadDetailsNote = threadDetailsStatus === 'truncated'
+    ? `<p class="js-debug-roster-note" data-go-thread-details-status="truncated">Showing the first ${debugSystemNumber(threads.length)} of ${debugSystemMetricText(threadMetric, 'thread_count')} OS thread details.</p>`
+    : threadDetailsStatus === 'incomplete'
+      ? `<p class="js-debug-roster-note" data-go-thread-details-status="incomplete">The OS thread census is incomplete${threadMetric?.state === 'measured' ? `; the measured total is ${debugSystemMetricText(threadMetric, 'thread_count')}` : '; the exact total is unavailable'}. Showing ${debugSystemNumber(threads.length)} readable thread details.</p>`
+      : '';
   const identity = debugSystemRowsHtml([
     ['Service id', row.id],
     ['PID', Number(row.pid) > 0 ? row.pid : '—', Number(row.pid) > 0 ? '' : debugSystemHealthReasonText('process_not_running')],
@@ -6275,7 +6631,7 @@ function debugSystemServiceDetailHtml(row, payload = {}, nowSeconds = Date.now()
       ...(goroutineMetric ? [['Goroutines', debugSystemMetricText(goroutineMetric, 'goroutine_count')]] : []),
       ...(goroutineScopeReason ? [['Goroutine detail', goroutineScopeReason]] : []),
       ...(threadMetric ? [['Threads', debugSystemMetricText(threadMetric, 'thread_count')]] : []),
-    ]) : ''}${threadHtml}${childProcessHtml}${goRuntimeHtml}
+    ]) : ''}${threadHtml}${threadDetailsNote}${childProcessHtml}${goRuntimeHtml}
     ${debugSystemServiceHealthDetailHtml(row.health, nowSeconds)}
     ${owned ? owned(payload, nowSeconds) : ''}`;
 }
@@ -6442,7 +6798,39 @@ function debugSystemAdvancedHtml(payload = {}, advanced = {}) {
   </details>`;
 }
 
-// The four regions of the Daemons view, in the order a reader needs them. `debugSystemInnerHtml`
+function debugSystemDaemonsChartHtml() {
+  const nowMs = Date.now();
+  const defaultBuckets = debugGraphDisplayBuckets(nowMs, {rangeSeconds: debugRuntimeState.graphRangeSeconds});
+  const domain = debugGraphDomain(nowMs);
+  const sourceBuckets = debugGraphSourceBuckets(domain);
+  const disconnectedRanges = debugGraphDisconnectedRanges(sourceBuckets, domain);
+  const charts = jsDebugGraphDaemonsChartGroups.map(group => {
+    const buckets = debugGraphBucketsForChartGroup(group, defaultBuckets, nowMs);
+    const chartGroup = debugGraphResolvedChartGroup(group, buckets);
+    const seriesItems = debugGraphSeriesData(buckets);
+    const groupSeries = debugGraphGroupSeriesItems(chartGroup, seriesItems);
+    const hasSamples = groupSeries.some(series => Number(series?.samples || 0) > 0);
+    if (hasSamples) {
+      return debugGraphChartHtml(chartGroup, seriesItems, domain, buckets, sourceBuckets, disconnectedRanges, {
+        patternScope: `daemons-${group.key}`,
+        closable: false,
+      });
+    }
+    const emptyText = chartGroup.serviceMetric === 'rss'
+      ? 'Daemon memory samples are not available yet.'
+      : chartGroup.runtimeOnly === true
+        ? 'Runtime-owner samples are not available yet.'
+        : 'Daemon CPU samples are not available yet.';
+    return `<section class="js-debug-chart js-debug-daemons-chart-empty" data-js-debug-chart="${esc(group.key)}"><div class="js-debug-chart-head"><span class="js-debug-chart-title">${esc(debugGraphLocalizedLabel(group))}</span></div><p class="js-debug-chart-unavailable" data-js-debug-daemons-chart-empty>${esc(emptyText)}</p></section>`;
+  }).join('');
+  const runtimeLoad = debugGraphResolvedChartGroup(jsDebugGraphDaemonsChartGroup, defaultBuckets).runtimeOnly === true;
+  const note = runtimeLoad
+    ? 'Daemons load shows measured in-process occupancy; daemon memory shows retained process resident memory. Labels identify goroutines and SQLite cgo work; Unix child processes and OS threads remain in the expanded daemon details. The yolomux-go process CPU line is shown in CPU.'
+    : 'Daemons load shows CPU use for local services; daemon memory shows retained process resident memory.';
+  return `<div class="js-debug-daemons-chart" data-js-debug-daemons-graph><div class="js-debug-chart-shell"><div class="js-debug-chart-grid" data-js-debug-chart-grid data-js-debug-chart-layout="${esc(debugRuntimeState.graphChartLayout)}" data-js-debug-domain-start="${esc(Math.floor(domain.startMs))}" data-js-debug-domain-end="${esc(Math.floor(domain.endMs))}">${charts}</div></div><p class="js-debug-roster-note" data-js-debug-daemons-chart-note>${esc(note)}</p></div>`;
+}
+
+// The six regions of the Daemons view, in the order a reader needs them. `debugSystemInnerHtml`
 // stays the ONE place the shape is declared; `refreshDebugSystemViews` replaces regions one at a
 // time so a poll does not destroy an open disclosure or the focused control inside it.
 // The ONE live region that speaks on its own: what the roster adds up to, and nothing else. It is
@@ -6459,6 +6847,7 @@ function debugSystemRegionHtml(region, payload) {
   if (region === 'announce') return debugSystemAnnounceHtml(payload);
   if (region === 'summary') return debugSystemSummaryStripHtml(payload);
   if (region === 'alerts') return debugSystemAlertsHtml(payload);
+  if (region === 'chart') return debugSystemDaemonsChartHtml();
   if (region === 'roster') {
     const generatedAt = Number(payload.generated_at);
     return debugSystemRosterHtml(payload, {
@@ -6469,7 +6858,7 @@ function debugSystemRegionHtml(region, payload) {
   return debugSystemAdvancedHtml(payload, debugSystemAdvancedView());
 }
 
-const DEBUG_SYSTEM_REGIONS = Object.freeze(['announce', 'summary', 'alerts', 'roster', 'advanced']);
+const DEBUG_SYSTEM_REGIONS = Object.freeze(['announce', 'summary', 'alerts', 'chart', 'roster', 'advanced']);
 
 // ---------------------------------------------------------------------------------------------
 // THE TYPED SNAPSHOT REFUSAL
@@ -6553,7 +6942,7 @@ function debugSystemInnerHtml() {
 // summary strip's "Updated 2s ago" repaints every five seconds.
 const debugSystemRenderedRegions = new WeakMap();
 
-// The ONE seeder for that cache, called by every site that builds the five regions from
+// The ONE seeder for that cache, called by every site that builds the six regions from
 // `debugSystemInnerHtml`. A site that writes the regions and does not record what it wrote leaves
 // each region's WeakMap value `undefined`, so the very next poll compares `undefined` against the
 // freshly generated HTML, finds them different, and assigns `innerHTML` to all five -- a wholesale
@@ -6561,7 +6950,7 @@ const debugSystemRenderedRegions = new WeakMap();
 // and it discards the focused control and any open disclosure row with it.
 //
 // `refreshDebugSystemViews` seeded its own build inline; `createDebugPanel` and `renderDebugPanels`
-// build the same five regions through `debugPanelHtml` and did not, so the first poll after panel
+// build the same six regions through `debugPanelHtml` and did not, so the first poll after panel
 // creation and after every full rerender rebuilt everything. This is one owner called from all
 // three, not a second cache: a second cache would be the divergent copy this panel keeps paying for.
 function seedDebugSystemRenderedRegions(root, payload = jsDebugSystemState.payload) {
@@ -6604,7 +6993,11 @@ function refreshDebugSystemViews() {
       for (const region of regions) {
         const html = debugSystemRegionHtml(String(region.dataset.jsDebugSystemRegion || ''), payload);
         if (debugSystemRenderedRegions.get(region) === html) continue;
+        const openHeapStackDisclosures = new Set([...region.querySelectorAll('[data-heap-stack-disclosure][open]')].map(disclosure => disclosure.dataset.heapStackDisclosure));
         region.innerHTML = html;
+        for (const disclosure of region.querySelectorAll('[data-heap-stack-disclosure]')) {
+          if (openHeapStackDisclosures.has(disclosure.dataset.heapStackDisclosure)) disclosure.open = true;
+        }
         debugSystemRenderedRegions.set(region, html);
       }
     }
@@ -7013,6 +7406,7 @@ function refreshDebugGraphSurfaces({force = true} = {}) {
     refreshDebugGraphElement(graph, {force});
   }
   renderYoCostPanels({force});
+  if (typeof refreshDebugSystemViews === 'function') refreshDebugSystemViews();
 }
 
 function createDebugPanel() {
@@ -7035,7 +7429,7 @@ function createDebugPanel() {
     },
     bind: bindDebugPanel,
   });
-  // `debugPanelHtml` above just wrote the five Daemons regions. Record what it wrote, or the first
+  // `debugPanelHtml` above just wrote the six Daemons regions. Record what it wrote, or the first
   // poll after this panel appears replaces every one of them for no change at all.
   seedDebugSystemRenderedRegions(panel);
   return panel;
@@ -7081,7 +7475,7 @@ function renderDebugPanels(options = {}) {
             restore: (root, value) => restoreDebugLogScrollAnchor(root.querySelector('[data-js-debug-log]'), value, {scrollToBottom: options.scrollLogToBottom === true}),
           },
         ],
-        // Same contract as `createDebugPanel`: record the five Daemons regions just written.
+        // Same contract as `createDebugPanel`: record the six Daemons regions just written.
         afterReplace: seedDebugSystemRenderedRegions,
       });
     }
@@ -7659,7 +8053,7 @@ function debugGraphPointerRatioForEvent(event) {
 }
 
 function debugGraphSetInteractionLines(panel, ratio) {
-  const graph = panel?.querySelector?.('[data-js-debug-graph], [data-js-yocost-graphs]');
+  const graph = panel?.querySelector?.('[data-js-debug-graph], [data-js-debug-daemons-graph], [data-js-yocost-graphs]');
   if (!graph || ratio == null) return;
   const x = (Math.max(0, Math.min(1, Number(ratio))) * jsDebugGraphGeometry.width).toFixed(1);
   graph.classList.add('js-debug-graph--hovering');
@@ -7725,7 +8119,7 @@ function debugGraphSetHoverTooltip(panel, event, ratio) {
 
 function debugGraphClearInteractionLines(panel) {
   if (jsDebugGraphSelectionState) return;
-  const graph = panel?.querySelector?.('[data-js-debug-graph], [data-js-yocost-graphs]');
+  const graph = panel?.querySelector?.('[data-js-debug-graph], [data-js-debug-daemons-graph], [data-js-yocost-graphs]');
   if (graph) graph.classList.remove('js-debug-graph--hovering');
   panel?.querySelectorAll?.('[data-js-debug-hover-tooltip]').forEach(tooltip => { tooltip.hidden = true; });
   panel?.querySelectorAll?.('[data-js-debug-legend-item--hovered]').forEach(item => item.classList.remove('js-debug-legend-item--hovered'));
@@ -7759,7 +8153,7 @@ if (typeof document !== 'undefined' && document?.addEventListener) {
 }
 
 function debugGraphSetSelectionRects(panel, startRatio, endRatio) {
-  const graph = panel?.querySelector?.('[data-js-debug-graph], [data-js-yocost-graphs]');
+  const graph = panel?.querySelector?.('[data-js-debug-graph], [data-js-debug-daemons-graph], [data-js-yocost-graphs]');
   if (!graph) return;
   const start = Math.max(0, Math.min(1, Number(startRatio)));
   const end = Math.max(0, Math.min(1, Number(endRatio)));
@@ -7773,7 +8167,7 @@ function debugGraphSetSelectionRects(panel, startRatio, endRatio) {
 }
 
 function debugGraphClearSelectionRects(panel) {
-  const graph = panel?.querySelector?.('[data-js-debug-graph], [data-js-yocost-graphs]');
+  const graph = panel?.querySelector?.('[data-js-debug-graph], [data-js-debug-daemons-graph], [data-js-yocost-graphs]');
   if (!graph) return;
   graph.classList.remove('js-debug-graph--selecting');
   graph.querySelectorAll('[data-js-debug-selection-rect]').forEach(rect => {
@@ -8186,6 +8580,20 @@ function bindDebugPanel(panel) {
   });
     scope.ownEvent('click', panel, 'click', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
+    const heapCapture = event.target.closest('[data-js-debug-heap-capture]');
+    if (heapCapture && panel.contains(heapCapture)) {
+      event.preventDefault();
+      heapCapture.disabled = true;
+      void apiFetchJsonQuiet('/api/diagnostics/heap', {method: 'POST'}).then(profile => {
+        const owner = jsDebugSystemState.payload?.local_services?.services?.find(item => item?.id === 'yolomux-go');
+        if (owner?.details?.stats_runtime) owner.details.stats_runtime.memory = profile;
+        refreshDebugSystemViews();
+      }).catch(error => {
+        jsDebugSystemState.error = userMessageText(error);
+        refreshDebugSystemViews();
+      });
+      return;
+    }
     const systemRefresh = event.target.closest('[data-js-debug-system-refresh]');
     if (systemRefresh && panel.contains(systemRefresh)) {
       event.preventDefault();

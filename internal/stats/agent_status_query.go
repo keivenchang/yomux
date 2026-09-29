@@ -85,19 +85,20 @@ func (d *Database) QueryAgentStatus(ctx context.Context, query AgentStatusQuery)
 		return AgentStatusSnapshot{}, fmt.Errorf("token rate window exceeds 24 hours")
 	}
 	result := AgentStatusSnapshot{SourceGeneration: d.Header.SourceGeneration, TokenRates: AgentTokenRates{WindowSeconds: window.Seconds()}}
+	nowSeconds := float64(now.UnixNano()) / 1e9
 	var err error
-	result.TokenRates, err = d.agentTokenRates(ctx, float64(now.Add(-window).UnixNano())/1e9, float64(now.UnixNano())/1e9, window)
+	result.TokenRates, err = d.agentTokenRates(ctx, nowSeconds-window.Seconds(), nowSeconds, window)
 	if err != nil {
 		return AgentStatusSnapshot{}, err
 	}
-	rows, err := d.reader.Rows(ctx, `SELECT observed_at, payload_json
+	rows, err := d.reader.Rows(ctx, `SELECT observed_at, source_id, epoch_id, payload_json
 FROM observations WHERE family = 'agent_status'
 ORDER BY observed_at DESC, event_id DESC LIMIT 1`)
 	if err != nil {
 		return AgentStatusSnapshot{}, fmt.Errorf("read latest agent status: %w", err)
 	}
 	if len(rows) == 0 {
-		reason, reasonErr := d.latestUnavailableReason(ctx, "agent_status")
+		reason, reasonErr := d.latestUnavailableReason(ctx, "agent_status", nowSeconds)
 		if reasonErr != nil {
 			return AgentStatusSnapshot{}, reasonErr
 		}
@@ -107,22 +108,22 @@ ORDER BY observed_at DESC, event_id DESC LIMIT 1`)
 		result.Unavailable = &AgentStatusQueryUnavailable{Reason: reason}
 		return result, nil
 	}
-	if len(rows[0]) != 2 {
+	if len(rows[0]) != 4 {
 		return AgentStatusSnapshot{}, fmt.Errorf("latest agent status row has %d columns", len(rows[0]))
 	}
 	observedAt, err := number(rows[0][0])
 	if err != nil {
 		return AgentStatusSnapshot{}, fmt.Errorf("latest agent status timestamp: %w", err)
 	}
-	payload, err := decodePayload(rows[0][1])
+	payload, err := decodePayload(rows[0][3])
 	if err != nil {
 		return AgentStatusSnapshot{}, fmt.Errorf("latest agent status payload: %w", err)
 	}
-	unavailableAt, unavailableReason, unavailableErr := d.latestUnavailableSpan(ctx, "agent_status")
+	unavailableStart, unavailableReason, unavailableErr := d.latestUnavailableSpan(ctx, "agent_status", nowSeconds)
 	if unavailableErr != nil {
 		return AgentStatusSnapshot{}, unavailableErr
 	}
-	if unavailableAt > observedAt {
+	if unavailableStart > observedAt {
 		if unavailableReason == "" {
 			unavailableReason = "agent-status-unavailable"
 		}
@@ -134,7 +135,11 @@ ORDER BY observed_at DESC, event_id DESC LIMIT 1`)
 	if result.Freshness.AgeSeconds < 0 {
 		result.Freshness.AgeSeconds = 0
 	}
-	if result.Freshness.AgeSeconds > AgentStatusActiveCadence.Seconds() {
+	freshnessCadence, cadenceErr := d.agentStatusCadence(ctx, rowString(rows[0][1]), rowString(rows[0][2]), observedAt)
+	if cadenceErr != nil {
+		return AgentStatusSnapshot{}, cadenceErr
+	}
+	if result.Freshness.AgeSeconds > freshnessCadence {
 		result.Available = false
 		result.Unavailable = &AgentStatusQueryUnavailable{Reason: "agent-status-stale"}
 		return result, nil
@@ -149,9 +154,30 @@ ORDER BY observed_at DESC, event_id DESC LIMIT 1`)
 	return result, nil
 }
 
-func (d *Database) latestUnavailableReason(ctx context.Context, family string) (string, error) {
+func (d *Database) agentStatusCadence(ctx context.Context, sourceID, epochID string, observedAt float64) (float64, error) {
+	rows, err := d.reader.Rows(ctx, `SELECT native_cadence_seconds FROM coverage_epochs
+WHERE family = 'agent_status' AND source_id = ? AND epoch_id = ?
+  AND started_at <= ? AND (ended_at IS NULL OR ended_at >= ?)
+ORDER BY started_at DESC LIMIT 1`, sourceID, epochID, observedAt, observedAt)
+	if err != nil {
+		return 0, fmt.Errorf("read agent status cadence: %w", err)
+	}
+	if len(rows) == 0 {
+		return AgentStatusActiveCadence.Seconds(), nil
+	}
+	if len(rows[0]) != 1 {
+		return 0, fmt.Errorf("agent status cadence row has %d columns", len(rows[0]))
+	}
+	cadence, err := number(rows[0][0])
+	if err != nil || cadence <= 0 {
+		return 0, fmt.Errorf("agent status cadence is invalid")
+	}
+	return cadence, nil
+}
+
+func (d *Database) latestUnavailableReason(ctx context.Context, family string, at float64) (string, error) {
 	rows, err := d.reader.Rows(ctx, `SELECT reason FROM unavailable_spans
-WHERE family = ? ORDER BY ended_at DESC, started_at DESC LIMIT 1`, family)
+WHERE family = ? AND started_at <= ? ORDER BY ended_at DESC, started_at DESC LIMIT 1`, family, at)
 	if err != nil {
 		return "", fmt.Errorf("read unavailable %s status: %w", family, err)
 	}
@@ -161,20 +187,20 @@ WHERE family = ? ORDER BY ended_at DESC, started_at DESC LIMIT 1`, family)
 	return rowString(rows[0][0]), nil
 }
 
-func (d *Database) latestUnavailableSpan(ctx context.Context, family string) (float64, string, error) {
-	rows, err := d.reader.Rows(ctx, `SELECT ended_at, reason FROM unavailable_spans
-WHERE family = ? ORDER BY ended_at DESC, started_at DESC LIMIT 1`, family)
+func (d *Database) latestUnavailableSpan(ctx context.Context, family string, at float64) (float64, string, error) {
+	rows, err := d.reader.Rows(ctx, `SELECT started_at, reason FROM unavailable_spans
+WHERE family = ? AND started_at <= ? ORDER BY started_at DESC, ended_at DESC LIMIT 1`, family, at)
 	if err != nil {
 		return 0, "", fmt.Errorf("read unavailable %s span: %w", family, err)
 	}
 	if len(rows) == 0 || len(rows[0]) != 2 {
 		return 0, "", nil
 	}
-	endedAt, err := number(rows[0][0])
+	startedAt, err := number(rows[0][0])
 	if err != nil {
 		return 0, "", fmt.Errorf("read unavailable %s timestamp: %w", family, err)
 	}
-	return endedAt, rowString(rows[0][1]), nil
+	return startedAt, rowString(rows[0][1]), nil
 }
 
 func (d *Database) agentTokenRates(ctx context.Context, start, end float64, window time.Duration) (AgentTokenRates, error) {

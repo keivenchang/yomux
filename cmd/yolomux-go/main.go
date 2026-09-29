@@ -57,6 +57,7 @@ func goRuntimeLabel() string {
 }
 
 type server struct {
+	runtimeMemory                      runtimeMemoryState
 	root                               string
 	host                               string
 	port                               int
@@ -84,6 +85,8 @@ type server struct {
 	statsWriter                        *stats.Writer
 	statsService                       *stats.StatsService
 	statsLifecycle                     *stats.Lifecycle
+	statsRuntimeRecorder               *statsRuntimeRecorder
+	syntheticHostInputs                bool
 	statsMigration                     map[string]any
 	statsDeltaMu                       sync.Mutex
 	statsDeltaHistory                  map[statsDeltaKey]map[int64]map[string]any
@@ -266,6 +269,7 @@ type goThreadMetric struct {
 	TID           int
 	Name          string
 	State         string
+	Identity      string
 	CPUPercent    *float64
 	CPUReasonCode string
 	CPUReason     string
@@ -280,6 +284,7 @@ type goChildProcessMetric struct {
 	PPID          int
 	Label         string
 	State         string
+	Identity      string
 	CPUPercent    *float64
 	RSSBytes      *uint64
 	CPUReasonCode string
@@ -2881,6 +2886,7 @@ func main() {
 	mux.Handle("/api/operations/ack", s.protected(http.HandlerFunc(s.operationAck), "readonly"))
 	mux.Handle("/api/operations/cancel", s.protected(http.HandlerFunc(s.operationCancel), "admin"))
 	mux.Handle("/api/background/status", s.protected(http.HandlerFunc(s.backgroundStatus), "readonly"))
+	mux.Handle("/api/diagnostics/heap", s.protected(http.HandlerFunc(s.runtimeHeapProfile), "admin"))
 	mux.Handle("/api/diagnostics/performance", s.protected(http.HandlerFunc(s.diagnosticsPerformance), "admin"))
 	mux.Handle("/api/settings", s.protected(http.HandlerFunc(s.settings), "readonly"))
 	// The browser requests session metadata during boot, before it opens the
@@ -3046,6 +3052,10 @@ func main() {
 	}
 	defer statsLifecycle.Stop()
 	collectorsDisabled := os.Getenv("YOLOMUX_STATS_DISABLE_COLLECTORS") == "1"
+	s.syntheticHostInputs = os.Getenv("YOLOMUX_STATS_SYNTHETIC_HOST") == "1"
+	if s.syntheticHostInputs {
+		s.processMetricsFn = syntheticGoProcessMetrics
+	}
 	claudeTranscriptRoot, codexTranscriptRoot, opencodeDatabase := "", "", ""
 	if !collectorsDisabled {
 		var collectorErr error
@@ -3124,7 +3134,7 @@ func main() {
 			hostSources = stats.NewSyntheticHostSources(processIdentityForRuntime(), processKeyForRuntime())
 		}
 		hostCollector := stats.NewHostCollector(hostSources, statsWriter, nil, stats.HostCollectorConfig{
-			ActiveCadence: time.Second, IdleCadence: time.Minute, MemoryCadence: stats.DefaultHostMemoryCadence, SourceTimeout: 900 * time.Millisecond,
+			ActiveCadence: stats.DefaultHostCPUBackgroundCadence, IdleCadence: stats.DefaultHostCPUBackgroundCadence, MemoryCadence: stats.DefaultHostMemoryCadence, SourceTimeout: 900 * time.Millisecond,
 			EpochID: fmt.Sprintf("host-%d", time.Now().UnixNano()), EpochStartedAt: float64(time.Now().UnixNano()) / 1e9,
 			OwnerGeneration: uint64(os.Getpid()), SourceID: "host", ProcessKey: processKeyForRuntime(), ProcessIdentity: processIdentityForRuntime(),
 			// CPU is a host view: keep the bounded top process binaries so the Go
@@ -3142,6 +3152,16 @@ func main() {
 		defer hostCollector.Stop()
 	}
 	s.startTmuxRosterWatcher(shutdownContext)
+	if !collectorsDisabled {
+		recorder := newStatsRuntimeRecorder(statsWriter, s.statsRuntimeServiceLoadSamples, time.Now, 5*time.Second, fmt.Sprintf("runtime-load-%d", time.Now().UnixNano()), uint64(os.Getpid()))
+		if err := recorder.Start(shutdownContext); err != nil {
+			_ = listener.Close()
+			s.shutdown()
+			fatal("stats runtime recorder setup failed: " + err.Error())
+		}
+		s.statsRuntimeRecorder = recorder
+		defer recorder.Stop()
+	}
 	scheme := "https"
 	if *httpMode {
 		scheme = "http"

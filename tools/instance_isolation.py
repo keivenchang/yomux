@@ -32,6 +32,22 @@ PRODUCT_ROOT_KEYS = (
     "PYTHONPYCACHEPREFIX",
     "TMPDIR",
 )
+INHERITED_CREDENTIAL_ENV_KEYS = frozenset({
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GOOGLE_API_KEY",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "HF_TOKEN",
+    "HUGGINGFACE_HUB_TOKEN",
+    "LINEAR_KEY",
+    "NGC_API_KEY",
+    "OPENAI_API_KEY",
+})
 
 
 def synthetic_test_environment(overrides: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -40,7 +56,8 @@ def synthetic_test_environment(overrides: Mapping[str, str] | None = None) -> di
         key: value
         for key, value in os.environ.items()
         if not key.startswith(("YOLOMUX_", "XDG_", "OPENCODE_", "CODEX_", "CLAUDE_"))
-        and key not in {"HOME", "TMPDIR", "PYTHONPATH", "PYTHONHOME", "PYTHONPYCACHEPREFIX"}
+        and key not in INHERITED_CREDENTIAL_ENV_KEYS
+        and key not in {"HOME", "TMPDIR", "TMUX", "TMUX_PANE", "TMUX_TMPDIR", "PYTHONPATH", "PYTHONHOME", "PYTHONPYCACHEPREFIX"}
     }
     environment.update(overrides or {})
     return environment

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -23,6 +24,14 @@ func TestLinuxAgentPaneCaptureUsesVisibleScreenOnly(t *testing.T) {
 		if value == "-S" || value == "-12" {
 			t.Fatalf("capture args still include scrollback selector: %v", got)
 		}
+	}
+}
+
+func TestSyntheticAgentStatusRequiresFixtureTmuxSocket(t *testing.T) {
+	t.Setenv("YOLOMUX_TMUX_SOCKET", "")
+	sources := SyntheticAgentStatusSources("")
+	if _, err := sources.CapturePane(context.Background(), "%1"); !errors.Is(err, errSyntheticTmuxSocketUnset) {
+		t.Fatalf("synthetic pane capture error = %v, want fixture socket admission error", err)
 	}
 }
 
@@ -326,6 +335,29 @@ func (*agentStatusTestClock) NewTimer(duration time.Duration) HostCollectorTimer
 	return realHostCollectorTimer{time.NewTimer(duration)}
 }
 
+type agentStatusFailingWriter struct {
+	mu      sync.Mutex
+	calls   int
+	batches []AppendBatch
+}
+
+func (w *agentStatusFailingWriter) AppendBatch(_ context.Context, batch AppendBatch) (AppendResult, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.calls++
+	if w.calls == 1 {
+		return AppendResult{}, errors.New("synthetic stats append failure")
+	}
+	w.batches = append(w.batches, batch)
+	return AppendResult{ObservationsAccepted: len(batch.Observations), UnavailableAccepted: len(batch.UnavailableSpans)}, nil
+}
+
+func (w *agentStatusFailingWriter) snapshot() []AppendBatch {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]AppendBatch(nil), w.batches...)
+}
+
 func TestAgentStatusCollectorPersistsCyclesGenerationAndDuplicateReplay(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "stats.sqlite3")
 	writer, err := OpenWriter(context.Background(), path)
@@ -349,6 +381,9 @@ func TestAgentStatusCollectorPersistsCyclesGenerationAndDuplicateReplay(t *testi
 	if first.Cycles != 1 || second.Cycles != 2 || second.AcceptedObservations != 2 {
 		t.Fatalf("counters = %+v then %+v", first, second)
 	}
+	if first.LastCadence != 10*time.Second {
+		t.Fatalf("status cadence = %s, want 10s", first.LastCadence)
+	}
 	database, err := OpenReadOnly(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
@@ -369,6 +404,59 @@ func TestAgentStatusCollectorPersistsCyclesGenerationAndDuplicateReplay(t *testi
 	result, err := writer.AppendBatch(context.Background(), AppendBatch{Observations: []Observation{{EventID: observations[0].EventID, Family: observations[0].Family, SourceID: observations[0].SourceID, ObservedAt: observations[0].ObservedAt, EpochID: observations[0].EpochID, OwnerGeneration: observations[0].OwnerGeneration, Payload: observations[0].Payload}}})
 	if err != nil || result.ObservationsDuplicate != 1 || result.Generation != 2 {
 		t.Fatalf("duplicate result = %+v err=%v", result, err)
+	}
+}
+
+func TestAgentStatusCollectorDoesNotCloseUnpersistedEpochAfterAppendFailure(t *testing.T) {
+	clock := &agentStatusTestClock{now: time.Unix(200, 0)}
+	writer := &agentStatusFailingWriter{}
+	available := true
+	collector := NewAgentStatusCollector(func(context.Context) ([]AgentRecord, []error) {
+		if !available {
+			return nil, []error{errors.New("synthetic inventory unavailable")}
+		}
+		return []AgentRecord{{Kind: "codex", TmuxSession: "synthetic", TmuxWindow: "0", TmuxPaneID: "%1"}}, nil
+	}, func(context.Context, AgentStatusRequest) AgentStatusResult {
+		return AgentStatusResult{Status: AgentStatusRun}
+	}, writer, clock, AgentStatusCollectorConfig{EpochID: "epoch", EpochStartedAt: 100, SourceID: "test"})
+
+	collector.RunOnce(context.Background())
+	available = false
+	clock.now = time.Unix(210, 0)
+	collector.RunOnce(context.Background())
+	batches := writer.snapshot()
+	if len(batches) != 1 || len(batches[0].Observations) != 0 || len(batches[0].CoverageEpochs) != 0 || len(batches[0].UnavailableSpans) != 1 {
+		t.Fatalf("post-failure unavailable batch = %+v, want only one unavailable span", batches)
+	}
+	if got := collector.Counters(); got.AcceptedObservations != 0 || got.Errors != 2 {
+		t.Fatalf("post-failure counters = %+v", got)
+	}
+}
+
+func TestAgentStatusCollectorDoesNotRetainUnpersistedStatusCacheAfterAppendFailure(t *testing.T) {
+	clock := &agentStatusTestClock{now: time.Unix(200, 0)}
+	writer := &agentStatusFailingWriter{}
+	status := AgentStatusRun
+	collector := NewAgentStatusCollector(func(context.Context) ([]AgentRecord, []error) {
+		return []AgentRecord{{Kind: "codex", TmuxSession: "synthetic", TmuxWindow: "0", TmuxPaneID: "%1"}}, nil
+	}, func(context.Context, AgentStatusRequest) AgentStatusResult {
+		return AgentStatusResult{Status: status}
+	}, writer, clock, AgentStatusCollectorConfig{EpochID: "epoch", EpochStartedAt: 100, SourceID: "test"})
+
+	// The first positive sample is rejected by the writer. It must not seed the
+	// transition cache because no corresponding fact exists in SQLite.
+	collector.RunOnce(context.Background())
+	status = AgentStatusIdle
+	clock.now = time.Unix(210, 0)
+	collector.RunOnce(context.Background())
+	batches := writer.snapshot()
+	if len(batches) != 1 || len(batches[0].Observations) != 1 {
+		t.Fatalf("successful retry batches = %+v", batches)
+	}
+	payload := batches[0].Observations[0].Payload
+	states, ok := payload["states"].(map[string]any)
+	if !ok || states["synthetic|0|%1|codex"] != "idle" {
+		t.Fatalf("retry status = %#v, want idle without fabricated transition", payload)
 	}
 }
 
@@ -502,6 +590,43 @@ func TestAgentStatusCollectorRetainsValidPaneWhenAnotherPaneConflicts(t *testing
 	roster := payload["agents"].([]map[string]any)
 	if len(roster) != 2 || roster[0]["state"] != "unavailable" || roster[1]["state"] != "run" {
 		t.Fatalf("mixed pane roster = %#v", roster)
+	}
+}
+
+func TestAgentStatusCollectorRetainsValidRosterWithNonfatalInventoryError(t *testing.T) {
+	clock := &agentStatusTestClock{now: time.Unix(200, 0)}
+	collector := NewAgentStatusCollector(func(context.Context) ([]AgentRecord, []error) {
+		return []AgentRecord{{Kind: "codex", TmuxSession: "valid", TmuxWindow: "0", TmuxPaneID: "%1"}}, []error{errors.New("tmux enrichment failed")}
+	}, func(context.Context, AgentStatusRequest) AgentStatusResult {
+		return AgentStatusResult{Status: AgentStatusRun}
+	}, nil, clock, AgentStatusCollectorConfig{EpochID: "epoch", EpochStartedAt: 100, SourceID: "test"})
+
+	facts := collector.collect(context.Background(), HostFactContext{
+		EpochID: "epoch", EpochStartedAt: 100, ObservedAt: 200, CadenceSeconds: 10, SourceID: "test",
+	})
+	if len(facts.UnavailableSpans) != 0 || len(facts.Observations) != 1 {
+		t.Fatalf("nonfatal inventory facts = %+v", facts)
+	}
+	states := facts.Observations[0].Payload["states"].(map[string]any)
+	if states["valid|0|%1|codex"] != "run" {
+		t.Fatalf("nonfatal inventory states = %#v", states)
+	}
+	if got := collector.Counters().Errors; got != 1 {
+		t.Fatalf("nonfatal inventory errors = %d, want 1 diagnostic error", got)
+	}
+}
+
+func TestAgentStatusCollectorKeepsFamilyUnavailableOnFatalEmptyInventory(t *testing.T) {
+	clock := &agentStatusTestClock{now: time.Unix(200, 0)}
+	collector := NewAgentStatusCollector(func(context.Context) ([]AgentRecord, []error) {
+		return nil, []error{errors.New("process inventory unavailable")}
+	}, nil, nil, clock, AgentStatusCollectorConfig{EpochID: "epoch", EpochStartedAt: 100, SourceID: "test"})
+
+	facts := collector.collect(context.Background(), HostFactContext{
+		EpochID: "epoch", EpochStartedAt: 100, ObservedAt: 200, CadenceSeconds: 10, SourceID: "test",
+	})
+	if len(facts.Observations) != 0 || len(facts.UnavailableSpans) != 1 || facts.UnavailableSpans[0].Reason != "inventory-unavailable" {
+		t.Fatalf("fatal inventory facts = %+v", facts)
 	}
 }
 

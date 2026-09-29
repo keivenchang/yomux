@@ -28,6 +28,15 @@ func (f *fixtureDB) Scalar(_ context.Context, query string, _ ...any) (any, erro
 	return f.schemaVersion, nil
 }
 func (f *fixtureDB) Rows(_ context.Context, query string, _ ...any) ([][]any, error) {
+	if strings.Contains(query, "FROM sqlite_master") && strings.Contains(query, "type='table'") {
+		rows := make([][]any, 0, len(f.columns))
+		for table, columns := range f.columns {
+			if len(columns) != 0 {
+				rows = append(rows, []any{table})
+			}
+		}
+		return rows, nil
+	}
 	if strings.HasPrefix(query, "SELECT") {
 		return f.meta, nil
 	}

@@ -252,6 +252,8 @@ const WEB_SERVER = {
   cpu_percent: measured(3.0),
   system_cpu_percent: measured(11.0),
   rss_bytes: measured(88 * 1024 * 1024),
+  system_memory_used_bytes: measured(512 * 1024 * 1024),
+  system_memory_capacity_bytes: measured(1024 * 1024 * 1024),
 };
 
 // What the backend publishes before statsd's first push: three typed absences, one reason.
@@ -264,6 +266,8 @@ const WEB_SERVER_NEVER_SAMPLED = {
   cpu_percent: absent('cpu_sample_not_pushed', UNPUSHED_SAMPLE_REASON),
   system_cpu_percent: absent('cpu_sample_not_pushed', UNPUSHED_SAMPLE_REASON),
   rss_bytes: absent('cpu_sample_not_pushed', UNPUSHED_SAMPLE_REASON),
+  system_memory_used_bytes: absent('memory_sample_not_pushed', UNPUSHED_SAMPLE_REASON),
+  system_memory_capacity_bytes: absent('memory_sample_not_pushed', UNPUSHED_SAMPLE_REASON),
 };
 
 // The CORE body only. `refresh`, `top_endpoints`, `top_background_work`, `top_event_types`,
@@ -447,6 +451,56 @@ test('the Go-native local-services row is rendered as a nested process without d
   assert.equal(context.result.rssMeasured, 1, 'only the top-level process contributes to the RSS sum');
 });
 
+test('the Go-native thread disclosure distinguishes total count from capped detail rows', () => {
+  const native = {
+    schema_version: 5,
+    inventory: ['yolomux-go'],
+    services: [serviceRow('yolomux-go', {
+      label: 'YO!stats Go backend',
+      parent_id: 'web',
+      details: {
+        backend: 'go',
+        thread_count: measured(300),
+        thread_details_status: 'truncated',
+        threads: Array.from({length: 256}, (_unused, index) => ({
+          tid: index + 1,
+          name: `synthetic-thread-${index + 1}`,
+          state: 'sleeping',
+          cpu_now_percent: measured(0),
+        })),
+      },
+    })],
+    health: healthSnapshot({available: false, reason_code: 'observer_unattached', resources: 0}),
+  };
+  const html = renderRoster(native, {expanded: ['yolomux-go']});
+  const detail = slice(html, 'id="js-debug-roster-detail-yolomux-go"', '</tr>');
+  assert.match(detail, /<dt>Threads<\/dt><dd>300<\/dd>/, 'the total is independent of the detail-row cap');
+  assert.match(detail, /data-go-thread-details-status="truncated">Showing the first 256 of 300 OS thread details\.<\/p>/);
+  assert.equal((detail.match(/class="js-debug-go-thread"/g) || []).length, 256);
+});
+
+test('an incomplete Go thread census does not present an exact total', () => {
+  const native = {
+    schema_version: 5,
+    inventory: ['yolomux-go'],
+    services: [serviceRow('yolomux-go', {
+      label: 'YO!stats Go backend',
+      parent_id: 'web',
+      details: {
+        backend: 'go',
+        thread_count: {state: 'unavailable', value: null, reason_code: 'darwin_thread_census_incomplete', reason: 'macOS returned malformed thread rows'},
+        thread_details_status: 'incomplete',
+        threads: [{tid: 1, name: 'synthetic-thread', state: 'sleeping', cpu_now_percent: measured(0)}],
+      },
+    })],
+    health: healthSnapshot({available: false, reason_code: 'observer_unattached', resources: 0}),
+  };
+  const html = renderRoster(native, {expanded: ['yolomux-go']});
+  const detail = slice(html, 'id="js-debug-roster-detail-yolomux-go"', '</tr>');
+  assert.match(detail, /<dt>Threads<\/dt><dd[^>]*>macOS returned malformed thread rows<\/dd>/);
+  assert.match(detail, /data-go-thread-details-status="incomplete">The OS thread census is incomplete; the exact total is unavailable\. Showing 1 readable thread details\.<\/p>/);
+});
+
 test('the Go-native disclosure reports runtime units and verified child processes', () => {
   const native = {
     schema_version: 5,
@@ -478,6 +532,8 @@ test('the Go-native disclosure reports runtime units and verified child processe
               opencode_database_opens: 1, opencode_database_reuses: 5,
               opencode_database_last_open_duration_ms: 120,
               opencode_collection_duration_total_ms: 640,
+              opencode_sqlite_queries: 14, opencode_sqlite_last_duration_ms: 2.5,
+              opencode_sqlite_duration_total_ms: 87,
               opencode_phases: {
                 step_finish: {runs: 2, last_duration_ms: 4.2, duration_total_ms: 8.4},
               },
@@ -489,6 +545,50 @@ test('the Go-native disclosure reports runtime units and verified child processe
           },
           lifecycle: {
             by_resolution: [{resolution_seconds: 1, selected_cells: 4, fact_rows_read: 120, selection_duration_ms: 1.5, materialization_duration_ms: 5.25}],
+          },
+          profile: {
+            available: true, active: false, scope: 'process-wide CPU sample with stats collector labels',
+            cpu_attribution: {
+              mode: 'pprof_labels', label_keys: ['stats_component', 'stats_family', 'stats_phase'],
+              per_goroutine_cpu: false, historical_owner_series: false, reason_code: 'process_profile_only',
+            },
+            last: {
+              state: 'completed', duration_ms: 20000, artifact_bytes: {cpu: 28083, heap: 37754, goroutine: 13786},
+              runtime_metrics_delta: {
+                '/cpu/classes/user:cpu-seconds': 6.97, '/cpu/classes/gc/total:cpu-seconds': 0.35,
+                '/gc/cycles/total:gc-cycles': 15,
+              },
+              runtime_metrics_end: {
+                '/sched/goroutines:goroutines': 33, '/sched/gomaxprocs:threads': 24,
+                '/gc/heap/live:bytes': 58594632,
+              },
+              io_delta: {rchar: 1482605883, wchar: 71999658, read_syscalls: 371765, write_syscalls: 4277, write_bytes: 67588096},
+            },
+          },
+          memory: {
+            available: true,
+            history: [{
+              at: 1790668000, pid: 4242,
+              categories: {
+                'Heap objects': 64, 'Heap unused spans': 8, 'Heap free retained': 4,
+                'Goroutine stacks': 2, 'OS stacks': 1, 'Runtime metadata': 1,
+                'Profiling buckets': 1, 'Other runtime': 1,
+              },
+              gauges: {'/gc/heap/live:bytes': 64, '/sched/goroutines:goroutines': 23},
+              unavailable: [],
+            }],
+            captures: [
+              {at: 1790667940, top_inuse: [{key: 'retained', function: 'stats.materialize', inuse_bytes: 48}], other_inuse_bytes: 10},
+              {at: 1790668000, top_inuse: [{key: 'retained', function: 'stats.materialize', inuse_bytes: 64}], other_inuse_bytes: 12},
+            ],
+            last: {
+              at: 1790668000, ranked_at: 1790668000, artifact_at: 1790668001,
+              pid: 4242, binary: '/candidate/yolomux_go', binary_sha256: 'capture-sha256',
+              build: 'abc1234', go_version: 'go1.22.2', sample_rate_bytes: 512000,
+              inuse_bytes: 64, alloc_bytes: 128, other_inuse_bytes: 12, artifact_bytes: 900,
+              top_inuse: [{key: 'retained', function: 'stats.materialize', inuse_bytes: 64, stack: ['stats.materialize runtime_memory.go:10']}],
+              top_alloc: [],
+            },
           },
         },
         child_processes: [{
@@ -515,6 +615,8 @@ test('the Go-native disclosure reports runtime units and verified child processe
   assert.match(html, /Agent inventory cache/);
   assert.match(html, /data-go-runtime-owner="agent_tokens:opencode"/);
   assert.match(html, /1 opens \/ 5 reuses/);
+  assert.match(html, /data-go-runtime-owner="agent_tokens:sqlite"/);
+  assert.match(html, />14 queries</);
   assert.match(html, /data-go-runtime-service-refresh/);
   assert.match(html, /Ring reads/);
   assert.match(html, /data-go-runtime-opencode-phases/);
@@ -522,6 +624,16 @@ test('the Go-native disclosure reports runtime units and verified child processe
   assert.match(html, /data-go-runtime-lifecycle/);
   assert.match(html, /data-go-runtime-resolution="1"/);
   assert.match(html, /5.3ms/);
+  assert.match(detail, /Go memory and heap profile/);
+  assert.match(detail, /Go memory classes over time/);
+  assert.match(detail, /Sampled retained allocation stacks/);
+  assert.match(detail, /data-heap-stack-chart/);
+  assert.match(detail, /Capture heap profile/);
+  assert.match(detail, /<dt>Live heap<\/dt><dd>64\.0B<\/dd>/);
+  assert.match(detail, /Largest sampled retained stacks/);
+  assert.match(detail, /stats\.materialize runtime_memory\.go:10/);
+  assert.match(detail, /binary SHA-256 capture-sha256/);
+  assert.match(detail, /Download pprof/);
 });
 
 test('an unsupported schema row interprets NO field from the schema it cannot render', () => {
@@ -697,6 +809,22 @@ test('there is no second Daemons renderer and no second service-state classifier
   // second place the rule could drift.
   assert.equal(source.match(/debugSystemLocalServicesSchemaSupported\(/g).length, 4,
     'the schema guard has one definition, the guarded reader, roster adapter, and triangle publisher');
+});
+
+test('the Daemons System region mounts the runtime-owner chart without the Go process line', () => {
+  assert.match(source, /const DEBUG_SYSTEM_REGIONS = Object\.freeze\(\['announce', 'summary', 'alerts', 'chart', 'roster', 'advanced'\]\)/);
+  const dispatcher = sourceFunction('debugSystemRegionHtml', 'debugSystemAdvancedView');
+  assert.match(dispatcher, /if \(region === 'chart'\) return debugSystemDaemonsChartHtml\(\);/);
+  const chart = sourceFunction('debugSystemDaemonsChartHtml', 'debugSystemRegionHtml');
+  assert.match(chart, /const charts = jsDebugGraphDaemonsChartGroups\.map\(group =>/);
+  assert.match(chart, /const chartGroup = debugGraphResolvedChartGroup\(group, buckets\)/);
+  assert.match(chart, /const groupSeries = debugGraphGroupSeriesItems\(chartGroup, seriesItems\)/);
+  assert.match(chart, /const hasSamples = groupSeries\.some\(series =>/);
+  assert.match(chart, /closable: false/);
+  assert.match(chart, /data-js-debug-daemons-graph/);
+  assert.match(chart, /data-js-debug-daemons-chart-note/);
+  assert.match(chart, /goroutines and SQLite cgo work/);
+  assert.match(chart, /yolomux-go process CPU line is shown in CPU/);
 });
 
 test('a running daemon whose transport failed is an issue with its typed reason, not "down"', () => {
@@ -1944,7 +2072,7 @@ test('the summary counts EVERY row the roster renders, nested child included', (
   assert.equal(context.result.idle, 1, context.result);
 });
 
-test('a Go monolith has one displayed CPU/RSS owner when the child shares the web PID', () => {
+test('a Go monolith displays CPU/RSS on YOLOmux web when the child shares its PID', () => {
   const context = renderContext();
   vm.runInContext(`${SHARED_SOURCE}\n${RENDER_SOURCE}`, context);
   const go = localServices();
@@ -1956,16 +2084,16 @@ test('a Go monolith has one displayed CPU/RSS owner when the child shares the we
   const {rows, html} = context.result;
   const web = rows.find(row => row.id === 'web');
   const child = rows.find(row => row.id === 'yolomux-go');
-  assert.equal(web.metrics.cpu_now_percent.reason_code, 'resource_metrics_owned_by_nested_service');
-  assert.equal(web.metrics.rss_bytes.reason_code, 'resource_metrics_owned_by_nested_service');
-  assert.equal(child.metrics.cpu_now_percent.state, 'measured');
-  assert.equal(child.metrics.rss_bytes.state, 'measured');
+  assert.equal(web.metrics.cpu_now_percent.state, 'measured');
+  assert.equal(web.metrics.rss_bytes.state, 'measured');
+  assert.equal(child.metrics.cpu_now_percent.reason_code, 'resource_metrics_owned_by_parent_web');
+  assert.equal(child.metrics.rss_bytes.reason_code, 'resource_metrics_owned_by_parent_web');
   vm.runInContext('result = debugSystemRosterSummary(debugSystemRosterRows(fixture));', context);
   assert.equal(context.result.resourcePopulation, 1, context.result);
-  assert.equal(context.result.cpuPercent, 2, context.result);
-  assert.equal(context.result.rssBytes, 48 * 1024 * 1024, context.result);
-  assert.match(html, /data-subsystem-id="web"[\s\S]*data-metric-reason="resource_metrics_owned_by_nested_service">—/);
-  assert.match(html, /data-subsystem-id="yolomux-go"[\s\S]*data-subsystem-metric="cpu_now_percent"[^>]*>2%/);
+  assert.equal(context.result.cpuPercent, 3, context.result);
+  assert.equal(context.result.rssBytes, 88 * 1024 * 1024, context.result);
+  assert.match(html, /data-subsystem-id="web"[\s\S]*data-subsystem-metric="cpu_now_percent"[^>]*>3%/);
+  assert.match(html, /data-subsystem-id="yolomux-go"[\s\S]*data-metric-reason="resource_metrics_owned_by_parent_web">—/);
 });
 
 test('the summary CPU number is labelled a population sum and carries no single-process budget', () => {
@@ -2091,6 +2219,15 @@ test('the web disclosure prints System CPU as an absence with its reason, not 0.
   assert.match(html, /<dt>System CPU<\/dt><dd[^>]*data-value-reason="[^"]+"[^>]*>—</);
 });
 
+test('the web disclosure prints measured system memory as used over capacity', () => {
+  const context = renderContext();
+  vm.runInContext(`${SHARED_SOURCE}\n${RENDER_SOURCE}`, context);
+  context.fixture = payloadFor(localServices(), {server: WEB_SERVER});
+  vm.runInContext('result = debugSystemWebProcessDetailHtml(fixture);', context);
+  const html = String(context.result);
+  assert.match(html, /<dt>System memory<\/dt><dd[^>]*>512MB \/ 1\.0GB</);
+});
+
 // -- the CPU budget block ------------------------------------------------------------------------
 
 test('a stale CPU budget renders stale, and its unmeasured current reading is an em dash', () => {
@@ -2160,7 +2297,7 @@ const SNAPSHOT_POLL_SOURCE = slice(source, 'async function pollDebugSystemAdvanc
 const ADVANCED_RENDER_SOURCE = [
   SNAPSHOT_CADENCE_SOURCE,
   slice(source, 'function debugSystemRolesHtml(', '\nfunction debugSystemSamplerFamilyEntries('),
-  slice(source, 'function debugSystemAdvancedHtml(', '\n// The four regions of the Daemons view'),
+  slice(source, 'function debugSystemAdvancedHtml(', '\n// The six regions of the Daemons view'),
   slice(source, 'function debugSystemRegionHtml(', '\n// The last HTML written into each region'),
 ].join('\n');
 
