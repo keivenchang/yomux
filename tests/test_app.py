@@ -956,24 +956,32 @@ def test_darwin_cpu_path_uses_native_ticks_before_ps_fallback(monkeypatch):
 # these now drive directly.
 
 
-def test_generic_gpu_devices_use_aggregate_devices_without_process_scans(monkeypatch):
-    responses = iter([SimpleNamespace(returncode=0, stdout="0, GPU Model A, 75, 4000, 8000\n")])
-    calls = []
+def test_linux_gpu_devices_use_generic_sysfs_metrics(tmp_path):
+    device = tmp_path / "card0" / "device"
+    device.mkdir(parents=True)
+    (device / "gpu_busy_percent").write_text("75\n", encoding="utf-8")
+    (device / "mem_info_vram_used").write_text("4194304000\n", encoding="utf-8")
+    (device / "mem_info_vram_total").write_text("8388608000\n", encoding="utf-8")
+    (tmp_path / "card1-DP-1").mkdir()
 
-    def run(*args, **_kwargs):
-        calls.append(args[0])
-        return next(responses)
+    devices = host_collectors._linux_gpu_devices(tmp_path)
 
-    monkeypatch.setattr(host_collectors.subprocess, "run", run)
+    assert devices == {
+        "gpu:0": {
+            "label": "GPU 0",
+            "util_percent": 75.0,
+            "memory_used_bytes": 4194304000,
+            "memory_capacity_bytes": 8388608000,
+        }
+    }
 
-    devices = host_collectors.generic_gpu_devices()
 
-    assert devices["gpu:0"]["util_percent"] == 75.0
-    assert devices["gpu:0"]["memory_used_bytes"] == 4000 * 1024 * 1024
-    assert devices["gpu:0"]["memory_capacity_bytes"] == 8000 * 1024 * 1024
-    assert devices["gpu:0"]["label"] == "GPU 0 (GPU Model A)"
-    assert list(devices) == ["gpu:0"]
-    assert calls == [["gpu-info", "--query-gpu=index,name,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"]]
+def test_linux_gpu_devices_leave_missing_metrics_unavailable(tmp_path):
+    device = tmp_path / "card0" / "device"
+    device.mkdir(parents=True)
+    (device / "gpu_busy_percent").write_text("12\n", encoding="utf-8")
+
+    assert host_collectors._linux_gpu_devices(tmp_path) == {}
 
 
 def test_process_memory_rows_group_python_variants_and_keep_only_the_top_five():

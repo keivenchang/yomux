@@ -6031,7 +6031,7 @@ def test_markdown_preview_html_callout_uses_dark_highlight_in_dark_mode(browser,
               <table id="normal"><tr><td id="normal-cell">Normal dark preview table</td></tr></table>
               <blockquote id="md-warning">
                 <p>[!WARNING] There is no one way.</p>
-                <p><strong id="md-warning-strong">IMPORTANT NOTE:</strong> run <code id="md-warning-code">gpu-info</code> before continuing.</p>
+                <p><strong id="md-warning-strong">IMPORTANT NOTE:</strong> run <code id="md-warning-code">check GPU metrics</code> before continuing.</p>
               </blockquote>
               <blockquote id="md-caution">
                 <p>[!CAUTION] Do not skip.</p>
@@ -6060,7 +6060,7 @@ python -V
               <table id="callout" bgcolor="#fff8cc" border="0" cellpadding="10" cellspacing="0" width="100%">
                 <tr>
                   <td width="50" align="center">&#9888;</td>
-                  <td id="callout-cell">There is no one way.<br><br><strong id="callout-strong">IMPORTANT NOTE:</strong> run <code id="callout-code">gpu-info</code> before continuing.</td>
+                  <td id="callout-cell">There is no one way.<br><br><strong id="callout-strong">IMPORTANT NOTE:</strong> run <code id="callout-code">check GPU metrics</code> before continuing.</td>
                 </tr>
               </table>
             `;
@@ -6233,7 +6233,7 @@ def test_markdown_preview_code_block_background_is_grayer_only_in_dark_mode(brow
           <div class="file-editor-content">
             <article id="preview" class="file-editor-preview-pane-panel markdown-body" style="position: static">
               <table id="callout" bgcolor="#fff8cc">
-                <tr><td id="callout-cell"><strong id="callout-strong">IMPORTANT NOTE:</strong> run <code id="callout-code">gpu-info</code>.</td></tr>
+                <tr><td id="callout-cell"><strong id="callout-strong">IMPORTANT NOTE:</strong> run <code id="callout-code">check GPU metrics</code>.</td></tr>
               </table>
               <pre id="code-block"><code>echo hello</code></pre>
             </article>

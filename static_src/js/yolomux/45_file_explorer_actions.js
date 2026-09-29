@@ -139,13 +139,11 @@ function finderOpenInNewTabActionsForContext(context = {}) {
     // The listing's descriptor-bound .git probe is enough to offer this action now. The tab
     // owns its potentially slow history request after it has painted its Loading state.
     if (entry.is_repo !== true && !primaryInfo?.repo_root) return [];
-    const disabledReason = finderPathActionDisabledReason();
-    const disabled = Boolean(disabledReason);
     return [{
       label: t('contextmenu.showDiff'),
       item: gitDiffItemFor(fullPath),
-      disabled,
-      disabledReason,
+      disabled: false,
+      disabledReason: '',
       // The context menu already refreshes this path's metadata. Opening the tab starts its
       // own history request, so do not send a second fresh info request for the same click.
       action: () => openGitDiffTab(fullPath, {userInitiated: true}),
@@ -263,9 +261,8 @@ function fileContextMenuState(entry, selectedPaths, relativeCopyEntries) {
     : [];
   return {
     copyRelativeDisabled: relativeEntries.length !== selectedPaths.length || relativeEntries.some(item => !item?.available),
-    // readonly is terminal-only — the server forbids every /api/fs/* read (raw/list/...),
-    // so the file-read affordances (open a file in a tab, Download via /api/fs/raw) are
-    // disabled in readonly to match the server, instead of offering a command that 403s.
+    // General file reads and downloads still require admin access; Repo Diff uses
+    // separate repository read routes and does not enable these file actions.
     openInNewTabDisabled: multiple || entry?.kind !== 'file' || readOnlyMode,
     copyImageDisabled: multiple || !entryIsImageFile(entry) || readOnlyMode,
     downloadDisabled: multiple || entry?.kind !== 'file' || readOnlyMode,

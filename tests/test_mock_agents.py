@@ -2398,7 +2398,7 @@ def test_opencode_prompt_matches_real_five_row_footer(monkeypatch):
     assert len(lines) == 5
     assert lines[0] == "┃  Ask anything... \"Fix broken tests\"" + (" " * 72)
     assert lines[1] == "┃" + (" " * 108)
-    assert lines[2].startswith("┃  Build · switchyard/openai/gpt-5.6-luna|$0.14-$0.8808/1M GPU Inference Hub")
+    assert lines[2].startswith("┃  Build · switchyard/openai/gpt-5.6-luna|$0.14-$0.8808/1M Inference Service")
     assert lines[3] == "╹" + ("▀" * 108)
     assert lines[4] == " tab agents   ctrl+p commands"
     assert not any("╭" in line or "╰" in line or "│" in line for line in lines)
@@ -2530,7 +2530,7 @@ def test_opencode_fallback_response_matches_real_session_answer(monkeypatch, cap
     mock_agent_common.fallback_response("what model are you")
 
     output = mock_agent_common.ANSI_RE.sub("", capsys.readouterr().out)
-    assert "I'm running switchyard/openai/gpt-5.6-luna via GPU Inference Hub." in output
+    assert "I'm running switchyard/openai/gpt-5.6-luna via Inference Service." in output
     assert "▣  Build · switchyard/openai/gpt-5.6-luna|$0.14-$0.8808/1M · 1.9s" in output
     assert "this is a mock" not in output
     assert "Built-in actions" not in output
@@ -2599,7 +2599,7 @@ def test_opencode_working_capture_enters_live_working_footer(monkeypatch, case_n
     assert state["fixture_case"] == case_name
     assert "<redacted" not in plain
     assert "■⬝⬝⬝⬝⬝⬝⬝  esc interrupt" in plain
-    assert "Build · switchyard/openai/gpt-5.6-luna|$0.14-$0.8808/1M GPU Inference Hub" in plain
+    assert "Build · switchyard/openai/gpt-5.6-luna|$0.14-$0.8808/1M Inference Service" in plain
     assert "27.4K  ctrl+p commands" in plain
 
 
@@ -2926,7 +2926,7 @@ def test_claude_header_redraw_clears_previous_rows_after_resize(monkeypatch, cap
     monkeypatch.setattr(mock_agent_common, "PERMISSION_STYLE", "claude")
     monkeypatch.setattr(mock_agent_common, "PROMPT_GLYPH", "❯")
     monkeypatch.setattr(mock_agent_common, "MODEL_LINE", "Opus 4.8 (1M context) with xhigh effort · API Usage Billing")
-    monkeypatch.setattr(mock_agent_common, "WELCOME_ORG_LINE", "· GPU Corporation - Power Users")
+    monkeypatch.setattr(mock_agent_common, "WELCOME_ORG_LINE", "· Development Team - Power Users")
     monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 80)
     monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 20)
 
@@ -2970,7 +2970,7 @@ def test_claude_startup_tty_places_header_above_fixed_footer(monkeypatch):
     monkeypatch.setattr(mock_agent_common, "PROMPT_GLYPH", "❯")
     monkeypatch.setattr(mock_agent_common, "VERSION", "2.1.185")
     monkeypatch.setattr(mock_agent_common, "MODEL_LINE", "Opus 4.8 (1M context) with xhigh effort · API Usage Billing")
-    monkeypatch.setattr(mock_agent_common, "WELCOME_ORG_LINE", "· GPU Corporation - Power Users")
+    monkeypatch.setattr(mock_agent_common, "WELCOME_ORG_LINE", "· Development Team - Power Users")
     monkeypatch.setattr(mock_agent_common, "terminal_height", lambda: 12)
     monkeypatch.setattr(mock_agent_common, "terminal_width", lambda: 80)
     monkeypatch.setattr(mock_agent_common, "launched_from_interactive_shell", lambda: False)
@@ -2987,7 +2987,7 @@ def test_claude_startup_tty_places_header_above_fixed_footer(monkeypatch):
     assert rendered.index("\x1b[8;1H\x1b[2K") < rendered.index(f"\x1b[9;1H\x1b[2K{separator}")
     assert '❯ \x1b[2mTry "fix typecheck errors"\x1b[0m' in rendered
     plain_rendered = mock_agent_common.ANSI_RE.sub("", rendered)
-    assert "… · API Usage Billing · GPU Corporation - Power Users" in plain_rendered
+    assert "… · API Usage Billing · Development Team - Power Users" in plain_rendered
     assert state["claude_startup_header_top"] == "6"
     assert state["claude_startup_header_bottom"] == "8"
 

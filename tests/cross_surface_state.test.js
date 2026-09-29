@@ -147,6 +147,16 @@ async function runCrossSurfaceStateSuite() {
     assert.deepStrictEqual([...repoActions.map(action => action.label)], ['ΔShow Diff']);
     assert.equal(repoActions[0].item, api.gitDiffItemFor('/repo'));
     assert.equal(repoActions[0].disabled, false, 'the listing-proven repository directory may open its Diff tab before deferred path metadata returns');
+    const readonlyApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'readonly');
+    const readonlyRepoAction = readonlyApi.finderOpenInNewTabActionsForContext({
+      fullPath: '/repo',
+      entry: {kind: 'dir', name: 'repo', is_repo: true},
+      selectedPaths: ['/repo'],
+      primaryInfo: null,
+      menuState,
+    })[0];
+    assert.equal(readonlyRepoAction.disabled, false, 'read-only users can open repository history');
+    assert.equal(readonlyRepoAction.item, readonlyApi.gitDiffItemFor('/repo'));
     assert.deepStrictEqual([...api.finderOpenInNewTabActionsForContext({
       ...fileContext,
       fullPath: '/unverified',

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"path"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -231,16 +232,53 @@ type CommandOutput struct {
 	ExitCode int
 }
 
-func CollectGPU(inputs HostCollectorInputs) ([]GPUDevice, bool) {
-	if inputs.Run == nil {
+func LinuxGPUDevices(inputs HostCollectorInputs, drmRoot string) ([]GPUDevice, bool) {
+	if inputs.ReadDir == nil || inputs.ReadFile == nil || strings.TrimSpace(drmRoot) == "" {
 		return nil, false
 	}
-	result, err := inputs.Run([]string{"gpu-info", "--query-gpu=index,name,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"})
-	if err != nil || result.ExitCode != 0 || len(result.Stdout) > maxHostInputBytes {
+	cards, err := inputs.ReadDir(drmRoot)
+	if err != nil {
 		return nil, false
 	}
-	devices := ParseGPUCSV(string(result.Stdout))
+	devices := []GPUDevice{}
+	for _, card := range cards {
+		if !strings.HasPrefix(card, "card") {
+			continue
+		}
+		indexText := strings.TrimPrefix(card, "card")
+		index, err := strconv.Atoi(indexText)
+		if err != nil || index < 0 {
+			continue
+		}
+		devicePath := filepath.Join(drmRoot, card, "device")
+		busyData, err := inputs.ReadFile(filepath.Join(devicePath, "gpu_busy_percent"))
+		if err != nil || len(busyData) > maxHostInputBytes {
+			continue
+		}
+		utilization, err := strconv.ParseFloat(strings.TrimSpace(string(busyData)), 64)
+		if err != nil || !finite(utilization) || utilization < 0 || utilization > 100 {
+			continue
+		}
+		used, usedOK := readLinuxGPUCounter(inputs.ReadFile, filepath.Join(devicePath, "mem_info_vram_used"))
+		capacity, capacityOK := readLinuxGPUCounter(inputs.ReadFile, filepath.Join(devicePath, "mem_info_vram_total"))
+		if !usedOK || !capacityOK || capacity == 0 || used > capacity {
+			continue
+		}
+		devices = append(devices, GPUDevice{SourceID: fmt.Sprintf("gpu:%d", index), Label: fmt.Sprintf("GPU %d", index), Utilization: utilization, MemoryUsedBytes: used, MemoryTotalBytes: capacity})
+	}
 	return devices, len(devices) > 0
+}
+
+func readLinuxGPUCounter(readFile func(string) ([]byte, error), path string) (uint64, bool) {
+	data, err := readFile(path)
+	if err != nil || len(data) > maxHostInputBytes {
+		return 0, false
+	}
+	value, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return value, true
 }
 
 func CollectIOAccelerator(inputs HostCollectorInputs) ([]GPUDevice, bool) {
@@ -468,37 +506,6 @@ func ParseLinuxMeminfo(text string) (MemoryCounters, bool) {
 		return MemoryCounters{}, false
 	}
 	return MemoryCounters{CapacityBytes: total, UsedBytes: total - available}, true
-}
-
-func ParseGPUCSV(text string) []GPUDevice {
-	devices := []GPUDevice{}
-	for _, line := range strings.Split(text, "\n") {
-		parts := strings.Split(line, ",")
-		if len(parts) != 5 {
-			continue
-		}
-		index, e1 := strconv.Atoi(strings.TrimSpace(parts[0]))
-		util, e2 := strconv.ParseFloat(strings.TrimSpace(parts[2]), 64)
-		used, e3 := strconv.ParseFloat(strings.TrimSpace(parts[3]), 64)
-		total, e4 := strconv.ParseFloat(strings.TrimSpace(parts[4]), 64)
-		if e1 != nil || e2 != nil || e3 != nil || e4 != nil || index < 0 || !finite(util) || !finite(used) || !finite(total) {
-			continue
-		}
-		if util < 0 {
-			util = 0
-		}
-		if util > 100 {
-			util = 100
-		}
-		if used < 0 {
-			used = 0
-		}
-		if total < 0 {
-			total = 0
-		}
-		devices = append(devices, GPUDevice{SourceID: fmt.Sprintf("gpu:%d", index), Label: gpuLabel(index, strings.TrimSpace(parts[1])), Utilization: util, MemoryUsedBytes: mibBytes(used), MemoryTotalBytes: mibBytes(total)})
-	}
-	return devices
 }
 
 func ParseIOAcceleratorJSON(data []byte) []GPUDevice {

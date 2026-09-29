@@ -6727,10 +6727,12 @@ function scheduleWorkingAgentTransitionNotification(session, kind, key, tone, op
   return true;
 }
 
-function rekeyWorkingAgentTransitionNotificationSession(oldSession, newSession) {
-  const record = sessionStatusRecord(oldSession);
-  if (!record) return;
-  for (const pending of record.workingAgentTransitionNotificationPending.values()) pending.session = newSession;
+function rekeyWorkingAgentTransitionNotificationSession(replacements) {
+  for (const [oldSession, newSession] of replacements) {
+    const record = sessionStatusRecord(oldSession);
+    if (!record) continue;
+    for (const pending of record.workingAgentTransitionNotificationPending.values()) pending.session = newSession;
+  }
 }
 
 function maybeNotifyWorkingAgentTransition(session, agentKey, tone, options = {}) {

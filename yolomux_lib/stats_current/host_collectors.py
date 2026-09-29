@@ -250,31 +250,35 @@ class CpuSampler:
         }
 
 
-def generic_gpu_devices() -> dict[str, dict[str, float | int | str]]:
-    try:
-        result = subprocess.run(["gpu-info", "--query-gpu=index,name,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=0.75, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return {}
-    if result.returncode != 0:
-        return {}
+def _linux_gpu_devices(device_root: Path = Path("/sys/class/drm")) -> dict[str, dict[str, float | int | str]]:
     devices: dict[str, dict[str, float | int | str]] = {}
-    for line in result.stdout.splitlines():
-        parts = [part.strip() for part in line.split(",")]
-        if len(parts) != 5:
+    for device_path in sorted(device_root.glob("card[0-9]*")):
+        if not re.fullmatch(r"card\d+", device_path.name):
             continue
         try:
-            index = int(parts[0])
-            used, capacity = float(parts[3]), float(parts[4])
-            utilization = _clamp(float(parts[2]))
-        except ValueError:
+            index = int(device_path.name[4:])
+            device = device_path / "device"
+            utilization = float((device / "gpu_busy_percent").read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
             continue
-        devices[f"gpu:{index}"] = {"label": f"GPU {index} ({parts[1]})" if parts[1] else f"GPU {index}", "util_percent": utilization, "memory_used_bytes": int(max(0, used) * 1024 * 1024), "memory_capacity_bytes": int(max(0, capacity) * 1024 * 1024)}
+        if not 0 <= utilization <= 100:
+            continue
+        try:
+            used = int((device / "mem_info_vram_used").read_text(encoding="utf-8").strip())
+            capacity = int((device / "mem_info_vram_total").read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            continue
+        if used < 0 or capacity <= 0 or used > capacity:
+            continue
+        devices[f"gpu:{index}"] = {"label": f"GPU {index}", "util_percent": utilization, "memory_used_bytes": used, "memory_capacity_bytes": capacity}
     return devices
 
 
 def gpu_devices() -> dict[str, dict[str, float | int | str]]:
+    if sys.platform == "linux":
+        return _linux_gpu_devices()
     if sys.platform != "darwin":
-        return generic_gpu_devices()
+        return {}
     try:
         result = subprocess.run(["ioreg", "-a", "-r", "-d1", "-w0", "-c", "IOAccelerator"], capture_output=True, timeout=0.75, check=False)
         rows = plistlib.loads(result.stdout) if result.returncode == 0 and result.stdout else []

@@ -333,7 +333,7 @@ def test_opencode_meter_only_capture_is_idle_without_current_turn_row():
         "old OpenCode tool text from scrollback",
         "     ctrl+x down view subagents",
         "     Build · switchyard/openai/gpt-5.6-luna | $0.00 in / $0.00 out per 1M tokens",
-        "  ┃  Build · switchyard/openai/gpt-5.6-luna | $0.00 in / $0.00 out per 1M tokens GPU Inference · high",
+        "  ┃  Build · switchyard/openai/gpt-5.6-luna | $0.00 in / $0.00 out per 1M tokens Inference Service · high",
         "  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
         "   ⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt                                                        606.2K  ctrl+p commands",
     ])
@@ -354,7 +354,7 @@ def test_opencode_meter_only_capture_is_idle_without_current_turn_row():
 
 def test_opencode_explicit_session_footer_meter_is_working_without_native_override():
     visible = "\n".join([
-        "  Build ·switchyard/openai/gpt-5.6-luna | $0.00 in / $0.00 out per 1M tokens GPU Inference Hub",
+        "  Build ·switchyard/openai/gpt-5.6-luna | $0.00 in / $0.00 out per 1M tokens Inference Service",
         "  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
         "   ⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt                                                    317.1K  ctrl+p commands",
     ])

@@ -595,10 +595,14 @@ exec /bin/sleep 300
                     (async () => {
                       try {
                         const launches = [];
-                        for (const item of cases) {
+                        for (const [index, item] of cases.entries()) {
                           const plan = await json('/api/create-session-plan');
                           if (plan.status !== 200 || !Number.isSafeInteger(Number(plan.body?.generation))) {
                             throw new Error(`unsafe create-session plan: ${JSON.stringify(plan)}`);
+                          }
+                          const expectedSession = String(index + 1);
+                          if (plan.body?.session !== expectedSession) {
+                            throw new Error(`Go create-session plan chose ${JSON.stringify(plan.body?.session)}, want ${expectedSession}`);
                           }
                           const params = new URLSearchParams({
                             agent: item.agent,
@@ -653,6 +657,7 @@ exec /bin/sleep 300
                 recorded = set()
                 for command in expected_launch_commands:
                     recorded = wait_for_recorded_command(command)
+
                 reload_trace_source = f"""
                     (() => {{
                       const targetSession = {json.dumps(session)};
@@ -1577,6 +1582,40 @@ exec /bin/sleep 300
                       if (!gitRow) throw new Error('Finder Git repository row is missing');
                       const gitDiffButton = await waitFor(() => Array.from(document.querySelectorAll('.file-context-menu button')).find(button => button.textContent.trim() === 'ΔShow Diff'), 'context-menu Diff action');
                       if (!gitDiffButton || gitDiffButton.disabled) throw new Error('Finder Git repository Diff action is missing or disabled');
+                      const originalFetch = window.fetch.bind(window);
+                      let heldStatsResponse = false;
+                      window.fetch = async (input, init) => {
+                        const response = await originalFetch(input, init);
+                        const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+                        if (url.pathname !== '/api/fs/git-history-stats-stream' || heldStatsResponse || !response.body) return response;
+                        heldStatsResponse = true;
+                        const sourceReader = response.body.getReader();
+                        let eventTail = '';
+                        let statsStreamText = '';
+                        const heldBody = new ReadableStream({
+                          start(controller) {
+                            (async () => {
+                              const decoder = new TextDecoder();
+                              while (true) {
+                                const result = await sourceReader.read();
+                                if (result.done) { controller.close(); return; }
+                                const text = decoder.decode(result.value, {stream: true});
+                                statsStreamText = (statsStreamText + text).slice(-1000);
+                                eventTail += text;
+                                window.__yolomuxGoStatsStreamText = statsStreamText;
+                                controller.enqueue(result.value);
+                                if (eventTail.includes('event: done')) {
+                                  window.__yolomuxGoStatsDoneHeldOpen = true;
+                                  return;
+                                }
+                                eventTail = eventTail.slice(-128);
+                              }
+                            })().catch(error => controller.error(error));
+                          },
+                          cancel(reason) { return sourceReader.cancel(reason); },
+                        });
+                        return new Response(heldBody, {status: response.status, statusText: response.statusText, headers: response.headers});
+                      };
                       const historyListStartedAt = performance.now();
                       gitDiffButton.click();
                       const gitDiffItem = gitDiffItemFor(gitRoot);
@@ -1627,6 +1666,25 @@ exec /bin/sleep 300
                           statsRequests: performance.getEntriesByType('resource').map(entry => entry.name).filter(name => name.includes('/api/fs/git-history-stats-stream')),
                         })}`, {cause: error});
                       }
+                      let doneCompletion;
+                      try {
+                        doneCompletion = await waitFor(() => {
+                          const historyState = gitDiffTabState.get(gitDiffItem);
+                          return window.__yolomuxGoStatsDoneHeldOpen === true && historyState?.statsStage >= 1 && !historyState.statsLoading
+                            ? {statsStage: historyState.statsStage, statsLoading: historyState.statsLoading}
+                            : null;
+                        }, 'Git stats done event completion while response stays open');
+                      } catch (error) {
+                        const historyState = gitDiffTabState.get(gitDiffItem);
+                        throw new Error(`${error.message}: ${JSON.stringify({
+                          heldStatsResponse,
+                          doneEventResponseHeldOpen: window.__yolomuxGoStatsDoneHeldOpen === true,
+                          statsStreamText: window.__yolomuxGoStatsStreamText || '',
+                          state: historyState ? {statsLoading: historyState.statsLoading, statsStage: historyState.statsStage, statsError: historyState.statsError, commits: historyState.commits?.slice(0, 2)} : null,
+                          statsRequests: performance.getEntriesByType('resource').map(entry => entry.name).filter(name => name.includes('/api/fs/git-history-stats-stream')),
+                        })}`, {cause: error});
+                      }
+                      window.fetch = originalFetch;
                       const statsRequests = performance.getEntriesByType('resource')
                         .map(entry => entry.name)
                         .filter(name => name.includes('/api/fs/git-history-stats-stream'));
@@ -1653,11 +1711,13 @@ exec /bin/sleep 300
                         historyListReadyMs,
                         historyRequestMs: historyRequestEntry?.duration ?? null,
                         topStats,
+                        doneCompletion,
+                        doneEventResponseHeldOpen: window.__yolomuxGoStatsDoneHeldOpen === true,
                         firstStatsBatchSizes: firstStatsRequest?.searchParams.get('batch_sizes') || '',
                         detailFiles: topDetail.files.map(file => file.path),
                         detailRendered: Boolean(renderedTopDetail),
                       };
-                      if (!gitHistory.nativeSuppressed || !gitHistory.active || gitHistory.head !== gitHead || gitHistory.commits < 2 || gitHistory.historyListReadyMs >= 500 || !historyRequest || !gitHistory.topStats || gitHistory.firstStatsBatchSizes !== '1' || !gitHistory.detailFiles.length || !gitHistory.detailRendered) throw new Error('Finder Git repository Diff tab contract mismatch: ' + JSON.stringify(gitHistory));
+                      if (!gitHistory.nativeSuppressed || !gitHistory.active || gitHistory.head !== gitHead || gitHistory.commits < 2 || gitHistory.historyListReadyMs >= 500 || !historyRequest || !gitHistory.topStats || !gitHistory.doneEventResponseHeldOpen || gitHistory.doneCompletion?.statsStage < 1 || gitHistory.doneCompletion?.statsLoading !== false || gitHistory.firstStatsBatchSizes !== '1' || !gitHistory.detailFiles.length || !gitHistory.detailRendered) throw new Error('Finder Git repository Diff tab contract mismatch: ' + JSON.stringify(gitHistory));
                       const removable = row(root + '/ui-remove-me.txt');
                       if (!removable) throw new Error('Finder delete fixture row is missing');
                       const originalConfirm = window.confirm;
@@ -1986,6 +2046,105 @@ exec /bin/sleep 300
                     raise SystemExit(
                         f"Go Chromium tmux window button failed: selected={selected_tmux_window()!r}, button={button_html!r}"
                     )
+
+                exited_session = session
+                roster_options = Options()
+                roster_options.binary_location = chrome_binary
+                for arg in ("--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--ignore-certificate-errors", "--window-size=1200,800"):
+                    roster_options.add_argument(arg)
+                roster_driver = webdriver.Chrome(
+                    service=Service(executable_path=driver_path), options=roster_options,
+                ) if driver_path else webdriver.Chrome(options=roster_options)
+                roster_lease = WebDriverLease.from_driver(roster_driver)
+                try:
+                    roster_driver.get(f"https://127.0.0.1:{port}/login")
+                    roster_driver.find_element("name", "username").send_keys("e2e")
+                    roster_driver.find_element("name", "password").send_keys("test-password")
+                    roster_driver.find_element("css selector", "button[type=submit]").click()
+                    WebDriverWait(roster_driver, 10).until(lambda current: "/login" not in current.current_url)
+                    roster_driver.execute_script("localStorage.clear(); sessionStorage.clear();")
+                    roster_driver.get(f"https://127.0.0.1:{port}/?sessions={exited_session}&layout=left&tabs=left:{exited_session}")
+                    try:
+                        WebDriverWait(roster_driver, 10).until(lambda current: current.execute_script(
+                            "const visible = node => Boolean(node?.getClientRects().length"
+                            " && getComputedStyle(node).display !== 'none'"
+                            " && getComputedStyle(node).visibility !== 'hidden');"
+                            "return visible(document.getElementById(`panel-${arguments[0]}`))"
+                            "&& visible(document.querySelector(`.dockview-pane-tab[data-pane-tab=\"${CSS.escape(arguments[0])}\"]`))"
+                            "&& clientEventTransportState.connected === true;",
+                            exited_session,
+                        ))
+                    except TimeoutException as error:
+                        mount_state = roster_driver.execute_script("""
+                            const session = arguments[0];
+                            const panel = document.getElementById(`panel-${session}`);
+                            const tab = document.getElementById(`panel-tab-${session}`);
+                            return {
+                              url: location.href,
+                              sessions: typeof sessions === 'undefined' ? null : sessions.slice(),
+                              activeSessions: typeof activeSessions === 'undefined' ? null : activeSessions.slice(),
+                              panel: panel ? {rect: panel.getBoundingClientRect().toJSON(), display: getComputedStyle(panel).display} : null,
+                              tab: tab ? {rect: tab.getBoundingClientRect().toJSON(), display: getComputedStyle(tab).display} : null,
+                              transport: typeof clientEventTransportState === 'undefined' ? null : clientEventTransportState.connected,
+                              body: document.body?.innerText?.slice(0, 400) || '',
+                            };
+                        """, exited_session)
+                        raise SystemExit(f"Go roster-exit E2E could not mount its clean fixture pane: {mount_state}") from error
+                    exited_slot = roster_driver.execute_script("return slotForItem(arguments[0], layoutSlots);", exited_session)
+                    kill_result = subprocess.run(
+                        (*tmux, "kill-session", "-t", f"={exited_session}"),
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                    if kill_result.returncode != 0:
+                        raise SystemExit(
+                            f"Go roster-exit E2E could not externally exit {exited_session!r}: "
+                            f"{kill_result.stderr.strip()}"
+                        )
+                    roster_exit = roster_driver.execute_async_script("""
+                    const session = arguments[0];
+                    const exitedSlot = arguments[1];
+                    const done = arguments[arguments.length - 1];
+                    const startedAt = performance.now();
+                    const deadline = startedAt + 5000;
+                    const visible = node => {
+                      if (!node || !node.getClientRects().length) return false;
+                      const style = getComputedStyle(node);
+                      return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) > 0;
+                    };
+                    const pane = () => document.getElementById(`panel-${session}`);
+                    const tab = () => document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(session)}"]`);
+                    const poll = () => {
+                      if (!sessions.includes(session) && !activeSessions.includes(session)
+                          && !visible(tab())
+                          && !visible(pane())
+                          && paneIsPlaceholder(exitedSlot, layoutSlots)) {
+                        done({ok: true, elapsedMs: performance.now() - startedAt, placeholderSlot: exitedSlot});
+                        return;
+                      }
+                      if (performance.now() >= deadline) {
+                        done({ok: false, sessions: sessions.slice(), activeSessions: activeSessions.slice(),
+                          panelVisible: visible(pane()),
+                          tabVisible: visible(tab()),
+                          panelRect: pane()?.getBoundingClientRect().toJSON() || null,
+                          tabRect: tab()?.getBoundingClientRect().toJSON() || null,
+                          placeholder: paneIsPlaceholder(exitedSlot, layoutSlots),
+                          transport: clientEventTransportState?.connected});
+                        return;
+                      }
+                      setTimeout(poll, 25);
+                    };
+                    poll();
+                    """, exited_session, exited_slot)
+                    if not roster_exit.get("ok"):
+                        raise SystemExit(f"Go roster-exit E2E left an exited pane visible: {roster_exit}")
+                    print(f"Go external tmux exit convergence: {json.dumps(roster_exit, sort_keys=True)}")
+                finally:
+                    retirement = roster_lease.retire()
+                    if not retirement.proven_gone:
+                        cleanup_errors.append(f"Go roster-exit E2E chromedriver survived retirement: {retirement.as_dict()}")
+
                 stop_server(force=True)
                 journal_path = config / "go-operations.jsonl"
                 journal_lines = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines() if line.strip()]

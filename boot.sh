@@ -9,7 +9,7 @@ host="${YOLOMUX_HOST:-0.0.0.0}"
 log_dir="${YOLOMUX_LOG_DIR:-/tmp}"
 restart_lock_base="${TMPDIR:-/tmp}"
 dev_mode="auto"
-backend="python"
+backend="go"
 print_command=0
 check_assets=0
 ignore_load=0
@@ -21,9 +21,9 @@ server_shell="${SHELL:-$(command -v bash)}"
 
 usage() {
   cat <<'EOF'
-Usage: boot.sh [--print-command|--check-assets] [--ignore-load] [--force] [--golang|--backend BACKEND] [--host HOST] [--log-dir DIR] [--dev|--no-dev] [--port PORT] [PORT ...]
+Usage: boot.sh [--print-command|--check-assets] [--ignore-load] [--force] [--golang|--deprecated-python|--backend go] [--host HOST] [--log-dir DIR] [--dev|--no-dev] [--port PORT] [PORT ...]
 
-Restart this checkout's YOLOmux server. YOLOMUX_PORT or an explicit port argument selects the primary port; a no-argument launch requires YOLOMUX_DEFAULT_PORT. Non-primary ports use --dev by default.
+Restart this checkout's Go YOLOmux server. Use --deprecated-python to select the legacy Python backend. YOLOMUX_PORT or an explicit port argument selects the primary port; a no-argument launch requires YOLOMUX_DEFAULT_PORT. Non-primary ports use --dev by default.
 
 Operator launches always use this Unix user's machine-wide tmux server, so every session visible to `tmux list-sessions` is eligible for discovery. The launcher clears inherited nested-tmux and private-socket routing; only isolated test fixtures should set YOLOMUX_TMUX_SOCKET explicitly.
 
@@ -32,7 +32,7 @@ Examples:
   ./boot.sh <dev-port>
   ./boot.sh --force <port>
   ./boot.sh --ignore-load <dev-port>
-  ./boot.sh --golang <port>
+  ./boot.sh --deprecated-python <port>
   ./boot.sh --port <port-a> --port <port-b>
 EOF
 }
@@ -76,11 +76,16 @@ while [[ "$#" -gt 0 ]]; do
       backend="go"
       shift
       ;;
+    --deprecated-python)
+      backend="python"
+      shift
+      ;;
     --backend)
       [[ "$#" -ge 2 ]] || die "--backend requires a value"
       case "$2" in
-        python|go) backend="$2" ;;
-        *) die "invalid backend: $2 (expected python or go)" ;;
+        go) backend="go" ;;
+        python) die "the Python backend is deprecated for managed launches; use --deprecated-python" ;;
+        *) die "invalid backend: $2 (expected go)" ;;
       esac
       shift 2
       ;;
@@ -223,6 +228,8 @@ build_server_args() {
   fi
   if [[ "$backend" == "go" ]]; then
     server_args+=(--backend go)
+  else
+    server_args+=(--backend python)
   fi
   if use_dev_mode "$port"; then
     server_args+=(--dev)

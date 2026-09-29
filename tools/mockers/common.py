@@ -54,7 +54,7 @@ OPENCODE_ELEMENT_FG = "\x1b[38;5;234m"
 OPENCODE_WARNING = "\x1b[38;5;215m"
 OPENCODE_VERSION = "1.18.26"
 OPENCODE_COST = "$0.14-$0.8808/1M"
-OPENCODE_PROVIDER = "GPU Inference Hub"
+OPENCODE_PROVIDER = "Inference Service"
 OPENCODE_WORKING_FRAMES = (
     ("■⬝⬝⬝⬝⬝⬝⬝", (75, 235, 235, 235, 235, 235, 235, 235)),
     ("■■⬝⬝⬝⬝⬝⬝", (75, 74, 235, 235, 235, 235, 235, 235)),
@@ -601,7 +601,7 @@ CLAUDE_CAPTURED_WORKING_RE = re.compile(
 )
 CLAUDE_CAPTURED_LABELLED_SEPARATOR_RE = re.compile(r"^\s*[─━═]{3,}\s+(?P<label>\S.*?\S)\s+[─━═]+\s*$")
 # Enterprise identity lines shown under the robot in the real welcome box.
-WELCOME_ORG_LINE = "· GPU Corporation - Power Users"
+WELCOME_ORG_LINE = "· Development Team - Power Users"
 WELCOME_PLAN_LABEL = "Claude Enterprise"
 
 

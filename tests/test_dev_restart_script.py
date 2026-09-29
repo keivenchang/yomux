@@ -37,12 +37,13 @@ def boot_function_source(name: str) -> str:
     return "\n".join(lines[start : end + 1])
 
 
-def test_boot_print_command_uses_any_configured_primary_port():
+def test_boot_print_command_defaults_to_go_for_any_configured_primary_port():
     env = {
         **os.environ,
         "YOLOMUX_HOST": "127.0.0.1",
         "YOLOMUX_LOG_DIR": "/tmp",
         "YOLOMUX_PORT": "48123",
+        "YOLOMUX_GO_BINARY": "/tmp/yolomux-go-test",
     }
     result = subprocess.run(
         [str(ROOT / "boot.sh"), "--print-command"],
@@ -55,6 +56,8 @@ def test_boot_print_command_uses_any_configured_primary_port():
 
     command = printable_command_text(result.stdout)
     assert "yolomux.py" in command
+    assert "--backend go" in command
+    assert "YOLOMUX_GO_BINARY=/tmp/yolomux-go-test" in command
     assert "--host 127.0.0.1" in command
     assert "--port 48123" in command
     assert "--dang --self-signed" in command
@@ -96,8 +99,9 @@ def test_boot_print_command_launches_dev_ports_in_dev_mode():
     assert "--port 8123" in command
     assert "--port 8124" in command
     assert "--port 8125" in command
-    assert command.count("--dang --self-signed --dev") == 2
-    assert command.count("--dang --self-signed") >= 3
+    assert command.count("--backend go") == 3
+    assert command.count("--dev") == 2
+    assert command.count("--self-signed") == 3
 
 
 def test_boot_print_command_selects_go_backend_and_defaults_to_all_interfaces():
@@ -139,6 +143,34 @@ def test_boot_print_command_accepts_backend_go_alias():
     )
 
     assert "--backend go" in printable_command_text(result.stdout)
+
+
+def test_boot_print_command_selects_python_only_with_deprecated_flag():
+    result = subprocess.run(
+        [str(ROOT / "boot.sh"), "--print-command", "--deprecated-python", "7221"],
+        cwd=ROOT,
+        env={**os.environ, "YOLOMUX_BACKEND": "go"},
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    command = printable_command_text(result.stdout)
+    assert "--backend python" in command
+    assert "--backend go" not in command
+
+
+def test_boot_print_command_rejects_backend_python_without_deprecated_flag():
+    result = subprocess.run(
+        [str(ROOT / "boot.sh"), "--print-command", "--backend", "python", "7221"],
+        cwd=ROOT,
+        env=dict(os.environ),
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 2
+    assert "--deprecated-python" in result.stderr
 
 
 def test_boot_go_resolution_includes_current_bazel_rule_output():

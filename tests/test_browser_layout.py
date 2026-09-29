@@ -5115,7 +5115,7 @@ def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(bro
 
 def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser, tmp_path):
     page = tmp_path / "pane-info-bar-scroll.html"
-    long_text = "#76 DRAFT · keivenchang/ABC-2239__parity-commit-link-parser-toolkits · ~/GPU/parser-toolkits3 · 5 dirty · ABC-2239 In Review · fix(performance): repair v1 PARITY commit + case-doc links after"
+    long_text = "#76 DRAFT · keivenchang/ABC-2239__parity-commit-link-parser-toolkits · ~/vendor/parser-toolkits3 · 5 dirty · ABC-2239 In Review · fix(performance): repair v1 PARITY commit + case-doc links after"
     body = """
       <article class="panel active-pane" style="width: 520px;">
         <div id="info-bar" class="pane-info-bar panel-detail-row">

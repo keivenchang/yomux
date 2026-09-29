@@ -1,7 +1,10 @@
 import argparse
 import json
+import os
+import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -14,6 +17,8 @@ from yolomux_lib import cli
 from yolomux_lib.local_services import registry as cli_registry
 from yolomux_lib.server import TmuxWebtermHTTPServer
 from yolomux_lib.server import https_redirect_response
+from yolomux_lib.infra.root_paths import YolomuxRoots
+from yolomux_lib.server_lease import acquire_instance_and_port_leases
 
 
 def cli_args(**overrides):
@@ -172,18 +177,111 @@ def test_exec_go_backend_forwards_dangerous_yolo_to_binary(monkeypatch, tmp_path
     binary.write_text("#!/bin/sh\n", encoding="utf-8")
     binary.chmod(0o755)
     captured = {}
+    lease_descriptors = []
+    for _ in range(2):
+        read_fd, write_fd = os.pipe()
+        os.close(write_fd)
+        lease_descriptors.append(read_fd)
+    released = []
+
+    class FakeLease:
+        def __init__(self, fd):
+            self.fd = fd
+            self.extra_fds = ()
+
+        def release(self):
+            released.append(self.fd)
+            os.close(self.fd)
+
     monkeypatch.setenv("YOLOMUX_GO_BINARY", str(binary))
-    monkeypatch.setattr(cli.os, "execv", lambda path, command: captured.update(path=path, command=command))
+    monkeypatch.setattr(
+        cli,
+        "acquire_instance_and_port_leases",
+        lambda roots, port, force: captured.update(roots=roots, port=port, force=force)
+        or (FakeLease(lease_descriptors[0]), FakeLease(lease_descriptors[1])),
+    )
+
+    def execv(path, command):
+        captured.update(
+            path=path,
+            command=command,
+            lease_inheritable=[os.get_inheritable(fd) for fd in lease_descriptors],
+        )
+
+    monkeypatch.setattr(cli.os, "execv", execv)
 
     result = cli.exec_go_backend(
-        argparse.Namespace(host="0.0.0.0", port=7221, dangerously_yolo=True)
+        argparse.Namespace(host="0.0.0.0", port=7221, dangerously_yolo=True, force=True)
     )
 
     assert result == 127
-    assert captured == {
-        "path": str(binary),
-        "command": [str(binary), "--host", "0.0.0.0", "--port", "7221", "--root", str(Path(__file__).resolve().parents[1]), "--dangerously-yolo"],
+    assert captured["roots"] == cli._YOLOMUX_ROOTS
+    assert (captured["port"], captured["force"]) == (7221, True)
+    assert captured["path"] == str(binary)
+    assert captured["command"] == [
+        str(binary), "--host", "0.0.0.0", "--port", "7221", "--root",
+        str(Path(__file__).resolve().parents[1]), "--dangerously-yolo",
+    ]
+    assert captured["lease_inheritable"] == [True, True]
+    assert sorted(released) == sorted(lease_descriptors)
+
+
+def test_exec_go_backend_keeps_managed_leases_across_real_exec(tmp_path, request):
+    root = Path("/tmp") / f"yg{os.getpid()}"
+    root.mkdir(mode=0o700)
+    request.addfinalizer(lambda: shutil.rmtree(root, ignore_errors=True))
+    roots = YolomuxRoots(
+        config_dir=root / "config",
+        state_dir=root / "state",
+        cache_dir=root / "cache",
+        codex_home=root / "codex",
+        runtime_dir=root / "runtime",
+        root=root,
+    )
+    marker = tmp_path / "go-child-started"
+    binary = tmp_path / "yolomux-go"
+    binary.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "import signal\n"
+        "from pathlib import Path\n"
+        "Path(os.environ['YOLOMUX_CHILD_MARKER']).write_text(str(os.getpid()))\n"
+        "signal.pause()\n",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+    launcher = (
+        "import argparse; from yolomux_lib import cli; "
+        "raise SystemExit(cli.exec_go_backend(argparse.Namespace("
+        "host='127.0.0.1', port=48123, dangerously_yolo=False, force=False)))"
+    )
+    env = {
+        **os.environ,
+        "YOLOMUX_ROOT": str(root),
+        "YOLOMUX_CONFIG_DIR": str(roots.config_dir),
+        "YOLOMUX_STATE_DIR": str(roots.state_dir),
+        "YOLOMUX_CACHE_DIR": str(roots.cache_dir),
+        "YOLOMUX_CODEX_HOME": str(roots.codex_home),
+        "YOLOMUX_RUNTIME_DIR": str(roots.runtime_dir),
+        "PYTHONPYCACHEPREFIX": str(root / "python-cache"),
+        "YOLOMUX_GO_BINARY": str(binary),
+        "YOLOMUX_CHILD_MARKER": str(marker),
     }
+    process = subprocess.Popen([sys.executable, "-c", launcher], cwd=Path(__file__).resolve().parents[1], env=env)
+    try:
+        deadline = time.monotonic() + 5
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert marker.exists(), "fake Go executable did not start after exec"
+        assert marker.read_text(encoding="utf-8") == str(process.pid)
+        assert acquire_instance_and_port_leases(roots, 48123) == (None, None)
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+    claimed_after_exit = acquire_instance_and_port_leases(roots, 48123)
+    assert claimed_after_exit[0] is not None and claimed_after_exit[1] is not None
+    for lease in claimed_after_exit:
+        lease.release()
 
 
 def test_parse_args_supports_explicit_http_opt_out(monkeypatch):

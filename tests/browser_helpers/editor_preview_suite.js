@@ -2399,8 +2399,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
 
     const readonlyApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'readonly');
     const readonlyState = readonlyApi.fileContextMenuState({kind: 'file'}, ['/repo/app/a.txt'], ['a.txt']);
-    // readonly is terminal-only — the server 403s every /api/fs/* read, so Download and file tab opens
-    // are disabled in readonly to match, rather than offering a command that fails.
+    // General file reads still require admin access. Repo Diff exposes its separate, read-only routes.
     assert.equal(readonlyState.downloadDisabled, true, 'readonly cannot download (server forbids /api/fs/raw)');
     const readonlyImage = readonlyApi.fileContextMenuState({kind: 'file', name: 'screen.png'}, ['/repo/app/screen.png'], ['screen.png']);
     assert.equal(readonlyImage.openInNewTabDisabled, true, 'readonly cannot open a file in a tab (server forbids the read)');

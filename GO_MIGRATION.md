@@ -4,10 +4,10 @@ This document records the Go backend capabilities implemented in this tree. The 
 
 ## Launch And Backend Selection
 
-The Python launch is unchanged:
+The managed launcher selects Go by default. To run the legacy Python backend, opt in explicitly:
 
 ```bash
-python3 yolomux.py --dang
+./boot.sh --deprecated-python 7221
 ```
 
 Build, validate, and start a Go instance with:
@@ -16,10 +16,12 @@ Build, validate, and start a Go instance with:
 make setup
 bazel --bazelrc=/dev/null build --jobs=auto //cmd/yolomux-go:yolomux_go
 tools/run_bazel_tests.sh --jobs "$(getconf _NPROCESSORS_ONLN)"
-YOLOMUX_START_LOAD_WAIT_SECONDS=30 ./boot.sh --golang 7221
+YOLOMUX_START_LOAD_WAIT_SECONDS=30 ./boot.sh 7221
 ```
 
-`boot.sh --golang` is equivalent to `boot.sh --backend go`. It finds the canonical Bazel output at `bazel-bin/cmd/yolomux-go/yolomux_go_/yolomux_go`, applies the shared startup/load/port lifecycle, invokes `python3 yolomux.py --backend go`, and then the Python CLI replaces itself with the Go process while carrying host, port, checkout root, and environment-selected config/state. Managed startup binds `0.0.0.0` by default. Direct execution of the Go binary defaults to `127.0.0.1`, so use the launcher for operator runs.
+`boot.sh` finds the canonical Bazel output at `bazel-bin/cmd/yolomux-go/yolomux_go_/yolomux_go`, applies the shared startup/load/port lifecycle, invokes `python3 yolomux.py --backend go`, and then the Python CLI replaces itself with the Go process while carrying host, port, checkout root, and environment-selected config/state. `--golang` and `--backend go` remain aliases. `--backend python` is rejected; `--deprecated-python` is the only managed Python selection. Managed startup binds `0.0.0.0` by default. Direct execution of the Go binary defaults to `127.0.0.1`, so use the launcher for operator runs.
+
+A Go process launched by an older managed launcher may not hold the shared root and port leases. Gracefully stop that verified listener once before migrating it; new managed Go processes retain those leases across `exec`, so later `boot.sh --force <port>` restarts can replace them safely.
 
 Go owns TLS after the `exec`: by default it generates a self-signed certificate with Go's crypto library under `${TMPDIR:-/tmp}/yolomux-go-tls-<port>/`. The managed Python launcher forwards `--dang` as Go's `--dangerously-yolo`; Python `--cert`, `--key`, `--http`, and `--dev` behavior still does not carry over. The Go binary accepts its own `--cert`, `--key`, `--http`, and `--dangerously-yolo` flags for fixture/direct use, but a direct launch does not replace `boot.sh` lifecycle and isolation checks.
 All operator launch forms use the machine-wide default tmux server for the launching Unix user. Managed launchers remove inherited `TMUX`, `TMUX_PANE`, and `YOLOMUX_TMUX_SOCKET` routing before starting Python or Go, so `tmux list-sessions` and the Go/Python session APIs see every session on that server. Direct Python, Go, and companion-tool entrypoints apply the same normalization for ordinary launches; an explicit `YOLOMUX_TMUX_SOCKET` is preserved only when an isolated test or fixture deliberately supplies it. A different Unix user's tmux server is not implicitly accessible.
@@ -268,7 +270,7 @@ The wrapper accepts an optional positive integer `--jobs`; when the flag is omit
 
 3. Fix product failures; do not hide them with retries, sleeps, lower concurrency, or a live-port substitution.
 
-4. Start an explicit non-production preview port through `boot.sh --golang` only after automated checks.
+4. Start an explicit non-production preview port through `boot.sh` only after automated checks.
 
 5. Verify the listener, `/healthz`, capability snapshot, and exact browser workflow against the rebuilt bundle.
 

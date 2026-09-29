@@ -628,7 +628,7 @@ def main() -> int:
 
 
 def exec_go_backend(args: argparse.Namespace) -> int:
-    """Replace the launcher with the explicitly selected Go server."""
+    """Replace the launcher with Go while retaining the managed instance leases."""
     repo_root = Path(__file__).resolve().parents[1]
     configured_binary = os.environ.get("YOLOMUX_GO_BINARY")
     candidates = [Path(configured_binary)] if configured_binary else [repo_root / "yolomux-go", repo_root / "bazel-bin" / "yolomux-go"]
@@ -637,8 +637,38 @@ def exec_go_backend(args: argparse.Namespace) -> int:
         searched = ", ".join(str(candidate) for candidate in candidates)
         print(f"ERROR: Go backend binary is unavailable; searched: {searched}", file=sys.stderr)
         return 2
+    try:
+        root_lease, port_lease = acquire_instance_and_port_leases(
+            _YOLOMUX_ROOTS,
+            args.port,
+            force=args.force,
+        )
+    except InstanceLeaseError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 2
+    if root_lease is None:
+        print(
+            "Another YOLOmux instance is already running for this product root/config; refusing a duplicate.",
+            file=sys.stderr,
+        )
+        return 1
+    if port_lease is None:
+        root_lease.release()
+        print(f"YOLOmux port {args.port} is already owned by another server launch; refusing a duplicate.", file=sys.stderr)
+        return 1
     command = [str(binary), "--host", args.host, "--port", str(args.port), "--root", str(repo_root)]
     if args.dangerously_yolo:
         command.append("--dangerously-yolo")
-    os.execv(str(binary), command)
+    leases = (root_lease, port_lease)
+    try:
+        for lease in leases:
+            for descriptor in (lease.fd, *lease.extra_fds):
+                os.set_inheritable(descriptor, True)
+        os.execv(str(binary), command)
+    except OSError as error:
+        print(f"ERROR: could not launch Go backend: {error}", file=sys.stderr)
+        return 2
+    finally:
+        for lease in leases:
+            lease.release()
     return 127

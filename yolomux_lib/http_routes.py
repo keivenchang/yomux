@@ -283,9 +283,6 @@ def _dispatch_route_handler(request: Any, parsed: Any, route: Route) -> None:
     required_role = route_required_role(route, request, parsed)
     if required_role is not None and not request.require_auth(required_role):
         return
-    if route.group in {"filesystem", "batch"} and request.auth_readonly():
-        request.reject_forbidden(request.auth_identity(), "admin")
-        return
     route.handler(request, parsed, route)
 
 
@@ -1697,21 +1694,23 @@ CHAT_ROUTES = (
 )
 
 FILESYSTEM_ROUTES = (
-    Route("GET", "/api/fs/fast/list", "readonly", get_fs_fast_list, protocol=RESPONSE_JSON, group="filesystem"),
-    Route("GET", "/api/fs/list", "readonly", get_fs_list, protocol=RESPONSE_JSON, group="filesystem"),
-    Route("GET", "/api/fs/search", "readonly", get_fs_search, protocol=RESPONSE_JSON, group="filesystem"),
-    Route("GET", "/api/fs/search-stream", "readonly", get_fs_search_stream, protocol=RESPONSE_SSE, group="filesystem"),
-    Route("GET", "/api/fs/index-status", "readonly", get_fs_index_status, protocol=RESPONSE_JSON, group="filesystem"),
-    Route("GET", "/api/fs/read", "readonly", get_fs_read, protocol=RESPONSE_JSON, group="filesystem"),
-    Route("GET", "/api/fs/info", "readonly", get_fs_info, protocol=RESPONSE_JSON, group="filesystem"),
+    # Route roles own access: Repo Diff reads are available to viewers, while general
+    # filesystem reads and mutations retain their existing administrator requirement.
+    Route("GET", "/api/fs/fast/list", "admin", get_fs_fast_list, protocol=RESPONSE_JSON, group="filesystem"),
+    Route("GET", "/api/fs/list", "admin", get_fs_list, protocol=RESPONSE_JSON, group="filesystem"),
+    Route("GET", "/api/fs/search", "admin", get_fs_search, protocol=RESPONSE_JSON, group="filesystem"),
+    Route("GET", "/api/fs/search-stream", "admin", get_fs_search_stream, protocol=RESPONSE_SSE, group="filesystem"),
+    Route("GET", "/api/fs/index-status", "admin", get_fs_index_status, protocol=RESPONSE_JSON, group="filesystem"),
+    Route("GET", "/api/fs/read", "admin", get_fs_read, protocol=RESPONSE_JSON, group="filesystem"),
+    Route("GET", "/api/fs/info", "admin", get_fs_info, protocol=RESPONSE_JSON, group="filesystem"),
     Route("GET", "/api/fs/diff", "readonly", get_fs_diff, protocol=RESPONSE_JSON, group="filesystem"),
     Route("GET", "/api/fs/git-history", "readonly", get_fs_git_history, protocol=RESPONSE_JSON, group="filesystem"),
     Route("GET", "/api/fs/git-history-stats-stream", "readonly", get_fs_git_history_stats_stream, protocol=RESPONSE_SSE, group="filesystem"),
     Route("GET", "/api/fs/git-commit", "readonly", get_fs_git_commit, protocol=RESPONSE_JSON, group="filesystem"),
-    Route("GET", "/api/fs/watch-diff", "readonly", get_fs_watch_diff, protocol=RESPONSE_JSON, group="filesystem"),
-    Route("GET", "/api/fs/raw", "readonly", get_fs_raw, protocol=RESPONSE_BINARY, group="filesystem"),
+    Route("GET", "/api/fs/watch-diff", "admin", get_fs_watch_diff, protocol=RESPONSE_JSON, group="filesystem"),
+    Route("GET", "/api/fs/raw", "admin", get_fs_raw, protocol=RESPONSE_BINARY, group="filesystem"),
     Route("POST", "/api/fs/batch", "admin", post_fs_batch, protocol=RESPONSE_JSON_BATCH, body_limit=64 * 1024, group="filesystem"),
-    Route("POST", "/api/fs/resolve-file-candidates", "readonly", post_fs_resolve_file_candidates, protocol=RESPONSE_JSON, body_limit=32 * 1024, group="filesystem"),
+    Route("POST", "/api/fs/resolve-file-candidates", "admin", post_fs_resolve_file_candidates, protocol=RESPONSE_JSON, body_limit=32 * 1024, group="filesystem"),
     Route("POST", "/api/fs/write", "admin", post_fs_write, protocol=RESPONSE_JSON, group="filesystem"),
     Route("POST", "/api/fs/delete", "admin", post_fs_delete, protocol=RESPONSE_JSON, body_limit=4096, group="filesystem"),
     Route("POST", "/api/fs/unindex", "admin", post_fs_unindex, protocol=RESPONSE_JSON, body_limit=4096, group="filesystem"),
@@ -1720,7 +1719,7 @@ FILESYSTEM_ROUTES = (
 )
 
 BATCH_ROUTES = (
-    Route("GET", "/api/batch/search", "readonly", get_batch_search, protocol=RESPONSE_JSON, group="batch"),
+    Route("GET", "/api/batch/search", "admin", get_batch_search, protocol=RESPONSE_JSON, group="batch"),
     Route("GET", "/api/batch/blame", "admin", get_blame, protocol=RESPONSE_JSON, group="batch"),
     Route("GET", "/api/batch/zip", "admin", get_fs_zip, protocol=RESPONSE_BINARY, group="batch"),
     Route("GET", "/api/batch/count", "admin", get_fs_count, protocol=RESPONSE_JSON, group="batch"),

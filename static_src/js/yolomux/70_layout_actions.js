@@ -2300,6 +2300,16 @@ function rekeyMap(map, oldKey, newKey) {
   map.delete(oldKey);
 }
 
+function rekeyMapEntries(map, replacements) {
+  const entries = Array.from(replacements, ([oldKey, newKey]) => [oldKey, newKey, map.get(oldKey)])
+    .filter(([oldKey, newKey, value]) => oldKey !== newKey && value !== undefined && map.has(oldKey));
+  const sourceKeys = new Set(entries.map(([oldKey]) => oldKey));
+  for (const [oldKey] of entries) map.delete(oldKey);
+  for (const [, newKey, value] of entries) {
+    if (sourceKeys.has(newKey) || !map.has(newKey)) map.set(newKey, value);
+  }
+}
+
 function clearSessionEphemeralRuntimeState(session) {
   tmuxWindowNavigationRecords.delete(session);
   terminalTmuxInputStates.delete(session);
@@ -2342,9 +2352,10 @@ function stopSessionUi(session) {
   clearSessionUiState(session);
 }
 
-function replaceSessionMetadata(oldSession, newSession) {
+function replaceSessionMetadataEntries(replacements) {
+  if (!replacements.size) return;
   if (typeof rekeyWorkingAgentTransitionNotificationSession === 'function') {
-    rekeyWorkingAgentTransitionNotificationSession(oldSession, newSession);
+    rekeyWorkingAgentTransitionNotificationSession(replacements);
   }
   for (const map of [
     autoApproveStates,
@@ -2358,58 +2369,70 @@ function replaceSessionMetadata(oldSession, newSession) {
     // eviction ordering glitches (it reads as never-activated).
     tabLastActivatedAt,
   ]) {
-    rekeyMap(map, oldSession, newSession);
+    rekeyMapEntries(map, replacements);
   }
-  const hasTranscriptSession = Boolean(transcriptMetadataState.payload.sessions?.[oldSession]);
+  const payloadSessions = transcriptMetadataState.payload.sessions || {};
+  const hasTranscriptSession = Array.from(replacements.keys()).some(session => Object.hasOwn(payloadSessions, session));
   const hasTranscriptOrderEntry = Array.isArray(transcriptMetadataState.payload.session_order)
-    && transcriptMetadataState.payload.session_order.includes(oldSession);
+    && transcriptMetadataState.payload.session_order.some(session => replacements.has(session));
   if (hasTranscriptSession || hasTranscriptOrderEntry) {
-    const nextSessions = {
-      ...(transcriptMetadataState.payload.sessions || {}),
-    };
-    if (hasTranscriptSession) {
-      nextSessions[newSession] = nextSessions[newSession] || nextSessions[oldSession];
-      delete nextSessions[oldSession];
+    const nextSessions = {...payloadSessions};
+    const movedSessions = Array.from(replacements, ([oldSession, newSession]) => [oldSession, payloadSessions[oldSession], newSession])
+      .filter(([oldSession]) => Object.hasOwn(payloadSessions, oldSession));
+    for (const [oldSession] of movedSessions) delete nextSessions[oldSession];
+    for (const [oldSession, metadata, newSession] of movedSessions) {
+      if (replacements.has(newSession) || !Object.hasOwn(nextSessions, newSession)) nextSessions[newSession] = metadata;
     }
     setTranscriptMetadataPayload({
       ...transcriptMetadataState.payload,
       sessions: nextSessions,
       session_order: Array.isArray(transcriptMetadataState.payload.session_order)
-        ? transcriptMetadataState.payload.session_order.map(item => item === oldSession ? newSession : item)
+        ? transcriptMetadataState.payload.session_order.map(item => replacements.get(item) || item)
         : transcriptMetadataState.payload.session_order,
     });
   }
 }
 
-function replaceTmuxSessionInClient(oldSession, newSession, nextSessions, options = {}) {
-  // A concurrent rename may return to the original name; preserve keyed state
-  // but still apply the layout so its mutation-completion receipt is consumed.
-  const sameSession = oldSession === newSession;
-  if (!sameSession) {
+function replaceTmuxSessionsInClient(renameEntries, nextSessions, options = {}) {
+  const replacements = renameEntries instanceof Map ? new Map(renameEntries) : new Map(renameEntries || []);
+  for (const [oldSession, newSession] of Array.from(replacements)) {
+    if (!oldSession || !newSession || oldSession === newSession) replacements.delete(oldSession);
+  }
+  const next = normalizedSessionOrder(nextSessions) || sessions.map(item => replacements.get(item) || item);
+  for (const oldSession of replacements.keys()) {
     clearPendingTmuxSession(oldSession);
-    markPendingTmuxSession(newSession);
-  }
-  const next = normalizedSessionOrder(nextSessions) || sessions.map(item => item === oldSession ? newSession : item);
-  if (!sameSession) {
-    moveUploadResultRecord(oldSession, newSession);
     detachSessionUi(oldSession);
-    replaceSessionMetadata(oldSession, newSession);
   }
+  if (options.authoritativeRoster !== true) {
+    for (const newSession of replacements.values()) markPendingTmuxSession(newSession);
+  }
+  moveUploadResultRecords(replacements);
+  replaceSessionMetadataEntries(replacements);
   setSessionOrder(next);
-  if (focusedTerminal === oldSession) focusedTerminal = newSession;
-  if (focusedPanelItem === oldSession) focusedPanelItem = newSession;
-  if (lastFocusedTmuxSession === oldSession) lastFocusedTmuxSession = newSession;
+  const focusSession = focusedPanelItem
+    ? replacements.get(focusedPanelItem) || focusedPanelItem
+    : replacements.values().next().value;
+  focusedTerminal = replacements.get(focusedTerminal) || focusedTerminal;
+  focusedPanelItem = replacements.get(focusedPanelItem) || focusedPanelItem;
+  lastFocusedTmuxSession = replacements.get(lastFocusedTmuxSession) || lastFocusedTmuxSession;
   const layoutOptions = {
-    focusSession: newSession,
+    focusSession,
     prune: false,
-    message: localizedHtml('common.renamed', {oldName: oldSession, newName: newSession}),
-    messageKind: 'advisory',
   };
+  if (replacements.size === 1) {
+    const [[oldSession, newSession]] = replacements;
+    layoutOptions.message = localizedHtml('common.renamed', {oldName: oldSession, newName: newSession});
+    layoutOptions.messageKind = 'advisory';
+  }
   if (Number.isSafeInteger(options.completionGeneration) && options.completionGeneration > 0) {
     layoutOptions.completionGeneration = options.completionGeneration;
   }
-  applyLayoutSlots(layoutWithReplacedItem(oldSession, newSession), layoutOptions);
-  renderUploadResult(newSession);
+  applyLayoutSlots(layoutWithReplacedItems(replacements), layoutOptions);
+  for (const newSession of replacements.values()) renderUploadResult(newSession);
+}
+
+function replaceTmuxSessionInClient(oldSession, newSession, nextSessions, options = {}) {
+  replaceTmuxSessionsInClient(new Map([[oldSession, newSession]]), nextSessions, options);
 }
 
 function closeSessionRenameDialog() {

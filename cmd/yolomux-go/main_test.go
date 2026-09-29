@@ -17,6 +17,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -275,18 +276,19 @@ func TestGoCreateSessionLaunchesShellAndAgentsWithExplicitDangerousFlags(t *test
 
 	srv := &server{root: t.TempDir(), dangerouslyYolo: true}
 	cases := []struct {
-		name  string
-		query string
-		agent string
-		want  string
+		name    string
+		session string
+		query   string
+		agent   string
+		want    string
 	}{
-		{name: "bash", query: "agent=term&terminal=bash&dangerously_yolo=0", agent: "term", want: "bash"},
-		{name: "claude", query: "agent=claude&dangerously_yolo=1", agent: "claude", want: "claude --dangerously-skip-permissions"},
-		{name: "codex", query: "agent=codex&dangerously_yolo=1", agent: "codex", want: "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"},
+		{name: "bash", session: "1", query: "agent=term&terminal=bash&dangerously_yolo=0", agent: "term", want: "bash"},
+		{name: "claude", session: "2", query: "agent=claude&dangerously_yolo=1", agent: "claude", want: "claude --dangerously-skip-permissions"},
+		{name: "codex", session: "3", query: "agent=codex&dangerously_yolo=1", agent: "codex", want: "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"},
 	}
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
-			request := httptest.NewRequest(http.MethodPost, "/api/create-session?session=go-"+item.name+"&"+item.query, nil)
+			request := httptest.NewRequest(http.MethodPost, "/api/create-session?"+item.query, nil)
 			record := httptest.NewRecorder()
 			srv.createSession(record, request)
 			if record.Code != http.StatusOK {
@@ -296,10 +298,10 @@ func TestGoCreateSessionLaunchesShellAndAgentsWithExplicitDangerousFlags(t *test
 			if err := json.Unmarshal(record.Body.Bytes(), &payload); err != nil {
 				t.Fatal(err)
 			}
-			if payload["agent"] != item.agent || payload["command"] != item.want || payload["created"] != true {
+			if payload["agent"] != item.agent || payload["command"] != item.want || payload["created"] != true || payload["session"] != item.session {
 				t.Fatalf("create session payload = %#v, want agent=%q command=%q", payload, item.agent, item.want)
 			}
-			pane, err := srv.tmuxCommand("list-panes", "-t", "="+"go-"+item.name+":", "-F", "#{pane_start_command}").Output()
+			pane, err := srv.tmuxCommand("list-panes", "-t", "="+item.session+":", "-F", "#{pane_start_command}").Output()
 			if err != nil || !strings.Contains(string(pane), item.want) {
 				t.Fatalf("created pane command = %q, err=%v, want %q", pane, err, item.want)
 			}
@@ -715,7 +717,9 @@ func TestGoRenameSessionTmuxCommandHasRequestBoundedTimeout(t *testing.T) {
 }
 
 func TestGoCreateSessionPlanReturnsJavaScriptSafeMonotonicGeneration(t *testing.T) {
-	srv := &server{}
+	srv := &server{tmuxSessionRosterFn: func() ([]string, error) {
+		return []string{"1", "3"}, nil
+	}}
 	var generations []int64
 	for range 2 {
 		record := httptest.NewRecorder()
@@ -724,10 +728,14 @@ func TestGoCreateSessionPlanReturnsJavaScriptSafeMonotonicGeneration(t *testing.
 			t.Fatalf("create session plan status = %d, body=%s", record.Code, record.Body.String())
 		}
 		var payload struct {
-			Generation int64 `json:"generation"`
+			Session    string `json:"session"`
+			Generation int64  `json:"generation"`
 		}
 		if err := json.Unmarshal(record.Body.Bytes(), &payload); err != nil {
 			t.Fatal(err)
+		}
+		if payload.Session != "2" {
+			t.Fatalf("planned session = %q, want first unused numbered session 2", payload.Session)
 		}
 		generations = append(generations, payload.Generation)
 	}
@@ -737,6 +745,107 @@ func TestGoCreateSessionPlanReturnsJavaScriptSafeMonotonicGeneration(t *testing.
 	}
 	if generations[1] <= generations[0] || generations[1] > javascriptMaxSafeInteger {
 		t.Fatalf("plan generations = %v, want strictly increasing JavaScript-safe integers", generations)
+	}
+}
+
+func TestNextNumberedSessionNameMatchesLegacyBackendRules(t *testing.T) {
+	allNumberedNames := make([]string, maxYolomuxSessionTabs)
+	for index := range allNumberedNames {
+		allNumberedNames[index] = strconv.Itoa(index + 1)
+	}
+	cases := []struct {
+		name     string
+		existing []string
+		want     string
+	}{
+		{name: "starts at one", want: "1"},
+		{name: "fills the first gap", existing: []string{"1", "3"}, want: "2"},
+		{name: "ignores named sessions", existing: []string{"yo-123", "project"}, want: "1"},
+		{name: "full numbered range", existing: allNumberedNames},
+		{name: "maximum session count", existing: append(append([]string(nil), allNumberedNames[:maxYolomuxSessionTabs-1]...), "project")},
+	}
+	for _, item := range cases {
+		t.Run(item.name, func(t *testing.T) {
+			if got := nextNumberedSessionName(item.existing); got != item.want {
+				t.Fatalf("nextNumberedSessionName(%v) = %q, want %q", item.existing, got, item.want)
+			}
+		})
+	}
+}
+
+func TestGoCreateSessionDefaultsToFirstAvailableNumberedName(t *testing.T) {
+	tmuxDir, err := os.MkdirTemp("/tmp", "ym-create-session-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmuxDir) })
+	tmuxSocket := filepath.Join(tmuxDir, "tmux.sock")
+	t.Setenv("YOLOMUX_TMUX_SOCKET", tmuxSocket)
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", tmuxSocket, "kill-server").Run() })
+
+	srv := &server{
+		root: t.TempDir(),
+		tmuxSessionRosterFn: func() ([]string, error) {
+			return []string{"1", "3"}, nil
+		},
+	}
+	record := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/create-session?agent=term&terminal=bash", nil)
+	srv.createSession(record, request)
+	if record.Code != http.StatusOK {
+		t.Fatalf("create session status = %d, body=%s", record.Code, record.Body.String())
+	}
+	var payload struct {
+		Session string `json:"session"`
+	}
+	if err := json.Unmarshal(record.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Session != "2" {
+		t.Fatalf("created session = %q, want first unused numbered session 2", payload.Session)
+	}
+}
+
+func TestGoCreateSessionRejectsStaleNumberedSessionPlan(t *testing.T) {
+	srv := &server{tmuxSessionRosterFn: func() ([]string, error) {
+		return []string{"2", "3"}, nil
+	}}
+	record := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/create-session?agent=term&terminal=bash&session=2&generation=1", nil)
+	srv.createSession(record, request)
+	if record.Code != http.StatusConflict {
+		t.Fatalf("stale create-session plan status = %d, body=%s; want conflict", record.Code, record.Body.String())
+	}
+	if !strings.Contains(record.Body.String(), "reservation no longer matches") {
+		t.Fatalf("stale create-session plan error = %s, want reservation mismatch", record.Body.String())
+	}
+}
+
+func TestGoCreateSessionRejectsExplicitNameWithoutPlanGeneration(t *testing.T) {
+	srv := &server{tmuxSessionRosterFn: func() ([]string, error) {
+		return []string{"1", "3"}, nil
+	}}
+	record := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/create-session?agent=term&terminal=bash&session=2", nil)
+	srv.createSession(record, request)
+	if record.Code != http.StatusConflict {
+		t.Fatalf("unreserved create-session status = %d, body=%s; want conflict", record.Code, record.Body.String())
+	}
+}
+
+func TestGoCreateSessionEnforcesMaximumTabsWithExplicitName(t *testing.T) {
+	sessions := make([]string, maxYolomuxSessionTabs)
+	for index := range sessions {
+		sessions[index] = strconv.Itoa(index + 1)
+	}
+	srv := &server{tmuxSessionRosterFn: func() ([]string, error) {
+		return sessions, nil
+	}}
+	record := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/create-session?agent=term&terminal=bash&session=100&generation=1", nil)
+	srv.createSession(record, request)
+	if record.Code != http.StatusConflict || !strings.Contains(record.Body.String(), "maximum session tabs reached") {
+		t.Fatalf("full-roster create-session status = %d, body=%s; want maximum-tabs conflict", record.Code, record.Body.String())
 	}
 }
 
@@ -2412,7 +2521,7 @@ func TestGoRootAdvertisesTheFullCapabilityGatedApplicationShell(t *testing.T) {
 	if page.Code != http.StatusOK {
 		t.Fatalf("full root status = %d, body=%s", page.Code, page.Body.String())
 	}
-	if !bytes.Contains(page.Body.Bytes(), []byte(`"versionStatus":"0.9.3`)) {
+	if !bytes.Contains(page.Body.Bytes(), []byte(`"versionStatus":"0.9.4`)) {
 		t.Fatalf("Go root does not preserve the release version label: %s", page.Body.String())
 	}
 	if !bytes.Contains(page.Body.Bytes(), []byte(`"backendLabel":"Go `)) {
@@ -5923,11 +6032,249 @@ func TestPhase3EventBrokerMatchesPythonDemandAndResourceContracts(t *testing.T) 
 	if eventMatchesChannels("stats_sample", []string{"core"}) {
 		t.Fatal("stats_sample must not belong to core")
 	}
+	if !slices.Equal(eventTypeChannels["tmux_roster_changed"], []string{"core"}) {
+		t.Fatalf("tmux_roster_changed channels = %v, want [core]", eventTypeChannels["tmux_roster_changed"])
+	}
 	if !eventMatchesChannels("unknown_event", []string{"core"}) {
 		t.Fatal("unknown event types must use the Python core fallback")
 	}
 	if got := b.readySnapshot(); got["fs_changed"] != files.Revision {
 		t.Fatalf("ready snapshot = %+v", got)
+	}
+}
+
+func TestTmuxRosterWatcherPublishesExternalRemovalAndStops(t *testing.T) {
+	broker := newEventBroker()
+	stream, unsubscribe := broker.subscribe("core", "transcripts")
+	defer unsubscribe()
+	var reads atomic.Int32
+	srv := &server{
+		events: broker,
+		tmuxSessionRosterFn: func() ([]string, error) {
+			if reads.Add(1) == 1 {
+				return []string{"1"}, nil
+			}
+			return []string{}, nil
+		},
+		metadataEnrichmentFn: func([]string) (map[string]map[string]any, error) {
+			return map[string]map[string]any{}, nil
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	srv.startTmuxRosterWatcherWithInterval(ctx, 5*time.Millisecond)
+	defer cancel()
+	select {
+	case event := <-stream:
+		if event.Type != "tmux_roster_changed" {
+			t.Fatalf("event type = %q, want tmux_roster_changed", event.Type)
+		}
+		if got, ok := event.Payload["session_order"].([]string); !ok || len(got) != 0 {
+			t.Fatalf("removed session order = %#v, want empty list", event.Payload["session_order"])
+		}
+		if event.Payload["server_epoch"] != broker.epoch {
+			t.Fatalf("event server epoch = %#v, want %q", event.Payload["server_epoch"], broker.epoch)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not publish the externally removed session")
+	}
+	select {
+	case event := <-stream:
+		if event.Type != "transcripts_changed" {
+			t.Fatalf("event after roster transition = %q, want transcripts_changed", event.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("metadata refresh did not publish after the roster transition")
+	}
+	cancel()
+	select {
+	case <-srv.tmuxRosterWatchDone:
+	case <-time.After(time.Second):
+		t.Fatal("roster watcher did not stop after cancellation")
+	}
+}
+
+func TestSessionMetadataPublishesRosterRenameBeforeEnrichment(t *testing.T) {
+	socket := shortSyntheticTmuxSocket(t)
+	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
+	root := t.TempDir()
+	const oldName = "roster-old"
+	const newName = "roster-new"
+	if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", oldName, "-c", root).CombinedOutput(); err != nil {
+		t.Fatalf("create synthetic tmux session: %v (%s)", err, output)
+	}
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
+	broker := newEventBroker()
+	stream, unsubscribe := broker.subscribe("core", "transcripts")
+	defer unsubscribe()
+	enrichmentStarted := make(chan struct{})
+	releaseEnrichment := make(chan struct{})
+	srv := &server{
+		events: broker,
+		metadataEnrichmentFn: func([]string) (map[string]map[string]any, error) {
+			close(enrichmentStarted)
+			<-releaseEnrichment
+			return map[string]map[string]any{}, nil
+		},
+	}
+	initial, err := srv.tmuxTopologySnapshot()
+	if err != nil || len(initial.sessions) != 1 || initial.sessions[0] != oldName {
+		t.Fatalf("initial tmux topology = %#v, %v", initial.sessions, err)
+	}
+	oldInfo := map[string]any{"session_identity": goTmuxSessionIdentity(oldName, initial.identities[oldName])}
+	srv.metadataGeneration = 1
+	srv.metadataNextGeneration = 1
+	srv.metadataPayload = map[string]any{
+		"sessions": map[string]any{oldName: oldInfo}, "session_order": []string{oldName},
+		"topology_generation": initial.generation, "errors": []string{},
+	}
+	srv.metadataBuiltAt = time.Now()
+	if output, err := exec.Command("tmux", "-S", socket, "rename-session", "-t", oldName, newName).CombinedOutput(); err != nil {
+		t.Fatalf("rename synthetic tmux session: %v (%s)", err, output)
+	}
+	srv.tmuxRosterMu.Lock()
+	srv.tmuxRosterSampledAt = time.Time{}
+	srv.tmuxRosterMu.Unlock()
+
+	response := httptest.NewRecorder()
+	srv.sessionMetadata(response, httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("session metadata status = %d %s", response.Code, response.Body.String())
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &metadata); err != nil {
+		t.Fatal(err)
+	}
+	responseRenames, ok := metadata["renames"].([]any)
+	if !ok || len(responseRenames) != 1 {
+		t.Fatalf("session metadata rename transition = %#v", metadata["renames"])
+	}
+	responseRename, ok := responseRenames[0].(map[string]any)
+	if !ok || responseRename["old_session"] != oldName || responseRename["new_session"] != newName {
+		t.Fatalf("session metadata rename = %#v", responseRenames[0])
+	}
+	activityResponse := httptest.NewRecorder()
+	srv.activity(activityResponse, httptest.NewRequest(http.MethodGet, "/api/activity?scope=all", nil))
+	if activityResponse.Code != http.StatusOK {
+		t.Fatalf("activity status = %d %s", activityResponse.Code, activityResponse.Body.String())
+	}
+	var activityPayload map[string]any
+	if err := json.Unmarshal(activityResponse.Body.Bytes(), &activityPayload); err != nil {
+		t.Fatal(err)
+	}
+	activityRenames, ok := activityPayload["renames"].([]any)
+	if !ok || len(activityRenames) != 1 {
+		t.Fatalf("activity rename transition = %#v", activityPayload["renames"])
+	}
+	select {
+	case <-enrichmentStarted:
+	case <-time.After(time.Second):
+		t.Fatal("metadata enrichment did not start")
+	}
+	select {
+	case event := <-stream:
+		if event.Type != "tmux_roster_changed" {
+			t.Fatalf("first rename event = %q, want tmux_roster_changed", event.Type)
+		}
+		renames, ok := event.Payload["renames"].([]map[string]any)
+		if !ok || len(renames) != 1 || renames[0]["old_session"] != oldName || renames[0]["new_session"] != newName {
+			t.Fatalf("rename payload = %#v", event.Payload["renames"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session metadata did not publish the roster rename")
+	}
+	close(releaseEnrichment)
+	select {
+	case event := <-stream:
+		if event.Type != "transcripts_changed" {
+			t.Fatalf("event after roster rename = %q, want transcripts_changed", event.Type)
+		}
+		data, ok := event.Payload["data"].(map[string]any)
+		if !ok {
+			t.Fatalf("metadata event data = %#v", event.Payload["data"])
+		}
+		metadataRenames, ok := data["renames"].([]map[string]any)
+		if !ok || len(metadataRenames) != 1 || metadataRenames[0]["old_session"] != oldName || metadataRenames[0]["new_session"] != newName {
+			t.Fatalf("metadata event rename = %#v", data["renames"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("metadata enrichment did not publish after the roster rename")
+	}
+}
+
+func TestTmuxTopologyFromRosterRejectsAnOlderCachedSnapshot(t *testing.T) {
+	socket := shortSyntheticTmuxSocket(t)
+	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
+	root := t.TempDir()
+	const oldName = "roster-before"
+	const newName = "roster-after"
+	if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", oldName, "-c", root).CombinedOutput(); err != nil {
+		t.Fatalf("create synthetic tmux session: %v (%s)", err, output)
+	}
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
+	broker := newEventBroker()
+	stream, unsubscribe := broker.subscribe("core")
+	defer unsubscribe()
+	srv := &server{events: broker}
+	older, err := srv.tmuxTopologySnapshot()
+	if err != nil || len(older.sessions) != 1 || older.sessions[0] != oldName {
+		t.Fatalf("initial topology = %#v, %v", older.sessions, err)
+	}
+	if output, err := exec.Command("tmux", "-S", socket, "rename-session", "-t", oldName, newName).CombinedOutput(); err != nil {
+		t.Fatalf("rename synthetic tmux session: %v (%s)", err, output)
+	}
+	newerRoster, err := srv.tmuxSessionRosterSnapshot(true)
+	if err != nil || len(newerRoster.sessions) != 1 || newerRoster.sessions[0] != newName {
+		t.Fatalf("newer cached roster = %#v, %v", newerRoster.sessions, err)
+	}
+
+	result, err := srv.tmuxTopologyFromRoster(tmuxSessionRosterSnapshot{
+		sessions: older.sessions, identities: older.identities, known: true, revision: older.rosterRevision,
+	}, nil)
+	if err != nil || len(result.sessions) != 1 || result.sessions[0] != newName {
+		t.Fatalf("stale topology caller returned = %#v, %v", result.sessions, err)
+	}
+	if result.generation != older.generation+1 {
+		t.Fatalf("topology generation = %d, want %d", result.generation, older.generation+1)
+	}
+	select {
+	case event := <-stream:
+		renames, ok := event.Payload["renames"].([]map[string]any)
+		if event.Type != "tmux_roster_changed" || !ok || len(renames) != 1 || renames[0]["old_session"] != oldName || renames[0]["new_session"] != newName {
+			t.Fatalf("newer roster event = %#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("newer cached roster was not published")
+	}
+	if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", oldName, "-c", root).CombinedOutput(); err != nil {
+		t.Fatalf("create a new session with the retired name: %v (%s)", err, output)
+	}
+	if _, err := srv.tmuxSessionRosterSnapshot(true); err != nil {
+		t.Fatalf("refresh roster after session-name reuse: %v", err)
+	}
+	reused, known := srv.cachedTmuxTopologySnapshot()
+	if !known || len(reused.sessions) != 2 || len(reused.renames) != 0 {
+		t.Fatalf("reused-name topology = sessions %#v, renames %#v, known %t", reused.sessions, reused.renames, known)
+	}
+}
+
+func TestTmuxRosterRenamesRequireStableTmuxIdentity(t *testing.T) {
+	unrelated := tmuxRosterRenames(
+		goTmuxTopology{sessions: []string{"1", "2"}, identities: map[string]string{"1": "$1\x1f100\x1f10", "2": "$2\x1f200\x1f20"}},
+		goTmuxTopology{sessions: []string{"2", "3"}, identities: map[string]string{"2": "$2\x1f200\x1f20", "3": "$3\x1f300\x1f30"}},
+	)
+	if len(unrelated) != 0 {
+		t.Fatalf("unrelated removal/addition inferred as rename: %#v", unrelated)
+	}
+	multiple := tmuxRosterRenames(
+		goTmuxTopology{sessions: []string{"1", "2", "3"}, identities: map[string]string{"1": "$1\x1f100\x1f10", "2": "$2\x1f200\x1f20", "3": "$3\x1f300\x1f30"}},
+		goTmuxTopology{sessions: []string{"4", "5", "3"}, identities: map[string]string{"4": "$1\x1f100\x1f10", "5": "$2\x1f200\x1f20", "3": "$3\x1f300\x1f30"}},
+	)
+	want := []map[string]any{
+		{"old_session": "1", "new_session": "4", "old_session_identity": goTmuxSessionIdentity("1", "$1\x1f100\x1f10")},
+		{"old_session": "2", "new_session": "5", "old_session_identity": goTmuxSessionIdentity("2", "$2\x1f200\x1f20")},
+	}
+	if !reflect.DeepEqual(multiple, want) {
+		t.Fatalf("identity-matched renames = %#v, want %#v", multiple, want)
 	}
 }
 

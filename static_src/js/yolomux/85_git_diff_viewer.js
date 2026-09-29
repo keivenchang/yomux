@@ -613,19 +613,29 @@ function gitDiffStatsStreamRequest(state, url, onChunk) {
     const decoder = new TextDecoder();
     let streamError = null;
     let donePayload = {};
+    let terminalEvent = false;
+    const cancelReader = () => {
+      terminalEvent = true;
+      Promise.resolve(reader.cancel?.()).catch(() => {});
+    };
     const parser = createFileQuickOpenSseParser((event, payload) => {
       if (event === 'chunk') onChunk(payload);
-      else if (event === 'done') donePayload = payload || {};
+      else if (event === 'done') {
+        donePayload = payload || {};
+        cancelReader();
+      }
       else if (event === 'error') {
         streamError = new Error(String(payload?.message || payload?.error || 'Git history stats stream failed'));
         streamError.payload = payload;
         streamError.code = String(payload?.error_code || '');
+        cancelReader();
       }
     });
     while (true) {
       const result = await reader.read();
       if (result.done) break;
       parser.feed(decoder.decode(result.value, {stream: true}));
+      if (terminalEvent) break;
     }
     parser.feed(decoder.decode());
     parser.finish();

@@ -5539,9 +5539,9 @@ async function runLayoutAsyncSuite() {
       session_order: ['old'],
       sessions: {old: {panes: [], marker: 'cached'}},
     }, {refreshAuto: false, refreshActivity: false, refreshContext: false});
-    let metadataReads = 0;
-    api.setFetchForTest(() => {
-      metadataReads += 1;
+    const unexpectedReads = [];
+    api.setFetchForTest(url => {
+      unexpectedReads.push(String(url));
       return Promise.reject(new Error('roster event must not poll metadata'));
     });
     const applied = api.applyTmuxRosterPayloadForTest({
@@ -5559,7 +5559,7 @@ async function runLayoutAsyncSuite() {
     assert.equal(state.payload.sessions.renamed.marker, 'cached', 'the compact roster event rekeys cached row data');
     assert.equal(state.payload.sessions.old, undefined);
     assert.equal(state.rosterGeneration, 2);
-    assert.equal(metadataReads, 0, 'roster event convergence does not request full metadata');
+    assert.deepStrictEqual(unexpectedReads, [], 'roster event convergence does not request full metadata');
 
     const stale = api.applyTmuxRosterPayloadForTest({
       session_order: ['old'],
@@ -5591,6 +5591,182 @@ async function runLayoutAsyncSuite() {
     }, {epoch: 'epoch-b'});
     assert.equal(fresh, true, 'a replacement server can restart roster generations at one');
     assert.deepStrictEqual(canonical(api.transcriptMetadataStateForTest().payload.session_order), ['fresh']);
+  });
+
+  await testAsync('HTTP metadata preserves a rename while its roster event is delayed', async () => {
+    const api = loadYolomux('?sessions=old&layout=left&tabs=left:old', ['old']);
+    const quiet = {refreshAuto: false, refreshActivity: false, refreshContext: false};
+    await api.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'epoch-a', generation: 4},
+      topology_generation: 1,
+      session_order: ['old'],
+      sessions: {old: {panes: [], marker: 'before-rename'}},
+    }, quiet);
+
+    const applied = await api.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'epoch-a', generation: 5},
+      topology_generation: 2,
+      session_order: ['renamed'],
+      sessions: {renamed: {panes: [], marker: 'metadata-first'}},
+      renames: [{old_session: 'old', new_session: 'renamed'}],
+    }, quiet);
+    assert.equal(applied, true);
+    assert.equal(api.itemInLayout('old'), false, 'HTTP metadata retires the old session only after migrating its layout');
+    assert.equal(api.itemInLayout('renamed'), true, 'HTTP metadata preserves the pane under the renamed session');
+    assert.deepStrictEqual(
+      canonical(api.serialize(api.currentSlots()).panes),
+      {left: {tabs: ['renamed'], active: 'renamed'}},
+    );
+
+    const delayedEvent = api.applyTmuxRosterPayloadForTest({
+      session_order: ['renamed'],
+      roster_generation: 2,
+      topology_generation: 2,
+      server_epoch: 'epoch-a',
+      renames: [{old_session: 'old', new_session: 'renamed'}],
+    }, {epoch: 'epoch-a'});
+    assert.equal(delayedEvent, true, 'the matching delayed event is accepted after metadata');
+    assert.equal(api.itemInLayout('renamed'), true, 'the delayed event does not undo the migrated pane');
+    assert.deepStrictEqual(canonical(api.transcriptMetadataStateForTest().payload.session_order), ['renamed']);
+
+    const activityApi = loadYolomux('?sessions=old&layout=left&tabs=left:old', ['old']);
+    await activityApi.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'epoch-b', generation: 4},
+      topology_generation: 1,
+      session_order: ['old'],
+      sessions: {old: {panes: []}},
+    }, quiet);
+    const activityApplied = activityApi.applyTabberActivityPayloadForTest({
+      activity: {},
+      topology_generation: 2,
+      session_order: ['renamed'],
+      sessions: {renamed: {panes: []}},
+      renames: [{old_session: 'old', new_session: 'renamed'}],
+    }, 1);
+    assert.equal(activityApplied, true);
+    assert.equal(activityApi.itemInLayout('renamed'), true, 'an activity response can arrive before the rename event without dropping the pane');
+
+    const reusedNameApi = loadYolomux('?sessions=old&layout=left&tabs=left:old', ['old']);
+    await reusedNameApi.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'epoch-c', generation: 4},
+      topology_generation: 1,
+      session_order: ['old'],
+      sessions: {old: {panes: [], session_identity: 'new-old-incarnation'}},
+    }, quiet);
+    await reusedNameApi.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'epoch-c', generation: 5},
+      topology_generation: 2,
+      session_order: ['old', 'renamed'],
+      sessions: {
+        old: {panes: [], session_identity: 'new-old-incarnation'},
+        renamed: {panes: [], session_identity: 'renamed-incarnation'},
+      },
+      renames: [{old_session: 'old', new_session: 'renamed', old_session_identity: 'old-incarnation'}],
+    }, quiet);
+    assert.equal(reusedNameApi.itemInLayout('old'), true, 'an obsolete rename cannot capture a newly created session with the old name');
+    assert.equal(reusedNameApi.itemInLayout('renamed'), false, 'the new old-name session keeps its own layout identity');
+  });
+
+  test('tmux roster removal rerenders panels after retiring the exited session', () => {
+    const api = loadYolomux('?sessions=exited&layout=left&tabs=left:exited', ['exited']);
+    let renderCount = 0;
+    let renderedPreviousActive = [];
+    api.setRenderPanelsForTest(previousActive => {
+      renderCount += 1;
+      renderedPreviousActive = [...previousActive];
+    });
+
+    const applied = api.applyTmuxRosterPayloadForTest({
+      session_order: [],
+      roster_generation: 2,
+      topology_generation: 2,
+      server_epoch: 'epoch-a',
+    }, {epoch: 'epoch-a'});
+
+    assert.equal(applied, true);
+    assert.equal(api.itemInLayout('exited'), false, 'the exited session leaves the saved layout model');
+    assert.equal(renderCount, 1, 'the existing panel DOM is reconciled after the roster update');
+    assert.deepStrictEqual(renderedPreviousActive, ['exited'], 'panel cleanup receives the previous visible session');
+  });
+
+  await testAsync('tmux roster rename chains migrate layout and keyed state atomically', async () => {
+    const api = loadYolomux(
+      '?sessions=A,B&layout=row@50(left,right)&tabs=left:A;right:B',
+      ['A', 'B'],
+    );
+    const quiet = {refreshAuto: false, refreshActivity: false, refreshContext: false};
+    await api.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'epoch-chain', generation: 1},
+      topology_generation: 1,
+      session_order: ['A', 'B'],
+      sessions: {
+        A: {panes: [], session_identity: 'identity-A'},
+        B: {panes: [], session_identity: 'identity-B'},
+      },
+    }, quiet);
+    api.seedSessionLifecycleStateForTest('A');
+    api.seedSessionLifecycleStateForTest('B');
+    api.seedUploadResultRecordForTest('A', [{id: 'upload-A', expiresAt: Date.now() + 60_000}]);
+    api.seedUploadResultRecordForTest('B', [{id: 'upload-B', expiresAt: Date.now() + 60_000}]);
+
+    const applied = api.applyTmuxRosterPayloadForTest({
+      session_order: ['B', 'C'],
+      roster_generation: 2,
+      topology_generation: 2,
+      server_epoch: 'epoch-chain',
+      renames: [
+        {old_session: 'A', new_session: 'B', old_session_identity: 'identity-A'},
+        {old_session: 'B', new_session: 'C', old_session_identity: 'identity-B'},
+      ],
+    }, {epoch: 'epoch-chain'});
+
+    assert.equal(applied, true);
+    assert.deepStrictEqual(canonical(api.sessionsForTest()), ['B', 'C']);
+    assert.deepStrictEqual(
+      canonical(api.serialize(api.currentSlots()).panes),
+      {left: {tabs: ['B'], active: 'B'}, right: {tabs: ['C'], active: 'C'}},
+      'each renamed tab moves once even when a destination is another rename source',
+    );
+    assert.equal(api.sessionLifecycleStateForTest('B').paneScrollTop, 9, 'A keyed state moves to B');
+    assert.equal(api.sessionLifecycleStateForTest('C').paneScrollTop, 9, 'B keyed state moves to C');
+    assert.equal(api.uploadResultRecordForTest('B').entries[0].id, 'upload-A');
+    assert.equal(api.uploadResultRecordForTest('C').entries[0].id, 'upload-B');
+    assert.equal(api.transcriptMetadataStateForTest().payload.sessions.B.session_identity, 'identity-A');
+    assert.equal(api.transcriptMetadataStateForTest().payload.sessions.C.session_identity, 'identity-B');
+
+    const focusApiFor = async focus => {
+      const focusApi = loadYolomux(
+        '?sessions=A,B,D&layout=row@50(left,row@50(right,bottom))&tabs=left:A;right:B;bottom:D',
+        ['A', 'B', 'D'],
+      );
+      focusApi.setFocusedPanelItemValueForTest(focus);
+      await focusApi.applySessionMetadataPayloadForTest({
+        metadata_identity: {epoch: 'epoch-focus', generation: 1},
+        topology_generation: 1,
+        session_order: ['A', 'B', 'D'],
+        sessions: {
+          A: {panes: [], session_identity: 'identity-A'},
+          B: {panes: [], session_identity: 'identity-B'},
+          D: {panes: [], session_identity: 'identity-D'},
+        },
+      }, quiet);
+      focusApi.setFocusedPanelItemValueForTest(focus);
+      focusApi.applyTmuxRosterPayloadForTest({
+        session_order: ['B', 'C', 'D'],
+        roster_generation: 2,
+        topology_generation: 2,
+        server_epoch: 'epoch-focus',
+        renames: [
+          {old_session: 'A', new_session: 'B', old_session_identity: 'identity-A'},
+          {old_session: 'B', new_session: 'C', old_session_identity: 'identity-B'},
+        ],
+      }, {epoch: 'epoch-focus'});
+      return focusApi;
+    };
+    assert.equal((await focusApiFor('A')).focusedPanelItemForTest(), 'B', 'focus on the first source follows A to B once');
+    assert.equal((await focusApiFor('B')).focusedPanelItemForTest(), 'C', 'focus on the second source follows B to C');
+    const unaffectedFocus = (await focusApiFor('D')).focusedPanelItemForTest();
+    assert.equal(unaffectedFocus, 'D', `focus outside the rename map stays on D (got ${unaffectedFocus})`);
   });
 
   await testAsync('a superseded response still records the build the server promised', async () => {
