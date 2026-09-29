@@ -4439,15 +4439,18 @@ function deleteUploadResultRecord(session) {
   return uploadResultRecords.delete(key);
 }
 
-function moveUploadResultRecord(oldSession, newSession) {
-  const oldKey = String(oldSession || '');
-  const newKey = String(newSession || '');
-  const record = uploadResultRecord(oldKey);
-  if (!record || !newKey || oldKey === newKey) return false;
-  clearUploadResultCleanup(oldKey, record);
-  if (!uploadResultRecords.has(newKey)) uploadResultRecords.set(newKey, record);
-  uploadResultRecords.delete(oldKey);
-  return true;
+function moveUploadResultRecords(replacements) {
+  const moved = Array.from(replacements, ([oldKey, newKey]) => [oldKey, newKey, uploadResultRecord(oldKey)])
+    .filter(([oldKey, newKey, record]) => record && oldKey !== newKey);
+  const sourceKeys = new Set(moved.map(([oldKey]) => oldKey));
+  for (const [oldKey, , record] of moved) {
+    clearUploadResultCleanup(oldKey, record);
+    uploadResultRecords.delete(oldKey);
+  }
+  for (const [, newKey, record] of moved) {
+    if (sourceKeys.has(newKey) || !uploadResultRecords.has(newKey)) uploadResultRecords.set(newKey, record);
+  }
+  return moved.length > 0;
 }
 
 function deliverUploadResultNotification(session, payload = {}, inserted = false) {
@@ -6132,6 +6135,7 @@ async function applySessionMetadataPayload(payload, options = {}) {
       return finalizeSessionMetadataOutcome(false, 'older_work_graph_generation', payload, {session});
     }
   }
+  if (!epochChanged) applyTmuxRosterRenames(payload.renames, filteredOrder);
   setTranscriptMetadataPayload(nextPayload, {invalidateRequest: options.source !== 'request'});
   adoptTopologyGeneration(payload);
   // Metadata can arrive after the more-frequent auto-approve poll. Keep every agent window that
@@ -6231,6 +6235,28 @@ function tmuxRosterEventGeneration(payload) {
   return Number.isSafeInteger(Number(raw)) && Number(raw) >= 0 ? Number(raw) : 0;
 }
 
+function validTmuxRosterRenames(renames, nextOrder) {
+  if (!Array.isArray(renames) || !Array.isArray(nextOrder)) return [];
+  return renames.filter(rename => {
+    const oldSession = String(rename?.old_session || '').trim();
+    const newSession = String(rename?.new_session || '').trim();
+    const oldSessionIdentity = String(rename?.old_session_identity || '').trim();
+    const currentOldIdentity = transcriptMetadataState.payload?.sessions?.[oldSession]?.session_identity;
+    return oldSession && newSession && oldSession !== newSession
+      && nextOrder.includes(newSession) && sessions.includes(oldSession)
+      && (!nextOrder.includes(oldSession) || (oldSessionIdentity && currentOldIdentity === oldSessionIdentity));
+  });
+}
+
+function applyTmuxRosterRenames(renames, nextOrder) {
+  const validRenames = validTmuxRosterRenames(renames, nextOrder);
+  if (validRenames.length && typeof replaceTmuxSessionsInClient === 'function') {
+    const replacements = new Map(validRenames.map(rename => [String(rename.old_session).trim(), String(rename.new_session).trim()]));
+    replaceTmuxSessionsInClient(replacements, nextOrder, {authoritativeRoster: true});
+  }
+  return validRenames;
+}
+
 function applyTmuxRosterPayload(payload, envelope = {}) {
   if (!payload || typeof payload !== 'object') return false;
   const eventEpoch = String(payload.server_epoch || payload.epoch || envelope.epoch || '');
@@ -6242,32 +6268,14 @@ function applyTmuxRosterPayload(payload, envelope = {}) {
   const sameOrder = nextOrder.length === sessions.length && nextOrder.every((session, index) => session === sessions[index]);
   if (generation === transcriptMetadataState.rosterGeneration && !sameOrder) return false;
   adoptServerEpoch(eventEpoch);
-  const renames = Array.isArray(payload.renames) ? payload.renames : [];
-  const validRenames = renames.filter(rename => {
-    const oldSession = String(rename?.old_session || '').trim();
-    const newSession = String(rename?.new_session || '').trim();
-    return oldSession && newSession && oldSession !== newSession
-      && nextOrder.includes(newSession) && sessions.includes(oldSession);
-  });
-  for (const rename of validRenames) {
-    const oldSession = String(rename.old_session).trim();
-    const newSession = String(rename.new_session).trim();
-    if (typeof replaceTmuxSessionInClient === 'function') replaceTmuxSessionInClient(oldSession, newSession, nextOrder);
-  }
   const priorPayload = transcriptMetadataState.payload && typeof transcriptMetadataState.payload === 'object'
     ? transcriptMetadataState.payload
     : {};
-  const metadataSessions = Object.fromEntries(
-    Object.entries(priorPayload.sessions || {}).filter(([session]) => nextOrder.includes(session)),
-  );
-  for (const rename of validRenames) {
-    const oldSession = String(rename?.old_session || '').trim();
-    const newSession = String(rename?.new_session || '').trim();
-    if (oldSession && newSession && metadataSessions[oldSession] && !metadataSessions[newSession]) {
-      metadataSessions[newSession] = metadataSessions[oldSession];
-      delete metadataSessions[oldSession];
-    }
-  }
+  const validRenames = applyTmuxRosterRenames(payload.renames, nextOrder);
+  const replacements = new Map(validRenames.map(rename => [String(rename.old_session).trim(), String(rename.new_session).trim()]));
+  const metadataSessions = Object.fromEntries(Object.entries(priorPayload.sessions || {})
+    .map(([session, metadata]) => [replacements.get(session) || session, metadata])
+    .filter(([session]) => nextOrder.includes(session)));
   setTranscriptMetadataPayload({
     ...priorPayload,
     sessions: metadataSessions,
@@ -6276,11 +6284,13 @@ function applyTmuxRosterPayload(payload, envelope = {}) {
   });
   transcriptMetadataState.rosterGeneration = generation;
   adoptTopologyGeneration({topology_generation: generation});
+  const previousActive = activeSessions.slice();
   const sessionsChanged = updateSessionList(nextOrder);
   if (sessionsChanged) {
     updateDocumentTitle();
     renderSessionButtons();
   }
+  renderPanels(previousActive);
   if (typeof refreshOpenTabsMenuRows === 'function') refreshOpenTabsMenuRows();
   return true;
 }

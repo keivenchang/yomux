@@ -5391,6 +5391,7 @@ function applyTabberActivityPayload(payload, requestGeneration = 0) {
   if (generation > 0 && generation < tabberActivityState.appliedGeneration) return false;
   const refreshPlaceholder = tabberActivityPayloadIsRefreshPlaceholder(payload);
   if (refreshPlaceholder && tabberActivityPayloadHasUsefulData(tabberActivityPayload)) return false;
+  if (typeof applyTmuxRosterRenames === 'function') applyTmuxRosterRenames(payload.renames, payload.session_order);
   mergeTabberActivitySessionMetadata(payload);
   tabberActivityPayload = payload;
   tabberActivityState.loaded = true;

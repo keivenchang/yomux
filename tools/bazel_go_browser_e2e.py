@@ -657,6 +657,7 @@ exec /bin/sleep 300
                 recorded = set()
                 for command in expected_launch_commands:
                     recorded = wait_for_recorded_command(command)
+
                 reload_trace_source = f"""
                     (() => {{
                       const targetSession = {json.dumps(session)};
@@ -2045,6 +2046,105 @@ exec /bin/sleep 300
                     raise SystemExit(
                         f"Go Chromium tmux window button failed: selected={selected_tmux_window()!r}, button={button_html!r}"
                     )
+
+                exited_session = session
+                roster_options = Options()
+                roster_options.binary_location = chrome_binary
+                for arg in ("--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--ignore-certificate-errors", "--window-size=1200,800"):
+                    roster_options.add_argument(arg)
+                roster_driver = webdriver.Chrome(
+                    service=Service(executable_path=driver_path), options=roster_options,
+                ) if driver_path else webdriver.Chrome(options=roster_options)
+                roster_lease = WebDriverLease.from_driver(roster_driver)
+                try:
+                    roster_driver.get(f"https://127.0.0.1:{port}/login")
+                    roster_driver.find_element("name", "username").send_keys("e2e")
+                    roster_driver.find_element("name", "password").send_keys("test-password")
+                    roster_driver.find_element("css selector", "button[type=submit]").click()
+                    WebDriverWait(roster_driver, 10).until(lambda current: "/login" not in current.current_url)
+                    roster_driver.execute_script("localStorage.clear(); sessionStorage.clear();")
+                    roster_driver.get(f"https://127.0.0.1:{port}/?sessions={exited_session}&layout=left&tabs=left:{exited_session}")
+                    try:
+                        WebDriverWait(roster_driver, 10).until(lambda current: current.execute_script(
+                            "const visible = node => Boolean(node?.getClientRects().length"
+                            " && getComputedStyle(node).display !== 'none'"
+                            " && getComputedStyle(node).visibility !== 'hidden');"
+                            "return visible(document.getElementById(`panel-${arguments[0]}`))"
+                            "&& visible(document.querySelector(`.dockview-pane-tab[data-pane-tab=\"${CSS.escape(arguments[0])}\"]`))"
+                            "&& clientEventTransportState.connected === true;",
+                            exited_session,
+                        ))
+                    except TimeoutException as error:
+                        mount_state = roster_driver.execute_script("""
+                            const session = arguments[0];
+                            const panel = document.getElementById(`panel-${session}`);
+                            const tab = document.getElementById(`panel-tab-${session}`);
+                            return {
+                              url: location.href,
+                              sessions: typeof sessions === 'undefined' ? null : sessions.slice(),
+                              activeSessions: typeof activeSessions === 'undefined' ? null : activeSessions.slice(),
+                              panel: panel ? {rect: panel.getBoundingClientRect().toJSON(), display: getComputedStyle(panel).display} : null,
+                              tab: tab ? {rect: tab.getBoundingClientRect().toJSON(), display: getComputedStyle(tab).display} : null,
+                              transport: typeof clientEventTransportState === 'undefined' ? null : clientEventTransportState.connected,
+                              body: document.body?.innerText?.slice(0, 400) || '',
+                            };
+                        """, exited_session)
+                        raise SystemExit(f"Go roster-exit E2E could not mount its clean fixture pane: {mount_state}") from error
+                    exited_slot = roster_driver.execute_script("return slotForItem(arguments[0], layoutSlots);", exited_session)
+                    kill_result = subprocess.run(
+                        (*tmux, "kill-session", "-t", f"={exited_session}"),
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                    if kill_result.returncode != 0:
+                        raise SystemExit(
+                            f"Go roster-exit E2E could not externally exit {exited_session!r}: "
+                            f"{kill_result.stderr.strip()}"
+                        )
+                    roster_exit = roster_driver.execute_async_script("""
+                    const session = arguments[0];
+                    const exitedSlot = arguments[1];
+                    const done = arguments[arguments.length - 1];
+                    const startedAt = performance.now();
+                    const deadline = startedAt + 5000;
+                    const visible = node => {
+                      if (!node || !node.getClientRects().length) return false;
+                      const style = getComputedStyle(node);
+                      return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) > 0;
+                    };
+                    const pane = () => document.getElementById(`panel-${session}`);
+                    const tab = () => document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(session)}"]`);
+                    const poll = () => {
+                      if (!sessions.includes(session) && !activeSessions.includes(session)
+                          && !visible(tab())
+                          && !visible(pane())
+                          && paneIsPlaceholder(exitedSlot, layoutSlots)) {
+                        done({ok: true, elapsedMs: performance.now() - startedAt, placeholderSlot: exitedSlot});
+                        return;
+                      }
+                      if (performance.now() >= deadline) {
+                        done({ok: false, sessions: sessions.slice(), activeSessions: activeSessions.slice(),
+                          panelVisible: visible(pane()),
+                          tabVisible: visible(tab()),
+                          panelRect: pane()?.getBoundingClientRect().toJSON() || null,
+                          tabRect: tab()?.getBoundingClientRect().toJSON() || null,
+                          placeholder: paneIsPlaceholder(exitedSlot, layoutSlots),
+                          transport: clientEventTransportState?.connected});
+                        return;
+                      }
+                      setTimeout(poll, 25);
+                    };
+                    poll();
+                    """, exited_session, exited_slot)
+                    if not roster_exit.get("ok"):
+                        raise SystemExit(f"Go roster-exit E2E left an exited pane visible: {roster_exit}")
+                    print(f"Go external tmux exit convergence: {json.dumps(roster_exit, sort_keys=True)}")
+                finally:
+                    retirement = roster_lease.retire()
+                    if not retirement.proven_gone:
+                        cleanup_errors.append(f"Go roster-exit E2E chromedriver survived retirement: {retirement.as_dict()}")
+
                 stop_server(force=True)
                 journal_path = config / "go-operations.jsonl"
                 journal_lines = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines() if line.strip()]

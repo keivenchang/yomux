@@ -5,6 +5,8 @@ This page keeps the durable user-visible rules. The selected backend's capabilit
 ## Layout and navigation
 
 - Keep panes and tabs usable across desktop, narrow-window, and touch layouts. Preserve the user's active selection and restored layout when switching between surfaces.
+- When a tmux session exits outside YOLOmux, remove its tab and reconcile its pane within five seconds while preserving the saved layout placeholder.
+- When a tmux session is renamed outside YOLOmux, preserve its tab and pane under the new name even if metadata or activity reaches the browser before the roster event.
 - A control's label, tooltip, accessibility state, and action must agree. Menus and popovers must work with pointer, keyboard, and focus changes.
 - Shared browser code does not imply that every backend supports every route. Hide or disable features according to `/api/capabilities`.
 

@@ -103,6 +103,9 @@ type server struct {
 	metadataNextGeneration             uint64
 	metadataTopologyGeneration         uint64
 	metadataTopologySignature          string
+	metadataTopologySessions           []string
+	metadataTopologyIdentities         map[string]string
+	metadataTopologyRenames            []map[string]any
 	metadataPayload                    map[string]any
 	metadataBuiltAt                    time.Time
 	metadataBuilding                   bool
@@ -144,6 +147,8 @@ type server struct {
 	tmuxRosterRevision                 uint64
 	tmuxRosterSampledAt                time.Time
 	tmuxSessionRosterFn                func() ([]string, error)
+	tmuxRosterWatchCancel              context.CancelFunc
+	tmuxRosterWatchDone                chan struct{}
 	tmuxSessionActivityFn              func() (map[string]float64, error)
 	tmuxWindowActivityFn               func() (map[string]float64, error)
 	processEntriesFn                   func() ([]procEntry, error)
@@ -199,10 +204,12 @@ type goTmuxTopology struct {
 	identities     map[string]string
 	generation     uint64
 	rosterRevision uint64
+	renames        []map[string]any
 }
 
 const goPerformanceRecordLimit = 4096
 const goMetadataCacheTTL = 15 * time.Second
+const goTmuxRosterWatchInterval = time.Second
 
 // Process/thread/descendant metrics are diagnostic snapshots, not a request
 // counter. Sampling them more than once per second only repeats /proc work and
@@ -404,7 +411,7 @@ var eventTypeChannels = map[string][]string{
 	"files_changed": {"files"}, "fs_changed": {"files"}, "operation_terminal": {"core", "files"},
 	"pricing_catalog_changed": {"core"}, "roots_changed": {"files"}, "search_progress": {"core"},
 	"session_files_ready": {"files"}, "settings_changed": {"core"}, "stats_sample": {"stats"},
-	"transcripts_changed": {"transcripts"}, "tmux_signals_changed": {"status", "attention"},
+	"transcripts_changed": {"transcripts"}, "tmux_roster_changed": {"core"}, "tmux_signals_changed": {"status", "attention"},
 	"update_available": {"core"}, "watched_prs_changed": {"core", "attention"},
 	"yoagent_conversation_changed": {"yoagent"}, "yoagent_jobs_changed": {"yoagent", "attention"},
 	"yoagent_skills_changed": {"yoagent"}, "yoagent_stream_delta": {"yoagent"},
@@ -3134,6 +3141,7 @@ func main() {
 		s.hostCollector = hostCollector
 		defer hostCollector.Stop()
 	}
+	s.startTmuxRosterWatcher(shutdownContext)
 	scheme := "https"
 	if *httpMode {
 		scheme = "http"
@@ -3240,6 +3248,10 @@ func (s *server) repairMissingTerminalEvents() {
 
 func (s *server) shutdown() {
 	s.shutdownOnce.Do(func() {
+		if s.tmuxRosterWatchCancel != nil {
+			s.tmuxRosterWatchCancel()
+			<-s.tmuxRosterWatchDone
+		}
 		s.homeRendererMu.Lock()
 		if s.homeRenderer != nil {
 			s.homeRenderer.close()
@@ -6533,12 +6545,14 @@ func (s *server) tmux(w http.ResponseWriter, r *http.Request) {
 	// topology response for Tabber: one live tmux session owns one top-level tab.
 	session := strings.TrimSpace(r.URL.Query().Get("session"))
 	if session == "" {
+		topology, topologyErr := s.tmuxTopologyFromRoster(s.cachedTmuxSessionRosterSnapshot(), rosterErr)
+		sessions = topology.sessions
 		payload := map[string]any{
 			"sessions": sessions, "session_order": sessions, "session_scope": "all", "backend": "go",
-			"errors": []string{},
+			"topology_generation": topology.generation, "renames": topology.renames, "errors": []string{},
 		}
-		if rosterErr != nil {
-			payload["errors"] = []string{rosterErr.Error()}
+		if topologyErr != nil {
+			payload["errors"] = []string{topologyErr.Error()}
 		}
 		jsonResponse(w, http.StatusOK, payload)
 		return
@@ -6791,8 +6805,8 @@ func (s *server) activity(w http.ResponseWriter, r *http.Request) {
 		// render one Tabber session row even when metadata is still unavailable.
 		"sessions": metadataSessions,
 		"errors":   activityErrors, "session_order": sessions, "session_scope": scope,
-		"topology_generation": topology.generation,
-		"session_file_hours":  hours,
+		"topology_generation": topology.generation, "renames": topology.renames,
+		"session_file_hours": hours,
 		"cache": map[string]any{
 			"hit": published != nil, "stale": metadataStale,
 			"generation": publishedGeneration, "refreshing": s.metadataRefreshInFlight(),
@@ -6869,6 +6883,7 @@ func (s *server) sessionMetadata(w http.ResponseWriter, r *http.Request) {
 		"sessions": metadataSessions, "session_order": sessions, "session_scope": "all",
 		"metadata_generation": servedGeneration, "metadata_identity": map[string]any{"epoch": s.metadataEpoch(), "generation": servedGeneration},
 		"topology_generation": topology.generation, "errors": responseErrors, "cache": cache,
+		"renames": topology.renames,
 	})
 }
 
@@ -6940,6 +6955,12 @@ func (s *server) buildMetadataPayload(generation uint64, sessions []string, iden
 		metadataSessions[session] = info
 	}
 	identity := map[string]any{"epoch": s.metadataEpoch(), "generation": generation}
+	s.metadataTopologyMu.Lock()
+	var renames []map[string]any
+	if topologyGeneration == s.metadataTopologyGeneration {
+		renames = cloneTmuxRosterRenames(s.metadataTopologyRenames)
+	}
+	s.metadataTopologyMu.Unlock()
 	return map[string]any{
 		"sessions":            metadataSessions,
 		"session_order":       sessions,
@@ -6947,6 +6968,7 @@ func (s *server) buildMetadataPayload(generation uint64, sessions []string, iden
 		"metadata_generation": generation,
 		"metadata_identity":   identity,
 		"topology_generation": topologyGeneration,
+		"renames":             renames,
 		"errors":              metadataErrors(rosterErr, metadataErr),
 	}
 }
@@ -7119,42 +7141,157 @@ func (s *server) tmuxTopologySnapshot(forceFresh ...bool) (goTmuxTopology, error
 }
 
 func (s *server) tmuxTopologyFromRoster(roster tmuxSessionRosterSnapshot, err error) (goTmuxTopology, error) {
-	// Never hold the topology lock while waiting for tmux. The roster fetch has
-	// its own serialization; reconcile the latest published roster afterward so
-	// a slower caller cannot overwrite a snapshot another read already published.
+	// Never hold the topology lock while waiting for tmux. Reconcile the latest
+	// cached roster inside topology serialization so an older caller cannot publish
+	// a snapshot copied before a newer topology transition.
+	eventEpoch := s.metadataEpoch()
+	s.metadataTopologyMu.Lock()
 	if latest := s.cachedTmuxSessionRosterSnapshot(); latest.known {
 		roster = latest
 	}
-	s.metadataTopologyMu.Lock()
 	var topology goTmuxTopology
+	var previous goTmuxTopology
+	changed := false
 	if err != nil {
 		if roster.known {
-			s.observeMetadataTopology(roster)
+			previous, changed = s.observeMetadataTopology(roster)
 			topology = goTmuxTopology{sessions: roster.sessions, identities: roster.identities, generation: s.metadataTopologyGeneration, rosterRevision: roster.revision}
 		} else {
 			topology = goTmuxTopology{generation: s.metadataTopologyGeneration}
 		}
 	} else {
-		s.observeMetadataTopology(roster)
+		previous, changed = s.observeMetadataTopology(roster)
 		topology = goTmuxTopology{sessions: roster.sessions, identities: roster.identities, generation: s.metadataTopologyGeneration, rosterRevision: roster.revision}
+	}
+	if changed {
+		topology.renames = tmuxRosterRenames(previous, topology)
+		s.metadataTopologyRenames = cloneTmuxRosterRenames(topology.renames)
+	} else {
+		topology.renames = cloneTmuxRosterRenames(s.metadataTopologyRenames)
+	}
+	if changed && previous.generation != 0 && s.events != nil {
+		_, publishErr := s.events.publish("tmux_roster_changed", map[string]any{
+			"sessions": append([]string{}, topology.sessions...), "session_order": append([]string{}, topology.sessions...),
+			"roster_generation": topology.generation, "topology_generation": topology.generation,
+			"server_epoch": eventEpoch, "renames": topology.renames,
+		})
+		if publishErr != nil {
+			slog.Warn("tmux roster event publish failed", "error", publishErr)
+		}
 	}
 	s.metadataTopologyMu.Unlock()
 	return topology, err
 }
 
 func (s *server) cachedTmuxTopologySnapshot() (goTmuxTopology, bool) {
-	s.metadataTopologyMu.Lock()
-	defer s.metadataTopologyMu.Unlock()
 	roster := s.cachedTmuxSessionRosterSnapshot()
-	return goTmuxTopology{sessions: roster.sessions, identities: roster.identities, generation: s.metadataTopologyGeneration, rosterRevision: roster.revision}, roster.known
+	if !roster.known {
+		return goTmuxTopology{}, false
+	}
+	topology, _ := s.tmuxTopologyFromRoster(roster, nil)
+	return topology, true
 }
 
-func (s *server) observeMetadataTopology(roster tmuxSessionRosterSnapshot) {
+func (s *server) observeMetadataTopology(roster tmuxSessionRosterSnapshot) (goTmuxTopology, bool) {
 	signature := tmuxTopologySignature(roster.sessions, roster.identities)
-	if signature != s.metadataTopologySignature {
-		s.metadataTopologyGeneration++
-		s.metadataTopologySignature = signature
+	if signature == s.metadataTopologySignature {
+		return goTmuxTopology{}, false
 	}
+	previous := goTmuxTopology{
+		sessions:   append([]string(nil), s.metadataTopologySessions...),
+		identities: cloneTmuxSessionIdentities(s.metadataTopologyIdentities), generation: s.metadataTopologyGeneration,
+	}
+	s.metadataTopologyGeneration++
+	s.metadataTopologySignature = signature
+	s.metadataTopologySessions = append([]string(nil), roster.sessions...)
+	s.metadataTopologyIdentities = cloneTmuxSessionIdentities(roster.identities)
+	return previous, true
+}
+
+func cloneTmuxRosterRenames(renames []map[string]any) []map[string]any {
+	cloned := make([]map[string]any, len(renames))
+	for index, rename := range renames {
+		cloned[index] = cloneMap(rename)
+	}
+	return cloned
+}
+
+func cloneTmuxSessionIdentities(identities map[string]string) map[string]string {
+	cloned := make(map[string]string, len(identities))
+	for session, identity := range identities {
+		cloned[session] = identity
+	}
+	return cloned
+}
+
+func (s *server) startTmuxRosterWatcher(parent context.Context) {
+	s.startTmuxRosterWatcherWithInterval(parent, goTmuxRosterWatchInterval)
+}
+
+func (s *server) startTmuxRosterWatcherWithInterval(parent context.Context, interval time.Duration) {
+	ctx, cancel := context.WithCancel(parent)
+	s.tmuxRosterWatchCancel = cancel
+	s.tmuxRosterWatchDone = make(chan struct{})
+	go func() {
+		defer close(s.tmuxRosterWatchDone)
+		s.watchTmuxRoster(ctx, interval)
+	}()
+}
+
+func (s *server) watchTmuxRoster(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = goTmuxRosterWatchInterval
+	}
+	previous, err := s.tmuxTopologySnapshot(true)
+	if err != nil {
+		slog.Warn("initial tmux roster watch snapshot failed", "error", err)
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		next, snapshotErr := s.tmuxTopologySnapshot(true)
+		if snapshotErr != nil {
+			continue
+		}
+		if tmuxTopologySignature(previous.sessions, previous.identities) == tmuxTopologySignature(next.sessions, next.identities) {
+			previous = next
+			continue
+		}
+		s.queueMetadataRefresh(true, next.sessions, next.identities, nil, next.generation)
+		previous = next
+	}
+}
+
+func tmuxRosterRenames(previous, next goTmuxTopology) []map[string]any {
+	nextByIdentity := make(map[string]string, len(next.sessions))
+	for _, session := range next.sessions {
+		if identity := next.identities[session]; identity != "" {
+			nextByIdentity[identity] = session
+		}
+	}
+	renamed := make([]map[string]any, 0)
+	used := make(map[string]bool, len(nextByIdentity))
+	for _, session := range previous.sessions {
+		identity := previous.identities[session]
+		if identity == "" || next.identities[session] == identity {
+			continue
+		}
+		newSession := nextByIdentity[identity]
+		if newSession == "" || used[newSession] {
+			continue
+		}
+		used[newSession] = true
+		renamed = append(renamed, map[string]any{
+			"old_session": session, "new_session": newSession,
+			"old_session_identity": goTmuxSessionIdentity(session, identity),
+		})
+	}
+	return renamed
 }
 
 func tmuxTopologySignature(sessions []string, identities map[string]string) string {
