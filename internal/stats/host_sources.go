@@ -25,6 +25,7 @@ const maxHostCommandOutput = 8 << 20
 // synthetic inputs in host_collectors_test.go.
 type LinuxHostSources struct {
 	procRoot          string
+	gpuRoot           string
 	readFile          func(string) ([]byte, error)
 	readDir           func(string) ([]string, error)
 	readLink          func(string) (string, error)
@@ -57,6 +58,7 @@ func NewHostSources() HostSources {
 	}
 	return &LinuxHostSources{
 		procRoot:    "/proc",
+		gpuRoot:     "/sys/class/drm",
 		readFile:    boundedOSReadFile,
 		readDir:     readDirNames,
 		readLink:    os.Readlink,
@@ -286,11 +288,10 @@ func (s *LinuxHostSources) GPU(ctx context.Context) ([]GPUDevice, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	result, err := s.run(ctx, []string{"gpu-info", "--query-gpu=index,name,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"})
-	if err != nil || result.ExitCode != 0 {
-		return nil, errors.New("gpu-info unavailable")
+	devices, ok := LinuxGPUDevices(HostCollectorInputs{ReadFile: s.readFile, ReadDir: s.readDir}, s.gpuRoot)
+	if !ok {
+		return nil, errors.New("Linux GPU metrics unavailable")
 	}
-	devices := ParseGPUCSV(string(result.Stdout))
 	return devices, nil
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
 	"reflect"
 	"testing"
 )
@@ -340,16 +341,51 @@ func TestParseLinuxMeminfo(t *testing.T) {
 	}
 }
 
-func TestParseGPUCSV(t *testing.T) {
-	got := ParseGPUCSV("0, GPU Model B, 120, -2, 4096\nmalformed\n1, , 4, 5, 6\n2, bad, nope, 1, 2\n")
-	if len(got) != 2 {
-		t.Fatalf("devices = %#v", got)
+func TestLinuxGPUDevicesReadGenericSysfsMetrics(t *testing.T) {
+	files := map[string]string{
+		"/sys/class/drm/card0/device/gpu_busy_percent":    "75\n",
+		"/sys/class/drm/card0/device/mem_info_vram_used":  "4194304000\n",
+		"/sys/class/drm/card0/device/mem_info_vram_total": "8388608000\n",
 	}
-	if got[0].SourceID != "gpu:0" || got[0].Label != "GPU 0 (GPU Model B)" || got[0].Utilization != 100 || got[0].MemoryUsedBytes != 0 || got[0].MemoryTotalBytes != 4096*1024*1024 {
-		t.Fatalf("first device = %#v", got[0])
+	inputs := HostCollectorInputs{
+		ReadDir: func(path string) ([]string, error) {
+			if path != "/sys/class/drm" {
+				t.Fatalf("unexpected directory %q", path)
+			}
+			return []string{"card0", "card1-DP-1", "renderD128"}, nil
+		},
+		ReadFile: func(path string) ([]byte, error) {
+			value, ok := files[path]
+			if !ok {
+				return nil, os.ErrNotExist
+			}
+			return []byte(value), nil
+		},
 	}
-	if got[1].Label != "GPU 1" {
-		t.Fatalf("empty-name label = %#v", got[1])
+	got, ok := LinuxGPUDevices(inputs, "/sys/class/drm")
+	if !ok || len(got) != 1 {
+		t.Fatalf("devices = %#v, %t", got, ok)
+	}
+	want := GPUDevice{SourceID: "gpu:0", Label: "GPU 0", Utilization: 75, MemoryUsedBytes: 4194304000, MemoryTotalBytes: 8388608000}
+	if got[0] != want {
+		t.Fatalf("device = %#v, want %#v", got[0], want)
+	}
+}
+
+func TestLinuxGPUDevicesLeaveMissingMetricsUnavailable(t *testing.T) {
+	files := map[string][]byte{"/sys/class/drm/card0/device/gpu_busy_percent": []byte("12\n")}
+	inputs := HostCollectorInputs{
+		ReadDir: func(string) ([]string, error) { return []string{"card0"}, nil },
+		ReadFile: func(path string) ([]byte, error) {
+			value, ok := files[path]
+			if !ok {
+				return nil, os.ErrNotExist
+			}
+			return value, nil
+		},
+	}
+	if got, ok := LinuxGPUDevices(inputs, "/sys/class/drm"); ok || len(got) != 0 {
+		t.Fatalf("devices = %#v, %t; want unavailable", got, ok)
 	}
 }
 

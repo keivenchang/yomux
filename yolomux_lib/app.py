@@ -1167,13 +1167,13 @@ def current_darwin_system_memory_bytes() -> tuple[int, int] | None:
     return None if snapshot is None else snapshot[0]
 
 
-# The GPU/hardware wrappers that used to sit here (`stats_GPU_gpu_metrics`,
+# The GPU/hardware wrappers that used to sit here (`stats_linux_gpu_metrics`,
 # `stats_macos_gpu_metrics`, `stats_macos_hardware_metadata`, `stats_host_hardware_metadata` with
 # its module-level cache, and `stats_gpu_metrics`) existed only to feed the unregistered
 # `collect_current_stats_gpu` below. They were one-line re-wrappings of
 # `yolomux_lib/stats_current/host_collectors.py`, which is the owner statsd actually calls, so
 # removing the unwired collector left them with no caller. Their parsing coverage moved with them:
-# the tests now drive `host_collectors.generic_gpu_devices` / `gpu_devices` /
+# the tests now drive `host_collectors._linux_gpu_devices` / `gpu_devices` /
 # `macos_hardware_metadata` directly.
 
 

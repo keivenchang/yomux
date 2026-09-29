@@ -257,7 +257,7 @@ def test_opencode_narrow_done_counter_without_interrupt_is_idle():
 def test_opencode_completed_nemotron_screen_with_large_blank_gap_is_idle():
     visible_text = "\n".join([
         "  + Thought: 20.1s",
-        "  I'm powered by GPU's Nemotron 3 Ultra model (opencode/nemotron-3-ultra-free).",
+        "  I'm powered by a Nemotron 3 Ultra model (opencode/nemotron-3-ultra-free).",
         "  ▣ Build · Nemotron 3 Ultra Free · 1m 23s",
         *([""] * 24),
         "  ┃ Build · Nemotron 3 Ultra Free OpenCode Zen",
@@ -318,7 +318,7 @@ def test_opencode_old_thinking_row_beyond_current_response_block_is_idle():
 
 def test_opencode_explicit_session_complete_footer_meter_is_working():
     visible_text = "\n".join([
-        "  Build ·switchyard/openai/gpt-5.6-luna | $0.00 in / $0.00 out per 1M tokens GPU Inference Hub",
+        "  Build ·switchyard/openai/gpt-5.6-luna | $0.00 in / $0.00 out per 1M tokens Inference Service",
         "  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
         "   ⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt                                                    317.1K  ctrl+p commands",
     ])

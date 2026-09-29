@@ -1,7 +1,7 @@
 """Persistent, stale-while-revalidate file index for quick-open search.
 
 The live `search_files` walk re-walks a root on every keystroke and is capped
-(MAX_SEARCH_DIRS / MAX_SEARCH_FILES), so a huge root like ~/GPU is both slow
+(MAX_SEARCH_DIRS / MAX_SEARCH_FILES), so a huge root like ~/vendor is both slow
 and incomplete. This module builds a per-root index of every file once (in a
 background thread, respecting the same skip dirs), keeps it in memory + on disk,
 and serves quick-open queries from it instantly with no per-query walk and no

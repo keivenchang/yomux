@@ -447,7 +447,7 @@ def test_switchyard_model_uses_average_of_nonzero_equivalent_provider_rates(tmp_
     payload = load_packaged_seed()
     payload["models"] = [
         {
-            "provider": "GPU",
+            "provider": "inference-service",
             "model": "openai/gpt-5.6-luna",
             "aliases": ["openai/gpt-5.6-luna"],
             "rates": [
