@@ -4,13 +4,12 @@
 package stats
 
 import (
-	"bytes"
-	"compress/zlib"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"hash/maphash"
+	"math"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -37,6 +36,13 @@ type statsProduct struct {
 	cacheGeneration  int64
 	publishedAt      float64
 	snapshot         StatsSnapshot
+	bucketVersions   []ringBucketVersion
+}
+
+type ringBucketVersion struct {
+	start, generation int64
+	noData            *ringNoDataSet
+	closedTail        *ringNoDataSet
 }
 
 type ringBucketCacheKey struct {
@@ -45,13 +51,14 @@ type ringBucketCacheKey struct {
 }
 
 type ringBucketCacheEntry struct {
-	ringGeneration   int64
-	bucket           MaterializedBucket
-	noDataCompressed []byte
-	cacheBytes       int
-	cacheGeneration  int64
-	generatedAt      float64
-	hasMetadata      bool
+	ringGeneration  int64
+	bucket          MaterializedBucket
+	noData          *ringNoDataSet
+	wireBytes       int
+	cacheBytes      int
+	cacheGeneration int64
+	generatedAt     float64
+	hasMetadata     bool
 }
 
 const (
@@ -61,47 +68,56 @@ const (
 	maxSnapshotChunkReserveBytes    = 64 * 1024
 )
 
-func compressRingBucketNoData(spans []MaterializedNoData) ([]byte, error) {
-	raw, err := json.Marshal(spans)
-	if err != nil {
-		return nil, err
-	}
-	var buffer bytes.Buffer
-	writer, err := zlib.NewWriterLevel(&buffer, zlib.BestSpeed)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := writer.Write(raw); err != nil {
-		_ = writer.Close()
-		return nil, err
-	}
-	if err := writer.Close(); err != nil {
-		return nil, err
-	}
-	return buffer.Bytes(), nil
+// Bucket-relative intervals let repeated unavailable sources share one typed
+// slice across a whole ring. Hashes only select candidates; exact comparison
+// remains authoritative, including partial intervals and every identity field.
+type ringNoDataSet struct {
+	spans []MaterializedNoData
+	bytes int
 }
 
-func decompressRingBucketNoData(compressed []byte) ([]MaterializedNoData, error) {
-	reader, err := zlib.NewReader(bytes.NewReader(compressed))
-	if err != nil {
-		return nil, err
+func (s *StatsService) internNoData(spans []MaterializedNoData, base float64) *ringNoDataSet {
+	var hash maphash.Hash
+	hash.SetSeed(s.noDataSeed)
+	var number [8]byte
+	for i := range spans {
+		spans[i].Start -= base
+		spans[i].End -= base
+		for _, value := range []string{spans[i].Family, spans[i].SourceID, spans[i].EpochID, spans[i].Reason} {
+			hash.WriteString(value)
+			hash.WriteByte(0)
+		}
+		for _, value := range []float64{spans[i].Start, spans[i].End, spans[i].NativeCadenceSeconds} {
+			bits := math.Float64bits(value)
+			for j := range number {
+				number[j] = byte(bits >> (8 * j))
+			}
+			hash.Write(number[:])
+		}
 	}
-	raw, readErr := io.ReadAll(io.LimitReader(reader, MaxRingBucketBytes+1))
-	closeErr := reader.Close()
-	if readErr != nil {
-		return nil, readErr
+	key := hash.Sum64()
+	for _, set := range s.noDataSets[key] {
+		if len(set.spans) != len(spans) {
+			continue
+		}
+		equal := true
+		for i := range spans {
+			if spans[i] != set.spans[i] {
+				equal = false
+				break
+			}
+		}
+		if equal {
+			return set
+		}
 	}
-	if closeErr != nil {
-		return nil, closeErr
+	bytes := len(spans) * 88
+	for _, span := range spans {
+		bytes += len(span.Family) + len(span.SourceID) + len(span.EpochID) + len(span.Reason)
 	}
-	if len(raw) > MaxRingBucketBytes {
-		return nil, fmt.Errorf("cached ring no-data exceeds %d bytes", MaxRingBucketBytes)
-	}
-	var spans []MaterializedNoData
-	if err := json.Unmarshal(raw, &spans); err != nil {
-		return nil, err
-	}
-	return spans, nil
+	set := &ringNoDataSet{spans: spans, bytes: bytes}
+	s.noDataSets[key] = append(s.noDataSets[key], set)
+	return set
 }
 
 // ServiceState is the lock-free status projection used by readiness and
@@ -156,6 +172,10 @@ type StatsService struct {
 	agentStatus             func(context.Context) (AgentStatusSnapshot, error)
 	mu                      sync.RWMutex
 	products                map[ProductKey]statsProduct
+	history                 map[ProductKey][]statsProduct
+	noDataSeed              maphash.Seed
+	noDataSets              map[uint64][]*ringNoDataSet
+	refreshMu               sync.Mutex
 	pending                 map[ProductKey]string
 	state                   ServiceState
 	keys                    []ProductKey
@@ -273,14 +293,25 @@ type materializedNoDataAccumulator struct {
 	spans          []MaterializedNoData
 	lastByKey      map[materializedNoDataKey]int
 	estimatedBytes int
+	sizeForWire    bool
 }
 
 func newMaterializedNoDataAccumulator() materializedNoDataAccumulator {
-	return materializedNoDataAccumulator{lastByKey: make(map[materializedNoDataKey]int)}
+	return newMaterializedNoDataAccumulatorWithWireSizing(true)
+}
+
+func newMaterializedNoDataAccumulatorWithWireSizing(sizeForWire bool) materializedNoDataAccumulator {
+	return materializedNoDataAccumulator{lastByKey: make(map[materializedNoDataKey]int), sizeForWire: sizeForWire}
 }
 
 func (a *materializedNoDataAccumulator) Append(spans []MaterializedNoData) {
+	a.appendShifted(spans, 0)
+}
+
+func (a *materializedNoDataAccumulator) appendShifted(spans []MaterializedNoData, base float64) {
 	for _, span := range spans {
+		span.Start += base
+		span.End += base
 		key := materializedNoDataKey{family: span.Family, sourceID: span.SourceID, epochID: span.EpochID, reason: span.Reason, cadence: span.NativeCadenceSeconds}
 		if index, exists := a.lastByKey[key]; exists && a.spans[index].End == span.Start {
 			a.spans[index].End = span.End
@@ -288,7 +319,9 @@ func (a *materializedNoDataAccumulator) Append(spans []MaterializedNoData) {
 		}
 		a.lastByKey[key] = len(a.spans)
 		a.spans = append(a.spans, span)
-		a.estimatedBytes += estimatedNoDataSpanBytes(span)
+		if a.sizeForWire {
+			a.estimatedBytes += estimatedNoDataSpanBytes(span)
+		}
 	}
 }
 
@@ -464,6 +497,9 @@ func NewStatsService(writer *Writer, config StatsServiceConfig) *StatsService {
 		now:                     now,
 		agentStatus:             config.AgentStatus,
 		products:                make(map[ProductKey]statsProduct),
+		history:                 make(map[ProductKey][]statsProduct),
+		noDataSeed:              maphash.MakeSeed(),
+		noDataSets:              make(map[uint64][]*ringNoDataSet),
 		pending:                 make(map[ProductKey]string),
 		ringBucketCache:         make(map[ringBucketCacheKey]ringBucketCacheEntry),
 		keys:                    keys,
@@ -565,6 +601,8 @@ func (s *StatsService) Refresh(ctx context.Context) (refreshErr error) {
 	if s == nil || s.writer == nil {
 		return errors.New("nil YO!stats service writer")
 	}
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
 	started := time.Now()
 	s.refreshCounters.runs.Add(1)
 	defer func() {
@@ -697,6 +735,17 @@ func (s *StatsService) Refresh(ctx context.Context) (refreshErr error) {
 				}
 				window.Rows = append(window.Rows, carrier)
 			}
+			versions := make([]ringBucketVersion, len(window.Rows))
+			for i, row := range window.Rows {
+				versions[i] = ringBucketVersion{start: row.BucketStart, generation: row.RingGeneration}
+			}
+			s.mu.RLock()
+			previous, exists := s.products[key]
+			s.mu.RUnlock()
+			if exists && previous.windowEnd == window.WindowEnd && equalBucketVersions(previous.bucketVersions, versions) {
+				refreshed[key] = previous
+				continue
+			}
 			buckets := make([]MaterializedBucket, 0, len(window.Rows))
 			layerNoData := newMaterializedNoDataAccumulator()
 			bucketSizes := make([]int, 0, len(window.Rows))
@@ -706,10 +755,9 @@ func (s *StatsService) Refresh(ctx context.Context) (refreshErr error) {
 			windowBucketBytes := 0
 			windowCostBytes := 0
 			windowCostEvidence := make(map[string]struct{})
-			for _, row := range window.Rows {
+			for rowIndex, row := range window.Rows {
 				cacheKey := ringBucketCacheKey{resolution: resolution, bucket: row.BucketStart}
 				cached, cacheHit := s.ringBucketCache[cacheKey]
-				var bucketNoData []MaterializedNoData
 				var bucketJSONBytes int
 				if !cacheHit || cached.ringGeneration != row.RingGeneration {
 					if cacheHit {
@@ -756,7 +804,6 @@ func (s *StatsService) Refresh(ctx context.Context) (refreshErr error) {
 						break
 					}
 					bucket, noData := decoded.bucket, decoded.noData
-					bucketNoData = noData
 					bucketJSON, marshalErr := json.Marshal(bucket)
 					if marshalErr != nil {
 						pending[key] = fmt.Sprintf("encode ring bucket %d: %v", row.BucketStart, marshalErr)
@@ -771,54 +818,23 @@ func (s *StatsService) Refresh(ctx context.Context) (refreshErr error) {
 						payloadCache = derivedCacheGeneration(row.PublishedAt, row.RingGeneration)
 						payloadGeneratedAt = row.PublishedAt
 					}
-					compressedNoData, compressErr := compressRingBucketNoData(noData)
-					if compressErr != nil {
-						pending[key] = fmt.Sprintf("cache ring bucket %d no-data: %v", row.BucketStart, compressErr)
-						if firstErr == nil {
-							firstErr = compressErr
-						}
-						break
+					wireBucket := bucket
+					wireBucket.Cost = MaterializedCostDetail{}
+					wireJSON, marshalErr := json.Marshal(wireBucket)
+					if marshalErr != nil {
+						return marshalErr
 					}
-					cacheBytes := bucketJSONBytes + len(compressedNoData)
+					intervals := s.internNoData(noData, bucket.Start)
+					cacheBytes := bucketJSONBytes + intervals.bytes
+					cached = ringBucketCacheEntry{ringGeneration: row.RingGeneration, bucket: bucket, noData: intervals, wireBytes: len(wireJSON), cacheGeneration: payloadCache, generatedAt: payloadGeneratedAt, hasMetadata: hasMetadata}
 					if cacheBytes <= maxRingBucketCacheEncodedBytes-s.ringBucketCacheBytes {
-						cached = ringBucketCacheEntry{ringGeneration: row.RingGeneration, bucket: bucket, noDataCompressed: compressedNoData, cacheBytes: cacheBytes, cacheGeneration: payloadCache, generatedAt: payloadGeneratedAt, hasMetadata: hasMetadata}
+						cached.cacheBytes = cacheBytes
 						s.ringBucketCache[cacheKey] = cached
 						s.ringBucketCacheBytes += cacheBytes
-					} else {
-						cached = ringBucketCacheEntry{ringGeneration: row.RingGeneration, bucket: bucket, noDataCompressed: compressedNoData, cacheGeneration: payloadCache, generatedAt: payloadGeneratedAt, hasMetadata: hasMetadata}
 					}
-				} else {
-					var cacheErr error
-					bucketNoData, cacheErr = decompressRingBucketNoData(cached.noDataCompressed)
-					if cacheErr != nil {
-						pending[key] = fmt.Sprintf("decode cached ring bucket %d no-data: %v", row.BucketStart, cacheErr)
-						if firstErr == nil {
-							firstErr = cacheErr
-						}
-						break
-					}
-					bucketJSON, marshalErr := json.Marshal(cached.bucket)
-					if marshalErr != nil {
-						pending[key] = fmt.Sprintf("encode cached ring bucket %d: %v", row.BucketStart, marshalErr)
-						if firstErr == nil {
-							firstErr = marshalErr
-						}
-						break
-					}
-					bucketJSONBytes = len(bucketJSON)
 				}
 				bucket := cached.bucket
-				wireBucket := bucket
-				wireBucket.Cost = MaterializedCostDetail{}
-				bucketWireJSON, marshalErr := json.Marshal(wireBucket)
-				if marshalErr != nil {
-					pending[key] = fmt.Sprintf("encode ring bucket %d wire payload: %v", row.BucketStart, marshalErr)
-					if firstErr == nil {
-						firstErr = marshalErr
-					}
-					break
-				}
-				bucketJSONBytes = len(bucketWireJSON)
+				bucketJSONBytes = cached.wireBytes
 				costBytes, costErr := statsCostReportBytes(bucket.Cost, windowCostEvidence)
 				if costErr != nil {
 					pending[key] = fmt.Sprintf("encode ring bucket %d cost report: %v", row.BucketStart, costErr)
@@ -865,12 +881,15 @@ func (s *StatsService) Refresh(ctx context.Context) (refreshErr error) {
 					// unknown. Close the bucket while retaining its series and cost, then
 					// project an explicit persisted-ring gap for every family.
 					bucket.Complete = true
-					bucketNoData = append(bucketNoData, persistedRingGapNoData(row.BucketStart, key.ResolutionSeconds, row.RingGeneration)...)
+					gap := s.internNoData(persistedRingGapNoData(row.BucketStart, key.ResolutionSeconds, row.RingGeneration), bucket.Start)
+					versions[rowIndex].closedTail = gap
+					layerNoData.appendShifted(gap.spans, bucket.Start)
 				}
 				buckets = append(buckets, bucket)
 				bucketSizes = append(bucketSizes, bucketJSONBytes)
 				bucketStarts = append(bucketStarts, row.BucketStart)
-				layerNoData.Append(bucketNoData)
+				layerNoData.appendShifted(cached.noData.spans, bucket.Start)
+				versions[rowIndex].noData = cached.noData
 				if windowBucketBytes+layerNoData.estimatedBytes+costReportBytes > MaxStatsSnapshotBytes-maxSnapshotEnvelopeReserveBytes {
 					transportErr := errors.New("materialized stats snapshot exceeds the transport size limit")
 					pending[key] = transportErr.Error()
@@ -908,12 +927,22 @@ func (s *StatsService) Refresh(ctx context.Context) (refreshErr error) {
 				}
 				continue
 			}
-			refreshed[key] = statsProduct{key: key, windowEnd: window.WindowEnd, sourceGeneration: window.SourceGeneration, ringGeneration: window.RingGeneration, cacheGeneration: cacheGeneration, publishedAt: window.PublishedAt, snapshot: snapshot}
+			refreshed[key] = statsProduct{key: key, windowEnd: window.WindowEnd, sourceGeneration: window.SourceGeneration, ringGeneration: window.RingGeneration, cacheGeneration: cacheGeneration, publishedAt: window.PublishedAt, snapshot: snapshot, bucketVersions: versions}
 			s.refreshCounters.productsBuilt.Add(1)
 		}
 	}
 	s.mu.Lock()
 	for key, product := range refreshed {
+		history := s.history[key]
+		if len(history) == 0 || history[len(history)-1].cacheGeneration != product.cacheGeneration {
+			historical := product
+			historical.snapshot.Materialized.NoData = nil
+			history = append(history, historical)
+			if len(history) > 8 {
+				history = append([]statsProduct(nil), history[len(history)-8:]...)
+			}
+			s.history[key] = history
+		}
 		s.products[key] = product
 	}
 	s.pending = pending
@@ -949,6 +978,7 @@ func (s *StatsService) Refresh(ctx context.Context) (refreshErr error) {
 	s.notify = make(chan struct{})
 	s.mu.Unlock()
 	close(oldNotify)
+	s.pruneNoDataSets()
 	return firstErr
 }
 
@@ -967,6 +997,78 @@ func (s *StatsService) pruneRingBucketCache(resolution int, rows []RingBucketRow
 		s.ringBucketCacheBytes -= cached.cacheBytes
 		delete(s.ringBucketCache, key)
 	}
+}
+
+func equalBucketVersions(left, right []ringBucketVersion) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i].start != right[i].start || left[i].generation != right[i].generation {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *StatsService) pruneNoDataSets() {
+	used := make(map[*ringNoDataSet]bool, len(s.ringBucketCache))
+	for _, entry := range s.ringBucketCache {
+		used[entry.noData] = true
+	}
+	for hash, sets := range s.noDataSets {
+		retained := sets[:0]
+		for _, set := range sets {
+			if used[set] {
+				retained = append(retained, set)
+			}
+		}
+		clear(sets[len(retained):])
+		if len(retained) == 0 {
+			delete(s.noDataSets, hash)
+		} else {
+			s.noDataSets[hash] = retained
+		}
+	}
+}
+
+// GenerationSnapshot resolves a retained immutable product without keeping a
+// second expanded history in HTTP. Returned values are read-only, like
+// CurrentSnapshot; callers construct their own wire values before mutation.
+func (s *StatsService) GenerationSnapshot(_ context.Context, rangeSeconds, resolutionSeconds int, cacheGeneration int64) (StatsSnapshot, bool) {
+	if s == nil {
+		return StatsSnapshot{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, product := range s.history[ProductKey{rangeSeconds, resolutionSeconds}] {
+		if product.cacheGeneration == cacheGeneration {
+			snapshot := snapshotWithCoverage(product)
+			snapshot.SourceGeneration = product.sourceGeneration
+			snapshot.CacheGeneration = product.cacheGeneration
+			snapshot.GeneratedAt = product.publishedAt
+			return snapshot, true
+		}
+	}
+	return StatsSnapshot{}, false
+}
+
+func snapshotWithCoverage(product statsProduct) StatsSnapshot {
+	snapshot := product.snapshot
+	if snapshot.Materialized.NoData != nil {
+		return snapshot
+	}
+	coverage := newMaterializedNoDataAccumulatorWithWireSizing(false)
+	for _, bucket := range product.bucketVersions {
+		if bucket.closedTail != nil {
+			coverage.appendShifted(bucket.closedTail.spans, float64(bucket.start))
+		}
+		if bucket.noData != nil {
+			coverage.appendShifted(bucket.noData.spans, float64(bucket.start))
+		}
+	}
+	snapshot.Materialized.NoData = coverage.Sorted()
+	return snapshot
 }
 
 // narrowRingWindow derives a shorter product from a single widest read for a
@@ -1159,7 +1261,7 @@ func (s *StatsService) Snapshot(_ context.Context, request SnapshotRequest) (Sta
 	if float64(requestedEnd) != request.End || float64(requestedStart) != request.Start || requestedEnd != product.windowEnd || requestedStart != product.windowEnd-int64(key.RangeSeconds) {
 		return StatsSnapshot{}, fmt.Errorf("%w: published product window does not match request", ErrProductPending)
 	}
-	snapshot := product.snapshot
+	snapshot := snapshotWithCoverage(product)
 	snapshot.Request = request
 	snapshot.SourceGeneration = product.sourceGeneration
 	snapshot.CacheGeneration = product.cacheGeneration
@@ -1175,6 +1277,39 @@ func (s *StatsService) Snapshot(_ context.Context, request SnapshotRequest) (Sta
 // response. Snapshot remains strict for callers that explicitly supply bounds.
 func (s *StatsService) CurrentSnapshot(_ context.Context, rangeSeconds, resolutionSeconds int) (StatsSnapshot, error) {
 	return s.currentSnapshot(rangeSeconds, resolutionSeconds, false)
+}
+
+// CurrentSnapshotIfChanged avoids expanding bucket-relative coverage when the
+// caller already has the current immutable generation.
+func (s *StatsService) CurrentSnapshotIfChanged(_ context.Context, rangeSeconds, resolutionSeconds int, afterCacheGeneration int64) (StatsSnapshot, bool, error) {
+	if s == nil {
+		return StatsSnapshot{}, false, errors.New("nil YO!stats service")
+	}
+	key := ProductKey{RangeSeconds: rangeSeconds, ResolutionSeconds: resolutionSeconds}
+	s.mu.RLock()
+	product, ok := s.products[key]
+	reason := s.pending[key]
+	if ok && product.cacheGeneration == afterCacheGeneration {
+		s.mu.RUnlock()
+		return StatsSnapshot{}, false, nil
+	}
+	s.mu.RUnlock()
+	if !ok {
+		if reason == "" {
+			reason = "product has not been published"
+		}
+		return StatsSnapshot{}, false, fmt.Errorf("%w: %s", ErrProductPending, reason)
+	}
+	snapshot := snapshotWithCoverage(product)
+	snapshot.Request = SnapshotRequest{
+		Start:      float64(product.windowEnd - int64(key.RangeSeconds)),
+		End:        float64(product.windowEnd),
+		Resolution: float64(key.ResolutionSeconds),
+	}
+	snapshot.SourceGeneration = product.sourceGeneration
+	snapshot.CacheGeneration = product.cacheGeneration
+	snapshot.GeneratedAt = product.publishedAt
+	return snapshot, true, nil
 }
 
 // CurrentSnapshotReady rejects a cached product while its requested range is
@@ -1203,7 +1338,7 @@ func (s *StatsService) currentSnapshot(rangeSeconds, resolutionSeconds int, requ
 		}
 		return StatsSnapshot{}, fmt.Errorf("%w: %s", ErrProductPending, reason)
 	}
-	snapshot := product.snapshot
+	snapshot := snapshotWithCoverage(product)
 	snapshot.Request = SnapshotRequest{
 		Start:      float64(product.windowEnd - int64(key.RangeSeconds)),
 		End:        float64(product.windowEnd),

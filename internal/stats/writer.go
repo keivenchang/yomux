@@ -265,7 +265,15 @@ func OpenWriter(ctx context.Context, path string) (*Writer, error) {
 	if err = validateWriterSchema(ctx, db, true); err != nil {
 		return closeOnError(err)
 	}
-	if err := publishWriterFence(path); err != nil {
+	var fenceVersion int64
+	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&fenceVersion); err != nil {
+		return closeOnError(err)
+	}
+	fenceProtocol := writerProtocol
+	if fenceVersion == checkpointSchemaVersion {
+		fenceProtocol = checkpointWriterProtocol
+	}
+	if err := publishWriterFenceVersion(path, fenceVersion, fenceProtocol); err != nil {
 		return closeOnError(fmt.Errorf("publish YO!stats writer fence: %w", err))
 	}
 	writer := &Writer{db: db, lease: lease, corruptRecoveryName: corruptRecoveryName, pending: make(map[[2]int64]int64)}
@@ -756,6 +764,19 @@ func (w *Writer) statsDatabaseIdentity() (string, error) {
 // intentionally not persisted as rows: their proof is the matching atom's
 // deletion, and replay of an already-applied tombstone is a duplicate.
 func (w *Writer) AppendBatch(ctx context.Context, batch AppendBatch) (AppendResult, error) {
+	return w.AppendWithCheckpoints(ctx, batch, nil)
+}
+
+// AppendWithCheckpoints advances collector progress only with its durable facts.
+// Checkpoints do not invalidate graphs or advance their source generation.
+func (w *Writer) AppendWithCheckpoints(ctx context.Context, batch AppendBatch, checkpoints []Checkpoint) (AppendResult, error) {
+	return w.AppendWithCheckpointsAndRetire(ctx, batch, checkpoints, nil)
+}
+
+// AppendWithCheckpointsAndRetire commits facts, checkpoint updates, and safe
+// checkpoint retirement atomically without changing graph generation for
+// checkpoint-only work.
+func (w *Writer) AppendWithCheckpointsAndRetire(ctx context.Context, batch AppendBatch, checkpoints []Checkpoint, retirement *CheckpointRetirement) (AppendResult, error) {
 	var result AppendResult
 	if w == nil || w.db == nil {
 		return result, errors.New("nil YO!stats writer")
@@ -778,11 +799,17 @@ func (w *Writer) AppendBatch(ctx context.Context, batch AppendBatch) (AppendResu
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
+	ownedChanges, err := w.startupOwnedChanges(ctx)
+	if err != nil {
+		return result, err
+	}
+	defer w.excludeOwnedStartupChanges(ownedChanges)
 	knownGeneration := w.sourceGeneration.Load()
 	tx, err := w.db.BeginTx(ctx, nil)
 	if err != nil {
 		return result, fmt.Errorf("begin stats append: %w", err)
 	}
+	defer tx.Rollback()
 	rollback := func(err error) (AppendResult, error) {
 		_ = tx.Rollback()
 		return AppendResult{}, err
@@ -818,6 +845,12 @@ func (w *Writer) AppendBatch(ctx context.Context, batch AppendBatch) (AppendResu
 			connectionChangesBeforeAppend != w.startupReconciledTotalChanges
 	}
 	result.Generation = generation
+	if err := writeCheckpoints(ctx, tx, checkpoints); err != nil {
+		return rollback(err)
+	}
+	if err := writeCheckpointRetirement(ctx, tx, retirement); err != nil {
+		return rollback(err)
+	}
 	acceptedTimestamps := make([]float64, 0, len(batch.Observations)+len(batch.UsageAtoms)+len(batch.UsageTombstones))
 	changedIntervals := make([]ringInvalidationInterval, 0, len(batch.CoverageEpochs)+len(batch.UnavailableSpans))
 	for _, item := range batch.Observations {
@@ -1416,7 +1449,7 @@ func validateWriterSchema(ctx context.Context, db *sql.DB, requireRingTriggers b
 	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if app != int64(ApplicationID) || version != SchemaVersion {
+	if app != int64(ApplicationID) || (version != SchemaVersion && version != checkpointSchemaVersion) {
 		return fmt.Errorf("YO!stats database is incompatible: expected application %#x/schema %d", ApplicationID, SchemaVersion)
 	}
 	if err := validateCoreShape(ctx, &sqliteReadOnlyDB{db: db}); err != nil {
@@ -1426,8 +1459,20 @@ func validateWriterSchema(ctx context.Context, db *sql.DB, requireRingTriggers b
 	if err := db.QueryRowContext(ctx, "SELECT minimum_writer_protocol,minimum_writer_build FROM schema_meta WHERE singleton=1").Scan(&protocol, &build); err != nil {
 		return err
 	}
-	if protocol > writerProtocol || build > writerBuild {
+	if protocol > checkpointWriterProtocol || build > writerBuild {
 		return &SchemaTooNewError{Found: SchemaVersion, Supported: SchemaVersion}
+	}
+	if version == checkpointSchemaVersion {
+		rows, err := db.QueryContext(ctx, "SELECT checkpoint_key,kind,source_id,revision,version,byte_offset,file_size,file_mtime_ns,device,inode,metadata,decoded_bytes,state,prefix,parsed_tail,pending_line,rebuild_buffer,rebuild_line FROM collector_checkpoints LIMIT 0")
+		if err != nil {
+			return fmt.Errorf("invalid checkpoint schema: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if protocol < checkpointWriterProtocol {
+			return errors.New("checkpoint schema requires checkpoint writer fence")
+		}
 	}
 	if err := validateRingShape(ctx, db, requireRingTriggers); err != nil {
 		return err

@@ -1,8 +1,5 @@
 package main
 
-
-package main
-
 import (
 	"crypto/sha256"
 	"encoding/json"

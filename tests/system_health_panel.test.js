@@ -94,6 +94,7 @@ const SHARED_SOURCE = [
   // `localizedDateTimeFormat`, so it renders here without the full i18n date module.
   sourceFunction('debugGraphLocalDateKey', 'debugGraphTimeLabel'),
   sourceFunction('debugGraphTimeLabel', 'debugGraphExactTimeLabel'),
+  sourceFunction('debugGraphAreaPatternHtml', 'debugGraphServiceLoadPatternHtml'),
   sourceFunction('debugSystemNumber', 'debugSystemRowsHtml'),
   sourceFunction('debugSystemRowsHtml', 'debugSystemCardHtml'),
   // The card shell, needed by the CPU-budget card below: it is the surface that coerced the

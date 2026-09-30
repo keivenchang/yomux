@@ -19,6 +19,9 @@ const currentSource = fs.readFileSync('static_src/js/yolomux/84_stats_current.js
 const debugRuntimeSource = fs.readFileSync('static_src/js/yolomux/84_debug_runtime_facade.js', 'utf8');
 const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
 const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+const apiFetchStart = coreSource.indexOf('async function apiFetch(');
+const apiFetchEnd = coreSource.indexOf('\nfunction ', apiFetchStart);
+const apiFetchSource = coreSource.slice(apiFetchStart, apiFetchEnd);
 const editorSettingsSource = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
 const tokenCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
 const lifecycleScopeSource = coreSource.slice(
@@ -45,13 +48,22 @@ let passed = 0;
 let failed = 0;
 const pending = [];
 
-test('session metadata uses the bootstrap capability while Tabber routes stay Tabber-owned', () => {
+test('bootstrap capability mapping keeps bootstrap, Tabber, and agent routes distinct', () => {
   const context = {URL, globalThis: {location: {href: 'https://example.test/'}}};
   vm.runInNewContext(`${capabilityRequestSource}\nresult = [
     capabilityNameForRequest('/api/session-metadata?force=1'),
     capabilityNameForRequest('/api/transcripts?session=1'),
+    capabilityNameForRequest('/api/activity?scope=all'),
+    capabilityNameForRequest('/api/yoagent/status?scope=all'),
+    capabilityNameForRequest('/api/yolo-rules/open'),
   ];`, context);
-  assert.deepEqual([...context.result], ['core.bootstrap.v1', 'core.bootstrap.v1']);
+  assert.deepEqual([...context.result], [
+    'core.bootstrap.v1',
+    'core.bootstrap.v1',
+    'pane.tabber.v1',
+    'pane.agent.v1',
+    'pane.agent.v1',
+  ]);
 });
 
 function test(name, body) {
@@ -74,6 +86,65 @@ function testAsync(name, body) {
     console.error(error.stack || error);
   }));
 }
+
+testAsync('capability-gated requests report full-mode failures but stay quiet in stats-only boot', async () => {
+  async function request(statsOnly) {
+    const apiEvents = [];
+    const deliveries = [];
+    const backendHealth = [];
+    const context = {
+      AbortController,
+      Response,
+      clearTimeout() {},
+      setTimeout() { throw new Error('a synthetic capability response must not start a request deadline'); },
+      terminalAuthenticationActive: () => false,
+      capabilityNameForRequest: () => 'pane.agent.v1',
+      capabilityAvailable: () => false,
+      capabilityReason: () => ({code: 'not_implemented', messageKey: 'capabilityUnavailable', messageParams: {}}),
+      pageTransportLifecycle: {
+        begin: () => 7,
+        noteDelivery: () => deliveries.push('delivery'),
+        reasonSince: () => '',
+      },
+      statsOnlyBootEnabled: () => statsOnly,
+      apiFetchDeadlineMs: () => 1000,
+      apiFetchResponseWithDeadline: response => response,
+      noteBackendHealthFailure: () => backendHealth.push('failure'),
+      noteBackendHealthSuccess: () => backendHealth.push('success'),
+      jsDebugPerformanceNow: () => 10,
+      jsDebugRequestMethod: () => 'GET',
+      jsDebugRequestBytes: () => 0,
+      applyApiRequestIdHeader: () => 'request-1',
+      notePageLoadApiStarted() {},
+      notePageLoadApiCompleted() {},
+      recordApiDebugEvent: (_url, _method, _startedAt, event) => {
+        apiEvents.push(event);
+        return event;
+      },
+      recordApiDebugResponseBytes() {},
+      noteApiDebugHeaders() {},
+      fetch() { throw new Error('an unavailable route must be gated without network access'); },
+    };
+    vm.runInNewContext(`${apiFetchSource}\nresult = apiFetch('/api/activity-summary');`, context);
+    const response = await context.result;
+    return {response, apiEvents, deliveries, backendHealth};
+  }
+
+  const fullMode = await request(false);
+  assert.equal(fullMode.response.status, 501);
+  assert.equal(fullMode.response.headers.get('X-YOLOmux-Capability-Gated'), 'pane.agent.v1');
+  assert.equal(fullMode.apiEvents.length, 1, 'full mode retains typed unsupported-route evidence');
+  assert.equal(fullMode.apiEvents[0].status, 501);
+  assert.equal(fullMode.apiEvents[0].ok, false);
+  assert.deepEqual(fullMode.deliveries, [], 'the synthetic response is not counted as a backend delivery');
+  assert.deepEqual(fullMode.backendHealth, [], 'the capability gate does not change backend health');
+
+  const statsOnly = await request(true);
+  assert.equal(statsOnly.response.status, 501, 'the caller still receives the typed unavailable response');
+  assert.equal(statsOnly.apiEvents.length, 0, 'an expected stats-only gate is not reported as an API failure');
+  assert.deepEqual(statsOnly.deliveries, []);
+  assert.deepEqual(statsOnly.backendHealth, []);
+});
 
 function sourceFunction(name, nextName) {
   const start = source.indexOf(`function ${name}(`);
@@ -334,13 +405,13 @@ test('Services omits the duplicated web process while CPU names it clearly', () 
   const serviceSource = sourceFunction('debugGraphServiceLoadSeriesDefs', 'debugGraphDisplayHoldOutage');
   assert.match(cpuSource, /yolomux\.py \(web\) :\$\{legacyWebPort\[1\]\}/);
   assert.match(visibleServiceSource, /if \(key === 'web'/);
-  assert.match(serviceSource, /debugGraphVisibleServiceLoadItems\(buckets\)/);
+  assert.match(serviceSource, /debugGraphVisibleServiceLoadItems\(buckets, group\)/);
   // familyHasData must prove THIS service was censused-and-absent, not merely that some service
   // had data in the bucket -- the old form cleared a sparse service's held gauge on every
   // ordinary bucket, producing a synthetic sawtooth to zero. It must read this series' own key
   // out of the bucket's serviceLoad census map.
   assert.match(serviceSource, /familyHasData: bucket => \{/);
-  assert.match(serviceSource, /source instanceof Map && source\.size > 0 && !\(Number\(source\.get\(key\)\?\.cpuSamples \|\| 0\) > 0\)/);
+  assert.match(serviceSource, /source instanceof Map && source\.size > 0 && !\(debugGraphServiceLoadSampleCount\(source\.get\(key\), metric\) > 0\)/);
 });
 
 test('a sparse per-process RSS hold survives ordinary system-memory-only buckets and clears only on a real census miss', () => {
@@ -437,31 +508,116 @@ test('CPU serving-port series stands alone on the default port with no aggregate
   assert.equal(context.result.some(series => series.key === 'cpu'), false);
 });
 
-test('the yolomux.py web CPU line renders on the daemon chart, not beside host processes', () => {
-  // The web process is a daemon like the other six, so its line belongs with them. Only the
-  // rendering moves: the CPU family still owns and samples that PID, and the service-load family
-  // still carries no `web` row, so one process is never sampled twice at two cadences.
-  const context = {result: null};
+test('Go process CPU stays in CPU while the Daemons chart keeps runtime owners only', () => {
+  // The whole Go process belongs in CPU. The Daemons/System chart is deliberately narrower: it
+  // carries only measured in-process runtime owners so a large process line cannot flatten them.
+  const context = {result: null, debugGraphServiceLoadMetric: group => group?.serviceMetric === 'rss' ? 'rss' : 'cpu'};
   vm.runInNewContext(`
-    ${sourceFunction('debugGraphSeriesIsWebProcessCpu', 'debugGraphMacMemoryCardAvailable')}
-    const web = {key: 'cpu:port:7442', processCpu: true, currentProcessCpu: true};
-    const peerWeb = {key: 'cpu:port:7001', processCpu: true};
+    ${sourceFunction('debugGraphGroupSeriesItems', 'debugGraphMacMemoryCardAvailable')}
+    const go = {key: 'cpu:port:7222', processCpu: true, currentProcessCpu: true};
+    const peer = {key: 'cpu:port:7001', processCpu: true};
     const systemCpu = {key: 'systemCpu'};
     const hostProcess = {key: 'cpuBinary:node', hostMetric: 'cpu'};
-    const daemon = {key: 'serviceLoad:batchd', serviceLoad: true};
-    const items = [web, peerWeb, systemCpu, hostProcess, daemon];
+    const runtime = {key: 'serviceLoad:runtime:agent_tokens:opencode:session_tree', serviceLoad: true};
+    const processService = {key: 'serviceLoad:batchd', serviceLoad: true};
+    const items = [go, peer, systemCpu, hostProcess, runtime, processService];
     result = {
-      daemons: debugGraphGroupSeriesItems({key: 'serversLoad', serviceLoad: true}, items).map(series => series.key).sort(),
+      daemons: debugGraphGroupSeriesItems({key: 'serversLoad', serviceLoad: true, runtimeOnly: true}, items).map(series => series.key).sort(),
       cpu: debugGraphGroupSeriesItems({key: 'cpu', hostMetric: 'cpu'}, items).map(series => series.key).sort(),
     };
   `, context);
-  // Membership, not paint order: the daemon chart owns every yolomux.py web line alongside the
-  // services, and the CPU chart keeps only the host binaries and the system total.
-  assert.deepEqual([...context.result.daemons], ['cpu:port:7001', 'cpu:port:7442', 'serviceLoad:batchd']);
-  assert.deepEqual([...context.result.cpu], ['cpuBinary:node', 'systemCpu']);
+  assert.deepEqual([...context.result.daemons], ['serviceLoad:runtime:agent_tokens:opencode:session_tree']);
+  assert.deepEqual([...context.result.cpu], ['cpu:port:7001', 'cpu:port:7222', 'cpuBinary:node', 'systemCpu']);
 });
 
-test('Go stats keeps host CPU out of Daemons and exposes only the Go process there', () => {
+test('the shared Daemons chart retains Python service CPU while Go shows runtime occupancy', () => {
+  const source = [
+    sourceFunction('debugGraphResolvedChartGroup', 'debugGraphMacMemoryDetailsHtml'),
+    sourceFunction('debugGraphGroupSeriesItems', 'debugGraphMacMemoryCardAvailable'),
+  ].join('\n');
+  const context = {
+    Map,
+    Number,
+    String,
+    Object,
+    debugGraphMacMemoryCardAvailable: () => false,
+    debugGraphServiceLoadSampleCount: item => Number(item?.cpuSamples || 0),
+    debugGraphServiceLoadMetric: group => group?.serviceMetric === 'rss' ? 'rss' : 'cpu',
+  };
+  vm.runInNewContext(`${source}
+    const buckets = [{hostMetrics: {serviceLoad: new Map([
+      ['claude', {cpuSamples: 1}],
+      ['codex', {cpuSamples: 1}],
+    ])}}];
+    const group = debugGraphResolvedChartGroup({
+      key: 'serversLoad', serviceLoad: true, runtimeOnly: true, unit: 'runtimeOccupancy',
+      descKey: 'debug.graph.chart.serversLoad.runtimeDesc',
+    }, buckets);
+    const items = [
+      {key: 'serviceLoad:claude', serviceLoad: true},
+      {key: 'serviceLoad:codex', serviceLoad: true},
+      {key: 'cpu:python', processCpu: true},
+    ];
+    const goBuckets = [{hostMetrics: {serviceLoad: new Map([
+      ['runtime:stats_lifecycle', {cpuSamples: 1}],
+      ['yolomux-go', {cpuSamples: 1}],
+    ])}}];
+    const goGroup = debugGraphResolvedChartGroup({
+      key: 'serversLoad', serviceLoad: true, runtimeOnly: true, unit: 'runtimeOccupancy',
+      descKey: 'debug.graph.chart.serversLoad.runtimeDesc',
+    }, goBuckets);
+    result = {
+      unit: group.unit,
+      descKey: group.descKey,
+      series: debugGraphGroupSeriesItems(group, items).map(item => item.key).sort(),
+      goUnit: goGroup.unit,
+      goDescKey: goGroup.descKey,
+      goSeries: debugGraphGroupSeriesItems(goGroup, [
+        {key: 'serviceLoad:runtime:stats_lifecycle', serviceLoad: true},
+        {key: 'serviceLoad:yolomux-go', serviceLoad: true},
+        {key: 'cpu:yolomux_go', processCpu: true},
+      ]).map(item => item.key),
+    };
+  `, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.result)), {
+    unit: 'percent',
+    descKey: 'debug.graph.chart.serversLoad.desc',
+    series: ['cpu:python', 'serviceLoad:claude', 'serviceLoad:codex'],
+    goUnit: 'runtimeOccupancy',
+    goDescKey: 'debug.graph.chart.serversLoad.runtimeDesc',
+    goSeries: ['serviceLoad:runtime:stats_lifecycle'],
+  });
+  const chartSource = sourceFunction('debugSystemDaemonsChartHtml', 'debugSystemRegionHtml');
+  assert.ok(
+    chartSource.indexOf('const chartGroup = debugGraphResolvedChartGroup(group, buckets)')
+      < chartSource.indexOf('debugGraphGroupSeriesItems(chartGroup, seriesItems)'),
+    'empty-state detection uses the same backend-resolved group as the renderer',
+  );
+});
+
+test('runtime Daemons history excludes nested lifecycle and OpenCode phase rows', () => {
+  const visibleSource = sourceFunction('debugGraphVisibleServiceLoadItems', 'debugGraphServiceLoadRangeAvailable');
+  const context = {
+    Map,
+    String,
+    Number,
+    debugGraphServiceLoadMetric: () => 'cpu',
+    debugGraphServiceLoadSampleCount: item => Number(item?.cpuSamples || 0),
+  };
+  vm.runInNewContext(`${visibleSource}
+    const bucket = {hostMetrics: {serviceLoad: new Map([
+      ['runtime:stats_lifecycle', {cpuSamples: 1}],
+      ['runtime:stats_lifecycle:gc', {cpuSamples: 1}],
+      ['runtime:agent_tokens', {cpuSamples: 1}],
+      ['runtime:agent_tokens:opencode:session_tree', {cpuSamples: 1}],
+      ['runtime:agent_status', {cpuSamples: 1}],
+    ])}};
+    result = debugGraphVisibleServiceLoadItems([bucket], {runtimeOnly: true}).map(([key]) => key);
+  `, context);
+  assert.deepEqual([...context.result], ['runtime:stats_lifecycle', 'runtime:agent_tokens', 'runtime:agent_status']);
+});
+
+test('Go stats keeps host CPU separate and exposes the Go process as a CPU series', () => {
   const bucketSource = [
     sourceFunction('jsDebugCurrentSeriesValue', 'jsDebugCurrentCpuProjectionValue'),
     sourceFunction('jsDebugCurrentCpuProjectionValue', 'jsDebugCurrentServiceLoadItem'),
@@ -498,15 +654,208 @@ test('Go stats keeps host CPU out of Daemons and exposes only the Go process the
       hostCpu: record.cpu_total_percent,
       daemonSources: Object.keys(record.servers),
       hostProcessSources: Object.keys(record.host_metrics.cpu_processes).sort(),
-      daemonSeries: debugGraphProcessCpuSeriesDefs(daemonBuckets).map(series => series.processId),
+      cpuSeries: debugGraphProcessCpuSeriesDefs(daemonBuckets).map(series => series.processId),
     };
   `, context);
   assert.deepEqual(JSON.parse(JSON.stringify(context.result)), {
     hostCpu: 31,
     daemonSources: ['yolomux_go'],
     hostProcessSources: ['python', 'tmux', 'yolomux_go'],
-    daemonSeries: ['yolomux_go'],
-  }, 'host CPU remains a CPU-family aggregate, while only the Go-owned process becomes a Daemons series');
+    cpuSeries: ['yolomux_go'],
+  }, 'host CPU remains a CPU-family aggregate, while the Go-owned process is a CPU series');
+});
+
+test('Daemons load includes bounded Go runtime-owner occupancy lines', () => {
+  const source = [
+    sourceFunction('normalizedDebugGraphServiceLoadMode', 'debugGraphServiceLoadLabel'),
+    sourceFunction('debugGraphServiceLoadLabel', 'debugGraphServiceLoadSeriesDefs'),
+    sourceFunction('jsDebugCurrentSeriesValue', 'jsDebugCurrentCpuProjectionValue'),
+    sourceFunction('jsDebugCurrentServiceLoadItem', 'jsDebugCurrentBucketRecord'),
+    sourceFunction('jsDebugCurrentBucketRecord', 'jsDebugCurrentSnapshotAgentWindowRevision'),
+    sourceFunction('debugGraphServiceLoadSeriesDefs', 'debugGraphDisplayHoldOutage'),
+  ].join('\n');
+  const context = {
+    Number,
+    Math,
+    Map,
+    String,
+    Object,
+    debugRuntimeState: {serviceLoadMode: 'avg'},
+    debugGraphStableServiceLoadVisuals: items => items.map((_item, index) => ({color: `color-${index}`, patternIndex: index})),
+    jsDebugGraphServiceLoadLinePatterns: ['solid', 'dash', 'dot', 'dash-dot'],
+    jsDebugGraphDisplayHoldExpiryMs: {tenSecondGauge: 10000},
+    debugGraphServiceLoadMetric: group => group?.serviceMetric === 'rss' ? 'rss' : 'cpu',
+    debugGraphServiceLoadSampleCount: (item, metric = 'cpu') => Number(item?.[metric === 'rss' ? 'rssSamples' : 'cpuSamples'] || 0),
+    debugGraphServiceMemoryValue: item => Number(item?.rssSamples || 0) > 0 ? Number(item.rssTotalBytes || 0) / Number(item.rssSamples) : 0,
+    debugGraphDisplayHoldOutage: () => false,
+  };
+  vm.runInNewContext(`${source}\nconst record = jsDebugCurrentBucketRecord({duration: 1, series: {
+    'service_cpu_percent:runtime:stats_lifecycle': {value: 12},
+    'service_cpu_percent:runtime:agent_tokens': {value: 34},
+    'service_cpu_percent:runtime:agent_status': {value: 5},
+  }});\nconst bucket = {hostMetrics: {serviceLoad: new Map(Object.entries(record.host_metrics.service_load).map(([key, item]) => [key, {
+    label: item.label, cpuTotalPercent: item.cpu_total_percent, cpuSamples: item.cpu_samples,
+    cpuRangeAvailable: false, cpuMinPercent: 0, cpuMaxPercent: 0,
+  }]))}};\nresult = debugGraphServiceLoadSeriesDefs([bucket]).map(item => [item.label, item.value(bucket)]);`, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.result)), [
+    ['agent status collector (goroutine, in-process)', 5],
+    ['agent token collector (goroutine, in-process)', 34],
+    ['stats lifecycle (goroutine, in-process)', 12],
+  ]);
+});
+
+test('Daemons load gives Go thread and child rows stable labels', () => {
+  const source = sourceFunction('debugGraphServiceLoadLabel', 'debugGraphServiceLoadSeriesDefs');
+  const context = {String};
+  vm.runInNewContext(`${source}\nresult = [
+    debugGraphServiceLoadLabel('yolomux-go:thread:41'),
+    debugGraphServiceLoadLabel('yolomux-go:child:8123'),
+    debugGraphServiceLoadLabel('yolomux-go:thread:41:9876'),
+    debugGraphServiceLoadLabel('yolomux-go:child:8123:habcdef'),
+  ];`, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.result)), [
+    'Go OS thread 41',
+    'Go child process 8123',
+    'Go OS thread 41',
+    'Go child process 8123',
+  ]);
+});
+
+test('Go process graph labels identify instances and preserve legacy history', () => {
+  const source = sourceFunction('debugGraphServiceLoadLabel', 'debugGraphServiceLoadSeriesDefs');
+  const labels = vm.runInNewContext(`${source}; [
+    debugGraphServiceLoadLabel('yolomux-go:process:123:7222:12:%2Fbin%2Fyolomux-go:host:boot:start:owner'),
+    debugGraphServiceLoadLabel('yolomux-go:process:124:7223:0:%2Fbin%2Fcustom+server:host:boot:start:owner'),
+    debugGraphServiceLoadLabel('yolomux-go'),
+  ]`);
+  assert.deepStrictEqual([...labels], [
+    'yolomux-go (PID 123, port 7222, PPID 12)',
+    'custom server (PID 124, port 7223)',
+    'yolomux-go (legacy process; identity unavailable)',
+  ]);
+});
+
+test('Daemons load labels host collector rows as runtime occupancy', () => {
+  const source = sourceFunction('debugGraphServiceLoadLabel', 'debugGraphServiceLoadSeriesDefs');
+  const context = {String};
+  vm.runInNewContext(`${source}\nresult = [
+    debugGraphServiceLoadLabel('runtime:host_collector:cpu'),
+    debugGraphServiceLoadLabel('runtime:host_collector:system_memory'),
+    debugGraphServiceLoadLabel('runtime:host_collector:gpu'),
+  ];`, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.result)), [
+    'host CPU collector (runtime occupancy)',
+    'host memory collector (runtime occupancy)',
+    'host GPU collector (runtime occupancy)',
+  ]);
+});
+
+test('live runtime SSE refreshes reported owners without erasing omitted Daemons history', () => {
+  assert.match(currentSource, /scope\.ownEvent\('stream-runtime',[\s\S]*userOnRuntime\(Object\.freeze\(value\.load\)\)/,
+    'the exact stats stream forwards validated runtime-owner telemetry');
+  assert.match(currentSource, /function closeStream\(\)[\s\S]*for \(const eventName of \[[^\]]*'runtime'/,
+    'closing or replacing the exact stream releases its runtime event listener');
+  assert.match(source, /onRuntime\(load\) \{\s*applyJsDebugCurrentRuntimeLoad\(load\);/,
+    'the current stats client consumes runtime-owner events');
+  assert.match(source, /sourceSamples < Number\(item\[samplesKey\] \|\| 0\) && !\(runtimeSse && prefix === 'cpu'\)/,
+    'a newer runtime sample can replace the durable aggregate in its open bucket');
+  let refreshes = 0;
+  const context = {
+    Date,
+    debugGraphBucketForTime: () => null,
+    debugGraphServiceLoadLabel: key => key,
+    refreshDebugGraphSurfaces: () => { refreshes += 1; },
+  };
+  vm.runInNewContext(
+    `${sourceFunction('debugGraphNewHostMetrics', 'debugGraphNewServiceLoadItem')}\n`
+      + `${sourceFunction('debugGraphNewServiceLoadItem', 'debugGraphNewClientBucket')}\n`
+      + `${sourceFunction('debugGraphApplyHostMetricProcesses', 'debugGraphApplyHostMetrics')}\n`
+      + `${sourceFunction('debugGraphApplyHostMetrics', 'debugGraphAgentStatusSnapshot')}\n`
+      + `${sourceFunction('applyJsDebugCurrentRuntimeLoad', 'debugGraphDeleteServerRecord')}\n`
+      + `const bucket = {hostMetrics: debugGraphNewHostMetrics()};`
+      + `bucket.hostMetrics.serviceLoad.set('runtime:agent_status', {label: 'agent status', cpuTotalPercent: 4, cpuSamples: 1});`
+      + `bucket.hostMetrics.serviceLoad.set('runtime:agent_tokens', {label: 'agent tokens', cpuTotalPercent: 7, cpuSamples: 1});`
+      + `bucket.hostMetrics.serviceLoad.set('runtime:stats_lifecycle', {label: 'stats lifecycle', cpuTotalPercent: 2, cpuSamples: 3});`
+      + `debugGraphBucketForTime = () => bucket;`
+      + `firstResult = applyJsDebugCurrentRuntimeLoad({stats_lifecycle: {load_percent: 9}, new_worker: {load_percent: 9}});`
+      + `secondResult = applyJsDebugCurrentRuntimeLoad({new_worker: {load_percent: 11}});`
+      + `result = {existingOmitted: bucket.hostMetrics.serviceLoad.get('runtime:agent_status').cpuTotalPercent, tokenOwnerOmitted: bucket.hostMetrics.serviceLoad.get('runtime:agent_tokens').cpuTotalPercent, refreshed: bucket.hostMetrics.serviceLoad.get('runtime:stats_lifecycle').cpuTotalPercent, samples: bucket.hostMetrics.serviceLoad.get('runtime:stats_lifecycle').cpuSamples, later: bucket.hostMetrics.serviceLoad.get('runtime:new_worker').cpuTotalPercent};`,
+    context,
+  );
+  assert.equal(context.firstResult, true);
+  assert.equal(context.secondResult, true);
+  assert.equal(context.result.existingOmitted, 4,
+    'a runtime event that omits this owner keeps its durable sample in the open bucket');
+  assert.equal(context.result.tokenOwnerOmitted, 7,
+    'a runtime event that omits token collection keeps the session-token daemon history');
+  assert.equal(context.result.refreshed, 9,
+    'a live runtime sample refreshes the same owner even when the durable aggregate has more samples');
+  assert.equal(context.result.samples, 1);
+  assert.equal(context.result.later, 11,
+    'later live events refresh an owner first introduced by runtime SSE');
+  assert.equal(refreshes, 2);
+});
+
+test('line charts keep isolated samples visible and Daemons uses a readable scale', () => {
+  assert.match(source, /function debugGraphSingletonLineMarkersHtml\(/,
+    'singleton line samples have an explicit SVG marker');
+  assert.match(source, /debugGraphSingletonLineMarkersHtml\(series,/,
+    'line charts paint the singleton marker layer');
+  const singletonSource = sourceFunction('debugGraphSingletonLineMarkersHtml', 'debugGraphAreaPathHtml');
+  assert.doesNotMatch(singletonSource, /if \(series\?\.serviceLoad !== true\) return ''/,
+    'singleton markers are not limited to service-load series');
+  assert.match(source, /group\?\.key === 'serversLoad'\) return false/,
+    'stacked occupancy uses a linear cumulative axis');
+});
+
+test('Daemons cumulative areas sum top-level owners and preserve unavailable middle buckets', () => {
+  const context = {
+    esc: String,
+    jsDebugGraphRawBucketMs: 1000,
+    debugGraphSeriesTokenAgentAttrs: () => '',
+    debugGraphSeriesStyleAttr: (series, {areaPatternId = ''} = {}) => {
+      const declarations = [`--js-debug-series-color: ${series.color || '#123456'}`];
+      if (areaPatternId) declarations.push(`fill: url(#${areaPatternId})`);
+      return ` style="${declarations.join('; ')};"`;
+    },
+    debugGraphServiceLoadPatternId: (series, scope) => `service-${scope}-${series.key}`,
+    debugGraphPointForValue: (value, time) => [time, 100 - value],
+  };
+  vm.runInNewContext(`
+    ${sourceFunction('debugGraphSeriesPlotValues', 'debugGraphSeriesClassKey')}
+    ${sourceFunction('debugGraphSeriesClassKey', 'debugGraphSeriesLineClassName')}
+    ${sourceFunction('debugGraphSeriesTimeMs', 'debugGraphPolylinePoints')}
+    ${sourceFunction('debugGraphTimeInNoDataRange', 'debugGraphPolylinePointSegments')}
+    ${sourceFunction('debugGraphSeriesUsesArea', 'debugGraphLegendSwatchHtml')}
+    ${sourceFunction('debugGraphStackedSeries', 'debugGraphChartAxisMax')}
+    ${sourceFunction('debugGraphAreaPathHtml', 'debugGraphBarRectsHtml')}
+    const common = {serviceLoad: true, color: '#123456', times: [1000, 2000, 3000], durations: [1000, 1000, 1000], hasDataValues: [true, false, true]};
+    const owners = [
+      {...common, key: 'first', values: [20, 0, 12]},
+      {...common, key: 'second', values: [30, 0, 23]},
+      {...common, key: 'nested', runtimeDetail: true, values: [9, 0, 9]},
+    ];
+    const stacked = debugGraphStackedSeries(owners.filter(item => debugGraphSeriesUsesArea(item, 'area')));
+    result = {
+      layers: stacked.map(item => ({key: item.key, top: item.plotValues, base: item.stackBaseValues})),
+      lines: owners.filter(item => !debugGraphSeriesUsesArea(item, 'area')).map(item => item.key),
+      html: debugGraphAreaPathHtml(stacked[1], 100, {startMs: 1000, endMs: 4000}, [{startMs: 2000, endMs: 3000}], 'daemons-serversLoad'),
+    };
+  `, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.result.layers)), [
+    {key: 'first', top: [20, 0, 12], base: [0, 0, 0]},
+    {key: 'second', top: [50, 0, 35], base: [20, 0, 12]},
+    {key: 'nested', top: [59, 0, 44], base: [50, 0, 35]},
+  ]);
+  assert.deepEqual([...context.result.lines], [], 'every Daemons contribution is a cumulative area');
+  const paths = [...context.result.html.matchAll(/ d="([^"]+)"/g)].map(match => match[1]);
+  assert.match(context.result.html, /fill: url\(#js-debug-service-pattern-daemons-serversLoad-second\)/, 'area fill references its chart-scoped pattern');
+  assert.equal((context.result.html.match(/\sstyle=/g) || []).length, 2, 'each split area path emits exactly one style attribute');
+  assert.match(context.result.html, /--js-debug-series-color: #123456/, 'pattern fill retains the series color style');
+  assert.equal(paths.length, 2, 'unavailable middle bucket splits the area');
+  const coordinates = paths.map(path => [...path.matchAll(/[ML] ([\d.]+),([\d.]+)/g)].map(match => match.slice(1).map(Number)));
+  assert.deepEqual(coordinates.map(points => [Math.min(...points.map(point => point[0])), Math.max(...points.map(point => point[0]))]), [[1000, 2000], [3000, 4000]]);
+  assert.deepEqual(coordinates.map(points => [...new Set(points.map(point => point[1]))].sort((a, b) => a - b)), [[50, 80], [65, 88]], 'upper and lower boundaries retain each measured stack across the gap');
 });
 
 test('CPU serving-port series leads the legend and paints after every other line', () => {
@@ -817,7 +1166,8 @@ test('fresh Graphs defaults show Agents, Session tokens/min, and system/process 
   assert.match(source, /\{key: 'agentTokens',[^\n]+noDataWhenEmpty: true,[^\n]+displayedSummary: 'agentTokens'/);
   assert.match(source, /\{key: 'modelTokens',[^\n]+noDataWhenEmpty: true,[^\n]+displayedSummary: 'modelTokens'/);
   assert.match(source, /\{key: 'memory',[^\n]+hostMetric: 'memory'/);
-  assert.match(source, /const jsDebugGraphDefaultHiddenChartKeys = Object\.freeze\(\['serversLoad', 'gpuUtil', 'gpuMemory'\]\)/);
+  assert.match(source, /const jsDebugGraphDefaultHiddenChartKeys = Object\.freeze\(\['gpuUtil', 'gpuMemory'\]\)/);
+  assert.doesNotMatch(source.slice(source.indexOf('const jsDebugGraphChartGroups = Object.freeze(['), source.indexOf('const jsDebugGraphChartControlItems =')), /key: 'serversLoad'/, 'Daemons load is not a Graphs chart');
   const context = {
     result: null,
     Date,
@@ -828,7 +1178,7 @@ test('fresh Graphs defaults show Agents, Session tokens/min, and system/process 
     Math,
     window: {localStorage: {getItem: () => null}},
     jsDebugGraphChartGroups: [
-      {key: 'activity'}, {key: 'agentTokens'}, {key: 'modelTokens'}, {key: 'memory'}, {key: 'serversLoad'},
+      {key: 'activity'}, {key: 'agentTokens'}, {key: 'modelTokens'}, {key: 'memory'},
     ],
     jsDebugStatsUiPreferencesStorageKey: 'stats',
     legacyYoCostMigrationRequested: false,
@@ -855,7 +1205,7 @@ test('fresh Graphs defaults show Agents, Session tokens/min, and system/process 
     result = jsDebugGraphChartGroups.filter(group => debugGraphChartVisible(group.key)).map(group => group.key);
   `, context);
   assert.deepEqual([...context.result], ['activity', 'agentTokens', 'memory']);
-  assert.equal(context.result.includes('serversLoad'), false, 'Daemons is not required by the default Graphs view');
+  assert.equal(context.result.includes('serversLoad'), false, 'Daemons load is absent from the Graphs chart registry');
 });
 
 test('saved Graphs visibility preferences override defaults instead of being backfilled', () => {
@@ -867,7 +1217,7 @@ test('saved Graphs visibility preferences override defaults instead of being bac
     String,
     Number,
     Math,
-    window: {localStorage: {getItem: () => JSON.stringify({hiddenCharts: ['activity'], visibleCharts: ['serversLoad']})}},
+    window: {localStorage: {getItem: () => JSON.stringify({hiddenCharts: ['activity'], visibleCharts: ['gpuUtil']})}},
     jsDebugStatsUiPreferencesStorageKey: 'stats',
     legacyYoCostMigrationRequested: false,
     jsDebugLogLevels: ['warning', 'error'],
@@ -890,9 +1240,9 @@ test('saved Graphs visibility preferences override defaults instead of being bac
     const jsDebugGraphDefaultRangeSeconds = 900;
     function debugGraphAvailableRangeOptions() { return [{seconds: 900}]; }
     loadJsDebugStatsUiPreferences();
-    result = ['activity', 'agentTokens', 'modelTokens', 'memory', 'serversLoad'].filter(debugGraphChartVisible);
+    result = ['activity', 'agentTokens', 'modelTokens', 'memory'].filter(debugGraphChartVisible);
   `, context);
-  assert.deepEqual([...context.result], ['agentTokens', 'memory', 'serversLoad']);
+  assert.deepEqual([...context.result], ['agentTokens', 'memory']);
 });
 
 test('AUTO resolution label reports the coarsest resolution actually rendered by token charts', () => {
@@ -967,6 +1317,67 @@ test('macOS keeps Activity Monitor memory facts and pressure in one card', () =>
   assert.deepEqual([...context.result], ['var(--good)', 'var(--warning-border-strong)', 'var(--bad)', 'var(--muted)']);
   assert.match(sourceFunction('debugGraphSeriesStyleAttr', 'debugGraphSeriesClientAttrs'), /debugGraphSeriesDisplayColor\(series\)/);
   assert.match(sourceFunction('debugGraphSeriesDisplayColor', 'debugGraphSeriesStyleAttr'), /series\?\.colorValues/);
+});
+
+test('Go memory diagnostics render stacked runtime classes and ranked sampled allocation sites', () => {
+  const chartSource = sourceFunction('debugGraphAreaPatternHtml', 'debugGraphServiceLoadPatternHtml') + sourceFunction('debugSystemRuntimeMemoryChartHtml', 'debugSystemPprofCaptureHtml');
+  const heapChartSource = sourceFunction('debugSystemHeapStackChartHtml', 'debugSystemPprofCaptureHtml');
+  const profileSource = sourceFunction('debugSystemPprofCaptureHtml', 'debugSystemGoRuntimeDetailHtml');
+  const context = {
+    esc: value => String(value),
+    debugGraphTerseBytesText: value => `${Number(value || 0)}B`,
+    debugSystemNumber: value => String(value),
+    debugSystemRowsHtml: rows => JSON.stringify(rows),
+    Date,
+  };
+  vm.runInNewContext(`${chartSource}\n${heapChartSource}\n${profileSource}
+    const base = {'Heap objects':80,'Heap unused spans':10,'Heap free retained':5,'Goroutine stacks':2,'OS stacks':1,'Runtime metadata':1,'Profiling buckets':1,'Other runtime':1};
+    const memory = {available:true, history:[{at:100,pid:42,categories:base,gauges:{'/memory/classes/total:bytes':101,'/memory/classes/heap/released:bytes':12,'/gc/heap/live:bytes':80,'/gc/heap/goal:bytes':128,'/gc/cycles/total:gc-cycles':7,'/sched/goroutines:goroutines':19},unavailable:[]}], last:{at:100,ranked_at:100,artifact_at:101,pid:42,binary:'/candidate/yolomux_go',binary_sha256:'0123456789abcdef',build:'abc1234',go_version:'go1.22.2',sample_rate_bytes:512000,inuse_bytes:100,alloc_bytes:300,other_inuse_bytes:20,artifact_bytes:900,top_inuse:[{key:'abc',function:'stats.materialize',inuse_bytes:80,stack:['stats.materialize x.go:10']}],top_alloc:[]}};
+    const gapHistory = [{at:100,pid:42,categories:base},{at:105,pid:42,categories:{...base,'Heap objects':undefined}},{at:120,pid:42,categories:base}];
+    const gapReadout = debugSystemRuntimeMemoryChartHtml({sample_interval_seconds:5,history:gapHistory});
+    const missingInterval = debugSystemRuntimeMemoryChartHtml({sample_interval_seconds:5,history:[{at:100,pid:42,categories:base},{at:120,pid:42,categories:base}]});
+    const stackChart = debugSystemHeapStackChartHtml([
+      {at:100,other_inuse_bytes:10,top_inuse:[{key:'a1abcdef-one',function:'json.decode',inuse_bytes:80,stack:['json.decode json.go:1','service.handle api.go:20']},{key:'b2abcdef-two',function:'json.decode',inuse_bytes:20,stack:['json.decode json.go:1','other.handle api.go:30']},{key:'drops-out',function:'cache.fold',inuse_bytes:40,stack:['cache.fold cache.go:2']}]},
+      {at:160,other_inuse_bytes:30,top_inuse:[{key:'a1abcdef-one',function:'json.decode',inuse_bytes:60,stack:['json.decode json.go:1','service.handle api.go:20']},{key:'b2abcdef-two',function:'json.decode',inuse_bytes:50,stack:['json.decode json.go:1','other.handle api.go:30']}]},
+    ], 42);
+    result = {chart:debugSystemRuntimeMemoryChartHtml(memory), profile:debugSystemPprofCaptureHtml(memory), gapChart:debugSystemRuntimeMemoryChartHtml({history:gapHistory}), gapReadout, missingInterval, stackChart};`, context);
+  assert.equal((context.result.chart.match(/data-go-memory-area=/g) || []).length, 8);
+  assert.match(context.result.chart, /Stacked Go runtime memory classes/);
+  assert.match(context.result.chart, /largest class Heap objects: 80B/);
+  for (const gauge of ['Go memory total', 'Heap released', 'Live heap', 'Heap goal', 'GC cycles', 'Goroutines']) assert.match(context.result.chart, new RegExp(gauge));
+  assert.equal((context.result.gapChart.match(/data-go-memory-area=/g) || []).length, 16, 'the missing sample splits every area into two observed runs');
+  assert.match(context.result.gapChart, /1 samples have incomplete class data and are shown as gaps/);
+  assert.match(context.result.gapChart, /M54\.0,/);
+  assert.match(context.result.gapChart, /M792\.0,/);
+  assert.doesNotMatch(context.result.gapChart, /M204\.0,/, 'irregular time gaps do not get interpolated as equal sample spacing');
+  assert.equal((context.result.missingInterval.match(/data-go-memory-area=/g) || []).length, 16, 'widely separated complete samples form separate runs');
+  assert.doesNotMatch(context.result.missingInterval, /M54\.0,[^<]*L792\.0,/, 'the area does not bridge a long interval with no samples');
+  const gapWidths = [...context.result.gapReadout.matchAll(/data-go-memory-sample=\"\d+\"[^>]*width=\"([\d.]+)\"/g)].map(match => Number(match[1]));
+  assert.equal(gapWidths.length, 2, 'only complete observed samples receive a hover target');
+  assert.ok(gapWidths.every(width => width < 200), 'hover targets stay within the sample cadence and leave the unobserved interval empty: ' + gapWidths);
+  assert.match(context.result.profile, /Capture heap profile/);
+  assert.match(context.result.profile, /Download pprof/);
+  assert.match(context.result.profile, /stats\.materialize/);
+  assert.match(context.result.profile, /binary SHA-256 0123456789abcdef/);
+  assert.match(context.result.profile, /revision abc1234 · Go go1\.22\.2/);
+  assert.match(context.result.profile, /Ranked stacks sampled/);
+  assert.match(context.result.profile, /pprof capture started/);
+  assert.match(context.result.profile, /adjacent runtime snapshots/);
+  assert.match(context.result.profile, /cumulative allocation/);
+  assert.match(context.result.profile, /do not expose exact object or struct sizes/);
+  assert.match(context.result.profile, /one minute cooldown/);
+  assert.match(context.result.chart, /byte values on the vertical axis and capture time on the horizontal axis/);
+  assert.match(context.result.chart, /data-go-memory-sample="100"/);
+  assert.match(context.result.chart, /Heap objects: 80B/);
+  assert.match(context.result.chart, /<text fill=\"currentColor\"/);
+  assert.match(context.result.profile, /<text fill=\"currentColor\"/);
+  assert.match(context.result.stackChart, /data-heap-stack-area="a1abcdef-one"/);
+  assert.doesNotMatch(context.result.stackChart, /data-heap-stack-area="drops-out"/, 'a stack outside a capture top twelve is not shown as zero');
+  assert.match(context.result.stackChart, /Other or unranked sampled stacks/);
+  assert.match(context.result.stackChart, /json\.decode · a1abcdef/);
+  assert.match(context.result.stackChart, /json\.decode · b2abcdef/);
+  assert.match(context.result.stackChart, /other\.handle api\.go:30/);
+  assert.match(context.result.stackChart, /stacks listed in every capture are shown individually/i);
 });
 
 test('System memory renders only the range top five cumulative binary RSS series', () => {
@@ -1144,13 +1555,51 @@ test('CPU hover chooses binary, System, yolomux, and nearest grid series without
   });
 });
 
-test('both themes render CPU and System memory with saturated areas and block area keys', () => {
-  assert.match(css, /--js-debug-process-area-opacity:\s*0\.52/);
-  assert.match(css, /body\.theme-light :is\(\.js-debug-graph-view, \.js-yocost-graphs\)\s*\{[^}]*--js-debug-process-area-opacity:\s*0\.52/);
-  assert.match(css, /:is\(\.js-debug-chart\[data-js-debug-chart="cpu"\], \.js-debug-chart\[data-js-debug-chart="memory"\]\) \.js-debug-area\s*\{[^}]*opacity:\s*var\(--js-debug-process-area-opacity\)/);
+test('both themes render CPU and System memory with solid areas and block area keys', () => {
+  assert.match(css, /\.js-debug-area\s*\{[^}]*opacity:\s*1/);
+  assert.match(css, /\.js-debug-legend-area\s*\{[^}]*opacity:\s*1/);
+  assert.doesNotMatch(css, /--js-debug-process-area-opacity/);
+  assert.match(css, /\.js-debug-chart\[data-js-debug-chart="serversLoad"\] \.js-debug-line\s*\{[^}]*opacity:\s*0\.9[^}]*stroke-width:\s*1\.4/);
   assert.match(css, /\.js-debug-legend-area\s*\{[^}]*width:\s*18px[^}]*height:\s*6px/);
   assert.match(sourceFunction('debugGraphLegendSwatchHtml', 'debugGraphIntegerAxisValues'), /debugGraphSeriesUsesArea\(series, kind\)/);
   assert.match(sourceFunction('debugGraphChartHtml', 'debugGraphUsesLogScale'), /debugGraphSeriesUsesArea\(series, group\.kind\)/);
+});
+
+test('host CPU and memory labels retain separate Go process instances', () => {
+  const processSeries = slice(
+    source,
+    'const jsDebugGraphHostProcessVisualAssignments = Object.freeze({',
+    '\nfunction normalizedDebugGraphServiceLoadMode(',
+  );
+  const context = {
+    result: null, Map, Set, Number, String,
+    jsDebugGraphAgentTokenPatternCount: 7,
+    jsDebugGraphAgentTokenColors: ['blue', 'orange', 'magenta', 'gold', 'green', 'red', 'violet'],
+    jsDebugGraphCpuProcessAreaColors: ['cyan', 'orange', 'magenta', 'turquoise'],
+    jsDebugGraphServiceLoadLinePatterns: ['solid', 'dash', 'dot', 'dash-dot', 'long-dash', 'dense-dot', 'long-short'],
+    jsDebugGraphDisplayHoldExpiryMs: {minuteGauge: 120000},
+    debugGraphStablePaletteIndex: (_key, count) => count - 1,
+    debugGraphHostMetricBucketValue: (_bucket, series) => Number(series.hostProcessId.endsWith('a1b2c3d4') ? 400 : 600),
+    debugGraphHostMetricBucketHasData: () => true,
+    debugGraphHostMetricBucketItem: (bucket, series) => bucket.hostMetrics[series.hostMetric === 'cpu' ? 'cpuProcesses' : 'memoryProcesses'].get(series.hostProcessId),
+  };
+  vm.runInNewContext(`
+    ${processSeries}
+    const first = 'yolomux-go-pid-101-a1b2c3d4';
+    const second = 'yolomux_go-pid-202-b2c3d4e5';
+    const bucket = {hostMetrics: {
+      cpuProcesses: new Map([[first, {label: first, totalPercent: 4, samples: 1}], [second, {label: second, totalPercent: 6, samples: 1}]]),
+      memoryProcesses: new Map([[first, {label: first, totalBytes: 400, samples: 1}], [second, {label: second, totalBytes: 600, samples: 1}]]),
+    }};
+    result = {
+      cpu: debugGraphCpuProcessSeriesDefs([bucket]).map(item => item.label),
+      memory: debugGraphMemoryProcessSeriesDefs([bucket]).map(item => item.label),
+    };
+  `, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.result)), {
+    cpu: ['yolomux-go (PID 202)', 'yolomux-go (PID 101)'],
+    memory: ['yolomux-go (PID 202)', 'yolomux-go (PID 101)'],
+  });
 });
 
 test('Agents keeps per-session revision joins and semantic paint', () => {
@@ -1427,8 +1876,18 @@ test('one shared spike-compression descriptor preserves token behavior and makes
   assert.deepEqual(JSON.parse(JSON.stringify(context.result.token)), JSON.parse(JSON.stringify(context.result.daemon)), 'tokens and daemon load use the same descriptor thresholds and geometry');
   assert.equal(context.result.quiet.scale, false, 'ordinary low daemon load stays linear');
   assert.ok(context.result.compressedY + 40 < context.result.linearY, context.result);
+  const serviceAxisSource = sourceFunction('debugGraphServiceLoadAxisDescriptor', 'debugGraphMemoryProcessSeriesDefs');
+  const seriesPlotValuesSource = sourceFunction('debugGraphSeriesPlotValues', 'debugGraphSeriesPlotHasDataValues');
+  const serviceAxisContext = {
+    Object,
+    Number,
+    Math,
+    debugGraphChartAxisMax: (_group, rawMax) => rawMax <= 10 ? 10 : 100,
+  };
+  vm.runInNewContext(`${axisSource}\n${seriesPlotValuesSource}\n${serviceAxisSource}\nresult = debugGraphServiceLoadAxisDescriptor({unit: 'percent'}, [{plotValues: [1, 2, 3, 4, 5, 5, 5, 5, 5]}], [{plotValues: [100]}]);`, serviceAxisContext);
+  assert.equal(serviceAxisContext.result.axisMax, 100, 'daemon range includes larger nested runtime-owner lines as well as cumulative area bands');
   assert.match(source, /function debugGraphTokenSpikeAxisDescriptor\(buckets\)[\s\S]*?debugGraphSpikeCompressedAxisDescriptor/);
-  assert.match(source, /group\.key === 'serversLoad' \? debugGraphSpikeCompressedAxisDescriptor\(group, plotSeries\.flatMap\(debugGraphSeriesPlotValues\)\)/);
+  assert.match(source, /group\.key === 'serversLoad' \? debugGraphServiceLoadAxisDescriptor\(group, plotSeries, lineSeries\)/);
   assert.match(source, /data-js-debug-chart-scale/);
   assert.match(source, /data-js-debug-chart-axis-break/);
 });
@@ -1579,6 +2038,30 @@ test('every range selection defaults to AUTO', () => {
   `, context);
   assert.deepEqual([...context.result], [0, 0, 0, 0]);
   assert.match(sourceFunction('setDebugGraphRange', 'setDebugGraphResolutionOverride'), /graphResolutionOverrideSeconds = debugGraphDefaultResolutionForRange/);
+});
+
+test('AUTO history requests use the controller capability resolution for wide ranges', () => {
+  const functionText = sourceFunction('debugGraphExactRequestResolutionSeconds', 'setDebugGraphExactResolutionEnabled');
+  const context = {result: null};
+  vm.runInNewContext(`
+    const debugRuntimeState = {graphResolutionOverrideSeconds: 0};
+    const jsDebugCurrentStatsClientState = {
+      client: {
+        controller: () => ({
+          selection: () => ({range_seconds: 3600, resolution: 'AUTO', resolution_seconds: 300}),
+          capabilities: () => ({ranges: [{range_seconds: 3600, auto_resolution_seconds: 300}] }),
+        }),
+      },
+    };
+    function activeJsDebugGraphRangeSeconds() { return 3600; }
+    function debugGraphExactResolutionChoices() { return [60, 300]; }
+    ${functionText}
+    const auto = debugGraphExactRequestResolutionSeconds();
+    debugRuntimeState.graphResolutionOverrideSeconds = 60;
+    const explicit = debugGraphExactRequestResolutionSeconds();
+    result = {auto, explicit};
+  `, context);
+  assert.deepEqual({...context.result}, {auto: 300, explicit: 60});
 });
 
 test('current cost reports do not expose the retired backfill display state', () => {
@@ -4683,9 +5166,21 @@ test('YO!cost usage metrics and compact pricing links stay on one line', () => {
 });
 
 test('Daemons chart mirrors the server continuous one-second service-load cadence', () => {
-  const manifestSource = slice(source, 'const jsDebugStatsFamilyManifest', 'const jsDebugGraphChartControlItems');
+  const manifestSource = slice(source, 'const jsDebugStatsFamilyManifest', 'const jsDebugGraphDaemonsChartGroup');
   assert.match(manifestSource, /service_load: Object\.freeze\(\{[^}]*cadenceSeconds: 1,/, 'the client mirrors the server continuous 1 Hz service-load cadence');
-  assert.match(manifestSource, /serviceLoad: true, bucketSeconds: jsDebugStatsFamilyManifest\.service_load\.cadenceSeconds/, 'the Daemons chart buckets from the mirrored family cadence');
+  assert.match(source, /const jsDebugGraphDaemonsChartGroup = Object\.freeze\(\{[\s\S]*kind: 'area',[\s\S]*stacked: true,[\s\S]*serviceLoad: true,[\s\S]*runtimeOnly: true,[\s\S]*bucketSeconds: jsDebugStatsFamilyManifest\.service_load\.cadenceSeconds/);
+  assert.match(source, /const jsDebugGraphDaemonsProcessSeriesGroup = Object\.freeze\(\{[\s\S]*\.\.\.jsDebugGraphDaemonsChartGroup,[\s\S]*processOnly: true/);
+  const areaSource = sourceFunction('debugGraphSeriesUsesArea', 'debugGraphLegendSwatchHtml');
+  assert.match(areaSource, /series\?\.serviceLoad === true/, 'Daemons service-load series use the shared area renderer');
+  assert.match(areaSource, /series\?\.serviceLoad === true/, 'every displayed Daemons owner uses a cumulative area');
+  assert.match(source, /runtimeDetail: false/, 'only independent top-level owners are recorded for stacked occupancy');
+  assert.match(css, /\.js-debug-daemons-chart \.js-debug-chart-shell > \.js-debug-chart-grid > \.js-debug-chart\s*\{[\s\S]*max-height: none;/, 'Daemons chart override wins against the shared max-height selector');
+  assert.match(css, /max-height: none;[\s\S]*overflow: visible;/, 'Daemon legend entries never scroll inside the chart');
+  assert.match(source, /unit: 'runtimeOccupancy'/, 'the Daemons chart labels elapsed occupancy separately from process CPU');
+  assert.match(source, /const jsDebugGraphDaemonsMemoryChartGroup = Object\.freeze\(\{[\s\S]*unit: 'bytes',[\s\S]*serviceMetric: 'rss',[\s\S]*processOnly: true/, 'Daemons exposes process RSS on a separate bytes chart');
+  assert.match(source, /const jsDebugGraphDaemonsChartGroups = Object\.freeze\(\[[\s\S]*jsDebugGraphDaemonsChartGroup,[\s\S]*jsDebugGraphDaemonsMemoryChartGroup/);
+  assert.match(source, /const jsDebugGraphDaemonsSeriesGroups = Object\.freeze\(\[[\s\S]*jsDebugGraphDaemonsChartGroup,[\s\S]*jsDebugGraphDaemonsProcessSeriesGroup,[\s\S]*jsDebugGraphDaemonsMemoryChartGroup/);
+  assert.match(sourceFunction('debugGraphSeriesData', 'debugGraphChartCapacityMax'), /jsDebugGraphDaemonsSeriesGroups\.flatMap/);
 });
 
 test('Daemons keep unique stable color and line-pattern identities beyond nine services', () => {
@@ -4703,6 +5198,9 @@ test('Daemons keep unique stable color and line-pattern identities beyond nine s
     jsDebugGraphDisplayHoldExpiryMs: {tenSecondGauge: 10000},
     debugGraphServiceLoadEffectiveMode: () => 'avg',
     debugGraphServiceLoadValue: () => 1,
+    debugGraphServiceLoadMetric: group => group?.serviceMetric === 'rss' ? 'rss' : 'cpu',
+    debugGraphServiceLoadSampleCount: (item, metric = 'cpu') => Number(item?.[metric === 'rss' ? 'rssSamples' : 'cpuSamples'] || 0),
+    debugGraphServiceMemoryValue: item => Number(item?.rssSamples || 0) > 0 ? Number(item.rssTotalBytes || 0) / Number(item.rssSamples) : 0,
     debugGraphVisibleServiceLoadItems: buckets => [...(buckets[0]?.services || [])].map(key => [key, {label: key, cpuSamples: 1}]),
   };
   vm.runInNewContext(`
@@ -4719,6 +5217,62 @@ test('Daemons keep unique stable color and line-pattern identities beyond nine s
   assert.equal(new Set(Object.values(fullIdentities).slice(0, 7).map(identity => identity.split('|')[0])).size, 7, 'the first seven visible daemons each receive a different primary color');
   for (const key of serviceKeys.slice(1)) {
     assert.equal(withoutFirstIdentities[key], fullIdentities[key], `${key} keeps its identity when another daemon disappears`);
+  }
+});
+
+test('Daemon memory uses the System memory palette before using fill patterns for repeats', () => {
+  const visualSource = sourceFunction('debugGraphStablePaletteIndex', 'debugGraphSelectedModelTokenBucketValue');
+  const seriesSource = sourceFunction('debugGraphServiceLoadSeriesDefs', 'debugGraphDisplayHoldOutage');
+  const patternSource = sourceFunction('debugGraphAreaPatternHtml', 'debugGraphServiceLoadPatternDefinitionsHtml');
+  const serviceKeys = Array.from({length: 8}, (_unused, index) => `process-${index}`);
+  const context = {
+    Number,
+    String,
+    Map,
+    Set,
+    result: null,
+    jsDebugGraphAgentTokenColors: ['blue', 'orange', 'magenta', 'gold', 'green', 'red', 'violet'],
+    jsDebugGraphCpuProcessAreaColors: ['cyan', 'orange', 'magenta', 'turquoise'],
+    jsDebugGraphServiceLoadLinePatterns: ['solid', 'dash', 'dot', 'dash-dot', 'long-dash', 'dense-dot', 'long-short'],
+    jsDebugGraphDisplayHoldExpiryMs: {tenSecondGauge: 10000},
+    debugGraphStablePaletteIndex: (_key, count) => count - 1,
+    debugGraphServiceLoadEffectiveMode: () => 'avg',
+    debugGraphServiceLoadValue: () => 1,
+    debugGraphServiceLoadMetric: group => group?.serviceMetric === 'rss' ? 'rss' : 'cpu',
+    debugGraphServiceLoadSampleCount: (item, metric = 'cpu') => Number(item?.[metric === 'rss' ? 'rssSamples' : 'cpuSamples'] || 0),
+    debugGraphServiceMemoryValue: item => Number(item?.rssSamples || 0) > 0 ? Number(item.rssTotalBytes || 0) / Number(item.rssSamples) : 0,
+    debugGraphVisibleServiceLoadItems: buckets => [...(buckets[0]?.services || [])].map(key => [key, {label: key, rssSamples: 1}]),
+  };
+  vm.runInNewContext(`
+    ${visualSource}
+    ${seriesSource}
+    const definitions = debugGraphServiceLoadSeriesDefs([{services: ${JSON.stringify(serviceKeys)}}], {serviceMetric: 'rss'});
+    result = definitions.map(series => ({color: series.color, patternIndex: series.patternIndex}));
+  `, context);
+  const visuals = JSON.parse(JSON.stringify(context.result));
+  assert.deepEqual(visuals.slice(0, 7), [
+    {color: 'blue', patternIndex: 0},
+    {color: 'orange', patternIndex: 0},
+    {color: 'magenta', patternIndex: 0},
+    {color: 'gold', patternIndex: 0},
+    {color: 'green', patternIndex: 0},
+    {color: 'red', patternIndex: 0},
+    {color: 'violet', patternIndex: 0},
+  ]);
+  assert.equal(visuals[7].color, visuals[0].color, 'the eighth process reuses the first palette color');
+  assert.notEqual(visuals[7].patternIndex, visuals[0].patternIndex, 'the repeated color gets a different fill pattern');
+  assert.equal(new Set(visuals.map(item => `${item.color}|${item.patternIndex}`)).size, visuals.length, 'every displayed memory process keeps a distinct combined identity');
+  assert.match(patternSource, /M2 0V8M6 0V8/, 'repeated colors use vertical strokes');
+  assert.match(patternSource, /<circle cx=/, 'the pattern set includes visible dots');
+  assert.doesNotMatch(patternSource, /M0 3H8|M0 2H4|M6 6H10/, 'fill patterns contain no horizontal hatch');
+  const paintContext = {esc: String, result: null};
+  vm.runInNewContext(`${patternSource}
+    result = Array.from({length: 7}, (_, index) => debugGraphAreaPatternHtml('probe-' + index, '#00a8ff', index));
+  `, paintContext);
+  for (const [index, pattern] of [...paintContext.result].entries()) {
+    assert.doesNotMatch(pattern, /opacity=/, 'no translucent pattern background or marks');
+    for (const match of pattern.matchAll(/<path[^>]* d="([^"]+)"/g)) assert.match(match[1], /^[M V0-9.]+$/, 'hatches use only vertical segments');
+    if (index > 0) assert.match(pattern, /<path|<circle/, 'every repeated color has visible infill');
   }
 });
 
@@ -4745,6 +5299,9 @@ test('Daemon load defaults coarse CPU to Max and one shared selector repaints Av
     debugGraphStableServiceLoadVisuals: items => items.map((_item, index) => ({color: `color-${index}`, patternIndex: index})),
     jsDebugGraphServiceLoadLinePatterns: ['solid', 'dash', 'dot'],
     jsDebugGraphDisplayHoldExpiryMs: {tenSecondGauge: 10000},
+    debugGraphServiceLoadMetric: group => group?.serviceMetric === 'rss' ? 'rss' : 'cpu',
+    debugGraphServiceLoadSampleCount: (item, metric = 'cpu') => Number(item?.[metric === 'rss' ? 'rssSamples' : 'cpuSamples'] || 0),
+    debugGraphServiceMemoryValue: item => Number(item?.rssSamples || 0) > 0 ? Number(item.rssTotalBytes || 0) / Number(item.rssSamples) : 0,
   };
   context.bucket = {
     startMs: 0,
@@ -4791,9 +5348,9 @@ test('Daemon load defaults coarse CPU to Max and one shared selector repaints Av
   assert.match(selectedModeRule, /color:\s*var\(--active-control-text\)/, 'Moon White and other bright accents use their contrast foreground');
   assert.match(selectedModeRule, /background:\s*var\(--active-control-bg\)/, 'the selected mode uses the shared active-control fill');
   assert.match(selectedModeRule, /border-color:\s*var\(--active-control-border\)/, 'the selected mode uses the shared active-control border');
-  assert.match(sourceFunction('debugGraphChartHtml', 'debugGraphUsesLogScale'), /group\.key === 'serversLoad' \? debugGraphServiceLoadModeControlsHtml\(buckets\) : displayedSummaryHtml/);
-  assert.match(valueSource, /debugGraphVisibleServiceLoadItems\(buckets\)/, 'range availability shares the renderer visible-service classifier');
-  assert.match(seriesSource, /for \(const \[key, item\] of debugGraphVisibleServiceLoadItems\(buckets\)\)/, 'the renderer consumes the shared visible-service classifier');
+  assert.match(sourceFunction('debugGraphChartHtml', 'debugGraphUsesLogScale'), /group\.key === 'serversLoad' \? debugGraphServiceLoadModeControlsHtml\(buckets, group\) : displayedSummaryHtml/);
+  assert.match(valueSource, /debugGraphVisibleServiceLoadItems\(buckets, group\)/, 'range availability shares the renderer visible-service classifier');
+  assert.match(seriesSource, /for \(const \[key, item\] of debugGraphVisibleServiceLoadItems\(buckets, group\)/, 'the renderer consumes the shared visible-service classifier');
 
   const defaultContext = {
     Number,
@@ -4824,12 +5381,38 @@ test('Daemon load defaults coarse CPU to Max and one shared selector repaints Av
   assert.match(setterSource, /debugRuntimeState\.serviceLoadMode = normalized/);
   assert.match(setterSource, /refreshDebugGraphSurfaces\(\)/, 'mode changes repaint through the shared owner');
   assert.match(handlerSource, /event\.type === 'change' && serviceLoadMode[\s\S]*setDebugGraphServiceLoadMode/);
-  assert.equal(debugRuntimeSource.includes("serviceLoadMode: 'auto'"), true, 'fresh state chooses Avg for fine buckets and Max for coarse CPU buckets');
-  assert.match(debugRuntimeSource, /debugRuntimeState\.serviceLoadMode = normalizedDebugGraphServiceLoadPreference\(saved\.serviceLoadMode\)/);
+  assert.equal(debugRuntimeSource.includes("serviceLoadMode: 'max'"), true, 'fresh state defaults Daemons to Max');
+  assert.match(debugRuntimeSource, /const savedServiceLoadMode = normalizedDebugGraphServiceLoadPreference\(saved\.serviceLoadMode\)/);
+  assert.match(debugRuntimeSource, /debugRuntimeState\.serviceLoadMode = savedServiceLoadMode === 'auto' \? 'max' : savedServiceLoadMode/);
   assert.match(debugRuntimeSource, /serviceLoadMode: debugRuntimeState\.serviceLoadMode/);
   for (const key of ['debug.graph.serviceLoad.mode.avg', 'debug.graph.serviceLoad.mode.max', 'debug.graph.serviceLoad.mode.min']) {
     assert.equal(typeof localeEn[key], 'string', `${key} is localized`);
   }
+});
+
+test('Daemons memory series expose retained service RSS without mixing runtime occupancy', () => {
+  const valueSource = sourceFunction('normalizedDebugGraphServiceLoadMode', 'debugGraphServiceLoadSeriesDefs');
+  const seriesSource = sourceFunction('debugGraphServiceLoadSeriesDefs', 'debugGraphDisplayHoldOutage');
+  const context = {
+    Number,
+    String,
+    Map,
+    result: null,
+    debugRuntimeState: {serviceLoadMode: 'max'},
+    debugGraphStableServiceLoadVisuals: items => items.map((_item, index) => ({color: `color-${index}`, patternIndex: index})),
+    jsDebugGraphServiceLoadLinePatterns: ['solid', 'dash', 'dot'],
+    jsDebugGraphDisplayHoldExpiryMs: {tenSecondGauge: 10000},
+    debugGraphServiceLoadEffectiveMode: () => 'avg',
+    debugGraphServiceLoadMetric: group => group?.serviceMetric === 'rss' ? 'rss' : 'cpu',
+    debugGraphServiceLoadSampleCount: (item, metric = 'cpu') => Number(item?.[metric === 'rss' ? 'rssSamples' : 'cpuSamples'] || 0),
+    debugGraphServiceMemoryValue: item => Number(item?.rssSamples || 0) > 0 ? Number(item.rssTotalBytes || 0) / Number(item.rssSamples) : 0,
+  };
+  context.buckets = [{hostMetrics: {serviceLoad: new Map([
+    ['yolomux-go', {label: 'yolomux-go', cpuSamples: 1, rssTotalBytes: 40 * 1024 * 1024, rssSamples: 1}],
+    ['runtime:stats_lifecycle', {label: 'stats lifecycle', cpuSamples: 1, rssTotalBytes: 1, rssSamples: 1}],
+  ])}}];
+  vm.runInNewContext(`${valueSource}\n${seriesSource}\nconst defs = debugGraphServiceLoadSeriesDefs(buckets, {serviceLoad: true, serviceMetric: 'rss', processOnly: true}); result = defs.map(item => ({key: item.key, value: item.value(buckets[0]), samples: item.sampleCount(buckets[0]), hasData: item.hasData(buckets[0])}));`, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.result)), [{key: 'serviceMemory:yolomux-go', value: 40 * 1024 * 1024, samples: 1, hasData: true}]);
 });
 
 Promise.all(pending).then(() => {

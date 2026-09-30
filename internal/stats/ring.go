@@ -286,6 +286,10 @@ func rawRingBucketString(value any) (string, error) {
 }
 
 func validateRingShape(ctx context.Context, db *sql.DB, requireTriggers bool) error {
+	var version int64
+	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		return err
+	}
 	tableRows, err := db.QueryContext(ctx, "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
 	if err != nil {
 		return err
@@ -315,10 +319,10 @@ func validateRingShape(ctx context.Context, db *sql.DB, requireTriggers bool) er
 			}
 		}
 		if ringTables == 0 {
-			return validateExactTableNames(tableNames, false)
+			return validateExactTableNames(tableNames, false, version)
 		}
 	}
-	if err := validateExactTableNames(tableNames, true); err != nil {
+	if err := validateExactTableNames(tableNames, true, version); err != nil {
 		return err
 	}
 	for table, expected := range ringColumns {

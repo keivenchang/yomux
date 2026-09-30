@@ -146,7 +146,10 @@ func BuildServiceLoadFacts(samples []ServiceLoadSample, context HostFactContext)
 		if strings.TrimSpace(sample.SourceID) == "" {
 			continue
 		}
-		if sample.CPUPercent == nil && sample.RSSBytes == nil {
+		// Python's current service_load contract requires a measured CPU value;
+		// RSS remains nullable alongside it. Do not persist an RSS-only shape
+		// that the shared materializer cannot read.
+		if sample.CPUPercent == nil {
 			continue
 		}
 		if sample.CPUPercent != nil && (!finite(*sample.CPUPercent) || *sample.CPUPercent < 0) {

@@ -12,9 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
-	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 	"unicode"
@@ -56,9 +54,10 @@ type TranscriptSource struct {
 // source. Prefix and file identity make replacement/truncation detectable;
 // usage folds make replay after a crash idempotent.
 type TranscriptScannerState struct {
-	Path   string
-	Device uint64
-	Inode  uint64
+	checkpointRevision int64
+	Path               string
+	Device             uint64
+	Inode              uint64
 	// FileSize and FileModTimeNS are retained with the cursor as cheap source
 	// metadata, but they are not an integrity proof: a same-size rewrite can
 	// preserve a coarse mtime. The scanner therefore still checks the bounded
@@ -112,6 +111,7 @@ type TranscriptScanOptions struct {
 	MaxBytes            int64
 	MaxRecords          int
 	CodexForkRepairOnly bool
+	ForceReset          bool
 }
 
 type TranscriptScanResult struct {
@@ -134,47 +134,17 @@ type TranscriptScanReceipt struct {
 	used   bool
 }
 
-// TranscriptCursorStore journals Claude/Codex scanner state beside the runtime
-// state. A prepared state is never promoted until the corresponding usage
-// append has committed. If the process crashes between those operations, the
-// next owner discards the prepared state and replays the source; SQLite's
-// stable event IDs then deduplicate anything that reached the database.
-type TranscriptCursorStore struct {
-	path                              string
-	sidecarWriter                     func(string, any) error
-	mu                                sync.Mutex
-	current                           map[string]TranscriptScannerState
-	pending                           map[string]TranscriptScannerState
-	pendingTokens                     map[string]string
-	nextSource                        string
-	pendingNextSource                 string
-	pendingNextSourceToken            string
-	nextHistoricalSource              string
-	pendingNextHistoricalSource       string
-	pendingNextHistoricalSourceToken  string
-	liveTranscriptPriorityRuns        int
-	pendingLiveTranscriptPriorityRuns int
-	generation                        uint64
-	diskKnown                         bool
-	diskExists                        bool
-	diskSize                          int64
-	diskMtimeNS                       int64
-	diskDevice                        uint64
-	diskInode                         uint64
-}
+// transcriptCursorDisk is decoded only while importing legacy committed cursors.
 
 type transcriptCursorDisk struct {
 	Version                           int                               `json:"version"`
 	Generation                        uint64                            `json:"generation,omitempty"`
 	States                            map[string]TranscriptScannerState `json:"states"`
 	Pending                           map[string]TranscriptScannerState `json:"pending,omitempty"`
-	PendingTokens                     map[string]string                 `json:"pending_tokens,omitempty"`
 	NextSource                        string                            `json:"next_source,omitempty"`
 	PendingNextSource                 string                            `json:"pending_next_source,omitempty"`
-	PendingNextSourceToken            string                            `json:"pending_next_source_token,omitempty"`
 	NextHistoricalSource              string                            `json:"next_historical_source,omitempty"`
 	PendingNextHistoricalSource       string                            `json:"pending_next_historical_source,omitempty"`
-	PendingNextHistoricalSourceToken  string                            `json:"pending_next_historical_source_token,omitempty"`
 	LiveTranscriptPriorityRuns        int                               `json:"live_transcript_priority_runs,omitempty"`
 	PendingLiveTranscriptPriorityRuns int                               `json:"pending_live_transcript_priority_runs,omitempty"`
 	CodexForkRepair                   codexForkRepairFrontierState      `json:"codex_fork_repair,omitempty"`
@@ -218,15 +188,6 @@ type codexForkRepairDirectoryState struct {
 	PendingNames   []string `json:"pending_names,omitempty"`
 }
 
-type transcriptCursorChange struct {
-	source        TranscriptSource
-	before, after TranscriptScannerState
-}
-
-func NewTranscriptCursorStore(path string) *TranscriptCursorStore {
-	return &TranscriptCursorStore{path: path, sidecarWriter: atomicSidecarWrite, current: make(map[string]TranscriptScannerState), pending: make(map[string]TranscriptScannerState), pendingTokens: make(map[string]string)}
-}
-
 func transcriptCursorKey(source TranscriptSource) string {
 	if source.CodexForkRepairOnly {
 		return "codex-fork-repair\x00" + filepath.Clean(source.Path)
@@ -234,17 +195,17 @@ func transcriptCursorKey(source TranscriptSource) string {
 	return source.Provider + "\x00" + filepath.Clean(source.Path)
 }
 
-func (s *TranscriptCursorStore) readDiskLocked(preferredKeys ...string) (transcriptCursorDisk, error) {
-	info, statErr := os.Stat(s.path)
+func readLegacyTranscriptCursor(path string, preferredKeys ...string) (transcriptCursorDisk, error) {
+	info, statErr := os.Stat(path)
 	if statErr != nil && !os.IsNotExist(statErr) {
 		return transcriptCursorDisk{}, statErr
 	}
 	if statErr == nil && info.Size() > maxLegacyTranscriptCursorSidecarBytes {
 		return transcriptCursorDisk{}, fmt.Errorf("transcript cursor state exceeds its size bound")
 	}
-	data, err := os.ReadFile(s.path)
+	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return transcriptCursorDisk{Version: 2, States: map[string]TranscriptScannerState{}, Pending: map[string]TranscriptScannerState{}, PendingTokens: map[string]string{}}, nil
+		return transcriptCursorDisk{Version: 2, States: map[string]TranscriptScannerState{}, Pending: map[string]TranscriptScannerState{}}, nil
 	}
 	if err != nil {
 		return transcriptCursorDisk{}, err
@@ -253,6 +214,7 @@ func (s *TranscriptCursorStore) readDiskLocked(preferredKeys ...string) (transcr
 	if err := json.Unmarshal(data, &disk); err != nil || (disk.Version != 0 && disk.Version != 1 && disk.Version != 2) {
 		return transcriptCursorDisk{}, fmt.Errorf("transcript cursor state is malformed")
 	}
+	disk.Pending = nil
 	if disk.Version < 2 {
 		// Older writers bounded serialized bytes but did not bound retained
 		// cursor count. Prune retired committed sources before enforcing the v2
@@ -269,20 +231,11 @@ func (s *TranscriptCursorStore) readDiskLocked(preferredKeys ...string) (transcr
 		}
 		disk.States[key] = state
 	}
-	for key, state := range disk.Pending {
-		if err := decodeTranscriptCursorSamples(&state, &remainingSampleBytes); err != nil {
-			return transcriptCursorDisk{}, err
-		}
-		disk.Pending[key] = state
-	}
-	if disk.LiveTranscriptPriorityRuns < 0 || disk.LiveTranscriptPriorityRuns > maxConsecutiveLiveTranscriptPriorityRuns || disk.PendingLiveTranscriptPriorityRuns < 0 || disk.PendingLiveTranscriptPriorityRuns > maxConsecutiveLiveTranscriptPriorityRuns {
+	if disk.LiveTranscriptPriorityRuns < 0 || disk.LiveTranscriptPriorityRuns > maxConsecutiveLiveTranscriptPriorityRuns {
 		return transcriptCursorDisk{}, fmt.Errorf("transcript cursor priority schedule is malformed")
 	}
 	if disk.States == nil {
 		disk.States = make(map[string]TranscriptScannerState)
-	}
-	if disk.PendingTokens == nil {
-		disk.PendingTokens = make(map[string]string)
 	}
 	if disk.CodexForkRepair.Roots == nil {
 		disk.CodexForkRepair.Roots = make(map[string]codexForkRepairCatalogState)
@@ -293,13 +246,6 @@ func (s *TranscriptCursorStore) readDiskLocked(preferredKeys ...string) (transcr
 	disk.CodexForkRepairCompletedRoots, err = mergeCodexForkRepairRootIDs(disk.CodexForkRepairCompletedRoots, nil)
 	if err != nil {
 		return transcriptCursorDisk{}, err
-	}
-	if disk.Version < 2 {
-		disk.Version = 2
-		disk.Generation++
-		if err := s.writeDiskLocked(disk, preferredKeys...); err != nil {
-			return transcriptCursorDisk{}, fmt.Errorf("compact legacy transcript cursor state: %w", err)
-		}
 	}
 	return disk, nil
 }
@@ -377,220 +323,6 @@ func validateCodexForkRepairDirectory(root string, directory *codexForkRepairDir
 	return nil
 }
 
-func transcriptCursorSignature(path string) (exists bool, size, mtimeNS int64, device, inode uint64, err error) {
-	info, statErr := os.Stat(path)
-	if os.IsNotExist(statErr) {
-		return false, 0, 0, 0, 0, nil
-	}
-	if statErr != nil {
-		return false, 0, 0, 0, 0, statErr
-	}
-	device, inode = fileIdentity(info)
-	return true, info.Size(), info.ModTime().UnixNano(), device, inode, nil
-}
-
-func (s *TranscriptCursorStore) rememberDiskSignatureLocked() error {
-	exists, size, mtimeNS, device, inode, err := transcriptCursorSignature(s.path)
-	if err != nil {
-		return err
-	}
-	s.diskKnown, s.diskExists, s.diskSize, s.diskMtimeNS = true, exists, size, mtimeNS
-	s.diskDevice, s.diskInode = device, inode
-	return nil
-}
-
-func (s *TranscriptCursorStore) State(source TranscriptSource) (TranscriptScannerState, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var result TranscriptScannerState
-	if s.diskKnown && len(s.pending) == 0 {
-		exists, size, mtimeNS, device, inode, err := transcriptCursorSignature(s.path)
-		if err != nil {
-			return result, err
-		}
-		if exists == s.diskExists && size == s.diskSize && mtimeNS == s.diskMtimeNS && device == s.diskDevice && inode == s.diskInode {
-			return cloneTranscriptState(s.current[transcriptCursorKey(source)]), nil
-		}
-	}
-	err := withSidecarLock(s.path, func() error {
-		preferredKey := transcriptCursorKey(source)
-		disk, err := s.readDiskLocked(preferredKey)
-		if err != nil {
-			return err
-		}
-		if (len(disk.Pending) > 0 || disk.PendingNextSourceToken != "" || disk.PendingNextHistoricalSourceToken != "") && len(s.pending) == 0 && s.pendingNextSourceToken == "" && s.pendingNextHistoricalSourceToken == "" {
-			cleanGeneration := disk.Generation + 1
-			disk.Generation = cleanGeneration
-			disk.Pending, disk.PendingTokens = nil, nil
-			disk.PendingNextSource, disk.PendingNextSourceToken = "", ""
-			disk.PendingNextHistoricalSource, disk.PendingNextHistoricalSourceToken = "", ""
-			disk.PendingLiveTranscriptPriorityRuns = 0
-			if err := s.writeDiskLocked(disk, preferredKey); err != nil {
-				return err
-			}
-		}
-		s.current, s.generation = disk.States, disk.Generation
-		s.nextSource, s.nextHistoricalSource = disk.NextSource, disk.NextHistoricalSource
-		s.liveTranscriptPriorityRuns = disk.LiveTranscriptPriorityRuns
-		// Keep pending operations owned by this store instance. A collector can
-		// prepare one changed source, inspect another unchanged source, and then
-		// commit all receipts together. Clearing the local token map during that
-		// second State call would make the durable prepare impossible to commit.
-		if len(s.pending) == 0 {
-			s.pending, s.pendingTokens = make(map[string]TranscriptScannerState), make(map[string]string)
-		}
-		result = cloneTranscriptState(disk.States[transcriptCursorKey(source)])
-		return s.rememberDiskSignatureLocked()
-	})
-	return result, err
-}
-
-func (s *TranscriptCursorStore) Schedule() (transcriptCursorSchedule, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var schedule transcriptCursorSchedule
-	err := withSidecarLock(s.path, func() error {
-		disk, err := s.readDiskLocked()
-		if err != nil {
-			return err
-		}
-		if (len(disk.Pending) > 0 || disk.PendingNextSourceToken != "" || disk.PendingNextHistoricalSourceToken != "") && len(s.pending) == 0 && s.pendingNextSourceToken == "" && s.pendingNextHistoricalSourceToken == "" {
-			disk.Generation++
-			disk.Pending, disk.PendingTokens = nil, nil
-			disk.PendingNextSource, disk.PendingNextSourceToken = "", ""
-			disk.PendingNextHistoricalSource, disk.PendingNextHistoricalSourceToken = "", ""
-			disk.PendingLiveTranscriptPriorityRuns = 0
-			if err := s.writeDiskLocked(disk); err != nil {
-				return err
-			}
-		}
-		s.current, s.generation = disk.States, disk.Generation
-		s.nextSource, s.nextHistoricalSource = disk.NextSource, disk.NextHistoricalSource
-		s.liveTranscriptPriorityRuns = disk.LiveTranscriptPriorityRuns
-		schedule = transcriptCursorSchedule{
-			NextSource: disk.NextSource, NextHistoricalSource: disk.NextHistoricalSource,
-			LiveTranscriptPriorityRuns: disk.LiveTranscriptPriorityRuns,
-		}
-		return s.rememberDiskSignatureLocked()
-	})
-	return schedule, err
-}
-
-func (s *TranscriptCursorStore) NextSource() (string, error) {
-	schedule, err := s.Schedule()
-	return schedule.NextSource, err
-}
-
-func (s *TranscriptCursorStore) NextHistoricalSource() (string, error) {
-	schedule, err := s.Schedule()
-	return schedule.NextHistoricalSource, err
-}
-
-func (s *TranscriptCursorStore) CodexForkRepairFrontier() (codexForkRepairFrontierState, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var frontier codexForkRepairFrontierState
-	err := withSidecarLock(s.path, func() error {
-		disk, err := s.readDiskLocked()
-		if err != nil {
-			return err
-		}
-		frontier = cloneCodexForkRepairFrontier(disk.CodexForkRepair)
-		return s.rememberDiskSignatureLocked()
-	})
-	return frontier, err
-}
-
-func (s *TranscriptCursorStore) SaveCodexForkRepairFrontier(frontier codexForkRepairFrontierState) error {
-	if err := validateCodexForkRepairFrontier(frontier); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return withSidecarLock(s.path, func() error {
-		disk, err := s.readDiskLocked()
-		if err != nil {
-			return err
-		}
-		disk.Version = 1
-		disk.Generation++
-		disk.CodexForkRepair = cloneCodexForkRepairFrontier(frontier)
-		if err := s.writeDiskLocked(disk); err != nil {
-			return err
-		}
-		return s.rememberDiskSignatureLocked()
-	})
-}
-
-func (s *TranscriptCursorStore) writeDiskLocked(disk transcriptCursorDisk, preferredKeys ...string) error {
-	pruneTranscriptCursorStates(&disk, preferredKeys...)
-	if len(disk.States)+len(disk.Pending) > maxTranscriptCursorStates {
-		return fmt.Errorf("transcript cursor state exceeds its entry bound")
-	}
-	if transcriptCursorSampleBytes(&disk) > maxTranscriptCursorSampleBytes {
-		return fmt.Errorf("transcript cursor aggregate sample size exceeds its bound")
-	}
-	disk = cloneTranscriptCursorDisk(disk)
-	disk.Version = 2
-	for key, state := range disk.States {
-		if err := encodeTranscriptCursorSamples(&state); err != nil {
-			return err
-		}
-		disk.States[key] = state
-	}
-	for key, state := range disk.Pending {
-		if err := encodeTranscriptCursorSamples(&state); err != nil {
-			return err
-		}
-		disk.Pending[key] = state
-	}
-	data, err := json.Marshal(disk)
-	if err != nil {
-		return err
-	}
-	if len(data) > maxTranscriptCursorSidecarBytes {
-		return fmt.Errorf("transcript cursor state exceeds its size bound")
-	}
-	return s.sidecarWriter(s.path, disk)
-}
-
-func cloneTranscriptCursorDisk(disk transcriptCursorDisk) transcriptCursorDisk {
-	cloned := disk
-	cloned.States = make(map[string]TranscriptScannerState, len(disk.States))
-	for key, state := range disk.States {
-		cloned.States[key] = cloneTranscriptState(state)
-	}
-	cloned.Pending = make(map[string]TranscriptScannerState, len(disk.Pending))
-	for key, state := range disk.Pending {
-		cloned.Pending[key] = cloneTranscriptState(state)
-	}
-	cloned.PendingTokens = make(map[string]string, len(disk.PendingTokens))
-	for key, token := range disk.PendingTokens {
-		cloned.PendingTokens[key] = token
-	}
-	return cloned
-}
-
-func encodeTranscriptCursorSamples(state *TranscriptScannerState) error {
-	if len(state.Prefix) > 0 {
-		compressed, err := gzipTranscriptCursorSample(state.Prefix)
-		if err != nil {
-			return err
-		}
-		state.PrefixCompressed = compressed
-		state.Prefix = nil
-	}
-	if len(state.ParsedTail) > 0 {
-		compressed, err := gzipTranscriptCursorSample(state.ParsedTail)
-		if err != nil {
-			return err
-		}
-		state.ParsedTailCompressed = compressed
-		state.ParsedTail = nil
-	}
-	return nil
-}
-
 func decodeTranscriptCursorSamples(state *TranscriptScannerState, remainingBytes *int64) error {
 	if len(state.Prefix) > transcriptPrefixBytes || len(state.ParsedTail) > transcriptParsedTailBytes {
 		return fmt.Errorf("transcript cursor raw sample exceeds its per-field bound")
@@ -618,18 +350,6 @@ func decodeTranscriptCursorSamples(state *TranscriptScannerState, remainingBytes
 		*remainingBytes -= int64(len(decoded))
 	}
 	return nil
-}
-
-func gzipTranscriptCursorSample(sample []byte) ([]byte, error) {
-	var buffer bytes.Buffer
-	writer := gzip.NewWriter(&buffer)
-	if _, err := writer.Write(sample); err != nil {
-		return nil, err
-	}
-	if err := writer.Close(); err != nil {
-		return nil, err
-	}
-	return buffer.Bytes(), nil
 }
 
 func gunzipTranscriptCursorSample(sample []byte, maxBytes int, remainingBytes int64) ([]byte, error) {
@@ -698,404 +418,13 @@ func pruneTranscriptCursorStates(disk *transcriptCursorDisk, preferredKeys ...st
 	}
 }
 
-func transcriptCursorSampleBytes(disk *transcriptCursorDisk) int64 {
-	var total int64
-	for _, states := range []map[string]TranscriptScannerState{disk.States, disk.Pending} {
-		for _, state := range states {
-			total += int64(len(state.Prefix) + len(state.ParsedTail))
-		}
-	}
-	return total
-}
-
-func cloneCodexForkRepairFrontier(frontier codexForkRepairFrontierState) codexForkRepairFrontierState {
-	copyOf := codexForkRepairFrontierState{
-		NextRoot: frontier.NextRoot, NextSource: frontier.NextSource,
-		Roots: make(map[string]codexForkRepairCatalogState, len(frontier.Roots)),
-	}
-	for rootID, catalog := range frontier.Roots {
-		cloned := catalog
-		cloned.PendingDirs = append([]string(nil), catalog.PendingDirs...)
-		cloned.PendingFiles = append([]string(nil), catalog.PendingFiles...)
-		cloned.BlockedFiles = append([]string(nil), catalog.BlockedFiles...)
-		cloned.Sources = append([]TranscriptSource(nil), catalog.Sources...)
-		cloned.PausedDirectories = make([]codexForkRepairDirectoryState, len(catalog.PausedDirectories))
-		for index, directory := range catalog.PausedDirectories {
-			cloned.PausedDirectories[index] = cloneCodexForkRepairDirectory(directory)
-		}
-		if catalog.Directory != nil {
-			directory := cloneCodexForkRepairDirectory(*catalog.Directory)
-			cloned.Directory = &directory
-		}
-		copyOf.Roots[rootID] = cloned
-	}
-	return copyOf
-}
-
 func cloneCodexForkRepairDirectory(directory codexForkRepairDirectoryState) codexForkRepairDirectoryState {
 	directory.PendingNames = append([]string(nil), directory.PendingNames...)
 	return directory
 }
 
-func (s *TranscriptCursorStore) Prepare(source TranscriptSource, before, after TranscriptScannerState) error {
-	return s.PrepareBatch([]transcriptCursorChange{{source: source, before: before, after: after}})
-}
-
-// PrepareBatch journals several scanner advances with one sidecar lock and
-// one atomic write. A token collection pass commonly advances many files; the
-// old per-file transaction rewrote the complete JSON sidecar twice per file.
-func (s *TranscriptCursorStore) PrepareBatch(changes []transcriptCursorChange) error {
-	return s.prepareBatch(changes, nil, nil, nil)
-}
-
-func (s *TranscriptCursorStore) PrepareBatchWithNextSource(changes []transcriptCursorChange, nextSource string) error {
-	return s.prepareBatch(changes, &nextSource, nil, nil)
-}
-
-func (s *TranscriptCursorStore) PrepareBatchWithSchedules(changes []transcriptCursorChange, nextSource, nextHistoricalSource string, liveTranscriptPriorityRuns int) error {
-	return s.prepareBatch(changes, &nextSource, &nextHistoricalSource, &liveTranscriptPriorityRuns)
-}
-
-func (s *TranscriptCursorStore) PrepareBatchWithHistoricalSchedule(changes []transcriptCursorChange, nextHistoricalSource string, liveTranscriptPriorityRuns int) error {
-	return s.prepareBatch(changes, nil, &nextHistoricalSource, &liveTranscriptPriorityRuns)
-}
-
-func (s *TranscriptCursorStore) prepareBatch(changes []transcriptCursorChange, nextSource, nextHistoricalSource *string, liveTranscriptPriorityRuns *int) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if (nextHistoricalSource == nil) != (liveTranscriptPriorityRuns == nil) {
-		return fmt.Errorf("historical transcript schedule and priority streak must be prepared together")
-	}
-	if liveTranscriptPriorityRuns != nil && (*liveTranscriptPriorityRuns < 0 || *liveTranscriptPriorityRuns > maxConsecutiveLiveTranscriptPriorityRuns) {
-		return fmt.Errorf("transcript live-priority streak exceeds its bound")
-	}
-	filtered := make([]transcriptCursorChange, 0, len(changes))
-	seen := make(map[string]struct{}, len(changes))
-	for _, change := range changes {
-		if reflect.DeepEqual(change.before, change.after) {
-			continue
-		}
-		key := transcriptCursorKey(change.source)
-		if _, exists := seen[key]; exists {
-			return fmt.Errorf("transcript cursor batch contains duplicate source")
-		}
-		seen[key] = struct{}{}
-		filtered = append(filtered, change)
-	}
-	if len(filtered) == 0 && nextSource == nil && nextHistoricalSource == nil {
-		return nil
-	}
-	preferredKeys := make([]string, 0, len(filtered))
-	for _, change := range filtered {
-		preferredKeys = append(preferredKeys, transcriptCursorKey(change.source))
-	}
-	return withSidecarLock(s.path, func() error {
-		disk, err := s.readDiskLocked(preferredKeys...)
-		if err != nil {
-			return err
-		}
-		pending := make(map[string]TranscriptScannerState, len(disk.Pending)+len(filtered))
-		for key, value := range disk.Pending {
-			pending[key] = value
-		}
-		pendingTokens := make(map[string]string, len(disk.PendingTokens)+len(filtered))
-		for key, value := range disk.PendingTokens {
-			pendingTokens[key] = value
-		}
-		for index, change := range filtered {
-			key := transcriptCursorKey(change.source)
-			if _, exists := pending[key]; exists {
-				return fmt.Errorf("transcript cursor state is pending")
-			}
-			current := disk.States[key]
-			if !reflect.DeepEqual(cloneTranscriptState(current), cloneTranscriptState(change.before)) {
-				return fmt.Errorf("transcript cursor state is stale")
-			}
-			token := strconv.FormatUint(disk.Generation+1, 10) + "-" + strconv.Itoa(index) + "-" + strconv.FormatInt(time.Now().UnixNano(), 10)
-			pending[key] = cloneTranscriptState(change.after)
-			pendingTokens[key] = token
-		}
-		staged := disk
-		staged.Version = 1
-		staged.Generation = disk.Generation + 1
-		staged.Pending = pending
-		staged.PendingTokens = pendingTokens
-		if nextSource != nil {
-			if disk.PendingNextSourceToken != "" {
-				return fmt.Errorf("transcript source schedule is pending")
-			}
-			token := strconv.FormatUint(disk.Generation+1, 10) + "-schedule-" + strconv.FormatInt(time.Now().UnixNano(), 10)
-			staged.PendingNextSource = *nextSource
-			staged.PendingNextSourceToken = token
-		}
-		if nextHistoricalSource != nil {
-			if disk.PendingNextHistoricalSourceToken != "" {
-				return fmt.Errorf("historical transcript source schedule is pending")
-			}
-			token := strconv.FormatUint(disk.Generation+1, 10) + "-historical-schedule-" + strconv.FormatInt(time.Now().UnixNano(), 10)
-			staged.PendingNextHistoricalSource = *nextHistoricalSource
-			staged.PendingNextHistoricalSourceToken = token
-			staged.PendingLiveTranscriptPriorityRuns = *liveTranscriptPriorityRuns
-		}
-		if err := s.writeDiskLocked(staged, preferredKeys...); err != nil {
-			return err
-		}
-		if nextSource != nil {
-			s.pendingNextSource, s.pendingNextSourceToken = staged.PendingNextSource, staged.PendingNextSourceToken
-		}
-		if nextHistoricalSource != nil {
-			s.pendingNextHistoricalSource, s.pendingNextHistoricalSourceToken = staged.PendingNextHistoricalSource, staged.PendingNextHistoricalSourceToken
-			s.pendingLiveTranscriptPriorityRuns = staged.PendingLiveTranscriptPriorityRuns
-		}
-		s.current, s.generation = disk.States, staged.Generation
-		s.pending, s.pendingTokens = pending, pendingTokens
-		return s.rememberDiskSignatureLocked()
-	})
-}
-
-func (s *TranscriptCursorStore) Commit(source TranscriptSource, expected TranscriptScannerState) error {
-	return s.CommitBatch([]transcriptCursorChange{{source: source, after: expected}})
-}
-
-// CommitBatch promotes several prepared scanner states with one sidecar
-// write. Validation happens for the complete batch before any durable state is
-// changed, preserving the single-source commit/rollback semantics.
-func (s *TranscriptCursorStore) CommitBatch(changes []transcriptCursorChange) error {
-	return s.CommitBatchWithCodexForkRepairRoots(changes, nil)
-}
-
-// CommitBatchWithCodexForkRepairRoots promotes scanner states and records
-// completed repair roots in one atomic cursor-sidecar replacement. Keeping the
-// completion marker beside its cursors prevents a crash or write failure from
-// making a root appear complete while its cursor promotion was not durable.
-func (s *TranscriptCursorStore) CommitBatchWithCodexForkRepairRoots(changes []transcriptCursorChange, rootIDs []string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(changes) == 0 && s.pendingNextSourceToken == "" && s.pendingNextHistoricalSourceToken == "" && len(rootIDs) == 0 {
-		return nil
-	}
-	preferredKeys := make([]string, 0, len(changes))
-	for _, change := range changes {
-		preferredKeys = append(preferredKeys, transcriptCursorKey(change.source))
-	}
-	return withSidecarLock(s.path, func() error {
-		disk, err := s.readDiskLocked(preferredKeys...)
-		if err != nil {
-			return err
-		}
-		completedRoots, err := mergeCodexForkRepairRootIDs(disk.CodexForkRepairCompletedRoots, rootIDs)
-		if err != nil {
-			return err
-		}
-		if s.pendingNextSourceToken != "" && disk.PendingNextSourceToken != s.pendingNextSourceToken {
-			return fmt.Errorf("transcript source schedule is stale")
-		}
-		if s.pendingNextHistoricalSourceToken != "" && disk.PendingNextHistoricalSourceToken != s.pendingNextHistoricalSourceToken {
-			return fmt.Errorf("historical transcript source schedule is stale")
-		}
-		seen := make(map[string]struct{}, len(changes))
-		for _, change := range changes {
-			key := transcriptCursorKey(change.source)
-			if _, exists := seen[key]; exists {
-				return fmt.Errorf("transcript cursor batch contains duplicate source")
-			}
-			seen[key] = struct{}{}
-			token := s.pendingTokens[key]
-			state, ok := disk.Pending[key]
-			if !ok || token == "" || disk.PendingTokens[key] != token {
-				return fmt.Errorf("transcript cursor state is stale")
-			}
-			if !reflect.DeepEqual(state, cloneTranscriptState(change.after)) {
-				return fmt.Errorf("transcript cursor state is stale")
-			}
-		}
-		states := make(map[string]TranscriptScannerState, len(disk.States)+len(changes))
-		for k, v := range disk.States {
-			states[k] = v
-		}
-		pending := make(map[string]TranscriptScannerState, len(disk.Pending))
-		pendingTokens := make(map[string]string, len(disk.PendingTokens))
-		for k, v := range disk.Pending {
-			pending[k] = v
-		}
-		for k, v := range disk.PendingTokens {
-			pendingTokens[k] = v
-		}
-		for _, change := range changes {
-			key := transcriptCursorKey(change.source)
-			states[key] = cloneTranscriptState(change.after)
-			delete(pending, key)
-			delete(pendingTokens, key)
-		}
-		nextSource := disk.NextSource
-		if s.pendingNextSourceToken != "" {
-			nextSource = s.pendingNextSource
-		}
-		nextHistoricalSource := disk.NextHistoricalSource
-		liveTranscriptPriorityRuns := disk.LiveTranscriptPriorityRuns
-		if s.pendingNextHistoricalSourceToken != "" {
-			nextHistoricalSource = s.pendingNextHistoricalSource
-			liveTranscriptPriorityRuns = s.pendingLiveTranscriptPriorityRuns
-		}
-		disk.Version = 1
-		disk.Generation++
-		disk.States, disk.Pending, disk.PendingTokens, disk.NextSource, disk.NextHistoricalSource = states, pending, pendingTokens, nextSource, nextHistoricalSource
-		disk.LiveTranscriptPriorityRuns = liveTranscriptPriorityRuns
-		disk.CodexForkRepairCompletedRoots = completedRoots
-		if s.pendingNextSourceToken != "" {
-			disk.PendingNextSource, disk.PendingNextSourceToken = "", ""
-		}
-		if s.pendingNextHistoricalSourceToken != "" {
-			disk.PendingNextHistoricalSource, disk.PendingNextHistoricalSourceToken = "", ""
-			disk.PendingLiveTranscriptPriorityRuns = 0
-		}
-		if err := s.writeDiskLocked(disk, preferredKeys...); err != nil {
-			return err
-		}
-		s.current, s.generation = states, disk.Generation
-		s.pending, s.pendingTokens = pending, pendingTokens
-		s.nextSource, s.pendingNextSource, s.pendingNextSourceToken = nextSource, "", ""
-		s.nextHistoricalSource, s.pendingNextHistoricalSource, s.pendingNextHistoricalSourceToken = nextHistoricalSource, "", ""
-		s.liveTranscriptPriorityRuns, s.pendingLiveTranscriptPriorityRuns = liveTranscriptPriorityRuns, 0
-		return s.rememberDiskSignatureLocked()
-	})
-}
-
-func (s *TranscriptCursorStore) Rollback(source TranscriptSource) error {
-	return s.RollbackBatch([]transcriptCursorChange{{source: source}})
-}
-
-func (s *TranscriptCursorStore) RollbackBatch(changes []transcriptCursorChange) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(changes) == 0 && s.pendingNextSourceToken == "" && s.pendingNextHistoricalSourceToken == "" {
-		return nil
-	}
-	preferredKeys := make([]string, 0, len(changes))
-	for _, change := range changes {
-		preferredKeys = append(preferredKeys, transcriptCursorKey(change.source))
-	}
-	err := withSidecarLock(s.path, func() error {
-		disk, err := s.readDiskLocked(preferredKeys...)
-		if err != nil {
-			return err
-		}
-		for _, change := range changes {
-			key := transcriptCursorKey(change.source)
-			localToken := s.pendingTokens[key]
-			diskToken, diskHasToken := disk.PendingTokens[key]
-			_, diskHasState := disk.Pending[key]
-			if localToken == "" {
-				if diskHasToken || diskHasState {
-					return fmt.Errorf("transcript cursor state is stale")
-				}
-				continue
-			}
-			if !diskHasToken || !diskHasState || diskToken != localToken {
-				return fmt.Errorf("transcript cursor state is stale")
-			}
-		}
-		if s.pendingNextSourceToken != "" && disk.PendingNextSourceToken != s.pendingNextSourceToken {
-			return fmt.Errorf("transcript source schedule is stale")
-		}
-		if s.pendingNextHistoricalSourceToken != "" && disk.PendingNextHistoricalSourceToken != s.pendingNextHistoricalSourceToken {
-			return fmt.Errorf("historical transcript source schedule is stale")
-		}
-		for _, change := range changes {
-			key := transcriptCursorKey(change.source)
-			delete(disk.Pending, key)
-			delete(disk.PendingTokens, key)
-		}
-		if s.pendingNextSourceToken != "" {
-			disk.PendingNextSource, disk.PendingNextSourceToken = "", ""
-		}
-		if s.pendingNextHistoricalSourceToken != "" {
-			disk.PendingNextHistoricalSource, disk.PendingNextHistoricalSourceToken = "", ""
-			disk.PendingLiveTranscriptPriorityRuns = 0
-		}
-		disk.Version = 1
-		disk.Generation++
-		if err := s.writeDiskLocked(disk, preferredKeys...); err != nil {
-			return err
-		}
-		for _, change := range changes {
-			key := transcriptCursorKey(change.source)
-			delete(s.pending, key)
-			delete(s.pendingTokens, key)
-		}
-		s.pendingNextSource, s.pendingNextSourceToken = "", ""
-		s.pendingNextHistoricalSource, s.pendingNextHistoricalSourceToken = "", ""
-		s.pendingLiveTranscriptPriorityRuns = 0
-		return s.rememberDiskSignatureLocked()
-	})
-	if err != nil {
-		// The durable pending journal remains authoritative and can be repaired
-		// or replayed by State once the sidecar is readable again. Do not retain a
-		// failed local token that would block every later scan in this process.
-		s.diskKnown = false
-		for _, change := range changes {
-			key := transcriptCursorKey(change.source)
-			delete(s.pending, key)
-			delete(s.pendingTokens, key)
-		}
-		s.pendingNextSource, s.pendingNextSourceToken = "", ""
-		s.pendingNextHistoricalSource, s.pendingNextHistoricalSourceToken = "", ""
-		s.pendingLiveTranscriptPriorityRuns = 0
-	}
-	return err
-}
-
 func codexForkRepairMarkerPath(cursorPath string) string {
 	return cursorPath + ".codex-fork-repair-v1.done"
-}
-
-func (s *TranscriptCursorStore) CompletedCodexForkRepairRoots() (map[string]struct{}, error) {
-	completed := make(map[string]struct{})
-	s.mu.Lock()
-	err := withSidecarLock(s.path, func() error {
-		disk, err := s.readDiskLocked()
-		if err != nil {
-			return err
-		}
-		for _, rootID := range disk.CodexForkRepairCompletedRoots {
-			completed[rootID] = struct{}{}
-		}
-		return s.rememberDiskSignatureLocked()
-	})
-	s.mu.Unlock()
-	if err != nil {
-		return nil, err
-	}
-	// Read the pre-transaction marker for compatibility with sidecars created
-	// before completion roots moved into the cursor sidecar.
-	path := codexForkRepairMarkerPath(s.path)
-	err = withSidecarLock(path, func() error {
-		data, err := os.ReadFile(path)
-		if os.IsNotExist(err) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		var marker struct {
-			Version        int      `json:"version"`
-			CompletedRoots []string `json:"completed_roots"`
-		}
-		if err := json.Unmarshal(data, &marker); err != nil || marker.Version != 1 {
-			return fmt.Errorf("Codex fork repair marker is malformed")
-		}
-		for _, rootID := range marker.CompletedRoots {
-			if len(rootID) == 64 {
-				completed[rootID] = struct{}{}
-			}
-		}
-		return nil
-	})
-	return completed, err
-}
-
-func (s *TranscriptCursorStore) CommitCodexForkRepairRoots(rootIDs []string) error {
-	return s.CommitBatchWithCodexForkRepairRoots(nil, rootIDs)
 }
 
 func mergeCodexForkRepairRootIDs(existing, additions []string) ([]string, error) {
@@ -1199,7 +528,7 @@ func ScanTranscript(source TranscriptSource, state *TranscriptScannerState, opti
 	fileSize := info.Size()
 	fileModTimeNS := info.ModTime().UnixNano()
 	pendingEnd := after.Offset + int64(len(after.PendingLine))
-	reset := before.Path != "" && (after.Path != before.Path || after.Offset > fileSize || (len(after.PendingLine) > 0 && fileSize < pendingEnd) || identityChanged(after, info))
+	reset := options.ForceReset || (before.Path != "" && (after.Path != before.Path || after.Offset > fileSize || (len(after.PendingLine) > 0 && fileSize < pendingEnd) || identityChanged(after, info)))
 	if reset {
 		resetTranscriptContent(&after)
 	} else if before.Path != "" && !after.UsageCommittedEOFKnown {
@@ -2500,4 +1829,14 @@ func fileIdentity(info os.FileInfo) (uint64, uint64) {
 func identityChanged(state TranscriptScannerState, info os.FileInfo) bool {
 	device, inode := fileIdentity(info)
 	return state.Device != 0 && (state.Device != device || state.Inode != inode)
+}
+
+func transcriptCursorSampleBytes(disk *transcriptCursorDisk) int64 {
+	var total int64
+	for _, states := range []map[string]TranscriptScannerState{disk.States, disk.Pending} {
+		for _, state := range states {
+			total += int64(len(state.Prefix) + len(state.ParsedTail))
+		}
+	}
+	return total
 }

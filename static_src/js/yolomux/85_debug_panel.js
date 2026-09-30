@@ -1526,6 +1526,20 @@ function debugGraphServiceLoadLabel(source) {
     'runtime:host_collector:gpu': 'host GPU collector (runtime occupancy)',
   };
   if (labels[source]) return labels[source];
+  if (source === 'yolomux-go') return 'yolomux-go (legacy process; identity unavailable)';
+  if (source.startsWith('yolomux-go:process:')) {
+    const parts = source.split(':');
+    const pid = Number(parts[2]);
+    const port = Number(parts[3]);
+    const parentPid = Number(parts[4]);
+    let executable = parts[5] || 'yolomux-go';
+    try { executable = decodeURIComponent(executable.replace(/\+/g, ' ')); } catch (_) { /* Preserve malformed historical labels. */ }
+    const name = executable.split('/').pop() || 'yolomux-go';
+    const details = [`PID ${pid}`];
+    if (port > 0) details.push(`port ${port}`);
+    if (parentPid > 0) details.push(`PPID ${parentPid}`);
+    return `${name} (${details.join(', ')})`;
+  }
   if (source.startsWith('yolomux-go:thread:')) {
     return `Go OS thread ${source.slice('yolomux-go:thread:'.length).split(':', 1)[0]}`;
   }
@@ -2722,7 +2736,7 @@ function debugGraphResolvedChartGroup(group, buckets) {
     const goOwnedSample = (buckets || []).some(bucket => {
       for (const [key, item] of bucket?.hostMetrics?.serviceLoad?.entries?.() || []) {
         if (debugGraphServiceLoadSampleCount(item, 'cpu') <= 0) continue;
-        if (String(key).startsWith('runtime:') || key === 'yolomux-go') return true;
+        if (String(key).startsWith('runtime:') || key === 'yolomux-go' || String(key).startsWith('yolomux-go:process:')) return true;
       }
       return false;
     });

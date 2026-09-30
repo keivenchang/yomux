@@ -110,10 +110,10 @@ func TestOpenReadOnlyRejectsMissingTableOrColumn(t *testing.T) {
 
 func TestOpenReadOnlyRejectsNewerSchema(t *testing.T) {
 	fixture := validFixture()
-	fixture.schemaVersion = SchemaVersion + 1
+	fixture.schemaVersion = checkpointSchemaVersion + 1
 	_, err := OpenReadOnly(context.Background(), "copy.sqlite3", func(string) (ReadOnlyDB, error) { return fixture, nil })
 	var tooNew *SchemaTooNewError
-	if !errors.As(err, &tooNew) || tooNew.Found != SchemaVersion+1 || !fixture.closed {
+	if !errors.As(err, &tooNew) || tooNew.Found != checkpointSchemaVersion+1 || !fixture.closed {
 		t.Fatalf("error = %v, closed = %t", err, fixture.closed)
 	}
 }

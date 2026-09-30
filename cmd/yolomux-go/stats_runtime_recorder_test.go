@@ -473,7 +473,7 @@ func TestStatsRuntimeRecorderPersistsGoProcessMetricsThroughReloadedProduct(t *t
 	}
 }
 
-func TestStatsRuntimeRecorderPersistsRSSWhenCPUIsUnavailable(t *testing.T) {
+func TestStatsRuntimeRecorderMarksRSSOnlySampleUnavailable(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "synthetic-rss-only-stats.sqlite3")
 	writer, err := stats.OpenWriter(ctx, path)
@@ -498,11 +498,15 @@ func TestStatsRuntimeRecorderPersistsRSSWhenCPUIsUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(observations) != 1 || observations[0].Payload["rss_bytes"] != rss {
-		t.Fatalf("RSS-only persisted observations = %#v", observations)
+	if len(observations) != 0 {
+		t.Fatalf("RSS-only sample produced a Python-incompatible observation: %#v", observations)
 	}
-	if _, ok := observations[0].Payload["cpu_percent"]; ok {
-		t.Fatalf("RSS-only persistence fabricated CPU: %#v", observations[0].Payload)
+	spans, err := reopened.ReadUnavailableSpans(ctx, 1989, 1992, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spans) != 1 || spans[0].Family != "service_load" || spans[0].Reason != "runtime_sample_unavailable" {
+		t.Fatalf("RSS-only sample unavailable span = %#v", spans)
 	}
 }
 

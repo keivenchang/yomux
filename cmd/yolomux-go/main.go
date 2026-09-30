@@ -88,8 +88,10 @@ type server struct {
 	statsRuntimeRecorder               *statsRuntimeRecorder
 	syntheticHostInputs                bool
 	statsMigration                     map[string]any
+	statsProcessSourceOnce             sync.Once
+	statsProcessSource                 string
 	statsDeltaMu                       sync.Mutex
-	statsDeltaHistory                  map[statsDeltaKey]map[int64]map[string]any
+	statsDeltaRevisions                map[statsDeltaKey]map[int64]int64
 	statsDeltaNextRevision             map[statsDeltaKey]int64
 	statsDemand                        atomic.Int64
 	hostCollector                      *stats.HostCollector
@@ -3012,10 +3014,9 @@ func main() {
 	s.statsService = statsService
 	var statsRefreshGate statsProjectionRefreshGate
 	statsLifecycle := stats.NewLifecycle(statsWriter, stats.LifecycleConfig{Cadence: time.Second,
-		// Cold history is demand-driven for the Go server. Keep a slow eventual
-		// backfill for unrequested products, but do not decode every advertised
-		// resolution on each one-second tick while the operator is using other
-		// panels or the server is only serving health/status traffic.
+		// Prepare a fixed startup horizon eagerly, then resume the ordinary
+		// bounded background cadence. Explicit requests retain priority.
+		StartupProducts:                productKeys,
 		BackgroundBackfillCadence:      30 * time.Second,
 		BackgroundBackfillInitialDelay: 30 * time.Second,
 		Busy: func() bool {

@@ -410,10 +410,10 @@ func TestMemoryWindowDistinguishesCoverageGapFromUnavailableHost(t *testing.T) {
 	}
 }
 
-func TestMaterializerEmitsRSSOnlyServiceLoadWithoutCPU(t *testing.T) {
+func TestMaterializerEmitsServiceRSSAlongsideCPU(t *testing.T) {
 	layer, err := (Materializer{}).Build(MaterializeRequest{Start: 100, End: 160, Resolution: 60}, []Observation{
 		{EventID: "service-rss-only", Family: "service_load", SourceID: "yolomux-go", ObservedAt: 120, EpochID: "service", Payload: map[string]any{
-			"running": true, "rss_bytes": uint64(2048),
+			"running": true, "cpu_percent": float64(0), "rss_bytes": uint64(2048),
 		}},
 	}, []CoverageEpoch{{Family: "service_load", SourceID: "yolomux-go", EpochID: "service", StartedAt: 0, EndedAt: nil, NativeCadenceSeconds: 1}}, nil, nil)
 	if err != nil {
@@ -422,8 +422,8 @@ func TestMaterializerEmitsRSSOnlyServiceLoadWithoutCPU(t *testing.T) {
 	if got := seriesValue(layer.Buckets[0], "service_rss_bytes:yolomux-go"); got != 2048 {
 		t.Fatalf("service RSS = %v", got)
 	}
-	if got := seriesValue(layer.Buckets[0], "service_cpu_percent:yolomux-go"); got != -1 {
-		t.Fatalf("RSS-only observation fabricated service CPU = %v", got)
+	if got := seriesValue(layer.Buckets[0], "service_cpu_percent:yolomux-go"); got != 0 {
+		t.Fatalf("service CPU = %v, want measured zero", got)
 	}
 }
 

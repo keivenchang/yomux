@@ -379,13 +379,6 @@ func validateCurrentFamilyObservation(item Observation) error {
 			return invalid("observation", "payload", "service_load.running must be a boolean")
 		}
 	}
-	if item.Family == "service_load" {
-		_, hasCPU := item.Payload["cpu_percent"]
-		rss, hasRSS := item.Payload["rss_bytes"]
-		if !hasCPU && (!hasRSS || rss == nil) {
-			return invalid("observation", "payload", "service_load requires cpu_percent or non-null rss_bytes")
-		}
-	}
 	for _, name := range []string{"label", "kind"} {
 		if value, ok := item.Payload[name]; ok {
 			if text, valid := value.(string); !valid || strings.TrimSpace(text) == "" {
@@ -438,12 +431,8 @@ func currentFamilyFields(family string) (map[string]bool, map[string]bool) {
 	}
 	requiredFields := map[string][]string{
 		"cpu": {"process_percent", "system_percent"}, "agent_status": {"states"},
-		"gpu": {"util_percent", "memory_used_bytes", "memory_capacity_bytes", "label"},
-		// A service can expose either resource independently: runtime-owner
-		// occupancy is CPU-only, while a process's first sample can be RSS-only
-		// until its counter delta exists. Require at least one measured resource
-		// below instead of fabricating a zero or discarding the other metric.
-		"service_load": {"running"}, "system_memory": {"used_bytes", "capacity_bytes"}, "browser": {"kind"},
+		"gpu":          {"util_percent", "memory_used_bytes", "memory_capacity_bytes", "label"},
+		"service_load": {"running", "cpu_percent"}, "system_memory": {"used_bytes", "capacity_bytes"}, "browser": {"kind"},
 	}
 	names, ok := fields[family]
 	if !ok {

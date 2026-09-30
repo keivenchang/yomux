@@ -10,7 +10,7 @@ import (
 func TestAgentTokenCollectorSyntheticCacheComparison(t *testing.T) {
 	databasePath := copyOpenCodeFixture(t)
 	makeCollector := func(cursorName string) *AgentTokenCollector {
-		return NewAgentTokenCollector(countingTokenWriter{}, realHostCollectorClock{}, AgentTokenCollectorConfig{
+		return NewAgentTokenCollector(newAgentTokenTestWriter(t), realHostCollectorClock{}, AgentTokenCollectorConfig{
 			OpenCodeDatabase: databasePath,
 			OpenCodeInventory: func(context.Context) ([]AgentRecord, []error) {
 				return []AgentRecord{{Kind: "opencode", OpenCodeSession: "ses-1", TmuxSession: "opencode"}}, nil

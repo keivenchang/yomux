@@ -80,6 +80,21 @@ function summarizedHangingShard(closeOnSignal) {
 }
 
 async function runLayoutAsyncSuite() {
+  await testAsync('retired tmux status refreshes do not log expected generation aborts', async () => {
+    const api = loadYolomux('', ['1']);
+    api.setFetchForTest(() => Promise.reject(new DOMException('session generation retired: 1', 'AbortError')));
+
+    await api.refreshTmuxStatusModeAfterSocketOpenForTest('1');
+
+    assert.deepEqual(api.vmConsoleErrorsForTest(), [], 'retiring the session does not emit a browser warning');
+
+    api.setFetchForTest(() => Promise.reject(new Error('status endpoint unavailable')));
+    await api.refreshTmuxStatusModeAfterSocketOpenForTest('1');
+
+    assert.match(api.vmConsoleErrorsForTest()[0], /tmux status read failed/,
+      'non-abort status failures remain visible');
+  });
+
   await testAsync('ordinary foreground session-files fetch applies its accepted payload', async () => {
     const api = loadYolomux('', ['1']);
     const slots = api.emptyLayoutSlots();

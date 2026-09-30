@@ -187,6 +187,7 @@ func truncateAgentTokenEpochID(value string, maxBytes int) string {
 }
 
 type AgentTokenCollectorCounters struct {
+	CheckpointOversized        uint64
 	Cycles                     uint64
 	UsageAccepted              uint64
 	UsageDuplicates            uint64
@@ -224,6 +225,7 @@ type OpenCodePhaseTiming struct {
 }
 
 type agentTokenCounters struct {
+	checkpointOversized                                           atomic.Uint64
 	cycles, usage, usageDuplicates, coverage, unavailable, errors atomic.Uint64
 	appendErrors, metadataErrors                                  atomic.Uint64
 	opencodeInventoryErrors, opencodeInventoryTimeouts            atomic.Uint64
@@ -246,7 +248,7 @@ func (c *agentTokenCounters) snapshot() AgentTokenCollectorCounters {
 		phases[name] = timing
 	}
 	c.opencodePhaseMu.Unlock()
-	return AgentTokenCollectorCounters{
+	return AgentTokenCollectorCounters{CheckpointOversized: c.checkpointOversized.Load(),
 		Cycles: c.cycles.Load(), UsageAccepted: c.usage.Load(), UsageDuplicates: c.usageDuplicates.Load(), CoverageAccepted: c.coverage.Load(),
 		UnavailableAccepted: c.unavailable.Load(), Errors: c.errors.Load(), AppendErrors: c.appendErrors.Load(), MetadataErrors: c.metadataErrors.Load(),
 		OpenCodeInventoryErrors: c.opencodeInventoryErrors.Load(), OpenCodeInventoryTimeouts: c.opencodeInventoryTimeouts.Load(),
@@ -280,6 +282,7 @@ func (c *agentTokenCounters) recordOpenCodePhase(name string, duration time.Dura
 // the token collector. It is deliberately separate from the persisted stats
 // payload so existing browser consumers do not acquire new stream semantics.
 type AgentTokenCollectionSnapshot struct {
+	CheckpointOversized         uint64                           `json:"checkpoint_oversized"`
 	Cycles                      uint64                           `json:"cycles"`
 	LastDurationMS              float64                          `json:"last_duration_ms"`
 	DurationTotalMS             float64                          `json:"duration_total_ms"`
@@ -330,31 +333,13 @@ type agentTokenDiagnostics struct {
 	lastReason                 string
 }
 
-type transcriptCursorRepository interface {
-	State(TranscriptSource) (TranscriptScannerState, error)
-	Schedule() (transcriptCursorSchedule, error)
-	NextSource() (string, error)
-	Prepare(TranscriptSource, TranscriptScannerState, TranscriptScannerState) error
-	PrepareBatch([]transcriptCursorChange) error
-	PrepareBatchWithNextSource([]transcriptCursorChange, string) error
-	PrepareBatchWithSchedules([]transcriptCursorChange, string, string, int) error
-	PrepareBatchWithHistoricalSchedule([]transcriptCursorChange, string, int) error
-	CommitBatch([]transcriptCursorChange) error
-	RollbackBatch([]transcriptCursorChange) error
-	CodexForkRepairFrontier() (codexForkRepairFrontierState, error)
-	SaveCodexForkRepairFrontier(codexForkRepairFrontierState) error
-	CompletedCodexForkRepairRoots() (map[string]struct{}, error)
-	CommitBatchWithCodexForkRepairRoots([]transcriptCursorChange, []string) error
-}
-
 // AgentTokenCollector owns one bounded collection goroutine. RunOnce is safe
 // for deterministic callers and is the transaction boundary used by tests.
 type AgentTokenCollector struct {
 	writer                     BatchWriter
 	clock                      HostCollectorClock
 	config                     AgentTokenCollectorConfig
-	transcriptStates           map[string]*TranscriptScannerState
-	transcriptCursor           transcriptCursorRepository
+	transcriptCursor           *databaseTranscriptCursors
 	codexForkRepairMu          sync.Mutex
 	codexForkRepairCatalog     map[string]*codexForkRepairCatalog
 	nextCodexForkRepairRoot    string
@@ -362,7 +347,6 @@ type AgentTokenCollector struct {
 	codexForkRepairLoaded      bool
 	nextHistoricalTranscript   string
 	liveTranscriptPriorityRuns int
-	cursor                     *OpenCodeTokenCursor
 	openCodeDatabaseMu         sync.Mutex
 	openCodeDatabase           *OpenCodeDatabase
 	openCodeDatabasePath       string
@@ -402,8 +386,8 @@ func NewAgentTokenCollector(writer BatchWriter, clock HostCollectorClock, config
 		clock = realHostCollectorClock{}
 	}
 	config = config.withDefaults()
-	cursor := NewOpenCodeTokenCursor(config.CursorPath)
-	return &AgentTokenCollector{writer: writer, clock: clock, config: config, transcriptStates: make(map[string]*TranscriptScannerState), transcriptCursor: NewTranscriptCursorStore(config.TranscriptCursorPath), codexForkRepairCatalog: make(map[string]*codexForkRepairCatalog), cursor: cursor, epochBaseID: config.EpochID}
+	checkpointWriter, _ := writer.(agentCheckpointWriter)
+	return &AgentTokenCollector{writer: writer, clock: clock, config: config, transcriptCursor: &databaseTranscriptCursors{writer: checkpointWriter, config: config}, codexForkRepairCatalog: make(map[string]*codexForkRepairCatalog), epochBaseID: config.EpochID}
 }
 
 func (c *AgentTokenCollector) Counters() AgentTokenCollectorCounters { return c.counters.snapshot() }
@@ -415,7 +399,7 @@ func (c *AgentTokenCollector) Snapshot() AgentTokenCollectionSnapshot {
 	c.diagnosticMu.RLock()
 	diagnostics := c.diagnostics
 	c.diagnosticMu.RUnlock()
-	snapshot := AgentTokenCollectionSnapshot{
+	snapshot := AgentTokenCollectionSnapshot{CheckpointOversized: counters.CheckpointOversized,
 		Cycles:                      counters.Cycles,
 		LastDurationMS:              counters.LastDuration.Seconds() * 1000,
 		DurationTotalMS:             counters.DurationTotal.Seconds() * 1000,
@@ -442,7 +426,7 @@ func (c *AgentTokenCollector) Snapshot() AgentTokenCollectionSnapshot {
 		LastAppendError:             diagnostics.lastAppendError,
 		LastMetadataError:           diagnostics.lastMetadataError,
 		SourceDBPath:                diagnosticPath(c.config.OpenCodeDatabase),
-		SourceCursorPath:            diagnosticPath(c.cursor.path),
+		SourceCursorPath:            "",
 		LastReason:                  diagnostics.lastReason,
 	}
 	if len(counters.OpenCodePhases) > 0 {
@@ -941,9 +925,9 @@ func runBoundedAgentInventory(ctx context.Context, inventory AgentTokenInventory
 
 func (c *AgentTokenCollector) appendCollected(ctx context.Context, batch AppendBatch, receipts []agentTokenReceipt) (bool, error) {
 	if c.writer == nil {
-		return false, errors.Join(errors.New("stats writer is unavailable"), rollbackReceipts(receipts))
+		return false, errors.New("stats writer is unavailable")
 	}
-	result, err := c.writer.AppendBatch(ctx, batch)
+	result, err := c.appendCheckpointBatch(ctx, batch, receipts)
 	if err != nil {
 		if isUnavailableIntervalConflict(err) {
 			// A cadence can rediscover an outage interval that an earlier owner
@@ -951,9 +935,9 @@ func (c *AgentTokenCollector) appendCollected(ctx context.Context, batch AppendB
 			// the interval itself is idempotent metadata, while other append
 			// failures remain strict below.
 			usageBatch := AppendBatch{UsageAtoms: batch.UsageAtoms, UsageTombstones: batch.UsageTombstones}
-			usageResult, usageErr := c.writer.AppendBatch(ctx, usageBatch)
+			usageResult, usageErr := c.appendCheckpointBatch(ctx, usageBatch, receipts)
 			if usageErr != nil {
-				return false, errors.Join(usageErr, rollbackReceipts(receipts))
+				return false, usageErr
 			}
 			c.counters.usage.Add(uint64(usageResult.UsageAccepted))
 			c.counters.usageDuplicates.Add(uint64(usageResult.UsageDuplicate))
@@ -962,7 +946,7 @@ func (c *AgentTokenCollector) appendCollected(ctx context.Context, batch AppendB
 			}
 			return true, nil
 		}
-		return false, errors.Join(err, rollbackReceipts(receipts))
+		return false, err
 	}
 	if err := commitReceipts(receipts); err != nil {
 		return false, err
@@ -980,51 +964,65 @@ func (c *AgentTokenCollector) appendCollected(ctx context.Context, batch AppendB
 // Metadata remains strict, but it must not roll back those atoms.
 func (c *AgentTokenCollector) appendOpenCodeCollected(ctx context.Context, batch AppendBatch, receipt *agentTokenReceipt) (bool, bool, error) {
 	if c.writer == nil {
-		return false, false, errors.Join(errors.New("stats writer is unavailable"), rollbackReceipt(receipt))
+		return false, false, errors.New("stats writer is unavailable")
 	}
 	if len(batch.UsageAtoms) > 0 {
 		result, err := c.writer.AppendBatch(ctx, AppendBatch{UsageAtoms: batch.UsageAtoms})
 		if err != nil {
-			return false, false, errors.Join(err, rollbackReceipt(receipt))
+			return false, false, err
 		}
 		c.counters.usage.Add(uint64(result.UsageAccepted))
 		c.counters.usageDuplicates.Add(uint64(result.UsageDuplicate))
 	}
 	metadata := AppendBatch{CoverageEpochs: batch.CoverageEpochs, UnavailableSpans: batch.UnavailableSpans}
-	if len(metadata.CoverageEpochs) > 0 || len(metadata.UnavailableSpans) > 0 {
-		result, err := c.writer.AppendBatch(ctx, metadata)
+	var receipts []agentTokenReceipt
+	if receipt != nil {
+		receipts = []agentTokenReceipt{*receipt}
+	}
+	if len(metadata.CoverageEpochs) > 0 || len(metadata.UnavailableSpans) > 0 || (receipt != nil && len(receipt.checkpoints) > 0) {
+		result, err := c.appendCheckpointBatch(ctx, metadata, receipts)
 		if err != nil {
 			// A recovered source can still carry its original epoch start, which
 			// makes the proposed coverage overlap the outage just recorded. Start
 			// a new epoch at this observation and retry the metadata transaction;
 			// never commit the source cursor while recovery coverage is missing.
 			if !isUnavailableIntervalConflict(err) {
-				return false, true, errors.Join(err, rollbackReceipt(receipt))
+				return false, true, err
+			}
+			checkpointWriter, ok := c.writer.(agentCheckpointWriter)
+			if !ok {
+				return false, true, err
+			}
+			metadata.UnavailableSpans, err = checkpointWriter.UncoveredUnavailableSpans(ctx, metadata.UnavailableSpans)
+			if err != nil {
+				return false, true, err
 			}
 			if len(metadata.CoverageEpochs) == 0 {
-				// Usage was committed independently above. An overlapping outage
-				// marker is metadata-only and cannot invalidate those usage facts;
-				// preserve the existing idempotent behavior by advancing the source
-				// cursor while leaving the conflicting marker unchanged.
+				// A cadence can overlap previously declared coverage. Keep every
+				// uncovered fragment; a wholly covered interval is the existing
+				// idempotent checkpoint-only fallback.
+				result, err = c.appendCheckpointBatch(ctx, metadata, receipts)
+				if err != nil {
+					return false, true, err
+				}
+				c.counters.unavailable.Add(uint64(result.UnavailableAccepted))
 				if receipt != nil {
-					if commitErr := commitOpenCodeReceipt(receipt); commitErr != nil {
-						return false, false, commitErr
-					}
+					commitOpenCodeReceipt(receipt)
 				}
 				return true, false, nil
 			}
 			startedAt, ok := coverageObservationStart(metadata.CoverageEpochs)
 			if !ok {
-				return false, true, errors.Join(err, rollbackReceipt(receipt))
+				return false, true, err
 			}
 			c.rotateCoverageEpoch(startedAt)
 			for index := range metadata.CoverageEpochs {
 				metadata.CoverageEpochs[index].EpochID = c.config.EpochID
 				metadata.CoverageEpochs[index].StartedAt = startedAt
 			}
-			result, err = c.writer.AppendBatch(ctx, metadata)
+			result, err = c.appendCheckpointBatch(ctx, metadata, receipts)
 			if err != nil {
-				return false, true, errors.Join(err, rollbackReceipt(receipt))
+				return false, true, err
 			}
 		}
 		c.counters.coverage.Add(uint64(result.CoverageChanged))
@@ -1063,12 +1061,7 @@ func (c *AgentTokenCollector) rotateCoverageEpoch(startedAt float64) {
 	c.config.EpochStartedAt = startedAt
 }
 
-func commitOpenCodeReceipt(receipt *agentTokenReceipt) error {
-	if err := receipt.commit(); err != nil {
-		return errors.Join(err, rollbackReceipt(receipt))
-	}
-	return nil
-}
+func commitOpenCodeReceipt(receipt *agentTokenReceipt) error { return receipt.commit() }
 
 func retryCodexForkRepairBlockedFiles(catalog *codexForkRepairCatalog) {
 	if catalog == nil || len(catalog.blockedFiles) == 0 {
@@ -1093,46 +1086,37 @@ func isUnavailableIntervalConflict(err error) bool {
 }
 
 type agentTokenReceipt struct {
-	commit   func() error
-	rollback func() error
+	checkpoints       []Checkpoint
+	retirement        *CheckpointRetirement
+	collector         *AgentTokenCollector
+	nextHistorical    string
+	priorityRuns      int
+	completedRoots    []string
+	sourceDatabase    *OpenCodeDatabase
+	sourceDataVersion int64
+	selectedSessions  []string
 }
 
-func rollbackReceipt(receipt *agentTokenReceipt) error {
-	if receipt == nil || receipt.rollback == nil {
-		return nil
-	}
-	return receipt.rollback()
-}
-
-func rollbackReceipts(receipts []agentTokenReceipt) error {
-	var errs []error
-	for index := range receipts {
-		if receipts[index].rollback == nil {
-			continue
+func (r agentTokenReceipt) commit() error {
+	if r.collector != nil {
+		r.collector.nextHistoricalTranscript = r.nextHistorical
+		r.collector.liveTranscriptPriorityRuns = r.priorityRuns
+		r.collector.codexForkRepairMu.Lock()
+		for _, root := range r.completedRoots {
+			delete(r.collector.codexForkRepairCatalog, root)
 		}
-		if err := receipts[index].rollback(); err != nil {
-			errs = append(errs, err)
-		}
+		r.collector.codexForkRepairMu.Unlock()
 	}
-	return errors.Join(errs...)
+	if r.sourceDatabase != nil {
+		r.sourceDatabase.CommitSourceScan(r.sourceDataVersion, r.selectedSessions)
+	}
+	return nil
 }
-
 func commitReceipts(receipts []agentTokenReceipt) error {
-	var errs []error
-	for index := range receipts {
-		if receipts[index].commit == nil {
-			continue
-		}
-		if err := receipts[index].commit(); err != nil {
-			errs = append(errs, err)
-			if receipts[index].rollback != nil {
-				if rollbackErr := receipts[index].rollback(); rollbackErr != nil {
-					errs = append(errs, rollbackErr)
-				}
-			}
-		}
+	for _, receipt := range receipts {
+		receipt.commit()
 	}
-	return errors.Join(errs...)
+	return nil
 }
 
 func (c *AgentTokenCollector) collect(parent context.Context, observed, cadence float64) (batch AppendBatch, receipts []agentTokenReceipt, err error) {
@@ -1259,15 +1243,17 @@ func transcriptSourceInOrder(source TranscriptSource, ordered []TranscriptSource
 
 func (c *AgentTokenCollector) collectTranscripts(parent context.Context, observed, cadence float64, records []AgentRecord, inventoryErrors []error, batch AppendBatch, receipts []agentTokenReceipt) (AppendBatch, []agentTokenReceipt, error) {
 	type transcriptCandidate struct {
-		source   TranscriptSource
-		result   TranscriptScanResult
-		change   transcriptCursorChange
-		changed  bool
-		coverage bool
+		source         TranscriptSource
+		result         TranscriptScanResult
+		checkpoint     Checkpoint
+		repairComplete bool
+		changed        bool
+		coverage       bool
 	}
 	discoveryCtx, discoveryCancel := context.WithTimeout(parent, c.config.TranscriptDiscoveryTimeout)
 	sources, err := c.config.TranscriptSources(discoveryCtx, records)
 	discoveryCancel()
+	completeTranscriptDiscovery := err == nil && len(inventoryErrors) == 0
 	if err != nil {
 		// Discovery budgets describe deferred backlog, not an outage. Keep the
 		// candidates returned before the bound and let their bounded scanners
@@ -1281,6 +1267,9 @@ func (c *AgentTokenCollector) collectTranscripts(parent context.Context, observe
 		}
 	}
 	completedRepairRoots, markerErr := c.transcriptCursor.CompletedCodexForkRepairRoots()
+	if markerErr != nil {
+		completeTranscriptDiscovery = false
+	}
 	repairSourcesByRoot := make(map[string][]TranscriptSource)
 	repairDiscoveryComplete := make(map[string]bool)
 	var allRepairSources []TranscriptSource
@@ -1313,6 +1302,7 @@ func (c *AgentTokenCollector) collectTranscripts(parent context.Context, observe
 		var boundErr error
 		orderedRoots, boundErr = c.boundCodexForkRepairRoots(orderedRoots, completedRepairRoots)
 		if boundErr != nil {
+			completeTranscriptDiscovery = false
 			batch.UnavailableSpans = append(batch.UnavailableSpans, agentTokenUnavailable(c.config, "codex-fork-repair", observed, cadence, "transcript-cursor-frontier-"+boundErr.Error()))
 		}
 		nextRootAfterBound := c.nextCodexForkRepairRoot
@@ -1326,6 +1316,7 @@ func (c *AgentTokenCollector) collectTranscripts(parent context.Context, observe
 			candidates, discoveryComplete, _, discoveryErr := c.codexForkRepairSources(repairCtx, root, rootID)
 			repairDiscoveryComplete[rootID] = discoveryComplete
 			if discoveryErr != nil {
+				completeTranscriptDiscovery = false
 				reason := "codex-fork-repair-discovery-unavailable"
 				if errors.Is(discoveryErr, context.DeadlineExceeded) || errors.Is(discoveryErr, context.Canceled) || repairCtx.Err() != nil {
 					reason = "codex-fork-repair-discovery-timeout"
@@ -1335,6 +1326,7 @@ func (c *AgentTokenCollector) collectTranscripts(parent context.Context, observe
 			repairSourcesByRoot[rootID] = candidates
 			allRepairSources = append(allRepairSources, candidates...)
 			if repairCtx.Err() != nil {
+				completeTranscriptDiscovery = false
 				nextRoot := nextRootAfterBound
 				if activeRepairRootCount <= maxCodexForkRepairCatalogRoots {
 					if rootIndex+1 < len(orderedRoots) {
@@ -1351,6 +1343,12 @@ func (c *AgentTokenCollector) collectTranscripts(parent context.Context, observe
 					batch.UnavailableSpans = append(batch.UnavailableSpans, agentTokenUnavailable(c.config, "codex-fork-repair", observed, cadence, "transcript-cursor-frontier-"+persistErr.Error()))
 				}
 				c.codexForkRepairMu.Unlock()
+				break
+			}
+		}
+		for _, complete := range repairDiscoveryComplete {
+			if !complete {
+				completeTranscriptDiscovery = false
 				break
 			}
 		}
@@ -1379,6 +1377,7 @@ func (c *AgentTokenCollector) collectTranscripts(parent context.Context, observe
 		}
 		normalLimit := maxAgentTokenSources - repairSlots
 		if len(normalSourceOrder) > normalLimit {
+			completeTranscriptDiscovery = false
 			batch.UnavailableSpans = append(batch.UnavailableSpans, agentTokenUnavailable(c.config, "transcripts", observed, cadence, "agent-token-source-bound-exceeded"))
 			normalSourceOrder, boundedSources = boundedTranscriptSourcePage(normalSourceOrder, "", normalLimit)
 		}
@@ -1398,30 +1397,58 @@ func (c *AgentTokenCollector) collectTranscripts(parent context.Context, observe
 		}
 		boundedSources = append(boundedSources, allRepairSources...)
 	} else if len(normalSourceOrder) > maxAgentTokenSources {
+		completeTranscriptDiscovery = false
 		batch.UnavailableSpans = append(batch.UnavailableSpans, agentTokenUnavailable(c.config, "transcripts", observed, cadence, "agent-token-source-bound-exceeded"))
 		normalSourceOrder, boundedSources = boundedTranscriptSourcePage(normalSourceOrder, "", maxAgentTokenSources)
 	}
+	allTranscriptSources := append([]TranscriptSource(nil), sources...)
 	sources = boundedSources
-	states := make(map[string]*TranscriptScannerState, len(sources))
+	metadataKeys := make([]string, 0, len(sources))
+	retainedKeys := make([]string, 0, len(sources))
+	seenMetadataKey := make(map[string]struct{}, len(sources))
+	addMetadataKey := func(source TranscriptSource) {
+		key := transcriptCursorKey(source)
+		if _, exists := seenMetadataKey[key]; exists {
+			return
+		}
+		seenMetadataKey[key] = struct{}{}
+		metadataKeys = append(metadataKeys, key)
+		retainedKeys = append(retainedKeys, key)
+	}
+	for _, source := range sources {
+		addMetadataKey(source)
+	}
+	for _, rootSources := range repairSourcesByRoot {
+		for _, source := range rootSources {
+			addMetadataKey(source)
+		}
+	}
+	checkpointMetadata, metadataErr := c.transcriptCursor.Metadata(metadataKeys)
+	if metadataErr != nil {
+		return batch, receipts, metadataErr
+	}
+	retirement := (*CheckpointRetirement)(nil)
+	if completeTranscriptDiscovery {
+		for _, source := range allTranscriptSources {
+			key := transcriptCursorKey(source)
+			if _, exists := seenMetadataKey[key]; !exists {
+				seenMetadataKey[key] = struct{}{}
+				retainedKeys = append(retainedKeys, key)
+			}
+		}
+		retirement = &CheckpointRetirement{Kind: "transcript", KeepKeys: retainedKeys, PreserveExistingSourceFiles: true}
+	}
 	liveSources := make([]TranscriptSource, 0, len(sources))
 	historicalSources := make([]TranscriptSource, 0, len(sources))
 	for _, source := range sources {
 		key := transcriptCursorKey(source)
-		state := c.transcriptStates[key]
-		if state == nil {
-			persisted, stateErr := c.transcriptCursor.State(source)
-			if stateErr != nil {
-				// Keep the source in the bounded scan order so the ordinary source
-				// path records the typed cursor-unavailable result below.
-				historicalSources = append(historicalSources, source)
-				continue
-			}
-			state = &persisted
-			c.transcriptStates[key] = state
+		state, stateErr := metadataTranscriptState(checkpointMetadata[key])
+		if stateErr != nil {
+			historicalSources = append(historicalSources, source)
+			continue
 		}
-		states[key] = state
 		info, statErr := os.Stat(source.Path)
-		if statErr == nil && transcriptSourceIsLive(source, *state, info.Size()) {
+		if statErr == nil && transcriptSourceIsLive(source, state, info.Size()) {
 			liveSources = append(liveSources, source)
 		} else {
 			historicalSources = append(historicalSources, source)
@@ -1450,6 +1477,8 @@ func (c *AgentTokenCollector) collectTranscripts(parent context.Context, observe
 		c.config.TranscriptMaxRecordsPerCycle,
 		len(repairDiscoveryComplete) > 0,
 	)
+	var admittedCheckpointBytes int64
+	var admittedCheckpoints int
 	var bytesScanned int64
 	var recordsScanned int
 	lastScanned := -1
@@ -1468,6 +1497,54 @@ func (c *AgentTokenCollector) collectTranscripts(parent context.Context, observe
 			break
 		}
 		stateKey := transcriptCursorKey(source)
+		estimate := checkpointMetadata[stateKey].DecodedBytes * 3
+		if admittedCheckpoints > 0 && (admittedCheckpointBytes >= transcriptCheckpointBudget || admittedCheckpointBytes+estimate > transcriptCheckpointBudget) {
+			break
+		}
+		verification := checkpointSourceVerification{}
+		var verifyErr error
+		metadata := checkpointMetadata[stateKey]
+		if checkpointCanUseUnchangedFastPath(source, metadata) {
+			samples, sampleErr := c.transcriptCursor.writer.LoadCheckpointComparisonSamples(parent, stateKey)
+			if sampleErr != nil {
+				verifyErr = sampleErr
+			} else {
+				verification, verifyErr = unchangedCheckpointSource(source, metadata, samples, remainingBytes)
+			}
+		}
+		bytesScanned += verification.BytesRead
+		remainingBytes -= verification.BytesRead
+		if verifyErr != nil {
+			batch.UnavailableSpans = append(batch.UnavailableSpans, agentTokenUnavailable(c.config, source.SourceID, observed, cadence, "transcript-cursor-"+verifyErr.Error()))
+			continue
+		}
+		if verification.Unchanged {
+			if !source.CodexForkRepairOnly {
+				lastNormalSourceKey = stateKey
+			}
+			isHistorical := transcriptSourceInOrder(source, historicalSources)
+			if isHistorical {
+				historicalAttempted = true
+				for index, historical := range historicalSources {
+					if transcriptCursorKey(historical) == stateKey {
+						proposedNextHistoricalTranscript = transcriptCursorKey(historicalSources[(index+1)%len(historicalSources)])
+						break
+					}
+				}
+			}
+			lastScanned = sourceIndex
+			if verification.BytesRead > 0 {
+				if isHistorical {
+					historicalWork = true
+				} else {
+					liveWork = true
+				}
+			}
+			continue
+		}
+		if remainingBytes <= 0 {
+			break
+		}
 		if !source.CodexForkRepairOnly {
 			lastNormalSourceKey = stateKey
 		}
@@ -1481,20 +1558,21 @@ func (c *AgentTokenCollector) collectTranscripts(parent context.Context, observe
 				}
 			}
 		}
-		state := states[stateKey]
-		if state == nil {
-			state = c.transcriptStates[stateKey]
-		}
-		if state == nil {
+		var state *TranscriptScannerState
+		{
 			persisted, stateErr := c.transcriptCursor.State(source)
 			if stateErr != nil {
 				batch.UnavailableSpans = append(batch.UnavailableSpans, agentTokenUnavailable(c.config, source.SourceID, observed, cadence, "transcript-cursor-"+stateErr.Error()))
 				continue
 			}
 			state = &persisted
-			c.transcriptStates[stateKey] = state
+			admittedCheckpoints++
+			admittedCheckpointBytes += estimate
+			if estimate > transcriptCheckpointBudget {
+				c.counters.checkpointOversized.Add(1)
+			}
 		}
-		result, scanErr := ScanTranscript(source, state, TranscriptScanOptions{Context: parent, MaxBytes: remainingBytes, MaxRecords: remainingRecords})
+		result, scanErr := ScanTranscript(source, state, TranscriptScanOptions{Context: parent, MaxBytes: remainingBytes, MaxRecords: remainingRecords, ForceReset: verification.SourceChanged})
 		if scanErr != nil {
 			reason := scanErr.Error()
 			if errors.Is(scanErr, context.Canceled) || errors.Is(scanErr, context.DeadlineExceeded) {
@@ -1524,8 +1602,24 @@ func (c *AgentTokenCollector) collectTranscripts(parent context.Context, observe
 		}
 		candidate := transcriptCandidate{source: source, result: result, changed: result.Receipt != nil, coverage: result.RecordsParsed > 0 || result.Reset || state.Offset == 0}
 		if candidate.changed {
-			candidate.change = transcriptCursorChange{source: source, before: result.Receipt.before, after: result.Receipt.after}
+			checkpoint, encodeErr := encodeTranscriptCheckpoint(stateKey, result.Receipt.after, state.checkpointRevision)
+			if encodeErr != nil {
+				return batch, receipts, encodeErr
+			}
+			candidate.checkpoint = checkpoint
+			candidate.repairComplete = result.Receipt.after.CodexForkRepairComplete
+			beforeBytes := checkpointMetadata[stateKey].DecodedBytes * 3
+			afterBytes := checkpoint.DecodedBytes * 3
+			if afterBytes > beforeBytes {
+				admittedCheckpointBytes += afterBytes - beforeBytes
+			}
+			if afterBytes > transcriptCheckpointBudget && beforeBytes <= transcriptCheckpointBudget {
+				c.counters.checkpointOversized.Add(1)
+			}
 		}
+		// Encoding owns exact fragments and parser JSON. No decoded maps or
+		// rollback copies are retained while the next source is processed.
+		candidate.result.Receipt = nil
 		candidates = append(candidates, candidate)
 	}
 	tombstonesByKey := make(map[string]UsageTombstone)
@@ -1570,8 +1664,7 @@ func (c *AgentTokenCollector) collectTranscripts(parent context.Context, observe
 	if len(conflictingTombstoneKeys) > 0 {
 		batch.UnavailableSpans = append(batch.UnavailableSpans, agentTokenUnavailable(c.config, "codex-fork-repair", observed, cadence, "transcript-tombstone-conflict"))
 	}
-	changedCandidates := make([]*transcriptCandidate, 0, len(candidates))
-	changes := make([]transcriptCursorChange, 0, len(candidates))
+	accepted := make(map[string]bool, len(candidates))
 	for index := range candidates {
 		candidate := &candidates[index]
 		if !candidate.changed {
@@ -1584,16 +1677,13 @@ func (c *AgentTokenCollector) collectTranscripts(parent context.Context, observe
 			}
 			if root != "" {
 				if _, conflicted := conflictingRepairRoots[codexForkRepairRootID(root)]; conflicted {
-					candidate.result.Receipt.Rollback()
 					continue
 				}
 			}
 		}
-		changedCandidates = append(changedCandidates, candidate)
-		changes = append(changes, candidate.change)
+		accepted[transcriptCursorKey(candidate.source)] = true
 	}
-	prepared := make(map[string]struct{}, len(changedCandidates))
-	schedulePrepared := false
+	scheduleChanged := lastScanned >= 0 || historicalAttempted
 	nextSourceAfter := ""
 	if lastScanned >= 0 && lastNormalSourceKey != "" {
 		nextSourceAfter = nextTranscriptSourceKey(normalSourceOrder, lastNormalSourceKey)
@@ -1608,70 +1698,22 @@ func (c *AgentTokenCollector) collectTranscripts(parent context.Context, observe
 	} else if len(historicalSources) == 0 {
 		proposedLiveTranscriptPriorityRuns = 0
 	}
-	if len(changes) > 0 || lastScanned >= 0 || historicalAttempted {
-		var prepareErr error
-		if lastScanned >= 0 && len(historicalSources) > 0 {
-			prepareErr = c.transcriptCursor.PrepareBatchWithSchedules(changes, nextSourceAfter, proposedNextHistoricalTranscript, proposedLiveTranscriptPriorityRuns)
-		} else if historicalAttempted {
-			prepareErr = c.transcriptCursor.PrepareBatchWithHistoricalSchedule(changes, proposedNextHistoricalTranscript, proposedLiveTranscriptPriorityRuns)
-		} else if lastScanned >= 0 {
-			prepareErr = c.transcriptCursor.PrepareBatchWithNextSource(changes, nextSourceAfter)
-		} else {
-			prepareErr = c.transcriptCursor.PrepareBatch(changes)
+	var checkpoints []Checkpoint
+	if scheduleChanged {
+		if lastScanned >= 0 {
+			schedule.NextSource = nextSourceAfter
 		}
-		if prepareErr == nil {
-			schedulePrepared = lastScanned >= 0 || historicalAttempted
-			for _, candidate := range changedCandidates {
-				prepared[transcriptCursorKey(candidate.source)] = struct{}{}
-			}
-		} else {
-			// A concurrent owner or stale sidecar should only defer the affected
-			// source. The normal path is one batch write; this per-source fallback
-			// keeps the old conflict behavior without turning a rare race into a
-			// loss of all transcript observations.
-			fallbackChanges := make([]transcriptCursorChange, 0, len(changedCandidates))
-			for _, candidate := range changedCandidates {
-				if prepareErr := c.transcriptCursor.Prepare(candidate.source, candidate.change.before, candidate.change.after); prepareErr != nil {
-					candidate.result.Receipt.Rollback()
-					batch.UnavailableSpans = append(batch.UnavailableSpans, agentTokenUnavailable(c.config, candidate.source.SourceID, observed, cadence, "transcript-cursor-"+prepareErr.Error()))
-					continue
-				}
-				prepared[transcriptCursorKey(candidate.source)] = struct{}{}
-				fallbackChanges = append(fallbackChanges, candidate.change)
-			}
-			if len(fallbackChanges) > 0 {
-				var scheduleErr error
-				if lastScanned >= 0 && len(historicalSources) > 0 {
-					scheduleErr = c.transcriptCursor.PrepareBatchWithSchedules(nil, nextSourceAfter, proposedNextHistoricalTranscript, proposedLiveTranscriptPriorityRuns)
-				} else if historicalAttempted {
-					scheduleErr = c.transcriptCursor.PrepareBatchWithHistoricalSchedule(nil, proposedNextHistoricalTranscript, proposedLiveTranscriptPriorityRuns)
-				} else {
-					scheduleErr = c.transcriptCursor.PrepareBatchWithNextSource(nil, nextSourceAfter)
-				}
-				if scheduleErr != nil {
-					rollbackErr := c.transcriptCursor.RollbackBatch(fallbackChanges)
-					for _, candidate := range changedCandidates {
-						if _, ok := prepared[transcriptCursorKey(candidate.source)]; ok {
-							candidate.result.Receipt.Rollback()
-							delete(prepared, transcriptCursorKey(candidate.source))
-							batch.UnavailableSpans = append(batch.UnavailableSpans, agentTokenUnavailable(c.config, candidate.source.SourceID, observed, cadence, "transcript-cursor-schedule-"+scheduleErr.Error()))
-							if rollbackErr != nil {
-								batch.UnavailableSpans = append(batch.UnavailableSpans, agentTokenUnavailable(c.config, candidate.source.SourceID, observed, cadence, "transcript-cursor-rollback-"+rollbackErr.Error()))
-							}
-						}
-					}
-				} else {
-					schedulePrepared = true
-				}
-			}
-			if len(changes) == 0 && !schedulePrepared {
-				batch.UnavailableSpans = append(batch.UnavailableSpans, agentTokenUnavailable(c.config, "transcripts", observed, cadence, "transcript-cursor-schedule-"+prepareErr.Error()))
-			}
+		if len(historicalSources) > 0 || historicalAttempted {
+			schedule.NextHistoricalSource = proposedNextHistoricalTranscript
+			schedule.LiveTranscriptPriorityRuns = proposedLiveTranscriptPriorityRuns
 		}
+		raw, err := json.Marshal(schedule)
+		if err != nil {
+			return batch, receipts, err
+		}
+		checkpoints = append(checkpoints, Checkpoint{Key: "collector/schedule", Kind: "schedule", Version: 1, ExpectedRevision: c.transcriptCursor.scheduleRevision, State: raw})
 	}
-	preparedChanges := make([]transcriptCursorChange, 0, len(prepared))
-	preparedReceipts := make([]*TranscriptScanReceipt, 0, len(prepared))
-	repairAfter := make(map[string]TranscriptScannerState, len(candidates))
+	repairAfter := make(map[string]bool, len(candidates))
 	orderedTombstones := make([]UsageTombstone, 0, len(orderedTombstoneKeys))
 	for _, key := range orderedTombstoneKeys {
 		if _, conflicted := conflictingTombstoneKeys[key]; conflicted {
@@ -1690,15 +1732,14 @@ func (c *AgentTokenCollector) collectTranscripts(parent context.Context, observe
 	}
 	for index := range candidates {
 		candidate := &candidates[index]
-		if candidate.source.CodexForkRepairOnly && candidate.result.Receipt != nil {
-			repairAfter[transcriptCursorKey(candidate.source)] = candidate.result.Receipt.after
+		if candidate.source.CodexForkRepairOnly && candidate.changed {
+			repairAfter[transcriptCursorKey(candidate.source)] = candidate.repairComplete
 		}
 		if candidate.changed {
-			if _, ok := prepared[transcriptCursorKey(candidate.source)]; !ok {
+			if !accepted[transcriptCursorKey(candidate.source)] {
 				continue
 			}
-			preparedChanges = append(preparedChanges, candidate.change)
-			preparedReceipts = append(preparedReceipts, candidate.result.Receipt)
+			checkpoints = append(checkpoints, candidate.checkpoint)
 		}
 		batch.UsageAtoms = append(batch.UsageAtoms, candidate.result.Atoms...)
 		if candidate.coverage {
@@ -1717,20 +1758,16 @@ func (c *AgentTokenCollector) collectTranscripts(parent context.Context, observe
 		complete := true
 		for _, source := range rootSources {
 			key := transcriptCursorKey(source)
-			state := states[key]
-			if state == nil {
-				persisted, stateErr := c.transcriptCursor.State(source)
-				if stateErr != nil {
-					complete = false
-					break
-				}
-				state = &persisted
+			state, stateErr := metadataTranscriptState(checkpointMetadata[key])
+			if stateErr != nil {
+				complete = false
+				break
 			}
 			proposed, scanned := repairAfter[key]
 			if scanned {
-				if _, isPrepared := prepared[key]; isPrepared {
-					state = &proposed
-				} else if !reflect.DeepEqual(state, &proposed) {
+				if accepted[key] {
+					state.CodexForkRepairComplete = proposed
+				} else if !state.CodexForkRepairComplete {
 					complete = false
 					break
 				}
@@ -1745,42 +1782,15 @@ func (c *AgentTokenCollector) collectTranscripts(parent context.Context, observe
 		}
 	}
 	sort.Strings(completedRootsToMark)
-	if len(preparedChanges) > 0 || schedulePrepared || len(completedRootsToMark) > 0 {
-		receipts = append(receipts, agentTokenReceipt{
-			commit: func() error {
-				// appendCollected has already committed usage facts. Promote the
-				// cursors and completion roots in one atomic sidecar write so a failed
-				// cursor commit cannot leave a durable marker that suppresses retry.
-				if err := c.transcriptCursor.CommitBatchWithCodexForkRepairRoots(preparedChanges, completedRootsToMark); err != nil {
-					return err
-				}
-				for _, receipt := range preparedReceipts {
-					receipt.Commit()
-				}
-				c.nextHistoricalTranscript = proposedNextHistoricalTranscript
-				c.liveTranscriptPriorityRuns = proposedLiveTranscriptPriorityRuns
-				c.codexForkRepairMu.Lock()
-				for _, rootID := range completedRootsToMark {
-					delete(c.codexForkRepairCatalog, rootID)
-				}
-				c.codexForkRepairMu.Unlock()
-				return nil
-			},
-			rollback: func() error {
-				for _, receipt := range preparedReceipts {
-					receipt.Rollback()
-				}
-				err := c.transcriptCursor.RollbackBatch(preparedChanges)
-				// A failed commit can be ambiguous after the sidecar rename: the
-				// disk may already contain the promoted cursor even though the
-				// directory sync failed. Even a no-op rollback cannot distinguish
-				// that case, so reload these cursors from the sidecar next cycle.
-				for _, change := range preparedChanges {
-					delete(c.transcriptStates, transcriptCursorKey(change.source))
-				}
-				return err
-			},
-		})
+	if len(completedRootsToMark) > 0 {
+		checkpoint, err := c.transcriptCursor.completedRootsCheckpoint(completedRootsToMark)
+		if err != nil {
+			return batch, receipts, err
+		}
+		checkpoints = append(checkpoints, checkpoint)
+	}
+	if len(checkpoints) > 0 || retirement != nil {
+		receipts = append(receipts, agentTokenReceipt{checkpoints: checkpoints, retirement: retirement, collector: c, nextHistorical: proposedNextHistoricalTranscript, priorityRuns: proposedLiveTranscriptPriorityRuns, completedRoots: completedRootsToMark})
 	}
 	for _, inventoryErr := range inventoryErrors {
 		batch.UnavailableSpans = append(batch.UnavailableSpans, agentTokenUnavailable(c.config, "inventory", observed, cadence, inventoryErr.Error()))
@@ -2470,12 +2480,18 @@ func (c *AgentTokenCollector) collectOpenCode(ctx context.Context, observed, cad
 			return AppendBatch{UnavailableSpans: []UnavailableSpan{agentTokenUnavailable(c.config, "opencode-cursor", observed, cadence, "stats-database-identity-unavailable")}}, nil, nil
 		}
 	}
-	cursorState, err := c.cursor.state()
+	var cursorState openCodeCursorState
+	checkpointRevision, err := c.transcriptCursor.load("opencode/"+c.config.OpenCodeDatabase, &cursorState)
+	if cursorState.Events == nil {
+		cursorState.Events = map[string]string{}
+	}
+	if cursorState.Parts == nil {
+		cursorState.Parts = map[string]OpenCodePartCursor{}
+	}
 	if err != nil {
 		c.counters.recordOpenCodePhase("identity_cursor", time.Since(identityCursorStarted))
 		return AppendBatch{UnavailableSpans: []UnavailableSpan{agentTokenUnavailable(c.config, "opencode-cursor", observed, cadence, err.Error())}}, nil, nil
 	}
-	cursorBefore := cursorState.clone()
 	statsDatabaseChanged := statsDatabaseIdentity != "" && cursorState.StatsDatabaseIdentity != statsDatabaseIdentity
 	if statsDatabaseChanged {
 		cursorState = openCodeCursorState{
@@ -2874,40 +2890,30 @@ func (c *AgentTokenCollector) collectOpenCode(ctx context.Context, observed, cad
 			batch.CoverageEpochs = append(batch.CoverageEpochs, agentTokenCoverage(c.config, "opencode:"+root.id, observed, cadence))
 		}
 	}
-	cursorPrepareStarted := time.Now()
+	checkpointEncodeStarted := time.Now()
 	cursorChanged := proposed.changed(cursorState)
 	sourceScanSucceeded := sourceScanRequired && sourceFailure == nil && (err == nil || rootValidationFailed)
 	if !cursorChanged && !sourceScanSucceeded {
-		c.counters.recordOpenCodePhase("cursor_prepare", time.Since(cursorPrepareStarted))
+		c.counters.recordOpenCodePhase("checkpoint_encode", time.Since(checkpointEncodeStarted))
 		return batch, nil, nil
 	}
+	c.counters.recordOpenCodePhase("checkpoint_encode", time.Since(checkpointEncodeStarted))
+	var checkpoints []Checkpoint
 	if cursorChanged {
-		if err := c.cursor.prepare(cursorBefore, proposed); err != nil {
-			c.counters.recordOpenCodePhase("cursor_prepare", time.Since(cursorPrepareStarted))
-			return AppendBatch{UnavailableSpans: []UnavailableSpan{agentTokenUnavailable(c.config, "opencode-cursor", observed, cadence, err.Error())}}, nil, nil
+		boundOpenCodeEventRevisions(proposed.Events)
+		raw, encodeErr := json.Marshal(proposed)
+		if encodeErr != nil {
+			return AppendBatch{}, nil, encodeErr
 		}
+		checkpoints = []Checkpoint{{Key: "opencode/" + c.config.OpenCodeDatabase, Kind: "opencode", Version: 1, ExpectedRevision: checkpointRevision, State: raw}}
 	}
-	c.counters.recordOpenCodePhase("cursor_prepare", time.Since(cursorPrepareStarted))
-	committed := proposed.clone()
-	return batch, &agentTokenReceipt{
-		commit: func() error {
-			if cursorChanged {
-				if err := c.cursor.commit(committed); err != nil {
-					return err
-				}
-			}
-			if sourceScanSucceeded {
-				db.CommitSourceScan(sourceDataVersion, selectedSessionIDs)
-			}
-			return nil
-		},
-		rollback: func() error {
-			if !cursorChanged {
-				return nil
-			}
-			return c.cursor.rollback()
-		},
-	}, nil
+	receipt = &agentTokenReceipt{checkpoints: checkpoints}
+	if sourceScanSucceeded {
+		receipt.sourceDatabase = db
+		receipt.sourceDataVersion = sourceDataVersion
+		receipt.selectedSessions = selectedSessionIDs
+	}
+	return batch, receipt, nil
 }
 
 func (c *AgentTokenCollector) recordOpenCodeSQLiteMetrics(database *OpenCodeDatabase) {
@@ -3191,50 +3197,6 @@ func (s openCodeCursorState) changed(other openCodeCursorState) bool {
 	return !reflect.DeepEqual(s.clone(), other.clone())
 }
 
-// OpenCodeTokenCursor is a small sidecar transaction. A pending journal is
-// discarded on reload and the committed state is replayed through statsd's
-// stable event-id dedupe; promoting the pending state would lose the ability
-// to distinguish a crash before versus after the fact append.
-type OpenCodeTokenCursor struct {
-	path         string
-	mu           sync.Mutex
-	current      openCodeCursorState
-	pending      *openCodeCursorState
-	pendingToken string
-	generation   uint64
-}
-
-func NewOpenCodeTokenCursor(path string) *OpenCodeTokenCursor {
-	return &OpenCodeTokenCursor{path: path, current: openCodeCursorState{Events: map[string]string{}, Parts: map[string]OpenCodePartCursor{}}}
-}
-func (c *OpenCodeTokenCursor) state() (openCodeCursorState, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.pending != nil {
-		return openCodeCursorState{}, errors.New("cursor-state-pending")
-	}
-	var result openCodeCursorState
-	err := withSidecarLock(c.path, func() error {
-		disk, err := c.readDisk()
-		if err != nil {
-			return err
-		}
-		if disk.Pending != nil || disk.EventsCompacted {
-			cleanGeneration := disk.Generation + 1
-			clean := openCodeCursorDisk{Version: 2, Generation: cleanGeneration, State: disk.State}
-			if err := atomicSidecarWrite(c.path, clean); err != nil {
-				return err
-			}
-			disk.Generation = cleanGeneration
-		}
-		c.current, c.generation = disk.State, disk.Generation
-		c.pending, c.pendingToken = nil, ""
-		result = c.current.clone()
-		return nil
-	})
-	return result, err
-}
-
 type openCodeCursorDisk struct {
 	Version         int                  `json:"version"`
 	Generation      uint64               `json:"generation,omitempty"`
@@ -3266,8 +3228,8 @@ func boundOpenCodeEventRevisions(events map[string]string) {
 	}
 }
 
-func (c *OpenCodeTokenCursor) readDisk() (openCodeCursorDisk, error) {
-	data, err := os.ReadFile(c.path)
+func readLegacyOpenCodeCursor(path string) (openCodeCursorDisk, error) {
+	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return openCodeCursorDisk{Version: 2, State: openCodeCursorState{Events: map[string]string{}, Parts: map[string]OpenCodePartCursor{}}}, nil
 	}
@@ -3336,91 +3298,6 @@ func (c *OpenCodeTokenCursor) readDisk() (openCodeCursorDisk, error) {
 	}
 	disk.Version = 2
 	return disk, nil
-}
-func (c *OpenCodeTokenCursor) prepare(before, next openCodeCursorState) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.pending != nil {
-		return errors.New("cursor-state-pending")
-	}
-	return withSidecarLock(c.path, func() error {
-		disk, err := c.readDisk()
-		if err != nil {
-			return err
-		}
-		if disk.Pending != nil {
-			return errors.New("cursor-state-pending")
-		}
-		if disk.State.changed(before) {
-			return errors.New("cursor-state-stale")
-		}
-		token := strconv.FormatUint(disk.Generation+1, 10) + "-" + strconv.FormatInt(time.Now().UnixNano(), 10)
-		boundOpenCodeEventRevisions(next.Events)
-		prepared := next.clone()
-		staged := openCodeCursorDisk{Version: 2, Generation: disk.Generation + 1, State: disk.State, Pending: &prepared, PendingToken: token}
-		if err := atomicSidecarWrite(c.path, staged); err != nil {
-			return err
-		}
-		c.current, c.generation = disk.State, staged.Generation
-		c.pending, c.pendingToken = &prepared, token
-		return nil
-	})
-}
-func (c *OpenCodeTokenCursor) commit(expected openCodeCursorState) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.pending == nil {
-		return errors.New("cursor-state-pending-missing")
-	}
-	return withSidecarLock(c.path, func() error {
-		disk, err := c.readDisk()
-		if err != nil {
-			return err
-		}
-		if disk.Pending == nil || disk.PendingToken == "" || disk.PendingToken != c.pendingToken || disk.Pending.changed(expected) {
-			return errors.New("cursor-state-stale")
-		}
-		committed := disk.Pending.clone()
-		staged := openCodeCursorDisk{Version: 2, Generation: disk.Generation + 1, State: committed}
-		if err := atomicSidecarWrite(c.path, staged); err != nil {
-			return err
-		}
-		c.current, c.generation, c.pending, c.pendingToken = committed, staged.Generation, nil, ""
-		return nil
-	})
-}
-func (c *OpenCodeTokenCursor) rollback() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.pending == nil {
-		return nil
-	}
-	err := withSidecarLock(c.path, func() error {
-		disk, err := c.readDisk()
-		if err != nil {
-			return err
-		}
-		if disk.PendingToken != c.pendingToken {
-			return errors.New("cursor-state-stale")
-		}
-		staged := openCodeCursorDisk{Version: 2, Generation: disk.Generation + 1, State: disk.State}
-		if err := atomicSidecarWrite(c.path, staged); err != nil {
-			return err
-		}
-		c.current, c.generation, c.pending, c.pendingToken = disk.State, staged.Generation, nil, ""
-		return nil
-	})
-	if err != nil {
-		// The durable pending journal remains authoritative and will be discarded
-		// or replayed by state() once the sidecar is readable again. Do not keep a
-		// failed in-memory receipt wedged across every subsequent collection.
-		c.pending, c.pendingToken = nil, ""
-	}
-	return err
-}
-func (c *OpenCodeTokenCursor) write() error {
-	disk := openCodeCursorDisk{Version: 2, Generation: c.generation, State: c.current, Pending: c.pending, PendingToken: c.pendingToken}
-	return atomicSidecarWrite(c.path, disk)
 }
 
 type transcriptDiscoveryBounds struct {

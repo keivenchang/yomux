@@ -210,6 +210,14 @@ func OpenReadOnly(ctx context.Context, path string, openers ...OpenFunc) (*Datab
 // migrated ring is unsafe because callers could mistake missing slots for
 // empty data.
 func validateOptionalRingShape(ctx context.Context, db ReadOnlyDB) error {
+	value, err := db.Scalar(ctx, "PRAGMA user_version")
+	if err != nil {
+		return err
+	}
+	version, err := integer(value)
+	if err != nil {
+		return err
+	}
 	seen := 0
 	for table := range ringColumns {
 		rows, err := db.Rows(ctx, "PRAGMA table_info("+table+")")
@@ -225,7 +233,7 @@ func validateOptionalRingShape(ctx context.Context, db ReadOnlyDB) error {
 		if err != nil {
 			return &ValidationError{"cannot inspect YO!stats tables"}
 		}
-		return validateExactTableNames(rows, false)
+		return validateExactTableNames(rows, false, version)
 	}
 	if seen != len(ringColumns) {
 		return &ValidationError{"ring schema is partially present"}
@@ -234,7 +242,7 @@ func validateOptionalRingShape(ctx context.Context, db ReadOnlyDB) error {
 	if err != nil {
 		return &ValidationError{"cannot inspect YO!stats tables"}
 	}
-	if err := validateExactTableNames(tableRows, true); err != nil {
+	if err := validateExactTableNames(tableRows, true, version); err != nil {
 		return err
 	}
 	// The ReadOnlyDB abstraction is intentionally query-only; validate the
@@ -354,8 +362,11 @@ func validateOptionalRingShape(ctx context.Context, db ReadOnlyDB) error {
 	return nil
 }
 
-func validateExactTableNames(rows [][]any, includeRings bool) error {
+func validateExactTableNames(rows [][]any, includeRings bool, version int64) error {
 	expected := make(map[string]struct{}, len(coreColumns)+len(ringColumns))
+	if version == checkpointSchemaVersion {
+		expected["collector_checkpoints"] = struct{}{}
+	}
 	for table := range coreColumns {
 		expected[table] = struct{}{}
 	}
@@ -467,10 +478,10 @@ func readHeader(ctx context.Context, db ReadOnlyDB) (Header, error) {
 	if err != nil {
 		return Header{}, &ValidationError{"invalid schema version"}
 	}
-	if schemaVersion > SchemaVersion {
-		return Header{}, &SchemaTooNewError{Found: schemaVersion, Supported: SchemaVersion}
+	if schemaVersion > checkpointSchemaVersion {
+		return Header{}, &SchemaTooNewError{Found: schemaVersion, Supported: checkpointSchemaVersion}
 	}
-	if applicationID != int64(ApplicationID) || schemaVersion != SchemaVersion {
+	if applicationID != int64(ApplicationID) || (schemaVersion != SchemaVersion && schemaVersion != checkpointSchemaVersion) {
 		return Header{}, &ValidationError{fmt.Sprintf("expected application %#x/schema %d, found %#x/schema %d", ApplicationID, SchemaVersion, applicationID, schemaVersion)}
 	}
 	row, err := db.Rows(ctx, "SELECT minimum_writer_protocol, minimum_writer_build, source_generation FROM schema_meta WHERE singleton = 1")

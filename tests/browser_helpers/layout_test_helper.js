@@ -1624,6 +1624,7 @@ globalThis.__layoutTestApi = {
   },
   clientCanUseUnscopedHostRequestsForTest: clientCanUseUnscopedHostRequests,
   refreshTmuxStatusModeForTest: refreshTmuxStatusMode,
+  refreshTmuxStatusModeAfterSocketOpenForTest: refreshTmuxStatusModeAfterSocketOpen,
   jsDebugResourcePhaseTimingsForTest: jsDebugResourcePhaseTimings,
   applyApiRequestIdHeaderForTest: applyApiRequestIdHeader,
   inactiveTabItems,

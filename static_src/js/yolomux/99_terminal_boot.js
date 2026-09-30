@@ -906,6 +906,12 @@ async function refreshTmuxStatusMode(session) {
   if (button) button.outerHTML = tmuxStatusToggleHtml(session);
 }
 
+function refreshTmuxStatusModeAfterSocketOpen(session) {
+  return refreshTmuxStatusMode(session).catch(error => {
+    if (error?.name !== 'AbortError') console.warn('tmux status read failed', error);
+  });
+}
+
 async function cycleTmuxStatusMode(session) {
   if (readOnlyMode) return;
   const payload = await apiFetchJson(`/api/tmux-status?session=${encodeURIComponent(session)}`, {method: 'POST'});
@@ -4957,7 +4963,7 @@ function connectTerminalSocket(session, item) {
       scheduleTerminalBlankScreenRefresh(session, {reason: 'socket-open'});
       scheduleRemoteResize(session);
     }
-    void refreshTmuxStatusMode(session).catch(error => console.warn('tmux status read failed', error));
+    void refreshTmuxStatusModeAfterSocketOpen(session);
     updateTypingIndicator(session);
     updateStatus();
     refreshTrackedSessionChrome(session);

@@ -444,7 +444,7 @@ func TestSingleBucketSnapshotUsesOneValidTransportPayload(t *testing.T) {
 	}
 }
 
-func TestChunkedStreamSeedsCompleteSnapshotForTheNextDelta(t *testing.T) {
+func TestChunkedStreamKeepsTypedSnapshotForTheNextDelta(t *testing.T) {
 	buckets := make([]stats.MaterializedBucket, 300)
 	largeSeriesName := "series-" + strings.Repeat("x", 5000)
 	for index := range buckets {
@@ -460,7 +460,7 @@ func TestChunkedStreamSeedsCompleteSnapshotForTheNextDelta(t *testing.T) {
 		Materialized:    stats.MaterializedLayer{Start: 0, End: 300, Resolution: 1, Buckets: buckets},
 	}
 	query := statsQuery{rangeSeconds: 300, resolution: 1, resolutionAuto: true}
-	payloads, seed, err := streamSnapshotPayloads(snapshot, query)
+	payloads, err := snapshotPayloadsForQuery(snapshot, query)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -473,10 +473,6 @@ func TestChunkedStreamSeedsCompleteSnapshotForTheNextDelta(t *testing.T) {
 	if !ok || len(firstBuckets) >= len(buckets) {
 		t.Fatalf("first stream payload did not contain one chunk: %T len=%d", first["buckets"], len(firstBuckets))
 	}
-	seedBuckets, ok := seed["buckets"].([]map[string]any)
-	if !ok || len(seedBuckets) != len(buckets) {
-		t.Fatalf("delta predecessor lost buckets: %T len=%d want=%d", seed["buckets"], len(seedBuckets), len(buckets))
-	}
 	for index := 1; index < chunkCount; index++ {
 		chunkBuckets, ok := payloads[index]["buckets"].([]map[string]any)
 		if !ok || len(chunkBuckets) == 0 {
@@ -488,8 +484,8 @@ func TestChunkedStreamSeedsCompleteSnapshotForTheNextDelta(t *testing.T) {
 	next.CacheGeneration = 8
 	next.Materialized.Buckets = append([]stats.MaterializedBucket(nil), buckets...)
 	next.Materialized.Buckets[150].Series = []stats.MaterializedSeries{{Name: largeSeriesName, Value: 999, SourceCount: 1, FirstObservedAt: 150, LastObservedAt: 150}}
-	current := snapshotWire(next, query)
-	delta := deltaFromWireMaps(seed, current, statsQuery{rangeSeconds: 300, resolution: 1, afterCacheGeneration: 7})
+	previousWire, currentWire := statsDeltaWirePair(snapshot, next, query)
+	delta := deltaFromWireMaps(previousWire, currentWire, statsQuery{rangeSeconds: 300, resolution: 1, afterCacheGeneration: 7})
 	deltaBuckets, ok := delta["buckets"].([]map[string]any)
 	if !ok || len(deltaBuckets) != 1 || deltaBuckets[0]["start"] != float64(150) {
 		t.Fatalf("chunked stream delta was not minimal: buckets=%#v", delta["buckets"])
@@ -2504,7 +2500,7 @@ func TestStatsSnapshotSeedsDeltaHistoryForSubsequentPublication(t *testing.T) {
 	// A reconnect may receive a 304 when its generation is still current. It
 	// must seed the same predecessor as a 200 snapshot before the next delta.
 	s.statsDeltaMu.Lock()
-	s.statsDeltaHistory = nil
+	s.statsDeltaRevisions = nil
 	s.statsDeltaNextRevision = nil
 	s.statsDeltaMu.Unlock()
 	unchanged := httptest.NewRecorder()
@@ -2980,7 +2976,7 @@ func TestStatsStreamEmitsRepairWhenDeltaBaseIsEvicted(t *testing.T) {
 	}
 	key := statsDeltaKey{rangeSeconds: 300, resolution: 1}
 	s.statsDeltaMu.Lock()
-	delete(s.statsDeltaHistory[key], int64(baseGeneration))
+	delete(s.statsDeltaRevisions[key], int64(baseGeneration))
 	s.statsDeltaMu.Unlock()
 	if _, err := writer.AppendBatch(ctx, stats.AppendBatch{Observations: []stats.Observation{{
 		EventID: "stream-repair-next", Family: "cpu", SourceID: "host", ObservedAt: float64(now.Unix() - 10),

@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -150,631 +149,210 @@ func TestWriterIntegrationWithTranscriptAndOpenCodeFacts(t *testing.T) {
 	t.Logf("SQLite readback: schema=%d generation=%d observations=%d usage_atoms=%d input_tokens=%g output_tokens=%g", schemaVersion, sourceGeneration, len(observations), len(usage), totalQuantity(usage, "input"), totalQuantity(usage, "output"))
 }
 
-func TestTranscriptStatsCrossStoreCrashBoundariesReplayExactlyOnce(t *testing.T) {
+func TestTranscriptStatsCheckpointTransactionSurvivesCrashBoundaries(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	transcriptPath := filepath.Join(root, "claude.jsonl")
-	cursorPath := filepath.Join(root, "transcript-cursors.json")
-	databasePath := filepath.Join(root, "stats.sqlite3")
-	source := TranscriptSource{Path: transcriptPath, Provider: "claude", SourceID: "claude", ThreadID: "thread"}
-	writeJSONL(t, transcriptPath, usageClaude(1, "first", 10, 2))
-	state := &TranscriptScannerState{}
-	scan, err := ScanTranscript(source, state, TranscriptScanOptions{})
-	if err != nil || scan.Receipt == nil || len(scan.Atoms) != 2 {
-		t.Fatalf("initial transcript scan = %+v, err=%v", scan, err)
-	}
-	observations := make([]Observation, 0, len(scan.Atoms))
-	for _, atom := range scan.Atoms {
-		observations = append(observations, Observation{
-			EventID: usageFactObservationID(atom), Family: "usage", SourceID: "claude", ObservedAt: atom.ObservedAt,
-			EpochID: "usage-epoch", OwnerGeneration: 1, Payload: atom.Payload,
-		})
-	}
-	batch := AppendBatch{Observations: observations, UsageAtoms: scan.Atoms}
-
-	// Crash after the cursor prepare but before the stats transaction: the new
-	// owner must discard the pending sidecar state and replay the source.
-	store := NewTranscriptCursorStore(cursorPath)
-	if err := store.Prepare(source, scan.Receipt.before, scan.Receipt.after); err != nil {
-		t.Fatal(err)
-	}
-	preparedBytes, err := os.ReadFile(cursorPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var preparedDisk transcriptCursorDisk
-	if err := json.Unmarshal(preparedBytes, &preparedDisk); err != nil {
-		t.Fatalf("decode prepared transcript cursor: %v", err)
-	}
-	key := transcriptCursorKey(source)
-	if preparedDisk.PendingTokens[key] == "" || preparedDisk.Pending[key].Offset != scan.Receipt.after.Offset || preparedDisk.States[key].Offset != scan.Receipt.before.Offset {
-		t.Fatalf("cursor prepare was not durably staged: committed=%+v pending=%+v token=%q", preparedDisk.States[key], preparedDisk.Pending[key], preparedDisk.PendingTokens[key])
-	}
-	restarted := NewTranscriptCursorStore(cursorPath)
-	loaded, err := restarted.State(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.Offset != 0 {
-		t.Fatalf("cursor advanced before stats append: %+v", loaded)
-	}
-	recoveredBytes, err := os.ReadFile(cursorPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var recoveredDisk transcriptCursorDisk
-	if err := json.Unmarshal(recoveredBytes, &recoveredDisk); err != nil {
-		t.Fatalf("decode recovered transcript cursor: %v", err)
-	}
-	if len(recoveredDisk.Pending) != 0 || len(recoveredDisk.PendingTokens) != 0 {
-		t.Fatalf("restarted cursor did not discard the uncommitted prepare: %+v", recoveredDisk)
-	}
+	sourcePath := filepath.Join(root, "claude.jsonl")
+	databasePath := filepath.Join(root, "stats-v9.sqlite3")
+	source := TranscriptSource{Path: sourcePath, Provider: "claude", SourceID: "claude", ThreadID: "thread"}
+	writeJSONL(t, sourcePath, usageClaude(1, "first", 10, 2))
 	writer, err := OpenWriter(ctx, databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result, appendErr := writer.AppendBatch(ctx, batch); appendErr != nil || result.UsageAccepted != len(scan.Atoms) {
-		t.Fatalf("replayed first append = %+v, err=%v", result, appendErr)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := restarted.Prepare(source, loaded, scan.Receipt.after); err != nil {
-		t.Fatal(err)
-	}
-	if err := restarted.Commit(source, scan.Receipt.after); err != nil {
-		t.Fatal(err)
-	}
-
-	// Crash after the stats transaction but before cursor commit: replaying the
-	// same source must be accepted as duplicate facts, then the cursor can be
-	// committed without double counting.
-	store = NewTranscriptCursorStore(cursorPath)
-	committedBefore, err := store.State(source)
+	collector := NewAgentTokenCollector(writer, nil, AgentTokenCollectorConfig{TranscriptCursorPath: filepath.Join(root, "cursor.json")})
+	initial, err := collector.transcriptCursor.State(source)
 	if err != nil {
 		t.Fatal(err)
 	}
-	appendJSONL(t, transcriptPath, usageClaude(2, "second", 15, 3), false)
-	nextState := cloneTranscriptState(committedBefore)
-	nextScan, err := ScanTranscript(source, &nextState, TranscriptScanOptions{})
-	if err != nil || nextScan.Receipt == nil || len(nextScan.Atoms) != 2 {
-		t.Fatalf("second transcript scan = %+v, err=%v", nextScan, err)
+	state := cloneTranscriptState(initial)
+	first, err := ScanTranscript(source, &state, TranscriptScanOptions{})
+	if err != nil || first.Receipt == nil || len(first.Atoms) != 2 {
+		t.Fatalf("initial scan=%+v err=%v", first, err)
 	}
-	nextObservations := make([]Observation, 0, len(nextScan.Atoms))
-	for _, atom := range nextScan.Atoms {
-		nextObservations = append(nextObservations, Observation{
-			EventID: usageFactObservationID(atom), Family: "usage", SourceID: "claude", ObservedAt: atom.ObservedAt,
-			EpochID: "usage-epoch", OwnerGeneration: 1, Payload: atom.Payload,
-		})
-	}
-	if err := store.Prepare(source, nextScan.Receipt.before, nextScan.Receipt.after); err != nil {
-		t.Fatal(err)
-	}
-	writer, err = OpenWriter(ctx, databasePath)
+	checkpoint, err := encodeTranscriptCheckpoint(transcriptCursorKey(source), first.Receipt.after, initial.checkpointRevision)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := writer.AppendBatch(ctx, AppendBatch{Observations: nextObservations, UsageAtoms: nextScan.Atoms})
-	if err != nil {
+	firstBatch := AppendBatch{UsageAtoms: first.Atoms}
+	for _, atom := range first.Atoms {
+		firstBatch.Observations = append(firstBatch.Observations, Observation{EventID: usageFactObservationID(atom), Family: "usage", SourceID: "claude", ObservedAt: atom.ObservedAt, EpochID: "usage-epoch", OwnerGeneration: 1, Payload: atom.Payload})
+	}
+	if _, err := writer.AppendWithCheckpoints(ctx, firstBatch, []Checkpoint{checkpoint}); err != nil {
 		t.Fatal(err)
 	}
-	if result.UsageAccepted != 2 || result.UsageDuplicate != 0 {
-		t.Fatalf("second append before simulated crash = %+v", result)
-	}
+	first.Receipt.Commit()
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	crashedOwner := NewTranscriptCursorStore(cursorPath)
-	loaded, err = crashedOwner.State(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.Offset != committedBefore.Offset {
-		t.Fatalf("cursor advanced after stats-only commit: before=%d after=%d", committedBefore.Offset, loaded.Offset)
-	}
-	replayState := loaded
-	replay, err := ScanTranscript(source, &replayState, TranscriptScanOptions{})
-	if err != nil || replay.Receipt == nil || len(replay.Atoms) != 2 {
-		t.Fatalf("post-crash replay scan = %+v, err=%v", replay, err)
-	}
+	// A crash before the next transaction leaves both facts and parser state at the last commit.
 	writer, err = OpenWriter(ctx, databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err = writer.AppendBatch(ctx, AppendBatch{Observations: nextObservations, UsageAtoms: replay.Atoms})
+	collector = NewAgentTokenCollector(writer, nil, AgentTokenCollectorConfig{TranscriptCursorPath: filepath.Join(root, "cursor.json")})
+	committed, err := collector.transcriptCursor.State(source)
+	if err != nil || committed.Offset != first.Receipt.after.Offset {
+		t.Fatalf("restart state=%+v err=%v", committed, err)
+	}
+	appendJSONL(t, sourcePath, usageClaude(2, "second", 15, 3), false)
+	scanState := cloneTranscriptState(committed)
+	second, err := ScanTranscript(source, &scanState, TranscriptScanOptions{})
+	if err != nil || second.Receipt == nil || len(second.Atoms) != 2 {
+		t.Fatalf("second scan=%+v err=%v", second, err)
+	}
+	batch := AppendBatch{UsageAtoms: second.Atoms}
+	observations := make([]Observation, 0, len(second.Atoms))
+	for _, atom := range second.Atoms {
+		observations = append(observations, Observation{EventID: usageFactObservationID(atom), Family: "usage", SourceID: "claude", ObservedAt: atom.ObservedAt, EpochID: "usage-epoch", OwnerGeneration: 1, Payload: atom.Payload})
+	}
+	batch.Observations = observations
+	next, err := encodeTranscriptCheckpoint(transcriptCursorKey(source), second.Receipt.after, committed.checkpointRevision)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.UsageAccepted != 0 || result.UsageDuplicate != 2 || result.ObservationsAccepted != 0 || result.ObservationsDuplicate != 2 {
-		t.Fatalf("post-crash duplicate replay = %+v", result)
+	// A failed fact append cannot publish its accompanying cursor.
+	conflicting := batch
+	conflicting.Observations = append([]Observation(nil), batch.Observations...)
+	conflicting.Observations[0].EventID = usageFactObservationID(first.Atoms[0])
+	conflicting.Observations[0].Payload = map[string]any{"changed": true}
+	if _, err := writer.AppendWithCheckpoints(ctx, conflicting, []Checkpoint{next}); err == nil {
+		t.Fatal("conflicting usage append succeeded")
+	}
+	afterFailure, err := collector.transcriptCursor.State(source)
+	if err != nil || afterFailure.Offset != committed.Offset {
+		t.Fatalf("failed append advanced cursor: %+v err=%v", afterFailure, err)
+	}
+	result, err := writer.AppendWithCheckpoints(ctx, batch, []Checkpoint{next})
+	if err != nil || result.UsageAccepted != 2 {
+		t.Fatalf("atomic append=%+v err=%v", result, err)
 	}
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := crashedOwner.Prepare(source, loaded, replay.Receipt.after); err != nil {
-		t.Fatal(err)
-	}
-	if err := crashedOwner.Commit(source, replay.Receipt.after); err != nil {
-		t.Fatal(err)
-	}
-	finalState, err := NewTranscriptCursorStore(cursorPath).State(source)
+
+	// Process loss after SQLite commits leaves both the facts and byte offset durable.
+	writer, err = OpenWriter(ctx, databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if finalState.Offset != replay.Receipt.after.Offset {
-		t.Fatalf("final cursor offset = %d, want %d", finalState.Offset, replay.Receipt.after.Offset)
+	defer writer.Close()
+	collector = NewAgentTokenCollector(writer, nil, AgentTokenCollectorConfig{TranscriptCursorPath: filepath.Join(root, "cursor.json")})
+	recovered, err := collector.transcriptCursor.State(source)
+	if err != nil || recovered.Offset != second.Receipt.after.Offset {
+		t.Fatalf("recovered state=%+v err=%v", recovered, err)
+	}
+	unchanged, err := ScanTranscript(source, &recovered, TranscriptScanOptions{})
+	if err != nil || len(unchanged.Atoms) != 0 {
+		t.Fatalf("unchanged recovery scan=%+v err=%v", unchanged, err)
+	}
+	result, err = writer.AppendBatch(ctx, batch)
+	if err != nil || result.UsageAccepted != 0 || result.UsageDuplicate != 2 {
+		t.Fatalf("duplicate fact replay=%+v err=%v", result, err)
 	}
 	reader, err := OpenReadOnly(ctx, databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	usage, err := reader.ReadUsageAtoms(ctx, 0, 10, MaxFactReadLimit)
-	if closeErr := reader.Close(); err == nil && closeErr != nil {
-		err = closeErr
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(usage) != 4 {
-		t.Fatalf("durable usage facts after both crash boundaries = %d, want 4", len(usage))
+	defer reader.Close()
+	usage, err := reader.ReadUsageAtoms(ctx, 0, 100, 10)
+	if err != nil || len(usage) != 4 {
+		t.Fatalf("durable usage=%d err=%v", len(usage), err)
 	}
 }
 
-func TestBudgetedTranscriptAppendAndCursorReplayAcrossCollectorRestarts(t *testing.T) {
+func TestBudgetedTranscriptCheckpointProgressAcrossCollectorRestarts(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	transcriptPath := filepath.Join(root, "claude.jsonl")
-	cursorPath := filepath.Join(root, "transcript-cursors.json")
-	databasePath := filepath.Join(root, "stats.sqlite3")
-	source := TranscriptSource{Path: transcriptPath, Provider: "claude", SourceID: "claude", ThreadID: "thread"}
-	writeJSONL(t, transcriptPath,
-		usageClaude(1, "first", 10, 2),
-		usageClaude(2, "second", 11, 3),
-		usageClaude(3, "third", 12, 4),
-	)
-	config := AgentTokenCollectorConfig{
-		TranscriptSources: func(context.Context, []AgentRecord) ([]TranscriptSource, error) {
-			return []TranscriptSource{source}, nil
-		},
-		TranscriptCursorPath:         cursorPath,
-		TranscriptMaxBytesPerCycle:   1 << 20,
-		TranscriptMaxRecordsPerCycle: 1,
-		EpochID:                      "synthetic-transcript",
-		EpochStartedAt:               1,
-		OwnerGeneration:              1,
-	}
-	eventIDFor := func(recordID string) string {
-		return "claude:" + transcriptPath + ":" + recordID
-	}
-	collect := func(collector *AgentTokenCollector, observed float64) (AppendBatch, []agentTokenReceipt) {
-		t.Helper()
-		batch, receipts, err := collector.collectTranscripts(ctx, observed, 10, nil, nil, AppendBatch{}, nil)
-		if err != nil {
-			t.Fatalf("collect synthetic transcript: %v", err)
-		}
-		if len(batch.UsageAtoms) > 2 {
-			t.Fatalf("bounded cycle returned %d atoms, want at most one record's two token facts", len(batch.UsageAtoms))
-		}
-		return batch, receipts
-	}
-
-	writer, err := OpenWriter(ctx, databasePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	firstOwner := NewAgentTokenCollector(writer, nil, config)
-	firstBatch, firstReceipts := collect(firstOwner, 10)
-	if len(firstBatch.UsageAtoms) != 2 || len(firstReceipts) == 0 {
-		t.Fatalf("first bounded scan = atoms:%d receipts:%d, want 2 and a cursor receipt", len(firstBatch.UsageAtoms), len(firstReceipts))
-	}
-	for _, atom := range firstBatch.UsageAtoms {
-		if atom.EventID != eventIDFor("first") {
-			t.Fatalf("first bounded scan consumed event %q, want %s", atom.EventID, eventIDFor("first"))
-		}
-	}
-	firstAppend, err := writer.AppendBatch(ctx, firstBatch)
-	if err != nil || firstAppend.UsageAccepted != 2 {
-		t.Fatalf("first stats append = %+v, err=%v", firstAppend, err)
-	}
-	// Simulate process death after durable facts commit but before cursor receipt
-	// commit. A new collector must replay this bounded batch, deduplicate it, then
-	// advance the cursor only after its own successful append.
-	state, err := NewTranscriptCursorStore(cursorPath).State(source)
-	if err != nil || state.Offset != 0 {
-		t.Fatalf("cursor advanced before receipt commit: state=%+v err=%v", state, err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	writer, err = OpenWriter(ctx, databasePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	restarted := NewAgentTokenCollector(writer, nil, config)
-	replayBatch, replayReceipts := collect(restarted, 11)
-	if !reflect.DeepEqual(firstBatch.UsageAtoms, replayBatch.UsageAtoms) {
-		t.Fatalf("post-crash bounded replay differs: first=%+v replay=%+v", firstBatch.UsageAtoms, replayBatch.UsageAtoms)
-	}
-	appendOK, appendErr := restarted.appendCollected(ctx, replayBatch, replayReceipts)
-	if !appendOK || appendErr != nil {
-		t.Fatalf("post-crash replay append = ok:%v err:%v", appendOK, appendErr)
-	}
-	if got := restarted.Counters().UsageDuplicates; got != 2 {
-		t.Fatalf("post-crash duplicate count = %d, want 2", got)
-	}
-	state, err = NewTranscriptCursorStore(cursorPath).State(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	priorOffset := state.Offset
-	if priorOffset <= 0 || priorOffset >= transcriptFixtureSize(t, transcriptPath) {
-		t.Fatalf("cursor after replay commit = %d, want a partial backfill offset", priorOffset)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	for cycle, recordID := range []string{"second", "third"} {
-		writer, err = OpenWriter(ctx, databasePath)
+	path := filepath.Join(root, "claude.jsonl")
+	dbPath := filepath.Join(root, "stats-v9.sqlite3")
+	writeJSONL(t, path, usageClaude(1, "first", 10, 2), usageClaude(2, "second", 11, 3), usageClaude(3, "third", 12, 4))
+	source := TranscriptSource{Path: path, Provider: "claude", SourceID: "claude", ThreadID: "thread"}
+	config := AgentTokenCollectorConfig{TranscriptCursorPath: filepath.Join(root, "cursors.json"), TranscriptSources: func(context.Context, []AgentRecord) ([]TranscriptSource, error) {
+		return []TranscriptSource{source}, nil
+	}, TranscriptMaxBytesPerCycle: 1 << 20, TranscriptMaxRecordsPerCycle: 1, EpochID: "synthetic-transcript", EpochStartedAt: 1, OwnerGeneration: 1}
+	eventID := func(record string) string { return "claude:" + path + ":" + record }
+	previousOffset := int64(0)
+	for cycle, record := range []string{"first", "second", "third"} {
+		writer, err := OpenWriter(ctx, dbPath)
 		if err != nil {
 			t.Fatal(err)
 		}
-		owner := NewAgentTokenCollector(writer, nil, config)
-		batch, receipts := collect(owner, float64(12+cycle))
+		collector := NewAgentTokenCollector(writer, nil, config)
+		batch, receipts, err := collector.collectTranscripts(ctx, float64(10+cycle), 10, nil, nil, AppendBatch{}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if len(batch.UsageAtoms) != 2 || len(receipts) == 0 {
-			t.Fatalf("bounded cycle %d = atoms:%d receipts:%d, want 2 and a cursor receipt", cycle, len(batch.UsageAtoms), len(receipts))
+			t.Fatalf("cycle %d atoms=%d receipts=%d", cycle, len(batch.UsageAtoms), len(receipts))
 		}
 		for _, atom := range batch.UsageAtoms {
-			wantEventID := eventIDFor(recordID)
-			if atom.EventID != wantEventID {
-				t.Fatalf("bounded cycle %d consumed event %q, want %s", cycle, atom.EventID, wantEventID)
+			if atom.EventID != eventID(record) {
+				t.Fatalf("cycle %d consumed %q want %q", cycle, atom.EventID, eventID(record))
 			}
 		}
-		appendOK, appendErr = owner.appendCollected(ctx, batch, receipts)
-		if !appendOK || appendErr != nil {
-			t.Fatalf("bounded cycle %d append = ok:%v err:%v", cycle, appendOK, appendErr)
+		ok, err := collector.appendCollected(ctx, batch, receipts)
+		if err != nil || !ok {
+			t.Fatalf("cycle %d append=%t err=%v", cycle, ok, err)
 		}
-		if got := owner.Counters().UsageAccepted; got != 2 {
-			t.Fatalf("bounded cycle %d accepted %d facts, want 2", cycle, got)
-		}
-		state, err = NewTranscriptCursorStore(cursorPath).State(source)
+		state, err := collector.transcriptCursor.State(source)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if state.Offset <= priorOffset {
-			t.Fatalf("bounded cycle %d cursor offset = %d, did not advance past %d", cycle, state.Offset, priorOffset)
+		if state.Offset <= previousOffset {
+			t.Fatalf("cycle %d offset %d did not advance past %d", cycle, state.Offset, previousOffset)
 		}
-		priorOffset = state.Offset
+		previousOffset = state.Offset
 		if err := writer.Close(); err != nil {
 			t.Fatal(err)
 		}
 	}
-
-	state, err = NewTranscriptCursorStore(cursorPath).State(source)
+	if size := transcriptFixtureSize(t, path); previousOffset != size {
+		t.Fatalf("final byte offset=%d want=%d", previousOffset, size)
+	}
+	writer, err := OpenWriter(ctx, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if size := transcriptFixtureSize(t, transcriptPath); state.Offset != size {
-		t.Fatalf("bounded backfill cursor offset = %d, want %d", state.Offset, size)
+	defer writer.Close()
+	collector := NewAgentTokenCollector(writer, nil, config)
+	unchanged, receipts, err := collector.collectTranscripts(ctx, 20, 10, nil, nil, AppendBatch{}, nil)
+	if err != nil || len(unchanged.UsageAtoms) != 0 {
+		t.Fatalf("unchanged scan=%+v receipts=%d err=%v", unchanged, len(receipts), err)
 	}
-	appendJSONL(t, transcriptPath, usageClaude(4, "appended", 13, 5), false)
-	writer, err = OpenWriter(ctx, databasePath)
+	for _, receipt := range receipts {
+		for _, checkpoint := range receipt.checkpoints {
+			if checkpoint.Kind == "transcript" {
+				t.Fatal("unchanged transcript produced a source checkpoint")
+			}
+		}
+	}
+	if ok, err := collector.appendCollected(ctx, unchanged, receipts); err != nil || !ok {
+		t.Fatalf("commit unchanged scheduling checkpoint=%t err=%v", ok, err)
+	}
+	appendJSONL(t, path, usageClaude(4, "appended", 13, 5), false)
+	batch, receipts, err := collector.collectTranscripts(ctx, 21, 10, nil, nil, AppendBatch{}, nil)
+	if err != nil || len(batch.UsageAtoms) != 2 || len(receipts) == 0 {
+		t.Fatalf("appended scan=%+v receipts=%d err=%v", batch, len(receipts), err)
+	}
+	for _, atom := range batch.UsageAtoms {
+		if atom.EventID != eventID("appended") {
+			t.Fatalf("post-restart append consumed %q", atom.EventID)
+		}
+	}
+	ok, err := collector.appendCollected(ctx, batch, receipts)
+	if err != nil || !ok {
+		t.Fatalf("append=%t err=%v", ok, err)
+	}
+	reader, err := OpenReadOnly(ctx, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	appendedOwner := NewAgentTokenCollector(writer, nil, config)
-	appendedBatch, appendedReceipts := collect(appendedOwner, 14)
-	if len(appendedBatch.UsageAtoms) != 2 {
-		t.Fatalf("post-backfill append scan returned %d atoms, want 2", len(appendedBatch.UsageAtoms))
-	}
-	for _, atom := range appendedBatch.UsageAtoms {
-		if atom.EventID != eventIDFor("appended") {
-			t.Fatalf("post-backfill append consumed event %q, want %s", atom.EventID, eventIDFor("appended"))
-		}
-	}
-	appendOK, appendErr = appendedOwner.appendCollected(ctx, appendedBatch, appendedReceipts)
-	if !appendOK || appendErr != nil || appendedOwner.Counters().UsageAccepted != 2 {
-		t.Fatalf("post-backfill append = ok:%v err:%v counters:%+v", appendOK, appendErr, appendedOwner.Counters())
-	}
-	state, err = NewTranscriptCursorStore(cursorPath).State(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if size := transcriptFixtureSize(t, transcriptPath); state.Offset != size {
-		t.Fatalf("cursor after appended record = %d, want %d", state.Offset, size)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	reader, err := OpenReadOnly(ctx, databasePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	usage, err := reader.ReadUsageAtoms(ctx, 0, 10, MaxFactReadLimit)
-	if closeErr := reader.Close(); err == nil && closeErr != nil {
-		err = closeErr
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(usage) != 8 {
-		t.Fatalf("durable synthetic usage facts = %d, want 8 without replay double-counting", len(usage))
-	}
-	seen := make(map[string]struct{}, len(usage))
-	appendedDirections := map[string]bool{}
-	for _, atom := range usage {
-		key := atom.EventID + "\x00" + atom.Direction
-		if _, exists := seen[key]; exists {
-			t.Fatalf("duplicate durable usage identity %q", key)
-		}
-		seen[key] = struct{}{}
-		if atom.EventID == eventIDFor("appended") {
-			quantity, ok := atom.Payload["quantity"].(float64)
-			if !ok {
-				t.Fatalf("appended %s quantity has type %T", atom.Direction, atom.Payload["quantity"])
-			}
-			want := map[string]float64{"input": 13, "output": 5}[atom.Direction]
-			if quantity != want {
-				t.Fatalf("appended %s quantity = %v, want %v", atom.Direction, quantity, want)
-			}
-			appendedDirections[atom.Direction] = true
-		}
-	}
-	if !appendedDirections["input"] || !appendedDirections["output"] {
-		t.Fatalf("durable facts omit the appended event's input/output pair: %#v", appendedDirections)
-	}
-}
-
-func TestTranscriptStatsProcessCrashAfterAppendReplaysWithoutDoubleCount(t *testing.T) {
-	if os.Getenv("YOLOMUX_TRANSCRIPT_CRASH_HELPER") == "1" {
-		ctx := context.Background()
-		source := TranscriptSource{Path: os.Getenv("YOLOMUX_TRANSCRIPT_CRASH_SOURCE"), Provider: "claude", SourceID: "claude", ThreadID: "thread"}
-		scan, err := ScanTranscript(source, &TranscriptScannerState{}, TranscriptScanOptions{})
-		if err != nil || scan.Receipt == nil {
-			fmt.Fprintln(os.Stdout, "scan failed:", err)
-			os.Exit(2)
-		}
-		cursor := NewTranscriptCursorStore(os.Getenv("YOLOMUX_TRANSCRIPT_CRASH_CURSOR"))
-		if err := cursor.Prepare(source, scan.Receipt.before, scan.Receipt.after); err != nil {
-			fmt.Fprintln(os.Stdout, "cursor prepare failed:", err)
-			os.Exit(3)
-		}
-		observations := make([]Observation, 0, len(scan.Atoms))
-		for _, atom := range scan.Atoms {
-			observations = append(observations, Observation{
-				EventID: usageFactObservationID(atom), Family: "usage", SourceID: "claude", ObservedAt: atom.ObservedAt,
-				EpochID: "usage-epoch", OwnerGeneration: 1, Payload: atom.Payload,
-			})
-		}
-		writer, err := OpenWriter(ctx, os.Getenv("YOLOMUX_TRANSCRIPT_CRASH_DATABASE"))
-		if err != nil {
-			fmt.Fprintln(os.Stdout, "writer open failed:", err)
-			os.Exit(4)
-		}
-		if _, err := writer.AppendBatch(ctx, AppendBatch{Observations: observations, UsageAtoms: scan.Atoms}); err != nil {
-			fmt.Fprintln(os.Stdout, "stats append failed:", err)
-			os.Exit(5)
-		}
-		// Exit without closing the writer or committing the cursor. The OS releases
-		// the lease, while SQLite keeps the committed facts and the cursor remains
-		// at its pre-append position for the replacement owner to replay.
-		fmt.Fprintln(os.Stdout, "appended")
-		os.Exit(0)
-	}
-
-	root := t.TempDir()
-	transcriptPath := filepath.Join(root, "claude.jsonl")
-	cursorPath := filepath.Join(root, "transcript-cursors.json")
-	databasePath := filepath.Join(root, "stats.sqlite3")
-	writeJSONL(t, transcriptPath, usageClaude(1, "process-crash", 10, 2))
-	command := exec.Command(os.Args[0], "-test.run=^TestTranscriptStatsProcessCrashAfterAppendReplaysWithoutDoubleCount$")
-	command.Env = testsupport.SyntheticEnvironment(
-		"YOLOMUX_TRANSCRIPT_CRASH_HELPER=1",
-		"YOLOMUX_TRANSCRIPT_CRASH_SOURCE="+transcriptPath,
-		"YOLOMUX_TRANSCRIPT_CRASH_CURSOR="+cursorPath,
-		"YOLOMUX_TRANSCRIPT_CRASH_DATABASE="+databasePath,
-	)
-	stdout, err := command.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	line, err := bufio.NewReader(stdout).ReadString('\n')
-	if err != nil {
-		t.Fatalf("crash helper did not announce append: %v", err)
-	}
-	if line != "appended\n" {
-		t.Fatalf("crash helper announcement = %q", line)
-	}
-	if err := command.Wait(); err != nil {
-		t.Fatalf("crash helper exited with append error: %v", err)
-	}
-
-	source := TranscriptSource{Path: transcriptPath, Provider: "claude", SourceID: "claude", ThreadID: "thread"}
-	cursor := NewTranscriptCursorStore(cursorPath)
-	state, err := cursor.State(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state.Offset != 0 {
-		t.Fatalf("crashed cursor advanced before commit: %+v", state)
-	}
-	scan, err := ScanTranscript(source, &state, TranscriptScanOptions{})
-	if err != nil || scan.Receipt == nil || len(scan.Atoms) != 2 {
-		t.Fatalf("restart replay scan = %+v, err=%v", scan, err)
-	}
-	observations := make([]Observation, 0, len(scan.Atoms))
-	for _, atom := range scan.Atoms {
-		observations = append(observations, Observation{
-			EventID: usageFactObservationID(atom), Family: "usage", SourceID: "claude", ObservedAt: atom.ObservedAt,
-			EpochID: "usage-epoch", OwnerGeneration: 1, Payload: atom.Payload,
-		})
-	}
-	writer, err := OpenWriter(context.Background(), databasePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := writer.AppendBatch(context.Background(), AppendBatch{Observations: observations, UsageAtoms: scan.Atoms})
-	if err != nil {
-		_ = writer.Close()
-		t.Fatal(err)
-	}
-	if result.UsageAccepted != 0 || result.UsageDuplicate != len(scan.Atoms) || result.ObservationsAccepted != 0 || result.ObservationsDuplicate != len(observations) {
-		_ = writer.Close()
-		t.Fatalf("process-crash replay changed durable facts: %+v", result)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := cursor.Prepare(source, state, scan.Receipt.after); err != nil {
-		t.Fatal(err)
-	}
-	if err := cursor.Commit(source, scan.Receipt.after); err != nil {
-		t.Fatal(err)
-	}
-	committed, err := NewTranscriptCursorStore(cursorPath).State(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if committed.Offset != scan.Receipt.after.Offset {
-		t.Fatalf("replayed cursor offset = %d, want %d", committed.Offset, scan.Receipt.after.Offset)
-	}
-}
-
-func TestTranscriptStatsProcessCrashMatrixRecoversEveryBoundary(t *testing.T) {
-	const helperTest = "^TestTranscriptStatsProcessCrashMatrixRecoversEveryBoundary$"
-	if os.Getenv("YOLOMUX_TRANSCRIPT_MATRIX_HELPER") == "1" {
-		ctx := context.Background()
-		stage := os.Getenv("YOLOMUX_TRANSCRIPT_MATRIX_STAGE")
-		source := TranscriptSource{Path: os.Getenv("YOLOMUX_TRANSCRIPT_MATRIX_SOURCE"), Provider: "claude", SourceID: "claude", ThreadID: "thread"}
-		if stage == "before_source_read" {
-			fmt.Fprintln(os.Stdout, stage)
-			os.Exit(0)
-		}
-		scan, err := ScanTranscript(source, &TranscriptScannerState{}, TranscriptScanOptions{})
-		if err != nil || scan.Receipt == nil || len(scan.Atoms) != 2 {
-			fmt.Fprintln(os.Stdout, "scan failed:", err)
-			os.Exit(2)
-		}
-		if stage == "after_source_read" {
-			fmt.Fprintln(os.Stdout, stage)
-			os.Exit(0)
-		}
-		cursor := NewTranscriptCursorStore(os.Getenv("YOLOMUX_TRANSCRIPT_MATRIX_CURSOR"))
-		if err := cursor.Prepare(source, scan.Receipt.before, scan.Receipt.after); err != nil {
-			fmt.Fprintln(os.Stdout, "cursor prepare failed:", err)
-			os.Exit(3)
-		}
-		if stage == "after_cursor_prepare" {
-			fmt.Fprintln(os.Stdout, stage)
-			os.Exit(0)
-		}
-		observations := make([]Observation, 0, len(scan.Atoms))
-		for _, atom := range scan.Atoms {
-			observations = append(observations, Observation{
-				EventID: usageFactObservationID(atom), Family: "usage", SourceID: "claude", ObservedAt: atom.ObservedAt,
-				EpochID: "usage-epoch", OwnerGeneration: 1, Payload: atom.Payload,
-			})
-		}
-		writer, err := OpenWriter(ctx, os.Getenv("YOLOMUX_TRANSCRIPT_MATRIX_DATABASE"))
-		if err != nil {
-			fmt.Fprintln(os.Stdout, "writer open failed:", err)
-			os.Exit(4)
-		}
-		if _, err := writer.AppendBatch(ctx, AppendBatch{Observations: observations, UsageAtoms: scan.Atoms}); err != nil {
-			fmt.Fprintln(os.Stdout, "stats append failed:", err)
-			os.Exit(5)
-		}
-		// os.Exit intentionally skips writer close and cursor commit to model process loss.
-		fmt.Fprintln(os.Stdout, "after_stats_append")
-		os.Exit(0)
-	}
-
-	for _, stage := range []string{"before_source_read", "after_source_read", "after_cursor_prepare", "after_stats_append"} {
-		t.Run(stage, func(t *testing.T) {
-			root := t.TempDir()
-			transcriptPath := filepath.Join(root, "claude.jsonl")
-			cursorPath := filepath.Join(root, "transcript-cursors.json")
-			databasePath := filepath.Join(root, "stats.sqlite3")
-			writeJSONL(t, transcriptPath, usageClaude(1, "matrix-crash", 10, 2))
-			command := exec.Command(os.Args[0], "-test.run="+helperTest)
-			command.Env = testsupport.SyntheticEnvironment(
-				"YOLOMUX_TRANSCRIPT_MATRIX_HELPER=1",
-				"YOLOMUX_TRANSCRIPT_MATRIX_STAGE="+stage,
-				"YOLOMUX_TRANSCRIPT_MATRIX_SOURCE="+transcriptPath,
-				"YOLOMUX_TRANSCRIPT_MATRIX_CURSOR="+cursorPath,
-				"YOLOMUX_TRANSCRIPT_MATRIX_DATABASE="+databasePath,
-			)
-			output, err := command.CombinedOutput()
-			if err != nil {
-				t.Fatalf("synthetic crash helper failed at %s: %v\n%s", stage, err, output)
-			}
-			if !bytes.Contains(output, []byte(stage+"\n")) {
-				t.Fatalf("synthetic crash helper did not reach %s: %s", stage, output)
-			}
-
-			source := TranscriptSource{Path: transcriptPath, Provider: "claude", SourceID: "claude", ThreadID: "thread"}
-			cursor := NewTranscriptCursorStore(cursorPath)
-			state, err := cursor.State(source)
-			if err != nil || state.Offset != 0 {
-				t.Fatalf("cursor after restart at %s = %+v, err=%v; want unadvanced cursor", stage, state, err)
-			}
-			scan, err := ScanTranscript(source, &state, TranscriptScanOptions{})
-			if err != nil || scan.Receipt == nil || len(scan.Atoms) != 2 {
-				t.Fatalf("restart replay at %s = atoms:%d receipt:%t err:%v", stage, len(scan.Atoms), scan.Receipt != nil, err)
-			}
-			observations := make([]Observation, 0, len(scan.Atoms))
-			for _, atom := range scan.Atoms {
-				observations = append(observations, Observation{
-					EventID: usageFactObservationID(atom), Family: "usage", SourceID: "claude", ObservedAt: atom.ObservedAt,
-					EpochID: "usage-epoch", OwnerGeneration: 1, Payload: atom.Payload,
-				})
-			}
-			writer, err := OpenWriter(context.Background(), databasePath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			result, err := writer.AppendBatch(context.Background(), AppendBatch{Observations: observations, UsageAtoms: scan.Atoms})
-			if err != nil {
-				_ = writer.Close()
-				t.Fatal(err)
-			}
-			wantAccepted, wantDuplicates := 2, 0
-			if stage == "after_stats_append" {
-				wantAccepted, wantDuplicates = 0, 2
-			}
-			if result.UsageAccepted != wantAccepted || result.UsageDuplicate != wantDuplicates || result.ObservationsAccepted != wantAccepted || result.ObservationsDuplicate != wantDuplicates {
-				_ = writer.Close()
-				t.Fatalf("recovery append at %s = %+v, want accepted=%d duplicate=%d", stage, result, wantAccepted, wantDuplicates)
-			}
-			if err := writer.Close(); err != nil {
-				t.Fatal(err)
-			}
-			if err := cursor.Prepare(source, scan.Receipt.before, scan.Receipt.after); err != nil {
-				t.Fatal(err)
-			}
-			if err := cursor.Commit(source, scan.Receipt.after); err != nil {
-				t.Fatal(err)
-			}
-			committed, err := NewTranscriptCursorStore(cursorPath).State(source)
-			if err != nil || committed.Offset != scan.Receipt.after.Offset {
-				t.Fatalf("recovered cursor at %s = %+v, err=%v", stage, committed, err)
-			}
-			reader, err := OpenReadOnly(context.Background(), databasePath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			usage, readErr := reader.ReadUsageAtoms(context.Background(), 0, 10, MaxFactReadLimit)
-			closeErr := reader.Close()
-			if readErr != nil || closeErr != nil || len(usage) != 2 {
-				t.Fatalf("durable facts at %s = %d, readErr=%v closeErr=%v; want exactly 2", stage, len(usage), readErr, closeErr)
-			}
-		})
+	defer reader.Close()
+	usage, err := reader.ReadUsageAtoms(ctx, 0, 100, MaxFactReadLimit)
+	if err != nil || len(usage) != 8 {
+		t.Fatalf("durable usage=%d err=%v want 8", len(usage), err)
 	}
 }
 

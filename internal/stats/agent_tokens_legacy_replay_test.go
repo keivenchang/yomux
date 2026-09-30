@@ -43,7 +43,12 @@ func testLegacyOpenCodeReplay(t *testing.T, quantityConflict, changeAttribution 
 			return []AgentRecord{{Kind: "opencode", OpenCodeSession: "ses-1", TmuxSession: liveSession}}, nil
 		},
 	}
-	seed := NewAgentTokenCollector(writer, clock, config)
+	seedWriter, err := OpenWriter(ctx, filepath.Join(t.TempDir(), "seed.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer seedWriter.Close()
+	seed := NewAgentTokenCollector(seedWriter, clock, config)
 	defer seed.Stop()
 	batch, receipts, err := seed.collect(ctx, float64(clock.now.Unix()), 10)
 	if err != nil || len(batch.UsageAtoms) == 0 || len(receipts) == 0 {
@@ -68,12 +73,12 @@ func testLegacyOpenCodeReplay(t *testing.T, quantityConflict, changeAttribution 
 	if _, err := writer.AppendBatch(ctx, AppendBatch{UsageAtoms: legacyAtoms}); err != nil {
 		t.Fatal(err)
 	}
-	if err := commitReceipts(receipts); err != nil {
-		t.Fatal(err)
-	}
 	seed.Stop()
-	state, err := NewOpenCodeTokenCursor(cursorPath).state()
-	if err != nil {
+	var state openCodeCursorState
+	if len(receipts[0].checkpoints) != 1 {
+		t.Fatal("missing proposed OpenCode checkpoint")
+	}
+	if err := json.Unmarshal(receipts[0].checkpoints[0].State, &state); err != nil {
 		t.Fatal(err)
 	}
 	state.StatsDatabaseIdentity = ""
@@ -101,7 +106,7 @@ func testLegacyOpenCodeReplay(t *testing.T, quantityConflict, changeAttribution 
 		if accepted || appendErr == nil || !strings.Contains(appendErr.Error(), "usage atom identity conflicts") {
 			t.Fatalf("real quantity conflict was accepted: accepted=%v err=%v", accepted, appendErr)
 		}
-		after, err := NewOpenCodeTokenCursor(cursorPath).state()
+		after, err := loadCollectorOpenCodeState(owner)
 		if err != nil || !reflect.DeepEqual(after, state) {
 			t.Fatalf("failed append advanced cursor: before=%+v after=%+v err=%v", state, after, err)
 		}
@@ -110,7 +115,7 @@ func testLegacyOpenCodeReplay(t *testing.T, quantityConflict, changeAttribution 
 			t.Fatalf("legacy metadata replay blocked fresh usage: accepted=%v err=%v", accepted, appendErr)
 		}
 		wantTotal += 5
-		after, err := NewOpenCodeTokenCursor(cursorPath).state()
+		after, err := loadCollectorOpenCodeState(owner)
 		if err != nil || after.StatsDatabaseIdentity == "" || after.Parts["ses-1"].RowID <= state.Parts["ses-1"].RowID {
 			t.Fatalf("successful upgrade did not advance durable cursor: before=%+v after=%+v err=%v", state, after, err)
 		}

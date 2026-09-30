@@ -2,6 +2,7 @@ package stats
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -32,6 +33,219 @@ func writeJSONL(t *testing.T, path string, records ...map[string]any) {
 		if err := encoder.Encode(record); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func transcriptCheckpointFixture(t *testing.T, legacyPath string) *databaseTranscriptCursors {
+	t.Helper()
+	if err := os.MkdirAll(legacyPath+".state", 0700); err != nil {
+		t.Fatal(err)
+	}
+	w, err := OpenWriter(context.Background(), filepath.Join(legacyPath+".state", "stats.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+	return &databaseTranscriptCursors{writer: w, config: AgentTokenCollectorConfig{TranscriptCursorPath: legacyPath, CursorPath: legacyPath + ".opencode.json"}}
+}
+
+func restartTranscriptCheckpointFixture(store *databaseTranscriptCursors) *databaseTranscriptCursors {
+	return &databaseTranscriptCursors{writer: store.writer, config: store.config}
+}
+
+// Scanner fixtures alter parser state deliberately; obtain the current durable
+// revision for that fixture write. Conflict tests below supply stale revisions
+// directly to AppendWithCheckpoints instead.
+func saveTranscriptCheckpointForTest(store *databaseTranscriptCursors, source TranscriptSource, state TranscriptScannerState) error {
+	old, err := store.State(source)
+	if err != nil {
+		return err
+	}
+	cp, err := encodeTranscriptCheckpoint(transcriptCursorKey(source), state, old.checkpointRevision)
+	if err != nil {
+		return err
+	}
+	_, err = store.writer.AppendWithCheckpoints(context.Background(), AppendBatch{}, []Checkpoint{cp})
+	return err
+}
+
+func gzipTranscriptSampleFixture(sample []byte) ([]byte, error) {
+	var data bytes.Buffer
+	w := gzip.NewWriter(&data)
+	if _, err := w.Write(sample); err != nil {
+		return nil, err
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+	return data.Bytes(), nil
+}
+
+func TestTranscriptCheckpointTransactionKeepsFactsScheduleAndRootsAtomic(t *testing.T) {
+	ctx := context.Background()
+	store := transcriptCheckpointFixture(t, filepath.Join(t.TempDir(), "cursors.json"))
+	source := TranscriptSource{Path: "/fixture/claude.jsonl", Provider: "claude"}
+	if _, err := store.State(source); err != nil {
+		t.Fatal(err)
+	}
+	w := store.writer.(*Writer)
+	state := TranscriptScannerState{Path: source.Path, Offset: 7, Prefix: []byte("prefix"), PendingLine: []byte("partial")}
+	cp, err := encodeTranscriptCheckpoint(transcriptCursorKey(source), state, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schedule, ok, err := w.LoadCheckpoint(ctx, "collector/schedule")
+	if err != nil || !ok {
+		t.Fatalf("initial schedule: %v %v", ok, err)
+	}
+	wantSchedule := transcriptCursorSchedule{NextSource: "live", NextHistoricalSource: "history", LiveTranscriptPriorityRuns: 2}
+	schedule.State, err = json.Marshal(wantSchedule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := strings.Repeat("a", 64)
+	roots, err := store.completedRootsCheckpoint([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := AppendBatch{UsageAtoms: []UsageAtom{{EventID: "fixture", ObservedAt: 10, Direction: "input", Modality: "text", CacheRole: "none", Unit: "tokens", Payload: map[string]any{"quantity": 3.0}}}}
+	updates := []Checkpoint{cp, roots, schedule}
+	if _, err := w.db.ExecContext(ctx, `CREATE TRIGGER fixture_checkpoint_failure BEFORE UPDATE ON collector_checkpoints WHEN NEW.checkpoint_key='collector/schedule' BEGIN SELECT RAISE(ABORT,'fixture checkpoint write failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.AppendWithCheckpoints(ctx, batch, updates); err == nil {
+		t.Fatal("failed checkpoint transaction unexpectedly committed")
+	}
+	if state, err := restartTranscriptCheckpointFixture(store).State(source); err != nil || state.Offset != 0 {
+		t.Fatalf("failed transaction advanced cursor: %+v %v", state, err)
+	}
+	if got, err := store.Schedule(); err != nil || got != (transcriptCursorSchedule{}) {
+		t.Fatalf("failed transaction advanced schedule: %+v %v", got, err)
+	}
+	if got, err := store.CompletedCodexForkRepairRoots(); err != nil || len(got) != 0 {
+		t.Fatalf("failed transaction advanced roots: %+v %v", got, err)
+	}
+	var facts int
+	if err := w.db.QueryRowContext(ctx, "SELECT count(*) FROM usage_atoms").Scan(&facts); err != nil || facts != 0 {
+		t.Fatalf("failed transaction persisted facts: %d %v", facts, err)
+	}
+	if _, err := w.db.ExecContext(ctx, "DROP TRIGGER fixture_checkpoint_failure"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.AppendWithCheckpoints(ctx, batch, updates); err != nil {
+		t.Fatal(err)
+	}
+	restarted := restartTranscriptCheckpointFixture(store)
+	if got, err := restarted.State(source); err != nil || got.Offset != 7 || !bytes.Equal(got.PendingLine, state.PendingLine) {
+		t.Fatalf("committed cursor failed reload: %+v %v", got, err)
+	}
+	if got, err := restarted.Schedule(); err != nil || got != wantSchedule {
+		t.Fatalf("committed schedule failed reload: %+v %v", got, err)
+	}
+	if got, err := restarted.CompletedCodexForkRepairRoots(); err != nil || len(got) != 1 {
+		t.Fatalf("committed roots failed reload: %+v %v", got, err)
+	}
+	if _, err := w.AppendWithCheckpoints(ctx, batch, updates); !errors.Is(err, ErrCheckpointConflict) {
+		t.Fatalf("stale scanner revision error: %v", err)
+	}
+	if err := w.db.QueryRowContext(ctx, "SELECT count(*) FROM usage_atoms").Scan(&facts); err != nil || facts != 1 {
+		t.Fatalf("stale transaction changed facts: %d %v", facts, err)
+	}
+}
+
+func TestTranscriptCheckpointReadsCurrentRevisionWithoutCursorSignatureCache(t *testing.T) {
+	store := transcriptCheckpointFixture(t, filepath.Join(t.TempDir(), "cursors.json"))
+	sourceA := TranscriptSource{Path: "/fixture/a", Provider: "claude"}
+	sourceB := TranscriptSource{Path: "/fixture/b", Provider: "claude"}
+	first := TranscriptScannerState{Path: sourceA.Path, Offset: 1}
+	if err := saveTranscriptCheckpointForTest(store, sourceA, first); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.State(sourceA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.State(sourceB); err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.Offset = 2
+	if err := saveTranscriptCheckpointForTest(restartTranscriptCheckpointFixture(store), sourceA, second); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := store.State(sourceA)
+	if err != nil || fresh.Offset != 2 || fresh.checkpointRevision != loaded.checkpointRevision+1 {
+		t.Fatalf("reader retained stale state: %+v %v", fresh, err)
+	}
+	stale, err := encodeTranscriptCheckpoint(transcriptCursorKey(sourceA), first, loaded.checkpointRevision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.AppendWithCheckpoints(context.Background(), AppendBatch{}, []Checkpoint{stale}); !errors.Is(err, ErrCheckpointConflict) {
+		t.Fatalf("stale owner replaced newer progress: %v", err)
+	}
+	if fresh, err := store.State(sourceA); err != nil || fresh.Offset != 2 {
+		t.Fatalf("failed stale write clobbered current: %+v %v", fresh, err)
+	}
+}
+
+func TestTranscriptCheckpointRepairRootsRetainImportedMarker(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cursors.json")
+	legacyRoot, newRoot := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	marker := codexForkRepairMarkerPath(path)
+	if err := atomicSidecarWrite(marker, map[string]any{"version": 1, "completed_roots": []string{legacyRoot}}); err != nil {
+		t.Fatal(err)
+	}
+	store := transcriptCheckpointFixture(t, path)
+	if got, err := store.CompletedCodexForkRepairRoots(); err != nil || len(got) != 1 {
+		t.Fatalf("legacy roots not imported: %v %v", got, err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	cp, err := store.completedRootsCheckpoint([]string{newRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.AppendWithCheckpoints(context.Background(), AppendBatch{}, []Checkpoint{cp}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := restartTranscriptCheckpointFixture(store).CompletedCodexForkRepairRoots()
+	if err != nil || len(got) != 2 {
+		t.Fatalf("root update lost imported progress: %v %v", got, err)
+	}
+	for _, key := range []string{legacyRoot, newRoot} {
+		if _, ok := got[key]; !ok {
+			t.Fatalf("missing completed root %s", key)
+		}
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("new persistence recreated legacy marker: %v", err)
+	}
+}
+
+func TestTranscriptCheckpointInvalidFrontierPreservesPriorProgress(t *testing.T) {
+	store := transcriptCheckpointFixture(t, filepath.Join(t.TempDir(), "cursors.json"))
+	root := filepath.Join(t.TempDir(), ".codex", "sessions")
+	rootID := codexForkRepairRootID(root)
+	frontier := codexForkRepairFrontierState{Roots: map[string]codexForkRepairCatalogState{rootID: {Root: root, PendingDirs: []string{root}}}}
+	if err := store.SaveCodexForkRepairFrontier(frontier); err != nil {
+		t.Fatal(err)
+	}
+	before, ok, err := store.writer.LoadCheckpoint(context.Background(), "collector/frontier")
+	if err != nil || !ok {
+		t.Fatalf("frontier missing: %v %v", ok, err)
+	}
+	bad := codexForkRepairFrontierState{Roots: map[string]codexForkRepairCatalogState{rootID: frontier.Roots[rootID]}}
+	row := bad.Roots[rootID]
+	row.PendingDirs = []string{filepath.Dir(root)}
+	bad.Roots[rootID] = row
+	if err := store.SaveCodexForkRepairFrontier(bad); err == nil {
+		t.Fatal("out-of-root frontier accepted")
+	}
+	after, ok, err := store.writer.LoadCheckpoint(context.Background(), "collector/frontier")
+	if err != nil || !ok || after.Revision != before.Revision || !bytes.Equal(after.State, before.State) {
+		t.Fatalf("failed frontier changed durable progress: %+v %v", after, err)
 	}
 }
 
@@ -431,7 +645,7 @@ func TestClaudeCursorBoundsMessageIDStateAndMatchesPythonEviction(t *testing.T) 
 		records = append(records, usageClaude(float64(index+1), fmt.Sprintf("message-%04d", index), float64(index+1), 1))
 	}
 	writeJSONL(t, path, records...)
-	cursor := NewTranscriptCursorStore(cursorPath)
+	cursor := transcriptCheckpointFixture(t, cursorPath)
 	state := &TranscriptScannerState{}
 	const maxRecordsPerPass = 512
 	transcriptSize := transcriptFixtureSize(t, path)
@@ -446,25 +660,30 @@ func TestClaudeCursorBoundsMessageIDStateAndMatchesPythonEviction(t *testing.T) 
 			t.Fatalf("bounded Claude scan cycle %d made invalid progress: %+v", cycle, scan)
 		}
 		originalAtoms = append(originalAtoms, scan.Atoms...)
-		if err := cursor.Prepare(source, scan.Receipt.before, scan.Receipt.after); err != nil {
-			t.Fatalf("prepare Claude cursor cycle %d: %v", cycle, err)
-		}
-		if err := cursor.Commit(source, scan.Receipt.after); err != nil {
+		if err := saveTranscriptCheckpointForTest(cursor, source, scan.Receipt.after); err != nil {
 			t.Fatalf("commit Claude cursor cycle %d: %v", cycle, err)
 		}
 
 		// Reload after every durable batch so later scans exercise exactly the
 		// cursor state another process would recover after a restart.
-		cursor = NewTranscriptCursorStore(cursorPath)
+		cursor = restartTranscriptCheckpointFixture(cursor)
 		loaded, loadErr := cursor.State(source)
 		if loadErr != nil {
 			t.Fatalf("reload Claude cursor cycle %d: %v", cycle, loadErr)
+		}
+		scan.Receipt.after.checkpointRevision = loaded.checkpointRevision
+		// SQLite stores absent fragments as empty non-NULL BLOBs. Their exact
+		// byte content is unchanged; normalize only the nil slice representation.
+		for _, fragment := range []*[]byte{&scan.Receipt.after.PendingLine, &scan.Receipt.after.ClaudeMessageOrderRebuildBuffer, &scan.Receipt.after.ClaudeMessageOrderRebuildLine} {
+			if len(*fragment) == 0 {
+				*fragment = []byte{}
+			}
 		}
 		if !reflect.DeepEqual(loaded, scan.Receipt.after) {
 			got, want := reflect.ValueOf(loaded), reflect.ValueOf(scan.Receipt.after)
 			differentFields := make([]string, 0, got.NumField())
 			for index := 0; index < got.NumField(); index++ {
-				if !reflect.DeepEqual(got.Field(index).Interface(), want.Field(index).Interface()) {
+				if got.Field(index).CanInterface() && !reflect.DeepEqual(got.Field(index).Interface(), want.Field(index).Interface()) {
 					differentFields = append(differentFields, got.Type().Field(index).Name)
 				}
 			}
@@ -485,12 +704,9 @@ func TestClaudeCursorBoundsMessageIDStateAndMatchesPythonEviction(t *testing.T) 
 	if len(restartedState.ClaudeMessageOrder) != messageLimit || restartedState.ClaudeMessageOrder[0] != "message-0001" {
 		t.Fatalf("Claude cursor eviction order = first %q, count %d", restartedState.ClaudeMessageOrder[0], len(restartedState.ClaudeMessageOrder))
 	}
-	info, err := os.Stat(cursorPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Size() >= maxTranscriptCursorSidecarBytes {
-		t.Fatalf("bounded Claude cursor sidecar size = %d, limit %d", info.Size(), maxTranscriptCursorSidecarBytes)
+	rows, err := cursor.writer.ListCheckpointMetadata(context.Background(), "transcript")
+	if err != nil || len(rows) != 1 || rows[0].DecodedBytes >= transcriptCheckpointBudget {
+		t.Fatalf("bounded Claude checkpoint metadata: %+v %v", rows, err)
 	}
 
 	writer, err := OpenWriter(context.Background(), filepath.Join(root, "stats.sqlite3"))
@@ -534,7 +750,7 @@ func TestTranscriptCursorStoreRejectsAggregateSampleExpansion(t *testing.T) {
 	root := t.TempDir()
 	cursorPath := filepath.Join(root, "transcript-cursors.json")
 	sample := bytes.Repeat([]byte("sample"), transcriptPrefixBytes/len("sample"))
-	compressed, err := gzipTranscriptCursorSample(sample)
+	compressed, err := gzipTranscriptSampleFixture(sample)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -556,7 +772,7 @@ func TestTranscriptCursorStoreRejectsAggregateSampleExpansion(t *testing.T) {
 	if info.Size() >= maxTranscriptCursorSidecarBytes {
 		t.Fatalf("compressed fixture size = %d, want under on-disk bound %d", info.Size(), maxTranscriptCursorSidecarBytes)
 	}
-	_, err = NewTranscriptCursorStore(cursorPath).State(TranscriptSource{Path: "/source.jsonl", Provider: "claude"})
+	_, err = readLegacyTranscriptCursor(cursorPath)
 	if err == nil || !strings.Contains(err.Error(), "aggregate sample size") {
 		t.Fatalf("load compressed cursor with aggregate expansion: err=%v, want aggregate sample bound", err)
 	}
@@ -575,7 +791,7 @@ func TestTranscriptCursorStoreRejectsOversizedLegacyRawSamplesBeforeMigration(t 
 		t.Fatal(err)
 	}
 
-	_, err := NewTranscriptCursorStore(cursorPath).State(TranscriptSource{Path: sourcePath, Provider: "claude"})
+	_, err := readLegacyTranscriptCursor(cursorPath, "claude\x00"+sourcePath)
 	if err == nil || !strings.Contains(err.Error(), "raw sample exceeds its per-field bound") {
 		t.Fatalf("load oversized legacy cursor sample: err=%v, want per-field bound error", err)
 	}
@@ -611,19 +827,15 @@ func TestTranscriptCursorStoreMigratesLegacySidecarWithRetiredEntries(t *testing
 		t.Fatal(err)
 	}
 
-	store := NewTranscriptCursorStore(cursorPath)
-	state, err := store.State(currentSource)
+	migrated, err := readLegacyTranscriptCursor(cursorPath, transcriptCursorKey(currentSource))
+	state := migrated.States[transcriptCursorKey(currentSource)]
 	if err != nil {
 		t.Fatalf("load recoverable legacy cursor sidecar: %v", err)
 	}
 	if state.Offset != 7 {
 		t.Fatalf("current transcript cursor offset = %d, want 7", state.Offset)
 	}
-	migrated, err := store.readDiskLocked()
-	if err != nil {
-		t.Fatalf("reload migrated cursor sidecar: %v", err)
-	}
-	if migrated.Version != 2 || len(migrated.States) != 1 {
+	if len(migrated.States) != 1 {
 		t.Fatalf("migrated sidecar version/states = %d/%d, want v2 with only current source", migrated.Version, len(migrated.States))
 	}
 }
@@ -646,57 +858,26 @@ func TestTranscriptCursorStorePinsRequestedCursorWhilePruningLegacyEntries(t *te
 		t.Fatal(err)
 	}
 
-	state, err := NewTranscriptCursorStore(cursorPath).State(requested)
+	migrated, err := readLegacyTranscriptCursor(cursorPath, transcriptCursorKey(requested))
+	state := migrated.States[transcriptCursorKey(requested)]
 	if err != nil {
 		t.Fatalf("load legacy sidecar while pruning active cursors: %v", err)
 	}
 	if state.Offset != 100 {
 		t.Fatalf("requested legacy cursor offset = %d, want pinned oldest cursor 100", state.Offset)
 	}
-	var migrated transcriptCursorDisk
-	data, err := os.ReadFile(cursorPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(data, &migrated); err != nil {
-		t.Fatalf("decode migrated cursor sidecar: %v", err)
-	}
-	if migrated.Version != 2 || len(migrated.States) != maxTranscriptCursorStates {
-		t.Fatalf("migrated version/state count = %d/%d, want v2 with exactly %d states", migrated.Version, len(migrated.States), maxTranscriptCursorStates)
+	if len(migrated.States) != maxTranscriptCursorStates {
+		t.Fatalf("imported state count = %d, want %d", len(migrated.States), maxTranscriptCursorStates)
 	}
 	if _, exists := migrated.States[transcriptCursorKey(requested)]; !exists {
 		t.Fatal("migration pruned the requested active transcript cursor")
 	}
 }
 
-func TestTranscriptCursorStoreRejectsPendingBatchBeyondEntryBound(t *testing.T) {
-	root := t.TempDir()
-	cursorPath := filepath.Join(root, "transcript-cursors.json")
-	changes := make([]transcriptCursorChange, maxTranscriptCursorStates+1)
-	for index := range changes {
-		path := filepath.Join(root, fmt.Sprintf("active-%04d.jsonl", index))
-		changes[index] = transcriptCursorChange{
-			source: TranscriptSource{Path: path, Provider: "claude"},
-			after:  TranscriptScannerState{Path: path, Offset: 1},
-		}
-	}
-	store := NewTranscriptCursorStore(cursorPath)
-	if err := store.PrepareBatch(changes); err == nil || !strings.Contains(err.Error(), "entry bound") {
-		t.Fatalf("prepare oversized cursor batch: err=%v, want entry bound", err)
-	}
-	if _, err := os.Stat(cursorPath); !os.IsNotExist(err) {
-		t.Fatalf("rejected pending batch left a sidecar: stat err=%v", err)
-	}
-	state, err := NewTranscriptCursorStore(cursorPath).State(changes[0].source)
-	if err != nil || state.Offset != 0 {
-		t.Fatalf("read after rejected batch = %+v, err=%v; want empty readable cursor", state, err)
-	}
-}
-
 func TestTranscriptCursorStorePrunesRetiredSourcesAcrossCycles(t *testing.T) {
 	root := t.TempDir()
-	store := NewTranscriptCursorStore(filepath.Join(root, "transcript-cursors.json"))
-	disk := transcriptCursorDisk{Version: 2, States: make(map[string]TranscriptScannerState)}
+	legacyPath := filepath.Join(root, "transcript-cursors.json")
+	disk := transcriptCursorDisk{Version: 1, States: make(map[string]TranscriptScannerState)}
 	addSources := func(prefix string, start, count int) []string {
 		paths := make([]string, 0, count)
 		for index := start; index < start+count; index++ {
@@ -718,22 +899,22 @@ func TestTranscriptCursorStorePrunesRetiredSourcesAcrossCycles(t *testing.T) {
 		}
 	}
 	oldPaths := addSources("old", 0, 600)
-	if err := store.writeDiskLocked(disk); err != nil {
+	if err := atomicSidecarWrite(legacyPath, disk); err != nil {
 		t.Fatalf("write initial source cursors: %v", err)
 	}
 	retire(oldPaths, 0, 400)
 	firstReplacement := addSources("replacement-a", 0, 400)
-	if err := store.writeDiskLocked(disk); err != nil {
+	if err := atomicSidecarWrite(legacyPath, disk); err != nil {
 		t.Fatalf("write first replacement cycle: %v", err)
 	}
 	retire(oldPaths, 400, 600)
 	retire(firstReplacement, 0, 200)
 	secondReplacement := addSources("replacement-b", 0, 400)
-	if err := store.writeDiskLocked(disk); err != nil {
+	if err := atomicSidecarWrite(legacyPath, disk); err != nil {
 		t.Fatalf("write second replacement cycle: %v", err)
 	}
 
-	recovered, err := store.readDiskLocked()
+	recovered, err := readLegacyTranscriptCursor(legacyPath)
 	if err != nil {
 		t.Fatalf("reload cursor state after source churn: %v", err)
 	}
@@ -772,11 +953,8 @@ func TestLegacyClaudeCursorRebuildsMessageOrderBeforeEviction(t *testing.T) {
 	if err != nil || initial.Receipt == nil || initial.RecordsParsed != messageLimit+2 {
 		t.Fatalf("initial Claude cursor setup = %+v, err = %v", initial, err)
 	}
-	store := NewTranscriptCursorStore(cursorPath)
-	if err := store.Prepare(source, initial.Receipt.before, initial.Receipt.after); err != nil {
-		t.Fatalf("prepare initial Claude cursor: %v", err)
-	}
-	if err := store.Commit(source, initial.Receipt.after); err != nil {
+	store := transcriptCheckpointFixture(t, cursorPath)
+	if err := saveTranscriptCheckpointForTest(store, source, initial.Receipt.after); err != nil {
 		t.Fatalf("commit initial Claude cursor: %v", err)
 	}
 	initial.Receipt.Commit()
@@ -785,19 +963,15 @@ func TestLegacyClaudeCursorRebuildsMessageOrderBeforeEviction(t *testing.T) {
 	}
 
 	// Older cursor sidecars persisted the usage maps but not their insertion order.
-	legacyBefore := cloneTranscriptState(*state)
 	legacyAfter := cloneTranscriptState(*state)
 	legacyAfter.ClaudeMessageOrder = nil
 	legacyAfter.ClaudeMessageOrderRebuildDone = false
 	legacyAfter.ClaudeSequence = 0
-	store = NewTranscriptCursorStore(cursorPath)
-	if err := store.Prepare(source, legacyBefore, legacyAfter); err != nil {
-		t.Fatalf("prepare legacy Claude cursor: %v", err)
-	}
-	if err := store.Commit(source, legacyAfter); err != nil {
+	store = restartTranscriptCheckpointFixture(store)
+	if err := saveTranscriptCheckpointForTest(store, source, legacyAfter); err != nil {
 		t.Fatalf("commit legacy Claude cursor: %v", err)
 	}
-	persisted, err := NewTranscriptCursorStore(cursorPath).State(source)
+	persisted, err := restartTranscriptCheckpointFixture(store).State(source)
 	if err != nil {
 		t.Fatalf("reload legacy Claude cursor: %v", err)
 	}
@@ -814,14 +988,11 @@ func TestLegacyClaudeCursorRebuildsMessageOrderBeforeEviction(t *testing.T) {
 	if result.Receipt.after.Offset != state.Offset {
 		t.Fatalf("legacy order scan advanced the usage cursor before migration completed: before=%d after=%d", state.Offset, result.Receipt.after.Offset)
 	}
-	store = NewTranscriptCursorStore(cursorPath)
-	if err := store.Prepare(source, result.Receipt.before, result.Receipt.after); err != nil {
-		t.Fatalf("prepare bounded legacy order progress: %v", err)
-	}
-	if err := store.Commit(source, result.Receipt.after); err != nil {
+	store = restartTranscriptCheckpointFixture(store)
+	if err := saveTranscriptCheckpointForTest(store, source, result.Receipt.after); err != nil {
 		t.Fatalf("commit bounded legacy order progress: %v", err)
 	}
-	persisted, err = NewTranscriptCursorStore(cursorPath).State(source)
+	persisted, err = restartTranscriptCheckpointFixture(store).State(source)
 	if err != nil {
 		t.Fatalf("reload bounded legacy order progress: %v", err)
 	}
@@ -838,14 +1009,11 @@ func TestLegacyClaudeCursorRebuildsMessageOrderBeforeEviction(t *testing.T) {
 		if result.BytesRead > 64*1024 || result.RecordsParsed > 512 {
 			t.Fatalf("legacy Claude order migration exceeded its per-pass limits: bytes=%d records=%d", result.BytesRead, result.RecordsParsed)
 		}
-		store = NewTranscriptCursorStore(cursorPath)
-		if err := store.Prepare(source, result.Receipt.before, result.Receipt.after); err != nil {
-			t.Fatalf("prepare legacy Claude order migration pass %d: %v", attempts, err)
-		}
-		if err := store.Commit(source, result.Receipt.after); err != nil {
+		store = restartTranscriptCheckpointFixture(store)
+		if err := saveTranscriptCheckpointForTest(store, source, result.Receipt.after); err != nil {
 			t.Fatalf("commit legacy Claude order migration pass %d: %v", attempts, err)
 		}
-		persisted, err = NewTranscriptCursorStore(cursorPath).State(source)
+		persisted, err = restartTranscriptCheckpointFixture(store).State(source)
 		if err != nil {
 			t.Fatalf("reload legacy Claude cursor pass %d: %v", attempts, err)
 		}
@@ -893,16 +1061,12 @@ func TestLegacyClaudeCursorRebuildDropsEntriesOutsideRecoveredBound(t *testing.T
 	if err != nil || initial.Receipt == nil || initial.RecordsParsed != historicalMessageCount {
 		t.Fatalf("initial overbound Claude cursor setup = %+v, err = %v", initial, err)
 	}
-	store := NewTranscriptCursorStore(cursorPath)
-	if err := store.Prepare(source, initial.Receipt.before, initial.Receipt.after); err != nil {
-		t.Fatalf("prepare initial overbound cursor: %v", err)
-	}
-	if err := store.Commit(source, initial.Receipt.after); err != nil {
+	store := transcriptCheckpointFixture(t, cursorPath)
+	if err := saveTranscriptCheckpointForTest(store, source, initial.Receipt.after); err != nil {
 		t.Fatalf("commit initial overbound cursor: %v", err)
 	}
 	initial.Receipt.Commit()
 
-	legacyBefore := cloneTranscriptState(*state)
 	legacyAfter := cloneTranscriptState(*state)
 	for index := 0; index < historicalMessageCount-maxClaudeMessageIDState; index++ {
 		messageID := fmt.Sprintf("message-%04d", index)
@@ -912,14 +1076,11 @@ func TestLegacyClaudeCursorRebuildDropsEntriesOutsideRecoveredBound(t *testing.T
 	legacyAfter.ClaudeMessageOrder = nil
 	legacyAfter.ClaudeMessageOrderRebuildDone = false
 	legacyAfter.ClaudeSequence = 0
-	store = NewTranscriptCursorStore(cursorPath)
-	if err := store.Prepare(source, legacyBefore, legacyAfter); err != nil {
-		t.Fatalf("prepare synthetic legacy overbound cursor: %v", err)
-	}
-	if err := store.Commit(source, legacyAfter); err != nil {
+	store = restartTranscriptCheckpointFixture(store)
+	if err := saveTranscriptCheckpointForTest(store, source, legacyAfter); err != nil {
 		t.Fatalf("commit synthetic legacy overbound cursor: %v", err)
 	}
-	persisted, err := NewTranscriptCursorStore(cursorPath).State(source)
+	persisted, err := restartTranscriptCheckpointFixture(store).State(source)
 	if err != nil {
 		t.Fatalf("reload synthetic legacy overbound cursor: %v", err)
 	}
@@ -936,14 +1097,11 @@ func TestLegacyClaudeCursorRebuildDropsEntriesOutsideRecoveredBound(t *testing.T
 		if result.BytesRead > 64*1024 || result.RecordsParsed > 512 {
 			t.Fatalf("overbound legacy migration exceeded its per-pass limits: bytes=%d records=%d", result.BytesRead, result.RecordsParsed)
 		}
-		store = NewTranscriptCursorStore(cursorPath)
-		if err := store.Prepare(source, result.Receipt.before, result.Receipt.after); err != nil {
-			t.Fatalf("prepare overbound legacy order pass %d: %v", attempts, err)
-		}
-		if err := store.Commit(source, result.Receipt.after); err != nil {
+		store = restartTranscriptCheckpointFixture(store)
+		if err := saveTranscriptCheckpointForTest(store, source, result.Receipt.after); err != nil {
 			t.Fatalf("commit overbound legacy order pass %d: %v", attempts, err)
 		}
-		persisted, err = NewTranscriptCursorStore(cursorPath).State(source)
+		persisted, err = restartTranscriptCheckpointFixture(store).State(source)
 		if err != nil {
 			t.Fatalf("reload overbound legacy cursor pass %d: %v", attempts, err)
 		}
@@ -1015,14 +1173,11 @@ func TestScanTranscriptCodexEffortSurvivesCursorRestartAndSettingsEvents(t *test
 	if err != nil || first.RecordsParsed != 2 || len(first.Atoms) != 0 {
 		t.Fatalf("context pass = %+v, err = %v", first, err)
 	}
-	store := NewTranscriptCursorStore(cursorPath)
-	if err := store.Prepare(source, first.Receipt.before, first.Receipt.after); err != nil {
+	store := transcriptCheckpointFixture(t, cursorPath)
+	if err := saveTranscriptCheckpointForTest(store, source, first.Receipt.after); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Commit(source, first.Receipt.after); err != nil {
-		t.Fatal(err)
-	}
-	restartedState, err := NewTranscriptCursorStore(cursorPath).State(source)
+	restartedState, err := restartTranscriptCheckpointFixture(store).State(source)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1773,15 +1928,12 @@ func TestScanTranscriptDefersRecordLargerThanCycleBudgetAndResumes(t *testing.T)
 	writeJSONL(t, path, usageCodex(1, 1, 0, 1))
 	source := TranscriptSource{Path: path, Provider: "codex", ThreadID: "thread"}
 	state := &TranscriptScannerState{}
-	cursor := NewTranscriptCursorStore(cursorPath)
+	cursor := transcriptCheckpointFixture(t, cursorPath)
 	initial, err := ScanTranscript(source, state, TranscriptScanOptions{MaxBytes: 1 << 20})
 	if err != nil || len(initial.Atoms) != 2 {
 		t.Fatalf("initial scan = %+v, err=%v", initial, err)
 	}
-	if err := cursor.Prepare(source, initial.Receipt.before, initial.Receipt.after); err != nil {
-		t.Fatal(err)
-	}
-	if err := cursor.Commit(source, initial.Receipt.after); err != nil {
+	if err := saveTranscriptCheckpointForTest(cursor, source, initial.Receipt.after); err != nil {
 		t.Fatal(err)
 	}
 	initial.Receipt.Commit()
@@ -1794,7 +1946,7 @@ func TestScanTranscriptDefersRecordLargerThanCycleBudgetAndResumes(t *testing.T)
 	var allAtoms []UsageAtom
 	var parsedRecords int
 	for cycle := 0; cycle < 20 && state.Offset < transcriptFixtureSize(t, path); cycle++ {
-		cursor = NewTranscriptCursorStore(cursorPath)
+		cursor = restartTranscriptCheckpointFixture(cursor)
 		persisted, stateErr := cursor.State(source)
 		if stateErr != nil {
 			t.Fatalf("reload synthetic cursor on cycle %d: %v", cycle, stateErr)
@@ -1810,10 +1962,7 @@ func TestScanTranscriptDefersRecordLargerThanCycleBudgetAndResumes(t *testing.T)
 		allAtoms = append(allAtoms, resumed.Atoms...)
 		parsedRecords += resumed.RecordsParsed
 		if resumed.Receipt != nil {
-			if err := cursor.Prepare(source, resumed.Receipt.before, resumed.Receipt.after); err != nil {
-				t.Fatalf("prepare cursor on cycle %d: %v", cycle, err)
-			}
-			if err := cursor.Commit(source, resumed.Receipt.after); err != nil {
+			if err := saveTranscriptCheckpointForTest(cursor, source, resumed.Receipt.after); err != nil {
 				t.Fatalf("commit cursor on cycle %d: %v", cycle, err)
 			}
 			resumed.Receipt.Commit()
@@ -2633,63 +2782,6 @@ func TestRecentTranscriptCandidatesPrioritizesNewerDirectoryWithinBound(t *testi
 	}
 }
 
-func TestTranscriptCursorStoreCrashReplayAndCommit(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "claude.jsonl")
-	statePath := filepath.Join(root, "transcript-cursors.json")
-	writeJSONL(t, path, usageClaude(1, "message", 10, 2))
-	source := TranscriptSource{Path: path, Provider: "claude", SourceID: "claude", ThreadID: "thread"}
-	state := &TranscriptScannerState{}
-	scan, err := ScanTranscript(source, state, TranscriptScanOptions{})
-	if err != nil || scan.Receipt == nil {
-		t.Fatalf("scan = %+v, err = %v", scan, err)
-	}
-	store := NewTranscriptCursorStore(statePath)
-	if err := store.PrepareBatchWithNextSource([]transcriptCursorChange{{source: source, before: scan.Receipt.before, after: scan.Receipt.after}}, transcriptCursorKey(source)); err != nil {
-		t.Fatal(err)
-	}
-	// A new owner must discard an uncommitted prepare. It cannot advance the
-	// source cursor before the corresponding SQLite append is known durable.
-	restarted := NewTranscriptCursorStore(statePath)
-	loaded, err := restarted.State(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.Offset != 0 || loaded.Path != "" {
-		t.Fatalf("prepared cursor was promoted after restart: %+v", loaded)
-	}
-	if nextSource, err := restarted.NextSource(); err != nil || nextSource != "" {
-		t.Fatalf("prepared source schedule was promoted after restart: next=%q err=%v", nextSource, err)
-	}
-	if err := store.Commit(source, scan.Receipt.after); err == nil {
-		t.Fatal("stale pre-restart owner committed a discarded pending cursor")
-	}
-	if err := store.Rollback(source); err == nil {
-		t.Fatal("stale pre-restart owner rolled back a newer cursor operation")
-	}
-	owner := NewTranscriptCursorStore(statePath)
-	if err := owner.Prepare(source, TranscriptScannerState{}, scan.Receipt.after); err != nil {
-		t.Fatal(err)
-	}
-	if err := owner.PrepareBatchWithNextSource(nil, transcriptCursorKey(source)); err != nil {
-		t.Fatal(err)
-	}
-	if err := owner.Commit(source, scan.Receipt.after); err != nil {
-		t.Fatal(err)
-	}
-	committed := NewTranscriptCursorStore(statePath)
-	loaded, err = committed.State(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.Offset != scan.Receipt.after.Offset || loaded.Inode == 0 {
-		t.Fatalf("committed cursor = %+v, want offset %d", loaded, scan.Receipt.after.Offset)
-	}
-	if nextSource, err := committed.NextSource(); err != nil || nextSource != transcriptCursorKey(source) {
-		t.Fatalf("fallback-prepared schedule = %q, err=%v", nextSource, err)
-	}
-}
-
 func TestScanTranscriptReplaysSyntheticSourceAfterInodeReplacement(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "claude.jsonl")
@@ -2748,365 +2840,13 @@ func TestScanTranscriptReplaysSyntheticSourceAfterInodeReplacement(t *testing.T)
 	}
 }
 
-func TestTranscriptCursorStoreScheduleOnlyCommitAndRollback(t *testing.T) {
-	statePath := filepath.Join(t.TempDir(), "transcript-cursors.json")
-	store := NewTranscriptCursorStore(statePath)
-	if err := store.PrepareBatchWithSchedules(nil, "live-next", "history-next", 2); err != nil {
-		t.Fatalf("prepare schedule-only fairness turn: %v", err)
-	}
-	if err := store.RollbackBatch(nil); err != nil {
-		t.Fatalf("rollback schedule-only fairness turn: %v", err)
-	}
-	rolledBack, err := NewTranscriptCursorStore(statePath).Schedule()
-	if err != nil {
-		t.Fatalf("read rolled-back schedule: %v", err)
-	}
-	if rolledBack != (transcriptCursorSchedule{}) {
-		t.Fatalf("schedule-only rollback changed durable fairness state: %+v", rolledBack)
-	}
-	if err := store.PrepareBatchWithSchedules(nil, "live-next", "history-next", 2); err != nil {
-		t.Fatalf("prepare schedule-only fairness turn for commit: %v", err)
-	}
-	if err := store.CommitBatchWithCodexForkRepairRoots(nil, nil); err != nil {
-		t.Fatalf("commit schedule-only fairness turn: %v", err)
-	}
-	committed, err := NewTranscriptCursorStore(statePath).Schedule()
-	if err != nil {
-		t.Fatalf("read committed schedule: %v", err)
-	}
-	want := transcriptCursorSchedule{NextSource: "live-next", NextHistoricalSource: "history-next", LiveTranscriptPriorityRuns: 2}
-	if committed != want {
-		t.Fatalf("committed fairness schedule = %+v, want %+v", committed, want)
-	}
-}
-
-func TestTranscriptCursorRepairRootsCommitAtomicallyAndReadLegacyMarker(t *testing.T) {
-	statePath := filepath.Join(t.TempDir(), "transcript-cursors.json")
-	legacyRoot := strings.Repeat("a", 64)
-	newRoot := strings.Repeat("b", 64)
-	legacyPath := codexForkRepairMarkerPath(statePath)
-	legacyMarker := struct {
-		Version        int      `json:"version"`
-		CompletedRoots []string `json:"completed_roots"`
-	}{Version: 1, CompletedRoots: []string{legacyRoot}}
-	data, err := json.Marshal(legacyMarker)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(legacyPath, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	store := NewTranscriptCursorStore(statePath)
-	if completed, err := store.CompletedCodexForkRepairRoots(); err != nil || len(completed) != 1 {
-		t.Fatalf("legacy completed roots = %v err=%v", completed, err)
-	} else if _, ok := completed[legacyRoot]; !ok {
-		t.Fatalf("legacy completed roots omitted %q: %v", legacyRoot, completed)
-	}
-	if err := os.Remove(legacyPath); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.CommitBatchWithCodexForkRepairRoots(nil, []string{newRoot}); err != nil {
-		t.Fatal(err)
-	}
-	completed, err := NewTranscriptCursorStore(statePath).CompletedCodexForkRepairRoots()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(completed) != 1 {
-		t.Fatalf("new sidecar completed roots = %v, want exactly one", completed)
-	}
-	if _, ok := completed[newRoot]; !ok {
-		t.Fatalf("new sidecar completed roots omitted %q: %v", newRoot, completed)
-	}
-	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
-		t.Fatalf("atomic cursor commit recreated the legacy marker: %v", err)
-	}
-}
-
-func TestTranscriptCursorStoreStateKeepsOtherLocalPendingCommit(t *testing.T) {
-	root := t.TempDir()
-	statePath := filepath.Join(root, "transcript-cursors.json")
-	sourceA := TranscriptSource{Path: filepath.Join(root, "claude-a.jsonl"), Provider: "claude"}
-	sourceB := TranscriptSource{Path: filepath.Join(root, "claude-b.jsonl"), Provider: "claude"}
-	nextA := TranscriptScannerState{Path: sourceA.Path, Offset: 17, Prefix: []byte("a")}
-	store := NewTranscriptCursorStore(statePath)
-	if err := store.Prepare(sourceA, TranscriptScannerState{}, nextA); err != nil {
-		t.Fatal(err)
-	}
-	// The collector reads every source before committing the batch. An
-	// unchanged second source must not discard source A's local prepare token.
-	if _, err := store.State(sourceB); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Commit(sourceA, nextA); err != nil {
-		t.Fatalf("pending source A could not commit after source B state read: %v", err)
-	}
-	loaded, err := NewTranscriptCursorStore(statePath).State(sourceA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.Offset != nextA.Offset || string(loaded.Prefix) != string(nextA.Prefix) {
-		t.Fatalf("source A cursor = %+v, want %+v", loaded, nextA)
-	}
-}
-
-func TestTranscriptCursorStoreRejectsStaleCommitWithoutClobberingNewPrepare(t *testing.T) {
-	root := t.TempDir()
-	statePath := filepath.Join(root, "transcript-cursors.json")
-	source := TranscriptSource{Path: filepath.Join(root, "claude.jsonl"), Provider: "claude", SourceID: "claude", ThreadID: "thread"}
-	first := TranscriptScannerState{Path: source.Path, Offset: 10, Prefix: []byte("first")}
-	second := TranscriptScannerState{Path: source.Path, Offset: 20, Prefix: []byte("second")}
-	third := TranscriptScannerState{Path: source.Path, Offset: 30, Prefix: []byte("third")}
-	store := NewTranscriptCursorStore(statePath)
-	if err := store.Prepare(source, TranscriptScannerState{}, first); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Commit(source, first); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Prepare(source, first, second); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Prepare(source, first, third); err == nil {
-		t.Fatal("stale transcript operation replaced a newer pending state")
-	}
-	if err := store.Commit(source, third); err == nil {
-		t.Fatal("stale transcript receipt committed a different pending state")
-	}
-	if err := store.Commit(source, second); err != nil {
-		t.Fatalf("new transcript receipt could not commit after stale rejection: %v", err)
-	}
-	loaded, err := NewTranscriptCursorStore(statePath).State(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.Offset != second.Offset || string(loaded.Prefix) != string(second.Prefix) {
-		t.Fatalf("stale commit changed durable cursor: %+v", loaded)
-	}
-	if err := store.Prepare(source, first, third); err == nil {
-		t.Fatal("stale transcript operation prepared over the committed cursor")
-	}
-}
-
-func TestTranscriptCursorStoreRejectsRollbackFromOwnerWithoutPendingToken(t *testing.T) {
-	root := t.TempDir()
-	statePath := filepath.Join(root, "transcript-cursors.json")
-	source := TranscriptSource{Path: filepath.Join(root, "claude.jsonl"), Provider: "claude", SourceID: "claude", ThreadID: "thread"}
-	next := TranscriptScannerState{Path: source.Path, Offset: 42, Prefix: []byte("prefix")}
-	owner := NewTranscriptCursorStore(statePath)
-	if err := owner.Prepare(source, TranscriptScannerState{}, next); err != nil {
-		t.Fatal(err)
-	}
-
-	// A restarted or otherwise stale owner has no local operation token. It must
-	// not be able to remove the active owner's pending state, or the next
-	// restart would replay without a durable receipt boundary.
-	stale := NewTranscriptCursorStore(statePath)
-	if err := stale.Rollback(source); err == nil {
-		t.Fatal("owner without a pending token removed another owner's cursor")
-	}
-	data, err := os.ReadFile(statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var pendingDisk transcriptCursorDisk
-	if err := json.Unmarshal(data, &pendingDisk); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := pendingDisk.Pending[transcriptCursorKey(source)]; !ok {
-		t.Fatalf("stale rollback removed the active pending cursor: %+v", pendingDisk)
-	}
-	if err := owner.Commit(source, next); err != nil {
-		t.Fatalf("active owner could not commit after stale rollback refusal: %v", err)
-	}
-	committed, err := NewTranscriptCursorStore(statePath).State(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if committed.Offset != next.Offset || string(committed.Prefix) != string(next.Prefix) {
-		t.Fatalf("committed cursor = %+v, want %+v", committed, next)
-	}
-}
-
-func TestTranscriptCursorStoreDiscardedPendingJournalAdvancesGeneration(t *testing.T) {
-	root := t.TempDir()
-	statePath := filepath.Join(root, "transcript-cursors.json")
-	source := TranscriptSource{Path: filepath.Join(root, "claude.jsonl"), Provider: "claude"}
-	next := TranscriptScannerState{Path: source.Path, Offset: 7}
-	owner := NewTranscriptCursorStore(statePath)
-	if err := owner.Prepare(source, TranscriptScannerState{}, next); err != nil {
-		t.Fatal(err)
-	}
-	stale := NewTranscriptCursorStore(statePath)
-	if _, err := stale.State(source); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var disk transcriptCursorDisk
-	if err := json.Unmarshal(data, &disk); err != nil {
-		t.Fatal(err)
-	}
-	if disk.Generation != 2 {
-		t.Fatalf("discarded pending generation = %d, want 2", disk.Generation)
-	}
-	if err := owner.Commit(source, next); err == nil {
-		t.Fatal("stale owner committed discarded pending cursor")
-	}
-	if err := stale.Prepare(source, TranscriptScannerState{}, next); err != nil {
-		t.Fatalf("new owner could not prepare after pending recovery: %v", err)
-	}
-}
-
 func TestTranscriptCursorStoreRejectsMalformedState(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "transcript-cursors.json")
 	if err := os.WriteFile(path, []byte(`{"version":99}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store := NewTranscriptCursorStore(path)
-	if _, err := store.State(TranscriptSource{Path: "x", Provider: "codex"}); err == nil {
+	if _, err := readLegacyTranscriptCursor(path); err == nil {
 		t.Fatal("malformed transcript cursor was accepted")
-	}
-}
-
-func TestTranscriptCursorWriteFailureDoesNotAdvanceMemory(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "cursor.json")
-	if err := os.Mkdir(path, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	source := TranscriptSource{Path: filepath.Join(root, "claude.jsonl"), Provider: "claude"}
-	store := NewTranscriptCursorStore(path)
-	next := TranscriptScannerState{Path: source.Path, Offset: 7}
-	if err := store.Prepare(source, TranscriptScannerState{}, next); err == nil {
-		t.Fatal("prepare unexpectedly succeeded with a directory sidecar path")
-	}
-	if len(store.pending) != 0 || len(store.pendingTokens) != 0 {
-		t.Fatalf("failed prepare advanced in-memory state: pending=%v tokens=%v", store.pending, store.pendingTokens)
-	}
-	if err := os.Remove(path); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Prepare(source, TranscriptScannerState{}, next); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Commit(source, next); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestTranscriptCursorRollbackFailureDoesNotWedgeTheOwner(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "cursor.json")
-	source := TranscriptSource{Path: filepath.Join(root, "claude.jsonl"), Provider: "claude"}
-	next := TranscriptScannerState{Path: source.Path, Offset: 7}
-	store := NewTranscriptCursorStore(path)
-	if err := store.Prepare(source, TranscriptScannerState{}, next); err != nil {
-		t.Fatal(err)
-	}
-	backup := filepath.Join(root, "pending.json")
-	if err := os.Rename(path, backup); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(path, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Rollback(source); err == nil {
-		t.Fatal("rollback unexpectedly succeeded with an unreadable sidecar")
-	}
-	if len(store.pending) != 0 || len(store.pendingTokens) != 0 {
-		t.Fatalf("failed rollback left transcript cursor pending: pending=%v tokens=%v", store.pending, store.pendingTokens)
-	}
-	if err := os.Remove(path); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(backup, path); err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := store.State(source)
-	if err != nil {
-		t.Fatalf("cursor did not repair after sidecar recovery: %v", err)
-	}
-	if loaded.Offset != 0 {
-		t.Fatalf("repaired cursor promoted pending state: %+v", loaded)
-	}
-	if err := store.Prepare(source, TranscriptScannerState{}, next); err != nil {
-		t.Fatalf("cursor could not prepare after repair: %v", err)
-	}
-	if err := store.Commit(source, next); err != nil {
-		t.Fatalf("cursor could not commit after repair: %v", err)
-	}
-}
-
-func TestTranscriptCursorStoreStateReloadsSameSizeSameMtimeReplacement(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "cursor.json")
-	source := TranscriptSource{Path: filepath.Join(root, "claude.jsonl"), Provider: "claude"}
-	first := TranscriptScannerState{Path: source.Path, Offset: 1}
-	second := TranscriptScannerState{Path: source.Path, Offset: 2}
-	store := NewTranscriptCursorStore(path)
-	if err := store.Prepare(source, TranscriptScannerState{}, first); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Commit(source, first); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := store.State(source); err != nil || got.Offset != first.Offset {
-		t.Fatalf("initial cursor state = %+v, err=%v", got, err)
-	}
-	oldInfo, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	oldDevice, oldInode := fileIdentity(oldInfo)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	replacement := bytes.Replace(data, []byte(`"Offset":1`), []byte(`"Offset":2`), 1)
-	if len(replacement) != len(data) || bytes.Equal(replacement, data) {
-		t.Fatalf("could not construct same-size cursor replacement: old=%q new=%q", data, replacement)
-	}
-	temp, err := os.CreateTemp(root, ".cursor-replacement-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	tempName := temp.Name()
-	defer os.Remove(tempName)
-	if _, err := temp.Write(replacement); err != nil {
-		t.Fatal(err)
-	}
-	if err := temp.Sync(); err != nil {
-		t.Fatal(err)
-	}
-	if err := temp.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(tempName, path); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(path, oldInfo.ModTime(), oldInfo.ModTime()); err != nil {
-		t.Fatal(err)
-	}
-	newInfo, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	newDevice, newInode := fileIdentity(newInfo)
-	if oldDevice == newDevice && oldInode == newInode {
-		t.Skip("filesystem did not replace the sidecar inode")
-	}
-	if oldInfo.Size() != newInfo.Size() || oldInfo.ModTime() != newInfo.ModTime() {
-		t.Fatalf("replacement signature changed size/mtime: old=(%d,%s) new=(%d,%s)", oldInfo.Size(), oldInfo.ModTime(), newInfo.Size(), newInfo.ModTime())
-	}
-	got, err := store.State(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Offset != second.Offset {
-		t.Fatalf("same-signature replacement returned stale cursor %+v, want %+v", got, second)
 	}
 }
 
@@ -3205,47 +2945,5 @@ func TestScanTranscriptRepairOptionCannotBypassSessionsRootValidation(t *testing
 				t.Fatalf("rejected repair scan mutated cursor state: got=%+v want=%+v", state, before)
 			}
 		})
-	}
-}
-
-func TestCodexForkRepairFrontierOverflowPreservesExistingCursorSidecar(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "cursor.json")
-	store := NewTranscriptCursorStore(path)
-	disk := transcriptCursorDisk{
-		Version: 1,
-		States: map[string]TranscriptScannerState{
-			// Leave room under the enlarged sidecar cap but not for the frontier below.
-			"synthetic-large-cursor": {PendingLine: []byte(strings.Repeat("x", 95<<20))},
-		},
-	}
-	if err := store.writeDiskLocked(disk); err != nil {
-		t.Fatalf("seed bounded synthetic cursor sidecar: %v", err)
-	}
-	before, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	root := filepath.Join(t.TempDir(), ".codex", "sessions")
-	rootID := codexForkRepairRootID(root)
-	longPrefix := strings.Repeat("p", maxCodexForkRepairPathBytes-len(root)-1-3)
-	pendingDirs := make([]string, 400)
-	for index := range pendingDirs {
-		pendingDirs[index] = filepath.Join(root, fmt.Sprintf("%s%03d", longPrefix, index))
-	}
-	frontier := codexForkRepairFrontierState{Roots: map[string]codexForkRepairCatalogState{
-		rootID: {Root: root, PendingDirs: pendingDirs},
-	}}
-	if err := validateCodexForkRepairFrontier(frontier); err != nil {
-		t.Fatalf("synthetic frontier itself should fit its limit: %v", err)
-	}
-	if err := store.SaveCodexForkRepairFrontier(frontier); err == nil {
-		t.Fatal("frontier unexpectedly fit beside the existing large cursor state")
-	}
-	after, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(after, before) {
-		t.Fatal("failed frontier save replaced the previously durable cursor sidecar")
 	}
 }

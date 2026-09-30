@@ -56,24 +56,66 @@ func TestAgentTokenCollectorBoundsLongOpenCodeEventIDLikePython(t *testing.T) {
 	}
 }
 
+func newAgentTokenTestWriter(t *testing.T) *Writer {
+	t.Helper()
+	writer, err := OpenWriter(context.Background(), filepath.Join(t.TempDir(), "stats.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { writer.Close() })
+	return writer
+}
+
 type countingTokenWriter struct{}
 
 func (countingTokenWriter) AppendBatch(_ context.Context, batch AppendBatch) (AppendResult, error) {
 	return AppendResult{UsageAccepted: len(batch.UsageAtoms), CoverageChanged: len(batch.CoverageEpochs), UnavailableAccepted: len(batch.UnavailableSpans)}, nil
 }
 
-type tokenWriterFunc func(context.Context, AppendBatch) (AppendResult, error)
-
-func (f tokenWriterFunc) AppendBatch(ctx context.Context, batch AppendBatch) (AppendResult, error) {
-	return f(ctx, batch)
+type checkpointTokenWriter struct {
+	*Writer
+	beforeAppend func(context.Context, AppendBatch) (AppendResult, error)
 }
 
-type failingCodexForkRepairMarkerStore struct {
-	*TranscriptCursorStore
+func tokenWriterFunc(t *testing.T, hook func(context.Context, AppendBatch) (AppendResult, error)) *checkpointTokenWriter {
+	return &checkpointTokenWriter{Writer: newAgentTokenTestWriter(t), beforeAppend: hook}
+}
+func (w *checkpointTokenWriter) AppendBatch(ctx context.Context, batch AppendBatch) (AppendResult, error) {
+	if _, err := w.beforeAppend(ctx, batch); err != nil {
+		return AppendResult{}, err
+	}
+	return w.Writer.AppendBatch(ctx, batch)
+}
+func (w *checkpointTokenWriter) AppendWithCheckpoints(ctx context.Context, batch AppendBatch, updates []Checkpoint) (AppendResult, error) {
+	if len(batch.Observations)+len(batch.UsageAtoms)+len(batch.CoverageEpochs)+len(batch.UnavailableSpans)+len(batch.UsageTombstones) > 0 {
+		if _, err := w.beforeAppend(ctx, batch); err != nil {
+			return AppendResult{}, err
+		}
+	}
+	return w.Writer.AppendWithCheckpoints(ctx, batch, updates)
+}
+func (w *checkpointTokenWriter) AppendWithCheckpointsAndRetire(ctx context.Context, batch AppendBatch, updates []Checkpoint, retirement *CheckpointRetirement) (AppendResult, error) {
+	if len(batch.Observations)+len(batch.UsageAtoms)+len(batch.CoverageEpochs)+len(batch.UnavailableSpans)+len(batch.UsageTombstones) > 0 {
+		if _, err := w.beforeAppend(ctx, batch); err != nil {
+			return AppendResult{}, err
+		}
+	}
+	return w.Writer.AppendWithCheckpointsAndRetire(ctx, batch, updates, retirement)
 }
 
-func (s failingCodexForkRepairMarkerStore) CommitBatchWithCodexForkRepairRoots([]transcriptCursorChange, []string) error {
-	return errors.New("synthetic fork repair transaction failure")
+type failingCodexForkRepairMarkerWriter struct{ *Writer }
+
+func (w failingCodexForkRepairMarkerWriter) AppendWithCheckpoints(ctx context.Context, batch AppendBatch, checkpoints []Checkpoint) (AppendResult, error) {
+	if len(batch.UsageTombstones) > 0 {
+		return AppendResult{}, errors.New("synthetic fork repair transaction failure")
+	}
+	return w.Writer.AppendWithCheckpoints(ctx, batch, checkpoints)
+}
+func (w failingCodexForkRepairMarkerWriter) AppendWithCheckpointsAndRetire(ctx context.Context, batch AppendBatch, checkpoints []Checkpoint, retirement *CheckpointRetirement) (AppendResult, error) {
+	if len(batch.UsageTombstones) > 0 {
+		return AppendResult{}, errors.New("synthetic fork repair transaction failure")
+	}
+	return w.Writer.AppendWithCheckpointsAndRetire(ctx, batch, checkpoints, retirement)
 }
 
 func TestAgentTokenCollectorCyclesRealShapedSourcesAndProjectsRate(t *testing.T) {
@@ -298,9 +340,11 @@ func TestBoundedTranscriptSourcePagesRotatePastTheSourceLimit(t *testing.T) {
 }
 
 func TestAgentTokenCollectorReusesOpenCodeDatabaseAcrossCycles(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := t.TempDir()
 	opencodePath := copyOpenCodeFixture(t)
-	collector := NewAgentTokenCollector(countingTokenWriter{}, realHostCollectorClock{}, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, realHostCollectorClock{}, AgentTokenCollectorConfig{
 		OpenCodeDatabase: opencodePath,
 		OpenCodeInventory: func(context.Context) ([]AgentRecord, []error) {
 			return []AgentRecord{{Kind: "opencode", OpenCodeSession: "ses-1", TmuxSession: "opencode"}}, nil
@@ -313,7 +357,7 @@ func TestAgentTokenCollectorReusesOpenCodeDatabaseAcrossCycles(t *testing.T) {
 	if counters.OpenCodeDatabaseOpens != 1 || counters.OpenCodeDatabaseReuses != 1 {
 		t.Fatalf("OpenCode database lifecycle = %+v", counters)
 	}
-	for _, phase := range []string{"identity_cursor", "database_open", "claims", "session_tree", "step_finish", "cursor_prepare", "append"} {
+	for _, phase := range []string{"identity_cursor", "database_open", "claims", "session_tree", "step_finish", "checkpoint_encode", "append"} {
 		timing, ok := counters.OpenCodePhases[phase]
 		if !ok || timing.Runs != 2 || timing.Last < 0 || timing.Total < timing.Last {
 			t.Fatalf("OpenCode phase timing %q = %+v (all phases should run for both cycles)", phase, counters.OpenCodePhases)
@@ -362,7 +406,7 @@ func TestAgentTokenCollectorReplaysOpenCodeAfterStatsDatabaseReplacement(t *test
 	if err != nil || len(atomsA) == 0 {
 		t.Fatalf("synthetic stats DB A OpenCode atoms = %d, err=%v", len(atomsA), err)
 	}
-	cursorBeforeOrdinaryAppend, err := NewOpenCodeTokenCursor(cursorPath).state()
+	cursorBeforeOrdinaryAppend, err := loadCollectorOpenCodeState(collectorA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +419,7 @@ func TestAgentTokenCollectorReplaysOpenCodeAfterStatsDatabaseReplacement(t *test
 	}
 	clock.now = time.Unix(1788307310, 0)
 	collectorA.RunOnce(ctx)
-	cursorAfterOrdinaryAppend, err := NewOpenCodeTokenCursor(cursorPath).state()
+	cursorAfterOrdinaryAppend, err := loadCollectorOpenCodeState(collectorA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,10 +477,12 @@ func TestAgentTokenCollectorReplaysOpenCodeAfterStatsDatabaseReplacement(t *test
 }
 
 func TestAgentTokenCollectorReopensReplacedOpenCodeDatabase(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := t.TempDir()
 	opencodePath := copyOpenCodeFixture(t)
 	replacement := copyOpenCodeFixture(t)
-	collector := NewAgentTokenCollector(countingTokenWriter{}, realHostCollectorClock{}, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, realHostCollectorClock{}, AgentTokenCollectorConfig{
 		OpenCodeDatabase: opencodePath,
 		OpenCodeInventory: func(context.Context) ([]AgentRecord, []error) {
 			return []AgentRecord{{Kind: "opencode", OpenCodeSession: "ses-1", TmuxSession: "opencode"}}, nil
@@ -467,7 +513,7 @@ func TestAgentTokenCollectorReopensWhenOpenCodeWALAppears(t *testing.T) {
 	}
 	clock := &agentStatusTestClock{now: time.Unix(3, 0)}
 	var emittedEventIDs []string
-	collector := NewAgentTokenCollector(tokenWriterFunc(func(_ context.Context, batch AppendBatch) (AppendResult, error) {
+	collector := NewAgentTokenCollector(tokenWriterFunc(t, func(_ context.Context, batch AppendBatch) (AppendResult, error) {
 		for _, atom := range batch.UsageAtoms {
 			emittedEventIDs = append(emittedEventIDs, atom.EventID)
 		}
@@ -484,8 +530,7 @@ func TestAgentTokenCollectorReopensWhenOpenCodeWALAppears(t *testing.T) {
 		t.Fatal("initial OpenCode database was not cached")
 	}
 	firstDatabase := collector.openCodeDatabase
-	cursorPath := filepath.Join(root, "cursor.json")
-	initialCursor, err := NewOpenCodeTokenCursor(cursorPath).state()
+	initialCursor, err := loadCollectorOpenCodeState(collector)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -561,7 +606,7 @@ func TestAgentTokenCollectorReopensWhenOpenCodeWALAppears(t *testing.T) {
 	if newWALParts != 2 {
 		t.Fatalf("WAL reopen emitted %d new part-wal dimensions, want 2: %v", newWALParts, emittedEventIDs[len(initialEventIDs):])
 	}
-	state, err := NewOpenCodeTokenCursor(cursorPath).state()
+	state, err := loadCollectorOpenCodeState(collector)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -702,7 +747,7 @@ func TestAgentTokenCollectorDoesNotReuseClosedOpenCodeHandleAfterSourceFailure(t
 
 	var batches []AppendBatch
 	clock := &agentStatusTestClock{now: time.Unix(3, 0)}
-	collector := NewAgentTokenCollector(tokenWriterFunc(func(_ context.Context, batch AppendBatch) (AppendResult, error) {
+	collector := NewAgentTokenCollector(tokenWriterFunc(t, func(_ context.Context, batch AppendBatch) (AppendResult, error) {
 		batches = append(batches, batch)
 		return AppendResult{UsageAccepted: len(batch.UsageAtoms), CoverageChanged: len(batch.CoverageEpochs), UnavailableAccepted: len(batch.UnavailableSpans)}, nil
 	}), clock, AgentTokenCollectorConfig{
@@ -726,20 +771,23 @@ func TestAgentTokenCollectorDoesNotReuseClosedOpenCodeHandleAfterSourceFailure(t
 	mutateSQLite(t, databasePath, `DROP TABLE session`)
 	clock.now = time.Unix(4, 0)
 	collector.RunOnce(context.Background())
-	if len(batches) != 3 {
-		t.Fatalf("source-failure collection count = %d, want one metadata append after two initial appends", len(batches))
+	if len(batches) != 4 {
+		t.Fatalf("source-failure collection count = %d, want original and uncovered metadata appends after the two initial appends: %#v", len(batches), batches)
 	}
-	if len(batches[2].UnavailableSpans) != 2 {
-		t.Fatalf("source-failure unavailable spans = %#v, want one per root", batches[2].UnavailableSpans)
+	if len(batches[3].UnavailableSpans) != 2 {
+		t.Fatalf("source-failure unavailable spans = %#v, want one uncovered fragment per root", batches[3].UnavailableSpans)
 	}
-	wantReason := batches[2].UnavailableSpans[0].Reason
+	wantReason := batches[3].UnavailableSpans[0].Reason
 	if wantReason == "" || strings.Contains(wantReason, "database is closed") {
 		t.Fatalf("first source-failure reason = %q", wantReason)
 	}
 	wantSources := map[string]bool{"opencode:root-a": false, "opencode:root-b": false}
-	for _, span := range batches[2].UnavailableSpans {
+	for _, span := range batches[3].UnavailableSpans {
 		if span.Reason != wantReason {
-			t.Fatalf("source-failure reasons diverged after handle close: %#v", batches[2].UnavailableSpans)
+			t.Fatalf("source-failure reasons diverged after handle close: %#v", batches[3].UnavailableSpans)
+		}
+		if span.StartedAt != 8 || span.EndedAt != 9 {
+			t.Fatalf("source-failure interval = [%g,%g], want uncovered [8,9]", span.StartedAt, span.EndedAt)
 		}
 		if _, ok := wantSources[span.SourceID]; !ok {
 			t.Fatalf("unexpected source-failure source: %#v", span)
@@ -804,6 +852,8 @@ func (r *syntheticOpenCodeTreeFailureReader) Close() error {
 }
 
 func TestAgentTokenCollectorStopsAfterTreeSourceFailure(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := t.TempDir()
 	databasePath := filepath.Join(root, "synthetic-opencode.db")
 	if err := os.WriteFile(databasePath, nil, 0o600); err != nil {
@@ -816,7 +866,7 @@ func TestAgentTokenCollectorStopsAfterTreeSourceFailure(t *testing.T) {
 	reader := &syntheticOpenCodeTreeFailureReader{failureRoot: "root-b"}
 	database := &OpenCodeDatabase{reader: reader, close: reader.Close}
 	device, inode := fileIdentity(identity)
-	collector := NewAgentTokenCollector(countingTokenWriter{}, &agentStatusTestClock{now: time.Unix(3, 0)}, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, &agentStatusTestClock{now: time.Unix(3, 0)}, AgentTokenCollectorConfig{
 		OpenCodeDatabase:   databasePath,
 		CursorPath:         filepath.Join(root, "cursor.json"),
 		SkipTranscriptScan: true,
@@ -888,7 +938,7 @@ func TestAgentTokenCollectorPublishesTypedMalformedDatabaseGap(t *testing.T) {
 		t.Fatal(err)
 	}
 	var batches []AppendBatch
-	collector := NewAgentTokenCollector(tokenWriterFunc(func(_ context.Context, batch AppendBatch) (AppendResult, error) {
+	collector := NewAgentTokenCollector(tokenWriterFunc(t, func(_ context.Context, batch AppendBatch) (AppendResult, error) {
 		batches = append(batches, batch)
 		return AppendResult{UnavailableAccepted: len(batch.UnavailableSpans)}, nil
 	}), &agentStatusTestClock{now: time.Unix(3, 0)}, AgentTokenCollectorConfig{
@@ -908,11 +958,13 @@ func TestAgentTokenCollectorPublishesTypedMalformedDatabaseGap(t *testing.T) {
 }
 
 func TestAgentTokenCollectorResourceSoakStaysBounded(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := t.TempDir()
 	transcript := filepath.Join(root, "claude.jsonl")
 	writeJSONL(t, transcript, usageClaude(1788307300, "soak", 4, 3))
 	clock := &agentStatusTestClock{now: time.Unix(1788307300, 0)}
-	collector := NewAgentTokenCollector(countingTokenWriter{}, clock, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, clock, AgentTokenCollectorConfig{
 		Inventory: func(context.Context) ([]AgentRecord, []error) {
 			return []AgentRecord{{Kind: "claude", TmuxSession: "soak"}}, nil
 		},
@@ -950,11 +1002,13 @@ func TestAgentTokenCollectorResourceSoakStaysBounded(t *testing.T) {
 }
 
 func TestAgentTokenCollectorSnapshotIsBoundedAndTracksDiagnostics(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := t.TempDir()
 	databasePath := filepath.Join(root, "source", "opencode.db")
 	cursorPath := filepath.Join(root, "cursor.json")
 	clock := &agentStatusTestClock{now: time.Unix(100, 123000000)}
-	collector := NewAgentTokenCollector(countingTokenWriter{}, clock, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, clock, AgentTokenCollectorConfig{
 		OpenCodeDatabase: databasePath,
 		CursorPath:       cursorPath,
 		OpenCodeInventory: func(context.Context) ([]AgentRecord, []error) {
@@ -985,8 +1039,10 @@ func TestAgentTokenCollectorSnapshotIsBoundedAndTracksDiagnostics(t *testing.T) 
 }
 
 func TestAgentTokenCollectorCadenceEpochIDsStayBoundedAcrossTransitions(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	active := true
-	collector := NewAgentTokenCollector(countingTokenWriter{}, realHostCollectorClock{}, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, realHostCollectorClock{}, AgentTokenCollectorConfig{
 		ActiveCadence:      time.Second,
 		IdleCadence:        time.Minute,
 		Inventory:          func(context.Context) ([]AgentRecord, []error) { return nil, nil },
@@ -1014,7 +1070,7 @@ func TestAgentTokenCollectorCadenceEpochIDsStayBoundedAcrossTransitions(t *testi
 func TestAgentTokenCollectorCadenceTransitionPreservesUTF8EpochIDs(t *testing.T) {
 	active := true
 	var batches []AppendBatch
-	collector := NewAgentTokenCollector(tokenWriterFunc(func(_ context.Context, batch AppendBatch) (AppendResult, error) {
+	collector := NewAgentTokenCollector(tokenWriterFunc(t, func(_ context.Context, batch AppendBatch) (AppendResult, error) {
 		batches = append(batches, batch)
 		return AppendResult{CoverageChanged: len(batch.CoverageEpochs)}, nil
 	}), realHostCollectorClock{}, AgentTokenCollectorConfig{
@@ -1080,6 +1136,8 @@ func TestAgentTokenCollectorSplitPathDeduplicatesRepeatedInventoryUnavailableSpa
 }
 
 func TestAgentTokenTranscriptBudgetIsAggregateFairAndSurvivesRestart(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := t.TempDir()
 	firstPath := filepath.Join(root, "first.jsonl")
 	secondPath := filepath.Join(root, "second.jsonl")
@@ -1108,7 +1166,7 @@ func TestAgentTokenTranscriptBudgetIsAggregateFairAndSurvivesRestart(t *testing.
 	}
 	seenAtoms := make(map[string]struct{})
 	for cycle := 0; cycle < 4; cycle++ {
-		collector := NewAgentTokenCollector(nil, nil, config)
+		collector := NewAgentTokenCollector(testWriter, nil, config)
 		batch, receipts, err := collector.collectTranscripts(context.Background(), 10+float64(cycle), 1, nil, nil, AppendBatch{}, nil)
 		if err != nil {
 			t.Fatalf("cycle %d collect transcripts: %v", cycle, err)
@@ -1127,12 +1185,12 @@ func TestAgentTokenTranscriptBudgetIsAggregateFairAndSurvivesRestart(t *testing.
 			t.Fatalf("second source was not scheduled after collector restart: %+v", batch.CoverageEpochs)
 		}
 		if len(receipts) != 0 {
-			if err := receipts[0].commit(); err != nil {
+			if _, err := collector.appendCollected(context.Background(), batch, receipts); err != nil {
 				t.Fatalf("cycle %d commit cursor: %v", cycle, err)
 			}
 		}
 	}
-	cursor := NewTranscriptCursorStore(cursorPath)
+	cursor := NewAgentTokenCollector(testWriter, nil, config).transcriptCursor
 	for _, source := range sources {
 		state, err := cursor.State(source)
 		if err != nil {
@@ -1149,6 +1207,8 @@ func TestAgentTokenTranscriptBudgetIsAggregateFairAndSurvivesRestart(t *testing.
 }
 
 func TestAgentTokenCollectorRecoversOversizedTranscriptCursorSidecar(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := t.TempDir()
 	transcriptPath := filepath.Join(root, "claude.jsonl")
 	writeJSONL(t, transcriptPath, usageClaude(1, "before-restart", 10, 2))
@@ -1196,7 +1256,7 @@ func TestAgentTokenCollectorRecoversOversizedTranscriptCursorSidecar(t *testing.
 	}
 
 	appendJSONL(t, transcriptPath, usageClaude(2, "after-restart", 20, 4), false)
-	collector := NewAgentTokenCollector(nil, nil, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, nil, AgentTokenCollectorConfig{
 		TranscriptCursorPath: cursorPath,
 		TranscriptSources: func(context.Context, []AgentRecord) ([]TranscriptSource, error) {
 			return []TranscriptSource{source}, nil
@@ -1226,11 +1286,11 @@ func TestAgentTokenCollectorRecoversOversizedTranscriptCursorSidecar(t *testing.
 			t.Fatalf("retire transcript source: %v", err)
 		}
 	}
-	if err := receipts[0].commit(); err != nil {
+	if _, err := collector.appendCollected(context.Background(), batch, receipts); err != nil {
 		t.Fatalf("commit recovered transcript cursor: %v", err)
 	}
 
-	recovered := NewTranscriptCursorStore(cursorPath)
+	recovered := collector.transcriptCursor
 	recoveredState, err := recovered.State(source)
 	if err != nil {
 		t.Fatalf("reload recovered transcript cursor: %v", err)
@@ -1242,28 +1302,24 @@ func TestAgentTokenCollectorRecoversOversizedTranscriptCursorSidecar(t *testing.
 	if recoveredState.Offset != transcriptInfo.Size() {
 		t.Fatalf("recovered cursor offset = %d, want transcript size %d", recoveredState.Offset, transcriptInfo.Size())
 	}
-	if info, err := os.Stat(cursorPath); err != nil || info.Size() >= maxTranscriptCursorSidecarBytes {
-		t.Fatalf("migrated cursor sidecar info=%v err=%v, want under %d bytes", info, err, maxTranscriptCursorSidecarBytes)
+	if retained, err := os.Stat(cursorPath); err != nil || retained.Size() != info.Size() {
+		t.Fatalf("migration changed legacy recovery file: %v %v", retained, err)
 	}
-	migratedJSON, err := os.ReadFile(cursorPath)
-	if err != nil {
-		t.Fatal(err)
+	metadata, err := testWriter.ListCheckpointMetadata(context.Background(), "transcript")
+	if err != nil || len(metadata) != 1 || metadata[0].SourceID != transcriptPath {
+		t.Fatalf("retired migrated sources=%d err=%v, want only the live transcript checkpoint", len(metadata), err)
 	}
-	var migrated transcriptCursorDisk
-	if err := json.Unmarshal(migratedJSON, &migrated); err != nil {
-		t.Fatalf("decode migrated cursor sidecar: %v", err)
-	}
-	if migrated.Version != 2 || len(migrated.States) != 1 {
-		t.Fatalf("migrated cursor version/states = %d/%d, want v2 with retired sources pruned and current source retained", migrated.Version, len(migrated.States))
-	}
+
 }
 
 func TestAgentTokenCollectorScansPartialSourcesAfterDiscoveryTimeout(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := t.TempDir()
 	transcriptPath := filepath.Join(root, "claude.jsonl")
 	writeJSONL(t, transcriptPath, usageClaude(1, "discovered-before-timeout", 12, 3))
 	source := TranscriptSource{Path: transcriptPath, Provider: "claude", SourceID: "fixture", ThreadID: "fixture"}
-	collector := NewAgentTokenCollector(nil, nil, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, nil, AgentTokenCollectorConfig{
 		TranscriptDiscoveryTimeout: 10 * time.Millisecond,
 		TranscriptSources: func(ctx context.Context, _ []AgentRecord) ([]TranscriptSource, error) {
 			<-ctx.Done()
@@ -1301,6 +1357,8 @@ func TestTranscriptSourceLivePriorityExcludesCodexForkRepair(t *testing.T) {
 }
 
 func TestAgentTokenCollectorPrioritizesLiveTranscriptThenServicesHistory(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := t.TempDir()
 	livePath := filepath.Join(root, "z-live.jsonl")
 	historicalSources := make([]TranscriptSource, 3)
@@ -1312,7 +1370,7 @@ func TestAgentTokenCollectorPrioritizesLiveTranscriptThenServicesHistory(t *test
 	writeJSONL(t, livePath, usageCodex(1, 1, 0, 1))
 	liveSource := TranscriptSource{Path: livePath, Provider: "codex", SourceID: "live", ThreadID: "live", LiveCandidate: true}
 	sources := append(append([]TranscriptSource(nil), historicalSources...), liveSource)
-	collector := NewAgentTokenCollector(nil, nil, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, nil, AgentTokenCollectorConfig{
 		TranscriptSources: func(context.Context, []AgentRecord) ([]TranscriptSource, error) {
 			return sources, nil
 		},
@@ -1341,7 +1399,7 @@ func TestAgentTokenCollectorPrioritizesLiveTranscriptThenServicesHistory(t *test
 		if len(receipts) != 1 {
 			t.Fatalf("cycle %d prepared cursor receipts = %d, want 1", cycle, len(receipts))
 		}
-		if err := receipts[0].commit(); err != nil {
+		if _, err := collector.appendCollected(context.Background(), batch, receipts); err != nil {
 			t.Fatalf("cycle %d commit cursor: %v", cycle, err)
 		}
 		if cycle < 5 {
@@ -1351,6 +1409,8 @@ func TestAgentTokenCollectorPrioritizesLiveTranscriptThenServicesHistory(t *test
 }
 
 func TestClaudeTranscriptWithGrowingPendingLineKeepsLivePriority(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := t.TempDir()
 	livePath := filepath.Join(root, "claude-live.jsonl")
 	historyPath := filepath.Join(root, "claude-history.jsonl")
@@ -1366,17 +1426,15 @@ func TestClaudeTranscriptWithGrowingPendingLineKeepsLivePriority(t *testing.T) {
 		TranscriptMaxBytesPerCycle:   1 << 20,
 		TranscriptMaxRecordsPerCycle: 1,
 	}
-	collector := NewAgentTokenCollector(nil, nil, config)
+	collector := NewAgentTokenCollector(testWriter, nil, config)
 	collectAndCommit := func(cycle int) AppendBatch {
 		t.Helper()
 		batch, receipts, err := collector.collectTranscripts(context.Background(), 10+float64(cycle), 1, nil, nil, AppendBatch{}, nil)
 		if err != nil {
 			t.Fatalf("cycle %d collect transcripts: %v", cycle, err)
 		}
-		for _, receipt := range receipts {
-			if err := receipt.commit(); err != nil {
-				t.Fatalf("cycle %d commit cursor receipt: %v", cycle, err)
-			}
+		if _, err := collector.appendCollected(context.Background(), batch, receipts); err != nil {
+			t.Fatal(err)
 		}
 		return batch
 	}
@@ -1385,9 +1443,19 @@ func TestClaudeTranscriptWithGrowingPendingLineKeepsLivePriority(t *testing.T) {
 	if seed := collectAndCommit(0); len(seed.CoverageEpochs) != 1 || seed.CoverageEpochs[0].SourceID != liveSource.SourceID {
 		t.Fatalf("seed live transcript coverage = %+v, want %s", seed.CoverageEpochs, liveSource.SourceID)
 	}
+	initialLiveCheckpoint, initialLiveFound, initialLiveErr := testWriter.LoadCheckpoint(context.Background(), transcriptCursorKey(liveSource))
+	if initialLiveErr != nil || !initialLiveFound || initialLiveCheckpoint.SourceID != livePath {
+		t.Fatalf("initial live checkpoint source identity=%q found=%v err=%v", initialLiveCheckpoint.SourceID, initialLiveFound, initialLiveErr)
+	}
 	sources = []TranscriptSource{historySource}
 	if seed := collectAndCommit(1); len(seed.CoverageEpochs) != 1 || seed.CoverageEpochs[0].SourceID != historySource.SourceID {
 		t.Fatalf("seed historical transcript coverage = %+v, want %s", seed.CoverageEpochs, historySource.SourceID)
+	}
+	_, foundLive, err := testWriter.LoadCheckpoint(context.Background(), transcriptCursorKey(liveSource))
+	if err != nil || !foundLive {
+		metadata, metadataErr := testWriter.ListCheckpointMetadata(context.Background(), "transcript")
+		liveInfo, liveStatErr := os.Stat(livePath)
+		t.Fatalf("scheduling page dropped live transcript checkpoint: found=%v err=%v live=%v statErr=%v metadata=%+v metadataErr=%v", foundLive, err, liveInfo, liveStatErr, metadata, metadataErr)
 	}
 	sources = []TranscriptSource{liveSource, historySource}
 	state, err := collector.transcriptCursor.State(liveSource)
@@ -1411,7 +1479,7 @@ func TestClaudeTranscriptWithGrowingPendingLineKeepsLivePriority(t *testing.T) {
 
 	// A fresh collector proves source priority survives process restart along with
 	// the committed EOF watermark, while an unchanged historical source is ready.
-	collector = NewAgentTokenCollector(nil, nil, config)
+	collector = NewAgentTokenCollector(testWriter, nil, config)
 	file, err := os.OpenFile(livePath, os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		t.Fatal(err)
@@ -1443,6 +1511,8 @@ func TestClaudeTranscriptWithGrowingPendingLineKeepsLivePriority(t *testing.T) {
 }
 
 func TestAgentTokenCollectorAdvancesHistoricalRotationWhenVisitedSourceIsAtEOF(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := t.TempDir()
 	eofPath := filepath.Join(root, "a-history-eof.jsonl")
 	backlogPath := filepath.Join(root, "b-history-backlog.jsonl")
@@ -1454,7 +1524,7 @@ func TestAgentTokenCollectorAdvancesHistoricalRotationWhenVisitedSourceIsAtEOF(t
 	backlogSource := TranscriptSource{Path: backlogPath, Provider: "claude", SourceID: "history-backlog", ThreadID: "history"}
 	liveSource := TranscriptSource{Path: livePath, Provider: "codex", SourceID: "live", ThreadID: "live", LiveCandidate: true}
 	sources := []TranscriptSource{eofSource}
-	collector := NewAgentTokenCollector(nil, nil, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, nil, AgentTokenCollectorConfig{
 		TranscriptSources: func(context.Context, []AgentRecord) ([]TranscriptSource, error) {
 			return sources, nil
 		},
@@ -1468,10 +1538,8 @@ func TestAgentTokenCollectorAdvancesHistoricalRotationWhenVisitedSourceIsAtEOF(t
 		if err != nil {
 			t.Fatalf("cycle %d collect transcripts: %v", cycle, err)
 		}
-		for _, receipt := range receipts {
-			if err := receipt.commit(); err != nil {
-				t.Fatalf("cycle %d commit cursor: %v", cycle, err)
-			}
+		if _, err := collector.appendCollected(context.Background(), batch, receipts); err != nil {
+			t.Fatal(err)
 		}
 		return &batch
 	}
@@ -1507,6 +1575,8 @@ func TestAgentTokenCollectorAdvancesHistoricalRotationWhenVisitedSourceIsAtEOF(t
 }
 
 func TestAgentTokenCollectorAdvancesFairnessPastUnchangedHistoricalEOF(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := t.TempDir()
 	eofPath := filepath.Join(root, "a-history-eof.jsonl")
 	backlogPath := filepath.Join(root, "b-history-backlog.jsonl")
@@ -1518,7 +1588,7 @@ func TestAgentTokenCollectorAdvancesFairnessPastUnchangedHistoricalEOF(t *testin
 	backlogSource := TranscriptSource{Path: backlogPath, Provider: "claude", SourceID: "history-backlog", ThreadID: "history"}
 	liveSource := TranscriptSource{Path: livePath, Provider: "codex", SourceID: "live", ThreadID: "live", LiveCandidate: true}
 	sources := []TranscriptSource{eofSource}
-	collector := NewAgentTokenCollector(nil, nil, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, nil, AgentTokenCollectorConfig{
 		TranscriptSources: func(context.Context, []AgentRecord) ([]TranscriptSource, error) {
 			return sources, nil
 		},
@@ -1530,15 +1600,13 @@ func TestAgentTokenCollectorAdvancesFairnessPastUnchangedHistoricalEOF(t *testin
 	if err != nil || len(seed.CoverageEpochs) != 1 || seed.CoverageEpochs[0].SourceID != eofSource.SourceID {
 		t.Fatalf("seed historical EOF cursor = %+v err=%v", seed.CoverageEpochs, err)
 	}
-	for _, receipt := range receipts {
-		if err := receipt.commit(); err != nil {
-			t.Fatalf("commit historical EOF seed: %v", err)
-		}
+	if _, err := collector.appendCollected(context.Background(), seed, receipts); err != nil {
+		t.Fatal(err)
 	}
 
 	sources = []TranscriptSource{eofSource, backlogSource, liveSource}
 	newCollector := func() *AgentTokenCollector {
-		return NewAgentTokenCollector(nil, nil, AgentTokenCollectorConfig{
+		return NewAgentTokenCollector(testWriter, nil, AgentTokenCollectorConfig{
 			TranscriptSources: func(context.Context, []AgentRecord) ([]TranscriptSource, error) {
 				return sources, nil
 			},
@@ -1553,10 +1621,8 @@ func TestAgentTokenCollectorAdvancesFairnessPastUnchangedHistoricalEOF(t *testin
 		if collectErr != nil || len(batch.CoverageEpochs) == 0 || batch.CoverageEpochs[0].SourceID != liveSource.SourceID {
 			t.Fatalf("restart fairness live cycle %d = coverage %+v err=%v", cycle, batch.CoverageEpochs, collectErr)
 		}
-		for _, receipt := range liveReceipts {
-			if err := receipt.commit(); err != nil {
-				t.Fatalf("commit restart fairness live cycle %d: %v", cycle, err)
-			}
+		if _, err := restarted.appendCollected(context.Background(), batch, liveReceipts); err != nil {
+			t.Fatal(err)
 		}
 		if got := restarted.liveTranscriptPriorityRuns; got != cycle+1 {
 			t.Fatalf("persisted live-priority streak after restart cycle %d = %d, want %d", cycle, got, cycle+1)
@@ -1571,8 +1637,6 @@ func TestAgentTokenCollectorAdvancesFairnessPastUnchangedHistoricalEOF(t *testin
 	}
 	collector = newCollector()
 	collector.config.TranscriptMaxBytesPerCycle = 2 // H0's two one-byte integrity reads exhaust the fairness turn.
-	cursor := collector.transcriptCursor.(*TranscriptCursorStore)
-	injectPostRenameTranscriptCursorWriteFailure(t, cursor, transcriptCursorKey(backlogSource))
 	fairnessTurn, receipts, err := collector.collectTranscripts(context.Background(), 13, 1, nil, nil, AppendBatch{}, nil)
 	if err != nil {
 		t.Fatalf("visit unchanged historical EOF source: %v", err)
@@ -1580,8 +1644,8 @@ func TestAgentTokenCollectorAdvancesFairnessPastUnchangedHistoricalEOF(t *testin
 	if len(fairnessTurn.UsageAtoms) != 0 || len(fairnessTurn.CoverageEpochs) != 0 || len(receipts) != 1 {
 		t.Fatalf("unchanged-EOF fairness turn was not schedule-only: batch=%+v receipts=%d", fairnessTurn, len(receipts))
 	}
-	if err := commitReceipts(receipts); err == nil {
-		t.Fatal("schedule-only fairness commit did not surface the post-rename error")
+	if _, err := collector.appendCollected(context.Background(), fairnessTurn, receipts); err != nil {
+		t.Fatal(err)
 	}
 	// The same collector must reload the committed H1 rotation and reset streak.
 	collector.config.TranscriptMaxBytesPerCycle = 1 << 20
@@ -1591,7 +1655,7 @@ func TestAgentTokenCollectorAdvancesFairnessPastUnchangedHistoricalEOF(t *testin
 		if collectErr != nil || len(batch.CoverageEpochs) == 0 || batch.CoverageEpochs[0].SourceID != liveSource.SourceID {
 			t.Fatalf("same-collector post-error live cycle %d = coverage %+v err=%v", cycle, batch.CoverageEpochs, collectErr)
 		}
-		if err := commitReceipts(liveReceipts); err != nil {
+		if _, err := collector.appendCollected(context.Background(), batch, liveReceipts); err != nil {
 			t.Fatalf("commit same-collector post-error live cycle %d: %v", cycle, err)
 		}
 	}
@@ -1599,7 +1663,7 @@ func TestAgentTokenCollectorAdvancesFairnessPastUnchangedHistoricalEOF(t *testin
 	if err != nil {
 		t.Fatalf("same-collector serve next historical source: %v", err)
 	}
-	if err := commitReceipts(receipts); err != nil {
+	if _, err := collector.appendCollected(context.Background(), batch, receipts); err != nil {
 		t.Fatalf("commit same-collector next historical source: %v", err)
 	}
 	if len(batch.CoverageEpochs) == 0 || batch.CoverageEpochs[0].SourceID != backlogSource.SourceID {
@@ -1608,6 +1672,8 @@ func TestAgentTokenCollectorAdvancesFairnessPastUnchangedHistoricalEOF(t *testin
 }
 
 func TestAgentTokenCollectorAdvancesHistoricalRotationAfterUnavailableSource(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := t.TempDir()
 	historyPath := filepath.Join(root, "a-history-unavailable.jsonl")
 	backlogPath := filepath.Join(root, "b-history-backlog.jsonl")
@@ -1619,7 +1685,7 @@ func TestAgentTokenCollectorAdvancesHistoricalRotationAfterUnavailableSource(t *
 	backlogSource := TranscriptSource{Path: backlogPath, Provider: "claude", SourceID: "history-backlog", ThreadID: "history"}
 	liveSource := TranscriptSource{Path: livePath, Provider: "codex", SourceID: "live", ThreadID: "live", LiveCandidate: true}
 	sources := []TranscriptSource{historySource}
-	collector := NewAgentTokenCollector(nil, nil, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, nil, AgentTokenCollectorConfig{
 		TranscriptSources: func(context.Context, []AgentRecord) ([]TranscriptSource, error) {
 			return sources, nil
 		},
@@ -1633,10 +1699,8 @@ func TestAgentTokenCollectorAdvancesHistoricalRotationAfterUnavailableSource(t *
 		if err != nil {
 			t.Fatalf("cycle %d collect transcripts: %v", cycle, err)
 		}
-		for _, receipt := range receipts {
-			if err := receipt.commit(); err != nil {
-				t.Fatalf("cycle %d commit cursor: %v", cycle, err)
-			}
+		if _, err := collector.appendCollected(context.Background(), batch, receipts); err != nil {
+			t.Fatal(err)
 		}
 		return batch
 	}
@@ -1681,60 +1745,6 @@ func TestDefaultAgentTokenSourcesMarkProcessOwnedCodexTranscriptLive(t *testing.
 	}
 }
 
-type failInitialTranscriptBatchCursor struct {
-	*TranscriptCursorStore
-	prepareBatchCalls int
-}
-
-func (c *failInitialTranscriptBatchCursor) PrepareBatchWithNextSource(changes []transcriptCursorChange, nextSource string) error {
-	c.prepareBatchCalls++
-	if c.prepareBatchCalls == 1 && len(changes) > 0 {
-		return errors.New("synthetic batch-prepare conflict")
-	}
-	return c.TranscriptCursorStore.PrepareBatchWithNextSource(changes, nextSource)
-}
-
-func (c *failInitialTranscriptBatchCursor) PrepareBatchWithSchedules(changes []transcriptCursorChange, nextSource, nextHistoricalSource string, liveTranscriptPriorityRuns int) error {
-	c.prepareBatchCalls++
-	if c.prepareBatchCalls == 1 && len(changes) > 0 {
-		return errors.New("synthetic batch-prepare conflict")
-	}
-	return c.TranscriptCursorStore.PrepareBatchWithSchedules(changes, nextSource, nextHistoricalSource, liveTranscriptPriorityRuns)
-}
-
-func (c *failInitialTranscriptBatchCursor) PrepareBatchWithHistoricalSchedule(changes []transcriptCursorChange, nextHistoricalSource string, liveTranscriptPriorityRuns int) error {
-	return c.TranscriptCursorStore.PrepareBatchWithHistoricalSchedule(changes, nextHistoricalSource, liveTranscriptPriorityRuns)
-}
-
-func TestAgentTokenCollectorUsesPerSourcePrepareFallback(t *testing.T) {
-	root := t.TempDir()
-	transcript := filepath.Join(root, "claude.jsonl")
-	writeJSONL(t, transcript, usageClaude(1, "fallback", 4, 2))
-	source := TranscriptSource{Path: transcript, Provider: "claude", SourceID: "synthetic-claude", ThreadID: "fallback"}
-	collector := NewAgentTokenCollector(nil, nil, AgentTokenCollectorConfig{
-		TranscriptSources: func(context.Context, []AgentRecord) ([]TranscriptSource, error) {
-			return []TranscriptSource{source}, nil
-		},
-		TranscriptCursorPath: filepath.Join(root, "transcript-cursor.json"),
-	})
-	cursor := &failInitialTranscriptBatchCursor{TranscriptCursorStore: NewTranscriptCursorStore(collector.config.TranscriptCursorPath)}
-	collector.transcriptCursor = cursor
-	batch, receipts, err := collector.collectTranscripts(context.Background(), 10, 1, nil, nil, AppendBatch{}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(batch.UsageAtoms) != 2 || len(batch.UnavailableSpans) != 0 || len(receipts) != 1 || cursor.prepareBatchCalls != 2 {
-		t.Fatalf("per-source fallback collection = batch=%+v receipts=%d batch_prepare_calls=%d", batch, len(receipts), cursor.prepareBatchCalls)
-	}
-	if err := receipts[0].commit(); err != nil {
-		t.Fatal(err)
-	}
-	state, err := cursor.State(source)
-	if err != nil || state.Offset != transcriptFixtureSize(t, transcript) {
-		t.Fatalf("fallback cursor commit = %+v, err=%v", state, err)
-	}
-}
-
 func TestAgentTokenCollectorRollsBackTranscriptAndOpenCodeCursor(t *testing.T) {
 	root := t.TempDir()
 	transcript := filepath.Join(root, "claude.jsonl")
@@ -1763,7 +1773,7 @@ func TestAgentTokenCollectorRollsBackTranscriptAndOpenCodeCursor(t *testing.T) {
 		OpenCodeDatabase: opencodePath, CursorPath: cursorPath,
 		TranscriptCursorPath: transcriptCursorPath, EpochStartedAt: 1,
 	})
-	initialOpenCodeState, err := NewOpenCodeTokenCursor(cursorPath).state()
+	initialOpenCodeState, err := loadCollectorOpenCodeState(collector)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1777,7 +1787,7 @@ func TestAgentTokenCollectorRollsBackTranscriptAndOpenCodeCursor(t *testing.T) {
 	if err != nil || transcriptState.Offset != 0 {
 		t.Fatalf("transcript cursor after failed SQLite append = %+v err=%v, want offset 0", transcriptState, err)
 	}
-	openCodeState, err := NewOpenCodeTokenCursor(cursorPath).state()
+	openCodeState, err := loadCollectorOpenCodeState(collector)
 	if err != nil || !reflect.DeepEqual(openCodeState, initialOpenCodeState) {
 		t.Fatalf("OpenCode cursor after failed SQLite append = %+v err=%v, want unchanged %+v", openCodeState, err, initialOpenCodeState)
 	}
@@ -1798,70 +1808,9 @@ func TestAgentTokenCollectorRollsBackTranscriptAndOpenCodeCursor(t *testing.T) {
 	if err != nil || transcriptState.Offset != transcriptFixtureSize(t, transcript) {
 		t.Fatalf("transcript cursor after successful retry = %+v err=%v", transcriptState, err)
 	}
-	openCodeState, err = NewOpenCodeTokenCursor(cursorPath).state()
+	openCodeState, err = loadCollectorOpenCodeState(collector)
 	if err != nil || len(openCodeState.Events) == 0 {
 		t.Fatalf("OpenCode cursor after successful retry = %+v err=%v", openCodeState, err)
-	}
-}
-
-func TestOpenCodeCursorRepairsPendingJournalOnRestart(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "cursor.json")
-	cursor := NewOpenCodeTokenCursor(path)
-	pending := openCodeCursorState{
-		Events: map[string]string{"a": "b"},
-		RawScan: openCodeRawScanState{
-			HasScan: true, SelectionKey: "synthetic-selection", ScannedThroughRowID: 20,
-			HighWaterRowID: 30, SourceDataVersion: 4,
-		},
-	}
-	if err := cursor.prepare(openCodeCursorState{}, pending); err != nil {
-		t.Fatal(err)
-	}
-	restarted := NewOpenCodeTokenCursor(path)
-	state, err := restarted.state()
-	if err != nil {
-		t.Fatalf("pending cursor was not repaired: %v", err)
-	}
-	if len(state.Events) != 0 || state.RawScan.HasScan {
-		t.Fatalf("interrupted pending state was promoted instead of discarded: %+v", state)
-	}
-	contents, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(contents), `"pending"`) {
-		t.Fatalf("pending journal remained after restart: %s", contents)
-	}
-}
-
-func TestOpenCodeCursorCommitsAndReloadsRawPageProgress(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "cursor.json")
-	cursor := NewOpenCodeTokenCursor(path)
-	before := openCodeCursorState{Events: map[string]string{}, Parts: map[string]OpenCodePartCursor{}}
-	next := before.clone()
-	next.RawScan = openCodeRawScanState{
-		HasScan: true, SelectionKey: "synthetic-selection", ScannedThroughRowID: 12,
-		HighWaterRowID: 20, SourceDataVersion: 7,
-		RootErrors:     map[string]string{"root-synthetic": "malformed-transcript-json"},
-		ScanRootErrors: map[string]string{"root-synthetic": "malformed-transcript-json"},
-		ScanDirty:      true,
-	}
-	if err := cursor.prepare(before, next); err != nil {
-		t.Fatal(err)
-	}
-	if err := cursor.commit(next); err != nil {
-		t.Fatal(err)
-	}
-	reloaded, err := NewOpenCodeTokenCursor(path).state()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(reloaded.RawScan, next.RawScan) {
-		t.Fatalf("reloaded raw page progress = %+v, want %+v", reloaded.RawScan, next.RawScan)
-	}
-	reloaded.RawScan.RootErrors["root-synthetic"] = "mutated"
-	if next.RawScan.RootErrors["root-synthetic"] != "malformed-transcript-json" {
-		t.Fatal("cursor clone shared mutable raw-scan errors with caller state")
 	}
 }
 
@@ -1871,28 +1820,20 @@ func TestOpenCodeCursorMigratesLegacyMalformedRowRefsToBoundedRescan(t *testing.
 	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cursor := NewOpenCodeTokenCursor(path)
-	state, err := cursor.state()
+	disk, err := readLegacyOpenCodeCursor(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	state := disk.State
 	if !state.RawScan.ForceRescan || state.RawScan.RootErrors["root-synthetic"] != "malformed-transcript-json" || len(state.RawScan.ErrorRefs) != 0 {
-		t.Fatalf("legacy cursor migration = %+v, want preserved summary and forced rescan without row refs", state.RawScan)
-	}
-	next := state.clone()
-	if err := cursor.prepare(state, next); err != nil {
-		t.Fatal(err)
-	}
-	if err := cursor.commit(next); err != nil {
-		disk, readErr := cursor.readDisk()
-		t.Fatalf("commit migrated cursor: %v; readErr=%v disk=%+v pending=%+v expected=%+v", err, readErr, disk, disk.Pending, next)
+		t.Fatalf("legacy decoded state=%+v", state.RawScan)
 	}
 	contents, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(contents), `"version":2`) || strings.Contains(string(contents), `"error_refs"`) {
-		t.Fatalf("migrated cursor sidecar retained legacy row refs or version: %s", contents)
+	if string(contents) != legacy {
+		t.Fatal("legacy migration input was modified")
 	}
 }
 
@@ -1968,7 +1909,7 @@ func TestAgentTokenCollectorCommitsEmptyRawPagesAndResumesSyntheticHistory(t *te
 	clock := &agentStatusTestClock{now: time.Unix(now/1000, 0)}
 	cursorPath := filepath.Join(root, "opencode-cursor.json")
 	var lastBatch AppendBatch
-	writer := tokenWriterFunc(func(_ context.Context, batch AppendBatch) (AppendResult, error) {
+	writer := tokenWriterFunc(t, func(_ context.Context, batch AppendBatch) (AppendResult, error) {
 		lastBatch = batch
 		return AppendResult{UsageAccepted: len(batch.UsageAtoms), CoverageChanged: len(batch.CoverageEpochs), UnavailableAccepted: len(batch.UnavailableSpans)}, nil
 	})
@@ -1980,7 +1921,7 @@ func TestAgentTokenCollectorCommitsEmptyRawPagesAndResumesSyntheticHistory(t *te
 		CursorPath: cursorPath, SkipTranscriptScan: true, OpenCodeCollectionTimeout: 20 * time.Second,
 	})
 	collector.RunOnce(context.Background())
-	first, err := NewOpenCodeTokenCursor(cursorPath).state()
+	first, err := loadCollectorOpenCodeState(collector)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2002,7 +1943,7 @@ func TestAgentTokenCollectorCommitsEmptyRawPagesAndResumesSyntheticHistory(t *te
 	mutateSQLite(t, databasePath, `UPDATE part SET data='{' WHERE id='part-0002'`)
 	clock.now = clock.now.Add(AgentTokenActiveCadence)
 	collector.RunOnce(context.Background())
-	completed, err := NewOpenCodeTokenCursor(cursorPath).state()
+	completed, err := loadCollectorOpenCodeState(collector)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2012,7 +1953,7 @@ func TestAgentTokenCollectorCommitsEmptyRawPagesAndResumesSyntheticHistory(t *te
 	for completed.RawScan.ScannedThroughRowID < completed.RawScan.HighWaterRowID {
 		clock.now = clock.now.Add(AgentTokenActiveCadence)
 		collector.RunOnce(context.Background())
-		completed, err = NewOpenCodeTokenCursor(cursorPath).state()
+		completed, err = loadCollectorOpenCodeState(collector)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2026,14 +1967,14 @@ func TestAgentTokenCollectorCommitsEmptyRawPagesAndResumesSyntheticHistory(t *te
 	mutateSQLite(t, databasePath, `UPDATE part SET data='{"type":"tool","name":"repaired"}' WHERE id IN ('part-0001', 'part-0002')`)
 	clock.now = clock.now.Add(AgentTokenActiveCadence)
 	collector.RunOnce(context.Background())
-	repaired, err := NewOpenCodeTokenCursor(cursorPath).state()
+	repaired, err := loadCollectorOpenCodeState(collector)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for repaired.RawScan.ScannedThroughRowID < repaired.RawScan.HighWaterRowID {
 		clock.now = clock.now.Add(AgentTokenActiveCadence)
 		collector.RunOnce(context.Background())
-		repaired, err = NewOpenCodeTokenCursor(cursorPath).state()
+		repaired, err = loadCollectorOpenCodeState(collector)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2108,7 +2049,7 @@ func TestAgentTokenCollectorKeepsMalformedHistorySummaryBoundedAndReconcilesRepa
 	clock := &agentStatusTestClock{now: time.Unix(now/1000, 0)}
 	cursorPath := filepath.Join(root, "opencode-cursor.json")
 	var lastBatch AppendBatch
-	writer := tokenWriterFunc(func(_ context.Context, batch AppendBatch) (AppendResult, error) {
+	writer := tokenWriterFunc(t, func(_ context.Context, batch AppendBatch) (AppendResult, error) {
 		lastBatch = batch
 		return AppendResult{UsageAccepted: len(batch.UsageAtoms), CoverageChanged: len(batch.CoverageEpochs), UnavailableAccepted: len(batch.UnavailableSpans)}, nil
 	})
@@ -2120,7 +2061,7 @@ func TestAgentTokenCollectorKeepsMalformedHistorySummaryBoundedAndReconcilesRepa
 		CursorPath: cursorPath, SkipTranscriptScan: true, OpenCodeCollectionTimeout: 20 * time.Second,
 	})
 	collector.RunOnce(context.Background())
-	initial, err := NewOpenCodeTokenCursor(cursorPath).state()
+	initial, err := loadCollectorOpenCodeState(collector)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2133,7 +2074,7 @@ func TestAgentTokenCollectorKeepsMalformedHistorySummaryBoundedAndReconcilesRepa
 	for initial.RawScan.ScannedThroughRowID < initial.RawScan.HighWaterRowID {
 		clock.now = clock.now.Add(AgentTokenActiveCadence)
 		collector.RunOnce(context.Background())
-		initial, err = NewOpenCodeTokenCursor(cursorPath).state()
+		initial, err = loadCollectorOpenCodeState(collector)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2141,7 +2082,11 @@ func TestAgentTokenCollectorKeepsMalformedHistorySummaryBoundedAndReconcilesRepa
 	if initial.RawScan.RootErrors["root"] != "malformed-transcript-json" || len(initial.RawScan.ScanRootErrors) != 0 || len(initial.RawScan.ErrorRefs) != 0 {
 		t.Fatalf("completed malformed-history summary=%+v, want one published root error and no per-row refs", initial.RawScan)
 	}
-	sidecar, err := os.ReadFile(cursorPath)
+	checkpoint, exists, err := writer.LoadCheckpoint(context.Background(), "opencode/"+databasePath)
+	sidecar := checkpoint.State
+	if !exists {
+		t.Fatal("malformed-history checkpoint absent")
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2152,14 +2097,14 @@ func TestAgentTokenCollectorKeepsMalformedHistorySummaryBoundedAndReconcilesRepa
 	mutateSQLite(t, databasePath, `UPDATE part SET data='{"type":"tool","name":"repaired"}'`)
 	clock.now = clock.now.Add(AgentTokenActiveCadence)
 	collector.RunOnce(context.Background())
-	completed, err := NewOpenCodeTokenCursor(cursorPath).state()
+	completed, err := loadCollectorOpenCodeState(collector)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for completed.RawScan.ScannedThroughRowID < completed.RawScan.HighWaterRowID {
 		clock.now = clock.now.Add(AgentTokenActiveCadence)
 		collector.RunOnce(context.Background())
-		completed, err = NewOpenCodeTokenCursor(cursorPath).state()
+		completed, err = loadCollectorOpenCodeState(collector)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2179,91 +2124,6 @@ func TestAgentTokenCollectorKeepsMalformedHistorySummaryBoundedAndReconcilesRepa
 		t.Fatalf("reconciled root coverage=%v malformed-unavailable=%v; batch=%+v", coverageForRoot, malformedUnavailable, lastBatch)
 	}
 	collector.Stop()
-}
-
-func TestOpenCodeCursorDiscardedPendingJournalAdvancesGeneration(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "cursor.json")
-	cursor := NewOpenCodeTokenCursor(path)
-	next := openCodeCursorState{Events: map[string]string{"event": "next"}}
-	if err := cursor.prepare(openCodeCursorState{}, next); err != nil {
-		t.Fatal(err)
-	}
-	restarted := NewOpenCodeTokenCursor(path)
-	if _, err := restarted.state(); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var disk openCodeCursorDisk
-	if err := json.Unmarshal(data, &disk); err != nil {
-		t.Fatal(err)
-	}
-	if disk.Generation != 2 {
-		t.Fatalf("discarded pending generation = %d, want 2", disk.Generation)
-	}
-	if err := restarted.prepare(openCodeCursorState{}, next); err != nil {
-		t.Fatalf("new owner could not prepare after pending recovery: %v", err)
-	}
-}
-
-func TestOpenCodeCursorRejectsStaleCommitWithoutClobberingNewPrepare(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "cursor.json")
-	cursor := NewOpenCodeTokenCursor(path)
-	first := openCodeCursorState{Events: map[string]string{"event": "first"}}
-	second := openCodeCursorState{Events: map[string]string{"event": "second"}}
-	third := openCodeCursorState{Events: map[string]string{"event": "third"}}
-	if err := cursor.prepare(openCodeCursorState{}, first); err != nil {
-		t.Fatal(err)
-	}
-	if err := cursor.commit(first); err != nil {
-		t.Fatal(err)
-	}
-	if err := cursor.prepare(first, second); err != nil {
-		t.Fatal(err)
-	}
-	if err := cursor.commit(third); err == nil {
-		t.Fatal("stale OpenCode receipt committed a different pending state")
-	}
-	if err := cursor.commit(second); err != nil {
-		t.Fatalf("new OpenCode receipt could not commit after stale rejection: %v", err)
-	}
-	loaded, err := NewOpenCodeTokenCursor(path).state()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.Events["event"] != "second" {
-		t.Fatalf("stale commit changed durable OpenCode cursor: %+v", loaded)
-	}
-	if err := cursor.prepare(first, third); err == nil {
-		t.Fatal("stale OpenCode operation prepared over the committed cursor")
-	}
-}
-
-func TestOpenCodeCursorWriteFailureDoesNotAdvanceMemory(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "cursor.json")
-	if err := os.Mkdir(path, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	cursor := NewOpenCodeTokenCursor(path)
-	next := openCodeCursorState{Events: map[string]string{"event": "next"}}
-	if err := cursor.prepare(openCodeCursorState{}, next); err == nil {
-		t.Fatal("prepare unexpectedly succeeded with a directory sidecar path")
-	}
-	if cursor.pending != nil || cursor.pendingToken != "" {
-		t.Fatalf("failed prepare advanced in-memory state: pending=%v token=%q", cursor.pending, cursor.pendingToken)
-	}
-	if err := os.Remove(path); err != nil {
-		t.Fatal(err)
-	}
-	if err := cursor.prepare(openCodeCursorState{}, next); err != nil {
-		t.Fatal(err)
-	}
-	if err := cursor.commit(next); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func TestAgentTokenCollectorReplaysOpenCodeAfterDatabaseReplacement(t *testing.T) {
@@ -2361,9 +2221,15 @@ func TestAgentTokenCollectorUsesInitialHistoryWindowPerNewOpenCodeRoot(t *testin
 
 func TestAgentTokenCollectorMarksInPlaceOpenCodeRevisionUnavailable(t *testing.T) {
 	root := t.TempDir()
+	statsPath := filepath.Join(root, "stats.sqlite3")
+	testWriter, err := OpenWriter(context.Background(), statsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { testWriter.Close() })
 	databasePath := createOpenCodeFixture(t)
 	clock := &agentStatusTestClock{now: time.Unix(3, 0)}
-	collector := NewAgentTokenCollector(countingTokenWriter{}, clock, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, clock, AgentTokenCollectorConfig{
 		OpenCodeDatabase: databasePath,
 		OpenCodeInventory: func(context.Context) ([]AgentRecord, []error) {
 			return []AgentRecord{{Kind: "opencode", TmuxSession: "opencode", OpenCodeSession: "ses-1"}}, nil
@@ -2388,16 +2254,30 @@ func TestAgentTokenCollectorMarksInPlaceOpenCodeRevisionUnavailable(t *testing.T
 	if second.UsageAccepted != 3 || second.UnavailableAccepted != 1 {
 		t.Fatalf("in-place OpenCode revision counters = %+v", second)
 	}
+	database, err := OpenReadOnly(context.Background(), statsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	unavailable, err := database.ReadUnavailableSpans(context.Background(), 0, 20, MaxFactReadLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unavailable) != 1 || unavailable[0].Reason != "opencode-source-revision-changed" || unavailable[0].StartedAt != 8 || unavailable[0].EndedAt != 10 {
+		t.Fatalf("in-place OpenCode revision durable no-data = %#v, want uncovered revision interval [8,10]", unavailable)
+	}
 }
 
 func TestAgentTokenCollectorRescansOpenCodeAfterOpeningFreshReadHandle(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := t.TempDir()
 	databasePath := createOpenCodeFixture(t)
 	updated := int64(1788307300000)
 	mutateSQLite(t, databasePath, fmt.Sprintf(`UPDATE session SET time_created = %d, time_updated = %d WHERE id = 'ses-1'`, updated-int64(time.Hour/time.Millisecond), updated))
 	clock := &agentStatusTestClock{now: time.Unix(updated/1000, 0)}
 	cursorPath := filepath.Join(root, "opencode-cursor.json")
-	collector := NewAgentTokenCollector(countingTokenWriter{}, clock, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, clock, AgentTokenCollectorConfig{
 		OpenCodeDatabase: databasePath,
 		OpenCodeInventory: func(context.Context) ([]AgentRecord, []error) {
 			return []AgentRecord{{Kind: "opencode", TmuxSession: "opencode", OpenCodeSession: "ses-1"}}, nil
@@ -2405,7 +2285,7 @@ func TestAgentTokenCollectorRescansOpenCodeAfterOpeningFreshReadHandle(t *testin
 		CursorPath: cursorPath, EpochStartedAt: 1, OwnerGeneration: 1,
 	})
 	collector.RunOnce(context.Background())
-	initial, err := NewOpenCodeTokenCursor(cursorPath).state()
+	initial, err := loadCollectorOpenCodeState(collector)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2460,11 +2340,11 @@ func TestOpenCodeCursorBoundsEventRevisionMap(t *testing.T) {
 	if err := os.WriteFile(path, encoded, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cursor := NewOpenCodeTokenCursor(path)
-	loaded, err := cursor.state()
+	disk, err := readLegacyOpenCodeCursor(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	loaded := disk.State
 	if len(loaded.Events) != 100_000 {
 		t.Fatalf("loaded event revisions = %d, want bounded 100000 entries", len(loaded.Events))
 	}
@@ -2480,14 +2360,6 @@ func TestOpenCodeCursorBoundsEventRevisionMap(t *testing.T) {
 	if _, ok := loaded.Events["oversized-value"]; ok {
 		t.Fatal("oversized event revision value survived cursor compaction")
 	}
-	compactedSidecar, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(compactedSidecar), `"event-000000"`) || strings.Contains(string(compactedSidecar), oversizedKey) || strings.Contains(string(compactedSidecar), "oversized-value") {
-		t.Fatal("cursor load did not persist event revision compaction")
-	}
-
 	next := loaded.clone()
 	batch := AppendBatch{}
 	collector := &AgentTokenCollector{}
@@ -2499,12 +2371,7 @@ func TestOpenCodeCursorBoundsEventRevisionMap(t *testing.T) {
 	if len(next.Events) != 100_001 {
 		t.Fatalf("event revisions before cursor prepare = %d, want one temporary entry above the persisted bound", len(next.Events))
 	}
-	if err := cursor.prepare(loaded, next); err != nil {
-		t.Fatal(err)
-	}
-	if err := cursor.commit(next); err != nil {
-		t.Fatal(err)
-	}
+	boundOpenCodeEventRevisions(next.Events)
 	if len(next.Events) != 100_000 {
 		t.Fatalf("event revisions after cursor prepare = %d, want bounded 100000 entries", len(next.Events))
 	}
@@ -2526,7 +2393,7 @@ func TestOpenCodeCursorBoundsEventRevisionMap(t *testing.T) {
 	if err := os.WriteFile(path, pendingPayload, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	disk, err := cursor.readDisk()
+	disk, err = readLegacyOpenCodeCursor(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2563,7 +2430,7 @@ func TestAgentTokenSourceScanRetriesAfterStatsAppendFailure(t *testing.T) {
 	databasePath := createOpenCodeFixture(t)
 	clock := &agentStatusTestClock{now: time.Unix(3, 0)}
 	writerCalls := 0
-	writer := tokenWriterFunc(func(ctx context.Context, batch AppendBatch) (AppendResult, error) {
+	writer := tokenWriterFunc(t, func(ctx context.Context, batch AppendBatch) (AppendResult, error) {
 		writerCalls++
 		if writerCalls == 1 {
 			return AppendResult{}, errors.New("synthetic append failure")
@@ -2603,10 +2470,12 @@ func TestAgentTokenSourceScanRetriesAfterStatsAppendFailure(t *testing.T) {
 }
 
 func TestAgentTokenCollectorSkipsUnchangedOpenCodePartScan(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := t.TempDir()
 	databasePath := createOpenCodeFixture(t)
 	clock := &agentStatusTestClock{now: time.Unix(3, 0)}
-	collector := NewAgentTokenCollector(countingTokenWriter{}, clock, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, clock, AgentTokenCollectorConfig{
 		OpenCodeDatabase: databasePath,
 		OpenCodeInventory: func(context.Context) ([]AgentRecord, []error) {
 			return []AgentRecord{{Kind: "opencode", TmuxSession: "opencode", OpenCodeSession: "ses-1"}}, nil
@@ -2632,12 +2501,14 @@ func TestAgentTokenCollectorSkipsUnchangedOpenCodePartScan(t *testing.T) {
 }
 
 func TestAgentTokenCollectorDoesNotRestartCompletedOpenCodeRawScanOnUnrelatedCommit(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := t.TempDir()
 	databasePath := filepath.Join(root, "opencode-unrelated-commit.db")
 	writeOpenCodeManyRootHistory(t, databasePath, 1, MaxOpenCodePartReadLimit)
 	clock := &agentStatusTestClock{now: time.Unix(10_000, 0)}
 	cursorPath := filepath.Join(root, "cursor.json")
-	collector := NewAgentTokenCollector(countingTokenWriter{}, clock, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, clock, AgentTokenCollectorConfig{
 		OpenCodeDatabase: databasePath,
 		OpenCodeInventory: func(context.Context) ([]AgentRecord, []error) {
 			return []AgentRecord{{Kind: "opencode", OpenCodeSession: "root-00", TmuxSession: "synthetic"}}, nil
@@ -2648,7 +2519,7 @@ func TestAgentTokenCollectorDoesNotRestartCompletedOpenCodeRawScanOnUnrelatedCom
 	collector.RunOnce(context.Background())
 	clock.now = clock.now.Add(AgentTokenActiveCadence)
 	collector.RunOnce(context.Background())
-	completed, err := NewOpenCodeTokenCursor(cursorPath).state()
+	completed, err := loadCollectorOpenCodeState(collector)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2659,7 +2530,7 @@ func TestAgentTokenCollectorDoesNotRestartCompletedOpenCodeRawScanOnUnrelatedCom
 	mutateSQLite(t, databasePath, `UPDATE session SET time_updated = time_updated + 1 WHERE id = 'root-00'`)
 	clock.now = clock.now.Add(AgentTokenActiveCadence)
 	collector.RunOnce(context.Background())
-	afterCommit, err := NewOpenCodeTokenCursor(cursorPath).state()
+	afterCommit, err := loadCollectorOpenCodeState(collector)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2671,7 +2542,7 @@ func TestAgentTokenCollectorDoesNotRestartCompletedOpenCodeRawScanOnUnrelatedCom
 	mutateSQLite(t, databasePath, `INSERT INTO part VALUES ('part-late-history', 'message-late-history', 'root-00', 1, 1, '{"type":"step-finish","tokens":{"input":2,"output":3,"cache":{"read":4}}}')`)
 	clock.now = clock.now.Add(AgentTokenActiveCadence)
 	collector.RunOnce(context.Background())
-	newPart, err := NewOpenCodeTokenCursor(cursorPath).state()
+	newPart, err := loadCollectorOpenCodeState(collector)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2681,12 +2552,14 @@ func TestAgentTokenCollectorDoesNotRestartCompletedOpenCodeRawScanOnUnrelatedCom
 }
 
 func TestAgentTokenCollectorCompletesOpenCodeRawScanAfterTrailingRowsAreDeleted(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := t.TempDir()
 	databasePath := filepath.Join(root, "opencode-deleted-tail.db")
 	writeOpenCodeManyRootHistory(t, databasePath, 1, MaxOpenCodePartReadLimit)
 	clock := &agentStatusTestClock{now: time.Unix(10_000, 0)}
 	cursorPath := filepath.Join(root, "cursor.json")
-	collector := NewAgentTokenCollector(countingTokenWriter{}, clock, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, clock, AgentTokenCollectorConfig{
 		OpenCodeDatabase: databasePath,
 		OpenCodeInventory: func(context.Context) ([]AgentRecord, []error) {
 			return []AgentRecord{{Kind: "opencode", OpenCodeSession: "root-00", TmuxSession: "synthetic"}}, nil
@@ -2695,7 +2568,7 @@ func TestAgentTokenCollectorCompletesOpenCodeRawScanAfterTrailingRowsAreDeleted(
 	})
 	t.Cleanup(collector.Stop)
 	collector.RunOnce(context.Background())
-	pending, err := NewOpenCodeTokenCursor(cursorPath).state()
+	pending, err := loadCollectorOpenCodeState(collector)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2707,7 +2580,7 @@ func TestAgentTokenCollectorCompletesOpenCodeRawScanAfterTrailingRowsAreDeleted(
 	for attempt := 0; attempt < 3; attempt++ {
 		clock.now = clock.now.Add(AgentTokenActiveCadence)
 		collector.RunOnce(context.Background())
-		completed, stateErr := NewOpenCodeTokenCursor(cursorPath).state()
+		completed, stateErr := loadCollectorOpenCodeState(collector)
 		if stateErr != nil {
 			t.Fatal(stateErr)
 		}
@@ -2715,7 +2588,7 @@ func TestAgentTokenCollectorCompletesOpenCodeRawScanAfterTrailingRowsAreDeleted(
 			return
 		}
 	}
-	final, err := NewOpenCodeTokenCursor(cursorPath).state()
+	final, err := loadCollectorOpenCodeState(collector)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2723,11 +2596,13 @@ func TestAgentTokenCollectorCompletesOpenCodeRawScanAfterTrailingRowsAreDeleted(
 }
 
 func TestAgentTokenCollectorReconcilesOldOpenCodeRevisionOnBoundedSchedule(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := t.TempDir()
 	databasePath := createOpenCodeFixture(t)
 	mutateSQLite(t, databasePath, `UPDATE session SET time_created = 9000000, time_updated = 10000000 WHERE id = 'ses-1'`)
 	clock := &agentStatusTestClock{now: time.Unix(10_000, 0)}
-	collector := NewAgentTokenCollector(countingTokenWriter{}, clock, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, clock, AgentTokenCollectorConfig{
 		OpenCodeDatabase: databasePath,
 		OpenCodeInventory: func(context.Context) ([]AgentRecord, []error) {
 			return []AgentRecord{{Kind: "opencode", OpenCodeSession: "ses-1", TmuxSession: "synthetic"}}, nil
@@ -2769,37 +2644,6 @@ func (c *AgentTokenCollector) openCodeReadMetricsDatabaseForTest() *OpenCodeData
 	c.openCodeDatabaseMu.Lock()
 	defer c.openCodeDatabaseMu.Unlock()
 	return c.openCodeDatabase
-}
-
-func TestCommitReceiptsSettlesEveryReceiptAfterAnError(t *testing.T) {
-	committed := make([]int, 0, 3)
-	receipts := []agentTokenReceipt{
-		{commit: func() error { committed = append(committed, 1); return errors.New("first") }},
-		{commit: func() error { committed = append(committed, 2); return errors.New("second") }},
-		{commit: func() error { committed = append(committed, 3); return nil }},
-	}
-	if err := commitReceipts(receipts); err == nil {
-		t.Fatal("receipt errors were lost")
-	}
-	if !reflect.DeepEqual(committed, []int{1, 2, 3}) {
-		t.Fatalf("receipt settlement stopped early: %v", committed)
-	}
-}
-
-func TestCommitReceiptsRollsBackAReceiptThatCannotCommit(t *testing.T) {
-	commitErr := errors.New("cursor commit failed")
-	rollbackErr := errors.New("cursor rollback failed")
-	rolledBack := false
-	err := commitReceipts([]agentTokenReceipt{{
-		commit: func() error { return commitErr },
-		rollback: func() error {
-			rolledBack = true
-			return rollbackErr
-		},
-	}})
-	if !rolledBack || !errors.Is(err, commitErr) || !errors.Is(err, rollbackErr) {
-		t.Fatalf("failed receipt settlement = rolledBack=%v err=%v", rolledBack, err)
-	}
 }
 
 func TestAgentTokenCollectorCancellationAfterPrepareRollsBackAndRetries(t *testing.T) {
@@ -2874,75 +2718,6 @@ func TestAgentTokenCollectorCancellationAfterPrepareRollsBackAndRetries(t *testi
 	assertDurableUsageAtoms(2)
 }
 
-func TestAgentTokenCollectorReloadsCursorAfterAmbiguousPostRenameFailure(t *testing.T) {
-	root := t.TempDir()
-	transcript := filepath.Join(root, "history.jsonl")
-	writeJSONL(t, transcript, usageClaude(1, "event-1", 3, 2))
-	source := TranscriptSource{Path: transcript, Provider: "claude", SourceID: "history", ThreadID: "history"}
-	config := AgentTokenCollectorConfig{
-		TranscriptSources: func(context.Context, []AgentRecord) ([]TranscriptSource, error) {
-			return []TranscriptSource{source}, nil
-		},
-		TranscriptCursorPath: filepath.Join(root, "transcript-cursor.json"),
-	}
-	collector := NewAgentTokenCollector(nil, nil, config)
-	cursor := NewTranscriptCursorStore(config.TranscriptCursorPath)
-	injectPostRenameTranscriptCursorWriteFailure(t, cursor, transcriptCursorKey(source))
-	collector.transcriptCursor = cursor
-
-	batch, receipts, err := collector.collectTranscripts(context.Background(), 10, 1, nil, nil, AppendBatch{}, nil)
-	if err != nil || len(batch.UsageAtoms) == 0 || len(receipts) != 1 {
-		t.Fatalf("initial synthetic transcript scan = atoms=%d receipts=%d unavailable=%+v err=%v", len(batch.UsageAtoms), len(receipts), batch.UnavailableSpans, err)
-	}
-	if err := commitReceipts(receipts); err == nil {
-		t.Fatal("post-rename commit failure was not returned")
-	}
-
-	batch, receipts, err = collector.collectTranscripts(context.Background(), 11, 1, nil, nil, AppendBatch{}, nil)
-	if err != nil {
-		t.Fatalf("same-collector retry after post-rename failure: %v", err)
-	}
-	if len(batch.UsageAtoms) != 0 {
-		t.Fatalf("same-collector retry replayed committed transcript atoms: %+v", batch.UsageAtoms)
-	}
-	for _, span := range batch.UnavailableSpans {
-		if strings.Contains(span.Reason, "stale") {
-			t.Fatalf("same-collector retry retained a stale cursor: %+v", span)
-		}
-	}
-	if err := commitReceipts(receipts); err != nil {
-		t.Fatalf("same-collector retry receipt: %v", err)
-	}
-	state, err := cursor.State(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := transcriptFixtureSize(t, transcript); state.Offset != want {
-		t.Fatalf("reconciled cursor offset = %d, want %d", state.Offset, want)
-	}
-}
-
-func injectPostRenameTranscriptCursorWriteFailure(t *testing.T, cursor *TranscriptCursorStore, nextHistoricalSource string) {
-	t.Helper()
-	writeSidecar := cursor.sidecarWriter
-	failedAfterRename := false
-	cursor.sidecarWriter = func(path string, value any) error {
-		disk, ok := value.(transcriptCursorDisk)
-		if !ok {
-			t.Fatalf("cursor sidecar value has type %T", value)
-		}
-		injectFailure := !failedAfterRename && len(disk.States) > 0 && len(disk.Pending) == 0 && disk.NextHistoricalSource == nextHistoricalSource && disk.PendingNextSourceToken == "" && disk.PendingNextHistoricalSourceToken == ""
-		if err := writeSidecar(path, value); err != nil {
-			return err
-		}
-		if injectFailure {
-			failedAfterRename = true
-			return errors.New("synthetic sidecar error after atomic rename")
-		}
-		return nil
-	}
-}
-
 func TestOpenCodeCursorReplaysAfterStatsCommitCrash(t *testing.T) {
 	root := t.TempDir()
 	databasePath := copyOpenCodeFixture(t)
@@ -2971,8 +2746,8 @@ func TestOpenCodeCursorReplaysAfterStatsCommitCrash(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Simulate SIGKILL after the stats transaction committed but before the
-	// cursor receipt committed. The restarted collector must discard pending
-	// state and replay deterministic IDs into the writer's dedupe boundary.
+	// checkpoint transaction committed. Restart must replay deterministic IDs
+	// into the writer's dedupe boundary.
 	restarted := NewAgentTokenCollector(writer, &agentStatusTestClock{now: time.Unix(1788307300, 0)}, config)
 	replayed, replayReceipts, err := restarted.collect(context.Background(), 1788307300, 10)
 	if err != nil || len(replayed.UsageAtoms) != len(first.UsageAtoms) || len(replayReceipts) != 1 {
@@ -2985,10 +2760,8 @@ func TestOpenCodeCursorReplaysAfterStatsCommitCrash(t *testing.T) {
 	if result.UsageAccepted != 0 || result.UsageDuplicate != len(replayed.UsageAtoms) {
 		t.Fatalf("replay changed durable usage: result=%+v atoms=%d", result, len(replayed.UsageAtoms))
 	}
-	for _, receipt := range replayReceipts {
-		if err := receipt.commit(); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := restarted.appendCollected(context.Background(), replayed, replayReceipts); err != nil {
+		t.Fatal(err)
 	}
 
 	mutateSQLite(t, databasePath, `INSERT INTO message VALUES ('msg-cursor-replay', 'ses-1', 1788307310000, 1788307310000, '{"role":"assistant"}')`)
@@ -3004,10 +2777,8 @@ func TestOpenCodeCursorReplaysAfterStatsCommitCrash(t *testing.T) {
 	if result.UsageAccepted != len(next.UsageAtoms) {
 		t.Fatalf("new OpenCode part was not accepted after replay: result=%+v", result)
 	}
-	for _, receipt := range nextReceipts {
-		if err := receipt.commit(); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := restarted.appendCollected(context.Background(), next, nextReceipts); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -3035,8 +2806,8 @@ func TestOpenCodeCursorReplaysAfterCrashBeforeStatsAppend(t *testing.T) {
 	if err != nil || len(first.UsageAtoms) == 0 {
 		t.Fatalf("initial OpenCode collection = atoms=%d err=%v", len(first.UsageAtoms), err)
 	}
-	// The prepared cursor is durable, but no stats transaction reached SQLite.
-	// Restart must discard that prepare so the source rows are replayed.
+	// The proposal has no durable cursor until its stats transaction commits.
+	// Restart must replay the same source rows.
 	restarted := NewAgentTokenCollector(writer, &agentStatusTestClock{now: time.Unix(1788307300, 0)}, config)
 	replayed, receipts, err := restarted.collect(context.Background(), 1788307300, 10)
 	if err != nil || len(replayed.UsageAtoms) != len(first.UsageAtoms) || len(receipts) != 1 {
@@ -3049,16 +2820,14 @@ func TestOpenCodeCursorReplaysAfterCrashBeforeStatsAppend(t *testing.T) {
 	if result.UsageAccepted != len(replayed.UsageAtoms) || result.UsageDuplicate != 0 {
 		t.Fatalf("crash-before-append replay = result=%+v atoms=%d", result, len(replayed.UsageAtoms))
 	}
-	for _, receipt := range receipts {
-		if err := receipt.commit(); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := restarted.appendCollected(context.Background(), replayed, receipts); err != nil {
+		t.Fatal(err)
 	}
 }
 
 func TestOpenCodeCursorProcessCrashMatrixReplaysExactlyOnce(t *testing.T) {
 	const expectedUsageAtoms = 3
-	for _, stage := range []string{"before_source_read", "after_source_read", "after_cursor_prepare", "after_stats_append"} {
+	for _, stage := range []string{"before_source_read", "after_source_read", "after_collection", "after_stats_append", "after_atomic_append"} {
 		t.Run(stage, func(t *testing.T) {
 			root := t.TempDir()
 			databasePath := copyOpenCodeFixture(t)
@@ -3079,29 +2848,8 @@ func TestOpenCodeCursorProcessCrashMatrixReplaysExactlyOnce(t *testing.T) {
 			if !strings.Contains(string(output), "synthetic OpenCode process exited at "+stage) {
 				t.Fatalf("crash helper did not reach %s: %s", stage, output)
 			}
-			if stage == "before_source_read" || stage == "after_source_read" {
-				for _, path := range []string{statsPath, cursorPath} {
-					if _, err := os.Stat(path); !os.IsNotExist(err) {
-						t.Fatalf("OpenCode crash stage %s touched persistence path %s: %v", stage, path, err)
-					}
-				}
-			}
-			if stage == "after_cursor_prepare" || stage == "after_stats_append" {
-				data, err := os.ReadFile(cursorPath)
-				if err != nil {
-					t.Fatalf("read prepared OpenCode cursor after %s: %v", stage, err)
-				}
-				var disk openCodeCursorDisk
-				if err := json.Unmarshal(data, &disk); err != nil {
-					t.Fatalf("decode prepared OpenCode cursor after %s: %v", stage, err)
-				}
-				pendingParts := 0
-				if disk.Pending != nil {
-					pendingParts = len(disk.Pending.Parts)
-				}
-				if pendingParts == 0 || disk.PendingToken == "" {
-					t.Fatalf("OpenCode cursor after %s lacks a durable pending prepare: pending_parts=%d token=%t", stage, pendingParts, disk.PendingToken != "")
-				}
+			if _, err := os.Stat(cursorPath); !os.IsNotExist(err) {
+				t.Fatalf("collector created retired cursor journal: %v", err)
 			}
 
 			writer, err := OpenWriter(context.Background(), statsPath)
@@ -3117,7 +2865,11 @@ func TestOpenCodeCursorProcessCrashMatrixReplaysExactlyOnce(t *testing.T) {
 			}
 			collector := NewAgentTokenCollector(writer, &agentStatusTestClock{now: time.Unix(1788307300, 0)}, config)
 			batch, receipts, err := collector.collect(context.Background(), 1788307300, 10)
-			if err != nil || len(batch.UsageAtoms) != expectedUsageAtoms || len(receipts) != 1 {
+			wantReplay := expectedUsageAtoms
+			if stage == "after_atomic_append" {
+				wantReplay = 0
+			}
+			if err != nil || len(batch.UsageAtoms) != wantReplay {
 				_ = writer.Close()
 				t.Fatalf("OpenCode replay after %s = atoms=%d receipts=%d err=%v", stage, len(batch.UsageAtoms), len(receipts), err)
 			}
@@ -3126,7 +2878,7 @@ func TestOpenCodeCursorProcessCrashMatrixReplaysExactlyOnce(t *testing.T) {
 				_ = writer.Close()
 				t.Fatalf("append OpenCode replay after %s: %v", stage, err)
 			}
-			wantAccepted, wantDuplicate := expectedUsageAtoms, 0
+			wantAccepted, wantDuplicate := wantReplay, 0
 			if stage == "after_stats_append" {
 				wantAccepted, wantDuplicate = 0, expectedUsageAtoms
 			}
@@ -3134,11 +2886,8 @@ func TestOpenCodeCursorProcessCrashMatrixReplaysExactlyOnce(t *testing.T) {
 				_ = writer.Close()
 				t.Fatalf("OpenCode replay after %s = %+v, want accepted=%d duplicate=%d", stage, result, wantAccepted, wantDuplicate)
 			}
-			for _, receipt := range receipts {
-				if err := receipt.commit(); err != nil {
-					_ = writer.Close()
-					t.Fatalf("commit OpenCode replay cursor after %s: %v", stage, err)
-				}
+			if _, err := collector.appendCollected(context.Background(), batch, receipts); err != nil {
+				t.Fatal(err)
 			}
 			if err := writer.Close(); err != nil {
 				t.Fatalf("close replacement writer after %s: %v", stage, err)
@@ -3157,6 +2906,7 @@ func TestOpenCodeCursorProcessCrashMatrixReplaysExactlyOnce(t *testing.T) {
 }
 
 func TestOpenCodeCursorCrashHelper(t *testing.T) {
+
 	if os.Getenv("YOLOMUX_OPENCODE_CRASH_HELPER") != "1" {
 		return
 	}
@@ -3177,7 +2927,12 @@ func TestOpenCodeCursorCrashHelper(t *testing.T) {
 			OpenCodeDatabase: databasePath, CursorPath: cursorPath, SkipTranscriptScan: true,
 			EpochStartedAt: 1788307200, OwnerGeneration: 1,
 		}
-		collector := NewAgentTokenCollector(nil, &agentStatusTestClock{now: time.Unix(1788307300, 0)}, config)
+		writer, err := OpenWriter(ctx, statsPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(6)
+		}
+		collector := NewAgentTokenCollector(writer, &agentStatusTestClock{now: time.Unix(1788307300, 0)}, config)
 		collector.openCodeAfterSourceRead = func(window OpenCodeStepFinishWindow, readErr error) {
 			if readErr != nil || len(window.Parts) != 1 || len(window.RootErrors) != 0 {
 				fmt.Fprintf(os.Stderr, "source-read crash boundary saw parts=%d root_errors=%d err=%v; want one clean synthetic part\n", len(window.Parts), len(window.RootErrors), readErr)
@@ -3211,7 +2966,15 @@ func TestOpenCodeCursorCrashHelper(t *testing.T) {
 		fmt.Fprintf(os.Stderr, "collect synthetic OpenCode atoms=%d receipts=%d err=%v\n", len(batch.UsageAtoms), len(receipts), err)
 		os.Exit(7)
 	}
-	if stage == "after_cursor_prepare" {
+	if stage == "after_collection" {
+		fmt.Fprintln(os.Stdout, "synthetic OpenCode process exited at "+stage)
+		os.Exit(0)
+	}
+	if stage == "after_atomic_append" {
+		if _, err := collector.appendCollected(ctx, batch, receipts); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(8)
+		}
 		fmt.Fprintln(os.Stdout, "synthetic OpenCode process exited at "+stage)
 		os.Exit(0)
 	}
@@ -3225,51 +2988,6 @@ func TestOpenCodeCursorCrashHelper(t *testing.T) {
 	}
 	fmt.Fprintln(os.Stderr, "unknown synthetic OpenCode crash stage:", stage)
 	os.Exit(9)
-}
-
-func TestAgentTokenCollectorPropagatesReceiptErrors(t *testing.T) {
-	commitErr := errors.New("cursor commit failed")
-	collector := &AgentTokenCollector{writer: countingTokenWriter{}}
-	ok, err := collector.appendCollected(context.Background(), AppendBatch{}, []agentTokenReceipt{{
-		commit: func() error { return commitErr },
-	}})
-	if ok || !errors.Is(err, commitErr) {
-		t.Fatalf("commit error = ok=%v err=%v", ok, err)
-	}
-
-	appendErr := errors.New("stats append failed")
-	rollbackErr := errors.New("cursor rollback failed")
-	rolledBack := false
-	collector.writer = tokenWriterFunc(func(context.Context, AppendBatch) (AppendResult, error) {
-		return AppendResult{}, appendErr
-	})
-	ok, err = collector.appendCollected(context.Background(), AppendBatch{}, []agentTokenReceipt{{
-		rollback: func() error {
-			rolledBack = true
-			return rollbackErr
-		},
-	}})
-	if ok || !rolledBack || !errors.Is(err, appendErr) || !errors.Is(err, rollbackErr) {
-		t.Fatalf("append/rollback errors = ok=%v rolledBack=%v err=%v", ok, rolledBack, err)
-	}
-}
-
-func TestAgentTokenCollectorRollsBackOpenCodeReceiptAfterCommitFailure(t *testing.T) {
-	commitErr := errors.New("cursor commit failed")
-	rolledBack := false
-	collector := &AgentTokenCollector{writer: countingTokenWriter{}}
-	ok, metadataError, err := collector.appendOpenCodeCollected(context.Background(), AppendBatch{
-		UsageAtoms: []UsageAtom{{EventID: "opencode-usage", Direction: "input", Modality: "text", CacheRole: "none", Unit: "tokens", ObservedAt: 10, Payload: map[string]any{"quantity": 1.0}}},
-	}, &agentTokenReceipt{
-		commit: func() error { return commitErr },
-		rollback: func() error {
-			rolledBack = true
-			return nil
-		},
-	})
-	if ok || metadataError || !rolledBack || !errors.Is(err, commitErr) {
-		t.Fatalf("OpenCode commit failure = ok=%v metadataError=%v rolledBack=%v err=%v", ok, metadataError, rolledBack, err)
-	}
 }
 
 func TestAgentTokenCollectorPreservesOpenCodeUsageWhenMetadataConflicts(t *testing.T) {
@@ -3293,9 +3011,15 @@ func TestAgentTokenCollectorPreservesOpenCodeUsageWhenMetadataConflicts(t *testi
 		OwnerGeneration:      1,
 	}
 	calls := 0
-	committed := 0
-	rolledBack := 0
-	collector := &AgentTokenCollector{writer: tokenWriterFunc(func(_ context.Context, batch AppendBatch) (AppendResult, error) {
+	writer := newAgentTokenTestWriter(t)
+	if _, err := writer.AppendBatch(context.Background(), AppendBatch{CoverageEpochs: []CoverageEpoch{{
+		Family: metadata.Family, SourceID: metadata.SourceID, EpochID: metadata.EpochID,
+		StartedAt: metadata.StartedAt, EndedAt: &metadata.EndedAt,
+		NativeCadenceSeconds: metadata.NativeCadenceSeconds, OwnerGeneration: metadata.OwnerGeneration,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	collector := &AgentTokenCollector{writer: &checkpointTokenWriter{Writer: writer, beforeAppend: func(_ context.Context, batch AppendBatch) (AppendResult, error) {
 		calls++
 		switch calls {
 		case 1:
@@ -3308,20 +3032,22 @@ func TestAgentTokenCollectorPreservesOpenCodeUsageWhenMetadataConflicts(t *testi
 				t.Fatalf("metadata append batch = %+v", batch)
 			}
 			return AppendResult{}, errors.New("unavailable spans overlap")
+		case 3:
+			if len(batch.UsageAtoms)+len(batch.Observations)+len(batch.CoverageEpochs)+len(batch.UnavailableSpans)+len(batch.UsageTombstones) != 0 {
+				t.Fatalf("covered metadata retry batch = %+v", batch)
+			}
+			return AppendResult{}, nil
 		default:
 			t.Fatalf("unexpected append call %d: %+v", calls, batch)
 			return AppendResult{}, nil
 		}
-	})}
+	}}}
 	ok, metadataError, err := collector.appendOpenCodeCollected(context.Background(), AppendBatch{
 		UsageAtoms:       []UsageAtom{usage},
 		UnavailableSpans: []UnavailableSpan{metadata},
-	}, &agentTokenReceipt{
-		commit:   func() error { committed++; return nil },
-		rollback: func() error { rolledBack++; return nil },
-	})
-	if err != nil || !ok || metadataError || calls != 2 || committed != 1 || rolledBack != 0 {
-		t.Fatalf("metadata conflict after usage = ok=%v metadataError=%v err=%v calls=%d committed=%d rolledBack=%d", ok, metadataError, err, calls, committed, rolledBack)
+	}, &agentTokenReceipt{collector: collector, nextHistorical: "committed"})
+	if err != nil || !ok || metadataError || calls != 3 || collector.nextHistoricalTranscript != "committed" {
+		t.Fatalf("metadata conflict after usage = ok=%v metadataError=%v err=%v calls=%d checkpoint=%q", ok, metadataError, err, calls, collector.nextHistoricalTranscript)
 	}
 	if got := collector.Counters().UsageAccepted; got != 1 {
 		t.Fatalf("usage counter after metadata conflict = %d, want 1", got)
@@ -3359,7 +3085,6 @@ func TestAgentTokenCollectorKeepsUsageWhenCoverageConflictComesFromWriter(t *tes
 		t.Fatal(err)
 	}
 	collector := &AgentTokenCollector{writer: writer}
-	committed := 0
 	ok, metadataError, err := collector.appendOpenCodeCollected(ctx, AppendBatch{
 		UsageAtoms: []UsageAtom{{
 			EventID: "opencode-conflict-usage", Direction: "input", Modality: "text", CacheRole: "none", Unit: "tokens", ObservedAt: 12,
@@ -3369,10 +3094,10 @@ func TestAgentTokenCollectorKeepsUsageWhenCoverageConflictComesFromWriter(t *tes
 			Family: "agent_tokens", SourceID: "opencode:root", EpochID: "unavailable", StartedAt: 12, EndedAt: 18,
 			NativeCadenceSeconds: 10, Reason: "synthetic-partial-history", OwnerGeneration: 1,
 		}},
-	}, &agentTokenReceipt{commit: func() error { committed++; return nil }})
-	if err != nil || !ok || metadataError || committed != 1 {
+	}, &agentTokenReceipt{collector: collector, nextHistorical: "committed"})
+	if err != nil || !ok || metadataError || collector.nextHistoricalTranscript != "committed" {
 		_ = writer.Close()
-		t.Fatalf("writer coverage conflict = ok=%v metadataError=%v err=%v committed=%d", ok, metadataError, err, committed)
+		t.Fatalf("writer coverage conflict = ok=%v metadataError=%v err=%v checkpoint=%q", ok, metadataError, err, collector.nextHistoricalTranscript)
 	}
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
@@ -3388,88 +3113,12 @@ func TestAgentTokenCollectorKeepsUsageWhenCoverageConflictComesFromWriter(t *tes
 	}
 }
 
-func TestAgentTokenCollectorCanRetryOpenCodeCursorAfterCommitFailure(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "opencode-cursor.json")
-	cursor := NewOpenCodeTokenCursor(path)
-	before := openCodeCursorState{Events: map[string]string{}, Parts: map[string]OpenCodePartCursor{}}
-	next := before.clone()
-	next.Events["event-1"] = "part-1"
-	if err := cursor.prepare(before, next); err != nil {
-		t.Fatal(err)
-	}
-	wrong := next.clone()
-	wrong.Events["event-1"] = "different-part"
-	collector := &AgentTokenCollector{writer: countingTokenWriter{}}
-	ok, metadataError, err := collector.appendOpenCodeCollected(context.Background(), AppendBatch{}, &agentTokenReceipt{
-		commit:   func() error { return cursor.commit(wrong) },
-		rollback: cursor.rollback,
-	})
-	if ok || metadataError || err == nil || !strings.Contains(err.Error(), "cursor-state-stale") {
-		t.Fatalf("stale OpenCode commit = ok=%v metadataError=%v err=%v", ok, metadataError, err)
-	}
-	if _, err := cursor.state(); err != nil {
-		t.Fatalf("cursor remained pending after failed commit rollback: %v", err)
-	}
-	if err := cursor.prepare(before, next); err != nil {
-		t.Fatalf("same collector could not prepare retry: %v", err)
-	}
-	if err := cursor.commit(next); err != nil {
-		t.Fatalf("same collector retry commit failed: %v", err)
-	}
-}
-
-func TestAgentTokenCollectorCanRecoverWhenOpenCodeRollbackTemporarilyFails(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "opencode-cursor.json")
-	cursor := NewOpenCodeTokenCursor(path)
-	before := openCodeCursorState{Events: map[string]string{}, Parts: map[string]OpenCodePartCursor{}}
-	next := before.clone()
-	next.Events["event-1"] = "part-1"
-	if err := cursor.prepare(before, next); err != nil {
-		t.Fatal(err)
-	}
-	backup := filepath.Join(root, "pending.json")
-	if err := os.Rename(path, backup); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(path, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	collector := &AgentTokenCollector{writer: countingTokenWriter{}}
-	ok, metadataError, err := collector.appendOpenCodeCollected(context.Background(), AppendBatch{}, &agentTokenReceipt{
-		commit:   func() error { return cursor.commit(next) },
-		rollback: cursor.rollback,
-	})
-	if ok || metadataError || err == nil {
-		t.Fatalf("temporarily unavailable OpenCode sidecar = ok=%v metadataError=%v err=%v", ok, metadataError, err)
-	}
-	if cursor.pending != nil || cursor.pendingToken != "" {
-		t.Fatalf("failed rollback left in-memory cursor pending: pending=%v token=%q", cursor.pending, cursor.pendingToken)
-	}
-	if err := os.Remove(path); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(backup, path); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := cursor.state(); err != nil {
-		t.Fatalf("cursor did not recover after sidecar repair: %v", err)
-	}
-	if err := cursor.prepare(before, next); err != nil {
-		t.Fatalf("cursor could not prepare after sidecar repair: %v", err)
-	}
-	if err := cursor.commit(next); err != nil {
-		t.Fatalf("cursor could not commit after sidecar repair: %v", err)
-	}
-}
-
 func TestAgentTokenCollectorPreservesUsageWhenUnavailableSpanIsAlreadyRecorded(t *testing.T) {
 	usage := UsageAtom{EventID: "usage-1", Direction: "input", Modality: "text", CacheRole: "none", Unit: "tokens", ObservedAt: 10, Payload: map[string]any{"quantity": 3.0, "provider": "codex", "model": "model"}}
 	span := UnavailableSpan{Family: "agent_tokens", SourceID: "source", EpochID: "epoch", StartedAt: 10, EndedAt: 20, NativeCadenceSeconds: 10, Reason: "inventory-unavailable", OwnerGeneration: 1}
-	commits := 0
 	calls := 0
 	collector := &AgentTokenCollector{}
-	collector.writer = tokenWriterFunc(func(_ context.Context, batch AppendBatch) (AppendResult, error) {
+	collector.writer = tokenWriterFunc(t, func(_ context.Context, batch AppendBatch) (AppendResult, error) {
 		calls++
 		if calls == 1 {
 			return AppendResult{}, errors.New("unavailable spans overlap")
@@ -3479,9 +3128,9 @@ func TestAgentTokenCollectorPreservesUsageWhenUnavailableSpanIsAlreadyRecorded(t
 		}
 		return AppendResult{UsageAccepted: 1}, nil
 	})
-	ok, err := collector.appendCollected(context.Background(), AppendBatch{UsageAtoms: []UsageAtom{usage}, UnavailableSpans: []UnavailableSpan{span}}, []agentTokenReceipt{{commit: func() error { commits++; return nil }}})
-	if err != nil || !ok || calls != 2 || commits != 1 || collector.Counters().UsageAccepted != 1 {
-		t.Fatalf("overlap fallback = ok=%v err=%v calls=%d commits=%d counters=%+v", ok, err, calls, commits, collector.Counters())
+	ok, err := collector.appendCollected(context.Background(), AppendBatch{UsageAtoms: []UsageAtom{usage}, UnavailableSpans: []UnavailableSpan{span}}, []agentTokenReceipt{{collector: collector, nextHistorical: "committed"}})
+	if err != nil || !ok || calls != 2 || collector.nextHistoricalTranscript != "committed" || collector.Counters().UsageAccepted != 1 {
+		t.Fatalf("overlap fallback = ok=%v err=%v calls=%d checkpoint=%q counters=%+v", ok, err, calls, collector.nextHistoricalTranscript, collector.Counters())
 	}
 }
 
@@ -3524,11 +3173,8 @@ func TestAgentTokenCollectorResolvesNormalOpenCodeTUIAndAttributesAgent(t *testi
 	if len(batch.UsageAtoms) != 3 {
 		t.Fatalf("collected OpenCode batch = %#v unavailable=%#v", batch.UsageAtoms, batch.UnavailableSpans)
 	}
-	if _, err := writer.AppendBatch(context.Background(), batch); err != nil {
+	if _, err := collector.appendCollected(context.Background(), batch, receipts); err != nil {
 		t.Fatal(err)
-	}
-	for _, receipt := range receipts {
-		receipt.commit()
 	}
 	database, err := OpenReadOnly(context.Background(), filepath.Join(root, "stats.sqlite3"))
 	if err != nil {
@@ -3565,10 +3211,12 @@ func TestAgentTokenCollectorResolvesNormalOpenCodeTUIAndAttributesAgent(t *testi
 }
 
 func TestAgentTokenCollectorPrefersPaneAnchoredClaimForDuplicateOpenCodeRoot(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := t.TempDir()
 	databasePath := filepath.Join(root, "opencode.db")
 	createOpenCodeFixtureWithTitle(t, databasePath, "ses-live", "/repo/live", "build", 1788307299000)
-	collector := NewAgentTokenCollector(nil, &agentStatusTestClock{now: time.Unix(1788307300, 0)}, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, &agentStatusTestClock{now: time.Unix(1788307300, 0)}, AgentTokenCollectorConfig{
 		OpenCodeDatabase: databasePath,
 		CursorPath:       filepath.Join(root, "cursor.json"),
 		EpochID:          "epoch",
@@ -3612,16 +3260,14 @@ func TestAgentTokenCollectorResolvesTruncatedCurrentOpenCodeTitle(t *testing.T) 
 		EpochStartedAt:   1789364500,
 		OwnerGeneration:  1,
 	})
-	batch, receipts, collectErr := collector.collect(context.Background(), 1789364620, 10)
+	batch, _, collectErr := collector.collect(context.Background(), 1789364620, 10)
 	if collectErr != nil {
 		t.Fatal(collectErr)
 	}
 	if len(batch.UsageAtoms) != 3 || len(batch.UnavailableSpans) != 0 {
 		t.Fatalf("current OpenCode batch = %#v unavailable=%#v", batch.UsageAtoms, batch.UnavailableSpans)
 	}
-	for _, receipt := range receipts {
-		receipt.rollback()
-	}
+	// Discard uncommitted checkpoint proposals.
 }
 
 func TestAgentTokenCollectorDeduplicatesInvalidOpenCodeRecordsBeforeAppend(t *testing.T) {
@@ -3667,19 +3313,18 @@ func TestAgentTokenCollectorDeduplicatesInvalidOpenCodeRecordsBeforeAppend(t *te
 	if batch.UnavailableSpans[0].SourceID != "opencode:ses-live" || batch.UnavailableSpans[0].Reason != "OpenCode root session not found" {
 		t.Fatalf("invalid OpenCode span = %#v", batch.UnavailableSpans[0])
 	}
-	if _, err := writer.AppendBatch(context.Background(), batch); err != nil {
+	if _, err := collector.appendCollected(context.Background(), batch, receipts); err != nil {
 		t.Fatalf("append with duplicate invalid OpenCode records: %v", err)
-	}
-	for _, receipt := range receipts {
-		receipt.commit()
 	}
 }
 
 func TestAgentTokenCollectorIgnoresStaleDeterministicOpenCodeMockRoot(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := t.TempDir()
 	databasePath := copyOpenCodeFixture(t)
 	clock := &agentStatusTestClock{now: time.Unix(1788307300, 0)}
-	collector := NewAgentTokenCollector(nil, clock, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, clock, AgentTokenCollectorConfig{
 		Inventory: func(context.Context) ([]AgentRecord, []error) {
 			return []AgentRecord{
 				{Kind: "opencode", Command: "opencode --mock --session ses-live", OpenCodeSession: "ses-live", TmuxSession: "stale-fixture"},
@@ -3692,18 +3337,14 @@ func TestAgentTokenCollectorIgnoresStaleDeterministicOpenCodeMockRoot(t *testing
 		OwnerGeneration:  1,
 	})
 
-	batch, receipts, err := collector.collect(context.Background(), 1788307300, 10)
+	batch, _, err := collector.collect(context.Background(), 1788307300, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(batch.UsageAtoms) != 3 || len(batch.UnavailableSpans) != 0 {
 		t.Fatalf("stale mock root polluted OpenCode batch: atoms=%d unavailable=%#v", len(batch.UsageAtoms), batch.UnavailableSpans)
 	}
-	for _, receipt := range receipts {
-		if err := receipt.rollback(); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// Discard uncommitted checkpoint proposals.
 }
 
 func TestAgentTokenCollectorAttributesCopiedActualOpenCodeRootAndChildren(t *testing.T) {
@@ -3856,13 +3497,11 @@ func TestAgentTokenCollectorCommitsFreshOpenCodeAtomsWhenPartialMetadataHasDupli
 		OwnerGeneration:  1,
 	})
 
-	_, receipts, collectErr := collector.collect(context.Background(), 1788307360, 10)
+	_, _, collectErr := collector.collect(context.Background(), 1788307360, 10)
 	if collectErr != nil {
 		t.Fatal(collectErr)
 	}
-	for _, receipt := range receipts {
-		receipt.rollback()
-	}
+	// Discard uncommitted checkpoint proposals.
 	collector.RunOnce(context.Background())
 	counters := collector.Counters()
 	if counters.UsageAccepted == 0 || counters.UnavailableAccepted != 2 || counters.Errors != 0 {
@@ -4063,22 +3702,21 @@ func TestAgentTokenCollectorManyChildrenCompletesBeforeSourceDeadline(t *testing
 	if len(batch.UsageAtoms) == 0 {
 		t.Fatalf("bounded large-history collection produced no atoms: unavailable=%#v", batch.UnavailableSpans)
 	}
-	if _, err := writer.AppendBatch(ctx, batch); err != nil {
+	if _, err := collector.appendCollected(ctx, batch, receipts); err != nil {
 		t.Fatal(err)
-	}
-	for _, receipt := range receipts {
-		receipt.commit()
 	}
 }
 
 func TestAgentTokenCollectorManyOpenCodeRootsEmitsFreshAtomsBeforeSourceDeadline(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := t.TempDir()
 	databasePath := filepath.Join(root, "opencode-many-roots.db")
 	// Keep 64 independent roots and a substantial historical fixture, but leave
 	// enough CPU headroom for the race target to run beside the other Bazel
 	// actions without turning a source-deadline assertion into a host-load test.
 	writeOpenCodeManyRootHistory(t, databasePath, 64, 2000)
-	collector := NewAgentTokenCollector(nil, nil, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, nil, AgentTokenCollectorConfig{
 		Inventory: func(context.Context) ([]AgentRecord, []error) {
 			records := make([]AgentRecord, 0, 64)
 			for index := 0; index < 64; index++ {
@@ -4093,16 +3731,11 @@ func TestAgentTokenCollectorManyOpenCodeRootsEmitsFreshAtomsBeforeSourceDeadline
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	started := time.Now()
-	batch, receipts, err := collector.collect(ctx, 10000, 10)
+	batch, _, err := collector.collect(ctx, 10000, 10)
 	counters := collector.Counters()
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		for _, receipt := range receipts {
-			_ = receipt.rollback()
-		}
-	})
 	elapsed := time.Since(started)
 	if elapsed >= 2*time.Second {
 		t.Fatalf("fresh multi-root collection took %s: SQLite queries=%d duration=%s phases=%+v", elapsed, counters.OpenCodeSQLiteQueries, counters.OpenCodeSQLiteTotal, counters.OpenCodePhases)
@@ -4137,11 +3770,13 @@ func TestAgentTokenCollectorManyOpenCodeRootsEmitsFreshAtomsBeforeSourceDeadline
 }
 
 func TestAgentTokenCollectorRestartsPendingOpenCodeRawScanWhenSelectedRootsChange(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := t.TempDir()
 	databasePath := filepath.Join(root, "opencode-selection-change.db")
 	writeOpenCodeManyRootHistory(t, databasePath, 2, MaxOpenCodePartReadLimit+10)
 	selectedRoot := "root-01"
-	collector := NewAgentTokenCollector(nil, nil, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, nil, AgentTokenCollectorConfig{
 		OpenCodeDatabase: databasePath,
 		Inventory: func(context.Context) ([]AgentRecord, []error) {
 			return []AgentRecord{{Kind: "opencode", OpenCodeSession: selectedRoot, TmuxSession: "synthetic"}}, nil
@@ -4156,17 +3791,14 @@ func TestAgentTokenCollectorRestartsPendingOpenCodeRawScanWhenSelectedRootsChang
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, receipt := range receipts {
-			if err := receipt.commit(); err != nil {
-				t.Fatalf("commit collection cursor: %v", err)
-			}
+		if _, err := collector.appendCollected(context.Background(), batch, receipts); err != nil {
+			t.Fatal(err)
 		}
 		return batch
 	}
 
 	firstBatch := collect()
-	cursor := NewOpenCodeTokenCursor(filepath.Join(root, "cursor.json"))
-	first, err := cursor.state()
+	first, err := loadCollectorOpenCodeState(collector)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4178,7 +3810,7 @@ func TestAgentTokenCollectorRestartsPendingOpenCodeRawScanWhenSelectedRootsChang
 
 	selectedRoot = "root-00"
 	secondBatch := collect()
-	second, err := cursor.state()
+	second, err := loadCollectorOpenCodeState(collector)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4541,9 +4173,8 @@ func TestAgentTokenCollectorRepairsOrphanedCodexForkOnce(t *testing.T) {
 			t.Fatalf("repair tombstone crossed into child suffix: %+v", tombstone)
 		}
 	}
-	if err := rollbackReceipts(receipts); err != nil {
-		t.Fatal(err)
-	}
+	// Discard the uncommitted proposal; restart must replay its facts.
+
 	if completed, err := collector.transcriptCursor.CompletedCodexForkRepairRoots(); err != nil || len(completed) != 0 {
 		t.Fatalf("rolled-back repair roots = %v err=%v", completed, err)
 	}
@@ -4589,6 +4220,8 @@ func TestAgentTokenCollectorRepairsOrphanedCodexForkOnce(t *testing.T) {
 }
 
 func TestCodexForkRepairGetsASourceSlotWhenNormalSourcesFillTheCap(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := t.TempDir()
 	sessionsRoot := filepath.Join(root, ".codex", "sessions")
 	active := filepath.Join(sessionsRoot, "2026", "09", "23", "rollout-active.jsonl")
@@ -4612,7 +4245,7 @@ func TestCodexForkRepairGetsASourceSlotWhenNormalSourcesFillTheCap(t *testing.T)
 		ordinary = append(ordinary, TranscriptSource{Path: path, Provider: "claude", SourceID: fmt.Sprintf("claude:%03d", index)})
 	}
 	ordinary = append(ordinary, TranscriptSource{Path: active, Provider: "codex", SourceID: "codex:active", ThreadID: "root-thread"})
-	collector := NewAgentTokenCollector(countingTokenWriter{}, &agentStatusTestClock{now: time.Unix(1788307300, 0)}, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, &agentStatusTestClock{now: time.Unix(1788307300, 0)}, AgentTokenCollectorConfig{
 		TranscriptSources: func(context.Context, []AgentRecord) ([]TranscriptSource, error) {
 			return ordinary, nil
 		},
@@ -4650,6 +4283,8 @@ func TestTranscriptCycleBudgetsMatchPythonCodexRepairThroughput(t *testing.T) {
 }
 
 func TestAgentTokenCollectorAppliesRepairBudgetToPendingRootWithoutOrphans(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := filepath.Join(t.TempDir(), ".codex", "sessions")
 	path := filepath.Join(root, "2026", "09", "24", "rollout-active.jsonl")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -4682,20 +4317,20 @@ func TestAgentTokenCollectorAppliesRepairBudgetToPendingRootWithoutOrphans(t *te
 
 	cursorPath := filepath.Join(t.TempDir(), "transcript-cursors.json")
 	source := TranscriptSource{Path: path, Provider: "codex", SourceID: "codex:active", ThreadID: "root-thread"}
-	collector := NewAgentTokenCollector(nil, nil, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, nil, AgentTokenCollectorConfig{
 		TranscriptSources: func(context.Context, []AgentRecord) ([]TranscriptSource, error) {
 			return []TranscriptSource{source}, nil
 		},
 		TranscriptCursorPath: cursorPath,
 	})
-	_, receipts, err := collector.collectTranscripts(context.Background(), 100, 10, nil, nil, AppendBatch{}, nil)
+	batch, receipts, err := collector.collectTranscripts(context.Background(), 100, 10, nil, nil, AppendBatch{}, nil)
 	if err != nil {
 		t.Fatalf("collect synthetic pending-root transcript: %v", err)
 	}
-	if err := commitReceipts(receipts); err != nil {
+	if _, err := collector.appendCollected(context.Background(), batch, receipts); err != nil {
 		t.Fatalf("commit synthetic transcript cursor: %v", err)
 	}
-	state, err := NewTranscriptCursorStore(cursorPath).State(source)
+	state, err := collector.transcriptCursor.State(source)
 	if err != nil {
 		t.Fatalf("read committed synthetic transcript cursor: %v", err)
 	}
@@ -4758,6 +4393,8 @@ func TestCodexForkRepairDoesNotMarkOverlappingNormalSourceCompleteBeforeHandoff(
 }
 
 func TestCodexForkRepairTombstoneConflictDoesNotCompleteRoot(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := t.TempDir()
 	sessionsRoot := filepath.Join(root, ".codex", "sessions")
 	active := filepath.Join(sessionsRoot, "2026", "09", "23", "rollout-active.jsonl")
@@ -4780,7 +4417,7 @@ func TestCodexForkRepairTombstoneConflictDoesNotCompleteRoot(t *testing.T) {
 		TranscriptMaxBytesPerCycle:   1 << 20,
 		TranscriptMaxRecordsPerCycle: 100,
 	}
-	collector := NewAgentTokenCollector(countingTokenWriter{}, &agentStatusTestClock{now: time.Unix(1788307300, 0)}, config)
+	collector := NewAgentTokenCollector(testWriter, &agentStatusTestClock{now: time.Unix(1788307300, 0)}, config)
 	batch, receipts, err := collector.collectTranscripts(context.Background(), 100, 10, []AgentRecord{{Kind: "codex", TmuxSession: "fixture"}}, nil, AppendBatch{}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -4837,9 +4474,8 @@ func TestAgentTokenCollectorForkRepairCommitFailureRollsBackCursorForRetry(t *te
 		TranscriptMaxBytesPerCycle:   1 << 20,
 		TranscriptMaxRecordsPerCycle: 100,
 	}
-	collector := NewAgentTokenCollector(writer, &agentStatusTestClock{now: time.Unix(1788307300, 0)}, config)
-	baseStore := NewTranscriptCursorStore(config.TranscriptCursorPath)
-	collector.transcriptCursor = failingCodexForkRepairMarkerStore{TranscriptCursorStore: baseStore}
+	collector := NewAgentTokenCollector(failingCodexForkRepairMarkerWriter{writer}, &agentStatusTestClock{now: time.Unix(1788307300, 0)}, config)
+	baseStore := collector.transcriptCursor
 	rows := []AgentRecord{{Kind: "codex", TmuxSession: "fixture"}}
 	batch, receipts, err := collector.collectTranscripts(context.Background(), 100, 10, rows, nil, AppendBatch{}, nil)
 	if err != nil || len(batch.UsageTombstones) != 3 {
@@ -4943,13 +4579,15 @@ func TestAgentTokenCollectorRepairsEachCodexSessionsRootIndependently(t *testing
 }
 
 func TestCodexForkRepairDiscoveryResumesWithinDirectoryAndFileBudgets(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := filepath.Join(t.TempDir(), ".codex", "sessions")
 	for _, rollout := range []string{"a/rollout-a.jsonl", "b/rollout-b.jsonl"} {
 		path := filepath.Join(root, rollout)
 		child := strings.TrimSuffix(filepath.Base(path), ".jsonl")
 		writeJSONL(t, path, map[string]any{"type": "session_meta", "payload": map[string]any{"id": child, "forked_from_id": "parent", "thread_source": "subagent"}})
 	}
-	collector := NewAgentTokenCollector(nil, nil, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, nil, AgentTokenCollectorConfig{
 		TranscriptCursorPath:        filepath.Join(t.TempDir(), "cursor.json"),
 		TranscriptDiscoveryMaxDirs:  1,
 		TranscriptDiscoveryMaxFiles: 1,
@@ -4970,6 +4608,8 @@ func TestCodexForkRepairDiscoveryResumesWithinDirectoryAndFileBudgets(t *testing
 }
 
 func TestCodexForkRepairDiscoveryCompletesWideBranchingTree(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := filepath.Join(t.TempDir(), ".codex", "sessions")
 	for parent := 0; parent < maxCodexForkRepairDirectoryFrontier+8; parent++ {
 		for child := 0; child < 2; child++ {
@@ -4979,7 +4619,7 @@ func TestCodexForkRepairDiscoveryCompletesWideBranchingTree(t *testing.T) {
 			}
 		}
 	}
-	collector := NewAgentTokenCollector(nil, nil, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, nil, AgentTokenCollectorConfig{
 		TranscriptCursorPath:       filepath.Join(t.TempDir(), "cursor.json"),
 		TranscriptDiscoveryMaxDirs: maxCodexForkRepairDirectoryFrontier,
 	})
@@ -4997,6 +4637,8 @@ func TestCodexForkRepairDiscoveryCompletesWideBranchingTree(t *testing.T) {
 }
 
 func TestCodexForkRepairDiscoveryKeepsOverDepthTreeIncomplete(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := filepath.Join(t.TempDir(), ".codex", "sessions")
 	current := root
 	for depth := 0; depth <= maxCodexForkRepairDirectoryFrontier; depth++ {
@@ -5005,7 +4647,7 @@ func TestCodexForkRepairDiscoveryKeepsOverDepthTreeIncomplete(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	collector := NewAgentTokenCollector(nil, nil, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, nil, AgentTokenCollectorConfig{
 		TranscriptCursorPath:       filepath.Join(t.TempDir(), "cursor.json"),
 		TranscriptDiscoveryMaxDirs: maxCodexForkRepairDirectoryFrontier,
 	})
@@ -5035,121 +4677,9 @@ func TestCodexForkRepairDiscoveryKeepsOverDepthTreeIncomplete(t *testing.T) {
 	t.Fatal("over-depth discovery never reported its explicit bound")
 }
 
-func TestCodexForkRepairSidecarOverflowDoesNotReturnUndurableSources(t *testing.T) {
-	cursorPath := filepath.Join(t.TempDir(), "cursor.json")
-	root := filepath.Join(t.TempDir(), ".codex", "sessions")
-	orphan := filepath.Join(root, "rollout-synthetic.jsonl")
-	writeJSONL(t, orphan, map[string]any{
-		"type":    "session_meta",
-		"payload": map[string]any{"id": "child", "forked_from_id": "parent", "thread_source": "subagent"},
-	})
-	source, _, budgetCut, err := codexForkRepairSource(root, orphan, 4096)
-	if err != nil || budgetCut || source == nil {
-		t.Fatalf("synthetic fork source = %#v, budget cut %t, err %v", source, budgetCut, err)
-	}
-	rootID := codexForkRepairRootID(root)
-	pendingNames := make([]string, maxCodexForkRepairPageEntries-96)
-	pendingNames[0] = filepath.Base(orphan)
-	for index := 1; index < len(pendingNames); index++ {
-		pendingNames[index] = strings.Repeat("n", maxCodexForkRepairNameBytes)
-	}
-	frontier := codexForkRepairFrontierState{Roots: map[string]codexForkRepairCatalogState{
-		rootID: {
-			Root: root, Initialized: true,
-			Directory: &codexForkRepairDirectoryState{Path: root, PendingNames: pendingNames},
-		},
-	}}
-	if err := validateCodexForkRepairFrontier(frontier); err != nil {
-		t.Fatalf("large synthetic frontier is invalid: %v", err)
-	}
-	projectedFrontier := cloneCodexForkRepairFrontier(frontier)
-	projectedCatalog := projectedFrontier.Roots[rootID]
-	projectedCatalog.Directory.PendingNames = append([]string(nil), projectedCatalog.Directory.PendingNames[1:]...)
-	projectedCatalog.Sources = append(projectedCatalog.Sources, *source)
-	projectedFrontier.Roots[rootID] = projectedCatalog
-	disk := func() transcriptCursorDisk {
-		base := transcriptCursorDisk{
-			Version: 1,
-			States: map[string]TranscriptScannerState{
-				"synthetic-large-cursor": {},
-			},
-			CodexForkRepair: frontier,
-		}
-		beforeEmpty, err := json.Marshal(base)
-		if err != nil {
-			t.Fatal(err)
-		}
-		projected := base
-		projected.Generation++
-		projected.CodexForkRepair = projectedFrontier
-		afterEmpty, err := json.Marshal(projected)
-		if err != nil {
-			t.Fatal(err)
-		}
-		measure := func(pendingLineBytes int) (int, int) {
-			encodedLineBytes := ((pendingLineBytes + 2) / 3) * 4
-			return len(beforeEmpty) + encodedLineBytes - 2, len(afterEmpty) + encodedLineBytes - 2
-		}
-		low, high := 0, maxTranscriptCursorSidecarBytes
-		for low+1 < high {
-			middle := low + (high-low)/2
-			beforeSize, _ := measure(middle)
-			if beforeSize+1 <= maxTranscriptCursorSidecarBytes {
-				low = middle
-			} else {
-				high = middle
-			}
-		}
-		beforeSize, afterSize := measure(low)
-		if beforeSize+1 > maxTranscriptCursorSidecarBytes || afterSize <= maxTranscriptCursorSidecarBytes {
-			t.Fatalf("sidecar fixture does not straddle admission: before=%d after=%d bound=%d", beforeSize, afterSize, maxTranscriptCursorSidecarBytes)
-		}
-		state := base.States["synthetic-large-cursor"]
-		state.PendingLine = make([]byte, low)
-		base.States["synthetic-large-cursor"] = state
-		return base
-	}()
-	store := NewTranscriptCursorStore(cursorPath)
-	if err := store.writeDiskLocked(disk); err != nil {
-		t.Fatalf("seed near-limit synthetic cursor sidecar: %v", err)
-	}
-	before, err := os.ReadFile(cursorPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	collector := NewAgentTokenCollector(nil, nil, AgentTokenCollectorConfig{
-		TranscriptCursorPath:        cursorPath,
-		TranscriptDiscoveryMaxDirs:  1,
-		TranscriptDiscoveryMaxFiles: 4,
-	})
-	sources, complete, _, err := collector.codexForkRepairSources(context.Background(), root, rootID)
-	if err == nil || !strings.Contains(err.Error(), "exceeds its size bound") {
-		t.Fatalf("aggregate sidecar admission error = %v, want size-bound rejection", err)
-	}
-	if complete || len(sources) != 0 {
-		t.Fatalf("failed admission returned sources=%#v complete=%t", sources, complete)
-	}
-	if catalog := collector.codexForkRepairCatalog[rootID]; catalog == nil || catalog.directory == nil || len(catalog.sources) != 0 || len(catalog.directory.PendingNames) == 0 || catalog.directory.PendingNames[0] != filepath.Base(orphan) {
-		t.Fatalf("failed admission changed in-memory catalog: %+v", catalog)
-	}
-	after, err := os.ReadFile(cursorPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(after, before) {
-		t.Fatal("failed aggregate admission replaced the previous cursor sidecar")
-	}
-	fresh := NewTranscriptCursorStore(cursorPath)
-	persisted, err := fresh.CodexForkRepairFrontier()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if sources := persisted.Roots[rootID].Sources; len(sources) != 0 {
-		t.Fatalf("fresh cursor store found undurable repair sources: %#v", sources)
-	}
-}
-
 func TestCodexForkRepairDiscoveryBoundsAndResumesLargeHeaders(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := filepath.Join(t.TempDir(), ".codex", "sessions")
 	large := filepath.Join(root, "2026", "01", "01", "rollout-a-large.jsonl")
 	regular := filepath.Join(root, "2026", "01", "01", "rollout-b-regular.jsonl")
@@ -5164,7 +4694,7 @@ func TestCodexForkRepairDiscoveryBoundsAndResumesLargeHeaders(t *testing.T) {
 		"type":    "session_meta",
 		"payload": map[string]any{"id": "regular-child", "forked_from_id": "parent", "thread_source": "subagent"},
 	})
-	collector := NewAgentTokenCollector(nil, nil, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, nil, AgentTokenCollectorConfig{
 		TranscriptCursorPath:        filepath.Join(t.TempDir(), "cursor.json"),
 		TranscriptDiscoveryMaxDirs:  16,
 		TranscriptDiscoveryMaxFiles: 8,
@@ -5190,7 +4720,7 @@ func TestCodexForkRepairDiscoveryBoundsAndResumesLargeHeaders(t *testing.T) {
 		"type":    "session_meta",
 		"payload": map[string]any{"id": "regular-child", "forked_from_id": "parent", "thread_source": "subagent"},
 	})
-	limited := NewAgentTokenCollector(nil, nil, AgentTokenCollectorConfig{
+	limited := NewAgentTokenCollector(testWriter, nil, AgentTokenCollectorConfig{
 		TranscriptCursorPath:        filepath.Join(t.TempDir(), "cursor.json"),
 		TranscriptDiscoveryMaxDirs:  16,
 		TranscriptDiscoveryMaxFiles: 8,
@@ -5208,11 +4738,13 @@ func TestCodexForkRepairDiscoveryBoundsAndResumesLargeHeaders(t *testing.T) {
 }
 
 func TestCodexForkRepairDirectoryDiscoveryResumesAfterCollectorStop(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := filepath.Join(t.TempDir(), ".codex", "sessions")
 	if err := os.MkdirAll(filepath.Join(root, "2026", "01", "01"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	collector := NewAgentTokenCollector(nil, nil, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, nil, AgentTokenCollectorConfig{
 		TranscriptCursorPath:        filepath.Join(t.TempDir(), "cursor.json"),
 		TranscriptDiscoveryMaxDirs:  1,
 		TranscriptDiscoveryMaxFiles: 1,
@@ -5295,11 +4827,13 @@ func TestCodexForkRepairDirectoryMutationRestartsPortableContinuation(t *testing
 }
 
 func TestCodexForkRepairClearsTransientBlockAfterSuccessfulRetry(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := filepath.Join(t.TempDir(), ".codex", "sessions")
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	collector := NewAgentTokenCollector(nil, nil, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, nil, AgentTokenCollectorConfig{
 		TranscriptCursorPath: filepath.Join(t.TempDir(), "cursor.json"),
 	})
 	rootID := codexForkRepairRootID(root)
@@ -5324,6 +4858,8 @@ func mustStat(t *testing.T, path string) os.FileInfo {
 }
 
 func TestCodexForkRepairDiscoveryResumesWithFreshCollector(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := filepath.Join(t.TempDir(), ".codex", "sessions")
 	forkPath := filepath.Join(root, "2026", "01", "01", "rollout-deep-fork.jsonl")
 	writeJSONL(t, forkPath, map[string]any{
@@ -5338,12 +4874,12 @@ func TestCodexForkRepairDiscoveryResumesWithFreshCollector(t *testing.T) {
 		TranscriptDiscoveryMaxDirs:  1,
 		TranscriptDiscoveryMaxFiles: 1,
 	}
-	first := NewAgentTokenCollector(nil, nil, config)
+	first := NewAgentTokenCollector(testWriter, nil, config)
 	if sources, complete, _, err := first.codexForkRepairSources(context.Background(), root, codexForkRepairRootID(root)); err != nil || complete || len(sources) != 0 {
 		t.Fatalf("initial partial discovery = sources=%#v complete=%t err=%v", sources, complete, err)
 	}
 
-	restarted := NewAgentTokenCollector(nil, nil, config)
+	restarted := NewAgentTokenCollector(testWriter, nil, config)
 	var sources []TranscriptSource
 	complete := false
 	for cycle := 0; cycle < 16 && !complete; cycle++ {
@@ -5359,6 +4895,8 @@ func TestCodexForkRepairDiscoveryResumesWithFreshCollector(t *testing.T) {
 }
 
 func TestCodexForkRepairDiscoverySurvivesRestartAfterEveryBoundedPage(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := filepath.Join(t.TempDir(), ".codex", "sessions")
 	forkPath := filepath.Join(root, "2026", "01", "01", "rollout-deep-fork.jsonl")
 	writeJSONL(t, forkPath, map[string]any{
@@ -5377,7 +4915,7 @@ func TestCodexForkRepairDiscoverySurvivesRestartAfterEveryBoundedPage(t *testing
 	var sources []TranscriptSource
 	complete := false
 	for cycle := 0; cycle < 16 && !complete; cycle++ {
-		collector := NewAgentTokenCollector(nil, nil, config)
+		collector := NewAgentTokenCollector(testWriter, nil, config)
 		var err error
 		sources, complete, _, err = collector.codexForkRepairSources(context.Background(), root, rootID)
 		if err != nil {
@@ -5390,7 +4928,9 @@ func TestCodexForkRepairDiscoverySurvivesRestartAfterEveryBoundedPage(t *testing
 }
 
 func TestCodexForkRepairCatalogBoundsAndRotatesRoots(t *testing.T) {
-	collector := NewAgentTokenCollector(nil, nil, AgentTokenCollectorConfig{})
+	testWriter := newAgentTokenTestWriter(t)
+
+	collector := NewAgentTokenCollector(testWriter, nil, AgentTokenCollectorConfig{})
 	rootBase := t.TempDir()
 	roots := make([]string, maxCodexForkRepairCatalogRoots+1)
 	for index := range roots {
@@ -5443,6 +4983,8 @@ func TestCodexForkRepairCatalogBoundsAndRotatesRoots(t *testing.T) {
 }
 
 func TestCodexForkRepairDeadlineRotatesRootsUnderCatalogLimit(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	rootBase := t.TempDir()
 	rootA := filepath.Join(rootBase, "a", "sessions")
 	rootB := filepath.Join(rootBase, "b", "sessions")
@@ -5450,7 +4992,7 @@ func TestCodexForkRepairDeadlineRotatesRootsUnderCatalogLimit(t *testing.T) {
 	pathB := filepath.Join(rootB, "2026", "09", "27", "rollout-b.jsonl")
 	writeJSONL(t, pathA, usageCodex(1788307359, 7, 2, 5))
 	writeJSONL(t, pathB, usageCodex(1788307359, 11, 3, 8))
-	collector := NewAgentTokenCollector(countingTokenWriter{}, &agentStatusTestClock{now: time.Unix(1788307400, 0)}, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, &agentStatusTestClock{now: time.Unix(1788307400, 0)}, AgentTokenCollectorConfig{
 		Inventory: func(context.Context) ([]AgentRecord, []error) {
 			return []AgentRecord{{Kind: "codex", TmuxSession: "codex-a"}, {Kind: "codex", TmuxSession: "codex-b"}}, nil
 		},
@@ -5478,6 +5020,8 @@ func TestCodexForkRepairDeadlineRotatesRootsUnderCatalogLimit(t *testing.T) {
 }
 
 func TestCodexForkRepairCatalogBoundsSourcesPerRoot(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := filepath.Join(t.TempDir(), ".codex", "sessions")
 	for index := 0; index < maxCodexForkRepairSourcesPerRoot+1; index++ {
 		path := filepath.Join(root, fmt.Sprintf("rollout-%03d.jsonl", index))
@@ -5488,7 +5032,7 @@ func TestCodexForkRepairCatalogBoundsSourcesPerRoot(t *testing.T) {
 			},
 		})
 	}
-	collector := NewAgentTokenCollector(nil, nil, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(testWriter, nil, AgentTokenCollectorConfig{
 		TranscriptCursorPath:        filepath.Join(t.TempDir(), "cursor.json"),
 		TranscriptDiscoveryMaxDirs:  16,
 		TranscriptDiscoveryMaxFiles: maxCodexForkRepairSourcesPerRoot + 1,
@@ -5537,6 +5081,8 @@ func TestCodexForkRepairSourceSelectionRotatesPastThePerCycleCap(t *testing.T) {
 }
 
 func TestCodexForkRepairDiscoveryRecoversBlockedFileAfterCrash(t *testing.T) {
+	testWriter := newAgentTokenTestWriter(t)
+
 	root := filepath.Join(t.TempDir(), ".codex", "sessions")
 	forkPath := filepath.Join(root, "a", "b", "rollout-fork.jsonl")
 	writeJSONL(t, forkPath, map[string]any{
@@ -5553,13 +5099,13 @@ func TestCodexForkRepairDiscoveryRecoversBlockedFileAfterCrash(t *testing.T) {
 		TranscriptDiscoveryMaxFiles: 8,
 		TranscriptDiscoveryMaxBytes: 1 << 20,
 	}
-	collector := NewAgentTokenCollector(nil, nil, config)
+	collector := NewAgentTokenCollector(testWriter, nil, config)
 	rootID := codexForkRepairRootID(root)
 	_, complete, _, err := collector.codexForkRepairSources(context.Background(), root, rootID)
 	if err == nil || complete || !strings.Contains(err.Error(), "header exceeds discovery byte budget") {
 		t.Fatalf("over-budget synthetic header = complete %t err=%v", complete, err)
 	}
-	frontier, err := NewTranscriptCursorStore(cursorPath).CodexForkRepairFrontier()
+	frontier, err := collector.transcriptCursor.CodexForkRepairFrontier()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5568,7 +5114,7 @@ func TestCodexForkRepairDiscoveryRecoversBlockedFileAfterCrash(t *testing.T) {
 		t.Fatalf("synthetic interrupted collector did not persist the blocked transcript: catalog=%+v present=%t", catalog, ok)
 	}
 	config.TranscriptDiscoveryMaxBytes = 3 << 20
-	restarted := NewAgentTokenCollector(nil, nil, config)
+	restarted := NewAgentTokenCollector(testWriter, nil, config)
 	var sources []TranscriptSource
 	complete = false
 	for cycle := 0; cycle < 16 && !complete; cycle++ {
@@ -5780,4 +5326,42 @@ func copyOpenCodeSQLFixture(t *testing.T, name string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestOpenCodeUsageSurvivesStaleCheckpointWithoutAdvancingProgress(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	if err := writer.EnsureCheckpoints(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	original := Checkpoint{Key: "opencode/stale", Kind: "opencode", Version: 1, Offset: 10, State: []byte(`{"saved":true}`)}
+	if _, err := writer.AppendWithCheckpoints(ctx, AppendBatch{}, []Checkpoint{original}); err != nil {
+		t.Fatal(err)
+	}
+	stale := original
+	stale.Offset = 20
+	stale.State = []byte(`{"saved":false}`)
+	collector := NewAgentTokenCollector(writer, nil, AgentTokenCollectorConfig{})
+	ok, metadataError, err := collector.appendOpenCodeCollected(ctx, AppendBatch{UsageAtoms: []UsageAtom{{EventID: "usage-before-conflicting-checkpoint", Direction: "input", Modality: "text", CacheRole: "none", Unit: "tokens", ObservedAt: 10, Payload: map[string]any{"quantity": 7.0}}}}, &agentTokenReceipt{checkpoints: []Checkpoint{stale}})
+	if ok || !metadataError || !errors.Is(err, ErrCheckpointConflict) {
+		t.Fatalf("stale checkpoint result ok=%v metadata=%v err=%v", ok, metadataError, err)
+	}
+	after, exists, err := writer.LoadCheckpoint(ctx, original.Key)
+	if err != nil || !exists || after.Revision != 1 || after.Offset != 10 || !bytes.Equal(after.State, original.State) {
+		t.Fatalf("stale checkpoint changed durable progress: %+v %v", after, err)
+	}
+	database, err := OpenReadOnly(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	atoms, err := database.ReadUsageAtoms(ctx, 0, 20, 10)
+	if err != nil || len(atoms) != 1 || atoms[0].Payload["quantity"] != float64(7) {
+		t.Fatalf("usage-first durability lost: %+v %v", atoms, err)
+	}
 }

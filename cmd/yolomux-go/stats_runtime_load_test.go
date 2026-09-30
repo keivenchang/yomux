@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,7 +101,7 @@ func TestStatsRuntimeServiceLoadSamplesIncludeOwnedProcessResources(t *testing.T
 		}}
 	}}
 	samples := server.statsRuntimeServiceLoadSamples(time.Unix(2000, 0))
-	if len(samples) != 2 || samples[0].SourceID != "yolomux-go" || samples[0].CPUPercent == nil || *samples[0].CPUPercent != cpu || samples[0].RSSBytes == nil || *samples[0].RSSBytes != float64(rss) {
+	if len(samples) != 2 || samples[0].SourceID != server.statsMainProcessSourceID() || samples[0].CPUPercent == nil || *samples[0].CPUPercent != cpu || samples[0].RSSBytes == nil || *samples[0].RSSBytes != float64(rss) {
 		t.Fatalf("owned process service sample = %#v, want CPU=%v RSS=%d", samples, cpu, rss)
 	}
 	if samples[1].SourceID != "yolomux-go:child:8123" || samples[1].CPUPercent == nil || *samples[1].CPUPercent != childCPU || samples[1].RSSBytes == nil || *samples[1].RSSBytes != float64(childRSS) {
@@ -121,7 +122,7 @@ func TestStatsRuntimeServiceLoadSamplesKeepRSSWhenCPUSampleIsUnavailable(t *test
 		source string
 		rss    float64
 	}{
-		{source: "yolomux-go", rss: float64(rss)},
+		{source: server.statsMainProcessSourceID(), rss: float64(rss)},
 		{source: "yolomux-go:child:8123", rss: float64(childRSS)},
 	} {
 		if samples[index].SourceID != want.source || samples[index].CPUPercent != nil || samples[index].RSSBytes == nil || *samples[index].RSSBytes != want.rss {
@@ -394,5 +395,56 @@ func TestAugmentSnapshotWireRuntimeLoadSkipsClosedRightmostBucket(t *testing.T) 
 	source := buckets[0]["source"].(map[string]any)
 	if source["count"] != 1 || source["first_timestamp"] != 101.0 || source["last_timestamp"] != 105.0 || series["service_cpu_percent:yolomux_go"]["value"] != 2.5 {
 		t.Fatal("closed-bucket augmentation mutated retained source data")
+	}
+}
+
+func TestStatsProcessSourceIdentitySeparatesEveryOwnerDimension(t *testing.T) {
+	base := statsProcessSourceID(123, 7222, 12, "/bin/yolomux-go", "host-a", "boot-a", "proc:10", "owner-a")
+	cases := []string{
+		statsProcessSourceID(124, 7222, 12, "/bin/yolomux-go", "host-a", "boot-a", "proc:10", "owner-a"),
+		statsProcessSourceID(123, 7223, 12, "/bin/yolomux-go", "host-a", "boot-a", "proc:10", "owner-a"),
+		statsProcessSourceID(123, 7222, 12, "/bin/yolomux-go", "host-b", "boot-a", "proc:10", "owner-a"),
+		statsProcessSourceID(123, 7222, 12, "/bin/yolomux-go", "host-a", "boot-b", "proc:10", "owner-a"),
+		statsProcessSourceID(123, 7222, 12, "/bin/yolomux-go", "host-a", "boot-a", "proc:11", "owner-a"),
+		statsProcessSourceID(123, 7222, 12, "/bin/yolomux-go", "host-a", "boot-a", "proc:10", "owner-b"),
+	}
+	long := statsProcessSourceID(123, 7222, 12, strings.Repeat("é", 512), strings.Repeat("h", 1024), "b", "s", "o")
+	if len(long) > stats.MaxSeriesComponentBytes {
+		t.Fatalf("source identity exceeds persistence limit: %d", len(long))
+	}
+	seen := map[string]bool{base: true}
+	for _, candidate := range cases {
+		if seen[candidate] {
+			t.Fatalf("process identities collided: %s", candidate)
+		}
+		seen[candidate] = true
+	}
+	// Colons and separators in owner identity cannot collide with adjacent fields.
+	a := statsProcessSourceID(123, 7222, 12, "x", "h", "b", "s:o", "p")
+	b := statsProcessSourceID(123, 7222, 12, "x", "h", "b", "s", "o:p")
+	if a == b {
+		t.Fatal("ambiguous identity field framing")
+	}
+}
+
+func TestStatsMainProcessSourceIsStableAcrossSamplesAndDistinctAcrossInstances(t *testing.T) {
+	a := &server{port: 7222, startedAt: time.Unix(100, 0), background: &goBackgroundOwner{stableHostID: "host", bootID: "boot", processStartIdentity: "start-a", serverID: "owner"}}
+	b := &server{port: 7223, startedAt: time.Unix(100, 0), background: &goBackgroundOwner{stableHostID: "host", bootID: "boot", processStartIdentity: "start-b", serverID: "owner"}}
+	first := a.statsMainProcessSourceID()
+	if first == "yolomux-go" || first != a.statsMainProcessSourceID() || first == b.statsMainProcessSourceID() {
+		t.Fatalf("process attribution a=%q b=%q", first, b.statsMainProcessSourceID())
+	}
+}
+
+func TestStatsMainProcessMissingStartSeparatesRestarts(t *testing.T) {
+	makeServer := func(start int64) *server {
+		return &server{port: 7222, startedAt: time.Unix(start, 0), background: &goBackgroundOwner{
+			stableHostID: "same-host", bootID: "unknown-boot", serverID: "same-reused-pid",
+		}}
+	}
+	first, restarted := makeServer(100), makeServer(200)
+	identity := first.statsMainProcessSourceID()
+	if identity != first.statsMainProcessSourceID() || identity == restarted.statsMainProcessSourceID() {
+		t.Fatalf("missing OS start metadata failed stable restart attribution: first=%s restarted=%s", identity, restarted.statsMainProcessSourceID())
 	}
 }

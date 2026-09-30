@@ -68,6 +68,45 @@ func TestStatsServiceReadsOnlyPublishedRingProducts(t *testing.T) {
 	}
 }
 
+func TestStatsServiceSkipsCoverageProjectionForUnchangedGeneration(t *testing.T) {
+	coverage := &ringNoDataSet{spans: []MaterializedNoData{{Family: "gpu", SourceID: "host", EpochID: "e", Reason: "offline", Start: 0, End: 5}}}
+	key := ProductKey{RangeSeconds: 10, ResolutionSeconds: 10}
+	service := NewStatsService(nil, StatsServiceConfig{Products: []ProductKey{key}})
+	service.products[key] = statsProduct{
+		key: key, windowEnd: 20, cacheGeneration: 7,
+		bucketVersions: []ringBucketVersion{{start: 10, generation: 3, noData: coverage}},
+	}
+
+	snapshot, changed, err := service.CurrentSnapshotIfChanged(context.Background(), 10, 10, 7)
+	if err != nil || changed || len(snapshot.Materialized.NoData) != 0 {
+		t.Fatalf("unchanged generation projected coverage: changed=%t snapshot=%+v err=%v", changed, snapshot, err)
+	}
+
+	snapshot, changed, err = service.CurrentSnapshotIfChanged(context.Background(), 10, 10, 6)
+	if err != nil || !changed || len(snapshot.Materialized.NoData) != 1 || snapshot.Materialized.NoData[0].Start != 10 || snapshot.Materialized.NoData[0].End != 15 {
+		t.Fatalf("changed generation snapshot = %+v changed=%t err=%v", snapshot, changed, err)
+	}
+}
+
+func TestHistoricalCoveragePreservesCurrentIntervalOrdering(t *testing.T) {
+	closedTail := &ringNoDataSet{spans: []MaterializedNoData{{Family: "cpu", SourceID: "host", EpochID: "e", Reason: "persisted ring gap", Start: 0, End: 10}}}
+	stored := &ringNoDataSet{spans: []MaterializedNoData{{Family: "cpu", SourceID: "host", EpochID: "e", Reason: "coverage gap", Start: 0, End: 10}}}
+	current := newMaterializedNoDataAccumulatorWithWireSizing(false)
+	current.appendShifted(closedTail.spans, 100)
+	current.appendShifted(stored.spans, 100)
+
+	product := statsProduct{
+		snapshot:       StatsSnapshot{Materialized: MaterializedLayer{NoData: current.Sorted()}},
+		bucketVersions: []ringBucketVersion{{start: 100, closedTail: closedTail, noData: stored}},
+	}
+	expected := append([]MaterializedNoData(nil), product.snapshot.Materialized.NoData...)
+	product.snapshot.Materialized.NoData = nil
+	historical := snapshotWithCoverage(product)
+	if !reflect.DeepEqual(historical.Materialized.NoData, expected) {
+		t.Fatalf("historical coverage order = %+v, current order = %+v", historical.Materialized.NoData, expected)
+	}
+}
+
 func TestStatsServiceSharesOneWidestRingReadPerResolution(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "stats.sqlite3")
@@ -149,6 +188,88 @@ func TestStatsServiceFetchesOnlyChangedRingPayloads(t *testing.T) {
 	if second.BucketDecodes != 31 {
 		t.Fatalf("changed publication decoded %d buckets, want one additional decode after 30", second.BucketDecodes)
 	}
+}
+
+func TestStatsServiceRetainsSharedGenerationsAndSkipsUnaffectedProducts(t *testing.T) {
+	ctx := context.Background()
+	writer, err := OpenWriter(ctx, filepath.Join(t.TempDir(), "stats.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	service := NewStatsService(writer, StatsServiceConfig{Products: []ProductKey{{20, 10}, {10, 10}}, Now: func() time.Time { return time.Unix(99, 0) }})
+	publish := func(start, generation int64) {
+		t.Helper()
+		payload, err := encodeRingBucketPayload(MaterializedBucket{Start: float64(start), Duration: 10, Complete: true, Series: []MaterializedSeries{{Name: "cpu", Value: float64(generation)}}}, nil, generation, float64(100+generation))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writer.PublishRingBuckets(ctx, []RingBucketWrite{{ResolutionSeconds: 10, BucketStart: start, BucketJSON: payload, Complete: true}}, generation, float64(100+generation), true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	publish(80, 1)
+	publish(90, 1)
+	if err := service.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	first, err := service.CurrentSnapshot(ctx, 20, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	short, err := service.CurrentSnapshot(ctx, 10, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for generation := int64(2); generation <= 10; generation++ {
+		publish(80, generation)
+		before := service.RefreshCounters()
+		if err := service.Refresh(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if service.RefreshCounters().ProductsBuilt-before.ProductsBuilt != 1 {
+			t.Fatal("unaffected short product rebuilt")
+		}
+	}
+	if first.Materialized.Buckets[0].Series[0].Value != 1 {
+		t.Fatal("publication mutated prior generation")
+	}
+	latest, err := service.CurrentSnapshot(ctx, 20, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if &first.Materialized.Buckets[1].Series[0] != &latest.Materialized.Buckets[1].Series[0] {
+		t.Fatal("unchanged bucket series was copied")
+	}
+	if _, ok := service.GenerationSnapshot(ctx, 20, 10, 1); ok {
+		t.Fatal("expired generation retained")
+	}
+	for generation := int64(3); generation <= 10; generation++ {
+		snapshot, ok := service.GenerationSnapshot(ctx, 20, 10, generation)
+		if !ok || snapshot.Materialized.Buckets[0].Series[0].Value != float64(generation) {
+			t.Fatalf("generation %d missing or changed", generation)
+		}
+	}
+	unchanged, err := service.CurrentSnapshot(ctx, 10, 10)
+	if err != nil || unchanged.CacheGeneration != short.CacheGeneration {
+		t.Fatalf("unaffected product generation changed: %+v %v", unchanged, err)
+	}
+	var readers sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for j := 0; j < 100; j++ {
+				if _, ok := service.GenerationSnapshot(ctx, 20, 10, 10); !ok {
+					t.Error("concurrent generation disappeared")
+				}
+			}
+		}()
+	}
+	if err := service.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	readers.Wait()
 }
 
 func TestStatsServiceSkipsRingDecodeWhenPublicationAndBacklogAreUnchanged(t *testing.T) {
@@ -668,15 +789,22 @@ func TestStatsServiceBuilds24HourProductWithLargeUnavailableHistory(t *testing.T
 	if got := len(snapshot.Materialized.NoData); got != sourceCount {
 		t.Fatalf("merged unavailable spans = %d, want %d", got, sourceCount)
 	}
+	sets := make(map[*ringNoDataSet]bool)
 	cachedNoDataBytes := 0
 	for _, entry := range service.ringBucketCache {
-		if len(entry.noDataCompressed) == 0 {
-			t.Fatal("ring cache retained uncompressed or missing no-data")
+		if entry.noData == nil {
+			t.Fatal("ring cache missing typed no-data")
 		}
-		cachedNoDataBytes += len(entry.noDataCompressed)
+		if !sets[entry.noData] {
+			sets[entry.noData] = true
+			cachedNoDataBytes += entry.noData.bytes
+		}
 	}
 	if cachedNoDataBytes >= MaxRingBucketBytes*4 {
-		t.Fatalf("compressed 24-hour no-data cache = %d bytes, want below 32 MiB", cachedNoDataBytes)
+		t.Fatalf("typed 24-hour no-data cache = %d bytes, want below 32 MiB", cachedNoDataBytes)
+	}
+	if len(sets) != 1 {
+		t.Fatalf("repeated no-data retained %d interval sets, want 1", len(sets))
 	}
 	shortSnapshot, err := service.CurrentSnapshot(ctx, 7200, 300)
 	if err != nil {

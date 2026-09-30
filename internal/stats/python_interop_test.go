@@ -1126,11 +1126,8 @@ json.dump(payload, sys.stdout, sort_keys=True, separators=(",", ":"))
 				t.Fatal("initial scan returned no cursor receipt")
 			}
 			cursorPath := filepath.Join(root, fixture.provider+"-cursor.json")
-			cursor := NewTranscriptCursorStore(cursorPath)
-			if err := cursor.Prepare(source, first.Receipt.before, first.Receipt.after); err != nil {
-				t.Fatal(err)
-			}
-			if err := cursor.Commit(source, first.Receipt.after); err != nil {
+			cursor := transcriptCheckpointFixture(t, cursorPath)
+			if err := saveTranscriptCheckpointForTest(cursor, source, first.Receipt.after); err != nil {
 				t.Fatal(err)
 			}
 			first.Receipt.Commit()
@@ -1141,7 +1138,7 @@ json.dump(payload, sys.stdout, sort_keys=True, separators=(",", ":"))
 			secondTombstones := make([]UsageTombstone, 0)
 			if fixture.byteBudget > 0 {
 				for cycle := 0; cycle < 64; cycle++ {
-					cursor = NewTranscriptCursorStore(cursorPath)
+					cursor = restartTranscriptCheckpointFixture(cursor)
 					before, stateErr := cursor.State(source)
 					if stateErr != nil {
 						t.Fatalf("reload synthetic cursor on cycle %d: %v", cycle, stateErr)
@@ -1207,10 +1204,7 @@ json.dump(payload, sys.stdout, sort_keys=True, separators=(",", ":"))
 					secondAtoms = append(secondAtoms, partial.Atoms...)
 					secondTombstones = append(secondTombstones, partial.Tombstones...)
 					if partial.Receipt != nil {
-						if err := cursor.Prepare(source, partial.Receipt.before, partial.Receipt.after); err != nil {
-							t.Fatalf("prepare cursor on cycle %d: %v", cycle, err)
-						}
-						if err := cursor.Commit(source, partial.Receipt.after); err != nil {
+						if err := saveTranscriptCheckpointForTest(cursor, source, partial.Receipt.after); err != nil {
 							t.Fatalf("commit cursor on cycle %d: %v", cycle, err)
 						}
 						partial.Receipt.Commit()
@@ -1220,7 +1214,7 @@ json.dump(payload, sys.stdout, sort_keys=True, separators=(",", ":"))
 					}
 				}
 			} else {
-				restartedState, stateErr := NewTranscriptCursorStore(cursorPath).State(source)
+				restartedState, stateErr := restartTranscriptCheckpointFixture(cursor).State(source)
 				if stateErr != nil {
 					t.Fatal(stateErr)
 				}
@@ -1393,7 +1387,7 @@ json.dump(selected, sys.stdout, separators=(",", ":"))
 		{Path: goPaths[1], Provider: "claude", SourceID: "h0", ThreadID: "history-0"},
 		{Path: goPaths[2], Provider: "claude", SourceID: "h1", ThreadID: "history-1"},
 	}
-	collector := NewAgentTokenCollector(nil, nil, AgentTokenCollectorConfig{
+	collector := NewAgentTokenCollector(newAgentTokenTestWriter(t), nil, AgentTokenCollectorConfig{
 		TranscriptSources: func(context.Context, []AgentRecord) ([]TranscriptSource, error) {
 			return sources, nil
 		},
@@ -1411,8 +1405,8 @@ json.dump(selected, sys.stdout, separators=(",", ":"))
 			t.Fatalf("Go scheduler cycle %d did not serve exactly one synthetic source: atoms=%d coverage=%+v", cycle, len(batch.UsageAtoms), batch.CoverageEpochs)
 		}
 		goSelected = append(goSelected, batch.CoverageEpochs[0].SourceID)
-		if err := commitReceipts(receipts); err != nil {
-			t.Fatalf("commit Go scheduler cycle %d: %v", cycle, err)
+		if ok, err := collector.appendCollected(context.Background(), batch, receipts); !ok || err != nil {
+			t.Fatalf("commit Go scheduler cycle %d: ok=%v err=%v", cycle, ok, err)
 		}
 		if cycle < 5 {
 			appendJSONL(t, goPaths[0], usageCodex(float64(cycle+2), float64((cycle+2)*10), 0, float64(cycle+2)), false)
@@ -1518,7 +1512,7 @@ scanner.commit(result.receipt_id)
 		},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
-			collector := NewAgentTokenCollector(nil, nil, AgentTokenCollectorConfig{
+			collector := NewAgentTokenCollector(newAgentTokenTestWriter(t), nil, AgentTokenCollectorConfig{
 				TranscriptSources: func(ctx context.Context, records []AgentRecord) ([]TranscriptSource, error) {
 					return defaultAgentTokenSourcesBounded(ctx, records, transcriptDiscoveryBounds{
 						maxFiles: 10,

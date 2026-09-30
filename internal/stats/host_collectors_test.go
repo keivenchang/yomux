@@ -218,7 +218,7 @@ func TestBuildServiceLoadFactsFiltersInvalidSamplesAndKeepsNullableRSS(t *testin
 		{SourceID: "runtime:negative", Running: true, CPUPercent: &negativeCPU},
 		{SourceID: "yolomux-go:rss-only", Running: true, RSSBytes: func() *float64 { value := 2048.0; return &value }()},
 	}, context)
-	if len(batch.Observations) != 3 || len(batch.CoverageEpochs) != 3 {
+	if len(batch.Observations) != 2 || len(batch.CoverageEpochs) != 2 {
 		t.Fatalf("service facts = %#v", batch)
 	}
 	if got := batch.Observations[0].Payload; !reflect.DeepEqual(got, map[string]any{"running": true, "cpu_percent": 12.5, "rss_bytes": 4096.0}) {
@@ -226,9 +226,6 @@ func TestBuildServiceLoadFactsFiltersInvalidSamplesAndKeepsNullableRSS(t *testin
 	}
 	if got := batch.Observations[1].Payload; !reflect.DeepEqual(got, map[string]any{"running": true, "cpu_percent": 2.0, "rss_bytes": nil}) {
 		t.Fatalf("nullable RSS payload = %#v", got)
-	}
-	if got := batch.Observations[2].Payload; !reflect.DeepEqual(got, map[string]any{"running": true, "rss_bytes": 2048.0}) {
-		t.Fatalf("RSS-only payload = %#v", got)
 	}
 	if batch.Observations[0].SourceID != "runtime:stats_lifecycle" || batch.Observations[1].SourceID != "runtime:agent_status" {
 		t.Fatalf("service sources = %#v", batch.Observations)

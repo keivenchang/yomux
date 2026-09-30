@@ -169,6 +169,12 @@ Tabber's Go API is separate from YO!stats storage: `/api/activity?scope=all` ret
 
 The Go process opens `stats-v9.sqlite3` directly and owns its writer lock. It does not use the Python statsd RPC protocol. The current storage, wire, and parity gaps are listed in this guide's YO!stats section and current-gaps list.
 
+When the Go token collector enables database checkpoints, it upgrades that same file to schema 10 with minimum writer protocol 26. The filename stays unchanged. Parser progress, exact comparison bytes, and scheduling metadata share the writer transaction with usage facts and tombstones; a checkpoint-only update does not change graph source generation. A bare writer without token collection can still use schema 9 for interoperability fixtures. Unchanged Python cannot write the migrated database.
+
+Before upgrading, Go holds the database writer lease and legacy cursor locks, makes a consistent SQLite backup, and copies the paired cursor files and writer fence into an adjacent `<database>.pre-checkpoints-*` directory. `cursor-manifest.json` maps original paths to backup files. The `go-checkpoints-v1` row in `migration_reconciliation` records the backup directory in `source_digest`. Pending legacy cursor work is replayed from committed progress.
+
+To roll back, stop the Go owner first. Preserve the migrated database, its WAL/SHM sidecars, current writer fence, and current cursor files in a separate recovery directory. Restore the backed-up database and every file listed in its cursor manifest to their original paths before starting Python. Do not leave migrated WAL/SHM files beside the restored database. Retain both backup sets so rollback does not discard newer facts.
+
 ## Completed Delivery Slices
 
 | Slice | Current result |
@@ -254,7 +260,7 @@ The wrapper accepts an optional positive integer `--jobs`; when the flag is omit
 
 * Go YO!stats owns its storage and collectors in process; it does not implement the legacy Python statsd RPC/lifecycle topology. Keep both backends on isolated roots while comparing them.
 
-* Large Claude/Codex transcript cursors and OpenCode cursors use durable sidecars; small transcript scans remain process-local. Exact Python-versus-Go recovery and output parity remain incomplete.
+* Go stores Claude/Codex transcript and OpenCode parser progress in versioned checkpoints in the YO!stats database. Migration imports legacy cursor sidecars and pairs them with a database backup; unchanged Python may reject schema 10. The broader Python-versus-Go recovery and output comparison remains incomplete.
 
 * Runtime agent/OpenCode discovery currently uses Linux adapters. Cross-platform parity is not established.
 

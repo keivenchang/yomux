@@ -50,6 +50,10 @@ type Lifecycle struct {
 	windowMetadataCache         map[int]lifecycleWindowMetadataCache
 	backgroundBackfillNotBefore time.Time
 	lastBackgroundBackfillAt    time.Time
+	startupMu                   sync.Mutex
+	startup                     StartupPreparationState
+	startupStarted              time.Time
+	startupTargets              map[[2]int64]startupPreparationTarget
 	counters                    lifecycleCounters
 }
 
@@ -73,9 +77,12 @@ type LifecycleConfig struct {
 	// normal request/collector work at startup.
 	BackgroundBackfillCadence      time.Duration
 	BackgroundBackfillInitialDelay time.Duration
-	Price                          PriceResolver
-	Now                            func() time.Time
-	StateFunc                      func(LifecycleCounters)
+	// StartupProducts prepares a fixed launch horizon on the existing lifecycle
+	// ticks. Empty preserves ordinary background admission for library callers.
+	StartupProducts []ProductKey
+	Price           PriceResolver
+	Now             func() time.Time
+	StateFunc       func(LifecycleCounters)
 }
 
 type LifecycleCounters struct {
@@ -85,10 +92,27 @@ type LifecycleCounters struct {
 	SelectionDuration, MaterializationDuration, FactReadDuration   time.Duration
 	LastDuration, LastFactReadDuration, LastSelectionDuration,
 	LastMaterializationDuration time.Duration
-	LastGeneration   int64
-	LastRunSucceeded bool
-	LastRunError     string
-	ByResolution     map[int]LifecycleResolutionCounters
+	LastGeneration     int64
+	LastRunSucceeded   bool
+	LastRunError       string
+	ByResolution       map[int]LifecycleResolutionCounters
+	StartupPreparation StartupPreparationState
+}
+
+// StartupPreparationState is safe for diagnostics and contains no source data.
+type StartupPreparationState struct {
+	StartedAt, Horizon       float64
+	SourceGeneration         int64
+	TotalCells, PendingCells int
+	Complete, TimedOut       bool
+	Duration                 time.Duration
+}
+
+type startupPreparationTarget struct {
+	cell            lifecycleCell
+	generation      int64
+	priority        int
+	requireComplete bool
 }
 
 // LifecycleResolutionCounters attributes bounded materializer work to the
@@ -277,7 +301,13 @@ func NewLifecycle(writer *Writer, config LifecycleConfig) *Lifecycle {
 	}
 	return &Lifecycle{writer: writer, config: config, materializer: Materializer{Price: config.Price}, trigger: make(chan struct{}, 1), completionWake: make(chan struct{}), pruneEvery: config.PruneCadence, lastPruneAt: lastPruneAt, vacuumEvery: config.VacuumCadence, vacuumRetry: config.VacuumRetry, vacuumMaxDefer: config.VacuumMaxDefer, lastVacuumAt: lastVacuumAt, busy: config.Busy, demands: make(map[ProductKey]time.Time), lastMaterializedAt: make(map[[2]int64]time.Time), windowMetadataCache: make(map[int]lifecycleWindowMetadataCache), backgroundBackfillNotBefore: backgroundBackfillNotBefore}
 }
-func (l *Lifecycle) Counters() LifecycleCounters { return l.counters.snapshot() }
+func (l *Lifecycle) Counters() LifecycleCounters {
+	result := l.counters.snapshot()
+	l.startupMu.Lock()
+	result.StartupPreparation = l.startup
+	l.startupMu.Unlock()
+	return result
+}
 
 func (l *Lifecycle) CompletedRuns() uint64 {
 	if l == nil {
@@ -780,6 +810,132 @@ func (l *Lifecycle) backgroundBackfillDue(now time.Time) bool {
 	return l.lastBackgroundBackfillAt.IsZero() || now.Sub(l.lastBackgroundBackfillAt) >= l.config.BackgroundBackfillCadence
 }
 
+// startupPreparationCells freezes the launch windows and required revisions.
+// Later appends can repair those cells but never extend this finite queue.
+func (l *Lifecycle) startupPreparationCells(ctx context.Context, now time.Time, generation int64, pending []InvalidationCell) ([]lifecycleCell, bool, error) {
+	if len(l.config.StartupProducts) == 0 {
+		return nil, false, nil
+	}
+	l.startupMu.Lock()
+	defer l.startupMu.Unlock()
+	if l.startup.Complete || l.startup.TimedOut {
+		return nil, false, nil
+	}
+	first := l.startupTargets == nil
+	if l.startupStarted.IsZero() {
+		l.startupStarted = now
+		l.startup = StartupPreparationState{StartedAt: float64(now.UnixNano()) / 1e9, Horizon: float64(now.UnixNano()) / 1e9, SourceGeneration: generation}
+	}
+	l.startup.Duration = now.Sub(l.startupStarted)
+	if l.startup.Duration >= 120*time.Second {
+		l.startup.TimedOut = true
+		l.startupTargets = nil
+		// Resume ordinary low-priority recovery after its normal cadence.
+		l.lastBackgroundBackfillAt = now
+		return nil, false, nil
+	}
+	horizon := l.startupStarted
+	ranges := make(map[int]int)
+	for _, key := range l.config.StartupProducts {
+		if !supportedProductKey(key) {
+			continue
+		}
+		if key.RangeSeconds > ranges[key.ResolutionSeconds] {
+			ranges[key.ResolutionSeconds] = key.RangeSeconds
+		}
+	}
+	rows := make(map[[2]int64]RingBucketRow)
+	for resolution, windowRange := range ranges {
+		window, err := l.writer.ReadRingWindowMetadata(ctx, windowRange, resolution, NextWindowEnd(horizon, resolution))
+		if err != nil {
+			return nil, false, err
+		}
+		for _, row := range window.Rows {
+			rows[[2]int64{int64(resolution), row.BucketStart}] = row
+		}
+		for _, row := range window.PendingRows {
+			rows[[2]int64{int64(resolution), row.BucketStart}] = row
+		}
+	}
+	pendingGenerations := make(map[[2]int64]int64, len(pending))
+	for _, cell := range pending {
+		pendingGenerations[[2]int64{int64(cell.ResolutionSeconds), cell.BucketStart}] = cell.SourceGeneration
+	}
+	if first {
+		l.startupTargets = make(map[[2]int64]startupPreparationTarget)
+		all := make(map[[2]int64]bool)
+		for priority, key := range l.config.StartupProducts {
+			if !supportedProductKey(key) {
+				continue
+			}
+			if key == (ProductKey{300, 1}) {
+				priority = -1
+			}
+			end := NextWindowEnd(horizon, key.ResolutionSeconds)
+			for start := end - int64(key.RangeSeconds); start < end; start += int64(key.ResolutionSeconds) {
+				identity := [2]int64{int64(key.ResolutionSeconds), start}
+				if all[identity] {
+					if old, ok := l.startupTargets[identity]; ok && priority < old.priority {
+						old.priority = priority
+						l.startupTargets[identity] = old
+					}
+					continue
+				}
+				all[identity] = true
+				row, exists := rows[identity]
+				required, invalid := pendingGenerations[identity]
+				elapsedIncomplete := exists && !row.Complete && start+int64(key.ResolutionSeconds) <= horizon.Unix() && row.PublishedAt < float64(start+int64(key.ResolutionSeconds))
+				if exists && !invalid && !elapsedIncomplete {
+					continue
+				}
+				if !invalid {
+					required = l.startup.SourceGeneration
+				}
+				l.startupTargets[identity] = startupPreparationTarget{cell: lifecycleCell{ResolutionSeconds: key.ResolutionSeconds, BucketStart: start}, generation: required, priority: priority, requireComplete: elapsedIncomplete}
+			}
+		}
+		l.startup.TotalCells = len(all)
+	} else {
+		for identity, target := range l.startupTargets {
+			row, exists := rows[identity]
+			pendingGeneration, invalid := pendingGenerations[identity]
+			if exists && row.SourceGeneration >= target.generation && (!target.requireComplete || row.Complete) && (!invalid || pendingGeneration > l.startup.SourceGeneration) {
+				delete(l.startupTargets, identity)
+			}
+		}
+	}
+	l.startup.PendingCells = len(l.startupTargets)
+	if len(l.startupTargets) == 0 {
+		l.startup.Complete = true
+		l.startupTargets = nil
+		l.lastBackgroundBackfillAt = now
+		return nil, false, nil
+	}
+	targets := make([]startupPreparationTarget, 0, len(l.startupTargets))
+	for _, target := range l.startupTargets {
+		targets = append(targets, target)
+	}
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].priority != targets[j].priority {
+			return targets[i].priority < targets[j].priority
+		}
+		if targets[i].cell.ResolutionSeconds != targets[j].cell.ResolutionSeconds {
+			return targets[i].cell.ResolutionSeconds < targets[j].cell.ResolutionSeconds
+		}
+		return targets[i].cell.BucketStart < targets[j].cell.BucketStart
+	})
+	cells := make([]lifecycleCell, 0, min(len(targets), l.config.MaxCells))
+	for _, target := range targets {
+		if l.openCellDue(now, target.cell) {
+			cells = append(cells, target.cell)
+		}
+		if len(cells) >= l.config.MaxCells {
+			break
+		}
+	}
+	return cells, true, nil
+}
+
 var errLifecycleBudget = errors.New("stats lifecycle materialization budget exhausted")
 
 const maxStaleRowsPerResolution = 4
@@ -820,6 +976,10 @@ func (l *Lifecycle) selectCellsFromSnapshot(ctx context.Context, now time.Time, 
 
 func (l *Lifecycle) selectCellsFromSnapshotWithReconciliation(ctx context.Context, now time.Time, generation int64, sourceSnapshot *Database, externalGeneration bool) ([]lifecycleCell, error) {
 	pending, err := l.writer.PendingInvalidationCells(ctx)
+	if err != nil {
+		return nil, err
+	}
+	startupCells, preparing, err := l.startupPreparationCells(ctx, now, generation, pending)
 	if err != nil {
 		return nil, err
 	}
@@ -945,6 +1105,17 @@ func (l *Lifecycle) selectCellsFromSnapshotWithReconciliation(ctx context.Contex
 	}
 	selected := make([]lifecycleCell, 0, l.config.MaxCells)
 	demands := l.demandedProducts(now)
+	if preparing && len(demands) == 0 {
+		// The finite launch horizon bounds background work, while the normal
+		// demand path also keeps the default graph's advancing live edge ready.
+		// A real request always takes precedence over this startup-only hint.
+		for _, key := range l.config.StartupProducts {
+			if key == (ProductKey{300, 1}) {
+				demands = append(demands, key)
+				break
+			}
+		}
+	}
 	backgroundBackfillDue := l.backgroundBackfillDue(now)
 	if backgroundBackfillDue && l.config.BackgroundBackfillCadence > 0 {
 		// Consume the low-priority scheduling slot once per cadence. Explicit
@@ -955,7 +1126,7 @@ func (l *Lifecycle) selectCellsFromSnapshotWithReconciliation(ctx context.Contex
 	for _, demand := range demands {
 		demandedResolutions[demand.ResolutionSeconds] = struct{}{}
 	}
-	if !backgroundBackfillDue && len(demands) == 0 && !generationMismatch {
+	if !preparing && !backgroundBackfillDue && len(demands) == 0 && !generationMismatch {
 		// Pending cells are still durable and will be repaired on the next
 		// low-priority slot. Without a requested product, spending the full
 		// materialization budget on a cold or interrupted history is unnecessary
@@ -1183,6 +1354,14 @@ func (l *Lifecycle) selectCellsFromSnapshotWithReconciliation(ctx context.Contex
 				break
 			}
 		}
+	}
+	// Admitted startup history follows current product work and precedes
+	// unrelated repair. Its fixed targets never grow with incoming samples.
+	for _, cell := range startupCells {
+		if len(selected) >= l.config.MaxCells {
+			break
+		}
+		add(&selected, cell.ResolutionSeconds, cell.BucketStart)
 	}
 	for _, cell := range pending {
 		claimed := false
