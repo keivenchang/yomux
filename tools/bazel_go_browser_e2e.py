@@ -902,12 +902,28 @@ exec /bin/sleep 300
                 print(f"Go browser warm Tabber activity: {json.dumps({key: surfaces[key] for key in ('tabberActivityMs', 'tabberFirstPaintMs', 'tabberCacheHit', 'tabberSessionRow')}, sort_keys=True)}")
                 phase3 = driver.execute_async_script("""
                     const done = arguments[arguments.length - 1];
+                    const session = arguments[0];
                     const events = new EventSource('/api/client-events?channels=core,events&client_id=phase3-e2e');
                     const seen = [];
-                    events.addEventListener('ready', event => { seen.push('ready'); fetch('/api/event', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session: '', type: 'note', message: 'phase3 browser event', details: {source: 'phase3-e2e'}})}); if (seen.includes('published')) { events.close(); done(seen); } });
-                    events.addEventListener('event_log_changed', event => { seen.push('published'); if (seen.includes('ready')) { events.close(); done(seen); } });
-                    setTimeout(() => { events.close(); done({error: 'client-events timeout', seen, response: window.__phase3EventResponse || ''}); }, 5000);
-                """)
+                    let settled = false;
+                    const finish = value => { if (settled) return; settled = true; events.close(); done(value); };
+                    events.addEventListener('ready', () => {
+                      seen.push('ready');
+                      fetch('/api/event', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({session, type: 'note', message: 'phase3 browser event', details: {source: 'phase3-e2e'}}),
+                      }).then(async response => {
+                        const body = await response.text();
+                        if (!response.ok) finish({error: 'event POST failed', status: response.status, body, seen});
+                      }).catch(error => finish({error: 'event POST failed', detail: String(error), seen}));
+                    });
+                    events.addEventListener('event_log_changed', () => {
+                      seen.push('published');
+                      if (seen.includes('ready')) finish(seen);
+                    });
+                    setTimeout(() => finish({error: 'client-events timeout', seen}), 5000);
+                """, session)
                 if not isinstance(phase3, list) or 'ready' not in phase3 or 'published' not in phase3:
                     raise SystemExit(f"Go Phase 3 Chromium E2E failed: {phase3}")
                 editor = driver.execute_async_script("""

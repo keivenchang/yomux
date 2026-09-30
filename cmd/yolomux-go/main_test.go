@@ -2521,7 +2521,7 @@ func TestGoRootAdvertisesTheFullCapabilityGatedApplicationShell(t *testing.T) {
 	if page.Code != http.StatusOK {
 		t.Fatalf("full root status = %d, body=%s", page.Code, page.Body.String())
 	}
-	if !bytes.Contains(page.Body.Bytes(), []byte(`"versionStatus":"0.9.4`)) {
+	if !bytes.Contains(page.Body.Bytes(), []byte(`"versionStatus":"0.9.5`)) {
 		t.Fatalf("Go root does not preserve the release version label: %s", page.Body.String())
 	}
 	if !bytes.Contains(page.Body.Bytes(), []byte(`"backendLabel":"Go `)) {
