@@ -1920,6 +1920,301 @@ def test_current_stats_system_memory_renders_the_top_five_vivid_binary_rss_areas
     }, result
 
 
+def test_current_stats_daemons_range_and_resolution_controls_use_shared_selection(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        Promise.resolve(selectSession(debugPaneItemId, {userInitiated: true}))
+          .then(() => { setDebugSubTab('system'); done(true); }, error => done({error: String(error)}));
+        """
+    )
+    WebDriverWait(browser, 8).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('.js-debug-panel [data-js-debug-daemons-graph] [data-js-debug-range-slider]') !== null"
+        )
+    )
+    result = browser.execute_script(
+        """
+        const graph = document.querySelector('.js-debug-panel [data-js-debug-daemons-graph]');
+        const slider = graph?.querySelector('[data-js-debug-range-slider]');
+        const resolution = graph?.querySelector('[data-js-debug-resolution-override]');
+        if (!graph || !slider || !resolution) return {error: 'Daemons range/resolution controls are missing'};
+        const ranges = debugGraphAvailableRangeOptions();
+        const target = ranges.find(option => option.seconds !== debugRuntimeState.graphRangeSeconds && option.seconds >= 3600);
+        if (!target) return {error: `No alternate range of at least one hour is available: ${JSON.stringify(ranges)}`};
+        const originalRequest = requestJsDebugHistoryForCurrentDomain;
+        let historyRequests = 0;
+        requestJsDebugHistoryForCurrentDomain = () => { historyRequests += 1; return false; };
+        try {
+          slider.focus();
+          slider.value = String(ranges.findIndex(option => option.seconds === target.seconds));
+          slider.dispatchEvent(new Event('input', {bubbles: true}));
+          slider.dispatchEvent(new Event('change', {bubbles: true}));
+          const rangeGraph = document.querySelector('.js-debug-panel [data-js-debug-daemons-graph]');
+          const rangeSlider = rangeGraph?.querySelector('[data-js-debug-range-slider]');
+          const rangeFocusRestored = document.activeElement === rangeSlider;
+          const rangeSelected = debugRuntimeState.graphRangeSeconds;
+          const rangeDomain = debugGraphDomain().rangeSeconds;
+          const availableResolutions = debugGraphAvailableResolutionChoices(debugGraphDomain());
+          const rangeLabel = rangeGraph?.querySelector('[data-js-debug-range-label]')?.textContent?.trim() || '';
+          const datalistId = rangeSlider?.getAttribute('list') || '';
+          const uniqueDatalist = datalistId === 'js-debug-range-options-daemons'
+            && document.querySelectorAll(`#${CSS.escape(datalistId)}`).length === 1;
+          const nextResolution = availableResolutions[0];
+          if (nextResolution) {
+            const currentResolution = rangeGraph.querySelector('[data-js-debug-resolution-override]');
+            currentResolution.focus();
+            currentResolution.value = String(nextResolution);
+            currentResolution.dispatchEvent(new Event('change', {bubbles: true}));
+          }
+          const refreshedGraph = document.querySelector('.js-debug-panel [data-js-debug-daemons-graph]');
+          const refreshedResolution = refreshedGraph?.querySelector('[data-js-debug-resolution-override]');
+          const chartWidth = refreshedGraph.style.width;
+          const geometry = [320, 240].map(width => {
+            refreshedGraph.style.width = `${width}px`;
+            const controls = refreshedGraph.querySelector('.js-debug-daemons-controls');
+            const rangeControls = controls?.querySelector('.js-debug-range-resolution-controls');
+            const rangeInput = rangeControls?.querySelector('[data-js-debug-range-slider]');
+            const resolutionInput = rangeControls?.querySelector('[data-js-debug-resolution-override]');
+            const bounds = node => {
+              const rect = node.getBoundingClientRect();
+              return {left: rect.left, right: rect.right, width: rect.width};
+            };
+            return {
+              width,
+              controls: bounds(controls),
+              rangeControls: bounds(rangeControls),
+              rangeInput: bounds(rangeInput),
+              resolutionInput: bounds(resolutionInput),
+              scrollWidth: controls.scrollWidth,
+              clientWidth: controls.clientWidth,
+            };
+          });
+          refreshedGraph.style.width = chartWidth;
+          return {
+            targetRange: target.seconds,
+            selectedRange: rangeSelected,
+            domainRange: rangeDomain,
+            rangeLabel,
+            rangeFocusRestored,
+            availableResolutions,
+            selectedResolution: debugRuntimeState.graphResolutionOverrideSeconds,
+            resolutionFocusRestored: nextResolution ? document.activeElement === refreshedResolution : null,
+            uniqueDatalist,
+            geometry,
+            historyRequests,
+          };
+        } finally {
+          requestJsDebugHistoryForCurrentDomain = originalRequest;
+        }
+        """
+    )
+    assert "error" not in result, result
+    assert result["selectedRange"] == result["targetRange"] == result["domainRange"], result
+    assert result["rangeLabel"], result
+    assert result["rangeFocusRestored"] is True, result
+    assert result["uniqueDatalist"] is True, result
+    assert result["historyRequests"] >= 1, result
+    if result["availableResolutions"]:
+        assert result["selectedResolution"] == result["availableResolutions"][0], result
+        assert result["resolutionFocusRestored"] is True, result
+    for metrics in result["geometry"]:
+        assert metrics["controls"]["width"] <= metrics["width"] + 1, metrics
+        assert metrics["scrollWidth"] <= metrics["clientWidth"] + 1, metrics
+        for control in ("rangeInput", "resolutionInput"):
+            assert metrics[control]["left"] >= metrics["controls"]["left"] - 1, metrics
+            assert metrics[control]["right"] <= metrics["controls"]["right"] + 1, metrics
+
+
+def test_current_stats_daemons_highlight_and_zoom_use_the_clicked_chart_surface(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    browser.execute_async_script(
+        """
+        const done = arguments[0];
+        Promise.resolve(selectSession(debugPaneItemId, {userInitiated: true}))
+          .then(() => { setDebugSubTab('system'); done(true); }, error => done({error: String(error)}));
+        """
+    )
+    browser.execute_script(
+        """
+        const now = Date.now();
+        const starts = [0, 1, 2, 3].map(index => Math.floor((now - (4 - index) * 1000) / 1000));
+        jsDebugSystemState.payload = {
+          ok: true, generated_at: now / 1000, server: {}, owner: {}, refresh: {}, search_index: {},
+          caches: {}, client_events: {}, chat: {}, cpu_budget: {},
+          local_services: {schema_version: 5, inventory: [], totals: {}, services: []},
+          top_endpoints: [], top_background_work: [],
+        };
+        clearJsDebugGraphData();
+        debugGraphApplyServerHistory({
+          latest_sequence: 4,
+          records: starts.map((start, index) => ({
+            start, duration: 1,
+            host_metrics: {service_load: {'runtime:stats_lifecycle': {
+              label: 'stats lifecycle (goroutine, in-process)',
+              cpu_samples: 1, cpu_total_percent: 20 + index * 5,
+              cpu_min_percent: 20 + index * 5, cpu_max_percent: 20 + index * 5,
+            }}},
+          })),
+        });
+        debugRuntimeState.graphRangeSeconds = 300;
+        debugRuntimeState.graphResolutionOverrideSeconds = 1;
+        jsDebugHistoryReadiness.phase = 'ready';
+        jsDebugHistoryReadiness.reason = '';
+        jsDebugHistoryReadiness.overlayVisible = false;
+        const chartRegion = document.querySelector('[data-js-debug-system-region="chart"]');
+        if (chartRegion) chartRegion.innerHTML = debugSystemRegionHtml('chart', jsDebugSystemState.payload);
+        """
+    )
+    WebDriverWait(browser, 8).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('.js-debug-panel [data-js-debug-daemons-graph] .js-debug-line-chart') !== null"
+        )
+    )
+    result = browser.execute_script(
+        """
+        const panel = document.querySelector('.js-debug-panel');
+        const graphs = panel.querySelector('[data-js-debug-graph]');
+        const daemons = panel.querySelector('[data-js-debug-daemons-graph]');
+        const svg = daemons?.querySelector('.js-debug-line-chart');
+        const line = daemons?.querySelector('[data-js-debug-hover-line]');
+        const graphsLine = graphs?.querySelector('[data-js-debug-hover-line]');
+        const selectionRect = daemons?.querySelector('[data-js-debug-selection-rect]');
+        const graphsGrid = graphs?.querySelector('[data-js-debug-chart-grid]');
+        const daemonsGrid = daemons?.querySelector('[data-js-debug-chart-grid]');
+        if (!panel || !graphs || !daemons || !svg || !line || !graphsLine || !selectionRect || !graphsGrid || !daemonsGrid) {
+          return {error: 'Graphs and Daemons chart surfaces are required'};
+        }
+        graphsGrid.dataset.jsDebugDomainStart = '100000';
+        graphsGrid.dataset.jsDebugDomainEnd = '700000';
+        daemonsGrid.dataset.jsDebugDomainStart = '1000000';
+        daemonsGrid.dataset.jsDebugDomainEnd = '1600000';
+        let activeSvg = svg;
+        const dispatch = (type, fraction, pointerId = 43) => {
+          const bounds = activeSvg.getBoundingClientRect();
+          return activeSvg.dispatchEvent(new PointerEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            pointerType: 'mouse',
+            pointerId,
+            button: 0,
+            buttons: type === 'pointerup' ? 0 : 1,
+            clientX: bounds.left + bounds.width * fraction,
+            clientY: bounds.top + bounds.height / 2,
+          }));
+        };
+        const originalRequest = requestJsDebugHistoryForCurrentDomain;
+        requestJsDebugHistoryForCurrentDomain = () => false;
+        try {
+          dispatch('pointermove', 0.4);
+          const hover = {
+            daemonsSurfaceActive: daemons.classList.contains('js-debug-graph--hovering'),
+            graphsSurfaceActive: graphs.classList.contains('js-debug-graph--hovering'),
+            daemonLineX: Number(line.getAttribute('x1')),
+            expectedLineX: jsDebugGraphGeometry.width * 0.4,
+            grayLine: getComputedStyle(line).stroke,
+            graphsGrayLine: getComputedStyle(graphsLine).stroke,
+            lineVisible: Number(getComputedStyle(line).opacity) === 1,
+          };
+          dispatch('pointerdown', 0.2);
+          dispatch('pointermove', 0.8);
+          const selection = {
+            daemonsSurfaceActive: daemons.classList.contains('js-debug-graph--selecting'),
+            graphsSurfaceActive: graphs.classList.contains('js-debug-graph--selecting'),
+            rectWidth: Number(selectionRect.getAttribute('width')),
+            expectedWidth: jsDebugGraphGeometry.width * 0.6,
+          };
+          dispatch('pointerup', 0.8);
+          const zoom = {...jsDebugGraphZoomDomain};
+          clearDebugGraphZoom();
+          activeSvg = document.querySelector('.js-debug-panel [data-js-debug-daemons-graph] .js-debug-line-chart');
+          if (!activeSvg) return {error: 'Daemons chart missing after resetting zoom'};
+          const chartRegion = activeSvg.closest('[data-js-debug-system-region="chart"]');
+          const beforeRefreshSvg = activeSvg;
+          dispatch('pointerdown', 0.2);
+          dispatch('pointermove', 0.4);
+          debugRuntimeState.graphChartLayout = 2;
+          refreshDebugSystemViews();
+          const refreshDeferred = panel.dataset.jsDebugSystemChartRefreshPending === 'true'
+            && chartRegion.querySelector('.js-debug-line-chart') === beforeRefreshSvg
+            && jsDebugGraphSelectionState !== null;
+          dispatch('pointercancel', 0.4);
+          const refreshFlushed = panel.dataset.jsDebugSystemChartRefreshPending !== 'true'
+            && chartRegion.querySelector('.js-debug-line-chart') !== beforeRefreshSvg
+            && jsDebugGraphSelectionState === null
+            && jsDebugGraphZoomDomain === null;
+          const cancel = {
+            zoomCommitted: jsDebugGraphZoomDomain !== null,
+            selectionCleared: jsDebugGraphSelectionState === null,
+            selectionRectCleared: !document.querySelector('[data-js-debug-daemons-graph]')?.classList.contains('js-debug-graph--selecting'),
+          };
+          activeSvg = document.querySelector('.js-debug-panel [data-js-debug-daemons-graph] .js-debug-line-chart');
+          dispatch('pointerdown', 0.2);
+          dispatch('pointermove', 0.8);
+          dispatch('lostpointercapture', 0.8, 44);
+          const mismatchedCapturePreserved = jsDebugGraphSelectionState !== null;
+          dispatch('lostpointercapture', 0.8);
+          const lostCapture = {
+            zoomCommitted: jsDebugGraphZoomDomain !== null,
+            selectionCleared: jsDebugGraphSelectionState === null,
+            selectionRectCleared: !document.querySelector('[data-js-debug-daemons-graph]')?.classList.contains('js-debug-graph--selecting'),
+          };
+          activeSvg = document.querySelector('.js-debug-panel [data-js-debug-daemons-graph] .js-debug-line-chart');
+          dispatch('pointerdown', 0.2);
+          dispatch('pointermove', 0.8);
+          jsDebugSystemState.payload = {ok: false, snapshot: {state: 'stale', reason_code: 'expired', age_seconds: 90, reason: 'fixture refusal'}};
+          refreshDebugSystemViews();
+          const typedRefusal = {
+            shown: document.querySelector('[data-js-debug-system-snapshot-state="stale"]') !== null,
+            selectionCleared: jsDebugGraphSelectionState === null,
+            svgDetached: !activeSvg.isConnected,
+          };
+          jsDebugSystemState.payload = {
+            ok: true, generated_at: Date.now() / 1000, server: {}, owner: {}, refresh: {}, search_index: {},
+            caches: {}, client_events: {}, chat: {}, cpu_budget: {},
+            local_services: {schema_version: 5, inventory: [], totals: {}, services: []},
+            top_endpoints: [], top_background_work: [],
+          };
+          renderDebugPanels({force: true});
+          activeSvg = document.querySelector('.js-debug-panel [data-js-debug-daemons-graph] .js-debug-line-chart');
+          dispatch('pointerdown', 0.2);
+          dispatch('pointermove', 0.8);
+          renderDebugPanels({force: true});
+          const fullPanelRefresh = {
+            selectionCleared: jsDebugGraphSelectionState === null,
+            oldSvgDetached: !activeSvg.isConnected,
+            newSvgPresent: document.querySelector('.js-debug-panel [data-js-debug-daemons-graph] .js-debug-line-chart') !== null,
+            zoomCommitted: jsDebugGraphZoomDomain !== null,
+          };
+          return {hover, selection, zoom, refreshDeferred, refreshFlushed, cancel, lostCapture, mismatchedCapturePreserved, typedRefusal, fullPanelRefresh};
+        } finally {
+          requestJsDebugHistoryForCurrentDomain = originalRequest;
+          clearDebugGraphZoom();
+        }
+        """
+    )
+    assert "error" not in result, result
+    assert result["hover"]["daemonsSurfaceActive"] is True, result
+    assert result["hover"]["graphsSurfaceActive"] is False, result
+    assert result["hover"]["lineVisible"] is True, result
+    assert result["hover"]["daemonLineX"] == pytest.approx(result["hover"]["expectedLineX"], abs=1), result
+    assert result["hover"]["grayLine"], result
+    assert result["hover"]["grayLine"] == result["hover"]["graphsGrayLine"], result
+    assert result["selection"]["daemonsSurfaceActive"] is True, result
+    assert result["selection"]["graphsSurfaceActive"] is False, result
+    assert result["selection"]["rectWidth"] == pytest.approx(result["selection"]["expectedWidth"], abs=1), result
+    assert result["zoom"]["startMs"] == pytest.approx(1120000, abs=2), result
+    assert result["zoom"]["endMs"] == pytest.approx(1480000, abs=2), result
+    assert result["refreshDeferred"] is True, result
+    assert result["refreshFlushed"] is True, result
+    assert result["cancel"] == {"zoomCommitted": False, "selectionCleared": True, "selectionRectCleared": True}, result
+    assert result["lostCapture"] == {"zoomCommitted": False, "selectionCleared": True, "selectionRectCleared": True}, result
+    assert result["mismatchedCapturePreserved"] is True, result
+    assert result["typedRefusal"] == {"shown": True, "selectionCleared": True, "svgDetached": True}, result
+    assert result["fullPanelRefresh"] == {"selectionCleared": True, "oldSvgDetached": True, "newSvgPresent": True, "zoomCommitted": False}, result
+
+
 def test_current_stats_cpu_stacks_host_binaries_and_the_daemon_chart_emphasizes_the_yolomux_line(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 8).until(lambda driver: driver.execute_script("return document.querySelector('.js-debug-panel [data-js-debug-graph]') !== null"))

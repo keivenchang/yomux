@@ -1733,20 +1733,23 @@ function debugGraphSeriesData(buckets) {
   });
 }
 
-function debugGraphResolutionLabelHtml(nowMs = Date.now()) {
+function debugGraphResolutionLabelHtml(nowMs = Date.now(), {focusKey = ''} = {}) {
   const domain = debugGraphDomain(nowMs);
   syncDebugGraphResolutionOverride(nowMs, {persist: true, domain});
   const resolutionSeconds = debugGraphRenderedResolutionSeconds(nowMs);
   const availableChoices = debugGraphAvailableResolutionChoices(domain, nowMs);
   const overrideSeconds = Number(debugRuntimeState.graphResolutionOverrideSeconds) || 0;
-  return `<label class="js-debug-resolution-label" data-js-debug-resolution data-js-debug-resolution-seconds="${esc(resolutionSeconds)}">${esc(t('debug.graph.control.resolution', {resolution: `${resolutionSeconds}s`}))}<select data-js-debug-resolution-override aria-label="${esc(t('debug.graph.control.resolution', {resolution: `${resolutionSeconds}s`}))}"><option value="0"${overrideSeconds === 0 ? ' selected' : ''}>AUTO</option>${availableChoices.map(value => `<option value="${value}"${overrideSeconds === value ? ' selected' : ''}>${value}s</option>`).join('')}</select></label>`;
+  const focusAttr = focusKey ? ` data-js-debug-system-focus-key="${esc(focusKey)}"` : '';
+  return `<label class="js-debug-resolution-label" data-js-debug-resolution data-js-debug-resolution-seconds="${esc(resolutionSeconds)}">${esc(t('debug.graph.control.resolution', {resolution: `${resolutionSeconds}s`}))}<select data-js-debug-resolution-override aria-label="${esc(t('debug.graph.control.resolution', {resolution: `${resolutionSeconds}s`}))}"${focusAttr}><option value="0"${overrideSeconds === 0 ? ' selected' : ''}>AUTO</option>${availableChoices.map(value => `<option value="${value}"${overrideSeconds === value ? ' selected' : ''}>${value}s</option>`).join('')}</select></label>`;
 }
 
-function debugGraphRangeControlsHtml(nowMs = Date.now()) {
+function debugGraphRangeControlsHtml(nowMs = Date.now(), {idPrefix = '', focusKeyPrefix = ''} = {}) {
   const activeRange = activeJsDebugGraphRangeSeconds(nowMs);
   const options = debugGraphAvailableRangeOptions(nowMs);
   if (!options.length) return '';
-  const sliderId = 'js-debug-range-options';
+  const sliderId = `js-debug-range-options${idPrefix ? `-${idPrefix}` : ''}`;
+  const sliderFocusAttr = focusKeyPrefix ? ` data-js-debug-system-focus-key="${esc(`${focusKeyPrefix}-range`)}"` : '';
+  const resetFocusAttr = focusKeyPrefix ? ` data-js-debug-system-focus-key="${esc(`${focusKeyPrefix}-range-reset`)}"` : '';
   const value = jsDebugGraphRangeOptionIndex(activeRange, nowMs);
   const zoomed = debugGraphZoomDomainValid();
   const domain = debugGraphDomain(nowMs);
@@ -1754,9 +1757,9 @@ function debugGraphRangeControlsHtml(nowMs = Date.now()) {
   const rangeLabel = zoomed ? debugGraphCompactRangeText(domain) : jsDebugGraphRangeLabel(activeRange, nowMs);
   const resetLabel = debugGraphZoomResetLabel();
   return `<div class="js-debug-range-slider-control${zoomed ? ' js-debug-range-slider-control--zoomed' : ''}" data-js-debug-range-control>
-    ${zoomed ? `<button type="button" class="js-debug-zoom-reset" data-js-debug-zoom-reset aria-label="${esc(resetLabel)}">${esc(resetLabel)}</button>` : ''}
+    ${zoomed ? `<button type="button" class="js-debug-zoom-reset" data-js-debug-zoom-reset aria-label="${esc(resetLabel)}"${resetFocusAttr}>${esc(resetLabel)}</button>` : ''}
     ${debugGraphRangePrefixVisible(zoomed) ? `<span class="js-debug-range-prefix" aria-hidden="true">${esc(debugGraphRangePrefixText())}</span>` : ''}
-    <input class="js-debug-range-slider" type="range" min="0" max="${esc(Math.max(0, options.length - 1))}" step="any" value="${esc(value)}" list="${esc(sliderId)}" data-js-debug-range-slider aria-label="${esc(t('debug.graph.control.timeRange'))}"${zoomed ? ' disabled aria-disabled="true"' : ''}>
+    <input class="js-debug-range-slider" type="range" min="0" max="${esc(Math.max(0, options.length - 1))}" step="any" value="${esc(value)}" list="${esc(sliderId)}" data-js-debug-range-slider aria-label="${esc(t('debug.graph.control.timeRange'))}"${sliderFocusAttr}${zoomed ? ' disabled aria-disabled="true"' : ''}>
     <datalist id="${esc(sliderId)}">${options.map((option, index) => `<option value="${esc(index)}" label="${esc(option.label)}" data-js-debug-range="${esc(option.seconds)}"></option>`).join('')}</datalist>
     <span class="js-debug-range-label${zoomed ? ' js-debug-range-label--zoomed' : ''}" data-js-debug-range-label${zoomed ? ` title="${esc(fullRangeLabel)}"` : ''}>${esc(rangeLabel)}</span>
   </div>`;
@@ -1791,8 +1794,8 @@ function debugGraphLayoutControlsHtml() {
   return `<div class="js-debug-chart-layout-control" role="group" aria-label="${esc(t('debug.graph.control.size'))}"><span>${esc(t('debug.graph.control.size'))}:</span>${['AUTO', 'S', 'M', 'L', 'MAX'].map((label, value) => `<button type="button" data-js-debug-chart-layout="${value}" aria-pressed="${debugRuntimeState.graphChartLayout === value ? 'true' : 'false'}">${label}</button>`).join('')}</div>`;
 }
 
-function debugGraphRangeResolutionControlsHtml(nowMs = Date.now()) {
-  return `<div class="js-debug-range-resolution-controls">${debugGraphRangeControlsHtml(nowMs)}${debugGraphResolutionLabelHtml(nowMs)}</div>`;
+function debugGraphRangeResolutionControlsHtml(nowMs = Date.now(), {idPrefix = '', focusKeyPrefix = ''} = {}) {
+  return `<div class="js-debug-range-resolution-controls">${debugGraphRangeControlsHtml(nowMs, {idPrefix, focusKeyPrefix})}${debugGraphResolutionLabelHtml(nowMs, {focusKey: focusKeyPrefix ? `${focusKeyPrefix}-resolution` : ''})}</div>`;
 }
 
 function debugGraphServiceLoadModeLabel(mode) {
@@ -6841,7 +6844,7 @@ function debugSystemDaemonsChartHtml() {
   const note = runtimeLoad
     ? 'Daemons load shows measured in-process occupancy; daemon memory shows retained process resident memory. Labels identify goroutines and SQLite cgo work; Unix child processes and OS threads remain in the expanded daemon details. The yolomux-go process CPU line is shown in CPU.'
     : 'Daemons load shows CPU use for local services; daemon memory shows retained process resident memory.';
-  return `<div class="js-debug-daemons-chart" data-js-debug-daemons-graph><div class="js-debug-chart-shell"><div class="js-debug-chart-grid" data-js-debug-chart-grid data-js-debug-chart-layout="${esc(debugRuntimeState.graphChartLayout)}" data-js-debug-domain-start="${esc(Math.floor(domain.startMs))}" data-js-debug-domain-end="${esc(Math.floor(domain.endMs))}">${charts}</div></div><p class="js-debug-roster-note" data-js-debug-daemons-chart-note>${esc(note)}</p></div>`;
+  return `<div class="js-debug-daemons-chart" data-js-debug-daemons-graph><div class="js-debug-daemons-controls">${debugGraphRangeResolutionControlsHtml(nowMs, {idPrefix: 'daemons', focusKeyPrefix: 'daemons'})}</div><div class="js-debug-chart-shell"><div class="js-debug-chart-grid" data-js-debug-chart-grid data-js-debug-chart-layout="${esc(debugRuntimeState.graphChartLayout)}" data-js-debug-domain-start="${esc(Math.floor(domain.startMs))}" data-js-debug-domain-end="${esc(Math.floor(domain.endMs))}">${charts}</div></div><p class="js-debug-roster-note" data-js-debug-daemons-chart-note>${esc(note)}</p></div>`;
 }
 
 // The six regions of the Daemons view, in the order a reader needs them. `debugSystemInnerHtml`
@@ -6996,17 +6999,26 @@ function refreshDebugSystemViews() {
     // below and `debugSystemInnerHtml` renders the state it was told.
     const payload = debugSystemSnapshotRefusal(jsDebugSystemState.payload) ? null : jsDebugSystemState.payload;
     const regions = view.querySelectorAll('[data-js-debug-system-region]');
+    const panel = view.closest('.js-debug-panel');
     // First render, or a view whose shell is not the current one: build the whole shell. Every
     // later render replaces only the regions whose GENERATED html changed -- the cache holds what
     // was generated, never `region.innerHTML`, because the browser's own serialization of the same
     // markup differs and would make every region look changed on the next poll.
     if (!payload || regions.length !== DEBUG_SYSTEM_REGIONS.length) {
+      if (debugGraphInteractionBelongsToPanel(panel)) {
+        delete panel.dataset.jsDebugSystemChartRefreshPending;
+        cancelDebugGraphSelection(panel);
+      }
       view.innerHTML = debugSystemInnerHtml();
       seedDebugSystemRenderedRegions(view, payload);
     } else {
       for (const region of regions) {
         const html = debugSystemRegionHtml(String(region.dataset.jsDebugSystemRegion || ''), payload);
         if (debugSystemRenderedRegions.get(region) === html) continue;
+        if (region.dataset.jsDebugSystemRegion === 'chart' && debugGraphInteractionBelongsToPanel(panel)) {
+          panel.dataset.jsDebugSystemChartRefreshPending = 'true';
+          continue;
+        }
         const openHeapStackDisclosures = new Set([...region.querySelectorAll('[data-heap-stack-disclosure][open]')].map(disclosure => disclosure.dataset.heapStackDisclosure));
         region.innerHTML = html;
         for (const disclosure of region.querySelectorAll('[data-heap-stack-disclosure]')) {
@@ -7239,7 +7251,6 @@ const DEBUG_SUBVIEWS = Object.freeze([
     html: () => `<div class="js-debug-subview js-debug-graph-view" ${debugSubViewAttrs('graph')}>${debugGraphHtml()}</div>`,
     render: (panel, options = {}) => refreshDebugGraphElement(panel.querySelector('[data-js-debug-graph]'), options),
     bind: panel => {
-      bindDebugGraphTouchSelection(panel);
       bindDebugCostSummaryTabButtons(panel.querySelector('[data-js-debug-graph]'));
     },
     activate: ({forceAgentStatus = true} = {}) => {
@@ -7252,7 +7263,6 @@ const DEBUG_SUBVIEWS = Object.freeze([
     id: 'cost',
     html: () => `<div class="js-debug-subview js-debug-cost-view" ${debugSubViewAttrs('cost')}><div class="preferences-scroll js-yocost-scroll"></div></div>`,
     render: renderYoCostPanel,
-    bind: bindYoCostPanel,
     activate: () => {
       renderYoCostPanels({force: true});
       if (jsDebugPricingRefreshState.inFlight) scheduleDebugCostPricingStatusRefresh();
@@ -7327,41 +7337,6 @@ function openYoCostTranscriptPreview(event) {
   return true;
 }
 
-function bindYoCostPanel(panel) {
-  if (!panel) return null;
-  return bindOnce(panel, 'yo-cost-panel', () => {
-    const scope = createLifecycleScope();
-    const disposeTouchSelection = bindDebugGraphTouchSelection(panel);
-    scope.replace('touch-selection', disposeTouchSelection, dispose => dispose?.());
-    scope.ownEvent('scroll', panel, 'scroll', event => {
-    if (!event.target?.matches?.('.js-debug-cost-table-wrap')) return;
-    panel.dataset.jsDebugCostLastScrollMs = String(Date.now());
-  }, {capture: true, passive: true});
-    scope.ownEvent('pointerdown', panel, 'pointerdown', event => {
-    if (handleDebugGraphControlEvent(event, panel)) return;
-    handleDebugGraphPointerDown(event, panel);
-  });
-    scope.ownEvent('pointermove', panel, 'pointermove', event => { handleDebugGraphPointerMove(event, panel); });
-    scope.ownEvent('pointerleave', panel, 'pointerleave', () => { debugGraphClearInteractionLinesUnlessPinned(panel); });
-    scope.ownEvent('pointerup', panel, 'pointerup', event => {
-    if (handleDebugGraphControlEvent(event, panel)) return;
-    handleDebugGraphPointerUp(event, panel);
-  });
-    scope.ownEvent('pointercancel', panel, 'pointercancel', event => {
-    handleDebugGraphControlEvent(event, panel);
-    handleDebugGraphPointerCancel(event, panel);
-  });
-    scope.ownEvent('input', panel, 'input', event => { handleDebugGraphControlEvent(event, panel); });
-    scope.ownEvent('change', panel, 'change', event => { handleDebugGraphControlEvent(event, panel); });
-    scope.ownEvent('click', panel, 'click', event => {
-    if (handleDebugGraphControlEvent(event, panel)) return;
-    if (typeof openExternalLinkFromEvent === 'function' && openExternalLinkFromEvent(event, panel)) return;
-    openYoCostTranscriptPreview(event);
-    });
-    return () => scope.dispose('yo-cost-panel-unbound');
-  });
-}
-
 function debugCostAgeRefreshDelayMs(randomValue = Math.random()) {
   return 3000 + Math.floor(Math.max(0, Math.min(1, Number(randomValue) || 0)) * 7000);
 }
@@ -7398,7 +7373,6 @@ function renderYoCostPanel(panel, {force = false} = {}) {
     ],
   });
   delete panel.dataset.jsDebugGraphRefreshPending;
-  bindYoCostPanel(panel);
   commitJsDebugCurrentStatsPaint();
   const delayMs = debugCostAgeRefreshDelayMs();
   jsDebugCostPanelNextRefreshAtMs = nowMs + delayMs;
@@ -7478,6 +7452,7 @@ function renderDebugPanels(options = {}) {
   for (const panel of document.querySelectorAll('.js-debug-panel')) {
     const body = panel.querySelector('.js-debug-body');
     if (body && (options.force === true || !body.querySelector('[data-js-debug-log]'))) {
+      if (debugGraphInteractionBelongsToPanel(panel)) cancelDebugGraphSelection(panel);
       reconcilePanelBody({
         body,
         html: `${panelToastStackHtml(debugPaneItemId)}<div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`,
@@ -8066,8 +8041,20 @@ function debugGraphPointerRatioForEvent(event) {
   return debugGraphPointerRatioFromRect(event.clientX, svg.getBoundingClientRect());
 }
 
-function debugGraphSetInteractionLines(panel, ratio) {
-  const graph = panel?.querySelector?.('[data-js-debug-graph], [data-js-debug-daemons-graph], [data-js-yocost-graphs]');
+function debugGraphSurface(panel, target = null) {
+  if (target) {
+    const surface = target.closest?.('[data-js-debug-graph], [data-js-debug-daemons-graph], [data-js-yocost-graphs]');
+    return surface && panel?.contains?.(surface) ? surface : null;
+  }
+  return panel?.querySelector?.('[data-js-debug-graph], [data-js-debug-daemons-graph], [data-js-yocost-graphs]') || null;
+}
+
+function debugGraphSetInteractionLines(panel, ratio, graph = null) {
+  if (!graph) {
+    graph = jsDebugGraphSelectionState?.panel === panel
+      ? jsDebugGraphSelectionState.graph
+      : debugGraphSurface(panel);
+  }
   if (!graph || ratio == null) return;
   const x = (Math.max(0, Math.min(1, Number(ratio))) * jsDebugGraphGeometry.width).toFixed(1);
   graph.classList.add('js-debug-graph--hovering');
@@ -8096,9 +8083,10 @@ function debugGraphSetHoverLegendItems(chart, timestamp) {
 function debugGraphSetHoverTooltip(panel, event, ratio) {
   const svg = event?.target?.closest?.('.js-debug-line-chart');
   const chart = svg?.closest?.('[data-js-debug-chart]');
+  const graph = debugGraphSurface(panel, svg);
   const tooltip = chart?.querySelector?.('[data-js-debug-hover-tooltip]');
   if (!svg || !chart || !tooltip || ratio == null) return;
-  const domain = debugGraphGridDomain(panel);
+  const domain = debugGraphGridDomain(panel, graph);
   const spanMs = Number(domain.endMs) - Number(domain.startMs);
   if (!Number.isFinite(spanMs) || spanMs <= 0) return;
   const timestamp = Number(domain.startMs) + (Math.max(0, Math.min(1, Number(ratio))) * spanMs);
@@ -8131,12 +8119,13 @@ function debugGraphSetHoverTooltip(panel, event, ratio) {
   tooltip.style.top = `${top}px`;
 }
 
-function debugGraphClearInteractionLines(panel) {
+function debugGraphClearInteractionLines(panel, graph = null) {
   if (jsDebugGraphSelectionState) return;
-  const graph = panel?.querySelector?.('[data-js-debug-graph], [data-js-debug-daemons-graph], [data-js-yocost-graphs]');
-  if (graph) graph.classList.remove('js-debug-graph--hovering');
-  panel?.querySelectorAll?.('[data-js-debug-hover-tooltip]').forEach(tooltip => { tooltip.hidden = true; });
-  panel?.querySelectorAll?.('[data-js-debug-legend-item--hovered]').forEach(item => item.classList.remove('js-debug-legend-item--hovered'));
+  const surfaces = graph ? [graph] : panel?.querySelectorAll?.('.js-debug-graph--hovering') || [];
+  surfaces.forEach(surface => surface.classList.remove('js-debug-graph--hovering'));
+  const owner = graph || panel;
+  owner?.querySelectorAll?.('[data-js-debug-hover-tooltip]').forEach(tooltip => { tooltip.hidden = true; });
+  owner?.querySelectorAll?.('[data-js-debug-legend-item--hovered]').forEach(item => item.classList.remove('js-debug-legend-item--hovered'));
 }
 
 function debugGraphClearInteractionLinesUnlessPinned(panel) {
@@ -8166,8 +8155,12 @@ if (typeof document !== 'undefined' && document?.addEventListener) {
   document.addEventListener('pointerdown', handleDebugGraphOutsideTapDismiss, true);
 }
 
-function debugGraphSetSelectionRects(panel, startRatio, endRatio) {
-  const graph = panel?.querySelector?.('[data-js-debug-graph], [data-js-debug-daemons-graph], [data-js-yocost-graphs]');
+function debugGraphSetSelectionRects(panel, startRatio, endRatio, graph = null) {
+  if (!graph) {
+    graph = jsDebugGraphSelectionState?.panel === panel
+      ? jsDebugGraphSelectionState.graph
+      : debugGraphSurface(panel);
+  }
   if (!graph) return;
   const start = Math.max(0, Math.min(1, Number(startRatio)));
   const end = Math.max(0, Math.min(1, Number(endRatio)));
@@ -8180,18 +8173,19 @@ function debugGraphSetSelectionRects(panel, startRatio, endRatio) {
   });
 }
 
-function debugGraphClearSelectionRects(panel) {
-  const graph = panel?.querySelector?.('[data-js-debug-graph], [data-js-debug-daemons-graph], [data-js-yocost-graphs]');
-  if (!graph) return;
-  graph.classList.remove('js-debug-graph--selecting');
-  graph.querySelectorAll('[data-js-debug-selection-rect]').forEach(rect => {
-    rect.setAttribute('x', '0');
-    rect.setAttribute('width', '0');
+function debugGraphClearSelectionRects(panel, graph = null) {
+  const graphs = graph ? [graph] : panel?.querySelectorAll?.('.js-debug-graph--selecting') || [];
+  graphs.forEach(surface => {
+    surface.classList.remove('js-debug-graph--selecting');
+    surface.querySelectorAll('[data-js-debug-selection-rect]').forEach(rect => {
+      rect.setAttribute('x', '0');
+      rect.setAttribute('width', '0');
+    });
   });
 }
 
-function debugGraphGridDomain(panel) {
-  const grid = panel?.querySelector?.('[data-js-debug-chart-grid]');
+function debugGraphGridDomain(panel, graph = null) {
+  const grid = (graph || debugGraphSurface(panel))?.querySelector?.('[data-js-debug-chart-grid]');
   const startMs = Number(grid?.dataset?.jsDebugDomainStart);
   const endMs = Number(grid?.dataset?.jsDebugDomainEnd);
   if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return debugGraphDomain();
@@ -8218,6 +8212,11 @@ function flushDeferredDebugGraphInteractionRefresh(panel) {
   if (panel.matches?.('.js-debug-panel') && panel.dataset.jsDebugGraphRefreshPending === 'true') {
     delete panel.dataset.jsDebugGraphRefreshPending;
     flushed = renderYoCostPanels({force: true}) || flushed;
+  }
+  if (panel.matches?.('.js-debug-panel') && panel.dataset.jsDebugSystemChartRefreshPending === 'true') {
+    delete panel.dataset.jsDebugSystemChartRefreshPending;
+    refreshDebugSystemViews();
+    flushed = true;
   }
   return flushed;
 }
@@ -8268,7 +8267,7 @@ function handleDebugGraphTouchMove(event, panel) {
   if (decision === 'scroll') {
     clearDebugGraphTouchCandidate(candidate);
     jsDebugGraphLastPointerType = 'mouse';
-    debugGraphClearInteractionLines(panel);
+    debugGraphClearInteractionLines(panel, candidate.graph);
     flushDeferredDebugGraphInteractionRefresh(panel);
   }
   return false;
@@ -8287,12 +8286,13 @@ function startDebugGraphSelection(candidate, event = null) {
   if (!candidate) return false;
   clearDebugGraphTouchCandidate(candidate);
   if (event?.cancelable !== false) event?.preventDefault?.();
-  const {panel, svg, pointerId, rect, domain, startRatio, currentRatio} = candidate;
+  const {panel, graph, svg, pointerId, rect, domain, startRatio, currentRatio} = candidate;
   if (pointerId != null && typeof svg?.setPointerCapture === 'function') {
     try { svg.setPointerCapture(pointerId); } catch (_) { /* capture is best-effort */ }
   }
   jsDebugGraphSelectionState = {
     panel,
+    graph,
     svg,
     pointerId,
     pointerType: candidate.pointerType,
@@ -8302,8 +8302,8 @@ function startDebugGraphSelection(candidate, event = null) {
     currentRatio,
     resolutionMs: candidate.resolutionMs,
   };
-  debugGraphSetInteractionLines(panel, currentRatio);
-  debugGraphSetSelectionRects(panel, startRatio, currentRatio);
+  debugGraphSetInteractionLines(panel, currentRatio, graph);
+  debugGraphSetSelectionRects(panel, startRatio, currentRatio, graph);
   return true;
 }
 
@@ -8314,13 +8314,16 @@ function handleDebugGraphPointerDown(event, panel) {
   if (pointerType !== 'touch') jsDebugGraphLastPointerType = pointerType;
   if (document.activeElement?.closest?.('.js-debug-graph-controls, [data-js-debug-range-control]')) document.activeElement.blur?.();
   const svg = event.target.closest('.js-debug-line-chart');
+  const graph = debugGraphSurface(panel, svg);
+  if (!graph) return false;
   const candidate = {
     panel,
+    graph,
     svg,
     pointerId: event.pointerId,
     pointerType,
     rect: svg.getBoundingClientRect(),
-    domain: debugGraphGridDomain(panel),
+    domain: debugGraphGridDomain(panel, graph),
     startRatio: ratio,
     currentRatio: ratio,
     startClientX: Number(event.clientX),
@@ -8338,7 +8341,7 @@ function handleDebugGraphPointerDown(event, panel) {
       if (candidate !== jsDebugGraphTouchCandidateState) return;
       if (Math.abs(candidate.currentClientY - candidate.startClientY) < jsDebugGraphTouchArmDistancePx) startDebugGraphSelection(candidate);
     }, jsDebugGraphTouchHoldMs);
-    debugGraphSetInteractionLines(panel, ratio);
+    debugGraphSetInteractionLines(panel, ratio, graph);
   } else {
     event.preventDefault();
     startDebugGraphSelection(candidate, event);
@@ -8364,11 +8367,11 @@ function handleDebugGraphPointerMove(event, panel) {
     } else if (decision === 'scroll') {
       clearDebugGraphTouchCandidate(candidate);
       jsDebugGraphLastPointerType = 'mouse';
-      debugGraphClearInteractionLines(panel);
+      debugGraphClearInteractionLines(panel, candidate.graph);
       flushDeferredDebugGraphInteractionRefresh(panel);
       return;
     } else {
-      debugGraphSetInteractionLines(panel, ratio);
+      debugGraphSetInteractionLines(panel, ratio, candidate.graph);
       debugGraphSetHoverTooltip(panel, event, ratio);
       return;
     }
@@ -8378,14 +8381,14 @@ function handleDebugGraphPointerMove(event, panel) {
     const ratio = debugGraphSelectionRatioForEvent(event);
     if (ratio == null) return;
     jsDebugGraphSelectionState.currentRatio = ratio;
-    debugGraphSetInteractionLines(panel, ratio);
+    debugGraphSetInteractionLines(panel, ratio, jsDebugGraphSelectionState.graph);
     debugGraphSetHoverTooltip(panel, event, ratio);
-    debugGraphSetSelectionRects(panel, jsDebugGraphSelectionState.startRatio, ratio);
+    debugGraphSetSelectionRects(panel, jsDebugGraphSelectionState.startRatio, ratio, jsDebugGraphSelectionState.graph);
     return;
   }
   const ratio = debugGraphPointerRatioForEvent(event);
   if (ratio == null) return;
-  debugGraphSetInteractionLines(panel, ratio);
+  debugGraphSetInteractionLines(panel, ratio, debugGraphSurface(panel, event?.target));
   debugGraphSetHoverTooltip(panel, event, ratio);
 }
 
@@ -8395,7 +8398,7 @@ function handleDebugGraphPointerUp(event, panel, {useEventRatio = true} = {}) {
     clearDebugGraphTouchCandidate(candidate);
     jsDebugGraphLastPointerType = 'touch';
     const ratio = debugGraphPointerRatioFromRect(event.clientX, candidate.rect);
-    if (ratio != null) debugGraphSetInteractionLines(panel, ratio);
+    if (ratio != null) debugGraphSetInteractionLines(panel, ratio, candidate.graph);
     flushDeferredDebugGraphInteractionRefresh(panel);
     return;
   }
@@ -8408,7 +8411,7 @@ function handleDebugGraphPointerUp(event, panel, {useEventRatio = true} = {}) {
   if (ratio != null) selection.currentRatio = ratio;
   const start = Math.max(0, Math.min(1, Number(selection.startRatio)));
   const end = Math.max(0, Math.min(1, Number(selection.currentRatio)));
-  debugGraphClearSelectionRects(panel);
+  debugGraphClearSelectionRects(panel, selection.graph);
   jsDebugGraphSelectionState = null;
   const minRatio = Math.min(start, end);
   const maxRatio = Math.max(start, end);
@@ -8428,7 +8431,7 @@ function handleDebugGraphPointerUp(event, panel, {useEventRatio = true} = {}) {
     requestJsDebugHistoryForCurrentDomain();
     for (const graph of document.querySelectorAll('[data-js-debug-graph]')) syncDebugGraphControls(graph);
   } else {
-    debugGraphSetInteractionLines(panel, end);
+    debugGraphSetInteractionLines(panel, end, selection.graph);
   }
   // Every pointer-up ends this interaction, so release the repaint it deferred. The zoom branch
   // previously stranded the pending flag when its non-forced refresh hit the render throttle.
@@ -8437,31 +8440,29 @@ function handleDebugGraphPointerUp(event, panel, {useEventRatio = true} = {}) {
 
 function handleDebugGraphPointerCancel(event, panel) {
   const selection = jsDebugGraphSelectionState;
-  const matchingPointer = selection?.pointerId == null
-    || event?.pointerId == null
-    || selection.pointerId === event.pointerId;
-  if (selection?.panel === panel && matchingPointer) {
-    handleDebugGraphPointerUp(event, panel, {useEventRatio: false});
-    return;
-  }
+  const candidate = jsDebugGraphTouchCandidateState;
+  const interaction = selection?.panel === panel ? selection : candidate?.panel === panel ? candidate : null;
+  if (!interaction) return;
+  if (interaction.pointerId != null && event?.pointerId != null && interaction.pointerId !== event.pointerId) return;
   cancelDebugGraphSelection(panel);
 }
 
 function cancelDebugGraphSelection(panel) {
   let interactionEnded = false;
-  if (jsDebugGraphTouchCandidateState?.panel === panel) {
-    clearDebugGraphTouchCandidate();
+  const candidate = jsDebugGraphTouchCandidateState;
+  if (candidate?.panel === panel) {
+    clearDebugGraphTouchCandidate(candidate);
     jsDebugGraphLastPointerType = 'mouse';
-    debugGraphClearInteractionLines(panel);
+    debugGraphClearInteractionLines(panel, candidate.graph);
     interactionEnded = true;
   }
   const selection = jsDebugGraphSelectionState;
   if (selection?.panel === panel) {
+    jsDebugGraphSelectionState = null;
     if (selection.pointerId != null && typeof selection.svg?.releasePointerCapture === 'function') {
       try { selection.svg.releasePointerCapture(selection.pointerId); } catch (_) { /* already released */ }
     }
-    debugGraphClearSelectionRects(panel);
-    jsDebugGraphSelectionState = null;
+    debugGraphClearSelectionRects(panel, selection.graph);
     interactionEnded = true;
   }
   if (interactionEnded) flushDeferredDebugGraphInteractionRefresh(panel);
@@ -8557,6 +8558,7 @@ function bindDebugPanel(panel) {
   if (!panel) return null;
   return bindOnce(panel, 'debug-panel', () => {
     const scope = createLifecycleScope();
+    bindDebugGraphTouchSelection(panel);
     for (const view of debugPanelSubviewDescriptors()) view.bind(panel);
     syncDebugSubviewActivation({pollNow: true});
     const disposeActions = bindActionDispatcher(panel, {
@@ -8568,6 +8570,10 @@ function bindDebugPanel(panel) {
     if (!graph) return;
     setTimeout(() => { flushDeferredDebugGraphRefresh(graph); }, 0);
   });
+    scope.ownEvent('scroll', panel, 'scroll', event => {
+    if (!event.target?.matches?.('.js-debug-cost-table-wrap')) return;
+    panel.dataset.jsDebugCostLastScrollMs = String(Date.now());
+  }, {capture: true, passive: true});
     scope.ownEvent('pointerdown', panel, 'pointerdown', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     handleDebugGraphPointerDown(event, panel);
@@ -8586,6 +8592,9 @@ function bindDebugPanel(panel) {
     handleDebugGraphControlEvent(event, panel);
     handleDebugGraphPointerCancel(event, panel);
   });
+    scope.ownEvent('lostpointercapture', panel, 'lostpointercapture', event => {
+    handleDebugGraphPointerCancel(event, panel);
+  });
     scope.ownEvent('input', panel, 'input', event => {
     handleDebugGraphControlEvent(event, panel);
   });
@@ -8594,6 +8603,8 @@ function bindDebugPanel(panel) {
   });
     scope.ownEvent('click', panel, 'click', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
+    if (typeof openExternalLinkFromEvent === 'function' && openExternalLinkFromEvent(event, panel)) return;
+    if (openYoCostTranscriptPreview(event)) return;
     const heapCapture = event.target.closest('[data-js-debug-heap-capture]');
     if (heapCapture && panel.contains(heapCapture)) {
       event.preventDefault();

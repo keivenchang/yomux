@@ -28,6 +28,8 @@ This page keeps the durable user-visible rules. The selected backend's capabilit
 
 - Render only values supplied by the active backend. Keep loading, pending, unavailable, failed, and valid no-data states distinct.
 - Range and resolution follow server capabilities and accepted snapshots. The browser does not aggregate data or fabricate missing values.
+- System -> Daemons exposes the shared capability-backed Range and Resolution controls; changes apply to the shared YO!stats history selection.
+- Graph hover lines, selection highlights, and drag zoom use the shared interaction owner. The chart under the pointer owns its gray vertical line and zoom domain throughout the gesture.
 - Keep Daemons Load out of Graphs; show runtime-owner occupancy only in System -> Daemons, with process RSS in its separate memory chart.
 - Go process history distinguishes host, boot, PID, process start, and owner so concurrent instances and restarted processes do not merge. Labels and details show PID, port, executable, and parent PID when available. Keep older samples without recoverable process identity visible as legacy; do not assign them a current PID. Process CPU and elapsed collector occupancy remain separate measurements.
 - Daemons charts use cumulative filled areas with distinct color/pattern pairs and fully visible, wrapping legends. Repeated colors use vertical lines or dots that remain visible in the legend; do not use horizontal or diagonal hatch marks. Cards grow with their legends instead of scrolling or clipping them. Nested occupancy measurements must not be presented as additional independent work.

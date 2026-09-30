@@ -980,6 +980,15 @@
   flex: 1 1 auto;
   min-inline-size: 12rem;
 }
+.js-debug-daemons-controls {
+  display: flex;
+  min-width: 0;
+  margin-block-end: var(--space-8);
+}
+.js-debug-daemons-controls > .js-debug-range-resolution-controls {
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+}
 .js-debug-chart-toggle-control {
   flex: 0 0 auto;
   position: relative;

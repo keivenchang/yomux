@@ -704,6 +704,21 @@ test('Daemons load includes bounded Go runtime-owner occupancy lines', () => {
   ]);
 });
 
+test('Daemons exposes the shared range and resolution controls with panel focus keys', () => {
+  const rangeControls = sourceFunction('debugGraphRangeControlsHtml', 'debugGraphZoomResetLabel');
+  const resolutionControls = sourceFunction('debugGraphResolutionLabelHtml', 'debugGraphRangeControlsHtml');
+  const sharedControls = sourceFunction('debugGraphRangeResolutionControlsHtml', 'debugGraphServiceLoadModeLabel');
+  const daemonsChart = sourceFunction('debugSystemDaemonsChartHtml', 'debugSystemAnnounceHtml');
+  assert.match(rangeControls, /idPrefix = '', focusKeyPrefix = ''/);
+  assert.match(rangeControls, /js-debug-range-options\$\{idPrefix \? `-\$\{idPrefix\}` : ''\}/);
+  assert.match(rangeControls, /data-js-debug-system-focus-key=.*focusKeyPrefix/);
+  assert.match(resolutionControls, /data-js-debug-system-focus-key=.*focusKey/);
+  assert.match(sharedControls, /debugGraphRangeControlsHtml\(nowMs, \{idPrefix, focusKeyPrefix\}\)/);
+  assert.match(sharedControls, /debugGraphResolutionLabelHtml\(nowMs, \{focusKey:/);
+  assert.match(daemonsChart, /debugGraphRangeResolutionControlsHtml\(nowMs, \{idPrefix: 'daemons', focusKeyPrefix: 'daemons'\}\)/);
+  assert.match(css, /\.js-debug-daemons-controls > \.js-debug-range-resolution-controls[\s\S]*flex-wrap: wrap;/);
+});
+
 test('Daemons load gives Go thread and child rows stable labels', () => {
   const source = sourceFunction('debugGraphServiceLoadLabel', 'debugGraphServiceLoadSeriesDefs');
   const context = {String};
@@ -3624,10 +3639,12 @@ test('active touch charts preserve vertical scrolling and arm only deliberate zo
     function refreshDebugGraphSurfaces() { refreshCount += 1; }
     function requestJsDebugHistoryForCurrentDomain() {}
     function syncDebugGraphControls() {}
-    const panel = {};
+    const graph = {};
+    const panel = {contains: node => node === graph};
     const svg = {
       captures: 0,
       releases: 0,
+      closest: selector => selector.includes('[data-js-debug-graph]') ? graph : null,
       getBoundingClientRect: () => ({left: 0, width: 1000}),
       setPointerCapture() { this.captures += 1; },
       releasePointerCapture() { this.releases += 1; },
@@ -3681,10 +3698,14 @@ test('active touch charts preserve vertical scrolling and arm only deliberate zo
     cancelDebugGraphSelection(panel);
     const cancelPrevented = {count: 0};
     handleDebugGraphPointerDown(pointer('touch', 100, 100, 0, cancelPrevented), panel);
-    const touchClaimed = handleDebugGraphTouchMove(touchMove(130, 108, 100, cancelPrevented), panel);
-    handleDebugGraphPointerMove(pointer('touch', 700, 108, 150, cancelPrevented), panel);
-    handleDebugGraphPointerCancel(pointer('touch', 0, 0, 151, cancelPrevented), panel);
+    handleDebugGraphPointerMove(pointer('touch', 100, 100, 200, cancelPrevented), panel);
+    const cancelArmedSelection = jsDebugGraphSelectionState !== null;
+    handleDebugGraphPointerMove(pointer('touch', 700, 102, 250, cancelPrevented), panel);
+    handleDebugGraphPointerCancel({...pointer('touch', 0, 0, 251, cancelPrevented), pointerId: 2}, panel);
+    const mismatchedCancelPreservedSelection = jsDebugGraphSelectionState !== null;
+    handleDebugGraphPointerCancel(pointer('touch', 0, 0, 251, cancelPrevented), panel);
     const cancelCommitted = jsDebugGraphZoomDomain !== null;
+    const cancelClearedSelection = jsDebugGraphSelectionState === null;
     jsDebugGraphZoomDomain = null;
     const nativeScrollPrevented = {count: 0};
     handleDebugGraphPointerDown(pointer('touch', 100, 100, 0, nativeScrollPrevented), panel);
@@ -3699,8 +3720,10 @@ test('active touch charts preserve vertical scrolling and arm only deliberate zo
       heldZoomed,
       mouseImmediate,
       mousePrevented: mousePrevented.count,
-      touchClaimed,
+      cancelArmedSelection,
+      mismatchedCancelPreservedSelection,
       cancelCommitted,
+      cancelClearedSelection,
       cancelPrevented: cancelPrevented.count,
       verticalClaimed,
       nativeScrollPrevented: nativeScrollPrevented.count,
@@ -3719,9 +3742,11 @@ test('active touch charts preserve vertical scrolling and arm only deliberate zo
   assert.equal(context.result.heldZoomed, true);
   assert.equal(context.result.mouseImmediate, true);
   assert.ok(context.result.mousePrevented >= 1);
-  assert.equal(context.result.touchClaimed, false);
+  assert.equal(context.result.cancelArmedSelection, true);
+  assert.equal(context.result.mismatchedCancelPreservedSelection, true);
   assert.equal(context.result.cancelCommitted, false);
-  assert.equal(context.result.cancelPrevented, 0);
+  assert.equal(context.result.cancelClearedSelection, true);
+  assert.ok(context.result.cancelPrevented >= 1);
   assert.equal(context.result.verticalClaimed, false);
   assert.equal(context.result.nativeScrollPrevented, 0);
   assert.ok(context.result.refreshCount >= 1);
@@ -4689,7 +4714,12 @@ test('stats and cost renders defer while a chart gesture owns their live DOM', (
   `, costContext);
   assert.deepEqual({...costContext.result}, {rendered: false, pending: 'true'});
   assert.match(sourceFunction('handleDebugGraphPointerUp', 'handleDebugGraphPointerCancel'), /flushDeferredDebugGraphInteractionRefresh/);
-  assert.match(sourceFunction('handleDebugGraphPointerCancel', 'cancelDebugGraphSelection'), /useEventRatio: false/);
+  assert.match(sourceFunction('handleDebugGraphPointerCancel', 'cancelDebugGraphSelection'), /cancelDebugGraphSelection\(panel\)/);
+  const panelBinding = sourceFunction('bindDebugPanel', 'registerDebugRuntimeFacade');
+  assert.equal((panelBinding.match(/scope\.ownEvent\('pointerdown'/g) || []).length, 1);
+  assert.match(panelBinding, /bindDebugGraphTouchSelection\(panel\)/);
+  assert.match(panelBinding, /lostpointercapture/);
+  assert.doesNotMatch(source, /function bindYoCostPanel\(/);
 });
 
 test('API SSE log preserves reader position through updates and forced rebuilds', () => {
