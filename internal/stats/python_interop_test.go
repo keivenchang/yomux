@@ -1065,7 +1065,10 @@ json.dump(payload, sys.stdout, sort_keys=True, separators=(",", ":"))
 	if err := os.WriteFile(pythonScript, []byte(script), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	fixtures := []struct {
 		name       string
 		provider   string

@@ -4798,6 +4798,15 @@ async function runLayoutAsyncSuite() {
     assert.ok(/function handleClientPushEvent\(type, payload = \{\}, envelope = \{\}\)[\s\S]*repairClientEventResources\(repairResources, envelope\)[\s\S]*clientEventEnvelopeIsCurrent\(envelope, payload\)/.test(source), 'the delivered overflow metadata is consumed before stale-frame filtering');
   });
 
+  await testAsync('dedicated Tabber pane demands transcript metadata over client events', async () => {
+    const api = loadYolomux('', ['1']);
+    assert.equal(await api.openFileSurfacePane('__tabber__'), true);
+    const demand = api.clientEventDemandDescriptorForTest();
+    assert.ok(demand.active_panes.includes('__tabber__'), `the dedicated Tabber pane is active: ${JSON.stringify(demand)}`);
+    assert.ok(demand.channels.includes('activity'), `Tabber receives activity updates: ${JSON.stringify(demand)}`);
+    assert.ok(demand.channels.includes('transcripts'), `Tabber receives transcript metadata updates: ${JSON.stringify(demand)}`);
+  });
+
   await testAsync('open event logs demand and refresh only through their SSE invalidation', async () => {
     const api = loadYolomux('', ['1']);
     const requests = [];
@@ -7352,6 +7361,30 @@ async function runLayoutAsyncSuite() {
     await flushAsyncWork();
   });
 
+  await testAsync('a failed pushed Finder expansion settles when the root listing is absent', async () => {
+    const api = loadYolomux('', ['1']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.leafNode('left');
+    slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
+    api.setLayoutSlotsForTest(slots);
+    api.setFileExplorerRootForTest('/repo');
+    api.setFileExplorerExpandedForTest(['/repo/bin']);
+    const tree = api.fileExplorerTreeForTest();
+    api.renderTreeChildrenForTest(tree, '/repo', [{name: 'bin', kind: 'dir'}]);
+    const row = tree.querySelector('.file-tree-row[data-path="/repo/bin"]');
+    assert.equal(row.classList.contains('loading-children'), true);
+    assert.deepStrictEqual([...api.fileExplorerFsResourceKeysForTest()], [], 'the restored tree has no cached root listing');
+
+    await api.refreshFileExplorerFromPushForTest({
+      mode: 'diff', token: 'failed-child-only',
+      directories: [{path: '/repo/bin', ok: false, status: 403, error: 'permission denied'}],
+    });
+    assert.equal(row.classList.contains('loading-children'), false, 'the failed child stops loading without a root response');
+    assert.equal(row.getAttribute('aria-expanded'), 'false');
+    assert.deepStrictEqual([...api.fileExplorerExpandedForTest()], [], 'the failed restored expansion is retired');
+    assert.ok(tree.querySelector('[role="status"]'), 'the child failure remains visible');
+  });
+
   await testAsync('a cached Finder session switch releases the fast-first metadata gate', async () => {
     const api = loadYolomux('', ['1', '2']);
     const slots = api.emptyLayoutSlots();
@@ -8724,6 +8757,33 @@ async function runLayoutAsyncSuite() {
       assert.deepStrictEqual(canonical(tabberState.root_surfaces), [], 'visible Tabber retains exact empty root-surface coverage');
       assert.equal(Object.prototype.hasOwnProperty.call(tabberState, 'session_files'), false, 'visible Tabber does not register session-files work');
     });
+
+    {
+      const api = loadYolomux('', ['1']);
+      const slots = api.emptyLayoutSlots();
+      slots[api.layoutTreeKey] = api.leafNode('left');
+      slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
+      api.setLayoutSlotsForTest(slots);
+      api.setFileExplorerRootForTest('/repo');
+      api.setFileExplorerExpandedForTest(['/repo/bin', '/repo/bin/2011']);
+      const tree = api.fileExplorerTreeForTest();
+      const rootEntries = [{name: 'bin', kind: 'dir'}];
+      api.renderTreeChildrenForTest(tree, '/repo', rootEntries);
+      const row = tree.querySelector('.file-tree-row[data-path="/repo/bin"]');
+      assert.equal(row.classList.contains('loading-children'), true, 'a cold reload marks a restored directory as pending');
+      await api.refreshFileExplorerFromPushForTest({
+        mode: 'full',
+        token: 'cold-reload-baseline',
+        directories: [
+          {path: '/repo', ok: true, status: 200, data: {path: '/repo', entries: rootEntries}},
+          {path: '/repo/bin', ok: false, status: 403, error: 'permission denied'},
+        ],
+      });
+      assert.equal(row.getAttribute('aria-expanded'), 'false', 'a failed restored expansion settles closed');
+      assert.equal(row.classList.contains('loading-children'), false, 'a denied restored listing stops the expansion spinner');
+      assert.match(tree.querySelector('.file-tree-status-error')?.textContent || '', /permission denied/, 'the failed expansion shows its listing error');
+      assert.equal(api.fileExplorerExpandedForTest().includes('/repo/bin'), false, 'failed paths are removed from saved expansion state');
+    }
 
     {
       const api = loadYolomux('', ['1']);

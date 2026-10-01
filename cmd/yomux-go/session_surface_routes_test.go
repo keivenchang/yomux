@@ -339,19 +339,94 @@ func TestTmuxSignalPaneAgentRecognizesCodexBelowNodeLauncher(t *testing.T) {
 	}
 }
 
-func TestPaneAgentProcessPrefersClassifiedNativeChild(t *testing.T) {
-	s := &server{processEntriesFn: func() ([]procEntry, error) {
-		return []procEntry{
-			{PID: 20, PPID: 10, Command: "node /home/test/.local/bin/codex", Executable: "/usr/bin/node"},
-			{PID: 21, PPID: 20, Command: "/home/test/.local/bin/codex", Executable: "/home/test/.local/bin/codex"},
-		}, nil
-	}}
-	kind, pid, command, executable := s.paneAgentProcess(10, "bash")
-	if kind != "codex" || pid != 21 || command != "/home/test/.local/bin/codex" {
-		t.Fatalf("pane agent = (%q, %d, %q), want native Codex child", kind, pid, command)
+func TestDarwinProcessEntriesRetainUsableAgentInventory(t *testing.T) {
+	rows := []stats.DarwinProcess{
+		{PID: 42, Identity: "42:1:0", Command: "bash", Executable: "/bin/bash", RSSBytes: 100},
+		{PID: 43, PPID: 42, Identity: "43:1:0", Command: "codex --resume thread", Executable: "/usr/bin/codex", CPUSeconds: 1, RSSBytes: 200},
 	}
-	if executable != "/home/test/.local/bin/codex" {
-		t.Fatalf("pane agent executable = %q, want native Codex executable", executable)
+	entries, err := processEntriesFromDarwinInventory(func() ([]stats.DarwinProcess, error) { return rows, nil })
+	if err != nil || len(entries) != 2 || entries[1].Identity != rows[1].Identity || entries[1].CPUSeconds != 1 || entries[1].RSSBytes != 200 {
+		t.Fatalf("Darwin observed process entries=%+v err=%v, want measured shell and native agent", entries, err)
+	}
+	index := indexProcessEntries(entries)
+	kind, pid, _, _ := paneAgentProcessFromIndex(42, "bash", index)
+	if kind != "codex" || pid != 43 {
+		t.Fatalf("partial observable inventory pane agent=(%q, %d), want native Codex 43", kind, pid)
+	}
+	_, err = processEntriesFromDarwinInventory(func() ([]stats.DarwinProcess, error) { return nil, os.ErrPermission })
+	if err != os.ErrPermission {
+		t.Fatalf("unavailable inventory err=%v, want preserved observation failure", err)
+	}
+}
+
+func TestPaneAgentProcessUsesSharedCodexProcessOwner(t *testing.T) {
+	launcher := procEntry{
+		PID: 20, PPID: 10,
+		Command:    "node /home/test/.local/share/node_modules/@openai/codex/bin/codex.js --resume thread",
+		Executable: "/usr/bin/node",
+	}
+	native := procEntry{PID: 21, PPID: 20, Command: "/home/test/.local/bin/codex", Executable: "/home/test/.local/bin/codex"}
+	for _, test := range []struct {
+		name      string
+		processes []procEntry
+		wantPID   int
+		wantCmd   string
+		wantExe   string
+	}{
+		{
+			name:      "launcher remains owner before native child appears",
+			processes: []procEntry{launcher},
+			wantPID:   launcher.PID,
+			wantCmd:   launcher.Command,
+			wantExe:   launcher.Executable,
+		},
+		{
+			name:      "native child replaces launcher as owner",
+			processes: []procEntry{launcher, native},
+			wantPID:   native.PID,
+			wantCmd:   native.Command,
+			wantExe:   native.Executable,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			s := &server{processEntriesFn: func() ([]procEntry, error) { return test.processes, nil }}
+			kind, pid, command, executable := s.paneAgentProcess(10, "bash")
+			if kind != "codex" || pid != test.wantPID || command != test.wantCmd {
+				t.Fatalf("pane agent = (%q, %d, %q), want Codex process %d", kind, pid, command, test.wantPID)
+			}
+			if executable != test.wantExe {
+				t.Fatalf("pane agent executable = %q, want %q", executable, test.wantExe)
+			}
+		})
+	}
+}
+
+func TestPaneAgentProcessTerminatesOnCyclicProcessSnapshot(t *testing.T) {
+	processes := []procEntry{
+		{PID: 20, PPID: 10, Command: "bash"},
+		{PID: 30, PPID: 20, Command: "bash"},
+		{PID: 40, PPID: 30, Command: "bash"},
+		{PID: 20, PPID: 40, Command: "bash"},
+	}
+	s := &server{processEntriesFn: func() ([]procEntry, error) { return processes, nil }}
+	type selection struct {
+		kind       string
+		pid        int
+		command    string
+		executable string
+	}
+	completed := make(chan selection, 1)
+	go func() {
+		kind, pid, command, executable := s.paneAgentProcess(10, "bash")
+		completed <- selection{kind: kind, pid: pid, command: command, executable: executable}
+	}()
+	select {
+	case got := <-completed:
+		if got != (selection{}) {
+			t.Fatalf("cyclic process snapshot selected an agent: %#v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pane process traversal did not terminate on a cycle")
 	}
 }
 
@@ -435,6 +510,10 @@ func TestSessionWorkGraphContainsTmuxPathAndActorEdges(t *testing.T) {
 
 func TestMetadataRefreshReadsGitSnapshotOncePerWorktree(t *testing.T) {
 	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve temporary worktree path: %v", err)
+	}
 	nested := filepath.Join(root, "nested")
 	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o700); err != nil {
 		t.Fatal(err)

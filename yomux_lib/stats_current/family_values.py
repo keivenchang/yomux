@@ -69,10 +69,12 @@ def validate_value(value: object, kind: str, path: str, *, error_type: type[Valu
             fail(f"{path} must be a bounded list")
         required = {"id", "kind", "state", "session", "pane"}
         for index, row in enumerate(value):
-            if not isinstance(row, Mapping) or set(row) != required:
+            if not isinstance(row, Mapping) or set(row) not in (required, required | {"observed_at"}):
                 fail(f"{path}[{index}] must contain the bounded agent identity fields")
             if any(not isinstance(row[name], str) for name in required) or row["state"] not in AGENT_ROSTER_STATE_VALUES:
                 fail(f"{path}[{index}] contains an invalid agent identity")
+            if "observed_at" in row:
+                validate_value(row["observed_at"], NUMBER, f"{path}[{index}].observed_at", error_type=error_type)
         return
     if kind in {PROCESS_MEMORY_BYTES, PROCESS_CPU_PERCENT}:
         if not isinstance(value, Mapping):

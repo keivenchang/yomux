@@ -102,6 +102,12 @@ func statsWireValueSize(value reflect.Value) (int, error) {
 }
 
 func statsWireStringSize(value string) int {
+	if !utf8.ValidString(value) {
+		// encoding/json changed how it sizes invalid UTF-8 across Go releases.
+		// This rare fallback keeps the estimator aligned with the active toolchain.
+		encoded, _ := json.Marshal(value)
+		return len(encoded)
+	}
 	size := 2
 	for i := 0; i < len(value); {
 		c := value[i]
@@ -118,7 +124,7 @@ func statsWireStringSize(value string) int {
 			continue
 		}
 		r, width := utf8.DecodeRuneInString(value[i:])
-		if (r == utf8.RuneError && width == 1) || r == '\u2028' || r == '\u2029' {
+		if r == '\u2028' || r == '\u2029' {
 			size += 6
 		} else {
 			size += width

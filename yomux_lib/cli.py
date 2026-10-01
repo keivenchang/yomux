@@ -41,6 +41,8 @@ from .local_services.watchdog import GroupOverloadWatchdog
 from .ptrace import allow_diagnostic_ptrace
 from tools.tls_san import self_signed_interface_ips as discover_self_signed_interface_ips
 from tools.tls_san import self_signed_san as build_self_signed_san
+from tools.go_binary import find_go_backend_binary
+from tools.go_binary import go_backend_binary_candidates
 from .server import TmuxWebtermHTTPServer
 from .server_lease import acquire_instance_and_port_leases
 from .server_lease import InstanceLeaseError
@@ -651,16 +653,8 @@ def exec_go_backend(args: argparse.Namespace) -> int:
         return 2
     repo_root = Path(__file__).resolve().parents[1]
     environment = normalize_yomux_environment(os.environ)
-    configured_binary = environment.get("YOLOMUX_GO_BINARY", "").strip()
-    candidates = [Path(configured_binary)] if configured_binary else [
-        repo_root / "bazel-bin" / "cmd" / "yomux-go" / "yomux-go_" / "yomux-go",
-        repo_root / "bazel-bin" / "yomux-go",
-        repo_root / "yomux-go",
-        repo_root / "bazel-bin" / "cmd" / "yomux-go" / "yolomux_go_" / "yolomux_go",
-        repo_root / "yolomux-go",
-        repo_root / "bazel-bin" / "yolomux-go",
-    ]
-    binary = next((candidate for candidate in candidates if candidate.is_file() and os.access(candidate, os.X_OK)), None)
+    candidates = go_backend_binary_candidates(repo_root, environment)
+    binary = find_go_backend_binary(candidates)
     if binary is None:
         searched = ", ".join(str(candidate) for candidate in candidates)
         print(f"ERROR: Go backend binary is unavailable; searched: {searched}", file=sys.stderr)

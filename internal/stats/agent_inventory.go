@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -121,10 +122,11 @@ func BuildAgentInventory(ctx context.Context, sources AgentInventorySources) ([]
 		}
 	}
 
+	kindsByPID := ClassifyAgentProcesses(processes)
 	records := make([]AgentRecord, 0)
 	seen := make(map[string]bool)
 	for _, process := range processes {
-		kind := ClassifyAgent(process.Command, process.Executable)
+		kind := kindsByPID[process.PID]
 		if kind == "" {
 			continue
 		}
@@ -319,6 +321,40 @@ func tmuxScopedAgentRecords(records []AgentRecord) []AgentRecord {
 	return result
 }
 
+// ClassifyAgentProcesses selects the process that owns each agent instance.
+// Codex's Node launcher stays discoverable until its native descendant appears;
+// retaining both would count one pane twice and poll the launcher's empty rollout.
+func ClassifyAgentProcesses(processes []AgentProcess) map[int]string {
+	byPID := make(map[int]AgentProcess, len(processes))
+	for _, process := range processes {
+		byPID[process.PID] = process
+	}
+	kinds := make(map[int]string)
+	for pid, process := range byPID {
+		if kind := ClassifyAgent(process.Command, process.Executable); kind != "" {
+			kinds[pid] = kind
+		}
+	}
+	for _, process := range byPID {
+		if kinds[process.PID] != "codex" || !codexNativeExecutable(process.Executable) {
+			continue
+		}
+		seen := map[int]bool{process.PID: true}
+		for parentPID := process.PPID; parentPID > 0 && !seen[parentPID]; {
+			seen[parentPID] = true
+			parent, ok := byPID[parentPID]
+			if !ok {
+				break
+			}
+			if codexNodeEntryPoint(shellWords(parent.Command), parent.Executable) {
+				delete(kinds, parentPID)
+			}
+			parentPID = parent.PPID
+		}
+	}
+	return kinds
+}
+
 // ClassifyAgent only accepts an executable entry point, never an argument that
 // happens to contain an agent name. Native OpenCode is identified by its
 // executable path even when a shell/operator wrapper leaves a different argv[0].
@@ -335,10 +371,11 @@ func ClassifyAgent(command, executable string) string {
 	if strings.EqualFold(filepath.Base(strings.TrimSuffix(executable, " (deleted)")), "opencode") {
 		return "opencode"
 	}
-	// Codex's Linux launcher is a Node entry point whose child native binary
-	// remains the agent executable. Use that executable identity only for the
-	// native child; arbitrary wrapper arguments must not become agent records.
-	if strings.EqualFold(filepath.Base(strings.TrimSuffix(executable, " (deleted)")), "codex") {
+	// The native executable identifies Codex even when argv[0] is rewritten.
+	if codexNativeExecutable(executable) {
+		return "codex"
+	}
+	if codexNodeEntryPoint(tokens, executable) {
 		return "codex"
 	}
 	// The repository's deterministic mock entry point uses exec -a opencode
@@ -359,23 +396,27 @@ func agentProcessMatchesKind(kind, command, executable string) bool {
 	if ClassifyAgent(command, executable) == kind {
 		return true
 	}
-	if kind != "codex" {
-		return false
-	}
-	parts := shellWords(command)
-	if len(parts) < 2 {
+	return kind == "codex" && codexNodeEntryPoint(shellWords(command), executable)
+}
+
+func codexNativeExecutable(executable string) bool {
+	return strings.EqualFold(filepath.Base(strings.TrimSuffix(executable, " (deleted)")), "codex")
+}
+
+func codexNodeEntryPoint(tokens []string, executable string) bool {
+	if len(tokens) < 2 {
 		return false
 	}
 	executableBase := strings.ToLower(filepath.Base(strings.TrimSuffix(executable, " (deleted)")))
+	if executable == "" {
+		// Some tmux process observations retain argv without an executable path.
+		executableBase = strings.ToLower(filepath.Base(strings.Trim(tokens[0], "\"'")))
+	}
 	if executableBase != "node" && executableBase != "nodejs" {
 		return false
 	}
-	for _, part := range parts[1:] {
-		if strings.EqualFold(filepath.Base(strings.Trim(part, "\"'")), "codex") {
-			return true
-		}
-	}
-	return false
+	entryPoint := strings.ToLower(strings.Trim(tokens[1], "\"'"))
+	return filepath.Base(entryPoint) == "codex" || strings.Contains(entryPoint, "/@openai/codex/") && strings.HasSuffix(entryPoint, "/codex.js")
 }
 
 func explicitSessionID(command, kind string) string {
@@ -409,6 +450,52 @@ func shellWords(command string) []string { return strings.Fields(command) }
 // on the size and lifetime of a host-wide ps snapshot.
 func LinuxAgentInventorySources() AgentInventorySources {
 	return AgentInventorySources{Processes: linuxProcesses, Panes: linuxTmuxPanes, CWD: linuxCWD, Started: linuxStartedIdentity, StartTime: linuxProcessStartedAt}
+}
+
+// CurrentPlatformAgentInventorySources shares one bounded native process snapshot
+// across status, transcript attribution, and host metrics on supported hosts.
+func CurrentPlatformAgentInventorySources() AgentInventorySources {
+	if runtime.GOOS != "darwin" {
+		return LinuxAgentInventorySources()
+	}
+	return AgentInventorySources{
+		Processes: func(ctx context.Context) ([]AgentProcess, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			rows, err := DarwinProcessInventory()
+			if err != nil {
+				return nil, err
+			}
+			result := make([]AgentProcess, 0, len(rows))
+			for _, row := range rows {
+				result = append(result, AgentProcess{PID: row.PID, PPID: row.PPID, Command: row.Command, Executable: row.Executable})
+			}
+			return result, nil
+		},
+		Panes: linuxTmuxPanes,
+		CWD: func(pid int) (string, error) {
+			row, ok := darwinProcessIdentity(pid)
+			if !ok || row.Directory == "" {
+				return "", errors.New("process cwd unavailable")
+			}
+			return row.Directory, nil
+		},
+		Started: func(pid int) (string, error) {
+			row, ok := darwinProcessIdentity(pid)
+			if !ok {
+				return "", errors.New("process start unavailable")
+			}
+			return row.Identity, nil
+		},
+		StartTime: func(pid int) (float64, error) {
+			row, ok := darwinProcessIdentity(pid)
+			if !ok || row.StartedAt <= 0 {
+				return 0, errors.New("process start unavailable")
+			}
+			return row.StartedAt, nil
+		},
+	}
 }
 
 // SyntheticAgentInventorySources keeps development and integration runs on

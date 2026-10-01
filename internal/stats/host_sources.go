@@ -79,17 +79,16 @@ const linuxProcessCensusCacheTTL = 500 * time.Millisecond
 
 const linuxClockTickQueryTimeout = 500 * time.Millisecond
 
-// DarwinHostSources adapts bounded macOS command output to the common host
-// collector boundary. Commands are injected so captured plist/proc fixtures
-// can exercise the same path without requiring macOS in the test runner.
+// DarwinHostSources adapts bounded macOS system commands and native Mach/libproc
+// snapshots to the common host collector boundary.
 type DarwinHostSources struct {
-	run      func(context.Context, []string) (CommandOutput, error)
-	readFile func(string) ([]byte, error)
+	run         func(context.Context, []string) (CommandOutput, error)
+	logicalCPUs int
 }
 
 func NewHostSources() HostSources {
 	if runtime.GOOS == "darwin" {
-		return &DarwinHostSources{run: runBoundedCommand, readFile: boundedOSReadFile}
+		return &DarwinHostSources{run: runBoundedCommand, logicalCPUs: darwinSystemLogicalCPUs()}
 	}
 	if runtime.GOOS != "linux" {
 		return unavailableHostSources{}
@@ -227,45 +226,31 @@ func (s *LinuxHostSources) processCensus() ([]ProcessCensusRow, bool) {
 	return rows, ok
 }
 
+func (s *DarwinHostSources) SystemLogicalCPUs() int { return s.logicalCPUs }
+
+const darwinProcessTicksPerSecond = 1_000_000_000
+
 func (s *DarwinHostSources) CPU(ctx context.Context) (CPUSnapshot, error) {
-	result, err := s.run(ctx, []string{"sysctl", "-n", "kern.cp_time"})
-	if err != nil || result.ExitCode != 0 {
+	if err := ctx.Err(); err != nil {
+		return CPUSnapshot{}, err
+	}
+	total, idle, available := darwinHostCPU()
+	if !available {
 		return CPUSnapshot{}, errors.New("Darwin CPU counters unavailable")
 	}
-	fields := strings.Fields(string(result.Stdout))
-	if len(fields) < 4 {
+	if idle > total {
 		return CPUSnapshot{}, errors.New("invalid Darwin CPU counters")
 	}
-	var total, idle uint64
-	for index, field := range fields {
-		value, parseErr := strconv.ParseUint(field, 10, 64)
-		if parseErr != nil || total > ^uint64(0)-value {
-			return CPUSnapshot{}, errors.New("invalid Darwin CPU counters")
-		}
-		total += value
-		if index == 3 {
-			idle = value
-		}
-	}
-	if total == 0 || idle > total {
-		return CPUSnapshot{}, errors.New("invalid Darwin CPU counters")
-	}
-	rows, ok := DarwinProcessCensus(s.run, ctx)
-	if !ok {
-		return CPUSnapshot{}, errors.New("Darwin process census unavailable")
-	}
+	rows, complete := DarwinProcessSnapshot()
 	processes := make(map[string]CPUProcessCounters, len(rows))
 	for _, row := range rows {
-		cpu, ok := cpuTicks(row.CPUSeconds, 100)
-		if !ok || strings.TrimSpace(row.Identity) == "" {
+		cpu, ok := cpuTicks(row.CPUSeconds, darwinProcessTicksPerSecond)
+		if !ok || row.Identity == "" {
 			continue
 		}
-		processes[row.Identity] = CPUProcessCounters{Identity: row.Identity, CPU: cpu, Binary: row.Binary}
+		processes[row.Identity] = CPUProcessCounters{Identity: row.Identity, CPU: cpu, Binary: normalizeHostBinary(row.Executable)}
 	}
-	if len(rows) > 0 && len(processes) == 0 {
-		return CPUSnapshot{}, errors.New("invalid Darwin process census")
-	}
-	return CPUSnapshot{Host: CPUHostCounters{Total: total, Busy: total - idle}, Processes: processes, ProcessTicksPerSecond: 100}, nil
+	return CPUSnapshot{Host: CPUHostCounters{Total: total, Busy: total - idle}, Processes: processes, ProcessCensusIncomplete: !complete, ProcessTicksPerSecond: darwinProcessTicksPerSecond}, nil
 }
 
 func (s *DarwinHostSources) Memory(ctx context.Context) (MemoryCounters, []ProcessCensusRow, error) {
@@ -277,8 +262,12 @@ func (s *DarwinHostSources) Memory(ctx context.Context) (MemoryCounters, []Proce
 	if err != nil || total == 0 {
 		return MemoryCounters{}, nil, errors.New("invalid Darwin memory counters")
 	}
-	rows, _ := DarwinProcessCensus(s.run, ctx)
-	return MemoryCounters{CapacityBytes: total, UsedBytes: total - darwinAvailableMemory(s, ctx, total)}, rows, nil
+	rows, complete := DarwinProcessSnapshot()
+	processRows := make([]ProcessCensusRow, 0, len(rows))
+	for _, row := range rows {
+		processRows = append(processRows, row.censusRow())
+	}
+	return MemoryCounters{CapacityBytes: total, UsedBytes: total - darwinAvailableMemory(s, ctx, total), ProcessCensusIncomplete: !complete}, processRows, nil
 }
 
 func (s *DarwinHostSources) GPU(ctx context.Context) ([]GPUDevice, error) {
@@ -290,47 +279,6 @@ func (s *DarwinHostSources) GPU(ctx context.Context) ([]GPUDevice, error) {
 	return devices, nil
 }
 
-func DarwinProcessCensus(run func(context.Context, []string) (CommandOutput, error), ctx context.Context) ([]ProcessCensusRow, bool) {
-	result, err := run(ctx, []string{"ps", "-axo", "pid=,rss=,time=,lstart=,comm="})
-	if err != nil || result.ExitCode != 0 {
-		return nil, false
-	}
-	rows := []ProcessCensusRow{}
-	for _, line := range strings.Split(string(result.Stdout), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 9 {
-			continue
-		}
-		pid, e1 := strconv.Atoi(fields[0])
-		rss, e2 := strconv.ParseUint(fields[1], 10, 64)
-		if e1 != nil || e2 != nil || rss > ^uint64(0)/1024 {
-			continue
-		}
-		cpu := parseDarwinCPUTime(fields[2])
-		if !finite(cpu) {
-			continue
-		}
-		binary := normalizeHostBinary(strings.Join(fields[8:], " "))
-		if binary != "" {
-			rows = append(rows, ProcessCensusRow{PID: pid, Identity: fmt.Sprintf("%d:%s", pid, strings.Join(fields[3:8], " ")), Binary: binary, CPUSeconds: cpu, RSSBytes: rss * 1024})
-		}
-	}
-	return rows, len(rows) > 0
-}
-
-func parseDarwinCPUTime(value string) float64 {
-	parts := strings.Split(value, ":")
-	if len(parts) != 3 {
-		return math.NaN()
-	}
-	hours, e1 := strconv.ParseFloat(parts[0], 64)
-	minutes, e2 := strconv.ParseFloat(parts[1], 64)
-	seconds, e3 := strconv.ParseFloat(parts[2], 64)
-	if e1 != nil || e2 != nil || e3 != nil {
-		return math.NaN()
-	}
-	return hours*3600 + minutes*60 + seconds
-}
 func darwinAvailableMemory(s *DarwinHostSources, ctx context.Context, total uint64) uint64 {
 	result, err := s.run(ctx, []string{"vm_stat"})
 	if err != nil || result.ExitCode != 0 {

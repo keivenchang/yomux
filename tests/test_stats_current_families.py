@@ -119,6 +119,24 @@ def test_invalid_payloads_fail_at_the_family_boundary(family_name, payload, mess
         families.validate_payload(family_name, payload)
 
 
+@pytest.mark.parametrize("extra", [{}, {"observed_at": 0}, {"observed_at": 123.5}])
+def test_agent_roster_preserves_optional_observation_time(extra):
+    row = {"id": "agent", "kind": "codex", "state": "run", "session": "work", "pane": "%1", **extra}
+    payload = {"states": {"agent": "run"}, "agents": [row]}
+    assert families.validate_payload("agent_status", payload)["agents"] == [row]
+
+
+@pytest.mark.parametrize("extra", [
+    {"observed_at": -1}, {"observed_at": float("nan")}, {"observed_at": float("inf")},
+    {"observed_at": True}, {"observed_at": "123"}, {"observed_at": None},
+    {"timestamp": 123}, {"observed_at": 123, "timestamp": 123},
+])
+def test_agent_roster_rejects_invalid_observation_time_and_unknown_fields(extra):
+    row = {"id": "agent", "kind": "codex", "state": "run", "session": "work", "pane": "%1", **extra}
+    with pytest.raises(families.FamilyValidationError):
+        families.validate_payload("agent_status", {"states": {"agent": "run"}, "agents": [row]})
+
+
 def test_current_family_owner_has_no_old_pipeline_dependencies_or_concepts():
     source = Path(families.__file__).read_text(encoding="utf-8")
     tree = ast.parse(source)

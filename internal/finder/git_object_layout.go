@@ -4,6 +4,7 @@
 package finder
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"sync"
@@ -39,14 +40,21 @@ func gitObjectDirectoryIdentity(path string) (gitObjectDirectoryStamp, error) {
 	if !ok {
 		return gitObjectDirectoryStamp{}, errGitNamespaceChanged
 	}
-	return gitObjectDirectoryStamp{identityFor(info), stat.Ctim.Sec*1e9 + stat.Ctim.Nsec}, nil
+	return gitObjectDirectoryStamp{identityFor(info), statCTime(stat)}, nil
 }
 
 func (cache *gitObjectLayoutCache) validate(objects string) error {
-	return cache.validateDirectory(objects, true)
+	return cache.validateContext(context.Background(), objects)
 }
 
-func (cache *gitObjectLayoutCache) validateDirectory(path string, root bool) error {
+func (cache *gitObjectLayoutCache) validateContext(ctx context.Context, objects string) error {
+	return cache.validateDirectory(ctx, objects, true)
+}
+
+func (cache *gitObjectLayoutCache) validateDirectory(ctx context.Context, path string, root bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	before, err := gitObjectDirectoryIdentity(path)
 	if err != nil {
 		return err
@@ -60,8 +68,14 @@ func (cache *gitObjectLayoutCache) validateDirectory(path string, root bool) err
 		if err != nil {
 			return errGitNamespaceChanged
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		children = nil
 		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if entry.Type()&os.ModeSymlink != 0 {
 				return errGitNamespaceChanged
 			}
@@ -97,27 +111,40 @@ func (cache *gitObjectLayoutCache) validateDirectory(path string, root bool) err
 		slots = make(chan struct{}, 8)
 	}
 	for _, child := range children {
+		if err := ctx.Err(); err != nil {
+			break
+		}
 		name := filepath.Base(child)
 		if root && name != "info" && name != "pack" && !isGitLooseObjectDirectory(name) {
 			continue
 		}
 		if slots == nil {
-			if err := cache.validateDirectory(child, false); err != nil {
+			if err := cache.validateDirectory(ctx, child, false); err != nil {
 				return err
 			}
 			continue
 		}
-		slots <- struct{}{}
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			break
+		}
+		if ctx.Err() != nil {
+			break
+		}
 		pending.Add(1)
 		go func(child string) {
 			defer pending.Done()
 			defer func() { <-slots }()
-			if err := cache.validateDirectory(child, false); err != nil {
+			if err := cache.validateDirectory(ctx, child, false); err != nil && ctx.Err() == nil {
 				failures <- err
 			}
 		}(child)
 	}
 	pending.Wait()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if failures != nil {
 		close(failures)
 		for err := range failures {
@@ -125,9 +152,15 @@ func (cache *gitObjectLayoutCache) validateDirectory(path string, root bool) err
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	after, err := gitObjectDirectoryIdentity(path)
 	if err != nil || before != after {
 		return errGitNamespaceChanged
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	return nil
 }

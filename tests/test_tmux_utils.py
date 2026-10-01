@@ -116,6 +116,46 @@ def test_startup_common_operator_launch_clears_inherited_tmux(monkeypatch):
     assert result.stdout == "unset|unset|||1|1"
 
 
+@pytest.mark.parametrize(
+    ("inputs", "expected", "warning_count"),
+    [
+        ({"YOMUX_GO_BINARY": "/fixture/canonical"}, "/fixture/canonical", 0),
+        ({"YOLOMUX_GO_BINARY": "/fixture/legacy"}, "/fixture/legacy", 1),
+        ({"YOMUX_GO_BINARY": "/fixture/canonical", "YOLOMUX_GO_BINARY": "/fixture/legacy"}, "/fixture/canonical", 1),
+        ({"YOMUX_GO_BINARY": "", "YOLOMUX_GO_BINARY": "/fixture/legacy"}, "", 1),
+    ],
+)
+def test_startup_environment_normalization_does_not_rewarn_for_generated_aliases(inputs, expected, warning_count):
+    environment = {name: value for name, value in os.environ.items() if not name.startswith(("YOMUX_", "YOLOMUX_"))}
+    environment.update(inputs)
+    result = subprocess.run(
+        ["bash", "-c", 'source tools/startup_common.sh; yomux_normalize_environment; yomux_normalize_environment; yomux_normalize_environment; printf "%s\\0%s" "$YOMUX_GO_BINARY" "$YOLOMUX_GO_BINARY"'],
+        cwd=Path(__file__).resolve().parents[1],
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.split("\0") == [expected, expected]
+    warning = "WARNING: YOLOMUX_* environment names are deprecated; use YOMUX_*.\n"
+    assert result.stderr == warning * warning_count
+
+
+def test_startup_environment_normalization_reapplies_canonical_changes():
+    environment = {name: value for name, value in os.environ.items() if not name.startswith(("YOMUX_", "YOLOMUX_"))}
+    environment["YOMUX_GO_BINARY"] = "/fixture/first"
+    result = subprocess.run(
+        ["bash", "-c", 'source tools/startup_common.sh; yomux_normalize_environment; export YOMUX_GO_BINARY=; yomux_normalize_environment; printf "%s\\0%s" "$YOMUX_GO_BINARY" "$YOLOMUX_GO_BINARY"'],
+        cwd=Path(__file__).resolve().parents[1],
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.split("\0") == ["", ""]
+    assert result.stderr == ""
+
+
 def test_list_tmux_session_activity_reads_the_roster_in_one_bulk_call(monkeypatch):
     calls = []
 
@@ -203,10 +243,17 @@ def test_launchers_declare_the_default_server_intent_for_control_mode(monkeypatc
         text=True,
         check=True,
     ).stdout
+    assert 'env_count=$8; shift 8' in launcher
+    assert 'unset TMUX TMUX_PANE;' in launcher
+    assert 'for env_suffix in GO_BINARY GO_START_REASON CLAUDE_TRANSCRIPT_ROOT CODEX_TRANSCRIPT_ROOT OPENCODE_DATABASE TEST_AUTH_BYPASS TMUX_SOCKET TMUX_ALLOW_DEFAULT_SERVER;' in launcher
+    assert 'unset "YOMUX_$env_suffix" "YOLOMUX_$env_suffix"' in launcher
+    assert 'source "$repo/tools/startup_common.sh" || exit 2; yomux_normalize_environment;' in launcher
+    assert 'export "$assignment"' in launcher
     assert '"$repo/tools/instance_isolation.py" exec --plan-json "$plan_json"' in launcher
     boot_source = (root / "boot.sh").read_text(encoding="utf-8")
-    assert 'extra_env+=("$(yolomux_default_server_optin)")' in boot_source
-    assert 'extra_env+=("YOLOMUX_TMUX_SOCKET=")' in boot_source
+    assert 'yomux_server_launch_environment "$backend" "$go_binary"' in boot_source
+    startup_source = (root / "tools" / "startup_common.sh").read_text(encoding="utf-8")
+    assert 'local assignments=("$(yolomux_default_server_optin)" "YOLOMUX_TMUX_SOCKET=")' in startup_source
 
 
 def test_tmux_move_to_option_walks_highlight_without_crashing(monkeypatch):

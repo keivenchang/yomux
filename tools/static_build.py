@@ -10,8 +10,10 @@ from collections import Counter, defaultdict
 import hashlib
 import json
 import math
+import os
 import re
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -835,7 +837,20 @@ def write_asset(asset: str) -> bool:
         current = None
     if current == next_text:
         return False
-    output_path.write_text(next_text, encoding="utf-8")
+    mode = output_path.stat().st_mode & 0o777 if output_path.exists() else 0o644
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=output_path.parent, prefix=f".{asset}.", delete=False) as output:
+            temporary_path = Path(output.name)
+            output.write(next_text)
+            output.flush()
+            os.fsync(output.fileno())
+        assert temporary_path is not None
+        temporary_path.chmod(mode)
+        os.replace(temporary_path, output_path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
     return True
 
 

@@ -13,6 +13,37 @@ func testObservation() Observation {
 	return Observation{EventID: "event-1", Family: "cpu", SourceID: "host", ObservedAt: 10, EpochID: "epoch-1", Payload: map[string]any{"value": 1}}
 }
 
+func TestCurrentAgentRosterAllowsBoundedObservationTime(t *testing.T) {
+	cases := []struct {
+		name  string
+		extra map[string]any
+		valid bool
+	}{
+		{"historical", nil, true},
+		{"current", map[string]any{"observed_at": 123.5}, true},
+		{"zero", map[string]any{"observed_at": 0.0}, true},
+		{"negative", map[string]any{"observed_at": -1.0}, false},
+		{"nan", map[string]any{"observed_at": math.NaN()}, false},
+		{"infinity", map[string]any{"observed_at": math.Inf(1)}, false},
+		{"boolean", map[string]any{"observed_at": true}, false},
+		{"string", map[string]any{"observed_at": "123"}, false},
+		{"null", map[string]any{"observed_at": nil}, false},
+		{"unknown field", map[string]any{"timestamp": 123.5}, false},
+		{"extra field", map[string]any{"observed_at": 123.5, "timestamp": 123.5}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			row := map[string]any{"id": "agent", "kind": "codex", "state": "run", "session": "work", "pane": "%1"}
+			for key, value := range tc.extra {
+				row[key] = value
+			}
+			if err := validateCurrentAgentRoster([]map[string]any{row}); (err == nil) != tc.valid {
+				t.Fatalf("roster validation = %v, want valid=%v", err, tc.valid)
+			}
+		})
+	}
+}
+
 func testCoverage() CoverageEpoch {
 	end := 20.0
 	return CoverageEpoch{Family: "cpu", SourceID: "host", EpochID: "epoch-1", StartedAt: 10, EndedAt: &end, NativeCadenceSeconds: 1, OwnerGeneration: 1}

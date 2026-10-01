@@ -18,7 +18,7 @@ Contributor and build instructions live in [`docs/DEVELOPMENT.md`](docs/DEVELOPM
 
 * Linux full-gate hosts: `fs.inotify.max_user_instances=1024`, `fs.inotify.max_user_watches=1048576`, and `fs.inotify.max_queued_events=65536`. Managed startup reports the current capacity and warns when it is below the gate floor; see the development guide for the persistent `sysctl` setup.
 
-* Go builds: Bazel 7.6.1; Docker is required for the isolated Go/Bazel/Chromium gate. The repository-pinned Go toolchain is resolved by Bazel, so a host Go installation is not required for the canonical build.
+* Go builds: Bazel 7.6.1; Linux uses Docker for the isolated Go/Bazel/Chromium gate, and macOS uses the native Bazel wrapper. The repository-pinned Go toolchain is resolved by Bazel, so a host Go installation is not required for the canonical build.
 
 ## Quickstart
 
@@ -28,7 +28,7 @@ Managed server launches and direct `python3 yomux.py` launches use Go by default
 git clone https://github.com/keivenchang/yomux.git
 cd yomux
 make setup          # pip install -e ".[yoagent]" + build the bundle  (run `make help` for more)
-bazel --bazelrc=/dev/null build --jobs=auto //cmd/yomux-go:yomux-go
+tools/build_go.sh
 tmux new-session -A -s project1     # optional: create one if you do not already have tmux sessions
 ./boot.sh 9998
 # Legacy backend: ./boot.sh --deprecated-python 9998
@@ -48,7 +48,7 @@ Build, validate, and then start the preview:
 
 ```bash
 make setup
-bazel --bazelrc=/dev/null build --jobs=auto //cmd/yomux-go:yomux-go
+tools/build_go.sh
 tools/run_bazel_tests.sh --jobs "$(getconf _NPROCESSORS_ONLN)"
 YOMUX_START_LOAD_WAIT_SECONDS=30 ./boot.sh 7221
 ```

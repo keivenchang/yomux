@@ -172,8 +172,19 @@ def test_parse_args_supports_sessions_dangerous_yolo_and_self_signed(monkeypatch
     assert args.print_runtime_report is False
 
 
-def test_exec_go_backend_forwards_dangerous_yolo_to_binary(monkeypatch, tmp_path):
-    binary = tmp_path / "yolomux-go"
+@pytest.mark.parametrize("binary_location", ["configured", "bazel-bin/cmd/yolomux-go/yolomux_go_/yolomux_go"])
+def test_exec_go_backend_forwards_dangerous_yolo_to_binary(monkeypatch, tmp_path, binary_location):
+    repo_root = Path(__file__).resolve().parents[1]
+    if binary_location == "configured":
+        binary = tmp_path / "yolomux-go"
+        monkeypatch.setenv("YOMUX_GO_BINARY", str(binary))
+    else:
+        repo_root = tmp_path / "checkout"
+        binary = repo_root / binary_location
+        binary.parent.mkdir(parents=True)
+        monkeypatch.setattr(cli, "__file__", str(repo_root / "yomux_lib" / "cli.py"))
+        monkeypatch.delenv("YOMUX_GO_BINARY", raising=False)
+        monkeypatch.delenv("YOLOMUX_GO_BINARY", raising=False)
     binary.write_text("#!/bin/sh\n", encoding="utf-8")
     binary.chmod(0o755)
     captured = {}
@@ -193,7 +204,6 @@ def test_exec_go_backend_forwards_dangerous_yolo_to_binary(monkeypatch, tmp_path
             released.append(self.fd)
             os.close(self.fd)
 
-    monkeypatch.setenv("YOMUX_GO_BINARY", str(binary))
     monkeypatch.setattr(
         cli,
         "acquire_instance_and_port_leases",
@@ -232,7 +242,7 @@ def test_exec_go_backend_forwards_dangerous_yolo_to_binary(monkeypatch, tmp_path
     assert captured["path"] == str(binary)
     assert captured["command"] == [
         str(binary), "--host", "0.0.0.0", "--port", "7221", "--root",
-        str(Path(__file__).resolve().parents[1]), "--config", str(cli._YOLOMUX_ROOTS.config_dir),
+        str(repo_root), "--config", str(cli._YOLOMUX_ROOTS.config_dir),
         "--dangerously-yolo",
     ]
     assert captured["lease_inheritable"] == [True, True]

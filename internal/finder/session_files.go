@@ -97,6 +97,41 @@ func sessionFilesRepositoryScopePath(rawPath string, missingIsFile bool) string 
 	return path
 }
 
+// Transcript paths often point below a repository already opened from a live pane. Reuse its
+// pinned scope instead of rediscovering .git for every distinct transcript directory.
+func sessionFilesKnownRepository(rawPath string, scopes map[string]*gitHistoryScope) (string, bool) {
+	path := canonicalSessionFilesPath(rawPath)
+	bestRepo := ""
+	bestLength := -1
+	for repo := range scopes {
+		canonicalRepo := canonicalSessionFilesPath(repo)
+		relative, err := filepath.Rel(canonicalRepo, path)
+		if err != nil || filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+			continue
+		}
+		if sessionFilesHasNestedGitBoundary(path, canonicalRepo) {
+			continue
+		}
+		if len(canonicalRepo) > bestLength {
+			bestRepo = repo
+			bestLength = len(canonicalRepo)
+		}
+	}
+	return bestRepo, bestLength >= 0
+}
+
+func sessionFilesHasNestedGitBoundary(directory, repo string) bool {
+	for current := filepath.Clean(directory); current != repo; current = filepath.Dir(current) {
+		if current == filepath.Dir(current) {
+			return true
+		}
+		if _, err := os.Lstat(filepath.Join(current, ".git")); err == nil || !os.IsNotExist(err) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Service) sessionFilesRepositoryForPath(ctx context.Context, rawRoot string) (string, *Error) {
 	return s.sessionFilesRepositoryForTarget(ctx, rawRoot, false)
 }
@@ -472,7 +507,7 @@ func (s *Service) enrichSessionFilesRepository(ctx context.Context, view session
 	}
 	gitCtx, cancel := gitViewContext(ctx)
 	defer cancel()
-	if output, _, err := runGitBounded(gitCtx, scope.directory, nil, []string{"symbolic-ref", "--quiet", "--short", "HEAD"}, 4096, scope.namespace); err == nil {
+	if output, _, err := runGitMetadataBounded(gitCtx, scope.directory, nil, []string{"symbolic-ref", "--quiet", "--short", "HEAD"}, 4096, scope.namespace); err == nil {
 		view.repo["branch"] = strings.TrimSpace(string(output))
 	}
 	view.refs = gitRecentRefs(gitCtx, scope)
@@ -603,10 +638,14 @@ func (s *Service) SessionFilesWithAgentsStream(ctx context.Context, session stri
 		directory := sessionFilesRepositoryScopePath(path, true)
 		repo, resolved := repoByDirectory[directory]
 		if !resolved {
-			var finderErr *Error
-			repo, finderErr = s.sessionFilesRepositoryForTouchedPath(ctx, path)
-			if finderErr != nil {
-				continue
+			if knownRepo, ok := sessionFilesKnownRepository(directory, discovery.repositoryScopes); ok {
+				repo = knownRepo
+			} else {
+				var finderErr *Error
+				repo, finderErr = s.sessionFilesRepositoryForTouchedPath(ctx, path)
+				if finderErr != nil {
+					continue
+				}
 			}
 			repoByDirectory[directory] = repo
 		}
@@ -885,7 +924,7 @@ func (s *Service) sessionFilesRepositoryWithScope(ctx context.Context, session, 
 	defer cancel()
 
 	head := ""
-	if output, _, err := runGitBounded(gitCtx, scope.directory, nil, []string{"rev-parse", "--verify", "--quiet", "HEAD^{commit}"}, 4096, scope.namespace); err == nil {
+	if output, _, err := runGitMetadataBounded(gitCtx, scope.directory, nil, []string{"rev-parse", "--verify", "--quiet", "HEAD^{commit}"}, 4096, scope.namespace); err == nil {
 		head = strings.TrimSpace(string(output))
 	}
 	selectedFrom, selectedTo := sessionFilesRefsForRepo(repo, fromRef, toRef, repoRefs)
@@ -936,7 +975,11 @@ func (s *Service) sessionFilesRepositoryWithScope(ctx context.Context, session, 
 	numstat := make(map[string]gitCommitCount)
 	if len(diffArgs) > 0 {
 		diffOptions := []string{"diff", "--raw", "--numstat", "-z", "--find-renames", "--no-ext-diff", "--no-textconv"}
-		diffRaw, stderr, diffErr := runGitBounded(gitCtx, scope.directory, nil, append(diffOptions, diffArgs...), gitCommitMaxOutput, scope.namespace)
+		runDiff := runGitMetadataBounded
+		if len(diffArgs) < 2 {
+			runDiff = runGitBounded
+		}
+		diffRaw, stderr, diffErr := runDiff(gitCtx, scope.directory, nil, append(diffOptions, diffArgs...), gitCommitMaxOutput, scope.namespace)
 		if diffErr != nil {
 			if errors.Is(diffErr, errGitNamespaceChanged) {
 				return sessionFilesRepositoryView{}, gitNamespaceChanged(repo)
@@ -1018,13 +1061,13 @@ func sessionFilesRefsValid(ctx context.Context, scope *gitHistoryScope, fromRef,
 		if ref.value == "current" {
 			continue
 		}
-		if _, _, err := runGitBounded(ctx, scope.directory, nil, []string{"rev-parse", "--verify", "--quiet", ref.value + "^{commit}"}, 4096, scope.namespace); err != nil {
+		if _, _, err := runGitMetadataBounded(ctx, scope.directory, nil, []string{"rev-parse", "--verify", "--quiet", ref.value + "^{commit}"}, 4096, scope.namespace); err != nil {
 			return false, "requested refs not found in this repo; showing default"
 		}
 		_ = ref.label
 	}
 	if toRef != "current" {
-		if _, _, err := runGitBounded(ctx, scope.directory, nil, []string{"merge-base", "--is-ancestor", fromRef, toRef}, 4096, scope.namespace); err != nil {
+		if _, _, err := runGitMetadataBounded(ctx, scope.directory, nil, []string{"merge-base", "--is-ancestor", fromRef, toRef}, 4096, scope.namespace); err != nil {
 			return false, "requested refs are not ordered; showing default"
 		}
 	}
@@ -1095,7 +1138,7 @@ func gitRefLabel(short string, aliases []string) string {
 
 func gitRecentRefs(ctx context.Context, scope *gitHistoryScope) []map[string]any {
 	refs := []map[string]any{{"ref": "HEAD", "short": "HEAD", "subject": "base commit"}, {"ref": "current", "short": "current", "subject": "working tree"}}
-	output, _, err := runGitBounded(ctx, scope.directory, nil, []string{
+	output, _, err := runGitMetadataBounded(ctx, scope.directory, nil, []string{
 		"log", "--decorate=short", "--max-count=200", "--pretty=format:%H%x1f%h%x1f%s%x1f%at%x1f%an%x1f%D",
 	}, gitHistoryMaxOutput, scope.namespace)
 	if err != nil {
@@ -1146,7 +1189,7 @@ func gitRecentRefs(ctx context.Context, scope *gitHistoryScope) []map[string]any
 func gitAheadBehind(ctx context.Context, scope *gitHistoryScope, fromRef, toRef string, refsActive bool) map[string]any {
 	leftRef, rightRef := fromRef, toRef
 	if !refsActive {
-		output, _, err := runGitBounded(ctx, scope.directory, nil, []string{"rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"}, 4096, scope.namespace)
+		output, _, err := runGitMetadataBounded(ctx, scope.directory, nil, []string{"rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"}, 4096, scope.namespace)
 		if err != nil || strings.TrimSpace(string(output)) == "" {
 			return map[string]any{}
 		}
@@ -1156,11 +1199,11 @@ func gitAheadBehind(ctx context.Context, scope *gitHistoryScope, fromRef, toRef 
 		rightRef = "HEAD"
 	}
 	for _, ref := range []string{leftRef, rightRef} {
-		if _, _, err := runGitBounded(ctx, scope.directory, nil, []string{"rev-parse", "--verify", "--quiet", ref + "^{commit}"}, 4096, scope.namespace); err != nil {
+		if _, _, err := runGitMetadataBounded(ctx, scope.directory, nil, []string{"rev-parse", "--verify", "--quiet", ref + "^{commit}"}, 4096, scope.namespace); err != nil {
 			return map[string]any{}
 		}
 	}
-	output, _, err := runGitBounded(ctx, scope.directory, nil, []string{"rev-list", "--left-right", "--count", leftRef + "..." + rightRef}, 4096, scope.namespace)
+	output, _, err := runGitMetadataBounded(ctx, scope.directory, nil, []string{"rev-list", "--left-right", "--count", leftRef + "..." + rightRef}, 4096, scope.namespace)
 	if err != nil {
 		return map[string]any{}
 	}
@@ -1177,32 +1220,42 @@ func gitAheadBehind(ctx context.Context, scope *gitHistoryScope, fromRef, toRef 
 }
 
 func sessionFilesDefaultBase(ctx context.Context, scope *gitHistoryScope) string {
-	for _, ref := range []struct {
-		args []string
-		name string
-	}{
-		{[]string{"symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"}, ""},
-		{[]string{"show-ref", "--verify", "--quiet", "refs/remotes/origin/main"}, "origin/main"},
-		{[]string{"show-ref", "--verify", "--quiet", "refs/remotes/origin/master"}, "origin/master"},
-		{[]string{"show-ref", "--verify", "--quiet", "refs/heads/main"}, "main"},
-		{[]string{"show-ref", "--verify", "--quiet", "refs/heads/master"}, "master"},
-	} {
-		output, _, err := runGitBounded(ctx, scope.directory, nil, ref.args, 4096, scope.namespace)
-		if err == nil {
-			candidate := strings.TrimSpace(string(output))
-			if ref.name == "" {
-				candidate = candidate
-			}
-			if candidate != "" {
-				if base, _, mergeErr := runGitBounded(ctx, scope.directory, nil, []string{"merge-base", candidate, "HEAD"}, 4096, scope.namespace); mergeErr == nil && strings.TrimSpace(string(base)) != "" {
-					return strings.TrimSpace(string(base))
-				}
-			}
-			if ref.name != "" {
-				if base, _, mergeErr := runGitBounded(ctx, scope.directory, nil, []string{"merge-base", ref.name, "HEAD"}, 4096, scope.namespace); mergeErr == nil && strings.TrimSpace(string(base)) != "" {
-					return strings.TrimSpace(string(base))
-				}
-			}
+	// Resolve candidate refs in one Git process; per-ref existence probes dominate this path on macOS.
+	refsOutput, _, refsErr := runGitMetadataBounded(ctx, scope.directory, nil, []string{
+		"for-each-ref", "--format=%(refname)%09%(symref)",
+		"refs/remotes/origin/HEAD", "refs/remotes/origin/main", "refs/remotes/origin/master",
+		"refs/heads/main", "refs/heads/master",
+	}, 4096, scope.namespace)
+	if refsErr != nil {
+		return "HEAD"
+	}
+	present := make(map[string]bool)
+	preferred := make([]string, 0, 5)
+	for _, line := range strings.Split(string(refsOutput), "\n") {
+		fields := strings.SplitN(line, "\t", 2)
+		if len(fields) == 0 || fields[0] == "" {
+			continue
+		}
+		present[fields[0]] = true
+		if len(fields) == 2 && fields[1] != "" {
+			preferred = append(preferred, fields[1])
+		}
+	}
+	candidates := append(preferred,
+		"refs/remotes/origin/main", "refs/remotes/origin/master", "refs/heads/main", "refs/heads/master",
+	)
+	seen := make(map[string]bool, len(candidates))
+	for _, candidate := range candidates {
+		if candidate == "" || seen[candidate] {
+			continue
+		}
+		seen[candidate] = true
+		if !strings.HasPrefix(candidate, "refs/") || !present[candidate] && !containsString(preferred, candidate) {
+			continue
+		}
+		base, _, mergeErr := runGitMetadataBounded(ctx, scope.directory, nil, []string{"merge-base", candidate, "HEAD"}, 4096, scope.namespace)
+		if mergeErr == nil && strings.TrimSpace(string(base)) != "" {
+			return strings.TrimSpace(string(base))
 		}
 	}
 	return "HEAD"

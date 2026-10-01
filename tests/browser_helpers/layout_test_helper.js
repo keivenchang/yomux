@@ -1511,6 +1511,7 @@ globalThis.__layoutTestApi = {
   markFileExplorerDeletedPathsForTest: markFileExplorerDeletedPaths,
   fileExplorerEntriesByWatchedDirectoryForTest: fileExplorerEntriesByWatchedDirectory,
   refreshFileExplorerFromPushForTest: refreshFileExplorerFromPush,
+  entriesByDirFromFilesystemPushForTest: entriesByDirFromFilesystemPush,
   refreshWatchedFilesystemForTest: refreshWatchedFilesystem,
   fileExplorerTreePaneIsVisibleForTest: fileExplorerTreePaneIsVisible,
   filesystemWatchTokenForTest() { return fileExplorerFilesystemWatchToken; },

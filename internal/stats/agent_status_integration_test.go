@@ -45,7 +45,16 @@ func TestAgentStatusWithSyntheticInventoryAndMockClient(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(root, ".GlobalProtect"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	socket := filepath.Join(root, "tmux.sock")
+	socketRoot, err := os.MkdirTemp("/tmp", "ym-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(socketRoot); err != nil {
+			t.Errorf("remove private tmux socket directory: %v", err)
+		}
+	})
+	socket := filepath.Join(socketRoot, "tmux.sock")
 	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
 
 	sessionPrefix := "yolo-go-status-" + strings.ToLower(strings.ReplaceAll(filepath.Base(root), "_", "-"))
@@ -71,6 +80,7 @@ func TestAgentStatusWithSyntheticInventoryAndMockClient(t *testing.T) {
 	env := []string{
 		"PATH=" + path,
 		"PYTHONPATH=" + repoRoot,
+		"PYTHONUSERBASE=" + os.Getenv("PYTHONUSERBASE"),
 		"HOME=" + root,
 		"TERM=xterm-256color",
 		"LANG=C.UTF-8",
@@ -78,7 +88,7 @@ func TestAgentStatusWithSyntheticInventoryAndMockClient(t *testing.T) {
 		"PYTHONUNBUFFERED=1",
 	}
 	startMock := func(session, entryPoint, client string) {
-		start := exec.Command(tmux, "-S", socket, "new-session", "-d", "-s", session, "-x", "100", "-y", "35", "bash", "-lc", "exec -a "+entryPoint+" "+shellQuote(python)+" -u "+shellQuote(client)+" --mock")
+		start := exec.Command(tmux, "-S", socket, "new-session", "-d", "-s", session, "-x", "100", "-y", "35", "bash", "-c", "exec -a "+entryPoint+" "+shellQuote(python)+" -u "+shellQuote(client)+" --mock")
 		start.Env = env
 		if output, err := start.CombinedOutput(); err != nil {
 			t.Fatalf("private tmux server cannot start %s: %v: %s", entryPoint, err, output)
@@ -319,14 +329,18 @@ func cleanupTmuxServer(binary, socket string) error {
 
 func waitForPane(binary, socket, target string) error {
 	deadline := time.Now().Add(5 * time.Second)
+	var lastOutput string
+	var lastErr error
 	for time.Now().Before(deadline) {
 		command := exec.Command(binary, "-S", socket, "capture-pane", "-p", "-J", "-t", target)
-		if output, err := command.Output(); err == nil && strings.TrimSpace(string(output)) != "" {
+		output, err := command.CombinedOutput()
+		lastOutput, lastErr = string(output), err
+		if err == nil && strings.TrimSpace(lastOutput) != "" {
 			return nil
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return errors.New("timed out waiting for mock client pane")
+	return fmt.Errorf("timed out waiting for mock client pane: last error=%v output=%q", lastErr, lastOutput)
 }
 
 func shellQuote(value string) string {

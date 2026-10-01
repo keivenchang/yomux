@@ -12,7 +12,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "finder_lib",
     srcs = glob(["*.go"], exclude = ["*_test.go"]),
-    deps = ["//internal/cache:cache_lib"],
+    deps = ["//internal/cache:cache_lib", "@org_golang_x_sys//unix"],
     importpath = "github.com/keivenchang/yomux/internal/finder",
 )
 

@@ -351,7 +351,7 @@ func (s *Service) Write(ctx context.Context, raw, content string, expectedMtime 
 		// matches in that case, but the caller's expected content version does not. Restore the
 		// original name before returning the typed conflict so the external edit remains authoritative.
 		if expectedMtime != nil {
-			quarantinedInfo, statErr := os.Lstat(descriptorChildPath(parent.directory, quarantine))
+			quarantinedInfo, statErr := lstatAt(parent.directory, quarantine)
 			if statErr != nil {
 				_ = restoreMutationTarget(parent, quarantine)
 				return nil, filesystemError(requested, statErr)
@@ -411,7 +411,7 @@ func (s *Service) Rename(ctx context.Context, raw, newName string) (map[string]a
 		return nil, filesystemError(requested, err)
 	}
 	target := filepath.Join(filepath.Dir(requested), newName)
-	if _, err := os.Lstat(descriptorChildPath(parent.directory, newName)); err == nil {
+	if _, err := lstatAt(parent.directory, newName); err == nil {
 		return nil, targetExists(target)
 	} else if !os.IsNotExist(err) {
 		return nil, filesystemError(target, err)
@@ -565,7 +565,7 @@ func (s *Service) deleteDirectoryContents(ctx context.Context, directory *os.Fil
 		}
 		name := entry.Name()
 		childPath := filepath.Join(requestedRoot, name)
-		linkInfo, statErr := os.Lstat(descriptorChildPath(directory, name))
+		linkInfo, statErr := lstatAt(directory, name)
 		if statErr != nil {
 			if os.IsNotExist(statErr) {
 				continue
@@ -576,7 +576,7 @@ func (s *Service) deleteDirectoryContents(ctx context.Context, directory *os.Fil
 		if quarantineErr != nil {
 			return recursiveDeleteError{reason: "changed_on_disk", failedPath: childPath, err: quarantineErr}
 		}
-		quarantinedInfo, infoErr := os.Lstat(descriptorChildPath(directory, quarantine))
+		quarantinedInfo, infoErr := lstatAt(directory, quarantine)
 		if infoErr != nil {
 			_ = restoreMutationTarget(&mutationParent{directory: directory, name: name}, quarantine)
 			return recursiveDeleteError{reason: "entry_failed", failedPath: childPath, err: infoErr}
@@ -626,7 +626,7 @@ func quarantineDeleteEntry(directory *os.File, name string, expected descriptorI
 			}
 			return "", err
 		}
-		info, err := os.Lstat(descriptorChildPath(directory, quarantine))
+		info, err := lstatAt(directory, quarantine)
 		if err == nil && sameDescriptorIdentity(identityFor(info), expected) {
 			return quarantine, nil
 		}
@@ -1115,7 +1115,7 @@ func (s *Service) openMutationParent(raw string) (*mutationParent, *Error) {
 		return nil, filesystemError(parentRequested, err)
 	}
 	result := &mutationParent{directory: directory, requested: requested, resolvedParent: parentResolved, name: filepath.Base(requested)}
-	if info, statErr := os.Lstat(descriptorChildPath(directory, result.name)); statErr == nil {
+	if info, statErr := lstatAt(directory, result.name); statErr == nil {
 		identity := identityFor(info)
 		result.targetIdentity = &identity
 	} else if !os.IsNotExist(statErr) {
@@ -1126,7 +1126,7 @@ func (s *Service) openMutationParent(raw string) (*mutationParent, *Error) {
 }
 
 func (s *Service) requireMutationTarget(parent *mutationParent, allowMissing bool) (os.FileInfo, *Error) {
-	info, err := os.Lstat(descriptorChildPath(parent.directory, parent.name))
+	info, err := lstatAt(parent.directory, parent.name)
 	if err != nil {
 		if allowMissing && os.IsNotExist(err) {
 			return nil, nil
@@ -1158,7 +1158,7 @@ func (s *Service) quarantineMutationTarget(parent *mutationParent) (string, *Err
 			}
 			return "", filesystemError(parent.requested, err)
 		}
-		info, err := os.Lstat(descriptorChildPath(parent.directory, name))
+		info, err := lstatAt(parent.directory, name)
 		if err == nil && sameDescriptorIdentity(identityFor(info), *parent.targetIdentity) {
 			return name, nil
 		}

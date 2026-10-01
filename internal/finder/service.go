@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -191,7 +192,7 @@ func (s *Service) walkDescriptors(ctx context.Context, root *os.File, requestedR
 			name := entry.Name()
 			childRelative := filepath.Join(relative, name)
 			requested := filepath.Join(requestedRoot, childRelative)
-			linkInfo, statErr := os.Lstat(descriptorChildPath(directory, name))
+			linkInfo, statErr := lstatAt(directory, name)
 			if statErr != nil || linkInfo.Mode()&os.ModeSymlink != 0 {
 				continue
 			}
@@ -503,14 +504,14 @@ func fastEntryInfoAt(directory *os.File, resolvedDir string, entry os.DirEntry) 
 	targetInfo := linkInfo
 	resolved := filepath.Join(resolvedDir, entry.Name())
 	if isSymlink {
-		targetInfo, err = os.Stat(descriptorChildPath(directory, entry.Name()))
+		targetInfo, err = statAt(directory, entry.Name())
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return brokenSymlinkEntry(directory, entry.Name(), linkInfo)
 			}
 			return nil, false
 		}
-		resolved, err = filepath.EvalSymlinks(descriptorChildPath(directory, entry.Name()))
+		resolved, err = resolvedChildPath(directory, entry.Name())
 		if err != nil {
 			return nil, false
 		}
@@ -535,7 +536,7 @@ func fastEntryInfoAt(directory *os.File, resolvedDir string, entry os.DirEntry) 
 		"file_id": fileID(targetInfo), "file_identity": "id:" + fileID(targetInfo),
 	}
 	if isSymlink {
-		if target, targetErr := os.Readlink(descriptorChildPath(directory, entry.Name())); targetErr == nil {
+		if target, targetErr := readlinkAt(directory, entry.Name()); targetErr == nil {
 			row["symlink_target"] = target
 		}
 	}
@@ -580,7 +581,7 @@ func (s *Service) entryInfoAt(directory *os.File, requestedDir, resolvedDir, nam
 	}
 	defer child.Close()
 	isSymlink := linkInfo.Mode()&os.ModeSymlink != 0
-	actualResolved, resolveErr := filepath.EvalSymlinks(descriptorPath(child))
+	actualResolved, resolveErr := resolvedDescriptorPath(child)
 	if resolveErr != nil {
 		return nil, false
 	}
@@ -605,7 +606,7 @@ func (s *Service) entryInfoAt(directory *os.File, requestedDir, resolvedDir, nam
 		"file_id": fileID(targetInfo), "file_identity": "id:" + fileID(targetInfo),
 	}
 	if isSymlink {
-		if target, targetErr := os.Readlink(descriptorChildPath(directory, name)); targetErr == nil {
+		if target, targetErr := readlinkAt(directory, name); targetErr == nil {
 			row["symlink_target"] = target
 		}
 	}
@@ -620,7 +621,7 @@ func (s *Service) entryInfoAt(directory *os.File, requestedDir, resolvedDir, nam
 
 func brokenSymlinkEntry(directory *os.File, name string, linkInfo os.FileInfo) (map[string]any, bool) {
 	row := map[string]any{"name": name, "kind": "symlink-broken", "size": 0, "mtime": linkInfo.ModTime().Unix(), "mtime_ns": linkInfo.ModTime().UnixNano(), "is_symlink": true}
-	if target, targetErr := os.Readlink(descriptorChildPath(directory, name)); targetErr == nil {
+	if target, targetErr := readlinkAt(directory, name); targetErr == nil {
 		row["symlink_target"] = target
 	}
 	return row, true
@@ -697,6 +698,9 @@ func (s *Service) Read(ctx context.Context, raw string, includeGit ...bool) (map
 	result := map[string]any{"path": requested, "realpath": resolved, "size": info.Size(), "mtime": info.ModTime().Unix(), "mtime_ns": info.ModTime().UnixNano(), "content": string(data), "extension": strings.ToLower(filepath.Ext(requested)), "is_text_extension": isTextPath(requested), "file_id": fileID(info), "file_identity": "id:" + fileID(info), "git_root": "", "git_tracked": false, "git_history": []any{}, "git_has_history": false, "git_enrichment": map[string]any{"available": false, "reason": "deferred"}}
 	if len(includeGit) > 0 && includeGit[0] {
 		s.addGitMetadata(ctx, result, requested, resolved, file)
+		if ctx.Err() != nil {
+			return nil, cancelled(requested)
+		}
 		if !s.pathStillStable(file, info) {
 			return nil, changed(requested)
 		}
@@ -756,6 +760,9 @@ func (s *Service) Info(ctx context.Context, raw string, includeGit ...bool) (map
 		result := map[string]any{"path": requested, "name": filepath.Base(requested), "kind": "dir", "size": nil, "mtime": nil, "mtime_ns": nil, "realpath": resolved, "file_id": fileID(info), "file_identity": "id:" + fileID(info), "preview_mime": "", "diff_capable": false, "repo_root": "", "git_tracked": false, "git_has_history": false, "relative_path": "", "repo": nil, "git_enrichment": map[string]any{"available": false, "reason": "deferred"}}
 		if len(includeGit) > 0 && includeGit[0] {
 			s.addGitMetadata(ctx, result, requested, resolved, file)
+			if ctx.Err() != nil {
+				return nil, cancelled(requested)
+			}
 			if !s.pathStillStable(file, info) {
 				return nil, changed(requested)
 			}
@@ -774,6 +781,9 @@ func (s *Service) Info(ctx context.Context, raw string, includeGit ...bool) (map
 	result := map[string]any{"path": requested, "name": filepath.Base(requested), "kind": "file", "size": info.Size(), "mtime": info.ModTime().Unix(), "mtime_ns": info.ModTime().UnixNano(), "realpath": resolved, "file_id": fileID(info), "file_identity": "id:" + fileID(info), "preview_mime": preview, "diff_capable": diffCapable, "repo_root": "", "git_tracked": false, "git_has_history": false, "relative_path": "", "repo": nil, "git_enrichment": map[string]any{"available": false, "reason": "deferred"}}
 	if len(includeGit) > 0 && includeGit[0] {
 		s.addGitMetadata(ctx, result, requested, resolved, file)
+		if ctx.Err() != nil {
+			return nil, cancelled(requested)
+		}
 		if !s.pathStillStable(file, info) {
 			return nil, changed(requested)
 		}
@@ -1373,6 +1383,11 @@ func (s *Service) pollWatches() {
 	s.mu.Lock()
 	snapshots := make(map[string]watchRecord, len(s.watches))
 	for clientID, record := range s.watches {
+		signatures := make(map[string]string, len(record.Signatures))
+		for path, signature := range record.Signatures {
+			signatures[path] = signature
+		}
+		record.Signatures = signatures
 		snapshots[clientID] = record
 	}
 	s.mu.Unlock()
@@ -1661,22 +1676,37 @@ func (s *Service) addGitMetadata(ctx context.Context, result map[string]any, req
 		defer parent.Close()
 		gitDirectory = parent
 	}
-	gitCtx, cancel := context.WithTimeout(ctx, 400*time.Millisecond)
+	gitMetadataTimeout := 400 * time.Millisecond
+	if runtime.GOOS == "darwin" {
+		gitMetadataTimeout = 10 * time.Second
+	}
+	gitCtx, cancel := context.WithTimeout(ctx, gitMetadataTimeout)
 	defer cancel()
-	rootBytes, _, err := runGitBounded(gitCtx, gitDirectory, nil, []string{"rev-parse", "--show-toplevel"}, 4096)
-	if err != nil {
-		return
-	}
-	root := filepath.Clean(strings.TrimSpace(string(rootBytes)))
-	root, err = filepath.Abs(root)
-	if err != nil {
-		return
-	}
 	workingDirectory := filepath.Dir(resolved)
 	if info.IsDir() {
 		workingDirectory = resolved
 	}
-	namespace, namespaceErr := s.openGitNamespace(gitDirectory, workingDirectory, requested)
+	var root string
+	var namespace *gitNamespace
+	var namespaceErr *Error
+	if runtime.GOOS == "darwin" {
+		namespace, namespaceErr = s.openGitNamespaceContext(gitCtx, gitDirectory, workingDirectory, requested)
+		if namespaceErr != nil {
+			return
+		}
+		root = namespace.workTreePath
+	} else {
+		rootBytes, _, gitErr := runGitBounded(gitCtx, gitDirectory, nil, []string{"rev-parse", "--show-toplevel"}, 4096)
+		if gitErr != nil {
+			return
+		}
+		root = filepath.Clean(strings.TrimSpace(string(rootBytes)))
+		root, err = filepath.Abs(root)
+		if err != nil {
+			return
+		}
+		namespace, namespaceErr = s.openGitNamespaceContext(gitCtx, gitDirectory, workingDirectory, requested)
+	}
 	if namespaceErr != nil {
 		return
 	}
@@ -1685,7 +1715,7 @@ func (s *Service) addGitMetadata(ctx context.Context, result map[string]any, req
 	if err != nil || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
 		return
 	}
-	rootDirectory, rootErr := openGitRootDescriptor(root, requested)
+	rootDirectory, rootErr := openGitRootDescriptor(gitCtx, root, requested)
 	if rootErr != nil {
 		return
 	}
@@ -1696,10 +1726,11 @@ func (s *Service) addGitMetadata(ctx context.Context, result map[string]any, req
 		return output, commandErr
 	}
 	rootPath := relative == "."
+	displayRoot := displayGitRootPath(requested, relative, root)
 	if rootPath {
 		relative = ""
 	}
-	repo := map[string]any{"root": root, "name": filepath.Base(root), "branch": "", "detached": false, "head_sha": "", "upstream": "", "dirty_count": 0, "ahead": 0, "behind": 0}
+	repo := map[string]any{"root": displayRoot, "name": filepath.Base(displayRoot), "branch": "", "detached": false, "head_sha": "", "upstream": "", "dirty_count": 0, "ahead": 0, "behind": 0}
 	if branch, branchErr := run("symbolic-ref", "--short", "HEAD"); branchErr == nil {
 		repo["branch"] = strings.TrimSpace(string(branch))
 	} else {
@@ -1732,8 +1763,8 @@ func (s *Service) addGitMetadata(ctx context.Context, result map[string]any, req
 			}
 		}
 	}
-	result["git_root"] = root
-	result["repo_root"] = root
+	result["git_root"] = displayRoot
+	result["repo_root"] = displayRoot
 	result["relative_path"] = filepath.ToSlash(relative)
 	result["git_tracked"] = tracked
 	result["git_history"] = history
@@ -1752,7 +1783,8 @@ func (s *Service) pathStillStable(file *os.File, before os.FileInfo) bool {
 		return false
 	}
 	left, right := identityFor(before), identityFor(after)
-	return sameDescriptorIdentity(left, right) && left.size == right.size && left.mtimeNS == right.mtimeNS
+	stable := sameDescriptorIdentity(left, right) && left.size == right.size && left.mtimeNS == right.mtimeNS
+	return stable
 }
 
 func nonEmptyLines(value string) []string {

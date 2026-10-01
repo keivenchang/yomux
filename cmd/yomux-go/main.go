@@ -40,7 +40,6 @@ import (
 	"syscall"
 	"time"
 	"unicode"
-	"unsafe"
 
 	"github.com/keivenchang/yomux/internal/capabilities"
 	"github.com/keivenchang/yomux/internal/finder"
@@ -48,7 +47,7 @@ import (
 	"github.com/keivenchang/yomux/internal/work"
 )
 
-const version = "0.10.0"
+const version = "0.10.1"
 const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 const maxYolomuxSessionTabs = 99
 const goServiceID = "yomux-go"
@@ -2649,47 +2648,6 @@ func clampDimension(value, minimum, maximum, fallback int) int {
 	return value
 }
 
-func openPTY(rows, cols int) (*ptyPair, error) {
-	masterFD, err := syscall.Open("/dev/ptmx", syscall.O_RDWR|syscall.O_NOCTTY, 0)
-	if err != nil {
-		return nil, err
-	}
-	unlock := 0
-	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(masterFD), uintptr(0x40045431), uintptr(unsafe.Pointer(&unlock))); errno != 0 {
-		_ = syscall.Close(masterFD)
-		return nil, errno
-	}
-	ptyNumber := 0
-	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(masterFD), uintptr(0x80045430), uintptr(unsafe.Pointer(&ptyNumber))); errno != 0 {
-		_ = syscall.Close(masterFD)
-		return nil, errno
-	}
-	slaveFD, err := syscall.Open(fmt.Sprintf("/dev/pts/%d", ptyNumber), syscall.O_RDWR|syscall.O_NOCTTY, 0)
-	if err != nil {
-		_ = syscall.Close(masterFD)
-		return nil, err
-	}
-	pair := &ptyPair{
-		master: os.NewFile(uintptr(masterFD), "pty-master"),
-		slave:  os.NewFile(uintptr(slaveFD), "pty-slave"),
-		tty:    fmt.Sprintf("/dev/pts/%d", ptyNumber),
-	}
-	if err := pair.resize(rows, cols); err != nil {
-		pair.close()
-		return nil, err
-	}
-	return pair, nil
-}
-
-func (p *ptyPair) resize(rows, cols int) error {
-	size := winsize{rows: uint16(rows), cols: uint16(cols)}
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, p.master.Fd(), uintptr(0x5414), uintptr(unsafe.Pointer(&size)))
-	if errno != 0 {
-		return errno
-	}
-	return nil
-}
-
 func (p *ptyPair) close() { _ = p.master.Close(); _ = p.slave.Close() }
 
 func (c *wsConn) frame(opcode byte, payload []byte) error {
@@ -3072,7 +3030,7 @@ func main() {
 	// The live Tabber metadata path and the persisted YO!stats collector must
 	// use the same screen classifier. Tests replace this seam with a synthetic
 	// classifier so no host pane, process, transcript, or database is needed.
-	statusSources := stats.LinuxAgentStatusSources(opencodeDatabase)
+	statusSources := stats.CurrentPlatformAgentStatusSources(opencodeDatabase)
 	if os.Getenv("YOLOMUX_STATS_SYNTHETIC_INVENTORY") == "1" {
 		statusSources = stats.SyntheticAgentStatusSources(opencodeDatabase)
 	}
@@ -3080,7 +3038,7 @@ func main() {
 		return stats.ClassifyAgentStatus(ctx, request, statusSources)
 	}
 	if !collectorsDisabled {
-		agentInventorySources := stats.LinuxAgentInventorySources()
+		agentInventorySources := stats.CurrentPlatformAgentInventorySources()
 		if os.Getenv("YOLOMUX_STATS_SYNTHETIC_INVENTORY") == "1" {
 			agentInventorySources = stats.SyntheticAgentInventorySources()
 		}
@@ -3231,10 +3189,15 @@ func normalizeYomuxEnvironment() bool {
 }
 
 func processKeyForRuntime() string {
-	if runtime.GOOS == "linux" {
-		return filepath.Base(os.Args[0])
+	return processKeyForExecutable(os.Args[0])
+}
+
+func processKeyForExecutable(executable string) string {
+	name := filepath.Base(executable)
+	if name == "" || name == "." || name == string(filepath.Separator) {
+		return goServiceID
 	}
-	return "yomux-go"
+	return name
 }
 
 // processIdentityForRuntime scopes the Go CPU series to this server instance.
@@ -3685,18 +3648,27 @@ func (s *server) rejectForbidden(w http.ResponseWriter, user authUser, role stri
 	})
 }
 
+func (s *server) authSetupRequired() bool {
+	users := s.users()
+	return len(users) == 0 || len(users) == 1 && users[0].username == "user" && users[0].password == "password"
+}
+
 func (s *server) authSetup(w http.ResponseWriter, _ *http.Request) {
-	jsonResponse(w, http.StatusOK, map[string]any{"setup_required": len(s.users()) == 0})
+	jsonResponse(w, http.StatusOK, map[string]any{"setup_required": s.authSetupRequired()})
 }
 
 func (s *server) login(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.authSetupRequired() {
+		s.writePythonSetupAuth(w, r)
+		return
+	}
 	if r.Method == http.MethodGet {
 		next := safeLoginNextValue(r.URL.Query().Get("next"))
 		s.writePythonLogin(w, r, next, "")
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
@@ -3774,12 +3746,7 @@ func (s *server) loginSucceeded(r *http.Request, username string) {
 
 func (s *server) writePythonLogin(w http.ResponseWriter, r *http.Request, next, message string) {
 	next = safeLoginNextValue(next)
-	locale := ""
-	if cookie, err := r.Cookie("yomux_locale"); err == nil {
-		locale = cookie.Value
-	} else if cookie, err := r.Cookie("yolomux_locale"); err == nil {
-		locale = cookie.Value
-	}
+	locale := requestLocale(r)
 	script := `import sys
 from yomux_lib.web import login_html
 print(login_html(next_path=sys.argv[1], error=sys.argv[2], secure=sys.argv[3] == "1", current_locale=sys.argv[4], accept_language=sys.argv[5]), end="")`
@@ -3797,6 +3764,37 @@ print(login_html(next_path=sys.argv[1], error=sys.argv[2], secure=sys.argv[3] ==
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(body)
+}
+
+func (s *server) writePythonSetupAuth(w http.ResponseWriter, r *http.Request) {
+	locale := requestLocale(r)
+	secure := "0"
+	if s.secureCookies() {
+		secure = "1"
+	}
+	script := `import sys
+from yomux_lib.web import setup_auth_html
+print(setup_auth_html(current_locale=sys.argv[1], accept_language=sys.argv[2], secure=sys.argv[3] == "1"), end="")`
+	command := exec.Command("python3", "-c", script, locale, r.Header.Get("Accept-Language"), secure)
+	command.Dir = s.root
+	command.Env = pythonBridgeEnvironment(s.root, s.config)
+	body, err := command.Output()
+	if err != nil {
+		http.Error(w, "authentication setup page unavailable", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(body)
+}
+
+func requestLocale(r *http.Request) string {
+	if cookie, err := r.Cookie("yomux_locale"); err == nil {
+		return cookie.Value
+	}
+	if cookie, err := r.Cookie("yolomux_locale"); err == nil {
+		return cookie.Value
+	}
+	return ""
 }
 
 func (s *server) logout(w http.ResponseWriter, r *http.Request) {
@@ -5863,6 +5861,30 @@ func (s *server) readGoProcessMetricsUncached(now time.Time) goProcessMetrics {
 	} else {
 		result.ChildProcesses = s.readGoChildProcessMetrics(now)
 	}
+	if runtime.GOOS == "darwin" {
+		row, ok := currentDarwinGoProcess(result.PID)
+		if !ok {
+			return result
+		}
+		rss := row.RSSBytes
+		result.RSSBytes = &rss
+		result.RSSReasonCode, result.RSSReason = "", ""
+		s.processMetricsMu.Lock()
+		if s.processCPUValid && now.After(s.processMetricsAt) && row.CPUSeconds >= s.processCPUSeconds {
+			elapsed := now.Sub(s.processMetricsAt).Seconds()
+			if elapsed > 0 {
+				percent := (row.CPUSeconds - s.processCPUSeconds) / elapsed * 100
+				if !math.IsNaN(percent) && !math.IsInf(percent, 0) && percent >= 0 {
+					result.CPUPercent = &percent
+					result.CPUReasonCode = ""
+					result.CPUReason = ""
+				}
+			}
+		}
+		s.processCPUSeconds, s.processMetricsAt, s.processCPUValid = row.CPUSeconds, now, true
+		s.processMetricsMu.Unlock()
+		return result
+	}
 	if runtime.GOOS != "linux" {
 		return result
 	}
@@ -5912,6 +5934,14 @@ func (s *server) readGoProcessMetricsUncached(now time.Time) goProcessMetrics {
 	s.processCPUValid = true
 	s.processMetricsMu.Unlock()
 	return result
+}
+
+func currentDarwinGoProcess(pid int) (procEntry, bool) {
+	row, ok := stats.DarwinProcessMetricsForPID(pid)
+	if !ok {
+		return procEntry{}, false
+	}
+	return procEntry{PID: row.PID, Identity: row.Identity, CPUSeconds: row.CPUSeconds, RSSBytes: row.RSSBytes}, true
 }
 
 const maxGoThreads = 256
@@ -6002,7 +6032,18 @@ func (s *server) readGoChildProcessMetrics(now time.Time) []goChildProcessMetric
 		if metric.Label == "" {
 			metric.Label = fmt.Sprintf("pid:%d", entry.PID)
 		}
-		if runtime.GOOS == "linux" {
+		if runtime.GOOS == "darwin" {
+			if row, ok := currentDarwinGoProcess(entry.PID); ok {
+				metric.State = "running"
+				rss := row.RSSBytes
+				metric.RSSBytes = &rss
+				metric.RSSReasonCode, metric.RSSReason = "", ""
+				metric.CPUPercent = s.childCPUPercent(now, row.Identity, row.CPUSeconds)
+				if metric.CPUPercent != nil {
+					metric.CPUReasonCode, metric.CPUReason = "", ""
+				}
+			}
+		} else if runtime.GOOS == "linux" {
 			data, readErr := os.ReadFile(filepath.Join("/proc", strconv.Itoa(entry.PID), "stat"))
 			if readErr == nil {
 				metric.State = linuxChildProcessState(string(data))
@@ -6813,7 +6854,7 @@ func (s *server) activity(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	sessions := topology.sessions
-	published, publishedGeneration, stale := s.metadataSnapshot()
+	published, publishedGeneration, stale, metadataObservedAt := s.metadataSnapshotWithBuiltAt()
 	metadataSessions := metadataSessionsForTopology(published, publishedGeneration, topology)
 	metadataStale := published == nil || stale || metadataPayloadTopologyGeneration(published) != topology.generation
 	if metadataStale {
@@ -6822,12 +6863,13 @@ func (s *server) activity(w http.ResponseWriter, r *http.Request) {
 	activity := make(map[string]any)
 	activityErrors := make([]string, 0)
 	activityAgentStates := map[string]string(nil)
+	activityAgentObservedAt := map[string]time.Time(nil)
 	if s.statsService != nil {
 		statusSnapshot, statusErr := s.statsService.AgentStatus(r.Context())
 		if statusErr != nil {
 			activityErrors = append(activityErrors, statusErr.Error())
 		} else {
-			activityAgentStates = activityAgentStatusOverrides(statusSnapshot)
+			activityAgentStates, activityAgentObservedAt = activityAgentStatusOverrides(statusSnapshot)
 		}
 	}
 	if rosterErr != nil {
@@ -6877,7 +6919,13 @@ func (s *server) activity(w http.ResponseWriter, r *http.Request) {
 		for _, agent := range rows {
 			window, _ := agent["window_index"].(int)
 			state := stringValue(agent["status"])
-			if currentState, ok := activityAgentStates[activityAgentStatusKey(session, stringValue(agent["pane_target"]), stringValue(agent["kind"]))]; ok {
+			statusObservedAt := metadataObservedAt
+			if observedAt, ok := agent["status_observed_at"].(float64); ok && observedAt > 0 {
+				statusObservedAt = time.Unix(0, int64(observedAt*1e9))
+			}
+			key := activityAgentStatusKey(session, stringValue(agent["pane_target"]), stringValue(agent["kind"]))
+			currentObservedAt := activityAgentObservedAt[key]
+			if currentState, ok := activityAgentStates[key]; ok && (currentObservedAt.IsZero() || currentObservedAt.After(statusObservedAt)) {
 				state = currentState
 			}
 			windowRow := map[string]any{
@@ -7117,12 +7165,17 @@ func appendMetadataErrorValues(result []string, value any) []string {
 }
 
 func (s *server) metadataSnapshot() (map[string]any, uint64, bool) {
+	payload, generation, stale, _ := s.metadataSnapshotWithBuiltAt()
+	return payload, generation, stale
+}
+
+func (s *server) metadataSnapshotWithBuiltAt() (map[string]any, uint64, bool, time.Time) {
 	s.metadataMu.Lock()
 	defer s.metadataMu.Unlock()
 	if s.metadataPayload == nil {
-		return nil, 0, true
+		return nil, 0, true, time.Time{}
 	}
-	return cloneMap(s.metadataPayload), s.metadataGeneration, s.metadataBuiltAt.IsZero() || time.Since(s.metadataBuiltAt) >= goMetadataCacheTTL
+	return cloneMap(s.metadataPayload), s.metadataGeneration, s.metadataBuiltAt.IsZero() || time.Since(s.metadataBuiltAt) >= goMetadataCacheTTL, s.metadataBuiltAt
 }
 
 func (s *server) queueMetadataRefresh(force bool, sessions []string, identities map[string]string, rosterErr error, topologyGeneration uint64) uint64 {
@@ -8400,11 +8453,7 @@ func (s *server) bridge(conn *wsConn, session string, readonly bool, clientID st
 		}
 	}
 	cmd := s.tmuxCommand(args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setsid:  true,
-		Setctty: true,
-		Ctty:    0,
-	}
+	cmd.SysProcAttr = terminalProcessAttributes()
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 	cmd.Stdin = pty.slave
 	cmd.Stdout = pty.slave

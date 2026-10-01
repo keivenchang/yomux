@@ -3570,9 +3570,12 @@ func defaultAgentTokenSourcesBoundedWithCursor(ctx context.Context, records []Ag
 			root := defaultTranscriptRoot(record.Kind, configuredRoots...)
 			if exact := codexTranscriptFromProcessFD(record.PID, root); exact != "" {
 				addTranscriptSource(&out, seen, exact, record, true)
-				exactCodexScopes[agentTokenScope(record)] = true
-				continue
 			}
+			// An active Codex process owns its rollout through an open descriptor.
+			// Guessing from the newest historical file in the same directory can
+			// attribute two panes' usage to the wrong session.
+			exactCodexScopes[agentTokenScope(record)] = true
+			continue
 		}
 		fallbackRecords = append(fallbackRecords, record)
 	}
@@ -3643,28 +3646,29 @@ func codexTranscriptFromProcessFD(pid int, root string) string {
 	if pid <= 0 || root == "" {
 		return ""
 	}
-	entries, err := os.ReadDir(filepath.Join("/proc", strconv.Itoa(pid), "fd"))
-	if err != nil {
-		return ""
-	}
-	targets := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		target, readErr := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "fd", entry.Name()))
-		if readErr == nil {
-			targets = append(targets, target)
-		}
-	}
-	return newestCodexTranscriptTarget(root, targets)
+	return newestCodexTranscriptTarget(root, ProcessOpenFiles(pid))
+}
+
+func CodexTranscriptFromProcess(pid int, root string) string {
+	return codexTranscriptFromProcessFD(pid, root)
 }
 
 func newestCodexTranscriptTarget(root string, targets []string) string {
 	root = filepath.Clean(root)
+	if resolvedRoot, err := filepath.EvalSymlinks(root); err == nil {
+		root = filepath.Clean(resolvedRoot)
+	}
 	candidates := make([]string, 0, len(targets))
 	for _, target := range targets {
 		target = strings.TrimSuffix(target, " (deleted)")
 		if filepath.Base(target) == "" || !strings.HasPrefix(filepath.Base(target), "rollout-") || filepath.Ext(target) != ".jsonl" {
 			continue
 		}
+		resolvedTarget, err := filepath.EvalSymlinks(target)
+		if err != nil {
+			continue
+		}
+		target = filepath.Clean(resolvedTarget)
 		relative, err := filepath.Rel(root, target)
 		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
 			continue

@@ -372,6 +372,41 @@ func TestHistoricalCodexAttributionCacheKeepsEmptyTranscriptReads(t *testing.T) 
 	}
 }
 
+func TestHistoricalCodexAttributionCacheKeepsLargeLowWeightTranscript(t *testing.T) {
+	archive := filepath.Join(t.TempDir(), "sessions")
+	if err := os.MkdirAll(archive, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cwd := t.TempDir()
+	path := filepath.Join(archive, "rollout-large.jsonl")
+	largeLine := append([]byte("{\"type\":\"message\",\"payload\":{\"text\":\""), []byte(strings.Repeat("x", 2*1024*1024))...)
+	largeLine = append(largeLine, []byte("\"}}\n")...)
+	operationLine := []byte("{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"arguments\":{\"cmd\":\"git add note.txt\",\"workdir\":\"" + cwd + "\"}}}\n")
+	transcript := append(largeLine, operationLine...)
+	if err := os.WriteFile(path, transcript, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	openCalls := 0
+	openFile := func(path string) (io.ReadCloser, error) {
+		openCalls++
+		return os.Open(path)
+	}
+	transcripts := newHistoricalCodexAttributionCache()
+	collect := func() map[string]*sessionFileAttribution {
+		t.Helper()
+		return collectHistoricalCodexAttributionsWithCache(context.Background(), transcripts, archive, []string{cwd}, time.Time{}, map[string]bool{}, openFile)
+	}
+	for iteration := 0; iteration < 2; iteration++ {
+		changes := collect()
+		if changes[filepath.Join(cwd, "note.txt")] == nil {
+			t.Fatalf("large transcript attribution is missing on collection %d", iteration+1)
+		}
+	}
+	if openCalls != 1 || transcripts.records.Len() != 1 || transcripts.bytes == 0 {
+		t.Fatalf("large low-weight transcript cache = opens:%d records:%d bytes:%d; want one open and one bounded entry", openCalls, transcripts.records.Len(), transcripts.bytes)
+	}
+}
+
 func TestHistoricalCodexAttributionCacheBoundsRetainedBytes(t *testing.T) {
 	transcripts := newHistoricalCodexAttributionCache()
 	halfBudget := int64(maxHistoricalCodexAttributionCacheBytes / 2)

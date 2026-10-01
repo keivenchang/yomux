@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -124,38 +125,48 @@ func (s *Service) openGitHistoryScopeWithOptions(ctx context.Context, raw string
 		}
 		return nil, finderErr
 	}
-	rootBytes, _, gitErr := runGitBounded(ctx, directory, nil, []string{"rev-parse", "--show-toplevel"}, 4096)
-	if gitErr != nil {
-		_ = directory.Close()
-		if ctx.Err() != nil {
-			return nil, cancelled(requested)
+	var root string
+	var err error
+	var namespace *gitNamespace
+	if runtime.GOOS == "darwin" {
+		namespace, finderErr = s.openGitNamespaceContext(ctx, directory, resolved, requested)
+		if finderErr == nil {
+			root = namespace.workTreePath
 		}
-		return nil, &Error{Status: http.StatusBadRequest, Code: "not_git_repo", MessageKey: "fs.error.notGitRepo", Path: requested, Message: "path is not in a Git repository"}
+	} else {
+		rootBytes, _, gitErr := runGitBounded(ctx, directory, nil, []string{"rev-parse", "--show-toplevel"}, 4096)
+		if gitErr != nil {
+			_ = directory.Close()
+			if ctx.Err() != nil {
+				return nil, cancelled(requested)
+			}
+			return nil, &Error{Status: http.StatusBadRequest, Code: "not_git_repo", MessageKey: "fs.error.notGitRepo", Path: requested, Message: "path is not in a Git repository"}
+		}
+		root, err = filepath.Abs(filepath.Clean(strings.TrimSpace(string(rootBytes))))
+		if err != nil {
+			_ = directory.Close()
+			return nil, filesystemError(requested, err)
+		}
+		namespace, finderErr = s.openGitNamespaceContext(ctx, directory, resolved, requested)
 	}
-	root, err := filepath.Abs(filepath.Clean(strings.TrimSpace(string(rootBytes))))
-	if err != nil {
-		_ = directory.Close()
-		return nil, filesystemError(requested, err)
-	}
-	namespace, finderErr := s.openGitNamespaceContext(ctx, directory, resolved, requested)
 	if finderErr != nil {
 		_ = directory.Close()
 		return nil, finderErr
 	}
 	var hostedRemote map[string]string
 	if options.readHostedRemote {
-		hostedRemote, finderErr = readHostedGitRemote(namespace, requested)
+		hostedRemote, finderErr = readHostedGitRemote(ctx, namespace, requested)
 		if finderErr != nil {
 			namespace.close()
 			_ = directory.Close()
 			return nil, finderErr
 		}
-	} else if finderErr = validateGitConfigFile(namespace, requested); finderErr != nil {
+	} else if finderErr = validateGitConfigFile(ctx, namespace, requested); finderErr != nil {
 		namespace.close()
 		_ = directory.Close()
 		return nil, finderErr
 	}
-	branch, finderErr := readCurrentGitBranch(namespace, requested)
+	branch, finderErr := readCurrentGitBranch(ctx, namespace, requested)
 	if finderErr != nil {
 		namespace.close()
 		_ = directory.Close()
@@ -176,14 +187,14 @@ func (s *Service) openGitHistoryScopeWithOptions(ctx context.Context, raw string
 		_ = directory.Close()
 		return nil, &Error{Status: http.StatusUnprocessableEntity, Code: "git_path_encoding", MessageKey: "fs.error.gitPathEncoding", Path: requested, Message: errGitPathEncoding.Error()}
 	}
-	rootDirectory, rootErr := openGitRootDescriptor(root, requested)
+	rootDirectory, rootErr := openGitRootDescriptor(ctx, root, requested)
 	if rootErr != nil {
 		namespace.close()
 		_ = directory.Close()
 		return nil, rootErr
 	}
 	_ = directory.Close()
-	return &gitHistoryScope{path: requested, repo: root, identity: namespace.identity(), relative: relative, branch: branch, hostedRemote: hostedRemote, directory: rootDirectory, namespace: namespace}, nil
+	return &gitHistoryScope{path: requested, repo: displayGitRootPath(requested, relative, root), identity: namespace.identity(), relative: relative, branch: branch, hostedRemote: hostedRemote, directory: rootDirectory, namespace: namespace}, nil
 }
 
 func gitRemoteURLs(config []byte) [][2]string {
@@ -308,8 +319,14 @@ func hostedGitRemote(config []byte) map[string]string {
 	return selected
 }
 
-func openHostedGitConfig(namespace *gitNamespace, requested string) (*os.File, os.FileInfo, *Error) {
-	if namespace == nil || namespace.validate() != nil {
+func openHostedGitConfig(ctx context.Context, namespace *gitNamespace, requested string) (*os.File, os.FileInfo, *Error) {
+	if ctx.Err() != nil {
+		return nil, nil, cancelled(requested)
+	}
+	if namespace == nil || namespace.validateContext(ctx) != nil {
+		if ctx.Err() != nil {
+			return nil, nil, cancelled(requested)
+		}
 		return nil, nil, gitNamespaceChanged(requested)
 	}
 	config, err := openAt(namespace.commonDir, "config", syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
@@ -319,6 +336,10 @@ func openHostedGitConfig(namespace *gitNamespace, requested string) (*os.File, o
 	if err != nil {
 		return nil, nil, &Error{Status: http.StatusConflict, Code: "git_repository_changed", MessageKey: "fs.error.gitRepositoryChanged", Path: requested, Message: "Git configuration is unavailable"}
 	}
+	if ctx.Err() != nil {
+		_ = config.Close()
+		return nil, nil, cancelled(requested)
+	}
 	before, err := config.Stat()
 	if err != nil || !before.Mode().IsRegular() {
 		_ = config.Close()
@@ -327,44 +348,62 @@ func openHostedGitConfig(namespace *gitNamespace, requested string) (*os.File, o
 	return config, before, nil
 }
 
-func validateGitConfigFile(namespace *gitNamespace, requested string) *Error {
-	config, before, finderErr := openHostedGitConfig(namespace, requested)
+func validateGitConfigFile(ctx context.Context, namespace *gitNamespace, requested string) *Error {
+	config, before, finderErr := openHostedGitConfig(ctx, namespace, requested)
 	if finderErr != nil || config == nil {
 		return finderErr
 	}
 	defer config.Close()
 	after, err := config.Stat()
-	if err != nil || identityFor(before) != identityFor(after) || namespace.validate() != nil {
+	if err != nil || identityFor(before) != identityFor(after) || namespace.validateContext(ctx) != nil {
+		if ctx.Err() != nil {
+			return cancelled(requested)
+		}
 		return &Error{Status: http.StatusConflict, Code: "git_repository_changed", MessageKey: "fs.error.gitRepositoryChanged", Path: requested, Message: "Git configuration changed during history read"}
 	}
 	return nil
 }
 
-func readHostedGitRemote(namespace *gitNamespace, requested string) (map[string]string, *Error) {
-	config, before, finderErr := openHostedGitConfig(namespace, requested)
+func readHostedGitRemote(ctx context.Context, namespace *gitNamespace, requested string) (map[string]string, *Error) {
+	config, before, finderErr := openHostedGitConfig(ctx, namespace, requested)
 	if finderErr != nil || config == nil {
 		return nil, finderErr
 	}
 	defer config.Close()
 	data, err := io.ReadAll(io.LimitReader(config, gitConfigMaxBytes+1))
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, cancelled(requested)
+		}
 		return nil, &Error{Status: http.StatusConflict, Code: "git_repository_changed", MessageKey: "fs.error.gitRepositoryChanged", Path: requested, Message: "Git configuration changed during history read"}
+	}
+	if ctx.Err() != nil {
+		return nil, cancelled(requested)
 	}
 	if len(data) > gitConfigMaxBytes {
 		return nil, &Error{Status: http.StatusRequestEntityTooLarge, Code: "too_large", MessageKey: "fs.error.gitHistoryTooLarge", Path: requested, Message: "Git configuration exceeds the metadata limit"}
 	}
 	after, err := config.Stat()
-	if err != nil || identityFor(before) != identityFor(after) || namespace.validate() != nil {
+	if err != nil || identityFor(before) != identityFor(after) || namespace.validateContext(ctx) != nil {
+		if ctx.Err() != nil {
+			return nil, cancelled(requested)
+		}
 		return nil, &Error{Status: http.StatusConflict, Code: "git_repository_changed", MessageKey: "fs.error.gitRepositoryChanged", Path: requested, Message: "Git configuration changed during history read"}
 	}
 	return hostedGitRemote(data), nil
 }
 
-func readCurrentGitBranch(namespace *gitNamespace, requested string) (string, *Error) {
+func readCurrentGitBranch(ctx context.Context, namespace *gitNamespace, requested string) (string, *Error) {
+	if ctx.Err() != nil {
+		return "", cancelled(requested)
+	}
 	if namespace == nil {
 		return "", gitNamespaceChanged(requested)
 	}
-	if err := namespace.validate(); err != nil {
+	if err := namespace.validateContext(ctx); err != nil {
+		if ctx.Err() != nil {
+			return "", cancelled(requested)
+		}
 		return "", gitNamespaceChanged(requested)
 	}
 	head, err := openAt(namespace.gitDir, "HEAD", syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
@@ -378,7 +417,13 @@ func readCurrentGitBranch(namespace *gitNamespace, requested string) (string, *E
 	}
 	data, err := io.ReadAll(io.LimitReader(head, 4097))
 	if err != nil || len(data) > 4096 {
+		if ctx.Err() != nil {
+			return "", cancelled(requested)
+		}
 		return "", gitNamespaceChanged(requested)
+	}
+	if ctx.Err() != nil {
+		return "", cancelled(requested)
 	}
 	after, err := head.Stat()
 	if err != nil || identityFor(before) != identityFor(after) {
@@ -389,14 +434,20 @@ func readCurrentGitBranch(namespace *gitNamespace, requested string) (string, *E
 	if strings.HasPrefix(record, "ref: refs/heads/") {
 		branch := strings.TrimPrefix(record, "ref: refs/heads/")
 		if branch != "" && !strings.ContainsAny(branch, "\x00\r\n") {
-			if err := namespace.validate(); err != nil {
+			if err := namespace.validateContext(ctx); err != nil {
+				if ctx.Err() != nil {
+					return "", cancelled(requested)
+				}
 				return "", gitNamespaceChanged(requested)
 			}
 			return branch, nil
 		}
 	}
 	if gitObjectIDPattern.MatchString(record) {
-		if err := namespace.validate(); err != nil {
+		if err := namespace.validateContext(ctx); err != nil {
+			if ctx.Err() != nil {
+				return "", cancelled(requested)
+			}
 			return "", gitNamespaceChanged(requested)
 		}
 		return "", nil
@@ -448,7 +499,7 @@ func gitHistoryLimit(raw string) (int, error) {
 }
 
 func gitHistoryHead(ctx context.Context, scope *gitHistoryScope) (string, *Error) {
-	output, stderr, err := runGitBounded(ctx, scope.directory, nil, []string{"rev-parse", "--verify", "--quiet", "HEAD"}, 512, scope.namespace)
+	output, stderr, err := runGitMetadataBounded(ctx, scope.directory, nil, []string{"rev-parse", "--verify", "--quiet", "HEAD"}, 512, scope.namespace)
 	if err == nil {
 		return strings.TrimSpace(string(output)), nil
 	}
@@ -465,7 +516,7 @@ func gitHistoryHead(ctx context.Context, scope *gitHistoryScope) (string, *Error
 }
 
 func gitVerifiedHistoryHead(ctx context.Context, scope *gitHistoryScope, messageKey string) (string, *Error) {
-	output, stderr, err := runGitBounded(ctx, scope.directory, nil, []string{"rev-parse", "--verify", "--quiet", "HEAD^{commit}"}, 512, scope.namespace)
+	output, stderr, err := runGitMetadataBounded(ctx, scope.directory, nil, []string{"rev-parse", "--verify", "--quiet", "HEAD^{commit}"}, 512, scope.namespace)
 	if err == nil {
 		return strings.TrimSpace(string(output)), nil
 	}
@@ -509,6 +560,13 @@ func (s *Service) captureGitSnapshot(ctx context.Context, scope *gitHistoryScope
 	}
 	snapshot.head = head
 	return snapshot, nil
+}
+
+func (s *Service) prepareGitHistoryNamespace(ctx context.Context, scope *gitHistoryScope) *Error {
+	if err := scope.namespace.prepareSnapshot(ctx, scope.directory); err != nil {
+		return gitHistoryReadError(scope.path, err)
+	}
+	return nil
 }
 
 func (s *Service) validateFrozenGitHistoryHead(ctx context.Context, snapshot gitSnapshot, frozenHead string) *Error {
@@ -614,7 +672,7 @@ func gitHistoryStatsPageCacheKey(scope *gitHistoryScope, currentHead, frozenHead
 func gitHistoryRefSignature(ctx context.Context, scope *gitHistoryScope) (string, *Error) {
 	// Decorations are part of the cached history rows, and refs can move without HEAD moving.
 	args := []string{"for-each-ref", "--sort=refname", "--format=%(refname)%x00%(objectname)%x00"}
-	output, stderr, err := runGitBounded(ctx, scope.directory, nil, args, gitHistoryMaxOutput, scope.namespace)
+	output, stderr, err := runGitMetadataBounded(ctx, scope.directory, nil, args, gitHistoryMaxOutput, scope.namespace)
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return "", cancelled(scope.path)
 	}
@@ -730,7 +788,7 @@ func (s *Service) refreshGitHistoryCachedMetadata(ctx context.Context, scope *gi
 	}
 	args := []string{"log", "--no-walk", "--format=" + format}
 	args = append(args, shas...)
-	output, _, err := runGitBounded(ctx, scope.directory, nil, args, gitHistoryMaxOutput, scope.namespace)
+	output, _, err := runGitMetadataBounded(ctx, scope.directory, nil, args, gitHistoryMaxOutput, scope.namespace)
 	if err != nil {
 		return gitHistoryReadError(scope.path, err)
 	}
@@ -1168,6 +1226,9 @@ func (s *Service) GitHistoryWorktree(ctx context.Context, raw string) (map[strin
 	defer scope.close()
 	gitCtx, cancel := gitViewContext(ctx)
 	defer cancel()
+	if finderErr := s.prepareGitHistoryNamespace(gitCtx, scope); finderErr != nil {
+		return nil, finderErr
+	}
 	return s.attachGitWorktreeStatus(gitCtx, scope, map[string]any{"path": scope.path, "repository_identity": scope.identity}), nil
 }
 
@@ -1175,7 +1236,7 @@ func (s *Service) GitHistoryPageAtOffset(ctx context.Context, raw, limitRaw, cur
 	if cursorRaw == "" || offset < 0 || offset > gitHistoryMaxOffset {
 		return nil, invalid(raw, "start_offset requires a valid frozen Git history cursor")
 	}
-	return s.gitHistory(ctx, raw, limitRaw, cursorRaw, false, &offset)
+	return s.gitHistory(ctx, raw, limitRaw, cursorRaw, false, &offset, false)
 }
 
 // GitHistoryAtOffset reads stats at a frozen cursor position without walking preceding rows.
@@ -1183,7 +1244,7 @@ func (s *Service) GitHistoryAtOffset(ctx context.Context, raw, limitRaw, cursorR
 	if cursorRaw == "" || offset < 0 || offset > gitHistoryMaxOffset {
 		return nil, invalid(raw, "stats_offset requires a valid frozen Git history cursor")
 	}
-	return s.gitHistory(ctx, raw, limitRaw, cursorRaw, true, &offset)
+	return s.gitHistory(ctx, raw, limitRaw, cursorRaw, true, &offset, false)
 }
 
 // GitHistoryStatsStream emits frozen history stats in caller-sized batches while keeping the
@@ -1252,6 +1313,9 @@ func (s *Service) gitHistoryStatsBatches(ctx context.Context, raw, cursorRaw str
 	defer scope.close()
 	gitCtx, cancel := gitViewContext(ctx)
 	defer cancel()
+	if finderErr := s.prepareGitHistoryNamespace(gitCtx, scope); finderErr != nil {
+		return "", finderErr
+	}
 	snapshot, finderErr := s.captureGitSnapshot(gitCtx, scope, "fs.error.gitHistoryFailed")
 	if finderErr != nil {
 		return "", finderErr
@@ -1393,7 +1457,7 @@ func (s *Service) gitHistoryStatsAtOffset(ctx context.Context, scope *gitHistory
 	}
 	args := []string{"log", "--topo-order", "--no-patch", "--decorate=short", "-z", "--max-count=" + strconv.Itoa(limit+1), "--skip=" + strconv.Itoa(offset), "--format=" + strings.ReplaceAll(gitHistoryFormat, "%G?", ""), frozenHead}
 	args = append(args, historyPathArgs(scope.relative)...)
-	output, _, gitErr := runGitBounded(ctx, scope.directory, nil, args, gitHistoryMaxOutput, scope.namespace)
+	output, _, gitErr := runGitMetadataBounded(ctx, scope.directory, nil, args, gitHistoryMaxOutput, scope.namespace)
 	if gitErr != nil {
 		return nil, gitHistoryReadError(scope.path, gitErr)
 	}
@@ -1418,7 +1482,7 @@ func (s *Service) gitHistoryStatsAtOffset(ctx context.Context, scope *gitHistory
 		args = append(args, gitCommitDiffOptions()...)
 		args = append(args, missing...)
 		args = append(args, historyPathArgs(scope.relative)...)
-		output, _, gitErr = runGitBounded(ctx, scope.directory, nil, args, gitHistoryMaxOutput, scope.namespace)
+		output, _, gitErr = runGitMetadataBounded(ctx, scope.directory, nil, args, gitHistoryMaxOutput, scope.namespace)
 		if gitErr != nil {
 			return nil, gitHistoryReadError(scope.path, gitErr)
 		}
@@ -1495,6 +1559,9 @@ func (s *Service) gitHistory(ctx context.Context, raw, limitRaw, cursorRaw strin
 	defer scope.close()
 	gitCtx, cancel := gitViewContext(ctx)
 	defer cancel()
+	if finderErr := s.prepareGitHistoryNamespace(gitCtx, scope); finderErr != nil {
+		return nil, finderErr
+	}
 	snapshot, finderErr := s.captureGitSnapshot(gitCtx, scope, "fs.error.gitHistoryFailed")
 	if finderErr != nil {
 		return nil, finderErr
@@ -1583,7 +1650,7 @@ func (s *Service) gitHistory(ctx context.Context, raw, limitRaw, cursorRaw strin
 	}
 	args = append(args, "-z", "--max-count="+strconv.Itoa(limit+1), "--skip="+strconv.Itoa(offset), "--format="+format, frozenHead)
 	args = append(args, historyPathArgs(scope.relative)...)
-	output, stderr, gitErr := runGitBounded(gitCtx, scope.directory, nil, args, gitHistoryMaxOutput, scope.namespace)
+	output, stderr, gitErr := runGitMetadataBounded(gitCtx, scope.directory, nil, args, gitHistoryMaxOutput, scope.namespace)
 	if errors.Is(gitErr, context.Canceled) || errors.Is(gitErr, context.DeadlineExceeded) {
 		return nil, cancelled(scope.path)
 	}
@@ -1708,7 +1775,7 @@ func gitExitStatus(err error, status int) bool {
 }
 
 func (s *Service) gitCommitExists(ctx context.Context, scope *gitHistoryScope, oid string) (bool, *Error) {
-	output, stderr, err := runGitBounded(ctx, scope.directory, nil, []string{"rev-parse", "--verify", "--quiet", oid + "^{commit}"}, 512, scope.namespace)
+	output, stderr, err := runGitMetadataBounded(ctx, scope.directory, nil, []string{"rev-parse", "--verify", "--quiet", oid + "^{commit}"}, 512, scope.namespace)
 	if err == nil && strings.TrimSpace(string(output)) == oid {
 		return true, nil
 	}
@@ -1743,7 +1810,7 @@ func (s *Service) gitCommitReachability(ctx context.Context, scope *gitHistorySc
 	if s.cachedGitReachability(cacheKey) {
 		return true, true, nil
 	}
-	_, stderr, err := runGitBounded(ctx, scope.directory, nil, []string{"merge-base", "--is-ancestor", ancestor, descendant}, 512, scope.namespace)
+	_, stderr, err := runGitMetadataBounded(ctx, scope.directory, nil, []string{"merge-base", "--is-ancestor", ancestor, descendant}, 512, scope.namespace)
 	if err == nil {
 		if !gitHistoryShallowBoundaryMatches(scope.namespace, scope.shallowBoundary) {
 			return false, false, gitNamespaceChanged(scope.path)
@@ -2120,6 +2187,9 @@ func (s *Service) GitCommit(ctx context.Context, raw, commitRaw, headRaw string,
 	defer scope.close()
 	gitCtx, cancel := gitViewContext(ctx)
 	defer cancel()
+	if finderErr := s.prepareGitHistoryNamespace(gitCtx, scope); finderErr != nil {
+		return nil, finderErr
+	}
 	snapshot, finderErr := s.captureGitSnapshot(gitCtx, scope, "fs.error.gitCommitFailed")
 	if finderErr != nil {
 		return nil, finderErr
@@ -2157,7 +2227,7 @@ func (s *Service) GitCommit(ctx context.Context, raw, commitRaw, headRaw string,
 	if cached, ok := s.cachedGitCommit(cacheKey); ok {
 		return cached, nil
 	}
-	productRaw, stderr, err := runGitBounded(gitCtx, scope.directory, nil, gitCommitProductArgs(commitRaw, scope.relative), gitCommitProductMaxOutput, scope.namespace)
+	productRaw, stderr, err := runGitMetadataBounded(gitCtx, scope.directory, nil, gitCommitProductArgs(commitRaw, scope.relative), gitCommitProductMaxOutput, scope.namespace)
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return nil, cancelled(scope.path)
 	}

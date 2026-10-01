@@ -97,6 +97,57 @@ func TestSessionFilesRepositoryResolverAcceptsFileAndDirectoryTargets(t *testing
 	}
 }
 
+func TestSessionFilesKnownRepositoryReusesMostSpecificScope(t *testing.T) {
+	root := t.TempDir()
+	nestedRepo := filepath.Join(root, "nested")
+	externalRepo := t.TempDir()
+	for _, directory := range []string{filepath.Join(root, "src"), nestedRepo, externalRepo} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(externalRepo, filepath.Join(root, "external")); err != nil {
+		t.Fatal(err)
+	}
+	scopes := map[string]*gitHistoryScope{
+		root:       {repo: root},
+		nestedRepo: {repo: nestedRepo},
+	}
+	tests := []struct {
+		name string
+		path string
+		want string
+		ok   bool
+	}{
+		{name: "parent repository", path: filepath.Join(root, "src", "missing.jsonl"), want: root, ok: true},
+		{name: "nested repository wins", path: filepath.Join(nestedRepo, "missing.jsonl"), want: nestedRepo, ok: true},
+		{name: "symlink escape is not reused", path: filepath.Join(root, "external", "missing.jsonl"), ok: false},
+		{name: "unrelated path is not reused", path: filepath.Join(externalRepo, "missing.jsonl"), ok: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := sessionFilesRepositoryScopePath(test.path, true)
+			got, ok := sessionFilesKnownRepository(path, scopes)
+			if got != test.want || ok != test.ok {
+				t.Fatalf("known repository = (%q, %t), want (%q, %t)", got, ok, test.want, test.ok)
+			}
+		})
+	}
+}
+
+func TestSessionFilesKnownRepositoryDoesNotCrossUnregisteredNestedRepository(t *testing.T) {
+	root := t.TempDir()
+	nestedRepo := filepath.Join(root, "nested")
+	if err := os.MkdirAll(filepath.Join(nestedRepo, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	scopes := map[string]*gitHistoryScope{root: {repo: root}}
+	path := sessionFilesRepositoryScopePath(filepath.Join(nestedRepo, "missing.jsonl"), true)
+	if got, ok := sessionFilesKnownRepository(path, scopes); ok {
+		t.Fatalf("known repository = (%q, %t), want no reusable outer scope across the nested .git boundary", got, ok)
+	}
+}
+
 func TestSessionFilesProjectsDefaultAndExplicitGitChanges(t *testing.T) {
 	isolateSessionFilesTestHome(t)
 	root, _ := newCommittedTestRepo(t)
@@ -144,6 +195,118 @@ func TestSessionFilesProjectsDefaultAndExplicitGitChanges(t *testing.T) {
 	explicitRepo := explicitPayload["repos"].([]map[string]any)
 	if len(explicitRepo) != 1 || explicitRepo[0]["from_ref"] != "HEAD" || explicitRepo[0]["to_ref"] != "current" || explicitRepo[0]["comparison_from_ref"] != "HEAD" || explicitRepo[0]["comparison_to_ref"] != "current" {
 		t.Fatalf("explicit repository = %#v", explicitPayload["repos"])
+	}
+}
+
+func TestSessionFilesDefaultBaseListsRefsOnceAndFallsBackToHEAD(t *testing.T) {
+	root, _ := newCommittedTestRepo(t)
+	for _, args := range [][]string{
+		{"-C", root, "checkout", "--orphan", "unrelated"},
+		{"-C", root, "rm", "-q", "--cached", "-r", "--", "."},
+	} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	unrelatedPath := filepath.Join(root, "unrelated.txt")
+	if err := os.WriteFile(unrelatedPath, []byte("unrelated history\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"-C", root, "add", "--", "unrelated.txt"},
+		{"-C", root, "commit", "-qm", "unrelated"},
+	} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	unrelatedCommit, err := exec.Command("git", "-C", root, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "note.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("git", "-C", root, "checkout", "master").CombinedOutput(); err != nil {
+		t.Fatalf("restore master: %v (%s)", err, output)
+	}
+	for _, args := range [][]string{
+		{"-C", root, "update-ref", "refs/remotes/origin/main", strings.TrimSpace(string(unrelatedCommit))},
+		{"-C", root, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"},
+		{"-C", root, "update-ref", "refs/heads/main", strings.TrimSpace(string(unrelatedCommit))},
+	} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	headCommit, err := exec.Command("git", "-C", root, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	scope, finderErr := service.openGitHistoryScopeWithOptions(context.Background(), root, gitHistoryScopeOptions{})
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	defer scope.close()
+	originalRunner := execCommandContext
+	commandCalls := 0
+	execCommandContext = func(ctx context.Context, args []string, extraFiles []*os.File) *exec.Cmd {
+		commandCalls++
+		return originalRunner(ctx, args, extraFiles)
+	}
+	t.Cleanup(func() { execCommandContext = originalRunner })
+	if base := sessionFilesDefaultBase(context.Background(), scope); base != strings.TrimSpace(string(headCommit)) {
+		t.Fatalf("default base = %q, want current HEAD after unrelated refs", base)
+	}
+	if commandCalls != 4 {
+		t.Fatalf("default-base Git command count = %d, want one ref listing and three unique ancestry checks", commandCalls)
+	}
+}
+
+func TestSessionFilesDefaultBasePrefersOriginHEAD(t *testing.T) {
+	root, base := newCommittedTestRepo(t)
+	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("second commit\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("git", "-C", root, "commit", "-qam", "second").CombinedOutput(); err != nil {
+		t.Fatalf("create second commit: %v (%s)", err, output)
+	}
+	for _, args := range [][]string{
+		{"-C", root, "update-ref", "refs/remotes/origin/main", base},
+		{"-C", root, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"},
+		{"-C", root, "update-ref", "refs/heads/main", "HEAD"},
+	} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
+	service, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	scope, finderErr := service.openGitHistoryScopeWithOptions(context.Background(), root, gitHistoryScopeOptions{})
+	if finderErr != nil {
+		t.Fatal(finderErr)
+	}
+	defer scope.close()
+	originalRunner := execCommandContext
+	commandCalls := 0
+	execCommandContext = func(ctx context.Context, args []string, extraFiles []*os.File) *exec.Cmd {
+		commandCalls++
+		return originalRunner(ctx, args, extraFiles)
+	}
+	t.Cleanup(func() { execCommandContext = originalRunner })
+	if selected := sessionFilesDefaultBase(context.Background(), scope); selected != base {
+		t.Fatalf("default base = %q, want origin/HEAD merge base %q", selected, base)
+	}
+	if commandCalls != 2 {
+		t.Fatalf("default-base Git command count = %d, want one ref listing and one ancestry check", commandCalls)
 	}
 }
 
@@ -680,6 +843,14 @@ func TestSessionFilesWithAgentsExcludesDefaultIgnoredTranscriptPaths(t *testing.
 func TestSessionFilesPreservesDeletedRowsAndRefFallback(t *testing.T) {
 	isolateSessionFilesTestHome(t)
 	root, _ := newCommittedTestRepo(t)
+	if err := os.WriteFile(filepath.Join(root, "stable.txt"), []byte("unchanged\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"-C", root, "add", "--", "stable.txt"}, {"-C", root, "commit", "-qm", "add stable file"}} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, output)
+		}
+	}
 	deleted := filepath.Join(root, "note.txt")
 	if err := os.Remove(deleted); err != nil {
 		t.Fatal(err)
@@ -704,6 +875,9 @@ func TestSessionFilesPreservesDeletedRowsAndRefFallback(t *testing.T) {
 	}
 	if rows["new.txt"] == nil || rows["new.txt"]["status"] != "?" {
 		t.Fatalf("invalid-ref fallback did not include untracked files: %#v", payload["files"])
+	}
+	if rows["stable.txt"] != nil {
+		t.Fatalf("invalid-ref fallback reported unchanged tracked file: %#v", rows["stable.txt"])
 	}
 	repos := payload["repos"].([]map[string]any)
 	if len(repos) != 1 || repos[0]["error"] != "requested refs not found in this repo; showing default" || repos[0]["from_ref"] != "default" || repos[0]["to_ref"] != "base" {

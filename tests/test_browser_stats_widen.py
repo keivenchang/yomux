@@ -6,6 +6,7 @@ import copy
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import ssl
 import shutil
@@ -277,7 +278,7 @@ def _prepare_go_collector_sources(root: Path) -> tuple[Path, Path, Path]:
     )
     copy_live_jsonl(
         source_root / "tests/fixtures/current_model_usage/observed.codex.jsonl",
-        home / "codex" / "sessions" / "live.jsonl",
+        home / "codex" / "sessions" / "rollout-live.jsonl",
         now,
     )
     database = root / "opencode.db"
@@ -1010,7 +1011,10 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
     prefix = f"yt-collector-{os.getpid()}"
     session_commands = {
         f"{prefix}-claude": f"exec -a claude {sys.executable} {source_root / 'tools/mockers/claude.py'} --mock",
-        f"{prefix}-codex": f"exec -a codex {sys.executable} {source_root / 'tools/mockers/codex.py'} --mock",
+        f"{prefix}-codex": (
+            f"exec 3<{shlex.quote(str(home / 'codex' / 'sessions' / 'rollout-live.jsonl'))}; "
+            f"exec -a codex {shlex.quote(sys.executable)} {shlex.quote(str(source_root / 'tools/mockers/codex.py'))} --mock"
+        ),
         f"{prefix}-opencode": f"exec -a opencode {opencode_interpreter} {source_root / 'tools/mockers/opencode.py'} --mock --session ses-live",
     }
     tmux_runtime = start_isolated_tmux_runtime(
@@ -1128,8 +1132,24 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
         result = browser.execute_async_script(
             r"""
             const done = arguments[arguments.length - 1];
+            const expectedSessions = arguments[0];
             const wait = async () => {
               const deadline = Date.now() + 30000;
+              let collectorFacts = null;
+              const visibleChartState = () => {
+                const panel = document.querySelector('.js-debug-panel');
+                const panelRect = panel?.getBoundingClientRect();
+                const panelVisible = Boolean(panel && panelRect.width > 0 && panelRect.height > 0);
+                const charts = Object.fromEntries(['activity', 'agentTokens', 'memory'].map(name => {
+                  const chart = panel?.querySelector(`[data-js-debug-chart="${name}"]`);
+                  const rect = chart?.getBoundingClientRect();
+                  const nodes = [...(chart?.querySelectorAll('[data-js-debug-series], [data-js-debug-area-series], [data-js-debug-bar-series]') || [])];
+                  return [name, {present: Boolean(chart), visible: Boolean(chart && rect.width > 0 && rect.height > 0),
+                    geometry: nodes.filter(node => node.getAttribute('d') || node.getAttribute('points') || Number(node.getAttribute('height') || 0) > 0).length,
+                    waiting: chart?.textContent?.includes('Waiting for server stats') || false}];
+                }));
+                return {panelVisible, charts};
+              };
               while (Date.now() < deadline) {
                 try {
                   const [statusResponse, snapshotResponse] = await Promise.all([
@@ -1146,36 +1166,41 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
                   const gpu = values.filter(item => item.name.startsWith('gpu_') && item.value > 0);
                   const gpuNoData = (snapshot.no_data || []).filter(span => span.family === 'gpu');
                   const cost = snapshot.cost_report || {};
-                  if (statusResponse.status === 200 && snapshotResponse.status === 200
+                  const tokenSessions = expectedSessions.every(session => tokens.some(item => item.name.includes(session)));
+                  const collectorFactsReady = statusResponse.status === 200 && snapshotResponse.status === 200
                     && Number(status.counts?.total) >= 3
                     && Number(status.token_rates?.total_per_second) > 0
-                    && tokens.length > 0 && activity.length > 0 && memory.length > 0 && cpu.length > 0
+                    && tokens.length > 0 && tokenSessions && activity.length > 0 && memory.length > 0 && cpu.length > 0
                     && (gpu.length > 0 || gpuNoData.length > 0)
-                    && Number(cost.total_tokens) > 0) {
-                    done({status, snapshot, tokens, activity, memory, cpu, gpu, gpuNoData, cost});
+                    && Number(cost.total_tokens) > 0;
+                  if (collectorFactsReady) {
+                    collectorFacts = {status, snapshot, tokens, activity, memory, cpu, gpu, gpuNoData, cost};
+                  }
+                  const readiness = globalThis.jsDebugHistoryReadinessSnapshot?.() ?? null;
+                  const ui = visibleChartState();
+                  const chartsReady = Object.values(ui.charts).length === 3
+                    && Object.values(ui.charts).every(item => item.present && item.visible && item.geometry > 0 && !item.waiting);
+                  if (collectorFactsReady && readiness?.phase === 'ready' && ui.panelVisible && chartsReady) {
+                    done({...collectorFacts, readiness, ui});
                     return;
                   }
                 } catch (_) {}
                 await new Promise(resolve => setTimeout(resolve, 250));
               }
-              done({error: 'collector facts did not reach snapshot before deadline', readiness: globalThis.jsDebugHistoryReadinessSnapshot?.(), body: document.body?.innerText?.slice(0, 1000)});
+              done({error: collectorFacts ? 'collector facts reached snapshot but history did not reach visible ready charts before deadline' : 'collector facts did not reach snapshot before deadline',
+                collectorFacts: Boolean(collectorFacts),
+                readiness: globalThis.jsDebugHistoryReadinessSnapshot?.() ?? null,
+                ui: visibleChartState(), body: document.body?.innerText?.slice(0, 1000)});
             };
             wait();
-            """
+            """,
+            list(tmux_runtime.sessions),
         )
         assert result.get("error") is None, result
         assert result["gpu"] or result["gpuNoData"], result
-        charts = browser.execute_script(
-            """
-            return Object.fromEntries(['activity', 'agentTokens', 'memory'].map(name => {
-              const chart = document.querySelector(`[data-js-debug-chart="${name}"]`);
-              const nodes = [...(chart?.querySelectorAll('[data-js-debug-series], [data-js-debug-area-series], [data-js-debug-bar-series]') || [])];
-              return [name, {present: Boolean(chart), visible: Boolean(chart && chart.getBoundingClientRect().width > 0 && chart.getBoundingClientRect().height > 0), geometry: nodes.filter(node => node.getAttribute('d') || node.getAttribute('points') || Number(node.getAttribute('height') || 0) > 0).length, waiting: chart?.textContent?.includes('Waiting for server stats') || false}];
-            }));
-            """
-        )
-        assert browser.execute_script("return jsDebugHistoryReadiness.phase") == "ready", result
-        assert all(item["present"] and item["visible"] and item["geometry"] > 0 and not item["waiting"] for item in charts.values()), {"result": result, "charts": charts}
+        assert result["readiness"]["phase"] == "ready", result
+        assert result["ui"]["panelVisible"], result
+        assert all(item["present"] and item["visible"] and item["geometry"] > 0 and not item["waiting"] for item in result["ui"]["charts"].values()), result
     finally:
         active_error = sys.exc_info()[1]
         browser_retirement_error = None

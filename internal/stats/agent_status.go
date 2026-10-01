@@ -54,6 +54,8 @@ type AgentStatusPane struct {
 	PaneText       string
 	CurrentCommand string
 	Error          string
+	// ObservedAt is stamped by the pane reader so callers can order this evidence against other samples.
+	ObservedAt time.Time
 	// Status is the structured screen classification produced by the pane
 	// reader. VisibleText remains for diagnostics and legacy readers only.
 	Status           string
@@ -90,6 +92,8 @@ type AgentStatusResult struct {
 	RawStatus        string
 	Acknowledged     bool
 	WorkingStoppedAt time.Time
+	// ObservedAt carries the pane evidence timestamp through the classifier result.
+	ObservedAt time.Time
 }
 
 // AgentStatusSources are the only live-system seams used by ClassifyAgentStatus.
@@ -111,18 +115,22 @@ func ClassifyAgentStatus(ctx context.Context, request AgentStatusRequest, source
 			return unavailable("opencode-state-reader-missing")
 		}
 		state, evidence, err := sources.OpenCodeState(ctx, request)
+		// The reader returns only after its database evidence has been read.
+		// Stamp at that boundary so metadata and the collector compare the same
+		// kind of observation rather than their later publication times.
+		observedAt := time.Now()
 		if err != nil {
-			return unavailable(err.Error())
+			return unavailableAt(err.Error(), observedAt)
 		}
 		switch state {
 		case "working":
-			return result(AgentStatusRun, evidence)
+			return resultAt(AgentStatusRun, evidence, observedAt)
 		case "paused":
-			return result(AgentStatusAsk, evidence)
+			return resultAt(AgentStatusAsk, evidence, observedAt)
 		case "idle":
-			return result(AgentStatusIdle, evidence)
+			return resultAt(AgentStatusIdle, evidence, observedAt)
 		default:
-			return unavailable("opencode-state-unknown")
+			return unavailableAt("opencode-state-unknown", observedAt)
 		}
 	}
 	if kind != "claude" && kind != "codex" {
@@ -133,31 +141,34 @@ func ClassifyAgentStatus(ctx context.Context, request AgentStatusRequest, source
 	}
 	if request.PID > 0 && sources.Process != nil {
 		process, err := sources.Process(ctx, request.PID)
+		processObservedAt := time.Now()
 		if err != nil || !process.Alive {
-			return unavailable("agent-process-unavailable")
+			return unavailableAt("agent-process-unavailable", processObservedAt)
 		}
 		if process.Command != "" && !agentProcessMatchesKind(kind, process.Command, request.Executable) {
-			return unavailable("agent-process-identity-mismatch")
+			return unavailableAt("agent-process-identity-mismatch", processObservedAt)
 		}
 		if strings.TrimSpace(process.Command) != "" && request.Command == "" {
 			request.Command = process.Command
 		}
 	}
 	pane, err := sources.CapturePane(ctx, request.PaneTarget)
+	if pane.ObservedAt.IsZero() {
+		pane.ObservedAt = time.Now()
+	}
 	if err != nil || pane.Error != "" {
-		if err != nil {
-			return unavailable("pane-capture-failed")
-		}
-		return unavailable("pane-capture-failed")
+		return unavailableAt("pane-capture-failed", pane.ObservedAt)
 	}
 	text := pane.VisibleText
 	if len([]byte(text)) > MaxAgentPaneCaptureBytes {
-		return unavailable("pane-capture-bound-exceeded")
+		return unavailableAt("pane-capture-bound-exceeded", pane.ObservedAt)
 	}
 	if strings.TrimSpace(text) == "" {
-		return unavailable("empty-pane-capture")
+		return unavailableAt("empty-pane-capture", pane.ObservedAt)
 	}
-	return classifyPaneStatus(pane, request)
+	classified := classifyPaneStatus(pane, request)
+	classified.ObservedAt = pane.ObservedAt
+	return classified
 }
 
 func classifyPaneStatus(pane AgentStatusPane, request AgentStatusRequest) AgentStatusResult {
@@ -330,8 +341,20 @@ func result(status AgentStatus, evidence []string) AgentStatusResult {
 	return AgentStatusResult{Status: status, Evidence: append([]string(nil), evidence...)}
 }
 
+func resultAt(status AgentStatus, evidence []string, observedAt time.Time) AgentStatusResult {
+	classified := result(status, evidence)
+	classified.ObservedAt = observedAt
+	return classified
+}
+
 func unavailable(reason string) AgentStatusResult {
 	return AgentStatusResult{Status: AgentStatusUnavailable, Reason: reason}
+}
+
+func unavailableAt(reason string, observedAt time.Time) AgentStatusResult {
+	classified := unavailable(reason)
+	classified.ObservedAt = observedAt
+	return classified
 }
 
 // OpenCodeSQLiteStateReader is the default read-only seam for OpenCode's
@@ -746,7 +769,12 @@ func (c *AgentStatusCollector) collect(parent context.Context, fact HostFactCont
 		c.statusCache[key] = entry
 		c.stateMu.Unlock()
 		state := string(result.Status)
-		rosterEntry := map[string]any{"id": key, "kind": strings.ToLower(strings.TrimSpace(record.Kind)), "state": state, "session": record.TmuxSession, "pane": tmuxPaneTarget(record)}
+		observedAt := result.ObservedAt
+		if observedAt.IsZero() {
+			observedAt = c.clock.Now()
+		}
+		observedAtSeconds := float64(observedAt.UnixNano()) / 1e9
+		rosterEntry := map[string]any{"id": key, "kind": strings.ToLower(strings.TrimSpace(record.Kind)), "state": state, "session": record.TmuxSession, "pane": tmuxPaneTarget(record), "observed_at": observedAtSeconds}
 		roster = append(roster, rosterEntry)
 		counts.Total++
 		switch result.Status {
@@ -822,18 +850,28 @@ func mergeAgentStatus(old, next AgentStatus) AgentStatus {
 }
 
 func agentStatusPayloadSignature(states map[string]any, sessions map[string]AgentStatus, counts AgentStatusCounts, roster []map[string]any) string {
+	signatureRoster := make([]map[string]any, 0, len(roster))
+	for _, entry := range roster {
+		signatureEntry := make(map[string]any, len(entry))
+		for key, value := range entry {
+			if key != "observed_at" {
+				signatureEntry[key] = value
+			}
+		}
+		signatureRoster = append(signatureRoster, signatureEntry)
+	}
 	payload := struct {
 		States   map[string]any         `json:"states"`
 		Sessions map[string]AgentStatus `json:"session_states"`
 		Counts   AgentStatusCounts      `json:"counts"`
 		Roster   []map[string]any       `json:"agents"`
-	}{States: states, Sessions: sessions, Counts: counts, Roster: roster}
+	}{States: states, Sessions: sessions, Counts: counts, Roster: signatureRoster}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return ""
 	}
-	// encoding/json sorts string map keys, so this is deterministic across
-	// collector cycles while retaining the complete bounded status projection.
+	// encoding/json sorts string map keys. Ignore per-agent timestamps so a new
+	// sample with unchanged states does not create a status revision.
 	return string(encoded)
 }
 

@@ -115,6 +115,17 @@ test_suite(
     ],
 )
 
+test_suite(
+    name = "go_native_tests",
+    tests = [
+        ":go_unit_tests",
+        ":go_race_tests",
+        ":yomux_go_contract_test",
+        ":bazel_action_environment_test",
+        ":yomux_go_browser_e2e",
+    ],
+)
+
 sh_test(
     name = "yomux_go_contract_test",
     srcs = ["tools/bazel_go_contract_test.sh"],
@@ -144,7 +155,7 @@ sh_test(
         "tests/browser_helpers/webdriver_lease.py",
     ],
     args = ["$(location :yolomux_go)", "$(location tools/bazel_go_browser_e2e.py)"],
-    tags = ["local", "no-sandbox"],
+    tags = ["local", "no-sandbox", "requires_chrome"],
 )
 
 sh_test(
