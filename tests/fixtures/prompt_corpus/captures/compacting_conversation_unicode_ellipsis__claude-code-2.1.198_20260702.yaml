@@ -1,0 +1,44 @@
+agent: claude
+capture_date: '2026-07-02'
+capture_date_position: end
+capture_mode: visible-tail
+captured_at: '2026-07-02T02:18:00+00:00'
+case_name: compacting_conversation_unicode_ellipsis
+claude_version: 2.1.198 (Claude Code)
+client_name: Claude Code
+client_version: 2.1.198 (Claude Code)
+client_version_slug: claude-code-2.1.198
+codex_version: ''
+cursor:
+  character: ' '
+  current_command: claude
+  pane_in_mode: false
+  x: 2
+  y: 54
+expected_promoted:
+  agent_kind: claude
+  approval_type: ''
+  approval_visible: false
+  attention_kind: working
+  attention_label: Working
+  composer_key: empty
+  reason_code: busy
+  screen_key: working
+failures: []
+filename_convention: case_name__client-token_date
+fixture_description: Claude compaction spinner above an empty composer with a decorated current-task title, reconstructed at the reported 116x57 viewport
+fixture_id: compacting_conversation_unicode_ellipsis__claude-code-2.1.198_20260702
+fixture_scenario: compacting_conversation_unicode_ellipsis
+height: 57
+id: compacting_conversation_unicode_ellipsis__claude-code-2.1.198_20260702
+raw_capture: |
+  ✶ Compacting conversation… (11m 14s · ↑ 28.6k tokens)
+    ⎿ Tip: /loop runs any prompt on a recurring schedule. Great for monitoring deploys, babysitting PRs, or polling status.
+                                        100% context used
+  ──────────────────────── Check DIS-2310 status ──
+  ❯
+  ─────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents · PR #93 · esc to interrupt
+source: real Claude Code 2.1.198 compaction frame captured from tmux session 1:0.0 and screenshot 20260701-027.png
+styled_capture: ''
+width: 116

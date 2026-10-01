@@ -1,0 +1,775 @@
+import argparse
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from yomux_lib import app as app_module
+from yomux_lib import cli
+from yomux_lib.local_services import registry as cli_registry
+from yomux_lib.server import TmuxWebtermHTTPServer
+from yomux_lib.server import https_redirect_response
+from yomux_lib.infra.root_paths import YolomuxRoots
+from yomux_lib.server_lease import acquire_instance_and_port_leases
+
+
+def cli_args(**overrides):
+    values = {
+        "self_signed": False,
+        "http": False,
+        "cert": None,
+        "key": None,
+    }
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+def fake_ssl_context(monkeypatch):
+    loaded = {}
+
+    class FakeContext:
+        minimum_version = None
+
+        def load_cert_chain(self, certfile, keyfile):
+            loaded.update(certfile=certfile, keyfile=keyfile)
+
+    context = FakeContext()
+    monkeypatch.setattr(cli.ssl, "SSLContext", lambda _protocol: context)
+    return context, loaded
+
+
+def test_tls_default_is_self_signed_https(monkeypatch, tmp_path):
+    cert_path = tmp_path / "self-signed.crt"
+    key_path = tmp_path / "self-signed.key"
+    monkeypatch.setattr(cli, "ensure_self_signed_cert", lambda: (cert_path, key_path))
+    expected_context, loaded = fake_ssl_context(monkeypatch)
+
+    context, message = cli.tls_context_for_args(cli_args())
+
+    assert context is expected_context
+    assert loaded == {"certfile": str(cert_path), "keyfile": str(key_path)}
+    assert "self-signed HTTPS certificate" in message
+    assert "SAN:" in message
+    assert "tools/setup-tls.sh" in message
+
+
+def test_self_signed_san_includes_localhost_hostname_and_interface_ips(monkeypatch):
+    monkeypatch.setattr(cli, "SERVER_HOSTNAME", "yolomux-host")
+    monkeypatch.setattr(cli, "self_signed_interface_ips", lambda: ("10.110.42.35", "192.168.50.9"))
+
+    assert cli.self_signed_san().split(",") == [
+        "DNS:localhost",
+        "IP:127.0.0.1",
+        "DNS:yolomux-host",
+        "IP:10.110.42.35",
+        "IP:192.168.50.9",
+    ]
+
+
+def test_setup_tls_dry_run_uses_shared_san_and_state_dir(tmp_path):
+    if not cli.shutil.which("openssl"):
+        pytest.skip("openssl is required for the TLS setup contract")
+    state_dir = tmp_path / "state"
+
+    result = subprocess.run(
+        [
+            "bash",
+            "tools/setup-tls.sh",
+            "--dry-run",
+            "--no-trust",
+            "--san",
+            "192.168.50.10",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**cli.os.environ, "YOMUX_STATE_DIR": str(state_dir)},
+    )
+
+    assert "DNS:localhost" in result.stdout
+    assert "IP:127.0.0.1" in result.stdout
+    assert "IP:192.168.50.10" in result.stdout
+    assert f"leaf ->    {state_dir}/tls/self-signed.{{crt,key}}" in result.stdout
+
+
+def test_tls_requires_cert_and_key_together():
+    with pytest.raises(ValueError, match="--cert and --key"):
+        cli.tls_cert_key_paths(cli_args(cert=Path("/tmp/cert.pem")))
+
+
+def test_tls_explicit_cert_overrides_redundant_self_signed_flag(monkeypatch):
+    expected_context, loaded = fake_ssl_context(monkeypatch)
+
+    context, message = cli.tls_context_for_args(
+        cli_args(self_signed=True, cert=Path("/tmp/cert.pem"), key=Path("/tmp/key.pem"))
+    )
+
+    assert context is expected_context
+    assert loaded == {"certfile": "/tmp/cert.pem", "keyfile": "/tmp/key.pem"}
+    assert message == "Using HTTPS certificate /tmp/cert.pem"
+
+
+@pytest.mark.parametrize("self_signed", [False, True])
+def test_tls_http_opt_out_is_plain_http(self_signed):
+    context, message = cli.tls_context_for_args(cli_args(http=True, self_signed=self_signed))
+
+    assert context is None
+    assert message == "WARNING: TLS disabled by --http; serving plain HTTP."
+
+
+def test_tls_rejects_http_with_explicit_cert():
+    with pytest.raises(ValueError, match="--http cannot be combined with --cert/--key"):
+        cli.tls_cert_key_paths(cli_args(http=True, cert=Path("/tmp/cert.pem"), key=Path("/tmp/key.pem")))
+
+
+def test_tls_self_signed_alias_remains_accepted(monkeypatch, tmp_path):
+    cert_path = tmp_path / "self-signed.crt"
+    key_path = tmp_path / "self-signed.key"
+    monkeypatch.setattr(cli, "ensure_self_signed_cert", lambda: (cert_path, key_path))
+    expected_context, _loaded = fake_ssl_context(monkeypatch)
+
+    context, message = cli.tls_context_for_args(cli_args(self_signed=True))
+
+    assert context is expected_context
+    assert "self-signed HTTPS certificate" in message
+
+
+def test_tls_missing_openssl_falls_back_to_http_with_actionable_warning(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: None)
+
+    context, message = cli.tls_context_for_args(cli_args())
+
+    assert context is None
+    assert "openssl not found" in message
+    assert "starting plain HTTP" in message
+    assert "pass --cert/--key, or pass --http explicitly" in message
+
+
+def test_parse_args_supports_sessions_dangerous_yolo_and_self_signed(monkeypatch):
+    monkeypatch.setattr(
+        cli.sys,
+        "argv",
+        ["yolomux.py", "--host", "0.0.0.0", "--port", "19001", "--sessions", "1,2", "ant", "--dang", "--self-signed"],
+    )
+
+    args = cli.parse_args()
+
+    assert args.host == "0.0.0.0"
+    assert args.port == 19001
+    assert args.sessions == ["1,2", "ant"]
+    assert args.dangerously_yolo is True
+    assert args.self_signed is True
+    assert args.http is False
+    assert args.print_runtime_report is False
+
+
+def test_exec_go_backend_forwards_dangerous_yolo_to_binary(monkeypatch, tmp_path):
+    binary = tmp_path / "yolomux-go"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    binary.chmod(0o755)
+    captured = {}
+    lease_descriptors = []
+    for _ in range(2):
+        read_fd, write_fd = os.pipe()
+        os.close(write_fd)
+        lease_descriptors.append(read_fd)
+    released = []
+
+    class FakeLease:
+        def __init__(self, fd):
+            self.fd = fd
+            self.extra_fds = ()
+
+        def release(self):
+            released.append(self.fd)
+            os.close(self.fd)
+
+    monkeypatch.setenv("YOMUX_GO_BINARY", str(binary))
+    monkeypatch.setattr(
+        cli,
+        "acquire_instance_and_port_leases",
+        lambda roots, port, force: captured.update(roots=roots, port=port, force=force)
+        or (FakeLease(lease_descriptors[0]), FakeLease(lease_descriptors[1])),
+    )
+
+    def execv(path, command):
+        captured.update(
+            path=path,
+            command=command,
+            lease_inheritable=[os.get_inheritable(fd) for fd in lease_descriptors],
+        )
+
+    monkeypatch.setattr(cli.os, "execv", execv)
+
+    result = cli.exec_go_backend(
+        argparse.Namespace(
+            host="0.0.0.0",
+            port=7221,
+            dangerously_yolo=True,
+            force=True,
+            sessions=None,
+            print_transcripts=False,
+            print_runtime_report=False,
+            dev=False,
+            http=False,
+            cert=None,
+            key=None,
+        )
+    )
+
+    assert result == 127
+    assert captured["roots"] == cli._YOLOMUX_ROOTS
+    assert (captured["port"], captured["force"]) == (7221, True)
+    assert captured["path"] == str(binary)
+    assert captured["command"] == [
+        str(binary), "--host", "0.0.0.0", "--port", "7221", "--root",
+        str(Path(__file__).resolve().parents[1]), "--config", str(cli._YOLOMUX_ROOTS.config_dir),
+        "--dangerously-yolo",
+    ]
+    assert captured["lease_inheritable"] == [True, True]
+    assert sorted(released) == sorted(lease_descriptors)
+
+
+@pytest.mark.parametrize(
+    ("http", "cert", "key", "message"),
+    [
+        (True, Path("cert.pem"), Path("key.pem"), "--http cannot be combined"),
+        (False, Path("cert.pem"), None, "--cert and --key must be provided together"),
+        (False, None, Path("key.pem"), "--cert and --key must be provided together"),
+    ],
+)
+def test_exec_go_backend_rejects_invalid_tls_options_before_launch(monkeypatch, capsys, http, cert, key, message):
+    monkeypatch.setattr(
+        cli,
+        "acquire_instance_and_port_leases",
+        lambda *_args, **_kwargs: pytest.fail("invalid TLS options must be rejected before acquiring leases"),
+    )
+    args = argparse.Namespace(
+        host="127.0.0.1",
+        port=7221,
+        dangerously_yolo=False,
+        force=False,
+        sessions=None,
+        print_transcripts=False,
+        print_runtime_report=False,
+        dev=False,
+        http=http,
+        cert=cert,
+        key=key,
+    )
+
+    assert cli.exec_go_backend(args) == 2
+    assert message in capsys.readouterr().err
+
+
+def test_empty_canonical_go_binary_does_not_fall_back_to_legacy_value(monkeypatch, tmp_path, capsys):
+    legacy_binary = tmp_path / "legacy-go"
+    legacy_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    legacy_binary.chmod(0o755)
+    monkeypatch.setenv("YOMUX_GO_BINARY", "")
+    monkeypatch.setenv("YOLOMUX_GO_BINARY", str(legacy_binary))
+    monkeypatch.setattr(Path, "is_file", lambda self: self == legacy_binary)
+
+    result = cli.exec_go_backend(
+        argparse.Namespace(
+            host="127.0.0.1",
+            port=7221,
+            dangerously_yolo=False,
+            force=False,
+            sessions=None,
+            print_transcripts=False,
+            print_runtime_report=False,
+            dev=False,
+            http=False,
+            cert=None,
+            key=None,
+        )
+    )
+
+    assert result == 2
+    assert "Go backend binary is unavailable" in capsys.readouterr().err
+
+
+def test_exec_go_backend_keeps_managed_leases_across_real_exec(tmp_path, request):
+    root = Path("/tmp") / f"yg{os.getpid()}"
+    root.mkdir(mode=0o700)
+    request.addfinalizer(lambda: shutil.rmtree(root, ignore_errors=True))
+    roots = YolomuxRoots(
+        config_dir=root / "config",
+        state_dir=root / "state",
+        cache_dir=root / "cache",
+        codex_home=root / "codex",
+        runtime_dir=root / "runtime",
+        root=root,
+    )
+    marker = tmp_path / "go-child-started"
+    binary = tmp_path / "yolomux-go"
+    binary.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "import signal\n"
+        "from pathlib import Path\n"
+        "Path(os.environ['YOLOMUX_CHILD_MARKER']).write_text(str(os.getpid()))\n"
+        "signal.pause()\n",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+    launcher = (
+        "import argparse; from yomux_lib import cli; "
+        "raise SystemExit(cli.exec_go_backend(argparse.Namespace("
+        "host='127.0.0.1', port=48123, dangerously_yolo=False, force=False, "
+        "sessions=None, print_transcripts=False, print_runtime_report=False, dev=False, "
+        "http=False, cert=None, key=None)))"
+    )
+    env = {
+        **os.environ,
+        "YOMUX_ROOT": str(root),
+        "YOMUX_CONFIG_DIR": str(roots.config_dir),
+        "YOMUX_STATE_DIR": str(roots.state_dir),
+        "YOMUX_CACHE_DIR": str(roots.cache_dir),
+        "YOMUX_CODEX_HOME": str(roots.codex_home),
+        "YOMUX_RUNTIME_DIR": str(roots.runtime_dir),
+        "PYTHONPYCACHEPREFIX": str(root / "python-cache"),
+        "YOMUX_GO_BINARY": str(binary),
+        "YOLOMUX_CHILD_MARKER": str(marker),
+    }
+    process = subprocess.Popen([sys.executable, "-c", launcher], cwd=Path(__file__).resolve().parents[1], env=env)
+    try:
+        deadline = time.monotonic() + 5
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert marker.exists(), "fake Go executable did not start after exec"
+        assert marker.read_text(encoding="utf-8") == str(process.pid)
+        assert acquire_instance_and_port_leases(roots, 48123) == (None, None)
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+    claimed_after_exit = acquire_instance_and_port_leases(roots, 48123)
+    assert claimed_after_exit[0] is not None and claimed_after_exit[1] is not None
+    for lease in claimed_after_exit:
+        lease.release()
+
+
+def test_parse_args_supports_explicit_http_opt_out(monkeypatch):
+    monkeypatch.setattr(cli.sys, "argv", ["yolomux.py", "--http"])
+
+    args = cli.parse_args()
+
+    assert args.http is True
+    assert args.self_signed is False
+
+
+def test_parse_args_supports_runtime_report(monkeypatch):
+    monkeypatch.setattr(cli.sys, "argv", ["yolomux.py", "--print-runtime-report", "--sessions", "8002"])
+
+    args = cli.parse_args()
+
+    assert args.print_runtime_report is True
+    assert args.sessions == ["8002"]
+
+
+def _forbid_app_construction(monkeypatch):
+    def explode(*_args, **_kwargs):
+        raise AssertionError("print_runtime_report must never construct a TmuxWebtermApp")
+
+    monkeypatch.setattr(cli, "TmuxWebtermApp", explode)
+
+
+def test_print_runtime_report_uses_live_scheduler_control_socket_without_an_app(monkeypatch, capsys):
+    _forbid_app_construction(monkeypatch)
+    requests = []
+    def fake_control(owner, request):
+        requests.append((owner, request))
+        return {"ok": True, "report": {"ok": True, "top_endpoints": [{"surface": "GET /api/session-files"}]}}
+
+    monkeypatch.setattr(cli, "send_yolomux_control_request", fake_control)
+
+    assert cli.print_runtime_report(["8002"], dangerously_yolo=True) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["top_endpoints"] == [{"surface": "GET /api/session-files"}]
+    assert payload["scheduler_diagnostics"] == {"debug": {"status": "local-only"}}
+    assert requests == [(None, {"action": "runtime_report"})]
+
+
+def test_print_runtime_report_degrades_to_bounded_ledger_records(monkeypatch, capsys, tmp_path):
+    _forbid_app_construction(monkeypatch)
+    monkeypatch.setattr(cli, "send_yolomux_control_request", lambda owner, request: {"ok": False, "error": "no owner"})
+    monkeypatch.setattr(cli, "RUNTIME_DIR", tmp_path)
+    lease_dir = tmp_path / "server-leases"
+    lease_dir = lease_dir / cli_registry.current_host_identity().stable_host_id
+    lease_dir.mkdir(parents=True)
+    identity = cli_registry.current_host_identity()
+    lease_record = {
+        **identity.process_record_fields(pid=400, start_identity="proc:5"),
+        "port": 8881,
+    }
+    (lease_dir / "8881.lock").write_text(json.dumps(lease_record), encoding="utf-8")
+    monkeypatch.setattr(
+        cli,
+        "bounded_process_table",
+        lambda: {
+            400: cli_registry.ProcessTableEntry(
+                1,
+                400,
+                5.0,
+                "python3 -u yolomux.py 8880 /tmp/log --port 8881 --dang",
+                start_time=5,
+            )
+        },
+    )
+
+    assert cli.print_runtime_report([], dangerously_yolo=False) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["mode"] == "bounded-records"
+    assert len(payload["port_groups"]) == 1
+    port_group = payload["port_groups"][0]
+    assert {key: port_group[key] for key in ("port", "pid", "pgid", "member_pids")} == {
+        "port": 8881,
+        "pid": 400,
+        "pgid": 400,
+        "member_pids": [400],
+    }
+    expected_process_record = cli_registry.process_fence_record(lease_record)
+    assert port_group["process_record"] == expected_process_record
+    assert port_group["member_records"] == {"400": expected_process_record}
+    assert payload["local_service_groups"] == []
+
+
+def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
+    captured = {}
+    args = argparse.Namespace(
+        host="0.0.0.0",
+        port=19001,
+        backend="python",
+        sessions=["1,2", "ant"],
+        dangerously_yolo=True,
+        self_signed=False,
+        http=False,
+        cert=None,
+        key=None,
+        print_transcripts=False,
+        print_runtime_report=False,
+        dev=False,
+    )
+
+    class FakeApp:
+        def __init__(self, sessions, dangerously_yolo=False):
+            captured["sessions"] = sessions
+            captured["dangerously_yolo"] = dangerously_yolo
+
+        def restore_auto_approve(self):
+            return []
+
+        def attach_backend_health_store(self, store):
+            captured["backend_health_store"] = store
+
+        # The app also receives the observer's liveness reader, beside its history store: the
+        # store answers "what was retained", the observer answers "is the monitor still looking".
+        def attach_backend_health_observer(self, observer):
+            captured["backend_health_observer"] = observer
+
+        def local_services_row_producers(self):
+            return {}
+
+        def local_services_recovery_control(self):
+            # M9: the observer is constructed with the app's recovery control, so a double that
+            # does not offer one no longer resolves. It is never used here -- nothing in this
+            # test drives an observation -- but it has to exist for `cli.main()` to get past
+            # `start_backend_health_observer`.
+            captured["recovery_control"] = app_module.LocalServiceRecoveryControl(dict)
+            return captured["recovery_control"]
+
+        class _Events:
+            @staticmethod
+            def publish(*_args, **_kwargs):
+                return None
+
+        client_events = _Events()
+
+        def start_background_scheduler(self, port=None):
+            captured["background_scheduler_port"] = port
+            return True
+
+        def start_yoagent_backend_prewarm(self, **kwargs):
+            captured["yoagent_prewarm"] = kwargs
+            return {"ok": True}, 202
+
+        def stop_auto_approve_all(self):
+            captured["stopped"] = True
+
+    class FakeServer:
+        def __init__(self, address, app, tls_context=None, dev=False):
+            captured["address"] = address
+            captured["app"] = app
+            captured["tls_context"] = tls_context
+            captured["dev"] = dev
+
+        def serve_forever(self):
+            captured["served"] = True
+
+        def server_close(self):
+            captured["closed"] = True
+
+    monkeypatch.setattr(cli, "parse_args", lambda: args)
+    tls_marker = object()
+    monkeypatch.setattr(cli, "tls_context_for_args", lambda _args: (tls_marker, "Using self-signed HTTPS certificate /tmp/cert.pem"))
+    monkeypatch.setattr(cli, "TmuxWebtermApp", FakeApp)
+    monkeypatch.setattr(cli, "TmuxWebtermHTTPServer", FakeServer)
+    monkeypatch.setattr(
+        cli,
+        "startup_path_line",
+        lambda _port: (
+            "YOmux paths: YOLOMUX_ROOT=/tmp/test (auto-derived); config=/tmp/config; "
+            "state=/tmp/state; cache=/tmp/cache; runtime=/tmp/runtime"
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "acquire_instance_and_port_leases",
+        lambda *_args, **_kwargs: (SimpleNamespace(release=lambda: None), SimpleNamespace(release=lambda: None)),
+    )
+    monkeypatch.setattr(cli, "set_local_service_launch_context", lambda _port: None)
+    monkeypatch.setattr(cli, "start_startup_overload_watchdog", lambda _port: None)
+    monkeypatch.setattr(cli, "auth_setup_required", lambda: False)
+
+    assert cli.main() == 0
+
+    output = capsys.readouterr().out
+    assert captured["sessions"] == ["1", "2", "ant"]
+    assert captured["dangerously_yolo"] is True
+    assert captured["address"] == ("0.0.0.0", 19001)
+    assert captured["tls_context"] is tls_marker
+    assert captured["dev"] is False  # dev mode off by default
+    assert captured["background_scheduler_port"] == 19001
+    assert captured["yoagent_prewarm"] == {"reason": "server_start"}
+    assert captured["served"] is True
+    assert captured["stopped"] is True
+    assert captured["closed"] is True
+    assert output.count("YOmux paths: YOLOMUX_ROOT=") == 1
+    assert "DANGEROUS YOLO mode is enabled" in output
+    assert "Serving YOmux on https://localhost:19001/" in output
+    assert "Using self-signed HTTPS certificate /tmp/cert.pem" in output
+    assert "Highly recommend" not in output
+
+
+def test_main_closes_server_when_app_shutdown_raises(monkeypatch):
+    """Native watcher teardown must survive an earlier application cleanup error."""
+    events = []
+    args = argparse.Namespace(
+        host="127.0.0.1",
+        port=19004,
+        backend="python",
+        sessions=[],
+        dangerously_yolo=False,
+        self_signed=False,
+        http=True,
+        cert=None,
+        key=None,
+        print_transcripts=False,
+        print_runtime_report=False,
+        dev=False,
+    )
+
+    class FakeApp:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def attach_backend_health_store(self, _store):
+            return None
+
+        def attach_backend_health_observer(self, _observer):
+            return None
+
+        def local_services_row_producers(self):
+            return {}
+
+        def local_services_recovery_control(self):
+            # M9, same reason as the double above.
+            return app_module.LocalServiceRecoveryControl(dict)
+
+        class _Events:
+            @staticmethod
+            def publish(*_args, **_kwargs):
+                return None
+
+        client_events = _Events()
+
+        def start_background_scheduler(self, **_kwargs):
+            return True
+
+        def start_yoagent_backend_prewarm(self, **_kwargs):
+            return {"ok": True}, 202
+
+        def restore_auto_approve(self):
+            return []
+
+        def stop_auto_approve_all(self):
+            events.append("app-stop")
+            raise RuntimeError("injected app cleanup failure")
+
+    class FakeServer:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def serve_forever(self):
+            return None
+
+        def server_close(self):
+            events.append("server-close")
+
+    monkeypatch.setattr(cli, "parse_args", lambda: args)
+    monkeypatch.setattr(cli, "tls_context_for_args", lambda _args: (None, ""))
+    monkeypatch.setattr(cli, "TmuxWebtermApp", FakeApp)
+    monkeypatch.setattr(cli, "TmuxWebtermHTTPServer", FakeServer)
+    monkeypatch.setattr(
+        cli,
+        "acquire_instance_and_port_leases",
+        lambda *_args, **_kwargs: (
+            SimpleNamespace(release=lambda: events.append("root-release")),
+            SimpleNamespace(release=lambda: events.append("lease-release")),
+        ),
+    )
+    monkeypatch.setattr(cli, "set_local_service_launch_context", lambda _port: None)
+    monkeypatch.setattr(cli, "start_startup_overload_watchdog", lambda _port: None)
+    monkeypatch.setattr(cli, "auth_setup_required", lambda: False)
+
+    with pytest.raises(RuntimeError, match="injected app cleanup failure"):
+        cli.main()
+
+    assert events == ["app-stop", "server-close", "lease-release", "root-release"]
+
+
+def test_main_rejects_duplicate_port_before_constructing_the_app(monkeypatch, capsys):
+    args = argparse.Namespace(
+        host="0.0.0.0",
+        port=19002,
+        backend="python",
+        sessions=None,
+        dangerously_yolo=False,
+        self_signed=False,
+        http=False,
+        cert=None,
+        key=None,
+        print_transcripts=False,
+        print_runtime_report=False,
+        dev=False,
+    )
+    monkeypatch.setattr(cli, "parse_args", lambda: args)
+    monkeypatch.setattr(cli, "tls_context_for_args", lambda _args: (None, ""))
+    monkeypatch.setattr(
+        cli,
+        "acquire_instance_and_port_leases",
+        lambda *_args, **_kwargs: (SimpleNamespace(release=lambda: None), None),
+    )
+    monkeypatch.setattr(cli, "TmuxWebtermApp", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("duplicate launch must not initialize app state")))
+
+    assert cli.main() == 1
+    assert "refusing a duplicate" in capsys.readouterr().err
+
+
+def test_self_signed_cert_generation_is_persistent(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/openssl")
+    monkeypatch.setattr(cli, "self_signed_interface_ips", lambda: ("10.110.42.35",))
+    calls = []
+
+    def fake_run(command, check, stdout, stderr, text):
+        calls.append(command)
+        Path(command[command.index("-out") + 1]).write_text("cert", encoding="utf-8")
+        Path(command[command.index("-keyout") + 1]).write_text("key", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    cert_path, key_path = cli.ensure_self_signed_cert()
+    second_cert_path, second_key_path = cli.ensure_self_signed_cert()
+
+    assert cert_path == second_cert_path
+    assert key_path == second_key_path
+    assert cert_path.read_text(encoding="utf-8") == "cert"
+    assert key_path.read_text(encoding="utf-8") == "key"
+    assert len(calls) == 1
+    assert any(item.startswith("subjectAltName=DNS:localhost,IP:127.0.0.1") for item in calls[0])
+
+
+def test_plain_http_on_tls_port_gets_redirect_response():
+    response = https_redirect_response(
+        b"GET /foo?bar=1 HTTP/1.1\r\nHost: localhost:19001\r\n\r\n",
+        "fallback:19001",
+    )
+
+    assert b"308 Permanent Redirect" in response
+    assert b"Location: https://localhost:19001/foo?bar=1" in response
+    assert b"Use HTTPS" in response
+
+
+def test_tls_socket_peek_waits_for_delayed_plaintext_first_byte():
+    server_socket, client_socket = socket.socketpair()
+
+    try:
+        fake_server = SimpleNamespace(tls_context=object(), tls_peek_timeout_seconds=0.4)
+
+        def delayed_client_write():
+            time.sleep(0.15)
+            client_socket.sendall(b"G")
+
+        writer = threading.Thread(target=delayed_client_write)
+        writer.start()
+        prepared = TmuxWebtermHTTPServer.prepare_request_socket(fake_server, server_socket)
+        writer.join(timeout=1)
+
+        assert prepared is server_socket
+        assert server_socket.recv(1) == b"G"
+    finally:
+        server_socket.close()
+        client_socket.close()
+
+
+def test_tls_socket_peek_does_not_wrap_an_idle_plaintext_preconnect():
+    server_socket, client_socket = socket.socketpair()
+
+    class FakeTlsContext:
+        def wrap_socket(self, *_args, **_kwargs):
+            raise AssertionError("idle plaintext preconnect must not be TLS-wrapped")
+
+    try:
+        fake_server = SimpleNamespace(tls_context=FakeTlsContext(), tls_peek_timeout_seconds=0.01)
+
+        prepared = TmuxWebtermHTTPServer.prepare_request_socket(fake_server, server_socket)
+
+        assert prepared is server_socket
+        assert server_socket.gettimeout() is None
+    finally:
+        server_socket.close()
+        client_socket.close()
+
+
+def test_tls_socket_peek_does_not_wrap_tls_like_bytes_with_http_redirect_sentinel():
+    server_socket, client_socket = socket.socketpair()
+
+    class FakeTlsContext:
+        def wrap_socket(self, *_args, **_kwargs):
+            raise AssertionError("plain HTTP share redirect sentinel must not wrap a connection")
+
+    try:
+        client_socket.sendall(b"\x16")
+        fake_server = SimpleNamespace(tls_context=FakeTlsContext(), tls_peek_timeout_seconds=0.01)
+
+        prepared = TmuxWebtermHTTPServer.prepare_request_socket(fake_server, server_socket)
+
+        assert prepared is server_socket
+        assert server_socket.recv(1) == b"\x16"
+    finally:
+        server_socket.close()
+        client_socket.close()

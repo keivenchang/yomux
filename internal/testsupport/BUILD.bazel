@@ -1,0 +1,30 @@
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["BUILD.bazel"])
+
+filegroup(
+    name = "docker_source_files",
+    srcs = ["BUILD.bazel"] + glob(["**"], exclude = ["BUILD.bazel"]),
+)
+
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "testsupport_lib",
+    srcs = ["environment.go", "runfiles.go"],
+    importpath = "github.com/keivenchang/yomux/internal/testsupport",
+    deps = ["@rules_go//go/runfiles"],
+)
+
+go_test(
+    name = "testsupport_test",
+    srcs = ["environment_test.go"],
+    embed = [":testsupport_lib"],
+)
+
+go_test(
+    name = "testsupport_race_test",
+    srcs = ["environment_test.go"],
+    embed = [":testsupport_lib"],
+    race = "on",
+)

@@ -1,0 +1,3234 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// This module is intentionally self-contained: tests and embedded consumers load only this namespace,
+// so its escaping and UTF-8 validation helpers cannot depend on the app bundle's lexical core helpers.
+
+(() => {
+  'use strict';
+
+  const SNAPSHOT_FIELDS = [
+    'protocol_version', 'range_seconds', 'requested_resolution', 'resolution_seconds',
+    'window_start', 'window_end', 'generated_at', 'source_generation', 'cache_generation',
+    'rightmost_open', 'buckets', 'no_data', 'cost_report', 'usage_atom_backfill',
+  ];
+  const SNAPSHOT_CHUNK_FIELDS = [
+    ...SNAPSHOT_FIELDS,
+    'chunk_index', 'chunk_count', 'chunk_start', 'chunk_end',
+  ];
+  const DELTA_FIELDS = [
+    'protocol_version', 'range_seconds', 'resolution_seconds', 'source_generation',
+    'base_cache_generation', 'cache_generation', 'revision', 'buckets', 'no_data', 'tombstones',
+    'cost_report',
+  ];
+  const BUCKET_FIELDS = ['start', 'duration', 'series', 'source', 'open'];
+  const SERIES_VALUE_FIELDS = ['value', 'source_count', 'first_timestamp', 'last_timestamp'];
+  // Series names predate the wire-level unit declaration. Keep their semantics in one
+  // compatibility map, but prefer a server-declared unit for every new series so an
+  // unlisted metric cannot be grouped and formatted as an unrelated magnitude.
+  const CURRENT_STATS_SERIES_METADATA = Object.freeze({
+    cost_micro_usd: Object.freeze({unit: 'micro_usd', group: 'cost', label: 'Marginal'}),
+    api_list_cost_micro_usd: Object.freeze({unit: 'micro_usd', group: 'cost', label: 'At API list prices'}),
+    usage_tokens: Object.freeze({unit: 'tokens', costGroup: 'usage'}),
+  });
+  const SOURCE_FIELDS = ['first_timestamp', 'last_timestamp', 'count'];
+  const NO_DATA_FIELDS = [
+    'family', 'source_id', 'start', 'end', 'epoch', 'reason', 'source_cadence_seconds',
+  ];
+  const BUCKET_TOMBSTONE_FIELDS = ['kind', 'start', 'duration'];
+  const NO_DATA_TOMBSTONE_FIELDS = ['kind', 'family', 'source_id', 'start', 'end', 'epoch'];
+  const CAPABILITY_FIELDS = [
+    'resolution_choices', 'max_buckets', 'min_buckets', 'max_live_cadence_seconds', 'ranges',
+  ];
+  const CAPABILITY_RANGE_FIELDS = [
+    'range_seconds', 'auto_resolution_seconds', 'explicit_resolution_seconds', 'buckets',
+  ];
+  const STATS_MIGRATION_FIELDS = ['state', 'result', 'issue_kinds'];
+  const CURRENT_RESOLUTIONS = Object.freeze([1, 10, 60, 300]);
+  const CURRENT_STATS_WIRE_PROTOCOL_VERSION = 2;
+  const CURRENT_COST_REPORT_SCHEMA_VERSION = 4;
+  const CURRENT_COST_DIMENSIONS = Object.freeze(['input', 'cache_read', 'cache_write_5m', 'cache_write_1h', 'output', 'other']);
+  const CURRENT_COST_REPORT_FIELDS = Object.freeze([
+    'schema_version', 'total_micro_usd', 'total_api_list_micro_usd', 'total_tokens',
+    'dimensions', 'priced', 'unpriced', 'models', 'agents', 'evidence', 'catalog_revision',
+    'omissions', 'reasoning_available',
+  ]);
+  const CURRENT_COST_DIMENSION_FIELDS = Object.freeze(['tokens', 'micro_usd', 'api_list_micro_usd']);
+  const CURRENT_COST_COVERAGE_FIELDS = Object.freeze(['atoms', 'tokens']);
+  const CURRENT_COST_MODEL_FIELDS = Object.freeze([
+    'key', 'provider', 'model', 'total_tokens', 'total_micro_usd',
+    'total_api_list_micro_usd', 'dimensions', 'priced', 'unpriced',
+  ]);
+  const CURRENT_COST_AGENT_FIELDS = Object.freeze([
+    'key', 'source', 'label', 'total_tokens', 'total_micro_usd', 'total_api_list_micro_usd',
+    'dimensions', 'priced', 'unpriced', 'sources',
+  ]);
+  const CURRENT_COST_SOURCE_FIELDS = Object.freeze([
+    'source', 'total_tokens', 'total_micro_usd', 'total_api_list_micro_usd', 'dimensions', 'priced', 'unpriced',
+  ]);
+  const CURRENT_COST_EVIDENCE_FIELDS = Object.freeze([
+    'key', 'provider', 'model', 'dimension', 'direction', 'modality', 'cache_role', 'unit',
+    'pricing_profile', 'service_tier', 'catalog_model', 'rate_usd', 'rate_scale', 'effective_from',
+    'source_kind', 'source_url', 'catalog_revision', 'tokens', 'micro_usd',
+    'api_list_micro_usd', 'priced_atoms',
+  ]);
+  const CURRENT_COST_OMISSION_FIELDS = Object.freeze(['models', 'agents', 'evidence']);
+  const CURRENT_COST_MAX_MODELS = 16;
+  const CURRENT_COST_MAX_AGENTS = 16;
+  const CURRENT_COST_MAX_EVIDENCE = 32;
+  const CURRENT_STATS_PENDING_RETRY_MAX_SECONDS = 60;
+  const CURRENT_STATS_MAX_SNAPSHOT_CHUNKS = 512;
+  const DELTA_REJECTION_PHASE_CODES = Object.freeze({
+    envelope: 'e',
+    key: 'k',
+    buckets: 'b',
+    no_data: 'n',
+    cost: 'c',
+    tombstones: 't',
+    apply: 'a',
+  });
+  const SNAPSHOT_NOT_MODIFIED = Object.freeze({not_modified: true});
+  const CURRENT_STATS_SVG_WIDTH = 600;
+  const CURRENT_STATS_SVG_HEIGHT = 160;
+  const CURRENT_STATS_PLOT_LEFT = 42;
+  const CURRENT_STATS_PLOT_RIGHT = 12;
+  const CURRENT_STATS_PLOT_TOP = 12;
+  const CURRENT_STATS_PLOT_BOTTOM = 28;
+  const CURRENT_STATS_ZOOM_THRESHOLD_PX = 8;
+  let nextRendererId = 1;
+
+  // `streamEvidence` is the transport's own first-transition observables. The failure MESSAGE
+  // can only say that nothing arrived; it cannot say which side went quiet, so every artifact a
+  // stall left behind was unclassifiable. Sampling the snapshot here — inside the one owner every
+  // failure already routes through, at the exact moment of the report — attaches that evidence
+  // without adding a second reporting path. It is bounded (a fixed set of scalars) and read-only,
+  // so it changes no product behaviour, no message, and nothing about when a failure fires.
+  function createTransportFailureOwner(onFailure = () => {}, onRetirement = () => {}, streamEvidence = null) {
+    let latched = false;
+    return Object.freeze({
+      report(message) {
+        if (latched) return false;
+        latched = true;
+        const boundedMessage = String(message || 'YO!stats stream unavailable').replace(/\s+/g, ' ').trim().slice(0, 160);
+        const evidence = typeof streamEvidence === 'function' ? streamEvidence() : null;
+        onFailure(Object.freeze(evidence
+          ? {message: boundedMessage, source: '/api/stats-stream', evidence}
+          : {message: boundedMessage, source: '/api/stats-stream'}));
+        return true;
+      },
+      // An unload-initiated close is an outcome, not a failure, so it never consumes the
+      // failure latch: latching it would swallow the next genuine transport failure if the
+      // document survives (a cancelled navigation, a bfcache restore). It still reports,
+      // with a machine-readable reason, so the close is never silently discarded.
+      reportRetirement(reason) {
+        onRetirement(Object.freeze({
+          reason: String(reason || 'page_unload').replace(/[^a-z0-9_]/gi, '_').slice(0, 32),
+          source: '/api/stats-stream',
+        }));
+        return true;
+      },
+      acceptPushProof() {
+        latched = false;
+      },
+    });
+  }
+
+  function createController(options) {
+    const capabilities = normalizeCapabilities(options.capabilities);
+    const clock = options.clock || {
+      now: () => Date.now(),
+      setTimeout: (callback, delay) => setTimeout(callback, delay),
+      clearTimeout: timer => clearTimeout(timer),
+    };
+    const onGeneration = options.onGeneration || (() => {});
+    const onDelta = options.onDelta || onGeneration;
+    const onRepairNeeded = options.onRepairNeeded || (() => {});
+    const onRepairComplete = options.onRepairComplete || (() => {});
+    const onViewport = options.onViewport || (() => {});
+    const onTick = options.onTick || (() => null);
+    const onPushProof = options.onPushProof || (() => {});
+    const failureOwner = options.failureOwner || createTransportFailureOwner(options.onFailure, options.onRetirement);
+    const fetchSnapshot = options.fetchSnapshot || (async () => null);
+    const repairBaseMs = positiveInteger(options.repairBaseMs ?? 500, 'repairBaseMs');
+    const repairMaxMs = positiveInteger(options.repairMaxMs ?? 30_000, 'repairMaxMs');
+    if (repairMaxMs < repairBaseMs) throw new Error('repairMaxMs must be at least repairBaseMs');
+    const clientId = String(options.clientId || '').trim();
+    if (!clientId || clientId.length > 128 || /[\x00-\x1f\x7f]/.test(clientId)) {
+      throw new Error('clientId must be non-empty, bounded, and contain no controls');
+    }
+
+    let selection = normalizeSelection(capabilities, options.savedRange, options.savedResolution);
+    let activeGeneration = null;
+    let running = false;
+    let explicitlyStopped = false;
+    let visible = true;
+    let zoomedStatic = false;
+    let tickTimer = null;
+    let tickBusy = false;
+    let repairTimer = null;
+    let repairBusy = false;
+    let repairNeeded = false;
+    let repairRequiresFullSnapshot = false;
+    let repairDelayMs = repairBaseMs;
+    let selectionSerial = 0;
+    let presentationAnchorMs = null;
+    let presentationAnchorEnd = null;
+    let presentationWindowEnd = null;
+    let zoomWindowStart = null;
+    let zoomWindowEnd = null;
+    let activeDeltaRevision = 0;
+    let lastGenerationAdvanceAtMs = null;
+    const selectionSourceGenerationFloors = new Map();
+    const selectionSnapshots = new Map();
+
+    function resolutionSecondsFor(value) {
+      return value.resolution === 'AUTO' ? value.capability.auto_resolution_seconds : value.resolution;
+    }
+
+    function concreteResolution() {
+      return resolutionSecondsFor(selection);
+    }
+
+    // Data identity is (range_seconds, resolved resolution_seconds), not the raw AUTO/explicit
+    // spelling: AUTO and its concrete equivalent (e.g. AUTO resolving to 300s for a 3600s range,
+    // then an explicit 300 pick) must share one cache entry or a same-data reselect refetches
+    // for no reason.
+    function selectionSnapshotKey(value = selection) {
+      return `${value.range_seconds}/${resolutionSecondsFor(value)}`;
+    }
+
+    function buildRequest() {
+      return Object.freeze({
+        range_seconds: selection.range_seconds,
+        resolution: selection.resolution,
+        client_id: clientId,
+        since_generation: repairRequiresFullSnapshot ? 0 : (activeGeneration?.cache_generation ?? 0),
+      });
+    }
+
+    function buildDeltaRequest() {
+      return Object.freeze({
+        range_seconds: selection.range_seconds,
+        resolution_seconds: concreteResolution(),
+        client_id: clientId,
+        after_cache_generation: activeGeneration?.cache_generation ?? 0,
+        after_revision: activeDeltaRevision,
+      });
+    }
+
+    function requestMatches(request, serial) {
+      return serial === selectionSerial
+        && request.range_seconds === selection.range_seconds
+        && request.resolution === selection.resolution;
+    }
+
+    function acceptSnapshot(snapshot) {
+      validateSnapshot(snapshot, selection, concreteResolution(), capabilities.max_buckets);
+      if (activeGeneration && snapshot.cache_generation < activeGeneration.cache_generation) {
+        throw new Error('snapshot generation is stale');
+      }
+      if (activeGeneration && snapshot.cache_generation === activeGeneration.cache_generation) {
+        if (activeDeltaRevision > 0) {
+          activeDeltaRevision = 0;
+          publish(snapshot, true);
+          clearRepair();
+          return true;
+        }
+        if (!sameJson(snapshot, activeGeneration)) {
+          throw new Error('snapshot generation is not immutable');
+        }
+        return false;
+      }
+      if (snapshot.source_generation < (selectionSourceGenerationFloors.get(selectionSnapshotKey()) ?? 0)) {
+        throw new Error('snapshot source generation regressed');
+      }
+      activeDeltaRevision = 0;
+      publish(snapshot, true);
+      clearRepair();
+      return true;
+    }
+
+    function acceptStreamRevision(cacheGeneration, revision) {
+      if (!activeGeneration
+          || activeGeneration.cache_generation !== cacheGeneration
+          || !Number.isSafeInteger(revision)
+          || revision < 0) return false;
+      activeDeltaRevision = revision;
+      const key = selectionSnapshotKey();
+      const cached = selectionSnapshots.get(key);
+      if (cached?.generation === activeGeneration) {
+        selectionSnapshots.set(key, Object.freeze({...cached, deltaRevision: revision}));
+      }
+      return true;
+    }
+
+    function acceptDelta(delta) {
+      if (!visible) {
+        repairNeeded = true;
+        return false;
+      }
+      if (!activeGeneration) {
+        scheduleRepair();
+        return false;
+      }
+      let rejectionPhase = 'envelope';
+      let candidate = null;
+      try {
+        exactFields(delta, DELTA_FIELDS, 'delta');
+        if (delta.protocol_version !== CURRENT_STATS_WIRE_PROTOCOL_VERSION) throw new Error('delta protocol is unsupported');
+        generationNumber(delta.source_generation, 'source_generation');
+        generationNumber(delta.base_cache_generation, 'base_cache_generation');
+        generationNumber(delta.cache_generation, 'cache_generation');
+        positiveInteger(delta.revision, 'revision');
+        if (delta.cache_generation <= activeGeneration.cache_generation) return false;
+        rejectionPhase = 'key';
+        if (delta.range_seconds !== selection.range_seconds) throw new Error('delta range does not match active selection');
+        if (delta.resolution_seconds !== concreteResolution()) throw new Error('delta resolution does not match active selection');
+        if (delta.source_generation < activeGeneration.source_generation) throw new Error('delta source generation regressed');
+        if (delta.base_cache_generation !== activeGeneration.cache_generation) throw new Error('delta base does not match active cache');
+        if (delta.cache_generation <= delta.base_cache_generation) throw new Error('delta cache does not advance its base');
+        if (activeDeltaRevision > 0 && delta.revision !== activeDeltaRevision + 1) throw new Error('delta revision does not continue active revision');
+        rejectionPhase = 'buckets';
+        validateBuckets(
+          delta.buckets,
+          concreteResolution(),
+          capabilities.max_buckets,
+          false,
+        );
+        rejectionPhase = 'no_data';
+        validateNoData(delta.no_data);
+        rejectionPhase = 'cost';
+        validateCostReport(delta.cost_report);
+        rejectionPhase = 'tombstones';
+        const removed = validateTombstones(
+          delta.tombstones,
+          concreteResolution(),
+          capabilities.max_buckets * 2,
+        );
+        if (delta.buckets.length + delta.no_data.length + removed.size > capabilities.max_buckets * 2) {
+          throw new Error('delta contains too many identities');
+        }
+        rejectionPhase = 'apply';
+        const bucketReplacements = new Map(delta.buckets.map(bucket => [bucketIdentityKey(bucket), bucket]));
+        const noDataReplacements = new Map(delta.no_data.map(span => [noDataIdentityKey(span), span]));
+        const replaced = new Set([...bucketReplacements.keys(), ...noDataReplacements.keys()]);
+        if ([...removed.keys()].some(identity => replaced.has(identity))) {
+          throw new Error('delta identity cannot be both replaced and removed');
+        }
+        if (!replaced.size && !removed.size) throw new Error('delta has no replacements or tombstones');
+
+        const bucketsByIdentity = new Map(
+          activeGeneration.buckets.map(bucket => [bucketIdentityKey(bucket), bucket]),
+        );
+        for (const [identity, tombstone] of removed) {
+          if (tombstone.kind === 'bucket') bucketsByIdentity.delete(identity);
+        }
+        for (const [identity, bucket] of bucketReplacements) bucketsByIdentity.set(identity, bucket);
+        const openBucketEnd = delta.buckets.find(bucket => bucket.open)?.start + concreteResolution();
+        const candidateEnd = delta.source_generation > activeGeneration.source_generation
+          && Number.isSafeInteger(openBucketEnd)
+          ? openBucketEnd
+          : Math.max(
+            activeGeneration.window_end,
+            ...delta.buckets.map(bucket => bucket.start + bucket.duration),
+          );
+        const candidateStart = candidateEnd - selection.range_seconds;
+        const buckets = [...bucketsByIdentity.values()]
+          .filter(bucket => bucket.start >= candidateStart && bucket.start + bucket.duration <= candidateEnd);
+        buckets.sort((left, right) => left.start - right.start);
+        validateBuckets(
+          buckets,
+          concreteResolution(),
+          capabilities.max_buckets,
+          true,
+          candidateStart,
+          candidateEnd,
+        );
+        const noDataByIdentity = new Map(
+          activeGeneration.no_data.map(span => [noDataIdentityKey(span), span]),
+        );
+        for (const [identity, tombstone] of removed) {
+          if (tombstone.kind === 'no_data') noDataByIdentity.delete(identity);
+        }
+        for (const [identity, span] of noDataReplacements) noDataByIdentity.set(identity, span);
+        const gaps = [...noDataByIdentity.values()]
+          .filter(gap => gap.end > candidateStart && gap.start < candidateEnd)
+          .sort(compareNoData);
+        validateNoData(gaps);
+        candidate = {
+          ...activeGeneration,
+          source_generation: delta.source_generation,
+          cache_generation: delta.cache_generation,
+          window_start: candidateStart,
+          window_end: candidateEnd,
+          rightmost_open: buckets.at(-1)?.open === true,
+          buckets,
+          no_data: gaps,
+          cost_report: delta.cost_report,
+        };
+      } catch (error) {
+        reportFailure(deltaRejectionMessage(rejectionPhase, error, delta));
+        repairRequiresFullSnapshot = true;
+        scheduleRepair();
+        return false;
+      }
+      activeDeltaRevision = delta.revision;
+      publish(candidate, false, delta);
+      failureOwner.acceptPushProof();
+      onPushProof(activeGeneration);
+      clearRepair();
+      return true;
+    }
+
+    function deltaRejectionMessage(phase, error, delta) {
+      const integer = value => Number.isSafeInteger(value) && value >= 0 ? value.toString(36) : '?';
+      const count = value => Array.isArray(value) ? integer(value.length) : '?';
+      const errorClass = (
+        String(error?.name || 'Error')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .replace(/[^A-Za-z0-9_.-]/g, '_')
+          .slice(0, 24)
+        || 'Error'
+      );
+      const errorMessage = String(error?.message || error || 'invalid delta').replace(/\s+/g, ' ').trim();
+      const incoming = delta && typeof delta === 'object' && !Array.isArray(delta) ? delta : {};
+      // d=delta rejection; p=e/k/b/n/c/t/a maps envelope/key/buckets/no_data/cost/
+      // tombstones/apply; a=active source/cache/revision; i=incoming source/base/cache/revision;
+      // o=bucket/no-data/tombstone counts; x=error class. Numeric fields are base36 safe integers.
+      const required = (
+        `d;p=${DELTA_REJECTION_PHASE_CODES[phase] || '?'}`
+        + `;a=${integer(activeGeneration?.source_generation)}/${integer(activeGeneration?.cache_generation)}/${integer(activeDeltaRevision)}`
+        + `;i=${integer(incoming.source_generation)}/${integer(incoming.base_cache_generation)}/${integer(incoming.cache_generation)}/${integer(incoming.revision)}`
+        + `;o=${count(incoming.buckets)}/${count(incoming.no_data)}/${count(incoming.tombstones)}`
+        + `;x=${errorClass}`
+      );
+      const reasonPrefix = ';r=';
+      const reasonLength = Math.max(0, 160 - required.length - reasonPrefix.length);
+      return reasonLength > 0 && errorMessage
+        ? required + reasonPrefix + errorMessage.slice(0, reasonLength)
+        : required;
+    }
+
+    function publish(value, authoritativeWindow, delta = null) {
+      const candidate = freezeJson(value);
+      activeGeneration = candidate;
+      const selectionKey = selectionSnapshotKey();
+      selectionSourceGenerationFloors.set(
+        selectionKey,
+        Math.max(selectionSourceGenerationFloors.get(selectionKey) ?? 0, candidate.source_generation),
+      );
+      lastGenerationAdvanceAtMs = clock.now();
+      selectionSnapshots.set(selectionSnapshotKey(), Object.freeze({
+        generation: candidate,
+        deltaRevision: activeDeltaRevision,
+      }));
+      if (!zoomedStatic || presentationWindowEnd === null) {
+        const nextEnd = authoritativeWindow
+          ? candidate.window_end
+          : Math.max(presentationWindowEnd ?? candidate.window_end, candidate.window_end);
+        anchorPresentation(nextEnd);
+      }
+      if (delta) onDelta(candidate, freezeJson(delta));
+      else onGeneration(candidate);
+    }
+
+    function reportFailure(message) {
+      return failureOwner.report(message);
+    }
+
+    // A payload this bundle cannot read is an outcome with a reason, not a reason to draw nothing.
+    // `exactFields` rejects any snapshot/delta whose top-level shape differs, which is exactly what
+    // a server upgraded under an already-open tab sends; both catch sites below used to discard that
+    // rejection, so YO!stats went blank and said nothing until the page was reloaded.
+    function reportContractViolation(error) {
+      if (error?.statsContractViolation !== true
+          || error?.cancelled === true
+          || isCurrentStatsTerminalAuthentication(error)) return false;
+      return reportFailure(`YO!stats cannot read this server's data (${error.message}); reload the page to pick up the current YOmux bundle`);
+    }
+
+    function reportCadenceStall(now) {
+      if (lastGenerationAdvanceAtMs === null) lastGenerationAdvanceAtMs = now;
+      const cadenceSeconds = liveCadenceSeconds();
+      if (now - lastGenerationAdvanceAtMs <= cadenceSeconds * 3000) return false;
+      return reportFailure(`YO!stats stream generation stalled for more than ${cadenceSeconds * 3}s`);
+    }
+
+    // A validated `ready` frame is the server saying "your view is current" on the
+    // same resolved cadence it would have used for a delta (yomux_lib/server.py
+    // delta_stream loop emits one or the other per cadence). That is delivery, so it
+    // advances the stall clock; only real silence — no delta and no heartbeat — is a
+    // stall. It does not clear the failure latch: only an accepted push does that.
+    function noteStreamHeartbeat() {
+      if (!running) return false;
+      lastGenerationAdvanceAtMs = clock.now();
+      return true;
+    }
+
+    function anchorPresentation(windowEnd) {
+      const cadenceMs = liveCadenceSeconds() * 1000;
+      presentationAnchorMs = Math.floor(clock.now() / cadenceMs) * cadenceMs;
+      presentationAnchorEnd = windowEnd;
+      presentationWindowEnd = windowEnd;
+    }
+
+    function updatePresentation(now) {
+      if (!activeGeneration || presentationAnchorMs === null || presentationAnchorEnd === null) return;
+      const cadenceSeconds = liveCadenceSeconds();
+      const elapsedSteps = Math.floor(Math.max(0, now - presentationAnchorMs) / (cadenceSeconds * 1000));
+      presentationWindowEnd = presentationAnchorEnd + elapsedSteps * cadenceSeconds;
+    }
+
+    function liveCadenceSeconds() {
+      return Math.min(concreteResolution(), capabilities.max_live_cadence_seconds);
+    }
+
+    function axisContract() {
+      const showSeconds = concreteResolution() === 1;
+      return Object.freeze({
+        smallest_unit: showSeconds ? 'second' : 'minute',
+        show_seconds: showSeconds,
+      });
+    }
+
+    function presentation() {
+      if (!activeGeneration) return null;
+      if (zoomedStatic && zoomWindowStart !== null && zoomWindowEnd !== null) {
+        return Object.freeze({
+          range_seconds: zoomWindowEnd - zoomWindowStart,
+          resolution_seconds: concreteResolution(),
+          source_generation: activeGeneration.source_generation,
+          cache_generation: activeGeneration.cache_generation,
+          delta_revision: activeDeltaRevision,
+          window_start: zoomWindowStart,
+          window_end: zoomWindowEnd,
+          axis: axisContract(),
+          buckets: activeGeneration.buckets,
+          no_data: activeGeneration.no_data,
+        });
+      }
+      const windowEnd = presentationWindowEnd ?? activeGeneration.window_end;
+      return Object.freeze({
+        range_seconds: selection.range_seconds,
+        resolution_seconds: concreteResolution(),
+        source_generation: activeGeneration.source_generation,
+        cache_generation: activeGeneration.cache_generation,
+        delta_revision: activeDeltaRevision,
+        window_start: windowEnd - selection.range_seconds,
+        window_end: windowEnd,
+        axis: axisContract(),
+        buckets: activeGeneration.buckets,
+        no_data: activeGeneration.no_data,
+      });
+    }
+
+    function projectSeries(seriesName, plotWidth) {
+      if (typeof seriesName !== 'string' || !seriesName || !Number.isFinite(plotWidth) || plotWidth < 0) {
+        throw new Error('seriesName and plotWidth are invalid');
+      }
+      const frame = presentation();
+      if (!frame) return Object.freeze([]);
+      const points = activeGeneration.buckets.flatMap(bucket => {
+        if (!Object.prototype.hasOwnProperty.call(bucket.series, seriesName)) return [];
+        return [Object.freeze({
+          start: bucket.start,
+          value: bucket.series[seriesName].value,
+          x: (bucket.start - frame.window_start) / frame.range_seconds * plotWidth,
+        })];
+      });
+      return Object.freeze(points);
+    }
+
+    function scheduleTick() {
+      if (!running || !visible || zoomedStatic || tickTimer !== null) return;
+      const cadence = liveCadenceSeconds() * 1000;
+      const remainder = ((clock.now() % cadence) + cadence) % cadence;
+      const delay = remainder === 0 ? cadence : cadence - remainder;
+      tickTimer = clock.setTimeout(runTick, delay);
+    }
+
+    async function runTick() {
+      tickTimer = null;
+      if (!running || !visible || zoomedStatic) return;
+      const now = clock.now();
+      reportCadenceStall(now);
+      if (tickBusy || repairBusy) {
+        scheduleTick();
+        return;
+      }
+      tickBusy = true;
+      updatePresentation(now);
+      const request = buildRequest();
+      const serial = selectionSerial;
+      try {
+        onViewport(presentation());
+        // Fine ticks advance presentation and drain SSE work; they never call the
+        // full-snapshot repair function. Coarse ticks may return one exact snapshot.
+        const snapshot = await onTick(request, Object.freeze({
+          now,
+          snapshotDue: concreteResolution() >= 60,
+        }));
+        if (snapshot && requestMatches(request, serial) && running && visible && !zoomedStatic) {
+          acceptSnapshot(snapshot);
+        }
+      } catch (error) {
+        reportContractViolation(error);
+        scheduleRepair();
+      } finally {
+        tickBusy = false;
+        scheduleTick();
+      }
+    }
+
+    function scheduleRepair(immediate = false) {
+      if (explicitlyStopped) return;
+      const firstRequest = !repairNeeded;
+      repairNeeded = true;
+      if (firstRequest) onRepairNeeded();
+      if (!visible || zoomedStatic || repairBusy) return;
+      if (repairTimer !== null) {
+        if (!immediate) return;
+        clock.clearTimeout(repairTimer);
+      }
+      repairTimer = clock.setTimeout(runRepair, immediate ? 0 : repairDelayMs);
+    }
+
+    async function runRepair() {
+      repairTimer = null;
+      if (!visible || zoomedStatic) return;
+      if (repairBusy) return;
+      if (tickBusy) {
+        scheduleRepair();
+        return;
+      }
+      repairBusy = true;
+      repairNeeded = false;
+      const request = buildRequest();
+      const serial = selectionSerial;
+      let succeeded = false;
+      let pendingRetryMs = null;
+      try {
+        const snapshot = await fetchSnapshot(request);
+        if (!requestMatches(request, serial) || !visible || zoomedStatic) return;
+        if (snapshot === SNAPSHOT_NOT_MODIFIED && activeGeneration) {
+          succeeded = true;
+          onRepairComplete(activeGeneration);
+        } else if (snapshot) {
+          acceptSnapshot(snapshot);
+          succeeded = true;
+          onRepairComplete(activeGeneration);
+        }
+      } catch (error) {
+        // The bounded delay below is the only retry owner.
+        if (error?.pending === true && Number.isSafeInteger(error.retryAfterMs)) {
+          pendingRetryMs = error.retryAfterMs;
+        }
+        // Snapshot validation errors already carry the explicit contract marker.
+        // Transport and server-unavailable errors do not: repair owns their
+        // bounded retry path and must not relabel a transient outage as a
+        // schema violation in the browser failure ledger.
+        if (error?.pending !== true) {
+          reportContractViolation(error);
+        }
+      } finally {
+        repairBusy = false;
+        if (succeeded) {
+          repairDelayMs = repairBaseMs;
+        } else {
+          repairDelayMs = pendingRetryMs !== null
+            ? pendingRetryMs
+            : Math.min(repairMaxMs, repairDelayMs * 2);
+          scheduleRepair(!requestMatches(request, serial));
+        }
+      }
+    }
+
+    function clearRepair() {
+      if (repairTimer !== null) clock.clearTimeout(repairTimer);
+      repairTimer = null;
+      repairNeeded = false;
+      repairRequiresFullSnapshot = false;
+      repairDelayMs = repairBaseMs;
+    }
+
+    function select(rangeSeconds, resolution) {
+      // normalizeSelection falls back to the first served range, which is correct
+      // for a saved preference at boot (no live intent to violate) but wrong here:
+      // it would move the caller to a range they did not pick, without a record,
+      // and stick there because the next select() normalizes back to the same
+      // range and takes the identity early return below.
+      if (!capabilities.ranges.some(entry => entry.range_seconds === Number(rangeSeconds))) {
+        reportFailure(`YO!stats range ${String(rangeSeconds).slice(0, 24)} is not served by this server`);
+        return currentSelection();
+      }
+      const nextSelection = normalizeSelection(capabilities, rangeSeconds, resolution);
+      if (nextSelection.range_seconds === selection.range_seconds && nextSelection.resolution === selection.resolution) {
+        return currentSelection();
+      }
+      selection = nextSelection;
+      selectionSerial += 1;
+      presentationAnchorMs = null;
+      presentationAnchorEnd = null;
+      presentationWindowEnd = null;
+      zoomWindowStart = null;
+      zoomWindowEnd = null;
+      clearRepair();
+      if (tickTimer !== null) clock.clearTimeout(tickTimer);
+      tickTimer = null;
+      const cached = selectionSnapshots.get(selectionSnapshotKey());
+      if (cached) {
+        activeDeltaRevision = cached.deltaRevision;
+        zoomedStatic = false;
+        // This generation was already accepted for this exact selection. Reusing it as
+        // last-known-good keeps that selection's source-generation floor, while another range may
+        // legitimately have been materialized at an older source generation.
+        // The cached generation may carry a stale requested_resolution spelling (AUTO reused
+        // under its concrete number, or vice versa) from whichever fetch first populated this
+        // key; relabel it to the selection that was just made so the UI picker and any observer
+        // that reads requested_resolution reflect the active pick, not the original fetch's
+        // request. No network refetch and no chart rebuild: only this label/state converges.
+        publish({...cached.generation, requested_resolution: selection.resolution}, true);
+        scheduleTick();
+        return currentSelection();
+      }
+      activeGeneration = null;
+      zoomedStatic = false;
+      activeDeltaRevision = 0;
+      // reportCadenceStall measures against the cadence of the NEW selection, so a
+      // narrowing switch would otherwise charge the old selection's age to a shorter
+      // budget and report a stall while the first replacement snapshot is in flight.
+      lastGenerationAdvanceAtMs = clock.now();
+      scheduleTick();
+      scheduleRepair(true);
+      return currentSelection();
+    }
+
+    function currentSelection() {
+      return Object.freeze({
+        range_seconds: selection.range_seconds,
+        resolution: selection.resolution,
+        resolution_seconds: concreteResolution(),
+      });
+    }
+
+    function setVisible(value) {
+      const wasVisible = visible;
+      visible = value === true;
+      if (!wasVisible && visible) {
+        lastGenerationAdvanceAtMs = clock.now();
+      }
+      resetSchedulers();
+      if (!wasVisible && visible) scheduleRepair(true);
+    }
+
+    function setZoomedStatic(value) {
+      const wasZoomed = zoomedStatic;
+      zoomedStatic = value === true;
+      if (zoomedStatic && !wasZoomed) {
+        const frame = presentation();
+        zoomWindowStart = frame?.window_start ?? null;
+        zoomWindowEnd = frame?.window_end ?? null;
+      }
+      if (!zoomedStatic) {
+        zoomWindowStart = null;
+        zoomWindowEnd = null;
+      }
+      if (wasZoomed && !zoomedStatic && activeGeneration) anchorPresentation(activeGeneration.window_end);
+      resetSchedulers();
+      if (!zoomedStatic && repairNeeded) scheduleRepair(true);
+    }
+
+    function setZoomWindow(start, end) {
+      if (!activeGeneration || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+        throw new Error('zoom window is invalid');
+      }
+      const liveFrame = presentation();
+      const lower = activeGeneration.window_start;
+      const upper = Math.max(activeGeneration.window_end, liveFrame?.window_end ?? activeGeneration.window_end);
+      zoomWindowStart = Math.max(lower, start);
+      zoomWindowEnd = Math.min(upper, end);
+      if (zoomWindowEnd - zoomWindowStart < concreteResolution()) {
+        throw new Error('zoom window is smaller than one exact bucket');
+      }
+      zoomedStatic = true;
+      resetSchedulers();
+      onViewport(presentation());
+      return presentation();
+    }
+
+    function clearZoom() {
+      setZoomedStatic(false);
+      onViewport(presentation());
+      return presentation();
+    }
+
+    function resetSchedulers() {
+      if (repairTimer !== null) clock.clearTimeout(repairTimer);
+      repairTimer = null;
+      resetTickTimer();
+      if (repairNeeded) scheduleRepair();
+    }
+
+    function resetTickTimer() {
+      if (tickTimer !== null) clock.clearTimeout(tickTimer);
+      tickTimer = null;
+      scheduleTick();
+    }
+
+    function handleReconnect({requiresFullSnapshot = true, retryAfterMs = null} = {}) {
+      repairRequiresFullSnapshot ||= requiresFullSnapshot === true;
+      if (Number.isSafeInteger(retryAfterMs) && retryAfterMs >= 1) repairDelayMs = retryAfterMs;
+      // A server can reject a just-accepted cursor while it publishes the next
+      // generation. Keep that repair on the controller's bounded cadence: an
+      // immediate snapshot/stream/repair loop otherwise refetches forever.
+      scheduleRepair();
+    }
+
+    function handleTransportFailure(message = 'YO!stats stream unavailable') {
+      reportFailure(message);
+      handleReconnect({requiresFullSnapshot: false});
+    }
+
+    // Same transport recovery as a failure — the document may survive the unload it
+    // started — but a different observation: the close was caused by this page going
+    // away, not by the server or the network.
+    function handleTransportRetirement(reason) {
+      failureOwner.reportRetirement(reason);
+      handleReconnect({requiresFullSnapshot: false});
+    }
+
+    return Object.freeze({
+      acceptDelta,
+      acceptSnapshot,
+      acceptStreamRevision,
+      axis: axisContract,
+      buildDeltaRequest,
+      buildRequest,
+      capabilities: () => capabilities,
+      generation: () => activeGeneration,
+      deltaRequest: buildDeltaRequest,
+      handleReconnect,
+      handleTransportFailure,
+      handleTransportRetirement,
+      noteStreamHeartbeat,
+      presentation,
+      projectSeries,
+      select,
+      selection: currentSelection,
+      setZoomWindow,
+      clearZoom,
+      setVisible,
+      setZoomedStatic,
+      start() {
+        if (running) return;
+        explicitlyStopped = false;
+        running = true;
+        if (lastGenerationAdvanceAtMs === null) lastGenerationAdvanceAtMs = clock.now();
+        scheduleTick();
+        if (!activeGeneration) scheduleRepair(true);
+      },
+      stop() {
+        explicitlyStopped = true;
+        running = false;
+        resetTickTimer();
+        clearRepair();
+        lastGenerationAdvanceAtMs = null;
+      },
+    });
+  }
+
+  function createBrowserClient(options = {}) {
+    if (!options || typeof options !== 'object' || Array.isArray(options)) {
+      throw new Error('browser client options must be an object');
+    }
+    const fetchImpl = options.fetch || globalThis.fetch?.bind(globalThis);
+    const EventSourceImpl = options.EventSource || globalThis.EventSource;
+
+    const controllerOptions = options.controllerOptions || {};
+    const clock = controllerOptions.clock || {
+      now: () => Date.now(),
+      setTimeout: globalThis.setTimeout?.bind(globalThis),
+      clearTimeout: globalThis.clearTimeout?.bind(globalThis),
+    };
+    const onState = options.onState || (() => {});
+    const onTerminalAuthentication = options.onTerminalAuthentication || (() => {});
+    const userOnGeneration = controllerOptions.onGeneration || (() => {});
+    const userOnDelta = controllerOptions.onDelta || userOnGeneration;
+    const userOnRuntime = controllerOptions.onRuntime || (() => {});
+    const userOnRepairNeeded = controllerOptions.onRepairNeeded || (() => {});
+    const userOnRepairComplete = controllerOptions.onRepairComplete || (() => {});
+    const failureOwner = createTransportFailureOwner(controllerOptions.onFailure, controllerOptions.onRetirement, () => streamEvidence());
+    const readinessTimeoutMs = positiveInteger(options.readinessTimeoutMs ?? 10_000, 'readinessTimeoutMs');
+    // A cold Go product is demand-driven and can take longer than the normal
+    // transport-start budget. The measured full-build range is 25-56 seconds;
+    // keep a separate bounded deadline once the server proves it is working.
+    const pendingReadinessTimeoutMs = positiveInteger(options.pendingReadinessTimeoutMs ?? 120_000, 'pendingReadinessTimeoutMs');
+    const readinessRetryMs = positiveInteger(options.readinessRetryMs ?? 1_000, 'readinessRetryMs');
+    const clientId = String(options.clientId ?? controllerOptions.clientId ?? '').trim();
+    let savedRange = options.savedRange ?? controllerOptions.savedRange;
+    let savedResolution = options.savedResolution ?? controllerOptions.savedResolution;
+    let capabilitiesPromise = null;
+    let startPromise = null;
+    let controller = null;
+    let lifecycleScope = null;
+    let streamEpoch = 0;
+    let streamTransportToken = 0;
+    let running = false;
+    let visible = true;
+    let readFenceRecovery = null;
+    let readinessEpoch = 0;
+    let pendingReadinessEpoch = 0;
+    let readinessReject = null;
+    let healthy = false;
+    let terminalAuthenticationError = null;
+    let deliverySequence = 0;
+    let acceptedDeltaSequence = 0;
+    let lastDeliveryKind = '';
+    let lastDeliveryAtMs = 0;
+    let lastDeliveryEmitMs = 0;
+    let lastDeliveryEpoch = 0;
+    const ownsPageTransportLifecycle = options.pageTransportLifecycle === undefined
+      && options.pageLifecycle !== undefined;
+    const transportLifecycle = options.pageTransportLifecycle || (
+      ownsPageTransportLifecycle
+        ? createPageTransportLifecycle(options.pageLifecycle)
+        : pageTransportLifecycle
+    );
+    streamTransportToken = transportLifecycle.begin();
+
+    function ensureLifecycleScope() {
+      if (lifecycleScope?.current()) return lifecycleScope;
+      const scope = createLifecycleScope({
+        isCurrent: () => lifecycleScope === scope,
+        onDispose: () => {
+          if (lifecycleScope === scope) lifecycleScope = null;
+        },
+      });
+      lifecycleScope = scope;
+      transportLifecycle.start();
+      return scope;
+    }
+    ensureLifecycleScope();
+
+    // `emitId` is the server's monotonic emit clock, carried on the frame's SSE `id:` line and
+    // handed over as `event.lastEventId`. Retaining it next to the arrival time is what separates
+    // "the server never sent it" from "the server sent it and it arrived late": emit spacing stays
+    // on cadence while arrival spacing stretches. It is deliberately read from outside the JSON
+    // body, so no frame body key set changes and `exactFields` never sees it. A server that sends
+    // no id leaves the value at 0 rather than NaN, so the evidence is always numeric.
+    function recordStreamDelivery(kind, epoch, {acceptedDelta = false, emitId = ''} = {}) {
+      transportLifecycle.noteDelivery(streamTransportToken);
+      streamTransportToken = transportLifecycle.begin();
+      deliverySequence = Math.min(Number.MAX_SAFE_INTEGER, deliverySequence + 1);
+      if (acceptedDelta) acceptedDeltaSequence = Math.min(Number.MAX_SAFE_INTEGER, acceptedDeltaSequence + 1);
+      lastDeliveryKind = kind;
+      lastDeliveryAtMs = Math.max(0, Number(clock.now()) || 0);
+      lastDeliveryEpoch = epoch;
+      const emitted = Number(emitId);
+      lastDeliveryEmitMs = Number.isFinite(emitted) && emitted >= 0 ? emitted : 0;
+    }
+
+    function streamEvidence() {
+      const generation = controller?.generation?.() || null;
+      const presentation = controller?.presentation?.() || null;
+      const selection = controller?.selection?.() || null;
+      return Object.freeze({
+        running,
+        visible,
+        healthy,
+        streamOpen: lifecycleScope?.value('stream') !== null,
+        streamEpoch,
+        deliverySequence,
+        acceptedDeltaSequence,
+        lastDeliveryKind,
+        lastDeliveryAtMs,
+        lastDeliveryEmitMs,
+        lastDeliveryEpoch,
+        rangeSeconds: Number(selection?.range_seconds) || 0,
+        resolutionSeconds: Number(generation?.resolution_seconds) || 0,
+        sourceGeneration: Number(generation?.source_generation) || 0,
+        cacheGeneration: Number(generation?.cache_generation) || 0,
+        deltaRevision: Number(presentation?.delta_revision) || 0,
+      });
+    }
+
+    function clearReadinessTimer() {
+      lifecycleScope?.release('readiness-timer');
+    }
+
+    function armReadinessTimer(epoch, timeoutMs, reject = null, forceFailure = false) {
+      const scope = ensureLifecycleScope();
+      clearReadinessTimer();
+      if (!running || !visible || typeof clock.setTimeout !== 'function') return;
+      const timer = clock.setTimeout(() => {
+        scope.release('readiness-timer', timer);
+        const error = new Error(`current stats readiness timed out after ${timeoutMs}ms`);
+        if ((forceFailure || startPromise === null) && handleReadinessFailure(error, epoch)) scheduleReadinessRetry();
+        (reject || readinessReject)?.(error);
+      }, timeoutMs);
+      scope.ownTimer('readiness-timer', timer, value => clock.clearTimeout(value));
+    }
+
+    function readinessMessage(error) {
+      const detail = String(error?.message || error || 'unavailable').replace(/\s+/g, ' ').trim().slice(0, 96);
+      return `YO!stats stream initialization unavailable: ${detail}`;
+    }
+
+    function resetUnreadyClient() {
+      cancelSnapshotRequest();
+      closeStream();
+      if (controller) controller.stop();
+      controller = null;
+      capabilitiesPromise = null;
+      healthy = false;
+    }
+
+    function retireForTerminalAuthentication(error) {
+      if (!isCurrentStatsTerminalAuthentication(error) || terminalAuthenticationError) return false;
+      terminalAuthenticationError = error;
+      running = false;
+      readinessEpoch += 1;
+      clearReadinessTimer();
+      cancelSnapshotRequest();
+      closeStream();
+      if (controller) {
+        controller.setVisible(false);
+        controller.stop();
+      }
+      onState('signed-out', error);
+      onTerminalAuthentication(error);
+      return true;
+    }
+
+    function scheduleReadinessRetry() {
+      const scope = ensureLifecycleScope();
+      if (!running || !visible || scope.value('readiness-timer') !== null || typeof clock.setTimeout !== 'function') return;
+      const timer = clock.setTimeout(() => {
+        scope.release('readiness-timer', timer);
+        void beginActivation().catch(() => {});
+      }, readinessRetryMs);
+      scope.ownTimer('readiness-timer', timer, value => clock.clearTimeout(value));
+    }
+
+    function handleReadinessFailure(error, epoch) {
+      if (epoch !== readinessEpoch) return false;
+      if (retireForTerminalAuthentication(error)) return false;
+      // Terminal authentication may already have been claimed by the shared
+      // auth owner while this activation promise was unwinding. Do not turn
+      // that expected signed-out transition into a second stats failure.
+      if (terminalAuthenticationError || isCurrentStatsTerminalAuthentication(error)) return false;
+      readinessEpoch += 1;
+      clearReadinessTimer();
+      resetUnreadyClient();
+      if (running && visible) {
+        onState('error', error);
+        failureOwner.report(readinessMessage(error));
+      }
+      return true;
+    }
+
+    function markHealthy(epoch) {
+      if (epoch !== readinessEpoch) return;
+      healthy = true;
+      clearReadinessTimer();
+    }
+
+    async function recoverReadFence(error) {
+      if (error?.recoverableReadFence !== true) return;
+      if (!readFenceRecovery) {
+        readFenceRecovery = fetchJson(fetchImpl, '/api/stats-retry', false, {method: 'POST'})
+          .catch(recoveryError => {
+            // Preserve the original fence details for the visible state while
+            // the controller's single bounded repair timer retries the read.
+            error.recoveryError = recoveryError;
+          })
+          .finally(() => { readFenceRecovery = null; });
+      }
+      await readFenceRecovery;
+    }
+
+    function fetchCapabilities() {
+      if (!capabilitiesPromise) {
+        onState('loading');
+        capabilitiesPromise = fetchJson(fetchImpl, '/api/stats-capabilities', false, {background: true});
+      }
+      return capabilitiesPromise;
+    }
+
+    function cancelSnapshotRequest() {
+      lifecycleScope?.release('snapshot-request');
+    }
+
+    function snapshotStreamError(payload, kind) {
+      const reason = String(payload?.reason || payload?.error || `stats snapshot ${kind}`).trim();
+      const error = new Error(reason || `stats snapshot ${kind}`);
+      error.reason = reason;
+      error.code = String(payload?.code || '').trim();
+      error.status = Number(payload?.status_code)
+        || (error.code === 'authentication_required' || error.reason === 'authentication_required' ? 401 : 0);
+      error.terminalAuthentication = isCurrentStatsTerminalAuthentication(error);
+      error.terminal = payload?.terminal === true;
+      if (kind === 'pending') {
+        const retryAfterSeconds = Number(payload?.retry_after_seconds);
+        error.pending = true;
+        error.retryAfterMs = Number.isSafeInteger(retryAfterSeconds)
+          && retryAfterSeconds >= 1
+          && retryAfterSeconds <= CURRENT_STATS_PENDING_RETRY_MAX_SECONDS
+          ? retryAfterSeconds * 1000
+          : 1000;
+      }
+      if (kind === 'upgrade_required') {
+        error.versionFence = true;
+        error.recoverableReadFence = payload?.terminal !== true;
+        error.requiredProtocolVersion = Number(payload?.required_protocol_version) || 0;
+        error.requiredSchemaGeneration = Number(payload?.required_schema_generation) || 0;
+        error.requiredBuild = String(payload?.required_build || '');
+      }
+      return error;
+    }
+
+    function fetchSnapshot(request) {
+      const scope = ensureLifecycleScope();
+      closeStream();
+      const url = exactUrl('/api/stats-stream', [
+        ['range_seconds', request.range_seconds],
+        ['resolution', request.resolution],
+        ['client_id', request.client_id],
+        ['since_generation', request.since_generation],
+      ]);
+      const epoch = streamEpoch + 1;
+      let candidate;
+      try {
+        candidate = new EventSourceImpl(url, {withCredentials: true});
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      streamEpoch = epoch;
+      streamTransportToken = transportLifecycle.begin();
+      scope.ownStream('stream', candidate);
+
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        let pendingBeforeReadiness = false;
+        let acknowledgement = null;
+        let fullSnapshot = null;
+        let assembly = null;
+
+        const current = () => scope.current()
+          && scope.value('stream') === candidate
+          && streamEpoch === epoch;
+        const finish = value => {
+          if (settled) return;
+          settled = true;
+          scope.relinquish('snapshot-request', cancel);
+          resolve(value);
+        };
+        const fail = async error => {
+          if (settled) return false;
+          settled = true;
+          scope.relinquish('snapshot-request', cancel);
+          closeStream();
+          if (retireForTerminalAuthentication(error)) {
+            reject(error);
+            return true;
+          }
+          if (error?.recoverableReadFence === true) await recoverReadFence(error);
+          onState(error?.pending === true ? 'pending' : 'error', error);
+          reject(error);
+          return true;
+        };
+        const cancel = () => {
+          if (settled) return;
+          const error = new Error('snapshot request was cancelled');
+          error.cancelled = true;
+          settled = true;
+          reject(error);
+        };
+        const handleTypedStreamError = (event, kind) => {
+          try {
+            const error = snapshotStreamError(JSON.parse(event.data), kind);
+            if (kind === 'pending' && !settled) {
+              pendingBeforeReadiness = true;
+              onState('pending', error);
+              const readiness = readinessEpoch;
+              if (pendingReadinessEpoch !== readiness) {
+                pendingReadinessEpoch = readiness;
+                armReadinessTimer(readiness, pendingReadinessTimeoutMs, null, true);
+              }
+              return;
+            }
+            if (!settled) void fail(error);
+            else void routeTypedStreamError(candidate, epoch, error);
+          } catch (error) {
+            if (!settled) void fail(error);
+            else void routeTypedStreamError(candidate, epoch, error);
+          }
+        };
+        scope.replace('snapshot-request', cancel, callback => callback());
+
+        scope.ownEvent('stream-ack', candidate, 'ack', event => {
+          if (!current() || settled) return;
+          try {
+            const value = JSON.parse(event.data);
+            exactFields(value, ['cache_generation', 'chunk_count', 'not_modified', 'range_seconds', 'requested_resolution', 'resolution_seconds'], 'snapshot ack');
+            generationNumber(value.cache_generation, 'snapshot ack cache_generation');
+            positiveInteger(value.chunk_count, 'snapshot ack chunk_count');
+            if (typeof value.not_modified !== 'boolean'
+                || value.chunk_count > CURRENT_STATS_MAX_SNAPSHOT_CHUNKS
+                || (value.not_modified && value.chunk_count !== 1)
+                || value.range_seconds !== request.range_seconds
+                || String(value.requested_resolution) !== String(request.resolution)) throw new Error('snapshot ack does not match the active request');
+            acknowledgement = Object.freeze(value);
+            recordStreamDelivery('ack', epoch, {emitId: event.lastEventId});
+          } catch (error) {
+            void fail(error);
+          }
+        });
+        scope.ownEvent('stream-snapshot', candidate, 'snapshot', event => {
+          if (!current() || settled) return;
+          try {
+            if (!acknowledgement || acknowledgement.not_modified) throw new Error('snapshot data arrived without a matching ack');
+            const value = JSON.parse(event.data);
+            if (snapshotChunkPayload(value)) {
+              if (value.chunk_count !== acknowledgement.chunk_count) throw new Error('snapshot chunk count does not match the ack');
+              if (!assembly) assembly = createSnapshotChunkAssembly(value, request, controller?.capabilities()?.max_buckets);
+              else assembly.accept(value);
+            } else {
+              if (acknowledgement.chunk_count !== 1 || assembly || fullSnapshot) throw new Error('snapshot stream mixed full and chunked data');
+              fullSnapshot = value;
+            }
+            recordStreamDelivery('snapshot', epoch, {emitId: event.lastEventId});
+          } catch (error) {
+            void fail(error);
+          }
+        });
+        scope.ownEvent('stream-delta', candidate, 'delta', event => {
+          if (!current()) return;
+          if (!settled) {
+            void fail(new Error('stats delta arrived before snapshot readiness'));
+            return;
+          }
+          try {
+            if (controller.acceptDelta(JSON.parse(event.data))) {
+              recordStreamDelivery('delta', epoch, {acceptedDelta: true, emitId: event.lastEventId});
+            }
+          } catch (_error) {
+            routeStreamFailure(candidate, epoch);
+          }
+        });
+        scope.ownEvent('stream-runtime', candidate, 'runtime', event => {
+          if (!current() || !settled) return;
+          try {
+            const value = JSON.parse(event.data);
+            exactFields(value, ['cache_generation', 'load'], 'runtime load');
+            generationNumber(value.cache_generation, 'runtime load cache_generation');
+            const generation = controller?.generation();
+            if (!generation || value.cache_generation !== generation.cache_generation) throw new Error('runtime load generation does not match current snapshot');
+            if (!value.load || typeof value.load !== 'object' || Array.isArray(value.load)) throw new Error('runtime load is not an object');
+            for (const [key, item] of Object.entries(value.load)) {
+              if (!/^[A-Za-z0-9_.:-]{1,96}$/.test(key) || !item || typeof item !== 'object' || Array.isArray(item)) throw new Error('runtime load entry is invalid');
+              const percent = Number(item.load_percent);
+              if (!Number.isFinite(percent) || percent < 0 || percent > 1e6) throw new Error('runtime load percentage is invalid');
+            }
+            userOnRuntime(Object.freeze(value.load));
+            recordStreamDelivery('runtime', epoch, {emitId: event.lastEventId});
+            controller?.noteStreamHeartbeat?.();
+          } catch (error) {
+            routeStreamFailure(candidate, epoch);
+          }
+        });
+        scope.ownEvent('stream-ready', candidate, 'ready', event => {
+          if (!current()) return;
+          try {
+            const ready = JSON.parse(event.data);
+            exactFields(ready, ['cache_generation', 'revision'], 'ready');
+            generationNumber(ready.cache_generation, 'ready.cache_generation');
+            if (!Number.isSafeInteger(ready.revision) || ready.revision < 0) throw new Error('ready revision is invalid');
+            if (!settled) {
+              if (!acknowledgement || ready.cache_generation !== acknowledgement.cache_generation) {
+                throw new Error('initial ready cursor does not match snapshot ack');
+              }
+              let value;
+              if (acknowledgement.not_modified) {
+                value = SNAPSHOT_NOT_MODIFIED;
+                if (!controller?.acceptStreamRevision(ready.cache_generation, ready.revision)) {
+                  throw new Error('not-modified ready cursor does not match the active generation');
+                }
+              } else {
+                if (ready.revision !== 0) throw new Error('full snapshot ready cursor must start at revision zero');
+                if (assembly) value = assembly.snapshot();
+                else if (fullSnapshot) value = fullSnapshot;
+                else throw new Error('initial ready arrived without snapshot data');
+              }
+              if (value !== SNAPSHOT_NOT_MODIFIED && value.cache_generation !== ready.cache_generation) {
+                throw new Error('snapshot data does not match the ready cursor');
+              }
+              if (value === SNAPSHOT_NOT_MODIFIED && !controller?.generation()) {
+                throw new Error('snapshot cannot be not-modified before an initial generation');
+              }
+              recordStreamDelivery('ready', epoch, {emitId: event.lastEventId});
+              finish(value);
+              return;
+            }
+            const generation = controller.generation();
+            const presentation = controller.presentation();
+            if (!generation
+                || ready.cache_generation !== generation.cache_generation
+                || ready.revision !== presentation?.delta_revision) {
+              throw new Error('ready cursor does not match current generation');
+            }
+            recordStreamDelivery('ready', epoch, {emitId: event.lastEventId});
+            controller.noteStreamHeartbeat();
+          } catch (error) {
+            if (!settled) void fail(error);
+            else routeStreamFailure(candidate, epoch);
+          }
+        });
+        scope.ownEvent('stream-pending', candidate, 'pending', event => {
+          if (!current()) return;
+          handleTypedStreamError(event, 'pending');
+        });
+        scope.ownEvent('stream-upgrade-required', candidate, 'upgrade_required', event => {
+          if (!current()) return;
+          handleTypedStreamError(event, 'upgrade_required');
+        });
+        scope.ownEvent('stream-repair', candidate, 'repair', () => {
+          if (!settled) void fail(new Error('snapshot stream requested repair before readiness'));
+          else routeStreamRepair(candidate, epoch);
+        });
+        scope.ownEvent('stream-unavailable', candidate, 'unavailable', event => {
+          if (!current()) return;
+          handleTypedStreamError(event, 'unavailable');
+        });
+        scope.ownEvent('stream-error', candidate, 'error', () => {
+          // A cold Go product closes its pending SSE response; EventSource reports that close while reconnecting.
+          if (!settled && pendingBeforeReadiness) return;
+          if (!settled) void fail(new Error('YO!stats stream unavailable before snapshot readiness'));
+          else routeStreamTransportError(candidate, epoch);
+        });
+      });
+    }
+
+    function closeStream() {
+      streamEpoch += 1;
+      for (const eventName of ['ack', 'snapshot', 'delta', 'runtime', 'ready', 'pending', 'upgrade-required', 'repair', 'unavailable', 'error']) {
+        lifecycleScope?.release(`stream-${eventName}`);
+      }
+      lifecycleScope?.release('stream');
+    }
+
+    function routeStreamFailure(candidate, epoch) {
+      if (lifecycleScope?.value('stream') !== candidate || streamEpoch !== epoch) return;
+      closeStream();
+      controller.handleTransportFailure();
+    }
+
+    // Only the native transport `error` is ambiguous: it is the one close the browser
+    // itself performs while unloading. A server-sent `unavailable` frame and a rejected
+    // `delta`/`ready` frame are the server or the payload failing and stay failures.
+    function routeStreamTransportError(candidate, epoch) {
+      if (lifecycleScope?.value('stream') !== candidate || streamEpoch !== epoch) return;
+      const retirementReason = transportLifecycle.reasonSince(streamTransportToken);
+      if (!retirementReason) {
+        routeStreamFailure(candidate, epoch);
+        return;
+      }
+      closeStream();
+      controller.handleTransportRetirement(retirementReason);
+    }
+
+    function routeStreamRepair(candidate, epoch) {
+      if (lifecycleScope?.value('stream') !== candidate || streamEpoch !== epoch) return;
+      closeStream();
+      controller.handleReconnect({requiresFullSnapshot: false});
+    }
+
+    async function routeTypedStreamError(candidate, epoch, error) {
+      if (lifecycleScope?.value('stream') !== candidate || streamEpoch !== epoch) return;
+      closeStream();
+      if (retireForTerminalAuthentication(error)) return;
+      onState(error?.pending === true ? 'pending' : 'error', error);
+      if (error?.recoverableReadFence === true) await recoverReadFence(error);
+      if (lifecycleScope?.value('stream') !== null || streamEpoch !== epoch + 1) return;
+      controller.handleReconnect({
+        requiresFullSnapshot: error?.versionFence === true,
+        retryAfterMs: error?.pending === true ? error.retryAfterMs : null,
+      });
+    }
+
+
+    async function activate(epoch) {
+      if (typeof fetchImpl !== 'function') throw new Error('browser fetch is unavailable');
+      if (typeof EventSourceImpl !== 'function') throw new Error('browser EventSource is unavailable');
+      const capabilities = await fetchCapabilities();
+      if (epoch !== readinessEpoch || !running || !visible) return controller;
+      if (!controller) {
+        controller = createController({
+          ...controllerOptions,
+          failureOwner,
+          capabilities,
+          clientId,
+          savedRange,
+          savedResolution,
+          fetchSnapshot,
+          onGeneration(generation) {
+            markHealthy(epoch);
+            onState('ready');
+            userOnGeneration(generation);
+          },
+          onDelta(generation, delta) {
+            markHealthy(epoch);
+            onState('ready');
+            userOnDelta(generation, delta);
+          },
+          onRepairNeeded() {
+            closeStream();
+            userOnRepairNeeded();
+          },
+          onRepairComplete(generation) {
+            onState('ready');
+            userOnRepairComplete(generation);
+          },
+        });
+      }
+      if (running) {
+        controller.setVisible(visible);
+        controller.start();
+        if (controller.generation() && !lifecycleScope?.value('stream')) {
+          controller.handleReconnect({requiresFullSnapshot: false});
+        }
+      }
+      return controller;
+    }
+
+    function beginActivation() {
+      if (!running || !visible) return Promise.resolve(controller);
+      if (startPromise) return startPromise;
+      ensureLifecycleScope();
+      if (controller) {
+        controller.setVisible(visible);
+        controller.start();
+        if (controller.generation() && !lifecycleScope?.value('stream')) {
+          controller.handleReconnect({requiresFullSnapshot: false});
+        }
+        return Promise.resolve(controller);
+      }
+      const epoch = readinessEpoch + 1;
+      readinessEpoch = epoch;
+      pendingReadinessEpoch = 0;
+      clearReadinessTimer();
+      const timeout = typeof clock.setTimeout === 'function'
+        ? new Promise((_resolve, reject) => {
+          readinessReject = reject;
+          armReadinessTimer(epoch, readinessTimeoutMs, reject);
+        })
+        : null;
+      const activation = Promise.resolve().then(() => activate(epoch));
+      let retryAfterFailure = false;
+      const observed = (timeout ? Promise.race([activation, timeout]) : activation).then(value => {
+        if (healthy) clearReadinessTimer();
+        return value;
+      }).catch(error => {
+        retryAfterFailure = handleReadinessFailure(error, epoch);
+        throw error;
+      }).finally(() => {
+        readinessReject = null;
+        if (startPromise === observed) startPromise = null;
+        if (retryAfterFailure) scheduleReadinessRetry();
+      });
+      startPromise = observed;
+      return observed;
+    }
+
+    function start() {
+      if (terminalAuthenticationError) return Promise.reject(terminalAuthenticationError);
+      if (running) {
+        if (startPromise) return startPromise;
+        if (controller || lifecycleScope?.value('readiness-timer') !== null) return Promise.resolve(controller);
+        return beginActivation();
+      }
+      running = true;
+      return beginActivation();
+    }
+
+    return Object.freeze({
+      controller: () => controller,
+      streamEvidence,
+      select(rangeSeconds, resolution) {
+        if (!controller) {
+          savedRange = rangeSeconds;
+          savedResolution = resolution;
+          return null;
+        }
+        const before = controller.selection();
+        const changed = before.range_seconds !== Number(rangeSeconds)
+          || String(before.resolution) !== String(resolution);
+        if (changed) closeStream();
+        if (changed) cancelSnapshotRequest();
+        const result = controller.select(rangeSeconds, resolution);
+        // The controller refuses a range this server does not serve and stays on
+        // `before`. Do not persist a selection it refused, and reopen the stream we
+        // closed for a switch that never happened: an old view left with no stream
+        // is a genuine stall three cadences later.
+        const kept = result.range_seconds === before.range_seconds
+          && String(result.resolution) === String(before.resolution);
+        if (!kept) {
+          savedRange = rangeSeconds;
+          savedResolution = resolution;
+        }
+        if (!controller.generation()) closeStream();
+        else if (changed) controller.handleReconnect({requiresFullSnapshot: false});
+        if (!running) controller.stop();
+        return result;
+      },
+      setVisible(value) {
+        if (terminalAuthenticationError) return;
+        const nextVisible = value === true;
+        if (visible === nextVisible) return;
+        visible = nextVisible;
+        if (!visible) {
+          cancelSnapshotRequest();
+          closeStream();
+        }
+        if (controller) {
+          controller.setVisible(visible);
+          if (!running) controller.stop();
+          else if (visible && controller.generation() && !lifecycleScope?.value('stream')) {
+            controller.handleReconnect({requiresFullSnapshot: false});
+          }
+        }
+        if (visible && running && !controller && !startPromise && lifecycleScope?.value('readiness-timer') === null) {
+          void beginActivation().catch(() => {});
+        }
+      },
+      async retry() {
+        onState('loading');
+        cancelSnapshotRequest();
+        await fetchJson(fetchImpl, '/api/stats-retry', false, {method: 'POST'}).catch(error => {
+          onState('error', error);
+          throw error;
+        });
+        closeStream();
+        capabilitiesPromise = null;
+        if (!controller) {
+          running = true;
+          readinessEpoch += 1;
+          clearReadinessTimer();
+          return beginActivation();
+        }
+        running = true;
+        controller.setVisible(visible);
+        controller.start();
+        controller.handleReconnect();
+        return controller;
+      },
+      start,
+      stop() {
+        running = false;
+        readinessEpoch += 1;
+        streamEpoch += 1;
+        lifecycleScope?.dispose('stats-client-stop');
+        if (ownsPageTransportLifecycle) transportLifecycle.dispose('stats-client-stop');
+        if (controller) controller.stop();
+        startPromise = null;
+      },
+    });
+  }
+
+  function mount(element, options = {}) {
+    if (!element || typeof element.querySelector !== 'function' || typeof element.addEventListener !== 'function') {
+      throw new Error('mount requires a DOM element');
+    }
+    const view = options.view || 'stats';
+    if (!['stats', 'cost'].includes(view)) throw new Error('view must be stats or cost');
+    const suppliedControllerOptions = options.controllerOptions || {};
+    const suppliedOnGeneration = suppliedControllerOptions.onGeneration || (() => {});
+    const suppliedOnDelta = suppliedControllerOptions.onDelta || suppliedOnGeneration;
+    const suppliedOnRuntime = suppliedControllerOptions.onRuntime || (() => {});
+    const suppliedOnViewport = suppliedControllerOptions.onViewport || (() => {});
+    let client = null;
+    let destroyed = false;
+    let renderVisible = true;
+    let latestState = 'loading';
+    const renderer = createCurrentRenderer(element, {
+      view,
+      onSelect(rangeSeconds, resolution) {
+        if (!client || destroyed) return;
+        const selection = client.select(rangeSeconds, resolution);
+        if (selection) renderer.configure(client.controller().capabilities(), selection);
+      },
+      onZoom(start, end) {
+        if (!client || destroyed) return;
+        client.controller()?.setZoomWindow(start, end);
+      },
+      onResetZoom() {
+        if (!client || destroyed) return;
+        client.controller()?.clearZoom();
+      },
+    });
+    client = createBrowserClient({
+      fetch: options.fetch,
+      EventSource: options.EventSource,
+      clientId: options.clientId || currentStatsClientId(),
+      savedRange: options.savedRange,
+      savedResolution: options.savedResolution,
+      onState(state) {
+        latestState = state;
+        if (renderVisible) renderer.setStatus(state);
+      },
+      controllerOptions: {
+        ...suppliedControllerOptions,
+        onGeneration(generation) {
+          suppliedOnGeneration(generation);
+          if (renderVisible) renderer.render(generation, client.controller().presentation());
+        },
+        onDelta(generation, delta) {
+          suppliedOnDelta(generation, delta);
+          if (renderVisible) renderer.render(generation, client.controller().presentation());
+        },
+        onRuntime(load) {
+          suppliedOnRuntime(load);
+        },
+        onViewport(frame) {
+          suppliedOnViewport(frame);
+          const generation = client.controller().generation();
+          if (generation && renderVisible) renderer.render(generation, frame);
+        },
+      },
+    });
+
+    const api = Object.freeze({
+      async start() {
+        if (destroyed) throw new Error('mounted stats view is destroyed');
+        try {
+          const controller = await client.start();
+          if (renderVisible) {
+            renderer.configure(controller.capabilities(), controller.selection());
+            if (controller.generation()) renderer.render(controller.generation(), controller.presentation());
+          }
+          return api;
+        } catch (error) {
+          latestState = 'error';
+          if (renderVisible) renderer.setStatus('error');
+          throw error;
+        }
+      },
+      stop() {
+        if (!destroyed) client.stop();
+      },
+      setVisible(value) {
+        if (destroyed) return;
+        const nextVisible = value === true;
+        if (renderVisible === nextVisible) return;
+        renderVisible = nextVisible;
+        if (!renderVisible) return;
+        renderer.setStatus(latestState);
+        const controller = client.controller();
+        if (!controller) return;
+        renderer.configure(controller.capabilities(), controller.selection());
+        if (controller.generation()) renderer.render(controller.generation(), controller.presentation());
+      },
+      destroy() {
+        if (destroyed) return;
+        destroyed = true;
+        client.stop();
+        renderer.destroy();
+      },
+    });
+    return api;
+  }
+
+  function createCurrentRenderer(element, options) {
+    const view = options.view;
+    const rendererId = nextRendererId++;
+    let capabilities = null;
+    let selection = null;
+    let latestGeneration = null;
+    let latestFrame = null;
+    let zoomed = false;
+    let pointerDrag = null;
+    let pinnedTooltip = null;
+    let controlSignature = '';
+    let statusSignature = '';
+    let costModalOpen = false;
+    let costModalSignature = '';
+    const visibilityDefinitions = view === 'stats' ? currentStatsVisibilityDefinitions() : [];
+    const visibleGroups = new Set(visibilityDefinitions.flatMap(definition => (
+      definition.defaultVisible === false ? [] : definition.groups
+    )));
+    const ownerDocument = element.ownerDocument || globalThis.document || null;
+    element.innerHTML = [
+      `<section class="yo-stats-current yo-stats-current--${currentStatsEscape(view)}" data-stats-current-view="${currentStatsEscape(view)}">`,
+      '<div class="yo-stats-current-controls" data-stats-current-controls></div>',
+      '<div class="yo-stats-current-recovery" data-stats-current-recovery></div>',
+      '<div class="yo-stats-current-status" data-stats-current-status aria-live="polite"></div>',
+      '<div class="yo-stats-current-content" data-stats-current-content></div>',
+      '<div data-stats-current-modal-root></div>',
+      '</section>',
+    ].join('');
+    const controlsElement = element.querySelector('[data-stats-current-controls]');
+    const recoveryElement = element.querySelector('[data-stats-current-recovery]');
+    const statusElement = element.querySelector('[data-stats-current-status]');
+    const contentElement = element.querySelector('[data-stats-current-content]');
+    const modalElement = element.querySelector('[data-stats-current-modal-root]');
+    if (!controlsElement || !recoveryElement || !statusElement || !contentElement || !modalElement) {
+      throw new Error('mount element could not create the current stats shell');
+    }
+
+    function paintControls() {
+      if (!capabilities || !selection) return;
+      const capability = capabilities.ranges.find(row => row.range_seconds === selection.range_seconds);
+      if (!capability) throw new Error('renderer selection is absent from capabilities');
+      const signature = JSON.stringify([
+        selection.range_seconds, selection.resolution, capability.auto_resolution_seconds,
+        capability.explicit_resolution_seconds, zoomed, [...visibleGroups].sort(compareUnicode),
+      ]);
+      if (signature === controlSignature) return;
+      controlSignature = signature;
+      const rangeOptions = capabilities.ranges.map(row => (
+        `<option value="${row.range_seconds}"${row.range_seconds === selection.range_seconds ? ' selected' : ''}>${currentStatsEscape(currentStatsDuration(row.range_seconds))}</option>`
+      )).join('');
+      const resolutionOptions = [
+        `<option value="AUTO"${selection.resolution === 'AUTO' ? ' selected' : ''}>AUTO (${capability.auto_resolution_seconds}s)</option>`,
+        ...capability.explicit_resolution_seconds.map(resolution => (
+          `<option value="${resolution}"${selection.resolution === resolution ? ' selected' : ''}>${resolution}s</option>`
+        )),
+      ].join('');
+      controlsElement.innerHTML = [
+        '<label class="yo-stats-current-control">Range ',
+        `<select data-stats-current-range aria-label="Range">${rangeOptions}</select></label>`,
+        '<label class="yo-stats-current-control">Resolution ',
+        `<select data-stats-current-resolution aria-label="Resolution">${resolutionOptions}</select></label>`,
+        `<span class="yo-stats-current-exact">Exact ${selection.resolution_seconds}s</span>`,
+        `<button type="button" data-stats-current-zoom-reset${zoomed ? '' : ' hidden'}>Reset zoom</button>`,
+        visibilityDefinitions.length ? `<div class="yo-stats-current-visibility" role="group" aria-label="Charts">${visibilityDefinitions.map(definition => {
+          const pressed = definition.groups.every(group => visibleGroups.has(group));
+          return `<button type="button" data-stats-current-visibility="${currentStatsEscape(definition.id)}" aria-pressed="${pressed}">${currentStatsEscape(definition.label)}</button>`;
+        }).join('')}</div>` : '',
+      ].join('');
+    }
+
+    function configure(nextCapabilities, nextSelection) {
+      capabilities = nextCapabilities;
+      selection = nextSelection;
+      recoveryElement.innerHTML = capabilities.migration?.result === 'recovered'
+        ? '<div class="yo-stats-current-recovery-banner" data-stats-current-recovery-banner role="alert">Stats history was reset after storage damage. The damaged database was kept in your YOmux state directory. Check the preserved file before removing it, then let new history accumulate.</div>'
+        : '';
+      paintControls();
+    }
+
+    function setStatus(state, clearContent = false) {
+      const normalized = ['loading', 'pending', 'error', 'ready'].includes(state) ? state : 'error';
+      const message = {
+        loading: 'Loading stats…',
+        pending: 'Stats are still being prepared. Retrying when the server asks.',
+        error: 'Could not load stats.',
+        ready: '',
+      }[normalized];
+      const signature = `${normalized}\n${message}`;
+      if (signature !== statusSignature) {
+        statusSignature = signature;
+        statusElement.innerHTML = message
+          ? `<div class="yo-stats-current-state yo-stats-current-state--${normalized}" data-stats-current-state="${normalized}" role="status">${currentStatsEscape(message)}</div>`
+          : '';
+      }
+      if (clearContent) {
+        contentElement.innerHTML = '';
+      }
+    }
+
+    function paintGeneration(nextGeneration, frame = nextGeneration, ready = true) {
+      latestGeneration = nextGeneration;
+      latestFrame = frame || nextGeneration;
+      if (capabilities) {
+        const requested = nextGeneration.requested_resolution;
+        configure(capabilities, Object.freeze({
+          range_seconds: nextGeneration.range_seconds,
+          resolution: requested,
+          resolution_seconds: nextGeneration.resolution_seconds,
+        }));
+      }
+      contentElement.innerHTML = currentStatsSnapshotHtml(
+        nextGeneration,
+        frame || nextGeneration,
+        view,
+        rendererId,
+        view === 'stats' ? visibleGroups : null,
+      );
+      if (view === 'cost' && costModalOpen) paintCostModal();
+      setStatus(ready ? 'ready' : 'loading');
+    }
+
+    function render(nextGeneration, frame = nextGeneration) {
+      paintGeneration(nextGeneration, frame, true);
+    }
+
+    function paintCostModal(force = false) {
+      if (view !== 'cost' || !latestGeneration || !costModalOpen) return;
+      const signature = JSON.stringify([
+        latestGeneration.cache_generation,
+        latestGeneration.cost_report,
+        latestGeneration.window_start,
+        latestGeneration.window_end,
+      ]);
+      if (!force && signature === costModalSignature) return;
+      const scrollTop = modalElement.querySelector?.('[data-stats-current-cost-modal-scroll]')?.scrollTop || 0;
+      modalElement.innerHTML = currentCostModalHtml(latestGeneration.cost_report, latestGeneration, rendererId);
+      costModalElementScroll(modalElement, scrollTop);
+      costModalSignature = signature;
+    }
+
+    function openCostModal() {
+      if (view !== 'cost' || !latestGeneration) return;
+      costModalOpen = true;
+      costModalSignature = '';
+      paintCostModal(true);
+      modalElement.querySelector?.('[data-stats-current-cost-modal-close]')?.focus?.();
+    }
+
+    function closeCostModal() {
+      costModalOpen = false;
+      costModalSignature = '';
+      modalElement.innerHTML = '';
+    }
+
+    function chartPointerContext(event, svg = null) {
+      const targetSvg = svg || event?.target?.closest?.('[data-stats-current-svg]');
+      const chart = targetSvg?.closest?.('[data-stats-chart]');
+      const bounds = targetSvg?.getBoundingClientRect?.();
+      if (!targetSvg || !chart || !bounds || !(bounds.width > 0)) return null;
+      const clientX = Number(event?.clientX);
+      if (!Number.isFinite(clientX)) return null;
+      const x = (clientX - bounds.left) / bounds.width * CURRENT_STATS_SVG_WIDTH;
+      return {svg: targetSvg, chart, bounds, x};
+    }
+
+    function hideTooltip(tooltip = null) {
+      const target = tooltip || pinnedTooltip;
+      if (target) target.hidden = true;
+      if (!tooltip || tooltip === pinnedTooltip) pinnedTooltip = null;
+    }
+
+    function nearestSeriesPoint(chart, x) {
+      let nearest = null;
+      for (const point of chart.querySelectorAll?.('[data-series-point]') || []) {
+        const pointX = Number(point.getAttribute?.('cx'));
+        if (!Number.isFinite(pointX)) continue;
+        const distance = Math.abs(pointX - x);
+        if (!nearest || distance < nearest.distance) nearest = {point, distance, x: pointX};
+      }
+      return nearest;
+    }
+
+    function showTooltip(context, pin = false) {
+      const nearest = nearestSeriesPoint(context.chart, context.x);
+      const tooltip = context.chart.querySelector?.('[data-stats-current-tooltip]');
+      if (!nearest || !tooltip) return;
+      const point = nearest.point;
+      const name = String(point.dataset?.seriesPoint || '');
+      const start = Number(point.dataset?.pointStart);
+      const duration = Number(point.dataset?.pointDuration);
+      const value = Number(point.dataset?.pointValue);
+      const sourceCount = Number(point.dataset?.pointSourceCount);
+      const firstTimestamp = Number(point.dataset?.pointFirstTimestamp);
+      const lastTimestamp = Number(point.dataset?.pointLastTimestamp);
+      const showSeconds = latestGeneration?.resolution_seconds === 1;
+      const bucketEnd = start + duration;
+      const parts = [
+        currentStatsSeriesLabel(name),
+        currentStatsMetric(value, point.dataset?.pointUnit || ''),
+        `${currentStatsTime(start, showSeconds)}–${currentStatsTime(bucketEnd, showSeconds)}`,
+      ];
+      if (Number.isSafeInteger(sourceCount) && sourceCount >= 0) {
+        parts.push(`${sourceCount} sample${sourceCount === 1 ? '' : 's'}`);
+      }
+      if (Number.isFinite(firstTimestamp) && Number.isFinite(lastTimestamp)) {
+        const sourceTime = firstTimestamp === lastTimestamp
+          ? currentStatsTime(firstTimestamp, true)
+          : `${currentStatsTime(firstTimestamp, true)}–${currentStatsTime(lastTimestamp, true)}`;
+        parts.push(`source ${sourceTime}`);
+      }
+      tooltip.textContent = parts.join(' · ');
+      tooltip.style.left = `${Math.max(0, Math.min(100, nearest.x / CURRENT_STATS_SVG_WIDTH * 100))}%`;
+      tooltip.hidden = false;
+      if (pin) pinnedTooltip = tooltip;
+    }
+
+    function clearPointerDrag(event = null) {
+      if (!pointerDrag) return;
+      const selectionRect = pointerDrag.svg.querySelector?.('[data-stats-current-selection]');
+      if (selectionRect) selectionRect.hidden = true;
+      try { pointerDrag.svg.releasePointerCapture?.(pointerDrag.pointerId); } catch (_error) { /* capture is optional */ }
+      pointerDrag = null;
+      if (event?.pointerType === 'touch') event.preventDefault?.();
+    }
+
+    function onPointerDown(event) {
+      if (event?.button !== undefined && event.button !== 0) return;
+      const context = chartPointerContext(event);
+      if (!context) return;
+      hideTooltip();
+      pointerDrag = {
+        ...context,
+        pointerId: event.pointerId,
+        pointerType: event.pointerType,
+        startClientX: Number(event.clientX),
+        startX: context.x,
+        currentX: context.x,
+      };
+      context.svg.setPointerCapture?.(event.pointerId);
+      if (event.pointerType === 'touch') event.preventDefault?.();
+    }
+
+    function onPointerMove(event) {
+      if (pointerDrag && event.pointerId === pointerDrag.pointerId) {
+        const context = chartPointerContext(event, pointerDrag.svg);
+        if (!context) return;
+        pointerDrag.currentX = context.x;
+        const start = Math.max(CURRENT_STATS_PLOT_LEFT, Math.min(CURRENT_STATS_SVG_WIDTH - CURRENT_STATS_PLOT_RIGHT, pointerDrag.startX));
+        const end = Math.max(CURRENT_STATS_PLOT_LEFT, Math.min(CURRENT_STATS_SVG_WIDTH - CURRENT_STATS_PLOT_RIGHT, pointerDrag.currentX));
+        const selectionRect = pointerDrag.svg.querySelector?.('[data-stats-current-selection]');
+        if (selectionRect) {
+          selectionRect.setAttribute('x', String(Math.min(start, end)));
+          selectionRect.setAttribute('width', String(Math.abs(end - start)));
+          selectionRect.hidden = false;
+        }
+        if (event.pointerType === 'touch') event.preventDefault?.();
+        return;
+      }
+      if (event?.pointerType === 'mouse' && !pinnedTooltip) {
+        const context = chartPointerContext(event);
+        if (context) showTooltip(context);
+      }
+    }
+
+    function onPointerUp(event) {
+      if (!pointerDrag || event.pointerId !== pointerDrag.pointerId) return;
+      const drag = pointerDrag;
+      const context = chartPointerContext(event, drag.svg) || drag;
+      const moved = Math.abs(Number(event.clientX) - drag.startClientX);
+      if (moved >= CURRENT_STATS_ZOOM_THRESHOLD_PX && latestFrame) {
+        const plotWidth = CURRENT_STATS_SVG_WIDTH - CURRENT_STATS_PLOT_LEFT - CURRENT_STATS_PLOT_RIGHT;
+        const fraction = value => (
+          Math.max(0, Math.min(1, (value - CURRENT_STATS_PLOT_LEFT) / plotWidth))
+        );
+        const first = Math.min(drag.startX, context.x);
+        const last = Math.max(drag.startX, context.x);
+        const start = latestFrame.window_start + fraction(first) * latestFrame.range_seconds;
+        const end = latestFrame.window_start + fraction(last) * latestFrame.range_seconds;
+        zoomed = true;
+        controlSignature = '';
+        paintControls();
+        options.onZoom(start, end);
+      } else if (event.pointerType === 'touch') {
+        showTooltip(context, true);
+      }
+      clearPointerDrag(event);
+    }
+
+    function onPointerLeave(event) {
+      if (!pointerDrag && event?.pointerType === 'mouse' && !pinnedTooltip) {
+        hideTooltip(event.target?.closest?.('[data-stats-chart]')?.querySelector?.('[data-stats-current-tooltip]'));
+      }
+    }
+
+    function onClick(event) {
+      const target = event?.target;
+      if (typeof openExternalLinkFromEvent === 'function' && openExternalLinkFromEvent(event, element)) return;
+      const visibilityButton = target?.closest?.('[data-stats-current-visibility]');
+      if (visibilityButton && view === 'stats') {
+        const definition = visibilityDefinitions.find(item => item.id === visibilityButton.dataset.statsCurrentVisibility);
+        if (!definition) return;
+        const hide = definition.groups.every(group => visibleGroups.has(group));
+        for (const group of definition.groups) {
+          if (hide) visibleGroups.delete(group);
+          else visibleGroups.add(group);
+        }
+        controlSignature = '';
+        paintControls();
+        if (latestGeneration) render(latestGeneration, latestFrame);
+        return;
+      }
+      if (target?.closest?.('[data-stats-current-cost-more]')) {
+        openCostModal();
+        return;
+      }
+      if (
+        target?.closest?.('[data-stats-current-cost-modal-close]')
+        || target?.matches?.('[data-stats-current-cost-modal-backdrop]')
+      ) {
+        closeCostModal();
+        return;
+      }
+      if (target?.closest?.('[data-stats-current-zoom-reset]')) {
+        zoomed = false;
+        controlSignature = '';
+        paintControls();
+        options.onResetZoom();
+      }
+    }
+
+    function onKeyDown(event) {
+      if (costModalOpen && event?.key === 'Escape') closeCostModal();
+    }
+
+    function onOutsidePointerDown(event) {
+      if (!pinnedTooltip || element.contains?.(event.target)) return;
+      hideTooltip();
+    }
+
+    function onChange(event) {
+      const target = event?.target;
+      if (!target || !target.dataset || !capabilities || !selection) return;
+      if (Object.prototype.hasOwnProperty.call(target.dataset, 'statsCurrentRange')) {
+        const rangeSeconds = Number(target.value);
+        const capability = capabilities.ranges.find(row => row.range_seconds === rangeSeconds);
+        if (!capability) return;
+        const resolution = 'AUTO';
+        selection = Object.freeze({
+          range_seconds: rangeSeconds,
+          resolution,
+          resolution_seconds: resolution === 'AUTO' ? capability.auto_resolution_seconds : resolution,
+        });
+      } else if (Object.prototype.hasOwnProperty.call(target.dataset, 'statsCurrentResolution')) {
+        const capability = capabilities.ranges.find(row => row.range_seconds === selection.range_seconds);
+        const resolution = target.value === 'AUTO' ? 'AUTO' : Number(target.value);
+        if (
+          !capability
+          || (resolution !== 'AUTO' && !capability.explicit_resolution_seconds.includes(resolution))
+        ) return;
+        selection = Object.freeze({
+          range_seconds: selection.range_seconds,
+          resolution,
+          resolution_seconds: resolution === 'AUTO' ? capability.auto_resolution_seconds : resolution,
+        });
+      } else {
+        return;
+      }
+      zoomed = false;
+      paintControls();
+      setStatus('loading');
+      options.onSelect(selection.range_seconds, selection.resolution);
+    }
+
+    element.addEventListener('change', onChange);
+    element.addEventListener('click', onClick);
+    element.addEventListener('pointerdown', onPointerDown);
+    element.addEventListener('pointermove', onPointerMove);
+    element.addEventListener('pointerup', onPointerUp);
+    element.addEventListener('pointercancel', clearPointerDrag);
+    element.addEventListener('pointerleave', onPointerLeave);
+    ownerDocument?.addEventListener?.('pointerdown', onOutsidePointerDown);
+    ownerDocument?.addEventListener?.('keydown', onKeyDown);
+    setStatus('loading');
+    return Object.freeze({
+      configure,
+      destroy() {
+        element.removeEventListener('change', onChange);
+        element.removeEventListener('click', onClick);
+        element.removeEventListener('pointerdown', onPointerDown);
+        element.removeEventListener('pointermove', onPointerMove);
+        element.removeEventListener('pointerup', onPointerUp);
+        element.removeEventListener('pointercancel', clearPointerDrag);
+        element.removeEventListener('pointerleave', onPointerLeave);
+        ownerDocument?.removeEventListener?.('pointerdown', onOutsidePointerDown);
+        ownerDocument?.removeEventListener?.('keydown', onKeyDown);
+        element.innerHTML = '';
+      },
+      render,
+      setStatus,
+    });
+  }
+
+  function currentStatsSnapshotHtml(generation, frame, view, rendererId, visibleGroups = null) {
+    const groups = currentStatsGroups(generation, view);
+    const groupDefinitions = currentStatsGroupDefinitions(view);
+    const tokenMaximum = currentStatsMaximum([
+      groups.get('agent-tokens'), groups.get('model-output-tokens'),
+    ]);
+    const rendered = groupDefinitions.flatMap(definition => {
+      if (visibleGroups && !visibleGroups.has(definition.id)) return [];
+      const series = groups.get(definition.id) || new Map();
+      const gaps = generation.no_data.filter(span => definition.families.includes(span.family));
+      if (!series.size && !gaps.length) return [];
+      const maximum = definition.sharedTokenScale
+        ? tokenMaximum
+        : currentStatsMaximum([series]);
+      return [currentStatsChartHtml({
+        definition, series, gaps, generation, frame, maximum, rendererId,
+      })];
+    });
+    const charts = rendered.length
+      ? `<div class="yo-stats-current-grid${view === 'cost' ? ' yo-stats-current-grid--compact' : ''}" data-stats-current-grid>${rendered.join('')}</div>`
+      : `<div class="yo-stats-current-empty" data-stats-current-empty>${view === 'cost' ? 'No cost or usage data recorded.' : 'No stats data recorded.'}</div>`;
+    return view === 'cost'
+      ? `${currentCostSummaryHtml(generation.cost_report, generation)}${charts}`
+      : charts;
+  }
+
+  function currentCostPriceHtml(marginalMicroUsd, apiListMicroUsd, {strong = false} = {}) {
+    const marginal = currentStatsEscape(currentStatsMoney(marginalMicroUsd));
+    const apiList = currentStatsEscape(currentStatsMoney(apiListMicroUsd));
+    const amount = value => strong ? `<strong>${value}</strong>` : value;
+    if (marginalMicroUsd === apiListMicroUsd) return amount(apiList);
+    return `${amount(marginal)} marginal · ${amount(apiList)} list`;
+  }
+
+  function currentCostSummaryHtml(report, generation) {
+    const breakdown = CURRENT_COST_DIMENSIONS.map(dimension => (
+      `${currentCostDimensionLabel(dimension)}=${currentStatsMetric(report.dimensions[dimension].tokens, 'usage')}`
+    )).join(', ');
+    const total = currentCostSummaryTotalHtml(report);
+    const unpriced = report.unpriced.atoms || report.unpriced.tokens
+      ? `<span>${currentCostCoverageHtml('Unpriced', report.unpriced, {strong: true})}</span>`
+      : '';
+    return [
+      '<section class="yo-cost-current-summary" data-stats-current-cost-summary>',
+      `<div class="yo-cost-current-summary-title"><strong>Cost Summary</strong><span>At API list prices · ${currentStatsEscape(currentStatsDateRange(generation))}</span></div>`,
+      '<div class="yo-cost-current-summary-line">',
+      `<span>Total: ${total}</span>`,
+      `<span>Total tokens: <strong>${currentStatsEscape(currentStatsMetric(report.total_tokens, 'usage'))} tokens</strong> (${currentStatsEscape(breakdown)})</span>`,
+      unpriced,
+      '<button type="button" class="preferences-inline-action" data-stats-current-cost-more>More Info</button>',
+      '</div></section>',
+    ].join('');
+  }
+
+  function currentCostSummaryTotalHtml(report) {
+    if (!report.priced.atoms && report.unpriced.atoms) return 'Unpriced';
+    return currentCostPriceHtml(report.total_micro_usd, report.total_api_list_micro_usd, {strong: true});
+  }
+
+  function currentCostCoverageHtml(label, coverage, {strong = false} = {}) {
+    const tokens = currentStatsEscape(currentStatsMetric(coverage.tokens, 'usage'));
+    const tokenText = strong ? `<strong>${tokens} tokens</strong>` : `${tokens} tokens`;
+    return `${currentStatsEscape(label)}: ${tokenText} / ${coverage.atoms} atoms`;
+  }
+
+  function currentCostModalHtml(report, generation, rendererId) {
+    const titleId = `yo-cost-current-modal-title-${rendererId}`;
+    const dimensions = CURRENT_COST_DIMENSIONS.map(dimension => {
+      const value = report.dimensions[dimension];
+      return `<tr><th scope="row">${currentStatsEscape(currentCostDimensionLabel(dimension))}</th><td>${currentStatsEscape(currentStatsMetric(value.tokens, 'usage'))}</td><td>${currentCostPriceHtml(value.micro_usd, value.api_list_micro_usd)}</td></tr>`;
+    }).join('');
+    const evidence = report.evidence.map(row => {
+      const source = row.source_url
+        ? `<a href="${currentStatsEscape(row.source_url)}" target="_blank" rel="noopener noreferrer">Pricing source</a>`
+        : '<span>No public source link</span>';
+      return [
+        '<li class="yo-cost-current-evidence-row">',
+        `<strong><span aria-hidden="true">✦</span> ${currentStatsEscape(row.provider)} · ${currentStatsEscape(row.model)}</strong>`,
+        `<span>${currentStatsEscape(currentCostDimensionLabel(row.dimension))} · ${currentStatsEscape(currentStatsMetric(row.tokens, 'usage'))} tokens · ${currentCostPriceHtml(row.micro_usd, row.api_list_micro_usd)}</span>`,
+        `<span>${currentStatsEscape(row.direction)} / ${currentStatsEscape(row.modality)} / ${currentStatsEscape(row.cache_role)} · ${currentStatsEscape(row.rate_usd)} per ${currentStatsEscape(String(row.rate_scale))} ${currentStatsEscape(row.unit)}</span>`,
+        `<span>Profile ${currentStatsEscape(row.pricing_profile)} · tier ${currentStatsEscape(row.service_tier)} · effective ${currentStatsEscape(row.effective_from)} · ${source}</span>`,
+        '</li>',
+      ].join('');
+    }).join('');
+    const omissionTotal = CURRENT_COST_OMISSION_FIELDS.reduce((total, field) => total + report.omissions[field], 0);
+    return [
+      '<div class="app-modal-overlay yo-cost-current-modal-backdrop" data-stats-current-cost-modal-backdrop>',
+      `<section class="yo-cost-current-modal" role="dialog" aria-modal="true" aria-labelledby="${titleId}">`,
+      '<header class="yo-cost-current-modal-header">',
+      `<h2 id="${titleId}">Cost summary details · At API list prices · ${currentStatsEscape(currentStatsDateRange(generation))}</h2>`,
+      '<button type="button" class="yo-cost-current-modal-close" data-stats-current-cost-modal-close aria-label="Close cost details" title="Close">×</button>',
+      '</header>',
+      '<div class="yo-cost-current-modal-scroll" data-stats-current-cost-modal-scroll>',
+      `<p class="yo-cost-current-total">Total: ${currentCostPriceHtml(report.total_micro_usd, report.total_api_list_micro_usd, {strong: true})} · Total tokens: <strong>${currentStatsEscape(currentStatsMetric(report.total_tokens, 'usage'))} tokens</strong> · ${currentCostCoverageHtml('Priced', report.priced)} · ${currentCostCoverageHtml('Unpriced', report.unpriced)}.</p>`,
+      '<details class="yo-cost-current-explainer"><summary>What these columns mean</summary><dl>',
+      '<div><dt>Input</dt><dd>Prompt and context tokens sent to the model before provider cache adjustments.</dd></div>',
+      '<div><dt>Cache read</dt><dd>Previously stored prompt or KV-cache tokens read again; providers commonly report these separately and often price them below ordinary input.</dd></div>',
+      '<div><dt>5m cache write</dt><dd>Input tokens written into a provider cache with a five-minute lifetime.</dd></div>',
+      '<div><dt>1h cache write</dt><dd>Input tokens written into a provider cache with a one-hour lifetime.</dd></div>',
+      '<div><dt>Output</dt><dd>Tokens generated by the model. Reasoning is not split out because the current source atoms do not distinguish it reliably.</dd></div>',
+      '<div><dt>Other</dt><dd>Non-text token usage or request-priced usage that cannot honestly be assigned to the four text dimensions.</dd></div>',
+      '<div><dt>Priced / Unpriced</dt><dd>Usage with a matching reviewed catalog rate versus recorded usage whose cost is unknown; unpriced usage remains visible and is never treated as free.</dd></div>',
+      '</dl></details>',
+      '<section><h3>Token and cost breakdown</h3><div class="yo-cost-current-table-scroll"><table><thead><tr><th>Usage</th><th>Tokens</th><th>Marginal / at API list prices</th></tr></thead><tbody>',
+      dimensions,
+      '</tbody></table></div></section>',
+       currentCostAttributionTable('Cost by Model', report.models, 'model'),
+       currentCostAttributionTable('Cost by Agent', report.agents, 'agent'),
+      '<section><h3>Pricing attribution</h3>',
+      evidence ? `<ol class="yo-cost-current-evidence">${evidence}</ol>` : '<p>No priced catalog evidence in this range.</p>',
+      '</section>',
+      `<p class="yo-cost-current-catalog">Catalog revision ${report.catalog_revision}. Reasoning breakdown unavailable. ${omissionTotal ? `Bounded report omitted ${report.omissions.models} model, ${report.omissions.agents} agent, and ${report.omissions.evidence} pricing-evidence rows.` : 'No bounded report rows were omitted.'}</p>`,
+      '</div></section></div>',
+    ].join('');
+  }
+
+  function currentCostAttributionTable(title, rows, kind) {
+    const displayedRows = rows;
+    const body = displayedRows.map(row => {
+      const identity = kind === 'model'
+        ? `<span class="yo-cost-current-model"><span><span aria-hidden="true">✦</span> ${currentStatsEscape(row.provider)}</span><strong>${currentStatsEscape(row.model)}</strong></span>`
+        : `<span class="yo-cost-current-agent" title="${currentStatsEscape(row.label || row.source)}">${currentStatsEscape(currentStatsCanonicalAgentLabel(row.label || row.source))}</span>`;
+      const dimensions = CURRENT_COST_DIMENSIONS.map(dimension => (
+        `<td>${currentCostDimensionCell(row.dimensions[dimension])}</td>`
+      )).join('');
+       const sourceRows = kind === 'agent' && Array.isArray(row.sources) ? row.sources : [];
+        const sourceDetails = sourceRows.length
+          ? `<details class="yo-cost-current-agent-sources"><summary>Source attribution (${sourceRows.length})</summary><ul>${sourceRows.map(source => `<li><strong>${currentStatsEscape(source.source)}</strong><span>${currentStatsEscape(currentStatsMetric(source.total_tokens, 'usage'))} tokens · ${currentCostPriceHtml(source.total_micro_usd, source.total_api_list_micro_usd)}</span></li>`).join('')}</ul></details>`
+          : '';
+        const agentIdentity = kind === 'agent' && sourceDetails
+          ? `<details class="yo-cost-current-agent-row" data-stats-current-cost-agent-key="${currentStatsEscape(row.key || row.label || row.source)}"><summary>${identity}</summary>${sourceDetails}</details>`
+          : identity;
+        return `<tr><th scope="row">${agentIdentity}</th><td>${currentStatsEscape(currentStatsMetric(row.total_tokens, 'usage'))}<small>${currentCostPriceHtml(row.total_micro_usd, row.total_api_list_micro_usd)}</small></td>${dimensions}<td>${currentStatsEscape(currentStatsMetric(row.priced.tokens, 'usage'))}<small>${row.priced.atoms} atoms</small></td><td>${currentStatsEscape(currentStatsMetric(row.unpriced.tokens, 'usage'))}<small>${row.unpriced.atoms} atoms</small></td></tr>`;
+    }).join('');
+    return [
+      `<section><h3>${currentStatsEscape(title)}</h3>`,
+      body
+        ? `<div class="yo-cost-current-table-scroll"><table><thead><tr><th>${kind === 'model' ? 'Model' : 'Agent'}</th><th>Total</th>${CURRENT_COST_DIMENSIONS.map(dimension => `<th>${currentStatsEscape(currentCostDimensionLabel(dimension))}</th>`).join('')}<th>Priced</th><th>Unpriced</th></tr></thead><tbody>${body}</tbody></table></div>`
+        : '<p>No attributed usage in this range.</p>',
+      '</section>',
+    ].join('');
+  }
+
+  function currentCostDimensionCell(value) {
+    return `${currentStatsEscape(currentStatsMetric(value.tokens, 'usage'))}<small>${currentCostPriceHtml(value.micro_usd, value.api_list_micro_usd)}</small>`;
+  }
+
+  function currentCostDimensionLabel(dimension) {
+    return ({
+      input: 'Input', cache_read: 'Cache read', cache_write_5m: '5m cache write', cache_write_1h: '1h cache write', output: 'Output', other: 'Other',
+    })[dimension] || dimension;
+  }
+
+  function currentStatsMoney(microUsd) {
+    const dollars = microUsd / 1_000_000;
+    const digits = dollars >= 0.01 ? 2 : 6;
+    return `$${dollars.toFixed(digits)}`;
+  }
+
+  function currentStatsDateRange(generation) {
+    const showSeconds = generation.resolution_seconds === 1;
+    return `${currentStatsDateTime(generation.window_start, showSeconds)}–${currentStatsDateTime(generation.window_end, showSeconds)}`;
+  }
+
+  function currentStatsDateTime(seconds, showSeconds) {
+    const date = new Date(seconds * 1000);
+    const dateParts = [date.getFullYear(), date.getMonth() + 1, date.getDate()].map((value, index) => (
+      index === 0 ? String(value) : String(value).padStart(2, '0')
+    ));
+    return `${dateParts.join('-')} ${currentStatsTime(seconds, showSeconds)}`;
+  }
+
+  function costModalElementScroll(modalElement, scrollTop) {
+    const scroll = modalElement.querySelector?.('[data-stats-current-cost-modal-scroll]');
+    if (scroll) scroll.scrollTop = scrollTop;
+  }
+
+  function currentStatsGroups(generation, view) {
+    const groups = new Map();
+    for (const bucket of generation.buckets) {
+      for (const [name, item] of Object.entries(bucket.series)) {
+        const unit = currentStatsSeriesUnit(name, item);
+        const groupId = currentStatsSeriesGroup(name, view, unit);
+        if (!groupId) continue;
+        if (!groups.has(groupId)) groups.set(groupId, new Map());
+        const series = groups.get(groupId);
+        const seriesName = groupId === 'agent-tokens'
+          ? `agent_tokens_per_minute:${currentStatsCanonicalSessionKey(name.slice('agent_tokens_per_minute:'.length))}`
+          : name;
+        if (!series.has(seriesName)) series.set(seriesName, []);
+        const points = series.get(seriesName);
+        const point = {
+          start: bucket.start,
+          duration: bucket.duration,
+          value: item.value,
+          unit,
+          source_count: item.source_count,
+          first_timestamp: item.first_timestamp,
+          last_timestamp: item.last_timestamp,
+        };
+        const existing = points.at(-1);
+        if (existing?.start === point.start && existing.duration === point.duration && existing.unit === point.unit) {
+          points[points.length - 1] = Object.freeze({
+            ...existing,
+            value: existing.value + point.value,
+            source_count: existing.source_count + point.source_count,
+            first_timestamp: Math.min(existing.first_timestamp, point.first_timestamp),
+            last_timestamp: Math.max(existing.last_timestamp, point.last_timestamp),
+          });
+        } else {
+          points.push(Object.freeze(point));
+        }
+      }
+    }
+    for (const series of groups.values()) {
+      const ordered = [...series.entries()].sort((left, right) => compareUnicode(left[0], right[0]));
+      series.clear();
+      for (const [name, points] of ordered) series.set(name, Object.freeze(points));
+    }
+    return groups;
+  }
+
+  function currentStatsSeriesMetadata(name) {
+    return CURRENT_STATS_SERIES_METADATA[name] || null;
+  }
+
+  function currentStatsSeriesUnit(name, series) {
+    if (series && Object.prototype.hasOwnProperty.call(series, 'unit')) return series.unit;
+    return currentStatsSeriesMetadata(name)?.unit || null;
+  }
+
+  function currentStatsSeriesGroup(name, view, unit) {
+    const metadata = currentStatsSeriesMetadata(name);
+    if (view === 'cost') {
+      if (unit === 'micro_usd') return 'cost';
+      if (metadata?.costGroup) return metadata.costGroup;
+      return null;
+    }
+    if (unit === 'micro_usd') return 'cost';
+    if (metadata?.costGroup) return null;
+    if (name.startsWith('agent_tokens_per_minute:')) return 'agent-tokens';
+    if (name.startsWith('model_tokens_per_minute:output:')) return 'model-output-tokens';
+    if (name.startsWith('model_tokens_per_minute:')) return 'model-usage';
+    if (['ask_agents', 'run_agents', 'transition_agents', 'idle_agents', 'ask_sessions', 'run_sessions', 'transition_sessions', 'idle_sessions'].includes(name)) return 'agent-status';
+    if (name.startsWith('gpu_')) return 'gpu';
+    if (name.startsWith('service_') || name.startsWith('system_memory_')) return 'system';
+    if (name.startsWith('browser_')) return 'browser';
+    if (name.includes('cpu_percent')) return 'cpu';
+    return 'other';
+  }
+
+  function currentStatsGroupDefinitions(view) {
+    if (view === 'cost') return [
+      {id: 'cost', title: 'Marginal / at API list prices', families: ['cost'], compact: true},
+      {id: 'usage', title: 'Token usage', families: ['cost'], compact: true},
+    ];
+    return [
+      {id: 'cpu', title: 'CPU', families: ['cpu']},
+      {id: 'agent-status', title: 'Agent status', families: ['agent_status']},
+      {id: 'gpu', title: 'GPU', families: ['gpu']},
+      {id: 'system', title: 'System', families: ['service_load', 'system_memory']},
+      {id: 'agent-tokens', title: 'Session tokens/min', families: ['agent_tokens'], sharedTokenScale: true},
+      {id: 'model-output-tokens', title: 'Model output tokens/min', families: ['agent_tokens'], sharedTokenScale: true},
+      {id: 'model-usage', title: 'Model usage', families: ['agent_tokens']},
+      {id: 'cost', title: 'Marginal / at API list prices', families: ['cost'], compact: true},
+      {id: 'browser', title: 'API / SSE', families: ['browser']},
+      {id: 'other', title: 'Other', families: []},
+    ];
+  }
+
+  function currentStatsVisibilityDefinitions() {
+    return [
+      {id: 'cpu', label: 'CPU', groups: ['cpu']},
+      {id: 'agent-status', label: 'Agent status', groups: ['agent-status']},
+      {id: 'gpu', label: 'GPU', groups: ['gpu']},
+      {id: 'system', label: 'System', groups: ['system']},
+      {id: 'agent-tokens', label: 'Session tokens', groups: ['agent-tokens']},
+      {id: 'model-tokens', label: 'Model tokens', groups: ['model-output-tokens', 'model-usage']},
+      {id: 'cost', label: 'Cost', groups: ['cost'], defaultVisible: false},
+      {id: 'browser', label: 'API/SSE', groups: ['browser']},
+      {id: 'other', label: 'Other', groups: ['other']},
+    ];
+  }
+
+  function currentStatsMaximum(seriesMaps) {
+    let maximum = 0;
+    for (const series of seriesMaps) {
+      if (!series) continue;
+      for (const points of series.values()) {
+        for (const point of points) maximum = Math.max(maximum, point.value);
+      }
+    }
+    return maximum;
+  }
+
+  function currentStatsChartHtml({definition, series, gaps, generation, frame, maximum, rendererId}) {
+    const width = CURRENT_STATS_SVG_WIDTH;
+    const height = CURRENT_STATS_SVG_HEIGHT;
+    const left = CURRENT_STATS_PLOT_LEFT;
+    const right = CURRENT_STATS_PLOT_RIGHT;
+    const top = CURRENT_STATS_PLOT_TOP;
+    const bottom = CURRENT_STATS_PLOT_BOTTOM;
+    const plotWidth = width - left - right;
+    const plotHeight = height - top - bottom;
+    const clipId = `yo-stats-current-clip-${rendererId}-${definition.id}`;
+    const paths = [...series.entries()].map(([name, points]) => {
+      const rendered = currentStatsPath(points, frame, maximum, left, top, plotWidth, plotHeight);
+      const circles = rendered.points.map((point, index) => (
+        `<circle cx="${point.x}" cy="${point.y}" r="2" data-series-point="${currentStatsEscape(name)}" data-point-start="${points[index].start}" data-point-duration="${points[index].duration}" data-point-value="${currentStatsNumber(points[index].value)}" data-point-unit="${currentStatsEscape(points[index].unit || '')}" data-point-source-count="${points[index].source_count}" data-point-first-timestamp="${points[index].first_timestamp}" data-point-last-timestamp="${points[index].last_timestamp}"></circle>`
+      )).join('');
+      return [
+        `<g class="yo-stats-current-series" data-series="${currentStatsEscape(name)}" data-point-count="${rendered.points.length}">`,
+        `<path d="${rendered.path}" fill="none" stroke="currentColor" vector-effect="non-scaling-stroke"></path>${circles}</g>`,
+      ].join('');
+    }).join('');
+    const gapRects = gaps.map(span => {
+      const start = Math.max(frame.window_start, span.start);
+      const end = Math.min(frame.window_end, span.end);
+      if (end <= start) return '';
+      const x = left + (start - frame.window_start) / frame.range_seconds * plotWidth;
+      const rectWidth = (end - start) / frame.range_seconds * plotWidth;
+      return `<rect class="yo-stats-current-no-data" data-no-data-family="${currentStatsEscape(span.family)}" data-no-data-source="${currentStatsEscape(span.source_id)}" x="${currentStatsNumber(x)}" y="${top}" width="${currentStatsNumber(rectWidth)}" height="${plotHeight}" fill="var(--danger, currentColor)" opacity="0.18"></rect>`;
+    }).join('');
+    const legend = [...series.keys()].map(name => (
+      `<li data-series-legend="${currentStatsEscape(name)}">${currentStatsEscape(currentStatsSeriesLabel(name))}</li>`
+    )).join('');
+    const showSeconds = generation.resolution_seconds === 1;
+    return [
+      `<article class="yo-stats-current-chart${definition.compact ? ' yo-stats-current-chart--compact' : ''}" data-stats-chart="${definition.id}" data-y-min="0" data-y-max="${currentStatsNumber(maximum)}" data-resolution-seconds="${generation.resolution_seconds}">`,
+      `<h3>${currentStatsEscape(definition.title)}</h3>`,
+      `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${currentStatsEscape(definition.title)}" data-stats-current-svg data-axis-seconds="${showSeconds}">`,
+      `<defs><clipPath id="${clipId}"><rect x="${left}" y="${top}" width="${plotWidth}" height="${plotHeight}"></rect></clipPath></defs>`,
+      `<g clip-path="url(#${clipId})">${gapRects}${paths}<rect data-stats-current-selection hidden x="${left}" y="${top}" width="0" height="${plotHeight}"></rect></g>`,
+      `<text x="${left}" y="${height - 6}" text-anchor="start">${currentStatsEscape(currentStatsTime(frame.window_start, showSeconds))}</text>`,
+      `<text x="${width - right}" y="${height - 6}" text-anchor="end">${currentStatsEscape(currentStatsTime(frame.window_end, showSeconds))}</text>`,
+      `<text x="${left - 5}" y="${top + plotHeight}" text-anchor="end">0</text>`,
+      `<text x="${left - 5}" y="${top + 5}" text-anchor="end">${currentStatsEscape(currentStatsMetric(maximum, currentStatsChartUnit(series)))}</text>`,
+      `</svg><div class="yo-stats-current-tooltip" data-stats-current-tooltip role="status" hidden></div><ul class="yo-stats-current-legend">${legend}</ul></article>`,
+    ].join('');
+  }
+
+  function currentStatsPath(points, frame, maximum, left, top, plotWidth, plotHeight) {
+    const rendered = [];
+    const commands = [];
+    let previousEnd = null;
+    const denominator = maximum > 0 ? maximum : 1;
+    for (const point of points) {
+      const x = left + (point.start + point.duration / 2 - frame.window_start) / frame.range_seconds * plotWidth;
+      const y = top + plotHeight - point.value / denominator * plotHeight;
+      const command = previousEnd === point.start ? 'L' : 'M';
+      const renderedPoint = Object.freeze({x: currentStatsNumber(x), y: currentStatsNumber(y)});
+      rendered.push(renderedPoint);
+      commands.push(`${command}${renderedPoint.x} ${renderedPoint.y}`);
+      previousEnd = point.start + point.duration;
+    }
+    return Object.freeze({path: commands.join(' '), points: Object.freeze(rendered)});
+  }
+
+  function currentStatsDuration(seconds) {
+    if (seconds % 3600 === 0) return `${seconds / 3600}h`;
+    if (seconds % 60 === 0) return `${seconds / 60}m`;
+    return `${seconds}s`;
+  }
+
+  function currentStatsTime(seconds, showSeconds) {
+    const date = new Date(seconds * 1000);
+    const parts = [date.getHours(), date.getMinutes(), ...(showSeconds ? [date.getSeconds()] : [])];
+    return parts.map(value => String(value).padStart(2, '0')).join(':');
+  }
+
+  function currentStatsChartUnit(series) {
+    const units = new Set();
+    for (const points of series.values()) {
+      for (const point of points) if (point.unit) units.add(point.unit);
+    }
+    return units.size === 1 ? units.values().next().value : null;
+  }
+
+  function currentStatsMetric(value, unit) {
+    if (unit === 'micro_usd') return `$${(value / 1_000_000).toFixed(value >= 10_000 ? 2 : 6)}`;
+    const absolute = Math.abs(value);
+    if (absolute >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1).replace(/\.0$/, '')}B`;
+    if (absolute >= 1_000_000) return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+    if (absolute >= 1_000) return `${(value / 1_000).toFixed(1).replace(/\.0$/, '')}K`;
+    return currentStatsNumber(value);
+  }
+
+  function currentStatsSeriesLabel(name) {
+    const metadata = currentStatsSeriesMetadata(name);
+    if (metadata?.label) return metadata.label;
+    if (name.startsWith('agent_tokens_per_minute:')) {
+      return currentStatsCanonicalAgentLabel(name.slice('agent_tokens_per_minute:'.length));
+    }
+    return name.replaceAll('_', ' ').replaceAll(':', ' · ');
+  }
+
+  // Usage series retain a stable pane-level key, while the token-throughput owner is the tmux
+  // session. Keep the exact grouping key separate from display shortening so unrelated private
+  // identities cannot collide merely because their visible labels were bounded.
+  function currentStatsCanonicalSessionKey(value) {
+    const full = String(value || '').trim();
+    if (!full) return '';
+    if (full.startsWith('opencode-process:')) return full;
+    const parts = full.split('|');
+    if (parts.length >= 2 && parts.length <= 4 && ['claude', 'codex', 'opencode', 'term'].includes(parts.at(-1))) {
+      return parts[0] || full;
+    }
+    return full;
+  }
+
+  function currentStatsCanonicalAgentLabel(value) {
+    const full = String(value || '').trim();
+    if (!full) return 'Unknown';
+    const sessionKey = currentStatsCanonicalSessionKey(full);
+    if (sessionKey !== full) return sessionKey;
+    if (full.startsWith('opencode-process:')) return full;
+    if (full.startsWith('claude-bg:')) {
+      const [, projectValue = '', sessionValue = ''] = full.split(':');
+      const projectParts = projectValue.split('-').filter(Boolean);
+      const project = projectParts.slice(-2).join('-') || projectValue;
+      const session = sessionValue.slice(0, 8);
+      return ['claude-bg', project, session].filter(Boolean).join(':');
+    }
+    return full;
+  }
+
+  function currentStatsNumber(value) {
+    return String(Number(value.toFixed(3)));
+  }
+
+  // This component is shipped/tested as an isolated closure, so keep its strict
+  // string-only escaping and URI fallback local instead of depending on app globals.
+  function currentStatsEscape(value) {
+    return String(value).replace(/[&<>"']/g, character => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    })[character]);
+  }
+
+  function currentStatsClientId() {
+    const generated = globalThis.crypto?.randomUUID?.();
+    if (generated) return `stats-${generated}`;
+    return `stats-${Date.now().toString(36)}-${nextRendererId}`;
+  }
+
+  async function fetchJson(fetchImpl, url, allowNotModified = false, requestOptions = {}) {
+    const response = await fetchImpl(url, Object.freeze({
+      method: requestOptions.method || 'GET',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      headers: Object.freeze({Accept: 'application/json'}),
+      yomuxBackgroundRead: requestOptions.background === true,
+      ...(requestOptions.signal ? {signal: requestOptions.signal} : {}),
+    }), allowNotModified ? Object.freeze({quietStatuses: Object.freeze([304])}) : undefined);
+    if (allowNotModified && response?.status === 304) return SNAPSHOT_NOT_MODIFIED;
+    let failurePayload = null;
+    if (response?.status !== 200 && response?.status !== 304 && typeof response?.json === 'function') {
+      try {
+        failurePayload = await response.json();
+      } catch (_error) {
+        // A malformed/unreadable error response is an ordinary transport failure.
+      }
+      const retryAfterSeconds = Number(failurePayload?.retry_after_seconds);
+      if (
+        failurePayload?.status === 'pending'
+        && Number.isSafeInteger(retryAfterSeconds)
+        && retryAfterSeconds >= 1
+        && retryAfterSeconds <= CURRENT_STATS_PENDING_RETRY_MAX_SECONDS
+      ) {
+        const error = new Error(`stats request is pending for ${retryAfterSeconds}s`);
+        error.status = response.status;
+        error.pending = true;
+        error.retryAfterMs = retryAfterSeconds * 1000;
+        throw error;
+      }
+    }
+    if (!response || response.status !== 200 || typeof response.json !== 'function') {
+      const reason = String(failurePayload?.reason || '').trim();
+      const error = new Error(reason || `stats request failed with HTTP ${response?.status ?? 'unknown'}`);
+      error.status = response?.status ?? 0;
+      error.reason = reason;
+      error.code = String(failurePayload?.code || reason || '').trim();
+      error.terminalAuthentication = error.status === 401 || error.code === 'authentication_required';
+      error.terminal = failurePayload?.terminal === true;
+      error.versionFence = response?.status === 426
+        && failurePayload?.status === 'upgrade_required';
+      // Read-side upgrade fences can be reclaimed by the stats lifecycle retry. A writer
+      // fence is deliberately terminal for the page that sent stale observations, so never
+      // use its terminal marker to trigger that read recovery path.
+      error.recoverableReadFence = error.versionFence && !error.terminal;
+      error.requiredProtocolVersion = Number(failurePayload?.required_protocol_version) || 0;
+      error.requiredSchemaGeneration = Number(failurePayload?.required_schema_generation) || 0;
+      error.requiredBuild = String(failurePayload?.required_build || '');
+      throw error;
+    }
+    return currentStatsResponsePayload(await response.json());
+  }
+
+  function isCurrentStatsTerminalAuthentication(error) {
+    return error?.terminalAuthentication === true
+      || error?.status === 401
+      || error?.code === 'authentication_required'
+      || error?.reason === 'authentication_required';
+  }
+
+  function currentStatsResponsePayload(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+    const envelopeFields = ['state', 'request', 'data'];
+    if (!envelopeFields.some(field => Object.prototype.hasOwnProperty.call(value, field))) return value;
+    if (
+      value.state !== 'ready'
+      || !value.request
+      || typeof value.request !== 'object'
+      || Array.isArray(value.request)
+      || typeof value.request.id !== 'string'
+      || !value.request.id
+      || !Object.prototype.hasOwnProperty.call(value, 'data')
+      || value.ok !== true
+      || value.terminal !== true
+    ) throw currentStatsContractError('stats response envelope is invalid');
+    return value.data;
+  }
+
+  function exactUrl(path, fields) {
+    return `${path}?${fields.map(([name, value]) => (
+      `${encodeURIComponent(name)}=${encodeURIComponent(String(value))}`
+    )).join('&')}`;
+  }
+
+  function normalizeCapabilities(value) {
+    exactFields(value, Object.prototype.hasOwnProperty.call(value || {}, 'migration') ? [...CAPABILITY_FIELDS, 'migration'] : CAPABILITY_FIELDS, 'stats capabilities');
+    if (!Array.isArray(value.ranges) || !value.ranges.length) throw new Error('stats capabilities require ranges');
+    if (
+      !Array.isArray(value.resolution_choices)
+      || value.resolution_choices.length !== CURRENT_RESOLUTIONS.length
+      || value.resolution_choices.some((choice, index) => choice !== CURRENT_RESOLUTIONS[index])
+    ) throw new Error('stats capabilities have an unsupported resolution universe');
+    const maxBuckets = positiveInteger(value.max_buckets, 'max_buckets');
+    if (maxBuckets > 600) throw new Error('max_buckets cannot exceed 600');
+    const minBuckets = positiveInteger(value.min_buckets, 'min_buckets');
+    if (minBuckets > maxBuckets) throw new Error('min_buckets cannot exceed max_buckets');
+    const maxLiveCadence = positiveInteger(value.max_live_cadence_seconds, 'max_live_cadence_seconds');
+    if (maxLiveCadence !== 60) throw new Error('current live cadence cap must be one minute');
+    let previousRange = 0;
+    const ranges = value.ranges.map(entry => {
+      exactFields(entry, CAPABILITY_RANGE_FIELDS, 'stats capability range');
+      const rangeSeconds = positiveInteger(entry.range_seconds, 'range_seconds');
+      if (rangeSeconds <= previousRange) throw new Error('capability ranges must be unique and increasing');
+      previousRange = rangeSeconds;
+      const choices = entry.explicit_resolution_seconds;
+      if (!Array.isArray(choices) || !choices.length) throw new Error('range requires resolutions');
+      const explicit = choices.map(choice => positiveInteger(choice, 'resolution'));
+      if (
+        explicit.some((choice, index) => !CURRENT_RESOLUTIONS.includes(choice) || (index > 0 && choice <= explicit[index - 1]))
+      ) throw new Error('range resolutions must be current, unique, and increasing');
+      const auto = positiveInteger(entry.auto_resolution_seconds, 'auto_resolution_seconds');
+      if (!explicit.includes(auto)) throw new Error('AUTO resolution must be explicit');
+      if (!entry.buckets || typeof entry.buckets !== 'object' || Array.isArray(entry.buckets)) {
+        throw new Error('range buckets must be an object');
+      }
+      const bucketKeys = Object.keys(entry.buckets);
+      if (
+        bucketKeys.length !== explicit.length
+        || explicit.some(resolution => !Object.prototype.hasOwnProperty.call(entry.buckets, resolution))
+      ) throw new Error('range bucket counts must match its resolutions');
+      for (const resolution of explicit) {
+        const count = positiveInteger(entry.buckets[resolution], 'bucket count');
+        if (
+          rangeSeconds % resolution !== 0
+          || count !== rangeSeconds / resolution
+          || count < minBuckets
+          || count > maxBuckets
+        ) throw new Error('range bucket count violates the server capability bounds');
+      }
+      return Object.freeze({
+        range_seconds: rangeSeconds,
+        auto_resolution_seconds: auto,
+        explicit_resolution_seconds: Object.freeze(explicit),
+        buckets: freezeJson({...entry.buckets}),
+      });
+    });
+    return Object.freeze({
+      resolution_choices: CURRENT_RESOLUTIONS,
+      max_buckets: maxBuckets,
+      min_buckets: minBuckets,
+      max_live_cadence_seconds: maxLiveCadence,
+      ranges: Object.freeze(ranges),
+      migration: normalizeStatsMigration(value.migration),
+    });
+  }
+
+  function normalizeStatsMigration(value) {
+    if (value == null) return null;
+    exactFields(value, STATS_MIGRATION_FIELDS, 'stats migration');
+    if (value.state !== 'ready' || !['existing', 'activated', 'recovered'].includes(value.result)) {
+      throw new Error('stats migration outcome is unsupported');
+    }
+    if (!Array.isArray(value.issue_kinds) || value.issue_kinds.length > 16 || value.issue_kinds.some(kind => typeof kind !== 'string' || kind.length > 80)) {
+      throw new Error('stats migration issues are invalid');
+    }
+    return Object.freeze({state: value.state, result: value.result, issue_kinds: Object.freeze([...value.issue_kinds])});
+  }
+
+  function normalizeSelection(capabilities, savedRange, savedResolution) {
+    const matched = capabilities.ranges.find(entry => entry.range_seconds === Number(savedRange));
+    const capability = matched || capabilities.ranges[0];
+    const numericResolution = canonicalSavedInteger(savedResolution);
+    const resolution = matched && (
+      savedResolution === 'AUTO' || capability.explicit_resolution_seconds.includes(numericResolution)
+    )
+      ? (savedResolution === 'AUTO' ? 'AUTO' : numericResolution)
+      : 'AUTO';
+    return {range_seconds: capability.range_seconds, resolution, capability};
+  }
+
+  function canonicalSavedInteger(value) {
+    if (Number.isInteger(value) && value > 0) return value;
+    if (typeof value !== 'string' || !/^\d+$/.test(value)) return null;
+    const parsed = Number(value);
+    return String(parsed) === value && Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  }
+
+  function snapshotChunkPayload(value) {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+      && ['chunk_index', 'chunk_count', 'chunk_start', 'chunk_end'].some(field => (
+        Object.prototype.hasOwnProperty.call(value, field)
+      ));
+  }
+
+  function validateSnapshotChunk(chunk, request, maxBuckets) {
+    const fields = Object.prototype.hasOwnProperty.call(chunk || {}, 'usage_atom_backfill')
+      ? SNAPSHOT_CHUNK_FIELDS
+      : SNAPSHOT_CHUNK_FIELDS.filter(field => field !== 'usage_atom_backfill');
+    exactFields(chunk, fields, 'snapshot chunk');
+    if (
+      chunk.protocol_version !== CURRENT_STATS_WIRE_PROTOCOL_VERSION
+      || chunk.range_seconds !== request.range_seconds
+      || String(chunk.requested_resolution) !== String(request.resolution)
+    ) throw new Error('snapshot chunk key does not match the active request');
+    const concrete = positiveInteger(chunk.resolution_seconds, 'snapshot chunk resolution_seconds');
+    generationNumber(chunk.source_generation, 'snapshot chunk source_generation');
+    generationNumber(chunk.cache_generation, 'snapshot chunk cache_generation');
+    const windowStart = generationNumber(chunk.window_start, 'snapshot chunk window_start');
+    const windowEnd = generationNumber(chunk.window_end, 'snapshot chunk window_end');
+    if (windowEnd - windowStart !== request.range_seconds) throw new Error('snapshot chunk window is not exact');
+    const chunkCount = positiveInteger(chunk.chunk_count, 'snapshot chunk_count');
+    if (chunkCount < 2 || chunkCount > CURRENT_STATS_MAX_SNAPSHOT_CHUNKS) throw new Error('snapshot chunk_count is outside the wire limit');
+    const chunkIndex = generationNumber(chunk.chunk_index, 'snapshot chunk_index');
+    if (chunkIndex >= chunkCount) throw new Error('snapshot chunk_index lies outside the request');
+    const chunkStart = generationNumber(chunk.chunk_start, 'snapshot chunk_start');
+    const chunkEnd = generationNumber(chunk.chunk_end, 'snapshot chunk_end');
+    if (!(windowStart <= chunkStart && chunkStart < chunkEnd && chunkEnd <= windowEnd)) throw new Error('snapshot chunk bounds lie outside the full window');
+    if ((chunkStart - windowStart) % concrete || (chunkEnd - windowStart) % concrete) throw new Error('snapshot chunk bounds are not bucket aligned');
+    if (!Number.isFinite(chunk.generated_at) || chunk.generated_at < 0) {
+      throw new Error('snapshot chunk generated_at is invalid');
+    }
+    if (typeof chunk.rightmost_open !== 'boolean') throw new Error('snapshot chunk open state is invalid');
+    validateBuckets(chunk.buckets, concrete, maxBuckets, true, chunkStart, chunkEnd);
+    if (chunk.buckets.length !== (chunkEnd - chunkStart) / concrete) throw new Error('snapshot chunk buckets do not fill its exact bounds');
+    validateNoData(chunk.no_data, chunkStart, chunkEnd);
+    validateCostReport(chunk.cost_report);
+    const finalOpen = chunk.buckets.at(-1)?.open === true;
+    if (finalOpen !== (chunkEnd === windowEnd && chunk.rightmost_open)) {
+      throw new Error('snapshot chunk open state disagrees');
+    }
+  }
+
+  function snapshotChunkSharedValue(chunk) {
+    return Object.fromEntries(Object.entries(chunk).filter(([field]) => (
+      !['chunk_index', 'chunk_count', 'chunk_start', 'chunk_end', 'buckets', 'no_data'].includes(field)
+    )));
+  }
+
+  function mergeSnapshotChunkNoData(chunks) {
+    const spans = chunks.flatMap(chunk => chunk.no_data).map(span => ({...span})).sort(compareNoData);
+    const merged = [];
+    for (const span of spans) {
+      const previous = merged.at(-1);
+      const sameSource = previous
+        && previous.end === span.start
+        && ['family', 'source_id', 'epoch', 'reason', 'source_cadence_seconds'].every(field => (
+          previous[field] === span[field]
+        ));
+      if (sameSource) previous.end = span.end;
+      else merged.push(span);
+    }
+    return merged;
+  }
+
+  function createSnapshotChunkAssembly(firstChunk, request, maxBuckets = 600) {
+    validateSnapshotChunk(firstChunk, request, maxBuckets);
+    const shared = freezeJson(snapshotChunkSharedValue(firstChunk));
+    const chunks = new Map();
+
+    function accept(chunk) {
+      validateSnapshotChunk(chunk, request, maxBuckets);
+      if (!sameJson(snapshotChunkSharedValue(chunk), shared)) {
+        throw new Error('snapshot chunks do not share one immutable generation');
+      }
+      if (chunk.chunk_count !== firstChunk.chunk_count) throw new Error('snapshot chunks disagree on chunk_count');
+      const existing = chunks.get(chunk.chunk_index);
+      if (existing) {
+        if (!sameJson(existing, chunk)) throw new Error('duplicate snapshot chunk changed in flight');
+        return false;
+      }
+      for (const accepted of chunks.values()) {
+        if (chunk.chunk_start < accepted.chunk_end && chunk.chunk_end > accepted.chunk_start
+            && (chunk.chunk_start !== accepted.chunk_start || chunk.chunk_end !== accepted.chunk_end)) {
+          throw new Error('snapshot chunks overlap without sharing an exact fragment range');
+        }
+      }
+      chunks.set(chunk.chunk_index, freezeJson(chunk));
+      return true;
+    }
+
+    function orderedChunks() {
+      return [...chunks.values()].sort((left, right) => left.chunk_index - right.chunk_index);
+    }
+
+    function assembledSnapshot() {
+      const ordered = orderedChunks();
+      const bucketsByStart = new Map();
+      for (const chunk of ordered) {
+        for (const bucket of chunk.buckets) {
+          const existing = bucketsByStart.get(bucket.start);
+          if (existing && !sameJson(existing, bucket)) throw new Error('snapshot fragments disagree on bucket data');
+          bucketsByStart.set(bucket.start, bucket);
+        }
+      }
+      return freezeJson({
+        ...shared,
+        buckets: [...bucketsByStart.values()].sort((left, right) => left.start - right.start),
+        no_data: mergeSnapshotChunkNoData(ordered),
+      });
+    }
+
+    accept(firstChunk);
+    return Object.freeze({
+      accept,
+      snapshot() {
+        if (chunks.size !== firstChunk.chunk_count) throw new Error('snapshot chunks are incomplete');
+        const candidate = assembledSnapshot();
+        validateSnapshot(candidate, {
+          range_seconds: request.range_seconds,
+          resolution: request.resolution,
+        }, firstChunk.resolution_seconds, maxBuckets);
+        return candidate;
+      },
+    });
+  }
+
+  function validateSnapshot(snapshot, selection, concrete, maxBuckets) {
+    const snapshotFields = Object.prototype.hasOwnProperty.call(snapshot || {}, 'usage_atom_backfill')
+      ? SNAPSHOT_FIELDS
+      : SNAPSHOT_FIELDS.filter(field => field !== 'usage_atom_backfill');
+    exactFields(snapshot, snapshotFields, 'snapshot');
+    if (
+      snapshot.protocol_version !== CURRENT_STATS_WIRE_PROTOCOL_VERSION
+      || snapshot.range_seconds !== selection.range_seconds
+      || snapshot.requested_resolution !== selection.resolution
+      || snapshot.resolution_seconds !== concrete
+    ) throw new Error('snapshot key does not match the active request');
+    generationNumber(snapshot.source_generation, 'source_generation');
+    generationNumber(snapshot.cache_generation, 'cache_generation');
+    const start = generationNumber(snapshot.window_start, 'window_start');
+    const end = generationNumber(snapshot.window_end, 'window_end');
+    if (end - start !== selection.range_seconds) throw new Error('snapshot window is not exact');
+    if (!Number.isFinite(snapshot.generated_at) || snapshot.generated_at < 0) {
+      throw new Error('snapshot generated_at is invalid');
+    }
+    if (typeof snapshot.rightmost_open !== 'boolean') throw new Error('snapshot open state is invalid');
+    validateBuckets(snapshot.buckets, concrete, maxBuckets, true, start, end);
+    validateNoData(snapshot.no_data, start, end);
+    validateCostReport(snapshot.cost_report);
+    const finalOpen = snapshot.buckets.at(-1)?.open === true;
+    if (finalOpen !== snapshot.rightmost_open) throw new Error('snapshot open state disagrees');
+  }
+
+  function validateBuckets(buckets, duration, maxBuckets, dense, windowStart = 0, windowEnd = null) {
+    if (!Array.isArray(buckets) || buckets.length > maxBuckets) throw new Error('too many buckets');
+    if (dense && buckets.length === 0) return;
+    let expected = windowStart;
+    let previous = -1;
+    for (const bucket of buckets) {
+      exactFields(bucket, BUCKET_FIELDS, 'bucket');
+      if (
+        bucket.duration !== duration || bucket.start % duration !== 0
+        || !bucket.series || typeof bucket.series !== 'object' || Array.isArray(bucket.series)
+        || !finiteJson(bucket.series)
+        || (dense && bucket.start !== expected)
+        || bucket.start <= previous
+        || (windowEnd !== null && (bucket.start < windowStart || bucket.start + duration > windowEnd))
+      ) throw new Error('bucket duration, alignment, series, or density is invalid');
+      for (const [name, series] of Object.entries(bucket.series)) {
+        identityText(name, 'series name');
+        const seriesFields = Object.prototype.hasOwnProperty.call(series, 'unit')
+          ? [...SERIES_VALUE_FIELDS, 'unit']
+          : SERIES_VALUE_FIELDS;
+        exactFields(series, seriesFields, `series ${name}`);
+        if (Object.prototype.hasOwnProperty.call(series, 'unit')) identityText(series.unit, `series ${name} unit`);
+        if (!Number.isFinite(series.value)) throw new Error('series value must be finite');
+        positiveInteger(series.source_count, 'series source_count');
+        if (
+          !Number.isFinite(series.first_timestamp) || series.first_timestamp < 0
+          || !Number.isFinite(series.last_timestamp)
+          || series.last_timestamp < series.first_timestamp
+        ) throw new Error('series timestamps are missing or reversed');
+      }
+      exactFields(bucket.source, SOURCE_FIELDS, 'bucket.source');
+      const count = generationNumber(bucket.source.count, 'bucket.source.count');
+      const first = bucket.source.first_timestamp;
+      const last = bucket.source.last_timestamp;
+      if (
+        (count === 0 && (first !== null || last !== null || Object.keys(bucket.series).length !== 0))
+        || (count > 0 && (
+          !Number.isFinite(first) || first < 0 || !Number.isFinite(last) || last < first
+          || Object.keys(bucket.series).length === 0
+        ))
+      ) throw new Error('bucket source facts do not match its series');
+      if (
+        typeof bucket.open !== 'boolean'
+        || (bucket.open && windowEnd !== null && bucket.start + duration !== windowEnd)
+      ) throw new Error('bucket open state is invalid');
+      expected = bucket.start + duration;
+      previous = bucket.start;
+    }
+    if (dense && expected !== windowEnd) throw new Error('snapshot buckets do not fill the exact window');
+  }
+
+  function validateNoData(spans, windowStart, windowEnd) {
+    if (!Array.isArray(spans)) throw new Error('no_data must be an array');
+    const sourceEnds = new Map();
+    let previous = null;
+    for (const span of spans) {
+      exactFields(span, NO_DATA_FIELDS, 'no_data span');
+      identityText(span.family, 'no_data.family');
+      identityText(span.source_id, 'no_data.source_id');
+      identityText(span.epoch, 'no_data.epoch');
+      identityText(span.reason, 'no_data.reason');
+      if (
+        !Number.isFinite(span.start) || !Number.isFinite(span.end) || span.end <= span.start
+        || span.start < 0
+        || !Number.isFinite(span.source_cadence_seconds) || span.source_cadence_seconds <= 0
+        || (windowStart !== undefined && span.start < windowStart)
+        || (windowEnd !== undefined && span.end > windowEnd)
+      ) throw new Error('no_data bounds or cadence are invalid');
+      const source = `${span.family}\n${span.source_id}`;
+      if ((previous && compareNoData(span, previous) <= 0) || span.start < (sourceEnds.get(source) ?? span.start)) {
+        throw new Error('no_data spans overlap or are unordered');
+      }
+      previous = span;
+      sourceEnds.set(source, span.end);
+    }
+  }
+
+  function validateCostReport(value) {
+    exactFields(value, CURRENT_COST_REPORT_FIELDS, 'cost_report');
+    if (value.schema_version !== CURRENT_COST_REPORT_SCHEMA_VERSION || value.reasoning_available !== false) {
+      throw new Error('cost_report schema or reasoning availability is unsupported');
+    }
+    const totalTokens = costInteger(value.total_tokens, 'cost_report.total_tokens');
+    const totalMicroUsd = costInteger(value.total_micro_usd, 'cost_report.total_micro_usd');
+    const totalApiListMicroUsd = costInteger(
+      value.total_api_list_micro_usd,
+      'cost_report.total_api_list_micro_usd',
+    );
+    const dimensions = validateCostDimensions(value.dimensions, 'cost_report.dimensions');
+    if (
+      CURRENT_COST_DIMENSIONS.reduce((sum, dimension) => sum + dimensions[dimension].tokens, 0) !== totalTokens
+      || CURRENT_COST_DIMENSIONS.reduce((sum, dimension) => sum + dimensions[dimension].micro_usd, 0) !== totalMicroUsd
+      || CURRENT_COST_DIMENSIONS.reduce((sum, dimension) => sum + dimensions[dimension].api_list_micro_usd, 0) !== totalApiListMicroUsd
+    ) throw new Error('cost_report totals disagree with dimensions');
+    const priced = validateCostCoverage(value.priced, 'cost_report.priced');
+    const unpriced = validateCostCoverage(value.unpriced, 'cost_report.unpriced');
+    if (priced.tokens + unpriced.tokens !== totalTokens) {
+      throw new Error('cost_report priced and unpriced tokens disagree with total');
+    }
+    validateCostRows(value.models, 'cost_report.models', CURRENT_COST_MODEL_FIELDS, CURRENT_COST_MAX_MODELS, 'model');
+    validateCostRows(value.agents, 'cost_report.agents', CURRENT_COST_AGENT_FIELDS, CURRENT_COST_MAX_AGENTS, 'agent');
+    const evidence = validateCostEvidence(value.evidence);
+    const revision = costInteger(value.catalog_revision, 'cost_report.catalog_revision');
+    if (evidence.some(row => row.catalog_revision > revision)) {
+      throw new Error('cost_report catalog revision predates evidence');
+    }
+    exactFields(value.omissions, CURRENT_COST_OMISSION_FIELDS, 'cost_report.omissions');
+    for (const field of CURRENT_COST_OMISSION_FIELDS) {
+      costInteger(value.omissions[field], `cost_report.omissions.${field}`);
+    }
+    return value;
+  }
+
+  function validateCostDimensions(value, name) {
+    exactFields(value, CURRENT_COST_DIMENSIONS, name);
+    for (const dimension of CURRENT_COST_DIMENSIONS) {
+      exactFields(value[dimension], CURRENT_COST_DIMENSION_FIELDS, `${name}.${dimension}`);
+      costInteger(value[dimension].tokens, `${name}.${dimension}.tokens`);
+      costInteger(value[dimension].micro_usd, `${name}.${dimension}.micro_usd`);
+      costInteger(value[dimension].api_list_micro_usd, `${name}.${dimension}.api_list_micro_usd`);
+    }
+    return value;
+  }
+
+  function validateCostCoverage(value, name) {
+    exactFields(value, CURRENT_COST_COVERAGE_FIELDS, name);
+    costInteger(value.atoms, `${name}.atoms`);
+    costInteger(value.tokens, `${name}.tokens`);
+    return value;
+  }
+
+  function validateCostRows(value, name, fields, maximum, kind) {
+    if (!Array.isArray(value) || value.length > maximum) throw new Error(`${name} is not bounded`);
+    const keys = new Set();
+    let previous = null;
+    for (const [index, row] of value.entries()) {
+      const rowName = `${name}[${index}]`;
+      exactFields(row, fields, rowName);
+      validateCostKey(row.key, `${rowName}.key`);
+      if (keys.has(row.key)) throw new Error(`${name} keys are not unique`);
+      keys.add(row.key);
+      if (kind === 'model') {
+        identityText(row.provider, `${rowName}.provider`);
+        identityText(row.model, `${rowName}.model`);
+      } else {
+        identityText(row.source, `${rowName}.source`);
+        identityText(row.label, `${rowName}.label`);
+        validateCostSources(row.sources, `${rowName}.sources`, row);
+      }
+      const totalTokens = costInteger(row.total_tokens, `${rowName}.total_tokens`);
+      const totalMicroUsd = costInteger(row.total_micro_usd, `${rowName}.total_micro_usd`);
+      const totalApiListMicroUsd = costInteger(
+        row.total_api_list_micro_usd,
+        `${rowName}.total_api_list_micro_usd`,
+      );
+      const dimensions = validateCostDimensions(row.dimensions, `${rowName}.dimensions`);
+      if (
+        CURRENT_COST_DIMENSIONS.reduce((sum, dimension) => sum + dimensions[dimension].tokens, 0) !== totalTokens
+        || CURRENT_COST_DIMENSIONS.reduce((sum, dimension) => sum + dimensions[dimension].micro_usd, 0) !== totalMicroUsd
+        || CURRENT_COST_DIMENSIONS.reduce((sum, dimension) => sum + dimensions[dimension].api_list_micro_usd, 0) !== totalApiListMicroUsd
+      ) throw new Error(`${rowName} totals disagree with dimensions`);
+      const priced = validateCostCoverage(row.priced, `${rowName}.priced`);
+      const unpriced = validateCostCoverage(row.unpriced, `${rowName}.unpriced`);
+      if (priced.tokens + unpriced.tokens !== totalTokens) throw new Error(`${rowName} coverage disagrees with total`);
+      const rank = [-totalTokens, -totalApiListMicroUsd, -totalMicroUsd, row.key];
+      if (previous && compareCostRank(rank, previous) <= 0) throw new Error(`${name} rank order is invalid`);
+      previous = rank;
+    }
+    return value;
+  }
+
+  function validateCostSources(value, name, parent) {
+    const kinds = ['claude', 'codex', 'opencode', 'yoagent', 'summary', 'images', 'responses', 'legacy', 'unknown'];
+    if (!Array.isArray(value) || value.length > kinds.length) throw new Error(`${name} is not bounded`);
+    const seen = new Set();
+    let previous = null;
+    const totals = [0, 0, 0];
+    for (const [index, row] of value.entries()) {
+      const rowName = `${name}[${index}]`;
+      exactFields(row, CURRENT_COST_SOURCE_FIELDS, rowName);
+      identityText(row.source, `${rowName}.source`);
+      if (!kinds.includes(row.source) || seen.has(row.source)) throw new Error(`${rowName}.source is unsupported or duplicated`);
+      seen.add(row.source);
+      const rowTotals = [
+        costInteger(row.total_tokens, `${rowName}.total_tokens`),
+        costInteger(row.total_micro_usd, `${rowName}.total_micro_usd`),
+        costInteger(row.total_api_list_micro_usd, `${rowName}.total_api_list_micro_usd`),
+      ];
+      const dimensions = validateCostDimensions(row.dimensions, `${rowName}.dimensions`);
+      const dimensionTotals = CURRENT_COST_DIMENSIONS.reduce((sum, dimension) => {
+        const value = dimensions[dimension];
+        return sum.map((total, field) => total + [value.tokens, value.micro_usd, value.api_list_micro_usd][field]);
+      }, [0, 0, 0]);
+      if (rowTotals.some((total, field) => total !== dimensionTotals[field])) throw new Error(`${rowName} totals disagree with dimensions`);
+      const priced = validateCostCoverage(row.priced, `${rowName}.priced`);
+      const unpriced = validateCostCoverage(row.unpriced, `${rowName}.unpriced`);
+      if (priced.tokens + unpriced.tokens !== rowTotals[0]) throw new Error(`${rowName} coverage disagrees with total`);
+      const rank = [-rowTotals[0], -rowTotals[2], -rowTotals[1], row.source];
+      if (previous && compareCostRank(rank, previous) <= 0) throw new Error(`${name} rank order is invalid`);
+      previous = rank;
+      rowTotals.forEach((total, field) => { totals[field] += total; });
+    }
+    if (totals.some((total, field) => total !== [parent.total_tokens, parent.total_micro_usd, parent.total_api_list_micro_usd][field])) throw new Error(`${name} totals disagree with parent attribution`);
+  }
+
+  function validateCostEvidence(value) {
+    if (!Array.isArray(value) || value.length > CURRENT_COST_MAX_EVIDENCE) {
+      throw new Error('cost_report.evidence is not bounded');
+    }
+    const keys = new Set();
+    let previous = null;
+    for (const [index, row] of value.entries()) {
+      const name = `cost_report.evidence[${index}]`;
+      exactFields(row, CURRENT_COST_EVIDENCE_FIELDS, name);
+      validateCostKey(row.key, `${name}.key`);
+      if (keys.has(row.key)) throw new Error('cost_report.evidence keys are not unique');
+      keys.add(row.key);
+      for (const field of CURRENT_COST_EVIDENCE_FIELDS) {
+        if (['key', 'tokens', 'micro_usd', 'api_list_micro_usd', 'priced_atoms', 'rate_scale', 'catalog_revision', 'source_url'].includes(field)) continue;
+        identityText(row[field], `${name}.${field}`);
+      }
+      if (!CURRENT_COST_DIMENSIONS.includes(row.dimension)) throw new Error(`${name}.dimension is unsupported`);
+      if (row.source_url !== '') {
+        identityText(row.source_url, `${name}.source_url`);
+        if (!/^https?:\/\//.test(row.source_url)) throw new Error(`${name}.source_url is unsupported`);
+      }
+      const tokens = costInteger(row.tokens, `${name}.tokens`);
+      const microUsd = costInteger(row.micro_usd, `${name}.micro_usd`);
+      const apiListMicroUsd = costInteger(row.api_list_micro_usd, `${name}.api_list_micro_usd`);
+      costInteger(row.priced_atoms, `${name}.priced_atoms`);
+      costInteger(row.rate_scale, `${name}.rate_scale`);
+      costInteger(row.catalog_revision, `${name}.catalog_revision`);
+      const rank = [-tokens, -apiListMicroUsd, -microUsd, row.key];
+      if (previous && compareCostRank(rank, previous) <= 0) throw new Error('cost_report.evidence rank order is invalid');
+      previous = rank;
+    }
+    return value;
+  }
+
+  function validateCostKey(value, name) {
+    if (typeof value !== 'string' || !/^[0-9a-f]{24}$/.test(value)) {
+      throw new Error(`${name} is invalid`);
+    }
+  }
+
+  function compareCostRank(left, right) {
+    return left[0] - right[0]
+      || left[1] - right[1]
+      || left[2] - right[2]
+      || compareUnicode(left[3], right[3]);
+  }
+
+  function costInteger(value, name) {
+    return generationNumber(value, name);
+  }
+
+  function validateTombstones(tombstones, resolution, maximum) {
+    if (!Array.isArray(tombstones) || tombstones.length > maximum) {
+      throw new Error('tombstones must be a bounded array');
+    }
+    const values = new Map();
+    let previous = null;
+    for (const tombstone of tombstones) {
+      let parts;
+      if (tombstone?.kind === 'bucket') {
+        exactFields(tombstone, BUCKET_TOMBSTONE_FIELDS, 'bucket tombstone');
+        const start = generationNumber(tombstone.start, 'bucket tombstone start');
+        const duration = positiveInteger(tombstone.duration, 'bucket tombstone duration');
+        if (duration !== resolution || start % resolution !== 0) {
+          throw new Error('bucket tombstone duration or alignment is invalid');
+        }
+        parts = ['bucket', start, duration];
+      } else if (tombstone?.kind === 'no_data') {
+        exactFields(tombstone, NO_DATA_TOMBSTONE_FIELDS, 'no_data tombstone');
+        identityText(tombstone.family, 'no_data tombstone family');
+        identityText(tombstone.source_id, 'no_data tombstone source_id');
+        identityText(tombstone.epoch, 'no_data tombstone epoch');
+        if (
+          !Number.isFinite(tombstone.start) || tombstone.start < 0
+          || !Number.isFinite(tombstone.end) || tombstone.end <= tombstone.start
+        ) throw new Error('no_data tombstone bounds are invalid');
+        parts = [
+          'no_data', tombstone.family, tombstone.source_id, tombstone.epoch,
+          tombstone.start, tombstone.end,
+        ];
+      } else {
+        throw new Error('tombstone kind must be bucket or no_data');
+      }
+      if (previous && compareIdentityParts(parts, previous) <= 0) {
+        throw new Error('tombstone identities must be unique and ordered');
+      }
+      previous = parts;
+      values.set(JSON.stringify(parts), tombstone);
+    }
+    return values;
+  }
+
+  function bucketIdentityKey(bucket) {
+    return JSON.stringify(['bucket', bucket.start, bucket.duration]);
+  }
+
+  function noDataIdentityKey(span) {
+    return JSON.stringify([
+      'no_data', span.family, span.source_id, span.epoch, span.start, span.end,
+    ]);
+  }
+
+  function compareIdentityParts(left, right) {
+    for (let index = 0; index < left.length; index += 1) {
+      if (left[index] === right[index]) continue;
+      if (typeof left[index] === 'string') return compareUnicode(left[index], right[index]);
+      return left[index] - right[index];
+    }
+    return 0;
+  }
+
+  function compareUnicode(left, right) {
+    const leftPoints = [...left].map(value => value.codePointAt(0));
+    const rightPoints = [...right].map(value => value.codePointAt(0));
+    const common = Math.min(leftPoints.length, rightPoints.length);
+    for (let index = 0; index < common; index += 1) {
+      if (leftPoints[index] !== rightPoints[index]) return leftPoints[index] - rightPoints[index];
+    }
+    return leftPoints.length - rightPoints.length;
+  }
+
+  function identityText(value, name) {
+    if (typeof value !== 'string' || !value || /[\x00-\x1f\x7f]/.test(value) || utf8ByteLength(value) > 256) {
+      throw new Error(`${name} must be bounded non-empty text without controls`);
+    }
+    return value;
+  }
+
+  function utf8ByteLength(value) {
+    try {
+      return encodeURIComponent(value).replace(/%[0-9A-F]{2}|./g, 'x').length;
+    } catch (_error) {
+      return Infinity;
+    }
+  }
+
+  function compareNoData(left, right) {
+    return compareUnicode(left.family, right.family)
+      || compareUnicode(left.source_id, right.source_id)
+      || left.start - right.start
+      || left.end - right.end;
+  }
+
+  function exactFields(value, expected, name) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw currentStatsContractError(`${name} must be an object`);
+    }
+    const actual = Object.keys(value).sort();
+    const wanted = [...expected].sort();
+    if (actual.length !== wanted.length || actual.some((field, index) => field !== wanted[index])) {
+      throw currentStatsContractError(`${name} fields are not exact`);
+    }
+  }
+
+  function currentStatsContractError(message) {
+    const error = new Error(message);
+    error.statsContractViolation = true;
+    return error;
+  }
+
+  function finiteJson(value) {
+    if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+    if (typeof value === 'number') return Number.isFinite(value);
+    if (Array.isArray(value)) return value.every(finiteJson);
+    return Boolean(value) && typeof value === 'object'
+      && Object.keys(value).every(key => typeof key === 'string')
+      && Object.values(value).every(finiteJson);
+  }
+
+  function sameJson(left, right) {
+    if (Object.is(left, right)) return true;
+    if (Array.isArray(left) || Array.isArray(right)) {
+      return Array.isArray(left) && Array.isArray(right)
+        && left.length === right.length
+        && left.every((value, index) => sameJson(value, right[index]));
+    }
+    if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+    const leftKeys = Object.keys(left).sort();
+    const rightKeys = Object.keys(right).sort();
+    return leftKeys.length === rightKeys.length
+      && leftKeys.every((key, index) => key === rightKeys[index] && sameJson(left[key], right[key]));
+  }
+
+  function generationNumber(value, name) {
+    if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${name} must be a non-negative safe integer`);
+    return value;
+  }
+
+  function positiveInteger(value, name) {
+    if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} must be a positive safe integer`);
+    return value;
+  }
+
+  function freezeJson(value) {
+    if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+    Object.values(value).forEach(freezeJson);
+    return Object.freeze(value);
+  }
+
+  const currentStatsModule = Object.freeze({
+    canonicalAgentLabel: currentStatsCanonicalAgentLabel,
+    canonicalSessionKey: currentStatsCanonicalSessionKey,
+    createBrowserClient,
+    createController,
+    mount,
+    resolutionChoices: CURRENT_RESOLUTIONS,
+  });
+  globalThis.YOmuxStatsCurrent = currentStatsModule;
+  globalThis.YOLOmuxStatsCurrent = currentStatsModule;
+})();

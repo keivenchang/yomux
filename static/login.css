@@ -1,0 +1,335 @@
+:root {
+  color-scheme: dark light;
+  --bg: #0c1016;
+  --panel: #151b24;
+  --panel-strong: #1d2632;
+  --text: #e7ecf3;
+  --muted: #9aa5b1;
+  --line: #344052;
+  --accent: #76b900;
+  --accent-focus: #9be33d;
+  --accent-text: #071000;
+  --accent-rgb: 118 185 0;
+  --bad: #ff8a95;
+  --warn: #f5c542;
+}
+* { box-sizing: border-box; }
+body {
+  min-height: 100vh;
+  margin: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  color: var(--text);
+  background: var(--bg);
+  font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  /* brand.css consumes the same control variables as the authenticated shell. */
+  --active-control-bg: var(--accent);
+  --active-control-border: var(--accent-focus);
+  --active-control-text: var(--accent-text);
+  /* brand.css resolves its fallback aliases on :root, before body overrides inherit. Rebind
+     the resolved aliases here as well so the highlighted product glyph follows the login accent. */
+  --brand-green: var(--accent);
+  --brand-primary-green: var(--accent);
+  --brand-mark-bg: var(--accent);
+  --brand-mark-border: var(--accent-focus);
+  --brand-mark-text: var(--accent-text);
+}
+/* Match the saved global dark/light setting before authentication.  A system setting stays
+   responsive to the browser/OS preference just as it does in the authenticated application. */
+body.login-theme-light {
+  color-scheme: light;
+  --bg: #f4f7fb;
+  --panel: #ffffff;
+  --panel-strong: #edf2f7;
+  --text: #172033;
+  --muted: #52617a;
+  --line: #bac6d5;
+}
+@media (prefers-color-scheme: light) {
+  body.login-theme-system {
+    color-scheme: light;
+    --bg: #f4f7fb;
+    --panel: #ffffff;
+    --panel-strong: #edf2f7;
+    --text: #172033;
+    --muted: #52617a;
+    --line: #bac6d5;
+  }
+}
+/* These values mirror appearance.active_color.  They apply to every login control and the YOLO
+   brand chip, so a login/logout round-trip cannot fall back to Envy Green. */
+body.login-accent-blue {
+  --accent: #3b82f6;
+  --accent-focus: #60a5fa;
+  --accent-text: #ffffff;
+  --accent-rgb: 59 130 246;
+}
+body.login-accent-orange {
+  --accent: #f97316;
+  --accent-focus: #fb923c;
+  --accent-text: #1a0c00;
+  --accent-rgb: 249 115 22;
+}
+body.login-accent-yellow {
+  --accent: #eab308;
+  --accent-focus: #facc15;
+  --accent-text: #1a1500;
+  --accent-rgb: 234 179 8;
+}
+body.login-accent-purple {
+  --accent: #a855f7;
+  --accent-focus: #c084fc;
+  --accent-text: #ffffff;
+  --accent-rgb: 168 85 247;
+}
+body.login-accent-white {
+  --accent: #e8edf2;
+  --accent-focus: #ffffff;
+  --accent-text: #0b0e14;
+  --accent-rgb: 232 237 242;
+}
+body.login-theme-light.login-accent-green {
+  --accent: #5f9800;
+  --accent-focus: #6cab00;
+  --accent-text: #071000;
+  --accent-rgb: 95 152 0;
+}
+body.login-theme-light.login-accent-blue {
+  --accent: #2563eb;
+  --accent-focus: #3b82f6;
+  --accent-text: #ffffff;
+  --accent-rgb: 37 99 235;
+}
+body.login-theme-light.login-accent-orange {
+  --accent: #b91c1c;
+  --accent-focus: #dc2626;
+  --accent-text: #ffffff;
+  --accent-rgb: 185 28 28;
+}
+body.login-theme-light.login-accent-yellow {
+  --accent: #d6a400;
+  --accent-focus: #eab308;
+  --accent-text: #1a1500;
+  --accent-rgb: 214 164 0;
+}
+body.login-theme-light.login-accent-purple {
+  --accent: #7c3aed;
+  --accent-focus: #8b5cf6;
+  --accent-text: #ffffff;
+  --accent-rgb: 124 58 237;
+}
+body.login-theme-light.login-accent-white {
+  --accent: #9aa5b3;
+  --accent-focus: #b8c1cc;
+  --accent-text: #0b0e14;
+  --accent-rgb: 154 165 179;
+}
+@media (prefers-color-scheme: light) {
+  body.login-theme-system.login-accent-green {
+    --accent: #5f9800;
+    --accent-focus: #6cab00;
+    --accent-text: #071000;
+    --accent-rgb: 95 152 0;
+  }
+  body.login-theme-system.login-accent-blue {
+    --accent: #2563eb;
+    --accent-focus: #3b82f6;
+    --accent-text: #ffffff;
+    --accent-rgb: 37 99 235;
+  }
+  body.login-theme-system.login-accent-orange {
+    --accent: #b91c1c;
+    --accent-focus: #dc2626;
+    --accent-text: #ffffff;
+    --accent-rgb: 185 28 28;
+  }
+  body.login-theme-system.login-accent-yellow {
+    --accent: #d6a400;
+    --accent-focus: #eab308;
+    --accent-text: #1a1500;
+    --accent-rgb: 214 164 0;
+  }
+  body.login-theme-system.login-accent-purple {
+    --accent: #7c3aed;
+    --accent-focus: #8b5cf6;
+    --accent-text: #ffffff;
+    --accent-rgb: 124 58 237;
+  }
+  body.login-theme-system.login-accent-white {
+    --accent: #9aa5b3;
+    --accent-focus: #b8c1cc;
+    --accent-text: #0b0e14;
+    --accent-rgb: 154 165 179;
+  }
+}
+.login-shell {
+  width: min(420px, 100%);
+}
+.login-panel {
+  padding: 24px;
+  background: color-mix(in srgb, var(--panel) 96%, transparent);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 22px 70px rgba(0, 0, 0, 0.42);
+}
+.login-brand {
+  margin-bottom: 20px;
+}
+.login-brand-title {
+  font-size: 26px;
+}
+.login-brand-title .brand-version {
+  color: #697382;
+  font-size: 0.48em;
+  font-weight: 600;
+}
+.login-form {
+  display: grid;
+  gap: 14px;
+}
+label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+input {
+  width: 100%;
+  height: 38px;
+  padding: 8px 10px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: 14px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+input:focus {
+  outline: 0;
+  border-color: var(--accent-focus);
+  box-shadow: 0 0 0 2px rgb(var(--accent-rgb) / 0.18);
+}
+.locale-picker {
+  position: relative;
+  display: grid;
+}
+.locale-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  height: 38px;
+  padding: 8px 10px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: 14px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  cursor: pointer;
+  text-align: start;
+}
+.locale-toggle::after {
+  content: "⌄";
+  color: var(--muted);
+}
+.locale-toggle:focus {
+  outline: 0;
+  border-color: var(--accent-focus);
+  box-shadow: 0 0 0 2px rgb(var(--accent-rgb) / 0.18);
+}
+.locale-options {
+  position: absolute;
+  z-index: 4;
+  inset-inline: 0;
+  top: calc(100% + 4px);
+  display: grid;
+  max-height: min(260px, 48vh);
+  overflow: auto;
+  padding: 4px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.42);
+}
+.locale-options[hidden] {
+  display: none;
+}
+.locale-option {
+  width: 100%;
+  height: 30px;
+  margin: 0;
+  padding: 0 8px;
+  justify-content: flex-start;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  font: 13px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  text-align: start;
+}
+.locale-option:hover,
+.locale-option[aria-selected="true"] {
+  color: var(--accent-text);
+  background: var(--accent);
+}
+.password-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 68px;
+  align-items: stretch;
+}
+.password-field input {
+  border-radius: 6px 0 0 6px;
+}
+.password-toggle {
+  height: 38px;
+  margin: 0;
+  color: var(--text);
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  border-left: 0;
+  border-radius: 0 6px 6px 0;
+  font: 700 12px/1 ui-sans-serif, system-ui, sans-serif;
+}
+.password-toggle:hover {
+  filter: brightness(1.12);
+}
+.password-toggle:focus {
+  outline: 0;
+  border-color: var(--accent-focus);
+  box-shadow: 0 0 0 2px rgb(var(--accent-rgb) / 0.18);
+}
+button {
+  height: 38px;
+  margin-top: 4px;
+  color: var(--accent-text);
+  background: var(--accent);
+  border: 1px solid var(--accent-focus);
+  border-radius: 6px;
+  font: 800 13px/1 ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+}
+button:hover {
+  filter: brightness(1.08);
+}
+.login-error,
+.login-warning {
+  margin: 0 0 14px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+.login-error {
+  color: #ffd8dc;
+  background: rgba(180, 35, 50, 0.16);
+  border: 1px solid rgba(255, 138, 149, 0.55);
+}
+.login-warning {
+  color: #ffe7a3;
+  background: rgba(245, 197, 66, 0.13);
+  border: 1px solid rgba(245, 197, 66, 0.45);
+}
+.login-warning code {
+  color: #fff1bd;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}

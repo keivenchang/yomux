@@ -1,0 +1,4 @@
+name,count,status
+alpha,1,ready
+"beta,gamma",2,"quoted comma"
+delta,3,done

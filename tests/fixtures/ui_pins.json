@@ -1,0 +1,22 @@
+{
+  "_comment": "Shared registry for UI colors and locale-backed labels used across test layers. Color values are validated against their shipping CSS-token or JS-literal owner. Label entries name keys in static_src/locales/en.json so tests derive copy from the locale catalog instead of duplicating English text. Wave 1 only registers entries; owning test lanes migrate consumers separately.",
+  "diffOverviewAdd": "#38d878",
+  "diffOverviewDelete": "#ff5d6c",
+  "agentStatusCooldown": "#ffd633",
+  "statusGood": "#52d273",
+  "neutralTextCool": "#e2e8f0",
+  "paneRingAttention": "#ff3347",
+  "paneMetaPathLight": "#111827",
+  "textSelectionBg": "#2563eb",
+  "paneTabTextLight": "#1f2937",
+  "activeAccentBright": "#86d600",
+  "activeAccentBrightLight": "#4f9e3a",
+  "labels": {
+    "statsTab": "tab.debug",
+    "infoTab": "brand.tab.info",
+    "reloadPrompt": "update.available"
+  },
+  "classes": {
+    "movingEllipsis": "moving-ellipsis"
+  }
+}

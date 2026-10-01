@@ -1,0 +1,179 @@
+:root {
+  /* these mirror the canonical dark-theme tokens in
+     static_src/css/yomux/00_tokens_base.css (--bg/--panel/--panel2/--text/--muted/--line). They used to
+     be near-but-not-equal copies, so the wall looked subtly different from the app with no clear "right".
+     Keep these in sync with 00_tokens_base.css. (--green/--red are the wall's own status colors.) */
+  color-scheme: dark;
+  --bg: #0f1115;
+  --panel: #151922;
+  --panel2: #1e2430;
+  --text: #e4e8ee;
+  --muted: #9aa5b1;
+  --green: #4ade80;
+  --red: #fb7185;
+  --border: #303948;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+.topbar {
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: #0d1014;
+}
+.title { font-weight: 700; font-size: 16px; }
+.sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.actions { display: flex; align-items: center; gap: 8px; }
+button {
+  background: var(--panel2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+button:hover { border-color: #556171; }
+.status { color: var(--muted); min-width: 170px; text-align: right; }
+.wrap { height: calc(100vh - 64px); padding: 10px; display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 8px; }
+.grid {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.pane {
+  min-width: 0;
+  min-height: 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+.pane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 9px;
+  background: var(--panel2);
+  border-bottom: 1px solid var(--border);
+}
+.pane-head-main {
+  min-width: 0;
+}
+.pane-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 650;
+}
+.pane-meta {
+  color: var(--muted);
+  white-space: nowrap;
+  font-size: 12px;
+}
+.pane-badges {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  max-width: 45%;
+  overflow: hidden;
+}
+.pane-badge {
+  border: 1px solid #465365;
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  max-width: 92px;
+  overflow: hidden;
+  padding: 3px 6px;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.pane-badge.working,
+.pane-badge.busy {
+  border-color: #3b82f6;
+  color: #93c5fd;
+}
+.pane-badge.question,
+.pane-badge.needs-input {
+  border-color: #f59e0b;
+  color: #fbbf24;
+}
+.pane-badge.approval {
+  border-color: #22c55e;
+  color: #86efac;
+}
+.pane-badge.disconnected,
+.pane-badge.error {
+  border-color: #fb7185;
+  color: #fb7185;
+}
+pre.term {
+  margin: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 9px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 12px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  color: #dce5ef;
+}
+.err { color: var(--red); }
+.ok { color: var(--green); }
+.containers {
+  min-height: 84px;
+  max-height: 132px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+th,
+td {
+  padding: 5px 8px;
+  border-bottom: 1px solid #252c35;
+  text-align: left;
+  white-space: nowrap;
+}
+th {
+  color: var(--muted);
+  font-weight: 650;
+  background: var(--panel2);
+  position: sticky;
+  top: 0;
+}
+td.path {
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (max-width: 900px) {
+  .grid { grid-template-columns: 1fr; grid-template-rows: repeat(6, minmax(260px, 1fr)); }
+  .wrap { height: auto; min-height: calc(100vh - 64px); }
+  .topbar { height: auto; align-items: flex-start; flex-direction: column; }
+  .status { text-align: left; }
+}

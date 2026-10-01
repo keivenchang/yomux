@@ -1,0 +1,1098 @@
+capture_harness: capture_prompt_fixture.py
+filename_convention: case_name__client-token_date
+fixture_format: agent_tui capture JSON with raw_capture, styled_capture, client metadata, cursor, operations, failures, and
+  expected detector state.
+fixtures:
+- case_name: shell_sleep_10_3_option
+  expected:
+    action: option1
+    agent: codex
+    approval_visible: true
+    ask: true
+    command: sleep 10
+    confidence_min: 0.9
+    option_labels:
+    - Yes, proceed (y)
+    - Yes, and don't ask again for commands that start with `sleep 10` (p)
+    - No, and tell Codex what to do differently (esc)
+    prompt_kind: shell-command
+    prompt_type: bash
+    question_text: Would you like to run the following command?
+    screen_key: approval
+    selected_option: 1
+    yes_selected: true
+  family: codex-shell-approval-3-option
+  file: captures/shell_sleep_10_3_option__codex-cli-0.141.0_20260620.yaml
+  fixture_id: shell_sleep_10_3_option__codex-cli-0.141.0_20260620
+  id: codex-shell-sleep-10-3-option
+  provenance: real Codex CLI 0.141.0 capture
+- case_name: shell_pytest_2_option
+  expected:
+    action: option1
+    agent: codex
+    approval_visible: true
+    ask: true
+    command: python3 -m pytest tests/test_auto_approve_detector.py -q
+    confidence_min: 0.9
+    option_labels:
+    - Yes, proceed (y)
+    - No, and tell Codex what to do differently (esc)
+    prompt_kind: shell-command
+    prompt_type: bash
+    question_text: Would you like to run the following command?
+    screen_key: approval
+    selected_option: 1
+    yes_selected: true
+  family: codex-shell-approval-2-option
+  file: synthetic/shell_pytest_2_option__codex-cli-synthetic_20260620.yaml
+  fixture_id: shell_pytest_2_option__codex-cli-synthetic_20260620
+  id: codex-shell-pytest-2-option
+  provenance: synthetic current Codex layout
+- case_name: shell_no_selected_option
+  expected:
+    action: option1
+    agent: codex
+    approval_visible: true
+    ask: true
+    command: sleep 10
+    confidence_min: 0.9
+    option_labels:
+    - Yes, proceed (y)
+    - Yes, and don't ask again for commands that start with `sleep 10` (p)
+    - No, and tell Codex what to do differently (esc)
+    prompt_kind: shell-command
+    prompt_type: bash
+    question_text: Would you like to run the following command?
+    screen_key: approval
+    selected_option: 3
+    yes_selected: false
+  family: codex-selected-no
+  file: captures/shell_no_selected_option__codex-cli-0.141.0_20260620.yaml
+  fixture_id: shell_no_selected_option__codex-cli-0.141.0_20260620
+  id: codex-shell-no-selected-option
+  provenance: real Codex CLI 0.141.0 capture
+- case_name: prefix_rule_gh_api
+  expected:
+    action: option2
+    agent: codex
+    approval_visible: true
+    ask: true
+    command: gh api repos/example/project/pulls/123/comments
+    confidence_min: 0.9
+    option_labels:
+    - Yes, proceed (y)
+    - Yes, and don't ask again for commands that start with `gh api` (p)
+    - No, and tell Codex what to do differently (esc)
+    prompt_kind: shell-command
+    prompt_type: bash
+    question_text: Would you like to run the following command?
+    screen_key: approval
+    selected_option: 1
+    yes_selected: true
+  family: codex-prefix-rule
+  file: synthetic/prefix_rule_gh_api__codex-cli-synthetic_20260620.yaml
+  fixture_id: prefix_rule_gh_api__codex-cli-synthetic_20260620
+  id: codex-prefix-rule-gh-api
+  provenance: mock capture from existing detector tests
+- case_name: network_escalation
+  expected:
+    action: option1
+    agent: codex
+    approval_visible: true
+    ask: true
+    command: python3 -m pip index versions pytest
+    confidence_min: 0.9
+    option_labels:
+    - Yes, proceed (y)
+    - No, and tell Codex what to do differently (esc)
+    prompt_kind: shell-command
+    prompt_type: bash
+    question_text: Would you like to run the following command?
+    screen_key: approval
+    selected_option: 1
+    yes_selected: true
+  family: codex-network-escalation
+  file: synthetic/network_escalation__codex-cli-synthetic_20260620.yaml
+  fixture_id: network_escalation__codex-cli-synthetic_20260620
+  id: codex-network-escalation
+  provenance: synthetic current Codex command approval layout from official network/escalation family
+- case_name: sandbox_escalation
+  expected:
+    action: option1
+    agent: codex
+    approval_visible: true
+    ask: true
+    command: touch /tmp/yolomux-sandbox-check
+    confidence_min: 0.9
+    option_labels:
+    - Yes, proceed (y)
+    - No, and tell Codex what to do differently (esc)
+    prompt_kind: shell-command
+    prompt_type: bash
+    question_text: Would you like to run the following command?
+    screen_key: approval
+    selected_option: 1
+    yes_selected: true
+  family: codex-sandbox-escalation
+  file: synthetic/sandbox_escalation__codex-cli-synthetic_20260620.yaml
+  fixture_id: sandbox_escalation__codex-cli-synthetic_20260620
+  id: codex-sandbox-escalation
+  provenance: synthetic current Codex command approval layout from official sandbox/escalation family
+- case_name: mcp_tool_approval
+  expected:
+    action: null
+    agent: codex
+    approval_visible: false
+    ask: true
+    command: null
+    confidence_min: 0.9
+    option_labels:
+    - Yes, allow once
+    - Yes, and always allow this MCP tool for this server
+    - 'No'
+    prompt_kind: tool-approval
+    prompt_type: ''
+    question_text: |-
+      Would you like to allow mcp__github__get_pull_request to access ai-dynamo/dynamo#123?
+      1. Yes, allow once
+      2. Yes, and always allow this MCP tool for this server
+      3. No
+    screen_key: needs-input
+    selected_option: 1
+    yes_selected: false
+  family: codex-mcp-tool-approval
+  file: synthetic/mcp_tool_approval__codex-cli-synthetic_20260620.yaml
+  fixture_id: mcp_tool_approval__codex-cli-synthetic_20260620
+  id: codex-mcp-tool-approval
+  provenance: synthetic MCP approval layout from official Codex MCP/tool approval family
+- case_name: bash_step_marker
+  expected:
+    action: option1
+    agent: claude
+    approval_visible: true
+    ask: true
+    command: mkdir -p build/output
+    confidence_min: 0.9
+    option_labels:
+    - 'Yes'
+    - 'No'
+    prompt_kind: shell-command
+    prompt_type: bash
+    question_text: Do you want to proceed?
+    screen_key: approval
+    selected_option: 1
+    yes_selected: true
+  family: claude-bash-permission
+  file: synthetic/bash_step_marker__claude-code-synthetic_20260620.yaml
+  fixture_id: bash_step_marker__claude-code-synthetic_20260620
+  id: claude-bash-step-marker
+  provenance: mock capture
+- case_name: bash_no_selector
+  expected:
+    action: option1
+    agent: claude
+    approval_visible: true
+    ask: true
+    command: echo no-selector-redraw && true
+    confidence_min: 0.9
+    option_labels:
+    - 'Yes'
+    - 'No'
+    prompt_kind: shell-command
+    prompt_type: bash
+    question_text: Do you want to proceed?
+    screen_key: approval
+    selected_option: 0
+    yes_selected: false
+  family: claude-bash-no-selector
+  file: synthetic/bash_no_selector__claude-code-synthetic_20260620.yaml
+  fixture_id: bash_no_selector__claude-code-synthetic_20260620
+  id: claude-bash-no-selector
+  provenance: synthetic redraw frame with no highlighted option
+- case_name: file_edit
+  expected:
+    action: option2
+    agent: claude
+    approval_visible: true
+    ask: true
+    command: null
+    confidence_min: 0.9
+    option_labels:
+    - 'Yes'
+    - Yes, and allow Claude to edit files in this project
+    - 'No'
+    prompt_kind: file-edit
+    prompt_type: file
+    question_text: Do you want to make this edit to yomux_lib/prompt_detector.py?
+    screen_key: approval
+    selected_option: 1
+    yes_selected: true
+  family: claude-file-permission
+  file: synthetic/file_edit__claude-code-synthetic_20260620.yaml
+  fixture_id: file_edit__claude-code-synthetic_20260620
+  id: claude-file-edit
+  provenance: synthetic current Claude layout
+- case_name: tool_allow_webfetch
+  expected:
+    action: option2
+    agent: claude
+    approval_visible: true
+    ask: true
+    command: null
+    confidence_min: 0.9
+    option_labels:
+    - 'Yes'
+    - Yes, and always allow WebFetch for code.claude.com
+    - 'No'
+    prompt_kind: tool-approval
+    prompt_type: tool
+    question_text: Do you want to allow WebFetch to access https://code.claude.com/docs/en/permission-modes?
+    screen_key: approval
+    selected_option: 1
+    yes_selected: true
+  family: claude-tool-permission
+  file: synthetic/tool_allow_webfetch__claude-code-synthetic_20260620.yaml
+  fixture_id: tool_allow_webfetch__claude-code-synthetic_20260620
+  id: claude-tool-allow-webfetch
+  provenance: synthetic current Claude layout
+- case_name: plan_approval_real
+  expected:
+    action: option1
+    agent: claude
+    approval_visible: true
+    ask: true
+    command: null
+    confidence_min: 0.9
+    option_labels:
+    - Yes, and use auto mode
+    - Yes, manually approve edits
+    - Tell Claude what to change
+    prompt_kind: plan-approval
+    prompt_type: plan
+    question_text: Claude has written up a plan and is ready to execute. Would you like to proceed?
+    screen_key: approval
+    selected_option: 1
+    yes_selected: true
+  family: claude-plan-approval
+  file: captures/plan_approval_real__claude-code-2.1.183_20260619.yaml
+  fixture_id: plan_approval_real__claude-code-2.1.183_20260619
+  id: claude-real-plan-approval-2-1-183
+  provenance: real capture
+- case_name: long_idle_prompt
+  expected:
+    action: option1
+    agent: claude
+    approval_visible: true
+    ask: true
+    command: null
+    confidence_min: 0.9
+    option_labels:
+    - 'Yes'
+    - No, keep planning
+    prompt_kind: plan-approval
+    prompt_type: plan
+    question_text: Do you want to proceed with this plan?
+    screen_key: approval
+    selected_option: 1
+    yes_selected: true
+  family: long-idle-prompt
+  file: synthetic/long_idle_prompt__claude-code-synthetic_20260620.yaml
+  fixture_id: long_idle_prompt__claude-code-synthetic_20260620
+  id: long-idle-prompt
+  provenance: synthetic old unanswered Claude plan approval; visible text should classify like a fresh prompt
+- case_name: reappeared_prompt_after_tool
+  expected:
+    action: option1
+    agent: codex
+    approval_visible: true
+    ask: true
+    command: echo after-redraw
+    confidence_min: 0.9
+    option_labels:
+    - Yes, proceed (y)
+    - No, and tell Codex what to do differently (esc)
+    prompt_kind: shell-command
+    prompt_type: bash
+    question_text: Would you like to run the following command?
+    screen_key: approval
+    selected_option: 1
+    yes_selected: true
+  family: reappeared-prompt-after-tool
+  file: synthetic/reappeared_prompt_after_tool__codex-cli-synthetic_20260620.yaml
+  fixture_id: reappeared_prompt_after_tool__codex-cli-synthetic_20260620
+  id: reappeared-prompt-after-tool
+  provenance: synthetic prompt redraw below a completed tool call
+- case_name: multiple_choice_question
+  expected:
+    action: null
+    agent: claude
+    approval_visible: false
+    ask: true
+    command: null
+    confidence_min: 0.9
+    option_labels:
+    - vLLM
+    - SGLang
+    - TensorRT-LLM
+    prompt_kind: question
+    prompt_type: ''
+    question_text: Which backend should I use for this verification?
+    screen_key: needs-input
+    selected_option: 1
+    yes_selected: false
+  family: claude-normal-question
+  file: synthetic/multiple_choice_question__claude-code-synthetic_20260620.yaml
+  fixture_id: multiple_choice_question__claude-code-synthetic_20260620
+  id: claude-multiple-choice-question
+  provenance: synthetic current Claude question layout
+- case_name: ask_user_question_no_selector_accessible
+  expected:
+    action: null
+    agent: claude
+    approval_visible: false
+    ask: true
+    command: null
+    confidence_min: 0.9
+    option_labels:
+    - Pane capture
+    - Transcript capture
+    - Other
+    - Chat about this
+    prompt_kind: question
+    prompt_type: ''
+    question_text: Which verifier mode should we use?
+    screen_key: needs-input
+    selected_option: 0
+    yes_selected: false
+  family: claude-ask-user-question-no-selector
+  file: captures/ask_user_question_no_selector_accessible__claude-code-2.1.190_20260624.yaml
+  fixture_id: ask_user_question_no_selector_accessible__claude-code-2.1.190_20260624
+  id: claude-ask-user-question-no-selector-accessible-real
+  provenance: real Claude Code 2.1.190 accessible AskUserQuestion no-selector capture at 240 columns
+- case_name: ask_user_question_selected_option
+  expected:
+    action: null
+    agent: claude
+    approval_visible: false
+    ask: true
+    command: null
+    confidence_min: 0.9
+    option_labels:
+    - Yes, 09:45 is right
+    - No, that's wrong
+    - Type something.
+    - Chat about this
+    prompt_kind: question
+    prompt_type: ''
+    question_text: Current time is 09:40:05 PDT. Adding 5 minutes gives 09:45:05 PDT. Is that the right time?
+    screen_key: needs-input
+    selected_option: 1
+    yes_selected: true
+  family: claude-ask-user-question-selected-option
+  file: captures/ask_user_question_selected_option__claude-code-2.1.185_20260621.yaml
+  fixture_id: ask_user_question_selected_option__claude-code-2.1.185_20260621
+  id: claude-ask-user-question-selected-option-real
+  provenance: real Claude Code 2.1.185 AskUserQuestion highlighted selector capture
+- case_name: parser_dependency_choice_question
+  expected:
+    action: null
+    agent: claude
+    approval_visible: false
+    ask: true
+    command: null
+    confidence_min: 0.9
+    option_labels:
+    - Local path dep (relative)
+    - Git dep, pinned rev
+    - Absolute path (as-is)
+    - Type something.
+    - Chat about this
+    prompt_kind: question
+    prompt_type: ''
+    question_text: How should dynamo depend on the frontend-crates parser crates (dynamo-parsers + dynamo-parsers-v2)?
+    screen_key: needs-input
+    selected_option: 1
+    yes_selected: true
+  family: claude-ask-user-question-selected-option
+  file: captures/parser_dependency_choice_question__claude-code-2.1.185_20260622.yaml
+  fixture_id: parser_dependency_choice_question__claude-code-2.1.185_20260622
+  id: claude-parser-dependency-choice-question-real
+  provenance: real Claude Code 2.1.185 parser dependency AskUserQuestion selected-option capture from tmux session 4:0.0
+- case_name: interrupted_what_should_claude_do_instead
+  expected:
+    action: null
+    agent: claude
+    approval_visible: false
+    ask: true
+    command: null
+    confidence_min: 0.75
+    option_labels: []
+    prompt_kind: question
+    prompt_type: ''
+    question_text: Interrupted · What should Claude do instead?
+    screen_key: needs-input
+    selected_option: 0
+    yes_selected: false
+  family: claude-interrupted-question
+  file: captures/interrupted_what_should_claude_do_instead__claude-code-2.1.185_20260621.yaml
+  fixture_id: interrupted_what_should_claude_do_instead__claude-code-2.1.185_20260621
+  id: claude-interrupted-what-should-do-instead-real
+  provenance: real Claude Code 2.1.185 interrupted awaiting-user-instruction capture
+- case_name: goal_active
+  expected:
+    action: null
+    agent: claude
+    approval_visible: false
+    ask: false
+    command: null
+    confidence_min: 0.9
+    negative_reason_contains: ''
+    option_labels: []
+    prompt_kind: ''
+    prompt_type: ''
+    question_text: ''
+    screen_key: working
+    selected_option: 0
+    yes_selected: false
+  family: claude-goal-active
+  file: captures/goal_active__claude-code-2.1.185_20260621.yaml
+  fixture_id: goal_active__claude-code-2.1.185_20260621
+  id: claude-goal-active-real
+  provenance: real Claude Code 2.1.185 `/goal active` capture from scratch tmux
+- case_name: goal_active
+  expected:
+    action: null
+    agent: codex
+    approval_visible: false
+    ask: false
+    command: null
+    confidence_min: 0.9
+    negative_reason_contains: ''
+    option_labels: []
+    prompt_kind: ''
+    prompt_type: ''
+    question_text: ''
+    screen_key: working
+    selected_option: 0
+    yes_selected: false
+  family: codex-goal-active
+  file: captures/goal_active__codex-cli-0.141.0_20260621.yaml
+  fixture_id: goal_active__codex-cli-0.141.0_20260621
+  id: codex-goal-active-real
+  provenance: real Codex CLI 0.141.0 `Pursuing goal` capture from tmux 8001:0.0
+- case_name: goal_achieved_working
+  expected:
+    action: null
+    agent: codex
+    approval_visible: false
+    ask: false
+    command: null
+    confidence_min: 0.9
+    negative_reason_contains: ''
+    option_labels: []
+    prompt_kind: ''
+    prompt_type: ''
+    question_text: ''
+    screen_key: working
+    selected_option: 0
+    yes_selected: false
+  family: codex-goal-active
+  file: captures/goal_achieved_working__codex-cli-0.141.0_20260623.yaml
+  fixture_id: goal_achieved_working__codex-cli-0.141.0_20260623
+  id: codex-goal-achieved-working-real
+  provenance: screenshot-provided Codex CLI 0.141.0 `Goal achieved` capture from tmux 8002:0.0; bottom rows later confirmed by tmux capture
+- case_name: goal_achieved_idle_draft
+  expected:
+    action: null
+    agent: codex
+    approval_visible: false
+    ask: false
+    command: null
+    confidence_min: 0.9
+    negative_reason_contains: ''
+    option_labels: []
+    prompt_kind: ''
+    prompt_type: ''
+    question_text: ''
+    screen_key: idle
+    selected_option: 0
+    yes_selected: false
+  family: codex-goal-achieved-idle
+  file: captures/goal_achieved_idle_draft__codex-cli-0.141.0_20260624.yaml
+  fixture_id: goal_achieved_idle_draft__codex-cli-0.141.0_20260624
+  id: codex-goal-achieved-idle-draft-real
+  provenance: screenshot-provided Codex CLI 0.141.0 `Goal achieved` idle/draft capture from tmux 8001:0.0
+- case_name: choice_question_real
+  expected:
+    action: null
+    agent: codex
+    approval_visible: false
+    ask: true
+    command: null
+    confidence_min: 0.9
+    option_labels:
+    - Pane capture
+    - Transcript capture
+    prompt_kind: question
+    prompt_type: ''
+    question_text: Which YOmux verifier mode should we use?
+    screen_key: needs-input
+    selected_option: 0
+    yes_selected: false
+  family: codex-normal-question
+  file: captures/choice_question_real__codex-cli-0.141.0_20260620.yaml
+  fixture_id: choice_question_real__codex-cli-0.141.0_20260620
+  id: codex-real-question-0-141-0
+  provenance: real Codex CLI 0.141.0 question followed by ghost-suggestion composer
+- case_name: free_text_question
+  expected:
+    action: null
+    agent: claude
+    approval_visible: false
+    ask: true
+    command: null
+    confidence_min: 0.7
+    option_labels: []
+    prompt_kind: question
+    prompt_type: ''
+    question_text: Which branch should I use for the follow-up?
+    screen_key: needs-input
+    selected_option: 0
+    yes_selected: false
+  family: claude-free-text-question
+  file: synthetic/free_text_question__claude-code-synthetic_20260620.yaml
+  fixture_id: free_text_question__claude-code-synthetic_20260620
+  id: claude-free-text-question
+  provenance: synthetic current Claude question layout
+- case_name: inline_yn_question
+  expected:
+    action: null
+    agent: unknown
+    approval_visible: false
+    ask: true
+    command: null
+    confidence_min: 0.7
+    option_labels: []
+    prompt_kind: question
+    prompt_type: ''
+    question_text: Do you want to proceed with deploying to staging? (y/n)
+    screen_key: needs-input
+    selected_option: 0
+    yes_selected: false
+  family: inline-yn-question
+  file: synthetic/inline_yn_question__generic-agent-synthetic_20260620.yaml
+  fixture_id: inline_yn_question__generic-agent-synthetic_20260620
+  id: inline-yn-question
+  provenance: synthetic current agent question layout
+- case_name: partial_choice_only
+  expected:
+    action: null
+    agent: claude
+    approval_visible: false
+    ask: true
+    command: null
+    confidence_min: 0.9
+    option_labels:
+    - 'Yes'
+    - 'No'
+    prompt_kind: question
+    prompt_type: ''
+    question_text: |-
+      1. Yes
+      2. No
+    screen_key: needs-input
+    selected_option: 1
+    yes_selected: false
+  family: partial-choice-capture
+  file: synthetic/partial_choice_only__claude-code-synthetic_20260620.yaml
+  fixture_id: partial_choice_only__claude-code-synthetic_20260620
+  id: partial-choice-only-claude
+  provenance: synthetic degraded capture
+- case_name: idle_empty_prompt
+  expected:
+    approval_visible: false
+    ask: false
+    negative_reason_contains: empty
+    screen_key: idle
+  family: idle-empty-prompt
+  file: captures/idle_empty_prompt__codex-cli-0.141.0_20260620.yaml
+  fixture_id: idle_empty_prompt__codex-cli-0.141.0_20260620
+  id: codex-idle-empty-prompt
+  provenance: real Codex CLI 0.141.0 idle capture
+- case_name: try_suggestion_idle
+  expected:
+    approval_visible: false
+    ask: false
+    negative_reason_contains: no current
+    screen_key: idle
+  family: suggestion-not-question
+  file: synthetic/try_suggestion_idle__claude-code-synthetic_20260620.yaml
+  fixture_id: try_suggestion_idle__claude-code-synthetic_20260620
+  id: claude-try-suggestion-idle
+  provenance: mock capture
+- case_name: typed_draft
+  expected:
+    approval_visible: false
+    ask: false
+    negative_reason_contains: idle composer
+    screen_key: idle
+  family: typed-draft
+  file: captures/typed_draft__codex-cli-0.141.0_20260620.yaml
+  fixture_id: typed_draft__codex-cli-0.141.0_20260620
+  id: typed-draft
+  provenance: real Codex CLI 0.141.0 capture
+- case_name: working_visible_counter
+  expected:
+    approval_visible: false
+    ask: false
+    negative_reason_contains: working
+    screen_key: working
+  family: visible-working-counter
+  file: captures/working_visible_counter__claude-code-2.1.183_20260620.yaml
+  fixture_id: working_visible_counter__claude-code-2.1.183_20260620
+  id: claude-visible-working-counter-real
+  provenance: real Claude Code 2.1.183 `Clauding…` visible counter capture
+- case_name: compacting_conversation_unicode_ellipsis
+  expected:
+    approval_visible: false
+    ask: false
+    negative_reason_contains: working
+    screen_key: working
+  family: visible-working-counter
+  file: captures/compacting_conversation_unicode_ellipsis__claude-code-2.1.198_20260702.yaml
+  fixture_id: compacting_conversation_unicode_ellipsis__claude-code-2.1.198_20260702
+  id: claude-compacting-conversation-real
+  provenance: real Claude Code 2.1.198 compaction frame with animated spinner and decorated composer title
+- case_name: compacting_conversation_progress_bar
+  expected:
+    approval_visible: false
+    ask: false
+    negative_reason_contains: working
+    screen_key: working
+  family: visible-working-counter
+  file: captures/compacting_conversation_progress_bar__claude-code-2.1.198_20260707.yaml
+  fixture_id: compacting_conversation_progress_bar__claude-code-2.1.198_20260707
+  id: claude-compacting-conversation-progress-real
+  provenance: real Claude Code 2.1.198 compaction progress-bar capture from tmux session 1:0.0
+- case_name: working_command_counter
+  expected:
+    approval_visible: false
+    ask: false
+    negative_reason_contains: working
+    screen_key: working
+  family: visible-working-counter
+  file: captures/working_command_counter__codex-cli-0.141.0_20260620.yaml
+  fixture_id: working_command_counter__codex-cli-0.141.0_20260620
+  id: codex-visible-working-counter-real
+  provenance: real Codex CLI 0.141.0 command-working visible counter capture
+- case_name: command_output_question
+  expected:
+    approval_visible: false
+    ask: false
+    negative_reason_contains: stale
+    screen_key: idle
+  family: command-output-question
+  file: synthetic/command_output_question__generic-agent-synthetic_20260620.yaml
+  fixture_id: command_output_question__generic-agent-synthetic_20260620
+  id: command-output-question
+  provenance: synthetic shell output negative
+- case_name: transcript_history_old_approval
+  expected:
+    approval_visible: false
+    ask: false
+    negative_reason_contains: stale
+    screen_key: idle
+  family: transcript-history-old-approval
+  file: synthetic/transcript_history_old_approval__generic-agent-synthetic_20260620.yaml
+  fixture_id: transcript_history_old_approval__generic-agent-synthetic_20260620
+  id: transcript-history-old-approval
+  provenance: synthetic old scrollback negative
+- case_name: shell_program_prompt
+  expected:
+    approval_visible: false
+    ask: false
+    negative_reason_contains: no current
+    screen_key: idle
+  family: shell-program-prompt
+  file: synthetic/shell_program_prompt__generic-agent-synthetic_20260620.yaml
+  fixture_id: shell_program_prompt__generic-agent-synthetic_20260620
+  id: shell-program-prompt
+  provenance: synthetic shell program prompt outside Claude/Codex agent approval
+- case_name: completed_prompt
+  expected:
+    approval_visible: false
+    ask: false
+    negative_reason_contains: stale
+    screen_key: idle
+  family: completed-prompt
+  file: synthetic/completed_prompt__codex-cli-synthetic_20260620.yaml
+  fixture_id: completed_prompt__codex-cli-synthetic_20260620
+  id: completed-prompt
+  provenance: synthetic answered Codex approval followed by command output
+- case_name: scrollback_old_question
+  expected:
+    approval_visible: false
+    ask: false
+    negative_reason_contains: idle
+    screen_key: idle
+  family: scrollback-old-question
+  file: synthetic/scrollback_old_question__generic-agent-synthetic_20260620.yaml
+  fixture_id: scrollback_old_question__generic-agent-synthetic_20260620
+  id: scrollback-old-question
+  provenance: synthetic answered choice question followed by later output and idle composer
+- case_name: bypass_mode_no_approval
+  expected:
+    approval_visible: false
+    ask: false
+    negative_reason_contains: no current
+    screen_key: idle
+  family: bypass-mode-no-approval
+  file: synthetic/bypass_mode_no_approval__generic-agent-synthetic_20260620.yaml
+  fixture_id: bypass_mode_no_approval__generic-agent-synthetic_20260620
+  id: bypass-mode-no-approval
+  provenance: synthetic Claude/Codex full-access chrome with no active prompt
+- case_name: generic_warning
+  expected:
+    approval_visible: false
+    ask: false
+    negative_reason_contains: idle
+    screen_key: idle
+  family: generic-warning
+  file: synthetic/generic_warning__generic-agent-synthetic_20260620.yaml
+  fixture_id: generic_warning__generic-agent-synthetic_20260620
+  id: generic-warning
+  provenance: synthetic warning negative
+gaps:
+- family: bell-only-signal
+  reason: A bell-only state needs tmux signal capture metadata, not only visible pane text.
+  source: uncaptured live signal
+live_capture_targets:
+- agent: codex
+  capture_when: Capture a real Codex two-option command approval after a CLI upgrade or live pane exposes this exact reduced option set.
+  current_fixture: synthetic/shell_pytest_2_option__codex-cli-synthetic_20260620.yaml
+  family: codex-shell-approval-2-option
+  why_currently_synthetic: Real Codex command approvals are already covered by three-option and reject-selected captures; this reduced two-option layout is a Codex-only variant, not a Claude counterpart.
+- agent: codex
+  capture_when: Capture a real Codex prefix-rule approval when a command offers a durable allow rule for a command prefix.
+  current_fixture: synthetic/prefix_rule_gh_api__codex-cli-synthetic_20260620.yaml
+  family: codex-prefix-rule
+  why_currently_synthetic: Codex exposes command-prefix allow rules; Claude permission prompts use different product wording and should not be forced into a same-name pair.
+- agent: codex
+  capture_when: Capture a real Codex network escalation prompt when a live command requests network access outside the current policy.
+  current_fixture: synthetic/network_escalation__codex-cli-synthetic_20260620.yaml
+  family: codex-network-escalation
+  why_currently_synthetic: Network escalation is a Codex sandbox/approval surface. Claude has web/tool permission prompts instead, so the gap is a live Codex capture, not a Claude capture.
+- agent: codex
+  capture_when: Capture a real Codex sandbox escalation prompt when a live command requests filesystem or sandbox access outside the current policy.
+  current_fixture: synthetic/sandbox_escalation__codex-cli-synthetic_20260620.yaml
+  family: codex-sandbox-escalation
+  why_currently_synthetic: Sandbox escalation is specific to Codex's approval model. Claude permission prompts are grouped under Claude tool/file/Bash permissions.
+- agent: codex
+  capture_when: Capture a real Codex MCP/tool approval when a configured MCP server requests user approval in the TUI.
+  current_fixture: synthetic/mcp_tool_approval__codex-cli-synthetic_20260620.yaml
+  family: codex-mcp-tool-approval
+  why_currently_synthetic: MCP approval is a Codex tool-approval shape in this corpus. It should be replaced by a live Codex capture when an MCP prompt is available.
+- agent: codex
+  capture_when: Capture a real Codex redraw where an approval prompt reappears below completed tool output.
+  current_fixture: synthetic/reappeared_prompt_after_tool__codex-cli-synthetic_20260620.yaml
+  family: reappeared-prompt-after-tool
+  why_currently_synthetic: This guards redraw ordering after tool output. The equivalent Claude risk is covered by other visible prompt boundaries, not a same-name capture.
+- agent: claude
+  capture_when: Capture a real Claude Bash permission prompt when a live pane is stopped on a Bash command approval.
+  current_fixture: synthetic/bash_step_marker__claude-code-synthetic_20260620.yaml
+  family: claude-bash-permission
+  why_currently_synthetic: Claude Bash permission is product-specific. Codex command approvals are already captured separately as Codex shell approvals.
+- agent: claude
+  capture_when: Capture a real Claude Bash permission redraw where no selector highlight is visible.
+  current_fixture: synthetic/bash_no_selector__claude-code-synthetic_20260620.yaml
+  family: claude-bash-no-selector
+  why_currently_synthetic: This is a Claude redraw/accessibility variant. It should be replaced by live Claude evidence when it appears, not paired with Codex.
+- agent: claude
+  capture_when: Capture a real Claude file-edit permission prompt when Claude is awaiting edit approval.
+  current_fixture: synthetic/file_edit__claude-code-synthetic_20260620.yaml
+  family: claude-file-permission
+  why_currently_synthetic: File-edit permission is a Claude product surface. Codex approvals are grouped by command/escalation/MCP surfaces instead.
+- agent: claude
+  capture_when: Capture a real Claude tool permission prompt such as WebFetch when the TUI is waiting for approval.
+  current_fixture: synthetic/tool_allow_webfetch__claude-code-synthetic_20260620.yaml
+  family: claude-tool-permission
+  why_currently_synthetic: Claude tool permission prompts are not one-to-one with Codex MCP or sandbox approvals; they need live Claude captures.
+- agent: claude
+  capture_when: Capture a real Claude free-text AskUserQuestion with no numbered options if a live pane exposes that prompt shape.
+  current_fixture: synthetic/free_text_question__claude-code-synthetic_20260620.yaml
+  family: claude-free-text-question
+  why_currently_synthetic: Real Claude AskUserQuestion captures cover selector/accessibility variants, but not a free-text-only shape.
+purpose: 'Corpus inventory for YOmux prompt detection: agent_tui capture JSON fixtures for visible approval/question panes
+  that should raise needs-input and negative panes that must stay quiet.'
+required_families:
+- codex-shell-approval-3-option
+- codex-shell-approval-2-option
+- codex-selected-no
+- codex-prefix-rule
+- codex-network-escalation
+- codex-sandbox-escalation
+- codex-mcp-tool-approval
+- claude-bash-permission
+- claude-bash-no-selector
+- claude-file-permission
+- claude-tool-permission
+- claude-plan-approval
+- claude-normal-question
+- claude-ask-user-question-no-selector
+- claude-ask-user-question-selected-option
+- claude-free-text-question
+- claude-interrupted-question
+- codex-normal-question
+- inline-yn-question
+- partial-choice-capture
+- bell-only-signal
+- long-idle-prompt
+- reappeared-prompt-after-tool
+- idle-empty-prompt
+- suggestion-not-question
+- typed-draft
+- visible-working-counter
+- claude-goal-active
+- codex-goal-active
+- command-output-question
+- shell-program-prompt
+- completed-prompt
+- transcript-history-old-approval
+- scrollback-old-question
+- bypass-mode-no-approval
+- generic-warning
+parity_groups:
+- id: opencode-visible-states
+  status: product-specific
+  contract: OpenCode 1.18.25 uses the shared visible screen-state path; its bounded composer/footer distinguishes idle from current working meter or tool rows.
+  fixtures:
+  - agent: opencode
+    case_name: completed_output
+    file: captures/completed_output__opencode-1.18.25_20260828.yaml
+  - agent: opencode
+    case_name: working_coordinator
+    file: captures/working_coordinator__opencode-1.18.25_20260828.yaml
+  - agent: opencode
+    case_name: working_tool_wrap
+    file: captures/working_tool_wrap__opencode-1.18.25_20260828.yaml
+- id: visible-working-counter
+  status: covered-by-both
+  contract: Both clients are working/busy and must render as Working without raising needs-input or YOLO?.
+  why_names_differ: The Claude capture name came from the visible `Clauding…` status counter; the Codex capture name came from the command-send scenario that produced the visible working counter. They are the same detector state, not missing counterparts.
+  fixtures:
+  - agent: claude
+    case_name: working_visible_counter
+    file: captures/working_visible_counter__claude-code-2.1.183_20260620.yaml
+  - agent: claude
+    case_name: working_empty_prompt_below_counter
+    file: captures/working_empty_prompt_below_counter__claude-code-2.1.186_20260623.yaml
+  - agent: claude
+    case_name: working_labelled_composer
+    file: captures/working_labelled_composer__claude-code-2.1.198_20260701.yaml
+  - agent: claude
+    case_name: compacting_conversation_unicode_ellipsis
+    file: captures/compacting_conversation_unicode_ellipsis__claude-code-2.1.198_20260702.yaml
+  - agent: claude
+    case_name: compacting_conversation_progress_bar
+    file: captures/compacting_conversation_progress_bar__claude-code-2.1.198_20260707.yaml
+  - agent: codex
+    case_name: working_command_counter
+    file: captures/working_command_counter__codex-cli-0.141.0_20260620.yaml
+- id: goal-active
+  status: covered-by-both
+  contract: Both clients can show a goal-following busy state that must render as Working without raising needs-input or YOLO?.
+  why_names_differ: >-
+    Both captures use the same `goal_active` case name, but the visible UI differs: Claude shows `/goal active` beside the
+    `Clauding…` counter, while Codex shows `Pursuing goal` or `Goal achieved` beside the working counter.
+  fixtures:
+  - agent: claude
+    case_name: goal_active
+    file: captures/goal_active__claude-code-2.1.185_20260621.yaml
+  - agent: codex
+    case_name: goal_active
+    file: captures/goal_active__codex-cli-0.141.0_20260621.yaml
+  - agent: codex
+    case_name: goal_achieved_working
+    file: captures/goal_achieved_working__codex-cli-0.141.0_20260623.yaml
+- id: codex-goal-achieved-idle
+  status: product-specific
+  contract: Codex `Goal achieved` without a visible current Working row is not busy and must not render as Working.
+  why_names_differ: Codex exposes a completed-goal footer that can remain visible while the prompt is idle or contains a draft; this is not the same state as Claude `/goal active`.
+  fixtures:
+  - agent: codex
+    case_name: goal_achieved_idle_draft
+    file: captures/goal_achieved_idle_draft__codex-cli-0.141.0_20260624.yaml
+- id: normal-choice-question
+  status: covered-by-both
+  contract: Both clients can ask non-permission user questions that should show Question.
+  why_names_differ: Claude calls this AskUserQuestion and its fixtures preserve selector/accessibility variants; Codex fixtures use choice/non-permission wording from its numbered prompt layout.
+  fixtures:
+  - agent: claude
+    case_name: ask_user_question
+    file: captures/ask_user_question__claude-code-2.1.183_20260620.yaml
+  - agent: claude
+    case_name: ask_user_question_no_selector_accessible
+    file: captures/ask_user_question_no_selector_accessible__claude-code-2.1.190_20260624.yaml
+  - agent: claude
+    case_name: ask_user_question_selected_option
+    file: captures/ask_user_question_selected_option__claude-code-2.1.185_20260621.yaml
+  - agent: claude
+    case_name: parser_dependency_choice_question
+    file: captures/parser_dependency_choice_question__claude-code-2.1.185_20260622.yaml
+  - agent: codex
+    case_name: choice_question
+    file: captures/choice_question__codex-cli-0.141.0_20260620.yaml
+  - agent: codex
+    case_name: choice_question_real
+    file: captures/choice_question_real__codex-cli-0.141.0_20260620.yaml
+  - agent: codex
+    case_name: question_with_answer_draft
+    file: captures/question_with_answer_draft__codex-cli-0.141.0_20260620.yaml
+- id: claude-interrupted-question
+  status: intentionally-not-one-to-one
+  contract: Claude's interrupted awaiting-user-instruction prompt should show Question; Codex interrupt/stop states in this corpus do not expose the same question prompt.
+  why_names_differ: Claude renders `Interrupted · What should Claude do instead?` as an active needs-input screen. Codex Ctrl-C/stop behavior is captured separately as command/session interruption behavior, not as a matching user-question surface.
+  fixtures:
+  - agent: claude
+    case_name: interrupted_what_should_claude_do_instead
+    file: captures/interrupted_what_should_claude_do_instead__claude-code-2.1.185_20260621.yaml
+- id: typed-draft
+  status: covered-by-both
+  contract: Both clients can have clearable composer drafts that must not be mistaken for submitted transcript text.
+  why_names_differ: The Claude real capture specifically guards NBSP cursor/composer behavior, while the Codex capture is a normal typed draft.
+  fixtures:
+  - agent: claude
+    case_name: typed_nbsp_draft
+    file: captures/typed_nbsp_draft__claude-code-2.1.183_20260620.yaml
+  - agent: codex
+    case_name: typed_draft
+    file: captures/typed_draft__codex-cli-0.141.0_20260620.yaml
+- id: idle-ghost-prompt
+  status: covered-by-both
+  contract: Both clients can show an idle composer with ghost/suggestion text and must not trigger attention.
+  why_names_differ: Claude names this ghost suggestion after the suggested text in its composer; Codex names the same detector state after the dim ghost prompt style in its TUI.
+  fixtures:
+  - agent: claude
+    case_name: idle_ghost_suggestion
+    file: captures/idle_ghost_suggestion__claude-code-2.1.183_20260620.yaml
+  - agent: codex
+    case_name: idle_dim_ghost_prompt
+    file: captures/idle_dim_ghost_prompt__codex-cli-0.141.0_20260620.yaml
+- id: idle-empty-prompt
+  status: covered-by-both
+  contract: Both clients can be idle at an empty composer and must not trigger attention.
+  why_names_differ: This is the only exact shared real-capture case name because both products had the same simple detector scenario.
+  fixtures:
+  - agent: claude
+    case_name: idle_empty_prompt
+    file: captures/idle_empty_prompt__claude-code-2.1.183_20260620.yaml
+  - agent: codex
+    case_name: idle_empty_prompt
+    file: captures/idle_empty_prompt__codex-cli-0.141.0_20260620.yaml
+- id: product-specific-approval-prompts
+  status: intentionally-not-one-to-one
+  contract: Approval prompts should be captured per product feature, not forced into fake cross-product pairs.
+  why_names_differ: Claude has plan, Bash, file-edit, and tool permission prompts; Codex has shell command, sandbox/network escalation, prefix-rule, and MCP approval prompts. The detector contract is shared, but the product surfaces are not equivalent enough to require a same-named capture for every case.
+  fixtures:
+  - agent: claude
+    case_name: plan_approval_real
+    file: captures/plan_approval_real__claude-code-2.1.183_20260619.yaml
+  - agent: claude
+    case_name: plan_approval_selected_option
+    file: captures/plan_approval_selected_option__claude-code-2.1.183_20260620.yaml
+  - agent: codex
+    case_name: shell_approval_touch_command
+    file: captures/shell_approval_touch_command__codex-cli-0.141.0_20260620.yaml
+  - agent: codex
+    case_name: shell_sleep_10_3_option
+    file: captures/shell_sleep_10_3_option__codex-cli-0.141.0_20260620.yaml
+  - agent: codex
+    case_name: shell_no_selected_option
+    file: captures/shell_no_selected_option__codex-cli-0.141.0_20260620.yaml
+- id: product-specific-idle-negative-chrome
+  status: intentionally-not-one-to-one
+  contract: Product-specific idle chrome that looks question-like must stay quiet, but it should not be forced into a fake counterpart when the other client does not expose the same chrome.
+  why_names_differ: Claude has a composing Tip capture that guards against treating helper chrome as a question; Codex does not have an equivalent real capture in this corpus.
+  fixtures:
+  - agent: claude
+    case_name: composing_tip_not_question
+    file: captures/composing_tip_not_question__claude-code-2.1.183_20260620.yaml
+research_notes:
+- expected_inputs:
+  - shell command approval prompts
+  - approval mode variants that may ask before commands or escalation
+  family: codex-approval-mode
+  fixture_status: real Codex CLI 0.141.0 captures cover codex-shell-sleep-10-3-option and codex-shell-no-selected-option;
+    synthetic fixtures still cover codex-shell-pytest-2-option and codex-prefix-rule-gh-api variants
+  source: https://developers.openai.com/codex/cli/features
+- expected_inputs:
+  - network-related approvals when a command needs permissions outside the current policy
+  family: codex-network-escalation
+  fixture_status: synthetic current Codex command approval shape in codex-network-escalation; needs exact live TUI capture
+    after CLI upgrade
+  source: https://developers.openai.com/codex/agent-approvals-security
+- expected_inputs:
+  - sandbox/permission escalation approvals
+  family: codex-sandbox-escalation
+  fixture_status: synthetic current Codex command approval shape in codex-sandbox-escalation; needs exact live TUI capture
+    after CLI upgrade
+  source: https://developers.openai.com/codex/concepts/sandboxing/auto-review
+- expected_inputs:
+  - MCP or app tool approval prompts
+  family: codex-mcp-tool-approval
+  fixture_status: synthetic MCP approval question in codex-mcp-tool-approval; exact TUI wording is still a live-capture target
+  source: https://developers.openai.com/codex/cli/features
+- expected_inputs:
+  - Bash command permission
+  - file edit permission
+  - tool permission
+  family: claude-permissions
+  fixture_status: covered by claude-bash-step-marker, claude-file-edit, claude-tool-allow-webfetch
+  source: https://code.claude.com/docs/en/security
+- expected_inputs:
+  - normal user questions
+  - plan approval and approval-before-changes states
+  family: claude-interactive-questions
+  fixture_status: covered by claude-multiple-choice-question, claude-free-text-question, claude-plan-approval, long-idle-prompt
+  source: https://code.claude.com/docs/en/interactive-mode
+schema: 1
+sources:
+- families:
+  - codex-shell-approval
+  - codex-approval-mode
+  name: OpenAI Codex CLI
+  url: https://developers.openai.com/codex/cli
+- families:
+  - codex-approval-mode
+  - codex-mcp-tool-approval
+  name: OpenAI Codex CLI features
+  url: https://developers.openai.com/codex/cli/features
+- families:
+  - codex-shell-approval
+  - codex-network-escalation
+  - codex-sandbox-escalation
+  name: OpenAI Codex agent approvals and security
+  url: https://developers.openai.com/codex/agent-approvals-security
+- families:
+  - codex-sandbox-escalation
+  name: OpenAI Codex sandboxing
+  url: https://developers.openai.com/codex/concepts/sandboxing/auto-review
+- families:
+  - claude-bash-permission
+  - claude-file-permission
+  - claude-tool-permission
+  name: Claude Code security and permissions
+  url: https://code.claude.com/docs/en/security
+- families:
+  - claude-normal-question
+  - claude-plan-approval
+  name: Claude Code interactive mode
+  url: https://code.claude.com/docs/en/interactive-mode
+- families:
+  - claude-bash-permission
+  - claude-file-permission
+  - claude-tool-permission
+  - claude-plan-approval
+  name: Claude Code hooks
+  url: https://code.claude.com/docs/en/hooks
+updated: '2026-06-22'

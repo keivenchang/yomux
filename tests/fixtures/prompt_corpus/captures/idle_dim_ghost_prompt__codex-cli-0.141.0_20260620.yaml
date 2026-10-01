@@ -1,0 +1,175 @@
+actual:
+  agent_kind: codex
+  approval:
+    approval_action: ''
+    approval_type: ''
+    approval_visible: false
+    command: ''
+    dangerous: false
+    prompt_hash: ''
+    risk: ''
+    rule_input_text: ''
+    selected_option: 0
+    source: ''
+  attention_kind: ''
+  attention_label: ''
+  composer:
+    accepting: true
+    detected_text: ''
+    evidence: suggestion-style
+    key: ghost
+    prompt_suggestion: true
+    text: Improve documentation in @filename
+  cursor:
+    character: I
+    current_command: node
+    pane_in_mode: false
+    x: 2
+    y: 35
+  display:
+    attention_kind: ''
+    attention_label: ''
+    evidence_lines: []
+    options: []
+    prompt_hash: ''
+    prompt_kind: ''
+    question_text: ''
+    screen_key: idle
+    selected_option: 0
+  reason_code: idle
+  screen:
+    key: idle
+    negative_reason: idle composer
+    text: ''
+agent: codex
+capture_date: '2026-06-20'
+capture_date_position: end
+capture_mode: visible
+captured_at: '2026-06-20T11:06:08.173048+00:00'
+case_name: idle_dim_ghost_prompt
+claude_version: ''
+client_name: Codex CLI
+client_version: codex-cli 0.141.0
+client_version_slug: codex-cli-0.141.0
+codex_version: codex-cli 0.141.0
+cursor:
+  character: I
+  current_command: node
+  pane_in_mode: false
+  x: 2
+  y: 34
+evidence_fields:
+  display_evidence_lines: []
+  prompt_hash: ''
+  screen_evidence_lines: null
+expected:
+  agent_kind: codex
+  approval_visible: ''
+  attention_kind: ''
+  clear_cleared: ''
+  clear_ok: ''
+  composer_key: ''
+  reason_code: ''
+  screen_key: ''
+  send_ok: ''
+  send_reason_code: ''
+expected_promoted:
+  agent_kind: codex
+  approval_type: ''
+  approval_visible: false
+  attention_kind: ''
+  attention_label: ''
+  composer_key: ghost
+  reason_code: idle
+  screen_key: idle
+failures: []
+filename_convention: case_name__client-token_date
+fixture_description: Codex idle dim ghost prompt
+fixture_id: idle_dim_ghost_prompt__codex-cli-0.141.0_20260620
+fixture_scenario: idle_dim_ghost_prompt
+height: 40
+id: idle_dim_ghost_prompt__codex-cli-0.141.0_20260620
+operations:
+- needles: []
+  ok: true
+  type: ready_text
+- needles: []
+  ok: true
+  type: wait_text
+raw_capture: |2
+
+  ✔ You approved codex to run touch /tmp/yolomux-e2e-approval this time
+
+  • Ran touch /tmp/yolomux-e2e-approval
+    └ (no output)
+
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  • Done.
+
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+  › Ask me this question and wait for my answer instead of choosing yourself: Which YOmux verifier mode should we use?
+    1. Pane capture 2. Transcript capture
+
+
+  • Which YOmux verifier mode should we use?
+
+    1. Pane capture
+    2. Transcript capture
+
+
+  › Pane capture
+
+
+  • Pane capture.
+
+
+  › Improve documentation in @filename
+
+    gpt-5.5 xhigh · ~/yolomux.dev8001
+source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T110608Z.yaml
+styled_capture: |2
+
+  ✔ You approved codex to run touch /tmp/yolomux-e2e-approval this time
+
+  • Ran touch /tmp/yolomux-e2e-approval
+    └ (no output)
+
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  • Done.
+
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+  › Ask me this question and wait for my answer instead of choosing yourself: Which YOmux verifier mode should we use?
+    1. Pane capture 2. Transcript capture
+
+
+  • Which YOmux verifier mode should we use?
+
+    1. Pane capture
+    2. Transcript capture
+
+
+  › Pane capture
+
+
+  • Pane capture.
+
+
+  › Improve documentation in @filename
+
+    gpt-5.5 xhigh · ~/yolomux.dev8001
+tmux_socket: /tmp/yoask-real-ui-2552908-0ead450e/s
+tmux_target: yr-codex-2552908-7ec5c7:0.0
+verifier_capabilities:
+- raw-capture
+- styled-capture
+- cursor-facts
+- central-clear-composer
+- central-send-prompt
+- visible-status-counter
+width: 200

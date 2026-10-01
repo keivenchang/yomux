@@ -1,0 +1,133 @@
+{
+  "behavioral_fixtures": {
+    "compact_sorted_json": "{\"payload\":{\"a\":2,\"z\":1},\"signature\":\"abc\",\"stored_at\":100.0,\"version\":2}",
+    "fixture_lifecycle_order": [
+      "app.start",
+      "server.start",
+      "yield",
+      "browser.quit",
+      "server.stop",
+      "thread.join",
+      "app.stop",
+      "temp_root.remove"
+    ],
+    "record_manifest_cleanup_order": [
+      "record.write",
+      "manifest.write",
+      "post_write.account",
+      "post_write.prune"
+    ],
+    "rpc_binary_frame_order": [
+      "metadata_length",
+      "metadata_bytes",
+      "binary_bytes"
+    ]
+  },
+  "blob_fingerprint": {
+    "count": 30,
+    "sha256": "f1feba0e021d8e602d892f211b3cf9f9f303174f1e2e70d0d54275672eb24af5"
+  },
+  "inputs": [
+    "yomux_lib/app.py",
+    "yomux_lib/server.py",
+    "yomux_lib/http_routes.py",
+    "yomux_lib/statusd.py",
+    "yomux_lib/watchd.py",
+    "yomux_lib/approval/approvald.py",
+    "yomux_lib/infra/batchd.py",
+    "yomux_lib/search/search_indexer.py",
+    "yomux_lib/local_services/rpc.py",
+    "yomux_lib/workspace/session_files.py",
+    "tests/conftest.py",
+    "tests/gate_harness.py",
+    "tools/check.py",
+    "static_src/js/yomux/00_bootstrap_state.js",
+    "static_src/js/yomux/20_layout_state.js",
+    "static_src/js/yomux/40_file_explorer_files.js",
+    "static_src/js/yomux/82_chat_panel.js",
+    "static_src/js/yomux/84_stats_current.js",
+    "static_src/js/yomux/85_debug_panel.js",
+    "static_src/js/yomux/89_preview_renderers.js",
+    "static_src/js/yomux/99_terminal_boot.js",
+    "tests/test_app.py",
+    "tests/test_local_services_launch.py",
+    "tests/test_local_services_rpc.py",
+    "tests/test_session_files.py",
+    "tests/test_check_runner.py",
+    "tests/layout_async.test.js",
+    "tests/layout_url.test.js",
+    "tests/tabber.test.js",
+    "tests/stats_current_ui.test.js"
+  ],
+  "inventory_fingerprints": {
+    "daemon_actions": {
+      "count": 51,
+      "sha256": "9a6bdbc633bbfca0455fa77d62ebd3dcd35376bde4587900d098f1f2e53e2584"
+    },
+    "dom_contracts": {
+      "count": 938,
+      "sha256": "127958de8ade6a4698df339765cd19e9d3c0105599c822e2249f0594794c6fec"
+    },
+    "external_test_node_ids": {
+      "count": 928,
+      "sha256": "9cb8c6063afbea9ef2d2ef3fcc99983bb3a2afbafd4aaef1db27a6512b9a0a2e"
+    },
+    "fixture_lifecycles": {
+      "count": 48,
+      "sha256": "3210926432b3ad57cfe6a4acc2fe48841996df6d2ae1f376d709ea59bf85fbf9"
+    },
+    "frontend_globals_state_domains": {
+      "count": 2556,
+      "sha256": "ad1bdd39701e0bab715171879207c86f125af37595dcb5a0b5a1b77425efcdeb"
+    },
+    "gate_lanes": {
+      "count": 14,
+      "sha256": "789521289dad12c3ff3e40db76752f4ef327382f4d7284dce5d5a190094a0ee1"
+    },
+    "public_facade_methods": {
+      "count": 684,
+      "sha256": "bc582acbdb5b822090d91c79e8a226bf98bff33991639aa94025c25b9cffc8ec"
+    },
+    "routes": {
+      "count": 129,
+      "sha256": "eda780412904a5d0ce41d716a27bda20824bf887ba30c4c3d3ac295ca42f21e7"
+    },
+    "timers_listeners_streams": {
+      "count": 247,
+      "sha256": "f079299d752019a8425ee0bff228b8bbaa94f89c5486b4c832b5bb876bee4f8f"
+    },
+    "wire_storage_identities": {
+      "count": 44,
+      "sha256": "b85ce73a4c94e42f96ee47a9ad46cf83253998e10e5f719121784947d96e18a0"
+    }
+  },
+  "manifest_version": 1,
+  "nondeterministic_exclusions": [
+    {
+      "field": "runtime.pid",
+      "reason": "OS-assigned process identity differs per run; PID field presence and coercion stay inventoried.",
+      "scope": "behavior fixtures"
+    },
+    {
+      "field": "runtime.wall_clock",
+      "reason": "Wall timestamps differ per run; stored_at field/order and explicit fixture timestamps stay pinned.",
+      "scope": "behavior fixtures"
+    },
+    {
+      "field": "runtime.monotonic",
+      "reason": "Monotonic origin differs per process; timer names, cadence literals, and cleanup order stay inventoried.",
+      "scope": "behavior fixtures"
+    },
+    {
+      "field": "runtime.temp_root",
+      "reason": "Per-process temporary roots differ; path constructors and suffix identities stay inventoried.",
+      "scope": "fixture paths"
+    },
+    {
+      "field": "browser.geometry_and_paint",
+      "reason": "This non-browser harness cannot stabilize viewport/font/GPU paint; DOM contract literals and external browser node IDs stay inventoried.",
+      "scope": "source-only harness"
+    }
+  ],
+  "source": "git:e68c0d709a7780ea4896685288c14ec44febec30"
+}

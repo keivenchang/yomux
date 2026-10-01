@@ -1,0 +1,51 @@
+:root {
+  --brand-primary-green: var(--brand-green, #76b900);
+  --brand-mark-text: var(--active-control-text, #071000);
+  --brand-mark-bg: var(--active-control-bg, var(--brand-primary-green));
+  --brand-mark-border: var(--active-control-border, #9be33d);
+}
+.brand-title {
+  font-weight: 700;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+.brand-title .brand-blue {
+  color: #4285f4;
+}
+.brand-title .brand-red {
+  color: #ea4335;
+}
+.brand-title .brand-yellow {
+  color: #fbbc05;
+}
+.brand-title .brand-green {
+  color: #34a853;
+}
+.brand-title .brand-green {
+  color: var(--brand-primary-green);
+}
+.brand-title .brand-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 1px;
+  padding: 0 0 1px;
+  color: var(--brand-mark-text);
+  background: var(--brand-mark-bg);
+  border: 1px solid var(--brand-mark-border);
+  border-radius: 3px;
+  line-height: 1;
+}
+.brand-title .brand-second {
+  color: var(--brand-primary-green);
+}
+.brand-title .brand-white {
+  color: #f4f7fb;
+}
+.brand-title .brand-version {
+  margin-left: 5px;
+  color: #8f98a6;
+  font-size: 0.62em;
+  font-weight: 650;
+  vertical-align: baseline;
+}

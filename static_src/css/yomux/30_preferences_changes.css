@@ -1,0 +1,3713 @@
+.pane-drag-image-frame,
+.preferences-panel,
+.js-debug-panel,
+.command-palette-dialog,
+.panel,
+.transcript,
+.summary {
+  display: grid;
+  grid-template-rows: var(--three-row-panel-layout);
+}
+.pane-tab-close::before,
+.pane-tab-close::after,
+.panel-detail-close::before,
+.panel-detail-close::after,
+.tabs .pane-close::before,
+.tabs .pane-close::after,
+.tabs .pane-detail-toggle::before,
+.tabs .pane-detail-toggle::after,
+.tabs .pane-minimize::before,
+.tabs .pane-minimize::after,
+.tabs .pane-popout::before,
+.tabs .pane-popout::after,
+.tabs .pane-expand::before,
+.tabs .pane-expand::after,
+.file-explorer-close::before,
+.file-explorer-close::after,
+.file-editor-close::before,
+.file-editor-close::after,
+.file-explorer-panel-close::before,
+.file-explorer-panel-close::after,
+.file-editor-panel-close::before,
+.file-editor-panel-close::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: var(--panel-close-glyph-width);
+  height: var(--panel-close-glyph-height);
+  border-radius: var(--radius-pill);
+  background: currentColor;
+}
+.preferences-body {
+  /* the inactive-pane dim is a full-bleed .panel-overlay-root::after (inset 0). If the
+     overlay-root is ALSO the scroll container, the dim scrolls away with the content and only covers
+     the top viewport. So the overlay-root must be a stable, non-scrolling pane-filling layer; the
+     scrolling lives on the inner .preferences-scroll. */
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+}
+.preferences-scroll {
+  /* Preferences scrollbars must always inherit a shared pane scrollbar rule from layout CSS; never
+     customize scrollbar colors or hover behavior here. */
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-10);
+}
+.js-debug-scroll,
+.js-debug-events-view {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: var(--space-8);
+}
+.js-debug-subtabs {
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  min-width: 0;
+  height: var(--pane-tab-height);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: var(--pane-bar-bg, var(--panel2));
+}
+.js-debug-subtab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 72px;
+  height: 100%;
+  padding: 0 var(--space-12);
+  border: 0;
+  border-inline-end: 1px solid var(--line);
+  color: var(--pane-tab-text);
+  background: transparent;
+  font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
+  cursor: pointer;
+}
+.js-debug-subtab:last-child {
+  border-inline-end: 0;
+}
+.js-debug-subtab .session-button-dir {
+  color: inherit;
+}
+.js-debug-subview {
+  min-width: 0;
+  min-height: 0;
+}
+.js-debug-subview[hidden] {
+  display: none;
+}
+.js-debug-system-view {
+  /* NO `--js-debug-roster-header-offset` any more, and no second sticky layer to offset against.
+     ONE sticky layer, so there is no coupling to keep in sync.
+
+     What was here: a hardcoded `2.1rem` (33.6px) meant to equal the summary strip's height. Three
+     separate things were wrong with it, all measured in Chrome:
+       * the strip is a wrapping flex row, 32px on one line and 94px once it wraps, and a longer
+         locale wraps it where English does not -- so the constant was a second copy of a measured
+         quantity and only one of the two tracked reality;
+       * the strip was not actually sticky at all. It lives in a region wrapper whose box is
+         exactly its own height, and a sticky element only holds while its containing block is in
+         view, so it scrolled straight off: at a 320px pane its bottom edge sat at -10px while the
+         header held a 33.6px gap open for a strip that was no longer there;
+       * `.js-debug-roster-wrap { overflow-x: hidden }` makes the wrap a scroll container, so the
+         thead's nearest scrollport is the WRAP, not this view. The offset could therefore never
+         measure the distance it claimed to: the header pinned at 32px inside the wrap while the
+         summary pinned at 112px inside the view.
+     Driving the offset from a ResizeObserver was tried and rejected -- it would have kept the
+     number honest while leaving the third problem, so the two layers still could not be aligned.
+     The summary strip is the one worth pinning (counts, freshness, the refresh control); the
+     roster is eight rows, so its header scrolling away costs nothing. */
+  /* The roster is responsive to the PANEL it is in, not to the window. A dockview pane at a 1280px
+     window is around 980px wide, so a viewport media query would keep nine columns in a container
+     that cannot hold them and force a horizontal scrollbar. */
+  container-type: inline-size;
+  container-name: js-debug-system;
+  min-height: 0;
+  overflow: auto;
+}
+.js-debug-logs-view {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: var(--space-8);
+  min-height: 0;
+  overflow: hidden;
+}
+.js-debug-logs-toolbar,
+.js-debug-log-levels {
+  min-width: 0;
+}
+.js-debug-logs-toolbar {
+  justify-content: space-between;
+}
+.js-debug-log-levels {
+  flex: 1 1 auto;
+}
+.js-debug-log-level {
+  text-transform: none;
+}
+.js-debug-logs-error {
+  padding: var(--space-6) var(--space-8);
+  border: 1px solid var(--danger-border-soft);
+  border-radius: var(--radius-control);
+  color: var(--bad);
+  background: var(--danger-panel-bg);
+  overflow-wrap: anywhere;
+}
+.js-debug-log-list {
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--panel2);
+}
+.js-debug-log-row {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-7) var(--space-8);
+  border-block-end: 1px solid var(--line);
+}
+.js-debug-log-row:last-child {
+  border-block-end: 0;
+}
+.js-debug-log-meta {
+  min-width: 0;
+  color: var(--muted);
+  font: 600 var(--ui-font-size-xs)/1.3 var(--mono-font);
+}
+.js-debug-log-chip {
+  padding: var(--space-1) var(--space-4);
+  border: 1px solid currentColor;
+  border-radius: var(--radius-control);
+  font-weight: 800;
+}
+.js-debug-log-row--info .js-debug-log-chip {
+  color: var(--good);
+}
+.js-debug-log-row--warning .js-debug-log-chip {
+  color: var(--attention);
+}
+.js-debug-log-row--debug .js-debug-log-chip {
+  color: var(--muted);
+}
+.js-debug-log-row--error .js-debug-log-chip {
+  color: var(--bad);
+}
+.js-debug-log-message {
+  min-width: 0;
+  color: var(--text);
+  font: 500 var(--ui-font-size-sm)/1.45 var(--mono-font);
+}
+.js-debug-log-empty {
+  padding: var(--space-12);
+  color: var(--muted);
+  text-align: center;
+}
+/* The summary strip is sticky, and it has to be the REGION that sticks. A sticky element only
+   holds while its own containing block is in view, and the strip lives inside a region wrapper
+   whose box is exactly the strip's height -- so `position: sticky` on the strip alone scrolled
+   straight off the top and never pinned at all. Measured before this: at a 320px pane the strip's
+   bottom edge sat at -10px while the roster header was pinned at +31.6px, i.e. the header was
+   holding a 33.6px gap open for a strip that was no longer there. */
+.js-debug-system-region[data-js-debug-system-region="summary"] {
+  position: sticky;
+  z-index: var(--z-layer-control);
+  top: 0;
+  background: var(--bg);
+}
+.js-debug-system-toolbar {
+  position: sticky;
+  z-index: var(--z-layer-control);
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-8);
+  padding-block-end: var(--space-8);
+  color: var(--muted);
+  background: var(--bg);
+  font: 600 var(--ui-font-size-xs)/1.3 var(--ui-font);
+}
+.js-debug-system-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+  align-items: start;
+  gap: var(--space-8);
+}
+.js-debug-system-card {
+  min-width: 0;
+  padding: var(--space-10);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel2);
+}
+.js-debug-system-card--wide {
+  grid-column: 1 / -1;
+}
+.js-debug-system-card h3 {
+  margin: 0 0 var(--space-8);
+  color: var(--text);
+  font: 700 var(--ui-font-size-sm)/1.2 var(--ui-font);
+}
+.js-debug-system-kv {
+  display: grid;
+  gap: var(--space-5);
+  margin: 0;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.js-debug-system-kv > div {
+  display: grid;
+  grid-template-columns: max-content minmax(8rem, 1fr);
+  gap: var(--space-8);
+  align-items: baseline;
+}
+.js-debug-system-kv dt {
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
+  color: var(--muted);
+}
+.js-debug-system-kv dd {
+  margin: 0;
+  overflow-wrap: normal;
+  word-break: normal;
+  color: var(--text);
+  text-align: end;
+  font-family: var(--mono-font);
+}
+.js-debug-system-state {
+  flex: 0 0 auto;
+  padding: var(--space-2) var(--space-6);
+  border-radius: var(--radius-pill);
+  color: var(--muted);
+  background: var(--line);
+  font: 700 var(--ui-font-size-xs)/1.2 var(--ui-font);
+}
+.js-debug-system-state--good {
+  color: var(--good);
+}
+.js-debug-system-state--bad {
+  color: var(--bad);
+}
+.js-debug-usage-health {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4) var(--space-8);
+  margin-block: var(--space-8);
+  padding: var(--space-6) var(--space-8);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+}
+.js-debug-usage-health strong {
+  color: var(--text);
+}
+.js-debug-usage-health > :last-child {
+  margin-inline-start: auto;
+  font-family: var(--mono-font);
+}
+.js-debug-usage-health--warning {
+  border-color: var(--warning-border-strong);
+  color: var(--text);
+}
+.js-debug-usage-health--warning strong {
+  color: var(--warning-border-strong);
+}
+.js-debug-system-fixed-table {
+  --js-debug-system-first-column-width: 10rem;
+  --js-debug-system-table-min-width: 46rem;
+  table-layout: fixed;
+  width: max(100%, var(--js-debug-system-table-min-width));
+}
+.js-debug-system-table.js-debug-system-fixed-table th:first-child,
+.js-debug-system-table.js-debug-system-fixed-table td:first-child {
+  width: var(--js-debug-system-first-column-width);
+  min-width: var(--js-debug-system-first-column-width);
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+.js-debug-system-sampler-table {
+  --js-debug-system-first-column-width: 9rem;
+  --js-debug-system-table-min-width: 56rem;
+}
+/* Backend-health provenance: revision, staleness, history reset, persistence. A snapshot that
+   stopped updating has to look different from a current one, so the alert variant is bordered. */
+.js-debug-system-health-snapshot {
+  margin-block-end: var(--space-5);
+  padding: var(--space-5) var(--space-7);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font: var(--ui-font-size-xs)/1.4 var(--mono-font);
+}
+.js-debug-system-health-snapshot--alert {
+  border-color: var(--warning-border-strong);
+  color: var(--text);
+}
+.js-debug-system-health-snapshot [data-system-health-headline] {
+  margin: 0 0 var(--space-5);
+  color: var(--text);
+}
+/* The counter denominator, stated once beneath the table it qualifies. It used to be a `nowrap`
+   fragment repeated in three column headers, where it pinned Latency, Requests and Errors to
+   121-127px apiece -- columns whose own numbers need ~68px -- and it could not shrink, so it cost
+   the roster roughly 160px of width to say one thing three times. */
+.js-debug-system-column-scope {
+  display: block;
+  margin: var(--space-5) 0 0;
+  color: var(--muted);
+  font-weight: normal;
+  text-align: start;
+}
+/* A count whose aggregate is partial carries a footnote marker in the cell; the reason sits in the
+   row directly beneath it. A partial count that looks complete is the defect this flag prevents.
+   The element is a real `<sup>`, so the raised, smaller glyph comes from the element and not from a
+   CSS-shrunk span. No inline start margin: a footnote marker belongs against the number it
+   qualifies (`826MB*`) -- a gap makes it read as a separate token. `line-height: 0` keeps the
+   raised glyph from growing the roster's already dense line boxes. */
+.js-debug-system-coverage-flag {
+  line-height: 0;
+  color: var(--warning-border-strong);
+}
+/* The retained observation for one service, inside that service's own disclosure. */
+.js-debug-system-health-row {
+  text-align: start;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+.js-debug-system-health-row p {
+  margin: 0 0 var(--space-3);
+}
+/* `--space-9` is 9px. A list marker renders OUTSIDE the content box, so 9px of padding left "1."
+   hanging past the list's inline start, where `.js-debug-roster-wrap { overflow-x: hidden }`
+   clipped it -- the transition list rendered ". rev #6" instead of "1. rev #6". The marker needs
+   room inside the box, and a two-digit ordinal ("16.") is the widest one the 16-row transition
+   window can produce. */
+.js-debug-system-health-notes,
+.js-debug-system-health-transitions {
+  margin: 0 0 var(--space-3);
+  padding-inline-start: 3ch;
+}
+.js-debug-system-service-name {
+  display: block;
+  margin-block-end: var(--space-3);
+  color: var(--text);
+  font-family: var(--ui-font);
+}
+/* ---------------------------------------------------------------------------------------------
+   THE DAEMONS ROSTER
+   One full-width list of every daemon, above everything else. The old default view was a grid of
+   bordered summary cards that filled the first screen before the roster; the cards now live in one
+   collapsed Advanced section and this is what a reader sees first.
+   --------------------------------------------------------------------------------------------- */
+.js-debug-system-region {
+  min-width: 0;
+}
+.js-debug-system-region + .js-debug-system-region {
+  margin-block-start: var(--space-8);
+}
+/* Empty regions collapse so no gap is spent on an alert slot with nothing in it. */
+.js-debug-system-region:empty {
+  display: none;
+}
+.js-debug-roster-summary {
+  flex-wrap: wrap;
+}
+.js-debug-roster-summary-title {
+  margin: 0;
+  color: var(--text);
+  font: 700 var(--ui-font-size-sm)/1.2 var(--ui-font);
+}
+.js-debug-roster-summary-facts {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  gap: var(--space-4) var(--space-10);
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+/* ONE compact inline alert above the roster, never a second large alert card and never repeated
+   per row. */
+.js-debug-system-alert {
+  padding: var(--space-5) var(--space-8);
+  border: 1px solid var(--warning-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font: var(--ui-font-size-xs)/1.4 var(--ui-font);
+}
+.js-debug-system-alert p {
+  margin: 0;
+}
+.js-debug-system-alert p + p {
+  margin-block-start: var(--space-4);
+}
+.js-debug-roster-wrap {
+  overflow-x: hidden;
+}
+.js-debug-system-table.js-debug-roster-table {
+  inline-size: 100%;
+  min-inline-size: 0;
+  table-layout: auto;
+  font-variant-numeric: tabular-nums;
+}
+/* Quiet separators: horizontal rules only. The per-cell vertical gridlines that suit a dense
+   diagnostic table make a scannable roster look like graph paper. */
+.js-debug-roster-table th,
+.js-debug-roster-table td {
+  border-inline-end: 0;
+  vertical-align: baseline;
+}
+/* Deliberately NOT sticky -- see `.js-debug-system-view`. The summary strip is the one pinned
+   layer; a second one could not be aligned with it, because this header's scrollport is the
+   roster wrap rather than the panel. */
+.js-debug-roster-table thead th {
+  color: var(--muted);
+  background: var(--bg);
+  font-weight: 700;
+  white-space: nowrap;
+}
+/* Service holds "approvald". A 12rem floor made the widest short string in the table set the
+   widest column in the table, and auto layout then scaled that lead up at every width. */
+.js-debug-system-table.js-debug-roster-table th.js-debug-roster-service,
+.js-debug-system-table.js-debug-roster-table td.js-debug-roster-service {
+  inline-size: auto;
+  min-inline-size: 8rem;
+  white-space: normal;
+}
+/* Deliberately NO `max-inline-size` here, though the status explanation is the widest string in the
+   column. It was tried and MEASURED: capping the cell changed the nine-column min/max content by
+   0px, because auto table layout sizes a column from its content's max-content and ignores a
+   max-width on the cell box. Capping the explanation's own measure to 10rem moved the column by 5%
+   while wrapping "Control client is attached" onto two lines -- a bad trade. The width Status was
+   really costing came from the scope caption in the headers, now stated once below the table. */
+.js-debug-roster-table .js-debug-roster-statuscell,
+.js-debug-roster-table .js-debug-roster-statushead {
+  text-align: start;
+  white-space: normal;
+}
+.js-debug-roster-row:hover > th,
+.js-debug-roster-row:hover > td {
+  background: color-mix(in srgb, var(--panel2) 70%, transparent);
+}
+.js-debug-roster-row--child > th,
+.js-debug-roster-row--child > td {
+  color: var(--muted);
+}
+.js-debug-roster-row--child .js-debug-roster-toggle {
+  padding-inline-start: var(--space-10);
+}
+/* The disclosure control. A real <button>, so mouse, Enter and Space all reach the one click
+   handler, and it fills its cell so the whole service name is the target. */
+.js-debug-roster-toggle {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+  inline-size: 100%;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: none;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.js-debug-roster-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.js-debug-roster-chevron {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+.js-debug-roster-qualifier {
+  color: var(--muted);
+}
+.js-debug-roster-status {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-4);
+  background: none;
+  padding: 0;
+}
+/* Status is dot PLUS word PLUS `data-subsystem-state`; the dot glyph itself differs between idle
+   and everything else, so colour is never the only carrier. */
+.js-debug-roster-dot {
+  font-size: var(--ui-font-size-xs);
+}
+.js-debug-system-state--warn {
+  color: var(--warning-border-strong);
+}
+.js-debug-system-state--muted {
+  color: var(--muted);
+}
+.js-debug-roster-reason {
+  display: block;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+/* An author `display` beats the UA's `[hidden] { display: none }` whatever the specificity, so a
+   row with no explanation was rendering an empty block. Harmless while it was zero-height inside a
+   cell; at phone width it is a grid item and would hold a whole row gap open. */
+.js-debug-roster-reason[hidden] {
+  display: none;
+}
+/* The column's name, carried inside the cell for the width at which `thead` is hidden. Same string
+   as the header, from the same `column.labelKey`; shown if and only if the header is not. */
+.js-debug-roster-celllabel {
+  display: none;
+}
+.js-debug-roster-sep {
+  color: var(--muted);
+}
+/* Qualified by the table class. `.js-debug-system-table th, .js-debug-system-table td` sits below
+   this rule in the file and ties it on specificity (0,1,1), so source order decided the padding
+   and this block silently rendered with the dense 5px/7px table cell padding at every width --
+   the roomier disclosure padding written here had never once applied. */
+.js-debug-system-table .js-debug-roster-detailrow > td {
+  padding: var(--space-8) var(--space-10);
+  background: var(--panel2);
+  text-align: start;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+/* The detail spans every column, because it belongs to the whole row -- but spanning is not licence
+   to lay out across the full table. At 2400px the label/value pairs sat at opposite ends of ~1700px
+   and the eye could not connect them, so the block read as a separate document wedged between two
+   rows. Packing the pairs into measured columns keeps each label beside its own value, and the
+   indent lines the block up under the service name that owns it. */
+.js-debug-roster-detail {
+  box-sizing: border-box;
+  min-inline-size: 0;
+  max-inline-size: calc(100cqw - 1rem);
+  padding-inline-start: var(--space-10);
+  border-inline-start: 2px solid var(--line);
+}
+.js-debug-roster-detail .js-debug-system-kv {
+  grid-template-columns: repeat(auto-fill, minmax(20rem, 28rem));
+  gap: var(--space-3) var(--space-10);
+}
+/* Label and value adjacent, and the value left-aligned against its own label rather than flung to
+   the far edge of the table. */
+.js-debug-roster-detail .js-debug-system-kv > div {
+  grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
+  gap: var(--space-6);
+}
+.js-debug-roster-detail .js-debug-system-kv dd {
+  text-align: start;
+}
+/* Paragraphs and lists read as prose, not as a table cell stretched to 1700px. */
+.js-debug-roster-detail .js-debug-system-health-row,
+.js-debug-roster-detail > .js-debug-roster-note {
+  max-inline-size: 78ch;
+}
+/* The copies of the columns the layout may drop. They exist in the markup at every width so no
+   number is ever unreachable, but they are only SHOWN at the width where the column itself is
+   hidden -- otherwise the disclosure restates seven values sitting inches above it. */
+.js-debug-roster-dropped {
+  display: none;
+}
+.js-debug-roster-detail-title {
+  margin: var(--space-8) 0 var(--space-5);
+  color: var(--text);
+  font: 700 var(--ui-font-size-xs)/1.2 var(--ui-font);
+}
+.js-debug-roster-detail > :first-child,
+.js-debug-roster-detail .js-debug-roster-detail-title:first-child {
+  margin-block-start: 0;
+}
+.js-debug-roster-note {
+  margin: var(--space-5) 0 0;
+  color: var(--muted);
+}
+.js-debug-system-advanced > summary {
+  padding: var(--space-6) 0;
+  color: var(--muted);
+  font: 700 var(--ui-font-size-sm)/1.2 var(--ui-font);
+  cursor: pointer;
+}
+.js-debug-system-advanced > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* Responsive: below this width the secondary metrics leave the row rather than forcing a
+   page-level horizontal scrollbar or a clipped table. Every value they carry is repeated in the
+   row's own disclosure, so nothing becomes unreachable -- Service, Status, Latency and Uptime stay
+   visible at every width.
+
+   The threshold is MEASURED, not chosen. Nine columns need 702px (43.9rem) of min-content once the
+   scope caption leaves the three headers -- and needed 869px (54.3rem) even before that. Both are
+   far below the 72rem this query used to test, so the roster was dropping five columns while ~18rem
+   of panel sat unused: that is why a 10% window increase bought five columns. 48rem sits just above
+   the measured minimum, so the drop happens when the table is genuinely out of room.
+   `tests/system_health_panel.test.js` pins this number against the column list that has to fit
+   inside it, so a new column cannot silently push the content back past the threshold. */
+@container js-debug-system (max-width: 48rem) {
+  .js-debug-roster-table .js-debug-roster-cell--secondary {
+    display: none;
+  }
+  /* Exactly the width at which the columns above are hidden -- so the disclosure's copies appear
+     if and only if the row's own cells are gone. One threshold, stated once. */
+  .js-debug-roster-dropped {
+    display: block;
+  }
+}
+/* PHONE WIDTH: the row stops being a table row and becomes the two-line service row this section
+   has always described.
+
+   What used to be here was `table-layout: fixed` plus `overflow-wrap: anywhere`, with a comment
+   claiming the result "reads as a two-line list per service". MEASURED in Chrome at a 390px
+   container -- the exact width the rule exists for -- it did not:
+     * the four surviving columns were 140px / 83px / 83px / 83px;
+     * a row with no status explanation was ONE line, not two (indexd, statsd, jobd, statusd);
+     * `tmux-signal-watcher` and a down `watchd` were FOUR line boxes, because a whole sentence was
+       being folded into an 83px column -- "Control client is attached" rendered as
+       `Control` / `client is` / `attached`, and at 320px as `Control` / `client` / `is` /
+       `attached`;
+     * the two structural em dashes each held 83px of a 390px screen while carrying no number;
+     * the table's own min-content in that regime measures 355px, so 390px was not short of room --
+       it was spending what it had on four columns nobody could read.
+
+   The layout below is the two lines, stated once:
+     line 1  the service name, and its state on the right;
+     line 2  every surviving metric beside its own name (`.js-debug-roster-celllabel`, which is
+             shown if and only if `thead` is hidden -- the same one-copy contract
+             `.js-debug-roster-dropped` has with the columns it copies);
+     line 3  ONLY when the service published an explanation, that sentence at full width. Four
+             facts and a sentence do not share a 390px line, and shredding the sentence into an
+             83px column is what this rule exists to stop.
+   `tests/test_gate_panels.py` measures the rendered line boxes at 390px; the rules are pinned in
+   `tests/system_health_panel.test.js`. */
+@container js-debug-system (max-width: 36rem) {
+  /* The table's boxes stop being table boxes so the row can lay out as a grid. Table semantics do
+     not survive `display: block` in any engine, which is why every element in the roster markup
+     carries its explicit ARIA role -- see `debugSystemRosterHeaderHtml`. */
+  .js-debug-system-table.js-debug-roster-table,
+  .js-debug-roster-table > tbody {
+    display: block;
+    inline-size: auto;
+    min-inline-size: 0;
+  }
+  /* A header row cannot label a stacked row, and the labels it carried are now in the cells. */
+  .js-debug-roster-table > thead {
+    display: none;
+  }
+  .js-debug-roster-celllabel {
+    display: inline;
+    margin-inline-end: var(--space-4);
+    color: var(--muted);
+  }
+  .js-debug-roster-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, auto);
+    column-gap: var(--space-8);
+    row-gap: var(--space-3);
+    padding: var(--space-5);
+    border-block-end: 1px solid var(--line);
+  }
+  .js-debug-roster-detailrow {
+    display: block;
+  }
+  /* An author `display` beats the UA's `[hidden] { display: none }`, so a collapsed disclosure
+     would otherwise become visible at exactly this width. */
+  .js-debug-roster-detailrow[hidden] {
+    display: none;
+  }
+  /* Deliberately NO `display` here. A grid item is blockified by the grid container, so the cells
+     stop being table cells on their own -- and writing `display: block` would have OVERRIDDEN the
+     48rem rule that hides the five secondary columns, putting all seven metrics back on the row at
+     the narrowest width. Measured: it produced seven implicit grid columns and a 307px row.
+     Both groups are qualified by BOTH table classes: `.js-debug-system-table td:first-child` and
+     `.js-debug-system-table th, td` sit further down the file, and a one-class prefix ties them on
+     specificity and loses on order -- measured, that handed a stacked cell its table padding, its
+     rule line, and a literal `inline-size: 1%`. */
+  .js-debug-system-table.js-debug-roster-table .js-debug-roster-row > th,
+  .js-debug-system-table.js-debug-roster-table .js-debug-roster-row > td {
+    inline-size: auto;
+    min-inline-size: 0;
+    padding: 0;
+    border: 0;
+    white-space: normal;
+  }
+  /* `inline-size: auto` undoes the `td:first-child { inline-size: 1% }` shrink-to-fit trick further
+     down the file. It means "as narrow as the content" to a table cell and a literal 1% to a
+     blockified one: measured, the open disclosure's cell was 14px wide -- its padding and nothing
+     else -- so every dropped metric was present, laid out, and invisible. */
+  .js-debug-system-table.js-debug-roster-table .js-debug-roster-detailrow > td {
+    display: block;
+    inline-size: auto;
+    border: 0;
+    white-space: normal;
+  }
+  /* The status cell's two children are laid out on two different lines, so the cell box itself
+     steps out of the way and they become grid items of the row. */
+  .js-debug-system-table.js-debug-roster-table .js-debug-roster-row > .js-debug-roster-statuscell {
+    display: contents;
+  }
+  /* LINE 1: who it is, and what it is doing. */
+  .js-debug-system-table.js-debug-roster-table th.js-debug-roster-service {
+    grid-area: 1 / 1;
+    inline-size: auto;
+    min-inline-size: 0;
+  }
+  .js-debug-roster-row .js-debug-roster-status {
+    grid-area: 1 / 2;
+  }
+  /* LINE 2: the metrics that survived this width, each beside its own name. */
+  .js-debug-roster-row > .js-debug-roster-cell {
+    grid-row: 2;
+  }
+  /* LINE 3: the explanation, at the full width of the row, as one sentence. */
+  .js-debug-roster-row .js-debug-roster-reason {
+    grid-row: 3;
+    grid-column: 1 / -1;
+    overflow-wrap: break-word;
+  }
+  .js-debug-roster-toggle {
+    flex-wrap: wrap;
+    min-inline-size: 0;
+  }
+  /* Flex items refuse to shrink below min-content unless told to. Without this the service name is
+     the reason the first line cannot narrow. */
+  .js-debug-roster-toggle > * {
+    min-inline-size: 0;
+    overflow-wrap: break-word;
+  }
+  .js-debug-roster-summary-facts {
+    gap: var(--space-3) var(--space-6);
+  }
+}
+.js-debug-system-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: visible;
+  overscroll-behavior-inline: contain;
+}
+.js-debug-system-table {
+  inline-size: max-content;
+  min-inline-size: 100%;
+  border-collapse: collapse;
+  /* Plain ruled table: an outer frame plus per-cell gridlines on BOTH axes
+     (below) so every cost/system table reads as a normal bordered table. */
+  border: 1px solid var(--line);
+  font: var(--ui-font-size-xs)/1.35 var(--mono-font);
+}
+.js-debug-system-table th,
+.js-debug-system-table td {
+  padding: var(--space-5) var(--space-7);
+  border-block-end: 1px solid var(--line);
+  border-inline-end: 1px solid var(--line);
+  text-align: end;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+.js-debug-system-table th:last-child,
+.js-debug-system-table td:last-child {
+  /* The outer frame already draws the right edge. */
+  border-inline-end: 0;
+}
+.js-debug-system-table th:first-child,
+.js-debug-system-table td:first-child {
+  inline-size: 1%;
+  text-align: start;
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+.js-debug-system-loading,
+.js-debug-system-empty {
+  color: var(--muted);
+}
+.ui-disclosure-triangle,
+.info-tree-group summary::before,
+.yoagent-message-details summary::before {
+  --disclosure-triangle-box-size: 1.333333em;
+  --disclosure-triangle-font-size: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: var(--disclosure-triangle-box-size);
+  block-size: var(--disclosure-triangle-box-size);
+  flex: 0 0 var(--disclosure-triangle-box-size);
+  color: var(--disclosure-triangle-collapsed-color);
+  font: inherit;
+  font-size: var(--disclosure-triangle-font-size);
+  font-weight: 800;
+  line-height: 1;
+  text-align: center;
+  transform-origin: center;
+  transition: color var(--motion-disclosure) ease, opacity var(--motion-disclosure) ease, transform var(--motion-disclosure) ease;
+}
+.ui-disclosure-triangle[data-disclosure-expanded="true"],
+.file-tree-row.kind-dir[aria-expanded="true"] > .ui-disclosure-triangle,
+.info-tree-group[open] > summary::before,
+.yoagent-message-details[open] summary::before {
+  color: var(--disclosure-triangle-expanded-color);
+  transform: rotate(90deg);
+}
+.js-debug-graph-view,
+.js-yocost-graphs,
+.js-debug-daemons-chart {
+  --js-debug-idle-agent-status: var(--30-preferences-changes-js-debug-graph-view-js-debug-idle-agent-status-1);
+  --js-debug-agent-attention: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-attention-2);
+  --js-debug-agent-working: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-working-3);
+  --js-debug-agent-transition: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-transition-4);
+  --js-debug-agent-status-bar-opacity: 0.82;
+  --js-debug-agent-idle-bar-opacity: 0.3;
+  --js-debug-api-series: var(--link-soft);
+  --js-debug-sse-series: var(--accent-gold);
+  --js-debug-client-comparison-opacity: 0.68;
+  --js-debug-bad-connection-rgb: 220 38 38;
+  --js-debug-agent-token-cyan: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-cyan-5);
+  --js-debug-agent-token-orange: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-orange-6);
+  --js-debug-agent-token-magenta: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-magenta-7);
+  --js-debug-agent-token-beige: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-beige-8);
+  --js-debug-agent-token-turquoise: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-turquoise-9);
+  --js-debug-agent-token-rose: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-rose-10);
+  --js-debug-agent-token-violet: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-violet-11);
+  --js-debug-agent-token-pattern-ink: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-pattern-ink-12);
+  --js-debug-agent-token-pattern-ink-rgb: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-pattern-ink-rgb-13);
+}
+.js-debug-graph-view {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: auto;
+}
+.js-debug-toolbar {
+  justify-content: space-between;
+  min-width: 0;
+}
+.js-debug-summary {
+  min-width: 0;
+}
+.js-debug-stat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-5);
+  min-width: 0;
+  padding: var(--space-4) var(--space-7);
+}
+.js-debug-stat span {
+  color: var(--muted);
+  font: 600 var(--ui-font-size-xs)/1 var(--ui-font);
+}
+.js-debug-stat strong {
+  color: var(--text);
+  font: 700 var(--ui-font-size-xs)/1 var(--mono-font);
+}
+.js-debug-log {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  resize: none;
+  padding: var(--space-8);
+  color: var(--text);
+  font: var(--ui-font-size-xs)/1.35 var(--mono-font);
+  white-space: pre;
+}
+.js-debug-graph {
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+  gap: var(--space-8);
+  min-width: 0;
+  min-height: 0;
+  container-type: inline-size;
+}
+.js-debug-graph--empty {
+  min-height: 180px;
+}
+.js-debug-graph-controls {
+  flex-wrap: nowrap;
+  gap: var(--space-6);
+  justify-self: stretch;
+  min-width: 0;
+}
+.js-debug-resolution-label {
+  min-width: 0;
+  justify-self: end;
+  white-space: nowrap;
+  color: var(--muted);
+  font: 700 var(--ui-font-size-xs)/1.2 var(--ui-font);
+}
+.js-debug-resolution-label select {
+  width: 3.25rem;
+  margin-inline-start: var(--space-4);
+  padding: var(--space-1) var(--space-2);
+  color: inherit;
+  font: inherit;
+}
+.js-debug-model-token-dimension {
+  flex: 0 1 auto;
+  justify-self: auto;
+}
+.js-debug-model-token-dimension select {
+  width: auto;
+  max-width: min(9rem, 32vw);
+}
+.js-debug-chart-layout-control,
+.js-debug-chart-toggle-control {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  min-width: 0;
+  max-width: 100%;
+  color: var(--muted);
+  font: 700 var(--ui-font-size-xs)/1.2 var(--ui-font);
+}
+.js-debug-chart-layout-control {
+  flex: 0 0 auto;
+}
+.js-debug-range-resolution-controls {
+  flex: 1 1 12rem;
+  gap: var(--space-6);
+  min-width: 0;
+}
+.js-debug-range-resolution-controls > .js-debug-resolution-label {
+  flex: 0 0 auto;
+}
+.js-debug-range-resolution-controls > .js-debug-range-slider-control {
+  flex: 1 1 auto;
+  min-inline-size: 12rem;
+}
+.js-debug-daemons-controls {
+  display: flex;
+  min-width: 0;
+  margin-block-end: var(--space-8);
+}
+.js-debug-daemons-controls > .js-debug-range-resolution-controls {
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+}
+.js-debug-chart-toggle-control {
+  flex: 0 0 auto;
+  position: relative;
+}
+.js-debug-chart-layout-control button,
+.js-debug-chart-toggle-control summary {
+  min-inline-size: 2.5rem;
+  min-block-size: 1.65rem;
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: inherit;
+  background: var(--panel2);
+  font: inherit;
+}
+.js-debug-chart-toggle-control summary {
+  cursor: pointer;
+  list-style: none;
+}
+.js-debug-chart-toggle-control summary::-webkit-details-marker {
+  display: none;
+}
+.js-debug-chart-toggle-menu {
+  position: absolute;
+  z-index: var(--z-menu-dropdown);
+  top: calc(100% + var(--space-3));
+  left: 0;
+  display: grid;
+  min-inline-size: 14rem;
+  padding: var(--space-5);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel2);
+  box-shadow: var(--shadow-popover);
+}
+.js-debug-chart-toggle-menu label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-block-size: 1.7rem;
+  cursor: pointer;
+}
+.js-debug-chart-toggle-menu input {
+  accent-color: var(--active-accent-bright);
+}
+/* 34rem is the measured intrinsic width of Charts + Size + a usable range slider + Resolution. */
+@container (max-width: 34rem) {
+  .js-debug-graph-controls {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    grid-template-rows: auto auto;
+  }
+  .js-debug-range-resolution-controls {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    min-width: 0;
+  }
+  .js-debug-chart-layout-control,
+  .js-debug-chart-toggle-control {
+    white-space: nowrap;
+  }
+  .js-debug-chart-layout-control {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .js-debug-chart-toggle-control {
+    grid-column: 1;
+    grid-row: 1;
+  }
+}
+.js-debug-subtab:not(.active):hover,
+.js-debug-subtab:not(.active):focus-visible {
+  color: var(--text);
+  background: var(--pane-inactive-tab-bg-hover);
+}
+.js-debug-range-slider-control {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.js-debug-chart-close {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin-inline-start: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-control);
+  color: var(--muted);
+  background: transparent;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.js-debug-range-slider {
+  flex: 1 1 auto;
+  inline-size: auto;
+  min-inline-size: 8rem;
+  accent-color: var(--active-accent-bright);
+}
+.js-debug-range-slider-control datalist {
+  display: none;
+}
+.js-debug-range-prefix,
+.js-debug-range-label {
+  color: var(--muted);
+  font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
+  white-space: nowrap;
+}
+.js-debug-range-prefix {
+  flex: 0 0 auto;
+}
+.js-debug-range-label {
+  flex: 0 0 auto;
+  min-width: 2.5rem;
+  color: var(--text);
+  text-align: center;
+}
+.js-debug-range-slider-control--zoomed .js-debug-range-slider {
+  display: none;
+}
+.js-debug-range-label--zoomed {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-align: start;
+  text-overflow: ellipsis;
+}
+.js-debug-zoom-reset {
+  flex: 0 0 auto;
+  height: 24px;
+  padding: 0 var(--space-8);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
+  cursor: pointer;
+}
+.js-debug-subtab.active,
+.js-debug-zoom-reset {
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+}
+.js-debug-graph-meta {
+  flex: 0 0 auto;
+  min-width: 0;
+  color: var(--muted);
+  font: 600 var(--ui-font-size-xs)/1.25 var(--mono-font);
+  overflow-wrap: anywhere;
+}
+.js-debug-client-perf {
+  display: grid;
+  flex: 0 0 auto;
+  gap: var(--space-4);
+  min-width: 0;
+  padding: var(--space-6) var(--space-8);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  color: var(--muted);
+  background: color-mix(in srgb, var(--panel2) 68%, transparent);
+  font: 600 var(--ui-font-size-xs)/1.25 var(--mono-font);
+}
+.js-debug-client-perf-title {
+  color: var(--text);
+}
+.js-debug-client-perf-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-2) var(--space-10);
+  min-width: 0;
+}
+.js-debug-chart-shell {
+  position: relative;
+  display: grid;
+  flex: 1 0 auto;
+  grid-template-rows: minmax(0, 1fr);
+  gap: var(--space-6);
+  min-width: 0;
+  min-height: 0;
+}
+.js-yocost-chart-area {
+  position: relative;
+}
+.js-debug-history-overlay {
+  position: absolute;
+  inset: 0;
+  display: block;
+  min-height: 100%;
+  z-index: var(--z-layer-control);
+  padding: var(--space-12);
+  color: var(--text);
+  background: var(--inactive-pane-overlay);
+  pointer-events: none;
+}
+.js-debug-history-overlay[hidden] {
+  display: none;
+}
+.js-debug-history-overlay-message {
+  position: sticky;
+  top: 50%;
+  z-index: var(--z-layer-raised);
+  display: flex;
+  width: max-content;
+  max-width: min(100%, 42rem);
+  margin-inline: auto;
+  transform: translateY(-50%);
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-8);
+  padding: var(--space-8) var(--space-10);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--panel2);
+  opacity: 1;
+  font: 700 var(--ui-font-size-xs)/1.35 var(--ui-font);
+  text-align: center;
+}
+.js-debug-history-retry {
+  pointer-events: auto;
+}
+.yo-stats-current-recovery-banner {
+  margin: var(--space-8) 0;
+  padding: var(--space-12);
+  border: 2px solid var(--bad);
+  background: color-mix(in srgb, var(--bad) 14%, var(--panel));
+  color: var(--text);
+  font: 700 var(--ui-font-size-sm)/1.45 var(--ui-font);
+}
+.js-debug-chart-shell > .js-debug-chart-grid {
+  --js-debug-chart-min-height: 172px;
+  --js-debug-chart-max-height: 360px;
+  grid-auto-rows: minmax(var(--js-debug-chart-min-height), 1fr);
+  height: 100%;
+}
+.js-debug-chart-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--space-10) 14px;
+  min-width: 0;
+  min-height: 0;
+  container-type: inline-size;
+}
+.js-debug-chart-grid[data-js-debug-chart-layout="1"] { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); --js-debug-chart-min-height: 150px; }
+.js-debug-chart-grid[data-js-debug-chart-layout="2"] { grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); --js-debug-chart-min-height: 210px; }
+.js-debug-chart-grid[data-js-debug-chart-layout="3"] { grid-template-columns: repeat(auto-fit, minmax(520px, 1fr)); --js-debug-chart-min-height: 270px; }
+.js-debug-chart-grid[data-js-debug-chart-layout="4"] { grid-template-columns: minmax(0, 1fr); --js-debug-chart-min-height: 330px; }
+.js-debug-chart {
+  --js-debug-display-label-font-size: var(--ui-font-size-xs);
+  --js-debug-legend-font-size: calc(var(--js-debug-display-label-font-size) * 0.85);
+  position: relative;
+  display: grid;
+  grid-template-rows: auto minmax(138px, 1fr);
+  gap: var(--space-6);
+  min-width: 0;
+  min-height: var(--js-debug-chart-min-height);
+  padding: var(--space-7) var(--space-8) var(--space-8);
+  border: 1px solid color-mix(in srgb, var(--line) 88%, transparent);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--panel2) 54%, transparent);
+}
+.js-debug-chart-shell > .js-debug-chart-grid > .js-debug-chart {
+  max-height: var(--js-debug-chart-max-height);
+}
+.js-debug-go-memory-legend {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: var(--space-5) var(--space-10);
+  margin-block: var(--space-6);
+}
+.js-debug-go-memory-legend-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  min-width: 0;
+  color: var(--muted);
+  font: 600 var(--ui-font-size-xs)/1.2 var(--ui-font);
+}
+.js-debug-go-memory-legend-item svg { width: 18px; height: 8px; flex: 0 0 18px; }
+[data-go-memory-chart] > svg { display: block; width: 100%; height: 220px; color: var(--text); }
+[data-heap-stack-chart] > svg { display: block; width: 100%; height: 220px; color: var(--text); }
+
+.js-debug-hover-tooltip {
+  position: absolute;
+  z-index: var(--z-layer-control);
+  max-width: calc(100% - 8px);
+  padding: var(--space-3) var(--space-5);
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
+  box-shadow: var(--active-control-focus-shadow-compact);
+  font: 700 var(--ui-font-size-2xs)/1 var(--mono-font);
+  pointer-events: none;
+  white-space: nowrap;
+}
+.js-debug-hover-tooltip[hidden] {
+  display: none;
+}
+.js-debug-chart[data-js-debug-chart="cpu"] {
+  grid-template-rows: auto minmax(72px, 1fr);
+  min-height: 124px;
+}
+.js-debug-chart-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-5);
+  min-width: 0;
+}
+.js-debug-chart-heading-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: var(--space-8);
+  min-width: 0;
+}
+.js-debug-chart-title {
+  flex: 1 1 8rem;
+  min-width: 0;
+  color: var(--text);
+  font: 700 var(--js-debug-display-label-font-size)/1.15 var(--ui-font);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.js-debug-chart-summary {
+  flex: 0 1 48%;
+  min-width: 0;
+  margin-inline-start: 0;
+  color: var(--active-accent-bright);
+  font: 700 var(--js-debug-display-label-font-size)/1.15 var(--ui-font);
+  text-align: end;
+}
+.js-debug-service-load-mode-control {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  color: var(--muted);
+  font: 700 var(--ui-font-size-2xs)/1 var(--ui-font);
+}
+.js-debug-service-load-mode-control label {
+  position: relative;
+  cursor: pointer;
+}
+.js-debug-service-load-mode-control input {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  opacity: 0;
+}
+.js-debug-service-load-mode-control span {
+  display: block;
+  padding: var(--space-3) var(--space-5);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.js-debug-service-load-mode-control input:focus-visible + span {
+  box-shadow: var(--active-control-focus-shadow-compact);
+}
+.js-debug-agent-window-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4) var(--space-8);
+  color: var(--muted);
+  font: 600 var(--ui-font-size-2xs)/1.25 var(--ui-font);
+}
+.js-debug-agent-window-detail[data-js-debug-agent-window-detail-state="changed"] {
+  color: var(--warning-border-strong);
+}
+.js-debug-agent-window-detail details {
+  min-inline-size: 0;
+}
+.js-debug-agent-window-detail summary {
+  cursor: pointer;
+}
+.js-debug-agent-window-detail ul {
+  margin: var(--space-3) 0 0;
+  padding-inline-start: var(--space-12);
+}
+.js-debug-chart-body {
+  display: grid;
+  grid-template-columns: minmax(58px, auto) minmax(0, 1fr);
+  grid-template-rows: minmax(104px, 1fr) minmax(20px, auto);
+  gap: var(--space-4) var(--space-8);
+  min-width: 0;
+  min-height: 0;
+}
+.js-debug-chart[data-js-debug-chart="cpu"] .js-debug-chart-body {
+  grid-template-rows: minmax(72px, 1fr) minmax(20px, auto);
+}
+.js-debug-mac-memory-details {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, max-content));
+  gap: var(--space-3) var(--space-10);
+  margin: 0;
+  min-width: 0;
+}
+.js-debug-mac-memory-details > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-5);
+  min-width: 0;
+  border-block-end: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+}
+.js-debug-mac-memory-details dt,
+.js-debug-mac-memory-details dd {
+  margin: 0;
+  font: 600 var(--ui-font-size-2xs)/1.25 var(--ui-font);
+}
+.js-debug-mac-memory-details dt {
+  color: var(--muted);
+}
+.js-debug-mac-memory-details dd {
+  color: var(--text);
+  text-align: end;
+  white-space: nowrap;
+}
+@container (max-width: 32rem) {
+  .js-debug-mac-memory-details {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@container (max-width: 20rem) {
+  .js-debug-mac-memory-details {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.js-debug-cost-summary {
+  display: grid;
+  grid-template-rows: auto auto auto;
+  align-content: start;
+  min-block-size: 0;
+}
+.js-debug-cost-summary .js-debug-chart-head {
+  gap: var(--space-4);
+}
+.js-debug-cost-details {
+  min-height: var(--compact-control-height);
+  border: 1px solid var(--active-control-soft-border);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-5);
+  color: var(--active-control-bg);
+  background: var(--active-control-soft-bg);
+  font: 700 var(--ui-font-size-xs)/1.2 var(--ui-font);
+  cursor: pointer;
+}
+.js-debug-cost-details:focus-visible {
+  outline: none;
+  box-shadow: var(--active-control-focus-shadow-compact);
+}
+.js-debug-cost-range {
+  overflow: hidden;
+  margin: 0;
+  color: var(--muted);
+  font: 600 var(--ui-font-size-2xs)/1.25 var(--ui-font);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.js-debug-cost-model-usages {
+  min-width: 0;
+  margin-top: var(--space-7);
+}
+.js-debug-cost-model-usages h4 {
+  margin: 0 0 var(--space-4);
+  color: var(--muted);
+  font: 700 var(--ui-font-size-xs)/1.25 var(--ui-font);
+}
+.js-debug-cost-usage-swatch {
+  flex: none;
+  width: var(--space-4);
+  height: var(--space-4);
+  border-radius: var(--radius-sm);
+  background: var(--muted);
+}
+.js-debug-cost-usage-swatch--input {
+  background: var(--js-debug-agent-token-cyan);
+}
+.js-debug-cost-usage-swatch--cache,
+.js-debug-cost-usage-swatch--cache_read,
+.js-debug-cost-usage-swatch--cache_write,
+.js-debug-cost-usage-swatch--cache_write_5m,
+.js-debug-cost-usage-swatch--cache_write_1h {
+  background: var(--js-debug-agent-token-orange);
+}
+.js-debug-cost-usage-swatch--output {
+  background: var(--js-debug-agent-token-magenta);
+}
+.js-debug-cost-usage-swatch--other {
+  background: var(--js-debug-agent-token-beige);
+}
+/* Always-visible column legend: one tight row that wraps; the terse gloss is visible, the full
+   description stays on the header hover tooltip. Kept compact so it never re-widens the report. */
+.js-debug-cost-column-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-7);
+  max-width: 100%;
+  margin: var(--space-5) 0;
+  padding: 0;
+  color: var(--muted);
+  font: 600 var(--ui-font-size-xs)/1.25 var(--ui-font);
+}
+.js-debug-cost-column-legend > div {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.js-debug-cost-column-legend dt {
+  display: block;
+  min-width: 0;
+  color: var(--text);
+  font-weight: 700;
+  white-space: nowrap;
+}
+.js-debug-cost-column-legend dd {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.js-debug-cost-column-legend dd::before {
+  content: " \00b7 ";
+}
+.js-debug-cost-usage-swatch--total {
+  background: var(--text);
+}
+.js-debug-cost-model-list > li {
+  overflow-x: auto;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+.js-debug-cost-summary > .js-debug-system-table-wrap {
+  margin: var(--space-6) 0 0;
+}
+.js-debug-cost-summary > .js-debug-cost-modal-host {
+  display: flex;
+  justify-content: flex-end;
+  min-width: 0;
+  margin-top: var(--space-5);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--line);
+}
+.js-debug-cost-token-summary {
+  color: var(--text);
+  font-family: var(--mono-font);
+}
+.js-debug-cost-table-wrap {
+  max-inline-size: 100%;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+.js-debug-cost-table {
+  /* Fill the container when wide, but never shrink below a readable width — the
+     wrap scrolls horizontally instead of squishing the columns. */
+  inline-size: 100%;
+  min-inline-size: 44rem;
+}
+.js-debug-cost-table th,
+.js-debug-cost-table td {
+  padding-inline: var(--space-5);
+}
+/* Content-sized usage tables (By Agent / Model Usages): each table takes only the
+   width its visible content needs, up to the available pane, instead of the retired
+   stretched shared percent template. Columns stay aligned WITHIN each table through
+   the shared cell metrics; the wrap's contained horizontal scroller takes over only
+   when the content's minimum readable (nowrap) width exceeds the pane. One shared
+   sizing parent for both tables. */
+.js-debug-cost-usage-table-section .js-debug-cost-table,
+.js-debug-cost-summary .js-debug-cost-table {
+  inline-size: max-content;
+  max-inline-size: none;
+  min-inline-size: auto;
+}
+.js-debug-cost-unpriced-disclosure {
+  margin-block-start: var(--space-5);
+  border-block-start: 1px solid var(--line);
+}
+.js-debug-cost-unpriced-disclosure > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-5);
+  min-inline-size: 0;
+  padding-block: var(--space-5);
+  color: var(--text);
+  font: 600 var(--ui-font-size-xs)/1.35 var(--ui-font);
+  cursor: pointer;
+}
+.js-debug-cost-unpriced-disclosure > summary span {
+  min-inline-size: 0;
+}
+.js-debug-cost-unpriced-disclosure > summary strong {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-family: var(--mono-font);
+}
+.js-debug-cost-unpriced-disclosure[open] > summary {
+  color: var(--active-control-text);
+}
+.js-debug-cost-unpriced-disclosure > .js-debug-cost-table-wrap {
+  margin-block-start: 0;
+}
+.js-debug-cost-table th:not(:first-child) {
+  color: var(--muted);
+}
+.js-debug-cost-table th[aria-sort] {
+  white-space: nowrap;
+}
+.js-debug-cost-sort {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+.js-debug-cost-sort:hover,
+.js-debug-cost-sort:focus-visible {
+  color: var(--active-control-text);
+}
+.js-debug-cost-sort:focus-visible {
+  outline: none;
+  box-shadow: var(--active-control-focus-shadow-compact);
+}
+.js-debug-cost-table th > .js-debug-cost-usage-swatch {
+  margin-inline-end: var(--space-2);
+}
+.js-debug-cost-table tbody th,
+.js-debug-cost-table tfoot th {
+  color: var(--text);
+  font-weight: 700;
+}
+.js-debug-cost-table tfoot th,
+.js-debug-cost-table tfoot td {
+  border-block-start: 2px solid var(--line);
+  border-block-end: 0;
+}
+.js-debug-cost-table-metric {
+  display: grid;
+  gap: var(--space-1);
+}
+.js-debug-cost-table-metric--inline {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  white-space: nowrap;
+}
+.js-debug-cost-table-metric--inline .js-debug-cost-price-pair {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+.js-debug-cost-table-metric strong,
+.js-debug-cost-table-metric small {
+  font-family: var(--mono-font);
+}
+.js-debug-cost-table-metric small {
+  color: var(--muted);
+}
+.js-debug-cost-unreported {
+  color: var(--muted);
+  font: 700 var(--ui-font-size-sm)/1 var(--mono-font);
+}
+.js-debug-cost-price-pair {
+  display: inline-grid;
+  gap: var(--space-1);
+  color: var(--muted);
+  font: 500 var(--ui-font-size-2xs)/1.2 var(--mono-font);
+  white-space: nowrap;
+}
+.js-debug-cost-model-identity {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  min-inline-size: 0;
+  max-inline-size: 100%;
+}
+.js-debug-cost-model-icon {
+  flex: none;
+  margin-block-start: var(--space-1);
+}
+.js-debug-cost-model-icon .agent-icon {
+  inline-size: 1.15em;
+  min-inline-size: 1.15em;
+  block-size: 1.15em;
+  margin: 0;
+  padding: 0;
+  vertical-align: 0;
+}
+.js-debug-cost-model-icon .agent-icon svg {
+  inline-size: 1em;
+  block-size: 1em;
+}
+.js-debug-cost-model-copy {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-inline-size: 0;
+  white-space: nowrap;
+}
+.js-debug-cost-stacked-cell {
+  display: grid;
+  gap: var(--space-1);
+  min-inline-size: 0;
+}
+.js-debug-cost-model-meta {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-inline-size: 0;
+}
+.js-debug-cost-model-meta .js-debug-cost-pricing-links {
+  flex: none;
+  margin-inline-start: 0;
+}
+.js-debug-cost-model-copy strong,
+.js-debug-cost-model-copy small,
+.js-debug-cost-stacked-cell strong,
+.js-debug-cost-stacked-cell small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.js-debug-cost-model-copy small,
+.js-debug-cost-stacked-cell small {
+  color: var(--muted);
+  font-weight: 500;
+}
+.js-debug-cost-agent-name {
+  display: inline-block;
+  max-inline-size: 24ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.js-debug-cost-agent-name--long {
+  display: inline-grid;
+  line-height: 1.1;
+  text-overflow: clip;
+}
+.js-debug-cost-agent-name--long > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.js-debug-cost-table[data-js-debug-cost-table="model"] th:first-child {
+  /* Tables scroll as a whole on narrow panes, so a model identifier must not
+     be ellipsized merely to make one column fit. */
+  inline-size: auto;
+  max-inline-size: none;
+  white-space: nowrap;
+}
+.js-debug-cost-model-formula {
+  display: inline-block;
+  white-space: nowrap;
+}
+.js-debug-cost-transcript-link {
+  display: block;
+  min-inline-size: 22ch;
+  max-inline-size: 100%;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+.js-debug-responsive-text {
+  min-inline-size: 0;
+}
+.js-debug-responsive-text--middle {
+  display: flex;
+  max-inline-size: 100%;
+  white-space: nowrap;
+}
+.js-debug-responsive-text-prefix {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.js-debug-responsive-text-suffix {
+  flex: none;
+}
+.js-debug-cost-table[data-js-debug-cost-table="source"] th:first-child,
+.js-debug-cost-table[data-js-debug-cost-table="source"] td:first-child {
+  inline-size: 100%;
+}
+.js-debug-cost-table[data-js-debug-cost-table="source"] th:nth-child(2),
+.js-debug-cost-table[data-js-debug-cost-table="source"] td:nth-child(2) {
+  inline-size: max-content;
+}
+.js-debug-cost-table[data-js-debug-cost-table="source"] th:last-child,
+.js-debug-cost-table[data-js-debug-cost-table="source"] td:last-child {
+  inline-size: auto;
+  /* Numeric cost is a single token — keep it on one line so a squeezed column
+     can't wrap it and blow the row height up (the row scrolls, never grows). */
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+.js-debug-cost-report-title {
+  flex: none;
+  display: flex;
+  /* One responsive heading line: `Cost summary details <range>`. The range sits
+     beside the title and the row wraps coherently at genuinely narrow widths
+     instead of consuming a second full-width paragraph. */
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-3) var(--space-8);
+  padding-bottom: var(--space-5);
+  border-bottom: 1px solid var(--line);
+}
+.js-debug-cost-report-range {
+  min-width: 0;
+  font: var(--ui-font-size-xs)/1.35 var(--ui-font);
+}
+.js-debug-cost-report-basis {
+  color: var(--muted);
+  font: 600 var(--ui-font-size-xs)/1.35 var(--ui-font);
+}
+/* Compact catalog status line: field groups wrap as units on a narrow pane and
+   never stretch four scalar facts to opposite edges of a wide screen. */
+.js-debug-cost-catalog-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2) 0;
+  margin: 0 0 var(--space-7);
+  color: var(--muted);
+  font: var(--ui-font-size-xs)/1.5 var(--mono-font);
+}
+.js-debug-cost-catalog-group {
+  white-space: nowrap;
+}
+.js-debug-cost-catalog-group--warning {
+  color: var(--bad);
+}
+.js-debug-cost-catalog-separator {
+  white-space: pre;
+}
+.js-debug-cost-report h1 {
+  min-width: 0;
+  margin: 0;
+  color: var(--text);
+  font: 700 var(--ui-font-size-lg)/1.25 var(--ui-font);
+}
+.js-debug-cost-report-body {
+  container-type: inline-size;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding-top: var(--space-5);
+}
+/* Keep the wide legend as compact inline chips. A two-column grid gives each
+   narrow item enough width for a label plus an indented explanation instead
+   of crushing six meanings into unreadable three-column fragments. */
+@container (max-width: 34rem) {
+  .js-debug-cost-column-legend {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+  .js-debug-cost-column-legend > div {
+    display: grid;
+    grid-template-columns: min-content minmax(0, 1fr);
+    column-gap: var(--space-3);
+    row-gap: var(--space-1);
+    align-items: start;
+  }
+  .js-debug-cost-column-legend > div > .js-debug-cost-usage-swatch {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+    align-self: start;
+    margin-block-start: 0.3em;
+  }
+  .js-debug-cost-column-legend dt,
+  .js-debug-cost-column-legend dd {
+    grid-column: 2;
+  }
+  .js-debug-cost-column-legend dt {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .js-debug-cost-column-legend dd::before {
+    content: none;
+  }
+}
+.js-yocost-panel .js-yocost-body,
+.js-yocost-panel .js-yocost-scroll,
+.js-yocost-panel .js-debug-cost-report,
+.js-yocost-panel .js-debug-cost-report-body {
+  min-inline-size: 0;
+}
+.js-yocost-panel .js-yocost-scroll {
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.js-yocost-graphs {
+  container-type: inline-size;
+}
+.js-yocost-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-5);
+  margin-block-end: var(--space-6);
+  color: var(--muted);
+  font: var(--ui-font-size-xs)/1.35 var(--ui-font);
+}
+.js-yocost-controls > [data-js-yocost-data-age-label],
+.js-yocost-controls > button {
+  flex: none;
+}
+.js-yocost-controls > .js-debug-range-resolution-controls {
+  flex: 1 0 100%;
+  order: 2;
+}
+.js-yocost-controls > button {
+  margin-inline-start: auto;
+}
+@container (max-width: 20rem) {
+  .js-yocost-controls > button {
+    order: 1;
+  }
+}
+/* No card reflow: at every width the cost tables stay full ruled tables and the
+   section scrolls horizontally when too narrow (readable-with-scroll beats the
+   stacked-card reflow). Horizontal scroll is owned by the table wraps
+   (overflow-x: auto) together with the table's readable pixel min-width. */
+.js-debug-range-slider:disabled {
+  cursor: not-allowed;
+  filter: grayscale(1);
+  opacity: 0.52;
+}
+.js-yocost-panel .js-debug-cost-report {
+  display: flex;
+  flex-direction: column;
+  inline-size: 100%;
+  max-inline-size: 100%;
+}
+.js-yocost-panel .js-debug-cost-report-body {
+  overflow: visible;
+}
+.js-debug-cost-report-body > p {
+  margin: var(--space-4) 0;
+  line-height: 1.5;
+}
+.js-debug-cost-details-section {
+  container-type: inline-size;
+  margin-top: var(--space-10);
+}
+.js-debug-cost-details-section h2 {
+  margin: 0 0 var(--space-5);
+  padding-bottom: var(--space-3);
+  color: var(--text);
+  font: 700 var(--ui-font-size-sm)/1.3 var(--ui-font);
+  border-bottom: 1px solid var(--line);
+}
+.js-debug-cost-pricing-links {
+  margin-inline-start: var(--space-4);
+  font-family: var(--ui-font);
+  font-size: var(--ui-font-size-xs);
+  font-weight: 600;
+}
+.js-debug-cost-pricing-links::before {
+  content: "[";
+  color: var(--muted);
+}
+.js-debug-cost-pricing-links::after {
+  content: "]";
+  color: var(--muted);
+}
+.js-debug-cost-pricing-links--compact {
+  margin-inline-start: 0;
+}
+.js-debug-cost-pricing-links--compact::before,
+.js-debug-cost-pricing-links--compact::after {
+  content: none;
+}
+.js-debug-cost-report-total {
+  margin: var(--space-6) 0 0;
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--line);
+  color: var(--text);
+  font-family: var(--mono-font);
+}
+.js-debug-cost-catalog {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-5);
+  margin: var(--space-6) 0;
+}
+.js-debug-cost-catalog div {
+  min-width: 0;
+}
+.js-debug-cost-catalog dt {
+  color: var(--muted);
+  font: 600 var(--ui-font-size-2xs)/1.2 var(--ui-font);
+}
+.js-debug-cost-catalog dd {
+  margin: var(--space-2) 0 0;
+  color: var(--text);
+  font: 600 var(--ui-font-size-xs)/1.2 var(--mono-font);
+  overflow-x: auto;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+.js-debug-cost-source-tree {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.js-debug-cost-source-tree li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-6);
+  padding: var(--space-3) var(--space-4);
+  font: var(--ui-font-size-xs)/1.3 var(--ui-font);
+}
+.js-debug-cost-source-tree li[aria-level="2"] {
+  margin-inline-start: var(--space-8);
+}
+.js-debug-cost-source-label {
+  overflow-wrap: normal;
+  word-break: normal;
+}
+.js-debug-cost-source-subtotals {
+  overflow-x: auto;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
+  color: var(--muted);
+  font-family: var(--mono-font);
+}
+.js-debug-cost-source-tree li:focus-visible {
+  outline: none;
+  box-shadow: var(--active-control-focus-shadow-compact);
+}
+@container (max-width: 22rem) {
+  .js-debug-cost-summary .js-debug-chart-heading-row {
+    flex-wrap: wrap;
+    gap: var(--space-4);
+  }
+  .js-debug-cost-summary .js-debug-chart-title {
+    flex-basis: 100%;
+  }
+  .js-debug-cost-catalog {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+.js-debug-chart-unavailable {
+  display: grid;
+  min-height: 138px;
+  place-items: center;
+  color: var(--muted);
+  font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
+}
+.js-debug-y-axis {
+  position: relative;
+  display: block;
+  grid-column: 1;
+  grid-row: 1;
+  min-width: 0;
+  min-height: 104px;
+  color: var(--muted);
+  font: 700 var(--ui-font-size-2xs)/1 var(--mono-font);
+  text-align: end;
+  white-space: nowrap;
+}
+.js-debug-y-axis span {
+  position: absolute;
+  inset-inline: 0;
+  top: var(--js-debug-axis-y, 0%);
+  transform: translateY(-50%);
+}
+.js-debug-y-axis--broken [data-js-debug-axis-break-label]::after {
+  content: " ≋";
+  color: var(--active-accent-bright);
+}
+.js-debug-plot {
+  display: grid;
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.js-debug-line-chart {
+  width: 100%;
+  height: 100%;
+  min-height: 104px;
+  border-block-end: 1px solid var(--line);
+  /* Vertical motion belongs to page scrolling; the shared gesture policy arms chart
+     zoom only after touch movement proves horizontal or becomes a short hold. */
+  touch-action: pan-y;
+}
+.js-debug-chart[data-js-debug-chart="cpu"] .js-debug-line-chart,
+.js-debug-chart[data-js-debug-chart="cpu"] .js-debug-y-axis {
+  min-height: 72px;
+}
+.js-debug-x-axis {
+  grid-column: 2;
+  grid-row: 2;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-6);
+  min-height: 16px;
+  padding-block-start: var(--space-2);
+  min-width: 0;
+  color: var(--muted);
+  font: 600 var(--ui-font-size-2xs)/1 var(--mono-font);
+}
+.js-debug-x-axis span {
+  flex: 0 1 33.333%;
+}
+.js-debug-x-axis span[data-js-debug-x-tick="mid"] {
+  text-align: center;
+}
+.js-debug-x-axis span[data-js-debug-x-tick="end"] {
+  text-align: end;
+}
+.js-debug-grid-line {
+  stroke: color-mix(in srgb, var(--line) 72%, transparent);
+  stroke-width: 0.4;
+}
+.js-debug-grid-line--integer {
+  stroke: color-mix(in srgb, var(--text) 55%, var(--line));
+  stroke-width: 0.3;
+}
+.js-debug-axis-break {
+  stroke: var(--active-accent-bright);
+  stroke-width: 1.2;
+  opacity: 0.9;
+}
+.js-debug-line {
+  stroke: var(--js-debug-series-color, var(--text));
+  stroke-width: 1;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.js-debug-singleton-marker {
+  fill: var(--js-debug-series-color, var(--text));
+  stroke: var(--bg);
+  stroke-width: 0.8;
+}
+body.theme-light :is(.js-debug-graph-view, .js-yocost-graphs) {
+  --js-debug-client-comparison-opacity: 0.9;
+}
+body.theme-light .js-debug-line {
+  stroke-width: 1.6;
+}
+body.theme-light .js-debug-line--moving-average {
+  stroke-width: 2.2;
+}
+.js-debug-live-pulse.heartbeat-pulse {
+  fill: rgb(var(--active-accent-rgb) / 0.14);
+  pointer-events: none;
+  animation-name: agent-status-opacity-pulse;
+  animation-duration: var(--pulse-duration);
+  animation-delay: var(--attention-animation-delay, 0s);
+  animation-timing-function: var(--status-pulse-timing);
+  animation-iteration-count: infinite;
+  animation-direction: normal;
+}
+.js-debug-hover-line {
+  opacity: 0;
+  stroke: color-mix(in srgb, var(--text) 46%, transparent);
+  stroke-width: 0.8;
+  pointer-events: none;
+}
+.js-debug-selection-rect {
+  opacity: 0;
+  fill: color-mix(in srgb, var(--active-accent-bright) 35%, transparent);
+  stroke: color-mix(in srgb, var(--active-accent-bright) 72%, transparent);
+  stroke-width: 1;
+  pointer-events: none;
+}
+.js-debug-disconnected-range {
+  fill: rgb(var(--js-debug-bad-connection-rgb) / 0.28);
+  pointer-events: none;
+}
+.js-debug-no-data-range {
+  fill: rgb(var(--js-debug-bad-connection-rgb) / 0.12);
+  pointer-events: none;
+}
+.js-debug-history-no-data-range {
+  fill: rgb(var(--js-debug-bad-connection-rgb) / 0.18);
+}
+.js-debug-graph--hovering .js-debug-hover-line {
+  opacity: 1;
+}
+.js-debug-graph--selecting .js-debug-selection-rect {
+  opacity: 1;
+}
+.js-debug-area {
+  fill: var(--js-debug-series-color, var(--accent-sky-strong));
+  opacity: 1;
+}
+.js-debug-chart[data-js-debug-chart="serversLoad"] .js-debug-area {
+  stroke-width: 1.4;
+}
+.js-debug-chart[data-js-debug-chart="serversLoad"] .js-debug-line {
+  opacity: 0.9;
+  stroke-width: 1.4;
+}
+.js-debug-bar {
+  fill: var(--js-debug-series-color, var(--accent-sky-strong));
+  opacity: 0.68;
+  shape-rendering: crispEdges;
+}
+.js-debug-bar--agentToken {
+  fill: var(--js-debug-series-color, var(--accent-sky-strong));
+}
+.js-debug-agent-token-pattern-ink {
+  fill: var(--js-debug-agent-token-pattern-ink);
+  stroke: var(--js-debug-agent-token-pattern-ink);
+  stroke-width: 0.45;
+  opacity: 0.32;
+}
+.js-debug-line--api {
+  stroke: var(--js-debug-series-color, var(--js-debug-api-series));
+}
+.js-debug-line--sse {
+  stroke: var(--js-debug-series-color, var(--js-debug-sse-series));
+}
+.js-debug-line--latency {
+  stroke: var(--js-debug-series-color, var(--accent-gold));
+}
+.js-debug-line--bandwidth {
+  stroke: var(--js-debug-series-color, var(--link-soft));
+}
+.js-debug-line--askAgents {
+  stroke: var(--js-debug-agent-attention);
+}
+.js-debug-line--workingAgents {
+  stroke: var(--js-debug-agent-working);
+}
+.js-debug-line--transitionAgents {
+  stroke: var(--js-debug-agent-transition);
+}
+.js-debug-line--idleAgents {
+  stroke: var(--js-debug-idle-agent-status);
+}
+.js-debug-line--tokensPerAgent {
+  stroke: var(--accent-sky-strong);
+}
+.js-debug-line--agentToken {
+  stroke: var(--js-debug-series-color, var(--accent-sky-strong));
+}
+.js-debug-bar--askAgents {
+  fill: var(--js-debug-agent-attention);
+  opacity: var(--js-debug-agent-status-bar-opacity);
+}
+.js-debug-bar--workingAgents {
+  fill: var(--js-debug-agent-working);
+  opacity: var(--js-debug-agent-status-bar-opacity);
+}
+.js-debug-bar--transitionAgents {
+  fill: var(--js-debug-agent-transition);
+  opacity: var(--js-debug-agent-status-bar-opacity);
+}
+.js-debug-bar--idleAgents {
+  fill: var(--js-debug-idle-agent-status);
+  opacity: var(--js-debug-agent-idle-bar-opacity);
+}
+.js-debug-area--tokensPerAgent {
+  fill: var(--accent-sky-strong);
+}
+.js-debug-line--cpu {
+  stroke: var(--js-debug-series-color, var(--js-debug-agent-token-violet));
+}
+.js-debug-line--systemCpu {
+  stroke: var(--js-debug-series-color, var(--js-debug-agent-token-rose));
+}
+.js-debug-line--current-process {
+  stroke-width: 2.4;
+}
+.js-debug-line--systemMemory {
+  stroke: var(--accent-gold);
+}
+.js-debug-line--moving-average {
+  opacity: 0.82;
+  stroke-width: 1.8;
+  stroke-dasharray: 0.75 4.25;
+}
+.js-debug-line--pattern,
+.js-debug-line--client {
+  stroke-dasharray: var(--js-debug-line-dash, none);
+}
+.js-debug-line--pattern-solid,
+.js-debug-line--client-solid {
+  --js-debug-line-dash: none;
+}
+.js-debug-line--pattern-dot,
+.js-debug-line--client-dot {
+  --js-debug-line-dash: 1 3;
+}
+.js-debug-line--client-dot {
+  opacity: var(--js-debug-client-comparison-opacity);
+}
+.js-debug-line--pattern-dash {
+  --js-debug-line-dash: 6 4;
+}
+.js-debug-line--pattern-dash-dot {
+  --js-debug-line-dash: 7 3 1 3;
+}
+.js-debug-line--pattern-long-dash {
+  --js-debug-line-dash: 11 4;
+}
+.js-debug-line--pattern-dense-dot {
+  --js-debug-line-dash: 1 2;
+}
+.js-debug-line--pattern-long-short {
+  --js-debug-line-dash: 10 3 3 3;
+}
+.js-debug-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-6) var(--space-10);
+  min-width: 0;
+}
+.js-debug-legend-item {
+  min-width: 0;
+  color: var(--muted);
+  font: 600 var(--js-debug-legend-font-size)/1 var(--ui-font);
+}
+.js-debug-daemons-chart .js-debug-chart-shell > .js-debug-chart-grid {
+  height: auto;
+  grid-auto-rows: auto;
+}
+.js-debug-daemons-chart .js-debug-chart-shell > .js-debug-chart-grid > .js-debug-chart {
+  max-height: none;
+  min-height: 330px;
+  grid-template-rows: auto minmax(180px, 1fr);
+}
+.js-debug-daemons-chart .js-debug-chart[data-js-debug-chart="serversLoad"] .js-debug-legend {
+  max-height: none;
+  overflow: visible;
+  align-content: start;
+}
+.js-debug-legend-item--hovered {
+  color: var(--text);
+}
+.js-debug-legend-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--js-debug-series-color, currentColor);
+}
+.js-debug-legend-line {
+  width: 18px;
+  height: 4px;
+  flex: 0 0 auto;
+  overflow: visible;
+}
+.js-debug-legend-line .js-debug-line {
+  stroke-width: 1.5;
+}
+.js-debug-legend-line .js-debug-line--current-process {
+  stroke-width: 2.5;
+}
+.js-debug-legend-area {
+  width: 18px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 1px;
+  background: var(--js-debug-series-color, var(--accent-sky-strong));
+  opacity: 1;
+}
+.js-debug-legend-swatch--api {
+  color: var(--js-debug-api-series);
+}
+.js-debug-legend-swatch--sse {
+  color: var(--js-debug-sse-series);
+}
+.js-debug-legend-swatch--latency {
+  color: var(--accent-gold);
+}
+.js-debug-legend-swatch--bandwidth {
+  color: var(--link-soft);
+}
+.js-debug-legend-swatch--askAgents {
+  color: var(--js-debug-agent-attention);
+}
+.js-debug-legend-swatch--workingAgents {
+  color: var(--js-debug-agent-working);
+}
+.js-debug-legend-swatch--transitionAgents {
+  color: var(--js-debug-agent-transition);
+}
+.js-debug-legend-swatch--idleAgents {
+  color: var(--js-debug-idle-agent-status);
+}
+.js-debug-legend-swatch--tokensPerAgent {
+  color: var(--accent-sky-strong);
+}
+.js-debug-legend-token-swatch {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  overflow: visible;
+}
+.js-debug-legend-swatch--cpu {
+  color: var(--js-debug-series-color, var(--js-debug-agent-token-violet));
+}
+.js-debug-legend-swatch--systemCpu {
+  color: var(--js-debug-series-color, var(--js-debug-agent-token-cyan));
+}
+.js-debug-graph-empty {
+  display: grid;
+  flex: 1 1 auto;
+  min-height: 0;
+  place-items: center;
+  color: var(--muted);
+  font: 600 var(--ui-font-size-sm)/1.2 var(--ui-font);
+}
+.info-refresh {
+  position: relative;
+  margin-inline-start: auto;
+  height: 22px;
+  justify-content: center;
+  gap: var(--space-5);
+  padding: 0 var(--space-8);
+  background: var(--panel2);
+  font-size: var(--ui-font-size-xs);
+  line-height: 1;
+  white-space: nowrap;
+}
+.info-refresh:hover,
+.info-refresh:focus-visible {
+  border-color: var(--active-control-border);
+  color: var(--30-preferences-changes-info-refresh-fg-17);
+}
+.info-refresh.loading {
+  cursor: wait;
+  color: transparent;
+  opacity: 0.86;
+}
+.info-refresh.loading::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 10px;
+  height: 10px;
+  color: var(--text);
+  border: 2px solid color-mix(in srgb, currentColor 32%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+}
+.info-refresh.loading::before,
+#refreshMeta.loading::before,
+.info-loading-spinner,
+.file-tree-row.kind-dir.loading-children > .file-tree-icon::before {
+  animation: metadata-refresh-spin var(--motion-activity-duration) linear infinite;
+}
+@keyframes metadata-refresh-spin {
+  to { transform: rotate(360deg); }
+}
+.changes-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-8);
+  margin-bottom: var(--space-10);
+  padding: var(--space-7) var(--space-8);
+  color: var(--muted);
+  font-family: var(--ui-font);
+  font-size: var(--ui-font-size-sm);
+
+
+  --changes-row-hover-bg: var(--changes-tree-row-hover-bg);
+  --changes-folder-bg: var(--30-preferences-changes-changes-toolbar-changes-folder-bg-34);
+  --changes-indent-line: var(--changes-tree-indent-line);
+  --changes-path-text: var(--30-preferences-changes-changes-toolbar-changes-path-text-36);
+  --changes-icon-text: var(--changes-tree-icon-text);
+}
+.file-explorer-changes-panel:hover > .changes-toolbar,
+.file-explorer-changes-panel:focus-within > .changes-toolbar {
+  background: var(--pane-tab-strip-bg);
+  color: var(--text);
+}
+.changes-control select,
+.changes-refresh,
+.diff-ref-input,
+.diff-ref-control input {
+  height: 24px;
+  background: var(--30-preferences-changes-changes-control-bg-15);
+  font: inherit;
+}
+.diff-ref-controls {
+  min-width: 0;
+}
+.diff-ref-control {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--muted);
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-2xs);
+  font-weight: 800;
+}
+.diff-ref-input,
+.diff-ref-control input {
+  width: clamp(12ch, 12vw, 24ch);
+  padding: 0 var(--space-5);
+  font-size: var(--ui-font-size-xs);
+}
+.diff-ref-controls.compact {
+  gap: var(--space-3);
+}
+.diff-ref-controls.compact .diff-ref-input,
+.diff-ref-controls.compact .diff-ref-control input {
+  width: clamp(16ch, 18vw, 24ch);
+  height: 20px;
+}
+.diff-ref-reset {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  min-width: 46px;
+  height: 24px;
+  padding: 0 var(--space-7);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--panel2);
+  color: var(--muted);
+  font-size: var(--ui-font-size-xs);
+  cursor: pointer;
+}
+.diff-ref-reset:hover {
+  background: var(--active-control-soft-bg);
+  color: var(--text);
+}
+.diff-ref-controls.compact .diff-ref-reset {
+  height: 20px;
+  min-width: 44px;
+  padding: 0 var(--space-6);
+}
+.diff-ref-suggestion-popover {
+  position: fixed;
+  z-index: var(--z-ref-suggestion);
+  min-width: min(520px, 90vw);
+  max-height: min(320px, 42vh);
+  overflow: auto;
+  padding: var(--space-4) var(--space-12) var(--space-4) var(--space-4);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-elevated);
+  font-family: var(--ui-font);
+
+
+  background: var(--30-preferences-changes-diff-ref-suggestion-popover-bg-16);
+}
+.diff-ref-suggestion-popover[hidden] {
+  display: none;
+}
+.diff-ref-suggestion-popover.compact {
+  min-width: min(520px, 66.667vw);
+  max-height: min(230px, 34vh);
+}
+.diff-ref-suggestion-option {
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  display: grid;
+  grid-template-columns: 8ch minmax(0, 1fr) max-content max-content;
+  align-items: center;
+  gap: var(--space-8);
+  padding: 0 var(--space-6);
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.diff-ref-suggestion-popover.compact .diff-ref-suggestion-option {
+  height: 22px;
+}
+.diff-ref-suggestion-option:hover,
+.diff-ref-suggestion-option.active {
+  background: var(--active-control-soft-bg);
+}
+.diff-ref-suggestion-option:hover .diff-ref-suggestion-subject,
+.diff-ref-suggestion-option.active .diff-ref-suggestion-subject,
+.diff-ref-suggestion-option:hover .diff-ref-suggestion-date,
+.diff-ref-suggestion-option.active .diff-ref-suggestion-date,
+.diff-ref-suggestion-option:hover .diff-ref-suggestion-author,
+.diff-ref-suggestion-option.active .diff-ref-suggestion-author {
+  color: var(--text);
+  opacity: 0.95;
+}
+.diff-ref-suggestion-ref {
+  min-width: 0;
+  font: 800 var(--ui-font-size-xs)/1 var(--mono-font);
+  color: var(--text);
+}
+.diff-ref-suggestion-subject {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  font: 600 var(--ui-font-size-xs)/1 var(--ui-font);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.diff-ref-suggestion-pr {
+  flex: 0 0 auto;
+  font: 800 var(--ui-font-size-xs)/1 var(--mono-font);
+  color: var(--text);
+}
+.diff-ref-suggestion-date,
+.diff-ref-suggestion-author {
+  min-width: 0;
+  font: 500 var(--ui-font-size-2xs)/1 var(--mono-font);
+  color: var(--muted);
+  opacity: 0.7;
+}
+.diff-ref-suggestion-date {
+  justify-self: start;
+}
+.diff-ref-suggestion-author {
+  justify-self: start;
+}
+.diff-ref-suggestion-empty {
+  padding: var(--space-5) var(--space-7);
+  color: var(--muted);
+  font: 600 var(--ui-font-size-xs)/1.2 var(--ui-font);
+}
+.changes-refresh {
+  padding: 0 var(--space-8);
+  cursor: pointer;
+}
+.changes-toolbar .changes-date-toggle {
+  height: 24px;
+}
+.changes-comparison-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-6) var(--space-10);
+  margin-bottom: var(--space-8);
+  padding: var(--space-7) var(--space-8);
+  color: var(--text);
+  font-family: var(--ui-font);
+  font-size: var(--ui-font-size-sm);
+}
+.changes-comparison-title {
+  min-width: 0;
+  font-weight: 700;
+}
+.changes-comparison-summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-8);
+  width: 100%;
+  color: var(--muted);
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-xs);
+}
+.changes-summary-label {
+  min-width: 0;
+}
+.changes-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-6);
+  color: var(--muted);
+}
+.changes-summary-totals,
+.changes-repo-totals {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-8);
+  margin-inline-start: auto;
+  white-space: nowrap;
+}
+.changes-error,
+.changes-warning,
+.changes-empty {
+  padding: var(--space-8);
+  color: var(--30-preferences-changes-changes-error-fg-18);
+  font-size: var(--ui-font-size-sm);
+}
+.changes-empty {
+  color: var(--muted);
+}
+/* Non-blocking notice (e.g. a per-agent transcript-missing warning) — must NOT read as a red blocking error. */
+.changes-warning {
+  color: var(--muted);
+}
+.changes-repo-group {
+  margin-bottom: var(--space-10);
+  min-inline-size: 0;
+  overflow: hidden;
+
+
+  --changes-row-hover-bg: var(--changes-tree-row-hover-bg);
+  --changes-folder-bg: var(--30-preferences-changes-changes-repo-group-changes-folder-bg-39);
+  --changes-indent-line: var(--changes-tree-indent-line);
+  --changes-path-text: var(--30-preferences-changes-changes-repo-group-changes-path-text-41);
+  --changes-icon-text: var(--changes-tree-icon-text);
+}
+.changes-repo-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  padding: var(--space-6) var(--space-8);
+  background: var(--changes-repo-head-bg);
+  color: var(--text);
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-xs);
+  font-weight: 700;
+  text-align: start;
+}
+.changes-repo-head:hover,
+.changes-repo-head:focus-visible {
+  color: var(--active-control-bg);
+  outline: 0;
+}
+.changes-repo-caret {
+  margin-inline-end: var(--space-2);
+}
+.changes-repo-title {
+  flex: 1;
+  min-width: 0;
+  color: var(--accent-gold);
+  font-weight: 800;
+}
+.changes-repo-totals {
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-xs);
+}
+.changes-repo-compare-meta {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-4) var(--space-8);
+  margin-inline-start: auto;
+  color: var(--muted);
+  font-weight: 600;
+}
+.changes-repo-count {
+  color: var(--muted);
+}
+/* C6: per-repo FROM/TO controls + comparison title row, directly under each repo header. */
+.changes-repo-refs {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-8);
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  font-size: var(--ui-font-size-xs);
+  color: var(--muted);
+}
+.changes-repo-refs-main,
+.changes-repo-refs-detail {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-4) var(--space-8);
+  min-width: 0;
+}
+.changes-repo-refs-detail {
+  min-height: 16px;
+}
+.changes-repo-inline-loading {
+  display: inline-flex;
+  align-items: center;
+}
+.changes-repo-compare-title {
+  color: var(--muted);
+}
+.changes-repo-refs-error {
+  color: var(--accent-gold);
+  font-weight: 600;
+}
+.changes-repo-refs .diff-ref-controls {
+  margin-inline-start: 0;
+}
+.changes-repo-refs .changes-repo-compare-meta {
+  margin-inline-start: 0;
+}
+.changes-repo-refs .diff-ref-inline-reset {
+  margin-inline-start: auto;
+  margin-inline-end: calc(-1 * var(--space-4));
+}
+.changes-file-list {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  inline-size: 100%;
+  min-inline-size: 0;
+}
+.changes-tree {
+  padding: var(--space-2) 0;
+}
+.changes-file-agent .agent-icon {
+  width: 16px;
+  min-width: 16px;
+  height: 14px;
+  margin: 0;
+  padding: 0;
+  vertical-align: 0;
+}
+.changes-diff-add {
+  color: var(--30-preferences-changes-changes-diff-add-fg-43);
+  font-weight: 800;
+}
+.changes-diff-remove {
+  color: var(--30-preferences-changes-changes-diff-remove-fg-44);
+  font-weight: 800;
+}
+.preferences-path-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--space-8);
+  padding: var(--space-7) var(--space-8);
+  color: var(--muted);
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-xs);
+}
+.preferences-path-value {
+  color: var(--text);
+}
+.preferences-readonly {
+  color: var(--accent-gold);
+  font-family: var(--ui-font);
+  font-size: var(--ui-font-size-xs);
+  font-weight: 700;
+}
+.preferences-status {
+  margin-top: var(--space-8);
+  color: var(--good);
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-xs);
+}
+.preferences-status[data-level="error"] {
+  color: var(--bad);
+}
+.preferences-sections {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-10);
+  margin-top: var(--space-10);
+}
+.preferences-section {
+  min-width: 0;
+}
+.preferences-section-toggle {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-8);
+  margin: 0;
+  padding: var(--space-8) var(--space-10);
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  color: var(--pane-tab-text);
+  background: var(--pane-bar-bg, var(--panel2));
+  font: 700 var(--ui-font-size)/1.2 var(--ui-font);
+  text-align: start;
+  cursor: pointer;
+}
+.preferences-section.collapsed .preferences-section-toggle {
+  border-bottom: 0;
+  border-radius: var(--radius-md);
+}
+.preferences-section-caret {
+  margin-inline-end: var(--space-2);
+}
+.preferences-section-count {
+  color: currentColor;
+  opacity: 0.72;
+  font-size: var(--ui-font-size-xs);
+}
+.preferences-settings {
+  display: grid;
+  gap: var(--space-1);
+}
+.preferences-settings[hidden] {
+  display: none;
+}
+.preferences-setting-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(140px, 0.9fr) minmax(180px, 1.1fr);
+  align-items: start;
+  gap: var(--space-10);
+  padding: var(--space-7) var(--space-10);
+  border-top: 1px solid rgba(48, 57, 72, 0.45);
+}
+
+/* #260: plain radio-button group for the Global color theme (replaced the macOS-style theme-cards). */
+.preferences-radio-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-6) 16px;
+  justify-content: start;
+  padding-inline-start: var(--preferences-control-left-indent);
+}
+.preferences-radio-group.has-swatches {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+  align-items: center;
+  column-gap: 16px;
+  row-gap: var(--space-6);
+}
+.preferences-radio {
+  cursor: pointer;
+  color: var(--text);
+}
+.preferences-radio.has-swatches {
+  display: inline-grid;
+  grid-template-columns: 18px 34px minmax(0, 1fr);
+  align-items: center;
+  column-gap: var(--space-6);
+  min-width: 0;
+}
+.preferences-radio.has-swatches input[type="radio"] {
+  justify-self: center;
+}
+.preferences-radio-swatches {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  width: 34px;
+}
+.preferences-radio-swatches.joined {
+  gap: 0;
+}
+.preferences-radio-swatch {
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  background: var(--preferences-radio-swatch);
+  box-shadow: inset 0 0 0 1px var(--paint-white-28);
+}
+.preferences-radio-swatches.joined .preferences-radio-swatch {
+  border-radius: 0;
+}
+.preferences-radio-swatches.joined .preferences-radio-swatch + .preferences-radio-swatch {
+  margin-inline-start: calc(-1 * var(--space-1));
+}
+.preferences-radio-swatches.joined .preferences-radio-swatch:first-child {
+  border-start-start-radius: 2px;
+  border-end-start-radius: 2px;
+}
+.preferences-radio-swatches.joined .preferences-radio-swatch:last-child {
+  border-start-end-radius: 2px;
+  border-end-end-radius: 2px;
+}
+.preferences-radio input[type="radio"] {
+  cursor: pointer;
+  accent-color: var(--active-control-bg);
+}
+.preferences-radio input[type="radio"]:disabled,
+.preferences-radio:has(input:disabled) {
+  cursor: default;
+  opacity: 0.6;
+}
+.preferences-setting-row:first-child {
+  border-top: 0;
+}
+.preferences-setting-row--wide {
+  grid-template-columns: minmax(0, 1fr);
+}
+.preferences-setting-note {
+  grid-template-columns: minmax(0, 1fr);
+  padding-block: var(--space-6);
+  color: var(--muted);
+  background: color-mix(in srgb, var(--panel2) 78%, transparent);
+  font: 600 var(--ui-font-size-xs)/1.35 var(--ui-font);
+}
+.preferences-setting-advisory {
+  --preferences-advisory-text: var(--30-preferences-changes-preferences-setting-advisory-preferences-advisory-text-19);
+  --preferences-advisory-bg: var(--30-preferences-changes-preferences-setting-advisory-preferences-advisory-bg-20);
+  --preferences-advisory-border: var(--30-preferences-changes-preferences-setting-advisory-preferences-advisory-border-21);
+  --preferences-advisory-code-text: var(--30-preferences-changes-preferences-setting-advisory-preferences-advisory-code-text-22);
+  --preferences-advisory-code-bg: var(--30-preferences-changes-preferences-setting-advisory-preferences-advisory-code-bg-23);
+  --preferences-advisory-code-border: var(--30-preferences-changes-preferences-setting-advisory-preferences-advisory-code-border-24);
+  grid-column: 1 / -1;
+  padding: var(--space-6) var(--space-8);
+  color: var(--preferences-advisory-text);
+  background: var(--preferences-advisory-bg);
+  border: 1px solid var(--preferences-advisory-border);
+  border-radius: var(--radius-control);
+  font: var(--ui-font-size-xs)/1.3 var(--ui-font);
+}
+.preferences-setting-advisory code {
+  padding: var(--space-2) var(--space-4);
+  color: var(--preferences-advisory-code-text);
+  background: var(--preferences-advisory-code-bg);
+  border: 1px solid var(--preferences-advisory-code-border);
+  border-radius: var(--radius-sm);
+  font: 700 var(--ui-font-size-xs)/1.2 var(--mono-font);
+}
+.preferences-setting-label {
+  color: var(--text);
+  font-size: var(--ui-font-size-sm);
+  font-weight: 650;
+}
+.preferences-setting-help {
+  grid-column: 1 / -1;
+  display: block;
+  margin-top: var(--space-3);
+  color: var(--muted);
+  font-size: var(--ui-font-size-xs);
+  font-weight: 500;
+  line-height: 1.28;
+}
+.preferences-search-row {
+  margin-top: var(--space-10);
+}
+.preferences-search,
+.search-history-input {
+  height: 28px;
+  padding: var(--space-3) var(--space-8);
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  font: var(--ui-font-size-sm)/1.2 var(--ui-font);
+}
+.preferences-search {
+  flex: 1 1 16ch;
+  min-width: 8ch;
+}
+.preferences-search-button,
+.preferences-reset-all {
+  flex: 0 0 auto;
+  height: 28px;
+  min-width: 0;
+  padding: 0 var(--space-8);
+  border-radius: 5px;
+  font: 700 var(--ui-font-size-xs)/1 var(--control-font);
+}
+.preferences-search-button {
+  box-shadow: var(--active-control-focus-shadow-compact);
+  font: 700 var(--ui-font-size-sm)/1.1 var(--ui-font);
+}
+.preferences-search-button:hover,
+.preferences-search-button:focus-visible {
+  background: color-mix(in srgb, var(--active-control-bg) 84%, var(--paint-white) 16%);
+  border-color: var(--active-control-border);
+}
+.preferences-global-reset {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-12);
+  margin-top: var(--space-12);
+  padding: var(--space-10);
+  color: var(--30-preferences-changes-preferences-global-reset-fg-66);
+  background: var(--30-preferences-changes-preferences-global-reset-bg-67);
+  border: 1px solid var(--danger-panel-border);
+  border-radius: var(--radius-md);
+
+
+  border-color: var(--30-preferences-changes-preferences-global-reset-border-68);
+}
+.preferences-global-reset.confirming {
+  background: var(--30-preferences-changes-preferences-global-reset-bg-69);
+  border-color: var(--30-preferences-changes-preferences-global-reset-border-70);
+  box-shadow: 0 0 0 2px var(--danger-panel-confirming-ring);
+}
+.preferences-global-reset-title {
+  color: var(--30-preferences-changes-preferences-global-reset-title-fg-71);
+  font: 700 var(--ui-font-size-sm)/1.2 var(--ui-font);
+}
+.preferences-global-reset-warning {
+  margin-top: var(--space-3);
+  color: var(--30-preferences-changes-preferences-global-reset-warning-fg-72);
+  font: 600 var(--ui-font-size-xs)/1.28 var(--ui-font);
+}
+.preferences-global-reset .preferences-reset-all {
+  color: var(--danger-action-text);
+  background: var(--30-preferences-changes-preferences-global-reset-bg-73);
+  border-color: var(--30-preferences-changes-preferences-global-reset-border-74);
+  font: 600 var(--ui-font-size-sm)/1.1 var(--ui-font);
+}
+.preferences-global-reset .preferences-reset-all:hover,
+.preferences-global-reset .preferences-reset-all:focus-visible {
+  background: var(--30-preferences-changes-preferences-global-reset-bg-75);
+  border-color: var(--30-preferences-changes-preferences-global-reset-border-76);
+}
+.preferences-reset-confirm {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-8);
+  justify-content: flex-end;
+}
+.preferences-reset-continue,
+.preferences-reset-cancel {
+  height: 26px;
+  padding: 0 var(--space-9);
+  border-radius: 5px;
+  font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
+}
+.preferences-reset-continue {
+  color: var(--danger-confirm-text);
+  background: var(--danger-confirm-bg);
+  border-color: var(--danger-confirm-border);
+}
+.preferences-reset-cancel {
+  color: var(--text);
+  background: var(--30-preferences-changes-preferences-reset-cancel-bg-77);
+  border-color: var(--30-preferences-changes-preferences-reset-cancel-border-78);
+}
+
+.command-palette {
+  z-index: var(--z-ref-suggestion);
+  align-items: start;
+  justify-items: center;
+  padding: min(12vh, 96px) var(--popover-edge-gap) var(--popover-edge-gap);
+}
+.command-palette[hidden] {
+  display: none;
+}
+.command-palette-dialog {
+  width: min(var(--dialog-standard-inline-size), var(--popover-max-inline-size));
+  max-height: min(70vh, 760px);
+  overflow: hidden;
+  color: var(--text);
+  background: var(--30-preferences-changes-command-palette-dialog-bg-45);
+  border: var(--app-modal-border-width) solid var(--app-modal-border-color);
+  border-radius: var(--radius-lg);
+  box-shadow:
+    var(--30-preferences-changes-command-palette-dialog-shadow-47);
+
+
+  border-color: var(--30-preferences-changes-command-palette-dialog-border-46);
+}
+.command-palette-input {
+  width: 100%;
+  height: 38px;
+  padding: var(--space-7) var(--space-10);
+  color: var(--text);
+  background: var(--30-preferences-changes-command-palette-input-bg-51);
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  outline: 0;
+  font: var(--ui-font-size-lg)/1.2 var(--ui-font);
+}
+.command-palette-status {
+  padding: var(--space-4) var(--space-10) var(--space-5);
+  color: var(--muted);
+  background: rgb(var(--overlay-slate-rgb) / 0.28);
+  border-bottom: 1px solid var(--line);
+  font: 700 var(--ui-font-size-2xs)/1 var(--mono-font);
+}
+.command-palette-status::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-inline-end: var(--space-7);
+  border-radius: var(--radius-pill);
+  background: var(--accent-gold);
+  vertical-align: 1px;
+}
+/* A freshness warning is a settled fact, not work in progress: the shared dot stops pulsing, and the
+   sentence itself (not the colour) carries the meaning. */
+.command-palette-status.stale::before {
+  animation: none;
+}
+.command-palette-freshness {
+  display: inline-block;
+  max-width: 100%;
+  line-height: 1.35;
+  white-space: normal;
+}
+.command-palette-status::before,
+.yoagent-message.assistant.streaming .yoagent-message-role::after {
+  animation: command-palette-thinking var(--motion-activity-duration) ease-in-out infinite alternate;
+}
+@keyframes command-palette-thinking {
+  from { opacity: 0.35; }
+  to { opacity: 1; }
+}
+.command-palette-results {
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-5);
+}
+.command-palette-row {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr) auto;
+  gap: var(--space-8);
+  align-items: center;
+  padding: var(--space-5) var(--space-7);
+  color: var(--30-preferences-changes-command-palette-row-fg-52);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  text-align: start;
+  font: var(--ui-font-size-sm)/1.25 var(--ui-font);
+  cursor: pointer;
+}
+.command-palette-row.active,
+.command-palette-row:hover {
+  color: var(--30-preferences-changes-command-palette-row-fg-53);
+  background: var(--30-preferences-changes-command-palette-row-bg-54);
+  border-color: var(--30-preferences-changes-command-palette-row-border-55);
+}
+.command-palette-group,
+.command-palette-keybinding {
+  color: var(--30-preferences-changes-command-palette-group-fg-56);
+  font: 700 var(--ui-font-size-2xs)/1 var(--mono-font);
+}
+.command-palette-group {
+  text-transform: uppercase;
+}
+.command-palette-main {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+.command-palette-file-icon {
+  flex: 0 0 auto;
+  width: 18px;
+  text-align: center;
+  font-size: var(--ui-font-size-sm);
+}
+.command-palette-label,
+.command-palette-detail {
+  min-width: 0;
+}
+.command-palette-label {
+  font-weight: 700;
+}
+/* view-mode chips on a deduped file row (one row for a file open as editor + preview). */
+.command-palette-views {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+.command-palette-view-chip {
+  padding: 0 var(--space-5);
+  border: 1px solid var(--active-control-soft-border);
+  border-radius: var(--radius-pill);
+  color: var(--text);
+  background: var(--active-control-soft-bg);
+  font: 700 var(--ui-font-size-3xs)/1.5 var(--mono-font);
+  text-transform: lowercase;
+  cursor: pointer;   /* follow-up: chips are clickable — jump to that view */
+}
+.command-palette-view-chip:hover {
+  border-color: var(--active-control-border);
+  color: var(--text);
+}
+.command-palette-label .fuzzy-match,
+.command-palette-detail .fuzzy-match {
+  padding: 0;
+  color: #081205;
+  background: #a6e35f;
+  border-radius: 0;
+  box-decoration-break: clone;
+}
+.command-palette-detail {
+  color: var(--30-preferences-changes-command-palette-detail-fg-57);
+  font: var(--ui-font-size-xs)/1.2 var(--mono-font);
+}
+.command-palette-keybinding {
+  justify-self: end;
+  white-space: nowrap;
+}
+.command-palette-empty {
+  padding: 18px var(--space-10);
+  color: var(--muted);
+  text-align: center;
+}
+.keyboard-shortcuts-overlay {
+  z-index: var(--z-file-conflict-dialog);
+  align-items: center;
+  justify-items: center;
+  padding: var(--popover-edge-gap);
+}
+.keyboard-shortcuts-overlay[hidden] {
+  display: none;
+}
+.keyboard-shortcuts-dialog {
+  width: min(var(--dialog-wide-inline-size), var(--popover-max-inline-size));
+  min-inline-size: 0;
+  max-height: min(92vh, 900px);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  color: var(--text);
+  background: var(--30-preferences-changes-keyboard-shortcuts-dialog-bg-48);
+  border: var(--app-modal-border-width) solid var(--app-modal-border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--30-preferences-changes-keyboard-shortcuts-dialog-shadow-50);
+
+
+  border-color: var(--30-preferences-changes-keyboard-shortcuts-dialog-border-49);
+}
+.keyboard-shortcuts-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-12);
+  padding: var(--space-7) var(--space-10);
+  border-bottom: 1px solid var(--line);
+}
+.keyboard-shortcuts-head h2 {
+  margin: 0;
+  font: 800 var(--ui-font-size-lg)/1.2 var(--ui-font);
+}
+.keyboard-shortcuts-close {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
+.keyboard-shortcuts-close:hover,
+.keyboard-shortcuts-close:focus-visible {
+  border-color: var(--accent-gold);
+  background: var(--30-preferences-changes-keyboard-shortcuts-close-bg-58);
+}
+.keyboard-shortcuts-body {
+  min-height: 0;
+  min-inline-size: 0;
+  overflow: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
+  align-items: start;
+  gap: var(--space-8) var(--space-10);
+  padding: var(--space-8) var(--space-10) var(--space-10);
+}
+.keyboard-shortcuts-column {
+  min-width: 0;
+  min-inline-size: 0;
+  display: grid;
+  align-content: start;
+  gap: var(--space-8);
+}
+.keyboard-shortcuts-section {
+  min-width: 0;
+  min-inline-size: 0;
+}
+.keyboard-shortcuts-section h3 {
+  margin: 0 0 var(--space-4);
+  color: var(--active-accent-bright);
+  font: 800 var(--ui-font-size-xs)/1.1 var(--mono-font);
+  text-transform: uppercase;
+}
+.keyboard-shortcuts-list {
+  min-inline-size: 0;
+  display: grid;
+  gap: var(--space-1);
+}
+.keyboard-shortcut-row,
+.keyboard-legend-row {
+  display: grid;
+  gap: var(--space-6);
+  align-items: center;
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--paint-white-06);
+  font: var(--ui-font-size-sm)/1.25 var(--ui-font);
+}
+.keyboard-shortcut-row {
+  min-inline-size: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+
+
+  border-bottom-color: var(--30-preferences-changes-keyboard-shortcut-row-border-bottom-59);
+}
+.keyboard-shortcut-row kbd {
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: var(--space-1) var(--space-4);
+  color: var(--30-preferences-changes-keyboard-shortcut-row-fg-61);
+  background: var(--30-preferences-changes-keyboard-shortcut-row-bg-62);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: var(--radius-control);
+  font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
+  white-space: nowrap;
+
+
+  border-color: var(--30-preferences-changes-keyboard-shortcut-row-border-63);
+}
+.keyboard-legend-row {
+  grid-template-columns: minmax(34px, max-content) minmax(0, 1fr);
+
+
+  border-bottom-color: var(--30-preferences-changes-keyboard-legend-row-border-bottom-60);
+}
+.keyboard-legend-sample {
+  min-width: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--space-4);
+  color: var(--text);
+}
+.keyboard-legend-text {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-1);
+}
+.keyboard-legend-label {
+  color: var(--text);
+  font-weight: 800;
+}
+@media (max-width: 520px) {
+  .keyboard-shortcuts-overlay {
+    align-items: stretch;
+    padding: var(--space-4);
+  }
+  .keyboard-shortcuts-dialog {
+    width: 100%;
+    max-height: calc(100vh - var(--space-8));
+  }
+  .keyboard-shortcuts-head {
+    gap: var(--space-6);
+    padding: var(--space-6) var(--space-7);
+  }
+  .keyboard-shortcuts-head h2 {
+    min-width: 0;
+    font-size: var(--ui-font-size-sm);
+  }
+  .keyboard-shortcuts-body {
+    min-inline-size: 0;
+    overflow-x: hidden;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-7);
+    padding: var(--space-7);
+  }
+  .keyboard-shortcut-row {
+    gap: var(--space-4);
+  }
+  .keyboard-shortcut-row > span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+}
+.keyboard-legend-detail {
+  color: var(--muted);
+  font-size: var(--ui-font-size-2xs);
+}
+.keyboard-legend-swatch {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--paint-white-28);
+  box-shadow: var(--30-preferences-changes-keyboard-legend-swatch-shadow-65);
+
+
+  border-color: var(--30-preferences-changes-keyboard-legend-swatch-border-64);
+}
+.keyboard-legend-swatch-merged {
+  background: var(--pr-status-merged);
+}
+.keyboard-legend-swatch-closed {
+  background: var(--pr-status-closed);
+}
+.keyboard-legend-meta {
+  padding: var(--space-1) var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  font: 800 var(--ui-font-size-3xs)/1.15 var(--mono-font);
+  white-space: nowrap;
+}
+.keyboard-legend-meta-branch {
+  color: var(--pane-meta-branch);
+}
+.keyboard-legend-pin {
+  color: var(--text);
+}
+.keyboard-legend-sample .session-yolo-marker {
+  transform: none;
+}
+.preferences-setting-control {
+  --preferences-control-left-indent: 14px;
+  --preferences-number-control-width: 11ch;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--space-6);
+}
+.preferences-setting-row--wide .preferences-setting-control {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+}
+.preferences-setting-control input[type="number"],
+.preferences-setting-control input[type="text"],
+.preferences-setting-control select,
+.preferences-setting-control textarea {
+  min-width: 0;
+  width: 100%;
+  background: var(--30-preferences-changes-preferences-setting-control-bg-14);
+  font: var(--ui-font-size-sm) var(--mono-font);
+  padding: var(--space-5) var(--space-6);
+}
+.preferences-setting-control input[type="checkbox"] {
+  justify-self: start;
+  margin-inline-start: var(--preferences-control-left-indent);
+}
+.preferences-setting-control.setting-type-range {
+  grid-template-columns: minmax(calc(var(--preferences-control-left-indent) + 140px), 1fr) 4ch auto minmax(0, 1fr) auto;
+}
+.preferences-setting-control.setting-type-range input[type="range"] {
+  min-width: 140px;
+  width: 100%;
+  justify-self: stretch;
+  margin-inline-start: var(--preferences-control-left-indent);
+  accent-color: var(--active-control-bg);
+}
+.preferences-setting-control.setting-type-range .preferences-range-value {
+  grid-column: 2;
+  min-width: 4ch;
+  color: var(--text);
+  font: 700 var(--ui-font-size-sm)/1 var(--mono-font);
+  text-align: end;
+}
+.preferences-setting-control.setting-type-range .preferences-setting-suffix {
+  grid-column: 3;
+  justify-self: start;
+}
+.preferences-setting-control.setting-type-range .preferences-reset {
+  grid-column: 5;
+  justify-self: end;
+}
+.preferences-setting-control.setting-type-number {
+  grid-template-columns: calc(var(--preferences-control-left-indent) + var(--preferences-number-control-width)) auto minmax(0, 1fr) auto;
+}
+.preferences-setting-control.setting-type-select,
+.preferences-setting-control.setting-type-text {
+  justify-content: start;
+}
+.preferences-setting-control.setting-type-number input[type="number"] {
+  width: var(--preferences-number-control-width);
+  justify-self: start;
+  margin-inline-start: var(--preferences-control-left-indent);
+  padding-inline-end: 18px;
+}
+.preferences-setting-control.setting-type-number .preferences-setting-suffix {
+  grid-column: 2;
+  justify-self: start;
+}
+.preferences-setting-control.setting-type-number .preferences-reset {
+  grid-column: 4;
+  justify-self: end;
+}
+.preferences-setting-control.setting-type-text input[type="text"],
+.preferences-setting-control.setting-type-select select {
+  width: min(calc(100% - var(--preferences-control-left-indent)), 24ch);
+  justify-self: start;
+  margin-inline-start: var(--preferences-control-left-indent);
+}
+.preferences-setting-control.setting-type-select select[data-setting-path="yoagent.claude_model"],
+.preferences-setting-control.setting-type-select select[data-setting-path="yoagent.codex_model"] {
+  width: min(calc(100% - var(--preferences-control-left-indent)), 42ch);
+}
+.preferences-setting-control.setting-type-list textarea,
+.preferences-setting-control.setting-type-textarea textarea {
+  width: calc(100% - var(--preferences-control-left-indent));
+  justify-self: start;
+  margin-inline-start: var(--preferences-control-left-indent);
+}
+.preferences-setting-row--wide .preferences-setting-control textarea {
+  grid-column: 1 / -1;
+  width: 100%;
+  margin-inline-start: 0;
+  min-height: 5lh;
+}
+/* #38: long-value text/select fields (e.g. the upload filename template, the YOLO rule path) render
+   as full-width --wide rows so the whole value is visible instead of clipping at the 24ch cap. */
+.preferences-setting-row--wide .preferences-setting-control.setting-type-text input[type="text"],
+.preferences-setting-row--wide .preferences-setting-control.setting-type-select select {
+  width: 100%;
+  margin-inline-start: 0;
+}
+.preferences-setting-row--wide .preferences-reset {
+  justify-self: end;
+}
+.preferences-setting-control textarea {
+  resize: vertical;
+}
+.preferences-setting-control textarea[data-setting-autosize="true"] {
+  overflow-y: hidden;
+}
+.preferences-setting-suffix {
+  color: var(--muted);
+  font-size: var(--ui-font-size-xs);
+}
+.preferences-status-pulse-example {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-8);
+  margin-top: var(--space-4);
+}
+.preferences-status-pulse-example-group {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+.preferences-status-pulse-marker,
+.preferences-status-pulse-marker .agent-window-activity {
+  margin-inline-start: 0;
+}
+.preferences-status-pulse-example .tmux-window-button {
+  min-width: 0;
+  padding: 0;
+  background: transparent;
+}
+.preferences-reset,
+.preferences-inline-action {
+  min-width: 0;
+  height: 24px;
+  padding: 0 var(--space-7);
+  border-radius: var(--radius-control);
+  font-size: var(--ui-font-size-xs);
+}
+.preferences-inline-action {
+  border-color: var(--active-control-soft-border);
+  color: var(--active-control-bg);
+}
+.branch-list {
+  margin-top: var(--space-8);
+  padding-top: var(--space-8);
+  border-top: 1px solid rgba(82, 95, 116, 0.42);
+}
+.branch-list-title {
+  color: var(--neutral-text-cool);
+  font-weight: 600;
+  font-size: var(--ui-font-size-sm);
+  margin-bottom: var(--space-6);
+}
+.branch-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-8);
+  padding: var(--space-4) 0;
+  font: inherit;
+}
+.branch-meta {
+  color: var(--text-muted-strong);
+  white-space: nowrap;
+}
+.branch-subject {
+  grid-column: 1 / -1;
+  color: var(--text-muted-cool);
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.agent-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-inline-start: var(--space-4);
+  width: 24px;
+  min-width: 24px;
+  height: 18px;
+  padding: 0 var(--space-3);
+  box-sizing: border-box;
+  border: 0;
+  background: transparent;
+  vertical-align: -4px;
+  overflow: visible;
+}
+.agent-icon svg {
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+.agent-icon.codex {
+  color: var(--30-preferences-changes-agent-icon-fg-79);
+}
+.agent-icon.codex svg {
+  transform: scale(1.16);
+  transform-origin: center;
+}
+.agent-icon.claude {
+  color: var(--30-preferences-changes-agent-icon-fg-80);
+}
+.agent-icon.opencode {
+  color: var(--accent);
+}
+
+/* Theme-token consumers without a pre-existing local owner. */
+.preferences-setting-advisory .preferences-inline-action {
+
+  color: var(--30-preferences-changes-preferences-setting-advisory-fg-25);
+  background: var(--30-preferences-changes-preferences-setting-advisory-bg-26);
+  border-color: var(--30-preferences-changes-preferences-setting-advisory-border-27);
+}
+body .file-explorer-changes-panel {
+
+  --changes-row-hover-bg: var(--changes-tree-row-hover-bg);
+  --changes-folder-bg: var(--30-preferences-changes-file-explorer-changes-panel-changes-folder-bg-29);
+  --changes-indent-line: var(--changes-tree-indent-line);
+  --changes-path-text: var(--30-preferences-changes-file-explorer-changes-panel-changes-path-text-31);
+  --changes-icon-text: var(--changes-tree-icon-text);
+}

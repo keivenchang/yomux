@@ -1,0 +1,37 @@
+name: loop-send
+kind: workflow
+description: >-
+  Schedule a bounded repeated prompt for one verified Claude/Codex tmux session. The isolated planner may only select a known session, exact prompt, interval from five seconds through one hour, and a maximum of one through one hundred sends. Loops start immediately without confirmation, but remain cancellable. The server owns persistence, cancellation, timeout, interval scheduling, target readiness checks, and each verified send; it never creates an unbounded client timer or grants the planner shell or tmux access.
+tools:
+  - read_activity
+  - preview_send_prompt
+  - execute_confirmed_send
+triggers:
+  - every 30 seconds ask session 1 for status ten times
+  - repeat a check in agent 2 until the bounded run count is reached
+confirmation: none
+default_timeout_minutes: 120
+model_intent:
+  handler: loop-send
+  confirmation: none
+  defaults:
+    interval_seconds: 30
+    max_runs: 10
+  candidate:
+    any_of:
+      - loop
+      - repeat
+      - periodically
+      - every
+    require_any:
+      - ask
+      - tell
+      - send
+      - run
+      - have
+    min_known_sessions: 1
+    session_scope: request
+    priority: 100
+  output:
+    tag: yoagent-loop-plan
+    schema: loop-send

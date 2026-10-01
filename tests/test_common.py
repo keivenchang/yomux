@@ -1,0 +1,261 @@
+import ast
+from pathlib import Path
+import signal
+import subprocess
+from types import SimpleNamespace
+
+import pytest
+
+from tests.source_inventory import parsed_python_source
+from tests.source_inventory import python_source_paths
+from yomux_lib import agent_tui
+from yomux_lib import app
+from yomux_lib import common
+from yomux_lib import session_files
+from yomux_lib import version
+from yomux_lib import web
+from yomux_lib.filesystem import git_ops
+from yomux_lib.tmux import process_group_ownership
+from yomux_lib.yoagent import conversation
+
+
+def test_package_and_runtime_versions_use_one_source():
+    root = Path(common.PROJECT_ROOT)
+    version_source = (root / "yomux_lib" / "version.py").read_text(encoding="utf-8")
+    version_match = common.YOMUX_VERSION_ASSIGNMENT_RE.search(version_source)
+    assert version_match is not None
+    assert version_match.group(1) == version.YOMUX_VERSION == common.YOMUX_VERSION
+    assert 'version = { attr = "yomux_lib.version.YOMUX_VERSION" }' in (root / "pyproject.toml").read_text(encoding="utf-8")
+    assert "YOMUX_VERSION = \"" not in (root / "yomux_lib" / "common.py").read_text(encoding="utf-8")
+    assert "YOMUX_VERSION = \"" not in (root / "yomux_lib" / "infra" / "common.py").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("variable", ("YOMUX_VERSION", "YOLOMUX_VERSION"))
+def test_version_source_parser_accepts_current_and_historical_names(variable):
+    assert common.parse_yomux_version_source(f'{variable} = "0.9.5"\n') == "0.9.5"
+
+
+def test_git_version_reader_falls_back_to_historical_package_path(monkeypatch):
+    calls = []
+
+    def fake_git(args, cwd, timeout=3.0):
+        calls.append(args)
+        if args == ["show", "v0.9.5:yomux_lib/version.py"]:
+            return SimpleNamespace(returncode=128, stdout="", stderr="path not found")
+        if args == ["show", "v0.9.5:yolomux_lib/version.py"]:
+            return SimpleNamespace(returncode=0, stdout='YOLOMUX_VERSION = "0.9.5"\n', stderr="")
+        raise AssertionError(f"unexpected git args: {args}")
+
+    monkeypatch.setattr(common, "git", fake_git)
+    assert common.git_yomux_version_at_ref("/repo", "v0.9.5") == ("0.9.5", None)
+    assert calls == [
+        ["show", "v0.9.5:yomux_lib/version.py"],
+        ["show", "v0.9.5:yolomux_lib/version.py"],
+    ]
+
+
+def test_record_owned_thread_starts_use_shared_rollback_owner():
+    root = Path(common.PROJECT_ROOT)
+    owners = {
+        "yomux_lib/app.py": {
+            "start_client_event_watcher",
+            "start_watchd_revision_watcher",
+            "start_input_heartbeat_worker",
+            "start_tabber_activity_cache_refresh",
+            "start_tabber_activity_cache_warmer",
+            "indexed_repo_roots_snapshot",
+            "warm_metadata_cache_async",
+            "start_update_check_thread",
+        },
+        "yomux_lib/search/file_index.py": {"_start_build"},
+        "yomux_lib/yoagent/controller.py": {
+            "start_yoagent_action_result_watcher",
+            "start_yoagent_backend_prewarm",
+        },
+    }
+    for relative, names in owners.items():
+        source, tree = parsed_python_source(root / relative)
+        functions = {
+            node.name: ast.get_source_segment(source, node) or ""
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name in names
+            and "start_thread_with_rollback(" in (ast.get_source_segment(source, node) or "")
+        }
+        assert set(functions) == names
+        for name, function_source in functions.items():
+            assert "start_thread_with_rollback(" in function_source, f"{relative}:{name}"
+            assert ".start()" not in function_source, f"{relative}:{name}"
+
+    rolled_back = []
+
+    class FailedWorker:
+        def start(self):
+            raise RuntimeError("cannot start")
+
+    with pytest.raises(RuntimeError, match="cannot start"):
+        common.start_thread_with_rollback(FailedWorker(), lambda: rolled_back.append(True))
+    assert rolled_back == [True]
+
+
+def test_main_process_cpu_work_has_named_allowlist():
+    root = Path(common.PROJECT_ROOT)
+    app_path = root / "yomux_lib" / "app.py"
+    source, tree = parsed_python_source(app_path)
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+
+    def owner_name(node):
+        parent = node
+        while parent in parents:
+            parent = parents[parent]
+            if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return parent.name
+        return "<module>"
+
+    threadpool_owners = {
+        owner_name(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and node.id == "ThreadPoolExecutor"
+    }
+    assert threadpool_owners == set()
+
+    thread_owners = {
+        owner_name(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "threading"
+        and node.func.attr in {"Thread", "Timer"}
+    }
+    assert thread_owners == {
+        "chat_yoagent",
+        "indexed_repo_roots_snapshot",
+        "invalidate_status_topology_async",
+        "start_client_event_watcher",
+        "start_client_watch_snapshot_publish",
+        "start_input_heartbeat_worker",
+        "start_watchd_revision_watcher",
+        "start_session_files_cache_refresh",
+        "start_status_generation_watcher",
+        "start_tabber_activity_cache_refresh",
+        "start_tabber_activity_cache_warmer",
+        "_start_transcripts_payload_refresh",
+        "start_update_check_thread",
+        "warm_metadata_cache_async",
+        "schedule_tmux_roster_rebuild",
+    }
+
+    retired_patterns = (
+        "AutoApproveWorker(",
+        "AutoApproveWorkerRecord",
+        "auto_worker_records",
+        "record_stats_process_sample",
+        "stats_history_encode_records_locked",
+        "stats_history_bucket_seconds",
+        "merge_shared_stats_history",
+        "write_shared_stats_history",
+    )
+    for pattern in retired_patterns:
+        assert pattern not in source
+
+    batchd_source = (root / "yomux_lib" / "infra" / "batchd.py").read_text(encoding="utf-8")
+    assert '"transcript_view": _transcript_view' in batchd_source
+    routes_source = (root / "yomux_lib" / "http_routes.py").read_text(encoding="utf-8")
+    assert routes_source.count("write_json_bytes(result.body, status=result.status)") == 2
+
+
+def test_positive_finite_number_normalizes_counter_inputs():
+    assert common.positive_finite_number("3.5") == 3.5
+    assert common.positive_finite_number(0) == 0.0
+    assert common.positive_finite_number(-1) == 0.0
+    assert common.positive_finite_number(float("inf")) == 0.0
+    assert common.positive_finite_number(float("nan")) == 0.0
+    assert common.positive_finite_number("invalid") == 0.0
+
+
+def test_backend_primitive_consumers_share_the_canonical_owners():
+    assert app.normalized_prompt_state is agent_tui.normalized_prompt_state
+    assert app.cached_agent_auth_status_snapshot is web.bootstrap_agent_auth_status
+    assert app.sanitized_yoagent_stream_items is conversation.sanitized_stream_items
+    assert session_files.normal_ref is git_ops.normal_ref
+    assert session_files.diff_refs is git_ops.diff_refs
+    assert session_files.refs_requested is git_ops.refs_requested
+
+    calls = []
+
+    class SignatureOwner:
+        def stable_client_event_signature_payload(self, payload):
+            calls.append(payload)
+            return {"owned": payload}
+
+    payload = {"value": 1}
+    assert app.TmuxWebtermApp.tmux_signal_signature_payload(SignatureOwner(), payload) == {"owned": payload}
+    assert calls == [payload]
+
+
+def test_backend_primitive_implementation_bodies_have_one_owner():
+    root = Path(common.PROJECT_ROOT) / "yomux_lib"
+    functions = []
+    for path in python_source_paths(str(root)):
+        _source, tree = parsed_python_source(path)
+        functions.extend((path, node) for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)))
+
+    owner_names = {
+        "normalized_prompt_state",
+        "sanitized_stream_items",
+        "positive_finite_number",
+        "normal_ref",
+        "diff_refs",
+        "refs_requested",
+        "bootstrap_agent_auth_status",
+        "healed_runtime_path",
+    }
+    owners = {node.name: (path, node) for path, node in functions if node.name in owner_names}
+    assert set(owners) == owner_names
+
+    for owner_name, (owner_path, owner) in owners.items():
+        fingerprint = ast.dump(ast.Module(body=owner.body, type_ignores=[]), include_attributes=False)
+        matches = [
+            f"{path.relative_to(root)}:{node.name}"
+            for path, node in functions
+            if ast.dump(ast.Module(body=node.body, type_ignores=[]), include_attributes=False) == fingerprint
+        ]
+        assert matches == [f"{owner_path.relative_to(root)}:{owner_name}"]
+
+
+def test_terminate_process_group_waits_after_sigkill(monkeypatch):
+    calls = []
+
+    class FakeProcess:
+        pid = 12345
+        waits = 0
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            calls.append(("wait", timeout))
+            self.waits += 1
+            if self.waits == 1:
+                raise subprocess.TimeoutExpired("cmd", timeout)
+            return 0
+
+    process = FakeProcess()
+    monkeypatch.setattr(process_group_ownership.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(process_group_ownership.os, "killpg", lambda pid, sig: calls.append(("killpg", pid, sig)))
+    monkeypatch.setattr(process_group_ownership, "process_start_identity", lambda pid: "fixture-start")
+    process_group_ownership.record_owned_process_group(process)
+
+    common.terminate_process_group(process)
+
+    assert calls == [
+        ("killpg", 12345, signal.SIGTERM),
+        ("wait", 2.0),
+        ("killpg", 12345, signal.SIGKILL),
+        ("wait", 2.0),
+    ]

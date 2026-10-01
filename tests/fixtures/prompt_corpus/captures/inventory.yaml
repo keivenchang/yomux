@@ -1,0 +1,683 @@
+filename_convention: case_name__client-token_date
+capture_library:
+  client: OpenCode
+  client_version: 1.18.25
+  formats:
+  - raw_capture: plain tmux text after capture-pane -J
+  - styled_capture: tmux text after capture-pane -e -J, retaining SGR attributes
+  - visible_text: normalized plain text used by the detector
+  normalization_owner: yomux_lib/tmux/tmux_utils.py:tmux_capture_pane
+  wrap_contract: capture-pane -J rejoins visual wraps; parser preserves logical values and real choice/footer boundaries
+  private_live_samples:
+  - pane: yo7220:0.0
+    shape: idle completed output
+    size: 146x63
+    title_shape: OC | <session title>
+  - pane: yo7220:1.0
+    shape: working Build footer with esc interrupt and tool rows
+    size: 142x63
+    title_shape: OC | "<session title>..."
+fixtures:
+- agent: claude
+  capture_date: '2026-06-20'
+  case_name: ask_user_question
+  client_name: Claude Code
+  client_version: 2.1.183 (Claude Code)
+  client_version_slug: claude-code-2.1.183
+  description: Claude AskUserQuestion needs-input prompt
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: question
+    attention_label: Question
+    composer_key: empty
+    reason_code: needs-input
+    screen_key: needs-input
+  file: ask_user_question__claude-code-2.1.183_20260620.yaml
+  id: ask_user_question__claude-code-2.1.183_20260620
+  scenario: ask_user_question
+  source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T105555Z.yaml
+- agent: claude
+  capture_date: '2026-06-24'
+  case_name: ask_user_question_no_selector_accessible
+  client_name: Claude Code
+  client_version: 2.1.190 (Claude Code)
+  client_version_slug: claude-code-2.1.190
+  description: Claude AskUserQuestion no-selector prompt in accessible screen-reader mode, captured at 240 columns
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: question
+    attention_label: Question
+    composer_key: empty
+    reason_code: needs-input
+    screen_key: needs-input
+  file: ask_user_question_no_selector_accessible__claude-code-2.1.190_20260624.yaml
+  id: ask_user_question_no_selector_accessible__claude-code-2.1.190_20260624
+  scenario: ask_user_question_no_selector_accessible
+  source: real Claude Code accessible AskUserQuestion no-selector capture from wide tmux test-wide-ask-30bf57be:0.0
+- agent: claude
+  capture_date: '2026-06-21'
+  case_name: ask_user_question_selected_option
+  client_name: Claude Code
+  client_version: 2.1.185 (Claude Code)
+  client_version_slug: claude-code-2.1.185
+  description: Claude AskUserQuestion highlighted selected-option prompt
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: question
+    attention_label: Question
+    composer_key: empty
+    reason_code: needs-input
+    screen_key: needs-input
+  file: ask_user_question_selected_option__claude-code-2.1.185_20260621.yaml
+  id: ask_user_question_selected_option__claude-code-2.1.185_20260621
+  scenario: ask_user_question_selected_option
+  source: real Claude AskUserQuestion highlighted selector from tmux 1:2.0
+- agent: claude
+  capture_date: '2026-06-22'
+  case_name: parser_dependency_choice_question
+  client_name: Claude Code
+  client_version: 2.1.185 (Claude Code)
+  client_version_slug: claude-code-2.1.185
+  description: Claude AskUserQuestion selected-option parser dependency choice prompt
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: question
+    attention_label: Question
+    composer_key: empty
+    reason_code: needs-input
+    screen_key: needs-input
+  file: parser_dependency_choice_question__claude-code-2.1.185_20260622.yaml
+  id: parser_dependency_choice_question__claude-code-2.1.185_20260622
+  scenario: parser_dependency_choice_question
+  source_staging_file: staging/agent_tui__claude-code-2.1.185_20260622T185445Z.yaml
+- agent: claude
+  capture_date: '2026-06-21'
+  case_name: interrupted_what_should_claude_do_instead
+  client_name: Claude Code
+  client_version: 2.1.185 (Claude Code)
+  client_version_slug: claude-code-2.1.185
+  description: Claude interrupted awaiting-user-instruction prompt
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: question
+    attention_label: Question
+    composer_key: empty
+    reason_code: needs-input
+    screen_key: needs-input
+  file: interrupted_what_should_claude_do_instead__claude-code-2.1.185_20260621.yaml
+  id: interrupted_what_should_claude_do_instead__claude-code-2.1.185_20260621
+  scenario: interrupted_what_should_claude_do_instead
+  source: real Claude interrupted awaiting-user-instruction capture from scratch tmux yoreal-claude-capture:0.0, trimmed to the visible prompt area for replay
+- agent: claude
+  capture_date: '2026-06-20'
+  case_name: composing_tip_not_question
+  client_name: Claude Code
+  client_version: 2.1.183 (Claude Code)
+  client_version_slug: claude-code-2.1.183
+  description: 'Negative: Claude composing Tip chrome is not a user question'
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: ''
+    attention_label: ''
+    composer_key: empty
+    reason_code: idle
+    screen_key: idle
+  file: composing_tip_not_question__claude-code-2.1.183_20260620.yaml
+  id: composing_tip_not_question__claude-code-2.1.183_20260620
+  scenario: composing_tip_not_question
+  source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T111001Z.yaml
+- agent: claude
+  capture_date: '2026-06-20'
+  case_name: idle_empty_prompt
+  client_name: Claude Code
+  client_version: 2.1.183 (Claude Code)
+  client_version_slug: claude-code-2.1.183
+  description: Claude idle empty prompt
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: ''
+    attention_label: ''
+    composer_key: empty
+    reason_code: idle
+    screen_key: idle
+  file: idle_empty_prompt__claude-code-2.1.183_20260620.yaml
+  id: idle_empty_prompt__claude-code-2.1.183_20260620
+  scenario: idle_empty_prompt
+  source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T110814Z.yaml
+- agent: claude
+  capture_date: '2026-06-20'
+  case_name: idle_ghost_suggestion
+  client_name: Claude Code
+  client_version: 2.1.183 (Claude Code)
+  client_version_slug: claude-code-2.1.183
+  description: Claude idle prompt with ghost suggestion
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: ''
+    attention_label: ''
+    composer_key: ghost
+    reason_code: idle
+    screen_key: idle
+  file: idle_ghost_suggestion__claude-code-2.1.183_20260620.yaml
+  id: idle_ghost_suggestion__claude-code-2.1.183_20260620
+  scenario: idle_ghost_suggestion
+  source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T111523Z.yaml
+- agent: claude
+  capture_date: '2026-06-19'
+  case_name: plan_approval_real
+  client_name: Claude Code
+  client_version: 2.1.183 (Claude Code)
+  client_version_slug: claude-code-2.1.183
+  description: Claude plan approval with selected option
+  expected:
+    agent_kind: claude
+    approval_type: plan
+    approval_visible: true
+    attention_kind: approval
+    attention_label: YOLO?
+    composer_key: empty
+    reason_code: approval
+    screen_key: approval
+  file: plan_approval_real__claude-code-2.1.183_20260619.yaml
+  id: plan_approval_real__claude-code-2.1.183_20260619
+  scenario: plan_approval_real
+  source: real capture
+- agent: claude
+  capture_date: '2026-06-20'
+  case_name: plan_approval_selected_option
+  client_name: Claude Code
+  client_version: 2.1.183 (Claude Code)
+  client_version_slug: claude-code-2.1.183
+  description: Claude plan approval with selected option
+  expected:
+    agent_kind: claude
+    approval_type: plan
+    approval_visible: true
+    attention_kind: approval
+    attention_label: YOLO?
+    composer_key: empty
+    reason_code: approval
+    screen_key: approval
+  file: plan_approval_selected_option__claude-code-2.1.183_20260620.yaml
+  id: plan_approval_selected_option__claude-code-2.1.183_20260620
+  scenario: plan_approval_selected_option
+  source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T111057Z.yaml
+- agent: claude
+  capture_date: '2026-06-20'
+  case_name: typed_nbsp_draft
+  client_name: Claude Code
+  client_version: 2.1.183 (Claude Code)
+  client_version_slug: claude-code-2.1.183
+  description: 'Negative: Claude NBSP composer text with advanced cursor is a clearable draft, not a ghost prompt'
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: ''
+    attention_label: ''
+    composer_key: ghost
+    reason_code: draft-clearable
+    screen_key: input-draft
+  file: typed_nbsp_draft__claude-code-2.1.183_20260620.yaml
+  id: typed_nbsp_draft__claude-code-2.1.183_20260620
+  scenario: typed_nbsp_draft
+  source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T104236Z.yaml
+- agent: claude
+  capture_date: '2026-06-21'
+  case_name: goal_active
+  client_name: Claude Code
+  client_version: 2.1.185 (Claude Code)
+  client_version_slug: claude-code-2.1.185
+  description: Claude goal-active working status counter
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: working
+    attention_label: Working
+    composer_key: empty
+    reason_code: busy
+    screen_key: working
+  file: goal_active__claude-code-2.1.185_20260621.yaml
+  id: goal_active__claude-code-2.1.185_20260621
+  scenario: goal_active
+  source: real Claude goal-active capture from scratch tmux yoreal-claude-capture:0.0
+- agent: claude
+  capture_date: '2026-06-20'
+  case_name: working_visible_counter
+  client_name: Claude Code
+  client_version: 2.1.183 (Claude Code)
+  client_version_slug: claude-code-2.1.183
+  description: Claude working visible status counter
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: working
+    attention_label: Working
+    composer_key: empty
+    reason_code: busy
+    screen_key: working
+  file: working_visible_counter__claude-code-2.1.183_20260620.yaml
+  id: working_visible_counter__claude-code-2.1.183_20260620
+  scenario: working_visible_counter
+  source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T105442Z.yaml
+- agent: claude
+  capture_date: '2026-06-23'
+  case_name: working_empty_prompt_below_counter
+  client_name: Claude Code
+  client_version: 2.1.186 (Claude Code)
+  client_version_slug: claude-code-2.1.186
+  description: Claude working status counter remains working when an empty composer prompt is visible below it
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: working
+    attention_label: Working
+    composer_key: empty
+    reason_code: busy
+    screen_key: working
+  file: working_empty_prompt_below_counter__claude-code-2.1.186_20260623.yaml
+  id: working_empty_prompt_below_counter__claude-code-2.1.186_20260623
+  scenario: working_empty_prompt_below_counter
+  source: real Claude Code 2.1.186 working capture from tmux 2:0.0 with an empty composer prompt below the status counter
+- agent: claude
+  capture_date: '2026-07-01'
+  case_name: working_labelled_composer
+  client_name: Claude Code
+  client_version: 2.1.198 (Claude Code)
+  client_version_slug: claude-code-2.1.198
+  description: Claude working counter remains RUNNING above a wrapped Tip and labelled composer border
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: working
+    attention_label: Working
+    composer_key: empty
+    reason_code: busy
+    screen_key: working
+  file: working_labelled_composer__claude-code-2.1.198_20260701.yaml
+  id: working_labelled_composer__claude-code-2.1.198_20260701
+  scenario: working_labelled_composer
+  source: screenshot-provided real Claude Code 2.1.198 capture from tmux 1:0.0 on 2026-07-01
+- agent: claude
+  capture_date: '2026-07-02'
+  case_name: compacting_conversation_unicode_ellipsis
+  client_name: Claude Code
+  client_version: 2.1.198 (Claude Code)
+  client_version_slug: claude-code-2.1.198
+  description: Claude compaction spinner remains working above a decorated empty composer
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: working
+    attention_label: Working
+    composer_key: empty
+    reason_code: busy
+    screen_key: working
+  file: compacting_conversation_unicode_ellipsis__claude-code-2.1.198_20260702.yaml
+  id: compacting_conversation_unicode_ellipsis__claude-code-2.1.198_20260702
+  scenario: compacting_conversation_unicode_ellipsis
+  source: real Claude Code 2.1.198 compaction frame captured from tmux session 1:0.0 and screenshot 20260701-027.png
+- agent: claude
+  capture_date: '2026-07-07'
+  case_name: compacting_conversation_progress_bar
+  client_name: Claude Code
+  client_version: 2.1.198 (Claude Code)
+  client_version_slug: claude-code-2.1.198
+  description: Claude compaction spinner and progress bar remain working above an empty composer
+  expected:
+    agent_kind: claude
+    approval_type: ''
+    approval_visible: false
+    attention_kind: working
+    attention_label: Working
+    composer_key: empty
+    reason_code: busy
+    screen_key: working
+  file: compacting_conversation_progress_bar__claude-code-2.1.198_20260707.yaml
+  id: compacting_conversation_progress_bar__claude-code-2.1.198_20260707
+  scenario: compacting_conversation_progress_bar
+  source: real Claude Code 2.1.198 tmux capture from session 1:0.0 on 2026-07-07
+- agent: codex
+  capture_date: '2026-06-20'
+  case_name: choice_question
+  client_name: Codex CLI
+  client_version: codex-cli 0.141.0
+  client_version_slug: codex-cli-0.141.0
+  description: Codex non-permission choice question
+  expected:
+    agent_kind: codex
+    approval_type: ''
+    approval_visible: false
+    attention_kind: question
+    attention_label: Question
+    composer_key: draft
+    reason_code: needs-input
+    screen_key: needs-input
+  file: choice_question__codex-cli-0.141.0_20260620.yaml
+  id: choice_question__codex-cli-0.141.0_20260620
+  scenario: choice_question
+  source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T110043Z.yaml
+- agent: codex
+  capture_date: '2026-06-20'
+  case_name: choice_question_real
+  client_name: Codex CLI
+  client_version: codex-cli 0.141.0
+  client_version_slug: codex-cli-0.141.0
+  description: Codex user question with an answer draft in the composer
+  expected:
+    agent_kind: codex
+    approval_type: ''
+    approval_visible: false
+    attention_kind: question
+    attention_label: Question
+    composer_key: draft
+    reason_code: needs-input
+    screen_key: needs-input
+  file: choice_question_real__codex-cli-0.141.0_20260620.yaml
+  id: choice_question_real__codex-cli-0.141.0_20260620
+  scenario: choice_question_real
+  source: real Codex CLI 0.141.0 question followed by ghost-suggestion composer
+- agent: codex
+  capture_date: '2026-06-20'
+  case_name: idle_dim_ghost_prompt
+  client_name: Codex CLI
+  client_version: codex-cli 0.141.0
+  client_version_slug: codex-cli-0.141.0
+  description: Codex idle dim ghost prompt
+  expected:
+    agent_kind: codex
+    approval_type: ''
+    approval_visible: false
+    attention_kind: ''
+    attention_label: ''
+    composer_key: ghost
+    reason_code: idle
+    screen_key: idle
+  file: idle_dim_ghost_prompt__codex-cli-0.141.0_20260620.yaml
+  id: idle_dim_ghost_prompt__codex-cli-0.141.0_20260620
+  scenario: idle_dim_ghost_prompt
+  source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T110608Z.yaml
+- agent: codex
+  capture_date: '2026-06-20'
+  case_name: idle_empty_prompt
+  client_name: Codex CLI
+  client_version: codex-cli 0.141.0
+  client_version_slug: codex-cli-0.141.0
+  description: Codex idle empty prompt
+  expected:
+    agent_kind: codex
+    approval_type: ''
+    approval_visible: false
+    attention_kind: ''
+    attention_label: ''
+    composer_key: empty
+    reason_code: idle
+    screen_key: idle
+  file: idle_empty_prompt__codex-cli-0.141.0_20260620.yaml
+  id: idle_empty_prompt__codex-cli-0.141.0_20260620
+  scenario: idle_empty_prompt
+  source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T104406Z.yaml
+- agent: codex
+  capture_date: '2026-06-20'
+  case_name: question_with_answer_draft
+  client_name: Codex CLI
+  client_version: codex-cli 0.141.0
+  client_version_slug: codex-cli-0.141.0
+  description: 'Positive: Codex question remains needs-input even when an answer draft is in the composer'
+  expected:
+    agent_kind: codex
+    approval_type: ''
+    approval_visible: false
+    attention_kind: question
+    attention_label: Question
+    composer_key: draft
+    reason_code: needs-input
+    screen_key: needs-input
+  file: question_with_answer_draft__codex-cli-0.141.0_20260620.yaml
+  id: question_with_answer_draft__codex-cli-0.141.0_20260620
+  scenario: question_with_answer_draft
+  source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T110100Z.yaml
+- agent: codex
+  capture_date: '2026-06-20'
+  case_name: shell_approval_touch_command
+  client_name: Codex CLI
+  client_version: codex-cli 0.141.0
+  client_version_slug: codex-cli-0.141.0
+  description: Codex shell command approval
+  expected:
+    agent_kind: codex
+    approval_type: bash
+    approval_visible: true
+    attention_kind: approval
+    attention_label: YOLO?
+    composer_key: empty
+    reason_code: approval
+    screen_key: approval
+  file: shell_approval_touch_command__codex-cli-0.141.0_20260620.yaml
+  id: shell_approval_touch_command__codex-cli-0.141.0_20260620
+  scenario: shell_approval_touch_command
+  source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T110706Z.yaml
+- agent: codex
+  capture_date: '2026-06-20'
+  case_name: shell_no_selected_option
+  client_name: Codex CLI
+  client_version: codex-cli 0.141.0
+  client_version_slug: codex-cli-0.141.0
+  description: Codex shell approval with the reject option selected
+  expected:
+    agent_kind: codex
+    approval_type: bash
+    approval_visible: true
+    attention_kind: approval
+    attention_label: YOLO?
+    composer_key: empty
+    reason_code: approval
+    screen_key: approval
+  file: shell_no_selected_option__codex-cli-0.141.0_20260620.yaml
+  id: shell_no_selected_option__codex-cli-0.141.0_20260620
+  scenario: shell_no_selected_option
+  source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T160826Z.yaml
+- agent: codex
+  capture_date: '2026-06-20'
+  case_name: shell_sleep_10_3_option
+  client_name: Codex CLI
+  client_version: codex-cli 0.141.0
+  client_version_slug: codex-cli-0.141.0
+  description: Codex shell approval with the first option selected
+  expected:
+    agent_kind: codex
+    approval_type: bash
+    approval_visible: true
+    attention_kind: approval
+    attention_label: YOLO?
+    composer_key: empty
+    reason_code: approval
+    screen_key: approval
+  file: shell_sleep_10_3_option__codex-cli-0.141.0_20260620.yaml
+  id: shell_sleep_10_3_option__codex-cli-0.141.0_20260620
+  scenario: shell_sleep_10_3_option
+  source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T160805Z.yaml
+- agent: codex
+  capture_date: '2026-06-20'
+  case_name: typed_draft
+  client_name: Codex CLI
+  client_version: codex-cli 0.141.0
+  client_version_slug: codex-cli-0.141.0
+  description: Codex composer with unsent user draft text
+  expected:
+    agent_kind: codex
+    approval_type: ''
+    approval_visible: false
+    attention_kind: ''
+    attention_label: ''
+    composer_key: draft
+    reason_code: draft-clearable
+    screen_key: input-draft
+  file: typed_draft__codex-cli-0.141.0_20260620.yaml
+  id: typed_draft__codex-cli-0.141.0_20260620
+  scenario: typed_draft
+  source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T160638Z.yaml
+- agent: codex
+  capture_date: '2026-06-21'
+  case_name: goal_active
+  client_name: Codex CLI
+  client_version: codex-cli 0.141.0
+  client_version_slug: codex-cli-0.141.0
+  description: Codex goal-active working status counter
+  expected:
+    agent_kind: codex
+    approval_type: ''
+    approval_visible: false
+    attention_kind: working
+    attention_label: Working
+    composer_key: ghost
+    reason_code: busy
+    screen_key: working
+  file: goal_active__codex-cli-0.141.0_20260621.yaml
+  id: goal_active__codex-cli-0.141.0_20260621
+  scenario: goal_active
+  source: real Codex CLI goal-active capture from tmux 8001:0.0
+- agent: codex
+  capture_date: '2026-06-23'
+  case_name: goal_achieved_working
+  client_name: Codex CLI
+  client_version: codex-cli 0.141.0
+  client_version_slug: codex-cli-0.141.0
+  description: Codex goal-achieved working status with queued follow-up inputs
+  expected:
+    agent_kind: codex
+    approval_type: ''
+    approval_visible: false
+    attention_kind: working
+    attention_label: Working
+    composer_key: draft
+    reason_code: busy
+    screen_key: working
+  file: goal_achieved_working__codex-cli-0.141.0_20260623.yaml
+  id: goal_achieved_working__codex-cli-0.141.0_20260623
+  scenario: goal_achieved_working
+  source: screenshot-provided Codex goal-achieved working capture from tmux 8002:0.0; later tmux capture confirmed the same Working/Goal achieved bottom rows after queued follow-up rows had re-rendered away
+- agent: codex
+  capture_date: '2026-06-24'
+  case_name: goal_achieved_idle_draft
+  client_name: Codex CLI
+  client_version: codex-cli 0.141.0
+  client_version_slug: codex-cli-0.141.0
+  description: Codex goal-achieved footer with idle draft prompt
+  expected:
+    agent_kind: codex
+    approval_type: ''
+    approval_visible: false
+    attention_kind: ''
+    attention_label: ''
+    composer_key: draft
+    reason_code: draft-clearable
+    screen_key: input-draft
+  file: goal_achieved_idle_draft__codex-cli-0.141.0_20260624.yaml
+  id: goal_achieved_idle_draft__codex-cli-0.141.0_20260624
+  scenario: goal_achieved_idle_draft
+  source: screenshot-provided Codex goal-achieved idle/draft capture from tmux 8001:0.0; `Goal achieved` footer must not classify as working without a visible current Working row
+- agent: codex
+  capture_date: '2026-06-20'
+  case_name: working_command_counter
+  client_name: Codex CLI
+  client_version: codex-cli 0.141.0
+  client_version_slug: codex-cli-0.141.0
+  description: Codex working after command send
+  expected:
+    agent_kind: codex
+    approval_type: ''
+    approval_visible: false
+    attention_kind: working
+    attention_label: Working
+    composer_key: ghost
+    reason_code: busy
+    screen_key: working
+  file: working_command_counter__codex-cli-0.141.0_20260620.yaml
+  id: working_command_counter__codex-cli-0.141.0_20260620
+  scenario: working_command_counter
+  source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T110659Z.yaml
+- agent: opencode
+  capture_date: '2026-08-28'
+  case_name: completed_output
+  client_name: OpenCode
+  client_version: 1.18.25
+  client_version_slug: opencode-1.18.25
+  description: OpenCode completed output with its idle composer footer
+  expected:
+    agent_kind: opencode
+    approval_type: ''
+    approval_visible: false
+    attention_kind: ''
+    attention_label: ''
+    composer_key: empty
+    reason_code: idle
+    screen_key: idle
+  file: completed_output__opencode-1.18.25_20260828.yaml
+  id: completed_output__opencode-1.18.25_20260828
+  scenario: completed_output
+  source: read-only real OpenCode 1.18.25 capture from an existing completed pane
+- agent: opencode
+  capture_date: '2026-08-28'
+  case_name: working_coordinator
+  client_name: OpenCode
+  client_version: 1.18.25
+  client_version_slug: opencode-1.18.25
+  description: OpenCode active footer with the working meter
+  expected:
+    agent_kind: opencode
+    approval_type: ''
+    approval_visible: false
+    attention_kind: working
+    attention_label: Working
+    composer_key: empty
+    reason_code: busy
+    screen_key: working
+  file: working_coordinator__opencode-1.18.25_20260828.yaml
+  id: working_coordinator__opencode-1.18.25_20260828
+  scenario: working_coordinator
+  source: read-only real OpenCode 1.18.25 capture from the authorized coordinator pane
+- agent: opencode
+  capture_date: '2026-08-28'
+  case_name: working_tool_wrap
+  client_name: OpenCode
+  client_version: 1.18.25
+  client_version_slug: opencode-1.18.25
+  description: OpenCode active task/tool row with extra-indented wrapped command values
+  expected:
+    agent_kind: opencode
+    approval_type: ''
+    approval_visible: false
+    attention_kind: working
+    attention_label: Working
+    composer_key: empty
+    reason_code: busy
+    screen_key: working
+  file: working_tool_wrap__opencode-1.18.25_20260828.yaml
+  id: working_tool_wrap__opencode-1.18.25_20260828
+  scenario: working_tool_wrap
+  source: read-only real OpenCode 1.18.25 capture from an existing working pane
+purpose: Promoted real Claude/Codex/OpenCode agent_tui captures. Filenames use case_name__client-token_date; source_staging_file records
+  staging provenance when available.
+schema: 1

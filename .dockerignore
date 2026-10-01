@@ -1,0 +1,15 @@
+.git
+.git/**
+.venv
+.venv/**
+__pycache__
+**/__pycache__
+*.py[cod]
+node_modules
+node_modules/**
+bazel-*
+**/bazel-*
+*.log
+*.png
+*.html
+instance.lock

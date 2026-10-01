@@ -1,0 +1,86 @@
+{
+  "acquisition_seconds": 1800,
+  "anchor_observed_at": 1750000000.0,
+  "arm_wall_seconds": 6.348024,
+  "commits": 3600,
+  "counts_after": {
+    "aggregate_ring_slots": 1248,
+    "coverage_epochs": 2,
+    "freelist_count": 0,
+    "observations": 3602,
+    "page_count": 150,
+    "page_size": 4096,
+    "ring_invalidations": 4,
+    "source_generation": 3602,
+    "unavailable_spans": 0,
+    "usage_atoms": 0
+  },
+  "counts_before": {
+    "aggregate_ring_slots": 1248,
+    "coverage_epochs": 2,
+    "freelist_count": 0,
+    "observations": 2,
+    "page_count": 41,
+    "page_size": 4096,
+    "ring_invalidations": 4,
+    "source_generation": 2,
+    "unavailable_spans": 0,
+    "usage_atoms": 0
+  },
+  "facts_per_commit": 1.0,
+  "families": [
+    "cpu/s0",
+    "cpu/s1"
+  ],
+  "family_count": 2,
+  "finished": {
+    "epoch": 1787713546.0257666,
+    "monotonic": 2097431.140882212,
+    "pt": "2026-08-25 20:05:46 PDT"
+  },
+  "interval_seconds": 1,
+  "label": "SANITY measure3-shape fresh per_family i=1",
+  "main_bytes_after": 602112,
+  "main_bytes_before": 98304,
+  "measure_finished": {
+    "epoch": 1787713546.0034719,
+    "monotonic": 2097431.118587701,
+    "pt": "2026-08-25 20:05:46 PDT"
+  },
+  "measure_started": {
+    "epoch": 1787713540.9304068,
+    "monotonic": 2097426.04552251,
+    "pt": "2026-08-25 20:05:40 PDT"
+  },
+  "measure_wall_seconds": 5.073065,
+  "merged": false,
+  "observations_offered": 3600,
+  "observations_stored": 3600,
+  "read_bytes": 0,
+  "ring_buckets_seeded": 1248,
+  "row_delta": {
+    "aggregate_ring_slots": 0,
+    "coverage_epochs": 0,
+    "observations": 3600,
+    "ring_invalidations": 0,
+    "unavailable_spans": 0,
+    "usage_atoms": 0
+  },
+  "shape": "measure3",
+  "source": null,
+  "started": {
+    "epoch": 1787713539.677743,
+    "monotonic": 2097424.792858682,
+    "pt": "2026-08-25 20:05:39 PDT"
+  },
+  "syscr": 463,
+  "syscw": 43772,
+  "syscw_per_commit": 12.16,
+  "topology": "fresh",
+  "wal_bytes_after": 4152992,
+  "wal_bytes_before": 168952,
+  "wchar": 91066328,
+  "write_bytes": 91197440,
+  "write_bytes_per_commit": 25332.6,
+  "write_bytes_per_observation": 25332.6
+}

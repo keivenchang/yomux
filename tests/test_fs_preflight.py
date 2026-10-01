@@ -1,0 +1,137 @@
+from pathlib import Path
+import subprocess
+from threading import Event
+
+import pytest
+
+from yomux_lib.infra.filesystem_preflight import FilesystemClassification
+from yomux_lib.infra.filesystem_preflight import FilesystemPreflightError
+from yomux_lib.infra.filesystem_preflight import classify_filesystem
+from yomux_lib.infra.filesystem_preflight import clear_filesystem_classification_cache
+from yomux_lib.infra.filesystem_preflight import preflight_mutable_roots
+from yomux_lib.infra import filesystem_preflight
+from yomux_lib.infra.atomic_file import open_wal_database
+from yomux_lib.local_services.runtime import run_local_rpc_service
+from yomux_lib.observability.pricing_catalog import PricingCatalog
+from yomux_lib.search import file_index
+from yomux_lib.stats_current.storage import DATABASE_FILENAME
+from yomux_lib.stats_current.storage import Store
+
+
+def test_preflight_allows_a_known_local_ext_root(tmp_path):
+    result = preflight_mutable_roots(
+        wal_databases=[tmp_path / "stats.sqlite3"],
+        unix_sockets=[tmp_path / "service.sock"],
+        classifier=lambda path: FilesystemClassification(Path(path), "ext4", False, True),
+    )
+
+    assert [item.filesystem_type for item in result] == ["ext4", "ext4"]
+
+
+def test_preflight_refuses_wal_and_socket_on_nfs_with_actionable_paths(tmp_path):
+    with pytest.raises(FilesystemPreflightError, match="YOLOMUX_ALLOW_NETWORK_FILESYSTEM_MUTABLE_ROOTS=1") as raised:
+        preflight_mutable_roots(
+            wal_databases=[tmp_path / "stats.sqlite3"],
+            unix_sockets=[tmp_path / "service.sock"],
+            classifier=lambda path: FilesystemClassification(Path(path), "nfs4", True, True),
+        )
+
+    message = str(raised.value)
+    assert "WAL SQLite database" in message
+    assert "Unix socket" in message
+    assert "nfs4" in message
+    assert str(tmp_path / "stats.sqlite3") in message
+    assert str(tmp_path / "service.sock") in message
+
+
+def test_preflight_refuses_unknown_filesystem_and_escape_hatch_warns(tmp_path, monkeypatch):
+    classifier = lambda path: FilesystemClassification(Path(path), "unknown", False, False)
+    with pytest.raises(FilesystemPreflightError, match="unknown"):
+        preflight_mutable_roots(wal_databases=[tmp_path / "stats.sqlite3"], classifier=classifier)
+
+    monkeypatch.setenv("YOLOMUX_ALLOW_NETWORK_FILESYSTEM_MUTABLE_ROOTS", "1")
+    with pytest.warns(RuntimeWarning, match="YOLOMUX_ALLOW_NETWORK_FILESYSTEM_MUTABLE_ROOTS=1"):
+        preflight_mutable_roots(wal_databases=[tmp_path / "stats.sqlite3"], classifier=classifier)
+
+
+def test_unreadable_mountinfo_is_unknown_and_refuses(tmp_path):
+    clear_filesystem_classification_cache()
+    result = classify_filesystem(tmp_path / "stats.sqlite3", mountinfo_path=tmp_path / "missing-mountinfo")
+    assert result == FilesystemClassification(tmp_path, "unknown", False, False)
+    with pytest.raises(FilesystemPreflightError, match="unknown"):
+        preflight_mutable_roots(wal_databases=[tmp_path / "stats.sqlite3"], classifier=lambda _path: result)
+
+
+def test_macos_classifies_local_apfs_without_linux_mountinfo(tmp_path):
+    def run(command, **_kwargs):
+        assert command == ("mount",)
+        return subprocess.CompletedProcess(command, 0, "/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)\n", "")
+
+    result = classify_filesystem(tmp_path / "service.sock", platform_name="darwin", runner=run)
+
+    assert result == FilesystemClassification(tmp_path, "apfs", False, True)
+
+
+def test_macos_uses_longest_mount_and_rejects_smbfs(tmp_path):
+    network_root = tmp_path / "share"
+    network_root.mkdir()
+
+    def run(command, **_kwargs):
+        assert command == ("mount",)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            f"/dev/disk3s1s1 on / (apfs, local)\n//server/share on {network_root} (smbfs, nodev, nosuid)\n",
+            "",
+        )
+
+    result = classify_filesystem(network_root / "service.sock", platform_name="darwin", runner=run)
+
+    assert result == FilesystemClassification(network_root, "smbfs", True, True)
+
+
+def _network_classifier(path):
+    return FilesystemClassification(Path(path), "nfs4", True, True)
+
+
+def test_real_atomic_wal_helper_refuses_before_creating_database(tmp_path, monkeypatch):
+    monkeypatch.setattr(filesystem_preflight, "classify_filesystem", _network_classifier)
+    path = tmp_path / "chat.sqlite3"
+    with pytest.raises(FilesystemPreflightError):
+        open_wal_database(path, 100)
+    assert not path.exists()
+
+
+def test_real_search_wal_writer_refuses_before_creating_database(tmp_path, monkeypatch):
+    monkeypatch.setattr(filesystem_preflight, "classify_filesystem", _network_classifier)
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path)
+    with pytest.raises(FilesystemPreflightError):
+        file_index._connect_sqlite_index(tmp_path / "source")
+    assert not list(tmp_path.glob("*.sqlite3"))
+
+
+def test_real_pricing_wal_writer_refuses_before_creating_database(tmp_path, monkeypatch):
+    monkeypatch.setattr(filesystem_preflight, "classify_filesystem", _network_classifier)
+    catalog = PricingCatalog(root=tmp_path)
+    with pytest.raises(FilesystemPreflightError):
+        catalog._connect()
+    assert not (tmp_path / "pricing.sqlite3").exists()
+
+
+def test_real_stats_wal_writer_refuses_before_creating_database(tmp_path, monkeypatch):
+    monkeypatch.setattr(filesystem_preflight, "classify_filesystem", _network_classifier)
+    path = tmp_path / DATABASE_FILENAME
+    with pytest.raises(FilesystemPreflightError):
+        Store.open(path)
+    assert not path.exists()
+
+
+def test_real_unix_socket_writer_refuses_before_bind(tmp_path, monkeypatch):
+    monkeypatch.setattr(filesystem_preflight, "classify_filesystem", _network_classifier)
+    socket_path = tmp_path / "service.sock"
+    with pytest.raises(FilesystemPreflightError):
+        run_local_rpc_service(
+            socket_path=socket_path, lock_path=tmp_path / "service.lock", service_name="test",
+            stop_event=Event(), handle=lambda _request, _request_binary: ({"ok": True}, b""), on_idle=lambda: True, on_client=lambda: None,
+        )
+    assert not socket_path.exists()

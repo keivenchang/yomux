@@ -1,0 +1,16 @@
+name: ask-for-status
+kind: workflow
+description: >-
+  Use YO!agent as the central command surface for explicit target-session requests. Ask one or more idle agents for status directly. Natural requests such as "ask for date" are sent as agent prompts, while quoted commands or "run ..." stay raw commands. Preserve perspectives by keeping YO!agent routing text separate from the target agent's own task; strip wrappers like "ask agent 1 to" or "ask session 1 to" before sending, so "ask agent 1 to <do ...>" sends only "<do ...>". Compose the text sent to the target agent as direct second-person speech to that agent; for example, send "what have you done today?" rather than "what it has done today". Explicit target-session sends return results by default: verify the target pane accepts a Claude/Codex prompt, send now, answer immediately that the prompt was sent, then background-watch the target transcript or visible pane and append the result to the YO!agent conversation. If the user says not to wait, just send it, or no output is needed, send without a watcher.
+tools:
+  - read_activity
+  - preview_send_prompt
+  - execute_confirmed_send
+triggers:
+  - ask this agent for status
+  - ask all idle agents for status
+  - ask session 1 what it has done today
+  - send a date command session 6
+  - send date to session 6 and show the result here
+confirmation: none
+default_timeout_minutes: 30

@@ -1,0 +1,111 @@
+agent: claude
+capture_date: '2026-06-21'
+capture_mode: visible
+captured_at: '2026-06-21T20:16:18.042376+00:00'
+case_name: goal_active
+claude_version: 2.1.185 (Claude Code)
+client_name: Claude Code
+client_version: 2.1.185 (Claude Code)
+client_version_slug: claude-code-2.1.185
+codex_version: ''
+cursor:
+  character: ❯
+  synthesized: true
+  x: 0
+  y: 29
+expected_goal_elapsed_seconds: 7
+expected_promoted:
+  agent_kind: claude
+  approval_type: ''
+  approval_visible: false
+  attention_kind: working
+  attention_label: Working
+  composer_key: empty
+  reason_code: busy
+  screen_key: working
+expected_screen_key: working
+failures: []
+fixture_id: goal_active__claude-code-2.1.185_20260621
+fixture_scenario: goal_active
+height: 40
+id: goal_active__claude-code-2.1.185_20260621
+include_scrollback: false
+launch_agent: ''
+launch_command: ''
+launched_session: ''
+mode: ''
+operations: []
+raw_capture: |2
+
+  ● Reading 1 file, running 1 shell command…
+    ⎿  $ git rev-parse --show-toplevel && echo "---DOIT files---" && ls -la DOIT
+  *.md 2>/dev/null; echo "---scratch
+       refs---" && grep -ril "scratch" --include="*.md" --include="*.js" --include="*.py" . 2>/dev/null | grep -v
+       node_modules | head -40
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  · Flummoxing… (7s · ↑ 352 tokens)
+
+                        ◎ /goal active (7s)
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ❯
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt
+ready_text: []
+send_lines: []
+source: real Claude goal-active capture from scratch tmux yoreal-claude-capture:0.0
+styled_capture: |2
+
+  ● Reading 1 file, running 1 shell command…
+    ⎿  $ git rev-parse --show-toplevel && echo "---DOIT files---" && ls -la DOIT
+  *.md 2>/dev/null; echo "---scratch
+       refs---" && grep -ril "scratch" --include="*.md" --include="*.js" --include="*.py" . 2>/dev/null | grep -v
+       node_modules | head -40
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  · Flummoxing… (7s · ↑ 352 tokens)
+
+                        ◎ /goal active (7s)
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ❯
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt
+target: yoreal-claude-capture:0.0
+tmux_socket: ''
+wait_text:
+- /goal active
+width: 200

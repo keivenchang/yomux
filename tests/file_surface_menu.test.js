@@ -1,0 +1,150 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+
+let passed = 0;
+let failed = 0;
+function test(label, fn) {
+  try {
+    fn();
+    passed += 1;
+  } catch (error) {
+    failed += 1;
+    process.exitCode = 1;
+    console.error(`✗ ${label}: ${error.message}`);
+  }
+}
+
+const menus = fs.readFileSync('static_src/js/yomux/30_app_menus.js', 'utf8');
+const terminalFacade = fs.readFileSync('static_src/js/yomux/98_terminal_runtime_facade.js', 'utf8');
+const terminalBoot = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
+const terminalShortcuts = fs.readFileSync('static_src/js/yomux/99_terminal_shortcuts_boot.js', 'utf8');
+const css = fs.readFileSync('static_src/css/yomux/10_topbar_menus.css', 'utf8');
+const filePanelCss = fs.readFileSync('static_src/css/yomux/60_editor_file_panels.css', 'utf8');
+const panel = fs.readFileSync('static/yomux.js', 'utf8');
+const shell = fs.readFileSync('static_src/js/yomux/78_panel_shell.js', 'utf8');
+const actions = fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8');
+const dockview = fs.readFileSync('static_src/js/yomux/75_dockview_layout.js', 'utf8');
+const coreUtils = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+const layoutState = fs.readFileSync('static_src/js/yomux/20_layout_state.js', 'utf8');
+
+test('File submenu restores the desktop triplet through the layout owner', () => {
+  assert.match(menus, /function fileSurfaceMenuItems\(\)[\s\S]*Array\.isArray\(fileSurfaceItems\)[\s\S]*openFileSurfaceFromMenu\(item\)/);
+  assert.match(menus, /if \(narrowSingleColumnMode\(\)\)[\s\S]*virtualCommands\.unshift\(\.\.\.fileSurfaces\)[\s\S]*else \{[\s\S]*menuCommand\(t\('yoagent\.capability\.finderDifferTabber\.name'\), \(\) => openFileSurfaceFromMenu\(finderItemId\)/);
+  assert.match(menus, /checked: fileSurfaceItems\.every\(item => itemInLayout\(item\)\),[\s\S]*partial: fileSurfaceItems\.some\(item => itemInLayout\(item\)\) && !fileSurfaceItems\.every\(item => itemInLayout\(item\)\)/);
+  assert.match(actions, /async function openFileSurfaceFromMenu\(item\)[\s\S]*sidePaneConstrainedMode\(\)[\s\S]*openFileSurfacePane\(resolved\)[\s\S]*fileSurfaceItems\.filter\(candidate => !itemInLayout\(candidate\)\)[\s\S]*layoutWithSidePaneItems\(layoutSlots, missing, \{[\s\S]*side: paneSideLeft[\s\S]*forceCreate: true[\s\S]*activatePaneTab/);
+  assert.doesNotMatch(menus.slice(menus.indexOf('function fileSurfaceMenuItems()'), menus.indexOf('function appMenuTree()')), /toggleFinderPane\(|selectSession\(fileExplorerItemId\)/);
+});
+
+test('partial triplet availability paints the left menu indicator without claiming all are open', () => {
+  assert.match(menus, /item\.partial === true \? 'partially-checked' : ''/);
+  assert.match(css, /\.app-menu-command\[data-partial="true"\] \.app-menu-check\s*\{[\s\S]*color-mix\(in srgb, var\(--active-control-bg\) 48%, transparent\)/);
+});
+
+test('File destinations have a single-line icon label detail presentation', () => {
+  assert.match(menus, /className: 'app-menu-file-destination'/);
+  assert.match(menus, /item\.className === 'app-menu-file-destination' \? 'app-menu-label' : ''/);
+  assert.match(css, /\.app-menu-file-destination \.app-menu-content\s*\{[\s\S]*grid-template-columns/);
+  assert.match(css, /\.app-menu-file-destination \.app-menu-detail\s*\{[\s\S]*text-align:\s*end/);
+});
+
+test('File navigation destinations share one localized alphabetical sort owner', () => {
+  assert.match(menus, /function compareLocalizedMenuLabels\(left, right\)[\s\S]*localeCompare/);
+  assert.match(menus, /function sortMenuCommandsByLabel\(commands\)[\s\S]*compareLocalizedMenuLabels\(left\?\.label, right\?\.label\)/);
+  assert.match(menus, /const fileDestinationCommands = sortMenuCommandsByLabel\(\[[\s\S]*fileMenuPanelCommands\(\)[\s\S]*common\.preferences[\s\S]*\]\)/);
+});
+
+test('Cmd/Ctrl+B delegates the triplet transaction without terminal fallback placement', () => {
+  const shortcut = terminalShortcuts.slice(terminalShortcuts.indexOf('function toggleFileExplorerShortcut()'), terminalShortcuts.indexOf('function handleFocusedTerminalCopyShortcut()'));
+  assert.match(shortcut, /typeof toggleAllFileSurfaces === 'function'\) return toggleAllFileSurfaces\(\)/);
+  assert.doesNotMatch(shortcut, /applyLayoutSlots\(|selectSession\(fileExplorerItemId\)|layoutWithoutItem/);
+});
+
+test('file-surface pane headers use shared minimize and expand controls, not a local close X', () => {
+  const builder = panel.slice(panel.indexOf('function createFileExplorerPanel('), panel.indexOf('function refreshFileExplorerPanelTree('));
+  assert.match(builder, /controlsHtml: virtualPanelInnerControlsHtml\(item\)/);
+  assert.doesNotMatch(builder, /file-explorer-panel-close/);
+  assert.match(filePanelCss, /\.panel\.file-explorer-panel \.file-explorer-toolbar\s*\{\s*clear:\s*both;/);
+  assert.doesNotMatch(filePanelCss, /\.panel\.file-explorer-panel \.virtual-panel-controls/);
+});
+
+test('independent triplets retain their pane tab strip and generic actions exclude Side Panes', () => {
+  const strip = shell.slice(shell.indexOf('function updatePaneTabStrip('), shell.indexOf('function reconcilePaneTabChildren('));
+  assert.doesNotMatch(strip, /isFileExplorerItem\(activeItemForSide\(side\)\)[\s\S]*strip\.hidden = true/);
+  assert.match(actions, /function paneTabsForGenericActions\([\s\S]*slotIsSidePane\(slot, slots\) \? \[\] : paneTabs\(slot, slots\)/);
+  assert.match(actions, /function canPaneExpand[\s\S]*slotIsSidePane\(targetSlot, slots\)/);
+});
+
+test('Dockview keeps the group tab strip for singleton file surfaces', () => {
+  const leaf = dockview.slice(dockview.indexOf('function dockviewSerializedLeaf('), dockview.indexOf('function adoptDockviewLayout('));
+  assert.match(leaf, /hideHeader: placeholder/);
+  assert.doesNotMatch(leaf, /tabs\.length === 1 && layoutIsFileSurfaceItem/);
+});
+
+test('Dockview center-drops an allowed Differ into the triplet home through the shared layout move', () => {
+  const paneCommit = dockview.slice(dockview.indexOf('function dockviewCommitPaneDrop('), dockview.indexOf('function dockviewPointerContentDropIntent('));
+  assert.match(paneCommit, /if \(intent\.zone === 'middle'\)[\s\S]*dockviewPaneContentDropAllowed\(\{item: intent\.item, intent\}\)[\s\S]*moveSessionToSlot\(intent\.item, intent\.targetSlot/);
+  assert.match(dockview, /const paneInfo = dockviewPaneContentDropInfo\(event, classification\);[\s\S]*paneInfo\.intent\.zone === 'middle'[\s\S]*dockviewCommitPaneDrop\(event, paneInfo\.intent\)/);
+  assert.match(dockview, /const tabInsertion = dockviewTabInsertionInfo\(event\);[\s\S]*slotIsSidePane\(tabInsertion\.targetSlot\)[\s\S]*paneRoleAllowsItemTransfer\(tabInsertion\.item, tabInsertion\.sourceSlot, tabInsertion\.targetSlot\)[\s\S]*moveSessionToSlot\(tabInsertion\.item, tabInsertion\.targetSlot/);
+  const pointerFallback = dockview.slice(dockview.indexOf('function dockviewFinishTabPointerDrag('), dockview.indexOf('function dockviewInstallTabPointerReorderFallback('));
+  assert.match(pointerFallback, /const contentIntent = dockviewPointerContentDropIntent\(releaseEvent, state\);[\s\S]*dropIntentAllowsSession\(state\.item, contentIntent\)[\s\S]*moveSessionToSlot\(state\.item, contentTargetSlot/);
+});
+
+test('Vertical Side Pane tab menus omit More desc and reuse the shared directional Move row', () => {
+  assert.match(coreUtils, /if \(!slotIsSidePane\(sourceSlot\)\) appendDescription\(\)/);
+  assert.match(coreUtils, /showTabContextMenu\(item, x, y, options = \{\}\)[\s\S]*appendTabSplitCommands\(menu, item, options\)/);
+  assert.doesNotMatch(coreUtils, /vertical-side-pane-edge-move|appendVerticalSidePaneEdgeMoveCommand/);
+});
+
+test('Finder and Differ render shared selectors with independent selected-session owners', () => {
+  const finderBuilder = panel.slice(panel.indexOf('function createFileExplorerPanel('), panel.indexOf('function refreshFileExplorerPanelTree('));
+  assert.match(finderBuilder, /file-explorer-path-row[\s\S]*file-explorer-primary-row[\s\S]*fileExplorerDiffSessionControlHtml\(fileExplorerFinderTargetSession\(\), 'finder'\)[\s\S]*view === 'differ'[\s\S]*fileExplorerDiffSessionControlHtml\(fileExplorerSessionFilesTargetSession\(\), 'differ'\)/);
+  assert.match(panel, /function switchFileExplorerFinderSession\(session\)[\s\S]*fileExplorerFinderSelectedSession = session[\s\S]*scheduleFileExplorerActiveTabSync\(session, \{explicit: true\}\)/);
+  assert.match(panel, /function switchFileExplorerChangesSession\(session\)[\s\S]*fileExplorerChangesSelectedSession = session/);
+});
+
+test('Finder keeps its Session control visible outside Sync mode', () => {
+  assert.match(panel, /function syncFileExplorerSessionControlVisibility\(scope = document\)[\s\S]*data-file-explorer-session-surface="finder"[\s\S]*control\.hidden = false[\s\S]*control\.setAttribute\('aria-hidden', 'false'\)/);
+  assert.match(fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8'), /file-explorer-root-mode-fixed/);
+  assert.doesNotMatch(filePanelCss, /data-file-explorer-view="finder"\]\.file-explorer-root-mode-fixed \.file-explorer-mode-files-diff-only/);
+  assert.match(panel, /fileExplorerDiffSessionControlHtml\(fileExplorerFinderTargetSession\(\), 'finder'\)/);
+});
+
+test('Dockview file surfaces inherit the common outer header controls and never render an inner copy', () => {
+  assert.match(terminalFacade, /function virtualPanelInnerControlsHtml\(session, options = \{\}\)[\s\S]*dockviewLayoutEnabled\(\) \? '' : virtualPanelControlsHtml\(session, options\)/);
+  assert.ok(dockview.includes('function dockviewHeaderActionsHtml(item, slot = slotForItem(item))') && dockview.includes('if (isVirtualItem(item)) return virtualPanelControlsHtml(item'), 'Dockview virtual panels use the shared outer header controls');
+  assert.match(dockview, /function hideDockviewInnerPaneTabs\(panel\)[\s\S]*head\.querySelector\('\.virtual-panel-controls'\)[\s\S]*controls\.remove\(\)/);
+  assert.match(shell, /function paneTabDismissControlHtml\(item\)[\s\S]*const isLegacyFiles = type\?\.key === 'files'[\s\S]*if \(isLegacyFiles \|\| \(tabIsPinned\(item\) && !isEditor\)\) return ''/);
+  assert.match(shell, /function paneTabInnerHtml\(item, rowOptions = \{\}\)[\s\S]*html \+= paneTabDismissControlHtml\(item\)/);
+});
+
+test('Finder rows require their own pointer-down before pointer-up can activate them', () => {
+  const finderSource = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  assert.match(finderSource, /row\.onpointerup = event => \{[\s\S]*const start = row\.__fileTreePointerDown;[\s\S]*if \(!start\)[\s\S]*row\.__fileTreeSuppressClick = true/);
+  assert.match(finderSource, /row\.onclick = event => \{[\s\S]*if \(row\.__fileTreeSuppressClick\)[\s\S]*return;/);
+});
+
+test('Finder header puts the path row (path input + copy + Reload) first and the Sync + Session row second', () => {
+  const pathRow = panel.indexOf('file-explorer-toolbar-row file-explorer-path-row');
+  const primaryRow = panel.indexOf('file-explorer-toolbar-row file-explorer-primary-row');
+  const actionsRow = panel.indexOf('file-explorer-toolbar-row file-explorer-actions-row');
+  assert.ok(pathRow > 0 && primaryRow > 0 && actionsRow > 0, 'finder toolbar rows present');
+  // Row order: path row FIRST, then Sync+Session (primary) row, then the actions row.
+  assert.ok(pathRow < primaryRow, 'path row renders before the Sync/Session row');
+  assert.ok(primaryRow < actionsRow, 'Sync/Session row renders before the actions row');
+  // The path row owns the path input, the copy button, and the Reload button (moved off the old primary row).
+  const pathRowBlock = panel.slice(pathRow, primaryRow);
+  assert.match(pathRowBlock, /input class="file-explorer-path-inline"/, 'path input in the path row');
+  assert.match(pathRowBlock, /file-explorer-path-copy-panel/, 'copy button in the path row');
+  assert.match(pathRowBlock, /\$\{reloadButtonHtml\}/, 'Reload button in the path row');
+  // The primary row owns the Sync toggle then the Finder session control.
+  const primaryRowBlock = panel.slice(primaryRow, actionsRow);
+  const syncIdx = primaryRowBlock.indexOf('file-explorer-root-mode-toggle-panel');
+  const sessionIdx = primaryRowBlock.indexOf("fileExplorerDiffSessionControlHtml(fileExplorerFinderTargetSession(), 'finder')");
+  assert.ok(syncIdx > 0 && sessionIdx > 0, 'Sync toggle and Session control in the primary row');
+  assert.ok(syncIdx < sessionIdx, 'Sync button precedes the Session dropdown');
+  // The reload button styling is scoped to its own class (it moved rows), not to the primary row.
+  assert.match(filePanelCss, /\.file-explorer-refresh-cluster \{/, 'reload styling scoped to its own class');
+  assert.doesNotMatch(filePanelCss, /\.file-explorer-primary-row \.changes-refresh/, 'no stale primary-row reload selector');
+});
+
+console.log(`\nfile-surface menu suite: ${passed} passed, ${failed} failed`);

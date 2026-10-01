@@ -1,0 +1,4207 @@
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+import atexit
+import contextlib
+import difflib
+from http import HTTPStatus
+import http.server
+from io import BytesIO
+from io import StringIO
+import json
+import os
+import re
+import shutil
+import socketserver
+import subprocess
+import sys
+import threading
+import time
+from types import MappingProxyType
+from types import SimpleNamespace
+import uuid
+from urllib.parse import parse_qs
+from urllib.parse import parse_qsl
+from urllib.parse import urlencode
+from urllib.parse import urlsplit
+from urllib.parse import urlunsplit
+
+import pytest
+
+from tools import static_build
+from yomux_lib import common
+from yomux_lib import app as app_module
+from yomux_lib import auto_approve_worker as auto_approve_worker_module
+from yomux_lib import control as control_module
+from yomux_lib import events as events_module
+from yomux_lib import settings as settings_module
+from yomux_lib import web
+from yomux_lib import yolo_rules as yolo_rules_module
+from yomux_lib import server_auth
+from yomux_lib.locales import locale_registry_payload
+from yomux_lib.http_routes import route_for_request
+from yomux_lib.app import TmuxWebtermApp
+from yomux_lib.server import TmuxWebtermHTTPServer
+from yomux_lib.server_logs import SERVER_LOGS
+from yomux_lib.stats_current import resolution as stats_resolution
+from yomux_lib.stats_current import storage as stats_storage
+from tests.browser_helpers.browser_console import assert_browser_console_error_free
+from tests.browser_helpers.browser_console import assert_browser_journey_error_free
+from tests.browser_helpers.browser_console import read_browser_console_log
+from tests.browser_helpers.browser_console import retire_browser_after_strict_diagnostic_gate
+from tests.browser_helpers.browser_console import stats_only_expected_boot_404
+from tests.browser_helpers.webdriver_lease import WebDriverLease
+from tests.browser_helpers.webdriver_lease import retire_all
+from tests.helpers.fixture_content_root import FixtureContentRoot
+from tests.helpers.browser_boot import BROWSER_BOOT_PRESETS
+from tests.helpers.browser_boot import BROWSER_BOOT_ROUTES
+from tests.helpers.browser_boot import BrowserBootRoute
+from tests.helpers.browser_boot import BrowserBootScenario
+from tests.helpers.browser_boot import PRODUCTION_BOOTSTRAP_OPTIONAL_IN_BROWSER_FIXTURE
+from tests.helpers.browser_boot import PRODUCTION_BOOTSTRAP_UNSUPPORTED_BY_BROWSER_FIXTURE
+from tests.browser_helpers.visual_contracts import css_color_rgb as _css_color_rgb
+from tests.browser_helpers.visual_contracts import css_hex_to_rgb
+from tests.browser_helpers.visual_contracts import wcag_contrast_ratio
+from tests.gate_harness import finish_browser_fixture_boundary
+from tests.gate_harness import GateLiveServer
+from tests.gate_harness import GateLiveServerOptions
+from tests.gate_harness import patch_imported_writable_constants
+from tests.gate_harness import prepare_fixture_http_app
+from tests.gate_harness import rollback_failed_fixture_http_start
+from tests.gate_harness import run_fixture_cleanup_phases
+from tests.gate_harness import stop_fixture_app_runtime
+from tests.gate_harness import stop_fixture_http_app
+from tests.gate_harness import start_fixture_live_server
+from tests.gate_harness import track_fixture_http_requests
+from tests.gate_harness import wait_for_fixture_api_quiescence
+from tests.gate_harness import wait_for_fixture_client_event_demand
+from tests.tmux_runtime import capture_isolated_tmux_pane
+from tests.tmux_runtime import run_isolated_tmux
+from tests.tmux_runtime import start_isolated_tmux_runtime
+from tests.tmux_runtime import stop_isolated_tmux_runtime
+from tests.tmux_runtime import wait_for_isolated_tmux_panes
+
+
+BROWSER_BOOT_ROUTES = (
+    *BROWSER_BOOT_ROUTES,
+    BrowserBootRoute("/api/fs/fast/list", ("GET",)),
+    BrowserBootRoute("/api/fs/info", ("GET",)),
+)
+
+pytestmark = [pytest.mark.browser, pytest.mark.socket]
+
+pytest.importorskip("selenium")
+webdriver = pytest.importorskip("selenium.webdriver")
+ActionChains = pytest.importorskip("selenium.webdriver.common.action_chains").ActionChains
+Options = pytest.importorskip("selenium.webdriver.chrome.options").Options
+ChromeService = pytest.importorskip("selenium.webdriver.chrome.service").Service
+TimeoutException = pytest.importorskip("selenium.common.exceptions").TimeoutException
+WebDriverException = pytest.importorskip("selenium.common.exceptions").WebDriverException
+SeleniumWebDriverWait = pytest.importorskip("selenium.webdriver.support.ui").WebDriverWait
+
+
+XDIST_BROWSER_WAIT_FLOOR_SECONDS = 10.0
+DEFAULT_BROWSER_WINDOW_SIZE = (1000, 700)
+SESSION_SCOPED_BROWSER_REUSE_ENV = "YOLOMUX_SESSION_SCOPED_BROWSER"
+GOLDEN_UPDATE_ENV = "YOLOMUX_UPDATE_GOLDENS"
+GOLDEN_DIR_ENV = "YOLOMUX_GOLDEN_DIR"
+LIVE_RUNTIME_BUNDLE_SENTINEL = "__yolomuxLiveRuntimeBundleLoaded"
+LIVE_RUNTIME_LATE_FUNCTION = "handleGlobalShortcutKeydown"
+LIVE_RUNTIME_BUNDLE_WAIT_SECONDS = 20.0
+BROWSER_WAIT_HELPER_SOURCE = r"""
+(() => {
+  const frame = (target = window) => new Promise(resolve => (target || window).requestAnimationFrame(resolve));
+  const settle = async (count = 2) => {
+    const frames = Math.max(1, Number(count) || 1);
+    for (let index = 0; index < frames; index += 1) await frame();
+  };
+  const rect = (node, options = {}) => {
+    if (typeof node === 'string') node = document.querySelector(node);
+    if (!node?.getBoundingClientRect) return options.fallback ?? null;
+    const value = node.getBoundingClientRect();
+    const number = options.round === true ? Math.round : current => current;
+    return {
+      left: number(value.left),
+      right: number(value.right),
+      top: number(value.top),
+      bottom: number(value.bottom),
+      width: number(value.width),
+      height: number(value.height),
+    };
+  };
+  const paint = node => {
+    if (typeof node === 'string') node = document.querySelector(node);
+    if (!node) return null;
+    const style = getComputedStyle(node);
+    return {
+      color: style.color,
+      background: style.backgroundColor,
+      border: style.borderTopColor,
+      borderBottom: style.borderBottomColor,
+    };
+  };
+  // Resolve an expected paint through the same cascade as its owner.  Passing a component as
+  // context matters for scoped tokens (for example an agent-status dot's fill); a document-body
+  // probe would accidentally test only the root fallback.
+  const probePaint = (cssText, context = document.body) => {
+    const probe = document.createElement('div');
+    probe.style.cssText = String(cssText || '');
+    (context || document.body).appendChild(probe);
+    const value = paint(probe);
+    probe.remove();
+    return value;
+  };
+  const normalizeColor = color => {
+    const value = String(color || '').trim().toLowerCase();
+    if (value === 'transparent' || /^#[0-9a-f]{6}$/.test(value)) return value;
+    const rgb = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/.exec(value);
+    if (!rgb) return value;
+    return `#${rgb.slice(1).map(part => Number(part).toString(16).padStart(2, '0')).join('')}`;
+  };
+  const parseStops = gradient => {
+    const value = String(gradient || '');
+    const stops = [];
+    const rangePattern = /(#[0-9a-f]{6}|rgba?\(\s*\d+\s*,\s*\d+\s*,\s*\d+(?:\s*,\s*[0-9.]+)?\s*\)|transparent)\s+([0-9.]+)%\s+([0-9.]+)%/gi;
+    let match = rangePattern.exec(value);
+    while (match) {
+      stops.push({color: normalizeColor(match[1]), start: Number(match[2]) / 100, end: Number(match[3]) / 100});
+      match = rangePattern.exec(value);
+    }
+    if (stops.length) return stops;
+    const tokens = [];
+    const tokenPattern = /(#[0-9a-f]{6}|rgba?\(\s*\d+\s*,\s*\d+\s*,\s*\d+(?:\s*,\s*[0-9.]+)?\s*\)|transparent)\s+([0-9.]+)%/gi;
+    match = tokenPattern.exec(value);
+    while (match) {
+      tokens.push({color: normalizeColor(match[1]), pos: Number(match[2]) / 100});
+      match = tokenPattern.exec(value);
+    }
+    for (let index = 1; index < tokens.length; index += 1) {
+      const previous = tokens[index - 1];
+      const current = tokens[index];
+      if (current.pos > previous.pos) stops.push({color: previous.color, start: previous.pos, end: current.pos});
+    }
+    return stops;
+  };
+  const rowsByTop = (rects, tolerance = 1) => {
+    const rows = [];
+    for (const item of [...rects].sort((left, right) => left.top - right.top || left.left - right.left)) {
+      const row = rows.find(candidate => Math.abs(candidate.top - item.top) <= tolerance);
+      if (row) row.items.push(item);
+      else rows.push({top: item.top, items: [item]});
+    }
+    return rows.map(row => row.items);
+  };
+  const waitFor = async (predicate, options = {}) => {
+    if (typeof predicate !== 'function') throw new TypeError('wait predicate must be a function');
+    const requestedTimeout = Number(options.timeoutMs);
+    const timeoutMs = Number.isFinite(requestedTimeout) ? Math.max(0, requestedTimeout) : 6500;
+    const requestedInterval = Number(options.intervalMs);
+    const intervalMs = Number.isFinite(requestedInterval) && requestedInterval > 0
+      ? Math.min(1000, Math.max(4, requestedInterval))
+      : 0;
+    const predicateText = String(predicate).replace(/\s+/g, ' ').slice(0, 180);
+    const description = String(options.description || `browser condition: ${predicateText}`);
+    const deadline = performance.now() + timeoutMs;
+    const poll = () => new Promise(resolve => {
+      if (intervalMs > 0) setTimeout(resolve, intervalMs);
+      else requestAnimationFrame(resolve);
+    });
+    while (true) {
+      const value = await predicate();
+      if (value) return value;
+      if (performance.now() >= deadline) {
+        const finalValue = await predicate();
+        if (finalValue) return finalValue;
+        throw new Error(`Timed out after ${timeoutMs}ms waiting for ${description}`);
+      }
+      await poll();
+    }
+  };
+  Object.defineProperty(window, '__yolomuxTestWaitFor', {
+    configurable: true,
+    value: waitFor,
+  });
+  Object.defineProperty(window, '__yolomuxTestHelpers', {
+    configurable: true,
+    value: Object.freeze({frame, settle, rect, paint, probePaint, parseStops, rowsByTop}),
+  });
+})();
+"""
+
+
+def browser_wait_timeout(timeout, worker=None):
+    requested = max(0.0, float(timeout))
+    active_worker = os.environ.get("PYTEST_XDIST_WORKER") if worker is None else worker
+    if not active_worker:
+        return requested
+    return max(requested, XDIST_BROWSER_WAIT_FLOOR_SECONDS)
+
+
+class WebDriverWait(SeleniumWebDriverWait):
+    def __init__(self, driver, timeout, poll_frequency=0.5, ignored_exceptions=None):
+        # `-n auto` starts one Chrome per worker. A five-second assertion budget is enough for an
+        # isolated browser but randomly expires before an unrelated fixture gets CPU under the full
+        # pool. Keep local focused tests fast while giving xdist one shared, still-bounded floor.
+        super().__init__(driver, browser_wait_timeout(timeout), poll_frequency, ignored_exceptions)
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+LOCAL_GOLDEN_SCREENSHOT_DIR = REPO_ROOT / ".yomux-test-goldens"
+
+# Chrome 150 blocks a file:// document from loading file:// subresources in an
+# unrelated directory (net::ERR_ACCESS_DENIED), which broke every fixture that pulls
+# the built bundle / vendor / codemirror assets from REPO_ROOT/static. Serve the repo
+# over a throwaway localhost HTTP origin so fixture pages and their assets are same-
+# origin http:// and load without any web-security flag. Self-contained inline fixtures
+# still work over file://, but routing them through http too is harmless and uniform.
+_FIXTURE_HTTP_BASE: str | None = None
+_FIXTURE_HTTP_LOCK = threading.Lock()
+_FIXTURE_CONTENT_ROOT = FixtureContentRoot.create(REPO_ROOT)
+_EMPTY_FAVICON_HTML = '<link rel="icon" data-yomux-favicon href="data:,">'
+_FIXTURE_PIXEL_GIF = bytes.fromhex(
+    "47494638396101000100800000000000ffffff21f90401000000002c00000000010001000002024401003b"
+)
+
+
+def _fixture_http_base() -> str:
+    global _FIXTURE_HTTP_BASE
+    if _FIXTURE_HTTP_BASE:
+        return _FIXTURE_HTTP_BASE
+    with _FIXTURE_HTTP_LOCK:
+        if _FIXTURE_HTTP_BASE:
+            return _FIXTURE_HTTP_BASE
+        httpd = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _QuietHttpFixtureHandler)
+        httpd.daemon_threads = True
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        atexit.register(httpd.shutdown)
+        _FIXTURE_HTTP_BASE = f"http://127.0.0.1:{httpd.server_address[1]}"
+        return _FIXTURE_HTTP_BASE
+
+
+class _QuietHttpFixtureHandler(http.server.SimpleHTTPRequestHandler):
+    def translate_path(self, path):
+        resolved = _FIXTURE_CONTENT_ROOT.resolve_request_path(path)
+        return str(resolved) if resolved is not None else str(_FIXTURE_CONTENT_ROOT.root / ".missing")
+
+    def do_GET(self):  # noqa: N802 - inherited HTTP handler API
+        parsed = urlsplit(self.path)
+        if parsed.path == "/favicon.ico":
+            self.send_response(HTTPStatus.NO_CONTENT)
+            self.end_headers()
+            return
+        if parsed.path == "/login":
+            body = f"<!doctype html><html><head>{_EMPTY_FAVICON_HTML}</head><body>fixture login</body></html>".encode()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if parsed.path == "/api/fs/list":
+            requested_path = parse_qs(parsed.query).get("path", ["/home/test"])[-1]
+            body = json.dumps({"path": requested_path, "entries": []}, separators=(",", ":")).encode()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if parsed.path == "/api/fs/fast/list":
+            requested_path = parse_qs(parsed.query).get("path", ["/"])[-1] or "/"
+            if requested_path == "/missing":
+                self.send_response(HTTPStatus.NOT_FOUND)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                body = b"File not found\n"
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            payload = {"path": requested_path, "entries": []}
+            if requested_path == "/":
+                payload["parent"] = None
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if parsed.path == "/api/fs/raw":
+            requested_path = parse_qs(parsed.query).get("path", [""])[-1]
+            suffix = Path(requested_path).suffix.lower()
+            if suffix == ".svg":
+                body = b'<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>'
+                content_type = "image/svg+xml"
+            elif suffix in {".mp3", ".wav", ".ogg"}:
+                body = b""
+                content_type = "audio/mpeg"
+            elif suffix in {".mp4", ".webm", ".mov"}:
+                body = b""
+                content_type = "video/mp4"
+            elif suffix == ".pdf":
+                body = b"%PDF-1.4\n%%EOF\n"
+                content_type = "application/pdf"
+            else:
+                body = _FIXTURE_PIXEL_GIF
+                content_type = "image/gif"
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        super().do_GET()
+
+    def do_POST(self):  # noqa: N802 - inherited HTTP handler API
+        parsed = urlsplit(self.path)
+        if parsed.path != "/api/fs/batch":
+            self.send_error(HTTPStatus.NOT_IMPLEMENTED, "Unsupported method (%s)" % self.command)
+            return
+        content_length = int(self.headers.get("Content-Length", "0"))
+        request_body = json.loads(self.rfile.read(content_length) or b"{}")
+        requests = request_body.get("requests", [])
+        responses = []
+        for index, request in enumerate(requests):
+            path = request.get("path", "/home/test")
+            responses.append(
+                {
+                    "id": request.get("id", index),
+                    "ok": True,
+                    "status": HTTPStatus.OK,
+                    "payload": {
+                        "path": path,
+                        "name": Path(path).name or "/",
+                        "kind": "file",
+                    },
+                }
+            )
+        body = json.dumps({"responses": responses}, separators=(",", ":")).encode()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):  # keep the pytest output clean
+        pass
+
+    def end_headers(self):
+        # Fixtures reuse one filename per type and are overwritten between loads (e.g. a
+        # dark then a light variant). Unlike file://, Chrome caches http responses by URL,
+        # so without no-store the second navigation to the same URL would serve the stale
+        # first page. Force a fresh fetch on every navigation.
+        self.send_header("Cache-Control", "no-store, must-revalidate")
+        super().end_headers()
+
+
+def fixture_asset_url(*parts: str) -> str:
+    """URL for a repo asset (e.g. static/yomux.js) served over the fixture HTTP origin."""
+    return f"{_fixture_http_base()}/{'/'.join(parts)}"
+
+
+def serve_repo_fixture_page(filename: str, html: str) -> Path:
+    """Write a fixture page into this process's private served root and return its Path.
+
+    The page lives at the HTTP origin root while `/static/*` resolves read-only from
+    the repository, so assets remain same-origin. A fresh URL per load avoids Chrome's
+    back/forward cache restoring a prior page's live JS state. A crash can leave only
+    the process's temporary root, never a repository file.
+    """
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+    return _FIXTURE_CONTENT_ROOT.write_page(worker, filename, html)
+
+
+def fixture_page_url(page: Path, search: str = "") -> str:
+    """Same-origin http:// URL for a fixture page served from the private root."""
+    return f"{_fixture_http_base()}{_FIXTURE_CONTENT_ROOT.url_path(page)}{search}"
+
+_APP_CSS_CACHE: str | None = None
+_APP_ENGLISH_STRINGS_CACHE: Mapping[str, str] | None = None
+_UI_PINS_CACHE: Mapping[str, object] | None = None
+
+
+def register_browser_new_document_script(driver, source: str, *, reset_after_test: bool = True) -> str:
+    result = driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": source})
+    identifier = str(result.get("identifier") or "")
+    if reset_after_test and identifier:
+        identifiers = getattr(driver, "_yolomux_test_script_ids", None)
+        if identifiers is None:
+            identifiers = []
+            driver._yolomux_test_script_ids = identifiers
+        identifiers.append(identifier)
+    return identifier
+
+
+def remove_browser_test_new_document_scripts(driver):
+    identifiers = list(getattr(driver, "_yolomux_test_script_ids", []))
+    driver._yolomux_test_script_ids = []
+    for identifier in identifiers:
+        driver.execute_cdp_cmd("Page.removeScriptToEvaluateOnNewDocument", {"identifier": identifier})
+
+
+def new_chrome_driver(window_size: str | tuple[int, int] | None = None, *, profile_dir: Path | None = None):
+    configured_chrome = os.environ.get("CHROME_BIN", "").strip()
+    if configured_chrome:
+        chrome_path = Path(configured_chrome)
+        if not chrome_path.is_file() or not os.access(chrome_path, os.X_OK):
+            raise RuntimeError(f"CHROME_BIN is not an executable file: {configured_chrome}")
+        chrome = str(chrome_path)
+    else:
+        # macOS installs Chrome as an app bundle rather than a PATH binary.  Keep
+        # the Linux lookup first, then use the canonical executable inside either
+        # common macOS bundle so browser regressions do not silently skip there.
+        chrome = (
+            shutil.which("google-chrome")
+            or shutil.which("chromium")
+            or shutil.which("chromium-browser")
+            or next((str(path) for path in (
+                Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+                Path("/Applications/Chromium.app/Contents/MacOS/Chromium"),
+            ) if path.is_file()), None)
+        )
+    if not chrome:
+        pytest.skip("Chrome/Chromium is not installed")
+    options = Options()
+    options.binary_location = chrome
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--ignore-certificate-errors")
+    options.set_capability("acceptInsecureCerts", True)
+    requested_size = window_size or DEFAULT_BROWSER_WINDOW_SIZE
+    window_size_arg = ",".join(str(value) for value in requested_size) if isinstance(requested_size, tuple) else str(requested_size)
+    options.add_argument(f"--window-size={window_size_arg}")
+    if profile_dir is not None:
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        options.add_argument(f"--user-data-dir={profile_dir}")
+    configured_driver = os.environ.get("CHROMEDRIVER_BIN", "").strip()
+    if configured_driver:
+        driver_path = Path(configured_driver)
+        if not driver_path.is_file() or not os.access(driver_path, os.X_OK):
+            raise RuntimeError(f"CHROMEDRIVER_BIN is not an executable file: {configured_driver}")
+        driver = webdriver.Chrome(service=ChromeService(executable_path=str(driver_path)), options=options)
+    else:
+        driver = webdriver.Chrome(options=options)
+    driver._yolomux_primary_window_handle = driver.current_window_handle
+    register_browser_new_document_script(driver, BROWSER_WAIT_HELPER_SOURCE, reset_after_test=False)
+    driver.execute_script(BROWSER_WAIT_HELPER_SOURCE)
+    return driver
+
+
+def fast_pointer_actions(browser):
+    # Hover/click tests need real W3C pointer events, not Selenium's human-speed 250 ms travel. Keep
+    # roughly three 60 Hz frames so hover paint/popover geometry can settle before the next command.
+    # Drag tests keep constructing ActionChains directly so their motion duration remains deliberate.
+    return ActionChains(browser, duration=50)
+
+
+def settle_browser_frames(browser, count=2):
+    """Wait for a deterministic number of rendered frames using the document helper."""
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const count = arguments[0];
+        const settle = window.__yolomuxTestHelpers?.settle;
+        if (typeof settle !== 'function') {
+          done({error: 'missing __yolomuxTestHelpers.settle'});
+          return;
+        }
+        settle(count).then(() => done({ok: true}), error => done({error: String(error?.stack || error)}));
+        """,
+        count,
+    )
+    assert result == {"ok": True}, result
+
+
+def assert_close(actual, expected, tol=1.0, *, context=None):
+    delta = abs(float(actual) - float(expected))
+    assert delta <= float(tol), context or f"expected {actual!r} to be within {tol} of {expected!r}; delta={delta}"
+
+
+def pause_animations_at_progress(browser, selector, progress=0.5):
+    """Freeze matching CSS animations at one reproducible point before measuring their paint."""
+    return browser.execute_script(
+        """
+        const nodes = Array.from(document.querySelectorAll(arguments[0]));
+        const progress = Math.max(0, Math.min(1, Number(arguments[1]) || 0));
+        let paused = 0;
+        for (const node of nodes) {
+          for (const animation of node.getAnimations({subtree: true})) {
+            const duration = Number(animation.effect?.getTiming?.().duration) || 0;
+            if (!duration) continue;
+            animation.pause();
+            animation.currentTime = duration * progress;
+            paused += 1;
+          }
+        }
+        return paused;
+        """,
+        selector,
+        progress,
+    )
+
+
+def freeze_document_animations(browser, progress=0.5):
+    """Freeze every running document animation at a deterministic point for a golden capture."""
+    return browser.execute_script(
+        """
+        const progress = Math.max(0, Math.min(1, Number(arguments[0]) || 0));
+        let paused = 0;
+        for (const animation of document.getAnimations({subtree: true})) {
+          const duration = Number(animation.effect?.getTiming?.().duration) || 0;
+          if (!duration) continue;
+          animation.pause();
+          animation.currentTime = duration * progress;
+          paused += 1;
+        }
+        return paused;
+        """,
+        progress,
+    )
+
+
+def animated_property_at_progress(browser, selector, property_name, progress=0.5):
+    """Freeze an animation and return its computed property, avoiding timing-sensitive samples."""
+    pause_animations_at_progress(browser, selector, progress)
+    return browser.execute_script(
+        "return getComputedStyle(document.querySelector(arguments[0])).getPropertyValue(arguments[1]).trim();",
+        selector,
+        property_name,
+    )
+
+
+def set_browser_visual_profile(browser, *, theme="dark", dpr=1):
+    """Apply a small explicit visual profile; reset hook clears CDP device metrics afterwards."""
+    if theme not in {"dark", "light"}:
+        raise ValueError(f"unsupported visual theme: {theme!r}")
+    scale = float(dpr)
+    if scale <= 0:
+        raise ValueError(f"device pixel ratio must be positive: {dpr!r}")
+    size = browser.get_window_size()
+    width, height = size["width"], size["height"]
+    browser.execute_cdp_cmd(
+        "Emulation.setDeviceMetricsOverride",
+        {"width": int(width), "height": int(height), "deviceScaleFactor": scale, "mobile": False},
+    )
+    browser.execute_script(
+        "document.body.classList.toggle('theme-light', arguments[0] === 'light');"
+        "document.body.classList.toggle('theme-dark', arguments[0] === 'dark');",
+        theme,
+    )
+    return browser.execute_script("return {theme: document.body.className, dpr: window.devicePixelRatio};")
+
+
+def app_css() -> str:
+    # The shipped app stylesheet, read once and reused. Every Selenium fixture used to re-read
+    # static/yomux.css from disk (~36 reads per run); the content is identical every time.
+    global _APP_CSS_CACHE
+    if _APP_CSS_CACHE is None:
+        _APP_CSS_CACHE = (REPO_ROOT / "static" / "yomux.css").read_text(encoding="utf-8")
+    return _APP_CSS_CACHE
+
+
+def app_english_strings() -> Mapping[str, str]:
+    # Locale fixture data is flat string-to-string JSON. Keep one parsed read-only catalog so every
+    # browser fixture consumes the same shipped labels without repeated disk reads and decoding.
+    global _APP_ENGLISH_STRINGS_CACHE
+    if _APP_ENGLISH_STRINGS_CACHE is None:
+        catalog = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+        if not isinstance(catalog, dict) or not all(isinstance(key, str) and isinstance(value, str) for key, value in catalog.items()):
+            raise TypeError("English browser fixture catalog must contain only string values")
+        _APP_ENGLISH_STRINGS_CACHE = MappingProxyType(catalog)
+    return _APP_ENGLISH_STRINGS_CACHE
+
+
+def ui_pins() -> Mapping[str, object]:
+    """Read the shared cross-layer UI pin registry once and expose it as read-only fixture data."""
+    global _UI_PINS_CACHE
+    if _UI_PINS_CACHE is None:
+        pins = json.loads((REPO_ROOT / "tests" / "fixtures" / "ui_pins.json").read_text(encoding="utf-8"))
+        if not isinstance(pins, dict):
+            raise TypeError("tests/fixtures/ui_pins.json must contain one JSON object")
+        _UI_PINS_CACHE = MappingProxyType(pins)
+    return _UI_PINS_CACHE
+
+
+def ui_pin(name: str) -> str:
+    value = ui_pins().get(name)
+    if not isinstance(value, str) or not value:
+        raise KeyError(f"unknown string UI pin: {name}")
+    return value
+
+
+def ui_pin_rgb(name: str) -> str:
+    return css_hex_to_rgb(ui_pin(name))
+
+
+def page_html(body: str, *, extra_css: str = "") -> str:
+    # One scaffold for the Selenium fixture pages: the app stylesheet, an optional fixture-specific
+    # <style> block, and the body. Replaces ~20 near-identical inline `<!doctype>…<style>{css}</style>`
+    # copies so a change to the harness shell happens in one place.
+    extra = f"\n        <style>\n{extra_css}\n        </style>" if extra_css else ""
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        {web.MOBILE_VIEWPORT_META}
+        {_EMPTY_FAVICON_HTML}
+        <style>{app_css()}</style>{extra}
+      </head>
+      <body>
+{body}
+      </body>
+    </html>
+    """
+
+
+def browser_screenshot_rgb(browser):
+    image_mod = pytest.importorskip("PIL.Image")
+    return image_mod.open(BytesIO(browser.get_screenshot_as_png())).convert("RGB")
+
+
+def local_golden_screenshot_dir():
+    """Return the ignored local baseline directory, optionally redirected for an isolated test."""
+    configured = os.environ.get(GOLDEN_DIR_ENV, "").strip()
+    return Path(configured).expanduser() if configured else LOCAL_GOLDEN_SCREENSHOT_DIR
+
+
+def assert_local_golden_screenshot(browser, name, *, rms_tolerance=6.0, changed_fraction_tolerance=0.015):
+    """Compare one browser screenshot with this machine's reviewed local baseline.
+
+    Golden PNGs deliberately stay out of git: Chrome font rasterization and app chrome are machine
+    specific, while this project runs its GUI gate locally.  Set YOLOMUX_UPDATE_GOLDENS=1 to create
+    or review-refresh them in one command.  A missing baseline is an explicit skip, never an empty
+    pixel assertion pretending to prove a visual result.
+    """
+    image_mod = pytest.importorskip("PIL.Image")
+    image_chops = pytest.importorskip("PIL.ImageChops")
+    image_stat = pytest.importorskip("PIL.ImageStat")
+    safe_name = str(name).strip()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]*", safe_name):
+        raise ValueError(f"golden name must be a simple lowercase filename, got {name!r}")
+    directory = local_golden_screenshot_dir()
+    baseline_path = directory / f"{safe_name}.png"
+    actual = browser_screenshot_rgb(browser)
+    if os.environ.get(GOLDEN_UPDATE_ENV) == "1":
+        directory.mkdir(parents=True, exist_ok=True)
+        actual.save(baseline_path)
+        return {"status": "updated", "path": str(baseline_path), "size": actual.size}
+    if not baseline_path.is_file():
+        pytest.skip(
+            f"local golden baseline missing: {baseline_path}; run "
+            f"{GOLDEN_UPDATE_ENV}=1 python3 -m pytest tests/test_browser_golden.py -q"
+        )
+    expected = image_mod.open(baseline_path).convert("RGB")
+    assert actual.size == expected.size, {
+        "golden": safe_name,
+        "actual": actual.size,
+        "expected": expected.size,
+        "baseline": str(baseline_path),
+    }
+    difference = image_chops.difference(actual, expected)
+    stat = image_stat.Stat(difference)
+    rms = sum(float(value) ** 2 for value in stat.rms) ** 0.5 / (3 ** 0.5)
+    changed_pixels = sum(1 for pixel in difference.getdata() if pixel != (0, 0, 0))
+    changed_fraction = changed_pixels / max(1, actual.width * actual.height)
+    assert rms <= rms_tolerance and changed_fraction <= changed_fraction_tolerance, {
+        "golden": safe_name,
+        "baseline": str(baseline_path),
+        "rms": round(rms, 4),
+        "rmsTolerance": rms_tolerance,
+        "changedFraction": round(changed_fraction, 6),
+        "changedFractionTolerance": changed_fraction_tolerance,
+        "refresh": f"{GOLDEN_UPDATE_ENV}=1 python3 -m pytest tests/test_browser_golden.py -q",
+    }
+    return {
+        "status": "matched",
+        "path": str(baseline_path),
+        "size": actual.size,
+        "rms": rms,
+        "changedFraction": changed_fraction,
+    }
+
+
+def browser_auth_yaml() -> str:
+    return """users:
+  - username: "keivenc"
+    password: "random-password"
+    role: "admin"
+  - username: "guest"
+    password: "guest"
+    role: "readonly"
+"""
+
+
+class BrowserFakeTlsContext:
+    def wrap_socket(self, *_args, **_kwargs):
+        raise AssertionError("plain HTTP fixture requests should not be TLS-wrapped")
+
+
+def isolate_browser_runtime_paths(monkeypatch, tmp_path):
+    # This helper supplies explicit per-app roots below tmp_path. Keeping the suite-wide rooted-run
+    # override active makes common.runtime_root() rebuild a longer <test-root>/runtime path and can
+    # push the local-service socket beyond Linux's sockaddr_un limit.
+    monkeypatch.delenv("YOLOMUX_ROOT", raising=False)
+    config_dir = tmp_path / "yolomux-config"
+    state_dir = tmp_path / "yolomux-state"
+    runtime_base_dir = tmp_path / "yolomux-runtime"
+    runtime_dir = runtime_base_dir / "yolomux"
+    config_dir.mkdir(exist_ok=True)
+    state_dir.mkdir(exist_ok=True)
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    old_roots = {
+        common.CONFIG_DIR: config_dir,
+        common.STATE_DIR: state_dir,
+        common.RUNTIME_DIR: runtime_dir,
+    }
+    monkeypatch.setenv("YOLOMUX_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("YOLOMUX_STATE_DIR", str(state_dir))
+    monkeypatch.setenv("YOLOMUX_RUNTIME_DIR", str(runtime_base_dir))
+    state_path = config_dir / "state.json"
+    event_log_path = state_dir / "events.jsonl"
+    activity_path = state_dir / "activity.json"
+    activity_heartbeats_path = state_dir / "activity-heartbeats.jsonl"
+    watch_index_path = state_dir / "watch-index.json"
+    auto_approve_lock_dir = state_dir / "locks"
+    control_socket_dir = Path(os.environ["YOLOMUX_TEST_ROOT"]) / "browser" / f"c-{os.getpid()}-{uuid.uuid4().hex[:4]}"
+    control_socket_dir.parent.mkdir(mode=0o700, exist_ok=True)
+    control_socket_dir.mkdir(mode=0o700)
+    for module in (common,):
+        monkeypatch.setattr(module, "CONFIG_DIR", config_dir)
+        monkeypatch.setattr(module, "STATE_DIR", state_dir)
+        monkeypatch.setattr(module, "RUNTIME_DIR", runtime_dir)
+        monkeypatch.setattr(module, "STATE_PATH", state_path)
+        monkeypatch.setattr(module, "EVENT_LOG_PATH", event_log_path)
+        monkeypatch.setattr(module, "ACTIVITY_PATH", activity_path)
+        monkeypatch.setattr(module, "ACTIVITY_HEARTBEATS_PATH", activity_heartbeats_path)
+        monkeypatch.setattr(module, "WATCH_INDEX_PATH", watch_index_path)
+        monkeypatch.setattr(module, "AUTO_APPROVE_LOCK_DIR", auto_approve_lock_dir)
+        monkeypatch.setattr(module, "CONTROL_SOCKET_DIR", control_socket_dir)
+    patch_imported_writable_constants(monkeypatch, old_roots)
+    monkeypatch.setattr(app_module, "ACTIVITY_PATH", activity_path)
+    monkeypatch.setattr(app_module, "ACTIVITY_HEARTBEATS_PATH", activity_heartbeats_path)
+    monkeypatch.setattr(app_module, "EVENT_LOG_PATH", event_log_path)
+    monkeypatch.setattr(app_module, "WATCH_INDEX_PATH", watch_index_path)
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", state_dir / "session-files-cache")
+    monkeypatch.setattr(events_module, "STATE_PATH", state_path)
+    monkeypatch.setattr(control_module, "CONTROL_SOCKET_DIR", control_socket_dir)
+    monkeypatch.setattr(auto_approve_worker_module, "AUTO_APPROVE_LOCK_DIR", auto_approve_lock_dir)
+    monkeypatch.setattr(settings_module, "SETTINGS_PATH", config_dir / "settings.yaml")
+    monkeypatch.setattr(app_module, "SETTINGS_PATH", config_dir / "settings.yaml")
+    monkeypatch.setattr(yolo_rules_module, "YOLO_RULES_PATH", config_dir / "yolo-rules.yaml")
+    return SimpleNamespace(config_dir=config_dir, state_dir=state_dir, runtime_dir=runtime_dir, control_socket_dir=control_socket_dir)
+
+
+def cleanup_isolated_browser_runtime_paths(paths):
+    if paths is None:
+        return
+    shutil.rmtree(paths.control_socket_dir, ignore_errors=True)
+
+
+@dataclass(frozen=True)
+class FixtureRuntimeOptions:
+    session_count: int = 1
+    dangerously_yolo: bool = True
+    session_cwd: Path | None = None
+
+
+@dataclass
+class FixtureRuntime:
+    app: object
+    sessions: list[str]
+    tmux: object
+    paths: object
+
+    def close(self) -> None:
+        run_fixture_cleanup_phases("isolated browser app", (
+            ("app runtime", lambda: stop_fixture_app_runtime(self.app, label="isolated browser app")),
+            ("tmux runtime", lambda: stop_isolated_tmux_runtime(self.tmux)),
+            ("runtime paths", lambda: cleanup_isolated_browser_runtime_paths(self.paths)),
+        ))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _error_type, _error, _traceback):
+        self.close()
+
+
+def start_fixture_runtime(monkeypatch, tmp_path, options: FixtureRuntimeOptions) -> FixtureRuntime:
+    paths = None
+    tmux_runtime = None
+    try:
+        paths = isolate_browser_runtime_paths(monkeypatch, tmp_path)
+        tmux_runtime = start_isolated_tmux_runtime(
+            monkeypatch,
+            tmp_path,
+            session_count=options.session_count,
+            session_cwd=options.session_cwd,
+        )
+        app = TmuxWebtermApp(list(tmux_runtime.sessions), dangerously_yolo=options.dangerously_yolo)
+        return FixtureRuntime(app, list(tmux_runtime.sessions), tmux_runtime, paths)
+    except Exception:
+        stop_isolated_tmux_runtime(tmux_runtime)
+        cleanup_isolated_browser_runtime_paths(paths)
+        raise
+
+
+def start_isolated_browser_app(monkeypatch, tmp_path, session_count=1, *, dangerously_yolo=True, session_cwd=None):
+    return start_fixture_runtime(
+        monkeypatch,
+        tmp_path,
+        FixtureRuntimeOptions(session_count, dangerously_yolo, session_cwd),
+    )
+
+
+def stop_isolated_browser_app(runtime):
+    if runtime is None:
+        return
+    if isinstance(runtime, FixtureRuntime):
+        runtime.close()
+        return
+    FixtureRuntime(runtime.app, list(getattr(runtime, "sessions", ())), runtime.tmux, runtime.paths).close()
+
+
+def start_browser_server(monkeypatch, tmp_path, app, *, tls_context=None, auth_bypass=False, pin_batchd_scheduler=None):
+    auth_path = tmp_path / "auth.yaml"
+    auth_path.write_text(browser_auth_yaml(), encoding="utf-8")
+    monkeypatch.setattr(common, "AUTH_CONFIG_PATH", auth_path)
+    monkeypatch.setattr(server_auth, "current_language_pref", lambda: "system")
+    if auth_bypass:
+        monkeypatch.setenv(common.TEST_AUTH_BYPASS_ENV, "1")
+    runtime = start_fixture_live_server(
+        monkeypatch,
+        app,
+        GateLiveServerOptions(
+            tls_context=tls_context,
+            label="isolated browser",
+            # Browser fixtures also serve small HTTP-only app doubles.  Pin batchd only when the
+            # app actually owns that scheduler seam; otherwise the fixture has no producer to
+            # protect and must not manufacture a batchd dependency.
+            pin_batchd_scheduler=(hasattr(app, "job_client") if pin_batchd_scheduler is None else pin_batchd_scheduler),
+        ),
+    )
+    runtime.server._fixture_server_log_boundary = runtime.server_log_boundary
+    runtime.server._fixture_gate_live_server = runtime
+    return runtime.server, runtime.thread
+
+
+def stop_browser_server(
+    server,
+    thread,
+    *,
+    browser=None,
+    browsers=(),
+    server_log_reader=None,
+    wait_for_api_quiescence=True,
+):
+    invalid_browser_arguments = browser is not None and browsers
+    runtime = getattr(server, "_fixture_gate_live_server", None)
+    base_url = runtime.base_url if isinstance(runtime, GateLiveServer) else f"http://127.0.0.1:{server.server_address[1]}"
+    owned_browsers = (browser, *tuple(browsers)) if invalid_browser_arguments else (tuple(browsers) if browsers else browser)
+    validation_error = (
+        ValueError("pass either browser or browsers to stop_browser_server, not both")
+        if invalid_browser_arguments
+        else None
+    )
+    try:
+        if isinstance(runtime, GateLiveServer):
+            runtime.finish(
+                owned_browsers,
+                server_log_reader=server_log_reader,
+                wait_for_api_quiescence=wait_for_api_quiescence,
+                require_owned_browsers=bool(browsers) or browser is not None,
+            )
+        else:
+            finish_browser_fixture_boundary(
+                owned_browsers,
+                base_url,
+                lambda: stop_fixture_http_app(server.app, server, thread, label="isolated browser"),
+                server_log_reader=server_log_reader,
+                server_log_boundary=getattr(server, "_fixture_server_log_boundary", None),
+                wait_for_api_quiescence=wait_for_api_quiescence,
+                require_owned_browsers=bool(browsers) or browser is not None,
+            )
+    except BaseException as cleanup_error:
+        if validation_error is not None:
+            raise validation_error from cleanup_error
+        raise
+    if validation_error is not None:
+        raise validation_error
+
+
+def install_browser_websocket_tracker(driver):
+    register_browser_new_document_script(
+        driver,
+        """
+        (() => {
+          const NativeWebSocket = window.WebSocket;
+          if (!NativeWebSocket || NativeWebSocket.__yolomuxTracked) return;
+          const tracked = [];
+          function TrackedWebSocket(url, protocols) {
+            const socket = protocols === undefined ? new NativeWebSocket(url) : new NativeWebSocket(url, protocols);
+            tracked.push(socket);
+            return socket;
+          }
+          Object.setPrototypeOf(TrackedWebSocket, NativeWebSocket);
+          TrackedWebSocket.prototype = NativeWebSocket.prototype;
+          for (const key of ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED']) {
+            Object.defineProperty(TrackedWebSocket, key, {value: NativeWebSocket[key]});
+          }
+          Object.defineProperty(TrackedWebSocket, '__yolomuxTracked', {value: true});
+          window.__yolomuxTrackedSockets = tracked;
+          window.WebSocket = TrackedWebSocket;
+        })();
+        """,
+    )
+
+
+def count_rect_region_pixels(image, dpr, rect, region, predicate, *, step=2):
+    left = int((rect["left"] + rect["width"] * region["left"]) * dpr)
+    top = int((rect["top"] + rect["height"] * region["top"]) * dpr)
+    right = int((rect["left"] + rect["width"] * region["right"]) * dpr)
+    bottom = int((rect["top"] + rect["height"] * region["bottom"]) * dpr)
+    left = max(0, min(image.width - 1, left))
+    right = max(left + 1, min(image.width, right))
+    top = max(0, min(image.height - 1, top))
+    bottom = max(top + 1, min(image.height, bottom))
+    stride = max(1, int(step))
+    matches = 0
+    samples = 0
+    for y in range(top, bottom, stride):
+        for x in range(left, right, stride):
+            pixel = image.getpixel((x, y))
+            samples += 1
+            if predicate(pixel):
+                matches += 1
+    return matches, samples
+
+
+def _browser_fixture_scope(*, fixture_name, config):
+    """Reuse one Chrome lease per pytest worker; the autouse reset owns isolation."""
+    del fixture_name, config
+    return "session"
+
+
+class _BrowserDriverLease:
+    """Stable fixture object whose worker-local Chrome may be replaced after a crash."""
+
+    def __init__(self, driver):
+        object.__setattr__(self, "_driver", driver)
+
+    def __getattr__(self, name):
+        return getattr(self._driver, name)
+
+    def __setattr__(self, name, value):
+        if name == "_driver":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._driver, name, value)
+
+    def get(self, url):
+        parsed = urlsplit(str(url))
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            origins = set(getattr(self._driver, "_yolomux_test_origins", set()))
+            origins.add(f"{parsed.scheme}://{parsed.netloc}")
+            self._driver._yolomux_test_origins = origins
+        return self._driver.get(url)
+
+    def replace_after_invalid_session(self):
+        # Retire the crashed driver through the one shared owner - bounded quit -> TERM -> KILL ->
+        # reap -> final proof, guarded by the driver's captured generation - so a wedged chromedriver
+        # from the invalid session cannot linger while we spawn its replacement.
+        previous = self._driver
+        retire_all([WebDriverLease.from_driver(previous)])
+        self._driver = new_chrome_driver()
+
+    def quit(self):
+        # One owner retires this driver: a bare best-effort quit leaves a chromedriver behind when
+        # quit() hangs, and the lease proves the leased process gone (or records why it could not).
+        retire_all([WebDriverLease.from_driver(self._driver)])
+
+
+def _reset_browser_windows(driver):
+    """Close fixture-created popouts before clearing profile-scoped state."""
+    handles = list(driver.window_handles)
+    if not handles:
+        raise WebDriverException("Chrome has no remaining top-level window")
+    primary = getattr(driver, "_yolomux_primary_window_handle", None)
+    if primary not in handles:
+        primary = handles[0]
+        driver._yolomux_primary_window_handle = primary
+    for handle in handles:
+        if handle == primary:
+            continue
+        driver.switch_to.window(handle)
+        driver.close()
+    driver.switch_to.window(primary)
+
+
+def _reset_reused_browser_state(driver, *, retired_origin=None):
+    """Return a worker-reused browser to a known blank, profile-clean state."""
+    _reset_browser_windows(driver)
+    remove_browser_test_new_document_scripts(driver)
+    origin = retired_origin
+    if origin is None:
+        origin = driver.execute_script("return location.origin;")
+    origins = set(getattr(driver, "_yolomux_test_origins", set()))
+    if origin and origin != "null":
+        origins.add(origin)
+    fixture_origin = _FIXTURE_HTTP_BASE
+    if fixture_origin:
+        origins.add(fixture_origin)
+    for storage_origin in sorted(origins):
+        driver.execute_cdp_cmd("Storage.clearDataForOrigin", {"origin": storage_origin, "storageTypes": "all"})
+    driver._yolomux_test_origins = set()
+    driver._yolomux_server_log_boundary = None
+    driver.delete_all_cookies()
+    driver.execute_cdp_cmd("Browser.resetPermissions", {})
+    driver.execute_cdp_cmd("Browser.setDownloadBehavior", {"behavior": "deny"})
+    driver.execute_cdp_cmd("Emulation.setCPUThrottlingRate", {"rate": 1})
+    driver.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+    driver.execute_cdp_cmd("Emulation.setEmulatedMedia", {"features": []})
+    read_browser_console_log(driver)
+    driver.get("about:blank")
+    driver.execute_script("document.body.tabIndex = -1; document.body.focus();")
+    driver.set_window_size(*DEFAULT_BROWSER_WINDOW_SIZE)
+
+
+def _invalid_browser_session(error):
+    message = str(error).lower()
+    return any(marker in message for marker in (
+        "invalid session id",
+        "session deleted",
+        "disconnected",
+        "not reachable",
+        "target window already closed",
+        "no remaining top-level window",
+    ))
+
+
+_BUNDLE_FRESHNESS_CHECKED = False
+
+
+def _require_current_generated_bundle(workerinput: Mapping[str, object] | None = None) -> None:
+    """Refuse to run a browser gate against a stale generated bundle.
+
+    Most browser gates serve the generated `static/yomux.js` rather than
+    building from `static_src/`. If that bundle is stale they exercise the
+    previous build: a fixed source can stay red, and a broken source can stay
+    green. `tools/check.py` has a `static_build --check` lane, but agents are
+    told never to run the full gate because it starves the box, so nothing
+    catches it in the focused runs we actually use. This does.
+
+    Checked once per process rather than per test -- it shells out, and the
+    bundle cannot change mid-run.
+    """
+
+    global _BUNDLE_FRESHNESS_CHECKED
+    if _BUNDLE_FRESHNESS_CHECKED:
+        return
+    environment = os.environ.copy()
+    if workerinput is not None:
+        token = str(workerinput.get("yomux_worktree_writer_token") or "")
+        slot = str(workerinput.get("yomux_worktree_writer_slot") or "")
+        if token and slot:
+            environment["YOLOMUX_WORKTREE_WRITER_TOKEN"] = token
+            environment["YOLOMUX_WORKTREE_WRITER_SLOT"] = slot
+    stdout = StringIO()
+    stderr = StringIO()
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        returncode = static_build.main(["--check"], environ=environment)
+    output = f"{stdout.getvalue()}{stderr.getvalue()}"
+    assert returncode == 0, output
+    _BUNDLE_FRESHNESS_CHECKED = True
+
+
+@pytest.fixture(scope=_browser_fixture_scope)
+def browser(pytestconfig: pytest.Config):
+    # Session scope creates exactly one lease per pytest-xdist worker, while the autouse teardown
+    # removes cross-test state after every test.
+    workerinput = pytestconfig.workerinput if hasattr(pytestconfig, "workerinput") else None
+    _require_current_generated_bundle(workerinput)
+    lease = _BrowserDriverLease(new_chrome_driver())
+    try:
+        yield lease
+    finally:
+        lease.quit()
+
+
+def reset_reused_browser_after_test(request):
+    """Reset the worker browser after one consumer, regardless of its test module."""
+
+    lease = request.node.funcargs.get("browser")
+    if lease is None:
+        return
+    if getattr(request.node, "_yolomux_skip_reused_browser_diagnostic", False):
+        _reset_reused_browser_state(lease, retired_origin=lease.execute_script("return location.origin;"))
+        return
+    try:
+        retired_origin = lease.execute_script("return location.origin;")
+        retirement_error = None
+        try:
+            retire_browser_after_strict_diagnostic_gate(
+                lease,
+                require_js_debug_store=False,
+            )
+        except BaseException as error:
+            retirement_error = error
+        _reset_reused_browser_state(lease, retired_origin=retired_origin)
+        if retirement_error is not None:
+            raise retirement_error.with_traceback(retirement_error.__traceback__)
+    except WebDriverException as error:
+        if not _invalid_browser_session(error):
+            raise
+        lease.replace_after_invalid_session()
+        pytest.fail(
+            "Chrome became invalid during this test; replaced the worker-local driver for later tests "
+            f"without concealing the failure: {error}"
+        )
+
+
+@pytest.fixture
+def _reset_browser_state(request):
+    """Compatibility fixture for direct reset lifecycle tests."""
+
+    yield
+    reset_reused_browser_after_test(request)
+
+
+def pane_fixture_html(width):
+    css = app_css()
+    tabs = "\n".join(
+        f"""
+        <button type="button" class="pane-tab {'active' if number == 5 else ''}">
+          <span class="pane-tab-core">
+            <span class="session-button-prefix"><span class="session-button-number">YO</span><strong class="session-button-number session-button-identifier">[{number}]</strong></span>
+            <span class="session-button-text">
+              <span class="tab-symbol session-state-badge">run</span>
+              <span class="session-button-dir">fix: stabilize pane and Finder tab workflow</span>
+            </span>
+          </span>
+          <span class="pane-tab-close pc-window-control pc-minimize"></span>
+        </button>
+        """
+        for number in (1, 2, 3, 5, 6, 9)
+    )
+    return page_html(
+        f"""
+        <div class="panel active-pane">
+          <div class="panel-head">
+            <div class="tabs" role="tablist">
+              <div class="tmux-window-bar" data-tmux-window-label-mode="names">
+                <button class="tab tmux-window-button" data-window-agent="shell"><span class="tmux-window-name-label">bash</span><span class="tmux-window-number-label">0</span></button>
+                <button class="tab tmux-window-button active" data-window-agent="codex" aria-pressed="true"><span class="tmux-window-name-label">codex</span><span class="tmux-window-number-label">1</span></button>
+                <button class="tab tmux-window-button" data-window-agent="other"><span class="tmux-window-name-label">pytest</span><span class="tmux-window-number-label">2</span></button>
+              </div>
+              <button class="tab">Tx</button>
+              <button class="tab">AI</button>
+              <button class="tab">Log</button>
+              <button class="tab panel-detail-toggle pane-detail-toggle pc-window-control pc-minimize active"></button>
+              <button class="tab pane-minimize pc-window-control pc-minimize"></button>
+              <button class="tab pane-expand pc-window-control pc-zoom"></button>
+            </div>
+            <div class="pane-tabs" role="tablist">{tabs}</div>
+          </div>
+          <div class="panel-detail-row"><div class="meta">branch · path · dirty 1</div><button class="panel-detail-close"></button></div>
+          <div class="tab-pane active"><div class="terminal"></div></div>
+        </div>
+      """,
+        extra_css=f"""
+          body {{ margin: 0; padding: 10px; display: block; height: auto; min-height: 0; }}
+          .panel {{ width: {width}px; height: 240px; }}
+        """,
+    )
+
+
+def menu_fixture_html():
+    css = app_css()
+    rows = "\n".join(
+        f"""
+        <button type="button" class="app-menu-command app-menu-tab-command">
+          <span class="app-menu-check" aria-hidden="true"></span>
+          <span class="app-menu-content">
+            <span class="app-menu-rich">
+              <span class="pane-tab-core">
+                <span class="session-button-prefix"><span class="session-button-number">YO</span></span>
+                <span class="session-button-name">{number}</span>
+                <span class="session-button-text">
+                  <span class="session-state-badge">run</span>
+                  <span class="ci-indicator pr-status-passing">CI</span>
+                  <span class="ci-indicator pr-indicator">#10123</span>
+                  <span class="session-button-dir tab-inline-detail">fix compact menu density</span>
+                </span>
+              </span>
+            </span>
+          </span>
+        </button>
+        """
+        for number in range(1, 31)
+    )
+    return page_html(
+        f"""
+        <div class="app-menu" data-app-menu="tabs">
+          <div class="app-menu-popover" role="menu">{rows}</div>
+        </div>
+      """,
+        extra_css=f"""
+          body {{ margin: 0; padding: 10px; display: block; height: auto; min-height: 0; overflow: auto; }}
+          .app-menu-popover {{
+            visibility: visible;
+            opacity: 1;
+            pointer-events: auto;
+            position: static;
+            transform: none;
+          }}
+        """,
+    )
+
+
+def pc_controls_fixture_html():
+    css = app_css()
+    return page_html(
+        f"""
+        <div class="tabs" role="tablist">
+          <button id="hash-tab" class="tab panel-detail-toggle">#</button>
+          <button id="list-tab" class="tab terminal-tab">1.</button>
+          <button id="pane-actions" class="tab pane-actions"><span id="pane-actions-dots" class="pane-actions-dots">...</span></button>
+          <button id="pane-zoom" type="button" class="tab pane-expand pc-window-control pc-zoom" data-action="fixture-zoom"></button>
+          <button id="hidden-pane-zoom" class="tab pane-expand pc-window-control pc-zoom" hidden></button>
+        </div>
+        <span id="working-yolo" class="session-yolo-marker active working">YO</span>
+        <span id="idle-yolo" class="session-yolo-marker active">YO</span>
+        <button type="button" class="pane-tab active" id="info-tab">
+          <span class="pane-tab-core"><span class="session-button-dir pane-tab-info-label">YO!info</span></span>
+        </button>
+        <button type="button" class="pane-tab active">
+          <span class="pane-tab-core"><span class="session-button-name">1</span></span>
+          <span id="tab-minimize" class="pane-tab-close pc-window-control pc-minimize"></span>
+        </button>
+        <div class="tabs pane-frame-controls">
+          <button id="finder-close" class="tab pane-close pc-window-control pc-close file-explorer-panel-close"></button>
+          <button id="editor-close" class="tab pane-close pc-window-control pc-close file-editor-panel-close"></button>
+        </div>
+        <section class="preferences-section collapsed">
+          <button type="button" class="preferences-section-toggle">Appearance</button>
+          <div id="collapsed-preferences" class="preferences-settings" hidden>
+            <div class="preferences-setting-row">hidden row</div>
+          </div>
+        </section>
+        <div class="file-explorer-tree-panel">
+          <div id="collapsed-dir" class="file-tree-row kind-dir" aria-expanded="false"><span class="file-tree-icon ui-disclosure-triangle" data-disclosure-expanded="false">›</span><span class="file-tree-name">Alpha</span></div>
+          <div id="expanded-dir" class="file-tree-row kind-dir expanded" aria-expanded="true"><span class="file-tree-icon ui-disclosure-triangle" data-disclosure-expanded="true">›</span><span class="file-tree-name">Bravo</span></div>
+          <div id="selected-file-row" class="file-tree-row kind-file selected"><span class="file-tree-icon">M</span><span class="file-tree-name">clicked.md</span></div>
+          <div id="current-file-row" class="file-tree-row kind-file current-file"><span class="file-tree-icon">M</span><span class="file-tree-name">README.md</span></div>
+          <div id="repo-dir" class="file-tree-row kind-dir is-repo repo-non-main"><span class="file-tree-icon ui-disclosure-triangle" data-disclosure-expanded="false">›</span><span class="file-tree-name">yolomux <span class="file-tree-repo-meta">[<span class="file-tree-repo-branch">feature/repo-row</span>]</span></span><span class="file-tree-agent" hidden></span><span class="file-tree-diff"><span class="changes-diff-add">+5</span> <span class="changes-diff-remove">-3</span></span><span class="file-tree-dir-count" hidden></span><span class="file-tree-git-status" hidden></span><span class="file-tree-date" hidden></span></div>
+        </div>
+        <div id="test-context-menu" class="terminal-context-menu" style="top: 220px; left: 24px;"></div>
+        <div id="test-image-preview" class="file-image-preview-popover" style="top: 220px; left: 24px;"></div>
+        <div class="pane-tab session-popover-host popover-open" style="position: fixed; top: 220px; left: 24px;">
+          <div id="test-tab-popover" class="session-popover"></div>
+        </div>
+      """,
+        extra_css=f"""
+          body {{ margin: 0; padding: 24px; display: block; height: auto; min-height: 0; }}
+        """,
+    )
+
+
+def topbar_font_fixture_html():
+    css = app_css()
+    return page_html(
+        f"""
+        <header id="topbar-fixture" class="topbar">
+          <div class="brand"><span class="title">YOmux</span></div>
+          <div class="app-menu-area">
+            <nav class="app-menu-bar" aria-label="Application menu">
+              <div class="app-menu"><button id="menu-file" type="button" class="app-menu-button">File</button></div>
+            </nav>
+          </div>
+          <div class="actions">
+            <button id="tabMetaToggle" type="button" aria-label="Tab metadata"></button>
+            <button id="notifyToggle" type="button" aria-label="Alerts"></button>
+            <button id="refreshMeta" type="button" aria-label="Refresh"></button>
+          </div>
+        </header>
+        <button type="button" class="pane-tab active">
+          <span class="pane-tab-core"><span class="session-button-name">1</span></span>
+        </button>
+      """,
+        extra_css=f"""
+          body {{ margin: 0; padding: 12px; display: block; height: auto; min-height: 0; }}
+          :root {{ --ui-font-size: 18px; --tab-label-size: 18px; }}
+        """,
+    )
+
+
+def editor_pane_ignores_legacy_body_class_fixture_html():
+    css = app_css()
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{css}</style>
+        <style>
+          body {{ margin: 0; display: block; height: 700px; min-height: 0; }}
+          #grid {{ height: 500px; }}
+        </style>
+      </head>
+      <body class="file-editor-open">
+        <main id="grid" class="grid">
+          <section class="layout-root">
+            <section class="layout-column file-editor-column">
+              <section class="drop-slot">
+                <article class="panel file-editor-panel"></article>
+              </section>
+            </section>
+          </section>
+        </main>
+      </body>
+    </html>
+    """
+
+
+def codemirror_editor_controls_fixture_html():
+    css = app_css()
+    tabs = "\n".join(
+        f"""
+        <div role="button" tabindex="0" class="pane-tab session-popover-host {'active popover-open' if index == 2 else ''}">
+          <span class="pane-tab-core"><span class="session-button-name">file-{index}.md</span></span>
+          <span class="pane-tab-close pc-window-control pc-close"></span>
+          {'''
+          <div id="file-popover" class="session-popover file-popover">
+            <button id="file-popover-copy" class="path-copy-button popover-copy-button"></button>
+          </div>
+          ''' if index == 2 else ''}
+        </div>
+        """
+        for index in range(1, 6)
+    )
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{css}</style>
+        <style>
+          body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; }}
+          .file-editor-panel {{ width: 930px; height: 360px; }}
+        </style>
+      </head>
+      <body class="editor-theme-light">
+        <article class="panel file-editor-panel active-pane editor-wrap">
+          <div class="panel-head file-editor-panel-head">
+            <div id="editor-actions" class="file-editor-panel-actions">
+              <div class="file-editor-mode-control file-editor-mode-control-panel" role="group">
+                <button type="button" data-editor-mode="edit"><span class="file-editor-icon file-editor-icon-edit"></span></button>
+                <button type="button" data-editor-mode="preview"><span class="file-editor-icon file-editor-icon-eye"></span></button>
+                <button type="button" data-editor-mode="split"><span class="file-editor-icon file-editor-icon-split"></span></button>
+                <button type="button" class="file-editor-popout-preview-panel"><span class="file-editor-icon file-editor-icon-popout-preview"></span></button>
+              </div>
+              <button type="button" class="file-editor-gutter-panel active">#</button>
+              <button type="button" class="file-editor-wrap-panel active"><span class="file-editor-icon file-editor-icon-wrap"></span></button>
+              <button type="button" class="file-editor-find-panel"><span class="file-editor-icon file-editor-icon-find"></span></button>
+              <button type="button" class="file-editor-blame-panel" aria-pressed="true"><span class="file-editor-icon file-editor-icon-blame"></span></button>
+              <button type="button" class="file-editor-diff-panel active">Differ</button>
+              <button type="button" class="file-editor-diff-expand-panel" aria-pressed="true">↕</button>
+              <button type="button" class="file-editor-theme-panel theme-light" data-editor-theme="light"><span class="file-editor-icon file-editor-icon-theme"></span></button>
+              <button type="button" class="file-editor-reload-panel">Reload</button>
+              <button type="button" class="file-editor-save-panel"><span class="file-editor-icon file-editor-icon-save"></span></button>
+              <div class="tabs pane-frame-controls file-editor-frame-controls">
+                <button class="tab pane-minimize pc-window-control pc-minimize"></button>
+                <button class="tab pane-expand pc-window-control pc-zoom"></button>
+                <button type="button" class="tab pane-close pc-window-control pc-close file-editor-panel-close"></button>
+              </div>
+            </div>
+            <div class="pane-tabs" role="tablist">{tabs}</div>
+          </div>
+          <div class="file-editor-panel-body">
+            <div class="file-editor-content">
+              <div class="file-editor-codemirror-panel">
+                <div id="cm-editor" class="cm-editor">
+                  <div class="cm-panels cm-panels-top">
+                    <div class="cm-panel cm-search">
+                      <input id="search-field" class="cm-textfield" name="search" value="precedence">
+                      <button class="cm-button" name="next" title="下一项 (Enter)">下一项</button>
+                      <button class="cm-button" name="prev" title="上一项 (Shift+Enter)">上一项</button>
+                      <button class="cm-button" name="select" data-search-label="全部">全部</button>
+                      <label id="match-label"><input id="match-case" type="checkbox">区分大小写</label>
+                      <label><input type="checkbox">正则表达式</label>
+                      <label data-search-label="全字匹配"><input name="word" type="checkbox">全字匹配</label>
+                      <button class="cm-dialog-close" type="button">x</button>
+                      <br>
+                      <input id="replace-field" class="cm-textfield" name="replace" placeholder="替换">
+                      <button class="cm-button" name="replace">替换</button>
+                      <button class="cm-button" name="replaceAll" data-search-label="全部">全部替换</button>
+                      <span id="search-count" class="cm-search-count">3/102</span>
+                    </div>
+                  </div>
+                  <div class="cm-scroller">
+                    <div class="cm-wrap-marker-layer"><span id="wrap-marker" class="cm-wrap-marker" style="left: 10px; top: 20px; height: 16px;">↪</span></div>
+                    <div class="cm-content cm-lineWrapping">
+                      <div id="wrapped-line" class="cm-line">a very long markdown line that wraps in the editor panel and needs a visible wrap marker</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div id="light-syntax-probe" class="file-editor-raw-panel" hidden>
+                <span class="code-keyword">if</span>
+                <span class="code-string">"value"</span>
+                <span class="code-variable">name</span>
+                <span class="code-function">call</span>
+                <span class="code-comment"># comment</span>
+                <span class="md-heading md-heading-1"># title</span>
+                <span class="md-code">`code`</span>
+                <span class="md-list-marker">- </span>
+                <span class="md-link">[link]</span>
+              </div>
+            </div>
+          </div>
+        </article>
+      </body>
+    </html>
+    """
+
+
+def editor_diff_ref_toolbar_fixture_html():
+    css = app_css()
+    return page_html(
+        f"""
+        <article class="panel file-editor-panel active-pane">
+          <div class="file-editor-toolbar" role="toolbar">
+            <div class="file-editor-toolbar-zone file-editor-toolbar-left">
+              <button id="gutter-button" type="button" class="file-editor-gutter-panel active" aria-pressed="true">#</button>
+              <button id="wrap-button" type="button" class="file-editor-wrap-panel active" aria-pressed="true"><span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span></button>
+              <button id="diff-button" type="button" class="file-editor-diff-panel active" aria-pressed="true">Differ</button>
+              <button id="diff-expand-button" type="button" class="file-editor-diff-expand-panel" aria-pressed="true">↕</button>
+              <span id="diff-ref-panel" class="file-editor-diff-ref-panel">
+                <span class="diff-ref-controls compact" data-diff-ref-controls data-diff-ref-repo="/repo/app">
+                  <label class="diff-ref-control">FROM <input id="from-ref" class="diff-ref-input" data-diff-ref-from value="2eb21b3339/HEAD"></label>
+                  <label class="diff-ref-control">TO <input id="to-ref" class="diff-ref-input" data-diff-ref-to value="current"></label>
+                  <button id="reset-ref" type="button" class="diff-ref-reset" data-diff-ref-reset title="Reset" aria-label="Reset">↺</button>
+                </span>
+              </span>
+            </div>
+            <div class="file-editor-toolbar-zone file-editor-toolbar-center">
+              <span id="font-panel" class="file-editor-preview-font-panel">
+                <button type="button">A-</button><span class="file-editor-preview-font-value">16</span><button type="button">A+</button>
+              </span>
+            </div>
+            <div class="file-editor-toolbar-zone file-editor-toolbar-right">
+              <div id="mode-control" class="file-editor-mode-control file-editor-mode-control-panel" role="group">
+                <button type="button" data-editor-mode="edit"><span class="file-editor-icon file-editor-icon-edit"></span></button>
+                <button type="button" data-editor-mode="preview"><span class="file-editor-icon file-editor-icon-eye"></span></button>
+                <button type="button" data-editor-mode="split"><span class="file-editor-icon file-editor-icon-split"></span></button>
+                <button type="button" class="file-editor-popout-preview-panel"><span class="file-editor-icon file-editor-icon-popout-preview"></span></button>
+              </div>
+              <button type="button" class="file-editor-find-panel"><span class="file-editor-icon file-editor-icon-find"></span></button>
+              <button type="button" class="file-editor-theme-panel"><span class="file-editor-icon file-editor-icon-theme"></span></button>
+              <button type="button" class="file-editor-save-panel"><span class="file-editor-icon file-editor-icon-save"></span></button>
+            </div>
+          </div>
+        </article>
+      """,
+        extra_css=f"""
+          body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; }}
+          .file-editor-panel {{ width: 520px; height: 120px; }}
+        """,
+    )
+
+
+def codemirror_bundle_fixture_html():
+    bundle_uri = fixture_asset_url("static", "codemirror.js")
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <script src="{bundle_uri}"></script>
+      </head>
+      <body></body>
+    </html>
+    """
+
+
+def git_show_text(rev_path, fallback_rev_paths=()):
+    for candidate in (rev_path, *fallback_rev_paths):
+        try:
+            return subprocess.check_output(["git", "show", candidate], cwd=REPO_ROOT, text=True, stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError:
+            continue
+    raise subprocess.CalledProcessError(128, ["git", "show", rev_path])
+
+
+def codemirror_todo_diff_overview_texts():
+    """Frozen (original, current) pair for the TODO CodeMirror diff-overview fixture.
+
+    Both sides are pinned so the merge-view chunk shape can't drift. ``original`` is the immutable
+    ``05f22a8646:TODO.md`` snapshot; ``current`` is a deterministic single-block replacement of it
+    (stable common prefix + a rewritten middle + stable common suffix). This preserves the realistic
+    large-doc geometry the test asserts while removing the dependency on the moving ``docs/TODO.md``
+    roadmap doc, whose edits had grown the diff from one chunk to many and broke the test.
+    """
+    original = git_show_text("05f22a8646:TODO.md")
+    original_lines = original.splitlines(keepends=True)
+    # Keep the changed region near the top of the editor (a tiny common prefix) so the deleted-row
+    # block widget renders inside the initial viewport. CodeMirror virtualizes the merge view's
+    # deleted chunk by the position of the first changed current line; if that line sits below the
+    # fold the deleted widgets never mount and ``deletedDomRows`` reads 0.
+    prefix = original_lines[:2]
+    suffix = original_lines[-2:]
+    replacement = [f"rewritten roadmap line {index:03d}\n" for index in range(1, 121)]
+    current = "".join(prefix + replacement + suffix)
+    return original, current
+
+
+def codemirror_todo_diff_overview_fixture_html():
+    css = app_css()
+    bundle_uri = fixture_asset_url("static", "codemirror.js")
+    strings = dict(app_english_strings())
+    bootstrap = json.dumps(
+        {
+            "sessions": [],
+            "availableAgents": [],
+            "accessRole": "admin",
+            "homePath": "/home/test",
+            "repoRoot": str(REPO_ROOT),
+            "maxSessionTabs": 99,
+            "serverHostname": "test-host",
+            "strings": {"en": strings},
+        }
+    )
+    original, current = codemirror_todo_diff_overview_texts()
+    app_script = app_bundle_before_boot_script()
+    original_json = json.dumps(original).replace("</script", "<\\/script")
+    current_json = json.dumps(current).replace("</script", "<\\/script")
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{css}</style>
+        <script src="{bundle_uri}"></script>
+        <style>
+          body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #11151d; }}
+          #mount {{ width: 920px; height: 640px; }}
+          .file-editor-panel {{ width: 920px; height: 640px; }}
+          .file-editor-codemirror-panel {{ height: 100%; }}
+        </style>
+      </head>
+      <body class="theme-dark editor-theme-dark">
+        <script id="yomux-bootstrap" type="application/json">{bootstrap}</script>
+        <div id="mount"></div>
+        <script>{app_script}</script>
+        <script>
+          (function() {{
+            const original = {original_json};
+            const current = {current_json};
+            const CM = window.YOmuxCodeMirror;
+            diffExpandUnchanged = true;
+            const panel = document.createElement('article');
+            panel.className = 'panel file-editor-panel active-pane';
+            const container = document.createElement('div');
+            container.className = 'file-editor-codemirror-panel file-editor-diff-codemirror';
+            panel.append(container);
+            document.getElementById('mount').append(panel);
+            const view = new CM.EditorView({{
+              state: CM.EditorState.create({{
+                doc: current,
+                extensions: [
+                  CM.unifiedMergeView({{original, highlightChanges: false, gutter: true}}),
+                  CM.lineNumbers(),
+                ],
+              }}),
+              parent: container,
+            }});
+            panel._cmView = view;
+            panel._cmMode = 'diff';
+            const chunks = diffOverviewCodeMirrorChunks(view, panel);
+            const rows = diffOverviewRowsFromCodeMirrorChunks(chunks, current, original);
+            const content = view.scrollDOM.querySelector('.cm-content');
+            if (content) content.style.minHeight = `${{Math.ceil(rows.totalRows * diffOverviewLineHeight(view, container))}}px`;
+            const {{parseStops}} = window.__yolomuxTestHelpers;
+            const collectMetrics = () => {{
+              const overview = container.querySelector('.cm-diff-overview');
+              if (!overview) {{
+                requestAnimationFrame(collectMetrics);
+                return;
+              }}
+              const overviewRect = overview.getBoundingClientRect();
+              const scrollerRect = view.scrollDOM.getBoundingClientRect();
+              const verticalTrackBottom = scrollerRect.top + view.scrollDOM.clientHeight;
+              const renderedRows = diffOverviewRowsFromCodeMirrorRenderedWeights(view, chunks, current, original, container) || rows;
+              const expectedGradient = buildDiffOverviewGradientFromBands(renderedRows.bands, renderedRows.totalRows);
+              window.__todoDiffOverviewMetrics = {{
+                chunks: chunks.map(chunk => ({{
+                  fromA: chunk.fromA,
+                  toA: chunk.toA,
+                  endA: chunk.endA,
+                  fromB: chunk.fromB,
+                  toB: chunk.toB,
+                  endB: chunk.endB,
+                }})),
+                rows,
+                renderedRows,
+                overviewBackground: overview?.style?.background || '',
+                overviewStops: parseStops(overview?.style?.background || ''),
+                expectedStops: parseStops(expectedGradient),
+                tickCount: container.querySelectorAll('.cm-diff-overview-tick').length,
+                deletedDomRows: container.querySelectorAll('.cm-deletedLine').length,
+                insertedRangeRows: rows?.bands?.filter(band => band.kind === 'add').reduce((total, band) => total + band.end - band.start, 0),
+                removedRangeRows: rows?.bands?.filter(band => band.kind === 'remove').reduce((total, band) => total + band.end - band.start, 0),
+                overviewTopDelta: Math.abs(overviewRect.top - scrollerRect.top),
+                overviewBottomDelta: Math.abs(overviewRect.bottom - verticalTrackBottom),
+              }};
+            }};
+            updateCodeMirrorDiffOverview(panel, container, {{diff: ''}}, current, original);
+            collectMetrics();
+          }})();
+        </script>
+      </body>
+    </html>
+    """
+
+
+def codemirror_file_explorer_diff_overview_fixture_html():
+    css = app_css()
+    bundle_uri = fixture_asset_url("static", "codemirror.js")
+    strings = dict(app_english_strings())
+    bootstrap = json.dumps(
+        {
+            "sessions": [],
+            "availableAgents": [],
+            "accessRole": "admin",
+            "homePath": "/home/test",
+            "repoRoot": str(REPO_ROOT),
+            "maxSessionTabs": 99,
+            "serverHostname": "test-host",
+            "strings": {"en": strings},
+        }
+    )
+    # These source snapshots predate the source-directory rename, so their Git paths keep the
+    # historical directory name even though the current checkout uses static_src/js/yomux/.
+    path = "static_src/js/yolomux/40_file_explorer_files.js"
+    original = subprocess.check_output(["git", "show", f"521bbfd:{path}"], cwd=REPO_ROOT, text=True)
+    current = subprocess.check_output(["git", "show", f"6a967aaa70:{path}"], cwd=REPO_ROOT, text=True)
+    app_script = app_bundle_before_boot_script()
+    original_json = json.dumps(original).replace("</script", "<\\/script")
+    current_json = json.dumps(current).replace("</script", "<\\/script")
+    deleted_color = ui_pin("diffOverviewDelete")
+    added_color = ui_pin("diffOverviewAdd")
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{css}</style>
+        <script src="{bundle_uri}"></script>
+        <style>
+          body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #11151d; }}
+          #mount {{ width: 920px; height: 640px; }}
+          .file-editor-panel {{ width: 920px; height: 640px; }}
+          .file-editor-codemirror-panel {{ height: 100%; }}
+        </style>
+      </head>
+      <body class="theme-dark editor-theme-dark">
+        <script id="yomux-bootstrap" type="application/json">{bootstrap}</script>
+        <div id="mount"></div>
+        <script>{app_script}</script>
+        <script>
+          (function() {{
+            const original = {original_json};
+            const current = {current_json};
+            const CM = window.YOmuxCodeMirror;
+            diffExpandUnchanged = true;
+            const panel = document.createElement('article');
+            panel.className = 'panel file-editor-panel active-pane';
+            const container = document.createElement('div');
+            container.className = 'file-editor-codemirror-panel file-editor-diff-codemirror';
+            panel.append(container);
+            document.getElementById('mount').append(panel);
+            const view = new CM.EditorView({{
+              state: CM.EditorState.create({{
+                doc: current,
+                extensions: [
+                  CM.unifiedMergeView({{original, highlightChanges: false, gutter: true}}),
+                  CM.lineNumbers(),
+                ],
+              }}),
+              parent: container,
+            }});
+            panel._cmView = view;
+            panel._cmMode = 'diff';
+            updateCodeMirrorDiffOverview(panel, container, {{diff: ''}}, current, original);
+
+            const {{settle, parseStops}} = window.__yolomuxTestHelpers;
+            const normalizeColor = color => {{
+              const value = String(color || '').toLowerCase();
+              if (value === 'transparent' || value === '{deleted_color}' || value === '{added_color}') return value;
+              const rgb = /^rgba?\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)/.exec(value);
+              if (!rgb) return value;
+              return `#${{rgb.slice(1).map(part => Number(part).toString(16).padStart(2, '0')).join('')}}`;
+            }};
+            const changedStops = gradient => parseStops(gradient).filter(item => item.color !== 'transparent');
+            const overview = () => container.querySelector('.cm-diff-overview');
+            const railColorAt = fraction => {{
+              const stop = parseStops(overview()?.style?.background || '').find(item => fraction >= item.start && fraction < item.end);
+              if (!stop || stop.color === 'transparent') return 'normal';
+              if (stop.color === '{deleted_color}') return 'remove';
+              if (stop.color === '{added_color}') return 'add';
+              return stop.color;
+            }};
+            const rowKind = node => {{
+              for (let currentNode = node; currentNode && currentNode !== document.body; currentNode = currentNode.parentElement) {{
+                if (currentNode.classList?.contains('cm-deletedLine') || currentNode.classList?.contains('cm-deletedChunk')) return 'remove';
+                if (currentNode.classList?.contains('cm-changedLine') || currentNode.classList?.contains('cm-insertedLine')) return 'add';
+              }}
+              return 'normal';
+            }};
+            const visibleKindAt = y => {{
+              const rect = view.scrollDOM.getBoundingClientRect();
+              const x = rect.left + Math.min(220, Math.max(50, rect.width * 0.35));
+              const nodes = document.elementsFromPoint(x, rect.top + y);
+              const row = nodes.find(node => node.classList?.contains('cm-line') || node.classList?.contains('cm-deletedLine') || node.classList?.contains('cm-deletedChunk'))
+                || nodes.find(node => node.closest?.('.cm-line, .cm-deletedLine, .cm-deletedChunk'))?.closest('.cm-line, .cm-deletedLine, .cm-deletedChunk');
+              return row ? rowKind(row) : 'none';
+            }};
+            window.__fileExplorerDiffOverviewMetrics = async function() {{
+              await settle();
+              const cmChunks = diffOverviewCodeMirrorChunks(view, panel);
+              const chunks = cmChunks.map(chunk => ({{
+                fromA: chunk.fromA,
+                toA: chunk.toA,
+                endA: chunk.endA,
+                fromB: chunk.fromB,
+                toB: chunk.toB,
+                endB: chunk.endB,
+              }}));
+              const initialBackground = overview()?.style?.background || '';
+              const initialOverviewPresent = Boolean(overview());
+              const initialDeletedDomRows = container.querySelectorAll('.cm-deletedLine').length;
+              const fullRows = diffOverviewRowsFromCodeMirrorRenderedWeights(view, cmChunks, current, original, container)
+                || diffOverviewRowsFromCodeMirrorChunks(cmChunks, current, original);
+              const expectedFullBackground = buildDiffOverviewGradientFromBands(fullRows.bands, fullRows.totalRows);
+              const positions = [
+                {{name: 'top-normal', scrollTop: 0}},
+                {{name: 'warmup-normal-05', scrollTop: 3504}},
+                {{name: 'warmup-normal-15', scrollTop: 10512}},
+                {{name: 'warmup-red-25', scrollTop: 17520}},
+                {{name: 'warmup-red-30', scrollTop: 21024}},
+                {{name: 'warmup-red-34', scrollTop: 23827}},
+                {{name: 'warmup-red-38', scrollTop: 26630}},
+                {{name: 'warmup-red-42', scrollTop: 29433}},
+                {{name: 'warmup-red-45', scrollTop: 31536}},
+                {{name: 'warmup-green-50', scrollTop: 35040}},
+                {{name: 'warmup-green-60', scrollTop: 42049}},
+                {{name: 'red-middle-previous-regression', scrollTop: 49505}},
+                {{name: 'red-late-previous-regression', scrollTop: 56065}},
+                {{name: 'green-middle', scrollTop: 70081}},
+              ];
+              const cases = [];
+              for (const item of positions) {{
+                view.scrollDOM.scrollTop = item.scrollTop;
+                await settle();
+                updateCodeMirrorDiffOverview(panel, container, {{diff: ''}}, current, original);
+                await settle();
+                const scrollHeight = Math.max(1, Number(view.scrollDOM.scrollHeight || 0));
+                const clientHeight = Math.max(1, Number(view.scrollDOM.clientHeight || 0));
+                const sampleYs = [20, 80, 160, 260, 380].filter(y => y < clientHeight);
+                const samples = sampleYs.map(y => {{
+                  const fraction = (Number(view.scrollDOM.scrollTop || 0) + y) / scrollHeight;
+                  return {{y, fraction, visible: visibleKindAt(y), rail: railColorAt(fraction)}};
+                }});
+                cases.push({{
+                  name: item.name,
+                  requestedScrollTop: item.scrollTop,
+                  scrollTop: view.scrollDOM.scrollTop,
+                  scrollHeight,
+                  clientHeight,
+                  railPresent: Boolean(overview()),
+                  background: overview()?.style?.background || '',
+                  deletedDomRows: container.querySelectorAll('.cm-deletedLine').length,
+                  samples,
+                  mismatches: overview() ? samples.filter(sample => sample.visible !== 'none' && sample.visible !== sample.rail) : [],
+                }});
+              }}
+              return {{
+                chunks,
+                initialBackground,
+                initialOverviewPresent,
+                initialDeletedDomRows,
+                initialChangedStops: changedStops(initialBackground),
+                fullRows,
+                finalBackground: overview()?.style?.background || '',
+                finalOverviewPresent: Boolean(overview()),
+                finalChangedStops: changedStops(overview()?.style?.background || ''),
+                expectedFullChangedStops: changedStops(expectedFullBackground),
+                tickCount: container.querySelectorAll('.cm-diff-overview-tick').length,
+                cases,
+              }};
+            }};
+          }})();
+        </script>
+      </body>
+    </html>
+    """
+
+
+def codemirror_diff_wrapped_inserted_line_fixture_html():
+    """Reproduce the screenshot bug: a long INSERTED line that soft-wraps in the unified merge diff.
+
+    In @codemirror/merge the inserted/deleted text are inline marks (``Decoration.mark`` -> ``<ins>`` /
+    ``<del>`` with class ``cm-insertedLine`` / ``cm-deletedLine``) nested inside a block
+    ``.cm-line.cm-changedLine``. The earlier diff CSS applied the full-bleed
+    ``box-shadow``/``clip-path: inset(0 -100vw)`` trick to those inline marks too; on a soft-wrapped
+    inline element that buried the wrapped continuation rows' text under the parent block's green band
+    (gutter numbers stayed, text went blank). This fixture builds that exact state with word-wrap on so
+    the regression asserts the continuation visual row paints visible inserted text.
+    """
+    css = app_css()
+    bundle_uri = fixture_asset_url("static", "codemirror.js")
+    strings = dict(app_english_strings())
+    bootstrap = json.dumps(
+        {
+            "sessions": [],
+            "availableAgents": [],
+            "accessRole": "admin",
+            "homePath": "/home/test",
+            "repoRoot": str(REPO_ROOT),
+            "maxSessionTabs": 99,
+            "serverHostname": "test-host",
+            "strings": {"en": strings},
+        }
+    )
+    app_script = app_bundle_before_boot_script()
+    # A long inserted bullet (the screenshot's "### Gate speedup" added block) plus a run of unchanged
+    # lines so collapseUnchanged engages and the collapsed-unchanged state is also covered. TAILTOKEN_END
+    # is the marker on the LAST wrapped fragment, so seeing it proves the final continuation row rendered.
+    long_line = (
+        "- The default tools check gate ran the node layout suite twice concurrently once as the "
+        "node-syntax lane and again folded into the pytest lane so every push paid the cost a second "
+        "time for no added coverage TAILTOKEN_END"
+    )
+    unchanged = "".join(f"unchanged context line {index:03d}\n" for index in range(40))
+    original = "# DONE\n" + unchanged + "tail unchanged a\ntail unchanged b\n"
+    current = "# DONE\n" + unchanged + "### Gate speedup\n" + long_line + "\ntail unchanged a\ntail unchanged b\n"
+    original_json = json.dumps(original).replace("</script", "<\\/script")
+    current_json = json.dumps(current).replace("</script", "<\\/script")
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{css}</style>
+        <script src="{bundle_uri}"></script>
+        <style>
+          body {{ margin: 0; padding: 8px; display: block; background: #11151d; }}
+          #mount {{ width: 460px; height: 520px; }}
+          .file-editor-panel {{ width: 460px; height: 520px; }}
+          .file-editor-codemirror-panel {{ height: 100%; }}
+        </style>
+      </head>
+      <body class="theme-dark editor-theme-dark file-editor-open">
+        <script id="yomux-bootstrap" type="application/json">{bootstrap}</script>
+        <div id="mount"></div>
+        <script>{app_script}</script>
+        <script>
+          (function() {{
+            const original = {original_json};
+            const current = {current_json};
+            const CM = window.YOmuxCodeMirror;
+            // editor-wrap on the panel + EditorView.lineWrapping is the word-wrap-on state.
+            const panel = document.createElement('article');
+            panel.className = 'panel file-editor-panel active-pane editor-wrap';
+            const container = document.createElement('div');
+            container.className = 'file-editor-codemirror-panel file-editor-diff-codemirror';
+            panel.append(container);
+            document.getElementById('mount').append(panel);
+            const view = new CM.EditorView({{
+              state: CM.EditorState.create({{
+                doc: current,
+                extensions: [
+                  CM.unifiedMergeView({{original, highlightChanges: false, gutter: true, collapseUnchanged: {{margin: 3, minSize: 8}}}}),
+                  CM.lineNumbers(),
+                  CM.EditorView.lineWrapping,
+                ],
+              }}),
+              parent: container,
+            }});
+            panel._cmView = view;
+            panel._cmMode = 'diff';
+            const {{settle}} = window.__yolomuxTestHelpers;
+            window.__diffWrapMetrics = async function() {{
+              await settle();
+              const inserted = Array.from(container.querySelectorAll('.cm-insertedLine'))
+                .find(node => node.textContent.includes('TAILTOKEN_END'));
+              if (!inserted) {{ await settle(); }}
+              const ins = Array.from(container.querySelectorAll('.cm-insertedLine'))
+                .find(node => node.textContent.includes('TAILTOKEN_END'));
+              if (!ins) return {{insertedFound: false}};
+              ins.scrollIntoView({{block: 'center'}});
+              await settle();
+              const lineHeight = Math.max(1, Number(view.defaultLineHeight || 0));
+              const bcr = ins.getBoundingClientRect();
+              const wraps = bcr.height > lineHeight * 1.5;
+              // Probe every visual row of the wrapped inserted mark. For each row record the topmost
+              // painted element (elementsFromPoint) and the rendered text under the caret. The bug
+              // painted the parent .cm-changedLine block band OVER continuation rows, so the topmost
+              // element was the block, not the inserted mark, and the text was buried.
+              const rows = [];
+              let rowIndex = 0;
+              for (let y = bcr.top + lineHeight * 0.5; y < bcr.bottom - 1; y += lineHeight) {{
+                const x = bcr.left + 30;
+                const topEl = document.elementsFromPoint(x, y)[0];
+                const range = document.caretRangeFromPoint ? document.caretRangeFromPoint(x, y) : null;
+                const caretText = range && range.startContainer ? String(range.startContainer.textContent || '') : '';
+                rows.push({{
+                  rowIndex: rowIndex++,
+                  topElInsideInserted: Boolean(topEl && topEl.closest && topEl.closest('.cm-insertedLine')),
+                  topElClass: topEl ? (topEl.className || topEl.tagName) : null,
+                  caretTextLen: caretText.length,
+                }});
+              }}
+              const continuationRows = rows.slice(1);
+              // The collapsed-unchanged widget must stay in normal flow and not vertically overlap the
+              // inserted block (W5: it only LOOKED like it floated over the green block because the
+              // continuation rows were blank).
+              const collapse = container.querySelector('.cm-collapsedLines');
+              let collapseOverlapPx = 0;
+              let collapsePosition = null;
+              if (collapse) {{
+                const cr = collapse.getBoundingClientRect();
+                const cs = getComputedStyle(collapse);
+                collapsePosition = cs.position;
+                collapseOverlapPx = Math.max(0, Math.min(cr.bottom, bcr.bottom) - Math.max(cr.top, bcr.top));
+              }}
+              return {{
+                insertedFound: true,
+                wraps,
+                boundingHeight: Math.round(bcr.height),
+                lineHeight,
+                hasTailText: ins.textContent.includes('TAILTOKEN_END'),
+                rowCount: rows.length,
+                rows,
+                continuationRowsAllVisible: continuationRows.length > 0
+                  && continuationRows.every(row => row.topElInsideInserted && row.caretTextLen > 0),
+                collapsePresent: Boolean(collapse),
+                collapsePosition,
+                collapseOverlapPx: Math.round(collapseOverlapPx),
+              }};
+            }};
+          }})();
+        </script>
+      </body>
+    </html>
+    """
+
+
+def app_bundle_before_boot_script():
+    source = (REPO_ROOT / "static" / "yomux.js").read_text(encoding="utf-8")
+    boot_start = source.index("if (refreshMeta) {")
+    return source[:boot_start].replace("</script", "<\\/script")
+
+
+def fixture_work_graph(session: str, path: str, *, root: str | None = None, branch: str = "main") -> dict:
+    """Return a schema-valid small graph for browser fixtures that bypass the live metadata API."""
+    root = root or path
+    session_id = f"tmux-session:{session}"
+    window_id = f"tmux-window:{session}:0"
+    pane_id = f"tmux-pane:{session}:0.0"
+    observation_id = f"path-observation:{session}:1"
+    worktree_id = f"git-worktree:{root}"
+    repository_id = f"local-repository:{root}"
+    branch_id = f"local-branch:{repository_id}:{branch}"
+    return {
+        "version": 1,
+        "generation": 1,
+        "tmux_sessions": {
+            session_id: {"id": session_id, "name": session, "tmux_window_ids": [window_id], "tmux_pane_ids": [pane_id], "runtime_actor_ids": [], "path_observation_ids": [observation_id]},
+        },
+        "tmux_windows": {
+            window_id: {"id": window_id, "tmux_session_id": session_id, "index": 0, "name": "0", "tmux_pane_ids": [pane_id]},
+        },
+        "tmux_panes": {
+            pane_id: {"id": pane_id, "tmux_window_id": window_id, "target": f"{session}:0.0", "pane_id": "0", "index": 0, "current_path": path, "command": "", "active": True, "window_active": True, "runtime_actor_ids": [], "path_observation_ids": [observation_id]},
+        },
+        "runtime_actors": {},
+        "path_observations": {
+            observation_id: {"id": observation_id, "path": path, "path_snapshot": path, "exists": True, "source": "fixture", "priority": 10, "first_observed_at": 1, "last_observed_at": 1, "tmux_pane_id": pane_id, "runtime_actor_id": None, "git_worktree_id": worktree_id},
+        },
+        "git_worktrees": {
+            worktree_id: {"id": worktree_id, "root": root, "git_dir": f"{root}/.git", "kind": "primary", "local_repository_id": repository_id, "current_branch_id": branch_id, "path_observation_ids": [observation_id], "branch_activity_ids": [], "git": {"root": root, "cwd": root, "branch": branch, "dirty_count": 0, "ahead": 0, "behind": 0}, "activity_priority": 10, "activity_ts": 0, "activity_source": "", "has_current_pull_request": False},
+        },
+        "local_repositories": {
+            repository_id: {"id": repository_id, "common_git_dir": f"{root}/.git", "git_worktree_ids": [worktree_id], "local_branch_ids": [branch_id]},
+        },
+        "hosted_repositories": {},
+        "local_branches": {
+            branch_id: {"id": branch_id, "local_repository_id": repository_id, "name": branch, "current": True, "pull_request_ids": [], "linear_issue_ids": [], "updated_ts": 0},
+        },
+        "pull_requests": {},
+        "linear_issues": {},
+        "worktree_branch_activity": {},
+    }
+
+
+def codemirror_wrap_toggle_fixture_html():
+    css = app_css()
+    bundle_uri = fixture_asset_url("static", "codemirror.js")
+    strings = dict(app_english_strings())
+    bootstrap = json.dumps(
+        {
+            "sessions": [],
+            "availableAgents": [],
+            "accessRole": "admin",
+            "homePath": "/home/test",
+            "repoRoot": "/home/test/yolomux.dev",
+            "maxSessionTabs": 99,
+            "serverHostname": "test-host",
+            "strings": {"en": strings},
+        }
+    )
+    app_script = app_bundle_before_boot_script()
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{css}</style>
+        <script src="{bundle_uri}"></script>
+        <style>
+          body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; }}
+          #wrap-regression-mount {{ width: 760px; height: 360px; }}
+          .file-editor-panel {{ width: 760px; height: 360px; }}
+        </style>
+      </head>
+      <body class="theme-dark editor-theme-dark">
+        <script id="yomux-bootstrap" type="application/json">{bootstrap}</script>
+        <div id="wrap-regression-mount"></div>
+        <script>try {{ localStorage.setItem('yolomux.editorWrap', '0'); }} catch (_) {{}}</script>
+        <script>
+          window.__wrapRegressionErrors = [];
+          window.addEventListener('error', event => {{
+            window.__wrapRegressionErrors.push(event.message || String(event.error || event));
+          }});
+          window.addEventListener('unhandledrejection', event => {{
+            window.__wrapRegressionErrors.push(String(event.reason || event));
+          }});
+        </script>
+        <script>{app_script}</script>
+        <script>
+          (function() {{
+            const path = '/home/test/yolomux.dev/wrap-regression.txt';
+            const doc = [
+              'Word wrap regression',
+              '',
+              'This line must stay visible after clicking Enable Word Wrap in the editor toolbar.',
+              'A second line makes an empty CodeMirror document obvious.'
+            ].join('\\n');
+            const item = fileEditorItemFor(path);
+            setFileState(path, {{
+              kind: 'text',
+              content: doc,
+              original: doc,
+              dirty: false,
+              language: 'markdown',
+              gitTracked: false,
+              gitHasHistory: false,
+              gitHistory: []
+            }});
+            setFileEditorViewMode(path, 'edit', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.id = 'wrap-regression-panel';
+            panel.classList.add('active-pane');
+            document.getElementById('wrap-regression-mount').append(panel);
+            renderFileEditorPanel(panel, item);
+            window.__wrapRegressionReady = new Promise((resolve, reject) => {{
+              let attempts = 0;
+              const wait = () => {{
+                const viewText = panel._cmView?.state?.doc?.toString?.() || '';
+                const contentText = panel.querySelector('.cm-content')?.textContent || '';
+                if (panel._cmView && viewText.includes('This line must stay visible') && contentText) {{
+                  window.__wrapRegressionInitialView = panel._cmView;
+                  window.__wrapRegressionRenderCalls = 0;
+                  const originalRender = renderFileEditorPanel;
+                  renderFileEditorPanel = function(...args) {{
+                    window.__wrapRegressionRenderCalls += 1;
+                    return originalRender.apply(this, args);
+                  }};
+                  window.__wrapRegressionReconfigCalls = [];
+                  const originalReconfigure = reconfigureCodeMirrorPanelEditorOptions;
+                  reconfigureCodeMirrorPanelEditorOptions = function(targetPanel) {{
+                    const result = originalReconfigure(targetPanel);
+                    const view = targetPanel?._cmView;
+                    const contentFacet = view
+                      ? view.state.facet(window.YOmuxCodeMirror.EditorView.contentAttributes)
+                      : [];
+                    window.__wrapRegressionReconfigCalls.push({{
+                      result,
+                      targetId: targetPanel?.id || '',
+                      path: targetPanel?.dataset?.filePath || '',
+                      stateKind: fileStateFor(targetPanel?.dataset?.filePath || '')?.kind || '',
+                      classes: contentFacet.map(item => item.class || '').join('|'),
+                    }});
+                    return result;
+                  }};
+                  resolve(true);
+                  return;
+                }}
+                attempts += 1;
+                if (attempts > 120) {{
+                  const status = panel.querySelector('.file-editor-status-panel')?.textContent || '';
+                  const cmPane = panel.querySelector('.file-editor-codemirror-panel');
+                  const rawPane = panel.querySelector('.file-editor-raw-panel');
+                  const cmKeys = Object.keys(window.YOmuxCodeMirror || {{}}).slice(0, 20).join(',');
+                  reject(new Error([
+                    'CodeMirror editor did not render test document',
+                    `status=${{status}}`,
+                    `cmHidden=${{cmPane?.hidden}}`,
+                    `cmText=${{cmPane?.textContent || ''}}`,
+                    `rawHidden=${{rawPane?.hidden}}`,
+                    `rawText=${{rawPane?.textContent || ''}}`,
+                    `cmKeys=${{cmKeys}}`
+                  ].join(' | ')));
+                  return;
+                }}
+                requestAnimationFrame(wait);
+              }};
+              wait();
+            }});
+          }})();
+        </script>
+      </body>
+    </html>
+    """
+
+
+def finder_click_toolbar_fixture_html():
+    css = app_css()
+    return page_html(
+        f"""
+        <article id="finder-panel" class="panel file-explorer-panel active-pane" data-file-explorer-mode="files">
+          <div class="panel-head file-explorer-head">
+            <div class="pane-tabs"><button type="button" class="pane-tab active">Finder</button><button type="button" class="pane-minimize pc-window-control pc-minimize"></button></div>
+            <div class="file-explorer-toolbar">
+              <div class="file-explorer-toolbar-row file-explorer-primary-row">
+                <label class="file-explorer-diff-session-control changes-control">Session: <select class="file-explorer-diff-session-select" data-session-files-session><option>project1</option></select></label>
+                <span class="file-explorer-toolbar-spacer"></span>
+                <button type="button" class="changes-refresh file-explorer-refresh-cluster" data-file-explorer-refresh>Reload</button>
+              </div>
+              <div class="file-explorer-toolbar-row file-explorer-path-row">
+                <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel active" aria-pressed="true">Sync</button>
+                <input class="file-explorer-path-inline" value="/home/keivenc/yolomux.dev/static_src/js/yomux">
+                <button type="button" class="path-copy-button file-explorer-path-copy-panel"></button>
+              </div>
+              <div class="file-explorer-toolbar-row file-explorer-actions-row">
+                <button type="button" class="file-explorer-header-action" id="new-file" data-file-explorer-new-file>+</button>
+                <button type="button" class="file-explorer-header-action file-explorer-folder-action" data-file-explorer-new-folder><span class="file-explorer-folder-icon" aria-hidden="true"></span></button>
+                <span class="file-explorer-toolbar-spacer"></span>
+                <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel">.*</button>
+                <select class="file-explorer-sort-select"><option>A-Z</option></select>
+                <span class="file-explorer-date-controls">
+                  <button type="button" class="file-explorer-header-action file-explorer-date-toggle changes-date-toggle">日期</button>
+                  <button type="button" class="file-explorer-header-action file-tree-expand-collapse-all changes-date-toggle" data-file-tree-expand-collapse-all="expand"><svg class="file-tree-expand-collapse-icon"></svg></button>
+                  <button type="button" class="file-explorer-header-action file-tree-expand-collapse-all changes-date-toggle" data-file-tree-expand-collapse-all="collapse"><svg class="file-tree-expand-collapse-icon"></svg></button>
+                </span>
+              </div>
+            </div>
+          </div>
+          <div class="file-explorer-pane">
+            <div class="file-explorer-tree-panel" tabindex="0">tree rows</div>
+            <div class="file-explorer-changes-resizer"></div>
+            <div class="file-explorer-changes-panel" data-file-explorer-changes tabindex="0"></div>
+          </div>
+        </article>
+        <article id="differ-panel" class="panel file-explorer-panel file-explorer-differ" data-file-explorer-mode="diff" hidden>
+          <div class="panel-head file-explorer-head">
+            <div class="pane-tabs"><button type="button" class="pane-tab active">Differ</button><button type="button" class="pane-minimize pc-window-control pc-minimize"></button></div>
+            <div class="file-explorer-toolbar">
+              <div class="file-explorer-toolbar-row file-explorer-primary-row">
+                <label class="file-explorer-diff-session-control changes-control">Session: <select class="file-explorer-diff-session-select" data-session-files-session><option>project1</option></select></label>
+              </div>
+            </div>
+          </div>
+          <div class="file-explorer-pane">
+            <div id="modified-files-panel" class="file-explorer-changes-panel" tabindex="0">
+              <div class="changes-toolbar file-explorer-diff-toolbar">
+                <label class="changes-control">Sort <select data-file-explorer-tree-sort><option>new</option></select></label>
+                <button type="button" data-file-explorer-tree-dates>Ago</button>
+                <button type="button" class="changes-refresh" data-session-files-refresh>Reload</button>
+              </div>
+              <div class="file-explorer-changes-head"><span class="changes-title">Differ: '5'</span></div>
+              <section class="changes-repo-group">
+                <button type="button" id="modified-files-repo-head" class="changes-repo-head">
+                  <span class="ui-disclosure-triangle changes-repo-caret" data-disclosure-expanded="true">›</span>
+                  <span class="changes-repo-title">~/yolomux.dev8002</span>
+                  <span class="changes-repo-totals"><span class="changes-diff-add">+0</span><span class="changes-diff-remove">-0</span><span class="changes-repo-count">0</span></span>
+                </button>
+              </section>
+            </div>
+          </div>
+        </article>
+        <article id="terminal-panel" class="panel active-pane">
+          <div class="panel-head">
+            <div id="terminal-toolbar" class="tabs" role="tablist">
+              <button class="tab active terminal-tab">1</button>
+              <button class="tab">Tx</button>
+              <button class="tab">AI</button>
+              <button class="tab">Log</button>
+              <button class="tab panel-detail-toggle pane-detail-toggle pc-window-control pc-minimize active"></button>
+              <button class="tab pane-actions"><span class="pane-actions-dots">...</span></button>
+              <button class="tab pane-minimize pc-window-control pc-minimize"></button>
+              <button class="tab pane-expand pc-window-control pc-zoom"></button>
+            </div>
+            <div class="pane-tabs" role="tablist">
+              <button type="button" class="pane-tab active"><span class="pane-tab-core"><span class="session-button-name">1</span></span></button>
+            </div>
+          </div>
+          <div class="panel-detail-row"><div class="meta">path</div></div>
+          <div class="tab-pane active"></div>
+        </article>
+      """,
+        extra_css=f"""
+          body {{ margin: 0; padding: 8px; display: grid; grid-template-columns: 420px 1fr; gap: 8px; height: auto; min-height: 0; }}
+          .panel {{ height: 230px; }}
+          [hidden] {{ display: none !important; }}
+        """,
+    )
+
+
+def file_tree_status_alignment_fixture_html():
+    css = app_css()
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{css}</style>
+        <style>
+          body {{ margin: 0; padding: 10px; width: 980px; }}
+          .file-explorer-tree {{ width: 960px; overflow: visible; }}
+          .narrow-file-explorer-tree {{ width: 360px; overflow: hidden; margin-top: 18px; }}
+        </style>
+      </head>
+      <body class="theme-light">
+        <div class="file-explorer-tree">
+          <div id="status-row-m" class="file-tree-row kind-file git-modified has-agent" style="padding-left: 92px">
+            <span class="file-tree-icon file-icon-code">*</span>
+            <span class="file-tree-name">10_core_utils.js</span>
+            <span class="file-tree-agent"><span class="agent-icon codex">A</span></span>
+            <span class="file-tree-diff"><span class="changes-diff-add">+7</span><span class="changes-diff-remove">-4</span></span>
+            <span class="file-tree-dir-count" hidden></span>
+            <span class="file-tree-git-status">M</span>
+            <span class="file-tree-date">20 min ago</span>
+          </div>
+          <div id="status-row-t" class="file-tree-row kind-file git-transcript has-agent" style="padding-left: 92px">
+            <span class="file-tree-icon file-icon-code">*</span>
+            <span class="file-tree-name">50_editor_settings_runtime.js</span>
+            <span class="file-tree-agent"><span class="agent-icon codex">A</span></span>
+            <span class="file-tree-diff" hidden></span>
+            <span class="file-tree-dir-count" hidden></span>
+            <span class="file-tree-git-status">T</span>
+            <span class="file-tree-date">2.5 hrs ago</span>
+          </div>
+          <div id="status-row-q" class="file-tree-row kind-file git-untracked" style="padding-left: 52px">
+            <span class="file-tree-icon file-icon-image">*</span>
+            <span class="file-tree-name">20260605-026.png</span>
+            <span class="file-tree-agent" hidden></span>
+            <span class="file-tree-diff" hidden></span>
+            <span class="file-tree-dir-count" hidden></span>
+            <span class="file-tree-git-status">?</span>
+            <span class="file-tree-date">1 hr ago</span>
+          </div>
+        </div>
+        <div class="file-explorer-tree narrow-file-explorer-tree">
+          <div id="status-row-long" class="file-tree-row kind-file git-modified has-agent" style="padding-left: 92px">
+            <span class="file-tree-icon file-icon-doc">*</span>
+            <span class="file-tree-name">TOOLCALLING_STREAMING_CASES.md</span>
+            <span class="file-tree-agent"><span class="agent-icon codex">A</span></span>
+            <span class="file-tree-diff"><span class="changes-diff-add">+66</span></span>
+            <span class="file-tree-dir-count" hidden></span>
+            <span class="file-tree-git-status">M</span>
+            <span class="file-tree-date">Jun 6, 21:44</span>
+          </div>
+        </div>
+      </body>
+    </html>
+    """
+
+
+def codemirror_scrollbar_overview_fixture_html():
+    css = app_css()
+    deleted_color = ui_pin("diffOverviewDelete")
+    added_color = ui_pin("diffOverviewAdd")
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{css}</style>
+        <style>
+          body {{ margin: 0; padding: 12px; background: #11151d; }}
+          #host {{ position: relative; width: 420px; height: 220px; }}
+          #host .cm-editor {{ height: 100%; }}
+          #host .cm-scroller {{ position: absolute; inset: 0; overflow: scroll; }}
+          #host .cm-content {{ width: 900px; height: 900px; }}
+        </style>
+      </head>
+      <body class="editor-theme-light">
+        <div id="host" class="file-editor-codemirror-panel file-editor-diff-codemirror">
+          <div class="cm-editor">
+            <div id="scroller" class="cm-scroller">
+              <div id="merge-revert" class="cm-merge-revert"><button type="button">↔</button></div>
+              <div class="cm-gutters">
+                <div id="changed-gutter" class="cm-changedLineGutter">12</div>
+                <div id="deleted-gutter" class="cm-deletedLineGutter">13</div>
+              </div>
+              <div class="cm-content"></div>
+            </div>
+          </div>
+          <div id="overview" class="cm-diff-overview" style="background: linear-gradient(to bottom, {deleted_color} 0.000% 40.000%, {added_color} 40.000% 80.000%, transparent 80.000% 100.000%)"></div>
+        </div>
+      </body>
+    </html>
+    """
+
+
+def split_seam_fixture_html():
+    css = app_css()
+    return page_html(
+        f"""
+        <div class="layout-root split-column">
+          <section class="layout-column"><article id="top-panel" class="panel"></article></section>
+          <div id="split-resizer" class="layout-resizer resizer-column"></div>
+          <section class="layout-column"><article id="bottom-panel" class="panel"></article></section>
+        </div>
+      """,
+        extra_css=f"""
+          body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; }}
+          .layout-root {{ width: 420px; height: 360px; }}
+        """,
+    )
+
+
+def build_browser_bootstrap(scenario: BrowserBootScenario) -> dict[str, object]:
+    sessions = list(scenario.sessions)
+    settings = dict(scenario.settings)
+    bootstrap: dict[str, object] = {
+        "sessions": sessions,
+        "availableAgents": list(scenario.available_agents) if scenario.available_agents is not None else ["term"],
+        "accessRole": scenario.access_role,
+        "authUsername": scenario.auth_username,
+        "dangerouslyYolo": scenario.dangerously_yolo,
+        "terminalOnly": scenario.terminal_only,
+        "statsOnly": scenario.stats_only,
+        "capabilities": None,
+        "sessionMutationsAllowed": scenario.session_mutations_allowed,
+        "homePath": "/home/test",
+        "repoRoot": "/home/test/yolomux.dev",
+        "maxSessionTabs": 9,
+        "filesystemBatchLimits": web.filesystem_batch_limits_payload(),
+        "serverHostname": "localhost",
+        "cpuTopology": {"logical_cpus": 8, "physical_cores": 4},
+        "backend": web.YOLOMUX_BACKEND,
+        "version": "test",
+        "versionStatus": "test",
+        "backendLabel": "Go test",
+        "postReleaseCommits": [],
+        "versionCommitTime": "test",
+        "settingsPayload": {"settings": settings, "defaults": settings_module.default_settings(), "mtime_ns": 0},
+        "statsWriterFence": {
+            "protocol_version": stats_storage.MIN_WRITER_PROTOCOL,
+            "schema_generation": stats_storage.SCHEMA_VERSION,
+        },
+        "yoloRulesPayload": {
+            "path": "/home/test/.config/yolomux/yolo-rules.yaml",
+            "source": "default",
+            "rules": [],
+            "errors": [],
+        },
+        "codeMirrorAssetUrl": fixture_asset_url("static", "codemirror.js"),
+        "proseMirrorAssetUrl": fixture_asset_url("static", "prosemirror.js"),
+        "locale": "en",
+        "localeRegistry": locale_registry_payload(),
+        "strings": {"en": dict(app_english_strings())},
+    }
+    if scenario.agent_auth is not None:
+        bootstrap["agentAuth"] = dict(scenario.agent_auth)
+    return bootstrap
+
+
+def validate_browser_boot_routes(stub_script: str) -> None:
+    for route in BROWSER_BOOT_ROUTES:
+        marker = f"url.pathname === '{route.path}'"
+        if stub_script.count(marker) != 1:
+            raise AssertionError(f"browser boot route {route.path!r} requires exactly one fake handler")
+        for method in route.methods:
+            if route_for_request(method, route.path) is None:
+                raise AssertionError(f"browser boot fake is more permissive than GateLiveServer: {method} {route.path}")
+
+
+def browser_boot_production_contract_errors(bootstrap: Mapping[str, object]) -> tuple[str, ...]:
+    production = json.loads(re.search(
+        r'<script id="yomux-bootstrap" type="application/json">(.*?)</script>',
+        web.html_page(["1"]),
+        re.DOTALL,
+    ).group(1))
+    missing = (
+        set(production)
+        - set(bootstrap)
+        - PRODUCTION_BOOTSTRAP_UNSUPPORTED_BY_BROWSER_FIXTURE
+        - PRODUCTION_BOOTSTRAP_OPTIONAL_IN_BROWSER_FIXTURE
+    )
+    extra_unsupported = PRODUCTION_BOOTSTRAP_UNSUPPORTED_BY_BROWSER_FIXTURE - set(production)
+    return tuple(sorted((*[f"missing:{key}" for key in missing], *[f"stale-unsupported:{key}" for key in extra_unsupported])))
+
+
+def build_browser_boot_dom_shell(rendered_html: str) -> str:
+    """Named DOM-shell boundary; initially preserves the characterized bytes exactly."""
+
+    return rendered_html
+
+
+def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
+    settings = scenario.settings
+    transcript_current_path = scenario.transcript_current_path
+    transcript_git_root = scenario.transcript_git_root
+    session_files_payload = dict(scenario.session_files_payload) if scenario.session_files_payload is not None else None
+    fs_entries = dict(scenario.fs_entries)
+    sessions = list(scenario.sessions)
+    transcript_sessions = dict(scenario.transcript_sessions)
+    session_files_payloads = dict(scenario.session_files_payloads)
+    terminal_css = scenario.terminal_css
+    grid_width = scenario.grid_width
+    grid_height = scenario.grid_height
+    file_explorer_open_intent = scenario.file_explorer_open_intent
+    auto_approve_payload = dict(scenario.auto_approve_payload) if scenario.auto_approve_payload is not None else None
+    wrap_app_root = scenario.wrap_app_root
+    yoagent_chat_mode = scenario.yoagent_chat_mode
+    hold_auto_approve = scenario.hold_auto_approve
+    background_status_payload = dict(scenario.background_status_payload) if scenario.background_status_payload is not None else None
+    stats_only = scenario.stats_only
+    css = app_css()
+    brand_css = (REPO_ROOT / "static" / "brand.css").read_text(encoding="utf-8")
+    script_uri = scenario.runtime_script_uri or fixture_asset_url("static", "yomux.js")
+    dockview_css_uri = fixture_asset_url("static", "vendor", "dockview.css")
+    dockview_script_uri = fixture_asset_url("static", "vendor", "dockview-core.noStyle.js")
+    stats_capabilities = stats_resolution.wire_capabilities()
+    session_files_payload = session_files_payload or {"session": sessions[0], "files": [], "repos": [], "errors": [], "loaded": True}
+    fs_entries = fs_entries or {}
+    bootstrap = build_browser_bootstrap(scenario)
+    file_explorer_intent_script = ""
+    if file_explorer_open_intent is not None:
+        file_explorer_intent_script = f"""
+          try {{ sessionStorage.setItem('yolomux.fileExplorerOpen.v1', {json.dumps(str(file_explorer_open_intent))}); }} catch (error) {{}}
+        """
+    app_root_open = '<div id="appRoot" class="app-root">' if wrap_app_root else ""
+    app_root_close = "</div>" if wrap_app_root else ""
+    stub_script = """
+      window.__bootFetches = [];
+      window.__bootSockets = [];
+      window.__bootSocketInstances = [];
+      window.__eventSources = [];
+      window.__fixtureStatsModels = new Map();
+      window.__bootTerminalInstances = [];
+      window.__terminalOpened = 0;
+      window.__terminalResizeCalls = [];
+      window.__settingsMtime = 0;
+      window.__fixtureRouteMethods = __BROWSER_BOOT_ROUTE_METHODS__;
+      window.__settingsPayload = JSON.parse(document.getElementById('yomux-bootstrap').textContent).settingsPayload;
+      window.__fixtureServerLogsPayload = {
+        ok: true,
+        epoch: 'fixture-server-log-epoch',
+        logs: [],
+        sequence: 0,
+        capacity: 500,
+        dropped: {count: 0, first_id: null, last_id: null, by_level: {}},
+      };
+      window.marked = {parse(text) {
+        return String(text || '').replace(/`\\/yo <query>`/g, '<code>/yo &lt;query&gt;</code>');
+      }};
+      window.hljs = {highlightAuto(text) { return {value: String(text || '')}; }, highlightElement() {}};
+      window.Notification = {permission: 'denied', requestPermission: async () => 'denied'};
+      class FakeTerminal {
+        constructor(options = {}) {
+          this.cols = options.cols || 80;
+          this.rows = options.rows || 24;
+          this.options = options;
+          this.buffer = {active: {length: 0, getLine() { return null; }}};
+          window.__bootTerminalInstances.push(this);
+        }
+        open(container) {
+          this.element = document.createElement('div');
+          this.element.className = 'xterm';
+          this.element.textContent = 'fake terminal';
+          container.appendChild(this.element);
+          window.__terminalOpened += 1;
+        }
+        resize(cols, rows) {
+          this.cols = cols;
+          this.rows = rows;
+          window.__terminalResizeCalls.push({cols, rows});
+        }
+        refresh() {}
+        write(data, callback) {
+          this.lastWrite = data;
+          this.writes = this.writes || [];
+          this.writes.push(typeof data === 'string' ? data : new TextDecoder().decode(data));
+          // xterm 6 invokes the optional write-completion callback once the chunk is parsed.
+          if (typeof callback === 'function') callback();
+        }
+        onData(callback) { this._onData = callback; return {dispose() {}}; }
+        onFocus(callback) { this._onFocus = callback; return {dispose() {}}; }
+        onBlur(callback) { this._onBlur = callback; return {dispose() {}}; }
+        focus() { if (this._onFocus) this._onFocus(); }
+        scrollLines() {}
+        registerLinkProvider() { return {dispose() {}}; }
+        attachCustomKeyEventHandler() {}
+        getSelection() { return ''; }
+        clearSelection() {}
+        dispose() { this.disposed = true; }
+      }
+      window.Terminal = FakeTerminal;
+      class FakeWebSocket {
+        static CONNECTING = 0;
+        static OPEN = 1;
+        static CLOSING = 2;
+        static CLOSED = 3;
+        constructor(url) {
+          this.url = String(url);
+          this.readyState = FakeWebSocket.CONNECTING;
+          this.sent = [];
+          window.__bootSockets.push(this.url);
+          window.__bootSocketInstances.push(this);
+          setTimeout(() => {
+            this.readyState = FakeWebSocket.OPEN;
+            if (this.onopen) this.onopen({type: 'open'});
+          }, 0);
+        }
+        send(message) { this.sent.push(String(message)); }
+        close() {
+          this.readyState = FakeWebSocket.CLOSED;
+          if (this.onclose) this.onclose({type: 'close'});
+        }
+      }
+      window.WebSocket = FakeWebSocket;
+       window.EventSource = class {
+         constructor(url) {
+           this.url = String(url);
+           this.listeners = {};
+           this.statsTimer = null;
+           // The fixture registry owns the shared client-events transport. Current-stats opens
+           // its own stream after a valid boot capability response, but it is not a second client
+           // event transport and must not make the fixture ownership assertion report a duplicate.
+          if (this.url.startsWith('/api/client-events?')) window.__eventSources.push(this);
+          if (this.url.startsWith('/api/stats-stream?')) {
+            const streamUrl = new URL(this.url, location.origin);
+            const rangeSeconds = Number(streamUrl.searchParams.get('range_seconds'));
+            const requestedText = streamUrl.searchParams.get('resolution') || 'AUTO';
+            const requestedResolution = requestedText === 'AUTO' ? 'AUTO' : Number(requestedText);
+            const capability = window.__fixtureStatsCapabilities.ranges.find(row => row.range_seconds === rangeSeconds);
+            const resolutionSeconds = requestedResolution === 'AUTO'
+              ? capability?.auto_resolution_seconds
+              : requestedResolution;
+            const model = fixtureStatsModel(rangeSeconds, resolutionSeconds);
+            let cacheGeneration = model.cacheGeneration;
+            let revision = 0;
+            const cadenceSeconds = Math.min(
+              resolutionSeconds,
+              window.__fixtureStatsCapabilities.max_live_cadence_seconds,
+            );
+            setTimeout(() => {
+              if (this.closed) return;
+              const snapshot = fixtureStatsSnapshot(model, requestedResolution);
+              this.emit('ack', {
+                cache_generation: cacheGeneration,
+                chunk_count: 1,
+                not_modified: false,
+                range_seconds: rangeSeconds,
+                requested_resolution: requestedResolution,
+                resolution_seconds: resolutionSeconds,
+              });
+              this.emit('snapshot', snapshot);
+              this.emit('ready', {cache_generation: cacheGeneration, revision});
+            }, 0);
+            this.statsTimer = setInterval(() => {
+              if (this.closed) return;
+              const delta = fixtureStatsDelta(model, cacheGeneration, revision + 1);
+              cacheGeneration = delta.cache_generation;
+              revision = delta.revision;
+              this.emit('delta', delta);
+            }, cadenceSeconds * 1000);
+          }
+         }
+         addEventListener(name, callback) { this.listeners[name] = callback; }
+        emit(name, payload = {}) { this.listeners[name]?.({data: JSON.stringify(payload)}); }
+         close() {
+           this.closed = true;
+           if (this.statsTimer !== null) clearInterval(this.statsTimer);
+           this.statsTimer = null;
+         }
+       };
+      function jsonResponse(payload, status = 200) {
+        return Promise.resolve(new Response(JSON.stringify(payload), {
+          status,
+          headers: {'Content-Type': 'application/json'},
+        }));
+      }
+      function emitFixtureClientEvent(type, payload = {}) {
+        for (const source of window.__eventSources || []) {
+          if (typeof source.emit === 'function') source.emit(type, payload);
+        }
+      }
+      function fixtureStatsModel(rangeSeconds, resolutionSeconds) {
+        const key = `${rangeSeconds}/${resolutionSeconds}`;
+        let model = window.__fixtureStatsModels.get(key);
+        if (model) return model;
+        const windowEnd = Math.floor(Date.now() / 1000 / resolutionSeconds) * resolutionSeconds;
+        model = {
+          rangeSeconds,
+          resolutionSeconds,
+          windowStart: windowEnd - rangeSeconds,
+          windowEnd,
+          sourceGeneration: 1,
+          cacheGeneration: 1,
+        };
+        window.__fixtureStatsModels.set(key, model);
+        return model;
+      }
+      function fixtureStatsDimensions() {
+        return Object.fromEntries(
+          ['input', 'cache_read', 'cache_write_5m', 'cache_write_1h', 'output', 'other'].map(key => [
+            key, {tokens: 0, micro_usd: 0, api_list_micro_usd: 0},
+          ]),
+        );
+      }
+      function fixtureStatsCostReport() {
+        return {
+          schema_version: 4,
+          total_micro_usd: 0,
+          total_api_list_micro_usd: 0,
+          total_tokens: 0,
+          dimensions: fixtureStatsDimensions(),
+          priced: {atoms: 0, tokens: 0},
+          unpriced: {atoms: 0, tokens: 0},
+          models: [],
+          agents: [],
+          evidence: [],
+          catalog_revision: 0,
+          omissions: {models: 0, agents: 0, evidence: 0},
+          reasoning_available: false,
+        };
+      }
+      function fixtureStatsBucket(start, duration, open) {
+        return {
+          start,
+          duration,
+          series: {
+            'cpu_percent:fixture': {value: 0, source_count: 1, first_timestamp: start, last_timestamp: start},
+            'run_agents': {value: 1, source_count: 1, first_timestamp: start, last_timestamp: start},
+            'idle_agents': {value: 1, source_count: 1, first_timestamp: start, last_timestamp: start},
+            'agent_window_snapshot_revision': {value: 7, source_count: 1, first_timestamp: start, last_timestamp: start},
+          },
+          source: {first_timestamp: start, last_timestamp: start, count: 1},
+          open,
+        };
+      }
+      function fixtureStatsSnapshot(model, requestedResolution) {
+        const bucketCount = model.rangeSeconds / model.resolutionSeconds;
+        return {
+          protocol_version: 2,
+          range_seconds: model.rangeSeconds,
+          requested_resolution: requestedResolution,
+          resolution_seconds: model.resolutionSeconds,
+          window_start: model.windowStart,
+          window_end: model.windowEnd,
+          generated_at: model.windowEnd,
+          source_generation: model.sourceGeneration,
+          cache_generation: model.cacheGeneration,
+          rightmost_open: true,
+          buckets: Array.from({length: bucketCount}, (_unused, index) => {
+            const start = model.windowStart + index * model.resolutionSeconds;
+            return fixtureStatsBucket(start, model.resolutionSeconds, index === bucketCount - 1);
+          }),
+          no_data: [],
+          cost_report: fixtureStatsCostReport(),
+        };
+      }
+      function fixtureStatsDelta(model, baseCacheGeneration, revision) {
+        const retiredStart = model.windowStart;
+        const previousTailStart = model.windowEnd - model.resolutionSeconds;
+        model.windowStart += model.resolutionSeconds;
+        model.windowEnd += model.resolutionSeconds;
+        model.sourceGeneration = Math.max(model.sourceGeneration + 1, baseCacheGeneration + 1);
+        model.cacheGeneration = baseCacheGeneration + 1;
+        return {
+          protocol_version: 2,
+          range_seconds: model.rangeSeconds,
+          resolution_seconds: model.resolutionSeconds,
+          source_generation: model.sourceGeneration,
+          base_cache_generation: baseCacheGeneration,
+          cache_generation: model.cacheGeneration,
+          revision,
+          buckets: [
+            fixtureStatsBucket(previousTailStart, model.resolutionSeconds, false),
+            fixtureStatsBucket(model.windowEnd - model.resolutionSeconds, model.resolutionSeconds, true),
+          ],
+          no_data: [],
+          tombstones: [{kind: 'bucket', start: retiredStart, duration: model.resolutionSeconds}],
+          cost_report: fixtureStatsCostReport(),
+        };
+      }
+      function applyFixtureSettingsPatch(patch) {
+        window.__settingsPayload.settings = mergeSettings(window.__settingsPayload.settings || {}, patch || {});
+        window.__settingsPayload.mtime_ns = ++window.__settingsMtime;
+        emitFixtureClientEvent('settings_changed', {data: window.__settingsPayload});
+      }
+      function fixtureSettingAnswer(path, before, after, where = 'Preferences -> Colors') {
+        return [
+          'Updated this Preference:',
+          '',
+          '| setting | before | after | where | live apply |',
+          '| --- | --- | --- | --- | --- |',
+          `| \\`${path}\\` | \\`${before}\\` | \\`${after}\\` | ${where} | \\`live\\` |`,
+        ].join('\\n');
+      }
+      function fixtureYoagentChatResponse(message) {
+        const text = String(message || '');
+        const lower = text.toLowerCase();
+        if (window.__fixtureAccessRole !== 'admin' && /\\b(set|change|switch|make|turn|enable|disable|add|remove|reset)\\b/.test(lower)) {
+          return '`appearance.theme` is readable, but changing Preferences requires an admin login. I did not change anything.';
+        }
+        if (lower.includes('maybe theme')) {
+          return 'Which setting do you mean: `appearance.theme` or `appearance.terminal_theme`?';
+        }
+        if (lower.includes('theme') && lower.includes('light')) {
+          applyFixtureSettingsPatch({appearance: {theme: 'light'}});
+          return fixtureSettingAnswer('appearance.theme', 'dark', 'light');
+        }
+        if (lower.includes('active color') && lower.includes('blue')) {
+          applyFixtureSettingsPatch({appearance: {active_color: 'blue'}});
+          return fixtureSettingAnswer('appearance.active_color', 'green', 'blue');
+        }
+        if (lower.includes('tab width')) {
+          applyFixtureSettingsPatch({appearance: {tab_width: 220}});
+          return fixtureSettingAnswer('appearance.tab_width', '172', '220', 'Preferences -> UI sizes');
+        }
+        if (lower.includes('font size')) {
+          applyFixtureSettingsPatch({appearance: {terminal_font_size: 18, sync_font_sizes: false}});
+          return fixtureSettingAnswer('appearance.terminal_font_size', '13', '18', 'Preferences -> UI sizes');
+        }
+        if (lower.includes('notification level') || lower.includes('notify level')) {
+          applyFixtureSettingsPatch({updates: {notify_level: 'none'}});
+          return fixtureSettingAnswer('updates.notify_level', 'patch', 'none', 'Preferences -> Notifications');
+        }
+        return 'No fixture answer.';
+      }
+      function mergeSettings(base, patch) {
+        const result = Array.isArray(base) ? base.slice() : {...(base || {})};
+        if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return result;
+        for (const [key, value] of Object.entries(patch)) {
+          if (value && typeof value === 'object' && !Array.isArray(value) && result[key] && typeof result[key] === 'object' && !Array.isArray(result[key])) {
+            result[key] = mergeSettings(result[key], value);
+          } else {
+            result[key] = Array.isArray(value) ? value.slice() : value;
+          }
+        }
+        return result;
+      }
+      window.__fixtureAccessRole = JSON.parse(document.getElementById('yomux-bootstrap').textContent).accessRole || 'admin';
+      window.__fixtureAuthUsername = JSON.parse(document.getElementById('yomux-bootstrap').textContent).authUsername || 'alice';
+      window.__fixtureYoagentMessages = [];
+      window.__fixtureChatMessages = [];
+      window.__fixtureChatMessageKeys = {};
+      window.__fixtureChatReaders = {};
+      window.__fixtureChatTyping = [];
+      window.__fixtureHoldChatYoagent = false;
+      window.__fixtureReleaseChatYoagent = null;
+      window.__fixtureHoldChatRead = false;
+      window.__fixtureReleaseChatRead = null;
+      window.__fixtureHoldChatBootstrap = false;
+      window.__fixtureReleaseChatBootstrap = null;
+      window.__fixtureChatSendAs = (username, senderInstanceId, messageBody, isQuestion = false, senderIp = '10.1.123.12') => {
+        const message = {
+          id: window.__fixtureChatMessages.length + 1,
+          created_at_utc: Date.now() / 1000,
+          username: String(username),
+          sender_ip: String(senderIp),
+          sender_instance_id: String(senderInstanceId),
+          client_message_uuid: `fixture-${window.__fixtureChatMessages.length + 1}`,
+          body: String(messageBody),
+          is_question: isQuestion === true,
+        };
+        window.__fixtureChatMessages.push(message);
+        emitFixtureClientEvent('chat_messages_changed', {revision: message.id});
+        return message;
+      };
+      window.fetch = async (input, options = {}) => {
+        const url = new URL(String(input), 'https://localhost');
+        const body = options.body ? JSON.parse(options.body || '{}') : null;
+        const method = String(options.method || 'GET').toUpperCase();
+        window.__bootFetches.push({path: url.pathname, search: url.search, method, body});
+        const allowedMethods = window.__fixtureRouteMethods[url.pathname];
+        if (allowedMethods && !allowedMethods.includes(method)) {
+          return jsonResponse({error: 'fixture method not allowed'}, 405);
+        }
+        // Stats-only mode intentionally models the partial Go boot: every known non-stats API
+        // route is absent. Keep this before the normal handlers so the test proves that unrelated
+        // 404s cannot change stats readiness, rather than accidentally exercising fixture 200s.
+        const statsOnlyUnavailableRoutes = new Set([
+          ...Object.keys(window.__fixtureRouteMethods || {}),
+          '/api/background/status', '/api/fs/fast/list', '/api/fs/index-status', '/api/watched-prs', '/api/update-status',
+        ]);
+        if (window.__fixtureStatsOnly === true
+            && statsOnlyUnavailableRoutes.has(url.pathname)
+            && !url.pathname.startsWith('/api/stats-')) {
+          return jsonResponse({error: 'stats-only fixture rejects unrelated route'}, 404);
+        }
+        if (url.pathname === '/api/chat/bootstrap') {
+          if (window.__fixtureHoldChatBootstrap) {
+            await new Promise(resolve => { window.__fixtureReleaseChatBootstrap = resolve; });
+            window.__fixtureReleaseChatBootstrap = null;
+          }
+          const instance = url.searchParams.get('browser_instance_id') || '';
+          const reader = window.__fixtureAuthUsername;
+          const latest = window.__fixtureChatMessages.at(-1)?.id || 0;
+          const firstRegistration = !Object.hasOwn(window.__fixtureChatReaders, reader);
+          if (firstRegistration) window.__fixtureChatReaders[reader] = latest;
+          const readUpTo = Number(window.__fixtureChatReaders[reader] || 0);
+          window.__fixtureLastChatBootstrapMessages = window.__fixtureChatMessages.filter(message => message.id > readUpTo);
+          return jsonResponse({
+            revision: latest,
+            newer_cursor: String(latest),
+            older_cursor: latest ? String(window.__fixtureChatMessages.find(message => message.id > readUpTo)?.id || (latest + 1)) : null,
+            has_more_older: window.__fixtureChatMessages.some(message => message.id < (window.__fixtureChatMessages.find(message => message.id > readUpTo)?.id || (latest + 1))),
+            read_up_to_id: readUpTo,
+            first_registration: firstRegistration,
+            messages: window.__fixtureLastChatBootstrapMessages,
+            typing: window.__fixtureChatTyping.filter(item => item.browser_instance_id !== instance),
+            retention_days: 7,
+            client_ip: '10.1.123.12',
+          });
+        }
+        if (url.pathname === '/api/chat/delta') {
+          const after = Number(url.searchParams.get('after') || 0);
+          const messages = window.__fixtureChatMessages.filter(message => message.id > after);
+          const revision = messages.at(-1)?.id || after;
+          return jsonResponse({messages, revision, newer_cursor: String(revision)});
+        }
+        if (url.pathname === '/api/chat/page') {
+          const before = Number(url.searchParams.get('before') || Number.MAX_SAFE_INTEGER);
+          const limit = Number(url.searchParams.get('limit') || 50);
+          const eligible = window.__fixtureChatMessages.filter(message => message.id < before);
+          const messages = eligible.slice(-limit);
+          return jsonResponse({messages, older_cursor: messages[0]?.id ? String(messages[0].id) : null, has_more: eligible.length > messages.length});
+        }
+        if (url.pathname === '/api/chat/context') {
+          const id = Number(url.searchParams.get('message_id') || 0);
+          const index = window.__fixtureChatMessages.findIndex(message => message.id === id);
+          return jsonResponse({
+            target: window.__fixtureChatMessages[index] || null,
+            before: window.__fixtureChatMessages.slice(Math.max(0, index - 3), Math.max(0, index)),
+            after: window.__fixtureChatMessages.slice(index + 1, index + 4),
+          });
+        }
+        if (url.pathname === '/api/chat/search') {
+          const query = String(url.searchParams.get('query') || '').toLocaleLowerCase();
+          const hits = window.__fixtureChatMessages.filter(message => message.body.toLocaleLowerCase().includes(query)).map(message => ({target: message, before: [], after: []}));
+          return jsonResponse({hits, next_cursor: null, has_more: false});
+        }
+        if (url.pathname === '/api/chat/send') {
+          if (window.__fixtureFailNextChatSendBeforeInsert) {
+            window.__fixtureFailNextChatSendBeforeInsert = false;
+            throw new TypeError('fixture chat send failed before insert');
+          }
+          const key = `${window.__fixtureAuthUsername}\u001f${body?.browser_instance_id || ''}\u001f${body?.client_message_uuid || ''}`;
+          let message = window.__fixtureChatMessageKeys[key];
+          const created = !message;
+          if (!message) {
+            const messageBody = String(body?.body || '');
+            const isQuestion = ['?', '？', '؟', '՞', ';', '፧'].includes(messageBody.trim().at(-1));
+            message = window.__fixtureChatSendAs(window.__fixtureAuthUsername, body?.browser_instance_id || '', messageBody, isQuestion);
+            message.client_message_uuid = body?.client_message_uuid || message.client_message_uuid;
+            window.__fixtureChatMessageKeys[key] = message;
+          }
+          if (window.__fixtureDropNextChatSendResponse) {
+            window.__fixtureDropNextChatSendResponse = false;
+            throw new TypeError('fixture dropped chat response');
+          }
+          return jsonResponse({message, revision: message.id, created});
+        }
+        if (url.pathname === '/api/chat/yoagent') {
+          const sourceId = Number(body?.message_id || 0);
+          const typingInstance = `yolomux-yoagent-${sourceId}`;
+          const refreshYoagentTyping = () => {
+            window.__fixtureChatTyping = window.__fixtureChatTyping.filter(item => item.browser_instance_id !== typingInstance);
+            window.__fixtureChatTyping.push({username: 'YO!agent', browser_instance_id: typingInstance, expires_at_utc: Date.now() / 1000 + 5});
+            emitFixtureClientEvent('chat_typing_changed', {});
+          };
+          refreshYoagentTyping();
+          let typingHeartbeat = null;
+          if (window.__fixtureHoldChatYoagent) {
+            typingHeartbeat = setInterval(refreshYoagentTyping, 2500);
+            try {
+              await new Promise(resolve => { window.__fixtureReleaseChatYoagent = resolve; });
+            } finally {
+              clearInterval(typingHeartbeat);
+              window.__fixtureReleaseChatYoagent = null;
+            }
+          }
+          window.__fixtureChatTyping = window.__fixtureChatTyping.filter(item => item.browser_instance_id !== typingInstance);
+          emitFixtureClientEvent('chat_typing_changed', {});
+          const source = window.__fixtureChatMessages.find(message => message.id === sourceId);
+          const message = window.__fixtureChatSendAs('YO!agent', 'yolomux-yoagent', `YO!agent answer for: ${String(source?.body || '').replace(/^\\/yo\\s+/, '')}`, false, '');
+          return jsonResponse({message, revision: message.id, created: true, source_message_id: source?.id || 0});
+        }
+        if (url.pathname === '/api/chat/typing') {
+          const instance = String(body?.browser_instance_id || '');
+          window.__fixtureChatTyping = window.__fixtureChatTyping.filter(item => item.browser_instance_id !== instance);
+          if (body?.typing) window.__fixtureChatTyping.push({username: window.__fixtureAuthUsername, browser_instance_id: instance, expires_at_utc: Date.now() / 1000 + 5});
+          emitFixtureClientEvent('chat_typing_changed', {});
+          return jsonResponse({typing: window.__fixtureChatTyping.filter(item => item.browser_instance_id !== instance)});
+        }
+        if (url.pathname === '/api/chat/read') {
+          if (window.__fixtureHoldChatRead) {
+            await new Promise(resolve => { window.__fixtureReleaseChatRead = resolve; });
+            window.__fixtureReleaseChatRead = null;
+          }
+          window.__fixtureChatReaders[window.__fixtureAuthUsername] = Number(body?.message_id || 0);
+          return jsonResponse({read_up_to_id: Number(body?.message_id || 0)});
+        }
+        if (url.pathname === '/api/yoagent/chat' && window.__fixtureYoagentChatMode === 'settings') {
+          const message = String(body?.message || '');
+          const answer = fixtureYoagentChatResponse(message);
+          const now = new Date().toISOString();
+          window.__fixtureYoagentMessages.push({role: 'user', content: message, createdAt: now});
+          window.__fixtureYoagentMessages.push({role: 'assistant', content: answer, createdAt: now});
+          return jsonResponse({
+            answer,
+            backend: 'yolomux',
+            backend_used: 'yolomux',
+            deterministic: true,
+            timing: {ttfr_ms: 1},
+            conversation: {
+              messages: window.__fixtureYoagentMessages,
+              transcript_path: '/home/test/.local/state/yolomux/yoagent/conversation.jsonl',
+              transcript_display_path: '~/.local/state/yolomux/yoagent/conversation.jsonl',
+              pending_waits: [],
+            },
+          });
+        }
+        if (url.pathname === '/api/settings') {
+          if ((options.method || 'GET') === 'POST') {
+            const body = JSON.parse(options.body || '{}');
+            window.__settingsPayload.settings = mergeSettings(window.__settingsPayload.settings || {}, body.settings || body);
+            window.__settingsPayload.mtime_ns = ++window.__settingsMtime;
+          }
+          return jsonResponse(window.__settingsPayload);
+        }
+        if (url.pathname === '/api/notify') return jsonResponse({enabled: false});
+        if (url.pathname === '/api/create-session-plan') {
+          const explicitSession = String(window.__fixtureNextCreatedSession || '').trim();
+          const numericSessions = window.__fixtureSessions.map(session => Number(session)).filter(Number.isFinite);
+          const session = explicitSession || String((numericSessions.length ? Math.max(...numericSessions) : 0) + 1);
+          return jsonResponse({ok: true, session, generation: 1});
+        }
+        if (url.pathname === '/api/create-session') {
+          const agent = url.searchParams.get('agent') || 'term';
+          const explicitSession = String(window.__fixtureNextCreatedSession || '').trim();
+          const numericSessions = window.__fixtureSessions.map(session => Number(session)).filter(Number.isFinite);
+          const session = url.searchParams.get('session') || explicitSession || String((numericSessions.length ? Math.max(...numericSessions) : 0) + 1);
+          const createSessions = Array.isArray(window.__fixtureCreateSessionRoster)
+            ? window.__fixtureCreateSessionRoster.slice()
+            : window.__fixtureSessions.slice();
+          return jsonResponse({ok: true, created: true, session, sessions: createSessions, agent});
+        }
+        if (url.pathname === '/api/rename-session') {
+          const session = url.searchParams.get('session') || '';
+          const newSession = url.searchParams.get('new_name') || session;
+          const staleSessions = window.__fixtureSessions.filter(item => item !== session);
+          return jsonResponse({ok: true, renamed: true, session, new_session: newSession, sessions: staleSessions});
+        }
+        if (url.pathname === '/api/ensure-session') return jsonResponse({ok: true, created: false});
+        if (url.pathname === '/api/attention-ack') {
+          const acknowledged = Array.from(new Set((Array.isArray(body?.keys) ? body.keys : [body?.key]).map(key => String(key || '')).filter(Boolean)));
+          const autoPayload = window.__fixtureAutoApprovePayload || {
+            session_order: window.__fixtureSessions,
+            sessions: Object.fromEntries(window.__fixtureSessions.map(session => [session, {target: session, enabled: false, last_action: 'off'}])),
+            rules: {path: '/home/test/.config/yolomux/yolo-rules.yaml', source: 'default', rules: [], errors: []},
+          };
+          for (const key of acknowledged) {
+            let parts = [];
+            try { parts = JSON.parse(key); } catch (error) {}
+            const session = String(Array.isArray(parts) ? parts[1] || '' : '');
+            const state = autoPayload.sessions?.[session];
+            if (!state) continue;
+            const keys = Array.isArray(state.attention_acks?.keys) ? state.attention_acks.keys : [];
+            if (!keys.includes(key)) keys.push(key);
+            state.attention_acks = {keys};
+            if (state.prompt?.attention_key === key || state.prompt_attention_key === key) {
+              if (state.prompt) state.prompt.attention_acknowledged = true;
+              state.prompt_attention_acknowledged = true;
+            }
+            for (const row of Array.isArray(state.agent_windows) ? state.agent_windows : []) {
+              if (row.attention_key === key) row.attention_acknowledged = true;
+              if (row.cooldown_attention_key === key) row.cooldown_acknowledged = true;
+            }
+          }
+          window.__fixtureAutoApprovePayload = autoPayload;
+          emitFixtureClientEvent('auto_approve_changed', {status: 200, data: autoPayload});
+          return jsonResponse({ok: true, acknowledged, auto_approve: autoPayload, status: 200});
+        }
+        if (url.pathname === '/api/auto-approve') {
+          if (window.__fixtureHoldAutoApprove) {
+            await new Promise(resolve => { window.__fixtureReleaseAutoApprove = resolve; });
+            window.__fixtureReleaseAutoApprove = null;
+          }
+          return jsonResponse(window.__fixtureAutoApprovePayload || {
+            session_order: window.__fixtureSessions,
+            sessions: Object.fromEntries(window.__fixtureSessions.map(session => [session, {target: session, enabled: false, last_action: 'off'}])),
+            rules: {path: '/home/test/.config/yolomux/yolo-rules.yaml', source: 'default', rules: [], errors: []},
+          });
+        }
+        if (url.pathname === '/api/session-metadata' || url.pathname === '/api/transcripts') {
+          const transcriptSessions = window.__fixtureTranscriptSessions || {};
+          const currentPath = window.__fixtureTranscriptCurrentPath || '/home/test/yolomux.dev';
+          const gitRoot = window.__fixtureTranscriptGitRoot || '/home/test/yolomux.dev';
+          // The production metadata contract has one owner for Git associations: work_graph. Keep
+          // the browser fixture on that contract too, so Finder sync tests cannot accidentally
+          // keep a retired session.project compatibility path alive.
+          const fixtureWorkGraph = (session, info, path, root) => {
+            const sessionId = `tmux-session:${session}`;
+            const windowId = `tmux-window:${session}:0`;
+            const paneId = `tmux-pane:${session}:0.0`;
+            const observationId = `path-observation:${session}:1`;
+            const worktreeId = `git-worktree:${root}`;
+            const repositoryId = `local-repository:${root}`;
+            const branchName = String(info.branch || 'main');
+            const branchId = `local-branch:${repositoryId}:${encodeURIComponent(branchName)}`;
+            const git = {root, cwd: root, branch: branchName, dirty_count: 0, ahead: 0, behind: 0};
+            return {
+              version: 1,
+              generation: 1,
+              tmux_sessions: {[sessionId]: {id: sessionId, name: String(session), tmux_window_ids: [windowId], tmux_pane_ids: [paneId], runtime_actor_ids: [], path_observation_ids: [observationId]}},
+              tmux_windows: {[windowId]: {id: windowId, tmux_session_id: sessionId, index: 0, name: '0', tmux_pane_ids: [paneId]}},
+              tmux_panes: {[paneId]: {id: paneId, tmux_window_id: windowId, target: `${session}:0.0`, pane_id: '0', index: 0, current_path: path, command: '', active: true, window_active: true, runtime_actor_ids: [], path_observation_ids: [observationId]}},
+              runtime_actors: {},
+              path_observations: {[observationId]: {id: observationId, path, path_snapshot: path, exists: true, source: 'selected-pane-cwd', priority: 10, first_observed_at: 1, last_observed_at: 1, tmux_pane_id: paneId, runtime_actor_id: null, git_worktree_id: worktreeId}},
+              git_worktrees: {[worktreeId]: {id: worktreeId, root, git_dir: `${root}/.git`, kind: 'primary', local_repository_id: repositoryId, current_branch_id: branchId, path_observation_ids: [observationId], branch_activity_ids: [], git, activity_priority: 10, activity_ts: 0, activity_source: '', has_current_pull_request: false}},
+              local_repositories: {[repositoryId]: {id: repositoryId, common_git_dir: `${root}/.git`, git_worktree_ids: [worktreeId], local_branch_ids: [branchId]}},
+              hosted_repositories: {},
+              local_branches: {[branchId]: {id: branchId, local_repository_id: repositoryId, name: branchName, current: true, pull_request_ids: [], linear_issue_ids: [], updated_ts: 0}},
+              pull_requests: {},
+              linear_issues: {},
+              worktree_branch_activity: {},
+            };
+          };
+          // The rows are rebuilt from CURRENT fixture state on every read, so the payload served at
+          // generation N+1 genuinely observes the mutation. Nothing here relabels pre-mutation
+          // bytes with a newer identity: that is the exact lie the epoch identity exists to catch.
+          const buildSessionRows = () => Object.fromEntries(window.__fixtureSessions.map(session => {
+            const info = transcriptSessions[session] || {};
+            const path = info.current_path || currentPath;
+            const root = info.git_root || gitRoot;
+            return [session, {
+              session,
+              selected_pane: {target: `${session}:0.0`, current_path: path},
+              work_graph: fixtureWorkGraph(session, info, path, root),
+              agents: info.agents || [],
+              panes: info.panes || [],
+            }];
+          }));
+          const meta = window.__fixtureMetadata;
+          const forced = url.searchParams.get('force') === '1';
+          // A forced read is answered from the build that already exists and names the build that
+          // will observe this request -- the server's contract exactly.
+          const servedGeneration = meta.generation;
+          const cache = {
+            hit: true,
+            stale: forced,
+            age_seconds: 0,
+            refresh_seconds: 15,
+            generation: servedGeneration,
+            refreshing: forced,
+          };
+          if (forced) {
+            meta.pending = servedGeneration + 1;
+            cache.pending_generation = meta.pending;
+            cache.pending_identity = {epoch: meta.epoch, generation: meta.pending};
+            // The promised build commits unless a test is deliberately withholding it, so the next
+            // read converges on freshly built rows. `withholdPendingBuild` is how a test models a
+            // build that never lands without also breaking the protocol.
+            if (!meta.withholdPendingBuild) meta.generation = meta.pending;
+          }
+          return jsonResponse({
+            metadata_identity: {epoch: meta.epoch, generation: servedGeneration},
+            metadata_generation: servedGeneration,
+            cache,
+            session_order: window.__fixtureSessions,
+            sessions: buildSessionRows(),
+          });
+        }
+        if (url.pathname === '/api/activity') {
+          // Go owns live agent status on the real 7222 backend. Keep the browser
+          // fixture on that contract instead of silently falling through to an
+          // empty response (which would erase the working marker before render).
+          const autoPayload = window.__fixtureAutoApprovePayload || {};
+          const sessionsPayload = autoPayload.sessions && typeof autoPayload.sessions === 'object'
+            ? autoPayload.sessions
+            : {};
+          const agentWindows = Object.fromEntries(Object.entries(sessionsPayload).map(([session, state]) => [
+            session,
+            Array.isArray(state?.agent_windows) ? state.agent_windows : [],
+          ]));
+          const agents = Object.entries(agentWindows).flatMap(([session, rows]) => rows.map(row => ({
+            ...row,
+            session,
+            pane_target: row.pane_target || row.pane || '',
+            window: row.window ?? row.window_index ?? '',
+            window_index: row.window_index ?? row.window ?? null,
+          })));
+          return jsonResponse({
+            activity: {},
+            agent_window_snapshot_revision: Number(autoPayload.agent_window_snapshot_revision || 0),
+            agent_windows: agentWindows,
+            agents,
+            errors: [],
+            session_order: window.__fixtureSessions,
+            session_scope: 'all',
+            sessions: Object.fromEntries(window.__fixtureSessions.map(session => [session, window.__fixtureTranscriptSessions?.[session] || {session, panes: []}])),
+            topology_generation: 1,
+          });
+        }
+        if (url.pathname === '/api/activity-summary') return jsonResponse({sessions: {}, global: {lines: []}, session_order: window.__fixtureSessions});
+        if (url.pathname === '/api/background/status') return jsonResponse(window.__fixtureBackgroundStatusPayload || {
+          owner: true,
+          status: 'disabled',
+          generation: {},
+          current_owner: {},
+          roles: {
+            'search-index': {role: 'search-index', owner: true, status: 'disabled'},
+            'stats-sampler': {role: 'stats-sampler', owner: true, status: 'disabled'},
+          },
+          search_index: {role: 'search-index', owner: true, mode: 'indexing-server', current_server: {}, owner_server: {}, status: 'disabled'},
+        });
+        if (url.pathname === '/api/session-files-stream') {
+          const session = url.searchParams.get('session') || window.__fixtureSessions[0] || '1';
+          const payload = (window.__fixtureSessionFilesPayloads || {})[session] || window.__fixtureSessionFilesPayload || {session, files: [], repos: [], errors: [], loaded: true};
+          const repos = Array.isArray(payload.repos) ? payload.repos : [];
+          const files = Array.isArray(payload.files) ? payload.files : [];
+          const refsByRepo = payload.refs_by_repo && typeof payload.refs_by_repo === 'object' ? payload.refs_by_repo : {};
+          const chunks = [];
+          for (const repo of repos) {
+            const repoPath = String(repo?.repo || repo?.root || '');
+            const repoRefs = repoPath && refsByRepo[repoPath] ? {[repoPath]: refsByRepo[repoPath]} : {};
+            chunks.push(`event: repo\ndata: ${JSON.stringify({session, repos: [repo], files: files.filter(file => String(file?.repo || '') === repoPath), refs_by_repo: repoRefs})}\n\n`);
+          }
+          if (!repos.length && files.length) chunks.push(`event: repo\ndata: ${JSON.stringify({session, repos: [], files, refs_by_repo: refsByRepo})}\n\n`);
+          chunks.push(`event: done\ndata: ${JSON.stringify({session, from_ref: payload.from_ref || 'HEAD', to_ref: payload.to_ref || 'current'})}\n\n`);
+          const streamBody = new TextEncoder().encode(chunks.join(''));
+          return Promise.resolve(new Response(new ReadableStream({
+            start(controller) {
+              controller.enqueue(streamBody);
+              controller.close();
+            },
+          }), {headers: {'Content-Type': 'text/event-stream'}}));
+        }
+        if (url.pathname === '/api/session-files') {
+          const session = url.searchParams.get('session') || window.__fixtureSessions[0] || '1';
+          return jsonResponse((window.__fixtureSessionFilesPayloads || {})[session] || window.__fixtureSessionFilesPayload || {session, files: [], repos: [], errors: [], loaded: true});
+        }
+        if (url.pathname === '/api/stats-capabilities') return jsonResponse(window.__fixtureStatsCapabilities);
+        if (url.pathname === '/api/stats-observations') {
+          return jsonResponse({
+            ok: true,
+            accepted: body.observations.length,
+            duplicates: 0,
+            observation_receipts: body.observations.map(observation => ({
+              event_id: observation.event_id,
+              disposition: 'accepted',
+            })),
+          });
+        }
+        if (url.pathname === '/api/stats-snapshot') {
+          const rangeSeconds = Number(url.searchParams.get('range_seconds'));
+          const requestedResolution = url.searchParams.get('resolution') || 'AUTO';
+          const capability = window.__fixtureStatsCapabilities.ranges.find(row => row.range_seconds === rangeSeconds);
+          const resolutionSeconds = requestedResolution === 'AUTO'
+            ? capability?.auto_resolution_seconds
+            : Number(requestedResolution);
+          if (!capability || !capability.explicit_resolution_seconds.includes(resolutionSeconds)) {
+            return jsonResponse({error: 'unsupported fixture stats selection'}, 400);
+          }
+          const model = fixtureStatsModel(rangeSeconds, resolutionSeconds);
+          return jsonResponse(fixtureStatsSnapshot(model, requestedResolution === 'AUTO' ? 'AUTO' : resolutionSeconds));
+        }
+        if (url.pathname === '/api/stats-agent-status') {
+          return jsonResponse(window.__fixtureStatsAgentStatus);
+        }
+        if (url.pathname === '/api/ping') return jsonResponse({ok: true});
+        if (url.pathname === '/api/event') return jsonResponse({ok: true});
+        if (url.pathname === '/api/events') return jsonResponse({events: []});
+        if (url.pathname === '/api/logs') return jsonResponse(window.__fixtureServerLogsPayload);
+        if (url.pathname === '/api/tmux-window') return jsonResponse({ok: true, session: url.searchParams.get('session'), window: url.searchParams.get('window')});
+        if (url.pathname === '/api/fs/list' || url.pathname === '/api/fs/fast/list') {
+          const path = url.searchParams.get('path') || '/home/test';
+          const entries = (window.__fixtureFsEntries || {})[path] || [];
+          return jsonResponse({path, entries});
+        }
+        if (url.pathname === '/api/fs/info') {
+          const path = url.searchParams.get('path') || '/home/test';
+          const entriesByPath = window.__fixtureFsEntries || {};
+          const parent = path.slice(0, Math.max(1, path.lastIndexOf('/'))) || '/';
+          const name = path.split('/').filter(Boolean).pop() || '/';
+          const entry = (entriesByPath[parent] || []).find(candidate => candidate.name === name);
+          if (!entry) return jsonResponse({path}, 404);
+          return jsonResponse({path, name, kind: entry.kind || (entriesByPath[path] ? 'dir' : 'file'), size: entry.size ?? null, mtime: entry.mtime ?? null, mtime_ns: entry.mtime_ns ?? null, realpath: path});
+        }
+        if (url.pathname === '/api/fs/batch') {
+          const entriesByPath = window.__fixtureFsEntries || {};
+          const responses = (body?.requests || []).map((request, index) => {
+            const path = request.path || '/home/test';
+            if (request.type === 'info') {
+              return {id: request.id ?? index, ok: true, status: 200, payload: {path, name: path.split('/').filter(Boolean).pop() || '/', kind: entriesByPath[path] ? 'dir' : 'file'}};
+            }
+            return {id: request.id ?? index, ok: false, status: 400, error: 'unsupported fs batch operation', path};
+          });
+          return jsonResponse({responses});
+        }
+        return window.__fixtureStatsOnly
+          ? jsonResponse({error: 'stats-only fixture rejects unrelated route'}, 404)
+          : jsonResponse({});
+      };
+    """
+    stub_script = stub_script.replace(
+        "__BROWSER_BOOT_ROUTE_METHODS__",
+        json.dumps({route.path: route.methods for route in BROWSER_BOOT_ROUTES}, separators=(",", ":")),
+    )
+    validate_browser_boot_routes(stub_script)
+    contract_errors = browser_boot_production_contract_errors(bootstrap)
+    if contract_errors:
+        raise AssertionError(f"browser boot bootstrap contract mismatch: {contract_errors}")
+    return build_browser_boot_dom_shell(f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        {web.MOBILE_VIEWPORT_META}
+        {_EMPTY_FAVICON_HTML}
+        <link rel="stylesheet" href="{dockview_css_uri}">
+        <style>{css}</style>
+        <style>{brand_css}</style>
+        <style>
+          body {{ margin: 0; }}
+          #grid {{ width: {grid_width}px; height: {grid_height}px; }}
+          {terminal_css}
+        </style>
+      </head>
+      <body>
+        {app_root_open}
+        <header class="topbar">
+          <div class="brand-cell"><div class="brand brand-title title" aria-label="YOmux test"><span class="brand-mark">Y</span><span class="brand-second brand-nv">O</span><span class="brand-blue">m</span><span class="brand-red">u</span><span class="brand-yellow">x</span><span class="brand-version">test</span></div><span id="httpsWarning" class="transport-warning" hidden></span></div>
+          <div id="sessionButtons" class="app-menu-area" aria-label="Application menus"></div>
+          <div class="actions">
+            <div id="latencyMeter" class="latency-meter topbar-status-surface"><svg class="latency-graph" viewBox="0 0 44 18"><polyline id="latencyLine" class="latency-line" points=""></polyline></svg><span id="latencyNumber" class="latency-number">-- ms</span></div>
+            <button id="notifyToggle">Notify</button>
+            <button id="refreshMeta">Refresh</button>
+            <button id="logoutButton">Log out</button>
+            <span id="status" class="sub">starting</span>
+          </div>
+        </header>
+        <div id="attentionAlerts" class="attention-alerts" aria-live="polite"></div>
+        <aside id="fileExplorer" class="file-explorer" hidden aria-label="File Explorer">
+          <div class="file-explorer-tree-col">
+            <div class="file-explorer-head">
+              <button type="button" class="file-explorer-header-action" data-file-explorer-collapse>▤</button>
+              <button type="button" id="fileExplorerHiddenToggle" class="file-explorer-hidden-toggle">.*</button>
+              <button type="button" id="fileExplorerRootMode" class="file-explorer-root-mode-toggle active" aria-pressed="true">Sync</button>
+              <input class="file-explorer-path" id="fileExplorerPath" type="text" value="/">
+              <button type="button" id="fileExplorerPathCopy" class="path-copy-button file-explorer-path-copy"></button>
+              <button type="button" id="fileExplorerClose" class="file-explorer-close"></button>
+            </div>
+            <div class="file-explorer-tree" id="fileExplorerTree" role="tree" tabindex="0"></div>
+          </div>
+        </aside>
+        <main id="grid" class="grid"></main>
+        <div id="panelPool" class="panel-pool" aria-hidden="true"></div>
+        <section id="modal" class="modal app-modal-overlay"><div class="modal-dialog"><div class="modal-head"><div id="modalTitle">Transcript</div><button id="closeModal">Close</button></div><pre id="modalBody"></pre></div></section>
+        {app_root_close}
+        <script id="yomux-bootstrap" type="application/json">{json.dumps(bootstrap, separators=(",", ":"))}</script>
+        <script>
+          window.__fixtureSessions = {json.dumps(sessions)};
+          // Session-metadata build identity, modelled on the server contract rather than invented
+          // here: one epoch per fixture page (one "server process"), a committed build generation,
+          // and -- for a forced read only -- the identity of the build that will observe it. A
+          // fixture that omits this makes every forced refresh a protocol failure, so a journey
+          // that is actually healthy cannot be told apart from one that never converged.
+          window.__fixtureMetadata = {{epoch: 'fixture-server-epoch-1', generation: 1, pending: 0, withholdPendingBuild: false}};
+          window.__fixtureTranscriptSessions = {json.dumps(transcript_sessions or {}, separators=(",", ":"))};
+          window.__fixtureTranscriptCurrentPath = {json.dumps(transcript_current_path)};
+          window.__fixtureTranscriptGitRoot = {json.dumps(transcript_git_root)};
+          window.__fixtureSessionFilesPayload = {json.dumps(session_files_payload, separators=(",", ":"))};
+          window.__fixtureSessionFilesPayloads = {json.dumps(session_files_payloads or {}, separators=(",", ":"))};
+          window.__fixtureFsEntries = {json.dumps(fs_entries, separators=(",", ":"))};
+          window.__fixtureAutoApprovePayload = {json.dumps(auto_approve_payload, separators=(",", ":")) if auto_approve_payload is not None else "null"};
+          window.__fixtureHoldAutoApprove = {json.dumps(bool(hold_auto_approve))};
+          window.__fixtureStatsOnly = {json.dumps(bool(stats_only))};
+          window.__fixtureReleaseAutoApprove = null;
+          window.__fixtureYoagentChatMode = {json.dumps(yoagent_chat_mode)};
+          window.__fixtureBackgroundStatusPayload = {json.dumps(background_status_payload, separators=(",", ":")) if background_status_payload is not None else "null"};
+          window.__fixtureStatsCapabilities = {json.dumps(stats_capabilities, separators=(",", ":"))};
+          window.__fixtureStatsAgentStatus = {json.dumps({
+              "available": True,
+              "source_generation": 1,
+              "payload": {"snapshot_revision": 7},
+              "counts": {"total": 2, "running": 1, "red": 0, "yellow": 0},
+              "agents": [
+                  {"id": "debug|0|%debug-0|codex", "kind": "codex", "state": "run", "session": "debug", "pane": "%debug-0"},
+                  {"id": "debug|1|%debug-1|claude", "kind": "claude", "state": "idle", "session": "debug", "pane": "%debug-1"},
+              ],
+              "token_rates": {"window_seconds": 60, "input_per_second": 0, "output_per_second": 0, "cache_per_second": 0, "total_per_second": 0},
+          }, separators=(",", ":"))};
+        </script>
+        <script>{file_explorer_intent_script}</script>
+        <script>{stub_script}</script>
+        <script src="{dockview_script_uri}"></script>
+        <script src="{script_uri}"></script>
+        <script>window.{LIVE_RUNTIME_BUNDLE_SENTINEL} = true;</script>
+      </body>
+    </html>
+    """)
+
+
+def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", session_mutations_allowed=None, terminal_only=False, auth_username="alice", wrap_app_root=False, yoagent_chat_mode=None, available_agents=None, agent_auth=None, background_status_payload=None, runtime_script_uri=None, dangerously_yolo=False, hold_auto_approve=False, stats_only=False):
+    """Compatibility facade for existing callers; BrowserBootScenario owns the fixture."""
+
+    return render_browser_boot_scenario(BrowserBootScenario(
+        settings=MappingProxyType(dict(settings or {})),
+        transcript_current_path=transcript_current_path,
+        transcript_git_root=transcript_git_root,
+        session_files_payload=session_files_payload,
+        fs_entries=MappingProxyType(dict(fs_entries or {})),
+        sessions=tuple(sessions or ("1",)),
+        transcript_sessions=MappingProxyType(dict(transcript_sessions or {})),
+        session_files_payloads=MappingProxyType(dict(session_files_payloads or {})),
+        terminal_css=terminal_css,
+        grid_width=grid_width,
+        grid_height=grid_height,
+        file_explorer_open_intent=file_explorer_open_intent,
+        auto_approve_payload=auto_approve_payload,
+        access_role=access_role,
+        session_mutations_allowed=access_role == "admin" if session_mutations_allowed is None else session_mutations_allowed,
+        terminal_only=terminal_only,
+        auth_username=auth_username,
+        wrap_app_root=wrap_app_root,
+        yoagent_chat_mode=yoagent_chat_mode,
+        available_agents=tuple(available_agents) if available_agents is not None else None,
+        agent_auth=agent_auth,
+        background_status_payload=background_status_payload,
+        runtime_script_uri=runtime_script_uri,
+        dangerously_yolo=dangerously_yolo,
+        hold_auto_approve=hold_auto_approve,
+        stats_only=stats_only,
+    ))
+
+
+def load_static_html_fixture(browser, tmp_path, filename, html):
+    if "data-yomux-favicon" not in html:
+        html = re.sub(r"(<head\b[^>]*>)", rf"\1{_EMPTY_FAVICON_HTML}", html, count=1, flags=re.IGNORECASE)
+    page = serve_repo_fixture_page(filename, html)
+    browser.get(fixture_page_url(page))
+    return page
+
+
+def load_fixture(browser, tmp_path, width):
+    load_static_html_fixture(browser, tmp_path, f"pane-{width}.html", pane_fixture_html(width))
+    return browser.execute_script(
+        """
+        const panel = document.querySelector('.panel').getBoundingClientRect();
+        const toolbar = document.querySelector('.tabs').getBoundingClientRect();
+        const toolbarButton = document.querySelector('.tabs .tab').getBoundingClientRect();
+        const panelHead = document.querySelector('.panel-head').getBoundingClientRect();
+        const firstPaneTab = document.querySelector('.pane-tab').getBoundingClientRect();
+        const detailRow = document.querySelector('.panel-detail-row').getBoundingClientRect();
+        const detailClose = document.querySelector('.panel-detail-close').getBoundingClientRect();
+        const detailStyle = window.getComputedStyle(document.querySelector('.panel-detail-row'));
+        document.body.classList.add('tab-meta-hidden');
+        const hiddenTextDisplay = window.getComputedStyle(document.querySelector('.pane-tab .session-button-text')).display;
+        const hiddenSymbolDisplay = window.getComputedStyle(document.querySelector('.pane-tab .tab-symbol')).display;
+        const tabs = Array.from(document.querySelectorAll('.pane-tab')).map(tab => {
+          const rect = tab.getBoundingClientRect();
+          return {top: Math.round(rect.top), bottom: rect.bottom, left: rect.left, right: rect.right, width: rect.width};
+        });
+        const rows = [];
+        for (const tab of tabs) {
+          let row = rows.find(item => item.top === tab.top);
+          if (!row) {
+            row = {top: tab.top, count: 0, rights: []};
+            rows.push(row);
+          }
+          row.count += 1;
+          row.rights.push(tab.right);
+        }
+        return {
+          panel: {left: panel.left, right: panel.right, width: panel.width},
+          panelHead: {top: panelHead.top, bottom: panelHead.bottom, height: panelHead.height},
+          toolbar: {left: toolbar.left, right: toolbar.right, width: toolbar.width},
+          toolbarCenterDelta: Math.abs((toolbarButton.top + toolbarButton.height / 2) - (firstPaneTab.top + firstPaneTab.height / 2)),
+          tabHeadBottomGap: Math.round(detailRow.top - Math.max(...tabs.map(tab => tab.bottom))),
+          detailBg: detailStyle.backgroundColor,
+          detailCloseRightGap: Math.round(panel.right - detailClose.right),
+          detailRow: {left: detailRow.left, right: detailRow.right, height: detailRow.height},
+          hiddenTextDisplay,
+          hiddenSymbolDisplay,
+          rows,
+          tabs,
+        };
+        """
+    )
+
+
+def load_pc_controls_fixture(browser, tmp_path):
+    load_static_html_fixture(browser, tmp_path, "pc-controls.html", pc_controls_fixture_html())
+
+
+def load_topbar_font_fixture(browser, tmp_path):
+    load_static_html_fixture(browser, tmp_path, "topbar-font.html", topbar_font_fixture_html())
+
+
+def load_editor_diff_ref_toolbar_fixture(browser, tmp_path):
+    load_static_html_fixture(browser, tmp_path, "editor-diff-ref-toolbar.html", editor_diff_ref_toolbar_fixture_html())
+
+
+def load_codemirror_wrap_toggle_fixture(browser, tmp_path):
+    load_static_html_fixture(browser, tmp_path, "cm-wrap-toggle.html", codemirror_wrap_toggle_fixture_html())
+
+
+def load_menu_fixture(browser, tmp_path):
+    load_static_html_fixture(browser, tmp_path, "menu.html", menu_fixture_html())
+    return browser.execute_script(
+        """
+        const rows = Array.from(document.querySelectorAll('.app-menu-tab-command')).map(row => {
+          const rect = row.getBoundingClientRect();
+          return {top: rect.top, bottom: rect.bottom, height: rect.height};
+        });
+        const popover = document.querySelector('.app-menu-popover');
+        const popoverStyle = window.getComputedStyle(popover);
+        const secondRowStyle = window.getComputedStyle(document.querySelectorAll('.app-menu-tab-command')[1]);
+        return {
+          count: rows.length,
+          maxHeight: Math.max(...rows.map(row => row.height)),
+          maxStep: Math.max(...rows.slice(1).map((row, index) => row.top - rows[index].top)),
+          firstTwentyFiveSpan: rows[24].bottom - rows[0].top,
+          width: popover.getBoundingClientRect().width,
+          maxInlineSize: Number.parseFloat(popoverStyle.maxWidth),
+          devicePixelRatio: window.devicePixelRatio || 1,
+          secondRowBorderTopColor: secondRowStyle.borderTopColor,
+          scrollHeight: popover.scrollHeight,
+        };
+        """
+    )
+
+
+def load_editor_pane_legacy_body_fixture(browser, tmp_path):
+    load_static_html_fixture(browser, tmp_path, "editor-pane-legacy-body.html", editor_pane_ignores_legacy_body_class_fixture_html())
+
+
+def load_codemirror_editor_controls_fixture(browser, tmp_path):
+    load_static_html_fixture(browser, tmp_path, "codemirror-editor-controls.html", codemirror_editor_controls_fixture_html())
+
+
+def load_codemirror_bundle_fixture(browser, tmp_path):
+    load_static_html_fixture(browser, tmp_path, "codemirror-bundle.html", codemirror_bundle_fixture_html())
+
+
+def load_codemirror_todo_diff_overview_fixture(browser, tmp_path):
+    load_static_html_fixture(browser, tmp_path, "codemirror-todo-diff-overview.html", codemirror_todo_diff_overview_fixture_html())
+
+
+def load_codemirror_file_explorer_diff_overview_fixture(browser, tmp_path):
+    load_static_html_fixture(browser, tmp_path, "codemirror-file-explorer-diff-overview.html", codemirror_file_explorer_diff_overview_fixture_html())
+
+
+def load_codemirror_diff_wrapped_inserted_line_fixture(browser, tmp_path):
+    load_static_html_fixture(browser, tmp_path, "codemirror-diff-wrapped-inserted-line.html", codemirror_diff_wrapped_inserted_line_fixture_html())
+
+
+def load_finder_click_toolbar_fixture(browser, tmp_path):
+    load_static_html_fixture(browser, tmp_path, "finder-click-toolbar.html", finder_click_toolbar_fixture_html())
+
+
+def activate_finder_diff_fixture(browser):
+    browser.execute_script(
+        """
+        const finder = document.getElementById('finder-panel');
+        const differ = document.getElementById('differ-panel');
+        finder?.setAttribute('hidden', '');
+        finder?.classList.remove('active-pane', 'focused-pane');
+        differ?.removeAttribute('hidden');
+        differ?.classList.add('active-pane', 'focused-pane');
+        """
+    )
+
+
+def load_file_tree_status_alignment_fixture(browser, tmp_path):
+    load_static_html_fixture(browser, tmp_path, "file-tree-status-alignment.html", file_tree_status_alignment_fixture_html())
+
+
+def load_codemirror_scrollbar_overview_fixture(browser, tmp_path):
+    load_static_html_fixture(browser, tmp_path, "codemirror-scrollbar-overview.html", codemirror_scrollbar_overview_fixture_html())
+
+
+def load_split_seam_fixture(browser, tmp_path):
+    load_static_html_fixture(browser, tmp_path, "split-seam.html", split_seam_fixture_html())
+
+
+def load_live_runtime_boot_fixture(browser, tmp_path, search="", expected_redirect_paths=(), **fixture_kwargs):
+    page = serve_repo_fixture_page("live-runtime-boot.html", _live_runtime_boot_fixture_html(**fixture_kwargs))
+    fixture_url = fixture_page_url(page, search)
+    browser.get(fixture_url)
+    ready_state = wait_for_live_runtime_bundle(
+        browser,
+        timeout=LIVE_RUNTIME_BUNDLE_WAIT_SECONDS,
+        expected_url=fixture_url,
+        expected_redirect_paths=expected_redirect_paths,
+    )
+    # An explicitly allowed redirect has left the app realm, so there is no client-event transport to own on the destination page.
+    if urlsplit(ready_state.get("url", "")).path in frozenset(expected_redirect_paths):
+        return
+    wait_for_fixture_client_event_demand(browser, expected_enabled=not bool(fixture_kwargs.get("stats_only", False)))
+
+
+def live_runtime_bundle_state(browser):
+    return browser.execute_script(
+        f"""
+        const failures = typeof jsDebugFailureEvents === 'function'
+          ? {{errors: Array.from(jsDebugFailureEvents('error')), rejections: Array.from(jsDebugFailureEvents('rejection'))}}
+          : {{errors: [], rejections: []}};
+        return {{
+          sentinel: window.{LIVE_RUNTIME_BUNDLE_SENTINEL} === true,
+          grid: document.getElementById('grid') !== null,
+          appRoot: document.getElementById('appRoot') !== null,
+          lateFunction: typeof {LIVE_RUNTIME_LATE_FUNCTION} === 'function',
+          statsOnly: window.__fixtureStatsOnly === true,
+          url: location.href,
+          errors: failures.errors,
+          rejections: failures.rejections,
+        }};
+        """
+    )
+
+
+def live_runtime_bundle_ready_state(state, expected_path="", expected_redirect_paths=()):
+    stats_only = state.get("statsOnly") is True
+    failures = [
+        event for event in [*state.get("errors", []), *state.get("rejections", [])]
+        if not stats_only_expected_boot_404(event, stats_only=stats_only)
+    ]
+    if failures:
+        raise AssertionError(f"live runtime bundle failed before readiness: {failures}")
+    current_path = urlsplit(state.get("url", "")).path
+    if expected_path and current_path and current_path != expected_path:
+        allowed = frozenset(str(path) for path in expected_redirect_paths)
+        if current_path in allowed:
+            return state
+        if allowed and str(state.get("url", "")).startswith("chrome-error://chromewebdata/"):
+            return state
+        return False
+    anchor_ready = state.get("grid") or state.get("appRoot")
+    return state if state.get("sentinel") and anchor_ready and state.get("lateFunction") else False
+
+
+def wait_for_live_runtime_bundle(browser, timeout=5, expected_url="", expected_redirect_paths=()):
+    last_state = None
+    expected_path = urlsplit(expected_url).path if expected_url else ""
+
+    def ready(driver):
+        nonlocal last_state
+        last_state = live_runtime_bundle_state(driver)
+        return live_runtime_bundle_ready_state(last_state, expected_path, expected_redirect_paths)
+
+    try:
+        return WebDriverWait(browser, timeout).until(ready)
+    except TimeoutException as exc:
+        raise AssertionError(f"live runtime bundle did not become ready: {last_state}") from exc
+
+
+def live_runtime_boot_health(browser):
+    return browser.execute_script(
+        """
+        const root = document.getElementById('appRoot');
+        const grid = document.getElementById('grid');
+        const rootRect = root?.getBoundingClientRect();
+        let activeLocale = '';
+        let localeError = '';
+        let collapsedPreferenceSectionIds = [];
+        let collapsedPreferenceSectionsError = '';
+        try {
+          activeLocale = typeof i18nActiveLocaleId === 'function' ? i18nActiveLocaleId() : '';
+        } catch (error) {
+          localeError = String(error?.stack || error);
+        }
+        try {
+          collapsedPreferenceSectionIds = Array.from(collapsedPreferenceSections || []);
+        } catch (error) {
+          collapsedPreferenceSectionsError = String(error?.stack || error);
+        }
+        const visiblePanels = Array.from(document.querySelectorAll('.panel')).filter(panel => {
+          const rect = panel.getBoundingClientRect();
+          const style = getComputedStyle(panel);
+          return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+        });
+        return {
+          documentReady: document.readyState,
+          errors: jsDebugFailureEvents('error'),
+          rejections: jsDebugFailureEvents('rejection'),
+          localeError,
+          collapsedPreferenceSectionsError,
+          activeLocale,
+          htmlLang: document.documentElement.lang || '',
+          htmlDir: document.documentElement.dir || '',
+          bodyTextLength: document.body?.innerText?.length || 0,
+          appRootPresent: Boolean(root),
+          appRootWidth: rootRect?.width || 0,
+          appRootHeight: rootRect?.height || 0,
+          gridChildren: grid?.children?.length || 0,
+          gridHtmlLength: grid?.innerHTML?.length || 0,
+          visiblePanels: visiblePanels.length,
+          paneTabs: document.querySelectorAll('.dockview-pane-tab').length,
+          collapsedPreferenceSectionIds,
+        };
+        """
+    )
+
+
+def install_live_runtime_boot_error_tracker(browser):
+    """Retain the call boundary while the product store and Chrome reader own error capture."""
+
+    return None
+
+
+def assert_live_runtime_boot_healthy(browser, case_name, *, expected_locale="en", timeout=8):
+    def settled(driver):
+        metrics = live_runtime_boot_health(driver)
+        fatal = bool(metrics["errors"] or metrics["rejections"] or metrics["localeError"] or metrics["collapsedPreferenceSectionsError"])
+        rendered = metrics["gridChildren"] > 0 and metrics["visiblePanels"] > 0 and metrics["paneTabs"] > 0
+        return fatal or rendered
+
+    try:
+        WebDriverWait(browser, timeout).until(settled)
+    except TimeoutException:
+        pass
+    metrics = live_runtime_boot_health(browser)
+    message = f"full-bundle boot case {case_name!r} failed: {metrics}"
+    assert metrics["documentReady"] == "complete", message
+    assert metrics["errors"] == [], message
+    assert metrics["rejections"] == [], message
+    assert metrics["localeError"] == "", message
+    assert metrics["collapsedPreferenceSectionsError"] == "", message
+    assert metrics["activeLocale"] == expected_locale, message
+    assert metrics["htmlLang"] == expected_locale, message
+    assert metrics["bodyTextLength"] > 0, message
+    assert metrics["appRootPresent"] is True, message
+    assert metrics["appRootWidth"] > 0 and metrics["appRootHeight"] > 0, message
+    assert metrics["gridChildren"] > 0 and metrics["gridHtmlLength"] > 0, message
+    assert metrics["visiblePanels"] > 0, message
+    assert metrics["paneTabs"] > 0, message
+    return metrics
+
+
+def load_dockview_runtime_boot_fixture(browser, tmp_path, search="", **fixture_kwargs):
+    browser.set_window_size(1200, 700)
+    fixture_kwargs.setdefault("file_explorer_open_intent", "0")
+    load_live_runtime_boot_fixture(browser, tmp_path, search, **fixture_kwargs)
+
+
+def wait_for_dockview(browser, min_tabs=1):
+    # Full-gate browser workers contend for CPU; Dockview is a fixture boot readiness condition, not
+    # a product latency budget, so leave enough room for the concurrent lane to schedule it.
+    WebDriverWait(browser, 8).until(
+        lambda driver: driver.execute_script(
+            """
+            return typeof dockviewLayoutActive === 'function'
+              && dockviewLayoutActive()
+              && document.querySelectorAll('.dockview-pane-tab').length >= arguments[0];
+            """,
+            min_tabs,
+        )
+    )
+
+
+
+def wait_for_dockview_tab_geometry(browser, min_tabs=1, min_width=150, max_rows=None, min_rows=None):
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const tabs = Array.from(document.querySelectorAll('.dockview-pane-tab'));
+            if (tabs.length < arguments[0]) return false;
+            const rects = tabs.map(tab => tab.getBoundingClientRect());
+            if (rects.some(rect => rect.width < arguments[1] || rect.height <= 0)) return false;
+            const tops = new Set(rects.map(rect => Math.round(rect.top)));
+            if (arguments[2] !== null) {
+              if (tops.size > arguments[2]) return false;
+            }
+            if (arguments[3] !== null && tops.size < arguments[3]) return false;
+            return true;
+            """,
+            min_tabs,
+            min_width,
+            max_rows,
+            min_rows,
+        )
+    )
+
+
+def wait_for_visible_panel(browser, panel_id):
+    return WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const panel = document.getElementById(arguments[0]);
+            if (!panel) return false;
+            const rect = panel.getBoundingClientRect();
+            const style = getComputedStyle(panel);
+            if (rect.width <= 0 || rect.height <= 0 || style.display === 'none' || style.visibility === 'hidden') return false;
+            return {
+              x: Math.round(rect.left + rect.width / 2),
+              y: Math.round(rect.top + rect.height / 2),
+              width: Math.round(rect.width),
+              height: Math.round(rect.height),
+            };
+            """,
+            panel_id,
+        )
+    )
+
+
+def wait_for_visible_selector(browser, selector):
+    return WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const node = [...document.querySelectorAll(arguments[0])].find(candidate => {
+              const rect = candidate.getBoundingClientRect();
+              const style = getComputedStyle(candidate);
+              return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+            });
+            if (!node) return false;
+            node.scrollIntoView?.({block: 'center', inline: 'center'});
+            const rect = node.getBoundingClientRect();
+            return {
+              x: Math.round(rect.left + rect.width / 2),
+              y: Math.round(rect.top + rect.height / 2),
+              width: Math.round(rect.width),
+              height: Math.round(rect.height),
+            };
+            """,
+            selector,
+        )
+    )
+
+
+def _assert_browser_point_hits_target(browser, point, *, panel_id=None, selector=None):
+    result = browser.execute_script(
+        """
+        const panelId = arguments[0];
+        const selector = arguments[1];
+        const x = arguments[2];
+        const y = arguments[3];
+        const candidates = panelId
+          ? [document.getElementById(panelId)].filter(Boolean)
+          : [...document.querySelectorAll(selector || '')];
+        const target = candidates.find(candidate => {
+          const rect = candidate.getBoundingClientRect();
+          const style = getComputedStyle(candidate);
+          return rect.width > 0 && rect.height > 0
+            && style.display !== 'none' && style.visibility !== 'hidden';
+        });
+        const hit = document.elementFromPoint(x, y);
+        const describe = node => node
+          ? `${node.tagName.toLowerCase()}${node.id ? `#${node.id}` : ''}${node.classList?.length ? `.${[...node.classList].join('.')}` : ''}`
+          : '<none>';
+        return {
+          ownsHit: Boolean(target && hit && (target === hit || target.contains(hit))),
+          target: describe(target),
+          hit: describe(hit),
+          x,
+          y,
+        };
+        """,
+        panel_id,
+        selector,
+        point["x"],
+        point["y"],
+    )
+    assert result and result["ownsHit"], f"browser click point is occluded or off-screen: {result}"
+
+
+def _cdp_click_point(browser, point):
+    browser.execute_cdp_cmd(
+        "Input.dispatchMouseEvent",
+        {"type": "mouseMoved", "x": point["x"], "y": point["y"], "button": "none"},
+    )
+    browser.execute_cdp_cmd(
+        "Input.dispatchMouseEvent",
+        {
+            "type": "mousePressed",
+            "x": point["x"],
+            "y": point["y"],
+            "button": "left",
+            "buttons": 1,
+            "clickCount": 1,
+        },
+    )
+    browser.execute_cdp_cmd(
+        "Input.dispatchMouseEvent",
+        {
+            "type": "mouseReleased",
+            "x": point["x"],
+            "y": point["y"],
+            "button": "left",
+            "buttons": 0,
+            "clickCount": 1,
+        },
+    )
+
+
+def click_visible_panel(browser, panel_id):
+    point = wait_for_visible_panel(browser, panel_id)
+    _assert_browser_point_hits_target(browser, point, panel_id=panel_id)
+    _cdp_click_point(browser, point)
+
+
+def click_visible_selector(browser, selector):
+    point = wait_for_visible_selector(browser, selector)
+    _assert_browser_point_hits_target(browser, point, selector=selector)
+    _cdp_click_point(browser, point)
+
+
+def move_to_visible_panel(browser, panel_id):
+    point = wait_for_visible_panel(browser, panel_id)
+    browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": point["x"], "y": point["y"], "button": "none"})
+
+
+def move_to_visible_selector(browser, selector):
+    point = wait_for_visible_selector(browser, selector)
+    browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": point["x"], "y": point["y"], "button": "none"})
+
+
+def dockview_point(browser, selector, x_ratio=0.5, y_ratio=0.5):
+    return browser.execute_script(
+        """
+        const node = document.querySelector(arguments[0]);
+        if (!node) return null;
+        const rect = node.getBoundingClientRect();
+        return {
+          x: Math.round(rect.left + rect.width * arguments[1]),
+          y: Math.round(rect.top + rect.height * arguments[2]),
+          width: rect.width,
+          height: rect.height,
+          left: rect.left,
+          right: rect.right,
+          top: rect.top,
+          bottom: rect.bottom,
+        };
+        """,
+        selector,
+        x_ratio,
+        y_ratio,
+    )
+
+
+def wait_for_dockview_pointer_target(browser, selector, x_ratio=0.5, y_ratio=0.5):
+    """Resolve a Dockview pointer target only after queued native/app layout work owns its hit point."""
+    settle_browser_frames(browser, 2)
+    return WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const node = document.querySelector(arguments[0]);
+            const rect = node?.getBoundingClientRect();
+            if (!node || !rect || rect.width <= 0 || rect.height <= 0) return false;
+            if (
+              dockviewLayoutState.syncQueued
+              || dockviewLayoutState.applyingFromLayout
+              || dockviewLayoutState.adoptingFromDockview
+              || dockviewLayoutState.pendingLoadFrame
+              || dockviewLayoutState.pendingCompletionFrame
+              || pendingLayoutRenderFrame
+            ) return false;
+            const x = Math.round(rect.left + rect.width * arguments[1]);
+            const y = Math.round(rect.top + rect.height * arguments[2]);
+            const hit = document.elementFromPoint(x, y);
+            if (!(hit === node || node.contains(hit))) return false;
+            return {
+              x,
+              y,
+              width: rect.width,
+              height: rect.height,
+              left: rect.left,
+              right: rect.right,
+              top: rect.top,
+              bottom: rect.bottom,
+            };
+            """,
+            selector,
+            x_ratio,
+            y_ratio,
+        )
+    )
+
+
+@contextlib.contextmanager
+def trusted_touch_emulation(browser, *, user_agent=None):
+    """Own the trusted-touch emulation lifecycle and restore every override on exit.
+
+    One owner for enable/restore so no touch test hand-rolls its own pair and forgets to
+    undo it. Control is yielded with touch emulation on; on exit - even if the body raised -
+    touch emulation is disabled, any device-metrics override is cleared, and the user-agent
+    override is restored. Device metrics are set by the caller (they can change within one
+    body) and always cleared here.
+    """
+    original_user_agent = browser.execute_script("return navigator.userAgent")
+    if user_agent is not None:
+        browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": user_agent})
+    browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": True, "maxTouchPoints": 1})
+    try:
+        yield
+    finally:
+        browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
+        browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+        if user_agent is not None:
+            browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": original_user_agent})
+
+
+def trusted_touch_tap(browser, selector, *, timeout=3):
+    """Tap a visible selector through Chromium's trusted touch path and require its click."""
+    point = wait_for_visible_selector(browser, selector)
+    _assert_browser_point_hits_target(browser, point, selector=selector)
+    browser.execute_script(
+        """
+        window.__yolomuxTrustedTapProbe = [];
+        window.__yolomuxTrustedTapHandler = event => window.__yolomuxTrustedTapProbe.push({
+          type: event.type, trusted: event.isTrusted, pointerType: event.pointerType || '',
+        });
+        for (const type of ['pointerdown', 'pointerup', 'click']) {
+          document.addEventListener(type, window.__yolomuxTrustedTapHandler, true);
+        }
+        """
+    )
+    browser.execute_cdp_cmd(
+        "Input.dispatchTouchEvent",
+        {"type": "touchStart", "touchPoints": [{"x": point["x"], "y": point["y"], "radiusX": 1, "radiusY": 1, "force": 1, "id": 1}]},
+    )
+    try:
+        browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        events = WebDriverWait(browser, timeout).until(
+            lambda driver: driver.execute_script(
+                "return (window.__yolomuxTrustedTapProbe || []).some(event => event.type === 'click');"
+            )
+        )
+    finally:
+        events = browser.execute_script(
+            """
+            const handler = window.__yolomuxTrustedTapHandler;
+            if (handler) {
+              for (const type of ['pointerdown', 'pointerup', 'click']) {
+                document.removeEventListener(type, handler, true);
+              }
+            }
+            const probe = window.__yolomuxTrustedTapProbe || [];
+            window.__yolomuxTrustedTapProbe = null;
+            window.__yolomuxTrustedTapHandler = null;
+            return probe;
+            """
+        )
+    assert any(event["type"] == "pointerdown" and event["trusted"] and event["pointerType"] == "touch" for event in events), events
+    assert any(event["type"] == "pointerup" and event["trusted"] and event["pointerType"] == "touch" for event in events), events
+    assert any(event["type"] == "click" and event["trusted"] for event in events), events
+    return point
+
+
+def trusted_touch_long_press(browser, selector, *, until, x_ratio=0.5, y_ratio=0.5, timeout=3):
+    """Long-press the CURRENT semantic target named by ``selector`` with a trusted CDP touch.
+
+    The target is re-resolved and its hit point re-verified (``document.elementFromPoint``)
+    immediately before the press, so a legitimate repaint between resolve and touch simply
+    re-resolves instead of raising a stale-element error - there is no retained WebElement and
+    no retry/catch. ``Input.dispatchTouchEvent`` reaches the page as a trusted pointerdown with
+    ``pointerType`` ``'touch'``, which this helper asserts on every call; a synthetic
+    ``dispatchEvent`` could not, so this is the identity guarantee callers rely on. ``until`` is
+    polled while the touch is held and its result returned; the touch is always released.
+    """
+    point = wait_for_dockview_pointer_target(browser, selector, x_ratio, y_ratio)
+    browser.execute_script(
+        """
+        window.__yolomuxTrustedTouchProbe = [];
+        window.__yolomuxTrustedTouchHandler = event => window.__yolomuxTrustedTouchProbe.push({trusted: event.isTrusted, pointerType: event.pointerType || ''});
+        document.addEventListener('pointerdown', window.__yolomuxTrustedTouchHandler, true);
+        """
+    )
+    browser.execute_cdp_cmd(
+        "Input.dispatchTouchEvent",
+        {"type": "touchStart", "touchPoints": [{"x": point["x"], "y": point["y"], "radiusX": 1, "radiusY": 1, "force": 1, "id": 1}]},
+    )
+    pointerdown = []
+    try:
+        result = WebDriverWait(browser, timeout).until(until)
+    finally:
+        browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        pointerdown = browser.execute_script(
+            """
+            const handler = window.__yolomuxTrustedTouchHandler;
+            if (handler) document.removeEventListener('pointerdown', handler, true);
+            const events = window.__yolomuxTrustedTouchProbe || [];
+            window.__yolomuxTrustedTouchProbe = null;
+            window.__yolomuxTrustedTouchHandler = null;
+            return events;
+            """
+        )
+    assert any(event["trusted"] and event["pointerType"] == "touch" for event in pointerdown), pointerdown
+    return result
+
+
+def cdp_drag(browser, start, end, steps=24):
+    assert start and end
+    browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": start["x"], "y": start["y"], "button": "left", "buttons": 0, "clickCount": 1})
+    browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": start["x"], "y": start["y"], "button": "none"})
+    browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mousePressed", "x": start["x"], "y": start["y"], "button": "left", "buttons": 1, "clickCount": 1})
+    settle_browser_frames(browser)
+    for index in range(1, steps + 1):
+        x = round(start["x"] + (end["x"] - start["x"]) * index / steps)
+        y = round(start["y"] + (end["y"] - start["y"]) * index / steps)
+        browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y, "button": "left", "buttons": 1})
+        if index % 4 == 0:
+            settle_browser_frames(browser, 1)
+    settle_browser_frames(browser, 4)
+    browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": end["x"], "y": end["y"], "button": "left", "buttons": 1})
+    settle_browser_frames(browser)
+    browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": end["x"], "y": end["y"], "button": "left", "buttons": 0, "clickCount": 1})
+
+
+def cdp_drag_hold(browser, start, end, steps=24):
+    assert start and end
+    browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": start["x"], "y": start["y"], "button": "left", "buttons": 0, "clickCount": 1})
+    browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": start["x"], "y": start["y"], "button": "none"})
+    browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mousePressed", "x": start["x"], "y": start["y"], "button": "left", "buttons": 1, "clickCount": 1})
+    settle_browser_frames(browser)
+    for index in range(1, steps + 1):
+        x = round(start["x"] + (end["x"] - start["x"]) * index / steps)
+        y = round(start["y"] + (end["y"] - start["y"]) * index / steps)
+        browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y, "button": "left", "buttons": 1})
+        if index % 4 == 0:
+            settle_browser_frames(browser, 1)
+    settle_browser_frames(browser, 3)
+
+
+def cdp_release(browser, point):
+    browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": point["x"], "y": point["y"], "button": "left", "buttons": 0, "clickCount": 1})
+
+
+def dockview_invalid_drop_preview(browser):
+    return browser.execute_script(
+        """
+        const visible = node => {
+          const rect = node.getBoundingClientRect();
+          const style = getComputedStyle(node);
+          return rect.width > 0
+            && rect.height > 0
+            && style.display !== 'none'
+            && style.visibility !== 'hidden'
+            && style.opacity !== '0';
+        };
+        const previews = Array.from(document.querySelectorAll('.dv-drop-target-selection, .dv-drop-target-anchor'))
+          .filter(visible)
+          .map(node => {
+            const style = getComputedStyle(node);
+            return {
+              className: node.className,
+              borderColor: style.borderTopColor,
+              borderStyle: style.borderTopStyle,
+            };
+          });
+        const swatch = document.createElement('span');
+        swatch.style.color = 'var(--danger-border)';
+        document.body.appendChild(swatch);
+        const dangerColor = getComputedStyle(swatch).color;
+        swatch.remove();
+        return {
+          previews,
+          dangerColor,
+          invalidPreview: document.querySelector('.yomux-dockview')?.classList.contains('dockview-invalid-tab-drop-preview') || false,
+        };
+        """
+    )
+
+
+def dockview_layout_metrics(browser):
+    return browser.execute_script(
+        """
+        const tabItem = tab => tab.dataset.paneTab || '';
+        const groups = Array.from(document.querySelectorAll('.dv-groupview')).map(group => {
+          const rect = group.getBoundingClientRect();
+          return {
+            tabs: Array.from(group.querySelectorAll('.dockview-pane-tab')).map(tabItem),
+            active: group.querySelector('.dv-tab.dv-active-tab .dockview-pane-tab')?.dataset?.paneTab || '',
+            rect: {
+              left: Math.round(rect.left),
+              right: Math.round(rect.right),
+              top: Math.round(rect.top),
+              bottom: Math.round(rect.bottom),
+              width: Math.round(rect.width),
+              height: Math.round(rect.height),
+            },
+          };
+        });
+        const tabStyles = Array.from(document.querySelectorAll('.dockview-pane-tab')).map(tab => ({
+          item: tabItem(tab),
+          active: tab.closest('.dv-tab')?.classList?.contains('dv-active-tab') || false,
+          bg: getComputedStyle(tab).backgroundColor,
+          color: getComputedStyle(tab).color,
+          borderTopLeftRadius: getComputedStyle(tab).borderTopLeftRadius,
+          borderTopRightRadius: getComputedStyle(tab).borderTopRightRadius,
+          rect: (() => {
+            const rect = tab.getBoundingClientRect();
+            return {
+              left: Math.round(rect.left),
+              right: Math.round(rect.right),
+              top: Math.round(rect.top),
+              bottom: Math.round(rect.bottom),
+              width: Math.round(rect.width),
+              height: Math.round(rect.height),
+            };
+          })(),
+        }));
+        return {
+          groups,
+          tabStyles,
+          header: (() => {
+            const container = document.querySelector('.dv-tabs-and-actions-container');
+            const tabs = document.querySelector('.dv-tabs-container');
+            const allTabs = Array.from(document.querySelectorAll('.dockview-pane-tab'));
+            const activeTab = allTabs[0];
+            const containerRect = container?.getBoundingClientRect?.();
+            const activeRect = activeTab?.getBoundingClientRect?.();
+            return {
+              height: containerRect ? Math.round(containerRect.height) : 0,
+              tabsHeight: tabs ? Math.round(tabs.getBoundingClientRect().height) : 0,
+              tabsScrollWidth: tabs ? Math.round(tabs.scrollWidth) : 0,
+              tabsClientWidth: tabs ? Math.round(tabs.clientWidth) : 0,
+              tabsOverflowX: tabs ? getComputedStyle(tabs).overflowX : '',
+              tabsScrollbarWidth: tabs ? getComputedStyle(tabs).scrollbarWidth : '',
+              tabsWebkitScrollbarDisplay: tabs ? getComputedStyle(tabs, '::-webkit-scrollbar').display : '',
+              tabsWebkitScrollbarHeight: tabs ? getComputedStyle(tabs, '::-webkit-scrollbar').height : '',
+              activeTabInsideHeader: Boolean(containerRect && activeRect && activeRect.top >= containerRect.top && activeRect.bottom <= containerRect.bottom),
+              allTabsInsideHeader: Boolean(containerRect && allTabs.every(tab => {
+                const rect = tab.getBoundingClientRect();
+                return rect.top >= containerRect.top && rect.bottom <= containerRect.bottom;
+              })),
+            };
+          })(),
+          slots: JSON.parse(JSON.stringify(layoutSlots)),
+          url: location.search,
+          errors: jsDebugFailureEvents('error'),
+          rejections: jsDebugFailureEvents('rejection'),
+        };
+        """
+    )
