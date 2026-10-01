@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$repo_root/tools/startup_common.sh"
+yomux_normalize_environment
 primary_port="${YOLOMUX_PORT:-${YOLOMUX_DEFAULT_PORT:-}}"
 default_port="$primary_port"
 host="${YOLOMUX_HOST:-0.0.0.0}"
@@ -23,7 +24,7 @@ usage() {
   cat <<'EOF'
 Usage: boot.sh [--print-command|--check-assets] [--ignore-load] [--force] [--golang|--deprecated-python|--backend go] [--host HOST] [--log-dir DIR] [--dev|--no-dev] [--port PORT] [PORT ...]
 
-Restart this checkout's Go YOLOmux server. Use --deprecated-python to select the legacy Python backend. YOLOMUX_PORT or an explicit port argument selects the primary port; a no-argument launch requires YOLOMUX_DEFAULT_PORT. Non-primary ports use --dev by default.
+Restart this checkout's Go YOmux server. Use --deprecated-python to select the legacy Python backend. YOLOMUX_PORT or an explicit port argument selects the primary port; a no-argument launch requires YOLOMUX_DEFAULT_PORT. Non-primary ports use --dev by default.
 
 Operator launches always use this Unix user's machine-wide tmux server, so every session visible to `tmux list-sessions` is eligible for discovery. The launcher clears inherited nested-tmux and private-socket routing; only isolated test fixtures should set YOLOMUX_TMUX_SOCKET explicitly.
 
@@ -182,13 +183,17 @@ extra_env+=("$(yolomux_default_server_optin)")
 extra_env+=("YOLOMUX_TMUX_SOCKET=")
 if [[ "$backend" == "go" ]]; then
   go_binary="${YOLOMUX_GO_BINARY:-}"
-  if [[ -z "$go_binary" && -x "$repo_root/bazel-bin/yolomux-go" ]]; then
-    go_binary="$repo_root/bazel-bin/yolomux-go"
-  elif [[ -z "$go_binary" && -x "$repo_root/bazel-bin/cmd/yolomux-go/yolomux_go_/yolomux_go" ]]; then
+  if [[ -z "$go_binary" && -x "$repo_root/bazel-bin/yomux-go" ]]; then
+    go_binary="$repo_root/bazel-bin/yomux-go"
+  elif [[ -z "$go_binary" && -x "$repo_root/bazel-bin/cmd/yomux-go/yomux-go_/yomux-go" ]]; then
     # Bazel's go_binary rule places the executable under the rule package's
     # _runfiles wrapper directory. Keep the flat path above for older builds,
     # but recognize the canonical output produced by the current target.
-    go_binary="$repo_root/bazel-bin/cmd/yolomux-go/yolomux_go_/yolomux_go"
+    go_binary="$repo_root/bazel-bin/cmd/yomux-go/yomux-go_/yomux-go"
+  elif [[ -z "$go_binary" && -x "$repo_root/bazel-bin/cmd/yomux-go/yolomux_go_/yolomux_go" ]]; then
+    go_binary="$repo_root/bazel-bin/cmd/yomux-go/yomux_go_/yolomux_go"
+  elif [[ -z "$go_binary" && -x "$repo_root/bazel-bin/yolomux-go" ]]; then
+    go_binary="$repo_root/bazel-bin/yolomux-go"
   elif [[ -z "$go_binary" && -x "$repo_root/yolomux-go" ]]; then
     go_binary="$repo_root/yolomux-go"
   fi
@@ -231,7 +236,7 @@ build_server_args() {
   else
     server_args+=(--backend python)
   fi
-  if use_dev_mode "$port"; then
+  if [[ "$backend" == "python" ]] && use_dev_mode "$port"; then
     server_args+=(--dev)
   fi
 }
@@ -257,7 +262,7 @@ print_launch_command() {
     printf 'launchctl bootout %q 2>/dev/null || true\n' "$(yolomux_macos_launch_target "$port")"
     printf 'tmux -L %q kill-session -t %q 2>/dev/null || true\n' "$socket_name" "=$session_name"
     printf 'tmux -L %q new-session -d -s %q -c %q /bin/bash -c %q bash %q %q %q %q %q %q %q' \
-      "$socket_name" "$session_name" "$repo_root" "$launcher" "$repo_root" "$PATH" "$server_shell" "$python_bin" "$repo_root/yolomux.py" "$log_path"
+      "$socket_name" "$session_name" "$repo_root" "$launcher" "$repo_root" "$PATH" "$server_shell" "$python_bin" "$repo_root/yomux.py" "$log_path"
     for item in "${server_args[@]}"; do
       printf ' %q' "$item"
     done
@@ -281,7 +286,7 @@ shell_command_for() {
     local value="${item#*=}"
     printf ' %s=%q' "$key" "$value"
   done
-  printf ' %q %q' "$python_bin" "${repo_root}/yolomux.py"
+  printf ' %q %q' "$python_bin" "${repo_root}/yomux.py"
   for item in "${server_args[@]}"; do
     printf ' %q' "$item"
   done
@@ -320,7 +325,7 @@ acquire_port_restart_lock() {
   local lock_dir
   local owner_pid
   lock_dir="$(port_restart_lock_dir "$port")"
-  mkdir -p "$restart_lock_base" || die "cannot create YOLOmux restart-lock directory: $restart_lock_base"
+  mkdir -p "$restart_lock_base" || die "cannot create YOmux restart-lock directory: $restart_lock_base"
   if mkdir "$lock_dir" 2>/dev/null; then
     printf '%s\n' "$$" > "$lock_dir/pid"
     return 0
@@ -334,7 +339,7 @@ acquire_port_restart_lock() {
       return 0
     fi
   fi
-  die "a YOLOmux restart for port $port is already in progress"
+  die "a YOmux restart for port $port is already in progress"
 }
 
 release_port_restart_lock() {
@@ -479,7 +484,7 @@ restart_port() {
   fi
   if [[ -n "$previous_listener_pids" && "$force_start" -ne 1 ]]; then
     release_port_restart_lock "$port"
-    die "port $port already has listener(s) $previous_listener_pids; use --force to replace the existing YOLOmux instance"
+    die "port $port already has listener(s) $previous_listener_pids; use --force to replace the existing YOmux instance"
   fi
   build_server_args "$port"
   launched_pid=""

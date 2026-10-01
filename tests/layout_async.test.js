@@ -42,7 +42,7 @@ const {PassThrough} = require('node:stream');
 const {runSuite} = require('./layout_url.test.js');
 
 // The product stamps generated upload names in Pacific on purpose (pacificDateStamp() in
-// static_src/js/yolomux/99_terminal_boot.js), because the operator contract is Pacific. Deriving the
+// static_src/js/yomux/99_terminal_boot.js), because the operator contract is Pacific. Deriving the
 // expected stamp from ambient local time instead made every such assertion wrong on any runner whose
 // clock is not Pacific — the UTC test container was a different calendar day for the last 7-8 hours of
 // each Pacific day. This is the one owner of the expected stamp; keep it timezone-explicit.
@@ -359,7 +359,7 @@ async function runLayoutAsyncSuite() {
     const plainRow = api.gitDiffCommitRowForTest(api.gitDiffItemFor('/plain'), {sha: 'c'.repeat(40), short: 'c'.repeat(9), subject: 'Plain #7'});
     assert.equal(plainRow.querySelector('.git-diff-commit-sha').localName, 'span');
     assert.equal(plainRow.querySelector('.git-diff-change-link').localName, 'span');
-    const css = fs.readFileSync('static_src/css/yolomux/35_git_diff_viewer.css', 'utf8');
+    const css = fs.readFileSync('static_src/css/yomux/35_git_diff_viewer.css', 'utf8');
     const authorDrop = css.indexOf('.git-diff-commit-author');
     const dateDrop = css.indexOf('.git-diff-commit-date', authorDrop + 1);
     const changesDrop = css.indexOf('.git-diff-commit-changes', dateDrop + 1);
@@ -372,7 +372,7 @@ async function runLayoutAsyncSuite() {
       'each commit group inherits the list tracks');
     assert.match(css, /\.git-diff-worktree-status\s*\{[\s\S]*display:\s*block/,
       'the native details disclosure keeps its expanded content in normal flow');
-    const gitDiffSource = fs.readFileSync('static_src/js/yolomux/85_git_diff_viewer.js', 'utf8');
+    const gitDiffSource = fs.readFileSync('static_src/js/yomux/85_git_diff_viewer.js', 'utf8');
     assert.match(gitDiffSource, /function syncGitDiffWorktreeSummaryColumns\(list\)[\s\S]*gridTemplateColumns\s*=\s*columns/,
       'the Dirty summary copies the resolved shared grid tracks instead of sizing separate max-content columns');
     assert.match(css, /\.git-diff-commit-row\s*\{[\s\S]*grid-template-columns:\s*subgrid/,
@@ -2014,7 +2014,7 @@ async function runLayoutAsyncSuite() {
     const first = api.registerApiOperationReceiptForTest(receipt('op-ack-a'));
     const second = api.registerApiOperationReceiptForTest(receipt('op-ack-b'));
     const handled = [];
-    api.addWindowEventListenerForTest('yolomux:operation-terminal', event => handled.push(event.detail.operation.id));
+    api.addWindowEventListenerForTest('yomux:operation-terminal', event => handled.push(event.detail.operation.id));
 
     assert.equal(api.applyApiOperationTerminalForTest({
       operation: {id: first.id, cursor: {epoch: 'wrong-epoch', seq: 1}},
@@ -2172,7 +2172,7 @@ async function runLayoutAsyncSuite() {
       for (const operation of ['read', 'diff']) {
         const api = loadYolomux('', ['1']);
         let terminalEvents = 0;
-        api.addWindowEventListenerForTest('yolomux:operation-terminal', () => { terminalEvents += 1; });
+        api.addWindowEventListenerForTest('yomux:operation-terminal', () => { terminalEvents += 1; });
         api.clearJsDebugEventsForTest();
         if (timing === 'before-waiter' || timing === 'reconnect' || timing === 'native-reconnect') api.installClientEventStreamForTest();
         const operationId = `op-${timing}-${operation}`;
@@ -2910,7 +2910,7 @@ async function runLayoutAsyncSuite() {
       status: 200,
     };
     let terminalEvents = 0;
-    api.addWindowEventListenerForTest('yolomux:operation-terminal', () => { terminalEvents += 1; });
+    api.addWindowEventListenerForTest('yomux:operation-terminal', () => { terminalEvents += 1; });
     api.clearJsDebugEventsForTest();
     api.registerApiOperationReceiptForTest(receipt);
     const resultPromise = api.waitForApiOperationResultForTest(receipt, {
@@ -2951,7 +2951,7 @@ async function runLayoutAsyncSuite() {
       status: 200,
     }), true, 'an unknown wrong-epoch terminal is retained before receipt admission');
     let terminalEvents = 0;
-    api.addWindowEventListenerForTest('yolomux:operation-terminal', () => { terminalEvents += 1; });
+    api.addWindowEventListenerForTest('yomux:operation-terminal', () => { terminalEvents += 1; });
     api.clearJsDebugEventsForTest();
     api.registerApiOperationReceiptForTest(receipt);
     assert.equal(api.apiOperationTerminalForTest(operationId), null, 'receipt admission removes the mismatched retained terminal');
@@ -4073,7 +4073,7 @@ async function runLayoutAsyncSuite() {
     await api.loadAutoStatusesForTest({render: false, force: true});
     assert.equal(api.autoApproveStateForTest('1').agent_windows[0].state, 'working', 'the next bounded repair promotes the live Codex pane to working');
     assert.deepStrictEqual(requests.map(url => url.split('?')[0]), ['/api/activity', '/api/activity'], 'Go avoids the unsupported auto-approve probe on both refreshes');
-    const runtimeSource = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
+    const runtimeSource = fs.readFileSync('static_src/js/yomux/50_editor_settings_runtime.js', 'utf8');
     assert.match(runtimeSource, /clientEventTransportState\.connected === true[\s\S]*goAgentStatusUsesActivityFallback/, 'Go keeps the fallback interval active while SSE is connected');
   });
 
@@ -4356,7 +4356,7 @@ async function runLayoutAsyncSuite() {
   });
 
   {
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
+    const source = fs.readFileSync('static/yomux.js', 'utf8');
     assert.equal((source.match(/const fileExplorerFsResourceRecords = new Map\(\);/g) || []).length, 1, 'Finder list/info resource state has one record-map owner');
     for (const retired of ['fileExplorerDirListingCache', 'fileExplorerDirListingInflight', 'fileExplorerPathInfoCache', 'fileExplorerPathInfoInflight']) {
       assert.ok(!source.includes(retired), `${retired} retired after list/info state moved into one resource record`);
@@ -4761,6 +4761,26 @@ async function runLayoutAsyncSuite() {
     assert.equal(requests.filter(url => url === '/api/auto-approve').length - httpBefore, 0, 'a revision-only patch performs no HTTP refetch');
   });
 
+  test('auto-approve patches retain topology generation when the server omits its unchanged value', () => {
+    const api = loadYolomux('', ['1']);
+    api.applyAutoApprovePayloadForTest({
+      topology_generation: 1,
+      session_order: ['1'],
+      sessions: {'1': {target: '1', enabled: false}},
+    }, {render: false});
+    const result = api.applyAutoApprovePayloadForTest({
+      patch: true,
+      collection: 'sessions',
+      changes: {'2': {target: '2', enabled: true}},
+      fields: {session_order: ['1', '2']},
+      removed_keys: [],
+      removed_fields: [],
+    }, {render: false});
+    assert.equal(result.applied, true, 'an unchanged topology generation omitted from a sparse patch does not make it stale');
+    assert.deepStrictEqual(canonical(api.sessionsForTest()), ['1', '2']);
+    assert.equal(api.autoApproveStateForTest('2').enabled, true);
+  });
+
   test('auto-approve patches retain changed-session scope while stamping every revision', () => {
     const api = loadYolomux('', ['1', '2']);
     api.applyAutoApprovePayloadForTest({agent_window_snapshot_revision: 10, session_order: ['1', '2'], sessions: {'1': {target: '1', agent_windows: [{kind: 'codex', window_index: 0}]}, '2': {target: '2'}}}, {render: false});
@@ -4773,7 +4793,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('client-event queue overflow maps every dropped resource to a scoped repair owner', () => {
-    const source = fs.readFileSync('static_src/js/yolomux/99_client_event_transport.js', 'utf8');
+    const source = fs.readFileSync('static_src/js/yomux/99_client_event_transport.js', 'utf8');
     assert.ok(/function clientEventRepairChannels\(resources = \[\]\)[\s\S]*fs_changed[\s\S]*channels\.add\('files'\)[\s\S]*event_log_changed[\s\S]*channels\.add\('events'\)[\s\S]*return channels/.test(source), 'overflow maps files/event logs to their own repair channels');
     assert.ok(/function handleClientPushEvent\(type, payload = \{\}, envelope = \{\}\)[\s\S]*repairClientEventResources\(repairResources, envelope\)[\s\S]*clientEventEnvelopeIsCurrent\(envelope, payload\)/.test(source), 'the delivered overflow metadata is consumed before stale-frame filtering');
   });
@@ -4797,7 +4817,7 @@ async function runLayoutAsyncSuite() {
     await flushAsyncWork();
     assert.deepStrictEqual(requests, ['/api/events?session=1&limit=120'], 'one session invalidation fetches only its open event log');
     assert.equal(api.eventLogScrollTopForTest('1'), 57, 'a log invalidation preserves the reader position in the bounded event page');
-    const runtimeSource = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
+    const runtimeSource = fs.readFileSync('static_src/js/yomux/50_editor_settings_runtime.js', 'utf8');
     assert.ok(!runtimeSource.includes("resetRuntimeInterval('events', refreshOpenEventLogs"), 'the normal event-log browser interval is retired');
     assert.ok(/resetRuntimeInterval\('events-fallback',[\s\S]*clientEventTransportState\.connected === true[\s\S]*refreshOpenEventLogs/.test(runtimeSource), 'event logs retain a disconnected-only repair path');
   });
@@ -4853,7 +4873,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('frontend request and transport records keep retired parallel globals absent', () => {
-    const source = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
+    const source = fs.readFileSync('static_src/js/yomux/00_bootstrap_state.js', 'utf8');
     for (const name of [
       'activitySummaryPayload', 'activitySummaryRefreshing', 'activitySummaryLastRefreshTs', 'activitySummaryGuard',
       'infoPanelRenderPending', 'infoPanelLastRenderSignature', 'infoPanelLastRenderHtml',
@@ -6393,7 +6413,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('data request records keep retired parallel globals absent', () => {
-    const source = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
+    const source = fs.readFileSync('static_src/js/yomux/00_bootstrap_state.js', 'utf8');
     assert.equal(/\btranscriptMeta\b/.test(source), false, 'transcriptMeta remains retired');
     assert.equal(/\byoagentJobs\b/.test(source), false, 'yoagentJobs remains retired');
     for (const name of ['yoagentMessages', 'yoagentPendingWaits', 'yoagentConversationLoaded', 'yoagentConversationLoading', 'yoagentConversationPath', 'yoagentConversationDisplayPath', 'yoagentStreamingMessages']) {
@@ -6489,7 +6509,7 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.fileExplorerSyncTargetRecordForTest('1\x1f/repo/a'), null, 'bounded eviction removes the complete old target record');
     assert.equal(api.fileExplorerSyncTargetRecordKeysForTest().length, api.fileExplorerMemoryCacheLimitForTest, 'combined target cache keeps the shared bound');
 
-    const source = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
+    const source = fs.readFileSync('static_src/js/yomux/00_bootstrap_state.js', 'utf8');
     assert.equal(source.includes('fileExplorerExpandedBySyncTarget'), false, 'retired expansion map stays absent');
     assert.equal(source.includes('fileExplorerSyncManualCollapsedByTarget'), false, 'retired manual-collapse map stays absent');
     assert.ok(source.includes('const fileExplorerSyncTargetRecords = new Map()'), 'one target-record map remains');
@@ -6798,7 +6818,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('Finder Sync cold and stale paths share bounded parallel fetch and deferred revalidation owners', () => {
-    const source = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
+    const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
     const syncOwner = source.slice(source.indexOf('async function syncFileExplorerRootToPlan('), source.indexOf('async function syncFileExplorerToActiveTab('));
     assert.ok(/function fetchFileExplorerSyncListings[\s\S]*workerCount = Math\.min\(8, queue\.length\)[\s\S]*Promise\.all\(Array\.from/.test(source), 'cold directory listings use one bounded parallel worker owner');
     assert.ok(/function scheduleFileExplorerSyncRevalidation[\s\S]*requestAnimationFrame[\s\S]*fresh: true, force: true/.test(source), 'stale-while-revalidate starts only after the cache-first frame and bypasses background suppression');
@@ -6807,8 +6827,8 @@ async function runLayoutAsyncSuite() {
   });
 
   test('Finder filesystem batches carry bounded caller attribution without path metadata', () => {
-    const source = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
-    const actionsSource = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
+    const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+    const actionsSource = fs.readFileSync('static_src/js/yomux/45_file_explorer_actions.js', 'utf8');
     assert.ok(source.includes('function fileExplorerFsBatchTrigger(options = {})'), 'the shared batch owner, not individual callers, normalizes its trigger enum');
     assert.ok(source.includes('function fileExplorerFsBatchClientMetadata()'), 'batch requests carry an opaque client revision and scope');
     assert.ok(source.includes('watch_token: watchToken.slice(0, 128)'), 'batch product identity follows the existing filesystem watch token so ready bytes retire after invalidation');
@@ -6937,8 +6957,8 @@ async function runLayoutAsyncSuite() {
   });
 
   test('compact watchd push revisions cannot overwrite the watch-diff cursor', () => {
-    const bootstrap = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
-    const source = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
+    const bootstrap = fs.readFileSync('static_src/js/yomux/00_bootstrap_state.js', 'utf8');
+    const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
     const owner = source.slice(source.indexOf('async function refreshFileExplorerFromPush('), source.indexOf('function fileExplorerWatchPayloadEntries('));
     assert.ok(bootstrap.includes("let fileExplorerFilesystemWatchToken = '';\nlet fileExplorerFilesystemPushToken = '';"), 'push revisions and watch-diff cursors have separate state owners');
     assert.ok(owner.includes('if (fileExplorerFilesystemPushToken === nextToken) return;'), 'a repeated watchd push revision cannot start another watch-diff operation');
@@ -7186,7 +7206,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('UI transaction records keep retired parallel globals absent', () => {
-    const source = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
+    const source = fs.readFileSync('static_src/js/yomux/00_bootstrap_state.js', 'utf8');
     for (const name of [
       'fileExplorerSyncPathInFlight', 'fileExplorerLastAppliedSyncPlanKey', 'fileExplorerSyncGeneration',
       'tabberActivityRequestGeneration', 'tabberActivityAppliedRequestGeneration', 'tabberActivityLoaded', 'tabberActivityFetchPromise',
@@ -7911,7 +7931,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('UI shell and drag records keep retired parallel globals absent', () => {
-    const source = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
+    const source = fs.readFileSync('static_src/js/yomux/00_bootstrap_state.js', 'utf8');
     for (const name of [
       'layoutUrlStateFromQuery', 'layoutUrlStateApplied', 'layoutUrlStateRefreshTimer',
       'fileExplorerSessionFilesPayload', 'fileExplorerSessionFilesPayloadSignature', 'fileExplorerSessionFilesLoading', 'fileExplorerSessionFilesGuard',
@@ -8609,8 +8629,8 @@ async function runLayoutAsyncSuite() {
     });
 
     test('watch-root synchronization: retired parallel globals stay absent', () => {
-      const src = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
-      const transport = fs.readFileSync('static_src/js/yolomux/99_client_event_transport.js', 'utf8');
+      const src = fs.readFileSync('static_src/js/yomux/00_bootstrap_state.js', 'utf8');
+      const transport = fs.readFileSync('static_src/js/yomux/99_client_event_transport.js', 'utf8');
       for (const name of ['serverWatchRootsSignature', 'serverWatchRootsInFlight', 'serverWatchRootsSyncedAt', 'serverWatchRootsTimer', 'serverWatchRootsPendingOptions']) {
         assert.equal(src.includes(name), false, `${name} remains retired`);
       }
@@ -8622,7 +8642,7 @@ async function runLayoutAsyncSuite() {
         assert.ok(transport.includes(owner), `${owner} supplies an explicit watch-root force owner`);
       }
       assert.ok(transport.includes('handleClientPushEventNowByType(type, payload, envelope)'), 'queued roots-changed delivery preserves its source-generation envelope');
-      assert.equal(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8').includes("'server-watch-renew'"), false, 'the browser renewal interval is retired in favor of SSE lifecycle cleanup');
+      assert.equal(fs.readFileSync('static_src/js/yomux/50_editor_settings_runtime.js', 'utf8').includes("'server-watch-renew'"), false, 'the browser renewal interval is retired in favor of SSE lifecycle cleanup');
     });
 
     await testAsync('hidden Finder/Differ refresh work is skipped', async () => {
@@ -10508,7 +10528,7 @@ async function runLayoutAsyncSuite() {
     // DOIT.78 (78.6): invariant guard — paste and drop must route through the ONE shared image-payload
     // detector so a new entry point can't reintroduce a divergent leak path.
     {
-      const imgSource = fs.readFileSync('static/yolomux.js', 'utf8');
+      const imgSource = fs.readFileSync('static/yomux.js', 'utf8');
       assert.ok(/scope\.ownEvent\('paste', document, 'paste', async event => \{\s*if \(!dataTransferHasImagePayload\(event\.clipboardData\)\) return;[\s\S]*markdownEditorPasteTarget\(event\)/.test(imgSource), '78.6: the document paste handler claims via the shared dataTransferHasImagePayload detector before editor or terminal routing');
       assert.ok(imgSource.includes('function hasUploadableDrag(event)') && /addEventListener\('drop', async event => \{\s*if \(!hasUploadableDrag\(event\)\) return;/.test(imgSource), '78.6: the file-drop handler claims via hasUploadableDrag (file OR image rich-data)');
       assert.ok(imgSource.includes('function dataTransferImageFiles(dt)') && imgSource.includes('function dataTransferHasImagePayload(dt)'), '78.6: the shared image-payload parent exists');
@@ -11283,7 +11303,7 @@ async function runLayoutAsyncSuite() {
       const chatBodies = calls.filter(call => call.url === '/api/yoagent/chat').map(call => JSON.parse(call.body));
       assert.deepStrictEqual(chatBodies.map(body => body.message), ['first', 'second'], 'queued asks run FIFO after the active turn completes');
       assert.ok(chatBodies.every(body => body.request_id && body.stream_id && body.request_id === body.stream_id), 'chat sends carry one request/stream id so local thinking and backend deltas update the same row');
-      const source = fs.readFileSync('static/yolomux.js', 'utf8');
+      const source = fs.readFileSync('static/yomux.js', 'utf8');
       assert.ok(/new AbortController\(\)|typeof AbortController === 'function'/.test(source) && /signal:\s*controller\?\.signal/.test(source), 'active chat fetch uses AbortController when the browser provides it');
     }
 
@@ -11837,7 +11857,7 @@ async function runLayoutAsyncSuite() {
       let actionButton = null;
       api.setShowToastForTest((title, lines, options = {}) => {
         toasts.push({title, lines: Array.isArray(lines) ? lines : [lines]});
-        if (title === 'YOLOmux update available') {
+        if (title === 'YOmux update available') {
           actionButton = options.actions[0];
           owner.appendChild(actionButton);
           return owner;
@@ -11870,7 +11890,7 @@ async function runLayoutAsyncSuite() {
       await flushAsyncWork();
       assert.deepStrictEqual(canonical(fetchCalls[0]), {method: 'POST', url: '/api/self-update'}, 'self-update posts immediately after confirmation');
       assert.ok(toasts.some(item => item.title === 'Installing update...'), 'successful restarting update shows installing status');
-      assert.ok(toasts.some(item => item.lines[0] === 'YOLOmux was updated and is restarting now.'), 'self-update resolves the server descriptor through the active locale instead of showing its raw fallback');
+      assert.ok(toasts.some(item => item.lines[0] === 'YOmux was updated and is restarting now.'), 'self-update resolves the server descriptor through the active locale instead of showing its raw fallback');
       assert.deepStrictEqual(canonical(api.selfUpdateReloadStateForTest()), {
         attempts: 0,
         deferredToastShown: false,
@@ -11955,11 +11975,11 @@ async function runLayoutAsyncSuite() {
       for (let attempt = 0; attempt < 120; attempt += 1) await api.pollSelfUpdateReloadForTest();
       assert.equal(api.selfUpdateReloadStateForTest().pending, false, 'the complete attempt stops at the retry bound');
       assert.equal(api.selfUpdateReloadStateForTest().attempts, 120, 'the retry count belongs to the stopped attempt');
-      assert.ok(toasts.some(item => item.lines[0] === 'Update installed, but YOLOmux did not answer after restart. Reload when it is reachable.'), 'terminal failure reports the bounded timeout');
+      assert.ok(toasts.some(item => item.lines[0] === 'Update installed, but YOmux did not answer after restart. Reload when it is reachable.'), 'terminal failure reports the bounded timeout');
     });
 
     test('self-update: retired parallel reload scalars stay absent', () => {
-      const src = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+      const src = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
       for (const name of ['selfUpdateReloadPending', 'selfUpdateReloadTarget', 'selfUpdateReloadAttempts', 'selfUpdateReloadTimer', 'selfUpdateReloadDeferredToastShown']) {
         assert.equal(src.includes(name), false, `${name} remains retired`);
       }
@@ -11967,7 +11987,7 @@ async function runLayoutAsyncSuite() {
     });
 
     test('self-update: topbar update badge + dryrun wiring present', () => {
-      const src = fs.readFileSync('static/yolomux.js', 'utf8');
+      const src = fs.readFileSync('static/yomux.js', 'utf8');
       assert.ok(/function applyUpdateAvailable\(/.test(src), 'applyUpdateAvailable present');
       assert.ok(/function checkForUpdateOnce\(/.test(src), 'checkForUpdateOnce present');
       assert.ok(/function triggerSelfUpdate\(/.test(src), 'triggerSelfUpdate present');
@@ -12043,12 +12063,12 @@ async function runLayoutAsyncSuite() {
     });
 
     test('copy affordances route through the shared feedback contract', () => {
-      const core = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
-      const files = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
-      const terminalBoot = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
-      const clipboardSourceFiles = fs.readdirSync('static_src/js/yolomux').filter(name => name.endsWith('.js')).sort();
-      const rawTextWriterFiles = clipboardSourceFiles.filter(name => fs.readFileSync(`static_src/js/yolomux/${name}`, 'utf8').includes('copyTextToClipboard('));
-      const clipboardItemFiles = clipboardSourceFiles.filter(name => fs.readFileSync(`static_src/js/yolomux/${name}`, 'utf8').includes('ClipboardItem'));
+      const core = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+      const files = fs.readFileSync('static_src/js/yomux/45_file_explorer_actions.js', 'utf8');
+      const terminalBoot = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
+      const clipboardSourceFiles = fs.readdirSync('static_src/js/yomux').filter(name => name.endsWith('.js')).sort();
+      const rawTextWriterFiles = clipboardSourceFiles.filter(name => fs.readFileSync(`static_src/js/yomux/${name}`, 'utf8').includes('copyTextToClipboard('));
+      const clipboardItemFiles = clipboardSourceFiles.filter(name => fs.readFileSync(`static_src/js/yomux/${name}`, 'utf8').includes('ClipboardItem'));
       assert.match(core, /function copyTextWithFeedback\(text, options = \{\}\)[\s\S]*copyTextToClipboard\(text\)\.then\([\s\S]*showCopyFeedback\(options\)/, 'one parent owns text-copy success and failure feedback');
       assert.deepEqual(rawTextWriterFiles, ['10_core_utils.js'], 'the raw text writer stays private to the shared feedback parent');
       assert.deepEqual(clipboardItemFiles, ['10_core_utils.js', '45_file_explorer_actions.js', '88_markdown_preview.js'], 'the ClipboardItem inventory is explicit and small enough to enforce');

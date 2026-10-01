@@ -18,7 +18,7 @@ func RepoRoot(t testing.TB) string {
 	if root, ok := rootFromCheckout(); ok {
 		return root
 	}
-	t.Fatalf("could not locate the YOLOmux repository in Bazel runfiles or the checkout")
+	t.Fatalf("could not locate the YOmux repository in Bazel runfiles or the checkout")
 	return ""
 }
 
@@ -38,7 +38,7 @@ func RepoPath(t testing.TB, relative string) string {
 }
 
 func rootFromRunfiles() (string, bool) {
-	const marker = "yolomux_lib/__init__.py"
+	const marker = "yomux_lib/__init__.py"
 	baseDirectories := make([]string, 0, 4)
 	for _, name := range []string{"RUNFILES_DIR", "TEST_SRCDIR"} {
 		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
@@ -82,7 +82,7 @@ func rootFromCheckout() (string, bool) {
 		return "", false
 	}
 	for directory := filepath.Clean(workingDirectory); ; directory = filepath.Dir(directory) {
-		if _, err := os.Stat(filepath.Join(directory, "yolomux_lib", "__init__.py")); err == nil {
+		if _, err := os.Stat(filepath.Join(directory, "yomux_lib", "__init__.py")); err == nil {
 			return directory, true
 		}
 		parent := filepath.Dir(directory)

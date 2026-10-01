@@ -22,9 +22,9 @@ from tests.browser_helpers.browser_console import read_browser_console_log
 from tests.gate_harness import assert_fixture_client_event_demand_claimed
 from tests.gate_harness import claim_fixture_client_event_demand
 from tools.static_build import build_asset
-from yolomux_lib.local_services import client as local_service_client_module
-from yolomux_lib.server_logs import ServerLogRing
-from yolomux_lib.watchd_client import WatchClient
+from yomux_lib.local_services import client as local_service_client_module
+from yomux_lib.server_logs import ServerLogRing
+from yomux_lib.watchd_client import WatchClient
 
 
 def test_browser_wait_timeout_has_one_xdist_only_floor(): browser_harness_lifecycle.assert_browser_wait_timeout_has_one_xdist_only_floor()
@@ -103,7 +103,7 @@ def test_light_terminal_preserves_ansi_emphasis_hierarchy(browser, tmp_path):
           <head>
             <meta charset="utf-8">
             <link rel="stylesheet" href="/static/vendor/xterm.css">
-            <link rel="stylesheet" href="/static/yolomux.css">
+            <link rel="stylesheet" href="/static/yomux.css">
             <style>
               body { margin: 0; background: #ffffff; }
               .terminal { width: 1000px; height: 320px; background: #ffffff; }
@@ -119,7 +119,7 @@ def test_light_terminal_preserves_ansi_emphasis_hierarchy(browser, tmp_path):
                 cols: 100,
                 rows: 12,
                 cursorBlink: false,
-                fontFamily: '"YOLOmux Mono", monospace',
+                fontFamily: '"YOmux Mono", monospace',
                 fontSize: 20,
                 minimumContrastRatio: 4.5,
                 theme: {
@@ -457,7 +457,7 @@ def test_tab_minimize_spacing_keeps_its_hit_target_and_gives_titles_the_compact_
             f"""
             <section class="tab-spacing-fixture">
               <div class="pane-tab classic-tab" role="button">{tab_inner}</div>
-              <div class="yolomux-dockview"><div class="dv-tab"><div class="pane-tab dockview-pane-tab" role="button">{tab_inner}</div></div></div>
+              <div class="yomux-dockview"><div class="dv-tab"><div class="pane-tab dockview-pane-tab" role="button">{tab_inner}</div></div></div>
             </section>
             """,
             extra_css=".tab-spacing-fixture { width: 360px; } .tab-spacing-fixture .pane-tab { margin-block: 8px; }",
@@ -2783,7 +2783,7 @@ def test_current_stats_resolution_switch_keeps_old_chart_through_pending_watchdo
           jsDebugStatsPollState.firstSampleReceived = false;
           debugRuntimeState.graphRangeSeconds = rangeSeconds;
           debugRuntimeState.graphResolutionOverrideSeconds = 60;
-          const client = YOLOmuxStatsCurrent.createBrowserClient({
+          const client = YOmuxStatsCurrent.createBrowserClient({
             fetch: fixtureFetch,
             EventSource: FixtureEventSource,
             clientId: 'retained-panel-pending-fixture',
@@ -3056,7 +3056,7 @@ def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(bro
     register_browser_new_document_script(
         browser,
         """
-        Object.defineProperty(globalThis, 'YOLOmuxStatsCurrent', {
+        Object.defineProperty(globalThis, 'YOmuxStatsCurrent', {
           configurable: true,
           get() { return null; },
           set(value) { globalThis.__logsFixtureStatsCurrent = value; },
@@ -3083,7 +3083,7 @@ def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(bro
         const originalApiFetchJsonQuiet = apiFetchJsonQuiet;
         const originalRunDebugCopy = runDebugCopy;
         const originalDateNow = Date.now;
-        const originalStatsCurrent = globalThis.YOLOmuxStatsCurrent;
+        const originalStatsCurrent = globalThis.YOmuxStatsCurrent;
         const statsCurrentModule = globalThis.__logsFixtureStatsCurrent;
         const style = document.createElement('style');
         style.textContent = `
@@ -3270,7 +3270,7 @@ def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(bro
           requests.logs = 0;
           clearJsDebugEvents();
           if (typeof statsCurrentModule?.createController !== 'function') {
-            throw new Error('fixture did not retain the YOLOmuxStatsCurrent module');
+            throw new Error('fixture did not retain the YOmuxStatsCurrent module');
           }
           let statsNow = 0;
           let nextStatsTimerId = 1;
@@ -3606,7 +3606,7 @@ def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(bro
           runDebugCopy = originalRunDebugCopy;
           Date.now = originalDateNow;
           applyLayoutSlots(layoutFromSessionList(['1']), {focusSession: '1', prune: false, forceFull: true});
-          globalThis.YOLOmuxStatsCurrent = originalStatsCurrent;
+          globalThis.YOmuxStatsCurrent = originalStatsCurrent;
           style.remove();
           clearRuntimeInterval('debug-system');
           clearRuntimeInterval('debug-logs');
@@ -3829,8 +3829,8 @@ def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(bro
     wait_for_live_runtime_bundle(browser, timeout=8, expected_url=reload_url)
     browser.execute_script(
         """
-        window.__logsReloadOriginalStatsCurrent = globalThis.YOLOmuxStatsCurrent;
-        globalThis.YOLOmuxStatsCurrent = null;
+        window.__logsReloadOriginalStatsCurrent = globalThis.YOmuxStatsCurrent;
+        globalThis.YOmuxStatsCurrent = null;
         applyLayoutSlots(layoutFromSessionList([debugPaneItemId]), {
           focusSession: debugPaneItemId,
           prune: false,
@@ -3859,7 +3859,7 @@ def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(bro
     browser.execute_script(
         """
         applyLayoutSlots(layoutFromSessionList(['1']), {focusSession: '1', prune: false, forceFull: true});
-        globalThis.YOLOmuxStatsCurrent = window.__logsReloadOriginalStatsCurrent;
+        globalThis.YOmuxStatsCurrent = window.__logsReloadOriginalStatsCurrent;
         """
     )
 
@@ -3893,7 +3893,7 @@ def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(bro
     persisted_payload["logs"] = [dict(entry) for entry in persisted_payload["logs"] for _ in range(2)]
     browser.execute_script(
         """
-        globalThis.YOLOmuxStatsCurrent = null;
+        globalThis.YOmuxStatsCurrent = null;
         applyLayoutSlots(layoutFromSessionList([debugPaneItemId]), {
           focusSession: debugPaneItemId,
           prune: false,
@@ -3953,7 +3953,7 @@ def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(bro
         const done = arguments[arguments.length - 1];
         const payload = arguments[0];
         (async () => {
-          globalThis.YOLOmuxStatsCurrent = null;
+          globalThis.YOmuxStatsCurrent = null;
           applyLayoutSlots(layoutFromSessionList([debugPaneItemId]), {
             focusSession: debugPaneItemId,
             prune: false,
@@ -5204,7 +5204,7 @@ def test_recreated_working_status_ball_keeps_wall_clock_pulse_phase(browser, tmp
         const done = arguments[arguments.length - 1];
         (async () => {
           const duration = 1550;
-          globalThis.yolomuxEnableBroadStatusPulse = false;
+          globalThis.yomuxEnableBroadStatusPulse = false;
           agentStatusPulsePeriodMs = duration;
           document.documentElement.style.setProperty('--pulse-duration', `${duration / 1000}s`);
           document.documentElement.style.setProperty('--status-pulse-step-count', '12');
@@ -6117,7 +6117,7 @@ def test_yoagent_recent_agents_stay_inside_narrow_vertical_side_pane(browser, tm
         page.name,
         page_html(
             """
-      <div class="yolomux-dockview" style="width:320px; height:640px;">
+      <div class="yomux-dockview" style="width:320px; height:640px;">
         <section id="side" class="dv-groupview" data-pane-role="side" style="width:320px; height:640px;">
           <div id="history" class="yoagent-chat-history" style="width:100%; height:100%; overflow-y:auto;">
             <article id="message" class="conversation-message assistant yoagent-message yoagent-recent-agents-message">
@@ -6713,7 +6713,7 @@ def test_regular_and_compact_tabs_share_interaction_and_active_child_paint(brows
         <button id="compact-active" type="button" class="tmux-pane-tab-token tmux-pane-tab-token-action active"><span class="session-button-name">compact active</span></button>
         <button id="missing-active" type="button" class="pane-tab file-missing active"><span class="session-button-name">missing active</span></button>
       </article>
-      <div class="yolomux-dockview">
+      <div class="yomux-dockview">
         <div class="dv-tab dv-active-tab"><button id="dock-active" type="button" class="pane-tab dockview-pane-tab"><span class="session-button-name">dock active</span></button></div>
       </div>
       <article class="panel" style="position:static;height:auto;width:760px;"><button id="plain-inactive" type="button" class="pane-tab">plain</button></article>
@@ -7790,7 +7790,7 @@ def test_touch_compact_topbar_keeps_menu_and_status_groups_separate(browser, tmp
         page.name,
         page_html("""
       <header id="touch-topbar" class="topbar">
-        <div class="brand-cell"><div class="brand title brand-title"><span class="brand-yolo">YO</span><span>LO</span><span>mux</span><span class="brand-version"> 0.5.24</span></div></div>
+        <div class="brand-cell"><div class="brand title brand-title"><span class="brand-mark">Y</span><span class="brand-second">O</span><span>mux</span><span class="brand-version"> 0.5.24</span></div></div>
         <div id="sessionButtons" class="app-menu-area">
           <nav class="app-menu-bar"><div id="touch-menu" class="app-menu"><button class="app-menu-button">Menus</button></div></nav>
           <div id="touch-nav" class="topbar-nav"><button class="topbar-nav-button">←</button><button class="topbar-nav-button">→</button></div>
@@ -7887,7 +7887,7 @@ def test_compact_activity_uses_desktop_right_rail_before_optional_icons(browser,
         page.name,
         page_html("""
       <header id="topbar" class="topbar">
-        <div class="brand-cell"><div class="brand title brand-title"><span class="brand-yolo">YO</span><span>LOmux</span></div></div>
+        <div class="brand-cell"><div class="brand title brand-title"><span class="brand-mark">Y</span><span class="brand-second">Omux</span></div></div>
         <div id="sessionButtons" class="app-menu-area">
           <nav class="app-menu-bar">
             <div class="app-menu"><button class="app-menu-button">File</button></div><div class="app-menu"><button class="app-menu-button">View</button></div><div class="app-menu"><button class="app-menu-button">tmux</button></div><div class="app-menu"><button class="app-menu-button">Tabs</button></div><div class="app-menu"><button class="app-menu-button">Help</button></div>
@@ -7951,7 +7951,7 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
           </div>
         </div>
       </div>
-    """, extra_css=f"""{build_asset("yolomux.css")}
+    """, extra_css=f"""{build_asset("yomux.css")}
 body {{ margin:0; display:block; min-height:0; }} #pane {{ width:320px; height:240px; }}"""))
     metrics = browser.execute_script("""
       const box = node => { const r = node.getBoundingClientRect(); return {left:r.left,top:r.top,right:r.right,bottom:r.bottom,width:r.width,height:r.height}; };
@@ -7979,13 +7979,13 @@ body {{ margin:0; display:block; min-height:0; }} #pane {{ width:320px; height:2
 
 
 def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_path):
-    source_bundle = serve_repo_fixture_page("yolomux-keyboard-source.js", build_asset("yolomux.js"))
+    source_bundle = serve_repo_fixture_page("yolomux-keyboard-source.js", build_asset("yomux.js"))
     original_user_agent = browser.execute_script("return navigator.userAgent")
     browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": "Mozilla/5.0 (iPad; CPU OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1"})
     browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": True})
     browser.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {"width": 834, "height": 1112, "deviceScaleFactor": 1, "mobile": True})
     try:
-        load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=slot1&tabs=slot1:1", sessions=["1"], terminal_css=f'{build_asset("yolomux.css")}\n.terminal {{ width:100%; height:100%; }}', grid_width=834, grid_height=1048, runtime_script_uri=fixture_page_url(source_bundle))
+        load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=slot1&tabs=slot1:1", sessions=["1"], terminal_css=f'{build_asset("yomux.css")}\n.terminal {{ width:100%; height:100%; }}', grid_width=834, grid_height=1048, runtime_script_uri=fixture_page_url(source_bundle))
         WebDriverWait(browser, 8).until(lambda driver: driver.execute_script("return typeof terminalMobileAccessoryState === 'function' && document.querySelector('[data-terminal-mobile-toggle=\"1\"]') !== null"))
         metrics = browser.execute_async_script("""
           const done=arguments[arguments.length-1],launcher=document.querySelector('[data-terminal-mobile-toggle="1"]'),bar=document.querySelector('[data-terminal-mobile-keybar="1"]');
@@ -8035,13 +8035,13 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
 
 
 def test_live_touch_terminal_keeps_two_fixed_pages_and_closes(browser, tmp_path):
-    source_bundle = serve_repo_fixture_page("yolomux-keyboard-pages-source.js", build_asset("yolomux.js"))
+    source_bundle = serve_repo_fixture_page("yolomux-keyboard-pages-source.js", build_asset("yomux.js"))
     original_user_agent = browser.execute_script("return navigator.userAgent")
     browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": "Mozilla/5.0 (iPad; CPU OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1"})
     browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": True})
     browser.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {"width": 390, "height": 480, "deviceScaleFactor": 1, "mobile": True})
     try:
-        load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=slot1&tabs=slot1:1", sessions=["1"], terminal_css=f'{build_asset("yolomux.css")}\n.terminal {{ width:100%; height:100%; }}', grid_width=390, grid_height=300, runtime_script_uri=fixture_page_url(source_bundle))
+        load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=slot1&tabs=slot1:1", sessions=["1"], terminal_css=f'{build_asset("yomux.css")}\n.terminal {{ width:100%; height:100%; }}', grid_width=390, grid_height=300, runtime_script_uri=fixture_page_url(source_bundle))
         WebDriverWait(browser, 8).until(lambda driver: driver.execute_script("return typeof terminalMobileAccessoryState === 'function' && document.querySelector('[data-terminal-mobile-toggle=\"1\"]') !== null"))
         metrics = browser.execute_async_script("""
           const done=arguments[arguments.length-1], launcher=document.querySelector('[data-terminal-mobile-toggle="1"]'), bar=document.querySelector('[data-terminal-mobile-keybar="1"]');
@@ -8217,7 +8217,7 @@ def test_phone_single_pane_uses_one_pixel_active_ring_without_changing_tablets(b
         page.parent,
         page.name,
         page_html("""
-      <div class="yolomux-dockview" id="dockview">
+      <div class="yomux-dockview" id="dockview">
         <div class="dv-groupview" id="group"><article class="panel active-pane" id="panel"></article></div>
       </div>
     """, extra_css="""
@@ -8255,7 +8255,7 @@ def test_topbar_menu_search_action_priority_matrix(browser, tmp_path):
         page.name,
         page_html("""
       <header id="matrix-topbar" class="topbar">
-        <div class="brand-cell"><div class="brand title brand-title"><span class="brand-yolo">YO</span><span class="brand-lo">LO</span><span>mux</span><span class="brand-version"> 0.5.23</span></div></div>
+        <div class="brand-cell"><div class="brand title brand-title"><span class="brand-mark">Y</span><span class="brand-second">O</span><span>mux</span><span class="brand-version"> 0.5.23</span></div></div>
         <div id="matrix-session-buttons" class="app-menu-area">
           <nav class="app-menu-bar">
             <div class="app-menu"><button id="matrix-file" class="app-menu-button">File</button></div>
@@ -8417,7 +8417,7 @@ def test_touch_pane_minimize_uses_a_large_one_tap_hit_target(browser, tmp_path):
             page.parent,
             page.name,
             page_html("""
-          <div class="yolomux-dockview"><div class="dockview-pane-header-actions"><div class="tabs">
+          <div class="yomux-dockview"><div class="dockview-pane-header-actions"><div class="tabs">
             <button id="touch-minimize" class="tab pane-minimize pc-window-control pc-minimize" type="button" data-pane-minimize="__finder__"></button>
           </div></div></div>
         """, extra_css="body { margin: 0; padding: 12px; display: block; height: auto; min-height: 0; }"),
@@ -8589,7 +8589,7 @@ def test_full_mobile_app_and_compact_menu_respect_nonzero_safe_area_insets(brows
             page.name,
             page_html("""
           <div id="appRoot" class="app-root">
-            <header id="safe-topbar" class="topbar"><span>YOLOmux</span></header>
+            <header id="safe-topbar" class="topbar"><span>YOmux</span></header>
             <main id="safe-grid"></main>
           </div>
           <div class="app-menu app-menu--nested-root open">
@@ -8644,7 +8644,7 @@ def test_narrow_server_update_banner_stacks_message_and_actions(browser, tmp_pat
         page.name,
         page_html("""
       <div id="serverUpdateBanner" class="server-update-banner">
-        <span class="server-update-banner-msg">The YOLOmux server version changed since this browser tab loaded. Do you want to reload the browser?</span>
+        <span class="server-update-banner-msg">The YOmux server version changed since this browser tab loaded. Do you want to reload the browser?</span>
         <div class="toast-control-row server-update-banner-actions"><button class="server-update-banner-reload">Reload</button><button class="server-update-banner-dismiss">Keep</button></div>
       </div>
     """),
@@ -9591,7 +9591,7 @@ def test_in_page_notification_titles_omit_external_yolomux_context(browser, tmp_
         """
     )
     assert metrics == {
-        "externalTitle": "YOLOmux[1 main] Needs input",
+        "externalTitle": "YOmux[1 main] Needs input",
         "internalTitle": "Needs input",
         "genericAttentionTitle": "Needs input",
         "attentionTitle": "[1] 0:claude: Needs approval",
@@ -9669,7 +9669,7 @@ def test_browser_notifications_use_shared_badge_free_yolomux_icon(browser, tmp_p
             return {};
           },
         });
-        sendBrowserNotification('YOLOmux[test] Needs input', {body: 'Please answer'});
+        sendBrowserNotification('YOmux[test] Needs input', {body: 'Please answer'});
         sendBrowserNotification('custom', {icon: 'data:image/png;base64,custom'});
         const image = new Image();
         image.onload = () => done({
@@ -9683,7 +9683,7 @@ def test_browser_notifications_use_shared_badge_free_yolomux_icon(browser, tmp_p
         """
     )
     assert "error" not in metrics, metrics
-    assert metrics["first"]["title"] == "YOLOmux[test] Needs input", metrics
+    assert metrics["first"]["title"] == "YOmux[test] Needs input", metrics
     assert metrics["first"]["options"]["body"] == "Please answer", metrics
     assert metrics["first"]["options"]["icon"].startswith("data:image/png;base64,"), metrics
     assert metrics["second"]["options"]["icon"] == "data:image/png;base64,custom", metrics
@@ -9810,7 +9810,7 @@ def test_yoinfo_vertical_side_pane_stacks_fields_without_character_column_wrappi
         page_html(
             """
             <script>document.body.className = 'theme-dark';</script>
-            <div class="yolomux-dockview" style="width: 360px">
+            <div class="yomux-dockview" style="width: 360px">
               <div class="dv-groupview" data-pane-role="side" data-pane-side="left">
                 <div class="info-tree">
                   <div class="info-tree-group-children"><div class="info-tree-group-children"><div class="info-tree-group-children">
@@ -10580,7 +10580,7 @@ def test_tabber_live_rows_use_custom_hover_without_native_titles(browser, tmp_pa
     hover_metrics = browser.execute_script(
         """
         const tab = document.querySelector('.file-tree-row[data-tabber-type="session"] .tabber-session-tab');
-        const visiblePopovers = [tab?.__yolomuxDetachedPopover].filter(popover => {
+        const visiblePopovers = [tab?.__yomuxDetachedPopover].filter(popover => {
           const style = getComputedStyle(popover);
           const rect = popover.getBoundingClientRect();
           return style.visibility === 'visible' && Number.parseFloat(style.opacity) > 0.9 && rect.width > 100 && rect.height > 40;
@@ -12333,7 +12333,7 @@ def test_terminal_file_reference_underlines_clear_on_same_viewport_output(browse
           rows.style.cssText = 'width:1000px;height:60px';
           container.appendChild(rows);
           document.body.appendChild(container);
-          let text = 'Open static_src/js/yolomux/00_bootstrap_state.js:283';
+          let text = 'Open static_src/js/yomux/00_bootstrap_state.js:283';
           const term = {
             cols: 100,
             rows: 3,
@@ -13900,7 +13900,7 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
         const finderControl = document.querySelector('#panel-__finder__ .file-explorer-root-mode-toggle[aria-pressed="true"]');
         const tabMeta = document.getElementById('tabMetaToggle');
         const notify = document.getElementById('notifyToggle');
-        const brandYo = document.querySelector('.brand-title .brand-yolo');
+        const brandYo = document.querySelector('.brand-title .brand-mark');
         const mdProbe = document.createElement('div');
         mdProbe.className = 'markdown-body';
         mdProbe.innerHTML = '<h1>Probe</h1>';
@@ -14077,7 +14077,7 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            const brandYo = document.querySelector('.brand-title .brand-yolo');
+            const brandYo = document.querySelector('.brand-title .brand-mark');
             return window.__settingsPayload?.settings?.appearance?.active_color === 'yellow'
               && getComputedStyle(brandYo).backgroundColor === 'rgb(234, 179, 8)'
               && getComputedStyle(brandYo).borderTopColor === 'rgb(234, 179, 8)';
@@ -17454,7 +17454,7 @@ def test_codemirror_bundle_exports_decoration_for_html_semantic_marks(browser, t
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            const cm = window.YOLOmuxCodeMirror || {};
+            const cm = window.YOmuxCodeMirror || {};
             return typeof cm.Decoration?.mark === 'function'
               && typeof cm.Decoration?.set === 'function'
               && typeof cm.MergeView === 'function'
@@ -17464,7 +17464,7 @@ def test_codemirror_bundle_exports_decoration_for_html_semantic_marks(browser, t
     )
     metrics = browser.execute_script(
         """
-        const cm = window.YOLOmuxCodeMirror || {};
+        const cm = window.YOmuxCodeMirror || {};
         const mark = cm.Decoration?.mark?.({attributes: {style: 'font-weight:700'}});
         return {
           hasDecoration: typeof cm.Decoration?.mark === 'function',
@@ -17804,7 +17804,7 @@ def codemirror_search_panel_fixture_html():
         </div>
         <script>
           (function() {{
-            const CM = window.YOLOmuxCodeMirror;
+            const CM = window.YOmuxCodeMirror;
             const phrases = {{
               Find: '查找', Replace: '替换', next: '下一项', previous: '上一项', all: '全部',
               'match case': '区分大小写', regexp: '正则表达式', 'by word': '全字匹配',

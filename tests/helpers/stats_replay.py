@@ -6,9 +6,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from yolomux_lib.stats_current import service as service_module
-from yolomux_lib.stats_current import storage
-from yolomux_lib.stats_current.storage import Observation
+from yomux_lib.stats_current import service as service_module
+from yomux_lib.stats_current import storage
+from yomux_lib.stats_current.storage import Observation
 
 
 def replay_service(

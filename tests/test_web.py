@@ -1,4 +1,4 @@
-"""Dedicated coverage for yolomux_lib.web — the server-rendered HTML shell and its escaping.
+"""Dedicated coverage for yomux_lib.web — the server-rendered HTML shell and its escaping.
 
 web.py had no test file of its own; its HTML-escaping / <script>-breakout safety was only exercised
 incidentally elsewhere. These tests pin the security-relevant invariants: user-controlled values (tmux
@@ -11,11 +11,11 @@ import os
 from pathlib import Path
 import re
 
-from yolomux_lib import common
-from yolomux_lib import web
-from yolomux_lib.stats_current import storage as stats_current_storage
+from yomux_lib import common
+from yomux_lib import web
+from yomux_lib.stats_current import storage as stats_current_storage
 
-_BOOTSTRAP_RE = re.compile(r'<script id="yolomux-bootstrap"[^>]*>(.*?)</script>', re.DOTALL)
+_BOOTSTRAP_RE = re.compile(r'<script id="yomux-bootstrap"[^>]*>(.*?)</script>', re.DOTALL)
 
 
 def _bootstrap_json(page: str) -> str:
@@ -55,9 +55,9 @@ def test_html_page_declares_inline_favicon_before_browser_can_request_default():
     # exact string is what made those two fixes look like a conflict.
     favicons = re.findall(r'<link rel="icon"[^>]*>', page)
     assert len(favicons) == 1, favicons
-    assert 'data-yolomux-favicon' in favicons[0]
+    assert 'data-yomux-favicon' in favicons[0]
     assert 'href="data:' in favicons[0]
-    assert page.index(favicons[0]) < page.index('/static/yolomux.css')
+    assert page.index(favicons[0]) < page.index('/static/yomux.css')
 
 
 def test_html_page_bootstraps_the_server_owned_stats_writer_fence():
@@ -106,7 +106,7 @@ def test_html_page_bootstraps_authoritative_username():
 
 
 def test_html_page_bootstraps_backend_identity_and_brand_hover(monkeypatch):
-    monkeypatch.setattr(web, "yolomux_version_metadata", lambda: ("0.8.8(7)", []))
+    monkeypatch.setattr(web, "yomux_version_metadata", lambda: ("0.8.8(7)", []))
 
     page = web.html_page([])
     bootstrap = json.loads(_bootstrap_json(page))
@@ -161,18 +161,31 @@ def test_xterm_assets_have_one_vendor_owner_even_with_root_contamination(monkeyp
 def test_static_asset_version_uses_high_resolution_generation(monkeypatch, tmp_path):
     static_dir = tmp_path / "static"
     static_dir.mkdir()
-    asset = static_dir / "yolomux.js"
+    asset = static_dir / "yomux.js"
     asset.write_text("one", encoding="utf-8")
     monkeypatch.setattr(web, "STATIC_DIR", static_dir)
 
-    first = web.static_asset_version("yolomux.js")
+    first = web.static_asset_version("yomux.js")
     first_stat = asset.stat()
     asset.write_text("two-two", encoding="utf-8")
     os.utime(asset, ns=(first_stat.st_atime_ns, first_stat.st_mtime_ns + 1))
 
-    second = web.static_asset_version("yolomux.js")
+    second = web.static_asset_version("yomux.js")
     assert first != second
     assert second == f"{asset.stat().st_mtime_ns}-{asset.stat().st_size}"
+
+
+def test_legacy_product_asset_names_resolve_to_canonical_bundles(monkeypatch, tmp_path):
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    for asset in ("yomux.js", "yomux.css"):
+        (static_dir / asset).write_text("canonical", encoding="utf-8")
+    monkeypatch.setattr(web, "STATIC_DIR", static_dir)
+
+    assert web.static_asset_path("yomux.js") == static_dir / "yomux.js"
+    assert web.static_asset_path("yolomux.js") == static_dir / "yomux.js"
+    assert web.static_asset_path("yomux.css") == static_dir / "yomux.css"
+    assert web.static_asset_path("yolomux.css") == static_dir / "yomux.css"
 
 
 def test_emoji_catalog_is_a_served_lazy_javascript_asset():
@@ -215,7 +228,7 @@ def test_html_page_loads_xterm_unicode11_addon_after_xterm():
 
     xterm_index = page.index("/static/vendor/xterm.js")
     addon_index = page.index("/static/vendor/xterm-addon-unicode11.js")
-    bootstrap_index = page.index('id="yolomux-bootstrap"')
+    bootstrap_index = page.index('id="yomux-bootstrap"')
 
     assert xterm_index < addon_index < bootstrap_index
     assert "/static/vendor/xterm.css" in page

@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """Offline contracts for declarative model-assisted YO!agent intents."""
 
-from yolomux_lib.yoagent.model_intents import model_intent_job_payload
-from yolomux_lib.yoagent.model_intents import model_intent_prompt
-from yolomux_lib.yoagent.model_intents import model_intent_provider_schema
-from yolomux_lib.yoagent.model_intents import parse_model_intent_plan
-from yolomux_lib.yoagent.model_intents import select_model_intent
-from yolomux_lib.yoagent.skills import load_yoagent_skills
+from yomux_lib.yoagent.model_intents import model_intent_job_payload
+from yomux_lib.yoagent.model_intents import model_intent_prompt
+from yomux_lib.yoagent.model_intents import model_intent_provider_schema
+from yomux_lib.yoagent.model_intents import parse_model_intent_plan
+from yomux_lib.yoagent.model_intents import select_model_intent
+from yomux_lib.yoagent.skills import load_yoagent_skills
 
 
 def roster_skill_payload():

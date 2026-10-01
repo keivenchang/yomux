@@ -11,9 +11,9 @@ from pathlib import Path
 import pytest
 from urllib.parse import urlsplit
 
-from yolomux_lib import live_browser_soak as soak
-from yolomux_lib.infra import listener_census
-from yolomux_lib import browser_diagnostic_receipts
+from yomux_lib import live_browser_soak as soak
+from yomux_lib.infra import listener_census
+from yomux_lib import browser_diagnostic_receipts
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
 from tests.gate_harness import gate_live_server  # noqa: F401
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
@@ -177,14 +177,14 @@ def test_install_auth_cookie_uses_login_without_losing_exact_safe_app_url(monkey
 
     assert soak.install_auth_cookie(driver, exact_url, 7443) == user
     assert driver.navigations == ["https://localhost:7443/login"]
-    assert driver.get_cookies() == [{"name": "yolomux_auth_7443", "value": "c" * 64, "path": "/", "secure": True, "httpOnly": True}]
+    assert driver.get_cookies() == [{"name": "yomux_auth_7443", "value": "c" * 64, "path": "/", "secure": True, "httpOnly": True}]
 
 
 @pytest.mark.parametrize(
     ("label", "store"),
     (
         ("silently dropped", lambda _cookie: None),
-        ("stored for another origin", lambda cookie: {**cookie, "name": "yolomux_auth_7444"}),
+        ("stored for another origin", lambda cookie: {**cookie, "name": "yomux_auth_7444"}),
         ("stored without the Secure attribute", lambda cookie: {**cookie, "secure": False}),
         ("stored with a truncated value", lambda cookie: {**cookie, "value": cookie["value"][:32]}),
     ),
@@ -197,7 +197,7 @@ def test_install_auth_cookie_fails_when_the_browser_does_not_retain_the_auth_coo
     monkeypatch.setattr(soak, "select_auth_user", lambda: user)
     monkeypatch.setattr(soak, "auth_cookie_value", lambda _username, _password: "c" * 64)
 
-    with pytest.raises(RuntimeError, match="browser did not retain the authenticated YOLOmux session cookie"):
+    with pytest.raises(RuntimeError, match="browser did not retain the authenticated YOmux session cookie"):
         soak.install_auth_cookie(driver, "https://localhost:7443/", 7443)
 
 
@@ -210,7 +210,7 @@ def test_install_auth_cookie_never_reports_the_session_cookie_value(monkeypatch)
     with pytest.raises(RuntimeError) as failure:
         soak.install_auth_cookie(driver, "https://localhost:7443/", 7443)
     assert "c" * 64 not in str(failure.value)
-    assert "yolomux_auth_7443" in str(failure.value)
+    assert "yomux_auth_7443" in str(failure.value)
 
 
 def test_install_auth_cookie_propagates_a_browser_cookie_refusal(monkeypatch):
@@ -428,7 +428,7 @@ def test_write_artifact_redacts_every_retained_evidence_channel(tmp_path):
 def negative_probe_failure_diagnostic(driver, handle, raw, evidence):
     try:
         operation_state = driver.execute_script(
-            "const lifecycle = window.__yolomuxFixtureLifecycle; "
+            "const lifecycle = window.__yomuxFixtureLifecycle; "
             "return lifecycle && typeof lifecycle.operationState === 'function' "
             "? lifecycle.operationState() : {available: false};"
         )
@@ -739,7 +739,7 @@ def test_completion_probe_failure_retains_runtime_artifact_and_makes_main_fail(t
     monkeypatch.setattr(soak, "listener_identity", completion_timeout)
     monkeypatch.setattr(soak, "install_auth_cookie", lambda *_args: None)
     monkeypatch.setattr(soak, "install_start_of_document_sentinels", lambda *_args: None)
-    monkeypatch.setattr(soak, "discover_served_bundle", lambda *_args: ("https://localhost:7443/static/yolomux.js", "b" * 64))
+    monkeypatch.setattr(soak, "discover_served_bundle", lambda *_args: ("https://localhost:7443/static/yomux.js", "b" * 64))
     monkeypatch.setattr(soak, "WebDriverWait", lambda *_args: type("Wait", (), {"until": lambda *_: None})())
     monkeypatch.setattr(soak, "assert_stats_hidden", lambda *_args: None)
     monkeypatch.setattr(soak, "sample_evidence", lambda *_args: next(samples))
@@ -808,7 +808,7 @@ def test_main_preserves_real_runtime_artifact_when_completion_probe_fails(tmp_pa
     monkeypatch.setattr(soak, "listener_identity", listener_probe)
     monkeypatch.setattr(soak, "install_auth_cookie", lambda *_args: None)
     monkeypatch.setattr(soak, "install_start_of_document_sentinels", lambda *_args: None)
-    monkeypatch.setattr(soak, "discover_served_bundle", lambda *_args: ("https://localhost:7443/static/yolomux.js", "b" * 64))
+    monkeypatch.setattr(soak, "discover_served_bundle", lambda *_args: ("https://localhost:7443/static/yomux.js", "b" * 64))
     monkeypatch.setattr(soak, "WebDriverWait", lambda *_args: type("Wait", (), {"until": lambda *_: None})())
     monkeypatch.setattr(soak, "assert_stats_hidden", lambda *_args: None)
     monkeypatch.setattr(soak, "sample_evidence", lambda *_args: next(samples))
@@ -840,7 +840,7 @@ def test_run_soak_retains_changed_completion_identity(monkeypatch):
     monkeypatch.setattr(soak, "listener_identity", lambda _port: next(identities))
     monkeypatch.setattr(soak, "install_auth_cookie", lambda *_args: None)
     monkeypatch.setattr(soak, "install_start_of_document_sentinels", lambda *_args: None)
-    monkeypatch.setattr(soak, "discover_served_bundle", lambda *_args: ("https://localhost:7443/static/yolomux.js", "b" * 64))
+    monkeypatch.setattr(soak, "discover_served_bundle", lambda *_args: ("https://localhost:7443/static/yomux.js", "b" * 64))
     monkeypatch.setattr(soak, "WebDriverWait", lambda *_args: type("Wait", (), {"until": lambda *_: None})())
     monkeypatch.setattr(soak, "assert_stats_hidden", lambda *_args: None)
     sample = {"browserEvents": [], "browserLocalFailures": [], "browserReceiptBarrier": clean_receipt_barrier(), "serverLogErrors": [], "browserLogFailures": [], "serverLogDropped": {"count": 0}, "cursors": {"js": 0, "server_epoch": "a", "server_sequence": 0, "server_log_ids": []}}
@@ -871,7 +871,7 @@ def test_run_soak_fails_for_error_arriving_during_completion_boundary(monkeypatc
     monkeypatch.setattr(soak, "listener_identity", completion_probe)
     monkeypatch.setattr(soak, "install_auth_cookie", lambda *_args: None)
     monkeypatch.setattr(soak, "install_start_of_document_sentinels", lambda *_args: None)
-    monkeypatch.setattr(soak, "discover_served_bundle", lambda *_args: ("https://localhost:7443/static/yolomux.js", "b" * 64))
+    monkeypatch.setattr(soak, "discover_served_bundle", lambda *_args: ("https://localhost:7443/static/yomux.js", "b" * 64))
     monkeypatch.setattr(soak, "WebDriverWait", lambda *_args: type("Wait", (), {"until": lambda *_: None})())
     monkeypatch.setattr(soak, "assert_stats_hidden", lambda *_args: None)
     monkeypatch.setattr(soak, "sample_evidence", sample)
@@ -929,7 +929,7 @@ def test_main_preserves_runtime_artifact_when_final_boundary_raises(tmp_path, mo
     monkeypatch.setattr(soak, "listener_identity", lambda _port: identity)
     monkeypatch.setattr(soak, "install_auth_cookie", lambda *_args: None)
     monkeypatch.setattr(soak, "install_start_of_document_sentinels", lambda *_args: None)
-    monkeypatch.setattr(soak, "discover_served_bundle", lambda *_args: ("https://localhost:7443/static/yolomux.js", "b" * 64))
+    monkeypatch.setattr(soak, "discover_served_bundle", lambda *_args: ("https://localhost:7443/static/yomux.js", "b" * 64))
     monkeypatch.setattr(soak, "WebDriverWait", lambda *_args: type("Wait", (), {"until": lambda *_: None})())
     monkeypatch.setattr(soak, "assert_stats_hidden", assert_hidden)
     monkeypatch.setattr(soak, "sample_evidence", sample)
@@ -964,7 +964,7 @@ def test_visible_stats_sentinel_rejects_before_next_sample(monkeypatch):
     monkeypatch.setattr(soak, "listener_identity", lambda _port: identity)
     monkeypatch.setattr(soak, "install_auth_cookie", lambda *_args: None)
     monkeypatch.setattr(soak, "install_start_of_document_sentinels", lambda *_args: None)
-    monkeypatch.setattr(soak, "discover_served_bundle", lambda *_args: ("https://localhost:7443/static/yolomux.js", "b" * 64))
+    monkeypatch.setattr(soak, "discover_served_bundle", lambda *_args: ("https://localhost:7443/static/yomux.js", "b" * 64))
     monkeypatch.setattr(soak, "WebDriverWait", lambda *_args: type("Wait", (), {"until": lambda *_: None})())
     monkeypatch.setattr(soak, "assert_stats_hidden", assert_hidden)
     monkeypatch.setattr(soak, "sample_evidence", sample)
@@ -976,7 +976,7 @@ def test_visible_stats_sentinel_rejects_before_next_sample(monkeypatch):
 def test_discover_served_bundle_rejects_cross_origin_bundle():
     class Driver:
         def get(self, _url): pass
-        def execute_script(self, _script): return "https://example.test/static/yolomux.js"
+        def execute_script(self, _script): return "https://example.test/static/yomux.js"
         def execute_async_script(self, _script, _url): return {"status": 200, "text": "bundle"}
     with pytest.raises(RuntimeError, match="same-origin"):
         soak.discover_served_bundle(Driver(), "https://localhost:7443/")
@@ -990,7 +990,7 @@ def test_discover_served_bundle_navigates_to_exact_recorded_layout_url():
             navigations.append(url)
 
         def execute_script(self, _script):
-            return "https://localhost:7443/static/yolomux.js"
+            return "https://localhost:7443/static/yomux.js"
 
         def execute_async_script(self, _script, _url):
             return {"status": 200, "text": "bundle"}
@@ -998,7 +998,7 @@ def test_discover_served_bundle_navigates_to_exact_recorded_layout_url():
     bundle_url, _bundle_sha256 = soak.discover_served_bundle(Driver(), RECORDED_LAYOUT_URL)
 
     assert navigations == [RECORDED_LAYOUT_URL]
-    assert bundle_url == "https://localhost:7443/static/yolomux.js"
+    assert bundle_url == "https://localhost:7443/static/yomux.js"
 
 
 def test_run_soak_authenticates_before_bundle_and_rejects_completion_identity_change(monkeypatch):
@@ -1009,7 +1009,7 @@ def test_run_soak_authenticates_before_bundle_and_rejects_completion_identity_ch
     monkeypatch.setattr(soak, "listener_identity", lambda _port: next(identities))
     monkeypatch.setattr(soak, "install_auth_cookie", lambda *_args: calls.append("auth"))
     monkeypatch.setattr(soak, "install_start_of_document_sentinels", lambda *_args: None)
-    monkeypatch.setattr(soak, "discover_served_bundle", lambda *_args: (calls.append("bundle") or ("https://localhost:7443/static/yolomux.js", "b" * 64)))
+    monkeypatch.setattr(soak, "discover_served_bundle", lambda *_args: (calls.append("bundle") or ("https://localhost:7443/static/yomux.js", "b" * 64)))
     monkeypatch.setattr(soak, "WebDriverWait", lambda *_args: type("W", (), {"until": lambda *_: None})())
     monkeypatch.setattr(soak, "assert_stats_hidden", lambda *_args: None)
     sample = {"browserEvents": [], "browserLocalFailures": [], "browserReceiptBarrier": clean_receipt_barrier(), "serverLogErrors": [], "browserLogFailures": [], "serverLogDropped": {"count": 0}, "cursors": {"js": 0, "server_epoch": "a", "server_sequence": 0, "server_log_ids": []}}
@@ -1095,7 +1095,7 @@ def test_sample_evidence_fences_an_event_arriving_during_server_log_fetch():
 
 
 def test_success_artifact_requires_receipt_barrier_in_baseline_and_final_sample():
-    identity = {"pid": 1, "cwd": "/repo", "process_started": "now", "head": "a" * 40, "bundle_url": "https://localhost/static/yolomux.js", "bundle_sha256": "b" * 64}
+    identity = {"pid": 1, "cwd": "/repo", "process_started": "now", "head": "a" * 40, "bundle_url": "https://localhost/static/yomux.js", "bundle_sha256": "b" * 64}
     evidence = {"browserEvents": [], "browserLocalFailures": [], "serverLogErrors": [], "browserLogFailures": [], "serverLogDropped": {"count": 0}, "cursors": {"js": 0, "server_epoch": "a", "server_sequence": 0, "server_log_ids": []}}
     artifact = {"url": "https://localhost/", "started_pt": "start", "ended_pt": "end", "requested_duration_seconds": 600, "elapsed_seconds": 600, "identity": identity, "completion_identity": identity, "baseline": evidence, "samples": [evidence, evidence], **clean_settle(evidence)}
     with pytest.raises(soak.ArtifactIntegrityError, match="exact clean finalBoundary"):
@@ -1103,7 +1103,7 @@ def test_success_artifact_requires_receipt_barrier_in_baseline_and_final_sample(
 
 
 def test_success_artifact_rejects_well_formed_nonquiescent_receipt_barriers():
-    identity = {"pid": 1, "cwd": "/repo", "process_started": "now", "head": "a" * 40, "bundle_url": "https://localhost/static/yolomux.js", "bundle_sha256": "b" * 64}
+    identity = {"pid": 1, "cwd": "/repo", "process_started": "now", "head": "a" * 40, "bundle_url": "https://localhost/static/yomux.js", "bundle_sha256": "b" * 64}
     blocker = {"key": "page-1:1", "epoch": "page-1", "eventId": 1, "requestId": "r", "source": "/", "route": "/", "event": "api", "wallTime": "", "deliveryOutcome": "failed", "httpStatus": 500, "status": "pending"}
     receipt = {"epoch": "page-1", "accepted": 0, "pending": 1, "retrying": 0, "rejected": 0, "dropped": 0, "quiescent": False, "blocking": [blocker]}
     evidence = {"browserEvents": [], "browserLocalFailures": [], "browserReceiptBarrier": receipt, "serverLogErrors": [], "browserLogFailures": [], "serverLogDropped": {"count": 0}, "cursors": {"js": 0, "server_epoch": "a", "server_sequence": 0, "server_log_ids": []}}
@@ -1115,7 +1115,7 @@ def test_success_artifact_rejects_well_formed_nonquiescent_receipt_barriers():
 
 @pytest.mark.parametrize("failure_field", ("browserLocalFailures", "serverLogErrors", "browserLogFailures", "integrityFailures"))
 def test_success_artifact_rejects_nonempty_failure_evidence_without_run_soak(failure_field):
-    identity = {"pid": 1, "cwd": "/repo", "process_started": "now", "head": "a" * 40, "bundle_url": "https://localhost/static/yolomux.js", "bundle_sha256": "b" * 64}
+    identity = {"pid": 1, "cwd": "/repo", "process_started": "now", "head": "a" * 40, "bundle_url": "https://localhost/static/yomux.js", "bundle_sha256": "b" * 64}
     evidence = {"browserEvents": [], "browserLocalFailures": [], "browserReceiptBarrier": clean_receipt_barrier(), "serverLogErrors": [], "browserLogFailures": [], "integrityFailures": [], "serverLogDropped": {"count": 0}, "cursors": {"js": 0, "server_epoch": "a", "server_sequence": 0, "server_log_ids": []}}
     evidence[failure_field] = [{"message": "must fail closed"}]
     artifact = {"url": "https://localhost/", "started_pt": "start", "ended_pt": "end", "requested_duration_seconds": 600, "elapsed_seconds": 600, "identity": identity, "completion_identity": identity, "baseline": evidence, "samples": [evidence, evidence], **clean_settle(evidence)}
@@ -1248,7 +1248,7 @@ def test_negative_command_runs_tool_main_after_settle_short_window_and_attributi
     monkeypatch.setattr(soak, "install_start_of_document_sentinels", lambda _driver: None)
     monkeypatch.setattr(soak, "authenticated_server_log_reader", lambda *_args: lambda: finalizer_server_payload())
     monkeypatch.setattr(soak, "chrome_failure_entries", lambda _entries: [])
-    monkeypatch.setattr(soak, "discover_served_bundle", lambda *_args, **_kwargs: ("https://localhost:7443/static/yolomux.js", "b" * 64))
+    monkeypatch.setattr(soak, "discover_served_bundle", lambda *_args, **_kwargs: ("https://localhost:7443/static/yomux.js", "b" * 64))
     monkeypatch.setattr(soak, "WebDriverWait", lambda *_args: type("Wait", (), {"until": lambda *_: None})())
     monkeypatch.setattr(soak, "assert_page_identity", lambda *_args: {"reasons": [], "drift": {"hrefChanged": False}, "journeyId": "j-reload-fake"})
     monkeypatch.setattr(soak, "assert_stats_hidden", lambda *_args: None)
@@ -1508,7 +1508,7 @@ def test_run_soak_rejects_dirty_authenticated_baseline(monkeypatch):
     monkeypatch.setattr(soak, "listener_identity", lambda _port: identity)
     monkeypatch.setattr(soak, "install_auth_cookie", lambda *_args: None)
     monkeypatch.setattr(soak, "install_start_of_document_sentinels", lambda *_args: None)
-    monkeypatch.setattr(soak, "discover_served_bundle", lambda *_args, **_kwargs: ("https://localhost:7443/static/yolomux.js", "b" * 64))
+    monkeypatch.setattr(soak, "discover_served_bundle", lambda *_args, **_kwargs: ("https://localhost:7443/static/yomux.js", "b" * 64))
     monkeypatch.setattr(soak, "WebDriverWait", lambda *_args: type("Wait", (), {"until": lambda *_: None})())
     monkeypatch.setattr(soak, "assert_stats_hidden", lambda *_args: None)
     monkeypatch.setattr(soak, "wait_for_hidden_stats_stream", lambda *_args: clean_stats_stream())
@@ -1601,7 +1601,7 @@ def test_run_soak_refuses_listener_and_bundle_mismatches_before_authentication(m
     monkeypatch.setattr(soak, "listener_identity", lambda _port: identity)
     with pytest.raises(RuntimeError, match="HEAD mismatch"):
         soak.run_soak(driver, url="https://localhost:7443/", duration=600, expected_head="c" * 40, expected_bundle_sha256="b" * 64, negative_probe=False)
-    monkeypatch.setattr(soak, "discover_served_bundle", lambda *_args, **_kwargs: ("https://localhost:7443/static/yolomux.js", "c" * 64))
+    monkeypatch.setattr(soak, "discover_served_bundle", lambda *_args, **_kwargs: ("https://localhost:7443/static/yomux.js", "c" * 64))
     monkeypatch.setattr(soak, "install_auth_cookie", lambda *_args: None)
     monkeypatch.setattr(soak, "install_start_of_document_sentinels", lambda _driver: None)
     with pytest.raises(RuntimeError, match="bundle SHA256 mismatch"):
@@ -1611,7 +1611,7 @@ def test_run_soak_refuses_listener_and_bundle_mismatches_before_authentication(m
 def test_negative_probe_returns_nonzero_gate_evidence_without_waiting(monkeypatch):
     driver = FakeDriver()
     monkeypatch.setattr(soak, "listener_identity", lambda _port: soak.ListenerIdentity(pid=12, cwd="/repo", started="now", head="a" * 40))
-    monkeypatch.setattr(soak, "discover_served_bundle", lambda *_args, **_kwargs: ("https://localhost:7443/static/yolomux.js", "b" * 64))
+    monkeypatch.setattr(soak, "discover_served_bundle", lambda *_args, **_kwargs: ("https://localhost:7443/static/yomux.js", "b" * 64))
     monkeypatch.setattr(soak, "install_auth_cookie", lambda *_args: None)
     monkeypatch.setattr(soak, "install_start_of_document_sentinels", lambda _driver: None)
     monkeypatch.setattr(soak, "assert_stats_hidden", lambda _driver: None)
@@ -1714,7 +1714,7 @@ def test_main_completion_bundle_check_does_not_navigate_away_late_browser_failur
 
         def execute_script(self, script, *args):
             if "document.scripts" in script:
-                return "https://localhost:7443/static/yolomux.js"
+                return "https://localhost:7443/static/yomux.js"
             if "document.getElementById" in script:
                 return True
             return super().execute_script(script, *args)
@@ -3224,7 +3224,7 @@ def complete_success_artifact(monkeypatch, *, driver=None, previous_js=0):
         "cwd": "/repo",
         "process_started": "now",
         "head": "a" * 40,
-        "bundle_url": "https://localhost:7443/static/yolomux.js",
+        "bundle_url": "https://localhost:7443/static/yomux.js",
         "bundle_sha256": "b" * 64,
     }
     # `run_soak` records the settle window, keeps its last sample as the observation baseline, and
@@ -3923,7 +3923,7 @@ def test_negative_attribution_rejects_a_missing_or_mismatched_injection(monkeypa
     assert boundary["attribution"]["unrelated"]["integrityFailures"] == ["negative browser error probe was not retained exactly"]
 
 
-# `URLSearchParams.get()` (static_src/js/yolomux/20_layout_state.js:1387-1393) returns the FIRST value
+# `URLSearchParams.get()` (static_src/js/yomux/20_layout_state.js:1387-1393) returns the FIRST value
 # of a repeated key, so collapsing the parsed pairs last-wins let a URL whose first `sessions` value
 # was foreign and whose last was the expected one drive the app from the foreign value while this
 # classifier reported no substitution at all.

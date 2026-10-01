@@ -3,11 +3,11 @@ import os
 import subprocess
 from pathlib import Path
 
-from yolomux_lib import sessions
-from yolomux_lib.common import AgentInfo, PaneInfo, ProcessInfo
-from yolomux_lib.sessions import list_processes
-from yolomux_lib.sessions import pane_process_label
-from yolomux_lib.server_logs import SERVER_LOGS
+from yomux_lib import sessions
+from yomux_lib.common import AgentInfo, PaneInfo, ProcessInfo
+from yomux_lib.sessions import list_processes
+from yomux_lib.sessions import pane_process_label
+from yomux_lib.server_logs import SERVER_LOGS
 
 
 def clear_transcript_lookup_cache():
@@ -40,7 +40,7 @@ def test_classify_agent_requires_process_identity_for_opencode(monkeypatch, tmp_
     assert sessions.classify_agent("node /home/me/.local/bin/codex resume abc") == "codex"
     assert sessions.classify_agent("python3 tools/mockers/claude.py --mock") == "claude"
     assert sessions.classify_agent("python3 tools/mockers/codex.py --mock") == "codex"
-    assert sessions.classify_agent("rg -n claude yolomux_lib tests") is None
+    assert sessions.classify_agent("rg -n claude yomux_lib tests") is None
     assert sessions.classify_agent("python3 -m pytest -k codex") is None
     assert sessions.classify_agent("git commit -m 'fix claude notifications'") is None
     executable = tmp_path / "opencode"
@@ -493,7 +493,7 @@ def test_discover_sessions_uses_one_canonical_agent_for_pane(monkeypatch):
         100: ProcessInfo(pid=100, ppid=1, command="bash"),
         101: ProcessInfo(pid=101, ppid=100, command="node /home/me/.local/bin/codex resume abc"),
         102: ProcessInfo(pid=102, ppid=101, command="/opt/codex resume abc"),
-        103: ProcessInfo(pid=103, ppid=102, command="rg -n claude yolomux_lib tests"),
+        103: ProcessInfo(pid=103, ppid=102, command="rg -n claude yomux_lib tests"),
         104: ProcessInfo(pid=104, ppid=102, command="python3 -m pytest -k codex"),
         105: ProcessInfo(pid=105, ppid=102, command="git commit -m 'fix claude notifications'"),
     }
@@ -985,6 +985,28 @@ def _write_codex_rollout(path: Path, *, header_cwd: str, tail_lines: int = 400) 
     lines = [json.dumps({"type": "session_meta", "payload": {"cwd": header_cwd}})]
     lines.extend(json.dumps({"type": "event", "message": f"line {index}"}) for index in range(tail_lines))
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_codex_transcript_header_matches_moved_yomux_checkout(tmp_path):
+    clear_transcript_lookup_cache()
+    legacy_cwd = str(tmp_path / "yolomux.dev8123")
+    canonical_cwd = str(tmp_path / "yomux.dev8123")
+    rollout = tmp_path / "rollout-header.jsonl"
+    _write_codex_rollout(rollout, header_cwd=legacy_cwd, tail_lines=0)
+
+    assert sessions.find_codex_transcript_in_candidates([rollout], canonical_cwd) == rollout
+
+
+def test_codex_transcript_tail_matches_moved_yomux_checkout(tmp_path):
+    clear_transcript_lookup_cache()
+    legacy_cwd = str(tmp_path / "yolomux.dev8123")
+    canonical_cwd = str(tmp_path / "yomux.dev8123")
+    rollout = tmp_path / "rollout-tail.jsonl"
+    _write_codex_rollout(rollout, header_cwd=str(tmp_path / "other"), tail_lines=0)
+    with rollout.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"payload": {"arguments": json.dumps({"cwd": legacy_cwd})}}) + "\n")
+
+    assert sessions.find_codex_transcript_in_candidates([rollout], canonical_cwd) == rollout
 
 
 class _FakeClock:

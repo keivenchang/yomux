@@ -2,11 +2,11 @@ import json
 import subprocess
 from pathlib import Path
 
-from yolomux_lib.tmux_theme import apply_tmux_theme_color_to_existing
-from yolomux_lib.tmux_theme import normalized_tmux_theme_color
-from yolomux_lib.tmux_theme import tmux_theme_commands_for_existing
-from yolomux_lib.tmux_theme import tmux_theme_commands_for_new_session
-from yolomux_lib.tmux_theme import tmux_theme_color_from_settings
+from yomux_lib.tmux_theme import apply_tmux_theme_color_to_existing
+from yomux_lib.tmux_theme import normalized_tmux_theme_color
+from yomux_lib.tmux_theme import tmux_theme_commands_for_existing
+from yomux_lib.tmux_theme import tmux_theme_commands_for_new_session
+from yomux_lib.tmux_theme import tmux_theme_color_from_settings
 
 
 UI_PINS = json.loads((Path(__file__).parent / "fixtures" / "ui_pins.json").read_text(encoding="utf-8"))

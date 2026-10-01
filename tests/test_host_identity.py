@@ -9,16 +9,16 @@ import subprocess
 
 import pytest
 
-from yolomux_lib import host_identity as public_host_identity_module
-from yolomux_lib.host_identity import HostIdentity
-from yolomux_lib.host_identity import HostIdentityError
-from yolomux_lib.host_identity import LateHostIdentityOverrideError
-from yolomux_lib.host_identity import LocalProcessReason
-from yolomux_lib.host_identity import current_host_identity
-from yolomux_lib.host_identity import is_current_local_process
-from yolomux_lib.host_identity import normalize_stable_host_id
-from yolomux_lib.host_identity import process_start_identity
-from yolomux_lib.infra import host_identity as infra_host_identity_module
+from yomux_lib import host_identity as public_host_identity_module
+from yomux_lib.host_identity import HostIdentity
+from yomux_lib.host_identity import HostIdentityError
+from yomux_lib.host_identity import LateHostIdentityOverrideError
+from yomux_lib.host_identity import LocalProcessReason
+from yomux_lib.host_identity import current_host_identity
+from yomux_lib.host_identity import is_current_local_process
+from yomux_lib.host_identity import normalize_stable_host_id
+from yomux_lib.host_identity import process_start_identity
+from yomux_lib.infra import host_identity as infra_host_identity_module
 
 
 def fixture_identity(

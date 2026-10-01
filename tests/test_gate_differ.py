@@ -28,9 +28,9 @@ from tests.helpers.gate_editor import _a8_missing_snapshot, _a8_latch_transient_
 from tests.helpers.gate_editor import _wait_for_active_watchd_descriptor, _wait_for_watchd_path_change, _dirty_conflict_snapshot, _open_editor, _publish_file_change, _type_dirty_text, _wait_for_file_event_stream
 from tests.helpers.gate_editor import gate_browser_runtime
 from tests.terminal_state_guard import assert_terminal_transition
-from yolomux_lib import filesystem
-from yolomux_lib import server as server_module
-from yolomux_lib import web as web_module
+from yomux_lib import filesystem
+from yomux_lib import server as server_module
+from yomux_lib import web as web_module
 
 
 pytestmark = pytest.mark.socket
@@ -128,11 +128,11 @@ def differ_source_bundle(monkeypatch, tmp_path):
     """Serve this module a fixture-owned bundle built from the current source partials."""
     asset_dir = tmp_path / "differ-static"
     asset_dir.mkdir()
-    for name in ("brand.css", "codemirror.js", "yolomux.css"):
+    for name in ("brand.css", "codemirror.js", "yomux.css"):
         shutil.copy2(REPO_ROOT / "static" / name, asset_dir / name)
     for name in ("fonts", "locales", "vendor"):
         shutil.copytree(REPO_ROOT / "static" / name, asset_dir / name)
-    (asset_dir / "yolomux.js").write_text(static_build.build_asset("yolomux.js"), encoding="utf-8")
+    (asset_dir / "yomux.js").write_text(static_build.build_asset("yomux.js"), encoding="utf-8")
     monkeypatch.setattr(web_module, "STATIC_DIR", asset_dir)
 
 
@@ -375,7 +375,7 @@ def test_differ_only_open_reaches_content_or_typed_error_within_bound(gate_brows
             const sessionFilesSignalAbortedAfterPush = sessionFilesSignal?.aborted === true;
             releaseSessionFilesFetch?.();
             const lifecycle = await window.__yolomuxTestWaitFor(() => {
-              const state = window.__yolomuxFixtureLifecycle?.operationState?.();
+              const state = window.__yomuxFixtureLifecycle?.operationState?.();
               if (!state) return null;
               return !state.pending.length
                 && state.batchQueued === 0
@@ -694,7 +694,7 @@ def test_mock_git_differ_queued_producer_completion_settles_every_visible_surfac
                 "operation": "batchd.result",
                 "code": "service_unavailable",
                 "exception": {"type": "FileNotFoundError", "message": "service socket is absent"},
-                "frames": [{"file": "yolomux_lib/local_services/rpc.py", "line": 272, "function": "request"}],
+                "frames": [{"file": "yomux_lib/local_services/rpc.py", "line": 272, "function": "request"}],
             },
         ],
     }

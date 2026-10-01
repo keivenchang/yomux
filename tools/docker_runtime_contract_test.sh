@@ -9,10 +9,10 @@ fail() {
   exit 1
 }
 
-[ "${YOLOMUX_TEST_CONTAINER:-}" = 1 ] || fail "test-container marker is absent"
+[ "${YOMUX_TEST_CONTAINER-${YOLOMUX_TEST_CONTAINER:-}}" = 1 ] || fail "test-container marker is absent"
 [ -f /.dockerenv ] || fail "generic Docker marker is absent"
-[ -f /opt/yolomux-test-image.marker ] || fail "test-image marker is absent"
-[ "$(cat /opt/yolomux-test-image.marker)" = yolomux-test-image-v1 ] || fail "wrong test image marker"
+[ -f /opt/yomux-test-image.marker ] || fail "test-image marker is absent"
+[ "$(cat /opt/yomux-test-image.marker)" = yomux-test-image-v1 ] || fail "wrong test image marker"
 case "${HOME:-}" in
   ""|/home/runner|/tmp/*) ;;
   *) fail "host HOME leaked into the test action: ${HOME:-unset}" ;;
@@ -30,7 +30,7 @@ if (umask 077; : > "$source_probe") 2>/dev/null; then
   fail "/w is writable"
 fi
 
-for cache_root in /opt/yolomux-go-mod-cache /opt/yolomux-bazel-repository-cache; do
+for cache_root in /opt/yomux-go-mod-cache /opt/yomux-bazel-repository-cache; do
   [ -d "$cache_root" ] || fail "image cache is absent: $cache_root"
   cache_probe="$cache_root/.yolomux-docker-runtime-probe-$$"
   if mkdir -- "$cache_probe" 2>/dev/null; then

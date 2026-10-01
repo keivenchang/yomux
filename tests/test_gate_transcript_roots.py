@@ -21,12 +21,12 @@ from tools.mockers.transcript import codex_usage
 from tools.mockers.transcript import finish_partial_record
 from tools.mockers.transcript import generate_mock_transcripts
 from tools.mockers.transcript import replace_records
-from yolomux_lib.infra.filesystem_preflight import FilesystemClassification
-from yolomux_lib.tmux import sessions
-from yolomux_lib.workspace import session_files
+from yomux_lib.infra.filesystem_preflight import FilesystemClassification
+from yomux_lib.tmux import sessions
+from yomux_lib.workspace import session_files
 
 
-TRANSCRIPT_ROOTS_MODULE = "yolomux_lib.workspace.session_files"
+TRANSCRIPT_ROOTS_MODULE = "yomux_lib.workspace.session_files"
 
 
 @pytest.fixture(autouse=True)

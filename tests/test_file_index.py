@@ -7,12 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib import file_index
-from yolomux_lib import filesystem
-from yolomux_lib.filesystem import SEARCH_SKIP_DIRS
-from yolomux_lib.filesystem import search as fs_search
-from yolomux_lib.search import bfs_index
-from yolomux_lib.search import search_indexer
+from yomux_lib import file_index
+from yomux_lib import filesystem
+from yomux_lib.filesystem import SEARCH_SKIP_DIRS
+from yomux_lib.filesystem import search as fs_search
+from yomux_lib.search import bfs_index
+from yomux_lib.search import search_indexer
 
 
 def _clear_registry():

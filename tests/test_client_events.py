@@ -5,11 +5,11 @@ from pathlib import Path
 
 import pytest
 
-import yolomux_lib.client_events as client_events
-from yolomux_lib.client_events import CLIENT_EVENT_TYPES
-from yolomux_lib.client_events import ClientEventBroker
-from yolomux_lib.search import file_index
-from yolomux_lib.search.search_indexer import PersistentSearchIndexer
+import yomux_lib.client_events as client_events
+from yomux_lib.client_events import CLIENT_EVENT_TYPES
+from yomux_lib.client_events import ClientEventBroker
+from yomux_lib.search import file_index
+from yomux_lib.search.search_indexer import PersistentSearchIndexer
 
 
 def test_client_event_broker_skips_json_byte_measurement_without_subscribers(monkeypatch):
@@ -319,7 +319,7 @@ def test_app_publishes_only_known_client_event_types():
     # every event name app.py emits via publish_client_event("...") must be in the canonical
     # CLIENT_EVENT_TYPES set. The browser's EventSource subscribes by these names, so a server-side typo
     # silently means "no client ever hears this event" — this catches that drift at test time.
-    app_src = (REPO_ROOT / "yolomux_lib" / "app.py").read_text(encoding="utf-8")
+    app_src = (REPO_ROOT / "yomux_lib" / "app.py").read_text(encoding="utf-8")
     emitted = set(re.findall(r"publish_client_event\(\s*[\"']([a-z_]+)[\"']", app_src))
     assert emitted, "expected to find publish_client_event(\"...\") string-literal calls"
     unknown = emitted - CLIENT_EVENT_TYPES
@@ -327,7 +327,7 @@ def test_app_publishes_only_known_client_event_types():
 
 
 def test_browser_client_event_contract_matches_server_event_types():
-    source = (REPO_ROOT / "static_src" / "js" / "yolomux" / "99_client_event_transport.js").read_text(encoding="utf-8")
+    source = (REPO_ROOT / "static_src" / "js" / "yomux" / "99_client_event_transport.js").read_text(encoding="utf-8")
     match = re.search(r"const clientServerPushEventTypes = Object\.freeze\(\[(.*?)\]\);", source, flags=re.DOTALL)
     assert match, "browser EventSource/dispatch contract must have one declared event table"
     browser_types = set(re.findall(r"'([a-z_]+)'", match.group(1)))
@@ -342,6 +342,15 @@ def test_browser_client_event_contract_matches_server_event_types():
 def test_update_available_is_a_known_client_event():
     # The server pushes "update_available" over /api/client-events; the browser subscribes by name.
     assert "update_available" in CLIENT_EVENT_TYPES
+
+
+def test_generation_ready_is_dispatched_to_old_and_new_browser_event_names():
+    source = (REPO_ROOT / "static_src" / "js" / "yomux" / "99_client_event_transport.js").read_text(encoding="utf-8")
+    assert "new CustomEvent('yolomux:generation-ready', {detail: payload})" in source
+    assert "new CustomEvent('yomux:generation-ready', {detail: payload})" in source
+    consumer = (REPO_ROOT / "static_src" / "js" / "yomux" / "40_file_explorer_files.js").read_text(encoding="utf-8")
+    assert "window.addEventListener('yomux:generation-ready'" in consumer
+    assert "window.addEventListener('yolomux:generation-ready'" not in consumer
 
 
 def test_search_progress_emitted_in_the_indexd_daemon_reaches_a_web_client(make_tmux_webterm_app, tmp_path):

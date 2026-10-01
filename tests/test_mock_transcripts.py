@@ -12,11 +12,11 @@ from tools.mockers.transcript import MOCK_TRANSCRIPTS_ENV
 from tools.mockers.transcript import MockTranscriptSpec
 from tools.mockers.transcript import generate_mock_transcripts
 from tools.mockers.transcript import generate_mock_transcripts_from_env
-from yolomux_lib import session_files
-from yolomux_lib.stats_current import materializer
-from yolomux_lib.stats_current import storage
-from yolomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
-from yolomux_lib.stats_current.usage import usage_atom_from_source
+from yomux_lib import session_files
+from yomux_lib.stats_current import materializer
+from yomux_lib.stats_current import storage
+from yomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
+from yomux_lib.stats_current.usage import usage_atom_from_source
 
 
 @pytest.fixture(autouse=True)

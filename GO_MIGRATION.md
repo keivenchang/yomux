@@ -1,4 +1,4 @@
-# YOLOmux Go Backend Status
+# YOmux Go Backend Status
 
 This document records the Go backend capabilities implemented in this tree. Go is the default server for managed/operator launches, including `boot.sh`, `make run`, and `yolo-dev-start`. The Python server is already deprecated and is available only as an explicit temporary fallback while the remaining Go gaps close; its planned removal is around late October 2026, about one month from this release. The Go server still uses Python to render the shared HTML shell, which does not select the Python server. Go exposes only the capabilities and routes it owns.
 
@@ -14,19 +14,19 @@ Build, validate, and start a Go instance with:
 
 ```bash
 make setup
-bazel --bazelrc=/dev/null build --jobs=auto //cmd/yolomux-go:yolomux_go
+bazel --bazelrc=/dev/null build --jobs=auto //cmd/yomux-go:yomux-go
 tools/run_bazel_tests.sh --jobs "$(getconf _NPROCESSORS_ONLN)"
-YOLOMUX_START_LOAD_WAIT_SECONDS=30 ./boot.sh 7221
+YOMUX_START_LOAD_WAIT_SECONDS=30 ./boot.sh 7221
 ```
 
-`boot.sh` finds the canonical Bazel output at `bazel-bin/cmd/yolomux-go/yolomux_go_/yolomux_go`, applies the shared startup/load/port lifecycle, invokes `python3 yolomux.py --backend go`, and then the Python CLI replaces itself with the Go process while carrying host, port, checkout root, and environment-selected config/state. `--golang` and `--backend go` remain aliases. `--backend python` is rejected; `--deprecated-python` is the only managed Python selection. Managed startup binds `0.0.0.0` by default. Direct execution of the Go binary defaults to `127.0.0.1`, so use the launcher for operator runs. A raw `python3 yolomux.py` invocation remains a legacy direct entrypoint and may select Python; use `boot.sh` for the normal Go default or pass `--backend go` explicitly.
+`boot.sh` finds the canonical Bazel output at `bazel-bin/cmd/yomux-go/yomux-go_/yomux-go`, applies the shared startup/load/port lifecycle, invokes `python3 yomux.py --backend go`, and then the Python CLI replaces itself with the Go process while carrying host, port, checkout root, and environment-selected config/state. `--golang` and `--backend go` remain aliases. `--backend python` is rejected by managed `boot.sh`; use `--deprecated-python`. Managed startup binds `0.0.0.0` by default. Direct execution of the Go binary defaults to `127.0.0.1`, so use the launcher for operator runs. Direct `python3 yomux.py` also selects Go unless `--backend python` is explicit.
 
 A Go process launched by an older managed launcher may not hold the shared root and port leases. Gracefully stop that verified listener once before migrating it; new managed Go processes retain those leases across `exec`, so later `boot.sh --force <port>` restarts can replace them safely.
 
-Go owns TLS after the `exec`: by default it generates a self-signed certificate with Go's crypto library under `${TMPDIR:-/tmp}/yolomux-go-tls-<port>/`. The managed Python launcher forwards `--dang` as Go's `--dangerously-yolo`; Python `--cert`, `--key`, `--http`, and `--dev` behavior still does not carry over. The Go binary accepts its own `--cert`, `--key`, `--http`, and `--dangerously-yolo` flags for fixture/direct use, but a direct launch does not replace `boot.sh` lifecycle and isolation checks.
-All operator launch forms use the machine-wide default tmux server for the launching Unix user. Managed launchers remove inherited `TMUX`, `TMUX_PANE`, and `YOLOMUX_TMUX_SOCKET` routing before starting Python or Go, so `tmux list-sessions` and the Go/Python session APIs see every session on that server. Direct Python, Go, and companion-tool entrypoints apply the same normalization for ordinary launches; an explicit `YOLOMUX_TMUX_SOCKET` is preserved only when an isolated test or fixture deliberately supplies it. A different Unix user's tmux server is not implicitly accessible.
+Go owns TLS after the `exec`: by default it generates a self-signed certificate with Go's crypto library under `${TMPDIR:-/tmp}/yomux-go-tls-<port>/`. The managed Python launcher forwards `--http`, `--cert`, and `--key`, and maps `--dang` to Go's `--dangerously-yolo`. Python-only `--sessions`, transcript-report, runtime-report, and `--dev` options return a clear error on Go. The Go binary also accepts its own `--cert`, `--key`, `--http`, and `--dangerously-yolo` flags for fixture/direct use, but a direct launch does not replace `boot.sh` lifecycle and isolation checks.
+All operator launch forms use the machine-wide default tmux server for the launching Unix user. Managed launchers remove inherited `TMUX`, `TMUX_PANE`, and `YOMUX_TMUX_SOCKET` routing before starting Python or Go, so `tmux list-sessions` and the Go/Python session APIs see every session on that server. Direct Python, Go, and companion-tool entrypoints apply the same normalization for ordinary launches; an explicit `YOMUX_TMUX_SOCKET` is preserved only when an isolated test or fixture deliberately supplies it. A different Unix user's tmux server is not implicitly accessible.
 
-The Go server still requires Python runtime dependencies and this checkout's generated static assets. It invokes `python3` to render `login_html()` and `html_page()` from `yolomux_lib.web`; it does not contain a second HTML shell.
+The Go server still requires Python runtime dependencies and this checkout's generated static assets. It invokes `python3` to render `login_html()` and `html_page()` from `yomux_lib.web`; it does not contain a second HTML shell.
 
 Automated tests must not use an operator port. `tools/run_bazel_tests.sh` starts disposable Docker state and fixture-owned ports. Port 7221 is reserved for a final manual check after the Dockerized gate. The operator runtime on port 7220 is outside automated test workflows and should only be restarted or smoke-tested as an explicit operator action.
 
@@ -48,7 +48,7 @@ flowchart LR
   listener --> python["python3: shared login/application HTML rendering"]
 ```
 
-One `yolomux-go` process owns:
+One `yomux-go` process owns:
 
 * HTTPS, TLS, authentication, static files, and the shared application bootstrap.
 
@@ -66,16 +66,16 @@ The Go process does not start or talk to Python `statsd`, `indexd`, `batchd`, `s
 
 | Owner | Responsibility |
 | --- | --- |
-| `cmd/yolomux-go/main.go` | Listener, TLS/auth, tmux PTY/WebSocket, core routes, event broker, operation journal, diagnostics, Python HTML rendering, startup, and shutdown |
-| `cmd/yolomux-go/finder_jobs.go` | Bounded interactive, background, bulk, and streaming Finder admission and operation completion |
-| `cmd/yolomux-go/differ_routes.go` | Session-file request identity, persistent cache, Git-backed Differ data, and cache refresh |
-| `cmd/yolomux-go/stats_runtime.go` | YO!stats route adapters, runtime collectors, migration, snapshots, deltas, streams, pricing, readiness, and diagnostics |
+| `cmd/yomux-go/main.go` | Listener, TLS/auth, tmux PTY/WebSocket, core routes, event broker, operation journal, diagnostics, Python HTML rendering, startup, and shutdown |
+| `cmd/yomux-go/finder_jobs.go` | Bounded interactive, background, bulk, and streaming Finder admission and operation completion |
+| `cmd/yomux-go/differ_routes.go` | Session-file request identity, persistent cache, Git-backed Differ data, and cache refresh |
+| `cmd/yomux-go/stats_runtime.go` | YO!stats route adapters, runtime collectors, migration, snapshots, deltas, streams, pricing, readiness, and diagnostics |
 | `internal/capabilities` | One capability catalog used by bootstrap, route admission, and diagnostics |
 | `internal/finder` | Descriptor-bound filesystem access, listing, read/raw/info, watch, search, Git diff/history/commit/blame, mutations, upload, archive, and HTML preview |
 | `internal/stats` | SQLite writer/readers, schema, observations, snapshots, rings, lifecycle materialization, host collection, agent status, token collection, pricing, and OpenCode |
 | `internal/work` | Bounded worker/queue scheduler used inside the Go process |
 | `static_src/` and `static/` | Shared browser source and generated bundle used by both backends |
-| `yolomux_lib.web` | Shared HTML/login renderer currently invoked by both launch modes |
+| `yomux_lib.web` | Shared HTML/login renderer currently invoked by both launch modes |
 
 ## Capability Contract
 
@@ -103,7 +103,7 @@ Any unregistered `/api/*` request receives HTTP `501` with `error: feature_unava
 
 ## Registered Go Routes
 
-The following routes have concrete handlers in `cmd/yolomux-go`.
+The following routes have concrete handlers in `cmd/yomux-go`.
 
 ### Core, Authentication, Events, And Operations
 
@@ -159,7 +159,7 @@ Finder's fast path lists names without optional repository enrichment. The brows
 
 ### YO!stats
 
-Tabber's Go API is separate from YO!stats storage: `/api/activity?scope=all` returns the global tmux session order plus live pane/window metadata and activity fields consumed by the shared Tabber tree. The Go command boundary clears inherited nested-tmux variables for this machine-wide read; tests use `YOLOMUX_TMUX_SOCKET` with synthetic sessions when isolation is required.
+Tabber's Go API is separate from YO!stats storage: `/api/activity?scope=all` returns the global tmux session order plus live pane/window metadata and activity fields consumed by the shared Tabber tree. The Go command boundary clears inherited nested-tmux variables for this machine-wide read; tests use `YOMUX_TMUX_SOCKET` with synthetic sessions when isolation is required.
 
 * `/api/stats-agent-status`, `/api/stats-capabilities`
 
@@ -256,7 +256,7 @@ The wrapper accepts an optional positive integer `--jobs`; when the flag is omit
 
 * Authentication storage and throttling are not at Python parity. Go reads the shared `auth.yaml` format and enforces route roles, but its browser-form limiter is an in-memory five-failure window keyed by socket peer and username; it is not durable or shared across ports, and Go HTTP Basic authentication does not pass through that limiter. Keep the preview behind a trusted network boundary.
 
-* Go consumes `YOLOMUX_CONFIG_DIR`, `YOLOMUX_STATE_DIR`, `YOLOMUX_ROOT`, and `YOLOMUX_STATS_DATABASE`, but it does not implement Python's `YOLOMUX_RUNTIME_DIR`/`YOLOMUX_CACHE_DIR` service topology or root-policy validation. Event/operation journals, auth material, background-owner records, and the default stats database are config-rooted; the session-files cache uses the state root. Use the managed launcher so each preview gets private local roots.
+* Go consumes `YOMUX_CONFIG_DIR`, `YOMUX_STATE_DIR`, `YOMUX_ROOT`, and `YOMUX_STATS_DATABASE`, but it does not implement Python's `YOMUX_RUNTIME_DIR`/`YOMUX_CACHE_DIR` service topology or root-policy validation. Event/operation journals, auth material, background-owner records, and the default stats database are config-rooted; the session-files cache uses the state root. Use the managed launcher so each preview gets private local roots.
 
 * Go YO!stats owns its storage and collectors in process; it does not implement the legacy Python statsd RPC/lifecycle topology. Keep both backends on isolated roots while comparing them.
 

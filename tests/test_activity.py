@@ -5,12 +5,12 @@ from datetime import timezone
 import json
 import os
 
-from yolomux_lib.activity import ActivityLedger
-from yolomux_lib.activity_summary import agent_transcript_activity_ts
-from yolomux_lib.activity_summary import build_recent_agents_payload
-from yolomux_lib.common import AgentInfo
-from yolomux_lib.common import PaneInfo
-from yolomux_lib.common import SessionInfo
+from yomux_lib.activity import ActivityLedger
+from yomux_lib.activity_summary import agent_transcript_activity_ts
+from yomux_lib.activity_summary import build_recent_agents_payload
+from yomux_lib.common import AgentInfo
+from yomux_lib.common import PaneInfo
+from yomux_lib.common import SessionInfo
 
 
 def _ledger(tmp_path, idle_gap_seconds=120.0, retention_days=14.0):

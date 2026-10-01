@@ -110,11 +110,11 @@ raw_capture: |2
   ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 
-  › Ask me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should we use?
+  › Ask me this question and wait for my answer instead of choosing yourself: Which YOmux verifier mode should we use?
     1. Pane capture 2. Transcript capture
 
 
-  • Which YOLOmux verifier mode should we use?
+  • Which YOmux verifier mode should we use?
 
     1. Pane capture
     2. Transcript capture
@@ -144,11 +144,11 @@ styled_capture: |2
   ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 
-  › Ask me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should we use?
+  › Ask me this question and wait for my answer instead of choosing yourself: Which YOmux verifier mode should we use?
     1. Pane capture 2. Transcript capture
 
 
-  • Which YOLOmux verifier mode should we use?
+  • Which YOmux verifier mode should we use?
 
     1. Pane capture
     2. Transcript capture

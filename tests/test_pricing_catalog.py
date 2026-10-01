@@ -6,18 +6,18 @@ from types import SimpleNamespace
 
 import pytest
 
-from yolomux_lib.pricing_catalog import PricingCatalog
-from yolomux_lib.pricing_catalog import PricingCatalogValidationError
-from yolomux_lib.pricing_catalog import PricingSourceAdapter
-from yolomux_lib.pricing_catalog import PricingRefreshCoordinator
-from yolomux_lib.pricing_catalog import default_pricing_source_adapters
-from yolomux_lib.pricing_catalog import load_packaged_seed
-from yolomux_lib.pricing_catalog import parse_litellm_prices
-from yolomux_lib.pricing_catalog import parse_openrouter_prices
-from yolomux_lib.pricing_catalog import parse_provider_pricing_table
-from yolomux_lib.pricing_catalog import safe_source_url
-from yolomux_lib.pricing_catalog import validate_catalog
-from yolomux_lib import pricing_catalog
+from yomux_lib.pricing_catalog import PricingCatalog
+from yomux_lib.pricing_catalog import PricingCatalogValidationError
+from yomux_lib.pricing_catalog import PricingSourceAdapter
+from yomux_lib.pricing_catalog import PricingRefreshCoordinator
+from yomux_lib.pricing_catalog import default_pricing_source_adapters
+from yomux_lib.pricing_catalog import load_packaged_seed
+from yomux_lib.pricing_catalog import parse_litellm_prices
+from yomux_lib.pricing_catalog import parse_openrouter_prices
+from yomux_lib.pricing_catalog import parse_provider_pricing_table
+from yomux_lib.pricing_catalog import safe_source_url
+from yomux_lib.pricing_catalog import validate_catalog
+from yomux_lib import pricing_catalog
 
 
 def test_fresh_catalog_imports_packaged_seed_offline(tmp_path):
@@ -37,7 +37,7 @@ def test_fresh_catalog_imports_packaged_seed_offline(tmp_path):
 def test_fresh_catalog_prices_current_models_with_provenance_and_effective_dates(tmp_path):
     catalog = PricingCatalog(tmp_path)
     # Availability dates, not the seed's checked-at date, must price retained
-    # history from before this YOLOmux release.
+    # history from before this YOmux release.
     sol = catalog.resolve_rate(provider="openai", model="gpt-5.6-sol", direction="output", timestamp="2026-07-11T00:00:00Z")
     terra = catalog.resolve_rate(provider="openai", model="gpt-5.6-terra", direction="input", timestamp="2026-07-11T00:00:00Z")
     sonnet_now = catalog.resolve_rate(provider="anthropic", model="claude-sonnet-5", direction="output", timestamp="2026-08-31T23:59:59Z")
@@ -624,7 +624,7 @@ def test_explicit_override_wins_over_official_and_survives_seed_upgrade(monkeypa
     upgraded_seed = json.loads(json.dumps(seed))
     upgraded_seed["catalog_revision"] = 2
     upgraded_seed["models"][0]["rates"][0]["usd"] = "3.00"
-    monkeypatch.setattr("yolomux_lib.pricing_catalog.load_packaged_seed", lambda: upgraded_seed)
+    monkeypatch.setattr("yomux_lib.pricing_catalog.load_packaged_seed", lambda: upgraded_seed)
     catalog.reconcile_seed()
     selected = catalog.resolve_rate(provider="openai", model="gpt-4.1", direction="input")
     assert selected is not None and str(selected.usd) == "9.00" and selected.source_kind == "override"
@@ -637,7 +637,7 @@ def test_seed_downgrade_does_not_replace_newer_official_catalog(monkeypatch, tmp
     official["models"][0]["rates"][0]["usd"] = "4.00"
     adapter = PricingSourceAdapter("openai", "https://platform.openai.com/docs/pricing", "official", lambda value: json.loads(value.decode()))
     catalog.refresh([adapter], fetch=lambda *_args: (200, {}, json.dumps(official).encode()))
-    monkeypatch.setattr("yolomux_lib.pricing_catalog.load_packaged_seed", load_packaged_seed)
+    monkeypatch.setattr("yomux_lib.pricing_catalog.load_packaged_seed", load_packaged_seed)
     catalog.reconcile_seed()
     selected = catalog.resolve_rate(provider="openai", model="gpt-4.1", direction="input")
     assert selected is not None and str(selected.usd) == "4.00" and selected.source_kind == "official"

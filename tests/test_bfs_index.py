@@ -20,10 +20,10 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib.filesystem import SEARCH_SKIP_DIRS
-from yolomux_lib.filesystem import paths as filesystem_paths
-from yolomux_lib.search import bfs_index
-from yolomux_lib.search import file_index
+from yomux_lib.filesystem import SEARCH_SKIP_DIRS
+from yomux_lib.filesystem import paths as filesystem_paths
+from yomux_lib.search import bfs_index
+from yomux_lib.search import file_index
 
 
 @pytest.fixture(autouse=True)

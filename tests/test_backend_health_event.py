@@ -24,16 +24,16 @@ from pathlib import Path
 import pytest
 from tests.helpers.backend_health_scenarios import BackendHealthHarness as Harness
 
-from yolomux_lib.backend_health.observer import BACKEND_HEALTH_DEBOUNCE_OBSERVATIONS
-from yolomux_lib.backend_health.observer import BACKEND_HEALTH_EVENT
-from yolomux_lib.backend_health.observer import BACKEND_HEALTH_EVENT_MAX_RESOURCES
-from yolomux_lib.client_events import CLIENT_EVENT_CHANNELS
-from yolomux_lib.client_events import CLIENT_EVENT_RETAINED_TYPES
-from yolomux_lib.client_events import CLIENT_EVENT_TYPE_CHANNELS
-from yolomux_lib.client_events import CLIENT_EVENT_TYPES
-from yolomux_lib.client_events import ClientEventBroker
-from yolomux_lib.client_events import client_event_resource
-from yolomux_lib.local_services.rpc import reset_local_service_traffic
+from yomux_lib.backend_health.observer import BACKEND_HEALTH_DEBOUNCE_OBSERVATIONS
+from yomux_lib.backend_health.observer import BACKEND_HEALTH_EVENT
+from yomux_lib.backend_health.observer import BACKEND_HEALTH_EVENT_MAX_RESOURCES
+from yomux_lib.client_events import CLIENT_EVENT_CHANNELS
+from yomux_lib.client_events import CLIENT_EVENT_RETAINED_TYPES
+from yomux_lib.client_events import CLIENT_EVENT_TYPE_CHANNELS
+from yomux_lib.client_events import CLIENT_EVENT_TYPES
+from yomux_lib.client_events import ClientEventBroker
+from yomux_lib.client_events import client_event_resource
+from yomux_lib.local_services.rpc import reset_local_service_traffic
 
 
 PAYLOAD_KEYS = {"epoch", "revision", "overall_state", "degraded_resources"}

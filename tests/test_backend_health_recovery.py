@@ -38,39 +38,39 @@ import pytest
 from tests.helpers.backend_health_scenarios import FakeService
 from tests.helpers.backend_health_scenarios import RecoveryHarness
 
-from yolomux_lib.backend_health.observer import BACKEND_HEALTH_OBSERVE_SECONDS
-from yolomux_lib.backend_health.observer import BACKEND_HEALTH_RECOVERY_ARMING_SECONDS
-from yolomux_lib.backend_health.observer import BACKEND_HEALTH_RECOVERY_BACKOFF_SECONDS
-from yolomux_lib.backend_health.observer import BACKEND_HEALTH_RECOVERY_MAX_ATTEMPTS
-from yolomux_lib.backend_health.observer import BLOCKED_CONTROL_ERROR
-from yolomux_lib.backend_health.observer import BLOCKED_DEMAND_STARTED_ABSENT
-from yolomux_lib.backend_health.observer import BLOCKED_NO_CONTROL
-from yolomux_lib.backend_health.observer import BLOCKED_OBSERVER_ARMING
-from yolomux_lib.backend_health.observer import RECOVERY_ELIGIBLE_REASONS
-from yolomux_lib.backend_health.observer import RECOVERY_EXHAUSTED
-from yolomux_lib.backend_health.observer import RECOVERY_NONE
-from yolomux_lib.backend_health.observer import RECOVERY_NOT_ATTEMPTED
-from yolomux_lib.backend_health.observer import RECOVERY_RECOVERED
-from yolomux_lib.backend_health.observer import RECOVERY_SCHEDULED
-from yolomux_lib.backend_health.observer import REASON_IDENTITY_MISMATCH
-from yolomux_lib.backend_health.observer import REASON_REVISION_MISMATCH
-from yolomux_lib.backend_health.observer import ServiceRecoveryPlanner
-from yolomux_lib.backend_health.observer import observed_health
-from yolomux_lib.backend_health.observer import recovery_blocked_cause
-from yolomux_lib.backend_health.observer import recovery_blocked_token
-from yolomux_lib.backend_health.observer import recovery_row_fence
-from yolomux_lib.backend_health.store import BACKEND_HEALTH_REASON_CODES
-from yolomux_lib.backend_health.store import TRANSITION_ROW_FIELDS
-from yolomux_lib.local_service_projection import LOCAL_SERVICE_INVENTORY
-from yolomux_lib.local_services.rpc import reset_local_service_traffic
-from yolomux_lib.infra import batchd
-from yolomux_lib.infra.batchd import BatchClient
-from yolomux_lib.infra.batchd import BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE
-from yolomux_lib import app as app_module
+from yomux_lib.backend_health.observer import BACKEND_HEALTH_OBSERVE_SECONDS
+from yomux_lib.backend_health.observer import BACKEND_HEALTH_RECOVERY_ARMING_SECONDS
+from yomux_lib.backend_health.observer import BACKEND_HEALTH_RECOVERY_BACKOFF_SECONDS
+from yomux_lib.backend_health.observer import BACKEND_HEALTH_RECOVERY_MAX_ATTEMPTS
+from yomux_lib.backend_health.observer import BLOCKED_CONTROL_ERROR
+from yomux_lib.backend_health.observer import BLOCKED_DEMAND_STARTED_ABSENT
+from yomux_lib.backend_health.observer import BLOCKED_NO_CONTROL
+from yomux_lib.backend_health.observer import BLOCKED_OBSERVER_ARMING
+from yomux_lib.backend_health.observer import RECOVERY_ELIGIBLE_REASONS
+from yomux_lib.backend_health.observer import RECOVERY_EXHAUSTED
+from yomux_lib.backend_health.observer import RECOVERY_NONE
+from yomux_lib.backend_health.observer import RECOVERY_NOT_ATTEMPTED
+from yomux_lib.backend_health.observer import RECOVERY_RECOVERED
+from yomux_lib.backend_health.observer import RECOVERY_SCHEDULED
+from yomux_lib.backend_health.observer import REASON_IDENTITY_MISMATCH
+from yomux_lib.backend_health.observer import REASON_REVISION_MISMATCH
+from yomux_lib.backend_health.observer import ServiceRecoveryPlanner
+from yomux_lib.backend_health.observer import observed_health
+from yomux_lib.backend_health.observer import recovery_blocked_cause
+from yomux_lib.backend_health.observer import recovery_blocked_token
+from yomux_lib.backend_health.observer import recovery_row_fence
+from yomux_lib.backend_health.store import BACKEND_HEALTH_REASON_CODES
+from yomux_lib.backend_health.store import TRANSITION_ROW_FIELDS
+from yomux_lib.local_service_projection import LOCAL_SERVICE_INVENTORY
+from yomux_lib.local_services.rpc import reset_local_service_traffic
+from yomux_lib.infra import batchd
+from yomux_lib.infra.batchd import BatchClient
+from yomux_lib.infra.batchd import BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE
+from yomux_lib import app as app_module
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-OBSERVER_SOURCE = REPO_ROOT / "yolomux_lib" / "backend_health" / "observer.py"
+OBSERVER_SOURCE = REPO_ROOT / "yomux_lib" / "backend_health" / "observer.py"
 
 # The bounded-token alphabet the retained store accepts (`store.py`). A recovery outcome that
 # does not match it is replaced by `recovery_invalid` and loses its cause.

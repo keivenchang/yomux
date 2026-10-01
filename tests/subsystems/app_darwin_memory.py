@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from yolomux_lib import app as app_module
+from yomux_lib import app as app_module
 
 
 def assert_darwin_memory_details_match_one_native_vm_snapshot(monkeypatch):

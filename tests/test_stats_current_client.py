@@ -8,10 +8,10 @@ from types import MappingProxyType
 
 import pytest
 
-from yolomux_lib import common
-from yolomux_lib.stats_current import client as client_module
-from yolomux_lib.stats_current import protocol, revision, storage
-from yolomux_lib.local_services.rpc import safe_socket_path
+from yomux_lib import common
+from yomux_lib.stats_current import client as client_module
+from yomux_lib.stats_current import protocol, revision, storage
+from yomux_lib.local_services.rpc import safe_socket_path
 
 
 def observation(index: int = 1) -> storage.Observation:

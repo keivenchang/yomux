@@ -7,9 +7,9 @@ import time
 
 import pytest
 
-from yolomux_lib.local_services.rpc import LOCAL_RPC_MAX_METADATA_BYTES
-from yolomux_lib.stats_current import client as client_module
-from yolomux_lib.stats_current import collectors, runtime, scheduler, storage
+from yomux_lib.local_services.rpc import LOCAL_RPC_MAX_METADATA_BYTES
+from yomux_lib.stats_current import client as client_module
+from yomux_lib.stats_current import collectors, runtime, scheduler, storage
 
 
 class FakeClient:

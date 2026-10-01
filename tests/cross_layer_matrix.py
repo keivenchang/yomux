@@ -13,16 +13,16 @@ import re
 import subprocess
 from typing import Mapping, Sequence
 
-from yolomux_lib import session_files
-from yolomux_lib.pricing_catalog import PricingCatalog
-from yolomux_lib.stats_current import materializer, pricing
-from yolomux_lib.stats_current.storage import DATABASE_FILENAME, Store, UsageAtom
-from yolomux_lib.stats_current.usage import usage_atom_from_source
+from yomux_lib import session_files
+from yomux_lib.pricing_catalog import PricingCatalog
+from yomux_lib.stats_current import materializer, pricing
+from yomux_lib.stats_current.storage import DATABASE_FILENAME, Store, UsageAtom
+from yomux_lib.stats_current.usage import usage_atom_from_source
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OBSERVED_USAGE_FIXTURES = REPO_ROOT / "tests" / "fixtures" / "current_model_usage"
-CURRENT_STATS_OWNER_PATH = Path("static_src/js/yolomux/84_stats_current.js")
+CURRENT_STATS_OWNER_PATH = Path("static_src/js/yomux/84_stats_current.js")
 CURRENT_STATS_OWNER_FUNCTION = "fetchSnapshot"
 LEGACY_STATS_DELEGATE_FUNCTION = "pollJsDebugStatsSample"
 
@@ -257,7 +257,7 @@ def render_cost_model_table(report: Mapping[str, object]) -> str:
     script = r"""
 const fs = require('node:fs');
 const vm = require('node:vm');
-const source = fs.readFileSync('static_src/js/yolomux/85_debug_panel.js', 'utf8');
+const source = fs.readFileSync('static_src/js/yomux/85_debug_panel.js', 'utf8');
 const sourceFunction = (name, nextName) => {
   const start = source.indexOf(`function ${name}(`);
   const end = source.indexOf(`\nfunction ${nextName}(`, start);

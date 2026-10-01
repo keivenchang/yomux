@@ -2,37 +2,62 @@ import ast
 from pathlib import Path
 import signal
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
 from tests.source_inventory import parsed_python_source
 from tests.source_inventory import python_source_paths
-from yolomux_lib import agent_tui
-from yolomux_lib import app
-from yolomux_lib import common
-from yolomux_lib import session_files
-from yolomux_lib import version
-from yolomux_lib import web
-from yolomux_lib.filesystem import git_ops
-from yolomux_lib.tmux import process_group_ownership
-from yolomux_lib.yoagent import conversation
+from yomux_lib import agent_tui
+from yomux_lib import app
+from yomux_lib import common
+from yomux_lib import session_files
+from yomux_lib import version
+from yomux_lib import web
+from yomux_lib.filesystem import git_ops
+from yomux_lib.tmux import process_group_ownership
+from yomux_lib.yoagent import conversation
 
 
 def test_package_and_runtime_versions_use_one_source():
     root = Path(common.PROJECT_ROOT)
-    version_source = (root / "yolomux_lib" / "version.py").read_text(encoding="utf-8")
-    version_match = common.YOLOMUX_VERSION_ASSIGNMENT_RE.search(version_source)
+    version_source = (root / "yomux_lib" / "version.py").read_text(encoding="utf-8")
+    version_match = common.YOMUX_VERSION_ASSIGNMENT_RE.search(version_source)
     assert version_match is not None
-    assert version_match.group(1) == version.YOLOMUX_VERSION == common.YOLOMUX_VERSION
-    assert 'version = { attr = "yolomux_lib.version.YOLOMUX_VERSION" }' in (root / "pyproject.toml").read_text(encoding="utf-8")
-    assert "YOLOMUX_VERSION = \"" not in (root / "yolomux_lib" / "common.py").read_text(encoding="utf-8")
-    assert "YOLOMUX_VERSION = \"" not in (root / "yolomux_lib" / "infra" / "common.py").read_text(encoding="utf-8")
+    assert version_match.group(1) == version.YOMUX_VERSION == common.YOMUX_VERSION
+    assert 'version = { attr = "yomux_lib.version.YOMUX_VERSION" }' in (root / "pyproject.toml").read_text(encoding="utf-8")
+    assert "YOMUX_VERSION = \"" not in (root / "yomux_lib" / "common.py").read_text(encoding="utf-8")
+    assert "YOMUX_VERSION = \"" not in (root / "yomux_lib" / "infra" / "common.py").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("variable", ("YOMUX_VERSION", "YOLOMUX_VERSION"))
+def test_version_source_parser_accepts_current_and_historical_names(variable):
+    assert common.parse_yomux_version_source(f'{variable} = "0.9.5"\n') == "0.9.5"
+
+
+def test_git_version_reader_falls_back_to_historical_package_path(monkeypatch):
+    calls = []
+
+    def fake_git(args, cwd, timeout=3.0):
+        calls.append(args)
+        if args == ["show", "v0.9.5:yomux_lib/version.py"]:
+            return SimpleNamespace(returncode=128, stdout="", stderr="path not found")
+        if args == ["show", "v0.9.5:yolomux_lib/version.py"]:
+            return SimpleNamespace(returncode=0, stdout='YOLOMUX_VERSION = "0.9.5"\n', stderr="")
+        raise AssertionError(f"unexpected git args: {args}")
+
+    monkeypatch.setattr(common, "git", fake_git)
+    assert common.git_yomux_version_at_ref("/repo", "v0.9.5") == ("0.9.5", None)
+    assert calls == [
+        ["show", "v0.9.5:yomux_lib/version.py"],
+        ["show", "v0.9.5:yolomux_lib/version.py"],
+    ]
 
 
 def test_record_owned_thread_starts_use_shared_rollback_owner():
     root = Path(common.PROJECT_ROOT)
     owners = {
-        "yolomux_lib/app.py": {
+        "yomux_lib/app.py": {
             "start_client_event_watcher",
             "start_watchd_revision_watcher",
             "start_input_heartbeat_worker",
@@ -42,8 +67,8 @@ def test_record_owned_thread_starts_use_shared_rollback_owner():
             "warm_metadata_cache_async",
             "start_update_check_thread",
         },
-        "yolomux_lib/search/file_index.py": {"_start_build"},
-        "yolomux_lib/yoagent/controller.py": {
+        "yomux_lib/search/file_index.py": {"_start_build"},
+        "yomux_lib/yoagent/controller.py": {
             "start_yoagent_action_result_watcher",
             "start_yoagent_backend_prewarm",
         },
@@ -75,7 +100,7 @@ def test_record_owned_thread_starts_use_shared_rollback_owner():
 
 def test_main_process_cpu_work_has_named_allowlist():
     root = Path(common.PROJECT_ROOT)
-    app_path = root / "yolomux_lib" / "app.py"
+    app_path = root / "yomux_lib" / "app.py"
     source, tree = parsed_python_source(app_path)
     parents = {
         child: parent
@@ -138,9 +163,9 @@ def test_main_process_cpu_work_has_named_allowlist():
     for pattern in retired_patterns:
         assert pattern not in source
 
-    batchd_source = (root / "yolomux_lib" / "infra" / "batchd.py").read_text(encoding="utf-8")
+    batchd_source = (root / "yomux_lib" / "infra" / "batchd.py").read_text(encoding="utf-8")
     assert '"transcript_view": _transcript_view' in batchd_source
-    routes_source = (root / "yolomux_lib" / "http_routes.py").read_text(encoding="utf-8")
+    routes_source = (root / "yomux_lib" / "http_routes.py").read_text(encoding="utf-8")
     assert routes_source.count("write_json_bytes(result.body, status=result.status)") == 2
 
 
@@ -174,7 +199,7 @@ def test_backend_primitive_consumers_share_the_canonical_owners():
 
 
 def test_backend_primitive_implementation_bodies_have_one_owner():
-    root = Path(common.PROJECT_ROOT) / "yolomux_lib"
+    root = Path(common.PROJECT_ROOT) / "yomux_lib"
     functions = []
     for path in python_source_paths(str(root)):
         _source, tree = parsed_python_source(path)

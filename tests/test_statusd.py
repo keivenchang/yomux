@@ -24,19 +24,19 @@ from tests.helpers.mock_agents import short_tmux_socket_path
 from tests.helpers.mock_agents import tmux_cmd
 from tests.helpers.mock_agents import wait_for_mockcase_render
 from tests.helpers.mock_agents import REPO_ROOT
-from yolomux_lib import control as control_module
-from yolomux_lib import sessions as sessions_mod
-from yolomux_lib import statusd
-from yolomux_lib import statusd_client
-from yolomux_lib.local_services import client as local_service_client_module
-from yolomux_lib.local_services import rpc
-from yolomux_lib.local_services import runtime as local_service_runtime
-from yolomux_lib.app import TmuxWebtermApp
-from yolomux_lib.statusd_client import StatusClient
-from yolomux_lib.statusd_protocol import validate_inventory
-from yolomux_lib.statusd_protocol import StatusSnapshotMetadata
-from yolomux_lib.statusd_protocol import stamped_request
-from yolomux_lib.tmux_utils import YOLOMUX_TMUX_SOCKET_ENV
+from yomux_lib import control as control_module
+from yomux_lib import sessions as sessions_mod
+from yomux_lib import statusd
+from yomux_lib import statusd_client
+from yomux_lib.local_services import client as local_service_client_module
+from yomux_lib.local_services import rpc
+from yomux_lib.local_services import runtime as local_service_runtime
+from yomux_lib.app import TmuxWebtermApp
+from yomux_lib.statusd_client import StatusClient
+from yomux_lib.statusd_protocol import validate_inventory
+from yomux_lib.statusd_protocol import StatusSnapshotMetadata
+from yomux_lib.statusd_protocol import stamped_request
+from yomux_lib.tmux_utils import YOLOMUX_TMUX_SOCKET_ENV
 
 
 class FakeStatusApp:
@@ -1871,7 +1871,7 @@ def test_statusd_orphan_diagnostics_reports_without_signalling_and_retains_age(t
             "-c",
             "import time; time.sleep(60)",
             "-m",
-            "yolomux_lib.fixture_stand_in",
+            "yomux_lib.fixture_stand_in",
             "--socket",
             str(service.socket_path.parent / "orphan-fixture.sock"),
         ]

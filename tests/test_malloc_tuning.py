@@ -11,10 +11,10 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib.infra.malloc_tuning import DEFAULT_ARENA_MAX
-from yolomux_lib.infra.malloc_tuning import cap_malloc_arenas
-from yolomux_lib.infra.worktree_writer import child_process_artifact_environment
-from yolomux_lib.local_services.registry import inherited_python_path
+from yomux_lib.infra.malloc_tuning import DEFAULT_ARENA_MAX
+from yomux_lib.infra.malloc_tuning import cap_malloc_arenas
+from yomux_lib.infra.worktree_writer import child_process_artifact_environment
+from yomux_lib.local_services.registry import inherited_python_path
 
 ROOT = Path(__file__).resolve().parents[1]
 ARENA_PROBE = ROOT / "tests" / "helpers" / "glibc_arena_probe.py"

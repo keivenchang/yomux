@@ -59,7 +59,7 @@ def synthetic_server_environment(overrides: dict[str, str]) -> dict[str, str]:
 def resolve_source_root() -> Path:
     configured = os.environ.get("YOLOMUX_E2E_SOURCE_ROOT", "").strip()
     source_root = Path(configured) if configured else Path.cwd()
-    required = (source_root / "static/yolomux.js", source_root / "tools", source_root / "yolomux_lib")
+    required = (source_root / "static/yomux.js", source_root / "tools", source_root / "yomux_lib")
     if not all(path.exists() for path in required):
         missing = ", ".join(str(path) for path in required if not path.exists())
         raise RuntimeError(f"E2E source root is missing required assets: {missing}")
@@ -128,12 +128,12 @@ def main(binary: str) -> None:
         private_source_root = root / "server-root"
         shutil.copytree(source_root / "static", private_source_root / "static")
         expected_bundle_hashes = {
-            "yolomux.js": sha256_file(private_source_root / "static" / "yolomux.js"),
-            "yolomux.css": sha256_file(private_source_root / "static" / "yolomux.css"),
+            "yomux.js": sha256_file(private_source_root / "static" / "yomux.js"),
+            "yomux.css": sha256_file(private_source_root / "static" / "yomux.css"),
         }
         binary_hash = sha256_file(Path(binary))
         shutil.copytree(source_root / "tools", private_source_root / "tools")
-        shutil.copytree(source_root / "yolomux_lib", private_source_root / "yolomux_lib")
+        shutil.copytree(source_root / "yomux_lib", private_source_root / "yomux_lib")
         finder_root = private_source_root / "finder-fixture"
         (finder_root / "nested").mkdir(parents=True)
         (finder_root / "note.md").write_text("hello from finder\n", encoding="utf-8")
@@ -154,7 +154,7 @@ def main(binary: str) -> None:
         git_note.write_text("base\n", encoding="utf-8")
         subprocess.run(("git", "init", "-q", str(git_root)), check=True)
         subprocess.run(("git", "-C", str(git_root), "config", "user.email", "e2e@example.invalid"), check=True)
-        subprocess.run(("git", "-C", str(git_root), "config", "user.name", "YOLOmux E2E"), check=True)
+        subprocess.run(("git", "-C", str(git_root), "config", "user.name", "YOmux E2E"), check=True)
         subprocess.run(("git", "-C", str(git_root), "add", "note.txt"), check=True)
         subprocess.run(("git", "-C", str(git_root), "commit", "-qm", "base"), check=True)
         subprocess.run(("git", "-C", str(git_root), "branch", "-M", "e2e-feature"), check=True)
@@ -455,7 +455,7 @@ exec /bin/sleep 300
                         error: 'terminal did not connect',
                         url: location.href,
                         body: document.body.innerText.slice(0, 300),
-                        bootstrap: document.getElementById('yolomux-bootstrap')?.textContent?.slice(0, 2000) || null,
+                        bootstrap: (document.getElementById('yomux-bootstrap') || document.getElementById('yolomux-bootstrap'))?.textContent?.slice(0, 2000) || null,
                         activeSessions: typeof activeSessions !== 'undefined' ? activeSessions : null,
                         layoutSlots: typeof layoutSlots !== 'undefined' ? layoutSlots : null,
                         terminal: Boolean(item?.term),
@@ -1233,7 +1233,7 @@ exec /bin/sleep 300
                           }
                         });
                         if (!paragraph) throw new Error('ViewEdit paragraph selection target is missing');
-                        view.dispatch(view.state.tr.setSelection(YOLOmuxProseMirror.TextSelection.create(view.state.doc, paragraphStart + paragraph.content.size)));
+                        view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, paragraphStart + paragraph.content.size)));
                         view.focus();
                         const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='), byte => byte.charCodeAt(0));
                         const transfer = new DataTransfer();
@@ -1618,6 +1618,7 @@ exec /bin/sleep 300
                         const url = new URL(typeof input === 'string' ? input : input.url, location.href);
                         if (url.pathname !== '/api/fs/git-history-stats-stream' || heldStatsResponse || !response.body) return response;
                         heldStatsResponse = true;
+                        window.__yolomuxGoStatsHeldRequestUrl = url.href;
                         const sourceReader = response.body.getReader();
                         let eventTail = '';
                         let statsStreamText = '';
@@ -1724,7 +1725,8 @@ exec /bin/sleep 300
                       const historyRequestEntry = historyRequests.length
                         ? performance.getEntriesByName(historyRequests[0]).at(-1)
                         : null;
-                      const firstStatsRequest = statsRequests.length ? new URL(statsRequests[0], location.href) : null;
+                      const heldStatsRequestUrl = window.__yolomuxGoStatsHeldRequestUrl || '';
+                      const heldStatsRequest = heldStatsRequestUrl ? new URL(heldStatsRequestUrl, location.href) : null;
                       topCommit.click();
                       const topDetail = await waitFor(() => {
                         const detail = gitDiffTabState.get(gitDiffItem)?.commitRecords?.get(gitHead)?.detail;
@@ -1742,11 +1744,11 @@ exec /bin/sleep 300
                         topStats,
                         doneCompletion,
                         doneEventResponseHeldOpen: window.__yolomuxGoStatsDoneHeldOpen === true,
-                        firstStatsBatchSizes: firstStatsRequest?.searchParams.get('batch_sizes') || '',
+                        heldStatsBatchSizes: heldStatsRequest?.searchParams.get('batch_sizes') || '',
                         detailFiles: topDetail.files.map(file => file.path),
                         detailRendered: Boolean(renderedTopDetail),
                       };
-                      if (!gitHistory.nativeSuppressed || !gitHistory.active || gitHistory.head !== gitHead || gitHistory.commits < 2 || gitHistory.historyListReadyMs >= 500 || !historyRequest || !gitHistory.topStats || !gitHistory.doneEventResponseHeldOpen || gitHistory.doneCompletion?.statsStage < 1 || gitHistory.doneCompletion?.statsLoading !== false || gitHistory.firstStatsBatchSizes !== '1' || !gitHistory.detailFiles.length || !gitHistory.detailRendered) throw new Error('Finder Git repository Diff tab contract mismatch: ' + JSON.stringify(gitHistory));
+                      if (!gitHistory.nativeSuppressed || !gitHistory.active || gitHistory.head !== gitHead || gitHistory.commits < 2 || gitHistory.historyListReadyMs >= 500 || !historyRequest || !gitHistory.topStats || !gitHistory.doneEventResponseHeldOpen || gitHistory.doneCompletion?.statsStage < 1 || gitHistory.doneCompletion?.statsLoading !== false || gitHistory.heldStatsBatchSizes !== '1' || !gitHistory.detailFiles.length || !gitHistory.detailRendered) throw new Error('Finder Git repository Diff tab contract mismatch: ' + JSON.stringify(gitHistory));
                       const removable = row(root + '/ui-remove-me.txt');
                       if (!removable) throw new Error('Finder delete fixture row is missing');
                       const originalConfirm = window.confirm;
@@ -1768,7 +1770,7 @@ exec /bin/sleep 300
                       done({initial: setup.initial, expanded: setup.expanded, reexpanded: setup.reexpanded, initialRepo: setup.initialRepo, repoEnriched: setup.repoEnriched, gitHistory, deletedViaFinder: true});
                     })().catch(error => done({error: String(error?.stack || error)}));
                 """, str(finder_root), str(git_root), git_head, finder_setup)
-                if finder_ui.get('error') or finder_ui.get('initial', {}).get('panel') is not True or finder_ui.get('expanded', {}).get('needle') is not True or finder_ui.get('reexpanded', {}).get('needle') is not True or finder_ui.get('repoEnriched') is not True or finder_ui.get('gitHistory', {}).get('nativeSuppressed') is not True or finder_ui.get('gitHistory', {}).get('active') is not True or finder_ui.get('gitHistory', {}).get('head') != git_head or finder_ui.get('gitHistory', {}).get('commits', 0) < 2 or finder_ui.get('gitHistory', {}).get('historyListReadyMs', 500) >= 500 or not finder_ui.get('gitHistory', {}).get('topStats') or finder_ui.get('gitHistory', {}).get('firstStatsBatchSizes') != '1' or not finder_ui.get('gitHistory', {}).get('detailFiles') or finder_ui.get('gitHistory', {}).get('detailRendered') is not True or finder_ui.get('deletedViaFinder') is not True:
+                if finder_ui.get('error') or finder_ui.get('initial', {}).get('panel') is not True or finder_ui.get('expanded', {}).get('needle') is not True or finder_ui.get('reexpanded', {}).get('needle') is not True or finder_ui.get('repoEnriched') is not True or finder_ui.get('gitHistory', {}).get('nativeSuppressed') is not True or finder_ui.get('gitHistory', {}).get('active') is not True or finder_ui.get('gitHistory', {}).get('head') != git_head or finder_ui.get('gitHistory', {}).get('commits', 0) < 2 or finder_ui.get('gitHistory', {}).get('historyListReadyMs', 500) >= 500 or not finder_ui.get('gitHistory', {}).get('topStats') or finder_ui.get('gitHistory', {}).get('heldStatsBatchSizes') != '1' or not finder_ui.get('gitHistory', {}).get('detailFiles') or finder_ui.get('gitHistory', {}).get('detailRendered') is not True or finder_ui.get('deletedViaFinder') is not True:
                     raise SystemExit(f"Go Phase 4/5 Finder UI Chromium E2E failed: {finder_ui}")
                 print(f"Go browser Git history readiness: {json.dumps(finder_ui['gitHistory'], sort_keys=True)}")
                 git_views = driver.execute_async_script("""
@@ -2019,7 +2021,7 @@ exec /bin/sleep 300
                       try {
                         const response = await fetch('/api/create-session?agent=codex&dangerously_yolo=1&session=' + encodeURIComponent(session + '-denied'), {method: 'POST', cache: 'no-store', credentials: 'same-origin'});
                         const body = await response.json();
-                        const bootstrap = JSON.parse(document.getElementById('yolomux-bootstrap')?.textContent || '{}');
+                        const bootstrap = JSON.parse((document.getElementById('yomux-bootstrap') || document.getElementById('yolomux-bootstrap'))?.textContent || '{}');
                         const wrapper = document.querySelector('[data-app-menu="file"]');
                         const button = wrapper?.querySelector(':scope > .app-menu-button');
                         button?.click();
@@ -2031,7 +2033,7 @@ exec /bin/sleep 300
                       }
                     })();
                 """, session)
-                forbiddenMessage = "full-access agent launches require YOLOmux --dangerously-yolo"
+                forbiddenMessage = "full-access agent launches require YOmux --dangerously-yolo"
                 if (non_yolo_contract.get("error") or non_yolo_contract.get("status") != 403 or non_yolo_contract.get("body", {}).get("error") != forbiddenMessage or non_yolo_contract.get("dangerouslyYolo") is not False or any("dangerously" in label for label in non_yolo_contract.get("labels", []))):
                     raise SystemExit(f"Go non-dangerous launch contract failed: {non_yolo_contract}")
 

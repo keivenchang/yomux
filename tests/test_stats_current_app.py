@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""App adapters from native YOLOmux state to current stats facts."""
+"""App adapters from native YOmux state to current stats facts."""
 
 import ast
 import inspect
@@ -12,16 +12,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from yolomux_lib import app as app_module, http_routes, local_service_projection, session_files, settings as settings_module
-from yolomux_lib.common import AgentInfo
-from yolomux_lib.stats_current import materializer as materializer_module
-from yolomux_lib.stats_current import collectors as collectors_module
-from yolomux_lib.stats_current import pricing as pricing_module
-from yolomux_lib.stats_current import runtime as runtime_module
-from yolomux_lib.stats_current import storage as storage_module
-from yolomux_lib.stats_current import usage as usage_module
-from yolomux_lib.stats_current import opencode as opencode_module
-from yolomux_lib.stats_current.transcripts import ScannedUsageAtom, StatsCurrentTranscriptUsageScanner, TranscriptUsageScanResult
+from yomux_lib import app as app_module, http_routes, local_service_projection, session_files, settings as settings_module
+from yomux_lib.common import AgentInfo
+from yomux_lib.stats_current import materializer as materializer_module
+from yomux_lib.stats_current import collectors as collectors_module
+from yomux_lib.stats_current import pricing as pricing_module
+from yomux_lib.stats_current import runtime as runtime_module
+from yomux_lib.stats_current import storage as storage_module
+from yomux_lib.stats_current import usage as usage_module
+from yomux_lib.stats_current import opencode as opencode_module
+from yomux_lib.stats_current.transcripts import ScannedUsageAtom, StatsCurrentTranscriptUsageScanner, TranscriptUsageScanResult
 
 
 def attempt(family, cadence):
@@ -2498,10 +2498,10 @@ def test_retired_stats_runtime_files_and_production_imports_are_deleted():
     assert not any(path.exists() for path in retired_files)
 
     forbidden_modules = {
-        "yolomux_lib.statsd",
-        "yolomux_lib.stats_families",
-        "yolomux_lib.stats_rebuild",
-        "yolomux_lib.local_services.stats_store",
+        "yomux_lib.statsd",
+        "yomux_lib.stats_families",
+        "yomux_lib.stats_rebuild",
+        "yomux_lib.local_services.stats_store",
     }
     imports = set()
     for path in root.rglob("*.py"):

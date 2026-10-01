@@ -16,15 +16,15 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib import filesystem
-from yolomux_lib.filesystem import search as filesystem_search
-from yolomux_lib.filesystem import FilesystemError
-from yolomux_lib.filesystem import io_ops as filesystem_io
-from yolomux_lib.filesystem import paths as filesystem_paths
-from yolomux_lib.filesystem.io_ops import read_json_file
-from yolomux_lib.filesystem import git_ops
-from yolomux_lib.search import bfs_index
-from yolomux_lib.workspace import metadata
+from yomux_lib import filesystem
+from yomux_lib.filesystem import search as filesystem_search
+from yomux_lib.filesystem import FilesystemError
+from yomux_lib.filesystem import io_ops as filesystem_io
+from yomux_lib.filesystem import paths as filesystem_paths
+from yomux_lib.filesystem.io_ops import read_json_file
+from yomux_lib.filesystem import git_ops
+from yomux_lib.search import bfs_index
+from yomux_lib.workspace import metadata
 
 from _git_helpers import git, init_repo
 from mock_git_repo import create_git_history_repository
@@ -2202,8 +2202,8 @@ def test_search_files_doit_queries_require_project_doc_prefix(tmp_path):
     (tmp_path / "DOIT.57.md").write_text("# doit\n", encoding="utf-8")
     (tmp_path / "frontend-crates").mkdir()
     (tmp_path / "frontend-crates" / "DOIT.parser-performance-v2-audit.md").write_text("# audit\n", encoding="utf-8")
-    (tmp_path / "static_src" / "js" / "yolomux").mkdir(parents=True)
-    (tmp_path / "static_src" / "js" / "yolomux" / "75_dockview_layout.js").write_text("export {}\n", encoding="utf-8")
+    (tmp_path / "static_src" / "js" / "yomux").mkdir(parents=True)
+    (tmp_path / "static_src" / "js" / "yomux" / "75_dockview_layout.js").write_text("export {}\n", encoding="utf-8")
 
     broad = filesystem.search_files(str(tmp_path), "DOIT", 20)
     exactish = filesystem.search_files(str(tmp_path), "doit57", 20)
@@ -2212,7 +2212,7 @@ def test_search_files_doit_queries_require_project_doc_prefix(tmp_path):
     exactish_paths = {item["relative_path"] for item in exactish["files"]}
     assert "DOIT.57.md" in broad_paths
     assert "frontend-crates/DOIT.parser-performance-v2-audit.md" in broad_paths
-    assert "static_src/js/yolomux/75_dockview_layout.js" not in broad_paths
+    assert "static_src/js/yomux/75_dockview_layout.js" not in broad_paths
     assert exactish_paths == {"DOIT.57.md"}
 
 

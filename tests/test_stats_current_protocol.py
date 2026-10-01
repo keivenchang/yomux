@@ -6,7 +6,7 @@ import copy
 
 import pytest
 
-from yolomux_lib.stats_current import protocol, resolution as resolution_policy
+from yomux_lib.stats_current import protocol, resolution as resolution_policy
 
 
 def request(range_seconds: str = "300", resolution: str = "AUTO", **extra: object) -> protocol.SnapshotRequest:

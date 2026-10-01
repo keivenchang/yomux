@@ -4,12 +4,12 @@ from typing import Any
 import pytest
 
 
-from yolomux_lib import auto_approve_worker
-from yolomux_lib import polling_policy
-from yolomux_lib.approval import auto_approve_policy as auto_approve_policy_module
-from yolomux_lib.auto_approve_policy import auto_approve_poll_is_quiet
-from yolomux_lib.auto_approve_policy import auto_approve_quiet_poll_interval
-from yolomux_lib.stats_current import families as stats_families
+from yomux_lib import auto_approve_worker
+from yomux_lib import polling_policy
+from yomux_lib.approval import auto_approve_policy as auto_approve_policy_module
+from yomux_lib.auto_approve_policy import auto_approve_poll_is_quiet
+from yomux_lib.auto_approve_policy import auto_approve_quiet_poll_interval
+from yomux_lib.stats_current import families as stats_families
 
 
 @pytest.fixture(autouse=True)

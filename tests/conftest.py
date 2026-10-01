@@ -1,9 +1,9 @@
 """Shared pytest configuration + isolation for the yolomux test suite.
 
 Point YOLOMUX_CONFIG_DIR / YOLOMUX_STATE_DIR at FRESH per-run temp dirs *before* any test module
-imports `yolomux_lib.common` (which binds CONFIG_DIR / STATE_DIR / SETTINGS_PATH at import time). pytest
+imports `yomux_lib.common` (which binds CONFIG_DIR / STATE_DIR / SETTINGS_PATH at import time). pytest
 imports conftest.py ahead of the test modules, so this is the one place that owns the config/state
-location — replacing the `os.environ.setdefault(..., "/tmp/yolomux-test-config")` lines that were
+location — replacing the `os.environ.setdefault(..., "/tmp/yomux-test-config")` lines that were
 copy-pasted across ~11 test files, and ensuring no test (e.g. the login-locale picker, which writes
 general.language) can leave a *persistent* shared config dir mutated across runs.
 """
@@ -22,8 +22,46 @@ import uuid
 
 import pytest
 
-from yolomux_lib.infra.transient_paths import create_run_root
-from yolomux_lib.infra.transient_paths import remove_run_root
+# This suite's fixtures explicitly select legacy YOLOMUX_* names in several
+# tests. Remove canonical ambient root aliases so those fixtures exercise the
+# requested compatibility path instead of inheriting the test container's
+# canonical per-worker values.
+for _name in (
+    "ROOT",
+    "CONFIG_DIR",
+    "STATE_DIR",
+    "CACHE_DIR",
+    "RUNTIME_DIR",
+    "CODEX_HOME",
+    "HOST_ARTIFACT_DIR",
+    "START_LOCK_DIR",
+    "TOOL_LOCK_PATH",
+    "CA_DIR",
+    "LOG_DIR",
+):
+    os.environ.pop(f"YOMUX_{_name}", None)
+
+
+@pytest.fixture(autouse=True)
+def clear_ambient_canonical_product_roots(monkeypatch):
+    """Keep each test's legacy-root setup independent of another test's canonical overrides."""
+    for _name in (
+        "ROOT",
+        "CONFIG_DIR",
+        "STATE_DIR",
+        "CACHE_DIR",
+        "RUNTIME_DIR",
+        "CODEX_HOME",
+        "HOST_ARTIFACT_DIR",
+        "START_LOCK_DIR",
+        "TOOL_LOCK_PATH",
+        "CA_DIR",
+        "LOG_DIR",
+    ):
+        monkeypatch.delenv(f"YOMUX_{_name}", raising=False)
+
+from yomux_lib.infra.transient_paths import create_run_root
+from yomux_lib.infra.transient_paths import remove_run_root
 
 # Each process needs its OWN config/state dir. Under pytest-xdist, worker subprocesses INHERIT the
 # parent's environment, so a plain setdefault makes every parallel worker share ONE YOLOMUX_CONFIG_DIR
@@ -52,9 +90,9 @@ if _test_run_root is not None:
 os.environ.setdefault("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", "1")
 
 
-from yolomux_lib import app as app_module
-from yolomux_lib import file_index
-from yolomux_lib import statusd_protocol
+from yomux_lib import app as app_module
+from yomux_lib import file_index
+from yomux_lib import statusd_protocol
 from tools.test_plan import automatic_test_markers
 from tools.test_plan import SLOWEST_FIRST_TESTS
 from tools.test_plan import test_node_sort_key

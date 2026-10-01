@@ -30,8 +30,8 @@ from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import gate_tmux  # noqa: F401
 from tests.gate_harness import load_gate_terminal_only_browser
 from tests.tmux_runtime import run_isolated_tmux
-from yolomux_lib.server import TmuxWebtermHTTPServer
-from yolomux_lib.tmux import tmux_utils
+from yomux_lib.server import TmuxWebtermHTTPServer
+from yomux_lib.tmux import tmux_utils
 
 
 pytestmark = pytest.mark.socket

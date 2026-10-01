@@ -36,7 +36,7 @@ from tests.isolated_dev_server import pid_is_alive
 from tests.isolated_dev_server import process_descendants
 from tests.isolated_dev_server import reap_descendants
 from tests.isolated_dev_server import stop_and_reap_daemons
-from yolomux_lib.host_identity import process_start_identity
+from yomux_lib.host_identity import process_start_identity
 
 
 pytestmark = pytest.mark.socket

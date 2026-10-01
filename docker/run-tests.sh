@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run a command in a throwaway YOLOmux test container with its own HOME.
+# Run a command in a throwaway YOmux test container with its own HOME.
 set -euo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -13,13 +13,15 @@ if docker info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -q 'name=
 fi
 
 if [ "$rootless_docker" = 1 ]; then
-  export YOLOMUX_IMAGE_RUNNER_UID=1000
-  export YOLOMUX_IMAGE_RUNNER_GID=1000
+  export YOMUX_IMAGE_RUNNER_UID=1000
+  export YOMUX_IMAGE_RUNNER_GID=1000
 else
-  export YOLOMUX_IMAGE_RUNNER_UID="$(id -u)"
-  export YOLOMUX_IMAGE_RUNNER_GID="$(id -g)"
+  export YOMUX_IMAGE_RUNNER_UID="$(id -u)"
+  export YOMUX_IMAGE_RUNNER_GID="$(id -g)"
 fi
-IMAGE="${YOLOMUX_TEST_IMAGE:-$(python3 "$REPO_ROOT/tools/docker_image.py" --name)}"
+export YOLOMUX_IMAGE_RUNNER_UID="$YOMUX_IMAGE_RUNNER_UID"
+export YOLOMUX_IMAGE_RUNNER_GID="$YOMUX_IMAGE_RUNNER_GID"
+IMAGE="${YOMUX_TEST_IMAGE-${YOLOMUX_TEST_IMAGE:-$(python3 "$REPO_ROOT/tools/docker_image.py" --name)}}"
 
 usage() {
   echo "usage: $0 [--build] [--workdir <dir>] [-- <command>]" >&2
@@ -78,7 +80,7 @@ esac
 
 # tools/docker_image.py is the sole image-identity owner. A changed build input creates a
 # new tag, making stale-image reuse impossible without duplicating the hash in shell.
-if [ "$do_build" = 1 ] || [ "${YOLOMUX_TEST_IMAGE_REBUILD:-0}" = 1 ] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+if [ "$do_build" = 1 ] || [ "${YOMUX_TEST_IMAGE_REBUILD-${YOLOMUX_TEST_IMAGE_REBUILD:-0}}" = 1 ] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   echo "Building $IMAGE (this is cached after the first run)" >&2
   build_args=()
   go_mod_context="$(mktemp -d /tmp/yolomux-go-mod-context.XXXXXX)"
@@ -251,7 +253,7 @@ validate_tmp_directory() {
 evidence_dir="${YOLOMUX_E2E_EVIDENCE_DIR:-}"
 remove_empty_evidence_dir=0
 if [ -z "$evidence_dir" ]; then
-  test_root="${YOLOMUX_TEST_ROOT:-/tmp/yolomux-test-${BASHPID}-$(id -u)}"
+  test_root="${YOLOMUX_TEST_ROOT:-/tmp/yomux-test-${BASHPID}-$(id -u)}"
   validate_tmp_directory "$test_root" "YOLOMUX_TEST_ROOT"
   evidence_dir="$(mktemp -d "$test_root/evidence.XXXXXX")"
   remove_empty_evidence_dir=1

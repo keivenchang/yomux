@@ -21,6 +21,28 @@ func TestSyntheticEnvironmentDropsInheritedTmuxClient(t *testing.T) {
 	}
 }
 
+func TestSyntheticEnvironmentDropsCanonicalAndLegacyProductRoots(t *testing.T) {
+	t.Setenv("YOMUX_ROOT", "/host/yomux")
+	t.Setenv("YOLOMUX_ROOT", "/host/yolomux")
+	t.Setenv("YOMUX_STATS_DISABLE_COLLECTORS", "0")
+
+	for _, entry := range SyntheticEnvironment("YOLOMUX_STATS_DISABLE_COLLECTORS=1") {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if key == "YOMUX_ROOT" || key == "YOLOMUX_ROOT" {
+			t.Fatalf("synthetic environment retained inherited product root %s", key)
+		}
+		if key == "YOMUX_STATS_DISABLE_COLLECTORS" {
+			t.Fatalf("synthetic environment retained inherited canonical override %s", key)
+		}
+		if key == "YOLOMUX_STATS_DISABLE_COLLECTORS" && value != "1" {
+			t.Fatalf("synthetic environment canonical override = %q, want fixture value", value)
+		}
+	}
+}
+
 func TestSyntheticEnvironmentDropsInheritedProviderCredentials(t *testing.T) {
 	credentialNames := []string{
 		"ANTHROPIC_API_KEY",

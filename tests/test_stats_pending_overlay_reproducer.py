@@ -22,8 +22,8 @@ import math
 from contextlib import contextmanager
 from dataclasses import replace
 
-from yolomux_lib.stats_current import service as service_module
-from yolomux_lib.stats_current import storage
+from yomux_lib.stats_current import service as service_module
+from yomux_lib.stats_current import storage
 
 CLOCK = 100_000.0
 OBSERVED_AT = CLOCK - 0.25

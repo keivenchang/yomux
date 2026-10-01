@@ -20,16 +20,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from yolomux_lib.http_routes import ALL_ROUTES
-from yolomux_lib.http_routes import RESPONSE_SSE
-from yolomux_lib.http_routes import RESPONSE_WEBSOCKET
-from yolomux_lib.server_logs import ServerLogRing
+from yomux_lib.http_routes import ALL_ROUTES
+from yomux_lib.http_routes import RESPONSE_SSE
+from yomux_lib.http_routes import RESPONSE_WEBSOCKET
+from yomux_lib.server_logs import ServerLogRing
 from tests import gate_harness as gate_harness_module
 from tests.browser_helpers import browser_console
-from yolomux_lib import browser_diagnostic_receipts
+from yomux_lib import browser_diagnostic_receipts
 from tests.browser_helpers import browser_layout
 from tests.browser_helpers.browser_layout import _live_runtime_boot_fixture_html
-from yolomux_lib.local_services import registry as local_service_registry
+from yomux_lib.local_services import registry as local_service_registry
 from tools.instance_isolation import GENERATED_PYTHON_CACHE_PREFIX_ENV
 from tests.gate_harness import assert_no_surviving_local_service_daemons
 from tests.gate_harness import assert_writable_paths_beneath
@@ -202,8 +202,8 @@ def test_gate_runtime_paths_and_imported_constants_are_fixture_owned(gate_runtim
     assert os.environ["YOLOMUX_CACHE_DIR"] == str(gate_runtime_paths.cache_dir)
 
     patched_labels = {label for label, _path in gate_runtime_paths.patched_module_paths}
-    assert "yolomux_lib.infra.common.CONFIG_DIR" in patched_labels
-    assert "yolomux_lib.auth.CONFIG_DIR" in patched_labels
+    assert "yomux_lib.infra.common.CONFIG_DIR" in patched_labels
+    assert "yomux_lib.auth.CONFIG_DIR" in patched_labels
 
 
 def test_gate_browser_boundary_waits_for_preexisting_async_api_work():
@@ -458,7 +458,7 @@ def test_exact_browser_warning_consumer_accepts_one_anchored_warning():
     expected = browser_log_entry(
         "WARNING",
         "console-api",
-        'http://127.0.0.1:7000/static/yolomux.js 10:2 "fixture warning" Error: exact correlation\n    at fixture',
+        'http://127.0.0.1:7000/static/yomux.js 10:2 "fixture warning" Error: exact correlation\n    at fixture',
     )
 
     assert browser_console.assert_only_expected_browser_warning(
@@ -473,7 +473,7 @@ def test_exact_browser_warning_consumer_rejects_an_additional_severe_failure():
         browser_log_entry(
             "WARNING",
             "console-api",
-            'http://127.0.0.1:7000/static/yolomux.js 10:2 "fixture warning" Error: exact correlation',
+            'http://127.0.0.1:7000/static/yomux.js 10:2 "fixture warning" Error: exact correlation',
         ),
         browser_log_entry("SEVERE", "network", "http://127.0.0.1:7000/unexpected - Failed to load resource"),
     )
@@ -3120,7 +3120,7 @@ def test_fixture_stops_whole_owned_local_service_group_before_waiting(monkeypatc
 
     class FixtureProcess:
         pid = 43210
-        args = ["python3", "-m", "yolomux_lib.batchd", "--serve"]
+        args = ["python3", "-m", "yomux_lib.batchd", "--serve"]
 
         def poll(self):
             return -15 if state["group_stopped"] else None
@@ -4249,13 +4249,13 @@ def test_surviving_local_service_daemon_fails_its_own_fixture_and_names_the_owne
 
     root = tmp_path / "yag-leak"
     root.mkdir()
-    process = _leak_one_local_service_daemon(root, "yolomux_lib.watchd")
+    process = _leak_one_local_service_daemon(root, "yomux_lib.watchd")
     try:
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline and not local_service_daemons_beneath(root):
             time.sleep(0.05)
         survivors = local_service_daemons_beneath(root)
-        assert [daemon.service for daemon in survivors] == ["yolomux_lib.watchd"], survivors
+        assert [daemon.service for daemon in survivors] == ["yomux_lib.watchd"], survivors
         assert survivors[0].pid == process.pid, survivors
 
         with pytest.raises(AssertionError) as failure:
@@ -4264,7 +4264,7 @@ def test_surviving_local_service_daemon_fails_its_own_fixture_and_names_the_owne
         reason = json.loads(str(failure.value))
         assert reason["error_code"] == LOCAL_SERVICE_DAEMON_SURVIVED_CODE, reason
         assert reason["root"] == str(root), reason
-        assert [entry["service"] for entry in reason["surviving"]] == ["yolomux_lib.watchd"], reason
+        assert [entry["service"] for entry in reason["surviving"]] == ["yomux_lib.watchd"], reason
         assert reason["surviving"][0]["pid"] == process.pid, reason
         assert reason["surviving"][0]["socket_path"].startswith(str(root)), reason
         # The ledger names the limit that refuses the watcher, not only the fd table.
@@ -4293,7 +4293,7 @@ def test_retired_local_service_root_passes_the_surviving_daemon_invariant(tmp_pa
 
     root = tmp_path / "yag-clean"
     (root / "yolomux-runtime" / "services").mkdir(parents=True)
-    process = _leak_one_local_service_daemon(root, "yolomux_lib.watchd")
+    process = _leak_one_local_service_daemon(root, "yomux_lib.watchd")
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline and not local_service_daemons_beneath(root):
         time.sleep(0.05)

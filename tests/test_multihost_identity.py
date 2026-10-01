@@ -6,10 +6,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from yolomux_lib.local_services.registry import LocalServiceRegistry
-from yolomux_lib.local_services.registry import LocalServiceSpec
-from yolomux_lib.server_lease import acquire_server_port_lease
-from yolomux_lib.infra.host_identity import HostIdentity
+from yomux_lib.local_services.registry import LocalServiceRegistry
+from yomux_lib.local_services.registry import LocalServiceSpec
+from yomux_lib.server_lease import acquire_server_port_lease
+from yomux_lib.infra.host_identity import HostIdentity
 
 
 def _identity(name: str) -> HostIdentity:

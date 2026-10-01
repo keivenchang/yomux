@@ -9,6 +9,8 @@ bazel-*
 /yolomux-go
 /static/yolomux.css
 /static/yolomux.js
+/static/yomux.css
+/static/yomux.js
 
 # Scratch worklists — never committed (kept local only)
 DOIT*.md

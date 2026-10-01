@@ -14,13 +14,13 @@ from tests.gate_harness import gate_runtime_paths  # noqa: F401 - fixture import
 from tests.tmux_runtime import run_isolated_tmux
 from tests.tmux_runtime import start_isolated_tmux_runtime
 from tests.tmux_runtime import stop_isolated_tmux_runtime
-import yolomux_lib.app as app_module
-import yolomux_lib.sessions as sessions_module
-from yolomux_lib.app import tmux_session_name_error
-from yolomux_lib.app import tmux_session_name_sanitize
-from yolomux_lib.common import PaneInfo
-from yolomux_lib.common import SessionInfo
-from yolomux_lib.server import TmuxWebtermHTTPServer
+import yomux_lib.app as app_module
+import yomux_lib.sessions as sessions_module
+from yomux_lib.app import tmux_session_name_error
+from yomux_lib.app import tmux_session_name_sanitize
+from yomux_lib.common import PaneInfo
+from yomux_lib.common import SessionInfo
+from yomux_lib.server import TmuxWebtermHTTPServer
 
 
 class FakeTmuxResult:

@@ -21,10 +21,10 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib import app as app_module
-from yolomux_lib import filesystem
-from yolomux_lib.filesystem import paths
-from yolomux_lib.infra import batchd
+from yomux_lib import app as app_module
+from yomux_lib import filesystem
+from yomux_lib.filesystem import paths
+from yomux_lib.infra import batchd
 
 BLOCKED_SENTINEL = "BLOCKED_SENTINEL_DO_NOT_EXPOSE"
 

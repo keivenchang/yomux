@@ -1,9 +1,10 @@
+import importlib
 import os
 import subprocess
 import sys
 from pathlib import Path
 
-from yolomux_lib import cli
+from yomux_lib import cli
 from tools.instance_isolation import EARLY_PORT_ENV
 from tools.instance_isolation import INSTANCE_ENV
 from tools.instance_isolation import MANAGED_INSTANCE_PORT_ENV
@@ -16,15 +17,56 @@ from tools.instance_isolation import apply_row_plan
 from tools.instance_isolation import assert_early_port
 from tools.instance_isolation import clean_row_environment
 from tools.instance_isolation import is_managed_instance_port
+from tools.instance_isolation import normalize_yomux_environment
 from tools.instance_isolation import parse_instance
 from tools.instance_isolation import resolve_instance_environment
 from tools.instance_isolation import resolve_direct_launch_plan
 from tools.instance_isolation import resolve_row_plan
 from tools.instance_isolation import scan_port
 from tools.instance_isolation import synthetic_test_environment
-from yolomux_lib.infra.root_paths import YolomuxRoots
+from yomux_lib.infra.root_paths import YolomuxRoots
 
 SHORT_TEMP_ROOT = Path("/tmp/yi")
+
+
+def test_yomux_environment_alias_precedence_and_warning(monkeypatch, capsys):
+    isolation = importlib.import_module("tools.instance_isolation")
+
+    monkeypatch.setattr(isolation, "_legacy_alias_warning_emitted", False)
+    normalized = normalize_yomux_environment(
+        {
+            "YOMUX_ROOT": "",
+            "YOLOMUX_ROOT": "/private/old-root",
+            "YOMUX_CONFIG_DIR": "/private/new-config",
+            "YOLOMUX_CONFIG_DIR": "/private/old-config",
+        },
+        warn=True,
+    )
+
+    assert normalized["YOMUX_ROOT"] == ""
+    assert normalized["YOLOMUX_ROOT"] == ""
+    assert normalized["YOMUX_CONFIG_DIR"] == "/private/new-config"
+    assert normalized["YOLOMUX_CONFIG_DIR"] == "/private/new-config"
+    warning = capsys.readouterr().err
+    assert warning == "WARNING: YOLOMUX_* environment names are deprecated; use YOMUX_*.\n"
+    assert "/private" not in warning
+    monkeypatch.setattr(isolation, "_legacy_alias_warning_emitted", False)
+    canonical_only = normalize_yomux_environment({"YOMUX_RUNTIME_DIR": "/private/runtime"}, warn=True)
+    assert canonical_only["YOLOMUX_RUNTIME_DIR"] == "/private/runtime"
+    assert capsys.readouterr().err == ""
+
+
+def test_python_early_environment_normalization_does_not_rewarn_for_canonical_values(monkeypatch, capsys):
+    isolation = importlib.import_module("tools.instance_isolation")
+    monkeypatch.setattr(isolation, "_legacy_alias_warning_emitted", False)
+    environment = {"YOMUX_RUNTIME_DIR": "/private/runtime"}
+
+    apply_early_instance_environment([], environment)
+    normalized = normalize_yomux_environment(environment, warn=True)
+
+    assert normalized["YOLOMUX_RUNTIME_DIR"] == "/private/runtime"
+    assert normalized["YOMUX_ENVIRONMENT_NORMALIZED"] == "1"
+    assert capsys.readouterr().err == ""
 
 
 def test_synthetic_environment_drops_inherited_tmux_client(monkeypatch):
@@ -96,7 +138,7 @@ def test_macos_managed_instance_uses_short_default_socket_root():
 
 
 def test_clean_row_environment_strips_inherited_and_resolves_the_row(tmp_path: Path):
-    """W1: the launcher builds one clean child env per row - inherited YOLOmux
+    """W1: the launcher builds one clean child env per row - inherited YOmux
     root/instance vars (from a parent shell that belongs to another instance) are
     stripped, then the row is resolved fresh; the parent env is not mutated."""
     contaminated = {
@@ -406,7 +448,7 @@ def test_startup_path_line_names_auto_derived_root_and_resolved_paths(tmp_path: 
     line = cli.startup_path_line(17775, environ=resolution.environment, roots=paths)
 
     assert line == (
-        f"YOLOmux paths: YOLOMUX_ROOT={root} (auto-derived for non-default port 17775 because no root-family override was set); "
+        f"YOmux paths: YOLOMUX_ROOT={root} (auto-derived for non-default port 17775 because no root-family override was set); "
         f"config={root / 'config'}; state={root / 'state'}; cache={root / 'cache'}; runtime={root / 'runtime'}"
     )
 

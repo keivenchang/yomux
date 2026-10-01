@@ -18,36 +18,36 @@ from watchfiles import Change
 
 from tests.helpers.external_lease_client import assert_self_lease_is_refused
 from tests.helpers.external_lease_client import external_lease_client
-from yolomux_lib import watchd
-from yolomux_lib.filesystem import search as search_module
-from yolomux_lib import filesystem
-from yolomux_lib.filesystem.paths import FilesystemAccessPolicy, FS_ACCESS_POLICY_VERSION
-from yolomux_lib.watchd import PersistentWatchService
-from yolomux_lib.backend_health.observer import observed_health
-from yolomux_lib.local_services import rpc
-from yolomux_lib.common import TmuxPaneInfo
-from yolomux_lib.infra.common import AgentInfo
-from yolomux_lib.infra.common import SessionInfo
-from yolomux_lib.watchd_protocol import WATCHD_DESCRIPTOR_RESYNC_SECONDS
-from yolomux_lib.watchd_protocol import WATCHD_REVISION_LOOP_MIN_PERIOD_SECONDS
-from yolomux_lib.watchd_protocol import WATCHD_DESCRIPTOR_TTL_SECONDS
-from yolomux_lib.watchd_protocol import WATCHD_SERVICE_NAME
-from yolomux_lib.watchd_protocol import WATCHD_PROTOCOL_VERSION
-from yolomux_lib.watchd_protocol import EffectiveWatchConfiguration
-from yolomux_lib.watchd_protocol import WATCHD_CODE_REVISION
-from yolomux_lib.watchd_protocol import validate_descriptor
-from yolomux_lib.watchd_protocol import WATCHD_MAX_PATHS
-from yolomux_lib.watchd_protocol import WATCHD_MAX_NATIVE_REGISTRATIONS
-from yolomux_lib.local_services import registry as registry_mod
-from yolomux_lib.local_services import runtime as local_service_runtime
-from yolomux_lib import watchd_client
-from yolomux_lib.watchd_client import WatchClient
-from yolomux_lib import app as app_module
-from yolomux_lib.infra.state_services import ClientEventWatcherRecord
-from yolomux_lib.local_services.registry import LocalServiceRegistry
-from yolomux_lib.local_services.registry import LocalServiceSpec
-from yolomux_lib.workspace.session_files import DEFAULT_INDEX_EXCLUDE_DIR_NAMES
-from yolomux_lib.filesystem import exclusions
+from yomux_lib import watchd
+from yomux_lib.filesystem import search as search_module
+from yomux_lib import filesystem
+from yomux_lib.filesystem.paths import FilesystemAccessPolicy, FS_ACCESS_POLICY_VERSION
+from yomux_lib.watchd import PersistentWatchService
+from yomux_lib.backend_health.observer import observed_health
+from yomux_lib.local_services import rpc
+from yomux_lib.common import TmuxPaneInfo
+from yomux_lib.infra.common import AgentInfo
+from yomux_lib.infra.common import SessionInfo
+from yomux_lib.watchd_protocol import WATCHD_DESCRIPTOR_RESYNC_SECONDS
+from yomux_lib.watchd_protocol import WATCHD_REVISION_LOOP_MIN_PERIOD_SECONDS
+from yomux_lib.watchd_protocol import WATCHD_DESCRIPTOR_TTL_SECONDS
+from yomux_lib.watchd_protocol import WATCHD_SERVICE_NAME
+from yomux_lib.watchd_protocol import WATCHD_PROTOCOL_VERSION
+from yomux_lib.watchd_protocol import EffectiveWatchConfiguration
+from yomux_lib.watchd_protocol import WATCHD_CODE_REVISION
+from yomux_lib.watchd_protocol import validate_descriptor
+from yomux_lib.watchd_protocol import WATCHD_MAX_PATHS
+from yomux_lib.watchd_protocol import WATCHD_MAX_NATIVE_REGISTRATIONS
+from yomux_lib.local_services import registry as registry_mod
+from yomux_lib.local_services import runtime as local_service_runtime
+from yomux_lib import watchd_client
+from yomux_lib.watchd_client import WatchClient
+from yomux_lib import app as app_module
+from yomux_lib.infra.state_services import ClientEventWatcherRecord
+from yomux_lib.local_services.registry import LocalServiceRegistry
+from yomux_lib.local_services.registry import LocalServiceSpec
+from yomux_lib.workspace.session_files import DEFAULT_INDEX_EXCLUDE_DIR_NAMES
+from yomux_lib.filesystem import exclusions
 from _git_helpers import git, init_repo
 
 
@@ -89,8 +89,8 @@ def _wait_for_watchd_socket(socket_path: Path) -> None:
 
 def test_watchd_unions_two_leased_web_descriptors_and_preserves_the_other_on_release(tmp_path, monkeypatch):
     service = PersistentWatchService(tmp_path / "watchd.sock")
-    monkeypatch.setattr("yolomux_lib.watchd.process_start_identity", lambda pid: f"proc:{pid}")
-    monkeypatch.setattr("yolomux_lib.watchd.pid_is_alive", lambda pid: True)
+    monkeypatch.setattr("yomux_lib.watchd.process_start_identity", lambda pid: f"proc:{pid}")
+    monkeypatch.setattr("yomux_lib.watchd.pid_is_alive", lambda pid: True)
     first = _lease(service, 101)
     second = _lease(service, 202)
 
@@ -107,8 +107,8 @@ def test_watchd_unions_two_leased_web_descriptors_and_preserves_the_other_on_rel
 
 def test_watchd_identical_upsert_keeps_watch_generation_stable(tmp_path, monkeypatch):
     service = PersistentWatchService(tmp_path / "watchd.sock")
-    monkeypatch.setattr("yolomux_lib.watchd.process_start_identity", lambda pid: f"proc:{pid}")
-    monkeypatch.setattr("yolomux_lib.watchd.pid_is_alive", lambda pid: True)
+    monkeypatch.setattr("yomux_lib.watchd.process_start_identity", lambda pid: f"proc:{pid}")
+    monkeypatch.setattr("yomux_lib.watchd.pid_is_alive", lambda pid: True)
     lease_id = _lease(service, 101)
     descriptor = _descriptor(tmp_path / "repo")
 
@@ -121,8 +121,8 @@ def test_watchd_identical_upsert_keeps_watch_generation_stable(tmp_path, monkeyp
 
 def test_watchd_rejects_stale_descriptor_generation(tmp_path, monkeypatch):
     service = PersistentWatchService(tmp_path / "watchd.sock")
-    monkeypatch.setattr("yolomux_lib.watchd.process_start_identity", lambda pid: f"proc:{pid}")
-    monkeypatch.setattr("yolomux_lib.watchd.pid_is_alive", lambda pid: True)
+    monkeypatch.setattr("yomux_lib.watchd.process_start_identity", lambda pid: f"proc:{pid}")
+    monkeypatch.setattr("yomux_lib.watchd.pid_is_alive", lambda pid: True)
     lease_id = _lease(service, 101)
     service.handle(_request("upsert", lease_id=lease_id, descriptor_id="browser", descriptor=_descriptor(tmp_path / "new", generation=2)))
 
@@ -402,8 +402,8 @@ def test_watchd_expired_history_reset_drives_coarse_and_open_file_refresh(tmp_pa
 
 def test_watchd_reset_payload_reports_current_state_after_reconfiguration_before_the_first_barrier(tmp_path, monkeypatch):
     service = PersistentWatchService(tmp_path / "watchd.sock")
-    monkeypatch.setattr("yolomux_lib.watchd.process_start_identity", lambda pid: f"proc:{pid}")
-    monkeypatch.setattr("yolomux_lib.watchd.pid_is_alive", lambda pid: True)
+    monkeypatch.setattr("yomux_lib.watchd.process_start_identity", lambda pid: f"proc:{pid}")
+    monkeypatch.setattr("yomux_lib.watchd.pid_is_alive", lambda pid: True)
     old_root = tmp_path / "old"
     old_root.mkdir()
     new_root = tmp_path / "new"
@@ -841,8 +841,8 @@ def test_watchd_client_reconfiguring_long_poll_reserves_the_declared_rebuild_mar
 
 def test_watchd_slow_file_signature_does_not_block_unrelated_upsert_or_revision_wait(tmp_path, monkeypatch):
     service = PersistentWatchService(tmp_path / "watchd.sock")
-    monkeypatch.setattr("yolomux_lib.watchd.process_start_identity", lambda pid: f"proc:{pid}")
-    monkeypatch.setattr("yolomux_lib.watchd.pid_is_alive", lambda pid: True)
+    monkeypatch.setattr("yomux_lib.watchd.process_start_identity", lambda pid: f"proc:{pid}")
+    monkeypatch.setattr("yomux_lib.watchd.pid_is_alive", lambda pid: True)
     watched_root = tmp_path / "watched"
     watched_root.mkdir()
     watched_file = watched_root / "watched.txt"
@@ -916,8 +916,8 @@ def test_watchd_slow_file_signature_does_not_block_unrelated_upsert_or_revision_
 
 def test_watchd_slow_generation_bump_does_not_block_an_unrelated_status_request(tmp_path, monkeypatch):
     service = PersistentWatchService(tmp_path / "watchd.sock")
-    monkeypatch.setattr("yolomux_lib.watchd.process_start_identity", lambda pid: f"proc:{pid}")
-    monkeypatch.setattr("yolomux_lib.watchd.pid_is_alive", lambda pid: True)
+    monkeypatch.setattr("yomux_lib.watchd.process_start_identity", lambda pid: f"proc:{pid}")
+    monkeypatch.setattr("yomux_lib.watchd.pid_is_alive", lambda pid: True)
     root = tmp_path / "repo"
     nested_repo = root / "nested"
     nested_repo.mkdir(parents=True)
@@ -1158,8 +1158,8 @@ def test_watchd_snapshot_returns_exact_opaque_watch_diff_bytes_and_uniform_produ
     root = tmp_path / "repo"
     root.mkdir()
     (root / "changed.txt").write_text("changed", encoding="utf-8")
-    monkeypatch.setattr("yolomux_lib.watchd.process_start_identity", lambda pid: f"proc:{pid}")
-    monkeypatch.setattr("yolomux_lib.watchd.pid_is_alive", lambda pid: True)
+    monkeypatch.setattr("yomux_lib.watchd.process_start_identity", lambda pid: f"proc:{pid}")
+    monkeypatch.setattr("yomux_lib.watchd.pid_is_alive", lambda pid: True)
     lease_id = _lease(service, 101)
     service.handle(_request("upsert", lease_id=lease_id, descriptor_id="browser", descriptor=_descriptor(root)))
     service.publish_revision(kind="delta", changed_paths=[str(root / "changed.txt")])
@@ -1193,8 +1193,8 @@ def test_watchd_snapshot_accepts_cold_work_before_held_producer_and_retains_exac
     root = tmp_path / "repo"
     root.mkdir()
     (root / "changed.txt").write_text("changed", encoding="utf-8")
-    monkeypatch.setattr("yolomux_lib.watchd.process_start_identity", lambda pid: f"proc:{pid}")
-    monkeypatch.setattr("yolomux_lib.watchd.pid_is_alive", lambda pid: True)
+    monkeypatch.setattr("yomux_lib.watchd.process_start_identity", lambda pid: f"proc:{pid}")
+    monkeypatch.setattr("yomux_lib.watchd.pid_is_alive", lambda pid: True)
     lease_id = _lease(service, 101)
     service.handle(_request("upsert", lease_id=lease_id, descriptor_id="browser", descriptor=_descriptor(root)))
     service.publish_revision(kind="delta", changed_paths=[str(root / "changed.txt")])
@@ -2457,7 +2457,7 @@ def test_watchd_teardown_keeps_record_until_bounded_worker_exit(monkeypatch):
 def test_local_service_record_persists_opaque_watchd_source_epoch(tmp_path):
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("watchd", "yolomux_lib.watchd", "watchd.sock", WATCHD_PROTOCOL_VERSION),
+        LocalServiceSpec("watchd", "yomux_lib.watchd", "watchd.sock", WATCHD_PROTOCOL_VERSION),
     )
 
     record = registry._record_from_status({
@@ -3023,8 +3023,8 @@ def _apply_shared_daemon_revision_under_policy(tmp_path, monkeypatch, *, changed
     server -- whose own filesystem authorization boundary is ONLY the narrow root.
     """
 
-    monkeypatch.setattr("yolomux_lib.watchd.process_start_identity", lambda pid: f"proc:{pid}")
-    monkeypatch.setattr("yolomux_lib.watchd.pid_is_alive", lambda pid: True)
+    monkeypatch.setattr("yomux_lib.watchd.process_start_identity", lambda pid: f"proc:{pid}")
+    monkeypatch.setattr("yomux_lib.watchd.pid_is_alive", lambda pid: True)
 
     narrow = tmp_path / "narrow_root"
     broad = tmp_path / "broad_root"
@@ -3565,8 +3565,8 @@ def test_unchanged_lease_renewal_preserves_generation_and_native_worker(tmp_path
     renewal that only bumps expires_at leaves the effective configuration hash --
     and therefore the native worker identity -- untouched.
     """
-    monkeypatch.setattr("yolomux_lib.watchd.process_start_identity", lambda pid: f"proc:{pid}")
-    monkeypatch.setattr("yolomux_lib.watchd.pid_is_alive", lambda pid: True)
+    monkeypatch.setattr("yomux_lib.watchd.process_start_identity", lambda pid: f"proc:{pid}")
+    monkeypatch.setattr("yomux_lib.watchd.pid_is_alive", lambda pid: True)
 
     hold = threading.Event()
     service = PersistentWatchService(tmp_path / "watchd.sock")
@@ -3626,7 +3626,7 @@ def test_stale_same_protocol_watchd_is_retired_before_descriptors(tmp_path, monk
 
     spec = LocalServiceSpec(
         WATCHD_SERVICE_NAME,
-        "yolomux_lib.watchd",
+        "yomux_lib.watchd",
         "watchd.sock",
         WATCHD_PROTOCOL_VERSION,
         code_revision=WATCHD_CODE_REVISION,
@@ -3716,7 +3716,7 @@ def test_current_revision_watchd_is_accepted(tmp_path, monkeypatch):
         tmp_path,
         LocalServiceSpec(
             WATCHD_SERVICE_NAME,
-            "yolomux_lib.watchd",
+            "yomux_lib.watchd",
             "watchd.sock",
             WATCHD_PROTOCOL_VERSION,
             code_revision=WATCHD_CODE_REVISION,
@@ -4101,8 +4101,8 @@ def _upsert(service, lease_id, descriptor_id, descriptor):
 
 def _capacity_service(tmp_path, monkeypatch):
     service = PersistentWatchService(tmp_path / "watchd.sock")
-    monkeypatch.setattr("yolomux_lib.watchd.process_start_identity", lambda pid: f"proc:{pid}")
-    monkeypatch.setattr("yolomux_lib.watchd.pid_is_alive", lambda pid: True)
+    monkeypatch.setattr("yomux_lib.watchd.process_start_identity", lambda pid: f"proc:{pid}")
+    monkeypatch.setattr("yomux_lib.watchd.pid_is_alive", lambda pid: True)
     return service
 
 

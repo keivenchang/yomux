@@ -126,7 +126,9 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
     )
     path = str(REPO_ROOT / "README.md")
     original = subprocess.check_output(["git", "show", "HEAD:README.md"], cwd=REPO_ROOT, text=True)
-    current = original.replace("# YOLOmux\n", "# YOLOmux — Deterministic test-only README diff line.\n", 1)
+    original_lines = original.splitlines(keepends=True)
+    original_lines[0] = original_lines[0].rstrip("\n") + " -- YOmux Deterministic test-only README diff line.\n"
+    current = "".join(original_lines)
     diff = "diff --git a/README.md b/README.md\n" + "".join(difflib.unified_diff(
         original.splitlines(keepends=True),
         current.splitlines(keepends=True),
@@ -160,7 +162,7 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
         .file-editor-codemirror-panel {{ height: 100%; }}
         </style></head>
         <body class="theme-light theme-resolved-light editor-theme-light">
-          <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+          <script id="yomux-bootstrap" type="application/json">{bootstrap}</script>
           <div id="mount"></div>
           <script>
             window.__readmeDiffPayload = {payload};
@@ -245,8 +247,8 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
                 viewMode: editorViewModeFor(path, item),
                 panelItems: filePanelItemsForPath(path),
                 panelConnected: panel.isConnected === true,
-                apiHasMergeView: Boolean(window.YOLOmuxCodeMirror?.MergeView),
-                apiHasUnifiedMergeView: Boolean(window.YOLOmuxCodeMirror?.unifiedMergeView),
+                apiHasMergeView: Boolean(window.YOmuxCodeMirror?.MergeView),
+                apiHasUnifiedMergeView: Boolean(window.YOmuxCodeMirror?.unifiedMergeView),
                 plainFallback: panel._cmPlainFallback === true,
                 statusText: panel.querySelector('.file-editor-status-message')?.textContent || '',
                 request: window.__readmeDiffRequest || '',
@@ -320,7 +322,7 @@ def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser,
         .file-editor-codemirror-panel {{ height: 100%; }}
         </style></head>
         <body class="theme-light theme-resolved-light editor-theme-light">
-          <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+          <script id="yomux-bootstrap" type="application/json">{bootstrap}</script>
           <div id="mount"></div>
           <script>
             window.__cleanDiffPayload = {payload};
@@ -478,7 +480,7 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
         .file-editor-panel {{ width: 920px; height: 520px; }}
         </style></head>
         <body class="theme-dark editor-theme-dark">
-          <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+          <script id="yomux-bootstrap" type="application/json">{bootstrap}</script>
           <div id="mount"></div>
           <script>{app_bundle_before_boot_script()}</script>
           <script>
@@ -1495,7 +1497,7 @@ def test_markdown_view_editor_search_is_read_only_and_counts_matches(browser, tm
               readOnly: view.props.editable?.(view.state) === false,
               sourceUnchanged: fileEditorPanelState(panel).content === original,
               matchCount: panel.querySelectorAll('.file-editor-preview-find-match').length,
-              highlightMatches: CSS.highlights?.get('yolomux-find-match')?.size || 0,
+              highlightMatches: CSS.highlights?.get('yomux-find-match')?.size || 0,
             };
             view.dom.dispatchEvent(new InputEvent('beforeinput', {bubbles: true, inputType: 'insertText', data: 'X'}));
             await new Promise(resolve => setTimeout(resolve, 50));
@@ -1607,7 +1609,7 @@ def test_split_view_search_stays_open_after_query_redraw(browser, tmp_path):
               visible: panel.querySelector('.file-editor-preview-find-panel')?.hidden === false,
               query: panel.querySelector('.file-editor-preview-find-panel input')?.value || '',
               count: panel.querySelector('.file-editor-preview-find-count')?.textContent || '',
-              highlights: CSS.highlights?.get('yolomux-find-match')?.size || 0,
+              highlights: CSS.highlights?.get('yomux-find-match')?.size || 0,
             };
           } catch (error) {
             return {error: String(error?.stack || error)};
@@ -1649,7 +1651,7 @@ def test_markdown_view_editor_search_marks_only_the_query_text(browser, tmp_path
             return {
               count: panel.querySelector('.file-editor-preview-find-count')?.textContent || '',
               marks: Array.from(panel.querySelectorAll('.file-editor-preview-find-match')).map(node => node.textContent),
-              highlightMatches: CSS.highlights?.get('yolomux-find-match')?.size || 0,
+              highlightMatches: CSS.highlights?.get('yomux-find-match')?.size || 0,
               source: fileEditorPanelState(panel).content,
             };
           } catch (error) {
@@ -1690,7 +1692,7 @@ def test_markdown_prosemirror_click_enter_and_delayed_source_sync(browser, tmp_p
             const view = panel._pmView;
             const paragraph = view.state.doc.lastChild;
             const paragraphStart = view.state.doc.content.size - paragraph.nodeSize + 1;
-            view.dispatch(view.state.tr.setSelection(YOLOmuxProseMirror.TextSelection.create(view.state.doc, paragraphStart + 5)));
+            view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, paragraphStart + 5)));
             view.focus();
             const clickEditable = view.dom.getAttribute('contenteditable') === 'true' && document.activeElement === view.dom;
             view.someProp('handleKeyDown', handler => handler(view, new KeyboardEvent('keydown', {key: 'Enter'})));
@@ -1729,7 +1731,7 @@ def test_markdown_prosemirror_click_enter_and_delayed_source_sync(browser, tmp_p
             const savedBeforeDebounce = saveRequests[0].content;
 
             const end = resumedView.state.doc.content.size - 1;
-            resumedView.dispatch(resumedView.state.tr.setSelection(YOLOmuxProseMirror.TextSelection.create(resumedView.state.doc, end)));
+            resumedView.dispatch(resumedView.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(resumedView.state.doc, end)));
             resumedView.someProp('handleKeyDown', handler => handler(resumedView, new KeyboardEvent('keydown', {key: 'Enter'})));
             resumedView.someProp('handleKeyDown', handler => handler(resumedView, new KeyboardEvent('keydown', {key: 'Enter'})));
             const endSelection = resumedView.state.selection.head;
@@ -1795,7 +1797,7 @@ def test_markdown_prosemirror_preserves_empty_paragraph_spacing_round_trip(brows
         (async () => {
           try {
             await loadProseMirrorApi();
-            const api = window.YOLOmuxProseMirror;
+            const api = window.YOmuxProseMirror;
             const schema = prosemirrorMarkdownSchema(api);
             const parser = prosemirrorMarkdownParser(api, schema);
             const serializer = prosemirrorMarkdownSerializer(api);
@@ -1866,7 +1868,7 @@ def test_markdown_viewedit_noop_flush_preserves_source_and_skips_autosave(browse
             };
             const view = panel._pmView;
             view.focus();
-            view.dispatch(view.state.tr.setSelection(YOLOmuxProseMirror.TextSelection.near(view.state.doc.resolve(1))));
+            view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.near(view.state.doc.resolve(1))));
             flushProseMirrorSource(panel, path);
             destroyProseMirrorPanel(panel);
             await new Promise(resolve => setTimeout(resolve, 50));
@@ -2023,7 +2025,7 @@ def test_markdown_prosemirror_image_paste_uses_view_selection(browser, tmp_path)
             await window.__yolomuxTestWaitFor(() => panel._pmView && panel._cmView);
             const view = panel._pmView;
             const start = 1 + 'before '.length;
-            view.dispatch(view.state.tr.setSelection(YOLOmuxProseMirror.TextSelection.create(view.state.doc, start)));
+            view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, start)));
             view.focus();
             const originalFetch = window.fetch.bind(window);
             let releaseUpload;
@@ -2045,7 +2047,7 @@ def test_markdown_prosemirror_image_paste_uses_view_selection(browser, tmp_path)
             const event = new ClipboardEvent('paste', {bubbles: true, cancelable: true, clipboardData: transfer});
             document.dispatchEvent(event);
             await window.__yolomuxTestWaitFor(() => typeof releaseUpload === 'function');
-            view.dispatch(view.state.tr.setSelection(YOLOmuxProseMirror.TextSelection.create(view.state.doc, 1)));
+            view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, 1)));
             releaseUpload();
             await new Promise(resolve => setTimeout(resolve, 2250));
             const image = panel._pmView.dom.querySelector('img');
@@ -2599,7 +2601,7 @@ def test_markdown_prosemirror_native_enter_keeps_typing_and_codemirror_keeps_vie
             const view = panel._pmView;
             const paragraph = view.state.doc.lastChild;
             const start = view.state.doc.content.size - paragraph.nodeSize + 1;
-            view.dispatch(view.state.tr.setSelection(YOLOmuxProseMirror.TextSelection.create(view.state.doc, start + 5)));
+            view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, start + 5)));
             view.focus();
             window.__nativeMarkdownViewEditLabel = viewEditLabel;
             done({ready: true});
@@ -2809,14 +2811,14 @@ def test_markdown_split_enter_middle_and_end_have_distinct_markdown_results(brow
           };
           const middle = await makePanel('/home/test/yolomux.dev/MIDDLE.md', 'helloworld');
           const middleView = middle._pmView;
-          middleView.dispatch(middleView.state.tr.setSelection(YOLOmuxProseMirror.TextSelection.create(middleView.state.doc, 6)));
+          middleView.dispatch(middleView.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(middleView.state.doc, 6)));
           middleView.someProp('handleKeyDown', handler => handler(middleView, new KeyboardEvent('keydown', {key: 'Enter'})));
           middleView.dom.dispatchEvent(new FocusEvent('blur'));
           await new Promise(resolve => setTimeout(resolve, 100));
           const middleSource = fileEditorPanelState(middle).content;
           const end = await makePanel('/home/test/yolomux.dev/END.md', 'helloworld');
           const endView = end._pmView;
-          endView.dispatch(endView.state.tr.setSelection(YOLOmuxProseMirror.TextSelection.create(endView.state.doc, endView.state.doc.content.size - 1)));
+          endView.dispatch(endView.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(endView.state.doc, endView.state.doc.content.size - 1)));
           endView.someProp('handleKeyDown', handler => handler(endView, new KeyboardEvent('keydown', {key: 'Enter'})));
           endView.dom.dispatchEvent(new FocusEvent('blur'));
           await new Promise(resolve => setTimeout(resolve, 100));
@@ -2909,7 +2911,7 @@ def test_markdown_viewedit_second_contextmenu_and_touch_longpress_keep_shared_me
           await window.__yolomuxTestWaitFor(() => panel._pmView);
           const view = panel._pmView;
           const p = view.dom.querySelector('p');
-          const select = () => view.dispatch(view.state.tr.setSelection(YOLOmuxProseMirror.TextSelection.create(view.state.doc, 1, 5)));
+          const select = () => view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, 1, 5)));
           const fire = (type, extra = {}) => view.dom.dispatchEvent(new MouseEvent(type, {bubbles: true, cancelable: true, clientX: 20, clientY: 20, ...extra}));
           select();
           view.dispatch(view.state.tr.addMark(1, 5, view.state.schema.marks.strong.create()));
@@ -2929,7 +2931,7 @@ def test_markdown_viewedit_second_contextmenu_and_touch_longpress_keep_shared_me
           secondMenu?.remove();
           select();
           const touchEvent = new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 20, clientY: 20});
-          touchEvent.yolomuxTouchLongPress = true;
+              touchEvent.yomuxTouchLongPress = true;
           const touchHandled = view.dom.dispatchEvent(touchEvent);
           done({
             firstPrevented: first === false,
@@ -2970,7 +2972,7 @@ def test_markdown_viewedit_link_context_menu_offers_url_actions(browser, tmp_pat
         (async () => {
           try {
             const path = '/home/test/yolomux.dev/LINK.md';
-            const source = '[YOLOmux](https://example.com/docs)';
+            const source = '[YOmux](https://example.com/docs)';
             const item = fileEditorItemFor(path);
             setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
             setFileEditorViewMode(path, 'split', item);
@@ -3027,7 +3029,7 @@ def test_markdown_viewedit_link_context_menu_offers_url_actions(browser, tmp_pat
     assert metrics["labels"][:4] == ["Open URL in a new tab", "Copy URL", "Modify URL", "Remove URL"], metrics
     assert metrics["labels"][4:7] == ["Copy text", "Copy with format", "Paste"], metrics
     assert "https://example.com/updated" in metrics["modified"], metrics
-    assert metrics["removed"] == "YOLOmux", metrics
+    assert metrics["removed"] == "YOmux", metrics
     assert metrics["dialogWidth"] >= 700, metrics
     assert metrics["inputWidth"] >= 650, metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
@@ -3051,7 +3053,7 @@ def test_markdown_viewedit_link_context_menu_selects_link_without_prior_highligh
             renderFileEditorPanel(panel, item);
             await window.__yolomuxTestWaitFor(() => panel._pmView?.dom.querySelector('a[href]'));
             const view = panel._pmView;
-            view.dispatch(view.state.tr.setSelection(YOLOmuxProseMirror.TextSelection.create(view.state.doc, 1, 1)));
+            view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, 1, 1)));
             const link = view.dom.querySelector('a[href]');
             link.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 20, clientY: 20}));
             const menu = document.querySelector('.markdown-preview-context-menu');
@@ -3093,7 +3095,7 @@ def test_markdown_viewedit_selected_text_context_menu_adds_url(browser, tmp_path
             renderFileEditorPanel(panel, item);
             await window.__yolomuxTestWaitFor(() => panel._pmView);
             const view = panel._pmView;
-            view.dispatch(view.state.tr.setSelection(YOLOmuxProseMirror.TextSelection.create(view.state.doc, 1, 5)));
+            view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, 1, 5)));
             const event = new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 20, clientY: 20});
             const prevented = !view.dom.dispatchEvent(event);
             const menu = document.querySelector('.markdown-preview-context-menu');
@@ -3780,8 +3782,8 @@ def test_direct_mermaid_network_topology_uses_native_svg_labels(browser, tmp_pat
     mac_port_range = f"{int(linux_port) + 1110}-{int(linux_port) + 1113}"
     mermaid_source = f"""flowchart TB
     relay[\"ereview.com relay<br/>account: conway\"]
-    linux[\"keivenc-linux1<br/>YOLOmux: 127.0.0.1:{linux_port_range}<br/>yo{linux_port}-yo{int(linux_port) + 3}\"]
-    mac[\"Mac<br/>YOLOmux: 0.0.0.0:{mac_port_range}<br/>yo{int(linux_port) + 1110}-yo{int(linux_port) + 1113}\"]
+    linux[\"keivenc-linux1<br/>YOmux: 127.0.0.1:{linux_port_range}<br/>yo{linux_port}-yo{int(linux_port) + 3}\"]
+    mac[\"Mac<br/>YOmux: 0.0.0.0:{mac_port_range}<br/>yo{int(linux_port) + 1110}-yo{int(linux_port) + 1113}\"]
     macForward[\"Mac Linux-forward listener<br/>localhost/LAN:{linux_port_range}\"]
     home[\"Home client<br/>192.168.1.x\"]
     internet[\"Internet client\"]
@@ -3853,7 +3855,7 @@ def test_direct_mermaid_network_topology_uses_native_svg_labels(browser, tmp_pat
             done({
               rawForeignObjects: (rawSvg.match(/<foreignObject\\b/gi) || []).length,
               previewForeignObjects: (previewSvg.match(/<foreignObject\\b/gi) || []).length,
-              previewHasCollapsedMacLabel: previewSvg.includes('MacYOLOmux:'),
+              previewHasCollapsedMacLabel: previewSvg.includes('MacYOmux:'),
               previewHasCollapsedForwardLabel: previewSvg.includes('Mac Linux-forward listenerlocalhost/LAN'),
               previewNativeLabelTexts,
               naturalWidth: image?.naturalWidth || 0,
@@ -5987,7 +5989,7 @@ def test_markdown_viewedit_prosemirror_enter_preserves_soft_break_contract(brows
             const view = panel._pmView;
             const paragraph = view.state.doc.lastChild;
             const paragraphStart = view.state.doc.content.size - paragraph.nodeSize + 1;
-            view.dispatch(view.state.tr.setSelection(YOLOmuxProseMirror.TextSelection.create(view.state.doc, paragraphStart + 6)));
+            view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, paragraphStart + 6)));
             view.someProp('handleKeyDown', handler => handler(view, new KeyboardEvent('keydown', {key: 'Enter'})));
             await waitFor(() => fileEditorPanelState(panel).content === 'Before\\n and after');
             done({
@@ -6373,7 +6375,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
             const original = `# Preview\\n\\nOriginal pop-out text\\n\\n\\`\\`\\`javascript\\nfunction paint() { return "blue"; }\\n\\`\\`\\`\\n\\n\\`\\`\\`rust\\npub fn main() { let value: Option<u32> = Some(1); }\\n\\`\\`\\`\\n\\n${longTail}\\n`;
             const updated = original.replace('Original pop-out text', 'Updated pop-out text');
             const item = fileEditorItemFor(path);
-            setFileEditorThemeMode('yolomux-light');
+            setFileEditorThemeMode('yomux-light');
             setFileState(path, {
               kind: 'text',
               gitRoot: '/home/test/repo',
@@ -7068,7 +7070,7 @@ def test_light_editor_and_preview_share_python_fence_token_colors(browser, tmp_p
                   .replace(/\\bextract_tool_calls\\b/g, '<span class="hljs-title function_">extract_tool_calls</span>');
               },
             };
-            setFileEditorThemeMode('yolomux-light');
+            setFileEditorThemeMode('yomux-light');
             const path = '/home/test/repo/README.md';
             const content = [
               '```python',
@@ -7258,7 +7260,7 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
         .file-editor-panel {{ width: 760px; height: 420px; }}
         </style></head>
         <body class="theme-light theme-resolved-light editor-theme-light">
-          <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+          <script id="yomux-bootstrap" type="application/json">{bootstrap}</script>
           <div id="mount"></div>
           <script>{app_bundle_before_boot_script()}</script>
           <script>
@@ -7278,7 +7280,7 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
               const path = '/home/test/repo/README.md';
               const content = '# Heading\\n\\n**Bold** and [link](https://example.com)\\n\\n```js\\nconst x = 1;\\n```\\n';
               const item = fileEditorItemFor(path);
-              setFileEditorThemeMode('yolomux-light');
+              setFileEditorThemeMode('yomux-light');
               setFileState(path, {{
                 kind: 'text',
                 content,
@@ -7416,18 +7418,18 @@ def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path
         .file-editor-codemirror-panel {{ height: 100%; }}
         </style></head>
         <body class="theme-dark theme-resolved-dark editor-theme-light">
-          <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+          <script id="yomux-bootstrap" type="application/json">{bootstrap}</script>
           <div id="mount"></div>
           <script>{app_bundle_before_boot_script()}</script>
           <script>
             window.__markdownColorReady = (async () => {{
               applyActiveColor('white');
-              setFileEditorThemeMode('yolomux-light');
+              setFileEditorThemeMode('yomux-light');
               codeMirrorLanguageExtension = function() {{
                 return [{{notARealCodeMirrorExtension: true}}];
               }};
               const path = '/home/test/repo/README.md';
-              const content = '# YOLOmux\\n\\n**bold** and [link](README.md)\\n';
+              const content = '# YOmux\\n\\n**bold** and [link](README.md)\\n';
               const item = fileEditorItemFor(path);
               setFileState(path, {{
                 kind: 'text',
@@ -7496,7 +7498,7 @@ def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path
     assert "error" not in metrics, metrics
     assert metrics["cmMode"] == "edit", metrics
     assert metrics["plainFallback"] is True, metrics
-    assert metrics["headingText"].startswith("# YOLOmux"), metrics
+    assert metrics["headingText"].startswith("# YOmux"), metrics
     assert metrics["headingColor"] == metrics["expectedHeading"], metrics
     assert metrics["headingColor"] == "rgb(0, 0, 0)", metrics
     assert metrics["headingBg"] == "rgba(0, 0, 0, 0)", metrics
@@ -7504,7 +7506,7 @@ def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path
     assert metrics["visibleHeadingBg"] == "rgba(0, 0, 0, 0)", metrics
     assert metrics["hasBold"] is True, metrics
     assert metrics["hasLink"] is True, metrics
-    assert metrics["afterHeadingText"].startswith("# YOLOmux"), metrics
+    assert metrics["afterHeadingText"].startswith("# YOmux"), metrics
     assert metrics["afterHeadingColor"] == "rgb(232, 237, 242)", metrics
     assert metrics["afterHeadingBg"] == "rgba(0, 0, 0, 0)", metrics
     assert metrics["hasBoldAfterTheme"] is True, metrics
@@ -7550,7 +7552,7 @@ def test_editor_search_button_toggles_pressed_state_with_codemirror_panel(browse
         .file-editor-codemirror-panel {{ height: 100%; }}
         </style></head>
         <body class="theme-dark editor-theme-dark">
-          <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+          <script id="yomux-bootstrap" type="application/json">{bootstrap}</script>
           <div id="mount"></div>
           <script>{app_bundle_before_boot_script()}</script>
           <script>
@@ -7653,7 +7655,7 @@ def test_codemirror_find_scroll_advances_visible_result_without_snapping(browser
         #mount, .file-editor-panel {{ width: 920px; height: 520px; }}
         .file-editor-codemirror-panel {{ height: 100%; }}
         </style></head><body class="theme-dark editor-theme-dark">
-          <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script><div id="mount"></div>
+          <script id="yomux-bootstrap" type="application/json">{bootstrap}</script><div id="mount"></div>
           <script>{app_bundle_before_boot_script()}</script>
           <script>
             window.__findScrollReady = (async () => {{
@@ -7767,7 +7769,7 @@ def test_long_markdown_editor_restores_scroll_after_codemirror_recreate(browser,
         .file-editor-codemirror-panel {{ height: 100%; }}
         </style></head>
         <body class="theme-dark editor-theme-dark">
-          <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+          <script id="yomux-bootstrap" type="application/json">{bootstrap}</script>
           <div id="mount"></div>
           <script>{app_bundle_before_boot_script()}</script>
           <script>
@@ -7868,7 +7870,7 @@ def test_focused_editor_background_rerender_keeps_live_selection_and_scroll(brow
         .file-editor-codemirror-panel {{ height: 100%; }}
         </style></head>
         <body class="theme-dark editor-theme-dark">
-          <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+          <script id="yomux-bootstrap" type="application/json">{bootstrap}</script>
           <div id="mount"></div>
           <script>{app_bundle_before_boot_script()}</script>
           <script>

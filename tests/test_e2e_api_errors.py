@@ -24,11 +24,11 @@ from tests.e2e_browser_harness import E2EBrowserHarness
 from tests.gate_harness import retire_expected_fixture_http_failures
 from tests.gate_harness import wait_for_fixture_api_quiescence
 from tests.browser_helpers.browser_console import retire_only_nonfailure_js_debug_events
-from yolomux_lib import statusd
-from yolomux_lib.http_routes import ALL_ROUTES
-from yolomux_lib.server import Handler
-from yolomux_lib.server_logs import SERVER_LOGS
-from yolomux_lib.statusd_client import StatusClient
+from yomux_lib import statusd
+from yomux_lib.http_routes import ALL_ROUTES
+from yomux_lib.server import Handler
+from yomux_lib.server_logs import SERVER_LOGS
+from yomux_lib.statusd_client import StatusClient
 
 
 pytest_plugins = ("tests.e2e_browser_harness",)

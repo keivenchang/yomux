@@ -1558,7 +1558,7 @@ def test_dockview_tab_switch_flips_highlight_in_input_frame_before_deferred_cont
     """Highlight-first paint-order contract: the new tab's active chrome flips synchronously in the
     input frame (highlight first), while the heavy terminal follow-up (phase 2) is deferred behind a
     frame and the previous tab's content never lingers under the new highlight. A deliberately slowed
-    phase 2 (window.__yolomuxTabSwitchPhaseTwoDelayMs) proves content strictly follows."""
+    phase 2 (window.__yomuxTabSwitchPhaseTwoDelayMs) proves content strictly follows."""
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
     wait_for_dockview(browser, min_tabs=2)
     # Everything up to the `return` runs in one synchronous script — no animation frame or timeout can
@@ -1574,7 +1574,7 @@ def test_dockview_tab_switch_flips_highlight_in_input_frame_before_deferred_cont
           return original(...args);
         };
         window.__restorePhaseTwo = () => { focusTerminalFromUserAction = original; };
-        window.__yolomuxTabSwitchPhaseTwoDelayMs = 300;
+        window.__yomuxTabSwitchPhaseTwoDelayMs = 300;
         activatePaneTab('left', target, {userInitiated: true});
         const activeTab = document.querySelector('.dv-tab.dv-active-tab .dockview-pane-tab')?.dataset?.paneTab || '';
         const targetTab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${target}"]`);
@@ -1604,7 +1604,7 @@ def test_dockview_tab_switch_flips_highlight_in_input_frame_before_deferred_cont
     # Phase 2 runs after the highlight paints (slowed by the test hook), for the target only.
     WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return window.__phaseTwo.length >= 1"))
     after = browser.execute_script(
-        "const rows = window.__phaseTwo.slice(); window.__restorePhaseTwo(); delete window.__yolomuxTabSwitchPhaseTwoDelayMs; return rows;"
+        "const rows = window.__phaseTwo.slice(); window.__restorePhaseTwo(); delete window.__yomuxTabSwitchPhaseTwoDelayMs; return rows;"
     )
     assert after == [frame["target"]], after
 
@@ -5067,14 +5067,14 @@ def test_dockview_file_editor_tabs_stay_above_toolbar(browser, tmp_path):
     encoded_files = [
         "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Fmissing%20dynamo.rs",
         "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2FCargo.toml",
-        "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Fstatic%2Fyolomux.css",
+        "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Fstatic%2Fyomux.css",
         "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Fstatic_src%2Fjs%2Fyolomux%2F60_popovers_tabs.js",
         "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2FREADME.md",
         "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Fdocs%2Fspecs%2FGUI.md",
         "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Fdocs%2FDEVELOPMENT.md",
         "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Ftests%2Ftest_browser_layout.py",
         "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Fstatic_src%2Fcss%2Fyolomux%2F40_layout_panes_tabs.css",
-        "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Fyolomux_lib%2Fsettings.py",
+        "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Fyomux_lib%2Fsettings.py",
         "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Fpyproject.toml",
         "file%3A%2Fhome%2Ftest%2Fyolomux.dev%2Fpytest.ini",
     ]
@@ -5221,6 +5221,13 @@ def test_dockview_pointercancel_reorders_from_last_tab_target(browser, tmp_path)
         const end = {clientX: targetRect.left + targetRect.width * .68, clientY: targetRect.top + targetRect.height / 2, button: 0};
         dockviewBeginTabPointerDrag(start, '1');
         dockviewTrackTabPointerDrag(end);
+        const canonicalPreview = document.querySelector('[data-yomux-tab-insertion-preview]');
+        const legacyPreview = document.querySelector('[data-yolomux-tab-insertion-preview]');
+        const previewAliases = {
+          canonical: Boolean(canonicalPreview),
+          legacy: Boolean(legacyPreview),
+          sameNode: Boolean(canonicalPreview && canonicalPreview === legacyPreview),
+        };
         document.dispatchEvent(new PointerEvent('pointercancel', {
           bubbles: true,
           cancelable: true,
@@ -5231,7 +5238,9 @@ def test_dockview_pointercancel_reorders_from_last_tab_target(browser, tmp_path)
         setTimeout(() => done({
           tabs: paneTabs('left'),
           pointerDragActive: Boolean(dockviewLayoutState.tabPointerDrag),
-          insertionPreview: Boolean(document.querySelector('[data-yolomux-tab-insertion-preview]')),
+          previewAliases,
+          insertionPreview: Boolean(document.querySelector('[data-yomux-tab-insertion-preview]')),
+          legacyInsertionPreview: Boolean(document.querySelector('[data-yolomux-tab-insertion-preview]')),
           errors: jsDebugFailureEvents('error'),
         }), 125);
         """
@@ -5239,7 +5248,9 @@ def test_dockview_pointercancel_reorders_from_last_tab_target(browser, tmp_path)
     assert result == {
         "tabs": ["2", "1", "3"],
         "pointerDragActive": False,
+        "previewAliases": {"canonical": True, "legacy": True, "sameNode": True},
         "insertionPreview": False,
+        "legacyInsertionPreview": False,
         "errors": [],
     }, result
 
@@ -5418,7 +5429,7 @@ def test_dockview_drag_to_full_pinned_pane_uses_danger_preview_and_status(browse
                   text: status.textContent,
                   classes: Array.from(status.classList),
                   kind: status.dataset.layoutStatusKind || '',
-                  invalidPreview: document.querySelector('.yolomux-dockview')?.classList.contains('dockview-invalid-tab-drop-preview') || false,
+                  invalidPreview: document.querySelector('.yomux-dockview')?.classList.contains('dockview-invalid-tab-drop-preview') || false,
                 };
                 """
             ))["kind"] == "danger"
@@ -5647,7 +5658,7 @@ def test_dockview_non_pinned_tab_cannot_drop_between_pinned_tabs(browser, tmp_pa
     assert any(item["borderStyle"] == "dashed" and item["borderColor"] == preview["dangerColor"] for item in preview["previews"]), preview
     assert metrics["groups"][0]["tabs"] == ["1", "2", "3"], metrics
     assert metrics["slots"]["left"]["tabs"] == ["1", "2", "3"], metrics
-    assert browser.execute_script("return document.querySelector('.yolomux-dockview')?.classList.contains('dockview-invalid-tab-drop-preview') || false") is False
+    assert browser.execute_script("return document.querySelector('.yomux-dockview')?.classList.contains('dockview-invalid-tab-drop-preview') || false") is False
     assert_dockview_drag_cleanup(dockview_drag_cleanup_metrics(browser))
 
 
@@ -5678,7 +5689,7 @@ def test_dockview_pinned_tab_cannot_move_to_other_pane(browser, tmp_path):
     assert metrics["slots"]["left"]["tabs"] == ["1"], metrics
     assert metrics["slots"]["right"]["tabs"] == ["2", "3"], metrics
     assert any(group["tabs"] == ["1"] for group in metrics["groups"]), metrics
-    assert browser.execute_script("return document.querySelector('.yolomux-dockview')?.classList.contains('dockview-invalid-tab-drop-preview') || false") is False
+    assert browser.execute_script("return document.querySelector('.yomux-dockview')?.classList.contains('dockview-invalid-tab-drop-preview') || false") is False
 
 
 def test_dockview_pinned_tab_cannot_split_to_new_pane(browser, tmp_path):
@@ -5729,7 +5740,7 @@ def test_dockview_pinned_tab_cannot_split_to_new_pane(browser, tmp_path):
             """
             return {
               rootPreview: document.querySelector('#grid')?.classList.contains('drop-preview-root') || false,
-              invalidPreview: document.querySelector('.yolomux-dockview')?.classList.contains('dockview-invalid-tab-drop-preview') || false,
+              invalidPreview: document.querySelector('.yomux-dockview')?.classList.contains('dockview-invalid-tab-drop-preview') || false,
             };
             """
         )
@@ -5775,7 +5786,7 @@ def test_dockview_pinned_tab_invalid_non_pinned_target_shows_red_dashes(browser,
     metrics = dockview_layout_metrics(browser)
     assert metrics["slots"]["left"]["tabs"] == ["1"], metrics
     assert metrics["slots"]["right"]["tabs"] == ["2", "3"], metrics
-    assert browser.execute_script("return document.querySelector('.yolomux-dockview')?.classList.contains('dockview-invalid-tab-drop-preview') || false") is False
+    assert browser.execute_script("return document.querySelector('.yomux-dockview')?.classList.contains('dockview-invalid-tab-drop-preview') || false") is False
 
 
 def test_dockview_pane_header_has_no_whole_pane_drag_handle(browser, tmp_path):
@@ -6304,11 +6315,14 @@ def test_dockview_top_split_begins_below_tab_header(browser, tmp_path):
         preview = browser.execute_script(
             """
             const selection = document.querySelector('.dv-groupview .dv-drop-target-selection.dv-drop-target-top');
-            const tabInsertion = document.querySelector('[data-yolomux-tab-insertion-preview]');
+            const tabInsertion = document.querySelector('[data-yomux-tab-insertion-preview]');
+            const legacyTabInsertion = document.querySelector('[data-yolomux-tab-insertion-preview]');
             const grid = document.getElementById('grid');
             return {
               selectionHeight: Math.round(selection.getBoundingClientRect().height),
               tabInsertion: Boolean(tabInsertion),
+              legacyTabInsertion: Boolean(legacyTabInsertion),
+              tabInsertionMirrored: Boolean(tabInsertion && legacyTabInsertion && tabInsertion === legacyTabInsertion),
               rootPreview: grid.classList.contains('drop-preview-root'),
             };
             """
@@ -7906,7 +7920,7 @@ def dockview_drag_cleanup_metrics(browser):
           dragGhosts: visibleMatches('.dv-tab-ghost-drag, .dv-tab--dragging, .dv-tab-dragging, .dv-dragged'),
           dropTargets: visibleMatches('.dv-drop-target-selection, .dv-drop-target-anchor'),
           appPreviews: visibleMatches('.drag-over, .drop-preview'),
-          invalidPreview: document.querySelector('.yolomux-dockview')?.classList.contains('dockview-invalid-tab-drop-preview') || false,
+          invalidPreview: document.querySelector('.yomux-dockview')?.classList.contains('dockview-invalid-tab-drop-preview') || false,
           errors: jsDebugFailureEvents('error'),
         };
         """
@@ -8408,7 +8422,7 @@ def test_moon_white_editor_theme_does_not_change_dark_app_tab_chrome(browser, tm
         tmp_path,
         "?sessions=1,file%3A%2Fhome%2Ftest%2Ft5t.md&layout=right&tabs=right:1,file%3A%2Fhome%2Ftest%2Ft5t.md*",
         sessions=["1"],
-        settings={"appearance": {"theme": "dark", "active_color": "white", "editor_light_color_scheme": "yolomux-light"}},
+        settings={"appearance": {"theme": "dark", "active_color": "white", "editor_light_color_scheme": "yomux-light"}},
     )
     wait_for_dockview(browser, min_tabs=2)
     metrics = browser.execute_script(
@@ -8425,7 +8439,7 @@ def test_moon_white_editor_theme_does_not_change_dark_app_tab_chrome(browser, tm
           };
         });
         const before = tabMetrics();
-        setFileEditorThemeMode('yolomux-light');
+        setFileEditorThemeMode('yomux-light');
         const source = document.createElement('div');
         source.className = 'file-editor-raw-panel';
         source.innerHTML = '<span class="md-heading md-heading-1"># Moon White source heading</span>';
@@ -8538,7 +8552,7 @@ def test_dockview_minimizing_finder_tab_preserves_triplet_home_width(browser, tm
             """
             const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="__differ__"]');
             const group = tab?.closest('.dv-groupview');
-            const host = document.querySelector('.yolomux-dockview');
+            const host = document.querySelector('.yomux-dockview');
             const groupRect = group?.getBoundingClientRect();
             const hostRect = host?.getBoundingClientRect();
             if (!groupRect || !hostRect?.width) return null;
@@ -8601,7 +8615,7 @@ def test_dockview_empty_generic_panes_close_independently_and_preserve_side_widt
     def empty_metrics(driver):
         return driver.execute_script(
             """
-            const host = document.querySelector('.yolomux-dockview')?.getBoundingClientRect();
+            const host = document.querySelector('.yomux-dockview')?.getBoundingClientRect();
             const sideSlot = sidePaneSlot(paneSideLeft);
             const sideItem = activeItemForSide(sideSlot);
             const side = document.querySelector(`.dockview-pane-tab[data-pane-tab="${sideItem}"]`)
@@ -8669,7 +8683,7 @@ def test_dockview_closing_empty_generic_pane_keeps_right_side_pane_at_host_edge(
     def right_edge_metrics(driver):
         return driver.execute_script(
             """
-            const host = document.querySelector('.yolomux-dockview')?.getBoundingClientRect();
+            const host = document.querySelector('.yomux-dockview')?.getBoundingClientRect();
             const side = document.querySelector('.dv-groupview[data-pane-role="side"][data-pane-side="right"]')
               ?.getBoundingClientRect();
             const empty = document.querySelector('.empty-pane-panel');
@@ -8741,7 +8755,7 @@ def test_dockview_closing_empty_between_two_side_panes_keeps_both_at_host_edges(
     def edge_metrics(driver):
         return driver.execute_script(
             """
-            const host = document.querySelector('.yolomux-dockview')?.getBoundingClientRect();
+            const host = document.querySelector('.yomux-dockview')?.getBoundingClientRect();
             const left = document.querySelector('.dv-groupview[data-pane-role="side"][data-pane-side="left"]')
               ?.getBoundingClientRect();
             const right = document.querySelector('.dv-groupview[data-pane-role="side"][data-pane-side="right"]')
@@ -8826,7 +8840,7 @@ def test_dockview_closing_horizontal_empty_beside_right_side_preserves_right_wid
     def metrics(driver):
         return driver.execute_script(
             """
-            const host = document.querySelector('.yolomux-dockview')?.getBoundingClientRect();
+            const host = document.querySelector('.yomux-dockview')?.getBoundingClientRect();
             const right = document.querySelector('.dv-groupview[data-pane-role="side"][data-pane-side="right"]')
               ?.getBoundingClientRect();
             const empty = document.querySelector('.empty-pane-panel');
@@ -9035,7 +9049,7 @@ def test_dockview_side_pane_chrome_intrinsic_tabs_cap_and_width_preservation(bro
             const side = document.querySelector('.dv-groupview[data-pane-role="side"][data-pane-side="left"]');
             const generic = Array.from(document.querySelectorAll('.dv-groupview[data-pane-role="generic"]'))
               .find(group => group.querySelector('.dockview-pane-tab[data-pane-tab="1"]'));
-            const host = document.querySelector('.yolomux-dockview');
+            const host = document.querySelector('.yomux-dockview');
             const sideRect = side?.getBoundingClientRect();
             const hostRect = host?.getBoundingClientRect();
             const sideTabs = Array.from(side?.querySelectorAll('.dv-tab') || []);
@@ -9167,7 +9181,7 @@ def test_dockview_right_side_pane_sash_cannot_expand_past_one_third(browser, tmp
     def metrics(driver):
         return driver.execute_script(
             """
-            const host = document.querySelector('.yolomux-dockview')?.getBoundingClientRect();
+            const host = document.querySelector('.yomux-dockview')?.getBoundingClientRect();
             const side = document.querySelector('.dv-groupview[data-pane-role="side"][data-pane-side="right"]')
               ?.getBoundingClientRect();
             if (!host?.width || !side?.width) return null;
@@ -9233,7 +9247,7 @@ def test_dockview_creating_opposite_right_side_pane_uses_capped_edge_width(brows
     metrics = WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            const host = document.querySelector('.yolomux-dockview')?.getBoundingClientRect();
+            const host = document.querySelector('.yomux-dockview')?.getBoundingClientRect();
             const side = document.querySelector('.dv-groupview[data-pane-role="side"][data-pane-side="right"]')
               ?.getBoundingClientRect();
             if (!host?.width || !side?.width) return null;

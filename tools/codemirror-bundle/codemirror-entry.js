@@ -71,7 +71,7 @@ import {shell} from "@codemirror/legacy-modes/mode/shell";
 import {toml} from "@codemirror/legacy-modes/mode/toml";
 import {tags} from "@lezer/highlight";
 
-window.YOLOmuxCodeMirror = {
+window.YOmuxCodeMirror = {
   EditorState,
   EditorView,
   ViewPlugin,

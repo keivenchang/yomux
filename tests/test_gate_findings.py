@@ -19,9 +19,9 @@ from tests.helpers.browser_scenarios import assert_terminal_wheel_observation
 from tests.helpers.browser_scenarios import terminal_wheel_observation
 from tests.tmux_runtime import run_isolated_tmux
 from tests.tmux_runtime import wait_for_isolated_tmux_panes
-from yolomux_lib.settings import default_settings
-from yolomux_lib.settings import read_settings_file
-from yolomux_lib.settings import write_settings_file
+from yomux_lib.settings import default_settings
+from yomux_lib.settings import read_settings_file
+from yomux_lib.settings import write_settings_file
 
 
 @pytest.mark.browser

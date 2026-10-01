@@ -6,7 +6,7 @@ capture_library:
   - raw_capture: plain tmux text after capture-pane -J
   - styled_capture: tmux text after capture-pane -e -J, retaining SGR attributes
   - visible_text: normalized plain text used by the detector
-  normalization_owner: yolomux_lib/tmux/tmux_utils.py:tmux_capture_pane
+  normalization_owner: yomux_lib/tmux/tmux_utils.py:tmux_capture_pane
   wrap_contract: capture-pane -J rejoins visual wraps; parser preserves logical values and real choice/footer boundaries
   private_live_samples:
   - pane: yo7220:0.0

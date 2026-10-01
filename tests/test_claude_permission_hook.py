@@ -5,8 +5,8 @@ import os
 
 import pytest
 
-from yolomux_lib import claude_permission_hook as hook
-from yolomux_lib import yolo_rules
+from yomux_lib import claude_permission_hook as hook
+from yomux_lib import yolo_rules
 
 
 def bash_request(command: str, **extra) -> dict:
@@ -139,7 +139,7 @@ def test_print_settings_emits_the_pretooluse_hook_snippet(monkeypatch, capsys):
     settings = json.loads(capsys.readouterr().out)
     pre = settings["hooks"]["PreToolUse"][0]
     assert pre["matcher"] == "Bash"
-    assert pre["hooks"][0]["command"] == "python3 -m yolomux_lib.claude_permission_hook"
+    assert pre["hooks"][0]["command"] == "python3 -m yomux_lib.claude_permission_hook"
 
 
 def test_decision_table_only_allows_approve():

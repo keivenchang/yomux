@@ -12,8 +12,8 @@ import json
 
 import pytest
 
-from yolomux_lib import app as app_module
-from yolomux_lib.stats_current import resolution as sr
+from yomux_lib import app as app_module
+from yomux_lib.stats_current import resolution as sr
 
 # The canonical contract table, as {range: (auto, (explicit...))}.
 EXPECTED_MATRIX = {

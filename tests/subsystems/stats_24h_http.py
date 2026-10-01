@@ -23,15 +23,15 @@ from tests.helpers.gate_stats import _seed_realistic_stats
 from tests.helpers.gate_stats import record_current_database_migration
 from tools.mockers.transcript import MockTranscriptSpec
 from tools.mockers.transcript import generate_mock_transcripts
-from yolomux_lib import http_routes as http_routes_module
-from yolomux_lib.stats_current import client as stats_client
-from yolomux_lib.stats_current import http as stats_http
-from yolomux_lib.stats_current import pricing
-from yolomux_lib.stats_current import resolution as stats_resolution
-from yolomux_lib.stats_current import service as stats_service
-from yolomux_lib.stats_current import storage
-from yolomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
-from yolomux_lib.stats_current.usage import usage_atom_from_source
+from yomux_lib import http_routes as http_routes_module
+from yomux_lib.stats_current import client as stats_client
+from yomux_lib.stats_current import http as stats_http
+from yomux_lib.stats_current import pricing
+from yomux_lib.stats_current import resolution as stats_resolution
+from yomux_lib.stats_current import service as stats_service
+from yomux_lib.stats_current import storage
+from yomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
+from yomux_lib.stats_current.usage import usage_atom_from_source
 
 
 # Cold 24h run: snapshot 11.0 ms (496,037 B), the other HTTP routes 0.6-2.5

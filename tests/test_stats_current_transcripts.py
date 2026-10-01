@@ -9,15 +9,15 @@ import time
 
 import pytest
 
-from yolomux_lib import session_files
-from yolomux_lib.backend_health.observer import BACKEND_HEALTH_PROBE_TIMEOUT_SECONDS
-from yolomux_lib.pricing_catalog import PricingCatalog
-from yolomux_lib.stats_current import materializer
-from yolomux_lib.stats_current import pricing
-from yolomux_lib.stats_current.storage import DATABASE_FILENAME
-from yolomux_lib.stats_current.storage import Store
-from yolomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
-from yolomux_lib.stats_current.usage import usage_atom_from_source
+from yomux_lib import session_files
+from yomux_lib.backend_health.observer import BACKEND_HEALTH_PROBE_TIMEOUT_SECONDS
+from yomux_lib.pricing_catalog import PricingCatalog
+from yomux_lib.stats_current import materializer
+from yomux_lib.stats_current import pricing
+from yomux_lib.stats_current.storage import DATABASE_FILENAME
+from yomux_lib.stats_current.storage import Store
+from yomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
+from yomux_lib.stats_current.usage import usage_atom_from_source
 from tools.mockers.transcript import append_record as _append_record
 from tools.mockers.transcript import claude_usage as _claude_usage
 from tools.mockers.transcript import codex_meta as _codex_meta

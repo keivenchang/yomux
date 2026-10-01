@@ -19,15 +19,15 @@ from types import SimpleNamespace
 
 import pytest
 
-import yolomux_lib.app as app_module
-import yolomux_lib.common as common
-import yolomux_lib.control as control_module
-import yolomux_lib.settings as settings_module
-import yolomux_lib.approval.yolo_rules as yolo_rules_module
-import yolomux_lib.yoagent.conversation as yoagent_conversation_module
-import yolomux_lib.yoagent.transports as transport_module
-from yolomux_lib.app import TmuxWebtermApp
-from yolomux_lib.tmux_utils import YOLOMUX_TMUX_SOCKET_ENV
+import yomux_lib.app as app_module
+import yomux_lib.common as common
+import yomux_lib.control as control_module
+import yomux_lib.settings as settings_module
+import yomux_lib.approval.yolo_rules as yolo_rules_module
+import yomux_lib.yoagent.conversation as yoagent_conversation_module
+import yomux_lib.yoagent.transports as transport_module
+from yomux_lib.app import TmuxWebtermApp
+from yomux_lib.tmux_utils import YOLOMUX_TMUX_SOCKET_ENV
 from tests.gate_harness import patch_imported_writable_constants
 from tests.tmux_runtime import run_isolated_tmux
 from tests.tmux_runtime import wait_for_isolated_tmux_panes

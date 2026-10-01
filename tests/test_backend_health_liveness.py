@@ -35,20 +35,20 @@ import pytest
 
 from tests.helpers.clock import FakeClock
 
-from yolomux_lib import local_service_projection
-from yolomux_lib.backend_health.observer import BACKEND_HEALTH_CYCLE_FAILING
-from yolomux_lib.backend_health.observer import BACKEND_HEALTH_CYCLES_STALLED
-from yolomux_lib.backend_health.observer import BACKEND_HEALTH_LIVENESS_MISSED_CYCLES
-from yolomux_lib.backend_health.observer import BACKEND_HEALTH_NO_CYCLE_OBSERVED
-from yolomux_lib.backend_health.observer import BACKEND_HEALTH_OBSERVE_SECONDS
-from yolomux_lib.backend_health.observer import BackendHealthObserver
-from yolomux_lib.backend_health.store import BACKEND_HEALTH_MAX_TRANSITIONS
-from yolomux_lib.backend_health.store import DIAGNOSTIC_CYCLE_FAILED
-from yolomux_lib.backend_health.store import _transition_totals
-from yolomux_lib.backend_health.store import BackendHealthStore
-from yolomux_lib.backend_health.store import HealthSnapshot
-from yolomux_lib.backend_health.store import ResourceObservation
-from yolomux_lib.local_service_projection import LOCAL_SERVICE_INVENTORY
+from yomux_lib import local_service_projection
+from yomux_lib.backend_health.observer import BACKEND_HEALTH_CYCLE_FAILING
+from yomux_lib.backend_health.observer import BACKEND_HEALTH_CYCLES_STALLED
+from yomux_lib.backend_health.observer import BACKEND_HEALTH_LIVENESS_MISSED_CYCLES
+from yomux_lib.backend_health.observer import BACKEND_HEALTH_NO_CYCLE_OBSERVED
+from yomux_lib.backend_health.observer import BACKEND_HEALTH_OBSERVE_SECONDS
+from yomux_lib.backend_health.observer import BackendHealthObserver
+from yomux_lib.backend_health.store import BACKEND_HEALTH_MAX_TRANSITIONS
+from yomux_lib.backend_health.store import DIAGNOSTIC_CYCLE_FAILED
+from yomux_lib.backend_health.store import _transition_totals
+from yomux_lib.backend_health.store import BackendHealthStore
+from yomux_lib.backend_health.store import HealthSnapshot
+from yomux_lib.backend_health.store import ResourceObservation
+from yomux_lib.local_service_projection import LOCAL_SERVICE_INVENTORY
 
 PORT = 17999
 

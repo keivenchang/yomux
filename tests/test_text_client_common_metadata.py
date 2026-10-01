@@ -42,10 +42,10 @@ from text_client_common import (  # noqa: E402
 )
 import claude  # noqa: E402
 import codex  # noqa: E402
-from yolomux_lib.agent_comms.json_rpc import json_rpc_request  # noqa: E402
-from yolomux_lib.agent_comms.stream_events import ClaudeStreamJsonNormalizer  # noqa: E402
-from yolomux_lib.agent_comms.stream_events import normalize_codex_app_server_message  # noqa: E402
-from yolomux_lib.yoagent.backends import yoagent_response_detail_rows  # noqa: E402
+from yomux_lib.agent_comms.json_rpc import json_rpc_request  # noqa: E402
+from yomux_lib.agent_comms.stream_events import ClaudeStreamJsonNormalizer  # noqa: E402
+from yomux_lib.agent_comms.stream_events import normalize_codex_app_server_message  # noqa: E402
+from yomux_lib.yoagent.backends import yoagent_response_detail_rows  # noqa: E402
 from claude import ClaudeTextClient  # noqa: E402
 from codex import APP_SERVER_TIMEOUT_SECONDS, CodexTextClient  # noqa: E402
 
@@ -481,13 +481,13 @@ def test_prefixed_output_labels_share_common_tool_and_metrics_labels():
 def test_text_clients_use_shared_agent_comms_primitives():
     codex_source = (TOOLS_DIR / "codex.py").read_text()
     claude_source = (TOOLS_DIR / "claude.py").read_text()
-    transport_source = (ROOT / "yolomux_lib" / "yoagent" / "transports.py").read_text()
-    assert "from yolomux_lib.agent_comms.codex_app_server import CodexAppServerProtocol" in codex_source
-    assert "from yolomux_lib.agent_comms.json_rpc import json_rpc_request" in codex_source
-    assert "from yolomux_lib.agent_comms.stream_events import normalize_codex_app_server_message" in codex_source
+    transport_source = (ROOT / "yomux_lib" / "yoagent" / "transports.py").read_text()
+    assert "from yomux_lib.agent_comms.codex_app_server import CodexAppServerProtocol" in codex_source
+    assert "from yomux_lib.agent_comms.json_rpc import json_rpc_request" in codex_source
+    assert "from yomux_lib.agent_comms.stream_events import normalize_codex_app_server_message" in codex_source
     assert "def json_rpc_request(" not in codex_source
     assert "def json_rpc_notification(" not in codex_source
-    assert "from yolomux_lib.agent_comms.stream_events import ClaudeStreamJsonNormalizer" in claude_source
+    assert "from yomux_lib.agent_comms.stream_events import ClaudeStreamJsonNormalizer" in claude_source
     assert "def _readline(" not in transport_source
     assert "def _read_message(" not in transport_source
     assert "def _read_response(" not in transport_source

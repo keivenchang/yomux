@@ -4,7 +4,7 @@
 
 import os
 
-from yolomux_lib.stats_current import families, process_memory
+from yomux_lib.stats_current import families, process_memory
 
 
 def _write_stat(root, pid, comm, *, started_at_ticks=12_345):

@@ -466,7 +466,7 @@ func binaryProcessRows(snapshot CPUSnapshot, binary string) map[string]CPUProces
 }
 
 func isYoloMuxGoBinary(binary string) bool {
-	return binary == "yolomux-go" || binary == "yolomux_go"
+	return binary == "yomux-go" || binary == "yolomux-go" || binary == "yolomux_go"
 }
 
 func hostProcessInstanceSeriesKey(binary, identity string) string {

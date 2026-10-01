@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""Shared text-client helpers for YOLOmux agent prototypes."""
+"""Shared text-client helpers for YOmux agent prototypes."""
 from __future__ import annotations
 
 import json

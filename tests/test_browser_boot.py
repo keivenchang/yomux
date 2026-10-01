@@ -312,8 +312,8 @@ def test_real_xterm_mobile_input_survives_pan_preview_pane_accessory_keyboard_an
         [
             "git",
             "-c", "core.hooksPath=/dev/null",
-            "-c", "user.name=YOLOmux Tests",
-            "-c", "user.email=yolomux-tests@example.invalid",
+            "-c", "user.name=YOmux Tests",
+            "-c", "user.email=yomux-tests@example.invalid",
             "commit", "-qm", "mobile preview base",
         ],
         cwd=tmp_path,
@@ -326,8 +326,8 @@ def test_real_xterm_mobile_input_survives_pan_preview_pane_accessory_keyboard_an
         [
             "git",
             "-c", "core.hooksPath=/dev/null",
-            "-c", "user.name=YOLOmux Tests",
-            "-c", "user.email=yolomux-tests@example.invalid",
+            "-c", "user.name=YOmux Tests",
+            "-c", "user.email=yomux-tests@example.invalid",
             "commit", "-qm", "update mobile preview",
         ],
         cwd=tmp_path,
@@ -1193,7 +1193,7 @@ def test_real_xterm_renders_tmux_output_and_survives_pane_resize(browser, monkey
                       phase: event.eventPhase,
                       defaultPrevented: event.defaultPrevented,
                       cancelBubble: event.cancelBubble,
-                      touchSelection: event.yolomuxTerminalTouchSelection?.text || '',
+                      touchSelection: event.yomuxTerminalTouchSelection?.text || '',
                       synthetic: touchContextMenuSyntheticEvents.has(event),
                     });
                     container?.addEventListener('contextmenu', observe, true);

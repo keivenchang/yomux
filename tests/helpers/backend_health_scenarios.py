@@ -9,12 +9,12 @@ import time
 from typing import Any
 
 from tests.helpers.clock import FakeClock
-from yolomux_lib.backend_health.observer import BACKEND_HEALTH_OBSERVER_THREAD_PREFIX
-from yolomux_lib.backend_health.observer import BACKEND_HEALTH_OBSERVE_SECONDS
-from yolomux_lib.backend_health.observer import BackendHealthObserver
-from yolomux_lib.backend_health.store import BackendHealthStore
-from yolomux_lib.local_service_projection import LOCAL_SERVICE_INVENTORY
-from yolomux_lib.local_services.rpc import local_service_traffic_class
+from yomux_lib.backend_health.observer import BACKEND_HEALTH_OBSERVER_THREAD_PREFIX
+from yomux_lib.backend_health.observer import BACKEND_HEALTH_OBSERVE_SECONDS
+from yomux_lib.backend_health.observer import BackendHealthObserver
+from yomux_lib.backend_health.store import BackendHealthStore
+from yomux_lib.local_service_projection import LOCAL_SERVICE_INVENTORY
+from yomux_lib.local_services.rpc import local_service_traffic_class
 
 
 BACKEND_HEALTH_TEST_PORT = 7799

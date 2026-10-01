@@ -15,7 +15,7 @@ from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import wait_for_browser_boot
 from tests.helpers.gate_editor import gate_browser_runtime
 from tools import static_build
-from yolomux_lib import web as web_module
+from yomux_lib import web as web_module
 
 
 pytestmark = [pytest.mark.browser, pytest.mark.socket]
@@ -34,11 +34,11 @@ def i18n_source_bundle(monkeypatch, tmp_path):
     """
     asset_dir = tmp_path / "i18n-static"
     asset_dir.mkdir()
-    for name in ("brand.css", "codemirror.js", "yolomux.css"):
+    for name in ("brand.css", "codemirror.js", "yomux.css"):
         shutil.copy2(REPO_ROOT / "static" / name, asset_dir / name)
     for name in ("fonts", "locales", "vendor"):
         shutil.copytree(REPO_ROOT / "static" / name, asset_dir / name)
-    (asset_dir / "yolomux.js").write_text(static_build.build_asset("yolomux.js"), encoding="utf-8")
+    (asset_dir / "yomux.js").write_text(static_build.build_asset("yomux.js"), encoding="utf-8")
     monkeypatch.setattr(web_module, "STATIC_DIR", asset_dir)
 
 

@@ -14,24 +14,24 @@ from threading import Event
 
 import pytest
 
-from yolomux_lib.infra.host_identity import LocalProcessReason
-from yolomux_lib.infra.host_identity import current_host_identity
-from yolomux_lib import approvald
-from yolomux_lib import batchd
-from yolomux_lib.local_services import registry as registry_mod
-from yolomux_lib.local_services.client import LocalServiceClient
-from yolomux_lib.local_services.client import TransportFailure
-from yolomux_lib.local_services import client as local_service_client_mod
-from yolomux_lib.local_services import runtime
-from yolomux_lib.local_services.registry import LOCAL_SERVICE_RETIRE_FORCE_SECONDS
-from yolomux_lib.local_services.registry import LOCAL_SERVICE_RETIRE_GRACE_SECONDS
-from yolomux_lib.local_services.registry import LocalServiceRegistry
-from yolomux_lib.local_services.registry import LocalServiceSpec
-from yolomux_lib.local_services.registry import parse_ps_cpu_seconds
-from yolomux_lib.local_services.registry import pid_is_serving
-from yolomux_lib.stats_current import client as stats_current_client
-from yolomux_lib.stats_current import service as stats_current_service
-from yolomux_lib.stats_current import storage as stats_current_storage
+from yomux_lib.infra.host_identity import LocalProcessReason
+from yomux_lib.infra.host_identity import current_host_identity
+from yomux_lib import approvald
+from yomux_lib import batchd
+from yomux_lib.local_services import registry as registry_mod
+from yomux_lib.local_services.client import LocalServiceClient
+from yomux_lib.local_services.client import TransportFailure
+from yomux_lib.local_services import client as local_service_client_mod
+from yomux_lib.local_services import runtime
+from yomux_lib.local_services.registry import LOCAL_SERVICE_RETIRE_FORCE_SECONDS
+from yomux_lib.local_services.registry import LOCAL_SERVICE_RETIRE_GRACE_SECONDS
+from yomux_lib.local_services.registry import LocalServiceRegistry
+from yomux_lib.local_services.registry import LocalServiceSpec
+from yomux_lib.local_services.registry import parse_ps_cpu_seconds
+from yomux_lib.local_services.registry import pid_is_serving
+from yomux_lib.stats_current import client as stats_current_client
+from yomux_lib.stats_current import service as stats_current_service
+from yomux_lib.stats_current import storage as stats_current_storage
 from tests.gate_harness import FixtureLocalServiceProcess
 from tests.gate_harness import stop_fixture_local_service_process
 from tests.helpers.local_service_records import FixtureLeaseRecordBuilder
@@ -51,7 +51,7 @@ def test_local_rpc_service_exits_when_its_launching_process_dies(tmp_path):
 import multiprocessing
 import sys
 from pathlib import Path
-from yolomux_lib.local_services.runtime import run_local_rpc_service
+from yomux_lib.local_services.runtime import run_local_rpc_service
 
 stop = multiprocessing.get_context("spawn").Event()
 raise SystemExit(run_local_rpc_service(
@@ -109,7 +109,7 @@ def test_registry_prunes_only_unlocked_stale_runtime_lock_generations(tmp_path):
     active_socket = service_dir / "statsd.p24s7.active.sock"
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", active_socket.name, 24),
+        LocalServiceSpec("statsd", "yomux_lib.stats_current.service", active_socket.name, 24),
         socket_path=active_socket,
         service_dir=service_dir,
     )
@@ -141,7 +141,7 @@ def test_registry_prunes_runtime_locks_before_adopting_a_recently_healthy_servic
     active_socket = service_dir / "statsd.p24s7.active.sock"
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", active_socket.name, 24),
+        LocalServiceSpec("statsd", "yomux_lib.stats_current.service", active_socket.name, 24),
         socket_path=active_socket,
         service_dir=service_dir,
     )
@@ -307,7 +307,7 @@ def test_adopted_demand_daemon_is_reaped_not_left_a_zombie(tmp_path):
     os.close(read_fd)
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("watchd", "yolomux_lib.watchd", "watchd.sock", 1),
+        LocalServiceSpec("watchd", "yomux_lib.watchd", "watchd.sock", 1),
     )
     registry._write_record({
         **current_host_identity().process_record_fields(
@@ -353,7 +353,7 @@ def test_ensure_started_reaps_an_adopted_child_that_already_exited(tmp_path, mon
     spawned = []
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", "statsd.sock", 24),
+        LocalServiceSpec("statsd", "yomux_lib.stats_current.service", "statsd.sock", 24),
         popen=lambda *args, **kwargs: spawned.append(True) or _NeverExitingProcess(),
     )
     try:
@@ -529,17 +529,17 @@ def test_pyproject_package_discovery_includes_local_service_subpackages():
     pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
     assert "[tool.setuptools.packages.find]" in pyproject
-    assert 'py-modules = ["yolomux"]' in pyproject
-    assert 'include = ["tools*", "yolomux_lib*"]' in pyproject
-    assert 'packages = ["yolomux_lib"]' not in pyproject
+    assert 'py-modules = ["yomux", "yolomux"]' in pyproject
+    assert 'include = ["tools*", "yomux_lib*"]' in pyproject
+    assert 'packages = ["yomux_lib"]' not in pyproject
     for module_name in (
         "tools.auto_approve_tmux",
         "tools.tmux_wall",
-        "yolomux_lib.local_services",
-        "yolomux_lib.local_services.rpc",
-        "yolomux_lib.stats_current.service",
-        "yolomux_lib.batchd",
-        "yolomux_lib.approvald",
+        "yomux_lib.local_services",
+        "yomux_lib.local_services.rpc",
+        "yomux_lib.stats_current.service",
+        "yomux_lib.batchd",
+        "yomux_lib.approvald",
     ):
         assert importlib.util.find_spec(module_name) is not None
 
@@ -561,7 +561,7 @@ def test_registry_spawn_uses_current_interpreter_module_and_quoted_args(tmp_path
         socket_path.parent,
         LocalServiceSpec(
             "batchd",
-            "yolomux_lib.batchd",
+            "yomux_lib.batchd",
             socket_path.name,
             batchd.BATCHD_PROTOCOL_VERSION,
             idle_seconds=12.5,
@@ -574,7 +574,7 @@ def test_registry_spawn_uses_current_interpreter_module_and_quoted_args(tmp_path
     assert registry._spawn() is not None
     args, kwargs = starts[0]
 
-    assert args[:3] == [sys.executable, "-m", "yolomux_lib.batchd"]
+    assert args[:3] == [sys.executable, "-m", "yomux_lib.batchd"]
     assert kwargs["env"][registry_mod.LOCAL_SERVICE_SPAWN_GENERATION_ENV]
     inherited_paths = kwargs["env"]["PYTHONPATH"].split(os.pathsep)
     assert all(path in inherited_paths for path in sys.path if path)
@@ -636,7 +636,7 @@ def test_registry_spawn_rebases_only_generated_artifacts_outside_current_root(tm
         monkeypatch.setattr(sys, "pycache_prefix", str(tmp_path / "different-prefix"))
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("batchd", "yolomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
+        LocalServiceSpec("batchd", "yomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
         popen=lambda args, **kwargs: starts.append((args, kwargs)) or FakeProcess(),
     )
 
@@ -674,7 +674,7 @@ def test_registry_spawn_honors_isolated_idle_override(tmp_path, monkeypatch):
     monkeypatch.setenv("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", "0.5")
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("batchd", "yolomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION, idle_seconds=60),
+        LocalServiceSpec("batchd", "yomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION, idle_seconds=60),
         popen=lambda args, **kwargs: starts.append((args, kwargs)) or FakeProcess(),
     )
 
@@ -696,7 +696,7 @@ def test_registry_spawn_captures_durable_session_ownership(tmp_path, monkeypatch
     monkeypatch.setattr(registry_mod.os, "getsid", lambda pid: pid)
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("batchd", "yolomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
+        LocalServiceSpec("batchd", "yomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
         popen=lambda _args, **_kwargs: FakeProcess(),
     )
 
@@ -716,7 +716,7 @@ def test_registry_refreshes_spawn_members_only_while_original_leader_matches(tmp
     generation_marker = "a" * 32
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("batchd", "yolomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
+        LocalServiceSpec("batchd", "yomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
     )
     registry.spawn_ownership = registry_mod.SpawnProcessOwnership(
         leader_pid=43231,
@@ -753,7 +753,7 @@ def test_registry_first_descendant_discovery_survives_leader_exit(tmp_path, monk
     generation_marker = "a" * 32
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("batchd", "yolomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
+        LocalServiceSpec("batchd", "yomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
     )
     registry.spawn_ownership = registry_mod.SpawnProcessOwnership(
         leader_pid=43234,
@@ -782,7 +782,7 @@ def test_registry_proves_inherited_worker_when_leader_exits_after_snapshot(tmp_p
     generation_marker = "a" * 32
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("batchd", "yolomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
+        LocalServiceSpec("batchd", "yomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
     )
     registry.spawn_ownership = registry_mod.SpawnProcessOwnership(
         leader_pid=43250,
@@ -809,7 +809,7 @@ def test_registry_proves_inherited_worker_when_leader_exits_after_snapshot(tmp_p
 def test_registry_absent_leader_rejects_numeric_group_reuse_by_foreign_generation(tmp_path, monkeypatch):
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("batchd", "yolomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
+        LocalServiceSpec("batchd", "yomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
     )
     ownership = registry_mod.SpawnProcessOwnership(
         leader_pid=43239,
@@ -845,7 +845,7 @@ def test_registry_rejects_recycled_retained_child_identity(tmp_path, monkeypatch
     generation_marker = "a" * 32
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("batchd", "yolomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
+        LocalServiceSpec("batchd", "yomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
     )
     ownership = registry_mod.SpawnProcessOwnership(
         leader_pid=43241,
@@ -1022,7 +1022,7 @@ def test_registry_real_ensure_started_preserves_generation_proof_through_cleanup
         tmp_path,
         LocalServiceSpec(
             "batchd",
-            "yolomux_lib.batchd",
+            "yomux_lib.batchd",
             "batchd.sock",
             batchd.BATCHD_PROTOCOL_VERSION,
             idle_seconds=30,
@@ -1074,7 +1074,7 @@ def test_long_default_socket_fallback_keeps_registry_lock_out_of_tmp(tmp_path, m
     # `safe_socket_path`'s length fallback nests inside its own private digest-named
     # directory now, never a bare file directly under `/tmp` -- a caller deriving a
     # sibling path (e.g. a `.service.json` record) must never inherit `/tmp` itself as
-    # `.parent`. See yolomux_lib/local_services/rpc.py:safe_socket_path.
+    # `.parent`. See yomux_lib/local_services/rpc.py:safe_socket_path.
     assert client.socket_path.parent != Path("/tmp")
     assert client.socket_path.parent.parent.name == "s"
     assert client.socket_path.parent.parent.parent.name == "yolomux"
@@ -1468,7 +1468,7 @@ def test_registry_resources_reads_cpu_and_rss_via_ps_without_proc(tmp_path, monk
     clock_values = iter([100.0, 101.0])
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("batchd", "yolomux_lib.batchd", "batchd.sock", 1),
+        LocalServiceSpec("batchd", "yomux_lib.batchd", "batchd.sock", 1),
         clock=lambda: next(clock_values),
     )
 
@@ -1488,7 +1488,7 @@ def test_registry_resources_returns_none_when_ps_reports_no_such_pid(tmp_path, m
         stdout = ""
 
     monkeypatch.setattr(registry_mod.subprocess, "run", lambda *_args, **_kwargs: FakeCompleted())
-    registry = LocalServiceRegistry(tmp_path, LocalServiceSpec("batchd", "yolomux_lib.batchd", "batchd.sock", 1))
+    registry = LocalServiceRegistry(tmp_path, LocalServiceSpec("batchd", "yomux_lib.batchd", "batchd.sock", 1))
 
     assert registry.resources(999999) == {"cpu_percent": None, "rss_bytes": None}
 
@@ -1509,7 +1509,7 @@ def test_registry_resources_for_pids_aggregates_verified_workers_and_resets_on_m
     clock_values = iter([100.0, 101.0, 102.0])
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("batchd", "yolomux_lib.batchd", "batchd.sock", 1),
+        LocalServiceSpec("batchd", "yomux_lib.batchd", "batchd.sock", 1),
         clock=lambda: next(clock_values),
     )
 
@@ -1527,7 +1527,7 @@ def test_registry_resources_for_pids_aggregates_verified_workers_and_resets_on_m
 def test_registry_health_request_identifies_expected_service_protocol(tmp_path, monkeypatch):
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", "statsd.sock", 5),
+        LocalServiceSpec("statsd", "yomux_lib.stats_current.service", "statsd.sock", 5),
     )
     captured = {}
 
@@ -1535,7 +1535,7 @@ def test_registry_health_request_identifies_expected_service_protocol(tmp_path, 
         captured.update(envelope.payload)
         return {"ok": True, "version": 5, "pid": 1}, b""
 
-    monkeypatch.setattr("yolomux_lib.local_services.registry.request", fake_request)
+    monkeypatch.setattr("yomux_lib.local_services.registry.request", fake_request)
 
     assert registry.healthy() is True
     assert captured == {"action": "ping", "protocol_version": 5}
@@ -1545,7 +1545,7 @@ def test_registry_recent_health_cache_removes_per_action_ping_status_fanout(tmp_
     now = [100.0]
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", "statsd.sock", 5),
+        LocalServiceSpec("statsd", "yomux_lib.stats_current.service", "statsd.sock", 5),
         clock=lambda: now[0],
     )
     requests = []
@@ -1560,7 +1560,7 @@ def test_registry_recent_health_cache_removes_per_action_ping_status_fanout(tmp_
             return {"ok": True, "version": 5, "pid": service_pid}, b""
         return {"ok": True, "version": 5, "pid": service_pid, "started_at": 1}, b""
 
-    monkeypatch.setattr("yolomux_lib.local_services.registry.request", fake_request)
+    monkeypatch.setattr("yomux_lib.local_services.registry.request", fake_request)
 
     assert registry.ensure_started() is True
     first_requests = list(requests)
@@ -1723,7 +1723,7 @@ def test_registry_publication_validator_accepts_a_proven_status(tmp_path, status
 
 def test_registry_writes_the_service_record_through_exactly_one_validator(tmp_path):
     """Divergent copies of this write are the defect; keep one publication owner."""
-    source = (REPO_ROOT / "yolomux_lib" / "local_services" / "registry.py").read_text(encoding="utf-8")
+    source = (REPO_ROOT / "yomux_lib" / "local_services" / "registry.py").read_text(encoding="utf-8")
     call_lines = [
         line.strip()
         for line in source.splitlines()
@@ -1848,7 +1848,7 @@ def test_registry_fences_a_real_child_after_its_fixture_directory_is_removed(tmp
     registry = _publication_registry(tmp_path, clock=now, spawned=spawned)
     # `untracked_local_service_processes` (the only surface with kill
     # authority feeding it) requires the live command to literally carry a
-    # `yolomux_lib.` `-m` module plus `--socket <path>`, so a bare sleep
+    # `yomux_lib.` `-m` module plus `--socket <path>`, so a bare sleep
     # child would always be invisible to it for reasons unrelated to this
     # regression -- mirror the real launch argv shape instead (the trailing
     # tokens after `-c SCRIPT` become inert extra sys.argv entries to the
@@ -1859,7 +1859,7 @@ def test_registry_fences_a_real_child_after_its_fixture_directory_is_removed(tmp
             "-c",
             "import time; time.sleep(60)",
             "-m",
-            "yolomux_lib.fixture_stand_in",
+            "yomux_lib.fixture_stand_in",
             "--socket",
             str(registry.socket_path),
         ]
@@ -2006,7 +2006,7 @@ def test_registry_does_not_retire_or_replace_a_newer_service(tmp_path, monkeypat
     spawned = []
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", "statsd.sock", 21),
+        LocalServiceSpec("statsd", "yomux_lib.stats_current.service", "statsd.sock", 21),
         popen=lambda *args, **kwargs: spawned.append((args, kwargs)),
     )
     actions = []
@@ -2043,7 +2043,7 @@ def test_registry_reclaims_service_left_by_a_dead_web_launcher(tmp_path, monkeyp
 
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", "statsd.sock", 21),
+        LocalServiceSpec("statsd", "yomux_lib.stats_current.service", "statsd.sock", 21),
         popen=lambda *args, **kwargs: spawned.append((args, kwargs)) or FakeProcess(),
     )
     stale_pid, dead_launcher, replacement_pid = 4242, 1111, 5252
@@ -2092,7 +2092,7 @@ def test_registry_reclaims_service_left_by_a_dead_web_launcher(tmp_path, monkeyp
 def test_registry_retires_an_older_service_that_rejects_the_new_protocol(tmp_path, monkeypatch):
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", "statsd.sock", 23),
+        LocalServiceSpec("statsd", "yomux_lib.stats_current.service", "statsd.sock", 23),
     )
     actions = []
     alive = {4242: True}
@@ -2155,7 +2155,7 @@ class _VirtualRetirementClock:
         self.generation = uuid.uuid4().hex
         self.registry = LocalServiceRegistry(
             tmp_path,
-            LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", "statsd.sock", spec_version),
+            LocalServiceSpec("statsd", "yomux_lib.stats_current.service", "statsd.sock", spec_version),
             clock=lambda: self.now[0],
             sleep=self._sleep,
         )
@@ -2446,8 +2446,8 @@ def test_verified_orphan_diagnostics_must_distinguish_a_recorded_survivor(tmp_pa
         encoding="utf-8",
     )
     table = _table([
-        (7001, 1, 7001, 1.0, f"python3 -m yolomux_lib.batchd --serve --socket {recorded_socket}", 8001),
-        (7002, 1, 7002, 1.0, f"python3 -m yolomux_lib.batchd --serve --socket {recordless_socket}", 8002),
+        (7001, 1, 7001, 1.0, f"python3 -m yomux_lib.batchd --serve --socket {recorded_socket}", 8001),
+        (7002, 1, 7002, 1.0, f"python3 -m yomux_lib.batchd --serve --socket {recordless_socket}", 8002),
     ])
 
     rows = registry_mod.verified_orphan_diagnostics(service_dir, table)
@@ -2543,7 +2543,7 @@ def test_registry_incompatible_generations_share_one_root_both_directions(tmp_pa
     # (protocol 2) it never wrote itself -- must refuse typed, never adopt.
     registry_old = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("statusd", "yolomux_lib.statusd", "statusd.sock", 1),
+        LocalServiceSpec("statusd", "yomux_lib.statusd", "statusd.sock", 1),
         popen=lambda *a, **k: (_ for _ in ()).throw(AssertionError("an older generation must never spawn over a live newer one")),
     )
     actions_old: list[str] = []
@@ -2561,7 +2561,7 @@ def test_registry_incompatible_generations_share_one_root_both_directions(tmp_pa
     # Direction 2: a newer registry (protocol 2), sharing the SAME service_dir,
     # meets a real persisted record written by a genuinely separate
     # older-generation registry object (protocol 1).
-    registry_seed = LocalServiceRegistry(tmp_path, LocalServiceSpec("statusd", "yolomux_lib.statusd", "statusd.sock", 1))
+    registry_seed = LocalServiceRegistry(tmp_path, LocalServiceSpec("statusd", "yomux_lib.statusd", "statusd.sock", 1))
     registry_seed._write_record({
         **_process_record(older_pid),
         "service": "statusd",
@@ -2570,7 +2570,7 @@ def test_registry_incompatible_generations_share_one_root_both_directions(tmp_pa
     })
     registry_seed.socket_path.touch()
 
-    registry_new = LocalServiceRegistry(tmp_path, LocalServiceSpec("statusd", "yolomux_lib.statusd", "statusd.sock", 2))
+    registry_new = LocalServiceRegistry(tmp_path, LocalServiceSpec("statusd", "yomux_lib.statusd", "statusd.sock", 2))
     assert registry_new.socket_path == registry_seed.socket_path
     assert registry_new.record_path == registry_seed.record_path
 
@@ -2609,7 +2609,7 @@ def test_registry_two_callers_share_one_root_with_compatible_generations(tmp_pat
     compatible owner to be reused, never replaced.
     """
     pid = 4242
-    registry_a = LocalServiceRegistry(tmp_path, LocalServiceSpec("statusd", "yolomux_lib.statusd", "statusd.sock", 3))
+    registry_a = LocalServiceRegistry(tmp_path, LocalServiceSpec("statusd", "yomux_lib.statusd", "statusd.sock", 3))
     registry_a._write_record({
         **_process_record(pid),
         "service": "statusd",
@@ -2620,7 +2620,7 @@ def test_registry_two_callers_share_one_root_with_compatible_generations(tmp_pat
 
     registry_b = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("statusd", "yolomux_lib.statusd", "statusd.sock", 3),
+        LocalServiceSpec("statusd", "yomux_lib.statusd", "statusd.sock", 3),
         popen=lambda *a, **k: (_ for _ in ()).throw(
             AssertionError("a compatible-generation caller must reuse the live service, never spawn a second one")
         ),
@@ -2650,7 +2650,7 @@ def test_registry_two_callers_share_one_root_with_compatible_generations(tmp_pat
 def test_registry_retires_ledger_proven_older_service_with_its_recorded_protocol(tmp_path, monkeypatch):
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("statusd", "yolomux_lib.statusd", "statusd.sock", 2),
+        LocalServiceSpec("statusd", "yomux_lib.statusd", "statusd.sock", 2),
     )
     old_pid = 4242
     registry._write_record({
@@ -2693,7 +2693,7 @@ def test_registry_retires_ledger_proven_older_service_with_its_recorded_protocol
 def test_registry_reclaims_dead_legacy_record_for_inert_socket_without_signalling(tmp_path, monkeypatch):
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("indexd", "yolomux_lib.search.search_indexer", "indexer.sock", 1),
+        LocalServiceSpec("indexd", "yomux_lib.search.search_indexer", "indexer.sock", 1),
     )
     registry._write_record({"pid": 999_999_999, "service": "indexd"})
     registry.socket_path.write_text("stale", encoding="utf-8")
@@ -2722,7 +2722,7 @@ def test_registry_reclaim_fence_refuses_typed_noncurrent_records(tmp_path, monke
     service_pid = 4242
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", "statsd.sock", 23),
+        LocalServiceSpec("statsd", "yomux_lib.stats_current.service", "statsd.sock", 23),
     )
     record = {
         **_process_record(service_pid),
@@ -2763,7 +2763,7 @@ def test_registry_does_not_retire_newer_same_protocol_build(tmp_path, monkeypatc
     registry = LocalServiceRegistry(
         tmp_path,
         LocalServiceSpec(
-            "statsd", "yolomux_lib.stats_current.service", "statsd.sock", 24,
+            "statsd", "yomux_lib.stats_current.service", "statsd.sock", 24,
             code_revision="old-revision", build_revision=2,
         ),
     )
@@ -2931,13 +2931,13 @@ def test_shutdown_owned_local_services_escalates_gracefully_and_spares_unrelated
     def table_reader():
         rows = []
         if alive[500]:
-            rows.append((500, 1, 500, 1.0, f"python3 -m yolomux_lib.batchd --serve --socket {target_socket} --idle-seconds 60", 1500))
+            rows.append((500, 1, 500, 1.0, f"python3 -m yomux_lib.batchd --serve --socket {target_socket} --idle-seconds 60", 1500))
         if alive[501]:
             # Reparented to init once its leader is gone; the process GROUP is what
             # binds it to the leader, and that is unchanged by the leader exiting.
             rows.append((501, 500 if alive[500] else 1, 500, 1.0, "python3 -c multiprocessing-spawn-worker", 1501))
         if alive[600]:
-            rows.append((600, 1, 600, 1.0, f"python3 -m yolomux_lib.statusd --serve --socket {bystander_socket} --idle-seconds 60", 1600))
+            rows.append((600, 1, 600, 1.0, f"python3 -m yomux_lib.statusd --serve --socket {bystander_socket} --idle-seconds 60", 1600))
         if alive[601]:
             rows.append((601, 600, 600, 1.0, "python3 -c multiprocessing-spawn-worker", 1601))
         return _table(rows)
@@ -3006,7 +3006,7 @@ def test_shutdown_owned_local_services_escalates_gracefully_and_spares_unrelated
 def test_ledger_record_identity_requires_the_exact_socket_marker(tmp_path):
     socket_path = tmp_path / "services" / "batchd.sock"
     record = FixtureLocalServiceRecordBuilder(service="batchd", socket_path=socket_path, pid=100).build()
-    with_marker = _table([(100, 1, 100, 5.0, f"python3 -m yolomux_lib.batchd --serve --socket {socket_path} --idle-seconds 60")])
+    with_marker = _table([(100, 1, 100, 5.0, f"python3 -m yomux_lib.batchd --serve --socket {socket_path} --idle-seconds 60")])
     unrelated_python = _table([(100, 1, 100, 5.0, "python3 some_other_tool.py --socket /tmp/elsewhere.sock")])
     defender_shaped = _table([(100, 1, 100, 5.0, "/Applications/Microsoft Defender.app/Contents/MacOS/wdavdaemon unprivileged")])
 
@@ -3026,7 +3026,7 @@ def test_tracked_local_service_groups_membership_is_exact_process_group(tmp_path
     _write_service_record(service_dir, "statsd", 300, stale_socket)
     table = _table(
         [
-            (200, 1, 200, 10.0, f"python3 -m yolomux_lib.batchd --serve --socket {batchd_socket} --idle-seconds 60"),
+            (200, 1, 200, 10.0, f"python3 -m yomux_lib.batchd --serve --socket {batchd_socket} --idle-seconds 60"),
             (201, 200, 200, 90.0, "python3 -c multiprocessing-spawn-worker"),
             (202, 200, 200, 80.0, "python3 -c multiprocessing-spawn-worker"),
             # Same-name stranger in ANOTHER process group: never a member.
@@ -3049,7 +3049,7 @@ def test_tracked_local_service_groups_preserve_darwin_member_identity(tmp_path):
     socket_path = service_dir / "batchd.sock"
     _write_service_record(service_dir, "batchd", 200, socket_path)
     table = {
-        200: registry_mod.ProcessTableEntry(1, 200, 1.0, f"python3 -m yolomux_lib.batchd --socket {socket_path}", 1200, 200, "proc:1200"),
+        200: registry_mod.ProcessTableEntry(1, 200, 1.0, f"python3 -m yomux_lib.batchd --socket {socket_path}", 1200, 200, "proc:1200"),
         201: registry_mod.ProcessTableEntry(200, 200, 1.0, "python3 worker", 1201, 200, "darwin:1201"),
     }
 
@@ -3083,7 +3083,7 @@ def test_tracked_port_process_group_requires_lease_and_port_identity(tmp_path):
         for key in ("stable_host_id", "boot_id", "pid", "process_start_identity", "process_start_ticks")
     }
     assert set(group["member_records"]) == {400, 401}
-    # Another YOLOmux port (or a --port prefix collision) never enters this ledger.
+    # Another YOmux port (or a --port prefix collision) never enters this ledger.
     assert registry_mod.tracked_port_process_group(8881, tmp_path, prefix_collision) == {}
     # A recycled lease PID fails the command identity check.
     assert registry_mod.tracked_port_process_group(8881, tmp_path, recycled) == {}
@@ -3109,7 +3109,7 @@ def test_service_record_carries_pgid_launcher_and_bounded_worker_pids(tmp_path, 
     registry_mod.set_local_service_launch_context(8881)
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("batchd", "yolomux_lib.batchd", "batchd.sock", protocol_version=3),
+        LocalServiceSpec("batchd", "yomux_lib.batchd", "batchd.sock", protocol_version=3),
     )
 
     record = registry._record_from_status(
@@ -3279,9 +3279,9 @@ class _VirtualLifetimeClock:
     def _rows(self):
         rows = []
         if self._is_alive(500):
-            rows.append((500, 1, 500, 1.0, f"python3 -m yolomux_lib.batchd --serve --socket {self.socket_path} --idle-seconds 60", 1500))
+            rows.append((500, 1, 500, 1.0, f"python3 -m yomux_lib.batchd --serve --socket {self.socket_path} --idle-seconds 60", 1500))
         if self._is_alive(600):
-            rows.append((600, 1, 600, 1.0, f"python3 -m yolomux_lib.statusd --serve --socket {self.bystander_socket} --idle-seconds 60", 1600))
+            rows.append((600, 1, 600, 1.0, f"python3 -m yomux_lib.statusd --serve --socket {self.bystander_socket} --idle-seconds 60", 1600))
         return _table(rows)
 
     def _is_alive(self, pid):
@@ -3449,7 +3449,7 @@ def test_a_child_that_survives_sigkill_is_reported_unconfirmed_not_declared_dead
 # CONTRACT REQUIRED OF THE LIFETIME OWNER: liveness decisions in the retirement
 # loop must go through the zombie-excluding serving predicate that production
 # already owns in `bounded_process_table(require_complete=True)`. Concretely,
-# `yolomux_lib.local_services.registry` must export `pid_is_serving` and
+# `yomux_lib.local_services.registry` must export `pid_is_serving` and
 # `process_group_has_serving_member`, `retained_process_state()` must use them,
 # and no second copy may exist anywhere. The test-side copy that used to live in
 # `tests/serving_process.py` is deleted, not shimmed; every test imports the
@@ -3567,7 +3567,7 @@ def test_retirement_observes_a_real_child_exit_within_one_supervision_pass(tmp_p
 
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", "statsd.sock", 23),
+        LocalServiceSpec("statsd", "yomux_lib.stats_current.service", "statsd.sock", 23),
         clock=lambda: now[0],
         sleep=fake_sleep,
     )
@@ -3674,10 +3674,10 @@ def test_serving_predicate_has_exactly_one_owner_and_it_is_the_product(tmp_path)
     now, and the test-side copy is DELETED rather than kept as a delegating shim:
     a shim is still a second name that can later be given a second body, and a
     second body is exactly the drift this test exists to prevent. Every test that
-    needs the predicate imports it from ``yolomux_lib.local_services.registry``.
+    needs the predicate imports it from ``yomux_lib.local_services.registry``.
     """
     assert hasattr(registry_mod, "pid_is_serving"), (
-        "yolomux_lib.local_services.registry must own the zombie-excluding liveness predicate"
+        "yomux_lib.local_services.registry must own the zombie-excluding liveness predicate"
     )
     assert hasattr(registry_mod, "process_group_has_serving_member")
 
@@ -3727,7 +3727,7 @@ def test_serving_predicate_has_exactly_one_owner_and_it_is_the_product(tmp_path)
 def _adoptable_registry(root, *, pid, launcher_pid, monkeypatch, protocol_version=3):
     registry = LocalServiceRegistry(
         root,
-        LocalServiceSpec("statusd", "yolomux_lib.statusd", "statusd.sock", protocol_version),
+        LocalServiceSpec("statusd", "yomux_lib.statusd", "statusd.sock", protocol_version),
         popen=lambda *a, **k: (_ for _ in ()).throw(
             AssertionError("an adopting generation must never spawn over a live healthy daemon")
         ),
@@ -3821,7 +3821,7 @@ def test_a_private_root_never_adopts_another_roots_daemon(tmp_path, monkeypatch)
         lambda pid: os.getpid() if int(pid) == daemon_pid else 0,
     )
 
-    registry_a = LocalServiceRegistry(root_a, LocalServiceSpec("statusd", "yolomux_lib.statusd", "statusd.sock", 3))
+    registry_a = LocalServiceRegistry(root_a, LocalServiceSpec("statusd", "yomux_lib.statusd", "statusd.sock", 3))
     registry_a._write_record({
         **_process_record(daemon_pid),
         "service": "statusd",
@@ -3836,7 +3836,7 @@ def test_a_private_root_never_adopts_another_roots_daemon(tmp_path, monkeypatch)
     assert registry_a.record_path.exists() is True
     assert snapshot_a, "positive control: root A really holds a published record"
 
-    registry_b = LocalServiceRegistry(root_b, LocalServiceSpec("statusd", "yolomux_lib.statusd", "statusd.sock", 3))
+    registry_b = LocalServiceRegistry(root_b, LocalServiceSpec("statusd", "yomux_lib.statusd", "statusd.sock", 3))
     assert registry_b.record_path != registry_a.record_path
 
     registry_b._arm_adopted_reaper()

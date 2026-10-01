@@ -5,8 +5,8 @@ import io
 import json
 from types import MethodType, SimpleNamespace
 from urllib.parse import urlencode
-from yolomux_lib import http_routes
-from yolomux_lib import server
+from yomux_lib import http_routes
+from yomux_lib import server
 
 def login_cookie(runtime, credentials) -> str:
     body = urlencode({"username": credentials.username, "password": credentials.password, "next": "/api/ping"}).encode()
@@ -18,7 +18,7 @@ def login_cookie(runtime, credentials) -> str:
     finally:
         connection.close()
     assert response.status == 303, response.status
-    return next(value.split(";", 1)[0] for value in cookies if "yolomux_auth_" in value and "Max-Age=0" not in value)
+    return next(value.split(";", 1)[0] for value in cookies if "yomux_auth_" in value and "Max-Age=0" not in value)
 
 def capturing_route_request(app, path: str, method: str = "GET", body: bytes = b""):
     handler = server.Handler.__new__(server.Handler)

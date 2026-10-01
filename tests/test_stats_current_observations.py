@@ -8,12 +8,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from yolomux_lib import app as app_module
-from yolomux_lib import http_routes
-from yolomux_lib.stats_current import browser_family
-from yolomux_lib.stats_current import client as stats_client
-from yolomux_lib.stats_current import families
-from yolomux_lib.stats_current import observations, service, storage
+from yomux_lib import app as app_module
+from yomux_lib import http_routes
+from yomux_lib.stats_current import browser_family
+from yomux_lib.stats_current import client as stats_client
+from yomux_lib.stats_current import families
+from yomux_lib.stats_current import observations, service, storage
 
 
 def payload(**changes):
@@ -60,7 +60,7 @@ def test_browser_failure_provenance_is_bounded_and_optional():
         "observed_at": 100.5, "epoch_id": "page-1",
         "payload": {
             "kind": "error", "signature": "jsf-provenance", "message": "confirmed issue",
-            "source": "/static/yolomux.js", "provenance": "confirmed_real",
+            "source": "/static/yomux.js", "provenance": "confirmed_real",
         },
     }])
     parsed = observations.parse_browser_observations(
@@ -488,7 +488,7 @@ def test_statsd_appends_accepted_browser_failure_to_durable_jsonl(tmp_path):
     body = json.dumps(payload(observations=[{
         "event_id": "request-failure-1", "family": "browser", "source_id": "browser-private",
         "observed_at": 100.5, "epoch_id": "page-1",
-        "payload": {"kind": "error", "signature": "jsf-abc123", "message": "real inline throw", "source": "/static/yolomux.js", "line": 42, "column": 9, "stack": "Error: real inline throw", "provenance": "confirmed_real"},
+        "payload": {"kind": "error", "signature": "jsf-abc123", "message": "real inline throw", "source": "/static/yomux.js", "line": 42, "column": 9, "stack": "Error: real inline throw", "provenance": "confirmed_real"},
     }])).encode("utf-8")
     with storage.Store.open(database) as store:
         current_service.writer = store
@@ -504,7 +504,7 @@ def test_statsd_appends_accepted_browser_failure_to_durable_jsonl(tmp_path):
     assert any(item.payload.get("kind") == "error" for item in snapshot.observations)
     line = json.loads(log_path.read_text(encoding="utf-8").strip())
     assert line == {
-        "timestamp": 100.5, "signature": "jsf-abc123", "source": "/static/yolomux.js",
+        "timestamp": 100.5, "signature": "jsf-abc123", "source": "/static/yomux.js",
         "line": 42, "column": 9, "message": "real inline throw", "stack": "Error: real inline throw", "provenance": "confirmed_real",
     }
     assert "accepted_observation_ids" not in response["counts"]
@@ -524,7 +524,7 @@ def test_statsd_rotates_browser_failure_jsonl_at_its_bound(tmp_path, monkeypatch
                 "observed_at": 100.5 + index, "epoch_id": "page-1",
                 "payload": {
                     "kind": "error", "signature": f"jsf-abc12{index}", "message": f"failure {index}",
-                    "source": "/static/yolomux.js", "line": 42, "column": 9,
+                    "source": "/static/yomux.js", "line": 42, "column": 9,
                 },
             }])).encode("utf-8")
             response, _binary = current_service.handle_with_binary({

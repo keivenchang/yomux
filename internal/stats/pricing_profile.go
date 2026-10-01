@@ -9,7 +9,7 @@ import (
 
 // ResolveUsagePricingProfile mirrors the Python usage_pricing_profile policy
 // for collector atoms. Settings are the sanitized settings mapping returned by
-// yolomux_lib.workspace.settings.settings_payload.
+// yomux_lib.workspace.settings.settings_payload.
 func ResolveUsagePricingProfile(settings map[string]any, provider, executionSource, endpoint string, observedAt float64) string {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	source := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(executionSource)), "!", "")

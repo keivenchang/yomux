@@ -112,13 +112,13 @@ raw_capture: |2
        ╰────────────────────────────────────────────────────────────────────────
   ─────────────────────────────────────────╯
 
-  ❯ Use Claude Code interactive question UI, not prose, and ask me this multiple-choice question: Which YOLOmux verifier
+  ❯ Use Claude Code interactive question UI, not prose, and ask me this multiple-choice question: Which YOmux verifier
     mode should we use? Options: Pane capture, Transcript capture. Wait for my selection.
 
 
   ● User declined to answer questions
 
-    ⎿  · Which YOLOmux verifier mode should we use? (Pane capture / Transcript capture)
+    ⎿  · Which YOmux verifier mode should we use? (Pane capture / Transcript capture)
 
 
   ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -144,13 +144,13 @@ styled_capture: |2
        ╰────────────────────────────────────────────────────────────────────────
   ─────────────────────────────────────────╯
 
-  ❯ Use Claude Code interactive question UI, not prose, and ask me this multiple-choice question: Which YOLOmux verifier
+  ❯ Use Claude Code interactive question UI, not prose, and ask me this multiple-choice question: Which YOmux verifier
     mode should we use? Options: Pane capture, Transcript capture. Wait for my selection.
 
 
   ● User declined to answer questions
 
-    ⎿  · Which YOLOmux verifier mode should we use? (Pane capture / Transcript capture)
+    ⎿  · Which YOmux verifier mode should we use? (Pane capture / Transcript capture)
 
 
   ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────

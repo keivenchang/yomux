@@ -4,9 +4,9 @@
 
 from dataclasses import replace
 
-from yolomux_lib.stats_current import materializer, storage
-from yolomux_lib.stats_current import pricing
-from yolomux_lib.stats_current import service as service_module
+from yomux_lib.stats_current import materializer, storage
+from yomux_lib.stats_current import pricing
+from yomux_lib.stats_current import service as service_module
 
 
 class CountingTuple(tuple):

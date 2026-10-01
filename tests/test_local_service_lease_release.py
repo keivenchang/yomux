@@ -6,14 +6,14 @@ import time
 
 from tests.helpers.external_lease_client import assert_daemon_refuses_a_self_lease
 from tests.helpers.external_lease_client import external_lease_client
-from yolomux_lib import app as app_module
-from yolomux_lib import batchd
-from yolomux_lib.local_services import client as local_service_client
-from yolomux_lib.local_services import registry as local_service_registry
-from yolomux_lib.local_services import rpc
-from yolomux_lib.local_services.rpc import LocalRpcError
-from yolomux_lib.local_services.registry import LocalServiceRegistry
-from yolomux_lib.local_services.registry import LocalServiceSpec
+from yomux_lib import app as app_module
+from yomux_lib import batchd
+from yomux_lib.local_services import client as local_service_client
+from yomux_lib.local_services import registry as local_service_registry
+from yomux_lib.local_services import rpc
+from yomux_lib.local_services.rpc import LocalRpcError
+from yomux_lib.local_services.registry import LocalServiceRegistry
+from yomux_lib.local_services.registry import LocalServiceSpec
 
 
 def test_registry_lease_release_timeout_retries_the_typed_transport_failure(tmp_path, monkeypatch):

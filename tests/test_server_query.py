@@ -18,25 +18,25 @@ from urllib.parse import urlparse
 import pytest
 
 
-from yolomux_lib import app as app_module
-from yolomux_lib import http_routes
-from yolomux_lib import batchd
-from yolomux_lib import server as server_module
-from yolomux_lib import server_auth as server_auth_module
-from yolomux_lib import web
-from yolomux_lib.filesystem import FilesystemError
-from yolomux_lib.observability.queued_delivery import QueuedDeliveryLedger
-from yolomux_lib import server_logs
-from yolomux_lib.workspace import settings as settings_module
-from yolomux_lib.tmux import process_group_ownership
-from yolomux_lib.common import ACTIVITY_MAX_HOURS
-from yolomux_lib.common import error_payload
-from yolomux_lib.server import Handler
-from yolomux_lib.server import parse_query_float
-from yolomux_lib.server import parse_query_int
-from yolomux_lib.server import parse_repo_refs_param
-from yolomux_lib.server import ws_resize_dimensions
-from yolomux_lib.web import html_page
+from yomux_lib import app as app_module
+from yomux_lib import http_routes
+from yomux_lib import batchd
+from yomux_lib import server as server_module
+from yomux_lib import server_auth as server_auth_module
+from yomux_lib import web
+from yomux_lib.filesystem import FilesystemError
+from yomux_lib.observability.queued_delivery import QueuedDeliveryLedger
+from yomux_lib import server_logs
+from yomux_lib.workspace import settings as settings_module
+from yomux_lib.tmux import process_group_ownership
+from yomux_lib.common import ACTIVITY_MAX_HOURS
+from yomux_lib.common import error_payload
+from yomux_lib.server import Handler
+from yomux_lib.server import parse_query_float
+from yomux_lib.server import parse_query_int
+from yomux_lib.server import parse_repo_refs_param
+from yomux_lib.server import ws_resize_dimensions
+from yomux_lib.web import html_page
 
 
 SOURCE_STATIC_DIR = Path(__file__).resolve().parents[1] / "static_src"
@@ -51,7 +51,7 @@ def valid_settings_payload() -> dict:
         "choices": settings_module.settings_payload_choices(),
         "catalog": settings_module.settings_catalog(settings),
         "path": "/fixture/settings.yaml",
-        "display_path": "~/.config/yolomux/settings.yaml",
+        "display_path": "~/.config/yomux/settings.yaml",
         "mtime_ns": 0,
     }
 
@@ -393,8 +393,8 @@ def test_record_http_response_bytes_keeps_capture_marker_out_of_metrics():
     handler.command = "GET"
     handler.path = "/api/ping"
     handler.headers = {
-        "X-YOLOmux-Measurement": "capture-0123456789abcdef0123456789abcdef",
-        "X-YOLOmux-Request-ID": "r-web-page-7",
+        "X-YOmux-Measurement": "capture-0123456789abcdef0123456789abcdef",
+        "X-YOmux-Request-ID": "r-web-page-7",
     }
     handler._api_request_id = ""
     handler.client_address = ("127.0.0.1", 43123)
@@ -416,7 +416,7 @@ def test_record_http_response_bytes_keeps_capture_marker_out_of_metrics():
     assert records[0][1]["details"]["request_id"] == "r-web-page-7"
     assert records[0][1]["details"]["transport_request_id"] == "r-web-page-7"
     assert "capture-" not in repr(records[0][1])
-    handler.headers = {"X-YOLOmux-Measurement": "capture-not-a-random-marker"}
+    handler.headers = {"X-YOmux-Measurement": "capture-not-a-random-marker"}
     assert Handler.measurement_scope(handler) == ""
 
 
@@ -426,8 +426,8 @@ def test_capture_metrics_keep_transport_request_id_when_response_identity_change
     handler.command = "GET"
     handler.path = "/api/fs/watch-diff"
     handler.headers = {
-        "X-YOLOmux-Measurement": "capture-0123456789abcdef0123456789abcdef",
-        "X-YOLOmux-Request-ID": "r-browser-issued",
+        "X-YOmux-Measurement": "capture-0123456789abcdef0123456789abcdef",
+        "X-YOmux-Request-ID": "r-browser-issued",
     }
     handler._api_request_id = ""
     handler._http_transport_request_id = ""
@@ -454,7 +454,7 @@ def test_capture_json_body_retains_only_bounded_salted_identity():
         handler = object.__new__(Handler)
         handler.headers = {
             "Content-Length": str(len(body)),
-            "X-YOLOmux-Measurement": marker,
+            "X-YOmux-Measurement": marker,
         }
         handler.rfile = io.BytesIO(body)
         assert Handler.read_json_body(handler, 4096) is not None
@@ -497,8 +497,8 @@ def test_capture_response_records_request_thread_cpu_and_payload_identity(monkey
     handler.command = "POST"
     handler.path = "/api/fs/batch"
     handler.headers = {
-        "X-YOLOmux-Measurement": "capture-0123456789abcdef0123456789abcdef",
-        "X-YOLOmux-Request-ID": "r-web-batch-1",
+        "X-YOmux-Measurement": "capture-0123456789abcdef0123456789abcdef",
+        "X-YOmux-Request-ID": "r-web-batch-1",
     }
     handler._api_request_id = ""
     handler.client_address = ("127.0.0.1", 43123)
@@ -1007,7 +1007,7 @@ def test_configure_session_tmux_options_uses_active_surface_authority(monkeypatc
     # Two browser surfaces on one session attach as two differently-sized tmux clients. Under the
     # default `latest` policy the most-recently-active (often smaller) client keeps resizing the
     # shared window; when it shrinks below a larger client's height that client's xterm smears the
-    # green tmux status line across the orphaned rows. YOLOmux keeps `largest`, starts each attach
+    # green tmux status line across the orphaned rows. YOmux keeps `largest`, starts each attach
     # as ignore-size, and lets the active browser surface clear ignore-size for its own client while
     # silencing every wider client on the session (see claim_tmux_resize_authority).
     monkeypatch.delenv("YOLOMUX_TMUX_SOCKET", raising=False)

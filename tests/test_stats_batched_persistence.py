@@ -24,8 +24,8 @@ import sqlite3
 
 import pytest
 
-from yolomux_lib.stats_current import service as service_module
-from yolomux_lib.stats_current import storage
+from yomux_lib.stats_current import service as service_module
+from yomux_lib.stats_current import storage
 
 @pytest.fixture(autouse=True)
 def candidate_arm(monkeypatch):

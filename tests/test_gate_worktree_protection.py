@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import json
+import importlib.util
 import os
 from pathlib import Path
 import shutil
@@ -17,13 +18,19 @@ import pytest
 
 from tools import check
 from tools import static_build
-from yolomux_lib import cli
-from yolomux_lib.infra.host_identity import HostIdentity
-from yolomux_lib.infra import worktree_writer
+from yomux_lib import cli
+from yomux_lib.infra.host_identity import HostIdentity
+from yomux_lib.infra import worktree_writer
 
 
 FIXTURE_PID = 4242
 FIXTURE_TICKS = 5252
+ROOT_CONFTEST_SPEC = importlib.util.spec_from_file_location(
+    "yomux_root_conftest", Path(__file__).resolve().parents[1] / "conftest.py"
+)
+assert ROOT_CONFTEST_SPEC is not None and ROOT_CONFTEST_SPEC.loader is not None
+pytest_conftest = importlib.util.module_from_spec(ROOT_CONFTEST_SPEC)
+ROOT_CONFTEST_SPEC.loader.exec_module(pytest_conftest)
 
 
 def _identity(name: str, hostname: str | None = None, *, pid: int = FIXTURE_PID) -> HostIdentity:
@@ -402,8 +409,8 @@ def test_package_import_routes_bytecode_before_product_modules_load(tmp_path: Pa
     source_root = Path(__file__).resolve().parents[1]
     copied_root = tmp_path / "shared-worktree"
     shutil.copytree(
-        source_root / "yolomux_lib",
-        copied_root / "yolomux_lib",
+        source_root / "yomux_lib",
+        copied_root / "yomux_lib",
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
     shutil.copytree(
@@ -411,21 +418,22 @@ def test_package_import_routes_bytecode_before_product_modules_load(tmp_path: Pa
         copied_root / "tools",
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
-    shutil.copy2(source_root / "yolomux.py", copied_root / "yolomux.py")
+    shutil.copy2(source_root / "yomux.py", copied_root / "yomux.py")
     runtime = tmp_path / "host-local-runtime"
     env = {
-        **os.environ,
-        "PYTHONPATH": str(copied_root),
-        "YOLOMUX_RUNTIME_DIR": str(runtime),
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("YOLOMUX_", "YOMUX_"))
     }
+    env.update({"PYTHONPATH": str(copied_root), "YOMUX_RUNTIME_DIR": str(runtime)})
     env.pop("PYTHONDONTWRITEBYTECODE", None)
     env.pop("PYTHONPYCACHEPREFIX", None)
     completed = subprocess.run(
         [
             sys.executable,
             "-c",
-            "import json, os, runpy, sys; runpy.run_path('yolomux.py', run_name='bootstrap_probe'); "
-            "import yolomux_lib.locales; "
+            "import json, os, runpy, sys; runpy.run_path('yomux.py', run_name='bootstrap_probe'); "
+            "import yomux_lib.locales; "
             "print(json.dumps({'prefix': sys.pycache_prefix, 'git_locks': os.environ.get('GIT_OPTIONAL_LOCKS')}))",
         ],
         cwd=copied_root,
@@ -457,15 +465,23 @@ def test_static_build_and_check_runner_acquire_the_shared_writer_parent(
     tmp_path: Path,
 ) -> None:
     purposes: list[str] = []
+    environments: list[dict[str, str] | None] = []
 
     @contextmanager
-    def acquire(_root: Path, *, purpose: str, **_kwargs: Any) -> Any:
+    def acquire(_root: Path, *, purpose: str, environ: dict[str, str] | None = None, **_kwargs: Any) -> Any:
         purposes.append(purpose)
+        environments.append(environ)
         yield object()
 
     monkeypatch.setattr(static_build.worktree_writer, "acquire_worktree_writer", acquire)
     monkeypatch.setattr(static_build, "lint_light_mode_pairs", lambda: [])
     assert static_build.main(["--lint-light"]) == 0
+    child_environment = {
+        worktree_writer.WRITER_TOKEN_ENV: "fixture-token",
+        "YOLOMUX_WORKTREE_WRITER_SLOT": "/tmp/fixture-writer",
+    }
+    assert static_build.main(["--lint-light"], environ=child_environment) == 0
+    assert environments[1] is child_environment
 
     monkeypatch.setattr(check.worktree_writer, "acquire_worktree_writer", acquire)
     report = tmp_path / "check-report.json"
@@ -476,7 +492,35 @@ def test_static_build_and_check_runner_acquire_the_shared_writer_parent(
 
     monkeypatch.setattr(check, "run_serial", run_serial)
     assert check.main(["--serial", "--lane", "whitespace", "--no-tool-guard", "--performance-report", str(report)]) == 0
-    assert purposes == ["static-build", "test-gate"]
+    assert purposes == ["static-build", "static-build", "test-gate"]
+
+
+def test_xdist_workers_borrow_the_controller_writer_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lease = type("Lease", (), {"token": "controller-token", "slot_dir": Path("/tmp/shared-writer")})()
+    node = type("Node", (), {"workerinput": {}})()
+    monkeypatch.setattr(pytest_conftest, "_SESSION_WRITER_LEASE", lease)
+
+    pytest_conftest.pytest_configure_node(node)
+
+    assert node.workerinput == {
+        "yomux_worktree_writer_token": "controller-token",
+        "yomux_worktree_writer_slot": "/tmp/shared-writer",
+    }
+
+    monkeypatch.setattr(pytest_conftest, "host_local_cache_dir", lambda: Path("/tmp/pytest-cache"))
+    monkeypatch.setattr(worktree_writer, "acquire_worktree_writer", lambda *_args, **_kwargs: lease)
+    config = type("Config", (), {
+        "inicfg": {},
+        "workerinput": node.workerinput,
+    })()
+    pytest_conftest.pytest_configure(config)
+    session = type("Session", (), {"config": config})()
+    pytest_conftest.pytest_sessionstart(session)
+
+    assert os.environ[worktree_writer.WRITER_TOKEN_ENV] == "controller-token"
+    assert os.environ["YOLOMUX_WORKTREE_WRITER_SLOT"] == "/tmp/shared-writer"
 
 
 def test_server_start_reports_writer_but_keeps_read_only_start_allowed(monkeypatch: pytest.MonkeyPatch) -> None:

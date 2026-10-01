@@ -17,7 +17,7 @@ import {history, redo, undo} from 'prosemirror-history';
 import {addListNodes, bulletList, listItem, orderedList, wrapInList} from 'prosemirror-schema-list';
 import MarkdownIt from 'markdown-it';
 
-window.YOLOmuxProseMirror = {
+window.YOmuxProseMirror = {
   DOMParser,
   DOMSerializer,
   Decoration,

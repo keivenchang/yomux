@@ -29,7 +29,7 @@ actual:
     attention_kind: question
     attention_label: Question
     evidence_lines:
-    - Which YOLOmux verifier mode should we use?
+    - Which YOmux verifier mode should we use?
     - 1. Pane capture
     - 2. Transcript capture
     - 3. Type something.
@@ -49,7 +49,7 @@ actual:
       selected: false
     prompt_hash: 932bb7e95030dfa57a2ea11fb7d2544b
     prompt_kind: question
-    question_text: Which YOLOmux verifier mode should we use?
+    question_text: Which YOmux verifier mode should we use?
     screen_key: needs-input
     selected_option: 1
   reason_code: needs-input
@@ -58,7 +58,7 @@ actual:
     command: null
     confidence: 0.9
     evidence_lines:
-    - Which YOLOmux verifier mode should we use?
+    - Which YOmux verifier mode should we use?
     - 1. Pane capture
     - 2. Transcript capture
     - 3. Type something.
@@ -79,9 +79,9 @@ actual:
       selected: false
     prompt_hash: 932bb7e95030dfa57a2ea11fb7d2544b
     prompt_kind: question
-    question_text: Which YOLOmux verifier mode should we use?
+    question_text: Which YOmux verifier mode should we use?
     selected_option: 1
-    text: Which YOLOmux verifier mode should we use?
+    text: Which YOmux verifier mode should we use?
 agent: claude
 capture_date: '2026-06-20'
 capture_date_position: end
@@ -101,14 +101,14 @@ cursor:
   y: 31
 evidence_fields:
   display_evidence_lines:
-  - Which YOLOmux verifier mode should we use?
+  - Which YOmux verifier mode should we use?
   - 1. Pane capture
   - 2. Transcript capture
   - 3. Type something.
   - 4. Chat about this
   prompt_hash: 932bb7e95030dfa57a2ea11fb7d2544b
   screen_evidence_lines:
-  - Which YOLOmux verifier mode should we use?
+  - Which YOmux verifier mode should we use?
   - 1. Pane capture
   - 2. Transcript capture
   - 3. Type something.
@@ -164,7 +164,7 @@ raw_capture: |
   ─────────────────────────────────────────╯
 
 
-  ❯ Use Claude Code interactive question UI, not prose, and ask me this multiple-choice question: Which YOLOmux verifier
+  ❯ Use Claude Code interactive question UI, not prose, and ask me this multiple-choice question: Which YOmux verifier
     mode should we use? Options: Pane capture, Transcript capture. Wait for my selection.
   ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   Planning: ~/.claude/plans/plan-this-harmless-verification-fuzzy-graham.md
@@ -174,7 +174,7 @@ raw_capture: |
 
 
 
-  Which YOLOmux verifier mode should we use?
+  Which YOmux verifier mode should we use?
 
 
   ❯ 1. Pane capture
@@ -195,7 +195,7 @@ source_staging_file: staging/agent_tui__claude-code-2.1.183_20260620T105555Z.yam
 styled_capture: |2
 
 
-  ❯ Use Claude Code interactive question UI, not prose, and ask me this multiple-choice question: Which YOLOmux verifier
+  ❯ Use Claude Code interactive question UI, not prose, and ask me this multiple-choice question: Which YOmux verifier
     mode should we use? Options: Pane capture, Transcript capture. Wait for my selection.
   ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   Planning: ~/.claude/plans/plan-this-harmless-verification-fuzzy-graham
@@ -205,7 +205,7 @@ styled_capture: |2
 
 
 
-  Which YOLOmux verifier mode should we use?
+  Which YOmux verifier mode should we use?
 
 
   ❯ 1. Pane capture

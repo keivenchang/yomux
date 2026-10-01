@@ -1,8 +1,8 @@
 # Third-Party Notices
 
-YOLOmux is licensed by Keiven Chang under PolyForm Noncommercial 1.0.0. This file records third-party software and generated bundles that keep their own upstream notices.
+YOmux is licensed by Keiven Chang under PolyForm Noncommercial 1.0.0. This file records third-party software and generated bundles that keep their own upstream notices.
 
-Do not replace third-party notices with the YOLOmux project license. They are not owned by Keiven Chang.
+Do not replace third-party notices with the YOmux project license. They are not owned by Keiven Chang.
 
 ## Runtime Python Dependency
 
@@ -25,5 +25,5 @@ Do not replace third-party notices with the YOLOmux project license. They are no
 ## Development/Test Dependencies
 
 - `pytest-xdist` is declared in the `dev` extra in `pyproject.toml` for local test parallelism.
-- Optional managed-agent SDK packages are declared in the `yoagent` extra in `pyproject.toml`; their upstream licenses remain separate from the YOLOmux project license.
+- Optional managed-agent SDK packages are declared in the `yoagent` extra in `pyproject.toml`; their upstream licenses remain separate from the YOmux project license.
 - Bazel `rules_go` 0.50.1 and Gazelle 0.36.0 are repository build dependencies declared in `MODULE.bazel`; both carry Apache License 2.0 upstream licenses.

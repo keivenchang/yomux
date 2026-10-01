@@ -3,10 +3,10 @@ import re
 import threading
 from pathlib import Path
 
-import yolomux_lib.app as app_module
-from yolomux_lib.app import METADATA_BADGE_PULSE_UNTIL_STATE_KEY
-from yolomux_lib.app import METADATA_BADGE_SIGNATURES_STATE_KEY
-from yolomux_lib.app import TmuxWebtermApp
+import yomux_lib.app as app_module
+from yomux_lib.app import METADATA_BADGE_PULSE_UNTIL_STATE_KEY
+from yomux_lib.app import METADATA_BADGE_SIGNATURES_STATE_KEY
+from yomux_lib.app import TmuxWebtermApp
 
 
 def make_metadata_app():
@@ -157,7 +157,7 @@ def install_state_store(monkeypatch, state):
 
 
 def test_metadata_badge_state_has_one_typed_session_owner():
-    source = (Path(__file__).resolve().parents[1] / "yolomux_lib" / "app.py").read_text(encoding="utf-8")
+    source = (Path(__file__).resolve().parents[1] / "yomux_lib" / "app.py").read_text(encoding="utf-8")
     assert "class MetadataBadgeRecord:" in source
     assert "self.metadata_badge_records" in source
     assert re.search(r"self\.metadata_badge_signatures(?!_for_session)", source) is None

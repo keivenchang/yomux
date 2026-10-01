@@ -1,4 +1,4 @@
-module github.com/keivenchang/yolomux
+module github.com/keivenchang/yomux
 
 go 1.22
 

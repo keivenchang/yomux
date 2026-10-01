@@ -16,10 +16,10 @@ from tests.gate_harness import gate_http_port  # noqa: F401
 from tests.gate_harness import gate_live_server  # noqa: F401
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import gate_tmux  # noqa: F401
-from yolomux_lib.approval import auto_approve_worker
-from yolomux_lib.approval import yolo_rules
-from yolomux_lib.server_logs import SERVER_LOGS
-from yolomux_lib.workspace import settings as settings_module
+from yomux_lib.approval import auto_approve_worker
+from yomux_lib.approval import yolo_rules
+from yomux_lib.server_logs import SERVER_LOGS
+from yomux_lib.workspace import settings as settings_module
 
 
 def _retire_expected_settings_failure(runtime, response, route: str) -> None:

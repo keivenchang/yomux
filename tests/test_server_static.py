@@ -7,9 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from yolomux_lib import server as server_module
-from yolomux_lib import web
-from yolomux_lib.server import Handler
+from yomux_lib import server as server_module
+from yomux_lib import web
+from yomux_lib.server import Handler
 
 
 SOURCE_STATIC_DIR = Path(__file__).resolve().parents[1] / "static_src"
@@ -81,7 +81,7 @@ def test_static_asset_errors_localize_without_exposing_read_failure(monkeypatch,
         monkeypatch.setattr(server_module, "static_asset_path", lambda _asset: UnreadableAsset())
         failed = static_handler("/static/broken.js")
         failed.headers["Accept-Language"] = "zh-CN"
-        caplog.set_level("WARNING", logger="yolomux_lib.server")
+        caplog.set_level("WARNING", logger="yomux_lib.server")
 
         failed.write_static_asset("broken.js", "application/javascript; charset=utf-8")
 
@@ -110,12 +110,12 @@ def test_static_asset_errors_localize_without_exposing_read_failure(monkeypatch,
 
 def test_write_static_asset_gzips_and_caches_versioned_assets(monkeypatch, tmp_path):
     body = b"function boot() { return 42; }\n" * 200
-    asset_path = tmp_path / "yolomux.js"
+    asset_path = tmp_path / "yomux.js"
     asset_path.write_bytes(body)
-    monkeypatch.setattr(server_module, "static_asset_path", lambda asset: asset_path if asset == "yolomux.js" else None)
-    handler = static_handler("/static/yolomux.js?v=123", "br, gzip")
+    monkeypatch.setattr(server_module, "static_asset_path", lambda asset: asset_path if asset == "yomux.js" else None)
+    handler = static_handler("/static/yomux.js?v=123", "br, gzip")
 
-    handler.write_static_asset("yolomux.js", "application/javascript; charset=utf-8")
+    handler.write_static_asset("yomux.js", "application/javascript; charset=utf-8")
 
     headers = response_headers(handler)
     encoded = handler.wfile.getvalue()
@@ -130,12 +130,12 @@ def test_write_static_asset_gzips_and_caches_versioned_assets(monkeypatch, tmp_p
 
 def test_write_static_asset_respects_gzip_q_zero_and_unversioned_no_store(monkeypatch, tmp_path):
     body = b".terminal { color: var(--fg); }\n" * 200
-    asset_path = tmp_path / "yolomux.css"
+    asset_path = tmp_path / "yomux.css"
     asset_path.write_bytes(body)
-    monkeypatch.setattr(server_module, "static_asset_path", lambda asset: asset_path if asset == "yolomux.css" else None)
-    handler = static_handler("/static/yolomux.css", "br, gzip;q=0")
+    monkeypatch.setattr(server_module, "static_asset_path", lambda asset: asset_path if asset == "yomux.css" else None)
+    handler = static_handler("/static/yomux.css", "br, gzip;q=0")
 
-    handler.write_static_asset("yolomux.css", "text/css; charset=utf-8")
+    handler.write_static_asset("yomux.css", "text/css; charset=utf-8")
 
     headers = response_headers(handler)
     assert handler.sent_status == HTTPStatus.OK

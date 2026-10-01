@@ -1,4 +1,4 @@
-# YOLOmux documentation
+# YOmux documentation
 
 The Git tags are the source for exact release contents and historical gate results. The summaries below group changes by release family and do not certify current deployments.
 

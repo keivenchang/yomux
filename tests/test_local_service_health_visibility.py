@@ -16,10 +16,10 @@ from typing import Any
 
 import pytest
 
-from yolomux_lib import app as app_module
-from yolomux_lib.local_services import registry as registry_mod
-from yolomux_lib.local_services.runtime import local_service_failure_text
-from yolomux_lib.search.search_indexer import SearchIndexerClient
+from yomux_lib import app as app_module
+from yomux_lib.local_services import registry as registry_mod
+from yomux_lib.local_services.runtime import local_service_failure_text
+from yomux_lib.search.search_indexer import SearchIndexerClient
 
 
 def classify(row: dict[str, Any]) -> dict[str, Any]:

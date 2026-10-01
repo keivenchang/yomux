@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""Fast local check runner for YOLOmux.
+"""Fast local check runner for YOmux.
 
 The default run starts independent lanes in parallel so agents and humans do not
 serialize py_compile, static checks, Node checks, full pytest, and whitespace
@@ -79,7 +79,7 @@ def default_tool_lock_path() -> Path:
     return resolved_product_path(
         os.environ,
         "YOLOMUX_TOOL_LOCK_PATH",
-        home / ".cache" / "yolomux" / "expensive-tools.lock",
+        home / ".cache" / "yomux" / "expensive-tools.lock",
     )
 
 
@@ -99,15 +99,15 @@ from tests import latency_calibration
 from tests.browser_helpers.webdriver_lease import process_start_key
 from tools import docker_image
 from tools import static_build
-from yolomux_lib.infra.atomic_file import atomic_write_text
-from yolomux_lib.background_scheduler import pid_is_alive
+from yomux_lib.infra.atomic_file import atomic_write_text
+from yomux_lib.background_scheduler import pid_is_alive
 # Reuse the repo's existing ANSI owner rather than growing a second copy in the
 # gate. It sits here, below `validate_product_root_environment`, because that
 # gate is what establishes the environment; importing the product/TUI chain
 # above it would claim safety before the check that is meant to prove it.
-from yolomux_lib.tmux.agent_tui import strip_ansi_sgr
-from yolomux_lib.filesystem.io_ops import read_json_file
-from yolomux_lib.infra import worktree_writer
+from yomux_lib.tmux.agent_tui import strip_ansi_sgr
+from yomux_lib.filesystem.io_ops import read_json_file
+from yomux_lib.infra import worktree_writer
 from tools.test_catalog import MOCK_TRANSCRIPT_FILES  # noqa: F401 - check-runner compatibility export
 from tools.test_catalog import NODE_LAYOUT_FILES
 from tools.test_catalog import PYTEST_PHASE_FILES  # noqa: F401 - check-runner compatibility export
@@ -119,8 +119,8 @@ from tools.test_plan import resolved_lane_step_ids
 from tools.test_plan import validate_lane_specs
 from tools.tool_guard import TOOL_LOCK_OWNER_ENV
 from tools.tool_guard import tool_lock_owner_marker
-from yolomux_lib.infra.inotify_capacity import InotifyCapacityVerdict
-from yolomux_lib.infra.inotify_capacity import inotify_capacity_verdict
+from yomux_lib.infra.inotify_capacity import InotifyCapacityVerdict
+from yomux_lib.infra.inotify_capacity import inotify_capacity_verdict
 TOOL_GUARD_STATE_STALE_SECONDS = 30.0
 EXPENSIVE_TOOL_LANES = frozenset({"node-layout", "bazel-go", "pytest", "pytest-boot", "pytest-browser", "pytest-e2e", "pytest-gate-serial"})
 
@@ -286,12 +286,13 @@ class StepResult:
 
 def py_compile_files() -> list[str]:
     return [
+        "yomux.py",
         "yolomux.py",
         "tools/tmux_wall.py",
         "tools/auto_approve_tmux.py",
         "tools/yostats_contention_benchmark.py",
         "tools/yostats_active_browser_window.py",
-        *sorted(str(path.relative_to(REPO_ROOT)) for path in (REPO_ROOT / "yolomux_lib").rglob("*.py")),
+        *sorted(str(path.relative_to(REPO_ROOT)) for path in (REPO_ROOT / "yomux_lib").rglob("*.py")),
     ]
 
 
@@ -374,7 +375,7 @@ def step_catalog(*, serial: bool = False, cpu_percent: int | None = None) -> dic
         StepId.TEXTSHAPE: Step("textshape_assertion_guard", ["python3", "tools/textshape_assertion_guard.py"]),
         StepId.ARCHITECTURE_BUDGETS: Step("architecture budgets", ["python3", "tools/architecture_budgets.py"]),
         StepId.LOCAL_SERVICE_TYPES: Step("local-service type gate", ["python3", "tools/check_local_service_types.py"]),
-        StepId.NODE_YOLOMUX_SYNTAX: Step("node --check static/yolomux.js", ["node", "--check", "static/yolomux.js"]),
+        StepId.NODE_YOLOMUX_SYNTAX: Step("node --check static/yomux.js", ["node", "--check", "static/yomux.js"]),
         StepId.NODE_WALL_SYNTAX: Step("node --check static/tmux-wall.js", ["node", "--check", "static/tmux-wall.js"]),
         StepId.NODE_LAYOUT: Step("node tests/layout_url.test.js", ["node", "tests/layout_url.test.js", *NODE_LAYOUT_FILES]),
         StepId.BAZEL_GO: Step("Bazel Go and Docker tests", ["tools/run_bazel_tests.sh", "--jobs", bazel_jobs]),
@@ -712,7 +713,7 @@ def expensive_tool_lock(enabled: bool = True, lock_path: Path | None = None):
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise ToolGuardBusy(f"another expensive YOLOmux check already owns {lock_path}") from exc
+            raise ToolGuardBusy(f"another expensive YOmux check already owns {lock_path}") from exc
         previous_owner = os.environ.get(TOOL_LOCK_OWNER_ENV)
         os.environ[TOOL_LOCK_OWNER_ENV] = tool_lock_owner_marker(lock_path)
         try:
@@ -1204,7 +1205,7 @@ def performance_report_payload(*, selected: list[Lane], results: list[LaneResult
 def performance_report_path(value: str) -> Path:
     """Limit raw machine evidence to /tmp, never the source tree or docs."""
 
-    path = Path(value) if value else Path(os.environ.get("YOLOMUX_TEST_ROOT", f"/tmp/yolomux-test-{os.getpid()}-{os.getuid()}")) / "check" / f"check-{time.time_ns()}.json"
+    path = Path(value) if value else Path(os.environ.get("YOLOMUX_TEST_ROOT", f"/tmp/yomux-test-{os.getpid()}-{os.getuid()}")) / "check" / f"check-{time.time_ns()}.json"
     _tmp_only_path(path, label="--performance-report")
     # Keep the caller-visible `/tmp/...` spelling on macOS, where resolving the path turns it
     # into `/private/tmp/...`; the resolved value above remains the security check.
@@ -1472,7 +1473,7 @@ def certification_evidence_dir(explicit: str | None = None) -> Path:
     evidence written by the containerized run is readable here without a second transport.
     """
 
-    path = Path(explicit) if explicit else Path(os.environ.get("YOLOMUX_TEST_ROOT", f"/tmp/yolomux-test-{os.getpid()}-{os.getuid()}")) / "certification" / f"cert-{time.time_ns()}"
+    path = Path(explicit) if explicit else Path(os.environ.get("YOLOMUX_TEST_ROOT", f"/tmp/yomux-test-{os.getpid()}-{os.getuid()}")) / "certification" / f"cert-{time.time_ns()}"
     if not path.resolve().is_relative_to(Path("/tmp").resolve()):
         raise ValueError("certification evidence dir must be under /tmp")
     return path
@@ -1925,7 +1926,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"CHECK REFUSED: {exc}", file=sys.stderr, flush=True)
         return EXIT_USAGE
     if guard_enabled:
-        print(f"Acquiring YOLOmux expensive-tool lock: {tool_lock_path}", flush=True)
+        print(f"Acquiring YOmux expensive-tool lock: {tool_lock_path}", flush=True)
 
     # `expected_containers` records whether the lanes will actually route into Docker: only then is
     # an unobservable client at retirement a refusal rather than a clear, because only then could an

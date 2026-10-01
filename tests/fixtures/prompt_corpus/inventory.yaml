@@ -223,7 +223,7 @@ fixtures:
     - 'No'
     prompt_kind: file-edit
     prompt_type: file
-    question_text: Do you want to make this edit to yolomux_lib/prompt_detector.py?
+    question_text: Do you want to make this edit to yomux_lib/prompt_detector.py?
     screen_key: approval
     selected_option: 1
     yes_selected: true
@@ -535,7 +535,7 @@ fixtures:
     - Transcript capture
     prompt_kind: question
     prompt_type: ''
-    question_text: Which YOLOmux verifier mode should we use?
+    question_text: Which YOmux verifier mode should we use?
     screen_key: needs-input
     selected_option: 0
     yes_selected: false
@@ -822,7 +822,7 @@ live_capture_targets:
   current_fixture: synthetic/free_text_question__claude-code-synthetic_20260620.yaml
   family: claude-free-text-question
   why_currently_synthetic: Real Claude AskUserQuestion captures cover selector/accessibility variants, but not a free-text-only shape.
-purpose: 'Corpus inventory for YOLOmux prompt detection: agent_tui capture JSON fixtures for visible approval/question panes
+purpose: 'Corpus inventory for YOmux prompt detection: agent_tui capture JSON fixtures for visible approval/question panes
   that should raise needs-input and negative panes that must stay quiet.'
 required_families:
 - codex-shell-approval-3-option

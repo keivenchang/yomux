@@ -12,7 +12,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "work_lib",
     srcs = ["scheduler.go"],
-    importpath = "github.com/keivenchang/yolomux/internal/work",
+    importpath = "github.com/keivenchang/yomux/internal/work",
 )
 
 go_test(

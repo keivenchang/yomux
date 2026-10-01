@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/keivenchang/yolomux/internal/testsupport"
+	"github.com/keivenchang/yomux/internal/testsupport"
 )
 
 func TestPricingCatalogLoadsPythonFixtureAndResolvesCacheDimensions(t *testing.T) {
@@ -328,7 +328,7 @@ func TestPricingCatalogInfersOnlyPythonReviewedModelSuffixes(t *testing.T) {
 func TestPricingCatalogPackagedMergeMatchesPythonForEveryModelAndRate(t *testing.T) {
 	scriptPath := filepath.Join(t.TempDir(), "pricing-catalog-oracle.py")
 	const oracle = `import json
-from yolomux_lib.observability.pricing_catalog import load_packaged_seed
+from yomux_lib.observability.pricing_catalog import load_packaged_seed
 
 catalog = load_packaged_seed()
 rate_keys = ("direction", "modality", "cache_role", "unit", "profile", "service_tier", "scale", "usd", "effective_from")
@@ -450,8 +450,8 @@ func TestPricingResolverProjectionMatchesPythonOnOneSharedFixture(t *testing.T) 
 	}
 	const oracle = `import json, sys
 from pathlib import Path
-from yolomux_lib.observability.pricing_catalog import PricingCatalog
-from yolomux_lib.stats_current import pricing, storage, usage
+from yomux_lib.observability.pricing_catalog import PricingCatalog
+from yomux_lib.stats_current import pricing, storage, usage
 item = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 atom = storage.UsageAtom(item["event_id"], item["direction"], item["modality"], item["cache_role"], item["unit"], item["observed_at"], item["payload"])
 projected = pricing.UsagePriceProjector(PricingCatalog(Path(sys.argv[2])))(usage.normalize_usage_atom(atom))
@@ -645,7 +645,7 @@ func TestLoadRepositoryPricingCatalogIgnoresMissingFallbackAfterConfiguredCatalo
 
 func TestLoadRepositoryPricingCatalogPreservesConfiguredModelOverInternalFallback(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "yolomux_lib", "data"), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "yomux_lib", "data"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	configured := filepath.Join(dir, "configured.json")
@@ -654,7 +654,7 @@ func TestLoadRepositoryPricingCatalogPreservesConfiguredModelOverInternalFallbac
 	if err := os.WriteFile(configured, []byte(configuredFixture), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "yolomux_lib", "data", "internal_model_pricing.json"), []byte(internalFixture), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "yomux_lib", "data", "internal_model_pricing.json"), []byte(internalFixture), 0600); err != nil {
 		t.Fatal(err)
 	}
 	catalog, err := LoadRepositoryPricingCatalog(dir, configured)
@@ -669,7 +669,7 @@ func TestLoadRepositoryPricingCatalogPreservesConfiguredModelOverInternalFallbac
 
 func TestLoadRepositoryPricingCatalogMergesInternalLunaForPartialConfiguredCatalog(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "yolomux_lib", "data"), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "yomux_lib", "data"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	configured := filepath.Join(dir, "configured.json")
@@ -678,7 +678,7 @@ func TestLoadRepositoryPricingCatalogMergesInternalLunaForPartialConfiguredCatal
 	if err := os.WriteFile(configured, []byte(configuredFixture), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "yolomux_lib", "data", "internal_model_pricing.json"), []byte(internalFixture), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "yomux_lib", "data", "internal_model_pricing.json"), []byte(internalFixture), 0600); err != nil {
 		t.Fatal(err)
 	}
 	catalog, err := LoadRepositoryPricingCatalog(dir, configured)
@@ -693,7 +693,7 @@ func TestLoadRepositoryPricingCatalogMergesInternalLunaForPartialConfiguredCatal
 
 func TestPricingCatalogRefreshPreservesRepositoryFallbackMerge(t *testing.T) {
 	dir := t.TempDir()
-	dataDir := filepath.Join(dir, "yolomux_lib", "data")
+	dataDir := filepath.Join(dir, "yomux_lib", "data")
 	if err := os.MkdirAll(dataDir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -740,7 +740,7 @@ func TestPricingCatalogRefreshPreservesRepositoryFallbackMerge(t *testing.T) {
 
 func TestLoadRepositoryPricingCatalogTreatsConfiguredLunaAliasAsOwnership(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "yolomux_lib", "data"), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "yomux_lib", "data"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	configured := filepath.Join(dir, "configured.json")
@@ -749,7 +749,7 @@ func TestLoadRepositoryPricingCatalogTreatsConfiguredLunaAliasAsOwnership(t *tes
 	if err := os.WriteFile(configured, []byte(configuredFixture), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "yolomux_lib", "data", "internal_model_pricing.json"), []byte(internalFixture), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "yomux_lib", "data", "internal_model_pricing.json"), []byte(internalFixture), 0600); err != nil {
 		t.Fatal(err)
 	}
 	catalog, err := LoadRepositoryPricingCatalog(dir, configured)

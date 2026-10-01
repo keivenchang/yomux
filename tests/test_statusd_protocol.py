@@ -4,12 +4,12 @@ import json
 
 import pytest
 
-from yolomux_lib.statusd_protocol import StatusProtocolError
-from yolomux_lib.statusd_protocol import STATUSD_PROTOCOL_VERSION
-from yolomux_lib.statusd_protocol import stamped_request
-from yolomux_lib.statusd_protocol import validate_inventory
-from yolomux_lib.statusd_protocol import validate_request
-from yolomux_lib.statusd_protocol import validate_snapshot
+from yomux_lib.statusd_protocol import StatusProtocolError
+from yomux_lib.statusd_protocol import STATUSD_PROTOCOL_VERSION
+from yomux_lib.statusd_protocol import stamped_request
+from yomux_lib.statusd_protocol import validate_inventory
+from yomux_lib.statusd_protocol import validate_request
+from yomux_lib.statusd_protocol import validate_snapshot
 
 
 def test_statusd_snapshot_contract_accepts_public_preencoded_json():

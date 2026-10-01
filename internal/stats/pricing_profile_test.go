@@ -99,7 +99,7 @@ func TestPythonAndGoPricingProfilesMatchSyntheticSettings(t *testing.T) {
 	}
 	scriptPath := filepath.Join(root, "pricing_profile.py")
 	const script = `import json, sys
-from yolomux_lib.workspace.settings import usage_pricing_profile
+from yomux_lib.workspace.settings import usage_pricing_profile
 value = json.load(open(sys.argv[1], encoding="utf-8"))
 print(json.dumps([usage_pricing_profile(value["settings"], provider=row["provider"], execution_source=row["source"], endpoint=row["endpoint"], observed_at=row["at"]) for row in value["cases"]]))
 `

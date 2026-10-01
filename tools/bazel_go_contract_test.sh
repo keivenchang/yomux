@@ -3,4 +3,4 @@ set -eu
 binary="$1"
 test -x "$binary"
 "$binary" --help >/dev/null
-"$binary" --version | grep -q 'yolomux-go'
+"$binary" --version | grep -q 'yomux-go'

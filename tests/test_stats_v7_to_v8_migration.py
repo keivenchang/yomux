@@ -18,8 +18,8 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib.stats_current import migration as migration_module
-from yolomux_lib.stats_current import storage
+from yomux_lib.stats_current import migration as migration_module
+from yomux_lib.stats_current import storage
 
 V7_SCHEMA_VERSION = migration_module.V7_SCHEMA_VERSION
 V7_DATABASE_FILENAME = migration_module.V7_DATABASE_FILENAME
@@ -399,7 +399,7 @@ def test_migration_peak_memory_is_bounded_by_its_chunk_not_by_the_store(tmp_path
 import json, resource, sys
 sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})
 from pathlib import Path
-from yolomux_lib.stats_current import migration as m
+from yomux_lib.stats_current import migration as m
 base = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
 report = m.migrate_current_v7_database(Path({str(tmp_path)!r}), Path({str(target)!r}), Path({str(source)!r}))
 peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024

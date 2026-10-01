@@ -5,8 +5,8 @@ from pathlib import Path
 
 import yaml
 
-from yolomux_lib.infra.host_identity import HostIdentity
-from yolomux_lib.infra import shared_config_lock
+from yomux_lib.infra.host_identity import HostIdentity
+from yomux_lib.infra import shared_config_lock
 
 
 def _hold_lock(path_text, entered, release):

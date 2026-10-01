@@ -489,7 +489,7 @@ HOST_QUALIFICATION_REFERENCE_CONDITIONS = (
     "2026-08-08 keivenc-linux1: Intel i9-14900K, cpufreq reporting 8 P-cores / 16 SMT threads "
     "capped at 3.2 GHz and 16 E-cores capped at 2.4 GHz, 125 GiB, /tmp on LVM over NVMe, "
     "Microsoft Defender permanently resident "
-    "at ~1.2 cores, live YOLOmux servers, nice 5. Four populations, raw ranges in "
+    "at ~1.2 cores, live YOmux servers, nice 5. Four populations, raw ranges in "
     "HOST_QUALIFICATION_MEASURED_POPULATIONS, and the limits answer to `post_lane`. "
     "The phase is NOT measuring a host the gate degraded. `retire_owned_processes()` joins on a "
     "measured predicate - zero surviving lane descendants and zero live test containers - and then "
@@ -791,7 +791,7 @@ def measure_host_resources(*, evidence_root: Path | None = None, sample_seconds:
         "storage_work_samples_ms": [round(sample, 3) for sample in storage_samples],
         "storage_work_median_ms": round(work_unit_statistic(storage_samples), 3),
         "storage_probe_path": str(probe_path),
-        # Recorded because check.py lowers its own priority when live YOLOmux servers are present,
+        # Recorded because check.py lowers its own priority when live YOmux servers are present,
         # and a niced measurement is a different measurement.
         "process_nice": os.nice(0),
         # Recorded, never asserted: these lag the state they describe by 1-5 minutes.

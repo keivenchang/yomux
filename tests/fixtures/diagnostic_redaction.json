@@ -1,5 +1,5 @@
 {
-  "note": "W2 diagnostic-redaction contract generated from yolomux_lib/diagnostic_redaction.py. Python and JavaScript conformance implementations must reproduce every expected value.",
+  "note": "W2 diagnostic-redaction contract generated from yomux_lib/diagnostic_redaction.py. Python and JavaScript conformance implementations must reproduce every expected value.",
   "cases": [
     {
       "category": "credentials",

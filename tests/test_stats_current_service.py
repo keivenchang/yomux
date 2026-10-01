@@ -20,12 +20,12 @@ import pytest
 
 from tests.helpers.external_lease_client import assert_self_lease_is_refused
 from tests.helpers.external_lease_client import external_lease_client
-from yolomux_lib.host_identity import current_host_identity
-from yolomux_lib.stats_current import client as client_module
-from yolomux_lib.stats_current import http as http_module
-from yolomux_lib.stats_current import collectors, host_collectors, materializer, migration, pricing, protocol, prune_schedule, revision, storage
-from yolomux_lib.stats_current import resolution as stats_resolution
-from yolomux_lib.stats_current import service as service_module
+from yomux_lib.host_identity import current_host_identity
+from yomux_lib.stats_current import client as client_module
+from yomux_lib.stats_current import http as http_module
+from yomux_lib.stats_current import collectors, host_collectors, materializer, migration, pricing, protocol, prune_schedule, revision, storage
+from yomux_lib.stats_current import resolution as stats_resolution
+from yomux_lib.stats_current import service as service_module
 
 FENCE = {
     "protocol_version": storage.MIN_WRITER_PROTOCOL,
@@ -4743,15 +4743,15 @@ def test_browser_observation_status_distinguishes_current_receipts_from_retained
             ),
             storage.Observation(
                 "error-1", "browser", "browser-private", 110.0, "page-1", 0,
-                {"kind": "error", "signature": "jsf-unknown", "message": "render failed", "source": "/static/yolomux.js", "code_revision": "old-revision"},
+                {"kind": "error", "signature": "jsf-unknown", "message": "render failed", "source": "/static/yomux.js", "code_revision": "old-revision"},
             ),
             storage.Observation(
                 "error-2", "browser", "browser-private", 120.0, "page-1", 0,
-                {"kind": "error", "signature": "jsf-probe", "message": "controlled throw", "source": "/static/yolomux.js", "code_revision": "old-revision", "provenance": "controlled_probe"},
+                {"kind": "error", "signature": "jsf-probe", "message": "controlled throw", "source": "/static/yomux.js", "code_revision": "old-revision", "provenance": "controlled_probe"},
             ),
             storage.Observation(
                 "rejection-1", "browser", "browser-private", 130.0, "page-1", 0,
-                {"kind": "unhandledrejection", "signature": "jsf-real", "message": "promise failed", "source": "/static/yolomux.js", "code_revision": "old-revision", "provenance": "confirmed_real"},
+                {"kind": "unhandledrejection", "signature": "jsf-real", "message": "promise failed", "source": "/static/yomux.js", "code_revision": "old-revision", "provenance": "confirmed_real"},
             ),
         )
         service._append({

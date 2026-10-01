@@ -8,12 +8,12 @@ import pytest
 from tests.helpers.local_service_records import FixtureLeaseRecordBuilder
 from tests.helpers.local_service_records import FixtureLocalServiceRecordBuilder
 from tests.helpers.local_service_records import FixtureProcessRecordBuilder
-from yolomux_lib.infra.process_claims import CLAIM_REASON_SUPERVISOR_ALIVE
-from yolomux_lib.infra.host_identity import current_host_identity
-from yolomux_lib.local_services import registry as registry_mod
-from yolomux_lib.local_services import watchdog as watchdog_mod
-from yolomux_lib.local_services.preflight import preflight_port
-from yolomux_lib.local_services.watchdog import GroupOverloadWatchdog
+from yomux_lib.infra.process_claims import CLAIM_REASON_SUPERVISOR_ALIVE
+from yomux_lib.infra.host_identity import current_host_identity
+from yomux_lib.local_services import registry as registry_mod
+from yomux_lib.local_services import watchdog as watchdog_mod
+from yomux_lib.local_services.preflight import preflight_port
+from yomux_lib.local_services.watchdog import GroupOverloadWatchdog
 
 
 def _table(rows):
@@ -59,7 +59,7 @@ def _tracked_state(tmp_path, port=8881, web_pid=400, *, socket_name="batchd.sock
 def _rows(batchd_socket, web_cpu, worker_cpu, extra=(), command_payload=""):
     return [
         (400, 1, 400, web_cpu, f"python3 -u yolomux.py 8880 /tmp/log --host 0.0.0.0 --port 8881 --dang --dev {command_payload}"),
-        (500, 1, 500, 1.0, f"python3 -m yolomux_lib.batchd --serve --socket {batchd_socket} --idle-seconds 60 {command_payload}"),
+        (500, 1, 500, 1.0, f"python3 -m yomux_lib.batchd --serve --socket {batchd_socket} --idle-seconds 60 {command_payload}"),
         (501, 500, 500, worker_cpu, "python3 -c multiprocessing-spawn-worker"),
         # An untracked high-CPU bystander (Defender-shaped): never touched.
         (900, 1, 900, 100000.0, "/Applications/Microsoft Defender.app/Contents/MacOS/wdavdaemon"),
@@ -551,7 +551,7 @@ def test_preflight_leaves_a_still_serving_service_alone_when_only_its_launcher_c
     (service_dir / "batchd.service.json").write_text(json.dumps(record), encoding="utf-8")
     # The launcher (700) is dead -- absent from the table -- but the service
     # (500) itself is alive and, in this case, still serving a client.
-    table = _table([(500, 1, 500, 1.0, f"python3 -m yolomux_lib.batchd --serve --socket {batchd_socket} --idle-seconds 60")])
+    table = _table([(500, 1, 500, 1.0, f"python3 -m yomux_lib.batchd --serve --socket {batchd_socket} --idle-seconds 60")])
     kills = []
     live, kill, process_group_reader = _wedged_process_view(table, kills)
 
@@ -715,7 +715,7 @@ def test_containment_never_stops_a_service_whose_supervisor_is_still_alive(
 ):
     """A daemon another live server still supervises is not this watchdog's to stop.
 
-    Several YOLOmux servers share one runtime directory, so this watchdog can
+    Several YOmux servers share one runtime directory, so this watchdog can
     SEE services it does not own. The record each daemon publishes names the
     ``supervisor`` that spawned it, and that field is what makes retention
     truthful: the claim ledger already answers "this helper is deliberately

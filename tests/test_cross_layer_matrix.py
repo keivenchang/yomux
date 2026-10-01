@@ -23,14 +23,14 @@ STATS_SNAPSHOT_ENDPOINT = "/api/stats-stream"
 def _shipped_javascript_sources() -> dict[Path, str]:
     return {
         path.relative_to(REPO_ROOT): path.read_text(encoding="utf-8")
-        for path in sorted((REPO_ROOT / "static_src" / "js" / "yolomux").glob("*.js"))
+        for path in sorted((REPO_ROOT / "static_src" / "js" / "yomux").glob("*.js"))
     }
 
 
 def _production_python_sources() -> dict[Path, str]:
     return {
         path.relative_to(REPO_ROOT): path.read_text(encoding="utf-8")
-        for path in sorted((REPO_ROOT / "yolomux_lib").rglob("*.py"))
+        for path in sorted((REPO_ROOT / "yomux_lib").rglob("*.py"))
     }
 
 
@@ -71,7 +71,7 @@ async function refreshStatsDirectly() {
 
 def test_stats_snapshot_owner_guard_rejects_an_arrow_caller_between_named_functions():
     sources = {
-        Path("static_src/js/yolomux/84_stats_current.js"): """
+        Path("static_src/js/yomux/84_stats_current.js"): """
 function fetchSnapshot() {
   return fetch('/api/stats-stream?owner=1');
 }
@@ -125,7 +125,7 @@ def test_every_queued_http_producer_has_a_registered_terminal_proof():
 
 def test_queued_http_producer_discovery_rejects_an_unregistered_acknowledgement():
     sources = _production_python_sources()
-    sources[Path("yolomux_lib/synthetic_queue.py")] = """
+    sources[Path("yomux_lib/synthetic_queue.py")] = """
 from http import HTTPStatus
 
 def accept_without_terminal_proof():
@@ -142,5 +142,5 @@ def accept_without_terminal_proof():
     } - registered
 
     assert unregistered == {
-        (Path("yolomux_lib/synthetic_queue.py"), "accept_without_terminal_proof")
+        (Path("yomux_lib/synthetic_queue.py"), "accept_without_terminal_proof")
     }

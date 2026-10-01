@@ -25,24 +25,24 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from yolomux_lib.infra.host_identity import process_identity_snapshot
-from yolomux_lib.infra.host_identity import process_start_identity
-from yolomux_lib.infra.listener_census import ListenerCensus
-from yolomux_lib.infra.listener_census import ListenerCensusDegraded
-from yolomux_lib.infra.listener_census import ListenerCensusError
-from yolomux_lib.infra.listener_census import ListenerCensusTimeout
-from yolomux_lib.infra.listener_census import canonical_listener_pids
-from yolomux_lib.infra.listener_census import listener_census
-from yolomux_lib.infra.listener_census import require_unique_listener_pid
-from yolomux_lib.infra.root_paths import resolved_product_path
-from yolomux_lib.local_services.registry import darwin_process_environment
-from yolomux_lib.tmux.sessions import process_cwd
+from yomux_lib.infra.host_identity import process_identity_snapshot
+from yomux_lib.infra.host_identity import process_start_identity
+from yomux_lib.infra.listener_census import ListenerCensus
+from yomux_lib.infra.listener_census import ListenerCensusDegraded
+from yomux_lib.infra.listener_census import ListenerCensusError
+from yomux_lib.infra.listener_census import ListenerCensusTimeout
+from yomux_lib.infra.listener_census import canonical_listener_pids
+from yomux_lib.infra.listener_census import listener_census
+from yomux_lib.infra.listener_census import require_unique_listener_pid
+from yomux_lib.infra.root_paths import resolved_product_path
+from yomux_lib.local_services.registry import darwin_process_environment
+from yomux_lib.tmux.sessions import process_cwd
 from tools.instance_isolation import resolve_instance_environment
 
 WARMUPS = 20
 SAMPLES = 200
 BUDGET_MS = 20.0
-HEADER = "X-YOLOmux-Measurement"
+HEADER = "X-YOmux-Measurement"
 METRIC = "route_to_representation_ready_ms"
 
 

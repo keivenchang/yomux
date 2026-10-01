@@ -6,11 +6,11 @@ from types import MappingProxyType
 
 import pytest
 
-from yolomux_lib.stats_current import collectors
-from yolomux_lib.stats_current.storage import DATABASE_FILENAME
-from yolomux_lib.stats_current.families import validate_payload
-from yolomux_lib.stats_current.storage import Store
-from yolomux_lib.stats_current.storage import UsageAtom
+from yomux_lib.stats_current import collectors
+from yomux_lib.stats_current.storage import DATABASE_FILENAME
+from yomux_lib.stats_current.families import validate_payload
+from yomux_lib.stats_current.storage import Store
+from yomux_lib.stats_current.storage import UsageAtom
 
 
 BASE = {

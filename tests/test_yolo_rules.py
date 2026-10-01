@@ -6,9 +6,9 @@ import pytest
 
 
 from tools import auto_approve_tmux
-from yolomux_lib import yolo_rules
-from yolomux_lib.infra.shared_config_lock import SharedConfigRevisionConflict
-from yolomux_lib.infra.shared_config_lock import read_shared_document
+from yomux_lib import yolo_rules
+from yomux_lib.infra.shared_config_lock import SharedConfigRevisionConflict
+from yomux_lib.infra.shared_config_lock import read_shared_document
 
 
 def ruleset(data):
@@ -87,7 +87,7 @@ def test_malformed_shell_quote_does_not_abort_rule_evaluation():
         ],
     })
 
-    assert action_for('python3 -c "from yolomux_lib.settings import settings_payload;', rules) == "approve"
+    assert action_for('python3 -c "from yomux_lib.settings import settings_payload;', rules) == "approve"
     assert action_for('rm -rf "/tmp/unclosed', rules) == "block"
 
 

@@ -1,6 +1,6 @@
 """Browser harness lifecycle contracts retained under tests.test_browser_layout node IDs."""
 
-import subprocess
+import sys
 
 import pytest
 
@@ -27,18 +27,16 @@ def assert_session_scoped_browser_reuse_is_the_default(monkeypatch):
 
 def assert_browser_bundle_guard_passes_through_static_build_failure(monkeypatch):
     """The browser gate must expose --check's specific failure, not invent one."""
-    completed = subprocess.CompletedProcess(
-        args=[],
-        returncode=1,
-        stdout="",
-        stderr="stale static assets: yolomux.js\n",
-    )
-    monkeypatch.setattr(browser_layout_module.subprocess, "run", lambda *_args, **_kwargs: completed)
+    def fail_static_build(*_args, **_kwargs):
+        print("stale static assets: yomux.js", file=sys.stderr)
+        return 1
+
+    monkeypatch.setattr(browser_layout_module.static_build, "main", fail_static_build)
     monkeypatch.setattr(browser_layout_module, "_BUNDLE_FRESHNESS_CHECKED", False)
 
     with pytest.raises(AssertionError) as raised:
         browser_layout_module._require_current_generated_bundle()
-    assert str(raised.value) == "stale static assets: yolomux.js\n"
+    assert str(raised.value) == "stale static assets: yomux.js\n"
 
 
 def assert_reused_browser_reset_closes_popouts_and_clears_profile_state(monkeypatch):

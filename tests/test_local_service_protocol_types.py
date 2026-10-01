@@ -9,8 +9,8 @@ from types import SimpleNamespace
 from typing import get_args
 
 from tools import check_local_service_types
-from yolomux_lib.local_services.protocol_types import CommonRequest
-from yolomux_lib.local_services.protocol_types import CommonResponse
+from yomux_lib.local_services.protocol_types import CommonRequest
+from yomux_lib.local_services.protocol_types import CommonResponse
 
 
 def test_common_protocol_unions_keep_request_and_response_variants_distinct():
@@ -24,12 +24,12 @@ def test_common_protocol_unions_keep_request_and_response_variants_distinct():
 
 def test_static_slice_allowlist_is_an_exact_expansion_ratchet():
     assert check_local_service_types.static_slice() == (
-        "yolomux_lib/local_services/protocol_types.py",
-        "yolomux_lib/local_services/command_router.py",
-        "yolomux_lib/local_services/rpc.py",
-        "yolomux_lib/local_services/client.py",
-        "yolomux_lib/local_services/registry.py",
-        "yolomux_lib/local_services/static_contracts.py",
+        "yomux_lib/local_services/protocol_types.py",
+        "yomux_lib/local_services/command_router.py",
+        "yomux_lib/local_services/rpc.py",
+        "yomux_lib/local_services/client.py",
+        "yomux_lib/local_services/registry.py",
+        "yomux_lib/local_services/static_contracts.py",
     )
 
 

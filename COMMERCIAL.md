@@ -1,6 +1,6 @@
 # Commercial Use
 
-YOLOmux is publicly available under the PolyForm Noncommercial License 1.0.0 for noncommercial use.
+YOmux is publicly available under the PolyForm Noncommercial License 1.0.0 for noncommercial use.
 
 Commercial use is not granted by the public license. Commercial use requires separate written permission from Keiven Chang.
 

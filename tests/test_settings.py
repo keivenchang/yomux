@@ -5,26 +5,26 @@ import re
 import threading
 
 
-from yolomux_lib import settings as settings_module
-from yolomux_lib.common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
-from yolomux_lib.common import UPLOAD_MAX_BYTES
-from yolomux_lib.settings import LEGACY_YOAGENT_DEFAULTS
-from yolomux_lib.settings import default_settings
-from yolomux_lib.settings import read_settings_file
-from yolomux_lib.settings import save_settings
-from yolomux_lib.settings import sanitize_settings
-from yolomux_lib.settings import settings_catalog
-from yolomux_lib.settings import settings_payload
-from yolomux_lib.settings import usage_pricing_profile
-from yolomux_lib.settings import write_settings_file
-from yolomux_lib.activity_summary import deterministic_yoagent_reply
-from yolomux_lib.web import current_language_pref
-from yolomux_lib.web import html_lang_dir_attrs
-from yolomux_lib.web import LOGIN_LOCALE_CHOICES
-from yolomux_lib.web import login_html
-from yolomux_lib.web import save_login_locale
-from yolomux_lib.yoagent.actions import parse_yoagent_action_intent
-from yolomux_lib.yoagent.preferences import parse_settings_write
+from yomux_lib import settings as settings_module
+from yomux_lib.common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
+from yomux_lib.common import UPLOAD_MAX_BYTES
+from yomux_lib.settings import LEGACY_YOAGENT_DEFAULTS
+from yomux_lib.settings import default_settings
+from yomux_lib.settings import read_settings_file
+from yomux_lib.settings import save_settings
+from yomux_lib.settings import sanitize_settings
+from yomux_lib.settings import settings_catalog
+from yomux_lib.settings import settings_payload
+from yomux_lib.settings import usage_pricing_profile
+from yomux_lib.settings import write_settings_file
+from yomux_lib.activity_summary import deterministic_yoagent_reply
+from yomux_lib.web import current_language_pref
+from yomux_lib.web import html_lang_dir_attrs
+from yomux_lib.web import LOGIN_LOCALE_CHOICES
+from yomux_lib.web import login_html
+from yomux_lib.web import save_login_locale
+from yomux_lib.yoagent.actions import parse_yoagent_action_intent
+from yomux_lib.yoagent.preferences import parse_settings_write
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -182,7 +182,7 @@ def test_legacy_yoagent_default_prompts_migrate_without_overwriting_custom_text(
     assert "do not reveal target-session identities to each other" in defaults["system_prompt"]
     assert "clean task/question rather than a routing transcript" in defaults["system_prompt"]
     assert "Address that target directly as `you`" in defaults["system_prompt"]
-    assert "~/.config/yolomux/skills.d/" in defaults["system_prompt"]
+    assert "~/.config/yomux/skills.d/" in defaults["system_prompt"]
     assert settings["yoagent"]["system_prompt"] == defaults["system_prompt"]
     assert settings["yoagent"]["intro"] == defaults["intro"]
     assert settings["yoagent"]["format"] == defaults["format"]
@@ -193,7 +193,7 @@ def test_legacy_yoagent_default_prompts_migrate_without_overwriting_custom_text(
     assert custom["yoagent"]["format"] == defaults["format"]
 
     stale_reset = sanitize_settings({"yoagent": {
-        "system_prompt": "You are YO!agent, a concise assistant for YOLOmux. Help users operate YOLOmux using the supplied concepts and report only from the supplied agent activity context. Write like a normal human status update, not a metadata list. Answer the user's question directly and helpfully. Prioritize the most recent and important work, blockers, PRs, CI, dirty repos, and likely next actions. Do not mention session ids, per-session details, or a session-by-session inventory unless the user explicitly asks about a session, asks to list/enumerate sessions, or asks for all sessions. Do not run tools or inspect ~/.claude, ~/.codex, transcript directories, or any filesystem path. Do not invent missing facts.",
+        "system_prompt": "You are YO!agent, a concise assistant for YOmux. Help users operate YOmux using the supplied concepts and report only from the supplied agent activity context. Write like a normal human status update, not a metadata list. Answer the user's question directly and helpfully. Prioritize the most recent and important work, blockers, PRs, CI, dirty repos, and likely next actions. Do not mention session ids, per-session details, or a session-by-session inventory unless the user explicitly asks about a session, asks to list/enumerate sessions, or asks for all sessions. Do not run tools or inspect ~/.claude, ~/.codex, transcript directories, or any filesystem path. Do not invent missing facts.",
         "intro": "Use the live AI agent activity only as much as the user asked for. If the user is unsure what to do, recommend what to work on next based on freshness, importance, blockers, PR/CI state, dirty repos, and changed files. Keep stale or old work out of the default answer unless it changes the recommendation or the user explicitly asks for sessions.",
         "format": "Reply in Markdown. Default shape: a short direct answer, then optional bullets for the top relevant topics or next actions. Do not include session ids, per-session headings, or one item per session unless the user asks about a specific session or asks to list/enumerate/show all sessions. When the user explicitly asks for sessions, use one numbered item per session/topic, with a bold title and one or two short factual sub-bullets.",
     }})
@@ -229,7 +229,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["appearance"]["editor_font_size"] == 28
     assert settings["appearance"]["editor_color_scheme"] == "dark"
     assert settings["appearance"]["editor_dark_color_scheme"] == "dark"
-    assert settings["appearance"]["editor_light_color_scheme"] == "yolomux-light"
+    assert settings["appearance"]["editor_light_color_scheme"] == "yomux-light"
     assert settings["appearance"]["editor_cursor_style"] == "block"  # C3: invalid choice clamps to the new block default
     assert settings["appearance"]["editor_cursor_color"] == "yellow"  # invalid choice clamps to the default
     assert sanitize_settings({"appearance": {"editor_cursor_color": "laser-lime"}})["appearance"]["editor_cursor_color"] == "laser-lime"
@@ -308,6 +308,16 @@ def test_legacy_editor_scheme_ids_migrate_to_popular_ide_names():
     assert settings["appearance"]["editor_light_color_scheme"] == "popular-ide-light-plus"
 
 
+def test_legacy_yolomux_light_setting_migrates_to_yomux_light():
+    settings = sanitize_settings({"appearance": {
+        "editor_color_scheme": "yolomux-light",
+        "editor_light_color_scheme": "yolomux-light",
+    }})
+
+    assert settings["appearance"]["editor_color_scheme"] == "yomux-light"
+    assert settings["appearance"]["editor_light_color_scheme"] == "yomux-light"
+
+
 def test_settings_round_trip_with_atomic_template(tmp_path):
     path = tmp_path / "settings.yaml"
     payload = settings_payload(path)
@@ -359,7 +369,7 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert "pass explicit instructions" in payload["settings"]["yoagent"]["system_prompt"]
     assert "source-neutral handoff prompt" in payload["settings"]["yoagent"]["system_prompt"]
     assert "what have you done today?" in payload["settings"]["yoagent"]["system_prompt"]
-    assert "~/.config/yolomux/context.d/" in payload["settings"]["yoagent"]["system_prompt"]
+    assert "~/.config/yomux/context.d/" in payload["settings"]["yoagent"]["system_prompt"]
     assert "If needed facts are missing" in payload["settings"]["yoagent"]["intro"]
     assert "recommend what to work on next" in payload["settings"]["yoagent"]["intro"]
     assert "refer to it as tmux session `<session-name>`" in payload["settings"]["yoagent"]["system_prompt"]
@@ -370,7 +380,7 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert "If there are 6 sessions, emit 6 table rows." in payload["settings"]["yoagent"]["format"]
     assert "Open / pending:" in payload["settings"]["yoagent"]["format"]
     assert path.exists()
-    assert "YOLOmux user preferences" in path.read_text()
+    assert "YOmux user preferences" in path.read_text()
 
     updated = save_settings({"appearance": {"terminal_font_size": 17, "date_time_hour_cycle": "12"}, "file_explorer": {"indexed_dirs": ["/tmp", ""]}}, path)
     assert updated["settings"]["appearance"]["terminal_font_size"] == 17
@@ -513,7 +523,7 @@ def test_summary_settings_reject_invalid_backend_defaults():
 
 
 def test_preferences_source_paths_are_in_backend_catalog():
-    source = (REPO_ROOT / "static_src/js/yolomux/83_preferences_panel.js").read_text(encoding="utf-8")
+    source = (REPO_ROOT / "static_src/js/yomux/83_preferences_panel.js").read_text(encoding="utf-8")
     paths = set(re.findall(r"preferenceSettingItem\(['\"]([^'\"]+)['\"]", source))
 
     catalog = settings_catalog(default_settings())

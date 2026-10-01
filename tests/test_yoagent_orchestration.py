@@ -7,9 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from yolomux_lib import app as app_module
-from yolomux_lib.yoagent import controller as controller_module
-from yolomux_lib.yoagent import transports as transport_module
+from yomux_lib import app as app_module
+from yomux_lib.yoagent import controller as controller_module
+from yomux_lib.yoagent import transports as transport_module
 
 
 pytestmark = pytest.mark.usefixtures("no_control_socket", "isolated_yoagent_conversation_state")

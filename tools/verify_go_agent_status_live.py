@@ -264,7 +264,7 @@ def main() -> int:
             if go_binary is None:
                 go_binary = root / "yolomux-go"
                 build_env = os.environ.copy()
-                run("go", "build", "-buildvcs=false", "-o", str(go_binary), "./cmd/yolomux-go", env=build_env)
+                run("go", "build", "-buildvcs=false", "-o", str(go_binary), "./cmd/yomux-go", env=build_env)
             server_env = env | {
                 "YOLOMUX_DEBUG_AGENT_STATUS": "1",
                 # This verifier owns a private tmux socket. Scope native
@@ -279,7 +279,7 @@ def main() -> int:
                 "YOLOMUX_STATS_SYNTHETIC_INVENTORY": "1",
                 "YOLOMUX_CLAUDE_TRANSCRIPT_ROOT": str(home / "claude" / "projects"),
                 "YOLOMUX_CODEX_TRANSCRIPT_ROOT": str(home / "codex" / "sessions"),
-                "YOLOMUX_PRICING_CATALOG": str(REPO / "yolomux_lib" / "data" / "model_pricing.json"),
+                "YOLOMUX_PRICING_CATALOG": str(REPO / "yomux_lib" / "data" / "model_pricing.json"),
             }
             print(json.dumps({"verification": "starting", "YOLOMUX_TMUX_SOCKET": server_env["YOLOMUX_TMUX_SOCKET"], "tmux_panes": inventory.splitlines()}, sort_keys=True), flush=True)
             server_log = server_log_path.open("w", encoding="utf-8")

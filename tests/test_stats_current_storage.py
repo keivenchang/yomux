@@ -15,29 +15,29 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib.stats_current import APPLICATION_ID
-from yolomux_lib.stats_current import DATABASE_FILENAME
-from yolomux_lib.stats_current import MIN_WRITER_BUILD
-from yolomux_lib.stats_current import MIN_WRITER_PROTOCOL
-from yolomux_lib.stats_current import MigrationReconciliation
-from yolomux_lib.stats_current import RETENTION_SECONDS
-from yolomux_lib.stats_current.storage import _RING_TABLES
-from yolomux_lib.stats_current import SCHEMA_VERSION
-from yolomux_lib.stats_current import CoverageEpoch
-from yolomux_lib.stats_current import Observation
-from yolomux_lib.stats_current import SchemaTooNewError
-from yolomux_lib.stats_current import SchemaMismatchError
-from yolomux_lib.stats_current import Store
-from yolomux_lib.stats_current import StatsCurrentError
-from yolomux_lib.stats_current import StorageValidationError
-from yolomux_lib.stats_current import UnavailableSpan
-from yolomux_lib.stats_current import UsageAtom
-from yolomux_lib.stats_current import UsageAtomTombstone
-from yolomux_lib.stats_current.storage import VACUUM_BASELINE_FILENAME
-from yolomux_lib.stats_current import WRITER_FENCE_FILENAME
-from yolomux_lib.stats_current import materializer as materializer_module
-from yolomux_lib.stats_current import resolution as stats_resolution
-from yolomux_lib.stats_current import storage as storage_module
+from yomux_lib.stats_current import APPLICATION_ID
+from yomux_lib.stats_current import DATABASE_FILENAME
+from yomux_lib.stats_current import MIN_WRITER_BUILD
+from yomux_lib.stats_current import MIN_WRITER_PROTOCOL
+from yomux_lib.stats_current import MigrationReconciliation
+from yomux_lib.stats_current import RETENTION_SECONDS
+from yomux_lib.stats_current.storage import _RING_TABLES
+from yomux_lib.stats_current import SCHEMA_VERSION
+from yomux_lib.stats_current import CoverageEpoch
+from yomux_lib.stats_current import Observation
+from yomux_lib.stats_current import SchemaTooNewError
+from yomux_lib.stats_current import SchemaMismatchError
+from yomux_lib.stats_current import Store
+from yomux_lib.stats_current import StatsCurrentError
+from yomux_lib.stats_current import StorageValidationError
+from yomux_lib.stats_current import UnavailableSpan
+from yomux_lib.stats_current import UsageAtom
+from yomux_lib.stats_current import UsageAtomTombstone
+from yomux_lib.stats_current.storage import VACUUM_BASELINE_FILENAME
+from yomux_lib.stats_current import WRITER_FENCE_FILENAME
+from yomux_lib.stats_current import materializer as materializer_module
+from yomux_lib.stats_current import resolution as stats_resolution
+from yomux_lib.stats_current import storage as storage_module
 
 
 def _observation(family: str, source_id: str, observed_at: float) -> Observation:
@@ -484,7 +484,7 @@ def test_writer_lease_resolves_parent_directory_aliases(tmp_path):
                 "-c",
                 "from pathlib import Path\n"
                 "import sys\n"
-                "from yolomux_lib.stats_current.storage import Store\n"
+                "from yomux_lib.stats_current.storage import Store\n"
                 "try:\n"
                 "    Store.open(Path(sys.argv[1]))\n"
                 "except Exception as error:\n"
@@ -507,7 +507,7 @@ def test_writer_lease_resolves_parent_directory_aliases(tmp_path):
                 "-c",
                 "from pathlib import Path\n"
                 "import sys\n"
-                "from yolomux_lib.stats_current.storage import Store\n"
+                "from yomux_lib.stats_current.storage import Store\n"
                 "try:\n"
                 "    Store.open(Path(sys.argv[1]))\n"
                 "except Exception as error:\n"
@@ -1277,7 +1277,7 @@ def test_browser_observation_status_aggregates_an_error_storm_without_decoding_e
                 "kind": kind,
                 "signature": signature,
                 "message": f"failure {signature_index}",
-                "source": "/static/yolomux.js",
+                "source": "/static/yomux.js",
             }
             if signature_index != 138:
                 payload["code_revision"] = f"rev-{occurrence % 3}"

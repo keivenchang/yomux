@@ -5,13 +5,13 @@ from threading import Thread
 
 import pytest
 
-from yolomux_lib import batchd
-from yolomux_lib.local_services import client as local_service_client_mod
-from yolomux_lib.local_services import registry as registry_mod
-from yolomux_lib.local_services import rpc
-from yolomux_lib.local_services import runtime
-from yolomux_lib.local_services.registry import LocalServiceRegistry
-from yolomux_lib.local_services.registry import LocalServiceSpec
+from yomux_lib import batchd
+from yomux_lib.local_services import client as local_service_client_mod
+from yomux_lib.local_services import registry as registry_mod
+from yomux_lib.local_services import rpc
+from yomux_lib.local_services import runtime
+from yomux_lib.local_services.registry import LocalServiceRegistry
+from yomux_lib.local_services.registry import LocalServiceSpec
 
 
 def test_lease_release_terminal_upgrade_response_is_recorded_without_retry(monkeypatch):

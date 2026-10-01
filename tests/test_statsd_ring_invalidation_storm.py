@@ -8,16 +8,16 @@ import json
 
 import pytest
 
-from yolomux_lib import session_files
-from yolomux_lib.stats_current import CoverageEpoch
-from yolomux_lib.stats_current import DATABASE_FILENAME
-from yolomux_lib.stats_current import Observation
-from yolomux_lib.stats_current import Store
-from yolomux_lib.stats_current import UnavailableSpan
-from yolomux_lib.stats_current import identity
-from yolomux_lib.stats_current import scheduler
-from yolomux_lib.stats_current import storage
-from yolomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
+from yomux_lib import session_files
+from yomux_lib.stats_current import CoverageEpoch
+from yomux_lib.stats_current import DATABASE_FILENAME
+from yomux_lib.stats_current import Observation
+from yomux_lib.stats_current import Store
+from yomux_lib.stats_current import UnavailableSpan
+from yomux_lib.stats_current import identity
+from yomux_lib.stats_current import scheduler
+from yomux_lib.stats_current import storage
+from yomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
 from tests.helpers.gate_stats import commit_scan
 from tools.mockers.transcript import append_record
 from tools.mockers.transcript import codex_meta

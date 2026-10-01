@@ -9,11 +9,11 @@ import ipaddress
 
 import pytest
 
-from yolomux_lib import login_escalation as esc
-from yolomux_lib.login_rate_limit import SCOPE_BROAD
-from yolomux_lib.login_rate_limit import SCOPE_EXACT
-from yolomux_lib.login_rate_limit import SCOPE_GLOBAL
-from yolomux_lib.login_rate_limit import SCOPE_USERNAME
+from yomux_lib import login_escalation as esc
+from yomux_lib.login_rate_limit import SCOPE_BROAD
+from yomux_lib.login_rate_limit import SCOPE_EXACT
+from yomux_lib.login_rate_limit import SCOPE_GLOBAL
+from yomux_lib.login_rate_limit import SCOPE_USERNAME
 
 
 class FakeClock:

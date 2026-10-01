@@ -19,7 +19,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 
-from yolomux_lib.agent_tui import agent_client_version_slug
+from yomux_lib.agent_tui import agent_client_version_slug
 
 
 DEFAULT_CAPTURE_COLS = 200

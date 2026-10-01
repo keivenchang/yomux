@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 260" role="img" aria-labelledby="title desc">
-  <title id="title">YOLOmux preview status card</title>
+  <title id="title">YOmux preview status card</title>
   <desc id="desc">A safe SVG image with three preview status rows.</desc>
   <rect width="720" height="260" rx="18" fill="#101820"/>
   <rect x="28" y="28" width="664" height="204" rx="14" fill="#f7f9fc"/>

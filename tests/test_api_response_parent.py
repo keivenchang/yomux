@@ -18,14 +18,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from yolomux_lib import app as app_module
-from yolomux_lib import http_routes
-from yolomux_lib import server
-from yolomux_lib import server_logs
-from yolomux_lib.local_services import client as local_service_client_module
-from yolomux_lib.local_services.client import LocalServiceClient
-from yolomux_lib.local_services.client import local_service_failure_is_transient
-from yolomux_lib.observability.queued_delivery import QueuedDeliveryLedger
+from yomux_lib import app as app_module
+from yomux_lib import http_routes
+from yomux_lib import server
+from yomux_lib import server_logs
+from yomux_lib.local_services import client as local_service_client_module
+from yomux_lib.local_services.client import LocalServiceClient
+from yomux_lib.local_services.client import local_service_failure_is_transient
+from yomux_lib.observability.queued_delivery import QueuedDeliveryLedger
 
 
 def _route_registrations() -> list[ast.Call]:
@@ -372,7 +372,7 @@ def test_response_parent_same_caller_request_id_frames_identical_retained_produc
     )
     first, _first_writes = _capturing_handler(route)
     second, _second_writes = _capturing_handler(route)
-    headers = {"X-YOLOmux-Request-ID": "r-same-request-id-parity"}
+    headers = {"X-YOmux-Request-ID": "r-same-request-id-parity"}
     first.headers = headers
     second.headers = headers
     product = b'{"cache_generation":7,"source_generation":5}'

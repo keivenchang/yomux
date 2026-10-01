@@ -2,15 +2,15 @@ from http import HTTPStatus
 
 import pytest
 
-from yolomux_lib import app as app_module
-from yolomux_lib.yoagent import controller as yoagent_controller_module
-from yolomux_lib.settings import default_settings
-from yolomux_lib.settings import save_settings
-from yolomux_lib.settings import settings_payload
-from yolomux_lib.yoagent.preferences import catalog_from_payload
-from yolomux_lib.yoagent.preferences import product_capability_registry
-from yolomux_lib.yoagent.preferences import product_capability_locale_key
-from yolomux_lib.yoagent.preferences import yoagent_operator_response
+from yomux_lib import app as app_module
+from yomux_lib.yoagent import controller as yoagent_controller_module
+from yomux_lib.settings import default_settings
+from yomux_lib.settings import save_settings
+from yomux_lib.settings import settings_payload
+from yomux_lib.yoagent.preferences import catalog_from_payload
+from yomux_lib.yoagent.preferences import product_capability_registry
+from yomux_lib.yoagent.preferences import product_capability_locale_key
+from yomux_lib.yoagent.preferences import yoagent_operator_response
 
 
 pytestmark = pytest.mark.usefixtures("isolated_yoagent_conversation_state")
@@ -333,7 +333,7 @@ def test_operator_reports_duplicate_watched_pr_noop(tmp_path):
     payload = settings_payload(path)
 
     response = yoagent_operator_response(
-        "add watched PR https://github.com/keivenchang/yolomux/pull/72",
+        "add watched PR https://github.com/keivenchang/yomux/pull/72",
         payload,
         {},
         "admin",
@@ -392,7 +392,7 @@ def test_operator_rejects_sensitive_path_values(tmp_path):
 
     assert response is not None
     assert "credential-sensitive" in response["answer"]
-    assert settings_payload(path)["settings"]["yolo"]["rule_file_path"] == "~/.config/yolomux/yolo-rules.yaml"
+    assert settings_payload(path)["settings"]["yolo"]["rule_file_path"] == "~/.config/yomux/yolo-rules.yaml"
 
 
 def test_operator_rejects_unsafe_absolute_config_path(tmp_path):
@@ -409,7 +409,7 @@ def test_operator_rejects_unsafe_absolute_config_path(tmp_path):
 
     assert response is not None
     assert "config-like setting" in response["answer"]
-    assert settings_payload(path)["settings"]["yolo"]["rule_file_path"] == "~/.config/yolomux/yolo-rules.yaml"
+    assert settings_payload(path)["settings"]["yolo"]["rule_file_path"] == "~/.config/yomux/yolo-rules.yaml"
 
 
 def test_operator_clarifies_invalid_pr_and_broad_reset(tmp_path):
@@ -435,7 +435,7 @@ def test_operator_answers_product_state_from_activity_cache(tmp_path):
                 "work": "YO!agent settings operator",
                 "status_text": "PR #72",
                 "pr_number": 72,
-                "file_lines": ["M yolomux_lib/settings.py (+10/-1)"],
+                "file_lines": ["M yomux_lib/settings.py (+10/-1)"],
             }
         },
         "agents": [],
@@ -461,7 +461,7 @@ def test_operator_answers_changed_files_pr_capabilities_and_session_reason(tmp_p
                 "activity_label": "blocked",
                 "status_text": "PR #72",
                 "pr_number": 72,
-                "file_lines": ["M README.md (+3/-1)", "M yolomux_lib/settings.py (+20/-2)"],
+                "file_lines": ["M README.md (+3/-1)", "M yomux_lib/settings.py (+20/-2)"],
                 "blockers": ["waiting for tests"],
             }
         },

@@ -11,13 +11,13 @@ import uuid
 from tests.helpers.local_service_records import FixtureLeaseRecordBuilder
 from tests.helpers.local_service_records import FixtureLocalServiceRecordBuilder
 from tests.helpers.local_service_records import FixtureProcessRecordBuilder
-from yolomux_lib.infra.host_identity import current_host_identity
-from yolomux_lib.local_services import preflight as preflight_module
-from yolomux_lib.local_services.preflight import preflight_port
-from yolomux_lib.local_services import registry as registry_mod
-from yolomux_lib.local_services.registry import ProcessTableEntry
-from yolomux_lib.local_services.registry import ProcessTableUnavailable
-from yolomux_lib.local_services.registry import shutdown_owned_local_services
+from yomux_lib.infra.host_identity import current_host_identity
+from yomux_lib.local_services import preflight as preflight_module
+from yomux_lib.local_services.preflight import preflight_port
+from yomux_lib.local_services import registry as registry_mod
+from yomux_lib.local_services.registry import ProcessTableEntry
+from yomux_lib.local_services.registry import ProcessTableUnavailable
+from yomux_lib.local_services.registry import shutdown_owned_local_services
 
 
 def _table(rows):
@@ -309,7 +309,7 @@ def test_preflight_reaps_exact_recorded_sidecar_after_its_launcher_dies(tmp_path
     )
     table = _table(
         [
-            (500, 1, 500, 1.0, f"python3 -m yolomux_lib.approval.approvald --serve --socket {socket_path}"),
+            (500, 1, 500, 1.0, f"python3 -m yomux_lib.approval.approvald --serve --socket {socket_path}"),
             (501, 500, 500, 1.0, "python3 -c multiprocessing-spawn-worker"),
             (900, 1, 900, 1.0, "foreign-daemon --serve"),
         ]
@@ -358,7 +358,7 @@ def test_preflight_keeps_a_recorded_sidecar_with_a_live_client(tmp_path):
         launcher_pid=400,
         launcher_port=18991,
     )
-    table = _table([(600, 1, 600, 1.0, f"python3 -m yolomux_lib.infra.batchd --serve --socket {socket_path}")])
+    table = _table([(600, 1, 600, 1.0, f"python3 -m yomux_lib.infra.batchd --serve --socket {socket_path}")])
     kills = []
 
     result = preflight_port(
@@ -388,7 +388,7 @@ def test_preflight_keeps_an_old_sidecar_record_without_status_protocol(tmp_path)
         launcher_port=18991,
         protocol_version=0,
     )
-    table = _table([(700, 1, 700, 1.0, f"python3 -m yolomux_lib.stats_current.service --serve --socket {socket_path}")])
+    table = _table([(700, 1, 700, 1.0, f"python3 -m yomux_lib.stats_current.service --serve --socket {socket_path}")])
     kills = []
 
     result = preflight_port(

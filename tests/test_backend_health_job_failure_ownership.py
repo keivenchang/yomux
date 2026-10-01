@@ -28,14 +28,14 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib.backend_health.observer import PROBE_OK
-from yolomux_lib.backend_health.observer import REASON_EXITED
-from yolomux_lib.backend_health.observer import REASON_NONE
-from yolomux_lib.backend_health.observer import REASON_SERVICE_UNHEALTHY
-from yolomux_lib.backend_health.observer import observed_health
-from yolomux_lib.infra.batchd import JobRecord
-from yolomux_lib.infra.batchd import PersistentJobBroker
-from yolomux_lib.local_services.runtime import local_service_failure_text
+from yomux_lib.backend_health.observer import PROBE_OK
+from yomux_lib.backend_health.observer import REASON_EXITED
+from yomux_lib.backend_health.observer import REASON_NONE
+from yomux_lib.backend_health.observer import REASON_SERVICE_UNHEALTHY
+from yomux_lib.backend_health.observer import observed_health
+from yomux_lib.infra.batchd import JobRecord
+from yomux_lib.infra.batchd import PersistentJobBroker
+from yomux_lib.local_services.runtime import local_service_failure_text
 
 
 # The exact error text the live batchd was reporting when it was measured healthy.

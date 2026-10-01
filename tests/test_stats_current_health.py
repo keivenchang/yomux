@@ -16,9 +16,9 @@ from http import HTTPStatus
 
 import pytest
 
-from yolomux_lib.stats_current import http
-from yolomux_lib.stats_current import service as service_module
-from yolomux_lib.stats_current import storage
+from yomux_lib.stats_current import http
+from yomux_lib.stats_current import service as service_module
+from yomux_lib.stats_current import storage
 
 PID = 4242
 READY_CONTROL = {
@@ -133,7 +133,7 @@ def test_the_health_module_never_names_a_service_lock():
         node.module for node in ast.walk(tree)
         if isinstance(node, ast.ImportFrom) and node.module
     }
-    assert "yolomux_lib.stats_current.service" not in modules, modules
+    assert "yomux_lib.stats_current.service" not in modules, modules
 
 
 # --- the projection -----------------------------------------------------------------------------

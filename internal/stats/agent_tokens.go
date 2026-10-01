@@ -4057,7 +4057,7 @@ func defaultTranscriptRoot(kind string, configuredRoots ...string) string {
 	if kind == "codex" && len(configuredRoots) > 1 && strings.TrimSpace(configuredRoots[1]) != "" {
 		return filepath.Clean(configuredRoots[1])
 	}
-	// Production resolves and passes explicit roots from cmd/yolomux-go.  Do not
+	// Production resolves and passes explicit roots from cmd/yomux-go.  Do not
 	// fall back to HOME/CODEX_HOME here: a missing configuration must be a
 	// bounded unavailable source, never an accidental read of developer state.
 	return ""

@@ -12,7 +12,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "fakellm_lib",
     srcs = ["server.go"],
-    importpath = "github.com/keivenchang/yolomux/internal/fakellm",
+    importpath = "github.com/keivenchang/yomux/internal/fakellm",
 )
 
 go_test(

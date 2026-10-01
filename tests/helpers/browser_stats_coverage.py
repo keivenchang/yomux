@@ -4,10 +4,10 @@ import json
 from pathlib import Path
 
 from tests.browser_helpers.browser_layout import page_html
-from yolomux_lib.stats_current import resolution as stats_resolution
+from yomux_lib.stats_current import resolution as stats_resolution
 
-CURRENT_STATS_SOURCE = "\n".join(Path(f"static_src/js/yolomux/{name}").read_text(encoding="utf-8") for name in ("09_transport_lifecycle.js", "84_stats_current.js"))
-CORE_SOURCE = Path("static_src/js/yolomux/10_core_utils.js").read_text(encoding="utf-8")
+CURRENT_STATS_SOURCE = "\n".join(Path(f"static_src/js/yomux/{name}").read_text(encoding="utf-8") for name in ("09_transport_lifecycle.js", "84_stats_current.js"))
+CORE_SOURCE = Path("static_src/js/yomux/10_core_utils.js").read_text(encoding="utf-8")
 LIFECYCLE_SCOPE_SOURCE = CORE_SOURCE[
     CORE_SOURCE.index("function createLifecycleScope("):
     CORE_SOURCE.index("\nfunction delegate(", CORE_SOURCE.index("function createLifecycleScope("))
@@ -271,7 +271,7 @@ def _current_stats_fixture_html(*, network_fetch=False) -> str:
       window.__statsFixture.finiteOperations.set(id, promise);
       return Promise.resolve(promise).finally(() => window.__statsFixture.finiteOperations.delete(id));
     };
-    window.__yolomuxFixtureLifecycle = Object.freeze({
+    window.__yomuxFixtureLifecycle = Object.freeze({
       diagnosticMode: 'browser-console',
       operationState() {
         return {pending: [...window.__statsFixture.finiteOperations.keys()].sort()};
@@ -295,7 +295,7 @@ def _current_stats_fixture_html(*, network_fetch=False) -> str:
 
     window.__statsFixture.start = view => window.__statsFixture.trackFinite(`start:${view}`, (async () => {
       const root = document.getElementById('stats-root');
-      const mounted = YOLOmuxStatsCurrent.mount(root, {
+      const mounted = YOmuxStatsCurrent.mount(root, {
         view,
         clientId: 'browser-current-fixture',
         savedRange: 300,
@@ -430,8 +430,8 @@ def _write_current_stats_fixture_assets(asset_dir: Path, asset_name: str) -> Non
     (asset_dir / asset_name).write_text(_current_stats_fixture_html(network_fetch=True), encoding="utf-8")
     font_dir = asset_dir / "fonts"
     font_dir.mkdir()
-    (font_dir / "yolomux-ui.woff2").write_bytes(
-        (Path("static/fonts") / "yolomux-ui.woff2").read_bytes()
+    (font_dir / "yomux-ui.woff2").write_bytes(
+        (Path("static/fonts") / "yomux-ui.woff2").read_bytes()
     )
 
 

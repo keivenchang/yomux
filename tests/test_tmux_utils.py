@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from tools import auto_approve_tmux
-from yolomux_lib import tmux_utils
+from yomux_lib import tmux_utils
 
 
 def test_tmux_run_converts_timeout_to_completed_process(monkeypatch):
@@ -60,9 +60,9 @@ def test_run_cmd_decodes_with_replacement_errors(monkeypatch):
 
 
 def test_tmux_command_uses_configured_socket(monkeypatch):
-    monkeypatch.setenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, "/tmp/yolomux-test-tmux.sock")
+    monkeypatch.setenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, "/tmp/yomux-test-tmux.sock")
 
-    assert tmux_utils.tmux_command(["list-sessions"]) == ["tmux", "-S", "/tmp/yolomux-test-tmux.sock", "list-sessions"]
+    assert tmux_utils.tmux_command(["list-sessions"]) == ["tmux", "-S", "/tmp/yomux-test-tmux.sock", "list-sessions"]
 
 
 def test_direct_operator_launch_uses_machine_tmux(monkeypatch):
@@ -97,13 +97,14 @@ def test_startup_common_operator_launch_clears_inherited_tmux(monkeypatch):
     monkeypatch.setenv("TMUX", "/tmp/private-tmux,123,0")
     monkeypatch.setenv("TMUX_PANE", "%7")
     monkeypatch.setenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, "/tmp/private-yolomux-tmux.sock")
+    monkeypatch.setenv("YOMUX_TMUX_SOCKET", "/tmp/private-yomux-tmux.sock")
 
     result = subprocess.run(
         [
             "bash",
             "-c",
-            "source tools/startup_common.sh; yolomux_use_machine_tmux; printf '%s|%s|%s|%s' "
-            '"${TMUX-unset}" "${TMUX_PANE-unset}" "${YOLOMUX_TMUX_SOCKET-unset}" "${YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER-unset}"',
+            "source tools/startup_common.sh; yomux_normalize_environment; yolomux_use_machine_tmux; printf '%s|%s|%s|%s|%s|%s' "
+            '"${TMUX-unset}" "${TMUX_PANE-unset}" "${YOMUX_TMUX_SOCKET-unset}" "${YOLOMUX_TMUX_SOCKET-unset}" "${YOMUX_TMUX_ALLOW_DEFAULT_SERVER-unset}" "${YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER-unset}"',
         ],
         cwd=Path(__file__).resolve().parents[1],
         check=True,
@@ -112,7 +113,7 @@ def test_startup_common_operator_launch_clears_inherited_tmux(monkeypatch):
         env=os.environ.copy(),
     )
 
-    assert result.stdout == "unset|unset||1"
+    assert result.stdout == "unset|unset|||1|1"
 
 
 def test_list_tmux_session_activity_reads_the_roster_in_one_bulk_call(monkeypatch):

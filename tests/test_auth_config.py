@@ -6,15 +6,15 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib import common
-from yolomux_lib import web
-from yolomux_lib.locales import locale_registry_payload
-from yolomux_lib.locales import normalize_locale
-from yolomux_lib.locales import resolve_locale_preference
-from yolomux_lib.workdir import available_agent_commands
-from yolomux_lib import auth
-from yolomux_lib.infra.shared_config_lock import SharedConfigRevisionConflict
-from yolomux_lib.infra.shared_config_lock import read_shared_document
+from yomux_lib import common
+from yomux_lib import web
+from yomux_lib.locales import locale_registry_payload
+from yomux_lib.locales import normalize_locale
+from yomux_lib.locales import resolve_locale_preference
+from yomux_lib.workdir import available_agent_commands
+from yomux_lib import auth
+from yomux_lib.infra.shared_config_lock import SharedConfigRevisionConflict
+from yomux_lib.infra.shared_config_lock import read_shared_document
 
 SOURCE_STATIC_DIR = Path(__file__).resolve().parents[1] / "static_src"
 
@@ -230,25 +230,25 @@ def test_version_status_displays_post_release_commits_and_dirty_worktree(monkeyp
     results = iter((type("GitResult", (), {"stdout": commits})(), type("GitResult", (), {"stdout": " M app.py\n"})()))
     monkeypatch.setattr(common.subprocess, "run", lambda *args, **kwargs: next(results))
 
-    assert common.yolomux_version_metadata()[0] == f"{common.YOLOMUX_VERSION}(3)*"
+    assert common.yomux_version_metadata()[0] == f"{common.YOMUX_VERSION}(3)*"
 
 
 @pytest.mark.parametrize(
     ("commit_count", "status_output", "expected"),
     [
-        ("", "", common.YOLOMUX_VERSION),
-        ("", "?? new.txt\n", common.YOLOMUX_VERSION),
-        ("", "A  new.txt\n", common.YOLOMUX_VERSION),
-        ("", "AM new.txt\n", common.YOLOMUX_VERSION),
-        ("", " M app.py\n", f"{common.YOLOMUX_VERSION}*"),
-        ("2026-09-09T12:34:56+00:00\tOne\n2026-09-08T12:34:56+00:00\tTwo\n2026-09-07T12:34:56+00:00\tThree\n", "", f"{common.YOLOMUX_VERSION}(3)"),
+        ("", "", common.YOMUX_VERSION),
+        ("", "?? new.txt\n", common.YOMUX_VERSION),
+        ("", "A  new.txt\n", common.YOMUX_VERSION),
+        ("", "AM new.txt\n", common.YOMUX_VERSION),
+        ("", " M app.py\n", f"{common.YOMUX_VERSION}*"),
+        ("2026-09-09T12:34:56+00:00\tOne\n2026-09-08T12:34:56+00:00\tTwo\n2026-09-07T12:34:56+00:00\tThree\n", "", f"{common.YOMUX_VERSION}(3)"),
     ],
 )
 def test_version_status_formats_clean_and_dirty_variants(monkeypatch, commit_count, status_output, expected):
     results = iter((type("GitResult", (), {"stdout": commit_count})(), type("GitResult", (), {"stdout": status_output})()))
     monkeypatch.setattr(common.subprocess, "run", lambda *args, **kwargs: next(results))
 
-    assert common.yolomux_version_metadata()[0] == expected
+    assert common.yomux_version_metadata()[0] == expected
 
 
 def test_version_status_v2_ignores_staged_new_file_but_marks_tracked_file(monkeypatch):
@@ -256,11 +256,11 @@ def test_version_status_v2_ignores_staged_new_file_but_marks_tracked_file(monkey
     tracked_change = "1 .M N... 100644 100644 100644 abc abc file.txt\n"
     results = iter((type("GitResult", (), {"stdout": ""})(), type("GitResult", (), {"stdout": staged_new})()))
     monkeypatch.setattr(common.subprocess, "run", lambda *args, **kwargs: next(results))
-    assert common.yolomux_version_metadata()[0] == common.YOLOMUX_VERSION
+    assert common.yomux_version_metadata()[0] == common.YOMUX_VERSION
 
     results = iter((type("GitResult", (), {"stdout": ""})(), type("GitResult", (), {"stdout": tracked_change})()))
     monkeypatch.setattr(common.subprocess, "run", lambda *args, **kwargs: next(results))
-    assert common.yolomux_version_metadata()[0] == f"{common.YOLOMUX_VERSION}*"
+    assert common.yomux_version_metadata()[0] == f"{common.YOMUX_VERSION}*"
 
 
 def test_version_status_does_not_claim_dirty_when_git_probe_fails(monkeypatch):
@@ -277,7 +277,7 @@ def test_version_status_does_not_claim_dirty_when_git_probe_fails(monkeypatch):
 
     monkeypatch.setattr(common.subprocess, "run", run)
 
-    assert common.yolomux_version_metadata() == (f"{common.YOLOMUX_VERSION}*", [])
+    assert common.yomux_version_metadata() == (f"{common.YOMUX_VERSION}*", [])
 
 
 def test_version_status_does_not_claim_dirty_when_status_probe_fails(monkeypatch):
@@ -294,14 +294,14 @@ def test_version_status_does_not_claim_dirty_when_status_probe_fails(monkeypatch
 
     monkeypatch.setattr(common.subprocess, "run", run)
 
-    assert common.yolomux_version_metadata() == (f"{common.YOLOMUX_VERSION}(1)", ["2026-09-09 05:34:56 PT One"])
+    assert common.yomux_version_metadata() == (f"{common.YOMUX_VERSION}(1)", ["2026-09-09 05:34:56 PT One"])
 
 
 def test_post_release_commits_format_pt_date_time_and_subject(monkeypatch):
     result = type("GitResult", (), {"stdout": "2026-09-09T12:34:56+00:00\tFix the thing\n"})()
     monkeypatch.setattr(common.subprocess, "run", lambda *args, **kwargs: result)
 
-    assert common.yolomux_version_metadata()[1] == ["2026-09-09 05:34:56 PT Fix the thing"]
+    assert common.yomux_version_metadata()[1] == ["2026-09-09 05:34:56 PT Fix the thing"]
 
 
 def test_version_status_uses_peeled_release_tag_and_fails_closed_on_status_error(monkeypatch):
@@ -315,8 +315,8 @@ def test_version_status_uses_peeled_release_tag_and_fails_closed_on_status_error
 
     monkeypatch.setattr(common.subprocess, "run", run)
 
-    assert common.yolomux_version_metadata()[0] == f"{common.YOLOMUX_VERSION}(3)"
-    assert f"v{common.YOLOMUX_VERSION}^{{}}..HEAD" in calls[0]
+    assert common.yomux_version_metadata()[0] == f"{common.YOMUX_VERSION}(3)"
+    assert f"v{common.YOMUX_VERSION}^{{}}..HEAD" in calls[0]
 
 
 def test_post_release_commits_use_peeled_release_tag(monkeypatch):
@@ -324,8 +324,8 @@ def test_post_release_commits_use_peeled_release_tag(monkeypatch):
     result = type("GitResult", (), {"stdout": ""})()
     monkeypatch.setattr(common.subprocess, "run", lambda *args, **kwargs: calls.append(args[0]) or result)
 
-    assert common.yolomux_version_metadata()[1] == []
-    assert f"v{common.YOLOMUX_VERSION}^{{}}..HEAD" in calls[0]
+    assert common.yomux_version_metadata()[1] == []
+    assert f"v{common.YOMUX_VERSION}^{{}}..HEAD" in calls[0]
 
 
 def test_main_page_bootstrap_includes_version_commit(monkeypatch):
@@ -337,13 +337,13 @@ def test_main_page_bootstrap_includes_version_commit(monkeypatch):
     monkeypatch.setattr(web, "yolomux_commit_sha", lambda: "abcdef123456")
     monkeypatch.setattr(web, "yolomux_commit_time_pt", lambda: "2026-01-15 04:34:56 PT")
     monkeypatch.setattr(web, "yolomux_commit_count", lambda: 1234)
-    monkeypatch.setattr(web, "yolomux_version_metadata", lambda: ("0.8.1(3)*", ["2026-09-09 05:34:56 PT Fix the thing"]))
+    monkeypatch.setattr(web, "yomux_version_metadata", lambda: ("0.8.1(3)*", ["2026-09-09 05:34:56 PT Fix the thing"]))
     monkeypatch.setattr(web, "yolomux_client_revision", lambda: "client-rev-test")
     monkeypatch.setattr(web, "yolomux_dev_bundle_revision", lambda: "bundle-rev-test")
     monkeypatch.setattr(web, "SERVER_STARTED_AT", 1234.5)
 
     page = web.html_page([])
-    match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
+    match = re.search(r'<script id="yomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
     assert match
     payload = json.loads(match.group(1))
     assert payload["versionCommit"] == "abcdef123456"
@@ -360,7 +360,7 @@ def test_main_page_bootstrap_includes_version_commit(monkeypatch):
     assert web.server_string("en", "menu.help.about.commits", count="1234") in page
 
     go_page = web.html_page([], backend_label="Go 0.9.1")
-    go_match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', go_page, re.DOTALL)
+    go_match = re.search(r'<script id="yomux-bootstrap" type="application/json">(.*?)</script>', go_page, re.DOTALL)
     assert go_match
     go_payload = json.loads(go_match.group(1))
     assert go_payload["versionStatus"] == "0.8.1(3)*"
@@ -379,7 +379,7 @@ def test_setup_auth_page_recommends_https_only_for_http(monkeypatch):
     recommendation = web.server_string(
         "en",
         "setup.httpsRecommended",
-        command="<code>python3 yolomux.py --port 9998</code>",
+        command="<code>python3 yomux.py --port 9998</code>",
     )
     assert recommendation not in secure_setup_html
     assert "setupSecurity" not in secure_setup_html
@@ -397,7 +397,7 @@ def test_setup_screen_names_effective_auth_config_path(monkeypatch, tmp_path):
     setup_html = web.setup_auth_html()
 
     assert str(auth_path) in setup_html
-    assert "~/.config/yolomux/auth.yaml" not in setup_html
+    assert "~/.config/yomux/auth.yaml" not in setup_html
 
 
 def test_login_and_setup_screens_show_please_login_for_logged_out_agent(monkeypatch):
@@ -456,12 +456,12 @@ def test_login_screen_has_no_notice_when_installed_agent_auth_is_unknown(monkeyp
 
 def test_auth_setup_brand_pulses_without_rotating():
     css = (Path(__file__).resolve().parents[1] / "static" / "setup-auth.css").read_text(encoding="utf-8")
-    rule = re.search(r"\.setup-brand-waiting \.brand-yolo\s*\{(?P<body>[^}]*)\}", css, re.DOTALL)
+    rule = re.search(r"\.setup-brand-waiting \.brand-mark\s*\{(?P<body>[^}]*)\}", css, re.DOTALL)
 
     assert rule is not None
-    assert "setup-brand-yolo-pulse" in rule.group("body")
-    assert "setup-brand-yolo-rotate" not in rule.group("body")
-    assert "setup-brand-yolo-rotate" not in css
+    assert "setup-brand-mark-pulse" in rule.group("body")
+    assert "setup-brand-mark-rotate" not in rule.group("body")
+    assert "setup-brand-mark-rotate" not in css
 
 
 def test_main_page_bootstrap_includes_agent_auth(monkeypatch):
@@ -470,7 +470,7 @@ def test_main_page_bootstrap_includes_agent_auth(monkeypatch):
         "codex": {"installed": True, "logged_in": False},
     })
     page = web.html_page([])
-    match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
+    match = re.search(r'<script id="yomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
     parsed = json.loads(match.group(1))
     assert parsed["agentAuth"]["codex"] == {"installed": True, "logged_in": False, "available": False}
 
@@ -485,24 +485,29 @@ def test_bootstrap_locale_resolves_language_and_serves_locale_catalogs():
     assert web.static_content_type("locales/en-XA.json") == "application/json; charset=utf-8"
     assert web.static_content_type("locales/../settings.yaml") is None
     assert web.static_content_type("locales/sub/dir.json") is None
-    # /static/fonts/<asset>.woff2 is a served font asset for mirror-stable share rendering; traversal is rejected.
+    # The new font URLs are canonical; the old URLs remain served as transition aliases.
+    assert web.static_content_type("fonts/yomux-ui.woff2") == "font/woff2"
+    assert web.static_asset_path("fonts/yomux-ui.woff2").is_file()
+    assert web.static_asset_path("fonts/yolomux-ui.woff2") == web.static_asset_path("fonts/yomux-ui.woff2")
+    assert web.static_asset_path("fonts/yolomux-mono.woff2") == web.static_asset_path("fonts/yomux-mono.woff2")
+    # /static/fonts/<asset>.woff2 is a served font asset; traversal is rejected.
     assert web.static_content_type("fonts/yolomux-ui.woff2") == "font/woff2"
     assert web.static_asset_path("fonts/yolomux-ui.woff2").is_file()
     assert web.static_content_type("fonts/../settings.yaml") is None
     assert web.static_content_type("fonts/sub/dir.woff2") is None
 
 
-def test_pre_auth_brand_wordmark_localizes_yo_lo_glyphs():
-    # follow-up: the server-rendered login / auth-setup screens are NOT localized by the JS
-    # renderBrandWordmark(), so brand_html must localize YO/LO itself — a Chinese locale showed
-    # "YO/LOmux" instead of 優樂mux / 优乐mux.
-    assert "優" in web.brand_html(locale="zh-Hant") and "樂" in web.brand_html(locale="zh-Hant")
-    assert "优" in web.brand_html(locale="zh-Hans") and "乐" in web.brand_html(locale="zh-Hans")
-    # No locale (main app, which re-localizes client-side) and "system" stay English.
-    assert ">YO<" in web.brand_html() and ">LO<" in web.brand_html()
-    assert ">YO<" in web.brand_html(locale="system")
-    # The full pre-auth pages carry the localized wordmark (login_html takes the locale by keyword —
-    # its first positional is next_path).
+def test_pre_auth_brand_wordmark_localizes_product_mark():
+    # Pre-auth pages render the selected locale directly because JavaScript has
+    # not bootstrapped yet.
+    traditional = web.brand_html(locale="zh-Hant")
+    simplified = web.brand_html(locale="zh-Hans")
+    english = web.brand_html()
+    assert '<span class="brand-mark">優</span>' in traditional
+    assert '<span class="brand-mark">优</span>' in simplified
+    assert '<span class="brand-second brand-green"></span>' in traditional
+    assert '<span class="brand-second brand-green"></span>' in simplified
+    assert '<span class="brand-mark">Y</span><span class="brand-second brand-green">O</span>' in english
     renderers = [
         ("setup", lambda loc: web.setup_auth_html(loc)),
         ("login", lambda loc: web.login_html(current_locale=loc)),
@@ -510,9 +515,9 @@ def test_pre_auth_brand_wordmark_localizes_yo_lo_glyphs():
     for name, render in renderers:
         zh_hant = render("zh-Hant")
         zh_hans = render("zh-Hans")
-        assert "優" in zh_hant and "樂" in zh_hant, f"{name} zh-Hant wordmark"
-        assert "优" in zh_hans and "乐" in zh_hans, f"{name} zh-Hans wordmark"
-        assert ">YO<" in render("en"), f"{name} en wordmark stays YO/LO"
+        assert '<span class="brand-mark">優</span>' in zh_hant, f"{name} zh-Hant wordmark"
+        assert '<span class="brand-mark">优</span>' in zh_hans, f"{name} zh-Hans wordmark"
+        assert '<span class="brand-mark">Y</span>' in render("en"), f"{name} en wordmark"
 
 
 def test_setup_auth_script_has_no_parallel_english_status_fallbacks():
@@ -530,7 +535,7 @@ def test_bootstrap_exposes_agent_launch_commands_and_term_always_available():
     assert "term" in available_agent_commands(), "Term (a shell) is always launchable"
 
     def boot(page):
-        match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
+        match = re.search(r'<script id="yomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
         return json.loads(match.group(1))
     yolo = boot(web.html_page([], "admin", dangerously_yolo=True))
     assert yolo["dangerouslyYolo"] is True
@@ -553,7 +558,7 @@ def test_bootstrap_exposes_agent_launch_commands_and_term_always_available():
 
 def test_main_page_bootstrap_includes_resolved_locale():
     page = web.html_page([])
-    match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
+    match = re.search(r'<script id="yomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
     parsed = json.loads(match.group(1))
     assert parsed["locale"] in {"en", "en-XA"}
 
@@ -562,7 +567,7 @@ def test_bootstrap_dev_flag_is_off_by_default_and_set_under_dev():
     # Dev-velocity #1b: the bootstrap carries a dev flag; the client only subscribes to /api/dev-reload
     # when it is true. Off by default so production never auto-reloads.
     def boot(page):
-        match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
+        match = re.search(r'<script id="yomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
         return json.loads(match.group(1))
     assert boot(web.html_page([]))["dev"] is False
     assert boot(web.html_page([], "admin", dev=True))["dev"] is True
@@ -570,7 +575,7 @@ def test_bootstrap_dev_flag_is_off_by_default_and_set_under_dev():
 
 def test_bootstrap_json_escapes_breakout_chars_without_html_entities():
     page = web.html_page([])
-    match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
+    match = re.search(r'<script id="yomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
     assert match, "bootstrap script tag is present"
     raw = match.group(1)
     # The YO!agent answer-format default is embedded as JSON, not HTML; it must not contain a raw
@@ -586,7 +591,7 @@ def test_bootstrap_json_escapes_breakout_chars_without_html_entities():
 
 def test_main_page_bootstrap_defers_preferences_metadata():
     page = web.html_page([])
-    match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
+    match = re.search(r'<script id="yomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
     parsed = json.loads(match.group(1))
     settings_payload = parsed["settingsPayload"]
 
@@ -643,7 +648,7 @@ def test_html_page_system_language_uses_accept_language_for_first_paint(monkeypa
     payload.setdefault("settings", {}).setdefault("general", {})["language"] = "system"
     monkeypatch.setattr(web, "settings_payload", lambda: payload)
     page = web.html_page([], accept_language="he-IL, en;q=0.5")
-    match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
+    match = re.search(r'<script id="yomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
     bootstrap = json.loads(match.group(1))
 
     assert bootstrap["locale"] == "he"
@@ -685,5 +690,5 @@ def test_pre_auth_pages_share_reload_picker_and_localize_first_paint(monkeypatch
     assert "Highly recommend that you restart with HTTPS" not in setup
 
     picker_source = (Path(__file__).resolve().parents[1] / "static" / "preauth-locale.js").read_text(encoding="utf-8")
-    assert "document.cookie = `yolomux_locale=${encodeURIComponent(input.value)}" in picker_source
+    assert "document.cookie = `yomux_locale=${encodeURIComponent(input.value)}" in picker_source
     assert picker_source.index("document.cookie =") < picker_source.index("location.reload()")

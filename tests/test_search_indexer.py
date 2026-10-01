@@ -4,14 +4,14 @@ import time
 
 import pytest
 
-from yolomux_lib import search_indexer
-from yolomux_lib.filesystem import paths
-from yolomux_lib.filesystem import search
-from yolomux_lib.infra import batchd
-from yolomux_lib.local_services.registry import LocalServiceRegistry
-from yolomux_lib.local_services.registry import LocalServiceSpec
-from yolomux_lib.local_services import runtime as local_service_runtime
-from yolomux_lib.search import file_index
+from yomux_lib import search_indexer
+from yomux_lib.filesystem import paths
+from yomux_lib.filesystem import search
+from yomux_lib.infra import batchd
+from yomux_lib.local_services.registry import LocalServiceRegistry
+from yomux_lib.local_services.registry import LocalServiceSpec
+from yomux_lib.local_services import runtime as local_service_runtime
+from yomux_lib.search import file_index
 
 
 SEARCH_INDEXER_ENSURE_STARTED = search_indexer.SearchIndexerClient.ensure_started
@@ -429,7 +429,7 @@ def test_local_service_registry_serializes_starters_and_reuses_healthy_winner(tm
     service = search_indexer.PersistentSearchIndexer(socket_path)
     worker = threading.Thread(target=service.run, daemon=True)
     worker.start()
-    spec = LocalServiceSpec("indexd", "yolomux_lib.search.search_indexer", socket_path.name, search_indexer.INDEXER_PROTOCOL_VERSION)
+    spec = LocalServiceSpec("indexd", "yomux_lib.search.search_indexer", socket_path.name, search_indexer.INDEXER_PROTOCOL_VERSION)
     first = LocalServiceRegistry(tmp_path, spec, socket_path=socket_path)
     second = LocalServiceRegistry(tmp_path, spec, socket_path=socket_path)
 
@@ -475,7 +475,7 @@ def test_local_service_registry_starts_real_indexd_and_recovers_stale_socket_rec
     socket_path = tmp_path / "state directory with spaces" / "indexer.sock"
     registry = LocalServiceRegistry(
         socket_path.parent,
-        LocalServiceSpec("indexd", "yolomux_lib.search.search_indexer", socket_path.name, search_indexer.INDEXER_PROTOCOL_VERSION, idle_seconds=30.0),
+        LocalServiceSpec("indexd", "yomux_lib.search.search_indexer", socket_path.name, search_indexer.INDEXER_PROTOCOL_VERSION, idle_seconds=30.0),
         socket_path=socket_path,
     )
     registry.socket_path.parent.mkdir(parents=True, exist_ok=True)

@@ -7,18 +7,18 @@ import pytest
 from tests.helpers.prompt_corpus import PromptCorpus
 from tests.helpers.prompt_corpus import PromptCorpusPreset
 
-from yolomux_lib import tmux_utils
-from yolomux_lib.agent_tui import AgentTuiCapture
-from yolomux_lib.agent_tui import AgentTuiCursor
-from yolomux_lib.agent_tui import agent_client_version_slug
-from yolomux_lib.agent_tui import capture_agent_pane
-from yolomux_lib.agent_tui import classify_agent_pane
-from yolomux_lib.agent_tui import clear_composer
-from yolomux_lib.agent_tui import cursor_state
-from yolomux_lib.agent_tui import read_composer_state
-from yolomux_lib.agent_tui import send_prompt
-from yolomux_lib.common import AgentInfo
-from yolomux_lib.common import SessionInfo
+from yomux_lib import tmux_utils
+from yomux_lib.agent_tui import AgentTuiCapture
+from yomux_lib.agent_tui import AgentTuiCursor
+from yomux_lib.agent_tui import agent_client_version_slug
+from yomux_lib.agent_tui import capture_agent_pane
+from yomux_lib.agent_tui import classify_agent_pane
+from yomux_lib.agent_tui import clear_composer
+from yomux_lib.agent_tui import cursor_state
+from yomux_lib.agent_tui import read_composer_state
+from yomux_lib.agent_tui import send_prompt
+from yomux_lib.common import AgentInfo
+from yomux_lib.common import SessionInfo
 
 
 PROMPT_CORPUS_DIR = Path(__file__).resolve().parent / "fixtures" / "prompt_corpus"
@@ -114,7 +114,7 @@ def test_opencode_capture_library_records_reusable_formats_and_wrap_owner():
         {"styled_capture": "tmux text after capture-pane -e -J, retaining SGR attributes"},
         {"visible_text": "normalized plain text used by the detector"},
     ]
-    assert library["normalization_owner"].startswith("yolomux_lib/tmux/tmux_utils.py:")
+    assert library["normalization_owner"].startswith("yomux_lib/tmux/tmux_utils.py:")
     assert len(library["private_live_samples"]) >= 2
     for case in OPENCODE_CAPTURE_CASES:
         data = case["data"]

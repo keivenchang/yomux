@@ -14,18 +14,18 @@ function test(label, fn) {
   }
 }
 
-const menus = fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8');
-const terminalFacade = fs.readFileSync('static_src/js/yolomux/98_terminal_runtime_facade.js', 'utf8');
-const terminalBoot = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
-const terminalShortcuts = fs.readFileSync('static_src/js/yolomux/99_terminal_shortcuts_boot.js', 'utf8');
-const css = fs.readFileSync('static_src/css/yolomux/10_topbar_menus.css', 'utf8');
-const filePanelCss = fs.readFileSync('static_src/css/yolomux/60_editor_file_panels.css', 'utf8');
-const panel = fs.readFileSync('static/yolomux.js', 'utf8');
-const shell = fs.readFileSync('static_src/js/yolomux/78_panel_shell.js', 'utf8');
-const actions = fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8');
-const dockview = fs.readFileSync('static_src/js/yolomux/75_dockview_layout.js', 'utf8');
-const coreUtils = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
-const layoutState = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
+const menus = fs.readFileSync('static_src/js/yomux/30_app_menus.js', 'utf8');
+const terminalFacade = fs.readFileSync('static_src/js/yomux/98_terminal_runtime_facade.js', 'utf8');
+const terminalBoot = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
+const terminalShortcuts = fs.readFileSync('static_src/js/yomux/99_terminal_shortcuts_boot.js', 'utf8');
+const css = fs.readFileSync('static_src/css/yomux/10_topbar_menus.css', 'utf8');
+const filePanelCss = fs.readFileSync('static_src/css/yomux/60_editor_file_panels.css', 'utf8');
+const panel = fs.readFileSync('static/yomux.js', 'utf8');
+const shell = fs.readFileSync('static_src/js/yomux/78_panel_shell.js', 'utf8');
+const actions = fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8');
+const dockview = fs.readFileSync('static_src/js/yomux/75_dockview_layout.js', 'utf8');
+const coreUtils = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+const layoutState = fs.readFileSync('static_src/js/yomux/20_layout_state.js', 'utf8');
 
 test('File submenu restores the desktop triplet through the layout owner', () => {
   assert.match(menus, /function fileSurfaceMenuItems\(\)[\s\S]*Array\.isArray\(fileSurfaceItems\)[\s\S]*openFileSurfaceFromMenu\(item\)/);
@@ -104,7 +104,7 @@ test('Finder and Differ render shared selectors with independent selected-sessio
 
 test('Finder keeps its Session control visible outside Sync mode', () => {
   assert.match(panel, /function syncFileExplorerSessionControlVisibility\(scope = document\)[\s\S]*data-file-explorer-session-surface="finder"[\s\S]*control\.hidden = false[\s\S]*control\.setAttribute\('aria-hidden', 'false'\)/);
-  assert.match(fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8'), /file-explorer-root-mode-fixed/);
+  assert.match(fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8'), /file-explorer-root-mode-fixed/);
   assert.doesNotMatch(filePanelCss, /data-file-explorer-view="finder"\]\.file-explorer-root-mode-fixed \.file-explorer-mode-files-diff-only/);
   assert.match(panel, /fileExplorerDiffSessionControlHtml\(fileExplorerFinderTargetSession\(\), 'finder'\)/);
 });
@@ -118,7 +118,7 @@ test('Dockview file surfaces inherit the common outer header controls and never 
 });
 
 test('Finder rows require their own pointer-down before pointer-up can activate them', () => {
-  const finderSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
+  const finderSource = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
   assert.match(finderSource, /row\.onpointerup = event => \{[\s\S]*const start = row\.__fileTreePointerDown;[\s\S]*if \(!start\)[\s\S]*row\.__fileTreeSuppressClick = true/);
   assert.match(finderSource, /row\.onclick = event => \{[\s\S]*if \(row\.__fileTreeSuppressClick\)[\s\S]*return;/);
 });

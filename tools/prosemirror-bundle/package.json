@@ -3,7 +3,7 @@
   "name": "yolomux-prosemirror-bundle",
   "description": "Pinned dependency manifest for rebuilding static/prosemirror.js.",
   "scripts": {
-    "build": "esbuild prosemirror-entry.js --bundle --format=iife --global-name=YOLOmuxProseMirrorBundle --outfile=../../static/prosemirror.js --minify"
+    "build": "esbuild prosemirror-entry.js --bundle --format=iife --global-name=YOmuxProseMirrorBundle --outfile=../../static/prosemirror.js --minify"
   },
   "dependencies": {
     "esbuild": "0.28.2",

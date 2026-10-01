@@ -16,7 +16,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 IMAGE_SCHEMA_VERSION = 4
-IMAGE_REPOSITORY = "yolomux-test"
+IMAGE_REPOSITORY = "yomux-test"
 IMAGE_INPUT_FILES = (
     Path("docker") / "Dockerfile.test",
     Path("docker") / "run-tests.sh",
@@ -43,9 +43,10 @@ IMAGE_INPUT_FILES = (
 IMAGE_INPUT_DIRECTORIES = (Path("cmd"), Path("internal"))
 CONTAINER_MARKER_PATH = Path("/.dockerenv")
 CONTAINER_MOUNTINFO_PATH = Path("/proc/self/mountinfo")
-TEST_IMAGE_MARKER_PATH = Path("/opt/yolomux-test-image.marker")
-TEST_IMAGE_MARKER = "yolomux-test-image-v1"
-TEST_CONTAINER_ENV = "YOLOMUX_TEST_CONTAINER"
+TEST_IMAGE_MARKER_PATH = Path("/opt/yomux-test-image.marker")
+TEST_IMAGE_MARKER = "yomux-test-image-v1"
+TEST_CONTAINER_ENV = "YOMUX_TEST_CONTAINER"
+TEST_CONTAINER_LEGACY_ENV = "YOLOMUX_TEST_CONTAINER"
 
 
 def docker_daemon_is_rootless() -> bool:
@@ -66,8 +67,8 @@ def docker_daemon_is_rootless() -> bool:
 def image_runner_identity() -> tuple[str, str]:
     """Return the UID/GID used by Dockerfile.test's runner account."""
 
-    configured_uid = os.environ.get("YOLOMUX_IMAGE_RUNNER_UID")
-    configured_gid = os.environ.get("YOLOMUX_IMAGE_RUNNER_GID")
+    configured_uid = os.environ.get("YOMUX_IMAGE_RUNNER_UID", os.environ.get("YOLOMUX_IMAGE_RUNNER_UID"))
+    configured_gid = os.environ.get("YOMUX_IMAGE_RUNNER_GID", os.environ.get("YOLOMUX_IMAGE_RUNNER_GID"))
     if configured_uid is None or configured_gid is None:
         rootless = docker_daemon_is_rootless()
         default_uid = "1000" if rootless else str(os.getuid())
@@ -77,7 +78,7 @@ def image_runner_identity() -> tuple[str, str]:
     uid = default_uid if configured_uid is None else configured_uid
     gid = default_gid if configured_gid is None else configured_gid
     if not uid.isdigit() or not gid.isdigit():
-        raise ValueError("YOLOMUX_IMAGE_RUNNER_UID/GID must be numeric")
+        raise ValueError("YOMUX_IMAGE_RUNNER_UID/GID must be numeric")
     return uid, gid
 
 
@@ -215,7 +216,8 @@ def image_exists(name: str) -> bool:
 def running_inside_container() -> bool:
     """Return whether this process is already the containerized run."""
 
-    if os.environ.get(TEST_CONTAINER_ENV) != "1":
+    marker = os.environ.get(TEST_CONTAINER_ENV, os.environ.get(TEST_CONTAINER_LEGACY_ENV))
+    if marker != "1":
         return False
     if (
         not CONTAINER_MARKER_PATH.is_file()

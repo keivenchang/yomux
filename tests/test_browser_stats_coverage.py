@@ -17,13 +17,13 @@ from tests.browser_helpers.browser_layout import _live_runtime_boot_fixture_html
 from tests.helpers.browser_stats_coverage import _current_stats_fixture_html
 from tests.helpers.browser_stats_coverage import _start_current_stats
 from tests.helpers.browser_stats_coverage import _write_current_stats_fixture_assets
-from yolomux_lib import server as server_module
-from yolomux_lib import web as web_module
-from yolomux_lib.stats_current import client as stats_client
-from yolomux_lib.stats_current import http as stats_http
-from yolomux_lib.stats_current import resolution as stats_resolution
-from yolomux_lib.stats_current import service as stats_service
-from yolomux_lib.stats_current import storage
+from yomux_lib import server as server_module
+from yomux_lib import web as web_module
+from yomux_lib.stats_current import client as stats_client
+from yomux_lib.stats_current import http as stats_http
+from yomux_lib.stats_current import resolution as stats_resolution
+from yomux_lib.stats_current import service as stats_service
+from yomux_lib.stats_current import storage
 
 
 def test_current_stats_fixture_uses_canonical_resolution_policy():
@@ -462,7 +462,7 @@ def test_http_client_rpc_cache_and_browser_render_every_exact_matrix_cell(
             "/api/stats-snapshot?range_seconds=300&resolution=1&"
             "client_id=browser-current-fixture"
         )
-        request_headers = {"X-YOLOmux-Request-ID": "r-stats-reader-parity"}
+        request_headers = {"X-YOmux-Request-ID": "r-stats-reader-parity"}
         with urlopen(
             Request(
                 f"http://127.0.0.1:{http_server.server_address[1]}{query}",

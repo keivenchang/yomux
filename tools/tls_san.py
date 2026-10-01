@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""Discover local TLS SANs without importing stateful YOLOmux packages."""
+"""Discover local TLS SANs without importing stateful YOmux packages."""
 
 from __future__ import annotations
 

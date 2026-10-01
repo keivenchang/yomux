@@ -13,11 +13,11 @@ from typing import Any
 
 import pytest
 
-from yolomux_lib.infra.host_identity import HostIdentity
+from yomux_lib.infra.host_identity import HostIdentity
 from tests.helpers.local_service_records import FixtureHostIdentityBuilder
 
 
-CROSS_HOST_VIEWS_MODULE = "yolomux_lib.cross_host_views"
+CROSS_HOST_VIEWS_MODULE = "yomux_lib.cross_host_views"
 DATASET = "stats"
 SCHEMA_VERSION = 3
 COVERAGE_START = 100

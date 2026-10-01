@@ -52,12 +52,12 @@ from pathlib import Path
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from yolomux_lib.tmux.agent_tui import AgentPaneState
-from yolomux_lib.tmux.agent_tui import classify_agent_pane
-from yolomux_lib.approval.approvals import blank_prompt_state
-from yolomux_lib.approval.approvals import hybrid_approval_prompt_state
-from yolomux_lib.approval.approvals import transcript_approval_prompt_state
-from yolomux_lib.approval.prompt_detector import (
+from yomux_lib.tmux.agent_tui import AgentPaneState
+from yomux_lib.tmux.agent_tui import classify_agent_pane
+from yomux_lib.approval.approvals import blank_prompt_state
+from yomux_lib.approval.approvals import hybrid_approval_prompt_state
+from yomux_lib.approval.approvals import transcript_approval_prompt_state
+from yomux_lib.approval.prompt_detector import (
     _find_full_path,
     action_for_bash_prompt,
     action_for_prompt,
@@ -75,14 +75,14 @@ from yolomux_lib.approval.prompt_detector import (
     visible_choice_prompt_text,
     yes_is_selected,
 )
-from yolomux_lib.approval import yolo_rules
-from yolomux_lib.tmux.tmux_utils import tmux_capture_pane
-from yolomux_lib.tmux.tmux_utils import tmux_has_session
-from yolomux_lib.tmux.tmux_utils import tmux_list_sessions
-from yolomux_lib.tmux.tmux_utils import tmux_send_option
-from yolomux_lib.tmux.tmux_utils import tmux_exact_target_from_sessions  # noqa: F401 - CLI compatibility export
-from yolomux_lib.tmux.tmux_utils import tmux_session_names
-from yolomux_lib.tmux.tmux_utils import use_machine_tmux_for_operator_launch
+from yomux_lib.approval import yolo_rules
+from yomux_lib.tmux.tmux_utils import tmux_capture_pane
+from yomux_lib.tmux.tmux_utils import tmux_has_session
+from yomux_lib.tmux.tmux_utils import tmux_list_sessions
+from yomux_lib.tmux.tmux_utils import tmux_send_option
+from yomux_lib.tmux.tmux_utils import tmux_exact_target_from_sessions  # noqa: F401 - CLI compatibility export
+from yomux_lib.tmux.tmux_utils import tmux_session_names
+from yomux_lib.tmux.tmux_utils import use_machine_tmux_for_operator_launch
 
 _DETECTOR_REEXPORTS = (
     blank_prompt_state,
@@ -107,14 +107,14 @@ _DETECTOR_REEXPORTS = (
 
 log = logging.getLogger("auto_approve")
 
-# The approval-prompt detection pipeline now lives in yolomux_lib.approval.approvals (one shared library home,
+# The approval-prompt detection pipeline now lives in yomux_lib.approval.approvals (one shared library home,
 # so app.py / the worker no longer reach detection through this CLI script). Re-exported here so this
 # script's own CLI keeps the same module-level names.
-from yolomux_lib.approval.approvals import DEFAULT_PROMPT_SOURCE
-from yolomux_lib.approval.approvals import PROMPT_RETRY_SECONDS
-from yolomux_lib.approval.approvals import PROMPT_SOURCE_CHOICES
+from yomux_lib.approval.approvals import DEFAULT_PROMPT_SOURCE
+from yomux_lib.approval.approvals import PROMPT_RETRY_SECONDS
+from yomux_lib.approval.approvals import PROMPT_SOURCE_CHOICES
 
-# Re-export detector helpers from yolomux_lib.approval.prompt_detector so existing
+# Re-export detector helpers from yomux_lib.approval.prompt_detector so existing
 # callers can keep importing them from this script.
 
 
@@ -276,7 +276,7 @@ def _self_test() -> bool:
     """Run the pytest coverage that replaced the old inline self-test."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     env = os.environ.copy()
-    with tempfile.TemporaryDirectory(prefix=f"yolomux-test-{os.getpid()}-{os.getuid()}-", dir="/tmp") as raw_root:
+    with tempfile.TemporaryDirectory(prefix=f"yomux-test-{os.getpid()}-{os.getuid()}-", dir="/tmp") as raw_root:
         test_root = Path(raw_root)
         test_root.chmod(0o700)
         env.setdefault("PYTHONPYCACHEPREFIX", str(test_root / "pyc"))

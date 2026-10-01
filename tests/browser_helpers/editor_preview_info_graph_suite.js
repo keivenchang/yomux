@@ -8,7 +8,7 @@ const {
 } = require('./layout_test_helper');
 
 test('YO!info prefers the normalized work graph without duplicating a shared worktree branch inventory', () => {
-  const source = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+  const source = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
   assert.ok(source.includes('function infoHasWorkGraph(info = {})'), 'YO!info recognizes a schema-valid canonical graph explicitly');
   assert.ok(source.includes('if (!infoHasWorkGraph(info)) return [];'), 'YO!info returns no Git sources without a normalized graph');
   assert.equal(source.includes('info?.project'), false, 'YO!info has no legacy project projection fallback');

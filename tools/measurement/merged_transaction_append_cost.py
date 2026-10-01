@@ -65,8 +65,8 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from yolomux_lib.stats_current import storage
-from yolomux_lib.stats_current import resolution as res
+from yomux_lib.stats_current import storage
+from yomux_lib.stats_current import resolution as res
 
 PACIFIC = ZoneInfo("America/Los_Angeles")
 

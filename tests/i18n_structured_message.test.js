@@ -3,16 +3,16 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const {makeCatalogT, sourceBetween} = require('./browser_helpers/layout_test_helper');
 
-const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
-const panelSource = fs.readFileSync('static_src/js/yolomux/78_panel_shell.js', 'utf8');
+const coreSource = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+const panelSource = fs.readFileSync('static_src/js/yomux/78_panel_shell.js', 'utf8');
 const terminalSource = [
-  'static_src/js/yolomux/99_terminal_boot.js',
-  'static_src/js/yolomux/99_client_event_transport.js',
-  'static_src/js/yolomux/99_terminal_shortcuts_boot.js',
+  'static_src/js/yomux/99_terminal_boot.js',
+  'static_src/js/yomux/99_client_event_transport.js',
+  'static_src/js/yomux/99_terminal_shortcuts_boot.js',
 ].map(path => fs.readFileSync(path, 'utf8')).join('\n');
-const i18nSource = fs.readFileSync('static_src/js/yolomux/05_i18n.js', 'utf8');
-const fileSource = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
-const editorSource = fs.readFileSync('static_src/js/yolomux/92_codemirror_editor.js', 'utf8');
+const i18nSource = fs.readFileSync('static_src/js/yomux/05_i18n.js', 'utf8');
+const fileSource = fs.readFileSync('static_src/js/yomux/45_file_explorer_actions.js', 'utf8');
+const editorSource = fs.readFileSync('static_src/js/yomux/92_codemirror_editor.js', 'utf8');
 const catalog = {
   'events.message.test': 'localized event {count}',
   'yolo.status.test': 'localized YOLO {state}',
@@ -22,7 +22,7 @@ const context = {
   i18nInterpolate: (text, params) => String(text).replace(/\{(\w+)\}/g, (match, name) => Object.prototype.hasOwnProperty.call(params || {}, name) ? String(params[name]) : match),
   esc: value => String(value),
   formatEventTime: value => String(value),
-  t: makeCatalogT({'common.eventLabel': 'event', 'yolo.ownerFallback': 'another YOLOmux'}),
+  t: makeCatalogT({'common.eventLabel': 'event', 'yolo.ownerFallback': 'another YOmux'}),
 };
 vm.runInNewContext(
   `${sourceBetween(coreSource, 'function messageDescriptorText(', 'function clientPushCanSupplyData(')}\n${sourceBetween(terminalSource, 'function eventItemHtml(', 'function formatEventTime(')}\n${sourceBetween(terminalSource, 'function autoApproveOwnerLabel(', 'function renderAutoApproveButtons(')}\nthis.api = {eventItemHtml, structuredMessageText, structuredMessageSnapshot, userMessageSnapshot, userMessageText, autoApproveOwnerLabel};`,

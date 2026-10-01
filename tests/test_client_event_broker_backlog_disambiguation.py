@@ -65,8 +65,8 @@ import time
 
 import pytest
 
-import yolomux_lib.client_events as client_events
-from yolomux_lib.client_events import ClientEventBroker
+import yomux_lib.client_events as client_events
+from yomux_lib.client_events import ClientEventBroker
 
 PUBLISHER_COUNT = 55
 # Liveness guards. On a defective implementation the rendezvous they bound is impossible, so they

@@ -111,13 +111,14 @@ bazel_args=(
   --repository_cache="$bazel_repository_cache"
   --symlink_prefix="$bazel_run_root/bazel-"
   --repository_disable_download
-  --registry=file:///opt/yolomux-bazel-registry
+  --registry=file:///opt/yomux-bazel-registry
   --jobs="$jobs"
   --test_output=errors
   --test_summary=terse
+  --test_env=YOMUX_TEST_CONTAINER=1
   --test_env=YOLOMUX_TEST_CONTAINER=1
-  --action_env=GOMODCACHE=/opt/yolomux-go-mod-cache
-  --action_env=YOLOMUX_BAZEL_GOMODCACHE=/opt/yolomux-go-mod-cache
+  --action_env=GOMODCACHE=/opt/yomux-go-mod-cache
+  --action_env=YOMUX_BAZEL_GOMODCACHE=/opt/yomux-go-mod-cache
   --action_env=LANG=C.UTF-8
   --action_env=LC_ALL=C.UTF-8
   --action_env=GOPATH="$bazel_run_root/go-path"
@@ -128,7 +129,7 @@ bazel_args=(
   --action_env=GO111MODULE=on
   --action_env=GOTOOLCHAIN=local
   --repo_env=GO_REPOSITORY_USE_HOST_MODCACHE=1
-  --repo_env=GOMODCACHE=/opt/yolomux-go-mod-cache
+  --repo_env=GOMODCACHE=/opt/yomux-go-mod-cache
   --repo_env=GOPATH="$bazel_run_root/go-path"
   --repo_env=GOCACHE="$bazel_run_root/go-cache"
   --repo_env=GOPROXY=off

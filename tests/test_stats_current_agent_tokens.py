@@ -4,7 +4,7 @@
 
 from types import SimpleNamespace
 
-from yolomux_lib.stats_current import agent_tokens, opencode, storage
+from yomux_lib.stats_current import agent_tokens, opencode, storage
 
 
 class _Scanner:

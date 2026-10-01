@@ -1,4 +1,4 @@
-from yolomux_lib.agent_tui import AgentTuiCapture
+from yomux_lib.agent_tui import AgentTuiCapture
 
 from tools.tmux_wall import PaneInfo
 from tools.tmux_wall import Handler
@@ -145,7 +145,7 @@ def test_tmux_wall_locale_reuses_canonical_system_language_resolution():
 
 def test_tmux_wall_catalog_and_html_use_server_locale_parent(monkeypatch):
     translations = {
-        "tmuxWall.title": "لوحة <YOLOmux>",
+        "tmuxWall.title": "لوحة <YOmux>",
         "tmuxWall.subtitle": "لقطات حية",
         "tmuxWall.action.pause": "إيقاف مؤقت",
         "common.refresh": "تحديث",
@@ -168,10 +168,10 @@ def test_tmux_wall_catalog_and_html_use_server_locale_parent(monkeypatch):
 
     assert catalog["tmuxWall.action.pause"] == "إيقاف مؤقت"
     assert '<html lang="ar" dir="rtl">' in body
-    assert "لوحة &lt;YOLOmux&gt;" in body
+    assert "لوحة &lt;YOmux&gt;" in body
     assert "إيقاف مؤقت" in body
     assert 'id="tmux-wall-bootstrap"' in body
-    assert "\\u003cYOLOmux\\u003e" in body
+    assert "\\u003cYOmux\\u003e" in body
 
 
 def test_state_message_fields_localize_stable_facts_and_keep_raw_diagnostics():

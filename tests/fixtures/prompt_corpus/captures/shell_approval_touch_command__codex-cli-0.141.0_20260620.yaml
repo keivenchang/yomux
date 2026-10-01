@@ -156,11 +156,11 @@ operations:
   type: wait_text
 raw_capture: |2
 
-  › Ask me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should we use?
+  › Ask me this question and wait for my answer instead of choosing yourself: Which YOmux verifier mode should we use?
     1. Pane capture 2. Transcript capture
 
 
-  • Which YOLOmux verifier mode should we use?
+  • Which YOmux verifier mode should we use?
 
     1. Pane capture
     2. Transcript capture
@@ -191,11 +191,11 @@ raw_capture: |2
 source_staging_file: staging/agent_tui__codex-cli-0.141.0_20260620T110706Z.yaml
 styled_capture: |2
 
-  › Ask me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should we use?
+  › Ask me this question and wait for my answer instead of choosing yourself: Which YOmux verifier mode should we use?
     1. Pane capture 2. Transcript capture
 
 
-  • Which YOLOmux verifier mode should we use?
+  • Which YOmux verifier mode should we use?
 
     1. Pane capture
     2. Transcript capture

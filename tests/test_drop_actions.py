@@ -1,7 +1,7 @@
 import subprocess
 
-from yolomux_lib import drop_actions
-from yolomux_lib import filesystem
+from yomux_lib import drop_actions
+from yomux_lib import filesystem
 
 
 def test_drop_action_server_head_and_info_use_validated_files(monkeypatch, tmp_path):

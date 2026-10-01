@@ -20,15 +20,15 @@ from typing import NamedTuple
 import pytest
 
 from tests import latency_calibration
-from yolomux_lib.chat_store import CHAT_FTS_MODE
-from yolomux_lib.chat_store import CHAT_HARD_ROW_LIMIT
-from yolomux_lib.chat_store import CHAT_LIKE_FALLBACK_MODE
-from yolomux_lib.chat_store import CHAT_MESSAGE_BODY_MAX_BYTES
-from yolomux_lib.chat_store import CHAT_SCHEMA_VERSION
-from yolomux_lib.chat_store import CHAT_TYPING_LEASE_SECONDS
-from yolomux_lib.chat_store import ChatStore
-from yolomux_lib.chat_store import ChatStoreMigrationError
-from yolomux_lib.chat_store import ChatStoreValidationError
+from yomux_lib.chat_store import CHAT_FTS_MODE
+from yomux_lib.chat_store import CHAT_HARD_ROW_LIMIT
+from yomux_lib.chat_store import CHAT_LIKE_FALLBACK_MODE
+from yomux_lib.chat_store import CHAT_MESSAGE_BODY_MAX_BYTES
+from yomux_lib.chat_store import CHAT_SCHEMA_VERSION
+from yomux_lib.chat_store import CHAT_TYPING_LEASE_SECONDS
+from yomux_lib.chat_store import ChatStore
+from yomux_lib.chat_store import ChatStoreMigrationError
+from yomux_lib.chat_store import ChatStoreValidationError
 
 
 EMOJI_MATRIX = (
@@ -45,7 +45,7 @@ EMOJI_MATRIX = (
 
 
 # The file that actually defines ChatStore, derived from the class under test rather than
-# named by hand. `yolomux_lib/chat_store.py` is a six-line compatibility alias that rebinds
+# named by hand. `yomux_lib/chat_store.py` is a six-line compatibility alias that rebinds
 # sys.modules, so a hand-written path there scans a file containing no SQL at all and any
 # query-shape assertion made against it passes for free.
 CHAT_STORE_SOURCE_PATH = Path(inspect.getsourcefile(ChatStore)).resolve()
@@ -738,7 +738,7 @@ def test_chat_store_hard_ceiling_payload_and_bounded_work(tmp_path):
 def test_chat_store_paging_sql_reads_the_real_implementation_and_avoids_offset():
     """No OFFSET paging, asserted against the file that actually defines ChatStore.
 
-    The previous form of this check read the relative path `yolomux_lib/chat_store.py`,
+    The previous form of this check read the relative path `yomux_lib/chat_store.py`,
     which is a six-line `sys.modules` alias containing no SQL, so it could not fail and it
     additionally depended on pytest's working directory. The source path here is derived
     from the class under test, and the guard below fails if that file ever stops containing

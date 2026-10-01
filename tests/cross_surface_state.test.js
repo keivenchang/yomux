@@ -65,7 +65,7 @@ async function runCrossSurfaceStateSuite() {
     assert.deepEqual(cacheApi.sessionFilesCacheSizesForTest(), {finder: 1, differ: 1});
     cacheApi.setRepoDiffRefsForTest('/repo/app', 'v0.7.4', 'current');
     assert.deepEqual(cacheApi.sessionFilesCacheSizesForTest(), {finder: 1, differ: 0}, 'changing Differ refs invalidates only the Differ cache');
-    assert.match(fs.readFileSync('static_src/js/yolomux/86_changes_00_refs.js', 'utf8'), /function setRepoDiffRefs[\s\S]*invalidateSessionFilesCaches\('differ'\)[\s\S]*fetchSessionFiles\(\{destination: 'differ'/, 'the ref transition refreshes only Differ');
+    assert.match(fs.readFileSync('static_src/js/yomux/86_changes_00_refs.js', 'utf8'), /function setRepoDiffRefs[\s\S]*invalidateSessionFilesCaches\('differ'\)[\s\S]*fetchSessionFiles\(\{destination: 'differ'/, 'the ref transition refreshes only Differ');
   });
 
   test('initial URL Git history state is applied before layout construction without a temporal-dead-zone failure', () => {
@@ -242,23 +242,23 @@ async function runCrossSurfaceStateSuite() {
   });
 
   test('hover surfaces share the 1300ms open and 120ms close/follow pair', () => {
-    const source = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8')
-      + fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8')
-      + fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8')
-      + fs.readFileSync('static_src/js/yolomux/60_popovers_tabs.js', 'utf8')
+    const source = fs.readFileSync('static_src/js/yomux/00_bootstrap_state.js', 'utf8')
+      + fs.readFileSync('static_src/js/yomux/30_app_menus.js', 'utf8')
+      + fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8')
+      + fs.readFileSync('static_src/js/yomux/60_popovers_tabs.js', 'utf8')
 ;
     assert.ok(source.includes("popoverShowDelayMs = initialSetting('performance.popover_show_delay_ms')"), 'one JS owner reads the shared hover-open setting');
     assert.ok(source.includes("popoverHideDelayMs = initialSetting('performance.popover_hide_delay_ms')"), 'one JS owner reads the shared hover-close/follow setting');
     for (const retiredName of ['hoverCloseDelayMs', 'menuHoverOpenDelayMs', 'menuHoverCloseDelayMs', 'tabPopoverShowDelayMs', 'tabPopoverFollowDelayMs', 'fileImagePreviewMinShowDelayMs']) {
       assert.equal(source.includes(retiredName), false, `${retiredName} cannot reintroduce a per-surface hover delay`);
     }
-    const css = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
+    const css = fs.readFileSync('static_src/css/yomux/00_tokens_base.css', 'utf8');
     assert.ok(css.includes('--popover-show-delay: 1300ms;'), 'CSS defaults to the shared open delay');
     assert.ok(css.includes('--popover-hide-delay: 120ms;'), 'CSS defaults to the shared close/follow delay');
-    const runtime = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
+    const runtime = fs.readFileSync('static_src/js/yomux/50_editor_settings_runtime.js', 'utf8');
     assert.ok(runtime.includes("root.setProperty('--popover-show-delay', `${popoverShowDelayMs}ms`);"), 'settings keep the CSS open-delay token synchronized');
     assert.ok(runtime.includes("root.setProperty('--popover-hide-delay', `${popoverHideDelayMs}ms`);"), 'settings keep the CSS close-delay token synchronized');
-    const popoverCss = fs.readFileSync('static_src/css/yolomux/20_sessions_popovers.css', 'utf8') + fs.readFileSync('static_src/css/yolomux/40_layout_panes_tabs.css', 'utf8');
+    const popoverCss = fs.readFileSync('static_src/css/yomux/20_sessions_popovers.css', 'utf8') + fs.readFileSync('static_src/css/yomux/40_layout_panes_tabs.css', 'utf8');
     assert.equal(popoverCss.includes('ease var(--popover-show-delay)'), false, 'CSS does not add a second hover-open wait');
     assert.equal(popoverCss.includes('ease var(--popover-hide-delay)'), false, 'CSS does not add a second hover-close wait');
   });
@@ -659,8 +659,8 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(collapsedEditorRefs.includes('/HEAD origin/main main'), false, 'Diff Editor ref toolbar does not show branch aliases in the selected control');
     assert.deepEqual(api.diffRefPopoverSubjectPartsForTest(collapsedHeadRefs[0]), {description: '[origin/main] [main] current head commit', pr: ''}, 'HEAD picker descriptions expose all same-commit branch aliases as bracketed labels');
     const manyDiffRefs = Array.from({length: 120}, (_, index) => ({ref: `${String(index).padStart(7, 'a')}abcdef`, short: `r${index}`, subject: `commit ${index}`}));
-    changedFilesSource = fs.readFileSync('static/yolomux.js', 'utf8');
-    fileExplorerSource = (fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8') + fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8'));
+    changedFilesSource = fs.readFileSync('static/yomux.js', 'utf8');
+    fileExplorerSource = (fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8') + fs.readFileSync('static_src/js/yomux/45_file_explorer_actions.js', 'utf8'));
     assert.equal(api.diffRefPopoverItems('', {compact: true, suggestions: manyDiffRefs, showAll: true}).length, 12, 'compact diff-ref popups are capped to avoid huge menus');
     assert.equal(api.diffRefPopoverItems('', {compact: false, suggestions: manyDiffRefs, showAll: true}).length, 18, 'full diff-ref popups are capped to a compact menu size');
     assert.deepEqual(api.diffRefPopoverItems('commit 117', {compact: true, suggestions: manyDiffRefs}).map(item => item.subject), ['commit 117'], 'typing filters the diff-ref popup to matching refs/subjects');
@@ -706,7 +706,7 @@ async function runCrossSurfaceStateSuite() {
     for (const listener of api.documentListenersForTest('scroll')) listener({target: new TestElement('outside')});
     assert.equal(api.diffRefPopoverStateForTest().input, null, 'scroll cleanup drops a detached owning input');
     for (const name of ['diffRefPopoverInput', 'diffRefPopoverItemsCurrent', 'diffRefPopoverActiveIndex', 'diffRefPopoverListenersInstalled']) {
-      assert.equal(fs.readFileSync('static/yolomux.js', 'utf8').includes(name), false, `${name} remains retired`);
+      assert.equal(fs.readFileSync('static/yomux.js', 'utf8').includes(name), false, `${name} remains retired`);
     }
     assert.equal(changedFilesSource.includes('.showPicker('), false, 'diff refs do not use the browser-native popup API');
     api.setFileExplorerSessionFilesPayloadForTest({
@@ -1358,8 +1358,8 @@ async function runCrossSurfaceStateSuite() {
     const transcriptPrHtml = api.paneInfoBarMetaHtml('transcript-pr', transcriptPrInfo);
     assert.ok(transcriptPrHtml.includes('#11251') && transcriptPrHtml.includes('reasoning: force nonempty content'), 'Info Bar preserves the canonical transcript-selected PR when a stale active-window path has no PR');
     assert.equal(transcriptPrHtml.includes('DIS-2323__cleanup-llm-tests'), false, 'Info Bar does not let a stale Tabber/window path replace the transcript PR context');
-    c9Src = fs.readFileSync('static/yolomux.js', 'utf8');
-    const c9Css = fs.readFileSync('static/yolomux.css', 'utf8');
+    c9Src = fs.readFileSync('static/yomux.js', 'utf8');
+    const c9Css = fs.readFileSync('static/yomux.css', 'utf8');
     assert.ok(c9Src.includes('function showRepoChipMenu('), 'C9: the repo count opens a popover');
     assert.ok(/showRepoChipMenu\([\s\S]*?sessionRepoDisplayRoot\.set\(session, root\)/.test(c9Src), 'C9: clicking a repo row switches the Info Bar to that repo (the <N/M> display)');
     assert.ok(multiMetaHtml.includes('class="btn-base meta-repo-cycle"'), 'CSS-2: repo arrow buttons use the shared button reset');
@@ -1393,7 +1393,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(c10Body.includes('globalShortcutTargetAllowsAppAction(event.target)'), 'C10: the shortcut is suppressed in text/rename inputs');
     assert.ok(c10Body.includes('fileExplorerSelectedPaths') && c10Body.includes('deleteFileTreePath('), 'C10: it deletes the selected paths via the existing delete flow');
     assert.ok(c10Body.includes('readOnlyMode'), 'C10: readonly is blocked through the existing delete guard');
-    const changedFilesCss = fs.readFileSync('static/yolomux.css', 'utf8');
+    const changedFilesCss = fs.readFileSync('static/yomux.css', 'utf8');
     assert.ok(/\.file-tree-git-status\s*\{[\s\S]*width:\s*13px/.test(changedFilesCss), 'modified-file status chips use the shared skinny Finder badge');
     // #46: Modified-files rows match the Finder file tree — the row uses the file-explorer font size and
     // the filename carries no semibold/bold weight (regular, not big bold white).
@@ -1446,7 +1446,7 @@ async function runCrossSurfaceStateSuite() {
     // #149/#150: the edit view no longer auto-loads the diff or paints inline diff decorations.
     // Changes are shown ONLY in the explicit diff VIEW (the MergeView). The inline-decoration helpers and
     // the edit-mode auto-load are removed; parseUnifiedDiffLineClasses/codeMirrorDiffLineExtension are gone.
-    const editSrc = fs.readFileSync('static/yolomux.js', 'utf8');
+    const editSrc = fs.readFileSync('static/yomux.js', 'utf8');
     assert.equal(/function parseUnifiedDiffLineClasses/.test(editSrc), false, '#150: parseUnifiedDiffLineClasses is deleted (no inline diff decorations)');
     assert.equal(/function codeMirrorDiffLineExtension/.test(editSrc), false, '#150: codeMirrorDiffLineExtension is deleted');
     assert.equal(/state\.diffLineClasses/.test(editSrc), false, '#150: the dead state.diffLineClasses is removed');
@@ -1455,7 +1455,7 @@ async function runCrossSurfaceStateSuite() {
     filesTab = api.fileExplorerPaneTabHtml();
     assert.equal(api.fileExplorerLabel(), 'File Explorer');
     assert.ok(filesTab.includes('File Explorer'));
-    appSource = fs.readFileSync('static/yolomux.js', 'utf8');
+    appSource = fs.readFileSync('static/yomux.js', 'utf8');
     const parseOverviewStops = gradient => {
       const stops = [];
       const pattern = /(#[0-9a-f]{6}|transparent)\s+([0-9.]+)%\s+([0-9.]+)%/gi;
@@ -1505,7 +1505,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(appSource.includes('const unifiedMergeOptions = {') && appSource.includes('original,'), 'unified diff options carry the original document for deleted-line widgets');
     assert.ok(appSource.includes('doc: currentText,'), 'unified diff edits the modified/current document');
     assert.ok(appSource.includes('api.unifiedMergeView(unifiedMergeOptions)'), 'unified diff overlays the original via unifiedMergeView, so deleted rows are unnumbered read-only widgets');
-    const diffGutterCss = fs.readFileSync('static/yolomux.css', 'utf8');
+    const diffGutterCss = fs.readFileSync('static/yomux.css', 'utf8');
     assert.equal(/\.cm-deletedLineGutter\s*\{[^}]*color:\s*transparent/.test(diffGutterCss), false, '#17: deleted-line numbers are suppressed natively by unifiedMergeView, not by a transparent-text gutter hack');
     // C6: editor diffs carry the FILE'S REPO refs (per-repo), not a single global pair.
     // When explicit fromRef/toRef are provided (e.g. from the Modified-files panel click), they take precedence;
@@ -1621,7 +1621,7 @@ async function runCrossSurfaceStateSuite() {
 
   test('cross-surface host state 08: Screenshot #48 repro shape from: git diff 521bbfd 05f22a8 --...', () => {
     // Screenshot #48 repro shape from:
-    //   git diff 521bbfd 05f22a8 -- static_src/js/yolomux/99_terminal_boot.js
+    //   git diff 521bbfd 05f22a8 -- static_src/js/yomux/99_terminal_boot.js
     // The hunk starts at line 164, removes 30 rows, then adds 80 current-side rows.
     const screenshotPrefix = makeOverviewFixtureLines(163, 'same');
     const screenshotRemoved = makeOverviewFixtureLines(30, 'removed');
@@ -2343,8 +2343,8 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(delayHtml.includes('data-preference-section="performance"'), 'delay search shows Performance');
     assert.equal(/data-preference-section="performance"[\s\S]*preferences-settings" hidden/.test(delayHtml), false, 'search expands matching collapsed sections');
     assert.ok(delayHtml.includes('Server SSE: editor file-change poll'), 'delay search surfaces server SSE timing settings');
-    preferencesCss = fs.readFileSync('static/yolomux.css', 'utf8');
-    const preferencesJs = fs.readFileSync('static/yolomux.js', 'utf8');
+    preferencesCss = fs.readFileSync('static/yomux.css', 'utf8');
+    const preferencesJs = fs.readFileSync('static/yomux.js', 'utf8');
     assert.ok(preferencesCss.startsWith('/* GENERATED by tools/static_build.py from static_src/'), 'generated CSS has a do-not-edit header');
     assert.ok(/\.preferences-section-toggle\s*\{[\s\S]*color:\s*var\(--pane-tab-text\)[\s\S]*background:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(preferencesCss), 'Preferences section headers use the same background token as the pane tab container');
     assert.ok(/\.preferences-search-button\s*\{[\s\S]*font:\s*700 var\(--ui-font-size-sm\)\/1\.1 var\(--ui-font\)/.test(preferencesCss), 'Preferences search button uses the normal UI font, not condensed tab text');
@@ -2370,7 +2370,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(/\.file-explorer-mode-(?:switcher|toggle|label)/.test(preferencesCss), false, 'retired in-panel mode-switcher CSS is removed now that Finder, Differ, and Tabber are pane tabs');
     assert.ok(/\.file-explorer-folder-icon\s*\{[\s\S]*border:\s*1\.5px solid currentColor[\s\S]*\.file-explorer-folder-icon::before/.test(preferencesCss), 'Finder new-folder button renders a folder icon instead of a square glyph');
     assert.ok(/\.file-explorer-path,[\s\S]*?\.file-explorer-path-inline\s*\{[\s\S]*color:\s*var\(--text\)[\s\S]*border:\s*1px solid var\(--line\)/.test(preferencesCss), 'Finder path uses normal text contrast and visible input chrome');
-    const finderPanelBundle = fs.readFileSync('static/yolomux.js', 'utf8');
+    const finderPanelBundle = fs.readFileSync('static/yomux.js', 'utf8');
     const finderPanelStart = finderPanelBundle.indexOf('function createFileExplorerPanel');
     const finderPanelSource = finderPanelBundle.slice(
       finderPanelStart,
@@ -2436,7 +2436,7 @@ async function runCrossSurfaceStateSuite() {
     {
       // #261: a 0-20px pane spacing setting drives the inter-pane gap; the active pane's green box width
       // == that gap (--pane-split-gap), so it's 0 at spacing 0 and fills the active side up to the line.
-      const paneSpacingSrc = fs.readFileSync('static/yolomux.js', 'utf8');
+      const paneSpacingSrc = fs.readFileSync('static/yomux.js', 'utf8');
       assert.ok(paneSpacingSrc.includes("numberSetting('appearance.pane_spacing', 3)"), 'runtime reads appearance.pane_spacing with a 3px fallback (matches the backend default)');
       assert.ok(paneSpacingSrc.includes("setProperty('--pane-split-gap'"), '#261: pane spacing drives the --pane-split-gap inter-pane gap');
       assert.equal(paneSpacingSrc.includes('paneSpacing / 5'), false, '#261: the active green box width is NOT a separate scaled value — it uses --pane-split-gap directly');
@@ -2471,15 +2471,15 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(preferencesCss.includes('--pane-tab-panel-head-text: var(--pane-tab-text)'), 'light mode status text inherits the shared dark tab foreground');
     assert.ok(/\.tabs \.pane-actions,\s*\n\.tabs \.panel-tab-overflow\s*\{[\s\S]*color:\s*var\(--pc-control-fg\)/.test(preferencesCss), 'pane actions use the shared platform-control foreground');
     assert.ok(/\.meta-path\s*\{[\s\S]*color:\s*var\(--pane-meta-path\)/.test(preferencesCss), 'status path color is theme-tokenized');
-    assert.ok(/function projectMetaPathHtml\(path\)[\s\S]*data-info-open-path/.test(fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8')), 'Info Bar paths use the shared Finder reveal action');
-    assert.ok(/body\.theme-light\s*\{[\s\S]*--drop-outline:\s*var\(--drop-outline-light\)/.test(fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8')), 'light editor panes switch drop-target outlines to readable blue through root theme tokens');
+    assert.ok(/function projectMetaPathHtml\(path\)[\s\S]*data-info-open-path/.test(fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8')), 'Info Bar paths use the shared Finder reveal action');
+    assert.ok(/body\.theme-light\s*\{[\s\S]*--drop-outline:\s*var\(--drop-outline-light\)/.test(fs.readFileSync('static_src/css/yomux/00_tokens_base.css', 'utf8')), 'light editor panes switch drop-target outlines to readable blue through root theme tokens');
     assert.ok(/\.file-editor-popout-preview-panel,[\s\S]*?\.file-editor-save-panel\s*\{[^}]*height:\s*20px/.test(preferencesCss), 'pop-out preview button shares the compact editor toolbar button sizing rule');
     assert.ok(/\.file-editor-panel-actions\s*\{[\s\S]*background:\s*color-mix\(in srgb, var\(--panel2\)/.test(preferencesCss), 'editor actions render as one compact gray toolbar');
     assert.ok(/\.file-editor-gutter-panel,\s*\n\.file-editor-wrap-panel,\s*\n\.file-editor-find-panel,\s*\n\.file-editor-diff-panel/.test(preferencesCss), 'diff button shares the compact editor toolbar sizing');
     assert.ok(preferencesCss.includes('--code-diff-add: #56d364'), 'dark diff add base is a brighter vivid green');
     assert.ok(preferencesCss.includes('--code-diff-remove: #ff7b72'), 'dark diff remove base is a brighter vivid red');
-    assert.equal(preferencesCss.includes('--code-diff-add: #98c379'), false, 'muted one-dark diff green must not return as the YOLOmux dark default');
-    assert.equal(preferencesCss.includes('--code-diff-remove: #e06c75'), false, 'muted one-dark diff red must not return as the YOLOmux dark default');
+    assert.equal(preferencesCss.includes('--code-diff-add: #98c379'), false, 'muted one-dark diff green must not return as the YOmux dark default');
+    assert.equal(preferencesCss.includes('--code-diff-remove: #e06c75'), false, 'muted one-dark diff red must not return as the YOmux dark default');
     assert.ok(preferencesCss.includes('--diff-remove-line-bg: #540c06'), '#250: dark diff removed-line fill matches the sampled deep maroon guide');
     assert.ok(preferencesCss.includes('--diff-add-line-bg: #2b5d16'), '#250: dark diff added-line fill matches the sampled deep green guide');
     assert.ok(preferencesCss.includes('.file-editor-icon-popout-preview'), 'preview pop-out has a distinct icon');
@@ -2551,8 +2551,8 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(/\.panel:hover \.terminal \.xterm-viewport[\s\S]*?\{[\s\S]*?scrollbar-color:/.test(preferencesCss), false, 'terminal no longer has a local hover scrollbar color rule');
     assert.ok(/--diff-add-line-bg:\s*#2b5d16/.test(preferencesCss), '#250: diff added lines use the sampled opaque green fill over the dark bg');
     assert.ok(/\.file-editor-diff-codemirror \.cm-content \.cm-activeLine\s*\{[^}]*background:\s*var\(--diff-full-line-bg,\s*transparent\)/.test(preferencesCss), 'diff active lines keep the same red/green fill as their neighboring changed lines');
-    assert.ok(/body\.theme-light\s*\{[\s\S]*--diff-add-line-bg:\s*#bfeac8/.test(fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8')), 'light diff added lines use a more visible green fill through root theme tokens');
-    assert.ok(/body\.theme-light\s*\{[\s\S]*--diff-remove-line-bg:\s*#f3b7b7/.test(fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8')), 'light diff removed lines use a more visible red fill through root theme tokens');
+    assert.ok(/body\.theme-light\s*\{[\s\S]*--diff-add-line-bg:\s*#bfeac8/.test(fs.readFileSync('static_src/css/yomux/00_tokens_base.css', 'utf8')), 'light diff added lines use a more visible green fill through root theme tokens');
+    assert.ok(/body\.theme-light\s*\{[\s\S]*--diff-remove-line-bg:\s*#f3b7b7/.test(fs.readFileSync('static_src/css/yomux/00_tokens_base.css', 'utf8')), 'light diff removed lines use a more visible red fill through root theme tokens');
     assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-a \.cm-changedLine,[\s\S]*?\.cm-deletedLine \*\s*\{[\s\S]*color:\s*#3b0a0a/.test(preferencesCss), 'light diff removed lines and descendants share one dark-red text rule on the stronger red fill');
     assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-a \.cm-changedText,[\s\S]*?\.cm-deletedChunk \.cm-deletedText\s*\{[\s\S]*color:\s*var\(--danger-light-text\)[\s\S]*background:\s*#f4b7b7/.test(preferencesCss), 'light diff removed inline text uses the danger text token on a distinct red fill (image 055)');
     assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-b \.cm-changedText\s*\{[\s\S]*color:\s*var\(--success-text-strong\)[\s\S]*background:\s*#b9e7c2/.test(preferencesCss), 'light diff added inline text uses dark green on a distinct green fill');
@@ -2588,9 +2588,9 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(/\.cm-insertedLine\b/.test(fullBleedRule[1]), false, 'the full-bleed box-shadow rule must not list the inline cm-insertedLine mark (it buries wrapped rows)');
     assert.equal(/\.cm-deletedLine\b/.test(fullBleedRule[1]), false, 'the full-bleed box-shadow rule must not list the inline cm-deletedLine mark (it buries wrapped rows)');
     // #44: diffs render as full-line red/green only (highlightChanges:false in both merge views). The old
-    // YOLOmux intra-line token overlay stays gone; CodeMirror still emits its built-in changed/deleted
+    // YOmux intra-line token overlay stays gone; CodeMirror still emits its built-in changed/deleted
     // text spans, which we only style for light-theme contrast.
-    diffBundle = fs.readFileSync('static/yolomux.js', 'utf8');
+    diffBundle = fs.readFileSync('static/yomux.js', 'utf8');
     assert.equal((diffBundle.match(/highlightChanges: false/g) || []).length, 2, '#44: both merge views disable intra-line change highlighting');
     assert.equal(diffBundle.includes('highlightChanges: true'), false, '#44: no merge view re-enables intra-line highlighting');
     assert.equal(preferencesCss.includes('cm-insertedText'), false, '#44: the dead intra-line token rules are removed');
@@ -2629,7 +2629,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(modifiedPreferencesHtml.includes('resets every Preferences value'), 'preferences reset carries a broad warning');
     assert.ok(modifiedPreferencesHtml.includes('data-preferences-reset-all'), 'preferences expose a global reset action after a setting changes');
     assert.ok(/\.preferences-global-reset \.preferences-reset-all\s*\{[\s\S]*?color:\s*var\(--danger-action-text\)[\s\S]*?background:\s*var\(--30-preferences-changes-preferences-global-reset-bg-73\)[\s\S]*?border-color:\s*var\(--30-preferences-changes-preferences-global-reset-border-74\)[\s\S]*?font:\s*600 var\(--ui-font-size-sm\)\/1\.1 var\(--ui-font\)/.test(preferencesCss), 'preferences global reset button uses tokenized danger action colors and normal UI text');
-    const resetTokenCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
+    const resetTokenCss = fs.readFileSync('static_src/css/yomux/00_tokens_base.css', 'utf8');
     assert.ok(resetTokenCss.includes('--30-preferences-changes-preferences-global-reset-bg-73: var(--danger-strong);') && resetTokenCss.includes('--30-preferences-changes-preferences-global-reset-border-74: var(--danger-action-light-border);'), 'preferences global reset button uses light-specific danger surface tokens');
     assert.equal(preferencesHtml.includes('data-preferences-reset-confirm'), false, 'preferences do not show the destructive confirmation until requested');
     const resetConfirmHtml = api.preferencesResetConfirmHtmlForTest();
@@ -2723,7 +2723,7 @@ async function runCrossSurfaceStateSuite() {
     // Cursor color is a preference shared by the active terminal cursor, editor cursor, and pane scrollbar thumb.
     assert.ok(preferencesHtml.includes('data-setting-path="appearance.editor_cursor_color"'), 'preferences expose the editor cursor color setting');
     {
-      const cursorSrc = fs.readFileSync('static/yolomux.js', 'utf8');
+      const cursorSrc = fs.readFileSync('static/yomux.js', 'utf8');
       assert.ok(/const DEFAULT_CURSOR_COLOR\s*=\s*'yellow'/.test(cursorSrc), 'cursor color: yellow remains the named default');
       assert.ok(/const NEON_CURSOR_COLOR_CHOICES\s*=\s*\['laser-lime', 'neon-green', 'neon-cyan', 'neon-magenta', 'neon-orange'\]/.test(cursorSrc), 'cursor color: neon choices are cursor-only, not active-color choices');
       assert.ok(/'laser-lime':\s*\{cursorLabelKey:\s*'pref\.appearance\.editor_cursor_color\.laser-lime',\s*cursor:\s*\{dark:\s*'#ccff00',\s*light:\s*'#6b8f00'\}\}/.test(cursorSrc), 'cursor color: Laser lime is the first neon cursor preset with a readable light-mode variant');
@@ -2817,7 +2817,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/\.keyboard-shortcuts-body\s*\{[\s\S]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(min\(260px,\s*100%\),\s*1fr\)\)[\s\S]*gap:\s*var\(--space-8\) var\(--space-10\)[\s\S]*padding:\s*var\(--space-8\) var\(--space-10\) var\(--space-10\)/.test(preferencesCss), 'Keyboard Shortcuts and Legends packs balanced columns into three or four compact tracks');
     assert.ok(/\.keyboard-shortcuts-column\s*\{[\s\S]*display:\s*grid[\s\S]*align-content:\s*start[\s\S]*gap:\s*var\(--space-8\)/.test(preferencesCss), 'Keyboard Shortcuts and Legends stacks sections inside each column instead of leaving sparse row holes');
     assert.ok(/\.keyboard-shortcuts-section h3\s*\{[\s\S]*color:\s*var\(--active-accent-bright\)/.test(preferencesCss), 'Keyboard shortcuts section headers follow the active theme color');
-    const topbarCss = fs.readFileSync('static_src/css/yolomux/10_topbar_menus.css', 'utf8');
+    const topbarCss = fs.readFileSync('static_src/css/yomux/10_topbar_menus.css', 'utf8');
     assert.ok(/\.app-menu-button::before\s*\{[\s\S]*border-inline-start:\s*5px solid var\(--disclosure-triangle-collapsed-color\)[\s\S]*\.app-menu\.open > \.app-menu-button::before\s*\{[\s\S]*border-inline-start-color:\s*var\(--disclosure-triangle-expanded-color\)[\s\S]*transform:\s*rotate\(90deg\)/.test(topbarCss), 'topbar menu disclosure triangles lead the label, point right when closed, and rotate into the themed expanded direction');
     assert.equal(/\.app-menu-button::after\s*\{/.test(topbarCss), false, 'topbar menus have no trailing down-caret owner');
     assert.ok(/\.keyboard-legend-row\s*\{[\s\S]*grid-template-columns:\s*minmax\(34px,\s*max-content\) minmax\(0,\s*1fr\)[\s\S]*padding:\s*var\(--space-2\) 0/.test(preferencesCss), 'Keyboard legend rows use compact sample/detail columns');
@@ -2838,9 +2838,9 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(preferencesHtml.includes('data-setting-path="appearance.editor_color_scheme"'), false, 'preferences do not show the legacy single mixed editor scheme setting');
     assert.ok(preferencesHtml.includes('<optgroup label="Dark">'), 'dark editor schemes are grouped under Dark');
     assert.ok(preferencesHtml.includes('<optgroup label="Light">'), 'light editor schemes are grouped under Light');
-    assert.ok(preferencesHtml.indexOf('YOLOmux Dark') < preferencesHtml.indexOf('Popular IDE Dark+'), 'YOLOmux dark scheme appears first');
-    assert.ok(preferencesHtml.indexOf('Popular IDE Light+') < preferencesHtml.indexOf('YOLOmux Light'), 'Popular IDE Light+ is the first light scheme');
-    assert.ok(preferencesHtml.indexOf('YOLOmux Light') < preferencesHtml.indexOf('GitHub Light'), 'YOLOmux light scheme remains ahead of GitHub Light');
+    assert.ok(preferencesHtml.indexOf('YOmux Dark') < preferencesHtml.indexOf('Popular IDE Dark+'), 'YOmux dark scheme appears first');
+    assert.ok(preferencesHtml.indexOf('Popular IDE Light+') < preferencesHtml.indexOf('YOmux Light'), 'Popular IDE Light+ is the first light scheme');
+    assert.ok(preferencesHtml.indexOf('YOmux Light') < preferencesHtml.indexOf('GitHub Light'), 'YOmux light scheme remains ahead of GitHub Light');
     assert.equal(api.globalThemeModeForTest(), 'dark');
     assert.equal(api.globalThemeIsDark(), true, 'global theme defaults dark');
     assert.equal(api.globalThemeLabel(), 'Dark mode');
@@ -2988,21 +2988,21 @@ async function runCrossSurfaceStateSuite() {
     api.applyGlobalThemeMode({updateEditor: true, updateTerminals: false});
     assert.ok(api.bodyClassListForTest().contains('theme-light'), 'global light theme marks the body');
     assert.ok(api.bodyClassListForTest().contains('theme-resolved-light'), 'global light theme tracks the resolved mode');
-    assert.equal(api.activeEditorSchemeForTest().label, 'YOLOmux Light Mode', 'inherited editor theme follows global light (brand YOLOmux Light default)');
+    assert.equal(api.activeEditorSchemeForTest().label, 'YOmux Light Mode', 'inherited editor theme follows global light (brand YOmux Light default)');
     assert.equal(api.configuredEditorSchemeForMode(true), 'dark');
-    assert.equal(api.configuredEditorSchemeForMode(false), 'yolomux-light');
+    assert.equal(api.configuredEditorSchemeForMode(false), 'yomux-light');
     api.setGlobalThemeModeForTest('dark');
     api.applyGlobalThemeMode({updateEditor: true, updateTerminals: false});
     assert.equal(api.fileEditorThemeModeForTest(), 'inherit');
-    assert.equal(api.activeEditorSchemeForTest().label, 'YOLOmux Dark mode');
+    assert.equal(api.activeEditorSchemeForTest().label, 'YOmux Dark mode');
     assert.equal(api.activeEditorSchemeForTest().activeLine, 'rgba(255, 255, 255, 0.04)');
     assert.equal(api.activeEditorSchemeForTest().selection, 'rgba(96, 165, 250, 0.38)');
     assert.equal(api.activeEditorSchemeForTest().diff.addFg, '#56d364');
     assert.equal(api.activeEditorSchemeForTest().diff.removeFg, '#ff7b72');
-    assert.equal(api.activeEditorSchemeForTest().activeLine.includes('118, 185, 0'), false, 'YOLOmux dark active line is no longer green');
-    assert.equal(api.activeEditorSchemeForTest().selection.includes('118, 185, 0'), false, 'YOLOmux dark selection is no longer green');
-    const editorSelectionSource = fs.readFileSync('static/yolomux.js', 'utf8');
-    const editorSelectionCss = fs.readFileSync('static/yolomux.css', 'utf8');
+    assert.equal(api.activeEditorSchemeForTest().activeLine.includes('118, 185, 0'), false, 'YOmux dark active line is no longer green');
+    assert.equal(api.activeEditorSchemeForTest().selection.includes('118, 185, 0'), false, 'YOmux dark selection is no longer green');
+    const editorSelectionSource = fs.readFileSync('static/yomux.js', 'utf8');
+    const editorSelectionCss = fs.readFileSync('static/yomux.css', 'utf8');
     assert.ok(editorSelectionSource.includes("&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground"), 'editor selection theme beats CodeMirror focused selection defaults');
     assert.ok(editorSelectionSource.includes("boxShadow: scheme.dark ? 'inset 0 0 0 1px rgba(191, 219, 254, 0.42)' : 'inset 0 0 0 1px rgba(29, 78, 216, 0.24)'"), 'editor selections get a visible edge without an opaque fill');
     assert.equal(editorSelectionSource.includes("'.cm-searchMatch-selected': {\n      backgroundColor: scheme.dark ? 'rgba(118, 185, 0, 0.84)'"), false, 'selected editor search matches are not green, so they remain visible on green active/highlighted rows');
@@ -3022,7 +3022,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(api.fileEditorThemeModeForTest(), 'github-light');
     assert.equal(api.activeEditorSchemeForTest().label, 'GitHub Light');
     assert.equal(api.activeEditorSchemeForTest().selection, 'rgba(37, 99, 235, 0.34)', 'light editor schemes use a visible blue selection fill');
-    for (const scheme of ['yolomux-light', 'popular-ide-light-plus', 'one-light', 'solarized-light']) {
+    for (const scheme of ['yomux-light', 'popular-ide-light-plus', 'one-light', 'solarized-light']) {
       api.setFileEditorThemeMode(scheme);
       assert.equal(api.activeEditorSchemeForTest().selection, 'rgba(37, 99, 235, 0.34)', `${scheme} uses the audited light editor selection fill`);
     }
@@ -3061,16 +3061,19 @@ async function runCrossSurfaceStateSuite() {
     api.cycleEditorThemeMode({includeVanilla: false});
     assert.equal(api.editorPreviewThemeStateForTest(), 'dark', 'edit/diff theme toggle moves light back to dark without vanilla');
     assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'theme');
-    api.setFileEditorThemeMode('light');
-    assert.equal(api.fileEditorThemeModeForTest(), 'yolomux-light', 'legacy light storage value maps to the YOLOmux Light default');
-    assert.equal(api.activeEditorSchemeForTest().bg, '#ffffff', 'YOLOmux Light uses a bright white editor background');
-    assert.equal(api.activeEditorSchemeForTest().previewBg, '#ffffff', 'YOLOmux Light preview background is bright white');
-    assert.equal(api.activeEditorSchemeForTest().syntax.comment, '#008000', 'YOLOmux Light uses Popular IDE-style green comments');
-    assert.equal(api.activeEditorSchemeForTest().syntax.keyword, '#0000ff', 'YOLOmux Light uses Popular IDE-style blue language keywords');
-    assert.equal(api.activeEditorSchemeForTest().syntax.control, '#af00db', 'YOLOmux Light uses Popular IDE-style magenta Rust control keywords');
-    assert.equal(api.activeEditorSchemeForTest().syntax.function, '#267f2e', 'YOLOmux Light uses Popular IDE-style green function declarations');
-    assert.equal(api.activeEditorSchemeForTest().syntax.type, '#008080', 'YOLOmux Light uses Popular IDE-style teal type declarations');
-    assert.equal(api.activeEditorSchemeForTest().syntax.property, '#5f3b00', 'YOLOmux Light uses Popular IDE-style brown field and parameter names');
+    api.setFileEditorThemeMode('yolomux-light');
+    assert.equal(api.fileEditorThemeModeForTest(), 'yomux-light', 'legacy saved light scheme id maps to the YOmux Light default');
+    assert.equal(api.storageValueForTest('yomux.fileEditorThemeMode.v1'), 'yomux-light', 'legacy saved light scheme id is rewritten with the canonical persisted value');
+    assert.ok(api.bodyClassListForTest().contains('editor-scheme-yomux-light'), 'legacy saved light scheme id applies the canonical body class');
+    assert.equal(api.bodyClassListForTest().contains('editor-scheme-yolomux-light'), false, 'legacy saved light scheme id does not retain the old body class');
+    assert.equal(api.activeEditorSchemeForTest().bg, '#ffffff', 'YOmux Light uses a bright white editor background');
+    assert.equal(api.activeEditorSchemeForTest().previewBg, '#ffffff', 'YOmux Light preview background is bright white');
+    assert.equal(api.activeEditorSchemeForTest().syntax.comment, '#008000', 'YOmux Light uses Popular IDE-style green comments');
+    assert.equal(api.activeEditorSchemeForTest().syntax.keyword, '#0000ff', 'YOmux Light uses Popular IDE-style blue language keywords');
+    assert.equal(api.activeEditorSchemeForTest().syntax.control, '#af00db', 'YOmux Light uses Popular IDE-style magenta Rust control keywords');
+    assert.equal(api.activeEditorSchemeForTest().syntax.function, '#267f2e', 'YOmux Light uses Popular IDE-style green function declarations');
+    assert.equal(api.activeEditorSchemeForTest().syntax.type, '#008080', 'YOmux Light uses Popular IDE-style teal type declarations');
+    assert.equal(api.activeEditorSchemeForTest().syntax.property, '#5f3b00', 'YOmux Light uses Popular IDE-style brown field and parameter names');
     api.setFileEditorPreviewDisplayMode('vanilla');
     assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'vanilla', 'preview display mode can select the independent vanilla surface');
     api.setFileEditorThemeMode('github-light');
@@ -3217,8 +3220,8 @@ async function runCrossSurfaceStateSuite() {
     assert.deepEqual(canonical(api.appViewport()), {width: 1024, height: 768, w: 1024, h: 768}, 'pinch scale does not impersonate a keyboard or change responsive app geometry');
     api.setNativeViewportForTest({width: 1200, height: 800, visualHeight: null});
     api.syncNativeAppViewportForTest({force: true});
-    const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
-    assert.ok(coreSource.includes("const APP_VIEWPORT_CHANGE_EVENT = 'yolomux:app-viewport-change'"), 'one shared event owns downstream normal-mode viewport work');
+    const coreSource = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+    assert.ok(coreSource.includes("const APP_VIEWPORT_CHANGE_EVENT = 'yomux:app-viewport-change'"), 'one shared event owns downstream normal-mode viewport work');
     assert.ok(/function nativeUsableViewportHeight\([\s\S]*visualViewport\.scale[\s\S]*viewport\.height - visualHeight > KEYBOARD_MIN_REDUCTION_PX/.test(coreSource), 'visual viewport contributes only unzoomed usable height (large-reduction threshold)');
     assert.ok(/function installNativeAppViewportOwner\([\s\S]*visualViewport\?\.addEventListener\?\.\('resize'[\s\S]*visualViewport\?\.addEventListener\?\.\('scroll'[\s\S]*document\.addEventListener\('visibilitychange'[\s\S]*window\.addEventListener\('pageshow'/.test(coreSource), 'one owner remeasures visual-viewport geometry when a backgrounded tab returns');
     const diagnosticsApi = loadYolomux('?debug=1', ['1']);
@@ -3282,10 +3285,10 @@ async function runCrossSurfaceStateSuite() {
       right: {active: 'newest', tabs: ['newest']},
     }, 'the responsive owner leaves the same restored URL split intact on a desktop viewport');
     assert.ok(/function dispatchTouchContextMenu[\s\S]*function installTouchContextMenuOwner\([\s\S]*pointerType !== 'touch'[\s\S]*TOUCH_CONTEXT_MENU_DELAY_MS/.test(coreSource), 'a stationary touch routes through the existing custom context-menu handlers without duplicating their menus');
-    assert.ok(coreSource.includes('event.yolomuxTouchLongPress = true'), 'a bridged long press is marked for editor selection ownership');
-    const baseCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
+    assert.ok(coreSource.includes('event.yomuxTouchLongPress = true'), 'a bridged long press is marked for editor selection ownership');
+    const baseCss = fs.readFileSync('static_src/css/yomux/00_tokens_base.css', 'utf8');
     assert.ok(/@media \(pointer: coarse\)\s*\{[\s\S]*--pane-resizer-hit-inset:\s*20px[\s\S]*:where\(input:not\(\[type="checkbox"\]\):not\(\[type="radio"\]\), textarea, select, \[contenteditable="true"\], \.xterm \.xterm-helper-textarea\)\s*\{\s*font-size:\s*var\(--touch-editable-font-size\)/.test(baseCss), 'coarse-pointer editable controls and xterm focus input share the 16px Safari zoom guard');
-    const paneCss = fs.readFileSync('static_src/css/yolomux/40_layout_panes_tabs.css', 'utf8');
+    const paneCss = fs.readFileSync('static_src/css/yomux/40_layout_panes_tabs.css', 'utf8');
     assert.ok(/--pane-resizer-hit-inset:\s*5px[\s\S]*--pane-resizer-touch-grip-length:\s*30px[\s\S]*--pane-resizer-touch-grip-thickness:\s*4px/.test(baseCss), 'touch resize uses shared hit-zone and centered-grip tokens');
     assert.ok(/\.dv-horizontal[^\{]*::after,\s*\.resizer-row::after\s*\{[\s\S]*?top:\s*50%;[\s\S]*?inset-inline:\s*calc\(-1 \* var\(--pane-resizer-hit-inset\)\);[\s\S]*?block-size:\s*var\(--pane-resizer-touch-handle-size\);[\s\S]*?transform:\s*translateY\(-50%\)/.test(paneCss), 'coarse horizontal dividers limit touch resizing to the centered 44px handle');
     assert.ok(/\.dv-vertical[^\{]*::after,\s*\.resizer-column::after\s*\{[\s\S]*?left:\s*50%;[\s\S]*?inset-block:\s*calc\(-1 \* var\(--pane-resizer-hit-inset\)\);[\s\S]*?inline-size:\s*var\(--pane-resizer-touch-handle-size\);[\s\S]*?transform:\s*translateX\(-50%\)/.test(paneCss), 'coarse vertical dividers limit touch resizing to the centered 44px handle');
@@ -3294,7 +3297,7 @@ async function runCrossSurfaceStateSuite() {
     assert.deepEqual(canonical(api.setAppViewportOverrideForTest({w: 1440, h: 900})), {width: 1440, height: 900, w: 1440, h: 900}, 'M0: appViewport can be pinned to a host viewport shape');
     assert.equal(api.effectiveViewportWidthForTest({width: 0}), 1200, 'MV-7: missing viewport widths use one shared desktop fallback');
     assert.equal(api.effectiveViewportWidthForTest({width: 240}), 320, 'MV-7: viewport widths share the same minimum floor');
-    const uiSource = fs.readFileSync('static/yolomux.js', 'utf8');
+    const uiSource = fs.readFileSync('static/yomux.js', 'utf8');
     assert.ok(/function effectiveViewportWidth\(/.test(uiSource), 'MV-7: effective viewport width is owned by one helper');
     assert.ok(/function paneDragPreviewMetrics[\s\S]*const viewportWidth = effectiveViewportWidth\(viewport\)/.test(uiSource), 'MV-7: pane drag preview routes viewport width through the shared helper');
     assert.ok(/function positionDiffRefPopover[\s\S]*const viewportWidth = effectiveViewportWidth\(viewport\)/.test(uiSource), 'MV-7: diff-ref popover routes viewport width through the shared helper');
@@ -3354,14 +3357,14 @@ async function runCrossSurfaceStateSuite() {
   test('cross-surface host state 16: C14: the menu-width measurer must un-clip the command label + detail spans (they were...', () => {
     // C14: the menu-width measurer must un-clip the command label + detail spans (they were omitted, so the
     // menu measured to the LABELS and the longer detail sub-lines ellipsized with "…").
-    const appMenuMeasureSrc = fs.readFileSync('static/yolomux.js', 'utf8');
+    const appMenuMeasureSrc = fs.readFileSync('static/yomux.js', 'utf8');
     const measureBody = appMenuMeasureSrc.slice(appMenuMeasureSrc.indexOf('function measureAppMenuContentWidth('), appMenuMeasureSrc.indexOf('function fitAppMenuPopover('));
     assert.ok(measureBody.includes(".app-menu-label'"), 'C14: the measurer neutralizes .app-menu-label truncation');
     assert.ok(measureBody.includes(".app-menu-detail'"), 'C14: the measurer neutralizes .app-menu-detail truncation');
     assert.ok(measureBody.includes("clone.classList?.contains('app-submenu-popover')"), 'C14: a standalone submenu clone is forced visible for measurement');
     assert.ok(measureBody.includes("querySelectorAll('.app-submenu-popover')"), 'C14: nested submenu widths are included in parent menu measurement');
     assert.ok(appMenuMeasureSrc.includes('_appMenuFontsRefit'), 'C14: a one-time fonts.ready re-fit corrects a cold first measurement');
-    const topbarMenuCss = fs.readFileSync('static/yolomux.css', 'utf8');
+    const topbarMenuCss = fs.readFileSync('static/yomux.css', 'utf8');
     assert.ok(/\.app-submenu-popover\s*\{[\s\S]*?max-width:\s*calc\(100% - var\(--app-submenu-inline-offset\)\)/.test(topbarMenuCss), 'C14: nested submenus clamp to the parent menu instead of clipping under overflow');
     assert.ok(/\.app-menu-detail\s*\{[\s\S]*?max-width:\s*min\(58ch/.test(topbarMenuCss), 'C14: app menu detail rows get enough width before ellipsizing');
     const tabMenuCommand = api.menuTabCommand('1', {detail: 'Minimized'});
@@ -3413,10 +3416,10 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(tabMenuLabels.includes('Inactive'), false);
     assert.equal(tabMenuLabels.includes('Minimized'), false);
     assert.equal(tabMenuLabels.some(label => label.startsWith('No ')), false);
-    assert.equal(tabMenu.items.filter(item => item.type === 'separator').length, 1, 'Tabs menu separators only split populated tmux and YOLOmux tab groups');
+    assert.equal(tabMenu.items.filter(item => item.type === 'separator').length, 1, 'Tabs menu separators only split populated tmux and YOmux tab groups');
     // Tabs has one fixed navigator order: all tmux sessions naturally sorted first, followed by
-    // the YOLOmux/file tabs in label order. Status or a prior stored preference cannot reshuffle it.
-    assert.deepEqual(api.sortTabItemsForMenu(['2', api.prefsItemId, '1', api.finderItemId]), ['1', '2', api.finderItemId, api.prefsItemId], 'Tabs puts naturally sorted tmux sessions before sorted YOLOmux tabs');
+    // the YOmux/file tabs in label order. Status or a prior stored preference cannot reshuffle it.
+    assert.deepEqual(api.sortTabItemsForMenu(['2', api.prefsItemId, '1', api.finderItemId]), ['1', '2', api.finderItemId, api.prefsItemId], 'Tabs puts naturally sorted tmux sessions before sorted YOmux tabs');
     const sortViewMenu = api.appMenuTree().find(menu => menu.id === 'view');
     const sortSubmenu = sortViewMenu.items.find(item => item.type === 'submenu' && item.label === api.t('menu.view.sortTabs'));
     assert.equal(sortSubmenu, undefined, 'Tabs has one deterministic order, so View does not expose conflicting sort modes');
@@ -3433,25 +3436,25 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(aboutCommand.type, 'command', 'Help menu ends with an About command');
     assert.equal(aboutCommand.label, 'About', 'About stays at the bottom of Help');
     assert.equal(aboutCommand.action, api.showAboutModal, 'About command opens the modal');
-    assert.ok(api.aboutBrandHtml().includes('about-brand-yo'), 'About brand includes the large YO segment');
-    assert.ok(api.aboutBrandHtml().includes('about-brand-lo'), 'About brand includes the large LO segment');
+    assert.ok(api.aboutBrandHtml().includes('about-brand-mark'), 'About brand includes the highlighted first glyph');
+    assert.ok(api.aboutBrandHtml().includes('about-brand-second'), 'About brand includes the second wordmark glyph');
     assert.ok(api.aboutBrandHtml().includes('about-brand-x'), 'About brand includes the large x segment');
     api.showAboutModal();
     assert.ok(api.modalClassForTest().includes('open'), 'About opens the shared modal');
     assert.ok(api.modalClassForTest().includes('about-open'), 'About modal gets its compact layout class');
     assert.equal(api.modalTitleForTest(), api.t('menu.help.about'), 'About modal title is localized');
-    assert.ok(api.modalBodyHtmlForTest().includes('about-brand-row'), 'About modal renders the large YOLOmux mark');
+    assert.ok(api.modalBodyHtmlForTest().includes('about-brand-row'), 'About modal renders the large YOmux mark');
     assert.ok(api.modalBodyHtmlForTest().includes(`<dt>${api.t('menu.help.about.datetime')}</dt>`), 'About modal contains localized date metadata');
     assert.ok(api.modalBodyHtmlForTest().includes('<dt>SHA</dt>'), 'About modal contains SHA metadata');
     assert.ok(api.modalBodyHtmlForTest().includes(`<dt>${api.t('menu.help.about.version')}</dt>`), 'About modal contains localized version metadata');
     assert.ok(api.modalBodyHtmlForTest().includes('Keiven Chang'), 'About modal contains Keiven Chang');
     assert.ok(api.modalBodyHtmlForTest().includes('https://www.linkedin.com/in/keiven/'), 'Keiven Chang entry links to LinkedIn');
-    assert.ok(fs.readFileSync('static/yolomux.js', 'utf8').includes('https://www.linkedin.com/in/keiven/'), 'About LinkedIn URL is bundled');
-    assert.ok(api.modalBodyHtmlForTest().includes('https://github.com/keivenchang/yolomux'), 'DOIT.60: About modal links to the project GitHub repo');
+    assert.ok(fs.readFileSync('static/yomux.js', 'utf8').includes('https://www.linkedin.com/in/keiven/'), 'About LinkedIn URL is bundled');
+    assert.ok(api.modalBodyHtmlForTest().includes('https://github.com/keivenchang/yomux'), 'DOIT.60: About modal links to the project GitHub repo');
     assert.ok(api.modalBodyHtmlForTest().includes('about-github'), 'DOIT.60: the GitHub link carries the about-github class');
     assert.ok(api.modalBodyHtmlForTest().includes(`>${api.t('menu.help.about.github')}</a>`), 'DOIT.60: the GitHub link uses the localized label');
     assert.ok(api.modalBodyHtmlForTest().includes('<span> - </span><a class="about-author about-github"'), 'About author and GitHub links render on one line');
-    assert.equal(api.modalBodyHtmlForTest().includes('(to YOLOmux)'), false, 'About GitHub link no longer carries the old inline target suffix');
+    assert.equal(api.modalBodyHtmlForTest().includes('(to YOmux)'), false, 'About GitHub link no longer carries the old inline target suffix');
     assert.ok(api.modalBodyHtmlForTest().includes('https://polyformproject.org/licenses/noncommercial/1.0.0'), 'About modal links to the PolyForm Noncommercial license');
     assert.ok(api.modalBodyHtmlForTest().includes(`>${api.t('menu.help.about.license')}</a>`), 'About modal renders the localized license label');
     assert.ok(preferencesCss.includes('.modal.about-open .modal-dialog'), 'About modal has compact modal chrome through the shared dialog shell');
@@ -3466,16 +3469,16 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/\.file-editor-dialog\s*\{[\s\S]*?border:\s*var\(--app-modal-border-width\) solid var\(--app-modal-border-color\)/.test(preferencesCss), 'file editor dialog uses the active-pane border token');
     assert.ok(/\.session-rename-dialog\s*\{[\s\S]*?border:\s*var\(--app-modal-border-width\) solid var\(--app-modal-border-color\)/.test(preferencesCss), 'rename dialog uses the active-pane border token');
     assert.ok(preferencesCss.includes('.about-brand-row'), 'About modal has a large brand row style');
-    assert.equal(/\.about-brand-yo\s*\{[^}]*animation:\s*yolo-marker-rotate/.test(preferencesCss), false, 'About YO glyph is static — it no longer rotates (the working green ball is the only YO motion)');
-    assert.ok(/\.about-brand-yo\s*\{[\s\S]*background:\s*var\(--pane-tab-yolo-bg\)/.test(preferencesCss), 'About YO glyph follows the active theme color');
-    assert.ok(/\.about-brand-lo\s*\{[\s\S]*color:\s*var\(--brand-green\)/.test(preferencesCss), 'About LO stays brand green regardless of active color');
+    assert.equal(/\.about-brand-mark\s*\{[^}]*animation:\s*yolo-marker-rotate/.test(preferencesCss), false, 'About mark stays static');
+    assert.ok(/\.about-brand-mark\s*\{[\s\S]*background:\s*var\(--pane-tab-yolo-bg\)/.test(preferencesCss), 'About mark follows the active theme color');
+    assert.ok(/\.about-brand-second\s*\{[\s\S]*color:\s*var\(--brand-green\)/.test(preferencesCss), 'About second glyph stays brand green regardless of active color');
     const brandCss = fs.readFileSync('static/brand.css', 'utf8');
-    assert.ok(/--brand-yolo-bg:\s*var\(--active-control-bg,\s*var\(--brand-primary-green\)\)/.test(brandCss), 'topbar YO follows the active color with green fallback');
-    assert.ok(/\.brand-title \.brand-yolo\s*\{[\s\S]*background:\s*var\(--brand-yolo-bg\)/.test(brandCss), 'topbar YO background uses the active-color brand token');
-    assert.ok(/--brand-primary-green:\s*var\(--brand-green,\s*#76b900\)/.test(brandCss), 'topbar YOLOmux LO stays brand green regardless of active color');
-    assert.equal(/--brand-primary-green:\s*var\(--active-control-bg/.test(brandCss), false, 'topbar YOLOmux LO is not routed through the active color preference');
+    assert.ok(/--brand-mark-bg:\s*var\(--active-control-bg,\s*var\(--brand-primary-green\)\)/.test(brandCss), 'topbar mark follows the active color with green fallback');
+    assert.ok(/\.brand-title \.brand-mark\s*\{[\s\S]*background:\s*var\(--brand-mark-bg\)/.test(brandCss), 'topbar mark background uses the active-color brand token');
+    assert.ok(/--brand-primary-green:\s*var\(--brand-green,\s*#76b900\)/.test(brandCss), 'topbar YOmux LO stays brand green regardless of active color');
+    assert.equal(/--brand-primary-green:\s*var\(--active-control-bg/.test(brandCss), false, 'topbar YOmux LO is not routed through the active color preference');
     assert.equal(api.testElementForId('closeModal').textContent || 'X', 'X', 'About modal close button is an X');
-    const shellHtml = fs.readFileSync('yolomux_lib/web.py', 'utf8');
+    const shellHtml = fs.readFileSync('yomux_lib/web.py', 'utf8');
     assert.ok(shellHtml.includes('<section id="modal" class="modal app-modal-overlay">'), 'HTML shell routes About and transcript through the shared modal overlay parent');
     assert.ok(shellHtml.includes('<div class="modal-dialog">'), 'HTML shell gives the shared app modal a bounded dialog child');
     assert.ok(/<button id="closeModal"[^>]*>X<\/button>/.test(shellHtml) && shellHtml.includes('server_string(locale, "common.close")'), 'HTML shell renders the modal close button as X with localized title and aria-label');
@@ -3489,8 +3492,11 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(api.appMenuTree().map(menu => menu.label).join(','), '檔案,檢視,tmux,分頁,說明', 'menu bar localizes (tmux unchanged)');
     api.showAboutModal();
     assert.equal(api.modalTitleForTest(), zhHantMenu['menu.help.about'], 'About modal title localizes to Chinese');
-    assert.ok(api.modalBodyHtmlForTest().includes('about-brand-yo') && api.modalBodyHtmlForTest().includes('>優<'), 'Traditional Chinese About brand uses 優');
-    assert.ok(api.modalBodyHtmlForTest().includes('>樂<'), 'Traditional Chinese About brand uses 樂');
+    assert.ok(api.modalBodyHtmlForTest().includes('about-brand-mark') && api.modalBodyHtmlForTest().includes('>優<'), 'Traditional Chinese About brand uses 優');
+    assert.equal(api.aboutBrandHtml().includes('about-brand-second'), false, 'Traditional Chinese About brand omits the empty second-glyph span so flex spacing remains continuous');
+    assert.ok(api.aboutBrandHtml().includes('>優</span><span class="about-brand-m">m</span>'), 'Traditional Chinese About brand places mux directly after 優');
+    assert.ok(api.modalBodyHtmlForTest().includes('about-brand-x'), 'Traditional Chinese About brand ends with x');
+    assert.equal(api.modalBodyHtmlForTest().includes('>樂<'), false, 'Traditional Chinese product wordmark omits 樂');
     assert.ok(api.modalBodyHtmlForTest().includes(`<dt>${zhHantMenu['menu.help.about.datetime']}</dt>`), 'Traditional Chinese About date label is localized');
     assert.ok(api.modalBodyHtmlForTest().includes('<dt>SHA</dt>'), 'SHA remains literal in Chinese About');
     assert.ok(api.modalBodyHtmlForTest().includes(`<dt>${zhHantMenu['menu.help.about.version']}</dt>`), 'Traditional Chinese About version label is localized');
@@ -3532,7 +3538,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(fileMenu.items.find(candidate => candidate.label === 'YO!agent').iconHtml.includes('app-menu-ui-icon-robot'));
     assert.ok(fileMenu.items.find(candidate => candidate.label === 'YO!chat').iconHtml.includes('app-menu-ui-icon-chat-bubble'));
     assert.ok(fileMenu.items.find(candidate => candidate.label === 'YO!stats').iconHtml.includes('app-menu-ui-icon-chart'));
-    const renderedSource = fs.readFileSync('static/yolomux.js', 'utf8');
+    const renderedSource = fs.readFileSync('static/yomux.js', 'utf8');
     assert.ok(renderedSource.includes("node.className = 'app-modal-overlay keyboard-shortcuts-overlay'"), 'keyboard shortcuts use the shared modal overlay parent');
     assert.ok(renderedSource.includes("node.className = 'app-modal-overlay command-palette'"), 'command palette uses the shared modal overlay parent');
     assert.ok(/backdrop\.className = `app-modal-overlay file-editor-dialog-backdrop/.test(renderedSource), 'file editor dialogs use the shared modal overlay parent');
@@ -3546,8 +3552,8 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/function showSessionRenameDialog\(session\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(overlay\)/.test(renderedSource), 'rename dialogs mount under the app overlay root');
     assert.ok(/function showFileEditorDecisionDialog\(options = \{\}\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(backdrop\)/.test(renderedSource), 'editor decision dialogs mount under the app overlay root');
     assert.ok(/function ensureCommandPalette\(\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(node\)/.test(renderedSource), 'command palette DOM mounts under the app overlay root');
-    const timingSource = fs.readFileSync('static_src/js/yolomux/02_timing.js', 'utf8');
-    const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
+    const timingSource = fs.readFileSync('static_src/js/yomux/02_timing.js', 'utf8');
+    const bootstrapSource = fs.readFileSync('static_src/js/yomux/00_bootstrap_state.js', 'utf8');
     assert.equal(/serverWatchRenew/.test(timingSource), false, 'SSE subscriber lifecycle owns watch-root retention; browser renewal cannot return');
     assert.ok(/fileExplorerFilesystemKeyframeMs = 60001/.test(bootstrapSource), 'filesystem watch keyframes retain their odd cadence');
     assert.ok(/autoApproveDisconnectedPollMs:\s*5003/.test(timingSource), 'the disconnected auto-approve fallback poll stays in the shared timing owner');
@@ -3581,8 +3587,8 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(missingPathClaude.disabled, true);
     assert.equal(missingPathClaude.detail, 'Not on server PATH');
     {
-      const newSessionSrc = fs.readFileSync('static/yolomux.js', 'utf8');
-      const menuCss = fs.readFileSync('static/yolomux.css', 'utf8');
+      const newSessionSrc = fs.readFileSync('static/yomux.js', 'utf8');
+      const menuCss = fs.readFileSync('static/yomux.css', 'utf8');
       assert.ok(/function agentLaunchCommand\(agent, dangerouslyYolo = false\)[\s\S]*full_access[\s\S]*normal/.test(newSessionSrc), 'the server-owned normal/full-access launch-command helper exists');
       assert.ok(/const fullAccessFlags = dangerouslyYolo \? newTmuxSessionFullAccessFlags\(agent\) : ''[\s\S]*dangerouslyYolo \? newTmuxSessionLabel\(agent, true\)[\s\S]*createNextSession\(agent, \{dangerouslyYolo, terminal\}\)[\s\S]*title: fullAccessFlags/.test(newSessionSrc), 'new-session labels retain the exact dangerous-auto-approve bypass flags in their tooltip');
       assert.ok(/function shellLaunchLabel\(terminal\)[\s\S]*Shell: \$\{terminal\}[\s\S]*const terminals = terminalLaunchNames\(\);[\s\S]*agent === 'term'[\s\S]*terminals\.length[\s\S]*menuCommandRow\(terminals\.map\(terminal => launch\(false, terminal\)\),[\s\S]*label: 'Shell:',[\s\S]*separator: false[\s\S]*: null/.test(newSessionSrc), 'Shell offers compact explicit server-provided commands with no separator and never guesses a default Xterm shell');
@@ -3593,7 +3599,7 @@ async function runCrossSurfaceStateSuite() {
       assert.ok(menuCss.includes('.app-menu-command-pair') && /\.app-menu-command-pair\s*\{[\s\S]*display:\s*flex[\s\S]*flex-wrap:\s*nowrap/.test(menuCss) && menuCss.includes('.app-menu-command-separator') && /function createAppMenuCommandPair\(item\)[\s\S]*separator: true/.test(newSessionSrc), 'paired launch actions stay compact on one line with a visible separator instead of wasting half the menu width');
       assert.ok(menuCss.includes('.app-menu-command-row') && /\.app-menu-command-row\s*\{[\s\S]*flex-wrap:\s*nowrap[\s\S]*overflow-x:\s*auto/.test(menuCss), 'Shell command rows stay on one line and scroll only as a final narrow-screen fallback');
       assert.ok(/app-phone-single-pane\.app-topbar-touch-compact \.app-menu > \.app-menu-popover\s*\{[\s\S]*position:\s*fixed[\s\S]*overflow:\s*auto/.test(menuCss) && /app-topbar-touch-compact \.app-menu-command-pair\s*\{[\s\S]*flex-wrap:\s*nowrap[\s\S]*overflow-x:\s*auto/.test(menuCss) && /app-menu-command-row--shells \.(?:app-menu-command-row-label|app-menu-command)[\s\S]*border-color:\s*transparent[\s\S]*background:\s*transparent/.test(menuCss), 'phone menus use a viewport-bounded sheet while tablet touch menus retain compact paired actions and separator-free shell text controls');
-      const infoTreeCss = fs.readFileSync('static/yolomux.css', 'utf8');
+      const infoTreeCss = fs.readFileSync('static/yomux.css', 'utf8');
       assert.ok(infoTreeCss.includes('--info-pane-bg:') && infoTreeCss.includes('--info-tree-border:') && infoTreeCss.includes('--info-tree-line:') && infoTreeCss.includes('--info-tree-record-border:'), 'YO!info tree owns dedicated pane, border, record-outline, and connector tokens');
       assert.ok(/--info-tree-record-border:\s*var\(--info-tree-line\)/.test(infoTreeCss), 'YO!info leaf record outlines use the same visibility token as the left tree guides');
       assert.ok(/body\.theme-light\s*\{[\s\S]*--info-pane-bg:\s*var\(--paint-white\)[\s\S]*--info-tree-group-bg:\s*#f6f9fd/.test(infoTreeCss), 'YO!info light mode uses the shared opaque-white pane surface');
@@ -3675,8 +3681,8 @@ async function runCrossSurfaceStateSuite() {
     explicitFocusApi.setFocusedTerminal('2', {userInitiated: true});
     assert.equal(explicitFocusApi.explicitPaneFocusItemForTest(), '2', 'clicking or typing in a terminal updates the shared explicit-pane state');
     assert.equal(explicitFocusApi.currentTmuxMenuTargetForTest(), '2', 'tmux menu updates to the newly explicit terminal');
-    source = fs.readFileSync('static/yolomux.js', 'utf8');
-    css = fs.readFileSync('static/yolomux.css', 'utf8');
+    source = fs.readFileSync('static/yomux.js', 'utf8');
+    css = fs.readFileSync('static/yomux.css', 'utf8');
     const currentTmuxMenuTargetBody = source.slice(source.indexOf('function currentTmuxMenuTarget()'), source.indexOf('function orderedPaneItems()'));
     assert.ok(currentTmuxMenuTargetBody.includes('explicitTmuxPaneFocusSession() || currentSessionActionTarget()'), 'tmux menus use the shared explicit pane state without changing global session actions');
     assert.equal(source.includes("menuNumberSetting('appearance.red_reminder_ms'"), false, 'YOLO submenu no longer exposes removed status pulse timing');
@@ -3742,7 +3748,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(finderSyncBody.includes('(explicit || !fileExplorerSyncPlanAlreadyApplied(syncPlan))'), '#automatic Finder Sync skips a repeated already-applied plan');
     const openFileExplorerAtStart = source.indexOf('async function openFileExplorerAt(');
     const openFileExplorerAtEnd = source.indexOf('function resetFileExplorerAppliedSyncPlan(', openFileExplorerAtStart);
-    const facadeSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
+    const facadeSource = fs.readFileSync('static_src/js/yomux/00_bootstrap_state.js', 'utf8');
     assert.ok(facadeSource.includes('class FileWorkspaceState'), 'Finder root opens have a dedicated state owner for async race cancellation');
     const openSource = source.slice(openFileExplorerAtStart, openFileExplorerAtEnd);
     const resolvedRootIndex = openSource.indexOf('const resolvedRoot = validateKind');
@@ -3893,7 +3899,7 @@ async function runCrossSurfaceStateSuite() {
     let terminalUrlLabels = Array.from(terminalUrlMenu.children).map(child => child.textContent).filter(Boolean);
     assert.deepStrictEqual(canonical(terminalUrlLabels), ['Open URL in a new tab', 'Copy URL', 'Copy tmux selection', 'Copy without indent'], 'terminal URL menu puts the link action first and drops the redundant generic Copy row when the selection already equals the href');
     assert.equal(terminalUrlLabels.includes('Copy'), false, 'terminal URL menu does not show the ambiguous generic Copy row when it would duplicate Copy URL');
-    api.showTerminalContextMenuForTest('1', {getSelection: () => ''}, 10, 10, {presetSelection: 'YOLOmux PR 172', reference: urlReference});
+    api.showTerminalContextMenuForTest('1', {getSelection: () => ''}, 10, 10, {presetSelection: 'YOmux PR 172', reference: urlReference});
     terminalUrlMenu = terminalContextMenuNode();
     terminalUrlLabels = Array.from(terminalUrlMenu.children).map(child => child.textContent).filter(Boolean);
     assert.deepStrictEqual(canonical(terminalUrlLabels), ['Open URL in a new tab', 'Copy URL', 'Copy selected text', 'Copy tmux selection', 'Copy without indent'], 'terminal URL menu labels the selected-text copy path explicitly when the visible text differs from the href');
@@ -4431,9 +4437,9 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(stableId, 'created-id', 'shared ID helper creates a missing session ID');
     assert.equal(api.sessionScopedIdForTest('test.stable-id', () => 'other-id'), 'created-id', 'shared ID helper preserves the existing ID');
     assert.equal(api.sessionStorageValueForTest('test.stable-id'), 'created-id', 'shared ID helper persists the created ID');
-    const previewSource = fs.readFileSync('static_src/js/yolomux/89_preview_renderers.js', 'utf8');
+    const previewSource = fs.readFileSync('static_src/js/yomux/89_preview_renderers.js', 'utf8');
     assert.ok(/function previewFileActionLinks\(path,[\s\S]*rawFileUrl\(path\)[\s\S]*noopener noreferrer[\s\S]*rawFileDownloadUrl\(path\)/.test(previewSource), 'one preview-link helper owns safe Open and Download URLs');
-    assert.ok(/previewFileActionLinks\(path, \{leadingSeparator: detailText \? ' · ' : ''\}\)/.test(previewSource) && /previewFileActionLinks\(path, \{leadingSeparator: ' '\}\)/.test(fs.readFileSync('static_src/js/yolomux/88_markdown_preview.js', 'utf8')), 'general and Markdown preview fallbacks reuse the shared link helper');
+    assert.ok(/previewFileActionLinks\(path, \{leadingSeparator: detailText \? ' · ' : ''\}\)/.test(previewSource) && /previewFileActionLinks\(path, \{leadingSeparator: ' '\}\)/.test(fs.readFileSync('static_src/js/yomux/88_markdown_preview.js', 'utf8')), 'general and Markdown preview fallbacks reuse the shared link helper');
     assert.ok(api.fuzzyHighlightHtml('10144', '#10144').includes('<mark class="fuzzy-match">10144</mark>'), 'contiguous fuzzy matches render as one box');
     assert.equal(api.commandPaletteMatches({group: 'Tabs', label: 'helloXandYyy', detail: ''}, 'xy'), true, 'command palette uses fuzzy matching');
     assert.equal(api.commandPaletteMatches({group: 'Tabs', label: 'helloXandYyy', detail: ''}, 'xz'), false, 'command palette rejects non-matches');
@@ -4615,7 +4621,7 @@ async function runCrossSurfaceStateSuite() {
   registerCrossSurfaceQuickOpenSuite(test);
 
   test('the redundant per-tick full re-query is retired for one delta path plus one explicit repair', () => {
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
+    const source = fs.readFileSync('static/yomux.js', 'utf8');
     // Step 8: an index-status transition / published-generation tick no longer re-issues the whole
     // query. The old `applyFileIndexStatusPayload(...) -> requeryOpenFileQuickOpenForIndexChange()`
     // per-tick call is gone; the warming-timer full-search owner is gone too.
@@ -4633,11 +4639,11 @@ async function runCrossSurfaceStateSuite() {
   test('quick-open ranks local numbered DOIT files over fuzzy indexed paths', () => {
   const doitApi = loadYolomux('', ['1']);
   doitApi.setFileQuickOpenCandidatesForTest('/repo/yolomux', [
-    {name: 'websocket.py', path: '/repo/yolomux/yolomux_lib/websocket.py', relative_path: 'yolomux_lib/websocket.py', kind: 'file'},
+    {name: 'websocket.py', path: '/repo/yolomux/yomux_lib/websocket.py', relative_path: 'yomux_lib/websocket.py', kind: 'file'},
     {name: 'DOIT.53.md', path: '/repo/yolomux/DOIT.53.md', relative_path: 'DOIT.53.md', kind: 'file'},
     {name: 'DOIT.parser-performance-v2-audit.md', path: '/repo/yolomux/frontend-crates/DOIT.parser-performance-v2-audit.md', relative_path: 'frontend-crates/DOIT.parser-performance-v2-audit.md', kind: 'file'},
     {name: 'DOIT.51.md', path: '/repo/yolomux/DOIT.51.md', relative_path: 'DOIT.51.md', kind: 'file'},
-    {name: 'events.py', path: '/repo/yolomux/yolomux_lib/events.py', relative_path: 'yolomux_lib/events.py', kind: 'file'},
+    {name: 'events.py', path: '/repo/yolomux/yomux_lib/events.py', relative_path: 'yomux_lib/events.py', kind: 'file'},
   ]);
   doitApi.setCommandPaletteStateForTest('files', 'DOIT:');
   assert.equal(doitApi.fileQuickOpenSearchText('DOIT:'), 'DOIT', 'file quick-open ignores a trailing colon with no line number');
@@ -4677,20 +4683,20 @@ async function runCrossSurfaceStateSuite() {
   const html = indexedApi.commandPaletteResultsHtmlForTest();
   assert.ok(html.includes(`class="command-palette-group" title="Indexed ${indexedRoot}"`), 'the clipped indexed-root group preserves its full path as a hover title');
   });
-  test('quick-open restricts DOIT family search to sibling YOLOmux worktrees', () => {
+  test('quick-open restricts DOIT family search to sibling YOmux worktrees', () => {
   const doitFamilyApi = loadYolomux('', ['1']);
-  assert.deepStrictEqual(canonical(doitFamilyApi.fileQuickOpenExtraRootsForSearchQuery('DOIT')), ['/home/test'], 'DOIT queries search the current YOLOmux workdir family parent');
+  assert.deepStrictEqual(canonical(doitFamilyApi.fileQuickOpenExtraRootsForSearchQuery('DOIT')), ['/home/test'], 'DOIT queries search the current YOmux workdir family parent');
   doitFamilyApi.setFileQuickOpenCandidatesForTest('/home/test/yolomux.dev3', [
     {name: 'DOIT.64.md', path: '/home/test/yolomux.dev1/DOIT.64.md', relative_path: 'yolomux.dev1/DOIT.64.md', indexed_root: '/home/test', kind: 'file'},
     {name: 'DOIT.57.md', path: '/home/test/yolomux.dev2/DOIT.57.md', relative_path: 'yolomux.dev2/DOIT.57.md', indexed_root: '/home/test', kind: 'file'},
     {name: 'DOIT.parser-performance-v2-audit.md', path: '/home/test/dynamo/frontend-crates/DOIT.parser-performance-v2-audit.md', relative_path: 'frontend-crates/DOIT.parser-performance-v2-audit.md', indexed_root: '/home/test/dynamo', kind: 'file'},
-    {name: '75_dockview_layout.js', path: '/home/test/yolomux.dev3/static_src/js/yolomux/75_dockview_layout.js', relative_path: 'static_src/js/yolomux/75_dockview_layout.js', indexed_root: '/home/test/yolomux.dev3', kind: 'file'},
+    {name: '75_dockview_layout.js', path: '/home/test/yolomux.dev3/static_src/js/yomux/75_dockview_layout.js', relative_path: 'static_src/js/yomux/75_dockview_layout.js', indexed_root: '/home/test/yolomux.dev3', kind: 'file'},
   ]);
   doitFamilyApi.setCommandPaletteStateForTest('files', 'DOIT');
   const doitFamilyPaths = doitFamilyApi.fileQuickOpenItems()
     .filter(item => item.category === 'file')
     .map(item => item.path);
-  assert.deepStrictEqual(canonical(doitFamilyPaths), ['/home/test/yolomux.dev1/DOIT.64.md', '/home/test/yolomux.dev2/DOIT.57.md'], 'DOIT quick-open keeps YOLOmux sibling docs and drops indexed Dynamo/fuzzy path noise');
+  assert.deepStrictEqual(canonical(doitFamilyPaths), ['/home/test/yolomux.dev1/DOIT.64.md', '/home/test/yolomux.dev2/DOIT.57.md'], 'DOIT quick-open keeps YOmux sibling docs and drops indexed Dynamo/fuzzy path noise');
   });
   test('cross-surface host state 25: C15 follow-up: cmd-P path mode offers a pinned "Open folder in Finder" row (Enter opens...', () => {
     assert.deepStrictEqual(
@@ -4815,10 +4821,10 @@ async function runCrossSurfaceStateSuite() {
   test('cross-surface host state 26: #31: the Finder indexed badge reflects the cached build status with a readable label...', () => {
     api.setFileExplorerIndexedDirsForTest(['/home/test/dynamo']);
     assert.deepStrictEqual(canonical(api.fileQuickOpenRootsForSearch('/home/test')), ['/home/test/dynamo'], 'an indexed child under the default root replaces the broad live parent search');
-    assert.equal(api.fileQuickOpenRootMatchesPathAlias('/home/test/yolomux.dev', 'yolo/TODO.md'), true, 'bare yolo/... queries match the YOLOmux repo basename as a narrow root alias');
+    assert.equal(api.fileQuickOpenRootMatchesPathAlias('/home/test/yolomux.dev', 'yolo/TODO.md'), true, 'bare yolo/... queries match the YOmux repo basename as a narrow root alias');
     assert.deepStrictEqual(canonical(api.fileQuickOpenExtraRootsForSearchQuery('yolo/TODO.md')), ['/home/test/yolomux.dev'], 'bare yolo/... queries add the app repo root without adding all of home');
-    assert.deepStrictEqual(canonical(api.fileQuickOpenRootsForSearch('/home/test', 'yolo/TODO.md')), ['/home/test/dynamo', '/home/test/yolomux.dev'], 'yolo/TODO.md searches the YOLOmux checkout even when home is narrowed to indexed Dynamo');
-    assert.deepStrictEqual(canonical(api.fileQuickOpenRootsForSearch('/home/test', 'src/file.js')), ['/home/test/dynamo'], 'unrelated slash queries do not add the YOLOmux root');
+    assert.deepStrictEqual(canonical(api.fileQuickOpenRootsForSearch('/home/test', 'yolo/TODO.md')), ['/home/test/dynamo', '/home/test/yolomux.dev'], 'yolo/TODO.md searches the YOmux checkout even when home is narrowed to indexed Dynamo');
+    assert.deepStrictEqual(canonical(api.fileQuickOpenRootsForSearch('/home/test', 'src/file.js')), ['/home/test/dynamo'], 'unrelated slash queries do not add the YOmux root');
     const staleDoitApi = loadYolomux('', ['1']);
     const staleDoitPath = '/home/test/yolomux.dev1/DOIT.57.md';
     const realDoitPath = '/home/test/yolomux.dev2/DOIT.57.md';
@@ -4886,17 +4892,17 @@ async function runCrossSurfaceStateSuite() {
     api.setFileExplorerIndexExcludePathsForTest(['/home/test/dynamo/backup']);
     assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo/backup'), 'index excluded', 'an explicit exclusion says index excluded');
     assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo/backup/archive'), '', 'descendants of an excluded path stay visually quiet');
-    const indexBadgeCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
+    const indexBadgeCss = fs.readFileSync('static_src/css/yomux/50_terminal_file_tree.css', 'utf8');
     assert.ok(/\.file-tree-row\.indexed-directory > \.file-tree-git-status,[\s\S]*?\.file-tree-row\.index-excluded-entry > \.file-tree-git-status[\s\S]*?flex-basis: auto;[\s\S]*?padding-inline: var\(--space-4\)/.test(indexBadgeCss), 'readable index labels expand beyond the one-character git badge width');
     const checkboxInput = {getAttribute: name => name === 'type' ? 'checkbox' : ''};
     const textInput = {getAttribute: name => name === 'type' ? 'text' : ''};
     assert.equal(api.markdownPreviewInputAllowed(checkboxInput), true, 'GFM task-list checkbox inputs survive markdown sanitization');
     assert.equal(api.markdownPreviewInputAllowed(textInput), false, 'non-checkbox inputs stay blocked in markdown preview');
-    const markdownSource = fs.readFileSync('static/yolomux.js', 'utf8');
+    const markdownSource = fs.readFileSync('static/yomux.js', 'utf8');
     const blockedTagsSource = markdownSource.slice(markdownSource.indexOf('const MARKDOWN_PREVIEW_BLOCKED_TAGS'), markdownSource.indexOf('const MARKDOWN_PREVIEW_URL_ATTRS'));
     assert.ok(!blockedTagsSource.includes("'input'"), 'markdown sanitizer no longer blocks safe task-list checkboxes at the tag level');
     assert.ok(markdownSource.includes("const MARKDOWN_PREVIEW_INPUT_ATTRS = new Set(['type', 'checked', 'disabled', 'aria-label', 'class'])"), 'markdown task checkbox sanitizer has an input attribute allow-list');
-    const cssSource = fs.readFileSync('static/yolomux.css', 'utf8');
+    const cssSource = fs.readFileSync('static/yomux.css', 'utf8');
     assert.ok(cssSource.includes('.markdown-body ul.contains-task-list'), 'markdown task lists remove the regular bullet gutter');
     assert.ok(cssSource.includes('.markdown-body li.task-list-item > input[type="checkbox"]'), 'markdown task-list checkbox alignment is pinned');
     // Descendants of an indexed root stay visually quiet; the root's indexed badge is the only repeated signal.
@@ -4961,8 +4967,8 @@ async function runCrossSurfaceStateSuite() {
     const unpinTabRow = Array.from(pinnedContextMenu.children).find(child => child.getAttribute('aria-label') === 'Unpin Tab');
     assert.ok(unpinTabRow?.innerHTML.includes('Unpin Tab'), 'pinned tab context menu flips to Unpin Tab');
     assert.equal(unpinTabRow?.getAttribute('aria-checked'), 'true', 'pinned tab context menu row is checked');
-    const paneTabsCss = fs.readFileSync('static_src/css/yolomux/40_layout_panes_tabs.css', 'utf8');
-    const contextMenuCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
+    const paneTabsCss = fs.readFileSync('static_src/css/yomux/40_layout_panes_tabs.css', 'utf8');
+    const contextMenuCss = fs.readFileSync('static_src/css/yomux/50_terminal_file_tree.css', 'utf8');
     assert.ok(/\.pane-tab-pin-icon\s*\{[\s\S]*flex:\s*0 0 18px;[\s\S]*place-items:\s*center;[\s\S]*\.pane-tab-pin-icon::before\s*\{[\s\S]*width:\s*14px;[\s\S]*background:\s*currentColor;[\s\S]*mask:\s*var\(--icon-pin\) center \/ contain no-repeat/.test(paneTabsCss), 'every pinned tab uses one plain thin pin icon through the shared component without state-specific badge styling');
     assert.equal(/\.terminal-context-menu button\[data-checked="true"\]::before/.test(contextMenuCss), false, 'checked context-menu rows rely on their stateful icon instead of adding a duplicate star marker');
     const filePathForMenu = '/home/test/yolomux.dev/README.md';
@@ -4977,6 +4983,7 @@ async function runCrossSurfaceStateSuite() {
       listener({preventDefault() {}, stopPropagation() {}});
     }
     assert.deepStrictEqual(canonical(api.openedWindowsForTest().map(record => record.url)), ['/preview-popout?path=%2Fhome%2Ftest%2Fyolomux.dev%2FREADME.md'], 'file tab Pop out opens the same preview popout route as the header button');
+    assert.equal(api.openedWindowsForTest()[0].name, 'yomux-preview-%2Fhome%2Ftest%2Fyolomux.dev%2FREADME.md', 'preview popouts use the renamed window namespace');
     api.setPinnedTabsForTest([]);
     const sessionViews = api.tmuxSessionViewCommands('1');
     assert.deepStrictEqual(canonical(sessionViews.map(item => item.label)), ["Transcript for session '1'", "YO!summary for session '1'", "Event log for session '1'", 'Show/hide Info Bar', 'tmux status bar']);
@@ -5180,7 +5187,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(api.panelControlsHtml(api.finderItemId).includes('data-pane-actions'), false);
     assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['finder.toolbar.rootLabel'], undefined, 'Finder toolbar no longer carries a Root button label');
     assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['finder.rootMode.fixed'], undefined, 'Finder toolbar no longer carries a Root mode title');
-    const serverShell = fs.readFileSync('yolomux_lib/web.py', 'utf8');
+    const serverShell = fs.readFileSync('yomux_lib/web.py', 'utf8');
     assert.ok(serverShell.includes('id="fileExplorerRootMode"'));
     assert.ok(serverShell.includes('id="fileExplorerRootMode"') && serverShell.includes('server_string(locale, "finder.toolbar.syncLabel")'), 'Server-rendered Finder root toggle starts with the localized Sync label');
     assert.equal(serverShell.includes('>Root</button>'), false, 'Server-rendered Finder root toggle must not flash Root before JS runs');
@@ -5366,13 +5373,13 @@ async function runCrossSurfaceStateSuite() {
       affectedDirs: [],
       expandPaths: [],
     });
-    const syncCss = fs.readFileSync('static/yolomux.css', 'utf8');
+    const syncCss = fs.readFileSync('static/yomux.css', 'utf8');
     assert.equal(syncCss.includes('--finder-session-repo-bg'), false, 'Finder Sync repo marker no longer uses a background token');
     assert.equal(syncCss.includes('--finder-session-touched-bg'), false, 'Finder Sync touched-dir marker no longer uses a background token');
     assert.equal(syncCss.includes('--finder-sync-expanded-bg'), false, 'Finder auto-expanded Sync marker no longer uses a background token');
     assert.ok(/\.file-tree-row\.file-tree-row--sync-expanded > \.file-tree-name,[\s\S]*?\.file-tree-row\.file-tree-row--session-repo > \.file-tree-name,[\s\S]*?\.file-tree-row\.file-tree-row--session-touched > \.file-tree-name,[\s\S]*?\.file-tree-row\.file-tree-row--changed-ancestor > \.file-tree-name\s*\{[\s\S]*?font-weight:\s*800/.test(syncCss), 'Finder Sync and changed-ancestor markers bold the row name instead of painting a background');
     assert.ok(/\.file-tree-git-status\.file-tree-git-status-unknown\s*\{[\s\S]*?background:\s*var\(--50-terminal-file-tree-file-tree-git-status-bg-107\)[\s\S]*?color:\s*var\(--50-terminal-file-tree-file-tree-git-status-fg-108\)/.test(syncCss), 'Finder ? status badge routes through shared theme tokens');
-    const fileTreeTokenCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
+    const fileTreeTokenCss = fs.readFileSync('static_src/css/yomux/00_tokens_base.css', 'utf8');
     assert.ok(fileTreeTokenCss.includes('--50-terminal-file-tree-file-tree-git-status-bg-107: var(--paint-overlay-slate-06) !important;') && fileTreeTokenCss.includes('--50-terminal-file-tree-file-tree-git-status-fg-108: rgb(var(--overlay-slate-rgb) / 0.36);'), 'light Finder ? status badge is faint against a light background through the shared slate paint token');
     assert.equal(syncCss.includes('.changes-status-unknown'), false, 'Differ no longer has a separate unknown-status CSS path');
     scrollContainer = {

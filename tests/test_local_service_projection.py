@@ -25,19 +25,19 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib import app as app_module
-from yolomux_lib import local_service_projection
-from yolomux_lib.backend_health import store as store_module
-from yolomux_lib.backend_health.observer import observed_health
-from yolomux_lib.backend_health.store import BackendHealthStore
-from yolomux_lib.backend_health.store import HealthSnapshot
-from yolomux_lib.backend_health.store import ResourceObservation
-from yolomux_lib.local_services import rpc
-from yolomux_lib.local_services.registry import LocalServiceRegistry
-from yolomux_lib.local_services.rpc import reset_local_service_traffic
-from yolomux_lib.search.search_indexer import SearchIndexerClient
-from yolomux_lib.stats_current.client import StatsCurrentClient
-from yolomux_lib.watchd_client import WatchClient
+from yomux_lib import app as app_module
+from yomux_lib import local_service_projection
+from yomux_lib.backend_health import store as store_module
+from yomux_lib.backend_health.observer import observed_health
+from yomux_lib.backend_health.store import BackendHealthStore
+from yomux_lib.backend_health.store import HealthSnapshot
+from yomux_lib.backend_health.store import ResourceObservation
+from yomux_lib.local_services import rpc
+from yomux_lib.local_services.registry import LocalServiceRegistry
+from yomux_lib.local_services.rpc import reset_local_service_traffic
+from yomux_lib.search.search_indexer import SearchIndexerClient
+from yomux_lib.stats_current.client import StatsCurrentClient
+from yomux_lib.watchd_client import WatchClient
 
 
 pytestmark = pytest.mark.usefixtures("no_control_socket", "isolated_yoagent_conversation_state", "isolated_tmux_socket")
@@ -119,7 +119,7 @@ def _watchd_client_with_record(tmp_path: Path, *, started_at: float, pid: int, p
     record = {
         **registry.host_identity.process_record_fields(pid=pid),
         "service": "watchd",
-        "module": "yolomux_lib.watchd",
+        "module": "yomux_lib.watchd",
         "protocol_version": protocol_version,
         "socket": str(registry.socket_path),
         "started_at": started_at,
@@ -293,7 +293,7 @@ def test_watchd_client_runtime_status_still_has_zero_production_callers():
     repo_root = Path(__file__).resolve().parent.parent
     callers = [
         str(path.relative_to(repo_root))
-        for path in sorted((repo_root / "yolomux_lib").rglob("*.py"))
+        for path in sorted((repo_root / "yomux_lib").rglob("*.py"))
         for line in path.read_text(encoding="utf-8").splitlines()
         if "watch_client.runtime_status" in line and not line.strip().startswith("#")
     ]
@@ -512,7 +512,7 @@ def test_statsd_is_a_named_row_producer_and_no_longer_an_inline_literal():
     all, and every service -- statsd included -- is one attribute reference to a whole-row
     owner rather than an expression that assembles a row at the call site.
     """
-    projection = _definition_source("yolomux_lib/app.py", ("SystemStatusProjector", "runtime_local_services"))
+    projection = _definition_source("yomux_lib/app.py", ("SystemStatusProjector", "runtime_local_services"))
     inline_literals = [
         node for node in ast.walk(ast.parse(textwrap.dedent(projection))) if isinstance(node, ast.Dict)
     ]
@@ -526,7 +526,7 @@ def test_statsd_is_a_named_row_producer_and_no_longer_an_inline_literal():
         assert expression.startswith("app."), (service, expression)
         assert "(" not in expression, (service, expression)
     # The whole row really does come back from that owner, not from the projection.
-    statsd_source = _definition_source("yolomux_lib/app.py", ("SystemStatusProjector", "statsd_runtime_status"))
+    statsd_source = _definition_source("yomux_lib/app.py", ("SystemStatusProjector", "statsd_runtime_status"))
     statsd_calls = [
         node for node in ast.walk(ast.parse(textwrap.dedent(statsd_source)))
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "local_service_runtime_row"
@@ -538,7 +538,7 @@ def test_statsd_is_a_named_row_producer_and_no_longer_an_inline_literal():
 def _producer_expressions() -> dict[str, str]:
     """The literal `{service: producer}` mapping local_services_row_producers returns."""
     source = textwrap.dedent(
-        _definition_source("yolomux_lib/app.py", ("SystemStatusProjector", "local_services_row_producers"))
+        _definition_source("yomux_lib/app.py", ("SystemStatusProjector", "local_services_row_producers"))
     )
     mapping = next(
         node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Dict)
@@ -556,10 +556,10 @@ def test_the_collector_is_the_only_path_into_the_projection():
     codebase fails on most, and the DOIT names it explicitly. Both callers must reach
     `local_services_snapshot()`, and neither may build rows of its own.
     """
-    snapshot_source = _definition_source("yolomux_lib/app.py", ("SystemStatusProjector", "local_services_snapshot"))
-    projection_source = _definition_source("yolomux_lib/app.py", ("SystemStatusProjector", "runtime_local_services"))
-    sampler_source = _definition_source("yolomux_lib/app.py", ("TmuxWebtermApp", "collect_current_stats_service_load"))
-    app_text = (Path(__file__).resolve().parent.parent / "yolomux_lib" / "app.py").read_text(encoding="utf-8")
+    snapshot_source = _definition_source("yomux_lib/app.py", ("SystemStatusProjector", "local_services_snapshot"))
+    projection_source = _definition_source("yomux_lib/app.py", ("SystemStatusProjector", "runtime_local_services"))
+    sampler_source = _definition_source("yomux_lib/app.py", ("TmuxWebtermApp", "collect_current_stats_service_load"))
+    app_text = (Path(__file__).resolve().parent.parent / "yomux_lib" / "app.py").read_text(encoding="utf-8")
 
     assert "LocalServicesCollector(" in snapshot_source
     # Exactly one construction site for the collector in the whole app.

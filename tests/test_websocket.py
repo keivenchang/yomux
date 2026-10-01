@@ -4,7 +4,7 @@ import socket
 import ssl
 import struct
 
-from yolomux_lib import websocket
+from yomux_lib import websocket
 
 
 def masked_client_frame(payload: bytes, opcode: int = 1, mask: bytes = b"\x01\x02\x03\x04", fin: bool = True) -> bytes:

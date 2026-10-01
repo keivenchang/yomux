@@ -5,7 +5,7 @@
 
 // W2: the JavaScript half of the ONE neutral diagnostic-redaction contract. The authoritative
 // fixture (tests/fixtures/diagnostic_redaction.json) is generated from the Python owner
-// (yolomux_lib/diagnostic_redaction.py). This suite proves the browser redactor
+// (yomux_lib/diagnostic_redaction.py). This suite proves the browser redactor
 // (10_core_utils.js::redactDiagnosticValue) reproduces every expected value byte-for-byte,
 // is idempotent, and leaves zero fixture secret fragments behind. Redaction is a security boundary.
 
@@ -27,7 +27,7 @@ function test(name, body) {
   }
 }
 
-const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+const coreSource = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
 const redactorSource = coreSource.slice(
   coreSource.indexOf('function redactDiagnosticSecretText('),
   coreSource.indexOf('\nfunction recordJsDebugEvent('),

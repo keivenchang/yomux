@@ -21,12 +21,12 @@ from urllib.parse import urlencode
 
 import pytest
 
-from yolomux_lib import common
-from yolomux_lib import http_routes
-from yolomux_lib import server as server_module
-from yolomux_lib import server_auth
-from yolomux_lib.server import Handler
-from yolomux_lib.server import TmuxWebtermHTTPServer
+from yomux_lib import common
+from yomux_lib import http_routes
+from yomux_lib import server as server_module
+from yomux_lib import server_auth
+from yomux_lib.server import Handler
+from yomux_lib.server import TmuxWebtermHTTPServer
 
 
 pytestmark = pytest.mark.socket
@@ -407,7 +407,7 @@ def test_valid_multipart_upload_header_defects_do_not_trigger_framing_rejection(
     app = SimpleNamespace(sessions=[], dangerously_yolo=False, upload_files=upload_files)
     server, thread = _start_server(monkeypatch, tmp_path, app=app)
     port = server.server_address[1]
-    boundary = "----WebKitFormBoundaryYOLOmuxGateWitness"
+    boundary = "----WebKitFormBoundaryYOmuxGateWitness"
     body = (
         f"--{boundary}\r\n"
         'Content-Disposition: form-data; name="files"; filename="mobile-upload.txt"\r\n'

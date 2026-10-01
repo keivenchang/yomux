@@ -6,10 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from yolomux_lib import http_routes
-from yolomux_lib.server_logs import SERVER_LOGS
-from yolomux_lib.server_logs import install_server_log_handler
-from yolomux_lib.server_logs import ServerLogRing
+from yomux_lib import http_routes
+from yomux_lib.server_logs import SERVER_LOGS
+from yomux_lib.server_logs import install_server_log_handler
+from yomux_lib.server_logs import ServerLogRing
 
 
 def test_server_log_ring_preserves_levels_order_and_metadata():
@@ -36,7 +36,7 @@ def test_server_log_ring_redacts_recognized_fields_before_retention_and_emits_pt
     secret = "fixture-secret-never-log"
     tokenized = lambda label: f"{label}?token={secret}"
     fixed_now = datetime(2026, 1, 15, 12, 34, 56, tzinfo=timezone.utc).timestamp()
-    monkeypatch.setattr("yolomux_lib.server_logs.time.time", lambda: fixed_now)
+    monkeypatch.setattr("yomux_lib.server_logs.time.time", lambda: fixed_now)
     ring = ServerLogRing(capacity=8)
 
     ring.emit("error", "browser/api", tokenized("GET /api/fs/raw failed"), category="browser")
@@ -71,8 +71,8 @@ def test_server_log_ring_is_bounded_and_deduplicates_for_a_window(monkeypatch):
     # time.monotonic(). The finite iterator is kept exactly as before, so any UNEXPECTED extra
     # monotonic()/time() call INSIDE this block still exhausts it and raises -- the oracle bites.
     with monkeypatch.context() as m:
-        m.setattr("yolomux_lib.server_logs.time.monotonic", lambda: next(clock))
-        m.setattr("yolomux_lib.server_logs.time.time", lambda: next(clock))
+        m.setattr("yomux_lib.server_logs.time.monotonic", lambda: next(clock))
+        m.setattr("yomux_lib.server_logs.time.time", lambda: next(clock))
         ring = ServerLogRing(capacity=2)
 
         assert ring.emit("warning", "sessions", "fallback", dedupe_key="pid:1", dedupe_seconds=15) is not None
@@ -113,12 +113,12 @@ def test_installed_handler_captures_process_warnings_once():
     handler = install_server_log_handler()
     try:
         assert install_server_log_handler() is handler
-        logging.getLogger("yolomux_lib.test").warning("collector unavailable")
+        logging.getLogger("yomux_lib.test").warning("collector unavailable")
 
         payload = SERVER_LOGS.payload()
         assert len(payload["logs"]) == 1
         assert payload["logs"][0]["level"] == "warning"
-        assert payload["logs"][0]["source"] == "yolomux_lib.test"
+        assert payload["logs"][0]["source"] == "yomux_lib.test"
         assert payload["logs"][0]["message"] == "collector unavailable"
     finally:
         root.removeHandler(handler)

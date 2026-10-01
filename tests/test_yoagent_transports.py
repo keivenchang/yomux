@@ -5,25 +5,25 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
-import yolomux_lib.yoagent.transports as transport_module
-from yolomux_lib.agent_comms.claude_stream_json import claude_stream_json_argv
-from yolomux_lib.agent_comms.claude_stream_json import CLAUDE_STREAM_JSON_DEFAULT_TOOLS
-from yolomux_lib.agent_comms.claude_stream_json import CLAUDE_STREAM_JSON_PERMISSION_MODE
-from yolomux_lib.agent_comms.claude_stream_json import claude_stream_json_result
-from yolomux_lib.common import codex_exec_argv
-from yolomux_lib.yoagent.transports import ClaudeChannelsTransport
-from yolomux_lib.yoagent.transports import ClaudeSdkTransport
-from yolomux_lib.yoagent.transports import ClaudeStreamJsonTransport
-from yolomux_lib.yoagent.transports import CodexAppServerTransport
-from yolomux_lib.yoagent.transports import CodexAppServerSession
-from yolomux_lib.yoagent.transports import CodexExecTransport
-from yolomux_lib.yoagent.transports import CodexMcpServerTransport
-from yolomux_lib.yoagent.transports import CodexSdkTransport
-from yolomux_lib.yoagent.transports import TMUX_LEGACY_TRANSPORT_ID
-from yolomux_lib.yoagent.transports import TmuxLegacyTransport
-from yolomux_lib.yoagent.transports import TransportInterrupted
-from yolomux_lib.yoagent.transports import default_yoagent_transport_registry
-from yolomux_lib.yoagent.transports import normalize_yoagent_transport_id
+import yomux_lib.yoagent.transports as transport_module
+from yomux_lib.agent_comms.claude_stream_json import claude_stream_json_argv
+from yomux_lib.agent_comms.claude_stream_json import CLAUDE_STREAM_JSON_DEFAULT_TOOLS
+from yomux_lib.agent_comms.claude_stream_json import CLAUDE_STREAM_JSON_PERMISSION_MODE
+from yomux_lib.agent_comms.claude_stream_json import claude_stream_json_result
+from yomux_lib.common import codex_exec_argv
+from yomux_lib.yoagent.transports import ClaudeChannelsTransport
+from yomux_lib.yoagent.transports import ClaudeSdkTransport
+from yomux_lib.yoagent.transports import ClaudeStreamJsonTransport
+from yomux_lib.yoagent.transports import CodexAppServerTransport
+from yomux_lib.yoagent.transports import CodexAppServerSession
+from yomux_lib.yoagent.transports import CodexExecTransport
+from yomux_lib.yoagent.transports import CodexMcpServerTransport
+from yomux_lib.yoagent.transports import CodexSdkTransport
+from yomux_lib.yoagent.transports import TMUX_LEGACY_TRANSPORT_ID
+from yomux_lib.yoagent.transports import TmuxLegacyTransport
+from yomux_lib.yoagent.transports import TransportInterrupted
+from yomux_lib.yoagent.transports import default_yoagent_transport_registry
+from yomux_lib.yoagent.transports import normalize_yoagent_transport_id
 
 
 def test_transport_registry_order_and_aliases():
@@ -126,7 +126,7 @@ def test_tmux_legacy_transport_sends_with_injected_paste_func():
 def test_codex_exec_transport_uses_output_last_message(monkeypatch, tmp_path):
     codex_home = tmp_path / "codex-home"
     calls = []
-    monkeypatch.setenv("YOLOMUX_CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("YOMUX_CODEX_HOME", str(codex_home))
     monkeypatch.setattr(transport_module.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
 
     def fake_run(args, **kwargs):
@@ -268,7 +268,7 @@ def test_claude_channels_transport_reports_missing_channel():
 
     assert result.ok is False
     assert result.sent is False
-    assert result.error == "target Claude pane lacks a YOLOmux Claude Channel; use tmux-legacy"
+    assert result.error == "target Claude pane lacks a YOmux Claude Channel; use tmux-legacy"
 
 
 def test_claude_channels_transport_reports_missing_cli_flag(monkeypatch):
@@ -556,7 +556,7 @@ def test_codex_app_server_session_interrupt_terminates_current_process():
 
 def test_codex_app_server_transport_runs_stdio_json_rpc_until_turn_completed(monkeypatch, tmp_path):
     codex_home = tmp_path / "codex-home"
-    monkeypatch.setenv("YOLOMUX_CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("YOMUX_CODEX_HOME", str(codex_home))
     monkeypatch.setattr(transport_module.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
     messages = [
         {"jsonrpc": "2.0", "id": "initialize-1", "result": {"userAgent": "codex-cli", "codexHome": "/tmp/codex", "platformFamily": "unix", "platformOs": "linux"}},

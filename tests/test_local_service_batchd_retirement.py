@@ -3,9 +3,9 @@ import signal
 import pytest
 
 from tests.helpers.local_service_records import FixtureProcessRecordBuilder
-from yolomux_lib.local_services import registry as registry_mod
-from yolomux_lib.local_services.registry import LocalServiceRegistry
-from yolomux_lib.local_services.registry import LocalServiceSpec
+from yomux_lib.local_services import registry as registry_mod
+from yomux_lib.local_services.registry import LocalServiceRegistry
+from yomux_lib.local_services.registry import LocalServiceSpec
 
 
 def test_registry_waits_for_long_running_accepted_batchd_work_before_code_replacement(
@@ -25,7 +25,7 @@ def test_registry_waits_for_long_running_accepted_batchd_work_before_code_replac
         tmp_path,
         LocalServiceSpec(
             "batchd",
-            "yolomux_lib.batchd",
+            "yomux_lib.batchd",
             "batchd.sock",
             current_protocol,
             code_revision="current-revision",
@@ -120,7 +120,7 @@ def test_registry_legacy_batchd_shutdown_requires_observable_idle(active, tmp_pa
         tmp_path,
         LocalServiceSpec(
             "batchd",
-            "yolomux_lib.batchd",
+            "yomux_lib.batchd",
             "batchd.sock",
             current_protocol,
             code_revision="current-revision",
@@ -201,7 +201,7 @@ def test_registry_bounds_batchd_drain_before_signalling_stuck_replacement(tmp_pa
         tmp_path,
         LocalServiceSpec(
             "batchd",
-            "yolomux_lib.batchd",
+            "yomux_lib.batchd",
             "batchd.sock",
             service_protocol,
             code_revision="current-revision",
@@ -295,7 +295,7 @@ def test_registry_refuses_batchd_shutdown_receipt_from_another_source_epoch(tmp_
         tmp_path,
         LocalServiceSpec(
             "batchd",
-            "yolomux_lib.batchd",
+            "yomux_lib.batchd",
             "batchd.sock",
             service_protocol,
             code_revision="current-revision",
@@ -369,7 +369,7 @@ def test_registry_stops_batchd_drain_wait_when_same_pid_identity_is_reused(tmp_p
         tmp_path,
         LocalServiceSpec(
             "batchd",
-            "yolomux_lib.batchd",
+            "yomux_lib.batchd",
             "batchd.sock",
             service_protocol,
             code_revision="current-revision",

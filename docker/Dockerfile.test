@@ -1,7 +1,7 @@
-# Isolated test runner for YOLOmux.
+# Isolated test runner for YOmux.
 #
 # Each run owns its HOME and writable container layer. The host HOME is never mounted, so
-# tests cannot reach live YOLOmux, Claude, or Codex state through an overlooked call site.
+# tests cannot reach live YOmux, Claude, or Codex state through an overlooked call site.
 FROM python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -45,11 +45,11 @@ RUN curl --fail --location --retry 3 --output /tmp/go.tar.gz \
  && rm -f /tmp/go.tar.gz
 ENV PATH=/usr/local/go/bin:${PATH}
 
-RUN mkdir -p /opt/yolomux-bazel-registry \
+RUN mkdir -p /opt/yomux-bazel-registry \
  && curl --fail --location --retry 3 --output /tmp/bazel-central-registry.tar.gz \
       "https://github.com/bazelbuild/bazel-central-registry/archive/${BCR_COMMIT}.tar.gz" \
  && echo "${BCR_SHA256}  /tmp/bazel-central-registry.tar.gz" | sha256sum --check --status \
- && tar --extract --gzip --file /tmp/bazel-central-registry.tar.gz --strip-components=1 --directory /opt/yolomux-bazel-registry \
+ && tar --extract --gzip --file /tmp/bazel-central-registry.tar.gz --strip-components=1 --directory /opt/yomux-bazel-registry \
  && rm -f /tmp/bazel-central-registry.tar.gz
 
 # Match the Node major used by the source gate instead of Debian's older package.
@@ -61,13 +61,13 @@ RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
 # E2E can use synthetic credentials and a local fake provider without mounting host client binaries
 # or credentials. Install scripts remain enabled because these CLIs select their platform binary
 # during installation; the lock fixes the package bytes and versions that those scripts consume.
-COPY docker/agent-clients/package.json docker/agent-clients/package-lock.json /opt/yolomux-agent-clients/
-ENV PATH=/opt/yolomux-agent-clients/node_modules/.bin:${PATH}
-RUN cd /opt/yolomux-agent-clients \
+COPY docker/agent-clients/package.json docker/agent-clients/package-lock.json /opt/yomux-agent-clients/
+ENV PATH=/opt/yomux-agent-clients/node_modules/.bin:${PATH}
+RUN cd /opt/yomux-agent-clients \
  && npm ci --no-audit --no-fund --omit=dev \
- && ln -sf /opt/yolomux-agent-clients/node_modules/.bin/claude /usr/local/bin/claude \
- && ln -sf /opt/yolomux-agent-clients/node_modules/.bin/codex /usr/local/bin/codex \
- && ln -sf /opt/yolomux-agent-clients/node_modules/.bin/opencode /usr/local/bin/opencode \
+ && ln -sf /opt/yomux-agent-clients/node_modules/.bin/claude /usr/local/bin/claude \
+ && ln -sf /opt/yomux-agent-clients/node_modules/.bin/codex /usr/local/bin/codex \
+ && ln -sf /opt/yomux-agent-clients/node_modules/.bin/opencode /usr/local/bin/opencode \
  && command -v claude \
  && command -v codex \
  && command -v opencode
@@ -85,58 +85,58 @@ RUN cd /opt/xterm && npm ci --ignore-scripts --no-audit --no-fund --omit=dev \
  && test -f /opt/xterm/node_modules/@xterm/xterm/lib/xterm.js \
  && test -f /opt/xterm/node_modules/@xterm/xterm/css/xterm.css \
  && test -f /opt/xterm/node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js
-COPY static/vendor/xterm.js static/vendor/xterm.css static/vendor/xterm-addon-unicode11.js /opt/yolomux-xterm-vendor/
-RUN cmp /opt/yolomux-xterm-vendor/xterm.js /opt/xterm/node_modules/@xterm/xterm/lib/xterm.js \
- && cmp /opt/yolomux-xterm-vendor/xterm.css /opt/xterm/node_modules/@xterm/xterm/css/xterm.css \
- && cmp /opt/yolomux-xterm-vendor/xterm-addon-unicode11.js /opt/xterm/node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js
+COPY static/vendor/xterm.js static/vendor/xterm.css static/vendor/xterm-addon-unicode11.js /opt/yomux-xterm-vendor/
+RUN cmp /opt/yomux-xterm-vendor/xterm.js /opt/xterm/node_modules/@xterm/xterm/lib/xterm.js \
+ && cmp /opt/yomux-xterm-vendor/xterm.css /opt/xterm/node_modules/@xterm/xterm/css/xterm.css \
+ && cmp /opt/yomux-xterm-vendor/xterm-addon-unicode11.js /opt/xterm/node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js
 
 # Keep source copies after the cache-independent test dependencies above. Go/Bazel prefetching
 # still invalidates when this checkout's build graph changes, but client, Python, and xterm layers
 # remain reusable across ordinary Go source edits.
-COPY go.mod go.sum /opt/yolomux-bazel-seed/
-COPY .bazelversion MODULE.bazel BUILD.bazel WORKSPACE /opt/yolomux-bazel-seed/
-COPY cmd /opt/yolomux-bazel-seed/cmd
-COPY internal /opt/yolomux-bazel-seed/internal
+COPY go.mod go.sum /opt/yomux-bazel-seed/
+COPY .bazelversion MODULE.bazel BUILD.bazel WORKSPACE /opt/yomux-bazel-seed/
+COPY cmd /opt/yomux-bazel-seed/cmd
+COPY internal /opt/yomux-bazel-seed/internal
 # The launcher supplies a temporary context containing only modules returned by `go mod download`
 # for this checkout. The image build is deliberately fail-closed: the Go seed must be complete,
 # and this layer may not reach a proxy to fill a missing module. That keeps a passing image tied to
 # the declared checkout cache rather than an ambient network or host dependency.
-COPY --from=go-mod-cache . /opt/yolomux-go-mod-cache/
-RUN mkdir -p /opt/yolomux-go-mod-cache /opt/yolomux-bazel-repository-cache \
-      /opt/yolomux-bazel-go-path /opt/yolomux-bazel-go-cache \
- && cd /opt/yolomux-bazel-seed \
- && GOWORK=off GO111MODULE=on GOPATH=/opt/yolomux-bazel-go-path \
-      GOMODCACHE=/opt/yolomux-go-mod-cache GOCACHE=/opt/yolomux-bazel-go-cache \
+COPY --from=go-mod-cache . /opt/yomux-go-mod-cache/
+RUN mkdir -p /opt/yomux-go-mod-cache /opt/yomux-bazel-repository-cache \
+      /opt/yomux-bazel-go-path /opt/yomux-bazel-go-cache \
+ && cd /opt/yomux-bazel-seed \
+ && GOWORK=off GO111MODULE=on GOPATH=/opt/yomux-bazel-go-path \
+      GOMODCACHE=/opt/yomux-go-mod-cache GOCACHE=/opt/yomux-bazel-go-cache \
       GOPROXY=off GOSUMDB=off go mod download \
- && GOWORK=off GO111MODULE=on GOPATH=/opt/yolomux-bazel-go-path \
-      GOMODCACHE=/opt/yolomux-go-mod-cache GOCACHE=/opt/yolomux-bazel-go-cache \
-      bazel --output_user_root=/opt/yolomux-bazel-output \
+ && GOWORK=off GO111MODULE=on GOPATH=/opt/yomux-bazel-go-path \
+      GOMODCACHE=/opt/yomux-go-mod-cache GOCACHE=/opt/yomux-bazel-go-cache \
+      bazel --output_user_root=/opt/yomux-bazel-output \
         fetch \
-        --registry=file:///opt/yolomux-bazel-registry \
-        --repository_cache=/opt/yolomux-bazel-repository-cache \
+        --registry=file:///opt/yomux-bazel-registry \
+        --repository_cache=/opt/yomux-bazel-repository-cache \
         --repo_env=GO_REPOSITORY_USE_HOST_MODCACHE=1 \
-        --repo_env=GOMODCACHE=/opt/yolomux-go-mod-cache \
-        --repo_env=GOPATH=/opt/yolomux-bazel-go-path \
-        --repo_env=GOCACHE=/opt/yolomux-bazel-go-cache \
+        --repo_env=GOMODCACHE=/opt/yomux-go-mod-cache \
+        --repo_env=GOPATH=/opt/yomux-bazel-go-path \
+        --repo_env=GOCACHE=/opt/yomux-bazel-go-cache \
         @rules_go//go:def \
         @gazelle//:extensions.bzl \
         @com_github_mattn_go_sqlite3//:go_default_library \
-        //cmd/yolomux-go:yolomux_go \
+        //cmd/yomux-go:yomux-go \
         //cmd/fake-llm:fake_llm \
- && GOWORK=off GO111MODULE=on GOPATH=/opt/yolomux-bazel-go-path \
-      GOMODCACHE=/opt/yolomux-go-mod-cache GOCACHE=/opt/yolomux-bazel-go-cache \
-      bazel --output_user_root=/opt/yolomux-bazel-output \
+ && GOWORK=off GO111MODULE=on GOPATH=/opt/yomux-bazel-go-path \
+      GOMODCACHE=/opt/yomux-go-mod-cache GOCACHE=/opt/yomux-bazel-go-cache \
+      bazel --output_user_root=/opt/yomux-bazel-output \
         build \
-        --registry=file:///opt/yolomux-bazel-registry \
-        --repository_cache=/opt/yolomux-bazel-repository-cache \
+        --registry=file:///opt/yomux-bazel-registry \
+        --repository_cache=/opt/yomux-bazel-repository-cache \
         --repo_env=GO_REPOSITORY_USE_HOST_MODCACHE=1 \
-        --repo_env=GOMODCACHE=/opt/yolomux-go-mod-cache \
-        --repo_env=GOPATH=/opt/yolomux-bazel-go-path \
-        --repo_env=GOCACHE=/opt/yolomux-bazel-go-cache \
-        //cmd/yolomux-go:yolomux_go \
+        --repo_env=GOMODCACHE=/opt/yomux-go-mod-cache \
+        --repo_env=GOPATH=/opt/yomux-bazel-go-path \
+        --repo_env=GOCACHE=/opt/yomux-bazel-go-cache \
+        //cmd/yomux-go:yomux-go \
         //cmd/fake-llm:fake_llm \
- && chmod -R a+rX /opt/yolomux-go-mod-cache /opt/yolomux-bazel-repository-cache \
- && rm -rf /opt/yolomux-bazel-seed /opt/yolomux-bazel-go-path /opt/yolomux-bazel-go-cache /opt/yolomux-bazel-output
+ && chmod -R a+rX /opt/yomux-go-mod-cache /opt/yomux-bazel-repository-cache \
+ && rm -rf /opt/yomux-bazel-seed /opt/yomux-bazel-go-path /opt/yomux-bazel-go-cache /opt/yomux-bazel-output
 
 # Match host ownership for any explicit worktree writes made by tests.
 ARG RUNNER_UID=1000
@@ -152,29 +152,29 @@ RUN mkdir -p /home/runner/.local/bin /home/runner/.local/share /home/runner/.loc
 # These are image-owned inputs, never per-test workspaces. Make their read-only contract hold even
 # for rootless Docker, where container UID 0 maps to the invoking host user and could otherwise
 # mutate an image-backed cache in its writable container layer.
-RUN chmod -R a-w /opt/yolomux-go-mod-cache /opt/yolomux-bazel-repository-cache /opt/yolomux-bazel-registry
+RUN chmod -R a-w /opt/yomux-go-mod-cache /opt/yomux-bazel-repository-cache /opt/yomux-bazel-registry
 
 # This marker is part of the dedicated test-image identity. Container detection requires it in
 # addition to the generic Docker marker and overlay root, so a developer container cannot silently
 # bypass the outer runner's network, HOME, and source-mount boundary by setting one environment var.
-RUN printf '%s\n' 'yolomux-test-image-v1' > /opt/yolomux-test-image.marker \
- && chmod 0444 /opt/yolomux-test-image.marker
+RUN printf '%s\n' 'yomux-test-image-v1' > /opt/yomux-test-image.marker \
+ && chmod 0444 /opt/yomux-test-image.marker
 
 USER runner
 ENV HOME=/home/runner
-# YOLOmux is a Pacific product: the client stamps generated upload names with pacificDateStamp(), and
-# yolomux_lib/workspace/uploads.py and the server_time field in yolomux_lib/app.py render ambient local
+# YOmux is a Pacific product: the client stamps generated upload names with pacificDateStamp(), and
+# yomux_lib/workspace/uploads.py and the server_time field in yomux_lib/app.py render ambient local
 # time. A UTC container runs those paths on tomorrow's calendar day for the last 7-8 hours of every
 # Pacific day, which made the generated-upload-filename assertion deterministically red after 5pm PT.
 # Pinning here rather than passing -e TZ from docker/run-tests.sh puts the timezone inside the image
 # fingerprint owned by tools/docker_image.py, so the tag changes and no stale UTC image is reused.
 ENV TZ=America/Los_Angeles
-ENV YOLOMUX_TEST_CONTAINER=1
+ENV YOMUX_TEST_CONTAINER=1 YOLOMUX_TEST_CONTAINER=1
 WORKDIR /w
 
 # Fixture repositories need an identity; this config exists only in the throwaway HOME.
-RUN git config --global user.email "runner@yolomux.test" \
- && git config --global user.name "YOLOmux Test Runner" \
+RUN git config --global user.email "runner@yomux.test" \
+ && git config --global user.name "YOmux Test Runner" \
  && git config --global init.defaultBranch main \
  && git config --global --add safe.directory /w
 

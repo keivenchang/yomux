@@ -14,16 +14,16 @@ from urllib.parse import urlparse
 
 import pytest
 
-from yolomux_lib import common
-from yolomux_lib import filesystem
-from yolomux_lib import http_routes
-from yolomux_lib import server_auth
-from yolomux_lib import web
-from yolomux_lib.app import FilesystemOperationHttpResponse
-from yolomux_lib.app import TmuxWebtermApp
-from yolomux_lib.app import filesystem_operation_descriptor
-from yolomux_lib.infra import batchd
-from yolomux_lib.server import Handler
+from yomux_lib import common
+from yomux_lib import filesystem
+from yomux_lib import http_routes
+from yomux_lib import server_auth
+from yomux_lib import web
+from yomux_lib.app import FilesystemOperationHttpResponse
+from yomux_lib.app import TmuxWebtermApp
+from yomux_lib.app import filesystem_operation_descriptor
+from yomux_lib.infra import batchd
+from yomux_lib.server import Handler
 from tests.helpers.fixture_http_server import FixtureArtifactTransfer
 from tests.helpers.fixture_http_server import FixtureHttpServer
 from tests.helpers.fixture_http_server import request_fixture_http_header_list as request_header_list
@@ -91,7 +91,7 @@ def start_server(monkeypatch, tmp_path, app=None, tls_context=None):
     auth_path.write_text(active_auth_yaml(), encoding="utf-8")
     monkeypatch.setattr(common, "AUTH_CONFIG_PATH", auth_path)
     # C2: the pre-auth login/setup screens localize via the saved general.language (read at import time
-    # from the real ~/.config/yolomux). Force "system" (-> English) so English literal assertions don't
+    # from the real ~/.config/yomux). Force "system" (-> English) so English literal assertions don't
     # depend on the developer's saved locale or on test import order. request_locale_pref resolves the
     # name in server_auth's namespace, so patch it there; the yolomux_locale cookie branch stays live.
     monkeypatch.setattr(server_auth, "current_language_pref", lambda: "system")
@@ -330,6 +330,11 @@ def test_login_page_sets_auth_cookie(monkeypatch, tmp_path):
         assert status == HTTPStatus.UNAUTHORIZED
         assert json.loads(body)["legacy_error"] == "authentication required"
 
+        legacy_cookie = cookie.replace(f"{common.AUTH_COOKIE_NAME}_{port}=", f"{common.LEGACY_AUTH_COOKIE_NAME}_{port}=")
+        status, _headers, body = request(port, "GET", "/api/ping", headers={"Cookie": legacy_cookie})
+        assert status == HTTPStatus.OK
+        assert json.loads(body)["ok"] is True
+
         empty_layout_body = urlencode({"username": "keivenc", "password": "random-password", "next": "/?layout=empty"})
         status, headers, _body = request(
             port,
@@ -364,26 +369,24 @@ def test_login_page_uses_saved_theme_and_active_color(monkeypatch):
     assert "body.login-accent-purple" in css
     assert "--brand-green: var(--accent)" in css
     assert "--brand-primary-green: var(--accent)" in css
-    assert "--brand-yolo-bg: var(--accent)" in css
+    assert "--brand-mark-bg: var(--accent)" in css
 
 
 def test_login_page_localizes_via_locale_cookie(monkeypatch, tmp_path):
-    # C2: a yolomux_locale cookie localizes the pre-auth login screen regardless of the saved/forced
-    # default locale — proves the localization path works (request_locale_pref's cookie branch wins) and
-    # that the English-default test above is isolation, not a localization regression.
+    # C2: the current and legacy locale cookies localize pre-auth pages regardless of the saved locale.
     server, thread = start_server(monkeypatch, tmp_path)
     port = server.server_address[1]
     try:
-        status, _headers, body = request(port, "GET", "/login", headers={"Cookie": "yolomux_locale=zh-Hant"})
-        assert status == HTTPStatus.OK
-        localized = web.server_string("zh-Hant", "login.showPassword")
-        assert localized == "顯示密碼"
-        assert f'aria-label="{localized}"'.encode("utf-8") in body
-        localized_system = web.server_string("zh-Hant", "pref.general.language.system")
-        assert f">{localized_system}<".encode("utf-8") in body
-        # The English default must NOT appear when the cookie selects another locale.
-        assert b'aria-label="Show password"' not in body
-        assert b">System<" not in body
+        for cookie_name in ("yomux_locale", "yolomux_locale"):
+            status, _headers, body = request(port, "GET", "/login", headers={"Cookie": f"{cookie_name}=zh-Hant"})
+            assert status == HTTPStatus.OK
+            localized = web.server_string("zh-Hant", "login.showPassword")
+            assert localized == "顯示密碼"
+            assert f'aria-label="{localized}"'.encode("utf-8") in body
+            localized_system = web.server_string("zh-Hant", "pref.general.language.system")
+            assert f">{localized_system}<".encode("utf-8") in body
+            assert b'aria-label="Show password"' not in body
+            assert b">System<" not in body
     finally:
         stop_server(server, thread)
 
@@ -768,6 +771,7 @@ def test_logout_clears_current_and_legacy_auth_cookies(monkeypatch, tmp_path):
         assert status == HTTPStatus.SEE_OTHER
         assert dict(header_items)["Location"] == "/login"
         assert any(value.startswith(f"{common.AUTH_COOKIE_NAME}_{port}=") for value in set_cookie_headers)
+        assert any(value.startswith(f"{common.LEGACY_AUTH_COOKIE_NAME}_{port}=") for value in set_cookie_headers)
         assert any(value.startswith(f"{common.AUTH_COOKIE_NAME}=") for value in set_cookie_headers)
         assert any(value.startswith(f"{common.AUTH_LOGOUT_COOKIE_NAME}=1;") for value in set_cookie_headers)
         clear_headers = [value for value in set_cookie_headers if not value.startswith(f"{common.AUTH_LOGOUT_COOKIE_NAME}=1;")]

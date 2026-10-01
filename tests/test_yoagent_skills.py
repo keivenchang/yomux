@@ -1,9 +1,9 @@
-from yolomux_lib.yoagent.skills import load_yoagent_skills
-from yolomux_lib.yoagent.skills import list_user_skill_files
-from yolomux_lib.yoagent.skills import parse_skill_text
-from yolomux_lib.yoagent.skills import read_user_skill_file
-from yolomux_lib.yoagent.skills import write_user_skill_file
-from yolomux_lib.yoagent.skills import delete_user_skill_file
+from yomux_lib.yoagent.skills import load_yoagent_skills
+from yomux_lib.yoagent.skills import list_user_skill_files
+from yomux_lib.yoagent.skills import parse_skill_text
+from yomux_lib.yoagent.skills import read_user_skill_file
+from yomux_lib.yoagent.skills import write_user_skill_file
+from yomux_lib.yoagent.skills import delete_user_skill_file
 
 
 def test_builtin_yoagent_skills_load_with_context(tmp_path):
@@ -52,7 +52,7 @@ def test_builtin_yoagent_skills_load_with_context(tmp_path):
         and "never paste free text into a menu" in line
         for line in payload["context_lines"]
     )
-    assert any("YO!agent skill `manage-skills`" in line and "~/.config/yolomux/skills.d/" in line for line in payload["context_lines"])
+    assert any("YO!agent skill `manage-skills`" in line and "~/.config/yomux/skills.d/" in line for line in payload["context_lines"])
     assert any("YO!agent context `recommendation-rubric`" in line for line in payload["context_lines"])
     assert by_name["wait-roster-then-send"]["model_intent"]["handler"] == "wait-roster-then-send"
     assert by_name["wait-roster-then-send"]["model_intent"]["output"]["tag"] == "yoagent-job-plan"

@@ -1,4 +1,4 @@
-module(name = "yolomux")
+module(name = "yomux")
 
 bazel_dep(name = "rules_go", version = "0.50.1")
 bazel_dep(name = "gazelle", version = "0.36.0")

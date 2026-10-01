@@ -12,8 +12,8 @@ import shutil
 import tempfile
 from typing import Any
 
-from yolomux_lib.infra.host_identity import HostIdentity
-from yolomux_lib.infra.host_identity import current_host_identity
+from yomux_lib.infra.host_identity import HostIdentity
+from yomux_lib.infra.host_identity import current_host_identity
 
 
 # Directory names that identify a directory as SHARED (owned by no single test), never a

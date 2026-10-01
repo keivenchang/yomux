@@ -25,18 +25,18 @@ from tests.source_inventory import python_source_paths
 
 import yaml
 
-from yolomux_lib import activity_summary
-from yolomux_lib import app as app_module
-from yolomux_lib import cli as cli_module
-from yolomux_lib.stats_current import host_collectors
-from yolomux_lib.stats_current import process_memory
-from yolomux_lib.stats_current import service as stats_current_service
-from yolomux_lib import common
-from yolomux_lib import batchd
-from yolomux_lib import metadata
-from yolomux_lib import state_services
-from yolomux_lib.infra import batchd as infra_batchd
-from yolomux_lib.local_service_projection import LOCAL_SERVICES_SCHEMA_VERSION
+from yomux_lib import activity_summary
+from yomux_lib import app as app_module
+from yomux_lib import cli as cli_module
+from yomux_lib.stats_current import host_collectors
+from yomux_lib.stats_current import process_memory
+from yomux_lib.stats_current import service as stats_current_service
+from yomux_lib import common
+from yomux_lib import batchd
+from yomux_lib import metadata
+from yomux_lib import state_services
+from yomux_lib.infra import batchd as infra_batchd
+from yomux_lib.local_service_projection import LOCAL_SERVICES_SCHEMA_VERSION
 from tests.gate_harness import gate_auth_credentials  # noqa: F401 - fixture import
 from tests.gate_harness import gate_authenticated_live_server  # noqa: F401 - fixture import
 from tests.gate_harness import gate_http_port  # noqa: F401 - fixture import
@@ -52,24 +52,24 @@ from tests.tmux_runtime import run_isolated_tmux
 from tests.helpers.app_domain_owners import assert_composed_owners_preserve_facade_overrides
 from tests.subsystems import app_darwin_memory
 from tests.subsystems import app_batchd_product
-from yolomux_lib import statusd_protocol
-from yolomux_lib import transcripts
-from yolomux_lib import uploads as uploads_module
-from yolomux_lib.common import AgentInfo, PaneInfo, SessionInfo, UploadedFile
-from yolomux_lib.backend_health.observer import BACKEND_HEALTH_DEGRADED_STATES
-from yolomux_lib.backend_health.observer import observed_health
-from yolomux_lib.backend_health.store import BackendHealthStore
-from yolomux_lib.backend_health.store import HealthSnapshot
-from yolomux_lib.backend_health.store import ResourceObservation
-from yolomux_lib.local_services.rpc import encode_metadata
-from yolomux_lib.local_services.rpc import LOCAL_RPC_MAX_METADATA_BYTES
-from yolomux_lib.local_services.rpc import new_envelope
-from yolomux_lib.local_services import runtime as local_service_runtime
-from yolomux_lib.local_services.client import TransportFailure
-from yolomux_lib import server_logs
-from yolomux_lib.yoagent import session_summaries as session_summaries_module
-from yolomux_lib.yoagent import controller as controller_module
-from yolomux_lib.yoagent import transports as transport_module
+from yomux_lib import statusd_protocol
+from yomux_lib import transcripts
+from yomux_lib import uploads as uploads_module
+from yomux_lib.common import AgentInfo, PaneInfo, SessionInfo, UploadedFile
+from yomux_lib.backend_health.observer import BACKEND_HEALTH_DEGRADED_STATES
+from yomux_lib.backend_health.observer import observed_health
+from yomux_lib.backend_health.store import BackendHealthStore
+from yomux_lib.backend_health.store import HealthSnapshot
+from yomux_lib.backend_health.store import ResourceObservation
+from yomux_lib.local_services.rpc import encode_metadata
+from yomux_lib.local_services.rpc import LOCAL_RPC_MAX_METADATA_BYTES
+from yomux_lib.local_services.rpc import new_envelope
+from yomux_lib.local_services import runtime as local_service_runtime
+from yomux_lib.local_services.client import TransportFailure
+from yomux_lib import server_logs
+from yomux_lib.yoagent import session_summaries as session_summaries_module
+from yomux_lib.yoagent import controller as controller_module
+from yomux_lib.yoagent import transports as transport_module
 
 from tests.gate_harness import stop_fixture_app_runtime
 
@@ -85,7 +85,7 @@ PROMOTED_CAPTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "prompt_co
 # still succeeding, painting "File could not be opened" over a read the next retry serves.
 BROWSER_OPERATION_DEADLINE_SECONDS = int(re.search(
     r"^const apiFetchAcceptedOperationDeadlineMs = (\d+);$",
-    (Path(__file__).resolve().parents[1] / "static_src" / "js" / "yolomux" / "10_core_utils.js").read_text(encoding="utf-8"),
+    (Path(__file__).resolve().parents[1] / "static_src" / "js" / "yomux" / "10_core_utils.js").read_text(encoding="utf-8"),
     re.MULTILINE,
 ).group(1)) / 1000.0
 assert BROWSER_OPERATION_DEADLINE_SECONDS >= app_module.FS_BATCH_OPERATION_DEADLINE_SECONDS
@@ -2243,7 +2243,7 @@ def test_system_status_payload_is_live_and_does_not_force_transcript_refresh(mon
     assert uptime["state"] == "measured"
     assert uptime["value"] == payload["generated_at"] - app_module.SERVER_STARTED_AT
     assert payload["server"] == {
-        "version": app_module.YOLOMUX_VERSION,
+        "version": app_module.YOMUX_VERSION,
         "pid": 321,
         "started_at": 100.0,
         "cpu_percent": {"state": "measured", "value": 3.5, "reason_code": "", "reason": ""},
@@ -4312,6 +4312,14 @@ def test_agent_window_status_payloads_use_real_run_captures_without_transcripts(
     assert before <= by_kind["codex"]["observed_ts"] <= after
 
 
+def test_agent_window_repo_paths_match_across_yomux_checkout_rename(tmp_path):
+    legacy = str(tmp_path / "yolomux.dev8123")
+    canonical = str(tmp_path / "yomux.dev8123")
+
+    assert app_module.TmuxWebtermApp.normalized_agent_window_repo_path(legacy) == canonical
+    assert app_module.TmuxWebtermApp.normalized_agent_window_repo_path(canonical) == canonical
+
+
 def test_idle_current_agent_window_is_not_active(monkeypatch, tmp_path):
     current_path = tmp_path / "repo" / "idle"
     current_path.mkdir(parents=True)
@@ -5435,7 +5443,7 @@ def test_transcripts_payload_exposes_server_version(monkeypatch):
     finally:
         webapp.control_server.stop()
 
-    assert payload["server_version"] == app_module.YOLOMUX_VERSION
+    assert payload["server_version"] == app_module.YOMUX_VERSION
     assert payload["client_revision"] == "client-rev-test"
     assert payload["server_started_at"] == app_module.SERVER_STARTED_AT
     assert payload["server_uptime_seconds"] >= 0
@@ -14065,7 +14073,7 @@ def test_yoagent_chat_uses_deterministic_fallback(monkeypatch):
     assert payload["backend_used"] == "deterministic"
     assert payload["fallback"] is False
     assert "No AI agent activity is available yet." in payload["answer"]
-    assert any("capability: YOLOmux can read tmux panes" in line for line in payload["context_lines"])
+    assert any("capability: YOmux can read tmux panes" in line for line in payload["context_lines"])
     assert all("tmux session `5`" not in line for line in payload["context_lines"])
 
 
@@ -17495,13 +17503,13 @@ def test_yoagent_capability_question_is_grounded_and_readonly(monkeypatch):
     assert "notify when configured transitions" in payload["answer"]
     assert "send explicit target-session requests" in payload["answer"]
     assert "must not ask one target session to contact another directly" in payload["answer"]
-    assert "~/.config/yolomux/skills.d/" in payload["answer"]
+    assert "~/.config/yomux/skills.d/" in payload["answer"]
     assert "verified against a live Claude/Codex prompt" in payload["answer"]
-    assert any("capability: YOLOmux can read tmux panes" in line for line in payload["context_lines"])
+    assert any("capability: YOmux can read tmux panes" in line for line in payload["context_lines"])
     assert any("YO!agent can execute explicit target-session sends" in line for line in payload["context_lines"])
     assert any("preserves perspectives" in line and "ask agent 1 to <do ...>" in line for line in payload["context_lines"])
     assert any("background-watches the target transcript" in line for line in payload["context_lines"])
-    assert any("manage_user_skills" not in line and "~/.config/yolomux/skills.d/" in line for line in payload["context_lines"])
+    assert any("manage_user_skills" not in line and "~/.config/yomux/skills.d/" in line for line in payload["context_lines"])
 
 
 def test_yoagent_chat_can_update_user_skill_files(monkeypatch):
@@ -17666,7 +17674,7 @@ def test_yoagent_chat_appends_language_directive_to_the_llm_prompt(monkeypatch):
         webapp.control_server.stop()
     assert status == HTTPStatus.OK
     assert "你是優!助手" in captured["prompt"]
-    assert "優樂mux" in captured["prompt"]
+    assert "優mux" in captured["prompt"]
     assert "You are YO!agent" not in captured["prompt"]
     assert "請用繁體中文回答。" in captured["prompt"]
 
@@ -17766,7 +17774,7 @@ def test_yoagent_codex_backend_reuses_persistent_app_server(monkeypatch, tmp_pat
     }
     webapp = app_module.TmuxWebtermApp(["5"])
     codex_home = tmp_path / "codex-home"
-    monkeypatch.setenv("YOLOMUX_CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("YOMUX_CODEX_HOME", str(codex_home))
     monkeypatch.setattr(app_module.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
     monkeypatch.setattr(transport_module.subprocess, "Popen", fake_popen)
     try:
@@ -17842,7 +17850,7 @@ def test_yoagent_codex_first_ask_reuses_server_start_prewarm(monkeypatch, tmp_pa
     }
     webapp = app_module.TmuxWebtermApp(["5"])
     codex_home = tmp_path / "codex-home"
-    monkeypatch.setenv("YOLOMUX_CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("YOMUX_CODEX_HOME", str(codex_home))
     monkeypatch.setattr(app_module.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
     monkeypatch.setattr(transport_module.subprocess, "Popen", fake_popen)
     settings = {"backend": "codex", "invocation": "cli", "codex_model": "gpt-5.4-mini", "codex_effort": "low"}
@@ -18032,7 +18040,7 @@ def test_yoagent_live_external_data_question_uses_backend_tools(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
     monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "claude", "invocation": "cli"})
     monkeypatch.setattr(app_module, "resolve_yoagent_backend", lambda backend: "claude")
-    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("weather question should not build YOLOmux activity context")))
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("weather question should not build YOmux activity context")))
     calls = []
 
     def fake_backend(backend, question, activity_payload, settings, history, locale="en", **kwargs):
@@ -18359,7 +18367,7 @@ def test_yoagent_cli_backend_resumes_and_trims_context(monkeypatch):
                 "repos": ["/repo/yolomux"],
                 "files": {"count": 1, "added": 2, "removed": 0},
                 "work": "editor fixes",
-                "file_lines": ["M static/yolomux.js (+2/-0)"],
+                "file_lines": ["M static/yomux.js (+2/-0)"],
             }
         },
         "errors": [],
@@ -18394,7 +18402,7 @@ def test_yoagent_cli_backend_resumes_and_trims_context(monkeypatch):
     assert second_status["activity_context_sent"] is True
     assert second_status["context_changed"] is True
     assert "Activity summary changed" in calls[1]["prompt"]
-    assert "M static/yolomux.js" in calls[1]["prompt"]
+    assert "M static/yomux.js" in calls[1]["prompt"]
 
 
 def test_yoagent_codex_resumed_cold_session_receives_context(monkeypatch):
@@ -18412,7 +18420,7 @@ def test_yoagent_codex_resumed_cold_session_receives_context(monkeypatch):
                 "repos": ["/repo/yolomux"],
                 "files": {"count": 1, "added": 2, "removed": 0},
                 "work": "editor fixes",
-                "file_lines": ["M static/yolomux.js (+2/-0)"],
+                "file_lines": ["M static/yomux.js (+2/-0)"],
             }
         },
         "errors": [],
@@ -18439,7 +18447,7 @@ def test_yoagent_codex_resumed_cold_session_receives_context(monkeypatch):
     assert reason == ""
     assert calls[0]["resume"] is True
     assert calls[0]["session_id"] == "thread-1"
-    assert "M static/yolomux.js" in calls[0]["prompt"]
+    assert "M static/yomux.js" in calls[0]["prompt"]
     assert status["activity_context_forced"] is True
     assert status["activity_context_sent"] is True
     assert status["context_changed"] is True
@@ -18505,7 +18513,7 @@ def test_yoagent_codex_cli_persists_then_resumes(monkeypatch, tmp_path):
         return SimpleNamespace(stdout=stdout, stderr="", returncode=0)
 
     monkeypatch.setattr(app_module.shutil, "which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setenv("YOLOMUX_CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("YOMUX_CODEX_HOME", str(codex_home))
     monkeypatch.setattr(app_module.subprocess, "run", fake_run)
     try:
         settings = {"codex_model": "gpt-5.4-mini", "codex_effort": "low"}
@@ -18854,7 +18862,7 @@ def test_ensure_xterm_runtime_assets_uses_only_tracked_vendor_files(monkeypatch,
 def _self_restart_context(monkeypatch, tmp_path, argv, *, main_module_name=None):
     checkout_root = tmp_path / "xyz"
     checkout_root.mkdir()
-    (checkout_root / "yolomux.py").write_text("from yolomux_lib.cli import main\n", encoding="utf-8")
+    (checkout_root / "yolomux.py").write_text("from yomux_lib.cli import main\n", encoding="utf-8")
     monkeypatch.setattr(app_module.common, "PROJECT_ROOT", checkout_root)
     monkeypatch.setattr(app_module.sys, "argv", list(argv))
     monkeypatch.setattr(app_module.sys, "executable", "/usr/bin/python3")
@@ -18922,7 +18930,7 @@ def test_self_update_restart_context_preserves_module_launcher(monkeypatch, tmp_
 
 def test_self_update_restart_context_preserves_stripped_launcher_env(monkeypatch, tmp_path):
     monkeypatch.setenv("PATH", "/usr/bin")
-    monkeypatch.setenv("YOLOMUX_EXTRA_PATH", "/opt/yolomux-agents")
+    monkeypatch.setenv("YOLOMUX_EXTRA_PATH", "/opt/yomux-agents")
     monkeypatch.setenv("YOLOMUX_TEST_AUTH_BYPASS", "1")
     monkeypatch.setenv("MALLOC_ARENA_MAX", "2")
     monkeypatch.delenv("TERM", raising=False)
@@ -18934,7 +18942,7 @@ def test_self_update_restart_context_preserves_stripped_launcher_env(monkeypatch
     )
 
     path_parts = context.env["PATH"].split(os.pathsep)
-    assert path_parts[0] == "/opt/yolomux-agents"
+    assert path_parts[0] == "/opt/yomux-agents"
     assert "/usr/bin" in path_parts
     assert str(Path.home() / ".local" / "bin") in path_parts
     assert context.env["TERM"] == "xterm-256color"
@@ -18946,7 +18954,7 @@ def test_self_update_restart_context_preserves_stripped_launcher_env(monkeypatch
 def test_self_update_restart_uses_running_checkout(monkeypatch, tmp_path):
     checkout_root = tmp_path / "xyz"
     checkout_root.mkdir()
-    (checkout_root / "yolomux.py").write_text("from yolomux_lib.cli import main\n", encoding="utf-8")
+    (checkout_root / "yolomux.py").write_text("from yomux_lib.cli import main\n", encoding="utf-8")
     captured = {}
 
     def fake_popen(args, **kwargs):
@@ -18996,14 +19004,14 @@ def _fake_update_git(remote_version="0.3.25", remote_sha="remoteabcdef1"):
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if args == ["rev-parse", "--short=12", "origin/main"]:
             return SimpleNamespace(returncode=0, stdout=f"{remote_sha}\n", stderr="")
-        if args == ["show", "origin/main:yolomux_lib/version.py"]:
+        if args == ["show", "origin/main:yomux_lib/version.py"]:
             return SimpleNamespace(returncode=0, stdout=f'YOLOMUX_VERSION = "{remote_version}"\n', stderr="")
         raise AssertionError(f"unexpected git args: {args}")
     return fake_git
 
 
 def test_update_check_status_ignores_sha_only_changes(monkeypatch):
-    monkeypatch.setattr(app_module.common, "YOLOMUX_VERSION", "0.3.25")
+    monkeypatch.setattr(app_module.common, "YOMUX_VERSION", "0.3.25")
     monkeypatch.setattr(app_module.common, "yolomux_commit_sha", lambda: "localabcdef1")
     monkeypatch.setattr(app_module.common, "git_ahead_behind_counts", lambda cwd, left: (0, 1))
     monkeypatch.setattr(app_module.common, "git", _fake_update_git(remote_version="0.3.25"))
@@ -19019,7 +19027,7 @@ def test_update_check_status_ignores_sha_only_changes(monkeypatch):
 
 
 def test_update_check_status_reports_newer_version(monkeypatch):
-    monkeypatch.setattr(app_module.common, "YOLOMUX_VERSION", "0.3.25")
+    monkeypatch.setattr(app_module.common, "YOMUX_VERSION", "0.3.25")
     monkeypatch.setattr(app_module.common, "yolomux_commit_sha", lambda: "localabcdef1")
     monkeypatch.setattr(app_module.common, "git_ahead_behind_counts", lambda cwd, left: (0, 1))
     monkeypatch.setattr(app_module.common, "git", _fake_update_git(remote_version="0.3.26"))
@@ -19509,7 +19517,7 @@ def test_the_health_observer_is_armed_after_the_local_scheduler_starts(monkeypat
     monkeypatch.setattr(cli_module, "TmuxWebtermApp", FakeApp)
     monkeypatch.setattr(cli_module, "TmuxWebtermHTTPServer", FakeServer)
     monkeypatch.setattr(cli_module, "start_backend_health_observer", arm)
-    monkeypatch.setattr(cli_module, "startup_path_line", lambda _port: "YOLOmux paths: test")
+    monkeypatch.setattr(cli_module, "startup_path_line", lambda _port: "YOmux paths: test")
     monkeypatch.setattr(
         cli_module,
         "acquire_instance_and_port_leases",

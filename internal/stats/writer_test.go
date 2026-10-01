@@ -101,7 +101,7 @@ func TestOpenWriterInitializesRingForCoreOnlyDatabase(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "stats.sqlite3")
 	pythonScript := filepath.Join(t.TempDir(), "create-core-only.py")
 	const script = `import sqlite3, sys
-from yolomux_lib.stats_current.storage import Store
+from yomux_lib.stats_current.storage import Store
 
 connection = sqlite3.connect(sys.argv[1])
 Store._initialize(connection)

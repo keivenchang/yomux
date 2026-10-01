@@ -1,5 +1,5 @@
-# Standard Python project metadata. `pip install -e ".[yoagent]"` installs YOLOmux's deps and
-# the `yolomux` command; pip itself enforces `requires-python` and resolves the dependency groups,
+# Standard Python project metadata. `pip install -e ".[yoagent]"` installs YOmux's deps and
+# the `yomux` command; pip itself enforces `requires-python` and resolves the dependency groups,
 # so Python-version and dependency prerequisites are checked by the standard tooling (not ad-hoc).
 # The tracked web-terminal assets and generated served bundle stay outside the Python wheel. Source
 # and editable installs use static/vendor directly; see `make xterm` for pinned upstream verification.
@@ -8,7 +8,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "yolomux"
+name = "yomux"
 description = "Browser tools for watching, driving, and summarizing tmux sessions."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -37,17 +37,18 @@ dev = [
 ]
 
 [project.scripts]
+yomux = "yomux:main"
 yolomux = "yolomux:main"
 
 [tool.setuptools]
-py-modules = ["yolomux"]
+py-modules = ["yomux", "yolomux"]
 
 [tool.setuptools.packages.find]
-include = ["tools*", "yolomux_lib*"]
+include = ["tools*", "yomux_lib*"]
 
 [tool.setuptools.package-data]
-yolomux_lib = ["data/*.json"]
+yomux_lib = ["data/*.json"]
 
-# Single source of truth for the version: read YOLOMUX_VERSION from yolomux_lib/version.py.
+# Single source of truth for the version: read YOMUX_VERSION from yomux_lib/version.py.
 [tool.setuptools.dynamic]
-version = { attr = "yolomux_lib.version.YOLOMUX_VERSION" }
+version = { attr = "yomux_lib.version.YOMUX_VERSION" }

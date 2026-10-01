@@ -4,14 +4,15 @@ import subprocess
 
 import pytest
 
-from yolomux_lib import common
-from yolomux_lib import workdir
-from yolomux_lib.agent_comms import codex_app_server
-from yolomux_lib.workdir import agent_auth_status
-from yolomux_lib.workdir import agent_command
-from yolomux_lib.workdir import available_agent_commands
-from yolomux_lib.workdir import available_terminal_commands
-from yolomux_lib.workdir import terminal_command
+from yomux_lib import common
+from yomux_lib import workdir
+from yomux_lib.agent_comms import codex_app_server
+from yomux_lib.infra.common import canonical_yomux_working_directory
+from yomux_lib.workdir import agent_auth_status
+from yomux_lib.workdir import agent_command
+from yomux_lib.workdir import available_agent_commands
+from yomux_lib.workdir import available_terminal_commands
+from yomux_lib.workdir import terminal_command
 
 
 @pytest.fixture(autouse=True)
@@ -53,6 +54,26 @@ def test_numeric_session_workdir_uses_matching_yolomux_dev_checkout(monkeypatch,
 
     assert workdir.session_workdir("8002") == dev_checkout
     assert workdir.numbered_session_workdir("8002") == dev_checkout
+
+
+def test_numeric_session_workdir_prefers_canonical_checkout_when_both_names_exist(monkeypatch, tmp_path):
+    canonical_checkout = tmp_path / "yomux.dev8002"
+    legacy_checkout = tmp_path / "yolomux.dev8002"
+    canonical_checkout.mkdir()
+    legacy_checkout.mkdir()
+    monkeypatch.setattr(workdir.Path, "home", lambda: tmp_path)
+
+    assert workdir.session_dev_workdir("8002") == canonical_checkout
+
+
+def test_yomux_working_directory_identity_matches_only_product_checkout_names(monkeypatch, tmp_path):
+    legacy = "/home/test/dev/yolomux.dev8002/src"
+    canonical = "/home/test/dev/yomux.dev8002/src"
+
+    assert canonical_yomux_working_directory(legacy) == canonical_yomux_working_directory(canonical)
+    assert canonical_yomux_working_directory("/home/test/dev/yolomux-project") == "/home/test/dev/yolomux-project"
+    monkeypatch.chdir(tmp_path)
+    assert canonical_yomux_working_directory("") == str(tmp_path)
 
 
 def _fake_run(results: dict[str, subprocess.CompletedProcess]):
@@ -135,7 +156,7 @@ def test_rooted_codex_auth_probe_uses_existing_user_login_without_creating_insta
 
 def test_codex_runtime_env_respects_yolomux_codex_home_override(monkeypatch, tmp_path):
     codex_home = tmp_path / "codex-home"
-    monkeypatch.setenv("YOLOMUX_CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("YOMUX_CODEX_HOME", str(codex_home))
 
     env = common.codex_runtime_env({"PATH": "/usr/bin"})
 
@@ -183,7 +204,7 @@ def test_server_and_codex_app_server_share_runtime_path_order(monkeypatch, tmp_p
 def test_agent_auth_status_probes_codex_with_runtime_env(monkeypatch, tmp_path):
     codex_home = tmp_path / "codex-home"
     seen: dict[str, dict[str, str] | None] = {}
-    monkeypatch.setenv("YOLOMUX_CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("YOMUX_CODEX_HOME", str(codex_home))
     monkeypatch.setattr(workdir.shutil, "which", lambda name: f"/usr/bin/{name}")
 
     def run(cmd, *args, **kwargs):

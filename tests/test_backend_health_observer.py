@@ -37,46 +37,46 @@ from tests.helpers.backend_health_scenarios import BackendHealthHarness as Harne
 from tests.helpers.backend_health_scenarios import FakeService
 from tests.helpers.clock import FakeClock
 
-from yolomux_lib import app as app_module
-from yolomux_lib import cli as cli_module
-from yolomux_lib import local_service_projection
-from yolomux_lib.stats_current import collectors as stats_current_collectors
-from yolomux_lib.backend_health.observer import BACKEND_HEALTH_DEBOUNCE_OBSERVATIONS
-from yolomux_lib.backend_health.observer import BACKEND_HEALTH_IMMEDIATE_STATES
-from yolomux_lib.backend_health.observer import BACKEND_HEALTH_OBSERVE_SECONDS
-from yolomux_lib.backend_health.observer import BACKEND_HEALTH_OBSERVER_THREAD_PREFIX
-from yolomux_lib.backend_health.observer import BACKEND_HEALTH_PROBE_TIMEOUT_SECONDS
-from yolomux_lib.backend_health.observer import PROBE_FAILED
-from yolomux_lib.backend_health.observer import PROBE_OK
-from yolomux_lib.backend_health.observer import PROBE_TIMEOUT
-from yolomux_lib.backend_health.observer import REASON_PROBE_TIMEOUT
-from yolomux_lib.backend_health.observer import REASON_SERVICE_UNHEALTHY
-from yolomux_lib.backend_health.observer import REASON_TERMINAL_FAILURE
-from yolomux_lib.backend_health.observer import BackendHealthObserver
-from yolomux_lib.backend_health.observer import observed_health
-from yolomux_lib.backend_health.observer import overall_health_state
-from yolomux_lib.backend_health.store import BACKEND_HEALTH_REASON_CODES
-from yolomux_lib.backend_health.store import BACKEND_HEALTH_STATES
-from yolomux_lib.backend_health.store import BackendHealthStore
-from yolomux_lib.stats_current.client import STATUS_TIMEOUT_SECONDS
-from yolomux_lib.local_service_projection import LOCAL_SERVICE_INVENTORY
-from yolomux_lib.local_services.rpc import LOCAL_SERVICE_TRAFFIC_PROBE
-from yolomux_lib.local_services.rpc import LOCAL_SERVICE_TRAFFIC_WORK
-from yolomux_lib.local_services.rpc import local_service_traffic_class
-from yolomux_lib.local_services.rpc import local_service_traffic_ledger
-from yolomux_lib.local_services.rpc import local_service_traffic_snapshot
-from yolomux_lib.local_services.rpc import reset_local_service_traffic
-from yolomux_lib.statusd_client import StatusClient
-from yolomux_lib.infra import batchd
-from yolomux_lib.infra.batchd import BatchClient
-from yolomux_lib.infra.batchd import BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE
-from yolomux_lib.approval.approvald import ApprovalClient
+from yomux_lib import app as app_module
+from yomux_lib import cli as cli_module
+from yomux_lib import local_service_projection
+from yomux_lib.stats_current import collectors as stats_current_collectors
+from yomux_lib.backend_health.observer import BACKEND_HEALTH_DEBOUNCE_OBSERVATIONS
+from yomux_lib.backend_health.observer import BACKEND_HEALTH_IMMEDIATE_STATES
+from yomux_lib.backend_health.observer import BACKEND_HEALTH_OBSERVE_SECONDS
+from yomux_lib.backend_health.observer import BACKEND_HEALTH_OBSERVER_THREAD_PREFIX
+from yomux_lib.backend_health.observer import BACKEND_HEALTH_PROBE_TIMEOUT_SECONDS
+from yomux_lib.backend_health.observer import PROBE_FAILED
+from yomux_lib.backend_health.observer import PROBE_OK
+from yomux_lib.backend_health.observer import PROBE_TIMEOUT
+from yomux_lib.backend_health.observer import REASON_PROBE_TIMEOUT
+from yomux_lib.backend_health.observer import REASON_SERVICE_UNHEALTHY
+from yomux_lib.backend_health.observer import REASON_TERMINAL_FAILURE
+from yomux_lib.backend_health.observer import BackendHealthObserver
+from yomux_lib.backend_health.observer import observed_health
+from yomux_lib.backend_health.observer import overall_health_state
+from yomux_lib.backend_health.store import BACKEND_HEALTH_REASON_CODES
+from yomux_lib.backend_health.store import BACKEND_HEALTH_STATES
+from yomux_lib.backend_health.store import BackendHealthStore
+from yomux_lib.stats_current.client import STATUS_TIMEOUT_SECONDS
+from yomux_lib.local_service_projection import LOCAL_SERVICE_INVENTORY
+from yomux_lib.local_services.rpc import LOCAL_SERVICE_TRAFFIC_PROBE
+from yomux_lib.local_services.rpc import LOCAL_SERVICE_TRAFFIC_WORK
+from yomux_lib.local_services.rpc import local_service_traffic_class
+from yomux_lib.local_services.rpc import local_service_traffic_ledger
+from yomux_lib.local_services.rpc import local_service_traffic_snapshot
+from yomux_lib.local_services.rpc import reset_local_service_traffic
+from yomux_lib.statusd_client import StatusClient
+from yomux_lib.infra import batchd
+from yomux_lib.infra.batchd import BatchClient
+from yomux_lib.infra.batchd import BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE
+from yomux_lib.approval.approvald import ApprovalClient
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-OBSERVER_SOURCE = REPO_ROOT / "yolomux_lib" / "backend_health" / "observer.py"
-CLI_SOURCE = REPO_ROOT / "yolomux_lib" / "cli.py"
-APP_SOURCE = REPO_ROOT / "yolomux_lib" / "app.py"
+OBSERVER_SOURCE = REPO_ROOT / "yomux_lib" / "backend_health" / "observer.py"
+CLI_SOURCE = REPO_ROOT / "yomux_lib" / "cli.py"
+APP_SOURCE = REPO_ROOT / "yomux_lib" / "app.py"
 
 PORT = 7799
 

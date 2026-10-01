@@ -13,7 +13,7 @@ go_library(
     name = "finder_lib",
     srcs = glob(["*.go"], exclude = ["*_test.go"]),
     deps = ["//internal/cache:cache_lib"],
-    importpath = "github.com/keivenchang/yolomux/internal/finder",
+    importpath = "github.com/keivenchang/yomux/internal/finder",
 )
 
 go_test(

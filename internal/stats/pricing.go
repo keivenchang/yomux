@@ -240,8 +240,8 @@ func LoadRepositoryPricingCatalog(root, configured string) (*PricingCatalog, err
 		paths = append(paths, configured)
 	}
 	if root != "" {
-		paths = append(paths, filepath.Join(root, "yolomux_lib", "data", "model_pricing.json"))
-		paths = append(paths, filepath.Join(root, "yolomux_lib", "data", "internal_model_pricing.json"))
+		paths = append(paths, filepath.Join(root, "yomux_lib", "data", "model_pricing.json"))
+		paths = append(paths, filepath.Join(root, "yomux_lib", "data", "internal_model_pricing.json"))
 	}
 	var loaded []*PricingCatalog
 	configuredOwnsLuna := false
@@ -254,7 +254,7 @@ func LoadRepositoryPricingCatalog(root, configured string) (*PricingCatalog, err
 			// catalog so Go emits the same evidence as Python for the default
 			// repository startup path.
 			if configured == "" && root != "" {
-				bundledPath := filepath.Join(root, "yolomux_lib", "data")
+				bundledPath := filepath.Join(root, "yomux_lib", "data")
 				if path == filepath.Join(bundledPath, "model_pricing.json") || path == filepath.Join(bundledPath, "internal_model_pricing.json") {
 					for index := range catalog.Models {
 						catalog.Models[index].Source.Kind = "seed"

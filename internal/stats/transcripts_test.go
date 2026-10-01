@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/keivenchang/yolomux/internal/testsupport"
+	"github.com/keivenchang/yomux/internal/testsupport"
 )
 
 func writeJSONL(t *testing.T, path string, records ...map[string]any) {

@@ -50,9 +50,9 @@ from http.client import HTTPConnection
 import pytest
 
 from tools import system_status_latency_probe
-from yolomux_lib import common as common_module
-from yolomux_lib.infra import listener_census
-from yolomux_lib.server import Handler
+from yomux_lib import common as common_module
+from yomux_lib.infra import listener_census
+from yomux_lib.server import Handler
 
 from tests.gate_harness import GateAuthCredentials
 from tests.gate_harness import GateLiveServer
@@ -80,7 +80,7 @@ SAMPLE_REQUESTS = 200
 CONCURRENCY = 1
 # W9: the browser's capture-marker header. Each sampled request carries a UNIQUE marker so the
 # server tags each per-request record with a unique measurement_request_id we can join one-to-one.
-MEASUREMENT_HEADER = "X-YOLOmux-Measurement"
+MEASUREMENT_HEADER = "X-YOmux-Measurement"
 # W9: the stated headline for this queue item -- server assembly time from route entry to the wire
 # representation being ready, stamped by the shared response writer BEFORE any header/body byte
 # leaves. compute_ms/write_ms are retained beside it as diagnostics, not as the headline.
@@ -181,7 +181,7 @@ def server_identity_snapshot() -> dict[str, Any]:
         "pid": os.getpid(),
         "started_at": float(common_module.SERVER_STARTED_AT),
         "cwd": str(common_module.PROJECT_ROOT),
-        "version": str(common_module.YOLOMUX_VERSION),
+        "version": str(common_module.YOMUX_VERSION),
         "sha": resolved_source_sha(str(common_module.PROJECT_ROOT)),
     }
 
@@ -566,7 +566,7 @@ def test_identity_unchanged_flags_every_kind_of_drift() -> None:
 def test_server_identity_snapshot_reads_stable_process_facts() -> None:
     snapshot = server_identity_snapshot()
     assert snapshot["pid"] == os.getpid()
-    assert snapshot["version"] == common_module.YOLOMUX_VERSION
+    assert snapshot["version"] == common_module.YOMUX_VERSION
     assert snapshot["cwd"] == str(common_module.PROJECT_ROOT)
     # Two reads in one unchanged process must be identical.
     if not snapshot["sha"]:

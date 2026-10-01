@@ -11,19 +11,19 @@ from tests.tmux_runtime import run_isolated_tmux
 from tests.tmux_runtime import start_isolated_default_tmux_runtime
 from tests.tmux_runtime import start_isolated_tmux_runtime
 from tests.tmux_runtime import stop_isolated_tmux_runtime
-from yolomux_lib import app as app_module
-from yolomux_lib import tmux_signals
-from yolomux_lib import tmux_utils
-from yolomux_lib.server import TmuxWebtermHTTPServer
-from yolomux_lib.tmux_signals import install_tmux_signal_monitoring
-from yolomux_lib.tmux_signals import parse_tmux_signal_snapshot
-from yolomux_lib.tmux_signals import parse_pane_signal_row
-from yolomux_lib.tmux_signals import tmux_signal_subscription_commands
-from yolomux_lib.tmux_signals import tmux_signal_hook_command
-from yolomux_lib.tmux_signals import tmux_control_attach_command
-from yolomux_lib.tmux_signals import tmux_control_event_relevant
-from yolomux_lib.tmux_signals import tmux_control_event_type
-from yolomux_lib.tmux_signals import window_record_key
+from yomux_lib import app as app_module
+from yomux_lib import tmux_signals
+from yomux_lib import tmux_utils
+from yomux_lib.server import TmuxWebtermHTTPServer
+from yomux_lib.tmux_signals import install_tmux_signal_monitoring
+from yomux_lib.tmux_signals import parse_tmux_signal_snapshot
+from yomux_lib.tmux_signals import parse_pane_signal_row
+from yomux_lib.tmux_signals import tmux_signal_subscription_commands
+from yomux_lib.tmux_signals import tmux_signal_hook_command
+from yomux_lib.tmux_signals import tmux_control_attach_command
+from yomux_lib.tmux_signals import tmux_control_event_relevant
+from yomux_lib.tmux_signals import tmux_control_event_type
+from yomux_lib.tmux_signals import window_record_key
 
 
 def test_tmux_signal_watcher_status_preserves_typed_absence_states():
@@ -306,14 +306,14 @@ def test_parse_pane_signal_row_does_not_promote_an_arbitrary_opencode_command():
 
 
 def test_tmux_control_attach_command_is_readonly_and_ignores_size(monkeypatch):
-    monkeypatch.setenv("YOLOMUX_TMUX_SOCKET", "/tmp/yolomux-test.sock")
+    monkeypatch.setenv("YOLOMUX_TMUX_SOCKET", "/tmp/yomux-test.sock")
 
     command = tmux_control_attach_command("alpha")
 
     assert command == [
         "tmux",
         "-S",
-        "/tmp/yolomux-test.sock",
+        "/tmp/yomux-test.sock",
         "-C",
         "attach-session",
         "-f",
@@ -626,8 +626,8 @@ def test_tmux_pane_exit_hook_never_writes_into_a_terminal():
 def test_tmux_signal_subscriptions_cover_activity_and_layout_formats():
     commands = tmux_signal_subscription_commands()
 
-    assert ["refresh-client", "-B", "yolomux-window-activity:#{session_name}:#{window_index}:#{window_activity}:#{window_activity_flag}:#{window_bell_flag}:#{window_silence_flag}:#{window_active_clients}"] in commands
-    assert ["refresh-client", "-B", "yolomux-window-layout:#{session_name}:#{window_index}:#{window_zoomed_flag}:#{window_layout}:#{window_visible_layout}"] in commands
+    assert ["refresh-client", "-B", "yomux-window-activity:#{session_name}:#{window_index}:#{window_activity}:#{window_activity_flag}:#{window_bell_flag}:#{window_silence_flag}:#{window_active_clients}"] in commands
+    assert ["refresh-client", "-B", "yomux-window-layout:#{session_name}:#{window_index}:#{window_zoomed_flag}:#{window_layout}:#{window_visible_layout}"] in commands
 
 
 def test_install_tmux_signal_monitoring_scopes_options_and_hooks(monkeypatch):

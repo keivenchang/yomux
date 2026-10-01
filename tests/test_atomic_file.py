@@ -3,7 +3,7 @@
 
 import os
 
-from yolomux_lib.atomic_file import file_lock
+from yomux_lib.atomic_file import file_lock
 
 
 def test_file_lock_touches_persistent_lock_file_on_acquisition(tmp_path):

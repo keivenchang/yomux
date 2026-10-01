@@ -55,7 +55,7 @@ def test_boot_print_command_defaults_to_go_for_any_configured_primary_port():
     )
 
     command = printable_command_text(result.stdout)
-    assert "yolomux.py" in command
+    assert "yomux.py" in command
     assert "--backend go" in command
     assert "YOLOMUX_GO_BINARY=/tmp/yolomux-go-test" in command
     assert "--host 127.0.0.1" in command
@@ -83,6 +83,66 @@ def test_boot_print_command_defaults_to_go_for_any_configured_primary_port():
         assert "yolomux-48123.log" in command
 
 
+def test_boot_print_command_uses_canonical_go_binary_environment_name():
+    env = {
+        **os.environ,
+        "YOLOMUX_PORT": "48124",
+        "YOMUX_GO_BINARY": "/tmp/yomux-go-canonical",
+    }
+    env.pop("YOLOMUX_GO_BINARY", None)
+    result = subprocess.run(
+        [str(ROOT / "boot.sh"), "--print-command"],
+        cwd=ROOT,
+        env=env,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert "YOLOMUX_GO_BINARY=/tmp/yomux-go-canonical" in printable_command_text(result.stdout)
+
+
+def test_boot_print_command_canonical_go_binary_wins_conflicting_legacy_value():
+    env = {
+        **os.environ,
+        "YOLOMUX_PORT": "48125",
+        "YOLOMUX_GO_BINARY": "/tmp/yolomux-go-legacy",
+        "YOMUX_GO_BINARY": "/tmp/yomux-go-canonical",
+    }
+    result = subprocess.run(
+        [str(ROOT / "boot.sh"), "--print-command"],
+        cwd=ROOT,
+        env=env,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    command = printable_command_text(result.stdout)
+    assert "YOLOMUX_GO_BINARY=/tmp/yomux-go-canonical" in command
+    assert "YOLOMUX_GO_BINARY=/tmp/yolomux-go-legacy" not in command
+
+
+def test_boot_print_command_empty_canonical_go_binary_clears_legacy_override():
+    env = {
+        **{key: value for key, value in os.environ.items() if key not in {"YOMUX_GO_BINARY", "YOLOMUX_GO_BINARY"}},
+        "YOLOMUX_PORT": "48126",
+        "YOLOMUX_GO_BINARY": "/tmp/yolomux-go-legacy",
+        "YOMUX_GO_BINARY": "",
+    }
+    result = subprocess.run(
+        [str(ROOT / "boot.sh"), "--print-command"],
+        cwd=ROOT,
+        env=env,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    command = printable_command_text(result.stdout)
+    assert "YOLOMUX_GO_BINARY=/tmp/yolomux-go-legacy" not in command
+
+
 def test_boot_print_command_launches_dev_ports_in_dev_mode():
     env = dict(os.environ)
     env.pop("YOLOMUX_PORT", None)
@@ -100,7 +160,7 @@ def test_boot_print_command_launches_dev_ports_in_dev_mode():
     assert "--port 8124" in command
     assert "--port 8125" in command
     assert command.count("--backend go") == 3
-    assert command.count("--dev") == 2
+    assert "--dev" not in command
     assert command.count("--self-signed") == 3
 
 
@@ -119,7 +179,7 @@ def test_boot_print_command_selects_go_backend_and_defaults_to_all_interfaces():
     )
 
     command = printable_command_text(result.stdout)
-    assert "yolomux.py" in command
+    assert "yomux.py" in command
     assert "--backend go" in command
     assert "--host 0.0.0.0" in command
     assert "YOLOMUX_GO_BINARY=/tmp/yolomux-go-test" in command
@@ -175,9 +235,9 @@ def test_boot_print_command_rejects_backend_python_without_deprecated_flag():
 
 def test_boot_go_resolution_includes_current_bazel_rule_output():
     source = (ROOT / "boot.sh").read_text(encoding="utf-8")
-    current = "bazel-bin/cmd/yolomux-go/yolomux_go_/yolomux_go"
+    current = "bazel-bin/cmd/yomux-go/yomux-go_/yomux-go"
     assert current in source
-    assert source.index("bazel-bin/yolomux-go") < source.index(current)
+    assert source.index(current) < source.index("bazel-bin/yolomux-go")
     assert source.index(current) < source.index('repo_root/yolomux-go')
 
 
@@ -288,16 +348,16 @@ def test_boot_restart_refuses_duplicate_without_blind_listener_kill():
     assert "stop_port_listener" not in source
     assert "wait_for_port_free" not in source
     assert "--force" in source
-    assert "yolomux_lib.server_lease" not in source
+    assert "yomux_lib.server_lease" not in source
     assert "exec --plan-json" not in source
     assert "boot.sh launching port" in source
     assert " >> %q 2>&1 < /dev/null" in source
     assert "TMUX= TMUX_PANE=" in source
     assert "acquire_port_restart_lock \"$port\"" in source
-    assert "a YOLOmux restart for port $port is already in progress" in source
-    assert "another YOLOmux stack start is already in progress" in startup_common
+    assert "a YOmux restart for port $port is already in progress" in source
+    assert "another YOmux stack start is already in progress" in startup_common
     assert "yolomux_report_inotify_capacity" in startup_common
-    assert "WARNING: startup inotify capacity is below the YOLOmux gate floor" in startup_common
+    assert "WARNING: startup inotify capacity is below the YOmux gate floor" in startup_common
     assert "inotify_capacity_verdict" in startup_common
     assert 'source "$repo_root/tools/startup_common.sh"' in source
     assert "yolomux_acquire_start_lock" in source
@@ -393,8 +453,8 @@ def test_boot_surfaces_same_root_duplicate_without_waiting_for_port_timeout():
         owner_code = (
             "import sys,time; "
             "from pathlib import Path; "
-            "from yolomux_lib.infra.root_paths import YolomuxRoots; "
-            "from yolomux_lib.server_lease import acquire_instance_root_lease; "
+            "from yomux_lib.infra.root_paths import YolomuxRoots; "
+            "from yomux_lib.server_lease import acquire_instance_root_lease; "
             "root=Path(sys.argv[1]); "
             "roots=YolomuxRoots(config_dir=root/'config', state_dir=root/'state', cache_dir=root/'cache', "
             "codex_home=root/'codex', runtime_dir=root/'runtime'); "
@@ -621,7 +681,7 @@ def test_startup_listener_boundary_uses_selected_interpreter_and_checkout_module
     assert record.read_text(encoding="utf-8").splitlines() == [
         f"cwd={ROOT}",
         "arg=-m",
-        "arg=yolomux_lib.infra.listener_census",
+        "arg=yomux_lib.infra.listener_census",
         "arg=48124",
     ]
 
@@ -636,7 +696,7 @@ def test_macos_submit_uses_callers_row_plan_not_tmux_daemon_environment(tmp_path
     tools_dir.mkdir(parents=True)
     shutil.copy2(ROOT / "tools" / "instance_isolation.py", tools_dir / "instance_isolation.py")
     result_path = tmp_path / "result.json"
-    server_script = checkout / "yolomux.py"
+    server_script = checkout / "yomux.py"
     server_script.write_text(
         """from __future__ import annotations
 
@@ -661,7 +721,7 @@ subprocess.run(["tmux", "-L", sys.argv[2], "wait-for", "-S", "server-ready"], ch
         encoding="utf-8",
     )
 
-    socket_name = f"yolomux-test-{os.getpid()}-{tmp_path.name}"
+    socket_name = f"yomux-test-{os.getpid()}-{tmp_path.name}"
     stale_plan_path = tmp_path / "stale-plan.json"
     fresh_plan_path = tmp_path / "fresh-plan.json"
     stale_plan_path.write_text(
@@ -863,7 +923,7 @@ def test_shared_start_lock_rejects_concurrent_launcher_and_releases_cleanly(tmp_
         capture_output=True,
     )
     assert contender.returncode != 0
-    assert "another YOLOmux stack start is already in progress" in contender.stderr
+    assert "another YOmux stack start is already in progress" in contender.stderr
 
     assert holder.stdin is not None
     holder.stdin.close()

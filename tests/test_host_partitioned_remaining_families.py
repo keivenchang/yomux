@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """Host-partition regressions for state that must never roam through shared home."""
 
-from yolomux_lib import app as app_module
-from yolomux_lib.infra import common
-from yolomux_lib.infra import host_partition
-from yolomux_lib.infra.host_identity import HostIdentity
-from yolomux_lib.workspace import session_files
-from yolomux_lib.yoagent import conversation
+from yomux_lib import app as app_module
+from yomux_lib.infra import common
+from yomux_lib.infra import host_partition
+from yomux_lib.infra.host_identity import HostIdentity
+from yomux_lib.workspace import session_files
+from yomux_lib.yoagent import conversation
 
 
 def _host(stable_host_id: str) -> HostIdentity:

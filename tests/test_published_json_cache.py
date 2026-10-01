@@ -8,9 +8,9 @@ import hashlib
 import json
 from pathlib import Path
 
-from yolomux_lib.infra.published_json_cache import DeterministicJsonCodec
-from yolomux_lib.infra.published_json_cache import PublishedJsonCache
-from yolomux_lib.infra.published_json_cache import PublishedJsonFreshness
+from yomux_lib.infra.published_json_cache import DeterministicJsonCodec
+from yomux_lib.infra.published_json_cache import PublishedJsonCache
+from yomux_lib.infra.published_json_cache import PublishedJsonFreshness
 
 
 def payload_signature(payload):

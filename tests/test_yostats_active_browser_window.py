@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from tools import yostats_capture_common
-from yolomux_lib.infra import listener_census
+from yomux_lib.infra import listener_census
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -117,10 +117,11 @@ def test_active_browser_window_rejects_raw_fork_parent_and_child(monkeypatch):
         tool.main()
 
 
-def test_active_browser_window_resolves_requested_instance_before_product_imports():
+def test_active_browser_window_import_is_read_only_and_cli_resolves_before_product_imports(tmp_path):
     source = TOOL_PATH.read_text(encoding="utf-8")
-    assert source.index("apply_early_instance_environment(sys.argv[1:])") < source.index(
-        "from yolomux_lib.auth import AUTH_CONFIG_PATH"
+    guarded_resolution = 'if __name__ == "__main__":\n    apply_early_instance_environment(sys.argv[1:])'
+    assert source.index(guarded_resolution) < source.index(
+        "from yomux_lib.auth import AUTH_CONFIG_PATH"
     )
 
     environment = dict(os.environ)
@@ -147,20 +148,18 @@ def test_active_browser_window_resolves_requested_instance_before_product_import
         "XDG_RUNTIME_DIR",
     ):
         environment.pop(key, None)
-    probe = subprocess.run(
+    legacy_runtime = tmp_path / "legacy-runtime"
+    environment["YOLOMUX_RUNTIME_DIR"] = str(legacy_runtime)
+    import_probe = subprocess.run(
         [
             sys.executable,
             "-c",
             (
-                "import json; "
+                "import json, os; "
                 "from tools import yostats_active_browser_window as tool; "
-                "print(json.dumps({'auth': str(tool.AUTH_CONFIG_PATH), "
-                "'state': str(tool.STATE_DIR), "
-                "'runtime': str(tool.RUNTIME_DIR), "
-                "'managed': tool.is_managed_instance_port(7771)}))"
+                "print(json.dumps({'canonical': os.environ.get('YOMUX_RUNTIME_DIR'), "
+                "'runtime': str(tool.RUNTIME_DIR)}))"
             ),
-            "--port",
-            "7771",
         ],
         cwd=ROOT,
         env=environment,
@@ -168,13 +167,20 @@ def test_active_browser_window_resolves_requested_instance_before_product_import
         text=True,
         check=True,
     )
-    expected_root = Path("/tmp") / f"y{os.getuid()}" / "p7771"
-    assert json.loads(probe.stdout) == {
-        "auth": str(expected_root / "config" / "auth.yaml"),
-        "state": str(expected_root / "state"),
-        "runtime": str(expected_root / "runtime"),
-        "managed": True,
-    }
+    import_result = json.loads(import_probe.stdout)
+    assert import_result["canonical"] is None
+    assert Path(import_result["runtime"]).is_relative_to(legacy_runtime)
+
+    cli_probe = subprocess.run(
+        [sys.executable, str(TOOL_PATH), "--port", "7771", "--help"],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert cli_probe.returncode == 0
+    assert "usage:" in cli_probe.stdout.lower()
 
 
 def test_active_browser_window_workload_source_contract():
@@ -205,7 +211,7 @@ def test_active_browser_window_workload_source_contract():
     assert source.index('wait_for_exact_history(driver, 300, 1)') < source.index('driver.execute_script("setDebugGraphRange(1800); setDebugGraphResolutionOverride(10)")')
     assert "clearClientPerfCounters(); performance.clearResourceTimings()" in source
     assert "runtime_service_pids" in source
-    assert "X-YOLOmux-Measurement" in source
+    assert "X-YOmux-Measurement" in source
     assert "capture_measurement_metrics" in source
     assert "install_measurement_fetch_header" in source
     assert "window.fetch =" in source
@@ -791,7 +797,7 @@ def test_active_browser_window_bounds_resource_evidence_and_strips_query_values(
     resources = tool.bounded_api_resources(
         [
             {"name": "https://localhost:8881/api/fs/batch?session=private", "duration": 2.5, "transferSize": 42},
-            {"name": "https://localhost:8881/static/yolomux.js", "duration": 4.0, "transferSize": 4},
+            {"name": "https://localhost:8881/static/yomux.js", "duration": 4.0, "transferSize": 4},
             {"name": "https://localhost:8881/api/stats-snapshot?client=private", "duration": 3.0, "transferSize": 84},
         ],
         limit=1,

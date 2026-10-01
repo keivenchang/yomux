@@ -34,7 +34,7 @@ def test_manifest_covers_every_required_characterization_domain():
 def test_comparator_reports_exact_category_additions_and_removals():
     baseline = characterization.capture(characterization.git_source(characterization.BASELINE_COMMIT))
     texts = {path: characterization.git_source(characterization.BASELINE_COMMIT).text(path) for path in characterization.ALL_INPUTS}
-    texts["yolomux_lib/http_routes.py"] = texts["yolomux_lib/http_routes.py"].replace('Route("GET",', 'Route("PATCH",', 1)
+    texts["yomux_lib/http_routes.py"] = texts["yomux_lib/http_routes.py"].replace('Route("GET",', 'Route("PATCH",', 1)
     changed = characterization.capture(characterization.Source("synthetic", lambda path: texts.get(path, "")))
 
     result = characterization.compare(characterization.manifest_snapshot(baseline), changed)

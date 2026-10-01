@@ -24,7 +24,7 @@ from tests.gate_harness import claim_fixture_client_event_demand
 from tests.gate_harness import load_gate_browser
 from tests.gate_harness import release_fixture_client_event_demand
 from tests.terminal_state_guard import assert_terminal_transition
-from yolomux_lib.server_logs import SERVER_LOGS
+from yomux_lib.server_logs import SERVER_LOGS
 
 
 DISCOVERED_MUTATING_ACTIONS = {
@@ -604,7 +604,7 @@ def test_m3_live_daemon_transport_failure_is_not_reported_as_process_down(browse
     """A running daemon whose transport failed is `issue` + `transport_failed`, never down.
 
     This used to call `debugSystemServiceState` in the browser -- a JavaScript re-derivation of a
-    rule `yolomux_lib/app.py:system_status_service` already owned, from `pid`/`healthy`/
+    rule `yomux_lib/app.py:system_status_service` already owned, from `pid`/`healthy`/
     `transport_reason`. Two classifiers for one rule, and the panel-side copy was the one the
     contract watched. The classifier is retired, so the contract now runs the WHOLE path it cares
     about: the live server classifies a transport-failed row, and the live browser renders that

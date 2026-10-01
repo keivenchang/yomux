@@ -1,6 +1,6 @@
 :root {
   /* these mirror the canonical dark-theme tokens in
-     static_src/css/yolomux/00_tokens_base.css (--bg/--panel/--panel2/--text/--muted/--line). They used to
+     static_src/css/yomux/00_tokens_base.css (--bg/--panel/--panel2/--text/--muted/--line). They used to
      be near-but-not-equal copies, so the wall looked subtly different from the app with no clear "right".
      Keep these in sync with 00_tokens_base.css. (--green/--red are the wall's own status colors.) */
   color-scheme: dark;

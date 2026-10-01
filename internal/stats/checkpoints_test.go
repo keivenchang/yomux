@@ -308,7 +308,7 @@ func TestCheckpointMigrationPythonRejectionAndPairedRollback(t *testing.T) {
 	}
 	script := filepath.Join(t.TempDir(), "migration.py")
 	if err := os.WriteFile(script, []byte(`import sys
-from yolomux_lib.stats_current.storage import Store, SchemaTooNewError
+from yomux_lib.stats_current.storage import Store, SchemaTooNewError
 try:
     store = Store.open(sys.argv[1], include_browser_diagnostics=False)
 except SchemaTooNewError:

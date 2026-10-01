@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from yolomux_lib import cli
-from yolomux_lib import ptrace
+from yomux_lib import cli
+from yomux_lib import ptrace
 
 
 def test_diagnostic_ptrace_is_off_without_dang(monkeypatch, capsys):

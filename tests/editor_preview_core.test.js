@@ -10,7 +10,7 @@ const {
 const {runEditorPreviewSuite} = require('./browser_helpers/editor_preview_suite');
 
 test('numbered Markdown task labels are a post-parse presentation transform', () => {
-  const source = fs.readFileSync('static_src/js/yolomux/88_markdown_preview.js', 'utf8');
+  const source = fs.readFileSync('static_src/js/yomux/88_markdown_preview.js', 'utf8');
   const context = {};
   vm.createContext(context);
   vm.runInContext(sourceBetween(
@@ -162,7 +162,7 @@ test('numbered Markdown task labels are a post-parse presentation transform', ()
   ]);
   assert.equal(context.markdownTextWithTaskLineToggled(sourceText, 6, true).split('\n')[5], '- [x] 2. two', 'numbered task writes retain the source label');
 
-  const css = fs.readFileSync('static_src/css/yolomux/60_editor_file_panels.css', 'utf8');
+  const css = fs.readFileSync('static_src/css/yomux/60_editor_file_panels.css', 'utf8');
   const taskRowCss = sourceBetween(css, '.markdown-body li.task-list-item {', '}');
   assert.match(taskRowCss, /minmax\(0, 1fr\)/, 'the label column can shrink and wrap beside the checkbox');
   assert.equal(/white-space:\s*nowrap/.test(taskRowCss), false, 'task labels are not forced onto one physical line');
@@ -172,7 +172,7 @@ test('numbered Markdown task labels are a post-parse presentation transform', ()
 });
 
 test('Markdown Preview editing converts plain paragraph and inline emphasis changes back to source', () => {
-  const source = fs.readFileSync('static_src/js/yolomux/88_markdown_preview.js', 'utf8');
+  const source = fs.readFileSync('static_src/js/yomux/88_markdown_preview.js', 'utf8');
   const context = {};
   vm.createContext(context);
   vm.runInContext(sourceBetween(
@@ -189,8 +189,8 @@ test('Markdown Preview editing converts plain paragraph and inline emphasis chan
     classList: {contains: () => false},
   });
   const formatted = element('P', element('STRONG', textNode('bold')), textNode(' words'));
-  const previewSource = fs.readFileSync('static_src/js/yolomux/88_markdown_preview.js', 'utf8');
-  const prosemirrorSource = fs.readFileSync('static_src/js/yolomux/93_prosemirror_editor.js', 'utf8');
+  const previewSource = fs.readFileSync('static_src/js/yomux/88_markdown_preview.js', 'utf8');
+  const prosemirrorSource = fs.readFileSync('static_src/js/yomux/93_prosemirror_editor.js', 'utf8');
   assert.equal(context.markdownInlineSourceFromNode(formatted), '**bold** words');
   assert.deepEqual(
     [...context.markdownTextWithInlineLineEdited('Intro\n\n**old** words\n\nTail', 3, '**new** words', 'paragraph').split('\n')],
@@ -236,7 +236,7 @@ test('Markdown Preview editing converts plain paragraph and inline emphasis chan
   assert.doesNotMatch(previewSource, /inlineHeading\.textContent = t\('editor\.toolbar\.aria'\)/);
   assert.doesNotMatch(previewSource, /blockHeading\.textContent = t\('editor\.toolbar\.aria'\)/);
   assert.match(previewSource, /checked\}/);
-  assert.match(fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8'), /context-menu-check/);
+  assert.match(fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8'), /context-menu-check/);
   assert.match(previewSource, /function markdownInlineFormatState/);
   assert.match(previewSource, /function markdownPreviewSourceChange/);
   assert.match(previewSource, /function handleMarkdownPreviewEnter/);

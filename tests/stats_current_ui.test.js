@@ -6,9 +6,9 @@ const {execFileSync} = require('child_process');
 const fs = require('fs');
 const vm = require('vm');
 
-const source = fs.readFileSync('static_src/js/yolomux/84_stats_current.js', 'utf8');
-const transportLifecycleSource = fs.readFileSync('static_src/js/yolomux/09_transport_lifecycle.js', 'utf8');
-const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+const source = fs.readFileSync('static_src/js/yomux/84_stats_current.js', 'utf8');
+const transportLifecycleSource = fs.readFileSync('static_src/js/yomux/09_transport_lifecycle.js', 'utf8');
+const coreSource = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
 const lifecycleScopeSource = coreSource.slice(
   coreSource.indexOf('function createLifecycleScope('),
   coreSource.indexOf('\nfunction delegate(', coreSource.indexOf('function createLifecycleScope(')),
@@ -19,7 +19,8 @@ function loadNamespace() {
   vm.runInContext(lifecycleScopeSource, context, {filename: '10_core_utils.js:createLifecycleScope'});
   vm.runInContext(transportLifecycleSource, context, {filename: '09_transport_lifecycle.js'});
   vm.runInContext(source, context, {filename: '84_stats_current.js'});
-  const namespace = context.YOLOmuxStatsCurrent;
+  const namespace = context.YOmuxStatsCurrent;
+  assert.strictEqual(context.YOLOmuxStatsCurrent, namespace, 'the migration alias points to the canonical stats module');
   return {
     ...namespace,
     createBrowserClient(options = {}) {
@@ -712,7 +713,7 @@ test('accepts the service-produced backfill field and no unlisted snapshot field
 import json
 import sys
 import threading
-from yolomux_lib.stats_current.service import StatsCurrentService
+from yomux_lib.stats_current.service import StatsCurrentService
 
 service = object.__new__(StatsCurrentService)
 service._snapshot_body_decoration_lock = threading.Lock()
@@ -743,7 +744,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from yolomux_lib.stats_current import protocol, service, storage
+from yomux_lib.stats_current import protocol, service, storage
 
 with tempfile.TemporaryDirectory() as temporary:
     root = Path(temporary)
@@ -3416,17 +3417,17 @@ test('static build registers the current controller once without a second namesp
   const summary = JSON.parse(execFileSync('python3', ['-c', [
     'import json',
     'from tools.static_build import ASSETS, build_asset, lint_duplicate_functions',
-    'parts = ASSETS["yolomux.js"]',
-    'built = build_asset("yolomux.js")',
-    'current = "static_src/js/yolomux/84_stats_current.js"',
-    'legacy = "static_src/js/yolomux/85_debug_panel.js"',
+    'parts = ASSETS["yomux.js"]',
+    'built = build_asset("yomux.js")',
+    'current = "static_src/js/yomux/84_stats_current.js"',
+    'legacy = "static_src/js/yomux/85_debug_panel.js"',
     'print(json.dumps({',
     '  "current_count": parts.count(current),',
     '  "current_index": parts.index(current),',
     '  "legacy_count": parts.count(legacy),',
     '  "legacy_index": parts.index(legacy) if legacy in parts else -1,',
-    '  "namespace_owner_count": built.count("globalThis.YOLOmuxStatsCurrent ="),',
-    '  "namespace_position": built.index("globalThis.YOLOmuxStatsCurrent ="),',
+    '  "namespace_owner_count": built.count("globalThis.YOmuxStatsCurrent ="),',
+    '  "namespace_position": built.index("globalThis.YOmuxStatsCurrent ="),',
     '  "legacy_position": built.find("const jsDebugGraphDefaultRangeSeconds"),',
     '  "duplicate_declarations": lint_duplicate_functions(),',
     '}))',
@@ -3436,16 +3437,16 @@ test('static build registers the current controller once without a second namesp
   assert.equal(summary.namespace_owner_count, 1);
   assert.ok(summary.legacy_position < 0 || summary.namespace_position < summary.legacy_position);
   assert.deepStrictEqual(summary.duplicate_declarations, []);
-  if (fs.existsSync('static_src/js/yolomux/85_debug_panel.js')) {
-    const legacySource = fs.readFileSync('static_src/js/yolomux/85_debug_panel.js', 'utf8');
-    assert.equal(legacySource.includes('globalThis.YOLOmuxStatsCurrent ='), false, 'the established renderer adapter cannot own the current namespace');
+  if (fs.existsSync('static_src/js/yomux/85_debug_panel.js')) {
+    const legacySource = fs.readFileSync('static_src/js/yomux/85_debug_panel.js', 'utf8');
+    assert.equal(legacySource.includes('globalThis.YOmuxStatsCurrent ='), false, 'the established renderer adapter cannot own the current namespace');
   }
 });
 
 test('new controller has one namespace and no old temporal processing dependency', () => {
   const context = vm.createContext({console});
   vm.runInContext(source, context, {filename: '84_stats_current.js'});
-  assert.deepStrictEqual(Object.keys(context).sort(), ['YOLOmuxStatsCurrent', 'console']);
+  assert.deepStrictEqual(Object.keys(context).sort(), ['YOLOmuxStatsCurrent', 'YOmuxStatsCurrent', 'console']);
   for (const forbidden of [
     'debugGraph', 'aggregateBucket', 'sampleHold', 'interpolate', 'prefetch', 'mergeRanges',
   ]) assert.equal(source.includes(forbidden), false, `current controller must not contain ${forbidden}`);

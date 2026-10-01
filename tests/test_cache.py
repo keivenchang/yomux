@@ -1,10 +1,10 @@
 """the one shared TtlCache. metadata.MetadataCache and the sessions transcript-lookup cache
 route through it now. These pin the parent's contract so the consumers can rely on it."""
 
-from yolomux_lib import cache
-from yolomux_lib import common
-from yolomux_lib.cache import MISS
-from yolomux_lib.cache import TtlCache
+from yomux_lib import cache
+from yomux_lib import common
+from yomux_lib.cache import MISS
+from yomux_lib.cache import TtlCache
 
 
 def test_get_or_miss_distinguishes_cached_none_from_absent():

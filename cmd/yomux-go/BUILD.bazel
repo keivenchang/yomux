@@ -1,0 +1,53 @@
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["BUILD.bazel"])
+
+filegroup(
+    name = "docker_source_files",
+    srcs = ["BUILD.bazel"] + glob(["**"], exclude = ["BUILD.bazel"]),
+)
+
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+SQLITE = "@com_github_mattn_go_sqlite3//:go_default_library"
+
+go_library(
+    name = "yomux_go_lib",
+    srcs = glob(["*.go"], exclude = ["*_test.go"]),
+    importpath = "github.com/keivenchang/yomux/cmd/yomux-go",
+    deps = [
+        "//internal/cache:cache_lib",
+        "//internal/capabilities:capabilities_lib",
+        "//internal/finder:finder_lib",
+        "//internal/stats:stats_lib",
+        "//internal/work:work_lib",
+        SQLITE,
+    ],
+)
+
+go_binary(
+    name = "yomux-go",
+    embed = [":yomux_go_lib"],
+)
+
+alias(
+    name = "yolomux_go",
+    actual = ":yomux-go",
+)
+
+go_test(
+    name = "yomux_go_test",
+    srcs = glob(["*_test.go"]),
+    data = ["//:go_test_support"],
+    deps = ["//internal/cache:cache_lib", "//internal/testsupport:testsupport_lib", SQLITE],
+    embed = [":yomux_go_lib"],
+)
+
+go_test(
+    name = "yomux_go_race_test",
+    srcs = glob(["*_test.go"]),
+    data = ["//:go_test_support"],
+    deps = ["//internal/cache:cache_lib", "//internal/testsupport:testsupport_lib", SQLITE],
+    embed = [":yomux_go_lib"],
+    race = "on",
+)

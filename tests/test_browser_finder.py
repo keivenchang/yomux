@@ -6,13 +6,13 @@ from urllib.parse import quote
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 
-from yolomux_lib import filesystem
-from yolomux_lib import web
+from yomux_lib import filesystem
+from yomux_lib import web
 
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 
-_BOOTSTRAP_SCRIPT_RE = re.compile(r'<script id="yolomux-bootstrap"[^>]*>(.*?)</script>', re.DOTALL)
+_BOOTSTRAP_SCRIPT_RE = re.compile(r'<script id="yomux-bootstrap"[^>]*>(.*?)</script>', re.DOTALL)
 
 
 def test_finder_parent_collapse_converges_all_surfaces_before_reexpand(browser, tmp_path):
@@ -1337,15 +1337,15 @@ def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_
             worktree_status: {
               available: true,
               dirty: true,
-              entries: [{status: 'M', path: 'note.txt', counts_available: true, added: 2, removed: 1, binary: false}],
+              entries: [{status: 'M', path: 'note.txt', counts_available: true, added: 10233, removed: 8640, binary: false}],
               truncated: false,
-              files: 1,
-              added: 2,
-              removed: 1,
-              binary_files: 0,
+              files: 765,
+              added: 10233,
+              removed: 8640,
+              binary_files: 2,
               stats_available: true,
               modified_at: 1786931640,
-              status_counts: {M: 1},
+              status_counts: {M: 449, R: 310, '??': 5},
             },
           });
           return originalFetch(input, options);
@@ -1360,12 +1360,10 @@ def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_
           });
           panel.style.width = '1200px';
           await new Promise(resolve => requestAnimationFrame(resolve));
-          const list = panel.querySelector('.git-diff-commits');
           const dirtyRow = panel.querySelector('.git-diff-worktree-summary');
           const commitRow = panel.querySelector('.git-diff-commit-row[data-git-diff-commit]');
           const fieldNames = ['caret', 'sha', 'date', 'changes', 'author', 'description'];
-          const tracks = getComputedStyle(list).gridTemplateColumns;
-          const trackSync = await waitFor(() => dirtyRow.style.gridTemplateColumns === tracks ? true : null);
+          await new Promise(resolve => requestAnimationFrame(resolve));
           const fields = fieldNames.map((name, index) => {
             const dirtyField = dirtyRow.children[index];
             const commitField = commitRow.children[index];
@@ -1375,15 +1373,43 @@ def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_
               delta: Math.abs(dirtyField.getBoundingClientRect().left - commitField.getBoundingClientRect().left),
             };
           });
-          done({tracks, trackSync, fields, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          const dirtyChangesWide = dirtyRow.querySelector('.git-diff-commit-changes');
+          const dirtyDescriptionWide = dirtyRow.querySelector('.git-diff-commit-description');
+          const dirtyWide = {
+            changesClientWidth: dirtyChangesWide.clientWidth,
+            changesScrollWidth: dirtyChangesWide.scrollWidth,
+            changesRight: dirtyChangesWide.getBoundingClientRect().right,
+            descriptionLeft: dirtyDescriptionWide.getBoundingClientRect().left,
+          };
+          panel.style.width = '500px';
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          const dirtyChangesNarrow = panel.querySelector('.git-diff-worktree-summary .git-diff-commit-changes');
+          const dirtyDescriptionNarrow = panel.querySelector('.git-diff-worktree-summary .git-diff-commit-description');
+          done({
+            fields,
+            dirtyChangesText: dirtyChangesWide.textContent,
+            dirtyChangesClientWidth: dirtyWide.changesClientWidth,
+            dirtyChangesScrollWidth: dirtyWide.changesScrollWidth,
+            dirtyChangesRight: dirtyWide.changesRight,
+            dirtyDescriptionWideLeft: dirtyWide.descriptionLeft,
+            dirtyDescriptionClientWidth: dirtyDescriptionNarrow.clientWidth,
+            dirtyDescriptionScrollWidth: dirtyDescriptionNarrow.scrollWidth,
+            dirtyDescriptionText: dirtyDescriptionNarrow.textContent,
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
+          });
         })().catch(error => done({error: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')})).finally(() => { window.fetch = originalFetch; });
         """,
         repo,
         sha,
     )
     assert not metrics.get("error"), metrics
-    assert metrics["trackSync"] is True, metrics
     assert all(field["visible"] and field["delta"] <= 1 for field in metrics["fields"]), metrics["fields"]
+    assert metrics["dirtyChangesText"].startswith("765 files +10233 -8640") and "2 binary" in metrics["dirtyChangesText"], metrics
+    assert metrics["dirtyChangesClientWidth"] > 0 and metrics["dirtyChangesScrollWidth"] <= metrics["dirtyChangesClientWidth"], metrics
+    assert metrics["dirtyChangesRight"] <= metrics["dirtyDescriptionWideLeft"], metrics
+    assert metrics["dirtyDescriptionText"] == "5 ?? · 449 M · 310 R", metrics
+    assert metrics["dirtyDescriptionClientWidth"] > 0 and metrics["dirtyDescriptionScrollWidth"] <= metrics["dirtyDescriptionClientWidth"], metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 

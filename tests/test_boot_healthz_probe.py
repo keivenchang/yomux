@@ -29,14 +29,14 @@ from typing import Any
 
 import pytest
 
-from yolomux_lib import common
-from yolomux_lib import http_routes
-from yolomux_lib import server_auth
-from yolomux_lib import server_logs
-from yolomux_lib.login_rate_limit import BucketPolicy
-from yolomux_lib.login_rate_limit import LoginRateLimiter
-from yolomux_lib.login_rate_limit import LoginRatePolicy
-from yolomux_lib.server import TmuxWebtermHTTPServer
+from yomux_lib import common
+from yomux_lib import http_routes
+from yomux_lib import server_auth
+from yomux_lib import server_logs
+from yomux_lib.login_rate_limit import BucketPolicy
+from yomux_lib.login_rate_limit import LoginRateLimiter
+from yomux_lib.login_rate_limit import LoginRatePolicy
+from yomux_lib.server import TmuxWebtermHTTPServer
 
 pytestmark = pytest.mark.socket
 

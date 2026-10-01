@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""OpenCode-shaped text client mock for YOLOmux parser and browser tests."""
+"""OpenCode-shaped text client mock for YOmux parser and browser tests."""
 from __future__ import annotations
 
 import argparse
@@ -19,7 +19,7 @@ import common as mock_agent_common
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the OpenCode-shaped YOLOmux mock client.")
+    parser = argparse.ArgumentParser(description="Run the OpenCode-shaped YOmux mock client.")
     parser.add_argument("prompt", nargs="*", help="Optional prompt or mock command.")
     parser.add_argument("-C", "--cd", dest="cwd", default=os.getcwd(), metavar="DIR")
     parser.add_argument("-m", "--model", default="switchyard/openai/gpt-5.6-luna", metavar="MODEL")

@@ -14,10 +14,10 @@ import threading
 
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.helpers.gate_stats import NOW
-from yolomux_lib.stats_current import materializer
-from yolomux_lib.stats_current import migration
-from yolomux_lib.stats_current import service as stats_service
-from yolomux_lib.stats_current import storage
+from yomux_lib.stats_current import materializer
+from yomux_lib.stats_current import migration
+from yomux_lib.stats_current import service as stats_service
+from yomux_lib.stats_current import storage
 
 
 G8_COVERAGE_EPOCHS = 15_000

@@ -5,9 +5,9 @@
 import os
 import threading
 
-from yolomux_lib.infra import batchd
-from yolomux_lib.local_services.registry import LocalServiceRegistry
-from yolomux_lib.local_services.registry import LocalServiceSpec
+from yomux_lib.infra import batchd
+from yomux_lib.local_services.registry import LocalServiceRegistry
+from yomux_lib.local_services.registry import LocalServiceSpec
 
 
 def test_state_lock_contention_returns_typed_busy_without_entering_the_handler(tmp_path):
@@ -318,7 +318,7 @@ def test_real_state_lock_contention_keeps_registry_control_plane_healthy(tmp_pat
 
         registry = LocalServiceRegistry(
             tmp_path,
-            LocalServiceSpec("batchd", "yolomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
+            LocalServiceSpec("batchd", "yomux_lib.batchd", "batchd.sock", batchd.BATCHD_PROTOCOL_VERSION),
             socket_path=broker.socket_path,
             service_dir=tmp_path,
         )

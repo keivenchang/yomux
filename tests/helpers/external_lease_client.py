@@ -26,11 +26,11 @@ from collections.abc import Callable
 from collections.abc import Iterator
 from typing import Any
 
-from yolomux_lib.local_services import runtime
+from yomux_lib.local_services import runtime
 
 
 # A process that does nothing but stay alive until its stdin is closed. It needs
-# no YOLOmux code: the only thing the fence reads about it is its pid and the
+# no YOmux code: the only thing the fence reads about it is its pid and the
 # process-start identity the kernel publishes for it.
 EXTERNAL_CLIENT_SOURCE = "import sys\nsys.stdin.read()\n"
 

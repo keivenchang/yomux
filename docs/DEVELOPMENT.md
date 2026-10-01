@@ -12,25 +12,25 @@ Run the canonical gate before landing a change:
 python3 tools/check.py
 ```
 
-The runner lists available lanes with `python3 tools/check.py --list-lanes` and runs independent lanes in parallel by default. For focused work, use `python3 tools/check.py --lane <name>`. The `bazel-go` lane owns the complete Go suite; do not run the full gate and the Go wrapper back-to-back on the same tree. Linux makes 100% of that capacity available to pytest by default; `--cpu-percent` and `YOLOMUX_CHECK_CPU_PERCENT` can lower the share. For example, 32 logical but 24 schedulable Linux CPUs produce 12/8/4 non-browser/browser/e2e workers.
+The runner lists available lanes with `python3 tools/check.py --list-lanes` and runs independent lanes in parallel by default. For focused work, use `python3 tools/check.py --lane <name>`. The `bazel-go` lane owns the complete Go suite; do not run the full gate and the Go wrapper back-to-back on the same tree. Linux makes 100% of that capacity available to pytest by default; `--cpu-percent` and `YOMUX_CHECK_CPU_PERCENT` can lower the share. For example, 32 logical but 24 schedulable Linux CPUs produce 12/8/4 non-browser/browser/e2e workers.
 
 The default gate is development validation, not latency certification. Use `python3 tools/check.py --certify` for the explicit certification run or `python3 tools/check.py --certification-only` when certification is the only requested lane; a normal green gate reports `NOT CERTIFIED`.
 
 Use `python3 -m pytest <path-or-test>` for a focused Python test. `node tests/layout_url.test.js` runs the focused Node/browser-source shards. Automated browser and Go tests use fixture-owned state and ports; they never use the operator server on port 7220.
 
-Frontend source lives in `static_src/`. `static/yolomux.js` and `static/yolomux.css` are ignored build outputs and are not tracked by Git. `make setup`, `make dev`, and `tools/check.py` generate them when missing or stale; after frontend source changes, run `python3 tools/static_build.py`. Use `python3 tools/static_build.py --check` to verify the generated files without writing them. Focused browser and Node tests need the generated bundles; run `make dev` or the builder first on a fresh checkout.
+Frontend source lives in `static_src/`. `static/yomux.js` and `static/yomux.css` are ignored build outputs and are not tracked by Git. `make setup`, `make dev`, and `tools/check.py` generate them when missing or stale; after frontend source changes, run `python3 tools/static_build.py`. Use `python3 tools/static_build.py --check` to verify the generated files without writing them. The old `/static/yolomux.js` and `/static/yolomux.css` URLs resolve to the same bundles during the transition. Focused browser and Node tests need the generated bundles; run `make dev` or the builder first on a fresh checkout.
 
 Build Go with:
 
 ```bash
-bazel --bazelrc=/dev/null build --jobs=auto //cmd/yolomux-go:yolomux_go
+bazel --bazelrc=/dev/null build --jobs=auto //cmd/yomux-go:yomux-go
 ```
 
 Run `python3 tools/check.py --lane bazel-go` for validation. `tools/run_bazel_tests.sh` is the direct equivalent when only that complete Go suite is needed.
 
 ## Local servers
 
-After a change, restart the active development server before reporting it ready. `./boot.sh <port>` starts Go by default after the Bazel binary is built. The `yolo-dev-start` workflow also starts Go explicitly for configured numbered checkouts. Use `./boot.sh --deprecated-python <port>` only when validating the deprecated Python fallback. Do not use a raw `python3 yolomux.py` launch for the normal server; that direct legacy entrypoint can still select Python unless `--backend go` is passed.
+After a change, restart the active development server before reporting it ready. `./boot.sh <port>` starts Go by default after the Bazel binary is built. The `yolo-dev-start` workflow also starts Go explicitly for configured numbered checkouts. Use `./boot.sh --deprecated-python <port>` or `python3 yomux.py --backend python` only when validating the deprecated Python fallback. Direct `python3 yomux.py` starts Go by default.
 
 Port 7220 is the operator runtime. Port 7221 is reserved for a manual Go preview. Automated tests must use fixture-owned ports. Restart production only when explicitly requested.
 

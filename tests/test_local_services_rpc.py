@@ -11,10 +11,10 @@ import time
 
 import pytest
 
-from yolomux_lib.local_services import registry as registry_module
-from yolomux_lib.local_services import rpc
-from yolomux_lib.local_services import runtime
-from yolomux_lib.local_services.client import LocalServiceClient
+from yomux_lib.local_services import registry as registry_module
+from yomux_lib.local_services import rpc
+from yomux_lib.local_services import runtime
+from yomux_lib.local_services.client import LocalServiceClient
 
 
 @pytest.fixture(autouse=True)
@@ -297,7 +297,7 @@ def test_local_service_runtime_self_connection_is_excluded_from_on_client(tmp_pa
     if not hasattr(socket, "SO_PEERCRED"):
         pytest.skip("SO_PEERCRED not supported on this platform")
     socket_path = tmp_path / "service.sock"
-    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yolomux-testd")
+    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yomux-testd")
     lock_path = tmp_path / "service.lock"
     stop_event = threading.Event()
     listener_ready = threading.Event()
@@ -532,7 +532,7 @@ def _run_echo_service(socket_path, lock_path, stop_event, *, monkeypatch=None, p
 
 def test_local_service_runtime_uses_mode_0600_unix_socket_and_survives_slow_clients(tmp_path, monkeypatch):
     socket_path = tmp_path / "service.sock"
-    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yolomux-testd")
+    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yomux-testd")
     lock_path = tmp_path / "service.lock"
     stop_event = threading.Event()
     worker = _run_echo_service(socket_path, lock_path, stop_event, monkeypatch=monkeypatch, peer_uid=os.getuid())
@@ -554,7 +554,7 @@ def test_local_service_runtime_uses_mode_0600_unix_socket_and_survives_slow_clie
 
 def test_local_service_runtime_forwards_bounded_request_binary_to_handler(tmp_path, monkeypatch):
     socket_path = tmp_path / "service.sock"
-    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yolomux-testd")
+    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yomux-testd")
     lock_path = tmp_path / "service.lock"
     stop_event = threading.Event()
     worker = _run_echo_service(socket_path, lock_path, stop_event, monkeypatch=monkeypatch, peer_uid=os.getuid())
@@ -581,7 +581,7 @@ def test_local_service_runtime_forwards_bounded_request_binary_to_handler(tmp_pa
 
 def test_local_service_runtime_carries_accept_read_and_handler_phases(tmp_path, monkeypatch):
     socket_path = tmp_path / "service.sock"
-    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yolomux-testd")
+    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yomux-testd")
     lock_path = tmp_path / "service.lock"
     stop_event = threading.Event()
     worker = _run_echo_service(socket_path, lock_path, stop_event, monkeypatch=monkeypatch, peer_uid=os.getuid())
@@ -616,7 +616,7 @@ def test_local_service_runtime_carries_accept_read_and_handler_phases(tmp_path, 
 
 def test_local_service_runtime_reports_bounded_capacity_rejection(tmp_path, monkeypatch):
     socket_path = tmp_path / "service.sock"
-    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yolomux-testd")
+    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yomux-testd")
     lock_path = tmp_path / "service.lock"
     stop_event = threading.Event()
     started = threading.Event()
@@ -664,7 +664,7 @@ def test_local_service_runtime_reports_bounded_capacity_rejection(tmp_path, monk
 
 def test_local_service_runtime_does_not_idle_shutdown_with_active_handler(tmp_path):
     socket_path = tmp_path / "service.sock"
-    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yolomux-testd")
+    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yomux-testd")
     lock_path = tmp_path / "service.lock"
     stop_event = threading.Event()
     started = threading.Event()
@@ -721,7 +721,7 @@ def test_local_service_runtime_idle_shutdown_after_last_client_disconnects(tmp_p
     if not hasattr(socket, "SO_PEERCRED"):
         pytest.skip("SO_PEERCRED not supported on this platform")
     socket_path = tmp_path / "service.sock"
-    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yolomux-testd")
+    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yomux-testd")
     lock_path = tmp_path / "service.lock"
     stop_event = threading.Event()
     listener_ready = threading.Event()
@@ -842,7 +842,7 @@ def test_local_service_runtime_idle_shutdown_after_last_client_disconnects(tmp_p
 
 def test_local_service_runtime_rejects_wrong_peer_uid_where_supported(tmp_path, monkeypatch):
     socket_path = tmp_path / "service.sock"
-    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yolomux-testd")
+    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yomux-testd")
     lock_path = tmp_path / "service.lock"
     stop_event = threading.Event()
     worker = _run_echo_service(socket_path, lock_path, stop_event, monkeypatch=monkeypatch, peer_uid=os.getuid() + 1)
@@ -857,7 +857,7 @@ def test_local_service_runtime_rejects_wrong_peer_uid_where_supported(tmp_path, 
 
 def test_local_service_runtime_caps_oversize_responses_without_exiting(tmp_path, monkeypatch):
     socket_path = tmp_path / "service.sock"
-    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yolomux-testd")
+    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yomux-testd")
     lock_path = tmp_path / "service.lock"
     stop_event = threading.Event()
     worker = _run_echo_service(socket_path, lock_path, stop_event, monkeypatch=monkeypatch, peer_uid=os.getuid())
@@ -874,7 +874,7 @@ def test_local_service_runtime_caps_oversize_responses_without_exiting(tmp_path,
 
 def test_local_service_runtime_returns_typed_handler_failure_and_keeps_serving(tmp_path, monkeypatch):
     socket_path = tmp_path / "service.sock"
-    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yolomux-testd")
+    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yomux-testd")
     lock_path = tmp_path / "service.lock"
     stop_event = threading.Event()
     worker = _run_echo_service(socket_path, lock_path, stop_event, monkeypatch=monkeypatch, peer_uid=os.getuid())
@@ -945,12 +945,12 @@ def test_local_service_runtime_loser_does_not_run_stateful_startup(tmp_path):
 
 def test_local_service_transport_has_no_pickle_or_decompression_surface():
     sources = [
-        "yolomux_lib/local_services/rpc.py",
-        "yolomux_lib/local_services/runtime.py",
-        "yolomux_lib/local_services/registry.py",
-        "yolomux_lib/infra/batchd.py",
-        "yolomux_lib/stats_current/service.py",
-        "yolomux_lib/approvald.py",
+        "yomux_lib/local_services/rpc.py",
+        "yomux_lib/local_services/runtime.py",
+        "yomux_lib/local_services/registry.py",
+        "yomux_lib/infra/batchd.py",
+        "yomux_lib/stats_current/service.py",
+        "yomux_lib/approvald.py",
     ]
     combined = "\n".join(open(path, encoding="utf-8").read() for path in sources)
 

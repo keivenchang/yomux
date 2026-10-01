@@ -9,14 +9,14 @@ import json
 import os
 from typing import Any
 
-from yolomux_lib.infra import common
-from yolomux_lib.infra.host_partition import host_partitioned_state_dir
-from yolomux_lib.local_services.rpc import encode_metadata
-from yolomux_lib.local_services.rpc import LOCAL_RPC_MAX_METADATA_BYTES
-from yolomux_lib.local_services.rpc import new_envelope
-from yolomux_lib.stats_current import storage
-from yolomux_lib.stats_current.storage import Observation
-from yolomux_lib.workspace import session_files
+from yomux_lib.infra import common
+from yomux_lib.infra.host_partition import host_partitioned_state_dir
+from yomux_lib.local_services.rpc import encode_metadata
+from yomux_lib.local_services.rpc import LOCAL_RPC_MAX_METADATA_BYTES
+from yomux_lib.local_services.rpc import new_envelope
+from yomux_lib.stats_current import storage
+from yomux_lib.stats_current.storage import Observation
+from yomux_lib.workspace import session_files
 
 
 LIVE_EVENT_DENSITY = {

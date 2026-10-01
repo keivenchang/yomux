@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import threading
 
-from yolomux_lib.infra.background_scheduler import BackgroundScheduler
+from yomux_lib.infra.background_scheduler import BackgroundScheduler
 
 
 def test_coordinator_reports_all_roles_as_local(tmp_path):

@@ -10,14 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib.infra.host_identity import HostIdentity
-from yolomux_lib.infra.transient_paths import TransientPathError
-from yolomux_lib.infra.transient_paths import create_run_root
-from yolomux_lib.infra.transient_paths import NAMESPACE_SERVER
-from yolomux_lib.infra.transient_paths import NAMESPACE_TEST
-from yolomux_lib.infra.transient_paths import remove_run_root
-from yolomux_lib.infra.transient_paths import recover_stale_run_root
-from yolomux_lib.infra.host_identity import process_start_identity
+from yomux_lib.infra.host_identity import HostIdentity
+from yomux_lib.infra.transient_paths import TransientPathError
+from yomux_lib.infra.transient_paths import create_run_root
+from yomux_lib.infra.transient_paths import NAMESPACE_SERVER
+from yomux_lib.infra.transient_paths import NAMESPACE_TEST
+from yomux_lib.infra.transient_paths import remove_run_root
+from yomux_lib.infra.transient_paths import recover_stale_run_root
+from yomux_lib.infra.host_identity import process_start_identity
 
 
 def fixture_identity(*, stable_host_id: str = "host-a", pid: int = 4242) -> HostIdentity:
@@ -38,7 +38,7 @@ def test_run_root_writes_identity_manifest_and_named_private_children(tmp_path: 
     run_root = create_run_root(namespace=NAMESPACE_TEST, owner_role="pytest", temporary_base=tmp_path, identity=identity, clock=12.5)
 
     assert run_root.path.parent == tmp_path
-    assert run_root.path.name.startswith("yolomux-test-4242-")
+    assert run_root.path.name.startswith("yomux-test-4242-")
     assert f"-{run_root.identity.pid}-{run_root.manifest['owner_uid']}-" in run_root.path.name
     assert run_root.path.stat().st_mode & 0o777 == 0o700
     assert json.loads((run_root.path / "manifest.json").read_text(encoding="utf-8")) == run_root.manifest

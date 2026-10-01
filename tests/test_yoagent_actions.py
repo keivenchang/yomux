@@ -1,6 +1,6 @@
-from yolomux_lib.yoagent.actions import parse_yoagent_action_intent
-from yolomux_lib.yoagent.actions import parse_yoagent_job_intent
-from yolomux_lib.yoagent.actions import parse_yoagent_skill_file_intent
+from yomux_lib.yoagent.actions import parse_yoagent_action_intent
+from yomux_lib.yoagent.actions import parse_yoagent_job_intent
+from yomux_lib.yoagent.actions import parse_yoagent_skill_file_intent
 
 
 def test_parse_wait_then_send_to_numeric_session():

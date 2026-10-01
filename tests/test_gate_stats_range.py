@@ -56,12 +56,12 @@ from tests.subsystems.stats_24h_http import assert_query_policy
 from tests.subsystems.stats_24h_http import assert_transcripts_fill_every_bucket
 from tests.subsystems.stats_24h_http import exercise_combined_observations_and_transcripts
 from tests.subsystems.stats_24h_http import exercise_empty_window
-from yolomux_lib import server as server_module
-from yolomux_lib import web as web_module
-from yolomux_lib.stats_current import client as stats_client
-from yolomux_lib.stats_current import http as stats_http
-from yolomux_lib.stats_current import service as stats_service
-from yolomux_lib.stats_current import storage
+from yomux_lib import server as server_module
+from yomux_lib import web as web_module
+from yomux_lib.stats_current import client as stats_client
+from yomux_lib.stats_current import http as stats_http
+from yomux_lib.stats_current import service as stats_service
+from yomux_lib.stats_current import storage
 
 
 SAMPLE_COUNT = 30
@@ -112,7 +112,7 @@ def _assert_range_shift_latency(label: str, maximum_ms: float) -> None:
 
 def test_debug_stats_sample_endpoint_is_not_a_live_client_contract():
     """The retired sample route must not survive as a latent browser 404."""
-    source = Path("static_src/js/yolomux/85_debug_panel.js").read_text(encoding="utf-8")
+    source = Path("static_src/js/yomux/85_debug_panel.js").read_text(encoding="utf-8")
     assert "/api/stats-sample" not in source
 
 

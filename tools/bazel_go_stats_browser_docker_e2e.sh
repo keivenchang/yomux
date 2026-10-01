@@ -38,8 +38,8 @@ if bazel_test_in_container; then
     # here catches a container-only module, fixture, or schema mismatch before the browser gate.
     YOLOMUX_GO_BINARY="$binary_host" \
     GOTOOLCHAIN=local GOWORK=off GO111MODULE=on GOPROXY=off GOSUMDB=off \
-    GOMODCACHE=/opt/yolomux-go-mod-cache GOCACHE="$YOLOMUX_BAZEL_TMPDIR/go-cache" \
-        "$go_bin" test -count=1 ./internal/stats ./cmd/yolomux-go
+    GOMODCACHE=/opt/yomux-go-mod-cache GOCACHE="$YOLOMUX_BAZEL_TMPDIR/go-cache" \
+        "$go_bin" test -count=1 ./internal/stats ./cmd/yomux-go
     YOLOMUX_GO_BINARY="$binary_host" \
     YOLOMUX_WORKTREE_WRITER_SLOT="${YOLOMUX_WORKTREE_WRITER_SLOT:-/tmp/yolomux-bazel-writer-$$}" \
         python3 -m pytest \

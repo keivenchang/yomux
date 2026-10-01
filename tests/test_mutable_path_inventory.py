@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ALLOWED_HOME_ROOT_OWNERS = {"yolomux_lib/infra/common.py", "yolomux_lib/auth.py"}
+ALLOWED_HOME_ROOT_OWNERS = {"yomux_lib/infra/common.py", "yomux_lib/auth.py"}
 MUTATORS = {"write_text", "write_bytes", "mkdir", "touch", "unlink", "replace", "rename", "chmod"}
 
 
@@ -24,7 +24,7 @@ def _has_path_home(node: ast.AST) -> bool:
 
 def test_direct_home_backed_mutable_paths_have_a_layout_owner():
     offenders = []
-    for path in sorted((ROOT / "yolomux_lib").rglob("*.py")):
+    for path in sorted((ROOT / "yomux_lib").rglob("*.py")):
         relative = path.relative_to(ROOT).as_posix()
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
         for node in ast.walk(tree):

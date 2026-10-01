@@ -7,6 +7,7 @@ import difflib
 from http import HTTPStatus
 import http.server
 from io import BytesIO
+from io import StringIO
 import json
 import os
 import re
@@ -27,22 +28,23 @@ from urllib.parse import urlunsplit
 
 import pytest
 
-from yolomux_lib import common
-from yolomux_lib import app as app_module
-from yolomux_lib import auto_approve_worker as auto_approve_worker_module
-from yolomux_lib import control as control_module
-from yolomux_lib import events as events_module
-from yolomux_lib import settings as settings_module
-from yolomux_lib import web
-from yolomux_lib import yolo_rules as yolo_rules_module
-from yolomux_lib import server_auth
-from yolomux_lib.locales import locale_registry_payload
-from yolomux_lib.http_routes import route_for_request
-from yolomux_lib.app import TmuxWebtermApp
-from yolomux_lib.server import TmuxWebtermHTTPServer
-from yolomux_lib.server_logs import SERVER_LOGS
-from yolomux_lib.stats_current import resolution as stats_resolution
-from yolomux_lib.stats_current import storage as stats_storage
+from tools import static_build
+from yomux_lib import common
+from yomux_lib import app as app_module
+from yomux_lib import auto_approve_worker as auto_approve_worker_module
+from yomux_lib import control as control_module
+from yomux_lib import events as events_module
+from yomux_lib import settings as settings_module
+from yomux_lib import web
+from yomux_lib import yolo_rules as yolo_rules_module
+from yomux_lib import server_auth
+from yomux_lib.locales import locale_registry_payload
+from yomux_lib.http_routes import route_for_request
+from yomux_lib.app import TmuxWebtermApp
+from yomux_lib.server import TmuxWebtermHTTPServer
+from yomux_lib.server_logs import SERVER_LOGS
+from yomux_lib.stats_current import resolution as stats_resolution
+from yomux_lib.stats_current import storage as stats_storage
 from tests.browser_helpers.browser_console import assert_browser_console_error_free
 from tests.browser_helpers.browser_console import assert_browser_journey_error_free
 from tests.browser_helpers.browser_console import read_browser_console_log
@@ -244,7 +246,7 @@ class WebDriverWait(SeleniumWebDriverWait):
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-LOCAL_GOLDEN_SCREENSHOT_DIR = REPO_ROOT / ".yolomux-test-goldens"
+LOCAL_GOLDEN_SCREENSHOT_DIR = REPO_ROOT / ".yomux-test-goldens"
 
 # Chrome 150 blocks a file:// document from loading file:// subresources in an
 # unrelated directory (net::ERR_ACCESS_DENIED), which broke every fixture that pulls
@@ -255,7 +257,7 @@ LOCAL_GOLDEN_SCREENSHOT_DIR = REPO_ROOT / ".yolomux-test-goldens"
 _FIXTURE_HTTP_BASE: str | None = None
 _FIXTURE_HTTP_LOCK = threading.Lock()
 _FIXTURE_CONTENT_ROOT = FixtureContentRoot.create(REPO_ROOT)
-_EMPTY_FAVICON_HTML = '<link rel="icon" data-yolomux-favicon href="data:,">'
+_EMPTY_FAVICON_HTML = '<link rel="icon" data-yomux-favicon href="data:,">'
 _FIXTURE_PIXEL_GIF = bytes.fromhex(
     "47494638396101000100800000000000ffffff21f90401000000002c00000000010001000002024401003b"
 )
@@ -393,7 +395,7 @@ class _QuietHttpFixtureHandler(http.server.SimpleHTTPRequestHandler):
 
 
 def fixture_asset_url(*parts: str) -> str:
-    """URL for a repo asset (e.g. static/yolomux.js) served over the fixture HTTP origin."""
+    """URL for a repo asset (e.g. static/yomux.js) served over the fixture HTTP origin."""
     return f"{_fixture_http_base()}/{'/'.join(parts)}"
 
 
@@ -591,10 +593,10 @@ def set_browser_visual_profile(browser, *, theme="dark", dpr=1):
 
 def app_css() -> str:
     # The shipped app stylesheet, read once and reused. Every Selenium fixture used to re-read
-    # static/yolomux.css from disk (~36 reads per run); the content is identical every time.
+    # static/yomux.css from disk (~36 reads per run); the content is identical every time.
     global _APP_CSS_CACHE
     if _APP_CSS_CACHE is None:
-        _APP_CSS_CACHE = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+        _APP_CSS_CACHE = (REPO_ROOT / "static" / "yomux.css").read_text(encoding="utf-8")
     return _APP_CSS_CACHE
 
 
@@ -1080,10 +1082,10 @@ def _invalid_browser_session(error):
 _BUNDLE_FRESHNESS_CHECKED = False
 
 
-def _require_current_generated_bundle() -> None:
+def _require_current_generated_bundle(workerinput: Mapping[str, object] | None = None) -> None:
     """Refuse to run a browser gate against a stale generated bundle.
 
-    Most browser gates serve the generated `static/yolomux.js` rather than
+    Most browser gates serve the generated `static/yomux.js` rather than
     building from `static_src/`. If that bundle is stale they exercise the
     previous build: a fixed source can stay red, and a broken source can stay
     green. `tools/check.py` has a `static_build --check` lane, but agents are
@@ -1097,20 +1099,28 @@ def _require_current_generated_bundle() -> None:
     global _BUNDLE_FRESHNESS_CHECKED
     if _BUNDLE_FRESHNESS_CHECKED:
         return
-    completed = subprocess.run(
-        [sys.executable, "tools/static_build.py", "--check"],
-        cwd=REPO_ROOT, capture_output=True, text=True, check=False,
-    )
-    output = f"{completed.stdout}{completed.stderr}"
-    assert completed.returncode == 0, output
+    environment = os.environ.copy()
+    if workerinput is not None:
+        token = str(workerinput.get("yomux_worktree_writer_token") or "")
+        slot = str(workerinput.get("yomux_worktree_writer_slot") or "")
+        if token and slot:
+            environment["YOLOMUX_WORKTREE_WRITER_TOKEN"] = token
+            environment["YOLOMUX_WORKTREE_WRITER_SLOT"] = slot
+    stdout = StringIO()
+    stderr = StringIO()
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        returncode = static_build.main(["--check"], environ=environment)
+    output = f"{stdout.getvalue()}{stderr.getvalue()}"
+    assert returncode == 0, output
     _BUNDLE_FRESHNESS_CHECKED = True
 
 
 @pytest.fixture(scope=_browser_fixture_scope)
-def browser():
+def browser(pytestconfig: pytest.Config):
     # Session scope creates exactly one lease per pytest-xdist worker, while the autouse teardown
     # removes cross-test state after every test.
-    _require_current_generated_bundle()
+    workerinput = pytestconfig.workerinput if hasattr(pytestconfig, "workerinput") else None
+    _require_current_generated_bundle(workerinput)
     lease = _BrowserDriverLease(new_chrome_driver())
     try:
         yield lease
@@ -1302,7 +1312,7 @@ def topbar_font_fixture_html():
     return page_html(
         f"""
         <header id="topbar-fixture" class="topbar">
-          <div class="brand"><span class="title">YOLOmux</span></div>
+          <div class="brand"><span class="title">YOmux</span></div>
           <div class="app-menu-area">
             <nav class="app-menu-bar" aria-label="Application menu">
               <div class="app-menu"><button id="menu-file" type="button" class="app-menu-button">File</button></div>
@@ -1580,14 +1590,14 @@ def codemirror_todo_diff_overview_fixture_html():
         </style>
       </head>
       <body class="theme-dark editor-theme-dark">
-        <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+        <script id="yomux-bootstrap" type="application/json">{bootstrap}</script>
         <div id="mount"></div>
         <script>{app_script}</script>
         <script>
           (function() {{
             const original = {original_json};
             const current = {current_json};
-            const CM = window.YOLOmuxCodeMirror;
+            const CM = window.YOmuxCodeMirror;
             diffExpandUnchanged = true;
             const panel = document.createElement('article');
             panel.className = 'panel file-editor-panel active-pane';
@@ -1670,6 +1680,8 @@ def codemirror_file_explorer_diff_overview_fixture_html():
             "strings": {"en": strings},
         }
     )
+    # These source snapshots predate the source-directory rename, so their Git paths keep the
+    # historical directory name even though the current checkout uses static_src/js/yomux/.
     path = "static_src/js/yolomux/40_file_explorer_files.js"
     original = subprocess.check_output(["git", "show", f"521bbfd:{path}"], cwd=REPO_ROOT, text=True)
     current = subprocess.check_output(["git", "show", f"6a967aaa70:{path}"], cwd=REPO_ROOT, text=True)
@@ -1693,14 +1705,14 @@ def codemirror_file_explorer_diff_overview_fixture_html():
         </style>
       </head>
       <body class="theme-dark editor-theme-dark">
-        <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+        <script id="yomux-bootstrap" type="application/json">{bootstrap}</script>
         <div id="mount"></div>
         <script>{app_script}</script>
         <script>
           (function() {{
             const original = {original_json};
             const current = {current_json};
-            const CM = window.YOLOmuxCodeMirror;
+            const CM = window.YOmuxCodeMirror;
             diffExpandUnchanged = true;
             const panel = document.createElement('article');
             panel.className = 'panel file-editor-panel active-pane';
@@ -1890,14 +1902,14 @@ def codemirror_diff_wrapped_inserted_line_fixture_html():
         </style>
       </head>
       <body class="theme-dark editor-theme-dark file-editor-open">
-        <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+        <script id="yomux-bootstrap" type="application/json">{bootstrap}</script>
         <div id="mount"></div>
         <script>{app_script}</script>
         <script>
           (function() {{
             const original = {original_json};
             const current = {current_json};
-            const CM = window.YOLOmuxCodeMirror;
+            const CM = window.YOmuxCodeMirror;
             // editor-wrap on the panel + EditorView.lineWrapping is the word-wrap-on state.
             const panel = document.createElement('article');
             panel.className = 'panel file-editor-panel active-pane editor-wrap';
@@ -1986,7 +1998,7 @@ def codemirror_diff_wrapped_inserted_line_fixture_html():
 
 
 def app_bundle_before_boot_script():
-    source = (REPO_ROOT / "static" / "yolomux.js").read_text(encoding="utf-8")
+    source = (REPO_ROOT / "static" / "yomux.js").read_text(encoding="utf-8")
     boot_start = source.index("if (refreshMeta) {")
     return source[:boot_start].replace("</script", "<\\/script")
 
@@ -2064,7 +2076,7 @@ def codemirror_wrap_toggle_fixture_html():
         </style>
       </head>
       <body class="theme-dark editor-theme-dark">
-        <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+        <script id="yomux-bootstrap" type="application/json">{bootstrap}</script>
         <div id="wrap-regression-mount"></div>
         <script>try {{ localStorage.setItem('yolomux.editorWrap', '0'); }} catch (_) {{}}</script>
         <script>
@@ -2123,7 +2135,7 @@ def codemirror_wrap_toggle_fixture_html():
                     const result = originalReconfigure(targetPanel);
                     const view = targetPanel?._cmView;
                     const contentFacet = view
-                      ? view.state.facet(window.YOLOmuxCodeMirror.EditorView.contentAttributes)
+                      ? view.state.facet(window.YOmuxCodeMirror.EditorView.contentAttributes)
                       : [];
                     window.__wrapRegressionReconfigCalls.push({{
                       result,
@@ -2142,7 +2154,7 @@ def codemirror_wrap_toggle_fixture_html():
                   const status = panel.querySelector('.file-editor-status-panel')?.textContent || '';
                   const cmPane = panel.querySelector('.file-editor-codemirror-panel');
                   const rawPane = panel.querySelector('.file-editor-raw-panel');
-                  const cmKeys = Object.keys(window.YOLOmuxCodeMirror || {{}}).slice(0, 20).join(',');
+                  const cmKeys = Object.keys(window.YOmuxCodeMirror || {{}}).slice(0, 20).join(',');
                   reject(new Error([
                     'CodeMirror editor did not render test document',
                     `status=${{status}}`,
@@ -2180,7 +2192,7 @@ def finder_click_toolbar_fixture_html():
               </div>
               <div class="file-explorer-toolbar-row file-explorer-path-row">
                 <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel active" aria-pressed="true">Sync</button>
-                <input class="file-explorer-path-inline" value="/home/keivenc/yolomux.dev/static_src/js/yolomux">
+                <input class="file-explorer-path-inline" value="/home/keivenc/yolomux.dev/static_src/js/yomux">
                 <button type="button" class="path-copy-button file-explorer-path-copy-panel"></button>
               </div>
               <div class="file-explorer-toolbar-row file-explorer-actions-row">
@@ -2431,7 +2443,7 @@ def validate_browser_boot_routes(stub_script: str) -> None:
 
 def browser_boot_production_contract_errors(bootstrap: Mapping[str, object]) -> tuple[str, ...]:
     production = json.loads(re.search(
-        r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>',
+        r'<script id="yomux-bootstrap" type="application/json">(.*?)</script>',
         web.html_page(["1"]),
         re.DOTALL,
     ).group(1))
@@ -2472,7 +2484,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
     stats_only = scenario.stats_only
     css = app_css()
     brand_css = (REPO_ROOT / "static" / "brand.css").read_text(encoding="utf-8")
-    script_uri = scenario.runtime_script_uri or fixture_asset_url("static", "yolomux.js")
+    script_uri = scenario.runtime_script_uri or fixture_asset_url("static", "yomux.js")
     dockview_css_uri = fixture_asset_url("static", "vendor", "dockview.css")
     dockview_script_uri = fixture_asset_url("static", "vendor", "dockview-core.noStyle.js")
     stats_capabilities = stats_resolution.wire_capabilities()
@@ -2497,7 +2509,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
       window.__terminalResizeCalls = [];
       window.__settingsMtime = 0;
       window.__fixtureRouteMethods = __BROWSER_BOOT_ROUTE_METHODS__;
-      window.__settingsPayload = JSON.parse(document.getElementById('yolomux-bootstrap').textContent).settingsPayload;
+      window.__settingsPayload = JSON.parse(document.getElementById('yomux-bootstrap').textContent).settingsPayload;
       window.__fixtureServerLogsPayload = {
         ok: true,
         epoch: 'fixture-server-log-epoch',
@@ -2797,8 +2809,8 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
         }
         return result;
       }
-      window.__fixtureAccessRole = JSON.parse(document.getElementById('yolomux-bootstrap').textContent).accessRole || 'admin';
-      window.__fixtureAuthUsername = JSON.parse(document.getElementById('yolomux-bootstrap').textContent).authUsername || 'alice';
+      window.__fixtureAccessRole = JSON.parse(document.getElementById('yomux-bootstrap').textContent).accessRole || 'admin';
+      window.__fixtureAuthUsername = JSON.parse(document.getElementById('yomux-bootstrap').textContent).authUsername || 'alice';
       window.__fixtureYoagentMessages = [];
       window.__fixtureChatMessages = [];
       window.__fixtureChatMessageKeys = {};
@@ -3289,7 +3301,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
       <body>
         {app_root_open}
         <header class="topbar">
-          <div class="brand-cell"><div class="brand brand-title title" aria-label="YOLOmux test"><span class="brand-yolo brand-nv">YO</span><span class="brand-lo brand-nv">LO</span><span class="brand-blue">m</span><span class="brand-red">u</span><span class="brand-yellow">x</span><span class="brand-version">test</span></div><span id="httpsWarning" class="transport-warning" hidden></span></div>
+          <div class="brand-cell"><div class="brand brand-title title" aria-label="YOmux test"><span class="brand-mark">Y</span><span class="brand-second brand-nv">O</span><span class="brand-blue">m</span><span class="brand-red">u</span><span class="brand-yellow">x</span><span class="brand-version">test</span></div><span id="httpsWarning" class="transport-warning" hidden></span></div>
           <div id="sessionButtons" class="app-menu-area" aria-label="Application menus"></div>
           <div class="actions">
             <div id="latencyMeter" class="latency-meter topbar-status-surface"><svg class="latency-graph" viewBox="0 0 44 18"><polyline id="latencyLine" class="latency-line" points=""></polyline></svg><span id="latencyNumber" class="latency-number">-- ms</span></div>
@@ -3317,7 +3329,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
         <div id="panelPool" class="panel-pool" aria-hidden="true"></div>
         <section id="modal" class="modal app-modal-overlay"><div class="modal-dialog"><div class="modal-head"><div id="modalTitle">Transcript</div><button id="closeModal">Close</button></div><pre id="modalBody"></pre></div></section>
         {app_root_close}
-        <script id="yolomux-bootstrap" type="application/json">{json.dumps(bootstrap, separators=(",", ":"))}</script>
+        <script id="yomux-bootstrap" type="application/json">{json.dumps(bootstrap, separators=(",", ":"))}</script>
         <script>
           window.__fixtureSessions = {json.dumps(sessions)};
           // Session-metadata build identity, modelled on the server contract rather than invented
@@ -3395,7 +3407,7 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
 
 
 def load_static_html_fixture(browser, tmp_path, filename, html):
-    if "data-yolomux-favicon" not in html:
+    if "data-yomux-favicon" not in html:
         html = re.sub(r"(<head\b[^>]*>)", rf"\1{_EMPTY_FAVICON_HTML}", html, count=1, flags=re.IGNORECASE)
     page = serve_repo_fixture_page(filename, html)
     browser.get(fixture_page_url(page))
@@ -4116,7 +4128,7 @@ def dockview_invalid_drop_preview(browser):
         return {
           previews,
           dangerColor,
-          invalidPreview: document.querySelector('.yolomux-dockview')?.classList.contains('dockview-invalid-tab-drop-preview') || false,
+          invalidPreview: document.querySelector('.yomux-dockview')?.classList.contains('dockview-invalid-tab-drop-preview') || false,
         };
         """
     )

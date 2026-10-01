@@ -27,13 +27,13 @@ from tests.gate_harness import load_gate_browser
 from tests.gate_harness import run_when_browser_ready
 from tests.tmux_runtime import run_isolated_tmux
 from tests.tmux_runtime import wait_for_isolated_tmux_panes
-from yolomux_lib.local_services.registry import pid_is_serving
-from yolomux_lib.local_services.registry import process_group_has_serving_member
-from yolomux_lib.local_services.registry import process_state
-from yolomux_lib.tmux.session_retirement import capture_tmux_session_retirement
-from yolomux_lib.tmux.session_retirement import join_tmux_session_retirement
-from yolomux_lib.tmux.session_retirement import retained_tmux_session_births
-from yolomux_lib.tmux.sessions import discover_sessions
+from yomux_lib.local_services.registry import pid_is_serving
+from yomux_lib.local_services.registry import process_group_has_serving_member
+from yomux_lib.local_services.registry import process_state
+from yomux_lib.tmux.session_retirement import capture_tmux_session_retirement
+from yomux_lib.tmux.session_retirement import join_tmux_session_retirement
+from yomux_lib.tmux.session_retirement import retained_tmux_session_births
+from yomux_lib.tmux.sessions import discover_sessions
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

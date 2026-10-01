@@ -35,32 +35,32 @@ DEFAULT_MANIFEST = REPO_ROOT / "tests/fixtures/architecture_budgets/v1.json"
 MANIFEST_VERSION = 1
 
 CLASS_TARGETS: Final[tuple[tuple[str, str], ...]] = (
-    ("yolomux_lib/app.py", "TmuxWebtermApp"),
-    ("yolomux_lib/server.py", "Handler"),
-    ("yolomux_lib/stats_current/service.py", "StatsCurrentService"),
-    ("yolomux_lib/local_services/registry.py", "LocalServiceRegistry"),
-    ("yolomux_lib/watchd.py", "PersistentWatchService"),
-    ("yolomux_lib/infra/batchd.py", "PersistentJobBroker"),
-    ("yolomux_lib/infra/batchd.py", "JobProductStore"),
-    ("yolomux_lib/infra/background_scheduler.py", "BackgroundScheduler"),
-    ("yolomux_lib/infra/state_services.py", "SessionFilesOperationLifecycle"),
+    ("yomux_lib/app.py", "TmuxWebtermApp"),
+    ("yomux_lib/server.py", "Handler"),
+    ("yomux_lib/stats_current/service.py", "StatsCurrentService"),
+    ("yomux_lib/local_services/registry.py", "LocalServiceRegistry"),
+    ("yomux_lib/watchd.py", "PersistentWatchService"),
+    ("yomux_lib/infra/batchd.py", "PersistentJobBroker"),
+    ("yomux_lib/infra/batchd.py", "JobProductStore"),
+    ("yomux_lib/infra/background_scheduler.py", "BackgroundScheduler"),
+    ("yomux_lib/infra/state_services.py", "SessionFilesOperationLifecycle"),
 )
 PRODUCTION_LINE_TARGETS: Final[tuple[str, ...]] = (
-    "yolomux_lib/app.py",
-    "yolomux_lib/infra/listener_census.py",
-    "yolomux_lib/infra/state_services.py",
-    "yolomux_lib/server.py",
-    "yolomux_lib/search/file_index.py",
-    "yolomux_lib/workspace/session_files.py",
-    "yolomux_lib/stats_current/service.py",
-    "static_src/js/yolomux/85_debug_panel.js",
-    "static_src/js/yolomux/99_terminal_boot.js",
-    "static_src/js/yolomux/20_layout_state.js",
-    "static_src/js/yolomux/10_core_utils.js",
-    "static_src/js/yolomux/40_file_explorer_files.js",
-    "static_src/css/yolomux/50_terminal_file_tree.css",
-    "static_src/css/yolomux/30_preferences_changes.css",
-    "static_src/css/yolomux/60_editor_file_panels.css",
+    "yomux_lib/app.py",
+    "yomux_lib/infra/listener_census.py",
+    "yomux_lib/infra/state_services.py",
+    "yomux_lib/server.py",
+    "yomux_lib/search/file_index.py",
+    "yomux_lib/workspace/session_files.py",
+    "yomux_lib/stats_current/service.py",
+    "static_src/js/yomux/85_debug_panel.js",
+    "static_src/js/yomux/99_terminal_boot.js",
+    "static_src/js/yomux/20_layout_state.js",
+    "static_src/js/yomux/10_core_utils.js",
+    "static_src/js/yomux/40_file_explorer_files.js",
+    "static_src/css/yomux/50_terminal_file_tree.css",
+    "static_src/css/yomux/30_preferences_changes.css",
+    "static_src/css/yomux/60_editor_file_panels.css",
 )
 GENERATED_PARTS: Final[set[str]] = {"static", "node_modules", "vendor", "dist", "build", "__pycache__"}
 DECLARATION_RE = re.compile(r"^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\b", re.MULTILINE)
@@ -93,7 +93,7 @@ RETIRED_SHARE_I18N_KEY_RE: Final[re.Pattern[bytes]] = re.compile(
 )
 RETIRED_SHARE_FILENAME_EXCEPTIONS: Final[frozenset[str]] = frozenset((
     "DOIT.075.2." + "yo" + "share-removal.md",
-    "yolomux_lib/infra/" + "shared_config_lock.py",
+    "yomux_lib/infra/" + "shared_config_lock.py",
     "tests/test_" + "shared_config_lock.py",
 ))
 RETIRED_SHARE_CONTENT_EXCEPTIONS: Final[frozenset[str]] = frozenset((
@@ -173,7 +173,7 @@ def _test_imports(root: Path) -> list[str]:
 
 
 def _partial_global_writes(root: Path) -> list[dict[str, Any]]:
-    directory = root / "static_src/js/yolomux"
+    directory = root / "static_src/js/yomux"
     paths = sorted(directory.glob("*.js"))
     owners: dict[str, str] = {}
     texts: dict[str, str] = {}
@@ -291,7 +291,7 @@ def _string_set(node: ast.AST, values: dict[str, set[str]]) -> set[str] | None:
 
 def _daemon_actions(root: Path) -> list[str]:
     rows: list[str] = []
-    for path in sorted((root / "yolomux_lib").rglob("*.py")):
+    for path in sorted((root / "yomux_lib").rglob("*.py")):
         relative = path.relative_to(root).as_posix()
         tree = _python_tree(root, relative)
         values: dict[str, set[str]] = {}
@@ -314,7 +314,7 @@ def _daemon_actions(root: Path) -> list[str]:
 
 
 def _runtime_row_fields(root: Path) -> list[str]:
-    tree = _python_tree(root, "yolomux_lib/local_service_projection.py")
+    tree = _python_tree(root, "yomux_lib/local_service_projection.py")
     target = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "LocalServiceRuntimeRow")
     return sorted(
         node.target.id
@@ -332,7 +332,7 @@ def _registry_ids(root: Path, relative: str, registry: str, constructor: str) ->
 
 
 def _control_families(root: Path) -> list[str]:
-    text = (root / "static_src/js/yolomux/76_panel_dom_actions.js").read_text(encoding="utf-8")
+    text = (root / "static_src/js/yomux/76_panel_dom_actions.js").read_text(encoding="utf-8")
     return sorted(name for name in CONTROL_FAMILY_NAMES if re.search(rf"^function\s+{re.escape(name)}\s*\(", text, re.MULTILINE))
 
 
@@ -412,8 +412,8 @@ def capture(root: Path) -> dict[str, Any]:
         "extension_families": {
             "daemon_actions": _daemon_actions(root),
             "runtime_row_fields": _runtime_row_fields(root),
-            "preview_renderers": _registry_ids(root, "static_src/js/yolomux/00_bootstrap_state.js", "PREVIEW_RENDERERS", "previewRendererStrategy"),
-            "debug_subviews": _registry_ids(root, "static_src/js/yolomux/85_debug_panel.js", "DEBUG_SUBVIEWS", "debugSubviewDescriptor"),
+            "preview_renderers": _registry_ids(root, "static_src/js/yomux/00_bootstrap_state.js", "PREVIEW_RENDERERS", "previewRendererStrategy"),
+            "debug_subviews": _registry_ids(root, "static_src/js/yomux/85_debug_panel.js", "DEBUG_SUBVIEWS", "debugSubviewDescriptor"),
             "control_families": _control_families(root),
         },
         "source_text_assertions": _source_text_assertions(root),
