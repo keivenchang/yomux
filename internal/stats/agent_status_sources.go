@@ -16,9 +16,20 @@ const maxAgentStatusCommandOutput = MaxAgentPaneCaptureBytes
 // LinuxAgentStatusSources returns bounded live-system adapters. Every adapter
 // fails closed when its OS identity or tmux target cannot be established.
 func LinuxAgentStatusSources(database string) AgentStatusSources {
+	return agentStatusSources(database, linuxAgentProcess)
+}
+
+// CurrentPlatformAgentStatusSources returns bounded adapters for the host OS.
+// The Tabber status path is used on macOS as well as Linux, while inventory
+// collection remains Linux-only YO!stats functionality.
+func CurrentPlatformAgentStatusSources(database string) AgentStatusSources {
+	return agentStatusSources(database, platformAgentProcess)
+}
+
+func agentStatusSources(database string, process func(context.Context, int) (AgentStatusProcess, error)) AgentStatusSources {
 	return AgentStatusSources{
 		CapturePane: linuxCaptureAgentPane,
-		Process:     linuxAgentProcess,
+		Process:     process,
 		OpenCodeState: func(ctx context.Context, request AgentStatusRequest) (string, []string, error) {
 			return OpenCodeSQLiteStateReader(database)(ctx, request)
 		},
@@ -68,7 +79,7 @@ func linuxCaptureAgentPane(ctx context.Context, target string) (AgentStatusPane,
 		}
 		return AgentStatusPane{}, errors.New("pane-capture-failed")
 	}
-	return AgentStatusPane{Target: target, VisibleText: string(result.Stdout)}, nil
+	return AgentStatusPane{Target: target, VisibleText: string(result.Stdout), ObservedAt: time.Now()}, nil
 }
 
 func linuxAgentPaneCaptureArgs(target string) []string {

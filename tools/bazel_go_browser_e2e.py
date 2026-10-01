@@ -57,13 +57,87 @@ def synthetic_server_environment(overrides: dict[str, str]) -> dict[str, str]:
 
 
 def resolve_source_root() -> Path:
-    configured = os.environ.get("YOLOMUX_E2E_SOURCE_ROOT", "").strip()
+    configured = os.environ.get("YOMUX_E2E_SOURCE_ROOT", os.environ.get("YOLOMUX_E2E_SOURCE_ROOT", "")).strip()
     source_root = Path(configured) if configured else Path.cwd()
     required = (source_root / "static/yomux.js", source_root / "tools", source_root / "yomux_lib")
     if not all(path.exists() for path in required):
         missing = ", ".join(str(path) for path in required if not path.exists())
         raise RuntimeError(f"E2E source root is missing required assets: {missing}")
     return source_root.resolve()
+
+
+def tabber_reload_trace_source(session: str) -> str:
+    return """
+        (() => {
+          const targetSession = __TARGET_SESSION__;
+          const trace = {requests: [], activity: null, firstRowAt: null, firstRowText: '', metadataConvergence: null};
+          window.__tabberReloadTrace = trace;
+          const sourceRequest = () => trace.requests
+            .filter(request => request.responseAt !== null && request.responseAt <= trace.firstRowAt
+              && request.body?.sessions?.[targetSession])
+            .sort((left, right) => left.responseAt - right.responseAt)[0];
+          const observeConvergence = () => {
+            if (trace.metadataConvergence || trace.firstRowAt === null) return;
+            const request = sourceRequest();
+            if (!request) return;
+            const body = request.body;
+            const baseline = Number(body.metadata_generation || body.metadata_identity?.generation || body.cache?.generation || 0);
+            if (body.cache?.stale !== true && body.cache?.refreshing !== true) {
+              trace.metadataConvergence = {generation: baseline, baseline, at: request.responseAt, skipped: 'cache is current'};
+              return;
+            }
+            const state = typeof transcriptMetadataState === 'object' ? transcriptMetadataState : null;
+            const generation = Number(state?.generation || 0);
+            const sessionData = state?.payload?.sessions?.[targetSession] || null;
+            const at = performance.now();
+            if (generation > baseline && sessionData?.work_graph?.version === 1) {
+              trace.metadataConvergence = {generation, baseline, at, graphVersion: sessionData.work_graph.version};
+            } else if (at >= request.startedAt + 500) {
+              trace.metadataConvergence = {
+                error: 'refreshed transcript metadata was not applied within 500ms', generation, baseline, at,
+                lastApply: state?.lastApply || null,
+                requests: trace.requests.map(request => ({path: request.path, status: request.status, responseAt: request.responseAt, cache: request.body?.cache || null})),
+              };
+            }
+          };
+          const markRow = () => {
+            if (trace.firstRowAt === null) {
+              const row = Array.from(document.querySelectorAll('#panel-__tabber__ .file-tree-row[data-tabber-type="session"]'))
+                .find(candidate => candidate.textContent.includes(targetSession));
+              if (row) {
+                trace.firstRowAt = performance.now();
+                trace.firstRowText = row.textContent;
+              }
+            }
+            observeConvergence();
+          };
+          new MutationObserver(markRow).observe(document, {subtree: true, childList: true});
+          const sampleFrame = () => {
+            markRow();
+            if (!trace.metadataConvergence) requestAnimationFrame(sampleFrame);
+          };
+          requestAnimationFrame(sampleFrame);
+          const originalFetch = window.fetch.bind(window);
+          window.fetch = async (...args) => {
+            const requestUrl = new URL(typeof args[0] === 'string' ? args[0] : args[0].url, location.href);
+            const isTracked = requestUrl.pathname === '/api/activity' || requestUrl.pathname === '/api/session-metadata';
+            if (!isTracked) return originalFetch(...args);
+            const startedAt = performance.now();
+            const request = {path: requestUrl.pathname, startedAt, responseAt: null, status: null, body: null};
+            trace.requests.push(request);
+            const response = await originalFetch(...args);
+            request.responseAt = performance.now();
+            request.status = response.status;
+            if (request.path === '/api/activity') trace.activity = request;
+            response.clone().json().then(body => {
+              request.body = body;
+              observeConvergence();
+            });
+            return response;
+          };
+          markRow();
+        })();
+    """.replace("__TARGET_SESSION__", json.dumps(session))
 
 
 def main(binary: str) -> None:
@@ -98,6 +172,7 @@ def main(binary: str) -> None:
         tmux_socket_path = short_tmux_socket_path("yogo")
         cleanup_errors = []
         tmux_socket_cleaned = False
+        server_log_paths = []
 
         def cleanup_tmux_socket_dir():
             nonlocal tmux_socket_cleaned
@@ -265,6 +340,7 @@ exec /bin/sleep 300
             nonlocal port
             generation = len(list(root.glob("server-*.txt"))) + 1
             log_path = root / f"server-{generation}.txt"
+            server_log_paths.append(log_path)
             log_file = log_path.open("w", encoding="utf-8")
             environment = synthetic_server_environment({
                 "HOME": str(fixture_home),
@@ -315,6 +391,16 @@ exec /bin/sleep 300
             stop_process(proc, "Go server", force=force)
             proc = None
 
+        def server_diagnostic():
+            process_state = "not started" if proc is None else f"pid={proc.pid} exit={proc.poll()}"
+            log_tails = []
+            for log_path in server_log_paths:
+                try:
+                    log_tails.append(f"{log_path.name}: {log_path.read_text(encoding='utf-8', errors='replace')[-4000:]!r}")
+                except OSError as error:
+                    log_tails.append(f"{log_path.name}: read failed: {error}")
+            return f"server={process_state}; logs={log_tails!r}"
+
         def assert_server_identity(driver, process):
             identity = driver.execute_async_script("""
                 const done = arguments[arguments.length - 1];
@@ -345,25 +431,31 @@ exec /bin/sleep 300
             for arg in ("--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--ignore-certificate-errors", "--window-size=1200,800"):
                 options.add_argument(arg)
             driver_path = os.environ.get("CHROMEDRIVER_BIN") or shutil.which("chromedriver")
-            if driver_path:
-                driver = webdriver.Chrome(service=Service(executable_path=driver_path), options=options)
-            else:
-                driver = webdriver.Chrome(options=options)
-            driver_lease = WebDriverLease.from_driver(driver)
             served_bundle_hashes = {}
             for asset, expected in expected_bundle_hashes.items():
-                with urllib.request.urlopen(
-                    f"https://127.0.0.1:{port}/static/{asset}",
-                    context=ssl._create_unverified_context(),
-                    timeout=5,
-                ) as response:
-                    served = response.read()
+                asset_url = f"https://127.0.0.1:{port}/static/{asset}"
+                try:
+                    with urllib.request.urlopen(
+                        asset_url,
+                        context=ssl._create_unverified_context(),
+                        timeout=5,
+                    ) as response:
+                        served = response.read()
+                except (OSError, urllib.error.URLError, TimeoutError) as error:
+                    raise SystemExit(
+                        f"served bundle request failed for {asset_url}: {error}; {server_diagnostic()}"
+                    ) from error
                 actual = sha256_bytes(served)
                 if actual != expected:
                     raise SystemExit(
                         f"served {asset} hash mismatch: expected {expected}, got {actual}"
                     )
                 served_bundle_hashes[asset] = actual
+            if driver_path:
+                driver = webdriver.Chrome(service=Service(executable_path=driver_path), options=options)
+            else:
+                driver = webdriver.Chrome(options=options)
+            driver_lease = WebDriverLease.from_driver(driver)
             try:
                 driver.get(f"https://127.0.0.1:{port}/login")
                 driver.find_element("name", "username").send_keys("e2e")
@@ -658,40 +750,7 @@ exec /bin/sleep 300
                 for command in expected_launch_commands:
                     recorded = wait_for_recorded_command(command)
 
-                reload_trace_source = f"""
-                    (() => {{
-                      const targetSession = {json.dumps(session)};
-                      const trace = {{requests: [], activity: null, firstRowAt: null, firstRowText: ''}};
-                      window.__tabberReloadTrace = trace;
-                      const markRow = () => {{
-                        if (trace.firstRowAt !== null) return;
-                        const row = Array.from(document.querySelectorAll('#panel-__tabber__ .file-tree-row[data-tabber-type="session"]'))
-                          .find(candidate => candidate.textContent.includes(targetSession));
-                        if (row) {{
-                          trace.firstRowAt = performance.now();
-                          trace.firstRowText = row.textContent;
-                        }}
-                      }};
-                      new MutationObserver(markRow).observe(document, {{subtree: true, childList: true}});
-                      const originalFetch = window.fetch.bind(window);
-                      window.fetch = async (...args) => {{
-                        const requestUrl = new URL(typeof args[0] === 'string' ? args[0] : args[0].url, location.href);
-                        const isTracked = requestUrl.pathname === '/api/activity' || requestUrl.pathname === '/api/session-metadata';
-                        if (!isTracked) return originalFetch(...args);
-                        const startedAt = performance.now();
-                        const request = {{path: requestUrl.pathname, startedAt, responseAt: null, status: null, body: null}};
-                        trace.requests.push(request);
-                        const response = await originalFetch(...args);
-                        request.responseAt = performance.now();
-                        request.status = response.status;
-                        if (request.path === '/api/activity') trace.activity = request;
-                        response.clone().json().then(body => {{ request.body = body; }});
-                        return response;
-                      }};
-                      markRow();
-                    }})();
-                """
-                driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": reload_trace_source})
+                driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": tabber_reload_trace_source(session)})
                 tabber_reload_url = (
                     f"https://127.0.0.1:{port}/?sessions=__tabber__,{session}"
                     f"&layout=row@34(left,right)&tabs=left:__tabber__;right:{session}"
@@ -703,6 +762,7 @@ exec /bin/sleep 300
                         const trace = window.__tabberReloadTrace;
                         const session = new URLSearchParams(location.search).get('sessions')?.split(',')[1];
                         return Boolean(trace?.activity?.body && trace.firstRowAt !== null
+                          && trace.metadataConvergence
                           && trace.requests.some(request => request.body?.sessions?.[session]));
                     """))
                 except TimeoutException as error:
@@ -740,12 +800,7 @@ exec /bin/sleep 300
                 tabber_reload_first_paint_ms = tabber_reload_trace["firstRowAt"] - tabber_reload_source["startedAt"]
                 tabber_reload_body = tabber_reload_source["body"]
                 tabber_reload_session = tabber_reload_body.get("sessions", {}).get(session, {})
-                tabber_reload_fresh_sources = [
-                    request for request in tabber_reload_trace["requests"]
-                    if request.get("body", {}).get("cache", {}).get("stale") is False
-                    and request.get("body", {}).get("sessions", {}).get(session)
-                ]
-                tabber_reload_fresh_source = min(tabber_reload_fresh_sources, key=lambda request: request["responseAt"], default=None)
+                tabber_reload_convergence = tabber_reload_trace["metadataConvergence"]
                 if (
                     tabber_reload_activity["status"] != 200
                     or tabber_reload_activity["responseAt"] - tabber_reload_activity["startedAt"] >= 500
@@ -755,12 +810,11 @@ exec /bin/sleep 300
                     or tabber_reload_duration_ms >= 500
                     or tabber_reload_first_paint_ms >= 500
                     or tabber_reload_session.get("work_graph", {}).get("version") != 1
-                    or tabber_reload_fresh_source is None
-                    or tabber_reload_fresh_source["responseAt"] >= 500
-                    or tabber_reload_fresh_source["body"].get("cache", {}).get("refreshing") is not False
+                    or tabber_reload_convergence.get("error")
+                    or tabber_reload_convergence["at"] - tabber_reload_source["startedAt"] >= 500
                 ):
                     raise SystemExit(
-                        "Chromium reload did not render cached Tabber data and converge within 500ms: "
+                        "Chromium reload did not render cached Tabber data within 500ms or refresh stale metadata within 500ms: "
                         + json.dumps({
                             "row_source": tabber_reload_source["path"],
                             "row_source_ms": tabber_reload_source_duration_ms,
@@ -768,11 +822,11 @@ exec /bin/sleep 300
                             "first_row_ms": tabber_reload_first_paint_ms,
                             "cache": tabber_reload_body.get("cache"),
                             "graph_version": tabber_reload_session.get("work_graph", {}).get("version"),
-                            "fresh_metadata_response_ms": tabber_reload_fresh_source["responseAt"] if tabber_reload_fresh_source else None,
-                            "fresh_cache": tabber_reload_fresh_source["body"].get("cache") if tabber_reload_fresh_source else None,
+                            "metadata_convergence": tabber_reload_convergence,
                         }, sort_keys=True)
                     )
-                print(f"Go browser Tabber reload: {json.dumps({'cached_source_ms': tabber_reload_source_duration_ms, 'first_row_ms': tabber_reload_first_paint_ms, 'fresh_metadata_response_ms': tabber_reload_fresh_source['responseAt']}, sort_keys=True)}")
+                metadata_converged_ms = None if tabber_reload_convergence.get("skipped") else tabber_reload_convergence["at"] - tabber_reload_source["startedAt"]
+                print(f"Go browser Tabber reload: {json.dumps({'cached_source_ms': tabber_reload_source_duration_ms, 'first_row_ms': tabber_reload_first_paint_ms, 'metadata_converged_ms': metadata_converged_ms, 'metadata_generation': tabber_reload_convergence['generation'], 'metadata_refresh_skipped': tabber_reload_convergence.get('skipped')}, sort_keys=True)}")
                 surfaces = driver.execute_async_script("""
                     const done = arguments[arguments.length - 1];
                     const session = arguments[0];
@@ -835,15 +889,18 @@ exec /bin/sleep 300
                           }, 'published session work graph');
                           await applyTranscriptsPayload(metadata.body, {refreshAuto: false, refreshContext: false, refreshActivity: false, source: 'e2e-probe'});
                         }
-                        const activitySession = tabberActivityResponse.body.sessions?.[session] || {};
+                        const freshActivityResponse = await json('/api/activity?hours=24&visible=1&scope=all');
+                        const activitySession = freshActivityResponse.body.sessions?.[session] || {};
                         if (tabberActivityResponse.status !== 200
                             || tabberActivityResponse.body.cache?.hit !== true
-                            || tabberActivityResponse.body.cache?.stale !== false
+                            || freshActivityResponse.status !== 200
+                            || freshActivityResponse.body.cache?.hit !== true
+                            || freshActivityResponse.body.cache?.stale !== false
                             || activitySession.work_graph?.version !== 1
                             || tabberReloadDurationMs >= 500
                             || tabberFirstPaintMs === null
                             || tabberFirstPaintMs >= 500) {
-                          throw new Error(`warm Tabber activity did not return and render within 500ms: ${JSON.stringify({status: tabberActivityResponse.status, durationMs: tabberReloadDurationMs, firstPaintMs: tabberFirstPaintMs, cache: tabberActivityResponse.body.cache, graphVersion: activitySession.work_graph?.version})}`);
+                          throw new Error(`warm Tabber activity did not return and render within 500ms or converge to a fresh snapshot: ${JSON.stringify({status: tabberActivityResponse.status, durationMs: tabberReloadDurationMs, firstPaintMs: tabberFirstPaintMs, warmCache: tabberActivityResponse.body.cache, freshStatus: freshActivityResponse.status, freshCache: freshActivityResponse.body.cache, graphVersion: activitySession.work_graph?.version})}`);
                         }
                         const info = metadata.body.sessions?.[session] || {};
                         const graph = info.work_graph || {};
@@ -2232,7 +2289,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the Docker/Bazel Go Chromium E2E contract.")
     parser.add_argument("binary", nargs="?", help="path to the Bazel-built Go server binary")
     arguments = parser.parse_args()
-    binary = arguments.binary or os.environ.get("YOLOMUX_GO_BINARY")
+    binary = arguments.binary or os.environ.get("YOMUX_GO_BINARY", os.environ.get("YOLOMUX_GO_BINARY"))
     if not binary:
-        parser.error("a Go server binary argument or YOLOMUX_GO_BINARY is required")
+        parser.error("a Go server binary argument or YOMUX_GO_BINARY is required")
     main(binary)

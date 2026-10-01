@@ -176,43 +176,16 @@ except Exception:
 fi
 
 extra_env=()
-extra_env+=("$(yolomux_default_server_optin)")
-# Managed/operator launches always use the machine-wide tmux server. Clear a
-# private socket inherited from a test fixture or a long-lived tmux client;
-# test launchers pass their private socket directly to their child process.
-extra_env+=("YOLOMUX_TMUX_SOCKET=")
+go_binary=""
 if [[ "$backend" == "go" ]]; then
   go_binary="${YOLOMUX_GO_BINARY:-}"
-  if [[ -z "$go_binary" && -x "$repo_root/bazel-bin/yomux-go" ]]; then
-    go_binary="$repo_root/bazel-bin/yomux-go"
-  elif [[ -z "$go_binary" && -x "$repo_root/bazel-bin/cmd/yomux-go/yomux-go_/yomux-go" ]]; then
-    # Bazel's go_binary rule places the executable under the rule package's
-    # _runfiles wrapper directory. Keep the flat path above for older builds,
-    # but recognize the canonical output produced by the current target.
-    go_binary="$repo_root/bazel-bin/cmd/yomux-go/yomux-go_/yomux-go"
-  elif [[ -z "$go_binary" && -x "$repo_root/bazel-bin/cmd/yomux-go/yolomux_go_/yolomux_go" ]]; then
-    go_binary="$repo_root/bazel-bin/cmd/yomux-go/yomux_go_/yolomux_go"
-  elif [[ -z "$go_binary" && -x "$repo_root/bazel-bin/yolomux-go" ]]; then
-    go_binary="$repo_root/bazel-bin/yolomux-go"
-  elif [[ -z "$go_binary" && -x "$repo_root/yolomux-go" ]]; then
-    go_binary="$repo_root/yolomux-go"
+  if [[ -z "$go_binary" ]]; then
+    go_binary="$("$python_bin" "$repo_root/tools/go_binary.py" "$repo_root")"
   fi
-  [[ -n "$go_binary" ]] && extra_env+=("YOLOMUX_GO_BINARY=$go_binary")
-  # The managed launcher is an operator demand boundary. Go persists the
-  # reason so restart and demand-start counters stay measured across boots;
-  # direct launches that omit this value remain explicitly partial.
-  extra_env+=("YOLOMUX_GO_START_REASON=${YOLOMUX_GO_START_REASON:-demand}")
-  # The Go collector intentionally refuses to derive mutable client-data roots
-  # from HOME/XDG. The managed operator launch is the explicit production
-  # boundary, so pass those roots here; synthetic tests launch the binary with
-  # their own private roots instead of going through boot.sh.
-  extra_env+=("YOLOMUX_CLAUDE_TRANSCRIPT_ROOT=${YOLOMUX_CLAUDE_TRANSCRIPT_ROOT:-$HOME/.claude/projects}")
-  extra_env+=("YOLOMUX_CODEX_TRANSCRIPT_ROOT=${YOLOMUX_CODEX_TRANSCRIPT_ROOT:-$HOME/.codex/sessions}")
-  extra_env+=("YOLOMUX_OPENCODE_DATABASE=${YOLOMUX_OPENCODE_DATABASE:-${XDG_DATA_HOME:-$HOME/.local/share}/opencode/opencode.db}")
 fi
-if [[ -n "${YOLOMUX_TEST_AUTH_BYPASS:-}" ]]; then
-  extra_env+=("YOLOMUX_TEST_AUTH_BYPASS=${YOLOMUX_TEST_AUTH_BYPASS}")
-fi
+while IFS= read -r -d '' assignment; do
+  extra_env+=("$assignment")
+done < <(yomux_server_launch_environment "$backend" "$go_binary")
 
 use_dev_mode() {
   local port="$1"
@@ -255,14 +228,19 @@ print_launch_command() {
   log_path="$(log_path_for "$port")"
   build_server_args "$port"
   if [[ "$(uname -s)" == "Darwin" ]]; then
-    local launcher socket_name session_name
+    local launcher socket_name session_name plan_json env_count
     launcher="$(yolomux_macos_server_launcher)"
     socket_name="$(yolomux_macos_server_tmux_socket)"
     session_name="$(yolomux_macos_server_tmux_session "$port")"
+    plan_json="$("$python_bin" "$repo_root/tools/instance_isolation.py" plan-direct --port "$port")" || die "port $port launch refused by instance-isolation preflight"
+    env_count="${#extra_env[@]}"
     printf 'launchctl bootout %q 2>/dev/null || true\n' "$(yolomux_macos_launch_target "$port")"
     printf 'tmux -L %q kill-session -t %q 2>/dev/null || true\n' "$socket_name" "=$session_name"
-    printf 'tmux -L %q new-session -d -s %q -c %q /bin/bash -c %q bash %q %q %q %q %q %q %q' \
-      "$socket_name" "$session_name" "$repo_root" "$launcher" "$repo_root" "$PATH" "$server_shell" "$python_bin" "$repo_root/yomux.py" "$log_path"
+    printf 'tmux -L %q new-session -d -s %q -c %q /bin/bash -c %q bash %q %q %q %q %q %q %q %q' \
+      "$socket_name" "$session_name" "$repo_root" "$launcher" "$repo_root" "$PATH" "$server_shell" "$python_bin" "$repo_root/yomux.py" "$log_path" "$plan_json" "$env_count"
+    for item in "${extra_env[@]}"; do
+      printf ' %q' "$item"
+    done
     for item in "${server_args[@]}"; do
       printf ' %q' "$item"
     done
@@ -498,7 +476,7 @@ restart_port() {
 
   printf '\n[%s] boot.sh launching port %s from %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$port" "$repo_root" >> "$log_path"
   if [[ "$(uname -s)" == "Darwin" ]]; then
-    yolomux_submit_macos_server "$repo_root" "$python_bin" "$server_shell" "$PATH" "$port" "$log_path" "${server_args[@]}"
+    yolomux_submit_macos_server "$repo_root" "$python_bin" "$server_shell" "$PATH" "$port" "$log_path" "${#extra_env[@]}" "${extra_env[@]}" "${server_args[@]}"
   else
     launch_server "$log_path"
   fi

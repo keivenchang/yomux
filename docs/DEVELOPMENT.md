@@ -12,7 +12,9 @@ Run the canonical gate before landing a change:
 python3 tools/check.py
 ```
 
-The runner lists available lanes with `python3 tools/check.py --list-lanes` and runs independent lanes in parallel by default. For focused work, use `python3 tools/check.py --lane <name>`. The `bazel-go` lane owns the complete Go suite; do not run the full gate and the Go wrapper back-to-back on the same tree. Linux makes 100% of that capacity available to pytest by default; `--cpu-percent` and `YOMUX_CHECK_CPU_PERCENT` can lower the share. For example, 32 logical but 24 schedulable Linux CPUs produce 12/8/4 non-browser/browser/e2e workers.
+The runner lists available lanes with `python3 tools/check.py --list-lanes` and runs independent lanes in parallel by default. For focused work, use `python3 tools/check.py --lane <name>`. The `bazel-go` lane owns the complete Go suite; do not run the full gate and the Go wrapper back-to-back on the same tree. On macOS, `tools/run_bazel_tests.sh` selects native Bazel execution and the macOS Go SDK; pass `--execution native` to select it explicitly. The wrapper skips its Chromium target when Chrome or chromedriver is unavailable. Linux makes 100% of that capacity available to pytest by default; `--cpu-percent` and `YOMUX_CHECK_CPU_PERCENT` can lower the share. For example, 32 logical but 24 schedulable Linux CPUs produce 12/8/4 non-browser/browser/e2e workers.
+
+Go YO!stats supports host CPU and memory, process CPU and RSS, agent inventory, and daemon-process CPU and RSS on Linux and macOS. macOS collection uses Mach host counters and libproc process data; other operating systems report those measurements unavailable. New samples are collected at the existing product cadence, so older persisted gaps remain unavailable.
 
 The default gate is development validation, not latency certification. Use `python3 tools/check.py --certify` for the explicit certification run or `python3 tools/check.py --certification-only` when certification is the only requested lane; a normal green gate reports `NOT CERTIFIED`.
 
@@ -20,13 +22,13 @@ Use `python3 -m pytest <path-or-test>` for a focused Python test. `node tests/la
 
 Frontend source lives in `static_src/`. `static/yomux.js` and `static/yomux.css` are ignored build outputs and are not tracked by Git. `make setup`, `make dev`, and `tools/check.py` generate them when missing or stale; after frontend source changes, run `python3 tools/static_build.py`. Use `python3 tools/static_build.py --check` to verify the generated files without writing them. The old `/static/yolomux.js` and `/static/yolomux.css` URLs resolve to the same bundles during the transition. Focused browser and Node tests need the generated bundles; run `make dev` or the builder first on a fresh checkout.
 
-Build Go with:
+Build Go with the platform-selected SDK:
 
 ```bash
-bazel --bazelrc=/dev/null build --jobs=auto //cmd/yomux-go:yomux-go
+tools/build_go.sh
 ```
 
-Run `python3 tools/check.py --lane bazel-go` for validation. `tools/run_bazel_tests.sh` is the direct equivalent when only that complete Go suite is needed.
+The build and test wrappers use the same SDK selection. On macOS they select Go 1.24.13 for the Mach-O UUIDs required by local-network binaries; Linux uses the default Go 1.22.2 toolchain. Run `python3 tools/check.py --lane bazel-go` for validation. `tools/run_bazel_tests.sh` is the direct equivalent when only that complete Go suite is needed.
 
 ## Local servers
 

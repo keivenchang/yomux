@@ -131,6 +131,89 @@ def test_finder_parent_collapse_converges_all_surfaces_before_reexpand(browser, 
     )
 
 
+@pytest.mark.parametrize("include_root_listing", [True, False], ids=["with-root", "without-root"])
+def test_finder_reloaded_expansion_stops_spinning_after_failed_directory_push(browser, tmp_path, include_root_listing):
+    root_entries = [{"name": "bin", "kind": "dir"}]
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=left&tabs=left:files",
+        fs_entries={"/home/test": root_entries, "/home/test/bin": [{"name": "tool", "kind": "file"}]},
+    )
+    assert browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        openFileExplorerAt('/home/test', {user: true})
+          .then(result => done({result}))
+          .catch(error => done({error: String(error)}));
+        """
+    ) == {"result": True}
+    selector = '#panel-__finder__ .file-tree-row[data-path="/home/test/bin"]'
+    WebDriverWait(browser, 5).until(lambda driver: driver.find_element(By.CSS_SELECTOR, selector))
+    browser.find_element(By.CSS_SELECTOR, selector).click()
+    WebDriverWait(browser, 5).until(
+        lambda driver: browser.execute_script(
+            "return document.querySelector(arguments[0])?.getAttribute('aria-expanded') === 'true' && fileExplorerExpanded.has('/home/test/bin');",
+            selector,
+        )
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: browser.execute_script(
+            "const state = JSON.parse(new URLSearchParams(location.search).get('state') || '{}'); return state.finder?.expanded?.includes('/home/test/bin') === true;"
+        )
+    )
+
+    browser.refresh()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof refreshFileExplorerFromPush === 'function' && document.querySelector(arguments[0]) !== null;",
+            selector,
+        )
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: browser.execute_script(
+            "return document.querySelector(arguments[0])?.getAttribute('aria-expanded') === 'true';",
+            selector,
+        )
+    )
+    browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const includeRootListing = arguments[0];
+        const directories = [{path: '/home/test/bin', ok: false, status: 403, error: 'permission denied'}];
+        if (includeRootListing) {
+          directories.unshift({path: '/home/test', ok: true, status: 200, data: {path: '/home/test', entries: [{name: 'bin', kind: 'dir'}]}});
+        } else {
+          // A mounted tree can outlive the bounded directory cache's root record.
+          fileExplorerFsResourceRecords.delete(fileExplorerFsBatchKey('list', '/home/test'));
+        }
+        refreshFileExplorerFromPush({
+          mode: 'full',
+          token: 'reload-failed-child-listing',
+          directories,
+        }).then(() => done(null)).catch(error => done(String(error)));
+        """,
+        include_root_listing,
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: browser.execute_script(
+            "const row = document.querySelector(arguments[0]); return row?.getAttribute('aria-expanded') === 'false' && row.classList.contains('loading-children') === false && childContainerForRow(row, '/home/test/bin')?.querySelector('[role=status]') !== null;",
+            selector,
+        )
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: browser.execute_script(
+            "const state = JSON.parse(new URLSearchParams(location.search).get('state') || '{}'); return state.finder?.expanded?.includes('/home/test/bin') !== true;"
+        )
+    )
+    state = browser.execute_script(
+        "const row = document.querySelector(arguments[0]); const status = childContainerForRow(row, '/home/test/bin')?.querySelector('[role=status]'); const layout = JSON.parse(new URLSearchParams(location.search).get('state') || '{}'); return {expanded: row?.getAttribute('aria-expanded'), status: status?.textContent || '', restored: layout.finder?.expanded?.includes('/home/test/bin') === true, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')};",
+        selector,
+    )
+    assert state["expanded"] == "false" and state["status"] and not state["restored"], state
+    assert state["errors"] == [] and state["rejections"] == [], state
+
+
 def test_finder_mobile_second_tap_collapses_directory_instead_of_being_discarded(browser, tmp_path):
     selector = '#panel-__finder__ .file-tree-row[data-path="/home/test/dev"]'
     with trusted_touch_emulation(browser, user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1"):
@@ -1322,11 +1405,14 @@ def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_
         const originalFetch = window.fetch.bind(window);
         const waitFor = window.__yolomuxTestWaitFor;
         const jsonResponse = payload => new Response(JSON.stringify(payload), {headers: {'Content-Type': 'application/json'}});
+        const worktreeResponses = [];
         window.fetch = async (input, options = {}) => {
           const url = new URL(String(input), location.href);
-          if (url.pathname === '/api/fs/git-history') return jsonResponse({
+          if (url.pathname === '/api/fs/git-history') {
+            const payload = {
             path: repo,
             repo,
+            repository_identity: 'alignment-repository',
             relative_path: '',
             shallow_boundary: 'complete',
             head: sha,
@@ -1347,7 +1433,12 @@ def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_
               modified_at: 1786931640,
               status_counts: {M: 449, R: 310, '??': 5},
             },
-          });
+            };
+            if (url.searchParams.get('worktree') === 'only') return new Promise(resolve => {
+              worktreeResponses.push(() => resolve(jsonResponse(payload)));
+            });
+            return jsonResponse(payload);
+          }
           return originalFetch(input, options);
         };
         (async () => {
@@ -1360,15 +1451,23 @@ def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_
           });
           panel.style.width = '1200px';
           await new Promise(resolve => requestAnimationFrame(resolve));
-          const dirtyRow = panel.querySelector('.git-diff-worktree-summary');
-          const commitRow = panel.querySelector('.git-diff-commit-row[data-git-diff-commit]');
+          const initialDirtyRow = panel.querySelector('.git-diff-worktree-summary');
+          const completeWorktree = await waitFor(() => worktreeResponses.shift());
+          completeWorktree();
+          await waitFor(() => !gitDiffTabState.get(item)?.worktreeController);
           const fieldNames = ['caret', 'sha', 'date', 'changes', 'author', 'description'];
           await new Promise(resolve => requestAnimationFrame(resolve));
+          // Worktree refresh replaces the Dirty details but retains commit rows. Measure
+          // the current connected pair after that redraw rather than the retired summary.
+          const dirtyRow = panel.querySelector('.git-diff-worktree-summary');
+          const commitRow = panel.querySelector('.git-diff-commit-row[data-git-diff-commit]');
           const fields = fieldNames.map((name, index) => {
             const dirtyField = dirtyRow.children[index];
             const commitField = commitRow.children[index];
             return {
               name,
+              dirtyConnected: dirtyField.isConnected,
+              commitConnected: commitField.isConnected,
               visible: getComputedStyle(dirtyField).display !== 'none' && getComputedStyle(commitField).display !== 'none',
               delta: Math.abs(dirtyField.getBoundingClientRect().left - commitField.getBoundingClientRect().left),
             };
@@ -1387,6 +1486,7 @@ def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_
           const dirtyDescriptionNarrow = panel.querySelector('.git-diff-worktree-summary .git-diff-commit-description');
           done({
             fields,
+            dirtyReplaced: dirtyRow !== initialDirtyRow && !initialDirtyRow.isConnected,
             dirtyChangesText: dirtyChangesWide.textContent,
             dirtyChangesClientWidth: dirtyWide.changesClientWidth,
             dirtyChangesScrollWidth: dirtyWide.changesScrollWidth,
@@ -1404,7 +1504,8 @@ def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_
         sha,
     )
     assert not metrics.get("error"), metrics
-    assert all(field["visible"] and field["delta"] <= 1 for field in metrics["fields"]), metrics["fields"]
+    assert metrics["dirtyReplaced"], metrics
+    assert all(field["dirtyConnected"] and field["commitConnected"] and field["visible"] and field["delta"] <= 1 for field in metrics["fields"]), metrics["fields"]
     assert metrics["dirtyChangesText"].startswith("765 files +10233 -8640") and "2 binary" in metrics["dirtyChangesText"], metrics
     assert metrics["dirtyChangesClientWidth"] > 0 and metrics["dirtyChangesScrollWidth"] <= metrics["dirtyChangesClientWidth"], metrics
     assert metrics["dirtyChangesRight"] <= metrics["dirtyDescriptionWideLeft"], metrics

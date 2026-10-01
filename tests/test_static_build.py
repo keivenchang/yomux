@@ -1,5 +1,6 @@
 import ast
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -49,6 +50,47 @@ from tools.static_build import lint_light_mode_pairs
 
 
 UI_PINS = json.loads(repo_path("tests/fixtures/ui_pins.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("failure", ["write", "fsync"])
+def test_write_asset_removes_temporary_file_after_write_or_fsync_failure(tmp_path, monkeypatch, failure):
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    target = static_dir / "yomux.js"
+    target.write_text("previous asset", encoding="utf-8")
+    monkeypatch.setattr(sb, "repo_path", lambda name: tmp_path / name)
+    monkeypatch.setattr(sb, "build_asset", lambda _asset: "replacement asset")
+    if failure == "write":
+        original_named_temporary_file = sb.tempfile.NamedTemporaryFile
+
+        class FailingOutput:
+            def __init__(self, output):
+                self.output = output
+                self.name = output.name
+
+            def __enter__(self):
+                self.output.__enter__()
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return self.output.__exit__(exc_type, exc_value, traceback)
+
+            def write(self, _value):
+                raise OSError("injected write failure")
+
+            def flush(self):
+                return self.output.flush()
+
+            def fileno(self):
+                return self.output.fileno()
+
+        monkeypatch.setattr(sb.tempfile, "NamedTemporaryFile", lambda **kwargs: FailingOutput(original_named_temporary_file(**kwargs)))
+    else:
+        monkeypatch.setattr(os, "fsync", lambda _fd: (_ for _ in ()).throw(OSError("injected fsync failure")))
+    with pytest.raises(OSError):
+        sb.write_asset("yomux.js")
+    assert target.read_text(encoding="utf-8") == "previous asset"
+    assert list(static_dir.glob(".yomux.js.*")) == []
 
 
 def _grouped_css_selectors(css):

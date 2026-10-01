@@ -1344,6 +1344,20 @@ VISIBLE_AGENT_WORKING_CASES = [
     pytest.param("◦ Reviewing files (24s • esc to interrupt)\n", True, "working", id="codex-esc-to-interrupt-no-working-word"),
     pytest.param(
         "\n".join([
+            "● Failed (exit 1) python3 - <<'PY' …",
+            "  ⎿ StopIteration",
+            "◦ Compacting context (9s • esc to interrupt) · 1 background terminal running · /ps to view · /s…",
+            "  └ Making room to continue.",
+            "  └ Tip: Type / to open the command popup; Tab autocompletes slash commands.",
+            "› Ask Codex to do anything",
+            "GPT-6-Luna high · ~/dev/frontend-crates · Approve append-only case ad… Goal achieved (4h 2m)",
+        ]),
+        True,
+        "working",
+        id="codex-compacting-context-working-without-working-label",
+    ),
+    pytest.param(
+        "\n".join([
             "○ Working (4m 09s • esc to interrupt)",
             "",
             "› Implement {feature}",
@@ -1863,6 +1877,14 @@ def test_agent_screen_state_counter_advances_across_animated_codex_marker():
     assert second_state["status_marker"] == "•"
     assert second_state["status_elapsed_seconds"] == 78
     assert second_state["status_counter_advanced"] is True
+
+
+def test_agent_screen_state_does_not_infer_working_from_background_terminal_notice():
+    visible_text = "1 background terminal running · /ps to view\n› Ask Codex to do anything\nGoal achieved (4h 2m)"
+
+    state = prompt_detector.agent_screen_state(visible_text, agent_kind="codex")
+
+    assert state["key"] == "idle"
 
 
 def test_agent_screen_state_reports_token_counter_advancement():

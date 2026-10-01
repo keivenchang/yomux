@@ -1,7 +1,11 @@
 package testsupport
 
 import (
+	"errors"
 	"os"
+	"os/user"
+	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -17,6 +21,25 @@ func SyntheticEnvironment(overrides ...string) []string {
 			overrideKeys[key] = struct{}{}
 		}
 	}
+	privateRoot, canonicalRootSet := os.LookupEnv("YOMUX_PRIVATE_TEST_ENV_ROOT")
+	if !canonicalRootSet {
+		privateRoot = os.Getenv("YOLOMUX_PRIVATE_TEST_ENV_ROOT")
+	}
+	privateDefaults := make([]string, 0, 4)
+	if privateRoot != "" {
+		if _, overridden := overrideKeys["HOME"]; !overridden {
+			privateDefaults = append(privateDefaults, "HOME="+filepath.Join(privateRoot, privateTestDirectories["HOME"]))
+		}
+		if _, overridden := overrideKeys["TMPDIR"]; !overridden {
+			privateDefaults = append(privateDefaults, "TMPDIR="+filepath.Join(privateRoot, privateTestDirectories["TMPDIR"]))
+		}
+		for _, entry := range []string{"PYTHONUSERBASE=" + os.Getenv("PYTHONUSERBASE"), "PYTHONDONTWRITEBYTECODE=1"} {
+			key, _, _ := strings.Cut(entry, "=")
+			if _, overridden := overrideKeys[key]; !overridden {
+				privateDefaults = append(privateDefaults, entry)
+			}
+		}
+	}
 	environment := make([]string, 0, len(os.Environ())+len(overrides))
 	for _, entry := range os.Environ() {
 		key, _, ok := strings.Cut(entry, "=")
@@ -28,7 +51,74 @@ func SyntheticEnvironment(overrides ...string) []string {
 		}
 		environment = append(environment, entry)
 	}
+	environment = append(environment, privateDefaults...)
 	return append(environment, overrides...)
+}
+
+// NewPrivateTestEnvironment gives cross-language test children temporary HOME and XDG roots.
+// Python module imports may create or chmod application config directories, so tests must not
+// inherit writable paths from the developer account or share those paths across parallel actions.
+func NewPrivateTestEnvironment() (func(), error) {
+	pythonUserBase := os.Getenv("PYTHONUSERBASE")
+	if pythonUserBase == "" {
+		originalHome := os.Getenv("HOME")
+		if originalHome == "" {
+			currentUser, err := user.Current()
+			if err != nil {
+				return nil, err
+			}
+			originalHome = currentUser.HomeDir
+		}
+		if originalHome == "" {
+			return nil, errors.New("resolve original home directory")
+		}
+		pythonUserBase = filepath.Join(originalHome, ".local")
+	}
+	tempRoot := os.TempDir()
+	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
+		// Bazel and macOS can provide deeply nested temp roots. Test tmux sockets
+		// are often created below testing.T.TempDir, so keep this private prefix
+		// short enough for the Unix-domain socket path limit on both platforms.
+		tempRoot = "/tmp"
+	}
+	root, err := os.MkdirTemp(tempRoot, "ym-")
+	if err != nil {
+		return nil, err
+	}
+	for _, directory := range privateTestDirectories {
+		path := filepath.Join(root, directory)
+		if err := os.Mkdir(path, 0o700); err != nil {
+			_ = os.RemoveAll(root)
+			return nil, err
+		}
+	}
+	environment := make(map[string]string, len(privateTestDirectories)+4)
+	for key, directory := range privateTestDirectories {
+		environment[key] = filepath.Join(root, directory)
+	}
+	environment["YOLOMUX_PRIVATE_TEST_ENV_ROOT"] = root
+	environment["YOMUX_PRIVATE_TEST_ENV_ROOT"] = root
+	environment["PYTHONUSERBASE"] = pythonUserBase
+	environment["PYTHONDONTWRITEBYTECODE"] = "1"
+	for key, value := range environment {
+		if err := os.Setenv(key, value); err != nil {
+			_ = os.RemoveAll(root)
+			return nil, err
+		}
+	}
+	return func() { _ = os.RemoveAll(root) }, nil
+}
+
+var privateTestDirectories = map[string]string{
+	"HOME":              "home",
+	"TMPDIR":            "tmp",
+	"XDG_CONFIG_HOME":   "xdg-config",
+	"XDG_DATA_HOME":     "xdg-data",
+	"XDG_STATE_HOME":    "xdg-state",
+	"XDG_CACHE_HOME":    "xdg-cache",
+	"CODEX_HOME":        "codex-home",
+	"CLAUDE_CONFIG_DIR": "claude-config",
+	"XDG_RUNTIME_DIR":   "xdg-runtime",
 }
 
 func ambientSyntheticInputKey(key string) bool {

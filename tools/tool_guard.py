@@ -13,8 +13,19 @@ import signal
 import subprocess
 import time
 
+from tools.instance_isolation import normalize_yomux_environment
+from tools.instance_isolation import resolved_home_path
+from tools.instance_isolation import resolved_product_path
+
 
 TOOL_LOCK_OWNER_ENV = "YOLOMUX_CHECK_TOOL_LOCK_OWNER"
+
+
+def host_expensive_tool_lock_path(environ: Mapping[str, str]) -> Path:
+    values = normalize_yomux_environment(environ)
+    home = resolved_home_path(values)
+    # Existing checkouts must contend on this same inode during the rename transition.
+    return resolved_product_path(values, "YOLOMUX_TOOL_LOCK_PATH", home / ".cache" / "yolomux" / "expensive-tools.lock")
 
 
 def tool_lock_owner_marker(lock_path: Path, *, pid: int | None = None) -> str:

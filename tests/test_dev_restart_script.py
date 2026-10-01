@@ -13,6 +13,9 @@ from pathlib import Path
 
 import pytest
 
+from tools.instance_isolation import synthetic_test_environment
+from tools.go_binary import go_backend_binary_candidates
+
 
 ROOT = Path(__file__).resolve().parents[1]
 STARTUP_COMMON = ROOT / "tools" / "startup_common.sh"
@@ -143,6 +146,33 @@ def test_boot_print_command_empty_canonical_go_binary_clears_legacy_override():
     assert "YOLOMUX_GO_BINARY=/tmp/yolomux-go-legacy" not in command
 
 
+@pytest.mark.parametrize("relative_binary", [
+    "bazel-bin/cmd/yomux-go/yomux-go_/yomux-go",
+    "bazel-bin/cmd/yolomux-go/yolomux_go_/yolomux_go",
+    "bazel-bin/cmd/yomux-go/yolomux_go_/yolomux_go",
+])
+def test_boot_print_command_selects_the_executable_bazel_wrapper(tmp_path, relative_binary):
+    checkout = tmp_path / "checkout"
+    tools_dir = checkout / "tools"
+    tools_dir.mkdir(parents=True)
+    for source in (ROOT / "boot.sh", STARTUP_COMMON, ROOT / "tools" / "instance_isolation.py", ROOT / "tools" / "go_binary.py"):
+        shutil.copy2(source, checkout / "boot.sh" if source.name == "boot.sh" else tools_dir / source.name)
+    binary = checkout / relative_binary
+    binary.parent.mkdir(parents=True)
+    shutil.copy2(sys.executable, binary)
+    with tempfile.TemporaryDirectory(prefix="yomux-launch-", dir="/tmp") as instance_root:
+        environment = synthetic_test_environment({"PYTHON": sys.executable, "HOME": str(tmp_path / "home"), "YOMUX_ROOT": instance_root})
+        result = subprocess.run(
+            [str(checkout / "boot.sh"), "--print-command", "48127"],
+            cwd=checkout,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    assert f"YOLOMUX_GO_BINARY={binary}" in printable_command_text(result.stdout)
+
+
 def test_boot_print_command_launches_dev_ports_in_dev_mode():
     env = dict(os.environ)
     env.pop("YOLOMUX_PORT", None)
@@ -234,11 +264,10 @@ def test_boot_print_command_rejects_backend_python_without_deprecated_flag():
 
 
 def test_boot_go_resolution_includes_current_bazel_rule_output():
-    source = (ROOT / "boot.sh").read_text(encoding="utf-8")
-    current = "bazel-bin/cmd/yomux-go/yomux-go_/yomux-go"
-    assert current in source
-    assert source.index(current) < source.index("bazel-bin/yolomux-go")
-    assert source.index(current) < source.index('repo_root/yolomux-go')
+    candidates = go_backend_binary_candidates(ROOT, {})
+    assert candidates[0] == ROOT / "bazel-bin/cmd/yomux-go/yomux-go_/yomux-go"
+    assert candidates.index(ROOT / "bazel-bin/cmd/yolomux-go/yolomux_go_/yolomux_go") > candidates.index(ROOT / "yomux-go")
+    assert candidates.index(ROOT / "bazel-bin/yolomux-go") > candidates.index(ROOT / "yomux-go")
 
 
 def test_boot_print_command_refuses_relative_log_dir_without_writing(tmp_path):
@@ -282,6 +311,7 @@ def test_boot_asset_check_uses_only_tracked_vendor_files_without_package_tools(t
     tools_dir.mkdir()
     shutil.copy2(ROOT / "boot.sh", checkout / "boot.sh")
     shutil.copy2(STARTUP_COMMON, tools_dir / "startup_common.sh")
+    shutil.copy2(ROOT / "tools" / "go_binary.py", tools_dir / "go_binary.py")
     asset_names = ("xterm.js", "xterm.css", "xterm-addon-unicode11.js")
     for name in asset_names:
         shutil.copy2(ROOT / "static" / "vendor" / name, vendor_dir / name)
@@ -686,7 +716,67 @@ def test_startup_listener_boundary_uses_selected_interpreter_and_checkout_module
     ]
 
 
-def test_macos_submit_uses_callers_row_plan_not_tmux_daemon_environment(tmp_path):
+def test_macos_submit_accepts_legacy_six_fields_and_server_options(tmp_path):
+    checkout = tmp_path / "checkout"
+    tools_dir = checkout / "tools"
+    tools_dir.mkdir(parents=True)
+    shutil.copy2(ROOT / "tools" / "instance_isolation.py", tools_dir / "instance_isolation.py")
+    shutil.copy2(STARTUP_COMMON, tools_dir / "startup_common.sh")
+    result_path = tmp_path / "result.json"
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(json.dumps({"unset": ["YOMUX_ROOT", "YOLOMUX_ROOT", "YOMUX_ROW_PLAN_FILE", "YOLOMUX_ROW_PLAN_FILE"], "assign": {"YOMUX_ROOT": str(tmp_path / "fresh-root"), "YOLOMUX_ROOT": str(tmp_path / "fresh-root")}}), encoding="utf-8")
+    (checkout / "yomux.py").write_text(
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "keys = ('GO_BINARY', 'GO_START_REASON', 'CODEX_TRANSCRIPT_ROOT', 'TMUX_SOCKET', 'TMUX_ALLOW_DEFAULT_SERVER', 'TEST_AUTH_BYPASS')\n"
+        "values = {prefix + key: os.environ.get(prefix + key) for prefix in ('YOMUX_', 'YOLOMUX_') for key in keys}\n"
+        "Path(os.environ['TEST_RESULT']).write_text(json.dumps({'args': sys.argv[1:], 'environment': values}))\n",
+        encoding="utf-8",
+    )
+    tmux_stub = tmp_path / "tmux_stub.py"
+    tmux_stub.write_text(
+        "import os, subprocess, sys\n"
+        "environment = dict(os.environ)\n"
+        "for prefix in ('YOMUX_', 'YOLOMUX_'):\n"
+        "    for key in ('GO_BINARY', 'GO_START_REASON', 'CODEX_TRANSCRIPT_ROOT', 'TMUX_SOCKET', 'TMUX_ALLOW_DEFAULT_SERVER', 'TEST_AUTH_BYPASS'):\n"
+        "        environment[prefix + key] = 'stale-daemon-value'\n"
+        "command = sys.argv[sys.argv.index('/bin/bash'):]\n"
+        "raise SystemExit(subprocess.run(command, env=environment).returncode)\n",
+        encoding="utf-8",
+    )
+    environment = {key: value for key, value in os.environ.items() if not key.startswith(('YOMUX_', 'YOLOMUX_'))}
+    environment.update({
+        "YOMUX_GO_BINARY": "/tmp/fresh-caller-yomux-go",
+        "YOLOMUX_GO_BINARY": "/tmp/conflicting-legacy-go",
+        "YOMUX_CODEX_TRANSCRIPT_ROOT": str(tmp_path / "codex sessions"),
+        "YOMUX_GO_START_REASON": "operator-demand",
+        "YOMUX_TEST_AUTH_BYPASS": "",
+        "YOLOMUX_TEST_AUTH_BYPASS": "1",
+        "YOLOMUX_ROW_PLAN_FILE": str(plan_path),
+        "TEST_RESULT": str(result_path),
+        "TEST_INTERPRETER": sys.executable,
+        "TEST_TMUX_STUB": str(tmux_stub),
+    })
+    result = subprocess.run([
+        "bash", "-c",
+        'source "$1"; tmux() { "$TEST_INTERPRETER" "$TEST_TMUX_STUB" "$@"; }; '
+        'yolomux_submit_macos_server "$2" "$3" /bin/bash "$PATH" 48125 "$4" --host 127.0.0.1 --port 48125 --backend go',
+        "legacy-submit", str(STARTUP_COMMON), str(checkout), sys.executable, str(tmp_path / "server.log"),
+    ], env=environment, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    captured = json.loads(result_path.read_text(encoding="utf-8"))
+    assert captured["args"] == ["--host", "127.0.0.1", "--port", "48125", "--backend", "go"]
+    for prefix in ("YOMUX_", "YOLOMUX_"):
+        assert captured["environment"][prefix + "GO_BINARY"] == "/tmp/fresh-caller-yomux-go"
+        assert captured["environment"][prefix + "GO_START_REASON"] == "operator-demand"
+        assert captured["environment"][prefix + "CODEX_TRANSCRIPT_ROOT"] == str(tmp_path / "codex sessions")
+        assert captured["environment"][prefix + "TMUX_SOCKET"] == ""
+        assert captured["environment"][prefix + "TMUX_ALLOW_DEFAULT_SERVER"] == "1"
+        assert captured["environment"][prefix + "TEST_AUTH_BYPASS"] is None
+
+
+@pytest.mark.parametrize("handoff_prefix", ("YOMUX", "YOLOMUX"))
+def test_macos_submit_uses_callers_row_plan_not_tmux_daemon_environment(tmp_path, handoff_prefix):
     tmux = shutil.which("tmux")
     if tmux is None:
         return
@@ -695,6 +785,7 @@ def test_macos_submit_uses_callers_row_plan_not_tmux_daemon_environment(tmp_path
     tools_dir = checkout / "tools"
     tools_dir.mkdir(parents=True)
     shutil.copy2(ROOT / "tools" / "instance_isolation.py", tools_dir / "instance_isolation.py")
+    shutil.copy2(STARTUP_COMMON, tools_dir / "startup_common.sh")
     result_path = tmp_path / "result.json"
     server_script = checkout / "yomux.py"
     server_script.write_text(
@@ -706,16 +797,21 @@ import subprocess
 import sys
 from pathlib import Path
 
-Path(sys.argv[1]).write_text(
-    json.dumps(
-        {
-            "YOLOMUX_ROOT": os.environ.get("YOLOMUX_ROOT"),
-            "PYTHONPYCACHEPREFIX": os.environ.get("PYTHONPYCACHEPREFIX"),
-            "YOLOMUX_ROW_PLAN_FILE": os.environ.get("YOLOMUX_ROW_PLAN_FILE"),
-        }
-    ),
-    encoding="utf-8",
-)
+values = {
+    "YOLOMUX_ROOT": os.environ.get("YOLOMUX_ROOT"),
+    "PYTHONPYCACHEPREFIX": os.environ.get("PYTHONPYCACHEPREFIX"),
+    "YOLOMUX_ROW_PLAN_FILE": os.environ.get("YOLOMUX_ROW_PLAN_FILE"),
+    "YOLOMUX_GO_BINARY": os.environ.get("YOLOMUX_GO_BINARY"),
+    "YOLOMUX_GO_START_REASON": os.environ.get("YOLOMUX_GO_START_REASON"),
+    "YOLOMUX_CLAUDE_TRANSCRIPT_ROOT": os.environ.get("YOLOMUX_CLAUDE_TRANSCRIPT_ROOT"),
+    "YOLOMUX_CODEX_TRANSCRIPT_ROOT": os.environ.get("YOLOMUX_CODEX_TRANSCRIPT_ROOT"),
+    "YOLOMUX_OPENCODE_DATABASE": os.environ.get("YOLOMUX_OPENCODE_DATABASE"),
+    "YOLOMUX_TEST_AUTH_BYPASS": os.environ.get("YOLOMUX_TEST_AUTH_BYPASS"),
+    "YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER": os.environ.get("YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER"),
+    "YOLOMUX_TMUX_SOCKET": os.environ.get("YOLOMUX_TMUX_SOCKET"),
+}
+values.update({"YOMUX_" + key.removeprefix("YOLOMUX_"): os.environ.get("YOMUX_" + key.removeprefix("YOLOMUX_")) for key in tuple(values) if key.startswith("YOLOMUX_")})
+Path(sys.argv[1]).write_text(json.dumps(values), encoding="utf-8")
 subprocess.run(["tmux", "-L", sys.argv[2], "wait-for", "-S", "server-ready"], check=True)
 """,
         encoding="utf-8",
@@ -739,8 +835,8 @@ subprocess.run(["tmux", "-L", sys.argv[2], "wait-for", "-S", "server-ready"], ch
     fresh_plan_path.write_text(
         json.dumps(
             {
-                "unset": ["YOLOMUX_ROOT", "PYTHONPYCACHEPREFIX", "YOLOMUX_ROW_PLAN_FILE"],
-                "assign": {"YOLOMUX_ROOT": str(tmp_path / "fresh-root")},
+                "unset": ["YOMUX_ROOT", "YOLOMUX_ROOT", "PYTHONPYCACHEPREFIX", "YOMUX_ROW_PLAN_FILE", "YOLOMUX_ROW_PLAN_FILE"],
+                "assign": {"YOMUX_ROOT": str(tmp_path / "fresh-root"), "YOLOMUX_ROOT": str(tmp_path / "fresh-root")},
             }
         ),
         encoding="utf-8",
@@ -750,7 +846,16 @@ subprocess.run(["tmux", "-L", sys.argv[2], "wait-for", "-S", "server-ready"], ch
         "YOLOMUX_ROW_PLAN_FILE": str(stale_plan_path),
         "YOLOMUX_ROOT": str(tmp_path / "stale-daemon-root"),
         "PYTHONPYCACHEPREFIX": str(tmp_path / "stale-daemon-pycache"),
+        "YOLOMUX_GO_BINARY": "/tmp/stale-other-checkout-go",
+        "YOLOMUX_GO_START_REASON": "stale-reason",
+        "YOLOMUX_CLAUDE_TRANSCRIPT_ROOT": "/tmp/stale-claude",
+        "YOLOMUX_CODEX_TRANSCRIPT_ROOT": "/tmp/stale-codex",
+        "YOLOMUX_OPENCODE_DATABASE": "/tmp/stale-opencode.db",
+        "YOLOMUX_TEST_AUTH_BYPASS": "1",
+        "YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER": "0",
+        "YOLOMUX_TMUX_SOCKET": "/tmp/stale-tmux.sock",
     }
+    daemon_env.update({"YOMUX_" + key.removeprefix("YOLOMUX_"): value for key, value in tuple(daemon_env.items()) if key.startswith("YOLOMUX_")})
     subprocess.run(
         [tmux, "-L", socket_name, "new-session", "-d", "-s", "keeper", "tail", "-f", "/dev/null"],
         env=daemon_env,
@@ -763,7 +868,11 @@ subprocess.run(["tmux", "-L", sys.argv[2], "wait-for", "-S", "server-ready"], ch
                 "-c",
                 'source "$1"; test_socket="$2"; yolomux_macos_server_tmux_socket() { printf "%s" "$test_socket"; }; '
                 'export YOLOMUX_ROW_PLAN_FILE="$3"; '
-                'yolomux_submit_macos_server "$4" "$5" "$6" "$7" 48125 "$8" "$9" "$2"',
+                'yolomux_submit_macos_server "$4" "$5" "$6" "$7" 48125 "$8" 8 '
+                '"YOMUX_GO_BINARY=/tmp/yomux-go-test" "YOMUX_GO_START_REASON=operator-demand" '
+                '"YOMUX_CLAUDE_TRANSCRIPT_ROOT=/tmp/claude projects" "YOMUX_CODEX_TRANSCRIPT_ROOT=/tmp/codex" '
+                '"YOMUX_OPENCODE_DATABASE=/tmp/opencode.db" "YOMUX_TEST_AUTH_BYPASS=1" '
+                '"YOMUX_TMUX_ALLOW_DEFAULT_SERVER=1" "YOMUX_TMUX_SOCKET=" "$9" "$2"'.replace("YOMUX_", f"{handoff_prefix}_"),
                 "submit-clean-plan",
                 str(STARTUP_COMMON),
                 socket_name,
@@ -781,11 +890,61 @@ subprocess.run(["tmux", "-L", sys.argv[2], "wait-for", "-S", "server-ready"], ch
         assert launch.returncode == 0, launch.stderr
         subprocess.run([tmux, "-L", socket_name, "wait-for", "server-ready"], check=True, timeout=10)
         child_environment = json.loads(result_path.read_text(encoding="utf-8"))
-        assert child_environment == {
+        expected_environment = {
             "YOLOMUX_ROOT": str(tmp_path / "fresh-root"),
             "PYTHONPYCACHEPREFIX": None,
             "YOLOMUX_ROW_PLAN_FILE": None,
+            "YOLOMUX_GO_BINARY": "/tmp/yomux-go-test",
+            "YOLOMUX_GO_START_REASON": "operator-demand",
+            "YOLOMUX_CLAUDE_TRANSCRIPT_ROOT": "/tmp/claude projects",
+            "YOLOMUX_CODEX_TRANSCRIPT_ROOT": "/tmp/codex",
+            "YOLOMUX_OPENCODE_DATABASE": "/tmp/opencode.db",
+            "YOLOMUX_TEST_AUTH_BYPASS": "1",
+            "YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER": "1",
+            "YOLOMUX_TMUX_SOCKET": "",
         }
+        expected_environment.update({"YOMUX_" + key.removeprefix("YOLOMUX_"): value for key, value in tuple(expected_environment.items()) if key.startswith("YOLOMUX_")})
+        assert child_environment == expected_environment
+        result_path.unlink()
+        launch_without_go = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1"; test_socket="$2"; yolomux_macos_server_tmux_socket() { printf "%s" "$test_socket"; }; '
+                'export YOLOMUX_ROW_PLAN_FILE="$3"; '
+                'yolomux_submit_macos_server "$4" "$5" "$6" "$7" 48125 "$8" 0 "$9" "$2"',
+                "submit-empty-go-handoff",
+                str(STARTUP_COMMON),
+                socket_name,
+                str(fresh_plan_path),
+                str(checkout),
+                sys.executable,
+                os.environ.get("SHELL", "/bin/bash"),
+                os.environ["PATH"],
+                str(tmp_path / "server.log"),
+                str(result_path),
+            ],
+            text=True,
+            capture_output=True,
+        )
+        assert launch_without_go.returncode == 0, launch_without_go.stderr
+        subprocess.run([tmux, "-L", socket_name, "wait-for", "server-ready"], check=True, timeout=10)
+        child_environment = json.loads(result_path.read_text(encoding="utf-8"))
+        expected_environment = {
+            "YOLOMUX_ROOT": str(tmp_path / "fresh-root"),
+            "PYTHONPYCACHEPREFIX": None,
+            "YOLOMUX_ROW_PLAN_FILE": None,
+            "YOLOMUX_GO_BINARY": None,
+            "YOLOMUX_GO_START_REASON": None,
+            "YOLOMUX_CLAUDE_TRANSCRIPT_ROOT": None,
+            "YOLOMUX_CODEX_TRANSCRIPT_ROOT": None,
+            "YOLOMUX_OPENCODE_DATABASE": None,
+            "YOLOMUX_TEST_AUTH_BYPASS": None,
+            "YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER": "1",
+            "YOLOMUX_TMUX_SOCKET": None,
+        }
+        expected_environment.update({"YOMUX_" + key.removeprefix("YOLOMUX_"): value for key, value in tuple(expected_environment.items()) if key.startswith("YOLOMUX_")})
+        assert child_environment == expected_environment
     finally:
         subprocess.run([tmux, "-L", socket_name, "kill-server"], check=False, capture_output=True)
 

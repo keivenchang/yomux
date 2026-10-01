@@ -16,6 +16,16 @@ go_sdk.download(
         "darwin_arm64": ["go1.22.2.darwin-arm64.tar.gz", "660298be38648723e783ba0398e90431de1cb288c637880cdb124f39bd977f0d"],
     },
 )
+# Go 1.24 adds Mach-O UUIDs required by current macOS for local-network binaries.
+go_sdk.download(
+    name = "yomux_darwin_go_sdk",
+    version = "1.24.13",
+    sdks = {
+        "darwin_amd64": ["go1.24.13.darwin-amd64.tar.gz", "6cc6549b06725220b342b740497ffd24e0ebdcef75781a77931ca199f46ad781"],
+        "darwin_arm64": ["go1.24.13.darwin-arm64.tar.gz", "f282d882c3353485e2fc6c634606d85caf36e855167d59b996dbeae19fa7629a"],
+    },
+)
+use_repo(go_sdk, "yomux_darwin_go_sdk")
 
 go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
 go_deps.from_file(go_mod = "//:go.mod")

@@ -41,6 +41,8 @@ def _launcher_path() -> Path:
     if override:
         return Path(override)
     candidates = (
+        Path.home() / ".agents" / "skills" / "yomux-dev-start" / "yomux-dev-start.sh",
+        Path.home() / "dev" / "ai-config" / "agents" / "skills" / "yomux-dev-start" / "yomux-dev-start.sh",
         Path.home() / ".agents" / "skills" / "yolo-dev-start" / "yolo-dev-start.sh",
         Path.home() / "dev" / "ai-config" / "claude" / "skills" / "yolo-dev-start" / "yolo-dev-start.sh",
     )
@@ -81,7 +83,8 @@ def test_launcher_captures_one_row_plan_and_reuses_it_for_server_and_both_probes
     # The Linux server launch runs the server through the exec mode under the plan.
     assert 'launch_server "$dir" "$server_port" "$plan_file"' in text
     assert 'instance_isolation.py exec --plan-file "$plan_file" --' in text
-    assert "yolomux.py --host" in text
+    assert 'server_entrypoint="$dir/yomux.py"' in text
+    assert '-u "$server_entrypoint" --host' in text
 
     # The session probe takes a plan-file argument and runs through the shared
     # exec mode. Runtime ownership is enforced by the product-root lease, not a
@@ -106,7 +109,10 @@ def test_shared_macos_launcher_execs_plan_when_present_and_stays_direct_otherwis
     retained environment; both launch paths pass one plan as an argument."""
     text = STARTUP_COMMON.read_text(encoding="utf-8")
 
-    assert 'plan_json=$7; shift 7' in text
+    assert 'plan_json=$7; env_count=$8; shift 8' in text
+    assert 'export "$assignment"' in text
+    assert 'unset "YOMUX_$env_suffix" "YOLOMUX_$env_suffix"' in text
+    assert 'source "$repo/tools/startup_common.sh" || exit 2; yomux_normalize_environment;' in text
     assert 'instance_isolation.py" exec --plan-json "$plan_json" --' in text
     assert 'instance_isolation.py" plan-direct --port "$port"' in text
     assert 'YOLOMUX_ROW_PLAN_FILE:-' not in text.split("yolomux_macos_server_launcher()", 1)[1].split("yolomux_submit_macos_server()", 1)[0]

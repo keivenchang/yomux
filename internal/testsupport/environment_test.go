@@ -1,9 +1,82 @@
 package testsupport
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+func TestPrivateTestEnvironmentKeepsNestedTmuxSocketPathsShort(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("short Unix temp roots are selected on Linux and macOS")
+	}
+	t.Setenv("TMPDIR", "/tmp/yolomux-bazel-tmp.5XyIp2/with/a/deep/inherited/root")
+	type savedValue struct {
+		value   string
+		present bool
+	}
+	original := make(map[string]savedValue)
+	for key := range privateTestDirectories {
+		value, present := os.LookupEnv(key)
+		original[key] = savedValue{value: value, present: present}
+	}
+	for _, key := range []string{"YOMUX_PRIVATE_TEST_ENV_ROOT", "YOLOMUX_PRIVATE_TEST_ENV_ROOT", "PYTHONUSERBASE", "PYTHONDONTWRITEBYTECODE"} {
+		value, present := os.LookupEnv(key)
+		original[key] = savedValue{value: value, present: present}
+	}
+	cleanup, err := NewPrivateTestEnvironment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cleanup)
+	t.Cleanup(func() {
+		for key, saved := range original {
+			var err error
+			if saved.present {
+				err = os.Setenv(key, saved.value)
+			} else {
+				err = os.Unsetenv(key)
+			}
+			if err != nil {
+				t.Errorf("restore %s: %v", key, err)
+			}
+		}
+	})
+
+	tempDir := os.Getenv("TMPDIR")
+	if !strings.HasPrefix(tempDir, "/tmp/ym-") {
+		t.Fatalf("private TMPDIR = %q, want a short private path under /tmp", tempDir)
+	}
+	socket := filepath.Join(tempDir, "TestActivityRouteIncludesEveryGlobalTmuxSession2333904820", "001", "tmux.sock")
+	if len(socket) > 104 {
+		t.Fatalf("representative nested tmux socket path is %d bytes (%q), want at most 104", len(socket), socket)
+	}
+}
+
+func TestSyntheticEnvironmentPrivateRootPrefersCanonicalIncludingEmpty(t *testing.T) {
+	for _, canonical := range []string{"/fixture/canonical", ""} {
+		t.Run(canonical, func(t *testing.T) {
+			t.Setenv("YOMUX_PRIVATE_TEST_ENV_ROOT", canonical)
+			t.Setenv("YOLOMUX_PRIVATE_TEST_ENV_ROOT", "/fixture/legacy")
+			environment := make(map[string]string)
+			for _, entry := range SyntheticEnvironment() {
+				key, value, _ := strings.Cut(entry, "=")
+				environment[key] = value
+			}
+			for key, directory := range map[string]string{"HOME": "home", "TMPDIR": "tmp"} {
+				want := ""
+				if canonical != "" {
+					want = filepath.Join(canonical, directory)
+				}
+				if environment[key] != want {
+					t.Fatalf("private %s = %q, want %q", key, environment[key], want)
+				}
+			}
+		})
+	}
+}
 
 func TestSyntheticEnvironmentDropsInheritedTmuxClient(t *testing.T) {
 	t.Setenv("TMUX", "/host/tmux/default,123,0")

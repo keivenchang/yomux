@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -1167,6 +1168,44 @@ func TestProcessIdentityForRuntimeScopesHostCPUToThisPID(t *testing.T) {
 	}
 }
 
+func TestProcessKeyForRuntimeMatchesHostSnapshotBinary(t *testing.T) {
+	want := filepath.Base(os.Args[0])
+	if got := processKeyForRuntime(); got != want {
+		t.Fatalf("runtime process key = %q, want executable basename %q", got, want)
+	}
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	row, ok := stats.DarwinProcessMetricsForPID(os.Getpid())
+	if !ok {
+		t.Fatal("Darwin host snapshot omitted the test process")
+	}
+	if key := processKeyForRuntime(); key != row.Binary {
+		t.Fatalf("runtime process key = %q, host snapshot binary = %q", key, row.Binary)
+	}
+}
+
+func TestProcessKeyForExecutablePreservesCensusBasename(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "canonical", path: "/opt/yomux/yomux-go", want: goServiceID},
+		{name: "legacy hyphen", path: "/opt/yolomux/yolomux-go", want: "yolomux-go"},
+		{name: "legacy underscore", path: "/opt/yolomux/yolomux_go", want: "yolomux_go"},
+		{name: "empty", path: "", want: goServiceID},
+		{name: "dot", path: ".", want: goServiceID},
+		{name: "separator", path: string(filepath.Separator), want: goServiceID},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := processKeyForExecutable(test.path); got != test.want {
+				t.Fatalf("process key for %q = %q, want %q", test.path, got, test.want)
+			}
+		})
+	}
+}
+
 func TestStatsProjectionRefreshGateWaitsForDurablePublication(t *testing.T) {
 	gate := statsProjectionRefreshGate{}
 	first := stats.LifecycleCounters{Runs: 1}
@@ -2254,6 +2293,96 @@ func TestLiveSessionMetadataPublishesWorkingAgentState(t *testing.T) {
 	}
 }
 
+func TestLiveSessionMetadataSharesProcessInventoryAcrossSessions(t *testing.T) {
+	processScans := 0
+	classifiedPIDs := make(map[int]bool)
+	s := &server{
+		processEntriesFn: func() ([]procEntry, error) {
+			processScans++
+			return []procEntry{
+				{PID: 42, PPID: 10, Command: "codex", Executable: "/usr/bin/codex"},
+				{PID: 84, PPID: 20, Command: "codex", Executable: "/usr/bin/codex"},
+			}, nil
+		},
+		agentStatusClassifier: func(_ context.Context, request stats.AgentStatusRequest) stats.AgentStatusResult {
+			classifiedPIDs[request.PID] = true
+			return stats.AgentStatusResult{Status: stats.AgentStatusRun}
+		},
+	}
+	output := []byte(
+		"first\t0\tmain\t0\t%1\t/tmp/first\tcodex\tCodex\t42\t1\t1\n" +
+			"second\t0\tmain\t0\t%2\t/tmp/second\tcodex\tCodex\t84\t1\t1\n",
+	)
+	metadata := s.liveSessionMetadataForSessionsFromOutput([]string{"first", "second"}, output, nil)
+	if processScans != 1 {
+		t.Fatalf("process inventory scans = %d, want one for the complete metadata refresh", processScans)
+	}
+	if len(metadata["first"]["agents"].([]map[string]any)) != 1 || len(metadata["second"]["agents"].([]map[string]any)) != 1 {
+		t.Fatalf("metadata agents were not resolved for both sessions: %#v", metadata)
+	}
+	if len(classifiedPIDs) != 2 || !classifiedPIDs[42] || !classifiedPIDs[84] {
+		t.Fatalf("classified process PIDs = %#v, want 42 and 84", classifiedPIDs)
+	}
+}
+
+func TestActivityPublishesCodexWorkingFooterAsWorkingWindowState(t *testing.T) {
+	visibleText := "Working (1m 43s • esc to interrupt)\n\n› Ask Codex to do anything\n"
+	statsService := stats.NewStatsService(nil, stats.StatsServiceConfig{
+		AgentStatus: func(context.Context) (stats.AgentStatusSnapshot, error) {
+			return stats.AgentStatusSnapshot{
+				Available: true,
+				Freshness: &stats.AgentStatusFreshness{ObservedAt: float64(time.Now().Add(-time.Second).UnixNano()) / 1e9},
+				Agents:    []any{map[string]any{"kind": "codex", "state": "idle", "session": "codex-live", "pane": "%42", "observed_at": float64(time.Now().Add(-time.Second).UnixNano()) / 1e9}},
+			}, nil
+		},
+	})
+	if err := statsService.RefreshAgentStatus(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	s := &server{
+		statsService:               statsService,
+		metadataGeneration:         1,
+		metadataTopologyGeneration: 1,
+		metadataTopologySignature:  tmuxTopologySignature([]string{"codex-live"}, map[string]string{"codex-live": "codex-live"}),
+		metadataBuiltAt:            time.Now(),
+		tmuxRoster:                 []string{"codex-live"},
+		tmuxRosterIdentities:       map[string]string{"codex-live": "codex-live"},
+		tmuxRosterKnown:            true,
+		tmuxRosterSampledAt:        time.Now(),
+		tmuxSessionActivityFn:      func() (map[string]float64, error) { return map[string]float64{}, nil },
+		tmuxWindowActivityFn:       func() (map[string]float64, error) { return map[string]float64{}, nil },
+		agentStatusClassifier: func(ctx context.Context, request stats.AgentStatusRequest) stats.AgentStatusResult {
+			return stats.ClassifyAgentStatus(ctx, request, stats.AgentStatusSources{
+				Process: func(context.Context, int) (stats.AgentStatusProcess, error) {
+					return stats.AgentStatusProcess{Alive: true}, nil
+				},
+				CapturePane: func(_ context.Context, target string) (stats.AgentStatusPane, error) {
+					return stats.AgentStatusPane{Target: target, VisibleText: visibleText}, nil
+				},
+			})
+		},
+	}
+	metadata := s.liveSessionMetadataFromOutput("codex-live", []byte("codex-live\t0\tmain\t0\t%42\t/tmp/synthetic\tcodex\tCodex\t42\t1\t1\n"), nil)
+	metadata["session_identity"] = goTmuxSessionIdentity("codex-live", "codex-live")
+	s.metadataPayload = map[string]any{
+		"sessions":            map[string]any{"codex-live": metadata},
+		"topology_generation": uint64(1), "errors": []string{},
+	}
+	response := httptest.NewRecorder()
+	s.activity(response, httptest.NewRequest(http.MethodGet, "/api/activity?scope=all", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("activity status = %d, body=%s", response.Code, response.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	agentWindows := payload["agent_windows"].(map[string]any)["codex-live"].([]any)
+	if len(agentWindows) != 1 || agentWindows[0].(map[string]any)["state"] != "working" {
+		t.Fatalf("exact Codex working footer reached agent_windows as %#v, want one working row", agentWindows)
+	}
+}
+
 func TestLiveSessionMetadataClassifiesNodeCodexWrapperAsWorking(t *testing.T) {
 	var classified stats.AgentStatusRequest
 	s := &server{
@@ -2631,7 +2760,7 @@ func TestGoRootAdvertisesTheFullCapabilityGatedApplicationShell(t *testing.T) {
 	if page.Code != http.StatusOK {
 		t.Fatalf("full root status = %d, body=%s", page.Code, page.Body.String())
 	}
-	if !bytes.Contains(page.Body.Bytes(), []byte(`"versionStatus":"0.10.0`)) {
+	if !bytes.Contains(page.Body.Bytes(), []byte(`"versionStatus":"0.10.1`)) {
 		t.Fatalf("Go root does not preserve the release version label: %s", page.Body.String())
 	}
 	if !bytes.Contains(page.Body.Bytes(), []byte(`"backendLabel":"Go `)) {
@@ -3996,7 +4125,7 @@ func TestSessionFilesPaneInputsResolveClaudeTranscriptIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := &server{}
+	s := &server{processEntriesFn: processEntries}
 	_, agents, finderErr := s.sessionFilesPaneInputs(session)
 	if finderErr != nil {
 		t.Fatal(finderErr)
@@ -4246,11 +4375,14 @@ func TestActivityUsesFreshPublishedAgentStatusInsteadOfMetadataCache(t *testing.
 		t.Fatal(err)
 	}
 	defer writer.Close()
+	observedAt := time.Now()
 	service := stats.NewStatsService(writer, stats.StatsServiceConfig{
 		AgentStatus: func(context.Context) (stats.AgentStatusSnapshot, error) {
-			return stats.AgentStatusSnapshot{Available: true, Agents: []any{map[string]any{
-				"kind": "codex", "state": "run", "session": "cached", "pane": "%7",
-			}}}, nil
+			return stats.AgentStatusSnapshot{
+				Available: true,
+				Freshness: &stats.AgentStatusFreshness{ObservedAt: float64(observedAt.UnixNano()) / 1e9},
+				Agents:    []any{map[string]any{"kind": "codex", "state": "ask", "session": "cached", "pane": "%7", "observed_at": float64(observedAt.UnixNano()) / 1e9}},
+			}, nil
 		},
 	})
 	if err := service.RefreshAgentStatus(ctx); err != nil {
@@ -4263,11 +4395,15 @@ func TestActivityUsesFreshPublishedAgentStatusInsteadOfMetadataCache(t *testing.
 		metadataPayload: map[string]any{
 			"sessions": map[string]any{"cached": map[string]any{
 				"session_identity": goTmuxSessionIdentity("cached", "cached"),
-				"agents":           []map[string]any{{"window_index": 3, "pane_target": "%7", "kind": "codex", "status": "idle", "window_active": true, "current": true}},
+				"agents": []map[string]any{{
+					"window_index": 3, "pane_target": "%7", "kind": "codex", "status": "working",
+					"status_observed_at": float64(observedAt.Add(-2*time.Second).UnixNano()) / 1e9,
+					"window_active":      true, "current": true,
+				}},
 			}},
 			"topology_generation": uint64(7), "errors": []string{},
 		},
-		metadataBuiltAt:       time.Now(),
+		metadataBuiltAt:       observedAt.Add(time.Second),
 		tmuxSessionRosterFn:   func() ([]string, error) { return []string{"cached"}, nil },
 		tmuxSessionActivityFn: func() (map[string]float64, error) { return map[string]float64{}, nil },
 		tmuxWindowActivityFn:  func() (map[string]float64, error) { return map[string]float64{}, nil },
@@ -4282,8 +4418,8 @@ func TestActivityUsesFreshPublishedAgentStatusInsteadOfMetadataCache(t *testing.
 		t.Fatal(err)
 	}
 	agents := payload["agents"].([]any)
-	if len(agents) != 1 || agents[0].(map[string]any)["state"] != "working" {
-		t.Fatalf("activity used stale metadata agent state instead of latest stats publication: %#v", agents)
+	if len(agents) != 1 || agents[0].(map[string]any)["state"] != "needs-input" {
+		t.Fatalf("activity used stale working metadata instead of newer stats publication: %#v", agents)
 	}
 }
 
@@ -5421,7 +5557,7 @@ func TestPhase45FinderBatchReturnsDurableReceiptWhenWorkerIsBusy(t *testing.T) {
 	}
 }
 
-func TestPhase45FinderBatchReturnsReadyProductWithinFastBudget(t *testing.T) {
+func TestPhase45FinderBatchReturnsReadyProductOrAcceptedOperation(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("hello"), 0o600); err != nil {
 		t.Fatal(err)
@@ -5444,15 +5580,41 @@ func TestPhase45FinderBatchReturnsReadyProductWithinFastBudget(t *testing.T) {
 	}
 	record := httptest.NewRecorder()
 	s.fsBatch(record, httptest.NewRequest(http.MethodPost, "/api/fs/batch", bytes.NewBufferString(`{"requests":[{"id":"info","type":"info","path":"`+filepath.Join(root, "note.txt")+`"}]}`)))
-	if record.Code != http.StatusOK {
-		t.Fatalf("ready batch status = %d %s", record.Code, record.Body.String())
-	}
 	var envelope map[string]any
 	if err := json.Unmarshal(record.Body.Bytes(), &envelope); err != nil {
 		t.Fatal(err)
 	}
-	if envelope["state"] != "ready" || envelope["terminal"] != true {
-		t.Fatalf("ready batch envelope = %#v", envelope)
+	if record.Code == http.StatusOK {
+		if envelope["state"] != "ready" || envelope["terminal"] != true {
+			t.Fatalf("ready batch envelope = %#v", envelope)
+		}
+		return
+	}
+	if record.Code != http.StatusAccepted {
+		t.Fatalf("batch status = %d %s", record.Code, record.Body.String())
+	}
+	operation, ok := envelope["operation"].(map[string]any)
+	if !ok || operation["id"] == "" {
+		t.Fatalf("accepted batch receipt = %#v", envelope)
+	}
+	operationID := operation["id"].(string)
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		current := s.operationRecord(operationID)
+		if current != nil && current.TerminalEvent != nil {
+			if current.Result["state"] != "ready" {
+				t.Fatalf("accepted batch terminal result = %#v", current.Result)
+			}
+			return
+		}
+		select {
+		case <-deadline.C:
+			t.Fatal("accepted batch operation did not become ready")
+		case <-ticker.C:
+		}
 	}
 }
 
@@ -7255,5 +7417,53 @@ func TestAuthCookiesArePortScopedAndHTTPSafe(t *testing.T) {
 	logoutCookieText := strings.Join(logoutCookies, "\n")
 	if len(logoutCookies) < 3 || !strings.Contains(logoutCookieText, "yomux_auth_7221=;") || !strings.Contains(logoutCookieText, "yolomux_auth_7221=;") || !strings.Contains(logoutCookieText, "yomux_logged_out=1") {
 		t.Fatalf("logout cookies = %#v", logoutCookies)
+	}
+}
+
+func TestLoginShowsSetupPageWhenAuthSetupIsRequired(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		authConfig string
+	}{
+		{name: "missing auth config"},
+		{name: "legacy placeholder", authConfig: "users:\n  - username: user\n    password: password\n    role: admin\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if test.authConfig != "" {
+				if err := os.WriteFile(filepath.Join(dir, "auth.yaml"), []byte(test.authConfig), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s := &server{root: testsupport.RepoRoot(t), config: dir, host: "127.0.0.1", port: 8881, httpMode: true}
+			if !s.authSetupRequired() {
+				t.Fatal("setup should be required for missing or placeholder auth configuration")
+			}
+			setup := httptest.NewRecorder()
+			s.authSetup(setup, httptest.NewRequest(http.MethodGet, "/api/auth-setup", nil))
+			if !strings.Contains(setup.Body.String(), `"setup_required":true`) {
+				t.Fatalf("/api/auth-setup response = %s", setup.Body.String())
+			}
+			for _, request := range []*http.Request{
+				httptest.NewRequest(http.MethodGet, "/login", nil),
+				httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("%zz")),
+			} {
+				if request.Method == http.MethodPost {
+					request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				}
+				response := httptest.NewRecorder()
+				s.login(response, request)
+				if response.Code != http.StatusOK {
+					t.Fatalf("%s /login status = %d: %s", request.Method, response.Code, response.Body.String())
+				}
+				body := response.Body.String()
+				if !strings.Contains(body, `id="setupStatus"`) || !strings.Contains(body, "/setup-auth.js") {
+					t.Fatalf("%s /login did not render the first-run setup page: %s", request.Method, body)
+				}
+				if strings.Contains(body, `action="/login"`) {
+					t.Fatalf("%s /login rendered the credential form before setup", request.Method)
+				}
+			}
+		})
 	}
 }

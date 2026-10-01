@@ -741,9 +741,13 @@ function clientEventDemandDescriptor() {
     channels.add('core');
     channels.add('status');
     const finderActive = activeItems.includes(fileExplorerItemId);
+    const tabberActive = activeItems.includes(tabberItemId);
     const differActive = activeItems.includes(differItemId);
     const fileEditorActive = activeItems.some(item => isFileEditorItem(item));
-    if (finderActive && fileExplorerMode === 'tabber') channels.add('activity');
+    if ((finderActive && fileExplorerMode === 'tabber') || tabberActive) {
+      channels.add('activity');
+      channels.add('transcripts');
+    }
     if ((finderActive && fileExplorerMode !== 'tabber') || differActive || fileEditorActive) channels.add('files');
     if (activeItems.includes(infoItemId)) {
       channels.add('activity');

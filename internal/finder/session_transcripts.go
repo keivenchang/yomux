@@ -24,7 +24,6 @@ import (
 const (
 	maxSessionTranscriptLineBytes             = 4 * 1024 * 1024
 	maxHistoricalCodexFiles                   = 256
-	maxHistoricalCodexCachedTranscriptBytes   = 2 * 1024 * 1024
 	maxHistoricalCodexAttributionCacheEntries = maxHistoricalCodexFiles
 	maxHistoricalCodexAttributionCacheBytes   = 8 * 1024 * 1024
 )
@@ -829,9 +828,8 @@ func (c *historicalCodexAttributionCache) scan(ctx context.Context, candidate hi
 	if err != nil || !sameTranscriptFile(openedInfo, currentInfo) {
 		return historicalCodexTranscript{}, false
 	}
-	if candidate.info.Size() <= maxHistoricalCodexCachedTranscriptBytes {
-		c.set(key, historicalCodexAttributionRecord{info: currentInfo, transcript: transcript, weight: weight})
-	}
+	// Bound retained parsed operations by semantic weight; raw rollout size includes discarded UI and tool output.
+	c.set(key, historicalCodexAttributionRecord{info: currentInfo, transcript: transcript, weight: weight})
 	return transcript, true
 }
 
