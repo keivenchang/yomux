@@ -1,6 +1,6 @@
 # YO!agent
 
-YO!agent answers product questions, watches sessions, sends reviewed prompts, and coordinates handoffs. It runs on the legacy Python backend. Go status and token collection do not provide YO!agent actions; check `GO_MIGRATION.md` before relying on backend-specific features.
+YO!agent answers product questions, watches sessions, sends reviewed prompts, and coordinates handoffs. It currently requires the deprecated Python server, which is an explicit temporary fallback planned for removal around late October 2026. Go status and token collection do not provide YO!agent actions; check `GO_MIGRATION.md` before relying on backend-specific features.
 
 ## Files
 

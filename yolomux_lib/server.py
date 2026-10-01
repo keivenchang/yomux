@@ -1145,13 +1145,24 @@ def sse_id_line(event_id: str) -> bytes:
     return f"id: {text}\n".encode("ascii")
 
 
-# The emit timestamp itself. `time.monotonic()` cannot go backwards, so successive frames on one
-# connection carry non-decreasing ids and the browser can compare emit spacing against arrival
-# spacing to tell "the server never sent it" from "the server sent it and it arrived late". It is
-# process-relative on purpose: a wall clock can step, and an absolute epoch is not needed to
-# compare two frames from the same server. Integer milliseconds keeps it about ten bytes a frame.
+# The emit timestamp itself. `time.monotonic()` cannot go backwards, so successive frames carry
+# non-decreasing timestamps. The SSE contract also requires strictly increasing ids; multiple
+# frames can be emitted in one millisecond, and concurrent stream handlers can share that tick, so
+# protect the process-wide high-water mark and advance it when necessary. It is process-relative
+# on purpose: a wall clock can step, and an absolute epoch is not needed to compare two frames
+# from the same server. Integer milliseconds keeps it about ten bytes a frame.
+_stats_stream_emit_lock = threading.Lock()
+_stats_stream_last_emit_id = 0
+
+
 def stats_stream_emit_id() -> str:
-    return str(int(time.monotonic() * 1000))
+    global _stats_stream_last_emit_id
+    with _stats_stream_emit_lock:
+        candidate = int(time.monotonic() * 1000)
+        if candidate <= _stats_stream_last_emit_id:
+            candidate = _stats_stream_last_emit_id + 1
+        _stats_stream_last_emit_id = candidate
+        return str(candidate)
 
 
 # One record per boundary per client per this window. The operator ring is capacity-bounded and
@@ -2702,6 +2713,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 "epoch": client_event_snapshot["epoch"],
                 "resource_revisions": client_event_snapshot["resource_revisions"],
             })
+            if not operation_id and not replay_operation_ids and hasattr(self.server.app, "replay_shared_background_client_events"):
+                self.server.app.replay_shared_background_client_events(subscriber_id=subscriber_id)
             if operation_id and hasattr(self.server.app, "operation_replay_payload"):
                 replay = self.server.app.operation_replay_payload(operation_id)
                 if isinstance(replay, dict):

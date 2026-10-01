@@ -1161,7 +1161,7 @@
   "pref.advisory.copyRsync": "Copiar ejemplo de rsync",
   "pref.advisory.upload": "Las subidas grandes del navegador se almacenan en memoria. Prefiere rsync para archivos de más de {size}.",
   "pref.appearance.active_color.blue": "Azul océano profundo",
-  "pref.appearance.active_color.green": "Verde vivo",
+  "pref.appearance.active_color.green": "verde bosque",
   "pref.appearance.active_color.help": "Color de acento para el panel activo/enfocado (pestaña activa, anillo de enfoque, tira cromada, selección de archivos, encabezados de Markdown y marcadores YO).",
   "pref.appearance.active_color.label": "Color del tema",
   "pref.appearance.active_color.orange": "naranja sanguina",

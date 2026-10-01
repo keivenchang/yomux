@@ -21,9 +21,49 @@ from tools.instance_isolation import resolve_instance_environment
 from tools.instance_isolation import resolve_direct_launch_plan
 from tools.instance_isolation import resolve_row_plan
 from tools.instance_isolation import scan_port
+from tools.instance_isolation import synthetic_test_environment
 from yolomux_lib.infra.root_paths import YolomuxRoots
 
 SHORT_TEMP_ROOT = Path("/tmp/yi")
+
+
+def test_synthetic_environment_drops_inherited_tmux_client(monkeypatch):
+    monkeypatch.setenv("TMUX", "/host/tmux/default,123,0")
+    monkeypatch.setenv("TMUX_PANE", "%7")
+    monkeypatch.setenv("TMUX_TMPDIR", "/host/tmux")
+
+    environment = synthetic_test_environment({"YOLOMUX_TMUX_SOCKET": "/fixture/tmux.sock"})
+
+    assert "TMUX" not in environment
+    assert "TMUX_PANE" not in environment
+    assert "TMUX_TMPDIR" not in environment
+    assert environment["YOLOMUX_TMUX_SOCKET"] == "/fixture/tmux.sock"
+
+
+def test_synthetic_environment_drops_inherited_provider_credentials(monkeypatch):
+    credential_names = (
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GOOGLE_API_KEY",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "HF_TOKEN",
+        "HUGGINGFACE_HUB_TOKEN",
+        "LINEAR_KEY",
+        "NGC_API_KEY",
+        "OPENAI_API_KEY",
+    )
+    for name in credential_names:
+        monkeypatch.setenv(name, "synthetic-test-secret")
+
+    environment = synthetic_test_environment({"OPENAI_API_KEY": "fixture-owned-key"})
+
+    assert not (set(credential_names) - {"OPENAI_API_KEY"}).intersection(environment)
+    assert environment["OPENAI_API_KEY"] == "fixture-owned-key"
 
 
 def test_one_instance_descriptor_owns_port_and_managed_capability(tmp_path: Path):

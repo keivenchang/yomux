@@ -258,6 +258,7 @@ def _current_stats_fixture_html(*, network_fetch=False) -> str:
       snapshots: new Map(),
       snapshotTransform: null,
       eventSources: [],
+      repairCompletions: [],
       generationEvents: [],
       lastGeneration: null,
       lastSnapshot: null,
@@ -310,6 +311,9 @@ def _current_stats_fixture_html(*, network_fetch=False) -> str:
               cacheGeneration: generation.cache_generation,
               dataset: JSON.stringify(generation),
             });
+          },
+          onRepairComplete: generation => {
+            window.__statsFixture.repairCompletions.push(generation.cache_generation);
           },
         },
       });

@@ -28,6 +28,15 @@ func (f *fixtureDB) Scalar(_ context.Context, query string, _ ...any) (any, erro
 	return f.schemaVersion, nil
 }
 func (f *fixtureDB) Rows(_ context.Context, query string, _ ...any) ([][]any, error) {
+	if strings.Contains(query, "FROM sqlite_master") && strings.Contains(query, "type='table'") {
+		rows := make([][]any, 0, len(f.columns))
+		for table, columns := range f.columns {
+			if len(columns) != 0 {
+				rows = append(rows, []any{table})
+			}
+		}
+		return rows, nil
+	}
 	if strings.HasPrefix(query, "SELECT") {
 		return f.meta, nil
 	}
@@ -101,10 +110,10 @@ func TestOpenReadOnlyRejectsMissingTableOrColumn(t *testing.T) {
 
 func TestOpenReadOnlyRejectsNewerSchema(t *testing.T) {
 	fixture := validFixture()
-	fixture.schemaVersion = SchemaVersion + 1
+	fixture.schemaVersion = checkpointSchemaVersion + 1
 	_, err := OpenReadOnly(context.Background(), "copy.sqlite3", func(string) (ReadOnlyDB, error) { return fixture, nil })
 	var tooNew *SchemaTooNewError
-	if !errors.As(err, &tooNew) || tooNew.Found != SchemaVersion+1 || !fixture.closed {
+	if !errors.As(err, &tooNew) || tooNew.Found != checkpointSchemaVersion+1 || !fixture.closed {
 		t.Fatalf("error = %v, closed = %t", err, fixture.closed)
 	}
 }

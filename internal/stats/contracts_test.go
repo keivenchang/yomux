@@ -162,6 +162,18 @@ func TestCurrentFamilyValidationIsWriteOnlyAndCompatibilityAware(t *testing.T) {
 			t.Fatalf("current writer rejected Python-shaped payload: %v", err)
 		}
 	}
+	if _, err := currentWriter.AppendBatch(context.Background(), AppendBatch{Observations: []Observation{{
+		EventID: "service-load-empty", Family: "service_load", SourceID: "yolomux-go", ObservedAt: 5.75,
+		EpochID: "service", Payload: map[string]any{"running": true},
+	}}}); err == nil || !strings.Contains(err.Error(), "missing field") {
+		t.Fatalf("current writer accepted service load without CPU: %v", err)
+	}
+	if _, err := currentWriter.AppendBatch(context.Background(), AppendBatch{Observations: []Observation{{
+		EventID: "service-load-null-rss", Family: "service_load", SourceID: "yolomux-go", ObservedAt: 5.8,
+		EpochID: "service", Payload: map[string]any{"running": true, "rss_bytes": nil},
+	}}}); err == nil || !strings.Contains(err.Error(), "missing field") {
+		t.Fatalf("current writer accepted service load without CPU: %v", err)
+	}
 	if _, err := currentWriter.AppendBatch(context.Background(), malformed); err == nil || !strings.Contains(err.Error(), "missing field") {
 		t.Fatalf("current writer accepted malformed current payload: %v", err)
 	}

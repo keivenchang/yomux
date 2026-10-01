@@ -1,18 +1,15 @@
 package stats
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestTmuxCommandArgsHonorsConfiguredSocket(t *testing.T) {
@@ -69,6 +66,47 @@ func TestTmuxNoServerErrorIsAnEmptyRoster(t *testing.T) {
 	}
 	if TmuxNoServerError([]byte("tmux: unknown option -- bad")) {
 		t.Fatal("unrelated tmux failure was classified as an empty roster")
+	}
+}
+
+func TestSyntheticAgentInventoryRequiresFixtureTmuxSocket(t *testing.T) {
+	t.Setenv("YOLOMUX_TMUX_SOCKET", "")
+	sources := SyntheticAgentInventorySources()
+	if _, err := sources.Panes(context.Background()); !errors.Is(err, errSyntheticTmuxSocketUnset) {
+		t.Fatalf("synthetic panes error = %v, want fixture socket admission error", err)
+	}
+}
+
+func TestSyntheticTmuxRejectsSocketOutsideFixtureRoot(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("YOLOMUX_STATS_SYNTHETIC", "1")
+	t.Setenv("YOLOMUX_STATS_SYNTHETIC_ROOT", filepath.Join(root, "fixture"))
+	t.Setenv("YOLOMUX_TMUX_SOCKET", filepath.Join(root, "global-tmux.sock"))
+	if syntheticTmuxSocketConfigured() {
+		t.Fatal("synthetic tmux admission accepted a socket outside the fixture root")
+	}
+	t.Setenv("YOLOMUX_TMUX_SOCKET", filepath.Join(root, "fixture", "tmux.sock"))
+	if !syntheticTmuxSocketConfigured() {
+		t.Fatal("synthetic tmux admission rejected the fixture-owned private socket")
+	}
+	if err := os.MkdirAll(filepath.Join(root, "fixture"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "fixture", "tmux.sock"), []byte("not a socket"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if syntheticTmuxSocketConfigured() {
+		t.Fatal("synthetic tmux admission accepted a regular file as a socket")
+	}
+}
+
+func TestSyntheticAgentProcessUsesGoFixtureOpenCodeSession(t *testing.T) {
+	process, ok := syntheticAgentProcess(AgentTmuxPane{PID: 42, Session: "fixture-opencode"})
+	if !ok {
+		t.Fatal("synthetic OpenCode pane was not admitted")
+	}
+	if process.Command != "opencode --mock --session ses-synthetic" || process.Executable != "python3" {
+		t.Fatalf("synthetic OpenCode process = %+v", process)
 	}
 }
 
@@ -286,7 +324,7 @@ func TestParseAgentCommandAndTmuxShapes(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "10", "cmdline"), []byte("claude\x00--dangerously-skip-permissions\x00"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	processes, err := linuxProcessesFromProc(context.Background(), root, os.ReadDir, os.ReadFile, func(string) (string, error) { return "/usr/bin/bash", nil })
+	processes, err := linuxProcessesFromProc(context.Background(), root, readDirNames, os.ReadFile, func(string) (string, error) { return "/usr/bin/bash", nil })
 	if err != nil || len(processes) != 1 || processes[0].PID != 10 || processes[0].PPID != 1 {
 		t.Fatalf("processes = %#v, err=%v", processes, err)
 	}
@@ -317,7 +355,7 @@ func TestLinuxProcessInventoryUsesProcAndKeepsCurrentOpenCodeRows(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
-	processes, err := linuxProcessesFromProc(context.Background(), root, os.ReadDir, os.ReadFile, func(path string) (string, error) {
+	processes, err := linuxProcessesFromProc(context.Background(), root, readDirNames, os.ReadFile, func(path string) (string, error) {
 		return map[string]string{
 			filepath.Join(root, "401", "exe"): "/usr/bin/opencode",
 			filepath.Join(root, "402", "exe"): "/usr/bin/opencode",
@@ -366,7 +404,7 @@ func TestLinuxOpenCodeProcessInventoryReadsNativeCandidatesWithoutCommandScan(t 
 		}
 	}
 	reads := map[string]int{}
-	processes, err := linuxOpenCodeProcessesFromProc(context.Background(), root, os.ReadDir, func(path string) ([]byte, error) {
+	processes, err := linuxOpenCodeProcessesFromProc(context.Background(), root, readDirNames, func(path string) ([]byte, error) {
 		reads[filepath.Base(path)]++
 		return os.ReadFile(path)
 	}, func(path string) (string, error) {
@@ -400,53 +438,35 @@ func TestLinuxProcessInventoryIgnoresAuxiliaryProcExit(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "401", "stat"), []byte("401 (opencode) S 300 2 3"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	processes, err := linuxProcessesFromProc(context.Background(), root, os.ReadDir, os.ReadFile, nil)
+	processes, err := linuxProcessesFromProc(context.Background(), root, readDirNames, os.ReadFile, nil)
 	if err != nil || len(processes) != 1 || processes[0].PID != 401 {
 		t.Fatalf("processes = %#v, err=%v", processes, err)
 	}
 }
 
-func TestLinuxProcessInventoryReadsActualProcList(t *testing.T) {
-	if _, err := os.Stat("/proc"); err != nil {
-		t.Skip("Linux /proc is unavailable")
+func TestLinuxProcessInventoriesRejectOverCapBeforeReadingRows(t *testing.T) {
+	names := make([]string, maxProcessEntries+1)
+	names[0] = "1"
+	readDir := func(string) ([]string, error) { return names, nil }
+	readFile := func(string) ([]byte, error) {
+		t.Fatal("process row was read before the oversized directory was rejected")
+		return nil, nil
 	}
-	processes, err := linuxProcesses(context.Background())
-	if err != nil {
-		t.Fatal(err)
+	if _, err := linuxProcessesFromProc(context.Background(), "/synthetic/proc", readDir, readFile, nil); err == nil || !strings.Contains(err.Error(), "process inventory bound exceeded") {
+		t.Fatalf("general process inventory error = %v, want over-cap rejection", err)
 	}
-	for _, process := range processes {
-		if process.PID == os.Getpid() {
-			return
-		}
+	if _, err := linuxOpenCodeProcessesFromProc(context.Background(), "/synthetic/proc", readDir, readFile, nil); err == nil || !strings.Contains(err.Error(), "process inventory bound exceeded") {
+		t.Fatalf("OpenCode process inventory error = %v, want over-cap rejection", err)
 	}
-	t.Fatalf("current Go test process %d was absent from %d process rows", os.Getpid(), len(processes))
 }
 
-func TestRunBoundedCommandDiagnosticsAndLargeOutput(t *testing.T) {
-	args := []string{"ps", "-e", "--cols", strconv.Itoa(linuxProcessCommandWidth), "-o", "pid=,ppid=,args="}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	deadline, hasDeadline := ctx.Deadline()
-	command := exec.CommandContext(ctx, args[0], args[1:]...)
-	command.Env = os.Environ()
-	command.Dir = cwd
-	var stdout, stderr bytes.Buffer
-	command.Stdout = &stdout
-	command.Stderr = &stderr
-	execErr := command.Run()
-	exitCode := 0
-	if exitErr, ok := execErr.(*exec.ExitError); ok {
-		exitCode = exitErr.ExitCode()
-	}
-	t.Logf("Go ps repro uid=%d cwd=%q env_entries=%d args=%q exec.CommandContext err=%v exit_code=%d stdout_len=%d stderr=%q context_err=%v deadline=%v has_deadline=%t", os.Getuid(), cwd, len(command.Env), args, execErr, exitCode, stdout.Len(), stderr.String(), ctx.Err(), deadline, hasDeadline)
-	result, boundedErr := runBoundedCommand(ctx, args)
-	t.Logf("runBoundedCommand err=%v exit_code=%d stdout_len=%d stderr=%q context_err=%v", boundedErr, result.ExitCode, len(result.Stdout), string(result.Stderr), ctx.Err())
-	if boundedErr != nil || result.ExitCode != 0 || len(result.Stdout) == 0 {
-		t.Fatalf("actual ps command failed: err=%v result=%+v", boundedErr, result)
+func TestRunBoundedCommandDiagnosticsAndLargeSyntheticOutput(t *testing.T) {
+	// The command runner is tested with fixture-generated bytes only. It must
+	// never inspect the host process table or inherit an operator's environment.
+	smallArgs := []string{"sh", "-c", "printf '101 1 synthetic-agent\\n'"}
+	small, smallErr := runBoundedCommand(context.Background(), smallArgs)
+	if smallErr != nil || small.ExitCode != 0 || string(small.Stdout) != "101 1 synthetic-agent\n" {
+		t.Fatalf("synthetic command result: err=%v result=%+v", smallErr, small)
 	}
 
 	largeArgs := []string{"sh", "-c", "printf '%9000000s' x"}

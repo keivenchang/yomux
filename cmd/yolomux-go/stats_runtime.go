@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"sort"
@@ -31,11 +32,12 @@ const (
 	statsWriterProtocol   = 25
 	statsSchemaGeneration = 9
 	statsClientIDDomain   = "yolomux-stats-client-v1\x00"
-	// Keep snapshot chunks below the Python local-RPC target. The public
-	// protocol permits a normal snapshot to be returned as its first chunk;
-	// callers request the remaining indexes with chunk_generation.
-	statsSnapshotChunkTargetBytes = 1 << 20
-	statsMaxSnapshotChunks        = 64
+	// Match Python's 1 MiB chunk target while allowing one indivisible bucket
+	// up to the local-RPC binary response bound. A bucket's no-data ledger can
+	// exceed the target even after every other bucket has been split away.
+	statsSnapshotChunkTargetBytes = stats.MaxStatsSnapshotChunkTargetBytes
+	statsSnapshotChunkMaxBytes    = stats.MaxStatsSnapshotChunkBytes
+	statsMaxSnapshotChunks        = stats.MaxStatsSnapshotChunks
 	statsMaxSafeJSONInteger       = int64(9007199254740991)
 )
 
@@ -398,7 +400,7 @@ func (s *server) statsAgentStatus(w http.ResponseWriter, r *http.Request) {
 // account for Go CPU. It intentionally reports counters and elapsed time, not
 // raw rows or payloads, so it is safe to expose through system-status.
 func (s *server) statsRuntimeDiagnostics() map[string]any {
-	payload := map[string]any{"schema_version": 1}
+	payload := map[string]any{"schema_version": 1, "memory": s.runtimeMemory.diagnostics()}
 	s.processEntriesCacheMu.Lock()
 	processEntriesRows := len(s.processEntriesCache)
 	processEntriesHits := s.processEntriesCacheHits
@@ -483,6 +485,7 @@ func (s *server) statsRuntimeDiagnostics() map[string]any {
 		payload["lifecycle"] = map[string]any{
 			"runs": counters.Runs, "publications": counters.Publications, "repairs": counters.Repairs, "errors": counters.Errors,
 			"background_backfill_deferrals": counters.BackgroundBackfillDeferrals,
+			"startup_preparation":           statsStartupPreparationWire(counters.StartupPreparation),
 			"selected_cells":                counters.SelectedCells, "materialized_buckets": counters.MaterializedBuckets,
 			"fact_rows_read": counters.FactRowsRead, "decoded_bytes": counters.DecodedBytes,
 			"selection_duration_ms":       counters.SelectionDuration.Seconds() * 1000,
@@ -542,7 +545,318 @@ func (s *server) statsRuntimeDiagnostics() map[string]any {
 		}
 	}
 	payload["collectors"] = collectors
+	if s.statsRuntimeRecorder != nil {
+		payload["runtime_recorder"] = s.statsRuntimeRecorder.diagnostics()
+	}
 	return payload
+}
+
+func statsStartupPreparationWire(state stats.StartupPreparationState) map[string]any {
+	return map[string]any{"started_at": state.StartedAt, "horizon": state.Horizon, "source_generation": state.SourceGeneration,
+		"total_cells": state.TotalCells, "pending_cells": state.PendingCells, "complete": state.Complete,
+		"timed_out": state.TimedOut, "duration_ms": state.Duration.Seconds() * 1000}
+}
+
+// statsRuntimeLoad reports collector occupancy against each owner's native
+// cadence. The values describe elapsed collector work, including waits and
+// I/O; they are not process CPU percentages.
+func (s *server) statsRuntimeLoad() map[string]any {
+	load := make(map[string]any)
+	add := func(key, label string, duration, cadence time.Duration) {
+		if duration <= 0 || cadence <= 0 {
+			return
+		}
+		percent := duration.Seconds() / cadence.Seconds() * 100
+		if math.IsNaN(percent) || math.IsInf(percent, 0) || percent < 0 {
+			return
+		}
+		load[key] = map[string]any{
+			"label": label, "load_percent": percent,
+			"duration_ms": duration.Seconds() * 1000, "cadence_ms": cadence.Seconds() * 1000,
+			"unit": "runtime_occupancy",
+		}
+	}
+	if s.statsLifecycle != nil {
+		counters := s.statsLifecycle.Counters()
+		cadence := s.statsLifecycle.Cadence()
+		add("stats_lifecycle", "stats lifecycle", counters.LastDuration, cadence)
+	}
+	if s.hostCollector != nil {
+		counters := s.hostCollector.Counters()
+		labels := map[string]string{
+			"cpu":           "host CPU collector (runtime occupancy)",
+			"system_memory": "host memory collector (runtime occupancy)",
+			"gpu":           "host GPU collector (runtime occupancy)",
+		}
+		for family, timing := range counters.Family {
+			label, ok := labels[family]
+			if !ok || !s.hostCollector.FamilyDemanded(family) {
+				continue
+			}
+			add("host_collector:"+family, label, timing.LastDuration, s.hostCollector.FamilyCadence(family))
+		}
+	}
+	if s.tokenCollector != nil {
+		counters := s.tokenCollector.Counters()
+		cadence := counters.LastCadence
+		if cadence <= 0 {
+			cadence = stats.AgentTokenActiveCadence
+		}
+		add("agent_tokens", "agent token collector", counters.LastDuration, cadence)
+	}
+	if s.agentStatusCollector != nil {
+		counters := s.agentStatusCollector.Counters()
+		cadence := counters.LastCadence
+		if cadence <= 0 {
+			cadence = 10 * time.Second
+		}
+		add("agent_status", "agent status collector", counters.LastDuration, cadence)
+	}
+	return load
+}
+
+func (s *server) statsRuntimeServiceLoadSamples(at time.Time) []stats.ServiceLoadSample {
+	s.runtimeMemory.sample(at)
+	load := s.statsRuntimeLoad()
+	samples := make([]stats.ServiceLoadSample, 0, len(load)+4)
+	for key, raw := range load {
+		record, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		percent, ok := record["load_percent"].(float64)
+		if !ok || math.IsNaN(percent) || math.IsInf(percent, 0) || percent < 0 {
+			continue
+		}
+		cpu := percent
+		samples = append(samples, stats.ServiceLoadSample{SourceID: "runtime:" + key, Running: true, CPUPercent: &cpu})
+	}
+	var process goProcessMetrics
+	if s.processMetricsFn != nil {
+		process = s.processMetricsFn(at)
+	} else {
+		process = s.readGoProcessMetrics(at)
+	}
+	processSample := stats.ServiceLoadSample{SourceID: s.statsMainProcessSourceID(), Running: true}
+	if validServiceLoadPercent(process.CPUPercent) {
+		processSample.CPUPercent = process.CPUPercent
+	}
+	if process.RSSBytes != nil {
+		rss := float64(*process.RSSBytes)
+		processSample.RSSBytes = &rss
+	}
+	if processSample.CPUPercent != nil || processSample.RSSBytes != nil {
+		samples = append(samples, processSample)
+	}
+	seenThreads := make(map[string]bool)
+	for _, thread := range process.Threads {
+		if thread.TID <= 0 || !validServiceLoadPercent(thread.CPUPercent) || thread.State == "dead" || thread.State == "zombie" {
+			continue
+		}
+		key := goProcessInstanceKey(thread.TID, thread.Identity)
+		if seenThreads[key] {
+			continue
+		}
+		seenThreads[key] = true
+		samples = append(samples, stats.ServiceLoadSample{
+			SourceID: goMetricSourceID("thread", thread.TID, thread.Identity), Running: true, CPUPercent: thread.CPUPercent,
+		})
+	}
+	for _, child := range normalizeGoChildProcessMetrics(process.ChildProcesses) {
+		if child.State == "dead" || child.State == "zombie" {
+			continue
+		}
+		childSample := stats.ServiceLoadSample{SourceID: goMetricSourceID("child", child.PID, child.Identity), Running: true}
+		if validServiceLoadPercent(child.CPUPercent) {
+			childSample.CPUPercent = child.CPUPercent
+		}
+		if child.RSSBytes != nil {
+			rss := float64(*child.RSSBytes)
+			childSample.RSSBytes = &rss
+		}
+		if childSample.CPUPercent != nil || childSample.RSSBytes != nil {
+			samples = append(samples, childSample)
+		}
+	}
+	return samples
+}
+
+// Keep identity and display metadata in the persisted source key: historical
+// samples must remain attributable after the process or its owner disappears.
+func (s *server) statsMainProcessSourceID() string {
+	s.statsProcessSourceOnce.Do(func() {
+		hostname, _ := os.Hostname()
+		host := readIdentityValue("YOLOMUX_HOST_ID", "/etc/machine-id", hostname)
+		boot := readIdentityValue("", "/proc/sys/kernel/random/boot_id", "unknown-boot")
+		start := processStartIdentity(os.Getpid())
+		owner := s.config + "\x00" + s.root + "\x00" + strconv.Itoa(s.port)
+		if s.background != nil {
+			host, boot, start, owner = s.background.stableHostID, s.background.bootID, s.background.processStartIdentity, s.background.serverID
+		}
+		// The shared owner also lacks /proc start metadata on platforms such
+		// as macOS. Apply the fallback after reading it to separate PID reuse.
+		if start == "" {
+			start = strconv.FormatInt(s.startedAt.UnixNano(), 10)
+		}
+		executable, _ := os.Executable()
+		s.statsProcessSource = statsProcessSourceID(os.Getpid(), s.port, os.Getppid(), executable, host, boot, start, owner)
+	})
+	return s.statsProcessSource
+}
+
+func statsProcessSourceID(pid, port, parentPID int, executable, host, boot, start, owner string) string {
+	// Source IDs have a 192-byte storage limit. Hash complete identity fields,
+	// while retaining bounded human-readable process details in the prefix.
+	identity, _ := json.Marshal([]string{host, boot, strconv.Itoa(pid), start, owner, executable})
+	digest := sha256.Sum256(identity)
+	name := filepath.Base(executable)
+	if name == "." || name == "" {
+		name = "yolomux-go"
+	}
+	for len(url.QueryEscape(name)) > 64 {
+		_, width := utf8.DecodeLastRuneInString(name)
+		name = name[:len(name)-width]
+	}
+	return fmt.Sprintf("yolomux-go:process:%d:%d:%d:%s:h%s", pid, port, parentPID, url.QueryEscape(name), hex.EncodeToString(digest[:16]))
+}
+
+func validServiceLoadPercent(value *float64) bool {
+	return value != nil && !math.IsNaN(*value) && !math.IsInf(*value, 0) && *value >= 0
+}
+
+func goMetricSourceID(kind string, id int, identity string) string {
+	base := fmt.Sprintf("yolomux-go:%s:%d", kind, id)
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
+		return base
+	}
+	prefix := strconv.Itoa(id) + ":"
+	if strings.HasPrefix(identity, prefix) {
+		identity = strings.TrimPrefix(identity, prefix)
+	}
+	for _, r := range identity {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+			digest := sha256.Sum256([]byte(identity))
+			return base + ":h" + hex.EncodeToString(digest[:6])
+		}
+	}
+	return base + ":" + identity
+}
+
+func goProcessInstanceKey(pid int, identity string) string {
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
+		return strconv.Itoa(pid)
+	}
+	return strconv.Itoa(pid) + "\x1f" + identity
+}
+
+func normalizeGoChildProcessMetrics(children []goChildProcessMetric) []goChildProcessMetric {
+	result := make([]goChildProcessMetric, 0, len(children))
+	indexes := make(map[string]int, len(children))
+	for _, child := range children {
+		if child.PID <= 0 {
+			continue
+		}
+		child.Identity = strings.TrimSpace(child.Identity)
+		key := goProcessInstanceKey(child.PID, child.Identity)
+		index, exists := indexes[key]
+		if !exists {
+			indexes[key] = len(result)
+			result = append(result, child)
+			continue
+		}
+		current := &result[index]
+		if !validServiceLoadPercent(current.CPUPercent) && validServiceLoadPercent(child.CPUPercent) {
+			current.CPUPercent = child.CPUPercent
+		}
+		if current.RSSBytes == nil && child.RSSBytes != nil {
+			current.RSSBytes = child.RSSBytes
+		}
+		if current.State == "" || current.State == "dead" || current.State == "zombie" {
+			current.State = child.State
+		}
+	}
+	return result
+}
+
+func runtimeWireTimestamp(value any) (float64, bool) {
+	switch timestamp := value.(type) {
+	case float64:
+		return timestamp, !math.IsNaN(timestamp) && !math.IsInf(timestamp, 0)
+	case int:
+		return float64(timestamp), true
+	case int64:
+		return float64(timestamp), true
+	default:
+		return 0, false
+	}
+}
+
+func augmentSnapshotWireRuntimeLoad(wire map[string]any, load map[string]any) map[string]any {
+	buckets, ok := wire["buckets"].([]map[string]any)
+	if !ok || len(buckets) == 0 {
+		return wire
+	}
+	liveBucket := buckets[len(buckets)-1]
+	if liveBucket["open"] != true {
+		return wire
+	}
+	series, ok := liveBucket["series"].(map[string]map[string]any)
+	if !ok {
+		return wire
+	}
+	sampledAt, ok := runtimeWireTimestamp(wire["generated_at"])
+	if !ok || sampledAt < 0 {
+		sampledAt = float64(time.Now().Unix())
+	}
+	source, _ := liveBucket["source"].(map[string]any)
+	if source == nil {
+		source = map[string]any{"count": 0, "first_timestamp": nil, "last_timestamp": nil}
+		liveBucket["source"] = source
+	}
+	originalFirst, originalLast, originalCount := source["first_timestamp"], source["last_timestamp"], source["count"]
+	first, firstOK := runtimeWireTimestamp(originalFirst)
+	last, lastOK := runtimeWireTimestamp(originalLast)
+	if !firstOK || first < 0 || sampledAt < first {
+		first = sampledAt
+	}
+	if !lastOK || last < first || sampledAt > last {
+		last = sampledAt
+	}
+	added := false
+	for key, raw := range load {
+		record, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		value, ok := record["load_percent"].(float64)
+		if !ok || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+			continue
+		}
+		for _, prefix := range []string{"service_cpu_percent:runtime:", "service_cpu_min_percent:runtime:", "service_cpu_max_percent:runtime:"} {
+			series[prefix+key] = map[string]any{
+				"value": value, "source_count": 1,
+				"first_timestamp": sampledAt, "last_timestamp": sampledAt,
+			}
+		}
+		added = true
+	}
+	if !added {
+		return wire
+	}
+	source["first_timestamp"], source["last_timestamp"] = first, last
+	switch count := originalCount.(type) {
+	case int:
+		source["count"] = count + 1
+	case int64:
+		source["count"] = count + 1
+	case float64:
+		source["count"] = int(count) + 1
+	default:
+		source["count"] = 1
+	}
+	return wire
 }
 
 func (s *server) statsCapabilities(w http.ResponseWriter, r *http.Request) {
@@ -702,18 +1016,9 @@ func statsObservationUnsupported(reason string) map[string]any {
 // opens SQLite or folds facts; the lifecycle must publish an immutable ring
 // product before a request can be served.
 func (s *server) currentStatsSnapshot(ctx context.Context, query statsQuery) (stats.StatsSnapshot, error) {
-	if s.statsService == nil {
-		return stats.StatsSnapshot{}, fmt.Errorf("%w: stats service is not initialized", stats.ErrProductPending)
+	if err := s.demandStatsProduct(query); err != nil {
+		return stats.StatsSnapshot{}, err
 	}
-	if s.statsLifecycle != nil {
-		// A pending HTTP read is still a demand signal. The lifecycle uses it to
-		// prioritize this exact product over unrelated cold-ring repair work;
-		// materialization remains fully off the request path.
-		s.statsLifecycle.DemandProduct(query.rangeSeconds, query.resolution)
-	}
-	// The service owns the latest retained product window. Do not derive strict
-	// bounds from this request's wall clock: a lifecycle publication can land
-	// on either side of the bucket boundary while the request is in flight.
 	snapshot, err := s.statsService.CurrentSnapshot(ctx, query.rangeSeconds, query.resolution)
 	if err != nil {
 		return stats.StatsSnapshot{}, err
@@ -723,6 +1028,26 @@ func (s *server) currentStatsSnapshot(ctx context.Context, query statsQuery) (st
 	// service, while a cached product carries its older source/cache generation
 	// until the next immutable publication replaces it.
 	return snapshot, nil
+}
+
+func (s *server) currentStatsSnapshotIfChanged(ctx context.Context, query statsQuery) (stats.StatsSnapshot, bool, error) {
+	if err := s.demandStatsProduct(query); err != nil {
+		return stats.StatsSnapshot{}, false, err
+	}
+	return s.statsService.CurrentSnapshotIfChanged(ctx, query.rangeSeconds, query.resolution, query.afterCacheGeneration)
+}
+
+func (s *server) demandStatsProduct(query statsQuery) error {
+	if s.statsService == nil {
+		return fmt.Errorf("%w: stats service is not initialized", stats.ErrProductPending)
+	}
+	if s.statsLifecycle != nil {
+		// A pending HTTP read is still a demand signal. The lifecycle uses it to
+		// prioritize this exact product over unrelated cold-ring repair work;
+		// materialization remains fully off the request path.
+		s.statsLifecycle.DemandProduct(query.rangeSeconds, query.resolution)
+	}
+	return nil
 }
 
 func statsPending(query statsQuery, reason string) map[string]any {
@@ -759,13 +1084,10 @@ func (s *server) statsSnapshot(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusFailedDependency, statsError(err.Error()))
 		return
 	}
-	// Even an unchanged response establishes the client's current immutable
-	// predecessor. A caller can follow a 304 with an after-generation delta;
-	// that cursor must not be treated as outside the retained chain.
+	// A generation descriptor is already owned by the service; seeding delivery
+	// metadata never reconstructs its wire body, including unchanged requests.
 	seedKey := statsDeltaKey{rangeSeconds: query.rangeSeconds, resolution: query.resolution}
-	seed := func() {
-		s.seedStatsDeltaGeneration(seedKey, snapshot.CacheGeneration, snapshotWire(snapshot, query), 0)
-	}
+	seed := func() { s.statsDeliveryRevision(seedKey, snapshot.CacheGeneration, true) }
 	if query.sinceGeneration > 0 && snapshot.CacheGeneration <= query.sinceGeneration {
 		seed()
 		jsonResponse(w, http.StatusNotModified, map[string]any{"protocol_version": statsWireVersion, "not_modified": true, "range_seconds": query.rangeSeconds, "resolution_seconds": query.resolution, "source_generation": snapshot.SourceGeneration, "cache_generation": snapshot.CacheGeneration})
@@ -780,9 +1102,6 @@ func (s *server) statsSnapshot(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, statsHTTPErrorEnvelope(r, http.StatusBadRequest, statsUnsupportedForQuery(false, err.Error(), query.rangeSeconds)))
 		return
 	}
-	// A direct snapshot establishes the same predecessor as the SSE path.  The
-	// next delta request may use this generation as its cursor, so retain the
-	// complete immutable wire body (not a transport chunk) before responding.
 	seed()
 	jsonResponse(w, http.StatusOK, payload)
 }
@@ -797,38 +1116,82 @@ func (s *server) statsDelta(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, statsHTTPErrorEnvelope(r, http.StatusBadRequest, failure))
 		return
 	}
-	snapshot, err := s.currentStatsSnapshot(r.Context(), query)
+	result := s.statsDeltaOperation(r.Context(), query)
+	payload := result.payload
+	if result.status == http.StatusConflict {
+		payload = statsHTTPErrorEnvelope(r, result.status, payload)
+	}
+	jsonResponse(w, result.status, payload)
+}
+
+// statsOperationResult carries transport state separately from the JSON payload.
+// HTTP and SSE apply their own framing without parsing an internal HTTP response.
+type statsOperationResult struct {
+	status               int
+	generation, revision int64
+	payload              map[string]any
+}
+
+func (s *server) statsDeltaOperation(ctx context.Context, query statsQuery) statsOperationResult {
+	snapshot, changed, err := s.currentStatsSnapshotIfChanged(ctx, query)
 	if err != nil {
 		if errors.Is(err, stats.ErrProductPending) {
-			jsonResponse(w, http.StatusAccepted, statsPending(query, err.Error()))
-			return
+			return statsOperationResult{status: http.StatusAccepted, payload: statsPending(query, err.Error())}
 		}
-		jsonResponse(w, http.StatusFailedDependency, statsError(err.Error()))
-		return
+		return statsOperationResult{status: http.StatusFailedDependency, payload: statsError(err.Error())}
+	}
+	if !changed {
+		generation := query.afterCacheGeneration
+		key := statsDeltaKey{rangeSeconds: query.rangeSeconds, resolution: query.resolution}
+		revision := s.statsDeliveryRevision(key, generation, false)
+		return statsOperationResult{status: http.StatusNotModified, generation: generation, revision: revision, payload: map[string]any{"protocol_version": statsWireVersion, "not_modified": true, "cache_generation": generation, "revision": revision}}
 	}
 	generation := snapshot.CacheGeneration
-	current := snapshotWire(snapshot, statsQuery{rangeSeconds: query.rangeSeconds, resolution: query.resolution})
 	key := statsDeltaKey{rangeSeconds: query.rangeSeconds, resolution: query.resolution}
+	revision := s.statsDeliveryRevision(key, generation, false)
 	s.statsDeltaMu.Lock()
-	if s.statsDeltaHistory == nil {
-		s.statsDeltaHistory = make(map[statsDeltaKey]map[int64]map[string]any)
+	_, delivered := s.statsDeltaRevisions[key][query.afterCacheGeneration]
+	s.statsDeltaMu.Unlock()
+	previous, retained := s.statsService.GenerationSnapshot(ctx, query.rangeSeconds, query.resolution, query.afterCacheGeneration)
+	if !delivered || !retained {
+		return statsOperationResult{status: http.StatusConflict, generation: generation, revision: revision, payload: map[string]any{
+			"status": "repair_required", "protocol_version": statsWireVersion,
+			"cache_generation": generation, "reason": "delta cursor is outside the retained exact chain",
+		}}
+	}
+	previousWire, currentWire := statsDeltaWirePair(previous, snapshot, query)
+	currentWire["revision"] = revision
+	return statsOperationResult{status: http.StatusOK, generation: generation, revision: revision,
+		payload: deltaFromWireMaps(previousWire, currentWire, query)}
+}
+
+// Only delivery revisions live in HTTP. Bucket and coverage history belongs to
+// the service, where generations share immutable products instead of wire maps.
+func (s *server) statsDeliveryRevision(key statsDeltaKey, generation int64, seed bool) int64 {
+	s.statsDeltaMu.Lock()
+	defer s.statsDeltaMu.Unlock()
+	if s.statsDeltaRevisions == nil {
+		s.statsDeltaRevisions = make(map[statsDeltaKey]map[int64]int64)
 	}
 	if s.statsDeltaNextRevision == nil {
 		s.statsDeltaNextRevision = make(map[statsDeltaKey]int64)
 	}
-	history := s.statsDeltaHistory[key]
+	history := s.statsDeltaRevisions[key]
 	if history == nil {
-		history = make(map[int64]map[string]any)
-		s.statsDeltaHistory[key] = history
+		history = make(map[int64]int64)
+		s.statsDeltaRevisions[key] = history
 	}
-	previous := history[query.afterCacheGeneration]
-	currentRevision, hasCurrentRevision := history[generation]["revision"]
-	if !hasCurrentRevision {
-		currentRevision = float64(s.statsDeltaNextRevision[key])
-		s.statsDeltaNextRevision[key]++
+	if revision, exists := history[generation]; exists {
+		return revision
 	}
-	current["revision"] = currentRevision
-	history[generation] = current
+	revision := s.statsDeltaNextRevision[key]
+	if seed {
+		revision = 0
+	}
+	history[generation] = revision
+	if s.statsDeltaNextRevision[key] <= revision {
+		s.statsDeltaNextRevision[key] = revision + 1
+	}
 	if len(history) > statsDeltaHistoryLimit {
 		oldest := generation
 		for candidate := range history {
@@ -838,78 +1201,60 @@ func (s *server) statsDelta(w http.ResponseWriter, r *http.Request) {
 		}
 		delete(history, oldest)
 	}
-	s.statsDeltaMu.Unlock()
-	revision := int64(currentRevision.(float64))
-	// Python treats a cursor on the current immutable cache generation as
-	// unchanged regardless of the delivery revision supplied by the caller.
-	// Revisions describe the exact delta chain between generations; they must
-	// not turn a same-generation probe into a repair response.
-	if query.afterCacheGeneration == generation {
-		jsonResponse(w, http.StatusNotModified, map[string]any{"protocol_version": statsWireVersion, "not_modified": true, "cache_generation": generation, "revision": revision})
-		return
-	}
-	if previous == nil {
-		jsonResponse(w, http.StatusConflict, statsHTTPErrorEnvelope(r, http.StatusConflict, map[string]any{
-			"status": "repair_required", "protocol_version": statsWireVersion,
-			"cache_generation": generation,
-			"reason":           "delta cursor is outside the retained exact chain",
-		}))
-		return
-	}
-	if previous != nil {
-		jsonResponse(w, http.StatusOK, deltaFromWireMaps(previous, current, query))
-		return
-	}
-	jsonResponse(w, http.StatusOK, deltaWire(snapshot, query))
+	return revision
 }
 
-// seedStatsDeltaGeneration records the generation the stream has already
-// delivered. Without this seed, the first subsequent generation has no
-// predecessor in the bounded history and is incorrectly classified as an
-// evicted cursor that requires repair.
-func (s *server) seedStatsDeltaGeneration(key statsDeltaKey, generation int64, snapshot map[string]any, revision int64) {
-	s.statsDeltaMu.Lock()
-	defer s.statsDeltaMu.Unlock()
-	if s.statsDeltaHistory == nil {
-		s.statsDeltaHistory = make(map[statsDeltaKey]map[int64]map[string]any)
+// statsDeltaWirePair compares immutable typed buckets before expanding only the
+// changed or removed buckets into wire maps. Cost totals still cover the complete
+// current product. Both sides include the same selected identities, so unchanged
+// buckets cannot be mistaken for tombstones by the shared delta projector.
+func statsDeltaWirePair(previous, current stats.StatsSnapshot, query statsQuery) (map[string]any, map[string]any) {
+	type bucketKey struct{ start, duration float64 }
+	old := make(map[bucketKey]int, len(previous.Materialized.Buckets))
+	selected := make(map[bucketKey]bool)
+	for index, bucket := range previous.Materialized.Buckets {
+		old[bucketKey{bucket.Start, bucket.Duration}] = index
 	}
-	if s.statsDeltaNextRevision == nil {
-		s.statsDeltaNextRevision = make(map[statsDeltaKey]int64)
-	}
-	history := s.statsDeltaHistory[key]
-	if history == nil {
-		history = make(map[int64]map[string]any)
-		s.statsDeltaHistory[key] = history
-	}
-	if _, exists := history[generation]; exists {
-		return
-	}
-	historySnapshot := make(map[string]any, len(snapshot)+1)
-	for name, value := range snapshot {
-		historySnapshot[name] = value
-	}
-	historySnapshot["revision"] = float64(revision)
-	history[generation] = historySnapshot
-	if s.statsDeltaNextRevision[key] <= revision {
-		s.statsDeltaNextRevision[key] = revision + 1
-	}
-	if len(history) <= statsDeltaHistoryLimit {
-		return
-	}
-	oldest := generation
-	for candidate := range history {
-		if candidate < oldest {
-			oldest = candidate
+	for index, bucket := range current.Materialized.Buckets {
+		key := bucketKey{bucket.Start, bucket.Duration}
+		oldIndex, exists := old[key]
+		if !exists {
+			selected[key] = true
+			continue
 		}
+		before := previous.Materialized.Buckets[oldIndex]
+		oldOpen := oldIndex == len(previous.Materialized.Buckets)-1 || !before.Complete
+		newOpen := index == len(current.Materialized.Buckets)-1 || !bucket.Complete
+		if before.SourceCount != bucket.SourceCount || oldOpen != newOpen || !reflect.DeepEqual(before.Series, bucket.Series) {
+			selected[key] = true
+		}
+		delete(old, key)
 	}
-	delete(history, oldest)
+	for key := range old {
+		selected[key] = true
+	}
+	// The public delta protocol repeats the rightmost bucket when a publication
+	// changes neither bucket nor coverage data. Include it in both comparisons.
+	if len(selected) == 0 && len(current.Materialized.Buckets) > 0 {
+		last := current.Materialized.Buckets[len(current.Materialized.Buckets)-1]
+		selected[bucketKey{last.Start, last.Duration}] = true
+	}
+	include := func(bucket stats.MaterializedBucket) bool { return selected[bucketKey{bucket.Start, bucket.Duration}] }
+	return snapshotWireSelected(previous, query, include), snapshotWireSelected(current, query, include)
 }
 
 func snapshotWire(snapshot stats.StatsSnapshot, query statsQuery) map[string]any {
+	return snapshotWireSelected(snapshot, query, nil)
+}
+
+func snapshotWireSelected(snapshot stats.StatsSnapshot, query statsQuery, include func(stats.MaterializedBucket) bool) map[string]any {
 	// Ring-backed products intentionally omit the raw observation projection;
 	// the public wire is defined by the immutable materialized bucket set.
-	buckets := make([]map[string]any, len(snapshot.Materialized.Buckets))
+	buckets := make([]map[string]any, 0, len(snapshot.Materialized.Buckets))
 	for i, bucket := range snapshot.Materialized.Buckets {
+		if include != nil && !include(bucket) {
+			continue
+		}
 		series := make(map[string]map[string]any, len(bucket.Series))
 		var firstTimestamp, lastTimestamp *float64
 		for _, item := range bucket.Series {
@@ -923,7 +1268,7 @@ func snapshotWire(snapshot stats.StatsSnapshot, query statsQuery) map[string]any
 				lastTimestamp = &last
 			}
 		}
-		buckets[i] = map[string]any{"start": bucket.Start, "duration": bucket.Duration, "series": series, "source": map[string]any{"count": bucket.SourceCount, "first_timestamp": firstTimestamp, "last_timestamp": lastTimestamp}, "open": i == len(snapshot.Materialized.Buckets)-1 || !bucket.Complete}
+		buckets = append(buckets, map[string]any{"start": bucket.Start, "duration": bucket.Duration, "series": series, "source": map[string]any{"count": bucket.SourceCount, "first_timestamp": firstTimestamp, "last_timestamp": lastTimestamp}, "open": i == len(snapshot.Materialized.Buckets)-1 || !bucket.Complete})
 	}
 	noData := make([]map[string]any, 0)
 	for _, item := range snapshot.Materialized.NoData {
@@ -1009,32 +1354,76 @@ func snapshotWire(snapshot stats.StatsSnapshot, query statsQuery) map[string]any
 // split deterministic from one immutable product means no separate mutable
 // transport cache is needed on the HTTP path.
 func snapshotPayloadForQuery(snapshot stats.StatsSnapshot, query statsQuery) (map[string]any, int, error) {
-	full := snapshotWire(snapshot, query)
-	encoded, err := json.Marshal(full)
+	if query.hasChunkIndex && query.chunkGeneration != snapshot.CacheGeneration {
+		return nil, 0, errSnapshotChunkGenerationAdvanced
+	}
+	payloads, err := snapshotPayloadsForQuery(snapshot, query)
 	if err != nil {
-		return nil, 0, fmt.Errorf("encode stats snapshot: %w", err)
+		return nil, 0, err
+	}
+	if query.hasChunkIndex {
+		if query.chunkIndex < 0 || query.chunkIndex >= len(payloads) {
+			return nil, 0, errors.New("chunk_index lies outside the retained snapshot batch")
+		}
+		return payloads[query.chunkIndex], len(payloads), nil
+	}
+	return payloads[0], len(payloads), nil
+}
+
+func snapshotPayloadsForQuery(snapshot stats.StatsSnapshot, query statsQuery) ([]map[string]any, error) {
+	return snapshotPayloadsForWire(snapshotWire(snapshot, query), query)
+}
+
+func snapshotPayloadsForWire(full map[string]any, query statsQuery) ([]map[string]any, error) {
+	encodedSize, err := statsWireSize(full)
+	if err != nil {
+		return nil, fmt.Errorf("encode stats snapshot: %w", err)
 	}
 	buckets, ok := full["buckets"].([]map[string]any)
 	if !ok {
-		return nil, 0, errors.New("stats snapshot buckets are malformed")
+		return nil, errors.New("stats snapshot buckets are malformed")
 	}
-	chunked := query.hasChunkIndex || len(encoded) > statsSnapshotChunkTargetBytes
+	chunked := query.hasChunkIndex || encodedSize > statsSnapshotChunkTargetBytes
 	if !chunked {
-		return full, 1, nil
+		return []map[string]any{full}, nil
 	}
-	if len(buckets) < 2 {
-		return nil, 0, errors.New("snapshot cannot be split into chunks")
+	if len(buckets) == 0 {
+		return nil, errors.New("snapshot cannot be split into chunks")
+	}
+	// A single bucket cannot be divided by time. Keep an oversized-but-valid
+	// one-bucket snapshot as one transport payload; the wire limit, rather than
+	// the smaller chunk target, is the applicable bound when no bucket split is
+	// possible.
+	if len(buckets) == 1 && encodedSize <= statsSnapshotChunkMaxBytes && !query.hasChunkIndex {
+		return []map[string]any{full}, nil
 	}
 	chunkLimit := len(buckets)
 	if chunkLimit > statsMaxSnapshotChunks {
 		chunkLimit = statsMaxSnapshotChunks
 	}
 	chunkCount := 2
-	if estimate := (len(encoded) + statsSnapshotChunkTargetBytes - 1) / statsSnapshotChunkTargetBytes; estimate > chunkCount {
+	if estimate := (encodedSize + statsSnapshotChunkTargetBytes - 1) / statsSnapshotChunkTargetBytes; estimate > chunkCount {
 		chunkCount = estimate
 	}
 	if chunkCount > chunkLimit {
 		chunkCount = chunkLimit
+	}
+	if len(buckets) == 1 {
+		chunk, chunkErr := singleBucketSnapshotChunkWire(full)
+		if chunkErr != nil {
+			return nil, chunkErr
+		}
+		fragments, fragmentErr := splitSnapshotChunkNoData(chunk)
+		if fragmentErr != nil {
+			return nil, fragmentErr
+		}
+		if len(fragments) < 2 || len(fragments) > statsMaxSnapshotChunks {
+			return nil, errors.New("single-bucket snapshot cannot be split within the transport chunk count limit")
+		}
+		for index, fragment := range fragments {
+			fragment["chunk_index"], fragment["chunk_count"] = index, len(fragments)
+		}
+		return fragments, nil
 	}
 	for {
 		chunks := make([]map[string]any, 0, chunkCount)
@@ -1042,31 +1431,51 @@ func snapshotPayloadForQuery(snapshot stats.StatsSnapshot, query statsQuery) (ma
 		for index := 0; index < chunkCount; index++ {
 			chunk, chunkErr := snapshotChunkWire(full, index, chunkCount)
 			if chunkErr != nil {
-				return nil, 0, chunkErr
+				return nil, chunkErr
 			}
-			chunkBytes, marshalErr := json.Marshal(chunk)
+			chunkSize, marshalErr := statsWireSize(chunk)
 			if marshalErr != nil {
-				return nil, 0, fmt.Errorf("encode stats snapshot chunk: %w", marshalErr)
+				return nil, fmt.Errorf("encode stats snapshot chunk: %w", marshalErr)
 			}
-			if len(chunkBytes) > largest {
-				largest = len(chunkBytes)
+			if chunkSize > largest {
+				largest = chunkSize
 			}
 			chunks = append(chunks, chunk)
 		}
-		if largest <= statsSnapshotChunkTargetBytes || chunkCount == chunkLimit {
-			if largest > statsSnapshotChunkTargetBytes {
-				return nil, 0, errors.New("one stats snapshot chunk exceeds the transport limit")
+		if largest <= statsSnapshotChunkMaxBytes {
+			for index, chunk := range chunks {
+				chunk["chunk_index"], chunk["chunk_count"] = index, len(chunks)
 			}
-			if query.hasChunkIndex {
-				if query.chunkGeneration != snapshot.CacheGeneration {
-					return nil, 0, errSnapshotChunkGenerationAdvanced
+			return chunks, nil
+		}
+		if chunkCount == chunkLimit {
+			fragmented := make([]map[string]any, 0, chunkCount+1)
+			for _, chunk := range chunks {
+				encodedChunkSize, marshalErr := statsWireSize(chunk)
+				if marshalErr != nil {
+					return nil, fmt.Errorf("encode stats snapshot chunk: %w", marshalErr)
 				}
-				if query.chunkIndex < 0 || query.chunkIndex >= len(chunks) {
-					return nil, 0, errors.New("chunk_index lies outside the retained snapshot batch")
+				if encodedChunkSize <= statsSnapshotChunkMaxBytes {
+					fragmented = append(fragmented, chunk)
+					continue
 				}
-				return chunks[query.chunkIndex], len(chunks), nil
+				chunkBuckets, bucketOK := chunk["buckets"].([]map[string]any)
+				if !bucketOK || len(chunkBuckets) != 1 {
+					return nil, errors.New("stats snapshot chunk exceeds the transport limit after bucket partitioning")
+				}
+				fragments, fragmentErr := splitSnapshotChunkNoData(chunk)
+				if fragmentErr != nil {
+					return nil, fragmentErr
+				}
+				fragmented = append(fragmented, fragments...)
 			}
-			return chunks[0], len(chunks), nil
+			if len(fragmented) > statsMaxSnapshotChunks {
+				return nil, errors.New("stats snapshot exceeds the transport chunk count limit")
+			}
+			for index, chunk := range fragmented {
+				chunk["chunk_index"], chunk["chunk_count"] = index, len(fragmented)
+			}
+			return fragmented, nil
 		}
 		next := (chunkCount*largest + statsSnapshotChunkTargetBytes - 1) / statsSnapshotChunkTargetBytes
 		if next <= chunkCount {
@@ -1079,18 +1488,86 @@ func snapshotPayloadForQuery(snapshot stats.StatsSnapshot, query statsQuery) (ma
 	}
 }
 
-// streamSnapshotPayloads returns the first transport payload and the complete
-// immutable snapshot used as the delta predecessor. A chunked stream must
-// seed its cursor with every bucket, even though it sends only chunk zero in
-// the first write; otherwise the first post-ready delta would resend every
-// bucket omitted from that first chunk.
-func streamSnapshotPayloads(snapshot stats.StatsSnapshot, query statsQuery) (first, seed map[string]any, chunkCount int, err error) {
-	seed = snapshotWire(snapshot, query)
-	first, chunkCount, err = snapshotPayloadForQuery(snapshot, query)
-	if err != nil {
-		return nil, nil, 0, err
+func singleBucketSnapshotChunkWire(full map[string]any) (map[string]any, error) {
+	buckets, ok := full["buckets"].([]map[string]any)
+	if !ok || len(buckets) != 1 {
+		return nil, errors.New("single-bucket snapshot bounds are invalid")
 	}
-	return first, seed, chunkCount, nil
+	resolution, ok := full["resolution_seconds"].(int)
+	if !ok || resolution <= 0 {
+		return nil, errors.New("single-bucket snapshot resolution is invalid")
+	}
+	start, ok := buckets[0]["start"].(float64)
+	if !ok {
+		return nil, errors.New("single-bucket snapshot start is invalid")
+	}
+	chunk := make(map[string]any, len(full)+2)
+	for key, value := range full {
+		if key != "chunk_index" && key != "chunk_count" && key != "chunk_start" && key != "chunk_end" {
+			chunk[key] = value
+		}
+	}
+	chunk["chunk_start"], chunk["chunk_end"] = start, start+float64(resolution)
+	return chunk, nil
+}
+
+func splitSnapshotChunkNoData(chunk map[string]any) ([]map[string]any, error) {
+	spans, ok := chunk["no_data"].([]map[string]any)
+	if !ok || len(spans) < 2 {
+		return nil, errors.New("one stats snapshot bucket exceeds the transport limit")
+	}
+	base := make(map[string]any, len(chunk))
+	for key, value := range chunk {
+		if key != "no_data" {
+			base[key] = value
+		}
+	}
+	base["no_data"] = []map[string]any{}
+	baseSize, err := statsWireSize(base)
+	if err != nil {
+		return nil, fmt.Errorf("encode stats snapshot fragment: %w", err)
+	}
+	const fragmentMetadataReserve = 32
+	available := statsSnapshotChunkMaxBytes - baseSize - fragmentMetadataReserve
+	if available <= 2 {
+		return nil, errors.New("stats snapshot bucket leaves no room for no-data fragments")
+	}
+	fragments := make([]map[string]any, 0, 2)
+	current := make([]map[string]any, 0)
+	currentBytes := 2
+	flush := func() {
+		fragment := make(map[string]any, len(base)+1)
+		for key, value := range base {
+			fragment[key] = value
+		}
+		fragment["no_data"] = current
+		fragments = append(fragments, fragment)
+		current = make([]map[string]any, 0)
+		currentBytes = 2
+	}
+	for _, span := range spans {
+		spanSize, marshalErr := statsWireSize(span)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("encode stats no-data span: %w", marshalErr)
+		}
+		itemBytes := spanSize
+		if len(current) > 0 {
+			itemBytes++
+		}
+		if currentBytes+itemBytes > available {
+			flush()
+			itemBytes = spanSize
+		}
+		if currentBytes+itemBytes > available {
+			return nil, errors.New("one stats no-data span exceeds the transport limit")
+		}
+		current = append(current, span)
+		currentBytes += itemBytes
+	}
+	if len(current) > 0 || len(fragments) == 0 {
+		flush()
+	}
+	return fragments, nil
 }
 
 func snapshotChunkWire(full map[string]any, index, count int) (map[string]any, error) {
@@ -1549,23 +2026,6 @@ func wireNoDataMap(value any) map[string]map[string]any {
 		result[key] = raw
 	}
 	return result
-}
-
-func deltaWire(snapshot stats.StatsSnapshot, query statsQuery) map[string]any {
-	wire := snapshotWire(snapshot, query)
-	return map[string]any{
-		"protocol_version":      statsWireVersion,
-		"range_seconds":         query.rangeSeconds,
-		"resolution_seconds":    query.resolution,
-		"source_generation":     snapshot.SourceGeneration,
-		"base_cache_generation": query.afterCacheGeneration,
-		"cache_generation":      snapshot.CacheGeneration,
-		"revision":              wireRevision(wire),
-		"buckets":               wire["buckets"],
-		"no_data":               wire["no_data"],
-		"tombstones":            []any{},
-		"cost_report":           wire["cost_report"],
-	}
 }
 
 func wireRevision(wire map[string]any) any {
@@ -2311,40 +2771,28 @@ func (s *server) statsStream(w http.ResponseWriter, r *http.Request) {
 		requestedResolution = "AUTO"
 	}
 	notModified := query.sinceGeneration > 0 && snapshot.CacheGeneration <= query.sinceGeneration
-	var snapshotPayload, seedPayload map[string]any
+	var snapshotPayloads []map[string]any
 	chunkCount := 1
-	if notModified {
-		// The browser already owns this immutable generation. Still seed the
-		// server-side predecessor with the complete body so the next delta is
-		// minimal after a reconnect that skipped the snapshot.
-		seedPayload = snapshotWire(snapshot, query)
-	} else {
+	if !notModified {
 		var payloadErr error
-		snapshotPayload, seedPayload, chunkCount, payloadErr = streamSnapshotPayloads(snapshot, query)
+		snapshotPayloads, payloadErr = snapshotPayloadsForQuery(snapshot, query)
 		if payloadErr != nil {
 			streamWriter.write("unavailable", statsError(payloadErr.Error()))
 			return
 		}
+		chunkCount = len(snapshotPayloads)
 	}
 	streamWriter.write("ack", map[string]any{"cache_generation": snapshot.CacheGeneration, "chunk_count": chunkCount, "not_modified": notModified, "range_seconds": query.rangeSeconds, "requested_resolution": requestedResolution, "resolution_seconds": query.resolution})
-	s.seedStatsDeltaGeneration(statsDeltaKey{rangeSeconds: query.rangeSeconds, resolution: query.resolution}, snapshot.CacheGeneration, seedPayload, 0)
+	s.statsDeliveryRevision(statsDeltaKey{rangeSeconds: query.rangeSeconds, resolution: query.resolution}, snapshot.CacheGeneration, true)
 	if !notModified {
-		streamWriter.write("snapshot", snapshotPayload)
-		for index := 1; index < chunkCount; index++ {
-			chunkQuery := query
-			chunkQuery.chunkIndex = index
-			chunkQuery.chunkGeneration = snapshot.CacheGeneration
-			chunkQuery.hasChunkIndex = true
-			chunk, _, chunkErr := snapshotPayloadForQuery(snapshot, chunkQuery)
-			if chunkErr != nil {
-				streamWriter.write("unavailable", statsError(chunkErr.Error()))
-				return
-			}
+		for index, chunk := range snapshotPayloads {
 			streamWriter.write("snapshot", chunk)
+			snapshotPayloads[index] = nil
 		}
 	}
 	streamWriter.write("ready", map[string]any{"cache_generation": snapshot.CacheGeneration, "revision": 0})
 	cacheGeneration := snapshot.CacheGeneration
+	s.writeStatsRuntimeEvent(streamWriter, cacheGeneration)
 	// The initial ready frame establishes revision zero for this cache cursor.
 	// Cache generations and delivery revisions are independent: a generation can
 	// be assigned a later revision, and using the generation here causes the first
@@ -2367,6 +2815,7 @@ func (s *server) statsStream(w http.ResponseWriter, r *http.Request) {
 				// the browser's liveness owner consumes only this event. A separate
 				// heartbeat event makes the stream appear stalled after three ticks.
 				streamWriter.write("ready", map[string]any{"cache_generation": cacheGeneration, "revision": revision})
+				s.writeStatsRuntimeEvent(streamWriter, cacheGeneration)
 				continue
 			}
 		} else {
@@ -2376,68 +2825,36 @@ func (s *server) statsStream(w http.ResponseWriter, r *http.Request) {
 			case <-ticker.C:
 			}
 		}
-		deltaRequest := r.Clone(r.Context())
-		values := deltaRequest.URL.Query()
-		values.Del("resolution")
-		values.Del("since_generation")
-		values.Set("resolution_seconds", strconv.Itoa(query.resolution))
-		values.Set("after_cache_generation", strconv.FormatInt(cacheGeneration, 10))
-		values.Set("after_revision", strconv.FormatInt(revision, 10))
-		deltaRequest.URL.RawQuery = values.Encode()
-		var deltaResponse bytes.Buffer
-		deltaRecorder := &bufferResponseWriter{header: make(http.Header), body: &deltaResponse}
-		s.statsDelta(deltaRecorder, deltaRequest)
-		if deltaRecorder.status == http.StatusNotModified {
+		deltaQuery := query
+		deltaQuery.afterCacheGeneration, deltaQuery.afterRevision = cacheGeneration, revision
+		result := s.statsDeltaOperation(r.Context(), deltaQuery)
+		switch result.status {
+		case http.StatusNotModified:
 			streamWriter.write("ready", map[string]any{"cache_generation": cacheGeneration, "revision": revision})
 			continue
-		}
-		if deltaRecorder.status == http.StatusAccepted {
-			var pending map[string]any
-			if err := json.Unmarshal(deltaResponse.Bytes(), &pending); err == nil {
-				streamWriter.write("pending", pending)
-				continue
-			}
-		}
-		if deltaRecorder.status == http.StatusConflict {
-			var repair map[string]any
-			if err := json.Unmarshal(deltaResponse.Bytes(), &repair); err == nil {
-				// The internal delta call uses the same HTTP handler as external
-				// clients, so its conflict is canonically wrapped. SSE keeps
-				// Python's legacy repair event shape for the browser instead of
-				// leaking an HTTP failure envelope inside the stream.
-				if repair["state"] == "failed" {
-					legacy := map[string]any{
-						"status": "repair_required", "protocol_version": statsWireVersion,
-						"reason": "delta cursor is outside the retained exact chain",
-					}
-					if value, ok := repair["cache_generation"]; ok {
-						legacy["cache_generation"] = value
-					}
-					repair = legacy
-				}
-				streamWriter.write("repair", repair)
-				return
-			}
-		}
-		if deltaRecorder.status != http.StatusOK {
+		case http.StatusAccepted:
+			streamWriter.write("pending", result.payload)
+			continue
+		case http.StatusConflict:
+			streamWriter.write("repair", result.payload)
+			return
+		case http.StatusOK:
+			streamWriter.write("delta", result.payload)
+			cacheGeneration, revision = result.generation, result.revision
+		default:
 			streamWriter.write("unavailable", statsError("stats delta unavailable"))
 			return
 		}
-		var payload map[string]any
-		if err := json.Unmarshal(deltaResponse.Bytes(), &payload); err != nil {
-			streamWriter.write("unavailable", statsError("stats delta malformed"))
-			return
-		}
-		streamWriter.write("delta", payload)
-		cacheGeneration = int64(payload["cache_generation"].(float64))
-		revision = int64(payload["revision"].(float64))
+		s.writeStatsRuntimeEvent(streamWriter, cacheGeneration)
 	}
 }
 
-type bufferResponseWriter struct {
-	header http.Header
-	body   *bytes.Buffer
-	status int
+func (s *server) writeStatsRuntimeEvent(stream *statsSSEWriter, cacheGeneration int64) {
+	load := s.statsRuntimeLoad()
+	if len(load) == 0 {
+		return
+	}
+	stream.write("runtime", map[string]any{"cache_generation": cacheGeneration, "load": load})
 }
 
 // statsSSEWriter assigns a process-relative monotonic millisecond id to every
@@ -2455,15 +2872,6 @@ func (s *statsSSEWriter) write(event string, payload any) {
 	}
 	s.lastID = id
 	_ = s.stream.writeWithID(strconv.FormatInt(id, 10), event, payload)
-}
-
-func (w *bufferResponseWriter) Header() http.Header    { return w.header }
-func (w *bufferResponseWriter) WriteHeader(status int) { w.status = status }
-func (w *bufferResponseWriter) Write(data []byte) (int, error) {
-	if w.status == 0 {
-		w.status = http.StatusOK
-	}
-	return w.body.Write(data)
 }
 
 func (s *server) pricingCatalog(w http.ResponseWriter, r *http.Request) {
@@ -2612,7 +3020,7 @@ func (s *server) ready(w http.ResponseWriter, r *http.Request) {
 	if serviceState.LastError != "" {
 		failures = append(failures, "stats service refresh failed: "+serviceState.LastError)
 	}
-	response := map[string]any{"ready": ready, "source_generation": serviceState.SourceGeneration, "cache_generation": serviceState.CacheGeneration, "pending_cells": maxInt(pending, 0), "pending_cell_details": pendingCells, "lifecycle_runs": counters.Runs, "lifecycle_publications": counters.Publications, "lifecycle_repairs": counters.Repairs, "lifecycle_errors": counters.Errors, "lifecycle_background_backfill_deferrals": counters.BackgroundBackfillDeferrals, "lifecycle_selected_cells": counters.SelectedCells, "lifecycle_materialized_buckets": counters.MaterializedBuckets, "lifecycle_fact_rows_read": counters.FactRowsRead, "lifecycle_decoded_bytes": counters.DecodedBytes, "lifecycle_selection_duration_ms": counters.SelectionDuration.Seconds() * 1000, "lifecycle_materialization_duration_ms": counters.MaterializationDuration.Seconds() * 1000, "lifecycle_by_resolution": counters.ByResolution, "lifecycle_last_run_succeeded": counters.LastRunSucceeded, "lifecycle_last_run_error": counters.LastRunError, "migration_state": "ready", "materializer_state": func() string {
+	response := map[string]any{"ready": ready, "source_generation": serviceState.SourceGeneration, "cache_generation": serviceState.CacheGeneration, "pending_cells": maxInt(pending, 0), "pending_cell_details": pendingCells, "startup_preparation": statsStartupPreparationWire(counters.StartupPreparation), "lifecycle_runs": counters.Runs, "lifecycle_publications": counters.Publications, "lifecycle_repairs": counters.Repairs, "lifecycle_errors": counters.Errors, "lifecycle_background_backfill_deferrals": counters.BackgroundBackfillDeferrals, "lifecycle_selected_cells": counters.SelectedCells, "lifecycle_materialized_buckets": counters.MaterializedBuckets, "lifecycle_fact_rows_read": counters.FactRowsRead, "lifecycle_decoded_bytes": counters.DecodedBytes, "lifecycle_selection_duration_ms": counters.SelectionDuration.Seconds() * 1000, "lifecycle_materialization_duration_ms": counters.MaterializationDuration.Seconds() * 1000, "lifecycle_by_resolution": counters.ByResolution, "lifecycle_last_run_succeeded": counters.LastRunSucceeded, "lifecycle_last_run_error": counters.LastRunError, "migration_state": "ready", "materializer_state": func() string {
 		if counters.Runs > 0 && !counters.LastRunSucceeded {
 			return "error"
 		}

@@ -1,9 +1,13 @@
 package stats
 
 import (
+	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 )
+
+var errSyntheticTmuxSocketUnset = errors.New("synthetic tmux socket is not configured")
 
 // TmuxNoServerError reports the normal result of querying a socket whose tmux
 // server has not been started. That is an empty machine roster, not a broken
@@ -25,4 +29,36 @@ func tmuxCommandArgs(args ...string) []string {
 		command = append(command, "-S", socket)
 	}
 	return append(command, args...)
+}
+
+// syntheticTmuxSocketConfigured is a separate admission check from
+// tmuxCommandArgs. Production adapters intentionally use the machine-wide
+// default server when no socket is configured; synthetic adapters must fail
+// closed instead of accidentally reading that server.
+func syntheticTmuxSocketConfigured() bool {
+	socket := strings.TrimSpace(os.Getenv("YOLOMUX_TMUX_SOCKET"))
+	if socket == "" {
+		return false
+	}
+	if os.Getenv("YOLOMUX_STATS_SYNTHETIC") != "1" {
+		return true
+	}
+	root := strings.TrimSpace(os.Getenv("YOLOMUX_STATS_SYNTHETIC_ROOT"))
+	if root == "" {
+		return false
+	}
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	socket, err = filepath.Abs(socket)
+	if err != nil || filepath.Clean(socket) != filepath.Join(filepath.Clean(root), "tmux.sock") {
+		return false
+	}
+	if info, err := os.Lstat(socket); err == nil && info.Mode()&os.ModeSocket == 0 {
+		return false
+	} else if err != nil && !os.IsNotExist(err) {
+		return false
+	}
+	return true
 }

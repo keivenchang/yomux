@@ -20,12 +20,48 @@ func finite(value float64) bool { return !math.IsNaN(value) && !math.IsInf(value
 
 const maxHostCommandOutput = 8 << 20
 
+// NewHostCommand creates a host collector command with the deterministic C
+// locale required by parsers of ps output.
+func NewHostCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
+	command := exec.CommandContext(ctx, name, args...)
+	if filepath.Base(name) == "ps" {
+		command.Env = hostCommandEnvironment("LC_ALL", "C")
+	}
+	return command
+}
+
+func hostCommandEnvironment(name, value string) []string {
+	environment := os.Environ()
+	result := make([]string, 0, len(environment)+1)
+	set := false
+	for _, entry := range environment {
+		if strings.HasPrefix(entry, name+"=") {
+			if !set {
+				result = append(result, name+"="+value)
+				set = true
+			}
+			continue
+		}
+		result = append(result, entry)
+	}
+	if !set {
+		result = append(result, name+"="+value)
+	}
+	return result
+}
+
 // LinuxHostSources adapts bounded Linux files and optional GPU commands to the
 // collector boundary. The parser functions remain pure and are tested with
 // synthetic inputs in host_collectors_test.go.
 type LinuxHostSources struct {
-	procRoot          string
-	gpuRoot           string
+	procRoot string
+	gpuRoot  string
+	// processPID is the server-owned process whose CPU counter must remain
+	// measurable even when a host-wide census is too large to scan within the
+	// collector budget. It is zero for injected/test sources that do not have an
+	// owner fallback.
+	processPID        int
+	logicalCPUs       int
 	readFile          func(string) ([]byte, error)
 	readDir           func(string) ([]string, error)
 	readLink          func(string) (string, error)
@@ -40,6 +76,8 @@ type LinuxHostSources struct {
 }
 
 const linuxProcessCensusCacheTTL = 500 * time.Millisecond
+
+const linuxClockTickQueryTimeout = 500 * time.Millisecond
 
 // DarwinHostSources adapts bounded macOS command output to the common host
 // collector boundary. Commands are injected so captured plist/proc fixtures
@@ -59,14 +97,112 @@ func NewHostSources() HostSources {
 	return &LinuxHostSources{
 		procRoot:    "/proc",
 		gpuRoot:     "/sys/class/drm",
+		processPID:  os.Getpid(),
+		logicalCPUs: linuxSystemLogicalCPUs(boundedOSReadFile),
 		readFile:    boundedOSReadFile,
 		readDir:     readDirNames,
 		readLink:    os.Readlink,
 		run:         runBoundedCommand,
 		pageSize:    uint64(os.Getpagesize()),
-		clockTick:   100,
+		clockTick:   linuxClockTickRate(runBoundedCommand),
 		binaryCache: make(map[string]string),
 	}
+}
+
+func linuxClockTickRate(run func(context.Context, []string) (CommandOutput, error)) uint64 {
+	if run == nil {
+		return 0
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), linuxClockTickQueryTimeout)
+	defer cancel()
+	result, err := run(ctx, []string{"getconf", "CLK_TCK"})
+	if err != nil || result.ExitCode != 0 || len(result.Stdout) > 64 {
+		return 0
+	}
+	rate, err := strconv.ParseUint(strings.TrimSpace(string(result.Stdout)), 10, 64)
+	if err != nil || rate == 0 {
+		return 0
+	}
+	return rate
+}
+
+func (s *LinuxHostSources) SystemLogicalCPUs() int {
+	if s == nil {
+		return 0
+	}
+	return s.logicalCPUs
+}
+
+// ProcessTicksPerSecond reports the measured Linux /proc CPU counter unit.
+// Zero means getconf could not provide the unit and CPU rates must stay unavailable.
+func (s *LinuxHostSources) ProcessTicksPerSecond() uint64 {
+	if s == nil {
+		return 0
+	}
+	return s.clockTick
+}
+
+func linuxSystemLogicalCPUs(readFile func(string) ([]byte, error)) int {
+	if readFile == nil {
+		return 0
+	}
+	data, err := boundedRead(readFile, "/sys/devices/system/cpu/online")
+	if err != nil {
+		return 0
+	}
+	return ParseLinuxOnlineCPUCount(data)
+}
+
+// ParseLinuxOnlineCPUCount counts a synthetic or captured Linux CPU-list file
+// such as "0-3,5". Malformed and overlapping ranges return zero so callers do
+// not publish grouped CPU values with a guessed denominator.
+func ParseLinuxOnlineCPUCount(data []byte) int {
+	const maxLogicalCPUs = 1 << 16 // reject corrupt ranges before expanding them
+	value := strings.TrimSpace(string(data))
+	if value == "" {
+		return 0
+	}
+	count := 0
+	seen := make(map[int]struct{})
+	for _, item := range strings.Split(value, ",") {
+		if item == "" {
+			return 0
+		}
+		bounds := strings.Split(item, "-")
+		if len(bounds) > 2 {
+			return 0
+		}
+		first, err := strconv.Atoi(bounds[0])
+		if err != nil || first < 0 {
+			return 0
+		}
+		last := first
+		if len(bounds) == 2 {
+			last, err = strconv.Atoi(bounds[1])
+			if err != nil || last < first {
+				return 0
+			}
+		}
+		rangeOffset := last - first
+		if rangeOffset >= maxLogicalCPUs {
+			return 0
+		}
+		rangeCount := rangeOffset + 1
+		if rangeCount > maxLogicalCPUs-count {
+			return 0
+		}
+		for cpu := first; ; cpu++ {
+			if _, exists := seen[cpu]; exists || count == int(^uint(0)>>1) {
+				return 0
+			}
+			seen[cpu] = struct{}{}
+			count++
+			if cpu == last {
+				break
+			}
+		}
+	}
+	return count
 }
 
 func (s *LinuxHostSources) processCensus() ([]ProcessCensusRow, bool) {
@@ -239,9 +375,21 @@ func (s *LinuxHostSources) CPU(ctx context.Context) (CPUSnapshot, error) {
 	if !ok {
 		return CPUSnapshot{}, errors.New("invalid Linux CPU counters")
 	}
-	rows, ok := s.processCensus()
-	if !ok {
-		return CPUSnapshot{}, errors.New("Linux process census unavailable")
+	if s.clockTick == 0 {
+		// Keep host CPU available, but never publish process rates using a
+		// guessed tick frequency when getconf could not establish the unit.
+		return CPUSnapshot{Host: host, ProcessCensusIncomplete: true}, nil
+	}
+	rows, censusComplete, censusAvailable := s.processCensusWithOwnerFallback()
+	if !censusAvailable {
+		// A large or transiently unreadable /proc must not erase the valid host
+		// CPU sample. Recover only the owned process, which is enough for the
+		// Go process series and keeps the top-process view honest: it contains
+		// one measured owner, not an invented partial census.
+		rows = s.ownerProcessCensusRow()
+		if len(rows) == 0 {
+			return CPUSnapshot{}, errors.New("Linux process census unavailable")
+		}
 	}
 	processes := make(map[string]CPUProcessCounters, len(rows))
 	for _, row := range rows {
@@ -254,7 +402,57 @@ func (s *LinuxHostSources) CPU(ctx context.Context) (CPUSnapshot, error) {
 	if len(rows) > 0 && len(processes) == 0 {
 		return CPUSnapshot{}, errors.New("invalid Linux process census")
 	}
-	return CPUSnapshot{Host: host, Processes: processes, ProcessTicksPerSecond: s.clockTick}, nil
+	return CPUSnapshot{
+		Host: host, Processes: processes, ProcessTicksPerSecond: s.clockTick,
+		ProcessCensusIncomplete: !censusComplete,
+	}, nil
+}
+
+func (s *LinuxHostSources) ownerProcessCensusRow() []ProcessCensusRow {
+	if s == nil || s.processPID <= 0 || s.readFile == nil {
+		return nil
+	}
+	name := strconv.Itoa(s.processPID)
+	data, err := boundedRead(s.readFile, filepath.Join(s.procRoot, name, "stat"))
+	if err != nil {
+		return nil
+	}
+	executable := ""
+	if s.readLink != nil {
+		executable, _ = s.readLink(filepath.Join(s.procRoot, name, "exe"))
+	}
+	row, ok := ParseLinuxProcessStat(string(data), executable, s.pageSize, s.clockTick)
+	if !ok || row.PID != s.processPID {
+		return nil
+	}
+	return []ProcessCensusRow{row}
+}
+
+// processCensusWithOwnerFallback keeps the server-owned process visible to
+// both CPU and memory products when a host-wide /proc census is too large or
+// races with process exit. A syntactically valid partial census that omitted
+// the owner is not accepted as complete: publishing it would make the Go
+// process disappear from one family while the host sample remains current.
+func (s *LinuxHostSources) processCensusWithOwnerFallback() ([]ProcessCensusRow, bool, bool) {
+	rows, censusComplete := s.processCensus()
+	if censusComplete && s.processPID > 0 {
+		ownerFound := false
+		for _, row := range rows {
+			if row.PID == s.processPID {
+				ownerFound = true
+				break
+			}
+		}
+		censusComplete = ownerFound
+	}
+	if censusComplete {
+		return rows, true, true
+	}
+	ownerRows := s.ownerProcessCensusRow()
+	if len(ownerRows) == 0 {
+		return nil, false, false
+	}
+	return ownerRows, false, true
 }
 
 func cpuTicks(seconds float64, ticksPerSecond uint64) (uint64, bool) {
@@ -280,7 +478,8 @@ func (s *LinuxHostSources) Memory(ctx context.Context) (MemoryCounters, []Proces
 	if !ok {
 		return MemoryCounters{}, nil, errors.New("invalid Linux memory counters")
 	}
-	rows, _ := s.processCensus()
+	rows, censusComplete, censusAvailable := s.processCensusWithOwnerFallback()
+	memory.ProcessCensusIncomplete = !censusComplete || !censusAvailable
 	return memory, rows, nil
 }
 
@@ -324,13 +523,34 @@ func boundedOSReadFile(name string) ([]byte, error) {
 }
 
 func readDirNames(name string) ([]string, error) {
-	entries, err := os.ReadDir(name)
+	return ReadDirNamesBounded(name, maxProcessEntries+1)
+}
+
+// ReadDirNamesBounded reads at most limit entries incrementally. Callers can
+// request their accepted maximum plus one to distinguish complete input from
+// an oversized directory without materializing the whole directory first.
+func ReadDirNamesBounded(name string, limit int) ([]string, error) {
+	if limit <= 0 {
+		return nil, errors.New("directory entry limit must be positive")
+	}
+	directory, err := os.Open(name)
 	if err != nil {
 		return nil, err
 	}
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		names = append(names, entry.Name())
+	defer directory.Close()
+	names := make([]string, 0, limit)
+	for len(names) < limit {
+		batchSize := min(256, limit-len(names))
+		entries, readErr := directory.ReadDir(batchSize)
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		if errors.Is(readErr, io.EOF) {
+			return names, nil
+		}
+		if readErr != nil {
+			return nil, readErr
+		}
 	}
 	return names, nil
 }
@@ -339,7 +559,7 @@ func runBoundedCommand(ctx context.Context, args []string) (CommandOutput, error
 	if len(args) == 0 {
 		return CommandOutput{}, errors.New("empty host command")
 	}
-	command := exec.CommandContext(ctx, args[0], args[1:]...)
+	command := NewHostCommand(ctx, args[0], args[1:]...)
 	stdout := boundedCommandBuffer{limit: maxHostCommandOutput}
 	stderr := boundedCommandBuffer{limit: maxHostCommandOutput}
 	command.Stdout = &stdout

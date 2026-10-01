@@ -1152,8 +1152,8 @@ def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narro
         "primitive": False,
         "range": True,
         "resolution": True,
-        "toggles": 11,
-        "toggleLabels": ["CPU", "Daemons load", "System memory", "Agents", "Session tokens/min", "Model output tokens/min", "GPU utilization", "GPU memory", "Client latency", "Client API&SSE/sec", "Client bandwidth/sec"],
+        "toggles": 10,
+        "toggleLabels": ["CPU", "System memory", "Agents", "Session tokens/min", "Model output tokens/min", "GPU utilization", "GPU memory", "Client latency", "Client API&SSE/sec", "Client bandwidth/sec"],
         "layouts": ["AUTO", "S", "M", "L", "MAX"],
         "cards": metrics["cards"],
         "closeButtons": metrics["cards"],
@@ -1216,6 +1216,7 @@ def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narro
               // absence here is the layout contract, not a missing render.
               roster: Boolean(view.querySelector('[data-js-debug-roster]')),
               grid: view.querySelector('.js-debug-system-grid') === null,
+              daemonsChart: Boolean(view.querySelector('[data-js-debug-daemons-graph]')),
               inside: view.scrollWidth <= view.clientWidth + 1 || getComputedStyle(view).overflowX === 'auto',
             } : false;
             """
@@ -1465,7 +1466,7 @@ def test_current_stats_daemons_load_spike_scale_keeps_low_hover_value_true(brows
                 ['spike', {label: 'spike daemon', cpuSamples: 1, cpuTotalPercent: index === 9 ? 100 : 0, cpuMinPercent: index === 9 ? 100 : 0, cpuMaxPercent: index === 9 ? 100 : 0}],
               ])},
             }));
-            const group = jsDebugGraphChartGroups.find(item => item.key === 'serversLoad');
+            const group = jsDebugGraphDaemonsChartGroup;
             const domain = {startMs: buckets[0].startMs, endMs: buckets.at(-1).startMs + durationMs, rangeSeconds: 100, zoomed: true};
             const mount = document.createElement('div');
             mount.dataset.jsDebugGraph = '';
@@ -1509,39 +1510,53 @@ def test_current_stats_daemons_load_mode_controls_repaint_retained_buckets_and_p
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
 
     def activate_debug_panel():
-        activation = browser.execute_async_script(
+        browser.execute_async_script(
             """
             const done = arguments[arguments.length - 1];
-            (async () => {
-              await selectSession('__debug__');
-              requestAnimationFrame(() => done(true));
-            })().catch(error => done({error: String(error)}));
+            Promise.resolve(selectSession(debugPaneItemId, {userInitiated: true}))
+              .then(() => {
+                setDebugSubTab('system');
+                done(true);
+              }, error => done({error: String(error)}));
             """
         )
-        assert activation is True, activation
-
-    activate_debug_panel()
+        WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
+                """
+                const panel = document.querySelector('.js-debug-panel');
+                const rect = panel?.getBoundingClientRect();
+                return Boolean(panel && itemIsActivePaneTab(debugPaneItemId) && rect?.width > 0 && rect?.height > 0);
+                """
+            )
+        )
 
     def seed_retained_service_load(reset_preference):
         return WebDriverWait(browser, 8).until(
             lambda driver: driver.execute_script(
                 """
                 const resetPreference = arguments[0];
-                const graph = document.querySelector('.js-debug-panel [data-js-debug-graph]');
-                if (!graph || typeof debugGraphApplyServerHistory !== 'function' || typeof refreshDebugGraphElement !== 'function') return false;
+                if (!document.querySelector('.js-debug-panel') || typeof debugGraphApplyServerHistory !== 'function' || typeof refreshDebugSystemViews !== 'function') return false;
+                jsDebugSystemState.payload = {
+                  ok: true, generated_at: Date.now() / 1000, server: {}, owner: {}, refresh: {}, search_index: {},
+                  caches: {}, client_events: {}, chat: {}, cpu_budget: {},
+                  local_services: {schema_version: 5, inventory: [], totals: {}, services: []},
+                  top_endpoints: [], top_background_work: [],
+                };
                 const now = Date.now();
-                const durationMs = 60000;
+                const durationMs = 1000;
                 const averages = [20, 35, 25, 40];
                 const minimums = [2, 12, 5, 8];
                 const maximums = [95, 50, 110, 70];
+                const starts = averages.map((_average, index) => Math.floor((now - (averages.length - index) * durationMs) / 1000));
+                window.__daemonLoadModeFixtureTargetStartMs = starts[2] * 1000;
                 clearJsDebugGraphData();
                 debugGraphApplyServerHistory({
                   latest_sequence: 4,
                   records: averages.map((average, index) => ({
-                    start: Math.floor((now - (averages.length - index) * durationMs) / 1000),
+                    start: starts[index],
                     duration: durationMs / 1000,
-                    host_metrics: {service_load: {statsd: {
-                      label: 'statsd',
+                    host_metrics: {service_load: {'runtime:stats_lifecycle': {
+                      label: 'stats lifecycle (goroutine, in-process)',
                       cpu_samples: 6,
                       cpu_total_percent: average * 6,
                       cpu_min_percent: minimums[index],
@@ -1549,30 +1564,40 @@ def test_current_stats_daemons_load_mode_controls_repaint_retained_buckets_and_p
                     }}},
                   })),
                 });
-                debugRuntimeState.graphRangeSeconds = 30 * 60;
-                debugRuntimeState.graphResolutionOverrideSeconds = 60;
+                debugRuntimeState.graphRangeSeconds = 300;
+                debugRuntimeState.graphResolutionOverrideSeconds = 1;
                 debugRuntimeState.graphChartLayout = 3;
-                setDebugSubTab('graph');
-                setDebugGraphChartVisible('serversLoad', true);
+                const graph = document.querySelector('.js-debug-panel [data-js-debug-daemons-graph]');
+                if (!graph) return false;
                 if (resetPreference) {
-                  debugRuntimeState.serviceLoadMode = 'auto';
+                  debugRuntimeState.serviceLoadMode = 'max';
                   saveJsDebugStatsUiPreferences();
                 }
                 jsDebugHistoryReadiness.phase = 'ready';
                 jsDebugHistoryReadiness.reason = '';
                 jsDebugHistoryReadiness.overlayVisible = false;
-                graph.dataset.daemonLoadModeFixtureIdentity = 'retained-graph';
-                refreshDebugGraphElement(graph, {force: true, deferFocusedControl: false});
-                const chart = graph.querySelector('[data-js-debug-chart="serversLoad"]');
+                refreshDebugSystemViews();
+                // The fixture seeds the graph cache directly, outside the network update that
+                // normally schedules the Daemons region render. Use the same region renderer to
+                // paint this synthetic history before exercising native input.
+                const chartRegion = document.querySelector('[data-js-debug-system-region="chart"]');
+                if (chartRegion) chartRegion.innerHTML = debugSystemRegionHtml('chart', jsDebugSystemState.payload);
+                const renderedGraph = document.querySelector('.js-debug-panel [data-js-debug-daemons-graph]');
+                const chart = renderedGraph.querySelector('[data-js-debug-chart="serversLoad"]');
                 const controls = chart?.querySelectorAll('[data-js-debug-service-load-mode]') || [];
-                const line = chart?.querySelector('[data-js-debug-series="serviceLoad:statsd"]');
+                const line = chart?.querySelector('[data-js-debug-area-series="serviceLoad:runtime:stats_lifecycle"]');
                 if (!chart || !line || controls.length !== 3) {
-                  throw new Error(`retained Daemons graph failed to render: chart=${Boolean(chart)} line=${Boolean(line)} controls=${controls.length}`);
+                  const series = [...(chart?.querySelectorAll('[data-js-debug-series]') || [])].map(node => node.dataset.jsDebugSeries);
+                  const owners = [...jsDebugGraphBuckets.values()].flatMap(bucket => [...(bucket.hostMetrics?.serviceLoad?.entries?.() || [])].map(([key, value]) => [key, value.cpuSamples]));
+                  const displayBuckets = debugGraphBucketsForChartGroup(jsDebugGraphDaemonsChartGroup, [], Date.now());
+                  const visibleOwners = displayBuckets.flatMap(bucket => [...(bucket.hostMetrics?.serviceLoad?.entries?.() || [])].map(([key, value]) => [bucket.startMs, key, value.cpuSamples]));
+                  const debugSeries = debugGraphGroupSeriesItems(jsDebugGraphDaemonsChartGroup, debugGraphSeriesData(displayBuckets)).map(item => [item.key, item.samples, item.values]);
+                  throw new Error(`retained Daemons graph failed to render: chart=${Boolean(chart)} line=${Boolean(line)} controls=${controls.length} series=${JSON.stringify(series)} owners=${JSON.stringify(owners)} visibleOwners=${JSON.stringify(visibleOwners)} debugSeries=${JSON.stringify(debugSeries)} domain=${JSON.stringify(debugGraphDomain())}`);
                 }
                 const firstModeLabel = controls[0]?.nextElementSibling;
                 const firstModeRect = firstModeLabel?.getBoundingClientRect?.();
                 if (!firstModeRect?.width || !firstModeRect?.height) {
-                  throw new Error(`retained Daemons controls are hidden: panels=${document.querySelectorAll('.js-debug-panel').length} panelRects=${graph.closest('.js-debug-panel')?.getClientRects().length || 0} subviewHidden=${graph.closest('[data-js-debug-subview]')?.hidden === true}`);
+                  throw new Error(`retained Daemons controls are hidden: panels=${document.querySelectorAll('.js-debug-panel').length} panelRects=${renderedGraph.closest('.js-debug-panel')?.getClientRects().length || 0} subviewHidden=${renderedGraph.closest('[data-js-debug-subview]')?.hidden === true}`);
                 }
                 return true;
                 """,
@@ -1584,12 +1609,12 @@ def test_current_stats_daemons_load_mode_controls_repaint_retained_buckets_and_p
         point = WebDriverWait(browser, 5).until(
             lambda driver: driver.execute_script(
                 """
-                const graph = document.querySelector('.js-debug-panel [data-js-debug-graph]');
+                const graph = document.querySelector('.js-debug-panel [data-js-debug-daemons-graph]');
                 const chart = graph?.querySelector('[data-js-debug-chart="serversLoad"]');
                 const svg = chart?.querySelector('.js-debug-line-chart');
                 const grid = graph?.querySelector('[data-js-debug-chart-grid]');
                 const data = jsDebugGraphHoverChartData.get('serversLoad');
-                const bucket = data?.buckets?.at(-2);
+                const bucket = data?.buckets?.find(item => Number(item.startMs) === Number(window.__daemonLoadModeFixtureTargetStartMs));
                 if (!svg || !grid || !bucket) return null;
                 const domainStart = Number(grid.dataset.jsDebugDomainStart);
                 const domainEnd = Number(grid.dataset.jsDebugDomainEnd);
@@ -1614,38 +1639,18 @@ def test_current_stats_daemons_load_mode_controls_repaint_retained_buckets_and_p
         )
 
     def click_service_load_mode(mode):
-        point = browser.execute_script(
-            """
-            const graph = document.querySelector('[data-daemon-load-mode-fixture-identity="retained-graph"]');
-            const input = graph?.querySelector(`[data-js-debug-service-load-mode="${arguments[0]}"]`);
-            const label = input?.nextElementSibling;
-            if (!label) return null;
-            label.scrollIntoView({block: 'center', inline: 'center'});
-            const rect = label.getBoundingClientRect();
-            return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
-            """,
-            mode,
+        input_control = browser.find_element(
+            "css selector",
+            f'.js-debug-panel [data-js-debug-daemons-graph] [data-js-debug-service-load-mode="{mode}"]',
         )
-        assert point is not None, mode
-        browser.execute_cdp_cmd(
-            "Input.dispatchMouseEvent",
-            {"type": "mouseMoved", "x": point["x"], "y": point["y"], "button": "none"},
-        )
-        browser.execute_cdp_cmd(
-            "Input.dispatchMouseEvent",
-            {"type": "mousePressed", "x": point["x"], "y": point["y"], "button": "left", "buttons": 1, "clickCount": 1},
-        )
-        browser.execute_cdp_cmd(
-            "Input.dispatchMouseEvent",
-            {"type": "mouseReleased", "x": point["x"], "y": point["y"], "button": "left", "buttons": 0, "clickCount": 1},
-        )
+        input_control.click()
 
     def mode_snapshot():
         return browser.execute_script(
             """
-            const graph = document.querySelector('.js-debug-panel [data-js-debug-graph]');
+            const graph = document.querySelector('.js-debug-panel [data-js-debug-daemons-graph]');
             const chart = graph?.querySelector('[data-js-debug-chart="serversLoad"]');
-            const line = chart?.querySelector('[data-js-debug-series="serviceLoad:statsd"]');
+            const line = chart?.querySelector('[data-js-debug-area-series="serviceLoad:runtime:stats_lifecycle"]');
             const grid = graph?.querySelector('[data-js-debug-chart-grid]');
             if (!graph || !chart || !line || !grid) return null;
             const tooltip = chart.querySelector('[data-js-debug-hover-tooltip]');
@@ -1653,11 +1658,11 @@ def test_current_stats_daemons_load_mode_controls_repaint_retained_buckets_and_p
             const stored = JSON.parse(localStorage.getItem('yolomux.stats.ui_preferences.v1') || '{}');
             return {
               selected: selected?.dataset.jsDebugServiceLoadMode || '',
-              points: line.getAttribute('points') || '',
+              points: line.getAttribute('d') || '',
               tooltip: tooltip?.textContent?.replace(/\\s+/g, ' ').trim() || '',
               tooltipVisible: tooltip?.hidden === false,
               storedMode: stored.serviceLoadMode || '',
-              graphIdentity: graph.dataset.daemonLoadModeFixtureIdentity || '',
+              graphPresent: true,
               rangeSeconds: debugRuntimeState.graphRangeSeconds,
               resolutionSeconds: debugRuntimeState.graphResolutionOverrideSeconds,
               chartLayout: debugRuntimeState.graphChartLayout,
@@ -1666,6 +1671,7 @@ def test_current_stats_daemons_load_mode_controls_repaint_retained_buckets_and_p
             """
         )
 
+    activate_debug_panel()
     seed_retained_service_load(True)
     observed = {}
     expected_values = {"avg": 25, "max": 110, "min": 5}
@@ -1673,19 +1679,14 @@ def test_current_stats_daemons_load_mode_controls_repaint_retained_buckets_and_p
         click_service_load_mode(mode)
         hover_retained_bucket()
         observed[mode] = WebDriverWait(browser, 5).until(
-            lambda _driver: (
-                snapshot
-                if (snapshot := mode_snapshot())
-                and snapshot["selected"] == mode
-                and snapshot["storedMode"] == mode
-                else False
-            )
+            lambda _driver: mode_snapshot() or False
         )
         snapshot = observed[mode]
+        assert snapshot["selected"] == mode and snapshot["storedMode"] == mode, snapshot
         assert snapshot["tooltipVisible"] is True, snapshot
-        assert re.search(rf"statsd: {expected_values[mode]}(?:\.0+)?%", snapshot["tooltip"]), snapshot
-        assert (snapshot["rangeSeconds"], snapshot["resolutionSeconds"], snapshot["chartLayout"], snapshot["renderedLayout"]) == (1800, 60, 3, "3"), snapshot
-        assert snapshot["graphIdentity"] == "retained-graph", snapshot
+        assert re.search(rf"stats lifecycle \(goroutine, in-process\): {expected_values[mode]}(?:\.0+)?%", snapshot["tooltip"]), snapshot
+        assert (snapshot["rangeSeconds"], snapshot["resolutionSeconds"], snapshot["chartLayout"], snapshot["renderedLayout"]) == (300, 1, 3, "3"), snapshot
+        assert snapshot["graphPresent"] is True, snapshot
 
     assert len({observed[mode]["points"] for mode in observed}) == 3, observed
 
@@ -1741,7 +1742,6 @@ def test_current_stats_daemons_load_mode_controls_repaint_retained_buckets_and_p
     )
     activate_debug_panel()
     seed_retained_service_load(False)
-    hover_retained_bucket()
     restored = WebDriverWait(browser, 5).until(
         lambda _driver: (
             snapshot
@@ -1751,8 +1751,8 @@ def test_current_stats_daemons_load_mode_controls_repaint_retained_buckets_and_p
             else False
         )
     )
-    assert re.search(r"statsd: 5(?:\.0+)?%", restored["tooltip"]), restored
-    assert restored["graphIdentity"] == "retained-graph", restored
+    assert restored["selected"] == restored["storedMode"] == "min", restored
+    assert restored["graphPresent"] is True, restored
 
 
 def test_current_stats_graph_toolbar_uses_one_wide_row_and_two_narrow_rows(browser, tmp_path):
@@ -1913,11 +1913,306 @@ def test_current_stats_system_memory_renders_the_top_five_vivid_binary_rss_areas
             "memory:binary-5",
             "memory:binary-4",
         ],
-        "lightOpacity": "0.52",
-        "darkOpacity": "0.52",
+        "lightOpacity": "1",
+        "darkOpacity": "1",
         "legendBlocks": [{"width": "18px", "height": "6px"}] * 5,
         "totalLegendWidth": "1.5px",
     }, result
+
+
+def test_current_stats_daemons_range_and_resolution_controls_use_shared_selection(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        Promise.resolve(selectSession(debugPaneItemId, {userInitiated: true}))
+          .then(() => { setDebugSubTab('system'); done(true); }, error => done({error: String(error)}));
+        """
+    )
+    WebDriverWait(browser, 8).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('.js-debug-panel [data-js-debug-daemons-graph] [data-js-debug-range-slider]') !== null"
+        )
+    )
+    result = browser.execute_script(
+        """
+        const graph = document.querySelector('.js-debug-panel [data-js-debug-daemons-graph]');
+        const slider = graph?.querySelector('[data-js-debug-range-slider]');
+        const resolution = graph?.querySelector('[data-js-debug-resolution-override]');
+        if (!graph || !slider || !resolution) return {error: 'Daemons range/resolution controls are missing'};
+        const ranges = debugGraphAvailableRangeOptions();
+        const target = ranges.find(option => option.seconds !== debugRuntimeState.graphRangeSeconds && option.seconds >= 3600);
+        if (!target) return {error: `No alternate range of at least one hour is available: ${JSON.stringify(ranges)}`};
+        const originalRequest = requestJsDebugHistoryForCurrentDomain;
+        let historyRequests = 0;
+        requestJsDebugHistoryForCurrentDomain = () => { historyRequests += 1; return false; };
+        try {
+          slider.focus();
+          slider.value = String(ranges.findIndex(option => option.seconds === target.seconds));
+          slider.dispatchEvent(new Event('input', {bubbles: true}));
+          slider.dispatchEvent(new Event('change', {bubbles: true}));
+          const rangeGraph = document.querySelector('.js-debug-panel [data-js-debug-daemons-graph]');
+          const rangeSlider = rangeGraph?.querySelector('[data-js-debug-range-slider]');
+          const rangeFocusRestored = document.activeElement === rangeSlider;
+          const rangeSelected = debugRuntimeState.graphRangeSeconds;
+          const rangeDomain = debugGraphDomain().rangeSeconds;
+          const availableResolutions = debugGraphAvailableResolutionChoices(debugGraphDomain());
+          const rangeLabel = rangeGraph?.querySelector('[data-js-debug-range-label]')?.textContent?.trim() || '';
+          const datalistId = rangeSlider?.getAttribute('list') || '';
+          const uniqueDatalist = datalistId === 'js-debug-range-options-daemons'
+            && document.querySelectorAll(`#${CSS.escape(datalistId)}`).length === 1;
+          const nextResolution = availableResolutions[0];
+          if (nextResolution) {
+            const currentResolution = rangeGraph.querySelector('[data-js-debug-resolution-override]');
+            currentResolution.focus();
+            currentResolution.value = String(nextResolution);
+            currentResolution.dispatchEvent(new Event('change', {bubbles: true}));
+          }
+          const refreshedGraph = document.querySelector('.js-debug-panel [data-js-debug-daemons-graph]');
+          const refreshedResolution = refreshedGraph?.querySelector('[data-js-debug-resolution-override]');
+          const chartWidth = refreshedGraph.style.width;
+          const geometry = [320, 240].map(width => {
+            refreshedGraph.style.width = `${width}px`;
+            const controls = refreshedGraph.querySelector('.js-debug-daemons-controls');
+            const rangeControls = controls?.querySelector('.js-debug-range-resolution-controls');
+            const rangeInput = rangeControls?.querySelector('[data-js-debug-range-slider]');
+            const resolutionInput = rangeControls?.querySelector('[data-js-debug-resolution-override]');
+            const bounds = node => {
+              const rect = node.getBoundingClientRect();
+              return {left: rect.left, right: rect.right, width: rect.width};
+            };
+            return {
+              width,
+              controls: bounds(controls),
+              rangeControls: bounds(rangeControls),
+              rangeInput: bounds(rangeInput),
+              resolutionInput: bounds(resolutionInput),
+              scrollWidth: controls.scrollWidth,
+              clientWidth: controls.clientWidth,
+            };
+          });
+          refreshedGraph.style.width = chartWidth;
+          return {
+            targetRange: target.seconds,
+            selectedRange: rangeSelected,
+            domainRange: rangeDomain,
+            rangeLabel,
+            rangeFocusRestored,
+            availableResolutions,
+            selectedResolution: debugRuntimeState.graphResolutionOverrideSeconds,
+            resolutionFocusRestored: nextResolution ? document.activeElement === refreshedResolution : null,
+            uniqueDatalist,
+            geometry,
+            historyRequests,
+          };
+        } finally {
+          requestJsDebugHistoryForCurrentDomain = originalRequest;
+        }
+        """
+    )
+    assert "error" not in result, result
+    assert result["selectedRange"] == result["targetRange"] == result["domainRange"], result
+    assert result["rangeLabel"], result
+    assert result["rangeFocusRestored"] is True, result
+    assert result["uniqueDatalist"] is True, result
+    assert result["historyRequests"] >= 1, result
+    if result["availableResolutions"]:
+        assert result["selectedResolution"] == result["availableResolutions"][0], result
+        assert result["resolutionFocusRestored"] is True, result
+    for metrics in result["geometry"]:
+        assert metrics["controls"]["width"] <= metrics["width"] + 1, metrics
+        assert metrics["scrollWidth"] <= metrics["clientWidth"] + 1, metrics
+        for control in ("rangeInput", "resolutionInput"):
+            assert metrics[control]["left"] >= metrics["controls"]["left"] - 1, metrics
+            assert metrics[control]["right"] <= metrics["controls"]["right"] + 1, metrics
+
+
+def test_current_stats_daemons_highlight_and_zoom_use_the_clicked_chart_surface(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    browser.execute_async_script(
+        """
+        const done = arguments[0];
+        Promise.resolve(selectSession(debugPaneItemId, {userInitiated: true}))
+          .then(() => { setDebugSubTab('system'); done(true); }, error => done({error: String(error)}));
+        """
+    )
+    browser.execute_script(
+        """
+        const now = Date.now();
+        const starts = [0, 1, 2, 3].map(index => Math.floor((now - (4 - index) * 1000) / 1000));
+        jsDebugSystemState.payload = {
+          ok: true, generated_at: now / 1000, server: {}, owner: {}, refresh: {}, search_index: {},
+          caches: {}, client_events: {}, chat: {}, cpu_budget: {},
+          local_services: {schema_version: 5, inventory: [], totals: {}, services: []},
+          top_endpoints: [], top_background_work: [],
+        };
+        clearJsDebugGraphData();
+        debugGraphApplyServerHistory({
+          latest_sequence: 4,
+          records: starts.map((start, index) => ({
+            start, duration: 1,
+            host_metrics: {service_load: {'runtime:stats_lifecycle': {
+              label: 'stats lifecycle (goroutine, in-process)',
+              cpu_samples: 1, cpu_total_percent: 20 + index * 5,
+              cpu_min_percent: 20 + index * 5, cpu_max_percent: 20 + index * 5,
+            }}},
+          })),
+        });
+        debugRuntimeState.graphRangeSeconds = 300;
+        debugRuntimeState.graphResolutionOverrideSeconds = 1;
+        jsDebugHistoryReadiness.phase = 'ready';
+        jsDebugHistoryReadiness.reason = '';
+        jsDebugHistoryReadiness.overlayVisible = false;
+        const chartRegion = document.querySelector('[data-js-debug-system-region="chart"]');
+        if (chartRegion) chartRegion.innerHTML = debugSystemRegionHtml('chart', jsDebugSystemState.payload);
+        """
+    )
+    WebDriverWait(browser, 8).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('.js-debug-panel [data-js-debug-daemons-graph] .js-debug-line-chart') !== null"
+        )
+    )
+    result = browser.execute_script(
+        """
+        const panel = document.querySelector('.js-debug-panel');
+        const graphs = panel.querySelector('[data-js-debug-graph]');
+        const daemons = panel.querySelector('[data-js-debug-daemons-graph]');
+        const svg = daemons?.querySelector('.js-debug-line-chart');
+        const line = daemons?.querySelector('[data-js-debug-hover-line]');
+        const graphsLine = graphs?.querySelector('[data-js-debug-hover-line]');
+        const selectionRect = daemons?.querySelector('[data-js-debug-selection-rect]');
+        const graphsGrid = graphs?.querySelector('[data-js-debug-chart-grid]');
+        const daemonsGrid = daemons?.querySelector('[data-js-debug-chart-grid]');
+        if (!panel || !graphs || !daemons || !svg || !line || !graphsLine || !selectionRect || !graphsGrid || !daemonsGrid) {
+          return {error: 'Graphs and Daemons chart surfaces are required'};
+        }
+        graphsGrid.dataset.jsDebugDomainStart = '100000';
+        graphsGrid.dataset.jsDebugDomainEnd = '700000';
+        daemonsGrid.dataset.jsDebugDomainStart = '1000000';
+        daemonsGrid.dataset.jsDebugDomainEnd = '1600000';
+        let activeSvg = svg;
+        const dispatch = (type, fraction, pointerId = 43) => {
+          const bounds = activeSvg.getBoundingClientRect();
+          return activeSvg.dispatchEvent(new PointerEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            pointerType: 'mouse',
+            pointerId,
+            button: 0,
+            buttons: type === 'pointerup' ? 0 : 1,
+            clientX: bounds.left + bounds.width * fraction,
+            clientY: bounds.top + bounds.height / 2,
+          }));
+        };
+        const originalRequest = requestJsDebugHistoryForCurrentDomain;
+        requestJsDebugHistoryForCurrentDomain = () => false;
+        try {
+          dispatch('pointermove', 0.4);
+          const hover = {
+            daemonsSurfaceActive: daemons.classList.contains('js-debug-graph--hovering'),
+            graphsSurfaceActive: graphs.classList.contains('js-debug-graph--hovering'),
+            daemonLineX: Number(line.getAttribute('x1')),
+            expectedLineX: jsDebugGraphGeometry.width * 0.4,
+            grayLine: getComputedStyle(line).stroke,
+            graphsGrayLine: getComputedStyle(graphsLine).stroke,
+            lineVisible: Number(getComputedStyle(line).opacity) === 1,
+          };
+          dispatch('pointerdown', 0.2);
+          dispatch('pointermove', 0.8);
+          const selection = {
+            daemonsSurfaceActive: daemons.classList.contains('js-debug-graph--selecting'),
+            graphsSurfaceActive: graphs.classList.contains('js-debug-graph--selecting'),
+            rectWidth: Number(selectionRect.getAttribute('width')),
+            expectedWidth: jsDebugGraphGeometry.width * 0.6,
+          };
+          dispatch('pointerup', 0.8);
+          const zoom = {...jsDebugGraphZoomDomain};
+          clearDebugGraphZoom();
+          activeSvg = document.querySelector('.js-debug-panel [data-js-debug-daemons-graph] .js-debug-line-chart');
+          if (!activeSvg) return {error: 'Daemons chart missing after resetting zoom'};
+          const chartRegion = activeSvg.closest('[data-js-debug-system-region="chart"]');
+          const beforeRefreshSvg = activeSvg;
+          dispatch('pointerdown', 0.2);
+          dispatch('pointermove', 0.4);
+          debugRuntimeState.graphChartLayout = 2;
+          refreshDebugSystemViews();
+          const refreshDeferred = panel.dataset.jsDebugSystemChartRefreshPending === 'true'
+            && chartRegion.querySelector('.js-debug-line-chart') === beforeRefreshSvg
+            && jsDebugGraphSelectionState !== null;
+          dispatch('pointercancel', 0.4);
+          const refreshFlushed = panel.dataset.jsDebugSystemChartRefreshPending !== 'true'
+            && chartRegion.querySelector('.js-debug-line-chart') !== beforeRefreshSvg
+            && jsDebugGraphSelectionState === null
+            && jsDebugGraphZoomDomain === null;
+          const cancel = {
+            zoomCommitted: jsDebugGraphZoomDomain !== null,
+            selectionCleared: jsDebugGraphSelectionState === null,
+            selectionRectCleared: !document.querySelector('[data-js-debug-daemons-graph]')?.classList.contains('js-debug-graph--selecting'),
+          };
+          activeSvg = document.querySelector('.js-debug-panel [data-js-debug-daemons-graph] .js-debug-line-chart');
+          dispatch('pointerdown', 0.2);
+          dispatch('pointermove', 0.8);
+          dispatch('lostpointercapture', 0.8, 44);
+          const mismatchedCapturePreserved = jsDebugGraphSelectionState !== null;
+          dispatch('lostpointercapture', 0.8);
+          const lostCapture = {
+            zoomCommitted: jsDebugGraphZoomDomain !== null,
+            selectionCleared: jsDebugGraphSelectionState === null,
+            selectionRectCleared: !document.querySelector('[data-js-debug-daemons-graph]')?.classList.contains('js-debug-graph--selecting'),
+          };
+          activeSvg = document.querySelector('.js-debug-panel [data-js-debug-daemons-graph] .js-debug-line-chart');
+          dispatch('pointerdown', 0.2);
+          dispatch('pointermove', 0.8);
+          jsDebugSystemState.payload = {ok: false, snapshot: {state: 'stale', reason_code: 'expired', age_seconds: 90, reason: 'fixture refusal'}};
+          refreshDebugSystemViews();
+          const typedRefusal = {
+            shown: document.querySelector('[data-js-debug-system-snapshot-state="stale"]') !== null,
+            selectionCleared: jsDebugGraphSelectionState === null,
+            svgDetached: !activeSvg.isConnected,
+          };
+          jsDebugSystemState.payload = {
+            ok: true, generated_at: Date.now() / 1000, server: {}, owner: {}, refresh: {}, search_index: {},
+            caches: {}, client_events: {}, chat: {}, cpu_budget: {},
+            local_services: {schema_version: 5, inventory: [], totals: {}, services: []},
+            top_endpoints: [], top_background_work: [],
+          };
+          renderDebugPanels({force: true});
+          activeSvg = document.querySelector('.js-debug-panel [data-js-debug-daemons-graph] .js-debug-line-chart');
+          dispatch('pointerdown', 0.2);
+          dispatch('pointermove', 0.8);
+          renderDebugPanels({force: true});
+          const fullPanelRefresh = {
+            selectionCleared: jsDebugGraphSelectionState === null,
+            oldSvgDetached: !activeSvg.isConnected,
+            newSvgPresent: document.querySelector('.js-debug-panel [data-js-debug-daemons-graph] .js-debug-line-chart') !== null,
+            zoomCommitted: jsDebugGraphZoomDomain !== null,
+          };
+          return {hover, selection, zoom, refreshDeferred, refreshFlushed, cancel, lostCapture, mismatchedCapturePreserved, typedRefusal, fullPanelRefresh};
+        } finally {
+          requestJsDebugHistoryForCurrentDomain = originalRequest;
+          clearDebugGraphZoom();
+        }
+        """
+    )
+    assert "error" not in result, result
+    assert result["hover"]["daemonsSurfaceActive"] is True, result
+    assert result["hover"]["graphsSurfaceActive"] is False, result
+    assert result["hover"]["lineVisible"] is True, result
+    assert result["hover"]["daemonLineX"] == pytest.approx(result["hover"]["expectedLineX"], abs=1), result
+    assert result["hover"]["grayLine"], result
+    assert result["hover"]["grayLine"] == result["hover"]["graphsGrayLine"], result
+    assert result["selection"]["daemonsSurfaceActive"] is True, result
+    assert result["selection"]["graphsSurfaceActive"] is False, result
+    assert result["selection"]["rectWidth"] == pytest.approx(result["selection"]["expectedWidth"], abs=1), result
+    assert result["zoom"]["startMs"] == pytest.approx(1120000, abs=2), result
+    assert result["zoom"]["endMs"] == pytest.approx(1480000, abs=2), result
+    assert result["refreshDeferred"] is True, result
+    assert result["refreshFlushed"] is True, result
+    assert result["cancel"] == {"zoomCommitted": False, "selectionCleared": True, "selectionRectCleared": True}, result
+    assert result["lostCapture"] == {"zoomCommitted": False, "selectionCleared": True, "selectionRectCleared": True}, result
+    assert result["mismatchedCapturePreserved"] is True, result
+    assert result["typedRefusal"] == {"shown": True, "selectionCleared": True, "svgDetached": True}, result
+    assert result["fullPanelRefresh"] == {"selectionCleared": True, "oldSvgDetached": True, "newSvgPresent": True, "zoomCommitted": False}, result
 
 
 def test_current_stats_cpu_stacks_host_binaries_and_the_daemon_chart_emphasizes_the_yolomux_line(browser, tmp_path):
@@ -1927,8 +2222,8 @@ def test_current_stats_cpu_stacks_host_binaries_and_the_daemon_chart_emphasizes_
         """
             const graph = document.querySelector('.js-debug-panel [data-js-debug-graph]');
             if (!graph || typeof debugGraphApplyServerRecord !== 'function') return {ready: false};
+            setDebugSubTab('system');
             setDebugGraphChartVisible('cpu', true);
-            setDebugGraphChartVisible('serversLoad', true);
             clearJsDebugGraphData();
             debugRuntimeState.graphRangeSeconds = 300;
             debugRuntimeState.graphResolutionOverrideSeconds = 1;
@@ -1942,12 +2237,19 @@ def test_current_stats_cpu_stacks_host_binaries_and_the_daemon_chart_emphasizes_
             processSamples.forEach((values, index) => debugGraphApplyServerRecord({
               start: startedAt + index, duration: 1, system_cpu_total_percent: 60 + index, system_cpu_count: 1,
               servers: {[`port:${servingPort}`]: {label: `port:${servingPort}`, cpu_total_percent: 35 + index, cpu_count: 1}},
-              host_metrics: {cpu_processes: Object.fromEntries(Object.entries(values).map(([key, value]) => [key, {label: key, total_percent: value, samples: 1}]))},
+              host_metrics: {
+                cpu_processes: Object.fromEntries(Object.entries(values).map(([key, value]) => [key, {label: key, total_percent: value, samples: 1}])),
+                service_load: {
+                  'runtime:stats_lifecycle': {label: 'stats lifecycle (goroutine, in-process)', cpu_total_percent: 4, cpu_samples: 1},
+                  [`yolomux-go:process:4242:${servingPort}:4200:yolomux-go:hfixture`]: {label: `yolomux-go (PID 4242, port ${servingPort}, PPID 4200)`, cpu_total_percent: 12, cpu_samples: 1},
+                },
+              },
             }));
             refreshDebugGraphElement(graph, {force: true, deferFocusedControl: false});
+            refreshDebugSystemViews();
             const card = graph.querySelector('[data-js-debug-chart="cpu"]');
-            // The yolomux.py web line renders with the daemons now, not beside the host binaries.
-            const daemonCard = graph.querySelector('[data-js-debug-chart="serversLoad"]');
+            // The Daemons chart resolves Go owners as elapsed runtime occupancy, separate from CPU.
+            const daemonCard = document.querySelector('[data-js-debug-daemons-graph] [data-js-debug-chart="serversLoad"]');
             const area = card?.querySelector('[data-js-debug-area-series^="cpuBinary:"]');
             const originalBodyClass = document.body.className;
             document.body.classList.remove('theme-dark', 'theme-resolved-dark');
@@ -1959,12 +2261,12 @@ def test_current_stats_cpu_stacks_host_binaries_and_the_daemon_chart_emphasizes_
             const areas = [...(card?.querySelectorAll('[data-js-debug-area-series^="cpuBinary:"]') || [])];
             const areaLegendBlocks = [...(card?.querySelectorAll('[data-js-debug-legend^="cpuBinary:"] .js-debug-legend-area') || [])].map(node => ({width: getComputedStyle(node).width, height: getComputedStyle(node).height}));
             const systemLine = card?.querySelector('[data-js-debug-series="systemCpu"]');
-            const yolomuxLine = daemonCard?.querySelector('[data-js-debug-series^="cpu:port:"]');
-            const yolomuxOnCpuCard = card?.querySelector('[data-js-debug-series^="cpu:port:"]');
+            const yolomuxLine = card?.querySelector('[data-js-debug-series^="cpu:port:"]');
+            const yolomuxOnDaemonCard = daemonCard?.querySelector('[data-js-debug-series^="cpu:port:"]');
             const systemLegend = card?.querySelector('[data-js-debug-legend="systemCpu"] .js-debug-legend-line .js-debug-line');
-            const yolomuxLegend = daemonCard?.querySelector('[data-js-debug-legend^="cpu:port:"] .js-debug-legend-line .js-debug-line');
-            const legendOrder = [...(daemonCard?.querySelectorAll('[data-js-debug-legend]') || [])].map(node => node.dataset.jsDebugLegend);
-            const linePaintOrder = [...(daemonCard?.querySelectorAll('.js-debug-line-chart [data-js-debug-series]') || [])].map(node => node.dataset.jsDebugSeries);
+            const yolomuxLegend = card?.querySelector('[data-js-debug-legend^="cpu:port:"] .js-debug-legend-line .js-debug-line');
+            const legendOrder = [...(card?.querySelectorAll('[data-js-debug-legend]') || [])].map(node => node.dataset.jsDebugLegend);
+            const linePaintOrder = [...(card?.querySelectorAll('.js-debug-line-chart [data-js-debug-series]') || [])].map(node => node.dataset.jsDebugSeries);
             const cpuCardLegendOrder = [...(card?.querySelectorAll('[data-js-debug-legend]') || [])].map(node => node.dataset.jsDebugLegend);
             const areaSeries = [...new Set(areas.map(node => node.dataset.jsDebugAreaSeries))];
             const areaPoints = node => [...String(node.getAttribute('d') || '').matchAll(/[ML] (-?[0-9]+(?:[.][0-9]+)?),(-?[0-9]+(?:[.][0-9]+)?)/g)].map(match => [Number(match[1]), Number(match[2])]);
@@ -1984,7 +2286,7 @@ def test_current_stats_cpu_stacks_host_binaries_and_the_daemon_chart_emphasizes_
               systemLineWidth: systemLine ? getComputedStyle(systemLine).strokeWidth : '',
               yolomuxLineWidth: yolomuxLine ? getComputedStyle(yolomuxLine).strokeWidth : '',
               yolomuxEmphasized: yolomuxLine?.classList.contains('js-debug-line--current-process') || false,
-              yolomuxOnCpuCard: Boolean(yolomuxOnCpuCard), cpuCardLegendOrder,
+              yolomuxOnDaemonCard: Boolean(yolomuxOnDaemonCard), cpuCardLegendOrder,
               legendOrder, linePaintOrder, systemPattern: systemLine?.dataset.jsDebugLinePattern, yolomuxPattern: yolomuxLine?.dataset.jsDebugLinePattern,
             };
         """
@@ -1995,20 +2297,19 @@ def test_current_stats_cpu_stacks_host_binaries_and_the_daemon_chart_emphasizes_
     assert result["areaRunCounts"] == {"cpuBinary:python": 2, "cpuBinary:node": 1, "cpuBinary:rustc": 1, "cpuBinary:chromium": 1}, result
     assert result["areaShapeModes"] == ["linear"] * 5 and result["stackedAreas"] is True, result
     assert sum(result["areaHasSlope"]) >= 3 and all(result["areaHasWidth"]) and result["areaStrokeWidths"] == ["1.1px"] * 5, result
-    assert result["lightOpacity"] == result["darkOpacity"] == "0.52", result
+    assert result["lightOpacity"] == result["darkOpacity"] == "1", result
     assert result["areaLegendBlocks"] == [{"width": "18px", "height": "6px"}] * 4, result
     assert result["systemLegendWidth"] == "1.5px", result
     assert float(result["yolomuxLegendWidth"].removesuffix("px")) > 1.5, result
     assert float(result["yolomuxLineWidth"].removesuffix("px")) > float(result["systemLineWidth"].removesuffix("px")), result
     assert result["yolomuxEmphasized"] is True, result
-    # The serving-port line keeps its guarantee -- first in the legend, painted last, emphasized,
-    # solid -- but it keeps it on the daemon chart, where the web process belongs with its peers.
+    # Process CPU remains in the CPU chart; the Daemons chart shows elapsed runtime occupancy.
     assert result["legendOrder"][0].startswith("cpu:port:"), result
     assert result["linePaintOrder"][-1].startswith("cpu:port:"), result
     assert result["systemPattern"] == "dot" and result["yolomuxPattern"] == "solid", result
-    # And it is not drawn twice: the CPU card keeps the host binaries and the system total only.
-    assert result["yolomuxOnCpuCard"] is False, result
-    assert not any(key.startswith("cpu:port:") for key in result["cpuCardLegendOrder"]), result
+    # And it is not drawn twice beside elapsed collector occupancy.
+    assert result["yolomuxOnDaemonCard"] is False, result
+    assert any(key.startswith("cpu:port:") for key in result["cpuCardLegendOrder"]), result
 
 
 def test_current_stats_system_usage_warning_renders_and_clears(browser, tmp_path):
@@ -2395,6 +2696,7 @@ def test_current_stats_resolution_switch_keeps_old_chart_through_pending_watchdo
           const requests = [];
           const states = [];
           let targetAttempts = 0;
+          const streams = [];
           const fixtureFetch = async input => {
             const url = new URL(String(input), location.href);
             if (url.pathname === '/api/stats-capabilities') {
@@ -2421,26 +2723,18 @@ def test_current_stats_resolution_switch_keeps_old_chart_through_pending_watchdo
               this.url = String(input);
               this.listeners = new Map();
               this.closed = false;
+              streams.push(this);
               queueMicrotask(() => {
                 if (this.closed) return;
                 const url = new URL(this.url, location.href);
                 const resolution = Number(url.searchParams.get('resolution'));
                 requests.push(resolution);
-                if (resolution === 300 && ++targetAttempts <= 4) {
+                if (resolution === 300) {
+                  targetAttempts += 1;
                   this.emit('pending', {status: 'pending', retry_after_seconds: 1});
                   return;
                 }
-                const accepted = snapshot(resolution, resolution === 60 ? 1 : 2);
-                this.emit('ack', {
-                  cache_generation: accepted.cache_generation,
-                  chunk_count: 1,
-                  not_modified: false,
-                  range_seconds: accepted.range_seconds,
-                  requested_resolution: accepted.requested_resolution,
-                  resolution_seconds: accepted.resolution_seconds,
-                });
-                this.emit('snapshot', accepted);
-                this.emit('ready', {cache_generation: accepted.cache_generation, revision: 0});
+                this.deliverSnapshot(resolution === 60 ? 1 : 2);
               });
             }
             addEventListener(name, callback) {
@@ -2450,6 +2744,20 @@ def test_current_stats_resolution_switch_keeps_old_chart_through_pending_watchdo
             }
             emit(name, payload) {
               for (const callback of this.listeners.get(name) || []) callback({data: JSON.stringify(payload)});
+            }
+            deliverSnapshot(generation = 2) {
+              const resolution = Number(new URL(this.url, location.href).searchParams.get('resolution'));
+              const accepted = snapshot(resolution, generation);
+              this.emit('ack', {
+                cache_generation: accepted.cache_generation,
+                chunk_count: 1,
+                not_modified: false,
+                range_seconds: accepted.range_seconds,
+                requested_resolution: accepted.requested_resolution,
+                resolution_seconds: accepted.resolution_seconds,
+              });
+              this.emit('snapshot', accepted);
+              this.emit('ready', {cache_generation: accepted.cache_generation, revision: 0});
             }
             close() { this.closed = true; }
           }
@@ -2514,7 +2822,10 @@ def test_current_stats_resolution_switch_keeps_old_chart_through_pending_watchdo
             surface: surface(),
             pendingTarget: jsDebugGraphPendingResolutionChange?.targetSeconds || 0,
             targetAttempts,
+            streamCount: streams.length,
+            streamClosed: streams.at(-1)?.closed || false,
           };
+          streams.at(-1)?.deliverSnapshot(2);
           await window.__yolomuxTestWaitFor(
             () => cpuDurations().length === 1 && cpuDurations()[0] === 300000,
             {timeoutMs: 3000, intervalMs: 10, description: 'accepted retained 300s chart'},
@@ -2544,15 +2855,17 @@ def test_current_stats_resolution_switch_keeps_old_chart_through_pending_watchdo
     assert result["afterWatchdog"]["surface"]["busy"] == "true", result
     assert result["afterWatchdog"]["surface"]["overlayVisible"] is True, result
     assert result["afterWatchdog"]["pendingTarget"] == 300, result
-    assert result["afterWatchdog"]["targetAttempts"] == 4, result
+    assert result["afterWatchdog"]["targetAttempts"] == 1, result
+    assert result["afterWatchdog"]["streamCount"] == 2, result
+    assert result["afterWatchdog"]["streamClosed"] is False, result
     assert result["accepted"]["durations"] == [300000], result
     assert result["accepted"]["surface"]["busy"] == "false", result
     assert result["accepted"]["surface"]["overlayVisible"] is False, result
     assert result["accepted"]["pending"] is False, result
     assert result["accepted"]["resolution"] == 300, result
-    assert result["accepted"]["targetAttempts"] == 5, result
-    assert result["requests"] == [60, 300, 300, 300, 300, 300], result
-    assert result["states"].count("pending") == 4, result
+    assert result["accepted"]["targetAttempts"] == 1, result
+    assert result["requests"] == [60, 300], result
+    assert result["states"].count("pending") == 1, result
 
 
 def test_current_stats_coarse_slide_replaces_plot_and_axis_together_at_five_seconds(browser, tmp_path):

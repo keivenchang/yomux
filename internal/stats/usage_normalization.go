@@ -19,13 +19,26 @@ const (
 // UsageMetadata identifies the provider context without coupling normalization
 // to a transcript or collector implementation.
 type UsageMetadata struct {
-	Provider        string
-	Model           string
-	ThreadID        string
-	ForkID          string
-	ExecutionSource string
-	Endpoint        string
-	Extra           map[string]string
+	Provider          string
+	Model             string
+	ModelEvidence     string
+	Effort            string
+	PricingProfile    string
+	ServiceTier       string
+	ThreadID          string
+	ForkID            string
+	ExecutionSource   string
+	Endpoint          string
+	TelemetryComplete bool
+	Extra             map[string]string
+}
+
+func sourceUsageMetadata(provider, model, modelEvidence, threadID, executionSource string) UsageMetadata {
+	return UsageMetadata{
+		Provider: provider, Model: model, ModelEvidence: modelEvidence,
+		Effort: "unknown", PricingProfile: "default", ServiceTier: "default",
+		ThreadID: threadID, ExecutionSource: executionSource,
+	}
 }
 
 type ClaudeUsageRecord struct {
@@ -83,6 +96,7 @@ func DeltaUsageCounters(previous, current UsageCounters) (UsageCounters, bool, e
 }
 
 func NormalizeClaudeUsage(record ClaudeUsageRecord) ([]UsageAtom, error) {
+	record.Metadata.TelemetryComplete = record.Metadata.TelemetryComplete || record.InputTokens != nil && record.OutputTokens != nil
 	cache5m := record.CacheCreation5mTokens
 	if cache5m == nil {
 		cache5m = record.CacheCreationInputTokens
@@ -97,6 +111,7 @@ func NormalizeClaudeUsage(record ClaudeUsageRecord) ([]UsageAtom, error) {
 }
 
 func NormalizeCodexUsage(record CodexUsageRecord) ([]UsageAtom, error) {
+	record.Metadata.TelemetryComplete = record.Metadata.TelemetryComplete || record.InputTokens != nil && record.OutputTokens != nil
 	var uncached *float64
 	if record.InputTokens != nil {
 		value := *record.InputTokens
@@ -191,24 +206,17 @@ func normalizeUsage(observedAt float64, metadata UsageMetadata, provider string,
 }
 
 func usageMetadataPayload(metadata UsageMetadata, provider string) (map[string]any, error) {
-	if metadata.Provider == "" {
-		metadata.Provider = provider
-	}
-	if err := validateText("usage_metadata", "provider", metadata.Provider, MaxIdentityBytes); err != nil {
+	payload := usageMetadataPayloadFields(metadata, provider)
+	if err := validateText("usage_metadata", "provider", payload["provider"].(string), MaxIdentityBytes); err != nil {
 		return nil, err
 	}
-	payload := map[string]any{"provider": metadata.Provider}
-	for name, value := range map[string]string{
-		"model": metadata.Model, "thread_id": metadata.ThreadID, "fork_id": metadata.ForkID,
-		"execution_source": metadata.ExecutionSource, "endpoint": metadata.Endpoint,
-	} {
-		if value == "" {
+	for name, value := range payload {
+		if name == "provider" || name == "telemetry_complete" {
 			continue
 		}
-		if err := validateText("usage_metadata", name, value, MaxSeriesComponentBytes); err != nil {
+		if err := validateText("usage_metadata", name, value.(string), MaxSeriesComponentBytes); err != nil {
 			return nil, err
 		}
-		payload[name] = value
 	}
 	if len(metadata.Extra) > MaxUsageMetadataEntries {
 		return nil, invalid("usage_metadata", "extra", "too many entries")
@@ -227,6 +235,24 @@ func usageMetadataPayload(metadata UsageMetadata, provider string) (map[string]a
 		return nil, invalid("usage_metadata", "payload", "exceeds metadata bound")
 	}
 	return payload, nil
+}
+
+func usageMetadataPayloadFields(metadata UsageMetadata, provider string) map[string]any {
+	if metadata.Provider == "" {
+		metadata.Provider = provider
+	}
+	payload := map[string]any{"provider": metadata.Provider}
+	for name, value := range map[string]string{
+		"model": metadata.Model, "model_evidence": metadata.ModelEvidence, "effort": metadata.Effort, "pricing_profile": metadata.PricingProfile, "service_tier": metadata.ServiceTier, "thread_id": metadata.ThreadID, "fork_id": metadata.ForkID,
+		"execution_source": metadata.ExecutionSource, "endpoint": metadata.Endpoint,
+	} {
+		if value == "" {
+			continue
+		}
+		payload[name] = value
+	}
+	payload["telemetry_complete"] = metadata.TelemetryComplete
+	return payload
 }
 
 func usageEventID(provider string, metadata UsageMetadata, observedAt float64, direction, cacheRole string, quantity float64) string {

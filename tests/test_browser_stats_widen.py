@@ -780,7 +780,7 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
                  || !defaultChartKeys.includes('agentTokens')
                  || !defaultChartKeys.includes('memory')
                  || defaultChartKeys.includes('serversLoad')
-                 || defaultDaemonsToggle?.checked !== false) {
+                 || defaultDaemonsToggle !== null) {
                  throw new Error(`default Graphs state did not paint the required charts: ${JSON.stringify({readiness: jsDebugHistoryReadinessSnapshot?.(), defaultChartKeys, defaultDaemonsChecked: defaultDaemonsToggle?.checked, defaultGraphs})}`);
                }
                const warningsBeforeProbe = jsDebugEvents.filter(event => event?.type === 'stats_history'
@@ -907,7 +907,7 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
                  || fiveMinuteMemoryGeometry <= 0) {
                  throw new Error(`5m memory graph stats gate failed: ${JSON.stringify({status: fiveMinuteSnapshotResponse.status, resolution: fiveMinuteSnapshot.resolution_seconds, values: fiveMinuteMemoryValues, geometry: fiveMinuteMemoryGeometry, chart: Boolean(fiveMinuteMemoryChart)})}`);
                }
-                done({status: response.status, readiness: jsDebugHistoryReadinessSnapshot?.(), routeCounts: {...globalThis.__yolomuxStatsRouteCounts}, unrelatedRouteCounts: {...globalThis.__yolomuxStatsUnrelatedRouteCounts}, defaultChartKeys, defaultDaemonsChecked: defaultDaemonsToggle?.checked, defaultGraphs, exact, streamEvolution: {initialCacheGeneration, delta, reconnectAck, reconnectReady, reconnectEvents}, generation: {
+                done({status: response.status, readiness: jsDebugHistoryReadinessSnapshot?.(), routeCounts: {...globalThis.__yolomuxStatsRouteCounts}, unrelatedRouteCounts: {...globalThis.__yolomuxStatsUnrelatedRouteCounts}, defaultChartKeys, defaultDaemonsChecked: defaultDaemonsToggle?.checked ?? false, defaultGraphs, exact, streamEvolution: {initialCacheGeneration, delta, reconnectAck, reconnectReady, reconnectEvents}, generation: {
                 range: generation.range_seconds,
                 resolution: generation.resolution_seconds,
                 buckets: generation.buckets.length,
@@ -1473,7 +1473,11 @@ def _production_stats_browser_pass(browser, base_url: str, session: str, request
     stream_events = browser.execute_script(
         "return (globalThis.__yolomuxStatsStreamEvents || []).map(item => ({event: item.event, data: item.data}));"
     )
-    if [item["event"] for item in stream_events[:3]] != ["ack", "snapshot", "ready"]:
+    # EventSource can report a connection error before its first successful open. The protocol
+    # handshake is the ordered ack/snapshot/ready sequence; a transient pre-open error does not
+    # invalidate a generation that subsequently became ready.
+    handshake = [item["event"] for item in stream_events if item["event"] in {"ack", "snapshot", "ready"}][:3]
+    if handshake != ["ack", "snapshot", "ready"]:
         raise AssertionError(f"initial stats stream did not settle to ack/snapshot/ready: {stream_events}")
     route_counts = browser.execute_script(
         "return {stats: {...(globalThis.__yolomuxStatsRouteCounts || {})}, unrelated: {...(globalThis.__yolomuxStatsUnrelatedRouteCounts || {})}};"
@@ -1513,6 +1517,7 @@ def _production_stats_browser_pass(browser, base_url: str, session: str, request
         # by cmd/yolomux-go/http_server_parity_test.go.
         "stream_events": stream_events[:3],
         "stream_events_observed": stream_events,
+        "stream_handshake": handshake,
         "route_counts": route_counts,
     }
 
@@ -1652,11 +1657,11 @@ def test_production_python_and_go_stats_share_one_fixture_and_browser_journey(br
         go_evidence = servers[1][2]
         assert _normalize_stats_capabilities_for_parity(go_evidence["capabilities"]) == _normalize_stats_capabilities_for_parity(python_evidence["capabilities"]), {"python": python_evidence, "go": go_evidence}
         assert _normalize_stats_snapshot_for_parity(go_evidence["snapshot"]) == _normalize_stats_snapshot_for_parity(python_evidence["snapshot"]), {"python": python_evidence, "go": go_evidence}
-        python_stream = [item["event"] for item in python_evidence["stream_events"]]
-        go_stream = [item["event"] for item in go_evidence["stream_events"]]
-        assert python_stream == go_stream, {"python_stream": python_evidence["stream_events"], "go_stream": go_evidence["stream_events"]}
-        assert python_stream[:3] == ["ack", "snapshot", "ready"], python_evidence["stream_events"]
-        assert go_stream[:3] == ["ack", "snapshot", "ready"], go_evidence["stream_events"]
+        python_stream = python_evidence["stream_handshake"]
+        go_stream = go_evidence["stream_handshake"]
+        assert python_stream == go_stream, {"python_stream": python_evidence["stream_events_observed"], "go_stream": go_evidence["stream_events_observed"]}
+        assert python_stream == ["ack", "snapshot", "ready"], python_evidence["stream_events_observed"]
+        assert go_stream == ["ack", "snapshot", "ready"], go_evidence["stream_events_observed"]
     finally:
         browser.get("about:blank")
         for process, port_lease, *_rest in reversed(servers):

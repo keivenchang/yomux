@@ -303,7 +303,7 @@ const jsDebugStatsHistoryPostMaxBytes = 96 * 1024;
 const jsDebugStatsClientStorageKey = 'yolomux.stats.client_id.v1';
 const jsDebugStatsDisconnectedStorageKey = 'yolomux.stats.disconnected_at.v1';
 const jsDebugStatsUiPreferencesStorageKey = 'yolomux.stats.ui_preferences.v1';
-const jsDebugGraphDefaultHiddenChartKeys = Object.freeze(['serversLoad', 'gpuUtil', 'gpuMemory']);
+const jsDebugGraphDefaultHiddenChartKeys = Object.freeze(['gpuUtil', 'gpuMemory']);
 const jsDebugGraphMovingAverageSamples = 10;
 const jsDebugGraphAgentTokenBucketSeconds = 60;
 const jsDebugGraphDisplayHoldExpiryMs = Object.freeze({
@@ -506,9 +506,35 @@ const jsDebugStatsFamilyManifest = Object.freeze({
 });
 const jsDebugStatsFamilyByChartGroup = Object.freeze(Object.fromEntries(Object.entries(jsDebugStatsFamilyManifest)
   .flatMap(([family, entry]) => entry.chartGroups.map(group => [group, family]))));
+const jsDebugGraphDaemonsChartGroup = Object.freeze({
+  key: 'serversLoad', labelKey: 'debug.graph.chart.serversLoad',
+  descKey: 'debug.graph.chart.serversLoad.runtimeDesc',
+  series: [], unit: 'runtimeOccupancy', kind: 'area', stacked: true,
+  serviceLoad: true, runtimeOnly: true,
+  bucketSeconds: jsDebugStatsFamilyManifest.service_load.cadenceSeconds,
+});
+// Process service metrics remain available to the Daemons memory chart and shared
+// history transforms; Graphs does not expose a daemon-load chart.
+const jsDebugGraphDaemonsProcessSeriesGroup = Object.freeze({
+  ...jsDebugGraphDaemonsChartGroup,
+  descKey: 'debug.graph.chart.serversLoad.desc',
+  unit: 'percent', runtimeOnly: false, processOnly: true,
+});
+const jsDebugGraphDaemonsMemoryChartGroup = Object.freeze({
+  key: 'serversMemory', label: 'Daemon memory', series: [], unit: 'bytes',
+  kind: 'area', stacked: true, serviceLoad: true, serviceMetric: 'rss', processOnly: true,
+});
+const jsDebugGraphDaemonsChartGroups = Object.freeze([
+  jsDebugGraphDaemonsChartGroup,
+  jsDebugGraphDaemonsMemoryChartGroup,
+]);
+const jsDebugGraphDaemonsSeriesGroups = Object.freeze([
+  jsDebugGraphDaemonsChartGroup,
+  jsDebugGraphDaemonsProcessSeriesGroup,
+  jsDebugGraphDaemonsMemoryChartGroup,
+]);
 const jsDebugGraphChartGroups = Object.freeze([
   {key: 'cpu', labelKey: 'debug.graph.chart.cpu', descKey: 'debug.graph.chart.cpu.desc', series: ['systemCpu'], unit: 'percent', kind: 'area', stacked: true, hostMetric: 'cpu'},
-  {key: 'serversLoad', labelKey: 'debug.graph.chart.serversLoad', descKey: 'debug.graph.chart.serversLoad.desc', series: [], unit: 'percent', serviceLoad: true, bucketSeconds: jsDebugStatsFamilyManifest.service_load.cadenceSeconds},
   {key: 'memory', labelKey: 'debug.graph.chart.memory', descKey: 'debug.graph.chart.memory.desc', series: ['systemMemory'], unit: 'bytes', kind: 'area', stacked: true, hostMetric: 'memory', capacityMetric: 'systemMemory'},
   {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', descKey: 'debug.graph.chart.agentStatus.desc', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: jsDebugStatsFamilyManifest.agent_status.cadenceSeconds, statusNoDataOverlay: true},
   {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', descKey: 'debug.graph.chart.agentTokens.desc', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, noDataWhenEmpty: true, displayedSummary: 'agentTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
@@ -968,10 +994,18 @@ let jsDebugGraphExactResolutionEnabled = !(typeof globalThis !== 'undefined' && 
 
 function debugGraphExactRequestResolutionSeconds() {
   // The concrete resolution to request: the explicit pick, or the range's AUTO
-  // (finest supported exact cell) when the picker is on AUTO.
+  // resolution published by the current controller when the picker is on AUTO.
   const override = Math.max(0, Number(debugRuntimeState.graphResolutionOverrideSeconds) || 0);
   if (override > 0) return override;
-  const choices = debugGraphExactResolutionChoices(activeJsDebugGraphRangeSeconds());
+  const rangeSeconds = activeJsDebugGraphRangeSeconds();
+  const controller = jsDebugCurrentStatsClientState.client?.controller?.();
+  const selection = controller?.selection?.();
+  if (selection?.resolution === 'AUTO' && Number(selection.range_seconds) === rangeSeconds) {
+    const capabilityRange = controller.capabilities?.()?.ranges?.find(item => Number(item.range_seconds) === rangeSeconds);
+    const autoResolution = Number(capabilityRange?.auto_resolution_seconds || selection.resolution_seconds);
+    if (Number.isFinite(autoResolution) && autoResolution > 0) return autoResolution;
+  }
+  const choices = debugGraphExactResolutionChoices(rangeSeconds);
   return choices.length ? Number(choices[0]) : 1;
 }
 

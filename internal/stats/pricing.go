@@ -8,27 +8,162 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 )
 
+const (
+	// MaxSafeJSONInteger is the largest integer JavaScript can represent exactly.
+	MaxSafeJSONInteger = int64(1<<53 - 1)
+	maxSafeJSONInteger = MaxSafeJSONInteger
+)
+
 const pricingSchemaVersion = 1
 
 const pricingStaleSeconds = 30 * 24 * 60 * 60
 
+var pricingDatedModelSuffix = regexp.MustCompile(`(?i)-(?:20\d{2}[-.]?\d{2}[-.]?\d{2}|latest|preview)$`)
+var pricingVariantModelSuffix = regexp.MustCompile(`(?i)-(?:sol|terra|luna)(?:-(?:latest|preview|20\d{2}[-.]?\d{2}[-.]?\d{2}))?$`)
+
 type PricingCatalog struct {
-	SchemaVersion   int            `json:"schema_version"`
-	CatalogRevision int64          `json:"catalog_revision"`
-	GeneratedAt     string         `json:"generated_at,omitempty"`
-	Models          []PricingModel `json:"models"`
-	path            string
-	root            string
-	configured      string
-	seedRevision    int64
-	refreshFailed   bool
-	mu              sync.RWMutex
+	SchemaVersion              int            `json:"schema_version"`
+	CatalogRevision            int64          `json:"catalog_revision"`
+	GeneratedAt                string         `json:"generated_at,omitempty"`
+	Models                     []PricingModel `json:"models"`
+	path                       string
+	root                       string
+	configured                 string
+	refreshCache               string
+	seedRevision               int64
+	refreshFailed              bool
+	refreshStatus              string
+	refreshWarnings            []string
+	pricingInvalidationPending bool
+	sourceChecks               map[string]pricingSourceCheck
+	refreshMu                  sync.Mutex
+	mu                         sync.RWMutex
+}
+
+func (c *PricingCatalog) SetRefreshCachePath(path string) {
+	c.mu.Lock()
+	c.refreshCache = strings.TrimSpace(path)
+	c.mu.Unlock()
+}
+
+func (c *PricingCatalog) RefreshResult() (string, []string) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.refreshStatus, append([]string(nil), c.refreshWarnings...)
+}
+
+func (c *PricingCatalog) RefreshDue(now time.Time) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	var latest time.Time
+	for _, model := range c.Models {
+		kind := pricingSourceKind(model.Source)
+		if kind == "seed" || kind == "corroboration" {
+			continue
+		}
+		checkedAt, err := time.Parse(time.RFC3339, strings.TrimSpace(model.Source.CheckedAt))
+		if err == nil && checkedAt.After(latest) {
+			latest = checkedAt
+		}
+	}
+	return latest.IsZero() || now.Sub(latest) >= pricingStaleSeconds*time.Second
+}
+
+func (c *PricingCatalog) PricingInvalidationPending() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.pricingInvalidationPending
+}
+
+func (c *PricingCatalog) Revision() int64 {
+	if c == nil {
+		return 0
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.CatalogRevision
+}
+
+func (c *PricingCatalog) AcknowledgePricingInvalidation() error {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	c.mu.RLock()
+	if !c.pricingInvalidationPending {
+		c.mu.RUnlock()
+		return nil
+	}
+	cachePath := c.refreshCache
+	catalog := &PricingCatalog{
+		SchemaVersion: c.SchemaVersion, CatalogRevision: c.CatalogRevision,
+		GeneratedAt: c.GeneratedAt, Models: clonePricingModels(c.Models),
+	}
+	checks := clonePricingSourceChecks(c.sourceChecks)
+	c.mu.RUnlock()
+	if cachePath == "" {
+		return fmt.Errorf("pricing invalidation state has no durable cache path")
+	}
+	if err := writePricingCache(cachePath, catalog, checks, nil, false); err != nil {
+		return fmt.Errorf("persist pricing invalidation acknowledgement: %w", err)
+	}
+	c.mu.Lock()
+	c.pricingInvalidationPending = false
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *PricingCatalog) RestoreRefreshCache() error {
+	c.mu.RLock()
+	path := c.refreshCache
+	c.mu.RUnlock()
+	if path == "" {
+		return nil
+	}
+	next, checks, failure, err := readPricingCache(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("load refreshed pricing cache: %w", err)
+	}
+	c.mu.RLock()
+	seedRevision, currentRevision := c.seedRevision, c.CatalogRevision
+	c.mu.RUnlock()
+	if next.CatalogRevision < currentRevision {
+		if next.pricingInvalidationPending {
+			c.mu.Lock()
+			c.pricingInvalidationPending = true
+			c.mu.Unlock()
+		}
+		return nil
+	}
+	for index := range next.Models {
+		next.Models[index].Source.Kind = pricingPublicSourceKind(next.Models[index].Source.Kind)
+	}
+	next.seedRevision = seedRevision
+	c.mu.Lock()
+	c.SchemaVersion = next.SchemaVersion
+	c.CatalogRevision = next.CatalogRevision
+	c.GeneratedAt = next.GeneratedAt
+	c.Models = next.Models
+	c.seedRevision = next.seedRevision
+	c.pricingInvalidationPending = next.pricingInvalidationPending
+	c.sourceChecks = checks
+	c.refreshFailed = failure != nil
+	c.refreshStatus = ""
+	c.refreshWarnings = nil
+	if failure != nil {
+		c.refreshStatus = "failed"
+		c.refreshWarnings = append([]string(nil), failure.Warnings...)
+	}
+	c.mu.Unlock()
+	return nil
 }
 
 type PricingModel struct {
@@ -219,23 +354,47 @@ func (c *PricingCatalog) validate() error {
 	seen := map[string]bool{}
 	for i := range c.Models {
 		m := &c.Models[i]
+		m.Provider = strings.TrimSpace(m.Provider)
+		m.Model = strings.TrimSpace(m.Model)
 		if strings.TrimSpace(m.Provider) == "" || strings.TrimSpace(m.Model) == "" || len(m.Aliases) == 0 || len(m.Rates) == 0 {
 			return fmt.Errorf("invalid pricing model %d", i)
 		}
-		for _, alias := range m.Aliases {
+		for aliasIndex := range m.Aliases {
+			m.Aliases[aliasIndex] = strings.TrimSpace(m.Aliases[aliasIndex])
+			alias := m.Aliases[aliasIndex]
+			if alias == "" {
+				return fmt.Errorf("invalid pricing alias for %s", m.Model)
+			}
 			key := m.Provider + "\x00" + alias
 			if seen[key] {
 				return fmt.Errorf("duplicate pricing alias %s/%s", m.Provider, alias)
 			}
 			seen[key] = true
 		}
-		for _, rate := range m.Rates {
-			if rate.Scale <= 0 || rate.USD == "" || rate.EffectiveFrom == "" {
+		if sourceURL := strings.TrimSpace(m.Source.URL); sourceURL != "" {
+			parsed, err := url.Parse(sourceURL)
+			if err != nil || parsed.Scheme != "https" {
+				return fmt.Errorf("invalid pricing source URL for %s", m.Model)
+			}
+			m.Source.URL = sourceURL
+		}
+		for rateIndex := range m.Rates {
+			rate := &m.Rates[rateIndex]
+			rate.Direction = strings.TrimSpace(rate.Direction)
+			rate.Modality = strings.TrimSpace(rate.Modality)
+			rate.CacheRole = strings.TrimSpace(rate.CacheRole)
+			rate.Unit = strings.TrimSpace(rate.Unit)
+			rate.USD = strings.TrimSpace(rate.USD)
+			rate.EffectiveFrom = strings.TrimSpace(rate.EffectiveFrom)
+			if rate.Direction == "" || rate.Modality == "" || rate.CacheRole == "" || rate.Unit == "" || rate.Scale <= 0 || rate.USD == "" || rate.EffectiveFrom == "" {
 				return fmt.Errorf("invalid pricing rate for %s", m.Model)
 			}
-			if _, ok := new(big.Rat).SetString(rate.USD); !ok {
+			amount, ok := new(big.Rat).SetString(rate.USD)
+			if !ok || amount.Sign() < 0 {
 				return fmt.Errorf("invalid pricing usd for %s", m.Model)
 			}
+			rate.Profile = strings.TrimSpace(rate.Profile)
+			rate.ServiceTier = strings.TrimSpace(rate.ServiceTier)
 			if rate.Profile == "" {
 				rate.Profile = "default"
 			}
@@ -248,6 +407,8 @@ func (c *PricingCatalog) validate() error {
 }
 
 func (c *PricingCatalog) Refresh() (err error) {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
 	defer func() {
 		c.mu.Lock()
 		c.refreshFailed = err != nil
@@ -262,10 +423,7 @@ func (c *PricingCatalog) Refresh() (err error) {
 		if err != nil {
 			return err
 		}
-		c.mu.Lock()
-		c.SchemaVersion, c.CatalogRevision, c.GeneratedAt, c.Models = next.SchemaVersion, next.CatalogRevision, next.GeneratedAt, next.Models
-		c.seedRevision = next.seedRevision
-		c.mu.Unlock()
+		c.installRefreshedCatalog(next)
 		return nil
 	}
 	if path == "" {
@@ -275,11 +433,28 @@ func (c *PricingCatalog) Refresh() (err error) {
 	if err != nil {
 		return err
 	}
+	c.installRefreshedCatalog(next)
+	return nil
+}
+
+func (c *PricingCatalog) installRefreshedCatalog(next *PricingCatalog) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	// A source revision is scoped to its producer. The active catalog revision
+	// is local evidence and must remain monotonic across refreshes, even when a
+	// source is replayed or temporarily serves an older revision.
+	if next.CatalogRevision <= c.CatalogRevision {
+		next.CatalogRevision = c.CatalogRevision + 1
+	}
+	if next.seedRevision < c.seedRevision {
+		next.seedRevision = c.seedRevision
+	}
 	c.SchemaVersion, c.CatalogRevision, c.GeneratedAt, c.Models = next.SchemaVersion, next.CatalogRevision, next.GeneratedAt, next.Models
 	c.seedRevision = next.seedRevision
-	c.mu.Unlock()
-	return nil
+	// Publish the new revision and its invalidation barrier together. Readers
+	// must not observe prices from this catalog alongside ring products built
+	// against the previous revision.
+	c.pricingInvalidationPending = true
 }
 
 func containsPricingAlias(aliases []string, wanted string) bool {
@@ -301,34 +476,250 @@ func (c *PricingCatalog) Resolve(provider, model, direction, modality, cacheRole
 	if tier == "" {
 		tier = "default"
 	}
+	equivalent, switchyardRouted := switchyardEquivalentModel(model)
+	switchyardRouted = switchyardRouted && provider == "inferencehub"
 	for _, item := range c.Models {
 		if item.Provider != provider {
+			continue
+		}
+		kind := pricingSourceKind(item.Source)
+		if kind == "seed" {
 			continue
 		}
 		for _, alias := range item.Aliases {
 			if alias != model {
 				continue
 			}
-			var best *PricingRate
-			for i := range item.Rates {
-				rate := &item.Rates[i]
-				rp, rt := rate.Profile, rate.ServiceTier
-				if rp == "" {
-					rp = "default"
+			if best := matchingPricingRate(item.Rates, direction, modality, cacheRole, unit, profile, tier, timestamp); best != nil {
+				return &ResolvedPricingRate{Provider: provider, Model: item.Model, Alias: alias, Rate: *best, Source: item.Source, CatalogRevision: c.CatalogRevision}
+			}
+		}
+	}
+	if switchyardRouted {
+		if inferred := inferSwitchyardPricingRate(c.Models, equivalent, model, direction, modality, cacheRole, unit, profile, tier, timestamp, c.CatalogRevision); inferred != nil {
+			return inferred
+		}
+	}
+	for _, family := range inferredPricingFamilies(model) {
+		for _, item := range c.Models {
+			if item.Provider != provider || pricingSourceKind(item.Source) != "official" {
+				continue
+			}
+			for _, alias := range item.Aliases {
+				if alias != family {
+					continue
 				}
-				if rt == "" {
-					rt = "default"
-				}
-				if rate.Direction == direction && rate.Modality == modality && rate.CacheRole == cacheRole && rate.Unit == unit && rp == profile && rt == tier && rate.EffectiveFrom <= timestamp && (best == nil || rate.EffectiveFrom > best.EffectiveFrom) {
-					best = rate
+				if best := matchingPricingRate(item.Rates, direction, modality, cacheRole, unit, profile, tier, timestamp); best != nil {
+					inferredSource := item.Source
+					inferredSource.Kind = "inferred"
+					return &ResolvedPricingRate{Provider: provider, Model: item.Model, Alias: model, Rate: *best, Source: inferredSource, CatalogRevision: c.CatalogRevision}
 				}
 			}
-			if best != nil {
+		}
+	}
+	for _, item := range c.Models {
+		if item.Provider != provider || pricingSourceKind(item.Source) != "seed" {
+			continue
+		}
+		for _, alias := range item.Aliases {
+			if alias != model {
+				continue
+			}
+			if best := matchingPricingRate(item.Rates, direction, modality, cacheRole, unit, profile, tier, timestamp); best != nil {
 				return &ResolvedPricingRate{Provider: provider, Model: item.Model, Alias: alias, Rate: *best, Source: item.Source, CatalogRevision: c.CatalogRevision}
 			}
 		}
 	}
 	return nil
+}
+
+func switchyardEquivalentModel(model string) (string, bool) {
+	if !strings.HasPrefix(model, "switchyard/") {
+		return "", false
+	}
+	separator := strings.LastIndexByte(model, '/')
+	if separator < 0 || separator == len(model)-1 {
+		return "", false
+	}
+	return model[separator+1:], true
+}
+
+func equalPricingASCIIFold(left, right string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := 0; index < len(left); index++ {
+		leftByte, rightByte := left[index], right[index]
+		if leftByte >= 'A' && leftByte <= 'Z' {
+			leftByte += 'a' - 'A'
+		}
+		if rightByte >= 'A' && rightByte <= 'Z' {
+			rightByte += 'a' - 'A'
+		}
+		if leftByte != rightByte {
+			return false
+		}
+	}
+	return true
+}
+
+// Python treats an inferencehub Switchyard alias as an inferred market rate:
+// average the positive matching provider/model entries after exact route
+// identities have had their chance to resolve.
+func inferSwitchyardPricingRate(models []PricingModel, equivalent, alias, direction, modality, cacheRole, unit, profile, tier, timestamp string, revision int64) *ResolvedPricingRate {
+	type candidate struct {
+		provider string
+		model    string
+		rate     PricingRate
+		source   PricingSource
+		usd      *big.Rat
+	}
+	type modelIdentity struct {
+		provider string
+		model    string
+	}
+	latest := make(map[modelIdentity]candidate, len(models))
+	suffix := "/" + equivalent
+	for _, item := range models {
+		separator := strings.LastIndexByte(item.Model, '/')
+		matchesEquivalent := item.Model == equivalent ||
+			separator >= 0 && equalPricingASCIIFold(item.Model[separator:], suffix)
+		if !matchesEquivalent {
+			continue
+		}
+		rate := matchingPricingRate(item.Rates, direction, modality, cacheRole, unit, profile, tier, timestamp)
+		if rate == nil {
+			continue
+		}
+		usd, ok := new(big.Rat).SetString(rate.USD)
+		if !ok || usd.Sign() <= 0 {
+			continue
+		}
+		row := candidate{provider: item.Provider, model: item.Model, rate: *rate, source: item.Source, usd: usd}
+		key := modelIdentity{provider: item.Provider, model: item.Model}
+		previous, exists := latest[key]
+		if !exists || row.rate.EffectiveFrom > previous.rate.EffectiveFrom || row.rate.EffectiveFrom == previous.rate.EffectiveFrom && row.source.CheckedAt > previous.source.CheckedAt {
+			latest[key] = row
+		}
+	}
+	rows := make([]candidate, 0, len(latest))
+	for _, row := range latest {
+		rows = append(rows, row)
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].rate.EffectiveFrom != rows[j].rate.EffectiveFrom {
+			return rows[i].rate.EffectiveFrom > rows[j].rate.EffectiveFrom
+		}
+		if rows[i].source.CheckedAt != rows[j].source.CheckedAt {
+			return rows[i].source.CheckedAt > rows[j].source.CheckedAt
+		}
+		if rows[i].provider != rows[j].provider {
+			return rows[i].provider < rows[j].provider
+		}
+		return rows[i].model < rows[j].model
+	})
+	total := new(big.Rat)
+	for _, row := range rows {
+		total.Add(total, row.usd)
+	}
+	total.Quo(total, new(big.Rat).SetInt64(int64(len(rows))))
+	resolved := rows[0]
+	resolved.rate.USD = pricingRatDecimalString(total, 28)
+	resolved.source.Kind = "inferred"
+	return &ResolvedPricingRate{
+		Provider: "inferencehub", Model: equivalent, Alias: alias,
+		Rate: resolved.rate, Source: resolved.source, CatalogRevision: revision,
+	}
+}
+
+func pricingRatDecimalString(value *big.Rat, precision int) string {
+	if value.Sign() == 0 {
+		return "0"
+	}
+	numerator := new(big.Int).Abs(value.Num())
+	denominator := new(big.Int).Set(value.Denom())
+	exponent := len(numerator.String()) - len(denominator.String())
+	if exponent >= 0 {
+		boundary := new(big.Int).Mul(denominator, new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(exponent)), nil))
+		if numerator.Cmp(boundary) < 0 {
+			exponent--
+		}
+	} else {
+		boundary := new(big.Int).Mul(numerator, new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(-exponent)), nil))
+		if boundary.Cmp(denominator) < 0 {
+			exponent--
+		}
+	}
+	places := precision - 1 - exponent
+	scaledNumerator := new(big.Int).Set(numerator)
+	scaledDenominator := new(big.Int).Set(denominator)
+	if places >= 0 {
+		scaledNumerator.Mul(scaledNumerator, new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(places)), nil))
+	} else {
+		scaledDenominator.Mul(scaledDenominator, new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(-places)), nil))
+	}
+	quotient, remainder := new(big.Int), new(big.Int)
+	quotient.QuoRem(scaledNumerator, scaledDenominator, remainder)
+	doubledRemainder := new(big.Int).Lsh(new(big.Int).Set(remainder), 1)
+	comparison := doubledRemainder.Cmp(scaledDenominator)
+	if comparison > 0 || comparison == 0 && quotient.Bit(0) == 1 {
+		quotient.Add(quotient, big.NewInt(1))
+	}
+	digits := quotient.String()
+	if places < 0 {
+		digits += strings.Repeat("0", -places)
+	} else if places > 0 {
+		if len(digits) <= places {
+			digits = strings.Repeat("0", places-len(digits)+1) + digits
+		}
+		point := len(digits) - places
+		digits = digits[:point] + "." + digits[point:]
+	}
+	if strings.Contains(digits, ".") {
+		digits = strings.TrimRight(strings.TrimRight(digits, "0"), ".")
+	}
+	if value.Sign() < 0 {
+		return "-" + digits
+	}
+	return digits
+}
+
+func inferredPricingFamilies(model string) []string {
+	var families []string
+	if dated := pricingDatedModelSuffix.ReplaceAllString(model, ""); dated != model {
+		families = append(families, dated)
+	}
+	if variant := pricingVariantModelSuffix.ReplaceAllString(model, ""); variant != model && (len(families) == 0 || families[0] != variant) {
+		families = append(families, variant)
+	}
+	return families
+}
+
+func matchingPricingRate(rates []PricingRate, direction, modality, cacheRole, unit, profile, tier, timestamp string) *PricingRate {
+	if profile == "" {
+		profile = "default"
+	}
+	if tier == "" {
+		tier = "default"
+	}
+	var best *PricingRate
+	for i := range rates {
+		rate := &rates[i]
+		rp, rt := rate.Profile, rate.ServiceTier
+		if rp == "" {
+			rp = "default"
+		}
+		if rt == "" {
+			rt = "default"
+		}
+		if rate.Direction == direction && rate.Modality == modality && rate.CacheRole == cacheRole && rate.Unit == unit && rp == profile && rt == tier && rate.EffectiveFrom <= timestamp && (best == nil || rate.EffectiveFrom > best.EffectiveFrom) {
+			best = rate
+		}
+	}
+	return best
 }
 
 func catalogIdentity(provider, model string) (string, string) {
@@ -418,7 +809,7 @@ func (c *PricingCatalog) PublicPayload() map[string]any {
 			state = "stale"
 		}
 	}
-	if c.refreshFailed {
+	if c.refreshFailed && official {
 		state = "review-needed"
 	}
 	seedRevision := c.seedRevision
@@ -473,6 +864,9 @@ func PricingMicroUSD(quantity float64, rate *ResolvedPricingRate) (int64, error)
 	}
 	if !n.IsInt64() {
 		return 0, fmt.Errorf("projected cost exceeds int64")
+	}
+	if n.Cmp(big.NewInt(maxSafeJSONInteger)) > 0 {
+		return 0, fmt.Errorf("projected cost exceeds the JSON safe integer range")
 	}
 	return n.Int64(), nil
 }

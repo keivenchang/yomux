@@ -14,7 +14,7 @@ func cpuSnapshot(busy, total uint64, processes ...struct {
 	for _, process := range processes {
 		items[process.key] = CPUProcessCounters{Identity: process.identity, CPU: process.cpu}
 	}
-	return CPUSnapshot{Host: CPUHostCounters{Busy: busy, Total: total}, Processes: items}
+	return CPUSnapshot{Host: CPUHostCounters{Busy: busy, Total: total}, Processes: items, ProcessTicksPerSecond: 100}
 }
 
 func TestCPUDeltaSamplerScenarios(t *testing.T) {
@@ -132,10 +132,12 @@ func TestCPUDeltaSamplerUsesWallTimeAndLogicalCPUCount(t *testing.T) {
 		key, identity string
 		cpu           uint64
 	}{"pid:1", "pid-1", 0})
+	first.ProcessTicksPerSecond = 100
 	second := cpuSnapshot(100, 800, struct {
 		key, identity string
 		cpu           uint64
 	}{"pid:1", "pid-1", 200})
+	second.ProcessTicksPerSecond = 100
 	sampler := NewCPUDeltaSampler("pid:1", nil, 8)
 	sampler.Sample(first, time.Second)
 	got := sampler.Sample(second, 2*time.Second)
@@ -144,13 +146,30 @@ func TestCPUDeltaSamplerUsesWallTimeAndLogicalCPUCount(t *testing.T) {
 	}
 }
 
+func TestCPUDeltaSamplerKeepsCPUUnavailableWithoutCounterRate(t *testing.T) {
+	first := CPUSnapshot{Host: CPUHostCounters{Busy: 10, Total: 100}, Processes: map[string]CPUProcessCounters{
+		"pid:1": {Identity: "pid-1", CPU: 10, Binary: "yolomux-go"},
+	}}
+	second := CPUSnapshot{Host: CPUHostCounters{Busy: 20, Total: 200}, Processes: map[string]CPUProcessCounters{
+		"pid:1": {Identity: "pid-1", CPU: 20, Binary: "yolomux-go"},
+	}}
+	sampler := NewCPUDeltaSampler("pid:1", nil, 8)
+	sampler.Sample(first, time.Second)
+	got := sampler.Sample(second, time.Second)
+	if got.Reason != CPUUnavailable || !got.Host.Valid || got.Process.Valid || got.Group.Valid {
+		t.Fatalf("unknown process tick rate produced a process CPU estimate: %+v", got)
+	}
+}
+
 func TestCPUDeltaSamplerKeepsProcessRelativeCPUAboveOneCore(t *testing.T) {
 	first := CPUSnapshot{Host: CPUHostCounters{Busy: 0, Total: 1000}, Processes: map[string]CPUProcessCounters{
 		"pid:1": {Identity: "pid-1", CPU: 0, Binary: "yolomux-go"},
 	}}
+	first.ProcessTicksPerSecond = 100
 	second := CPUSnapshot{Host: CPUHostCounters{Busy: 100, Total: 1100}, Processes: map[string]CPUProcessCounters{
 		"pid:1": {Identity: "pid-1", CPU: 450, Binary: "yolomux-go"},
 	}}
+	second.ProcessTicksPerSecond = 100
 	sampler := NewCPUDeltaSampler("pid:1", nil, 8)
 	sampler.Sample(first, time.Second)
 	got := sampler.Sample(second, time.Second)
@@ -180,6 +199,26 @@ func TestCPUDeltaSamplerUsesSnapshotProcessCounterRate(t *testing.T) {
 	}
 	if got.ProcessCPUPercent["yolomux-go"] != 12.5 {
 		t.Fatalf("grouped process sample = %#v, want 12.5%%", got.ProcessCPUPercent)
+	}
+}
+
+func TestCPUDeltaSamplerKeepsYoloMuxGoInstancesSeparate(t *testing.T) {
+	first := CPUSnapshot{Host: CPUHostCounters{Busy: 100, Total: 200}, ProcessTicksPerSecond: 100, Processes: map[string]CPUProcessCounters{
+		"101:10": {Identity: "101:10", CPU: 100, Binary: "yolomux_go"},
+		"202:20": {Identity: "202:20", CPU: 200, Binary: "yolomux_go"},
+	}}
+	second := CPUSnapshot{Host: CPUHostCounters{Busy: 140, Total: 240}, ProcessTicksPerSecond: 100, Processes: map[string]CPUProcessCounters{
+		"101:10": {Identity: "101:10", CPU: 110, Binary: "yolomux_go"},
+		"202:20": {Identity: "202:20", CPU: 260, Binary: "yolomux_go"},
+	}}
+	sampler := NewCPUDeltaSampler("yolomux_go", nil, 1)
+	sampler.Sample(first, time.Second)
+	got := sampler.Sample(second, time.Second)
+	if got.Reason != CPUValid || len(got.ProcessCPUPercent) != 2 {
+		t.Fatalf("Go instance CPU series = %#v, want two distinct rows", got.ProcessCPUPercent)
+	}
+	if got.ProcessCPUPercent[hostProcessInstanceSeriesKey("yolomux_go", "101:10")] != 10 || got.ProcessCPUPercent[hostProcessInstanceSeriesKey("yolomux_go", "202:20")] != 60 {
+		t.Fatalf("Go instance CPU series = %#v, want PID 101=10%% and PID 202=60%%", got.ProcessCPUPercent)
 	}
 }
 
@@ -214,7 +253,8 @@ func TestCPUDeltaSamplerPreservesPIDMembershipAndReset(t *testing.T) {
 
 func TestCPUDeltaSamplerRuntimeSnapshotsEmitAllStableBinarySeries(t *testing.T) {
 	first := CPUSnapshot{
-		Host: CPUHostCounters{Busy: 100, Total: 200},
+		Host:                  CPUHostCounters{Busy: 100, Total: 200},
+		ProcessTicksPerSecond: 100,
 		Processes: map[string]CPUProcessCounters{
 			"101:10": {Identity: "101:10", CPU: 100, Binary: "yolomux-go"},
 			"102:20": {Identity: "102:20", CPU: 50, Binary: "python"},
@@ -223,7 +263,8 @@ func TestCPUDeltaSamplerRuntimeSnapshotsEmitAllStableBinarySeries(t *testing.T) 
 		},
 	}
 	second := CPUSnapshot{
-		Host: CPUHostCounters{Busy: 140, Total: 240},
+		Host:                  CPUHostCounters{Busy: 140, Total: 240},
+		ProcessTicksPerSecond: 100,
 		Processes: map[string]CPUProcessCounters{
 			"101:10": {Identity: "101:10", CPU: 120, Binary: "yolomux-go"},
 			"102:20": {Identity: "102:20", CPU: 60, Binary: "python"},
@@ -237,7 +278,7 @@ func TestCPUDeltaSamplerRuntimeSnapshotsEmitAllStableBinarySeries(t *testing.T) 
 	if got.Reason != CPUValid || !got.Process.Valid || !got.Group.Valid {
 		t.Fatalf("runtime sample = %+v", got)
 	}
-	want := map[string]float64{"node": 5, "python": 20, "yolomux-go": 20}
+	want := map[string]float64{"node": 5, "python": 20, hostProcessInstanceSeriesKey("yolomux-go", "101:10"): 20}
 	if !reflect.DeepEqual(got.ProcessCPUPercent, want) {
 		t.Fatalf("grouped series = %#v, want %#v", got.ProcessCPUPercent, want)
 	}
@@ -245,14 +286,16 @@ func TestCPUDeltaSamplerRuntimeSnapshotsEmitAllStableBinarySeries(t *testing.T) 
 
 func TestCPUDeltaSamplerRuntimeSnapshotsSkipChangedBinaryMembership(t *testing.T) {
 	first := CPUSnapshot{
-		Host: CPUHostCounters{Busy: 100, Total: 200},
+		Host:                  CPUHostCounters{Busy: 100, Total: 200},
+		ProcessTicksPerSecond: 100,
 		Processes: map[string]CPUProcessCounters{
 			"101:10": {Identity: "101:10", CPU: 100, Binary: "yolomux-go"},
 			"102:20": {Identity: "102:20", CPU: 50, Binary: "python"},
 		},
 	}
 	second := CPUSnapshot{
-		Host: CPUHostCounters{Busy: 140, Total: 240},
+		Host:                  CPUHostCounters{Busy: 140, Total: 240},
+		ProcessTicksPerSecond: 100,
 		Processes: map[string]CPUProcessCounters{
 			"101:10": {Identity: "101:10", CPU: 120, Binary: "yolomux-go"},
 			"103:30": {Identity: "103:30", CPU: 60, Binary: "python"},
@@ -264,18 +307,18 @@ func TestCPUDeltaSamplerRuntimeSnapshotsSkipChangedBinaryMembership(t *testing.T
 	if got.Reason != CPUValid {
 		t.Fatalf("membership sample = %+v", got)
 	}
-	if !reflect.DeepEqual(got.ProcessCPUPercent, map[string]float64{"yolomux-go": 20}) {
+	if !reflect.DeepEqual(got.ProcessCPUPercent, map[string]float64{hostProcessInstanceSeriesKey("yolomux-go", "101:10"): 20}) {
 		t.Fatalf("grouped series = %#v", got.ProcessCPUPercent)
 	}
 }
 
 func TestCPUDeltaSamplerOwnedIdentityExcludesSameNamedCotenants(t *testing.T) {
-	first := CPUSnapshot{Host: CPUHostCounters{Busy: 100, Total: 200}, Processes: map[string]CPUProcessCounters{
+	first := CPUSnapshot{Host: CPUHostCounters{Busy: 100, Total: 200}, ProcessTicksPerSecond: 100, Processes: map[string]CPUProcessCounters{
 		"101:10": {Identity: "101:10", CPU: 10, Binary: "yolomux-go"},
 		"202:20": {Identity: "202:20", CPU: 30, Binary: "yolomux-go"},
 		"303:30": {Identity: "303:30", CPU: 40, Binary: "python"},
 	}}
-	second := CPUSnapshot{Host: CPUHostCounters{Busy: 140, Total: 240}, Processes: map[string]CPUProcessCounters{
+	second := CPUSnapshot{Host: CPUHostCounters{Busy: 140, Total: 240}, ProcessTicksPerSecond: 100, Processes: map[string]CPUProcessCounters{
 		"101:10": {Identity: "101:10", CPU: 20, Binary: "yolomux-go"},
 		"202:20": {Identity: "202:20", CPU: 80, Binary: "yolomux-go"},
 		"303:30": {Identity: "303:30", CPU: 60, Binary: "python"},
@@ -297,12 +340,12 @@ func TestCPUDeltaSamplerOwnedIdentityExcludesSameNamedCotenants(t *testing.T) {
 }
 
 func TestCPUDeltaSamplerScopesProcessButKeepsHostTopUsers(t *testing.T) {
-	first := CPUSnapshot{Host: CPUHostCounters{Busy: 100, Total: 200}, Processes: map[string]CPUProcessCounters{
+	first := CPUSnapshot{Host: CPUHostCounters{Busy: 100, Total: 200}, ProcessTicksPerSecond: 100, Processes: map[string]CPUProcessCounters{
 		"101:10": {Identity: "101:10", CPU: 100, Binary: "yolomux-go"},
 		"202:20": {Identity: "202:20", CPU: 200, Binary: "yolomux-go"},
 		"303:30": {Identity: "303:30", CPU: 50, Binary: "python"},
 	}}
-	second := CPUSnapshot{Host: CPUHostCounters{Busy: 140, Total: 240}, Processes: map[string]CPUProcessCounters{
+	second := CPUSnapshot{Host: CPUHostCounters{Busy: 140, Total: 240}, ProcessTicksPerSecond: 100, Processes: map[string]CPUProcessCounters{
 		"101:10": {Identity: "101:10", CPU: 110, Binary: "yolomux-go"},
 		"202:20": {Identity: "202:20", CPU: 260, Binary: "yolomux-go"},
 		"303:30": {Identity: "303:30", CPU: 70, Binary: "python"},
@@ -314,7 +357,11 @@ func TestCPUDeltaSamplerScopesProcessButKeepsHostTopUsers(t *testing.T) {
 	if got.Reason != CPUValid || !got.Process.Valid || got.Process.Value != 10 {
 		t.Fatalf("owned process sample = %+v, want 10%%", got)
 	}
-	wantUsers := map[string]float64{"yolomux-go": 70, "python": 20}
+	wantUsers := map[string]float64{
+		hostProcessInstanceSeriesKey("yolomux-go", "101:10"): 10,
+		hostProcessInstanceSeriesKey("yolomux-go", "202:20"): 60,
+		"python": 20,
+	}
 	if !reflect.DeepEqual(got.ProcessCPUPercent, wantUsers) {
 		t.Fatalf("host top-user series = %#v, want %#v", got.ProcessCPUPercent, wantUsers)
 	}
@@ -324,8 +371,8 @@ func TestCPUDeltaSamplerScopesProcessButKeepsHostTopUsers(t *testing.T) {
 }
 
 func TestCPUDeltaSamplerBoundsBinarySeriesToTopFour(t *testing.T) {
-	first := CPUSnapshot{Host: CPUHostCounters{Busy: 100, Total: 200}, Processes: map[string]CPUProcessCounters{}}
-	second := CPUSnapshot{Host: CPUHostCounters{Busy: 200, Total: 300}, Processes: map[string]CPUProcessCounters{}}
+	first := CPUSnapshot{Host: CPUHostCounters{Busy: 100, Total: 200}, ProcessTicksPerSecond: 100, Processes: map[string]CPUProcessCounters{}}
+	second := CPUSnapshot{Host: CPUHostCounters{Busy: 200, Total: 300}, ProcessTicksPerSecond: 100, Processes: map[string]CPUProcessCounters{}}
 	for index, binary := range []string{"alpha", "bravo", "charlie", "delta", "echo", "foxtrot"} {
 		identity := binary + "-pid"
 		first.Processes[identity] = CPUProcessCounters{Identity: identity, CPU: 0, Binary: binary}

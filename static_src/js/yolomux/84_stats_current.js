@@ -76,7 +76,7 @@
   const CURRENT_COST_MAX_AGENTS = 16;
   const CURRENT_COST_MAX_EVIDENCE = 32;
   const CURRENT_STATS_PENDING_RETRY_MAX_SECONDS = 60;
-  const CURRENT_STATS_MAX_SNAPSHOT_CHUNKS = 64;
+  const CURRENT_STATS_MAX_SNAPSHOT_CHUNKS = 512;
   const DELTA_REJECTION_PHASE_CODES = Object.freeze({
     envelope: 'e',
     key: 'k',
@@ -244,6 +244,20 @@
       activeDeltaRevision = 0;
       publish(snapshot, true);
       clearRepair();
+      return true;
+    }
+
+    function acceptStreamRevision(cacheGeneration, revision) {
+      if (!activeGeneration
+          || activeGeneration.cache_generation !== cacheGeneration
+          || !Number.isSafeInteger(revision)
+          || revision < 0) return false;
+      activeDeltaRevision = revision;
+      const key = selectionSnapshotKey();
+      const cached = selectionSnapshots.get(key);
+      if (cached?.generation === activeGeneration) {
+        selectionSnapshots.set(key, Object.freeze({...cached, deltaRevision: revision}));
+      }
       return true;
     }
 
@@ -786,6 +800,7 @@
     return Object.freeze({
       acceptDelta,
       acceptSnapshot,
+      acceptStreamRevision,
       axis: axisContract,
       buildDeltaRequest,
       buildRequest,
@@ -839,10 +854,15 @@
     const onTerminalAuthentication = options.onTerminalAuthentication || (() => {});
     const userOnGeneration = controllerOptions.onGeneration || (() => {});
     const userOnDelta = controllerOptions.onDelta || userOnGeneration;
+    const userOnRuntime = controllerOptions.onRuntime || (() => {});
     const userOnRepairNeeded = controllerOptions.onRepairNeeded || (() => {});
     const userOnRepairComplete = controllerOptions.onRepairComplete || (() => {});
     const failureOwner = createTransportFailureOwner(controllerOptions.onFailure, controllerOptions.onRetirement, () => streamEvidence());
     const readinessTimeoutMs = positiveInteger(options.readinessTimeoutMs ?? 10_000, 'readinessTimeoutMs');
+    // A cold Go product is demand-driven and can take longer than the normal
+    // transport-start budget. The measured full-build range is 25-56 seconds;
+    // keep a separate bounded deadline once the server proves it is working.
+    const pendingReadinessTimeoutMs = positiveInteger(options.pendingReadinessTimeoutMs ?? 120_000, 'pendingReadinessTimeoutMs');
     const readinessRetryMs = positiveInteger(options.readinessRetryMs ?? 1_000, 'readinessRetryMs');
     const clientId = String(options.clientId ?? controllerOptions.clientId ?? '').trim();
     let savedRange = options.savedRange ?? controllerOptions.savedRange;
@@ -857,6 +877,8 @@
     let visible = true;
     let readFenceRecovery = null;
     let readinessEpoch = 0;
+    let pendingReadinessEpoch = 0;
+    let readinessReject = null;
     let healthy = false;
     let terminalAuthenticationError = null;
     let deliverySequence = 0;
@@ -932,6 +954,19 @@
 
     function clearReadinessTimer() {
       lifecycleScope?.release('readiness-timer');
+    }
+
+    function armReadinessTimer(epoch, timeoutMs, reject = null, forceFailure = false) {
+      const scope = ensureLifecycleScope();
+      clearReadinessTimer();
+      if (!running || !visible || typeof clock.setTimeout !== 'function') return;
+      const timer = clock.setTimeout(() => {
+        scope.release('readiness-timer', timer);
+        const error = new Error(`current stats readiness timed out after ${timeoutMs}ms`);
+        if ((forceFailure || startPromise === null) && handleReadinessFailure(error, epoch)) scheduleReadinessRetry();
+        (reject || readinessReject)?.(error);
+      }, timeoutMs);
+      scope.ownTimer('readiness-timer', timer, value => clock.clearTimeout(value));
     }
 
     function readinessMessage(error) {
@@ -1074,6 +1109,7 @@
 
       return new Promise((resolve, reject) => {
         let settled = false;
+        let pendingBeforeReadiness = false;
         let acknowledgement = null;
         let fullSnapshot = null;
         let assembly = null;
@@ -1111,6 +1147,16 @@
         const handleTypedStreamError = (event, kind) => {
           try {
             const error = snapshotStreamError(JSON.parse(event.data), kind);
+            if (kind === 'pending' && !settled) {
+              pendingBeforeReadiness = true;
+              onState('pending', error);
+              const readiness = readinessEpoch;
+              if (pendingReadinessEpoch !== readiness) {
+                pendingReadinessEpoch = readiness;
+                armReadinessTimer(readiness, pendingReadinessTimeoutMs, null, true);
+              }
+              return;
+            }
             if (!settled) void fail(error);
             else void routeTypedStreamError(candidate, epoch, error);
           } catch (error) {
@@ -1170,6 +1216,27 @@
             routeStreamFailure(candidate, epoch);
           }
         });
+        scope.ownEvent('stream-runtime', candidate, 'runtime', event => {
+          if (!current() || !settled) return;
+          try {
+            const value = JSON.parse(event.data);
+            exactFields(value, ['cache_generation', 'load'], 'runtime load');
+            generationNumber(value.cache_generation, 'runtime load cache_generation');
+            const generation = controller?.generation();
+            if (!generation || value.cache_generation !== generation.cache_generation) throw new Error('runtime load generation does not match current snapshot');
+            if (!value.load || typeof value.load !== 'object' || Array.isArray(value.load)) throw new Error('runtime load is not an object');
+            for (const [key, item] of Object.entries(value.load)) {
+              if (!/^[A-Za-z0-9_.:-]{1,96}$/.test(key) || !item || typeof item !== 'object' || Array.isArray(item)) throw new Error('runtime load entry is invalid');
+              const percent = Number(item.load_percent);
+              if (!Number.isFinite(percent) || percent < 0 || percent > 1e6) throw new Error('runtime load percentage is invalid');
+            }
+            userOnRuntime(Object.freeze(value.load));
+            recordStreamDelivery('runtime', epoch, {emitId: event.lastEventId});
+            controller?.noteStreamHeartbeat?.();
+          } catch (error) {
+            routeStreamFailure(candidate, epoch);
+          }
+        });
         scope.ownEvent('stream-ready', candidate, 'ready', event => {
           if (!current()) return;
           try {
@@ -1178,14 +1245,21 @@
             generationNumber(ready.cache_generation, 'ready.cache_generation');
             if (!Number.isSafeInteger(ready.revision) || ready.revision < 0) throw new Error('ready revision is invalid');
             if (!settled) {
-              if (!acknowledgement || ready.cache_generation !== acknowledgement.cache_generation || ready.revision !== 0) {
+              if (!acknowledgement || ready.cache_generation !== acknowledgement.cache_generation) {
                 throw new Error('initial ready cursor does not match snapshot ack');
               }
               let value;
-              if (acknowledgement.not_modified) value = SNAPSHOT_NOT_MODIFIED;
-              else if (assembly) value = assembly.snapshot();
-              else if (fullSnapshot) value = fullSnapshot;
-              else throw new Error('initial ready arrived without snapshot data');
+              if (acknowledgement.not_modified) {
+                value = SNAPSHOT_NOT_MODIFIED;
+                if (!controller?.acceptStreamRevision(ready.cache_generation, ready.revision)) {
+                  throw new Error('not-modified ready cursor does not match the active generation');
+                }
+              } else {
+                if (ready.revision !== 0) throw new Error('full snapshot ready cursor must start at revision zero');
+                if (assembly) value = assembly.snapshot();
+                else if (fullSnapshot) value = fullSnapshot;
+                else throw new Error('initial ready arrived without snapshot data');
+              }
               if (value !== SNAPSHOT_NOT_MODIFIED && value.cache_generation !== ready.cache_generation) {
                 throw new Error('snapshot data does not match the ready cursor');
               }
@@ -1227,6 +1301,8 @@
           handleTypedStreamError(event, 'unavailable');
         });
         scope.ownEvent('stream-error', candidate, 'error', () => {
+          // A cold Go product closes its pending SSE response; EventSource reports that close while reconnecting.
+          if (!settled && pendingBeforeReadiness) return;
           if (!settled) void fail(new Error('YO!stats stream unavailable before snapshot readiness'));
           else routeStreamTransportError(candidate, epoch);
         });
@@ -1235,7 +1311,7 @@
 
     function closeStream() {
       streamEpoch += 1;
-      for (const eventName of ['ack', 'snapshot', 'delta', 'ready', 'pending', 'upgrade-required', 'repair', 'unavailable', 'error']) {
+      for (const eventName of ['ack', 'snapshot', 'delta', 'runtime', 'ready', 'pending', 'upgrade-required', 'repair', 'unavailable', 'error']) {
         lifecycleScope?.release(`stream-${eventName}`);
       }
       lifecycleScope?.release('stream');
@@ -1339,17 +1415,12 @@
       }
       const epoch = readinessEpoch + 1;
       readinessEpoch = epoch;
+      pendingReadinessEpoch = 0;
       clearReadinessTimer();
       const timeout = typeof clock.setTimeout === 'function'
         ? new Promise((_resolve, reject) => {
-          const scope = ensureLifecycleScope();
-          const timer = clock.setTimeout(() => {
-            scope.release('readiness-timer', timer);
-            const error = new Error(`current stats readiness timed out after ${readinessTimeoutMs}ms`);
-            if (startPromise === null && handleReadinessFailure(error, epoch)) scheduleReadinessRetry();
-            reject(error);
-          }, readinessTimeoutMs);
-          scope.ownTimer('readiness-timer', timer, value => clock.clearTimeout(value));
+          readinessReject = reject;
+          armReadinessTimer(epoch, readinessTimeoutMs, reject);
         })
         : null;
       const activation = Promise.resolve().then(() => activate(epoch));
@@ -1361,6 +1432,7 @@
         retryAfterFailure = handleReadinessFailure(error, epoch);
         throw error;
       }).finally(() => {
+        readinessReject = null;
         if (startPromise === observed) startPromise = null;
         if (retryAfterFailure) scheduleReadinessRetry();
       });
@@ -1472,6 +1544,7 @@
     const suppliedControllerOptions = options.controllerOptions || {};
     const suppliedOnGeneration = suppliedControllerOptions.onGeneration || (() => {});
     const suppliedOnDelta = suppliedControllerOptions.onDelta || suppliedOnGeneration;
+    const suppliedOnRuntime = suppliedControllerOptions.onRuntime || (() => {});
     const suppliedOnViewport = suppliedControllerOptions.onViewport || (() => {});
     let client = null;
     let destroyed = false;
@@ -1512,6 +1585,9 @@
         onDelta(generation, delta) {
           suppliedOnDelta(generation, delta);
           if (renderVisible) renderer.render(generation, client.controller().presentation());
+        },
+        onRuntime(load) {
+          suppliedOnRuntime(load);
         },
         onViewport(frame) {
           suppliedOnViewport(frame);
@@ -2616,8 +2692,6 @@
     const chunkEnd = generationNumber(chunk.chunk_end, 'snapshot chunk_end');
     if (!(windowStart <= chunkStart && chunkStart < chunkEnd && chunkEnd <= windowEnd)) throw new Error('snapshot chunk bounds lie outside the full window');
     if ((chunkStart - windowStart) % concrete || (chunkEnd - windowStart) % concrete) throw new Error('snapshot chunk bounds are not bucket aligned');
-    if (chunkIndex === 0 && chunkStart !== windowStart) throw new Error('first snapshot chunk does not start the full window');
-    if (chunkIndex === chunkCount - 1 && chunkEnd !== windowEnd) throw new Error('final snapshot chunk does not end the full window');
     if (!Number.isFinite(chunk.generated_at) || chunk.generated_at < 0) {
       throw new Error('snapshot chunk generated_at is invalid');
     }
@@ -2627,7 +2701,7 @@
     validateNoData(chunk.no_data, chunkStart, chunkEnd);
     validateCostReport(chunk.cost_report);
     const finalOpen = chunk.buckets.at(-1)?.open === true;
-    if (finalOpen !== (chunkIndex === chunkCount - 1 && chunk.rightmost_open)) {
+    if (finalOpen !== (chunkEnd === windowEnd && chunk.rightmost_open)) {
       throw new Error('snapshot chunk open state disagrees');
     }
   }
@@ -2671,8 +2745,9 @@
         return false;
       }
       for (const accepted of chunks.values()) {
-        if (chunk.chunk_start < accepted.chunk_end && chunk.chunk_end > accepted.chunk_start) {
-          throw new Error('snapshot chunks overlap');
+        if (chunk.chunk_start < accepted.chunk_end && chunk.chunk_end > accepted.chunk_start
+            && (chunk.chunk_start !== accepted.chunk_start || chunk.chunk_end !== accepted.chunk_end)) {
+          throw new Error('snapshot chunks overlap without sharing an exact fragment range');
         }
       }
       chunks.set(chunk.chunk_index, freezeJson(chunk));
@@ -2685,9 +2760,17 @@
 
     function assembledSnapshot() {
       const ordered = orderedChunks();
+      const bucketsByStart = new Map();
+      for (const chunk of ordered) {
+        for (const bucket of chunk.buckets) {
+          const existing = bucketsByStart.get(bucket.start);
+          if (existing && !sameJson(existing, bucket)) throw new Error('snapshot fragments disagree on bucket data');
+          bucketsByStart.set(bucket.start, bucket);
+        }
+      }
       return freezeJson({
         ...shared,
-        buckets: ordered.flatMap(chunk => chunk.buckets),
+        buckets: [...bucketsByStart.values()].sort((left, right) => left.start - right.start),
         no_data: mergeSnapshotChunkNoData(ordered),
       });
     }
@@ -2697,13 +2780,6 @@
       accept,
       snapshot() {
         if (chunks.size !== firstChunk.chunk_count) throw new Error('snapshot chunks are incomplete');
-        const ordered = orderedChunks();
-        if (ordered[0].chunk_start !== firstChunk.window_start || ordered.at(-1).chunk_end !== firstChunk.window_end) {
-          throw new Error('snapshot chunks do not cover the full window');
-        }
-        for (let index = 1; index < ordered.length; index += 1) {
-          if (ordered[index - 1].chunk_end !== ordered[index].chunk_start) throw new Error('snapshot chunks are not contiguous');
-        }
         const candidate = assembledSnapshot();
         validateSnapshot(candidate, {
           range_seconds: request.range_seconds,

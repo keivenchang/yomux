@@ -10,10 +10,15 @@ import (
 )
 
 const (
-	MaxEventIDBytes         = 512
-	MaxIdentityBytes        = 256
-	MaxSeriesComponentBytes = 192
-	MaxPayloadBytes         = 256 * 1024
+	MaxEventIDBytes                  = 512
+	MaxIdentityBytes                 = 256
+	MaxSeriesComponentBytes          = 192
+	MaxPayloadBytes                  = 256 * 1024
+	MaxStatsSnapshotChunkTargetBytes = 1 * 1024 * 1024
+	MaxStatsSnapshotChunkBytes       = 4 * 1024 * 1024
+	// Keep room for a 24-hour agent-token window with dense persisted no-data spans.
+	MaxStatsSnapshotChunks = 512
+	MaxStatsSnapshotBytes  = 512 * 1024 * 1024
 )
 
 type Observation struct {
@@ -427,7 +432,7 @@ func currentFamilyFields(family string) (map[string]bool, map[string]bool) {
 	requiredFields := map[string][]string{
 		"cpu": {"process_percent", "system_percent"}, "agent_status": {"states"},
 		"gpu":          {"util_percent", "memory_used_bytes", "memory_capacity_bytes", "label"},
-		"service_load": {"running", "cpu_percent", "rss_bytes"}, "system_memory": {"used_bytes", "capacity_bytes"}, "browser": {"kind"},
+		"service_load": {"running", "cpu_percent"}, "system_memory": {"used_bytes", "capacity_bytes"}, "browser": {"kind"},
 	}
 	names, ok := fields[family]
 	if !ok {

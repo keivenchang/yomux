@@ -99,7 +99,7 @@ func validateWriterFence(path string) error {
 	if err := json.Unmarshal(data, &fence); err != nil {
 		return fmt.Errorf("writer fence is malformed: %w", err)
 	}
-	if fence.ApplicationID != ApplicationID || fence.DatabaseFilename != filepath.Base(path) || fence.SchemaVersion != SchemaVersion || fence.MinimumWriterProtocol > writerProtocol || fence.MinimumWriterBuild > writerBuild {
+	if fence.ApplicationID != ApplicationID || fence.DatabaseFilename != filepath.Base(path) || (fence.SchemaVersion != SchemaVersion && fence.SchemaVersion != checkpointSchemaVersion) || fence.MinimumWriterProtocol > checkpointWriterProtocol || fence.MinimumWriterBuild > writerBuild {
 		return &SchemaTooNewError{Found: fence.SchemaVersion, Supported: SchemaVersion}
 	}
 	return nil
@@ -116,7 +116,11 @@ func writerReadOnlyURI(path string) string {
 }
 
 func publishWriterFence(path string) error {
-	fence := writerFence{ApplicationID: ApplicationID, DatabaseFilename: filepath.Base(path), SchemaVersion: SchemaVersion, MinimumWriterProtocol: writerProtocol, MinimumWriterBuild: writerBuild}
+	return publishWriterFenceVersion(path, SchemaVersion, writerProtocol)
+}
+
+func publishWriterFenceVersion(path string, version int64, protocol int) error {
+	fence := writerFence{ApplicationID: ApplicationID, DatabaseFilename: filepath.Base(path), SchemaVersion: version, MinimumWriterProtocol: int64(protocol), MinimumWriterBuild: writerBuild}
 	data, err := json.Marshal(fence)
 	if err != nil {
 		return err

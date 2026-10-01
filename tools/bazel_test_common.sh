@@ -91,14 +91,32 @@ bazel_test_prepare_environment() {
   local root="$test_root/yolomux-agent-environment"
   local short_tmpdir
   local directory
+  local variable
   mkdir -p -- "$root"
   for directory in home xdg-config xdg-data xdg-state xdg-cache codex-home claude-config xdg-runtime tmp; do
     mkdir -p -- "$root/$directory"
     chmod 700 -- "$root/$directory"
   done
 
-  # Bazel gives every test action its own TEST_TMPDIR. Do not inherit a developer's agent
-  # configuration or point two concurrent actions at the same client state.
+  # Keep only the Bazel runner controls needed after this boundary. Product roots, client
+  # database/transcript overrides, tmux selection, and Python import roots must not leak from
+  # the host or a parent action into Go/browser fixtures.
+  while IFS= read -r variable; do
+    case "$variable" in
+      YOLOMUX_TEST_CONTAINER|YOLOMUX_GO_BINARY|YOLOMUX_GO_STATS_BROWSER_TEST|YOLOMUX_TEST_SOURCE_ROOT|YOLOMUX_WORKTREE_WRITER_SLOT)
+        continue
+        ;;
+      YOLOMUX_*|XDG_*|OPENCODE_*|CODEX_*|CLAUDE_*|TMUX|TMUX_PANE|TMUX_TMPDIR|PYTHONPATH|PYTHONHOME|PYTHONPYCACHEPREFIX)
+        unset "$variable"
+        ;;
+      ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|GH_TOKEN|GITHUB_TOKEN|GOOGLE_API_KEY|GOOGLE_APPLICATION_CREDENTIALS|HF_TOKEN|HUGGINGFACE_HUB_TOKEN|LINEAR_KEY|NGC_API_KEY|OPENAI_API_KEY)
+        unset "$variable"
+        ;;
+    esac
+  done < <(compgen -e)
+
+  # Bazel gives every test action its own TEST_TMPDIR. Do not point parallel actions at shared
+  # client state; the remaining client roots are fixture-owned below.
   export HOME="$root/home"
   export XDG_CONFIG_HOME="$root/xdg-config"
   export XDG_DATA_HOME="$root/xdg-data"

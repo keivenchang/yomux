@@ -1,8 +1,11 @@
 package stats
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -28,6 +31,11 @@ type CPUSnapshot struct {
 	Host                  CPUHostCounters
 	Processes             map[string]CPUProcessCounters
 	ProcessTicksPerSecond uint64
+	// ProcessCensusIncomplete marks snapshots that retain the owned process
+	// after a host-wide census failed or was partial. Those rows may support
+	// owned-process measurements but must not be published as a complete host
+	// process breakdown.
+	ProcessCensusIncomplete bool
 }
 
 type CPUMeasurement struct {
@@ -49,15 +57,15 @@ const (
 )
 
 type CPUSample struct {
-	Host              CPUMeasurement
-	Process           CPUMeasurement
-	Group             CPUMeasurement
-	ProcessCPUPercent map[string]float64
+	Host                    CPUMeasurement
+	Process                 CPUMeasurement
+	Group                   CPUMeasurement
+	ProcessCPUPercent       map[string]float64
+	ProcessCensusIncomplete bool
 	// OwnedProcessCPUPercent is the wall-clock CPU series for the process
-	// identity selected by the collector. ProcessCPUPercent deliberately keeps
-	// the host-wide, executable-grouped view used by the top-process chart; the
-	// owned series must stay separate so same-named co-tenants cannot inflate a
-	// Go Daemons row.
+	// identity selected by the collector. ProcessCPUPercent keeps the host-wide
+	// top-process view; same-named yolomux-go processes are keyed by instance so
+	// separate servers do not collapse into one chart series.
 	OwnedProcessCPUPercent map[string]float64
 	Reason                 CPUSampleReason
 }
@@ -73,6 +81,33 @@ type CPUDeltaSampler struct {
 	logicalCPUs     int
 	wallProcess     bool
 	previous        *CPUSnapshot
+}
+
+// clone preserves the pending delta boundary while a host collector decides
+// whether the corresponding facts were durably appended. CPU samples are
+// speculative until that append succeeds; retaining a private copy lets the
+// collector replay the same interval after a transient writer failure.
+func (s *CPUDeltaSampler) clone() *CPUDeltaSampler {
+	if s == nil {
+		return nil
+	}
+	copySampler := *s
+	copySampler.groupKeys = append([]string(nil), s.groupKeys...)
+	if s.previous != nil {
+		copySampler.previous = cloneCPUSnapshot(*s.previous)
+	}
+	return &copySampler
+}
+
+func (s *CPUDeltaSampler) restore(snapshot *CPUDeltaSampler) {
+	if s == nil || snapshot == nil {
+		return
+	}
+	*s = *snapshot
+	s.groupKeys = append([]string(nil), snapshot.groupKeys...)
+	if snapshot.previous != nil {
+		s.previous = cloneCPUSnapshot(*snapshot.previous)
+	}
 }
 
 const maxProcessCPUSeries = 4
@@ -98,6 +133,7 @@ func (s *CPUDeltaSampler) Sample(snapshot CPUSnapshot, wallDuration time.Duratio
 	}
 	previous := s.previous
 	s.previous = cloneCPUSnapshot(snapshot)
+	result.ProcessCensusIncomplete = snapshot.ProcessCensusIncomplete || previous.ProcessCensusIncomplete
 	if wallDuration <= 0 {
 		result.Reason = CPUInvalidDuration
 		return result
@@ -126,9 +162,14 @@ func (s *CPUDeltaSampler) Sample(snapshot CPUSnapshot, wallDuration time.Duratio
 		result.Reason = CPUProcessCounterReset
 		return result
 	}
+	ticksPerSecond := processCounterRate(snapshot, *previous)
+	if s.wallProcess && ticksPerSecond == 0 {
+		result.Reason = CPUUnavailable
+		return result
+	}
 	processPercent := percentage(process.CPU-previousProcess.CPU, hostDelta)
 	if s.wallProcess {
-		processPercent = wallPercentage(process.CPU-previousProcess.CPU, wallDuration, processCounterRate(snapshot, *previous))
+		processPercent = wallPercentage(process.CPU-previousProcess.CPU, wallDuration, ticksPerSecond)
 	}
 	result.Process = validMeasurement(processPercent)
 	if s.processIdentity != "" {
@@ -139,6 +180,10 @@ func (s *CPUDeltaSampler) Sample(snapshot CPUSnapshot, wallDuration time.Duratio
 		if binary != "" {
 			result.OwnedProcessCPUPercent = map[string]float64{binary: processPercent}
 		}
+	}
+	if result.ProcessCensusIncomplete {
+		result.Reason = CPUValid
+		return result
 	}
 
 	groupKeys := s.groupKeys
@@ -160,7 +205,7 @@ func (s *CPUDeltaSampler) Sample(snapshot CPUSnapshot, wallDuration time.Duratio
 			delta += current - old
 		}
 		if s.wallProcess {
-			result.Group = validMeasurement(cpuPercentage(delta, wallDuration, s.logicalCPUs, processCounterRate(snapshot, *previous)))
+			result.Group = validMeasurement(cpuPercentage(delta, wallDuration, s.logicalCPUs, ticksPerSecond))
 			result.ProcessCPUPercent = s.groupedProcessPercent(snapshot, *previous, wallDuration, s.logicalCPUs, groupKeys)
 		} else {
 			result.Group = validMeasurement(percentage(delta, hostDelta))
@@ -356,6 +401,28 @@ func binaryPair(current, previous CPUSnapshot, binary string) (uint64, uint64, b
 func groupedProcessPercent(current, previous CPUSnapshot, wall time.Duration, logicalCPUs int, binaries []string) map[string]float64 {
 	values := make(map[string]float64)
 	for _, binary := range binaries {
+		if isYoloMuxGoBinary(binary) {
+			currentRows, previousRows := binaryProcessRows(current, binary), binaryProcessRows(previous, binary)
+			if len(currentRows) == 0 || len(currentRows) != len(previousRows) {
+				continue
+			}
+			stable := true
+			for identity, process := range currentRows {
+				old, ok := previousRows[identity]
+				if !ok || process.CPU < old.CPU {
+					stable = false
+					break
+				}
+			}
+			if !stable {
+				continue
+			}
+			for identity, process := range currentRows {
+				old := previousRows[identity]
+				values[hostProcessInstanceSeriesKey(binary, identity)] = cpuPercentage(process.CPU-old.CPU, wall, logicalCPUs, processCounterRate(current, previous))
+			}
+			continue
+		}
 		if a, b, ok := binaryPair(current, previous, binary); ok && a >= b {
 			values[binary] = cpuPercentage(a-b, wall, logicalCPUs, processCounterRate(current, previous))
 		}
@@ -381,6 +448,34 @@ func groupedProcessPercent(current, previous CPUSnapshot, wall time.Duration, lo
 		result[binary] = math.Min(100, values[binary])
 	}
 	return result
+}
+
+func binaryProcessRows(snapshot CPUSnapshot, binary string) map[string]CPUProcessCounters {
+	rows := make(map[string]CPUProcessCounters)
+	for key, process := range snapshot.Processes {
+		if process.Binary != binary {
+			continue
+		}
+		identity := process.Identity
+		if identity == "" {
+			identity = key
+		}
+		rows[identity] = process
+	}
+	return rows
+}
+
+func isYoloMuxGoBinary(binary string) bool {
+	return binary == "yolomux-go" || binary == "yolomux_go"
+}
+
+func hostProcessInstanceSeriesKey(binary, identity string) string {
+	pidText, _, _ := strings.Cut(identity, ":")
+	if _, err := strconv.ParseUint(pidText, 10, 64); err != nil {
+		return binary
+	}
+	digest := sha256.Sum256([]byte(identity))
+	return fmt.Sprintf("%s-pid-%s-%x", binary, pidText, digest[:4])
 }
 
 func stableProcessBinaries(current, previous CPUSnapshot) []string {
@@ -462,7 +557,7 @@ func processCounterRate(current, previous CPUSnapshot) uint64 {
 	if previous.ProcessTicksPerSecond > 0 {
 		return previous.ProcessTicksPerSecond
 	}
-	return clockTicksPerSec
+	return 0
 }
 
 func wallPercentage(delta uint64, duration time.Duration, ticksPerSecond uint64) float64 {

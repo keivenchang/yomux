@@ -15,7 +15,7 @@ go_library(
     name = "stats_lib",
     srcs = glob(["*.go"], exclude = ["*_test.go"]),
     importpath = "github.com/keivenchang/yolomux/internal/stats",
-    deps = [SQLITE],
+    deps = [SQLITE, "@org_golang_x_sys//unix"],
 )
 
 go_test(

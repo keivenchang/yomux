@@ -1,6 +1,6 @@
 # Backend architecture
 
-YOLOmux has two runtimes during migration. The Go process is the target architecture; Python is the broader legacy backend scheduled for deprecation after required Go gaps close. No removal date is set.
+Go is the default server for managed/operator launches. The Python server is deprecated and available only as an explicit temporary fallback while the remaining Go capability gaps close; removal is planned around late October 2026. The Go server still invokes Python to render the shared HTML shell, so a Python runtime dependency does not mean the Python server is selected.
 
 ## Python
 

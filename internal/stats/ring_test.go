@@ -29,6 +29,51 @@ func TestRingSlotIndexAndFixedShape(t *testing.T) {
 	}
 }
 
+func TestRingBucketPersistsLargeNoDataPayload(t *testing.T) {
+	var payload strings.Builder
+	payload.WriteString(`{"no_data":[`)
+	for index := 0; index < 14000; index++ {
+		if index > 0 {
+			payload.WriteByte(',')
+		}
+		fmt.Fprintf(&payload, `{"family":"agent_tokens","source_id":"retired-unavailable:source-%05d","epoch":"epoch-%02d","reason":"transcript cursor state exceeds its size bound","start":1790582400,"end":1790582700,"source_cadence_seconds":60}`, index, index%69)
+	}
+	payload.WriteString(`]}`)
+	raw := payload.String()
+	if len(raw) <= 256*1024 || len(raw) >= 8*1024*1024 {
+		t.Fatalf("fixture JSON size = %d, want greater than 256 KiB and below the intended 8 MiB ring limit", len(raw))
+	}
+
+	encoded, err := encodeRingBucket(raw)
+	if err != nil {
+		t.Fatalf("encode large no-data bucket: %v", err)
+	}
+	decoded, err := decodeRingBucket(encoded)
+	if err != nil || decoded != raw {
+		t.Fatalf("large no-data bucket round trip: decoded %d bytes, err=%v", len(decoded), err)
+	}
+}
+
+func TestDecodeRingBucketRejectsTrailingAndConcatenatedCompression(t *testing.T) {
+	encodedValue, err := encodeRingBucket(`{"value":"` + strings.Repeat("a", 1024) + `"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, ok := encodedValue.([]byte)
+	if !ok {
+		t.Fatal("fixture did not select compressed ring encoding")
+	}
+	for name, suffix := range map[string][]byte{
+		"trailing bytes":    []byte("garbage"),
+		"concatenated zlib": append([]byte(nil), encoded[5:]...),
+	} {
+		payload := append(append([]byte(nil), encoded...), suffix...)
+		if _, err := decodeRingBucket(payload); err == nil {
+			t.Errorf("decode %s: accepted trailing compressed data", name)
+		}
+	}
+}
+
 func TestRingPublicationReadAndInvalidation(t *testing.T) {
 	ctx := context.Background()
 	writer, err := OpenWriter(ctx, filepath.Join(t.TempDir(), "stats.sqlite3"))
@@ -62,6 +107,54 @@ func TestRingPublicationReadAndInvalidation(t *testing.T) {
 	}
 	if len(window.Rows) != 0 || len(window.PendingInvalidations) != 1 {
 		t.Fatalf("stale ring window = %+v", window)
+	}
+}
+
+func TestRingPayloadReadRejectsPublicationThatChangedAfterMetadataRead(t *testing.T) {
+	ctx := context.Background()
+	writer, err := OpenWriter(ctx, filepath.Join(t.TempDir(), "stats.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	first, err := encodeRingBucketPayload(MaterializedBucket{
+		Start: 100, Duration: 10, Complete: true,
+		Series: []MaterializedSeries{{Name: "cpu_percent:host", Value: 1}},
+	}, nil, 1, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.PublishRingBuckets(ctx, []RingBucketWrite{{ResolutionSeconds: 10, BucketStart: 100, BucketJSON: first, Complete: true}}, 1, 100, true); err != nil {
+		t.Fatal(err)
+	}
+	oldWindow, err := writer.ReadRingWindowMetadata(ctx, 10, 10, 110)
+	if err != nil || len(oldWindow.Rows) != 1 {
+		t.Fatalf("read first publication metadata: rows=%+v err=%v", oldWindow.Rows, err)
+	}
+	second, err := encodeRingBucketPayload(MaterializedBucket{
+		Start: 100, Duration: 10, Complete: true,
+		Series: []MaterializedSeries{{Name: "cpu_percent:host", Value: 2}},
+	}, nil, 2, 101)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.PublishRingBuckets(ctx, []RingBucketWrite{{ResolutionSeconds: 10, BucketStart: 100, BucketJSON: second, Complete: true}}, 2, 101, true); err != nil {
+		t.Fatal(err)
+	}
+	payloads, err := writer.readRingBucketPayloads(ctx, 10, []int64{100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, ok := payloads[100]
+	if !ok {
+		t.Fatal("replacement payload was not returned")
+	}
+	if ringBucketPayloadMatchesMetadata(oldWindow.Rows[0], payload) {
+		t.Fatalf("payload from a newer publication matched old metadata: row=%+v payload=%+v", oldWindow.Rows[0], payload)
+	}
+	newWindow, err := writer.ReadRingWindowMetadata(ctx, 10, 10, 110)
+	if err != nil || len(newWindow.Rows) != 1 || !ringBucketPayloadMatchesMetadata(newWindow.Rows[0], payload) {
+		t.Fatalf("replacement metadata does not match its payload: rows=%+v payload=%+v err=%v", newWindow.Rows, payload, err)
 	}
 }
 

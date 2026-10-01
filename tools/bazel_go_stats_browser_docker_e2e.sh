@@ -13,6 +13,10 @@ test -f "$common"
 . "$common"
 repo="$(bazel_test_source_root "$0")"
 cd "$repo"
+browser_pytest_args=(-q -rs)
+if [ -n "${YOLOMUX_GO_STATS_BROWSER_TEST:-}" ]; then
+    browser_pytest_args+=(-k "$YOLOMUX_GO_STATS_BROWSER_TEST")
+fi
 
 if bazel_test_in_container; then
     bazel_test_prepare_environment
@@ -39,11 +43,11 @@ if bazel_test_in_container; then
     YOLOMUX_GO_BINARY="$binary_host" \
     YOLOMUX_WORKTREE_WRITER_SLOT="${YOLOMUX_WORKTREE_WRITER_SLOT:-/tmp/yolomux-bazel-writer-$$}" \
         python3 -m pytest \
-        tests/test_browser_stats_coverage.py tests/test_browser_stats_widen.py -q -rs
+        tests/test_browser_stats_coverage.py tests/test_browser_stats_widen.py "${browser_pytest_args[@]}"
     exit $?
 fi
 
 YOLOMUX_GO_BINARY="$binary_host" \
-    YOLOMUX_WORKTREE_WRITER_CONTAINER_SLOT="/tmp/yolomux-bazel-writer-$$" \
+YOLOMUX_WORKTREE_WRITER_CONTAINER_SLOT="/tmp/yolomux-bazel-writer-$$" \
     docker/run-tests.sh -- python3 -m pytest \
-        tests/test_browser_stats_coverage.py tests/test_browser_stats_widen.py -q -rs
+        tests/test_browser_stats_coverage.py tests/test_browser_stats_widen.py "${browser_pytest_args[@]}"

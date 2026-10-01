@@ -594,10 +594,25 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
       capability: capabilityName,
       reason: reason || {code: 'not_implemented', messageKey: 'capabilityUnavailable', messageParams: {}},
     };
-    return new Response(JSON.stringify(payload), {
+    const response = new Response(JSON.stringify(payload), {
       status: 501,
       headers: {'Content-Type': 'application/json', 'X-YOLOmux-Capability-Gated': capabilityName},
     });
+    if (!(typeof statsOnlyBootEnabled === 'function' && statsOnlyBootEnabled()) && internalOptions.recordDebug !== false) {
+      const startedAt = jsDebugPerformanceNow();
+      const method = jsDebugRequestMethod(options);
+      const requestBytes = jsDebugRequestBytes(url, options);
+      const requestId = applyApiRequestIdHeader(url, options);
+      const event = recordApiDebugEvent(url, method, startedAt, {
+        status: response.status,
+        ok: response.ok,
+        requestBytes,
+        requestId,
+      });
+      recordApiDebugResponseBytes(event, response);
+      noteApiDebugHeaders(event, url, startedAt);
+    }
+    return response;
   }
   const transportLifecycle = pageTransportLifecycle;
   const transportToken = transportLifecycle.begin();

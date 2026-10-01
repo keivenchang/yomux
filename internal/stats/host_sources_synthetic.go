@@ -29,6 +29,10 @@ type syntheticHostSources struct {
 	processKey      string
 }
 
+// SystemLogicalCPUs returns the fixture's stable eight-CPU topology without
+// consulting the machine that runs development or integration tests.
+func (*syntheticHostSources) SystemLogicalCPUs() int { return 8 }
+
 func (s *syntheticHostSources) CPU(ctx context.Context) (CPUSnapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return CPUSnapshot{}, err

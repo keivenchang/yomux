@@ -186,12 +186,43 @@ def test_n7_preferences_service_controls_group_features_contiguously(browser, tm
 
 
 @pytest.mark.browser
-@pytest.mark.xfail(strict=True, reason="NOT-APPLICABLE on v0.6.10; waits for F9 Daemons Load graph")
-def test_n8_daemons_load_graph_paints_when_service_load_data_exists(browser, tmp_path):
-    """Given service-load data, the Daemons chart has painted SVG/canvas marks rather than an empty panel."""
+def test_n8_daemons_load_chart_paints_in_system_view_when_service_load_data_exists(browser, tmp_path):
+    """Given service-load data, System -> Daemons paints SVG marks and Graphs has no Daemons Load card."""
     load_live_runtime_boot_fixture(browser, tmp_path)
-    marks = browser.execute_script("return document.querySelectorAll('[data-daemons-load-graph] svg path, [data-daemons-load-graph] canvas').length;")
-    assert marks > 0, marks
+    activated = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        selectSession('__debug__').then(() => requestAnimationFrame(() => done(true)))
+          .catch(error => done({error: String(error)}));
+        """
+    )
+    assert activated is True, activated
+    result = browser.execute_script(
+        """
+        const now = Date.now();
+        setDebugSubTab('system');
+        clearJsDebugGraphData();
+        debugGraphApplyServerHistory({latest_sequence: 1, records: [{
+          start: Math.floor(now / 1000), duration: 1,
+          host_metrics: {service_load: {'runtime:agent_status': {
+            label: 'agent status collector', cpu_samples: 1, cpu_total_percent: 42,
+          }}},
+        }]});
+        jsDebugSystemState.payload = {
+          ok: true, generated_at: now / 1000, server: {}, owner: {}, refresh: {}, search_index: {}, caches: {},
+          client_events: {}, chat: {}, cpu_budget: {},
+          local_services: {schema_version: 5, inventory: [], totals: {}, services: []},
+          top_endpoints: [], top_background_work: [],
+        };
+        refreshDebugSystemViews();
+        const graph = document.querySelector('[data-js-debug-subview="graph"]');
+        const system = document.querySelector('[data-js-debug-subview="system"]');
+        const chart = system?.querySelector('[data-js-debug-chart="serversLoad"]');
+        const marks = chart?.querySelectorAll('[data-js-debug-area-series], [data-js-debug-series]').length || 0;
+        return {graphChart: Boolean(graph?.querySelector('[data-js-debug-chart="serversLoad"]')), systemChart: Boolean(chart), marks};
+        """
+    )
+    assert result == {"graphChart": False, "systemChart": True, "marks": 1}, result
 
 
 @pytest.mark.browser

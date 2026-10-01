@@ -364,7 +364,7 @@ def test_the_default_daemons_view_is_a_roster_not_a_card_wall(browser, tmp_path)
     # its own region deliberately: the region cache rewrites a region only when its generated HTML
     # changes, so keeping the volatile "Updated N seconds ago" out of this one is what stops a
     # screen reader being re-announced on every 5-second poll.
-    assert layout["regions"] == ["announce", "summary", "alerts", "roster", "advanced"], layout
+    assert layout["regions"] == ["announce", "summary", "alerts", "chart", "roster", "advanced"], layout
     assert layout["cards"] == 0 and layout["grids"] == 0, layout
     for retired in ("Server", "CPU budget", "Distributed owner", "Worker totals", "Search & caches", "Events & chat", "Tmux signal watcher"):
         assert retired not in layout["headings"], layout
@@ -1101,7 +1101,7 @@ def test_roster_fits_desktop_laptop_and_phone_widths_without_hiding_a_value(brow
                 const container = arguments[0];
                 const view = document.querySelector('[data-js-debug-system]');
                 view.style.width = '';
-                const paneWidth = view.clientWidth;
+                const paneWidth = view.getBoundingClientRect().width;
                 view.style.width = `${container}px`;
                 const table = view.querySelector('[data-js-debug-roster]');
                 const wrap = table.closest('.js-debug-system-table-wrap');

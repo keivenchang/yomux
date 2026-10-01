@@ -36,6 +36,7 @@ from tools import pytest_catalog_plugin
 from tools.test_catalog import discover_pytest_phase_files
 from tools.tool_guard import container_command_with_host_tool_guard
 from yolomux_lib.background_scheduler import pid_is_alive as background_scheduler_pid_is_alive
+from yolomux_lib.infra.host_identity import process_state
 from yolomux_lib.stats_current import service as service_module
 
 
@@ -1278,7 +1279,7 @@ def test_run_lane_terminates_a_timed_out_launcher_and_its_pipe_holding_child(mon
     assert result.ok is False
     assert result.steps[-1].returncode != 0
     assert "check step timed out after 0.2s" in result.output
-    assert not check.pid_is_alive(int(child_pid_path.read_text(encoding="utf-8")))
+    assert process_state(int(child_pid_path.read_text(encoding="utf-8"))) in {"", "Z"}
 
 
 @pytest.mark.parametrize(("returncode", "expected_ok"), ((0, True), (7, False)))
@@ -1690,6 +1691,14 @@ def test_docker_run_tests_forwards_the_stats_persistence_arm_variable():
     """
 
     assert service_module.APPEND_FLUSH_ENV_NAME in _certification_env_allowlist()
+
+
+def test_docker_run_tests_forwards_the_go_stats_browser_selector():
+    name = "YOLOMUX_GO_STATS_BROWSER_TEST"
+    allowlist = _certification_env_allowlist()
+    assert name in allowlist
+    assert _forwarding_loop(allowlist, {name: "production_python_and_go_stats"}) == ["-e", name]
+    assert _forwarding_loop([item for item in allowlist if item != name], {name: "production_python_and_go_stats"}) == []
 
 
 def test_the_forwarding_loop_only_passes_names_the_allowlist_contains():

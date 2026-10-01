@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -94,6 +96,154 @@ func TestOpenWriterRepairsMissingRingTriggers(t *testing.T) {
 	}
 }
 
+func TestOpenWriterInitializesRingForCoreOnlyDatabase(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	pythonScript := filepath.Join(t.TempDir(), "create-core-only.py")
+	const script = `import sqlite3, sys
+from yolomux_lib.stats_current.storage import Store
+
+connection = sqlite3.connect(sys.argv[1])
+Store._initialize(connection)
+connection.execute(
+    "INSERT INTO observations VALUES(?, ?, ?, ?, ?, ?, ?)",
+    ("legacy-core-fact", "cpu", "synthetic", 10, "legacy-epoch", 1, '{"value":3}'),
+)
+connection.execute("UPDATE schema_meta SET source_generation=1 WHERE singleton=1")
+connection.commit()
+connection.close()
+`
+	if err := os.WriteFile(pythonScript, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runPython(t, pythonExecutable(t), pythonScript, path)
+	if err := validateWriterDatabaseReadOnly(ctx, path); err != nil {
+		t.Fatalf("valid core-only schema was rejected during preflight: %v", err)
+	}
+
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatalf("OpenWriter failed to initialize missing ring extension: %v", err)
+	}
+	defer writer.Close()
+	var preserved int
+	if err := writer.db.QueryRowContext(ctx, "SELECT count(*) FROM observations WHERE event_id='legacy-core-fact'").Scan(&preserved); err != nil || preserved != 1 {
+		t.Fatalf("core-only fact preservation count = %d, err = %v", preserved, err)
+	}
+	if _, err := writer.AppendBatch(ctx, writerBatch()); err != nil {
+		t.Fatalf("append after ring initialization: %v", err)
+	}
+	if err := validateWriterSchema(ctx, writer.db, true); err != nil {
+		t.Fatalf("initialized writer schema is invalid: %v", err)
+	}
+}
+
+func TestRingValidationRejectsMissingReplayCursorRow(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	mutation, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mutation.ExecContext(ctx, "DELETE FROM ring_replay_cursor WHERE resolution_seconds=1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mutation.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := OpenReadOnly(ctx, path); err == nil || !strings.Contains(err.Error(), "ring_replay_cursor") {
+		t.Fatalf("read-only validation error = %v, want missing fixed cursor row", err)
+	}
+	if err := validateWriterDatabaseReadOnly(ctx, path); err == nil || !strings.Contains(err.Error(), "ring_replay_cursor") {
+		t.Fatalf("writer preflight error = %v, want missing fixed cursor row", err)
+	}
+}
+
+func TestRingValidationRejectsPythonSchemaMismatch(t *testing.T) {
+	tests := []struct {
+		name, want string
+		mutations  []string
+	}{
+		{
+			name: "extra slot resolution",
+			mutations: []string{
+				"PRAGMA foreign_keys=OFF",
+				"DROP TRIGGER aggregate_ring_slots_reject_insert",
+				"INSERT INTO aggregate_ring_slots(resolution_seconds,slot_index) VALUES(999,0)",
+				"CREATE TRIGGER aggregate_ring_slots_reject_insert BEFORE INSERT ON aggregate_ring_slots BEGIN SELECT RAISE(ABORT, 'aggregate ring rows are fixed'); END",
+			},
+			want: "slot counts",
+		},
+		{
+			name:      "misaligned ring head",
+			mutations: []string{"PRAGMA ignore_check_constraints=ON", "UPDATE aggregate_rings SET newest_bucket_start=1 WHERE resolution_seconds=10"},
+			want:      "head is not resolution-aligned",
+		},
+		{
+			name:      "unexpected trigger on core table",
+			mutations: []string{"CREATE TRIGGER unexpected_test_trigger AFTER INSERT ON observations BEGIN SELECT 1; END"},
+			want:      "trigger set is not exact",
+		},
+		{
+			name:      "unexpected table",
+			mutations: []string{"CREATE TABLE unexpected_test_table(value TEXT)"},
+			want:      "table set does not match",
+		},
+		{
+			name: "unexpected core columns",
+			mutations: []string{
+				"ALTER TABLE observations RENAME TO observations_old",
+				"CREATE TABLE observations(event_id TEXT)",
+				"DROP TABLE observations_old",
+			},
+			want: "table \"observations\" has unexpected columns",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), "stats.sqlite3")
+			writer, err := OpenWriter(ctx, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatal(err)
+			}
+			mutation, err := sql.Open("sqlite3", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mutation.SetMaxOpenConns(1)
+			for _, statement := range test.mutations {
+				if _, err := mutation.ExecContext(ctx, statement); err != nil {
+					_ = mutation.Close()
+					t.Fatalf("apply synthetic schema mutation %q: %v", statement, err)
+				}
+			}
+			if err := mutation.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := OpenReadOnly(ctx, path); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("read-only validation error = %v, want %q", err, test.want)
+			}
+			if err := validateWriterDatabaseReadOnly(ctx, path); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("writer preflight error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestSchema9UsesPythonAffinityAndRejectsInvalidConstraints(t *testing.T) {
 	ctx := context.Background()
 	writer, err := OpenWriter(ctx, filepath.Join(t.TempDir(), "stats.sqlite3"))
@@ -160,18 +310,134 @@ func TestAppendBatchConflictRollsBackEarlierRows(t *testing.T) {
 	if _, err = writer.AppendBatch(context.Background(), writerBatch()); err != nil {
 		t.Fatal(err)
 	}
+	beforeGeneration := writer.SourceGeneration()
+	beforeCounts := make(map[string]int)
+	for _, table := range []string{"observations", "coverage_epochs", "unavailable_spans", "usage_atoms", "ring_invalidations"} {
+		var count int
+		if err = writer.db.QueryRow("SELECT count(*) FROM " + table).Scan(&count); err != nil {
+			t.Fatalf("count %s before conflict: %v", table, err)
+		}
+		beforeCounts[table] = count
+	}
 	conflict := writerBatch()
 	conflict.Observations = append(conflict.Observations, Observation{EventID: "new", Family: "cpu", SourceID: "host", ObservedAt: 11, EpochID: "epoch-1", Payload: map[string]any{"value": 2}})
 	conflict.UsageAtoms[0].Payload = map[string]any{"quantity": 99.0, "provider": "openai", "model": "gpt", "thread_id": "thread-1", "execution_source": "codex"}
 	if _, err = writer.AppendBatch(context.Background(), conflict); err == nil {
 		t.Fatal("conflict accepted")
 	}
-	var count int
-	if err = writer.db.QueryRow("SELECT count(*) FROM observations").Scan(&count); err != nil {
+	if got := writer.SourceGeneration(); got != beforeGeneration {
+		t.Fatalf("failed append advanced in-memory generation from %d to %d", beforeGeneration, got)
+	}
+	var durableGeneration int64
+	if err = writer.db.QueryRow("SELECT source_generation FROM schema_meta WHERE singleton=1").Scan(&durableGeneration); err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 {
-		t.Fatalf("rollback left %d observations", count)
+	if durableGeneration != beforeGeneration {
+		t.Fatalf("failed append advanced durable generation from %d to %d", beforeGeneration, durableGeneration)
+	}
+	for table, before := range beforeCounts {
+		var after int
+		if err = writer.db.QueryRow("SELECT count(*) FROM " + table).Scan(&after); err != nil {
+			t.Fatalf("count %s after conflict: %v", table, err)
+		}
+		if after != before {
+			t.Errorf("failed append changed %s row count from %d to %d", table, before, after)
+		}
+	}
+}
+
+func TestAppendBatchRollsBackWhenRingInvalidationWriteFails(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	if _, err := writer.AppendBatch(ctx, writerBatch()); err != nil {
+		t.Fatal(err)
+	}
+	// Invalidations only target populated ring cells. Publish the cell that the
+	// next append contradicts so the trigger exercises the late transaction step.
+	if _, err := writer.PublishRingBuckets(ctx, []RingBucketWrite{{
+		ResolutionSeconds: 10, BucketStart: 30, BucketJSON: `{"value":0}`, Complete: true,
+	}}, writer.SourceGeneration(), 40, true); err != nil {
+		t.Fatal(err)
+	}
+	readRows := func(table string) [][]any {
+		t.Helper()
+		probe, queryErr := writer.db.QueryContext(ctx, "SELECT * FROM "+table+" LIMIT 0")
+		if queryErr != nil {
+			t.Fatalf("read %s before failed append: %v", table, queryErr)
+		}
+		columns, columnsErr := probe.Columns()
+		if columnsErr != nil {
+			_ = probe.Close()
+			t.Fatalf("read %s columns: %v", table, columnsErr)
+		}
+		if closeErr := probe.Close(); closeErr != nil {
+			t.Fatalf("close %s schema probe: %v", table, closeErr)
+		}
+		order := make([]string, len(columns))
+		for index := range columns {
+			order[index] = fmt.Sprint(index + 1)
+		}
+		rows, queryErr := writer.db.QueryContext(ctx, "SELECT * FROM "+table+" ORDER BY "+strings.Join(order, ","))
+		if queryErr != nil {
+			t.Fatalf("read %s rows: %v", table, queryErr)
+		}
+		defer rows.Close()
+		var result [][]any
+		for rows.Next() {
+			values := make([]any, len(columns))
+			destinations := make([]any, len(columns))
+			for index := range values {
+				destinations[index] = &values[index]
+			}
+			if scanErr := rows.Scan(destinations...); scanErr != nil {
+				t.Fatalf("scan %s before failed append: %v", table, scanErr)
+			}
+			result = append(result, values)
+		}
+		if rowsErr := rows.Err(); rowsErr != nil {
+			t.Fatalf("iterate %s before failed append: %v", table, rowsErr)
+		}
+		return result
+	}
+	tables := []string{"observations", "coverage_epochs", "unavailable_spans", "usage_atoms", "ring_invalidations"}
+	before := make(map[string][][]any, len(tables))
+	for _, table := range tables {
+		before[table] = readRows(table)
+	}
+	beforeGeneration := writer.SourceGeneration()
+	if _, err := writer.db.ExecContext(ctx, `CREATE TRIGGER synthetic_abort_ring_invalidation
+		BEFORE INSERT ON ring_invalidations
+		BEGIN SELECT RAISE(ABORT, 'synthetic ring invalidation failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	end := 40.0
+	batch := AppendBatch{
+		Observations:     []Observation{{EventID: "rollback-new-fact", Family: "cpu", SourceID: "host", ObservedAt: 30, EpochID: "epoch-2", Payload: map[string]any{"value": 7}}},
+		CoverageEpochs:   []CoverageEpoch{{Family: "cpu", SourceID: "host", EpochID: "epoch-2", StartedAt: 30, EndedAt: &end, NativeCadenceSeconds: 1, OwnerGeneration: 2}},
+		UnavailableSpans: []UnavailableSpan{{Family: "gpu", SourceID: "device-0", EpochID: "epoch-2", StartedAt: 30, EndedAt: 40, NativeCadenceSeconds: 1, Reason: "synthetic outage", OwnerGeneration: 2}},
+	}
+	if _, err := writer.AppendBatch(ctx, batch); err == nil || !strings.Contains(err.Error(), "synthetic ring invalidation failure") {
+		t.Fatalf("append with failing synthetic invalidation trigger error = %v", err)
+	}
+	if got := writer.SourceGeneration(); got != beforeGeneration {
+		t.Fatalf("failed append advanced in-memory generation from %d to %d", beforeGeneration, got)
+	}
+	var durableGeneration int64
+	if err := writer.db.QueryRowContext(ctx, "SELECT source_generation FROM schema_meta WHERE singleton=1").Scan(&durableGeneration); err != nil {
+		t.Fatal(err)
+	}
+	if durableGeneration != beforeGeneration {
+		t.Fatalf("failed append advanced durable generation from %d to %d", beforeGeneration, durableGeneration)
+	}
+	for _, table := range tables {
+		if after := readRows(table); !reflect.DeepEqual(after, before[table]) {
+			t.Errorf("failed append changed %s rows: before=%#v after=%#v", table, before[table], after)
+		}
 	}
 }
 
@@ -235,6 +501,62 @@ func TestCoverageAndUnavailableIntervalConflictsRollBack(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("second rollback left %d observations", count)
+	}
+}
+
+func TestWriterCheckpointReportsPinnedReaderProgress(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	if _, err := writer.db.ExecContext(ctx, "PRAGMA wal_autocheckpoint=0"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.AppendBatch(ctx, AppendBatch{Observations: []Observation{{
+		EventID: "checkpoint-before-reader", Family: "cpu", SourceID: "host", ObservedAt: 10,
+		EpochID: "synthetic", OwnerGeneration: 1, Payload: map[string]any{"process_percent": 1.0},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := OpenReadOnly(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	readTx, err := reader.sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readTx.Rollback()
+	var initialCount int
+	if err := readTx.QueryRowContext(ctx, "SELECT count(*) FROM observations").Scan(&initialCount); err != nil || initialCount != 1 {
+		t.Fatalf("pin initial WAL snapshot: count=%d err=%v", initialCount, err)
+	}
+	if _, err := writer.AppendBatch(ctx, AppendBatch{Observations: []Observation{{
+		EventID: "checkpoint-after-reader", Family: "cpu", SourceID: "host", ObservedAt: 11,
+		EpochID: "synthetic", OwnerGeneration: 1, Payload: map[string]any{"process_percent": 2.0},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	partial, err := writer.Checkpoint(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if partial.LogFrames <= partial.CheckpointedFrames {
+		t.Fatalf("PASSIVE checkpoint hid incomplete reader-pinned progress: %+v", partial)
+	}
+	if err := readTx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	complete, err := writer.Checkpoint(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if complete.Busy != 0 || complete.LogFrames != complete.CheckpointedFrames {
+		t.Fatalf("checkpoint did not catch up after reader released its snapshot: %+v", complete)
 	}
 }
 
@@ -773,6 +1095,162 @@ func TestAppendReconcilesExternallyAdvancedGeneration(t *testing.T) {
 	}
 	if got := pendingStarts(t, writer, 10); len(got) != 1 || got[0] != base {
 		t.Fatalf("external-generation pending cells = %v, want [%d]", got, base)
+	}
+}
+
+func TestAppendAfterStartupReconciliationRescansWhenDataVersionChanges(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseSeconds := time.Now().Unix() - 100
+	baseSeconds -= baseSeconds % 10
+	base := float64(baseSeconds)
+	if _, err := writer.AppendBatch(ctx, AppendBatch{Observations: []Observation{{
+		EventID: "startup-fact", Family: "cpu", SourceID: "host", ObservedAt: base, EpochID: "epoch", Payload: map[string]any{"value": 1},
+	}}}); err != nil {
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	if _, err := writer.PublishRingBuckets(ctx, []RingBucketWrite{
+		{ResolutionSeconds: 10, BucketStart: int64(base), BucketJSON: `{"value":0}`, Complete: true},
+		{ResolutionSeconds: 10, BucketStart: int64(base + 10), BucketJSON: `{"value":0}`, Complete: true},
+		{ResolutionSeconds: 10, BucketStart: int64(base + 20), BucketJSON: `{"value":0}`, Complete: true},
+	}, 1, base+1, true); err != nil {
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	mutate := func(eventID string, observedAt float64, generation int64) {
+		database, openErr := sql.Open("sqlite3", writerURI(path))
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		if _, execErr := database.ExecContext(ctx, `INSERT INTO observations(event_id,family,source_id,observed_at,epoch_id,owner_generation,payload_json) VALUES(?,?,?,?,?,?,?)`, eventID, "cpu", "host", observedAt, "external", 1, `{"value":2}`); execErr != nil {
+			_ = database.Close()
+			t.Fatal(execErr)
+		}
+		if _, execErr := database.ExecContext(ctx, "UPDATE schema_meta SET source_generation=? WHERE singleton=1", generation); execErr != nil {
+			_ = database.Close()
+			t.Fatal(execErr)
+		}
+		if closeErr := database.Close(); closeErr != nil {
+			t.Fatal(closeErr)
+		}
+	}
+	mutate("external-before-reopen", base+10, 2)
+
+	reopened, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	mutate("external-after-reopen", base+20, 3)
+	if _, err := reopened.AppendBatch(ctx, AppendBatch{Observations: []Observation{{
+		EventID: "current-fact", Family: "cpu", SourceID: "host", ObservedAt: base + 30, EpochID: "epoch", Payload: map[string]any{"value": 3},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := reopened.PendingInvalidationCells(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundExternal := false
+	for _, cell := range pending {
+		if cell.ResolutionSeconds == 10 && cell.BucketStart == int64(base+20) {
+			foundExternal = true
+			break
+		}
+	}
+	if !foundExternal {
+		t.Fatalf("external post-reopen fact was not reconciled: %+v", pending)
+	}
+}
+
+func TestAppendAfterStartupReconciliationRescansSameGenerationAfterPricingInvalidation(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().Unix() - 100
+	base -= base % 10
+	if _, err := writer.AppendBatch(ctx, AppendBatch{Observations: []Observation{{
+		EventID: "startup-fact", Family: "cpu", SourceID: "host", ObservedAt: float64(base + 10), EpochID: "epoch", Payload: map[string]any{"value": 1},
+	}}}); err != nil {
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	if _, err := writer.PublishRingBuckets(ctx, []RingBucketWrite{
+		{ResolutionSeconds: 10, BucketStart: base + 10, BucketJSON: `{"value":0}`, Complete: true},
+		{ResolutionSeconds: 10, BucketStart: base + 20, BucketJSON: `{"value":0}`, Complete: true},
+		{ResolutionSeconds: 10, BucketStart: base + 30, BucketJSON: `{"value":0}`, Complete: true},
+	}, 1, float64(base+21), true); err != nil {
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database, err := sql.Open("sqlite3", writerURI(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, "UPDATE aggregate_publication SET source_generation=0, ring_generation=0, published_at=0 WHERE singleton=1"); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	external, err := sql.Open("sqlite3", writerURI(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := external.ExecContext(ctx, `INSERT INTO observations(event_id,family,source_id,observed_at,epoch_id,owner_generation,payload_json) VALUES(?,?,?,?,?,?,?)`, "same-generation-external", "cpu", "host", float64(base+20), "external", 1, `{"value":2}`); err != nil {
+		_ = external.Close()
+		t.Fatal(err)
+	}
+	if err := external.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reopened.InvalidatePricingCatalog(ctx, float64(base+100)); err != nil {
+		t.Fatal(err)
+	}
+	external, err = sql.Open("sqlite3", writerURI(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := external.ExecContext(ctx, `INSERT INTO observations(event_id,family,source_id,observed_at,epoch_id,owner_generation,payload_json) VALUES(?,?,?,?,?,?,?)`, "same-generation-external-after-pricing", "cpu", "host", float64(base+30), "external", 1, `{"value":3}`); err != nil {
+		_ = external.Close()
+		t.Fatal(err)
+	}
+	if err := external.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reopened.AppendBatch(ctx, AppendBatch{Observations: []Observation{{
+		EventID: "current-fact", Family: "cpu", SourceID: "host", ObservedAt: float64(base + 40), EpochID: "epoch", Payload: map[string]any{"value": 4},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	got := pendingStarts(t, reopened, 10)
+	if !slices.Contains(got, base+20) {
+		t.Fatalf("same-generation external bucket was not reconciled: %v, want bucket %d", got, base+20)
+	}
+	if !slices.Contains(got, base+30) {
+		t.Fatalf("same-generation post-pricing external bucket was not reconciled: %v, want bucket %d", got, base+30)
 	}
 }
 

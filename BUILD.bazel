@@ -76,6 +76,7 @@ test_suite(
         "//internal/finder:finder_test",
         "//internal/stats:stats_test",
         "//internal/stats:agent_status_integration_test",
+        "//internal/testsupport:testsupport_test",
         "//internal/work:work_test",
     ],
 )
@@ -89,6 +90,7 @@ test_suite(
         "//internal/finder:finder_race_test",
         "//internal/stats:stats_race_test",
         "//internal/stats:agent_status_integration_race_test",
+        "//internal/testsupport:testsupport_race_test",
         "//internal/work:work_race_test",
     ],
 )
@@ -117,6 +119,7 @@ sh_test(
 sh_test(
     name = "bazel_action_environment_test",
     srcs = ["tools/bazel_action_environment_test.sh"],
+    data = ["tools/bazel_test_common.sh"],
 )
 
 sh_test(

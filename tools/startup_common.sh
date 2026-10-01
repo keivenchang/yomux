@@ -284,7 +284,7 @@ yolomux_macos_server_launcher() {
   # The plan JSON is a positional argument, not inherited state: a long-lived
   # tmux server cannot substitute a stale root or stale plan-file path. Both the
   # direct boot path and supported multi-row launcher use this same exec path.
-  printf '%s' 'repo=$1; launch_path=$2; shell_bin=$3; python_bin=$4; script=$5; log_path=$6; plan_json=$7; shift 7; cd "$repo" && export PATH="$launch_path" SHELL="$shell_bin" PYTHONUNBUFFERED=1 TERM=xterm-256color MALLOC_ARENA_MAX=2 '"$(yolomux_default_server_optin)"' && unset TMUX TMUX_PANE; exec "$python_bin" "$repo/tools/instance_isolation.py" exec --plan-json "$plan_json" -- "$python_bin" -u "$script" "$@" >> "$log_path" 2>&1'
+  printf '%s' 'repo=$1; launch_path=$2; shell_bin=$3; python_bin=$4; script=$5; log_path=$6; plan_json=$7; shift 7; cd "$repo" && export PATH="$launch_path" SHELL="$shell_bin" PYTHONUNBUFFERED=1 TERM=xterm-256color MALLOC_ARENA_MAX=2 YOLOMUX_CLAUDE_TRANSCRIPT_ROOT="${YOLOMUX_CLAUDE_TRANSCRIPT_ROOT:-$HOME/.claude/projects}" YOLOMUX_CODEX_TRANSCRIPT_ROOT="${YOLOMUX_CODEX_TRANSCRIPT_ROOT:-$HOME/.codex/sessions}" YOLOMUX_OPENCODE_DATABASE="${YOLOMUX_OPENCODE_DATABASE:-${XDG_DATA_HOME:-$HOME/.local/share}/opencode/opencode.db}" '"$(yolomux_default_server_optin)"' && unset TMUX TMUX_PANE; exec "$python_bin" "$repo/tools/instance_isolation.py" exec --plan-json "$plan_json" -- "$python_bin" -u "$script" "$@" >> "$log_path" 2>&1'
 }
 
 yolomux_submit_macos_server() {

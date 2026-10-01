@@ -2787,7 +2787,7 @@ test('five typed stream repairs for a 24h selection each settle through one snap
   client.stop();
 });
 
-test('valid pending snapshots honor the server retry hint until exact 2h/300s data is ready', async () => {
+test('a pending SSE snapshot stays connected until exact 2h/300s data is ready', async () => {
   ManualEventSource.instances = [];
   const clock = new FakeClock();
   const states = [];
@@ -2815,29 +2815,19 @@ test('valid pending snapshots honor the server retry hint until exact 2h/300s da
   ManualEventSource.instances[0].emit('pending', JSON.stringify({status: 'pending', retry_after_seconds: 1}));
   await flushPromises();
   assert.equal(ManualEventSource.instances.length, 1);
-  assert.equal([...clock.timers.values()].filter(timer => timer.at - clock.time === 1000).length, 1, 'one controller timer owns the pending retry');
-  assert.equal(clock.nextDelay(), 1000, 'the valid server hint replaces offline backoff');
+  assert.equal([...clock.timers.values()].filter(timer => timer.at - clock.time === 1000).length, 0, 'pending SSE does not schedule an HTTP-style retry');
   assert.equal(client.controller().generation(), null);
-  await clock.advance(999);
-  assert.equal(ManualEventSource.instances.length, 1, 'pending does not reconnect before the server asks');
-  await clock.advance(1);
-  assert.equal(ManualEventSource.instances.length, 2);
-  ManualEventSource.instances[1].emit('pending', JSON.stringify({status: 'pending', retry_after_seconds: 1}));
-  await flushPromises();
-  assert.equal([...clock.timers.values()].filter(timer => timer.at - clock.time === 1000).length, 1, 'a repeated pending response still owns one timer');
-  assert.equal(clock.nextDelay(), 1000, 'repeated pending does not grow exponential backoff');
-  await clock.advance(1000);
-  assert.equal(ManualEventSource.instances.length, 3);
-  emitSnapshotSequence(ManualEventSource.instances[2], snapshot({
+  emitSnapshotSequence(ManualEventSource.instances[0], snapshot({
     range: 7200, requested: 300, resolution: 300, cache: 9, sourceGeneration: 9,
   }));
   await flushPromises();
+  assert.equal(ManualEventSource.instances.length, 1, 'the same stream delivers its snapshot after pending');
 
   assert.equal(client.controller().generation().range_seconds, 7200);
   assert.equal(client.controller().generation().resolution_seconds, 300);
   assert.ok(states.includes('pending'));
   assert.equal(states.at(-1), 'ready');
-  assert.ok(ManualEventSource.instances.every(stream => stream.url.includes('range_seconds=7200&resolution=300')));
+  assert.ok(ManualEventSource.instances[0].url.includes('range_seconds=7200&resolution=300'));
   assert.deepEqual(failures, [], 'retryable pending materialization never reports a contract failure');
   client.stop();
 });
