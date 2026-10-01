@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_yoagent_expanded_auxiliary_details_do_not_use_inner_scroll():
-    css = (ROOT / "static_src/css/yolomux/50_terminal_file_tree.css").read_text(encoding="utf-8")
+    css = (ROOT / "static_src/css/yomux/50_terminal_file_tree.css").read_text(encoding="utf-8")
     rule = re.search(r"\.yoagent-message-details\[open\]\s+pre\.yoagent-auxiliary-stream\s*\{(?P<body>[^}]*)\}", css)
 
     assert rule is not None

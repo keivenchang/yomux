@@ -11,14 +11,14 @@ maps to a specific actionable locale string in static_src/locales/en.json.
 import json
 from pathlib import Path
 
-from yolomux_lib.yoagent import transports as transports_module
-from yolomux_lib.yoagent.preferences import backend_no_backend_notice
-from yolomux_lib.yoagent.transports import BACKEND_REASON_AVAILABLE
-from yolomux_lib.yoagent.transports import BACKEND_REASON_MODULE_MISSING
-from yolomux_lib.yoagent.transports import BACKEND_REASON_NO_CREDENTIALS
-from yolomux_lib.yoagent.transports import BACKEND_REASON_NO_PROVIDER
-from yolomux_lib.yoagent.transports import BackendAvailability
-from yolomux_lib.yoagent.transports import backend_availability
+from yomux_lib.yoagent import transports as transports_module
+from yomux_lib.yoagent.preferences import backend_no_backend_notice
+from yomux_lib.yoagent.transports import BACKEND_REASON_AVAILABLE
+from yomux_lib.yoagent.transports import BACKEND_REASON_MODULE_MISSING
+from yomux_lib.yoagent.transports import BACKEND_REASON_NO_CREDENTIALS
+from yomux_lib.yoagent.transports import BACKEND_REASON_NO_PROVIDER
+from yomux_lib.yoagent.transports import BackendAvailability
+from yomux_lib.yoagent.transports import backend_availability
 
 
 EN_LOCALE_PATH = Path(__file__).resolve().parents[1] / "static_src" / "locales" / "en.json"

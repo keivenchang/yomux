@@ -12,13 +12,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from yolomux_lib import app as app_module
-from yolomux_lib import cli
-from yolomux_lib.local_services import registry as cli_registry
-from yolomux_lib.server import TmuxWebtermHTTPServer
-from yolomux_lib.server import https_redirect_response
-from yolomux_lib.infra.root_paths import YolomuxRoots
-from yolomux_lib.server_lease import acquire_instance_and_port_leases
+from yomux_lib import app as app_module
+from yomux_lib import cli
+from yomux_lib.local_services import registry as cli_registry
+from yomux_lib.server import TmuxWebtermHTTPServer
+from yomux_lib.server import https_redirect_response
+from yomux_lib.infra.root_paths import YolomuxRoots
+from yomux_lib.server_lease import acquire_instance_and_port_leases
 
 
 def cli_args(**overrides):
@@ -91,7 +91,7 @@ def test_setup_tls_dry_run_uses_shared_san_and_state_dir(tmp_path):
         check=True,
         capture_output=True,
         text=True,
-        env={**cli.os.environ, "YOLOMUX_STATE_DIR": str(state_dir)},
+        env={**cli.os.environ, "YOMUX_STATE_DIR": str(state_dir)},
     )
 
     assert "DNS:localhost" in result.stdout
@@ -193,7 +193,7 @@ def test_exec_go_backend_forwards_dangerous_yolo_to_binary(monkeypatch, tmp_path
             released.append(self.fd)
             os.close(self.fd)
 
-    monkeypatch.setenv("YOLOMUX_GO_BINARY", str(binary))
+    monkeypatch.setenv("YOMUX_GO_BINARY", str(binary))
     monkeypatch.setattr(
         cli,
         "acquire_instance_and_port_leases",
@@ -211,7 +211,19 @@ def test_exec_go_backend_forwards_dangerous_yolo_to_binary(monkeypatch, tmp_path
     monkeypatch.setattr(cli.os, "execv", execv)
 
     result = cli.exec_go_backend(
-        argparse.Namespace(host="0.0.0.0", port=7221, dangerously_yolo=True, force=True)
+        argparse.Namespace(
+            host="0.0.0.0",
+            port=7221,
+            dangerously_yolo=True,
+            force=True,
+            sessions=None,
+            print_transcripts=False,
+            print_runtime_report=False,
+            dev=False,
+            http=False,
+            cert=None,
+            key=None,
+        )
     )
 
     assert result == 127
@@ -220,10 +232,71 @@ def test_exec_go_backend_forwards_dangerous_yolo_to_binary(monkeypatch, tmp_path
     assert captured["path"] == str(binary)
     assert captured["command"] == [
         str(binary), "--host", "0.0.0.0", "--port", "7221", "--root",
-        str(Path(__file__).resolve().parents[1]), "--dangerously-yolo",
+        str(Path(__file__).resolve().parents[1]), "--config", str(cli._YOLOMUX_ROOTS.config_dir),
+        "--dangerously-yolo",
     ]
     assert captured["lease_inheritable"] == [True, True]
     assert sorted(released) == sorted(lease_descriptors)
+
+
+@pytest.mark.parametrize(
+    ("http", "cert", "key", "message"),
+    [
+        (True, Path("cert.pem"), Path("key.pem"), "--http cannot be combined"),
+        (False, Path("cert.pem"), None, "--cert and --key must be provided together"),
+        (False, None, Path("key.pem"), "--cert and --key must be provided together"),
+    ],
+)
+def test_exec_go_backend_rejects_invalid_tls_options_before_launch(monkeypatch, capsys, http, cert, key, message):
+    monkeypatch.setattr(
+        cli,
+        "acquire_instance_and_port_leases",
+        lambda *_args, **_kwargs: pytest.fail("invalid TLS options must be rejected before acquiring leases"),
+    )
+    args = argparse.Namespace(
+        host="127.0.0.1",
+        port=7221,
+        dangerously_yolo=False,
+        force=False,
+        sessions=None,
+        print_transcripts=False,
+        print_runtime_report=False,
+        dev=False,
+        http=http,
+        cert=cert,
+        key=key,
+    )
+
+    assert cli.exec_go_backend(args) == 2
+    assert message in capsys.readouterr().err
+
+
+def test_empty_canonical_go_binary_does_not_fall_back_to_legacy_value(monkeypatch, tmp_path, capsys):
+    legacy_binary = tmp_path / "legacy-go"
+    legacy_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    legacy_binary.chmod(0o755)
+    monkeypatch.setenv("YOMUX_GO_BINARY", "")
+    monkeypatch.setenv("YOLOMUX_GO_BINARY", str(legacy_binary))
+    monkeypatch.setattr(Path, "is_file", lambda self: self == legacy_binary)
+
+    result = cli.exec_go_backend(
+        argparse.Namespace(
+            host="127.0.0.1",
+            port=7221,
+            dangerously_yolo=False,
+            force=False,
+            sessions=None,
+            print_transcripts=False,
+            print_runtime_report=False,
+            dev=False,
+            http=False,
+            cert=None,
+            key=None,
+        )
+    )
+
+    assert result == 2
+    assert "Go backend binary is unavailable" in capsys.readouterr().err
 
 
 def test_exec_go_backend_keeps_managed_leases_across_real_exec(tmp_path, request):
@@ -251,20 +324,22 @@ def test_exec_go_backend_keeps_managed_leases_across_real_exec(tmp_path, request
     )
     binary.chmod(0o755)
     launcher = (
-        "import argparse; from yolomux_lib import cli; "
+        "import argparse; from yomux_lib import cli; "
         "raise SystemExit(cli.exec_go_backend(argparse.Namespace("
-        "host='127.0.0.1', port=48123, dangerously_yolo=False, force=False)))"
+        "host='127.0.0.1', port=48123, dangerously_yolo=False, force=False, "
+        "sessions=None, print_transcripts=False, print_runtime_report=False, dev=False, "
+        "http=False, cert=None, key=None)))"
     )
     env = {
         **os.environ,
-        "YOLOMUX_ROOT": str(root),
-        "YOLOMUX_CONFIG_DIR": str(roots.config_dir),
-        "YOLOMUX_STATE_DIR": str(roots.state_dir),
-        "YOLOMUX_CACHE_DIR": str(roots.cache_dir),
-        "YOLOMUX_CODEX_HOME": str(roots.codex_home),
-        "YOLOMUX_RUNTIME_DIR": str(roots.runtime_dir),
+        "YOMUX_ROOT": str(root),
+        "YOMUX_CONFIG_DIR": str(roots.config_dir),
+        "YOMUX_STATE_DIR": str(roots.state_dir),
+        "YOMUX_CACHE_DIR": str(roots.cache_dir),
+        "YOMUX_CODEX_HOME": str(roots.codex_home),
+        "YOMUX_RUNTIME_DIR": str(roots.runtime_dir),
         "PYTHONPYCACHEPREFIX": str(root / "python-cache"),
-        "YOLOMUX_GO_BINARY": str(binary),
+        "YOMUX_GO_BINARY": str(binary),
         "YOLOMUX_CHILD_MARKER": str(marker),
     }
     process = subprocess.Popen([sys.executable, "-c", launcher], cwd=Path(__file__).resolve().parents[1], env=env)
@@ -455,7 +530,7 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
         cli,
         "startup_path_line",
         lambda _port: (
-            "YOLOmux paths: YOLOMUX_ROOT=/tmp/test (auto-derived); config=/tmp/config; "
+            "YOmux paths: YOLOMUX_ROOT=/tmp/test (auto-derived); config=/tmp/config; "
             "state=/tmp/state; cache=/tmp/cache; runtime=/tmp/runtime"
         ),
     )
@@ -481,9 +556,9 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
     assert captured["served"] is True
     assert captured["stopped"] is True
     assert captured["closed"] is True
-    assert output.count("YOLOmux paths: YOLOMUX_ROOT=") == 1
+    assert output.count("YOmux paths: YOLOMUX_ROOT=") == 1
     assert "DANGEROUS YOLO mode is enabled" in output
-    assert "Serving YOLOmux on https://localhost:19001/" in output
+    assert "Serving YOmux on https://localhost:19001/" in output
     assert "Using self-signed HTTPS certificate /tmp/cert.pem" in output
     assert "Highly recommend" not in output
 

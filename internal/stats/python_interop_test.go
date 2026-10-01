@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/keivenchang/yolomux/internal/testsupport"
+	"github.com/keivenchang/yomux/internal/testsupport"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -100,7 +100,7 @@ func TestPythonGoCutoverRollbackPreservesFactsAndGeneration(t *testing.T) {
 	statsPath := filepath.Join(root, "stats-v9.sqlite3")
 	script := filepath.Join(root, "cutover.py")
 	const scriptBody = `import json, sqlite3, sys
-from yolomux_lib.stats_current.storage import Observation, Store, UsageAtom
+from yomux_lib.stats_current.storage import Observation, Store, UsageAtom
 
 path, operation = sys.argv[1:3]
 if operation == "python-write-first":
@@ -282,7 +282,7 @@ func TestPythonAndGoCompressedRingPayloadsAreBidirectionallyCompatible(t *testin
 	}
 	goReadScript := filepath.Join(root, "read-ring.py")
 	const readRing = `import json, sqlite3, sys
-from yolomux_lib.stats_current.storage import Store
+from yomux_lib.stats_current.storage import Store
 path = sys.argv[1]
 connection = sqlite3.connect(path)
 kind, value = connection.execute("SELECT typeof(bucket_json), bucket_json FROM aggregate_ring_slots WHERE resolution_seconds=10 AND bucket_start=1000").fetchone()
@@ -314,7 +314,7 @@ print(json.dumps({"kind": kind, "magic": value[:5].decode("ascii", "strict"), "b
 	}
 	pythonWriteScript := filepath.Join(root, "write-ring.py")
 	const writeRing = `import sys
-from yolomux_lib.stats_current.storage import RingBucketWrite, Store
+from yomux_lib.stats_current.storage import RingBucketWrite, Store
 path, payload = sys.argv[1], sys.argv[2]
 store = Store.open(path, include_browser_diagnostics=False)
 store.initialize_ring_storage()
@@ -356,7 +356,7 @@ func TestPythonAndGoInvalidationLedgersMatchForSparseMutations(t *testing.T) {
 		t.Fatal(err)
 	}
 	const scriptBody = `import json, sys
-from yolomux_lib.stats_current.storage import CoverageEpoch, Observation, RingBucketWrite, Store, UnavailableSpan, UsageAtom, UsageAtomTombstone
+from yomux_lib.stats_current.storage import CoverageEpoch, Observation, RingBucketWrite, Store, UnavailableSpan, UsageAtom, UsageAtomTombstone
 
 path = sys.argv[1]
 store = Store.open(path, include_browser_diagnostics=False)
@@ -565,7 +565,7 @@ func writePythonSchemaTopologyScript(t *testing.T, path string) {
 	t.Helper()
 	const script = `import json, sqlite3, sys
 from pathlib import Path
-from yolomux_lib.stats_current.storage import Store
+from yomux_lib.stats_current.storage import Store
 
 def topology(path):
     connection = sqlite3.connect(path)
@@ -704,8 +704,8 @@ func TestSystemMemoryCollectorPayloadMatchesPythonTopFiveTieContract(t *testing.
 	}
 	const oracle = `import json, sys
 from pathlib import Path
-from yolomux_lib.stats_current import collectors
-from yolomux_lib.stats_current.process_memory import aggregate_process_memory_by_binary
+from yomux_lib.stats_current import collectors
+from yomux_lib.stats_current.process_memory import aggregate_process_memory_by_binary
 
 source = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 process_memory = aggregate_process_memory_by_binary(
@@ -801,8 +801,8 @@ func TestPythonGeneratedDeclaredFamilyFixtureMaterializesInGo(t *testing.T) {
 	path := filepath.Join(root, "stats-v9.sqlite3")
 	script := filepath.Join(root, "families.py")
 	const fixture = `import sys
-from yolomux_lib.stats_current import collectors
-from yolomux_lib.stats_current.storage import Store, UsageAtom
+from yomux_lib.stats_current import collectors
+from yomux_lib.stats_current.storage import Store, UsageAtom
 
 path = sys.argv[1]
 store = Store.open(path)
@@ -987,8 +987,8 @@ func TestPythonAndGoTranscriptScannersMatchSyntheticAtoms(t *testing.T) {
 	pythonScript := filepath.Join(t.TempDir(), "scan_transcript.py")
 	const script = `import json, sys
 from pathlib import Path
-from yolomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
-from yolomux_lib.stats_current.usage import legacy_fork_usage_tombstone_from_source, usage_atom_from_source
+from yomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
+from yomux_lib.stats_current.usage import legacy_fork_usage_tombstone_from_source, usage_atom_from_source
 
 path, kind, split_at, byte_budget = Path(sys.argv[1]), sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
 lines = path.read_bytes().splitlines(keepends=True)
@@ -1291,7 +1291,7 @@ json.dump(payload, sys.stdout, sort_keys=True, separators=(",", ":"))
 
 func TestPythonAndGoTranscriptSchedulersMatchSyntheticLiveHistoryOrder(t *testing.T) {
 	const pythonScanScript = `import json, sys
-from yolomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
+from yomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
 
 live_path, h0_path, h1_path = sys.argv[1:4]
 rows = [
@@ -1425,7 +1425,7 @@ func TestPythonAndGoTranscriptContextNormalizationMatchSyntheticUnicode(t *testi
 	root := t.TempDir()
 	scriptPath := filepath.Join(root, "normalize_transcript_context.py")
 	const script = `import json
-from yolomux_lib.workspace.session_files import transcript_effort, transcript_pricing_context
+from yomux_lib.workspace.session_files import transcript_effort, transcript_pricing_context
 
 value = "\u0130" + "A" * 63
 print(json.dumps([transcript_effort(value), transcript_pricing_context(value)], ensure_ascii=False))
@@ -1462,7 +1462,7 @@ func TestPythonAndGoTranscriptSchedulersPrioritizeRecentClaudeHistory(t *testing
 
 	pythonScript := filepath.Join(t.TempDir(), "scan_claude_priority.py")
 	const script = `import json, sys
-from yolomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
+from yomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
 
 old_path, new_path = sys.argv[1:3]
 scanner = StatsCurrentTranscriptUsageScanner(max_bytes_per_scan=1 << 20, max_records_per_scan=1)
@@ -1573,7 +1573,7 @@ func writePythonInteropScript(t *testing.T, path string) {
 	t.Helper()
 	const script = `import json, sqlite3, sys
 from pathlib import Path
-from yolomux_lib.stats_current import opencode
+from yomux_lib.stats_current import opencode
 
 def make_stats(path):
     connection = sqlite3.connect(path)

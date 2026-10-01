@@ -5,7 +5,7 @@
 // snapshot-level `health` provenance block and the per-row `health` block -- through the ONE
 // metric-envelope cell renderer, as ONE service roster with one disclosure per row.
 //
-// Every test here drives the real functions sliced out of static_src/js/yolomux/85_debug_panel.js.
+// Every test here drives the real functions sliced out of static_src/js/yomux/85_debug_panel.js.
 // There is no second renderer and no second state map in this file: `debugSystemMetricText` is the
 // same function the three process metrics already went through, the health columns call it, and
 // the web row and the tmux child row call it for their structural absences too.
@@ -25,12 +25,12 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 const source = [
-  'static_src/js/yolomux/84_debug_observation.js',
-  'static_src/js/yolomux/85_debug_panel.js',
+  'static_src/js/yomux/84_debug_observation.js',
+  'static_src/js/yomux/85_debug_panel.js',
 ].map(path => fs.readFileSync(path, 'utf8')).join('\n');
-const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
-const i18nSource = fs.readFileSync('static_src/js/yolomux/05_i18n.js', 'utf8');
-const css = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');
+const coreSource = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+const i18nSource = fs.readFileSync('static_src/js/yomux/05_i18n.js', 'utf8');
+const css = fs.readFileSync('static_src/css/yomux/30_preferences_changes.css', 'utf8');
 const localeEn = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'));
 
 let passed = 0;
@@ -243,7 +243,7 @@ function localServices(overrides = {}, serviceOverrides = {}) {
 }
 
 // The web process publishes the SAME metric envelopes as every service row -- see
-// `yolomux_lib/app.py:system_status_server_block`. It used to publish plain floats, which is how an
+// `yomux_lib/app.py:system_status_server_block`. It used to publish plain floats, which is how an
 // unsampled value reached this panel as a finite `0` and was stamped `measured`.
 const WEB_SERVER = {
   version: '0.7.1',
@@ -328,10 +328,10 @@ function renderAlerts(healthOverrides = {}) {
 
 // -- the guard ---------------------------------------------------------------------------------
 
-test('the panel guard renders schema 5, the version yolomux_lib/local_service_projection.py publishes', () => {
+test('the panel guard renders schema 5, the version yomux_lib/local_service_projection.py publishes', () => {
   const guarded = [...source.matchAll(/Number\(payload\.local_services\?\.schema_version\) === (\d+)/g)].map(match => match[1]);
   assert.deepEqual(guarded, ['5'], 'the panel must guard exactly once, on the published schema version');
-  const projection = fs.readFileSync('yolomux_lib/local_service_projection.py', 'utf8');
+  const projection = fs.readFileSync('yomux_lib/local_service_projection.py', 'utf8');
   assert.match(projection, /^LOCAL_SERVICES_SCHEMA_VERSION = 5$/m, 'producer and consumer pin the same number');
 });
 
@@ -423,22 +423,22 @@ test('a genuinely FUTURE-shaped payload still says it cannot be rendered', () =>
 test('the Go-native local-services row is rendered as a nested process without double-counting resources', () => {
   const native = {
     schema_version: 5,
-    inventory: ['yolomux-go'],
-    services: [serviceRow('yolomux-go', {
+    inventory: ['yomux-go'],
+    services: [serviceRow('yomux-go', {
       label: 'YO!stats Go backend',
       parent_id: 'web',
       details: {backend: 'go', observer: 'not-attached', thread_count: measured(17)},
     })],
     health: healthSnapshot({available: false, reason_code: 'observer_unattached', resources: 0}),
   };
-  const html = renderRoster(native, {expanded: ['yolomux-go']});
+  const html = renderRoster(native, {expanded: ['yomux-go']});
   const ids = [...html.matchAll(/data-subsystem-row data-subsystem-id="([^"]+)"/g)].map(match => match[1]);
-  assert.deepEqual(ids, ['web', 'tmux-signal-watcher', 'yolomux-go']);
-  const row = rosterRow(html, 'yolomux-go');
+  assert.deepEqual(ids, ['web', 'tmux-signal-watcher', 'yomux-go']);
+  const row = rosterRow(html, 'yomux-go');
   assert.match(row, /data-subsystem-parent="web"/);
   assert.match(row, /<span class="js-debug-system-service-name">YO!stats Go backend<\/span>/);
   assert.doesNotMatch(row, /data-subsystem-state="schema_unsupported"/);
-  const detail = slice(html, 'id="js-debug-roster-detail-yolomux-go"', '</tr>');
+  const detail = slice(html, 'id="js-debug-roster-detail-yomux-go"', '</tr>');
   assert.match(detail, /<dt>Threads<\/dt><dd>17<\/dd>/, 'expanded Go service details expose the measured thread count');
   const context = renderContext();
   vm.runInContext(`${SHARED_SOURCE}\n${RENDER_SOURCE}`, context);
@@ -759,7 +759,7 @@ test('NO value from an unreadable payload reaches the HTML, by whole-output swee
 
 test('there is no second Daemons renderer and no second service-state classifier', () => {
   // The retired surface, by name. Each of these was either a second renderer for a case the roster
-  // already covers, a second classifier in JavaScript of a rule `yolomux_lib/app.py` owns, or the
+  // already covers, a second classifier in JavaScript of a rule `yomux_lib/app.py` owns, or the
   // lifecycle state map that only they read. A deletion that leaves a live reference behind is
   // worse than no deletion, so this asserts on the SOURCE, not on whether anything calls them.
   const retired = [
@@ -831,7 +831,7 @@ test('the Daemons System region mounts the runtime-owner chart without the Go pr
 test('a running daemon whose transport failed is an issue with its typed reason, not "down"', () => {
   // THE BEHAVIOUR THE RETIRED CLASSIFIER PINNED, re-pinned on the surviving path. It used to be a
   // JavaScript re-derivation from `pid`/`healthy`/`transport_reason` -- a second copy of the rule
-  // `yolomux_lib/app.py:system_status_service` owns. The backend classifies, and the roster's job
+  // `yomux_lib/app.py:system_status_service` owns. The backend classifies, and the roster's job
   // is to keep the classification intact: `issue` is a running process that is not serving, and it
   // must not read as a process that is down or idle.
   const fixture = localServices();
@@ -958,7 +958,7 @@ test('the web process renders its unobserved columns as their reason, never as 0
   assert.match(webRow, /data-subsystem-metric="uptime_seconds" data-metric-state="measured">2h 14m 0s</);
   assert.match(webRow, /data-subsystem-metric="rss_bytes" data-metric-state="measured">88\.0MB</);
   assert.match(webRow, /data-subsystem-metric="cpu_now_percent" data-metric-state="measured">3%</);
-  assert.match(webRow, /YOLOmux web<\/span><span class="js-debug-roster-qualifier">:7999<\/span>/);
+  assert.match(webRow, /YOmux web<\/span><span class="js-debug-roster-qualifier">:7999<\/span>/);
 });
 
 test('the tmux signal watcher is a child of the web row with no invented process metrics', () => {
@@ -1452,7 +1452,7 @@ test('a recovered corrupt database is named in the same one compact alert', () =
 
 test('unattached, not-yet-probing and probing-but-unchanged are three different, named facts', () => {
   // `observer_cycles`/`observer_alive` are NULL when nothing is attached, not `0`/`false` --
-  // `yolomux_lib/local_service_projection.py` refuses to publish a count nobody took, and
+  // `yomux_lib/local_service_projection.py` refuses to publish a count nobody took, and
   // `tests/test_app.py::test_an_app_with_no_observer_attached_says_so_instead_of_publishing_zeros`
   // pins that end. This is the other end: `Number(null)` is 0, so rendering the count through the
   // plain number formatter would have turned the honest absence straight back into a measured
@@ -2073,7 +2073,7 @@ test('the summary counts EVERY row the roster renders, nested child included', (
   assert.equal(context.result.idle, 1, context.result);
 });
 
-test('a Go monolith displays CPU/RSS on YOLOmux web when the child shares its PID', () => {
+test('a Go monolith displays CPU/RSS on YOmux web when the child shares its PID', () => {
   const context = renderContext();
   vm.runInContext(`${SHARED_SOURCE}\n${RENDER_SOURCE}`, context);
   const go = localServices();
@@ -2369,7 +2369,7 @@ const ADVANCED_BODY = {
   transcripts_cache: {},
 };
 // The exact shape `SnapshotRead.refusal_payload` publishes at HTTP 200 (see
-// yolomux_lib/system_status_snapshot.py). `snapshot` describes the state; there is no body.
+// yomux_lib/system_status_snapshot.py). `snapshot` describes the state; there is no body.
 function snapshotRefusalBody(overrides = {}) {
   return {
     ok: false,

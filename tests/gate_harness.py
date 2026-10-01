@@ -35,33 +35,33 @@ from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 
-from yolomux_lib import app as app_module
-from yolomux_lib import common
-from yolomux_lib import auth as auth_module
-from yolomux_lib import server as server_module
-from yolomux_lib import server_auth
-from yolomux_lib.auth import TEST_AUTH_BYPASS_ENV
-from yolomux_lib.http_routes import RESPONSE_SSE
-from yolomux_lib.http_routes import RESPONSE_WEBSOCKET
-from yolomux_lib.http_routes import route_for_request
-from yolomux_lib.infra.inotify_capacity import INOTIFY_FD_TARGET
-from yolomux_lib.infra.inotify_capacity import INOTIFY_MAX_USER_INSTANCES_PATH
-from yolomux_lib.infra.inotify_capacity import INOTIFY_MAX_USER_WATCHES_PATH
-from yolomux_lib.infra.inotify_capacity import inotify_instance_census
-from yolomux_lib.infra.inotify_capacity import process_fd_owners
-from yolomux_lib.infra.inotify_capacity import read_kernel_limit
-from yolomux_lib.infra.worktree_writer import child_process_artifact_environment
-from yolomux_lib.observability.failure_severity import EXPECTED_OUTCOME_LOG_LEVEL
-from yolomux_lib.local_services.registry import bounded_process_table
-from yolomux_lib.local_services.registry import LocalServiceRegistry
-from yolomux_lib.local_services.registry import SpawnProcessOwnership
-from yolomux_lib.local_services.registry import SpawnOwnershipProof
-from yolomux_lib.local_services.registry import process_spawn_generation
-from yolomux_lib.host_identity import process_start_identity
-from yolomux_lib.server import TmuxWebtermHTTPServer
-from yolomux_lib.server_logs import SERVER_LOGS
-from yolomux_lib.workspace import uploads as uploads_module
-from yolomux_lib.workspace import workdir as workdir_module
+from yomux_lib import app as app_module
+from yomux_lib import common
+from yomux_lib import auth as auth_module
+from yomux_lib import server as server_module
+from yomux_lib import server_auth
+from yomux_lib.auth import TEST_AUTH_BYPASS_ENV
+from yomux_lib.http_routes import RESPONSE_SSE
+from yomux_lib.http_routes import RESPONSE_WEBSOCKET
+from yomux_lib.http_routes import route_for_request
+from yomux_lib.infra.inotify_capacity import INOTIFY_FD_TARGET
+from yomux_lib.infra.inotify_capacity import INOTIFY_MAX_USER_INSTANCES_PATH
+from yomux_lib.infra.inotify_capacity import INOTIFY_MAX_USER_WATCHES_PATH
+from yomux_lib.infra.inotify_capacity import inotify_instance_census
+from yomux_lib.infra.inotify_capacity import process_fd_owners
+from yomux_lib.infra.inotify_capacity import read_kernel_limit
+from yomux_lib.infra.worktree_writer import child_process_artifact_environment
+from yomux_lib.observability.failure_severity import EXPECTED_OUTCOME_LOG_LEVEL
+from yomux_lib.local_services.registry import bounded_process_table
+from yomux_lib.local_services.registry import LocalServiceRegistry
+from yomux_lib.local_services.registry import SpawnProcessOwnership
+from yomux_lib.local_services.registry import SpawnOwnershipProof
+from yomux_lib.local_services.registry import process_spawn_generation
+from yomux_lib.host_identity import process_start_identity
+from yomux_lib.server import TmuxWebtermHTTPServer
+from yomux_lib.server_logs import SERVER_LOGS
+from yomux_lib.workspace import uploads as uploads_module
+from yomux_lib.workspace import workdir as workdir_module
 from tests.browser_helpers.browser_console import assert_browser_journey_error_free
 from tests.browser_helpers.browser_console import acknowledge_browser_diagnostic_receipts
 from tests.browser_helpers.browser_console import begin_browser_journey_surface_tracking
@@ -78,6 +78,7 @@ from tests.gate_helpers import CounterDelta
 from tests.gate_helpers import RepeatFailure
 from tests.gate_helpers import assert_counter_delta
 from tests.gate_helpers import repeat
+from tools.instance_isolation import normalize_yomux_environment
 from tests.gate_helpers import sample_counter_delta
 from tools.test_plan import CHECK_LANE_ENV
 from tools.test_plan import PYTEST_LANE_NAMES
@@ -104,7 +105,7 @@ def gate_http_port_candidates(
     candidates = tuple(GATE_HTTP_PORT_RANGE)
     if active_lane:
         if active_lane not in PYTEST_LANE_NAMES:
-            raise ValueError(f"invalid YOLOmux check lane: {active_lane!r}")
+            raise ValueError(f"invalid YOmux check lane: {active_lane!r}")
         candidates = candidates[PYTEST_LANE_NAMES.index(active_lane)::len(PYTEST_LANE_NAMES)]
     active_worker = os.environ.get("PYTEST_XDIST_WORKER") if worker is None else worker
     if active_worker is None:
@@ -312,7 +313,7 @@ def resolved_gate_writable_paths(paths: GateRuntimePaths) -> dict[str, Path]:
     resolved[f"env:{GATE_HOME_ENV_VAR}"] = Path(os.environ[GATE_HOME_ENV_VAR])
     resolved[f"env:{GATE_ROOT_ENV_VAR}"] = Path(os.environ[GATE_ROOT_ENV_VAR])
     resolved.update({f"module:{label}": path for label, path in paths.patched_module_paths})
-    resolved["module:yolomux_lib.workspace.uploads.UPLOAD_TMP_BASE"] = uploads_module.UPLOAD_TMP_BASE
+    resolved["module:yomux_lib.workspace.uploads.UPLOAD_TMP_BASE"] = uploads_module.UPLOAD_TMP_BASE
     resolved["env:TMPDIR"] = Path(os.environ["TMPDIR"])
     resolved["fixture:tmp_dir"] = paths.tmp_dir
     resolved["fixture:chrome_profile_dir"] = paths.chrome_profile_dir
@@ -323,7 +324,7 @@ def patch_imported_writable_constants(
     monkeypatch: pytest.MonkeyPatch,
     old_to_new_roots: Mapping[Path, Path],
 ) -> tuple[tuple[str, Path], ...]:
-    """Move imported YOLOmux Path constants from bootstrap roots to this test."""
+    """Move imported YOmux Path constants from bootstrap roots to this test."""
 
     mappings = sorted(
         ((old.resolve(strict=False), new) for old, new in old_to_new_roots.items()),
@@ -332,7 +333,7 @@ def patch_imported_writable_constants(
     )
     patched: list[tuple[str, Path]] = []
     for module_name, module in tuple(sys.modules.items()):
-        if not module_name.startswith("yolomux_lib") or module is None:
+        if not module_name.startswith("yomux_lib") or module is None:
             continue
         for attribute, value in tuple(vars(module).items()):
             if not isinstance(value, Path):
@@ -418,11 +419,12 @@ def gate_runtime_paths(
         "YOLOMUX_CA_DIR": ca_dir,
         "YOLOMUX_LOG_DIR": log_dir,
         "YOLOMUX_WORKSPACE_BASE": workspace_dir,
+        GATE_ROOT_ENV_VAR: root,
         GATE_TMUX_SOCKET_ENV_VAR: tmux_socket_path,
     }
-    for name, path in per_test_env.items():
-        monkeypatch.setenv(name, str(path))
-    monkeypatch.setenv(GATE_ROOT_ENV_VAR, str(root))
+    normalized_test_env = normalize_yomux_environment({name: str(path) for name, path in per_test_env.items()})
+    for name, value in normalized_test_env.items():
+        monkeypatch.setenv(name, value)
     monkeypatch.setenv("TMPDIR", str(tmp_dir))
     previous_tempdir = tempfile.tempdir
     tempfile.tempdir = None
@@ -433,7 +435,7 @@ def gate_runtime_paths(
 
     # Package import installed one bootstrap artifact root before this fixture
     # selected its per-test product root. Rebase the package-owned paths before
-    # the fixture starts tmux or any other child that imports yolomux_lib.
+    # the fixture starts tmux or any other child that imports yomux_lib.
     child_environment = child_process_artifact_environment(Path(__file__).resolve().parents[1])
     for name in set(os.environ) | set(child_environment):
         current = os.environ.get(name)
@@ -451,8 +453,8 @@ def gate_runtime_paths(
     )
     patched_paths = dict(patched_module_paths)
     for label, module in (
-        ("yolomux_lib.infra.common.AUTH_CONFIG_PATH", common),
-        ("yolomux_lib.auth.AUTH_CONFIG_PATH", auth_module),
+        ("yomux_lib.infra.common.AUTH_CONFIG_PATH", common),
+        ("yomux_lib.auth.AUTH_CONFIG_PATH", auth_module),
     ):
         monkeypatch.setattr(module, "AUTH_CONFIG_PATH", auth_config_path)
         patched_paths[label] = auth_config_path
@@ -863,7 +865,7 @@ def retire_expected_fixture_typed_api_failure(
 
     ``code`` names an EXPECTED outcome of what the fixture asked for -- a file the test itself
     deleted, a directory the user browsed to that is not there.  ``failure_record_level``
-    (``yolomux_lib/observability/failure_severity.py``) is the one owner of that distinction and
+    (``yomux_lib/observability/failure_severity.py``) is the one owner of that distinction and
     records such a row at ``info``, because ``{"warning", "error"}`` is the release-blocking set the
     live soak and every retirement helper here collect.  So this retires an INFO row, and it holds
     the rule from both sides: the transition must contain no release-blocking row at all, and it
@@ -947,7 +949,7 @@ def prepare_fixture_http_app(monkeypatch: pytest.MonkeyPatch, app: Any) -> None:
 class FixtureSchedulerClient(Protocol):
     """The batchd scheduler-lease seam the gate fixture pins on setup and releases on teardown.
 
-    Both halves act on one object: the real ``BatchClient`` (``yolomux_lib/infra/batchd.py``) and any
+    Both halves act on one object: the real ``BatchClient`` (``yomux_lib/infra/batchd.py``) and any
     fixture stand-in must expose the SAME two calls, so setup pins and teardown releases can never
     diverge onto different owners.  ``start_for_scheduler`` takes the lease that pins batchd up;
     ``stop_for_scheduler`` releases it; ``holds_scheduler_lease`` reports whether the lease is held.
@@ -2836,7 +2838,7 @@ def _read_fixture_operation_state(driver) -> dict[str, Any]:
 
     state = driver.execute_script(
         """
-        const lifecycle = window.__yolomuxFixtureLifecycle;
+        const lifecycle = window.__yomuxFixtureLifecycle;
         if (!lifecycle || typeof lifecycle.operationState !== 'function') {
           return {available: false};
         }
@@ -2915,7 +2917,7 @@ def _retire_fixture_background_producers(driver) -> dict[str, Any]:
 
     lifecycle = driver.execute_script(
         """
-        const lifecycle = window.__yolomuxFixtureLifecycle;
+        const lifecycle = window.__yomuxFixtureLifecycle;
         if (!lifecycle) {
           return {available: false};
         }
@@ -2928,7 +2930,7 @@ def _retire_fixture_background_producers(driver) -> dict[str, Any]:
         return {}
     result = driver.execute_script(
         """
-        const lifecycle = window.__yolomuxFixtureLifecycle;
+        const lifecycle = window.__yomuxFixtureLifecycle;
         if (typeof lifecycle.retireBackgroundProducers !== 'function') {
           return {available: false};
         }
@@ -3136,7 +3138,7 @@ def _await_lifecycle_operation_receipts(driver, blocked_state: Mapping[str, Any]
         """
         const boundMs = arguments[0];
         const done = arguments[arguments.length - 1];
-        const lifecycle = window.__yolomuxFixtureLifecycle;
+        const lifecycle = window.__yomuxFixtureLifecycle;
         if (!lifecycle || typeof lifecycle.awaitPendingOperationReceipts !== 'function') {
           done({available: false});
           return;
@@ -3401,7 +3403,7 @@ def finish_browser_fixture_boundary(
             else:
                 lifecycle_state = current_browser.execute_script(
                     """
-                    const lifecycle = window.__yolomuxFixtureLifecycle;
+                    const lifecycle = window.__yomuxFixtureLifecycle;
                     return lifecycle ? {diagnosticMode: lifecycle.diagnosticMode} : null;
                     """
                 )
@@ -3433,7 +3435,7 @@ def finish_browser_fixture_boundary(
         try:
             lifecycle_state = current_browser.execute_script(
                 """
-                const lifecycle = window.__yolomuxFixtureLifecycle;
+                const lifecycle = window.__yomuxFixtureLifecycle;
                 return lifecycle ? {diagnosticMode: lifecycle.diagnosticMode} : null;
                 """
             )
@@ -3875,7 +3877,7 @@ FINDER_JOURNEY_INSTRUMENT_SOURCE = """
     // request), no expansion is pending, no row is still loading children, and the
     // product's own operation ledger is idle. None of these depend on a rendered frame.
     settlement(root) {
-      const lifecycle = window.__yolomuxFixtureLifecycle;
+      const lifecycle = window.__yomuxFixtureLifecycle;
       const operations = lifecycle && typeof lifecycle.operationState === 'function'
         ? lifecycle.operationState()
         : null;

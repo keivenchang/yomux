@@ -1,10 +1,10 @@
 from pathlib import Path
 
-from yolomux_lib.chat import chat_store
-from yolomux_lib.login_rate_limit import LoginRateLimiter
-from yolomux_lib import login_rate_limit
-from yolomux_lib.observability import pricing_catalog
-from yolomux_lib.search import file_index
+from yomux_lib.chat import chat_store
+from yomux_lib.login_rate_limit import LoginRateLimiter
+from yomux_lib import login_rate_limit
+from yomux_lib.observability import pricing_catalog
+from yomux_lib.search import file_index
 
 
 def _host_root(root: Path, calls: list[Path]) -> Path:

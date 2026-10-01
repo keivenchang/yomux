@@ -7,11 +7,11 @@ import pytest
 from tests.gate_harness import aged_state_root  # noqa: F401
 from tests.gate_harness import assert_browser_journey_error_free
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
-from yolomux_lib.local_services.rpc import encode_metadata
-from yolomux_lib.local_services.rpc import LOCAL_RPC_MAX_METADATA_BYTES
-from yolomux_lib.local_services.rpc import new_envelope
-from yolomux_lib.stats_current import storage
-from yolomux_lib.workspace import session_files
+from yomux_lib.local_services.rpc import encode_metadata
+from yomux_lib.local_services.rpc import LOCAL_RPC_MAX_METADATA_BYTES
+from yomux_lib.local_services.rpc import new_envelope
+from yomux_lib.stats_current import storage
+from yomux_lib.workspace import session_files
 
 
 class _MissingJsDebugStoreDriver:

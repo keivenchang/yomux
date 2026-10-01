@@ -9,9 +9,9 @@ from tests.browser_helpers.browser_layout import load_static_html_fixture
 from tests.helpers.browser_stats_coverage import _current_stats_fixture_html
 from tests.helpers.gate_stats import corrupt_in_place as _corrupt_in_place
 from tests.helpers.gate_stats import valid_current_database as _valid_current_database
-from yolomux_lib.stats_current import http as stats_http
-from yolomux_lib.stats_current import service as stats_service
-from yolomux_lib.stats_current import storage
+from yomux_lib.stats_current import http as stats_http
+from yomux_lib.stats_current import service as stats_service
+from yomux_lib.stats_current import storage
 
 
 pytest_plugins = ("tests.gate_harness",)
@@ -79,7 +79,7 @@ def test_recovered_store_renders_a_persistent_banner_but_first_run_does_not(brow
           };
           const root = document.getElementById('stats-root');
           root.replaceChildren();
-          const mounted = YOLOmuxStatsCurrent.mount(root, {
+          const mounted = YOmuxStatsCurrent.mount(root, {
             view: 'stats', clientId: `corruption-${migration.result}`,
             savedRange: 300, savedResolution: 1, fetch: window.__statsFixture.fetch,
             EventSource: eventSource, controllerOptions: {clock: window.__statsFixture.clock},
@@ -105,7 +105,7 @@ def test_recovered_store_renders_a_persistent_banner_but_first_run_does_not(brow
 
     assert result.get("error") is None, result
     assert result["recovery"] == {
-        "text": "Stats history was reset after storage damage. The damaged database was kept in your YOLOmux state directory. Check the preserved file before removing it, then let new history accumulate.",
+        "text": "Stats history was reset after storage damage. The damaged database was kept in your YOmux state directory. Check the preserved file before removing it, then let new history accumulate.",
         "role": "alert",
         "persistent": True,
     }, result

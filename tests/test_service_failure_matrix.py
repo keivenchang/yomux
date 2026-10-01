@@ -4,12 +4,12 @@ import time
 from concurrent.futures import Future
 from concurrent.futures.process import BrokenProcessPool
 
-from yolomux_lib import approvald
-from yolomux_lib import batchd
-from yolomux_lib.infra.host_identity import current_host_identity
-from yolomux_lib.local_services.registry import LOCAL_SERVICE_BACKOFF_SECONDS
-from yolomux_lib.local_services.registry import LocalServiceRegistry
-from yolomux_lib.local_services.registry import LocalServiceSpec
+from yomux_lib import approvald
+from yomux_lib import batchd
+from yomux_lib.infra.host_identity import current_host_identity
+from yomux_lib.local_services.registry import LOCAL_SERVICE_BACKOFF_SECONDS
+from yomux_lib.local_services.registry import LocalServiceRegistry
+from yomux_lib.local_services.registry import LocalServiceSpec
 
 
 SERVICE_FAILURE_MATRIX = [
@@ -129,7 +129,7 @@ def test_registry_refuses_incompatible_socket_owner_without_sidecar_record(tmp_p
     shutdowns = []
     spawned = []
 
-    monkeypatch.setattr("yolomux_lib.local_services.registry.pid_is_alive", lambda pid: stale_alive.get(pid, False))
+    monkeypatch.setattr("yomux_lib.local_services.registry.pid_is_alive", lambda pid: stale_alive.get(pid, False))
 
     class RunningProcess:
         def poll(self):

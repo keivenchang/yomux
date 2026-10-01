@@ -26,7 +26,7 @@ import tempfile
 import threading
 from pathlib import Path
 
-from yolomux_lib.stats_current.service import StatsCurrentService
+from yomux_lib.stats_current.service import StatsCurrentService
 
 # glibc emits one such element per arena; `nr` is the arena index, main arena is 0.
 _HEAP_ELEMENT_RE = re.compile(r'<heap nr="\d+">')

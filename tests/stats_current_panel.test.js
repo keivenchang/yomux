@@ -8,22 +8,22 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 const source = [
-  'static_src/js/yolomux/84_debug_observation.js',
-  'static_src/js/yolomux/85_debug_panel.js',
+  'static_src/js/yomux/84_debug_observation.js',
+  'static_src/js/yomux/85_debug_panel.js',
 ].map(path => fs.readFileSync(path, 'utf8')).join('\n');
 const graphDefaultsSource = source.slice(
   source.indexOf('const jsDebugGraphDefaultHiddenChartKeys ='),
   source.indexOf('\nconst jsDebugGraphMovingAverageSamples', source.indexOf('const jsDebugGraphDefaultHiddenChartKeys =')),
 );
-const currentSource = fs.readFileSync('static_src/js/yolomux/84_stats_current.js', 'utf8');
-const debugRuntimeSource = fs.readFileSync('static_src/js/yolomux/84_debug_runtime_facade.js', 'utf8');
-const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
-const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+const currentSource = fs.readFileSync('static_src/js/yomux/84_stats_current.js', 'utf8');
+const debugRuntimeSource = fs.readFileSync('static_src/js/yomux/84_debug_runtime_facade.js', 'utf8');
+const bootstrapSource = fs.readFileSync('static_src/js/yomux/00_bootstrap_state.js', 'utf8');
+const coreSource = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
 const apiFetchStart = coreSource.indexOf('async function apiFetch(');
 const apiFetchEnd = coreSource.indexOf('\nfunction ', apiFetchStart);
 const apiFetchSource = coreSource.slice(apiFetchStart, apiFetchEnd);
-const editorSettingsSource = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
-const tokenCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
+const editorSettingsSource = fs.readFileSync('static_src/js/yomux/50_editor_settings_runtime.js', 'utf8');
+const tokenCss = fs.readFileSync('static_src/css/yomux/00_tokens_base.css', 'utf8');
 const lifecycleScopeSource = coreSource.slice(
   coreSource.indexOf('function createLifecycleScope('),
   coreSource.indexOf('\nfunction createLatestResource(', coreSource.indexOf('function createLifecycleScope(')),
@@ -38,11 +38,11 @@ const canonicalJsonValueSource = bootstrapSource.slice(
   bootstrapSource.indexOf('\nfunction statsOnlyBootEnabled(', bootstrapSource.indexOf('function canonicalJsonValue(')),
 );
 const terminalSource = [
-  'static_src/js/yolomux/99_terminal_boot.js',
-  'static_src/js/yolomux/99_client_event_transport.js',
-  'static_src/js/yolomux/99_terminal_shortcuts_boot.js',
+  'static_src/js/yomux/99_terminal_boot.js',
+  'static_src/js/yomux/99_client_event_transport.js',
+  'static_src/js/yomux/99_terminal_shortcuts_boot.js',
 ].map(path => fs.readFileSync(path, 'utf8')).join('\n');
-const css = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');
+const css = fs.readFileSync('static_src/css/yomux/30_preferences_changes.css', 'utf8');
 const localeEn = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'));
 let passed = 0;
 let failed = 0;
@@ -132,7 +132,7 @@ testAsync('capability-gated requests report full-mode failures but stay quiet in
 
   const fullMode = await request(false);
   assert.equal(fullMode.response.status, 501);
-  assert.equal(fullMode.response.headers.get('X-YOLOmux-Capability-Gated'), 'pane.agent.v1');
+  assert.equal(fullMode.response.headers.get('X-YOmux-Capability-Gated'), 'pane.agent.v1');
   assert.equal(fullMode.apiEvents.length, 1, 'full mode retains typed unsupported-route evidence');
   assert.equal(fullMode.apiEvents[0].status, 501);
   assert.equal(fullMode.apiEvents[0].ok, false);
@@ -157,6 +157,16 @@ function sourceFunction(name, nextName) {
   assert.notEqual(end, -1, `${nextName} follows ${name}`);
   return source.slice(start, end);
 }
+
+test('stats renderer prefers the canonical module and accepts the legacy alias', () => {
+  const canonical = {name: 'canonical'};
+  const legacy = {name: 'legacy'};
+  const context = vm.createContext({YOmuxStatsCurrent: canonical, YOLOmuxStatsCurrent: legacy});
+  vm.runInContext(sourceFunction('debugGraphStatsCurrentModule', 'debugGraphAgentDisplayLabel'), context);
+  assert.equal(context.debugGraphStatsCurrentModule().name, 'canonical');
+  context.YOmuxStatsCurrent = null;
+  assert.equal(context.debugGraphStatsCurrentModule().name, 'legacy');
+});
 
 test('CPU chart title distinguishes logical CPUs from physical cores', () => {
   const context = {
@@ -202,7 +212,7 @@ test('the established Graph API-SSE System Logs shell remains the renderer owner
   assert.match(source, /function debugSystemInnerHtml\(/);
   assert.match(source, /function debugLogsInnerHtml\(/);
   assert.doesNotMatch(source, /data-stats-current-view/);
-  assert.equal(fs.existsSync('static_src/js/yolomux/83_stats_panel.js'), false);
+  assert.equal(fs.existsSync('static_src/js/yomux/83_stats_panel.js'), false);
 });
 
 test('Logs normalizes browser and server records without duplicate IDs or unsafe extra fields', () => {
@@ -723,12 +733,16 @@ test('Daemons load gives Go thread and child rows stable labels', () => {
   const source = sourceFunction('debugGraphServiceLoadLabel', 'debugGraphServiceLoadSeriesDefs');
   const context = {String};
   vm.runInNewContext(`${source}\nresult = [
+    debugGraphServiceLoadLabel('yomux-go:thread:42'),
+    debugGraphServiceLoadLabel('yomux-go:child:8124:habcdef'),
     debugGraphServiceLoadLabel('yolomux-go:thread:41'),
     debugGraphServiceLoadLabel('yolomux-go:child:8123'),
     debugGraphServiceLoadLabel('yolomux-go:thread:41:9876'),
     debugGraphServiceLoadLabel('yolomux-go:child:8123:habcdef'),
   ];`, context);
   assert.deepEqual(JSON.parse(JSON.stringify(context.result)), [
+    'Go OS thread 42',
+    'Go child process 8124',
     'Go OS thread 41',
     'Go child process 8123',
     'Go OS thread 41',
@@ -739,11 +753,13 @@ test('Daemons load gives Go thread and child rows stable labels', () => {
 test('Go process graph labels identify instances and preserve legacy history', () => {
   const source = sourceFunction('debugGraphServiceLoadLabel', 'debugGraphServiceLoadSeriesDefs');
   const labels = vm.runInNewContext(`${source}; [
+    debugGraphServiceLoadLabel('yomux-go:process:125:7224:3:%2Fbin%2Fyomux-go:host:boot:start:habcdef'),
     debugGraphServiceLoadLabel('yolomux-go:process:123:7222:12:%2Fbin%2Fyolomux-go:host:boot:start:owner'),
     debugGraphServiceLoadLabel('yolomux-go:process:124:7223:0:%2Fbin%2Fcustom+server:host:boot:start:owner'),
     debugGraphServiceLoadLabel('yolomux-go'),
   ]`);
   assert.deepStrictEqual([...labels], [
+    'yomux-go (PID 125, port 7224, PPID 3)',
     'yolomux-go (PID 123, port 7222, PPID 12)',
     'custom server (PID 124, port 7223)',
     'yolomux-go (legacy process; identity unavailable)',
@@ -1192,6 +1208,8 @@ test('fresh Graphs defaults show Agents, Session tokens/min, and system/process 
     Number,
     Math,
     window: {localStorage: {getItem: () => null}},
+    storageGet: key => context.window.localStorage.getItem(key),
+    storageSet: (key, value) => context.window.localStorage.setItem(key, String(value)),
     jsDebugGraphChartGroups: [
       {key: 'activity'}, {key: 'agentTokens'}, {key: 'modelTokens'}, {key: 'memory'},
     ],
@@ -1233,6 +1251,8 @@ test('saved Graphs visibility preferences override defaults instead of being bac
     Number,
     Math,
     window: {localStorage: {getItem: () => JSON.stringify({hiddenCharts: ['activity'], visibleCharts: ['gpuUtil']})}},
+    storageGet: key => context.window.localStorage.getItem(key),
+    storageSet: (key, value) => context.window.localStorage.setItem(key, String(value)),
     jsDebugStatsUiPreferencesStorageKey: 'stats',
     legacyYoCostMigrationRequested: false,
     jsDebugLogLevels: ['warning', 'error'],
@@ -1269,7 +1289,7 @@ test('AUTO resolution label reports the coarsest resolution actually rendered by
 test('token chart groups different agent windows from one tmux session into one summed series', () => {
   assert.match(
     sourceFunction('debugGraphSessionTokenKey', 'debugGraphCostModelAgentKind'),
-    /YOLOmuxStatsCurrent\?\.canonicalSessionKey\?\.\(full\)/,
+    /debugGraphStatsCurrentModule\(\)\?\.canonicalSessionKey\?\.\(full\)/,
   );
   const context = {
     result: null,
@@ -1602,9 +1622,10 @@ test('host CPU and memory labels retain separate Go process instances', () => {
     ${processSeries}
     const first = 'yolomux-go-pid-101-a1b2c3d4';
     const second = 'yolomux_go-pid-202-b2c3d4e5';
+    const canonical = 'yomux-go-pid-303-c3d4e5f6';
     const bucket = {hostMetrics: {
-      cpuProcesses: new Map([[first, {label: first, totalPercent: 4, samples: 1}], [second, {label: second, totalPercent: 6, samples: 1}]]),
-      memoryProcesses: new Map([[first, {label: first, totalBytes: 400, samples: 1}], [second, {label: second, totalBytes: 600, samples: 1}]]),
+      cpuProcesses: new Map([[first, {label: first, totalPercent: 4, samples: 1}], [second, {label: second, totalPercent: 6, samples: 1}], [canonical, {label: canonical, totalPercent: 8, samples: 1}]]),
+      memoryProcesses: new Map([[first, {label: first, totalBytes: 400, samples: 1}], [second, {label: second, totalBytes: 600, samples: 1}], [canonical, {label: canonical, totalBytes: 800, samples: 1}]]),
     }};
     result = {
       cpu: debugGraphCpuProcessSeriesDefs([bucket]).map(item => item.label),
@@ -1612,8 +1633,8 @@ test('host CPU and memory labels retain separate Go process instances', () => {
     };
   `, context);
   assert.deepEqual(JSON.parse(JSON.stringify(context.result)), {
-    cpu: ['yolomux-go (PID 202)', 'yolomux-go (PID 101)'],
-    memory: ['yolomux-go (PID 202)', 'yolomux-go (PID 101)'],
+    cpu: ['yomux-go (PID 303)', 'yolomux-go (PID 202)', 'yolomux-go (PID 101)'],
+    memory: ['yomux-go (PID 303)', 'yolomux-go (PID 202)', 'yolomux-go (PID 101)'],
   });
 });
 
@@ -1909,7 +1930,7 @@ test('one shared spike-compression descriptor preserves token behavior and makes
 
 // The transport-failure classification used to be re-derived here, in JavaScript, from
 // `pid`/`healthy`/`transport_reason` -- a second copy of the rule
-// `yolomux_lib/app.py:system_status_service` owns. That classifier is retired. The behaviour it
+// `yomux_lib/app.py:system_status_service` owns. That classifier is retired. The behaviour it
 // pinned now has two owners' worth of coverage on the surviving path:
 //   * the backend rule and its published row -- tests/test_gate_contract.py
 //     `test_m3_live_daemon_transport_failure_is_not_reported_as_process_down`;
@@ -2287,8 +2308,8 @@ test('client failure observations are signed, source-bounded, and omit arbitrary
     key: 'epoch-1:error:1',
     event: {
       type: 'error', ts: '2026-08-04T12:00:00.000Z',
-      message: 'render failed', stack: 'Error: render failed\\n at paint (/static/yolomux.js:10:2)',
-      source: '/static/yolomux.js?secret=value', line: 10, column: 2,
+      message: 'render failed', stack: 'Error: render failed\\n at paint (/static/yomux.js:10:2)',
+      source: '/static/yomux.js?secret=value', line: 10, column: 2,
       signature: 'jsf-deadbeef', provenance: 'confirmed_real', typedText: 'do not upload', fileContents: 'private',
     },
   });`, context);
@@ -2297,13 +2318,13 @@ test('client failure observations are signed, source-bounded, and omit arbitrary
     'journey_id', 'kind', 'line', 'message', 'provenance', 'route', 'signature', 'source', 'stack',
   ]);
   assert.equal(context.result.payload.kind, 'error');
-  assert.equal(context.result.payload.source, '/static/yolomux.js');
+  assert.equal(context.result.payload.source, '/static/yomux.js');
   assert.match(context.result.payload.signature, /^jsf-[0-9a-f]{8}$/);
   assert.notEqual(context.result.payload.signature, 'jsf-deadbeef');
   assert.equal(context.result.payload.provenance, 'confirmed_real');
   vm.runInNewContext(`${failureHelpers}\n${failureClassifier}\n${sourceFunction('jsDebugCurrentFailureCorrelation', 'jsDebugCurrentObservationReceiptBarrier')}\n${functionText}\nresult = jsDebugCurrentObservationFromEvent({
     key: 'epoch-1:error:2',
-    event: {type: 'error', ts: '2026-08-04T12:01:00.000Z', message: 'unmarked', source: '/static/yolomux.js'},
+    event: {type: 'error', ts: '2026-08-04T12:01:00.000Z', message: 'unmarked', source: '/static/yomux.js'},
   });`, context);
   assert.equal(Object.hasOwn(context.result.payload, 'provenance'), false);
 });
@@ -2454,6 +2475,13 @@ testAsync('browser observation writer fences acknowledge, retry authentication, 
       navigator: {userAgent: identity.userAgent || 'Mozilla/5.0 Chrome/140.0'},
     };
     vm.runInNewContext(`
+      function browserStorageLegacyKey(key) { return String(key).startsWith('yomux.') ? 'yolomux.' + String(key).slice(6) : ''; }
+      function browserStorageGet(storage, key) { const canonical = storage.getItem(key); const legacy = browserStorageLegacyKey(key); return canonical !== null ? canonical : legacy ? storage.getItem(legacy) : null; }
+      function browserStorageSet(storage, key, value) { storage.setItem(key, String(value)); const legacy = browserStorageLegacyKey(key); if (legacy) storage.setItem(legacy, String(value)); }
+      function browserStorageRemove(storage, key) { storage.removeItem(key); const legacy = browserStorageLegacyKey(key); if (legacy) storage.removeItem(legacy); }
+      function sessionStorageSet(key, value) { browserStorageSet(sessionStorage, key, value); }
+      function sessionStorageRemove(key) { browserStorageRemove(sessionStorage, key); }
+      function storageSet(key, value) { browserStorageSet(localStorage, key, value); }
       const statsWriterFence = ${JSON.stringify(fence)};
       const jsDebugCurrentObservationBatchDelayMs = 10000;
       const jsDebugCurrentObservationRetryMaxMs = 300000;
@@ -3067,7 +3095,7 @@ testAsync('browser observation writer fences acknowledge, retry authentication, 
   const byteBatch = makeUploader({protocolVersion: 24, schemaGeneration: 5}, 'page-bytes');
   const largeFailure = {
     type: 'error', ts: '2026-07-17T12:00:00.000Z', message: 'failure',
-    stack: `Error: failure\\n${'x'.repeat(3990)}`, source: '/static/yolomux.js',
+    stack: `Error: failure\\n${'x'.repeat(3990)}`, source: '/static/yomux.js',
   };
   for (let index = 0; index < 100; index += 1) {
     byteBatch.api.queue(`page-bytes:error:${index}`, largeFailure);
@@ -3131,7 +3159,8 @@ testAsync('browser observation writer fences acknowledge, retry authentication, 
 });
 
 test('the established renderer consumes the protocol-v2 exact stream', () => {
-  assert.match(source, /globalThis\.YOLOmuxStatsCurrent\.createBrowserClient/);
+  assert.match(source, /function debugGraphStatsCurrentModule\(\)[\s\S]*globalThis\.YOmuxStatsCurrent \|\| globalThis\.YOLOmuxStatsCurrent/);
+  assert.match(source, /statsCurrent\.createBrowserClient/);
   assert.match(source, /onGeneration\(snapshot\)[\s\S]*paintJsDebugCurrentStatsGeneration/);
   assert.doesNotMatch(source, /onSnapshotProgress|paintJsDebugCurrentStatsProgress/);
   assert.match(source, /client\.select\(selection\.rangeSeconds, selection\.resolution\)/);
@@ -3145,7 +3174,7 @@ test('the established renderer consumes the protocol-v2 exact stream', () => {
 });
 
 test('YO!stats startup begins before locale boot can delay the app shell', () => {
-  const boot = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+  const boot = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
   const statsStart = boot.indexOf('initializeJsDebugStatsBeforeStreams');
   const localeWait = boot.indexOf('await applyLocale(resolveLocalePref');
   assert.ok(statsStart >= 0 && localeWait >= 0 && statsStart < localeWait);
@@ -3159,7 +3188,7 @@ test('stats-only boot does not schedule unrelated deferred settings metadata', (
 });
 
 test('stats-only boot loads Tabber topology before returning', () => {
-  const boot = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+  const boot = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
   const statsOnlyBranch = boot.slice(
     boot.indexOf('if (statsOnlyBootEnabled()) {'),
     boot.indexOf('\n  refreshBackgroundOwnerStatus', boot.indexOf('if (statsOnlyBootEnabled()) {')),
@@ -4026,14 +4055,15 @@ test('already-selected current views keep their cached generation and skip selec
 test('current stats stream selector exposes exact production client evidence without healthy defaults', () => {
   const functionText = sourceFunction('jsDebugCurrentStatsStreamEvidence', 'paintJsDebugCurrentStatsGeneration');
   const evidence = {running: true, streamOpen: true, deliverySequence: 4, acceptedDeltaSequence: 2};
-  const context = {result: null, missing: null};
+    const context = {result: null, missing: null};
   vm.runInNewContext(`
-    const globalThis = {YOLOmuxStatsCurrent: {createBrowserClient() {}}};
+    const globalThis = {YOmuxStatsCurrent: {createBrowserClient() {}}};
     const generation = {cache_generation: 8};
     const controller = {generation: () => generation};
     const client = {controller: () => controller, streamEvidence: () => (${JSON.stringify(evidence)})};
     let jsDebugCurrentStatsClientState = {client, paintedGenerationKey: '300:1:1:8:8'};
     function jsDebugStatsPanelVisible() { return false; }
+    ${sourceFunction('debugGraphStatsCurrentModule', 'debugGraphAgentDisplayLabel')}
     ${functionText}
     result = jsDebugCurrentStatsStreamEvidence();
     jsDebugCurrentStatsClientState = {client: null, paintedGenerationKey: ''};
@@ -4276,14 +4306,15 @@ test('hidden boot loads saved exact selection before constructing the one curren
       select() {},
       start: () => Promise.resolve(controller),
     };
-    const YOLOmuxStatsCurrent = {
+    const YOmuxStatsCurrent = {
       createBrowserClient(options) { constructed = {loaded, ...options}; return client; },
     };
-    globalThis.YOLOmuxStatsCurrent = YOLOmuxStatsCurrent;
+    globalThis.YOmuxStatsCurrent = YOmuxStatsCurrent;
     const jsDebugCurrentStatsClientState = {
       client: null, selectionKey: '', startPromise: null, failureLatched: false,
       paintedGenerationKey: '',
     };
+    ${sourceFunction('debugGraphStatsCurrentModule', 'debugGraphAgentDisplayLabel')}
     ${functionText}
     const handled = syncJsDebugCurrentStatsClient();
     result = {handled, constructed, selectionKey: jsDebugCurrentStatsClientState.selectionKey};

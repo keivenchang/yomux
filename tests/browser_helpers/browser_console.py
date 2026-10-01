@@ -14,8 +14,8 @@ from urllib.parse import urlsplit
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.support.ui import WebDriverWait
 
-from yolomux_lib import browser_diagnostic_receipts
-from yolomux_lib.live_browser_soak import js_debug_event_enrichment_matches
+from yomux_lib import browser_diagnostic_receipts
+from yomux_lib.live_browser_soak import js_debug_event_enrichment_matches
 
 
 # Live activity-summary and session-files errors arrived 8 and 15 seconds after the first

@@ -21,20 +21,20 @@ import pytest
 
 import threading as threading_module
 
-import yolomux_lib.app as app_module
-from yolomux_lib import common as common_module
-from yolomux_lib import sessions as sessions_module
-from yolomux_lib import watchd
-from yolomux_lib.app import TmuxWebtermApp
-from yolomux_lib.common import AgentInfo
-from yolomux_lib.common import PaneInfo
-from yolomux_lib.common import SessionInfo
-from yolomux_lib import session_files
-from yolomux_lib.sessions import CODEX_TRANSCRIPT_SCAN_LIMIT
-from yolomux_lib.types import RepoPayload
-from yolomux_lib.types import SessionFileEntry
-from yolomux_lib.types import SessionFilesPayload
-from yolomux_lib.watchd_protocol import EffectiveWatchConfiguration
+import yomux_lib.app as app_module
+from yomux_lib import common as common_module
+from yomux_lib import sessions as sessions_module
+from yomux_lib import watchd
+from yomux_lib.app import TmuxWebtermApp
+from yomux_lib.common import AgentInfo
+from yomux_lib.common import PaneInfo
+from yomux_lib.common import SessionInfo
+from yomux_lib import session_files
+from yomux_lib.sessions import CODEX_TRANSCRIPT_SCAN_LIMIT
+from yomux_lib.types import RepoPayload
+from yomux_lib.types import SessionFileEntry
+from yomux_lib.types import SessionFilesPayload
+from yomux_lib.watchd_protocol import EffectiveWatchConfiguration
 
 from _git_helpers import git
 from _git_helpers import init_repo
@@ -53,14 +53,14 @@ from tests.isolated_dev_server import stop_and_reap_daemons
 from tests.tmux_runtime import start_isolated_tmux_runtime
 from tests.tmux_runtime import stop_isolated_tmux_runtime
 from tests.terminal_state_guard import assert_terminal_transition
-from yolomux_lib.local_services.registry import process_state
-from yolomux_lib.observability.queued_delivery import QueuedDeliveryLedger
-from yolomux_lib.server_logs import SERVER_LOGS
-from yolomux_lib.filesystem import exclusions
-from yolomux_lib.filesystem import paths as filesystem_paths
-from yolomux_lib.infra import batchd as batchd_module
-from yolomux_lib.infra.common import runtime_root
-from yolomux_lib.infra.host_partition import host_partitioned_state_dir
+from yomux_lib.local_services.registry import process_state
+from yomux_lib.observability.queued_delivery import QueuedDeliveryLedger
+from yomux_lib.server_logs import SERVER_LOGS
+from yomux_lib.filesystem import exclusions
+from yomux_lib.filesystem import paths as filesystem_paths
+from yomux_lib.infra import batchd as batchd_module
+from yomux_lib.infra.common import runtime_root
+from yomux_lib.infra.host_partition import host_partitioned_state_dir
 
 
 @contextlib.contextmanager
@@ -1466,7 +1466,7 @@ def test_session_files_failure_attributes_one_terminal_producer(failure_stage, m
     monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
     terminal_published = threading_module.Event()
     published, submissions = [], []
-    root_cause = {"exception": {"type": "FileNotFoundError", "message": "service socket is absent"}, "frames": [{"file": "yolomux_lib/local_services/rpc.py", "line": 272, "function": "request"}]}
+    root_cause = {"exception": {"type": "FileNotFoundError", "message": "service socket is absent"}, "frames": [{"file": "yomux_lib/local_services/rpc.py", "line": 272, "function": "request"}]}
 
     class FailingBatchClient:
         def start_for_scheduler(self):
@@ -5232,9 +5232,9 @@ def test_absent_worktree_collapses_to_one_root_entry(tmp_path):
 
     retired = tmp_path / "yo7771-browser-p0-candidate"
     (retired / "tests").mkdir(parents=True)
-    (retired / "yolomux_lib").mkdir()
+    (retired / "yomux_lib").mkdir()
     remembered = [retired / "tests" / f"test_{index}.py" for index in range(120)]
-    remembered.append(retired / "yolomux_lib" / "app.py")
+    remembered.append(retired / "yomux_lib" / "app.py")
     transcript = _claude_transcript_touching(tmp_path / "transcript.jsonl", remembered)
     assert str(remembered[0]) in session_files.scan_claude_transcript(transcript, str(retired))
     for path in remembered:
@@ -5243,7 +5243,7 @@ def test_absent_worktree_collapses_to_one_root_entry(tmp_path):
     for path in remembered:
         path.unlink()
     (retired / "tests").rmdir()
-    (retired / "yolomux_lib").rmdir()
+    (retired / "yomux_lib").rmdir()
     retired.rmdir()
 
     info = SessionInfo(session="s1", panes=[], selected_pane=None, agents=[agent("claude", transcript, retired)])

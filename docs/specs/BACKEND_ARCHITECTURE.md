@@ -8,7 +8,7 @@ Each Python web server coordinates local services for YO!stats, indexing, bounde
 
 ## Go
 
-One `yolomux-go` process owns HTTP/TLS, tmux attach, registered routes, Finder and Git work, operations/events, YO!stats, and bounded in-process schedulers. It does not start Python's local services. Go uses private config/state roots and its own storage; matching environment-variable names do not imply matching Python path validation or service behavior.
+One `yomux-go` process owns HTTP/TLS, tmux attach, registered routes, Finder and Git work, operations/events, YO!stats, and bounded in-process schedulers. It does not start Python's local services. Go uses private config/state roots and its own storage; matching environment-variable names do not imply matching Python path validation or service behavior.
 
 The shared browser checks `/api/capabilities` before exposing backend-dependent features. Unsupported Go routes return typed `501 feature_unavailable` responses. `GO_MIGRATION.md` owns the current route inventory and known gaps.
 

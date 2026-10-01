@@ -1,0 +1,4332 @@
+.tab-pane {
+  position: relative;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 0;
+  display: none;
+  overflow: hidden;
+}
+.tab-pane.active {
+  display: block;
+  height: 100%;
+}
+.terminal {
+  position: relative;
+  height: 100%;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 0;
+  --terminal-file-link-underline: rgb(125 211 252 / 0.50);
+  --terminal-file-link-underline-hover: rgb(125 211 252 / 0.60);
+  /* No padding: the terminal sits flush to the pane edges so its box meets the resizer directly (the
+     old 2px left/right padding showed a dark sliver at the seam). The former `padding-top: 2px` gave a
+     small breathing gap below the Info Bar border, but it just wasted vertical real estate — removed
+     so the terminal uses the full pane (user request, image 034). Restore `padding-top: 2px` here if a
+     gap is wanted back. */
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+}
+.mobile-terminal-key-launcher {
+  position: absolute;
+  z-index: var(--z-terminal-popover);
+  inset-inline-end: max(var(--space-8), env(safe-area-inset-right));
+  inset-block-end: max(var(--space-8), env(safe-area-inset-bottom));
+  display: grid;
+  place-items: center;
+  width: var(--touch-target-min-size);
+  height: var(--touch-target-min-size);
+  padding: 0;
+  border: 1px solid var(--pane-inactive-tab-border);
+  border-radius: var(--radius-control);
+  color: var(--pane-tab-text);
+  background: var(--panel2);
+  box-shadow: var(--shadow-elevated);
+  font: 700 var(--ui-font-size)/1 var(--ui-font);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+/* Touch terminals keep the OS keyboard for text entry. The smart-key palette is a movable overlay,
+   not a permanent row, so an idle terminal keeps its full visible height. */
+.mobile-terminal-keybar {
+  position: absolute;
+  z-index: var(--z-terminal-popover);
+  inset-inline-end: max(var(--space-8), env(safe-area-inset-right));
+  inset-block-end: calc(max(var(--space-8), env(safe-area-inset-bottom)) + 44px);
+  display: grid;
+  grid-template-rows: 21px minmax(0, 1fr);
+  width: min(306px, calc(100% - var(--space-4)));
+  height: min(211px, calc(100% - var(--space-4)));
+  max-height: calc(100% - var(--space-4));
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
+  border-radius: var(--radius-md);
+  background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
+  box-shadow: var(--shadow-elevated), inset 0 1px 0 color-mix(in srgb, var(--text) 5%, transparent);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+.mobile-terminal-keybar[hidden] {
+  display: none;
+}
+.mobile-terminal-key-grabber {
+  position: absolute;
+  z-index: var(--z-layer-raised);
+  inset-inline: 0;
+  inset-block-start: 0;
+  height: 21px;
+  border-block-end: 1px solid color-mix(in srgb, var(--pane-tab-text) 24%, transparent);
+  background: color-mix(in srgb, var(--pane-tab-text) 10%, var(--pane-ctl-bg, var(--pane-tab-control-bg)));
+  cursor: grab;
+  touch-action: none;
+}
+.mobile-terminal-key-grabber::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 50%;
+  inset-block-start: var(--space-2);
+  width: 40px;
+  height: 5px;
+  transform: translateX(-50%);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--pane-tab-text) 78%, transparent);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--pane-ctl-bg, var(--pane-tab-control-bg)) 80%, transparent);
+}
+.mobile-terminal-key-content {
+  grid-row: 2;
+  display: grid;
+  grid-template-columns: var(--touch-row-height) minmax(0, 1fr);
+  grid-template-rows: repeat(4, var(--touch-row-height));
+  gap: var(--space-1);
+  min-width: 0;
+  min-height: 0;
+  padding: 0 var(--space-1) var(--space-1);
+  overflow: hidden;
+  touch-action: none;
+}
+.mobile-terminal-key-content[hidden] {
+  display: none;
+}
+/* Esc sits alone in the top-left corner. Tab, Shift, and Ctrl continue down the left column. */
+.mobile-terminal-key-content > .mobile-terminal-key--escape {
+  grid-column: 1;
+  grid-row: 1;
+  width: var(--touch-row-height);
+  min-width: var(--touch-row-height);
+  padding: 0;
+  align-self: start;
+  justify-self: start;
+}
+.mobile-terminal-key-side {
+  grid-column: 1;
+  grid-row: 2 / 5;
+  display: grid;
+  grid-template-rows: repeat(3, var(--touch-row-height));
+  gap: var(--space-1);
+}
+.mobile-terminal-key-side .mobile-terminal-key {
+  width: var(--touch-row-height);
+  min-width: var(--touch-row-height);
+  padding: 0;
+}
+.mobile-terminal-key-side .mobile-terminal-key--tab { grid-row: 1; }
+.mobile-terminal-key-side .mobile-terminal-key--shift { grid-row: 2; }
+.mobile-terminal-key-side .mobile-terminal-key--ctrl { grid-row: 3; }
+.mobile-terminal-keyrow {
+  display: flex;
+  min-width: 0;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: none;
+}
+.mobile-terminal-keyrow--primary {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) 48px 48px var(--touch-row-height);
+  gap: var(--space-1);
+  overflow: visible;
+}
+.mobile-terminal-keyrow--primary .mobile-terminal-key--tmux-prefix { grid-column: 1; }
+.mobile-terminal-keyrow--primary .mobile-terminal-key--upload { grid-column: 2; }
+.mobile-terminal-keyrow--primary .mobile-terminal-key--backspace { grid-column: 3; }
+.mobile-terminal-keyrow--primary .mobile-terminal-key--more { grid-column: 4; }
+.mobile-terminal-keyrow-shell {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: center;
+}
+.mobile-terminal-keybar > .mobile-terminal-key--close {
+  position: absolute;
+  z-index: var(--z-layer-raised);
+  inset-inline-end: 1px;
+  inset-block-start: 21px;
+  width: var(--touch-row-height);
+  min-width: var(--touch-row-height);
+  min-height: var(--touch-row-height);
+  padding-inline: 0;
+}
+.mobile-terminal-key--close {
+  font-size: 20px;
+}
+.mobile-terminal-keyrow--primary .mobile-terminal-key {
+  min-width: 0;
+  padding-inline: 0;
+  font-size: clamp(11px, var(--ui-font-size-xs), 15px);
+}
+.mobile-terminal-keyrow::-webkit-scrollbar {
+  display: none;
+}
+.mobile-terminal-keyrow[hidden] {
+  display: none;
+}
+.mobile-terminal-key-content--more {
+  grid-template-columns: repeat(3, minmax(0, 1fr)) 48px var(--touch-row-height);
+  grid-template-rows: repeat(3, minmax(var(--touch-row-height), 1fr));
+  gap: var(--space-1);
+}
+.mobile-terminal-key-content--more .mobile-terminal-key {
+  min-width: 0;
+  padding-inline: var(--space-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mobile-terminal-key-content--more .mobile-terminal-key--command-p { grid-column: 1; grid-row: 1; }
+.mobile-terminal-key-content--more .mobile-terminal-key--home { grid-column: 2; grid-row: 1; }
+.mobile-terminal-key-content--more .mobile-terminal-key--end { grid-column: 3; grid-row: 1; }
+.mobile-terminal-key-content--more .mobile-terminal-key--delete { grid-column: 1; grid-row: 2; }
+.mobile-terminal-key-content--more .mobile-terminal-key--shift-tab { grid-column: 2 / 4; grid-row: 2; }
+.mobile-terminal-key-content--more .mobile-terminal-key--ctrl-d { grid-column: 4 / 6; grid-row: 2; }
+.mobile-terminal-key-content--more .mobile-terminal-key--ctrl-z { grid-column: 1; grid-row: 3; }
+.mobile-terminal-key-content--more .mobile-terminal-key--ctrl-l { grid-column: 2; grid-row: 3; }
+.mobile-terminal-key-content--more .mobile-terminal-key--ctrl-r { grid-column: 3; grid-row: 3; }
+.mobile-terminal-key-content--more .mobile-terminal-key--more {
+  grid-column: 4;
+  grid-row: 1;
+}
+.mobile-terminal-key-content--more .mobile-terminal-key--interrupt {
+  grid-column: 4 / 6;
+  grid-row: 3;
+}
+.mobile-terminal-key-dpad {
+  grid-column: 2;
+  grid-row: 2 / 5;
+  display: grid;
+  grid-template-columns: var(--touch-row-height) 1em 32px var(--touch-row-height) 40px 1em minmax(var(--touch-row-height), 1fr);
+  grid-template-rows: repeat(3, var(--touch-row-height));
+  gap: var(--space-1);
+}
+.mobile-terminal-key {
+  flex: 0 0 auto;
+  min-width: var(--touch-row-height);
+  min-height: var(--touch-row-height);
+  padding: 0 var(--space-7);
+  border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
+  border-radius: var(--radius-control);
+  color: var(--pane-ctl-fg, var(--pc-control-fg));
+  background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
+  font: 700 var(--ui-font-size-sm)/1 var(--ui-font);
+  white-space: nowrap;
+  touch-action: manipulation;
+}
+.mobile-terminal-key-dpad .mobile-terminal-key--copy { grid-column: 1; grid-row: 1; }
+.mobile-terminal-key-dpad .mobile-terminal-key--command-v { grid-column: 1; grid-row: 2; }
+.mobile-terminal-key-dpad .mobile-terminal-key--alt { grid-column: 1; grid-row: 3; }
+.mobile-terminal-key-dpad .mobile-terminal-key--cmd { grid-column: 2 / 4; grid-row: 3; width: var(--touch-row-height); justify-self: start; }
+.mobile-terminal-key-dpad .mobile-terminal-key--tmux-scroll-up { grid-column: 5; grid-row: 1; }
+.mobile-terminal-key-dpad .mobile-terminal-key--tmux-scroll-down { grid-column: 5; grid-row: 3; }
+.mobile-terminal-key-dpad .mobile-terminal-key--interrupt { grid-column: 7; grid-row: 3; justify-self: start; }
+.mobile-terminal-key--enter { grid-column: 7; grid-row: 1 / 3; width: var(--touch-row-height); justify-self: start; }
+.mobile-terminal-key--arrow-up,
+.mobile-terminal-key--arrow-down,
+.mobile-terminal-key--arrow-left,
+.mobile-terminal-key--arrow-right {
+  position: relative;
+  z-index: var(--z-layer-control);
+  overflow: visible;
+}
+.mobile-terminal-key--arrow-up {
+  grid-column: 4;
+  grid-row: 1;
+  border-end-start-radius: 0;
+  border-end-end-radius: 0;
+  border-block-end-color: transparent;
+}
+.mobile-terminal-key--arrow-down {
+  grid-column: 4;
+  grid-row: 3;
+  border-start-start-radius: 0;
+  border-start-end-radius: 0;
+  border-block-start-color: transparent;
+}
+.mobile-terminal-key--arrow-left {
+  grid-column: 3;
+  grid-row: 2;
+  border-start-end-radius: 0;
+  border-end-end-radius: 0;
+  border-inline-end-color: transparent;
+}
+.mobile-terminal-key--arrow-right {
+  grid-column: 5;
+  grid-row: 2;
+  border-start-start-radius: 0;
+  border-end-start-radius: 0;
+  border-inline-start-color: transparent;
+}
+:where(.mobile-terminal-key--arrow-up)::before,
+:where(.mobile-terminal-key--arrow-up)::after,
+:where(.mobile-terminal-key--arrow-down)::before,
+:where(.mobile-terminal-key--arrow-down)::after,
+:where(.mobile-terminal-key--arrow-left)::before,
+:where(.mobile-terminal-key--arrow-left)::after,
+:where(.mobile-terminal-key--arrow-right)::before,
+:where(.mobile-terminal-key--arrow-right)::after {
+  content: "";
+  position: absolute;
+  pointer-events: auto;
+}
+:where(.mobile-terminal-key--arrow-up)::before,
+:where(.mobile-terminal-key--arrow-down)::before,
+:where(.mobile-terminal-key--arrow-left)::before,
+:where(.mobile-terminal-key--arrow-right)::before {
+  z-index: var(--z-layer-control);
+  background: var(--pane-ctl-border, var(--pane-tab-control-border));
+}
+:where(.mobile-terminal-key--arrow-up)::after,
+:where(.mobile-terminal-key--arrow-down)::after,
+:where(.mobile-terminal-key--arrow-left)::after,
+:where(.mobile-terminal-key--arrow-right)::after {
+  z-index: var(--z-layer-control);
+  background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
+}
+:where(.mobile-terminal-key--arrow-up)::before {
+  inset-block-start: calc(100% - 1px);
+  inset-inline: 0;
+  height: 19px;
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+}
+:where(.mobile-terminal-key--arrow-up)::after {
+  inset-block-start: calc(100% - 1px);
+  inset-inline: 1px;
+  height: 17px;
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+}
+:where(.mobile-terminal-key--arrow-down)::before {
+  inset-block-end: calc(100% - 1px);
+  inset-inline: 0;
+  height: 19px;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+:where(.mobile-terminal-key--arrow-down)::after {
+  inset-block-end: calc(100% - 1px);
+  inset-inline: 1px;
+  height: 17px;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+:where(.mobile-terminal-key--arrow-left)::before {
+  inset-block: 0;
+  inset-inline-start: calc(100% - 1px);
+  width: 19px;
+  clip-path: polygon(0 0, 100% 50%, 0 100%);
+}
+:where(.mobile-terminal-key--arrow-left)::after {
+  inset-block: 1px;
+  inset-inline-start: calc(100% - 1px);
+  width: 17px;
+  clip-path: polygon(0 0, 100% 50%, 0 100%);
+}
+:where(.mobile-terminal-key--arrow-right)::before {
+  inset-block: 0;
+  inset-inline-end: calc(100% - 1px);
+  width: 19px;
+  clip-path: polygon(100% 0, 100% 100%, 0 50%);
+}
+:where(.mobile-terminal-key--arrow-right)::after {
+  inset-block: 1px;
+  inset-inline-end: calc(100% - 1px);
+  width: 17px;
+  clip-path: polygon(100% 0, 100% 100%, 0 50%);
+}
+:where(.mobile-terminal-key--arrow-up).active::before,
+:where(.mobile-terminal-key--arrow-up):active::before,
+:where(.mobile-terminal-key--arrow-down).active::before,
+:where(.mobile-terminal-key--arrow-down):active::before,
+:where(.mobile-terminal-key--arrow-left).active::before,
+:where(.mobile-terminal-key--arrow-left):active::before,
+:where(.mobile-terminal-key--arrow-right).active::before,
+:where(.mobile-terminal-key--arrow-right):active::before {
+  background: var(--pane-ctl-pressed-border, var(--pane-tab-active-border));
+}
+:where(.mobile-terminal-key--arrow-up).active::after,
+:where(.mobile-terminal-key--arrow-up):active::after,
+:where(.mobile-terminal-key--arrow-down).active::after,
+:where(.mobile-terminal-key--arrow-down):active::after,
+:where(.mobile-terminal-key--arrow-left).active::after,
+:where(.mobile-terminal-key--arrow-left):active::after,
+:where(.mobile-terminal-key--arrow-right).active::after,
+:where(.mobile-terminal-key--arrow-right):active::after {
+  background: var(--pane-ctl-pressed-bg, var(--pane-tab-active-bg));
+}
+.mobile-terminal-key--arrow-left,
+.mobile-terminal-key--arrow-right {
+  min-width: 0;
+  width: 100%;
+  padding-inline: 0;
+}
+.mobile-terminal-key--interrupt {
+  color: var(--danger-text);
+  border-color: var(--danger-border);
+}
+.mobile-terminal-key.locked {
+  box-shadow: inset 0 0 0 2px var(--pane-ctl-pressed-border, var(--pane-tab-active-border));
+}
+.mobile-terminal-key:disabled {
+  opacity: 0.48;
+}
+.terminal[data-terminal-theme="light"] {
+  --terminal-file-link-underline: rgb(3 105 161 / 0.48);
+  --terminal-file-link-underline-hover: rgb(3 105 161 / 0.58);
+}
+/* xterm's minimum contrast correction collapses dark-tuned 24-bit grays when it compares them to a
+   white background. Light terminals retain the dark render palette/contrast reference, then this
+   involutive transform converts the painted rows to dark-on-white while preserving source spacing.
+   Keep the xterm paint layers explicitly white: filtering a transparent row stack composites the
+   dark render background into the result even when the outer terminal container is already white.
+   A cursor receives the transform twice so its light display colors and bad-connection X stay
+   unchanged instead of inheriting the row conversion. */
+.terminal[data-terminal-theme="light"] :is(.xterm, .xterm-viewport, .xterm-screen) {
+  background-color: var(--paint-white) !important;
+}
+.terminal[data-terminal-theme="light"] .xterm-rows {
+  filter: invert(1) hue-rotate(180deg);
+}
+.terminal[data-terminal-theme="light"] .xterm-rows .xterm-cursor {
+  filter: invert(1) hue-rotate(180deg);
+}
+.terminal-file-link-underlines {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-terminal-overlay-low);
+  overflow: hidden;
+  pointer-events: none;
+}
+.terminal-file-link-underline {
+  position: absolute;
+  height: 0;
+  border-bottom: 1px solid var(--terminal-file-link-underline);
+  pointer-events: none;
+}
+.terminal-file-link-underline--hover {
+  border-bottom-color: var(--terminal-file-link-underline-hover);
+  border-bottom-width: 1px;
+}
+.terminal-url-link-underlines {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-terminal-overlay-low);
+  overflow: hidden;
+  pointer-events: none;
+  color: currentColor;
+}
+.terminal-url-link-underline {
+  position: absolute;
+  height: 0;
+  border-bottom: 1px solid currentColor;
+  pointer-events: none;
+  overflow: hidden;
+}
+.terminal .xterm-rows span[style*="text-decoration: underline"],
+.terminal .xterm-rows span[style*="text-decoration-line: underline"] {
+  text-decoration-color: currentColor !important;
+  text-decoration-thickness: 1px !important;
+  text-underline-offset: 2px !important;
+}
+/* A .panel-overlay-root must NOT be the scroll container — put `overflow:auto` on an INNER child.
+   The inactive-pane dim below is a full-bleed ::after (inset 0) on this element; if this element
+   scrolls, the dim scrolls away with the content and only covers the top viewport. */
+.panel-overlay-root {
+  position: relative;
+}
+/* Inactive-pane dimming: ONE CSS rule keyed off the uniformly-toggled .focused-pane class. Every pane
+   — terminal, Finder, Preferences, Info, Changes, editor — dims identically; there is no per-pane JS
+   overlay <div> (and so no isVirtualItem special-case). pointer-events:none lets a click on a dimmed
+   pane fall through to focus it (the old overlay swallowed the first click). The focused/typing-ready
+   pane is not dimmed. A stale typing-ready terminal is still inactive when another pane owns
+   .focused-pane, so do not exempt .typing-ready-pane here. */
+.panel:not(.focused-pane) .panel-overlay-root::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-terminal-overlay-low);
+  background: var(--inactive-pane-overlay);
+  pointer-events: none;
+}
+.terminal.typing-ready {
+  border-color: transparent;
+  box-shadow: none;
+}
+.terminal .xterm {
+  height: 100%;
+}
+body.bad-connection .terminal .xterm .xterm-cursor {
+  position: relative;
+  color: var(--danger-text) !important;
+  background: var(--bad) !important;
+  animation: none !important;
+  box-shadow: inset 0 0 0 1px var(--danger-border), 0 0 0 1px rgb(0 0 0 / 0.35);
+}
+body.bad-connection .terminal .xterm .xterm-cursor.xterm-cursor-blink {
+  animation: none !important;
+}
+body.bad-connection .terminal .xterm .xterm-cursor::before,
+body.bad-connection .terminal .xterm .xterm-cursor::after {
+  content: "";
+  position: absolute;
+  inset-inline-start: 50%;
+  inset-block-start: 50%;
+  width: 72%;
+  height: 1.5px;
+  border-radius: var(--radius-pill);
+  background: var(--danger-text);
+  transform-origin: center;
+  pointer-events: none;
+}
+body.bad-connection .terminal .xterm .xterm-cursor::before {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+body.bad-connection .terminal .xterm .xterm-cursor::after {
+  transform: translate(-50%, -50%) rotate(-45deg);
+}
+.terminal .terminal-attention-question-overlay {
+  position: absolute;
+  z-index: var(--z-terminal-overlay-low);
+  pointer-events: none;
+  background: rgb(var(--attention-ring-rgb, var(--agent-status-attention-ring-rgb)) / 0.16);
+  box-shadow: inset 0 0 0 1px rgb(var(--attention-ring-rgb, var(--agent-status-attention-ring-rgb)) / 0.24);
+  border-radius: var(--radius-md);
+}
+.terminal .xterm-rows .terminal-attention-question-row {
+  background: transparent;
+}
+/* THE BLACK LINE FIX (image 034): xterm.css ships `.xterm:not(.allow-transparency) .xterm-viewport {
+   background-color: #000 }` — a dark-page assumption so the OS-X scrollbar slider reads as opaque.
+   `.xterm-viewport` is positioned top:0/bottom:0 and the canvas (`.xterm-screen`) paints the text rows
+   ON TOP of it; the few px the canvas doesn't cover at the top show the viewport's #000 as a stark
+   black line on our LIGHT terminal (verified by pixel-scan: the strip's element is `.xterm-viewport`,
+   bg rgb(0,0,0), with NO inline override — present even on an empty shell, so it is NOT agent output).
+   Our `.terminal` container already carries the theme background (set in JS), so make the viewport
+   transparent and let that show through — removes the black line in BOTH themes. Specificity 0,4,0
+   beats xterm's 0,3,0, so no !important. (Restore xterm's #000 if a viewport bg is ever needed.) */
+.terminal .xterm:not(.allow-transparency) .xterm-viewport {
+  background-color: transparent;
+}
+.terminal .xterm-screen,
+.terminal .xterm-screen canvas,
+.terminal .xterm-accessibility-tree {
+  box-sizing: content-box;
+}
+.terminal .xterm-viewport {
+  /* Terminal and YO!info scrollbars must always inherit a shared pane scrollbar rule from layout CSS;
+     never customize scrollbar colors or hover behavior here. */
+  --pane-scrollbar-track: transparent;
+  --pane-scrollbar-track-active: transparent;
+  overflow-y: auto;
+}
+.terminal-context-menu {
+  position: fixed;
+  z-index: var(--z-terminal-popover);
+  padding: var(--space-3);
+  color: var(--chrome-text-strong);
+  background: var(--overlay-surface-strong);
+  border: 1px solid var(--sep-muted);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-elevated);
+}
+.terminal-context-menu:not(.repo-chip-menu) {
+  max-width: var(--context-menu-compact-inline-size);
+}
+.terminal-context-menu.tab-action-sheet {
+  width: var(--context-menu-compact-inline-size);
+  max-width: var(--popover-max-inline-size);
+  max-height: var(--context-menu-max-block-size);
+  overflow: auto;
+  transform: none;
+}
+.tab-action-description {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  padding: var(--space-4) var(--space-6);
+  color: var(--chrome-text-strong);
+  background: transparent;
+  cursor: pointer;
+  font: 600 var(--ui-font-size-sm)/1.3 var(--ui-font);
+  text-align: start;
+}
+.tab-action-description:hover,
+.tab-action-description:focus-visible {
+  background: var(--overlay-option-hover-bg);
+  outline: none;
+}
+.tab-directional-action-groups {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-2);
+  padding: var(--space-2);
+}
+.tab-split-actions {
+  display: grid;
+  grid-template-columns: repeat(var(--context-menu-direction-count), minmax(0, 1fr));
+  grid-template-rows: auto var(--touch-target-min-size);
+  gap: var(--space-2);
+  min-width: 0;
+}
+.tab-directional-actions-title {
+  grid-column: 1 / -1;
+  align-self: center;
+  color: var(--muted);
+  font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.tab-split-actions .tab-split-action[data-direction="left"] { grid-column: 1; }
+.tab-split-actions .tab-split-action[data-direction="right"] { grid-column: 2; }
+.tab-split-actions .tab-split-action[data-direction="top"] { grid-column: 3; }
+.tab-split-actions .tab-split-action[data-direction="bottom"] { grid-column: 4; }
+.terminal-context-menu .tab-split-actions .tab-split-action {
+  display: grid;
+  place-items: center;
+  min-height: var(--touch-target-min-size);
+  padding: 0;
+  border-color: transparent;
+  border-radius: var(--radius-control);
+  color: var(--chrome-text-strong);
+  background: transparent;
+  text-align: center;
+}
+.tab-split-actions .tab-split-action .context-menu-line {
+  display: grid;
+  place-items: center;
+}
+.tab-split-actions .tab-split-action .context-menu-label {
+  display: none;
+}
+.tab-directional-action-icon {
+  --tab-directional-icon-inline-size: 2.75em;
+  --tab-directional-icon-block-size: 2em;
+  --tab-directional-icon-border-width: var(--space-2);
+  --tab-directional-icon-outer-radius: var(--radius-control);
+  --tab-directional-icon-inner-radius: var(--space-2);
+  position: relative;
+  display: block;
+  inline-size: var(--tab-directional-icon-inline-size);
+  block-size: var(--tab-directional-icon-block-size);
+  box-sizing: border-box;
+  border: var(--tab-directional-icon-border-width) solid currentColor;
+  border-radius: var(--tab-directional-icon-outer-radius);
+}
+.tab-directional-action-icon::after {
+  content: "";
+  position: absolute;
+  border-radius: var(--tab-directional-icon-inner-radius);
+  background: currentColor;
+}
+.tab-directional-action-icon--left::after,
+.tab-directional-action-icon--right::after {
+  inset-block: var(--space-4);
+  inline-size: var(--space-7);
+}
+.tab-directional-action-icon--left::after { inset-inline-start: var(--space-3); }
+.tab-directional-action-icon--right::after { inset-inline-end: var(--space-3); }
+.tab-directional-action-icon--top::after,
+.tab-directional-action-icon--bottom::after {
+  inset-inline: var(--space-4);
+  block-size: var(--space-7);
+}
+.tab-directional-action-icon--top::after { inset-block-start: var(--space-3); }
+.tab-directional-action-icon--bottom::after { inset-block-end: var(--space-3); }
+.terminal-context-menu .tab-split-actions .tab-split-action.control-active-hover:hover,
+.terminal-context-menu .tab-split-actions .tab-split-action.control-active-hover:focus-visible {
+  color: var(--chrome-text-strong);
+  background: var(--overlay-option-hover-bg);
+}
+.terminal-context-menu .tab-split-actions .tab-split-action:disabled {
+  border-color: transparent;
+}
+.session-rename-backdrop {
+  z-index: var(--z-topbar);
+  place-items: center;
+  padding: 18px;
+}
+.session-rename-dialog {
+  width: min(42ch, var(--popover-max-inline-size));
+  display: grid;
+  gap: var(--space-9);
+  padding: var(--space-12);
+  color: var(--chrome-text-strong);
+  background: var(--overlay-surface-strong);
+  border: var(--app-modal-border-width) solid var(--app-modal-border-color);
+  border-radius: 7px;
+  box-shadow: 0 18px 56px rgb(var(--shadow-rgb) / 0.58);
+}
+.session-rename-title {
+  font: 700 var(--ui-font-size)/1.25 var(--ui-font);
+}
+.session-rename-input {
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  padding: var(--space-4) var(--space-7);
+  color: var(--pane-tab-panel-head-text);
+  background: var(--input-bg);
+  /* A rename is ordinary UI work, not auto-approval: its border follows the selected app accent. */
+  border: 1px solid var(--active-control-border);
+  border-radius: var(--radius-control);
+  font: 600 var(--ui-font-size)/1.2 var(--mono-font);
+  outline: 0;
+}
+.session-rename-error {
+  color: var(--bad);
+  font: var(--ui-font-size-sm)/1.25 var(--ui-font);
+}
+.session-rename-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-7);
+}
+.session-rename-actions button {
+  padding: var(--space-4) var(--space-9);
+  color: var(--text);
+  background: var(--panel2);
+  border: 1px solid var(--sep-muted);
+  border-radius: 5px;
+  font: var(--ui-font-size-sm)/1.25 var(--ui-font);
+  cursor: pointer;
+}
+.terminal-context-menu button {
+  width: 100%;
+  display: block;
+  padding: var(--space-4) var(--space-6);
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-control);
+  text-align: start;
+  font: var(--ui-font-size-sm)/1.25 var(--ui-font);
+  cursor: pointer;
+}
+.context-menu-line {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-6);
+}
+.context-menu-icon {
+  display: inline-flex;
+  align-items: center;
+}
+.context-menu-icon .app-menu-ui-icon {
+  width: 1.75em;
+  height: 1.55em;
+  border-radius: var(--radius-control);
+}
+.context-menu-icon .app-menu-ui-icon::before {
+  width: 1em;
+  height: 1em;
+}
+.context-menu-label {
+  min-width: 0;
+}
+.terminal-context-menu .context-menu-check {
+  display: inline-flex;
+  flex: 0 0 1.1em;
+  width: 1.1em;
+  height: 1.1em;
+  align-items: center;
+  justify-content: center;
+  color: var(--active-control-text);
+  font: 700 var(--ui-font-size)/1 var(--ui-font);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.terminal-context-menu button[aria-checked="true"] .context-menu-check {
+  color: var(--active-control-text);
+  background: color-mix(in srgb, var(--active-control-bg) 85%, var(--panel));
+  box-shadow: inset 0 0 0 1px var(--active-control-border);
+}
+.context-menu-shortcut {
+  color: var(--muted);
+  font: 600 var(--ui-font-size-xs)/1.2 var(--mono-font);
+  white-space: nowrap;
+}
+.terminal-context-menu button.danger {
+  color: var(--danger-text-soft);
+}
+.terminal-context-menu button.danger:hover,
+.terminal-context-menu button.danger:focus-visible {
+  color: var(--danger-confirm-text);
+  background: var(--bad);
+}
+.terminal-context-menu button:disabled:hover,
+.terminal-context-menu button:disabled:focus-visible {
+  color: inherit;
+  background: transparent;
+}
+.terminal-context-menu-separator {
+  height: 1px;
+  margin: var(--space-3) var(--space-2);
+  background: var(--menu-tab-row-separator);
+}
+.file-image-preview-popover {
+  position: fixed;
+  z-index: var(--z-terminal-badge);
+  max-width: var(--file-image-preview-max-inline-size);
+  max-height: var(--file-image-preview-max-block-size);
+  padding: var(--space-6);
+  background: var(--overlay-surface-strong);
+  border: 1px solid #6f7b8d;
+  border-radius: 7px;
+  box-shadow: 10px 14px 32px var(--paint-shadow-62);
+  pointer-events: none;
+}
+.file-image-preview-popover img,
+.file-image-preview-popover video {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+.terminal-error {
+  height: 100%;
+  margin: 0;
+  padding: var(--space-10);
+  color: var(--bad);
+  background: var(--surface-ink);
+  white-space: pre-wrap;
+  font: var(--ui-font-size-sm)/1.35 var(--mono-font);
+}
+.terminal-connection-pending > .xterm {
+  opacity: 0.52;
+}
+/* A pending tmux sub-window switch must never show the previous window's frame: an opaque
+   full-container backdrop (inheriting the shared terminal container background set by
+   applyTerminalContainerTheme) sits above the xterm layers while xterm stays mounted and keeps
+   ingesting output behind it. The connection-state badge stays on its higher badge layer. */
+.terminal-connection-switching::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-terminal-overlay-low);
+  background: inherit;
+}
+/* Sibling low-layer overlays (file-link underlines, attention highlight) belong to the masked
+   previous frame; they must not leak above the opaque switch backdrop. */
+.terminal-connection-switching .terminal-file-link-underlines,
+.terminal-connection-switching .terminal-attention-question-overlay {
+  visibility: hidden;
+}
+.terminal-connection-state {
+  position: absolute;
+  z-index: var(--z-terminal-badge);
+  inset: 50% auto auto 50%;
+  max-width: min(88%, 32rem);
+  display: flex;
+  gap: var(--space-8);
+  align-items: center;
+  padding: var(--space-7) var(--space-10);
+  color: var(--text);
+  background: color-mix(in srgb, var(--overlay-surface-strong) 92%, transparent);
+  border: 1px solid var(--neutral-border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 8px 24px var(--paint-shadow-38);
+  translate: -50% -50%;
+  font: 600 var(--ui-font-size-sm)/1.3 var(--ui-font);
+}
+.terminal-connection-state--unavailable {
+  color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 55%, var(--line));
+}
+.terminal-connection-state button {
+  flex: none;
+  padding: var(--space-4) var(--space-7);
+  color: inherit;
+  background: var(--panel2);
+  border: 1px solid currentcolor;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+/* Upload and attention/status messages must stay visually identical. Keep shared box styling on .toast. */
+.toast {
+  position: relative;
+  overflow: hidden;
+  padding: var(--space-7) var(--space-9) var(--space-9);
+  color: #14171d;
+  background: rgba(255, 244, 194, 0.58);
+  border: 1px solid var(--50-terminal-file-tree-server-update-banner-border-88);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 16px 42px var(--paint-shadow-38), inset 0 0 0 1px rgba(255, 255, 255, 0.26);
+  backdrop-filter: blur(2px);
+}
+/* The update-available cue uses a solid (opaque) background instead of the translucent default, so it
+   reads clearly over busy terminal content while it sits for its 4-hour window. */
+.toast.toast-update {
+  background: #fff4c2;
+  backdrop-filter: none;
+}
+.toast-header {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-6);
+  margin-bottom: var(--space-3);
+}
+.toast-title {
+  min-width: 0;
+  flex: 1 1 auto;
+  font-weight: 800;
+  font-size: var(--ui-font-size-sm);
+  line-height: 1.2;
+}
+.toast-control-row {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+.toast-body {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font: var(--ui-font-size-sm)/1.35 var(--mono-font);
+}
+.toast-line {
+  /* #258: WRAP the message instead of clipping it. An actionable toast (Keep/x) must be read in full
+     to decide, and the old single-line clip (nowrap + ellipsis) truncated it ("…as a fenced A…"). The
+     ::after countdown bar is absolutely positioned, so wrapping does not disturb it. */
+  position: relative;
+  padding-bottom: var(--space-3);
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.toast-line--attention {
+  display: block;
+}
+.attention-toast-controls {
+  float: inline-start;
+  flex: 0 0 auto;
+  max-inline-size: 100%;
+  margin: 0 var(--space-5) var(--space-2) 0;
+}
+.attention-toast-session-tab {
+  max-inline-size: 100%;
+}
+.attention-toast-agent-button {
+  pointer-events: none;
+  max-width: none;
+  border: 1px solid;
+  font-weight: 700;
+}
+.attention-toast-agent-button .tmux-window-name-text {
+  overflow: visible;
+  text-overflow: clip;
+}
+.attention-toast-reason {
+  min-width: 0;
+}
+.toast-line::after,
+.toast-countdown::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: #d28b00;
+  transform-origin: left center;
+  animation: toast-countdown var(--toast-countdown-duration, 10s) linear forwards;
+}
+.toast.toast-countdown-paused .toast-line::after,
+.toast.toast-countdown-paused .toast-countdown::after {
+  animation-play-state: paused;
+}
+@keyframes toast-countdown {
+  from { transform: scaleX(1); }
+  to { transform: scaleX(0); }
+}
+.toast button {
+  min-width: 28px;
+  padding: var(--space-1) var(--space-6);
+  color: inherit;
+  background: #fff3c6;
+  border-color: #b98c24;
+}
+.toast-close,
+.toast-keep {
+  color: #3a2b00;
+}
+.toast-close {
+  position: static;
+  width: 20px;
+  height: 20px;
+  min-width: 20px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  font: 700 var(--ui-font-size-xl)/1 var(--ui-font);
+}
+.toast-keep {
+  position: static;
+  min-width: 42px;
+  height: 20px;
+  padding: 0 var(--space-6);
+  background: rgba(255, 243, 198, 0.72);
+  font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
+}
+.toast.kept .toast-line::after,
+.toast.kept .toast-countdown::after {
+  animation-play-state: paused;
+  transform: scaleX(1);
+}
+.toast[data-toast-persistent="true"] .toast-line::after,
+.toast[data-toast-persistent="true"] .toast-countdown::after {
+  display: none;
+}
+.toast-actions {
+  display: flex;
+  gap: var(--space-6);
+  margin-top: var(--space-6);
+  justify-content: flex-end;
+}
+.toast-action {
+  height: 24px;
+  padding: 0 var(--space-10);
+  border: 1px solid var(--active-control-border, var(--line));
+  border-radius: var(--radius-md);
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
+  cursor: pointer;
+}
+.toast-action:hover {
+  filter: brightness(1.08);
+}
+.startup-helper-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+}
+.toast .startup-helper-nav-button {
+  min-width: 28px;
+  width: 28px;
+  height: 22px;
+  padding: 0;
+  font: 800 var(--ui-font-size-sm)/1 var(--ui-font);
+}
+.toast .startup-helper-nav-button:first-child {
+  border-radius: var(--radius-lg) 0 0 var(--radius-lg);
+}
+.toast .startup-helper-nav-button:last-child {
+  margin-inline-start: calc(-1 * var(--space-1));
+  border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
+}
+.panel-toast-stack {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  /* #258: above the topbar (--z-topbar) so a top-row pane's toast is never painted UNDER it and
+     clipped — the whole toast incl. the Keep/x buttons stays visible. */
+  z-index: var(--z-full-screen-overlay);
+  width: calc(100% - 16px);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  pointer-events: none;
+}
+.panel-toast-stack .toast {
+  width: 100%;
+  pointer-events: auto;
+}
+body.app-topbar-touch-compact .attention-alerts {
+  top: calc(var(--topbar-height) + 2 * var(--pane-tab-height) + var(--space-4));
+}
+body.app-topbar-touch-compact .attention-alerts .attention-alert {
+  pointer-events: none;
+}
+body.app-topbar-touch-compact .attention-alerts .attention-alert :is(button, a, input, select, [role="button"], [tabindex]) {
+  pointer-events: auto;
+}
+.attention-alerts .startup-helper-toast {
+  width: min(720px, 100%);
+  align-self: flex-end;
+}
+.upload-result {
+  width: 100%;
+}
+.upload-result[hidden] {
+  display: none;
+}
+.tmux-snapshot {
+  height: 100%;
+  margin: 0;
+  padding: var(--space-8);
+  overflow: auto;
+  color: var(--pane-tab-text);
+  background: var(--surface-ink);
+  font: var(--ui-font-size-sm)/1.3 var(--mono-font);
+}
+.transcript,
+.summary {
+  height: 100%;
+  min-height: 0;
+  background: var(--bg);
+}
+.transcript-head {
+  padding: var(--space-6) var(--space-8);
+  color: var(--muted);
+  background: var(--panel2);
+  border-bottom: 1px solid var(--line);
+  font-size: var(--ui-font-size-sm);
+}
+.transcript-path-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-7);
+  padding: var(--space-5) var(--space-8);
+  color: var(--muted);
+  background: var(--panel2);
+  border-bottom: 1px solid var(--line);
+  font: var(--ui-font-size-xs)/1.25 var(--mono-font);
+}
+.transcript-path-label {
+  flex: 0 0 auto;
+  color: var(--muted);
+  text-transform: uppercase;
+  font: 700 var(--ui-font-size-2xs)/1 var(--ui-font);
+}
+.transcript-path-value {
+  min-width: 0;
+  flex: 1 1 auto;
+  color: var(--text);
+}
+.transcript-path-missing {
+  min-width: 0;
+}
+.transcript-path-copy {
+  width: 20px;
+  height: 20px;
+}
+.transcript-preview {
+  /* Scrollable YO!info bodies always inherit a shared pane scrollbar rule from layout CSS; never
+     customize scrollbar colors or hover behavior here. */
+  min-height: 0;
+  padding: var(--space-8);
+  overflow: auto;
+  color: var(--text);
+  font: var(--ui-font-size-sm)/1.35 var(--mono-font);
+}
+.transcript-item {
+  border-inline-start: 3px solid var(--line);
+  background: var(--panel2);
+  margin: 0 0 var(--space-8) 0;
+  padding: var(--space-7) var(--space-9);
+  border-radius: 5px;
+}
+.transcript-item.user { border-color: var(--transcript-user-accent); background: color-mix(in srgb, var(--transcript-user-accent) 12%, var(--panel)); }
+.transcript-item.assistant { border-color: var(--transcript-assistant-accent); background: color-mix(in srgb, var(--transcript-assistant-accent) 12%, var(--panel)); }
+.transcript-item.tool_use { border-color: var(--status-tool); background: color-mix(in srgb, var(--status-tool) 12%, var(--panel)); }
+.transcript-item.tool_result { border-color: var(--pr-status-merged); background: color-mix(in srgb, var(--pr-status-merged) 12%, var(--panel)); }
+.transcript-item.summary { border-color: var(--transcript-summary-accent); background: color-mix(in srgb, var(--transcript-summary-accent) 12%, var(--panel)); }
+.transcript-item.system { border-color: var(--git-transcript-badge); background: color-mix(in srgb, var(--git-transcript-badge) 12%, var(--panel)); }
+.transcript-role {
+  color: var(--text);
+  font-weight: 700;
+  margin-bottom: var(--space-5);
+}
+.summary-context {
+  padding: var(--space-7) var(--space-10);
+  color: var(--muted);
+  background: var(--panel2);
+  border-bottom: 1px solid var(--line);
+  font: var(--ui-font-size-sm)/1.35 var(--mono-font);
+  overflow: hidden;
+}
+.summary-context-label {
+  color: var(--text);
+  font-weight: 700;
+}
+.summary-preview {
+  min-height: 0;
+  margin: 0;
+  padding: var(--space-10);
+  overflow: auto;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+.event-list {
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-8);
+  background: var(--bg);
+  border-top: 1px solid var(--line);
+  container: event-list / inline-size;
+}
+.event-item {
+  display: grid;
+  grid-template-columns: minmax(18ch, max-content) minmax(12ch, 20ch) minmax(0, 1fr);
+  gap: var(--space-8);
+  padding: var(--space-6) var(--space-7);
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+  font: var(--ui-font-size-sm)/1.35 var(--mono-font);
+}
+.event-item:last-child {
+  border-bottom: 0;
+}
+.event-time,
+.event-type {
+  align-self: start;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.event-type {
+  text-transform: uppercase;
+}
+.event-message {
+  /* wrap the command across lines instead of one-line ellipsis (no horizontal scroll). */
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+@container event-list (max-width: 72ch) {
+  .event-item {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .event-time,
+  .event-type {
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .event-type {
+    justify-self: end;
+    text-align: end;
+  }
+  .event-message {
+    grid-column: 1 / -1;
+  }
+}
+.event-empty {
+  padding: var(--space-12);
+  color: var(--muted);
+}
+.info-pane {
+  position: relative;
+  height: 100%;
+  min-height: 0;
+  /* min-width:0 is REQUIRED: .info-pane is the body grid item of the .panel grid, whose single column is
+     an implicit `auto` track. Without this, wide YO!info content (long PR/commit/CI lines) forces the
+     item past the panel width and `.panel { overflow:hidden }` CLIPS it — so the user can't scroll right.
+     Constraining it to 0 lets the inner .info-list (overflow:auto) own the horizontal scroll instead. */
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--50-terminal-file-tree-info-pane-bg-5);
+}
+.info-tree-panel .info-pane.info-tree-pane-scrolled::before {
+  content: "";
+  position: absolute;
+  z-index: var(--z-layer-control);
+  inset-block-start: 0;
+  inset-inline: 0;
+  height: var(--info-tree-sticky-level-block, 27px);
+  background: var(--info-pane-bg);
+  pointer-events: none;
+}
+/* Virtual info-style panels keep the action row when their detail header is collapsed. */
+.info-panel.details-collapsed {
+  grid-template-rows: var(--three-row-panel-layout);
+}
+.info-actions-bar {
+  position: relative;
+  z-index: var(--z-layer-marker);
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  padding: var(--space-5) var(--space-10);
+  /* route through a theme token so it flips light/dark — the hardcoded near-black slab
+     was a black band on the light pane. */
+  background: var(--pane-bar-bg, var(--panel2));
+  border-block-end: 1px solid var(--line);
+}
+.info-subtab-actions {
+  margin-inline-start: auto;
+}
+.info-tree-actions-bar {
+  container: info-tree-toolbar / inline-size;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  column-gap: var(--space-8);
+  row-gap: var(--space-5);
+}
+.info-tree-primary-controls,
+.info-tree-presets,
+.info-tree-group-selects,
+.info-tree-sort-controls {
+  min-width: 0;
+}
+.info-tree-primary-controls {
+  flex: 1 0 100%;
+}
+.info-tree-presets {
+  flex: 1 1 auto;
+}
+.info-tree-sort-controls {
+  margin-inline-start: auto;
+  justify-content: flex-end;
+}
+.info-tree-search-control {
+  min-width: 0;
+  max-width: 100%;
+  flex: 1 1 180px;
+  color: var(--muted);
+  font: 700 var(--ui-font-size-xs)/1.2 var(--mono-font);
+}
+.info-tree-search-control input {
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  padding: 0 var(--space-7);
+  background: var(--panel);
+  font: 600 var(--ui-font-size-xs)/1.2 var(--ui-font);
+}
+.info-tree-search-control input:focus,
+.preferences-search:focus,
+.search-history-input:focus {
+  outline: 0;
+  border-color: var(--active-control-border);
+  box-shadow: var(--active-control-focus-shadow);
+}
+.info-tree-preset {
+  height: 24px;
+  padding: 0 var(--space-8);
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  font: 600 var(--ui-font-size-xs)/1.2 var(--ui-font);
+  cursor: pointer;
+}
+.info-tree-preset.active,
+.info-tree-preset:hover,
+.info-tree-preset:focus-visible {
+  outline: 0;
+}
+.info-tree-group-select {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  color: var(--muted);
+  font: 700 var(--ui-font-size-xs)/1.2 var(--mono-font);
+}
+.info-tree-order-label,
+.info-tree-order-separator {
+  color: var(--muted);
+  font: 700 var(--ui-font-size-xs)/1.2 var(--mono-font);
+  white-space: nowrap;
+}
+.info-tree-order-separator {
+  margin-inline: var(--space-1);
+}
+.info-tree-group-select select {
+  height: 24px;
+  min-width: 74px;
+  padding: 0 20px 0 var(--space-6);
+  background: var(--panel);
+  font: 600 var(--ui-font-size-xs)/1.2 var(--ui-font);
+}
+.info-lookback-control {
+  color: var(--muted);
+  font-size: var(--ui-font-size-xs);
+  white-space: nowrap;
+}
+.info-lookback-control select {
+  min-width: 74px;
+  height: 22px;
+  padding: 0 20px 0 var(--space-6);
+  background: var(--panel);
+  font-size: var(--ui-font-size-xs);
+}
+.info-list {
+  /* YO!info scrollbars always inherit a shared pane scrollbar rule from layout CSS; never
+     customize scrollbar colors or hover behavior here. */
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-8) var(--space-10);
+  background: var(--50-terminal-file-tree-info-list-bg-6);
+}
+.info-list > * {
+  flex-shrink: 0;
+}
+.info-tree-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-7);
+  min-width: min(760px, 100%);
+  padding-block: var(--space-4);
+}
+.search-history-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-10);
+}
+.search-history-search {
+  display: grid;
+  grid-template-columns: minmax(10ch, 1fr) auto auto;
+  gap: var(--space-6);
+  align-items: center;
+}
+.search-history-input {
+  min-width: 0;
+}
+.search-history-error,
+.search-history-empty {
+  padding: var(--space-8);
+  color: var(--muted);
+  font: var(--ui-font-size-xs)/1.35 var(--ui-font);
+}
+.search-history-error {
+  color: var(--bad);
+}
+.search-history-section {
+  min-width: 0;
+}
+.search-history-section-head {
+  margin: 0 0 var(--space-5);
+  color: var(--pane-tab-text);
+  font: 800 var(--ui-font-size-xs)/1.2 var(--ui-font);
+  text-transform: uppercase;
+}
+.search-history-list {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-6);
+}
+.search-history-result,
+.search-history-run {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-3);
+  padding: var(--space-7) var(--space-8);
+  color: var(--text);
+  font: var(--ui-font-size-xs)/1.35 var(--ui-font);
+  text-align: start;
+  cursor: pointer;
+}
+.search-history-result:hover,
+.search-history-result:focus-visible,
+.search-history-run:not(:disabled):hover,
+.search-history-run:not(:disabled):focus-visible {
+  outline: 0;
+  border-color: var(--active-control-border);
+  background: color-mix(in srgb, var(--active-control-bg) 12%, var(--panel));
+}
+.search-history-run:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+.search-history-row-title {
+  color: var(--markdown-heading);
+  font-weight: 800;
+}
+.search-history-row-meta {
+  color: var(--muted);
+}
+.search-history-row-snippet,
+.search-history-row-field {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+.search-history-row-field span {
+  margin-inline-end: var(--space-6);
+  color: var(--muted);
+  font-weight: 700;
+}
+.yoagent-list {
+  display: flex;
+  flex-direction: column;
+  font-size: var(--terminal-font-size);
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.yoagent-global {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0 0 var(--space-10);
+  padding: var(--space-8) var(--space-10);
+  color: var(--50-terminal-file-tree-yoagent-global-fg-7);
+  background: var(--50-terminal-file-tree-yoagent-global-bg-8);
+  border: 1px solid #314154;
+  border-inline-start: 3px solid var(--active-accent-bright);
+  border-radius: var(--radius-control);
+  font: var(--terminal-font-size)/1.35 var(--mono-font);
+
+
+  border-color: var(--50-terminal-file-tree-yoagent-global-border-9);
+}
+.yoagent-global-head,
+.yoagent-headline {
+  color: var(--50-terminal-file-tree-yoagent-global-head-fg-23);
+}
+.yoagent-global-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-12);
+  margin-bottom: var(--space-5);
+  font-weight: 800;
+}
+.yoagent-refresh-progress {
+  position: relative;
+  height: 3px;
+  margin: var(--space-2) 0 var(--space-7);
+  overflow: hidden;
+  background: color-mix(in srgb, var(--active-control-bg) 12%, var(--panel2));
+  border-radius: var(--radius-pill);
+}
+.yoagent-refresh-progress::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  left: -35%;
+  width: 35%;
+  background: var(--active-control-bg);
+  box-shadow: 0 0 12px var(--active-control-focus-ring);
+  animation: yoagent-refresh-sweep 1s linear infinite;
+}
+@keyframes yoagent-refresh-sweep {
+  to { left: 100%; }
+}
+.yoagent-generated,
+.yoagent-empty {
+  color: var(--50-terminal-file-tree-yoagent-generated-fg-25);
+  font-weight: 500;
+}
+.yoagent-headline {
+  margin-bottom: var(--space-5);
+  font-size: var(--terminal-font-size);
+  line-height: 1.35;
+}
+.yoagent-line {
+  padding: var(--space-2) 0;
+  color: var(--50-terminal-file-tree-yoagent-line-fg-24);
+}
+.yoagent-global .markdown-body {
+  white-space: normal;
+
+
+  color: var(--50-terminal-file-tree-yoagent-global-fg-29);
+}
+.yoagent-chat {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: var(--space-4);
+  margin-top: auto;
+  padding: var(--space-5) var(--space-6);
+  background: var(--panel);
+
+
+  --yoagent-detail-text: var(--50-terminal-file-tree-yoagent-chat-yoagent-detail-text-11);
+  color: var(--50-terminal-file-tree-yoagent-chat-fg-12);
+  border-color: var(--line);
+}
+.yoagent-chat.has-history {
+  flex: 1 1 auto;
+}
+.yoagent-chat.empty {
+  flex: 0 0 auto;
+  grid-template-rows: auto auto auto;
+  align-content: start;
+}
+.yoagent-chat.empty .yoagent-chat-history {
+  overflow: visible;
+}
+.yoagent-recent-agents {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: 0 0 var(--space-2);
+}
+.yoagent-section-title {
+  color: var(--muted);
+  font: 800 max(9px, calc(var(--terminal-font-size) - 3px))/1 var(--mono-font);
+  text-transform: uppercase;
+}
+.yoagent-recent-agents-list {
+  display: grid;
+  box-sizing: border-box;
+  gap: var(--space-3);
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding-inline-start: 18px;
+}
+.yoagent-recent-agent {
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0;
+  color: var(--text);
+  font: 600 max(10px, calc(var(--terminal-font-size) - 1px))/1.25 var(--ui-font);
+}
+.yoagent-recent-agent::marker {
+  color: var(--muted);
+}
+.yoagent-recent-agent-line {
+  display: flex;
+  box-sizing: border-box;
+  align-items: baseline;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  flex-flow: row wrap;
+  column-gap: var(--space-6);
+  row-gap: var(--space-6);
+}
+.yoagent-recent-agent .agent-icon {
+  width: max(12px, calc(var(--terminal-font-size) + 1px));
+  height: max(12px, calc(var(--terminal-font-size) + 1px));
+  flex: 0 0 auto;
+}
+.yoagent-recent-agent-session,
+.yoagent-recent-agent-window {
+  flex: 0 0 auto;
+  color: var(--text);
+}
+.yoagent-recent-agent-window {
+  color: var(--muted);
+}
+.yoagent-recent-agent-paths {
+  flex: 1 1 96px;
+  color: var(--text-muted-strong);
+}
+.yoagent-recent-agent-activity {
+  flex: 0 1 auto;
+  color: var(--muted);
+}
+.yoagent-recent-agent.tmux-idle {
+  opacity: 0.68;
+}
+.yoagent-recent-agent-signals {
+  display: inline-flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.yoagent-recent-agent-signal {
+  display: inline-flex;
+  align-items: center;
+  min-height: 16px;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-control);
+  padding: var(--space-1) var(--space-4);
+  color: var(--text);
+  background: var(--panel);
+  font: 800 max(9px, calc(var(--terminal-font-size) - 3px))/1 var(--mono-font);
+  white-space: nowrap;
+}
+.yoagent-recent-agent-signal.signal-dead,
+.yoagent-recent-agent-signal.signal-bell {
+  border-color: var(--danger-border);
+  color: var(--danger-border);
+}
+.yoagent-recent-agent-signal.signal-silence {
+  border-color: var(--accent-gold);
+  color: var(--accent-gold);
+}
+.yoagent-recent-agent-signal.signal-presence {
+  border-color: var(--active-control-soft-border);
+  color: var(--active-control-bg);
+}
+.yoagent-recent-agent-signal.signal-presence::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  margin-inline-end: var(--space-4);
+  border-radius: 50%;
+  background: var(--active-control-bg);
+}
+.yoagent-recent-agent-signal.signal-zoom {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.yoagent-recent-agent-restart {
+  flex: 0 0 auto;
+  min-height: 18px;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-control);
+  padding: var(--space-1) var(--space-6);
+  color: var(--auto-text);
+  background: var(--brand-green);
+  font: 800 max(9px, calc(var(--terminal-font-size) - 3px))/1 var(--ui-font);
+  cursor: pointer;
+}
+.yoagent-recent-agent-restart:hover {
+  background: var(--accent-lime);
+}
+.yoagent-transcript-path {
+  min-width: 0;
+  padding: 0 0 var(--space-2);
+  color: var(--muted);
+  font: 600 max(9px, calc(var(--terminal-font-size) - 3px))/1.2 var(--mono-font);
+}
+.yoagent-transcript-label {
+  flex: 0 0 auto;
+  text-transform: uppercase;
+}
+.yoagent-transcript-value {
+  flex: 1 1 auto;
+  color: var(--text);
+}
+.yoagent-transcript-loading {
+  color: var(--muted);
+}
+.yoagent-transcript-copy {
+  flex: 0 0 auto;
+}
+.yoagent-chat-history {
+  /* One normal vertical owner for YO!agent activity. The outer #yoagent-content only keeps horizontal
+     overflow, so thinking/stream refreshes do not expose nested rails. */
+  --pane-scrollbar-current-thumb: var(--pane-scrollbar-thumb);
+  --pane-scrollbar-current-track: var(--pane-scrollbar-track);
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+.yoagent-chat-history::-webkit-scrollbar-thumb:hover,
+.yoagent-chat-history::-webkit-scrollbar-thumb:active {
+  background: var(--pane-scrollbar-thumb-active);
+}
+.yoagent-chat-empty,
+.yoagent-chat-status,
+.yoagent-chat-error {
+  color: var(--muted);
+  font: var(--terminal-font-size)/1.35 var(--ui-font);
+}
+.yoagent-chat-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-7);
+}
+.yoagent-waiting-queue {
+  display: grid;
+  gap: var(--space-5);
+  padding: var(--space-7) var(--space-8);
+  color: var(--text);
+  background: var(--panel2);
+  border: 1px solid var(--active-control-soft-border);
+  border-radius: var(--radius-control);
+  font: var(--terminal-font-size)/1.35 var(--ui-font);
+}
+.yoagent-compact-list {
+  display: grid;
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.yoagent-compact-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-7);
+  min-width: 0;
+}
+.yoagent-compact-label {
+  flex: 1 1 auto;
+}
+.yoagent-waiting-age {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+.yoagent-compact-action {
+  appearance: none;
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+  font: 800 max(10px, calc(var(--terminal-font-size) - 2px))/1 var(--ui-font);
+  padding: var(--space-4) var(--space-7);
+}
+.yoagent-chat-queue {
+  display: grid;
+  gap: var(--space-5);
+  padding: var(--space-7) var(--space-8);
+  color: var(--50-terminal-file-tree-yoagent-chat-queue-fg-39);
+  background: var(--50-terminal-file-tree-yoagent-chat-queue-bg-40);
+  border: 1px dashed var(--active-control-soft-border);
+  border-radius: var(--radius-control);
+  font: var(--terminal-font-size)/1.35 var(--ui-font);
+
+
+  border-color: var(--50-terminal-file-tree-yoagent-chat-queue-border-41);
+}
+.yoagent-chat-queue-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-radius: 50%;
+  font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
+}
+.yoagent-jobs-list {
+  display: grid;
+  gap: var(--space-5);
+  padding: var(--space-7) var(--space-8);
+  background: var(--panel2);
+  font: var(--terminal-font-size)/1.35 var(--ui-font);
+}
+.yoagent-jobs-items {
+  display: grid;
+  gap: var(--space-5);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.yoagent-job-item {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+  padding: var(--space-6);
+  border: 1px solid var(--active-control-soft-border);
+  border-radius: var(--radius-control);
+  background: color-mix(in srgb, var(--panel) 82%, transparent);
+}
+.yoagent-job-failed,
+.yoagent-job-timed_out {
+  border-color: color-mix(in srgb, var(--danger) 65%, var(--line));
+}
+.yoagent-job-cancelled {
+  opacity: 0.78;
+}
+.yoagent-job-main {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-8);
+  min-width: 0;
+}
+.yoagent-job-status {
+  flex: 0 0 auto;
+  color: var(--accent-gold);
+  font-weight: 800;
+}
+.yoagent-job-meta,
+.yoagent-job-text {
+  color: var(--muted);
+}
+.yoagent-job-meta {
+  flex: 1 1 auto;
+}
+.yoagent-job-text {
+  color: var(--text);
+}
+.yoagent-job-confirm,
+.yoagent-job-cancel {
+  appearance: none;
+  border: 1px solid var(--active-control-border);
+  border-radius: var(--radius-control);
+  background: var(--active-control-soft-bg);
+  color: var(--text);
+  cursor: pointer;
+  font: 800 max(10px, calc(var(--terminal-font-size) - 2px))/1 var(--ui-font);
+  padding: var(--space-5) var(--space-8);
+}
+.yoagent-job-cancel {
+  border-color: var(--line);
+  background: var(--panel);
+  color: var(--muted);
+}
+/* "thinking" with a blinking, moving ellipsis so it reads as live agent work, not static text. */
+.yoagent-thinking {
+  display: inline-flex;
+  align-items: baseline;
+}
+.yoagent-chat-error {
+  color: var(--bad);
+}
+.yoagent-chat-retry {
+  height: 22px;
+  padding: 0 var(--space-8);
+  color: var(--auto-text);
+  background: var(--pane-tab-badge-gold);
+  border: 1px solid var(--warning-border-strong);
+  border-radius: var(--radius-control);
+  font: 800 max(10px, calc(var(--terminal-font-size) - 2px))/1 var(--ui-font);
+}
+.yoagent-chat-notice {
+  padding: var(--space-7) var(--space-8);
+  color: #2a1e00;
+  background: #ffe7a3;
+  border: 1px solid #c8941e;
+  border-radius: var(--radius-control);
+  font: var(--terminal-font-size)/1.35 var(--ui-font);
+}
+.yoagent-chat-notice-backend {
+  font-weight: 800;
+}
+.conversation-message {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+  width: calc(100% - 28px);
+  max-width: calc(100% - 28px);
+  padding: var(--space-7) var(--space-8);
+  border-radius: 5px;
+  overflow: visible;
+  overscroll-behavior: auto;
+
+
+  color: var(--50-terminal-file-tree-conversation-message-fg-19);
+}
+.conversation-message.assistant {
+  align-self: flex-start;
+  margin-inline-end: 28px;
+  padding-inline-start: var(--space-12);
+  border-color: var(--active-control-border);
+  border-inline-start-width: 4px;
+  background: color-mix(in srgb, var(--active-control-soft-bg) 62%, var(--panel2));
+}
+.yoagent-message.assistant.yoagent-agent-result {
+  border-inline-start-color: var(--accent-gold);
+  border-inline-start-width: 6px;
+  background: var(--50-terminal-file-tree-yoagent-message-bg-18);
+}
+.yoagent-agent-result-body {
+  display: grid;
+  gap: 0;
+}
+.yoagent-message.assistant.yoagent-agent-result .yoagent-agent-result-output {
+  padding-inline-start: 14px;
+  border-inline-start: 3px solid var(--accent-gold);
+}
+.yoagent-message.assistant.streaming {
+  border-inline-start-style: dashed;
+}
+.yoagent-message.assistant.stopped {
+  opacity: 0.82;
+  border-inline-start-color: var(--muted);
+  border-inline-start-style: solid;
+}
+.yoagent-message-state {
+  color: var(--muted);
+  font: var(--ui-font-size-xs)/1.2 var(--ui-font);
+}
+.yoagent-message.assistant.streaming .yoagent-message-role::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--active-control-border);
+}
+.yoagent-recent-agents-message .yoagent-recent-agents {
+  padding: 0;
+}
+.conversation-message.user {
+  align-self: flex-end;
+  margin-inline-start: 28px;
+  padding-inline-end: var(--space-12);
+  border-color: var(--link-soft);
+  border-inline-end-width: 4px;
+}
+.conversation-message-role {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  color: var(--50-terminal-file-tree-conversation-message-role-fg-26);
+  font: 800 max(9px, calc(var(--terminal-font-size) - 3px))/1 var(--mono-font);
+}
+.yoagent-message:not(.yochat-message) .conversation-message-role { text-transform: uppercase; }
+.yoagent-message-time {
+  color: var(--50-terminal-file-tree-yoagent-message-time-fg-27);
+  font-weight: 600;
+  text-transform: none;
+}
+.yoagent-message-latency {
+  color: var(--50-terminal-file-tree-yoagent-message-latency-fg-28);
+  font-weight: 600;
+  text-transform: none;
+  white-space: nowrap;
+}
+.conversation-message-body {
+  min-width: 0;
+  overflow-x: visible;
+  overflow-y: visible;
+  overscroll-behavior: auto;
+  color: var(--50-terminal-file-tree-conversation-message-body-fg-20);
+  font: var(--terminal-font-size)/1.35 var(--ui-font);
+}
+/* Rendered Markdown brings its own block layout — keep pre-wrap only for the plain-text fallback/user
+   messages. On a markdown body it would preserve the newlines between/inside the generated <ul><li>
+   HTML as blank lines, which is why the bullets looked far too widely spaced. */
+.yoagent-message-body.markdown-body {
+  overflow-y: visible;
+  white-space: normal;
+}
+.yoagent-message-details {
+  margin-top: var(--space-5);
+  font: max(9px, calc(var(--terminal-font-size) - 2px))/1.35 var(--mono-font);
+  color: var(--muted);
+  overflow: visible;
+  overscroll-behavior: auto;
+}
+.yoagent-message-details summary {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-7);
+  max-width: 100%;
+  cursor: pointer;
+  user-select: none;
+  color: var(--50-terminal-file-tree-yoagent-message-details-fg-30);
+}
+.yoagent-message-details summary::-webkit-details-marker {
+  display: none;
+}
+.yoagent-message-details summary::marker {
+  content: '';
+}
+.yoagent-message-details summary::before {
+  content: "›";
+  margin-top: 0.15em;
+  opacity: 0.9;
+}
+.yoagent-message-details[open] summary::before {
+  content: "›";
+  opacity: 1;
+}
+.yoagent-message-details summary > span:first-child {
+  flex: 0 0 auto;
+}
+.yoagent-details-preview {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-height: calc(2 * max(9px, calc(var(--terminal-font-size) - 2px)) * 1.35);
+  overflow: clip;
+  color: var(--50-terminal-file-tree-yoagent-details-preview-fg-31);
+}
+.yoagent-details-preview.yoagent-thinking-live-preview {
+  max-height: calc(5 * max(9px, calc(var(--terminal-font-size) - 2px)) * 1.35);
+}
+.yoagent-message-details[open] .yoagent-details-preview {
+  display: none;
+}
+.yoagent-message-details pre {
+  margin: var(--space-5) 0 0;
+  max-height: 180px;
+  overflow: auto;
+  overscroll-behavior: auto;
+  padding: var(--space-7) var(--space-8);
+  color: var(--50-terminal-file-tree-yoagent-message-details-fg-32);
+  background: var(--50-terminal-file-tree-yoagent-message-details-bg-33);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+
+
+  border-color: var(--50-terminal-file-tree-yoagent-message-details-border-34);
+}
+.yoagent-message-details pre.yoagent-auxiliary-stream {
+  color: var(--50-terminal-file-tree-yoagent-message-details-fg-35);
+  background: var(--50-terminal-file-tree-yoagent-message-details-bg-36);
+
+
+  border-color: var(--50-terminal-file-tree-yoagent-message-details-border-37);
+}
+.yoagent-message-details[open] pre.yoagent-auxiliary-stream {
+  max-height: none;
+  overflow: visible;
+}
+.yoagent-toolcall-details summary > span:first-child {
+  color: var(--accent-gold);
+}
+.yoagent-message-details pre.yoagent-toolcall-stream {
+  color: var(--50-terminal-file-tree-yoagent-message-details-fg-43);
+  border-color: var(--50-terminal-file-tree-yoagent-message-details-border-45);
+
+
+  background: var(--50-terminal-file-tree-yoagent-message-details-bg-44);
+}
+.yoagent-tc-command {
+  color: var(--50-terminal-file-tree-yoagent-tc-command-fg-46);
+  font-weight: 650;
+}
+.yoagent-details-note {
+  margin-top: var(--space-5);
+  color: var(--50-terminal-file-tree-yoagent-details-note-fg-38);
+}
+.yoagent-action-card {
+  display: grid;
+  gap: var(--space-7);
+  margin-top: var(--space-7);
+  padding: var(--space-8);
+  color: var(--50-terminal-file-tree-yoagent-action-card-fg-47);
+  background: var(--50-terminal-file-tree-yoagent-action-card-bg-48);
+  border: 1px solid rgba(112, 167, 255, 0.65);
+  border-radius: var(--radius-md);
+
+
+  border-color: var(--50-terminal-file-tree-yoagent-action-card-border-49);
+}
+.yoagent-action-card.sent {
+  border-color: var(--active-control-border);
+}
+.yoagent-action-card.error {
+  border-color: var(--bad);
+}
+.yoagent-action-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  justify-content: space-between;
+  color: var(--50-terminal-file-tree-yoagent-action-head-fg-54);
+  font: 800 max(10px, calc(var(--terminal-font-size) - 2px))/1 var(--ui-font);
+}
+.yoagent-action-send {
+  height: 24px;
+  padding: 0 var(--space-10);
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border: 1px solid var(--active-control-border);
+  border-radius: var(--radius-pill);
+  font: 800 max(10px, calc(var(--terminal-font-size) - 2px))/1 var(--ui-font);
+  cursor: pointer;
+}
+.yoagent-action-state {
+  color: var(--muted);
+  font: 700 max(10px, calc(var(--terminal-font-size) - 2px))/1 var(--ui-font);
+}
+.yoagent-action-rows {
+  display: grid;
+  gap: var(--space-4);
+}
+.yoagent-action-row {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: var(--space-8);
+  align-items: baseline;
+  color: var(--muted);
+  font: max(10px, calc(var(--terminal-font-size) - 2px))/1.25 var(--ui-font);
+}
+.yoagent-action-row code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--50-terminal-file-tree-yoagent-action-row-fg-55);
+  background: var(--50-terminal-file-tree-yoagent-action-row-bg-56);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  padding: var(--space-1) var(--space-4);
+
+
+  border-color: var(--50-terminal-file-tree-yoagent-action-row-border-57);
+}
+.yoagent-action-text {
+  min-width: 0;
+  max-height: 170px;
+  overflow: auto;
+  margin: 0;
+  padding: var(--space-7) var(--space-8);
+  color: var(--50-terminal-file-tree-yoagent-action-text-fg-58);
+  background: var(--50-terminal-file-tree-yoagent-action-text-bg-59);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  white-space: pre-wrap;
+
+
+  border-color: var(--50-terminal-file-tree-yoagent-action-text-border-60);
+}
+/* Composer (mockup 044): one rounded container with the input on top and a control row below —
+   the backend "Auto" pill on the left, a subtle Clear, and a circular send-arrow on the right. */
+.conversation-composer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-6) var(--space-8);
+  background: color-mix(in srgb, var(--link-soft) 8%, var(--bg));
+  border: 1px solid var(--link-soft);
+  border-radius: 14px;
+}
+.conversation-composer:focus-within {
+  border-color: var(--link-soft);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--link-soft) 45%, transparent);
+}
+.conversation-composer-input {
+  min-width: 0;
+  width: 100%;
+  height: 22px;
+  padding: 0 var(--space-2);
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  font: var(--terminal-font-size)/1.3 var(--ui-font);
+}
+.conversation-composer-input:focus { outline: 0; }
+.conversation-composer-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+.conversation-composer-controls-spacer { flex: 1 1 auto; }
+.yoagent-composer-pill,
+.yoagent-backend-pill {
+  height: 24px;
+  padding: 0 var(--space-5) 0 var(--space-8);
+  border-radius: var(--radius-pill);
+  font: 600 max(10px, calc(var(--terminal-font-size) - 2px))/1 var(--ui-font);
+}
+.yoagent-composer-pill-model {
+  max-width: min(34ch, 100%);
+}
+.yoagent-composer-pill-effort {
+  max-width: 13ch;
+}
+.yoagent-backend-pill-dot {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--agent-inactive-marker-bg);
+  border: 2px solid var(--yoagent-inactive-backend-dot-border);
+  box-shadow: var(--50-terminal-file-tree-yoagent-backend-pill-dot-shadow-2);
+
+
+  border-color: var(--50-terminal-file-tree-yoagent-backend-pill-dot-border-1);
+}
+.yoagent-composer-pill-backend:not(:has(select:disabled)) .yoagent-backend-pill-dot {
+  background: var(--pr-status-passing);
+  border-color: var(--50-terminal-file-tree-yoagent-composer-pill-backend-border-3);
+  box-shadow: var(--50-terminal-file-tree-yoagent-composer-pill-backend-shadow-4);
+}
+.yoagent-composer-pill select,
+.yoagent-backend-pill select {
+  min-width: 0;
+  max-width: 100%;
+  height: 20px;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+  text-overflow: ellipsis;
+}
+.yoagent-composer-pill select:disabled,
+.yoagent-backend-pill select:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+.yoagent-composer-pill select:focus { outline: 0; }
+.yoagent-backend-pill select:focus { outline: 0; }
+.yoagent-chat-disabled {
+  color: var(--muted);
+  font-size: max(11px, calc(var(--terminal-font-size) - 1px));
+}
+.yoagent-chat-clear {
+  height: 24px;
+  padding: 0 var(--space-9);
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-pill);
+  font: 600 max(10px, calc(var(--terminal-font-size) - 2px))/1 var(--ui-font);
+  cursor: pointer;
+}
+.yoagent-chat-clear:hover:not(:disabled),
+.yoagent-chat-clear:focus-visible {
+  color: var(--text);
+  background: var(--panel2);
+}
+.yoagent-chat-clear:disabled { display: none; }
+.conversation-send,
+.yoagent-chat-stop {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  padding: 0;
+  border-radius: 50%;
+  cursor: pointer;
+}
+.conversation-send-primary {
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border: 1px solid var(--active-control-border);
+}
+.conversation-send-primary:disabled { opacity: 0.5; cursor: default; }
+.conversation-send-icon { width: 16px; height: 16px; }
+.yoagent-chat-stop {
+  color: var(--text);
+  background: color-mix(in srgb, var(--bad) 24%, var(--panel2));
+  border: 1px solid color-mix(in srgb, var(--bad) 70%, var(--line));
+  font: 900 18px/1 var(--ui-font);
+}
+.yoagent-chat-stop:hover,
+.yoagent-chat-stop:focus-visible {
+  color: var(--auto-text);
+  background: var(--bad);
+  outline: 0;
+}
+/* YO!agent rendered code blocks: soft rounded boxes (not the editor's near-black slab). */
+.yoagent-chat .markdown-body pre,
+.yoagent-global .markdown-body pre {
+  background: var(--50-terminal-file-tree-yoagent-chat-bg-62);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  overflow-x: auto;
+  overflow-y: auto;
+  overscroll-behavior: auto;
+  padding: var(--space-8) var(--space-10);
+}
+body :is(.yoagent-compact-action, .yoagent-job-confirm, .yoagent-job-cancel):is(:hover, :focus-visible) {
+  border-color: var(--active-control-focus-ring);
+  color: var(--text);
+  outline: 0;
+}
+
+/* YO!chat reuses the shared conversation message/composer owners above. This block owns only its
+   timeline, search, presence, and picker geometry. */
+.chat-panel > .panel-head { grid-row: 1; }
+.chat-panel > .chat-actions-bar { grid-row: 2; }
+.chat-panel > .chat-pane {
+  grid-row: 3;
+  align-self: stretch;
+}
+.chat-pane {
+  position: relative;
+  display: grid;
+  grid-template-areas:
+    "timeline"
+    "new-messages"
+    "typing"
+    "composer";
+  grid-template-rows: minmax(0, 1fr) auto auto auto;
+  gap: var(--space-4);
+  min-height: 0;
+  padding: var(--space-6) var(--space-8);
+}
+.chat-actions-bar form {
+  flex: 1 1 auto;
+}
+.chat-actions-bar[hidden] {
+  display: none;
+}
+.chat-actions-bar .search-history-input {
+  width: 100%;
+}
+.chat-history-search-split {
+  display: grid;
+  grid-area: timeline;
+  grid-template-rows: fit-content(calc(50% - var(--space-2))) minmax(0, 1fr);
+  min-height: 0;
+}
+.chat-history-search-split.search-open {
+  gap: var(--space-4);
+}
+.chat-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-4);
+  overscroll-behavior: contain;
+}
+.chat-history-sentry + .yochat-introduction {
+  margin-block-start: auto;
+}
+.yochat-message,
+.yochat-composer {
+  --yochat-author-accent: var(--active-control-border);
+  --yochat-author-border: color-mix(in srgb, var(--yochat-author-accent) 68%, var(--line));
+}
+.yochat-author-tone-0 { --yochat-author-accent: var(--link-soft); }
+.yochat-author-tone-1 { --yochat-author-accent: var(--good); }
+.yochat-author-tone-2 { --yochat-author-accent: var(--accent-gold); }
+.yochat-author-tone-3 { --yochat-author-accent: var(--pr-status-merged); }
+.yochat-author-tone-4 { --yochat-author-accent: var(--git-untracked-badge); }
+.yochat-author-tone-5 { --yochat-author-accent: var(--icon-archive); }
+.yochat-author-tone-6 { --yochat-author-accent: var(--transcript-summary-accent); }
+.yochat-author-tone-7 { --yochat-author-accent: var(--accent-sky-strong); }
+.yochat-author-tone-8 { --yochat-author-accent: var(--accent-lime); }
+.yochat-author-tone-9 { --yochat-author-accent: var(--git-deleted); }
+.yochat-message:not(.yochat-agent-message):not(.yochat-introduction) {
+  border: 1px solid var(--yochat-author-border);
+  background: color-mix(in srgb, var(--yochat-author-accent) 8%, var(--panel2));
+}
+.yochat-message.user:not(.yochat-agent-message):not(.yochat-introduction) { border-inline-end-width: 4px; }
+.yochat-message.assistant:not(.yochat-agent-message):not(.yochat-introduction) { border-inline-start-width: 4px; }
+.yochat-message:not(.yochat-agent-message) .conversation-message-role > span:first-child {
+  color: var(--yochat-author-accent);
+}
+.yochat-message:not(.yochat-agent-message) .conversation-message-body {
+  white-space: pre-wrap;
+}
+.yochat-message-metadata {
+  color: var(--50-terminal-file-tree-yochat-message-metadata-fg-78);
+  font-weight: 500;
+  text-transform: none;
+}
+.yochat-message-metadata .yoagent-message-time { color: inherit; }
+.yochat-introduction {
+  border: 1px solid var(--active-control-soft-border);
+  background: color-mix(in srgb, var(--active-control-soft-bg) 62%, var(--panel2));
+}
+.yochat-introduction .conversation-message-body { display: grid; gap: var(--space-5); }
+.yochat-introduction p { margin: 0; }
+.yochat-message.pending { opacity: 0.72; }
+.yochat-message.failed { border-color: var(--bad); }
+.yochat-external-link {
+  overflow-wrap: anywhere;
+}
+.yochat-media-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  margin-top: var(--space-5);
+}
+.yochat-media-thumbnail {
+  width: 44px;
+  height: 44px;
+  overflow: hidden;
+  padding: var(--space-2);
+  background: var(--panel2);
+  border: 1px solid var(--yochat-author-border, var(--line));
+  border-radius: var(--radius-control);
+}
+.yochat-media-thumbnail img,
+.yochat-media-thumbnail video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
+}
+.yochat-media-panel .info-pane {
+  min-height: 0;
+}
+.yochat-media-panel-content {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto auto;
+  gap: var(--space-8);
+  height: 100%;
+  min-height: 0;
+  padding: var(--space-8);
+}
+.yochat-media-panel-stage {
+  display: grid;
+  min-height: 0;
+  place-items: center;
+  overflow: auto;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+}
+.yochat-media-panel-stage img,
+.yochat-media-panel-stage video {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+.yochat-media-panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+.yochat-media-panel-content > a {
+  overflow-wrap: anywhere;
+  color: var(--link-soft);
+  font: var(--ui-font-size-xs)/1.3 var(--mono-font);
+}
+.chat-message-pending,
+.chat-typing,
+.chat-search-empty,
+.chat-emoji-empty {
+  color: var(--muted);
+  font: var(--ui-font-size-sm)/1.3 var(--ui-font);
+}
+.chat-message-retry,
+.chat-new-messages,
+.chat-emoji-button {
+  border-radius: var(--radius-control);
+}
+.chat-new-messages {
+  grid-area: new-messages;
+  justify-self: center;
+  padding: var(--space-4) var(--space-8);
+}
+.chat-typing {
+  grid-area: typing;
+  min-height: 1.3em;
+  padding-inline: var(--space-8);
+}
+.yochat-composer {
+  grid-area: composer;
+  flex: 0 0 auto;
+  border-color: var(--yochat-author-border);
+}
+.yochat-composer:focus-within {
+  border-color: var(--yochat-author-border);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--yochat-author-accent, var(--active-control-border)) 45%, transparent);
+}
+.yochat-composer .conversation-send-primary {
+  background: var(--yochat-author-accent);
+  border-color: var(--yochat-author-border);
+}
+.yochat-input {
+  min-height: 42px;
+  height: auto;
+  overflow-y: hidden;
+  resize: none;
+}
+.chat-emoji-button {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 50%;
+  font-size: var(--ui-font-size-lg);
+}
+.chat-emoji-picker {
+  position: absolute;
+  inset-inline-start: clamp(var(--space-8), 4%, 32px);
+  inset-inline-end: clamp(var(--space-8), 4%, 32px);
+  bottom: 86px;
+  z-index: var(--z-terminal-popover);
+  max-height: min(60%, 420px);
+  overflow: hidden;
+  padding: var(--space-8);
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-popover);
+}
+.chat-emoji-head {
+  display: flex;
+  gap: var(--space-4);
+  margin-bottom: var(--space-8);
+}
+.chat-emoji-head input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.chat-emoji-categories {
+  display: flex;
+  gap: var(--space-2);
+  overflow-x: auto;
+  margin-bottom: var(--space-6);
+}
+.chat-emoji-categories button {
+  flex: 0 0 auto;
+  min-width: 32px;
+  padding: var(--space-2);
+}
+.chat-emoji-categories button.active {
+  border-color: var(--active-control-border);
+  background: var(--active-control-soft-bg);
+}
+.chat-emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(var(--touch-row-height), 1fr));
+  gap: var(--space-3);
+  max-height: 310px;
+  overflow: auto;
+}
+.chat-emoji-grid button {
+  min-width: var(--touch-row-height);
+  min-height: var(--touch-row-height);
+  padding: var(--space-2);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  font-size: 22px;
+  cursor: pointer;
+}
+.chat-emoji-grid button:is(:hover, :focus-visible) {
+  background: var(--panel2);
+  border-color: var(--active-control-border);
+  outline: 0;
+}
+.chat-search-results {
+  display: grid;
+  gap: var(--space-4);
+  min-height: 0;
+  overflow: auto;
+}
+.chat-search-result {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-6);
+  text-align: start;
+}
+.chat-search-result-head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-8);
+  color: var(--muted);
+}
+.chat-search-context {
+  display: grid;
+  gap: var(--space-2);
+  color: var(--muted);
+  font-size: var(--ui-font-size-xs);
+}
+.chat-search-result mark {
+  color: var(--info-tree-search-match-text);
+  background: var(--info-tree-search-match-bg);
+}
+.chat-status-marker {
+  display: inline-flex;
+  gap: var(--space-2);
+}
+@media (max-width: 520px) {
+  .chat-pane {
+    padding: var(--space-4);
+  }
+  .chat-emoji-picker {
+    inset-inline: var(--space-4);
+    bottom: 78px;
+  }
+}
+.info-tree {
+  --info-tree-sticky-level-block: 27px;
+  --info-tree-connector-x: -14px;
+  --info-tree-connector-arm: 12px;
+  --info-tree-connector-line-width: 1px;
+  --info-tree-connector-arm-start: calc(var(--info-tree-connector-x) + var(--info-tree-connector-line-width));
+  --info-tree-connector-arm-width: calc(var(--info-tree-connector-arm) - var(--info-tree-connector-line-width));
+  --info-tree-children-gap: 0px;
+  --info-tree-summary-connector-y: 13px;
+  --info-tree-record-connector-y: 13px;
+  --info-tree-tab-color: var(--pane-tab-active-bg);
+  --info-tree-tab-color-hover: var(--pane-tab-active-border);
+  --info-tree-tmux-window-color: var(--pane-tab-active-bg);
+  --info-tree-tmux-window-color-hover: var(--pane-tab-active-border);
+  --info-tree-ai-color: var(--icon-code);
+  --info-tree-ai-color-hover: var(--50-terminal-file-tree-info-tree-info-tree-ai-color-hover-79);
+  --info-tree-path-color: var(--text);
+  --info-tree-path-color-hover: var(--text);
+  --info-tree-branch-color: var(--link-soft);
+  --info-tree-branch-color-hover: var(--link-soft-hover);
+  --info-tree-pr-color: var(--info-tree-pr-neutral);
+  --info-tree-pr-color-hover: var(--info-tree-pr-neutral-hover);
+  --info-tree-linear-color: var(--50-terminal-file-tree-info-tree-info-tree-linear-color-80);
+  --info-tree-linear-color-hover: var(--50-terminal-file-tree-info-tree-info-tree-linear-color-hover-81);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  color: var(--pane-tab-text);
+  font: var(--ui-font-size-sm)/1.35 var(--ui-font);
+}
+.info-tree-group {
+  --info-tree-sticky-offset: 0;
+  --z-info-tree-summary-current: var(--z-info-tree-summary-base);
+  min-width: 0;
+}
+.info-tree-group summary {
+  position: sticky;
+  inset-block-start: var(--info-tree-sticky-offset);
+  z-index: var(--z-info-tree-summary-current);
+  display: grid;
+  grid-template-columns: max-content max-content minmax(0, 1fr);
+  align-items: center;
+  align-content: center;
+  gap: var(--space-6);
+  min-height: var(--info-tree-sticky-level-block);
+  padding: var(--space-2) var(--space-4);
+  color: var(--text);
+  background: var(--info-pane-bg);
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  cursor: pointer;
+  list-style: none;
+  overflow: visible;
+}
+.info-tree-group[data-info-depth="0"] {
+  --info-tree-sticky-offset: 0;
+  --z-info-tree-summary-current: var(--z-info-tree-summary-depth-0);
+}
+.info-tree-group[data-info-depth="1"] {
+  --info-tree-sticky-offset: var(--info-tree-sticky-level-block);
+  --z-info-tree-summary-current: var(--z-info-tree-summary-depth-1);
+}
+.info-tree-group[data-info-depth="2"] {
+  --info-tree-sticky-offset: calc(var(--info-tree-sticky-level-block) * 2);
+  --z-info-tree-summary-current: var(--z-info-tree-summary-depth-2);
+}
+.info-tree-group[data-info-depth="3"] {
+  --info-tree-sticky-offset: calc(var(--info-tree-sticky-level-block) * 3);
+  --z-info-tree-summary-current: var(--z-info-tree-summary-depth-3);
+}
+.info-tree-group summary::-webkit-details-marker {
+  display: none;
+}
+.info-tree-group summary::before {
+  content: "›";
+}
+.info-tree-group:not([open]) summary::before {
+  content: "›";
+}
+.info-tree-group[data-info-depth="1"] > summary::after,
+.info-tree-group[data-info-depth="2"] > summary::after,
+.info-tree-group[data-info-depth="3"] > summary::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  inset-block-start: var(--info-tree-summary-connector-y);
+  inset-inline-start: var(--info-tree-connector-arm-start);
+  width: var(--info-tree-connector-arm-width);
+  height: var(--info-tree-connector-line-width);
+  background: var(--info-tree-line);
+}
+.info-tree-group-dimension {
+  color: var(--muted);
+  font: 700 var(--ui-font-size-xs)/1.2 var(--mono-font);
+  text-transform: uppercase;
+}
+.info-tree-group[data-info-dimension="tab"] > summary {
+  --info-tree-dimension-color: var(--info-tree-tab-color);
+  --info-tree-dimension-hover: var(--info-tree-tab-color-hover);
+}
+.info-tree-group[data-info-dimension="tmux-window"] > summary {
+  --info-tree-dimension-color: var(--info-tree-tmux-window-color);
+  --info-tree-dimension-hover: var(--info-tree-tmux-window-color-hover);
+}
+.info-tree-group[data-info-dimension="ai"] > summary {
+  --info-tree-dimension-color: var(--info-tree-ai-color);
+  --info-tree-dimension-hover: var(--info-tree-ai-color-hover);
+}
+.info-tree-group[data-info-dimension="path"] > summary {
+  --info-tree-dimension-color: var(--info-tree-path-color);
+  --info-tree-dimension-hover: var(--info-tree-path-color-hover);
+}
+.info-tree-group[data-info-dimension="branch"] > summary {
+  --info-tree-dimension-color: var(--info-tree-branch-color);
+  --info-tree-dimension-hover: var(--info-tree-branch-color-hover);
+}
+.info-tree-group[data-info-dimension="pr"] > summary {
+  --info-tree-dimension-color: var(--info-tree-pr-color);
+  --info-tree-dimension-hover: var(--info-tree-pr-color-hover);
+}
+.info-tree-group[data-info-dimension="linear"] > summary {
+  --info-tree-dimension-color: var(--info-tree-linear-color);
+  --info-tree-dimension-hover: var(--info-tree-linear-color-hover);
+}
+.info-tree-group[data-info-dimension] > summary .info-tree-group-dimension,
+.info-tree-group[data-info-dimension] > summary .info-tree-group-label {
+  color: var(--info-tree-dimension-color);
+}
+.info-tree-group[data-info-dimension="tab"] > summary .info-tree-group-dimension {
+  text-transform: none;
+}
+.info-tree-group[data-info-dimension="tmux-window"] > summary .info-tree-group-dimension {
+  text-transform: none;
+}
+.info-tree-group[data-info-dimension="branch"] > summary .info-tree-group-dimension {
+  text-transform: none;
+}
+.info-tree-group[data-info-dimension="pr"] > summary .info-tree-group-dimension {
+  text-transform: none;
+}
+.info-tree-group-label-line a {
+  color: var(--info-tree-dimension-color, var(--link-soft));
+}
+.info-tree-group-label {
+  color: var(--text);
+}
+.info-tree-group-label-line > .info-tree-tab-group-status {
+  margin-inline: 0 var(--space-5);
+  vertical-align: -0.08em;
+}
+.info-tree-tab-token {
+  inline-size: 100%;
+  max-width: 100%;
+  vertical-align: middle;
+}
+button.info-tree-tab-token.active:hover,
+button.info-tree-tab-token.active:focus-visible {
+  color: var(--pane-tab-active-text);
+  background: var(--pane-tab-active-bg);
+  border-color: var(--pane-tab-active-border);
+}
+.info-tree-group-label-action,
+.info-tree-action-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+.info-tree-group-label-action:hover,
+.info-tree-group-label-action:focus-visible {
+  outline: 0;
+}
+.info-tree-group[data-info-dimension] > summary .info-tree-group-label-action:hover,
+.info-tree-group[data-info-dimension] > summary .info-tree-group-label-action:focus-visible {
+  color: var(--info-tree-dimension-hover);
+}
+.info-tree-group-child-count {
+  margin-inline-start: var(--space-6);
+  color: var(--muted);
+  font: 700 var(--ui-font-size-xs)/1.2 var(--mono-font);
+  white-space: nowrap;
+}
+.info-tree-group[data-info-dimension="path"] > summary .info-tree-group-child-count {
+  margin-inline-start: 0;
+}
+.info-tree-group[data-info-dimension="path"] > summary .info-tree-meta-path-activity,
+.info-tree-field-path .info-tree-meta-path-activity {
+  flex: 0 0 auto;
+  margin-inline-start: auto;
+  text-align: end;
+}
+.info-tree-group[data-info-dimension="path"] > summary .info-tree-group-label-line,
+.info-tree-group[data-info-dimension="branch"] > summary .info-tree-group-label-line,
+.info-tree-group[data-info-dimension="pr"] > summary .info-tree-group-label-line,
+.info-tree-group[data-info-dimension="linear"] > summary .info-tree-group-label-line,
+.info-tree-group[data-info-dimension="path"] > summary .info-tree-group-label,
+.info-tree-group[data-info-dimension="branch"] > summary .info-tree-group-label,
+.info-tree-group[data-info-dimension="pr"] > summary .info-tree-group-label,
+.info-tree-group[data-info-dimension="linear"] > summary .info-tree-group-label {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.info-tree-group-children {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--info-tree-children-gap);
+  margin-block-start: var(--space-2);
+  margin-inline-start: 18px;
+  padding-inline-start: 14px;
+}
+.info-tree-group-children > .info-tree-item {
+  position: relative;
+}
+.info-tree-group-children > .info-tree-item::before {
+  content: "";
+  position: absolute;
+  z-index: var(--z-layer-raised);
+  inset-block-start: var(--info-tree-record-connector-y);
+  inset-inline-start: var(--info-tree-connector-arm-start);
+  width: var(--info-tree-connector-arm-width);
+  height: var(--info-tree-connector-line-width);
+  background: var(--info-tree-line);
+}
+.info-tree-group-children > .info-tree-group.info-tree-item::before {
+  content: none;
+}
+.info-tree-group-children > .info-tree-item::after {
+  content: "";
+  position: absolute;
+  z-index: var(--z-layer-background);
+  inset-block-start: calc((var(--info-tree-children-gap) / -2) - var(--info-tree-connector-line-width));
+  inset-block-end: calc((var(--info-tree-children-gap) / -2) - var(--info-tree-connector-line-width));
+  inset-inline-start: var(--info-tree-connector-x);
+  width: var(--info-tree-connector-line-width);
+  background: var(--info-tree-line);
+}
+.info-tree-group-children > .info-tree-item-last::after {
+  inset-block-end: auto;
+  height: calc(var(--info-tree-record-connector-y) + (var(--info-tree-connector-line-width) * 2) + (var(--info-tree-children-gap) / 2));
+}
+.info-tree-group-children > .info-tree-group.info-tree-item-last::after {
+  height: calc(var(--info-tree-summary-connector-y) + (var(--info-tree-connector-line-width) * 2) + (var(--info-tree-children-gap) / 2));
+}
+.info-tree-record {
+  --info-tree-field-label-width: 18ch;
+  container: info-tree-record / inline-size;
+  display: block;
+  gap: var(--space-6);
+  padding: var(--space-2) var(--space-4) var(--space-3);
+  color: var(--pane-tab-text);
+  background: transparent;
+  border: 1px solid var(--info-tree-record-border);
+  border-radius: var(--radius-lg);
+  box-shadow: none;
+  font: var(--ui-font-size-sm)/1.35 var(--mono-font);
+}
+.info-tree-group-children > .info-tree-record {
+  border-radius: 0;
+}
+.info-tree-group-children > .info-tree-record:not(.info-tree-item-first) {
+  border-block-start-width: 0;
+}
+.info-tree-group-children > .info-tree-record.info-tree-item-first {
+  border-start-start-radius: var(--radius-lg);
+  border-start-end-radius: var(--radius-lg);
+}
+.info-tree-group-children > .info-tree-record.info-tree-item-last {
+  border-end-start-radius: var(--radius-lg);
+  border-end-end-radius: var(--radius-lg);
+}
+.info-tree-record-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-3);
+  padding-inline-start: var(--space-10);
+}
+.info-tree-field {
+  min-width: 0;
+  max-width: 100%;
+  width: 100%;
+  display: grid;
+  grid-template-columns: var(--info-tree-field-label-width) minmax(0, 1fr);
+  align-items: start;
+  column-gap: var(--space-8);
+}
+.info-tree-field,
+.info-tree-field-value,
+.info-tree-value-text,
+.info-tree-field-pr a,
+.info-tree-field-linear a,
+.info-tree-action-link {
+  min-width: 0;
+  max-width: 100%;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.info-tree-field-label {
+  justify-self: start;
+  color: var(--muted);
+  font: 700 var(--ui-font-size-xs)/1.35 var(--mono-font);
+  text-align: left;
+  white-space: nowrap;
+}
+.info-tree-field-value {
+  color: var(--text);
+}
+.info-tree-field-branch .info-tree-field-value,
+.info-tree-field-path .info-tree-field-value,
+.info-tree-field-ai .info-tree-field-value {
+  min-width: 0;
+}
+.info-tree-path-observations {
+  width: 100%;
+  margin-block-start: var(--space-2);
+  color: var(--muted);
+  font: var(--ui-font-size-xs)/1.35 var(--mono-font);
+}
+.info-tree-path-observations > summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--info-tree-dimension-hover);
+}
+.info-tree-path-observations ul {
+  display: grid;
+  gap: var(--space-1);
+  margin: var(--space-2) 0 0;
+  padding-inline-start: var(--space-12);
+}
+.info-tree-path-observations code {
+  color: var(--text);
+  font: inherit;
+}
+.info-tree-ai-value {
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.info-tree-ai-value.tmux-window-bar,
+.file-tree-row.tabber-row .tabber-window-token {
+  flex: 0 1 auto;
+  max-width: 100%;
+  margin-inline-start: 0;
+  justify-content: flex-start;
+  overflow: visible;
+  vertical-align: middle;
+}
+.info-tree-field-ai .info-tree-ai-value.tmux-window-bar {
+  flex: 1 1 auto;
+  width: 100%;
+}
+.info-tree-ai-window-button {
+  min-width: 0;
+}
+.info-tree-ai-value .agent-window-activity {
+  --agent-window-icon-size: 14px;
+  --agent-window-activity-inline-size: var(--agent-window-icon-size);
+  --agent-window-activity-block-size: var(--agent-window-icon-size);
+  flex: 0 0 auto;
+}
+.info-tree-field-tab {
+  --info-tree-field-color: var(--info-tree-tab-color);
+  --info-tree-field-hover: var(--info-tree-tab-color-hover);
+}
+.info-tree-field-ai {
+  --info-tree-field-color: var(--pane-tab-active-bg);
+  --info-tree-field-hover: var(--pane-tab-active-border);
+}
+.info-tree-field-path {
+  --info-tree-field-color: var(--info-tree-path-color);
+  --info-tree-field-hover: var(--info-tree-path-color-hover);
+}
+.info-tree-field-branch {
+  --info-tree-field-color: var(--info-tree-branch-color);
+}
+.info-tree-field-pr {
+  --info-tree-field-color: var(--info-tree-pr-color);
+  --info-tree-field-hover: var(--info-tree-pr-color-hover);
+}
+.info-tree-field-linear {
+  --info-tree-field-color: var(--info-tree-linear-color);
+  --info-tree-field-hover: var(--info-tree-linear-color-hover);
+}
+.info-tree-field-path .info-tree-field-label,
+.info-tree-field-path .info-tree-action-link,
+.info-tree-field-branch .info-tree-field-label,
+.info-tree-field-branch .info-tree-value-text,
+.info-tree-field-pr .info-tree-field-label,
+.info-tree-field-pr a,
+.info-tree-field-linear .info-tree-field-label,
+.info-tree-field-linear a,
+.info-tree-field-tab .info-tree-field-label,
+.info-tree-field-ai .info-tree-field-label,
+.info-tree-field-ai .info-tree-action-link {
+  color: var(--info-tree-field-color);
+}
+.info-tree-branch-state {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  margin-inline-start: var(--space-4);
+  padding: 0 var(--space-4);
+  border: 1px solid color-mix(in srgb, var(--info-tree-field-color) 58%, transparent);
+  border-radius: var(--radius-sm);
+  color: var(--info-tree-field-color);
+  font: 700 var(--ui-font-size-2xs)/1.35 var(--mono-font);
+  text-transform: lowercase;
+  white-space: nowrap;
+}
+.info-tree-branch-state-current { color: var(--good); border-color: color-mix(in srgb, var(--good) 70%, transparent); }
+.info-tree-branch-state-worked { color: var(--warning-border-strong); border-color: color-mix(in srgb, var(--warning-border-strong) 70%, transparent); }
+.info-tree-branch-state-missing { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 70%, transparent); }
+.info-tree-chip {
+  padding: var(--space-1) var(--space-6);
+  background: var(--info-tree-chip-bg);
+}
+.info-tree-chip-action {
+  font: inherit;
+  cursor: pointer;
+}
+.info-tree-chip-action:hover,
+.info-tree-chip-action:focus-visible {
+  color: var(--link-soft-hover);
+  border-color: var(--link-soft-hover);
+  outline: 0;
+}
+.info-tree-chip-tab {
+  border-color: color-mix(in srgb, var(--accent-gold) 55%, var(--line));
+}
+.info-tree-chip-ai {
+  border-color: color-mix(in srgb, var(--link-soft) 55%, var(--line));
+}
+.info-tree-field-pr a,
+.info-tree-field-linear a,
+.info-tree-action-link {
+  color: var(--info-tree-field-color, var(--link-soft));
+}
+.info-tree-field-pr a:hover,
+.info-tree-field-linear a:hover,
+.info-tree-action-link:hover,
+.info-tree-action-link:focus-visible {
+  color: var(--info-tree-field-hover, var(--link-soft-hover));
+  text-decoration: underline;
+  outline: 0;
+}
+.info-tree-field-path .info-tree-action-link:hover,
+.info-tree-field-path .info-tree-action-link:focus-visible,
+.info-tree-field-pr a:hover,
+.info-tree-field-pr a:focus-visible,
+.info-tree-field-linear a:hover,
+.info-tree-field-linear a:focus-visible,
+.info-tree-field-ai .info-tree-action-link:hover,
+.info-tree-field-ai .info-tree-action-link:focus-visible {
+  color: var(--info-tree-field-hover);
+}
+.info-tree-search-match {
+  padding: 0 var(--space-1);
+  color: var(--info-tree-search-match-text);
+  background: var(--info-tree-search-match-bg);
+  border-radius: 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.info-tree-field-branch .info-tree-meta-updated,
+.info-tree-field-ai .info-tree-trailing-meta {
+  margin-inline-start: auto;
+  text-align: end;
+}
+/* Tree depth, not only Dockview role, determines how much width a record can actually use. Let
+   each record respond to its own measured inline size so a deeply nested item in an otherwise
+   wide pane cannot squeeze branch/status text into one-character columns. */
+@container info-tree-record (max-width: 48rem) {
+  .info-tree-record-main {
+    padding-inline-start: var(--space-4);
+  }
+  .info-tree-field {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: var(--space-1);
+  }
+  .info-tree-field-label {
+    white-space: normal;
+  }
+  .info-tree-field-value {
+    width: 100%;
+  }
+  .info-tree-field-branch .info-tree-field-value,
+  .info-tree-field-path .info-tree-field-value,
+  .info-tree-field-ai .info-tree-field-value {
+    flex-wrap: wrap;
+  }
+  .info-tree-field-branch .info-tree-value-text {
+    flex: 1 1 14rem;
+  }
+  .info-tree-field-branch .info-tree-meta-updated,
+  .info-tree-field-path .info-tree-meta-path-activity,
+  .info-tree-field-ai .info-tree-trailing-meta {
+    flex: 0 0 100%;
+    margin-inline-start: 0;
+    text-align: start;
+  }
+}
+/* At toolbar widths where a flex line can strand a `>` by itself, use a stable two-column control
+   grid. The DOM order remains the grouping order, while the redundant visual separators disappear. */
+@container info-tree-toolbar (max-width: 62rem) {
+  .info-tree-group-selects {
+    flex: 1 1 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: center;
+  }
+  .info-tree-order-label {
+    grid-column: 1 / -1;
+  }
+  .info-tree-order-separator {
+    display: none;
+  }
+  .info-tree-order-select,
+  .info-tree-order-select select {
+    width: 100%;
+  }
+  .info-tree-sort-controls {
+    margin-inline-start: 0;
+    justify-content: flex-start;
+  }
+}
+/* A Vertical Side Pane deliberately trades width for a persistent edge view. Tighten tree
+   indentation here; the shared info-tree-record container rule above owns field stacking. */
+.yomux-dockview .dv-groupview[data-pane-role="side"] .info-tree-group-children {
+  margin-inline-start: var(--space-8);
+  padding-inline-start: var(--space-8);
+}
+.info-tree-trailing-meta {
+  color: var(--subwindow-recency-color);
+  font: var(--ui-font-size-2xs)/1 var(--mono-font);
+  white-space: nowrap;
+}
+.info-tree-ai-pid {
+  flex: 0 0 auto;
+  color: var(--subwindow-pid-color);
+  font: var(--ui-font-size-2xs)/1 var(--mono-font);
+  white-space: nowrap;
+}
+.info-empty {
+  padding: 14px;
+  color: var(--muted);
+  font: var(--ui-font-size-sm)/1.35 var(--mono-font);
+}
+.info-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+.info-loading-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid color-mix(in srgb, var(--muted) 28%, transparent);
+  border-top-color: var(--pane-tab-active-bg);
+  border-radius: 50%;
+}
+.info-error {
+  color: var(--bad);
+}
+.ok { color: var(--good); }
+.err { color: var(--bad); }
+.attention-alerts {
+  position: fixed;
+  /* Clear the topbar: it uses --z-topbar and occupies the top band (~--compact-control-height + padding),
+     so a top:12px / z:140 toast rendered INSIDE that band was painted over by the topbar (the Keep/x row
+     was clipped). Drop below the topbar height + a gap, and sit above it in z so it is never covered. */
+  top: calc(var(--compact-control-height) + 20px);
+  right: 12px;
+  bottom: auto;
+  left: auto;
+  z-index: var(--z-full-screen-overlay);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  width: min(360px, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
+  pointer-events: none;
+}
+.attention-alert {
+  pointer-events: auto;
+  cursor: pointer;
+}
+.server-update-banner {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: var(--z-full-screen-overlay);
+  display: flex;
+  align-items: center;
+  gap: var(--space-10);
+  box-sizing: border-box;
+  width: min(56ch, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
+  padding: var(--space-6) var(--space-8) var(--space-6) var(--space-12);
+  border: 1px solid var(--accent-gold);
+  border-radius: var(--radius-md);
+  background: var(--50-terminal-file-tree-server-update-banner-bg-86);
+  color: var(--50-terminal-file-tree-server-update-banner-fg-87);
+  box-shadow: var(--50-terminal-file-tree-server-update-banner-shadow-89);
+  font: 600 var(--ui-font-size-xs, 12px)/1.2 var(--mono-font);
+}
+.server-update-banner-msg {
+  min-width: 0;
+  flex: 1 1 24ch;
+  overflow-wrap: anywhere;
+}
+.server-update-banner-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.server-update-banner-reload {
+  cursor: pointer;
+  border: 1px solid var(--danger-strong-hover);
+  border-radius: var(--radius-control);
+  background: var(--danger-strong);
+  color: var(--paint-white);
+  font: inherit;
+  font-weight: 800;
+  padding: var(--space-2) var(--space-10);
+}
+.server-update-banner-reload:hover,
+.server-update-banner-reload:focus-visible {
+  border-color: var(--danger-strong-border);
+  background: var(--danger-strong-hover);
+  color: var(--paint-white);
+}
+.server-update-banner-dismiss {
+  cursor: pointer;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--50-terminal-file-tree-server-update-banner-dismiss-fg-90);
+  font: inherit;
+  font-weight: 800;
+  padding: var(--space-2) var(--space-8);
+}
+.server-update-banner-dismiss:hover,
+.server-update-banner-dismiss:focus-visible {
+  border-color: color-mix(in srgb, var(--pr-status-closed) 60%, transparent);
+  background: color-mix(in srgb, var(--pr-status-closed) 12%, transparent);
+}
+body.app-vw-lte-760 .server-update-banner {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-6);
+}
+/* The desktop message reserves horizontal room for actions. In a stacked banner that same
+   flex basis becomes a vertical minimum, producing an empty, screen-filling notification. */
+body.app-vw-lte-760 .server-update-banner-msg {
+  flex: 0 1 auto;
+}
+body.app-vw-lte-760 .server-update-banner-actions {
+  justify-content: flex-end;
+}
+.modal {
+  display: none;
+  z-index: var(--z-file-conflict-dialog);
+  align-items: center;
+  justify-items: center;
+  padding: var(--popover-edge-gap);
+  overflow: hidden;
+}
+.modal.open { display: grid; }
+.modal-dialog {
+  width: min(86vw, var(--popover-max-inline-size));
+  max-height: min(86vh, calc(100vh - var(--popover-edge-gap) - var(--popover-edge-gap)));
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  background: var(--50-terminal-file-tree-modal-bg-85);
+  border: var(--app-modal-border-width) solid var(--app-modal-border-color);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.modal-head {
+  padding: var(--space-9) var(--space-11);
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+#closeModal {
+  inline-size: 32px;
+  block-size: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: var(--radius-md);
+  font: 900 var(--ui-font-size-lg)/1 var(--ui-font);
+}
+#modalBody {
+  min-height: 0;
+}
+.modal pre {
+  margin: 0;
+  padding: var(--space-12);
+  overflow: auto;
+  font: var(--ui-font-size-sm)/1.35 var(--mono-font);
+}
+.modal.about-open .modal-dialog {
+  width: min(var(--dialog-compact-inline-size), 100%);
+  max-height: min(76vh, calc(100vh - var(--popover-edge-gap) - var(--popover-edge-gap)));
+  background: var(--50-terminal-file-tree-modal-bg-85);
+  box-shadow: var(--shadow-elevated);
+}
+.modal.about-open #modalBody {
+  white-space: normal;
+  overflow: auto;
+  font-family: var(--ui-font);
+}
+.about-modal {
+  display: grid;
+  gap: 18px;
+  padding: 18px;
+}
+.about-brand-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-8);
+  white-space: nowrap;
+}
+.about-brand-row [class^="about-brand-"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 46px;
+  line-height: 0.9;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+.about-brand-mark {
+  padding: var(--space-3) var(--space-6) var(--space-5);
+  color: var(--pane-tab-yolo-text);
+  background: var(--pane-tab-yolo-bg);
+  border-radius: var(--radius-control);
+  /* Keep the product mark static; status indicators own their own animation. */
+}
+.about-brand-second {
+  color: var(--brand-green);
+}
+.about-brand-m {
+  color: #3b82f6;
+}
+.about-brand-u {
+  color: var(--about-brand-red);
+}
+.about-brand-x {
+  color: var(--status-tool);
+}
+.about-version {
+  color: var(--muted);
+  font: 900 var(--ui-font-size-xl)/1 var(--mono-font);
+}
+.about-details {
+  display: grid;
+  gap: var(--space-8);
+  margin: 0;
+}
+.about-details div {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: var(--space-10);
+}
+.about-details dt {
+  color: var(--muted);
+  font-weight: 800;
+}
+.about-details dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-family: var(--mono-font);
+}
+.about-links {
+  justify-self: start;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: var(--ui-font-size-sm);
+  font-weight: 800;
+}
+.about-license {
+  justify-self: start;
+  font-size: var(--ui-font-size-xs);
+}
+.about-author {
+  justify-self: start;
+  color: var(--markdown-link);
+  text-decoration: underline;
+}
+body.app-vw-lte-1500 .topbar {
+  gap: var(--space-6);
+  padding-inline: var(--space-6);
+}
+body.app-vw-lte-1500 .brand {
+  min-width: 82px;
+}
+body.app-vw-lte-1500 .app-menu-area {
+  gap: var(--space-6);
+}
+body.app-vw-lte-1500 .app-menu-button {
+  padding-inline: var(--space-6);
+}
+body.app-vw-lte-1500 .actions {
+  gap: var(--space-4);
+}
+
+body.app-vw-lte-1280 .app-menu-area {
+  justify-content: flex-start;
+}
+body.app-vw-lte-1280 .app-menu-button {
+  padding-inline: var(--space-5);
+}
+body.app-vw-lte-1280 .latency-meter {
+  min-width: 62px;
+  grid-template-columns: 34px auto;
+  gap: var(--space-4);
+  padding-inline: var(--space-4);
+}
+body.app-vw-lte-1280 .latency-graph {
+  width: 32px;
+}
+body.app-vw-lte-1280 .latency-number {
+  min-width: 28px;
+}
+
+body.app-vw-lte-1080 .brand {
+  min-width: 72px;
+}
+body.app-vw-lte-1080 .title {
+  font-size: var(--ui-font-size);
+}
+body.app-vw-lte-1080 .app-menu-area {
+  gap: var(--space-4);
+}
+body.app-vw-lte-1080 .app-menu-button {
+  padding-inline: var(--space-4);
+}
+body.app-vw-lte-1080 .session-yolo-marker {
+  min-width: 18px;
+  padding-inline: 0;
+}
+body.app-vw-lte-1080 .latency-graph {
+  display: none;
+}
+body.app-vw-lte-1080 .latency-meter {
+  min-width: 42px;
+  grid-template-columns: auto;
+}
+body.app-vw-lte-1080 .actions button:not(.topbar-activity--mobile-count-balls) {
+  width: var(--compact-icon-button-size);
+  min-width: var(--compact-icon-button-size);
+  max-width: var(--compact-icon-button-size);
+  padding-inline: 0;
+  font-size: 0;
+}
+body.app-vw-lte-1080 #status {
+  max-width: 72px;
+}
+
+body.app-vw-lte-980 .topbar {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+}
+body.app-vw-lte-980 .actions { flex-wrap: nowrap; }
+body.app-vw-lte-980 .panel-head {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+body.app-vw-lte-980 .pane-tabs {
+  max-width: 100%;
+}
+body.app-vw-lte-980 .tabs {
+  justify-self: stretch;
+}
+
+/* File Explorer overlay panel (Phase 2 of the file-browser feature).
+   Tall left-edge panel; the editor pane will sit to its right in Phase 3. */
+.file-explorer {
+  position: fixed;
+  top: var(--topbar-height);
+  bottom: 0;
+  left: 0;
+  width: var(--file-explorer-tree-inline-size);
+  z-index: var(--z-file-tree-drag);
+  display: flex;
+  flex-direction: row;
+  background: var(--panel);
+  border-inline-end: 1px solid var(--line);
+  box-shadow: 4px 0 18px var(--paint-shadow-35);
+  overflow: hidden;
+  font-family: var(--ui-font);
+  font-size: var(--file-explorer-font-size);
+  color: var(--text);
+}
+.file-explorer[hidden] {
+  display: none;
+}
+.file-explorer-head {
+  padding: var(--space-4) var(--space-8);
+  background: var(--pane-bar-bg, var(--panel2));
+  border-bottom: 1px solid var(--line);
+  min-height: 26px;
+}
+.file-explorer-path,
+.file-explorer-path-inline {
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-xs);
+  background: var(--50-terminal-file-tree-file-explorer-path-bg-95);
+  direction: ltr;
+  text-align: start;
+  outline: 0;
+}
+.file-explorer-path {
+  flex-grow: 1;
+  flex-shrink: 0;
+  flex-basis: min(34ch, 100%);
+  min-width: min(32ch, 100%);
+  height: 22px;
+  padding: var(--space-2) var(--space-6);
+
+
+  border-color: var(--50-terminal-file-tree-file-explorer-path-border-96);
+}
+.file-explorer-path:focus,
+.file-explorer-path-inline:focus {
+  color: var(--text);
+  background: var(--50-terminal-file-tree-file-explorer-path-bg-98);
+  border-color: var(--active-control-border);
+  box-shadow: var(--active-control-focus-shadow);
+}
+.file-explorer-path.invalid,
+.file-explorer-path-inline.invalid {
+  color: var(--50-terminal-file-tree-file-explorer-path-fg-99);
+  border-color: var(--bad);
+  box-shadow: 0 0 0 2px rgba(255, 102, 115, 0.14);
+}
+.file-explorer-close,
+.file-editor-close,
+.file-explorer-panel-close,
+.file-editor-panel-close {
+  flex: 0 0 var(--panel-close-size);
+  min-width: var(--panel-close-size);
+  max-width: var(--panel-close-size);
+  width: var(--panel-close-size);
+  height: var(--panel-close-size);
+  position: relative;
+  padding: 0;
+  border: 0;
+  border-radius: var(--panel-close-radius);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.file-explorer-close,
+.file-editor-close {
+  --panel-close-glyph-width: 10px;
+  --panel-close-glyph-height: 1.4px;
+}
+.file-editor-close,
+.file-editor-panel-close {
+  --panel-close-glyph-width: 7px;
+  --panel-close-glyph-height: 1.3px;
+}
+.file-editor-close.pc-window-control,
+.file-editor-panel-close.pc-window-control {
+  flex-basis: 20px;
+  min-width: 20px;
+  max-width: 20px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+}
+.file-editor-panel-close {
+  --panel-close-size: 20px;
+}
+.file-explorer-close:hover,
+.file-explorer-close:focus-visible,
+.file-editor-close:hover,
+.file-editor-close:focus-visible,
+.file-explorer-panel-close:hover,
+.file-explorer-panel-close:focus-visible,
+.file-editor-panel-close:hover,
+.file-editor-panel-close:focus-visible {
+  color: var(--paint-white);
+  background: var(--panel-close-hover-bg);
+}
+.file-explorer-close::before,
+.file-editor-close::before,
+.file-explorer-panel-close::before,
+.file-editor-panel-close::before {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+.file-explorer-close::after,
+.file-editor-close::after,
+.file-explorer-panel-close::after,
+.file-editor-panel-close::after {
+  transform: translate(-50%, -50%) rotate(-45deg);
+}
+.file-explorer-tree {
+  flex: 1;
+  overflow: auto;
+  padding: var(--space-4) 0;
+}
+.file-tree-row {
+  --file-tree-row-control-size: calc(var(--file-explorer-font-size) + 2px);
+  --file-tree-icon-size: calc(var(--file-explorer-font-size) + 2px);
+  --file-tree-icon-font-size: max(6px, calc(var(--file-explorer-font-size) - 1px));
+  --file-tree-date-column-width: 16ch;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  inline-size: 100%;
+  max-inline-size: 100%;
+  min-inline-size: 0;
+  padding: var(--space-2) var(--space-8);
+  font-size: var(--file-explorer-font-size);
+  line-height: 1.4;
+  cursor: pointer;
+  /* A tap should activate the row without the browser waiting to classify it as a double tap.
+     manipulation keeps native vertical scrolling available while removing the touch ambiguity
+     caused by the draggable Finder row. */
+  touch-action: manipulation;
+  white-space: nowrap;
+  user-select: none;
+}
+.file-tree-row.compact {
+  line-height: 1.05;
+  gap: var(--space-5);
+}
+.file-tree-row:not(.selected):hover {
+  background: var(--file-hover-bg);
+  box-shadow: inset 4px 0 0 var(--file-hover-border), inset 0 0 0 1px var(--file-hover-outline);
+}
+.file-tree-status-row {
+  color: var(--muted);
+  cursor: default;
+}
+.file-tree-status-row:not(.selected):hover {
+  background: transparent;
+  box-shadow: none;
+}
+.file-tree-row.current-directory:not(.selected) {
+  color: var(--text);
+  background: var(--active-control-soft-bg);
+  box-shadow: inset 3px 0 0 var(--active-control-border);
+}
+.file-tree-row.renaming {
+  background: var(--success-soft-bg);
+}
+.file-tree-row.new-entry:not(.selected) {
+  color: var(--50-terminal-file-tree-file-tree-row-fg-100);
+  background: var(--50-terminal-file-tree-file-tree-row-bg-101);
+  box-shadow: inset 3px 0 0 var(--accent-gold);
+}
+.file-tree-row.git-modified:not(.selected) .file-tree-name {
+  color: var(--50-terminal-file-tree-file-tree-row-fg-102);
+}
+.file-tree-row.git-modified:not(.selected) .file-tree-git-status:not([hidden]) {
+  background: var(--git-modified-badge);
+}
+.file-tree-row.git-untracked:not(.selected) .file-tree-name {
+  color: var(--50-terminal-file-tree-file-tree-row-fg-103);
+}
+.file-tree-row.git-untracked:not(.selected) .file-tree-git-status:not([hidden]) {
+  background: var(--git-untracked-badge);
+}
+.file-tree-row.git-deleted:not(.selected) .file-tree-name {
+  color: var(--50-terminal-file-tree-file-tree-row-fg-104);
+  text-decoration: line-through;
+}
+.file-tree-row.git-deleted:not(.selected) .file-tree-git-status:not([hidden]) {
+  background: var(--git-deleted-badge);
+}
+.file-tree-row.git-staged:not(.selected) .file-tree-name {
+  color: var(--50-terminal-file-tree-file-tree-row-fg-105);
+  font-weight: 700;
+}
+.file-tree-row.git-staged:not(.selected) .file-tree-git-status:not([hidden]) {
+  background: var(--git-staged-badge);
+}
+.file-tree-row.git-transcript:not(.selected) .file-tree-name {
+  color: var(--git-transcript);
+}
+.file-tree-row.git-transcript:not(.selected) .file-tree-git-status:not([hidden]) {
+  background: var(--git-transcript-badge);
+}
+.file-tree-row.kind-dir {
+  color: var(--text);
+  font-weight: 500;
+}
+.file-tree-row.kind-file {
+  color: var(--muted);
+}
+.file-tree-row.kind-dir .file-tree-name {
+  color: var(--text);
+}
+.file-tree-row.kind-file .file-tree-name {
+  color: var(--muted);
+}
+.file-tree-row.selected,
+.file-tree-row.current-file:not(.selected) {
+  color: var(--file-selection-text);
+  background: var(--file-selection-bg);
+  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--file-selection-outline);
+}
+.file-tree-row.selected .file-tree-name,
+.file-tree-row.current-file:not(.selected) .file-tree-name {
+  color: currentColor;
+}
+.file-tree-row.is-repo .file-tree-name {
+  color: var(--accent-gold);
+  font-weight: 400;
+}
+.file-tree-row.repo-non-main:not(.selected) .file-tree-name {
+  color: var(--50-terminal-file-tree-file-tree-row-fg-91);
+  text-decoration: underline;
+  text-decoration-color: var(--50-terminal-file-tree-file-tree-row-text-decoration-color-92);
+  text-underline-offset: 2px;
+}
+.file-tree-repo-meta {
+  color: var(--muted);
+  font-size: var(--ui-font-size-2xs);
+  line-height: 1.1;
+  letter-spacing: -0.2px;
+}
+.file-tree-repo-branch {
+  font-family: var(--mono-font);
+  color: var(--text);
+  font-weight: 400;
+}
+.file-tree-repo-delta {
+  font-family: var(--mono-font);
+  color: var(--accent-gold);
+  font-weight: 400;
+}
+/* Git-aware Finder: compact ahead/behind/dirty markers in the repo-dir inline annotation. */
+.file-tree-repo-ahead {
+  font-family: var(--mono-font);
+  color: #6fce8a;
+}
+.file-tree-repo-behind {
+  font-family: var(--mono-font);
+  color: #e8b04b;
+}
+.file-tree-repo-dirty {
+  font-family: var(--mono-font);
+  color: var(--accent-gold);
+}
+/* Rich hover popover for a repo dir (replaces the native title tooltip). */
+.file-tree-repo-popover {
+  position: fixed;
+  z-index: var(--z-rename-input);
+  inline-size: max-content;
+  max-inline-size: min(72ch, var(--popover-max-inline-size));
+  padding: var(--space-6) var(--space-9);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel2);
+  box-shadow: 0 6px 20px var(--paint-shadow-35);
+  font-size: var(--ui-font-size-2xs);
+  pointer-events: none;
+}
+.file-tree-repo-popover[hidden] {
+  display: none;
+}
+.file-tree-repo-popover-title {
+  font-weight: 700;
+  color: var(--text);
+}
+.file-tree-repo-popover-branch {
+  font-family: var(--mono-font);
+  color: var(--text);
+}
+.file-tree-repo-popover-sha {
+  font-family: var(--mono-font);
+  color: var(--muted);
+  word-break: break-all;
+}
+.file-tree-repo-popover-stat {
+  color: var(--muted);
+}
+.file-tree-repo-popover-path {
+  margin-top: var(--space-3);
+  color: var(--muted);
+  font-family: var(--mono-font);
+  word-break: break-all;
+}
+.file-tree-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 var(--file-tree-icon-size);
+  width: var(--file-tree-icon-size);
+  height: var(--file-tree-icon-size);
+  text-align: center;
+  font-size: var(--file-tree-icon-font-size);
+  line-height: 1;
+  border-radius: var(--radius-sm);
+}
+.file-tree-icon.ui-disclosure-triangle {
+  inline-size: var(--file-tree-icon-size);
+  block-size: var(--file-tree-icon-size);
+  flex: 0 0 var(--file-tree-icon-size);
+  width: var(--file-tree-icon-size);
+  height: var(--file-tree-icon-size);
+  font-size: var(--disclosure-triangle-font-size);
+}
+/* symlinks keep their target-type icon (dir icon for a linked dir, code icon for a linked .py)
+   and get a small arrow badge overlaid — macOS-Finder / Popular IDE style. Broken links go red + struck. */
+.file-tree-row.is-symlink > .file-tree-icon {
+  position: relative;
+}
+.file-tree-row.is-symlink > .file-tree-icon::after {
+  content: "↪";
+  position: absolute;
+  right: -2px;
+  bottom: -3px;
+  font-size: var(--ui-font-size-2xs);
+  line-height: 1;
+  color: var(--muted);
+}
+.file-tree-row.symlink-broken > .file-tree-icon::after {
+  color: var(--bad);
+}
+.file-tree-row.symlink-broken:not(.selected) > .file-tree-name {
+  color: var(--bad);
+  text-decoration: line-through;
+}
+/* the inline "→ target" reads as secondary to the name; broken links tint it red too. */
+.file-tree-symlink-target {
+  color: var(--muted);
+}
+.file-tree-row.symlink-broken:not(.selected) > .file-tree-name .file-tree-symlink-target {
+  color: var(--bad);
+}
+.file-tree-icon.file-icon-code {
+  color: var(--icon-code);
+}
+.file-tree-icon.file-icon-doc {
+  color: var(--icon-doc);
+}
+.file-tree-icon.file-icon-config {
+  color: var(--pr-status-merged);
+}
+.file-tree-icon.file-icon-image {
+  color: var(--icon-image);
+}
+.file-tree-icon.file-icon-archive {
+  color: var(--icon-archive);
+}
+.file-tree-icon.file-icon-generic {
+  color: var(--git-transcript-badge);
+}
+.file-tree-row.kind-dir > .file-tree-icon {
+  font-size: 1em;
+  font-weight: 800;
+  line-height: 1;
+  color: var(--disclosure-triangle-collapsed-color);
+}
+.file-tree-row.kind-dir > .file-tree-icon.ui-disclosure-triangle {
+  font-size: var(--disclosure-triangle-font-size);
+}
+.file-tree-row.kind-dir.expanded > .file-tree-icon,
+.file-tree-row.kind-dir[aria-expanded="true"] > .file-tree-icon {
+  color: var(--disclosure-triangle-expanded-color);
+}
+.file-tree-row.kind-dir.loading-children > .file-tree-icon {
+  position: relative;
+  color: var(--50-terminal-file-tree-file-tree-row-fg-109);
+}
+.file-tree-row.kind-dir.loading-children > .file-tree-icon::before {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  border: 1px solid currentColor;
+  border-top-color: transparent;
+  border-radius: var(--radius-pill);
+  opacity: 0.9;
+}
+.file-tree-row.indexed-directory:not(.selected) .file-tree-name {
+  font-weight: 700;
+
+
+  color: var(--50-terminal-file-tree-file-tree-row-fg-110);
+}
+.file-tree-row.indexed-directory > .file-tree-git-status,
+.file-tree-row.index-excluded-entry > .file-tree-git-status {
+  flex-basis: auto;
+  min-width: 0;
+  padding-inline: var(--space-4);
+}
+.file-tree-row:is(.indexed-directory, .index-excluded-entry).selected > .file-tree-git-status {
+  color: var(--file-selection-badge-text);
+}
+.file-tree-row.indexed-directory:not(.selected) .file-tree-git-status {
+  color: var(--50-terminal-file-tree-file-tree-row-fg-94);
+  letter-spacing: 0;
+  text-transform: none;
+}
+.file-tree-row.index-excluded-entry:not(.selected) .file-tree-git-status {
+  color: var(--muted);
+  font-style: italic;
+  letter-spacing: 0;
+  text-transform: none;
+}
+/* A directory under an indexed ancestor stays visually quiet; only the indexed root carries the badge. */
+.file-tree-row.indexed-descendant-directory:not(.selected) .file-tree-git-status {
+  color: var(--muted);
+  font-style: italic;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed {
+  position: relative;
+  color: var(--50-terminal-file-tree-file-tree-row-fg-111);
+  text-shadow: var(--50-terminal-file-tree-file-tree-row-text-shadow-112);
+}
+.file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent-gold);
+  box-shadow: var(--50-terminal-file-tree-file-tree-row-shadow-113);
+}
+.file-tree-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-inline-size: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: currentColor;
+}
+.file-tree-row.has-agent .file-tree-name {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.file-tree-dir-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-2xs);
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+}
+.file-tree-diff {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-4);
+  flex: 0 0 auto;
+  min-width: 6.5ch;
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-2xs);
+  font-weight: 800;
+  line-height: 1;
+}
+.file-tree-row:has(> .file-tree-diff:not([hidden])) > .file-tree-diff,
+.file-tree-row:not(:has(> .file-tree-diff:not([hidden]))):has(> .file-tree-dir-count:not([hidden])) > .file-tree-dir-count,
+.file-tree-row:not(:has(> .file-tree-diff:not([hidden]))):not(:has(> .file-tree-dir-count:not([hidden]))):has(> .file-tree-git-status:not([hidden])) > .file-tree-git-status,
+.file-tree-row:not(:has(> .file-tree-diff:not([hidden]))):not(:has(> .file-tree-dir-count:not([hidden]))):not(:has(> .file-tree-git-status:not([hidden]))):has(> .file-tree-date:not([hidden])) > .file-tree-date {
+  margin-inline-start: auto;
+}
+.file-tree-agent .agent-icon {
+  width: calc(var(--file-explorer-font-size) + 3px);
+  min-width: calc(var(--file-explorer-font-size) + 3px);
+  height: calc(var(--file-explorer-font-size) + 1px);
+  margin: 0;
+  padding: 0;
+  vertical-align: 0;
+}
+.file-tree-agent .agent-icon svg {
+  flex-basis: calc(var(--file-explorer-font-size) + 1px);
+  width: calc(var(--file-explorer-font-size) + 1px);
+  height: calc(var(--file-explorer-font-size) + 1px);
+}
+.file-tree-git-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  box-sizing: border-box;
+  flex: 0 0 var(--file-tree-row-control-size);
+  min-width: var(--file-tree-row-control-size);
+  height: var(--file-tree-row-control-size);
+  padding: 0;
+  border-radius: var(--radius-sm);
+  color: var(--file-selection-badge-text);
+  font-family: var(--mono-font);
+  font-size: max(6px, calc(var(--file-explorer-font-size) - 2px));
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+  overflow: hidden;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+.file-tree-git-status.file-tree-git-status-unknown {
+  border: 1px solid rgba(226, 232, 240, 0.16);
+  background: var(--50-terminal-file-tree-file-tree-git-status-bg-107);
+  color: var(--50-terminal-file-tree-file-tree-git-status-fg-108);
+
+
+  border-color: var(--50-terminal-file-tree-file-tree-git-status-border-106);
+}
+.file-tree-date {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  align-self: center;
+  box-sizing: border-box;
+  flex: 0 0 var(--file-tree-date-column-width);
+  inline-size: var(--file-tree-date-column-width);
+  min-height: var(--file-tree-row-control-size);
+  padding-inline-start: var(--space-4);
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--muted);
+  font-family: var(--mono-font);
+  font-size: max(var(--ui-font-size-2xs), calc(var(--file-explorer-font-size) - 1px));
+  line-height: 1;
+  font-stretch: condensed;
+  letter-spacing: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-tree-row:not(.selected):not(.current-file)[data-recency] > .file-tree-date {
+  color: var(--file-tree-recency-date-color, var(--muted));
+}
+.file-tree-row:not(.selected):not(.current-file).file-tree-recency-just-updated > .file-tree-date,
+.file-tree-row:not(.selected):not(.current-file).file-tree-recency-hot > .file-tree-date,
+.file-tree-row:not(.selected):not(.current-file).file-tree-recency-fresh > .file-tree-date {
+  font-weight: 800;
+}
+.file-tree-row:not(.selected):not(.current-file).file-tree-recency-recent > .file-tree-date {
+  font-weight: 700;
+}
+.file-tree-dir-count[hidden],
+.file-tree-agent[hidden],
+.file-tree-diff[hidden],
+.file-tree-git-status[hidden],
+.file-tree-date[hidden] {
+  display: none;
+}
+.file-tree-children {
+  position: relative;
+  display: block;
+}
+.file-tree-children::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(15px + (var(--tree-depth, 1) - 1) * 14px);
+  border-inline-start: 1px solid var(--tree-indent-line);
+  pointer-events: none;
+
+
+  border-left-color: var(--50-terminal-file-tree-file-tree-children-border-left-114);
+}
+/* File Explorer contains a tree column (left) and an editor column that grows when a file is opened. */
+.file-explorer-tree-col {
+  display: flex;
+  flex-direction: column;
+  width: var(--file-explorer-tree-inline-size);
+  flex: 0 0 var(--file-explorer-tree-inline-size);
+  height: 100%;
+  border-inline-end: 1px solid var(--line);
+  background: var(--panel);
+  overflow: hidden;
+}
+.file-explorer-hidden-toggle,
+.file-explorer-root-mode-toggle,
+.file-explorer-header-action,
+.file-explorer-sort-select {
+  height: 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  color: var(--muted);
+  background: transparent;
+  font: 700 var(--ui-font-size-2xs)/1 var(--mono-font);
+}
+.file-explorer-hidden-toggle,
+.file-explorer-root-mode-toggle,
+.file-explorer-header-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  flex: 0 0 30px;
+  padding: 0 var(--space-4);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.file-explorer-root-mode-toggle {
+  width: auto;
+  min-width: 38px;
+  flex: 0 0 auto;
+}
+.file-explorer-header-action {
+  width: 20px;
+  flex-basis: 20px;
+  padding: 0;
+  line-height: 1;
+}
+.file-explorer-header-action.file-explorer-date-toggle:not(.file-tree-expand-collapse-all) {
+  width: auto;
+  min-width: 42px;
+  flex-basis: auto;
+  padding: 0 var(--space-5);
+}
+.file-explorer-sort-select {
+  width: 50px;
+  flex: 0 0 50px;
+  padding: 0 var(--space-2);
+}
+.file-explorer-date-toggle[data-date-mode="none"] {
+  text-decoration-line: line-through;
+  text-decoration-thickness: 2px;
+  text-decoration-color: currentColor;
+}
+.file-editor {
+  display: flex;
+  flex-direction: column;
+  width: var(--file-explorer-editor-inline-size);
+  flex: 0 0 var(--file-explorer-editor-inline-size);
+  height: 100%;
+  background: var(--panel2);
+  border-inline-end: 1px solid var(--line);
+  overflow: hidden;
+}
+.file-editor[hidden] {
+  display: none;
+}
+.file-editor-head {
+  padding: var(--space-4) var(--space-8);
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  min-height: 26px;
+}
+
+/* DOIT.57: the transient drop-suggestion overlay (1..9 actions when a file is dropped on a
+   terminal). Non-modal, auto-dismisses; the terminal keeps focus. */
+.terminal-drop-suggestions {
+  position: fixed;
+  z-index: var(--z-drop-suggestions);
+  inline-size: min(64ch, var(--popover-max-inline-size));
+  min-inline-size: min(28ch, var(--popover-max-inline-size));
+  max-inline-size: var(--popover-max-inline-size);
+  padding: var(--space-6);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-popover);
+  font: var(--ui-font-size) var(--ui-font);
+}
+.terminal-drop-suggestions-head {
+  padding: var(--space-4) var(--space-8) var(--space-6);
+  color: var(--muted);
+  font-size: var(--ui-font-size-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.terminal-drop-suggestion {
+  display: flex;
+  align-items: center;
+  gap: var(--space-10);
+  padding: var(--space-5) var(--space-8);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.terminal-drop-suggestion:hover {
+  background: var(--active-control-soft-bg);
+}
+/* The number you press to pick this row, drawn as a keycap so the keyboard shortcut is obvious. */
+.terminal-drop-suggestion-combo {
+  flex: none;
+  min-width: 22px;
+  text-align: center;
+  padding: var(--space-1) var(--space-6);
+  border: 1px solid var(--active-accent-text);
+  border-radius: var(--radius-sm);
+  background: var(--active-accent-bright);
+  color: var(--active-accent-text);
+  font: var(--ui-font-size-sm) var(--mono-font);
+  box-shadow: 0 1px 0 var(--active-accent-text);
+}
+
+/* Theme-token consumers without a pre-existing local owner. */
+.yoagent-message {
+
+  --yoagent-detail-text: var(--50-terminal-file-tree-yoagent-message-yoagent-detail-text-14);
+  color: var(--50-terminal-file-tree-yoagent-message-fg-15);
+  background: var(--50-terminal-file-tree-yoagent-message-bg-16);
+  border-color: var(--line);
+}
+.yoagent-message.assistant {
+
+  background: var(--50-terminal-file-tree-yoagent-message-bg-17);
+}
+.conversation-message-body.markdown-body {
+
+  color: var(--50-terminal-file-tree-conversation-message-body-fg-21);
+}
+.conversation-message-body.markdown-body * {
+
+  color: var(--50-terminal-file-tree-conversation-message-body-fg-22);
+}
+:is(.yoagent-section-title, .yoagent-compact-action) {
+
+  color: var(--50-terminal-file-tree-yoagent-section-title-fg-42);
+}
+.yoagent-chat-form {
+
+  background: var(--50-terminal-file-tree-yoagent-chat-form-bg-50);
+  border-color: var(--50-terminal-file-tree-yoagent-chat-form-border-51);
+}
+.yoagent-chat-input {
+
+  color: var(--50-terminal-file-tree-yoagent-chat-input-fg-52);
+}
+.yoagent-chat-input::placeholder {
+
+  color: var(--50-terminal-file-tree-yoagent-chat-input-fg-53);
+}
+.yoagent-chat .markdown-body pre {
+
+  color: var(--50-terminal-file-tree-yoagent-chat-fg-61);
+  border-color: var(--50-terminal-file-tree-yoagent-chat-border-63);
+}
+.yoagent-global .markdown-body pre {
+
+  color: var(--50-terminal-file-tree-yoagent-global-fg-64);
+  border-color: var(--50-terminal-file-tree-yoagent-global-border-65);
+}
+.yoagent-chat .markdown-body strong {
+
+  color: var(--50-terminal-file-tree-yoagent-chat-fg-66);
+}
+.yoagent-global .markdown-body strong {
+
+  color: var(--50-terminal-file-tree-yoagent-global-fg-67);
+}
+.yoagent-chat .markdown-body em {
+
+  color: var(--50-terminal-file-tree-yoagent-chat-fg-68);
+}
+.yoagent-global .markdown-body em {
+
+  color: var(--50-terminal-file-tree-yoagent-global-fg-69);
+}
+.yoagent-chat .markdown-body :not(pre) > code {
+
+  color: var(--50-terminal-file-tree-yoagent-chat-fg-70);
+  background: var(--50-terminal-file-tree-yoagent-chat-bg-71);
+  border-color: var(--50-terminal-file-tree-yoagent-chat-border-72);
+}
+.yoagent-global .markdown-body :not(pre) > code {
+
+  color: var(--50-terminal-file-tree-yoagent-global-fg-73);
+  background: var(--50-terminal-file-tree-yoagent-global-bg-74);
+  border-color: var(--50-terminal-file-tree-yoagent-global-border-75);
+}
+.yoagent-chat .markdown-body pre code {
+
+  color: var(--50-terminal-file-tree-yoagent-chat-fg-76);
+}
+.yoagent-global .markdown-body pre code {
+
+  color: var(--50-terminal-file-tree-yoagent-global-fg-77);
+}
+.info-tree-tab-token:not(.active) {
+
+  color: var(--50-terminal-file-tree-info-tree-tab-token-fg-82);
+}
+body .file-explorer-path-inline {
+
+  border-color: var(--50-terminal-file-tree-file-explorer-path-inline-border-97);
+}

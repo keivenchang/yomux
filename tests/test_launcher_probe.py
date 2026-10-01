@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 
 from tools import launcher_probe
+from yomux_lib.auth import AuthUser
 
 
 def test_probe_sessions_accepts_every_expected_session(monkeypatch, capsys):
@@ -29,3 +30,11 @@ def test_probe_sessions_reports_missing_session(monkeypatch, capsys):
 
     assert launcher_probe._probe_sessions(args) == 1
     assert "incomplete" in capsys.readouterr().err
+
+
+def test_row_cookie_header_uses_the_new_same_port_cookie(monkeypatch):
+    user = AuthUser(username="admin", password="secret", role="admin")
+    monkeypatch.setattr(launcher_probe, "current_auth_users", lambda: [user])
+    monkeypatch.setattr(launcher_probe, "auth_cookie_value", lambda username, password: "opaque")
+
+    assert launcher_probe._row_cookie_header(7220) == {"Cookie": "yomux_auth_7220=opaque"}

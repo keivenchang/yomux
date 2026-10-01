@@ -10,9 +10,9 @@ from http import HTTPStatus
 
 import pytest
 
-from yolomux_lib import common
-from yolomux_lib.app import ATTENTION_ACK_KEY_MAX_LENGTH
-from yolomux_lib.app import ATTENTION_ACK_TTL_SECONDS
+from yomux_lib import common
+from yomux_lib.app import ATTENTION_ACK_KEY_MAX_LENGTH
+from yomux_lib.app import ATTENTION_ACK_TTL_SECONDS
 
 
 @pytest.fixture

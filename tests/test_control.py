@@ -2,8 +2,8 @@ import json
 import os
 import time
 
-from yolomux_lib import control
-from yolomux_lib.local_services import rpc
+from yomux_lib import control
+from yomux_lib.local_services import rpc
 
 
 class FakeConnection:

@@ -9,7 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/keivenchang/yolomux/internal/fakellm"
+	"github.com/keivenchang/yomux/internal/fakellm"
 )
 
 func main() {

@@ -9,7 +9,7 @@ from tests.browser_helpers.browser_layout import fast_pointer_actions
 from tests.browser_helpers.browser_layout import load_live_runtime_boot_fixture
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import run_when_browser_ready
-from yolomux_lib import app as app_module
+from yomux_lib import app as app_module
 
 
 SYSTEM_STATUS_SERVICE_IDS = ("indexd", "statsd", "batchd", "statusd", "watchd", "approvald")
@@ -1077,7 +1077,7 @@ def test_roster_fits_desktop_laptop_and_phone_widths_without_hiding_a_value(brow
     # The container-query breakpoint, in px. Below it the five secondary metrics leave the row.
     # Measured, not chosen: the nine-column table needs 702px of min-content in Chrome, so the old
     # 72rem threshold dropped five columns while ~18rem of panel sat unused. See the comment on the
-    # `@container` rule in static_src/css/yolomux/30_preferences_changes.css.
+    # `@container` rule in static_src/css/yomux/30_preferences_changes.css.
     secondary_breakpoint_px = 48 * 16
     # (window width, window height, container width) -- one row per device class.
     device_classes = ((1920, 1080, 1400), (1280, 800, 1100), (1024, 768, 760), (390, 844, 360))

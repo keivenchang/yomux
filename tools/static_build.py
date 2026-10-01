@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""Build served YOLOmux static assets from ordered source partials."""
+"""Build served YOmux static assets from ordered source partials."""
 
 from __future__ import annotations
 
@@ -20,11 +20,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 sys.dont_write_bytecode = True
 
-from yolomux_lib.locales import FALLBACK_LOCALE
-from yolomux_lib.locales import PLURAL_CATEGORIES_BY_LOCALE
-from yolomux_lib.locales import PSEUDO_LOCALE
-from yolomux_lib.locales import SHIPPED_LOCALES
-from yolomux_lib.infra import worktree_writer
+from yomux_lib.locales import FALLBACK_LOCALE
+from yomux_lib.locales import PLURAL_CATEGORIES_BY_LOCALE
+from yomux_lib.locales import PSEUDO_LOCALE
+from yomux_lib.locales import SHIPPED_LOCALES
+from yomux_lib.infra import worktree_writer
 
 # i18n: source catalogs live in static_src/locales/<locale>.json; en.json is the source of truth.
 # The build copies them to static/locales/ (all-static-fetch delivery), validates key parity, and
@@ -39,7 +39,7 @@ RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST: dict[str, str] = {}
 # use a shared token or be added here with a reviewed reason; normalized identities make equivalent
 # hex/rgb spellings share one entry.
 NOVEL_COMPONENT_COLOR_ALLOWLIST: dict[str, tuple[frozenset[str], str]] = {
-    "static_src/css/yolomux/20_sessions_popovers.css": (
+    "static_src/css/yomux/20_sessions_popovers.css": (
         frozenset({
             "#082014", "#10151f", "#3a3524", "#67d7ff", "#7a1020", "#9befad",
             "#a5e8ff", "#aab4c4", "#e7ebf1", "#ff304a", "#ffd75d", "#ffd7dc",
@@ -49,7 +49,7 @@ NOVEL_COMPONENT_COLOR_ALLOWLIST: dict[str, tuple[frozenset[str], str]] = {
         }),
         "reviewed pre-token component palette (2026-07-07)",
     ),
-    "static_src/css/yolomux/30_preferences_changes.css": (
+    "static_src/css/yomux/30_preferences_changes.css": (
         frozenset({
             "#081205", "#a6e35f",
             "rgb(255 255 255 / 0.18)", "rgb(48 57 72 / 0.45)",
@@ -57,7 +57,7 @@ NOVEL_COMPONENT_COLOR_ALLOWLIST: dict[str, tuple[frozenset[str], str]] = {
         }),
         "reviewed pre-token component palette (2026-07-07)",
     ),
-    "static_src/css/yolomux/40_layout_panes_tabs.css": (
+    "static_src/css/yomux/40_layout_panes_tabs.css": (
         frozenset({
             "#7a8799", "rgb(0 0 0 / 0.52)", "rgb(0 0 0 / 0.66)",
             "rgb(8 18 5 / 0.28)", "rgb(245 197 66 / 0.95)",
@@ -65,7 +65,7 @@ NOVEL_COMPONENT_COLOR_ALLOWLIST: dict[str, tuple[frozenset[str], str]] = {
         }),
         "reviewed pre-token component palette (2026-07-07)",
     ),
-    "static_src/css/yolomux/50_terminal_file_tree.css": (
+    "static_src/css/yomux/50_terminal_file_tree.css": (
         frozenset({
             "#14171d", "#2a1e00", "#314154",
             "#3a2b00", "#3b82f6", "#6f7b8d", "#6fce8a", "#b98c24",
@@ -77,7 +77,7 @@ NOVEL_COMPONENT_COLOR_ALLOWLIST: dict[str, tuple[frozenset[str], str]] = {
         }),
         "reviewed pre-token component palette (2026-07-07)",
     ),
-    "static_src/css/yolomux/60_editor_file_panels.css": (
+    "static_src/css/yomux/60_editor_file_panels.css": (
         frozenset({
             "#0b0e14", "#0e1724", "#0f131b", "#17210f", "#202838", "#35d36f",
             "#3b0a0a", "#59677d", "#6cb6df", "#91a68a", "#9b2d33", "#a8e95a",
@@ -144,27 +144,27 @@ SEMANTIC_CONTRAST_PAIRS: tuple[tuple[str, str], ...] = (
     ("--pane-tab-active-text", "--pane-tab-active-bg"),
 )
 SHARED_UI_OWNERSHIP_REQUIREMENTS = {
-    "static_src/js/yolomux/76_panel_dom_actions.js": (
+    "static_src/js/yomux/76_panel_dom_actions.js": (
         ("panel detail close control", "function panelDetailCloseButtonHtml", "toolbarButtonHtml("),
     ),
-    "static_src/js/yolomux/78_panel_shell.js": (
+    "static_src/js/yomux/78_panel_shell.js": (
         ("search-history controls", "function searchHistoryResultHtml", "toolbarButtonHtml(", "bindActionDispatcher(panel, {"),
         ("search-history panel close", "panelDetailCloseButtonHtml(searchHistoryItemId)"),
     ),
-    "static_src/js/yolomux/84_debug_observation.js": (
+    "static_src/js/yomux/84_debug_observation.js": (
         ("debug subtab controls", "function debugSubTabButtonHtml", "toolbarButtonHtml("),
     ),
-    "static_src/js/yolomux/85_debug_panel.js": (
+    "static_src/js/yomux/85_debug_panel.js": (
         ("debug panel close controls", "panelDetailCloseButtonHtml(debugPaneItemId)"),
         ("debug subtab dispatch", "'debug-subtab':"),
     ),
-    "static_src/js/yolomux/98_terminal_runtime_facade.js": (
+    "static_src/js/yomux/98_terminal_runtime_facade.js": (
         ("pane-frame controls", "function paneFrameControlsHtml", "toolbarButtonHtml("),
     ),
-    "static_src/js/yolomux/20_layout_state.js": (
+    "static_src/js/yomux/20_layout_state.js": (
         ("editor state", "function applyEditorStateFields", "applyEditorStateFields("),
     ),
-    "static_src/js/yolomux/84_stats_current.js": (
+    "static_src/js/yomux/84_stats_current.js": (
         (
             "current plot-ready series owner",
             "function currentStatsGroups",
@@ -176,7 +176,7 @@ SHARED_UI_OWNERSHIP_REQUIREMENTS = {
     # selection, expansion, click, and keyboard mechanics must all flow through this one parent.
     # Keep this structural fact in the build lint rather than duplicating source-text regexes in
     # the node shard that exercises the controller's actual behavior.
-    "static_src/js/yolomux/40_file_explorer_files.js": (
+    "static_src/js/yomux/40_file_explorer_files.js": (
         (
             "shared tree controller parent",
             "function createSharedTreeInteractionController",
@@ -187,10 +187,10 @@ SHARED_UI_OWNERSHIP_REQUIREMENTS = {
             "const tabberTreeInteractionController = createSharedTreeInteractionController({",
         ),
     ),
-    "static_src/js/yolomux/45_file_explorer_actions.js": (
+    "static_src/js/yomux/45_file_explorer_actions.js": (
         ("Finder tree controller registration", "const finderTreeInteractionController = createSharedTreeInteractionController({"),
     ),
-    "static_src/js/yolomux/86_changes_20_differ.js": (
+    "static_src/js/yomux/86_changes_20_differ.js": (
         ("Differ tree controller registration", "const differTreeInteractionController = createSharedTreeInteractionController({"),
     ),
 }
@@ -206,16 +206,16 @@ NORMALIZED_PRODUCTION_CLONE_ALLOWLIST: dict[str, str] = {
     # what remains is the lazy-init skeleton wrapping two deliberately separate schemas (chat's
     # multi-step FTS ladder vs the throttle's single bucket table), each raising its own
     # migration-error type. Collapsing further would couple two unrelated schemas.
-    "yolomux_lib/chat/chat_store.py, yolomux_lib/login_rate_limit.py:2e5bfc1edef9": "shared lazy-init guard; schemas deliberately separate",
-    "yolomux_lib/chat/chat_store.py, yolomux_lib/login_rate_limit.py:e53fcf7e7da8": "shared lazy-init guard; schemas deliberately separate",
-    "yolomux_lib/stats_current/migration.py, yolomux_lib/stats_current/storage.py:08ee56a6d225": "SQLite migration and storage transaction wrappers are separate boundaries",
-    "yolomux_lib/stats_current/migration.py, yolomux_lib/stats_current/storage.py:197895be7a90": "SQLite migration and storage transaction wrappers are separate boundaries",
-    "yolomux_lib/stats_current/migration.py, yolomux_lib/stats_current/storage.py:566ab5821680": "SQLite migration and storage transaction wrappers are separate boundaries",
-    "static_src/js/yolomux/85_git_diff_viewer.js, static_src/js/yolomux/86_changes_10_session_files.js:09d8f565dfb2": "Differ and changes editor each own separate SSE stream consumers",
-    "static_src/js/yolomux/85_git_diff_viewer.js, static_src/js/yolomux/86_changes_10_session_files.js:0b8d97565a93": "Differ and changes editor each own separate SSE stream consumers",
-    "static_src/js/yolomux/85_git_diff_viewer.js, static_src/js/yolomux/86_changes_10_session_files.js:0fa488303097": "Differ and changes editor each own separate SSE stream consumers",
-    "static_src/js/yolomux/85_git_diff_viewer.js, static_src/js/yolomux/86_changes_10_session_files.js:5fc7ee95ca7c": "Differ and changes editor each own separate SSE stream consumers",
-    "static_src/js/yolomux/85_git_diff_viewer.js, static_src/js/yolomux/86_changes_10_session_files.js:6cdd8a05e7db": "Differ and changes editor each own separate SSE stream consumers",
+    "yomux_lib/chat/chat_store.py, yomux_lib/login_rate_limit.py:2e5bfc1edef9": "shared lazy-init guard; schemas deliberately separate",
+    "yomux_lib/chat/chat_store.py, yomux_lib/login_rate_limit.py:e53fcf7e7da8": "shared lazy-init guard; schemas deliberately separate",
+    "yomux_lib/stats_current/migration.py, yomux_lib/stats_current/storage.py:08ee56a6d225": "SQLite migration and storage transaction wrappers are separate boundaries",
+    "yomux_lib/stats_current/migration.py, yomux_lib/stats_current/storage.py:197895be7a90": "SQLite migration and storage transaction wrappers are separate boundaries",
+    "yomux_lib/stats_current/migration.py, yomux_lib/stats_current/storage.py:566ab5821680": "SQLite migration and storage transaction wrappers are separate boundaries",
+    "static_src/js/yomux/85_git_diff_viewer.js, static_src/js/yomux/86_changes_10_session_files.js:09d8f565dfb2": "Differ and changes editor each own separate SSE stream consumers",
+    "static_src/js/yomux/85_git_diff_viewer.js, static_src/js/yomux/86_changes_10_session_files.js:0b8d97565a93": "Differ and changes editor each own separate SSE stream consumers",
+    "static_src/js/yomux/85_git_diff_viewer.js, static_src/js/yomux/86_changes_10_session_files.js:0fa488303097": "Differ and changes editor each own separate SSE stream consumers",
+    "static_src/js/yomux/85_git_diff_viewer.js, static_src/js/yomux/86_changes_10_session_files.js:5fc7ee95ca7c": "Differ and changes editor each own separate SSE stream consumers",
+    "static_src/js/yomux/85_git_diff_viewer.js, static_src/js/yomux/86_changes_10_session_files.js:6cdd8a05e7db": "Differ and changes editor each own separate SSE stream consumers",
 }
 CSS_COLOR_LITERAL_PATTERN = r"#[0-9a-fA-F]{3,8}\b|rgba?\([^)]+\)"
 CSS_COLOR_LITERAL_RE = re.compile(CSS_COLOR_LITERAL_PATTERN)
@@ -230,25 +230,25 @@ STANDARD_BORDER_RADIUS_TOKENS = {
 # this exact shrinking inventory so a new occurrence must either join a demonstrated semantic
 # owner or receive an explicit classification instead of silently becoming another magic value.
 CUSTOM_BORDER_RADIUS_CLASSIFICATIONS = {
-    "static_src/css/yolomux/10_topbar_menus.css:.transport-warning::after:7px": "transport tooltip surface",
-    "static_src/css/yolomux/10_topbar_menus.css:.app-menu-area.drag-over:7px": "drag target outline",
-    "static_src/css/yolomux/10_topbar_menus.css:.app-submenu-popover:7px": "submenu overlay surface",
-    "static_src/css/yolomux/20_sessions_popovers.css:.status-indicator--inline:5px": "inline status indicator",
-    "static_src/css/yolomux/20_sessions_popovers.css:.status-indicator--text:5px": "text status indicator",
-    "static_src/css/yolomux/20_sessions_popovers.css:.status-indicator--label:5px": "label status indicator",
-    "static_src/css/yolomux/20_sessions_popovers.css:.agent-window-agent-icon--active:5px": "active agent icon glow",
-    "static_src/css/yolomux/20_sessions_popovers.css:.session-agent-window-block > .session-agent-row:5px": "session agent row surface",
-    "static_src/css/yolomux/30_preferences_changes.css:.preferences-search, .search-history-input:5px": "search input shell",
-    "static_src/css/yolomux/30_preferences_changes.css:.preferences-search-button, .preferences-reset-all:5px": "preferences action control",
-    "static_src/css/yolomux/30_preferences_changes.css:.preferences-reset-continue, .preferences-reset-cancel:5px": "reset confirmation control",
-    "static_src/css/yolomux/30_preferences_changes.css:.command-palette-row:5px": "command palette row",
-    "static_src/css/yolomux/40_layout_panes_tabs.css:.tab:5px": "pane tab shell",
-    "static_src/css/yolomux/50_terminal_file_tree.css:.session-rename-dialog:7px": "rename modal surface",
-    "static_src/css/yolomux/50_terminal_file_tree.css:.session-rename-actions button:5px": "rename action control",
-    "static_src/css/yolomux/50_terminal_file_tree.css:.file-image-preview-popover:7px": "image preview overlay",
-    "static_src/css/yolomux/50_terminal_file_tree.css:.transcript-item:5px": "transcript message block",
-    "static_src/css/yolomux/50_terminal_file_tree.css:.conversation-message:5px": "conversation message block",
-    "static_src/css/yolomux/50_terminal_file_tree.css:.file-tree-date:5px": "file-tree date chip",
+    "static_src/css/yomux/10_topbar_menus.css:.transport-warning::after:7px": "transport tooltip surface",
+    "static_src/css/yomux/10_topbar_menus.css:.app-menu-area.drag-over:7px": "drag target outline",
+    "static_src/css/yomux/10_topbar_menus.css:.app-submenu-popover:7px": "submenu overlay surface",
+    "static_src/css/yomux/20_sessions_popovers.css:.status-indicator--inline:5px": "inline status indicator",
+    "static_src/css/yomux/20_sessions_popovers.css:.status-indicator--text:5px": "text status indicator",
+    "static_src/css/yomux/20_sessions_popovers.css:.status-indicator--label:5px": "label status indicator",
+    "static_src/css/yomux/20_sessions_popovers.css:.agent-window-agent-icon--active:5px": "active agent icon glow",
+    "static_src/css/yomux/20_sessions_popovers.css:.session-agent-window-block > .session-agent-row:5px": "session agent row surface",
+    "static_src/css/yomux/30_preferences_changes.css:.preferences-search, .search-history-input:5px": "search input shell",
+    "static_src/css/yomux/30_preferences_changes.css:.preferences-search-button, .preferences-reset-all:5px": "preferences action control",
+    "static_src/css/yomux/30_preferences_changes.css:.preferences-reset-continue, .preferences-reset-cancel:5px": "reset confirmation control",
+    "static_src/css/yomux/30_preferences_changes.css:.command-palette-row:5px": "command palette row",
+    "static_src/css/yomux/40_layout_panes_tabs.css:.tab:5px": "pane tab shell",
+    "static_src/css/yomux/50_terminal_file_tree.css:.session-rename-dialog:7px": "rename modal surface",
+    "static_src/css/yomux/50_terminal_file_tree.css:.session-rename-actions button:5px": "rename action control",
+    "static_src/css/yomux/50_terminal_file_tree.css:.file-image-preview-popover:7px": "image preview overlay",
+    "static_src/css/yomux/50_terminal_file_tree.css:.transcript-item:5px": "transcript message block",
+    "static_src/css/yomux/50_terminal_file_tree.css:.conversation-message:5px": "conversation message block",
+    "static_src/css/yomux/50_terminal_file_tree.css:.file-tree-date:5px": "file-tree date chip",
 }
 STANDARD_COMPONENT_FONT_SIZE_TOKENS = {
     "10px": "--ui-font-size-2xs",
@@ -624,15 +624,19 @@ I18N_ALLOWED_IDENTICAL_TERMS = {
     "aa", "ai", "apache", "api", "ci", "claude", "cli", "codex", "cpu", "css", "csv", "geojson", "git", "github", "gitlab", "head", "html", "http",
     "graph", "id", "ip", "javascript", "json", "jsonl", "linear", "linkedin", "markdown", "mermaid", "mit", "ndjson", "ok", "openai", "pdf",
     "polyform", "pr", "readme", "rss", "sse", "ssh", "tmux", "toml", "tsv", "url", "websocket", "worktree", "xml", "yaml", "yo!agent",
-    "yo!info", "yo!stats", "yolo", "yolomux",
+    "yo!chat", "yo!info", "yo!stats", "yolo", "yomux", "yolomux",
 }
 I18N_ALLOWED_IDENTICAL_KEYS = frozenset({
+    "app.documentTitle",
     "brand.marker",
     "brand.tab.agent",
     "brand.tab.changes",
+    "brand.tab.chat",
     "brand.tab.info",
     "brand.tab.summary",
-    "brand.wordmark.lo",
+    "brand.wordmark.initial",
+    "brand.wordmark.second",
+    "brand.version",
     "changes.titleForSession",
     "debug.graph.chart.cpu",
     "debug.graph.chart.gpuMemory",
@@ -682,6 +686,8 @@ I18N_PROTECTED_TOKEN_RE = re.compile(
 I18N_PSEUDO_TOKEN_RE = re.compile(f"({I18N_PLACEHOLDER_PATTERN}|{I18N_PROTECTED_TOKEN_RE.pattern})")
 I18N_TRANSLATABLE_CODE_KEYS = frozenset({"yoagent.prompt.format"})
 I18N_REQUIRED_YO_MARKERS = {"zh-Hans": "优", "zh-Hant": "優"}
+I18N_PRESERVED_YO_PRODUCT_KEYS = frozenset({"brand.tab.agent", "brand.tab.chat", "brand.tab.info"})
+I18N_OPTIONAL_NONENGLISH_TRANSLATIONS = {"brand.wordmark.second": frozenset({"zh-Hans", "zh-Hant"})}
 I18N_ALLOWED_DUPLICATE_KEY_GROUPS: dict[frozenset[str], str] = {
     frozenset({"debug.summary", "searchHistory.summary", "transcript.role.summary"}): "view labels and a transcript role need different grammar",
     frozenset({"dialog.delete.kindFile", "popover.kind.file", "yolo.rule.source.file"}): "file kind, popover metadata, and rule source need different grammar",
@@ -737,63 +743,63 @@ ASSETS: dict[str, list[str]] = {
     "emoji-data.js": [
         "static_src/js/emoji/emoji_data.js",
     ],
-    "yolomux.js": [
-        "static_src/js/yolomux/00_bootstrap_state.js",
-        "static_src/js/yolomux/02_timing.js",
-        "static_src/js/yolomux/05_i18n.js",
-        "static_src/js/yolomux/09_transport_lifecycle.js",
-        "static_src/js/yolomux/10_core_utils.js",
-        "static_src/js/yolomux/15_command_registry.js",
-        "static_src/js/yolomux/20_layout_state.js",
-        "static_src/js/yolomux/30_app_menus.js",
-        "static_src/js/yolomux/35_agent_window_activity.js",
-        "static_src/js/yolomux/39_raw_file_media.js",
-        "static_src/js/yolomux/40_file_explorer_files.js",
-        "static_src/js/yolomux/45_file_explorer_actions.js",
-        "static_src/js/yolomux/46_file_drop_actions.js",
-        "static_src/js/yolomux/50_editor_settings_runtime.js",
-        "static_src/js/yolomux/60_popovers_tabs.js",
-        "static_src/js/yolomux/70_layout_actions.js",
-        "static_src/js/yolomux/75_dockview_layout.js",
-        "static_src/js/yolomux/76_panel_dom_actions.js",
-        "static_src/js/yolomux/78_panel_shell.js",
-        "static_src/js/yolomux/79_conversation_common.js",
-        "static_src/js/yolomux/80_info_panel.js",
-        "static_src/js/yolomux/81_yoagent_panel.js",
-        "static_src/js/yolomux/82_chat_panel.js",
-        "static_src/js/yolomux/83_preferences_panel.js",
-        "static_src/js/yolomux/84_stats_current.js",
-        "static_src/js/yolomux/84_debug_runtime_facade.js",
-        "static_src/js/yolomux/84_debug_observation.js",
-        "static_src/js/yolomux/85_debug_panel.js",
-        "static_src/js/yolomux/85_git_diff_viewer.js",
-        "static_src/js/yolomux/86_changes_00_refs.js",
-        "static_src/js/yolomux/86_changes_10_session_files.js",
-        "static_src/js/yolomux/86_changes_20_differ.js",
-        "static_src/js/yolomux/86_changes_30_preferences.js",
-        "static_src/js/yolomux/86_changes_40_finder.js",
-        "static_src/js/yolomux/86_changes_editor.js",
-        "static_src/js/yolomux/87_editor_nav.js",
-        "static_src/js/yolomux/88_markdown_preview.js",
-        "static_src/js/yolomux/89_preview_renderers.js",
-        "static_src/js/yolomux/90_pane_popout.js",
-        "static_src/js/yolomux/91_preview_popout.js",
-        "static_src/js/yolomux/92_codemirror_editor.js",
-        "static_src/js/yolomux/93_prosemirror_editor.js",
-        "static_src/js/yolomux/98_terminal_runtime_facade.js",
-        "static_src/js/yolomux/99_terminal_boot.js",
-        "static_src/js/yolomux/99_client_event_transport.js",
-        "static_src/js/yolomux/99_terminal_shortcuts_boot.js",
+    "yomux.js": [
+        "static_src/js/yomux/00_bootstrap_state.js",
+        "static_src/js/yomux/02_timing.js",
+        "static_src/js/yomux/05_i18n.js",
+        "static_src/js/yomux/09_transport_lifecycle.js",
+        "static_src/js/yomux/10_core_utils.js",
+        "static_src/js/yomux/15_command_registry.js",
+        "static_src/js/yomux/20_layout_state.js",
+        "static_src/js/yomux/30_app_menus.js",
+        "static_src/js/yomux/35_agent_window_activity.js",
+        "static_src/js/yomux/39_raw_file_media.js",
+        "static_src/js/yomux/40_file_explorer_files.js",
+        "static_src/js/yomux/45_file_explorer_actions.js",
+        "static_src/js/yomux/46_file_drop_actions.js",
+        "static_src/js/yomux/50_editor_settings_runtime.js",
+        "static_src/js/yomux/60_popovers_tabs.js",
+        "static_src/js/yomux/70_layout_actions.js",
+        "static_src/js/yomux/75_dockview_layout.js",
+        "static_src/js/yomux/76_panel_dom_actions.js",
+        "static_src/js/yomux/78_panel_shell.js",
+        "static_src/js/yomux/79_conversation_common.js",
+        "static_src/js/yomux/80_info_panel.js",
+        "static_src/js/yomux/81_yoagent_panel.js",
+        "static_src/js/yomux/82_chat_panel.js",
+        "static_src/js/yomux/83_preferences_panel.js",
+        "static_src/js/yomux/84_stats_current.js",
+        "static_src/js/yomux/84_debug_runtime_facade.js",
+        "static_src/js/yomux/84_debug_observation.js",
+        "static_src/js/yomux/85_debug_panel.js",
+        "static_src/js/yomux/85_git_diff_viewer.js",
+        "static_src/js/yomux/86_changes_00_refs.js",
+        "static_src/js/yomux/86_changes_10_session_files.js",
+        "static_src/js/yomux/86_changes_20_differ.js",
+        "static_src/js/yomux/86_changes_30_preferences.js",
+        "static_src/js/yomux/86_changes_40_finder.js",
+        "static_src/js/yomux/86_changes_editor.js",
+        "static_src/js/yomux/87_editor_nav.js",
+        "static_src/js/yomux/88_markdown_preview.js",
+        "static_src/js/yomux/89_preview_renderers.js",
+        "static_src/js/yomux/90_pane_popout.js",
+        "static_src/js/yomux/91_preview_popout.js",
+        "static_src/js/yomux/92_codemirror_editor.js",
+        "static_src/js/yomux/93_prosemirror_editor.js",
+        "static_src/js/yomux/98_terminal_runtime_facade.js",
+        "static_src/js/yomux/99_terminal_boot.js",
+        "static_src/js/yomux/99_client_event_transport.js",
+        "static_src/js/yomux/99_terminal_shortcuts_boot.js",
     ],
-    "yolomux.css": [
-        "static_src/css/yolomux/00_tokens_base.css",
-        "static_src/css/yolomux/10_topbar_menus.css",
-        "static_src/css/yolomux/20_sessions_popovers.css",
-        "static_src/css/yolomux/30_preferences_changes.css",
-        "static_src/css/yolomux/35_git_diff_viewer.css",
-        "static_src/css/yolomux/40_layout_panes_tabs.css",
-        "static_src/css/yolomux/50_terminal_file_tree.css",
-        "static_src/css/yolomux/60_editor_file_panels.css",
+    "yomux.css": [
+        "static_src/css/yomux/00_tokens_base.css",
+        "static_src/css/yomux/10_topbar_menus.css",
+        "static_src/css/yomux/20_sessions_popovers.css",
+        "static_src/css/yomux/30_preferences_changes.css",
+        "static_src/css/yomux/35_git_diff_viewer.css",
+        "static_src/css/yomux/40_layout_panes_tabs.css",
+        "static_src/css/yomux/50_terminal_file_tree.css",
+        "static_src/css/yomux/60_editor_file_panels.css",
     ],
 }
 
@@ -1119,7 +1125,7 @@ def lint_css_structure() -> list[str]:
     errors: list[str] = []
     selector_locations: dict[tuple[tuple[str, ...], str], list[str]] = defaultdict(list)
     declaration_re = re.compile(r"(?:^|;)\s*(--[\w-]+|[\w-]+)\s*:")
-    for part in ASSETS.get("yolomux.css", []):
+    for part in ASSETS.get("yomux.css", []):
         path = repo_path(part)
         try:
             css = _css_without_comments(read_text(path))
@@ -1171,7 +1177,7 @@ def lint_identical_theme_restatements() -> list[str]:
     declaration_re = re.compile(r"(?:^|;)\s*(--[\w-]+|[\w-]+)\s*:\s*([^;}]+)", re.IGNORECASE)
     base_declarations: dict[tuple[tuple[str, ...], str, str], list[tuple[str, str]]] = defaultdict(list)
     light_rules: list[tuple[tuple[str, ...], str, str, dict[str, str], str]] = []
-    for part in ASSETS.get("yolomux.css", []):
+    for part in ASSETS.get("yomux.css", []):
         path = repo_path(part)
         try:
             css = _css_without_comments(read_text(path))
@@ -1210,7 +1216,7 @@ def lint_repeated_semantic_declaration_sets() -> list[str]:
     """Semantic paint sets belong to one grouped selector, independent of declaration order."""
     declaration_re = re.compile(r"(?:^|;)\s*([\w-]+)\s*:\s*([^;}]+)", re.IGNORECASE)
     occurrences: dict[str, list[str]] = defaultdict(list)
-    for part in ASSETS.get("yolomux.css", []):
+    for part in ASSETS.get("yomux.css", []):
         path = repo_path(part)
         try:
             css = _css_without_comments(read_text(path))
@@ -1235,7 +1241,7 @@ def lint_code_syntax_color_ownership() -> list[str]:
     """Each semantic syntax color has one rule shared by every renderer."""
     color_re = re.compile(r"(?:^|;)\s*color\s*:\s*var\((--code-[\w-]+)\)\s*!important", re.IGNORECASE)
     occurrences: dict[str, list[str]] = defaultdict(list)
-    for part in ASSETS.get("yolomux.css", []):
+    for part in ASSETS.get("yomux.css", []):
         path = repo_path(part)
         try:
             css = _css_without_comments(read_text(path))
@@ -1268,7 +1274,7 @@ def lint_raw_standard_border_radii() -> list[str]:
     property_re = re.compile(r"\bborder(?:-[a-z-]+)?-radius\s*:\s*([^;}]+)")
     literals = "|".join(re.escape(value) for value in STANDARD_BORDER_RADIUS_TOKENS)
     literal_re = re.compile(rf"(?<![\w.])({literals})(?![\w-])")
-    for part in ASSETS.get("yolomux.css", []):
+    for part in ASSETS.get("yomux.css", []):
         if part.endswith("00_tokens_base.css"):
             continue
         path = repo_path(part)
@@ -1290,7 +1296,7 @@ def lint_custom_border_radius_classifications() -> list[str]:
     observed: set[str] = set()
     radius_re = re.compile(r"\bborder(?:-[a-z-]+)?-radius\s*:\s*([^;}]+)")
     custom_re = re.compile(r"(?<![\w.])(5px|7px)(?![\w-])")
-    for part in ASSETS.get("yolomux.css", []):
+    for part in ASSETS.get("yomux.css", []):
         if part.endswith("00_tokens_base.css"):
             continue
         path = repo_path(part)
@@ -1327,7 +1333,7 @@ def lint_raw_standard_motion_durations() -> list[str]:
         re.escape(value) for value in sorted(STANDARD_MOTION_DURATION_TOKENS, key=len, reverse=True)
     )
     literal_re = re.compile(rf"(?<![\w.])({literal_pattern})(?![\w.])", re.IGNORECASE)
-    for part in ASSETS.get("yolomux.css", []):
+    for part in ASSETS.get("yomux.css", []):
         if part.endswith("00_tokens_base.css"):
             continue
         path = repo_path(part)
@@ -1353,7 +1359,7 @@ def lint_raw_standard_font_sizes() -> list[str]:
     property_re = re.compile(r"\b(font-size|font)\s*:\s*([^;}]+)", re.IGNORECASE)
     literal_pattern = "|".join(re.escape(value) for value in STANDARD_COMPONENT_FONT_SIZE_TOKENS)
     shorthand_re = re.compile(rf"(?<![/\w.-])({literal_pattern})(?=\s*(?:/|\s|$))", re.IGNORECASE)
-    for part in ASSETS.get("yolomux.css", []):
+    for part in ASSETS.get("yomux.css", []):
         if part.endswith("00_tokens_base.css"):
             continue
         path = repo_path(part)
@@ -1388,7 +1394,7 @@ def lint_raw_standard_spacing() -> list[str]:
     literals = "|".join(re.escape(value) for value in sorted(STANDARD_SPACING_TOKENS, key=len, reverse=True))
     literal_re = re.compile(rf"(?<![\w.])({literals})(?![\w-])", re.IGNORECASE)
     invalid_negated_token_re = re.compile(r"(?<![\w-])-var\((--space-(?:[1-9]|1[0-2]))\)", re.IGNORECASE)
-    for part in ASSETS.get("yolomux.css", []):
+    for part in ASSETS.get("yomux.css", []):
         if part.endswith("00_tokens_base.css"):
             continue
         path = repo_path(part)
@@ -1517,7 +1523,7 @@ def _light_covers(dark_sel: str, light_bases: list[str]) -> bool:
 
 
 def lint_light_mode_pairs() -> list[str]:
-    css = "\n".join(read_text(repo_path(part)) for part in ASSETS["yolomux.css"])
+    css = "\n".join(read_text(repo_path(part)) for part in ASSETS["yomux.css"])
     css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
     light_by_prop: dict[str, list[str]] = {}
     dark: list[tuple[str, str, str]] = []
@@ -1663,8 +1669,8 @@ def i18n_literal_key_errors(source: dict[str, object], paths: list[Path] | None 
     """Every complete literal runtime key must resolve in the English catalog."""
     errors: list[str] = []
     source_paths = paths if paths is not None else [
-        *(REPO_ROOT / path for path in ASSETS["yolomux.js"]),
-        *sorted((REPO_ROOT / "yolomux_lib").rglob("*.py")),
+        *(REPO_ROOT / path for path in ASSETS["yomux.js"]),
+        *sorted((REPO_ROOT / "yomux_lib").rglob("*.py")),
     ]
     for path in source_paths:
         text = read_text(path)
@@ -1747,8 +1753,8 @@ def i18n_visible_literal_sink_errors(paths: list[Path] | None = None) -> list[st
     """Reject direct English literals at common user-visible DOM/status sinks."""
     errors: list[str] = []
     source_paths = paths if paths is not None else [
-        *(REPO_ROOT / path for path in ASSETS["yolomux.js"]),
-        *(REPO_ROOT / path for path in ASSETS["yolomux.css"]),
+        *(REPO_ROOT / path for path in ASSETS["yomux.js"]),
+        *(REPO_ROOT / path for path in ASSETS["yomux.css"]),
     ]
     for path in source_paths:
         text = read_text(path)
@@ -1926,7 +1932,11 @@ def locale_semantic_errors(catalogs: dict[str, dict]) -> list[str]:
             source_key = locale_source_key(source, key)
             english_value = source.get(source_key)
             value = catalog[key]
-            if str(english_value or "").strip() and not str(value or "").strip():
+            if (
+                str(english_value or "").strip()
+                and not str(value or "").strip()
+                and locale not in I18N_OPTIONAL_NONENGLISH_TRANSLATIONS.get(key, frozenset())
+            ):
                 errors.append(f"{locale}.json blank translation at {key}")
             expected_placeholders = i18n_placeholder_tokens(english_value)
             actual_placeholders = i18n_placeholder_tokens(value)
@@ -1940,7 +1950,12 @@ def locale_semantic_errors(catalogs: dict[str, dict]) -> list[str]:
                 errors.append(
                     f"{locale}.json protected-token drift at {key}: expected {dict(expected_protected)}, got {dict(actual_protected)}"
                 )
-            if required_yo_marker and "YO" in str(english_value) and ("YO" in str(value) or required_yo_marker not in str(value)):
+            if (
+                required_yo_marker
+                and key not in I18N_PRESERVED_YO_PRODUCT_KEYS
+                and "YO" in str(english_value)
+                and ("YO" in str(value) or required_yo_marker not in str(value))
+            ):
                 errors.append(f"{locale}.json must localize YO as {required_yo_marker} at {key}")
     _warnings, untranslated_errors = i18n_untranslated_report(catalogs, sample_limit=None)
     errors.extend(untranslated_errors)
@@ -2003,7 +2018,7 @@ def lint_duplicate_functions() -> list[str]:
     too, not just `function` — a duplicate const would otherwise only surface as a `node --check`
     redeclaration error, which the manual lane can miss.
     """
-    js_sources = ASSETS.get("yolomux.js", [])
+    js_sources = ASSETS.get("yomux.js", [])
     name_to_files: dict[str, list[str]] = defaultdict(list)
     decl = re.compile(r"^(?:function\s+(\w+)\s*\(|(?:const|let|class)\s+(\w+)\b)")
     for part in js_sources:
@@ -2029,7 +2044,7 @@ def lint_direct_button_construction() -> list[str]:
     owner_count = 0
     function_re = re.compile(r"^function\s+(\w+)\s*\(")
     construction_re = re.compile(r"document\.createElement\(\s*(['\"])button\1\s*\)")
-    for part in ASSETS.get("yolomux.js", []):
+    for part in ASSETS.get("yomux.js", []):
         path = repo_path(part)
         try:
             lines = read_text(path).splitlines()
@@ -2054,13 +2069,13 @@ def lint_direct_button_construction() -> list[str]:
 def lint_framed_panel_construction() -> list[str]:
     """Keep framed article creation behind the one registered panel-shell factory."""
     errors: list[str] = []
-    owner = "static_src/js/yolomux/78_panel_shell.js"
-    js_sources = ASSETS.get("yolomux.js", [])
+    owner = "static_src/js/yomux/78_panel_shell.js"
+    js_sources = ASSETS.get("yomux.js", [])
     owner_registrations = js_sources.count(owner)
     if owner_registrations != 1:
         errors.append(
             f"{owner}: createFramedPanel() owner must be registered exactly once in "
-            f"ASSETS['yolomux.js']; found {owner_registrations}"
+            f"ASSETS['yomux.js']; found {owner_registrations}"
         )
 
     function_re = re.compile(r"^function\s+(\w+)\s*\(")
@@ -2083,13 +2098,13 @@ def lint_framed_panel_construction() -> list[str]:
             lines = read_text(path).splitlines()
         except FileNotFoundError:
             errors.append(
-                f"{part}: registered yolomux.js partial is missing; "
+                f"{part}: registered yomux.js partial is missing; "
                 "framed-panel ownership cannot be verified"
             )
             continue
         except (OSError, UnicodeError) as error:
             errors.append(
-                f"{part}: registered yolomux.js partial is unreadable "
+                f"{part}: registered yomux.js partial is unreadable "
                 f"({type(error).__name__}); framed-panel ownership cannot be verified"
             )
             continue
@@ -2154,7 +2169,7 @@ def lint_shared_ui_ownership() -> list[str]:
             missing = [needle for needle in needles if needle not in source]
             if missing:
                 errors.append(f"{part}: shared {label} owner is missing {', '.join(repr(needle) for needle in missing)}")
-    for part in ASSETS.get("yolomux.js", []):
+    for part in ASSETS.get("yomux.js", []):
         path = repo_path(part)
         try:
             source = read_text(path)
@@ -2163,15 +2178,15 @@ def lint_shared_ui_ownership() -> list[str]:
         for label, needle in SHARED_UI_OWNERSHIP_FORBIDDEN_NEEDLES:
             if needle in source:
                 errors.append(f"{part}: shared ownership forbids {label} ({needle!r})")
-    terminal_boot = repo_path("static_src/js/yolomux/98_terminal_runtime_facade.js")
+    terminal_boot = repo_path("static_src/js/yomux/98_terminal_runtime_facade.js")
     if terminal_boot.exists():
         source = read_text(terminal_boot)
         frame_start = source.find("function paneFrameControlsHtml")
         frame_end = source.find("\nfunction ", frame_start + 1)
         frame_body = source[frame_start:frame_end if frame_end >= 0 else len(source)]
         if "<button" in frame_body:
-            errors.append("static_src/js/yolomux/98_terminal_runtime_facade.js: paneFrameControlsHtml() must use toolbarButtonHtml(), not raw button templates")
-    for path in sorted((REPO_ROOT / "yolomux_lib").rglob("*.py")):
+            errors.append("static_src/js/yomux/98_terminal_runtime_facade.js: paneFrameControlsHtml() must use toolbarButtonHtml(), not raw button templates")
+    for path in sorted((REPO_ROOT / "yomux_lib").rglob("*.py")):
         source = read_text(path)
         if "return self.yoagent_controller." in source:
             errors.append(f"{path.relative_to(REPO_ROOT)}: YO!agent forwarding wrappers must call the controller at the caller, not return through the app")
@@ -2199,8 +2214,8 @@ def normalized_production_lines(source: str) -> list[str]:
 def lint_normalized_production_clones(window: int = 8) -> list[str]:
     """Ratchet meaningful cross-file copy/paste blocks without scanning generated/test assets."""
     windows: dict[str, set[str]] = defaultdict(set)
-    sources = [*ASSETS.get("yolomux.js", [])]
-    sources += [str(path.relative_to(REPO_ROOT)) for path in sorted((REPO_ROOT / "yolomux_lib").rglob("*.py"))]
+    sources = [*ASSETS.get("yomux.js", [])]
+    sources += [str(path.relative_to(REPO_ROOT)) for path in sorted((REPO_ROOT / "yomux_lib").rglob("*.py"))]
     for part in sources:
         try:
             lines = normalized_production_lines(read_text(repo_path(part)))
@@ -2252,9 +2267,9 @@ def lint_source_control_characters() -> list[str]:
 def lint_asset_source_completeness() -> list[str]:
     """Every source partial on disk must be shipped or explicitly retired with a reason."""
     source_families = (
-        ("static_src/js/yolomux", "*.js"),
+        ("static_src/js/yomux", "*.js"),
         ("static_src/js/emoji", "*.js"),
-        ("static_src/css/yolomux", "*.css"),
+        ("static_src/css/yomux", "*.css"),
     )
     discovered = {
         f"{directory}/{path.name}"
@@ -2292,8 +2307,8 @@ def lint_undefined_css_vars() -> list[str]:
     """Every `var(--x)` in the CSS bundle must resolve to a `--x:` definition (CSS) or a JS
     `setProperty('--x', …)` / inline `style="--x:…"`. a typo'd or removed token name otherwise
     degrades silently (a hover that does nothing, an invalid `font` shorthand)."""
-    css = build_asset("yolomux.css")
-    js = build_asset("yolomux.js")
+    css = build_asset("yomux.css")
+    js = build_asset("yomux.js")
     css_no_comments = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
     defined = set(re.findall(r"(--[\w-]+)\s*:", css_no_comments))
     defined |= set(re.findall(r"setProperty\(\s*[`'\"]\s*(--[\w-]+)", js))
@@ -2305,8 +2320,8 @@ def lint_undefined_css_vars() -> list[str]:
 
 def lint_unused_css_tokens() -> list[str]:
     """Reject newly defined CSS custom properties that no CSS var() or JavaScript references."""
-    css = _css_without_comments(build_asset("yolomux.css"))
-    js = build_asset("yolomux.js")
+    css = _css_without_comments(build_asset("yomux.css"))
+    js = build_asset("yomux.js")
     defined = set(re.findall(r"(--[\w-]+)\s*:", css))
     referenced = set(re.findall(r"var\(\s*(--[\w-]+)", css))
     referenced.update(re.findall(r"--[\w-]+", js))
@@ -2347,10 +2362,10 @@ def _css_token_source_part() -> str:
     return next(
         (
             part
-            for part in ASSETS.get("yolomux.css", [])
+            for part in ASSETS.get("yomux.css", [])
             if str(part).endswith("00_tokens_base.css")
         ),
-        "static_src/css/yolomux/00_tokens_base.css",
+        "static_src/css/yomux/00_tokens_base.css",
     )
 
 
@@ -2370,7 +2385,7 @@ def _token_color_identities() -> set[tuple[int, int, int, float]]:
 def lint_novel_component_colors() -> list[str]:
     """A raw component color must be token-owned or part of the reviewed migration baseline."""
     token_identities = _token_color_identities()
-    css_parts = set(ASSETS.get("yolomux.css", []))
+    css_parts = set(ASSETS.get("yomux.css", []))
     occurrences: dict[str, dict[tuple[int, int, int, float], list[int]]] = defaultdict(
         lambda: defaultdict(list)
     )
@@ -2497,7 +2512,7 @@ def lint_raw_literal_equals_token() -> list[str]:
     token_values = _token_opaque_color_values()
     ignored_values = {_canonical_opaque_color(value) for value in RAW_TOKEN_LITERAL_IGNORED_VALUES}
     errors: list[str] = []
-    for part in ASSETS.get("yolomux.css", []):
+    for part in ASSETS.get("yomux.css", []):
         if part.endswith("00_tokens_base.css"):
             continue
         path = repo_path(part)
@@ -2529,7 +2544,7 @@ def lint_repeated_raw_component_literals() -> list[str]:
         r"rgba?\(\s*var\(\s*(--[\w-]+)\s*\)\s*/\s*([0-9]*\.?[0-9]+%?)\s*\)",
         re.IGNORECASE,
     )
-    for part in ASSETS.get("yolomux.css", []):
+    for part in ASSETS.get("yomux.css", []):
         if part.endswith("00_tokens_base.css"):
             continue
         path = repo_path(part)
@@ -2586,7 +2601,7 @@ def lint_repeated_raw_box_shadows() -> list[str]:
     """Repeated shadow geometry belongs in one token or grouped selector."""
     occurrences: dict[str, list[str]] = defaultdict(list)
     declaration_re = re.compile(r"(?:^|;)\s*box-shadow\s*:\s*([^;}]+)", re.IGNORECASE)
-    for part in ASSETS.get("yolomux.css", []):
+    for part in ASSETS.get("yomux.css", []):
         if part.endswith("00_tokens_base.css"):
             continue
         path = repo_path(part)
@@ -2624,7 +2639,7 @@ def lint_unowned_z_indexes() -> list[str]:
     token_definition_re = re.compile(r"(--z-[\w-]+)\s*:\s*([^;}]+)", re.IGNORECASE)
     owned_re = re.compile(r"var\(\s*--z-[\w-]+\s*\)(?:\s*!important)?", re.IGNORECASE)
     css_wide_re = re.compile(r"(?:auto|inherit|initial|revert|revert-layer|unset)(?:\s*!important)?", re.IGNORECASE)
-    for asset in ("yolomux.css", "yolomux.js"):
+    for asset in ("yomux.css", "yomux.js"):
         for part in ASSETS.get(asset, []):
             path = repo_path(part)
             try:
@@ -2658,7 +2673,7 @@ def lint_raw_window_viewport_reads() -> list[str]:
     """Every JS viewport read must go through appViewport(); the one owner line is marked."""
     errors: list[str] = []
     pattern = re.compile(r"\bwindow\.inner(?:Width|Height)\b")
-    for part in ASSETS.get("yolomux.js", []):
+    for part in ASSETS.get("yomux.js", []):
         path = repo_path(part)
         try:
             text = read_text(path)
@@ -2828,9 +2843,9 @@ def _main(argv: list[str] | None = None) -> int:
         return 1
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, environ: dict[str, str] | None = None) -> int:
     try:
-        with worktree_writer.acquire_worktree_writer(REPO_ROOT, purpose="static-build"):
+        with worktree_writer.acquire_worktree_writer(REPO_ROOT, purpose="static-build", environ=environ):
             return _main(argv)
     except worktree_writer.WorktreeWriterBusy as error:
         print(f"STATIC BUILD REFUSED: {error}", file=sys.stderr)

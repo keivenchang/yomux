@@ -18,22 +18,22 @@ import pytest
 
 from tests.helpers.external_lease_client import assert_daemon_refuses_a_self_lease
 from tests.helpers.external_lease_client import external_lease_client
-from yolomux_lib import activity_summary
-from yolomux_lib import app as app_module
-from yolomux_lib import github_client
-from yolomux_lib import batchd
-from yolomux_lib import metadata as metadata_module
-from yolomux_lib import session_files
-from yolomux_lib.common import AgentInfo
-from yolomux_lib.common import PaneInfo
-from yolomux_lib.common import SessionInfo
-from yolomux_lib.common import AgentInfo
-from yolomux_lib.common import SessionInfo
-from yolomux_lib.common import TmuxPaneInfo
-from yolomux_lib.filesystem import FilesystemError
-from yolomux_lib.filesystem import io_ops
-from yolomux_lib.local_services import rpc
-from yolomux_lib.local_services import runtime
+from yomux_lib import activity_summary
+from yomux_lib import app as app_module
+from yomux_lib import github_client
+from yomux_lib import batchd
+from yomux_lib import metadata as metadata_module
+from yomux_lib import session_files
+from yomux_lib.common import AgentInfo
+from yomux_lib.common import PaneInfo
+from yomux_lib.common import SessionInfo
+from yomux_lib.common import AgentInfo
+from yomux_lib.common import SessionInfo
+from yomux_lib.common import TmuxPaneInfo
+from yomux_lib.filesystem import FilesystemError
+from yomux_lib.filesystem import io_ops
+from yomux_lib.local_services import rpc
+from yomux_lib.local_services import runtime
 
 from _git_helpers import git
 from _git_helpers import init_repo
@@ -88,7 +88,7 @@ def _build_repository_snapshot_in_child(repo_text, state_dir_text, counter_text,
     Readiness is signalled in two decoupled phases so the parent's single-flight oracle never
     hangs on cold fork+import latency:
 
-    * ``ready`` fires once this process has spawned and imported ``yolomux_lib`` and is about to
+    * ``ready`` fires once this process has spawned and imported ``yomux_lib`` and is about to
       enter ``cached_repository_snapshot``.  Everything before this point -- the fork and the cold
       import -- scales unboundedly with host load, so the parent waits on ``ready`` conditioned on
       this process staying alive rather than against a wall clock.
@@ -1677,7 +1677,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from yolomux_lib import batchd
+from yomux_lib import batchd
 
 os.close(0)
 client = batchd.BatchClient(Path(sys.argv[1]))

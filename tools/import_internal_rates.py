@@ -41,7 +41,7 @@ def normalize_model(row: dict[str, object]) -> dict[str, object] | None:
 
 def main() -> int:
     source = Path(sys.argv[1] if len(sys.argv) > 1 else "/nfs/keivenc/rates.json")
-    destination = Path(sys.argv[2] if len(sys.argv) > 2 else "yolomux_lib/data/internal_model_pricing.json")
+    destination = Path(sys.argv[2] if len(sys.argv) > 2 else "yomux_lib/data/internal_model_pricing.json")
     payload = json.loads(source.read_text(encoding="utf-8"))
     rows = payload.get("rates")
     if not isinstance(rows, list) or payload.get("count") != len(rows) or payload.get("priced_count") != sum(any(row.get(key) is not None for key in ("price_1m_input_tokens", "price_1m_output_tokens", "price_1m_cache_read_input_tokens")) for row in rows):

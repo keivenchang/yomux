@@ -40,7 +40,7 @@ ATTEMPT_SCHEMA = 1
 TIMELINE_SCHEMA = 1
 
 # The one failure this experiment classifies. Byte-identical to the client predicate at
-# static_src/js/yolomux/84_stats_current.js; several retained records key off it, and the
+# static_src/js/yomux/84_stats_current.js; several retained records key off it, and the
 # retired `cpuAxisMax == 100` mismatch is deliberately NOT in scope.
 STALL_PREDICATE = "YO!stats stream generation stalled for more than 3s"
 SUBJECT_NODE_ID = (
@@ -56,7 +56,7 @@ ENVELOPE_MODE = "parallel"
 # The arm variable has exactly one owner, `service.APPEND_FLUSH_ENV_NAME`, and its name is read
 # from there rather than restated. A literal copied here would keep passing after a rename, which
 # is precisely how an arm variable stops reaching the subject without anything going red.
-ARM_ENV_OWNER = Path("yolomux_lib/stats_current/service.py")
+ARM_ENV_OWNER = Path("yomux_lib/stats_current/service.py")
 ARM_ENV_OWNER_CONSTANT = "APPEND_FLUSH_ENV_NAME"
 
 # `0` selects the pre-batching synchronous owner; the batched owner's default is 10.0. BOTH arms
@@ -68,8 +68,8 @@ ARMS = {"control_synchronous": "0", "treatment_batched": "10.0"}
 # statsd respawns from disk and no served response distinguishes a patched interpreter from an
 # unpatched one, so the arm is proven by source identity on disk, not by behaviour.
 STATSD_SOURCE_FILES = (
-    Path("yolomux_lib/stats_current/storage.py"),
-    Path("yolomux_lib/stats_current/service.py"),
+    Path("yomux_lib/stats_current/storage.py"),
+    Path("yomux_lib/stats_current/service.py"),
 )
 
 # Per-test attribution crosses the container boundary through the ONE directory
@@ -238,7 +238,7 @@ def arm_equality_violations(
     """Every way two arms can stop being the same subject, stated as failures not prose.
 
     Arms must be artifact-equal, not source-equal. The historical pair that looked like one
-    defect were the same commit SHA with the same 21 dirty paths and DIFFERENT `yolomux.js`
+    defect were the same commit SHA with the same 21 dirty paths and DIFFERENT `yomux.js`
     (`4dda432e...` vs `3247b973...`), with `84_stats_current.js` -- the file that owns the
     watchdog -- dirty in both. The bundle triple is already recorded by the gate, so asserting
     it costs nothing and would have caught that.
@@ -539,7 +539,7 @@ def first_transition_timeline(bundle: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def retention_root(explicit: str | None = None) -> Path:
-    path = Path(explicit) if explicit else Path(os.environ.get("YOLOMUX_TEST_ROOT", "/tmp/yolomux-test-defect2")) / "defect2" / f"run-{time.time_ns()}"
+    path = Path(explicit) if explicit else Path(os.environ.get("YOLOMUX_TEST_ROOT", "/tmp/yomux-test-defect2")) / "defect2" / f"run-{time.time_ns()}"
     if not path.resolve().is_relative_to(Path("/tmp").resolve()):
         raise ValueError("defect2 retention root must be under /tmp")
     return path

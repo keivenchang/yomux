@@ -19,12 +19,12 @@ import time
 
 import pytest
 
-from yolomux_lib.backend_health.observer import observed_health
-from yolomux_lib.filesystem import SEARCH_SKIP_DIRS
-from yolomux_lib.filesystem import search as fs_search
-from yolomux_lib.search import bfs_index
-from yolomux_lib.search import file_index
-from yolomux_lib.search import search_indexer
+from yomux_lib.backend_health.observer import observed_health
+from yomux_lib.filesystem import SEARCH_SKIP_DIRS
+from yomux_lib.filesystem import search as fs_search
+from yomux_lib.search import bfs_index
+from yomux_lib.search import file_index
+from yomux_lib.search import search_indexer
 
 
 @pytest.fixture(autouse=True)

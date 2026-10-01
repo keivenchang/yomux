@@ -1,0 +1,1198 @@
+.topbar {
+  /* the "big space" above the green tabs was the topbar's OWN cool-gray bg showing where
+     the shorter pills sit centered in a too-tall bar. Keep the tightened height (+4px, not +8px), but
+     leave the bar neutral at rest and use the shared tab-strip green only for hover/focus feedback. */
+  min-height: calc(var(--compact-control-height) + 4px);
+  position: relative;
+  z-index: var(--z-topbar);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-8);
+  padding: var(--space-3) var(--space-8);
+  border-bottom: 1px solid var(--line);
+  background: var(--panel2);
+  transition: background var(--motion-interaction-standard) ease;
+  overflow: visible;
+  white-space: nowrap;
+}
+.topbar:hover,
+.topbar:focus-within {
+  background: var(--pane-tab-strip-bg);
+}
+/* cap the brand title's line-box so it doesn't make the bar tall (it drove most of the centering band). */
+.topbar .title,
+.topbar .brand {
+  line-height: 1;
+}
+.title {
+  font-size: var(--ui-font-size-xl);
+}
+.sub {
+  color: var(--muted);
+  font-size: var(--ui-font-size-sm);
+}
+.brand-cell {
+  justify-self: start;
+  padding-top: var(--space-1);
+}
+.brand {
+  min-width: 92px;
+}
+.transport-warning {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--transport-warning-text);
+  background: var(--transport-warning-bg);
+  border: 1px solid var(--transport-warning-border);
+  border-radius: var(--radius-pill);
+  font: 900 var(--ui-font-size-sm)/1 var(--ui-font);
+  cursor: help;
+}
+.transport-warning[hidden] {
+  display: none;
+}
+.transport-warning::before {
+  content: "!";
+}
+.transport-warning::after {
+  content: attr(data-tip);
+  position: fixed;
+  top: calc(var(--topbar-height) - 2px);
+  left: var(--popover-edge-gap);
+  z-index: var(--z-transport-warning);
+  width: min(60ch, var(--popover-max-inline-size));
+  padding: var(--space-8) var(--space-10);
+  color: var(--transport-tooltip-text);
+  background: var(--transport-tooltip-surface);
+  border: 1px solid var(--transport-tooltip-border);
+  border-radius: 7px;
+  box-shadow: 0 14px 38px var(--paint-shadow-42);
+  white-space: normal;
+  font: var(--ui-font-size-sm)/1.35 var(--ui-font);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition: opacity var(--motion-interaction-standard) ease, transform var(--motion-interaction-standard) ease;
+}
+.transport-warning:hover::after,
+.transport-warning:focus-visible::after {
+  opacity: 1;
+  transform: translateY(0);
+}
+.actions {
+  justify-self: end;
+  min-width: 0;
+  padding-top: var(--space-1);
+}
+.actions button {
+  width: var(--compact-icon-button-size);
+  min-width: var(--compact-icon-button-size);
+  max-width: var(--compact-icon-button-size);
+  height: var(--compact-icon-button-size);
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  overflow: hidden;
+  font-size: 0;
+}
+.actions button::before {
+  content: "";
+  display: block;
+  width: clamp(14px, calc(var(--ui-font-size) + 2px), 19px);
+  height: clamp(14px, calc(var(--ui-font-size) + 2px), 19px);
+  background: currentColor;
+  -webkit-mask: var(--action-icon) center / contain no-repeat;
+  mask: var(--action-icon) center / contain no-repeat;
+}
+#notifyToggle {
+  --action-icon: var(--icon-notify);
+}
+#refreshMeta {
+  --action-icon: var(--icon-refresh);
+}
+#tabMetaToggle {
+  --action-icon: var(--icon-tab-meta);
+}
+#logoutButton {
+  --action-icon: var(--icon-logout);
+}
+#status {
+  max-width: var(--topbar-status-max-inline-size);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#status.layout-status-visible {
+  position: fixed !important;
+  z-index: var(--z-file-editor-dialog);
+  inset-block-start: calc(var(--topbar-height) + var(--space-8)) !important;
+  inset-inline-end: var(--space-12) !important;
+  width: max-content !important;
+  max-width: min(42rem, calc(100vw - var(--space-12) - var(--space-12))) !important;
+  height: auto !important;
+  margin: 0 !important;
+  padding: var(--space-6) var(--space-10) !important;
+  overflow: visible !important;
+  clip: auto !important;
+  white-space: normal !important;
+  border: 1px solid var(--line) !important;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-popover);
+  font: 600 var(--ui-font-size-sm)/1.35 var(--ui-font);
+  pointer-events: none;
+}
+#status.layout-status-danger {
+  color: var(--danger-panel-text);
+  border-color: var(--danger-panel-border) !important;
+  background: color-mix(in srgb, var(--danger-muted-bg) 86%, var(--panel2));
+}
+#status.layout-status-advisory {
+  color: var(--warning-border-strong);
+  border-color: var(--warning-border-strong) !important;
+  background: color-mix(in srgb, var(--warning-border-strong) 12%, var(--panel2));
+}
+#status:empty {
+  display: none;
+}
+.topbar-status-surface {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--panel2) 72%, transparent);
+  color: var(--muted);
+  font: inherit;
+}
+button.topbar-status-surface {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  height: var(--compact-control-height);
+  font-size: var(--ui-font-size-2xs);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.topbar-status-surface[hidden] {
+  display: none;
+}
+/* The one backend-health control: permanently mounted and a FIXED icon-sized square, so a health
+   transition repaints one slot instead of inserting or removing a text pill. Its outer box is the
+   same in every state -- box-sizing:border-box with a fixed inline and block size and a constant 1px
+   border whose colour is the only thing that changes -- so the topbar, #grid, Search, Language, and
+   every xterm keep identical geometry while healthy, degraded, down, or recovered. Its severity is
+   carried by the sentence in its role=status label, never by these colours alone. */
+.backend-health-indicator {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  inline-size: var(--compact-control-height);
+  min-inline-size: var(--compact-control-height);
+  max-inline-size: var(--compact-control-height);
+  block-size: var(--compact-control-height);
+  padding: 0;
+  overflow: hidden;
+  color: var(--danger-text-soft);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  font-size: var(--ui-font-size-2xs);
+  line-height: 1;
+  cursor: default;
+}
+/* Healthy is PAINTED, not cleared. The same fixed square, the same triangle, green -- so a reader
+   who sees the control knows the aggregate is being reported, and an all-green Daemons roster and
+   this triangle agree by construction. It used to have no rule at all: healthy fell through to the
+   transparent base above, which is indistinguishable from "no report yet" and from an empty slot. */
+.backend-health-indicator[data-backend-health="ready"] {
+  color: color-mix(in srgb, var(--good) 45%, transparent);
+  background: color-mix(in srgb, var(--good) 3%, transparent);
+  border-color: color-mix(in srgb, var(--good) 28%, transparent);
+  cursor: pointer;
+}
+.backend-health-indicator[data-backend-health="degraded"] {
+  color: var(--text);
+  background: color-mix(in srgb, var(--warning-border-strong) 12%, var(--panel2));
+  border-color: var(--warning-border-strong);
+  cursor: pointer;
+}
+.backend-health-indicator[data-backend-health="down"],
+.backend-health-indicator[data-backend-health="unresponsive"] {
+  color: var(--danger-text-soft);
+  background: color-mix(in srgb, var(--bad) 18%, var(--panel2));
+  border-color: var(--danger-border-soft);
+  cursor: pointer;
+}
+.backend-health-indicator:hover:not(:disabled),
+.backend-health-indicator:focus-visible {
+  outline: 0;
+  border-color: var(--accent);
+  color: var(--text);
+}
+.backend-health-indicator-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  pointer-events: none;
+}
+/* The full localized sentence lives here as a role=status live region, visually clipped so it
+   announces to assistive tech and shows on the control's tooltip without widening the fixed slot. */
+.backend-health-indicator-text {
+  position: absolute;
+  width: var(--space-1);
+  height: var(--space-1);
+  margin: calc(-1 * var(--space-1));
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+button.topbar-status-surface:hover,
+button.topbar-status-surface:focus-visible {
+  outline: 0;
+  border-color: var(--accent);
+  color: var(--text);
+}
+.latency-meter {
+  height: 24px;
+  min-width: 82px;
+  display: inline-grid;
+  grid-template-columns: 44px auto;
+  align-items: center;
+  gap: var(--space-7);
+  padding: var(--space-2) var(--space-6);
+}
+.latency-meter.good { color: var(--good); }
+.latency-meter.warn { color: var(--accent-gold); }
+.latency-meter.bad { color: var(--bad); }
+.latency-graph {
+  width: 40px;
+  height: 16px;
+  display: block;
+}
+.latency-line {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.latency-number {
+  min-width: 34px;
+  font: var(--ui-font-size-xs)/1 var(--mono-font);
+  text-align: end;
+}
+.app-menu-area {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--space-8);
+  min-height: var(--compact-control-height);
+  overflow: visible;
+}
+/* Keep menu roots, editor navigation, search, and right-side controls in one real flex sequence.
+   An absolutely centered launcher could cover Help while there was still spare space at the right.
+   This order makes Help visible first and puts Search directly between it and the right controls. */
+.topbar-center-tools {
+  /* This is the free middle region between Help and the right-side chrome.  It must own that
+     region so its navigation/search pair can be centered and grow on a wide screen instead of
+     shrink-wrapping immediately after Help. */
+  flex: 1 1 42ch;
+  justify-content: center;
+}
+.topbar-center-tools .topbar-nav {
+  margin-inline-start: 0;
+}
+.topbar-center-tools .topbar-search {
+  margin-inline: 0;
+}
+.topbar-right-tools {
+  /* Status/action controls keep their measured width. The centered Search region owns all shrink;
+     allowing this group to shrink made Language overflow into activity while Search kept a wide,
+     visibly empty flex box. */
+  flex: 0 0 auto;
+  margin-inline-start: 0;
+}
+/* editor back/forward history, immediately before the search box. An auto inline-start margin
+   on the group + an auto inline-end margin on the search centers the nav+search PAIR as one unit. */
+.topbar-nav {
+  flex: 0 0 auto;
+  margin-inline-start: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.topbar-nav-button {
+  flex: 0 0 auto;
+  width: var(--compact-control-height);
+  height: var(--compact-control-height);
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--topbar-control-surface);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--ui-font-size-sm);
+  line-height: 1;
+  cursor: pointer;
+}
+.topbar-nav-button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.topbar-nav-button:disabled {
+  opacity: 0.34;
+  cursor: default;
+}
+.topbar-search {
+  --topbar-search-min-inline-size: 8ch;
+  margin-block: 0;
+  margin-inline: var(--space-6) auto;
+  flex: 1 1 42ch;
+  min-inline-size: var(--topbar-search-min-inline-size);
+  max-inline-size: min(100%, 64ch);
+  height: var(--compact-control-height);
+  padding: 0 var(--space-8);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--topbar-control-surface);
+  color: var(--muted);
+  cursor: text;
+  font: inherit;
+  overflow: hidden;
+}
+.topbar-search:hover {
+  border-color: var(--accent);
+}
+/* Phase 1: the top-right language switcher. A compact pill matching the topbar search. */
+.topbar-language {
+  flex: 0 0 auto;
+  justify-self: end;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--compact-control-height);
+  max-width: var(--topbar-account-max-inline-size);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--topbar-control-surface);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--ui-font-size-sm);
+  padding: 0 var(--space-6);
+  cursor: pointer;
+}
+.topbar-language-menu > .topbar-language {
+  min-width: 72px;
+}
+.topbar-language:hover {
+  border-color: var(--accent);
+}
+.topbar-language-popover {
+  max-height: min(60vh, 520px);
+  overflow: auto;
+}
+.topbar-search-icon {
+  flex: 0 0 auto;
+}
+.topbar-search-label {
+  flex: 1 1 auto;
+  text-align: start;
+}
+.topbar-search-label-short {
+  display: none;
+}
+.topbar-search-hint {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: var(--ui-font-size-3xs, 10px);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-4);
+  color: var(--muted);
+  background: transparent;
+}
+/* Cross-session AI activity status line in the top bar (opens the YO!agent summary). */
+.topbar-activity {
+  gap: var(--space-4);
+  padding: 0 var(--space-6);
+}
+/* Per-state dots carry activity meaning; the aggregate summary is not an error surface. */
+.topbar-activity-count {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-weight: 600;
+}
+.topbar-activity-count-number {
+  min-width: 1ch;
+  text-align: right;
+}
+.topbar-activity-ball.agent-window-activity {
+  --agent-status-ball-size: var(--agent-status-ball-size-base);
+  width: var(--agent-status-ball-size);
+  min-width: var(--agent-status-ball-size);
+  min-height: var(--agent-status-ball-size);
+  margin-inline-start: 0;
+}
+.topbar-activity-sep {
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+  margin-inline: calc(-1 * var(--space-1));
+  opacity: 0.5;
+}
+/* Pointer affordances remain independent from capacity. The measured packing pass below owns
+   every visibility decision, so locale, zoom, and dynamic status content cannot strand spare space. */
+body.app-topbar-touch-compact .topbar {
+  gap: var(--space-6);
+}
+body.app-topbar-touch-compact .app-menu-area {
+  gap: var(--space-6);
+}
+/* The compact Menus root is the only route to File/View/tmux/Tabs/Help on a phone. Give that
+   real button a reliable touch target instead of relying on its short desktop menu-row height. */
+body.app-topbar-touch-compact .app-menu-button {
+  min-height: 36px;
+  touch-action: manipulation;
+}
+body.app-topbar-touch-compact .topbar-center-tools,
+body.app-topbar-touch-compact .topbar-right-tools {
+  gap: var(--space-6);
+}
+/* Compact activity is a state on the control itself, not an incidental touch/menu selector.
+   The existing status-dot renderer remains the color owner; this changes only count geometry. */
+.topbar-activity--mobile-count-balls {
+  display: inline-flex;
+  gap: var(--space-3);
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+}
+.topbar-activity--mobile-count-balls .topbar-activity-count:not(.active),
+.topbar-activity--mobile-count-balls .topbar-activity-idle,
+.topbar-activity--mobile-count-balls .topbar-activity-sep {
+  display: none;
+}
+.topbar-activity--mobile-count-balls .topbar-activity-count.active {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  inline-size: 20px;
+  block-size: 20px;
+}
+.topbar-activity--mobile-count-balls .topbar-activity-ball.agent-window-activity {
+  --agent-status-ball-size-base: 20px;
+  position: absolute;
+  inset: 0;
+  inline-size: var(--agent-status-ball-size);
+  block-size: var(--agent-status-ball-size);
+}
+.topbar-activity--mobile-count-balls .topbar-activity-count-number {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  z-index: var(--z-inline-control);
+  min-inline-size: 0;
+  color: var(--paint-black);
+  font: 800 var(--ui-font-size-3xs)/1 var(--mono-font);
+  font-variant-numeric: tabular-nums;
+  /* Grid centers the line box, not the glyph's optical center. Keep the count horizontally exact
+     and move Safari's high-rendering mono digits down by one physical pixel. */
+  transform: translateY(1px);
+  pointer-events: none;
+}
+/* The packer starts full, walks these semantic reductions on actual overflow, then tests each
+   removed option again. No viewport breakpoint owns a topbar visibility decision. */
+body.topbar-pack-hide-version .topbar .brand-version {
+  display: none;
+}
+body.topbar-pack-compact-brand .topbar .brand {
+  min-width: 0;
+}
+body.topbar-pack-compact-brand .topbar .brand-title > :not(.brand-mark) {
+  display: none;
+}
+body.topbar-pack-hide-latency #latencyMeter,
+body.topbar-pack-hide-logout #logoutButton,
+body.topbar-pack-hide-notify #notifyToggle,
+body.topbar-pack-hide-notify #tabMetaToggle,
+body.topbar-pack-hide-language .topbar-language,
+body.topbar-pack-hide-nav .topbar-nav {
+  display: none;
+}
+body.topbar-pack-compact-search .topbar-search {
+  display: inline-flex;
+  flex: 0 1 8ch;
+  min-inline-size: 7ch;
+  max-inline-size: 8ch;
+  margin-inline: var(--space-6) 0;
+}
+body.topbar-pack-compact-search .topbar-search-label {
+  display: inline-flex;
+  min-inline-size: 0;
+}
+body.topbar-pack-compact-search .topbar-search-label-long,
+body.topbar-pack-compact-search .topbar-search-hint {
+  display: none;
+}
+body.topbar-pack-compact-search .topbar-search-label-short {
+  display: inline;
+}
+body.topbar-pack-icon-search .topbar-center-tools {
+  flex: 0 0 auto;
+}
+body.topbar-pack-icon-search .topbar-search {
+  flex: 0 0 var(--compact-control-height);
+  inline-size: var(--compact-control-height);
+  min-inline-size: var(--compact-control-height);
+  max-inline-size: var(--compact-control-height);
+  justify-content: center;
+  padding: 0;
+  cursor: pointer;
+}
+body.topbar-pack-icon-search .topbar-search-label,
+body.topbar-pack-icon-search .topbar-search-hint {
+  display: none;
+}
+/* Compact activity stays left of Ping and every action button in the real actions rail. */
+.actions > .topbar-activity--mobile-count-balls {
+  display: inline-flex;
+  inline-size: auto;
+  min-inline-size: 0;
+  max-inline-size: none;
+  block-size: var(--compact-icon-button-size);
+  padding: 0;
+  overflow: visible;
+  font-size: inherit;
+}
+.actions > .topbar-activity--mobile-count-balls::before {
+  display: none;
+}
+.app-menu-area.drag-over {
+  outline: 1px dashed var(--drop-outline);
+  outline-offset: 2px;
+  border-radius: 7px;
+}
+.app-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+.app-menu-button {
+  min-height: var(--compact-control-height);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: 0 0.46em;
+  color: var(--menu-button-text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  font: 600 var(--ui-font-size)/1 var(--ui-font);
+  white-space: nowrap;
+}
+.app-menu-button-badge {
+  min-width: max(16px, calc(var(--ui-font-size) + 3px));
+  height: max(16px, calc(var(--ui-font-size) + 3px));
+  padding: 0 var(--space-4);
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border: 1px solid var(--active-control-border);
+  border-radius: var(--radius-pill);
+  font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
+}
+.app-menu-button::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-block: 4px solid transparent;
+  border-inline-start: 5px solid var(--disclosure-triangle-collapsed-color);
+  opacity: 0.9;
+  transform-origin: center;
+  transition: border-color var(--motion-disclosure) ease, transform var(--motion-disclosure) ease;
+}
+.app-menu-button:hover,
+.app-menu-button:focus-visible,
+.app-menu.open > .app-menu-button {
+  color: var(--menu-button-hover-text);
+  background: var(--menu-button-hover-surface);
+  border-color: var(--menu-button-hover-border);
+  outline: 0;
+}
+.app-menu.open > .app-menu-button {
+  border-color: var(--accent-gold);
+}
+.app-menu.open > .app-menu-button::before {
+  border-inline-start-color: var(--disclosure-triangle-expanded-color);
+  transform: rotate(90deg);
+}
+.app-menu-popover {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: var(--z-menu-dropdown);
+  width: var(--app-menu-fit-width, max-content);
+  max-width: var(--app-menu-max-inline-size);
+  max-height: var(--app-menu-max-block-size);
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: var(--space-7);
+  color: var(--menu-popover-text);
+  background: var(--menu-popover-surface);
+  border: 1px solid var(--menu-popover-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--menu-popover-shadow);
+  transform: translate(var(--app-menu-fit-offset, 0), -2px);
+  transition:
+    opacity var(--motion-interaction-fast) ease,
+    transform var(--motion-interaction-fast) ease,
+    visibility 0s linear var(--motion-interaction-fast);
+  top: 100%;
+  left: 0;
+}
+.notification-delivery-popover {
+  top: auto;
+  left: auto;
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+  transition: none;
+}
+.app-menu[data-app-menu="tabs"] > .app-menu-popover {
+  max-height: var(--app-menu-tab-max-block-size);
+}
+/* Phones use a viewport-bounded sheet. Tablets keep the normal content-sized dropdown even when
+   their topbar uses touch-sized controls; an iPad is not an iPhone. */
+body.app-phone-single-pane.app-topbar-touch-compact .app-menu > .app-menu-popover {
+  position: fixed;
+  inset-block-start: calc(max(var(--topbar-height), env(safe-area-inset-top)) + var(--space-4));
+  inset-block-end: max(var(--space-4), env(safe-area-inset-bottom));
+  inset-inline-start: max(var(--space-4), env(safe-area-inset-left));
+  inset-inline-end: max(var(--space-4), env(safe-area-inset-right));
+  width: auto !important;
+  max-width: none;
+  max-height: none;
+  overflow: auto;
+  transform: none !important;
+}
+body.app-phone-single-pane.app-topbar-touch-compact .app-menu--nested-root .app-submenu-popover {
+  width: 100% !important;
+  max-width: none;
+  box-sizing: border-box;
+  margin-inline: 0;
+}
+.app-submenu-popover {
+  display: none;
+  --app-submenu-inline-offset: 22px;
+  width: var(--app-menu-fit-width, max-content);
+  max-width: calc(100% - var(--app-submenu-inline-offset));
+  margin-block: var(--space-2) var(--space-5);
+  margin-inline: var(--app-submenu-inline-offset) 0;
+  padding: var(--space-4);
+  color: var(--menu-popover-text);
+  background: var(--menu-submenu-surface);
+  border: 1px solid var(--menu-submenu-border);
+  border-radius: 7px;
+  box-shadow: var(--menu-submenu-shadow);
+}
+.app-menu.open > .app-menu-popover {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(var(--app-menu-fit-offset, 0), 0);
+  transition-delay: 0s;
+}
+.app-menu:not(.app-menu--nested-root) .app-menu-submenu-wrap:hover > .app-submenu-popover,
+.app-menu:not(.app-menu--nested-root) .app-menu-submenu-wrap:focus-within > .app-submenu-popover,
+.app-menu-submenu-wrap.open > .app-submenu-popover {
+  display: block;
+}
+.app-menu-section {
+  padding: var(--space-4) var(--space-7) var(--space-5);
+  color: var(--menu-section-text);
+  font-size: var(--ui-font-size-xs);
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+.app-menu-separator {
+  height: 1px;
+  margin: var(--space-6) var(--space-2);
+  background: var(--divider);
+}
+.app-menu-submenu-wrap {
+  position: relative;
+}
+.app-menu-command-pair {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: var(--space-4);
+  max-width: 100%;
+  overflow-x: auto;
+}
+.app-menu-command-separator {
+  flex: 0 0 auto;
+  align-self: center;
+  color: var(--muted);
+  font: var(--ui-font-size)/1 var(--mono-font);
+}
+.app-menu-command-row-label {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding-inline: var(--space-6);
+  color: var(--menu-command-text);
+  font: 600 var(--ui-font-size)/1.2 var(--ui-font);
+  white-space: nowrap;
+}
+.app-menu-command-row {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: var(--space-4);
+  max-width: 100%;
+  overflow-x: auto;
+}
+.app-menu-command {
+  width: 100%;
+  min-width: 0;
+  min-height: 30px;
+  display: grid;
+  grid-template-columns: 4px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-6);
+  padding: var(--space-5) var(--space-7);
+  color: var(--menu-command-text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  text-align: start;
+  font: var(--ui-font-size)/1.2 var(--ui-font);
+}
+.app-menu-check {
+  display: block;
+  width: 4px;
+  align-self: stretch;
+  border-radius: var(--radius-pill);
+  opacity: 0;
+}
+.app-menu-command[data-checked="true"] {
+  background: var(--active-control-soft-bg);
+  border-color: transparent;
+}
+.app-menu-command[data-checked="true"] .app-menu-check {
+  opacity: 1;
+  background: var(--active-control-bg);
+}
+.app-menu-command[data-partial="true"] .app-menu-check {
+  opacity: 1;
+  background: color-mix(in srgb, var(--active-control-bg) 48%, transparent);
+}
+.app-menu-command + .app-menu-command,
+.app-menu-submenu-wrap + .app-menu-command,
+.app-menu-command + .app-menu-submenu-wrap,
+.app-menu-submenu-wrap + .app-menu-submenu-wrap,
+.app-menu-command + .app-menu-command-pair,
+.app-menu-command-pair + .app-menu-command,
+.app-menu-command-pair + .app-menu-command-pair,
+.app-menu-submenu-wrap + .app-menu-command-pair,
+.app-menu-command-pair + .app-menu-submenu-wrap,
+.app-menu-command + .app-menu-command-row,
+.app-menu-command-row + .app-menu-command,
+.app-menu-command-row + .app-menu-command-row,
+.app-menu-submenu-wrap + .app-menu-command-row,
+.app-menu-command-row + .app-menu-submenu-wrap {
+  margin-top: var(--space-2);
+}
+.app-menu-command-pair .app-menu-command {
+  width: auto;
+  flex: 0 0 auto;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+  min-height: 30px;
+  padding-inline: var(--space-6);
+}
+.app-menu-command-pair .app-menu-command + .app-menu-command {
+  margin-top: 0;
+}
+.app-menu-command-row .app-menu-command {
+  width: auto;
+  flex: 0 0 auto;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+  min-height: 30px;
+  padding-inline: var(--space-6);
+}
+.app-menu-command-row .app-menu-command + .app-menu-command {
+  margin-top: 0;
+}
+.app-menu-command-row .app-menu-check,
+.app-menu-command-row .app-menu-detail {
+  display: none;
+}
+.app-menu-command-row .app-menu-content {
+  display: block;
+}
+.app-menu-command-row .app-menu-line {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+.app-menu-command-row-label .app-menu-icon {
+  min-width: 24px;
+}
+.app-menu-command-row .app-menu-label {
+  min-width: 0;
+  white-space: nowrap;
+}
+.app-menu-command-pair .app-menu-check {
+  display: none;
+}
+.app-menu-command-pair .app-menu-content {
+  display: block;
+}
+.app-menu-command-pair .app-menu-line {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+.app-menu-command-pair .app-menu-label {
+  min-width: 0;
+  white-space: nowrap;
+}
+.app-menu-command-pair .app-menu-detail {
+  display: none;
+}
+/* Agent launches remain two separate touch targets. The full-access button uses the localized action
+   name; its exact bypass flags stay in the accessible label/title rather than consuming the whole sheet. */
+body.app-topbar-touch-compact .app-menu-command-pair {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+}
+body.app-topbar-touch-compact .app-menu-command-pair .app-menu-command {
+  min-height: 44px;
+}
+body.app-topbar-touch-compact .app-menu-command-row,
+body.app-topbar-touch-compact .app-menu-command-row .app-menu-command,
+body.app-topbar-touch-compact .app-menu-command-row-label {
+  min-height: 44px;
+}
+/* Shell choices are explicit commands, not a second toolbar. Keep their desktop treatment close to
+   text so the launch row does not spend width on pill borders; the touch override below restores
+   a usable hit target without bringing back separators. */
+.app-menu-command-row--shells {
+  gap: var(--space-2);
+  scrollbar-width: thin;
+}
+.app-menu-command-row--shells .app-menu-command-row-label {
+  gap: var(--space-2);
+  padding-inline: var(--space-3);
+}
+.app-menu-command-row--shells .app-menu-command-row-label .app-menu-icon {
+  min-width: auto;
+}
+.app-menu-command-row--shells .app-menu-command {
+  min-width: 0;
+  min-height: 24px;
+  padding-inline: var(--space-3);
+  border-color: transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+}
+.app-menu-command-row--shells .app-menu-command:hover:not(:disabled),
+.app-menu-command-row--shells .app-menu-command:focus-visible {
+  border-color: var(--accent-gold);
+}
+body.app-topbar-touch-compact .app-menu-command-row--shells .app-menu-command,
+body.app-topbar-touch-compact .app-menu-command-row--shells .app-menu-command-row-label {
+  min-height: 40px;
+}
+.app-menu-command:hover:not(:disabled),
+.app-menu-command:focus-visible,
+.app-menu-submenu-wrap:hover > .app-menu-command:not(:disabled),
+.app-menu-submenu-wrap.open > .app-menu-command:not(:disabled),
+.app-menu-tab-command:hover:not(:disabled),
+.app-menu-tab-command:focus-visible {
+  color: var(--menu-command-hover-text);
+  background: var(--menu-command-hover-surface);
+  border-color: var(--menu-command-hover-border);
+  outline: 0;
+}
+.app-menu-command:disabled {
+  color: var(--menu-command-disabled-text);
+  cursor: default;
+}
+.app-menu-setting-row {
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-10);
+  padding: var(--space-5) var(--space-7) var(--space-5) 17px;
+  color: var(--menu-command-text);
+  font: var(--ui-font-size)/1.2 var(--ui-font);
+}
+.app-menu-setting-label {
+  font-weight: 600;
+}
+.app-menu-setting-control input[type="number"] {
+  width: 8ch;
+  min-width: 0;
+  height: var(--compact-control-height);
+  padding: 0 var(--space-5);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--menu-input-surface);
+  color: var(--text);
+  font: var(--ui-font-size-sm)/1 var(--mono-font);
+}
+.app-menu-setting-control input[type="number"]:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.app-menu-setting-control input[type="number"]:disabled {
+  opacity: 0.55;
+}
+.app-menu-setting-suffix {
+  color: var(--pr-status-closed);
+  font: var(--ui-font-size-xs)/1 var(--mono-font);
+}
+.app-menu-content {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.app-menu-icon {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 24px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.app-menu-icon .agent-icon {
+  margin: 0;
+}
+.app-menu-ui-icon {
+  width: 28px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--menu-icon-text);
+  background: var(--menu-icon-surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+.app-menu-ui-icon:hover,
+.app-menu-ui-icon:focus-visible {
+  color: var(--menu-icon-hover-text);
+  background: var(--menu-icon-hover-surface);
+  border-color: var(--menu-icon-hover-border);
+}
+.app-menu-ui-icon.active:hover,
+.app-menu-ui-icon.active:focus-visible {
+  background: var(--menu-active-icon-hover-surface);
+  border-color: var(--menu-active-icon-hover-border);
+}
+.app-menu-ui-icon::before {
+  content: "";
+  width: 15px;
+  height: 15px;
+  background: currentColor;
+  -webkit-mask: var(--app-menu-ui-icon) center / contain no-repeat;
+  mask: var(--app-menu-ui-icon) center / contain no-repeat;
+}
+.app-menu-ui-icon-notify {
+  --app-menu-ui-icon: var(--icon-notify);
+}
+.app-menu-ui-icon-refresh {
+  --app-menu-ui-icon: var(--icon-refresh);
+}
+.app-menu-ui-icon-logout {
+  --app-menu-ui-icon: var(--icon-logout);
+}
+.app-menu-ui-icon-tab-meta {
+  --app-menu-ui-icon: var(--icon-tab-meta);
+}
+.app-menu-ui-icon-finder {
+  --app-menu-ui-icon: var(--icon-finder);
+}
+.app-menu-ui-icon-document {
+  --app-menu-ui-icon: var(--icon-document);
+}
+.app-menu-ui-icon-shell {
+  --app-menu-ui-icon: var(--icon-shell);
+}
+.app-menu-ui-icon-gear {
+  --app-menu-ui-icon: var(--icon-gear);
+}
+.app-menu-ui-icon-pin {
+  --app-menu-ui-icon: var(--icon-pin);
+}
+.app-menu-ui-icon-branch-info {
+  --app-menu-ui-icon: var(--icon-branch-info);
+}
+.app-menu-ui-icon-robot {
+  --app-menu-ui-icon: var(--icon-robot);
+}
+.app-menu-ui-icon-chat-bubble {
+  --app-menu-ui-icon: var(--icon-chat-bubble);
+}
+.app-menu-ui-icon-chart {
+  --app-menu-ui-icon: var(--icon-chart);
+}
+.app-menu-ui-icon-changes {
+  --app-menu-ui-icon: var(--icon-changes);
+}
+.app-menu-label,
+.app-menu-detail {
+  min-width: 0;
+  overflow: hidden;
+}
+.app-menu-label {
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+.app-menu-detail {
+  /* Single line + ellipsis: a wrapping detail made each item 3-4 lines tall AND kept the menu narrow
+     (a wrapping block's max-content is ~one word, so fitAppMenuPopover computed a tiny width). On one
+     line the fit-width grows to the longest detail (capped at max-width), so the menu is wider + shorter.
+     Full text stays available via the item's title/aria-label. */
+  max-width: min(58ch, calc(var(--app-menu-max-inline-size) - 74px));
+  color: var(--menu-detail-text);
+  font: var(--ui-font-size-xs)/1.2 var(--mono-font);
+}
+/* File destinations are navigation, not cards: icon, name, explanation, and shortcut/state share
+   one row. The detail is still titled and in the accessible name when it has to ellipsize. */
+.app-menu-file-destination .app-menu-content {
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+  align-items: center;
+  column-gap: var(--space-6);
+}
+.app-menu-file-destination .app-menu-line {
+  min-width: 0;
+}
+.app-menu-file-destination .app-menu-detail {
+  min-width: 0;
+  max-width: none;
+  text-align: end;
+}
+.app-menu-rich {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  overflow: hidden;
+}
+.app-menu-rich .pane-tab-core {
+  min-width: 0;
+}
+.app-menu-rich .session-button-text {
+  min-width: 0;
+}
+.app-menu-tab-command {
+  min-height: 20px;
+  grid-template-columns: 4px minmax(0, 1fr);
+  gap: var(--space-4);
+  padding: var(--space-1) var(--space-5);
+  border-radius: var(--radius-control);
+  font-size: var(--ui-font-size-sm);
+  line-height: 1;
+}
+.app-menu-tab-command + .app-menu-tab-command {
+  margin-top: var(--space-1);
+  border-top-color: var(--menu-tab-row-separator);
+}
+.app-menu-tab-command .app-menu-content {
+  gap: 0;
+}
+.app-menu-tab-command .app-menu-detail {
+  display: none;
+}
+.app-menu-tab-command .app-menu-rich,
+.app-menu-tab-command .pane-tab-core,
+.app-menu-tab-command .session-button-text {
+  min-width: 0;
+  height: 16px;
+  gap: var(--space-3);
+}
+.app-menu-tab-command .session-button-prefix {
+  gap: var(--space-1);
+}
+.app-menu-tab-command .pane-tab-core > .session-yolo-marker {
+  min-width: 16px;
+  height: 16px;
+  padding: 0;
+  font-size: var(--ui-font-size-3xs);
+}
+.app-menu-tab-command .agent-icon {
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
+}
+.app-menu-tab-command .session-button-number,
+.app-menu-tab-command .session-button-name,
+.app-menu-tab-command .session-button-dir {
+  font-size: var(--ui-font-size-sm);
+  line-height: 1;
+}
+.app-menu-tab-command .session-button-name {
+  max-width: none;
+}
+.app-menu-tab-command .session-button-detail {
+  max-width: none;
+  font-size: var(--ui-font-size-2xs);
+}
+.app-menu-tab-command .session-state-badge {
+  min-width: 20px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--ui-font-size-3xs);
+}
+.app-menu-tab-command .ci-indicator {
+  min-width: 15px;
+  height: 13px;
+  padding: 0 var(--space-2);
+  font-size: var(--ui-font-size-3xs);
+}
+.app-menu-tab-command,
+.app-menu-tab-command .app-menu-rich,
+.app-menu-tab-command .pane-tab-core,
+.app-menu-tab-command .session-button-text,
+.app-menu-tab-command .session-button-prefix,
+.app-menu-tab-command .session-button-dir {
+  color: var(--menu-tab-rich-text);
+}
+.app-menu-submenu-arrow {
+  color: var(--pr-status-closed);
+  font-weight: 700;
+}
+.app-menu-submenu-wrap:hover > .app-menu-command .app-menu-submenu-arrow,
+.app-menu-submenu-wrap:focus-within > .app-menu-command .app-menu-submenu-arrow,
+.app-menu-submenu-wrap.open > .app-menu-command .app-menu-submenu-arrow {
+  transform: rotate(90deg);
+}

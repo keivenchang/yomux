@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from yolomux_lib import app as app_module
+from yomux_lib import app as app_module
 
 
 def assert_composed_owners_preserve_facade_overrides(monkeypatch) -> None:

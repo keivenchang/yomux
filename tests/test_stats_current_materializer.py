@@ -12,29 +12,29 @@ from dataclasses import replace
 
 import pytest
 
-from yolomux_lib.stats_current import materializer
-from yolomux_lib.stats_current import pricing as current_pricing
-from yolomux_lib.stats_current import service as service_module
-from yolomux_lib.stats_current import storage as storage_module
-from yolomux_lib.stats_current.materializer import LAYER_SECONDS
-from yolomux_lib.stats_current.materializer import RANGES
-from yolomux_lib.stats_current.materializer import RESOLUTIONS
-from yolomux_lib.stats_current.materializer import DirtyCell
-from yolomux_lib.stats_current.materializer import MaterializationError
-from yolomux_lib.stats_current.materializer import StaleGenerationError
-from yolomux_lib.stats_current.materializer import UnsupportedSliceError
-from yolomux_lib.stats_current.materializer import accept_generation
-from yolomux_lib.stats_current.materializer import build_generation
-from yolomux_lib.stats_current.materializer import resolve_resolution
-from yolomux_lib.stats_current.materializer import slice_generation
-from yolomux_lib.stats_current.materializer import update_generation
-from yolomux_lib.stats_current.storage import CoverageEpoch
-from yolomux_lib.stats_current.storage import Observation
-from yolomux_lib.stats_current.storage import SchemaMetadata
-from yolomux_lib.stats_current.storage import StoreSnapshot
-from yolomux_lib.stats_current.storage import UsageAtom
-from yolomux_lib.stats_current.storage import UnavailableSpan
-from yolomux_lib.stats_current import resolution as stats_resolution
+from yomux_lib.stats_current import materializer
+from yomux_lib.stats_current import pricing as current_pricing
+from yomux_lib.stats_current import service as service_module
+from yomux_lib.stats_current import storage as storage_module
+from yomux_lib.stats_current.materializer import LAYER_SECONDS
+from yomux_lib.stats_current.materializer import RANGES
+from yomux_lib.stats_current.materializer import RESOLUTIONS
+from yomux_lib.stats_current.materializer import DirtyCell
+from yomux_lib.stats_current.materializer import MaterializationError
+from yomux_lib.stats_current.materializer import StaleGenerationError
+from yomux_lib.stats_current.materializer import UnsupportedSliceError
+from yomux_lib.stats_current.materializer import accept_generation
+from yomux_lib.stats_current.materializer import build_generation
+from yomux_lib.stats_current.materializer import resolve_resolution
+from yomux_lib.stats_current.materializer import slice_generation
+from yomux_lib.stats_current.materializer import update_generation
+from yomux_lib.stats_current.storage import CoverageEpoch
+from yomux_lib.stats_current.storage import Observation
+from yomux_lib.stats_current.storage import SchemaMetadata
+from yomux_lib.stats_current.storage import StoreSnapshot
+from yomux_lib.stats_current.storage import UsageAtom
+from yomux_lib.stats_current.storage import UnavailableSpan
+from yomux_lib.stats_current import resolution as stats_resolution
 
 
 def _snapshot(*, observations=(), coverage=(), usage=(), unavailable=()):
@@ -272,7 +272,7 @@ def test_browser_failure_without_a_metric_does_not_publish_orphan_source_facts()
     observations = (
         Observation("failure", "browser", "browser:a", 11, "epoch:a", 1, {
             "kind": "error", "signature": "jsf-deadbeef", "message": "boom",
-            "source": "/static/yolomux.js", "delivery_outcome": "failed",
+            "source": "/static/yomux.js", "delivery_outcome": "failed",
         }),
         Observation("api", "browser", "browser:a", 12, "epoch:a", 2, {
             "kind": "api", "latency_ms": 10,
@@ -293,7 +293,7 @@ def test_browser_failure_does_not_widen_same_bucket_metric_source_facts():
     observations = (
         Observation("failure", "browser", "browser:a", 11, "epoch:a", 1, {
             "kind": "error", "signature": "jsf-deadbeef", "message": "boom",
-            "source": "/static/yolomux.js", "delivery_outcome": "failed",
+            "source": "/static/yomux.js", "delivery_outcome": "failed",
         }),
         Observation("api", "browser", "browser:a", 12, "epoch:a", 2, {
             "kind": "api", "latency_ms": 10,

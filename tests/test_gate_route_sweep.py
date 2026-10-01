@@ -39,9 +39,9 @@ from tests.browser_helpers.browser_console import validate_server_log_ring_paylo
 from tests.browser_helpers.browser_console import validate_server_log_ring_transition
 from tests.tmux_runtime import run_isolated_tmux
 from tests.tmux_runtime import wait_for_isolated_tmux_panes
-from yolomux_lib import http_routes
-from yolomux_lib import server as server_module
-from yolomux_lib.server_logs import SERVER_LOGS
+from yomux_lib import http_routes
+from yomux_lib import server as server_module
+from yomux_lib.server_logs import SERVER_LOGS
 
 
 pytestmark = [pytest.mark.socket, pytest.mark.e2e]
@@ -398,8 +398,8 @@ def _exercise_route(
         "Accept": "application/json, text/event-stream;q=0.9, */*;q=0.1",
         "Cookie": cookie,
         "Connection": "close",
-        "X-YOLOmux-Measurement": marker,
-        "X-YOLOmux-Request-ID": request_id,
+        "X-YOmux-Measurement": marker,
+        "X-YOmux-Request-ID": request_id,
         **dict(request.extra_headers),
     }
     if request.body is not None:
@@ -676,7 +676,7 @@ def _write_report_artifact(outcomes: list[dict[str, Any]], *, base_sha: str) -> 
     envelope_kinds = sorted({str(outcome["response_envelope"]) for outcome in outcomes})
     payload = {
         "base_sha": base_sha,
-        "registry_owner": "yolomux_lib.http_routes.ALL_ROUTES via yolomux_lib.server.dispatch_http_route",
+        "registry_owner": "yomux_lib.http_routes.ALL_ROUTES via yomux_lib.server.dispatch_http_route",
         "route_count": len(_registry_routes()),
         "api_route_count": sum(route.path.startswith("/api/") for route in _registry_routes()),
         "response_envelope_counts": {

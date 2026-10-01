@@ -36,15 +36,15 @@ from tests.gate_harness import gate_tmux  # noqa: F401
 from tests.gate_harness import assert_no_surviving_local_service_daemons
 from tests.gate_harness import retire_local_service_daemons_beneath
 from tests.gate_harness import run_fixture_cleanup_phases
-from yolomux_lib import auth as auth_module
-from yolomux_lib import common
-from yolomux_lib import server_auth
-from yolomux_lib.infra.worktree_writer import child_process_artifact_environment
-from yolomux_lib.local_services.registry import bounded_process_table
-from yolomux_lib.local_services.registry import inherited_python_path
-from yolomux_lib.stats_current import client as stats_client
-from yolomux_lib.stats_current import service as stats_service
-from yolomux_lib.stats_current import storage
+from yomux_lib import auth as auth_module
+from yomux_lib import common
+from yomux_lib import server_auth
+from yomux_lib.infra.worktree_writer import child_process_artifact_environment
+from yomux_lib.local_services.registry import bounded_process_table
+from yomux_lib.local_services.registry import inherited_python_path
+from yomux_lib.stats_current import client as stats_client
+from yomux_lib.stats_current import service as stats_service
+from yomux_lib.stats_current import storage
 from tools.instance_isolation import synthetic_test_environment
 
 
@@ -186,7 +186,9 @@ def _launch_server(
     process = subprocess.Popen(
         (
             sys.executable,
-            str(REPO_ROOT / "yolomux.py"),
+            str(REPO_ROOT / "yomux.py"),
+            "--backend",
+            "python",
             "--host",
             "127.0.0.1",
             "--port",
@@ -316,7 +318,7 @@ def _statsd_processes_for_database(database_path: Path) -> list[dict[str, object
             arguments = shlex.split(process.command)
         except ValueError:
             continue
-        if "yolomux_lib.stats_current.service" not in arguments:
+        if "yomux_lib.stats_current.service" not in arguments:
             continue
         try:
             database = arguments[arguments.index("--database") + 1]

@@ -4,10 +4,10 @@ YO!agent answers product questions, watches sessions, sends reviewed prompts, an
 
 ## Files
 
-- Built-in skills: `yolomux_lib/yoagent/builtin_skills/*.yaml`.
-- Built-in context: `yolomux_lib/yoagent/builtin_context/*.md`.
-- User skills: `~/.config/yolomux/skills.d/*.yaml`.
-- User context: `~/.config/yolomux/context.d/*.md`.
+- Built-in skills: `yomux_lib/yoagent/builtin_skills/*.yaml`.
+- Built-in context: `yomux_lib/yoagent/builtin_context/*.md`.
+- User skills: `~/.config/yomux/skills.d/*.yaml`.
+- User context: `~/.config/yomux/context.d/*.md`.
 
 User skills replace built-ins with the same name. Set `enabled: false` to disable a skill. Skills describe workflows and allowed YO!agent tools; they do not run shell commands.
 

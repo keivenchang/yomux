@@ -32,7 +32,7 @@ func SyntheticEnvironment(overrides ...string) []string {
 }
 
 func ambientSyntheticInputKey(key string) bool {
-	if strings.HasPrefix(key, "YOLOMUX_") || strings.HasPrefix(key, "XDG_") ||
+	if strings.HasPrefix(key, "YOMUX_") || strings.HasPrefix(key, "YOLOMUX_") || strings.HasPrefix(key, "XDG_") ||
 		strings.HasPrefix(key, "OPENCODE_") || strings.HasPrefix(key, "CODEX_") || strings.HasPrefix(key, "CLAUDE_") {
 		return true
 	}

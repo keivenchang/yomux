@@ -7,13 +7,13 @@ from __future__ import annotations
 import inspect
 from collections import OrderedDict
 
-from yolomux_lib import app
-from yolomux_lib import local_service_projection
-from yolomux_lib import statusd_client
-from yolomux_lib import watchd_client
-from yolomux_lib.approval import approvald
-from yolomux_lib.infra import batchd
-from yolomux_lib.search import search_indexer
+from yomux_lib import app
+from yomux_lib import local_service_projection
+from yomux_lib import statusd_client
+from yomux_lib import watchd_client
+from yomux_lib.approval import approvald
+from yomux_lib.infra import batchd
+from yomux_lib.search import search_indexer
 
 
 class RegistryStub:

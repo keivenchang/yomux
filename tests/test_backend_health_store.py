@@ -21,45 +21,45 @@ import pytest
 
 from tests.helpers.clock import FakeClock
 
-from yolomux_lib.backend_health import store as store_module
-from yolomux_lib.backend_health.store import AGGREGATE_COVERAGE_FULL
-from yolomux_lib.backend_health.store import AGGREGATE_COVERAGE_PARTIAL
-from yolomux_lib.backend_health.store import BACKEND_HEALTH_MAX_RESOURCES
-from yolomux_lib.backend_health.store import BACKEND_HEALTH_MAX_TRANSITIONS
-from yolomux_lib.backend_health.store import BACKEND_HEALTH_REASON_CODES
-from yolomux_lib.backend_health.store import BACKEND_HEALTH_RECOVERY_OUTCOMES
-from yolomux_lib.backend_health.store import BACKEND_HEALTH_SCHEMA_VERSION
-from yolomux_lib.backend_health.store import BACKEND_HEALTH_STATES
-from yolomux_lib.backend_health.store import COVERAGE_REASON_CORRUPT_COUNTERS
-from yolomux_lib.backend_health.store import COVERAGE_REASON_MISSED_FINAL
-from yolomux_lib.backend_health.store import COVERAGE_REASON_ROLLBACK
-from yolomux_lib.backend_health.store import DIAGNOSTIC_HISTORY_RESET
-from yolomux_lib.backend_health.store import DIAGNOSTIC_PEER_COUNTERS_INVALID
-from yolomux_lib.backend_health.store import DIAGNOSTIC_PERSIST_FAILED
-from yolomux_lib.backend_health.store import DIAGNOSTIC_REASON_CODE_INVALID
-from yolomux_lib.backend_health.store import DIAGNOSTIC_RESOURCE_LIMIT
-from yolomux_lib.backend_health.store import DIAGNOSTIC_WRITER_CONFLICT
-from yolomux_lib.backend_health.store import HISTORY_COVERAGE_FULL
-from yolomux_lib.backend_health.store import HISTORY_COVERAGE_RESET
-from yolomux_lib.backend_health.store import PERSISTENCE_BLOCKED
-from yolomux_lib.backend_health.store import PERSISTENCE_DEGRADED
-from yolomux_lib.backend_health.store import PERSISTENCE_OK
-from yolomux_lib.backend_health.store import RESET_HISTORY_CORRUPT
-from yolomux_lib.backend_health.store import RESET_HISTORY_PORT_MISMATCH
-from yolomux_lib.backend_health.store import RESET_HISTORY_SCHEMA_UNSUPPORTED
-from yolomux_lib.backend_health.store import RESET_HISTORY_UNREADABLE
-from yolomux_lib.backend_health.store import TRANSITION_ROW_FIELDS
-from yolomux_lib.backend_health.store import UNVERIFIED_PROCESS_EPOCH
-from yolomux_lib.backend_health.store import BackendHealthContractError
-from yolomux_lib.backend_health.store import BackendHealthStore
-from yolomux_lib.backend_health.store import HealthSnapshot
-from yolomux_lib.backend_health.store import PublishResult
-from yolomux_lib.backend_health.store import ResourceObservation
-from yolomux_lib.backend_health.store import WriterIdentity
-from yolomux_lib.backend_health.store import _PROCESS_EPOCH_RE
-from yolomux_lib.backend_health.store import _REASON_CODE_RE
-from yolomux_lib.backend_health.store import process_epoch_token
-from yolomux_lib.infra.atomic_file import atomic_write_text
+from yomux_lib.backend_health import store as store_module
+from yomux_lib.backend_health.store import AGGREGATE_COVERAGE_FULL
+from yomux_lib.backend_health.store import AGGREGATE_COVERAGE_PARTIAL
+from yomux_lib.backend_health.store import BACKEND_HEALTH_MAX_RESOURCES
+from yomux_lib.backend_health.store import BACKEND_HEALTH_MAX_TRANSITIONS
+from yomux_lib.backend_health.store import BACKEND_HEALTH_REASON_CODES
+from yomux_lib.backend_health.store import BACKEND_HEALTH_RECOVERY_OUTCOMES
+from yomux_lib.backend_health.store import BACKEND_HEALTH_SCHEMA_VERSION
+from yomux_lib.backend_health.store import BACKEND_HEALTH_STATES
+from yomux_lib.backend_health.store import COVERAGE_REASON_CORRUPT_COUNTERS
+from yomux_lib.backend_health.store import COVERAGE_REASON_MISSED_FINAL
+from yomux_lib.backend_health.store import COVERAGE_REASON_ROLLBACK
+from yomux_lib.backend_health.store import DIAGNOSTIC_HISTORY_RESET
+from yomux_lib.backend_health.store import DIAGNOSTIC_PEER_COUNTERS_INVALID
+from yomux_lib.backend_health.store import DIAGNOSTIC_PERSIST_FAILED
+from yomux_lib.backend_health.store import DIAGNOSTIC_REASON_CODE_INVALID
+from yomux_lib.backend_health.store import DIAGNOSTIC_RESOURCE_LIMIT
+from yomux_lib.backend_health.store import DIAGNOSTIC_WRITER_CONFLICT
+from yomux_lib.backend_health.store import HISTORY_COVERAGE_FULL
+from yomux_lib.backend_health.store import HISTORY_COVERAGE_RESET
+from yomux_lib.backend_health.store import PERSISTENCE_BLOCKED
+from yomux_lib.backend_health.store import PERSISTENCE_DEGRADED
+from yomux_lib.backend_health.store import PERSISTENCE_OK
+from yomux_lib.backend_health.store import RESET_HISTORY_CORRUPT
+from yomux_lib.backend_health.store import RESET_HISTORY_PORT_MISMATCH
+from yomux_lib.backend_health.store import RESET_HISTORY_SCHEMA_UNSUPPORTED
+from yomux_lib.backend_health.store import RESET_HISTORY_UNREADABLE
+from yomux_lib.backend_health.store import TRANSITION_ROW_FIELDS
+from yomux_lib.backend_health.store import UNVERIFIED_PROCESS_EPOCH
+from yomux_lib.backend_health.store import BackendHealthContractError
+from yomux_lib.backend_health.store import BackendHealthStore
+from yomux_lib.backend_health.store import HealthSnapshot
+from yomux_lib.backend_health.store import PublishResult
+from yomux_lib.backend_health.store import ResourceObservation
+from yomux_lib.backend_health.store import WriterIdentity
+from yomux_lib.backend_health.store import _PROCESS_EPOCH_RE
+from yomux_lib.backend_health.store import _REASON_CODE_RE
+from yomux_lib.backend_health.store import process_epoch_token
+from yomux_lib.infra.atomic_file import atomic_write_text
 
 
 PORT = 7111
@@ -613,7 +613,7 @@ def test_a_transition_row_with_unexpected_fields_rejects_the_document(tmp_path, 
     store = build_store(tmp_path, clock, epoch_ids)
     publish(store, clock, observation(state="ready"))
     document = json.loads(store.document_path.read_text(encoding="utf-8"))
-    document["resources"]["statsd"]["transitions"][0]["command_line"] = "python -m yolomux_lib.statsd --serve"
+    document["resources"]["statsd"]["transitions"][0]["command_line"] = "python -m yomux_lib.statsd --serve"
     store.document_path.write_text(json.dumps(document), encoding="utf-8")
 
     reopened = build_store(tmp_path, clock, epoch_ids)
@@ -700,7 +700,7 @@ def test_an_invalid_reason_code_is_reported_once_per_episode(tmp_path, clock, ep
 SECRETS = (
     "/home/keivenc/dev/yolomux.dev7111/state/services/yolomux-statsd.sock",
     "Authorization: Bearer sk-live-9f3a-DO-NOT-LEAK",
-    "python -m yolomux_lib.stats_current.service --serve --token=hunter2",
+    "python -m yomux_lib.stats_current.service --serve --token=hunter2",
     "Traceback (most recent call last): child log line",
 )
 

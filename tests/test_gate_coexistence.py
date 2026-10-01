@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""Gate O: old and rebuilt YOLOmux processes must coexist without state loss."""
+"""Gate O: old and rebuilt YOmux processes must coexist without state loss."""
 
 from __future__ import annotations
 
@@ -42,16 +42,18 @@ from tests.isolated_dev_server import SERVER_STOP_TIMEOUT_SECONDS
 from tests.isolated_dev_server import build_environment
 from tests.isolated_dev_server import build_paths as _build_paths
 from tests.isolated_dev_server import signal_server_exactly
+from tests.isolated_dev_server import server_entrypoint
+from tests.isolated_dev_server import server_entrypoint_arguments
 from tests.isolated_dev_server import wait_until_serving
 from tests.tmux_runtime import start_isolated_tmux_runtime
 from tests.tmux_runtime import stop_isolated_tmux_runtime
-from yolomux_lib.host_identity import process_start_identity
-from yolomux_lib.local_services import registry as local_services_registry
-from yolomux_lib.local_services.registry import bounded_process_table
-from yolomux_lib.local_services.registry import ProcessTableEntry
-from yolomux_lib.local_services.registry import process_spawn_generation
-from yolomux_lib.local_services.registry import SpawnOwnershipProof
-from yolomux_lib.local_services.registry import SpawnProcessOwnership
+from yomux_lib.host_identity import process_start_identity
+from yomux_lib.local_services import registry as local_services_registry
+from yomux_lib.local_services.registry import bounded_process_table
+from yomux_lib.local_services.registry import ProcessTableEntry
+from yomux_lib.local_services.registry import process_spawn_generation
+from yomux_lib.local_services.registry import SpawnOwnershipProof
+from yomux_lib.local_services.registry import SpawnProcessOwnership
 
 
 pytestmark = pytest.mark.socket
@@ -181,18 +183,38 @@ def _process_argv(pid: int, command: str) -> tuple[str, ...]:
     return tuple(os.fsdecode(value) for value in raw.split(b"\0") if value)
 
 
-def _is_local_service_process(pid: int, command: str) -> bool:
+def _is_local_service_process(pid: int, command: str, *, allow_legacy: bool = False) -> bool:
     argv = _process_argv(pid, command)
     try:
         module_index = argv.index("-m") + 1
     except ValueError:
         return False
+    module_prefixes = ("yomux_lib.", "yolomux_lib.") if allow_legacy else ("yomux_lib.",)
     return (
         module_index < len(argv)
-        and argv[module_index].startswith("yolomux_lib.")
+        and argv[module_index].startswith(module_prefixes)
         and "--serve" in argv
         and "--socket" in argv
     )
+
+
+def test_o6_legacy_service_capture_accepts_only_the_explicit_old_package_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        f"{__name__}._process_argv",
+        lambda _pid, _command: (
+            "python",
+            "-m",
+            "yolomux_lib.stats_current.service",
+            "--serve",
+            "--socket",
+            "/tmp/exact.sock",
+        ),
+    )
+
+    assert not _is_local_service_process(43201, "legacy sidecar")
+    assert _is_local_service_process(43201, "legacy sidecar", allow_legacy=True)
 
 
 def _member_matches_capture(
@@ -230,7 +252,11 @@ def _capture_fixture_services(
     )
     captured: list[CapturedFixtureService] = []
     for service_pid, entry in table.items():
-        if entry.ppid != launcher_pid or not _is_local_service_process(service_pid, entry.command):
+        if entry.ppid != launcher_pid or not _is_local_service_process(
+            service_pid,
+            entry.command,
+            allow_legacy=allow_legacy,
+        ):
             continue
         assert entry.pgid == service_pid and entry.session_id == service_pid, (
             f"fixture local-service child {service_pid} lacks a dedicated process group/session"
@@ -617,7 +643,14 @@ def test_o1_service_capture_is_serialized_while_health_requests_converge(monkeyp
 def _wait_until_serving(build: RunningBuild) -> None:
     """Adapter only: the readiness rule itself belongs to `isolated_dev_server`."""
 
-    wait_until_serving(build.process, build.port, build.output, label=build.label)
+    historical_name = server_entrypoint(build.source_root).name == "yolomux.py"
+    wait_until_serving(
+        build.process,
+        build.port,
+        build.output,
+        label=build.label,
+        product_name="YOLOmux" if historical_name else "YOmux",
+    )
 
 
 def _spawn_build(
@@ -635,7 +668,7 @@ def _spawn_build(
     command = [
         sys.executable,
         "-u",
-        str(source_root / "yolomux.py"),
+        *server_entrypoint_arguments(source_root),
         "--http",
         "--host",
         "127.0.0.1",
@@ -1141,7 +1174,7 @@ def test_o6_process_table_uses_portable_session_column_for_darwin_capture(
 
     class Completed:
         returncode = 0
-        stdout = "43201 43200 43201 43201 0:00.01 python -m yolomux_lib.watchd --serve --socket /tmp/exact.sock\n"
+        stdout = "43201 43200 43201 43201 0:00.01 python -m yomux_lib.watchd --serve --socket /tmp/exact.sock\n"
 
     def run(command: list[str], **_kwargs: object) -> Completed:
         commands.append(command)
@@ -1172,7 +1205,7 @@ def test_o6_fixture_service_capture_uses_exact_live_launcher_children_only(
             launcher_pid,
             service_pid,
             0.0,
-            "python -m yolomux_lib.stats_current.service --serve --socket /tmp/exact.sock",
+            "python -m yomux_lib.stats_current.service --serve --socket /tmp/exact.sock",
             1201,
             service_pid,
             "proc:1201",
@@ -1182,7 +1215,7 @@ def test_o6_fixture_service_capture_uses_exact_live_launcher_children_only(
             1,
             foreign_pid,
             0.0,
-            "python -m yolomux_lib.stats_current.service --serve --socket /tmp/foreign.sock",
+            "python -m yomux_lib.stats_current.service --serve --socket /tmp/foreign.sock",
             1203,
             foreign_pid,
             "proc:1203",
@@ -1217,7 +1250,7 @@ def test_o6_fixture_service_capture_fails_closed_without_valid_spawn_generation(
     launcher_pid = 43200
     service_pid = 43201
     launcher_identity = "proc:1200"
-    command = "python -m yolomux_lib.watchd --serve --socket /tmp/exact.sock"
+    command = "python -m yomux_lib.watchd --serve --socket /tmp/exact.sock"
     table = {
         launcher_pid: ProcessTableEntry(1, launcher_pid, 0.0, "python yolomux.py", 1200, launcher_pid, launcher_identity),
         service_pid: ProcessTableEntry(launcher_pid, service_pid, 0.0, command, 1201, service_pid, "proc:1201"),
@@ -1242,7 +1275,7 @@ def test_o6_legacy_peer_capture_accepts_missing_generation_with_exact_leader_pro
     launcher_pid = 43200
     service_pid = 43201
     launcher_identity = "proc:1200"
-    command = "python -m yolomux_lib.watchd --serve --socket /tmp/legacy.sock"
+    command = "python -m yomux_lib.watchd --serve --socket /tmp/legacy.sock"
     table = {
         launcher_pid: ProcessTableEntry(1, launcher_pid, 0.0, "python yolomux.py", 1200, launcher_pid, launcher_identity),
         service_pid: ProcessTableEntry(launcher_pid, service_pid, 0.0, command, 1201, service_pid, "proc:1201"),
@@ -1270,7 +1303,7 @@ def test_o6_fixture_service_capture_revalidates_command_group_session_and_identi
     launcher_pid = 43200
     service_pid = 43201
     launcher_identity = "proc:1200"
-    command = "python -m yolomux_lib.watchd --serve --socket /tmp/exact.sock"
+    command = "python -m yomux_lib.watchd --serve --socket /tmp/exact.sock"
     table = {
         launcher_pid: ProcessTableEntry(1, launcher_pid, 0.0, "python yolomux.py", 1200, launcher_pid, launcher_identity),
         service_pid: ProcessTableEntry(launcher_pid, service_pid, 0.0, command, 1201, service_pid, "proc:1201"),
@@ -1301,7 +1334,7 @@ def test_o6_fixture_service_member_is_revalidated_immediately_before_signal(
         "proc:1200",
         ownership,
         SpawnOwnershipProof(ownership, True, ownership.member_identities),
-        ((service_pid, ("python", "-m", "yolomux_lib.watchd", "--serve", "--socket", "/tmp/exact.sock")),),
+        ((service_pid, ("python", "-m", "yomux_lib.watchd", "--serve", "--socket", "/tmp/exact.sock")),),
     )
     changed_command = "python -m foreign.module --serve --socket /tmp/exact.sock"
     table = {
@@ -1331,9 +1364,9 @@ def test_o6_fixture_service_capture_survives_launcher_exit_without_adopting_reus
         "proc:1200",
         ownership,
         SpawnOwnershipProof(ownership, True, ownership.member_identities),
-        ((service_pid, ("python", "-m", "yolomux_lib.watchd", "--serve", "--socket", "/tmp/exact.sock")),),
+        ((service_pid, ("python", "-m", "yomux_lib.watchd", "--serve", "--socket", "/tmp/exact.sock")),),
     )
-    command = "python -m yolomux_lib.watchd --serve --socket /tmp/exact.sock"
+    command = "python -m yomux_lib.watchd --serve --socket /tmp/exact.sock"
     table = {service_pid: ProcessTableEntry(1, service_pid, 0.0, command, 1201, service_pid, "proc:1201")}
     identities: dict[int, str | None] = {launcher_pid: None, service_pid: "proc:1201"}
     monkeypatch.setattr(f"{__name__}.bounded_process_table", lambda **_kwargs: table)
@@ -1988,7 +2021,7 @@ def test_o6_running_build_stops_registered_server_before_reporting_missing_servi
     class Tmux:
         socket_path = tmp_path / "tmux.sock"
 
-    command = "python -m yolomux_lib.watchd --serve --socket /tmp/exact.sock"
+    command = "python -m yomux_lib.watchd --serve --socket /tmp/exact.sock"
     table = {
         launcher_pid: ProcessTableEntry(1, launcher_pid, 0.0, "python yolomux.py", 1200, launcher_pid, launcher_identity),
         service_pid: ProcessTableEntry(launcher_pid, service_pid, 0.0, command, 1201, service_pid, "proc:1201"),
@@ -2211,7 +2244,7 @@ def test_o6_fixture_service_teardown_never_signals_argv_only_legacy_process_grou
     legacy_entry.mkdir()
     legacy_database = paths.state_dir / "stats-v6.sqlite3"
     (legacy_entry / "cmdline").write_bytes(
-        b"python3\0-m\0yolomux_lib.stats_current.service\0--database\0"
+        b"python3\0-m\0yomux_lib.stats_current.service\0--database\0"
         + os.fsencode(legacy_database)
         + b"\0"
     )

@@ -283,7 +283,7 @@ func fetchPricingSourceWithClient(ctx context.Context, sourceURL string, request
 	if err != nil {
 		return pricingFetchResponse{}, err
 	}
-	request.Header.Set("User-Agent", "YOLOmux pricing refresh")
+	request.Header.Set("User-Agent", "YOmux pricing refresh")
 	request.Header.Set("Accept", "application/json,text/html;q=0.9")
 	for name, value := range requestHeaders {
 		if name == "If-None-Match" || name == "If-Modified-Since" {

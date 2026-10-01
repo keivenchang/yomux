@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""Cross-boundary safety contracts for explicit YOLOmux product roots."""
+"""Cross-boundary safety contracts for explicit YOmux product roots."""
 
 from __future__ import annotations
 
@@ -14,9 +14,9 @@ import pytest
 
 from tools import system_status_latency_probe as probe
 from tools.instance_isolation import resolve_instance_environment
-from yolomux_lib.agent_comms import codex_app_server
-from yolomux_lib.infra import common
-from yolomux_lib.infra import worktree_writer
+from yomux_lib.agent_comms import codex_app_server
+from yomux_lib.infra import common
+from yomux_lib.infra import worktree_writer
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -171,11 +171,14 @@ def test_cli_refuses_relative_product_roots_before_writing_to_cwd(tmp_path: Path
         "YOLOMUX_CODEX_HOME": str(tmp_path / "codex"),
         "YOLOMUX_RUNTIME_DIR": str(tmp_path / "runtime"),
     }
+    for key in tuple(env):
+        if key.startswith("YOMUX_"):
+            env.pop(key)
     env[relative_key] = "relative-product-root"
     env.pop("YOLOMUX_ROOT", None)
 
     result = subprocess.run(
-        [sys.executable, str(ROOT / "yolomux.py"), "--print-runtime-report"],
+        [sys.executable, str(ROOT / "yomux.py"), "--backend", "python", "--print-runtime-report"],
         cwd=cwd,
         env=env,
         text=True,
@@ -259,8 +262,8 @@ def test_home_mapping_owns_defaults_and_exact_home_refusal(tmp_path: Path) -> No
     home = tmp_path / "home"
     paths = common.resolve_yolomux_roots({"HOME": str(home)}, identity=_identity(), temporary_dir=tmp_path / "tmp")
 
-    assert paths.config_dir == home / ".config" / "yolomux"
-    assert paths.state_dir == home / ".local" / "state" / "yolomux"
+    assert paths.config_dir == home / ".config" / "yomux"
+    assert paths.state_dir == home / ".local" / "state" / "yomux"
     assert paths.codex_home == home / ".codex"
     with pytest.raises(ValueError, match=r"YOLOMUX_ROOT.*home directory"):
         common.resolve_yolomux_roots(
@@ -282,7 +285,7 @@ def test_cli_refuses_relative_home_before_default_roots_write_to_cwd(tmp_path: P
         env.pop(key, None)
 
     result = subprocess.run(
-        [sys.executable, str(ROOT / "yolomux.py"), "--print-runtime-report"],
+        [sys.executable, str(ROOT / "yomux.py"), "--backend", "python", "--print-runtime-report"],
         cwd=cwd,
         env=env,
         text=True,
@@ -309,6 +312,39 @@ def test_host_artifact_paths_refuse_relative_runtime_before_writing(tmp_path: Pa
         )
 
     assert not (tmp_path / "relative-runtime").exists()
+
+
+def test_artifact_setup_does_not_materialize_stale_environment_aliases(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    environ = {"YOLOMUX_RUNTIME_DIR": str(tmp_path / "first-runtime")}
+
+    worktree_writer.configure_host_local_artifacts(worktree, environ=environ, apply_process=False)
+    assert "YOMUX_RUNTIME_DIR" not in environ
+
+    environ["YOLOMUX_RUNTIME_DIR"] = str(tmp_path / "second-runtime")
+    paths = worktree_writer.host_artifact_paths(worktree, environ=environ)
+
+    assert paths.root.is_relative_to(tmp_path / "second-runtime")
+
+
+def test_artifact_setup_mirrors_canonical_environment_for_legacy_readers(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    canonical_runtime = str(tmp_path / "canonical-runtime")
+    environ = {
+        "YOMUX_RUNTIME_DIR": canonical_runtime,
+        "YOLOMUX_RUNTIME_DIR": str(tmp_path / "legacy-runtime"),
+    }
+
+    paths = worktree_writer.configure_host_local_artifacts(
+        worktree,
+        environ=environ,
+        apply_process=False,
+    )
+
+    assert environ["YOLOMUX_RUNTIME_DIR"] == canonical_runtime
+    assert paths.root.is_relative_to(tmp_path / "canonical-runtime")
 
 
 def test_rooted_host_artifacts_ignore_ambient_xdg_runtime(tmp_path: Path) -> None:
@@ -360,7 +396,7 @@ def test_rooted_package_import_refuses_outside_artifact_overrides_before_writing
     })
 
     result = subprocess.run(
-        [sys.executable, "-c", "import yolomux_lib"],
+        [sys.executable, "-c", "import yomux_lib"],
         cwd=tmp_path,
         env=env,
         text=True,
@@ -368,9 +404,30 @@ def test_rooted_package_import_refuses_outside_artifact_overrides_before_writing
     )
 
     assert result.returncode != 0
-    assert key in result.stderr
+    expected_key = "YOMUX_CA_DIR" if key == "YOLOMUX_CA_DIR" else key
+    assert expected_key in result.stderr
     assert not root.exists()
     assert not outside.exists()
+
+
+def test_package_import_exposes_canonical_roots_to_legacy_readers(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    environment = {
+        "HOME": str(tmp_path / "home"),
+        "PYTHONPATH": str(ROOT),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "YOMUX_RUNTIME_DIR": str(runtime),
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", "import os, yomux_lib; print(os.environ['YOLOMUX_RUNTIME_DIR'])"],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(runtime)
 
 
 @pytest.mark.parametrize("prefix_kind", ("relative", "filesystem-root", "home"))
@@ -401,6 +458,9 @@ def test_python_cache_prefix_refuses_unsafe_roots_before_writing(
 @pytest.mark.parametrize("key", ("YOLOMUX_CODEX_HOME", "CODEX_HOME"))
 def test_codex_runtime_adapters_refuse_relative_home_without_creating_it(monkeypatch, tmp_path: Path, key: str) -> None:
     monkeypatch.chdir(tmp_path)
+    for env_key in tuple(os.environ):
+        if env_key.startswith("YOMUX_"):
+            monkeypatch.delenv(env_key)
     base_env = {
         "PATH": "/usr/bin",
         "YOLOMUX_CONFIG_DIR": str(tmp_path / "config"),
@@ -651,15 +711,17 @@ def test_setup_tls_dry_run_rejects_relative_output_roots_before_writing(
     key: str,
     value: str,
 ) -> None:
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("YOMUX_")}
     state_dir = str(tmp_path / "state")
     ca_dir = str(tmp_path / "ca")
     arguments = [str(ROOT / "tools" / "setup-tls.sh"), "--dry-run", "--state-dir", state_dir, "--ca-dir", ca_dir]
     arguments[arguments.index(option) + 1] = value
 
-    result = subprocess.run(arguments, cwd=tmp_path, text=True, capture_output=True)
+    result = subprocess.run(arguments, cwd=tmp_path, env=environment, text=True, capture_output=True)
 
     assert result.returncode != 0
-    assert key in result.stderr
+    expected_key = "YOMUX_CA_DIR" if key == "YOLOMUX_CA_DIR" else key
+    assert expected_key in result.stderr
     assert "absolute" in result.stderr
     assert list(tmp_path.iterdir()) == []
 
@@ -670,8 +732,8 @@ def test_setup_tls_rejects_relative_environment_ca_before_default_state_import(t
     env = {
         **os.environ,
         "PYTHONDONTWRITEBYTECODE": "1",
-        "YOLOMUX_CA_DIR": "relative-ca",
-        "YOLOMUX_RUNTIME_DIR": str(tmp_path / "runtime"),
+        "YOMUX_CA_DIR": "relative-ca",
+        "YOMUX_RUNTIME_DIR": str(tmp_path / "runtime"),
     }
 
     result = subprocess.run(
@@ -683,7 +745,7 @@ def test_setup_tls_rejects_relative_environment_ca_before_default_state_import(t
     )
 
     assert result.returncode != 0
-    assert "YOLOMUX_CA_DIR" in result.stderr
+    assert "YOMUX_CA_DIR" in result.stderr
     assert "absolute" in result.stderr
     assert not (tmp_path / "runtime").exists()
 
@@ -697,6 +759,9 @@ def test_setup_tls_rejects_relative_environment_state_before_product_import(tmp_
         "YOLOMUX_STATE_DIR": "relative-state",
         "YOLOMUX_HOST_ARTIFACT_DIR": str(tmp_path / "artifacts"),
     }
+    for key in tuple(env):
+        if key.startswith("YOMUX_"):
+            env.pop(key)
 
     result = subprocess.run(
         [str(ROOT / "tools" / "setup-tls.sh"), "--dry-run"],
@@ -757,6 +822,32 @@ def test_setup_tls_default_dry_run_writes_no_product_state(tmp_path: Path) -> No
     assert not (tmp_path / "artifacts").exists()
 
 
+def test_setup_tls_empty_canonical_ca_value_overrides_legacy_value(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {key: value for key, value in os.environ.items() if not key.startswith(("YOMUX_", "YOLOMUX_"))}
+    env.update({
+        "HOME": str(home),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "YOMUX_CA_DIR": "",
+        "YOLOMUX_CA_DIR": str(tmp_path / "legacy-ca"),
+        "YOMUX_RUNTIME_DIR": str(tmp_path / "runtime"),
+    })
+
+    result = subprocess.run(
+        [str(ROOT / "tools" / "setup-tls.sh"), "--dry-run"],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"[dry-run] CA:        {home}/.local/share/yomux-ca/rootCA.crt" in result.stdout
+    assert str(tmp_path / "legacy-ca") not in result.stdout
+    assert result.stderr.count("WARNING: YOLOMUX_* environment names are deprecated") == 1
+
+
 def test_check_refuses_relative_tool_lock_before_writing(tmp_path: Path) -> None:
     cwd = tmp_path / "cwd"
     cwd.mkdir()
@@ -788,7 +879,7 @@ def test_check_refuses_unsafe_root_environment_before_package_writes(tmp_path: P
     cwd = tmp_path / "cwd"
     cwd.mkdir()
     env = {
-        **os.environ,
+        **{key: value for key, value in os.environ.items() if not key.startswith("YOMUX_")},
         "HOME": str(tmp_path / "home"),
         "PYTHONDONTWRITEBYTECODE": "1",
     }

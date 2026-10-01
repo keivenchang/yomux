@@ -7,7 +7,7 @@ const vm = require('vm');
 // getComputedStyle only supplies direction and default element rects are synthetic. ResizeObserver,
 // MutationObserver, scrolling metrics, and boot-section wiring are intentionally absent. Tests that need
 // computed paint, observer delivery, scroll geometry, or rendered placement belong in Selenium.
-const BUNDLE_SOURCE = fs.readFileSync('static/yolomux.js', 'utf8');
+const BUNDLE_SOURCE = fs.readFileSync('static/yomux.js', 'utf8');
 const EN_CATALOG = Object.freeze(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8')));
 const BUNDLE_BOOT_START = BUNDLE_SOURCE.indexOf("if (refreshMeta) {");
 assert.ok(BUNDLE_BOOT_START > 0, 'could not find browser boot section');
@@ -139,26 +139,26 @@ function canonicalWorkGraphFixture(session, info = {}) {
 }
 
 function serverDefaultSettings(...keys) {
-  // Numeric defaults come from the ONE owner, yolomux_lib/workspace/settings.py
+  // Numeric defaults come from the ONE owner, yomux_lib/workspace/settings.py
   // DEFAULT_SETTINGS; the fixture inherits instead of keeping a drifting copy.
-  const source = fs.readFileSync(require('path').join(__dirname, '..', '..', 'yolomux_lib', 'workspace', 'settings.py'), 'utf8');
+  const source = fs.readFileSync(require('path').join(__dirname, '..', '..', 'yomux_lib', 'workspace', 'settings.py'), 'utf8');
   return Object.fromEntries(keys.map(key => {
     const match = source.match(new RegExp(`"${key}": ([0-9.]+),`));
-    if (!match) throw new Error(`layout_test_helper: default "${key}" not found in yolomux_lib/workspace/settings.py DEFAULT_SETTINGS`);
+    if (!match) throw new Error(`layout_test_helper: default "${key}" not found in yomux_lib/workspace/settings.py DEFAULT_SETTINGS`);
     return [key, Number(match[1])];
   }));
 }
 
 function serverFilesystemBatchLimits() {
-  // The /api/fs/batch bounds come from the ONE owner, yolomux_lib/filesystem/__init__.py, the same
+  // The /api/fs/batch bounds come from the ONE owner, yomux_lib/filesystem/__init__.py, the same
   // way the real boot payload does. A literal here would be a copy free to drift from the constant
   // the server actually refuses above, which is the whole reason the bundle stopped carrying one.
-  const source = fs.readFileSync(require('path').join(__dirname, '..', '..', 'yolomux_lib', 'filesystem', '__init__.py'), 'utf8');
+  const source = fs.readFileSync(require('path').join(__dirname, '..', '..', 'yomux_lib', 'filesystem', '__init__.py'), 'utf8');
   const maxRequestsMatch = source.match(/^MAX_BATCH_REQUESTS = (\d+)$/m);
-  if (!maxRequestsMatch) throw new Error('layout_test_helper: MAX_BATCH_REQUESTS not found in yolomux_lib/filesystem/__init__.py');
+  if (!maxRequestsMatch) throw new Error('layout_test_helper: MAX_BATCH_REQUESTS not found in yomux_lib/filesystem/__init__.py');
   const maxRequests = Number(maxRequestsMatch[1]);
   const triggerMatch = source.match(/^BATCH_TRIGGER_COUNT_LIMIT = (MAX_BATCH_REQUESTS|\d+)$/m);
-  if (!triggerMatch) throw new Error('layout_test_helper: BATCH_TRIGGER_COUNT_LIMIT not found in yolomux_lib/filesystem/__init__.py');
+  if (!triggerMatch) throw new Error('layout_test_helper: BATCH_TRIGGER_COUNT_LIMIT not found in yomux_lib/filesystem/__init__.py');
   const triggerCountLimit = triggerMatch[1] === 'MAX_BATCH_REQUESTS' ? maxRequests : Number(triggerMatch[1]);
   return {maxRequests, triggerCountLimit};
 }
@@ -178,7 +178,7 @@ const DEFAULT_TEST_SETTINGS = Object.freeze({
   notifications: Object.freeze({
     toast_duration_ms: 10000,
   }),
-  // Performance defaults are READ from the single owner (yolomux_lib/workspace/settings.py
+  // Performance defaults are READ from the single owner (yomux_lib/workspace/settings.py
   // DEFAULT_SETTINGS) instead of hand-copied here: this block previously drifted in
   // lockstep-edit fashion whenever a default changed. A missing key throws so a
   // renamed setting fails loudly rather than silently diverging.
@@ -791,7 +791,7 @@ function settingsOverride(settings = {}, defaults = DEFAULT_TEST_SETTINGS) {
 }
 
 function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], protocol = 'http:', navigatorPlatform = 'Linux x86_64', accessRole = 'admin', options = {}) {
-  const bootstrapOverrides = options.bootstrapOverrides || Object.fromEntries(Object.entries(options).filter(([key]) => !['sessionStorage', 'localStorage', 'fireTimeoutDelays', 'locationPort', 'locationHash', 'coarsePointer', 'hoverCapable', 'viewport', 'performance', 'PerformanceObserver'].includes(key)));
+  const bootstrapOverrides = options.bootstrapOverrides || Object.fromEntries(Object.entries(options).filter(([key]) => !['sessionStorage', 'localStorage', 'fireTimeoutDelays', 'locationPort', 'locationHash', 'coarsePointer', 'hoverCapable', 'viewport', 'performance', 'PerformanceObserver', 'bootstrapElementId'].includes(key)));
   const fireTimeoutDelays = new Set((Array.isArray(options.fireTimeoutDelays) ? options.fireTimeoutDelays : [])
     .map(Number)
     .filter(delay => Number.isFinite(delay) && delay >= 0));
@@ -815,7 +815,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     homePath: '/home/test',
     repoRoot: '/home/test/yolomux.dev',
     maxSessionTabs: 99,
-    // The real server always states the bounds /api/fs/batch refuses above (yolomux_lib/web.py),
+    // The real server always states the bounds /api/fs/batch refuses above (yomux_lib/web.py),
     // and the bundle splits its posts at maxRequests. Seed the production values so every suite
     // exercises the configuration a browser actually boots into; the tests that care about the
     // split or about an unstated bound override this key explicitly.
@@ -844,11 +844,15 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
   const storage = new Map(Object.entries(options.localStorage || {}).map(([key, value]) => [String(key), String(value)]));
   const sessionStorageMap = new Map(Object.entries(options.sessionStorage || {}).map(([key, value]) => [String(key), String(value)]));
   const localStorage = {
+    get length() { return storage.size; },
+    key(index) { return [...storage.keys()][Number(index)] ?? null; },
     getItem(key) { return storage.has(String(key)) ? storage.get(String(key)) : null; },
     setItem(key, value) { storage.set(String(key), String(value)); },
     removeItem(key) { storage.delete(String(key)); },
   };
   const sessionStorage = {
+    get length() { return sessionStorageMap.size; },
+    key(index) { return [...sessionStorageMap.keys()][Number(index)] ?? null; },
     getItem(key) { return sessionStorageMap.has(String(key)) ? sessionStorageMap.get(String(key)) : null; },
     setItem(key, value) { sessionStorageMap.set(String(key), String(value)); },
     removeItem(key) { sessionStorageMap.delete(String(key)); },
@@ -896,9 +900,10 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
   };
   const notification = {permission: 'denied'};
   const element = id => {
+    if (id === 'yomux-bootstrap' && options.bootstrapElementId === 'yolomux-bootstrap') return null;
     if (!elements.has(id)) elements.set(id, new TestElement(id));
     const node = elements.get(id);
-    if (id === 'yolomux-bootstrap') node.textContent = bootstrap;
+    if (id === (options.bootstrapElementId || 'yomux-bootstrap')) node.textContent = bootstrap;
     return node;
   };
   const context = {
@@ -1499,7 +1504,7 @@ globalThis.__layoutTestApi = {
   bindPanelPopoverForTest: bindPanelPopover,
   debugRuntimeFacadeForTest: debugRuntimeFacade,
   terminalRuntimeFacadeForTest: terminalRuntimeFacade,
-  setStatsCurrentNamespaceForTest(value) { globalThis.YOLOmuxStatsCurrent = value; },
+  setStatsCurrentNamespaceForTest(value) { globalThis.YOmuxStatsCurrent = value; },
   bindPaneFrameControlsForTest: bindPaneFrameControls,
   bindSearchHistoryPanelForTest: bindSearchHistoryPanel,
   fetchDirectoryForTest: fetchDirectory,
@@ -1617,7 +1622,7 @@ globalThis.__layoutTestApi = {
     };
   },
   fixtureLifecycleOperationStateForTest() {
-    return window.__yolomuxFixtureLifecycle.operationState();
+    return window.__yomuxFixtureLifecycle.operationState();
   },
   apiOperationTerminalForTest(operationId) {
     return apiOperationState.terminal.get(String(operationId || '')) || null;
@@ -2406,8 +2411,8 @@ globalThis.__layoutTestApi = {
     return state ? {...state} : null;
   },
   setFileTreeRecencyNowForTest(value) {
-    if (value == null) delete globalThis.__yolomuxFileTreeRecencyNowMs;
-    else globalThis.__yolomuxFileTreeRecencyNowMs = Number(value);
+    if (value == null) delete globalThis.__yomuxFileTreeRecencyNowMs;
+    else globalThis.__yomuxFileTreeRecencyNowMs = Number(value);
   },
   dateTimeHourCycleForTest() { return dateTimeHourCycle; },
   setDateTimeHourCycleForTest(value) { dateTimeHourCycle = normalizeDateTimeHourCycle(value); },
@@ -3154,6 +3159,8 @@ globalThis.__layoutTestApi = {
     updateMetadataBadgePulses({sessions: {[session]: {metadata_badge_pulse_remaining_ms: pulses}}});
   },
   storageValueForTest(key) { return localStorage.getItem(key); },
+  storageSetForTest(key, value) { storageSet(key, value); },
+  beginPasteUploadForTest(session) { return beginPasteUpload(session); },
   sessionStorageValueForTest(key) { return sessionStorage.getItem(key); },
   rememberFileExplorerOpenIntentForTest: rememberFileExplorerOpenIntent,
   fileExplorerClosedByUserForTest: fileExplorerClosedByUser,
@@ -3354,7 +3361,7 @@ globalThis.__layoutTestApi = {
   runningAgentCount,
   updateDocumentTitle,
   documentTitleForTest() { return document.title; },
-  setDocumentTitleNowForTest(value) { window.__yolomuxDocumentTitleNowMs = Number(value); },
+  setDocumentTitleNowForTest(value) { window.__yomuxDocumentTitleNowMs = Number(value); },
   modalClassForTest() { return document.getElementById('modal').className; },
   modalTitleForTest() { return document.getElementById('modalTitle').textContent; },
   modalBodyHtmlForTest() { return document.getElementById('modalBody').innerHTML; },
@@ -3463,7 +3470,7 @@ globalThis.__layoutTestApi = {
   documentElementStyleForTest() {
     return document.documentElement.style;
   },
-};`, {filename: 'yolomux-test-bundle.js'})).runInContext(context);
+};`, {filename: 'yomux-test-bundle.js'})).runInContext(context);
   context.document.__listeners = documentListeners;
   const api = context.__layoutTestApi;
   // Mirror production boot: preload the en catalog so t() resolves to English in tests (fetch is

@@ -4,9 +4,9 @@ import socket
 import threading
 import time
 
-from yolomux_lib import approvald
-from yolomux_lib.local_services import rpc
-from yolomux_lib.local_services import runtime as local_service_runtime
+from yomux_lib import approvald
+from yomux_lib.local_services import rpc
+from yomux_lib.local_services import runtime as local_service_runtime
 
 
 class FakeEventLog:

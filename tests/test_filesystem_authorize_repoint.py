@@ -13,14 +13,14 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib import filesystem
-from yolomux_lib.filesystem import git_ops
-from yolomux_lib.filesystem import io_ops
-from yolomux_lib.filesystem import listing
-from yolomux_lib.filesystem import paths
-from yolomux_lib.filesystem import search
-from yolomux_lib.search import bfs_index
-from yolomux_lib.search import file_index
+from yomux_lib import filesystem
+from yomux_lib.filesystem import git_ops
+from yomux_lib.filesystem import io_ops
+from yomux_lib.filesystem import listing
+from yomux_lib.filesystem import paths
+from yomux_lib.filesystem import search
+from yomux_lib.search import bfs_index
+from yomux_lib.search import file_index
 
 from _git_helpers import git, init_repo
 

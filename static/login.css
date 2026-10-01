@@ -28,12 +28,12 @@ body {
   --active-control-border: var(--accent-focus);
   --active-control-text: var(--accent-text);
   /* brand.css resolves its fallback aliases on :root, before body overrides inherit. Rebind
-     the resolved aliases here as well so both the YO chip and LO letters follow the login accent. */
+     the resolved aliases here as well so the highlighted product glyph follows the login accent. */
   --brand-green: var(--accent);
   --brand-primary-green: var(--accent);
-  --brand-yolo-bg: var(--accent);
-  --brand-yolo-border: var(--accent-focus);
-  --brand-yolo-text: var(--accent-text);
+  --brand-mark-bg: var(--accent);
+  --brand-mark-border: var(--accent-focus);
+  --brand-mark-text: var(--accent-text);
 }
 /* Match the saved global dark/light setting before authentication.  A system setting stays
    responsive to the browser/OS preference just as it does in the authenticated application. */

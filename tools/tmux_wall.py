@@ -32,22 +32,22 @@ from urllib.parse import urlparse
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from yolomux_lib.tmux.agent_tui import capture_agent_pane
-from yolomux_lib.tmux.agent_tui import classify_agent_pane
-from yolomux_lib.common import split_csv
-from yolomux_lib.common import path_mtime_or_zero
-from yolomux_lib.locales import message_fields
-from yolomux_lib.locales import resolve_locale_preference
-from yolomux_lib.locales import user_message_payload
-from yolomux_lib.tmux.tmux_utils import cmd_error
-from yolomux_lib.tmux.tmux_utils import run_cmd
-from yolomux_lib.tmux.tmux_utils import tmux
-from yolomux_lib.tmux.tmux_utils import tmux_capture_pane
-from yolomux_lib.tmux.tmux_utils import tmux_capture_pane_styled
-from yolomux_lib.tmux.tmux_utils import use_machine_tmux_for_operator_launch
-from yolomux_lib.web import current_language_pref
-from yolomux_lib.web import html_lang_dir_attrs
-from yolomux_lib.web import server_string
+from yomux_lib.tmux.agent_tui import capture_agent_pane
+from yomux_lib.tmux.agent_tui import classify_agent_pane
+from yomux_lib.common import split_csv
+from yomux_lib.common import path_mtime_or_zero
+from yomux_lib.locales import message_fields
+from yomux_lib.locales import resolve_locale_preference
+from yomux_lib.locales import user_message_payload
+from yomux_lib.tmux.tmux_utils import cmd_error
+from yomux_lib.tmux.tmux_utils import run_cmd
+from yomux_lib.tmux.tmux_utils import tmux
+from yomux_lib.tmux.tmux_utils import tmux_capture_pane
+from yomux_lib.tmux.tmux_utils import tmux_capture_pane_styled
+from yomux_lib.tmux.tmux_utils import use_machine_tmux_for_operator_launch
+from yomux_lib.web import current_language_pref
+from yomux_lib.web import html_lang_dir_attrs
+from yomux_lib.web import server_string
 
 
 DEFAULT_SESSIONS = ("project1", "project2", "project3", "project4")
@@ -143,7 +143,7 @@ class PaneInfo:
 
 
 def tmux_wall_locale(accept_language: str = "", preference: str | None = None) -> str:
-    """Resolve the wall locale through the same preference and browser-language path as YOLOmux."""
+    """Resolve the wall locale through the same preference and browser-language path as YOmux."""
     selected = current_language_pref() if preference is None else preference
     return resolve_locale_preference(selected, accept_language)
 
@@ -761,7 +761,7 @@ def main() -> int:
 
     server = TmuxWallHTTPServer((args.host, args.port), app)
     url_host = "localhost" if args.host in {"0.0.0.0", "::"} else args.host
-    print(f"Serving YOLOmux tmux wall on http://{url_host}:{args.port}/")
+    print(f"Serving YOmux tmux wall on http://{url_host}:{args.port}/")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

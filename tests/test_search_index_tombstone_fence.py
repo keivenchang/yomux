@@ -15,11 +15,11 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib.search import file_index
-from yolomux_lib.search import bfs_index
-from yolomux_lib.search import search_indexer
-from yolomux_lib.filesystem import paths as filesystem_paths
-from yolomux_lib.filesystem import search as filesystem_search
+from yomux_lib.search import file_index
+from yomux_lib.search import bfs_index
+from yomux_lib.search import search_indexer
+from yomux_lib.filesystem import paths as filesystem_paths
+from yomux_lib.filesystem import search as filesystem_search
 
 
 def _reset_registry():

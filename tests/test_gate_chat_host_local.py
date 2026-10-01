@@ -8,12 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib.chat import chat_service as chat_service_module
-from yolomux_lib.chat.chat_service import ChatCursorCodec
-from yolomux_lib.chat.chat_store import ChatStore
-from yolomux_lib.chat.chat_store import default_chat_database_path
-from yolomux_lib.infra import host_partition as host_partition_module
-from yolomux_lib.infra.host_identity import HostIdentity
+from yomux_lib.chat import chat_service as chat_service_module
+from yomux_lib.chat.chat_service import ChatCursorCodec
+from yomux_lib.chat.chat_store import ChatStore
+from yomux_lib.chat.chat_store import default_chat_database_path
+from yomux_lib.infra import host_partition as host_partition_module
+from yomux_lib.infra.host_identity import HostIdentity
 from tests.helpers.local_service_records import FixtureHostIdentityBuilder
 
 

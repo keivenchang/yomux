@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """Hidden YO!stats soak revision-scope contracts."""
 
-from yolomux_lib import live_browser_soak as soak
+from yomux_lib import live_browser_soak as soak
 
 
 def stats_evidence(

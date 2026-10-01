@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""Capture a bounded, read-only YOLOmux CPU/batchd contention window.
+"""Capture a bounded, read-only YOmux CPU/batchd contention window.
 
 The harness deliberately does not drive a browser or refresh any API. Run it while
 the operator keeps the target browser state open, then compare its start/end batchd
@@ -22,7 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from yolomux_lib.batchd import BatchClient
+from yomux_lib.batchd import BatchClient
 from tools.yostats_capture_common import positive_float, positive_int, process_cpu_seconds
 
 
@@ -94,7 +94,7 @@ def bounded_batchd_status() -> dict[str, Any]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Capture a read-only YOLOmux CPU/batchd contention window")
+    parser = argparse.ArgumentParser(description="Capture a read-only YOmux CPU/batchd contention window")
     parser.add_argument("--duration", type=positive_float, default=60.0, help="capture duration in seconds (default: 60)")
     parser.add_argument("--interval", type=positive_float, default=1.0, help="CPU sample interval in seconds (default: 1)")
     parser.add_argument("--web-pid", type=positive_int, required=True, help="active yolomux.py web PID")

@@ -9,7 +9,7 @@ from threading import Thread
 from typing import Mapping
 from typing import Sequence
 
-from yolomux_lib.server import TmuxWebtermHTTPServer
+from yomux_lib.server import TmuxWebtermHTTPServer
 
 
 @dataclass

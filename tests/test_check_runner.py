@@ -35,9 +35,9 @@ from tools import test_plan
 from tools import pytest_catalog_plugin
 from tools.test_catalog import discover_pytest_phase_files
 from tools.tool_guard import container_command_with_host_tool_guard
-from yolomux_lib.background_scheduler import pid_is_alive as background_scheduler_pid_is_alive
-from yolomux_lib.infra.host_identity import process_state
-from yolomux_lib.stats_current import service as service_module
+from yomux_lib.background_scheduler import pid_is_alive as background_scheduler_pid_is_alive
+from yomux_lib.infra.host_identity import process_state
+from yomux_lib.stats_current import service as service_module
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -55,7 +55,7 @@ def load_check_module():
 def test_python_imports_are_module_scoped():
     roots = [
         REPO_ROOT / "yolomux.py",
-        REPO_ROOT / "yolomux_lib",
+        REPO_ROOT / "yomux_lib",
         REPO_ROOT / "tools",
         REPO_ROOT / "tests",
     ]
@@ -82,7 +82,7 @@ def test_python_imports_are_module_scoped():
 def test_runtime_and_tool_function_bodies_are_not_exact_duplicates():
     functions = {}
     duplicates = []
-    for root in (REPO_ROOT / "yolomux_lib", REPO_ROOT / "tools"):
+    for root in (REPO_ROOT / "yomux_lib", REPO_ROOT / "tools"):
         for path in python_source_paths(str(root)):
             _source, tree = parsed_python_source(path)
             for node in ast.walk(tree):
@@ -106,7 +106,7 @@ def test_check_lock_is_one_per_user_across_worktrees_and_tmpdirs(monkeypatch, tm
     monkeypatch.delenv("YOLOMUX_TOOL_LOCK_PATH", raising=False)
     monkeypatch.chdir(tmp_path)
     check = load_check_module()
-    assert check.DEFAULT_TOOL_LOCK_PATH == Path.home() / ".cache" / "yolomux" / "expensive-tools.lock"
+    assert check.DEFAULT_TOOL_LOCK_PATH == Path.home() / ".cache" / "yomux" / "expensive-tools.lock"
 
 
 def test_parent_check_lock_ownership_is_inherited_by_pytest(monkeypatch, tmp_path):
@@ -679,7 +679,7 @@ def test_bazel_runner_copies_the_image_repository_cache_into_private_writable_st
     common = (REPO_ROOT / "tools" / "bazel_test_common.sh").read_text(encoding="utf-8")
     runner = (REPO_ROOT / "tools" / "run_bazel_tests.sh").read_text(encoding="utf-8")
     assert "bazel_test_prepare_repository_cache" in common
-    assert "seed_root=/opt/yolomux-bazel-repository-cache" in common
+    assert "seed_root=/opt/yomux-bazel-repository-cache" in common
     assert '"$seed_root/."' in common
     assert 'find "$cache_root" -type d -exec chmod u+rwx {} +' in common
     assert 'find "$cache_root" -type f -exec chmod u+rw {} +' in common
@@ -978,7 +978,7 @@ def test_explicit_certification_uses_guard_without_lowering_priority(monkeypatch
     # The exclusive phase belongs to the canonical command, and it runs after the parallel lanes.
     assert events[3][0] == "certify", events
     output = capsys.readouterr().out
-    assert "Acquiring YOLOmux expensive-tool lock" in output
+    assert "Acquiring YOmux expensive-tool lock" in output
     assert "lowered check priority" not in output
     assert "CERTIFIED" in output
 
@@ -1049,7 +1049,7 @@ def test_focused_cheap_lane_skips_live_server_priority_work(monkeypatch):
         yield enabled
 
     def fail_active_records():
-        raise AssertionError("cheap focused lanes should not probe live YOLOmux server state")
+        raise AssertionError("cheap focused lanes should not probe live YOmux server state")
 
     monkeypatch.setattr(check, "expensive_tool_lock", fake_expensive_tool_lock)
     monkeypatch.setattr(check, "active_yolomux_server_records", fail_active_records)
@@ -1190,7 +1190,7 @@ def test_expensive_tool_lock_refuses_direct_worktree_path(monkeypatch, tmp_path)
 
 def test_performance_instrumentation_adds_bounded_pytest_durations_and_parses_them():
     check = load_check_module()
-    lane = check.Lane("demo", "demo", (check.Step("pytest", ["python3", "-m", "pytest", "tests", "-q"]), check.Step("node", ["node", "--check", "static/yolomux.js"])))
+    lane = check.Lane("demo", "demo", (check.Step("pytest", ["python3", "-m", "pytest", "tests", "-q"]), check.Step("node", ["node", "--check", "static/yomux.js"])))
 
     instrumented = check.instrument_lane_for_performance(lane)
 
@@ -3240,7 +3240,7 @@ def test_run_tests_sh_rejects_a_workdir_that_escapes_the_source_mount(tmp_path):
     environment = {
         **os.environ,
         "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}",
-        "YOLOMUX_TEST_IMAGE": "yolomux-test:contract",
+        "YOLOMUX_TEST_IMAGE": "yomux-test:contract",
     }
     completed = subprocess.run(
         [str(REPO_ROOT / "docker" / "run-tests.sh"), "--workdir", "../", "--", "true"],
@@ -3279,7 +3279,7 @@ def test_run_tests_sh_rejects_a_symlinked_test_root_before_creating_outside_it(t
         environment = {
             **os.environ,
             "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}",
-            "YOLOMUX_TEST_IMAGE": "yolomux-test:contract",
+            "YOLOMUX_TEST_IMAGE": "yomux-test:contract",
             "YOLOMUX_TEST_ROOT": str(test_root),
             "YOLOMUX_E2E_EVIDENCE_DIR": "",
         }
@@ -3347,7 +3347,7 @@ def test_run_tests_sh_retains_auto_evidence_only_after_a_failed_container(tmp_pa
         environment = {
             **os.environ,
             "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}",
-            "YOLOMUX_TEST_IMAGE": "yolomux-test:contract",
+            "YOLOMUX_TEST_IMAGE": "yomux-test:contract",
             "YOLOMUX_TEST_ROOT": str(test_root),
             "YOLOMUX_E2E_EVIDENCE_DIR": "",
         }
@@ -3404,7 +3404,7 @@ def test_run_tests_sh_fails_when_successful_run_evidence_cleanup_fails(tmp_path)
         environment = {
             **os.environ,
             "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}",
-            "YOLOMUX_TEST_IMAGE": "yolomux-test:contract",
+            "YOLOMUX_TEST_IMAGE": "yomux-test:contract",
             "YOLOMUX_TEST_ROOT": str(test_root),
             "YOLOMUX_E2E_EVIDENCE_DIR": "",
         }
@@ -3437,9 +3437,9 @@ def test_dockerfile_keeps_expensive_dependency_layers_above_go_source_copies():
     """Go edits must not force client, Python, or xterm dependency reinstalls."""
 
     text = (REPO_ROOT / "docker" / "Dockerfile.test").read_text(encoding="utf-8")
-    source_copy = text.index("COPY cmd /opt/yolomux-bazel-seed/cmd")
+    source_copy = text.index("COPY cmd /opt/yomux-bazel-seed/cmd")
     assert text.index("COPY docker/agent-clients/package.json docker/agent-clients/package-lock.json") < source_copy
-    assert text.index("RUN cd /opt/yolomux-agent-clients") < source_copy
+    assert text.index("RUN cd /opt/yomux-agent-clients") < source_copy
     assert "npm install --global" not in text
     assert text.index("RUN pip install --no-cache-dir") < source_copy
     assert text.index("COPY docker/requirements-test.txt /opt/requirements-test.txt") < text.index("RUN pip install --no-cache-dir")
@@ -3447,8 +3447,8 @@ def test_dockerfile_keeps_expensive_dependency_layers_above_go_source_copies():
     assert '"watchfiles>=1.2.0"' not in text
     assert text.index("COPY package.json package-lock.json /opt/xterm/") < source_copy
     assert "npm ci --ignore-scripts" in text
-    assert "ENV PATH=/opt/yolomux-agent-clients/node_modules/.bin:${PATH}" in text
-    assert text.index("COPY go.mod go.sum /opt/yolomux-bazel-seed/") < source_copy
+    assert "ENV PATH=/opt/yomux-agent-clients/node_modules/.bin:${PATH}" in text
+    assert text.index("COPY go.mod go.sum /opt/yomux-bazel-seed/") < source_copy
     assert "GOPROXY=off GOSUMDB=off go mod download" in text
     assert "builder will use its network" not in text
 
@@ -3500,7 +3500,7 @@ def test_bazel_go_race_declares_every_runtime_fixture_root():
     for source_root in (
         '"tests/fixtures/current_model_usage/**/*.jsonl"',
         '"tools/**/*.py"',
-        '"yolomux_lib/**/*.py"',
+        '"yomux_lib/**/*.py"',
     ):
         assert source_root in support_block, source_root
     assert '"//:go_test_support"' in race_block
@@ -3548,8 +3548,8 @@ def test_docker_bazel_targets_share_complete_runtime_data_group():
         assert source_root in group_block, source_root
     assert '"tests/fixtures/architecture_budgets/v1.json"' not in group_block.split("exclude =", 1)[-1], group_block
     for target in (
-        "yolomux_go_browser_e2e",
-        "yolomux_go_stats_browser_docker_e2e",
+        "yomux_go_browser_e2e",
+        "yomux_go_stats_browser_docker_e2e",
         "agent_status_docker_e2e",
     ):
         target_block = text.split(f'name = "{target}"', 1)[1].split("\n)\n\n", 1)[0]
@@ -3561,11 +3561,11 @@ def test_docker_bazel_data_exports_go_subpackage_sources_without_checkout_access
     """The Docker data group must carry Go package files through Bazel boundaries."""
 
     cquery = ["bazel", "cquery", "//:docker_bazel_test_data", "--output=files"]
-    local_registry = Path("/opt/yolomux-bazel-registry")
+    local_registry = Path("/opt/yomux-bazel-registry")
     if local_registry.is_dir():
         cquery.append(f"--registry=file://{local_registry}")
         local_cache = tmp_path / "bazel-repository-cache"
-        shutil.copytree("/opt/yolomux-bazel-repository-cache", local_cache)
+        shutil.copytree("/opt/yomux-bazel-repository-cache", local_cache)
         for cached_path in local_cache.rglob("*"):
             mode = cached_path.stat().st_mode
             os.chmod(cached_path, mode | (0o700 if cached_path.is_dir() else 0o600))
@@ -3581,7 +3581,7 @@ def test_docker_bazel_data_exports_go_subpackage_sources_without_checkout_access
     declared = set(completed.stdout.splitlines())
     for relative in (
         "cmd/fake-llm/BUILD.bazel",
-        "cmd/yolomux-go/BUILD.bazel",
+        "cmd/yomux-go/BUILD.bazel",
         "internal/capabilities/BUILD.bazel",
         "internal/fakellm/BUILD.bazel",
         "internal/finder/BUILD.bazel",
@@ -3589,8 +3589,8 @@ def test_docker_bazel_data_exports_go_subpackage_sources_without_checkout_access
         "internal/testsupport/BUILD.bazel",
         "internal/work/BUILD.bazel",
         "pytest.ini",
-        "cmd/yolomux-go/main.go",
-        "cmd/yolomux-go/stats_runtime.go",
+        "cmd/yomux-go/main.go",
+        "cmd/yomux-go/stats_runtime.go",
         "internal/stats/service.go",
         "internal/stats/materializer.go",
     ):
@@ -3737,6 +3737,15 @@ def test_docker_image_fingerprint_includes_runner_identity(monkeypatch, tmp_path
     assert docker_image.image_fingerprint(shadow_root) != baseline
 
 
+def test_docker_image_runner_identity_prefers_canonical_environment(monkeypatch):
+    docker_image = importlib.import_module("tools.docker_image")
+    monkeypatch.setenv("YOMUX_IMAGE_RUNNER_UID", "1001")
+    monkeypatch.setenv("YOLOMUX_IMAGE_RUNNER_UID", "1000")
+    monkeypatch.setenv("YOMUX_IMAGE_RUNNER_GID", "1002")
+    monkeypatch.setenv("YOLOMUX_IMAGE_RUNNER_GID", "1000")
+    assert docker_image.image_runner_identity() == ("1001", "1002")
+
+
 def test_docker_image_default_identity_matches_rootless_launcher(monkeypatch):
     docker_image = importlib.import_module("tools.docker_image")
     monkeypatch.delenv("YOLOMUX_IMAGE_RUNNER_UID", raising=False)
@@ -3775,7 +3784,7 @@ def test_container_detection_does_not_trust_a_generic_dockerenv_marker(monkeypat
     mountinfo = tmp_path / "mountinfo"
     image_marker = tmp_path / "test-image-marker"
     marker.touch()
-    image_marker.write_text("not-yolomux-test-image\n", encoding="ascii")
+    image_marker.write_text("not-yomux-test-image\n", encoding="ascii")
     mountinfo.write_text("1 2 0:1 / / rw,relatime - overlay overlay rw\n", encoding="utf-8")
     monkeypatch.setattr(docker_image, "CONTAINER_MARKER_PATH", marker)
     monkeypatch.setattr(docker_image, "CONTAINER_MOUNTINFO_PATH", mountinfo)
@@ -4027,7 +4036,7 @@ def test_both_extractors_normalize_through_the_repo_wide_ansi_owner():
     """The gate must not grow a second ANSI stripper beside `strip_ansi_sgr`."""
     check = load_check_module()
     # The bound function IS the repo-wide owner, proven by where it is defined.
-    assert check.strip_ansi_sgr.__module__ == "yolomux_lib.tmux.agent_tui"
+    assert check.strip_ansi_sgr.__module__ == "yomux_lib.tmux.agent_tui"
     assert not hasattr(check, "strip_ansi"), "a second ANSI helper reappeared in the check runner"
     colored = "\x1b[31mFAILED\x1b[0m tests/t.py::\x1b[1mtest_one\x1b[0m - boom\n"
     assert check.strip_ansi_sgr(colored) == "FAILED tests/t.py::test_one - boom\n"
@@ -4041,7 +4050,7 @@ def test_pytest_step_predicate_is_one_shared_owner():
     """Instrumentation routes through the predicate rather than re-spelling it."""
     check = load_check_module()
     pytest_step = check.Step("pytest", ["python3", "-m", "pytest", "tests", "-q"])
-    other = check.Step("node", ["node", "--check", "static/yolomux.js"])
+    other = check.Step("node", ["node", "--check", "static/yomux.js"])
     assert check.is_pytest_step(pytest_step) is True and check.is_pytest_step(other) is False
     instrumented = check.instrument_lane_for_performance(check.Lane("d", "d", (pytest_step, other)))
     assert instrumented.steps[0].args[-2:] == ["--durations=0", "--durations-min=0"]

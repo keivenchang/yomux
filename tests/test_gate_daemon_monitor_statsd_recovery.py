@@ -44,10 +44,10 @@ from tests.isolated_dev_server import start_isolated_dev_server
 from tests.isolated_dev_server import stop_and_reap_daemons
 from tests.tmux_runtime import start_isolated_tmux_runtime
 from tests.tmux_runtime import stop_isolated_tmux_runtime
-from yolomux_lib.infra.host_identity import current_host_identity
-from yolomux_lib.stats_current.storage import MIN_WRITER_PROTOCOL
-from yolomux_lib.stats_current.storage import SCHEMA_VERSION
-from yolomux_lib.stats_current.storage import SOCKET_FILENAME
+from yomux_lib.infra.host_identity import current_host_identity
+from yomux_lib.stats_current.storage import MIN_WRITER_PROTOCOL
+from yomux_lib.stats_current.storage import SCHEMA_VERSION
+from yomux_lib.stats_current.storage import SOCKET_FILENAME
 
 
 pytestmark = pytest.mark.socket
@@ -79,7 +79,7 @@ def _write_poisoned_statsd_record(state_dir: Path) -> Path:
         **identity.process_record_fields(pid=0, start_identity=""),
         "version": 2,
         "service": "statsd",
-        "module": "yolomux_lib.stats_current.service",
+        "module": "yomux_lib.stats_current.service",
         "protocol_version": MIN_WRITER_PROTOCOL,
         "socket": str(socket_path),
         "started_at": 1.0,

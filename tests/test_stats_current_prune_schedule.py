@@ -11,17 +11,17 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib import settings as settings_module
-from yolomux_lib.stats_current import prune_schedule
-from yolomux_lib.stats_current import resolution as stats_resolution
-from yolomux_lib.stats_current import service as service_module
-from yolomux_lib.stats_current import storage
-from yolomux_lib.stats_current.storage import DATABASE_FILENAME
-from yolomux_lib.stats_current.storage import Observation
-from yolomux_lib.stats_current.storage import PruneResult
-from yolomux_lib.stats_current.storage import RETENTION_SECONDS
-from yolomux_lib.stats_current.storage import StatsCurrentError
-from yolomux_lib.stats_current.storage import Store
+from yomux_lib import settings as settings_module
+from yomux_lib.stats_current import prune_schedule
+from yomux_lib.stats_current import resolution as stats_resolution
+from yomux_lib.stats_current import service as service_module
+from yomux_lib.stats_current import storage
+from yomux_lib.stats_current.storage import DATABASE_FILENAME
+from yomux_lib.stats_current.storage import Observation
+from yomux_lib.stats_current.storage import PruneResult
+from yomux_lib.stats_current.storage import RETENTION_SECONDS
+from yomux_lib.stats_current.storage import StatsCurrentError
+from yomux_lib.stats_current.storage import Store
 
 PACIFIC = "America/Los_Angeles"
 # 2026 US transitions: clocks jump 02:00 -> 03:00 on March 8 and 02:00 -> 01:00
@@ -226,7 +226,7 @@ def test_settings_file_round_trip_keeps_a_valid_time_and_replaces_an_invalid_one
 
 
 def test_preferences_panel_offers_the_schedule_in_the_stats_section():
-    source = Path("static_src/js/yolomux/83_preferences_panel.js").read_text(encoding="utf-8")
+    source = Path("static_src/js/yomux/83_preferences_panel.js").read_text(encoding="utf-8")
     assert "preferenceSettingItem('stats.prune_at_local_time'" in source
     assert "function statsPruneLocalTimeChoices()" in source
     # The client renders the server's list; it never spells its own copy.

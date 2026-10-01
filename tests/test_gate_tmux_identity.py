@@ -10,13 +10,13 @@ from typing import Any
 
 import pytest
 
-from yolomux_lib import app as app_module
-from yolomux_lib.infra import common
-from yolomux_lib.infra.common import SessionInfo
-from yolomux_lib.infra.common import TmuxPaneInfo
-from yolomux_lib.infra.host_partition import host_namespaced_path
-from yolomux_lib.observability.activity import ActivityLedger
-from yolomux_lib.workspace import metadata
+from yomux_lib import app as app_module
+from yomux_lib.infra import common
+from yomux_lib.infra.common import SessionInfo
+from yomux_lib.infra.common import TmuxPaneInfo
+from yomux_lib.infra.host_partition import host_namespaced_path
+from yomux_lib.observability.activity import ActivityLedger
+from yomux_lib.workspace import metadata
 from tests.helpers.local_service_records import FixtureHostIdentityBuilder
 
 

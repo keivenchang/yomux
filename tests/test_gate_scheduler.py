@@ -3,8 +3,8 @@ from __future__ import annotations
 import threading
 import time
 
-from yolomux_lib import batchd
-from yolomux_lib.local_services import rpc
+from yomux_lib import batchd
+from yomux_lib.local_services import rpc
 
 
 def _batchd_request(socket_path, action, **payload):

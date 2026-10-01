@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib import auto_approve_worker
+from yomux_lib import auto_approve_worker
 
 pytestmark = pytest.mark.socket
 
@@ -18,7 +18,7 @@ def test_auto_approve_lock_blocks_second_process(tmp_path, monkeypatch):
 import json
 import time
 from pathlib import Path
-from yolomux_lib import auto_approve_worker
+from yomux_lib import auto_approve_worker
 auto_approve_worker.AUTO_APPROVE_LOCK_DIR = Path({str(lock_dir)!r})
 lock = auto_approve_worker.AutoApproveProcessLock("6")
 started, owner = lock.acquire()

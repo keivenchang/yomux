@@ -1,10 +1,10 @@
-# YOLOmux
+# YOmux
 
 Lightweight, powerful browser workspace for managing AI work.
 
 Text files provide TextEdit for raw source editing. Markdown also provides ProseMirror-powered ViewEdit. In Split mode the left surface is labeled TextEditor and the right rendered Markdown WYSIWYG surface is labeled ViewEditor. Typing stays local to the active surface, then synchronizes both surfaces and canonical Markdown after 1.25 seconds without further input; saving, blur, mode changes, and close flush immediately. In ViewEditor, ordinary Enter creates a Markdown paragraph break; Shift-Enter alone creates an explicit hard break. Markdown image paste saves the image in a directory named for the Markdown file without its extension, then inserts a relative image reference at the original caret or selected range: `/a/b/file.md` becomes `/a/b/file/upload.png` and `![upload](file/upload.png)`.
 
-YOLOmux brings AI session management, editing, filesystem and Git context, and observability into one browser workspace backed by local tmux sessions. Go is now the default server for managed launches, including `boot.sh`, `make run`, and `yolo-dev-start`. The Python server is deprecated and remains only as an explicit temporary fallback; removal is planned around late October 2026, about one month from this release. Go feature access is capability-gated, so review [`GO_MIGRATION.md`](GO_MIGRATION.md) before relying on a specific route. The Go server still uses Python to render the shared HTML shell, and Python companion tools remain available: `tools/auto_approve_tmux.py` and `tools/tmux_wall.py`.
+YOmux brings AI session management, editing, filesystem and Git context, and observability into one browser workspace backed by local tmux sessions. Go is now the default server for managed launches, including `boot.sh`, `make run`, and `yolo-dev-start`. The Python server is deprecated, remains available only as an explicit fallback, and receives no new server features. Go feature access is capability-gated, so review [`GO_MIGRATION.md`](GO_MIGRATION.md) before relying on a specific route. The Go server still uses Python to render the shared HTML shell, and Python companion tools remain available: `tools/auto_approve_tmux.py` and `tools/tmux_wall.py`.
 
 Contributor and build instructions live in [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md). AI-agent conventions live in [`AGENTS.md`](AGENTS.md), the concise UI contract and grouped release notes are indexed in [`docs/README.md`](docs/README.md).
 
@@ -22,25 +22,25 @@ Contributor and build instructions live in [`docs/DEVELOPMENT.md`](docs/DEVELOPM
 
 ## Quickstart
 
-Managed server launches use Go by default. Select the deprecated Python server in a managed launch only with `--deprecated-python`; a raw `python3 yolomux.py` invocation remains a legacy path and may select Python unless you pass `--backend go`. The deprecated server is planned for removal around late October 2026.
+Managed server launches and direct `python3 yomux.py` launches use Go by default. Select the deprecated Python server explicitly with `--backend python` or `boot.sh --deprecated-python`; the `yolomux` command and `yolomux.py` entrypoint remain warning aliases for 30 days after fleet cutover.
 
 ```bash
-git clone https://github.com/keivenchang/yolomux.git
-cd yolomux
+git clone https://github.com/keivenchang/yomux.git
+cd yomux
 make setup          # pip install -e ".[yoagent]" + build the bundle  (run `make help` for more)
-bazel --bazelrc=/dev/null build --jobs=auto //cmd/yolomux-go:yolomux_go
+bazel --bazelrc=/dev/null build --jobs=auto //cmd/yomux-go:yomux-go
 tmux new-session -A -s project1     # optional: create one if you do not already have tmux sessions
 ./boot.sh 9998
 # Legacy backend: ./boot.sh --deprecated-python 9998
 ```
 
-`make setup` checks for Python 3.10+ before doing any build work, then pip automatically installs every runtime dependency, including the native `watchfiles` filesystem-event backend. On an externally managed system Python (PEP 668), create and activate a virtualenv first (`python3 -m venv .venv && . .venv/bin/activate`), then `make setup`. Setup generates the ignored `static/yolomux.js` and `static/yolomux.css` bundles from `static_src/`; they are recreated when missing or stale. The runtime serves the tracked xterm files under `static/vendor/`, so npm is not needed to start YOLOmux. Contributors can run `make xterm` to install the pinned upstream packages and verify that their bytes still match the tracked files. The Python wheel does not currently package these static assets.
+`make setup` checks for Python 3.10+ before doing any build work, then pip automatically installs every runtime dependency, including the native `watchfiles` filesystem-event backend. On an externally managed system Python (PEP 668), create and activate a virtualenv first (`python3 -m venv .venv && . .venv/bin/activate`), then `make setup`. Setup generates the ignored `static/yomux.js` and `static/yomux.css` bundles from `static_src/`; they are recreated when missing or stale. The old `/static/yolomux.js` and `/static/yolomux.css` URLs remain aliases during the transition. The runtime serves the tracked xterm files under `static/vendor/`, so npm is not needed to start YOmux. Contributors can run `make xterm` to install the pinned upstream packages and verify that their bytes still match the tracked files. The Python wheel does not currently package these static assets.
 
 ### Go backend
 
-The Go backend is a modular monolith, not a port of Python's web-process-plus-local-daemons topology. One `yolomux-go` process owns HTTPS/auth, the tmux PTY/WebSocket path, events and durable operation receipts, Finder and Differ, bounded in-process work queues, and the Go YO!stats writer/readers/materializers and collectors. It serves the shared browser bundle and calls `python3` to render the existing login and application HTML from `yolomux_lib.web`, so Python remains a runtime dependency even when the Go server is selected.
+The Go backend is a modular monolith, not a port of Python's web-process-plus-local-daemons topology. One `yomux-go` process owns HTTPS/auth, the tmux PTY/WebSocket path, events and durable operation receipts, Finder and Differ, bounded in-process work queues, and the Go YO!stats writer/readers/materializers and collectors. It serves the shared browser bundle and calls `python3` to render the existing login and application HTML from `yomux_lib.web`, so Python remains a runtime dependency even when the Go server is selected.
 
-Available Go routes include terminal/session, Finder, Git, Differ, editor, diagnostics, and YO!stats operations. Session rename uses the same `/api/rename-session` contract on both backends, including admin access, name validation, and collision checks. YO!chat and YO!agent remain unavailable in Go, and unknown `/api/*` routes return typed `501 feature_unavailable` errors. The Python server remains an explicitly selected deprecated fallback while these Go gaps close; its planned removal is around late October 2026. [`GO_MIGRATION.md`](GO_MIGRATION.md) owns route, capability, and YO!stats status.
+Available Go routes include terminal/session, Finder, Git, Differ, editor, diagnostics, and YO!stats operations. Session rename uses the same `/api/rename-session` contract on both backends, including admin access, name validation, and collision checks. YO!chat and YO!agent remain unavailable in Go, and unknown `/api/*` routes return typed `501 feature_unavailable` errors. The Python server remains an explicitly selected deprecated fallback while these Go gaps close; it receives no new server features. [`GO_MIGRATION.md`](GO_MIGRATION.md) owns route, capability, and YO!stats status.
 
 Go Finder accepts any absolute path the server process can access. It does not apply the legacy Python backend's configured-root or credential-name denylist. OS permissions, descriptor identity checks, bounded operation limits, role checks, and the protected product-root mutation guard still apply.
 
@@ -48,16 +48,18 @@ Build, validate, and then start the preview:
 
 ```bash
 make setup
-bazel --bazelrc=/dev/null build --jobs=auto //cmd/yolomux-go:yolomux_go
+bazel --bazelrc=/dev/null build --jobs=auto //cmd/yomux-go:yomux-go
 tools/run_bazel_tests.sh --jobs "$(getconf _NPROCESSORS_ONLN)"
-YOLOMUX_START_LOAD_WAIT_SECONDS=30 ./boot.sh 7221
+YOMUX_START_LOAD_WAIT_SECONDS=30 ./boot.sh 7221
 ```
 
-`boot.sh` defaults to Go, discovers `bazel-bin/cmd/yolomux-go/yolomux_go_/yolomux_go`, and binds `0.0.0.0` unless `--host` or `YOLOMUX_HOST` says otherwise. `--golang` and `--backend go` remain Go aliases. Select the legacy Python server with `boot.sh --deprecated-python`; `--backend python` is rejected so Python has one explicit managed opt-in. Use `boot.sh` (or `make run`/`yolo-dev-start`) for the managed operator lifecycle; direct Python and Go entrypoints still apply the same machine-wide tmux routing, but do not provide the managed restart and ownership checks.
+`boot.sh` defaults to Go, discovers `bazel-bin/cmd/yomux-go/yomux-go_/yomux-go`, and binds `0.0.0.0` unless `--host` or `YOMUX_HOST` says otherwise. `--golang` and `--backend go` remain Go aliases. Select the legacy Python server with `boot.sh --deprecated-python` or `--backend python`. Use `boot.sh` (or `make run`/`yolo-dev-start`) for the managed operator lifecycle; direct Python and Go entrypoints still apply the same machine-wide tmux routing, but do not provide the managed restart and ownership checks.
 
-All YOLOmux operator launches (`boot.sh`, `make run`, `yolo-dev-start`, the installed `yolomux` command, direct `python3 yolomux.py`, the Go binary, and the tmux companion tools) use the same global tmux server as `tmux list-sessions` for the launching Unix user. Here, “global” means that user's default server: every session on that roster is eligible for discovery, regardless of which checkout created it; separately named `tmux -L`/`-S` servers are independent and are not merged into one roster. For normal operator launches, an explicit `--sessions` filter is the only YOLOmux narrowing option. Managed launchers clear inherited `YOLOMUX_TMUX_SOCKET`, `TMUX`, and `TMUX_PANE`, so starting YOLOmux from inside another tmux client cannot silently select that client's server. Direct entrypoints preserve a nonempty `YOLOMUX_TMUX_SOCKET` only when an isolated test or fixture explicitly supplies it; otherwise they apply the same global-server normalization. A different Unix user's tmux server is outside the user's permissions and is not implicitly merged. On macOS, `yolomux-services` is only the private supervisor socket for the wrapper; the YOLOmux process inside it still uses the global server.
+All YOmux operator launches (`boot.sh`, `make run`, `yolo-dev-start`, the installed `yomux` command, direct `python3 yomux.py`, the Go binary, and the tmux companion tools) use the same global tmux server as `tmux list-sessions` for the launching Unix user. Here, “global” means that user's default server: every session on that roster is eligible for discovery, regardless of which checkout created it; separately named `tmux -L`/`-S` servers are independent and are not merged into one roster. For normal operator launches, an explicit `--sessions` filter is the only YOmux narrowing option. Managed launchers clear inherited `YOMUX_TMUX_SOCKET`, `TMUX`, and `TMUX_PANE`, so starting YOmux from inside another tmux client cannot silently select that client's server. Direct entrypoints preserve a nonempty `YOMUX_TMUX_SOCKET` only when an isolated test or fixture explicitly supplies it; otherwise they apply the same global-server normalization. A different Unix user's tmux server is outside the user's permissions and is not implicitly merged. On macOS, `yomux-services` is only the private supervisor socket for the wrapper; the YOmux process inside it still uses the global server.
 
-The Go process generates and reuses its own self-signed certificate under `${TMPDIR:-/tmp}/yolomux-go-tls-<port>/`; it does not reuse Python's state-root certificate or local-CA helper. The managed launcher forwards host, port, checkout root, environment-selected config/state, and `--dang` as Go's `--dangerously-yolo`; Python-only `--cert`, `--key`, `--http`, and `--dev` semantics still do not carry over. Direct Go flags exist for fixtures and diagnostics, but operator starts should keep the managed `boot.sh` lifecycle.
+The Go process generates and reuses its own self-signed certificate under `${TMPDIR:-/tmp}/yomux-go-tls-<port>/`; it does not reuse Python's state-root certificate or local-CA helper. The managed launcher forwards host, port, checkout root, environment-selected config/state, `--http`, `--cert`, `--key`, and `--dang` as Go's `--dangerously-yolo`. Python-only `--sessions`, transcript-report, runtime-report, and `--dev` options return an error on Go rather than being silently dropped.
+
+`YOMUX_*` is the canonical environment prefix. `YOLOMUX_*` remains accepted as a warning alias for 30 days after fleet cutover; when both forms are present, `YOMUX_*` wins, including an explicitly empty value. The `yolomux` command and `yolomux.py` entrypoint follow the same transition window.
 
 Automated Go validation runs inside isolated Docker state with fixture-owned test ports and Chromium. Port 7221 is reserved for a manual smoke after those checks. Automated checks never connect to the operator runtime on port 7220; use the managed operator workflow for an explicitly requested live restart or smoke.
 
@@ -65,7 +67,7 @@ Contributors should use `make dev`. Its `dev` extra installs `mypy`, `pillow`, `
 
 Python native filesystem watching is validated on macOS and Linux. Native events reduce invalidation latency but do not replace bounded reconciliation: the elected Python web owner still scans at most 1,000 visible names per watched root and retains at most 512 in each directory signature. If Python `watchfiles` cannot start or loses events, it uses the same bounded polling path as its correctness fallback. Go uses a separate in-process Finder watcher: native events are Linux-only, and other platforms use the bounded polling fallback.
 
-For the deprecated Python server only, open `https://localhost:9998/`. The first launch shows a setup page — see [First launch](#first-launch) below. With no `--sessions` filter, Python discovers every tmux session from `tmux list-sessions`. By default Python creates and reuses a local HTTPS certificate under `~/.local/state/yolomux/tls/`; your browser will warn because it is not signed by a public CA. `--dang` is the Python short alias for `--dangerously-yolo`, which makes the UI's `+ Claude` and `+ Codex` buttons launch with their dangerous bypass flags. Use `./boot.sh` for the Go server.
+For the deprecated Python server only, open `https://localhost:9998/`. The first launch shows a setup page — see [First launch](#first-launch) below. With no `--sessions` filter, Python discovers every tmux session from `tmux list-sessions`. By default Python creates and reuses a local HTTPS certificate under `~/.local/state/yomux/tls/`; your browser will warn because it is not signed by a public CA. `--dang` is the Python short alias for `--dangerously-yolo`, which makes the UI's `+ Claude` and `+ Codex` buttons launch with their dangerous bypass flags. Use `./boot.sh` for the Go server.
 
 ## Runtime architecture
 
@@ -73,12 +75,12 @@ The Python and Go servers share the browser bundle and selected browser contract
 
 | Area | Legacy Python backend | Go backend |
 | --- | --- | --- |
-| Entry point | `./boot.sh --deprecated-python <port>` | `./boot.sh <port>` -> `python3 yolomux.py --backend go` -> `exec` of the Bazel-built binary |
+| Entry point | `./boot.sh --deprecated-python <port>` | `./boot.sh <port>` -> `python3 yomux.py --backend go` -> `exec` of the Bazel-built binary |
 | Process shape | One web process per port plus same-host Unix RPC services | One Go process with bounded in-process schedulers |
-| Finder/Differ | Python filesystem adapters plus `indexd`, `watchd`, and `batchd` ownership where applicable | `internal/finder`, `cmd/yolomux-go/finder_jobs.go`, and `cmd/yolomux-go/differ_routes.go` |
+| Finder/Differ | Python filesystem adapters plus `indexd`, `watchd`, and `batchd` ownership where applicable | `internal/finder`, `cmd/yomux-go/finder_jobs.go`, and `cmd/yomux-go/differ_routes.go` |
 | YO!stats | Web collector clients plus `statsd` as the sole database writer/materializer | Direct `internal/stats` ownership of `stats-v9.sqlite3` and in-process collectors/materializers |
 | Feature admission | Full Python product route set | `internal/capabilities` gates routes and browser presentation; unsupported APIs return typed `501` |
-| HTML shell | Python `yolomux_lib.web` | Go invokes `python3` to render the shared `yolomux_lib.web` login/application HTML |
+| HTML shell | Python `yomux_lib.web` | Go invokes `python3` to render the shared `yomux_lib.web` login/application HTML |
 
 ### Python runtime topology
 
@@ -88,18 +90,18 @@ The broker gives terminal candidate probes and base file reads a bounded foregro
 
 “Lightweight” describes this process topology, not a guarantee that every browser-visible handler is asynchronous. The current release line still runs a forced full session-metadata build on the HTTP request thread. The legacy `/api/activity-summary` path is disabled across HTTP, browser demand, watch publication, and statusd, and returns a typed terminal `503 feature_disabled` response without starting summary work. It must not be re-enabled until an asynchronous and more efficient API and backend replacement is implemented and accepted. The `Route.normal_session_local_service` flag is only the inventory marker used by the authenticated route test; runtime dispatch does not read it or use it to offload work.
 
-Every terminal HTTP response checks whether the request body was fully consumed before committing headers. If bytes remain, YOLOmux sends `Connection: close` and ends the connection after that response, so leftover POST bytes cannot be parsed as another request line.
+Every terminal HTTP response checks whether the request body was fully consumed before committing headers. If bytes remain, YOmux sends `Connection: close` and ends the connection after that response, so leftover POST bytes cannot be parsed as another request line.
 
 ```mermaid
 flowchart TB
   browser["Browser UI"]
 
-  subgraph server["One yolomux.py web process per port"]
+  subgraph server["One yomux.py web process per port"]
     direction TB
     http["HTTPS/auth/SSE\nrequest threads"]
     app["TmuxWebtermApp\ncoordination only"]
     bridge["WebSocket PTY bridge\none request thread"]
-    control["Control RPC\nRUNTIME_DIR/control/yolomux-<pid>-<token>.sock\nmode 0600"]
+    control["Control RPC\nRUNTIME_DIR/control/yomux-<pid>-<token>.sock\nmode 0600"]
 
     subgraph schedulers["Small in-process schedulers"]
       direction LR
@@ -112,7 +114,7 @@ flowchart TB
     end
   end
 
-  subgraph services["Same-host local services per YOLOMUX_RUNTIME_DIR"]
+  subgraph services["Same-host local services per YOMUX_RUNTIME_DIR"]
     direction TB
     statsd["statsd\nversioned state socket\nsole SQLite writer\nasync four-layer materializer\nexact snapshot/delta cache"]
     indexd["indexd\nRUNTIME_DIR/services/indexd.sock\nowns per-root SQLite WAL in STATE_DIR\n60s idle after leases"]
@@ -214,13 +216,13 @@ sequenceDiagram
 
 ```mermaid
 flowchart TB
-  subgraph p1["yolomux.py :<configured-port-a>"]
+  subgraph p1["yomux.py :<configured-port-a>"]
     app1["web app"]
-    sock1["control sock\nRUNTIME_DIR/control/yolomux-<pid>-*.sock"]
+    sock1["control sock\nRUNTIME_DIR/control/yomux-<pid>-*.sock"]
   end
-  subgraph p2["yolomux.py :<configured-port-b>"]
+  subgraph p2["yomux.py :<configured-port-b>"]
     app2["web app"]
-    sock2["control sock\nRUNTIME_DIR/control/yolomux-<pid>-*.sock"]
+    sock2["control sock\nRUNTIME_DIR/control/yomux-<pid>-*.sock"]
   end
 
   subgraph runtime["One host's local runtime directory"]
@@ -298,22 +300,22 @@ flowchart TB
 
 | Flow | Concrete mechanism |
 | --- | --- |
-| Browser → YOLOmux | HTTPS API/SSE and RFC 6455 WebSocket on the configured listener. Direct `yolomux.py` launches default to `:9998`; `boot.sh` requires `YOLOMUX_PORT`, an explicit port argument, or `YOLOMUX_DEFAULT_PORT`. |
-| Terminal WebSocket → tmux | The handler opens a PTY, then spawns `tmux attach-session [-r] [-f ignore-size] -t <session>:` with that PTY as stdin/stdout/stderr. Terminal bytes move over the PTY; tmux’s client then talks to its tmux server over tmux’s Unix socket, not a TCP port. Operator launches clear inherited socket/client routing and use the machine-wide default server, so `tmux list-sessions` can see every session on that host. A private `YOLOMUX_TMUX_SOCKET` is reserved for explicitly isolated tests and ad hoc fixture processes. |
-| Signal watcher → tmux | A long-lived child runs `tmux -C attach-session -f read-only,ignore-size -t <session>:`. YOLOmux reads/writes tmux control-mode records on the child’s stdin/stdout; the child uses the same tmux Unix socket. |
-| Server → elected server | Versioned length-framed JSON request/response over a mode-`0600` Unix socket, with legacy newline reads only for rolling compatibility. Normally: `$YOLOMUX_RUNTIME_DIR/yolomux/control/yolomux-<pid>-<token>.sock`; a deterministic `/tmp/ycs-…/` path is used if the Unix socket pathname would be too long. RPC actions include `background_refresh`, `background_status`, `background_ping`, `background_client_event`, `runtime_profile`, and release/disable operations. Token-consumer demand uses a family-specific refresh that wakes only the elected token sampler. |
-| Server → local services | Versioned length-framed Unix RPC over mode-`0600` sockets under the runtime directory. The stats socket name is version-scoped with the stats protocol and schema, while indexd, batchd, statusd, watchd, and approvald use service-local paths. `safe_socket_path()` moves only the socket pathname to deterministic `/tmp/yolomux-…` storage when a platform path limit requires it. Common actions include `ping`, `status`, `profile`, `lease`, `release`, `shutdown`, and `shutdown_if_idle`; service-specific actions include current stats observation writes/exact snapshots, index enqueue/search/unindex, batch submit/result/cancel, watch descriptor/revision work, and approval target start/status/stop. Stats snapshot bodies are encoded and cached by statsd, then forwarded without web-process database access or re-aggregation. |
+| Browser → YOmux | HTTPS API/SSE and RFC 6455 WebSocket on the configured listener. Direct `yomux.py` launches default to `:9998`; `boot.sh` requires `YOMUX_PORT`, an explicit port argument, or `YOMUX_DEFAULT_PORT`. |
+| Terminal WebSocket → tmux | The handler opens a PTY, then spawns `tmux attach-session [-r] [-f ignore-size] -t <session>:` with that PTY as stdin/stdout/stderr. Terminal bytes move over the PTY; tmux’s client then talks to its tmux server over tmux’s Unix socket, not a TCP port. Operator launches clear inherited socket/client routing and use the machine-wide default server, so `tmux list-sessions` can see every session on that host. A private `YOMUX_TMUX_SOCKET` is reserved for explicitly isolated tests and ad hoc fixture processes. |
+| Signal watcher → tmux | A long-lived child runs `tmux -C attach-session -f read-only,ignore-size -t <session>:`. YOmux reads/writes tmux control-mode records on the child’s stdin/stdout; the child uses the same tmux Unix socket. |
+| Server → elected server | Versioned length-framed JSON request/response over a mode-`0600` Unix socket, with legacy newline reads only for rolling compatibility. Normally: `$YOMUX_RUNTIME_DIR/yomux/control/yomux-<pid>-<token>.sock`; a deterministic `/tmp/ycs-…/` path is used if the Unix socket pathname would be too long. RPC actions include `background_refresh`, `background_status`, `background_ping`, `background_client_event`, `runtime_profile`, and release/disable operations. Token-consumer demand uses a family-specific refresh that wakes only the elected token sampler. |
+| Server → local services | Versioned length-framed Unix RPC over mode-`0600` sockets under the runtime directory. The stats socket name is version-scoped with the stats protocol and schema, while indexd, batchd, statusd, watchd, and approvald use service-local paths. `safe_socket_path()` moves only the socket pathname to deterministic `/tmp/yomux-…` storage when a platform path limit requires it. Common actions include `ping`, `status`, `profile`, `lease`, `release`, `shutdown`, and `shutdown_if_idle`; service-specific actions include current stats observation writes/exact snapshots, index enqueue/search/unindex, batch submit/result/cancel, watch descriptor/revision work, and approval target start/status/stop. Stats snapshot bodies are encoded and cached by statsd, then forwarded without web-process database access or re-aggregation. |
 | Markdown → visual preview | Browser-local rendering; there is no SVG server or preview port. A changed Markdown content generation replaces its derived DOM, reruns Mermaid to a sanitized SVG/blob image, recreates inline media nodes, and rejects any late render from an older generation. |
 
 Every server accepts browser traffic and owns its WebSocket/PTy children plus its local IDX/STATS/SESS services. Startup claims the complete product root with an exclusive `instance.lock`; a second server using the same root is refused, even on another port. Service startup is serialized by `services/<name>.service.lock`; stale records are cleaned only after PID checks, and a newer incompatible service makes the caller stop with `upgrade_required`. Repeated spawn failures back off from 0.25 seconds up to 8 seconds. Singleton service locks and one-writer SQLite ownership remain defense-in-depth; they no longer implement a server leader/follower model.
 
 ## First launch
 
-On first run YOLOmux creates `~/.config/yolomux/auth.yaml` with every account commented out. No login works until you uncomment one:
+On first run YOmux creates `~/.config/yomux/auth.yaml` with every account commented out. No login works until you uncomment one:
 
 ```bash
 # edit the file — nano, vim, whatever you prefer
-nano ~/.config/yolomux/auth.yaml
+nano ~/.config/yomux/auth.yaml
 ```
 
 Uncomment the admin entry (it uses your login username and a random generated password):
@@ -337,40 +339,40 @@ To add a read-only guest account, uncomment (or add) a `readonly` entry:
 
 ## Two machines sharing a home
 
-YOLOmux is not a shared-state cluster. The safe current shape is one independent YOLOmux deployment per machine, with each machine using local configuration, state, cache, tmux, sockets, databases, and writable worktrees. A mounted home may supply read-only source or transcript files, but two hosts must not use one shared `YOLOMUX_STATE_DIR`, one writable worktree, or concurrently writable configuration files.
+YOmux is not a shared-state cluster. The safe current shape is one independent YOmux deployment per machine, with each machine using local configuration, state, cache, tmux, sockets, databases, and writable worktrees. A mounted home may supply read-only source or transcript files, but two hosts must not use one shared `YOMUX_STATE_DIR`, one writable worktree, or concurrently writable configuration files.
 
-The detailed variables and support matrix below describe the legacy Python backend. Go has no Python service/runtime/cache topology and does not implement the legacy backend's complete host-partition and network-filesystem preflight. Give each Go process private host-local `YOLOMUX_CONFIG_DIR` and `YOLOMUX_STATE_DIR` roots through `boot.sh`; do not share its config-rooted journals, background-owner records, auth material, or default stats database between hosts.
+The detailed variables and support matrix below describe the legacy Python backend. Go has no Python service/runtime/cache topology and does not implement the legacy backend's complete host-partition and network-filesystem preflight. Give each Go process private host-local `YOMUX_CONFIG_DIR` and `YOMUX_STATE_DIR` roots through `boot.sh`; do not share its config-rooted journals, background-owner records, auth material, or default stats database between hosts.
 
 ### Safe launch shape
 
-Set these before starting YOLOmux on each machine. Replace the example roots with paths on that machine's local filesystem, not paths from the shared home or an NFS/CIFS/FUSE/9p mount.
+Set these before starting YOmux on each machine. Replace the example roots with paths on that machine's local filesystem, not paths from the shared home or an NFS/CIFS/FUSE/9p mount.
 
-Every configured product path must be absolute and cannot be `/`, the home directory itself, or a path inside the shared checkout; YOLOmux refuses a relative `HOME` or path before it writes state or stops an existing listener. Use the normal defaults under `~/.config/yolomux`, `~/.local/state/yolomux`, and `~/.cache/yolomux`, or choose explicit child directories rather than pointing a root at `$HOME`.
+Every configured product path must be absolute and cannot be `/`, the home directory itself, or a path inside the shared checkout; YOmux refuses a relative `HOME` or path before it writes state or stops an existing listener. Use the normal defaults under `~/.config/yomux`, `~/.local/state/yomux`, and `~/.cache/yomux`, or choose explicit child directories rather than pointing a root at `$HOME`.
 
 ```bash
-export YOLOMUX_CONFIG_DIR=/local/path/yolomux-config
-export YOLOMUX_STATE_DIR=/local/path/yolomux-state
-export YOLOMUX_CACHE_DIR=/local/path/yolomux-cache
-python3 yolomux.py --dang
+export YOMUX_CONFIG_DIR=/local/path/yomux-config
+export YOMUX_STATE_DIR=/local/path/yomux-state
+export YOMUX_CACHE_DIR=/local/path/yomux-cache
+python3 yomux.py --dang
 ```
 
 | Variable | Current behavior | Multi-host rule |
 | --- | --- | --- |
-| `YOLOMUX_HOST_ID` | Optional stable host-ID override; otherwise YOLOmux reads `/etc/machine-id`. The value is fixed on first use and a late change fails closed. | Set a unique stable value before startup for containers or cloned machine images. Hostname is display-only and is not a durable key. |
-| `YOLOMUX_CONFIG_DIR` | Owns `auth.yaml`, `settings.yaml`, `state.json`, YOLO rules, and user skill/context files. | Use a local directory today. A shared read-only directory or one designated writer is possible, but concurrent cross-host writes are not supported. |
-| `YOLOMUX_STATE_DIR` | Owns durable activity/status files, histories, and host-partitioned database paths. | Must resolve to a local filesystem and must be distinct per host. |
-| `YOLOMUX_RUNTIME_DIR` | Owns boot-scoped service sockets, locks, control endpoints, leases, and background-owner records. | Must resolve to a local filesystem and must be distinct per host and running deployment. |
-| `YOLOMUX_CACHE_DIR` | Owns reconstructible caches such as model pricing. | Must resolve to a local filesystem and must be distinct per host. |
-| `YOLOMUX_ALLOW_NETWORK_FILESYSTEM_MUTABLE_ROOTS=1` | Changes a WAL/socket preflight refusal into a warning. | Emergency escape hatch only. It does not make SQLite WAL or Unix sockets safe on a network filesystem and is not the supported shared-home setup. |
+| `YOMUX_HOST_ID` | Optional stable host-ID override; otherwise YOmux reads `/etc/machine-id`. The value is fixed on first use and a late change fails closed. | Set a unique stable value before startup for containers or cloned machine images. Hostname is display-only and is not a durable key. |
+| `YOMUX_CONFIG_DIR` | Owns `auth.yaml`, `settings.yaml`, `state.json`, YOLO rules, and user skill/context files. | Use a local directory today. A shared read-only directory or one designated writer is possible, but concurrent cross-host writes are not supported. |
+| `YOMUX_STATE_DIR` | Owns durable activity/status files, histories, and host-partitioned database paths. | Must resolve to a local filesystem and must be distinct per host. |
+| `YOMUX_RUNTIME_DIR` | Owns boot-scoped service sockets, locks, control endpoints, leases, and background-owner records. | Must resolve to a local filesystem and must be distinct per host and running deployment. |
+| `YOMUX_CACHE_DIR` | Owns reconstructible caches such as model pricing. | Must resolve to a local filesystem and must be distinct per host. |
+| `YOMUX_ALLOW_NETWORK_FILESYSTEM_MUTABLE_ROOTS=1` | Changes a WAL/socket preflight refusal into a warning. | Emergency escape hatch only. It does not make SQLite WAL or Unix sockets safe on a network filesystem and is not the supported shared-home setup. |
 
 ### Current support matrix
 
 | Family | Current status | What is safe on two machines |
 | --- | --- | --- |
-| Stable host/process identity | Implemented: stable host ID, display hostname, boot ID, PID start identity/ticks, and process nonce are available, and a late `YOLOMUX_HOST_ID` change is rejected. | Give cloned/containerized hosts different overrides before startup. Do not use hostname, PID, port, or an absolute path alone as identity. |
-| Local services, leases, owners, sockets | Partial: records carry host/process identity and several destructive paths fail closed, but the principal two-host owner/lease/service-root gate is still a strict expected failure. | Use a different local `YOLOMUX_STATE_DIR` on each host. Sharing one state directory across hosts is not supported. |
+| Stable host/process identity | Implemented: stable host ID, display hostname, boot ID, PID start identity/ticks, and process nonce are available, and a late `YOMUX_HOST_ID` change is rejected. | Give cloned/containerized hosts different overrides before startup. Do not use hostname, PID, port, or an absolute path alone as identity. |
+| Local services, leases, owners, sockets | Partial: records carry host/process identity and several destructive paths fail closed, but the principal two-host owner/lease/service-root gate is still a strict expected failure. | Use a different local `YOMUX_STATE_DIR` on each host. Sharing one state directory across hosts is not supported. |
 | Login throttle, YO!stats, Quick Open, model-pricing databases | Their default helpers select a `hosts/<stable-host-id>/` partition, and each WAL opener rejects network or undetermined filesystems before creating the database unless the escape hatch is set. | Keep the containing state/cache roots local. A host-ID subdirectory on NFS prevents filename collision but does not make WAL-on-NFS supported. |
-| YO!chat | Host-partitioned: the production app opens `YOLOMUX_STATE_DIR/hosts/<stable-host-id>/yochat.sqlite3` and matching history/cursor paths. Conversations do not roam between hosts. | Run chat only inside one host's local state root. Do not share its database or journal between hosts. |
+| YO!chat | Host-partitioned: the production app opens `YOMUX_STATE_DIR/hosts/<stable-host-id>/yochat.sqlite3` and matching history/cursor paths. Conversations do not roam between hosts. | Run chat only inside one host's local state root. Do not share its database or journal between hosts. |
 | Shared preferences and authentication | Production settings and state mutations now use the POSIX record-lock parent; auth and YO rules use its complete-document writer and can reject stale revisions. Same-host tests cover exclusion, crash release, key-level merge, concurrent settings updates, and stale auth/rules refusal, but the exporter-local versus NFS-client acceptance run has not happened. | Use local configuration on each host, mount shared configuration read-only, or designate exactly one writer. Do not claim cross-host lock safety from the same-host tests. |
 | Transcript reads | Incremental scans tolerate partial final JSONL records and inode replacement. Cached read failures preserve the last-known-good result with typed reasons; an initial ENOENT remains a deletion. The shared-root reader polls active remote files every five seconds for appended bytes while local roots wait for native invalidation, and logical identity is `(shared_root_id, relative_path)`. | The reader contracts are implemented and fixture-tested, but shared-root discovery/path mapping is not wired into operator configuration. Treat mounted transcript trees as read-only and do not assume multi-host transcript federation is available. |
 | Tmux identities, attention acknowledgements, `tmux-AI-status`, watch-root interest, activity rows | Alerts, errors, and notifications are host-local. The contract requires every record and acknowledgement to use the stable host ID: acknowledging an alert on `lin1` must not clear an identically named pane on `lin2`. When multiple hosts are visible, the UI displays the source hostname without using it as the durable key. The implementation remains strict expected failure: these isolation and attribution contracts are not built. | Keep each host's state and UI separate. Cross-host tmux display and acknowledgement isolation are not supported yet. |
@@ -379,7 +381,7 @@ python3 yolomux.py --dang
 
 ### Why the local roots are required
 
-SQLite's own WAL documentation states that all processes using a WAL database must be on the same host and that WAL does not work over a network filesystem: <https://www.sqlite.org/wal.html#overview>. SQLite's network-filesystem guidance also warns that network locking and sync behavior vary and can corrupt data: <https://www.sqlite.org/useovernet.html>. YOLOmux refuses live WAL databases and Unix sockets on `nfs`, `nfs4`, `cifs`, `smb`, `smbfs`, `9p`, and `fuse*` mounts, and it also fails closed when the filesystem cannot be determined.
+SQLite's own WAL documentation states that all processes using a WAL database must be on the same host and that WAL does not work over a network filesystem: <https://www.sqlite.org/wal.html#overview>. SQLite's network-filesystem guidance also warns that network locking and sync behavior vary and can corrupt data: <https://www.sqlite.org/useovernet.html>. YOmux refuses live WAL databases and Unix sockets on `nfs`, `nfs4`, `cifs`, `smb`, `smbfs`, `9p`, and `fuse*` mounts, and it also fails closed when the filesystem cannot be determined.
 
 The `hosts/<stable-host-id>/` database partition prevents two hosts from choosing the same filename. It does not change the filesystem underneath that file, so a partition located on NFS is still an unsupported live WAL database.
 
@@ -389,9 +391,9 @@ Upgrading does not move or delete legacy unpartitioned databases. For the databa
 
 Use this procedure only during a deliberate maintenance window:
 
-1. Stop every old and new YOLOmux process or local service that can write the source or target database. Do not copy a live `-wal` or `-shm` file independently.
+1. Stop every old and new YOmux process or local service that can write the source or target database. Do not copy a live `-wal` or `-shm` file independently.
 
-2. Resolve the destination host ID with `python3 -c 'from yolomux_lib.infra.host_identity import current_host_identity; print(current_host_identity().stable_host_id)'` in the same environment that will launch YOLOmux.
+2. Resolve the destination host ID with `python3 -c 'from yomux_lib.infra.host_identity import current_host_identity; print(current_host_identity().stable_host_id)'` in the same environment that will launch YOmux.
 
 3. Record the legacy database path and preserve the original database plus any sidecars. Never delete, rename, or overwrite the legacy copy as part of adoption.
 
@@ -416,7 +418,7 @@ Implementation details and current Go migration gaps are documented in [`GO_MIGR
 
 ## Concepts
 
-YOLOmux follows terminal-app terminology (iTerm2-style):
+YOmux follows terminal-app terminology (iTerm2-style):
 
 The tab vocabulary names the complete Python product. Go presents only the subset admitted by its capability catalog; in particular, it does not present YO!agent or YO!chat.
 
@@ -424,13 +426,13 @@ The tab vocabulary names the complete Python product. Go presents only the subse
 
 * **Tab** — the thing shown inside a pane. Tab types: **tmux session** (terminal), **Finder** (file browser), **Differ** (changed files), **Tabber** (recent tabs/windows), **Git history** (`Diff repo`), **File** (text editor, preview, diff, or image viewer), **Preferences**, **YO!agent**, and **YO!chat**.
 
-When a Tab is a tmux session, that session has its own internal hierarchy — tmux sub-windows (`Ctrl-b n/p`) and tmux panes (`Ctrl-b %/"`) — which belong to tmux, not YOLOmux. Watch the overloaded word **pane**: a YOLOmux Pane is a browser layout split, a tmux pane is a split inside a tmux sub-window.
+When a Tab is a tmux session, that session has its own internal hierarchy — tmux sub-windows (`Ctrl-b n/p`) and tmux panes (`Ctrl-b %/"`) — which belong to tmux, not YOmux. Watch the overloaded word **pane**: a YOmux Pane is a browser layout split, a tmux pane is a split inside a tmux sub-window.
 
-YOLOmux addresses tmux sessions with the exact target `=<session>:`. The leading `=` prevents tmux from falling back to a prefix or pattern match when a named session is absent; destructive and mutating actions therefore cannot select a similarly named sibling session.
+YOmux addresses tmux sessions with the exact target `=<session>:`. The leading `=` prevents tmux from falling back to a prefix or pattern match when a named session is absent; destructive and mutating actions therefore cannot select a similarly named sibling session.
 
 ## Daily use
 
-Open YOLOmux after setup. Existing tmux sessions appear as tabs. The list describes shared browser behavior where the selected backend advertises the required capabilities; unsupported Go capabilities stay hidden. See [`docs/specs/GUI.md`](docs/specs/GUI.md) for durable interaction rules.
+Open YOmux after setup. Existing tmux sessions appear as tabs. The list describes shared browser behavior where the selected backend advertises the required capabilities; unsupported Go capabilities stay hidden. See [`docs/specs/GUI.md`](docs/specs/GUI.md) for durable interaction rules.
 
 * Click a tab to show it in that pane. Use the `Tabs` menu to activate minimized or inactive tabs.
 
@@ -444,11 +446,11 @@ Open YOLOmux after setup. Existing tmux sessions appear as tabs. The list descri
 
 * Drag a Finder or Differ file row into a pane to open that file there; dropping near a pane edge opens it in a new split.
 
-* Right-click a file path printed in a terminal to open its menu immediately. The menu shows a disabled loading row while YOLOmux confirms an uncached path, then replaces that row with **Open file** and **Copy path**. A missing path simply removes the loading row. Opening a confirmed file creates its file tab before optional Git details finish, so slow history or Blame/Diff enrichment does not hold back the document. Reopening an already-open file, including through a resolved alias, keeps that tab's current Edit, Preview, or Diff mode; only an explicit mode action changes it. Wrap remains a global editor preference.
+* Right-click a file path printed in a terminal to open its menu immediately. The menu shows a disabled loading row while YOmux confirms an uncached path, then replaces that row with **Open file** and **Copy path**. A missing path simply removes the loading row. Opening a confirmed file creates its file tab before optional Git details finish, so slow history or Blame/Diff enrichment does not hold back the document. Reopening an already-open file, including through a resolved alias, keeps that tab's current Edit, Preview, or Diff mode; only an explicit mode action changes it. Wrap remains a global editor preference.
 
 * Markdown previews load local images through the authenticated file API, which authorizes one descriptor-bounded direct response instead of creating a background-job artifact. A missing login, missing path, or over-limit file produces a distinct message with Open and Download actions instead of a generic broken-image label. Numbered task labels such as `- [x] 2. Verify it` keep the checkbox, number, and text on one line without rewriting the Markdown; genuine nested multi-item lists remain indented, and clicking the checkbox still updates its source line.
 
-* Upload or paste files with drag-drop, clipboard paste, or the `+` button. Dropping a file on a terminal offers actions suited to an AI or shell pane. Terminal uploads are transient artifacts stored at `/tmp/yolomux.<login-user>/uploads/<session>/`, where the login user is the authenticated YOLOmux username rather than the Unix account. Each user tree is private (`0700`), files are removed lazily after seven days by default, and `uploads.retention_days` in `~/.config/yolomux/settings.yaml` accepts 1–365 days. Markdown editor image paste uses separate document storage: `/a/b/file.md` creates `/a/b/file/`, writes the image there, and inserts a relative `file/<name>` reference at the captured editor selection.
+* Upload or paste files with drag-drop, clipboard paste, or the `+` button. Dropping a file on a terminal offers actions suited to an AI or shell pane. Terminal uploads are transient artifacts stored at `/tmp/yomux.<login-user>/uploads/<session>/`, where the login user is the authenticated YOmux username rather than the Unix account. Each user tree is private (`0700`), files are removed lazily after seven days by default, and `uploads.retention_days` in `~/.config/yomux/settings.yaml` accepts 1–365 days. Markdown editor image paste uses separate document storage: `/a/b/file.md` creates `/a/b/file/`, writes the image there, and inserts a relative `file/<name>` reference at the captured editor selection.
 
 * Use the pane Info Bar to switch tmux sub-windows (`0:bash`, `1:codex`, ...), cycle among a session's repositories with `< N/M >` or pick one from the `N/M` menu, open transcripts (`Tx`), request an AI summary (`AI`), or inspect the event log (`Log`). A transient tmux-signal patch with no matching window rows retains the populated transcript window strip; only a non-empty signal inventory replaces it, and rejected render records produce typed diagnostics rather than a placeholder.
 
@@ -460,7 +462,7 @@ Open YOLOmux after setup. Existing tmux sessions appear as tabs. The list descri
 
 * On Python, `statsd` is the sole database writer and cache/materializer owner. Its retained deltas, cost attribution, daemon roster, and recovery behavior differ from Go; see [`GO_MIGRATION.md`](GO_MIGRATION.md).
 
-* On Go, one `yolomux-go` process owns `stats-v9.sqlite3`, collectors, materialization, routes, and SSE. Snapshot/delta, attribution, readiness, and diagnostics still differ from Python. The current status is in [`GO_MIGRATION.md`](GO_MIGRATION.md).
+* On Go, one `yomux-go` process owns `stats-v9.sqlite3`, collectors, materialization, routes, and SSE. Snapshot/delta, attribution, readiness, and diagnostics still differ from Python. The current status is in [`GO_MIGRATION.md`](GO_MIGRATION.md).
 
 * Python and Go stats writers must use isolated config/state roots; never point both backends at one live database. Go runtime discovery and current Docker evidence are Linux-first. Python remains a legacy comparison path during the migration.
 
@@ -472,17 +474,17 @@ Open YOLOmux after setup. Existing tmux sessions appear as tabs. The list descri
 
 * On Python, a stale Finder/Differ session-files result keeps the visible completed rows while this server refreshes it; reconnecting the browser does not start another Git/`batchd` producer or repeat the same cache read. Go uses its separate in-process session-files cache and background scheduler.
 
-* Python Quick Open indexes are bounded accelerators. The default keeps at most 100,000 entries per root and aggressively excludes dependency, VCS, secret, IDE, cache, coverage, and build directories. When the background owner starts, every configured indexed root gets a scheduler lease on the local `indexd` service, so it does not wait for the first Quick Open query: each root lists its own direct contents first (layer 1) and those direct files become searchable as soon as that one listing finishes, then deeper directories fill breadth-first, one directory at a time, without letting a deep or unusually wide subtree hold back shallower results. Previously indexed results stay searchable while a refresh runs, and Quick Open reports explicit coverage — a warming or partially covered scope keeps its cached matches and shows an Indexing state instead of a false No matches. Concrete changes refresh fast: for a root that holds an indexer lease, a create or delete driven through the watcher or a YOLOmux file mutation is reflected in about two to three seconds (a two-second debounce plus one bounded repair) rather than waiting on the safety interval. `file_explorer.index_refresh_seconds` (default 300 seconds / 5 minutes; 0 to 3600, where 0 disables proactive safety reconciliation) is retained only as a lowest-priority safety reconciliation that catches changes no stronger evidence covered; it is driven by the lease and is independent of whether anyone is searching. In Finder/File Explorer, right-click any directory and choose **Allow index** to add its root or **Disallow index** to remove it; Preferences -> Finder/File Explorer shows the same `file_explorer.indexed_dirs` list. That section also exposes **Quick Open exclusions** for descendants inside those roots. Add one rule per line: a plain absolute or home-relative subtree, `glob:<root-relative glob>` such as `glob:**/.uploads/**`, or `regex:<regular expression>` matched against a root-relative POSIX path such as `regex:(^|/)target(?:/|$)`. Advanced operators can also tune `file_explorer.index_max_files`, `index_refresh_seconds`, `index_persist`, `index_persist_max_files`, `index_persist_max_mb`, and `index_exclude_paths` in `~/.config/yolomux/settings.yaml`. Go offers bounded direct and streamed search but does not claim this persistent Python frontier.
+* Python Quick Open indexes are bounded accelerators. The default keeps at most 100,000 entries per root and aggressively excludes dependency, VCS, secret, IDE, cache, coverage, and build directories. When the background owner starts, every configured indexed root gets a scheduler lease on the local `indexd` service, so it does not wait for the first Quick Open query: each root lists its own direct contents first (layer 1) and those direct files become searchable as soon as that one listing finishes, then deeper directories fill breadth-first, one directory at a time, without letting a deep or unusually wide subtree hold back shallower results. Previously indexed results stay searchable while a refresh runs, and Quick Open reports explicit coverage — a warming or partially covered scope keeps its cached matches and shows an Indexing state instead of a false No matches. Concrete changes refresh fast: for a root that holds an indexer lease, a create or delete driven through the watcher or a YOmux file mutation is reflected in about two to three seconds (a two-second debounce plus one bounded repair) rather than waiting on the safety interval. `file_explorer.index_refresh_seconds` (default 300 seconds / 5 minutes; 0 to 3600, where 0 disables proactive safety reconciliation) is retained only as a lowest-priority safety reconciliation that catches changes no stronger evidence covered; it is driven by the lease and is independent of whether anyone is searching. In Finder/File Explorer, right-click any directory and choose **Allow index** to add its root or **Disallow index** to remove it; Preferences -> Finder/File Explorer shows the same `file_explorer.indexed_dirs` list. That section also exposes **Quick Open exclusions** for descendants inside those roots. Add one rule per line: a plain absolute or home-relative subtree, `glob:<root-relative glob>` such as `glob:**/.uploads/**`, or `regex:<regular expression>` matched against a root-relative POSIX path such as `regex:(^|/)target(?:/|$)`. Advanced operators can also tune `file_explorer.index_max_files`, `index_refresh_seconds`, `index_persist`, `index_persist_max_files`, `index_persist_max_mb`, and `index_exclude_paths` in `~/.config/yomux/settings.yaml`. Go offers bounded direct and streamed search but does not claim this persistent Python frontier.
 
 * On both backends, Tabber lists open tabs and tmux sub-windows by recent activity. `Mod+B` hides Finder/Differ/Tabber or restores the default left Side Pane on wide layouts. The top-bar language picker changes the live UI language.
 
 * On Python, YO!agent handles product questions, session watches, notifications, safe sends, wait-then-send jobs, and multi-agent handoffs. It can also watch an explicit roster until every agent is stably calm, then send one exact command to a separately named tmux session; it shows the roster, destination, blockers, and quiet window, and never sends twice across shared servers. Known phrasing is parsed locally; a configured AI backend may propose a flexible roster plan, but the server validates it and requires confirmation before that model-derived send. See [`docs/YOAGENT.md`](docs/YOAGENT.md) for setup, intents, and coordination rules.
 
-* On Python, File -> `YO!chat`, immediately after `YO!stats`, opens one conversation shared by authenticated admin and readonly users whose servers use the same local `YOLOMUX_STATE_DIR` on one host; unauthenticated clients cannot access it. Human headers preserve the authenticated username's case, show the server-observed IP, use a stable per-person color from the shared theme, and show relative age for the first four hours before switching to an exact local timestamp; the composer border uses the same color as that user's sent messages. A non-persisted YO!agent introduction with one of several localized greetings remains first in the current timeline, named typing presence uses localized list formatting, history search stays absent until Cmd/Ctrl-F and its X hides it again, older messages load in bounded pages as you scroll upward, the composer grows with content only up to half the pane, and the keyboard/touch emoji picker lazy-loads its catalog. New content follows the bottom only while you are already viewing the tail; scrolling into older messages preserves that position and exposes New messages. `/yo <query>` stores the question, shares `YO!agent is typing…` through the normal typing lease without adding a fake history message, delegates to the existing YO!agent task/transcript/recommendation pipeline, renders the stored answer through the shared sanitized Markdown path, and shares it with every client. Searchable state lives in SQLite and exact messages are also journaled under `YOLOMUX_STATE_DIR/yochat-history/YYYY-MM-DD.jsonl` using UTC dates. Both are retained for seven days by default (`Preferences -> YO!chat` supports 1–365 days), the database is capped at 100,000 messages, and first load starts at the current tail. Cross-host chat semantics remain undecided and this build does not support sharing these files between hosts.
+* On Python, File -> `YO!chat`, immediately after `YO!stats`, opens one conversation shared by authenticated admin and readonly users whose servers use the same local `YOMUX_STATE_DIR` on one host; unauthenticated clients cannot access it. Human headers preserve the authenticated username's case, show the server-observed IP, use a stable per-person color from the shared theme, and show relative age for the first four hours before switching to an exact local timestamp; the composer border uses the same color as that user's sent messages. A non-persisted YO!agent introduction with one of several localized greetings remains first in the current timeline, named typing presence uses localized list formatting, history search stays absent until Cmd/Ctrl-F and its X hides it again, older messages load in bounded pages as you scroll upward, the composer grows with content only up to half the pane, and the keyboard/touch emoji picker lazy-loads its catalog. New content follows the bottom only while you are already viewing the tail; scrolling into older messages preserves that position and exposes New messages. `/yo <query>` stores the question, shares `YO!agent is typing…` through the normal typing lease without adding a fake history message, delegates to the existing YO!agent task/transcript/recommendation pipeline, renders the stored answer through the shared sanitized Markdown path, and shares it with every client. Searchable state lives in SQLite and exact messages are also journaled under `YOMUX_STATE_DIR/yochat-history/YYYY-MM-DD.jsonl` using UTC dates. Both are retained for seven days by default (`Preferences -> YO!chat` supports 1–365 days), the database is capped at 100,000 messages, and first load starts at the current tail. Cross-host chat semantics remain undecided and this build does not support sharing these files between hosts.
 
-* Cross-pane notifications appear in one global toast rail and identify their target tab without changing your current focus. Attention remains until acknowledged; completion, chat, PR, and job notices are coalesced by target. Clicking a notice opens its target and clears it. Uploads and file/editor errors remain in the pane where that direct action occurred. Preferences independently control in-YOLOmux and system notifications.
+* Cross-pane notifications appear in one global toast rail and identify their target tab without changing your current focus. Attention remains until acknowledged; completion, chat, PR, and job notices are coalesced by target. Clicking a notice opens its target and clears it. Uploads and file/editor errors remain in the pane where that direct action occurred. Preferences independently control in-YOmux and system notifications.
 
-* Tab attention badges surface agents waiting for input or approval even when automatic approval is off. YOLOmux tracks one canonical Claude/Codex identity per physical tmux pane, so short-lived searches or tests that mention an agent name cannot create duplicate status rows or finished notifications. Visible spinner/timer history is bounded and resets when it disappears, so a reused tmux pane cannot inherit stale working state. Unknown footer chrome does not cancel a visible Working row, while a real later completion, shell prompt, choice, or AskUserQuestion does; a current question also outranks a stale `Goal blocked` footer.
+* Tab attention badges surface agents waiting for input or approval even when automatic approval is off. YOmux tracks one canonical Claude/Codex identity per physical tmux pane, so short-lived searches or tests that mention an agent name cannot create duplicate status rows or finished notifications. Visible spinner/timer history is bounded and resets when it disappears, so a reused tmux pane cannot inherit stale working state. Unknown footer chrome does not cancel a visible Working row, while a real later completion, shell prompt, choice, or AskUserQuestion does; a current question also outranks a stale `Goal blocked` footer.
 
 * The browser title, favicon badge, and topbar activity count report working Claude/Codex sub-windows, so two active agents inside one tmux session count as two everywhere.
 
@@ -490,7 +492,7 @@ Open YOLOmux after setup. Existing tmux sessions appear as tabs. The list descri
 
 * Phone layouts show the selected tab in one full-width pane while preserving the restored desktop split for wider viewports. Editor, Preview, and Diff actions use touch-sized versions of the existing controls; Markdown image paste/upload and pane switching stay on the same desktop action paths. Once a finger claims Preview scrolling, deferred render, zoom, split-reflection, and layout restoration work yields to that live position instead of snapping backward.
 
-* For a real-device mobile diagnostic, open YOLOmux with `?debug=1`, reproduce the Preview or terminal input problem once, then open `YO!stats` -> `API/SSE` and press `Copy Events`. That debug-only action copies raw JSON containing the Preview touch/viewport/write owners and generations plus terminal tap/focus/input stages; normal sessions do not retain this mobile trace.
+* For a real-device mobile diagnostic, open YOmux with `?debug=1`, reproduce the Preview or terminal input problem once, then open `YO!stats` -> `API/SSE` and press `Copy Events`. That debug-only action copies raw JSON containing the Preview touch/viewport/write owners and generations plus terminal tap/focus/input stages; normal sessions do not retain this mobile trace.
 
 For durable UI rules, see [`docs/specs/GUI.md`](docs/specs/GUI.md); current browser tests own exact edge cases and assertions.
 
@@ -506,7 +508,7 @@ For durable UI rules, see [`docs/specs/GUI.md`](docs/specs/GUI.md); current brow
 
 * Right-clicking a URL in a terminal pane or rendered markdown puts `Open URL in a new tab` first, then `Copy URL`; when the visible selected text differs from the actual href, the menu labels that path explicitly as `Copy selected text`.
 
-* After a terminal copy/open action consumes selected text, YOLOmux clears stale browser/xterm selection. Explicit `Copy tmux selection` also exits tmux copy-mode after copying so selected rows do not stay painted as green blocks.
+* After a terminal copy/open action consumes selected text, YOmux clears stale browser/xterm selection. Explicit `Copy tmux selection` also exits tmux copy-mode after copying so selected rows do not stay painted as green blocks.
 
 The `YO` button toggles YOLO auto-approval for a tmux session. See [Agent permissions & YOLO](#agent-permissions--yolo).
 
@@ -515,36 +517,36 @@ The `YO` button toggles YOLO auto-approval for a tmux session. See [Agent permis
 All tmux sessions, default behavior:
 
 ```bash
-python3 yolomux.py --dang
+python3 yomux.py --backend python --dang
 ```
 
 Custom port (default is `9998`, host defaults to `0.0.0.0`):
 
 ```bash
-python3 yolomux.py --port 8080 --dang
+python3 yomux.py --backend python --port 8080 --dang
 ```
 
 Background server:
 
 ```bash
-setsid nohup env TERM=xterm-256color PYTHONUNBUFFERED=1 MALLOC_ARENA_MAX=2 python3 yolomux.py --dang > /tmp/yolomux.log 2>&1 < /dev/null &
+setsid nohup env TERM=xterm-256color PYTHONUNBUFFERED=1 MALLOC_ARENA_MAX=2 python3 yomux.py --backend python --dang > /tmp/yomux.log 2>&1 < /dev/null &
 ```
 
 Specific tmux sessions only, optional filter:
 
 ```bash
-python3 yolomux.py --sessions project1,project2 --dang
+python3 yomux.py --backend python --sessions project1,project2 --dang
 ```
 
 ## Python HTTPS / TLS
 
 ```bash
-python3 yolomux.py                         # default: auto-generated cert under ~/.local/state/yolomux/tls/
-python3 yolomux.py --cert fullchain.pem --key privkey.pem   # bring your own
-python3 yolomux.py --http                  # explicit plain-HTTP opt-out
+python3 yomux.py --backend python       # default: auto-generated cert under ~/.local/state/yomux/tls/
+python3 yomux.py --backend python --cert fullchain.pem --key privkey.pem   # bring your own
+python3 yomux.py --backend python --http # explicit plain-HTTP opt-out
 ```
 
-HTTPS is the default. The compatibility flags `--self-signed` and `--https-self-signed` remain accepted but are redundant. Generating the default certificate requires `openssl` on `PATH`; if it is unavailable, YOLOmux emits a loud warning and falls back to HTTP so the server can still start. Install OpenSSL, provide `--cert` and `--key`, or deliberately select plain HTTP with `--http`. Browsers warn for the generated certificate because it is self-signed; run `tools/setup-tls.sh` once to issue a local-CA certificate, then import the printed CA once on each client that connects by LAN IP or hostname. Explicit `--state-dir`, `--ca-dir`, and `YOLOMUX_CA_DIR` values must be absolute and cannot be `/` or the home directory itself. `--http` cannot be combined with `--cert`/`--key`.
+HTTPS is the default. The compatibility flags `--self-signed` and `--https-self-signed` remain accepted but are redundant. Generating the default certificate requires `openssl` on `PATH`; if it is unavailable, YOmux emits a loud warning and falls back to HTTP so the server can still start. Install OpenSSL, provide `--cert` and `--key`, or deliberately select plain HTTP with `--http`. Browsers warn for the generated certificate because it is self-signed; run `tools/setup-tls.sh` once to issue a local-CA certificate, then import the printed CA once on each client that connects by LAN IP or hostname. Explicit `--state-dir`, `--ca-dir`, and `YOMUX_CA_DIR` values must be absolute and cannot be `/` or the home directory itself. `--http` cannot be combined with `--cert`/`--key`.
 
 ## Authentication & roles
 
@@ -563,15 +565,15 @@ Go issues a port-scoped 90-day cookie backed by its config-rooted secret, but it
 
 ### Login rate limiting
 
-On Python, every password path (the browser login form and HTTP Basic auth) is throttled before the password is ever hashed, so brute force, credential stuffing, and password spraying are bounded and cannot burn the server's password-hash CPU. Two independent limits apply together: a per-username limit (5 failed attempts, then escalating waits of 30s, 1m, 2m, 5m, 10m, 30m, up to 1h, reset on a successful login, with a hard lock after 100 consecutive failures) and per-network limits keyed on the client address at several prefix widths (a single address, its /24 or /64 neighborhood, and its /16 or /48 provider block) plus one global emergency limit. When a limit is hit the response is a generic `429 Too Many Requests` that says only "wait a few minutes" or "wait a few hours" — it never reveals which limit fired, whether the username exists, how many attempts remain, or an exact retry time. Correct credentials for an account that is not itself locked always work. The limiter lives in one SQLite file under `YOLOMUX_STATE_DIR`, so the policy holds across every Python port that shares a state directory and survives restarts.
+On Python, every password path (the browser login form and HTTP Basic auth) is throttled before the password is ever hashed, so brute force, credential stuffing, and password spraying are bounded and cannot burn the server's password-hash CPU. Two independent limits apply together: a per-username limit (5 failed attempts, then escalating waits of 30s, 1m, 2m, 5m, 10m, 30m, up to 1h, reset on a successful login, with a hard lock after 100 consecutive failures) and per-network limits keyed on the client address at several prefix widths (a single address, its /24 or /64 neighborhood, and its /16 or /48 provider block) plus one global emergency limit. When a limit is hit the response is a generic `429 Too Many Requests` that says only "wait a few minutes" or "wait a few hours" — it never reveals which limit fired, whether the username exists, how many attempts remain, or an exact retry time. Correct credentials for an account that is not itself locked always work. The limiter lives in one SQLite file under `YOMUX_STATE_DIR`, so the policy holds across every Python port that shares a state directory and survives restarts.
 
 Go login-rate limiting is less complete than the legacy Python backend. Its browser form uses a process-local in-memory counter keyed by socket peer and username, blocks after five failed verifications for a one-minute window, and forgets the counter on restart. Go Basic auth does not use that limiter, and Go has no durable HMAC keys, hierarchical network buckets, hard username lock, shared-port state, policy override, recovery database, or optional edge escalation. Keep Go on a trusted network or loopback tunnel until that gap is closed.
 
-For Python, the client address is the socket peer. Python deliberately does not trust `X-Forwarded-For`/`Forwarded` headers (any client can forge them). Behind a reverse proxy or an SSH tunnel all clients therefore share the proxy/tunnel address and one network bucket — safe, but intentionally coarser; run YOLOmux with a trusted edge if you need per-client network limits from a real reverse proxy.
+For Python, the client address is the socket peer. Python deliberately does not trust `X-Forwarded-For`/`Forwarded` headers (any client can forge them). Behind a reverse proxy or an SSH tunnel all clients therefore share the proxy/tunnel address and one network bucket — safe, but intentionally coarser; run YOmux with a trusted edge if you need per-client network limits from a real reverse proxy.
 
-Python defaults are tuned for a self-hosted server and rarely need changing. To override them, create `~/.config/yolomux/login-rate-limit.json` (0600) with any of the policy keys — for example `{"username_initial_allowance": 3, "exact_bucket": {"capacity": 5, "refill_per_minute": 2}}`. Overrides are validated on load; a malformed or incoherent file is ignored and the safe defaults are kept. (Overrides live in their own file rather than `auth.yaml` because the auth-config parser only understands accounts and would drop unknown keys.)
+Python defaults are tuned for a self-hosted server and rarely need changing. To override them, create `~/.config/yomux/login-rate-limit.json` (0600) with any of the policy keys — for example `{"username_initial_allowance": 3, "exact_bucket": {"capacity": 5, "refill_per_minute": 2}}`. Overrides are validated on load; a malformed or incoherent file is ignored and the safe defaults are kept. (Overrides live in their own file rather than `auth.yaml` because the auth-config parser only understands accounts and would drop unknown keys.)
 
-**Python recovery.** If a username reaches the hard 100-failure lock, changing that account's password in `auth.yaml` clears it. To reset all throttle state, stop every Python server on that host, make a validated backup, and move aside that host's `YOLOMUX_STATE_DIR/hosts/<stable-host-id>/login-throttle.sqlite3` plus its matching key instead of deleting them; accounts and cookies are unaffected. Leave another host's partition and the legacy unpartitioned file untouched. If the throttle database is ever unreadable, remote password attempts fail closed with the same generic message while local recovery stays possible; the degraded state is visible in the admin System diagnostics (`login_throttle.healthy`).
+**Python recovery.** If a username reaches the hard 100-failure lock, changing that account's password in `auth.yaml` clears it. To reset all throttle state, stop every Python server on that host, make a validated backup, and move aside that host's `YOMUX_STATE_DIR/hosts/<stable-host-id>/login-throttle.sqlite3` plus its matching key instead of deleting them; accounts and cookies are unaffected. Leave another host's partition and the legacy unpartitioned file untouched. If the throttle database is ever unreadable, remote password attempts fail closed with the same generic message while local recovery stays possible; the degraded state is visible in the admin System diagnostics (`login_throttle.healthy`).
 
 **Python optional escalation (off by default).** Beyond the generic 429, Python can serve a harmless "type this phrase" decoy to high-confidence automation and can install expiring firewall DROP rules for volumetric single-address/prefix floods. Both are disabled by default and are defense-in-depth, not the core protection. The firewall integration is opt-in and platform-specific (`pf` on macOS, `nftables` on Linux), builds commands as argument lists (never a shell string), applies a strict per-rule TTL and a rule cap, never blocks a configured trusted address, and only ever reacts to a network/volumetric limit — never to a username lock, so it cannot be tricked into firewalling innocent addresses.
 
@@ -596,14 +598,14 @@ codex --dangerously-bypass-hook-trust             # hook trust bypass
 **`--dang` / `--dangerously-yolo` (server flag).** Makes `+ Claude` / `+ Codex` buttons launch with the dangerous bypass flags:
 
 ```bash
-python3 yolomux.py --dang
+python3 yomux.py --dang
 ```
 
 With `--dang`, `+ Claude` launches `claude --dangerously-skip-permissions`, so permission prompts are bypassed for new Claude sessions (hooks and OAuth login are left intact — see the note above on why `--bare` is not used). `+ Codex` launches `codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust`, so both command approval/sandbox checks and hook trust checks are bypassed for new Codex sessions.
 
 Without it, those buttons create plain `claude` / `codex` sessions. This flag does not change existing sessions.
 
-**The `YO` toggle.** Per-session auto-approval for an existing tmux session. It watches the visible tmux screen and sends the approval key when the rule engine says the prompt is safe. Rules live in `~/.config/yolomux/yolo-rules.yaml`:
+**The `YO` toggle.** Per-session auto-approval for an existing tmux session. It watches the visible tmux screen and sends the approval key when the rule engine says the prompt is safe. Rules live in `~/.config/yomux/yolo-rules.yaml`:
 
 ```yaml
 default: ask
@@ -626,7 +628,7 @@ The optional `risk:` field is a label shown in the YOLO event log. Keep it to th
 
 ## Remote access
 
-The managed Go launcher and the legacy Python backend bind `--host 0.0.0.0` (all interfaces) by default: YOLOmux supports reaching sessions from another machine on a trusted LAN, and every product request is gated by login. The Go binary itself defaults to `127.0.0.1` when run directly. If you use the managed all-interface launch, restrict the port to trusted IPs at the firewall:
+The managed Go launcher and the legacy Python backend bind `--host 0.0.0.0` (all interfaces) by default: YOmux supports reaching sessions from another machine on a trusted LAN, and every product request is gated by login. The Go binary itself defaults to `127.0.0.1` when run directly. If you use the managed all-interface launch, restrict the port to trusted IPs at the firewall:
 
 For Go, this firewall/tunnel boundary is required rather than optional hardening because login throttling is not yet at legacy Python parity.
 
@@ -634,10 +636,10 @@ For Go, this firewall/tunnel boundary is required rather than optional hardening
 sudo ufw allow from <client-ip> to any port 9998 proto tcp
 ```
 
-To keep YOLOmux local-only instead, bind loopback and tunnel from your client:
+To keep YOmux local-only instead, bind loopback and tunnel from your client:
 
 ```bash
-python3 yolomux.py --host 127.0.0.1 --port 9998 --dang
+python3 yomux.py --host 127.0.0.1 --port 9998 --dang
 autossh -M 0 -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -L 9998:127.0.0.1:9998 user@server
 ```
 
@@ -667,10 +669,10 @@ python3 tools/tmux_wall.py --port 8765
 python3 tools/tmux_wall.py --targets project1:0.0,project2:0.0 --slots 4
 ```
 
-Set `YOLOMUX_CONTAINER_HELPER=/path/to/show_project_containers.py` if the wall should include container metadata from a helper outside `~/utils/container/show_project_containers.py`.
+Set `YOMUX_CONTAINER_HELPER=/path/to/show_project_containers.py` if the wall should include container metadata from a helper outside `~/utils/container/show_project_containers.py`.
 
 ## License
 
-YOLOmux is licensed under PolyForm Noncommercial 1.0.0. Noncommercial use is allowed under that license. Commercial use requires a separate commercial license from Keiven Chang.
+YOmux is licensed under PolyForm Noncommercial 1.0.0. Noncommercial use is allowed under that license. Commercial use requires a separate commercial license from Keiven Chang.
 
 Third-party code and generated dependency bundles keep their own upstream notices; see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

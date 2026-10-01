@@ -8,7 +8,7 @@ function registerCrossSurfaceQuickOpenSuite(test) {
   test('search-progress scope digest matches the server-side opaque root digest', () => {
     const api = loadYolomux('', ['1']);
     // Known SHA-256 test vector proves the synchronous implementation, then the 16-hex scope digest
-    // must equal yolomux_lib/search/file_index.py::_root_scope_id = sha256(canonical_root)[:16].
+    // must equal yomux_lib/search/file_index.py::_root_scope_id = sha256(canonical_root)[:16].
     assert.equal(api.sha256HexForTest('abc'), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad', 'sha256 matches the published abc vector');
     assert.equal(api.fileSearchScopeIdForTest('/home/keivenc/dev'), 'c41cbfc443440bf6', 'the scope digest matches the backend _root_scope_id for /home/keivenc/dev');
     assert.equal(api.fileSearchScopeIdForTest(''), '', 'an empty realpath yields no scope digest');

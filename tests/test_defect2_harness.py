@@ -244,8 +244,8 @@ def _attempt(arm, attempt_id, **overrides):
             "start_clean_state": {"observable": True, "clean": True, "tracked": [], "untracked": []},
             "end_clean_state": {"observable": True, "clean": True, "tracked": [], "untracked": []},
         },
-        "artifacts": {"generated_bundle_hashes": {"yolomux.js": "4dda432e", "yolomux.css": "c0", "emoji-data.js": "e0"}},
-        "container": {"tag": "yolomux-test:2fe10ac2d641", "image_id": "sha256:aaa", "image_present": True},
+        "artifacts": {"generated_bundle_hashes": {"yomux.js": "4dda432e", "yomux.css": "c0", "emoji-data.js": "e0"}},
+        "container": {"tag": "yomux-test:2fe10ac2d641", "image_id": "sha256:aaa", "image_present": True},
         "arm_env": {"name": "YOLOMUX_STATS_PERSISTENCE_OWNER", "forwarded": True, "observed_by_subject": True},
         "statsd": {"source_shape": [{"source": "storage.py", "source_sha256": f"sha-{arm}"}]},
         "workers": {"counts": dict(harness.ENVELOPE_WORKERS), "mode": "parallel"},
@@ -261,7 +261,7 @@ ARM_ENV = "YOLOMUX_STATS_PERSISTENCE_OWNER"
 def test_artifact_equal_arms_pass_and_a_differing_bundle_fails():
     """The historical pair that looked like one defect were the same SHA with different bundles.
 
-    Same commit `8adc6108...`, same 21 dirty paths, `yolomux.js` differing `4dda432e` vs
+    Same commit `8adc6108...`, same 21 dirty paths, `yomux.js` differing `4dda432e` vs
     `3247b973`, and `84_stats_current.js` -- the file that owns the watchdog -- dirty in both.
     Source-equal is not artifact-equal, and only the bundle triple catches it.
     """
@@ -270,14 +270,14 @@ def test_artifact_equal_arms_pass_and_a_differing_bundle_fails():
     assert harness.arm_equality_violations(clean, arm_env_name=ARM_ENV) == []
 
     drifted = [_attempt("batched", "a1"), _attempt("per_append", "b1")]
-    drifted[1]["artifacts"]["generated_bundle_hashes"]["yolomux.js"] = "3247b973"
+    drifted[1]["artifacts"]["generated_bundle_hashes"]["yomux.js"] = "3247b973"
     violations = harness.arm_equality_violations(drifted, arm_env_name=ARM_ENV)
     assert any("generated_bundle_hashes differ" in item for item in violations), violations
 
 
 def test_a_dirty_checkout_or_a_rebuilt_container_fails_the_comparison():
     dirty = [_attempt("batched", "a1"), _attempt("per_append", "b1")]
-    dirty[0]["tree"]["start_clean_state"] = {"observable": True, "clean": False, "tracked": ["static/yolomux.js"], "untracked": []}
+    dirty[0]["tree"]["start_clean_state"] = {"observable": True, "clean": False, "tracked": ["static/yomux.js"], "untracked": []}
     assert any("dirty checkout" in item for item in harness.arm_equality_violations(dirty, arm_env_name=ARM_ENV))
 
     rebuilt = [_attempt("batched", "a1"), _attempt("per_append", "b1")]
@@ -388,8 +388,8 @@ def test_statsd_source_identity_names_every_file_statsd_respawns_from():
 
     records = harness.statsd_source_identity()
     assert [record["source"] for record in records] == [
-        "yolomux_lib/stats_current/storage.py",
-        "yolomux_lib/stats_current/service.py",
+        "yomux_lib/stats_current/storage.py",
+        "yomux_lib/stats_current/service.py",
     ], records
     for record in records:
         assert record["present"] is True, record

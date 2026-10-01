@@ -20,10 +20,10 @@ import pytest
 
 from tests.helpers.http_routes import capturing_route_request as _capturing_route_request
 
-from yolomux_lib import app as app_module
-from yolomux_lib import common
-from yolomux_lib import http_routes
-from yolomux_lib import server
+from yomux_lib import app as app_module
+from yomux_lib import common
+from yomux_lib import http_routes
+from yomux_lib import server
 
 
 class _StoppedCompletionService(app_module.BatchedOperationService):

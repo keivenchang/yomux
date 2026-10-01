@@ -19,8 +19,8 @@ from http import HTTPStatus
 
 import pytest
 
-from yolomux_lib import app as app_module
-from yolomux_lib import server_logs
+from yomux_lib import app as app_module
+from yomux_lib import server_logs
 
 from tests.helpers.http_routes import capturing_route_request as _capturing_route_request
 

@@ -25,7 +25,7 @@ import (
 	"syscall"
 	"unicode/utf8"
 
-	"github.com/keivenchang/yolomux/internal/cache"
+	"github.com/keivenchang/yomux/internal/cache"
 )
 
 const (

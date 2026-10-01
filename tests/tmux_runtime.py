@@ -15,9 +15,9 @@ import uuid
 
 import pytest
 
-from yolomux_lib.background_scheduler import pid_is_alive
-from yolomux_lib.host_identity import process_start_identity
-from yolomux_lib.tmux_utils import YOLOMUX_TMUX_SOCKET_ENV
+from yomux_lib.background_scheduler import pid_is_alive
+from yomux_lib.host_identity import process_start_identity
+from yomux_lib.tmux_utils import YOLOMUX_TMUX_SOCKET_ENV
 
 
 TMUX_WAIT_INITIAL_POLL_SECONDS = 0.05
@@ -217,6 +217,7 @@ def start_isolated_tmux_runtime(
         raise ValueError("at least one isolated tmux session is required")
     monkeypatch.delenv("TMUX", raising=False)
     monkeypatch.delenv("TMUX_PANE", raising=False)
+    monkeypatch.setenv("YOMUX_TMUX_SOCKET", str(socket_path))
     monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
     monkeypatch.setenv("HISTFILE", os.devnull)
     owned_cwd = Path(session_cwd) if session_cwd is not None else tmp_path

@@ -6,10 +6,10 @@ import time
 
 import pytest
 
-from yolomux_lib import app as app_module
-from yolomux_lib.infra.state_services import ClientEventWatcherRecord
-from yolomux_lib.infra.state_services import ClientWatchDescriptor
-from yolomux_lib.local_services import client as local_service_client
+from yomux_lib import app as app_module
+from yomux_lib.infra.state_services import ClientEventWatcherRecord
+from yomux_lib.infra.state_services import ClientWatchDescriptor
+from yomux_lib.local_services import client as local_service_client
 
 
 class _WatchdDemandRetirementClient:

@@ -9,10 +9,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from yolomux_lib.infra.listener_census import ListenerCensus
-from yolomux_lib.infra.listener_census import ListenerDegradation
-from yolomux_lib.infra.listener_census import SCOPE_GLOBAL
-from yolomux_lib.infra.listener_census import SCOPE_TARGET
+from yomux_lib.infra.listener_census import ListenerCensus
+from yomux_lib.infra.listener_census import ListenerDegradation
+from yomux_lib.infra.listener_census import SCOPE_GLOBAL
+from yomux_lib.infra.listener_census import SCOPE_TARGET
 
 from tools import system_status_latency_probe as probe
 from tests.isolated_dev_server import build_paths

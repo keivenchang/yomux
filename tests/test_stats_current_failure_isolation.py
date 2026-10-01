@@ -6,14 +6,14 @@ import json
 import threading
 from http import HTTPStatus
 
-from yolomux_lib import common
-from yolomux_lib.stats_current import client as client_module
-from yolomux_lib.stats_current import collectors, protocol, runtime, storage
-from yolomux_lib.stats_current import service as stats_current_service
-from yolomux_lib.local_services import client as local_service_client
-from yolomux_lib.observability.failure_severity import BROWSER_UPLOAD_OUTCOME_OWNER
-from yolomux_lib.observability.failure_severity import CALLER_OUTCOME_OWNER_FIELD
-from yolomux_lib.observability.failure_severity import expected_caller_outcome, failure_record_level
+from yomux_lib import common
+from yomux_lib.stats_current import client as client_module
+from yomux_lib.stats_current import collectors, protocol, runtime, storage
+from yomux_lib.stats_current import service as stats_current_service
+from yomux_lib.local_services import client as local_service_client
+from yomux_lib.observability.failure_severity import BROWSER_UPLOAD_OUTCOME_OWNER
+from yomux_lib.observability.failure_severity import CALLER_OUTCOME_OWNER_FIELD
+from yomux_lib.observability.failure_severity import expected_caller_outcome, failure_record_level
 
 
 class _FutureServiceClient:

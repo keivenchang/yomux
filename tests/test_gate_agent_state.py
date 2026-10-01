@@ -28,13 +28,13 @@ from tests.gate_harness import gate_tmux  # noqa: F401
 from tests.tmux_runtime import create_isolated_tmux_session
 from tests.tmux_runtime import run_isolated_tmux
 from tests.tmux_runtime import wait_for_isolated_tmux_panes
-from yolomux_lib.app import TmuxWebtermApp
-from yolomux_lib.approval import approvald
-from yolomux_lib.infra import batchd
-from yolomux_lib.local_services.rpc import safe_socket_path
-from yolomux_lib import statusd_client
-from yolomux_lib.approval.prompt_detector import agent_screen_state
-from yolomux_lib.tmux.sessions import discover_sessions
+from yomux_lib.app import TmuxWebtermApp
+from yomux_lib.approval import approvald
+from yomux_lib.infra import batchd
+from yomux_lib.local_services.rpc import safe_socket_path
+from yomux_lib import statusd_client
+from yomux_lib.approval.prompt_detector import agent_screen_state
+from yomux_lib.tmux.sessions import discover_sessions
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -500,22 +500,69 @@ def _wait_for_realistic_browser_roster(browser, sessions: list[str]) -> dict[str
         """
         const expected = arguments[0];
         const done = arguments[arguments.length - 1];
-        window.__yolomuxTestWaitFor(() => {
+        const observe = () => {
           const metadataSessions = transcriptMetadataState.payload?.sessions || {};
-          return sessions.length === expected.length
-            && expected.every(session => metadataSessions[session])
-            && expected.every(session => (autoApproveStates.get(session)?.agent_windows || []).length === 1)
-            && expected.every(session => agentWindowSnapshotRevision(autoApproveStates.get(session)) > 0);
+          const approvalWindowCounts = expected.map(session => (autoApproveStates.get(session)?.agent_windows || []).length);
+          const revisions = expected.map(session => agentWindowSnapshotRevision(autoApproveStates.get(session)));
+          return {
+            browserSessionCount: sessions.length,
+            expectedCount: expected.length,
+            metadataSessionCount: Object.keys(metadataSessions).length,
+            metadataPresentCount: expected.filter(session => metadataSessions[session]).length,
+            approvalPresentCount: expected.filter(session => autoApproveStates.has(session)).length,
+            approvalWindowCountHistogram: approvalWindowCounts.reduce((counts, count) => ({
+              ...counts,
+              [count]: (counts[count] || 0) + 1,
+            }), {}),
+            positiveRevisionCount: revisions.filter(revision => revision > 0).length,
+            minimumRevision: Math.min(...revisions),
+            maximumRevision: Math.max(...revisions),
+          };
+        };
+        window.__yolomuxTestWaitFor(() => {
+          const observation = observe();
+          return observation.browserSessionCount === expected.length
+            && observation.metadataPresentCount === expected.length
+            && observation.approvalWindowCountHistogram[1] === expected.length
+            && observation.positiveRevisionCount === expected.length;
         }, {timeoutMs: 20000, description: `${expected.length}-session producer roster`}).then(() => done({
           sessionCount: sessions.length,
           metadataCount: Object.keys(transcriptMetadataState.payload?.sessions || {}).length,
           revisions: expected.map(session => agentWindowSnapshotRevision(autoApproveStates.get(session))),
           rowCount: expected.reduce((count, session) => count + (autoApproveStates.get(session)?.agent_windows || []).length, 0),
-        }), error => done({error: String(error?.stack || error)}));
+        }), async error => {
+          let serverObservation = {unavailable: true};
+          try {
+            const response = await fetch('/api/auto-approve');
+            const payload = await response.json();
+            const serverSessions = payload?.sessions || {};
+            const windowCounts = Object.values(serverSessions).map(state => (state?.agent_windows || []).length);
+            serverObservation = {
+              status: response.status,
+              sessionCount: Object.keys(serverSessions).length,
+              windowCountHistogram: windowCounts.reduce((counts, count) => ({
+                ...counts,
+                [count]: (counts[count] || 0) + 1,
+              }), {}),
+              revision: payload?.agent_window_snapshot_revision || 0,
+            };
+          } catch (diagnosticError) {
+            serverObservation = {error: String(diagnosticError)};
+          }
+          done({error: String(error?.stack || error), ...observe(), serverObservation});
+        });
         """,
         sessions,
     )
-    assert not metrics.get("error"), metrics
+    if metrics.get("error"):
+        raise AssertionError(json.dumps({
+            key: metrics.get(key)
+            for key in (
+                "error", "browserSessionCount", "expectedCount", "metadataSessionCount",
+                "metadataPresentCount", "approvalPresentCount", "approvalWindowCountHistogram",
+                "positiveRevisionCount", "minimumRevision", "maximumRevision", "serverObservation",
+            )
+        }, sort_keys=True))
     assert metrics["sessionCount"] == metrics["metadataCount"] == len(sessions), metrics
     assert metrics["rowCount"] == len(sessions), metrics
     assert all(revision > 0 for revision in metrics["revisions"]), metrics
@@ -1181,6 +1228,8 @@ def test_f6_realistic_consumers_converge_to_the_published_roster_revision(
                 revisions,
                 detailState: detailHost.firstElementChild?.dataset.jsDebugAgentWindowDetailState || '',
                 detailText: detailHost.textContent || '',
+                rosterTopologyGeneration: Number(tmuxTopologyGeneration || 0),
+                metadataTopologyGeneration: Number(transcriptMetadataState.payload?.topology_generation || 0),
                 metadataRequestCount: performance.getEntriesByType('resource').filter(entry => new URL(entry.name).pathname === '/api/session-metadata').length,
               };
             };
@@ -1222,16 +1271,61 @@ def test_f6_realistic_consumers_converge_to_the_published_roster_revision(
             initial_revision,
             metadata_requests_before,
         )
+        if result.get("error"):
+            status_response, status_body = fixture.runtime.app.status_client.snapshot(
+                fixture.runtime.app.sessions,
+                timeout=1.0,
+            )
+            try:
+                status_payload = json.loads(status_body) if status_body else {}
+            except (TypeError, ValueError):
+                status_payload = {}
+            status_sessions = status_payload.get("sessions") if isinstance(status_payload, dict) else {}
+            if not isinstance(status_sessions, dict):
+                status_sessions = {}
+            window_counts = [
+                len(value.get("agent_windows") or [])
+                for value in status_sessions.values()
+                if isinstance(value, dict)
+            ]
+            result["statusdDiagnostic"] = {
+                "ok": status_response.get("ok") is True,
+                "status": status_response.get("status"),
+                "generation": status_response.get("generation"),
+                "stale": status_response.get("stale"),
+                "error": status_response.get("error"),
+                "sessionCount": len(status_sessions),
+                "windowCounts": window_counts,
+                "revision": status_payload.get("agent_window_snapshot_revision") if isinstance(status_payload, dict) else None,
+                "topologyGeneration": status_payload.get("topology_generation") if isinstance(status_payload, dict) else None,
+            }
+        scheduler = fixture.runtime.app.client_events.snapshot()
+        watcher_record = fixture.runtime.app.client_watch_service.event_watcher_record
+        status_worker = watcher_record.status_generation_worker
+        if result.get("error"):
+            result["statusPublisherDiagnostic"] = {
+                "publishedAutoApproveEvents": scheduler["published_by_type"].get("auto_approve_changed", {}).get("events", 0),
+                "publishedTranscriptEvents": scheduler["published_by_type"].get("transcripts_changed", {}).get("events", 0),
+                "watcherGeneration": watcher_record.status_generation,
+                "watcherWorkerAlive": status_worker is not None and status_worker.is_alive(),
+                "watcherLeasePresent": bool(watcher_record.status_generation_lease_id),
+            }
         # Report the wait outcome HERE, before scheduler/`advanced`/shape assertions can
         # fire first and bury the compact diagnostic under the full result repr.
         # A failed wait reports `error` and, if reporting also threw, `reportingError`
         # beside it - never instead of it. `postWaitError` means the wait SUCCEEDED and
         # only reporting failed, so it can never mask a convergence failure.
-        assert not result.get("error"), f6_wait_failure_record(result, metadata_requests_before)
+        assert not result.get("error"), json.dumps({
+            "wait": json.loads(f6_wait_failure_record(result, metadata_requests_before)),
+            "statusd": result.get("statusdDiagnostic"),
+            "statusPublisher": result.get("statusPublisherDiagnostic"),
+            "browserTopology": {
+                "roster": result.get("final", {}).get("rosterTopologyGeneration"),
+                "metadata": result.get("final", {}).get("metadataTopologyGeneration"),
+            },
+        }, sort_keys=True)
         assert not result.get("reportingError"), f6_wait_failure_record(result, metadata_requests_before)
         assert not result.get("postWaitError"), f6_wait_failure_record(result, metadata_requests_before)
-        scheduler = fixture.runtime.app.client_events.snapshot()
-
     published = scheduler["published_by_type"].get("auto_approve_changed", {"events": 0, "bytes": 0})
     metadata_published = scheduler["published_by_type"].get("transcripts_changed", {"events": 0, "bytes": 0})
     assert published["events"] > 0 and published["bytes"] > 0, scheduler

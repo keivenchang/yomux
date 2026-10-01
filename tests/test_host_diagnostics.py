@@ -1,13 +1,13 @@
 from pathlib import Path
 
-from yolomux_lib.infra.filesystem_preflight import FilesystemClassification
-from yolomux_lib.infra.host_identity import HostIdentity
-from yolomux_lib.infra.host_identity import current_host_identity
-from yolomux_lib.infra.host_diagnostics import DatabasePartition
-from yolomux_lib.infra.host_diagnostics import RejectedMutablePath
-from yolomux_lib.infra.host_diagnostics import RootLayout
-from yolomux_lib.infra.host_diagnostics import collect_host_diagnostics
-from yolomux_lib.stats_current.storage import DATABASE_FILENAME
+from yomux_lib.infra.filesystem_preflight import FilesystemClassification
+from yomux_lib.infra.host_identity import HostIdentity
+from yomux_lib.infra.host_identity import current_host_identity
+from yomux_lib.infra.host_diagnostics import DatabasePartition
+from yomux_lib.infra.host_diagnostics import RejectedMutablePath
+from yomux_lib.infra.host_diagnostics import RootLayout
+from yomux_lib.infra.host_diagnostics import collect_host_diagnostics
+from yomux_lib.stats_current.storage import DATABASE_FILENAME
 
 
 def test_non_admin_host_diagnostics_redacts_paths_and_keeps_safety_state_visible(tmp_path):
@@ -127,7 +127,7 @@ def test_collect_uses_current_host_identity_with_distinct_display_name_and_sourc
         instance_nonce="nonce-abc",
         stable_host_id_source="YOLOMUX_HOST_ID",
     )
-    monkeypatch.setattr("yolomux_lib.infra.host_diagnostics.current_host_identity", lambda: identity)
+    monkeypatch.setattr("yomux_lib.infra.host_diagnostics.current_host_identity", lambda: identity)
 
     payload = collect_host_diagnostics(
         roots=roots,
@@ -185,10 +185,10 @@ def test_synthetic_host_diagnostics_never_reads_machine_state(monkeypatch):
     def forbidden(*_args, **_kwargs):
         raise AssertionError("synthetic host diagnostics read machine state")
 
-    monkeypatch.setattr("yolomux_lib.infra.host_diagnostics.RootLayout.current", forbidden)
-    monkeypatch.setattr("yolomux_lib.infra.host_diagnostics.current_host_identity", forbidden)
-    monkeypatch.setattr("yolomux_lib.infra.host_diagnostics.classify_filesystem", forbidden)
-    monkeypatch.setattr("yolomux_lib.infra.host_diagnostics.current_database_partitions", forbidden)
+    monkeypatch.setattr("yomux_lib.infra.host_diagnostics.RootLayout.current", forbidden)
+    monkeypatch.setattr("yomux_lib.infra.host_diagnostics.current_host_identity", forbidden)
+    monkeypatch.setattr("yomux_lib.infra.host_diagnostics.classify_filesystem", forbidden)
+    monkeypatch.setattr("yomux_lib.infra.host_diagnostics.current_database_partitions", forbidden)
 
     payload = collect_host_diagnostics(environ={"YOLOMUX_STATS_SYNTHETIC_HOST": "1"}).payload(admin=True)
 

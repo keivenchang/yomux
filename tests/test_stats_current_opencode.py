@@ -8,7 +8,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-from yolomux_lib.stats_current import opencode
+from yomux_lib.stats_current import opencode
 
 
 def _database(path: Path, sessions: list[tuple[object, ...]], messages: list[tuple[object, ...]], parts: list[tuple[object, ...]]) -> None:
@@ -724,6 +724,18 @@ def test_cwd_only_selection_accepts_one_fresh_eligible_session(tmp_path: Path) -
 
     assert isinstance(result, opencode.OpenCodeReadSuccess)
     assert result.session.session_id == "ses-only"
+
+
+def test_cwd_only_selection_matches_historical_yomux_directory(tmp_path: Path) -> None:
+    database = tmp_path / "opencode.db"
+    legacy_directory = str(tmp_path / "yolomux.dev8123")
+    canonical_directory = str(tmp_path / "yomux.dev8123")
+    _database(database, [_session("ses-moved", legacy_directory, updated=3_000, tokens=(0, 0, 0, 0, 0))], [], [])
+
+    result = opencode.read_usage(database, directory=canonical_directory, started_at=2.0, now=4.0)
+
+    assert isinstance(result, opencode.OpenCodeReadSuccess)
+    assert result.session.session_id == "ses-moved"
 
 
 def test_read_is_read_only_and_never_reads_credential_table(tmp_path: Path) -> None:

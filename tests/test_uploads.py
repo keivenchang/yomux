@@ -6,17 +6,17 @@ import time
 import pytest
 
 
-from yolomux_lib.common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
-from yolomux_lib.common import UPLOAD_MAX_BYTES
-from yolomux_lib.common import UPLOAD_MAX_FILES
-from yolomux_lib.server import FilesystemHttpAdapter, Handler
-from yolomux_lib.uploads import UploadTargetError
-from yolomux_lib.uploads import UploadRetentionSweeper
-from yolomux_lib.uploads import central_upload_target
-from yolomux_lib.uploads import parse_multipart_upload
-from yolomux_lib.uploads import prune_expired_uploads
-from yolomux_lib.uploads import upload_path_component
-from yolomux_lib.uploads import unique_upload_path
+from yomux_lib.common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
+from yomux_lib.common import UPLOAD_MAX_BYTES
+from yomux_lib.common import UPLOAD_MAX_FILES
+from yomux_lib.server import FilesystemHttpAdapter, Handler
+from yomux_lib.uploads import UploadTargetError
+from yomux_lib.uploads import UploadRetentionSweeper
+from yomux_lib.uploads import central_upload_target
+from yomux_lib.uploads import parse_multipart_upload
+from yomux_lib.uploads import prune_expired_uploads
+from yomux_lib.uploads import upload_path_component
+from yomux_lib.uploads import unique_upload_path
 
 
 def test_unique_upload_path_uses_template_with_original_name(tmp_path):

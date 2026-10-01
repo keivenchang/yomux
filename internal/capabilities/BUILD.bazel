@@ -12,7 +12,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "capabilities_lib",
     srcs = ["catalog.go"],
-    importpath = "github.com/keivenchang/yolomux/internal/capabilities",
+    importpath = "github.com/keivenchang/yomux/internal/capabilities",
 )
 
 go_test(

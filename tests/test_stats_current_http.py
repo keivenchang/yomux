@@ -14,10 +14,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from yolomux_lib import http_routes
-from yolomux_lib import server
-from yolomux_lib import server_logs
-from yolomux_lib.stats_current import http, protocol, resolution as stats_resolution
+from yomux_lib import http_routes
+from yomux_lib import server
+from yomux_lib import server_logs
+from yomux_lib.stats_current import http, protocol, resolution as stats_resolution
 from tests.terminal_state_guard import assert_terminal_transition
 
 
@@ -600,7 +600,7 @@ def test_stream_delta_checks_keep_absolute_cadence_when_rpc_work_takes_time(monk
 
 
 STATS_CLIENT_SOURCE = (
-    Path(__file__).resolve().parents[1] / "static_src" / "js" / "yolomux" / "84_stats_current.js"
+    Path(__file__).resolve().parents[1] / "static_src" / "js" / "yomux" / "84_stats_current.js"
 ).read_text(encoding="utf-8")
 
 
@@ -757,7 +757,7 @@ def test_reconnect_last_event_id_header_is_inert(monkeypatch):
     to be influenced -- and the handler never consults a request header while doing it.
     """
 
-    library = Path(__file__).resolve().parents[1] / "yolomux_lib"
+    library = Path(__file__).resolve().parents[1] / "yomux_lib"
     pattern = re.compile(r"last[-_ ]?event[-_ ]?id", re.IGNORECASE)
     readers = []
     for path in sorted(library.rglob("*.py")):

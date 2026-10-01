@@ -4,10 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from yolomux_lib import app as app_module
-from yolomux_lib import statusd
-from yolomux_lib import statusd_client
-from yolomux_lib import web
+from yomux_lib import app as app_module
+from yomux_lib import statusd
+from yomux_lib import statusd_client
+from yomux_lib import web
 
 
 def test_activity_summary_app_boundaries_fail_closed_before_statusd_or_assembly():
@@ -86,6 +86,6 @@ def test_activity_summary_html_bootstrap_is_fail_closed(bootstrap_value, monkeyp
     if bootstrap_value is not None:
         monkeypatch.setattr(web, "activity_summary_bootstrap", lambda: bootstrap_value)
     page = web.html_page([])
-    marker = '<script id="yolomux-bootstrap" type="application/json">'
+    marker = '<script id="yomux-bootstrap" type="application/json">'
     payload = json.loads(page.split(marker, 1)[1].split("</script>", 1)[0])
     assert payload["activitySummary"] == {"enabled": False, "reason": "async_replacement_required"}

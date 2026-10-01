@@ -5,11 +5,11 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 
-from yolomux_lib.transcripts import transcript_activity_state
-from yolomux_lib.transcripts import transcript_activity_state_from_text
-from yolomux_lib.transcripts import transcript_delta_result_state
-from yolomux_lib.transcripts import transcript_pending_approval
-from yolomux_lib.transcripts import transcript_pending_approval_from_text
+from yomux_lib.transcripts import transcript_activity_state
+from yomux_lib.transcripts import transcript_activity_state_from_text
+from yomux_lib.transcripts import transcript_delta_result_state
+from yomux_lib.transcripts import transcript_pending_approval
+from yomux_lib.transcripts import transcript_pending_approval_from_text
 
 
 def jsonl(*records):

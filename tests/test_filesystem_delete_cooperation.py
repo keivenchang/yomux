@@ -8,8 +8,8 @@ import time
 
 import pytest
 
-from yolomux_lib import filesystem
-from yolomux_lib.filesystem import FilesystemError
+from yomux_lib import filesystem
+from yomux_lib.filesystem import FilesystemError
 
 
 def _tree(tmp_path):

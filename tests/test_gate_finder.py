@@ -15,7 +15,7 @@ from tests.browser_helpers.browser_layout import load_live_runtime_boot_fixture
 from tests.browser_helpers.browser_layout import serve_repo_fixture_page
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.terminal_state_guard import assert_terminal_transition
-from yolomux_lib import app as app_module
+from yomux_lib import app as app_module
 
 
 FINDER_ROOT = "/home/test"
@@ -29,7 +29,7 @@ QUIET_POLL_CYCLES = 25
 
 
 def _load_finder(browser, tmp_path) -> None:
-    source_bundle = serve_repo_fixture_page("finder-source.js", static_build.build_asset("yolomux.js"))
+    source_bundle = serve_repo_fixture_page("finder-source.js", static_build.build_asset("yomux.js"))
     load_live_runtime_boot_fixture(
         browser,
         tmp_path,

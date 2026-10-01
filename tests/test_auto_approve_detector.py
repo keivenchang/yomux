@@ -14,12 +14,12 @@ from tests.helpers.prompt_corpus import PromptCorpus
 from tests.helpers.prompt_corpus import PromptCorpusPreset
 
 from tools import auto_approve_tmux
-from yolomux_lib import app as app_module
-from yolomux_lib import approvals
-from yolomux_lib import prompt_detector
-from yolomux_lib.auto_approve_worker import AutoApproveWorker
-from yolomux_lib.common import AgentInfo
-from yolomux_lib.common import SessionInfo
+from yomux_lib import app as app_module
+from yomux_lib import approvals
+from yomux_lib import prompt_detector
+from yomux_lib.auto_approve_worker import AutoApproveWorker
+from yomux_lib.common import AgentInfo
+from yomux_lib.common import SessionInfo
 
 
 PROMPT_CORPUS_DIR = Path(__file__).resolve().parent / "fixtures" / "prompt_corpus"
@@ -650,7 +650,7 @@ def test_auto_approve_tmux_reexports_detector_helpers():
 def test_approval_detection_pipeline_has_one_shared_owner():
     # The read-path (app.py), the act-path worker (via the auto_approve_tmux module seam), and the CLI
     # must all run the SAME detection functions — no parallel re-implementation. Detection lives in
-    # yolomux_lib.approvals; the root CLI re-exports it and app.py imports it directly. Identity here
+    # yomux_lib.approvals; the root CLI re-exports it and app.py imports it directly. Identity here
     # means a future divergent copy fails this test instead of silently drifting the two paths apart.
     assert auto_approve_tmux.hybrid_approval_prompt_state is approvals.hybrid_approval_prompt_state
     assert auto_approve_tmux.transcript_approval_prompt_state is approvals.transcript_approval_prompt_state
@@ -900,10 +900,10 @@ def test_extract_command_rejoins_wrapped_codex_command():
     visible_text = "\n".join([
         "  Would you like to run the following command?",
         "",
-        "  Reason: Verify the persisted YOLOmux settings file now defaults",
+        "  Reason: Verify the persisted YOmux settings file now defaults",
         "  the editor font size to 13.",
         "",
-        '  $ python3 -c "from yolomux_lib.settings import settings_payload;',
+        '  $ python3 -c "from yomux_lib.settings import settings_payload;',
         '  print(settings_payload()[\'settings\'][\'appearance\'][\'editor_font_size\'])"',
         "",
         "› 1. Yes, proceed (y)",
@@ -913,7 +913,7 @@ def test_extract_command_rejoins_wrapped_codex_command():
     ])
 
     assert prompt_detector.extract_command(visible_text) == (
-        'python3 -c "from yolomux_lib.settings import settings_payload; '
+        'python3 -c "from yomux_lib.settings import settings_payload; '
         'print(settings_payload()[\'settings\'][\'appearance\'][\'editor_font_size\'])"'
     )
 
@@ -2324,7 +2324,7 @@ def test_visible_choice_prompt_text_ignores_stale_user_question_above_idle_promp
 
 def test_visible_choice_prompt_text_ignores_claude_tip_question_chrome():
     visible_text = "\n".join([
-        "❯ Plan this harmless YOLOmux E2E task: run `sleep 5` and then report done. Stop for approval before executing.",
+        "❯ Plan this harmless YOmux E2E task: run `sleep 5` and then report done. Stop for approval before executing.",
         "",
         "✻ Composing…",
         "  ⎿  Tip: Did you know you can drag and drop image files into your terminal?",
@@ -2343,10 +2343,10 @@ def test_visible_choice_prompt_text_ignores_url_query_output_above_idle_prompt()
     visible_text = "\n".join([
         "Ran python3 - <<'PY'",
         " import re, ssl, urllib.request",
-        " from yolomux_lib import common",
+        " from yomux_lib import common",
         " ... +13 lines",
         " bootstrap_dev= True",
-        " css_href= /static/yolomux.css?",
+        " css_href= /static/yomux.css?",
         " v=1782321509",
         "",
         "❯ ",

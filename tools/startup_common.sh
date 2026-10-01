@@ -2,6 +2,36 @@
 
 # Shared, source-only startup guards for boot.sh and yolo-dev-start.
 
+yomux_normalize_environment() {
+  local variable_name legacy_name new_name used_legacy=0
+  while IFS= read -r variable_name; do
+    case "$variable_name" in
+      YOLOMUX_*)
+        legacy_name="$variable_name"
+        new_name="YOMUX_${legacy_name#YOLOMUX_}"
+        used_legacy=1
+        ;;
+      YOMUX_*)
+        new_name="$variable_name"
+        legacy_name="YOLOMUX_${new_name#YOMUX_}"
+        ;;
+      *) continue ;;
+    esac
+    if [[ "${!new_name+x}" ]]; then
+      printf -v "$legacy_name" '%s' "${!new_name}"
+      export "$legacy_name"
+    else
+      printf -v "$new_name" '%s' "${!legacy_name}"
+      export "$new_name"
+    fi
+  done < <(compgen -e)
+  if [[ "$used_legacy" -eq 1 ]]; then
+    printf 'WARNING: YOLOMUX_* environment names are deprecated; use YOMUX_*.\n' >&2
+  fi
+  YOMUX_ENVIRONMENT_NORMALIZED=1
+  export YOMUX_ENVIRONMENT_NORMALIZED
+}
+
 # Managed/operator launches deliberately watch the shared default tmux server.
 # Test and ad hoc processes can still pass a private socket directly when they
 # need isolation, but operator launchers must not inherit one accidentally.
@@ -11,7 +41,9 @@ yolomux_default_server_optin() {
 
 yolomux_use_machine_tmux() {
   unset TMUX TMUX_PANE
+  export YOMUX_TMUX_SOCKET=
   export YOLOMUX_TMUX_SOCKET=
+  export YOMUX_TMUX_ALLOW_DEFAULT_SERVER=1
   export YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER=1
 }
 
@@ -21,7 +53,7 @@ yolomux_port_listener_pids() {
   local listener_python="${YOLOMUX_PYTHON:-${python_bin:-${PYTHON:-python3}}}"
   local startup_repo_root
   startup_repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)" || return 2
-  (cd -- "$startup_repo_root" && "$listener_python" -m yolomux_lib.infra.listener_census "$port")
+  (cd -- "$startup_repo_root" && "$listener_python" -m yomux_lib.infra.listener_census "$port")
 }
 
 # Require EXACTLY one listener on a port and print its pid. The managed owner
@@ -64,7 +96,7 @@ yolomux_start_lock_path() {
     printf '%s' "${YOLOMUX_ROOT%/}/cache/start.lock"
     return
   fi
-  printf '%s' "${YOLOMUX_START_LOCK_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/yolomux/start.lock}"
+  printf '%s' "${YOLOMUX_START_LOCK_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/yomux/start.lock}"
 }
 
 yolomux_release_start_lock() {
@@ -101,7 +133,7 @@ yolomux_acquire_start_lock() {
       return 0
     fi
   fi
-  printf 'ERROR: another YOLOmux stack start is already in progress%s\n' "${owner_pid:+ (pid $owner_pid)}" >&2
+  printf 'ERROR: another YOmux stack start is already in progress%s\n' "${owner_pid:+ (pid $owner_pid)}" >&2
   return 1
 }
 
@@ -216,7 +248,7 @@ import sys
 if platform.system() != "Linux":
     raise SystemExit(0)
 os.chdir(sys.argv[1])
-from yolomux_lib.infra.inotify_capacity import inotify_capacity_verdict
+from yomux_lib.infra.inotify_capacity import inotify_capacity_verdict
 
 verdict = inotify_capacity_verdict()
 if verdict.admitted:
@@ -226,7 +258,7 @@ if verdict.admitted:
         flush=True,
     )
     raise SystemExit(0)
-print("WARNING: startup inotify capacity is below the YOLOmux gate floor", flush=True)
+print("WARNING: startup inotify capacity is below the YOmux gate floor", flush=True)
 print(verdict.refusal_text(), flush=True)
 raise SystemExit(1)
 PY
@@ -248,7 +280,7 @@ yolomux_wait_for_system_capacity() {
     printf 'ramp  waiting for system capacity: %s\n' "$snapshot"
     sleep 5
   done
-  printf 'ERROR: system load did not recover within %ss; refusing to start another YOLOmux server\n' "$max_wait" >&2
+  printf 'ERROR: system load did not recover within %ss; refusing to start another YOmux server\n' "$max_wait" >&2
   return 1
 }
 
@@ -305,5 +337,5 @@ yolomux_submit_macos_server() {
     plan_json="$("$python_bin" "$repo_root/tools/instance_isolation.py" plan-direct --port "$port")" || return
   fi
   tmux -L "$socket_name" new-session -d -s "$session_name" -c "$repo_root" \
-    /bin/bash -c "$launcher" bash "$repo_root" "$launch_path" "$shell_bin" "$python_bin" "$repo_root/yolomux.py" "$log_path" "$plan_json" "$@"
+    /bin/bash -c "$launcher" bash "$repo_root" "$launch_path" "$shell_bin" "$python_bin" "$repo_root/yomux.py" "$log_path" "$plan_json" "$@"
 }

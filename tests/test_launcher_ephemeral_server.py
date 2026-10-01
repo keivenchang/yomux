@@ -23,8 +23,8 @@ from tests.isolated_dev_server import build_paths
 from tests.isolated_dev_server import start_isolated_dev_server
 from tests.tmux_runtime import start_isolated_tmux_runtime
 from tests.tmux_runtime import stop_isolated_tmux_runtime
-from yolomux_lib.auth import AUTH_COOKIE_NAME
-from yolomux_lib.auth import read_auth_users
+from yomux_lib.auth import AUTH_COOKIE_NAME
+from yomux_lib.auth import read_auth_users
 
 
 def _get(port: int, path: str, *, cookie: str | None = None) -> int:

@@ -47,10 +47,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from yolomux_lib.stats_current import storage  # noqa: E402
-from yolomux_lib.stats_current.client import SERVICE_NAME  # noqa: E402
-from yolomux_lib.stats_current.client import _append_payload  # noqa: E402
-from yolomux_lib.stats_current.client import _wire_rpc  # noqa: E402
+from yomux_lib.stats_current import storage  # noqa: E402
+from yomux_lib.stats_current.client import SERVICE_NAME  # noqa: E402
+from yomux_lib.stats_current.client import _append_payload  # noqa: E402
+from yomux_lib.stats_current.client import _wire_rpc  # noqa: E402
 from tools.instance_isolation import synthetic_test_environment  # noqa: E402
 
 DATABASE_FILENAME = storage.DATABASE_FILENAME
@@ -415,7 +415,7 @@ def _launch_daemon(master: Path, root: Path, label: str) -> dict:
     env.setdefault("MALLOC_ARENA_MAX", "2")
 
     command = [
-        sys.executable, "-m", "yolomux_lib.stats_current.service", "--serve",
+        sys.executable, "-m", "yomux_lib.stats_current.service", "--serve",
         "--socket", str(sock), "--database", str(database),
         "--idle-seconds", str(IDLE_SECONDS),
     ]

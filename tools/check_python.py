@@ -21,7 +21,7 @@ def python_requirement_error(
     required = ".".join(str(part) for part in MIN_PYTHON)
     detected = ".".join(str(part) for part in current)
     return (
-        f"YOLOmux requires Python {required} or newer; "
+        f"YOmux requires Python {required} or newer; "
         f"{interpreter} is Python {detected}. Set PYTHON to a newer interpreter "
         f"(for example: make setup PYTHON=python3.12)."
     )

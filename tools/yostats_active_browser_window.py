@@ -39,22 +39,23 @@ from tools.instance_isolation import apply_early_instance_environment
 
 
 # Authentication, state, and local-service paths are resolved at product-module
-# import time. Match the server entrypoint so a managed capture reads the exact
-# row selected by --port instead of silently authenticating against the default.
-apply_early_instance_environment(sys.argv[1:])
+# import time. Match the server entrypoint only for direct tool execution; helper
+# imports must not rewrite the caller's environment.
+if __name__ == "__main__":
+    apply_early_instance_environment(sys.argv[1:])
 
-from yolomux_lib.auth import AUTH_CONFIG_PATH
-from yolomux_lib.auth import AUTH_COOKIE_NAME
-from yolomux_lib.auth import AuthUser
-from yolomux_lib.auth import auth_cookie_value
-from yolomux_lib.auth import read_auth_users
-from yolomux_lib.common import RUNTIME_DIR
-from yolomux_lib.common import STATE_DIR
-from yolomux_lib.filesystem.io_ops import read_json_file
-from yolomux_lib.infra.listener_census import unique_listener_pid
-from yolomux_lib.local_services.registry import bounded_process_table
-from yolomux_lib.local_services.registry import tracked_local_service_groups
-from yolomux_lib.local_services.watchdog import GroupOverloadWatchdog
+from yomux_lib.auth import AUTH_CONFIG_PATH
+from yomux_lib.auth import AUTH_COOKIE_NAME
+from yomux_lib.auth import AuthUser
+from yomux_lib.auth import auth_cookie_value
+from yomux_lib.auth import read_auth_users
+from yomux_lib.common import RUNTIME_DIR
+from yomux_lib.common import STATE_DIR
+from yomux_lib.filesystem.io_ops import read_json_file
+from yomux_lib.infra.listener_census import unique_listener_pid
+from yomux_lib.local_services.registry import bounded_process_table
+from yomux_lib.local_services.registry import tracked_local_service_groups
+from yomux_lib.local_services.watchdog import GroupOverloadWatchdog
 from tests.browser_helpers.browser_console import assert_browser_local_error_free
 from tests.browser_helpers.browser_console import read_browser_console_log
 from tests.browser_helpers.webdriver_lease import WebDriverLease
@@ -177,7 +178,7 @@ def bounded_api_resources(entries: list[dict[str, object]], limit: int = 500) ->
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8881)
-    parser.add_argument("--username", help="configured YOLOmux account name; defaults to the first admin account")
+    parser.add_argument("--username", help="configured YOmux account name; defaults to the first admin account")
     parser.add_argument("--duration", type=positive_int, default=60)
     parser.add_argument(
         "--workload",
@@ -244,12 +245,12 @@ def capture_auth_user(username: str | None) -> AuthUser:
     """Choose a configured local account without handling plaintext credentials."""
     users = read_auth_users(AUTH_CONFIG_PATH)
     if not users:
-        raise RuntimeError("no configured YOLOmux account is available for local capture")
+        raise RuntimeError("no configured YOmux account is available for local capture")
     if username:
         for user in users:
             if user.username == username:
                 return user
-        raise RuntimeError("requested YOLOmux capture account is not configured")
+        raise RuntimeError("requested YOmux capture account is not configured")
     return next((user for user in users if user.role == "admin"), users[0])
 
 
@@ -574,11 +575,11 @@ MEASUREMENT_FETCH_INSTALL_SCRIPT = """
           const parsed = new URL(request.url, window.location.href);
           if (!parsed.pathname.startsWith('/api/')) return originalFetch(request);
           const headers = new Headers(request.headers);
-          headers.set('X-YOLOmux-Measurement', marker);
-          let requestId = String(headers.get('X-YOLOmux-Request-ID') || '');
+          headers.set('X-YOmux-Measurement', marker);
+          let requestId = String(headers.get('X-YOmux-Request-ID') || '');
           if (!/^r-[A-Za-z0-9._-]{1,120}$/.test(requestId)) {
             requestId = `r-capture-${Date.now().toString(36)}-${(++sequence).toString(36)}`;
-            headers.set('X-YOLOmux-Request-ID', requestId);
+            headers.set('X-YOmux-Request-ID', requestId);
           }
           const entry = {
             request_id: requestId,

@@ -12,9 +12,9 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib import local_service_projection
-from yolomux_lib.stats_current import resolution as stats_resolution
-from yolomux_lib.stats_current import storage
+from yomux_lib import local_service_projection
+from yomux_lib.stats_current import resolution as stats_resolution
+from yomux_lib.stats_current import storage
 
 
 def test_service_sampling_skips_system_only_diagnostics():
@@ -125,8 +125,8 @@ def product_append_flush_seconds():
     """
 
     for module, name in (
-        ("yolomux_lib.stats_current.service", "APPEND_FLUSH_SECONDS"),
-        ("yolomux_lib.stats_current.collectors", "APPEND_FLUSH_SECONDS"),
+        ("yomux_lib.stats_current.service", "APPEND_FLUSH_SECONDS"),
+        ("yomux_lib.stats_current.collectors", "APPEND_FLUSH_SECONDS"),
     ):
         imported = sys.modules.get(module)
         if imported is not None and hasattr(imported, name):

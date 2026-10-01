@@ -15,8 +15,8 @@ from typing import Any
 
 import pytest
 
-from yolomux_lib import http_routes
-from yolomux_lib import system_status_snapshot
+from yomux_lib import http_routes
+from yomux_lib import system_status_snapshot
 
 from tests.gate_harness import GateAuthCredentials
 from tests.gate_harness import GateLiveServer
@@ -273,7 +273,7 @@ def test_advanced_route_serves_its_own_retained_producer(make_tmux_webterm_app):
 def test_exactly_one_owner_constructs_the_retained_system_status_body():
     """A second retained system-status body would be the defect this module exists to prevent."""
 
-    sources = [path for path in (REPO_ROOT / "yolomux_lib").rglob("*.py")]
+    sources = [path for path in (REPO_ROOT / "yomux_lib").rglob("*.py")]
     constructions = [
         f"{path.relative_to(REPO_ROOT)}:{number}"
         for path in sources
@@ -296,7 +296,7 @@ def test_exactly_one_owner_constructs_the_retained_system_status_body():
 def test_the_route_module_contains_no_system_status_assembly():
     """The handlers must read a snapshot; a producer call in this module is assembly on the thread."""
 
-    source = (REPO_ROOT / "yolomux_lib" / "http_routes.py").read_text(encoding="utf-8")
+    source = (REPO_ROOT / "yomux_lib" / "http_routes.py").read_text(encoding="utf-8")
     for forbidden in ("system_status_core_payload(", "system_status_advanced_payload(", "runtime_report_payload("):
         assert forbidden not in source, f"{forbidden} must not be called from a request handler"
 
@@ -391,7 +391,7 @@ def test_the_app_starts_and_stops_exactly_one_producer(make_tmux_webterm_app):
 def test_the_serving_process_owns_the_producer_lifecycle():
     """The producer belongs to the server that answers the route, and is retired with it."""
 
-    source = (REPO_ROOT / "yolomux_lib" / "server.py").read_text(encoding="utf-8")
+    source = (REPO_ROOT / "yomux_lib" / "server.py").read_text(encoding="utf-8")
     assert "self.app.start_system_status_snapshot_owner()" in source
     # Stopped on the first shutdown signal AND at close, so a sealed fixture cannot see a build.
     assert source.count("self.app.stop_system_status_snapshot_owner()") == 2

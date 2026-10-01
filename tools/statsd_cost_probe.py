@@ -51,9 +51,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from yolomux_lib.stats_current import materializer  # noqa: E402
-from yolomux_lib.stats_current import resolution as stats_resolution  # noqa: E402
-from yolomux_lib.stats_current import storage  # noqa: E402
+from yomux_lib.stats_current import materializer  # noqa: E402
+from yomux_lib.stats_current import resolution as stats_resolution  # noqa: E402
+from yomux_lib.stats_current import storage  # noqa: E402
 
 # Measured production mix, 26,687 observations/hour across six families:
 # service_load 80.69%, cpu 13.29%, browser 4.22%, remainder split across the rest.

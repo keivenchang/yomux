@@ -12,14 +12,14 @@ from urllib.parse import urlencode
 
 import pytest
 
-from yolomux_lib import common
-from yolomux_lib import server_auth
-from yolomux_lib import web
-from yolomux_lib import login_rate_limit as lrl
-from yolomux_lib.login_escalation import EdgeBlockController
-from yolomux_lib.login_rate_limit import BucketPolicy
-from yolomux_lib.login_rate_limit import LoginRatePolicy
-from yolomux_lib.login_rate_limit import LoginRateLimiter
+from yomux_lib import common
+from yomux_lib import server_auth
+from yomux_lib import web
+from yomux_lib import login_rate_limit as lrl
+from yomux_lib.login_escalation import EdgeBlockController
+from yomux_lib.login_rate_limit import BucketPolicy
+from yomux_lib.login_rate_limit import LoginRatePolicy
+from yomux_lib.login_rate_limit import LoginRateLimiter
 from tests.helpers.fixture_http_server import FixtureHttpServer
 from tests.helpers.fixture_http_server import request_fixture_http_tuple as request
 

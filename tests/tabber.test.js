@@ -131,14 +131,14 @@ async function runTabberSuite() {
   });
 
   test('shared tree controller is the Finder, Tabber, Differ, and Git history interaction parent', () => {
-    const source = fs.readFileSync('static_src/js/yolomux/86_changes_20_differ.js', 'utf8');
-    const css = fs.readFileSync('static/yolomux.css', 'utf8');
+    const source = fs.readFileSync('static_src/js/yomux/86_changes_20_differ.js', 'utf8');
+    const css = fs.readFileSync('static/yomux.css', 'utf8');
     const api = loadYolomux('', ['1']);
     assert.deepStrictEqual(canonical(api.sharedTreeControllerNamesForTest()), ['differ', 'finder', 'git-diff-commits', 'git-diff-files', 'tabber'], 'Finder, Tabber, Differ, and both Git history trees register through the shared interaction controller');
     // Source ownership is enforced once by static_build's shared-ui ownership lint. This node
     // shard keeps the observable controller registration and keyboard behavior contract.
     assert.ok(/handleFileExplorerArrowNav = event =>[\s\S]*fileExplorerViewForItem\(panel\?\.dataset\?\.panelItem\)[\s\S]*view === 'tabber'[\s\S]*tabberTreeInteractionController\.handleKeydown[\s\S]*view === 'differ'[\s\S]*differTreeInteractionController\.handleKeydown[\s\S]*originalFileExplorerArrowNavForSharedTree/.test(source), 'per-panel key dispatch routes fixed Tabber/Differ views through the shared parent before Finder fallback');
-    const fileTreeSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
+    const fileTreeSource = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
     assert.ok(/selectableFileTreeRows\(container = document\)[\s\S]*!row\.dataset\.tabberType/.test(fileTreeSource), 'Finder/Differ row discovery does not steal Tabber rows');
     assert.ok(fileTreeSource.includes('row.classList.toggle(CLS.selected, selected)') && fileTreeSource.includes("row.classList.toggle('current-file', current && row.dataset.kind !== 'dir')") && fileTreeSource.includes("row.classList.toggle('current-directory', current && row.dataset.kind === 'dir')"), 'Tabber row render uses shared selected/current classes');
     assert.equal(/classList\??\.\s*(?:add|remove|toggle|contains)\s*\(\s*['"](active|open|selected|collapsed)['"]/.test(source), false, 'MV-1: active/open/selected/collapsed classList calls route through CLS');
@@ -150,25 +150,25 @@ async function runTabberSuite() {
   });
 
   test('Finder, Differ, and Tabber have fixed independent identities and one placement entry point', () => {
-    const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
-    const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
-    const actionsSource = fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8');
-    const menuSource = fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8');
-    const panelSource = fs.readFileSync('static/yolomux.js', 'utf8');
+    const bootstrapSource = fs.readFileSync('static_src/js/yomux/00_bootstrap_state.js', 'utf8');
+    const layoutSource = fs.readFileSync('static_src/js/yomux/20_layout_state.js', 'utf8');
+    const actionsSource = fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8');
+    const menuSource = fs.readFileSync('static_src/js/yomux/30_app_menus.js', 'utf8');
+    const panelSource = fs.readFileSync('static/yomux.js', 'utf8');
     assert.ok(/const finderItemId = '__finder__';[\s\S]*const differItemId = '__differ__';[\s\S]*const tabberItemId = '__tabber__';[\s\S]*const fileExplorerItemIds = Object\.freeze\(\[finderItemId, differItemId, tabberItemId\]\)/.test(bootstrapSource), 'the triplet has three stable layout identities in one registry');
     assert.ok(/function fileExplorerViewForItem\(item\)[\s\S]*function isFileExplorerItem\(item\)/.test(bootstrapSource), 'identity-to-view and shared triplet predicate have one bootstrap owner');
     assert.ok(/function sidePaneSlots[\s\S]*function layoutWithSidePaneItems[\s\S]*function layoutWithDefaultLeftSidePane/.test(layoutSource), 'Side Pane detection, insertion, and default seeding share the layout owner');
     assert.ok(/async function openFileSurfacePane\(item\)[\s\S]*currentSlot[\s\S]*activatePaneTab[\s\S]*layoutWithSidePaneItems/.test(actionsSource), 'an existing triplet item activates in place while only a missing item uses Side Pane insertion');
     assert.ok(/function fileMenuPanelCommands\(\)[\s\S]*narrowSingleColumnMode\(\)[\s\S]*virtualCommands\.unshift\(\.\.\.fileSurfaces\)[\s\S]*openFileSurfaceFromMenu\(finderItemId\)/.test(menuSource), 'File uses one desktop triplet command and separate narrow-screen commands through the shared placement entry point');
-    assert.ok(/function createFileExplorerPanel\(item = finderItemId\)[\s\S]*fileExplorerViewForItem\(item\)[\s\S]*createFramedPanel\(\{\s*item,/.test(panelSource) && /function createFramedPanel\([\s\S]*panel\.id = panelDomId\(item\)/.test(fs.readFileSync('static_src/js/yolomux/78_panel_shell.js', 'utf8')), 'one parameterized panel builder gives every triplet item a fixed view and unique panel DOM id through the shared frame factory');
-    const terminalBootSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    assert.ok(/function createFileExplorerPanel\(item = finderItemId\)[\s\S]*fileExplorerViewForItem\(item\)[\s\S]*createFramedPanel\(\{\s*item,/.test(panelSource) && /function createFramedPanel\([\s\S]*panel\.id = panelDomId\(item\)/.test(fs.readFileSync('static_src/js/yomux/78_panel_shell.js', 'utf8')), 'one parameterized panel builder gives every triplet item a fixed view and unique panel DOM id through the shared frame factory');
+    const terminalBootSource = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
     assert.ok(/function syncPanelVisibility\(previousActive = \[\]\)[\s\S]*const previouslyVisible = new Set\(previousActive\);[\s\S]*activeSessions[\s\S]*isFileExplorerItem\(item\) && !previouslyVisible\.has\(item\)[\s\S]*activateFileExplorerSurface\(item\)/.test(terminalBootSource), 'one shared active-panel transition resumes whichever Finder/Differ/Tabber surface becomes newly visible');
     assert.ok(/function fileExplorerModeSwitcherHtml\(\)\s*\{\s*return '';\s*\}/.test(panelSource), 'the retired in-panel mode switcher is a compatibility no-op');
   });
 
   test('Finder, Tabber, and Differ keep independent shared tree settings', () => {
     const api = loadYolomux('', ['1']);
-    const source = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+    const source = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
     assert.ok(/function fileExplorerViewSettingsFor\(view = 'finder'\)[\s\S]*function setFileExplorerViewSetting\(view, key, value/.test(source), 'one keyed shared settings owner replaces global per-control variables');
     api.setFileExplorerViewSettingForTest('finder', 'treeSortMode', 'za');
     api.setFileExplorerViewSettingForTest('finder', 'treeDateMode', 'relative');
@@ -761,9 +761,9 @@ async function runTabberSuite() {
   test('chrome labels, File triplet command, and theme refresh use shared owners', () => {
     // #8-#13: renames, toggles, theme propagation, README preview.
     const api = loadYolomux('', ['1']);
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
-    const menuSource = fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8');
-    const css = fs.readFileSync('static/yolomux.css', 'utf8');
+    const source = fs.readFileSync('static/yomux.js', 'utf8');
+    const menuSource = fs.readFileSync('static_src/js/yomux/30_app_menus.js', 'utf8');
+    const css = fs.readFileSync('static/yomux.css', 'utf8');
     // #8: Branch Info -> YO!info. The tab/menu/palette labels are now localized (functions, not consts) so
     // a runtime language switch repaints them; en still resolves to "YO!info" / "YO!agent".
     assert.ok(/function infoTabLabel\(\)\s*\{\s*return t\('brand\.tab\.info'\)/.test(source), '#8: the YO!info tab label is localized via brand.tab.info');
@@ -825,8 +825,8 @@ async function runTabberSuite() {
     assert.equal(api.paneTabDropPlacement(strip3, {clientX: 330, clientY: 8}, 'A').index, 2, '#30: 3-tab L->R drop on the far tab lands after it');
     assert.equal(api.paneTabDropPlacement(strip3, {clientX: 120, clientY: 8}, 'C').index, 0, '#30: 3-tab R->L drop on the first tab lands before it');
     // #32/#33 source guards.
-    const dragSrc = fs.readFileSync('static/yolomux.js', 'utf8');
-    const dragCss = fs.readFileSync('static/yolomux.css', 'utf8');
+    const dragSrc = fs.readFileSync('static/yomux.js', 'utf8');
+    const dragCss = fs.readFileSync('static/yomux.css', 'utf8');
     assert.ok(dragSrc.includes('minimumContrastRatio: terminalMinimumContrastRatio()'), '#32: terminal creation sets minimumContrastRatio');
     assert.ok(dragSrc.includes('item.term.options.minimumContrastRatio = minContrast'), '#32: live terminals re-apply minimumContrastRatio');
     assert.ok(/applyTerminalContainerTheme\(item\.container, displayTheme\)/.test(dragSrc), '#32: all terminal containers share the display theme background');
@@ -842,23 +842,23 @@ async function runTabberSuite() {
     const endDragStart = dragSrc.indexOf('function endSessionDrag');
     const endDragBody = dragSrc.slice(endDragStart, endDragStart + 1200);
     assert.ok(/cancelDragOperationState\(\);[\s\S]*?flushPendingLayoutRender\(\);/.test(endDragBody), '#endSessionDrag clears the shared drag record before flushing through the layout scheduler');
-    const layoutState = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
+    const layoutState = fs.readFileSync('static_src/js/yomux/20_layout_state.js', 'utf8');
     assert.match(layoutState, /function requestLayoutRender[\s\S]*?dragState\.item != null \|\| pendingLayoutRenderFrame[\s\S]*?pendingLayoutRender = mergePendingLayoutRender/, 'a post-drag frame coalesces any immediate follow-up layout request instead of starting another full render');
     assert.match(layoutState, /function flushPendingLayoutRender[\s\S]*?pendingLayoutRenderFrame = requestAnimationFrame\(flush\);/, 'the expensive deferred layout render runs in the next animation frame, outside native dragend');
     assert.match(layoutState, /function beginLayoutMutationCompletion[\s\S]*?runtimeState\.beginLayoutMutation\(\)/, 'a user drop owns one pending product completion generation');
     assert.match(layoutState, /const completionGeneration = Number\(options\.completionGeneration \|\| runtimeState\.layoutMutationSnapshot\(\)\.pending\)[\s\S]*?runtimeState\.consumePendingLayoutMutation\(completionGeneration\)/, 'the first resulting layout transaction consumes the pending user generation');
     assert.match(layoutState, /function completeLayoutMutationGeneration[\s\S]*?accepted = runtimeState\.completeLayoutMutation\(generation\)[\s\S]*?window\.dispatchEvent/, 'the shared scheduler publishes accepted and refused layout settlements');
-    const bootstrapState = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
+    const bootstrapState = fs.readFileSync('static_src/js/yomux/00_bootstrap_state.js', 'utf8');
     assert.match(bootstrapState, /class RuntimeState[\s\S]*beginLayoutMutation\(\)[\s\S]*consumePendingLayoutMutation\(generation\)[\s\S]*completeLayoutMutation\(generation\)/, 'layout mutation command/query state has one runtime facade');
-    assert.match(layoutState, /function completeLayoutMutationGeneration\(value\) \{[\s\S]*runtimeState\.completeLayoutMutation\(generation\)[\s\S]*window\.dispatchEvent\(new CustomEvent\('yolomux:layout-mutation-complete'/, 'runtime completion state advances before the existing completion event is dispatched');
+    assert.match(layoutState, /function completeLayoutMutationGeneration\(value\) \{[\s\S]*runtimeState\.completeLayoutMutation\(generation\)[\s\S]*window\.dispatchEvent\(new CustomEvent\('yomux:layout-mutation-complete'/, 'runtime completion state advances before the existing completion event is dispatched');
     assert.match(layoutState, /function mergePendingLayoutRender[\s\S]*?layoutCompletionGeneration\([\s\S]*?current\.options\.completionGeneration,[\s\S]*?next\.options\.completionGeneration[\s\S]*?options\.completionGeneration = completionGeneration/, 'coalescing retains the highest valid pending completion generation');
     assert.match(dragSrc, /waitForLayoutMutationCompletion\(layoutGeneration\)[\s\S]*?promiseWithDeadline\(ensureTerminalRunning\(renamed\), 5000/, 'rename bounds both layout and terminal convergence waits');
     assert.match(layoutState, /if \(renderRequest\.options\.sessionButtons !== false\) renderSessionButtons\(\);/, 'layout callers can preserve an unchanged global session roster during a pane-only render');
     assert.match(layoutState, /sessionButtons: options\.sessionButtons,[\s\S]*?deferDockviewLoad: options\.deferDockviewLoad,[\s\S]*?deferDockviewLoadAfterPaint: options\.deferDockviewLoadAfterPaint/, 'applyLayoutSlots carries pane-only render options through the shared scheduler');
     assert.match(layoutState, /deferDockviewLoad: renderRequest\.options\.deferDockviewLoad,[\s\S]*?deferDockviewLoadAfterPaint: renderRequest\.options\.deferDockviewLoadAfterPaint/, 'the scheduler forwards deferred Dockview-load timing to the panel renderer');
     assert.match(dragSrc, /function swapPaneSlots[\s\S]*?sessionButtons: false,[\s\S]*?deferDockviewLoad: dockviewLayoutActive\(\),[\s\S]*?forceFull: dockviewLayoutActive\(\)/, 'Dockview pane swaps avoid unrelated global session-button work and defer only the safe topology load');
-    const dockviewSource = fs.readFileSync('static_src/js/yolomux/75_dockview_layout.js', 'utf8');
-    const focusSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+    const dockviewSource = fs.readFileSync('static_src/js/yomux/75_dockview_layout.js', 'utf8');
+    const focusSource = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
     const explicitFocusBody = focusSource.slice(focusSource.indexOf('function setExplicitPaneFocusItem('), focusSource.indexOf('function visualActivePaneItem('));
     assert.equal(explicitFocusBody.includes('renderSessionButtons('), false, 'a pane-focus change updates state only; menus read that state when opened instead of rebuilding the complete topbar');
     assert.match(dockviewSource, /function dockviewTrackTabPointerDrag[\s\S]*?if \(Math\.max\(dx, dy\) < DRAG_HYSTERESIS_PX\) return;[\s\S]*?beginLayoutMutationCompletion\(state\)/, 'one completion generation begins when a tab pointer gesture becomes a drag, before either app or native topology commits');
@@ -868,7 +868,7 @@ async function runTabberSuite() {
   });
 
   test('whole-pane Dockview reload reconciles mounted panels once', () => {
-    const source = fs.readFileSync('static_src/js/yolomux/75_dockview_layout.js', 'utf8');
+    const source = fs.readFileSync('static_src/js/yomux/75_dockview_layout.js', 'utf8');
     assert.match(source, /let layoutReloaded = false;[\s\S]*?if \(options\.deferDockviewLoad === true\)[\s\S]*?dockviewScheduleDeferredLoad\(previousActive, options\)[\s\S]*?dockviewLoadLayout\(layoutSlots, \{[\s\S]*?layoutReloaded = true;[\s\S]*?if \(activeOnlyChange\) \{[\s\S]*?syncPanelVisibility\(previousActive\);[\s\S]*?return true;[\s\S]*?if \(!layoutReloaded && !layoutLoadDeferred\) \{[\s\S]*?clientPerfStart\('dockviewRefreshTabs'\)[\s\S]*?dockviewRefreshTabs\(\);[\s\S]*?clientPerfStart\('dockviewSyncMountedPanels'\)[\s\S]*?dockviewSyncMountedPanels\(\);/);
     const loadBody = source.slice(source.indexOf('function dockviewLoadLayout'), source.indexOf('function dockviewActivateLayoutTabs'));
     assert.match(loadBody, /clientPerfStart\('dockviewFromJson'\)[\s\S]*?api\.fromJSON\([\s\S]*?dockviewRefreshLoadedLayout\(items\);/);
@@ -1182,6 +1182,7 @@ async function runTabberSuite() {
       kind: 'file',
       name: 'pic.png',
     }));
+    assert.equal(event.dataTransfer['application/x-yomux-file'], event.dataTransfer['application/x-yolomux-file']);
     assert.ok(api.customDragPreviewForTest(), 'file drag preview is installed');
     assert.equal(event.dataTransfer.dragImage.node.className, 'transparent-drag-image');
     assert.equal(event.dataTransfer.dragImage.x, 0);
@@ -1221,6 +1222,7 @@ async function runTabberSuite() {
     assert.equal(source.classList.contains('dragging'), false, 'source tab is not dimmed while dragging');
     assert.equal(event.dataTransfer.effectAllowed, 'move');
     assert.equal(event.dataTransfer['application/x-yolomux-session'], JSON.stringify({session: '4', sourceSlot: 'left'}));
+    assert.equal(event.dataTransfer['application/x-yomux-session'], event.dataTransfer['application/x-yolomux-session']);
     assert.equal(event.dataTransfer['text/plain'], '4');
     // #47: tab drags use the NATIVE drag image — a one-time snapshot of the tab itself, positioned under
     // the grab point — with NO transparent image, NO JS clone-follow preview, and NO document listeners.
@@ -1233,7 +1235,7 @@ async function runTabberSuite() {
   });
 
   test('Tabber tab rows share the normal pane-tab drag source', () => {
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
+    const source = fs.readFileSync('static/yomux.js', 'utf8');
     assert.ok(/function bindPaneTabNativeDragSource\([\s\S]*startSessionDrag\(event, item, paneTabDragSourceSlot[\s\S]*dragImage: options\.dragImage/.test(source), 'normal pane tabs have one shared native drag-source binder with an optional drag image override');
     assert.ok(source.includes('bindPaneTabNativeDragSource(tab, item, () => side);'), 'createPaneTab uses the shared native tab drag binder');
     assert.ok(/function bindTabberRowDragSource\(row\)[\s\S]*bindPaneTabNativeDragSource\(row, \(\) => tabberRowDragItem\(row\)/.test(source), 'Tabber rows reuse the shared native tab drag binder');
@@ -1345,6 +1347,7 @@ async function runTabberSuite() {
 
     assert.equal(event.dataTransfer.effectAllowed, 'move');
     assert.equal(event.dataTransfer['application/x-yolomux-pane'], JSON.stringify({slot: 'left'}));
+    assert.equal(event.dataTransfer['application/x-yomux-pane'], event.dataTransfer['application/x-yolomux-pane']);
     assert.equal(api.paneDragPayload(event).slot, 'left', 'pane drags use a distinct pane payload');
     assert.equal(event.dataTransfer.dragImage.node.className, 'transparent-drag-image', 'pane drags hide the browser snapshot behind the custom pane preview');
     assert.equal(event.dataTransfer.dragImage.x, 0, 'pane drags use a transparent native image at origin');
@@ -1523,7 +1526,7 @@ async function runTabberSuite() {
   // the quick-open palette collapses a file's editor-tab + preview-tab into ONE row with
   // edit/preview view chips (it used to emit two identical rows — same name + path).
   test('command palette deduplicates open files and ranks mixed results', () => {
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
+    const source = fs.readFileSync('static/yomux.js', 'utf8');
     const api = loadYolomux('', ['1']);
     const candidateStart = source.indexOf('function commandPaletteCandidateItems(');
     const candidateEnd = source.indexOf('function commandPaletteItems(', candidateStart);
@@ -1613,18 +1616,18 @@ async function runTabberSuite() {
     assert.equal(api.clipboardTextForTest(), '', 'OSC 52 read query never touches the clipboard');
     assert.equal(api.installTerminalOsc52BridgeForTest('1', {}), false, 'bridge degrades gracefully without parser API');
     // wiring + instrumentation guards
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
+    const source = fs.readFileSync('static/yomux.js', 'utf8');
     assert.ok(source.includes('installTerminalOsc52Bridge(session, term);'), 'OSC 52 bridge is wired into terminal startup');
     assert.ok(/registerOscHandler\(52, data =>/.test(source), 'bridge registers the OSC 52 parser handler');
     assert.ok(source.includes('writeTerminalTextToClipboard(text, {action: TERMINAL_COPY_ACTIONS.osc52, params: {count: text.length}})'), 'bridge routes through the shared terminal clipboard-write chain and pluralized status action');
-    assert.ok(source.includes("storageGet('yolomux.debugCopy') === '1'"), 'copy-path debug logging is gated behind an opt-in storage flag');
+    assert.ok(source.includes("storageGet('yomux.debugCopy') === '1'"), 'copy-path debug logging is gated behind an opt-in storage flag');
     assert.ok(source.includes("copyDebug('shortcut'") && source.includes("copyDebug('osc52'") && source.includes("copyDebug('clipboard'"), 'N1: shortcut, OSC 52, and clipboard-write stages each log one compact debug event');
   });
 
   // right-click must not clear the terminal highlight; the menu copies the selection captured at
   // right-click time.
   test('terminal context menu preserves captured right-click selection', () => {
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
+    const source = fs.readFileSync('static/yomux.js', 'utf8');
     assert.ok(/container\.addEventListener\('mousedown', event => \{[\s\S]*?event\.button !== 2[\s\S]*?rightClickSelection = terminalSelectedText\(term, container\);[\s\S]*?event\.stopPropagation\(\);[\s\S]*?\}, \{capture: true\}\)/.test(source), 'N7: a capture-phase right-mousedown captures the selection and stops xterm clearing it');
     assert.ok(/showTerminalContextMenu\(session, term, event\.clientX, event\.clientY, \{container, reference: terminalPointReference\(event\), presetSelection: touchSelection\?\.text \|\| rightClickSelection\}\)/.test(source), 'N7: the context menu receives a touch selection when present and otherwise preserves the captured right-click selection');
     assert.ok(/function terminalContextMenuSelection\(session, term, container = null, presetSelection = null\)[\s\S]*presetSelection == null \? terminalSelectedText\(term, container\) : String\(presetSelection \|\| ''\)/.test(source), 'N7: an explicitly captured empty right-click selection is not replaced by a live under-cursor re-read');
@@ -1639,9 +1642,9 @@ async function runTabberSuite() {
   });
 
   test('terminal context menu uses exact pane identity and preserves native fallback behavior', () => {
-    const layoutSource = fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8');
-    const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
-    const terminalBootSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    const layoutSource = fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8');
+    const coreSource = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+    const terminalBootSource = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
     assert.ok(/function terminalContextMenuCapabilityForSession\(session, options = \{\}\)[\s\S]*paneTarget[\s\S]*info\.agents\.filter\(agent => String\(agent\?\.pane_target \|\| agent\?\.pane_id \|\| ''\)\.trim\(\) === paneTarget\)[\s\S]*matches\.length === 1/.test(layoutSource), 'context-menu capability is resolved from one exact pane agent');
     assert.ok(/function terminalContextMenuCapabilityForSession\(session, options = \{\}\)[\s\S]*typeof options\.paneTarget === 'function' \? options\.paneTarget\(\) : options\.paneTarget/.test(layoutSource), 'missing container identity does not fall back to a session-selected pane');
     assert.ok(/function installTerminalContextMenu\(session, term, container\)[\s\S]*const preservesNativeContextMenu = \(\) => terminalContextMenuPreservesNativeBehavior\(session, container\)/.test(coreSource), 'event handling rechecks the exact terminal-container capability at event time');
@@ -1664,11 +1667,11 @@ async function runTabberSuite() {
       terminalContextMenuPaneTargetForSession: () => '',
     });
     assert.deepEqual({...capability('opencode', {paneTarget: '%open'})}, {paneTarget: '%open', clientKind: 'opencode', preserveNativeContextMenu: true}, 'OpenCode receives the native-menu capability');
-    assert.deepEqual({...capability('claude', {paneTarget: '%claude'})}, {paneTarget: '%claude', clientKind: 'claude', preserveNativeContextMenu: false}, 'Claude remains on the YOLOmux menu path');
-    assert.deepEqual({...capability('codex', {paneTarget: '%codex'})}, {paneTarget: '%codex', clientKind: 'codex', preserveNativeContextMenu: false}, 'Codex remains on the YOLOmux menu path');
+    assert.deepEqual({...capability('claude', {paneTarget: '%claude'})}, {paneTarget: '%claude', clientKind: 'claude', preserveNativeContextMenu: false}, 'Claude remains on the YOmux menu path');
+    assert.deepEqual({...capability('codex', {paneTarget: '%codex'})}, {paneTarget: '%codex', clientKind: 'codex', preserveNativeContextMenu: false}, 'Codex remains on the YOmux menu path');
     assert.deepEqual({...capability('split', {paneTarget: '%claude'})}, {paneTarget: '%claude', clientKind: 'claude', preserveNativeContextMenu: false}, 'split panes use the matching pane agent instead of the first session agent');
-     assert.deepEqual({...capability('split', {paneTarget: '%missing'})}, {paneTarget: '%missing', clientKind: '', preserveNativeContextMenu: false}, 'unknown pane identity retains the shared YOLOmux menu');
-     assert.deepEqual({...capability('split', {paneTarget: ''})}, {paneTarget: '', clientKind: '', preserveNativeContextMenu: false}, 'missing terminal-container identity retains the shared YOLOmux menu');
+     assert.deepEqual({...capability('split', {paneTarget: '%missing'})}, {paneTarget: '%missing', clientKind: '', preserveNativeContextMenu: false}, 'unknown pane identity retains the shared YOmux menu');
+     assert.deepEqual({...capability('split', {paneTarget: ''})}, {paneTarget: '', clientKind: '', preserveNativeContextMenu: false}, 'missing terminal-container identity retains the shared YOmux menu');
     const api = loadYolomux('', ['split']);
     api.setTranscriptInfoForTest('split', {
       agents: [
@@ -1714,7 +1717,7 @@ async function runTabberSuite() {
     assert.equal(prevented, 0, 'OpenCode container binding leaves the native context menu uncancelled');
     assert.equal(stopped, 0, 'OpenCode container binding leaves native right-click propagation untouched');
     assert.equal(api.terminalContextMenuPreservesNativeBehaviorForTest('split', container), true, 'OpenCode keeps native copy behavior at event time');
-    assert.equal(api.dedentSelectionText(term.getSelection()), 'selected\n  indented', 'the selected split-pane fixture includes indented text for the explicit YOLOmux-only dedent path');
+    assert.equal(api.dedentSelectionText(term.getSelection()), 'selected\n  indented', 'the selected split-pane fixture includes indented text for the explicit YOmux-only dedent path');
 
     const urlParts = [
       '     https://example.test/long/path/for/opencode/',
@@ -1788,12 +1791,12 @@ async function runTabberSuite() {
     };
     stopped = 0;
     mousedown(claudeMouseEvent);
-    assert.equal(stopped, 1, 'the exact Claude container binding retains YOLOmux right-click selection capture');
+    assert.equal(stopped, 1, 'the exact Claude container binding retains YOmux right-click selection capture');
   });
 
   test('OpenCode is a visible Tabber owner and top-bar counts retain the three status tones', () => {
-    const tabberSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
-    const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
+    const tabberSource = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+    const layoutSource = fs.readFileSync('static_src/js/yomux/20_layout_state.js', 'utf8');
     assert.match(tabberSource, /function tabberWindowIsAgent\(name\)[\s\S]*key === 'claude' \|\| key === 'codex' \|\| key === 'opencode'/, 'OpenCode is included in the shared visible Tabber owner');
     assert.match(layoutSource, /const attentionCount = Number\(counts\.ask\) \|\| 0/, 'unavailable counts do not share the red attention slot');
     assert.match(layoutSource, /topbarActivityCountBallHtml\(counts\.blocked, 'cooldown', 'topbar-activity-blocked'\)/, 'blocked top-bar counts retain the yellow tone');
@@ -1930,8 +1933,8 @@ async function runTabberSuite() {
   // DOIT.58 B1-B7: Tabber's fixed panel — source guards that rows route through the
   // shared row pipeline (no forked *RowHtml builder), plus a behavioral test of the tree assembly.
   test('Tabber shares the Finder tree and tab interaction pipeline', () => {
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
-    const css = fs.readFileSync('static/yolomux.css', 'utf8');
+    const source = fs.readFileSync('static/yomux.js', 'utf8');
+    const css = fs.readFileSync('static/yomux.css', 'utf8');
     const tabberSessionChromeSource = source.match(/function tabberSessionChromeHtml\(data\) \{[\s\S]*?\n\}/)?.[0] || '';
     // B1/B3 source guards: routes through the shared pipeline, no forked builder, finder refreshes skip tabber rows.
     assert.ok(/mode === 'diff' \|\| mode === 'tabber' \? mode : 'files'/.test(source), 'B1: normalizeFileExplorerMode accepts files|diff|tabber');
@@ -1954,14 +1957,14 @@ async function runTabberSuite() {
     assert.ok(/\.tmux-pane-tab-token-action\s*\{[\s\S]*cursor:\s*pointer/.test(css), 'A2: shared compact tmux tab tokens own the interactive cursor');
     assert.ok(/\.pane-tab:not\(\.active\):hover,\s*\.pane-tab:not\(\.active\):focus-visible,\s*\.tmux-pane-tab-token-action:not\(\.active\):hover,\s*\.tmux-pane-tab-token-action:not\(\.active\):focus-visible\s*\{[\s\S]*background:\s*var\(--pane-inactive-tab-bg-hover\)[\s\S]*border-color:\s*var\(--40-layout-panes-tabs-pane-tab-border-26\)/.test(css) && /:root\s*\{[\s\S]*--40-layout-panes-tabs-pane-tab-border-26:\s*var\(--paint-white-92\)/.test(css), 'A2: regular and compact inactive pane tabs share centralized pointer and keyboard interaction paint');
     assert.ok(/body\.theme-light\s*\{[\s\S]*--40-layout-panes-tabs-pane-tab-border-26:\s*rgb\(var\(--overlay-slate-rgb\) \/ 0\.5\)/.test(css), 'A2: one centralized light-theme token corrects every regular and compact interaction border');
-    const sharedActiveTabRule = css.match(/\.yolomux-dockview \.dv-tab\.dv-active-tab > \.dockview-pane-tab:not\(\.file-missing\),[\s\S]*?\.panel\.file-explorer-panel \.pane-tab\.active:not\(\.file-missing\)\s*\{([\s\S]*?)\}/);
+    const sharedActiveTabRule = css.match(/\.yomux-dockview \.dv-tab\.dv-active-tab > \.dockview-pane-tab:not\(\.file-missing\),[\s\S]*?\.panel\.file-explorer-panel \.pane-tab\.active:not\(\.file-missing\)\s*\{([\s\S]*?)\}/);
     assert.ok(sharedActiveTabRule, 'A5: every active tab-like surface routes through one paint owner');
     for (const selector of ['.tmux-pane-tab-token.active', '.panel.active-pane .pane-tab.active:not(.file-missing)', '.panel.file-explorer-panel .pane-tab.active:not(.file-missing)']) {
       assert.ok(sharedActiveTabRule[0].includes(selector), `A5: shared active tab owner includes ${selector}`);
     }
     assert.ok(/color:\s*var\(--pane-tab-active-text\)[\s\S]*background:\s*var\(--pane-tab-active-bg\)[\s\S]*border-color:\s*var\(--pane-tab-active-border\)[\s\S]*border-bottom-color:\s*var\(--pane-tab-active-bg\)/.test(sharedActiveTabRule[1]), 'A5: the shared active tab owner carries the complete active paint');
     assert.equal((css.match(/border-bottom-color:\s*var\(--pane-tab-active-bg\)/g) || []).length, 1, 'A5: the exact active-tab paint signature has one owner');
-    assert.ok(/\.yolomux-dockview \.dv-tab\.dv-active-tab > \.dockview-pane-tab \.session-button-name,[\s\S]*\.tmux-pane-tab-token\.active \.session-button-detail,[\s\S]*\.pane-tab\.active \.session-button-detail\s*\{\s*color:\s*inherit/.test(css), 'A5: every active tab child inherits color from the shared shell paint');
+    assert.ok(/\.yomux-dockview \.dv-tab\.dv-active-tab > \.dockview-pane-tab \.session-button-name,[\s\S]*\.tmux-pane-tab-token\.active \.session-button-detail,[\s\S]*\.pane-tab\.active \.session-button-detail\s*\{\s*color:\s*inherit/.test(css), 'A5: every active tab child inherits color from the shared shell paint');
     assert.ok(/\.panel \.pane-tab:not\(\.active\),\s*\.panel \.tmux-pane-tab-token:not\(\.active\)\s*\{\s*background:\s*var\(--pane-bar-bg\)/.test(css), 'A5: one unconditional panel owner paints inactive pane tabs');
     assert.equal(css.includes('.panel:not(.active-pane):not(.typing-ready-pane) .pane-tab:not(.active)'), false, 'A5: inactive tab paint has no focus/readiness partition');
     assert.equal(/\.panel\.active-pane \.pane-tab\.active,\s*\.panel\.file-explorer-panel \.pane-tab\.active\s*\{\s*box-shadow:\s*none/.test(css), false, 'A5: focused pane tabs do not restate the base active no-shadow rule');

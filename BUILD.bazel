@@ -1,6 +1,11 @@
 alias(
+    name = "yomux-go",
+    actual = "//cmd/yomux-go:yomux-go",
+)
+
+alias(
     name = "yolomux_go",
-    actual = "//cmd/yolomux-go:yolomux_go",
+    actual = "//cmd/yomux-go:yolomux_go",
 )
 
 alias(
@@ -16,8 +21,8 @@ filegroup(
     srcs = glob([
         "tools/**/*.py",
         "tests/fixtures/current_model_usage/**/*.jsonl",
-        "yolomux_lib/**/*.json",
-        "yolomux_lib/**/*.py",
+        "yomux_lib/**/*.json",
+        "yomux_lib/**/*.py",
     ]),
 )
 
@@ -41,10 +46,11 @@ filegroup(
         "package-lock.json",
         "pyproject.toml",
         "pytest.ini",
+        "yomux.py",
         "yolomux.py",
         "docker/requirements-test.txt",
         "//cmd/fake-llm:docker_source_files",
-        "//cmd/yolomux-go:docker_source_files",
+        "//cmd/yomux-go:docker_source_files",
         "//internal/capabilities:docker_source_files",
         "//internal/cache:docker_source_files",
         "//internal/fakellm:docker_source_files",
@@ -59,7 +65,7 @@ filegroup(
         "static_src/**",
         "tests/**",
         "tools/**",
-        "yolomux_lib/**",
+        "yomux_lib/**",
     ], exclude = [
         "**/__pycache__/**",
         "**/*.pyc",
@@ -69,7 +75,7 @@ filegroup(
 test_suite(
     name = "go_unit_tests",
     tests = [
-        "//cmd/yolomux-go:yolomux_go_test",
+        "//cmd/yomux-go:yomux_go_test",
         "//internal/capabilities:capabilities_test",
         "//internal/cache:cache_test",
         "//internal/fakellm:fakellm_test",
@@ -84,7 +90,7 @@ test_suite(
 test_suite(
     name = "go_race_tests",
     tests = [
-        "//cmd/yolomux-go:yolomux_go_race_test",
+        "//cmd/yomux-go:yomux_go_race_test",
         "//internal/capabilities:capabilities_race_test",
         "//internal/fakellm:fakellm_race_test",
         "//internal/finder:finder_race_test",
@@ -100,17 +106,17 @@ test_suite(
     tests = [
         ":go_unit_tests",
         ":go_race_tests",
-        ":yolomux_go_contract_test",
+        ":yomux_go_contract_test",
         ":bazel_action_environment_test",
         ":docker_runtime_contract_test",
-        ":yolomux_go_browser_e2e",
-        ":yolomux_go_stats_browser_docker_e2e",
+        ":yomux_go_browser_e2e",
+        ":yomux_go_stats_browser_docker_e2e",
         ":agent_status_docker_e2e",
     ],
 )
 
 sh_test(
-    name = "yolomux_go_contract_test",
+    name = "yomux_go_contract_test",
     srcs = ["tools/bazel_go_contract_test.sh"],
     data = [":yolomux_go"],
     args = ["$(location :yolomux_go)"],
@@ -128,7 +134,7 @@ sh_test(
 )
 
 sh_test(
-    name = "yolomux_go_browser_e2e",
+    name = "yomux_go_browser_e2e",
     srcs = ["tools/run_go_browser_e2e.sh"],
     data = [
         ":yolomux_go",
@@ -142,7 +148,7 @@ sh_test(
 )
 
 sh_test(
-    name = "yolomux_go_stats_browser_docker_e2e",
+    name = "yomux_go_stats_browser_docker_e2e",
     srcs = ["tools/bazel_go_stats_browser_docker_e2e.sh"],
     data = [
         ":yolomux_go",

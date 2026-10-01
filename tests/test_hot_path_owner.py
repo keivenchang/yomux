@@ -1,6 +1,6 @@
 """Item 6 (DOIT.fs-interactivity): the one hot-path index owner.
 
-These prove that concrete change evidence (watchd, YOLOmux write/delete/mkdir/rename, uploads, editor
+These prove that concrete change evidence (watchd, YOmux write/delete/mkdir/rename, uploads, editor
 saves) and visibility evidence (Finder/Differ) route through ONE owner, are coalesced by indexed
 root, refresh in seconds instead of at the 1800s safety TTL, decay their heat after inactivity, and
 cannot starve breadth/safety reconciliation of a forever-hot root.
@@ -15,11 +15,11 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib import file_index
-from yolomux_lib import filesystem
-from yolomux_lib.filesystem import SEARCH_SKIP_DIRS
-from yolomux_lib.filesystem import search as fs_search
-from yolomux_lib.search import bfs_index
+from yomux_lib import file_index
+from yomux_lib import filesystem
+from yomux_lib.filesystem import SEARCH_SKIP_DIRS
+from yomux_lib.filesystem import search as fs_search
+from yomux_lib.search import bfs_index
 
 
 def _clear_registry():

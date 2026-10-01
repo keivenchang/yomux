@@ -25,8 +25,8 @@ from tests.browser_helpers.browser_console import acknowledge_and_consume_only_e
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.gate_harness import wait_for_fixture_api_quiescence
 from tests.gate_harness import HttpPortLease
-from yolomux_lib.stats_current import http as stats_current_http
-from yolomux_lib.stats_current import storage
+from yomux_lib.stats_current import http as stats_current_http
+from yomux_lib.stats_current import storage
 from tests.tmux_runtime import stop_isolated_tmux_runtime
 from tests.tmux_runtime import start_isolated_tmux_runtime
 from tools.verify_go_agent_status_live import copy_live_jsonl
@@ -387,7 +387,7 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
     # The Go server only needs these runtime roots. Copying the whole checkout makes this
     # non-root Docker test depend on unrelated developer-owned files (for example mode-600
     # locks), and it needlessly enlarges the private server fixture.
-    for relative in ("static", "tools", "yolomux_lib"):
+    for relative in ("static", "tools", "yomux_lib"):
         shutil.copytree(source_root / relative, private_source_root / relative)
     configured_binary = os.environ.get("YOLOMUX_GO_BINARY", "").strip()
     binary = Path(configured_binary) if configured_binary else tmp_path / "yolomux-go"
@@ -401,7 +401,7 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
             "GOWORK": "off",
             "GO111MODULE": "on",
         }
-        image_module_cache = Path("/opt/yolomux-go-mod-cache")
+        image_module_cache = Path("/opt/yomux-go-mod-cache")
         if image_module_cache.is_dir():
             go_environment.update(
                 {
@@ -413,7 +413,7 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
                 }
             )
         subprocess.run(
-            [go_binary, "build", "-buildvcs=false", "-o", str(binary), "./cmd/yolomux-go"],
+            [go_binary, "build", "-buildvcs=false", "-o", str(binary), "./cmd/yomux-go"],
             cwd=source_root,
             check=True,
             env=go_environment,
@@ -739,7 +739,7 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
                      ) {
                      throw new Error(`raw stats snapshot no-data normalization failed: ${JSON.stringify({status: rawResponse.status, normalizedNoData})}`);
                    }
-                   const validator = YOLOmuxStatsCurrent.createController({
+                   const validator = YOmuxStatsCurrent.createController({
                      capabilities: capabilities,
                      savedRange: 900,
                      savedResolution: 'AUTO',
@@ -992,7 +992,7 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
     """Prove collector -> SQLite -> lifecycle -> SSE -> unchanged UI in one fixture."""
     source_root = Path(__file__).resolve().parents[1]
     private_source_root = tmp_path / "source-root"
-    for relative in ("static", "tools", "yolomux_lib"):
+    for relative in ("static", "tools", "yomux_lib"):
         shutil.copytree(source_root / relative, private_source_root / relative)
     home, opencode_database, opencode_interpreter = _prepare_go_collector_sources(tmp_path)
     config_dir = tmp_path / "config"
@@ -1006,7 +1006,7 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
     monkeypatch.setenv("YOLOMUX_OPENCODE_DATABASE", str(opencode_database))
     monkeypatch.setenv("YOLOMUX_CLAUDE_TRANSCRIPT_ROOT", str(home / "claude" / "projects"))
     monkeypatch.setenv("YOLOMUX_CODEX_TRANSCRIPT_ROOT", str(home / "codex" / "sessions"))
-    monkeypatch.setenv("YOLOMUX_PRICING_CATALOG", str(private_source_root / "yolomux_lib" / "data" / "model_pricing.json"))
+    monkeypatch.setenv("YOLOMUX_PRICING_CATALOG", str(private_source_root / "yomux_lib" / "data" / "model_pricing.json"))
     prefix = f"yt-collector-{os.getpid()}"
     session_commands = {
         f"{prefix}-claude": f"exec -a claude {sys.executable} {source_root / 'tools/mockers/claude.py'} --mock",
@@ -1032,7 +1032,7 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
             "GOWORK": "off",
             "GO111MODULE": "on",
         }
-        image_module_cache = Path("/opt/yolomux-go-mod-cache")
+        image_module_cache = Path("/opt/yomux-go-mod-cache")
         if image_module_cache.is_dir():
             build_environment.update(
                 {
@@ -1044,7 +1044,7 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
                 }
             )
         subprocess.run(
-            [go_binary, "build", "-buildvcs=false", "-o", str(binary), "./cmd/yolomux-go"],
+            [go_binary, "build", "-buildvcs=false", "-o", str(binary), "./cmd/yomux-go"],
             cwd=source_root,
             check=True,
             env=build_environment,
@@ -1068,7 +1068,7 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
                 "YOLOMUX_OPENCODE_DATABASE": str(opencode_database),
                 "YOLOMUX_CLAUDE_TRANSCRIPT_ROOT": str(home / "claude" / "projects"),
                 "YOLOMUX_CODEX_TRANSCRIPT_ROOT": str(home / "codex" / "sessions"),
-                "YOLOMUX_PRICING_CATALOG": str(private_source_root / "yolomux_lib" / "data" / "model_pricing.json"),
+                "YOLOMUX_PRICING_CATALOG": str(private_source_root / "yomux_lib" / "data" / "model_pricing.json"),
                 "YOLOMUX_TMUX_SOCKET": str(tmux_runtime.socket_path),
                 "PYTHONPATH": str(private_source_root),
             })
@@ -1269,7 +1269,9 @@ def _start_production_stats_server(
     if kind == "python":
         command = [
             sys.executable,
-            "yolomux.py",
+            "yomux.py",
+            "--backend",
+            "python",
             "--http",
             "--host",
             "127.0.0.1",
@@ -1514,7 +1516,7 @@ def _production_stats_browser_pass(browser, base_url: str, session: str, request
         # wall-clock dependent: Go may publish the next open bucket while the
         # browser is collecting chart evidence, whereas Python can still be on
         # the same generation. Raw initial SSE parity is covered independently
-        # by cmd/yolomux-go/http_server_parity_test.go.
+        # by cmd/yomux-go/http_server_parity_test.go.
         "stream_events": stream_events[:3],
         "stream_events_observed": stream_events,
         "stream_handshake": handshake,
@@ -1591,13 +1593,13 @@ def test_production_python_and_go_stats_share_one_fixture_and_browser_journey(br
             runtime_dir.mkdir()
             runtime_dirs.append(runtime_dir)
             project_root = root / "project"
-            for relative in ("static", "tools", "yolomux_lib"):
+            for relative in ("static", "tools", "yomux_lib"):
                 shutil.copytree(source_root / relative, project_root / relative)
             monkeypatch.setenv("YOLOMUX_RUNTIME_DIR", str(runtime_dir))
             if kind == "python":
                 seed_script = (
                     "import os, shutil\n"
-                    "from yolomux_lib.stats_current.storage import default_database_path\n"
+                    "from yomux_lib.stats_current.storage import default_database_path\n"
                     "destination = default_database_path()\n"
                     "destination.parent.mkdir(parents=True, exist_ok=True)\n"
                     "shutil.copyfile(os.environ['YOLOMUX_STATS_FIXTURE'], destination)\n"
@@ -1629,7 +1631,7 @@ def test_production_python_and_go_stats_share_one_fixture_and_browser_journey(br
                     )
                 database = Path(
                     subprocess.check_output(
-                        [sys.executable, "-c", "from yolomux_lib.stats_current.storage import default_database_path; print(default_database_path())"],
+                        [sys.executable, "-c", "from yomux_lib.stats_current.storage import default_database_path; print(default_database_path())"],
                         cwd=source_root,
                         env=seed_environment,
                         text=True,
@@ -1781,7 +1783,7 @@ def test_retained_stats_widen_fetches_and_paints_the_full_exact_window(browser, 
     WebDriverWait(browser, 8).until(
         lambda driver: driver.execute_script(
             "return typeof setDebugGraphRange === 'function' "
-            "&& typeof globalThis.YOLOmuxStatsCurrent?.createBrowserClient === 'function' "
+            "&& typeof globalThis.YOmuxStatsCurrent?.createBrowserClient === 'function' "
             "&& document.querySelector('.js-debug-panel [data-js-debug-graph]') !== null"
         )
     )
@@ -1991,7 +1993,7 @@ def test_retained_stats_widen_fetches_and_paints_the_full_exact_window(browser, 
           resetJsDebugHistoryReadiness();
           debugRuntimeState.graphRangeSeconds = 900;
           debugRuntimeState.graphResolutionOverrideSeconds = 10;
-          const client = YOLOmuxStatsCurrent.createBrowserClient({
+          const client = YOmuxStatsCurrent.createBrowserClient({
             fetch: fixtureFetch,
             EventSource: FixtureEventSource,
             clientId: 'retained-widen-fixture',

@@ -4,8 +4,8 @@ import dataclasses
 
 import pytest
 
-from yolomux_lib.infra.refresh_outcome import RefreshOutcome
-from yolomux_lib.infra.refresh_outcome import RefreshOutcomeState
+from yomux_lib.infra.refresh_outcome import RefreshOutcome
+from yomux_lib.infra.refresh_outcome import RefreshOutcomeState
 
 
 ACCEPTED_LOCAL = {"ok": True, "accepted": True, "role": "r", "local": True, "fallback": False}

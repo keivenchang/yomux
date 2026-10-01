@@ -1,8 +1,8 @@
 :root {
   --brand-primary-green: var(--brand-green, #76b900);
-  --brand-yolo-text: var(--active-control-text, #071000);
-  --brand-yolo-bg: var(--active-control-bg, var(--brand-primary-green));
-  --brand-yolo-border: var(--active-control-border, #9be33d);
+  --brand-mark-text: var(--active-control-text, #071000);
+  --brand-mark-bg: var(--active-control-bg, var(--brand-primary-green));
+  --brand-mark-border: var(--active-control-border, #9be33d);
 }
 .brand-title {
   font-weight: 700;
@@ -24,19 +24,19 @@
 .brand-title .brand-green {
   color: var(--brand-primary-green);
 }
-.brand-title .brand-yolo {
+.brand-title .brand-mark {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   margin-right: 1px;
   padding: 0 0 1px;
-  color: var(--brand-yolo-text);
-  background: var(--brand-yolo-bg);
-  border: 1px solid var(--brand-yolo-border);
+  color: var(--brand-mark-text);
+  background: var(--brand-mark-bg);
+  border: 1px solid var(--brand-mark-border);
   border-radius: 3px;
   line-height: 1;
 }
-.brand-title .brand-lo {
+.brand-title .brand-second {
   color: var(--brand-primary-green);
 }
 .brand-title .brand-white {

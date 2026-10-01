@@ -10,9 +10,9 @@ from decimal import Decimal
 
 import pytest
 
-from yolomux_lib.pricing_catalog import PricingCatalog, ResolvedRate
-from yolomux_lib.stats_current import materializer, pricing, storage, usage
-from yolomux_lib.stats_current import service as service_module
+from yomux_lib.pricing_catalog import PricingCatalog, ResolvedRate
+from yomux_lib.stats_current import materializer, pricing, storage, usage
+from yomux_lib.stats_current import service as service_module
 from tests.cross_layer_matrix import observed_fixture_atoms
 
 

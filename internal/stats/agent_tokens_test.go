@@ -23,7 +23,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/keivenchang/yolomux/internal/testsupport"
+	"github.com/keivenchang/yomux/internal/testsupport"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -153,9 +153,25 @@ func TestAgentTokenCollectorCyclesRealShapedSourcesAndProjectsRate(t *testing.T)
 	if err := collector.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(100 * time.Millisecond)
+	deadline := time.NewTimer(10 * time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	for {
+		snapshot := collector.Snapshot()
+		if snapshot.LastSuccessAt != "" || snapshot.LastReason != "" {
+			break
+		}
+		select {
+		case <-deadline.C:
+			cancel()
+			collector.Stop()
+			t.Fatal("token collector did not finish its first cycle")
+		case <-ticker.C:
+		}
+	}
 	cancel()
 	collector.Stop()
+	deadline.Stop()
+	ticker.Stop()
 	first := collector.Counters()
 	if first.UsageAccepted != 27 || first.Cycles != 1 {
 		t.Fatalf("first counters = %+v", first)

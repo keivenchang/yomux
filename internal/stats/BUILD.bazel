@@ -14,7 +14,7 @@ SQLITE = "@com_github_mattn_go_sqlite3//:go_default_library"
 go_library(
     name = "stats_lib",
     srcs = glob(["*.go"], exclude = ["*_test.go"]),
-    importpath = "github.com/keivenchang/yolomux/internal/stats",
+    importpath = "github.com/keivenchang/yomux/internal/stats",
     deps = [SQLITE, "@org_golang_x_sys//unix"],
 )
 

@@ -19,8 +19,8 @@ from tests.helpers.mock_agents import short_tmux_socket_path
 from tests.helpers.mock_agents import tmux_cmd
 from tests.helpers.mock_agents import wait_for_mockcase_render
 
-from yolomux_lib.agent_tui import classify_agent_pane
-from yolomux_lib.tmux_utils import YOLOMUX_TMUX_SOCKET_ENV
+from yomux_lib.agent_tui import classify_agent_pane
+from yomux_lib.tmux_utils import YOLOMUX_TMUX_SOCKET_ENV
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -617,9 +617,9 @@ def test_codex_mock_question_strips_captured_footer_and_reserves_live_footer(mon
             "keys": {"choice_question"},
             "path": PROMPT_CORPUS_DIR / "captures" / "choice_question.yaml",
             "styled_capture": (
-                "› Ask me this question and wait for my answer instead of choosing yourself: Which YOLOmux verifier mode should we use?\n"
+                "› Ask me this question and wait for my answer instead of choosing yourself: Which YOmux verifier mode should we use?\n"
                 "  1. Pane capture 2. Transcript capture\n\n\n"
-                "• Which YOLOmux verifier mode should we use?\n\n"
+                "• Which YOmux verifier mode should we use?\n\n"
                 "  1. Pane capture\n"
                 "  2. Transcript capture\n\n\n"
                 "› Improve documentation in @filename\n\n"
@@ -643,7 +643,7 @@ def test_codex_mock_question_strips_captured_footer_and_reserves_live_footer(mon
     mock_agent_common.cmd_mock_fixture(state, "choice_question", freeze_static=False)
 
     output = capsys.readouterr().out
-    assert "Which YOLOmux verifier mode should we use?" in output
+    assert "Which YOmux verifier mode should we use?" in output
     assert "gpt-5.5 xhigh" not in output
     assert "› Improve documentation in @filename" not in output
     assert "\x1b[18;1H\x1b[2K› \x1b[2mExplain this codebase\x1b[0m" in output
@@ -1295,7 +1295,7 @@ def test_plain_mock_reconstructs_hard_wrapped_fixture_text(monkeypatch, capsys):
             "path": PROMPT_CORPUS_DIR / "captures" / "wrapped_text.yaml",
             "styled_capture": "\n".join([
                 "› Ask me this question and wait for my answer instead of choosing yourself: Wh",
-                "ich YOLOmux verifier mode should we use?",
+                "ich YOmux verifier mode should we use?",
                 "  1. Pane capture",
                 "  2. Transcript capture",
             ]),
@@ -1314,7 +1314,7 @@ def test_plain_mock_reconstructs_hard_wrapped_fixture_text(monkeypatch, capsys):
     mock_agent_common.cmd_mock_fixture(state, "wrapped_text", freeze_static=False)
 
     output = capsys.readouterr().out
-    assert "Which YOLOmux verifier mode should we use?" in output
+    assert "Which YOmux verifier mode should we use?" in output
     assert "Wh\nich" not in output
 
 
@@ -1327,7 +1327,7 @@ def test_mockcase_preserves_hard_wrapped_fixture_text(monkeypatch, capsys):
             "path": PROMPT_CORPUS_DIR / "captures" / "wrapped_text.yaml",
             "styled_capture": "\n".join([
                 "› Ask me this question and wait for my answer instead of choosing yourself: Wh",
-                "ich YOLOmux verifier mode should we use?",
+                "ich YOmux verifier mode should we use?",
             ]),
             "cursor": {},
             "width": 78,
@@ -1344,7 +1344,7 @@ def test_mockcase_preserves_hard_wrapped_fixture_text(monkeypatch, capsys):
     mock_agent_common.cmd_mock_fixture(state, "wrapped_text", freeze_static=True)
 
     output = capsys.readouterr().out
-    assert "Wh\nich YOLOmux verifier mode should we use?" in output
+    assert "Wh\nich YOmux verifier mode should we use?" in output
 
 
 def test_fixture_reconstruct_does_not_merge_options_or_fresh_rows():
@@ -1469,7 +1469,7 @@ def test_claude_plain_mock_scrollback_fixture_renders_above_footer(monkeypatch, 
 
 def test_fixture_choice_group_handles_claude_multiline_options():
     lines = [
-        "Which YOLOmux verifier mode should we use?",
+        "Which YOmux verifier mode should we use?",
         "",
         "❯ 1. Pane capture",
         "     Capture the verification output directly from the terminal pane.",
@@ -1551,7 +1551,7 @@ def test_mock_fixture_without_selector_returns_to_composer(monkeypatch, capsys):
             "case_name": "plain_question",
             "keys": {"plain_question"},
             "path": PROMPT_CORPUS_DIR / "captures" / "plain_question.yaml",
-            "styled_capture": "• Which YOLOmux verifier mode should we use?\n\n  1. Pane capture\n  2. Transcript capture\n",
+            "styled_capture": "• Which YOmux verifier mode should we use?\n\n  1. Pane capture\n  2. Transcript capture\n",
             "cursor": {},
         },
     ])
@@ -1563,7 +1563,7 @@ def test_mock_fixture_without_selector_returns_to_composer(monkeypatch, capsys):
     assert state.get("pending", "") == ""
     assert state.get("fixture_interactive", "") == ""
     output = capsys.readouterr().out
-    assert "Which YOLOmux verifier mode" in output
+    assert "Which YOmux verifier mode" in output
 
 
 def test_mockcase_fixture_without_selector_stays_frozen(monkeypatch, capsys):
@@ -1573,7 +1573,7 @@ def test_mockcase_fixture_without_selector_stays_frozen(monkeypatch, capsys):
             "case_name": "plain_question",
             "keys": {"plain_question"},
             "path": PROMPT_CORPUS_DIR / "captures" / "plain_question.yaml",
-            "styled_capture": "• Which YOLOmux verifier mode should we use?\n\n  1. Pane capture\n  2. Transcript capture\n",
+            "styled_capture": "• Which YOmux verifier mode should we use?\n\n  1. Pane capture\n  2. Transcript capture\n",
             "cursor": {},
         },
     ])

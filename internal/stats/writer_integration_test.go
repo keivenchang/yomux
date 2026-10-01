@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/keivenchang/yolomux/internal/testsupport"
+	"github.com/keivenchang/yomux/internal/testsupport"
 	"github.com/mattn/go-sqlite3"
 )
 

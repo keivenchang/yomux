@@ -4,7 +4,7 @@ from types import MappingProxyType
 
 import pytest
 
-from yolomux_lib.diagnostic_redaction import redact_diagnostic_value
+from yomux_lib.diagnostic_redaction import redact_diagnostic_value
 
 SHARED_FIXTURE = json.loads(
     (Path(__file__).parent / "fixtures" / "diagnostic_redaction.json").read_text(encoding="utf-8")

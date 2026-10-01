@@ -4,15 +4,15 @@ from http import HTTPStatus
 
 import pytest
 
-from yolomux_lib import events as events_module
-from yolomux_lib.common import AgentInfo
-from yolomux_lib.common import PaneInfo
-from yolomux_lib.common import SessionInfo
-from yolomux_lib.events import EventLog
-from yolomux_lib.events import RunHistoryStore
-from yolomux_lib.metadata import empty_work_graph
-from yolomux_lib.transcripts import format_transcript_item
-from yolomux_lib.transcripts import transcript_items_from_raw_line
+from yomux_lib import events as events_module
+from yomux_lib.common import AgentInfo
+from yomux_lib.common import PaneInfo
+from yomux_lib.common import SessionInfo
+from yomux_lib.events import EventLog
+from yomux_lib.events import RunHistoryStore
+from yomux_lib.metadata import empty_work_graph
+from yomux_lib.transcripts import format_transcript_item
+from yomux_lib.transcripts import transcript_items_from_raw_line
 
 
 def write_event_lines(path, events):
@@ -331,7 +331,7 @@ def test_run_history_payload_summarizes_and_persists_live_session(monkeypatch, t
         error=None,
     )
     info = SessionInfo(session="s1", panes=[pane], selected_pane=pane, agents=[agent])
-    monkeypatch.setattr("yolomux_lib.app.discover_sessions", lambda _sessions: ({"s1": info}, ["tmux discovery diagnostic"]))
+    monkeypatch.setattr("yomux_lib.app.discover_sessions", lambda _sessions: ({"s1": info}, ["tmux discovery diagnostic"]))
     graph = empty_work_graph()
     graph["git_worktrees"]["worktree:repo"] = {
         "id": "worktree:repo",
@@ -352,7 +352,7 @@ def test_run_history_payload_summarizes_and_persists_live_session(monkeypatch, t
     graph["hosted_repositories"]["hosted:repo"] = {"id": "hosted:repo", "url": "https://example.test/repo"}
     graph["local_branches"]["branch:repo:feature/search"] = {"id": "branch:repo:feature/search", "local_repository_id": "local:repo", "name": "feature/search", "pull_request_ids": ["pr:42"], "linear_issue_ids": []}
     graph["pull_requests"]["pr:42"] = {"id": "pr:42", "hosted_repository_id": "hosted:repo", "number": 42, "title": "Add search", "url": "https://example.test/pull/42", "state": "open", "draft": False, "description": "not stored in compact history", "linear_issue_ids": []}
-    monkeypatch.setattr("yolomux_lib.app.session_work_graph", lambda _info, _cache, allow_network=False: graph)
+    monkeypatch.setattr("yomux_lib.app.session_work_graph", lambda _info, _cache, allow_network=False: graph)
     app.yoagent_session_summaries = {
         "s1": {
             "rolling_summary": "beta rollout finished",

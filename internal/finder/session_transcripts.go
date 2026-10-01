@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/keivenchang/yolomux/internal/cache"
+	"github.com/keivenchang/yomux/internal/cache"
 )
 
 const (

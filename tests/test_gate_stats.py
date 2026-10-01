@@ -33,18 +33,18 @@ from tools.mockers.transcript import codex_meta as _codex_meta
 from tools.mockers.transcript import codex_usage as _codex_usage
 from tools.mockers.transcript import write_records as _write_records
 from tests.helpers.gate_stats import commit_scan as _commit
-from yolomux_lib import server as server_module
-from yolomux_lib import app as app_module
-from yolomux_lib import web as web_module
-from yolomux_lib.client_events import ClientEventBroker
-from yolomux_lib.stats_current import client as stats_client
-from yolomux_lib.stats_current import http as stats_http
-from yolomux_lib.stats_current import pricing
-from yolomux_lib.stats_current import service as stats_service
-from yolomux_lib.stats_current import storage
-from yolomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
-from yolomux_lib.stats_current.usage import usage_atom_from_source
-from yolomux_lib.workspace import settings as workspace_settings
+from yomux_lib import server as server_module
+from yomux_lib import app as app_module
+from yomux_lib import web as web_module
+from yomux_lib.client_events import ClientEventBroker
+from yomux_lib.stats_current import client as stats_client
+from yomux_lib.stats_current import http as stats_http
+from yomux_lib.stats_current import pricing
+from yomux_lib.stats_current import service as stats_service
+from yomux_lib.stats_current import storage
+from yomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
+from yomux_lib.stats_current.usage import usage_atom_from_source
+from yomux_lib.workspace import settings as workspace_settings
 
 
 REALISTIC_ROW_COUNT = 8_929
@@ -496,7 +496,7 @@ def _start_current_stats_over_network(browser):
         """
         const done = arguments[arguments.length - 1];
         const root = document.getElementById('stats-root');
-        const mounted = YOLOmuxStatsCurrent.mount(root, {
+        const mounted = YOmuxStatsCurrent.mount(root, {
           view: 'stats',
           clientId: 'gate-live-stats',
           savedRange: 300,

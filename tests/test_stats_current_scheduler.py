@@ -7,8 +7,8 @@ import time
 
 import pytest
 
-from yolomux_lib.stats_current import runtime, scheduler
-from yolomux_lib.stats_current import storage
+from yomux_lib.stats_current import runtime, scheduler
+from yomux_lib.stats_current import storage
 
 
 def test_manifest_and_web_scheduler_ownership_are_explicit():

@@ -1,6 +1,6 @@
 # Preview Renderer Sample Index
 
-Open these files directly in YOLOmux Preview to verify the useful rendered preview paths. This directory is intentionally curated: do not add samples that only demonstrate "same as text" behavior, broken-by-design media placeholders, archive fallbacks, or unsupported placeholders.
+Open these files directly in YOmux Preview to verify the useful rendered preview paths. This directory is intentionally curated: do not add samples that only demonstrate "same as text" behavior, broken-by-design media placeholders, archive fallbacks, or unsupported placeholders.
 
 | Renderer | Sample file | Expected behavior |
 |---|---|---|

@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib.chat_questions import chat_message_is_question
-from yolomux_lib.chat_service import ChatService
-from yolomux_lib.chat_service import ChatServiceError
-from yolomux_lib.chat_store import ChatStore
+from yomux_lib.chat_questions import chat_message_is_question
+from yomux_lib.chat_service import ChatService
+from yomux_lib.chat_service import ChatServiceError
+from yomux_lib.chat_store import ChatStore
 
 
 QUESTION_CASES = {

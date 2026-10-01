@@ -9,13 +9,13 @@ import threading
 
 import pytest
 
-from yolomux_lib.approval import approvald
-from yolomux_lib import statusd
-from yolomux_lib import watchd
-from yolomux_lib.infra import batchd
-from yolomux_lib.search import search_indexer
-from yolomux_lib.stats_current import service as stats_service
-from yolomux_lib.local_services.command_router import LocalServiceCommandRouter
+from yomux_lib.approval import approvald
+from yomux_lib import statusd
+from yomux_lib import watchd
+from yomux_lib.infra import batchd
+from yomux_lib.search import search_indexer
+from yomux_lib.stats_current import service as stats_service
+from yomux_lib.local_services.command_router import LocalServiceCommandRouter
 
 
 def test_router_has_fixed_vocabulary_and_unknown_is_not_dispatched():

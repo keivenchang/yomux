@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from yolomux_lib import app as app_module
-from yolomux_lib.infra.background_scheduler import BACKGROUND_ROLE_SESSION_FILES, BackgroundScheduler
+from yomux_lib import app as app_module
+from yomux_lib.infra.background_scheduler import BACKGROUND_ROLE_SESSION_FILES, BackgroundScheduler
 
 
 def test_app_constructs_exactly_one_local_scheduler(monkeypatch):

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# setup-tls.sh — set up trusted HTTPS for YOLOmux via a local CA.
+# setup-tls.sh — set up trusted HTTPS for YOmux via a local CA.
 #
 # What it does (idempotent — safe to re-run):
-#   1. Creates a local CA once (~/.local/share/yolomux-ca), reuses it thereafter.
+#   1. Creates a local CA once (~/.local/share/yomux-ca), reuses it thereafter.
 #   2. Issues a server leaf cert covering localhost + every non-docker LAN IP +
 #      this host's name (+ any extra --san you pass), signed by that CA.
-#   3. Installs the leaf where YOLOmux serves it (STATE_DIR/tls/self-signed.*),
+#   3. Installs the leaf where YOmux serves it (STATE_DIR/tls/self-signed.*),
 #      backing up whatever was there.
 #   4. Trusts the CA in THIS machine's trust store (Linux/macOS), if it can.
 #   5. Prints the CA path + fingerprint + client-import instructions.
@@ -24,11 +24,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$REPO_ROOT/tools/startup_common.sh"
+yomux_normalize_environment
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 STATE_DIR=""
-CA_DIR="${YOLOMUX_CA_DIR:-$HOME/.local/share/yolomux-ca}"
-LEAF_DAYS="${YOLOMUX_LEAF_DAYS:-825}"
-CA_DAYS="${YOLOMUX_CA_DAYS:-3650}"
+CA_DIR="${YOMUX_CA_DIR:-${YOLOMUX_CA_DIR:-$HOME/.local/share/yomux-ca}}"
+LEAF_DAYS="${YOMUX_LEAF_DAYS:-${YOLOMUX_LEAF_DAYS:-825}}"
+CA_DAYS="${YOMUX_CA_DAYS:-${YOLOMUX_CA_DAYS:-3650}}"
 INSTALL_TRUST=1
 DRY_RUN=0
 EXTRA_SANS=()
@@ -50,13 +52,13 @@ done
 
 command -v openssl >/dev/null || die "openssl not found"
 command -v "$PYTHON_BIN" >/dev/null || die "$PYTHON_BIN not found"
-CA_DIR="$("$PYTHON_BIN" "$REPO_ROOT/tools/instance_isolation.py" resolve-product-path YOLOMUX_CA_DIR "$CA_DIR")" \
+CA_DIR="$("$PYTHON_BIN" "$REPO_ROOT/tools/instance_isolation.py" resolve-product-path YOMUX_CA_DIR "$CA_DIR")" \
   || die "CA directory refused by product-root policy"
 if [ -z "$STATE_DIR" ]; then
   STATE_DIR="$("$PYTHON_BIN" "$REPO_ROOT/tools/instance_isolation.py" resolve-state-dir)" \
     || die "state directory refused by product-root policy"
 else
-  STATE_DIR="$(YOLOMUX_STATE_DIR="$STATE_DIR" "$PYTHON_BIN" "$REPO_ROOT/tools/instance_isolation.py" resolve-state-dir)" \
+  STATE_DIR="$(YOMUX_STATE_DIR="$STATE_DIR" "$PYTHON_BIN" "$REPO_ROOT/tools/instance_isolation.py" resolve-state-dir)" \
     || die "state directory refused by product-root policy"
 fi
 TLS_DIR="$STATE_DIR/tls"
@@ -94,7 +96,7 @@ chmod 700 "$CA_DIR"
 if [ ! -f "$CA_DIR/rootCA.crt" ] || [ ! -f "$CA_DIR/rootCA.key" ]; then
   note "creating local CA"
   openssl genrsa -out "$CA_DIR/rootCA.key" 4096 2>/dev/null
-  openssl req -new -key "$CA_DIR/rootCA.key" -subj "/O=YOLOmux Dev/CN=YOLOmux Local CA" \
+  openssl req -new -key "$CA_DIR/rootCA.key" -subj "/O=YOmux Dev/CN=YOmux Local CA" \
     -out "$CA_DIR/rootCA.csr" 2>/dev/null
   printf 'basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\n' \
     > "$CA_DIR/ca.ext"
@@ -109,13 +111,13 @@ chmod 600 "$CA_DIR/rootCA.key"
 # --- Leaf cert signed by the CA (reissued every run so new IPs are picked up). ---
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 openssl genrsa -out "$tmp/leaf.key" 2048 2>/dev/null
-openssl req -new -key "$tmp/leaf.key" -subj "/CN=$(hostname) YOLOmux" -out "$tmp/leaf.csr" 2>/dev/null
+openssl req -new -key "$tmp/leaf.key" -subj "/CN=$(hostname) YOmux" -out "$tmp/leaf.csr" 2>/dev/null
 printf 'subjectAltName=%s\nextendedKeyUsage=serverAuth\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\n' \
   "$SAN" > "$tmp/leaf.ext"
 openssl x509 -req -in "$tmp/leaf.csr" -CA "$CA_DIR/rootCA.crt" -CAkey "$CA_DIR/rootCA.key" \
   -CAcreateserial -days "$LEAF_DAYS" -sha256 -extfile "$tmp/leaf.ext" -out "$tmp/leaf.crt" 2>/dev/null
 
-# --- Install where YOLOmux serves it (back up any existing cert first). ---
+# --- Install where YOmux serves it (back up any existing cert first). ---
 stamp="$(date +%Y%m%d-%H%M%S)"
 for f in self-signed.crt self-signed.key; do
   [ -f "$TLS_DIR/$f" ] && \cp -f "$TLS_DIR/$f" "$TLS_DIR/$f.bak.$stamp"

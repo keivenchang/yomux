@@ -46,7 +46,7 @@ FETCH_PROBE_SOURCE = """
   window.fetch = (resource, init) => {
     const request = resource instanceof Request ? resource : new Request(resource, init);
     const headers = new Headers(request.headers);
-    headers.set('X-YOLOmux-Measurement', window.__finderFsReproMarker);
+    headers.set('X-YOmux-Measurement', window.__finderFsReproMarker);
     const trackedRequest = new Request(request, {headers});
     const url = new URL(trackedRequest.url, location.href);
     const record = {

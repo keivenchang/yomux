@@ -15,9 +15,9 @@ import threading
 import pytest
 from pathlib import Path
 
-from yolomux_lib import http_routes
-from yolomux_lib.stats_current import http as stats_http
-from yolomux_lib.stats_current import service as service_module
+from yomux_lib import http_routes
+from yomux_lib.stats_current import http as stats_http
+from yomux_lib.stats_current import service as service_module
 
 
 def _service(tmp_path):

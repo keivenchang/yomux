@@ -9,9 +9,9 @@ import threading
 
 import pytest
 
-from yolomux_lib import login_rate_limit as lrl
-from yolomux_lib.login_rate_limit import LoginRatePolicy
-from yolomux_lib.login_rate_limit import LoginRateLimiter
+from yomux_lib import login_rate_limit as lrl
+from yomux_lib.login_rate_limit import LoginRatePolicy
+from yomux_lib.login_rate_limit import LoginRateLimiter
 
 
 class FakeClock:

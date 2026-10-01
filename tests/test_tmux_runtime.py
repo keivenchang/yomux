@@ -10,11 +10,11 @@ from types import SimpleNamespace
 import pytest
 
 from tests import tmux_runtime
-from yolomux_lib.tmux import session_retirement
-from yolomux_lib.local_services.registry import ProcessTableEntry
-from yolomux_lib.tmux.session_retirement import ProcessBirthIdentity
-from yolomux_lib.tmux.session_retirement import SessionRetirementIdentity
-from yolomux_lib.tmux.session_retirement import retained_tmux_session_births
+from yomux_lib.tmux import session_retirement
+from yomux_lib.local_services.registry import ProcessTableEntry
+from yomux_lib.tmux.session_retirement import ProcessBirthIdentity
+from yomux_lib.tmux.session_retirement import SessionRetirementIdentity
+from yomux_lib.tmux.session_retirement import retained_tmux_session_births
 
 
 def test_isolated_tmux_session_creation_has_one_cwd_owner():
@@ -183,6 +183,8 @@ def test_stop_isolated_tmux_runtime_waits_for_the_exact_pane_exit_side_effect(mo
         tmp_path,
         session_commands={session: f"{shlex.quote(sys.executable)} -c {shlex.quote(command_source)}"},
     )
+    assert os.environ["YOMUX_TMUX_SOCKET"] == str(runtime.socket_path)
+    assert os.environ["YOLOMUX_TMUX_SOCKET"] == str(runtime.socket_path)
     ready, panes = tmux_runtime.wait_for_isolated_tmux_panes(
         runtime,
         (session,),

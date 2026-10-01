@@ -1,8 +1,8 @@
 import pytest
 from types import SimpleNamespace
 
-from yolomux_lib import app as app_module
-from yolomux_lib.agent_comms.stream_events import ClaudeStreamJsonNormalizer
+from yomux_lib import app as app_module
+from yomux_lib.agent_comms.stream_events import ClaudeStreamJsonNormalizer
 
 
 pytestmark = pytest.mark.usefixtures("no_control_socket", "isolated_yoagent_conversation_state")

@@ -6,14 +6,14 @@ from unittest.mock import DEFAULT, Mock
 
 import pytest
 
-from yolomux_lib import atomic_file
-import yolomux_lib.observability.queued_delivery as queued_delivery_module
-from yolomux_lib.infra import batchd as batchd_module
-from yolomux_lib.app import TmuxWebtermApp
-from yolomux_lib.observability.queued_delivery import QueuedDeliveryCompactionOwner
-from yolomux_lib.observability.queued_delivery import QueuedDeliveryLedger
-from yolomux_lib.observability.queued_delivery import compact_queued_delivery_journal
-from yolomux_lib.infra.state_services import BatchedOperationFlight
+from yomux_lib import atomic_file
+import yomux_lib.observability.queued_delivery as queued_delivery_module
+from yomux_lib.infra import batchd as batchd_module
+from yomux_lib.app import TmuxWebtermApp
+from yomux_lib.observability.queued_delivery import QueuedDeliveryCompactionOwner
+from yomux_lib.observability.queued_delivery import QueuedDeliveryLedger
+from yomux_lib.observability.queued_delivery import compact_queued_delivery_journal
+from yomux_lib.infra.state_services import BatchedOperationFlight
 
 
 def accept_queued_operation(ledger, suffix, **overrides):
@@ -31,7 +31,7 @@ def accept_queued_operation(ledger, suffix, **overrides):
 def test_queued_operation_ledger_appends_acceptance_and_terminal_without_snapshot_rewrite(monkeypatch, tmp_path):
     path = tmp_path / "operations.json"
     ledger = QueuedDeliveryLedger(state_path=path)
-    monkeypatch.setattr("yolomux_lib.observability.queued_delivery.atomic_write_text", lambda *_args, **_kwargs: pytest.fail("request path must not rewrite the full ledger"))
+    monkeypatch.setattr("yomux_lib.observability.queued_delivery.atomic_write_text", lambda *_args, **_kwargs: pytest.fail("request path must not rewrite the full ledger"))
 
     receipt = accept_queued_operation(
         ledger,

@@ -5,7 +5,7 @@
 import ast
 from pathlib import Path
 
-from yolomux_lib.stats_current import revision
+from yomux_lib.stats_current import revision
 
 
 def test_daemon_revision_covers_every_module_loaded_by_the_writer_process():
@@ -36,7 +36,7 @@ def test_current_production_path_never_imports_the_legacy_top_level_resolution_m
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import) and any(
-                alias.name == "yolomux_lib.stats_resolution" for alias in node.names
+                alias.name == "yomux_lib.stats_resolution" for alias in node.names
             ):
                 offenders.append(path.name)
             if isinstance(node, ast.ImportFrom) and any(

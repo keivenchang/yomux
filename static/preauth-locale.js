@@ -25,7 +25,7 @@ document.querySelectorAll('[data-locale-picker]').forEach(picker => {
     if (!option) return;
     event.preventDefault();
     input.value = option.dataset.localeValue || 'system';
-    document.cookie = `yolomux_locale=${encodeURIComponent(input.value)}; Path=/; Max-Age=600; SameSite=Lax`;
+    document.cookie = `yomux_locale=${encodeURIComponent(input.value)}; Path=/; Max-Age=600; SameSite=Lax`;
     location.reload();
   });
   picker.addEventListener('keydown', event => {

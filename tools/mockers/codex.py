@@ -4,7 +4,7 @@
 """Text prototype client for `codex app-server`.
 
 This intentionally talks to the structured JSON-RPC app-server instead of scraping a
-visible Codex TUI. It is a prototype for the kind of client YOLOmux can own directly:
+visible Codex TUI. It is a prototype for the kind of client YOmux can own directly:
 start/resume a Codex thread, send turns, stream answer deltas, optionally display
 Codex reasoning/thinking summaries and raw events when the server emits them, and relay basic
 approval prompts.
@@ -43,12 +43,12 @@ if "--dump-fixtures" in sys.argv[1:]:
     mock_agent_common.print_mock_fixture_dump()
     raise SystemExit(0)
 
-from yolomux_lib.agent_comms.codex_app_server import CodexAppServerProtocol
-from yolomux_lib.agent_comms.json_rpc import json_rpc_error
-from yolomux_lib.agent_comms.json_rpc import json_rpc_notification
-from yolomux_lib.agent_comms.json_rpc import json_rpc_request
-from yolomux_lib.agent_comms.json_rpc import json_rpc_response
-from yolomux_lib.agent_comms.stream_events import normalize_codex_app_server_message
+from yomux_lib.agent_comms.codex_app_server import CodexAppServerProtocol
+from yomux_lib.agent_comms.json_rpc import json_rpc_error
+from yomux_lib.agent_comms.json_rpc import json_rpc_notification
+from yomux_lib.agent_comms.json_rpc import json_rpc_request
+from yomux_lib.agent_comms.json_rpc import json_rpc_response
+from yomux_lib.agent_comms.stream_events import normalize_codex_app_server_message
 from text_client_common import (
     CODEX_CONFIG_KEYS,
     CODEX_OUTPUT_TERMS,

@@ -1,10 +1,10 @@
 # Contributing
 
-YOLOmux accepts contributions only under the contributor terms in [`CONTRIBUTOR_TERMS.md`](CONTRIBUTOR_TERMS.md).
+YOmux accepts contributions only under the contributor terms in [`CONTRIBUTOR_TERMS.md`](CONTRIBUTOR_TERMS.md).
 
 By opening a pull request, sending a patch, or otherwise submitting a contribution, you confirm that you wrote the contribution or have the right to submit it under those terms.
 
-Do not submit code, assets, generated output, or documentation copied from another project unless its license is compatible with YOLOmux's public PolyForm Noncommercial license and the commercial sublicensing grant in the contributor terms.
+Do not submit code, assets, generated output, or documentation copied from another project unless its license is compatible with YOmux's public PolyForm Noncommercial license and the commercial sublicensing grant in the contributor terms.
 
 Do not remove or rewrite third-party copyright or license notices. Vendored dependency notices must stay attached to the files or bundles they cover.
 
@@ -20,4 +20,4 @@ The default gate already includes the isolated `bazel-go` lane. For focused Go i
 tools/run_bazel_tests.sh --jobs "$(getconf _NPROCESSORS_ONLN)"
 ```
 
-Do not run both the full gate and the direct wrapper against the same frozen tree merely to repeat the same Go suite. Use `bazel --bazelrc=/dev/null build --jobs=auto //cmd/yolomux-go:yolomux_go` for a local preview build. Do not use a fixed operator port as an automated test target; Docker fixtures own their own ports and state. Start a Go server for final manual review only after the isolated gate passes, using `YOLOMUX_START_LOAD_WAIT_SECONDS=30 ./boot.sh <port>`. The managed launcher selects Python only with `./boot.sh --deprecated-python <port>`.
+Do not run both the full gate and the direct wrapper against the same frozen tree merely to repeat the same Go suite. Use `bazel --bazelrc=/dev/null build --jobs=auto //cmd/yomux-go:yomux-go` for a local preview build. Do not use a fixed operator port as an automated test target; Docker fixtures own their own ports and state. Start a Go server for final manual review only after the isolated gate passes, using `YOMUX_START_LOAD_WAIT_SECONDS=30 ./boot.sh <port>`. The managed launcher selects Python only with `./boot.sh --deprecated-python <port>`.

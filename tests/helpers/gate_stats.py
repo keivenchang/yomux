@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from yolomux_lib.stats_current import migration, storage
+from yomux_lib.stats_current import migration, storage
 
 
 NOW = 1_700_000_000.0

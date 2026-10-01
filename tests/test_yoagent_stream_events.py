@@ -1,17 +1,17 @@
 import json
 
-from yolomux_lib.yoagent.stream_events import APPROVAL_REQUESTED
-from yolomux_lib.yoagent.stream_events import ASSISTANT_DELTA
-from yolomux_lib.yoagent.stream_events import HIDDEN_WORK_DELTA
-from yolomux_lib.yoagent.stream_events import TOOL_CALL_DELTA
-from yolomux_lib.yoagent.stream_events import TOOL_CALL_FINISHED
-from yolomux_lib.yoagent.stream_events import TOOL_CALL_STARTED
-from yolomux_lib.yoagent.stream_events import TURN_DONE
-from yolomux_lib.yoagent.stream_events import USAGE
-from yolomux_lib.yoagent.stream_events import ClaudeStreamJsonNormalizer
-from yolomux_lib.yoagent.stream_events import normalize_codex_app_server_message
-from yolomux_lib.yoagent.stream_events import yoagent_stream_event_auxiliary_item
-from yolomux_lib.yoagent.stream_events import yoagent_stream_event_auxiliary_line
+from yomux_lib.yoagent.stream_events import APPROVAL_REQUESTED
+from yomux_lib.yoagent.stream_events import ASSISTANT_DELTA
+from yomux_lib.yoagent.stream_events import HIDDEN_WORK_DELTA
+from yomux_lib.yoagent.stream_events import TOOL_CALL_DELTA
+from yomux_lib.yoagent.stream_events import TOOL_CALL_FINISHED
+from yomux_lib.yoagent.stream_events import TOOL_CALL_STARTED
+from yomux_lib.yoagent.stream_events import TURN_DONE
+from yomux_lib.yoagent.stream_events import USAGE
+from yomux_lib.yoagent.stream_events import ClaudeStreamJsonNormalizer
+from yomux_lib.yoagent.stream_events import normalize_codex_app_server_message
+from yomux_lib.yoagent.stream_events import yoagent_stream_event_auxiliary_item
+from yomux_lib.yoagent.stream_events import yoagent_stream_event_auxiliary_line
 
 
 def test_codex_app_server_stream_events_cover_answer_reasoning_tool_and_approval():

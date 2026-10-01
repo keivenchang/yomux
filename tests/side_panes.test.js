@@ -214,12 +214,12 @@ async function runSidePaneSuite() {
       'ordinary edge panes remain unconstrained Generic Panes');
 
     const sources = [
-      'static_src/js/yolomux/20_layout_state.js',
-      'static_src/js/yolomux/70_layout_actions.js',
-      'static_src/js/yolomux/75_dockview_layout.js',
-      'static_src/js/yolomux/78_panel_shell.js',
-      'static_src/js/yolomux/99_terminal_boot.js',
-      'static_src/css/yolomux/40_layout_panes_tabs.css',
+      'static_src/js/yomux/20_layout_state.js',
+      'static_src/js/yomux/70_layout_actions.js',
+      'static_src/js/yomux/75_dockview_layout.js',
+      'static_src/js/yomux/78_panel_shell.js',
+      'static_src/js/yomux/99_terminal_boot.js',
+      'static_src/css/yomux/40_layout_panes_tabs.css',
     ].map(path => fs.readFileSync(path, 'utf8')).join('\n');
     assert.doesNotMatch(sources, /layoutFileSurfaceHome|layoutWithFileSurfaceHome|layoutWithDefaultFileSurfaceHome|slotIsFileSurfaceHome|dockedFileExplorerRootSplit|preserveMissingFileExplorer|fileExplorerSplitPercent|file-explorer-home-column|file-surface-home-pane/);
   });
@@ -396,7 +396,7 @@ async function runSidePaneSuite() {
     assert.equal(genericNode.dataset.paneRole, api.paneRoleGeneric);
     assert.equal(genericNode.dataset.paneSide, undefined);
 
-    const css = fs.readFileSync('static_src/css/yolomux/40_layout_panes_tabs.css', 'utf8');
+    const css = fs.readFileSync('static_src/css/yomux/40_layout_panes_tabs.css', 'utf8');
     assert.match(css, /\.layout-column\[data-pane-role="side"\] \.pane-tab\s*\{[\s\S]*width:\s*auto/);
     assert.match(css, /\.dv-groupview\[data-pane-role="side"\] \.dv-tab\s*\{[\s\S]*width:\s*max-content/);
     assert.match(css, /\.dv-groupview\[data-pane-role="side"\] \.dv-tab > \.dockview-pane-tab\s*\{[\s\S]*width:\s*auto/);
@@ -467,7 +467,7 @@ async function runSidePaneSuite() {
   });
 
   test('Dockview tabs use the pointer drag owner without a competing HTML5 source', () => {
-    const source = fs.readFileSync(`${__dirname}/../static_src/js/yolomux/75_dockview_layout.js`, 'utf8');
+    const source = fs.readFileSync(`${__dirname}/../static_src/js/yomux/75_dockview_layout.js`, 'utf8');
     const renderer = source.slice(source.indexOf('function createDockviewTabRenderer()'), source.indexOf('function syncDockviewTabShell('));
     assert.match(renderer, /dockviewBeginTabPointerDrag\(event, item\)/,
       'Dockview tab renderer starts every tab gesture through the shared pointer owner');

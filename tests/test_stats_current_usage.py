@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib.stats_current.storage import UsageAtom
-from yolomux_lib.stats_current import usage
+from yomux_lib.stats_current.storage import UsageAtom
+from yomux_lib.stats_current import usage
 
 
 def _atom(**updates) -> UsageAtom:

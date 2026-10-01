@@ -1,8 +1,8 @@
 """Split WAL vs checkpoint cost, and probe pragma sensitivity."""
 import json, os, sys, time
 sys.path.insert(0, "/home/keivenc/dev/yolomux.release0715")
-from yolomux_lib.stats_current import storage
-import yolomux_lib.stats_current.resolution as res
+from yomux_lib.stats_current import storage
+import yomux_lib.stats_current.resolution as res
 
 os.makedirs("/tmp/yolomux-e3-remeasure-08/db/ref3", exist_ok=True)
 DB = "/tmp/yolomux-e3-remeasure-08/db/ref3/stats-v8.sqlite3"

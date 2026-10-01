@@ -2,7 +2,7 @@
 
 from pathlib import Path
 import threading
-from yolomux_lib import file_index
+from yomux_lib import file_index
 
 
 def test_reset_clears_leaked_search_progress_notifier_and_coalescing():

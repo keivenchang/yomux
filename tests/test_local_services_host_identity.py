@@ -13,17 +13,17 @@ from pathlib import Path
 import pytest
 
 from tests.helpers.local_service_records import FixtureLocalServiceRecordBuilder
-from yolomux_lib.host_identity import HostIdentity
-from yolomux_lib.host_identity import current_host_identity
-from yolomux_lib.host_identity import is_current_local_process
-from yolomux_lib.infra.process_claims import ProcessClaimLedger
-from yolomux_lib.local_services import registry as registry_mod
-from yolomux_lib.local_services.registry import ProcessTableEntry
-from yolomux_lib.local_services.registry import process_record_diagnostic
-from yolomux_lib.local_services.registry import shutdown_owned_local_services
-from yolomux_lib.local_services.registry import verified_orphan_diagnostics
-from yolomux_lib.local_services.runtime import acquire_client_lease
-from yolomux_lib.local_services.runtime import reap_dead_client_leases
+from yomux_lib.host_identity import HostIdentity
+from yomux_lib.host_identity import current_host_identity
+from yomux_lib.host_identity import is_current_local_process
+from yomux_lib.infra.process_claims import ProcessClaimLedger
+from yomux_lib.local_services import registry as registry_mod
+from yomux_lib.local_services.registry import ProcessTableEntry
+from yomux_lib.local_services.registry import process_record_diagnostic
+from yomux_lib.local_services.registry import shutdown_owned_local_services
+from yomux_lib.local_services.registry import verified_orphan_diagnostics
+from yomux_lib.local_services.runtime import acquire_client_lease
+from yomux_lib.local_services.runtime import reap_dead_client_leases
 
 
 def fixture_identity(*, stable_host_id: str = "host-a") -> HostIdentity:
@@ -186,7 +186,7 @@ def _service_environment(tmp_path: Path, *, record_overrides: dict, command: str
     ).build()
     record.update(record_overrides)
     (service_dir / "batchd.service.json").write_text(json.dumps(record), encoding="utf-8")
-    live_command = command or f"python3 -m yolomux_lib.batchd --serve --socket {socket_path} --idle-seconds 60"
+    live_command = command or f"python3 -m yomux_lib.batchd --serve --socket {socket_path} --idle-seconds 60"
     table = {
         SERVICE_PID: ProcessTableEntry(1, SERVICE_PID, 1.0, live_command, SERVICE_START_TICKS),
         # A co-tenant of the SAME process group that the record never named.
@@ -238,7 +238,7 @@ ACTIONABLE_SIGNALS = [
         (
             "service_kind",
             {},
-            "python3 -m yolomux_lib.statsd --serve --socket /nowhere/statsd.sock --idle-seconds 60",
+            "python3 -m yomux_lib.statsd --serve --socket /nowhere/statsd.sock --idle-seconds 60",
             "current_local_process",
             [],
             False,
@@ -344,9 +344,9 @@ def test_one_typed_orphan_row_per_ambiguous_survivor_and_never_a_silent_one(tmp_
         encoding="utf-8",
     )
     table = {
-        7001: ProcessTableEntry(1, 7001, 1.0, f"python3 -m yolomux_lib.batchd --serve --socket {ghost_socket}", 8001),
-        7002: ProcessTableEntry(1, 7002, 1.0, f"python3 -m yolomux_lib.batchd --serve --socket {unreadable_socket}", 8002),
-        7003: ProcessTableEntry(1, 7003, 1.0, f"python3 -m yolomux_lib.batchd --serve --socket {superseded_socket}", 8003),
+        7001: ProcessTableEntry(1, 7001, 1.0, f"python3 -m yomux_lib.batchd --serve --socket {ghost_socket}", 8001),
+        7002: ProcessTableEntry(1, 7002, 1.0, f"python3 -m yomux_lib.batchd --serve --socket {unreadable_socket}", 8002),
+        7003: ProcessTableEntry(1, 7003, 1.0, f"python3 -m yomux_lib.batchd --serve --socket {superseded_socket}", 8003),
     }
 
     ledger = registry_mod.OrphanObservationLedger()
@@ -568,12 +568,12 @@ def test_every_leased_service_routes_departures_through_the_shared_lease_reaper(
     must also route departures through the shared reaper.
     """
     leasing_modules = {
-        "yolomux_lib/statusd.py",
-        "yolomux_lib/watchd.py",
-        "yolomux_lib/approval/approvald.py",
-        "yolomux_lib/search/search_indexer.py",
-        "yolomux_lib/infra/batchd.py",
-        "yolomux_lib/stats_current/service.py",
+        "yomux_lib/statusd.py",
+        "yomux_lib/watchd.py",
+        "yomux_lib/approval/approvald.py",
+        "yomux_lib/search/search_indexer.py",
+        "yomux_lib/infra/batchd.py",
+        "yomux_lib/stats_current/service.py",
     }
     repo_root = Path(__file__).resolve().parents[1]
     acquires: set[str] = set()

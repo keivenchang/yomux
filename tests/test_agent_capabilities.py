@@ -26,7 +26,7 @@ def test_missing_executable_reports_host_and_docker_skip_reasons(tmp_path, monke
 
     capability = probe_client(
         "claude", environ={"PATH": str(tmp_path)}, home=tmp_path,
-        docker_image="yolomux-test:fixture", runner=fake_runner(),
+        docker_image="yomux-test:fixture", runner=fake_runner(),
     )
 
     assert capability.version is None
@@ -62,13 +62,13 @@ def test_docker_probe_is_network_isolated_and_reports_image_blocker(tmp_path, mo
 
     capability = probe_client(
         "codex", environ={"PATH": "/bin", "CODEX_API_KEY": "present"}, home=tmp_path,
-        docker_image="yolomux-test:fixture", runner=runner,
+        docker_image="yomux-test:fixture", runner=runner,
     )
 
     assert capability.docker_safe
     assert runner.calls == [
         ["/bin/codex", "--version"],
-        ["docker", "run", "--rm", "--network", "none", "--entrypoint", "codex", "yolomux-test:fixture", "--version"],
+        ["docker", "run", "--rm", "--network", "none", "--entrypoint", "codex", "yomux-test:fixture", "--version"],
     ]
 
 
@@ -91,7 +91,7 @@ def test_capability_probe_never_forwards_auth_values_to_docker(tmp_path, monkeyp
 
     probe_client(
         "claude", environ={"PATH": "/bin", "ANTHROPIC_API_KEY": "secret"}, home=tmp_path,
-        docker_image="yolomux-test:fixture", runner=runner,
+        docker_image="yomux-test:fixture", runner=runner,
     )
 
     docker_command = runner.calls[1]

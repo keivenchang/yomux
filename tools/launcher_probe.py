@@ -18,8 +18,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from yolomux_lib.common import auth_cookie_value
-from yolomux_lib.common import current_auth_users
+from yomux_lib.common import auth_cookie_value
+from yomux_lib.common import current_auth_users
 
 
 def _row_cookie_header(port: int) -> dict[str, str]:
@@ -27,7 +27,7 @@ def _row_cookie_header(port: int) -> dict[str, str]:
     if not users:
         return {}
     user = users[0]
-    return {"Cookie": f"yolomux_auth_{port}={auth_cookie_value(user.username, user.password)}"}
+    return {"Cookie": f"yomux_auth_{port}={auth_cookie_value(user.username, user.password)}"}
 
 
 def _get_json(scheme: str, host: str, port: int, path: str, headers: Mapping[str, str], *, timeout: float = 5.0) -> Any:

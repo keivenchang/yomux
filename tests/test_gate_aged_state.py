@@ -24,8 +24,8 @@ from tests.gate_harness import load_gate_browser
 from tests.gate_harness import open_gate_stats_surface
 from tests.gate_harness import run_finder_nested_reexpand_journey
 from tests.gate_harness import stateful_journey  # noqa: F401
-from yolomux_lib.server_logs import SERVER_LOGS
-from yolomux_lib.stats_current import storage as stats_storage
+from yomux_lib.server_logs import SERVER_LOGS
+from yomux_lib.stats_current import storage as stats_storage
 
 
 pytestmark = [pytest.mark.browser, pytest.mark.socket]
@@ -385,7 +385,7 @@ def test_browser_journey_error_gate_rejects_unconsumed_server_failures(browser, 
         },
         {
             "level": "warning",
-            "source": "yolomux_lib.stats_current.scheduler",
+            "source": "yomux_lib.stats_current.scheduler",
             "category": "python",
             "message": "current stats agent_tokens collector failed: RuntimeError: agent roster unavailable",
         },

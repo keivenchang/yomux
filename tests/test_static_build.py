@@ -66,7 +66,7 @@ def test_generated_static_assets_are_current():
 
 
 def test_application_bundles_are_ignored_and_untracked():
-    generated_paths = ("static/yolomux.css", "static/yolomux.js", "yolomux-go")
+    generated_paths = ("static/yomux.css", "static/yomux.js", "yolomux-go")
     for relative_path in generated_paths:
         tracked = subprocess.run(
             ["git", "ls-files", "--error-unmatch", "--", relative_path],
@@ -87,8 +87,8 @@ def test_application_bundles_are_ignored_and_untracked():
 
 
 def test_markdown_source_change_invalidates_derived_preview_artifacts():
-    markdown = repo_path("static_src/js/yolomux/88_markdown_preview.js").read_text(encoding="utf-8")
-    renderers = repo_path("static_src/js/yolomux/89_preview_renderers.js").read_text(encoding="utf-8")
+    markdown = repo_path("static_src/js/yomux/88_markdown_preview.js").read_text(encoding="utf-8")
+    renderers = repo_path("static_src/js/yomux/89_preview_renderers.js").read_text(encoding="utf-8")
 
     assert "function invalidateMarkdownPreviewArtifacts" in markdown
     assert "container._markdownPreviewGeneration" in markdown
@@ -98,7 +98,7 @@ def test_markdown_source_change_invalidates_derived_preview_artifacts():
 
 
 def test_session_rename_border_uses_the_selected_active_color():
-    css = repo_path("static_src/css/yolomux/50_terminal_file_tree.css").read_text(encoding="utf-8")
+    css = repo_path("static_src/css/yomux/50_terminal_file_tree.css").read_text(encoding="utf-8")
     rule = re.search(r"\.session-rename-input\s*\{(?P<body>.*?)\n\}", css, re.DOTALL)
     assert rule is not None
     assert "border: 1px solid var(--active-control-border);" in rule.group("body")
@@ -106,9 +106,9 @@ def test_session_rename_border_uses_the_selected_active_color():
 
 
 def test_i18n_runtime_partial_is_registered_before_core():
-    js = ASSETS["yolomux.js"]
-    assert "static_src/js/yolomux/05_i18n.js" in js
-    assert js.index("static_src/js/yolomux/05_i18n.js") < js.index("static_src/js/yolomux/10_core_utils.js")
+    js = ASSETS["yomux.js"]
+    assert "static_src/js/yomux/05_i18n.js" in js
+    assert js.index("static_src/js/yomux/05_i18n.js") < js.index("static_src/js/yomux/10_core_utils.js")
 
 
 def test_locale_key_parity_flags_missing_and_extra():
@@ -241,12 +241,12 @@ def test_i18n_visible_literal_sink_tree_is_clean():
 
 
 def test_pseudo_value_accents_text_keeps_tokens_and_pads():
-    protected = "`git status` https://example.com/a /static/yolomux.js ~/repo/file Ctrl-Alt-C <strong>safe</strong>"
+    protected = "`git status` https://example.com/a /static/yomux.js ~/repo/file Ctrl-Alt-C <strong>safe</strong>"
     out = pseudo_value(f"Save {{name}} as {{date:%Y%m%d}}-{{seq:03d}} with {protected}")
     assert out.startswith("⟦") and out.endswith("⟧")
     assert "{name}" in out          # interpolation tokens are preserved verbatim
     assert "{date:%Y%m%d}" in out and "{seq:03d}" in out  # documented format tokens are also syntax
-    for token in ("`git status`", "https://example.com/a", "/static/yolomux.js", "~/repo/file", "Ctrl-Alt-C", "<strong>", "</strong>"):
+    for token in ("`git status`", "https://example.com/a", "/static/yomux.js", "~/repo/file", "Ctrl-Alt-C", "<strong>", "</strong>"):
         assert token in out
     assert "Save" not in out        # the rest is accented
     assert "·" in out               # padded to surface overflow
@@ -262,12 +262,12 @@ def test_build_pseudo_catalog_covers_every_source_key():
 def test_i18n_untranslated_report_lists_real_matches_and_allows_brand_strings():
     catalogs = {
         "en": {
-            "about.github": "YOLOmux GitHub",
+            "about.github": "YOmux GitHub",
             "common.ok": "OK",
             "pref.uploads.custom_actions.label": "Custom file-drop actions",
         },
         "zh-Hant": {
-            "about.github": "YOLOmux GitHub",
+            "about.github": "YOmux GitHub",
             "common.ok": "OK",
             "pref.uploads.custom_actions.label": "Custom file-drop actions",
         },
@@ -405,6 +405,29 @@ def test_locale_semantic_errors_requires_chinese_yo_brand_marker():
     assert "zh-Hant.json must localize YO as 優 at brand" in errors
 
 
+def test_chinese_product_tab_labels_preserve_yo_feature_names():
+    catalogs = {
+        "en": {
+            "brand.tab.agent": "YO!agent",
+            "brand.tab.chat": "YO!chat",
+            "brand.tab.info": "YO!info",
+        },
+        "zh-Hans": {
+            "brand.tab.agent": "YO!agent",
+            "brand.tab.chat": "YO!chat",
+            "brand.tab.info": "YO!info",
+        },
+        "zh-Hant": {
+            "brand.tab.agent": "YO!agent",
+            "brand.tab.chat": "YO!chat",
+            "brand.tab.info": "YO!info",
+        },
+    }
+    errors = locale_semantic_errors(catalogs)
+    assert not [error for error in errors if "must localize YO" in error]
+    assert not [error for error in errors if "unintended English fallback" in error]
+
+
 def test_locale_semantic_errors_rejects_prose_under_former_broad_exemptions():
     catalogs = {
         "en": {
@@ -457,7 +480,7 @@ def test_duplicate_function_lint_flags_cross_file_duplicates(monkeypatch, tmp_pa
     second = tmp_path / "second.js"
     first.write_text("function shared() {}\nfunction uniqueOne() {}\n", encoding="utf-8")
     second.write_text("  function indentedIsIgnored() {}\nfunction shared() {}\n", encoding="utf-8")
-    monkeypatch.setitem(sb.ASSETS, "yolomux.js", ["first.js", "second.js"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.js", ["first.js", "second.js"])
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
     assert sb.lint_duplicate_functions() == ["duplicate top-level declaration 'shared' in: first.js, second.js"]
 
@@ -468,7 +491,7 @@ def test_duplicate_declaration_lint_also_catches_top_level_const(monkeypatch, tm
     second = tmp_path / "second.js"
     first.write_text("const DUP = 1;\nfunction onlyHere() {}\n", encoding="utf-8")
     second.write_text("const DUP = 2;\n", encoding="utf-8")
-    monkeypatch.setitem(sb.ASSETS, "yolomux.js", ["first.js", "second.js"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.js", ["first.js", "second.js"])
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
     assert sb.lint_duplicate_functions() == ["duplicate top-level declaration 'DUP' in: first.js, second.js"]
 
@@ -480,7 +503,7 @@ def test_source_control_character_lint_tree_is_clean():
 def test_source_control_character_lint_rejects_binary_bytes(monkeypatch, tmp_path):
     source = tmp_path / "first.js"
     source.write_bytes(b"ok\nbad\x00x\x01\n")
-    monkeypatch.setitem(sb.ASSETS, "yolomux.js", ["first.js"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.js", ["first.js"])
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
     assert sb.lint_source_control_characters() == [
         "first.js:2:4: source control character U+0000; use a textual escape or structured signature",
@@ -503,7 +526,7 @@ def test_css_structure_lint_flags_duplicate_property_selector_and_empty_rule(mon
         encoding="utf-8",
     )
     second.write_text(".shared { background: black; }\n6\n", encoding="utf-8")
-    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["first.css", "second.css"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.css", ["first.css", "second.css"])
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
     assert sb.lint_css_structure() == [
         "first.css:1: CSS rule ':root' declares '--tone' more than once",
@@ -525,7 +548,7 @@ def test_identical_theme_restatement_lint_catches_separate_and_grouped_copies(mo
         ".state, body.editor-theme-light .state { border-color: var(--line); }\n",
         encoding="utf-8",
     )
-    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["component.css"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.css", ["component.css"])
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
     assert sb.lint_identical_theme_restatements() == [
         "component.css:2: theme selector 'body.theme-light .control' restates 'color: var(--text)' from component.css:1 base selector '.control'; remove the copy or lower fallback specificity",
@@ -538,7 +561,7 @@ def test_repeated_semantic_declaration_set_lint_tree_is_clean():
 
 
 def test_preformatted_text_wrapping_has_one_shared_selector_owner():
-    css = repo_path("static_src/css/yolomux/00_tokens_base.css").read_text(encoding="utf-8")
+    css = repo_path("static_src/css/yomux/00_tokens_base.css").read_text(encoding="utf-8")
     selectors = (
         ".tmux-snapshot",
         ".transcript-text",
@@ -563,11 +586,11 @@ def test_preformatted_text_wrapping_has_one_shared_selector_owner():
 def test_transient_surface_capacities_reuse_the_viewport_clamp():
     css_by_part = {
         part: repo_path(part).read_text(encoding="utf-8")
-        for part in ASSETS["yolomux.css"]
+        for part in ASSETS["yomux.css"]
     }
-    topbar = css_by_part["static_src/css/yolomux/10_topbar_menus.css"]
-    popovers = css_by_part["static_src/css/yolomux/20_sessions_popovers.css"]
-    file_tree = css_by_part["static_src/css/yolomux/50_terminal_file_tree.css"]
+    topbar = css_by_part["static_src/css/yomux/10_topbar_menus.css"]
+    popovers = css_by_part["static_src/css/yomux/20_sessions_popovers.css"]
+    file_tree = css_by_part["static_src/css/yomux/50_terminal_file_tree.css"]
     assert re.search(r"\.topbar-search\s*\{[^}]*flex:\s*1 1 42ch[^}]*max-inline-size:\s*min\(100%, 64ch\)", topbar, re.DOTALL)
     assert re.search(r"\.drag-timing-overlay\s*\{[^}]*max-inline-size:\s*min\(88ch, var\(--popover-max-inline-size\)\)", popovers, re.DOTALL)
     assert re.search(r"\.file-tree-repo-popover\s*\{[^}]*max-inline-size:\s*min\(72ch, var\(--popover-max-inline-size\)\)", file_tree, re.DOTALL)
@@ -578,11 +601,11 @@ def test_transient_surface_capacities_reuse_the_viewport_clamp():
 
 
 def test_dialog_capacities_have_one_content_relative_token_owner():
-    tokens = repo_path("static_src/css/yolomux/00_tokens_base.css").read_text(encoding="utf-8")
-    topbar = repo_path("static_src/css/yolomux/10_topbar_menus.css").read_text(encoding="utf-8")
-    preferences = repo_path("static_src/css/yolomux/30_preferences_changes.css").read_text(encoding="utf-8")
-    file_tree = repo_path("static_src/css/yolomux/50_terminal_file_tree.css").read_text(encoding="utf-8")
-    panels = repo_path("static_src/css/yolomux/60_editor_file_panels.css").read_text(encoding="utf-8")
+    tokens = repo_path("static_src/css/yomux/00_tokens_base.css").read_text(encoding="utf-8")
+    topbar = repo_path("static_src/css/yomux/10_topbar_menus.css").read_text(encoding="utf-8")
+    preferences = repo_path("static_src/css/yomux/30_preferences_changes.css").read_text(encoding="utf-8")
+    file_tree = repo_path("static_src/css/yomux/50_terminal_file_tree.css").read_text(encoding="utf-8")
+    panels = repo_path("static_src/css/yomux/60_editor_file_panels.css").read_text(encoding="utf-8")
 
     assert "--dialog-compact-inline-size: 80ch" in tokens
     assert "--dialog-standard-inline-size: 112ch" in tokens
@@ -689,7 +712,7 @@ def test_browser_fixtures_use_one_read_only_english_catalog_owner():
 
 
 def test_event_rows_use_one_container_responsive_layout_owner():
-    css = repo_path("static_src/css/yolomux/50_terminal_file_tree.css").read_text(encoding="utf-8")
+    css = repo_path("static_src/css/yomux/50_terminal_file_tree.css").read_text(encoding="utf-8")
 
     assert re.search(r"\.event-list\s*\{[^}]*container:\s*event-list / inline-size", css, re.DOTALL)
     assert re.search(r"\.event-item\s*\{[^}]*grid-template-columns:\s*minmax\(18ch, max-content\) minmax\(12ch, 20ch\) minmax\(0, 1fr\)", css, re.DOTALL)
@@ -757,13 +780,13 @@ def test_current_yostats_diagnostics_browser_tests_use_shared_observable_waits()
 
 
 def test_tokenized_component_base_rules_have_no_identical_light_restatements():
-    tokens_css = repo_path("static_src/css/yolomux/00_tokens_base.css").read_text(encoding="utf-8")
-    topbar_css = repo_path("static_src/css/yolomux/10_topbar_menus.css").read_text(encoding="utf-8")
-    popovers_css = repo_path("static_src/css/yolomux/20_sessions_popovers.css").read_text(encoding="utf-8")
-    preferences_css = repo_path("static_src/css/yolomux/30_preferences_changes.css").read_text(encoding="utf-8")
-    layout_css = repo_path("static_src/css/yolomux/40_layout_panes_tabs.css").read_text(encoding="utf-8")
-    file_tree_css = repo_path("static_src/css/yolomux/50_terminal_file_tree.css").read_text(encoding="utf-8")
-    panels_css = repo_path("static_src/css/yolomux/60_editor_file_panels.css").read_text(encoding="utf-8")
+    tokens_css = repo_path("static_src/css/yomux/00_tokens_base.css").read_text(encoding="utf-8")
+    topbar_css = repo_path("static_src/css/yomux/10_topbar_menus.css").read_text(encoding="utf-8")
+    popovers_css = repo_path("static_src/css/yomux/20_sessions_popovers.css").read_text(encoding="utf-8")
+    preferences_css = repo_path("static_src/css/yomux/30_preferences_changes.css").read_text(encoding="utf-8")
+    layout_css = repo_path("static_src/css/yomux/40_layout_panes_tabs.css").read_text(encoding="utf-8")
+    file_tree_css = repo_path("static_src/css/yomux/50_terminal_file_tree.css").read_text(encoding="utf-8")
+    panels_css = repo_path("static_src/css/yomux/60_editor_file_panels.css").read_text(encoding="utf-8")
 
     assert not re.search(r"body\.theme-light \.topbar\s*\{\s*background:\s*var\(--panel2\)", topbar_css)
     assert not re.search(r"body\.theme-light \.topbar:hover,\s*body\.theme-light \.topbar:focus-within\s*\{\s*background:\s*var\(--pane-tab-strip-bg\)", topbar_css)
@@ -802,19 +825,19 @@ def test_tokenized_component_base_rules_have_no_identical_light_restatements():
 
 
 def test_compact_overflow_strips_have_one_shared_layout_owner():
-    tokens_css = repo_path("static_src/css/yolomux/00_tokens_base.css").read_text(encoding="utf-8")
-    topbar_css = repo_path("static_src/css/yolomux/10_topbar_menus.css").read_text(encoding="utf-8")
-    file_tree_css = repo_path("static_src/css/yolomux/50_terminal_file_tree.css").read_text(encoding="utf-8")
+    tokens_css = repo_path("static_src/css/yomux/00_tokens_base.css").read_text(encoding="utf-8")
+    topbar_css = repo_path("static_src/css/yomux/10_topbar_menus.css").read_text(encoding="utf-8")
+    file_tree_css = repo_path("static_src/css/yomux/50_terminal_file_tree.css").read_text(encoding="utf-8")
     assert re.search(r"\.app-menu-bar\s*\{[^}]*flex:\s*0 0 auto[^}]*overflow:\s*visible", tokens_css)
     assert not re.search(r"\.app-menu-bar\s*\{", topbar_css)
     assert "file-explorer-quick-access" not in file_tree_css
 
 
 def test_audited_css_families_have_one_grouped_owner():
-    layout_css = repo_path("static_src/css/yolomux/40_layout_panes_tabs.css").read_text(encoding="utf-8")
-    preferences_css = repo_path("static_src/css/yolomux/30_preferences_changes.css").read_text(encoding="utf-8")
-    file_tree_css = repo_path("static_src/css/yolomux/50_terminal_file_tree.css").read_text(encoding="utf-8")
-    panels_css = repo_path("static_src/css/yolomux/60_editor_file_panels.css").read_text(encoding="utf-8")
+    layout_css = repo_path("static_src/css/yomux/40_layout_panes_tabs.css").read_text(encoding="utf-8")
+    preferences_css = repo_path("static_src/css/yomux/30_preferences_changes.css").read_text(encoding="utf-8")
+    file_tree_css = repo_path("static_src/css/yomux/50_terminal_file_tree.css").read_text(encoding="utf-8")
+    panels_css = repo_path("static_src/css/yomux/60_editor_file_panels.css").read_text(encoding="utf-8")
 
     preference_groups = _grouped_css_selectors(preferences_css)
     file_tree_groups = _grouped_css_selectors(file_tree_css)
@@ -837,7 +860,7 @@ def test_audited_css_families_have_one_grouped_owner():
     assert re.search(r"\.pane-drag-image-frame,\s*\.preferences-panel,\s*\.js-debug-panel,\s*\.command-palette-dialog,\s*\.panel,\s*\.transcript,\s*\.summary\s*\{", preferences_css)
     assert re.search(r"\.pane-tab-close::before,\s*\.pane-tab-close::after,\s*\.panel-detail-close::before,\s*\.panel-detail-close::after,[\s\S]*?\.file-editor-panel-close::after\s*\{", preferences_css)
     assert re.search(r"\.file-editor-codemirror \.cm-content ::selection,\s*\.file-editor-codemirror-panel \.cm-content ::selection\s*\{", panels_css)
-    assert "body.editor-scheme-yolomux-light .file-editor-codemirror .cm-content ::selection" in panels_css
+    assert "body.editor-scheme-yomux-light .file-editor-codemirror .cm-content ::selection" in panels_css
     assert ".cm-content ::-moz-selection" not in panels_css
     assert not re.search(r"\.panel\s*\{[^}]*grid-template-rows:", layout_css)
     assert not re.search(r"\.panel\.file-editor-panel\s*\{[^}]*grid-template-rows:", panels_css)
@@ -867,22 +890,22 @@ def test_shared_ui_reuse_protocol_stays_in_agent_guide():
 
 
 def test_panel_frame_builder_owns_the_shared_panel_chrome():
-    owner = repo_path("static_src/js/yolomux/78_panel_shell.js").read_text(encoding="utf-8")
+    owner = repo_path("static_src/js/yomux/78_panel_shell.js").read_text(encoding="utf-8")
     assert "function panelFrameHtml(" in owner
     assert "function createFramedPanel(" in owner
     assert "panel-toast-stack" in owner
     assert "pane-tabs\" role=\"tablist\"" in owner
     for path in (
-        "static_src/js/yolomux/78_panel_shell.js",
-        "static_src/js/yolomux/80_info_panel.js",
-        "static_src/js/yolomux/82_chat_panel.js",
-        "static_src/js/yolomux/83_preferences_panel.js",
-        "static_src/js/yolomux/85_debug_panel.js",
-        "static_src/js/yolomux/86_changes_40_finder.js",
-        "static_src/js/yolomux/99_terminal_boot.js",
+        "static_src/js/yomux/78_panel_shell.js",
+        "static_src/js/yomux/80_info_panel.js",
+        "static_src/js/yomux/82_chat_panel.js",
+        "static_src/js/yomux/83_preferences_panel.js",
+        "static_src/js/yomux/85_debug_panel.js",
+        "static_src/js/yomux/86_changes_40_finder.js",
+        "static_src/js/yomux/99_terminal_boot.js",
     ):
         source = repo_path(path).read_text(encoding="utf-8")
-        if path != "static_src/js/yolomux/78_panel_shell.js":
+        if path != "static_src/js/yomux/78_panel_shell.js":
             assert "createFramedPanel({" in source
             assert '<div class="panel-head' not in source
 
@@ -938,8 +961,8 @@ def test_framed_panel_construction_lint_rejects_registered_parallel_owners(monke
     (tmp_path / "20_parallel.js").write_text(parallel_body, encoding="utf-8")
     monkeypatch.setitem(
         sb.ASSETS,
-        "yolomux.js",
-        ["static_src/js/yolomux/78_panel_shell.js", "20_parallel.js"],
+        "yomux.js",
+        ["static_src/js/yomux/78_panel_shell.js", "20_parallel.js"],
     )
     monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / Path(path).name)
 
@@ -954,13 +977,13 @@ def test_framed_panel_construction_lint_rejects_raw_article_outside_owner_functi
     )
     monkeypatch.setitem(
         sb.ASSETS,
-        "yolomux.js",
-        ["static_src/js/yolomux/78_panel_shell.js"],
+        "yomux.js",
+        ["static_src/js/yomux/78_panel_shell.js"],
     )
     monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / Path(path).name)
 
     assert sb.lint_framed_panel_construction() == [
-        "static_src/js/yolomux/78_panel_shell.js:4: raw article panel construction; use createFramedPanel()"
+        "static_src/js/yomux/78_panel_shell.js:4: raw article panel construction; use createFramedPanel()"
     ]
 
 
@@ -969,28 +992,28 @@ def test_framed_panel_construction_lint_fails_closed_for_missing_registered_part
     _write_synthetic_framed_panel_owner(owner)
     monkeypatch.setitem(
         sb.ASSETS,
-        "yolomux.js",
-        ["static_src/js/yolomux/78_panel_shell.js", "missing.js"],
+        "yomux.js",
+        ["static_src/js/yomux/78_panel_shell.js", "missing.js"],
     )
     monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / Path(path).name)
 
     assert sb.lint_framed_panel_construction() == [
-        "missing.js: registered yolomux.js partial is missing; framed-panel ownership cannot be verified"
+        "missing.js: registered yomux.js partial is missing; framed-panel ownership cannot be verified"
     ]
 
 
 def test_frontend_orchestration_facade_partials_load_before_their_owners():
-    parts = sb.ASSETS["yolomux.js"]
-    debug_facade = "static_src/js/yolomux/84_debug_runtime_facade.js"
+    parts = sb.ASSETS["yomux.js"]
+    debug_facade = "static_src/js/yomux/84_debug_runtime_facade.js"
     debug_owners = [
-        "static_src/js/yolomux/84_debug_observation.js",
-        "static_src/js/yolomux/85_debug_panel.js",
+        "static_src/js/yomux/84_debug_observation.js",
+        "static_src/js/yomux/85_debug_panel.js",
     ]
-    terminal_facade = "static_src/js/yolomux/98_terminal_runtime_facade.js"
+    terminal_facade = "static_src/js/yomux/98_terminal_runtime_facade.js"
     terminal_owners = [
-        "static_src/js/yolomux/99_terminal_boot.js",
-        "static_src/js/yolomux/99_client_event_transport.js",
-        "static_src/js/yolomux/99_terminal_shortcuts_boot.js",
+        "static_src/js/yomux/99_terminal_boot.js",
+        "static_src/js/yomux/99_client_event_transport.js",
+        "static_src/js/yomux/99_terminal_shortcuts_boot.js",
     ]
     assert all(parts.count(path) == 1 for path in [debug_facade, *debug_owners, terminal_facade, *terminal_owners])
     assert [parts.index(path) for path in [debug_facade, *debug_owners]] == sorted(parts.index(path) for path in [debug_facade, *debug_owners])
@@ -1010,7 +1033,7 @@ def test_direct_button_construction_lint_rejects_parallel_builders(monkeypatch, 
     parallel = tmp_path / "20_parallel.js"
     owner.write_text("function makeButton() {\n  return document.createElement('button');\n}\n", encoding="utf-8")
     parallel.write_text("function localButton() {\n  return document.createElement(\"button\");\n}\n", encoding="utf-8")
-    monkeypatch.setitem(sb.ASSETS, "yolomux.js", ["10_core_utils.js", "20_parallel.js"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.js", ["10_core_utils.js", "20_parallel.js"])
     monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / path)
 
     assert sb.lint_direct_button_construction() == [
@@ -1034,7 +1057,7 @@ def test_shared_ui_ownership_lint_rejects_a_raw_pane_control_family(monkeypatch,
     errors = sb.lint_shared_ui_ownership()
 
     assert "98_terminal_runtime_facade.js: shared pane-frame controls owner is missing 'toolbarButtonHtml('" in errors
-    assert "static_src/js/yolomux/98_terminal_runtime_facade.js: paneFrameControlsHtml() must use toolbarButtonHtml(), not raw button templates" in errors
+    assert "static_src/js/yomux/98_terminal_runtime_facade.js: paneFrameControlsHtml() must use toolbarButtonHtml(), not raw button templates" in errors
 
 
 def test_node_shard_launcher_has_unique_behavior_owners_and_a_terminal_summary():
@@ -1068,7 +1091,7 @@ def test_normalized_production_clone_lint_rejects_new_unreviewed_behavior_copy(m
     ))
     (tmp_path / "a.js").write_text(body, encoding="utf-8")
     (tmp_path / "b.js").write_text(body.replace("copiedBehavior", "anotherBehavior"), encoding="utf-8")
-    monkeypatch.setitem(sb.ASSETS, "yolomux.js", ["a.js", "b.js"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.js", ["a.js", "b.js"])
     monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / path)
     monkeypatch.setattr(sb, "NORMALIZED_PRODUCTION_CLONE_ALLOWLIST", {})
 
@@ -1090,7 +1113,7 @@ def test_code_syntax_color_ownership_requires_one_grouped_renderer_rule(monkeypa
         ".cm-content .code-string { color: var(--code-string) !important; }\n",
         encoding="utf-8",
     )
-    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["component.css"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.css", ["component.css"])
     monkeypatch.setattr(sb, "CODE_SYNTAX_COLOR_TOKENS", frozenset({"--code-string"}))
     monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / path)
 
@@ -1123,7 +1146,7 @@ def test_repeated_semantic_declaration_set_lint_ignores_order_and_extra_properti
         f".second {{ {'; '.join(reversed(declarations))}; padding: 2px; }}\n",
         encoding="utf-8",
     )
-    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["first.css", "second.css"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.css", ["first.css", "second.css"])
     monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / path)
     assert lint_repeated_semantic_declaration_sets() == [
         f"semantic CSS declaration set {name!r} repeats in first.css:1, second.css:1; merge it into one grouped selector"
@@ -1146,7 +1169,7 @@ def test_custom_border_radius_inventory_stays_scoped_and_complete():
 def test_custom_border_radius_lint_rejects_unclassified_and_stale_entries(monkeypatch, tmp_path):
     component = tmp_path / "component.css"
     component.write_text(".known { border-radius: 5px; }\n.new { border-radius: 7px; }\n", encoding="utf-8")
-    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["component.css"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.css", ["component.css"])
     monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / path)
     monkeypatch.setattr(
         sb,
@@ -1172,7 +1195,7 @@ def test_standard_border_radius_lint_rejects_single_compound_and_logical_copies(
         ".multiline { border-radius:\n  4px; }\n",
         encoding="utf-8",
     )
-    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["component.css"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.css", ["component.css"])
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
     assert lint_raw_standard_border_radii() == [
         "component.css:1: raw standard border radius 6px; use var(--radius-md)",
@@ -1200,7 +1223,7 @@ def test_standard_motion_duration_lint_rejects_equivalent_component_cadences(mon
         ".fallback { transition: opacity var(--local-duration, 100ms); }\n",
         encoding="utf-8",
     )
-    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["00_tokens_base.css", "component.css"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.css", ["00_tokens_base.css", "component.css"])
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
     assert lint_raw_standard_motion_durations() == [
         "component.css:1: raw standard motion duration 90ms; use var(--motion-interaction-fast)",
@@ -1229,7 +1252,7 @@ def test_standard_component_font_size_lint_rejects_fixed_text_but_ignores_fallba
         ".icon { width: 10px; height: 12px; }\n",
         encoding="utf-8",
     )
-    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["00_tokens_base.css", "component.css"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.css", ["00_tokens_base.css", "component.css"])
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
     assert lint_raw_standard_font_sizes() == [
         "component.css:1: raw standard component font size 10px; use var(--ui-font-size-2xs)",
@@ -1262,7 +1285,7 @@ def test_standard_spacing_lint_rejects_physical_logical_compound_and_fallback_co
         ".relative { gap: 0.45em; }\n",
         encoding="utf-8",
     )
-    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["00_tokens_base.css", "component.css"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.css", ["00_tokens_base.css", "component.css"])
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
     assert lint_raw_standard_spacing() == [
         "component.css:1: raw standard spacing 8px; use var(--space-8)",
@@ -1295,15 +1318,15 @@ def test_repeated_raw_component_literal_lint_tree_is_clean():
 
 def test_opaque_white_has_one_css_paint_owner():
     occurrences = []
-    for part in ASSETS["yolomux.css"]:
+    for part in ASSETS["yomux.css"]:
         text = repo_path(part).read_text(encoding="utf-8")
         occurrences.extend(part for _match in re.finditer(r"(?i)#fff(?:fff)?\b", text))
-    assert occurrences == ["static_src/css/yolomux/00_tokens_base.css"]
-    assert "--paint-white: #fff;" in repo_path("static_src/css/yolomux/00_tokens_base.css").read_text(encoding="utf-8")
+    assert occurrences == ["static_src/css/yomux/00_tokens_base.css"]
+    assert "--paint-white: #fff;" in repo_path("static_src/css/yomux/00_tokens_base.css").read_text(encoding="utf-8")
 
 
 def test_linked_semantic_colors_alias_one_palette_owner():
-    css = repo_path("static_src/css/yolomux/00_tokens_base.css").read_text(encoding="utf-8")
+    css = repo_path("static_src/css/yomux/00_tokens_base.css").read_text(encoding="utf-8")
 
     for declaration in (
         "--editor-scheme-panel: var(--panel);",
@@ -1359,8 +1382,8 @@ def test_z_index_ownership_lint_tree_is_clean():
 
 
 def test_tree_row_hover_and_selection_paint_have_one_base_owner():
-    tree_css = repo_path("static_src/css/yolomux/50_terminal_file_tree.css").read_text(encoding="utf-8")
-    editor_css = repo_path("static_src/css/yolomux/60_editor_file_panels.css").read_text(encoding="utf-8")
+    tree_css = repo_path("static_src/css/yomux/50_terminal_file_tree.css").read_text(encoding="utf-8")
+    editor_css = repo_path("static_src/css/yomux/60_editor_file_panels.css").read_text(encoding="utf-8")
     selection_shadow = "box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--file-selection-outline);"
     hover_shadow = "box-shadow: inset 4px 0 0 var(--file-hover-border), inset 0 0 0 1px var(--file-hover-outline);"
     assert frozenset({".file-tree-row.selected", ".file-tree-row.current-file:not(.selected)"}) in (
@@ -1383,7 +1406,7 @@ def test_repeated_raw_box_shadow_lint_normalizes_whitespace_and_ignores_owned_va
         ".owned { box-shadow: var(--shared-shadow); }\n",
         encoding="utf-8",
     )
-    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["component.css"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.css", ["component.css"])
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
     assert sb.lint_repeated_raw_box_shadows() == [
         "raw box-shadow '0 0 0 2px var(--ring)' repeats in component.css:1, component.css:2; move it to a CSS token or grouped selector"
@@ -1405,8 +1428,8 @@ def test_z_index_ownership_lint_checks_css_and_inline_js_styles(monkeypatch, tmp
         encoding="utf-8",
     )
     inline.write_text("const css = `.inline { z-index: 1000; }`;\n", encoding="utf-8")
-    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["component.css"])
-    monkeypatch.setitem(sb.ASSETS, "yolomux.js", ["inline.js"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.css", ["component.css"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.js", ["inline.js"])
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
     assert sb.lint_unowned_z_indexes() == [
         "component.css:7: local z-index token --z-local owns '9'; move numeric/arithmetic ownership to 00_tokens_base.css",
@@ -1421,7 +1444,7 @@ def test_z_index_ownership_lint_checks_css_and_inline_js_styles(monkeypatch, tmp
 def test_repeated_raw_component_literal_lint_flags_new_repeats(monkeypatch, tmp_path):
     bad = tmp_path / "bad.css"
     bad.write_text(".a { color: #123456; }\n.b { border-color: #123456; }\n.c { color: #abcdef; }\n", encoding="utf-8")
-    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["bad.css"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.css", ["bad.css"])
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
     monkeypatch.setattr(sb, "RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST", {})
     assert sb.lint_repeated_raw_component_literals() == [
@@ -1437,7 +1460,7 @@ def test_repeated_raw_component_literal_lint_owns_variable_channel_alpha(monkeyp
         ".c { color: rgb(var(--other-rgb) / 0.2); }\n",
         encoding="utf-8",
     )
-    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["bad.css"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.css", ["bad.css"])
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
     monkeypatch.setattr(sb, "RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST", {})
 
@@ -1458,7 +1481,7 @@ def test_repeated_raw_component_literal_lint_canonicalizes_css_spellings_and_onl
         ".compound { box-shadow: 0 0 #445566, 0 1px #445566; }\n",
         encoding="utf-8",
     )
-    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["bad.css"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.css", ["bad.css"])
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
     monkeypatch.setattr(sb, "RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST", {})
     assert sb.lint_repeated_raw_component_literals() == [
@@ -1472,7 +1495,7 @@ def test_repeated_raw_component_literal_lint_canonicalizes_css_spellings_and_onl
 def test_repeated_raw_component_literal_lint_canonicalizes_allowlist_keys(monkeypatch, tmp_path):
     component = tmp_path / "component.css"
     component.write_text(".a { color: #ffffff; }\n.b { color: rgb(255 255 255); }\n", encoding="utf-8")
-    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["component.css"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.css", ["component.css"])
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
     monkeypatch.setattr(sb, "RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST", {"#fff": "reviewed white"})
     assert sb.lint_repeated_raw_component_literals() == []
@@ -1481,7 +1504,7 @@ def test_repeated_raw_component_literal_lint_canonicalizes_allowlist_keys(monkey
 def test_repeated_raw_component_literal_lint_flags_stale_allowlist_entries(monkeypatch, tmp_path):
     component = tmp_path / "component.css"
     component.write_text(".only { color: #abcdef; }\n", encoding="utf-8")
-    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["component.css"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.css", ["component.css"])
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
     monkeypatch.setattr(sb, "RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST", {"#abcdef": "reviewed example"})
     assert sb.lint_repeated_raw_component_literals() == [
@@ -1493,7 +1516,7 @@ def test_raw_token_lint_canonicalizes_opaque_rgb_and_hex(monkeypatch, tmp_path):
     pane_meta_path_light = UI_PINS["paneMetaPathLight"]
     component = tmp_path / "component.css"
     component.write_text(".label { color: rgb(17, 24, 39); }\n", encoding="utf-8")
-    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["component.css"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.css", ["component.css"])
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
     monkeypatch.setattr(sb, "_token_opaque_color_values", lambda: {pane_meta_path_light: ["--lt-text"]})
     assert sb._canonical_opaque_color(pane_meta_path_light) == pane_meta_path_light
@@ -1511,7 +1534,7 @@ def test_raw_token_lint_masks_only_var_fallback_not_neighboring_literal(monkeypa
         f".label {{ color: var(--fallback, {pane_meta_path_light}); border-color: rgb(17 24 39); }}\n",
         encoding="utf-8",
     )
-    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["component.css"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.css", ["component.css"])
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
     monkeypatch.setattr(sb, "_token_opaque_color_values", lambda: {pane_meta_path_light: ["--lt-text"]})
     assert lint_raw_literal_equals_token() == [
@@ -1526,7 +1549,7 @@ def test_raw_token_lint_rejects_opaque_white_property_and_local_token(monkeypatc
         ".local { --local-white: #ffffff; color: var(--local-white); }\n",
         encoding="utf-8",
     )
-    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["component.css"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.css", ["component.css"])
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
     monkeypatch.setattr(sb, "_token_opaque_color_values", lambda: {"#ffffff": ["--paint-white"]})
     assert lint_raw_literal_equals_token() == [
@@ -1540,7 +1563,7 @@ def test_novel_component_color_lint_tree_is_clean():
 
 
 def test_novel_component_color_lint_rejects_one_use_mid_luminance_literal(monkeypatch, tmp_path):
-    css_dir = tmp_path / "static_src/css/yolomux"
+    css_dir = tmp_path / "static_src/css/yomux"
     css_dir.mkdir(parents=True)
     tokens = css_dir / "00_tokens_base.css"
     component = css_dir / "component.css"
@@ -1548,10 +1571,10 @@ def test_novel_component_color_lint_rejects_one_use_mid_luminance_literal(monkey
     component.write_text(".novel { color: #56789a; }\n", encoding="utf-8")
     monkeypatch.setitem(
         sb.ASSETS,
-        "yolomux.css",
+        "yomux.css",
         [
-            "static_src/css/yolomux/00_tokens_base.css",
-            "static_src/css/yolomux/component.css",
+            "static_src/css/yomux/00_tokens_base.css",
+            "static_src/css/yomux/component.css",
         ],
     )
     monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / path)
@@ -1560,7 +1583,7 @@ def test_novel_component_color_lint_rejects_one_use_mid_luminance_literal(monkey
     violations = sb.lint_novel_component_colors()
 
     assert len(violations) == 1
-    assert "static_src/css/yolomux/component.css:1: novel raw component color #56789a" in violations[0]
+    assert "static_src/css/yomux/component.css:1: novel raw component color #56789a" in violations[0]
 
 
 def test_unused_css_token_lint_tree_is_clean():
@@ -1574,8 +1597,8 @@ def test_unused_css_token_lint_rejects_new_dead_definition(monkeypatch, tmp_path
     tokens.write_text(":root { --used: #123456; --unused: #56789a; }\n", encoding="utf-8")
     component.write_text(".used { color: var(--used); }\n", encoding="utf-8")
     javascript.write_text("const unrelated = true;\n", encoding="utf-8")
-    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["00_tokens_base.css", "component.css"])
-    monkeypatch.setitem(sb.ASSETS, "yolomux.js", ["component.js"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.css", ["00_tokens_base.css", "component.css"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.js", ["component.js"])
     monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / path)
     monkeypatch.setattr(sb, "UNUSED_CSS_TOKEN_ALLOWLIST", {})
 
@@ -1590,7 +1613,7 @@ def test_semantic_color_contrast_lint_tree_is_clean():
 
 
 def test_semantic_color_contrast_lint_rejects_low_contrast_theme_pair(monkeypatch, tmp_path):
-    tokens = tmp_path / "static_src/css/yolomux/00_tokens_base.css"
+    tokens = tmp_path / "static_src/css/yomux/00_tokens_base.css"
     tokens.parent.mkdir(parents=True)
     tokens.write_text(":root { --foreground: #777; --background: #888; }\n", encoding="utf-8")
     monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / path)
@@ -1609,7 +1632,7 @@ def test_asset_source_completeness_lint_tree_is_clean():
 def test_asset_source_completeness_lint_covers_registration_and_retirement_states(
     monkeypatch, tmp_path
 ):
-    source_dir = tmp_path / "static_src/js/yolomux"
+    source_dir = tmp_path / "static_src/js/yomux"
     source_dir.mkdir(parents=True)
     for name in ("registered.js", "retired.js", "overlap.js", "orphan.js", "blank-reason.js"):
         (source_dir / name).write_text("// fixture\n", encoding="utf-8")
@@ -1617,10 +1640,10 @@ def test_asset_source_completeness_lint_covers_registration_and_retirement_state
         sb,
         "ASSETS",
         {
-            "yolomux.js": [
-                "static_src/js/yolomux/registered.js",
-                "static_src/js/yolomux/overlap.js",
-                "static_src/js/yolomux/missing.js",
+            "yomux.js": [
+                "static_src/js/yomux/registered.js",
+                "static_src/js/yomux/overlap.js",
+                "static_src/js/yomux/missing.js",
             ]
         },
     )
@@ -1628,20 +1651,20 @@ def test_asset_source_completeness_lint_covers_registration_and_retirement_state
         sb,
         "RETIRED_ASSET_PARTS",
         {
-            "static_src/js/yolomux/retired.js": "reviewed retirement",
-            "static_src/js/yolomux/overlap.js": "must not also be registered",
-            "static_src/js/yolomux/stale.js": "stale fixture",
-            "static_src/js/yolomux/blank-reason.js": " ",
+            "static_src/js/yomux/retired.js": "reviewed retirement",
+            "static_src/js/yomux/overlap.js": "must not also be registered",
+            "static_src/js/yomux/stale.js": "stale fixture",
+            "static_src/js/yomux/blank-reason.js": " ",
         },
     )
     monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / path)
 
     violations = sb.lint_asset_source_completeness()
 
-    assert any("unregistered static asset source part static_src/js/yolomux/orphan.js" in item for item in violations)
-    assert any("registered static asset source part is missing: static_src/js/yolomux/missing.js" in item for item in violations)
-    assert any("retired static asset part is missing: static_src/js/yolomux/stale.js" in item for item in violations)
-    assert any("retired static asset part is also registered: static_src/js/yolomux/overlap.js" in item for item in violations)
+    assert any("unregistered static asset source part static_src/js/yomux/orphan.js" in item for item in violations)
+    assert any("registered static asset source part is missing: static_src/js/yomux/missing.js" in item for item in violations)
+    assert any("retired static asset part is missing: static_src/js/yomux/stale.js" in item for item in violations)
+    assert any("retired static asset part is also registered: static_src/js/yomux/overlap.js" in item for item in violations)
     assert any("blank-reason.js" in item and "nonblank" in item for item in violations)
     assert not any("retired.js" in item for item in violations)
 
@@ -1651,7 +1674,7 @@ def test_raw_window_viewport_lint_flags_unowned_reads(monkeypatch, tmp_path):
     good = tmp_path / "good.js"
     bad.write_text("const width = window.innerWidth;\n", encoding="utf-8")
     good.write_text("const height = window.innerHeight; // static-build-allow-window-viewport\n", encoding="utf-8")
-    monkeypatch.setitem(sb.ASSETS, "yolomux.js", ["bad.js", "good.js"])
+    monkeypatch.setitem(sb.ASSETS, "yomux.js", ["bad.js", "good.js"])
     monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
     assert sb.lint_raw_window_viewport_reads() == [
         "bad.js:1: raw window.innerWidth/innerHeight read; use appViewport()"

@@ -6,11 +6,11 @@ current while its producer (`indexd`) was not running, with no warning anywhere 
 Mechanism, as it stood before the fix:
 
 1. The web process is a read client for Quick Open.  `search_index_can_build`
-   (`yolomux_lib/app.py:2920-2922`) returns False for the search-index role, so only the
+   (`yomux_lib/app.py:2920-2922`) returns False for the search-index role, so only the
    `indexd` child may build.  Read clients take a snapshot-serving branch when a committed
    snapshot is available.
 2. The persisted SQLite snapshot was validated ONLY by `_sqlite_metadata_matches`
-   (`yolomux_lib/search/file_index.py`), which compares root, version, storage == "sqlite"
+   (`yomux_lib/search/file_index.py`), which compares root, version, storage == "sqlite"
    and skip_signature.  That is a configuration-shape match.  There was no generation term,
    no mtime term, no age term and no producer-liveness term, so a snapshot written months
    ago by a long-dead `indexd` passed identically to one written a second ago.
@@ -70,10 +70,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from yolomux_lib import app as app_module
-from yolomux_lib import file_index
-from yolomux_lib import filesystem
-from yolomux_lib.filesystem import search as filesystem_search
+from yomux_lib import app as app_module
+from yomux_lib import file_index
+from yomux_lib import filesystem
+from yomux_lib.filesystem import search as filesystem_search
 
 
 ONE_DAY_SECONDS = 24.0 * 60.0 * 60.0

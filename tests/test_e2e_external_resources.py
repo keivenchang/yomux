@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""Real-browser guard for page-load dependencies served outside YOLOmux."""
+"""Real-browser guard for page-load dependencies served outside YOmux."""
 
 from __future__ import annotations
 

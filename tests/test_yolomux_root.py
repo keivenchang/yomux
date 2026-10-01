@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib.infra import common
-from yolomux_lib.local_services import rpc
+from yomux_lib.infra import common
+from yomux_lib.local_services import rpc
 
 
 def _identity() -> common.HostIdentity:
@@ -19,6 +19,13 @@ def _rooted_subprocess_environment(root: Path) -> dict[str, str]:
 
     values = dict(os.environ)
     for key in (
+        "YOMUX_ROOT",
+        "YOMUX_CONFIG_DIR",
+        "YOMUX_STATE_DIR",
+        "YOMUX_CACHE_DIR",
+        "YOMUX_CODEX_HOME",
+        "YOMUX_RUNTIME_DIR",
+        "YOMUX_HOST_ARTIFACT_DIR",
         "YOLOMUX_CONFIG_DIR",
         "YOLOMUX_STATE_DIR",
         "YOLOMUX_CACHE_DIR",
@@ -33,7 +40,7 @@ def _rooted_subprocess_environment(root: Path) -> dict[str, str]:
         "TMPDIR",
     ):
         values.pop(key, None)
-    values["YOLOMUX_ROOT"] = str(root)
+    values["YOMUX_ROOT"] = str(root)
     return values
 
 
@@ -47,7 +54,7 @@ def test_rooted_subprocess_isolates_instance_state_but_reuses_user_codex_credent
     probe = """
 import json
 from pathlib import Path
-from yolomux_lib.infra import common
+from yomux_lib.infra import common
 paths = common._YOLOMUX_ROOTS
 longest = max(common.runtime_socket_candidates(paths), key=lambda value: len(str(value).encode()))
 print(json.dumps({
@@ -123,11 +130,11 @@ def test_root_unset_preserves_existing_default_paths(monkeypatch, tmp_path: Path
     monkeypatch.delenv("YOLOMUX_ROOT", raising=False)
     paths = common.resolve_yolomux_roots({}, identity=_identity(), temporary_dir=tmp_path / "tmp", uid=1000)
 
-    assert paths.config_dir == Path.home() / ".config" / "yolomux"
-    assert paths.state_dir == Path.home() / ".local" / "state" / "yolomux"
-    assert paths.cache_dir == Path.home() / ".cache" / "yolomux"
+    assert paths.config_dir == Path.home() / ".config" / "yomux"
+    assert paths.state_dir == Path.home() / ".local" / "state" / "yomux"
+    assert paths.cache_dir == Path.home() / ".cache" / "yomux"
     assert paths.codex_home == Path.home() / ".codex"
-    assert paths.runtime_dir == tmp_path / "tmp" / "yolomux-server-1000" / "shared" / "h-host-a" / "b-boot-a"
+    assert paths.runtime_dir == tmp_path / "tmp" / "yomux-server-1000" / "shared" / "h-host-a" / "b-boot-a"
 
 
 def test_deep_root_fails_socket_budget_before_creating_a_directory(tmp_path: Path):
@@ -152,9 +159,9 @@ def test_socket_budget_accepts_a_realistic_development_root():
 def test_rooted_import_refuses_an_outside_config_before_creating_the_root(tmp_path: Path):
     root = tmp_path / "root"
     env = _rooted_subprocess_environment(root)
-    env["YOLOMUX_CONFIG_DIR"] = "/outside/config"
+    env["YOMUX_CONFIG_DIR"] = "/outside/config"
     result = subprocess.run(
-        [sys.executable, "-c", "import yolomux_lib.infra.common"],
+        [sys.executable, "-c", "import yomux_lib.infra.common"],
         env=env,
         text=True,
         capture_output=True,
@@ -169,11 +176,14 @@ def test_rooted_import_refuses_an_outside_config_before_creating_the_root(tmp_pa
 
 def test_cli_reports_outside_codex_override_without_a_traceback(tmp_path: Path):
     root = tmp_path / "root"
-    env = {**os.environ, "YOLOMUX_ROOT": str(root), "YOLOMUX_CODEX_HOME": "/outside/codex"}
-    for key in ("YOLOMUX_CONFIG_DIR", "YOLOMUX_STATE_DIR", "YOLOMUX_CACHE_DIR", "YOLOMUX_RUNTIME_DIR"):
+    env = {**os.environ, "YOMUX_ROOT": str(root), "YOMUX_CODEX_HOME": "/outside/codex"}
+    for key in (
+        "YOLOMUX_CONFIG_DIR", "YOLOMUX_STATE_DIR", "YOLOMUX_CACHE_DIR", "YOLOMUX_RUNTIME_DIR",
+        "YOMUX_CONFIG_DIR", "YOMUX_STATE_DIR", "YOMUX_CACHE_DIR", "YOMUX_RUNTIME_DIR",
+    ):
         env.pop(key, None)
     result = subprocess.run(
-        [sys.executable, str(Path(__file__).parents[1] / "yolomux.py"), "--print-runtime-report"],
+        [sys.executable, str(Path(__file__).parents[1] / "yomux.py"), "--backend", "python", "--print-runtime-report"],
         env=env,
         text=True,
         capture_output=True,

@@ -14,17 +14,17 @@ from tools.check import Lane
 from tools.check import Step
 from tools.check import admit_inotify_capacity
 from tools.check import heavy_lane_names
-from yolomux_lib.infra import inotify_capacity
-from yolomux_lib.infra.inotify_capacity import CODE_HEADROOM_BELOW
-from yolomux_lib.infra.inotify_capacity import CODE_INSTANCES_BELOW
-from yolomux_lib.infra.inotify_capacity import CODE_QUEUED_BELOW
-from yolomux_lib.infra.inotify_capacity import CODE_UNMEASURABLE
-from yolomux_lib.infra.inotify_capacity import CODE_WATCHES_BELOW
-from yolomux_lib.infra.inotify_capacity import REQUIRED_MAX_QUEUED_EVENTS
-from yolomux_lib.infra.inotify_capacity import REQUIRED_MAX_USER_INSTANCES
-from yolomux_lib.infra.inotify_capacity import REQUIRED_MAX_USER_WATCHES
-from yolomux_lib.infra.inotify_capacity import UNMEASURED_LIMIT
-from yolomux_lib.infra.inotify_capacity import inotify_capacity_verdict
+from yomux_lib.infra import inotify_capacity
+from yomux_lib.infra.inotify_capacity import CODE_HEADROOM_BELOW
+from yomux_lib.infra.inotify_capacity import CODE_INSTANCES_BELOW
+from yomux_lib.infra.inotify_capacity import CODE_QUEUED_BELOW
+from yomux_lib.infra.inotify_capacity import CODE_UNMEASURABLE
+from yomux_lib.infra.inotify_capacity import CODE_WATCHES_BELOW
+from yomux_lib.infra.inotify_capacity import REQUIRED_MAX_QUEUED_EVENTS
+from yomux_lib.infra.inotify_capacity import REQUIRED_MAX_USER_INSTANCES
+from yomux_lib.infra.inotify_capacity import REQUIRED_MAX_USER_WATCHES
+from yomux_lib.infra.inotify_capacity import UNMEASURED_LIMIT
+from yomux_lib.infra.inotify_capacity import inotify_capacity_verdict
 
 
 def _limits(monkeypatch, *, instances, watches, queued, in_use):

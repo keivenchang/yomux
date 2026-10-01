@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/keivenchang/yolomux/internal/testsupport"
+	"github.com/keivenchang/yomux/internal/testsupport"
 )
 
 // This test deliberately keeps a private tmux server and live-like client panes

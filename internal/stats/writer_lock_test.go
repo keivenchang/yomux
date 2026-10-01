@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/keivenchang/yolomux/internal/testsupport"
+	"github.com/keivenchang/yomux/internal/testsupport"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -117,7 +117,7 @@ func TestWriterLeaseCrossLanguageOwnership(t *testing.T) {
 	python := `
 import os, sys
 from pathlib import Path
-from yolomux_lib.stats_current.storage import Store
+from yomux_lib.stats_current.storage import Store
 store = Store.open(Path(os.environ["YOLOMUX_WRITER_LEASE_PATH"]))
 print("ready", flush=True)
 sys.stdin.readline()
@@ -223,7 +223,7 @@ func TestWriterLeasePythonRejectsGoOwner(t *testing.T) {
 	repoRoot = filepath.Join(repoRoot, "..", "..")
 	python := `import os
 from pathlib import Path
-from yolomux_lib.stats_current.storage import Store
+from yomux_lib.stats_current.storage import Store
 try:
     Store.open(Path(os.environ["YOLOMUX_WRITER_LEASE_PATH"]))
 except Exception as error:
@@ -253,7 +253,7 @@ else:
 	cleanup = false
 	acquire := exec.Command("python3", "-c", `import os
 from pathlib import Path
-from yolomux_lib.stats_current.storage import Store
+from yomux_lib.stats_current.storage import Store
 store = Store.open(Path(os.environ["YOLOMUX_WRITER_LEASE_PATH"]))
 print("ready", flush=True)
 store.close()

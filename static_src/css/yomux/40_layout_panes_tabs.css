@@ -1,0 +1,2246 @@
+.grid {
+  position: relative;
+  height: 100%;
+  min-height: 0;
+  padding: 0 var(--space-5) var(--space-5);
+  display: block;
+  overflow: auto;
+}
+.grid.empty {
+  display: block;
+}
+.grid.dockview-grid {
+  overflow: hidden;
+}
+.panel-pool {
+  display: none;
+}
+.yomux-dockview {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+}
+.yomux-dockview .yomux-dockview-core,
+.yomux-dockview .dv-dockview,
+.yomux-dockview .dv-grid-view,
+.yomux-dockview .dv-split-view,
+.yomux-dockview .dv-view,
+.yomux-dockview .dv-groupview,
+.yomux-dockview .dv-content-container,
+.yomux-dockview .dockview-panel-content {
+  min-width: 0;
+  min-height: 0;
+}
+.yomux-dockview .dv-groupview:has(.file-explorer-panel) {
+  min-width: var(--file-pane-min-inline-size);
+}
+.yomux-dockview .yomux-dockview-core {
+  --dv-tabs-and-actions-container-height: calc(var(--pane-tab-height) + 2px);
+  --dv-tabs-and-actions-container-font-size: var(--tab-label-size);
+  --dv-tabs-and-actions-container-background-color: var(--panel2);
+  --dv-group-view-background-color: var(--panel-inactive);
+  --dv-activegroup-visiblepanel-tab-background-color: var(--pane-tab-active-bg);
+  --dv-activegroup-hiddenpanel-tab-background-color: var(--pane-inactive-tab-bg);
+  --dv-inactivegroup-visiblepanel-tab-background-color: var(--pane-tab-unfocused-active-bg);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: var(--panel2);
+  --dv-activegroup-visiblepanel-tab-color: var(--pane-tab-active-text);
+  --dv-activegroup-hiddenpanel-tab-color: var(--pane-tab-text);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--pane-tab-unfocused-active-text);
+  --dv-inactivegroup-hiddenpanel-tab-color: var(--pane-tab-text);
+  --dv-tab-divider-color: var(--pane-inactive-tab-border);
+  --dv-sash-color: var(--pane-resizer-bg);
+  --dv-active-sash-color: var(--pane-resizer-hover-bg);
+  --dv-drag-over-background-color: color-mix(in srgb, var(--pane-resizer-bg) 18%, transparent);
+  --dv-drag-over-border-color: var(--pane-resizer-hover-bg);
+  --dv-drag-over-border: 2px dashed var(--pane-resizer-hover-bg);
+  color: var(--text);
+  background: transparent;
+}
+body.theme-light .yomux-dockview .yomux-dockview-core {
+  --dv-activegroup-visiblepanel-tab-color: var(--light-readable-text);
+  --dv-activegroup-hiddenpanel-tab-color: var(--light-readable-text);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--light-readable-text);
+  --dv-inactivegroup-hiddenpanel-tab-color: var(--light-readable-text);
+}
+.yomux-dockview .dv-tabs-and-actions-container {
+  position: relative;
+  border-bottom: 0;
+  background: var(--pane-bar-bg, var(--panel2));
+  align-items: flex-start;
+  height: auto;
+  min-height: var(--pane-tab-height);
+  overflow: visible;
+}
+.yomux-dockview .dv-tabs-container {
+  box-sizing: border-box;
+  flex: 0 0 100%;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  inline-size: 100%;
+  max-inline-size: 100%;
+  min-width: 0;
+  height: auto;
+  min-height: var(--pane-tab-height);
+  max-height: none;
+  overflow: visible;
+  scrollbar-width: none;
+}
+.yomux-dockview .dv-tabs-container::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+.yomux-dockview .dockview-tab-first-row-reservation {
+  flex: 0 0 var(--dockview-first-row-reservation-inline-size, 0px);
+  inline-size: var(--dockview-first-row-reservation-inline-size, 0px);
+  block-size: var(--pane-tab-height);
+  pointer-events: none;
+}
+.yomux-dockview .dv-right-actions-container {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: var(--z-pane-tab-strip);
+  flex: 0 0 auto;
+  align-items: flex-start;
+  min-height: calc(var(--pane-tab-height) + 2px);
+  padding-top: 0;
+  pointer-events: none;
+}
+.yomux-dockview .dockview-pane-header-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  min-width: 0;
+  pointer-events: auto;
+}
+.yomux-dockview .dockview-pane-header-actions[hidden] {
+  display: none !important;
+}
+.yomux-dockview .dockview-pane-header-actions .tabs {
+  float: none;
+  flex: 0 0 auto;
+  max-width: none;
+  margin: 0 var(--space-1) 0 var(--space-4);
+  overflow: visible;
+}
+.yomux-dockview .dockview-pane-header-actions .tab {
+  box-sizing: border-box;
+  height: min(18px, var(--pane-tab-height));
+  min-height: 0;
+  max-height: min(18px, var(--pane-tab-height));
+  line-height: 1;
+}
+.yomux-dockview .dockview-pane-header-actions .tmux-window-button,
+.yomux-dockview .dockview-pane-header-actions .terminal-tab {
+  padding-block: 0;
+}
+.yomux-dockview .dockview-pane-header-actions .pane-actions,
+.yomux-dockview .dockview-pane-header-actions .panel-tab-overflow {
+  flex-basis: 20px;
+  min-width: 20px;
+  max-width: 20px;
+}
+.yomux-dockview .dockview-pane-header-actions .pane-drag-handle {
+  flex: 0 0 min(18px, var(--pane-tab-height));
+  min-width: min(18px, var(--pane-tab-height));
+  max-width: min(18px, var(--pane-tab-height));
+  margin: 0 0 0 var(--space-3);
+  padding: 0;
+  cursor: grab;
+}
+.yomux-dockview .dockview-pane-header-actions .pane-drag-handle:active {
+  cursor: grabbing;
+}
+.pane-drag-handle::before {
+  content: "";
+  width: 3px;
+  height: 3px;
+  border-radius: var(--radius-pill);
+  background: currentColor;
+  box-shadow: 0 5px 0 currentColor, 5px 0 0 currentColor, 5px 5px 0 currentColor;
+}
+.yomux-dockview .dv-groupview {
+  --pane-bar-bg: var(--panel2);
+  --panel-ring-color: transparent;
+  --panel-ring-opacity: var(--pane-ring-opacity, 75%);
+  position: relative;
+  box-sizing: border-box;
+  border: 0;
+  border-radius: var(--pane-ring-radius, var(--pane-tile-radius));
+  padding: var(--pane-split-gap);
+  background: var(--panel-inactive);
+  overflow: hidden;
+}
+.yomux-dockview .dv-groupview::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-pane-overlay);
+  box-sizing: border-box;
+  border: var(--pane-split-gap) solid color-mix(in srgb, var(--panel-ring-color) var(--panel-ring-opacity), transparent);
+  border-radius: inherit;
+  pointer-events: none;
+}
+.yomux-dockview .dv-groupview:has(.panel.active-pane),
+.yomux-dockview .dv-groupview:has(.panel.typing-ready-pane) {
+  --pane-bar-bg: var(--pane-tab-strip-bg);
+  --panel-ring-color: var(--pane-tab-panel-ring);
+  --panel-ring-opacity: var(--pane-active-ring-opacity);
+  --pane-ring-radius: var(--pane-tab-top-radius);
+  background: var(--panel);
+}
+.yomux-dockview .dv-groupview:has(.panel.needs-input-pane),
+.yomux-dockview .dv-groupview:has(.panel.needs-exec-pane),
+.yomux-dockview .dv-groupview:has(.panel.needs-blocked-pane) {
+  --panel-ring-color: var(--pane-ring-attention);
+}
+/* A phone's policy permits exactly one pane, so a wide pane-spacing ring cannot convey which sibling
+   is active. Keep the same shared ring mechanism but reserve only one pixel for it. Tablets retain
+   the user-selected spacing because they can still show more than one pane. */
+body.app-phone-single-pane .yomux-dockview .dv-groupview,
+body.app-phone-single-pane .panel {
+  --pane-split-gap: 1px;
+}
+.yomux-dockview .dv-content-container {
+  background: transparent;
+}
+.yomux-dockview .dv-split-view-container > .dv-sash-container > .dv-sash,
+.yomux-dockview .dv-split-view-container > .dv-sash-container > .dv-sash:not(.disabled):hover,
+.yomux-dockview .dv-split-view-container > .dv-sash-container > .dv-sash:not(.disabled):active {
+  overflow: visible;
+  background: transparent;
+  background-color: transparent;
+}
+.yomux-dockview .dv-sash::before {
+  content: "";
+  position: absolute;
+  background: var(--pane-resizer-bg);
+  transition: background var(--motion-interaction-fast) ease, inset var(--motion-interaction-fast) ease;
+}
+.yomux-dockview .dv-tab {
+  flex: 0 0 var(--dockview-tab-inline-size, var(--pane-tab-width));
+  width: var(--dockview-tab-inline-size, var(--pane-tab-width));
+  max-width: var(--dockview-tab-inline-size, var(--pane-tab-width));
+  min-width: 0;
+  height: var(--pane-tab-height);
+  padding: 0;
+  margin: 0 var(--space-1) 0 0;
+  overflow: visible;
+  background: transparent;
+  border-radius: var(--pane-tab-top-radius) var(--pane-tab-top-radius) 0 0;
+}
+.yomux-dockview .dv-tabs-and-actions-container.dv-single-tab.dv-full-width-single-tab .dv-tabs-container .dv-tab {
+  flex-grow: 0;
+}
+.yomux-dockview .dv-tab > .dockview-pane-tab {
+  margin: 0;
+  width: 100%;
+  max-width: 100%;
+  height: var(--pane-tab-height);
+  border-radius: var(--pane-tab-top-radius) var(--pane-tab-top-radius) 0 0;
+}
+.yomux-dockview .dv-tab.dv-inactive-tab > .dockview-pane-tab:not(.active) {
+  color: var(--pane-tab-text);
+  background: var(--pane-bar-bg, var(--panel2));
+  border-color: var(--pane-inactive-tab-border);
+}
+body.theme-light .yomux-dockview .dv-tab:not(.dv-active-tab) > .dockview-pane-tab {
+  color: var(--light-readable-text) !important;
+}
+.yomux-dockview .dv-tab.dv-drop-target .dv-drop-target-selection.dv-drop-target-left,
+.yomux-dockview .dv-tab.dv-drop-target .dv-drop-target-selection.dv-drop-target-right {
+  top: -2px !important;
+  width: var(--tab-insert-preview-width) !important;
+  height: calc(100% + 4px) !important;
+  box-sizing: border-box;
+  border: 2px dashed var(--pane-resizer-hover-bg) !important;
+  border-radius: 2px !important;
+  background-color: color-mix(in srgb, var(--pane-resizer-bg) 18%, transparent) !important;
+  box-shadow: var(--pane-resizer-preview-shadow);
+  pointer-events: none;
+}
+.yomux-dockview.dockview-invalid-tab-drop-preview .dv-tab.dv-drop-target .dv-drop-target-selection.dv-drop-target-left,
+.yomux-dockview.dockview-invalid-tab-drop-preview .dv-tab.dv-drop-target .dv-drop-target-selection.dv-drop-target-right {
+  border-color: var(--danger-border) !important;
+  background-color: color-mix(in srgb, var(--danger-bg) 20%, transparent) !important;
+  box-shadow: 0 0 12px color-mix(in srgb, var(--danger-border) 70%, transparent);
+}
+.yomux-dockview .dv-tab.dv-drop-target .dv-drop-target-selection.dv-drop-target-left {
+  left: 0 !important;
+  transform: translateX(-50%) !important;
+}
+.yomux-dockview .dv-tab.dv-drop-target .dv-drop-target-selection.dv-drop-target-right {
+  left: 100% !important;
+  transform: translateX(-50%) !important;
+}
+.yomux-dockview .dockview-panel-content {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.yomux-dockview .dockview-panel-content > .panel {
+  height: 100%;
+  border-width: 0;
+  border-radius: 0;
+}
+.yomux-dockview .dockview-panel-content > .panel.dockview-inner-head-collapsed {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+.yomux-dockview .dockview-panel-content > .panel.dockview-inner-head-collapsed.details-collapsed {
+  grid-template-rows: minmax(0, 1fr);
+}
+.yomux-dockview .dockview-panel-content > .panel > .panel-head.dockview-inner-head-hidden,
+.yomux-dockview .dockview-panel-content > .panel > .panel-head[hidden] {
+  display: none;
+}
+.yomux-dockview .panel-head .pane-tabs[hidden] {
+  display: none;
+}
+.layout-root,
+.layout-split {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  /* No flex gap: the inter-pane spacing is provided by each pane's own --pane-split-gap-wide border
+     (so the active pane's colored border sits flush against the 1px resizer with no gap to the line). */
+  gap: 0;
+}
+.layout-split {
+  flex: 1 1 0;
+}
+.split-row {
+  flex-direction: row;
+}
+.split-column {
+  flex-direction: column;
+}
+.layout-column {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  gap: var(--pane-split-gap);
+}
+.layout-column.file-explorer-column {
+  min-width: var(--file-pane-min-inline-size);
+}
+.layout-column.file-editor-column {
+  min-width: var(--file-editor-pane-min-inline-size);
+}
+.split-column > .layout-column.file-editor-column {
+  min-width: 0;
+}
+.layout-column.preferences-column {
+  min-width: var(--preferences-pane-min-inline-size);
+}
+.layout-column.empty-pane-column {
+  min-width: var(--file-pane-min-inline-size);
+}
+.layout-resizer {
+  position: relative;
+  z-index: var(--z-resizer);
+  flex: 0 0 var(--pane-resizer-size);
+  align-self: stretch;
+  background: transparent;
+  touch-action: none;
+}
+.layout-resizer::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 0;
+  background: var(--pane-resizer-bg);
+  transition: background var(--motion-interaction-fast) ease, box-shadow var(--motion-interaction-fast) ease;
+}
+.layout-resizer:hover::before,
+.layout-resizer:focus-visible::before,
+.layout-resizing .layout-resizer::before {
+  background: transparent;
+  box-shadow: var(--pane-resizer-hover-shadow);
+}
+.resizer-row {
+  width: var(--pane-resizer-size);
+  cursor: col-resize;
+}
+.resizer-column {
+  height: var(--pane-resizer-size);
+  cursor: row-resize;
+}
+
+/* Dockview and the fallback layout render the same separator contract through one geometry owner. */
+.yomux-dockview .dv-split-view-container.dv-horizontal > .dv-sash-container > .dv-sash::before,
+.resizer-row::before {
+  top: 0;
+  bottom: 0;
+  left: calc(50% - (var(--pane-resizer-line-size) / 2));
+  right: calc(50% - (var(--pane-resizer-line-size) / 2));
+}
+.yomux-dockview .dv-split-view-container.dv-vertical > .dv-sash-container > .dv-sash::before,
+.resizer-column::before {
+  top: calc(50% - (var(--pane-resizer-line-size) / 2));
+  bottom: calc(50% - (var(--pane-resizer-line-size) / 2));
+  left: 0;
+  right: 0;
+}
+.yomux-dockview .dv-sash:hover::before,
+.yomux-dockview .dv-sash:active::before,
+.resizer-row:hover::before,
+.resizer-row:focus-visible::before,
+.resizer-column:hover::before,
+.resizer-column:focus-visible::before,
+.layout-resizing .resizer-row::before,
+.layout-resizing .resizer-column::before {
+  background: var(--pane-resizer-hover-bg);
+}
+.yomux-dockview .dv-split-view-container.dv-horizontal > .dv-sash-container > .dv-sash:hover::before,
+.yomux-dockview .dv-split-view-container.dv-horizontal > .dv-sash-container > .dv-sash:active::before,
+.resizer-row:hover::before,
+.resizer-row:focus-visible::before,
+.layout-resizing .resizer-row::before {
+  left: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
+  right: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
+}
+.yomux-dockview .dv-split-view-container.dv-vertical > .dv-sash-container > .dv-sash:hover::before,
+.yomux-dockview .dv-split-view-container.dv-vertical > .dv-sash-container > .dv-sash:active::before,
+.resizer-column:hover::before,
+.resizer-column:focus-visible::before,
+.layout-resizing .resizer-column::before {
+  top: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
+  bottom: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
+}
+/* The separator stays skinny. Desktop gets the familiar full-length grab zone; touch gets one centered
+   handle, so a pane-edge tap never ambiguously starts a resize. */
+.yomux-dockview .dv-sash::after,
+.layout-resizer::after {
+  content: "";
+  position: absolute;
+  z-index: var(--z-stacking-base);
+  pointer-events: auto;
+}
+.yomux-dockview .dv-split-view-container.dv-horizontal > .dv-sash-container > .dv-sash::after,
+.resizer-row::after {
+  inset-block: 0;
+  inset-inline: calc(-1 * var(--pane-resizer-hit-inset));
+  cursor: col-resize;
+}
+.yomux-dockview .dv-split-view-container.dv-vertical > .dv-sash-container > .dv-sash::after,
+.resizer-column::after {
+  inset-inline: 0;
+  inset-block: calc(-1 * var(--pane-resizer-hit-inset));
+  cursor: row-resize;
+}
+@media (pointer: coarse) {
+  /* Touch owns only the centered 44px grip. A full-length transparent hit target captures nearby
+     tabs and Finder controls, making ordinary tab moves and the close button behave like resizing. */
+  .yomux-dockview .dv-split-view-container.dv-horizontal > .dv-sash-container > .dv-sash::after,
+  .resizer-row::after {
+    top: 50%;
+    bottom: auto;
+    inset-inline: calc(-1 * var(--pane-resizer-hit-inset));
+    block-size: var(--pane-resizer-touch-handle-size);
+    transform: translateY(-50%);
+    background: transparent;
+    border-radius: 0;
+    box-shadow: none;
+  }
+  .yomux-dockview .dv-split-view-container.dv-vertical > .dv-sash-container > .dv-sash::after,
+  .resizer-column::after {
+    left: 50%;
+    right: auto;
+    inset-block: calc(-1 * var(--pane-resizer-hit-inset));
+    inline-size: var(--pane-resizer-touch-handle-size);
+    transform: translateX(-50%);
+    background: transparent;
+    border-radius: 0;
+    box-shadow: none;
+  }
+  .yomux-dockview .dv-split-view-container.dv-horizontal > .dv-sash-container > .dv-sash::before,
+  .resizer-row::before {
+    top: calc(50% - (var(--pane-resizer-touch-grip-length) / 2));
+    bottom: calc(50% - (var(--pane-resizer-touch-grip-length) / 2));
+    left: calc(50% - (var(--pane-resizer-touch-grip-thickness) / 2));
+    right: calc(50% - (var(--pane-resizer-touch-grip-thickness) / 2));
+    border-radius: var(--radius-pill);
+    background: var(--pane-resizer-hover-bg);
+  }
+  .yomux-dockview .dv-split-view-container.dv-vertical > .dv-sash-container > .dv-sash::before,
+  .resizer-column::before {
+    left: calc(50% - (var(--pane-resizer-touch-grip-length) / 2));
+    right: calc(50% - (var(--pane-resizer-touch-grip-length) / 2));
+    top: calc(50% - (var(--pane-resizer-touch-grip-thickness) / 2));
+    bottom: calc(50% - (var(--pane-resizer-touch-grip-thickness) / 2));
+    border-radius: var(--radius-pill);
+    background: var(--pane-resizer-hover-bg);
+  }
+}
+body.layout-resizing-row,
+body.layout-resizing-row * {
+  cursor: col-resize !important;
+}
+body.layout-resizing-column,
+body.layout-resizing-column * {
+  cursor: row-resize !important;
+}
+body.layout-resizing {
+  user-select: none;
+}
+.layout-column.drag-over {
+  outline: 1px dashed var(--pane-resizer-hover-bg);
+  outline-offset: -3px;
+  border-radius: var(--radius-lg);
+}
+.drop-slot {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: visible;
+  border: 1px dashed transparent;
+  border-radius: var(--radius-lg);
+}
+.drop-slot.drag-over {
+  border-color: var(--pane-resizer-hover-bg);
+  background: var(--40-layout-panes-tabs-drop-slot-bg-1);
+}
+.drop-slot.drop-preview::before,
+.yomux-dockview .dv-groupview.drop-preview::before,
+.grid.drop-preview::before {
+  content: attr(data-drop-label);
+  position: absolute;
+  z-index: var(--z-pane-overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--drop-outline-text);
+  background: color-mix(in srgb, var(--pane-resizer-bg) 18%, transparent);
+  border: 2px dashed var(--pane-resizer-hover-bg);
+  border-radius: 0;
+  font: 900 var(--ui-font-size)/1 var(--ui-font);
+  text-transform: uppercase;
+  pointer-events: none;
+}
+.grid.drop-preview::before {
+  z-index: var(--z-drop-preview);
+}
+.yomux-dockview.dockview-invalid-tab-drop-preview .dv-groupview.drop-preview::before {
+  color: var(--danger-text);
+  background: color-mix(in srgb, var(--danger-bg) 20%, transparent);
+  border-color: var(--danger-border);
+}
+.drop-slot.drop-preview-middle::before {
+  inset: 18%;
+}
+.yomux-dockview .dv-groupview.drop-preview-middle::before {
+  inset: 18%;
+}
+.drop-slot.drop-preview-top::before,
+.yomux-dockview .dv-groupview.drop-preview-top::before {
+  top: 6px;
+  right: 6px;
+  left: 6px;
+  height: calc(50% - 9px);
+}
+.drop-slot.drop-preview-bottom::before,
+.yomux-dockview .dv-groupview.drop-preview-bottom::before {
+  right: 6px;
+  bottom: 6px;
+  left: 6px;
+  height: calc(50% - 9px);
+}
+.drop-slot.drop-preview-left::before,
+.yomux-dockview .dv-groupview.drop-preview-left::before {
+  top: 6px;
+  bottom: 6px;
+  left: 6px;
+  width: calc(50% - 9px);
+}
+.drop-slot.drop-preview-right::before,
+.yomux-dockview .dv-groupview.drop-preview-right::before {
+  top: 6px;
+  right: 6px;
+  bottom: 6px;
+  width: calc(50% - 9px);
+}
+.grid.drop-preview-root::before {
+  top: var(--drop-preview-top, 6px);
+  right: auto;
+  bottom: auto;
+  left: var(--drop-preview-left, 6px);
+  width: var(--drop-preview-width, calc(50% - 9px));
+  height: var(--drop-preview-height, calc(100% - 12px));
+}
+.grid.drop-preview-gutter::before {
+  top: var(--drop-preview-top, 6px);
+  left: var(--drop-preview-left, 6px);
+  width: var(--drop-preview-width, calc(100% - 12px));
+  height: var(--drop-preview-height, calc(100% - 12px));
+}
+.panel {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  /* SHARED PANE-CHROME THEMING (one source of truth — no per-button/per-bar one-offs):
+     • --pane-bar-bg  : every chrome BAR (tab strip, Info Bar, editor toolbar, find panel) reads
+       this. Default = neutral gray (--panel2) for an UNFOCUSED pane; the focused override below sets it
+       to the bright tab-strip green. So all bars track focus together.
+     • --pane-ctl-*   : every chrome BUTTON reads these. Rest state = white (light) / near-black (dark);
+       the .active / [aria-pressed=true] state = green. Buttons never hardcode their own colors.
+     Raw values come from theme tokens, so everything flips light/dark automatically. */
+  --pane-bar-bg: var(--panel2);
+  /* default = no ring on a plain inactive pane; per-state rules below set green/red/white. */
+  --panel-ring-color: transparent;
+  --pane-ctl-bg: var(--pane-tab-control-bg);
+  --pane-ctl-fg: var(--pc-control-fg);
+  --pane-ctl-border: var(--pane-tab-control-border);
+  --pane-ctl-pressed-bg: var(--pane-tab-active-bg);
+  --pane-ctl-pressed-fg: var(--pane-tab-active-text);
+  --pane-ctl-pressed-border: var(--pane-tab-active-border);
+  /* Every pane has a "natural border" = the pane spacing (--pane-split-gap), transparent by default so
+     it just shows the background gutter. The ACTIVE pane colors it green (below). Because it's a real
+     border (box-sizing: border-box) it is part of the pane's box — it sits flush against the resizer
+     (no gap to the red/yellow line) and is never clipped like an outset box-shadow was. At spacing 0
+     the border is 0px (no gutter, panes flush to the 1px separator). */
+  /* the green/red/white state ring IS this gutter border, colored per state via the unified
+     --panel-ring-color and faded by --pane-ring-opacity. Because it fills the pane's OUTER edge (the
+     gutter, flush to the resizer), an active (green) pane and a needs (red) pane meet at the seam with
+     only the 1px resizer between them — they TOUCH (image 038). Inactive = transparent (--panel-ring-color
+     default). At spacing 0 the border is 0px (panes flush). This puts the ring back at the seam after
+     's content-edge overlay made adjacent rings sit a gutter apart. */
+  border: var(--pane-split-gap) solid color-mix(in srgb, var(--panel-ring-color) var(--panel-ring-opacity, var(--pane-ring-opacity, 75%)), transparent);
+  border-radius: var(--pane-ring-radius, var(--pane-tile-radius));
+  background: var(--panel-inactive);
+  overflow: hidden;
+}
+.panel:is(.focused-pane, .active-pane):hover {
+  --pane-scrollbar-current-thumb: var(--pane-scrollbar-thumb-active);
+  --pane-scrollbar-current-track: var(--pane-scrollbar-track-active);
+}
+/* Pane scrollbars must always inherit a shared pane scrollbar contract from this block. Add new pane scroll
+   containers to this shared list instead of forking full scrollbar rules.
+   YO!agent's normal vertical owner is .yoagent-chat-history; its outer .yoagent-list only keeps horizontal
+   overflow so thinking/activity refreshes do not show nested vertical rails. */
+:where(
+  .preferences-scroll,
+  .terminal .xterm-viewport,
+  .transcript-preview,
+  .summary-preview,
+  .event-list,
+  .info-list,
+  .search-history-scroll,
+  .yoagent-chat-history,
+  .yoagent-chat .markdown-body pre,
+  .yoagent-global .markdown-body pre,
+  .file-explorer-tree-panel,
+  .file-explorer-changes-panel,
+  .file-editor-raw-panel,
+  .file-editor-preview-pane,
+  .file-editor-preview-pane-panel,
+  .file-editor-image-panel,
+  .file-editor-dialog-body,
+  .file-editor-conflict-compare pre,
+  .file-editor-diff-codemirror .cm-mergeView,
+  .file-editor-codemirror .cm-scroller,
+  .file-editor-codemirror-panel .cm-scroller,
+  .file-editor-content .markdown-body pre,
+  .diff-ref-suggestion-popover,
+  .command-palette-results,
+  .keyboard-shortcuts-body
+) {
+  scrollbar-width: auto;
+  scrollbar-color: var(--pane-scrollbar-current-thumb, var(--pane-scrollbar-thumb)) var(--pane-scrollbar-current-track, var(--pane-scrollbar-track));
+}
+/* Terminal scrolling is translated by the shared touch owner into app/tmux line events. Prevent
+   mobile browsers from committing the gesture to the document before that owner can claim it. */
+:where(.terminal, .terminal .xterm, .terminal .xterm-viewport, .terminal .xterm-scrollable-element, .terminal .xterm-screen, .terminal .xterm-rows) {
+  touch-action: none;
+}
+:where(
+  .preferences-scroll,
+  .terminal .xterm-viewport,
+  .transcript-preview,
+  .summary-preview,
+  .event-list,
+  .info-list,
+  .search-history-scroll,
+  .yoagent-chat-history,
+  .yoagent-chat .markdown-body pre,
+  .yoagent-global .markdown-body pre,
+  .file-explorer-tree-panel,
+  .file-explorer-changes-panel,
+  .file-editor-raw-panel,
+  .file-editor-preview-pane,
+  .file-editor-preview-pane-panel,
+  .file-editor-image-panel,
+  .file-editor-dialog-body,
+  .file-editor-conflict-compare pre,
+  .file-editor-diff-codemirror .cm-mergeView,
+  .file-editor-codemirror .cm-scroller,
+  .file-editor-codemirror-panel .cm-scroller,
+  .file-editor-content .markdown-body pre,
+  .diff-ref-suggestion-popover,
+  .command-palette-results,
+  .keyboard-shortcuts-body
+)::-webkit-scrollbar {
+  width: var(--pane-scrollbar-size);
+  height: var(--pane-scrollbar-size);
+}
+:where(
+  .preferences-scroll,
+  .terminal .xterm-viewport,
+  .transcript-preview,
+  .summary-preview,
+  .event-list,
+  .info-list,
+  .search-history-scroll,
+  .yoagent-chat-history,
+  .yoagent-chat .markdown-body pre,
+  .yoagent-global .markdown-body pre,
+  .file-explorer-tree-panel,
+  .file-explorer-changes-panel,
+  .file-editor-raw-panel,
+  .file-editor-preview-pane,
+  .file-editor-preview-pane-panel,
+  .file-editor-image-panel,
+  .file-editor-dialog-body,
+  .file-editor-conflict-compare pre,
+  .file-editor-diff-codemirror .cm-mergeView,
+  .file-editor-codemirror .cm-scroller,
+  .file-editor-codemirror-panel .cm-scroller,
+  .file-editor-content .markdown-body pre,
+  .diff-ref-suggestion-popover,
+  .command-palette-results,
+  .keyboard-shortcuts-body
+)::-webkit-scrollbar-track {
+  background: var(--pane-scrollbar-current-track, var(--pane-scrollbar-track));
+}
+:where(
+  .preferences-scroll,
+  .terminal .xterm-viewport,
+  .transcript-preview,
+  .summary-preview,
+  .event-list,
+  .info-list,
+  .search-history-scroll,
+  .yoagent-chat-history,
+  .yoagent-chat .markdown-body pre,
+  .yoagent-global .markdown-body pre,
+  .file-explorer-tree-panel,
+  .file-explorer-changes-panel,
+  .file-editor-raw-panel,
+  .file-editor-preview-pane,
+  .file-editor-preview-pane-panel,
+  .file-editor-image-panel,
+  .file-editor-dialog-body,
+  .file-editor-conflict-compare pre,
+  .file-editor-diff-codemirror .cm-mergeView,
+  .file-editor-codemirror .cm-scroller,
+  .file-editor-codemirror-panel .cm-scroller,
+  .file-editor-content .markdown-body pre,
+  .diff-ref-suggestion-popover,
+  .command-palette-results,
+  .keyboard-shortcuts-body
+)::-webkit-scrollbar-corner {
+  background: var(--pane-scrollbar-corner, var(--pane-scrollbar-current-track, var(--pane-scrollbar-track)));
+}
+:where(
+  .preferences-scroll,
+  .terminal .xterm-viewport,
+  .transcript-preview,
+  .summary-preview,
+  .event-list,
+  .info-list,
+  .search-history-scroll,
+  .yoagent-chat-history,
+  .yoagent-chat .markdown-body pre,
+  .yoagent-global .markdown-body pre,
+  .file-explorer-tree-panel,
+  .file-explorer-changes-panel,
+  .file-editor-raw-panel,
+  .file-editor-preview-pane,
+  .file-editor-preview-pane-panel,
+  .file-editor-image-panel,
+  .file-editor-dialog-body,
+  .file-editor-conflict-compare pre,
+  .file-editor-diff-codemirror .cm-mergeView,
+  .file-editor-codemirror .cm-scroller,
+  .file-editor-codemirror-panel .cm-scroller,
+  .file-editor-content .markdown-body pre,
+  .diff-ref-suggestion-popover,
+  .command-palette-results,
+  .keyboard-shortcuts-body
+)::-webkit-scrollbar-thumb {
+  background: var(--pane-scrollbar-current-thumb, var(--pane-scrollbar-thumb));
+  border: var(--pane-scrollbar-border);
+  border-radius: var(--pane-scrollbar-radius);
+  background-clip: content-box;
+}
+.panel.empty-pane-panel {
+  display: flex;
+  grid-template-rows: none;
+  padding: var(--space-10);
+  border: 1px dashed #7a8799;
+  background: var(--40-layout-panes-tabs-panel-bg-19);
+  box-shadow: none;
+
+
+  border-color: var(--40-layout-panes-tabs-panel-border-20);
+}
+.empty-pane-controls {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  z-index: var(--z-pane-tab-strip);
+}
+.split-column > .layout-column:has(+ .layout-resizer) > .panel {
+  border-bottom-width: 0;
+  border-bottom-right-radius: 0;
+  border-bottom-left-radius: 0;
+}
+.split-column > .layout-resizer + .layout-column > .panel {
+  border-top-width: 0;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+.split-row > .layout-column:has(+ .layout-resizer) > .panel {
+  border-right-width: 0;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.split-row > .layout-resizer + .layout-column > .panel {
+  border-left-width: 0;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+.empty-pane-fill {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: var(--space-6);
+  border: 1px dashed var(--empty-pane-border);
+  border-radius: var(--radius-md);
+  background: var(--empty-pane-bg);
+}
+.empty-pane-hint {
+  color: var(--muted);
+  font-size: var(--ui-font-size-xs);
+}
+.empty-pane-add {
+  min-width: var(--touch-target-min-size);
+  min-height: var(--touch-target-min-size);
+  padding-inline: var(--space-7);
+  font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
+}
+.panel.file-drag-over::before {
+  content: attr(data-file-drop-label);
+  position: absolute;
+  inset: 36px 10px 10px 10px;
+  z-index: var(--z-pane-tab-strip);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--pane-resizer-hover-bg);
+  background: color-mix(in srgb, var(--pane-resizer-bg) 18%, transparent);
+  border: 2px dashed var(--pane-resizer-hover-bg);
+  border-radius: var(--radius-lg);
+  font-weight: 700;
+  pointer-events: none;
+}
+.terminal.path-drag-over,
+.panel.path-drag-over {
+  outline: 2px dashed var(--pane-resizer-hover-bg);
+  outline-offset: -5px;
+}
+.panel-head {
+  position: relative;
+  min-width: 0;
+  max-width: 100%;
+  min-height: calc(var(--pane-tab-height) + 2px);
+  display: block;
+  padding: var(--space-2) var(--space-1) 0;
+  border-bottom: 0;
+  color: var(--pane-tab-text);
+  background: var(--pane-bar-bg);
+  overflow: hidden;
+}
+.panel-head:not(.file-explorer-head)::after {
+  content: "";
+  display: block;
+  clear: both;
+}
+.panel-head.tab-drag-over {
+  box-shadow: inset 0 -2px 0 rgba(245, 197, 66, 0.95);
+}
+.panel-detail-row {
+  --pane-info-bar-scroll-distance: 0px;
+  --pane-info-bar-scroll-offset: 0px;
+  --pane-info-bar-scroll-duration: 23s;
+  --pane-info-bar-scroll-timing: linear(0 0%, 0 13.04%, 1 91.30%, 1 100%);
+  position: relative;
+  min-height: max(18px, calc(var(--ui-font-size) + 5px));
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  padding: var(--space-1) var(--space-2) var(--space-1) var(--space-8);
+  color: var(--40-layout-panes-tabs-panel-detail-row-fg-21);
+  background: var(--pane-bar-bg);
+  border-bottom: 1px solid var(--line);
+  overflow: hidden;
+}
+/* The compact session label owns hover state, but its extra-info card describes the
+   whole pane. Let the card use the Info Bar's full inline size instead of limiting it
+   to the shrinking metadata slice beside the window controls. */
+.panel-detail-row:has(.panel-popover-zone.popover-open) {
+  overflow: visible;
+  z-index: var(--z-session-popover);
+}
+/* When the Info Bar leads with the sub-window button bar (order:-1), sit it flush-left —
+   drop the leading inset so the first window button hugs the panel edge. */
+.panel-detail-row:has(.tmux-window-bar) {
+  padding-inline-start: 0;
+}
+.panel-detail-close {
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  margin-inline-start: var(--space-4);
+  margin-inline-end: 0;
+  align-self: center;
+  position: relative;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.panel-detail-close:hover,
+.panel-detail-close:focus-visible {
+  color: var(--40-layout-panes-tabs-panel-detail-close-fg-24);
+  background: var(--40-layout-panes-tabs-panel-detail-close-bg-25);
+}
+.panel-detail-close::before {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+.panel-detail-close::after {
+  transform: translate(-50%, -50%) rotate(-45deg);
+}
+.panel.details-collapsed {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+.panel.details-collapsed .pane-info-bar,
+.panel.details-collapsed .panel-detail-row {
+  display: none;
+}
+.panel-popover-zone > .session-popover {
+  top: calc(100% + 4px);
+  left: var(--space-8);
+  right: var(--space-8);
+  width: auto;
+  max-height: min(60vh, 520px);
+  white-space: normal;
+}
+.panel-popover-zone.popover-open > .session-popover {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+  transition:
+    opacity var(--motion-interaction-fast) ease 0s,
+    transform var(--motion-interaction-fast) ease 0s,
+    visibility 0s linear 0s;
+}
+.panel-popover-zone > .session-popover::before {
+  left: 94px;
+}
+.panel.active-pane {
+  --panel-ring-color: var(--pane-tab-panel-ring);
+  --panel-ring-opacity: var(--pane-active-ring-opacity);
+  background: var(--panel);
+}
+/* the green/red/white pane ring is the translucent --pane-split-gap GUTTER BORDER
+   (above), colored per state by the unified --panel-ring-color and faded by --pane-ring-opacity. Because
+   it fills the pane's outer edge, an active (green) pane and a needs (red) pane meet at the seam (image
+   038). ONE marker means no "red inside green" nesting: a focused+needs pane just resolves --panel-ring-
+   color to red. (first tried a content-edge .panel::after overlay for opacity, but that sat a
+   gutter away from the neighbor; moved it back to the seam border, keeping the opacity.) */
+.panel.active-pane,
+.panel.typing-ready-pane {
+  /* focused pane: all chrome bars (tab container + Info Bar) switch from neutral gray to the
+     bright tab-strip green TOGETHER via the one shared --pane-bar-bg → --pane-tab-strip-bg token. No
+     separate per-bar override, so they always match; change --pane-tab-strip-bg to recolor both. */
+  --pane-bar-bg: var(--pane-tab-strip-bg);
+  /* The focused outline uses the tab-radius token too, so its four outer corners visually
+     belong to the active tab instead of ending as a separate square frame. */
+  --pane-ring-radius: var(--pane-tab-top-radius);
+}
+.panel.file-explorer-panel > .file-explorer-head:hover,
+.panel.file-explorer-panel > .file-explorer-head:focus-within,
+.panel.file-explorer-panel:has(.file-explorer-tree-panel:hover) > .file-explorer-head,
+.panel.file-explorer-panel:has(.file-explorer-tree-panel:focus-within) > .file-explorer-head {
+  /* Finder hover/focus colors only the Finder header, not the embedded Modified Files header. */
+  --pane-bar-bg: var(--pane-tab-strip-bg);
+}
+.panel.typing-ready-pane {
+  /* a hover-selected/typing-ready pane shows the same green focus ring as the active pane (it did
+     before this refactor, when both colored their real border green). */
+  --panel-ring-color: var(--pane-tab-panel-ring);
+  --panel-ring-opacity: var(--pane-active-ring-opacity);
+}
+.panel.needs-input-pane,
+.panel.needs-exec-pane,
+.panel.needs-blocked-pane {
+  --panel-ring-color: var(--pane-ring-attention);
+  --attention-ring-border: 1px;
+}
+/* image 028: attention ALWAYS beats the yolo-ready green tint. A focused needs pane is also
+   .yolo-ready-pane, whose green --panel-ring-color (0,3,0) would otherwise out-specify the needs red
+   (0,2,0). Same specificity, later in source → red wins. */
+.panel.active-pane.needs-input-pane,
+.panel.active-pane.needs-exec-pane,
+.panel.active-pane.needs-blocked-pane,
+.panel.typing-ready-pane.needs-input-pane,
+.panel.typing-ready-pane.needs-exec-pane,
+.panel.typing-ready-pane.needs-blocked-pane {
+  --panel-ring-color: var(--pane-ring-attention);
+}
+/* needs-* panes get the shared .attention-pulse class from syncAttentionAnimation. */
+.panel.active-pane .panel-head {
+  /* bg comes from --pane-bar-bg (focused = bright strip); no per-state override here. */
+  color: var(--pane-tab-text);
+  box-shadow: none;
+}
+.panel.active-pane .pane-info-bar .meta,
+.panel.active-pane .pane-info-bar .meta-branch,
+.panel.active-pane .pane-info-bar .meta-path,
+.panel.active-pane .pane-info-bar .meta-desc,
+.panel.active-pane .pane-info-bar .session-button-dir,
+.panel.active-pane .pane-info-bar .session-button-detail,
+.panel.active-pane .panel-detail-row .meta,
+.panel.active-pane .panel-detail-row .meta-branch,
+.panel.active-pane .panel-detail-row .meta-path,
+.panel.active-pane .panel-detail-row .meta-desc,
+.panel.active-pane .panel-detail-row .session-button-dir,
+.panel.active-pane .panel-detail-row .session-button-detail {
+  color: var(--pane-tab-panel-head-text);
+}
+.panel-copy {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.panel-session-label {
+  flex: 0 0 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  height: max(16px, calc(var(--ui-font-size) + 5px));
+  padding-inline-end: 0;
+  white-space: nowrap;
+}
+.panel-session-label:empty {
+  display: none;
+}
+.panel-popover-zone {
+  flex: 1 1 auto;
+  min-width: 0;
+  /* The containing block is .panel-detail-row so the popover spans the full pane. */
+  position: static;
+  overflow: visible;
+  white-space: nowrap;
+}
+.panel-session-label .session-button-name {
+  color: inherit;
+  font-weight: 500;
+  max-width: none;
+}
+.panel-session-label .session-button-dir {
+  max-width: var(--session-label-dir-max-inline-size);
+}
+.panel-session-label .session-button-detail {
+  max-width: var(--session-label-detail-max-inline-size);
+}
+.panel-session-label.needs-attention .session-state-badge {
+  box-shadow: 0 0 0 1px rgba(245, 197, 66, 0.26);
+}
+.panel-session-label .agent-icon {
+  margin-inline-start: 0;
+}
+.panel-session-tab {
+  cursor: default;
+  pointer-events: none;
+}
+.meta {
+  min-width: 0;
+  flex: 1 1 auto;
+  max-width: 100%;
+  margin-top: 0;
+  color: var(--muted);
+  font: var(--ui-font-size-sm)/1.3 var(--mono-font);
+}
+.pane-info-bar-meta {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+/* The window buttons own the left edge of the Info Bar.  Metadata shares the
+   remaining flex row, using its natural width when it fits and shrinking only
+   when necessary so its right edge stays aligned with the pane. */
+.pane-info-bar-popover-zone .pane-info-bar-scroll-viewport {
+  flex: 0 1 auto;
+}
+/* A terminal Info Bar has fixed child-window and repository controls first. Its metadata must
+   begin immediately after those controls; generic popover panels retain their trailing metadata. */
+.pane-info-bar:has(> .tmux-window-bar) .pane-info-bar-popover-zone .pane-info-bar-meta {
+  margin-inline-start: 0;
+  justify-content: flex-start;
+}
+.pane-info-bar:has(> .tmux-window-bar) .panel-session-label {
+  display: none;
+}
+.pane-info-bar:has(> .tmux-window-bar) > .pane-info-bar-controls {
+  margin-inline-end: 0;
+}
+.pane-info-bar-controls {
+  flex: 0 0 auto;
+}
+.pane-info-bar > .pane-info-bar-controls {
+  order: -1;
+  margin-inline-end: var(--space-8);
+}
+.pane-info-bar > .pane-info-bar-controls:empty {
+  display: none;
+}
+.pane-info-bar-scroll-viewport {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+.pane-info-bar-scroll-text {
+  display: inline-block;
+  min-width: max-content;
+  padding-inline-end: 14px;
+  white-space: nowrap;
+  transform: translateX(0);
+  will-change: transform;
+}
+.pane-info-bar-meta.pane-info-bar-meta-overflow .pane-info-bar-scroll-text {
+  animation-name: pane-info-bar-scroll;
+  animation-duration: var(--pane-info-bar-scroll-duration);
+  animation-delay: 0s;
+  animation-timing-function: var(--pane-info-bar-scroll-timing);
+  animation-iteration-count: infinite;
+  animation-direction: normal;
+}
+@keyframes pane-info-bar-scroll {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(var(--pane-info-bar-scroll-offset));
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pane-info-bar-meta.pane-info-bar-meta-overflow .pane-info-bar-scroll-text {
+    animation: none;
+  }
+}
+.meta-branch {
+  color: var(--pane-meta-branch);
+}
+.meta-path {
+  color: var(--pane-meta-path);
+}
+.meta-path-action {
+  padding: 0;
+  border: 0;
+  color: var(--pane-meta-path);
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+.meta-path-action:hover,
+.meta-path-action:focus-visible {
+  color: var(--text);
+  text-decoration: underline;
+  outline: none;
+}
+.meta-desc {
+  color: var(--pane-meta-desc);
+}
+.meta-pr-status.pr-status-failing {
+  color: var(--pr-status-failing);
+}
+.meta-pr-status.pr-status-pending,
+.meta-pr-status.pr-status-draft {
+  color: var(--accent-gold);
+}
+.meta-pr-status.pr-status-passing {
+  color: var(--pr-status-passing);
+}
+.meta-pr-status.pr-status-merged {
+  color: var(--pr-status-merged);
+}
+.meta-pr-status.pr-status-closed {
+  color: var(--pr-status-closed);
+}
+.meta-muted {
+  color: var(--text-muted-strong);
+}
+.meta-sep {
+  color: var(--sep-muted);
+  display: inline-block;
+  margin-inline: var(--space-2);
+  opacity: 0.65;
+}
+/* Multi-repo detail controls and popover rows. Tokens only (light/dark). */
+.meta-repo-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  max-width: 100%;
+  vertical-align: middle;
+}
+.meta-repo-chip {
+  min-width: 0;
+  padding: 0 var(--space-1);
+  border-radius: 0;
+  appearance: none;
+  font-weight: 600;
+  color: var(--pane-meta-branch);
+}
+.meta-repo-cycle {
+  justify-content: center;
+  min-width: 0;
+  width: auto;
+  height: auto;
+  padding: 0 var(--space-1);
+  border-radius: 0;
+  appearance: none;
+  font-weight: 800;
+  line-height: 1;
+  color: var(--pane-meta-branch);
+}
+.meta-repo-chip:hover,
+.meta-repo-chip:focus-visible,
+.meta-repo-cycle:hover,
+.meta-repo-cycle:focus-visible {
+  color: var(--active-accent-bright);
+  background: transparent;
+  outline: 0;
+}
+.repo-chip-menu {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(12ch, 1fr) max-content;
+  align-items: center;
+  gap: var(--space-2) var(--space-10);
+}
+.repo-chip-menu .repo-chip-row {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  align-items: center;
+  width: 100%;
+  color: var(--text);
+  font: inherit;
+  text-align: start;
+  padding: var(--space-4) var(--space-8);
+}
+.repo-chip-menu .repo-chip-row:hover,
+.repo-chip-menu .repo-chip-row:focus-visible {
+  background: color-mix(in srgb, var(--accent-gold) 18%, transparent);
+  outline: 0;
+}
+.repo-chip-menu .repo-chip-row-primary .repo-chip-path {
+  font-weight: 700;
+}
+.repo-chip-menu .repo-chip-status {
+  display: inline-flex;
+  gap: var(--space-8);
+  justify-content: flex-start;
+}
+.pane-tabs {
+  position: relative;
+  min-height: var(--pane-tab-height);
+  min-width: 0;
+  max-width: 100%;
+  display: block;
+  line-height: 0;
+  white-space: normal;
+  padding: 0;
+  overflow: visible;
+  scrollbar-width: none;
+}
+.pane-tabs::-webkit-scrollbar {
+  display: none;
+}
+.pane-tabs.drag-over {
+  outline: 1px dashed var(--pane-resizer-hover-bg);
+  outline-offset: 2px;
+  border-radius: 0;
+}
+.pane-tabs.tab-drop-preview::after {
+  content: "";
+  position: absolute;
+  left: var(--tab-drop-x, 2px);
+  top: var(--tab-drop-y, 0px);
+  z-index: var(--z-drag-ghost);
+  width: var(--tab-insert-preview-width);
+  height: var(--tab-drop-height, 27px);
+  box-sizing: border-box;
+  border: 2px dashed var(--pane-resizer-hover-bg);
+  border-radius: 2px;
+  transform: translateX(-50%);
+  pointer-events: none;
+  background-color: color-mix(in srgb, var(--pane-resizer-bg) 18%, transparent);
+  box-shadow: var(--pane-resizer-preview-shadow);
+}
+.transparent-drag-image {
+  position: fixed;
+  left: -10000px;
+  top: -10000px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.pane-tab,
+.tmux-pane-tab-token {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--pane-tab-close-gap);
+  min-width: 0;
+  height: var(--pane-tab-height);
+  padding: var(--space-1) var(--pane-tab-inline-end-padding) 0 var(--space-5);
+  color: var(--pane-tab-text);
+  background: var(--pane-inactive-tab-bg);
+  border: 1px solid var(--pane-inactive-tab-border);
+  border-bottom-color: var(--pane-inactive-tab-border);
+  border-radius: var(--pane-tab-top-radius) var(--pane-tab-top-radius) 0 0;
+  font-family: var(--tab-font);
+  font-size: var(--tab-label-size);
+  font-stretch: condensed;
+  font-weight: 500;
+  line-height: var(--tab-line-height);
+  text-align: start;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.pane-tab {
+  width: min(var(--pane-tab-width), 100%);
+  max-width: min(var(--pane-tab-width), 100%);
+  z-index: var(--z-pane-tab);
+  vertical-align: top;
+  margin: 0 var(--space-1) 0 0;
+  cursor: pointer;
+  user-select: none;
+}
+.layout-column[data-pane-role="side"],
+.yomux-dockview .dv-groupview[data-pane-role="side"] {
+  max-inline-size: calc(100vw * var(--side-pane-max-viewport-fraction));
+}
+.layout-column[data-pane-role="side"] .pane-tab {
+  width: auto;
+  max-width: 100%;
+}
+.yomux-dockview .dv-groupview[data-pane-role="side"] .dv-tab {
+  flex: 0 1 max-content;
+  width: max-content;
+  max-width: calc(100% - var(--space-1));
+}
+.yomux-dockview .dv-groupview[data-pane-role="side"] .dv-tab > .dockview-pane-tab {
+  width: auto;
+  max-width: 100%;
+}
+.yomux-dockview .dv-groupview[data-pane-role="side"] .dockview-pane-tab > .pane-tab-core {
+  flex: 0 1 auto;
+}
+.yomux-dockview .dv-groupview[data-pane-role="side"] .dv-tabs-and-actions-container {
+  height: var(--pane-tab-height);
+  min-height: var(--pane-tab-height);
+  overflow: hidden;
+}
+.yomux-dockview .dv-groupview[data-pane-role="side"] .dv-tabs-container {
+  box-sizing: border-box;
+  flex-wrap: nowrap;
+  align-content: stretch;
+  height: var(--pane-tab-height);
+  min-height: var(--pane-tab-height);
+  padding-inline-end: var(--dockview-header-actions-reserved-inline-size, 0px);
+  overflow: hidden;
+}
+.tmux-pane-tab-token {
+  box-sizing: border-box;
+}
+.tmux-pane-tab-token-action {
+  cursor: pointer;
+}
+.tmux-pane-tab-token-action:hover,
+.tmux-pane-tab-token-action:focus-visible {
+  color: var(--pane-tab-text);
+  text-decoration: none;
+  outline: 0;
+}
+.tmux-pane-tab-token > .pane-tab-core {
+  inline-size: 100%;
+}
+.tmux-pane-tab-token .session-button-text,
+.pane-tab .session-button-text {
+  gap: var(--space-1);
+}
+.tmux-pane-tab-token .tab-inline-detail,
+.pane-tab .tab-inline-detail,
+.pane-tab.file-editor-item .session-button-dir {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: none;
+}
+.yomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab:not(.file-missing),
+.tmux-pane-tab-token.active,
+.panel.active-pane .pane-tab.active:not(.file-missing),
+.panel.file-explorer-panel .pane-tab.active:not(.file-missing) {
+  color: var(--pane-tab-active-text) !important;
+  background: var(--pane-tab-active-bg);
+  border-color: var(--pane-tab-active-border);
+  border-bottom-color: var(--pane-tab-active-bg);
+}
+.yomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab .session-button-name,
+.yomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab .session-button-dir,
+.yomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab .session-button-detail,
+.tmux-pane-tab-token.active .session-button-name,
+.tmux-pane-tab-token.active .session-button-dir,
+.tmux-pane-tab-token.active .session-button-detail,
+.pane-tab.active .session-button-name,
+.pane-tab.active .session-button-dir,
+.pane-tab.active .session-button-detail {
+  color: inherit;
+}
+.pane-tab.active {
+  color: var(--pane-tab-unfocused-active-text);
+  background: var(--pane-tab-unfocused-active-bg);
+  border-color: var(--pane-tab-unfocused-active-border);
+  border-bottom-color: var(--pane-tab-unfocused-active-bg);
+  font-weight: 500;
+  box-shadow: none;
+}
+/* every pane keeps its active tab clearly green (no dimming) so you can tell which session
+   each pane shows; the focused pane's extra cue is its brighter lime active tab + the pane ring. */
+.panel:not(.active-pane):not(.file-explorer-panel) .pane-tab.active {
+  opacity: 1;
+}
+.pane-tab-pin-icon {
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  display: inline-grid;
+  place-items: center;
+  opacity: 1;
+}
+.pane-tab-pin-icon::before {
+  content: "";
+  width: 14px;
+  height: 14px;
+  background: currentColor;
+  -webkit-mask: var(--icon-pin) center / contain no-repeat;
+  mask: var(--icon-pin) center / contain no-repeat;
+}
+.pane-tab.pinned-tab,
+.tmux-pane-tab-token.pinned-tab {
+  padding-inline-start: var(--space-4);
+}
+.pane-tab.pinned-tab .pane-tab-core,
+.tmux-pane-tab-token.pinned-tab .pane-tab-core {
+  min-width: 0;
+}
+/* image 003/004: an inactive pane's INACTIVE TABS match the gray bar (--pane-bar-bg, which is --panel2
+   when the pane is unfocused). The bars themselves (strip, Info Bar, editor toolbar, find) already read
+   --pane-bar-bg, so only the tabs need this; the active tab stays green. */
+.panel .pane-tab:not(.active),
+.panel .tmux-pane-tab-token:not(.active) {
+  background: var(--pane-bar-bg);
+}
+body.theme-light .panel .pane-tab:not(.active),
+body.theme-light .panel .tmux-pane-tab-token:not(.active) {
+  color: var(--light-readable-text) !important;
+  border-color: var(--light-readable-line);
+}
+body.theme-light .panel .pane-tab:not(.active) .session-button-name,
+body.theme-light .panel .pane-tab:not(.active) .session-button-dir,
+body.theme-light .panel .pane-tab:not(.active) .session-button-detail,
+body.theme-light .panel .pane-tab:not(.active) .pane-tab-close,
+body.theme-light .panel .tmux-pane-tab-token:not(.active) .session-button-name,
+body.theme-light .panel .tmux-pane-tab-token:not(.active) .session-button-dir,
+body.theme-light .panel .tmux-pane-tab-token:not(.active) .session-button-detail,
+body.theme-light .panel .tmux-pane-tab-token:not(.active) .pane-tab-close {
+  color: var(--light-readable-text) !important;
+}
+body.theme-light .panel :is(.pane-tab, .tmux-pane-tab-token-action):not(.active):is(:hover, :focus-visible) {
+  background: var(--pane-inactive-tab-bg-hover);
+  border-color: var(--40-layout-panes-tabs-pane-tab-border-26);
+}
+.pane-tab:not(.active):hover,
+.pane-tab:not(.active):focus-visible,
+.tmux-pane-tab-token-action:not(.active):hover,
+.tmux-pane-tab-token-action:not(.active):focus-visible {
+  background: var(--pane-inactive-tab-bg-hover);
+  border-color: var(--40-layout-panes-tabs-pane-tab-border-26);
+}
+body.theme-light .panel .pane-tab:not(.active):is(:hover, :focus-visible),
+body.theme-light .panel .tmux-pane-tab-token:not(.active):is(:hover, :focus-visible) {
+  color: var(--light-readable-text) !important;
+  background: var(--pane-inactive-tab-bg-hover);
+  border-color: var(--40-layout-panes-tabs-pane-tab-border-26);
+}
+.pane-tab.file-missing {
+  color: var(--40-layout-panes-tabs-pane-tab-fg-8);
+  background: var(--40-layout-panes-tabs-pane-tab-bg-9);
+  border-color: var(--40-layout-panes-tabs-pane-tab-border-10);
+}
+.pane-tab.file-missing:hover {
+  background: var(--40-layout-panes-tabs-pane-tab-bg-11);
+  border-color: var(--40-layout-panes-tabs-pane-tab-border-12);
+}
+.pane-tab.file-missing.active {
+  color: var(--40-layout-panes-tabs-pane-tab-fg-13);
+  background: var(--file-missing-active-bg);
+  border-color: var(--40-layout-panes-tabs-pane-tab-border-14);
+  border-bottom-color: var(--file-missing-active-bg);
+}
+.pane-tab.file-missing .session-button-dir {
+  text-decoration: line-through;
+  text-decoration-thickness: 2px;
+  text-decoration-color: currentColor;
+}
+.pane-tab.file-missing .file-tab-missing-badge {
+  flex: 0 0 auto;
+  color: var(--40-layout-panes-tabs-pane-tab-fg-15);
+  font: 800 var(--ui-font-size-2xs)/1 var(--control-font);
+}
+.pane-tab.file-missing.active .file-tab-missing-badge {
+  color: var(--40-layout-panes-tabs-pane-tab-fg-16);
+}
+.pane-tab-close {
+  position: relative;
+  flex: 0 0 18px;
+  width: 18px;
+  min-width: 18px;
+  height: 18px;
+  justify-content: center;
+  margin-inline-start: 0;
+  padding: 0;
+  color: currentColor;
+  opacity: 0.58;
+  border-radius: 50%;
+}
+body.theme-light .pane-tab-close {
+  color: var(--light-readable-text) !important;
+  opacity: 0.9;
+}
+.pane-tab-close::before {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+.pane-tab-close::after {
+  transform: translate(-50%, -50%) rotate(-45deg);
+}
+.pane-tab-close:hover {
+  opacity: 0.92;
+  background: rgba(255, 255, 255, 0.16);
+}
+.pane-tab.active .pane-tab-close {
+  color: currentColor;
+  opacity: 0.52;
+  background: transparent;
+}
+.pane-tab.active .pane-tab-close:hover {
+  opacity: 0.92;
+  background: var(--paint-dark-green-16);
+}
+/* Keep the compact minus glyph, but make its actual target reliable on touch. Narrow tab strips
+   are where an 18px desktop hit box is easiest to miss; this remains one shared tab-close owner. */
+body.app-topbar-touch-compact .pane-tab-close {
+  flex-basis: var(--pane-control-touch-target-size);
+  width: var(--pane-control-touch-target-size);
+  min-width: var(--pane-control-touch-target-size);
+  height: var(--pane-control-touch-target-size);
+  touch-action: manipulation;
+}
+/* Pane-frame actions use Dockview's separate header-actions strip, so the tab-close rule above
+   does not reach the actual minimize button. Give that button the same one-tap touch target while
+   leaving the desktop 20px geometry unchanged. */
+body.app-topbar-touch-compact .tabs .pane-minimize {
+  flex-basis: var(--pane-control-touch-target-size);
+  width: var(--pane-control-touch-target-size);
+  min-width: var(--pane-control-touch-target-size);
+  max-width: var(--pane-control-touch-target-size);
+  height: var(--pane-control-touch-target-size);
+  min-height: var(--pane-control-touch-target-size);
+  max-height: var(--pane-control-touch-target-size);
+  touch-action: manipulation;
+}
+body.app-topbar-touch-compact .yomux-dockview .dv-tabs-and-actions-container,
+body.app-topbar-touch-compact .yomux-dockview .dv-right-actions-container {
+  min-height: max(var(--pane-tab-height), var(--pane-control-touch-target-size));
+}
+/* Keep this selector list in sync with platformCloseButtonClass() callers in yomux.js. */
+.file-explorer-close.pc-window-control,
+.file-explorer-panel-close.pc-window-control,
+.file-editor-close.pc-window-control,
+.file-editor-panel-close.pc-window-control {
+  border: 1px solid var(--pc-control-border);
+  border-radius: var(--radius-sm);
+  background: var(--pc-control-bg);
+  color: var(--pc-control-fg);
+  opacity: 0.82;
+}
+.pane-tab-close.pc-window-control {
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: currentColor;
+  opacity: 0.68;
+}
+.pane-tab-close.pc-minimize::before,
+.file-explorer-close.pc-minimize::before,
+.file-explorer-panel-close.pc-minimize::before,
+.file-editor-close.pc-minimize::before,
+.file-editor-panel-close.pc-minimize::before {
+  transform: translate(-50%, calc(-50% + 2px)) rotate(0deg);
+}
+.pane-tab-close.pc-minimize::after,
+.file-explorer-close.pc-minimize::after,
+.file-explorer-panel-close.pc-minimize::after,
+.file-editor-close.pc-minimize::after,
+.file-editor-panel-close.pc-minimize::after {
+  display: none;
+}
+.pane-tab.active .pane-tab-close.pc-window-control {
+  color: currentColor;
+  background: transparent;
+  border-color: transparent;
+}
+.pane-tab-close.pc-window-control:hover,
+.pane-tab.active .pane-tab-close.pc-window-control:hover,
+.file-explorer-close.pc-window-control:hover,
+.file-explorer-panel-close.pc-window-control:hover,
+.file-editor-close.pc-window-control:hover,
+.file-editor-panel-close.pc-window-control:hover {
+  opacity: 1;
+  background: var(--pc-control-hover-bg);
+  border-color: var(--pc-control-hover-border);
+}
+.pane-tab.active .pane-tab-close.pc-window-control:hover {
+  color: currentColor;
+  background: var(--paint-dark-green-16);
+  border-color: rgba(8, 18, 5, 0.28);
+}
+.pane-tab:not(.active) .session-button-dir {
+  max-width: none;
+
+
+  color: var(--40-layout-panes-tabs-pane-tab-fg-6);
+}
+.pane-tab .ci-indicator {
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--ui-font-size-3xs);
+}
+.pane-tab-core {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+.session-tab-leading-activity {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+}
+.pane-tab-core > .session-yolo-marker {
+  flex: 0 0 auto;
+  min-width: 18px;
+  height: 18px;
+  padding: var(--space-1) 0;
+  border-radius: var(--radius-control);
+  font-size: var(--ui-font-size-2xs);
+}
+.session-popover-host > .session-popover,
+.pane-tab-detached-popover {
+  position: fixed;
+  top: var(--pane-tab-popover-top, 72px);
+  left: var(--pane-tab-popover-left, 0);
+  z-index: var(--z-pane-modal);
+  width: var(--pane-tab-popover-inline-size);
+  max-width: var(--popover-max-inline-size);
+  max-height: var(--pane-tab-popover-max-block-size);
+  white-space: normal;
+  box-shadow:
+    -22px 18px 34px var(--paint-black-58),
+    22px 18px 34px var(--paint-black-58),
+    0 34px 62px rgba(0, 0, 0, 0.66),
+    0 8px 16px rgba(0, 0, 0, 0.52),
+    var(--active-control-focus-shadow-compact);
+}
+.session-popover-host.popover-open {
+  z-index: var(--z-pane-modal);
+}
+.session-popover-host.popover-open > .session-popover,
+.pane-tab-detached-popover.popover-open {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+  transition-delay: 0s;
+}
+.session-popover-host > .session-popover::before,
+.pane-tab-detached-popover::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -5px;
+  height: 5px;
+  display: block;
+  background: transparent;
+}
+.session-popover-host > .session-popover.file-popover,
+.pane-tab-detached-popover.file-popover {
+  width: min(54ch, var(--popover-max-inline-size));
+  max-height: min(42vh, var(--pane-tab-popover-max-block-size));
+  pointer-events: none;
+}
+.session-popover-host.popover-open > .session-popover.file-popover,
+.pane-tab-detached-popover.popover-open.file-popover {
+  pointer-events: auto;
+}
+.session-popover-host > .session-popover.file-popover .popover-copy-button,
+.pane-tab-detached-popover.file-popover .popover-copy-button {
+  pointer-events: auto;
+}
+.disabled-panel-controls .tab:disabled {
+  pointer-events: none;
+}
+.pane-tab-info-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 500;
+}
+.tabs {
+  position: relative;
+  z-index: var(--z-tabs-row);
+  float: right;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  max-width: calc(100% - 4px);
+  margin: 0 0 0 var(--space-6);
+  padding: 0;
+  border-bottom: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow: hidden;
+  scrollbar-width: none;
+}
+.pane-frame-controls.tabs {
+  float: none;
+  flex: 0 0 auto;
+  max-width: none;
+  margin: 0;
+  overflow: visible;
+}
+.file-editor-panel-actions .pane-frame-controls.tabs,
+.file-explorer-toolbar .pane-frame-controls.tabs {
+  z-index: auto;
+}
+.tabs::-webkit-scrollbar {
+  display: none;
+}
+.tab {
+  border-radius: 5px;
+  min-width: 0;
+  height: min(20px, var(--pane-tab-height));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 var(--space-3);
+  color: var(--muted);
+  background: transparent;
+  font-family: var(--control-font);
+  font-size: var(--ui-font-size-2xs);
+  font-stretch: condensed;
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1.1;
+}
+.tabs .tab[hidden] {
+  display: none !important;
+}
+.tmux-window-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+.pane-info-bar .tmux-window-bar,
+.panel-detail-row .tmux-window-bar {
+  order: -1;
+  flex: 0 0 auto;
+  min-width: max-content;
+  max-width: none;
+  margin-inline-start: 0;
+  margin-inline-end: var(--space-8);
+  justify-content: flex-start;
+  overflow: visible;
+}
+.tmux-status-toggle {
+  flex: 0 0 auto;
+  min-width: 20px;
+  margin-inline-start: var(--space-4);
+  border-radius: 0;
+  border: 1px solid;
+}
+.tmux-window-button {
+  flex: 0 1 auto;
+  min-width: 18px;
+  max-width: var(--tmux-window-tab-max-inline-size);
+  padding-inline: var(--space-2);
+  /* DOIT.57: window buttons read in the normal UI font, not the condensed/bold .tab control font. */
+  font-family: var(--ui-font);
+  font-stretch: normal;
+  font-weight: 500;
+}
+.pane-info-bar .tmux-window-button,
+.panel-detail-row .tmux-window-button,
+.tmux-window-bar[data-tmux-window-bar-context="info"] .tmux-window-button {
+  flex: 0 0 auto;
+  max-width: none;
+  overflow: visible;
+  /* Info Bar sub-window buttons are fully square — no rounded corners (overrides the .tab 5px). */
+  border-radius: 0;
+  border: 1px solid;
+}
+.tmux-window-button .tmux-window-number-label {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tmux-window-button .tmux-window-name-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* One shared minimum separates state glyph, agent identity, and the window label. */
+  gap: var(--space-1);
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+.pane-info-bar .tmux-window-button .tmux-window-name-label,
+.panel-detail-row .tmux-window-button .tmux-window-name-label,
+.tmux-window-bar[data-tmux-window-bar-context="info"] .tmux-window-button .tmux-window-name-label,
+.pane-info-bar .tmux-window-button .tmux-window-name-text,
+.panel-detail-row .tmux-window-button .tmux-window-name-text,
+.tmux-window-bar[data-tmux-window-bar-context="info"] .tmux-window-button .tmux-window-name-text {
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+}
+.agent-window-activity--subwindow {
+  --agent-window-icon-size: 14px;
+  --agent-window-activity-inline-size: var(--agent-window-icon-size);
+  --agent-window-activity-block-size: var(--agent-window-icon-size);
+  --agent-status-ball-size: var(--agent-status-ball-size-base);
+  --subwindow-status-glyph-scale: 0.66;
+  --subwindow-status-slot-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale));
+  /* RUN/ASK/paused share these exact dimensions everywhere this renderer is embedded. Keeping
+     the shape geometry here prevents a Tabber/popup font context from changing one triangle. */
+  --subwindow-status-glyph-inline-size: calc(var(--subwindow-status-slot-size) * 0.94);
+  --subwindow-status-glyph-block-size: calc(var(--subwindow-status-slot-size) * 0.88);
+  --subwindow-status-glyph-inner-inline-size: calc(var(--subwindow-status-glyph-inline-size) - 2px);
+  --subwindow-status-glyph-inner-block-size: calc(var(--subwindow-status-glyph-block-size) - 2px);
+  margin-inline-start: 0;
+  margin-inline-end: 0;
+}
+.tmux-window-button .agent-window-activity--subwindow {
+  /* Keep the state glyph and stable agent identity visually distinct without wasting label space. */
+  gap: var(--space-3);
+}
+.tmux-window-button .agent-window-status-placeholder {
+  inline-size: var(--subwindow-status-slot-size);
+  min-inline-size: var(--subwindow-status-slot-size);
+  block-size: var(--subwindow-status-slot-size);
+  flex: 0 0 var(--subwindow-status-slot-size);
+  opacity: 0;
+  pointer-events: none;
+}
+.agent-window-activity--subwindow .agent-icon {
+  padding: 0;
+  vertical-align: middle;
+}
+.agent-window-activity--subwindow .agent-window-status-dot {
+  --subwindow-status-attention-fill: var(--danger-strong);
+  --subwindow-status-cooldown-fill: var(--agent-status-cooldown);
+  --subwindow-status-glyph-fill: currentColor;
+  --subwindow-status-glyph-border-color: color-mix(in srgb, var(--text) 84%, var(--bg) 16%);
+  --subwindow-status-glyph-border-color-active: var(--active-control-text);
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: var(--subwindow-status-slot-size);
+  min-inline-size: var(--subwindow-status-slot-size);
+  block-size: var(--subwindow-status-slot-size);
+  flex: 0 0 var(--subwindow-status-slot-size);
+  border-radius: 0;
+  color: transparent !important;
+  margin-inline: 0;
+}
+.agent-window-activity--subwindow .agent-window-status-dot:is(.heartbeat-pulse, .attention-pulse, .agent-window-status-dot--transition-glow, .agent-window-status-dot--transition-pulse, .agent-window-status-dot--subwindow-pulse) {
+  border-color: transparent !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  animation: none !important;
+  filter: none !important;
+}
+.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--working {
+  --subwindow-status-glyph-fill: var(--pr-status-passing);
+  color: transparent !important;
+}
+.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--attention {
+  --subwindow-status-glyph-fill: var(--subwindow-status-attention-fill);
+  color: transparent !important;
+}
+.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--blocked {
+  --subwindow-status-glyph-fill: var(--subwindow-status-attention-fill);
+  color: transparent !important;
+}
+.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--cooldown {
+  --subwindow-status-glyph-fill: var(--subwindow-status-cooldown-fill);
+  color: transparent !important;
+}
+.agent-window-activity--subwindow .agent-window-status-dot::before,
+.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--cooldown::after {
+  content: "";
+  position: absolute;
+  inset-block-start: 50%;
+  inset-inline-start: 50%;
+  display: block;
+  text-indent: 0;
+  transform: translate(-50%, -50%);
+  filter: none;
+}
+.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--working::before {
+  inline-size: var(--subwindow-status-glyph-inline-size);
+  block-size: var(--subwindow-status-glyph-block-size);
+  background: var(--subwindow-status-glyph-border-color);
+  clip-path: polygon(8% 0, 100% 50%, 8% 100%);
+}
+.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--working::after {
+  content: "";
+  position: absolute;
+  inset-block-start: 50%;
+  inset-inline-start: 50%;
+  inline-size: var(--subwindow-status-glyph-inner-inline-size);
+  block-size: var(--subwindow-status-glyph-inner-block-size);
+  background: var(--subwindow-status-glyph-fill);
+  clip-path: polygon(8% 0, 100% 50%, 8% 100%);
+  transform: translate(-50%, -50%);
+}
+.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--attention::before {
+  box-sizing: border-box;
+  inline-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale));
+  block-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale));
+  border-radius: max(1px, calc(var(--agent-status-ball-size) * 0.08));
+  background: var(--subwindow-status-glyph-fill, currentColor);
+}
+.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--blocked::before {
+  box-sizing: border-box;
+  inline-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale));
+  block-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale));
+  border-radius: max(1px, calc(var(--agent-status-ball-size) * 0.08));
+  background: var(--subwindow-status-glyph-fill, currentColor);
+}
+.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--acknowledged::before {
+  background: var(--muted);
+}
+.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--cooldown::before,
+.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--cooldown::after {
+  --subwindow-status-pause-bar-offset: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale) * 0.31);
+  box-sizing: border-box;
+  inline-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale) * 0.16);
+  block-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale));
+  border-radius: max(1px, calc(var(--agent-status-ball-size) * 0.06));
+  background: var(--subwindow-status-glyph-fill, currentColor);
+  filter: none;
+}
+.agent-window-activity--subwindow .agent-window-status-dot.agent-window-status-dot--subwindow-pulse {
+  /* The parent circle and child glyph deliberately animate this same element opacity. The child
+     container is transparent, so this does not draw a ball behind the triangle/square/pause bars. */
+  animation: agent-status-opacity-pulse var(--pulse-duration) var(--status-pulse-timing) var(--attention-animation-delay, 0s) infinite normal both !important;
+  will-change: opacity;
+}
+.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--cooldown::before {
+  inset-inline-start: calc(50% - var(--subwindow-status-pause-bar-offset));
+}
+.agent-window-activity--subwindow .agent-window-status-dot.status-indicator--cooldown::after {
+  inset-inline-start: calc(50% + var(--subwindow-status-pause-bar-offset));
+}
+.tmux-window-bar[data-tmux-window-label-mode="names"] .tmux-window-number-label,
+.tmux-window-bar[data-tmux-window-label-mode="numbers"] .tmux-window-name-label {
+  display: none;
+}
+.tmux-window-bar[data-tmux-window-label-mode="numbers"] .tmux-window-button {
+  flex: 0 0 auto;
+  min-width: 20px;
+  max-width: 28px;
+  padding-inline: var(--space-3);
+}
+/* The selected subwindow label is slightly stronger; its tint/ring paint is owned in the final
+   pane-control state block so generic control paint cannot override it. */
+.tmux-window-bar .tmux-window-button.active {
+  font-weight: 600;
+}
+.tmux-window-bar .tmux-window-button.active .agent-window-status-dot,
+.session-agent-window-block > .session-agent-row.current .agent-window-status-dot {
+  --subwindow-status-glyph-border-color: var(--subwindow-status-glyph-border-color-active);
+  color: transparent !important;
+}
+.tmux-window-bar .tmux-window-button.active .agent-window-status-dot.status-indicator--attention,
+.session-agent-window-block > .session-agent-row.current .agent-window-status-dot.status-indicator--attention {
+  --subwindow-status-glyph-fill: var(--subwindow-status-attention-fill);
+}
+.tmux-window-bar .tmux-window-button.active .agent-window-status-dot.status-indicator--working,
+.session-agent-window-block > .session-agent-row.current .agent-window-status-dot.status-indicator--working {
+  --subwindow-status-glyph-fill: var(--pr-status-passing);
+}
+.tmux-window-bar .tmux-window-button.active .agent-window-status-dot.status-indicator--cooldown,
+.session-agent-window-block > .session-agent-row.current .agent-window-status-dot.status-indicator--cooldown {
+  --subwindow-status-glyph-fill: var(--subwindow-status-cooldown-fill);
+}
+.agent-window-activity--subwindow .agent-window-status-dot--acknowledging {
+  --subwindow-status-glyph-fill: var(--muted) !important;
+  color: transparent !important;
+}
+.terminal-tab {
+  flex: 0 1 auto;
+  max-width: var(--terminal-tab-max-inline-size);
+  min-width: 0;
+  padding-inline: var(--space-3);
+}
+.tabs .tab:not(.tmux-window-button):not(.terminal-tab):not(.pane-actions):not(.panel-tab-overflow):not(.pane-close):not(.pane-detail-toggle):not(.pane-minimize):not(.pane-popout):not(.pane-expand) {
+  flex: 0 1 auto;
+  min-width: 0;
+  padding-inline: var(--space-3);
+}
+.tabs .panel-detail-toggle {
+  min-width: 0;
+}
+.tabs .pane-actions,
+.tabs .panel-tab-overflow {
+  flex: 0 0 24px;
+  min-width: 24px;
+  max-width: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  color: var(--pc-control-fg);
+  background: var(--pc-control-bg);
+  border: 1px solid var(--pc-control-border);
+  font-size: 0;
+  letter-spacing: 0;
+}
+.pane-actions-dots {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  color: currentColor;
+  font-size: 0;
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: 1px;
+  text-align: center;
+  text-shadow: none;
+  transform: none;
+}
+.pane-actions-dots::before {
+  content: "...";
+  font-size: var(--ui-font-size-xl);
+  line-height: 0.75;
+  transform: translateY(-2px);
+}
+.tabs .pane-actions:hover,
+.tabs .pane-actions:focus-visible,
+.tabs .panel-tab-overflow:hover,
+.tabs .panel-tab-overflow:focus-visible {
+  color: var(--40-layout-panes-tabs-tabs-fg-27);
+  background: var(--pc-control-hover-bg);
+  border-color: var(--pc-control-hover-border);
+}
+.tabs .pane-actions:hover .pane-actions-dots,
+.tabs .pane-actions:focus-visible .pane-actions-dots,
+.tabs .panel-tab-overflow:hover .pane-actions-dots,
+.tabs .panel-tab-overflow:focus-visible .pane-actions-dots {
+  color: currentColor;
+}
+.tabs .pane-close,
+.tabs .pane-detail-toggle,
+.tabs .pane-minimize,
+.tabs .pane-popout,
+.tabs .pane-expand {
+  position: relative;
+  flex: 0 0 min(20px, var(--pane-tab-height));
+  min-width: min(20px, var(--pane-tab-height));
+  max-width: min(20px, var(--pane-tab-height));
+  padding: 0;
+}
+.tabs .pane-close::before {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+.tabs .pane-close::after {
+  transform: translate(-50%, -50%) rotate(-45deg);
+}
+.tabs .pane-minimize::before {
+  transform: translate(-50%, calc(-50% + 2px)) rotate(0deg);
+}
+.tabs .pane-minimize::after {
+  display: none;
+}
+.tabs .pane-popout::before {
+  width: 9px;
+  height: 7px;
+  border: 1.3px solid currentColor;
+  border-radius: 2px;
+  background: transparent;
+  transform: translate(-54%, -42%);
+}
+.tabs .pane-popout::after {
+  width: 5px;
+  height: 5px;
+  border-top: 1.4px solid currentColor;
+  border-inline-end: 1.4px solid currentColor;
+  background: transparent;
+  transform: translate(-6%, -78%) rotate(0deg);
+}
+/* (the detail/info toggle's pressed = green now comes from the shared .tab[aria-pressed=true] rule — no
+   per-button white override here.) */
+.tabs .pane-detail-toggle::before {
+  width: 10px;
+  height: 8px;
+  border: 1.4px solid currentColor;
+  border-radius: 2px;
+  background: transparent;
+  transform: translate(-50%, -50%);
+  clip-path: polygon(0 0, 72% 0, 100% 28%, 100% 100%, 0 100%);
+}
+.tabs .pane-detail-toggle::after {
+  width: 6px;
+  height: 1.3px;
+  transform: translate(-50%, calc(-50% - 2px));
+}
+.tabs .pane-expand::before {
+  transform: translate(-50%, -50%) rotate(0deg);
+}
+.tabs .pane-expand::after {
+  transform: translate(-50%, -50%) rotate(90deg);
+}
+/* ── SHARED pane control buttons (single source of truth) ───────────────────────────────────────────
+   Every control button (terminal/window pill, status toggle, actions …, detail/info toggle, minimize,
+   expand +, close ×) shares ONE color treatment — they only add their own glyph/layout, never their own
+   colors. Rest = white (light) / near-black (dark) via --pane-ctl-*; the PRESSED/ACTIVE state (active
+   terminal/agent tab, a toggled-on info toggle, etc.) = green. The .auto-toggle (YO/YOLO) keeps its own
+   green-glow below. This replaces the old per-button one-offs (navy active tab, always-green zoom). */
+.tmux-status-toggle,
+.pane-info-bar .tmux-window-button:not(.active),
+.panel-detail-row .tmux-window-button:not(.active),
+.tmux-window-bar[data-tmux-window-bar-context="info"] .tmux-window-button:not(.active),
+.tabs .tab:not(.auto-toggle) {
+  color: var(--pane-ctl-fg, var(--pc-control-fg));
+  background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
+  border-color: var(--pane-ctl-border, var(--pane-tab-control-border));
+}
+.tmux-status-toggle:hover,
+.tmux-status-toggle:focus-visible,
+.pane-info-bar .tmux-window-button:not(.active):hover,
+.pane-info-bar .tmux-window-button:not(.active):focus-visible,
+.panel-detail-row .tmux-window-button:not(.active):hover,
+.panel-detail-row .tmux-window-button:not(.active):focus-visible,
+.tmux-window-bar[data-tmux-window-bar-context="info"] .tmux-window-button:not(.active):hover,
+.tmux-window-bar[data-tmux-window-bar-context="info"] .tmux-window-button:not(.active):focus-visible,
+.tabs .tab:not(.auto-toggle):hover,
+.tabs .tab:not(.auto-toggle):focus-visible {
+  color: var(--pc-control-hover-fg);
+  background: var(--pane-tab-control-hover-bg);
+  border-color: var(--pane-tab-control-hover-border);
+}
+/* Fallback for any .tab.active OUTSIDE a pane head (e.g. detached/menu contexts). */
+.tab.active:not(.tmux-window-button) {
+  color: var(--text);
+  background: var(--40-layout-panes-tabs-tab-bg-17);
+  border-color: var(--40-layout-panes-tabs-tab-border-18);
+  font-weight: 700;
+}
+.tab.auto-toggle.active {
+  color: var(--pane-tab-yolo-text);
+  background: var(--pane-tab-yolo-bg);
+  border-color: var(--pane-tab-yolo-border);
+  font-weight: 700;
+  box-shadow: 0 0 0 1px rgb(var(--active-accent-rgb) / 0.28), 0 0 14px var(--active-control-focus-ring);
+}
+/* (removed) a light-mode gray var(--pc-control-border) border on focused terminals — the light twin of the dark #465267
+   gray focus bug. Focused terminals now fall through to the shared green focus border (var(--pane-tab-
+   panel-ring)) like every other focused pane, in both light and dark. */
+
+/* Theme-token consumers without a pre-existing local owner. */
+.tmux-pane-tab-token:not(.active) .session-button-name {
+
+  color: var(--40-layout-panes-tabs-tmux-pane-tab-token-fg-2);
+}
+.tmux-pane-tab-token:not(.active) .session-button-dir {
+
+  color: var(--40-layout-panes-tabs-tmux-pane-tab-token-fg-3);
+}
+.tmux-pane-tab-token:not(.active) .session-button-detail {
+
+  color: var(--40-layout-panes-tabs-tmux-pane-tab-token-fg-4);
+}
+so on the light-green/gray inactive tabs in LIGHT mode they were white-on-white. Give them dark text (active tabs keep their own white-on-green via the rules above; dark mode keeps the near-white). */ .pane-tab:not(.active) .session-button-name {
+
+  color: var(--40-layout-panes-tabs-pane-tab-fg-5);
+}
+.pane-tab:not(.active) .session-button-detail {
+
+  color: var(--40-layout-panes-tabs-pane-tab-fg-7);
+}
+so in light mode force it dark on the light row. (meta/dir/detail already resolve dark via the --pane-tab-panel-head-text light override.) */ .panel-detail-row .session-button-name {
+
+  color: var(--40-layout-panes-tabs-panel-detail-row-fg-22);
+}
+.panel.active-pane .panel-detail-row .session-button-name {
+
+  color: var(--40-layout-panes-tabs-panel-fg-23);
+}

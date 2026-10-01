@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""One isolated YOLOmux dev server: a real `yolomux.py` process a test owns end to end.
+"""One isolated YOmux dev server: a real `yolomux.py` process a test owns end to end.
 
 WHY THIS EXISTS SEPARATELY FROM `gate_harness.gate_live_server`. `gate_live_server` builds the
 app and the HTTP server INSIDE the pytest process. That is the right tool for almost everything,
@@ -22,7 +22,7 @@ WHAT ISOLATION MEANS HERE, and every clause is load-bearing:
     cost real time twice. A dev server on a non-default port derives a private root under `/tmp`
     (`tools/instance_isolation.resolve_instance_environment`), and this harness derives one
     itself and passes it explicitly. Either way the instance reads the auth config INSIDE that
-    root -- NOT `~/.config/yolomux` -- so a browser cookie or session minted against the
+    root -- NOT `~/.config/yomux` -- so a browser cookie or session minted against the
     operator's instance authenticates against nothing here. Use `auth_bypass=True` (the default,
     matching the coexistence gate) or write `paths.config_dir / "auth.yaml"` yourself and log in
     through the real form; there is no third option and no cookie to borrow.
@@ -55,7 +55,7 @@ from tests.gate_harness import HttpPortLease
 from tests.gate_harness import run_fixture_cleanup_phases
 from tests.tmux_runtime import start_isolated_tmux_runtime
 from tests.tmux_runtime import stop_isolated_tmux_runtime
-from yolomux_lib.host_identity import process_start_identity
+from yomux_lib.host_identity import process_start_identity
 from tools.instance_isolation import synthetic_test_environment
 
 
@@ -66,6 +66,23 @@ SERVER_STOP_TIMEOUT_SECONDS = 10.0
 
 # The operator's live servers, by platform. Never automated, on any lane, for any reason.
 FORBIDDEN_LIVE_PORTS = frozenset(range(8880, 8884) if sys.platform == "darwin" else range(7110, 7114))
+
+
+def server_entrypoint(source_root: Path) -> Path:
+    """Select the canonical server script, with support for frozen old trees."""
+
+    for name in ("yomux.py", "yolomux.py"):
+        candidate = source_root / name
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(f"no YOmux server entrypoint under {source_root}")
+
+
+def server_entrypoint_arguments(source_root: Path) -> list[str]:
+    """Use backend selection only where the selected CLI supports it."""
+
+    entrypoint = server_entrypoint(source_root)
+    return [str(entrypoint), "--backend", "python"] if entrypoint.name == "yomux.py" else [str(entrypoint)]
 
 
 @dataclass(frozen=True)
@@ -88,7 +105,7 @@ class BuildPaths:
 
     @property
     def auth_config_path(self) -> Path:
-        """This instance's OWN auth config. A cookie from `~/.config/yolomux` is meaningless here."""
+        """This instance's OWN auth config. A cookie from `~/.config/yomux` is meaningless here."""
 
         return self.config_dir / "auth.yaml"
 
@@ -204,6 +221,7 @@ def wait_until_serving(
     output: list[str],
     *,
     label: str = "isolated dev server",
+    product_name: str = "YOmux",
     timeout_seconds: float = SERVER_READY_TIMEOUT_SECONDS,
 ) -> None:
     """Block until the server prints its own serving line, or fail with what it printed instead.
@@ -215,7 +233,7 @@ def wait_until_serving(
 
     stdout = process.stdout
     assert stdout is not None
-    expected = f"Serving YOLOmux on http://127.0.0.1:{port}/"
+    expected = f"Serving {product_name} on http://127.0.0.1:{port}/"
     deadline = time.monotonic() + timeout_seconds
     with selectors.DefaultSelector() as selector:
         selector.register(stdout, selectors.EVENT_READ)
@@ -404,7 +422,7 @@ def start_isolated_dev_server(
     command = [
         sys.executable,
         "-u",
-        str(source_root / "yolomux.py"),
+        *server_entrypoint_arguments(source_root),
         "--http",
         "--host",
         "127.0.0.1",

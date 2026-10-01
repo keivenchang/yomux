@@ -19,7 +19,7 @@ const {
 const MD = '/repo/app/notes/status.md';
 const ENTRY = {name: 'status.md', realpath: MD, file_id: 'dev:1:ino:77', size: 21549};
 
-// The real producer is `FilesystemError.file_too_large` in yolomux_lib/filesystem/errors.py, which
+// The real producer is `FilesystemError.file_too_large` in yomux_lib/filesystem/errors.py, which
 // sends `params: {label, size, max}` - not an empty object. A fixture that sends `{}` renders the
 // locale template's own placeholder names and still satisfies a state-only assertion, so the
 // oversize case below supplies the exact params the server does.
@@ -84,7 +84,7 @@ async function runOpenFile413ReasonSuite() {
 
   await testAsync('a labelled oversize renders the real label and numbers, not placeholders', async () => {
     // Fixture parity with the server: `FilesystemError.file_too_large(21549, MAX_READ_BYTES)` emits
-    // exactly this descriptor, verified against yolomux_lib/filesystem/errors.py.
+    // exactly this descriptor, verified against yomux_lib/filesystem/errors.py.
     const api = loadYolomux();
     const state = await openWithRefusal(
       api,

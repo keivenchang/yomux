@@ -4,18 +4,18 @@ from threading import Event
 
 import pytest
 
-from yolomux_lib.infra.filesystem_preflight import FilesystemClassification
-from yolomux_lib.infra.filesystem_preflight import FilesystemPreflightError
-from yolomux_lib.infra.filesystem_preflight import classify_filesystem
-from yolomux_lib.infra.filesystem_preflight import clear_filesystem_classification_cache
-from yolomux_lib.infra.filesystem_preflight import preflight_mutable_roots
-from yolomux_lib.infra import filesystem_preflight
-from yolomux_lib.infra.atomic_file import open_wal_database
-from yolomux_lib.local_services.runtime import run_local_rpc_service
-from yolomux_lib.observability.pricing_catalog import PricingCatalog
-from yolomux_lib.search import file_index
-from yolomux_lib.stats_current.storage import DATABASE_FILENAME
-from yolomux_lib.stats_current.storage import Store
+from yomux_lib.infra.filesystem_preflight import FilesystemClassification
+from yomux_lib.infra.filesystem_preflight import FilesystemPreflightError
+from yomux_lib.infra.filesystem_preflight import classify_filesystem
+from yomux_lib.infra.filesystem_preflight import clear_filesystem_classification_cache
+from yomux_lib.infra.filesystem_preflight import preflight_mutable_roots
+from yomux_lib.infra import filesystem_preflight
+from yomux_lib.infra.atomic_file import open_wal_database
+from yomux_lib.local_services.runtime import run_local_rpc_service
+from yomux_lib.observability.pricing_catalog import PricingCatalog
+from yomux_lib.search import file_index
+from yomux_lib.stats_current.storage import DATABASE_FILENAME
+from yomux_lib.stats_current.storage import Store
 
 
 def test_preflight_allows_a_known_local_ext_root(tmp_path):

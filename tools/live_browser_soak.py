@@ -18,14 +18,14 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tests.browser_helpers.webdriver_lease import WebDriverLease
-from yolomux_lib.live_browser_soak import evidence_failed
-from yolomux_lib.live_browser_soak import record_failure
-from yolomux_lib.live_browser_soak import run_soak
-from yolomux_lib.live_browser_soak import terminal_failure
-from yolomux_lib.live_browser_soak import validate_arguments
-from yolomux_lib.live_browser_soak import validate_clean_soak_prerequisite
-from yolomux_lib.live_browser_soak import validate_success_artifact
-from yolomux_lib.live_browser_soak import write_artifact
+from yomux_lib.live_browser_soak import evidence_failed
+from yomux_lib.live_browser_soak import record_failure
+from yomux_lib.live_browser_soak import run_soak
+from yomux_lib.live_browser_soak import terminal_failure
+from yomux_lib.live_browser_soak import validate_arguments
+from yomux_lib.live_browser_soak import validate_clean_soak_prerequisite
+from yomux_lib.live_browser_soak import validate_success_artifact
+from yomux_lib.live_browser_soak import write_artifact
 
 
 CLEANUP_TIMEOUT_SECONDS = 15

@@ -47,6 +47,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
     "tests/test_browser_editor.py:test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels": "The embedded Mermaid sample is a fixed rendering fixture, not a substitute for browser behavior tests.",
     "tests/test_browser_stats_coverage.py:test_current_stats_fixture_uses_canonical_resolution_policy": "The browser fixture must import the canonical stats resolution policy rather than clone it.",
     "tests/test_client_events.py:test_browser_client_event_contract_matches_server_event_types": "The declared client-event names are a producer/consumer protocol contract.",
+    "tests/test_client_events.py:test_generation_ready_is_dispatched_to_old_and_new_browser_event_names": "The generation-ready event name is a cross-version producer and consumer protocol boundary; checking both dispatch names and the active consumer binding prevents old tabs from missing refreshes during the alias window.",
     "tests/test_common.py:test_main_process_cpu_work_has_named_allowlist": "The process-accounting allowlist is an explicit static inventory.",
     "tests/test_dev_restart_script.py:test_boot_restart_waits_for_stable_listener_after_ready": "The boot script's listener sequencing is an operator safety contract best checked before execution.",
     "tests/test_dev_restart_script.py:test_boot_restart_refuses_duplicate_without_blind_listener_kill": "The boot script must refuse unverified duplicates, reserve replacement for the verified instance lease, and detach the launched server from the invoking shell; these startup wiring contracts are safest to check from source.",
@@ -124,7 +125,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
 # text-shape assertion to an already allowlisted function still fails the guard
 # until a reviewer deliberately updates this value and its reason. The sequence
 # is stable when unrelated code moves an assertion to a different source line.
-TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "546ff2ad3b52a3355cc4fac4c3d50c3bb9438c1b124f086d0888fb24ef967e96"
+TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "d8ed9a1b41ae629660805addb7a26a7210899680bd40d5850eb1470561169891"
 
 
 @dataclass(frozen=True, slots=True)

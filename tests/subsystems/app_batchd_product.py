@@ -2,7 +2,7 @@
 
 import pytest
 
-from yolomux_lib import app as app_module
+from yomux_lib import app as app_module
 
 
 def assert_wait_for_batchd_product_uses_shared_bounded_cadence_until_ready(monkeypatch):

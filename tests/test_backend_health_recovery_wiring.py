@@ -37,22 +37,22 @@ import pytest
 from tests.helpers.backend_health_scenarios import FakeService
 from tests.helpers.backend_health_scenarios import RecoveryHarness
 
-from yolomux_lib import cli as cli_module
-from yolomux_lib.app import STATSD_ABSENT_WHILE_PIN_PENDING
-from yolomux_lib.infra.batchd import BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE
-from yolomux_lib.app import LocalServiceRecoveryControl
-from yolomux_lib.app import TmuxWebtermApp
-from yolomux_lib.backend_health.observer import BACKEND_HEALTH_RECOVERY_MAX_ATTEMPTS
-from yolomux_lib.backend_health.observer import BLOCKED_CONTROL_ERROR
-from yolomux_lib.backend_health.observer import BLOCKED_DEMAND_STARTED_ABSENT
-from yolomux_lib.backend_health.observer import BLOCKED_NO_CONTROL
-from yolomux_lib.backend_health.observer import RECOVERY_EXHAUSTED
-from yolomux_lib.backend_health.observer import RECOVERY_SCHEDULED
-from yolomux_lib.backend_health.observer import recovery_blocked_token
-from yolomux_lib.backend_health.store import BackendHealthStore
-from yolomux_lib.local_service_projection import LOCAL_SERVICE_INVENTORY
-from yolomux_lib.server_logs import SERVER_LOGS
-from yolomux_lib.local_services.rpc import reset_local_service_traffic
+from yomux_lib import cli as cli_module
+from yomux_lib.app import STATSD_ABSENT_WHILE_PIN_PENDING
+from yomux_lib.infra.batchd import BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE
+from yomux_lib.app import LocalServiceRecoveryControl
+from yomux_lib.app import TmuxWebtermApp
+from yomux_lib.backend_health.observer import BACKEND_HEALTH_RECOVERY_MAX_ATTEMPTS
+from yomux_lib.backend_health.observer import BLOCKED_CONTROL_ERROR
+from yomux_lib.backend_health.observer import BLOCKED_DEMAND_STARTED_ABSENT
+from yomux_lib.backend_health.observer import BLOCKED_NO_CONTROL
+from yomux_lib.backend_health.observer import RECOVERY_EXHAUSTED
+from yomux_lib.backend_health.observer import RECOVERY_SCHEDULED
+from yomux_lib.backend_health.observer import recovery_blocked_token
+from yomux_lib.backend_health.store import BackendHealthStore
+from yomux_lib.local_service_projection import LOCAL_SERVICE_INVENTORY
+from yomux_lib.server_logs import SERVER_LOGS
+from yomux_lib.local_services.rpc import reset_local_service_traffic
 
 
 # Every operation that could touch a process, a socket, or another owner's state, copied from

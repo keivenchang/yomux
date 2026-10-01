@@ -32,7 +32,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from yolomux_lib.agent_comms.stream_events import ClaudeStreamJsonNormalizer
+from yomux_lib.agent_comms.stream_events import ClaudeStreamJsonNormalizer
 import common as mock_agent_common
 from text_client_common import (
     CLAUDE_CONFIG_KEYS,

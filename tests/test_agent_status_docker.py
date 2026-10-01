@@ -27,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from yolomux_lib.approval import prompt_detector
+from yomux_lib.approval import prompt_detector
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -316,8 +316,8 @@ def _run_failure_recovery(client: str, failure: str, tmp_path: Path) -> dict[str
             "YOLOMUX_TMUX_SOCKET": str(socket_path),
             "NO_PROXY": "127.0.0.1,localhost",
             "no_proxy": "127.0.0.1,localhost",
-            "OPENAI_API_KEY": "yolomux-test-only",
-            "ANTHROPIC_API_KEY": "yolomux-test-only",
+            "OPENAI_API_KEY": "yomux-test-only",
+            "ANTHROPIC_API_KEY": "yomux-test-only",
             "HTTP_PROXY": "http://127.0.0.1:9",
             "HTTPS_PROXY": "http://127.0.0.1:9",
             **client_env,
@@ -461,7 +461,7 @@ def _write_client_config(client: str, config_root: Path, port: int, scenario: Ag
         workspace.mkdir(mode=0o700, exist_ok=True)
         path.write_text(
             f'model = "{TEST_MODELS[client]}"\nmodel_provider = "yolomux-fake"\n\n'
-            f'[model_providers.yolomux-fake]\nname = "YOLOmux fake"\nwire_api = "responses"\nbase_url = "{endpoint}/v1"\nenv_key = "OPENAI_API_KEY"\n',
+            f'[model_providers.yolomux-fake]\nname = "YOmux fake"\nwire_api = "responses"\nbase_url = "{endpoint}/v1"\nenv_key = "OPENAI_API_KEY"\n',
             encoding="utf-8",
         )
         with path.open("a", encoding="utf-8") as config_file:
@@ -469,14 +469,14 @@ def _write_client_config(client: str, config_root: Path, port: int, scenario: Ag
     elif client == "claude":
         path = config_root / "claude-settings" / "settings.json"
         path.parent.mkdir(mode=0o700, exist_ok=True)
-        path.write_text(json.dumps({"model": TEST_MODELS[client], "apiKeyHelper": "printf yolomux-test-only", "env": {"ANTHROPIC_BASE_URL": endpoint}}) + "\n", encoding="utf-8")
+        path.write_text(json.dumps({"model": TEST_MODELS[client], "apiKeyHelper": "printf yomux-test-only", "env": {"ANTHROPIC_BASE_URL": endpoint}}) + "\n", encoding="utf-8")
     else:
         path = config_root / "opencode" / "opencode.json"
         path.parent.mkdir(mode=0o700, exist_ok=True)
         path.write_text(json.dumps({
             "$schema": "https://opencode.ai/config.json",
             "model": TEST_MODELS[client],
-            "provider": {"yolomux-fake": {"npm": "@ai-sdk/openai-compatible", "name": "YOLOmux fake", "options": {"baseURL": f"{endpoint}/v1", "apiKey": "yolomux-test-only"}, "models": {"gpt-4o-mini": {"name": "gpt-4o-mini"}}}},
+            "provider": {"yolomux-fake": {"npm": "@ai-sdk/openai-compatible", "name": "YOmux fake", "options": {"baseURL": f"{endpoint}/v1", "apiKey": "yomux-test-only"}, "models": {"gpt-4o-mini": {"name": "gpt-4o-mini"}}}},
         }, indent=2) + "\n", encoding="utf-8")
     path.chmod(0o600)
     return path
@@ -905,7 +905,7 @@ def _run_scenario(client: str, scenario: AgentScenario, tmp_path: Path, *, requi
         if client == "opencode":
             client_env = {**client_env, "OPENCODE_E2E_OUTPUT": str(opencode_output_path)}
         endpoint = f"http://127.0.0.1:{port}{scenario.fake_path}"
-        env = {**os.environ, "HOME": str(home), "XDG_CONFIG_HOME": str(xdg / "config"), "XDG_DATA_HOME": str(xdg / "data"), "XDG_STATE_HOME": str(xdg / "state"), "YOLOMUX_STATE_DIR": str(state_dir), "YOLOMUX_TMUX_SOCKET": str(socket_path), "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost", "OPENAI_API_KEY": "yolomux-test-only", "ANTHROPIC_API_KEY": "yolomux-test-only", "HTTP_PROXY": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9", **client_env, **_endpoint_environment(client, endpoint)}
+        env = {**os.environ, "HOME": str(home), "XDG_CONFIG_HOME": str(xdg / "config"), "XDG_DATA_HOME": str(xdg / "data"), "XDG_STATE_HOME": str(xdg / "state"), "YOLOMUX_STATE_DIR": str(state_dir), "YOLOMUX_TMUX_SOCKET": str(socket_path), "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost", "OPENAI_API_KEY": "yomux-test-only", "ANTHROPIC_API_KEY": "yomux-test-only", "HTTP_PROXY": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9", **client_env, **_endpoint_environment(client, endpoint)}
         if client == "opencode":
             env["XDG_CONFIG_HOME"] = str(config.parent.parent)
         passed = {"HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "YOLOMUX_STATE_DIR", "YOLOMUX_TMUX_SOCKET", "NO_PROXY", "no_proxy", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "HTTP_PROXY", "HTTPS_PROXY", *client_env, *_endpoint_environment(client, endpoint)}

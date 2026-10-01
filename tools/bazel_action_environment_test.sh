@@ -19,7 +19,8 @@ assert_value GO111MODULE on
 assert_value GOTOOLCHAIN local
 assert_value GOPROXY off
 assert_value GOSUMDB off
-assert_value GOMODCACHE /opt/yolomux-go-mod-cache
+assert_value GOMODCACHE /opt/yomux-go-mod-cache
+assert_value YOMUX_TEST_CONTAINER 1
 assert_value YOLOMUX_TEST_CONTAINER 1
 
 case "${GOPATH-}" in

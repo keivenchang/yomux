@@ -4,7 +4,7 @@
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
-if git -C "$repo_root" diff --cached --quiet -- static_src/ tools/static_build.py .githooks/pre-commit static/yolomux.js; then
+if git -C "$repo_root" diff --cached --quiet -- static_src/ tools/static_build.py .githooks/pre-commit static/yomux.js; then
     exit 0
 fi
 

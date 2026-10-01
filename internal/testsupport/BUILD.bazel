@@ -12,7 +12,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "testsupport_lib",
     srcs = ["environment.go", "runfiles.go"],
-    importpath = "github.com/keivenchang/yolomux/internal/testsupport",
+    importpath = "github.com/keivenchang/yomux/internal/testsupport",
     deps = ["@rules_go//go/runfiles"],
 )
 

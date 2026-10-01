@@ -18,13 +18,13 @@ import pytest
 
 from tests.helpers.stats_replay import replay_observation as _observation
 from tests.helpers.stats_replay import ring_slot_state as _slot_state
-from yolomux_lib.stats_current import materializer
-from yolomux_lib.stats_current import service as service_module
-from yolomux_lib.stats_current import storage
-from yolomux_lib.stats_current.storage import CoverageEpoch
-from yolomux_lib.stats_current.storage import UnavailableSpan
-from yolomux_lib.stats_current.storage import UsageAtom
-from yolomux_lib.stats_current.storage import UsageAtomTombstone
+from yomux_lib.stats_current import materializer
+from yomux_lib.stats_current import service as service_module
+from yomux_lib.stats_current import storage
+from yomux_lib.stats_current.storage import CoverageEpoch
+from yomux_lib.stats_current.storage import UnavailableSpan
+from yomux_lib.stats_current.storage import UsageAtom
+from yomux_lib.stats_current.storage import UsageAtomTombstone
 
 RESOLUTION = 60
 RANGE_SECONDS = 3_600

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from yolomux_lib import tmux
+from yomux_lib import tmux
 
 
 @pytest.mark.xfail(strict=True, reason="F3: v0.6.10 has no recovery-row identity contract shared by live and Lost sessions.")

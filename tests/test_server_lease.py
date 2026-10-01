@@ -12,13 +12,13 @@ from tests.isolated_dev_server import start_isolated_dev_server
 from tests.isolated_dev_server import stop_and_reap_daemons
 from tests.tmux_runtime import start_isolated_tmux_runtime
 from tests.tmux_runtime import stop_isolated_tmux_runtime
-from yolomux_lib.infra.host_identity import HostIdentity
-from yolomux_lib.infra.root_paths import YolomuxRoots
-from yolomux_lib import server_lease as server_lease_module
-from yolomux_lib.server_lease import acquire_server_port_lease
-from yolomux_lib.server_lease import acquire_instance_and_port_leases
-from yolomux_lib.server_lease import acquire_instance_root_lease
-from yolomux_lib.server_lease import InstanceLeaseError
+from yomux_lib.infra.host_identity import HostIdentity
+from yomux_lib.infra.root_paths import YolomuxRoots
+from yomux_lib import server_lease as server_lease_module
+from yomux_lib.server_lease import acquire_server_port_lease
+from yomux_lib.server_lease import acquire_instance_and_port_leases
+from yomux_lib.server_lease import acquire_instance_root_lease
+from yomux_lib.server_lease import InstanceLeaseError
 
 
 def _roots(tmp_path, prefix=""):
@@ -155,7 +155,7 @@ def test_instance_root_lease_force_stops_verified_owner(tmp_path):
     code = (
         "import time; "
         "from pathlib import Path; "
-        "from yolomux_lib.server_lease import acquire_instance_root_lease; "
+        "from yomux_lib.server_lease import acquire_instance_root_lease; "
         "lease = acquire_instance_root_lease(Path(__import__('sys').argv[1])); "
         "Path(__import__('sys').argv[2]).write_text('ready'); "
         "time.sleep(60)"
@@ -184,8 +184,8 @@ def test_combined_force_waits_for_owner_exit_after_early_lease_release(tmp_path)
     code = """import signal
 import time
 from pathlib import Path
-from yolomux_lib.infra.root_paths import YolomuxRoots
-from yolomux_lib.server_lease import acquire_instance_and_port_leases
+from yomux_lib.infra.root_paths import YolomuxRoots
+from yomux_lib.server_lease import acquire_instance_and_port_leases
 
 a, b, c, d, e = map(Path, __import__('sys').argv[1:6])
 ready_path = Path(__import__('sys').argv[6])
@@ -306,8 +306,8 @@ def test_force_does_not_stop_root_owner_when_requested_port_is_foreign(tmp_path)
     code = (
         "import time; "
         "from pathlib import Path; "
-        "from yolomux_lib.infra.root_paths import YolomuxRoots; "
-        "from yolomux_lib.server_lease import acquire_instance_root_lease; "
+        "from yomux_lib.infra.root_paths import YolomuxRoots; "
+        "from yomux_lib.server_lease import acquire_instance_root_lease; "
         "a,b,c,d,e=map(Path,__import__('sys').argv[1:6]); "
         "lease=acquire_instance_root_lease(YolomuxRoots(config_dir=a,state_dir=b,cache_dir=c,codex_home=d,runtime_dir=e)); "
         "Path(__import__('sys').argv[6]).write_text('ready'); "
@@ -387,6 +387,8 @@ def test_process_level_root_lease_refuses_second_server_on_another_port(monkeypa
                 sys.executable,
                 "-u",
                 str(source_root / "yolomux.py"),
+                "--backend",
+                "python",
                 "--http",
                 "--host",
                 "127.0.0.1",
@@ -409,7 +411,7 @@ def test_process_level_root_lease_refuses_second_server_on_another_port(monkeypa
 
     assert second is not None
     assert second.returncode == 1
-    assert "Another YOLOmux instance is already running" in second.stderr
+    assert "Another YOmux instance is already running" in second.stderr
 
 
 def test_process_level_force_replaces_existing_server(monkeypatch, tmp_path):

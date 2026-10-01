@@ -13,18 +13,18 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib.stats_current import migration
-from yolomux_lib.stats_current import identity
-from yolomux_lib.stats_current import storage as storage_module
-from yolomux_lib.stats_current.storage import DATABASE_FILENAME
-from yolomux_lib.stats_current.storage import RETENTION_SECONDS
-from yolomux_lib.stats_current.storage import SCHEMA_VERSION
-from yolomux_lib.stats_current.storage import WRITER_FENCE_FILENAME
-from yolomux_lib.stats_current.storage import MigrationReconciliation
-from yolomux_lib.stats_current.storage import Observation
-from yolomux_lib.stats_current.storage import Store
-from yolomux_lib.stats_current.storage import SchemaTooNewError
-from yolomux_lib.stats_current.storage import UsageAtom
+from yomux_lib.stats_current import migration
+from yomux_lib.stats_current import identity
+from yomux_lib.stats_current import storage as storage_module
+from yomux_lib.stats_current.storage import DATABASE_FILENAME
+from yomux_lib.stats_current.storage import RETENTION_SECONDS
+from yomux_lib.stats_current.storage import SCHEMA_VERSION
+from yomux_lib.stats_current.storage import WRITER_FENCE_FILENAME
+from yomux_lib.stats_current.storage import MigrationReconciliation
+from yomux_lib.stats_current.storage import Observation
+from yomux_lib.stats_current.storage import Store
+from yomux_lib.stats_current.storage import SchemaTooNewError
+from yomux_lib.stats_current.storage import UsageAtom
 
 
 def _component(event_id: str, quantity: int, *, timestamp: float = 100) -> dict[str, object]:
@@ -1133,8 +1133,8 @@ def test_current_migration_has_no_retired_runtime_imports():
         if isinstance(node, ast.ImportFrom) and node.module is not None
     }
     assert not imported & {
-        "yolomux_lib.statsd",
-        "yolomux_lib.stats_families",
-        "yolomux_lib.local_services.stats_store",
-        "yolomux_lib.session_files",
+        "yomux_lib.statsd",
+        "yomux_lib.stats_families",
+        "yomux_lib.local_services.stats_store",
+        "yomux_lib.session_files",
     }

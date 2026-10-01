@@ -24,7 +24,7 @@ from tests.browser_helpers.browser_layout import WebDriverWait
 from tests.gate_harness import wait_for_browser_boot
 from tests.gate_harness import retire_expected_fixture_server_log_errors
 from tests.tmux_runtime import run_isolated_tmux
-from yolomux_lib.server_logs import SERVER_LOGS
+from yomux_lib.server_logs import SERVER_LOGS
 
 
 pytest_plugins = ("tests.e2e_browser_harness",)
@@ -521,7 +521,7 @@ def test_real_chromium_markdown_split_full_vieweditor_contract(e2e_browser: Any)
     assert visible_after_all_refreshes is True
 
     def open_context_and_read() -> dict[str, Any]:
-        e2e_browser.driver.execute_script("const p=arguments[0]._pmView; p.dispatch(p.state.tr.setSelection(YOLOmuxProseMirror.TextSelection.create(p.state.doc, 1, 5))); p.dom.dispatchEvent(new MouseEvent('contextmenu', {bubbles:true,cancelable:true,clientX:30,clientY:30}));", panel)
+        e2e_browser.driver.execute_script("const p=arguments[0]._pmView; p.dispatch(p.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(p.state.doc, 1, 5))); p.dom.dispatchEvent(new MouseEvent('contextmenu', {bubbles:true,cancelable:true,clientX:30,clientY:30}));", panel)
         return WebDriverWait(e2e_browser.driver, 4).until(lambda driver: driver.execute_script("const m=document.querySelector('.markdown-preview-context-menu'); return m ? {bold:m.querySelector('[data-markdown-command=bold]')?.getAttribute('aria-checked'), strike:m.querySelector('[data-markdown-command=strike]')?.getAttribute('aria-checked'), underline:m.querySelector('[data-markdown-command=underline]')?.getAttribute('aria-checked')} : false"))
 
     first_menu = open_context_and_read()
@@ -531,7 +531,7 @@ def test_real_chromium_markdown_split_full_vieweditor_contract(e2e_browser: Any)
     assert second_menu["bold"] == "true", second_menu
     e2e_browser.driver.execute_script("document.querySelector('.markdown-preview-context-menu')?.remove()")
 
-    mobile_menu = e2e_browser.driver.execute_script("const p=arguments[0]._pmView; p.dispatch(p.state.tr.setSelection(YOLOmuxProseMirror.TextSelection.create(p.state.doc, 1, 5))); const e=new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:30,clientY:30}); e.yolomuxTouchLongPress=true; const prevented=!p.dom.dispatchEvent(e); return {prevented, menu:Boolean(document.querySelector('.markdown-preview-context-menu'))};", panel)
+    mobile_menu = e2e_browser.driver.execute_script("const p=arguments[0]._pmView; p.dispatch(p.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(p.state.doc, 1, 5))); const e=new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:30,clientY:30}); e.yomuxTouchLongPress=true; const prevented=!p.dom.dispatchEvent(e); return {prevented, menu:Boolean(document.querySelector('.markdown-preview-context-menu'))};", panel)
     assert mobile_menu == {"prevented": True, "menu": True}, mobile_menu
     e2e_browser.driver.execute_script("document.querySelector('.markdown-preview-context-menu')?.remove()")
     assert_browser_journey_error_free(e2e_browser.driver, server_log_boundary=e2e_browser.runtime.server_log_boundary)
@@ -652,7 +652,7 @@ def test_authenticated_real_page_finder_repeats_without_pending(authenticated_e2
     authentication = authenticated_e2e_browser.authentication
     assert authentication is not None
     assert authentication.username == "e2e-admin" and authentication.role == "admin"
-    assert any(name.startswith("yolomux_auth_") for name in authentication.cookie_names)
+    assert any(name.startswith("yomux_auth_") for name in authentication.cookie_names)
 
     session = str(authenticated_e2e_browser.runtime.tmux.sessions[0])
     respawned = run_isolated_tmux(

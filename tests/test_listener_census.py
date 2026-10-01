@@ -11,8 +11,8 @@ import pytest
 
 from tools import system_status_latency_probe
 from tools import yostats_active_browser_window
-from yolomux_lib import live_browser_soak
-from yolomux_lib.infra import listener_census
+from yomux_lib import live_browser_soak
+from yomux_lib.infra import listener_census
 
 
 SS_LISTENER = (

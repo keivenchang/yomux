@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib.stats_current import families
+from yomux_lib.stats_current import families
 
 
 def test_manifest_owns_every_current_family_cadence_and_fold():
@@ -128,9 +128,9 @@ def test_current_family_owner_has_no_old_pipeline_dependencies_or_concepts():
         if isinstance(node, ast.ImportFrom) and node.module is not None
     }
     assert not imported & {
-        "yolomux_lib.stats_families",
-        "yolomux_lib.statsd",
-        "yolomux_lib.local_services.stats_store",
+        "yomux_lib.stats_families",
+        "yomux_lib.statsd",
+        "yomux_lib.local_services.stats_store",
     }
     assert len(source.splitlines()) < 300
     for retired_concept in (

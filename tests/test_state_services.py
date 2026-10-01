@@ -4,8 +4,8 @@
 
 import threading
 
-from yolomux_lib import app as app_module
-from yolomux_lib.infra.state_services import BatchedOperationService, SessionFilesService
+from yomux_lib import app as app_module
+from yomux_lib.infra.state_services import BatchedOperationService, SessionFilesService
 
 
 def test_session_files_service_owns_worker_until_target_returns_and_stop_joins_it():

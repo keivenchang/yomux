@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+from typing import Any
 
 import pytest
 
@@ -18,7 +19,7 @@ _previous_dont_write_bytecode = sys.dont_write_bytecode
 sys.dont_write_bytecode = True
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
-from yolomux_lib.infra import worktree_writer
+from yomux_lib.infra import worktree_writer
 
 _HOST_ARTIFACTS = worktree_writer.configure_host_local_artifacts(REPO_ROOT)
 sys.dont_write_bytecode = _previous_dont_write_bytecode
@@ -27,7 +28,7 @@ del _previous_dont_write_bytecode
 # Resolve the cross-run host lock before fallback environment variables replace HOME and
 # YOLOMUX_TOOL_LOCK_PATH. The lock must serialize container launches on the host; a path
 # created inside a container or fixture namespace has no other run to contend with.
-HOST_EXPENSIVE_TOOL_LOCK = Path.home() / ".cache" / "yolomux" / "expensive-tools.lock"
+HOST_EXPENSIVE_TOOL_LOCK = Path.home() / ".cache" / "yomux" / "expensive-tools.lock"
 
 # Import only the stdlib-only image helper here. tools.check imports product configuration
 # and would bind it from the host environment before isolation is installed.
@@ -35,6 +36,14 @@ from tools import docker_image
 from tools.tool_guard import hold_host_tool_flock
 from tools.tool_guard import parent_owns_tool_lock
 from tools.tool_guard import run_reaped_container_command
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool | None:
+    """Skip document coordination directories before pytest stats their protected paths."""
+    if ".agent-edit.lock" in collection_path.name:
+        return True
+    return None
 
 
 def host_local_cache_dir() -> Path:
@@ -46,13 +55,32 @@ def host_local_cache_dir() -> Path:
 def _install_fallback_environment() -> None:
     """Install Phase 1's short, per-process writable namespace."""
 
+    # The container runner may provide canonical YOMUX_* roots. Unit fixtures
+    # intentionally exercise legacy YOLOMUX_* overrides, so clear both halves
+    # of each ambient root pair before installing this process's isolated paths.
+    for name in (
+        "ROOT",
+        "CONFIG_DIR",
+        "STATE_DIR",
+        "CACHE_DIR",
+        "RUNTIME_DIR",
+        "CODEX_HOME",
+        "HOST_ARTIFACT_DIR",
+        "START_LOCK_DIR",
+        "TOOL_LOCK_PATH",
+        "CA_DIR",
+        "LOG_DIR",
+    ):
+        os.environ.pop(f"YOMUX_{name}", None)
+        os.environ.pop(f"YOLOMUX_{name}", None)
+
     test_root_env = "YOLOMUX_TEST_ROOT"
     inherited_test_root = os.environ.get(test_root_env, "").strip()
     if inherited_test_root:
         test_root = Path(inherited_test_root)
         test_root.mkdir(parents=True, exist_ok=True)
     else:
-        test_root = Path(tempfile.mkdtemp(prefix=f"yolomux-test-{os.getpid()}-{os.getuid()}-", dir="/tmp"))
+        test_root = Path(tempfile.mkdtemp(prefix=f"yomux-test-{os.getpid()}-{os.getuid()}-", dir="/tmp"))
         test_root.chmod(0o700)
         os.environ[test_root_env] = str(test_root)
 
@@ -185,11 +213,30 @@ def pytest_configure(config: pytest.Config) -> None:
     config.inicfg["cache_dir"] = str(host_local_cache_dir())
 
 
+@pytest.hookimpl(optionalhook=True)
+def pytest_configure_node(node: Any) -> None:
+    """Give xdist workers the controller's exact shared writer lease."""
+
+    lease = _SESSION_WRITER_LEASE
+    if lease is None:
+        return
+    node.workerinput["yomux_worktree_writer_token"] = lease.token
+    node.workerinput["yomux_worktree_writer_slot"] = str(lease.slot_dir)
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_sessionstart(session: pytest.Session) -> None:
-    """Declare direct host/in-container pytest runs as worktree writers."""
+    """Adopt the controller lease in workers before they run tests or subprocess checks."""
 
     global _SESSION_WRITER_LEASE
+    config = session.config
+    if hasattr(config, "workerinput"):
+        workerinput = config.workerinput
+        token = str(workerinput.get("yomux_worktree_writer_token") or "")
+        slot = str(workerinput.get("yomux_worktree_writer_slot") or "")
+        if token and slot:
+            os.environ[worktree_writer.WRITER_TOKEN_ENV] = token
+            os.environ["YOLOMUX_WORKTREE_WRITER_SLOT"] = slot
     try:
         _SESSION_WRITER_LEASE = worktree_writer.acquire_worktree_writer(REPO_ROOT, purpose="pytest")
     except (worktree_writer.WorktreeWriterBusy, worktree_writer.WorktreeWriterContainerRefusal) as error:

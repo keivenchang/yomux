@@ -17,12 +17,12 @@ import threading
 from pathlib import Path
 
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
-from yolomux_lib.infra import common
-from yolomux_lib.stats_current import client as stats_client
-from yolomux_lib.stats_current import service as stats_service
-from yolomux_lib.stats_current import storage
-from yolomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
-from yolomux_lib.stats_current.usage import usage_atom_from_source
+from yomux_lib.infra import common
+from yomux_lib.stats_current import client as stats_client
+from yomux_lib.stats_current import service as stats_service
+from yomux_lib.stats_current import storage
+from yomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
+from yomux_lib.stats_current.usage import usage_atom_from_source
 from tools.mockers.transcript import codex_meta
 from tools.mockers.transcript import codex_usage
 from tools.mockers.transcript import write_records

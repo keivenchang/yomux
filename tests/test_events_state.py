@@ -3,7 +3,7 @@ import os
 import threading
 
 
-from yolomux_lib import events
+from yomux_lib import events
 
 
 def use_temp_state(monkeypatch, tmp_path):

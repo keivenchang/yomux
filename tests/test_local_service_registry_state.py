@@ -11,15 +11,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from yolomux_lib.local_services import registry as registry_module
-from yolomux_lib.local_services import rpc
-from yolomux_lib.local_services import runtime
-from yolomux_lib.local_services.registry import ChildOwnershipState
-from yolomux_lib.local_services.registry import HealthProbeCache
-from yolomux_lib.local_services.registry import LOCAL_SERVICE_HEALTH_CACHE_SECONDS
-from yolomux_lib.local_services.registry import LocalServiceRegistry
-from yolomux_lib.local_services.registry import LocalServiceSpec
-from yolomux_lib.local_services.registry import StartupFailureState
+from yomux_lib.local_services import registry as registry_module
+from yomux_lib.local_services import rpc
+from yomux_lib.local_services import runtime
+from yomux_lib.local_services.registry import ChildOwnershipState
+from yomux_lib.local_services.registry import HealthProbeCache
+from yomux_lib.local_services.registry import LOCAL_SERVICE_HEALTH_CACHE_SECONDS
+from yomux_lib.local_services.registry import LocalServiceRegistry
+from yomux_lib.local_services.registry import LocalServiceSpec
+from yomux_lib.local_services.registry import StartupFailureState
 
 
 def test_startup_failure_state_resets_one_complete_episode():
@@ -145,7 +145,7 @@ def test_a_self_connection_never_counts_as_demand_but_a_real_client_does(tmp_pat
     Synchronisation is event-driven throughout; there is no sleep anywhere.
     """
     socket_path = tmp_path / "service.sock"
-    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yolomux-testd")
+    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yomux-testd")
     lock_path = tmp_path / "service.lock"
     stop_event = threading.Event()
     listener_ready = threading.Event()

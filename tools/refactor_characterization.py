@@ -22,18 +22,18 @@ MANIFEST_VERSION = 1
 DEFAULT_MANIFEST = REPO_ROOT / "tests/fixtures/refactor_characterization/v1.json"
 
 PYTHON_INPUTS = (
-    "yolomux_lib/app.py", "yolomux_lib/server.py", "yolomux_lib/http_routes.py",
-    "yolomux_lib/statusd.py", "yolomux_lib/watchd.py", "yolomux_lib/approval/approvald.py",
-    "yolomux_lib/infra/batchd.py", "yolomux_lib/search/search_indexer.py",
-    "yolomux_lib/local_services/rpc.py", "yolomux_lib/workspace/session_files.py",
+    "yomux_lib/app.py", "yomux_lib/server.py", "yomux_lib/http_routes.py",
+    "yomux_lib/statusd.py", "yomux_lib/watchd.py", "yomux_lib/approval/approvald.py",
+    "yomux_lib/infra/batchd.py", "yomux_lib/search/search_indexer.py",
+    "yomux_lib/local_services/rpc.py", "yomux_lib/workspace/session_files.py",
     "tests/conftest.py", "tests/gate_harness.py", "tools/check.py",
 )
 FRONTEND_INPUTS = (
-    "static_src/js/yolomux/00_bootstrap_state.js", "static_src/js/yolomux/20_layout_state.js",
-    "static_src/js/yolomux/40_file_explorer_files.js",
-    "static_src/js/yolomux/82_chat_panel.js", "static_src/js/yolomux/84_stats_current.js",
-    "static_src/js/yolomux/85_debug_panel.js", "static_src/js/yolomux/89_preview_renderers.js",
-    "static_src/js/yolomux/99_terminal_boot.js",
+    "static_src/js/yomux/00_bootstrap_state.js", "static_src/js/yomux/20_layout_state.js",
+    "static_src/js/yomux/40_file_explorer_files.js",
+    "static_src/js/yomux/82_chat_panel.js", "static_src/js/yomux/84_stats_current.js",
+    "static_src/js/yomux/85_debug_panel.js", "static_src/js/yomux/89_preview_renderers.js",
+    "static_src/js/yomux/99_terminal_boot.js",
 )
 TEST_INPUTS = (
     "tests/test_app.py", "tests/test_local_services_launch.py", "tests/test_local_services_rpc.py",
@@ -62,13 +62,21 @@ class Source:
 
 def git_source(commit: str) -> Source:
     def read(path: str) -> str:
-        result = subprocess.run(
-            ["git", "show", f"{commit}:{path}"], cwd=REPO_ROOT,
-            capture_output=True, text=True, check=False,
-        )
-        if result.returncode != 0:
-            return ""
-        return result.stdout
+        candidates = [path]
+        if path == "yomux.py":
+            candidates.append("yolomux.py")
+        elif path.startswith("yomux_lib/"):
+            candidates.append(path.replace("yomux_lib/", "yolomux_lib/", 1))
+        elif path.startswith(("static_src/js/yomux/", "static_src/css/yomux/")):
+            candidates.append(path.replace("/yomux/", "/yolomux/", 1))
+        for candidate in candidates:
+            result = subprocess.run(
+                ["git", "show", f"{commit}:{candidate}"], cwd=REPO_ROOT,
+                capture_output=True, text=True, check=False,
+            )
+            if result.returncode == 0:
+                return result.stdout
+        return ""
     return Source(f"git:{commit}", read)
 
 
@@ -102,7 +110,7 @@ def _signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
 
 
 def public_facades(source: Source) -> list[str]:
-    targets = {"yolomux_lib/app.py": {"TmuxWebtermApp"}, "yolomux_lib/server.py": {"Handler"}}
+    targets = {"yomux_lib/app.py": {"TmuxWebtermApp"}, "yomux_lib/server.py": {"Handler"}}
     values = []
     for path, classes in targets.items():
         tree = _tree(source, path)
@@ -119,7 +127,7 @@ def public_facades(source: Source) -> list[str]:
 
 
 def route_catalog(source: Source) -> list[str]:
-    tree = _tree(source, "yolomux_lib/http_routes.py")
+    tree = _tree(source, "yomux_lib/http_routes.py")
     values = []
     if tree is None:
         return values

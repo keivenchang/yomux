@@ -27,7 +27,7 @@ def test_automated_tests_do_not_reference_live_yolomux_ports():
         text = path.read_text(encoding="utf-8")
         for port in LIVE_YOLOMUX_PORTS:
             if re.search(rf"\b(?:localhost|127\.0\.0\.1|0\.0\.0\.0):{port}\b|:{port}\b", text):
-                offenders.append(f"{path.relative_to(REPO_ROOT)} references live YOLOmux port {port}")
+                offenders.append(f"{path.relative_to(REPO_ROOT)} references live YOmux port {port}")
 
     assert offenders == []
 

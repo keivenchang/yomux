@@ -6,12 +6,12 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const {makeCatalogT, runSuites, sourceBetween, testAsync} = require('./browser_helpers/layout_test_helper');
 
-const source = fs.readFileSync('static_src/js/yolomux/05_i18n.js', 'utf8');
-const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
-const menuSource = fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8');
+const source = fs.readFileSync('static_src/js/yomux/05_i18n.js', 'utf8');
+const layoutSource = fs.readFileSync('static_src/js/yomux/20_layout_state.js', 'utf8');
+const menuSource = fs.readFileSync('static_src/js/yomux/30_app_menus.js', 'utf8');
 const terminalSource = [
-  'static_src/js/yolomux/99_terminal_boot.js',
-  'static_src/js/yolomux/99_terminal_shortcuts_boot.js',
+  'static_src/js/yomux/99_terminal_boot.js',
+  'static_src/js/yomux/99_terminal_shortcuts_boot.js',
 ].map(path => fs.readFileSync(path, 'utf8')).join('\n');
 const englishCatalog = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'));
 
@@ -34,7 +34,8 @@ function testChromeOwnerBehavior() {
     'app.latencyTitle': 'Latencia',
     'app.menusAria': 'Menus',
     'brand.version': 'Marca {version}',
-    'brand.wordmark.lo': 'LE',
+    'brand.wordmark.initial': 'Y',
+    'brand.wordmark.second': 'O',
     'brand.marker': 'UE',
     'common.close': 'Cerrar',
     'common.loading': 'Cargando',
@@ -61,8 +62,8 @@ function testChromeOwnerBehavior() {
     bootstrap: {version: '1.2.3'},
     document: {
       querySelectorAll(selector) {
-        if (selector === '.brand-title .brand-yolo') return [brandYo];
-        if (selector === '.brand-title .brand-lo') return [brandLo];
+        if (selector === '.brand-title .brand-mark') return [brandYo];
+        if (selector === '.brand-title .brand-second') return [brandLo];
         if (selector === '.brand-title') return [brand];
         return [];
       },
@@ -80,8 +81,8 @@ function testChromeOwnerBehavior() {
   );
   menuContext.api.renderBrandWordmark();
   menuContext.api.renderTopbarStaticChrome();
-  assert.equal(brandYo.textContent, 'UE');
-  assert.equal(brandLo.textContent, 'LE');
+  assert.equal(brandYo.textContent, 'Y');
+  assert.equal(brandLo.textContent, 'O');
   assert.equal(brand.attributes['aria-label'], 'Marca 1.2.3');
   assert.equal(sessionButtons.attributes['aria-label'], 'Menus');
   assert.equal(latencyMeter.title, 'Latencia');
@@ -222,7 +223,7 @@ vm.runInContext(
 async function runI18nLocaleRegistrySuite() {
   await testAsync('locale registry normalizes locales and relocalizes global chrome', async () => {
   const api = context.api;
-  assert.equal(englishCatalog['app.latencyTitle'], 'Browser ↔ YOLOmux round-trip latency (ms)', 'latency hover explains browser round-trip units');
+  assert.equal(englishCatalog['app.latencyTitle'], 'Browser ↔ YOmux round-trip latency (ms)', 'latency hover explains browser round-trip units');
   assert.deepEqual([...api.i18nSupportedLocales()], ['en', 'he', 'pt-BR']);
   assert.deepEqual(
     [...api.i18nLocaleChoices()].map(choice => [choice.value, choice.label]),

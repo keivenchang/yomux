@@ -25,8 +25,8 @@ from pathlib import Path
 import pytest
 
 from tools.instance_isolation import PRODUCT_ROOT_KEYS
-from yolomux_lib.infra.inotify_capacity import inotify_watch_descriptor_count
-from yolomux_lib.watchd_client import WatchClient
+from yomux_lib.infra.inotify_capacity import inotify_watch_descriptor_count
+from yomux_lib.watchd_client import WatchClient
 
 ROOT = Path(__file__).resolve().parents[1]
 # Enough directories that an O(tree) topology is unmistakable next to an O(visible) one, while the
@@ -92,7 +92,7 @@ def _spawn_watchd(base: Path, socket_path: Path) -> subprocess.Popen:
     boot = (
         f"import sys; sys.path.insert(0, {str(ROOT)!r})\n"
         "from pathlib import Path\n"
-        "from yolomux_lib.watchd import PersistentWatchService\n"
+        "from yomux_lib.watchd import PersistentWatchService\n"
         f"raise SystemExit(PersistentWatchService(Path({str(socket_path)!r}), idle_seconds=120.0).run())\n"
     )
     return subprocess.Popen(

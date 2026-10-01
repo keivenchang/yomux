@@ -7,25 +7,25 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib import github_client
-from yolomux_lib import linear_client
-from yolomux_lib import metadata
-from yolomux_lib.common import _CACHE_MISS
-from yolomux_lib.common import AgentInfo
-from yolomux_lib.common import PaneInfo
-from yolomux_lib.common import SessionInfo
-from yolomux_lib.common import TmuxPaneInfo
-from yolomux_lib.common import tail_file_lines
-from yolomux_lib.metadata import MetadataCache
-from yolomux_lib.metadata import extract_linear_ids
-from yolomux_lib.metadata import github_checks_unknown
-from yolomux_lib.metadata import linear_issue_metadata
-from yolomux_lib.metadata import parse_pull_request_ref
-from yolomux_lib.metadata import current_branch_pull_request
-from yolomux_lib.metadata import summarize_github_checks
-from yolomux_lib.metadata import WATCHED_PR_LIMIT
-from yolomux_lib.metadata import watched_pr_metadata
-from yolomux_lib.sessions import discover_sessions
+from yomux_lib import github_client
+from yomux_lib import linear_client
+from yomux_lib import metadata
+from yomux_lib.common import _CACHE_MISS
+from yomux_lib.common import AgentInfo
+from yomux_lib.common import PaneInfo
+from yomux_lib.common import SessionInfo
+from yomux_lib.common import TmuxPaneInfo
+from yomux_lib.common import tail_file_lines
+from yomux_lib.metadata import MetadataCache
+from yomux_lib.metadata import extract_linear_ids
+from yomux_lib.metadata import github_checks_unknown
+from yomux_lib.metadata import linear_issue_metadata
+from yomux_lib.metadata import parse_pull_request_ref
+from yomux_lib.metadata import current_branch_pull_request
+from yomux_lib.metadata import summarize_github_checks
+from yomux_lib.metadata import WATCHED_PR_LIMIT
+from yomux_lib.metadata import watched_pr_metadata
+from yomux_lib.sessions import discover_sessions
 
 from _git_helpers import git as _git
 
@@ -41,7 +41,7 @@ def _pane(session, index, path):
 def test_tmux_pane_info_is_the_explicit_backend_type_with_compatibility_alias():
     assert PaneInfo is TmuxPaneInfo
     backend_sources = [
-        path for path in Path("yolomux_lib").glob("*.py")
+        path for path in Path("yomux_lib").glob("*.py")
         if path.name != "common.py"
     ]
     assert all(" PaneInfo" not in path.read_text(encoding="utf-8") for path in backend_sources)
@@ -941,7 +941,7 @@ def test_github_graphql_posts_query_with_token(monkeypatch):
     call = calls[0]
     assert call["url"].endswith("/graphql")
     assert call["headers"]["Accept"] == "application/vnd.github+json"
-    assert call["headers"]["User-Agent"] == "YOLOmux"
+    assert call["headers"]["User-Agent"] == "YOmux"
     assert call["headers"]["Content-Type"] == "application/json"
     assert call["headers"]["Authorization"] == "token test-token"
     assert call["payload"] == {"query": "query($id:Int!){x}", "variables": {"id": 7}}
@@ -1440,7 +1440,7 @@ def test_session_metadata_retirement_guards_keep_git_ownership_in_work_graph_onl
     assert all("git" not in row for row in payload["window_metadata"])
     metadata_source = Path(metadata.__file__).read_text(encoding="utf-8")
     assert "def project_pull_request" not in metadata_source
-    frontend_sources = "\n".join(path.read_text(encoding="utf-8") for path in Path("static_src/js/yolomux").glob("*.js"))
+    frontend_sources = "\n".join(path.read_text(encoding="utf-8") for path in Path("static_src/js/yomux").glob("*.js"))
     assert "info.project" not in frontend_sources
     assert "window_metadata.git" not in frontend_sources
 

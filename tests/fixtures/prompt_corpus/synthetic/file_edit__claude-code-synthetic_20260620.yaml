@@ -27,7 +27,7 @@ expected:
   - 'No'
   prompt_kind: file-edit
   prompt_type: file
-  question_text: Do you want to make this edit to yolomux_lib/prompt_detector.py?
+  question_text: Do you want to make this edit to yomux_lib/prompt_detector.py?
   screen_key: approval
   selected_option: 1
   yes_selected: true
@@ -41,7 +41,7 @@ operations: []
 raw_capture: |
   ● I can make the requested change.
 
-  Do you want to make this edit to yolomux_lib/prompt_detector.py?
+  Do you want to make this edit to yomux_lib/prompt_detector.py?
   ❯ 1. Yes
     2. Yes, and allow Claude to edit files in this project
     3. No
@@ -53,7 +53,7 @@ source_text_file: claude_file_edit.txt
 styled_capture: |
   ● I can make the requested change.
 
-  Do you want to make this edit to yolomux_lib/prompt_detector.py?
+  Do you want to make this edit to yomux_lib/prompt_detector.py?
   ❯ 1. Yes
     2. Yes, and allow Claude to edit files in this project
     3. No
@@ -62,7 +62,7 @@ styled_capture: |
 visible_text: |
   ● I can make the requested change.
 
-  Do you want to make this edit to yolomux_lib/prompt_detector.py?
+  Do you want to make this edit to yomux_lib/prompt_detector.py?
   ❯ 1. Yes
     2. Yes, and allow Claude to edit files in this project
     3. No

@@ -2,10 +2,10 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib.infra.filesystem_preflight import FilesystemClassification
-from yolomux_lib.infra.filesystem_preflight import FilesystemPreflightError
-from yolomux_lib.infra.host_identity import HostIdentity
-from yolomux_lib.infra import common
+from yomux_lib.infra.filesystem_preflight import FilesystemClassification
+from yomux_lib.infra.filesystem_preflight import FilesystemPreflightError
+from yomux_lib.infra.host_identity import HostIdentity
+from yomux_lib.infra import common
 from tests.gate_harness import UNIX_SOCKET_PATH_LIMIT_BYTES
 
 
@@ -19,7 +19,7 @@ def test_runtime_root_prefers_xdg_and_is_scoped_to_host_and_boot(tmp_path):
         identity=_identity(),
     )
 
-    assert root == tmp_path / "xdg-runtime" / "yolomux" / "h-host-a" / "b-boot-a"
+    assert root == tmp_path / "xdg-runtime" / "yomux" / "h-host-a" / "b-boot-a"
 
 
 def test_runtime_root_fallback_is_scoped_to_host_and_boot(tmp_path):
@@ -30,7 +30,7 @@ def test_runtime_root_fallback_is_scoped_to_host_and_boot(tmp_path):
         uid=1000,
     )
 
-    assert root == tmp_path / "temporary" / "yolomux-server-1000" / "shared" / "h-host-a" / "b-boot-a"
+    assert root == tmp_path / "temporary" / "yomux-server-1000" / "shared" / "h-host-a" / "b-boot-a"
 
 
 def test_runtime_root_refuses_a_network_filesystem(tmp_path):

@@ -30,10 +30,10 @@ from tests.gate_harness import repeat
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import wait_for_browser_boot
 from tests.terminal_state_guard import assert_terminal_transition
-from yolomux_lib import filesystem
-from yolomux_lib.observability.failure_severity import EXPECTED_OUTCOME_LOG_LEVEL
-from yolomux_lib.observability.failure_severity import FAULT_LOG_LEVEL
-from yolomux_lib.server_logs import SERVER_LOGS
+from yomux_lib import filesystem
+from yomux_lib.observability.failure_severity import EXPECTED_OUTCOME_LOG_LEVEL
+from yomux_lib.observability.failure_severity import FAULT_LOG_LEVEL
+from yomux_lib.server_logs import SERVER_LOGS
 
 
 pytestmark = pytest.mark.socket

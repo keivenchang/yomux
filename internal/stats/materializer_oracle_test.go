@@ -78,7 +78,7 @@ func TestMaterializerMatchesPythonAcrossCurrentMatrix(t *testing.T) {
 		t.Fatal(err)
 	}
 	const oracle = `import dataclasses, json, sys
-from yolomux_lib.stats_current import materializer, storage
+from yomux_lib.stats_current import materializer, storage
 
 fixture = json.loads(open(sys.argv[1], encoding="utf-8").read())
 observations = tuple(storage.Observation(
@@ -203,7 +203,7 @@ func TestMaterializerFoldOrderingMatchesPython(t *testing.T) {
 		t.Fatal(err)
 	}
 	const oracle = `import json, sys
-from yolomux_lib.stats_current import materializer, storage
+from yomux_lib.stats_current import materializer, storage
 
 fixture = json.loads(open(sys.argv[1], encoding="utf-8").read())
 observations = tuple(storage.Observation(
@@ -265,7 +265,7 @@ func TestMemoryNoDataMatchesPythonOracle(t *testing.T) {
 		t.Fatal(err)
 	}
 	const oracle = `import dataclasses, json, sys
-from yolomux_lib.stats_current import materializer, storage
+from yomux_lib.stats_current import materializer, storage
 
 fixture = json.loads(open(sys.argv[1], encoding="utf-8").read())
 observations = tuple(storage.Observation(

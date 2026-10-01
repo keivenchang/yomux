@@ -4,10 +4,10 @@ set -euo pipefail
 # Shared by Bazel E2E wrappers so runfiles, bazel test sandboxes, and the outer test container use
 # one source-root resolver and one containment decision.
 bazel_test_in_container() {
-  [ "${YOLOMUX_TEST_CONTAINER:-}" = 1 ] || return 1
+  [ "${YOMUX_TEST_CONTAINER-${YOLOMUX_TEST_CONTAINER:-}}" = 1 ] || return 1
   [ -f /.dockerenv ] || return 1
-  [ -f /opt/yolomux-test-image.marker ] || return 1
-  grep -Fxq 'yolomux-test-image-v1' /opt/yolomux-test-image.marker || return 1
+  [ -f /opt/yomux-test-image.marker ] || return 1
+  grep -Fxq 'yomux-test-image-v1' /opt/yomux-test-image.marker || return 1
   awk '$5 == "/" { for (i = 1; i <= NF; i++) if ($i == "-") { print $(i + 1); exit } }' /proc/self/mountinfo \
     | grep -Eq '^(overlay|fuse-overlayfs|aufs)$'
 }
@@ -67,7 +67,7 @@ bazel_test_source_root() {
 
 bazel_test_prepare_repository_cache() {
   local cache_root="$1"
-  local seed_root=/opt/yolomux-bazel-repository-cache
+  local seed_root=/opt/yomux-bazel-repository-cache
   mkdir -p -- "$cache_root"
   # Bazel creates temporary files while reading a repository cache. Keep the image seed immutable
   # and give this invocation a private writable copy so parallel actions cannot share cache state.
@@ -103,7 +103,7 @@ bazel_test_prepare_environment() {
   # the host or a parent action into Go/browser fixtures.
   while IFS= read -r variable; do
     case "$variable" in
-      YOLOMUX_TEST_CONTAINER|YOLOMUX_GO_BINARY|YOLOMUX_GO_STATS_BROWSER_TEST|YOLOMUX_TEST_SOURCE_ROOT|YOLOMUX_WORKTREE_WRITER_SLOT)
+      YOMUX_TEST_CONTAINER|YOMUX_TEST_SOURCE_ROOT|YOMUX_TEST_IMAGE|YOMUX_TEST_IMAGE_REBUILD|YOMUX_IMAGE_RUNNER_UID|YOMUX_IMAGE_RUNNER_GID|YOLOMUX_GO_BINARY|YOLOMUX_GO_STATS_BROWSER_TEST|YOLOMUX_TEST_CONTAINER|YOLOMUX_TEST_SOURCE_ROOT|YOLOMUX_WORKTREE_WRITER_SLOT)
         continue
         ;;
       YOLOMUX_*|XDG_*|OPENCODE_*|CODEX_*|CLAUDE_*|TMUX|TMUX_PANE|TMUX_TMPDIR|PYTHONPATH|PYTHONHOME|PYTHONPYCACHEPREFIX)

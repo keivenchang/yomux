@@ -10,8 +10,8 @@ cannot be established by asserting a steady state in each mode separately.
 
 from __future__ import annotations
 
-from yolomux_lib.stats_current import host_collectors
-from yolomux_lib.stats_current import service as service_module
+from yomux_lib.stats_current import host_collectors
+from yomux_lib.stats_current import service as service_module
 
 
 class _Store:

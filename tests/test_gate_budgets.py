@@ -21,21 +21,21 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib.local_services import client as local_service_client_module
-from yolomux_lib.local_services import registry as local_services_registry
-from yolomux_lib.local_services import rpc as local_service_rpc_module
-from yolomux_lib.approval.approvald import ApprovalClient
-from yolomux_lib.infra import batchd as batchd_module
-from yolomux_lib.filesystem import git_ops
-from yolomux_lib.infra.batchd import BatchClient
-from yolomux_lib.infra.batchd import PersistentJobBroker
-from yolomux_lib.local_services.client import LocalServiceClient
-from yolomux_lib.local_services.client import local_service_failure_is_transient
-from yolomux_lib.local_services.rpc import local_service_traffic_ledger
-from yolomux_lib.local_services.rpc import reset_local_service_traffic
-from yolomux_lib.observability.pricing_catalog import PricingRefreshCoordinator
-from yolomux_lib.server_logs import SERVER_LOGS
-from yolomux_lib.stats_current.http import SnapshotHttpResult
+from yomux_lib.local_services import client as local_service_client_module
+from yomux_lib.local_services import registry as local_services_registry
+from yomux_lib.local_services import rpc as local_service_rpc_module
+from yomux_lib.approval.approvald import ApprovalClient
+from yomux_lib.infra import batchd as batchd_module
+from yomux_lib.filesystem import git_ops
+from yomux_lib.infra.batchd import BatchClient
+from yomux_lib.infra.batchd import PersistentJobBroker
+from yomux_lib.local_services.client import LocalServiceClient
+from yomux_lib.local_services.client import local_service_failure_is_transient
+from yomux_lib.local_services.rpc import local_service_traffic_ledger
+from yomux_lib.local_services.rpc import reset_local_service_traffic
+from yomux_lib.observability.pricing_catalog import PricingRefreshCoordinator
+from yomux_lib.server_logs import SERVER_LOGS
+from yomux_lib.stats_current.http import SnapshotHttpResult
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
 from tests.browser_helpers.browser_layout import WebDriverWait
@@ -86,8 +86,8 @@ def test_gate_runtime_paths_are_fixture_owned(gate_runtime_paths):
     assert Path(child_tempdir).resolve() == gate_runtime_paths.tmp_dir.resolve()
     assert gate_runtime_paths.auth_config_path == gate_runtime_paths.config_dir / "auth.yaml"
     patched_paths = dict(gate_runtime_paths.patched_module_paths)
-    assert patched_paths["yolomux_lib.infra.common.AUTH_CONFIG_PATH"] == gate_runtime_paths.auth_config_path
-    assert patched_paths["yolomux_lib.auth.AUTH_CONFIG_PATH"] == gate_runtime_paths.auth_config_path
+    assert patched_paths["yomux_lib.infra.common.AUTH_CONFIG_PATH"] == gate_runtime_paths.auth_config_path
+    assert patched_paths["yomux_lib.auth.AUTH_CONFIG_PATH"] == gate_runtime_paths.auth_config_path
 
 
 def _leave_predecessor_time_wait(host: str, port: int) -> None:
@@ -362,7 +362,7 @@ def _endpoint_compute_sample(runtime, path, surface):
     request_id = f"r-gate-budget-{uuid.uuid4().hex}"
     connection = HTTPConnection("127.0.0.1", runtime.port, timeout=8.0)
     try:
-        connection.request("GET", path, headers={"X-YOLOmux-Request-ID": request_id})
+        connection.request("GET", path, headers={"X-YOmux-Request-ID": request_id})
         response = connection.getresponse()
         endpoint_response = GateHttpResponse(
             status=int(response.status),
@@ -574,13 +574,13 @@ def test_l5_runtime_process_ledger_keeps_launcher_and_finds_untracked_orphan(
             launcher_pid,
             tracked_pgid,
             0.25,
-            f"python3 -m yolomux_lib.gate_tracked --socket {tracked_socket}",
+            f"python3 -m yomux_lib.gate_tracked --socket {tracked_socket}",
         ),
         orphan_pid: local_services_registry.ProcessTableEntry(
             orphan_pid + 1000,
             orphan_pgid,
             4.5,
-            f"python3 -m yolomux_lib.gate_orphan --socket {orphan_socket}",
+            f"python3 -m yomux_lib.gate_orphan --socket {orphan_socket}",
         ),
     }
     monkeypatch.setattr(local_services_registry, "bounded_process_table", lambda: process_table)

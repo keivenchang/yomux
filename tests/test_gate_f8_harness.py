@@ -35,10 +35,10 @@ from tests.helpers.browser_contracts import clean_browser_receipt_barrier
 from tools.tool_guard import hold_host_tool_flock
 from tools.tool_guard import run_reaped_container_command
 from tools.tool_guard import TOOL_LOCK_OWNER_ENV
-from yolomux_lib.infra.host_identity import current_host_identity
-from yolomux_lib.infra.worktree_writer import acquire_worktree_writer
-from yolomux_lib.infra.worktree_writer import inspect_worktree_writer
-from yolomux_lib.infra.worktree_writer import WRITER_TOKEN_ENV
+from yomux_lib.infra.host_identity import current_host_identity
+from yomux_lib.infra.worktree_writer import acquire_worktree_writer
+from yomux_lib.infra.worktree_writer import inspect_worktree_writer
+from yomux_lib.infra.worktree_writer import WRITER_TOKEN_ENV
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -850,7 +850,7 @@ def test_generated_lifecycle_adapter_partitions_pending_by_terminal_owner(browse
         apiOperationState.records.set(unrelatedId, unrelatedRecord);
         apiOperationState.pending.set(unrelatedId, unrelatedRecord);
         try {
-          const state = window.__yolomuxFixtureLifecycle.operationState();
+          const state = window.__yomuxFixtureLifecycle.operationState();
           return {
             pending: state.pending,
             pendingDetails: state.pendingDetails,

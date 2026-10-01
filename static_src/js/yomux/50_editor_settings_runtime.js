@@ -1,0 +1,1680 @@
+function editorViewModeKey(path, item = null) {
+  return item && isFileEditorItem(item) ? item : path;
+}
+
+function editorViewModeFor(path, item = null) {
+  const modes = fileEditorViewModesForPath(path);
+  const mode = modes.get(editorViewModeKey(path, item)) || modes.get(path);
+  if (mode === 'diff') return 'diff';
+  const state = fileEditorStateForItem(path, item);
+  if (state?.historical === true && mode !== 'preview') return 'diff';
+  if (!editorPreviewModeAvailable(path, state)) return 'edit';
+  if (previewRendererForPath(path, state)?.previewOnly === true) return 'preview';
+  if (state?.kind && state.kind !== 'text') return 'preview';
+  if (editorViewModes.has(mode)) return mode;
+  return 'edit';
+}
+
+function fileEditorWrapForPath(path, state = null) {
+  if (fileEditorWrapEnabled) return true;
+  return defaultFileEditorWrapForPath(path, state?.kind || 'text') && storageGet(fileEditorWrapStorageKey) === null;
+}
+
+function setFileEditorViewMode(path, mode, item = null) {
+  if (!path || !editorViewModes.has(mode)) return;
+  const state = fileEditorStateForItem(path, item);
+  if (state?.historical === true && mode !== 'preview' && mode !== 'diff') mode = 'diff';
+  if (state?.historical !== true && mode !== 'diff' && previewRendererForPath(path, state)?.previewOnly === true) mode = 'preview';
+  if (mode !== 'edit' && mode !== 'diff' && !editorPreviewModeAvailable(path, state)) mode = state?.historical === true ? 'diff' : 'edit';
+  const previousMode = editorViewModeFor(path, item);
+  if (state?.historical !== true && (mode === 'preview' || mode === 'split') && typeof closeFilePreviewPopout === 'function') closeFilePreviewPopout(path);
+  if (mode === 'split' && previousMode !== 'split' && ['markdown', 'mermaid'].includes(previewKindForPath(path, state))) {
+    resetFileEditorPreviewZoomStateForPath(path, 'split:mermaid');
+  }
+  fileEditorViewModesForPath(path, true).set(editorViewModeKey(path, item), mode);
+  if (previousMode !== mode) {
+    renderPaneTabStrips();
+    refreshPaneTabLabel(item || fileEditorItemFor(path));
+    if (itemInLayout(tabberItemId)) refreshTabberPanels();
+  }
+}
+
+function updateEditorModeControl(control, path, state, item = null) {
+  if (!control) return;
+  const visible = Boolean(state?.kind) && editorPreviewModeAvailable(path, state);
+  const previewOnly = previewRendererForPath(path, state)?.previewOnly === true;
+  control.hidden = !visible || previewOnly;
+  if (!visible) return;
+  const mode = editorViewModeFor(path, item);
+  control.querySelectorAll('[data-editor-mode]').forEach(button => {
+    const nextMode = button.dataset.editorMode;
+    button.hidden = (state?.kind !== 'text' && nextMode !== 'preview') || (state?.historical === true && nextMode === 'split');
+    button.disabled = state?.historical === true && nextMode === 'edit';
+    if (button.disabled) button.title = t('editor.historicalReadOnly');
+    const label = editorModeLabel(nextMode);
+    const visibleLabel = button.disabled ? `${label} (${t('common.readOnly')})` : label;
+    const active = nextMode === mode || (state?.kind !== 'text' && nextMode === 'preview');
+    syncPressedButton(button, active, {labelOn: visibleLabel, labelOff: visibleLabel});
+    setFileEditorIcon(button, editorModeIconClass(nextMode));
+  });
+}
+
+function editorModeLabel(mode) {
+  if (mode === 'diff') return t('common.diff');
+  if (mode === 'preview') return t('editor.mode.viewEdit');
+  if (mode === 'split') return t('editor.mode.split');
+  return t('editor.mode.textEdit');
+}
+
+function editorModeIconClass(mode) {
+  if (mode === 'diff') return 'file-editor-icon-diff';
+  if (mode === 'preview') return 'file-editor-icon-eye';
+  if (mode === 'split') return 'file-editor-icon-split';
+  return 'file-editor-icon-edit';
+}
+
+function updateEditorGutterButton(button) {
+  if (!button) return;
+  syncPressedButton(button, fileEditorLineNumbersEnabled, {
+    labelOn: t('editor.hideLineNumbers'),
+    labelOff: t('editor.showLineNumbers'),
+  });
+}
+
+function setEditorContentMode(content, mode) {
+  if (!content) return;
+  content.classList.toggle('edit-mode', mode === 'edit');
+  content.classList.toggle('preview-mode', mode === 'preview');
+  content.classList.toggle('split-preview', mode === 'split');
+  content.classList.toggle('diff-mode', mode === 'diff');
+}
+
+function editorWrapValue(enabled = fileEditorWrapEnabled) {
+  return enabled ? 'soft' : 'off';
+}
+
+function setFileEditorIcon(button, iconClass) {
+  if (!button || button.querySelector(`.${iconClass}`)) return;
+  button.innerHTML = `<span class="file-editor-icon ${iconClass}" aria-hidden="true"></span>`;
+}
+
+function editorThemeLabel(mode = fileEditorThemeMode) {
+  if (fileEditorPreviewDisplayMode === 'vanilla') return t('editor.previewVanilla');
+  const scheme = mode === editorThemeInheritMode ? activeEditorScheme() : (EDITOR_SCHEMES[normalizeEditorSchemeId(mode)] || EDITOR_SCHEMES.dark);
+  if (mode === editorThemeInheritMode) return t('editor.inheritGlobalTheme', {scheme: scheme.label});
+  return t('editor.editorSchemeLabel', {scheme: scheme.label});
+}
+
+function editorPreviewThemeState() {
+  if (fileEditorPreviewDisplayMode === 'vanilla') return 'vanilla';
+  return activeEditorScheme().dark ? 'dark' : 'light';
+}
+
+function editorPreviewThemeStateLabel(state = editorPreviewThemeState()) {
+  if (state === 'vanilla') return t('editor.previewVanilla');
+  return state === 'light' ? t('editor.previewBright') : t('editor.previewDark');
+}
+
+function editorPreviewThemeShortLabel(state = editorPreviewThemeState()) {
+  if (state === 'vanilla') return t('editor.previewVanillaShort');
+  return state === 'light' ? t('editor.previewBrightShort') : t('common.theme.dark');
+}
+
+function editorSchemeCssVariables(scheme = activeEditorScheme()) {
+  const syntax = scheme.syntax || {};
+  const diff = scheme.diff || {};
+  return {
+    '--editor-scheme-bg': scheme.bg,
+    '--editor-scheme-fg': scheme.fg,
+    '--editor-scheme-muted': syntax.comment || scheme.lineNo,
+    '--editor-scheme-line': scheme.line,
+    '--editor-scheme-panel': scheme.panel,
+    '--editor-scheme-panel2': scheme.panel2,
+    '--editor-scheme-gutter-bg': scheme.gutterBg,
+    '--editor-scheme-preview-bg': scheme.previewBg,
+    '--editor-cursor': editorCursorColorForScheme(scheme),
+    '--editor-selection': scheme.selection,
+    '--editor-active-line': scheme.activeLine,
+    '--editor-line-number': scheme.lineNo,
+    '--markdown-heading': scheme.dark ? 'var(--active-accent)' : syntax.heading,
+    '--markdown-heading-bg': 'transparent',
+    '--markdown-link': syntax.link,
+    '--markdown-strong': syntax.strong,
+    '--markdown-emphasis': syntax.emphasis,
+    '--code-keyword': syntax.keyword,
+    '--code-control': syntax.control || syntax.keyword,
+    '--code-atom': syntax.atom,
+    '--code-string': syntax.string,
+    '--code-number': syntax.number,
+    '--code-variable': syntax.variable,
+    '--code-function': syntax.function,
+    '--code-type': syntax.type,
+    '--code-property': syntax.property,
+    '--code-tag': syntax.tag,
+    '--code-comment': syntax.comment,
+    '--code-inline': syntax.inlineCode,
+    '--code-inline-bg': syntax.inlineCodeBg,
+    '--code-inline-border': syntax.inlineCodeBorder,
+    '--code-invalid': syntax.invalid,
+    '--code-diff-add': diff.addFg,
+    '--code-diff-remove': diff.removeFg,
+    '--lt-bg': scheme.bg,
+    '--lt-panel': scheme.panel,
+    '--lt-panel2': scheme.panel2,
+    '--lt-text': scheme.fg,
+    '--lt-muted': syntax.comment || scheme.lineNo,
+    '--lt-line': scheme.line,
+    '--lt-editor-bg': scheme.bg,
+    '--lt-editor-gutter-bg': scheme.gutterBg,
+    '--lt-editor-preview-bg': scheme.previewBg,
+    '--lt-markdown-heading': scheme.dark ? 'var(--active-accent)' : syntax.heading,
+    '--lt-markdown-heading-bg': 'transparent',
+    '--lt-markdown-link': syntax.link,
+    '--lt-markdown-strong': syntax.strong,
+    '--lt-markdown-emphasis': syntax.emphasis,
+    '--lt-code-keyword': syntax.keyword,
+    '--lt-code-control': syntax.control || syntax.keyword,
+    '--lt-code-atom': syntax.atom,
+    '--lt-code-string': syntax.string,
+    '--lt-code-number': syntax.number,
+    '--lt-code-variable': syntax.variable,
+    '--lt-code-function': syntax.function,
+    '--lt-code-type': syntax.type,
+    '--lt-code-property': syntax.property,
+    '--lt-code-tag': syntax.tag,
+    '--lt-code-comment': syntax.comment,
+    '--lt-code-inline': syntax.inlineCode,
+    '--lt-code-inline-bg': syntax.inlineCodeBg,
+    '--lt-code-inline-border': syntax.inlineCodeBorder,
+    '--lt-code-invalid': syntax.invalid,
+  };
+}
+
+function applyEditorSchemeCssVariables(scheme = activeEditorScheme()) {
+  const style = document.documentElement?.style;
+  if (!style) return;
+  for (const [name, value] of Object.entries(editorSchemeCssVariables(scheme))) {
+    if (value !== undefined && value !== null && value !== '') style.setProperty(name, String(value));
+  }
+}
+
+function updateEditorThemeButton(button, options = {}) {
+  if (!button) return;
+  const includeVanilla = options.includeVanilla !== false;
+  const scheme = activeEditorScheme();
+  const previewState = editorPreviewThemeState();
+  const nextState = previewState === 'dark' ? 'light' : (previewState === 'light' && includeVanilla ? 'vanilla' : 'dark');
+  button.classList.toggle(themeBodyClass('dark'), previewState === 'dark');
+  button.classList.toggle(themeBodyClass('light'), previewState === 'light');
+  button.classList.toggle('theme-vanilla', previewState === 'vanilla');
+  button.classList.toggle('theme-with-label', includeVanilla);
+  button.dataset.editorTheme = previewState === 'vanilla' ? 'vanilla' : scheme.id;
+  button.dataset.editorThemeShort = includeVanilla ? editorPreviewThemeShortLabel(previewState) : '';
+  button.dataset.editorThemeNext = includeVanilla ? editorPreviewThemeShortLabel(nextState) : '';
+  button.setAttribute('aria-pressed', previewState === 'dark' ? 'false' : 'true');
+  button.title = t('editor.themeButtonTitle', {current: editorThemeLabel(), next: editorPreviewThemeStateLabel(nextState)});
+  button.setAttribute('aria-label', editorThemeLabel());
+  setFileEditorIcon(button, 'file-editor-icon-theme');
+}
+
+function updateImageViewerThemeButton(button) {
+  updateEditorThemeButton(button, {includeVanilla: false});
+  if (!button) return;
+  button.title = t('editor.toggleImageBackgroundWithScheme', {scheme: activeEditorScheme().label});
+  button.setAttribute('aria-label', t('editor.toggleImageBackground'));
+}
+
+function refreshOpenEditorThemePanels() {
+  document.querySelectorAll('.file-editor-panel').forEach(panel => {
+    const item = panel.dataset.layoutItem || fileEditorItemFor(panel.dataset.filePath || '');
+    const path = fileItemPath(item);
+    const state = fileEditorStateForItem(path, item);
+    if (!path || state?.kind !== 'text') return;
+    const reconfigured = typeof reconfigureCodeMirrorPanelTheme === 'function' && reconfigureCodeMirrorPanelTheme(panel);
+    if (panel?._pmView) syncProseMirrorPanelSource(panel, path, state);
+    else renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+    if (!reconfigured) {
+      capturePaneViewState(item, panel);
+      renderFileEditorPanel(panel, item);
+    }
+  });
+  if (typeof refreshFilePreviewPopouts === 'function') refreshFilePreviewPopouts();
+}
+
+function applyEditorThemeMode(options = {}) {
+  const scheme = activeEditorScheme();
+  applyEditorSchemeCssVariables(scheme);
+  document.body?.classList.remove(...EDITOR_THEME_BODY_CLASSES, EDITOR_PREVIEW_VANILLA_CLASS);
+  EDITOR_SCHEME_IDS.forEach(id => document.body?.classList.remove(`editor-scheme-${id}`));
+  document.body?.classList.add(editorThemeBodyClass(scheme.dark ? 'dark' : 'light'));
+  document.body?.classList.add(`editor-scheme-${scheme.id}`);
+  document.body?.classList.toggle('editor-contrast-light', !scheme.dark);
+  document.body?.classList.toggle(EDITOR_PREVIEW_VANILLA_CLASS, fileEditorPreviewDisplayMode === 'vanilla');
+  document.querySelectorAll('.file-editor-theme-panel').forEach(updateEditorThemeButton);
+  if (options.refreshEditors) refreshOpenEditorThemePanels();
+  if (typeof refreshPanePopouts === 'function') refreshPanePopouts();
+}
+
+function setFileEditorThemeMode(mode) {
+  fileEditorThemeMode = normalizeEditorThemeMode(mode);
+  writeStoredEditorThemeMode(fileEditorThemeMode);
+  if (fileEditorPreviewDisplayMode !== 'theme') {
+    fileEditorPreviewDisplayMode = 'theme';
+    writeStoredEditorPreviewDisplayMode(fileEditorPreviewDisplayMode);
+  }
+  applyEditorThemeMode({refreshEditors: true});
+}
+
+function setFileEditorPreviewDisplayMode(mode) {
+  fileEditorPreviewDisplayMode = normalizeEditorPreviewDisplayMode(mode);
+  writeStoredEditorPreviewDisplayMode(fileEditorPreviewDisplayMode);
+  applyEditorThemeMode({refreshEditors: true});
+}
+
+function cycleEditorThemeMode(options = {}) {
+  const includeVanilla = options.includeVanilla !== false;
+  const previewState = editorPreviewThemeState();
+  if (previewState === 'dark') {
+    setFileEditorThemeMode(configuredEditorSchemeForMode(false));
+    return;
+  }
+  if (previewState === 'light' && includeVanilla) {
+    setFileEditorPreviewDisplayMode('vanilla');
+    return;
+  }
+  fileEditorPreviewDisplayMode = 'theme';
+  writeStoredEditorPreviewDisplayMode(fileEditorPreviewDisplayMode);
+  setFileEditorThemeMode(configuredEditorSchemeForMode(true));
+}
+
+function updateEditorWrapButton(button) {
+  if (!button) return;
+  syncPressedButton(button, fileEditorWrapEnabled, {
+    labelOn: t('editor.disableWordWrap'),
+    labelOff: t('editor.enableWordWrap'),
+  });
+  setFileEditorIcon(button, 'file-editor-icon-wrap');
+}
+
+function previewFindPanelForHost(host = null) {
+  return host?.querySelector?.('.file-editor-preview-find-panel') || null;
+}
+
+function fileEditorSearchSurfaceForHost(host = null) {
+  if (!host) return 'editor';
+  const mode = fileEditorPanelMode(host);
+  if (mode === 'preview') return 'preview';
+  if (mode !== 'split') return 'editor';
+  if (host._fileEditorSearchSurface === 'preview' || host._fileEditorSearchSurface === 'editor') {
+    return host._fileEditorSearchSurface;
+  }
+  const active = document.activeElement;
+  if (active && host.querySelector('.file-editor-preview-pane-panel')?.contains(active)) return 'preview';
+  if (active && host.querySelector('.file-editor-codemirror-panel')?.contains(active)) return 'editor';
+  return host._fileEditorSearchSurface === 'preview' ? 'preview' : 'editor';
+}
+
+function rememberFileEditorSearchSurface(host = null, surface = 'editor') {
+  if (!host || !['editor', 'preview'].includes(surface)) return;
+  host._fileEditorSearchSurface = surface;
+  host.querySelector('.file-editor-content')?.classList.toggle('split-search-preview', surface === 'preview');
+  host.querySelector('.file-editor-content')?.classList.toggle('split-search-editor', surface === 'editor');
+}
+
+function fileEditorFindOverviewForHost(host = null) {
+  return host?.querySelector?.('.file-editor-find-overview') || null;
+}
+
+function clearFileEditorFindOverview(host = null) {
+  const overview = fileEditorFindOverviewForHost(host);
+  if (!overview) return;
+  overview.replaceChildren();
+  overview.hidden = true;
+}
+
+function updateFileEditorFindOverview(host = null, positions = [], activeIndex = -1) {
+  const overview = fileEditorFindOverviewForHost(host);
+  if (!overview || !positions.length) {
+    clearFileEditorFindOverview(host);
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  positions.forEach((position, index) => {
+    const tick = document.createElement('span');
+    tick.className = 'file-editor-find-overview-tick';
+    tick.classList.toggle(CLS.active, index === activeIndex);
+    tick.style.top = `${Math.max(0, Math.min(100, Number(position) || 0))}%`;
+    fragment.append(tick);
+  });
+  overview.replaceChildren(fragment);
+  overview.hidden = false;
+}
+
+function previewFindStateForHost(host = null, create = false) {
+  if (!host) return null;
+  if (!host._previewFindState && create) host._previewFindState = {query: '', matches: [], index: -1, open: false};
+  return host._previewFindState || null;
+}
+
+function previewFindClearMatches(host = null) {
+  const preview = host?.querySelector?.('.file-editor-preview-pane-panel');
+  if (!preview) return;
+  if (host?._pmView?.dom && CSS.highlights) {
+    CSS.highlights.delete('yomux-find-match');
+    CSS.highlights.delete('yomux-find-active');
+  }
+  for (const match of preview.querySelectorAll('.file-editor-preview-find-match')) {
+    const parent = match.parentNode;
+    match.replaceWith(document.createTextNode(match.textContent || ''));
+    parent?.normalize?.();
+  }
+  clearFileEditorFindOverview(host);
+}
+
+function previewFindUsesTextHighlights(host = null) {
+  return Boolean(host?._pmView?.dom && CSS.highlights && typeof Highlight === 'function');
+}
+
+function previewFindSetReadOnly(host = null, readOnly = false) {
+  const view = host?._pmView;
+  if (!view) return;
+  host._pmSearchReadOnly = readOnly === true;
+  view.setProps?.({editable: () => host._pmSearchReadOnly !== true});
+}
+
+function previewFindUpdateOverview(host = null) {
+  const preview = host?.querySelector?.('.file-editor-preview-pane-panel');
+  const state = previewFindStateForHost(host);
+  if (!preview || !state?.matches.length) {
+    clearFileEditorFindOverview(host);
+    return;
+  }
+  const previewRect = preview.getBoundingClientRect();
+  const scrollHeight = Math.max(1, Number(preview.scrollHeight || 0));
+  const positions = state.matches.map(match => {
+    const offset = preview.scrollTop + match.getBoundingClientRect().top - previewRect.top;
+    return (offset / scrollHeight) * 100;
+  });
+  updateFileEditorFindOverview(host, positions, state.index);
+}
+
+function refreshCodeMirrorFindOverview(host = null) {
+  if (!host || fileEditorPanelMode(host) === 'preview') return;
+  const view = host._cmView;
+  const panel = codeMirrorSearchPanelForHost(host);
+  const query = panel?.querySelector?.('input[name="search"]')?.value || '';
+  const text = view?.state?.doc?.toString?.() || '';
+  const matches = codeMirrorSearchMatches(text, query, codeMirrorSearchCheckboxState(panel));
+  if (!matches.length || !view?.state?.doc) {
+    clearFileEditorFindOverview(host);
+    return;
+  }
+  const totalLines = Math.max(1, Number(view.state.doc.lines || 1));
+  const positions = matches.map(match => ((view.state.doc.lineAt(match.from).number - 1) / totalLines) * 100);
+  const summary = codeMirrorSearchMatchSummary(text, query, view.state.selection.main || {}, codeMirrorSearchCheckboxState(panel));
+  updateFileEditorFindOverview(host, positions, summary.current - 1);
+}
+
+function previewFindUpdatePanel(host = null) {
+  const panel = previewFindPanelForHost(host);
+  const state = previewFindStateForHost(host);
+  if (!panel || !state) return;
+  const count = state.matches.length;
+  const current = count && state.index >= 0 ? state.index + 1 : 0;
+  const countNode = panel.querySelector('.file-editor-preview-find-count');
+  if (countNode) countNode.textContent = state.query ? `${current}/${count}` : '';
+  panel.querySelectorAll('[data-preview-find-move]').forEach(button => { button.disabled = count === 0; });
+}
+
+function previewFindSelectMatch(host = null, index = 0) {
+  const state = previewFindStateForHost(host);
+  if (!state?.matches.length) return false;
+  state.index = (index + state.matches.length) % state.matches.length;
+  if (previewFindUsesTextHighlights(host)) {
+    CSS.highlights.set('yomux-find-match', new Highlight(...state.matches));
+    CSS.highlights.set('yomux-find-active', new Highlight(state.matches[state.index]));
+    state.matches[state.index].getBoundingClientRect?.();
+    const range = state.matches[state.index];
+    const element = range.startContainer.parentElement;
+    element?.scrollIntoView?.({block: 'center', inline: 'nearest'});
+  } else if (host?._pmView?.dom) {
+    const range = state.matches[state.index];
+    range.getBoundingClientRect?.();
+    range.startContainer?.parentElement?.scrollIntoView?.({block: 'center', inline: 'nearest'});
+  } else {
+    state.matches.forEach((match, matchIndex) => match.classList.toggle(CLS.active, matchIndex === state.index));
+    state.matches[state.index].scrollIntoView?.({block: 'center', inline: 'nearest'});
+  }
+  previewFindUpdateOverview(host);
+  previewFindUpdatePanel(host);
+  return true;
+}
+
+function previewFindApplyQuery(host = null, query = '', options = {}) {
+  const preview = host?.querySelector?.('.file-editor-preview-pane-panel');
+  const state = previewFindStateForHost(host, true);
+  if (!preview || !state) return false;
+  // A refresh rebuilds mark nodes after a preview redraw. Keep the user's active result when
+  // the query itself did not change; an input edit is a new search and intentionally starts at 1.
+  const previousIndex = options.preserveIndex === true && state.query === String(query || '')
+    ? state.index
+    : -1;
+  previewFindClearMatches(host);
+  state.query = String(query || '');
+  state.matches = [];
+  state.index = -1;
+  const needle = state.query.toLocaleLowerCase();
+  if (needle) {
+    const prosemirrorRoot = host?._pmView?.dom || null;
+    const root = prosemirrorRoot || preview;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (!node.nodeValue?.trim() || node.parentElement?.closest('script, style, .file-editor-preview-find-match')) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    const nodes = [];
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) nodes.push(node);
+    for (const node of nodes) {
+      const text = node.nodeValue || '';
+      const folded = text.toLocaleLowerCase();
+      let from = 0;
+      let index = folded.indexOf(needle, from);
+      if (index < 0) continue;
+      if (prosemirrorRoot) {
+        for (let matchIndex = index; matchIndex >= 0; matchIndex = folded.indexOf(needle, matchIndex + needle.length)) {
+          const range = document.createRange();
+          range.setStart(node, matchIndex);
+          range.setEnd(node, matchIndex + needle.length);
+          state.matches.push(range);
+        }
+        continue;
+      }
+      const fragment = document.createDocumentFragment();
+      while (index >= 0) {
+        fragment.append(document.createTextNode(text.slice(from, index)));
+        const match = document.createElement('mark');
+        match.className = 'file-editor-preview-find-match';
+        match.textContent = text.slice(index, index + needle.length);
+        fragment.append(match);
+        state.matches.push(match);
+        from = index + needle.length;
+        index = folded.indexOf(needle, from);
+      }
+      fragment.append(document.createTextNode(text.slice(from)));
+      node.replaceWith(fragment);
+    }
+  }
+  if (state.matches.length) previewFindSelectMatch(host, previousIndex >= 0 ? previousIndex : 0);
+  else previewFindUpdatePanel(host);
+  return true;
+}
+
+function previewFindOpenForHost(host = null) {
+  return previewFindPanelForHost(host)?.hidden === false;
+}
+
+function openPreviewFind(host = null) {
+  const panel = previewFindPanelForHost(host);
+  if (!panel) return false;
+  panel.hidden = false;
+  const state = previewFindStateForHost(host, true);
+  state.open = true;
+  previewFindSetReadOnly(host, true);
+  const input = panel.querySelector('input');
+  previewFindApplyQuery(host, input?.value || '');
+  input?.focus();
+  input?.select();
+  return true;
+}
+
+function closePreviewFind(host = null) {
+  const panel = previewFindPanelForHost(host);
+  if (!panel) return false;
+  previewFindClearMatches(host);
+  previewFindSetReadOnly(host, false);
+  const state = previewFindStateForHost(host, true);
+  state.open = false;
+  state.matches = [];
+  state.index = -1;
+  panel.hidden = true;
+  previewFindUpdatePanel(host);
+  return true;
+}
+
+function refreshPreviewFind(host = null) {
+  if (!previewFindOpenForHost(host)) return;
+  previewFindApplyQuery(host, previewFindPanelForHost(host)?.querySelector('input')?.value || '', {preserveIndex: true});
+}
+
+function restorePreviewFindAfterRender(host = null) {
+  const panel = previewFindPanelForHost(host);
+  const state = previewFindStateForHost(host);
+  if (!panel || !state || state.open !== true) return;
+  panel.hidden = false;
+  previewFindSetReadOnly(host, true);
+  previewFindApplyQuery(host, state.query || panel.querySelector('input')?.value || '', {preserveIndex: true});
+}
+
+function fileEditorPreviewSelectionOffsets(pane = null) {
+  const doc = pane?.ownerDocument;
+  const selection = doc?.getSelection?.();
+  if (!pane || !selection?.rangeCount) return null;
+  const range = selection.getRangeAt(0);
+  if (!pane.contains(range.startContainer) || !pane.contains(range.endContainer)) return null;
+  const offsetAt = (node, offset) => {
+    const prefix = doc.createRange();
+    prefix.selectNodeContents(pane);
+    prefix.setEnd(node, offset);
+    return prefix.toString().length;
+  };
+  try {
+    return {
+      start: offsetAt(range.startContainer, range.startOffset),
+      end: offsetAt(range.endContainer, range.endOffset),
+      text: range.toString(),
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+function restoreFileEditorPreviewSelectionOffsets(pane = null, snapshot = null) {
+  const doc = pane?.ownerDocument;
+  const selection = doc?.getSelection?.();
+  if (!pane || !selection || !snapshot) return false;
+  const textNodes = [];
+  const walker = doc.createTreeWalker(pane, 4);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) textNodes.push(node);
+  const positionAt = value => {
+    let remaining = Math.max(0, Number(value) || 0);
+    for (const node of textNodes) {
+      if (remaining <= node.nodeValue.length) return {node, offset: remaining};
+      remaining -= node.nodeValue.length;
+    }
+    const node = textNodes[textNodes.length - 1];
+    return node ? {node, offset: node.nodeValue.length} : null;
+  };
+  let startOffset = Number(snapshot.start) || 0;
+  let endOffset = Number(snapshot.end) || startOffset;
+  const selectedText = String(snapshot.text || '');
+  if (selectedText) {
+    const text = pane.textContent || '';
+    let best = text.indexOf(selectedText);
+    for (let index = text.indexOf(selectedText, best + 1); index >= 0; index = text.indexOf(selectedText, index + 1)) {
+      if (best >= 0 && Math.abs(index - startOffset) >= Math.abs(best - startOffset)) continue;
+      best = index;
+    }
+    if (best >= 0) {
+      startOffset = best;
+      endOffset = best + selectedText.length;
+    }
+  }
+  const start = positionAt(startOffset);
+  const end = positionAt(endOffset);
+  if (!start || !end) return false;
+  try {
+    const range = doc.createRange();
+    range.setStart(start.node, start.offset);
+    range.setEnd(end.node, end.offset);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// All preview redraws pass through one owner. Renderer replacement otherwise drops native viewer
+// selection and Find's mark nodes, which makes a theme/settings refresh look like a vanished match.
+function renderFileEditorPreviewSurface(host = null, pane = null, path = '', text = '', options = {}) {
+  if (!pane) return false;
+  if (host?._pmRequired && previewKindForPath(path) === 'markdown') return false;
+  if (host?._pmView && host._pmPath === path && host._pmView.dom?.isConnected) {
+    const result = syncProseMirrorPanelSource(host, path, options.state || fileEditorPanelState(host));
+    restorePreviewFindAfterRender(host);
+    return result;
+  }
+  if (options.force !== true && previewScrollUserOwnsElementNow(pane)) {
+    void schedulePreviewDeferredWorkAfterUserScroll(pane, 'editor-surface-render', () => (
+      renderFileEditorPreviewSurface(host, pane, path, text, options)
+    ));
+    return false;
+  }
+  cancelPreviewDeferredWorkAfterUserScroll(pane, 'editor-surface-render');
+  const selection = options.preserveSelection === false ? null : fileEditorPreviewSelectionOffsets(pane);
+  const state = options.state || (host ? fileEditorPanelState(host) : null) || fileState.get(path) || null;
+  const rendered = renderEditorPreviewPane(pane, path, text, {...options, state});
+  if (rendered === false) return false;
+  restorePreviewFindAfterRender(host);
+  restoreFileEditorPreviewSelectionOffsets(pane, selection);
+  return rendered;
+}
+
+function updateEditorFindButton(button, state, host = null) {
+  if (!button) return;
+  const visible = state?.kind === 'text';
+  button.hidden = !visible;
+  button.disabled = false;
+  const label = t('editor.findInFile', {shortcut: appShortcutText('F')});
+  button.title = label;
+  button.setAttribute('aria-label', label);
+  const previewSurface = fileEditorSearchSurfaceForHost(host) === 'preview';
+  button.setAttribute('aria-pressed', previewSurface ? String(previewFindOpenForHost(host)) : String(codeMirrorSearchPanelOpenForHost(host)));
+  if (!previewSurface) refreshCodeMirrorFindOverview(host);
+  setFileEditorIcon(button, 'file-editor-icon-find');
+}
+
+function fileEditorGitActionControlsVisible(path, state, item = null) {
+  if (state?.kind !== 'text' || !fileStateHasRepo(path, state) || !fileStateHasUsefulGitHistory(state)) return false;
+  const active = editorViewModeFor(path, item) === 'diff';
+  const confirmedNoDiff = state?.diffLoaded === true && !openFileDiffAvailable(state);
+  return active || !confirmedNoDiff;
+}
+
+function fileEditorBlameControlsVisible(path, state, item = null) {
+  return state?.kind === 'text' && fileStateHasRepo(path, state) && fileStateHasUsefulGitHistory(state);
+}
+
+function updateFileEditorBlameButton(button, path, state, item = null) {
+  if (!button) return;
+  const visible = fileEditorBlameControlsVisible(path, state, item);
+  const editable = editorViewModeFor(path, item) === 'edit';
+  button.hidden = !visible;
+  button.disabled = !visible || !editable;
+  syncPressedButton(button, fileEditorBlameEnabled, {
+    labelOn: t('editor.blame.toggle'),
+    labelOff: t('editor.blame.toggle'),
+  });
+  setFileEditorIcon(button, 'file-editor-icon-blame');
+}
+
+function updateFileEditorDiffButton(button, path, state, item = null) {
+  if (!button) return;
+  const active = editorViewModeFor(path, item) === 'diff';
+  const loading = state?.diffLoading === true;
+  // Keep the diff toggle on ANY text file (not just md/html) so .py/.js/.rs can switch edit<->diff.
+  // The diff loads lazily on click (refreshOpenFileDiff); only hide the button once a load has
+  // confirmed there is nothing to diff, and never while in diff mode.
+  // Hide the git action pair for files with no useful file history (outside git, untracked, or only
+  // the creation commit): there is no meaningful older file version to diff/blame against.
+  const visible = fileEditorGitActionControlsVisible(path, state, item);
+  button.hidden = !visible;
+  button.disabled = !visible || (!active && loading);
+  const label = !active && loading ? t('editor.diffLoading') : (active ? t('editor.diffExit') : t('common.diff'));
+  syncPressedButton(button, active, {labelOn: label, labelOff: label});
+  button.textContent = t('brand.tab.changes');
+}
+
+function updateFileEditorDiffExpandButton(button, path, state, item = null) {
+  if (!button) return;
+  const activeDiff = editorViewModeFor(path, item) === 'diff';
+  button.hidden = state?.kind !== 'text' || !activeDiff || !openFileDiffAvailable(state);
+  button.disabled = button.hidden || state?.diffLoading === true;
+  button.setAttribute('aria-pressed', fileEditorDiffExpandUnchangedForItem(item) ? 'true' : 'false');
+}
+
+async function openEditorFind(host = null) {
+  const view = host?._cmView || null;
+  const status = host
+    ? (msg, level) => setFileEditorPanelStatus(host, msg, level)
+    : () => {};
+  if (!view) {
+    status(t('editor.findLoading'), 'warn');
+    return false;
+  }
+  try {
+    const api = await loadCodeMirrorApi();
+    if (openCodeMirrorFindForView(api, view)) {
+      syncCodeMirrorFindButtonForView(view);
+      return true;
+    }
+  } catch (error) {
+    status(t('editor.findUnavailable', {error}), 'error');
+  }
+  return false;
+}
+
+async function closeEditorFind(host = null) {
+  const view = host?._cmView || null;
+  if (!view) return false;
+  try {
+    const api = await loadCodeMirrorApi();
+    if (api?.closeSearchPanel) {
+      api.closeSearchPanel(view);
+    } else {
+      codeMirrorSearchPanelForHost(host)?.querySelector?.('.cm-dialog-close')?.click?.();
+    }
+    syncCodeMirrorFindButtonForView(view);
+    return true;
+  } catch (error) {
+    setFileEditorPanelStatus(host, t('editor.findUnavailable', {error}), 'error');
+  }
+  return false;
+}
+
+async function toggleEditorFind(host = null) {
+  if (fileEditorSearchSurfaceForHost(host) === 'preview') {
+    rememberFileEditorSearchSurface(host, 'preview');
+    return previewFindOpenForHost(host) ? closePreviewFind(host) : openPreviewFind(host);
+  }
+  return codeMirrorSearchPanelOpenForHost(host) ? closeEditorFind(host) : openEditorFind(host);
+}
+
+async function openEditorFindShortcut(host = null) {
+  if (fileEditorSearchSurfaceForHost(host) === 'preview') {
+    rememberFileEditorSearchSurface(host, 'preview');
+    return openPreviewFind(host);
+  }
+  return openEditorFind(host);
+}
+
+async function focusFileEditorSearch(panel = null) {
+  const opened = await openEditorFindShortcut(panel);
+  if (panel) updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileEditorPanelState(panel), panel);
+  return opened;
+}
+
+function applyEditorWrapPreference() {
+  document.querySelectorAll('.file-editor-panel').forEach(panel => {
+    panel.classList.toggle('editor-wrap', fileEditorWrapEnabled);
+    panel.classList.toggle('editor-line-numbers', fileEditorLineNumbersEnabled);
+    updateEditorWrapButton(panel.querySelector('.file-editor-wrap-panel'));
+    updateEditorGutterButton(panel.querySelector('.file-editor-gutter-panel'));
+    const path = panel.dataset.filePath;
+    const item = panel.dataset.layoutItem || fileEditorItemFor(path);
+    const state = fileEditorStateForItem(path, item);
+    if (path && state?.kind === 'text') {
+      const liveText = typeof codeMirrorCurrentText === 'function' ? codeMirrorCurrentText(panel) : null;
+      if (state.historical !== true && liveText !== null && state.content !== liveText) state.content = liveText;
+      if (panel?._pmView) syncProseMirrorPanelSource(panel, path, state);
+      else renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+      if (typeof reconfigureCodeMirrorPanelEditorOptions === 'function' && reconfigureCodeMirrorPanelEditorOptions(panel)) {
+        return;
+      }
+      // Re-render each panel with its OWN layout item: passing the editor item flipped
+      // a preview/diff pane into an editor on any appearance change (e.g. font-size). This is a fallback
+      // for raw/preview panels or browsers without CodeMirror compartments.
+      renderFileEditorPanel(panel, item);
+    }
+  });
+}
+
+function setEditorWrapEnabled(enabled) {
+  fileEditorWrapEnabled = enabled === true;
+  writeStoredEditorWrap(fileEditorWrapEnabled);
+  applyEditorWrapPreference();
+}
+
+// toggle inline git blame. Fetch the blame payload for each open text file first (so the
+// re-rendered editor's blame ViewPlugin has data), then re-render with each panel's OWN item.
+async function applyEditorBlamePreference() {
+  for (const panel of document.querySelectorAll('.file-editor-panel')) {
+    const blameButton = panel.querySelector('.file-editor-blame-panel');
+    const path = panel.dataset.filePath;
+    const item = panel.dataset.layoutItem || fileEditorItemFor(path);
+    const state = fileEditorStateForItem(path, item);
+    updateFileEditorBlameButton(blameButton, path, state, item);
+    if (!path || state?.kind !== 'text') continue;
+    if (fileEditorBlameEnabled && editorViewModeFor(path, item) === 'edit' && fileEditorBlameControlsVisible(path, state, item) && !hasEditorBlameForPath(path)) await fetchEditorBlame(path);
+    renderFileEditorPanel(panel, item);
+  }
+}
+
+function setFileEditorBlameEnabled(enabled) {
+  fileEditorBlameEnabled = enabled === true;
+  storageSet('yomux.editorBlame', fileEditorBlameEnabled ? '1' : '0');
+  applyEditorBlamePreference();
+}
+
+function toggleFileEditorBlame() {
+  setFileEditorBlameEnabled(!fileEditorBlameEnabled);
+}
+
+function toggleEditorWrap() {
+  const enabled = !fileEditorWrapEnabled;
+  setEditorWrapEnabled(enabled);
+}
+
+// B4: toggle showing ALL diff context vs collapsing unchanged regions. Persisted; re-renders
+// every open editor in diff mode (the signature includes `expand`, so the diff view rebuilds).
+function setDiffExpandUnchanged(enabled) {
+  diffExpandUnchanged = enabled === true;
+  storageSet('yomux.diffExpandUnchanged', diffExpandUnchanged ? '1' : '0');
+  fileEditorDiffExpandOverrides.clear();
+  document.querySelectorAll('.file-editor-panel').forEach(panel => {
+    const item = panel.dataset.layoutItem || fileEditorItemFor(panel.dataset.filePath || '');
+    const path = fileItemPath(item);
+    const state = fileEditorStateForItem(path, item);
+    updateFileEditorDiffExpandButton(panel.querySelector('.file-editor-diff-expand-panel'), path, state, item);
+    if (path && state?.kind === 'text' && editorViewModeFor(path, item) === 'diff' && openFileDiffAvailable(state)) {
+      renderFileEditorPanel(panel, item);
+    }
+  });
+}
+
+function fileEditorDiffExpandUnchangedForItem(item = null) {
+  if (item && fileEditorDiffExpandOverrides.has(item)) return fileEditorDiffExpandOverrides.get(item) === true;
+  return diffExpandUnchanged;
+}
+
+function setFileEditorDiffExpandUnchangedForItem(path, item, enabled) {
+  if (!isFileEditorItem(item)) return;
+  fileEditorDiffExpandOverrides.set(item, enabled === true);
+  const panel = panelNodes.get(item);
+  const state = fileEditorStateForItem(path, item);
+  if (panel) updateFileEditorDiffExpandButton(panel.querySelector('.file-editor-diff-expand-panel'), path, state, item);
+  if (panel && state?.kind === 'text' && editorViewModeFor(path, item) === 'diff' && openFileDiffAvailable(state)) {
+    renderFileEditorPanel(panel, item);
+  }
+}
+
+function toggleFileEditorDiffExpandUnchangedForItem(path, item) {
+  setFileEditorDiffExpandUnchangedForItem(path, item, !fileEditorDiffExpandUnchangedForItem(item));
+}
+
+function setEditorLineNumbersEnabled(enabled) {
+  fileEditorLineNumbersEnabled = enabled === true;
+  writeStoredEditorLineNumbers(fileEditorLineNumbersEnabled);
+  applyEditorWrapPreference();
+}
+
+function toggleEditorLineNumbers() {
+  const enabled = !fileEditorLineNumbersEnabled;
+  setEditorLineNumbersEnabled(enabled);
+}
+
+function numberSetting(path, fallback) {
+  const defaultValue = arguments.length >= 2 ? fallback : settingFallback(path);
+  const value = Number(initialSetting(path, defaultValue));
+  return Number.isFinite(value) ? value : defaultValue;
+}
+
+function boolSetting(path, fallback) {
+  const defaultValue = arguments.length >= 2 ? fallback : settingFallback(path);
+  const value = initialSetting(path, defaultValue);
+  return value === true || value === 'true' || value === 1;
+}
+
+const UPDATE_NOTIFICATION_LEVELS = ['major', 'minor', 'patch', 'none'];
+
+function normalizeUpdateNotificationLevel(value) {
+  if (value === true || value === 'true' || value === 1) return 'patch';
+  if (value === false || value === 'false' || value === 0) return 'none';
+  const clean = String(value || '').trim().toLowerCase();
+  return UPDATE_NOTIFICATION_LEVELS.includes(clean) ? clean : 'patch';
+}
+
+function updateNotificationLevelSetting() {
+  return normalizeUpdateNotificationLevel(initialSetting('general.reload_on_update', false));
+}
+
+function semanticVersionParts(value) {
+  const match = String(value || '').trim().match(/^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?/i);
+  if (!match) return null;
+  return [
+    Number.parseInt(match[1] || '0', 10),
+    Number.parseInt(match[2] || '0', 10),
+    Number.parseInt(match[3] || '0', 10),
+  ];
+}
+
+function updateNotificationAllowsVersion(currentVersion, targetVersion, level = updateNotificationLevelSetting()) {
+  const cleanLevel = normalizeUpdateNotificationLevel(level);
+  if (cleanLevel === 'none') return false;
+  const currentParts = semanticVersionParts(currentVersion);
+  const targetParts = semanticVersionParts(targetVersion);
+  if (!currentParts || !targetParts) {
+    return cleanLevel === 'patch' && String(targetVersion || '') !== String(currentVersion || '');
+  }
+  if (targetParts[0] !== currentParts[0]) return cleanLevel !== 'none';
+  if (targetParts[1] !== currentParts[1]) return cleanLevel === 'minor' || cleanLevel === 'patch';
+  if (targetParts[2] !== currentParts[2]) return cleanLevel === 'patch';
+  return false;
+}
+
+function normalizeEditorCursorStyle(value) {
+  return value === 'block' ? 'block' : 'line';
+}
+
+const UI_COLOR_CHOICES = ['green', 'blue', 'orange', 'yellow', 'purple', 'white'];
+const DEFAULT_CURSOR_COLOR = 'yellow';
+const BAD_CONNECTION_BODY_CLASS = 'bad-connection';
+const BAD_CONNECTION_CURSOR_COLORS = Object.freeze({dark: '#ff6673', light: '#b91c1c'});
+const BAD_CONNECTION_CURSOR_ACCENT = '#fff3f4';
+const SEPARATOR_COLOR_CHOICES = ['theme', ...UI_COLOR_CHOICES];
+const NEON_CURSOR_COLOR_CHOICES = ['laser-lime', 'neon-green', 'neon-cyan', 'neon-magenta', 'neon-orange'];
+const CURSOR_COLOR_CHOICES = [...UI_COLOR_CHOICES, ...NEON_CURSOR_COLOR_CHOICES, 'theme'];
+// One parent for the named UI colors. Active color and cursor color must both derive from this map so
+// labels, swatches, and palette membership cannot drift.
+const UI_COLOR_PRESETS = {
+  green:  {labelKey: 'pref.appearance.active_color.green', cursorLabelKey: 'pref.appearance.editor_cursor_color.green', cursor: {dark: '#76b900', light: '#4f7f00'}, active: null},
+  blue:   {labelKey: 'pref.appearance.active_color.blue', cursorLabelKey: 'pref.appearance.editor_cursor_color.blue', cursor: {dark: '#00b7ff', light: '#0069b8'}, active: {dark: {accent: '#3b82f6', bright: '#3b82f6', text: '#ffffff'}, light: {accent: '#2563eb', bright: '#2563eb', text: '#ffffff'}}},
+  orange: {labelKey: 'pref.appearance.active_color.orange', cursorLabelKey: 'pref.appearance.editor_cursor_color.orange', cursor: {dark: '#ff7a00', light: '#b91c1c'}, active: {dark: {accent: '#f97316', bright: '#f97316', text: '#1a0c00'}, light: {accent: '#b91c1c', bright: '#b91c1c', text: '#ffffff'}}},
+  yellow: {labelKey: 'pref.appearance.active_color.yellow', cursorLabelKey: 'pref.appearance.editor_cursor_color.yellow', cursor: {dark: '#ffea00', light: '#9a6700'}, active: {dark: {accent: '#eab308', bright: '#eab308', text: '#1a1500'}, light: {accent: '#d6a400', bright: '#d6a400', text: '#1a1500'}}},
+  purple: {labelKey: 'pref.appearance.active_color.purple', cursorLabelKey: 'pref.appearance.editor_cursor_color.purple', cursor: {dark: '#d946ef', light: '#7c3aed'}, active: {dark: {accent: '#a855f7', bright: '#a855f7', text: '#ffffff'}, light: {accent: '#7c3aed', bright: '#7c3aed', text: '#ffffff'}}},
+  white:  {labelKey: 'pref.appearance.active_color.white', cursorLabelKey: 'pref.appearance.editor_cursor_color.white', cursor: {dark: '#ffffff', light: '#6b7280'}, active: {dark: {accent: '#e8edf2', bright: '#e8edf2', text: '#0b0e14'}, light: {accent: '#64748b', bright: '#aeb8c5', text: '#0b0e14', tabMuted: '#d3dbe6', tabMutedHover: '#c2ccd9', tabMutedBorder: '#8290a3'}}},
+  'laser-lime':   {cursorLabelKey: 'pref.appearance.editor_cursor_color.laser-lime', cursor: {dark: '#ccff00', light: '#6b8f00'}},
+  'neon-green':   {cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-green', cursor: {dark: '#39ff14', light: '#16825d'}},
+  'neon-cyan':    {cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-cyan', cursor: {dark: '#00ffff', light: '#0e7490'}},
+  'neon-magenta': {cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-magenta', cursor: {dark: '#ff00ff', light: '#a21caf'}},
+  'neon-orange':  {cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-orange', cursor: {dark: '#ff9f0a', light: '#b45309'}},
+};
+
+const ACTIVE_COLOR_PRESETS = Object.fromEntries(
+  UI_COLOR_CHOICES
+    .map(value => [value, UI_COLOR_PRESETS[value]?.active])
+    .filter(([, active]) => active)
+);
+
+function normalizeEditorCursorColor(value) {
+  return value === 'theme' || UI_COLOR_PRESETS[value]?.cursor ? value : DEFAULT_CURSOR_COLOR;
+}
+
+function cursorColorForPreset(value, light = false) {
+  const cursor = UI_COLOR_PRESETS[value]?.cursor;
+  if (typeof cursor === 'string') return cursor;
+  return light ? cursor?.light : cursor?.dark;
+}
+
+function editorCursorColorForScheme(scheme = activeEditorScheme()) {
+  const value = normalizeEditorCursorColor(fileEditorCursorColor);
+  return value === 'theme' ? scheme.cursor : cursorColorForPreset(value, scheme?.dark === false);
+}
+
+function activeTerminalCursorColorForTheme(baseTheme = terminalThemeForGlobalTheme()) {
+  const value = normalizeEditorCursorColor(fileEditorCursorColor);
+  if (value === 'theme' && resolvedTerminalThemeMode() === 'light') return terminalThemeForGlobalTheme().cursor;
+  return value === 'theme' ? baseTheme.cursor : cursorColorForPreset(value, resolvedTerminalThemeMode() === 'light');
+}
+
+function badConnectionCursorStateActive() {
+  return document.body?.classList?.contains(BAD_CONNECTION_BODY_CLASS) === true;
+}
+
+function badConnectionTerminalCursorColor() {
+  return resolvedTerminalThemeMode() === 'light' ? BAD_CONNECTION_CURSOR_COLORS.light : BAD_CONNECTION_CURSOR_COLORS.dark;
+}
+
+function terminalCursorBlinkEnabled() {
+  return true;
+}
+
+function terminalThemeWithBadConnectionCursor(theme) {
+  return {...theme, cursor: badConnectionTerminalCursorColor(), cursorAccent: BAD_CONNECTION_CURSOR_ACCENT};
+}
+
+function terminalCursorColorsForSession(session, baseTheme = terminalRenderThemeForGlobalTheme()) {
+  if (badConnectionCursorStateActive()) return terminalThemeWithBadConnectionCursor({});
+  const displayTheme = resolvedTerminalThemeMode() === 'light' ? terminalThemeForGlobalTheme() : baseTheme;
+  return {
+    cursor: session === focusedPanelItem ? activeTerminalCursorColorForTheme(displayTheme) : displayTheme.cursor,
+    cursorAccent: displayTheme.cursorAccent,
+  };
+}
+
+function setBadConnectionCursorState(active) {
+  document.body?.classList?.toggle(BAD_CONNECTION_BODY_CLASS, active === true);
+  refreshActiveTerminalCursor();
+}
+
+function applyCursorColorSetting() {
+  const style = document.documentElement?.style;
+  if (!style) return;
+  style.setProperty('--active-terminal-cursor-rgb', hexToRgbTriple(activeTerminalCursorColorForTheme()));
+}
+
+function applyEditorCursorStyle() {
+  fileEditorCursorStyle = normalizeEditorCursorStyle(fileEditorCursorStyle);
+  document.body?.classList.remove('editor-cursor-line', 'editor-cursor-block');
+  document.body?.classList.add(`editor-cursor-${fileEditorCursorStyle}`);
+}
+
+function applyInactivePaneOpacity(value) {
+  const number = Number(value);
+  const percent = Number.isFinite(number) ? Math.max(0, Math.min(100, number)) : 60;
+  document.documentElement?.style.setProperty('--inactive-pane-opacity-scale', String(percent / 100));
+}
+
+function applyPaneRingOpacity(value) {
+  const number = Number(value);
+  const percent = Number.isFinite(number) ? Math.max(5, Math.min(100, number)) : 75;
+  const root = document.documentElement?.style;
+  if (!root) return;
+  root.setProperty('--pane-ring-opacity', `${percent}%`);
+  root.setProperty('--pane-active-ring-opacity', `${percent}%`);
+}
+
+function hexToRgbTriple(hex) {
+  const h = String(hex || '').replace('#', '');
+  if (h.length !== 6) return '118 185 0';
+  return `${parseInt(h.slice(0, 2), 16)} ${parseInt(h.slice(2, 4), 16)} ${parseInt(h.slice(4, 6), 16)}`;
+}
+
+function uiColorVisualPreset(value, light = false) {
+  if (value === 'green') {
+    return light
+      ? {accent: '#5f9800', bright: '#4f9e3a', text: '#071000'}
+      : {accent: '#76b900', bright: '#86d600', text: '#071000'};
+  }
+  const preset = ACTIVE_COLOR_PRESETS[value];
+  return light ? preset?.light : preset?.dark;
+}
+
+// Set the active-accent source vars on both roots: documentElement covers surfaces that resolve tokens
+// there, while body inline beats body.theme-light's class-level defaults for normal descendants.
+// Green/unknown clears both so the CSS defaults stand. Re-run on theme switch since the per-preset values
+// differ per resolved theme.
+function applyActiveColor(value) {
+  const styles = [document.documentElement?.style, document.body?.style].filter(Boolean);
+  if (!styles.length) return;
+  const vars = ['--active-accent', '--active-accent-rgb', '--active-accent-bright', '--active-accent-text', '--active-accent-dim', '--active-accent-soft', '--active-tab-muted-bg', '--active-tab-muted-hover-bg', '--active-tab-muted-border'];
+  const preset = ACTIVE_COLOR_PRESETS[value];
+  if (!preset) {
+    styles.forEach(style => vars.forEach(v => style.removeProperty(v)));
+    updateBrowserFavicon({force: true});
+    return;
+  }
+  const light = document.body.classList.contains(themeResolvedBodyClass('light'));
+  const p = light ? preset.light : preset.dark;
+  const rgb = hexToRgbTriple(p.accent);
+  for (const style of styles) {
+    style.setProperty('--active-accent', p.accent);
+    style.setProperty('--active-accent-rgb', rgb);
+    style.setProperty('--active-accent-bright', p.bright);
+    style.setProperty('--active-accent-text', p.text);
+    style.setProperty('--active-accent-dim', `color-mix(in srgb, ${p.accent} 26%, var(--panel))`);
+    style.setProperty('--active-accent-soft', `rgb(${rgb} / 0.12)`);
+    for (const [name, presetKey] of [
+      ['--active-tab-muted-bg', 'tabMuted'],
+      ['--active-tab-muted-hover-bg', 'tabMutedHover'],
+      ['--active-tab-muted-border', 'tabMutedBorder'],
+    ]) {
+      if (p[presetKey]) style.setProperty(name, p[presetKey]);
+      else style.removeProperty(name);
+    }
+  }
+  // keep the browser-tab favicon background/glyph in sync with the chosen accent + theme
+  updateBrowserFavicon({force: true});
+}
+
+function applySeparatorColor(value) {
+  const styles = [document.documentElement?.style, document.body?.style].filter(Boolean);
+  if (!styles.length) return;
+  const vars = ['--pane-resizer-bg', '--pane-resizer-hover-bg', '--pane-resizer-shadow'];
+  const preset = String(value || 'theme') === 'theme'
+    ? null
+    : uiColorVisualPreset(value, document.body?.classList?.contains('theme-resolved-light'));
+  if (!preset) {
+    styles.forEach(style => vars.forEach(v => style.removeProperty(v)));
+    return;
+  }
+  const rgb = hexToRgbTriple(preset.bright || preset.accent);
+  for (const style of styles) {
+    style.setProperty('--pane-resizer-bg', `rgb(${rgb} / 0.72)`);
+    style.setProperty('--pane-resizer-hover-bg', `rgb(${rgb} / 0.96)`);
+    style.setProperty('--pane-resizer-shadow', `rgb(${rgb} / 0.72)`);
+  }
+}
+
+function applyStatusPulseModeClass() {
+  const enabled = typeof statusPulseAnimationEnabled === 'function' ? statusPulseAnimationEnabled() : false;
+  document.documentElement?.classList.toggle('status-pulse-disabled', !enabled);
+}
+
+function syncedFinderFontSize(globalSize) {
+  const size = Math.round(Number(globalSize));
+  return Math.max(1, size - Math.max(1, Math.round(size * 0.12)));
+}
+
+function applyCssSettings() {
+  applyStatusPulseModeClass();
+  const root = document.documentElement?.style;
+  if (!root) return;
+  const globalFontSize = Math.max(6, Math.min(25, numberSetting('appearance.global_font_size', 14)));
+  const uiFontSize = numberSetting('appearance.ui_font_size', 14);
+  const syncFontSizes = boolSetting('appearance.sync_font_sizes', true);
+  if (syncFontSizes) {
+    terminalFontSize = globalFontSize;
+    editorFontSize = globalFontSize;
+    editorPreviewFontSize = globalFontSize;
+    fileExplorerFontSize = syncedFinderFontSize(globalFontSize);
+  }
+  root.setProperty('--ui-font-size', `${syncFontSizes ? globalFontSize : uiFontSize}px`);
+  root.setProperty('--tab-label-size', `${syncFontSizes ? globalFontSize : uiFontSize}px`);
+  root.setProperty('--terminal-font-size', `${syncFontSizes ? globalFontSize : terminalFontSize}px`);
+  root.setProperty('--editor-font-size', `${syncFontSizes ? globalFontSize : editorFontSize}px`);
+  root.setProperty('--editor-preview-font-size', `${syncFontSizes ? globalFontSize : editorPreviewFontSize}px`);
+  root.setProperty('--file-explorer-font-size', `${syncFontSizes ? globalFontSize : fileExplorerFontSize}px`);
+  root.setProperty('--pane-tab-width', `${numberSetting('appearance.tab_width', 172)}px`);
+  // #261: pane spacing (0-20px) = the gap on each side of the separator AND the width of the active
+  // pane's green "border" (which fills its side of that gap up to the line). At 0: no gap, no green —
+  // panes sit flush to the 1px separator. The red needs-* attention ring keeps its own constant width
+  // (--pane-tab-panel-ring-width, unchanged) so it stays visible even at spacing 0.
+  const paneSpacing = Math.max(0, Math.min(20, numberSetting('appearance.pane_spacing', 3)));
+  root.setProperty('--pane-split-gap', `${paneSpacing}px`);
+  // Opacity (5-100%) of the translucent pane ring. The active ring follows the same setting; otherwise
+  // low values appear to save correctly while the visible focused pane still stays prominent.
+  const paneRingOpacity = Math.max(5, Math.min(100, numberSetting('appearance.pane_ring_opacity', 75)));
+  applyPaneRingOpacity(paneRingOpacity);
+  applyInactivePaneOpacity(numberSetting('appearance.inactive_pane_opacity', 60));
+  applyActiveColor(initialSetting('appearance.active_color', 'green'));
+  applySeparatorColor(initialSetting('appearance.separator_color', 'theme'));
+  applyCursorColorSetting();
+  const statusPulsePeriodMs = Math.max(1, agentStatusPulsePeriodMs);
+  root.setProperty('--pulse-duration', `${statusPulsePeriodMs / 1000}s`);
+  root.setProperty('--red-reminder-duration', `${statusPulsePeriodMs / 1000}s`);
+  // Quantize the opacity pulse into ~125ms steps (steps(N) timing): step size = period / N with
+  // N = round(period / 125). 125ms (~8 opacity updates/sec at the 1.55s default) was chosen over:
+  //   - 250ms (the old value): ~4/sec read as a perceptible staircase on the 0.16->1 ramp;
+  //   - 50ms: ~20/sec is near-continuous but pays close to full 60fps repaint cost on EVERY status
+  //     ball (per-window, tabs, YO!info, topbar) -- the stepping exists to avoid exactly that;
+  //   - 500ms: ~3 samples per cycle looks like a strobe, not a breathing pulse.
+  // 125ms is the smoothness/cost midpoint: visibly smoother than 250ms yet still far fewer repaints
+  // than a per-frame animation. We pin the STEP size (not a fixed step count) so repaint rate and
+  // perceived smoothness stay ~constant across the whole 250-10000ms period preference; a fixed
+  // count would over-repaint short periods and look chunky on long ones.
+  root.setProperty('--status-pulse-step-count', String(Math.max(1, Math.round(statusPulsePeriodMs / 125))));
+  if (typeof setAttentionAnimationClockDelay === 'function') setAttentionAnimationClockDelay();
+  root.setProperty('--popover-show-delay', `${popoverShowDelayMs}ms`);
+  root.setProperty('--popover-hide-delay', `${popoverHideDelayMs}ms`);
+  root.setProperty('--file-image-preview-max-size', `${Math.max(1, fileExplorerImagePreviewMaxPx)}px`);
+}
+
+function applyGlobalThemeMode(options = {}) {
+  globalThemeMode = normalizeGlobalThemeMode(globalThemeMode);
+  const resolved = resolvedGlobalThemeMode();
+  document.body?.classList.remove(...THEME_BODY_CLASSES);
+  document.body?.classList.add(themeBodyClass(resolved), themeResolvedBodyClass(resolved));
+  if (globalThemeMode === 'system') document.body?.classList.add(themeBodyClass('system'));
+  if (document.documentElement?.style) document.documentElement.style.colorScheme = resolved;
+  if (typeof syncDockviewTheme === 'function') syncDockviewTheme();
+  if (options.updateEditor !== false) applyEditorThemeMode({refreshEditors: options.refreshEditors !== false});
+  if (options.updateTerminals) applyTerminalRuntimeSettings({fit: false});
+  // the active-color presets are theme-specific, so re-apply on every theme switch.
+  applyActiveColor(initialSetting('appearance.active_color', 'green'));
+  applySeparatorColor(initialSetting('appearance.separator_color', 'theme'));
+  if (typeof refreshPanePopouts === 'function') refreshPanePopouts();
+}
+
+let globalThemeMediaListenerInstalled = false;
+
+function installGlobalThemeMediaListener() {
+  if (globalThemeMediaListenerInstalled) return;
+  const query = globalThemeMediaQuery();
+  if (!query) return;
+  const handler = () => {
+    if (normalizeGlobalThemeMode(globalThemeMode) !== 'system') return;
+    applyGlobalThemeMode({updateEditor: true, updateTerminals: true, reason: 'theme-system'});
+    renderSessionButtons();
+    renderPaneTabStrips();
+  };
+  if (typeof query.addEventListener === 'function') query.addEventListener('change', handler);
+  else if (typeof query.addListener === 'function') query.addListener(handler);
+  globalThemeMediaListenerInstalled = true;
+}
+
+// The ACTIVE pane's terminal gets the configured cursor color so it's obvious which terminal you're
+// typing into; every other terminal keeps its theme's default cursor color.
+
+function terminalThemeForSession(session, baseTheme) {
+  const theme = baseTheme || terminalRenderThemeForGlobalTheme();
+  return {...theme, ...terminalCursorColorsForSession(session, theme)};
+}
+
+function applyTerminalContainerTheme(container, theme = terminalThemeForGlobalTheme(), mode = globalThemeMode) {
+  if (!container) return;
+  container.dataset.terminalTheme = resolvedTerminalThemeMode(terminalThemeMode, mode);
+  if (container.style) container.style.background = theme.background;
+}
+
+function applyTerminalRuntimeSettings(options = {}) {
+  // The display theme owns the container/background. The render theme owns xterm's source palette
+  // and contrast reference; in light mode CSS converts those painted rows without collapsing their
+  // original neutral hierarchy.
+  const displayTheme = terminalThemeForGlobalTheme();
+  const renderTheme = terminalRenderThemeForGlobalTheme();
+  const minContrast = terminalMinimumContrastRatio();
+  for (const [session, item] of terminals.entries()) {
+    if (!item?.term) continue;
+    item.term.options.fontFamily = terminalFontFamily;
+    item.term.options.fontSize = terminalFontSize;
+    item.term.options.scrollback = terminalScrollback;
+    item.term.options.cursorBlink = terminalCursorBlinkEnabled();
+    item.term.options.theme = terminalThemeForSession(session, renderTheme);
+    item.term.options.minimumContrastRatio = minContrast;
+    item.term.clearTextureAtlas?.();
+    refreshTerminal(session);
+    applyTerminalContainerTheme(item.container, displayTheme);
+    if (options.fit !== false) scheduleFit(session);
+  }
+}
+
+// Lightweight cursor-only refresh for focus changes: re-color just the cursor so the active pane's
+// terminal blinks yellow and the rest revert to their theme default, without re-fitting every pane.
+function refreshActiveTerminalCursor() {
+  const base = terminalRenderThemeForGlobalTheme();
+  const badConnection = badConnectionCursorStateActive();
+  for (const [session, item] of terminals.entries()) {
+    if (!item?.term?.options) continue;
+    item.term.options.cursorBlink = !badConnection;
+    const {cursor, cursorAccent} = terminalCursorColorsForSession(session, base);
+    const current = item.term.options.theme || base;
+    if (current.cursor !== cursor || current.cursorAccent !== cursorAccent) {
+      item.term.options.theme = {...current, cursor, cursorAccent};
+    }
+  }
+}
+
+function refreshMetaButtonChrome() {
+  if (!refreshMeta) return;
+  const loading = transcriptMetadataState.loading === true;
+  const seconds = ms => `${Math.round(ms / 1000)}s`;
+  refreshMeta.textContent = t('common.refresh');
+  refreshMeta.title = loading
+    ? t('info.loadingRepo')
+    : t('meta.refreshTitle', {ping: seconds(latencyRefreshMs), openLogs: seconds(eventLogRefreshMs), tabber: seconds(tabberActivityRefreshMs)});
+  refreshMeta.setAttribute('aria-label', loading ? t('info.loadingRepo') : t('meta.refreshAria'));
+}
+
+const SETTINGS_APPLY_DEPENDENCIES = Object.freeze({
+  css: [
+    'appearance.global_font_size', 'appearance.ui_font_size', 'appearance.sync_font_sizes', 'appearance.terminal_font_size',
+    'appearance.editor_font_size', 'appearance.preview_font_size', 'appearance.file_explorer_font_size', 'appearance.tab_width',
+    'appearance.pane_spacing', 'appearance.pane_ring_opacity', 'appearance.inactive_pane_opacity',
+    'appearance.active_color', 'appearance.separator_color', 'appearance.editor_cursor_color',
+    'performance.agent_status_pulse_period_ms', 'performance.popover_show_delay_ms', 'performance.popover_hide_delay_ms',
+    'file_explorer.image_preview_max_px',
+  ],
+  globalTheme: ['appearance.theme'],
+  editorTheme: ['appearance.theme', 'appearance.editor_dark_color_scheme', 'appearance.editor_light_color_scheme'],
+  editorCursor: ['appearance.editor_cursor_style'],
+  terminal: [
+    'appearance.theme', 'appearance.terminal_theme', 'appearance.terminal_font_size', 'appearance.global_font_size',
+    'appearance.sync_font_sizes', 'appearance.editor_cursor_color', 'terminal_editor.scrollback',
+  ],
+  editorWrap: ['terminal_editor.word_wrap', 'terminal_editor.line_numbers'],
+  explorerRoot: ['file_explorer.root_mode'],
+  indexedDirs: ['file_explorer.indexed_dirs'],
+  indexExcludes: ['file_explorer.index_exclude_paths'],
+  metaChrome: ['performance.latency_refresh_ms', 'performance.event_log_refresh_ms', 'performance.tabber_activity_refresh_ms'],
+  runtimeIntervals: [
+    'performance.latency_refresh_ms', 'performance.event_log_refresh_ms', 'performance.tabber_activity_refresh_ms',
+    'performance.agent_status_pulse_period_ms', 'file_explorer.index_refresh_seconds',
+  ],
+  previewControls: ['appearance.preview_font_size', 'appearance.editor_font_size', 'appearance.global_font_size', 'appearance.sync_font_sizes'],
+  previewPopouts: [
+    'appearance.preview_font_size', 'appearance.editor_font_size', 'appearance.global_font_size', 'appearance.sync_font_sizes',
+    'appearance.theme', 'appearance.editor_dark_color_scheme', 'appearance.editor_light_color_scheme',
+  ],
+  autosave: ['editor.autosave', 'editor.autosave_delay_seconds'],
+  locale: ['general.language'],
+  chrome: [
+    'appearance.theme', 'appearance.terminal_theme',
+    'appearance.editor_dark_color_scheme', 'appearance.editor_light_color_scheme',
+  ],
+});
+
+function settingsPathValue(source, defaults, path) {
+  return nestedSetting(source, path, nestedSetting(defaults, path, settingFallback(path)));
+}
+
+function settingsPathValuesEqual(left, right) {
+  if (Object.is(left, right)) return true;
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function settingsDependencyChanged(group, previousSettings, previousDefaults, nextSettings, nextDefaults) {
+  return (SETTINGS_APPLY_DEPENDENCIES[group] || []).some(path => !settingsPathValuesEqual(
+    settingsPathValue(previousSettings, previousDefaults, path),
+    settingsPathValue(nextSettings, nextDefaults, path),
+  ));
+}
+
+function applySettingsPayload(payload, options = {}) {
+  if (!payload?.settings) return false;
+  const nextMtime = Number(payload.mtime_ns || 0);
+  // A deferred refresh or duplicate push may arrive after a settings write. A revision is a
+  // complete snapshot, so an equal revision is already applied; `force` may repaint callers but
+  // must never let an older/equal payload roll back the accepted settings values.
+  if (!options.initial && clientSettingsMtimeNs && (!nextMtime || nextMtime <= clientSettingsMtimeNs)) return false;
+  const previousSettings = clientSettings;
+  const previousDefaults = clientSettingsDefaults;
+  const nextDefaults = payload.defaults || previousDefaults;
+  const nextSettings = mergeSettingObjects(nextDefaults, payload.settings || {});
+  const settingsChanged = JSON.stringify(previousSettings) !== JSON.stringify(nextSettings);
+  const groupChanged = Object.fromEntries(Object.keys(SETTINGS_APPLY_DEPENDENCIES).map(group => [
+    group,
+    options.initial === true || settingsDependencyChanged(group, previousSettings, previousDefaults, nextSettings, nextDefaults),
+  ]));
+  if (options.applyEditorDefaults === true) groupChanged.editorWrap = true;
+  const previousLocale = i18nActiveLocaleId();
+  const previousDateTimeHourCycle = dateTimeHourCycle;
+  const previousAgentStatusPulsePeriodMs = agentStatusPulsePeriodMs;
+  clientSettingsPayload = payload;
+  clientSettingsMetadataDeferred = payload.deferred_metadata === true;
+  clientSettingsDefaults = nextDefaults;
+  clientSettings = nextSettings;
+  clientSettingsMtimeNs = nextMtime;
+  remoteResizeDelayMs = numberSetting('performance.remote_resize_delay_ms');
+  latencyRefreshMs = numberSetting('performance.latency_refresh_ms');
+  eventLogRefreshMs = numberSetting('performance.event_log_refresh_ms');
+  tabberActivityRefreshMs = numberSetting('performance.tabber_activity_refresh_ms');
+  agentStatusPulsePeriodMs = numberSetting('performance.agent_status_pulse_period_ms');
+  workflowTransitionGlowSeconds = numberSetting('performance.workflow_transition_glow_seconds');
+  toastDurationMs = numberSetting('notifications.toast_duration_ms');
+  popoverShowDelayMs = numberSetting('performance.popover_show_delay_ms');
+  popoverHideDelayMs = numberSetting('performance.popover_hide_delay_ms');
+  fileExplorerIndexRefreshSeconds = numberSetting('file_explorer.index_refresh_seconds');
+  fileExplorerNewEntryHighlightMs = numberSetting('file_explorer.new_entry_highlight_ms');
+  fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px');
+  fileExplorerImageOpenMode = normalizedImageOpenMode(initialSetting('file_explorer.image_open_mode'));
+  if (options.initial || groupChanged.indexedDirs) reconcileIndexedDirsFromSetting({initial: options.initial === true});
+  if (options.initial || groupChanged.indexExcludes) reconcileIndexExcludePathsFromSetting();
+  uploadMaxBytes = numberSetting('uploads.max_bytes');
+  terminalFontSize = numberSetting('appearance.terminal_font_size', 14);
+  editorFontSize = numberSetting('appearance.editor_font_size', 14);
+  editorPreviewFontSize = numberSetting('appearance.preview_font_size', 14);
+  fileExplorerFontSize = numberSetting('appearance.file_explorer_font_size', 14);
+  terminalScrollback = numberSetting('terminal_editor.scrollback');
+  fileEditorAutosaveEnabled = boolSetting('editor.autosave', true);
+  fileEditorAutosaveDelaySeconds = numberSetting('editor.autosave_delay_seconds');
+  const previousBlameAllLines = fileEditorBlameAllLines;
+  fileEditorBlameAllLines = boolSetting('editor.blame_all_lines', false);
+  autoFocusEnabled = boolSetting('general.auto_focus');
+  startupHelpersEnabled = boolSetting('general.startup_tips');
+  const previousEditorSchemeId = activeEditorScheme().id;
+  const previousCursorColor = fileEditorCursorColor;
+  globalThemeMode = normalizeGlobalThemeMode(initialSetting('appearance.theme', defaultGlobalTheme));
+  terminalThemeMode = normalizeTerminalThemeMode(initialSetting('appearance.terminal_theme', defaultTerminalTheme));
+  dateTimeHourCycle = normalizeDateTimeHourCycle(initialSetting('appearance.date_time_hour_cycle'));
+  fileEditorCursorStyle = normalizeEditorCursorStyle(initialSetting('appearance.editor_cursor_style', 'block'));
+  fileEditorCursorColor = normalizeEditorCursorColor(initialSetting('appearance.editor_cursor_color', DEFAULT_CURSOR_COLOR));
+  fileEditorThemeMode = readConfiguredEditorScheme();
+  if (options.initial || options.applyEditorDefaults) {
+    fileEditorWrapEnabled = boolSetting('terminal_editor.word_wrap', fileEditorWrapEnabled);
+    fileEditorLineNumbersEnabled = boolSetting('terminal_editor.line_numbers', fileEditorLineNumbersEnabled);
+  }
+  fileExplorerRootMode = initialSetting('file_explorer.root_mode', fileExplorerRootMode) === 'sync' ? 'sync' : 'fixed';
+  if (groupChanged.css) applyCssSettings();
+  if (previousAgentStatusPulsePeriodMs !== agentStatusPulsePeriodMs) {
+    // Retiming an existing stepped CSS animation is browser-dependent. Reuse the status owner to
+    // clear phase state and restart only these animations after the new duration is on :root.
+    if (typeof restartAgentWindowActivityPulseAnimations === 'function') restartAgentWindowActivityPulseAnimations();
+    else if (typeof scheduleAgentWindowActivityAnimationSync === 'function') scheduleAgentWindowActivityAnimationSync();
+  }
+  if (groupChanged.globalTheme) applyGlobalThemeMode({updateEditor: false, updateTerminals: false});
+  if (groupChanged.editorTheme || groupChanged.globalTheme) applyEditorThemeMode({refreshEditors: false});
+  if (groupChanged.editorCursor) applyEditorCursorStyle();
+  if (groupChanged.terminal) applyTerminalRuntimeSettings();
+  if (groupChanged.editorWrap) applyEditorWrapPreference();
+  if (groupChanged.explorerRoot) renderFileExplorerRootModeControls();
+  if (groupChanged.metaChrome) refreshMetaButtonChrome();
+  if (settingsChanged || options.initial || options.forcePreferences === true) renderPreferencesPanels({force: options.forcePreferences === true});
+  if (groupChanged.chrome && !groupChanged.locale) {
+    renderSessionButtons();
+    renderPaneTabStrips();
+  }
+  if (groupChanged.autosave) rescheduleAllFileAutosaves();
+  if (groupChanged.previewControls) updateEditorPreviewFontControls();
+  if (previousDateTimeHourCycle !== dateTimeHourCycle) {
+    rerenderDateTimeFormatSurfaces();
+  }
+  const editorThemeChanged = previousEditorSchemeId !== activeEditorScheme().id;
+  const editorCursorColorChanged = previousCursorColor !== fileEditorCursorColor;
+  if (editorThemeChanged || editorCursorColorChanged) {
+    // re-theme LIVE editors via the compartment swap (preserves scroll/selection). A plain
+    // renderFileEditorPanel short-circuits because codeMirrorConfigSignature omits the scheme, so the
+    // CM view would keep its old theme; refreshOpenEditorThemePanels reconfigures the theme directly.
+    refreshOpenEditorThemePanels();
+  } else if (groupChanged.previewPopouts) {
+    refreshFilePreviewPopouts();
+  }
+  // the blame ViewPlugin decorates per fileEditorBlameAllLines at build time + the editor
+  // config signature carries it, so re-render open editors when the toggle changes (only matters while
+  // blame is on).
+  if (previousBlameAllLines !== fileEditorBlameAllLines && fileEditorBlameEnabled) applyEditorBlamePreference();
+  // i18n: when general.language changes, load the new catalog and re-render localized surfaces.
+  const nextLocale = resolveLocalePref(initialSetting('general.language', 'system'));
+  if (nextLocale !== previousLocale) applyLocale(nextLocale);
+  if (!options.initial && groupChanged.runtimeIntervals) {
+    installRuntimeIntervals();
+  }
+  return true;
+}
+
+function scheduleDeferredSettingsMetadataRefresh() {
+  if (typeof statsOnlyBootEnabled === 'function' && statsOnlyBootEnabled()) return null;
+  if (!clientSettingsMetadataDeferred) return null;
+  if (clientSettingsMetadataRefreshPromise) return clientSettingsMetadataRefreshPromise;
+  if (clientSettingsMetadataRefreshTimer) return null;
+  clientSettingsMetadataRefreshTimer = setTimeout(() => {
+    clientSettingsMetadataRefreshTimer = null;
+    clientSettingsMetadataRefreshPromise = refreshSettings({force: true, silent: true})
+      .finally(() => { clientSettingsMetadataRefreshPromise = null; });
+  }, 0);
+  return null;
+}
+
+async function refreshSettings(options = {}) {
+  try {
+    const payload = await apiFetchJson('/api/settings', {cache: 'no-store'});
+    const changed = applySettingsPayload(payload, {force: options.force === true});
+    if (changed) refreshYoloRulesStatus({silent: true});
+    if (changed && !options.silent) statusEl.textContent = t('status.settingsReloaded');
+  } catch (error) {
+    if (!options.silent) {
+      statusErr(localizedHtml('status.settingsReloadFailed', {
+        error: userMessageText(error, t('common.requestFailed')),
+      }));
+    }
+  }
+}
+
+const runtimeIntervals = new Map();
+
+// One catalog names the truth source for every recurring browser callback. An entry is
+// deliberately a reason, not a scheduling policy: callers still own their visibility,
+// demand, and socket-health guards. Keep this in source (rather than a docs-only list) so
+// a future "remove polling" cleanup has to classify a new callback before treating it as
+// redundant discovery work.
+const runtimeTimerClassCatalog = Object.freeze({
+  'poll:no-change': 'A bounded reconciliation that can report no changed state.',
+  sample: 'A request or local observation that creates a new measurement.',
+  lease: 'A bounded liveness or ownership renewal.',
+  'external-reconcile': 'A bounded check against a system without an event source.',
+  repair: 'A bounded recovery action after a detected gap or divergence.',
+  fallback: 'A reduced-cadence recovery path while the primary event source is unavailable.',
+  'local-display': 'A local repaint that does not discover remote state.',
+});
+
+const runtimeIntervalCatalog = Object.freeze({
+  latency: Object.freeze({classes: Object.freeze(['sample']), source: 'A fresh /api/ping round trip is the latency measurement.'}),
+  'events-fallback': Object.freeze({classes: Object.freeze(['fallback']), source: 'event_log_changed SSE is authoritative while connected; HTTP repairs an open log after transport loss.'}),
+  'auto-approve': Object.freeze({classes: Object.freeze(['fallback']), source: 'auto-approve SSE/status revisions are authoritative while connected; visible pages repair after transport loss.'}),
+  'tabber-activity-fallback': Object.freeze({classes: Object.freeze(['fallback']), source: 'Tabber cache completion normally arrives through the shared SSE stream; this repairs an active Tabber only while that stream is disconnected.'}),
+  'file-index-refresh': Object.freeze({classes: Object.freeze(['fallback']), source: 'Index lifecycle events are authoritative while SSE is connected; visible Finder/search uses this status repair path only after transport loss.'}),
+  'file-index-building': Object.freeze({classes: Object.freeze(['fallback']), source: 'Search-index lifecycle invalidations are authoritative while SSE is connected; a building root is repaired only after transport loss.'}),
+  'debug-stats': Object.freeze({classes: Object.freeze(['fallback']), source: 'Exact YO!stats SSE owns a live short range; HTTP supplies initial, legacy, coarse, and disconnected repair data.'}),
+  'debug-system': Object.freeze({classes: Object.freeze(['poll:no-change']), source: 'System diagnostics aggregate independently changing local-service state without a producer revision.'}),
+  'debug-logs': Object.freeze({classes: Object.freeze(['poll:no-change']), source: 'Debug log retention has no push revision; the visible Logs tab reconciles its bounded server snapshot.'}),
+  'chat-relative-times': Object.freeze({classes: Object.freeze(['local-display']), source: 'Existing message timestamps are repainted locally; no request is made.'}),
+});
+
+function runtimeIntervalCatalogEntry(name) {
+  return runtimeIntervalCatalog[name] || null;
+}
+
+function runtimeIntervalDelay(baseDelay) {
+  const base = Math.max(1, Math.round(Number(baseDelay) || 1));
+  return base;
+}
+
+function runtimeIntervalDiagnostics(name = '') {
+  const names = name ? [name] : [...runtimeIntervals.keys()].sort();
+  return names.map(intervalName => {
+    const state = runtimeIntervals.get(intervalName);
+    if (!state) return null;
+    const catalog = runtimeIntervalCatalogEntry(intervalName);
+    return {
+      name: intervalName,
+      classes: catalog?.classes || [],
+      source: catalog?.source || '',
+      active: state.active === true,
+      delay: state.delay,
+      lastStartedAtMs: state.lastStartedAtMs,
+      lastUsefulAtMs: state.lastUsefulAtMs,
+      lastResult: state.lastResult,
+    };
+  }).filter(Boolean);
+}
+
+function resetRuntimeInterval(name, callback, delay) {
+  const normalizedDelay = Math.max(1, Math.round(Number(delay) || 1));
+  const existing = runtimeIntervals.get(name);
+  if (existing?.delay === normalizedDelay) {
+    existing.callback = callback;
+    return existing;
+  }
+  if (existing) {
+    existing.active = false;
+    clearTimeout(existing.timer);
+  }
+  const state = {
+    active: true,
+    timer: null,
+    delay: normalizedDelay,
+    callback,
+    lastStartedAtMs: 0,
+    lastUsefulAtMs: 0,
+    lastResult: 'never',
+  };
+  const scheduleNext = () => {
+    if (!state.active) return;
+    state.timer = setTimeout(run, runtimeIntervalDelay(state.delay));
+  };
+  const run = () => {
+    if (!state.active) return;
+    state.lastStartedAtMs = Date.now();
+    try {
+      Promise.resolve(state.callback())
+        .then(result => {
+          state.lastResult = result === null ? 'no-change' : 'useful';
+          if (result !== null) state.lastUsefulAtMs = Date.now();
+        })
+        .catch(error => console.warn('runtime interval failed', name, error))
+        .finally(scheduleNext);
+    } catch (error) {
+      console.warn('runtime interval failed', name, error);
+      scheduleNext();
+    }
+  };
+  scheduleNext();
+  runtimeIntervals.set(name, state);
+  return state;
+}
+
+function clearRuntimeInterval(name) {
+  const existing = runtimeIntervals.get(name);
+  if (!existing) return false;
+  existing.active = false;
+  clearTimeout(existing.timer);
+  runtimeIntervals.delete(name);
+  return true;
+}
+
+function runtimeIntervalActive(name) {
+  return runtimeIntervals.get(name)?.active === true;
+}
+
+function latencyVisibleConsumer() {
+  const topbarLatencyVisible = Boolean(latencyMeter) && !document.body?.classList?.contains('topbar-pack-hide-latency');
+  const statsLatencyVisible = typeof jsDebugStatsPanelVisible === 'function' && jsDebugStatsPanelVisible();
+  return document.visibilityState !== 'hidden' && (topbarLatencyVisible || statsLatencyVisible);
+}
+
+function installRuntimeIntervals() {
+  resetRuntimeInterval('latency', () => {
+    if (!latencyVisibleConsumer()) return null;
+    return updateLatency();
+  }, latencyRefreshMs);
+  // Event-log writes publish `event_log_changed` over the shared SSE stream. Retain this
+  // interval solely as an outage repair path so an EventSource failure cannot leave an open Log
+  // pane permanently stale.
+  resetRuntimeInterval('events-fallback', () => {
+    if (clientEventTransportState.connected === true) return null;
+    return refreshOpenEventLogs();
+  }, eventLogRefreshMs);
+  clearRuntimeInterval('events');
+  resetRuntimeInterval('auto-approve', () => {
+    if (!clientCanUseUnscopedHostRequests()) return null;
+    if (document.visibilityState === 'hidden') return null;
+    // Python publishes auto_approve_changed over the shared SSE stream. Go has
+    // no auto-approve route/event, so its activity fallback must keep repairing
+    // a transient unavailable sample while the general event stream is healthy.
+    if (clientEventTransportState.connected === true
+        && !(typeof goAgentStatusUsesActivityFallback === 'function' && goAgentStatusUsesActivityFallback())) return null;
+    return refreshAutoStatuses();
+  }, autoApproveDisconnectedPollMs);
+  if (itemInLayout(tabberItemId)) {
+    resetRuntimeInterval('tabber-activity-fallback', () => {
+      if (clientEventTransportState.connected === true || !tabberActivityVisibleConsumer()) return null;
+      return fetchTabberActivity();
+    }, tabberActivityRefreshMs);
+  } else {
+    clearRuntimeInterval('tabber-activity-fallback');
+  }
+  syncFileIndexStatusPollInterval();
+}
+
+function yomuxFontSpecsForCurrentSettings() {
+  const uiSize = Math.max(6, Math.min(30, Math.round(numberSetting('appearance.ui_font_size', 13))));
+  const monoSizes = [
+    uiSize,
+    terminalFontSize,
+    editorFontSize,
+    editorPreviewFontSize,
+    fileExplorerFontSize,
+  ].map(value => Math.max(6, Math.round(Number(value) || uiSize)));
+  return [
+    `${uiSize}px "YOmux UI"`,
+    ...monoSizes.map(size => `${size}px "YOmux Mono"`),
+  ].filter((spec, index, values) => values.indexOf(spec) === index);
+}
+
+function waitForYomuxFontsReady(options = {}) {
+  const fonts = document.fonts;
+  if (!fonts?.load) return Promise.resolve(false);
+  if (!yomuxFontsReadyPromise) {
+    const specs = yomuxFontSpecsForCurrentSettings();
+    yomuxFontsReadyPromise = Promise.all(specs.map(spec => fonts.load(spec).catch(() => [])))
+      .then(() => fonts.ready || true)
+      .then(() => true)
+      .catch(() => false);
+  }
+  const timeoutMs = Math.max(0, Math.round(Number(options.timeoutMs ?? yomuxFontReadyTimeoutMs) || 0));
+  if (!timeoutMs) return yomuxFontsReadyPromise;
+  return Promise.race([
+    yomuxFontsReadyPromise,
+    new Promise(resolve => setTimeout(() => resolve(false), timeoutMs)),
+  ]);
+}
+
+function refreshLayoutAfterFontMetricsReady() {
+  applyCssSettings();
+  renderSessionButtons();
+  renderPaneTabStrips();
+  if (typeof autosizePreferenceTextareas === 'function') autosizePreferenceTextareas(document);
+  for (const session of terminals.keys()) fitTerminal(session);
+  document.querySelectorAll?.('.file-editor-panel').forEach(panel => {
+    try { panel._cmView?.requestMeasure?.(); } catch (_) {}
+  });
+}
+
+function installYomuxFontMetricRefresh() {
+  if (!document.fonts?.ready) return;
+  waitForYomuxFontsReady({timeoutMs: 0})
+    .then(() => refreshLayoutAfterFontMetricsReady())
+    .catch(() => {});
+}

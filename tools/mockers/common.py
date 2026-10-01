@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared mock agent terminal for YOLOmux UI testing."""
+"""Shared mock agent terminal for YOmux UI testing."""
 
 import atexit
 import os
@@ -25,7 +25,7 @@ import yaml
 AGENT_NAME = "claude"
 AGENT_DISPLAY_NAME = "Claude"
 AGENT_PRODUCT_NAME = "Claude Code"
-HISTORY_FILE = os.path.expanduser("~/.cache/yolomux/mock_claude_history")
+HISTORY_FILE = os.path.expanduser("~/.cache/yomux/mock_claude_history")
 HISTORY_LIMIT = 1000
 
 VERSION = ".9.9.999"
@@ -234,7 +234,7 @@ def configure_claude_mock(*, display_cwd_override: str = "") -> None:
         agent_name="claude",
         agent_display_name="Claude",
         agent_product_name="Claude Code",
-        history_file="~/.cache/yolomux/mock_claude_history",
+        history_file="~/.cache/yomux/mock_claude_history",
         version="2.1.185",
         model="Opus 4.8 (1M context)",
         effort="xhigh",
@@ -258,7 +258,7 @@ def configure_codex_mock(
         agent_name="codex",
         agent_display_name="Codex",
         agent_product_name="OpenAI Codex",
-        history_file="~/.cache/yolomux/mock_codex_history",
+        history_file="~/.cache/yomux/mock_codex_history",
         version="0.142.0",
         model=model,
         effort=effort,
@@ -283,7 +283,7 @@ def configure_opencode_mock(
         agent_name="opencode",
         agent_display_name="OpenCode",
         agent_product_name="OpenCode",
-        history_file="~/.cache/yolomux/mock_opencode_history",
+        history_file="~/.cache/yomux/mock_opencode_history",
         version=OPENCODE_VERSION,
         model=model or "switchyard/openai/gpt-5.6-luna",
         effort=effort,

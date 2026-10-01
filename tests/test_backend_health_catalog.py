@@ -113,9 +113,9 @@ from pathlib import Path
 
 import pytest
 
-from yolomux_lib.backend_health.observer import ABSENCE_EXPECTED_REASON_FIELD
+from yomux_lib.backend_health.observer import ABSENCE_EXPECTED_REASON_FIELD
 
-from yolomux_lib import app as app_module
+from yomux_lib import app as app_module
 
 
 # Names from the abandoned `abandoned/0.6.12` topology. None of them exist in this tree, and
@@ -131,14 +131,14 @@ ABANDONED_TOPOLOGY_NAMES = (
     "quick_open_search_payload",
     "StoragedSearchCoordinator",
 )
-ABANDONED_MODULES = ("yolomux_lib.daemon", "yolomux_lib.storaged", "yolomux_lib.storaged_process")
+ABANDONED_MODULES = ("yomux_lib.daemon", "yomux_lib.storaged", "yomux_lib.storaged_process")
 
 
 def _abandoned_module_is_truly_present(module: str) -> bool:
     """True only when an abandoned module resolves to REAL importable code.
 
     A fresh checkout has none of the `ABANDONED_MODULES` on disk, so `find_spec` returns None.
-    But the real 0.7.2->0.7.3 upgrade path leaves an empty `yolomux_lib/daemon/` directory with
+    But the real 0.7.2->0.7.3 upgrade path leaves an empty `yomux_lib/daemon/` directory with
     NO `__init__.py` behind. Python resolves that residue as an implicit *namespace package*: a
     spec whose `origin` is None and whose `submodule_search_locations` is a `_NamespacePath`. No
     code is loadable from it. Treating that spec as "present" is what falsely failed the oracle in
@@ -155,28 +155,28 @@ def _abandoned_module_is_truly_present(module: str) -> bool:
 ROLES = ("demand", "status", "identity", "metrics", "recovery")
 
 # The one process-creating primitive. Every service reaches the operating system through it.
-DEMAND_PRIMITIVE = "yolomux_lib.local_services.registry:LocalServiceRegistry.ensure_started"
-# The one latched-failure-clearing primitive. Every `def retry` in yolomux_lib delegates here.
-RECOVERY_PRIMITIVE = "yolomux_lib.local_services.registry:LocalServiceRegistry.retry"
+DEMAND_PRIMITIVE = "yomux_lib.local_services.registry:LocalServiceRegistry.ensure_started"
+# The one latched-failure-clearing primitive. Every `def retry` in yomux_lib delegates here.
+RECOVERY_PRIMITIVE = "yomux_lib.local_services.registry:LocalServiceRegistry.retry"
 # The one status projection composed into /api/system-status.
-COMPOSED_PROJECTION = "yolomux_lib.app:SystemStatusProjector.runtime_local_services"
-SYSTEM_STATUS_SERVICE = "yolomux_lib.app:SystemStatusProjector.system_status_service"
+COMPOSED_PROJECTION = "yomux_lib.app:SystemStatusProjector.runtime_local_services"
+SYSTEM_STATUS_SERVICE = "yomux_lib.app:SystemStatusProjector.system_status_service"
 
 # M3 split the projection into three named owners. The inventory literal lives in one module,
 # the row producers in one map, and the composition in one collector.
-INVENTORY_MODULE = "yolomux_lib.local_service_projection"
+INVENTORY_MODULE = "yomux_lib.local_service_projection"
 INVENTORY_NAME = "LOCAL_SERVICE_INVENTORY"
-INVENTORY_FILE = "yolomux_lib/local_service_projection.py"
-ROW_PRODUCER_MAP = "yolomux_lib.app:SystemStatusProjector.local_services_row_producers"
-SNAPSHOT_OWNER = "yolomux_lib.app:SystemStatusProjector.local_services_snapshot"
-COLLECTOR = "yolomux_lib.local_service_projection:LocalServicesCollector.collect"
+INVENTORY_FILE = "yomux_lib/local_service_projection.py"
+ROW_PRODUCER_MAP = "yomux_lib.app:SystemStatusProjector.local_services_row_producers"
+SNAPSHOT_OWNER = "yomux_lib.app:SystemStatusProjector.local_services_snapshot"
+COLLECTOR = "yomux_lib.local_service_projection:LocalServicesCollector.collect"
 
 # The two identity owners that read the persisted `*.service.json` process record. Both are
 # registry-derived and differ only in cost: `LocalServiceRegistry.status` returns the record
 # alongside a live `status` RPC, while `registry_process_identity` reads the record plus /proc
 # and issues no RPC at all -- which is why a demand-scoped service must use the second one.
-REGISTRY_STATUS_IDENTITY = "yolomux_lib.local_services.registry:LocalServiceRegistry.status"
-REGISTRY_RECORD_IDENTITY = "yolomux_lib.local_service_projection:registry_process_identity"
+REGISTRY_STATUS_IDENTITY = "yomux_lib.local_services.registry:LocalServiceRegistry.status"
+REGISTRY_RECORD_IDENTITY = "yomux_lib.local_service_projection:registry_process_identity"
 REGISTRY_RECORD_IDENTITY_OWNERS = frozenset({REGISTRY_STATUS_IDENTITY, REGISTRY_RECORD_IDENTITY})
 
 # The two attribute names that may create or lease a process. Neither may be named anywhere on
@@ -245,17 +245,17 @@ class ServiceOwners:
 
 CATALOG: dict[str, ServiceOwners] = {
     "indexd": ServiceOwners(
-        spec_module="yolomux_lib.search.search_indexer",
-        implementation_module="yolomux_lib.search.search_indexer",
-        client_owner="yolomux_lib.search.search_indexer:SearchIndexerClient",
+        spec_module="yomux_lib.search.search_indexer",
+        implementation_module="yomux_lib.search.search_indexer",
+        client_owner="yomux_lib.search.search_indexer:SearchIndexerClient",
         demand_owner=DEMAND_PRIMITIVE,
-        demand_entrypoint="yolomux_lib.search.search_indexer:SearchIndexerClient.ensure_started",
+        demand_entrypoint="yomux_lib.search.search_indexer:SearchIndexerClient.ensure_started",
         demand_evidence="return self.registry.ensure_started()",
-        status_owner="yolomux_lib.search.search_indexer:SearchIndexerClient.runtime_status",
+        status_owner="yomux_lib.search.search_indexer:SearchIndexerClient.runtime_status",
         status_row_expression="app.search_indexer.runtime_status",
         identity_owner=REGISTRY_STATUS_IDENTITY,
         identity_evidence="self.registry.status()",
-        metrics_owner="yolomux_lib.local_services.registry:LocalServiceRegistry.resources",
+        metrics_owner="yomux_lib.local_services.registry:LocalServiceRegistry.resources",
         metrics_evidence='"resources": self.registry.resources(int(payload.get("pid") or 0)),',
         recovery_owner=RECOVERY_PRIMITIVE,
         # SearchIndexerClient is not a LocalServiceClient, so it inherits no retry wrapper.
@@ -273,26 +273,26 @@ CATALOG: dict[str, ServiceOwners] = {
         absence_expected_constant="",
     ),
     "statsd": ServiceOwners(
-        spec_module="yolomux_lib.stats_current.service",
-        implementation_module="yolomux_lib.stats_current.service",
-        client_owner="yolomux_lib.stats_current.client:StatsCurrentClient",
+        spec_module="yomux_lib.stats_current.service",
+        implementation_module="yomux_lib.stats_current.service",
+        client_owner="yomux_lib.stats_current.client:StatsCurrentClient",
         demand_owner=DEMAND_PRIMITIVE,
-        demand_entrypoint="yolomux_lib.stats_current.client:StatsCurrentClient.ensure_started",
+        demand_entrypoint="yomux_lib.stats_current.client:StatsCurrentClient.ensure_started",
         demand_evidence="started = self._transport.registry.ensure_started()",
         # M3: statsd's row was the one built inline in the projection body, so its shape lived
         # in two places. It is now a named producer like the other five, and that producer
         # delegates identity and metrics to the client through the two asserted hops above.
-        status_owner="yolomux_lib.app:SystemStatusProjector.statsd_runtime_status",
+        status_owner="yomux_lib.app:SystemStatusProjector.statsd_runtime_status",
         status_row_expression="app.statsd_runtime_status",
         # statsd does not read LocalServiceRegistry.status(); its identity comes from a live
         # `status` RPC, so it carries no persisted process `record`. This is the one identity
         # divergence M2 did not resolve, and the only one left.
-        identity_owner="yolomux_lib.stats_current.runtime:StatsCurrentRuntime._service_status",
+        identity_owner="yomux_lib.stats_current.runtime:StatsCurrentRuntime._service_status",
         identity_evidence="response = self.client.status()",
-        metrics_owner="yolomux_lib.local_services.registry:LocalServiceRegistry.resources",
+        metrics_owner="yomux_lib.local_services.registry:LocalServiceRegistry.resources",
         metrics_evidence='"resources": self._transport.registry.resources(pid),',
         recovery_owner=RECOVERY_PRIMITIVE,
-        recovery_client_entrypoint="yolomux_lib.stats_current.client:StatsCurrentClient.retry",
+        recovery_client_entrypoint="yomux_lib.stats_current.client:StatsCurrentClient.retry",
         # The only service wired before M9, and by a HUMAN path: POST /api/stats-retry
         # (http_routes.py:1564 -> :436 -> stats_current/http.py:183). M9 adds the automatic
         # path -- the observer's control maps statsd to the same client wrapper -- so this
@@ -315,27 +315,27 @@ CATALOG: dict[str, ServiceOwners] = {
         # taken, a recorded failure, or a demoting/stopping/backoff/blocked process -- so the excuse cannot outlive
         # the pending start and a statsd that actually died still alarms.
         absence_expected_reason="stats_pin_pending",
-        absence_expected_owner="yolomux_lib.app:statsd_pin_pending",
+        absence_expected_owner="yomux_lib.app:statsd_pin_pending",
         absence_expected_constant="STATSD_ABSENT_WHILE_PIN_PENDING",
     ),
     "batchd": ServiceOwners(
-        # Load-bearing shim: yolomux_lib/batchd.py aliases yolomux_lib.infra.batchd, and the spec
+        # Load-bearing shim: yomux_lib/batchd.py aliases yomux_lib.infra.batchd, and the spec
         # names the shim, so the child really launches through it.
-        spec_module="yolomux_lib.batchd",
-        implementation_module="yolomux_lib.infra.batchd",
-        client_owner="yolomux_lib.infra.batchd:BatchClient",
+        spec_module="yomux_lib.batchd",
+        implementation_module="yomux_lib.infra.batchd",
+        client_owner="yomux_lib.infra.batchd:BatchClient",
         demand_owner=DEMAND_PRIMITIVE,
-        demand_entrypoint="yolomux_lib.local_services.client:LocalServiceClient.ensure_started",
+        demand_entrypoint="yomux_lib.local_services.client:LocalServiceClient.ensure_started",
         demand_evidence="started = self.registry.ensure_started()",
-        status_owner="yolomux_lib.infra.batchd:BatchClient._runtime_status_for_service",
+        status_owner="yomux_lib.infra.batchd:BatchClient._runtime_status_for_service",
         status_row_expression="app.job_client.runtime_status",
         identity_owner=REGISTRY_STATUS_IDENTITY,
         identity_evidence="status = self.registry.status()",
         # The only service whose metrics cover worker children as well as the broker.
-        metrics_owner="yolomux_lib.local_services.registry:LocalServiceRegistry.resources_for_pids",
+        metrics_owner="yomux_lib.local_services.registry:LocalServiceRegistry.resources_for_pids",
         metrics_evidence='"resources": self.registry.resources_for_pids(pid, worker_pids)',
         recovery_owner=RECOVERY_PRIMITIVE,
-        recovery_client_entrypoint="yolomux_lib.local_services.client:LocalServiceClient.retry",
+        recovery_client_entrypoint="yomux_lib.local_services.client:LocalServiceClient.retry",
         # M9. The observer's control maps batchd to this wrapper, so a batchd that is down while
         # THIS process holds the scheduler lease is retried; a batchd absent because the lease is
         # inactive still publishes `retry_blocked_scheduler_inactive` and is not touched.
@@ -345,24 +345,24 @@ CATALOG: dict[str, ServiceOwners] = {
         # Pinned up by the scheduler lease, so NOT demand_started. The one expected absence is
         # the other side of that lease: this process does not own background scheduling.
     absence_expected_reason="scheduler_inactive",
-        absence_expected_owner="yolomux_lib.infra.batchd:BatchClient._runtime_status_for_service",
+        absence_expected_owner="yomux_lib.infra.batchd:BatchClient._runtime_status_for_service",
         absence_expected_constant="BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE",
     ),
     "statusd": ServiceOwners(
-        spec_module="yolomux_lib.statusd",
-        implementation_module="yolomux_lib.statusd",
-        client_owner="yolomux_lib.statusd_client:StatusClient",
+        spec_module="yomux_lib.statusd",
+        implementation_module="yomux_lib.statusd",
+        client_owner="yomux_lib.statusd_client:StatusClient",
         demand_owner=DEMAND_PRIMITIVE,
-        demand_entrypoint="yolomux_lib.local_services.client:LocalServiceClient.ensure_started",
+        demand_entrypoint="yomux_lib.local_services.client:LocalServiceClient.ensure_started",
         demand_evidence="started = self.registry.ensure_started()",
-        status_owner="yolomux_lib.statusd_client:StatusClient.runtime_status",
+        status_owner="yomux_lib.statusd_client:StatusClient.runtime_status",
         status_row_expression="app.status_client.runtime_status",
         identity_owner=REGISTRY_STATUS_IDENTITY,
         identity_evidence="runtime = self.registry.status()",
-        metrics_owner="yolomux_lib.local_services.registry:LocalServiceRegistry.resources",
+        metrics_owner="yomux_lib.local_services.registry:LocalServiceRegistry.resources",
         metrics_evidence='"resources": self.registry.resources(pid),',
         recovery_owner=RECOVERY_PRIMITIVE,
-        recovery_client_entrypoint="yolomux_lib.local_services.client:LocalServiceClient.retry",
+        recovery_client_entrypoint="yomux_lib.local_services.client:LocalServiceClient.retry",
         # M9. Wired, and still never retried while merely resting: `demand_started` fences a
         # statusd that is absent with no recorded failure, so only a statusd that ran and
         # exited -- or that stopped answering -- reaches the ladder.
@@ -374,17 +374,17 @@ CATALOG: dict[str, ServiceOwners] = {
         absence_expected_constant="",
     ),
     "watchd": ServiceOwners(
-        spec_module="yolomux_lib.watchd",
-        implementation_module="yolomux_lib.watchd",
-        client_owner="yolomux_lib.watchd_client:WatchClient",
+        spec_module="yomux_lib.watchd",
+        implementation_module="yomux_lib.watchd",
+        client_owner="yomux_lib.watchd_client:WatchClient",
         demand_owner=DEMAND_PRIMITIVE,
         # watchd is leased, not status-probed: acquire_lease() is what starts it.
-        demand_entrypoint="yolomux_lib.local_services.registry:LocalServiceRegistry.acquire_lease",
+        demand_entrypoint="yomux_lib.local_services.registry:LocalServiceRegistry.acquire_lease",
         # acquire_lease is itself a registry method, so it calls the primitive on self.
         demand_evidence="if not self.ensure_started():",
         # The System row deliberately does NOT come from WatchClient.runtime_status; calling
         # it would demand-start a demand-scoped service from a diagnostics path.
-        status_owner="yolomux_lib.app:WatchBridge.watchd_runtime_status",
+        status_owner="yomux_lib.app:WatchBridge.watchd_runtime_status",
         status_row_expression="app.watchd_runtime_status",
         # M2 resolved this. It used to be the in-process bridge mirror, which knows a lease PID
         # but no birth time, so started_at was hardcoded 0.0 (uptime permanently blank) and
@@ -393,10 +393,10 @@ CATALOG: dict[str, ServiceOwners] = {
         # an RPC from a diagnostics path would demand-start a demand-scoped service.
         identity_owner=REGISTRY_RECORD_IDENTITY,
         identity_evidence="identity = local_service_projection.registry_process_identity(app.watch_client.registry)",
-        metrics_owner="yolomux_lib.local_services.registry:LocalServiceRegistry.resources",
+        metrics_owner="yomux_lib.local_services.registry:LocalServiceRegistry.resources",
         metrics_evidence='"resources": self.watch_client.registry.resources(identity.pid),',
         recovery_owner=RECOVERY_PRIMITIVE,
-        recovery_client_entrypoint="yolomux_lib.local_services.client:LocalServiceClient.retry",
+        recovery_client_entrypoint="yomux_lib.local_services.client:LocalServiceClient.retry",
         # M9. Same fence as statusd: demand-scoped absence is never retried, a recorded failure
         # is. The row is built without an RPC, so wiring recovery here does not add one.
         recovery_wired_today=True,
@@ -410,20 +410,20 @@ CATALOG: dict[str, ServiceOwners] = {
     ),
     "approvald": ServiceOwners(
         # Load-bearing shim, same shape as batchd.
-        spec_module="yolomux_lib.approvald",
-        implementation_module="yolomux_lib.approval.approvald",
-        client_owner="yolomux_lib.approval.approvald:ApprovalClient",
+        spec_module="yomux_lib.approvald",
+        implementation_module="yomux_lib.approval.approvald",
+        client_owner="yomux_lib.approval.approvald:ApprovalClient",
         demand_owner=DEMAND_PRIMITIVE,
-        demand_entrypoint="yolomux_lib.local_services.client:LocalServiceClient.ensure_started",
+        demand_entrypoint="yomux_lib.local_services.client:LocalServiceClient.ensure_started",
         demand_evidence="started = self.registry.ensure_started()",
-        status_owner="yolomux_lib.approval.approvald:ApprovalClient.runtime_status",
+        status_owner="yomux_lib.approval.approvald:ApprovalClient.runtime_status",
         status_row_expression="app.approval_client.runtime_status",
         identity_owner=REGISTRY_STATUS_IDENTITY,
         identity_evidence="status = self.registry.status()",
-        metrics_owner="yolomux_lib.local_services.registry:LocalServiceRegistry.resources",
+        metrics_owner="yomux_lib.local_services.registry:LocalServiceRegistry.resources",
         metrics_evidence='"resources": self.registry.resources(int(payload.get("pid") or 0)),',
         recovery_owner=RECOVERY_PRIMITIVE,
-        recovery_client_entrypoint="yolomux_lib.local_services.client:LocalServiceClient.retry",
+        recovery_client_entrypoint="yomux_lib.local_services.client:LocalServiceClient.retry",
         # M9. Same fence as statusd and watchd.
         recovery_wired_today=True,
         essential=True,
@@ -443,11 +443,11 @@ CATALOG: dict[str, ServiceOwners] = {
 # `local_services_recovery_entrypoints()` and calls that service's own client wrapper. It starts
 # nothing itself, which `RECOVERY_ENTRYPOINT_EXPRESSIONS` below proves per service.
 RETRY_DEFINITIONS = {
-    "yolomux_lib/local_services/registry.py": "primitive",
-    "yolomux_lib/local_services/client.py": "self.registry.retry()",
-    "yolomux_lib/stats_current/client.py": "self._transport.registry.retry()",
-    "yolomux_lib/stats_current/http.py": "self.client.retry()",
-    "yolomux_lib/app.py": "entrypoint() from local_services_recovery_entrypoints()",
+    "yomux_lib/local_services/registry.py": "primitive",
+    "yomux_lib/local_services/client.py": "self.registry.retry()",
+    "yomux_lib/stats_current/client.py": "self._transport.registry.retry()",
+    "yomux_lib/stats_current/http.py": "self.client.retry()",
+    "yomux_lib/app.py": "entrypoint() from local_services_recovery_entrypoints()",
 }
 # The app-level recovery map: service id -> the exact expression
 # `local_services_recovery_entrypoints()` maps it to. Five of six; see the indexd row's
@@ -461,9 +461,9 @@ RECOVERY_ENTRYPOINT_EXPRESSIONS = {
     "watchd": "app.watch_client.retry",
     "approvald": "app.approval_client.retry",
 }
-RECOVERY_ENTRYPOINT_MAP = "yolomux_lib.app:SystemStatusProjector.local_services_recovery_entrypoints"
-RECOVERY_CONTROL_OWNER = "yolomux_lib.app:SystemStatusProjector.local_services_recovery_control"
-RECOVERY_CONTROL = "yolomux_lib.app:LocalServiceRecoveryControl"
+RECOVERY_ENTRYPOINT_MAP = "yomux_lib.app:SystemStatusProjector.local_services_recovery_entrypoints"
+RECOVERY_CONTROL_OWNER = "yomux_lib.app:SystemStatusProjector.local_services_recovery_control"
+RECOVERY_CONTROL = "yomux_lib.app:LocalServiceRecoveryControl"
 # The whole public surface the observer is handed. Anything else here is a destructive operation
 # waiting to be reachable from the recovery path.
 RECOVERY_CONTROL_PUBLIC_SURFACE = frozenset({"retry"})
@@ -479,12 +479,12 @@ RECOVERY_CONTROL_PUBLIC_SURFACE = frozenset({"retry"})
 # `control.retry(resource)`, so this census went GREEN through the whole M7 landing while its own
 # docstring claim -- "the only production modules that invoke recovery at all" -- was false. The
 # needle is `.retry(` now, so a call site cannot hide behind an argument list.
-OBSERVER_MODULE = "yolomux_lib/backend_health/observer.py"
+OBSERVER_MODULE = "yomux_lib/backend_health/observer.py"
 RETRY_CALL_SITE_FILES = frozenset({
-    "yolomux_lib/local_services/client.py",
-    "yolomux_lib/stats_current/client.py",
-    "yolomux_lib/stats_current/http.py",
-    "yolomux_lib/http_routes.py",
+    "yomux_lib/local_services/client.py",
+    "yomux_lib/stats_current/client.py",
+    "yomux_lib/stats_current/http.py",
+    "yomux_lib/http_routes.py",
     OBSERVER_MODULE,
 })
 # The SECOND half of the census, added by M9 because the first half still could not see the
@@ -498,7 +498,7 @@ RETRY_CALL_SITE_FILES = frozenset({
 # prewarm record, server_auth's rate-limit band, tmux_signals' backoff) -- three unrelated
 # attributes that merely start with the same letters. Every file below is a real recovery
 # reference, and every recovery reference in the tree is below.
-RETRY_ATTRIBUTE_FILES = frozenset(RETRY_CALL_SITE_FILES | {"yolomux_lib/app.py"})
+RETRY_ATTRIBUTE_FILES = frozenset(RETRY_CALL_SITE_FILES | {"yomux_lib/app.py"})
 RETRY_ATTRIBUTE_PATTERN = r"\.retry\b"
 # The observer may reach a control exactly once, from `_issue_retry`. More than one call site in
 # that module means the choke point stopped being one.
@@ -692,7 +692,7 @@ def _inventory_literal_sites(inventory: tuple[str, ...]) -> frozenset[str]:
     catches is the inventory ORDER being retyped somewhere the collector does not read.
     """
     sites: set[str] = set()
-    for path in sorted((REPO_ROOT / "yolomux_lib").rglob("*.py")):
+    for path in sorted((REPO_ROOT / "yomux_lib").rglob("*.py")):
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if not isinstance(node, (ast.Tuple, ast.List)):
                 continue
@@ -723,7 +723,7 @@ def _inventory_literal() -> tuple[str, ...]:
 
     Re-pointed by M3: this used to AST-read `inventory = (...)` from the body of
     `runtime_local_services()`. That literal no longer exists; `LOCAL_SERVICE_INVENTORY` in
-    `yolomux_lib/local_service_projection.py` is now the one declaration, and the collector
+    `yomux_lib/local_service_projection.py` is now the one declaration, and the collector
     defaults to it. Still read from source, never retyped here.
     """
     _text, tree = _module_source(INVENTORY_MODULE)
@@ -935,7 +935,7 @@ def _metrics_source(service: str, owners: ServiceOwners) -> str:
     """
     if service == "statsd":
         assert STATSD_METRICS_HOP in _source(owners.status_owner), service
-        return _source("yolomux_lib.stats_current.client:StatsCurrentClient.runtime_status")
+        return _source("yomux_lib.stats_current.client:StatsCurrentClient.runtime_status")
     return _source(owners.status_owner)
 
 
@@ -943,13 +943,13 @@ def _identity_source(service: str, owners: ServiceOwners) -> str:
     """Where the row's pid/started_at actually originate, following PROVEN hops when needed."""
     if service == "indexd":
         # runtime_status delegates identity to service_status() one line above it.
-        return _source("yolomux_lib.search.search_indexer:SearchIndexerClient.service_status")
+        return _source("yomux_lib.search.search_indexer:SearchIndexerClient.service_status")
     if service == "statsd":
         # Two hops after M3, both asserted: the row builder reads the runtime's status, and the
         # runtime fills its `service` key from the live RPC that is statsd's identity owner.
         assert STATSD_IDENTITY_HOP in _source(owners.status_owner), service
         assert '"service": self._service_status(),' in _source(
-            "yolomux_lib.stats_current.runtime:StatsCurrentRuntime.status"
+            "yomux_lib.stats_current.runtime:StatsCurrentRuntime.status"
         ), service
         return _source(owners.identity_owner)
     if service == "watchd":
@@ -1002,18 +1002,18 @@ def test_statsd_is_the_only_service_off_the_registry_record_identity_owner():
     assert "response = self.client.status()" in statsd_identity, statsd_identity
     assert "record" not in statsd_identity, statsd_identity
 
-    watchd_source = _source("yolomux_lib.app:WatchBridge.watchd_runtime_status")
+    watchd_source = _source("yomux_lib.app:WatchBridge.watchd_runtime_status")
     # The two M2 hardcodes are gone, and the row publishes the record-derived values instead.
     assert '"started_at": 0.0,' not in watchd_source, watchd_source
     assert '"resources": {},' not in watchd_source, watchd_source
-    watchd_projection = _runtime_row_projection("yolomux_lib.app:WatchBridge.watchd_runtime_status")
+    watchd_projection = _runtime_row_projection("yomux_lib.app:WatchBridge.watchd_runtime_status")
     assert watchd_projection["started_at"] == "identity.started_at", watchd_projection
     assert watchd_projection["pid"] == "identity.pid", watchd_projection
     assert watchd_projection["resources"] == "app.watch_client.registry.resources(identity.pid)", watchd_projection
     # Unchanged and load-bearing: the row still issues no RPC of its own.
     assert "without making a status route call watchd" in watchd_source
     # WatchClient.runtime_status exists and is intentionally never reached from production.
-    assert callable(_resolve("yolomux_lib.watchd_client:WatchClient.runtime_status"))
+    assert callable(_resolve("yomux_lib.watchd_client:WatchClient.runtime_status"))
     assert _production_call_site_files("watch_client.runtime_status") == frozenset()
 
 
@@ -1061,10 +1061,10 @@ def test_recovery_role_has_one_primitive_and_a_known_reachability():
     definitions = _retry_definition_files()
     assert definitions == frozenset(RETRY_DEFINITIONS), (definitions, frozenset(RETRY_DEFINITIONS))
     assert "self.registry.retry()" in _source(
-        "yolomux_lib.local_services.client:LocalServiceClient.retry"
+        "yomux_lib.local_services.client:LocalServiceClient.retry"
     )
     assert "self._transport.registry.retry()" in _source(
-        "yolomux_lib.stats_current.client:StatsCurrentClient.retry"
+        "yomux_lib.stats_current.client:StatsCurrentClient.retry"
     )
     # The dispatcher reaches a service ONLY through the map, and calls nothing else.
     dispatcher = _source(f"{RECOVERY_CONTROL}.retry")
@@ -1082,7 +1082,7 @@ def test_recovery_role_has_one_primitive_and_a_known_reachability():
     # three-line module function precisely so this stays countable;
     # `tests/test_backend_health_recovery.py::test_zero_destructive_operations_reach_the_control_object`
     # owns the complementary rule that `retry` is the only attribute named inside it.
-    observer_source = (REPO_ROOT / "yolomux_lib" / "backend_health" / "observer.py").read_text(encoding="utf-8")
+    observer_source = (REPO_ROOT / "yomux_lib" / "backend_health" / "observer.py").read_text(encoding="utf-8")
     call_sites = [
         line.strip()
         for line in observer_source.splitlines()
@@ -1154,20 +1154,20 @@ def test_the_app_recovery_map_is_the_one_owner_the_observer_is_wired_to():
     assert _source(RECOVERY_CONTROL_OWNER).count("LocalServiceRecoveryControl(") == 1
     assert "app.local_services_recovery_entrypoints" in _source(RECOVERY_CONTROL_OWNER)
 
-    cli_source = (REPO_ROOT / "yolomux_lib" / "cli.py").read_text(encoding="utf-8")
+    cli_source = (REPO_ROOT / "yomux_lib" / "cli.py").read_text(encoding="utf-8")
     wiring = "recovery_control=app.local_services_recovery_control(),"
     assert cli_source.count(wiring) == 1, cli_source.count(wiring)
     # In the observer construction, not somewhere else in the module that never runs.
-    observer_call = _source("yolomux_lib.cli:start_backend_health_observer")
+    observer_call = _source("yomux_lib.cli:start_backend_health_observer")
     assert wiring in observer_call, observer_call
     # The one production place a control is built. A second builder is a second ladder.
-    assert _production_call_site_files("LocalServiceRecoveryControl(") == frozenset({"yolomux_lib/app.py"})
+    assert _production_call_site_files("LocalServiceRecoveryControl(") == frozenset({"yomux_lib/app.py"})
 
 
 def _retry_definition_files() -> frozenset[str]:
     return frozenset(
         str(path.relative_to(REPO_ROOT))
-        for path in sorted((REPO_ROOT / "yolomux_lib").rglob("*.py"))
+        for path in sorted((REPO_ROOT / "yomux_lib").rglob("*.py"))
         if re.search(r"^\s*def retry\(", path.read_text(encoding="utf-8"), re.MULTILINE)
     )
 
@@ -1183,7 +1183,7 @@ def _production_attribute_files(pattern: str) -> frozenset[str]:
     """
     needle = re.compile(pattern)
     hits: set[str] = set()
-    for path in sorted((REPO_ROOT / "yolomux_lib").rglob("*.py")):
+    for path in sorted((REPO_ROOT / "yomux_lib").rglob("*.py")):
         for line in path.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
             if needle.search(stripped) and not stripped.startswith("def ") and not stripped.startswith("#"):
@@ -1192,9 +1192,9 @@ def _production_attribute_files(pattern: str) -> frozenset[str]:
 
 
 def _production_call_site_files(needle: str) -> frozenset[str]:
-    """Production files (yolomux_lib only) containing `needle` outside its own definition."""
+    """Production files (yomux_lib only) containing `needle` outside its own definition."""
     hits: set[str] = set()
-    for path in sorted((REPO_ROOT / "yolomux_lib").rglob("*.py")):
+    for path in sorted((REPO_ROOT / "yomux_lib").rglob("*.py")):
         for line in path.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
             if needle in stripped and not stripped.startswith("def ") and not stripped.startswith("#"):
@@ -1338,19 +1338,19 @@ def test_the_two_shimmed_services_launch_through_their_shim():
 def test_spawned_module_string_matches_the_client_spec():
     """The spec module in each client is the string registry._spawn passes to `python -m`."""
     spec_sources = {
-        "indexd": "yolomux_lib.search.search_indexer:SearchIndexerClient.__init__",
-        "batchd": "yolomux_lib.infra.batchd:BatchClient.__init__",
-        "statusd": "yolomux_lib.statusd_client:StatusClient.__init__",
-        "watchd": "yolomux_lib.watchd_client:WatchClient.__init__",
-        "approvald": "yolomux_lib.approval.approvald:ApprovalClient.__init__",
+        "indexd": "yomux_lib.search.search_indexer:SearchIndexerClient.__init__",
+        "batchd": "yomux_lib.infra.batchd:BatchClient.__init__",
+        "statusd": "yomux_lib.statusd_client:StatusClient.__init__",
+        "watchd": "yomux_lib.watchd_client:WatchClient.__init__",
+        "approvald": "yomux_lib.approval.approvald:ApprovalClient.__init__",
     }
     for service, ref in spec_sources.items():
         assert f'"{CATALOG[service].spec_module}"' in _source(ref), (service, ref)
-    stats_client = importlib.import_module("yolomux_lib.stats_current.client")
+    stats_client = importlib.import_module("yomux_lib.stats_current.client")
     assert stats_client.SERVICE_MODULE == CATALOG["statsd"].spec_module
     assert stats_client.SERVICE_NAME == "statsd"
     assert "sys.executable" in _source(
-        "yolomux_lib.local_services.registry:LocalServiceRegistry._spawn"
+        "yomux_lib.local_services.registry:LocalServiceRegistry._spawn"
     )
 
 
@@ -1383,7 +1383,7 @@ def test_no_abandoned_topology_name_is_a_service_row_or_an_owner():
     assert _abandoned_names_in(surfaces) == [], _abandoned_names_in(surfaces)
     for module in ABANDONED_MODULES:
         # Not `find_spec(module) is None`: an upgraded checkout leaves an importable namespace-only
-        # residue (empty `yolomux_lib/daemon/`, no `__init__.py`) that returns a spec but no code.
+        # residue (empty `yomux_lib/daemon/`, no `__init__.py`) that returns a spec but no code.
         # A genuinely-present abandoned module (a real origin) is still a violation; the residue is
         # tolerated. See `_abandoned_module_is_truly_present` and the W15 regression below.
         assert not _abandoned_module_is_truly_present(module), module
@@ -1393,7 +1393,7 @@ def test_an_abandoned_name_in_an_inventory_is_rejected():
     """Permanent negative control for the abandoned-name rule."""
     poisoned = ["indexd", "statsd", "storaged", "batchd"]
     assert _abandoned_names_in(poisoned) == ["storaged"], _abandoned_names_in(poisoned)
-    assert _abandoned_names_in(["yolomux_lib.daemon.supervisor"]) == ["daemon"]
+    assert _abandoned_names_in(["yomux_lib.daemon.supervisor"]) == ["daemon"]
     # Substrings of real identifiers are not hits: this rule must not fire on `storaged.products`
     # style keys or on `batchd`.
     assert _abandoned_names_in(["storagedaemonish", "batchd", "search_indexer"]) == []
@@ -1427,13 +1427,13 @@ def test_namespace_package_residue_is_tolerated_but_a_real_module_is_not():
     """W15: the abandoned-module oracle survives the upgrade residue, without weakening.
 
     (a) Clean checkout: none of the abandoned modules resolve to real code, so the oracle holds.
-    (b) Upgraded/dirty checkout: an empty `yolomux_lib/daemon/` namespace residue is importable
+    (b) Upgraded/dirty checkout: an empty `yomux_lib/daemon/` namespace residue is importable
         (`find_spec` returns a spec), which is exactly what falsely failed the bare
         `find_spec is None` oracle. The fixed oracle tolerates it, but a REAL
-        `yolomux_lib/daemon/__init__.py` would still be a violation.
+        `yomux_lib/daemon/__init__.py` would still be a violation.
     """
 
-    module = "yolomux_lib.daemon"
+    module = "yomux_lib.daemon"
     assert module in ABANDONED_MODULES
 
     # (a) Clean checkout: no residue on disk, no abandoned module is truly present.
