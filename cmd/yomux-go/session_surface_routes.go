@@ -59,6 +59,34 @@ type procEntry struct {
 	PPID       int
 	Command    string
 	Executable string
+	Identity   string
+	CPUSeconds float64
+	RSSBytes   uint64
+}
+
+type processEntryIndex struct {
+	byPID                    map[int]procEntry
+	children                 map[int][]procEntry
+	agentKindByPID           map[int]string
+	allowPaneCommandFallback bool
+}
+
+func indexProcessEntries(processes []procEntry) *processEntryIndex {
+	index := &processEntryIndex{
+		byPID:                    make(map[int]procEntry, len(processes)),
+		children:                 make(map[int][]procEntry),
+		allowPaneCommandFallback: true,
+	}
+	agentProcesses := make([]stats.AgentProcess, 0, len(processes))
+	for _, process := range processes {
+		index.byPID[process.PID] = process
+		index.children[process.PPID] = append(index.children[process.PPID], process)
+		agentProcesses = append(agentProcesses, stats.AgentProcess{
+			PID: process.PID, PPID: process.PPID, Command: process.Command, Executable: process.Executable,
+		})
+	}
+	index.agentKindByPID = stats.ClassifyAgentProcesses(agentProcesses)
+	return index
 }
 
 func runGitMetadata(path string, args ...string) (string, bool) {
@@ -350,6 +378,9 @@ func processParent(pid int) int {
 }
 
 func processEntries() ([]procEntry, error) {
+	if runtime.GOOS == "darwin" {
+		return processEntriesFromDarwinInventory(stats.DarwinProcessInventory)
+	}
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return nil, err
@@ -373,12 +404,27 @@ func processEntries() ([]procEntry, error) {
 	return processes, nil
 }
 
+func processEntriesFromDarwinInventory(inventory func() ([]stats.DarwinProcess, error)) ([]procEntry, error) {
+	rows, err := inventory()
+	if err != nil {
+		return nil, err
+	}
+	result := make([]procEntry, 0, len(rows))
+	for _, row := range rows {
+		result = append(result, procEntry{PID: row.PID, PPID: row.PPID, Command: row.Command, Executable: row.Executable, Identity: row.Identity, CPUSeconds: row.CPUSeconds, RSSBytes: row.RSSBytes})
+	}
+	return result, nil
+}
+
 // descendantProcessEntries walks Linux's per-process children files instead
 // of scanning every process on the machine. The Go Daemons panel only needs
 // descendants of this server; a machine-wide roster here duplicated the much
 // more expensive agent inventory scan and was a major avoidable contributor to
 // high CPU while /api/system-status was polled.
 func descendantProcessEntries(rootPID int) ([]procEntry, error) {
+	if runtime.GOOS == "darwin" {
+		return darwinDescendantProcessEntries(rootPID)
+	}
 	if rootPID <= 0 || runtime.GOOS != "linux" {
 		return nil, errors.New("descendant process walk unavailable")
 	}
@@ -445,43 +491,39 @@ func (s *server) paneAgentProcess(panePID int, paneCommand string) (string, int,
 	if err != nil {
 		return "", 0, "", ""
 	}
-	byPID := make(map[int]procEntry, len(processes))
-	for _, process := range processes {
-		byPID[process.PID] = process
+	return paneAgentProcessFromIndex(panePID, paneCommand, indexProcessEntries(processes))
+}
+
+func paneAgentProcessFromIndex(panePID int, paneCommand string, processIndex *processEntryIndex) (string, int, string, string) {
+	if processIndex == nil {
+		if kind := agentKindFromCommand(paneCommand); kind != "" {
+			return kind, panePID, paneCommand, ""
+		}
+		return "", 0, "", ""
 	}
-	classify := func(process procEntry) string { return stats.ClassifyAgent(process.Command, process.Executable) }
-	if process, ok := byPID[panePID]; ok {
-		if kind := classify(process); kind != "" {
+	if process, ok := processIndex.byPID[panePID]; ok {
+		if kind := processIndex.agentKindByPID[process.PID]; kind != "" {
 			return kind, process.PID, process.Command, process.Executable
 		}
-	} else if kind := agentKindFromCommand(paneCommand); kind != "" {
-		return kind, panePID, paneCommand, ""
+	} else if processIndex.allowPaneCommandFallback {
+		if kind := agentKindFromCommand(paneCommand); kind != "" {
+			return kind, panePID, paneCommand, ""
+		}
 	}
-	children := make(map[int][]procEntry)
-	for _, process := range processes {
-		children[process.PPID] = append(children[process.PPID], process)
-	}
-	queue := append([]procEntry(nil), children[panePID]...)
-	var fallback *procEntry
+	queue := append([]procEntry(nil), processIndex.children[panePID]...)
+	seen := make(map[int]struct{}, len(processIndex.byPID))
+	seen[panePID] = struct{}{}
 	for len(queue) > 0 {
 		process := queue[0]
 		queue = queue[1:]
-		if kind := classify(process); kind != "" {
+		if _, visited := seen[process.PID]; visited {
+			continue
+		}
+		seen[process.PID] = struct{}{}
+		if kind := processIndex.agentKindByPID[process.PID]; kind != "" {
 			return kind, process.PID, process.Command, process.Executable
 		}
-		// Codex's Linux launcher is a Node process whose argv contains the
-		// real /.../codex entry point.  Keep this as a fallback so a native
-		// Codex child later in the same tree wins over its Node wrapper.
-		if fallback == nil {
-			if kind := agentKindFromCommand(process.Command); kind != "" {
-				candidate := process
-				fallback = &candidate
-			}
-		}
-		queue = append(queue, children[process.PID]...)
-	}
-	if fallback != nil {
-		return agentKindFromCommand(fallback.Command), fallback.PID, fallback.Command, fallback.Executable
+		queue = append(queue, processIndex.children[process.PID]...)
 	}
 	return "", 0, "", ""
 }
@@ -594,14 +636,12 @@ func openTranscriptForProcess(pid int, kind string) string {
 	if pid <= 0 {
 		return ""
 	}
-	entries, err := os.ReadDir(filepath.Join("/proc", strconv.Itoa(pid), "fd"))
-	if err != nil {
-		return ""
+	if kind == "codex" {
+		return stats.CodexTranscriptFromProcess(pid, transcriptRoot(kind))
 	}
 	root := filepath.Clean(transcriptRoot(kind))
-	for _, entry := range entries {
-		target, readErr := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "fd", entry.Name()))
-		if readErr != nil || !strings.HasSuffix(target, ".jsonl") || !strings.HasPrefix(filepath.Clean(target), root+string(os.PathSeparator)) {
+	for _, target := range stats.ProcessOpenFiles(pid) {
+		if !strings.HasSuffix(target, ".jsonl") || !strings.HasPrefix(filepath.Clean(target), root+string(os.PathSeparator)) {
 			continue
 		}
 		return filepath.Clean(target)
@@ -641,7 +681,7 @@ func agentTranscriptWithCommand(kind string, pid int, cwd, title, command string
 		}
 	}
 	transcript := openTranscriptForProcess(pid, kind)
-	if transcript == "" {
+	if transcript == "" && kind != "codex" {
 		transcript = newestTranscriptForCWD(transcriptRoot(kind), cwd)
 	}
 	if transcript == "" {
@@ -1187,13 +1227,38 @@ func (s *server) liveSessionMetadataForSessionsWithError(sessions []string) (map
 	commandContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	output, err := s.tmuxCommandContext(commandContext, "list-panes", "-a", "-F", liveSessionMetadataTmuxFormat).Output()
-	for _, session := range sessions {
-		result[session] = s.liveSessionMetadataFromOutput(session, output, err)
+	return s.liveSessionMetadataForSessionsFromOutput(sessions, output, err), err
+}
+
+func (s *server) liveSessionMetadataForSessionsFromOutput(sessions []string, output []byte, err error) map[string]map[string]any {
+	result := make(map[string]map[string]any, len(sessions))
+	var processIndex *processEntryIndex
+	if err == nil && s.processEntriesFn != nil {
+		if processes, processErr := s.processEntriesFn(); processErr == nil {
+			processIndex = indexProcessEntries(processes)
+		} else {
+			processIndex = &processEntryIndex{}
+		}
 	}
-	return result, err
+	for _, session := range sessions {
+		result[session] = s.liveSessionMetadataFromOutputWithIndex(session, output, err, processIndex)
+	}
+	return result
 }
 
 func (s *server) liveSessionMetadataFromOutput(session string, output []byte, err error) map[string]any {
+	var processIndex *processEntryIndex
+	if err == nil && s.processEntriesFn != nil {
+		if processes, processErr := s.processEntriesFn(); processErr == nil {
+			processIndex = indexProcessEntries(processes)
+		} else {
+			processIndex = &processEntryIndex{}
+		}
+	}
+	return s.liveSessionMetadataFromOutputWithIndex(session, output, err, processIndex)
+}
+
+func (s *server) liveSessionMetadataFromOutputWithIndex(session string, output []byte, err error, processIndex *processEntryIndex) map[string]any {
 	if err != nil {
 		return map[string]any{
 			"panes":           []map[string]any{},
@@ -1235,7 +1300,7 @@ func (s *server) liveSessionMetadataFromOutput(session string, output []byte, er
 				"path": parts[5], "pane": parts[3], "pane_target": parts[4],
 			}
 		}
-		kind, agentPID, agentCommand, agentExecutable := s.paneAgentProcess(pid, parts[6])
+		kind, agentPID, agentCommand, agentExecutable := paneAgentProcessFromIndex(pid, parts[6], processIndex)
 		if kind == "" {
 			continue
 		}
@@ -1245,15 +1310,19 @@ func (s *server) liveSessionMetadataFromOutput(session string, output []byte, er
 			cwd = resolvedCWD
 		}
 		status := "idle"
+		statusObservedAt := time.Now()
 		if s.agentStatusClassifier != nil {
 			classified := s.agentStatusClassifier(context.Background(), stats.AgentStatusRequest{
 				Kind: kind, PID: agentPID, Command: agentCommand, Executable: agentExecutable, PaneTarget: parts[4], Directory: cwd,
 			})
 			status = liveAgentWindowState(classified.Status)
+			if !classified.ObservedAt.IsZero() {
+				statusObservedAt = classified.ObservedAt
+			}
 		}
 		agents = append(agents, map[string]any{
 			"session": session, "kind": kind, "pid": agentPID, "pane_target": parts[4], "command": agentCommand,
-			"cwd": cwd, "status": status, "session_id": sessionID, "transcript": transcript,
+			"cwd": cwd, "status": status, "status_observed_at": float64(statusObservedAt.UnixNano()) / 1e9, "session_id": sessionID, "transcript": transcript,
 			"error": "", "window": parts[1], "window_index": windowIndex, "pane": parts[3],
 			"window_active": windowActive, "current": active && windowActive,
 		})
@@ -1291,11 +1360,22 @@ func activityAgentStatusKey(session, pane, kind string) string {
 	return strings.Join([]string{session, pane, strings.ToLower(strings.TrimSpace(kind))}, "\x00")
 }
 
-func activityAgentStatusOverrides(snapshot stats.AgentStatusSnapshot) map[string]string {
+func activityStatusObservedAt(seconds float64) time.Time {
+	wholeSeconds := int64(seconds)
+	nanoseconds := int64((seconds - float64(wholeSeconds)) * 1e9)
+	return time.Unix(wholeSeconds, nanoseconds)
+}
+
+func activityAgentStatusOverrides(snapshot stats.AgentStatusSnapshot) (map[string]string, map[string]time.Time) {
 	if !snapshot.Available {
-		return nil
+		return nil, nil
 	}
 	result := make(map[string]string, len(snapshot.Agents))
+	observedAtByAgent := make(map[string]time.Time, len(snapshot.Agents))
+	cycleObservedAt := time.Time{}
+	if snapshot.Freshness != nil {
+		cycleObservedAt = activityStatusObservedAt(snapshot.Freshness.ObservedAt)
+	}
 	for _, raw := range snapshot.Agents {
 		row, ok := raw.(map[string]any)
 		if !ok {
@@ -1308,9 +1388,15 @@ func activityAgentStatusOverrides(snapshot stats.AgentStatusSnapshot) map[string
 		if session == "" || pane == "" || kind == "" || state == "" {
 			continue
 		}
-		result[activityAgentStatusKey(session, pane, kind)] = liveAgentWindowState(state)
+		key := activityAgentStatusKey(session, pane, kind)
+		result[key] = liveAgentWindowState(state)
+		observedAt := cycleObservedAt
+		if value, ok := row["observed_at"].(float64); ok && value > 0 {
+			observedAt = activityStatusObservedAt(value)
+		}
+		observedAtByAgent[key] = observedAt
 	}
-	return result
+	return result, observedAtByAgent
 }
 
 func goTmuxSignalFields(line string, want int) ([]string, bool) {

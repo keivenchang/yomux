@@ -1829,6 +1829,7 @@
       "tests/test_launcher_row_wiring.py:test_launcher_captures_one_row_plan_and_reuses_it_for_server_and_both_probes:5",
       "tests/test_launcher_row_wiring.py:test_launcher_captures_one_row_plan_and_reuses_it_for_server_and_both_probes:6",
       "tests/test_launcher_row_wiring.py:test_launcher_captures_one_row_plan_and_reuses_it_for_server_and_both_probes:7",
+      "tests/test_launcher_row_wiring.py:test_launcher_captures_one_row_plan_and_reuses_it_for_server_and_both_probes:8",
       "tests/test_launcher_row_wiring.py:test_launcher_has_no_inherited_global_primary_port_export:1",
       "tests/test_launcher_row_wiring.py:test_launcher_has_no_inherited_global_primary_port_export:2",
       "tests/test_launcher_row_wiring.py:test_launcher_has_no_inherited_global_primary_port_export:3",
@@ -1837,6 +1838,9 @@
       "tests/test_launcher_row_wiring.py:test_shared_macos_launcher_execs_plan_when_present_and_stays_direct_otherwise:1",
       "tests/test_launcher_row_wiring.py:test_shared_macos_launcher_execs_plan_when_present_and_stays_direct_otherwise:2",
       "tests/test_launcher_row_wiring.py:test_shared_macos_launcher_execs_plan_when_present_and_stays_direct_otherwise:3",
+      "tests/test_launcher_row_wiring.py:test_shared_macos_launcher_execs_plan_when_present_and_stays_direct_otherwise:4",
+      "tests/test_launcher_row_wiring.py:test_shared_macos_launcher_execs_plan_when_present_and_stays_direct_otherwise:5",
+      "tests/test_launcher_row_wiring.py:test_shared_macos_launcher_execs_plan_when_present_and_stays_direct_otherwise:6",
       "tests/test_local_service_runtime_row_projection.py:test_every_registry_row_producer_delegates_to_the_shared_parent:1",
       "tests/test_local_service_runtime_row_projection.py:test_shared_projection_and_watchd_bridge_have_no_lifecycle_entrypoint:1",
       "tests/test_local_service_runtime_row_projection.py:test_shared_projection_and_watchd_bridge_have_no_lifecycle_entrypoint:2",
@@ -2048,7 +2052,7 @@
       "tests/test_yostats_active_browser_window.py:test_main_installs_signal_handlers_deadline_and_selenium_timeouts:8",
       "tests/test_yostats_active_browser_window.py:test_main_installs_signal_handlers_deadline_and_selenium_timeouts:9"
     ],
-    "inventory_sha256": "d8ed9a1b41ae629660805addb7a26a7210899680bd40d5850eb1470561169891",
+    "inventory_sha256": "cf9ec8154447dbfd5877719af806c5fbea5cfbc774aa5785d92f816af5b6203e",
     "unallowlisted": [],
     "validation_errors": []
   },

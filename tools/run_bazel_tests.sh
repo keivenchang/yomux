@@ -6,17 +6,23 @@ COMMON="$REPO_ROOT/tools/bazel_test_common.sh"
 . "$COMMON"
 
 usage() {
-  echo "usage: $0 [--jobs N] [--target LABEL] [-- <bazel test arguments>]" >&2
+  echo "usage: $0 [--jobs N] [--execution auto|native|docker] [--target LABEL] [-- <bazel test arguments>]" >&2
   exit "${1:-2}"
 }
 
-jobs="${YOLOMUX_BAZEL_JOBS:-}"
+jobs="${YOMUX_BAZEL_JOBS-${YOLOMUX_BAZEL_JOBS:-}}"
 target="//:go_tests"
+execution="${YOMUX_BAZEL_EXECUTION-${YOLOMUX_BAZEL_EXECUTION:-auto}}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --jobs)
       [ "$#" -ge 2 ] || usage 2
       jobs="$2"
+      shift 2
+      ;;
+    --execution)
+      [ "$#" -ge 2 ] || usage 2
+      execution="$2"
       shift 2
       ;;
     --target)
@@ -36,6 +42,26 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+case "$execution" in
+  auto)
+    if [ "$(uname -s)" = Darwin ]; then
+      execution=native
+    elif bazel_test_in_container; then
+      execution=container
+    else
+      execution=docker
+    fi
+    ;;
+  native|docker) ;;
+  *) echo "--execution must be auto, native, or docker: $execution" >&2; exit 2 ;;
+esac
+if [ "$execution" = docker ] && ! bazel_test_in_container && ! docker info >/dev/null 2>&1; then
+  echo "Docker execution requested, but the Docker daemon is unavailable" >&2
+  exit 2
+fi
+if [ "$execution" = native ] && [ "$target" = "//:go_tests" ]; then
+  target="//:go_native_tests"
+fi
 if [ -z "$jobs" ]; then
   jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '2')"
 fi
@@ -51,6 +77,27 @@ if [ "$jobs" -lt 1 ]; then
 fi
 
 set -- "$target" "$@"
+
+native_sdk_args=()
+native_test_filter_args=()
+native_browser_args=()
+if [ "$execution" = native ]; then
+  if [ "$(uname -s)" = Darwin ]; then
+    native_sdk_version="$(bazel_go_sdk_version)"
+    native_sdk_args+=("--@rules_go//go/toolchain:sdk_version=$native_sdk_version")
+    if bazel_native_browser_resolve; then
+      native_python_userbase="${PYTHONUSERBASE:-${HOME:-}/.local}"
+      native_browser_args+=(--test_env=CHROME_BIN="$BAZEL_NATIVE_CHROME_BIN")
+      native_browser_args+=(--test_env=PYTHONUSERBASE="$native_python_userbase")
+      if [ -n "$BAZEL_NATIVE_CHROMEDRIVER_BIN" ]; then
+        native_browser_args+=(--test_env=CHROMEDRIVER_BIN="$BAZEL_NATIVE_CHROMEDRIVER_BIN")
+      fi
+    else
+      native_test_filter_args+=(--test_tag_filters=-requires_chrome)
+      echo "Skipping Chrome E2E target because Chrome/Chromium or chromedriver is unavailable" >&2
+    fi
+  fi
+fi
 
 # The Go Chromium fixture copies the served frontend into its isolated source root. Generate it
 # from the checked-out partials first so a source-only commit works without a tracked bundle.
@@ -110,41 +157,71 @@ bazel_args=(
   test
   --repository_cache="$bazel_repository_cache"
   --symlink_prefix="$bazel_run_root/bazel-"
-  --repository_disable_download
-  --registry=file:///opt/yomux-bazel-registry
   --jobs="$jobs"
   --test_output=errors
   --test_summary=terse
-  --test_env=YOMUX_TEST_CONTAINER=1
-  --test_env=YOLOMUX_TEST_CONTAINER=1
-  --action_env=GOMODCACHE=/opt/yomux-go-mod-cache
-  --action_env=YOMUX_BAZEL_GOMODCACHE=/opt/yomux-go-mod-cache
-  --action_env=LANG=C.UTF-8
-  --action_env=LC_ALL=C.UTF-8
+  --test_env=YOMUX_BAZEL_EXECUTION="$execution"
+  --test_env=YOLOMUX_BAZEL_EXECUTION="$execution"
   --action_env=GOPATH="$bazel_run_root/go-path"
   --action_env=GOCACHE="$bazel_run_root/go-cache"
-  --action_env=GOPROXY=off
-  --action_env=GOSUMDB=off
   --action_env=GOWORK=off
   --action_env=GO111MODULE=on
   --action_env=GOTOOLCHAIN=local
   --repo_env=GO_REPOSITORY_USE_HOST_MODCACHE=1
-  --repo_env=GOMODCACHE=/opt/yomux-go-mod-cache
   --repo_env=GOPATH="$bazel_run_root/go-path"
   --repo_env=GOCACHE="$bazel_run_root/go-cache"
-  --repo_env=GOPROXY=off
-  --repo_env=GOSUMDB=off
   --repo_env=GOWORK=off
   --repo_env=GO111MODULE=on
   --repo_env=GOTOOLCHAIN=local
+  ${native_test_filter_args[@]+"${native_test_filter_args[@]}"}
+  ${native_browser_args[@]+"${native_browser_args[@]}"}
+  ${native_sdk_args[@]+"${native_sdk_args[@]}"}
   "$@"
 )
 
-if bazel_test_in_container; then
+if [ "$execution" = native ]; then
+  mkdir -p -- "$bazel_run_root/gomodcache"
+  bazel_args+=(
+    --action_env=GOMODCACHE="$bazel_run_root/gomodcache"
+    --test_env=YOMUX_TEST_CONTAINER=0
+    --test_env=YOLOMUX_TEST_CONTAINER=0
+    --action_env=YOMUX_BAZEL_GOMODCACHE="$bazel_run_root/gomodcache"
+    --action_env=YOLOMUX_BAZEL_GOMODCACHE="$bazel_run_root/gomodcache"
+    --action_env=GOPROXY=https://proxy.golang.org,direct
+    --action_env=GOSUMDB=sum.golang.org
+    --repo_env=GOMODCACHE="$bazel_run_root/gomodcache"
+    --repo_env=GOPROXY=https://proxy.golang.org,direct
+    --repo_env=GOSUMDB=sum.golang.org
+  )
+else
+  bazel_args+=(
+    --repository_disable_download
+    --registry=file:///opt/yomux-bazel-registry
+    --test_env=YOMUX_TEST_CONTAINER=1
+    --test_env=YOLOMUX_TEST_CONTAINER=1
+    --action_env=GOMODCACHE=/opt/yomux-go-mod-cache
+    --action_env=YOMUX_BAZEL_GOMODCACHE=/opt/yomux-go-mod-cache
+    --action_env=YOLOMUX_BAZEL_GOMODCACHE=/opt/yomux-go-mod-cache
+    --action_env=LANG=C.UTF-8
+    --action_env=LC_ALL=C.UTF-8
+    --action_env=GOPROXY=off
+    --action_env=GOSUMDB=off
+    --repo_env=GOMODCACHE=/opt/yomux-go-mod-cache
+    --repo_env=GOPROXY=off
+    --repo_env=GOSUMDB=off
+  )
+fi
+
+if [ "$execution" = container ] || bazel_test_in_container; then
   bazel_test_prepare_repository_cache "$bazel_repository_cache"
   # Keep this shell process alive until Bazel exits so the EXIT trap removes the private
   # output-user root when this script runs in the test container.
   bazel "${bazel_args[@]}"
+  exit $?
+fi
+
+if [ "$execution" = native ]; then
+  YOMUX_BAZEL_EXECUTION=native YOLOMUX_BAZEL_EXECUTION=native YOMUX_TEST_CONTAINER=0 YOLOMUX_TEST_CONTAINER=0 bazel "${bazel_args[@]}"
   exit $?
 fi
 

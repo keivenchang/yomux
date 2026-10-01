@@ -14,7 +14,7 @@ Build, validate, and start a Go instance with:
 
 ```bash
 make setup
-bazel --bazelrc=/dev/null build --jobs=auto //cmd/yomux-go:yomux-go
+tools/build_go.sh
 tools/run_bazel_tests.sh --jobs "$(getconf _NPROCESSORS_ONLN)"
 YOMUX_START_LOAD_WAIT_SECONDS=30 ./boot.sh 7221
 ```

@@ -20,6 +20,7 @@ sys.dont_write_bytecode = True
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 from yomux_lib.infra import worktree_writer
+from tools.tool_guard import host_expensive_tool_lock_path
 
 _HOST_ARTIFACTS = worktree_writer.configure_host_local_artifacts(REPO_ROOT)
 sys.dont_write_bytecode = _previous_dont_write_bytecode
@@ -28,7 +29,7 @@ del _previous_dont_write_bytecode
 # Resolve the cross-run host lock before fallback environment variables replace HOME and
 # YOLOMUX_TOOL_LOCK_PATH. The lock must serialize container launches on the host; a path
 # created inside a container or fixture namespace has no other run to contend with.
-HOST_EXPENSIVE_TOOL_LOCK = Path.home() / ".cache" / "yomux" / "expensive-tools.lock"
+HOST_EXPENSIVE_TOOL_LOCK = host_expensive_tool_lock_path(os.environ)
 
 # Import only the stdlib-only image helper here. tools.check imports product configuration
 # and would bind it from the host environment before isolation is installed.

@@ -68,19 +68,14 @@ if str(REPO_ROOT) not in sys.path:
 sys.dont_write_bytecode = True
 
 from tools.instance_isolation import resolved_product_path
-from tools.instance_isolation import resolved_home_path
 from tools.instance_isolation import resolved_state_dir
 from tools.instance_isolation import validate_product_root_environment
 from tools.instance_isolation import YolomuxRootError
+from tools.tool_guard import host_expensive_tool_lock_path
 
 
 def default_tool_lock_path() -> Path:
-    home = resolved_home_path(os.environ)
-    return resolved_product_path(
-        os.environ,
-        "YOLOMUX_TOOL_LOCK_PATH",
-        home / ".cache" / "yomux" / "expensive-tools.lock",
-    )
+    return host_expensive_tool_lock_path(os.environ)
 
 
 try:

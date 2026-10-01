@@ -595,7 +595,8 @@ func validateCurrentAgentRoster(value any) error {
 	}
 	validStates := map[string]bool{"ask": true, "run": true, "transition": true, "idle": true, "error": true, "unavailable": true}
 	for _, row := range rows {
-		if len(row) != 5 {
+		observedAt, hasObservedAt := row["observed_at"]
+		if len(row) != 5 && !(len(row) == 6 && hasObservedAt) {
 			return invalid("observation", "payload", "agent_status.agents contains an invalid row")
 		}
 		for _, name := range []string{"id", "kind", "state", "session", "pane"} {
@@ -605,6 +606,9 @@ func validateCurrentAgentRoster(value any) error {
 		}
 		if !validStates[row["state"].(string)] {
 			return invalid("observation", "payload", "agent_status.agents contains an invalid state")
+		}
+		if hasObservedAt && !currentNonNegativeNumber(observedAt) {
+			return invalid("observation", "payload", "agent_status.agents.observed_at must be a non-negative finite number")
 		}
 	}
 	return nil

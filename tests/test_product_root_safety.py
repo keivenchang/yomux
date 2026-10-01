@@ -660,6 +660,7 @@ def test_boot_rejects_tmpdir_inside_checkout_before_listener_or_worktree_mutatio
     shutil.copy2(ROOT / "boot.sh", checkout / "boot.sh")
     shutil.copy2(ROOT / "tools" / "startup_common.sh", tools_dir / "startup_common.sh")
     shutil.copy2(ROOT / "tools" / "instance_isolation.py", tools_dir / "instance_isolation.py")
+    shutil.copy2(ROOT / "tools" / "go_binary.py", tools_dir / "go_binary.py")
     before = sorted(path.relative_to(checkout) for path in checkout.rglob("*"))
     listener = subprocess.Popen(
         [

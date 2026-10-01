@@ -5467,6 +5467,22 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(refreshTree.scrollTop, 44);
     assert.equal(srcChildren.scrollTop, 12);
 
+    const coldRestoreTree = new TestElement('cold-restore-tree');
+    coldRestoreTree.setAttribute('role', 'tree');
+    coldRestoreTree.classList.add('file-explorer-tree-panel');
+    api.setFileExplorerExpandedForTest(['/repo/bin', '/repo/bin/2011']);
+    const restoredRootEntries = [{name: 'bin', kind: 'dir'}];
+    api.renderTreeChildrenForTest(coldRestoreTree, '/repo', restoredRootEntries);
+    assert.equal(coldRestoreTree.children[0].classList.contains('loading-children'), true, 'cold restored expansion waits for its directory response');
+    const pushResult = api.entriesByDirFromFilesystemPushForTest({directories: [
+      {path: '/repo', ok: true, data: {entries: restoredRootEntries}},
+      {path: '/repo/bin', ok: false, status: 403, error: 'permission denied'},
+    ]});
+    assert.deepStrictEqual([...pushResult.failedDirectories], ['/repo/bin'], 'failed watch baseline directories reach the shared list error owner');
+    api.renderTreeChildrenForTest(coldRestoreTree, '/repo', restoredRootEntries);
+    assert.equal(coldRestoreTree.children[0].classList.contains('loading-children'), false, 'failed restored expansions stop showing an endless spinner');
+    assert.equal(coldRestoreTree.children[0].getAttribute('aria-expanded'), 'true', 'tree rows preserve their expansion until the shared failure renderer settles them');
+
     api.setFinderSessionFilesPayloadForTest({
       loaded: true,
       repos: [{repo: '/repo/app', count: 1, touched_count: 1, added: 5, removed: 3}],

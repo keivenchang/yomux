@@ -271,6 +271,17 @@ function setFileExplorerListError(path, error, status = 0) {
     : null;
 }
 
+function handleFileExplorerDirectoryListFailure(path, error, status = Number(error?.status) || 0) {
+  const root = normalizeDirectoryPath(path || '');
+  if (!root) return;
+  const openFailed = t('preview.openFailed', {path: root});
+  fileExplorerPathError = status
+    ? error?.message || `${openFailed} (${status})`
+    : `${openFailed}: ${error}`;
+  setFileExplorerListError(root, error, status);
+  if (fileExplorerDirectoryDemandTerminalError(error)) retireFileExplorerDirectoryDemand(root);
+}
+
 function currentFileExplorerListError(path) {
   const root = normalizeDirectoryPath(path || '');
   return root && fileExplorerLastListError && normalizeDirectoryPath(fileExplorerLastListError.path || '') === root
@@ -403,6 +414,11 @@ function cachedFileExplorerFsResourceValue(type, path) {
   return record.value;
 }
 
+function fileExplorerDirectoryListingFailed(path) {
+  const record = fileExplorerFsResourceRecords.get(fileExplorerFsBatchKey('list', path));
+  return Number(record?.failureCount) > 0;
+}
+
 function invalidateFileExplorerFsResourceRecord(key, record) {
   record.generation += 1;
   record.value = undefined;
@@ -454,7 +470,7 @@ function requestFileExplorerFsResource(type, path, options, makeRequest, lifecyc
     } catch (error) {
       if (fileExplorerFsResourceCurrent(key, record, generation)) {
         const negativeStatus = Number(lifecycle.negativeStatus?.(error)) || 0;
-        if (negativeStatus) recordFileExplorerFsResourceFailure(record, negativeStatus);
+        if (type === 'list') recordFileExplorerFsResourceFailure(record, negativeStatus || Number(error?.status) || 0);
         lifecycle.onError?.(error);
       }
       if (Object.prototype.hasOwnProperty.call(lifecycle, 'errorValue')) return lifecycle.errorValue;
@@ -817,12 +833,7 @@ async function fetchDirectory(path, options = {}) {
       },
       onError: err => {
         const status = Number(err?.status) || 0;
-        const openFailed = t('preview.openFailed', {path: root});
-        fileExplorerPathError = status
-          ? err.message || `${openFailed} (${status})`
-          : `${openFailed}: ${err}`;
-        setFileExplorerListError(root, err, status);
-        if (fileExplorerDirectoryDemandTerminalError(err)) retireFileExplorerDirectoryDemand(root);
+        handleFileExplorerDirectoryListFailure(root, err, status);
         console.warn(status ? 'fs list failed' : 'fs list error', root, status || err, fileExplorerPathError);
       },
       negativeStatus: err => fileExplorerDirectoryDemandTerminalError(err) ? Number(err?.status) || 400 : 0,
@@ -877,6 +888,7 @@ function invalidateFileExplorerRoots(roots = []) {
 function entriesByDirFromFilesystemPush(payload = {}, options = {}) {
   const entriesByDir = new Map();
   const changedDirectories = [];
+  const failedDirectories = [];
   const directories = Array.isArray(payload.directories) ? payload.directories : [];
   for (const item of directories) {
     const path = normalizeDirectoryPath(item?.path || item?.data?.path || '');
@@ -884,7 +896,18 @@ function entriesByDirFromFilesystemPush(payload = {}, options = {}) {
     const entries = Array.isArray(data.entries) ? data.entries : null;
     reconcileFileExplorerDeletedPathTombstones(path, entries, true);
     const visibleEntries = entries ? filterFileExplorerDeletedPathTombstones(path, entries) : null;
-    if (!path || !visibleEntries || item.ok === false || Number(item.status || 200) >= 400) continue;
+    if (!path) continue;
+    if (item.ok === false || Number(item.status || 200) >= 400) {
+      const status = Number(item.status) || Number(data.status) || 0;
+      const error = item.error && typeof item.error === 'object'
+        ? {...item.error, status: Number(item.error.status) || status}
+        : {status, message: String(item.error || data.error || data.message || '')};
+      markFileExplorerDirectoryDemandNegative(path, status || 0);
+      handleFileExplorerDirectoryListFailure(path, error, status);
+      failedDirectories.push(path);
+      continue;
+    }
+    if (!visibleEntries) continue;
     const previousSignature = fileExplorerDirectoryRecord(path)?.signature;
     const nextSignature = directoryEntriesSignature(visibleEntries);
     if (previousSignature !== undefined && previousSignature !== nextSignature) changedDirectories.push(path);
@@ -898,7 +921,7 @@ function entriesByDirFromFilesystemPush(payload = {}, options = {}) {
       watchDiffOwned: options.fromWatchDiff === true,
     });
   }
-  return {entriesByDir, changedDirectories};
+  return {entriesByDir, changedDirectories, failedDirectories};
 }
 
 async function fetchFilesystemWatchDiff(options = {}) {
@@ -1040,9 +1063,10 @@ async function refreshFileExplorerFromPush(payload = {}, options = {}) {
       fileExplorerFilesystemWatchToken = nextToken;
       fileExplorerFilesystemPushToken = nextToken;
     }
-    const pushed = treeVisible ? entriesByDirFromFilesystemPush(payload, options) : {entriesByDir: new Map(), changedDirectories: []};
+    const pushed = treeVisible ? entriesByDirFromFilesystemPush(payload, options) : {entriesByDir: new Map(), changedDirectories: [], failedDirectories: []};
     const entriesByDir = pushed.entriesByDir;
     const changedDirectories = pushed.changedDirectories;
+    const failedDirectories = pushed.failedDirectories;
     renderedRows = Array.from(entriesByDir.values()).reduce((total, entries) => total + (Array.isArray(entries) ? entries.length : 0), 0);
     const visibleRootRemoved = treeVisible ? invalidateFileExplorerRoots(payload?.removed_roots) : false;
     if (!entriesByDir.size && payload?.refresh === true && options.fromWatchDiff !== true) {
@@ -1058,7 +1082,7 @@ async function refreshFileExplorerFromPush(payload = {}, options = {}) {
       return;
     }
     if (visibleRootRemoved) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
-    if (!entriesByDir.size) return;
+    if (!entriesByDir.size && !failedDirectories.length) return;
     const finderBackfillSession = fileExplorerFinderTargetSession();
     const currentRoot = normalizeDirectoryPath(currentFileExplorerRoot());
     const watchDiffChangedVisibleTree = changedDirectories.some(path => (
@@ -1071,15 +1095,22 @@ async function refreshFileExplorerFromPush(payload = {}, options = {}) {
     fileExplorerPushRefreshDepth += 1;
     try {
       const root = normalizeDirectoryPath(currentFileExplorerRoot());
-      if (fileExplorerPaneIsOpen() && entriesByDir.has(root)) {
-        await refreshFileExplorerTreesInPlace({
-          root,
-          entries: entriesByDir.get(root),
-          preserveExpanded: true,
-          preserveScroll: true,
-          entriesByDir,
-          deferSessionFilesDiff: finderHasLoadedMetadata,
-        });
+      if (fileExplorerPaneIsOpen() && (entriesByDir.has(root) || failedDirectories.length)) {
+        const rootEntries = entriesByDir.get(root) || cachedFileExplorerFsResourceValue('list', root);
+        if (Array.isArray(rootEntries)) {
+          await refreshFileExplorerTreesInPlace({
+            root,
+            entries: rootEntries,
+            preserveExpanded: true,
+            preserveScroll: true,
+            entriesByDir,
+            deferSessionFilesDiff: finderHasLoadedMetadata,
+          });
+        }
+      }
+      for (const failedPath of failedDirectories) {
+        const row = liveDirectoryRows(failedPath, null)[0];
+        if (row) settleDirectoryRowExpansionAcrossSurfaces(row, failedPath, null);
       }
       const openFileDirs = Array.from(fileState.keys()).map(path => normalizeDirectoryPath(dirnameOf(path)));
       if (openFileDirs.every(path => fileExplorerFsResourceHasValue('list', path))) await refreshOpenFilesIfChanged();
@@ -3716,7 +3747,7 @@ function buildFileTreeRowState(fullPath, entry, depth, options = {}) {
     && options.entriesByDir.has(normalizeDirectoryPath(fullPath));
   const pendingExpansion = !differMode && entry.kind === 'dir' && (
     fileExplorerPendingExpansions.has(fullPath)
-    || (expanded && options.hasRenderedChildren !== true && !loadedChildListing)
+    || (expanded && options.hasRenderedChildren !== true && !loadedChildListing && !fileExplorerDirectoryListingFailed(fullPath))
   );
   const indexedDirectory = !differMode && entry.kind === 'dir' && fileExplorerDirectoryIsIndexed(fullPath);
   const indexExcludedEntry = !differMode && fileExplorerPathIsExcluded(fullPath);

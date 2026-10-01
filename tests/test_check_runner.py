@@ -33,6 +33,7 @@ from tools import instance_isolation
 from tools import test_catalog
 from tools import test_plan
 from tools import pytest_catalog_plugin
+from tools.instance_isolation import synthetic_test_environment
 from tools.test_catalog import discover_pytest_phase_files
 from tools.tool_guard import container_command_with_host_tool_guard
 from yomux_lib.background_scheduler import pid_is_alive as background_scheduler_pid_is_alive
@@ -50,6 +51,64 @@ def load_check_module():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def test_tabber_reload_probe_records_convergence_before_webdriver_reads():
+    _, source = parsed_python_source(REPO_ROOT / "tools" / "bazel_go_browser_e2e.py")
+    owner = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == "tabber_reload_trace_source")
+    namespace = {"json": json}
+    exec(compile(ast.Module(body=[owner], type_ignores=[]), "tabber-reload-probe", "exec"), namespace)
+    probe = namespace["tabber_reload_trace_source"]("fixture")
+    script = r"""
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+async function scenario(stale, applyAt) {
+  let now = 0;
+  let visible = false;
+  const frames = [];
+  const state = {generation: 4, payload: {sessions: {fixture: {work_graph: {version: 1}}}}};
+  const body = {cache: {hit: true, stale, refreshing: stale, generation: 4}, sessions: {fixture: {work_graph: {version: 1}}}};
+  const context = {URL, location: {href: 'https://fixture.invalid/'}, performance: {now: () => now}, transcriptMetadataState: state,
+    document: {querySelectorAll: () => visible ? [{textContent: 'fixture'}] : []},
+    MutationObserver: class {constructor(callback) {this.callback = callback;} observe() {}},
+    requestAnimationFrame: callback => frames.push(callback),
+    fetch: async () => {now = 30; return {status: 200, clone: () => ({json: async () => body})};},
+  };
+  context.window = context;
+  vm.createContext(context);
+  vm.runInContext(process.argv[1], context);
+  await context.fetch('/api/activity');
+  await Promise.resolve();
+  const frame = at => {now = at; for (const callback of frames.splice(0)) callback();};
+  visible = true;
+  frame(80);
+  if (applyAt !== null) {state.generation = 5; frame(applyAt);}
+  else frame(500);
+  // The WebDriver command can arrive after the product's entire deadline.
+  now = 1000;
+  return context.__tabberReloadTrace.metadataConvergence;
+}
+(async () => {
+  const current = await scenario(false, null);
+  assert.equal(current.at, 30);
+  assert.equal(current.skipped, 'cache is current');
+  assert.equal(current.error, undefined);
+  const timely = await scenario(true, 140);
+  assert.equal(timely.at, 140);
+  assert.equal(timely.generation, 5);
+  assert.equal(timely.error, undefined);
+  const stuck = await scenario(true, null);
+  assert.match(stuck.error, /within 500ms/);
+  assert.equal(stuck.at, 500);
+  console.log(JSON.stringify({current, timely, stuck}));
+})().catch(error => {console.error(error); process.exitCode = 1;});
+"""
+    result = subprocess.run(["node", "-e", script, probe], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    outcomes = json.loads(result.stdout)
+    assert outcomes["current"]["at"] == 30
+    assert outcomes["timely"]["at"] == 140
+    assert outcomes["stuck"]["at"] == 500
 
 
 def test_python_imports_are_module_scoped():
@@ -104,9 +163,91 @@ def test_check_runner_reuses_background_scheduler_process_liveness():
 
 def test_check_lock_is_one_per_user_across_worktrees_and_tmpdirs(monkeypatch, tmp_path):
     monkeypatch.delenv("YOLOMUX_TOOL_LOCK_PATH", raising=False)
+    monkeypatch.delenv("YOMUX_TOOL_LOCK_PATH", raising=False)
     monkeypatch.chdir(tmp_path)
     check = load_check_module()
-    assert check.DEFAULT_TOOL_LOCK_PATH == Path.home() / ".cache" / "yomux" / "expensive-tools.lock"
+    assert check.DEFAULT_TOOL_LOCK_PATH == Path.home() / ".cache" / "yolomux" / "expensive-tools.lock"
+
+
+def test_default_check_lock_contends_with_legacy_host_guard(tmp_path):
+    home = tmp_path / "home"
+    legacy_lock = home / ".cache" / "yolomux" / "expensive-tools.lock"
+    legacy_lock.parent.mkdir(parents=True)
+    holder = subprocess.Popen(
+        [sys.executable, "-c", "import fcntl,sys; handle=open(sys.argv[1], 'a+'); fcntl.flock(handle, fcntl.LOCK_EX); print('locked', flush=True); sys.stdin.read()", str(legacy_lock)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "locked"
+        code = """from tools.check import expensive_tool_lock, ToolGuardBusy
+import sys
+try:
+    with expensive_tool_lock():
+        print('admitted')
+except ToolGuardBusy:
+    print('refused')
+    sys.exit(3)
+"""
+        contender = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=REPO_ROOT,
+            env=synthetic_test_environment({"HOME": str(home), "PYTHONPATH": os.pathsep.join(sys.path)}),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert contender.returncode == 3, contender.stdout + contender.stderr
+        assert contender.stdout.strip() == "refused"
+    finally:
+        holder.terminate()
+        holder.wait(timeout=5)
+
+
+@pytest.mark.parametrize("name", ["YOMUX_TOOL_LOCK_PATH", "YOLOMUX_TOOL_LOCK_PATH"])
+def test_check_tool_lock_preserves_explicit_private_path(monkeypatch, tmp_path, name):
+    monkeypatch.delenv("YOMUX_TOOL_LOCK_PATH", raising=False)
+    monkeypatch.delenv("YOLOMUX_TOOL_LOCK_PATH", raising=False)
+    private_lock = tmp_path / "private" / "expensive-tools.lock"
+    monkeypatch.setenv(name, str(private_lock))
+    assert load_check_module().default_tool_lock_path() == private_lock
+
+
+@pytest.mark.parametrize("canonical_empty", [False, True])
+def test_check_tool_lock_canonical_precedence_and_empty_value(monkeypatch, tmp_path, canonical_empty):
+    private_lock = tmp_path / "canonical" / "expensive-tools.lock"
+    monkeypatch.setenv("YOMUX_TOOL_LOCK_PATH", "" if canonical_empty else str(private_lock))
+    monkeypatch.setenv("YOLOMUX_TOOL_LOCK_PATH", str(tmp_path / "legacy" / "expensive-tools.lock"))
+    expected = Path.home() / ".cache" / "yolomux" / "expensive-tools.lock" if canonical_empty else private_lock
+    assert load_check_module().default_tool_lock_path() == expected
+
+
+@pytest.mark.parametrize("name", ["YOMUX_TOOL_LOCK_PATH", "YOLOMUX_TOOL_LOCK_PATH"])
+def test_pytest_captures_parent_custom_tool_lock_before_fallback_isolation(tmp_path, name):
+    check = load_check_module()
+    lock_path = tmp_path / "custom" / "expensive-tools.lock"
+    code = """import json,os,runpy
+from pathlib import Path
+from tools.tool_guard import container_command_with_host_tool_guard
+captured = runpy.run_path('conftest.py')['HOST_EXPENSIVE_TOOL_LOCK']
+command = ['python3', '-m', 'pytest']
+guarded = container_command_with_host_tool_guard(command, lock_path=captured,
+    collect_only=False, environ=os.environ, parent_pid=os.getppid())
+print(json.dumps({'captured':str(captured), 'command':guarded}))
+"""
+    with check.expensive_tool_lock(lock_path=lock_path):
+        environment = synthetic_test_environment({
+            "HOME": str(tmp_path / "home"), "PYTHONPATH": os.pathsep.join(sys.path),
+            name: str(lock_path), "YOLOMUX_CHECK_TOOL_LOCK_OWNER": os.environ["YOLOMUX_CHECK_TOOL_LOCK_OWNER"],
+        })
+        result = subprocess.run([sys.executable, "-c", code], cwd=REPO_ROOT,
+            env=environment, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    captured = json.loads(result.stdout)
+    assert captured["captured"] == str(lock_path)
+    assert captured["command"] == ["python3", "-m", "pytest"]
 
 
 def test_parent_check_lock_ownership_is_inherited_by_pytest(monkeypatch, tmp_path):

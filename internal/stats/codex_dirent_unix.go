@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || darwin
 
 package stats
 
@@ -8,6 +8,8 @@ import (
 	"os"
 	"reflect"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 const codexDirentReadBufferBytes = 32 * 1024
@@ -18,16 +20,16 @@ func readCodexDirectoryPage(file *os.File, cookie int64) ([]string, int64, bool,
 	}
 	fd := int(file.Fd())
 	if cookie > 0 {
-		if _, err := syscall.Seek(fd, cookie, io.SeekStart); err != nil {
+		if _, err := unix.Seek(fd, cookie, io.SeekStart); err != nil {
 			return nil, cookie, false, fmt.Errorf("seek Codex directory continuation: %w", err)
 		}
 	}
 	buffer := make([]byte, codexDirentReadBufferBytes)
-	count, err := syscall.ReadDirent(fd, buffer)
+	count, err := unix.ReadDirent(fd, buffer)
 	if err != nil {
 		return nil, cookie, false, fmt.Errorf("read Codex directory page: %w", err)
 	}
-	nextCookie, err := syscall.Seek(fd, 0, io.SeekCurrent)
+	nextCookie, err := unix.Seek(fd, 0, io.SeekCurrent)
 	if err != nil {
 		return nil, cookie, false, fmt.Errorf("read Codex directory continuation: %w", err)
 	}

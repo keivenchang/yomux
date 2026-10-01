@@ -42,7 +42,6 @@ function renderDirectoryRowExpansionError(row, fullPath) {
   errorRow.textContent = error;
   children.appendChild(errorRow);
   if (!existingChildren) row.insertAdjacentElement('afterend', children);
-  rememberFileExplorerSyncExpandedState();
 }
 
 async function retryNetworkFailedFileExplorerExpansion() {
@@ -82,10 +81,16 @@ function liveDirectoryRows(fullPath, fallbackRow) {
 function settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, entries) {
   const rows = liveDirectoryRows(fullPath, row);
   if (!entries) {
+    const failed = Boolean(currentFileExplorerListError(fullPath) || fileExplorerDirectoryListingFailed(fullPath));
     rows.forEach(currentRow => {
-      if (currentFileExplorerListError(fullPath)) renderDirectoryRowExpansionError(currentRow, fullPath);
+      if (failed) renderDirectoryRowExpansionError(currentRow, fullPath);
       else settleSuppressedDirectoryRowExpansion(currentRow, fullPath);
     });
+    if (failed) {
+      rememberFileExplorerSyncExpandedState();
+      refreshLayoutUrlStateSoon();
+      if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+    }
     return;
   }
   rows.forEach(currentRow => renderExpandedDirectoryRowChildren(currentRow, fullPath, entries));

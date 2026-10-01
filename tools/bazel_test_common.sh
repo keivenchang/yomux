@@ -3,6 +3,12 @@ set -euo pipefail
 
 # Shared by Bazel E2E wrappers so runfiles, bazel test sandboxes, and the outer test container use
 # one source-root resolver and one containment decision.
+bazel_go_sdk_version() {
+  if [ "$(uname -s)" = Darwin ]; then
+    printf '1.24.13\n'
+  fi
+}
+
 bazel_test_in_container() {
   [ "${YOMUX_TEST_CONTAINER-${YOLOMUX_TEST_CONTAINER:-}}" = 1 ] || return 1
   [ -f /.dockerenv ] || return 1
@@ -10,6 +16,51 @@ bazel_test_in_container() {
   grep -Fxq 'yomux-test-image-v1' /opt/yomux-test-image.marker || return 1
   awk '$5 == "/" { for (i = 1; i <= NF; i++) if ($i == "-") { print $(i + 1); exit } }' /proc/self/mountinfo \
     | grep -Eq '^(overlay|fuse-overlayfs|aufs)$'
+}
+
+bazel_native_browser_resolve() {
+  local chrome="${CHROME_BIN:-}"
+  local chromedriver="${CHROMEDRIVER_BIN:-}"
+  local candidate
+  if [ -z "$chrome" ]; then
+    for candidate in chromium chromium-browser google-chrome "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"; do
+      if command -v "$candidate" >/dev/null 2>&1; then
+        chrome="$(command -v "$candidate")"
+        break
+      elif [ -x "$candidate" ]; then
+        chrome="$candidate"
+        break
+      fi
+    done
+  fi
+  if [ -z "$chromedriver" ] && command -v chromedriver >/dev/null 2>&1; then
+    chromedriver="$(command -v chromedriver)"
+  fi
+  if [ -n "$chrome" ] && [ ! -x "$chrome" ]; then
+    chrome="$(command -v "$chrome" || true)"
+  fi
+  if [ -n "$chromedriver" ] && [ ! -x "$chromedriver" ]; then
+    chromedriver="$(command -v "$chromedriver" || true)"
+  fi
+  if [ -n "$chrome" ] && [ -x "$chrome" ] && [ -z "$chromedriver" ]; then
+    local chrome_version chrome_build selenium_driver_cache
+    chrome_version="$("$chrome" --version 2>/dev/null | sed -E -n 's/.* ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | sed -n '1p')"
+    chrome_build="${chrome_version%.*}"
+    selenium_driver_cache="${HOME:-}/.cache/selenium/chromedriver"
+    if [ -n "$chrome_build" ] && [ -d "$selenium_driver_cache" ]; then
+      chromedriver="$(find "$selenium_driver_cache" -type f -name chromedriver -path "*/$chrome_build/chromedriver" -perm -111 -print -quit 2>/dev/null || true)"
+    fi
+  fi
+  if [ -n "$chrome" ] && [ -x "$chrome" ] && { [ -n "$chromedriver" ] && [ -x "$chromedriver" ] || python3 -c 'import importlib.util; raise SystemExit(importlib.util.find_spec("selenium") is None)' >/dev/null 2>&1; }; then
+    BAZEL_NATIVE_CHROME_BIN="$chrome"
+    BAZEL_NATIVE_CHROMEDRIVER_BIN="$chromedriver"
+    return 0
+  fi
+  return 1
+}
+
+bazel_resolve_path() {
+  python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).resolve())' "$1"
 }
 
 bazel_test_source_root() {
@@ -20,8 +71,9 @@ bazel_test_source_root() {
   if [ -n "${BUILD_WORKSPACE_DIRECTORY:-}" ]; then
     candidates+=("$BUILD_WORKSPACE_DIRECTORY")
   fi
-  if [ -n "${YOLOMUX_TEST_SOURCE_ROOT:-}" ]; then
-    candidates+=("$YOLOMUX_TEST_SOURCE_ROOT")
+  local configured_source_root="${YOMUX_TEST_SOURCE_ROOT-${YOLOMUX_TEST_SOURCE_ROOT:-}}"
+  if [ -n "$configured_source_root" ]; then
+    candidates+=("$configured_source_root")
   fi
   if [ -n "${TEST_SRCDIR:-}" ]; then
     candidates+=("$TEST_SRCDIR/__main__")
@@ -43,18 +95,21 @@ bazel_test_source_root() {
       # Docker's BuildKit daemon cannot dereference a runfiles Dockerfile symlink whose target
       # lives outside the sandbox. Materialize the declared runfiles tree into the action-owned
       # TEST_TMPDIR instead of resolving the symlink back to the source checkout. Bazel removes
-      # TEST_TMPDIR after the action, and cp -RL dereferences only the files already present in
-      # the declared runfiles tree.
-      if [ -L "$candidate/docker/Dockerfile.test" ]; then
+      # TEST_TMPDIR after the action, and the copy dereferences only declared runfiles.
+      if [ -L "$candidate/docker/Dockerfile.test" ] && [ "${YOMUX_BAZEL_EXECUTION-${YOLOMUX_BAZEL_EXECUTION:-}}" != native ]; then
         local materialized_root
         materialized_root="$(mktemp -d "${TEST_TMPDIR:-/tmp}/yolomux-bazel-source.XXXXXX")"
         # The source context is bind-mounted into the rootless Docker runner. mktemp creates a
         # 0700 directory owned by the host UID, which the container's runner UID cannot traverse;
         # make this action-owned read-only context traversable before handing it to Docker.
-        chmod 0755 -- "$materialized_root"
+        chmod 0755 "$materialized_root"
         # Do not preserve source ownership/timestamps: runfile targets can be owned by a different
         # account, while executable mode is part of the Docker input for the wrapper scripts.
-        \cp -RL --no-preserve=ownership,timestamps -- "$candidate/." "$materialized_root/"
+        python3 - "$candidate" "$materialized_root" <<'PY_COPY'
+import shutil
+import sys
+shutil.copytree(sys.argv[1], sys.argv[2], symlinks=False, dirs_exist_ok=True)
+PY_COPY
         candidate="$materialized_root"
       fi
       (cd -- "$candidate" && pwd)
@@ -95,7 +150,7 @@ bazel_test_prepare_environment() {
   mkdir -p -- "$root"
   for directory in home xdg-config xdg-data xdg-state xdg-cache codex-home claude-config xdg-runtime tmp; do
     mkdir -p -- "$root/$directory"
-    chmod 700 -- "$root/$directory"
+    chmod 700 "$root/$directory"
   done
 
   # Keep only the Bazel runner controls needed after this boundary. Product roots, client
@@ -103,10 +158,10 @@ bazel_test_prepare_environment() {
   # the host or a parent action into Go/browser fixtures.
   while IFS= read -r variable; do
     case "$variable" in
-      YOMUX_TEST_CONTAINER|YOMUX_TEST_SOURCE_ROOT|YOMUX_TEST_IMAGE|YOMUX_TEST_IMAGE_REBUILD|YOMUX_IMAGE_RUNNER_UID|YOMUX_IMAGE_RUNNER_GID|YOLOMUX_GO_BINARY|YOLOMUX_GO_STATS_BROWSER_TEST|YOLOMUX_TEST_CONTAINER|YOLOMUX_TEST_SOURCE_ROOT|YOLOMUX_WORKTREE_WRITER_SLOT)
+      YOMUX_TEST_CONTAINER|YOMUX_TEST_SOURCE_ROOT|YOMUX_TEST_IMAGE|YOMUX_TEST_IMAGE_REBUILD|YOMUX_IMAGE_RUNNER_UID|YOMUX_IMAGE_RUNNER_GID|YOMUX_GO_BINARY|YOMUX_GO_STATS_BROWSER_TEST|YOMUX_WORKTREE_WRITER_SLOT|YOLOMUX_GO_BINARY|YOLOMUX_GO_STATS_BROWSER_TEST|YOLOMUX_TEST_CONTAINER|YOLOMUX_TEST_SOURCE_ROOT|YOLOMUX_WORKTREE_WRITER_SLOT)
         continue
         ;;
-      YOLOMUX_*|XDG_*|OPENCODE_*|CODEX_*|CLAUDE_*|TMUX|TMUX_PANE|TMUX_TMPDIR|PYTHONPATH|PYTHONHOME|PYTHONPYCACHEPREFIX)
+      YOMUX_*|YOLOMUX_*|XDG_*|OPENCODE_*|CODEX_*|CLAUDE_*|TMUX|TMUX_PANE|TMUX_TMPDIR|PYTHONPATH|PYTHONHOME|PYTHONPYCACHEPREFIX)
         unset "$variable"
         ;;
       ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|GH_TOKEN|GITHUB_TOKEN|GOOGLE_API_KEY|GOOGLE_APPLICATION_CREDENTIALS|HF_TOKEN|HUGGINGFACE_HUB_TOKEN|LINEAR_KEY|NGC_API_KEY|OPENAI_API_KEY)
@@ -125,13 +180,14 @@ bazel_test_prepare_environment() {
   export CODEX_HOME="$root/codex-home"
   export CLAUDE_CONFIG_DIR="$root/claude-config"
   export XDG_RUNTIME_DIR="$root/xdg-runtime"
+  export PYTHONDONTWRITEBYTECODE=1
   # TEST_TMPDIR is intentionally action-owned, but Bazel's nested execution path can exceed
   # Chromium's path budget when Selenium asks ChromeDriver to create its temporary profile. Keep
   # this writable root unique and private per action while giving Unix-socket-backed tools a short
   # lexical path. The outer Docker container is disposable, and the EXIT trap removes this exact
   # mktemp-created directory after the wrapper has reaped its children.
   short_tmpdir="$(mktemp -d /tmp/yolomux-bazel-tmp.XXXXXX)"
-  chmod 700 -- "$short_tmpdir"
+  chmod 700 "$short_tmpdir"
   export YOLOMUX_BAZEL_TMPDIR="$short_tmpdir"
   bazel_test_cleanup() {
     local status="$?"

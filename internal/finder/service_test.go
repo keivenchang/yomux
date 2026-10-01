@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,7 +52,7 @@ func newCommittedTestRepo(t *testing.T) (string, string) {
 	if err := os.WriteFile(file, []byte("one\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"init", "-q", root}, {"-C", root, "config", "gc.auto", "0"}, {"-C", root, "config", "user.email", "test@example.invalid"}, {"-C", root, "config", "user.name", "Finder Test"}, {"-C", root, "add", "--", "note.txt"}, {"-C", root, "commit", "-qm", "initial"}} {
+	for _, args := range [][]string{{"init", "-q", "--initial-branch=master", root}, {"-C", root, "config", "gc.auto", "0"}, {"-C", root, "config", "user.email", "test@example.invalid"}, {"-C", root, "config", "user.name", "Finder Test"}, {"-C", root, "add", "--", "note.txt"}, {"-C", root, "commit", "-qm", "initial"}} {
 		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v (%s)", args, err, output)
 		}
@@ -642,6 +643,10 @@ func TestListUsesPinnedDirectoryAndIncludesSymlinksToAnyReadablePath(t *testing.
 	if err := os.Symlink(outside, filepath.Join(root, "outside-link")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
+	resolvedOutside, err := filepath.EvalSymlinks(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
 	broken := filepath.Join(root, "broken-link")
 	if err := os.Symlink(filepath.Join(root, "missing-target"), broken); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
@@ -655,7 +660,7 @@ func TestListUsesPinnedDirectoryAndIncludesSymlinksToAnyReadablePath(t *testing.
 	for _, entry := range entries {
 		seen[entry["name"].(string)] = entry
 	}
-	if seen["outside-link"]["kind"] != "file" || seen["outside-link"]["realpath"] != outside {
+	if seen["outside-link"]["kind"] != "file" || seen["outside-link"]["realpath"] != resolvedOutside {
 		t.Fatalf("external symlink metadata = %#v", seen["outside-link"])
 	}
 	if seen["inside-link"]["kind"] != "file" || seen["inside-link"]["symlink_target"] != inside {
@@ -847,10 +852,13 @@ func TestWatchRootsUsesNativeWatcherAndAdmitsNestedDirectories(t *testing.T) {
 		t.Fatal(finderErr)
 	}
 	status, ok := registration["watch_status"].(map[string]any)
+	if runtime.GOOS != "linux" && registration["mode"] == "polling-fallback" {
+		t.Skipf("native watcher unavailable in this environment: %#v", registration["watch_status"])
+	}
 	if !ok || status["registrations"].(int) < 1 {
 		t.Fatalf("native watch status = %#v", registration["watch_status"])
 	}
-	if registration["mode"] == "polling-fallback" {
+	if runtime.GOOS != "linux" && registration["mode"] == "polling-fallback" {
 		t.Skipf("native watcher unavailable in this environment: %#v", registration)
 	}
 	nested := filepath.Join(root, "new", "deeper")
@@ -1244,7 +1252,7 @@ func TestGitHistoryRefSignatureIncludesStash(t *testing.T) {
 	if finderErr != nil {
 		t.Fatal(finderErr)
 	}
-	defer scope.close()
+	defer func() { scope.close() }()
 	before, finderErr := gitHistoryRefSignature(context.Background(), scope)
 	if finderErr != nil {
 		t.Fatal(finderErr)
@@ -1253,6 +1261,13 @@ func TestGitHistoryRefSignatureIncludesStash(t *testing.T) {
 		t.Fatalf("create stash ref: %v (%s)", err, output)
 	}
 	t.Cleanup(func() { _ = exec.Command("git", "-C", root, "update-ref", "-d", "refs/stash").Run() })
+	if runtime.GOOS == "darwin" {
+		scope.close()
+		scope, finderErr = service.openGitHistoryScopeContext(context.Background(), root)
+		if finderErr != nil {
+			t.Fatal(finderErr)
+		}
+	}
 
 	after, finderErr := gitHistoryRefSignature(context.Background(), scope)
 	if finderErr != nil {
@@ -2989,8 +3004,12 @@ func TestGitHistoryNamespacePathWithNewline(t *testing.T) {
 	if !ok || len(commits) != 1 || commits[0]["subject"] != "initial" {
 		t.Fatalf("history for repository path with newline = %#v", history["commits"])
 	}
-	if pathDiscoveryCalls != 2 {
-		t.Fatalf("object path discovery commands = %d, want combined command plus newline-safe fallback", pathDiscoveryCalls)
+	wantPathDiscoveryCalls := 2
+	if runtime.GOOS == "darwin" {
+		wantPathDiscoveryCalls = 0
+	}
+	if pathDiscoveryCalls != wantPathDiscoveryCalls {
+		t.Fatalf("object path discovery commands = %d, want %d", pathDiscoveryCalls, wantPathDiscoveryCalls)
 	}
 }
 
@@ -3519,6 +3538,27 @@ func TestRenameNoReplaceDoesNotOverwriteExistingTarget(t *testing.T) {
 	}
 }
 
+func TestRenameAndDeleteDoNotRequireReadingTheTarget(t *testing.T) {
+	service, root := newTestService(t, nil)
+	path := filepath.Join(root, "unreadable.txt")
+	if err := os.WriteFile(path, []byte("unreadable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, finderErr := service.Rename(context.Background(), path, "renamed.txt"); finderErr != nil {
+		t.Fatalf("rename unreadable target: %#v", finderErr)
+	}
+	renamed := filepath.Join(root, "renamed.txt")
+	if _, finderErr := service.Delete(context.Background(), renamed); finderErr != nil {
+		t.Fatalf("delete unreadable target: %#v", finderErr)
+	}
+	if _, err := os.Lstat(renamed); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("renamed target after delete = %v, want not-exist", err)
+	}
+}
+
 func TestRecursiveDeleteReportsPartialProgressAfterRestoringQuarantine(t *testing.T) {
 	service, root := newTestService(t, nil)
 	subtree := filepath.Join(root, "partial")
@@ -3934,8 +3974,12 @@ func TestMutationsRejectAConfiguredRootReachedThroughASymlinkAlias(t *testing.T)
 	if err := os.Symlink(root, alias); err != nil {
 		t.Fatal(err)
 	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	native := &fakeNativeWatcher{events: make(chan nativeWatchEvent), status: nativeWatchStatus{available: true}}
-	service := newService(root, nil, native, native.status, UploadLimits{MaxBytes: MaxUploadBytes, MaxFiles: MaxUploadFiles})
+	service := newService(resolvedRoot, nil, native, native.status, UploadLimits{MaxBytes: MaxUploadBytes, MaxFiles: MaxUploadFiles})
 	t.Cleanup(service.Close)
 	if _, finderErr := service.Write(context.Background(), alias, "must not replace root", nil); finderErr == nil || finderErr.Code != "forbidden" || finderErr.MessageKey != "fs.error.rootMutationBlocked" {
 		t.Fatalf("root alias mutation error = %#v", finderErr)

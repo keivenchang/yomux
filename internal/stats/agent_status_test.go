@@ -98,7 +98,7 @@ func TestClassifyAgentStatusAcceptsAdmittedNodeCodexWrapper(t *testing.T) {
 		Kind: "codex", PID: 10, Executable: "/usr/bin/node", PaneTarget: "%1",
 	}, AgentStatusSources{
 		Process: func(context.Context, int) (AgentStatusProcess, error) {
-			return AgentStatusProcess{Alive: true, Command: "node /home/test/.local/bin/codex --resume thread", Executable: "/usr/bin/node"}, nil
+			return AgentStatusProcess{Alive: true, Command: "node /home/test/.npm/_npx/@openai/codex/bin/codex.js --resume thread", Executable: "/usr/bin/node"}, nil
 		},
 		CapturePane: func(context.Context, string) (AgentStatusPane, error) {
 			return AgentStatusPane{VisibleText: "Working\nEsc to interrupt"}, nil
@@ -791,12 +791,14 @@ func TestAgentStatusCollectorLifecyclePersistsSyntheticInventory(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer writer.Close()
+	writer.EnableCurrentFamilyValidation()
+	evidenceTime := time.Unix(123, 456)
 	collector := NewAgentStatusCollector(
 		func(context.Context) ([]AgentRecord, []error) {
 			return []AgentRecord{{PID: 42, Kind: "codex", StartedIdentity: "proc:42", TmuxSession: "synthetic", TmuxWindow: "0", TmuxPaneID: "%42"}}, nil
 		},
 		func(context.Context, AgentStatusRequest) AgentStatusResult {
-			return AgentStatusResult{Status: AgentStatusIdle}
+			return AgentStatusResult{Status: AgentStatusIdle, ObservedAt: evidenceTime}
 		},
 		writer,
 		nil,
@@ -827,4 +829,73 @@ func TestAgentStatusCollectorLifecyclePersistsSyntheticInventory(t *testing.T) {
 	if err != nil || len(observations) != 1 {
 		t.Fatalf("observations = %v err=%v", observations, err)
 	}
+	roster := observations[0].Payload["agents"].([]any)
+	if got := roster[0].(map[string]any)["observed_at"]; got != float64(evidenceTime.UnixNano())/1e9 {
+		t.Fatalf("persisted pane observation time = %v, want %v", got, evidenceTime)
+	}
+}
+
+func TestAgentStatusPayloadSignatureIgnoresPerAgentObservationTime(t *testing.T) {
+	states := map[string]any{"session|0|%1|codex": "run"}
+	sessions := map[string]AgentStatus{"session": AgentStatusRun}
+	counts := AgentStatusCounts{Total: 1, Running: 1}
+	first := []map[string]any{{"id": "session|0|%1|codex", "kind": "codex", "state": "run", "session": "session", "pane": "%1", "observed_at": 10.0}}
+	second := []map[string]any{{"id": "session|0|%1|codex", "kind": "codex", "state": "run", "session": "session", "pane": "%1", "observed_at": 20.0}}
+	if firstSignature, secondSignature := agentStatusPayloadSignature(states, sessions, counts, first), agentStatusPayloadSignature(states, sessions, counts, second); firstSignature != secondSignature {
+		t.Fatalf("status signature changed with only observed_at: first=%q second=%q", firstSignature, secondSignature)
+	}
+}
+
+func TestClassifyAgentStatusPreservesPaneObservationTime(t *testing.T) {
+	observedAt := time.Unix(123, 456)
+	result := ClassifyAgentStatus(context.Background(), AgentStatusRequest{Kind: "codex", PaneTarget: "%1"}, AgentStatusSources{
+		CapturePane: func(context.Context, string) (AgentStatusPane, error) {
+			return AgentStatusPane{VisibleText: "Working (1m 43s • esc to interrupt)", ObservedAt: observedAt}, nil
+		},
+	})
+	if !result.ObservedAt.Equal(observedAt) {
+		t.Fatalf("pane observation time = %v, want %v", result.ObservedAt, observedAt)
+	}
+}
+
+func TestClassifyAgentStatusTimestampsOpenCodeReadAndUnavailableEvidence(t *testing.T) {
+	t.Run("OpenCode state reader", func(t *testing.T) {
+		startedAt := time.Now()
+		got := ClassifyAgentStatus(context.Background(), AgentStatusRequest{Kind: "opencode"}, AgentStatusSources{
+			OpenCodeState: func(context.Context, AgentStatusRequest) (string, []string, error) {
+				return "paused", []string{"queued-input"}, nil
+			},
+		})
+		finishedAt := time.Now()
+		if got.Status != AgentStatusAsk || got.ObservedAt.Before(startedAt) || got.ObservedAt.After(finishedAt) {
+			t.Fatalf("OpenCode classification = %+v, expected ask observed during [%v, %v]", got, startedAt, finishedAt)
+		}
+	})
+
+	t.Run("process unavailable", func(t *testing.T) {
+		got := ClassifyAgentStatus(context.Background(), AgentStatusRequest{Kind: "codex", PID: 42, PaneTarget: "%1"}, AgentStatusSources{
+			Process: func(context.Context, int) (AgentStatusProcess, error) {
+				return AgentStatusProcess{}, nil
+			},
+			CapturePane: func(context.Context, string) (AgentStatusPane, error) {
+				t.Fatal("pane must not be read after process evidence says unavailable")
+				return AgentStatusPane{}, nil
+			},
+		})
+		if got.Status != AgentStatusUnavailable || got.ObservedAt.IsZero() {
+			t.Fatalf("unavailable process classification = %+v, want a timestamped unavailable result", got)
+		}
+	})
+
+	t.Run("pane capture error", func(t *testing.T) {
+		observedAt := time.Unix(456, 789)
+		got := ClassifyAgentStatus(context.Background(), AgentStatusRequest{Kind: "codex", PaneTarget: "%1"}, AgentStatusSources{
+			CapturePane: func(context.Context, string) (AgentStatusPane, error) {
+				return AgentStatusPane{ObservedAt: observedAt}, fmt.Errorf("capture failed")
+			},
+		})
+		if got.Status != AgentStatusUnavailable || !got.ObservedAt.Equal(observedAt) {
+			t.Fatalf("pane error classification = %+v, want timestamp %v", got, observedAt)
+		}
+	})
 }

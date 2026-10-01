@@ -13,8 +13,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -63,16 +65,46 @@ type gitView struct {
 	namespace      *gitNamespace
 }
 
-func openGitRootDescriptor(root, requested string) (*os.File, *Error) {
-	identities, err := captureResolvedIdentities(root)
+func openGitRootDescriptor(ctx context.Context, root, requested string) (*os.File, *Error) {
+	identities, err := captureResolvedIdentitiesContext(ctx, root)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, cancelled(requested)
+		}
 		return nil, filesystemError(requested, err)
 	}
-	directory, err := openResolvedDescriptor(root, true, identities)
+	directory, err := openResolvedDescriptorContext(ctx, root, true, identities)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, cancelled(requested)
+		}
 		return nil, filesystemError(requested, err)
 	}
 	return directory, nil
+}
+
+func displayGitRootPath(requested, relative, resolvedRoot string) string {
+	components := 0
+	if relative != "." && relative != "" {
+		for _, component := range strings.Split(filepath.Clean(relative), string(os.PathSeparator)) {
+			if component != "" && component != "." {
+				components++
+			}
+		}
+	}
+	candidate := filepath.Clean(requested)
+	for index := 0; index < components; index++ {
+		candidate = filepath.Dir(candidate)
+	}
+	resolvedCandidate, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return resolvedRoot
+	}
+	resolvedCandidate, err = filepath.Abs(resolvedCandidate)
+	if err != nil || filepath.Clean(resolvedCandidate) != filepath.Clean(resolvedRoot) {
+		return resolvedRoot
+	}
+	return candidate
 }
 
 var (
@@ -82,16 +114,24 @@ var (
 )
 
 type gitNamespace struct {
-	gitDir       *os.File
-	commonDir    *os.File
-	objects      *os.File
-	gitDirPath   string
-	commonPath   string
-	objectsPath  string
-	alternates   string
-	alternateID  descriptorIdentity
-	alternateSet bool
-	layoutCache  *gitObjectLayoutCache
+	gitDir         *os.File
+	commonDir      *os.File
+	objects        *os.File
+	gitDirPath     string
+	commonPath     string
+	objectsPath    string
+	alternates     string
+	alternateID    descriptorIdentity
+	alternateSet   bool
+	layoutCache    *gitObjectLayoutCache
+	snapshotMu     sync.Mutex
+	snapshotRoot   string
+	snapshotWork   string
+	snapshotGit    string
+	snapshotCommon string
+	snapshotErr    error
+	snapshotReady  bool
+	workTreePath   string
 }
 
 func (namespace *gitNamespace) identity() string {
@@ -126,9 +166,12 @@ func (namespace *gitNamespace) close() {
 			_ = file.Close()
 		}
 	}
+	if namespace.snapshotRoot != "" {
+		removeDarwinSnapshot(namespace.snapshotRoot)
+	}
 }
 
-func (namespace *gitNamespace) validate() error {
+func (namespace *gitNamespace) validateContext(ctx context.Context) error {
 	if namespace == nil {
 		return nil
 	}
@@ -140,6 +183,9 @@ func (namespace *gitNamespace) validate() error {
 		{namespace.commonPath, namespace.commonDir},
 		{namespace.objectsPath, namespace.objects},
 	} {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		info, err := os.Lstat(item.path)
 		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			return errGitNamespaceChanged
@@ -149,7 +195,10 @@ func (namespace *gitNamespace) validate() error {
 			return errGitNamespaceChanged
 		}
 	}
-	if err := namespace.layoutCache.validate(namespace.objectsPath); err != nil {
+	if err := namespace.layoutCache.validateContext(ctx, namespace.objectsPath); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	info, err := os.Lstat(namespace.alternates)
@@ -175,10 +224,16 @@ func (namespace *gitNamespace) validate() error {
 	return nil
 }
 
-func (s *Service) openGitView(raw string) (*gitView, *Error) {
+func (s *Service) openGitView(ctx context.Context, raw string) (*gitView, *Error) {
+	if ctx.Err() != nil {
+		return nil, cancelled(raw)
+	}
 	working, requested, resolved, finderErr := s.openAny(raw)
 	workingMissing := false
 	if finderErr != nil {
+		if ctx.Err() != nil {
+			return nil, cancelled(raw)
+		}
 		if finderErr.Status != http.StatusNotFound {
 			return nil, finderErr
 		}
@@ -200,33 +255,51 @@ func (s *Service) openGitView(raw string) (*gitView, *Error) {
 		}
 	}
 	parentResolved := filepath.Dir(resolved)
-	identities, err := captureResolvedIdentities(parentResolved)
+	identities, err := captureResolvedIdentitiesContext(ctx, parentResolved)
 	if err != nil {
 		if working != nil {
 			_ = working.Close()
 		}
+		if ctx.Err() != nil {
+			return nil, cancelled(requested)
+		}
 		return nil, filesystemError(requested, err)
 	}
-	directory, err := openResolvedDescriptor(parentResolved, true, identities)
+	directory, err := openResolvedDescriptorContext(ctx, parentResolved, true, identities)
 	if err != nil {
 		if working != nil {
 			_ = working.Close()
+		}
+		if ctx.Err() != nil {
+			return nil, cancelled(requested)
 		}
 		return nil, filesystemError(requested, err)
 	}
 	view := &gitView{requested: requested, resolved: resolved, directory: directory, working: working, workingMissing: workingMissing}
-	rootBytes, _, gitErr := runGitBounded(context.Background(), directory, nil, []string{"rev-parse", "--show-toplevel"}, 4096)
-	if gitErr != nil {
-		view.close()
-		return nil, &Error{Status: http.StatusBadRequest, Code: "not_git_repo", MessageKey: "fs.error.notGitRepo", Path: requested, Message: "path is not in a Git repository"}
+	var root string
+	var namespace *gitNamespace
+	if runtime.GOOS == "darwin" {
+		namespace, finderErr = s.openGitNamespaceContext(ctx, directory, parentResolved, requested)
+		if finderErr == nil {
+			root = namespace.workTreePath
+		}
+	} else {
+		rootBytes, _, gitErr := runGitBounded(ctx, directory, nil, []string{"rev-parse", "--show-toplevel"}, 4096)
+		if gitErr != nil {
+			view.close()
+			if ctx.Err() != nil {
+				return nil, cancelled(requested)
+			}
+			return nil, &Error{Status: http.StatusBadRequest, Code: "not_git_repo", MessageKey: "fs.error.notGitRepo", Path: requested, Message: "path is not in a Git repository"}
+		}
+		root = filepath.Clean(strings.TrimSpace(string(rootBytes)))
+		root, err = filepath.Abs(root)
+		if err != nil {
+			view.close()
+			return nil, filesystemError(requested, err)
+		}
+		namespace, finderErr = s.openGitNamespaceContext(ctx, directory, parentResolved, requested)
 	}
-	root := filepath.Clean(strings.TrimSpace(string(rootBytes)))
-	root, err = filepath.Abs(root)
-	if err != nil {
-		view.close()
-		return nil, filesystemError(requested, err)
-	}
-	namespace, finderErr := s.openGitNamespace(directory, parentResolved, requested)
 	if finderErr != nil {
 		view.close()
 		return nil, finderErr
@@ -237,13 +310,13 @@ func (s *Service) openGitView(raw string) (*gitView, *Error) {
 		view.close()
 		return nil, forbidden(requested, "fs.error.outsideRoots", "path is outside the Git repository")
 	}
-	view.repo = root
+	view.repo = displayGitRootPath(requested, relative, root)
 	view.relative = filepath.ToSlash(relative)
 	if !utf8.ValidString(view.relative) {
 		view.close()
 		return nil, &Error{Status: http.StatusUnprocessableEntity, Code: "git_path_encoding", MessageKey: "fs.error.gitPathEncoding", Path: requested, Message: errGitPathEncoding.Error()}
 	}
-	rootDirectory, rootErr := openGitRootDescriptor(root, requested)
+	rootDirectory, rootErr := openGitRootDescriptor(ctx, root, requested)
 	if rootErr != nil {
 		view.close()
 		return nil, rootErr
@@ -273,6 +346,13 @@ func (s *Service) openGitNamespace(directory *os.File, workingDirectory, request
 }
 
 func (s *Service) openGitNamespaceContext(ctx context.Context, directory *os.File, workingDirectory, requested string) (*gitNamespace, *Error) {
+	if runtime.GOOS == "darwin" {
+		return s.openDarwinGitNamespace(ctx, directory, workingDirectory, requested)
+	}
+	return s.openGitNamespaceGenericContext(ctx, directory, workingDirectory, requested)
+}
+
+func (s *Service) openGitNamespaceGenericContext(ctx context.Context, directory *os.File, workingDirectory, requested string) (*gitNamespace, *Error) {
 	paths, _, err := runGitBounded(ctx, directory, nil, []string{"rev-parse", "--git-dir", "--git-common-dir", "--git-path", "objects"}, 3*4096)
 	if err != nil && ctx.Err() != nil {
 		return nil, cancelled(requested)
@@ -325,7 +405,10 @@ func (s *Service) openGitNamespaceContext(ctx context.Context, directory *os.Fil
 	if objectsInfo.Mode()&os.ModeSymlink != 0 || !objectsInfo.IsDir() {
 		return nil, forbidden(requested, "fs.error.outsideRoots", "Git object store is not a local directory")
 	}
-	if err := s.gitObjectLayouts.validate(objects); err != nil {
+	if err := s.gitObjectLayouts.validateContext(ctx, objects); err != nil {
+		if ctx.Err() != nil {
+			return nil, cancelled(requested)
+		}
 		return nil, gitNamespaceChanged(requested)
 	}
 	alternates := filepath.Join(objects, "info", "alternates")
@@ -338,14 +421,20 @@ func (s *Service) openGitNamespaceContext(ctx context.Context, directory *os.Fil
 		{commonDir, &namespace.commonDir},
 		{objects, &namespace.objects},
 	} {
-		identities, identityErr := captureResolvedIdentities(item.path)
+		identities, identityErr := captureResolvedIdentitiesContext(ctx, item.path)
 		if identityErr != nil {
 			namespace.close()
+			if ctx.Err() != nil {
+				return nil, cancelled(requested)
+			}
 			return nil, filesystemError(requested, identityErr)
 		}
-		opened, openErr := openResolvedDescriptor(item.path, true, identities)
+		opened, openErr := openResolvedDescriptorContext(ctx, item.path, true, identities)
 		if openErr != nil {
 			namespace.close()
+			if ctx.Err() != nil {
+				return nil, cancelled(requested)
+			}
 			return nil, filesystemError(requested, openErr)
 		}
 		*item.directory = opened
@@ -406,6 +495,17 @@ func (buffer *boundedBuffer) Write(data []byte) (int, error) {
 }
 
 func runGitBounded(ctx context.Context, directory, working *os.File, args []string, limit int, namespaces ...*gitNamespace) ([]byte, []byte, error) {
+	return runGitBoundedWithWorktree(ctx, directory, working, args, limit, true, namespaces...)
+}
+
+// runGitMetadataBounded is for commands that read Git metadata and committed objects only. On
+// macOS it avoids copying the repository worktree; callers that need current file bytes must read
+// them through an already-open descriptor.
+func runGitMetadataBounded(ctx context.Context, directory, working *os.File, args []string, limit int, namespaces ...*gitNamespace) ([]byte, []byte, error) {
+	return runGitBoundedWithWorktree(ctx, directory, working, args, limit, false, namespaces...)
+}
+
+func runGitBoundedWithWorktree(ctx context.Context, directory, working *os.File, args []string, limit int, includeWorktree bool, namespaces ...*gitNamespace) ([]byte, []byte, error) {
 	if directory == nil || limit <= 0 {
 		return nil, nil, errors.New("invalid Git command scope")
 	}
@@ -421,11 +521,24 @@ func runGitBounded(ctx context.Context, directory, working *os.File, args []stri
 	}
 	if len(namespaces) == 1 {
 		namespace = namespaces[0]
-		if err := namespace.validate(); err != nil {
+		if err := namespace.validateContext(ctx); err != nil {
 			return nil, nil, err
 		}
+		if runtime.GOOS == "darwin" {
+			if err := namespace.prepareSnapshot(ctx, directory); err != nil {
+				return nil, nil, err
+			}
+		}
 	}
-	commandArgs := append([]string{"-C", "/proc/self/fd/3", "--literal-pathspecs", "-c", "advice.graftFileDeprecated=false"}, args...)
+	gitWorkingPath := platformGitPath(directoryCopy, 3)
+	if namespace != nil && runtime.GOOS == "darwin" {
+		gitWorkingPath = namespace.snapshotWork
+	}
+	commandPrefix := []string{"-C", gitWorkingPath, "--literal-pathspecs", "-c", "advice.graftFileDeprecated=false"}
+	if namespace != nil && runtime.GOOS == "darwin" && includeWorktree {
+		commandPrefix = []string{"--literal-pathspecs", "-c", "advice.graftFileDeprecated=false"}
+	}
+	commandArgs := append(commandPrefix, args...)
 	if working != nil {
 		workingCopy, copyErr := copyDescriptor(working)
 		if copyErr != nil {
@@ -435,36 +548,58 @@ func runGitBounded(ctx context.Context, directory, working *os.File, args []stri
 		extraFiles = append(extraFiles, workingCopy)
 	}
 	namespaceFDs := map[string]int{}
-	if namespace != nil {
+	if namespace != nil && runtime.GOOS != "darwin" {
 		for _, item := range []struct {
 			name string
 			file *os.File
 		}{
 			{"git", namespace.gitDir}, {"common", namespace.commonDir}, {"objects", namespace.objects},
 		} {
+			copy, copyErr := copyDescriptor(item.file)
+			if copyErr != nil {
+				return nil, nil, copyErr
+			}
+			defer copy.Close()
 			namespaceFDs[item.name] = 3 + len(extraFiles)
-			extraFiles = append(extraFiles, item.file)
+			extraFiles = append(extraFiles, copy)
 		}
 	}
 	command := execCommandContext(ctx, commandArgs, extraFiles)
 	if namespace != nil {
+		gitDir, commonDir, objects, workTree := platformGitPath(namespace.gitDir, namespaceFDs["git"]), platformGitPath(namespace.commonDir, namespaceFDs["common"]), platformGitPath(namespace.objects, namespaceFDs["objects"]), platformGitPath(directoryCopy, 3)
+		if runtime.GOOS == "darwin" {
+			gitDir, commonDir, objects, workTree = namespace.snapshotGit, namespace.snapshotCommon, filepath.Join(namespace.snapshotCommon, "objects"), namespace.snapshotWork
+			if includeWorktree {
+				workTree = "."
+			}
+		}
 		command.Env = append(gitCommandEnvironment(),
-			fmt.Sprintf("GIT_DIR=/proc/self/fd/%d", namespaceFDs["git"]),
-			fmt.Sprintf("GIT_COMMON_DIR=/proc/self/fd/%d", namespaceFDs["common"]),
-			fmt.Sprintf("GIT_OBJECT_DIRECTORY=/proc/self/fd/%d", namespaceFDs["objects"]),
-			"GIT_WORK_TREE=/proc/self/fd/3",
+			"GIT_DIR="+gitDir,
+			"GIT_COMMON_DIR="+commonDir,
+			"GIT_OBJECT_DIRECTORY="+objects,
+			"GIT_WORK_TREE="+workTree,
 		)
 	}
 	stdout := &boundedBuffer{limit: limit}
 	stderr := &boundedBuffer{limit: 64 * 1024}
 	command.Stdout = stdout
 	command.Stderr = stderr
+	restoreWorktree := func() error { return nil }
+	if namespace != nil && runtime.GOOS == "darwin" && includeWorktree {
+		restoreWorktree, err = platformEnterGitWorktree(directoryCopy)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 	err = command.Run()
+	if restoreErr := restoreWorktree(); restoreErr != nil && err == nil {
+		err = restoreErr
+	}
 	if stdout.over || stderr.over {
 		return stdout.data, stderr.data, errGitOutputLimit
 	}
 	if namespace != nil {
-		if namespaceErr := namespace.validate(); namespaceErr != nil {
+		if namespaceErr := namespace.validateContext(ctx); namespaceErr != nil {
 			return stdout.data, stderr.data, namespaceErr
 		}
 	}
@@ -505,7 +640,7 @@ func (s *Service) gitBlob(ctx context.Context, view *gitView, ref, label string)
 	if ref == "current" {
 		return "", "", invalid(view.requested, "current is the working tree")
 	}
-	output, _, err := runGitBounded(ctx, view.directory, nil, []string{"show", ref + ":" + view.relative}, MaxReadBytes+1, view.namespace)
+	output, _, err := runGitMetadataBounded(ctx, view.directory, nil, []string{"show", ref + ":" + view.relative}, MaxReadBytes+1, view.namespace)
 	if errors.Is(err, errGitNamespaceChanged) {
 		return "", "", gitNamespaceChanged(view.requested)
 	}
@@ -780,7 +915,7 @@ func unifiedFileDiff(original, working, relative string) string {
 }
 
 func (s *Service) Diff(ctx context.Context, raw string, fromRef, toRef string) (map[string]any, *Error) {
-	view, finderErr := s.openGitView(raw)
+	view, finderErr := s.openGitView(ctx, raw)
 	if finderErr != nil {
 		return nil, finderErr
 	}
@@ -803,7 +938,7 @@ func (s *Service) Diff(ctx context.Context, raw string, fromRef, toRef string) (
 	defer cancel()
 	trackedArgs := []string{"ls-files", "--error-unmatch"}
 	trackedArgs = append(trackedArgs, historyPathArgs(view.relative)...)
-	trackedOutput, _, trackedErr := runGitBounded(gitCtx, view.directory, nil, trackedArgs, 64*1024, view.namespace)
+	trackedOutput, _, trackedErr := runGitMetadataBounded(gitCtx, view.directory, nil, trackedArgs, 64*1024, view.namespace)
 	if errors.Is(trackedErr, errGitNamespaceChanged) {
 		return nil, gitNamespaceChanged(view.requested)
 	}
@@ -822,7 +957,7 @@ func (s *Service) Diff(ctx context.Context, raw string, fromRef, toRef string) (
 			if ref == "current" {
 				continue
 			}
-			if _, _, err := runGitBounded(gitCtx, view.directory, nil, []string{"rev-parse", "--verify", "--quiet", ref + "^{commit}"}, 4096, view.namespace); err != nil {
+			if _, _, err := runGitMetadataBounded(gitCtx, view.directory, nil, []string{"rev-parse", "--verify", "--quiet", ref + "^{commit}"}, 4096, view.namespace); err != nil {
 				if errors.Is(err, errGitNamespaceChanged) {
 					return nil, gitNamespaceChanged(view.requested)
 				}
@@ -837,7 +972,7 @@ func (s *Service) Diff(ctx context.Context, raw string, fromRef, toRef string) (
 			if from == "current" {
 				return nil, &Error{Status: http.StatusBadRequest, Code: "ref_order", MessageKey: "fs.error.refOrderCurrent", Path: view.requested, Message: "current cannot precede a commit"}
 			}
-			_, _, orderErr := runGitBounded(gitCtx, view.directory, nil, []string{"merge-base", "--is-ancestor", from, to}, 4096, view.namespace)
+			_, _, orderErr := runGitMetadataBounded(gitCtx, view.directory, nil, []string{"merge-base", "--is-ancestor", from, to}, 4096, view.namespace)
 			if errors.Is(orderErr, errGitNamespaceChanged) {
 				return nil, gitNamespaceChanged(view.requested)
 			}
@@ -889,7 +1024,7 @@ func (s *Service) Diff(ctx context.Context, raw string, fromRef, toRef string) (
 	if to != "current" && originalError == "" && workingError == "" {
 		diffArgs := []string{"diff", from, to}
 		diffArgs = append(diffArgs, historyPathArgs(view.relative)...)
-		output, _, diffErr := runGitBounded(gitCtx, view.directory, nil, diffArgs, MaxReadBytes+1, view.namespace)
+		output, _, diffErr := runGitMetadataBounded(gitCtx, view.directory, nil, diffArgs, MaxReadBytes+1, view.namespace)
 		if errors.Is(diffErr, errGitNamespaceChanged) {
 			return nil, gitNamespaceChanged(view.requested)
 		}
@@ -909,7 +1044,13 @@ func (s *Service) Diff(ctx context.Context, raw string, fromRef, toRef string) (
 				binaryArgs = append(binaryArgs, to)
 			}
 			binaryArgs = append(binaryArgs, historyPathArgs(view.relative)...)
-			binaryDiff, _, binaryErr := runGitBounded(gitCtx, view.directory, nil, binaryArgs, MaxReadBytes+1, view.namespace)
+			var binaryDiff []byte
+			var binaryErr error
+			if to == "current" {
+				binaryDiff, _, binaryErr = runGitBounded(gitCtx, view.directory, nil, binaryArgs, MaxReadBytes+1, view.namespace)
+			} else {
+				binaryDiff, _, binaryErr = runGitMetadataBounded(gitCtx, view.directory, nil, binaryArgs, MaxReadBytes+1, view.namespace)
+			}
 			if errors.Is(binaryErr, errGitNamespaceChanged) {
 				return nil, gitNamespaceChanged(view.requested)
 			}
@@ -984,7 +1125,7 @@ func parseBlamePorcelain(text string) map[string]map[string]any {
 }
 
 func (s *Service) Blame(ctx context.Context, raw, ref string) (map[string]any, *Error) {
-	view, finderErr := s.openGitView(raw)
+	view, finderErr := s.openGitView(ctx, raw)
 	if finderErr != nil {
 		if finderErr.MessageKey == "fs.error.notGitRepo" {
 			return map[string]any{"path": raw, "repo": "", "relative_path": "", "in_repo": false, "lines": map[string]map[string]any{}}, nil
@@ -1005,12 +1146,12 @@ func (s *Service) Blame(ctx context.Context, raw, ref string) (map[string]any, *
 	}
 	gitCtx, cancel := gitViewContext(ctx)
 	defer cancel()
-	args := []string{"blame", "--line-porcelain", "--contents", "/proc/self/fd/4"}
+	args := []string{"blame", "--line-porcelain", "--contents", platformChildFDPath(4)}
 	if useRef != "" && useRef != "HEAD" && useRef != "current" {
 		args = append(args, useRef)
 	}
 	args = append(args, historyPathArgs(view.relative)...)
-	output, stderr, err := runGitBounded(gitCtx, view.directory, view.working, args, MaxReadBytes, view.namespace)
+	output, stderr, err := runGitMetadataBounded(gitCtx, view.directory, view.working, args, MaxReadBytes, view.namespace)
 	if err != nil {
 		if errors.Is(err, errGitNamespaceChanged) {
 			return nil, gitNamespaceChanged(view.requested)
@@ -1027,7 +1168,7 @@ func (s *Service) Blame(ctx context.Context, raw, ref string) (map[string]any, *
 		}
 		return map[string]any{"path": view.requested, "repo": view.repo, "relative_path": view.relative, "in_repo": true, "lines": map[string]map[string]any{}, "error": errorText}, nil
 	}
-	head, _, headErr := runGitBounded(gitCtx, view.directory, nil, []string{"rev-parse", "HEAD"}, 4096, view.namespace)
+	head, _, headErr := runGitMetadataBounded(gitCtx, view.directory, nil, []string{"rev-parse", "HEAD"}, 4096, view.namespace)
 	if errors.Is(headErr, errGitNamespaceChanged) {
 		return nil, gitNamespaceChanged(view.requested)
 	}

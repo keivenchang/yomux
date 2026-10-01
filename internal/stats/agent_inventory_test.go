@@ -138,6 +138,14 @@ func TestClassifyAgentRequiresEntryPoint(t *testing.T) {
 		{"/opt/codex/vendor/codex --dangerously-bypass", "/opt/codex/vendor/codex", "codex"},
 		{"node /tmp/opencode-wrapper.js", "/usr/bin/node", ""},
 		{"node /tmp/codex-wrapper.js", "/usr/bin/node", ""},
+		{"/usr/local/bin/node /Users/test/.npm/_npx/@openai/codex/bin/codex.js", "/usr/local/bin/node", "codex"},
+		{"node /tmp/tool.js /tmp/codex.js", "/usr/local/bin/node", ""},
+		{"node /usr/local/bin/codex --resume thread", "/usr/bin/node", "codex"},
+		{"node /home/test/.local/bin/codex --resume thread", "", "codex"},
+		{"nodejs /usr/local/bin/codex --resume thread", "", "codex"},
+		{"node /tmp/tool.js /usr/local/bin/codex", "/usr/bin/node", ""},
+		{"node /tmp/codex.js", "/usr/bin/node", ""},
+		{"node /usr/local/bin/codex", "/usr/bin/bash", ""},
 		{"bash -c 'codex --full-auto'", "", ""},
 		{"/tmp/not-opencode --session abc", "/tmp/not-opencode", ""},
 	}
@@ -145,6 +153,67 @@ func TestClassifyAgentRequiresEntryPoint(t *testing.T) {
 		if got := ClassifyAgent(test.command, test.executable); got != test.want {
 			t.Errorf("ClassifyAgent(%q, %q) = %q, want %q", test.command, test.executable, got, test.want)
 		}
+	}
+}
+
+func TestBuildAgentInventoryCodexLauncherUsesNativeChildWhenPresent(t *testing.T) {
+	launcher := AgentProcess{PID: 301, PPID: 300, Command: "/usr/local/bin/node /Users/test/.npm/_npx/@openai/codex/bin/codex.js", Executable: "/usr/local/bin/node"}
+	native := AgentProcess{PID: 302, PPID: 301, Command: "/opt/codex/vendor/codex --full-auto", Executable: "/opt/codex/vendor/codex"}
+	for _, test := range []struct {
+		name      string
+		processes []AgentProcess
+		wantPID   int
+	}{
+		{name: "launcher only", processes: []AgentProcess{launcher}, wantPID: launcher.PID},
+		{name: "launcher and native child", processes: []AgentProcess{launcher, native}, wantPID: native.PID},
+		{name: "snapshot order reversed", processes: []AgentProcess{native, launcher}, wantPID: native.PID},
+		{name: "legacy launcher only", processes: []AgentProcess{{PID: launcher.PID, PPID: launcher.PPID, Command: "node /usr/local/bin/codex --resume thread"}}, wantPID: launcher.PID},
+		{name: "legacy launcher and native child", processes: []AgentProcess{{PID: launcher.PID, PPID: launcher.PPID, Command: "node /usr/local/bin/codex --resume thread"}, native}, wantPID: native.PID},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			records, errs := BuildAgentInventory(context.Background(), AgentInventorySources{
+				Processes: func(context.Context) ([]AgentProcess, error) { return test.processes, nil },
+				Panes: func(context.Context) ([]AgentTmuxPane, error) {
+					return []AgentTmuxPane{{PID: launcher.PID, Session: "work", PaneID: "%9", Directory: "/repo"}}, nil
+				},
+			})
+			if len(errs) != 0 {
+				t.Fatalf("inventory errors: %v", errs)
+			}
+			if len(records) != 1 || records[0].PID != test.wantPID || records[0].Kind != "codex" || records[0].TmuxPaneID != "%9" {
+				t.Fatalf("pane agent records = %#v, want one Codex PID %d on pane %%9", records, test.wantPID)
+			}
+		})
+	}
+}
+
+func TestClassifyAgentProcessesPreservesIndependentAgentsAndIncompleteLaunches(t *testing.T) {
+	launcher := AgentProcess{PID: 301, PPID: 300, Command: "node /opt/node_modules/@openai/codex/bin/codex.js", Executable: "/usr/bin/node"}
+	native := AgentProcess{PID: 302, PPID: 301, Command: "/opt/codex/vendor/codex", Executable: "/opt/codex/vendor/codex"}
+	for _, test := range []struct {
+		name      string
+		processes []AgentProcess
+		want      map[int]string
+	}{
+		{name: "native through shell", processes: []AgentProcess{launcher, {PID: 303, PPID: launcher.PID, Command: "sh"}, {PID: native.PID, PPID: 303, Command: native.Command, Executable: native.Executable}}, want: map[int]string{native.PID: "codex"}},
+		{name: "unrelated native sibling", processes: []AgentProcess{launcher, {PID: native.PID, PPID: launcher.PPID, Command: native.Command, Executable: native.Executable}}, want: map[int]string{launcher.PID: "codex", native.PID: "codex"}},
+		{name: "different child agent", processes: []AgentProcess{launcher, {PID: 302, PPID: launcher.PID, Command: "claude", Executable: "/usr/bin/claude"}}, want: map[int]string{launcher.PID: "codex", 302: "claude"}},
+		{name: "native command unavailable", processes: []AgentProcess{launcher, {PID: native.PID, PPID: launcher.PID, Executable: native.Executable}}, want: map[int]string{launcher.PID: "codex"}},
+		{name: "deleted native executable", processes: []AgentProcess{launcher, {PID: native.PID, PPID: launcher.PID, Command: native.Command, Executable: native.Executable + " (deleted)"}}, want: map[int]string{native.PID: "codex"}},
+		{name: "nested launchers", processes: []AgentProcess{launcher, {PID: 303, PPID: launcher.PID, Command: launcher.Command, Executable: launcher.Executable}, {PID: native.PID, PPID: 303, Command: native.Command, Executable: native.Executable}}, want: map[int]string{native.PID: "codex"}},
+		{name: "parent cycle", processes: []AgentProcess{{PID: launcher.PID, PPID: native.PID, Command: launcher.Command, Executable: launcher.Executable}, native}, want: map[int]string{native.PID: "codex"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// Ownership must not depend on process snapshot enumeration order.
+			for range 2 {
+				if got := ClassifyAgentProcesses(test.processes); !reflect.DeepEqual(got, test.want) {
+					t.Fatalf("classified process owners = %#v, want %#v", got, test.want)
+				}
+				for left, right := 0, len(test.processes)-1; left < right; left, right = left+1, right-1 {
+					test.processes[left], test.processes[right] = test.processes[right], test.processes[left]
+				}
+			}
+		})
 	}
 }
 
@@ -474,4 +543,20 @@ func TestRunBoundedCommandDiagnosticsAndLargeSyntheticOutput(t *testing.T) {
 	if largeErr == nil || !strings.Contains(largeErr.Error(), "output exceeds bound") || len(large.Stdout) > maxHostCommandOutput+1 {
 		t.Fatalf("large output semantics: err=%v stdout_len=%d", largeErr, len(large.Stdout))
 	}
+}
+
+func TestLinuxProcessInventoryReadsActualProcList(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("Linux /proc is unavailable")
+	}
+	processes, err := linuxProcesses(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, process := range processes {
+		if process.PID == os.Getpid() {
+			return
+		}
+	}
+	t.Fatalf("current Go test process %d was absent from %d process rows", os.Getpid(), len(processes))
 }
