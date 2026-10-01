@@ -4,7 +4,7 @@ Lightweight, powerful browser workspace for managing AI work.
 
 Text files provide TextEdit for raw source editing. Markdown also provides ProseMirror-powered ViewEdit. In Split mode the left surface is labeled TextEditor and the right rendered Markdown WYSIWYG surface is labeled ViewEditor. Typing stays local to the active surface, then synchronizes both surfaces and canonical Markdown after 1.25 seconds without further input; saving, blur, mode changes, and close flush immediately. In ViewEditor, ordinary Enter creates a Markdown paragraph break; Shift-Enter alone creates an explicit hard break. Markdown image paste saves the image in a directory named for the Markdown file without its extension, then inserts a relative image reference at the original caret or selected range: `/a/b/file.md` becomes `/a/b/file/upload.png` and `![upload](file/upload.png)`.
 
-YOLOmux brings AI session management, editing, filesystem and Git context, and observability into one browser workspace backed by local tmux sessions. The 0.9.x release line is migrating the server to Go, which now owns terminal/session, Finder/Differ, editor, operation/event, and YO!stats paths. Python remains available as the broader legacy backend while capability gaps are closed; it is scheduled for deprecation, with no removal date set. Go feature access is capability-gated, so review [`GO_MIGRATION.md`](GO_MIGRATION.md) before relying on a specific route. Python companion tools remain available: `tools/auto_approve_tmux.py` and `tools/tmux_wall.py`.
+YOLOmux brings AI session management, editing, filesystem and Git context, and observability into one browser workspace backed by local tmux sessions. Go is now the default server for managed launches, including `boot.sh`, `make run`, and `yolo-dev-start`. The Python server is deprecated and remains only as an explicit temporary fallback; removal is planned around late October 2026, about one month from this release. Go feature access is capability-gated, so review [`GO_MIGRATION.md`](GO_MIGRATION.md) before relying on a specific route. The Go server still uses Python to render the shared HTML shell, and Python companion tools remain available: `tools/auto_approve_tmux.py` and `tools/tmux_wall.py`.
 
 Contributor and build instructions live in [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md). AI-agent conventions live in [`AGENTS.md`](AGENTS.md), the concise UI contract and grouped release notes are indexed in [`docs/README.md`](docs/README.md).
 
@@ -22,7 +22,7 @@ Contributor and build instructions live in [`docs/DEVELOPMENT.md`](docs/DEVELOPM
 
 ## Quickstart
 
-The managed launcher uses Go by default. Python remains available with `--deprecated-python` while its remaining capabilities are migrated.
+Managed server launches use Go by default. Select the deprecated Python server in a managed launch only with `--deprecated-python`; a raw `python3 yolomux.py` invocation remains a legacy path and may select Python unless you pass `--backend go`. The deprecated server is planned for removal around late October 2026.
 
 ```bash
 git clone https://github.com/keivenchang/yolomux.git
@@ -38,9 +38,9 @@ tmux new-session -A -s project1     # optional: create one if you do not already
 
 ### Go backend
 
-The Go backend is a modular monolith, not a port of Python's web-process-plus-local-daemons topology. One `yolomux-go` process owns HTTPS/auth, the tmux PTY/WebSocket path, events and durable operation receipts, Finder and Differ, bounded in-process work queues, and the Go YO!stats writer/readers/materializers and collectors. It serves the shared browser bundle and calls `python3` to render the existing login and application HTML from `yolomux_lib.web`, so Python remains a runtime dependency during this migration.
+The Go backend is a modular monolith, not a port of Python's web-process-plus-local-daemons topology. One `yolomux-go` process owns HTTPS/auth, the tmux PTY/WebSocket path, events and durable operation receipts, Finder and Differ, bounded in-process work queues, and the Go YO!stats writer/readers/materializers and collectors. It serves the shared browser bundle and calls `python3` to render the existing login and application HTML from `yolomux_lib.web`, so Python remains a runtime dependency even when the Go server is selected.
 
-Available Go routes include terminal/session, Finder, Git, Differ, editor, diagnostics, and YO!stats operations. Session rename uses the same `/api/rename-session` contract on both backends, including admin access, name validation, and collision checks. YO!chat and YO!agent remain unavailable in Go, and unknown `/api/*` routes return typed `501 feature_unavailable` errors. Python remains the broader legacy backend while required Go gaps close; it is scheduled for deprecation, with no removal date set. [`GO_MIGRATION.md`](GO_MIGRATION.md) owns route, capability, and YO!stats status.
+Available Go routes include terminal/session, Finder, Git, Differ, editor, diagnostics, and YO!stats operations. Session rename uses the same `/api/rename-session` contract on both backends, including admin access, name validation, and collision checks. YO!chat and YO!agent remain unavailable in Go, and unknown `/api/*` routes return typed `501 feature_unavailable` errors. The Python server remains an explicitly selected deprecated fallback while these Go gaps close; its planned removal is around late October 2026. [`GO_MIGRATION.md`](GO_MIGRATION.md) owns route, capability, and YO!stats status.
 
 Go Finder accepts any absolute path the server process can access. It does not apply the legacy Python backend's configured-root or credential-name denylist. OS permissions, descriptor identity checks, bounded operation limits, role checks, and the protected product-root mutation guard still apply.
 
@@ -65,7 +65,7 @@ Contributors should use `make dev`. Its `dev` extra installs `mypy`, `pillow`, `
 
 Python native filesystem watching is validated on macOS and Linux. Native events reduce invalidation latency but do not replace bounded reconciliation: the elected Python web owner still scans at most 1,000 visible names per watched root and retains at most 512 in each directory signature. If Python `watchfiles` cannot start or loses events, it uses the same bounded polling path as its correctness fallback. Go uses a separate in-process Finder watcher: native events are Linux-only, and other platforms use the bounded polling fallback.
 
-Open `https://localhost:9998/` for the Python quickstart. The first launch shows a setup page — see [First launch](#first-launch) below. With no `--sessions` filter, Python discovers every tmux session from `tmux list-sessions`. By default Python creates and reuses a local HTTPS certificate under `~/.local/state/yolomux/tls/`; your browser will warn because it is not signed by a public CA. `--dang` is the Python short alias for `--dangerously-yolo`, which makes the UI's `+ Claude` and `+ Codex` buttons launch with their dangerous bypass flags.
+For the deprecated Python server only, open `https://localhost:9998/`. The first launch shows a setup page — see [First launch](#first-launch) below. With no `--sessions` filter, Python discovers every tmux session from `tmux list-sessions`. By default Python creates and reuses a local HTTPS certificate under `~/.local/state/yolomux/tls/`; your browser will warn because it is not signed by a public CA. `--dang` is the Python short alias for `--dangerously-yolo`, which makes the UI's `+ Claude` and `+ Codex` buttons launch with their dangerous bypass flags. Use `./boot.sh` for the Go server.
 
 ## Runtime architecture
 

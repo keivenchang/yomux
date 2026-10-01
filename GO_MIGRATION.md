@@ -1,10 +1,10 @@
 # YOLOmux Go Backend Status
 
-This document records the Go backend capabilities implemented in this tree. The 0.9.x line is migrating runtime ownership from Python to Go. Python remains available as the broader legacy backend while Go capability and operational gaps are addressed; Python is scheduled for deprecation, but no removal date is set. Go exposes only the capabilities and routes it owns.
+This document records the Go backend capabilities implemented in this tree. Go is the default server for managed/operator launches, including `boot.sh`, `make run`, and `yolo-dev-start`. The Python server is already deprecated and is available only as an explicit temporary fallback while the remaining Go gaps close; its planned removal is around late October 2026, about one month from this release. The Go server still uses Python to render the shared HTML shell, which does not select the Python server. Go exposes only the capabilities and routes it owns.
 
 ## Launch And Backend Selection
 
-The managed launcher selects Go by default. To run the legacy Python backend, opt in explicitly:
+Managed launchers select Go by default. `yolo-dev-start` passes `--backend go` explicitly. To run the deprecated Python server, opt in explicitly:
 
 ```bash
 ./boot.sh --deprecated-python 7221
@@ -19,7 +19,7 @@ tools/run_bazel_tests.sh --jobs "$(getconf _NPROCESSORS_ONLN)"
 YOLOMUX_START_LOAD_WAIT_SECONDS=30 ./boot.sh 7221
 ```
 
-`boot.sh` finds the canonical Bazel output at `bazel-bin/cmd/yolomux-go/yolomux_go_/yolomux_go`, applies the shared startup/load/port lifecycle, invokes `python3 yolomux.py --backend go`, and then the Python CLI replaces itself with the Go process while carrying host, port, checkout root, and environment-selected config/state. `--golang` and `--backend go` remain aliases. `--backend python` is rejected; `--deprecated-python` is the only managed Python selection. Managed startup binds `0.0.0.0` by default. Direct execution of the Go binary defaults to `127.0.0.1`, so use the launcher for operator runs.
+`boot.sh` finds the canonical Bazel output at `bazel-bin/cmd/yolomux-go/yolomux_go_/yolomux_go`, applies the shared startup/load/port lifecycle, invokes `python3 yolomux.py --backend go`, and then the Python CLI replaces itself with the Go process while carrying host, port, checkout root, and environment-selected config/state. `--golang` and `--backend go` remain aliases. `--backend python` is rejected; `--deprecated-python` is the only managed Python selection. Managed startup binds `0.0.0.0` by default. Direct execution of the Go binary defaults to `127.0.0.1`, so use the launcher for operator runs. A raw `python3 yolomux.py` invocation remains a legacy direct entrypoint and may select Python; use `boot.sh` for the normal Go default or pass `--backend go` explicitly.
 
 A Go process launched by an older managed launcher may not hold the shared root and port leases. Gracefully stop that verified listener once before migrating it; new managed Go processes retain those leases across `exec`, so later `boot.sh --force <port>` restarts can replace them safely.
 
@@ -280,7 +280,7 @@ The wrapper accepts an optional positive integer `--jobs`; when the flag is omit
 
 5. Verify the listener, `/healthz`, capability snapshot, and exact browser workflow against the rebuilt bundle.
 
-6. Close the documented capability and operational gaps before deprecating the Python backend. Until then, keep Python available as a compatibility path and use capability admission to avoid presenting unsupported Go behavior.
+6. Keep the deprecated Python server as an explicit temporary fallback while the remaining documented capability gaps close. Remove it around late October 2026; use capability admission until then to avoid presenting unsupported Go behavior.
 
 ## Related Documents
 

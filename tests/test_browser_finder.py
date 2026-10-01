@@ -1298,9 +1298,99 @@ def test_finder_repo_context_menu_and_diff_tab_are_immediate_while_metadata_is_d
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
+def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_path):
+    repo = "/home/test/repo"
+    sha = "a" * 40
+    browser.set_window_size(1600, 900)
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=left&tabs=left:files",
+        settings={"file_explorer": {"root_mode": "fixed"}},
+        fs_entries={"/home/test": [{"name": "repo", "kind": "dir"}], repo: []},
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('#panel-__finder__ .file-tree-row[data-path=\"/home/test/repo\"]')"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const repo = arguments[0];
+        const sha = arguments[1];
+        const done = arguments[arguments.length - 1];
+        const originalFetch = window.fetch.bind(window);
+        const waitFor = window.__yolomuxTestWaitFor;
+        const jsonResponse = payload => new Response(JSON.stringify(payload), {headers: {'Content-Type': 'application/json'}});
+        window.fetch = async (input, options = {}) => {
+          const url = new URL(String(input), location.href);
+          if (url.pathname === '/api/fs/git-history') return jsonResponse({
+            path: repo,
+            repo,
+            relative_path: '',
+            shallow_boundary: 'complete',
+            head: sha,
+            snapshot_cursor: 'alignment-snapshot',
+            next_cursor: '',
+            truncated: false,
+            commits: [{sha, short: sha.slice(0, 9), parents: [], subject: 'Commit row', author: 'Test', authored_at: 1786931640, files: 1, added: 2, removed: 1, binary_files: 0}],
+            worktree_status: {
+              available: true,
+              dirty: true,
+              entries: [{status: 'M', path: 'note.txt', counts_available: true, added: 2, removed: 1, binary: false}],
+              truncated: false,
+              files: 1,
+              added: 2,
+              removed: 1,
+              binary_files: 0,
+              stats_available: true,
+              modified_at: 1786931640,
+              status_counts: {M: 1},
+            },
+          });
+          return originalFetch(input, options);
+        };
+        (async () => {
+          const item = gitDiffItemFor(repo);
+          openGitDiffTab(repo, {userInitiated: true});
+          const panel = await waitFor(() => {
+            const candidate = panelNodes.get(item);
+            return candidate?.querySelector('.git-diff-worktree-summary')
+              && candidate?.querySelector('.git-diff-commit-row[data-git-diff-commit]') ? candidate : null;
+          });
+          panel.style.width = '1200px';
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          const list = panel.querySelector('.git-diff-commits');
+          const dirtyRow = panel.querySelector('.git-diff-worktree-summary');
+          const commitRow = panel.querySelector('.git-diff-commit-row[data-git-diff-commit]');
+          const fieldNames = ['caret', 'sha', 'date', 'changes', 'author', 'description'];
+          const tracks = getComputedStyle(list).gridTemplateColumns;
+          const trackSync = await waitFor(() => dirtyRow.style.gridTemplateColumns === tracks ? true : null);
+          const fields = fieldNames.map((name, index) => {
+            const dirtyField = dirtyRow.children[index];
+            const commitField = commitRow.children[index];
+            return {
+              name,
+              visible: getComputedStyle(dirtyField).display !== 'none' && getComputedStyle(commitField).display !== 'none',
+              delta: Math.abs(dirtyField.getBoundingClientRect().left - commitField.getBoundingClientRect().left),
+            };
+          });
+          done({tracks, trackSync, fields, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+        })().catch(error => done({error: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')})).finally(() => { window.fetch = originalFetch; });
+        """,
+        repo,
+        sha,
+    )
+    assert not metrics.get("error"), metrics
+    assert metrics["trackSync"] is True, metrics
+    assert all(field["visible"] and field["delta"] <= 1 for field in metrics["fields"]), metrics["fields"]
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
 def test_finder_diff_dirty_worktree_is_commit_shaped_and_expandable(browser, tmp_path):
     repo = "/home/test/repo"
     sha = "a" * 40
+    browser.set_window_size(1600, 900)
     load_live_runtime_boot_fixture(
         browser,
         tmp_path,
@@ -1375,6 +1465,8 @@ def test_finder_diff_dirty_worktree_is_commit_shaped_and_expandable(browser, tmp
             const candidate = panelNodes.get(item);
             return candidate?.querySelector('.git-diff-worktree-summary') && candidate?.querySelector('.git-diff-commit-row[data-git-diff-commit]') ? candidate : null;
           });
+          panel.style.width = '1200px';
+          await new Promise(resolve => requestAnimationFrame(resolve));
               const details = panel.querySelector('.git-diff-worktree-status');
               const dirtyRow = panel.querySelector('.git-diff-worktree-summary');
               const commitRow = panel.querySelector('.git-diff-commit-row[data-git-diff-commit]');
@@ -1383,14 +1475,21 @@ def test_finder_diff_dirty_worktree_is_commit_shaped_and_expandable(browser, tmp
             text: row.children[index]?.textContent || '',
             className: row.children[index]?.className || '',
           }]));
-                      const alignment = fieldNames.map((name, index) => {
-                const dirtyLeft = dirtyRow.children[index]?.getBoundingClientRect().left;
-                const commitLeft = commitRow.children[index]?.getBoundingClientRect().left;
-                            return {name, dirtyLeft, commitLeft, delta: Math.abs(dirtyLeft - commitLeft)};
-                          });
-              const before = {
+          const alignment = fieldNames.map((name, index) => {
+            const dirtyLeft = dirtyRow.children[index]?.getBoundingClientRect().left;
+            const commitLeft = commitRow.children[index]?.getBoundingClientRect().left;
+            return {name, dirtyLeft, commitLeft, delta: Math.abs(dirtyLeft - commitLeft)};
+          });
+          const alignmentVisibility = Object.fromEntries(fieldNames.map((name, index) => [
+            name,
+            getComputedStyle(dirtyRow.children[index]).display !== 'none',
+          ]));
+          panel.style.width = '';
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          const before = {
             fields: fields(dirtyRow),
             alignment,
+            alignmentVisibility,
             open: details.open,
             entries: Array.from(panel.querySelectorAll('.git-diff-worktree-entries .file-tree-row[data-path]')).map(row => ({
               status: row.querySelector('.file-tree-git-status')?.textContent || '',
@@ -1454,6 +1553,7 @@ def test_finder_diff_dirty_worktree_is_commit_shaped_and_expandable(browser, tmp
     assert metrics["before"]["fields"]["changes"]["text"] == "2 files +3 -1", metrics
     assert metrics["before"]["fields"]["author"]["text"] == "", metrics
     assert metrics["before"]["fields"]["description"]["text"] == "1 ?? · 1 M", metrics
+    assert all(metrics["before"]["alignmentVisibility"].values()), metrics["before"]["alignmentVisibility"]
     assert all(field["delta"] <= 1 for field in metrics["before"]["alignment"]), metrics["before"]["alignment"]
     assert metrics["before"]["entries"] == [
         {"status": "?", "path": "new.txt", "changes": "+1", "role": "treeitem", "tabIndex": 0},
@@ -1462,6 +1562,7 @@ def test_finder_diff_dirty_worktree_is_commit_shaped_and_expandable(browser, tmp
     assert metrics["before"]["statusBadges"] == ["?", "M"], metrics
     assert not metrics["before"]["hasOldLabel"], metrics
     assert metrics["collapsed"] == {"open": False, "entries": 2}, metrics
+    assert metrics["expanded"]["visiblePathEntries"] == metrics["expanded"]["entries"], metrics["expanded"]
     assert metrics["expanded"] == {
         "open": True,
         "entries": 2,
@@ -1870,6 +1971,18 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
           rootPanel.style.width = '1200px';
           await new Promise(resolve => requestAnimationFrame(resolve));
           const alignedColumnVisibility = fieldVisibility(rootPanel);
+          const firstDate = rootRows[0].querySelector('.git-diff-commit-date');
+          const firstChanges = rootRows[0].querySelector('.git-diff-commit-changes');
+          const dateTextRange = document.createRange();
+          dateTextRange.selectNodeContents(firstDate);
+          const changesTextRange = document.createRange();
+          changesTextRange.selectNodeContents(firstChanges);
+          const rowFontSize = Number.parseFloat(getComputedStyle(rootRows[0]).fontSize);
+          const compactHistoryFields = {
+            dateScale: Number((Number.parseFloat(getComputedStyle(firstDate).fontSize) / rowFontSize).toFixed(3)),
+            changesScale: Number((Number.parseFloat(getComputedStyle(firstChanges).fontSize) / rowFontSize).toFixed(3)),
+            dateToChangesGap: Number((changesTextRange.getBoundingClientRect().left - dateTextRange.getBoundingClientRect().right).toFixed(2)),
+          };
           const columnStarts = Object.fromEntries([
             'sha',
             'date',
@@ -2159,6 +2272,7 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
             branchColor,
             branchWeight,
             alignedColumnVisibility,
+            compactHistoryFields,
             columnStarts,
             rowDensity,
             commitRoving,
@@ -2246,10 +2360,13 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
     assert metrics["branchWeight"] == "800", metrics
     assert metrics["branchColor"] != metrics["summaryColors"]["added"] and metrics["branchColor"] != metrics["summaryColors"]["removed"], metrics
     assert all(metrics["alignedColumnVisibility"].values()), metrics["alignedColumnVisibility"]
+    assert metrics["compactHistoryFields"]["dateScale"] == 0.8, metrics["compactHistoryFields"]
+    assert metrics["compactHistoryFields"]["changesScale"] == 0.8, metrics["compactHistoryFields"]
+    assert metrics["compactHistoryFields"]["dateToChangesGap"] <= 8, metrics["compactHistoryFields"]
     assert all(
         max(starts) - min(starts) <= 0.5 for starts in metrics["columnStarts"].values()
     ), metrics["columnStarts"]
-    assert max(metrics["rowDensity"]["heights"]) <= 24.5, metrics["rowDensity"]
+    assert max(metrics["rowDensity"]["heights"]) <= 20.5, metrics["rowDensity"]
     assert max(metrics["rowDensity"]["gaps"], default=0) <= 0.5, metrics["rowDensity"]
     assert metrics["commitRoving"] == {"focused": sha_b, "tabStops": [sha_b]}, metrics
     assert metrics["focusAfterAsync"] == sha_b, metrics
@@ -2333,11 +2450,11 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
     assert metrics["tabLabels"] == {"root": "Δrepo", "nested": "Δrepo;src"}, metrics
     expected_history_requests = [
         f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=22&worktree=0",
-        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=22&cursor=page-2&worktree=0",
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=27&cursor=page-2&worktree=0",
         f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=22&cursor=snapshot-zero&worktree=0",
         f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo%2Fsrc&limit=22&worktree=0",
-        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo%2Fsrc&limit=22&cursor=page-2&worktree=0",
-        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=22&cursor=page-2&worktree=0",
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo%2Fsrc&limit=27&cursor=page-2&worktree=0",
+        f"/api/fs/git-history?path=%2Fhome%2Ftest%2Frepo&limit=27&cursor=page-2&worktree=0",
     ]
     assert sorted(metrics["historyRequests"]) == sorted(expected_history_requests), metrics
     assert len(metrics["detailRequests"]) == 4, metrics

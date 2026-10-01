@@ -333,7 +333,16 @@ async function runLayoutAsyncSuite() {
     assert.equal(row.children[1].textContent, 'aaaaaaaaa', 'SHA is always rendered');
     assert.equal(row.children[1].href, `https://github.com/owner/project/commit/${'a'.repeat(40)}`);
     assert.deepStrictEqual([...row.querySelectorAll('.git-diff-commit-decoration')].map(node => node.textContent), ['HEAD -> yo7110', 'tag: v0.8.8', 'origin/main']);
-    assert.equal(row.querySelector('.git-diff-commit-signature').textContent, 'U', 'Git signature status is shown beside the SHA');
+    const signature = row.querySelector('.git-diff-commit-signature');
+    assert.equal(signature.textContent, 'U', 'Git signature status is shown beside the SHA');
+    assert.equal(signature.title, 'Git signature status: U');
+    assert.equal(signature.getAttribute('aria-label'), 'Git signature status: U');
+    const unsignedRow = api.gitDiffCommitRowForTest(item, {
+      sha: 'f'.repeat(40), short: 'f'.repeat(9), subject: 'Unsigned commit', signature_status: 'N',
+    });
+    const unsignedMarker = unsignedRow.querySelector('.git-diff-commit-signature');
+    assert.equal(unsignedMarker.title, 'No signature');
+    assert.equal(unsignedMarker.getAttribute('aria-label'), 'No signature');
     assert.ok([...row.querySelectorAll('.git-diff-commit-decoration')].map(node => node.textContent).join(' ').includes('HEAD -> yo7110') && [...row.querySelectorAll('.git-diff-commit-decoration')].map(node => node.textContent).join(' ').includes('tag: v0.8.8'), 'Git ref decorations are shown with the commit subject');
     assert.equal(row.querySelector('.git-diff-change-link').href, 'https://github.com/owner/project/pull/123');
     assert.deepStrictEqual([
@@ -355,20 +364,23 @@ async function runLayoutAsyncSuite() {
     const dateDrop = css.indexOf('.git-diff-commit-date', authorDrop + 1);
     const changesDrop = css.indexOf('.git-diff-commit-changes', dateDrop + 1);
     assert.ok(authorDrop >= 0 && dateDrop > authorDrop && changesDrop > dateDrop, 'responsive rules remove author, then date, then changes');
-    assert.match(css, /\.git-diff-commits\s*\{[\s\S]*--git-diff-history-columns:\s*14px 13ch 26ch 18ch 20ch/,
-      'one commit-list grid owns the shared semantic column tracks');
+    assert.match(css, /\.git-diff-commits\s*\{[\s\S]*--git-diff-history-columns:\s*14px max-content max-content max-content max-content minmax\(6rem, 1fr\)/,
+      'metadata columns size to their content instead of reserving empty width');
+    assert.match(css, /\.git-diff-commit-date\s*,\s*\.git-diff-commit-changes\s*\{\s*font-size:\s*80%/,
+      'commit dates and file-count summaries use 80 percent of the row text size');
     assert.match(css, /\.git-diff-commit\s*\{[\s\S]*grid-template-columns:\s*subgrid/,
       'each commit group inherits the list tracks');
-    assert.match(css, /\.git-diff-worktree-status\s*\{[\s\S]*--git-diff-worktree-columns:\s*var\(--git-diff-history-columns\)/,
-      'the Dirty group uses the shared history-column template');
-    assert.match(css, /\.git-diff-worktree-status\s*> \.git-diff-worktree-summary\s*\{[\s\S]*grid-template-columns:\s*var\(--git-diff-worktree-columns\)/,
-      'the Dirty summary uses the shared history-column template');
+    assert.match(css, /\.git-diff-worktree-status\s*\{[\s\S]*display:\s*block/,
+      'the native details disclosure keeps its expanded content in normal flow');
+    const gitDiffSource = fs.readFileSync('static_src/js/yolomux/85_git_diff_viewer.js', 'utf8');
+    assert.match(gitDiffSource, /function syncGitDiffWorktreeSummaryColumns\(list\)[\s\S]*gridTemplateColumns\s*=\s*columns/,
+      'the Dirty summary copies the resolved shared grid tracks instead of sizing separate max-content columns');
     assert.match(css, /\.git-diff-commit-row\s*\{[\s\S]*grid-template-columns:\s*subgrid/,
       'each summary row inherits the same list tracks');
-    assert.match(css, /\.git-diff-commits\s*\{[\s\S]*gap:\s*0 var\(--space-8\)/,
+    assert.match(css, /\.git-diff-commits\s*\{[\s\S]*gap:\s*0 var\(--space-6\)/,
       'collapsed commit rows have no extra inter-row whitespace');
-    assert.match(css, /\.git-diff-commit-row\s*\{[\s\S]*min-height:\s*24px;[\s\S]*padding:\s*var\(--space-2\) var\(--space-6\)/,
-      'commit summaries keep the approved compact row height and padding');
+    assert.match(css, /\.git-diff-commit-row\s*\{[\s\S]*min-height:\s*20px;[\s\S]*padding:\s*0 var\(--space-6\)[\s\S]*line-height:\s*1/,
+      'commit summaries keep compact vertical spacing while preserving horizontal padding');
     assert.match(css, /\.git-diff-commit-row\s*\{[\s\S]*white-space:\s*nowrap/);
     assert.match(css, /\.git-diff-commit-decoration\s*\{[\s\S]*font:\s*var\(--ui-font-size-2xs\)/);
     assert.match(css, /\.git-diff-dirty-entry\s*\{[\s\S]*overflow-wrap:\s*anywhere/);

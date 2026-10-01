@@ -1029,6 +1029,22 @@ function gitDiffCommitDateText(commit) {
   });
 }
 
+function gitDiffCommitSignatureLabel(status) {
+  const value = String(status || '').trim();
+  if (value === 'N') return 'No signature';
+  return value ? `Git signature status: ${value}` : '';
+}
+
+function gitDiffCommitSignatureNode(status) {
+  const value = String(status || '').trim();
+  if (!value) return null;
+  const label = gitDiffCommitSignatureLabel(value);
+  const node = gitDiffTextNode('git-diff-commit-signature', value);
+  node.title = label;
+  node.setAttribute('aria-label', label);
+  return node;
+}
+
 function gitDiffCommitRowAriaLabel(commit, changes, date, author) {
   const sha = String(commit?.sha || '');
   const shortShaText = commit?.short || sha.slice(0, 9);
@@ -1036,7 +1052,7 @@ function gitDiffCommitRowAriaLabel(commit, changes, date, author) {
   const decorationLabels = Array.isArray(commit?.decorations)
     ? commit.decorations.map(value => String(value || '').trim()).filter(Boolean)
     : [];
-  return [shortShaText, signatureStatus, date?.textContent, changes?.getAttribute?.('aria-label'), author?.textContent, decorationLabels.join(' '), commit?.subject || ''].filter(Boolean).join(' ');
+  return [shortShaText, gitDiffCommitSignatureLabel(signatureStatus), date?.textContent, changes?.getAttribute?.('aria-label'), author?.textContent, decorationLabels.join(' '), commit?.subject || ''].filter(Boolean).join(' ');
 }
 
 function gitDiffHistoryRow(item, rowData, row = null) {
@@ -1069,7 +1085,7 @@ function gitDiffHistoryRow(item, rowData, row = null) {
   shortSha.title = sha || shortShaText;
   const signatureStatus = String(rowData?.signatureStatus || '').trim();
   if (signatureStatus) {
-    const signature = gitDiffTextNode('git-diff-commit-signature', signatureStatus);
+    const signature = gitDiffCommitSignatureNode(signatureStatus);
     shortSha.append(document.createTextNode(' '), signature);
   }
   const date = gitDiffTextNode('git-diff-commit-date', gitDiffCommitDateText({authored_at: rowData?.authoredAt}));
@@ -1097,8 +1113,11 @@ function gitDiffCommitRow(item, commit, row = null, options = {}) {
       const existingSignature = shortSha.querySelector?.(':scope > .git-diff-commit-signature');
       const signatureStatus = String(commit?.signature_status || '').trim();
       if (existingSignature && !signatureStatus) existingSignature.remove();
-      else if (signatureStatus && existingSignature) existingSignature.textContent = signatureStatus;
-      else if (signatureStatus) shortSha.append(document.createTextNode(' '), gitDiffTextNode('git-diff-commit-signature', signatureStatus));
+      else if (signatureStatus && existingSignature) {
+        existingSignature.textContent = signatureStatus;
+        existingSignature.title = gitDiffCommitSignatureLabel(signatureStatus);
+        existingSignature.setAttribute('aria-label', gitDiffCommitSignatureLabel(signatureStatus));
+      } else if (signatureStatus) shortSha.append(document.createTextNode(' '), gitDiffCommitSignatureNode(signatureStatus));
     }
     control.setAttribute('aria-label', gitDiffCommitRowAriaLabel(commit, changes ? control.querySelector?.(':scope > .git-diff-commit-changes') : null, date, author));
     return control;
@@ -1122,7 +1141,7 @@ function gitDiffCommitRow(item, commit, row = null, options = {}) {
   );
   const signatureStatus = String(commit?.signature_status || '').trim();
   if (signatureStatus) {
-    const signature = gitDiffTextNode('git-diff-commit-signature', signatureStatus);
+    const signature = gitDiffCommitSignatureNode(signatureStatus);
     shortSha.append(document.createTextNode(' '), signature);
   }
   const date = gitDiffTextNode('git-diff-commit-date', gitDiffCommitDateText(commit));
@@ -1606,6 +1625,14 @@ function renderGitDiffCommitList(item, list, state) {
   gitDiffCommitTreeInteractionController.applyState(list, {focusLead: restoreCommitFocus});
 }
 
+function syncGitDiffWorktreeSummaryColumns(list) {
+  if (!list) return;
+  const summary = list.querySelector?.(':scope > .git-diff-worktree-status > .git-diff-worktree-summary');
+  if (!summary) return;
+  const columns = getComputedStyle(list).gridTemplateColumns;
+  if (columns) summary.style.gridTemplateColumns = columns;
+}
+
 function createGitDiffPanel(item) {
   const panel = document.createElement('section');
   panel.className = 'git-diff-panel';
@@ -1630,6 +1657,7 @@ function createGitDiffPanel(item) {
   if (typeof ResizeObserver === 'function') {
     state.viewportObserver?.disconnect?.();
     state.viewportObserver = new ResizeObserver(() => {
+      syncGitDiffWorktreeSummaryColumns(body.querySelector?.(':scope > .git-diff-commits'));
       backfillGitDiffVisibleCommitDetails(item);
       scheduleGitDiffHistoryStatsBackfill(item);
     });
@@ -1683,6 +1711,7 @@ function renderGitDiffPanel(item, options = {}) {
     nodes.push(gitDiffStatusNode('git-diff-truncated', t('gitDiff.historyTruncated'), 'status'));
   }
   body.replaceChildren(...nodes);
+  syncGitDiffWorktreeSummaryColumns(list);
   scheduleGitDiffHistoryInfiniteScroll(item, body);
   if (state.loaded && !state.statsLoading && gitDiffProgressiveHistorySupported()) scheduleGitDiffHistoryStatsBackfill(item);
   if (restoreCommitFocus && body.contains(list)) gitDiffCommitTreeInteractionController.applyState(list, {focusLead: true});

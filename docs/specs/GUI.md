@@ -19,7 +19,8 @@ This page keeps the durable user-visible rules. The selected backend's capabilit
 ## Finder, Differ, and editor
 
 - Finder and Differ share tree-row, sorting, status, selection, and toolbar behavior.
-- Read-only users can open a repository's Repo Diff tab directly, expand commits and the Dirty row, and view file comparisons without editing. General filesystem actions retain their backend permissions.
+- Read-only users can open a repository's Repo Diff tab directly, expand commits and the Dirty row, and view file comparisons without editing. The Dirty summary shares the commit-list grid tracks so each visible field aligns vertically with commit rows. General filesystem actions retain their backend permissions.
+- Repo Diff commit rows use a 20 CSS-pixel minimum height, no vertical padding, and a 1:1 line height. Metadata columns size to their content to preserve room for refs and subjects. Dates and file-change summaries use 80% of row text size; compact signature codes have plain-language tooltips and accessible labels.
 - Show file content as soon as the bounded read completes; optional Git decoration may arrive later. Keep authorization and filesystem failures visible instead of painting stale or replacement content.
 - Text editing stays distinct from preview. Markdown ViewEdit uses the supported ProseMirror path; if parsing fails, keep the source preview read-only and show the error. Saving, mode changes, close, and blur must not discard pending edits.
 - Uploads and pasted images use the active editor's file-relative path and the original selection or caret captured for that operation.

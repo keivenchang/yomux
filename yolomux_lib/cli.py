@@ -631,7 +631,11 @@ def exec_go_backend(args: argparse.Namespace) -> int:
     """Replace the launcher with Go while retaining the managed instance leases."""
     repo_root = Path(__file__).resolve().parents[1]
     configured_binary = os.environ.get("YOLOMUX_GO_BINARY")
-    candidates = [Path(configured_binary)] if configured_binary else [repo_root / "yolomux-go", repo_root / "bazel-bin" / "yolomux-go"]
+    candidates = [Path(configured_binary)] if configured_binary else [
+        repo_root / "bazel-bin" / "cmd" / "yolomux-go" / "yolomux_go_" / "yolomux_go",
+        repo_root / "yolomux-go",
+        repo_root / "bazel-bin" / "yolomux-go",
+    ]
     binary = next((candidate for candidate in candidates if candidate.is_file() and os.access(candidate, os.X_OK)), None)
     if binary is None:
         searched = ", ".join(str(candidate) for candidate in candidates)
