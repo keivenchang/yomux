@@ -22,6 +22,7 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from tools.instance_isolation import synthetic_test_environment
+from tools.generate_go_version import generate_go_version_overlay
 
 
 def run(*args: str, env: dict[str, str] | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -264,7 +265,15 @@ def main() -> int:
             if go_binary is None:
                 go_binary = root / "yolomux-go"
                 build_env = os.environ.copy()
-                run("go", "build", "-buildvcs=false", "-o", str(go_binary), "./cmd/yomux-go", env=build_env)
+                generated_version = root / "product_version_generated.go"
+                go_overlay = root / "go-overlay.json"
+                generate_go_version_overlay(
+                    REPO / "yomux_lib" / "version.py",
+                    generated_version,
+                    go_overlay,
+                    REPO / "cmd" / "yomux-go" / "product_version_generated.go",
+                )
+                run("go", "build", "-buildvcs=false", "-overlay", str(go_overlay), "-o", str(go_binary), "./cmd/yomux-go", env=build_env)
             server_env = env | {
                 "YOLOMUX_DEBUG_AGENT_STATUS": "1",
                 # This verifier owns a private tmux socket. Scope native

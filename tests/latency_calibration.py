@@ -156,18 +156,18 @@ def start_independent_browser_pressure(browser: Any, *, busy_ms: float = 24.0) -
     browser.execute_script(
         r"""
         const busyMs = Number(arguments[0]);
-        window.__yolomuxCalibrationPressureActive = true;
-        window.__yolomuxCalibrationPressureTicks = 0;
+        window.__yomuxCalibrationPressureActive = true;
+        window.__yomuxCalibrationPressureTicks = 0;
         const burn = () => {
-          if (!window.__yolomuxCalibrationPressureActive) return;
+          if (!window.__yomuxCalibrationPressureActive) return;
           const deadline = performance.now() + busyMs;
           let value = 1;
           while (performance.now() < deadline) value = Math.imul(value + 17, 2654435761) >>> 0;
-          window.__yolomuxCalibrationPressureChecksum = value;
-          window.__yolomuxCalibrationPressureTicks += 1;
-          window.__yolomuxCalibrationPressureFrame = requestAnimationFrame(burn);
+          window.__yomuxCalibrationPressureChecksum = value;
+          window.__yomuxCalibrationPressureTicks += 1;
+          window.__yomuxCalibrationPressureFrame = requestAnimationFrame(burn);
         };
-        window.__yolomuxCalibrationPressureFrame = requestAnimationFrame(burn);
+        window.__yomuxCalibrationPressureFrame = requestAnimationFrame(burn);
         """,
         busy_ms,
     )
@@ -175,7 +175,7 @@ def start_independent_browser_pressure(browser: Any, *, busy_ms: float = 24.0) -
 
 def stop_independent_browser_pressure(browser: Any) -> None:
     browser.execute_script(
-        "window.__yolomuxCalibrationPressureActive = false; cancelAnimationFrame(window.__yolomuxCalibrationPressureFrame);",
+        "window.__yomuxCalibrationPressureActive = false; cancelAnimationFrame(window.__yomuxCalibrationPressureFrame);",
     )
 
 

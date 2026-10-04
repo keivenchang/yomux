@@ -14,8 +14,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from tests.browser_helpers.browser_layout import assert_live_runtime_boot_healthy
 from tests.browser_helpers.browser_layout import start_browser_server
 from tests.browser_helpers.browser_layout import start_isolated_browser_app
-from tests.browser_helpers.browser_layout import stop_browser_server
-from tests.browser_helpers.browser_layout import stop_isolated_browser_app
+from tests.browser_helpers.browser_layout import stop_browser_fixture
 from tests.gate_harness import wait_for_browser_boot
 
 EDITOR_GLOBALS = {
@@ -44,7 +43,7 @@ def gate_browser_runtime(browser, monkeypatch, gate_runtime_paths):
         "auto_approve_status_bytes",
         lambda session=None: (json.dumps(auto_approve_payload).encode("utf-8"), HTTPStatus.OK),
     )
-    server, thread = start_browser_server(monkeypatch, gate_runtime_paths.config_dir, runtime.app, auth_bypass=True)
+    server, thread = start_browser_server(monkeypatch, gate_runtime_paths.config_dir, runtime.app, auth_bypass=True, paths=gate_runtime_paths)
     session = runtime.sessions[0]
     browser.get(f"http://127.0.0.1:{server.server_address[1]}/?{urlencode({'sessions': session, 'layout': 'left', 'tabs': f'left:{session}'})}")
     assert_live_runtime_boot_healthy(browser, "regression-gate", timeout=12)
@@ -68,8 +67,7 @@ def gate_browser_runtime(browser, monkeypatch, gate_runtime_paths):
     try:
         yield SimpleNamespace(browser=browser, runtime=runtime, server=server, session=session)
     finally:
-        stop_browser_server(server, thread, browser=browser)
-        stop_isolated_browser_app(runtime)
+        stop_browser_fixture(server, thread, runtime, browser=browser)
 
 
 def _open_editor(gate_browser_runtime, target, expected):
@@ -82,7 +80,7 @@ def _open_editor(gate_browser_runtime, target, expected):
         (async () => {
           try {
             const item = await openFileInEditor(path, {name: path.split('/').at(-1)}, {userInitiated: true, viewMode: 'edit'});
-            const ready = await window.__yolomuxTestWaitFor(() => {
+            const ready = await window.__yomuxTestWaitFor(() => {
               const panel = fileEditorPanelsForPath(path)[0];
               return panel?._cmView?.state?.doc?.toString?.() === expected && Boolean(panel.querySelector('.cm-content'));
             }, {timeoutMs: 10000, description: `CodeMirror content for ${path}`});
@@ -259,7 +257,7 @@ def _wait_for_file_event_stream(gate_browser_runtime, target):
         const done = arguments[arguments.length - 1];
         const previousSyncedAt = Number(serverWatchRootsState.syncedAt || 0);
         syncServerWatchRoots({immediate: true, force: true});
-        window.__yolomuxTestWaitFor(() => {
+        window.__yomuxTestWaitFor(() => {
           const descriptor = clientEventDemandDescriptor();
           return descriptor.channels.includes('files')
             && clientEventTransportState.connected === true
@@ -324,7 +322,7 @@ def _type_dirty_text(gate_browser_runtime, target, text):
         const path = arguments[0];
         const text = arguments[1];
         const done = arguments[arguments.length - 1];
-        window.__yolomuxTestWaitFor(() => {
+        window.__yomuxTestWaitFor(() => {
           const state = fileState.get(path);
           const panel = fileEditorPanelsForPath(path)[0];
           return fileEditorAutosaveEnabled === false
@@ -360,7 +358,7 @@ def _dirty_conflict_snapshot(gate_browser_runtime, target, expected_text, previo
         const previousSignature = arguments[2];
         const done = arguments[arguments.length - 1];
         const signature = state => JSON.stringify(state?.externalChanged || {});
-        window.__yolomuxTestWaitFor(() => {
+        window.__yomuxTestWaitFor(() => {
           const state = fileState.get(path);
           const panel = fileEditorPanelsForPath(path)[0];
           const status = panel?.querySelector('.file-editor-status-message');
@@ -458,7 +456,7 @@ def _a8_recovered_snapshot(gate_browser_runtime, target, expected_text, expected
         const expected = arguments[1];
         const expectedViewMode = arguments[2];
         const done = arguments[arguments.length - 1];
-        window.__yolomuxTestWaitFor(() => {
+        window.__yomuxTestWaitFor(() => {
           const state = fileState.get(path);
           const panel = fileEditorPanelsForPath(path)[0];
           const item = panel?.dataset?.layoutItem || fileEditorItemFor(path);
@@ -498,7 +496,7 @@ def _a8_missing_snapshot(gate_browser_runtime, target):
         """
         const path = arguments[0];
         const done = arguments[arguments.length - 1];
-        window.__yolomuxTestWaitFor(() => {
+        window.__yomuxTestWaitFor(() => {
           const state = fileState.get(path);
           const panel = fileEditorPanelsForPath(path)[0];
           const item = panel?.dataset?.layoutItem || fileEditorItemFor(path);

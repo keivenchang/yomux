@@ -994,9 +994,11 @@ func applyCodexContextRecord(source TranscriptSource, state *TranscriptScannerSt
 	}
 	if typeName == "inter_agent_communication_metadata" || (typeName == "event_msg" && eventType == "inter_agent_communication_metadata") {
 		state.CodexSuppressForkHistory = false
+		// Ordinary handoffs keep the transcript UUID; assigning the source fallback would reset cumulative usage.
 		if state.CodexForkChildThreadID != "" {
 			state.CodexThreadID = state.CodexForkChildThreadID
-		} else if source.ThreadID != "" {
+		} else if state.CodexThreadID == "" && source.ThreadID != "" {
+			// Legacy usage records may omit thread_id, so retain the inventory identity only when no transcript ID exists.
 			state.CodexThreadID = source.ThreadID
 		}
 		return true, nil

@@ -919,6 +919,7 @@
     function recordStreamDelivery(kind, epoch, {acceptedDelta = false, emitId = ''} = {}) {
       transportLifecycle.noteDelivery(streamTransportToken);
       streamTransportToken = transportLifecycle.begin();
+      controller?.noteStreamHeartbeat?.();
       deliverySequence = Math.min(Number.MAX_SAFE_INTEGER, deliverySequence + 1);
       if (acceptedDelta) acceptedDeltaSequence = Math.min(Number.MAX_SAFE_INTEGER, acceptedDeltaSequence + 1);
       lastDeliveryKind = kind;
@@ -1149,6 +1150,7 @@
             const error = snapshotStreamError(JSON.parse(event.data), kind);
             if (kind === 'pending' && !settled) {
               pendingBeforeReadiness = true;
+              recordStreamDelivery('pending', epoch, {emitId: event.lastEventId});
               onState('pending', error);
               const readiness = readinessEpoch;
               if (pendingReadinessEpoch !== readiness) {
@@ -1232,7 +1234,6 @@
             }
             userOnRuntime(Object.freeze(value.load));
             recordStreamDelivery('runtime', epoch, {emitId: event.lastEventId});
-            controller?.noteStreamHeartbeat?.();
           } catch (error) {
             routeStreamFailure(candidate, epoch);
           }
@@ -1278,7 +1279,6 @@
               throw new Error('ready cursor does not match current generation');
             }
             recordStreamDelivery('ready', epoch, {emitId: event.lastEventId});
-            controller.noteStreamHeartbeat();
           } catch (error) {
             if (!settled) void fail(error);
             else routeStreamFailure(candidate, epoch);
@@ -1347,6 +1347,7 @@
       if (lifecycleScope?.value('stream') !== candidate || streamEpoch !== epoch) return;
       closeStream();
       if (retireForTerminalAuthentication(error)) return;
+      if (error?.pending !== true) failureOwner.report(error?.message);
       onState(error?.pending === true ? 'pending' : 'error', error);
       if (error?.recoverableReadFence === true) await recoverReadFence(error);
       if (lifecycleScope?.value('stream') !== null || streamEpoch !== epoch + 1) return;
@@ -1636,6 +1637,78 @@
       },
     });
     return api;
+  }
+
+  // Agent stats and cost share one operation status owner.
+  function createAgentHistoryRefill(options = {}) {
+    const fetcher = options.fetch || globalThis.fetch?.bind(globalThis);
+    let status = {state: 'idle'};
+    let confirming = false;
+    let submitting = false;
+    let timer = null;
+    let destroyed = false;
+    let started = false;
+    let requestGeneration = 0;
+    const ownerDocument = options.document || globalThis.document;
+    const refreshOnVisible = () => { if (!ownerDocument?.hidden && started && !submitting) void poll(); };
+    const title = 'Refill the last 24 hours?';
+    const warning = 'Tokens/min will be temporarily unavailable while we reread available agent history. CPU usage may rise, and YOmux may feel slower. Deleted source history cannot be recovered.';
+    const busy = () => submitting || ['queued', 'running'].includes(status.state);
+    const waitHtml = () => '<div role="status" data-stats-refill-wait>Refilling agent history… Please wait.</div>';
+    function html(showButton = true) {
+      const message = busy() ? `Refilling agent history… Please wait. ${status.phase || 'Reading history'}` : status.message || '';
+      return `${showButton ? `<button type="button" data-stats-refill${busy() ? ' disabled' : ''}>Refill last 24 hours</button>` : ''}<span data-stats-refill-status aria-live="polite">${currentStatsEscape(message)}</span>${status.state === 'failed' ? ' <button type="button" data-stats-refill>Try again</button>' : ''}`;
+    }
+    async function poll(method = 'GET') {
+      if (destroyed || !fetcher) return;
+      const generation = ++requestGeneration;
+      if (timer !== null) globalThis.clearTimeout(timer);
+      timer = null;
+      try {
+        const response = await fetcher('/api/stats-refill', {method, credentials: 'same-origin', cache: 'no-store'});
+        if (!response.ok) { const error = new Error(`Refill request failed (${response.status})`); error.authoritative = true; throw error; }
+        const received = await response.json();
+        if (destroyed || generation !== requestGeneration) return;
+        const wasBusy = busy();
+        const next = method === 'GET' && status.state === 'failed' && received.state === 'idle' ? status : received;
+        const changed = submitting || JSON.stringify(status) !== JSON.stringify(next);
+        submitting = false;
+        status = next;
+        if (changed) options.onChange?.();
+        if (wasBusy && !busy() && next.state === 'succeeded') options.onRefilled?.();
+      } catch (error) {
+        if (destroyed || generation !== requestGeneration) return;
+        // A disconnected POST can still have started the operation. Keep
+        // polling its host status instead of inviting a second scan.
+        if (method === 'POST') {
+          status = error.authoritative
+            ? {state: 'failed', message: 'Couldn’t refill agent history. Your previous data is unchanged.'}
+            : {state: 'running', phase: 'Checking job status'};
+          submitting = false;
+          options.onChange?.();
+        }
+      }
+      if (!destroyed && generation === requestGeneration) timer = globalThis.setTimeout(() => { void poll(); }, 1000);
+    }
+    function handleClick(event) {
+      const target = event?.target;
+      if (target?.closest?.('[data-stats-refill]')) {
+        if (!busy() && !confirming) {
+          confirming = true;
+          void options.confirm({title, message: warning, actions: [{id: 'cancel', label: 'Cancel'}, {id: 'refill', label: 'Refill'}]}).then(action => {
+            confirming = false;
+            if (destroyed) return;
+            if (action === 'refill' && !busy()) { submitting = true; options.onChange?.(); void poll('POST'); }
+          });
+        }
+        return true;
+      }
+      return false;
+    }
+    return Object.freeze({busy, html, waitHtml, handleClick, status: () => status,
+      start() { if (!started) { started = true; ownerDocument?.addEventListener?.('visibilitychange', refreshOnVisible); options.onChange?.(); void poll(); } },
+      destroy() { destroyed = true; ownerDocument?.removeEventListener?.('visibilitychange', refreshOnVisible); if (timer !== null) globalThis.clearTimeout(timer); },
+    });
   }
 
   function createCurrentRenderer(element, options) {
@@ -2569,7 +2642,7 @@
   }
 
   function normalizeCapabilities(value) {
-    exactFields(value, Object.prototype.hasOwnProperty.call(value || {}, 'migration') ? [...CAPABILITY_FIELDS, 'migration'] : CAPABILITY_FIELDS, 'stats capabilities');
+    exactFields(value, [...CAPABILITY_FIELDS, ...['migration', 'agent_history_refill'].filter(key => Object.prototype.hasOwnProperty.call(value || {}, key))], 'stats capabilities');
     if (!Array.isArray(value.ranges) || !value.ranges.length) throw new Error('stats capabilities require ranges');
     if (
       !Array.isArray(value.resolution_choices)
@@ -2627,6 +2700,7 @@
       max_live_cadence_seconds: maxLiveCadence,
       ranges: Object.freeze(ranges),
       migration: normalizeStatsMigration(value.migration),
+      agent_history_refill: value.agent_history_refill === true,
     });
   }
 
@@ -2827,7 +2901,6 @@
       if (
         bucket.duration !== duration || bucket.start % duration !== 0
         || !bucket.series || typeof bucket.series !== 'object' || Array.isArray(bucket.series)
-        || !finiteJson(bucket.series)
         || (dense && bucket.start !== expected)
         || bucket.start <= previous
         || (windowEnd !== null && (bucket.start < windowStart || bucket.start + duration > windowEnd))
@@ -3151,11 +3224,19 @@
   }
 
   function utf8ByteLength(value) {
-    try {
-      return encodeURIComponent(value).replace(/%[0-9A-F]{2}|./g, 'x').length;
-    } catch (_error) {
-      return Infinity;
+    let bytes = 0;
+    for (let index = 0; index < value.length; index += 1) {
+      const code = value.charCodeAt(index);
+      if (code < 0x80) bytes += 1;
+      else if (code < 0x800) bytes += 2;
+      else if (code >= 0xd800 && code <= 0xdbff) {
+        const low = value.charCodeAt(++index);
+        if (!(low >= 0xdc00 && low <= 0xdfff)) return Infinity;
+        bytes += 4;
+      } else if (code >= 0xdc00 && code <= 0xdfff) return Infinity;
+      else bytes += 3;
     }
+    return bytes;
   }
 
   function compareNoData(left, right) {
@@ -3169,9 +3250,8 @@
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
       throw currentStatsContractError(`${name} must be an object`);
     }
-    const actual = Object.keys(value).sort();
-    const wanted = [...expected].sort();
-    if (actual.length !== wanted.length || actual.some((field, index) => field !== wanted[index])) {
+    const actual = Object.keys(value);
+    if (actual.length !== expected.length || actual.some(field => !expected.includes(field))) {
       throw currentStatsContractError(`${name} fields are not exact`);
     }
   }
@@ -3180,15 +3260,6 @@
     const error = new Error(message);
     error.statsContractViolation = true;
     return error;
-  }
-
-  function finiteJson(value) {
-    if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
-    if (typeof value === 'number') return Number.isFinite(value);
-    if (Array.isArray(value)) return value.every(finiteJson);
-    return Boolean(value) && typeof value === 'object'
-      && Object.keys(value).every(key => typeof key === 'string')
-      && Object.values(value).every(finiteJson);
   }
 
   function sameJson(left, right) {
@@ -3227,6 +3298,7 @@
     createBrowserClient,
     createController,
     mount,
+    createAgentHistoryRefill,
     resolutionChoices: CURRENT_RESOLUTIONS,
   });
   globalThis.YOmuxStatsCurrent = currentStatsModule;

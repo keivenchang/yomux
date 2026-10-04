@@ -57,6 +57,7 @@ func TestLifecycleDemanded300SecondProductConvergesWhenCellExceedsDefaultRowBudg
 		t.Fatal(err)
 	}
 	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: RetentionSeconds, MaxCells: 8, Now: func() time.Time { return now }})
+	t.Cleanup(lifecycle.Stop)
 	lifecycle.DemandProduct(7200, 300)
 	service := NewStatsService(writer, StatsServiceConfig{
 		Products: []ProductKey{{RangeSeconds: 7200, ResolutionSeconds: 300}},
@@ -64,10 +65,11 @@ func TestLifecycleDemanded300SecondProductConvergesWhenCellExceedsDefaultRowBudg
 	})
 	for attempt := 0; attempt < 8; attempt++ {
 		beforeBytes := lifecycle.Counters().ByResolution[300].DecodedBytes
+		beforeDuration := lifecycle.Counters().ByResolution[300].MaterializationDuration
 		if err := lifecycle.RunOnce(ctx); err != nil {
 			t.Fatal(err)
 		}
-		if duration := lifecycle.Counters().LastMaterializationDuration; duration > defaultLifecycleMaxRunTime {
+		if duration := lifecycle.Counters().ByResolution[300].MaterializationDuration - beforeDuration; duration > defaultLifecycleMaxRunTime {
 			t.Fatalf("fixture 300s materialization took %s, over fixture performance budget %s", duration, defaultLifecycleMaxRunTime)
 		}
 		afterBytes := lifecycle.Counters().ByResolution[300].DecodedBytes
@@ -154,6 +156,7 @@ func TestLifecycleBatchesAdjacentDemandedCoarseCellsPastRunBudget(t *testing.T) 
 		MaxRunTime:    time.Nanosecond,
 		Now:           func() time.Time { return now },
 	})
+	t.Cleanup(lifecycle.Stop)
 	lifecycle.DemandProduct(3600, 300)
 	selected, err := lifecycle.selectCells(ctx, now, writer.sourceGeneration.Load())
 	if err != nil {

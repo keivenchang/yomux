@@ -17,7 +17,7 @@ from yomux_lib import cli
 from yomux_lib.local_services import registry as cli_registry
 from yomux_lib.server import TmuxWebtermHTTPServer
 from yomux_lib.server import https_redirect_response
-from yomux_lib.infra.root_paths import YolomuxRoots
+from yomux_lib.infra.root_paths import YomuxRoots
 from yomux_lib.server_lease import acquire_instance_and_port_leases
 
 
@@ -237,12 +237,12 @@ def test_exec_go_backend_forwards_dangerous_yolo_to_binary(monkeypatch, tmp_path
     )
 
     assert result == 127
-    assert captured["roots"] == cli._YOLOMUX_ROOTS
+    assert captured["roots"] == cli._YOMUX_ROOTS
     assert (captured["port"], captured["force"]) == (7221, True)
     assert captured["path"] == str(binary)
     assert captured["command"] == [
         str(binary), "--host", "0.0.0.0", "--port", "7221", "--root",
-        str(repo_root), "--config", str(cli._YOLOMUX_ROOTS.config_dir),
+        str(repo_root), "--config", str(cli._YOMUX_ROOTS.config_dir),
         "--dangerously-yolo",
     ]
     assert captured["lease_inheritable"] == [True, True]
@@ -313,7 +313,7 @@ def test_exec_go_backend_keeps_managed_leases_across_real_exec(tmp_path, request
     root = Path("/tmp") / f"yg{os.getpid()}"
     root.mkdir(mode=0o700)
     request.addfinalizer(lambda: shutil.rmtree(root, ignore_errors=True))
-    roots = YolomuxRoots(
+    roots = YomuxRoots(
         config_dir=root / "config",
         state_dir=root / "state",
         cache_dir=root / "cache",
@@ -401,7 +401,7 @@ def test_print_runtime_report_uses_live_scheduler_control_socket_without_an_app(
         requests.append((owner, request))
         return {"ok": True, "report": {"ok": True, "top_endpoints": [{"surface": "GET /api/session-files"}]}}
 
-    monkeypatch.setattr(cli, "send_yolomux_control_request", fake_control)
+    monkeypatch.setattr(cli, "send_yomux_control_request", fake_control)
 
     assert cli.print_runtime_report(["8002"], dangerously_yolo=True) == 0
 
@@ -413,7 +413,7 @@ def test_print_runtime_report_uses_live_scheduler_control_socket_without_an_app(
 
 def test_print_runtime_report_degrades_to_bounded_ledger_records(monkeypatch, capsys, tmp_path):
     _forbid_app_construction(monkeypatch)
-    monkeypatch.setattr(cli, "send_yolomux_control_request", lambda owner, request: {"ok": False, "error": "no owner"})
+    monkeypatch.setattr(cli, "send_yomux_control_request", lambda owner, request: {"ok": False, "error": "no owner"})
     monkeypatch.setattr(cli, "RUNTIME_DIR", tmp_path)
     lease_dir = tmp_path / "server-leases"
     lease_dir = lease_dir / cli_registry.current_host_identity().stable_host_id

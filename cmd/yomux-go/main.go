@@ -43,13 +43,13 @@ import (
 
 	"github.com/keivenchang/yomux/internal/capabilities"
 	"github.com/keivenchang/yomux/internal/finder"
+	"github.com/keivenchang/yomux/internal/productenv"
 	"github.com/keivenchang/yomux/internal/stats"
 	"github.com/keivenchang/yomux/internal/work"
 )
 
-const version = "0.10.1"
 const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-const maxYolomuxSessionTabs = 99
+const maxYomuxSessionTabs = 99
 const goServiceID = "yomux-go"
 
 func goRuntimeLabel() string {
@@ -82,6 +82,10 @@ type server struct {
 	statsPath                          string
 	statsNow                           func() time.Time
 	statsHeartbeat                     time.Duration
+	refillMu                           sync.Mutex
+	refillRoot                         string
+	refillContext                      context.Context
+	refillRun                          func(context.Context, time.Time, func(string)) (stats.AgentHistoryRefillResult, error)
 	statsWriter                        *stats.Writer
 	statsService                       *stats.StatsService
 	statsLifecycle                     *stats.Lifecycle
@@ -1641,13 +1645,19 @@ func loadOperationJournal(path string, records map[string]*goOperation) map[stri
 		records = map[string]*goOperation{}
 	}
 	if path == "" {
+		retainOperationRecords(records)
 		return records
 	}
 	result := records
-	_ = withFileLock(path, func() error {
+	if err := withOperationJournalLock(path, func() error {
 		result = loadOperationJournalUnlocked(path, records, true)
+		if retainOperationRecords(result) {
+			return compactOperationJournalUnlocked(path, result)
+		}
 		return nil
-	})
+	}); err != nil {
+		slog.Error("operation journal recovery failed", "error", err)
+	}
 	return result
 }
 
@@ -1811,6 +1821,9 @@ func compactOperationJournal(path string, records map[string]*goOperation) error
 		// snapshots only its caller's in-memory map can erase a record appended by a
 		// different process that won the file lock immediately before compaction.
 		merged := loadOperationJournalUnlocked(path, cloneOperationMap(records), false)
+		// A snapshot replaces the seed map. Apply the same replay/retention policy
+		// after merging so old snapshots cannot resurrect pruned or evicted data.
+		retainOperationRecords(merged)
 		return compactOperationJournalUnlocked(path, merged)
 	})
 }
@@ -1947,8 +1960,12 @@ func cloneOperationMap(records map[string]*goOperation) map[string]*goOperation 
 }
 
 func (s *server) pruneOperationsLocked() {
+	pruneOperationRecords(s.operations)
+}
+
+func pruneOperationRecords(records map[string]*goOperation) {
 	now := time.Now().UnixMilli()
-	for id, record := range s.operations {
+	for id, record := range records {
 		if record == nil || record.State == "queued" {
 			continue
 		}
@@ -1957,20 +1974,20 @@ func (s *server) pruneOperationsLocked() {
 			at = record.CreatedAt
 		}
 		if at > 0 && now-at > operationRetention.Milliseconds() {
-			delete(s.operations, id)
+			delete(records, id)
 		}
 	}
-	if len(s.operations) <= operationRecordLimit {
+	if len(records) <= operationRecordLimit {
 		return
 	}
-	ids := make([]string, 0, len(s.operations))
-	for id, record := range s.operations {
+	ids := make([]string, 0, len(records))
+	for id, record := range records {
 		if record != nil && record.State != "queued" {
 			ids = append(ids, id)
 		}
 	}
 	sort.Slice(ids, func(i, j int) bool {
-		left, right := s.operations[ids[i]], s.operations[ids[j]]
+		left, right := records[ids[i]], records[ids[j]]
 		leftAt, rightAt := left.TerminalAt, right.TerminalAt
 		if leftAt == 0 {
 			leftAt = left.CreatedAt
@@ -1983,8 +2000,8 @@ func (s *server) pruneOperationsLocked() {
 		}
 		return leftAt < rightAt
 	})
-	for _, id := range ids[:minInt(len(ids), len(s.operations)-operationRecordLimit)] {
-		delete(s.operations, id)
+	for _, id := range ids[:minInt(len(ids), len(records)-operationRecordLimit)] {
+		delete(records, id)
 	}
 }
 
@@ -2004,10 +2021,10 @@ func boundedOperationTerminal(record *goOperation) map[string]any {
 	}
 }
 
-func (s *server) boundOperationReplaysLocked() bool {
+func boundOperationReplays(records map[string]*goOperation) bool {
 	exposed := make([]*goOperation, 0)
 	totalBytes := 0
-	for _, record := range s.operations {
+	for _, record := range records {
 		if record != nil && record.DeliveryAcknowledged && record.TerminalEvent != nil {
 			exposed = append(exposed, record)
 			totalBytes += eventBytes(clientEvent{Payload: record.TerminalEvent})
@@ -2037,6 +2054,13 @@ func (s *server) boundOperationReplaysLocked() bool {
 		changed = true
 	}
 	return changed
+}
+
+func retainOperationRecords(records map[string]*goOperation) bool {
+	count := len(records)
+	pruneOperationRecords(records)
+	bounded := boundOperationReplays(records)
+	return bounded || len(records) != count
 }
 func (s *server) operationRecord(id string) *goOperation {
 	s.operationsMu.Lock()
@@ -2630,9 +2654,10 @@ type authContextKey struct{}
 type winsize struct{ rows, cols, x, y uint16 }
 
 type ptyPair struct {
-	master *os.File
-	slave  *os.File
-	tty    string
+	master         *os.File
+	slave          *os.File
+	tty            string
+	requestControl func(cols, rows, txn int)
 }
 
 func clampDimension(value, minimum, maximum, fallback int) int {
@@ -2722,7 +2747,7 @@ func explicitCollectorPaths() (claudeRoot, codexRoot, opencodeDatabase string, e
 }
 
 func useMachineTmuxForOperatorLaunch() {
-	if strings.TrimSpace(os.Getenv("YOLOMUX_TMUX_SOCKET")) != "" {
+	if strings.TrimSpace(productenv.Value("YOLOMUX_TMUX_SOCKET")) != "" {
 		return
 	}
 	_ = os.Unsetenv("TMUX")
@@ -2838,6 +2863,7 @@ func main() {
 	mux.Handle("/api/stats-agent-status", s.protected(http.HandlerFunc(s.statsAgentStatus), "readonly"))
 	mux.Handle("/api/stats-capabilities", s.protected(http.HandlerFunc(s.statsCapabilities), "readonly"))
 	mux.Handle("/api/stats-observations", s.protected(http.HandlerFunc(s.statsObservations), "readonly"))
+	mux.Handle("/api/stats-refill", s.protected(http.HandlerFunc(s.statsRefill), "admin"))
 	mux.Handle("/api/stats-retry", s.protected(http.HandlerFunc(s.statsRetry), "readonly"))
 	mux.Handle("/api/stats-snapshot", s.protected(http.HandlerFunc(s.statsSnapshot), "readonly"))
 	mux.Handle("/api/stats-delta", s.protected(http.HandlerFunc(s.statsDelta), "readonly"))
@@ -2957,6 +2983,7 @@ func main() {
 	// typed Python family contract for this serving process.
 	statsWriter.EnableCurrentFamilyValidation()
 	s.statsWriter = statsWriter
+	s.refillContext = shutdownContext
 	productKeys := make([]stats.ProductKey, 0)
 	for _, window := range statsRanges {
 		for _, resolution := range []int{1, 10, 60, 300} {
@@ -3231,21 +3258,11 @@ func (g *statsProjectionRefreshGate) record(counters stats.LifecycleCounters) {
 	g.errors = counters.Errors
 }
 
-func yomuxEnvironmentValue(legacyName string) string {
-	if !strings.HasPrefix(legacyName, "YOLOMUX_") {
-		return os.Getenv(legacyName)
-	}
-	if value, present := os.LookupEnv("YOMUX_" + strings.TrimPrefix(legacyName, "YOLOMUX_")); present {
-		return value
-	}
-	return os.Getenv(legacyName)
-}
-
 func defaultConfigDir() string {
-	if configured := yomuxEnvironmentValue("YOLOMUX_CONFIG_DIR"); configured != "" {
+	if configured := productenv.Value("YOLOMUX_CONFIG_DIR"); configured != "" {
 		return configured
 	}
-	if root := yomuxEnvironmentValue("YOLOMUX_ROOT"); root != "" {
+	if root := productenv.Value("YOLOMUX_ROOT"); root != "" {
 		return filepath.Join(root, "config")
 	}
 	return filepath.Join(os.Getenv("HOME"), ".config", "yomux")
@@ -5656,8 +5673,7 @@ func (s *server) operationAck(w http.ResponseWriter, r *http.Request) {
 				record.DeliveryAcknowledged = true
 				acknowledged = append(acknowledged, ack.ID)
 			}
-			s.boundOperationReplaysLocked()
-			s.pruneOperationsLocked()
+			retainOperationRecords(s.operations)
 			if err := s.saveOperationsLocked(); err != nil {
 				s.logState().emit("error", "operations", "operation acknowledgement snapshot failed")
 			}
@@ -7523,7 +7539,7 @@ func (s *server) createSession(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "tmux session roster is unavailable"})
 		return
 	}
-	if len(roster.sessions) >= maxYolomuxSessionTabs {
+	if len(roster.sessions) >= maxYomuxSessionTabs {
 		jsonResponse(w, http.StatusConflict, map[string]any{
 			"ok": false, "error": "maximum session tabs reached: 99",
 		})
@@ -7653,14 +7669,14 @@ func (s *server) nextAvailableSessionName() (string, error) {
 }
 
 func nextNumberedSessionName(existing []string) string {
-	if len(existing) >= maxYolomuxSessionTabs {
+	if len(existing) >= maxYomuxSessionTabs {
 		return ""
 	}
 	present := make(map[string]struct{}, len(existing))
 	for _, session := range existing {
 		present[session] = struct{}{}
 	}
-	for number := 1; number <= maxYolomuxSessionTabs; number++ {
+	for number := 1; number <= maxYomuxSessionTabs; number++ {
 		name := strconv.Itoa(number)
 		if _, exists := present[name]; !exists {
 			return name
@@ -8252,7 +8268,7 @@ func (s *server) tmuxCommand(args ...string) *exec.Cmd {
 
 func (s *server) tmuxCommandContext(ctx context.Context, args ...string) *exec.Cmd {
 	values := []string{}
-	socket := strings.TrimSpace(os.Getenv("YOLOMUX_TMUX_SOCKET"))
+	socket := strings.TrimSpace(productenv.Value("YOLOMUX_TMUX_SOCKET"))
 	if socket != "" {
 		values = append(values, "-S", socket)
 	}
@@ -8311,17 +8327,20 @@ func (s *server) configureTmuxSession(session string) {
 	}
 }
 
-func (s *server) claimResizeAuthority(session, activeClient string, cols, rows int) {
+func (s *server) claimResizeAuthority(ctx context.Context, session, activeClient string, cols, rows int) {
 	if activeClient == "" || !s.supportsIgnoreSize() {
 		return
 	}
 	target := s.exactTarget(session)
 	format := "#{client_tty}\t#{client_session}\t#{client_width}\t#{client_height}"
-	out, err := s.tmuxCommand("list-clients", "-F", format).Output()
+	out, err := s.tmuxCommandContext(ctx, "list-clients", "-F", format).Output()
 	if err != nil {
 		return
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if ctx.Err() != nil {
+			return
+		}
 		fields := strings.Split(line, "\t")
 		if len(fields) != 4 || fields[1] != session {
 			continue
@@ -8330,22 +8349,81 @@ func (s *server) claimResizeAuthority(session, activeClient string, cols, rows i
 		width, _ := strconv.Atoi(fields[2])
 		height, _ := strconv.Atoi(fields[3])
 		if client == activeClient {
-			_ = s.tmuxCommand("refresh-client", "-t", client, "-f", "!ignore-size").Run()
+			_ = s.tmuxCommandContext(ctx, "refresh-client", "-t", client, "-f", "!ignore-size").Run()
 		} else if width > cols || height > rows {
-			_ = s.tmuxCommand("refresh-client", "-t", client, "-f", "ignore-size").Run()
+			_ = s.tmuxCommandContext(ctx, "refresh-client", "-t", client, "-f", "ignore-size").Run()
 		}
 	}
-	_ = s.tmuxCommand("refresh-client", "-t", target).Run()
+	_ = s.tmuxCommandContext(ctx, "refresh-client", "-t", target).Run()
 }
 
-func (s *server) refreshAfterAttach(session string) {
-	target := "=" + session + ":"
-	_ = s.tmuxCommand("refresh-client", "-t", target).Run()
-	for _, delay := range []time.Duration{100 * time.Millisecond, 500 * time.Millisecond} {
-		go func(wait time.Duration) {
-			time.Sleep(wait)
-			_ = s.tmuxCommand("refresh-client", "-t", target).Run()
-		}(delay)
+// Terminal controls share the connection's lifetime and latest resize owner. A
+// slow tmux client must never hold the goroutine delivering keyboard bytes.
+func (s *server) startTerminalControls(conn *wsConn, session, tty string) (func(int, int, int), func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	wake := make(chan struct{}, 1)
+	done := make(chan struct{})
+	var mu sync.Mutex
+	var cols, rows, txn, generation int
+	var claim bool
+	var activeCancel context.CancelFunc
+	request := func(nextCols, nextRows, nextTxn int) {
+		mu.Lock()
+		if nextCols > 0 && nextRows > 0 {
+			cols, rows, claim = nextCols, nextRows, true
+		}
+		if nextTxn > 0 {
+			txn = nextTxn
+		}
+		generation++
+		if activeCancel != nil {
+			activeCancel()
+		}
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+		mu.Unlock()
+	}
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-wake:
+			}
+			mu.Lock()
+			select {
+			case <-wake:
+			default:
+			}
+			currentCols, currentRows, currentTxn, currentGeneration, currentClaim := cols, rows, txn, generation, claim
+			commandCtx, commandCancel := context.WithCancel(ctx)
+			activeCancel = commandCancel
+			mu.Unlock()
+			if currentClaim && tty != "" && s.supportsIgnoreSize() {
+				s.claimResizeAuthority(commandCtx, session, tty, currentCols, currentRows)
+			} else {
+				_ = s.tmuxCommandContext(commandCtx, "refresh-client", "-t", s.exactTarget(session)).Run()
+			}
+			if commandCtx.Err() == nil && currentTxn > 0 {
+				payload, _ := json.Marshal(map[string]any{"type": "refresh-ack", "txn": currentTxn})
+				_ = conn.frame(1, payload)
+			}
+			mu.Lock()
+			if generation == currentGeneration {
+				claim, txn, activeCancel = false, 0, nil
+			}
+			mu.Unlock()
+			commandCancel()
+		}
+	}()
+	return request, func() {
+		cancel()
+		// Closing transport also releases a worker blocked while sending an ack.
+		_ = conn.Close()
+		<-done
 	}
 }
 
@@ -8406,7 +8484,11 @@ func (s *server) bridge(conn *wsConn, session string, readonly bool, clientID st
 	for {
 		opcode, payload, err := readFrame(reader)
 		if err != nil {
-			break
+			var networkError net.Error
+			if errors.As(err, &networkError) && networkError.Timeout() {
+				break
+			}
+			return
 		}
 		if opcode == 8 {
 			return
@@ -8429,7 +8511,7 @@ func (s *server) bridge(conn *wsConn, session string, readonly bool, clientID st
 				rows = clampDimension(message.Rows, 2, 300, rows)
 				cols = clampDimension(message.Cols, 20, 500, cols)
 			}
-			continue
+			break
 		}
 		pending = append(pending, payload)
 		break
@@ -8454,7 +8536,7 @@ func (s *server) bridge(conn *wsConn, session string, readonly bool, clientID st
 	}
 	cmd := s.tmuxCommand(args...)
 	cmd.SysProcAttr = terminalProcessAttributes()
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	cmd.Env = append(cmd.Env, "TERM=xterm-256color")
 	cmd.Stdin = pty.slave
 	cmd.Stdout = pty.slave
 	cmd.Stderr = pty.slave
@@ -8462,9 +8544,6 @@ func (s *server) bridge(conn *wsConn, session string, readonly bool, clientID st
 		slog.Error("tmux attach failed", "session", session, "error", err)
 		return
 	}
-	activeTTY := pty.tty
-	s.claimResizeAuthority(session, activeTTY, cols, rows)
-	s.refreshAfterAttach(session)
 	s.mu.Lock()
 	s.children[cmd] = struct{}{}
 	s.mu.Unlock()
@@ -8479,6 +8558,9 @@ func (s *server) bridge(conn *wsConn, session string, readonly bool, clientID st
 		delete(s.children, cmd)
 		s.mu.Unlock()
 	}()
+	requestControl, stopControls := s.startTerminalControls(conn, session, pty.tty)
+	pty.requestControl = requestControl
+	defer stopControls()
 	go func() {
 		buf := make([]byte, 32*1024)
 		for {
@@ -8491,7 +8573,7 @@ func (s *server) bridge(conn *wsConn, session string, readonly bool, clientID st
 			}
 		}
 	}()
-	_ = s.tmuxCommand("refresh-client", "-t", "="+session+":").Run()
+	requestControl(cols, rows, 0)
 	for _, payload := range pending {
 		s.handleMessage(pty.master, pty, cmd, conn, session, clientID, payload, !readonly)
 	}
@@ -8546,11 +8628,13 @@ func (s *server) handleMessage(stdin io.Writer, pty *ptyPair, process *exec.Cmd,
 		if msg.Rows > 0 && msg.Cols > 0 {
 			rows := clampDimension(msg.Rows, 2, 300, 36)
 			cols := clampDimension(msg.Cols, 20, 500, 120)
-			if msg.Activate || (msg.Foreground != nil && *msg.Foreground) {
-				s.claimResizeAuthority(session, pty.tty, cols, rows)
-			}
-			if pty.resize(rows, cols) == nil && process.Process != nil {
-				_ = process.Process.Signal(syscall.SIGWINCH)
+			if pty.resize(rows, cols) == nil {
+				if process.Process != nil {
+					_ = process.Process.Signal(syscall.SIGWINCH)
+				}
+				if msg.Activate || (msg.Foreground != nil && *msg.Foreground) {
+					pty.requestControl(cols, rows, 0)
+				}
 			}
 		}
 	case "tmux-scroll":
@@ -8566,11 +8650,7 @@ func (s *server) handleMessage(stdin io.Writer, pty *ptyPair, process *exec.Cmd,
 			_ = s.tmuxCommand("send-keys", "-X", "-N", strconv.Itoa(lines), key, "-t", s.exactTarget(session)).Run()
 		}
 	case "refresh":
-		_ = s.tmuxCommand("refresh-client", "-t", "="+session+":").Run()
-		if msg.Txn > 0 {
-			b, _ := json.Marshal(map[string]any{"type": "refresh-ack", "txn": msg.Txn})
-			_ = conn.frame(1, b)
-		}
+		pty.requestControl(0, 0, msg.Txn)
 	}
 }
 

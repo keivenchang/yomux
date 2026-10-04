@@ -15,12 +15,12 @@ from yomux_lib.yoagent import transports as transport_module
 pytestmark = pytest.mark.usefixtures("no_control_socket", "isolated_yoagent_conversation_state")
 
 
-def install_fake_yolomux_state(monkeypatch):
+def install_fake_yomux_state(monkeypatch):
     state = {}
     lock = threading.Lock()
-    monkeypatch.setattr(app_module, "read_yolomux_state", lambda: dict(state))
-    monkeypatch.setattr(app_module, "update_yolomux_state", lambda updates: state.update(updates))
-    monkeypatch.setattr(app_module, "mutate_yolomux_state", lambda mutator: _lock_and_mutate(lock, state, mutator))
+    monkeypatch.setattr(app_module, "read_yomux_state", lambda: dict(state))
+    monkeypatch.setattr(app_module, "update_yomux_state", lambda updates: state.update(updates))
+    monkeypatch.setattr(app_module, "mutate_yomux_state", lambda mutator: _lock_and_mutate(lock, state, mutator))
     return state
 
 
@@ -106,7 +106,7 @@ def test_yoagent_chat_send_by_bare_number_executes_verified_send_without_refusal
 
 
 def test_yoagent_chat_wait_then_send_queues_while_busy_then_fires_when_idle(monkeypatch):
-    install_fake_yolomux_state(monkeypatch)
+    install_fake_yomux_state(monkeypatch)
     webapp = app_module.TmuxWebtermApp(["1"])
     state = {"screen": "working"}
     send_calls = []
@@ -149,7 +149,7 @@ def test_yoagent_chat_wait_then_send_queues_while_busy_then_fires_when_idle(monk
 
 
 def test_yoagent_chat_roster_calm_then_send_queues_without_model_backend(monkeypatch):
-    install_fake_yolomux_state(monkeypatch)
+    install_fake_yomux_state(monkeypatch)
     webapp = app_module.TmuxWebtermApp(["1", "2", "3", "4"])
     install_chat_defaults(monkeypatch, webapp)
     monkeypatch.setattr(
@@ -180,7 +180,7 @@ def test_yoagent_chat_roster_calm_then_send_queues_without_model_backend(monkeyp
 
 
 def test_yoagent_chat_accepts_validated_model_roster_plan_as_confirmation_only_job(monkeypatch):
-    install_fake_yolomux_state(monkeypatch)
+    install_fake_yomux_state(monkeypatch)
     webapp = app_module.TmuxWebtermApp(["1", "2", "3", "4"])
     install_chat_defaults(monkeypatch, webapp)
     model_calls = []
@@ -221,7 +221,7 @@ def test_yoagent_chat_accepts_validated_model_roster_plan_as_confirmation_only_j
 
 
 def test_yoagent_model_loop_starts_without_confirmation_and_reschedules_verified_sends(monkeypatch):
-    install_fake_yolomux_state(monkeypatch)
+    install_fake_yomux_state(monkeypatch)
     webapp = app_module.TmuxWebtermApp(["1"])
     send_calls = []
     install_chat_defaults(monkeypatch, webapp)
@@ -261,7 +261,7 @@ def test_yoagent_model_loop_starts_without_confirmation_and_reschedules_verified
 
 
 def test_yoagent_loop_cancellation_prevents_the_next_verified_send(monkeypatch):
-    install_fake_yolomux_state(monkeypatch)
+    install_fake_yomux_state(monkeypatch)
     webapp = app_module.TmuxWebtermApp(["1"])
     send_calls = []
     install_chat_defaults(monkeypatch, webapp)
@@ -299,7 +299,7 @@ def test_yoagent_loop_cancellation_prevents_the_next_verified_send(monkeypatch):
 
 
 def test_yoagent_cancel_session_jobs_cancels_a_firing_loop(monkeypatch):
-    install_fake_yolomux_state(monkeypatch)
+    install_fake_yomux_state(monkeypatch)
     webapp = app_module.TmuxWebtermApp(["1"])
     install_chat_defaults(monkeypatch, webapp)
 

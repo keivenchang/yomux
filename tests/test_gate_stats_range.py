@@ -48,8 +48,11 @@ from tests.browser_helpers.browser_layout import (  # noqa: F401
     stop_browser_server,
 )
 from tests.helpers.browser_stats_coverage import _start_current_stats, _write_current_stats_fixture_assets
+from tests.helpers.gate_stats import stop_stats_current_service
+from tests.gate_harness import run_fixture_cleanup_phases
 from tests.helpers.gate_stats import NOW
 from tests.helpers.gate_stats import _seed_realistic_stats
+from tests.subsystems import stats_24h_http
 from tests.subsystems.stats_24h_http import MAX_24H_ENDPOINT_MS
 from tests.subsystems.stats_24h_http import assert_bunched_transcript_window_rejected
 from tests.subsystems.stats_24h_http import assert_query_policy
@@ -78,6 +81,68 @@ SCALE_SWEEP = (
 )
 pytestmark = pytest.mark.browser
 certification_phase_only = latency_calibration.certification_phase_fixture()
+
+
+@pytest.mark.no_browser
+def test_stats_24h_service_admission_failure_still_retires_service(monkeypatch, tmp_path):
+    class FixtureStore:
+        def __init__(self, database):
+            self.database = Path(database)
+
+        def __enter__(self):
+            self.database.touch(exist_ok=True)
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def append_batch(self, *, usage_atoms):
+            return SimpleNamespace(usage_atoms_accepted=len(usage_atoms))
+
+    class NotReady:
+        def wait(self, _timeout):
+            return False
+
+    class RejectedService:
+        def __init__(self, *_args, **_kwargs):
+            self.cache_ready_event = NotReady()
+            self.stop_event = threading.Event()
+            self.work_event = threading.Event()
+            self.worker = None
+            services.append(self)
+
+        def run(self):
+            self.worker = threading.current_thread()
+            self.stop_event.wait(1)
+
+        def _status(self):
+            return {"admission": "not_ready"}
+
+    services = []
+    monkeypatch.setattr(stats_24h_http.storage.Store, "open", lambda database: FixtureStore(database))
+    monkeypatch.setattr(stats_24h_http, "_seed_realistic_stats", lambda database, *, end: (Path(database).touch() or 8_929))
+    monkeypatch.setattr(
+        stats_24h_http,
+        "_generate_24h_transcript_corpora",
+        lambda _root: {name: SimpleNamespace(usage_records=spec.usage_records) for name, spec in stats_24h_http.TRANSCRIPT_CORPUS_SPECS},
+    )
+    monkeypatch.setattr(stats_24h_http, "_assert_transcript_corpus_window", lambda *_args: None)
+    monkeypatch.setattr(
+        stats_24h_http,
+        "_scan_transcript_atoms",
+        lambda _corpora: (
+            SimpleNamespace(items=[SimpleNamespace(agent_kind="claude"), SimpleNamespace(agent_kind="codex")]),
+            [object()] * 648,
+        ),
+    )
+    monkeypatch.setattr(stats_24h_http.stats_service, "StatsCurrentService", RejectedService)
+
+    with pytest.raises(AssertionError, match="admission.*not_ready"):
+        exercise_combined_observations_and_transcripts(monkeypatch, tmp_path)
+    assert len(services) == 1
+    service = services[0]
+    assert service.stop_event.is_set() and service.work_event.is_set()
+    assert service.worker is not None and not service.worker.is_alive()
 
 
 def _distribution(samples: list[float]) -> tuple[float, float, float]:
@@ -360,7 +425,7 @@ def test_v0610_stats_range_shift_g4b_keeps_each_transition_fast_and_complete(bro
               };
               const waitForRenderedSnapshot = async (rangeSeconds, requestedResolution, renderDelayMs = 0, timeoutMs = completionTimeoutMs) => {
                 try {
-                  await window.__yolomuxTestWaitFor(() => {
+                  await window.__yomuxTestWaitFor(() => {
                     const state = renderedState();
                     return state.renderedRange === rangeSeconds
                       && state.renderedResolution === String(requestedResolution)
@@ -461,7 +526,7 @@ def test_v0610_stats_range_shift_g4b_keeps_each_transition_fast_and_complete(bro
                 fixture.openNetworkEventSource = originalOpenNetworkEventSource;
                 injectedSource?.close();
                 if (injectedFiniteOperation) {
-                  await window.__yolomuxTestWaitFor(
+                  await window.__yomuxTestWaitFor(
                     () => !fixture.finiteOperations.has(injectedFiniteOperation),
                     {timeoutMs: completionTimeoutMs, description: `G4b settled ${injectedFiniteOperation}`},
                   );
@@ -555,9 +620,7 @@ def test_v0610_stats_range_shift_g4b_keeps_each_transition_fast_and_complete(bro
         )
         assert not latency_failures, f"G4b latency guard: {'; '.join(latency_failures)}"
     finally:
-        if http_server is not None and http_thread is not None:
-            stop_browser_server(http_server, http_thread, browser=browser)
-        service.stop_event.set()
-        service.work_event.set()
-        service_thread.join(timeout=3)
-        assert not service_thread.is_alive()
+        run_fixture_cleanup_phases("G4b stats range browser", (
+            ("HTTP server", lambda: stop_browser_server(http_server, http_thread, browser=browser) if http_server is not None and http_thread is not None else None),
+            ("stats service", lambda: stop_stats_current_service(service, service_thread)),
+        ))

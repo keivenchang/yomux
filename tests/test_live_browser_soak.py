@@ -1552,7 +1552,7 @@ def test_document_start_sentinel_installs_journey_tracking_with_the_helper_contr
     driver = SentinelDriver()
     soak.install_start_of_document_sentinels(driver)
     source = driver.commands[0][1]["source"]
-    assert "window.__yolomuxBrowserJourneyGate" in source
+    assert "window.__yomuxBrowserJourneyGate" in source
     for field in ("visitedSurfaces", "consumedServerLogIds", "serverLogEpoch", "observer", "observe"):
         assert field in source
     assert "journey.visitedSurfaces.push('stats')" in source
@@ -1893,7 +1893,7 @@ def test_atomic_finalizer_rejects_browser_failure_recorded_during_lifecycle(brow
           }
           await flushJsDebugCurrentObservations();
           const now = Date.now();
-          window.__yolomuxStatsHiddenSentinel = {installed: true, everVisible: false, checks: 1};
+          window.__yomuxStatsHiddenSentinel = {installed: true, everVisible: false, checks: 1};
           window.jsDebugCurrentStatsStreamEvidence = () => ({
             moduleReady: true,
             clientReady: true,
@@ -2025,7 +2025,7 @@ const done = arguments[arguments.length - 1];
   }
   await flushJsDebugCurrentObservations();
   const now = Date.now();
-  window.__yolomuxStatsHiddenSentinel = {installed: true, everVisible: false, checks: 1};
+  window.__yomuxStatsHiddenSentinel = {installed: true, everVisible: false, checks: 1};
   window.jsDebugCurrentStatsStreamEvidence = () => ({
     moduleReady: true,
     clientReady: true,

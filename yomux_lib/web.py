@@ -11,20 +11,20 @@ from .filesystem import MAX_BATCH_REQUESTS
 from .filesystem.io_ops import read_json_file
 from .common import AUTH_CONFIG_PATH
 from .common import DEFAULT_LINEAR_ISSUE_BASE_URL
-from .common import MAX_YOLOMUX_SESSION_TABS
+from .common import MAX_YOMUX_SESSION_TABS
 from .common import MANAGED_CHAT_AGENT_KINDS
 from .common import SERVER_HOSTNAME
 from .common import SERVER_STARTED_AT
 from .common import STATIC_DIR
-from .common import YOLOMUX_BACKEND
+from .common import YOMUX_BACKEND
 from .common import YOMUX_VERSION
 from .common import login_username
 from .common import xterm_asset_path
-from .common import yolomux_client_revision
-from .common import yolomux_commit_count
-from .common import yolomux_commit_sha
-from .common import yolomux_commit_time_pt
-from .common import yolomux_dev_bundle_revision
+from .common import yomux_client_revision
+from .common import yomux_commit_count
+from .common import yomux_commit_sha
+from .common import yomux_commit_time_pt
+from .common import yomux_dev_bundle_revision
 from .common import yomux_version_metadata
 from .locales import LANGUAGE_PREFERENCES
 from .locales import LOCALE_ENDONYMS
@@ -223,17 +223,17 @@ def brand_html(
     backend_label: str = "",
 ) -> str:
     active_locale = normalize_locale(locale)
-    commit_count = yolomux_commit_count()
+    commit_count = yomux_commit_count()
     commit_count_line = f"\n{server_string(active_locale, 'menu.help.about.commits', count=commit_count)}" if commit_count > 0 else ""
     version_status, post_release_commits = version_metadata or yomux_version_metadata()
-    backend_version = backend_label.strip() or YOLOMUX_BACKEND
+    backend_version = backend_label.strip() or YOMUX_BACKEND
     backend_version_title = f"{version_status} [{backend_version}]"
     version_title = html.escape(
         f"{backend_version_title}\n"
         + "\n".join(post_release_commits)
         + ("\n" if post_release_commits else "")
-        + f"{server_string(active_locale, 'menu.help.about.sha', sha=yolomux_commit_sha())}\n"
-        + f"{server_string(active_locale, 'menu.help.lastCommit', time=yolomux_commit_time_pt())}{commit_count_line}",
+        + f"{server_string(active_locale, 'menu.help.about.sha', sha=yomux_commit_sha())}\n"
+        + f"{server_string(active_locale, 'menu.help.lastCommit', time=yomux_commit_time_pt())}{commit_count_line}",
         quote=True,
     )
     # Pre-auth pages are not relocalized by JavaScript, so render the selected
@@ -364,7 +364,7 @@ def html_page(
         "authUsername": auth_username,
         "homePath": str(Path.home()),
         "repoRoot": str(Path(__file__).resolve().parents[1]),
-        "maxSessionTabs": MAX_YOLOMUX_SESSION_TABS,
+        "maxSessionTabs": MAX_YOMUX_SESSION_TABS,
         # The two bounds /api/fs/batch refuses above, stated by the server that will refuse.
         # `maxRequests` is the size the browser must split its posts at: the same constant this
         # server's own watch-batch producer chunks at (`submit_filesystem_watch_batches`), and the
@@ -378,16 +378,16 @@ def html_page(
         "serverStartedAt": SERVER_STARTED_AT,
         "serverStartedAtMs": int(SERVER_STARTED_AT * 1000),
         "linearIssueBaseUrl": DEFAULT_LINEAR_ISSUE_BASE_URL,
-        "backend": YOLOMUX_BACKEND,
+        "backend": YOMUX_BACKEND,
         "version": YOMUX_VERSION,
         "versionStatus": version_metadata[0],
         "backendLabel": backend_label,
         "postReleaseCommits": version_metadata[1],
-        "clientRevision": yolomux_client_revision(),
-        "devBundleRevision": yolomux_dev_bundle_revision(),
-        "versionCommit": yolomux_commit_sha(),
-        "versionCommitTime": yolomux_commit_time_pt(),
-        "versionCommitCount": yolomux_commit_count(),
+        "clientRevision": yomux_client_revision(),
+        "devBundleRevision": yomux_dev_bundle_revision(),
+        "versionCommit": yomux_commit_sha(),
+        "versionCommitTime": yomux_commit_time_pt(),
+        "versionCommitCount": yomux_commit_count(),
         "settingsPayload": bootstrap_settings_payload(settings_data),
         "activitySummary": normalized_activity_summary_bootstrap(activity_summary_bootstrap()),
         # This fence ships atomically with the cache-busted client bundle. An already-loaded older

@@ -103,7 +103,7 @@ def test_startup_common_operator_launch_clears_inherited_tmux(monkeypatch):
         [
             "bash",
             "-c",
-            "source tools/startup_common.sh; yomux_normalize_environment; yolomux_use_machine_tmux; printf '%s|%s|%s|%s|%s|%s' "
+            "source tools/startup_common.sh; yomux_normalize_environment; yomux_use_machine_tmux; printf '%s|%s|%s|%s|%s|%s' "
             '"${TMUX-unset}" "${TMUX_PANE-unset}" "${YOMUX_TMUX_SOCKET-unset}" "${YOLOMUX_TMUX_SOCKET-unset}" "${YOMUX_TMUX_ALLOW_DEFAULT_SERVER-unset}" "${YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER-unset}"',
         ],
         cwd=Path(__file__).resolve().parents[1],
@@ -215,7 +215,7 @@ def test_launchers_declare_the_default_server_intent_for_control_mode(monkeypatc
     root = Path(__file__).resolve().parents[1]
     monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV, raising=False)
     optin = subprocess.run(
-        ["bash", "-c", "source tools/startup_common.sh; yolomux_default_server_optin"],
+        ["bash", "-c", "source tools/startup_common.sh; yomux_default_server_optin"],
         cwd=root,
         capture_output=True,
         text=True,
@@ -223,21 +223,21 @@ def test_launchers_declare_the_default_server_intent_for_control_mode(monkeypatc
     ).stdout
     assert optin == f"{tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV}=1"
     assert f'export PATH="$launch_path"' in subprocess.run(
-        ["bash", "-c", "source tools/startup_common.sh; yolomux_macos_server_launcher"],
+        ["bash", "-c", "source tools/startup_common.sh; yomux_macos_server_launcher"],
         cwd=root,
         capture_output=True,
         text=True,
         check=True,
     ).stdout
     assert tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV in subprocess.run(
-        ["bash", "-c", "source tools/startup_common.sh; yolomux_macos_server_launcher"],
+        ["bash", "-c", "source tools/startup_common.sh; yomux_macos_server_launcher"],
         cwd=root,
         capture_output=True,
         text=True,
         check=True,
     ).stdout
     launcher = subprocess.run(
-        ["bash", "-c", "source tools/startup_common.sh; yolomux_macos_server_launcher"],
+        ["bash", "-c", "source tools/startup_common.sh; yomux_macos_server_launcher"],
         cwd=root,
         capture_output=True,
         text=True,
@@ -253,7 +253,7 @@ def test_launchers_declare_the_default_server_intent_for_control_mode(monkeypatc
     boot_source = (root / "boot.sh").read_text(encoding="utf-8")
     assert 'yomux_server_launch_environment "$backend" "$go_binary"' in boot_source
     startup_source = (root / "tools" / "startup_common.sh").read_text(encoding="utf-8")
-    assert 'local assignments=("$(yolomux_default_server_optin)" "YOLOMUX_TMUX_SOCKET=")' in startup_source
+    assert 'local assignments=("$(yomux_default_server_optin)" "YOLOMUX_TMUX_SOCKET=")' in startup_source
 
 
 def test_tmux_move_to_option_walks_highlight_without_crashing(monkeypatch):

@@ -56,7 +56,7 @@ class YoagentSessionSummariesMixin:
 
 
     def load_yoagent_session_summaries(self) -> None:
-        state = self.deps.read_yolomux_state()
+        state = self.deps.read_yomux_state()
         with self.yoagent_session_summary_lock:
             self.yoagent_session_summaries = self.sanitized_yoagent_session_summaries(
                 state.get(YOAGENT_SESSION_SUMMARIES_STATE_KEY)
@@ -64,7 +64,7 @@ class YoagentSessionSummariesMixin:
 
 
     def persist_yoagent_session_summaries_locked(self) -> None:
-        self.deps.update_yolomux_state({YOAGENT_SESSION_SUMMARIES_STATE_KEY: self.yoagent_session_summaries})
+        self.deps.update_yomux_state({YOAGENT_SESSION_SUMMARIES_STATE_KEY: self.yoagent_session_summaries})
 
 
     def prune_yoagent_session_summaries(self, live_sessions: set[str]) -> None:

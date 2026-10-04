@@ -546,7 +546,7 @@ async function expandSyncFileExplorerAffectedDirectories() {
   setFileExplorerVisibleSyncTarget(plan.session, root);
   rememberFileExplorerSyncExpandedState(plan.session, root);
   markFileExplorerSyncPlanApplied(plan);
-  updateFileExplorerSessionHighlightRows(plan.session);
+  scheduleFileTreeMetadataRefresh({highlightsOnly: true});
   if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   return changed;
 }
@@ -804,6 +804,7 @@ function fileExplorerTypeaheadSelect(rows, leadIndex, char, selectLead) {
 // The tree row's aria-expanded state and its descendants must always use this one state calculation. Finder
 // opts into expansion, while Differ defaults to expanded and persists only folders the user collapsed.
 function fileTreeDirectoryExpanded(fullPath, options = {}) {
+  if (options.collapsedSet instanceof Set) return !options.collapsedSet.has(fullPath);
   if (options.differMode === true || options.row?.closest?.('.file-explorer-changes-panel')) {
     return !changesFolderCollapsed.has(fullPath);
   }
@@ -1082,33 +1083,23 @@ function fileExplorerQualifiedExpandedPaths(root, entriesByDir) {
 
 async function fileExplorerEntriesByWatchedDirectory(root = currentFileExplorerRoot(), options = {}) {
   const normalizedRoot = normalizeDirectoryPath(root);
-  const entriesByDir = new Map();
-  const rootEntries = await fetchDirectory(normalizedRoot, options);
-  if (!rootEntries) return entriesByDir;
-  entriesByDir.set(normalizedRoot, rootEntries);
   const expandedPaths = fileExplorerExpandedPathsForRoot(normalizedRoot);
-  const maximumDepth = expandedPaths.reduce((maximum, path) => Math.max(maximum, childPathParts(normalizedRoot, path).length), 0);
-  for (let depth = 1; depth <= maximumDepth; depth += 1) {
-    const qualified = fileExplorerQualifiedExpandedPaths(normalizedRoot, entriesByDir)
-      .filter(path => childPathParts(normalizedRoot, path).length === depth);
-    const listings = await Promise.all(qualified.map(async directory => ({
-      directory,
-      entries: await fetchDirectory(directory, options),
-    })));
-    for (const {directory, entries} of listings) {
-      if (entries) entriesByDir.set(normalizeDirectoryPath(directory), entries);
-    }
-  }
-  return entriesByDir;
+  return fetchFileExplorerSyncListings([normalizedRoot, ...expandedPaths], {
+    ...options,
+    qualificationContext: {preserveActiveSync: true},
+  });
 }
 
 async function refreshFileExplorerTreesInPlace(options = {}) {
   const root = normalizeDirectoryPath(options.root || currentFileExplorerRoot());
+  const syncGeneration = fileExplorerSyncState.generation;
   const entriesByDir = options.entriesByDir instanceof Map
     ? options.entriesByDir
     : await fileExplorerEntriesByWatchedDirectory(root, options);
   const rootEntries = Array.isArray(options.entries) ? options.entries : entriesByDir.get(root);
   if (!rootEntries) return false;
+  if (root !== normalizeDirectoryPath(currentFileExplorerRoot())
+      || (fileExplorerRootMode === 'sync' && syncGeneration !== fileExplorerSyncState.generation)) return false;
   const scrollPositions = options.preserveScroll ? captureFileExplorerScrollPositions() : null;
   if (fileExplorerTree) {
     setFileExplorerPathDisplay(root);

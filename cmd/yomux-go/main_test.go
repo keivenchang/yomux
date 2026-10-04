@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -34,7 +35,32 @@ import (
 	"github.com/keivenchang/yomux/internal/work"
 )
 
+func preserveProductEnvironment(t *testing.T) {
+	t.Helper()
+	original := make(map[string]string)
+	for _, entry := range os.Environ() {
+		key, value, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, "YOMUX_") || strings.HasPrefix(key, "YOLOMUX_") {
+			original[key] = value
+		}
+	}
+	t.Cleanup(func() {
+		for _, entry := range os.Environ() {
+			key, _, _ := strings.Cut(entry, "=")
+			if strings.HasPrefix(key, "YOMUX_") || strings.HasPrefix(key, "YOLOMUX_") {
+				if _, existed := original[key]; !existed {
+					_ = os.Unsetenv(key)
+				}
+			}
+		}
+		for key, value := range original {
+			_ = os.Setenv(key, value)
+		}
+	})
+}
+
 func TestNormalizeYomuxEnvironmentMirrorsCanonicalValuesToLegacyReaders(t *testing.T) {
+	preserveProductEnvironment(t)
 	t.Setenv("YOMUX_CONFIG_DIR", "/new/config")
 	t.Setenv("YOLOMUX_CONFIG_DIR", "/old/config")
 	t.Setenv("YOMUX_STATE_DIR", "")
@@ -53,29 +79,15 @@ func TestNormalizeYomuxEnvironmentMirrorsCanonicalValuesToLegacyReaders(t *testi
 }
 
 func TestNormalizeYomuxEnvironmentDoesNotWarnForCanonicalOnlyValues(t *testing.T) {
-	legacyValues := make(map[string]string)
+	preserveProductEnvironment(t)
 	for _, entry := range os.Environ() {
-		key, value, ok := strings.Cut(entry, "=")
+		key, _, ok := strings.Cut(entry, "=")
 		if ok && strings.HasPrefix(key, "YOLOMUX_") {
-			legacyValues[key] = value
 			if err := os.Unsetenv(key); err != nil {
 				t.Fatalf("unset inherited legacy variable %s: %v", key, err)
 			}
 		}
 	}
-	t.Cleanup(func() {
-		for _, entry := range os.Environ() {
-			key, _, ok := strings.Cut(entry, "=")
-			if ok && strings.HasPrefix(key, "YOLOMUX_") {
-				if _, existed := legacyValues[key]; !existed {
-					_ = os.Unsetenv(key)
-				}
-			}
-		}
-		for key, value := range legacyValues {
-			_ = os.Setenv(key, value)
-		}
-	})
 	t.Setenv("YOMUX_RUNTIME_DIR", "/private/runtime")
 
 	if normalizeYomuxEnvironment() {
@@ -346,11 +358,7 @@ func TestHealthAndCapabilities(t *testing.T) {
 }
 
 func TestTmuxIgnoreSizeCapabilityProbeUsesTheRealAttachFlag(t *testing.T) {
-	tmuxDir, err := os.MkdirTemp("/tmp", "yolomux-tmux-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(tmuxDir) })
+	tmuxDir := testsupport.ShortTempDir(t)
 	socket := filepath.Join(tmuxDir, "tmux.sock")
 	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
 	if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", "probe").CombinedOutput(); err != nil {
@@ -368,11 +376,7 @@ func TestTmuxIgnoreSizeCapabilityProbeUsesTheRealAttachFlag(t *testing.T) {
 }
 
 func TestGoCreateSessionLaunchesShellAndAgentsWithExplicitDangerousFlags(t *testing.T) {
-	tmuxDir, err := os.MkdirTemp("/tmp", "ym-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(tmuxDir) })
+	tmuxDir := testsupport.ShortTempDir(t)
 	tmuxSocket := filepath.Join(tmuxDir, "tmux.sock")
 	launchBin := t.TempDir()
 	for _, name := range []string{"claude", "codex"} {
@@ -429,11 +433,7 @@ func TestGoCreateSessionLaunchesShellAndAgentsWithExplicitDangerousFlags(t *test
 }
 
 func TestGoRenameSessionRouteValidatesAndRenamesExactTmuxSession(t *testing.T) {
-	tmuxDir, err := os.MkdirTemp("/tmp", "yo7220-session-rename-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(tmuxDir) })
+	tmuxDir := testsupport.ShortTempDir(t)
 	tmuxSocket := filepath.Join(tmuxDir, "tmux.sock")
 	t.Setenv("YOLOMUX_TMUX_SOCKET", tmuxSocket)
 	t.Cleanup(func() { _ = exec.Command("tmux", "-S", tmuxSocket, "kill-server").Run() })
@@ -860,7 +860,7 @@ func TestGoCreateSessionPlanReturnsJavaScriptSafeMonotonicGeneration(t *testing.
 }
 
 func TestNextNumberedSessionNameMatchesLegacyBackendRules(t *testing.T) {
-	allNumberedNames := make([]string, maxYolomuxSessionTabs)
+	allNumberedNames := make([]string, maxYomuxSessionTabs)
 	for index := range allNumberedNames {
 		allNumberedNames[index] = strconv.Itoa(index + 1)
 	}
@@ -873,7 +873,7 @@ func TestNextNumberedSessionNameMatchesLegacyBackendRules(t *testing.T) {
 		{name: "fills the first gap", existing: []string{"1", "3"}, want: "2"},
 		{name: "ignores named sessions", existing: []string{"yo-123", "project"}, want: "1"},
 		{name: "full numbered range", existing: allNumberedNames},
-		{name: "maximum session count", existing: append(append([]string(nil), allNumberedNames[:maxYolomuxSessionTabs-1]...), "project")},
+		{name: "maximum session count", existing: append(append([]string(nil), allNumberedNames[:maxYomuxSessionTabs-1]...), "project")},
 	}
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
@@ -885,11 +885,7 @@ func TestNextNumberedSessionNameMatchesLegacyBackendRules(t *testing.T) {
 }
 
 func TestGoCreateSessionDefaultsToFirstAvailableNumberedName(t *testing.T) {
-	tmuxDir, err := os.MkdirTemp("/tmp", "ym-create-session-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(tmuxDir) })
+	tmuxDir := testsupport.ShortTempDir(t)
 	tmuxSocket := filepath.Join(tmuxDir, "tmux.sock")
 	t.Setenv("YOLOMUX_TMUX_SOCKET", tmuxSocket)
 	t.Cleanup(func() { _ = exec.Command("tmux", "-S", tmuxSocket, "kill-server").Run() })
@@ -945,7 +941,7 @@ func TestGoCreateSessionRejectsExplicitNameWithoutPlanGeneration(t *testing.T) {
 }
 
 func TestGoCreateSessionEnforcesMaximumTabsWithExplicitName(t *testing.T) {
-	sessions := make([]string, maxYolomuxSessionTabs)
+	sessions := make([]string, maxYomuxSessionTabs)
 	for index := range sessions {
 		sessions[index] = strconv.Itoa(index + 1)
 	}
@@ -1040,6 +1036,7 @@ func TestEventBrokerPublishesAndReplays(t *testing.T) {
 
 func TestPhase3ProtectedRoutes(t *testing.T) {
 	s := &server{config: t.TempDir(), events: newEventBroker(), children: make(map[*exec.Cmd]struct{})}
+	t.Cleanup(s.shutdown)
 	r := httptest.NewRecorder()
 	s.systemStatus(r, httptest.NewRequest(http.MethodGet, "/api/system-status", nil))
 	if r.Code != http.StatusOK || !bytes.Contains(r.Body.Bytes(), []byte(`"schema":"system-status-snapshot"`)) {
@@ -1063,7 +1060,8 @@ func TestSystemStatusPublishesGoNativeLocalServicesSchema(t *testing.T) {
 			return goProcessMetrics{PID: 7222, StartedAt: started, CPUPercent: &cpu, RSSBytes: &rss, ThreadCount: &threads}
 		},
 	}
-	t.Setenv("YOLOMUX_TMUX_SOCKET", filepath.Join(t.TempDir(), "no-server.sock"))
+	t.Cleanup(s.shutdown)
+	t.Setenv("YOMUX_TMUX_SOCKET", filepath.Join(testsupport.ShortTempDir(t), "no-server.sock"))
 	record := httptest.NewRecorder()
 	s.systemStatus(record, httptest.NewRequest(http.MethodGet, "/api/system-status", nil))
 	if record.Code != http.StatusOK {
@@ -1605,12 +1603,63 @@ func TestTmuxRoutePublishesGlobalRosterAndPythonCompatibleCapture(t *testing.T) 
 
 func shortSyntheticTmuxSocket(t *testing.T) string {
 	t.Helper()
-	directory, err := os.MkdirTemp("/tmp", "yo-go-tmux-")
-	if err != nil {
+	return filepath.Join(testsupport.ShortTempDir(t), "tmux.sock")
+}
+
+func startSyntheticTmuxGeneration(t *testing.T, socket, root, session string) *parityProcess {
+	t.Helper()
+	fixture := t.TempDir()
+	ready := filepath.Join(fixture, "ready")
+	config := filepath.Join(fixture, "tmux.conf")
+	// Foreground ownership lets Wait prove retirement before this socket is reused.
+	// -D disables exit-empty, so restore it after creating the original $0 session.
+	configuration := fmt.Sprintf("new-session -d -s %q -c %q\nset-option -g exit-empty on\nrun-shell %q\n", session, root, "printf ready > "+shellQuote(ready))
+	if err := os.WriteFile(config, []byte(configuration), 0600); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(directory) })
-	return filepath.Join(directory, "tmux.sock")
+	var output synchronizedBuffer
+	command := exec.Command("tmux", "-D", "-S", socket, "-f", config)
+	command.Env = testsupport.SyntheticEnvironment()
+	command.Stdout, command.Stderr = &output, &output
+	process := startParityProcess(t, command, &output)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	deadline, _ := ctx.Deadline()
+	waitFixtureCondition(t, "owned tmux listener", time.Until(deadline), func() bool {
+		if process.exited() {
+			t.Fatalf("owned tmux exited before readiness: %s", output.String())
+		}
+		connection, err := net.DialTimeout("unix", socket, time.Until(deadline))
+		if err != nil {
+			return false
+		}
+		_ = connection.Close()
+		return true
+	})
+	// -D loads configuration on its first identified client; -N keeps that
+	// client from creating another server during the owned child's startup.
+	if output, err := exec.CommandContext(ctx, "tmux", "-N", "-S", socket, "start-server").CombinedOutput(); err != nil {
+		t.Fatalf("initialize owned tmux generation: %v (%s)", err, output)
+	}
+	waitTerminalControlFile(t, ready, time.Until(deadline))
+	identity, err := exec.CommandContext(ctx, "tmux", "-N", "-S", socket, "display-message", "-p", "-t", session+":", "#{session_id}").CombinedOutput()
+	if err != nil || strings.TrimSpace(string(identity)) != "$0" {
+		t.Fatalf("synthetic generation initial session identity = %q, %v", identity, err)
+	}
+	return process
+}
+
+func retireSyntheticTmuxGeneration(t *testing.T, process *parityProcess, socket string, args ...string) {
+	t.Helper()
+	if err := process.stopWithSignal(5*time.Second, func() error {
+		output, err := exec.Command("tmux", append([]string{"-S", socket}, args...)...).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("retire synthetic tmux generation: %w (%s)", err, output)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestDiagnosticsPerformanceCapturesMarkedHTTPRequests(t *testing.T) {
@@ -2016,16 +2065,7 @@ func TestSettingsRoutePersistsSharedSchemaAndUpdatesGoOwnedSettings(t *testing.T
 	if err := os.WriteFile(filepath.Join(config, "settings.yaml"), []byte("general:\n  startup_tips: true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	root, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for range 5 {
-		if _, statErr := os.Stat(filepath.Join(root, "yomux_lib")); statErr == nil {
-			break
-		}
-		root = filepath.Dir(root)
-	}
+	root := testsupport.RepoRoot(t)
 	finderRoot := t.TempDir()
 	service, err := finder.NewWithLimits(finderRoot, nil, finder.UploadLimits{MaxBytes: 4, MaxFiles: 1, FilenameTemplate: "{name}-{seq}{ext}"})
 	if err != nil {
@@ -2207,7 +2247,7 @@ func TestSettingsRouteRejectsReadonlyMutation(t *testing.T) {
 }
 
 func TestActivityRouteIncludesEveryGlobalTmuxSession(t *testing.T) {
-	socketDir := t.TempDir()
+	socketDir := testsupport.ShortTempDir(t)
 	socket := filepath.Join(socketDir, "tmux.sock")
 	root := t.TempDir()
 	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
@@ -2412,7 +2452,7 @@ func TestLiveSessionMetadataClassifiesNodeCodexWrapperAsWorking(t *testing.T) {
 }
 
 func TestActivityRouteKeepsRosterWhenActivityReadFails(t *testing.T) {
-	socketDir := t.TempDir()
+	socketDir := testsupport.ShortTempDir(t)
 	socket := filepath.Join(socketDir, "tmux.sock")
 	root := t.TempDir()
 	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
@@ -2508,7 +2548,7 @@ func TestSessionMetadataDoesNotClearRosterOnInitialDiscoveryFailure(t *testing.T
 }
 
 func TestSessionMetadataKeepsRosterAndReportsPaneInventoryFailure(t *testing.T) {
-	t.Setenv("YOLOMUX_TMUX_SOCKET", filepath.Join(t.TempDir(), "missing-tmux.sock"))
+	t.Setenv("YOMUX_TMUX_SOCKET", filepath.Join(testsupport.ShortTempDir(t), "missing-tmux.sock"))
 	s := &server{tmuxSessionRosterFn: func() ([]string, error) {
 		return []string{"synthetic-pane-failure"}, nil
 	}}
@@ -2537,8 +2577,21 @@ func TestSessionMetadataKeepsRosterAndReportsPaneInventoryFailure(t *testing.T) 
 	}
 }
 
+func TestTmuxCommandsCanonicalSocketWinsIncludingExplicitEmpty(t *testing.T) {
+	t.Setenv("YOLOMUX_TMUX_SOCKET", "/legacy/tmux.sock")
+	t.Setenv("YOMUX_TMUX_SOCKET", " /canonical/tmux.sock ")
+	s := &server{}
+	if got := strings.Join(s.tmuxCommand("list-panes").Args, " "); got != "tmux -S /canonical/tmux.sock list-panes" {
+		t.Fatalf("canonical tmux command = %q", got)
+	}
+	t.Setenv("YOMUX_TMUX_SOCKET", "")
+	if got := strings.Join(s.tmuxCommand("list-panes").Args, " "); got != "tmux list-panes" {
+		t.Fatalf("cleared canonical tmux command = %q", got)
+	}
+}
+
 func TestTmuxSignalsRouteIncludesGlobalWindowsAndPanes(t *testing.T) {
-	socketDir := t.TempDir()
+	socketDir := testsupport.ShortTempDir(t)
 	socket := filepath.Join(socketDir, "tmux.sock")
 	root := t.TempDir()
 	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
@@ -2596,7 +2649,7 @@ func TestTmuxSignalsRouteIncludesGlobalWindowsAndPanes(t *testing.T) {
 }
 
 func TestTmuxSignalsFilteredSessionUsesExactTmuxTarget(t *testing.T) {
-	socketDir := t.TempDir()
+	socketDir := testsupport.ShortTempDir(t)
 	socket := filepath.Join(socketDir, "tmux.sock")
 	root := t.TempDir()
 	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
@@ -2623,7 +2676,7 @@ func TestTmuxSignalsFilteredSessionUsesExactTmuxTarget(t *testing.T) {
 }
 
 func TestTmuxWindowRouteSelectsExactWindow(t *testing.T) {
-	socketDir := t.TempDir()
+	socketDir := testsupport.ShortTempDir(t)
 	socket := filepath.Join(socketDir, "tmux.sock")
 	root := t.TempDir()
 	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
@@ -2760,7 +2813,7 @@ func TestGoRootAdvertisesTheFullCapabilityGatedApplicationShell(t *testing.T) {
 	if page.Code != http.StatusOK {
 		t.Fatalf("full root status = %d, body=%s", page.Code, page.Body.String())
 	}
-	if !bytes.Contains(page.Body.Bytes(), []byte(`"versionStatus":"0.10.1`)) {
+	if !bytes.Contains(page.Body.Bytes(), []byte(`"versionStatus":"`+version)) {
 		t.Fatalf("Go root does not preserve the release version label: %s", page.Body.String())
 	}
 	if !bytes.Contains(page.Body.Bytes(), []byte(`"backendLabel":"Go `)) {
@@ -3198,11 +3251,7 @@ func TestPhase8SessionFilesRoutesExposeParityEnvelopes(t *testing.T) {
 
 	// Bazel's TEST_TMPDIR can be deeply nested. Keep the Unix socket itself under /tmp;
 	// tmux rejects a longer pathname before the test reaches the route under test.
-	tmuxSocketDir, err := os.MkdirTemp("/tmp", "yo7221-tmux-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(tmuxSocketDir) })
+	tmuxSocketDir := testsupport.ShortTempDir(t)
 	tmuxSocket := filepath.Join(tmuxSocketDir, "tmux.sock")
 	t.Setenv("YOLOMUX_TMUX_SOCKET", tmuxSocket)
 	session := "go-phase8-session"
@@ -3718,7 +3767,7 @@ func TestSessionFilesRejectedIncarnationDoesNotRefreshMemoryRecency(t *testing.T
 
 func TestSessionFilesCacheRejectsLateWriteFromOtherIncarnation(t *testing.T) {
 	config := t.TempDir()
-	t.Setenv("YOLOMUX_TMUX_SOCKET", filepath.Join(t.TempDir(), "missing-tmux.sock"))
+	t.Setenv("YOMUX_TMUX_SOCKET", filepath.Join(testsupport.ShortTempDir(t), "missing-tmux.sock"))
 	newRequest := sessionFilesRequest{session: "session-1", hours: 24, sessionIdentity: "new-incarnation"}
 	viewID := sessionFilesCacheViewID(sessionFilesRequestDescriptor(newRequest))
 	cacheServer := &server{config: config}
@@ -4084,11 +4133,7 @@ func TestSessionFilesPaneInputsResolveClaudeTranscriptIdentity(t *testing.T) {
 	t.Setenv("HOME", home)
 	// Bazel's TEST_TMPDIR can be deeply nested. Keep the Unix socket itself under /tmp;
 	// tmux rejects a longer pathname before the test reaches the route under test.
-	tmuxSocketDir, err := os.MkdirTemp("/tmp", "yo7221-tmux-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(tmuxSocketDir) })
+	tmuxSocketDir := testsupport.ShortTempDir(t)
 	tmuxSocket := filepath.Join(tmuxSocketDir, "tmux.sock")
 	t.Setenv("YOLOMUX_TMUX_SOCKET", tmuxSocket)
 	session := "go-phase8-claude"
@@ -5227,23 +5272,14 @@ func TestForcedTopologyReadBypassesWarmTmuxRosterCache(t *testing.T) {
 	socket := shortSyntheticTmuxSocket(t)
 	root := t.TempDir()
 	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
-	create := func(name string) {
-		t.Helper()
-		if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", name, "-c", root).CombinedOutput(); err != nil {
-			t.Fatalf("create synthetic tmux session %q: %v (%s)", name, err, output)
-		}
-	}
-	create("before-force")
-	t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
+	first := startSyntheticTmuxGeneration(t, socket, root, "before-force")
 	s := &server{}
 	warm, err := s.tmuxSessionRoster()
 	if err != nil || len(warm) != 1 || warm[0] != "before-force" {
 		t.Fatalf("warm roster = %v, %v", warm, err)
 	}
-	if output, err := exec.Command("tmux", "-S", socket, "kill-session", "-t", "before-force").CombinedOutput(); err != nil {
-		t.Fatalf("kill synthetic tmux session: %v (%s)", err, output)
-	}
-	create("after-force")
+	retireSyntheticTmuxGeneration(t, first, socket, "kill-session", "-t", "before-force")
+	startSyntheticTmuxGeneration(t, socket, root, "after-force")
 	forced, forceErr := s.tmuxTopologySnapshot(true)
 	if forceErr != nil || len(forced.sessions) != 1 || forced.sessions[0] != "after-force" {
 		t.Fatalf("forced roster reused warm cache: %v, %v", forced.sessions, forceErr)
@@ -5254,24 +5290,15 @@ func TestTmuxServerRestartChangesTopologyForSameSessionNameAndID(t *testing.T) {
 	socket := shortSyntheticTmuxSocket(t)
 	root := t.TempDir()
 	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
-	create := func() {
-		t.Helper()
-		if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", "same-name", "-c", root).CombinedOutput(); err != nil {
-			t.Fatalf("create same-name tmux session: %v (%s)", err, output)
-		}
-	}
-	create()
-	t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
+	first := startSyntheticTmuxGeneration(t, socket, root, "same-name")
 	s := &server{}
 	firstTopology, firstErr := s.tmuxTopologySnapshot(true)
 	firstSnapshot, _ := s.tmuxSessionRosterSnapshot(false)
 	if firstErr != nil || len(firstTopology.sessions) != 1 || firstTopology.generation != 1 {
 		t.Fatalf("first topology = %v, %v, generation %d", firstTopology.sessions, firstErr, firstTopology.generation)
 	}
-	if output, err := exec.Command("tmux", "-S", socket, "kill-server").CombinedOutput(); err != nil {
-		t.Fatalf("restart private tmux server: %v (%s)", err, output)
-	}
-	create()
+	retireSyntheticTmuxGeneration(t, first, socket, "kill-server")
+	startSyntheticTmuxGeneration(t, socket, root, "same-name")
 	secondTopology, secondErr := s.tmuxTopologySnapshot(true)
 	secondSnapshot, _ := s.tmuxSessionRosterSnapshot(false)
 	if secondErr != nil || len(secondTopology.sessions) != 1 || secondTopology.sessions[0] != "same-name" {
@@ -6656,6 +6683,7 @@ func TestPhase3EventBrokerDeliversLatestRepairForKeyedPatch(t *testing.T) {
 
 func TestPhase3DiagnosticsHaveDurableShape(t *testing.T) {
 	s := &server{config: t.TempDir(), events: newEventBroker(), children: make(map[*exec.Cmd]struct{})}
+	t.Cleanup(s.shutdown)
 	background := httptest.NewRecorder()
 	s.backgroundStatus(background, httptest.NewRequest(http.MethodGet, "/api/background/status", nil))
 	for _, field := range []string{`"roles"`, `"counters"`, `"refresh_queue"`, `"search_index"`} {
@@ -6756,7 +6784,9 @@ func TestCancellationPublishesTerminalEvent(t *testing.T) {
 func TestBackgroundFollowerCanClaimAfterIncumbentCloses(t *testing.T) {
 	config := t.TempDir()
 	incumbent := newGoBackgroundOwner(config, "/repo", 18011)
+	t.Cleanup(incumbent.close)
 	follower := newGoBackgroundOwner(config, "/repo", 18012)
+	t.Cleanup(follower.close)
 	if !incumbent.owner || follower.owner || follower.lockFile == nil {
 		t.Fatalf("owner election incumbent=%+v follower=%+v", incumbent.owner, follower.owner)
 	}
@@ -6774,7 +6804,9 @@ func TestBackgroundFollowerCanClaimAfterIncumbentCloses(t *testing.T) {
 func TestBackgroundFollowerFencesFreshOwnerRecord(t *testing.T) {
 	config := t.TempDir()
 	incumbent := newGoBackgroundOwner(config, "/repo", 18013)
+	t.Cleanup(incumbent.close)
 	follower := newGoBackgroundOwner(config, "/repo", 18014)
+	t.Cleanup(follower.close)
 	if !incumbent.owner || follower.owner {
 		t.Fatalf("owner election incumbent=%v follower=%v", incumbent.owner, follower.owner)
 	}
@@ -6790,7 +6822,6 @@ func TestBackgroundFollowerFencesFreshOwnerRecord(t *testing.T) {
 		t.Fatalf("fresh-owner fence = %+v", claim)
 	}
 	incumbent.close()
-	defer follower.close()
 	claim = follower.claim()
 	if claim["claimed"] != true || !follower.owner {
 		t.Fatalf("post-stop takeover = %+v", claim)
@@ -6800,7 +6831,9 @@ func TestBackgroundFollowerFencesFreshOwnerRecord(t *testing.T) {
 func TestBackgroundFollowerFencesForeignHostOwner(t *testing.T) {
 	config := t.TempDir()
 	incumbent := newGoBackgroundOwner(config, "/repo", 18015)
+	t.Cleanup(incumbent.close)
 	follower := newGoBackgroundOwner(config, "/repo", 18016)
+	t.Cleanup(follower.close)
 	if !incumbent.owner || follower.owner {
 		t.Fatalf("owner election incumbent=%v follower=%v", incumbent.owner, follower.owner)
 	}
@@ -6809,8 +6842,6 @@ func TestBackgroundFollowerFencesForeignHostOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	incumbent.releaseLock()
-	defer incumbent.close()
-	defer follower.close()
 	claim := follower.claim()
 	if claim["claimed"] == true || follower.status != "blocked_by_foreign_owner" {
 		t.Fatalf("foreign-owner fence = %+v", claim)
@@ -6820,7 +6851,7 @@ func TestBackgroundFollowerFencesForeignHostOwner(t *testing.T) {
 func TestBackgroundOwnerHeartbeatRefreshesRecord(t *testing.T) {
 	dir := t.TempDir()
 	owner := newGoBackgroundOwner(dir, "/repo", 18001)
-	defer owner.close()
+	t.Cleanup(owner.close)
 	before, _ := os.ReadFile(owner.ownerPath)
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
@@ -6845,7 +6876,9 @@ func TestBackgroundOwnerTakeoverPublishesGenerationChange(t *testing.T) {
 	stream, unsubscribe := broker.subscribe("core")
 	defer unsubscribe()
 	incumbent := newGoBackgroundOwner(dir, "/repo", 18001)
+	t.Cleanup(incumbent.close)
 	follower := newGoBackgroundOwner(dir, "/repo", 18002)
+	t.Cleanup(follower.close)
 	incumbent.setEventPublisher(func(kind string, payload map[string]any) error {
 		_, err := broker.publish(kind, payload)
 		return err
@@ -6855,7 +6888,6 @@ func TestBackgroundOwnerTakeoverPublishesGenerationChange(t *testing.T) {
 		return err
 	})
 	incumbent.close()
-	defer follower.close()
 	claim := follower.claim()
 	if claim["claimed"] != true || !follower.owner || follower.status != "local" {
 		t.Fatalf("takeover = %+v", claim)
@@ -6885,7 +6917,7 @@ func TestBackgroundOwnerTakeoverPublishesGenerationChange(t *testing.T) {
 func TestBackgroundOwnerWriteFailureDemotesFailClosed(t *testing.T) {
 	dir := t.TempDir()
 	owner := newGoBackgroundOwner(dir, "/repo", 18003)
-	defer owner.close()
+	t.Cleanup(owner.close)
 	owner.mu.Lock()
 	owner.writeFile = func(string, []byte) error { return os.ErrPermission }
 	err := owner.writeRecord()
@@ -6904,7 +6936,7 @@ func TestBackgroundOwnerWriteFailureDemotesFailClosed(t *testing.T) {
 func TestBackgroundOwnerWritesGenerationIndex(t *testing.T) {
 	dir := t.TempDir()
 	owner := newGoBackgroundOwner(dir, "/repo", 18004)
-	defer owner.close()
+	t.Cleanup(owner.close)
 	indexPath := filepath.Join(dir, "go-background-generations", "index.json")
 	data, err := os.ReadFile(indexPath)
 	if err != nil {
@@ -6917,7 +6949,7 @@ func TestBackgroundOwnerWritesGenerationIndex(t *testing.T) {
 
 func TestBackgroundStatusCarriesDurableRoleAndRefreshShape(t *testing.T) {
 	owner := newGoBackgroundOwner(t.TempDir(), "/repo", 18005)
-	defer owner.close()
+	t.Cleanup(owner.close)
 
 	payload := owner.statusPayload()
 	generation, ok := payload["latest_generation"].(map[string]any)
@@ -6955,7 +6987,7 @@ func TestBackgroundStatusCarriesDurableRoleAndRefreshShape(t *testing.T) {
 
 func TestBackgroundRefreshRequestsAreCoalescedAndCounted(t *testing.T) {
 	owner := newGoBackgroundOwner(t.TempDir(), "/repo", 18006)
-	defer owner.close()
+	t.Cleanup(owner.close)
 
 	first := owner.requestRefresh("session-files", map[string]any{"cache_key": "same"})
 	second := owner.requestRefresh("session-files", map[string]any{"cache_key": "same", "trigger": "watch"})
@@ -6984,7 +7016,12 @@ func TestBackgroundRefreshRequestsAreCoalescedAndCounted(t *testing.T) {
 func TestBackgroundOwnerCloseRemovesOwnedDurableRecords(t *testing.T) {
 	dir := t.TempDir()
 	owner := newGoBackgroundOwner(dir, "/repo", 18007)
+	t.Cleanup(owner.close)
 	ownerPath, generationPath := owner.ownerPath, owner.generationPath
+	done, lock := owner.heartbeatDone, owner.lockFile
+	if done == nil || lock == nil {
+		t.Fatal("background owner did not create its heartbeat and lock")
+	}
 	if _, err := os.Stat(ownerPath); err != nil {
 		t.Fatalf("owner record was not created: %v", err)
 	}
@@ -6993,21 +7030,39 @@ func TestBackgroundOwnerCloseRemovesOwnedDurableRecords(t *testing.T) {
 	}
 
 	owner.close()
+	select {
+	case <-done:
+	default:
+		t.Fatal("close returned before the background heartbeat exited")
+	}
+	if _, err := lock.Stat(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("background lock descriptor after close = %v", err)
+	}
 	if _, err := os.Stat(ownerPath); !os.IsNotExist(err) {
 		t.Fatalf("owned owner record after close = %v", err)
 	}
 	if _, err := os.Stat(generationPath); !os.IsNotExist(err) {
 		t.Fatalf("owned generation record after close = %v", err)
 	}
+	probe, err := os.OpenFile(lock.Name(), os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer probe.Close()
+	if err := syscall.Flock(int(probe.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("closed background owner retained its kernel lock: %v", err)
+	}
+	defer syscall.Flock(int(probe.Fd()), syscall.LOCK_UN)
 }
 
 func TestOperationJournalAppendAndCompactionShareTransactionLock(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "operations.jsonl")
 	records := map[string]*goOperation{}
+	now := time.Now().UnixMilli()
 	for index := 0; index < 32; index++ {
 		id := fmt.Sprintf("op-concurrent-%02d", index)
-		records[id] = &goOperation{ID: id, State: "terminal", Epoch: "epoch", Seq: 1, TerminalAt: int64(index + 1)}
+		records[id] = &goOperation{ID: id, State: "terminal", Epoch: "epoch", Seq: 1, TerminalAt: now + int64(index)}
 	}
 	var group sync.WaitGroup
 	for id := range records {
@@ -7078,6 +7133,85 @@ func TestAcknowledgedLargeOperationReplayIsBoundedAndJournalIsVersioned(t *testi
 	}
 	if !bytes.Contains(journal, []byte(`"version":2`)) || !bytes.Contains(journal, []byte(`"type":"snapshot"`)) {
 		t.Fatalf("journal was not compacted to v2 snapshot: %s", journal)
+	}
+	reloaded := loadOperationJournal(s.operationsJournal, loadOperations(s.operationsPath))
+	if reloaded["op-large"].HTTPStatus != http.StatusGone {
+		t.Fatal("journal compaction resurrected an evicted replay")
+	}
+	if len(journal) >= operationReplayRecordBytes {
+		t.Fatalf("compacted journal retained large replay: %d bytes", len(journal))
+	}
+}
+
+func TestOperationCompactionBoundsRecoveredRecordsWithoutLosingForeignWrites(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "operations.jsonl")
+	now := time.Now().UnixMilli()
+	result := map[string]any{"state": "ready", "blob": strings.Repeat("x", operationReplayRecordBytes+1)}
+	large := &goOperation{ID: "large", State: "terminal", Epoch: "epoch", Seq: 1, TerminalAt: now, Result: result, HTTPStatus: http.StatusOK, DeliveryAcknowledged: true, TerminalEvent: map[string]any{"result": result}}
+	expired := &goOperation{ID: "expired", State: "terminal", TerminalAt: now - operationRetention.Milliseconds() - 1}
+	records := map[string]*goOperation{"large": large, "expired": expired}
+	if err := compactOperationJournalUnlocked(path, records); err != nil {
+		t.Fatal(err)
+	}
+	foreign := &goOperation{ID: "foreign", State: "queued", CreatedAt: now - operationRetention.Milliseconds() - 1}
+	if err := appendOperationJournal(path, map[string]any{"version": operationJournalVersion, "type": "operation", "record": foreign}); err != nil {
+		t.Fatal(err)
+	}
+	// The caller has already evicted and pruned its copies; replaying the old snapshot must not undo that policy.
+	s := &server{operations: cloneOperationMap(records)}
+	s.pruneOperationsLocked()
+	boundOperationReplays(s.operations)
+	if err := compactOperationJournal(path, s.operations); err != nil {
+		t.Fatal(err)
+	}
+	raw := loadOperationJournalUnlocked(path, map[string]*goOperation{}, false)
+	if raw["expired"] != nil || raw["foreign"] == nil || raw["large"].HTTPStatus != http.StatusGone {
+		t.Fatalf("raw compacted journal violated retention/replay/foreign-write invariant: %+v", raw)
+	}
+	reloaded := loadOperationJournal(path, map[string]*goOperation{})
+	if reloaded["expired"] != nil || reloaded["foreign"] == nil || reloaded["large"].HTTPStatus != http.StatusGone {
+		t.Fatalf("compaction retention/replay/foreign-write invariant failed: %+v", reloaded)
+	}
+}
+
+func TestOperationRecoveryRepairsReplayBudgetAndPreservesUndeliveredResults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "operations.jsonl")
+	now := time.Now().UnixMilli()
+	records := map[string]*goOperation{}
+	for index := 0; index < 24; index++ {
+		id := fmt.Sprintf("op-%02d", index)
+		result := map[string]any{"blob": strings.Repeat("x", 100*1024)}
+		records[id] = &goOperation{ID: id, State: "terminal", TerminalAt: now + int64(index), HTTPStatus: http.StatusOK, DeliveryAcknowledged: true, Result: result, TerminalEvent: map[string]any{"result": result}}
+	}
+	undelivered := cloneOperation(records["op-00"])
+	undelivered.ID = "undelivered"
+	undelivered.DeliveryAcknowledged = false
+	records[undelivered.ID] = undelivered
+	records["expired"] = &goOperation{ID: "expired", State: "terminal", TerminalAt: now - operationRetention.Milliseconds() - 1}
+	if err := compactOperationJournalUnlocked(path, records); err != nil {
+		t.Fatal(err)
+	}
+	for pass := 0; pass < 2; pass++ {
+		loaded := loadOperationJournal(path, map[string]*goOperation{})
+		total := 0
+		for _, record := range loaded {
+			if record.DeliveryAcknowledged {
+				total += eventBytes(clientEvent{Payload: record.TerminalEvent})
+			}
+		}
+		if total > operationReplayTotalBytes || loaded["op-00"].HTTPStatus != http.StatusGone || loaded["op-23"].HTTPStatus != http.StatusOK || loaded["expired"] != nil {
+			t.Fatalf("recovery pass %d violated replay budget/retention: total=%d", pass, total)
+		}
+		if loaded["undelivered"].HTTPStatus != http.StatusOK || loaded["undelivered"].Result["blob"] != undelivered.Result["blob"] {
+			t.Fatal("recovery evicted an undelivered result")
+		}
+		// Inspect the raw reader as well: recovery must durably repair the snapshot,
+		// rather than just hiding old records from the public loader.
+		raw := loadOperationJournalUnlocked(path, map[string]*goOperation{}, false)
+		if raw["expired"] != nil || raw["op-00"].HTTPStatus != http.StatusGone {
+			t.Fatal("recovery did not persist retention/replay repair")
+		}
 	}
 }
 
@@ -7200,9 +7334,9 @@ func TestPublishedTerminalOperationIsNotRepublishedOnRestart(t *testing.T) {
 func TestBackgroundClaimFailureReturnsConflict(t *testing.T) {
 	dir := t.TempDir()
 	incumbent := newGoBackgroundOwner(dir, "/repo", 18021)
+	t.Cleanup(incumbent.close)
 	follower := newGoBackgroundOwner(dir, "/repo", 18022)
-	defer incumbent.close()
-	defer follower.close()
+	t.Cleanup(follower.close)
 	s := &server{config: dir, background: follower}
 	response := httptest.NewRecorder()
 	s.backgroundClaim(response, httptest.NewRequest(http.MethodPost, "/api/background/claim", nil))
@@ -7217,9 +7351,9 @@ func TestBackgroundClaimFailureReturnsConflict(t *testing.T) {
 func TestOlderBackgroundGenerationCannotRetakeFromNewerFollower(t *testing.T) {
 	dir := t.TempDir()
 	older := newGoBackgroundOwner(dir, "/repo", 18023)
+	t.Cleanup(older.close)
 	newer := newGoBackgroundOwner(dir, "/repo", 18024)
-	defer older.close()
-	defer newer.close()
+	t.Cleanup(newer.close)
 	stopHeartbeat(t, older)
 	stopHeartbeat(t, newer)
 	older.mu.Lock()
@@ -7338,6 +7472,7 @@ func TestEventJournalMigratesLegacyRecords(t *testing.T) {
 func TestServerShutdownStopsBackgroundAndChildren(t *testing.T) {
 	dir := t.TempDir()
 	background := newGoBackgroundOwner(dir, "/repo", 18021)
+	t.Cleanup(background.close)
 	command := exec.Command("sleep", "30")
 	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := command.Start(); err != nil {

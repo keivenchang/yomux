@@ -107,7 +107,7 @@ from .common import EVENT_LOG_PATH
 from .common import MAX_COMPACT_TRANSCRIPT_ITEMS
 from .common import MAX_EVENT_TAIL_LINES
 from .common import MAX_TRANSCRIPT_TAIL_LINES
-from .common import MAX_YOLOMUX_SESSION_TABS
+from .common import MAX_YOMUX_SESSION_TABS
 from .common import PROJECT_ROOT
 from .common import RUN_HISTORY_PATH
 from .common import SERVER_HOSTNAME
@@ -133,9 +133,9 @@ from .common import as_dict
 from .common import next_numbered_session_name
 from .common import tail_file_lines
 from .common import truncate_text
-from .common import yolomux_client_revision
-from .control import YolomuxControlServer
-from .control import send_yolomux_control_request
+from .common import yomux_client_revision
+from .control import YomuxControlServer
+from .control import send_yomux_control_request
 from .browser_diagnostic_receipts import JAVASCRIPT_MAX_SAFE_INTEGER
 from .diagnostic_redaction import redact_diagnostic_value
 from .search.search_indexer import SearchIndexerClient
@@ -159,10 +159,10 @@ from .stats_current import usage as stats_current_usage
 from .drop_actions import run_drop_action
 from .observability.events import EventLog
 from .observability.events import RunHistoryStore
-from .observability.events import mutate_yolomux_state  # noqa: F401 - Yoagent dependency injection re-export
+from .observability.events import mutate_yomux_state  # noqa: F401 - Yoagent dependency injection re-export
 from .observability.events import search_snippet
-from .observability.events import read_yolomux_state
-from .observability.events import update_yolomux_state
+from .observability.events import read_yomux_state
+from .observability.events import update_yomux_state
 from .server_logs import emit_server_log
 from .tmux.agent_tui import classify_agent_pane
 from .tmux.agent_tui import normalized_prompt_state
@@ -2381,8 +2381,8 @@ class YoagentAppDeps:
     yoagent_session_summary_lock yoagent_settings yoagent_skill_file_answer yoagent_skills_payload yoagent_stream_auxiliary_message_fields
     yoagent_stream_callback yoagent_summary_worker_lock yoagent_summary_worker_record yoagent_transports""".split()
     global_callables = """agent_screen_state codex_event_session_id discover_sessions hybrid_approval_prompt_state normalized_prompt_state
-    mutate_yolomux_state read_yolomux_state resolve_yoagent_backend tmux_capture_pane tmux_capture_pane_styled tmux_clear_input tmux_paste_text
-    transcript_activity_is_recent update_yolomux_state yoagent_activity_payload_signature yoagent_cli_auth_failure
+    mutate_yomux_state read_yomux_state resolve_yoagent_backend tmux_capture_pane tmux_capture_pane_styled tmux_clear_input tmux_paste_text
+    transcript_activity_is_recent update_yomux_state yoagent_activity_payload_signature yoagent_cli_auth_failure
     strip_yoagent_hidden_thinking strip_yoagent_stream_hidden_thinking yoagent_cli_fallback_reason yoagent_language_directive""".split()
 
     def __init__(self, app: Any):
@@ -2518,6 +2518,11 @@ class WatchBridge:
         channels = app.client_events.aggregate_channels()
         deadlines: list[float] = []
         if not channels.isdisjoint({"status", "attention"}):
+            worker = current.status_generation_worker
+            if current.status_generation_retry_at > 0 and (worker is None or not worker.is_alive()):
+                # Startup can return a refreshing snapshot. Wake for the existing retry
+                # even when every unrelated demand owner has a distant deadline.
+                deadlines.append(current.status_generation_retry_at)
             if current.tmux_signal_refresh_at > 0:
                 deadlines.append(current.tmux_signal_refresh_at)
             elif not app.tmux_signal_event_watcher_healthy():
@@ -2712,7 +2717,7 @@ class WatchBridge:
                 continue
             seen.add(key)
             items.append({"session": session, "messages": messages})
-        return items[:MAX_YOLOMUX_SESSION_TABS]
+        return items[:MAX_YOMUX_SESSION_TABS]
 
     def normalized_client_session_files(self, app, value: Any) -> list[dict[str, Any]]:
         if not isinstance(value, list):
@@ -2741,7 +2746,7 @@ class WatchBridge:
                 continue
             seen.add(signature)
             items.append(request)
-        return items[:MAX_YOLOMUX_SESSION_TABS]
+        return items[:MAX_YOMUX_SESSION_TABS]
 
     def normalized_client_activity_summary(self, app, value: Any) -> dict[str, Any]:
         if not activity_summary_enabled():
@@ -4475,16 +4480,6 @@ class WatchBridge:
                     record.status_generation_retry_at = time.monotonic() + 1.0
             return False
         generation = max(0, int(response.get("generation") or 0))
-        snapshot_payload: dict[str, Any] | None = None
-        if _body:
-            metadata = None
-            try:
-                metadata = validate_status_snapshot(response, _body)
-                decoded_snapshot = json.loads(_body)
-            except (StatusProtocolError, ValueError, TypeError):
-                decoded_snapshot = None
-            if metadata is not None and metadata.generation == generation and isinstance(decoded_snapshot, dict):
-                snapshot_payload = decoded_snapshot
         with self.state.lock:
             if self.state.event_watcher_record is not record or record.stop_event.is_set():
                 release_local_service_lease_eventually(
@@ -4495,9 +4490,7 @@ class WatchBridge:
             record.status_generation_stop_event.clear()
             record.status_generation_lease_id = lease_id
             record.status_generation = generation
-            self.state.auto_approve_signature = f"statusd:{generation}:{int(response.get('status') or HTTPStatus.OK)}"
-            self.state.auto_approve_payload = copy.deepcopy(snapshot_payload)
-            worker = threading.Thread(target=app.status_generation_wait_loop, args=(record,), name="statusd-generation-wait", daemon=True)
+            worker = threading.Thread(target=app.status_generation_wait_loop, args=(record, (response, _body)), name="statusd-generation-wait", daemon=True)
             record.status_generation_worker = worker
         common.start_thread_with_rollback(worker, lambda: app.stop_status_generation_watcher(record))
         return True
@@ -4514,22 +4507,35 @@ class WatchBridge:
                 app.status_client.release_generation_lease,
                 lease_id,
             )
-        if worker is not None and worker is not threading.current_thread():
+        if worker is not threading.current_thread() and common.thread_is_running(worker):
             worker.join(timeout=2.0)
 
-    def status_generation_wait_loop(self, app, record: ClientEventWatcherRecord) -> None:
+    def status_generation_wait_loop(
+        self,
+        app,
+        record: ClientEventWatcherRecord,
+        initial_snapshot: tuple[dict[str, Any], bytes] | None = None,
+    ) -> None:
         worker = threading.current_thread()
         retry_seconds = 0.25
         try:
             while not record.stop_event.is_set() and not record.status_generation_stop_event.is_set():
                 with self.state.lock:
-                    if self.state.event_watcher_record is not record:
+                    if not self.status_generation_worker_is_current(app, record, worker):
                         return
                     generation = record.status_generation
-                response = app.status_client.probe_generation(generation)
+                # A subscriber whose first HTTP read was pending still needs this baseline,
+                # even if statusd never advances again. Reuse the later-generation publisher.
+                snapshot = initial_snapshot
+                initial_snapshot = None
+                response = (
+                    {"ok": True, "generation": generation}
+                    if snapshot is not None
+                    else app.status_client.probe_generation(generation)
+                )
                 if response.get("ok") is True:
                     next_generation = max(0, int(response.get("generation") or 0))
-                    changed = response.get("changed") is True and next_generation > generation
+                    changed = snapshot is not None or (response.get("changed") is True and next_generation > generation)
                     app.note_client_event_recurring_work(record, "status_generation_lease", useful=changed)
                     if changed:
                         event_payload: dict[str, object] = {
@@ -4538,21 +4544,22 @@ class WatchBridge:
                             "generation": next_generation,
                             "signature": f"statusd:{next_generation}:{int(HTTPStatus.OK)}",
                         }
-                        snapshot_response, snapshot_body = app.status_client.snapshot(app.sessions, timeout=1.0)
+                        snapshot_response, snapshot_body = snapshot or app.status_client.snapshot(app.sessions, timeout=1.0)
                         snapshot_payload = None
                         if snapshot_response.get("ok") is True and snapshot_body:
                             metadata = None
                             try:
                                 metadata = validate_status_snapshot(snapshot_response, snapshot_body)
-                                snapshot_payload = json.loads(snapshot_body)
+                                decoded_snapshot = json.loads(snapshot_body)
                             except (StatusProtocolError, ValueError, TypeError):
-                                snapshot_payload = None
-                            if metadata is not None and metadata.generation == next_generation and isinstance(snapshot_payload, dict):
+                                decoded_snapshot = None
+                            if metadata is not None and metadata.generation == next_generation and isinstance(decoded_snapshot, dict):
+                                snapshot_payload = decoded_snapshot
                                 event_payload["refresh"] = False
                         with self.state.lock:
-                            if self.state.event_watcher_record is not record:
+                            if not self.status_generation_worker_is_current(app, record, worker):
                                 return
-                            previous_payload = copy.deepcopy(self.state.auto_approve_payload)
+                            previous_payload = None if snapshot is not None else copy.deepcopy(self.state.auto_approve_payload)
                             record.status_generation = next_generation
                             self.state.auto_approve_signature = f"statusd:{next_generation}:{int(HTTPStatus.OK)}"
                             if isinstance(snapshot_payload, dict):
@@ -4560,13 +4567,16 @@ class WatchBridge:
                         if isinstance(snapshot_payload, dict):
                             session_order = snapshot_payload.get("session_order")
                             if isinstance(session_order, list):
-                                app.apply_session_roster(session_order)
+                                app.apply_session_roster(session_order, status_generation_owner=(record, worker))
                             patch = app.auto_approve_client_event_patch(previous_payload, snapshot_payload)
                             if patch is None:
                                 retry_seconds = 0.25
                                 continue
                             event_payload = {**event_payload, **patch}
-                        app.publish_client_event("auto_approve_changed", event_payload, trigger="statusd-generation", cache="ready")
+                        with self.state.lock:
+                            if not self.status_generation_worker_is_current(app, record, worker):
+                                return
+                            app.publish_client_event("auto_approve_changed", event_payload, trigger="statusd-generation", cache="ready")
                     retry_seconds = 0.25
                     if not changed and record.status_generation_stop_event.wait(STATUS_GENERATION_RPC_WAIT_SECONDS):
                         return
@@ -4579,6 +4589,16 @@ class WatchBridge:
             with self.state.lock:
                 if self.state.event_watcher_record is record and record.status_generation_worker is worker:
                     record.status_generation_worker = None
+
+    def status_generation_worker_is_current(self, app, record: ClientEventWatcherRecord, worker: threading.Thread) -> bool:
+        del app
+        with self.state.lock:
+            return (
+                self.state.event_watcher_record is record
+                and record.status_generation_worker is worker
+                and not record.stop_event.is_set()
+                and not record.status_generation_stop_event.is_set()
+            )
 
     def poll_tmux_signals_client_event_once(self, app) -> list[str]:
         started = time.perf_counter()
@@ -4872,11 +4892,11 @@ class WatchBridge:
         app.stop_status_generation_watcher(record)
         # Keep in-flight metadata ownership until its finally block releases the guard; a
         # Git/filesystem operation may not have a cancellation boundary.
-        if thread is not None and thread is not threading.current_thread():
+        if thread is not threading.current_thread() and common.thread_is_running(thread):
             thread.join(timeout=2.0)
-        if watchd_worker is not None and watchd_worker is not threading.current_thread():
+        if watchd_worker is not threading.current_thread() and common.thread_is_running(watchd_worker):
             watchd_worker.join(timeout=WATCHD_REVISION_STOP_JOIN_TIMEOUT_SECONDS)
-        if roster_worker is not None and roster_worker is not threading.current_thread():
+        if roster_worker is not threading.current_thread() and common.thread_is_running(roster_worker):
             roster_worker.join(timeout=2.0)
         with self.state.lock:
             current_workers = (
@@ -8431,7 +8451,7 @@ class TmuxWebtermApp:
         self.yoagent_controller.load_yoagent_session_summaries()
         self.event_log = EventLog(EVENT_LOG_PATH)
         self.run_history_store = RunHistoryStore(RUN_HISTORY_PATH)
-        self.control_server = YolomuxControlServer(self.handle_control_request)
+        self.control_server = YomuxControlServer(self.handle_control_request)
         self.background_scheduler: BackgroundScheduler = BackgroundScheduler(project_root=str(PROJECT_ROOT))
         self._application_teardown_lock = threading.Lock()
         self._application_teardown_done = False
@@ -9316,7 +9336,9 @@ class TmuxWebtermApp:
         # startup, and each service can retry through its normal local lifecycle.
         self.job_client.start_for_scheduler()
         composed_owner_for(self, "_session_files_coordinator", SessionFilesCoordinator).start()
-        self.pricing_refresh_coordinator.start_periodic()
+        # Offline parity servers must not change response state through a failed provider fetch.
+        if os.environ.get("YOMUX_TEST_DISABLE_PRICING_REFRESH") != "1":
+            self.pricing_refresh_coordinator.start_periodic()
         self.start_status_collector_lease()
         # Parity and migration fixtures may supply a fixed stats database and
         # deliberately disable live collectors. Keep the production HTTP and
@@ -10113,35 +10135,42 @@ class TmuxWebtermApp:
         *,
         invalidate_status: bool = True,
         refresh_metadata: bool = True,
+        status_generation_owner: tuple[ClientEventWatcherRecord, threading.Thread] | None = None,
     ) -> bool:
         """Install one tmux-session roster and invalidate metadata on membership transitions."""
 
         record = self.activity_transcript_service.transcripts_payload_cache_record
         with record.publication_lock:
-            roster = list(dict.fromkeys(session.strip() for session in sessions if isinstance(session, str) and session.strip()))
-            previous_roster = list(self.sessions)
-            membership_changed = set(roster) != set(self.sessions)
-            self.sessions = roster
-            if membership_changed:
-                self.topology_generation = getattr(self, "topology_generation", 0) + 1
-                self.advance_transcripts_payload_input_generation()
-        if not roster:
-            self.stop_status_collector_lease()
-        if membership_changed and not self.status_service_mode:
-            # The web roster is also the statusd snapshot request's roster owner. Invalidate the
-            # daemon at the same lifecycle boundary so its next generation carries every session
-            # the metadata build just observed; otherwise transcripts and status rows converge on
-            # different rosters until an unrelated status change occurs.
-            if invalidate_status:
-                self.status_client.invalidate("tmux-topology", self.sessions, self.topology_generation)
-            # Record the transition only after installing the roster. A build that started before
-            # this instant cannot have observed the new membership, so the existing single-flight
-            # server process must either start now or queue one publishing follow-up behind that older
-            # build. statusd owns roster production only; it has no browser metadata consumer and
-            # must not publish a second transcript-metadata stream from its internal app.
-            if refresh_metadata:
-                self.start_transcripts_payload_refresh(publish=True, not_before=time.monotonic(), lifecycle_owner=True)
-        return membership_changed
+            # Check after acquiring roster publication ownership: a retired status worker
+            # can have waited here while its replacement published a newer roster.
+            owner_lock = self.client_watch_service.lock if status_generation_owner is not None else record.publication_lock
+            with owner_lock:
+                if status_generation_owner is not None and not self._watch_bridge.status_generation_worker_is_current(self, *status_generation_owner):
+                    return False
+                roster = list(dict.fromkeys(session.strip() for session in sessions if isinstance(session, str) and session.strip()))
+                previous_roster = list(self.sessions)
+                membership_changed = set(roster) != set(self.sessions)
+                self.sessions = roster
+                if membership_changed:
+                    self.topology_generation = getattr(self, "topology_generation", 0) + 1
+                    self.advance_transcripts_payload_input_generation()
+                if not roster:
+                    self.stop_status_collector_lease()
+                if membership_changed and not self.status_service_mode:
+                    # The web roster is also the statusd snapshot request's roster owner. Invalidate the
+                    # daemon at the same lifecycle boundary so its next generation carries every session
+                    # the metadata build just observed; otherwise transcripts and status rows converge on
+                    # different rosters until an unrelated status change occurs.
+                    if invalidate_status:
+                        self.status_client.invalidate("tmux-topology", self.sessions, self.topology_generation)
+                    # Record the transition only after installing the roster. A build that started before
+                    # this instant cannot have observed the new membership, so the existing single-flight
+                    # server process must either start now or queue one publishing follow-up behind that older
+                    # build. statusd owns roster production only; it has no browser metadata consumer and
+                    # must not publish a second transcript-metadata stream from its internal app.
+                    if refresh_metadata:
+                        self.start_transcripts_payload_refresh(publish=True, not_before=time.monotonic(), lifecycle_owner=True)
+                return membership_changed
 
     def advance_topology_generation(self) -> int:
         self.topology_generation = getattr(self, "topology_generation", 0) + 1
@@ -10156,20 +10185,20 @@ class TmuxWebtermApp:
         return kept
 
     def persisted_auto_sessions(self) -> list[str]:
-        enabled = read_yolomux_state().get("auto_approve_enabled", [])
+        enabled = read_yomux_state().get("auto_approve_enabled", [])
         if not isinstance(enabled, list):
             return []
         return [session for session in enabled if isinstance(session, str) and session in self.sessions]
 
     def set_persisted_auto_session(self, session: str, enabled: bool) -> None:
-        state = read_yolomux_state()
+        state = read_yomux_state()
         current = state.get("auto_approve_enabled", [])
         sessions = {name for name in current if isinstance(name, str)} if isinstance(current, list) else set()
         if enabled:
             sessions.add(session)
         else:
             sessions.discard(session)
-        update_yolomux_state({"auto_approve_enabled": sorted(sessions)})
+        update_yomux_state({"auto_approve_enabled": sorted(sessions)})
 
     def persist_auto_sessions(self) -> None:
         status = self.approval_client.service_status()
@@ -10180,7 +10209,7 @@ class TmuxWebtermApp:
             if isinstance(item, dict) and item.get("enabled") is True
         }
         local_enabled = {session for session in local_enabled if session in self.sessions}
-        current = read_yolomux_state().get("auto_approve_enabled", [])
+        current = read_yomux_state().get("auto_approve_enabled", [])
         if isinstance(current, list):
             external_enabled = {
                 session
@@ -10189,10 +10218,10 @@ class TmuxWebtermApp:
             }
         else:
             external_enabled = set()
-        update_yolomux_state({"auto_approve_enabled": sorted(local_enabled | external_enabled)})
+        update_yomux_state({"auto_approve_enabled": sorted(local_enabled | external_enabled)})
 
     def notify_status(self) -> dict[str, Any]:
-        return {"enabled": bool(read_yolomux_state().get("notify_enabled", False))}
+        return {"enabled": bool(read_yomux_state().get("notify_enabled", False))}
 
     def settings_payload(self) -> dict[str, Any]:
         return settings_payload()
@@ -11357,8 +11386,12 @@ class TmuxWebtermApp:
     def stop_status_generation_watcher(self, record: ClientEventWatcherRecord) -> None:
         return self._watch_bridge.stop_status_generation_watcher(self, record)
 
-    def status_generation_wait_loop(self, record: ClientEventWatcherRecord) -> None:
-        return self._watch_bridge.status_generation_wait_loop(self, record)
+    def status_generation_wait_loop(
+        self,
+        record: ClientEventWatcherRecord,
+        initial_snapshot: tuple[dict[str, Any], bytes] | None = None,
+    ) -> None:
+        return self._watch_bridge.status_generation_wait_loop(self, record, initial_snapshot)
 
     def poll_tmux_signals_client_event_once(self) -> list[str]:
         return self._watch_bridge.poll_tmux_signals_client_event_once(self)
@@ -11924,7 +11957,7 @@ class TmuxWebtermApp:
             worker.daemon = True
         else:
             worker = threading.Thread(target=run, name="transcripts-payload-refresh", daemon=True)
-        worker._yolomux_transcripts_payload_owner = self
+        worker._yomux_transcripts_payload_owner = self
         generation = self.begin_transcripts_payload_work(
             worker,
             queue_rebuild_after=not_before,
@@ -12514,7 +12547,7 @@ class TmuxWebtermApp:
         return value if value in {"pane", "hybrid"} else "hybrid"
 
     def set_notify(self, enabled: bool) -> dict[str, Any]:
-        update_yolomux_state({"notify_enabled": enabled})
+        update_yomux_state({"notify_enabled": enabled})
         self.log_event(
             None,
             "notify_enabled" if enabled else "notify_disabled",
@@ -14038,7 +14071,7 @@ class TmuxWebtermApp:
         payload = {
             "server_time": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
             "server_version": YOMUX_VERSION,
-            "client_revision": yolomux_client_revision(),
+            "client_revision": yomux_client_revision(),
             "server_started_at": SERVER_STARTED_AT,
             "server_uptime_seconds": max(0.0, time.time() - SERVER_STARTED_AT),
             "session_order": session_order,
@@ -14442,7 +14475,7 @@ class TmuxWebtermApp:
                 self.persist_metadata_badge_state_locked()
 
     def load_metadata_badge_state(self) -> None:
-        state = read_yolomux_state()
+        state = read_yomux_state()
         with self.metadata_badge_lock:
             signatures = self.sanitized_metadata_badge_signatures(state.get(METADATA_BADGE_SIGNATURES_STATE_KEY))
             self.metadata_badge_records = {
@@ -14454,7 +14487,7 @@ class TmuxWebtermApp:
         return {session: dict(record.signature) for session, record in self.metadata_badge_records.items()}
 
     def persist_metadata_badge_state_locked(self) -> None:
-        update_yolomux_state(
+        update_yomux_state(
             {
                 METADATA_BADGE_SIGNATURES_STATE_KEY: self.metadata_badge_signature_snapshot_locked(),
                 METADATA_BADGE_PULSE_UNTIL_STATE_KEY: {},
@@ -16605,13 +16638,13 @@ class TmuxWebtermApp:
 
     def create_next_session_plan(self) -> tuple[dict[str, Any], HTTPStatus]:
         self.refresh_sessions()
-        if len(self.sessions) >= MAX_YOLOMUX_SESSION_TABS:
-            diagnostic = f"maximum session tabs reached: {MAX_YOLOMUX_SESSION_TABS}"
-            return {"sessions": self.sessions, **user_message_payload("session.error.maximumTabs", diagnostic, limit=MAX_YOLOMUX_SESSION_TABS)}, HTTPStatus.CONFLICT
+        if len(self.sessions) >= MAX_YOMUX_SESSION_TABS:
+            diagnostic = f"maximum session tabs reached: {MAX_YOMUX_SESSION_TABS}"
+            return {"sessions": self.sessions, **user_message_payload("session.error.maximumTabs", diagnostic, limit=MAX_YOMUX_SESSION_TABS)}, HTTPStatus.CONFLICT
         session = next_numbered_session_name(self.sessions)
         if session is None:
-            diagnostic = f"no available numbered session names from 1 to {MAX_YOLOMUX_SESSION_TABS}"
-            return {"sessions": self.sessions, **user_message_payload("session.error.noAvailableNumberedNames", diagnostic, limit=MAX_YOLOMUX_SESSION_TABS)}, HTTPStatus.CONFLICT
+            diagnostic = f"no available numbered session names from 1 to {MAX_YOMUX_SESSION_TABS}"
+            return {"sessions": self.sessions, **user_message_payload("session.error.noAvailableNumberedNames", diagnostic, limit=MAX_YOMUX_SESSION_TABS)}, HTTPStatus.CONFLICT
         with self.session_reservation_lock:
             generation = max(time.time_ns() // 1_000_000, self.session_reservation_generation + 1)
             if generation > JAVASCRIPT_MAX_SAFE_INTEGER:
@@ -16659,18 +16692,18 @@ class TmuxWebtermApp:
                 "available_terminals": available_terminal_commands(),
                 **user_message_payload("session.error.agentUnavailablePath", diagnostic, agent=terminal_name),
             }, HTTPStatus.NOT_FOUND
-        if len(self.sessions) >= MAX_YOLOMUX_SESSION_TABS:
-            diagnostic = f"maximum session tabs reached: {MAX_YOLOMUX_SESSION_TABS}"
+        if len(self.sessions) >= MAX_YOMUX_SESSION_TABS:
+            diagnostic = f"maximum session tabs reached: {MAX_YOMUX_SESSION_TABS}"
             return {
                 "sessions": self.sessions,
-                **user_message_payload("session.error.maximumTabs", diagnostic, limit=MAX_YOLOMUX_SESSION_TABS),
+                **user_message_payload("session.error.maximumTabs", diagnostic, limit=MAX_YOMUX_SESSION_TABS),
             }, HTTPStatus.CONFLICT
         session = next_numbered_session_name(self.sessions)
         if session is None:
-            diagnostic = f"no available numbered session names from 1 to {MAX_YOLOMUX_SESSION_TABS}"
+            diagnostic = f"no available numbered session names from 1 to {MAX_YOMUX_SESSION_TABS}"
             return {
                 "sessions": self.sessions,
-                **user_message_payload("session.error.noAvailableNumberedNames", diagnostic, limit=MAX_YOLOMUX_SESSION_TABS),
+                **user_message_payload("session.error.noAvailableNumberedNames", diagnostic, limit=MAX_YOMUX_SESSION_TABS),
             }, HTTPStatus.CONFLICT
         requested = str(requested_session or "").strip()
         if requested and (requested != session or not isinstance(reservation_generation, int) or reservation_generation <= 0):

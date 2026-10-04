@@ -9,7 +9,7 @@ from tools.test_plan import automatic_test_markers
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LIVE_YOLOMUX_PORTS = ("7770", "7771", "7772", "7773")
+LIVE_YOMUX_PORTS = ("7770", "7771", "7772", "7773")
 
 
 def automated_test_source_paths():
@@ -25,7 +25,7 @@ def test_automated_tests_do_not_reference_live_yolomux_ports():
         if path.name == Path(__file__).name:
             continue
         text = path.read_text(encoding="utf-8")
-        for port in LIVE_YOLOMUX_PORTS:
+        for port in LIVE_YOMUX_PORTS:
             if re.search(rf"\b(?:localhost|127\.0\.0\.1|0\.0\.0\.0):{port}\b|:{port}\b", text):
                 offenders.append(f"{path.relative_to(REPO_ROOT)} references live YOmux port {port}")
 

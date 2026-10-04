@@ -338,7 +338,7 @@ def test_an_arm_variable_missing_from_the_container_allowlist_is_refused_before_
     """
 
     allowlist = harness.forwarded_test_env()
-    assert "YOLOMUX_WORKTREE_WRITER_TOKEN" in allowlist, allowlist
+    assert "YOMUX_WORKTREE_WRITER_TOKEN" in allowlist, allowlist
 
     refused = harness.arm_env_admission("YOLOMUX_DEFECT2_NOT_FORWARDED")
     assert refused["admitted"] is False
@@ -492,9 +492,9 @@ def test_attribution_never_breaks_the_run_it_observes(tmp_path, monkeypatch):
 
     conftest = _conftest_module()
     monkeypatch.setenv("YOLOMUX_E2E_EVIDENCE_DIR", str(tmp_path))
-    directory = harness.enable_attribution(tmp_path)
+    harness.enable_attribution(tmp_path)
     # Replace the writable file with a directory so the append raises OSError.
-    (directory / "worker-master.jsonl").mkdir()
+    conftest._defect2_attribution_path().mkdir()
     conftest.pytest_runtest_logreport(
         SimpleNamespace(when="call", outcome="passed", nodeid="tests/a.py::x", duration=0.1, start=100.0)
     )
@@ -503,6 +503,30 @@ def test_attribution_never_breaks_the_run_it_observes(tmp_path, monkeypatch):
     conftest.pytest_runtest_logreport(
         SimpleNamespace(when="call", outcome="passed", nodeid="tests/a.py::x", duration=0.1, start=100.0)
     )
+
+
+@pytest.mark.parametrize("worker", ["master", "gw3"])
+def test_attribution_uses_a_stable_encoder_when_shared_json_is_patched(tmp_path, monkeypatch, worker):
+    """A test that patches json.dumps must not make the pytest report hook fail too."""
+
+    conftest = _conftest_module()
+    monkeypatch.setenv("YOLOMUX_E2E_EVIDENCE_DIR", str(tmp_path))
+    monkeypatch.setenv("PYTEST_XDIST_WORKER", worker)
+    harness.enable_attribution(tmp_path)
+
+    def fail_materialization(*_args, **_kwargs):
+        raise AssertionError("opaque product bytes must not be decoded, copied, or encoded")
+
+    with monkeypatch.context() as isolated_patch:
+        isolated_patch.setattr(conftest.json, "dumps", fail_materialization)
+        conftest.pytest_runtest_logreport(
+            SimpleNamespace(when="call", outcome="passed", nodeid="tests/a.py::x", duration=0.1, start=100.0)
+        )
+
+    rows = harness.worker_assignment(tmp_path)
+    assert [row["nodeid"] for row in rows] == ["tests/a.py::x"], rows
+    assert conftest._defect2_attribution_path().is_file()
+    assert rows[0]["worker"] == worker, rows
 
 
 def test_attribution_is_off_until_the_harness_turns_it_on(tmp_path):

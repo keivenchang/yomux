@@ -17,7 +17,7 @@ func TestLifecycleStartupPreparesDefaultBeforeFirstRequest(t *testing.T) {
 	now := time.Unix(RetentionSeconds+1000, 0)
 	products := []ProductKey{{1800, 10}, {300, 1}}
 	l := NewLifecycle(w, LifecycleConfig{Now: func() time.Time { return now }, MaxCells: 64, StartupProducts: products, BackgroundBackfillCadence: 30 * time.Second, BackgroundBackfillInitialDelay: 30 * time.Second})
-	defer l.closeReadDatabase()
+	t.Cleanup(l.Stop)
 	service := NewStatsService(w, StatsServiceConfig{Now: func() time.Time { return now }, Products: products})
 	for i := 0; i < 5; i++ {
 		if err := l.RunOnce(ctx); err != nil {
@@ -60,6 +60,7 @@ func TestLifecycleStartupFrozenHorizonAndExplicitDemandPriority(t *testing.T) {
 	defer w.Close()
 	now := time.Unix(RetentionSeconds+1000, 0)
 	l := NewLifecycle(w, LifecycleConfig{Now: func() time.Time { return now }, MaxCells: 1, StartupProducts: []ProductKey{{300, 1}}, BackgroundBackfillCadence: 30 * time.Second})
+	t.Cleanup(l.Stop)
 	cells, err := l.selectCells(ctx, now, 1)
 	if err != nil || len(cells) != 1 || cells[0].ResolutionSeconds != 1 {
 		t.Fatalf("first startup selection: %+v %v", cells, err)
@@ -90,6 +91,7 @@ func TestLifecycleStartupTimesOutWithoutExtendingBudget(t *testing.T) {
 	defer w.Close()
 	now := time.Unix(RetentionSeconds+1000, 0)
 	l := NewLifecycle(w, LifecycleConfig{Now: func() time.Time { return now }, StartupProducts: []ProductKey{{300, 1}}, BackgroundBackfillCadence: 30 * time.Second})
+	t.Cleanup(l.Stop)
 	if _, err := l.selectCells(ctx, now, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +121,7 @@ func TestLifecycleStartupAdvancingClockPreparesDefault(t *testing.T) {
 	now := time.Unix(RetentionSeconds+1000, 0)
 	products := []ProductKey{{1800, 10}, {300, 1}}
 	l := NewLifecycle(w, LifecycleConfig{Now: func() time.Time { return now }, MaxCells: 64, StartupProducts: products, BackgroundBackfillCadence: 30 * time.Second, BackgroundBackfillInitialDelay: 30 * time.Second})
-	defer l.closeReadDatabase()
+	t.Cleanup(l.Stop)
 	service := NewStatsService(w, StatsServiceConfig{Now: func() time.Time { return now }, Products: products})
 	for i := 0; i < 10; i++ {
 		if err := l.RunOnce(ctx); err != nil {

@@ -42,10 +42,12 @@ from tests.gate_harness import gate_runtime_paths
 from tests.gate_harness import inotify_instance_census
 from tests.gate_harness import local_service_daemons_beneath
 from tests.gate_harness import retire_local_service_daemons_beneath
+from tests.gate_harness import remove_fixture_runtime_root
 from tests.gate_harness import LOCAL_SERVICE_DAEMON_SURVIVED_CODE
 from tests.gate_harness import resolved_gate_writable_paths
 from tests.gate_harness import stop_fixture_app_runtime
 from tests.gate_harness import wait_for_fixture_api_quiescence
+from yomux_lib.statusd_client import StatusClient
 
 
 def clean_browser_receipt_barrier(*, accepted=0):
@@ -534,7 +536,7 @@ def test_full_browser_gate_keeps_network_ring_404_fatal():
                     "errors": [],
                     "receiptBarrier": clean_browser_receipt_barrier(),
                 }
-            if "const state = window.__yolomuxBrowserJourneyGate" in source:
+            if "const state = window.__yomuxBrowserJourneyGate" in source:
                 return {"reachable": False, "visitedSurfaces": []}
             if "return [...state.consumedServerLogIds]" in source:
                 return []
@@ -600,7 +602,7 @@ def test_full_browser_gate_fails_closed_on_malformed_receipt_barrier(label, barr
                     "errors": [],
                     "receiptBarrier": barrier,
                 }
-            if "const state = window.__yolomuxBrowserJourneyGate" in source:
+            if "const state = window.__yomuxBrowserJourneyGate" in source:
                 return {"reachable": False, "visitedSurfaces": []}
             if "return [...state.consumedServerLogIds]" in source:
                 return []
@@ -1040,7 +1042,7 @@ def test_browser_gate_uses_strict_in_process_ring_reader_without_opening_http_lo
                 }
             if "return [...state.consumedServerLogIds]" in source:
                 return []
-            if "const state = window.__yolomuxBrowserJourneyGate" in source:
+            if "const state = window.__yomuxBrowserJourneyGate" in source:
                 return {"reachable": False, "visitedSurfaces": []}
             raise AssertionError(f"unexpected browser script: {source}")
 
@@ -1097,7 +1099,7 @@ def test_full_browser_gate_scopes_shared_ring_to_server_epoch_sequence_boundary(
                     "errors": [],
                     "receiptBarrier": clean_browser_receipt_barrier(),
                 }
-            if "const existing = window.__yolomuxBrowserJourneyGate" in source:
+            if "const existing = window.__yomuxBrowserJourneyGate" in source:
                 return {"malformed": False, "visitedSurfaces": []}
             if "for (const id of arguments[1])" in source:
                 epoch, event_ids = _args
@@ -1113,7 +1115,7 @@ def test_full_browser_gate_scopes_shared_ring_to_server_epoch_sequence_boundary(
                     self.server_log_epoch = epoch
                     self.consumed_server_log_ids.clear()
                 return list(self.consumed_server_log_ids)
-            if "const state = window.__yolomuxBrowserJourneyGate" in source:
+            if "const state = window.__yomuxBrowserJourneyGate" in source:
                 return {"reachable": False, "visitedSurfaces": []}
             raise AssertionError(f"unexpected browser script: {source}")
 
@@ -2289,7 +2291,7 @@ def test_browser_fixture_finish_uses_process_ring_and_never_fetches_for_off_orig
                 }
             if "return [...state.consumedServerLogIds]" in source:
                 return []
-            if "const state = window.__yolomuxBrowserJourneyGate" in source:
+            if "const state = window.__yomuxBrowserJourneyGate" in source:
                 return {"reachable": False, "visitedSurfaces": []}
             raise AssertionError(f"unexpected browser script: {source}")
 
@@ -4106,6 +4108,263 @@ def test_registry_reaper_settlement_failure_precedes_runtime_root_removal(tmp_pa
         gate_harness_module.remove_fixture_runtime_root(ledger, tmp_path, label="fixture root")
 
     assert removed == []
+
+
+def test_gate_root_retirement_stops_spawn_owner_before_adopter_reaper_and_root_removal(monkeypatch):
+    root = Path("/tmp") / f"ysd-{os.getpid()}-{time.time_ns():x}"
+    unrelated_root = root.with_name(f"{root.name}-unrelated")
+    root.mkdir(mode=0o700)
+    unrelated_root.mkdir(mode=0o700)
+    monkeypatch.setenv("YOLOMUX_ROOT", str(root))
+    for name in ("CONFIG", "STATE", "CACHE", "RUNTIME"):
+        monkeypatch.setenv(f"YOLOMUX_{name}_DIR", str(root / name.lower()))
+    monkeypatch.delenv("YOLOMUX_HOST_ARTIFACT_DIR", raising=False)
+    monkeypatch.delenv("YOLOMUX_CODEX_HOME", raising=False)
+    monkeypatch.delenv("YOMUX_CODEX_HOME", raising=False)
+    monkeypatch.delenv("PYTHONPYCACHEPREFIX", raising=False)
+    monkeypatch.setattr(local_service_registry, "MANAGED_PRIVATE_ROOT", True)
+    service_dir = root / "runtime" / "services"
+    socket_path = service_dir / "statusd.sock"
+    owner_client = StatusClient(socket_path)
+    adopter_client = StatusClient(socket_path)
+    unrelated_tmp = unrelated_root / "tmp"
+    unrelated_tmp.mkdir()
+    unrelated_runtime_marker = unrelated_root / "runtime" / "owner.json"
+    unrelated_runtime_marker.parent.mkdir(parents=True)
+    unrelated_runtime_marker.write_bytes(b"{}\n")
+    unrelated_environment = dict(os.environ)
+    unrelated_environment["TMPDIR"] = str(unrelated_tmp)
+    unrelated_process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        env=unrelated_environment,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    ledger = gate_harness_module.FixtureLocalServiceLedger()
+    ledger.record_registry(owner_client.registry)
+    ledger.record_registry(adopter_client.registry)
+
+    try:
+        assert owner_client.registry.ensure_started(), json.dumps(owner_client.registry.status(), sort_keys=True)
+        owner_process = owner_client.registry.process
+        assert owner_process is not None
+        owner_pid = owner_process.pid
+        owner_generation = owner_client.registry.spawn_ownership
+        assert owner_generation is not None
+        assert owner_client.registry.claim is not None
+        owner_claim_path = owner_client.registry.claim_ledger().claim_path(owner_client.registry.claim.claim_id)
+        assert adopter_client.registry.ensure_started()
+        adopter = adopter_client.registry
+        assert adopter.process is None
+        assert adopter._adopted_reaper_pid == owner_pid
+        assert owner_client.registry._read_record()["root_sharing"] == "managed-private"
+        metadata_stop = threading.Event()
+
+        def metadata_warmer():
+            metadata_stop.wait()
+            owner_process.wait()
+
+        metadata_thread = threading.Thread(target=metadata_warmer, name="fixture-test-metadata-warmer")
+        metadata_thread.start()
+
+        app = SimpleNamespace(
+            status_client=adopter_client,
+            metadata_warm_lock=threading.Lock(),
+            metadata_warm_record=SimpleNamespace(worker=metadata_thread, stop_event=metadata_stop),
+            _fixture_local_service_ledger=ledger,
+            stop_client_event_watcher=lambda: None,
+            stop_batchd_operation_service=lambda: None,
+            stop_background_scheduler=lambda: None,
+            stop_auto_approve_all=lambda: None,
+        )
+        stop_fixture_app_runtime(app, label="same-root adopted statusd app")
+        assert app._fixture_runtime_stopped is True
+        assert any(thread.is_alive() for thread in adopter._child_ownership.reaper_threads), {
+            "adopted_reaper_pid": adopter._adopted_reaper_pid,
+            "reapers": [(thread.name, thread.is_alive()) for thread in adopter._child_ownership.reaper_threads],
+            "owner_pid": owner_pid,
+        }
+        assert owner_process.poll() is None
+        assert metadata_thread.is_alive(), "metadata observer must remain joined to batchd retirement"
+
+        actual_rmtree = gate_harness_module.shutil.rmtree
+
+        def verify_retired_before_root_removal(path, *args, **kwargs):
+            if Path(path) == root:
+                assert owner_process.poll() is not None
+                assert not gate_harness_module.fixture_owned_process_group_exists(
+                    owner_generation,
+                    label="same-root statusd owner regression",
+                    require_proof=False,
+                )
+                assert not socket_path.exists()
+                assert not owner_client.registry.record_path.exists()
+                assert all(not thread.is_alive() for thread in adopter._child_ownership.reaper_threads)
+                assert all(not thread.is_alive() for thread in owner_client.registry._child_ownership.reaper_threads)
+                assert not metadata_thread.is_alive()
+                assert unrelated_process.poll() is None
+                assert unrelated_runtime_marker.read_bytes() == b"{}\n"
+            return actual_rmtree(path, *args, **kwargs)
+
+        with monkeypatch.context() as cleanup_patch:
+            cleanup_patch.setattr(gate_harness_module.shutil, "rmtree", verify_retired_before_root_removal)
+            remove_fixture_runtime_root(
+                ledger,
+                root,
+                label="same-root statusd owner regression",
+                after_retirement=lambda: gate_harness_module.join_deferred_fixture_metadata_warmers(
+                    (app,), label="same-root statusd owner regression",
+                ),
+            )
+        assert not root.exists()
+        assert not owner_claim_path.exists()
+    finally:
+        if unrelated_process.poll() is None:
+            unrelated_process.terminate()
+            unrelated_process.wait(timeout=2)
+        if owner_client.registry.process is not None and owner_client.registry.process.poll() is None:
+            gate_harness_module.stop_fixture_local_service_processes(
+                gate_harness_module.capture_fixture_local_service_processes(
+                    (owner_client.registry, adopter_client.registry),
+                ),
+                label="same-root statusd owner regression cleanup",
+            )
+        if "metadata_thread" in locals():
+            metadata_stop.set()
+            gate_harness_module.join_fixture_metadata_warmer(
+                metadata_thread,
+                label="same-root statusd owner regression cleanup",
+            )
+        gate_harness_module.settle_fixture_local_service_reapers(
+            (owner_client.registry, adopter_client.registry),
+            label="same-root statusd owner regression cleanup",
+        )
+        if "owner_process" not in locals() or owner_process.poll() is not None:
+            shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(unrelated_root, ignore_errors=True)
+
+
+def test_fixture_app_cleanup_retires_adopted_statusd_from_its_private_service_root(monkeypatch):
+    root = Path("/tmp") / f"ysd-app-{os.getpid()}-{time.time_ns():x}-{'x' * 80}"
+    unrelated_root = root.with_name(f"{root.name}-unrelated")
+    root.mkdir(mode=0o700)
+    unrelated_root.mkdir(mode=0o700)
+    monkeypatch.setenv("YOLOMUX_TEST_ROOT", str(root))
+    monkeypatch.delenv("YOLOMUX_ROOT", raising=False)
+    for name in ("CONFIG", "STATE", "CACHE", "RUNTIME"):
+        monkeypatch.setenv(f"YOLOMUX_{name}_DIR", str(root / name.lower()))
+    monkeypatch.delenv("YOLOMUX_HOST_ARTIFACT_DIR", raising=False)
+    monkeypatch.delenv("YOLOMUX_CODEX_HOME", raising=False)
+    monkeypatch.delenv("YOMUX_CODEX_HOME", raising=False)
+    monkeypatch.delenv("PYTHONPYCACHEPREFIX", raising=False)
+    monkeypatch.setenv("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", "600")
+    monkeypatch.setattr(local_service_registry, "MANAGED_PRIVATE_ROOT", True)
+
+    socket_path = root / "runtime" / "services" / "statusd.sock"
+    owner_client = StatusClient(socket_path)
+    adopter_client = StatusClient(socket_path)
+    unrelated_tmp = unrelated_root / "tmp"
+    unrelated_tmp.mkdir()
+    unrelated_process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        env={**os.environ, "TMPDIR": str(unrelated_tmp)},
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+    owner_process = None
+    try:
+        assert owner_client.registry.ensure_started(), json.dumps(owner_client.registry.status(), sort_keys=True)
+        owner_process = owner_client.registry.process
+        assert owner_process is not None
+        assert adopter_client.registry.ensure_started()
+        adopter = adopter_client.registry
+        assert adopter.process is None
+        assert adopter._adopted_reaper_pid == owner_process.pid
+        assert adopter.socket_path != socket_path
+        assert not adopter.socket_path.is_relative_to(root)
+
+        app = SimpleNamespace(
+            status_client=adopter_client,
+            stop_client_event_watcher=lambda: None,
+            stop_batchd_operation_service=lambda: None,
+            stop_background_scheduler=lambda: None,
+            stop_auto_approve_all=lambda: None,
+        )
+        assert gate_harness_module.capture_fixture_local_service_processes((adopter,)) == ()
+        stop_fixture_app_runtime(app, label="adopted statusd app cleanup")
+
+        assert app._fixture_runtime_stopped is True
+        assert owner_process.poll() is not None
+        assert not any(thread.is_alive() for thread in adopter._child_ownership.reaper_threads)
+        assert not gate_harness_module.local_service_daemons_beneath(adopter.socket_path)
+        assert unrelated_process.poll() is None
+    finally:
+        if owner_process is not None and owner_process.poll() is None:
+            gate_harness_module.stop_fixture_local_service_processes(
+                gate_harness_module.capture_fixture_local_service_processes(
+                    (owner_client.registry, adopter_client.registry),
+                ),
+                label="adopted statusd app cleanup recovery",
+            )
+        gate_harness_module.retire_local_service_daemons_beneath(
+            adopter_client.registry.socket_path,
+            label="adopted statusd app cleanup recovery",
+        )
+        gate_harness_module.settle_fixture_local_service_reapers(
+            (owner_client.registry, adopter_client.registry),
+            label="adopted statusd app cleanup recovery",
+        )
+        if unrelated_process.poll() is None:
+            unrelated_process.terminate()
+            unrelated_process.wait(timeout=2)
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(unrelated_root, ignore_errors=True)
+
+
+def test_adopted_app_cleanup_attempts_every_private_socket_root(monkeypatch, tmp_path):
+    class Registry(local_service_registry.LocalServiceRegistry):
+        def __init__(self, service_dir, socket_path):
+            self._test_service_dir = service_dir
+            self._test_socket_path = socket_path
+
+        @property
+        def service_dir(self):
+            return self._test_service_dir
+
+        @property
+        def socket_path(self):
+            return self._test_socket_path
+
+        @property
+        def _adopted_reaper_pid(self):
+            return 1234
+
+    first_socket = tmp_path / "one" / "statusd.sock"
+    second_socket = tmp_path / "two" / "statusd.sock"
+    first = Registry(first_socket.parent, first_socket)
+    second = Registry(second_socket.parent, second_socket)
+    monkeypatch.setenv("YOLOMUX_TEST_ROOT", str(tmp_path))
+    attempted = []
+
+    def retire(socket_path, *, label):
+        attempted.append(socket_path)
+        if socket_path == first_socket:
+            raise RuntimeError(f"injected retirement failure for {label}")
+
+    monkeypatch.setattr(gate_harness_module, "retire_adopted_local_service_socket", retire)
+    app = SimpleNamespace(
+        job_client=SimpleNamespace(registry=first),
+        status_client=SimpleNamespace(registry=second),
+    )
+    with pytest.raises(RuntimeError, match="injected retirement failure"):
+        gate_harness_module.retire_fixture_app_local_services(app, label="multiple adopted roots")
+
+    assert attempted == [first_socket.resolve(), second_socket.resolve()]
 
 
 @pytest.mark.parametrize("failure_phase", ("app", "tmux", "paths"))

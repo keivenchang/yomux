@@ -64,7 +64,7 @@ TERMINAL_STATE_CONTRACTS = (
     TerminalStateContract(
         contract_id="finder-expansion-all-surfaces",
         owner_path=Path("static_src/js/yomux/60_popovers_tabs.js"),
-        owner_token="function settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, entries)",
+        owner_token="async function settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, entries, options = {})",
         proof_path=Path("tests/test_gate_finder.py"),
         proof_test="test_b3a_pending_expansion_settles_every_live_finder_surface",
     ),

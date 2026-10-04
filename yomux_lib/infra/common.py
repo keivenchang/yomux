@@ -41,11 +41,12 @@ from .host_partition import HOST_PARTITION_DIRNAME
 from .host_partition import host_partitioned_state_dir
 from ..local_services.rpc import LOCAL_RPC_SOCKET_PATH_BYTES
 from .root_paths import YOLOMUX_ROOT_ENV
-from .root_paths import YolomuxRootError
-from .root_paths import YolomuxRoots
-from .root_paths import resolve_yolomux_roots as _resolve_root_paths
+from .root_paths import YomuxRootError
+from .root_paths import YomuxRoots
+from .root_paths import resolve_yomux_roots as _resolve_root_paths
 from tools.instance_isolation import normalize_yomux_environment
 from .root_paths import resolved_path
+from .root_paths import runtime_root
 from .root_paths import resolved_product_path
 from tools.instance_isolation import rooted_socket_candidates
 from ..version import YOMUX_VERSION
@@ -64,10 +65,10 @@ DEFAULT_COLS = 120
 DEFAULT_ROWS = 36
 MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
-MAX_YOLOMUX_SESSION_TABS = 99
+MAX_YOMUX_SESSION_TABS = 99
 ACTIVITY_MAX_HOURS = 24.0 * 365.0
 # The implementation/runtime identity is shown by the top-left version hover.
-YOLOMUX_BACKEND = f"Python {platform.python_version()}"
+YOMUX_BACKEND = f"Python {platform.python_version()}"
 # Persistent state is versioned independently from the release string.  A
 # rebuilt checkout must be able to run beside v0.6.10 without reopening its
 # append-only event log or its current-schema database.
@@ -80,13 +81,13 @@ SUMMARY_CODEX_MODEL = os.environ.get("YOLOMUX_SUMMARY_MODEL", "gpt-5.5")
 SUMMARY_CODEX_EFFORT = os.environ.get("YOLOMUX_SUMMARY_EFFORT", "low")
 SUMMARY_CODEX_SERVICE_TIER = os.environ.get("YOLOMUX_SUMMARY_SERVICE_TIER", "fast")
 YOAGENT_CLAUDE_SUMMARY_MODEL = os.environ.get("YOLOMUX_YOAGENT_CLAUDE_SUMMARY_MODEL", "claude-haiku-4-5")
-def resolve_yolomux_roots(
+def resolve_yomux_roots(
     environ: Mapping[str, str] | None = None,
     *,
     identity: HostIdentity | None = None,
     temporary_dir: Path | None = None,
     uid: int | None = None,
-) -> YolomuxRoots:
+) -> YomuxRoots:
     """Resolve all writable product roots from one parent without creating paths.
 
     A rooted run isolates YOmux-owned XDG state. Codex credentials and
@@ -117,7 +118,7 @@ STATS_SCHEMA_VERSION = 9
 STATS_DATABASE_FILENAME = f"stats-v{STATS_SCHEMA_VERSION}.sqlite3"
 
 
-def runtime_socket_candidates(paths: YolomuxRoots, *, identity: HostIdentity | None = None) -> tuple[Path, ...]:
+def runtime_socket_candidates(paths: YomuxRoots, *, identity: HostIdentity | None = None) -> tuple[Path, ...]:
     """Enumerate every product-owned Unix socket before rooted directories exist."""
     resolved_identity = identity or current_host_identity()
     database = paths.state_dir / HOST_PARTITION_DIRNAME / resolved_identity.stable_host_id / STATS_DATABASE_FILENAME
@@ -125,55 +126,14 @@ def runtime_socket_candidates(paths: YolomuxRoots, *, identity: HostIdentity | N
     return rooted_socket_candidates(paths.runtime_dir, stats_digest=digest)
 
 
-def validate_rooted_socket_paths(paths: YolomuxRoots, *, identity: HostIdentity | None = None) -> None:
+def validate_rooted_socket_paths(paths: YomuxRoots, *, identity: HostIdentity | None = None) -> None:
     """Refuse a root whose real socket names would trigger a /tmp fallback."""
     longest = max(runtime_socket_candidates(paths, identity=identity), key=lambda path: len(os.fsencode(str(path))))
     length = len(os.fsencode(str(longest)))
     if length > LOCAL_RPC_SOCKET_PATH_BYTES:
-        raise YolomuxRootError(
+        raise YomuxRootError(
             f"YOLOMUX_ROOT is too deep for product socket {longest} ({length} bytes; limit {LOCAL_RPC_SOCKET_PATH_BYTES}); choose a shorter YOLOMUX_ROOT"
         )
-
-
-def runtime_root(
-    *,
-    environ: Mapping[str, str] | None = None,
-    identity: HostIdentity | None = None,
-    temporary_dir: Path | None = None,
-    uid: int | None = None,
-) -> Path:
-    """Return the host- and boot-private root for sockets, leases, and locks.
-
-    XDG runtime storage is normally a local tmpfs cleared on reboot. Headless
-    shells and containers often lack it, so the fallback remains under the
-    machine's temporary directory and is still checked before use.
-    """
-    values = os.environ if environ is None else environ
-    if values.get(YOLOMUX_ROOT_ENV):
-        # A rooted run already has a unique, operator-selected parent. Keeping
-        # host/boot suffixes here would make the advertised <root>/runtime
-        # layout false and wastes the Unix-socket pathname budget.
-        return resolved_product_path(values, YOLOMUX_ROOT_ENV, values[YOLOMUX_ROOT_ENV]) / "runtime"
-    resolved_identity = identity or current_host_identity()
-    if values.get("YOLOMUX_RUNTIME_DIR"):
-        runtime_base = resolved_product_path(values, "YOLOMUX_RUNTIME_DIR", values["YOLOMUX_RUNTIME_DIR"]) / "yomux"
-    elif values.get("XDG_RUNTIME_DIR"):
-        runtime_base = resolved_product_path(
-            values,
-            "XDG_RUNTIME_DIR",
-            values["XDG_RUNTIME_DIR"],
-            reject_home=False,
-        ) / "yomux"
-    else:
-        resolved_uid = os.getuid() if uid is None else int(uid)
-        runtime_base = resolved_path(temporary_dir or tempfile.gettempdir()) / f"yomux-server-{resolved_uid}" / "shared"
-    # Keep the socket-bearing root readable while leaving enough sockaddr_un
-    # budget for the longest service filename. These stable prefixes identify
-    # the host and boot in diagnostics without an opaque hash.
-    host_scope = f"h-{resolved_identity.stable_host_id[:12]}"
-    boot_value = resolved_identity.boot_id or f"instance-{resolved_identity.instance_nonce}"
-    boot_scope = f"b-{boot_value[:12]}"
-    return runtime_base / host_scope / boot_scope
 
 
 def ensure_runtime_root(
@@ -187,7 +147,7 @@ def ensure_runtime_root(
         unix_sockets=(path / ".yolomux-runtime-probe.sock",),
         classifier=classifier,
     )
-    rooted_runtime = _YOLOMUX_ROOTS.root is not None and path == RUNTIME_DIR
+    rooted_runtime = _YOMUX_ROOTS.root is not None and path == RUNTIME_DIR
     candidates = (path.parent, path) if rooted_runtime else (path.parent.parent, path.parent, path)
     for candidate in candidates:
         _ensure_private_runtime_directory(candidate)
@@ -263,21 +223,21 @@ def cleanup_previous_boot_runtime_dirs(root: Path) -> tuple[Path, ...]:
     return tuple(removed)
 
 
-_YOLOMUX_ROOTS = resolve_yolomux_roots()
+_YOMUX_ROOTS = resolve_yomux_roots()
 # Whether the caller pinned every product path under one YOLOMUX_ROOT. That is
 # the difference between "several YOmux servers share this runtime directory,
 # so a survivor there may legitimately belong to one of them" and "this root has
 # exactly one launcher, so a survivor has no successor to be handed to". Every
 # adoption decision reads this, so it is resolved once beside the roots rather
 # than re-derived from a path shape at each call site.
-MANAGED_PRIVATE_ROOT = _YOLOMUX_ROOTS.root is not None
-RUNTIME_DIR = _YOLOMUX_ROOTS.runtime_dir
-CONFIG_DIR = _YOLOMUX_ROOTS.config_dir
-STATE_DIR = _YOLOMUX_ROOTS.state_dir
-YOLOMUX_CACHE_DIR = _YOLOMUX_ROOTS.cache_dir
-MODEL_PRICING_CACHE_DIR = YOLOMUX_CACHE_DIR / "model-pricing"
+MANAGED_PRIVATE_ROOT = _YOMUX_ROOTS.root is not None
+RUNTIME_DIR = _YOMUX_ROOTS.runtime_dir
+CONFIG_DIR = _YOMUX_ROOTS.config_dir
+STATE_DIR = _YOMUX_ROOTS.state_dir
+YOMUX_CACHE_DIR = _YOMUX_ROOTS.cache_dir
+MODEL_PRICING_CACHE_DIR = YOMUX_CACHE_DIR / "model-pricing"
 MODEL_PRICING_DATABASE_PATH = MODEL_PRICING_CACHE_DIR / "pricing.sqlite3"
-YOAGENT_CODEX_HOME = _YOLOMUX_ROOTS.codex_home
+YOAGENT_CODEX_HOME = _YOMUX_ROOTS.codex_home
 STATE_PATH = CONFIG_DIR / "state.json"
 
 # Auth creates its configuration at import time. Resolve and validate every
@@ -397,11 +357,11 @@ def file_revision(path: Path) -> str:
     return f"{stat.st_mtime_ns}-{stat.st_size}"
 
 
-def yolomux_client_revision() -> str:
+def yomux_client_revision() -> str:
     return file_revision(STATIC_DIR / "yomux.js")
 
 
-def yolomux_dev_bundle_revision() -> str:
+def yomux_dev_bundle_revision() -> str:
     """Identify both browser assets so a restarted dev server can refresh stale clients."""
     return ".".join(file_revision(STATIC_DIR / asset) for asset in ("yomux.js", "yomux.css"))
 
@@ -611,9 +571,9 @@ _CACHE_MISS = cache_MISS
 SERVER_HOSTNAME = current_host_identity().display_hostname
 SERVER_STARTED_AT = time.time()
 PACIFIC_TIME = ZoneInfo("America/Los_Angeles")
-_YOLOMUX_COMMIT_TIME_PT: str | None = None
-_YOLOMUX_COMMIT_SHA: str | None = None
-_YOLOMUX_COMMIT_COUNT: int | None = None
+_YOMUX_COMMIT_TIME_PT: str | None = None
+_YOMUX_COMMIT_SHA: str | None = None
+_YOMUX_COMMIT_COUNT: int | None = None
 _AGENT_PATH_WARNING_KEYS: set[str] = set()
 
 
@@ -625,7 +585,7 @@ def heal_server_path() -> str:
 
 def codex_home_from_env(env: dict[str, str] | None = None) -> Path:
     values = os.environ if env is None else env
-    return resolve_yolomux_roots(values).codex_home
+    return resolve_yomux_roots(values).codex_home
 
 
 def codex_runtime_env(base_env: dict[str, str] | None = None, *, create_home: bool = True) -> dict[str, str]:
@@ -842,10 +802,10 @@ def auth_identity_for_credentials(username: str, password: str) -> AuthIdentity 
     return _auth.auth_identity_for_credentials(username, password)
 
 
-def yolomux_commit_time_pt() -> str:
-    global _YOLOMUX_COMMIT_TIME_PT
-    if _YOLOMUX_COMMIT_TIME_PT is not None:
-        return _YOLOMUX_COMMIT_TIME_PT
+def yomux_commit_time_pt() -> str:
+    global _YOMUX_COMMIT_TIME_PT
+    if _YOMUX_COMMIT_TIME_PT is not None:
+        return _YOMUX_COMMIT_TIME_PT
     try:
         result = subprocess.run(
             ["git", "-C", str(PROJECT_ROOT), "show", "-s", "--format=%cI", "HEAD"],
@@ -856,16 +816,16 @@ def yolomux_commit_time_pt() -> str:
         )
         timestamp = result.stdout.strip()
         commit_time = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-        _YOLOMUX_COMMIT_TIME_PT = commit_time.astimezone(PACIFIC_TIME).strftime("%Y-%m-%d %H:%M:%S PT")
+        _YOMUX_COMMIT_TIME_PT = commit_time.astimezone(PACIFIC_TIME).strftime("%Y-%m-%d %H:%M:%S PT")
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError):
-        _YOLOMUX_COMMIT_TIME_PT = "commit time unavailable"
-    return _YOLOMUX_COMMIT_TIME_PT
+        _YOMUX_COMMIT_TIME_PT = "commit time unavailable"
+    return _YOMUX_COMMIT_TIME_PT
 
 
-def yolomux_commit_sha() -> str:
-    global _YOLOMUX_COMMIT_SHA
-    if _YOLOMUX_COMMIT_SHA is not None:
-        return _YOLOMUX_COMMIT_SHA
+def yomux_commit_sha() -> str:
+    global _YOMUX_COMMIT_SHA
+    if _YOMUX_COMMIT_SHA is not None:
+        return _YOMUX_COMMIT_SHA
     try:
         result = subprocess.run(
             ["git", "-C", str(PROJECT_ROOT), "rev-parse", "--short=12", "HEAD"],
@@ -874,16 +834,16 @@ def yolomux_commit_sha() -> str:
             text=True,
             timeout=1.0,
         )
-        _YOLOMUX_COMMIT_SHA = result.stdout.strip()
+        _YOMUX_COMMIT_SHA = result.stdout.strip()
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
-        _YOLOMUX_COMMIT_SHA = ""
-    return _YOLOMUX_COMMIT_SHA
+        _YOMUX_COMMIT_SHA = ""
+    return _YOMUX_COMMIT_SHA
 
 
-def yolomux_commit_count() -> int:
-    global _YOLOMUX_COMMIT_COUNT
-    if _YOLOMUX_COMMIT_COUNT is not None:
-        return _YOLOMUX_COMMIT_COUNT
+def yomux_commit_count() -> int:
+    global _YOMUX_COMMIT_COUNT
+    if _YOMUX_COMMIT_COUNT is not None:
+        return _YOMUX_COMMIT_COUNT
     try:
         result = subprocess.run(
             ["git", "-C", str(PROJECT_ROOT), "rev-list", "--count", "HEAD"],
@@ -892,10 +852,10 @@ def yolomux_commit_count() -> int:
             text=True,
             timeout=1.0,
         )
-        _YOLOMUX_COMMIT_COUNT = max(0, int(result.stdout.strip()))
+        _YOMUX_COMMIT_COUNT = max(0, int(result.stdout.strip()))
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError):
-        _YOLOMUX_COMMIT_COUNT = 0
-    return _YOLOMUX_COMMIT_COUNT
+        _YOMUX_COMMIT_COUNT = 0
+    return _YOMUX_COMMIT_COUNT
 
 
 def _version_status_has_tracked_changes(status_output: str) -> bool:
@@ -1052,9 +1012,9 @@ def default_session_names() -> list[str]:
 
 
 def next_numbered_session_name(existing_sessions: list[str]) -> str | None:
-    if len(existing_sessions) >= MAX_YOLOMUX_SESSION_TABS:
+    if len(existing_sessions) >= MAX_YOMUX_SESSION_TABS:
         return None
-    for index in range(1, MAX_YOLOMUX_SESSION_TABS + 1):
+    for index in range(1, MAX_YOMUX_SESSION_TABS + 1):
         session = str(index)
         if session not in existing_sessions:
             return session
@@ -1198,7 +1158,7 @@ def update_check_status(cwd: str, branch: str = "main", dryrun: bool = False, fe
     existing credentials, so this works for private repos with no GitHub token). SHA and ahead/behind
     counts stay in the payload for diagnostics only; they do not decide whether to notify.
     """
-    current_sha = yolomux_commit_sha()
+    current_sha = yomux_commit_sha()
     base = {"available": False, "ahead": 0, "behind": 0, "current": YOMUX_VERSION,
             "current_version": YOMUX_VERSION, "current_sha": current_sha, "target": None,
             "target_version": None, "target_sha": None, "branch": branch, "dryrun": dryrun, "error": None,

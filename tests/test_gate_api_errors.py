@@ -207,7 +207,7 @@ def test_authenticated_normal_session_journey_has_no_unowned_non_2xx(
         """
         const path = arguments[0];
         const done = arguments[arguments.length - 1];
-        window.__yolomuxTestWaitFor(() => {
+        window.__yomuxTestWaitFor(() => {
           const panel = fileEditorPanelsForPath(path)[0];
           const text = panel?._cmView?.state?.doc?.toString?.() || '';
           return panel?.isConnected && Boolean(panel.querySelector('.cm-content')) && text.includes('working API sweep content') ? {

@@ -24,8 +24,7 @@ from tests.browser_helpers.browser_console import validate_server_log_ring_paylo
 from tests.browser_helpers.browser_console import validate_server_log_ring_transition
 from tests.browser_helpers.browser_layout import start_browser_server
 from tests.browser_helpers.browser_layout import start_isolated_browser_app
-from tests.browser_helpers.browser_layout import stop_browser_server
-from tests.browser_helpers.browser_layout import stop_isolated_browser_app
+from tests.browser_helpers.browser_layout import stop_browser_fixture
 from tests.gate_harness import repeat
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import wait_for_browser_boot
@@ -132,12 +131,11 @@ def _running_server(monkeypatch: pytest.MonkeyPatch, gate_runtime_paths):
             runtime.paths.config_dir,
             runtime.app,
             auth_bypass=True,
+            paths=gate_runtime_paths,
         )
         yield SimpleNamespace(port=server.server_address[1], server=server)
     finally:
-        if server is not None and thread is not None:
-            stop_browser_server(server, thread)
-        stop_isolated_browser_app(runtime)
+        stop_browser_fixture(server, thread, runtime)
 
 
 from tests.helpers.gate_editor import A8_FRAME_COUNTS
@@ -206,7 +204,7 @@ def test_a3_clean_buffer_converges_after_external_rewrite(gate_browser_runtime, 
         const path = arguments[0];
         const expected = arguments[1];
         const done = arguments[arguments.length - 1];
-        window.__yolomuxTestWaitFor(() => {
+        window.__yomuxTestWaitFor(() => {
           const state = fileState.get(path);
           const panel = fileEditorPanelsForPath(path)[0];
           return state?.dirty === false && panel?._cmView?.state?.doc?.toString?.() === expected;
@@ -259,7 +257,7 @@ const done = arguments[arguments.length - 1];
   };
   try {
     const reload = reloadOpenFileFromDisk(path, {force: true});
-    await window.__yolomuxTestWaitFor(() => reads === 1, {
+    await window.__yomuxTestWaitFor(() => reads === 1, {
       timeoutMs: 5000,
       description: `queued explicit reload for ${path}`,
     });
@@ -279,7 +277,7 @@ const done = arguments[arguments.length - 1];
     });
     await reload;
     await pushed;
-    await window.__yolomuxTestWaitFor(() => {
+    await window.__yomuxTestWaitFor(() => {
       const state = fileState.get(path);
       const panel = fileEditorPanelsForPath(path)[0];
       return state?.dirty === false && panel?._cmView?.state?.doc?.toString?.() === expected;
@@ -424,7 +422,7 @@ def test_a3_explicit_reload_waits_for_exact_bytes_after_external_rewrite(gate_br
           };
           try {
             const reload = reloadOpenFileFromDisk(path, {force: true});
-            await window.__yolomuxTestWaitFor(() => reads === 1, {
+            await window.__yomuxTestWaitFor(() => reads === 1, {
               timeoutMs: 3000,
               description: `queued explicit reload for ${path}`,
             });
@@ -439,7 +437,7 @@ def test_a3_explicit_reload_waits_for_exact_bytes_after_external_rewrite(gate_br
               },
             });
             await reload;
-            await window.__yolomuxTestWaitFor(() => {
+            await window.__yomuxTestWaitFor(() => {
               const state = fileState.get(path);
               const panel = fileEditorPanelsForPath(path)[0];
               return state?.dirty === false && panel?._cmView?.state?.doc?.toString?.() === expected;
@@ -573,7 +571,7 @@ def test_editor_autosave_uses_the_last_edited_panel_and_serializes_its_writes(ga
               targetSlot: slotForSession(fileEditorItemFor(path)),
               targetZone: 'right',
             });
-            await window.__yolomuxTestWaitFor(() => fileEditorPanelsForPath(path).length === 2, {timeoutMs: 10000, description: 'two editor panels'});
+            await window.__yomuxTestWaitFor(() => fileEditorPanelsForPath(path).length === 2, {timeoutMs: 10000, description: 'two editor panels'});
             const panels = fileEditorPanelsForPath(path);
             const firstPanel = panels.find(panel => panel.dataset.layoutItem !== secondItem);
             const secondPanel = panels.find(panel => panel.dataset.layoutItem === secondItem);
@@ -583,10 +581,10 @@ def test_editor_autosave_uses_the_last_edited_panel_and_serializes_its_writes(ga
             fileEditorAutosaveEnabled = true;
             fileEditorAutosaveDelaySeconds = 0.5;
             replaceDocument(firstPanel, 'first panel\\n');
-            await window.__yolomuxTestWaitFor(() => fileState.get(path)?.content === 'first panel\\n', {timeoutMs: 5000, description: 'first panel edit'});
-            await window.__yolomuxTestWaitFor(() => writes.length === 1, {timeoutMs: 5000, description: 'first autosave timer request'});
+            await window.__yomuxTestWaitFor(() => fileState.get(path)?.content === 'first panel\\n', {timeoutMs: 5000, description: 'first panel edit'});
+            await window.__yomuxTestWaitFor(() => writes.length === 1, {timeoutMs: 5000, description: 'first autosave timer request'});
             replaceDocument(secondPanel, 'second panel\\n');
-            await window.__yolomuxTestWaitFor(() => fileState.get(path)?.content === 'second panel\\n', {timeoutMs: 5000, description: 'second panel edit'});
+            await window.__yomuxTestWaitFor(() => fileState.get(path)?.content === 'second panel\\n', {timeoutMs: 5000, description: 'second panel edit'});
             await new Promise(resolve => setTimeout(resolve, 250));
             const queuedBeforeRelease = writes.slice();
             const settle = operation => handleClientPushEventNow('operation_terminal', {
@@ -598,9 +596,9 @@ def test_editor_autosave_uses_the_last_edited_panel_and_serializes_its_writes(ga
               },
             });
             settle(operations[0]);
-            await window.__yolomuxTestWaitFor(() => writes.length === 2, {timeoutMs: 5000, description: 'second autosave after first terminal'});
+            await window.__yomuxTestWaitFor(() => writes.length === 2, {timeoutMs: 5000, description: 'second autosave after first terminal'});
             settle(operations[1]);
-            await window.__yolomuxTestWaitFor(() => fileState.get(path)?.dirty === false, {timeoutMs: 10000, description: 'serialized autosaves'});
+            await window.__yomuxTestWaitFor(() => fileState.get(path)?.dirty === false, {timeoutMs: 10000, description: 'serialized autosaves'});
             done({
               writes,
               queuedBeforeRelease,
@@ -710,7 +708,7 @@ def test_a6_reopen_replaces_cached_not_found_after_file_is_created(gate_browser_
         (async () => {
           try {
             await openFileInEditor(path, {name: path.split('/').at(-1)}, {userInitiated: true, viewMode: 'edit'});
-            await window.__yolomuxTestWaitFor(() => {
+            await window.__yomuxTestWaitFor(() => {
               const state = fileState.get(path);
               return state?.kind === 'error';
             }, {timeoutMs: 10000, description: `typed direct missing-file result for ${path}`});
@@ -741,7 +739,7 @@ def test_a6_reopen_replaces_cached_not_found_after_file_is_created(gate_browser_
         (async () => {
           try {
             await openFileInEditor(path, {name: path.split('/').at(-1)}, {userInitiated: true, viewMode: 'edit'});
-            await window.__yolomuxTestWaitFor(() => {
+            await window.__yomuxTestWaitFor(() => {
               const state = fileState.get(path);
               const panel = fileEditorPanelsForPath(path)[0];
               return state?.kind === 'text'
@@ -795,7 +793,7 @@ def test_a6_reopen_replaces_cached_not_found_after_file_is_created(gate_browser_
         for entry in transition["newLogs"]
     ] == [(EXPECTED_OUTCOME_LOG_LEVEL, "api-response", "api", "path_not_found")], transition
     gate_browser_runtime.server._fixture_server_log_boundary = current
-    gate_browser_runtime.browser._yolomux_server_log_boundary = current
+    gate_browser_runtime.browser._yomux_server_log_boundary = current
     assert_browser_journey_error_free(gate_browser_runtime.browser)
 
 

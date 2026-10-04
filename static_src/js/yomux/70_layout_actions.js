@@ -484,10 +484,11 @@ async function activateTabInExistingPane(item, options = {}) {
   if (!targetSlot) return;
   const currentSlot = slotForSession(item);
   if (currentSlot === targetSlot) {
-    activatePaneTab(targetSlot, item, {userInitiated: options.userInitiated === true});
+    activatePaneTab(targetSlot, item, options);
     return;
   }
-  await moveSessionToSlot(item, targetSlot, currentSlot, paneTabs(targetSlot).length);
+  await moveSessionToSlot(item, targetSlot, currentSlot, paneTabs(targetSlot).length, options);
+  if (options.userInitiated === true && itemInLayout(item)) activatePaneTab(slotForSession(item), item, options);
 }
 
 function filesOnlySlotForSession(session) {
@@ -507,23 +508,22 @@ function slotForNewTmuxSession(session) {
   return filesOnlySlotForSession(session) || largestPaneSlot() || slotForNewSession();
 }
 
-async function placeTmuxSession(session) {
+async function placeTmuxSession(session, options = {}) {
   const currentSlot = slotForSession(session);
   if (currentSlot) {
-    activatePaneTab(currentSlot, session);
+    activatePaneTab(currentSlot, session, options);
     return;
   }
   const targetSlot = slotForNewTmuxSession(session);
   if (!targetSlot) return;
   if (paneIsPlaceholder(targetSlot) || !paneTabs(targetSlot).length) {
-    await moveSessionToSlot(session, targetSlot, null);
-    return;
+    await moveSessionToSlot(session, targetSlot, null, 0, options);
+  } else if (isFileExplorerItem(activeItemForSide(targetSlot))) {
+    await splitSessionAtSlot(session, targetSlot, 'right', null, sidePaneDefaultWidthPercent, options);
+  } else {
+    await moveSessionToSlot(session, targetSlot, null, paneTabs(targetSlot).length, options);
   }
-  if (isFileExplorerItem(activeItemForSide(targetSlot))) {
-    await splitSessionAtSlot(session, targetSlot, 'right', null, sidePaneDefaultWidthPercent);
-    return;
-  }
-  await moveSessionToSlot(session, targetSlot, null, paneTabs(targetSlot).length);
+  if (options.userInitiated === true && itemInLayout(session)) activatePaneTab(slotForSession(session), session, options);
 }
 
 // File -> Finder and Mod+B toggle the reserved Finder/Differ/Tabber pane. Hide it when it is already in
@@ -683,6 +683,7 @@ async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertI
   next[targetSlot] = paneStateWithTabsForSlot(targetSlot, capacity.finalTabs, session, next);
   applyLayoutSlots(next, {
     focusSession: session,
+    userInitiated: options.userInitiated === true,
     prune: false,
     preservePlaceholderSlots: options.preserveSourcePlaceholder === true,
     message: capacity.evicted.length ? t('layout.status.autoClosed', {items: capacity.evicted.map(itemLabel).join(', '), limit: capacity.cap}) : '',
@@ -798,7 +799,7 @@ async function splitLayoutItemAtSlot(item, targetSlot, zone, sourceSlot = null, 
   });
   const targetTabs = paneTabs(liveTargetSlot, next);
   if (!targetTabs.length && options.forceSplitEmpty !== true) {
-    await moveSessionToSlot(item, liveTargetSlot, liveSourceSlot);
+    await moveSessionToSlot(item, liveTargetSlot, liveSourceSlot, 0, options);
     return true;
   }
   const newSlot = nextLayoutSlot(next);
@@ -813,14 +814,15 @@ async function splitLayoutItemAtSlot(item, targetSlot, zone, sourceSlot = null, 
   next[layoutTreeKey] = replaceLayoutLeaf(next[layoutTreeKey], liveTargetSlot, replacement);
   applyLayoutSlots(next, {
     focusSession: item,
+    userInitiated: options.userInitiated === true,
     preservePlaceholderSlots: preserveRemovedSlot || targetRole.kind === paneRoleSide,
     prune: false,
   });
   return true;
 }
 
-async function splitSessionAtSlot(session, targetSlot, zone, sourceSlot = null, pct = null) {
-  return splitLayoutItemAtSlot(session, targetSlot, zone, sourceSlot, pct);
+async function splitSessionAtSlot(session, targetSlot, zone, sourceSlot = null, pct = null, options = {}) {
+  return splitLayoutItemAtSlot(session, targetSlot, zone, sourceSlot, pct, options);
 }
 
 function layoutSlotsWithoutUnrenderedPlaceholders(slots = layoutSlots) {
@@ -1168,8 +1170,8 @@ function replaceLayoutNodeAtPath(node, path, replacement) {
 
 // Highlight-first tab switching (two-phase paint order). Phase 1 is synchronous DOM-only chrome:
 // update the layout state and flip the active-tab highlight in the same frame as the input so the new
-// tab lights up immediately. Phase 2 is the heavy follow-up (terminal focus/fit) run on the next
-// frame and generation-guarded, so rapid tab cycling coalesces content onto the FINAL target only and
+// tab lights up immediately and focuses the terminal. Phase 2 is the heavy session-side follow-up
+// after a paint opportunity and generation-guarded, so rapid cycling updates only the FINAL target and
 // never blocks the highlight paint. See docs/specs/GUI.md "Tab switch: highlight first, content
 // follows".
 let tabSwitchHighlightGeneration = 0;
@@ -1195,11 +1197,44 @@ function scheduleTabSwitchPhaseTwo(generation, work) {
     work();
   };
   const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : callback => setTimeout(callback, 0);
-  raf(() => {
+  // The first animation-frame callback runs before paint. Cross one more frame so the active
+  // terminal and its focus target have had a paint opportunity before secondary work starts.
+  raf(() => raf(() => {
     const delay = tabSwitchPhaseTwoDelayMs();
     if (delay > 0) setTimeout(run, delay);
     else run();
+  }));
+}
+
+function syncFileExplorerAfterTerminalActivation(session) {
+  if (focusedTerminal !== session || fileExplorerExplicitSyncSessionTarget() !== session) return false;
+  const changesPanelExists = Boolean(document.querySelector('.file-explorer-changes-panel'));
+  const interactionIsCurrent = fileExplorerChangesSessionInteractionIsCurrent(session);
+  const differSession = String(fileExplorerSessionFilesState.payload?.session || '');
+  if (changesPanelExists && (!interactionIsCurrent || differSession !== session)) {
+    // This owner updates stale Differ payloads even when the selected-session marker already
+    // matches, and it schedules the matching Finder sync itself.
+    switchFileExplorerChangesSession(session);
+    return true;
+  }
+  if (!interactionIsCurrent) noteFileExplorerChangesSessionInteraction(session);
+  scheduleFileExplorerActiveTabSync(session, {explicit: true});
+  return true;
+}
+
+function scheduleTerminalActivationFollowup(session, generation) {
+  scheduleTabSwitchPhaseTwo(generation, () => {
+    claimVisibleTerminalResizeAuthority('terminal-tab', {force: true});
+    syncFileExplorerAfterTerminalActivation(session);
   });
+}
+
+function commitUserTerminalTabActivation(session, focusOptions = {}, generation = nextTabSwitchHighlightGeneration()) {
+  dockviewBeginTabActivationPerf(session);
+  activateTab(session, 'terminal', {...focusOptions, userInitiated: true, syncFinder: false});
+  rememberFileExplorerExplicitSyncSession(session);
+  dockviewFinishTabActivationPerf(session);
+  scheduleTerminalActivationFollowup(session, generation);
 }
 
 function activatePaneTab(side, session, options = {}) {
@@ -1218,7 +1253,7 @@ function activatePaneTab(side, session, options = {}) {
     }
   }
   if (options.userInitiated === true && isTmuxSession(session)) {
-    noteFileExplorerChangesSessionInteraction(session);
+    rememberFileExplorerExplicitSyncSession(session);
   }
   if (options.userInitiated === true && isFileEditorItem(session)) {
     const path = fileItemPath(session);
@@ -1234,17 +1269,27 @@ function activatePaneTab(side, session, options = {}) {
   }
   if (isFileEditorItem(session)) {
     activeFile = fileItemPath(session);
-    updateFileExplorerCurrentFileHighlight();
+    updateFileExplorerCurrentFileHighlight({yieldToInput: true});
   }
   if (activeItemForSide(side) === session) {
+    if (options.userInitiated === true && isTmuxSession(session)) {
+      commitUserTerminalTabActivation(session, focusOptions);
+      return;
+    }
     // A user-initiated tab switch is navigation. Record focus only after the layout already names
     // this item active so Tabber never renders the transient old-active/new-focus combination.
-    setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
-    if (isFileExplorerItem(session)) activateFileExplorerSurface(session);
+    setFocusedPanelItem(session, {userInitiated: options.userInitiated === true, deferSideSync: options.userInitiated === true});
+    if (isFileExplorerItem(session)) {
+      const generation = nextTabSwitchHighlightGeneration();
+      scheduleTabSwitchPhaseTwo(generation, () => {
+        if (activeItemForSide(side) === session) activateFileExplorerSurface(session);
+      });
+    }
     focusPanel(session, focusOptions);
     return;
   }
   const generation = nextTabSwitchHighlightGeneration();
+  dockviewBeginTabActivationPerf(session);
   // Phase 1 (synchronous, input frame): update the layout state and flip the active-tab chrome. For an
   // active-only switch applyLayoutSlots takes Dockview's cheap pre-rendered activate path (no fromJSON)
   // and swaps the shown pane body to the target, so the highlight paints and the previous tab's content
@@ -1253,23 +1298,19 @@ function activatePaneTab(side, session, options = {}) {
   next[layoutTreeKey] = layoutSlots[layoutTreeKey];
   for (const key of layoutSlotKeys()) next[key] = paneStateForLayoutSlot(key);
   next[side].active = session;
-  applyLayoutSlots(next, {focusSession: session});
-  setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
-  if (isFileExplorerItem(session)) activateFileExplorerSurface(session);
-  // Phase 2 (next frame, generation-guarded): terminal focus/fit follows the highlight and coalesces
-  // across rapid cycling so only the final target engages its xterm.
+  applyLayoutSlots(next, {focusSession: session, userInitiated: options.userInitiated === true});
   if (options.userInitiated && isTmuxSession(session)) {
-    scheduleTabSwitchPhaseTwo(generation, () => focusTerminalFromUserAction(session, 25, focusOptions));
+    commitUserTerminalTabActivation(session, focusOptions, generation);
+  } else {
+    setFocusedPanelItem(session, {userInitiated: options.userInitiated === true, deferSideSync: options.userInitiated === true});
+    dockviewFinishTabActivationPerf(session);
   }
 }
 
 async function selectSession(session, options = {}) {
-  if (options.userInitiated === true && isTmuxSession(session)) {
-    noteFileExplorerChangesSessionInteraction(session);
-  }
   if (isFileEditorItem(session)) {
     activeFile = fileItemPath(session);
-    updateFileExplorerCurrentFileHighlight();
+    updateFileExplorerCurrentFileHighlight({yieldToInput: true});
   }
   if (layoutIsFileSurfaceItem(session)) {
     await openFileSurfacePane(session);
@@ -1277,14 +1318,15 @@ async function selectSession(session, options = {}) {
     return;
   }
   if (activeSessions.includes(session)) {
-    focusPanel(session, options);
+    if (options.userInitiated === true && isTmuxSession(session)) activatePaneTab(slotForItem(session), session, options);
+    else focusPanel(session, options);
     return;
   }
   if (isTmuxSession(session) && filesOnlySlotForSession(session)) {
-    await placeTmuxSession(session);
+    await placeTmuxSession(session, options);
     return;
   }
-  await activateTabInExistingPane(session);
+  await activateTabInExistingPane(session, options);
 }
 
 function layoutPaneTabTraversalPositions(slots = layoutSlots) {
@@ -2713,7 +2755,9 @@ function installTerminalResizeAuthorityHandlers() {
   // Another YOmux server can change tmux's shared ignore-size flags without changing this
   // browser's local dimensions. Every foreground pointer transition must therefore cross the
   // socket instead of trusting lastTerminalResizeAuthoritySignature.
-  window.addEventListener('pointerdown', () => claimVisibleTerminalResizeAuthority('pointerdown', {force: true}), {capture: true});
+  window.addEventListener('pointerdown', () => {
+    scheduleTabSwitchPhaseTwo(tabSwitchHighlightGeneration, () => claimVisibleTerminalResizeAuthority('pointerdown', {force: true}));
+  }, {capture: true});
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') claimVisibleTerminalResizeAuthority('visible', {force: true});
   });
@@ -3311,11 +3355,11 @@ function runTerminalBlankScreenRefresh(session, item = terminals.get(session), l
   tmuxSessionLifecycleReleaseTimer(lifecycleToken, item.blankScreenRefreshTimer);
   item.blankScreenRefreshTimer = 0;
   if (terminals.get(session) !== item || !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) return;
-  if (!terminalIsVisible(session, item.container)) return;
   if (terminalRenderedContentPresent(session, item)) {
     item.blankScreenRefreshAttempts = 0;
     return;
   }
+  if (!terminalIsVisible(session, item.container)) return;
   const attempts = Math.max(0, Number(item.blankScreenRefreshAttempts || 0));
   if (attempts >= terminalBlankScreenRefreshDelaysMs.length) return;
   item.blankScreenRefreshAttempts = attempts + 1;
@@ -3324,7 +3368,7 @@ function runTerminalBlankScreenRefresh(session, item = terminals.get(session), l
 
 function scheduleTerminalBlankScreenRefresh(session, options = {}) {
   const item = terminals.get(session);
-  if (!item || !terminalIsVisible(session, item.container)) return;
+  if (!item) return;
   const reason = String(options.reason || 'blank-risk');
   if (!terminalBlankScreenRefreshAllowed(reason)) return;
   if (item.socket?.readyState !== WebSocket.OPEN) return;
@@ -3337,6 +3381,7 @@ function scheduleTerminalBlankScreenRefresh(session, options = {}) {
     }
     return;
   }
+  if (!terminalIsVisible(session, item.container)) return;
   const attempts = Math.max(0, Number(item.blankScreenRefreshAttempts || 0));
   if (attempts >= terminalBlankScreenRefreshDelaysMs.length) return;
   const lifecycleToken = item.sessionLifecycleToken;

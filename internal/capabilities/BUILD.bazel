@@ -1,13 +1,9 @@
-package(default_visibility = ["//visibility:public"])
+load("@rules_go//go:def.bzl", "go_library")
+load("//:tools/bazel_rules.bzl", "go_test_pair")
+
+package(default_visibility = ["//:__subpackages__"])
 
 exports_files(["BUILD.bazel"])
-
-filegroup(
-    name = "docker_source_files",
-    srcs = ["BUILD.bazel"] + glob(["**"], exclude = ["BUILD.bazel"]),
-)
-
-load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "capabilities_lib",
@@ -15,15 +11,8 @@ go_library(
     importpath = "github.com/keivenchang/yomux/internal/capabilities",
 )
 
-go_test(
-    name = "capabilities_test",
+go_test_pair(
+    name = "capabilities",
     srcs = ["catalog_test.go"],
     embed = [":capabilities_lib"],
-)
-
-go_test(
-    name = "capabilities_race_test",
-    srcs = ["catalog_test.go"],
-    embed = [":capabilities_lib"],
-    race = "on",
 )

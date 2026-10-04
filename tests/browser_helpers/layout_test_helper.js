@@ -477,6 +477,9 @@ class TestElement {
       const key = testDatasetKeyForAttribute(attrName);
       return this.dataset[key] !== undefined && (attrValue === undefined || this.dataset[key] === attrValue);
     }
+    if (/^(?:\[[A-Za-z0-9_-]+(?:="[^"]*")?\]){2,}$/.test(selector)) {
+      return Array.from(selector.matchAll(/\[[A-Za-z0-9_-]+(?:="[^"]*")?\]/g), match => match[0]).every(part => this.matches(part));
+    }
     const attributeMatch = selector.match(/^\[([A-Za-z0-9_-]+)(?:="([^"]*)")?\]$/);
     if (attributeMatch) {
       const [, attributeName, attributeValue] = attributeMatch;
@@ -727,7 +730,7 @@ function controllableSseResponse() {
 
 async function apiTransportRetirementScenario() {
   const outcome = promise => promise.then(() => 'resolved', error => String(error?.message || error));
-  const api = loadYolomux();
+  const api = loadYomux();
   api.setStatsCurrentNamespaceForTest(null);
   const request = deferredFetch();
   api.setFetchForTest(() => request.promise);
@@ -738,7 +741,7 @@ async function apiTransportRetirementScenario() {
   const retirement = api.jsDebugEventsForTest().find(event => event.type === 'api' && event.endpoint === '/api/auto-approve');
   const retired = {error: retiredError, outcome: retirement.deliveryOutcome, reason: retirement.reason, failures: api.jsDebugFailureEventsForTest().length, backendFailures: api.backendHealthStateForTest().consecutiveFailures, consoleErrors: api.vmConsoleErrorsForTest().length};
 
-  const lateApi = loadYolomux();
+  const lateApi = loadYomux();
   lateApi.windowListenersForTest('beforeunload')[0]({type: 'beforeunload'});
   const lateRequest = deferredFetch();
   lateApi.setFetchForTest(() => lateRequest.promise);
@@ -748,7 +751,7 @@ async function apiTransportRetirementScenario() {
   const lateEvent = lateApi.jsDebugEventsForTest().find(event => event.endpoint === '/api/late-retirement');
   const lateRetired = {error: lateError, outcome: lateEvent.deliveryOutcome, reason: lateEvent.reason, failures: lateApi.jsDebugFailureEventsForTest().length, backendFailures: lateApi.backendHealthStateForTest().consecutiveFailures, consoleErrors: lateApi.vmConsoleErrorsForTest().length};
 
-  const resumedApi = loadYolomux();
+  const resumedApi = loadYomux();
   resumedApi.windowListenersForTest('beforeunload')[0]({type: 'beforeunload'});
   const resumedRequest = deferredFetch();
   resumedApi.setFetchForTest(() => resumedRequest.promise);
@@ -775,7 +778,7 @@ async function apiTransportRetirementScenario() {
   const racedError = await outcome(secondPending);
   const raced = {error: racedError, outcome: api.jsDebugEventsForTest().find(event => event.endpoint === '/api/second').deliveryOutcome, failures: api.jsDebugFailureEventsForTest().length};
 
-  const control = loadYolomux();
+  const control = loadYomux();
   const failure = deferredFetch();
   control.setFetchForTest(() => failure.promise);
   const failurePending = control.apiFetchJsonForTest('/api/auto-approve');
@@ -790,7 +793,7 @@ function settingsOverride(settings = {}, defaults = DEFAULT_TEST_SETTINGS) {
   return {defaults, settings, mtime_ns: 1};
 }
 
-function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], protocol = 'http:', navigatorPlatform = 'Linux x86_64', accessRole = 'admin', options = {}) {
+function loadYomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], protocol = 'http:', navigatorPlatform = 'Linux x86_64', accessRole = 'admin', options = {}) {
   const bootstrapOverrides = options.bootstrapOverrides || Object.fromEntries(Object.entries(options).filter(([key]) => !['sessionStorage', 'localStorage', 'fireTimeoutDelays', 'locationPort', 'locationHash', 'coarsePointer', 'hoverCapable', 'viewport', 'performance', 'PerformanceObserver', 'bootstrapElementId'].includes(key)));
   const fireTimeoutDelays = new Set((Array.isArray(options.fireTimeoutDelays) ? options.fireTimeoutDelays : [])
     .map(Number)
@@ -872,7 +875,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
   const immediateTimeoutHandles = new Set();
   const testSetTimeout = options.setTimeout || ((callback, ms) => {
     const delay = Number(ms);
-    if ((delay === 8 || fireTimeoutDelays.has(delay)) && typeof callback === 'function') {
+    if ((delay === 8 || fireTimeoutDelays.has(delay) || ['flushFileTreeMetadataRefresh', 'paintFileTreeMetadataBatch', 'resumeFileExplorerAfterPaint'].includes(callback?.name)) && typeof callback === 'function') {
       const handle = setImmediate(() => {
         immediateTimeoutHandles.delete(handle);
         callback();
@@ -920,6 +923,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     WebSocket: TestWebSocket,
     __testWebSocketInstances: TestWebSocket.instances,
     AbortController,
+    DOMException,
     CustomEvent: TestCustomEvent,
     clearInterval: testClearInterval,
     clearTimeout: testClearTimeout,
@@ -956,6 +960,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
       getElementById: element,
       querySelector: () => null,
       querySelectorAll: () => [],
+      getElementsByClassName: () => [],
       removeEventListener(type, listener) {
         const listeners = documentListeners.get(type) || [];
         documentListeners.set(type, listeners.filter(item => item !== listener));
@@ -991,7 +996,8 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     // The bundle schedules the batched /api/fs/batch directory-listing flush via
     // setTimeout(flushFileExplorerFsBatch, fileExplorerFsBatchDelayMs) — and 8ms is UNIQUE to that flush
     // (verified: no other bundle timer uses an 8ms delay). All other bundle timers (polls, debounces,
-    // periodic publishers) must stay no-ops here. So fire ONLY the 8ms flush, on a real setImmediate, so any
+    // periodic publishers) must stay no-ops here. Fire the 8ms flush and named finite metadata/paint continuations
+    // on a real setImmediate, so producer publication remains asynchronous and any
     // code that `await`s a directory listing settles instead of hanging forever (which used to leave the
     // trailing suite IIFE unsettled and silently exit 0 — see the suite watchdog + AGENTS.md note).
     // Synchronous back-to-back enqueues still batch into one request (no await between them = no yield),
@@ -1068,6 +1074,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     TextEncoder,
     TextDecoder,
     Uint8Array,
+    Response,
     // Host ArrayBuffer so binary terminal-socket frames built by tests pass the bundle's
     // `data instanceof ArrayBuffer` routing (Uint8Array/TextEncoder above are host classes too).
     ArrayBuffer,
@@ -1510,6 +1517,7 @@ globalThis.__layoutTestApi = {
   fetchDirectoryForTest: fetchDirectory,
   markFileExplorerDeletedPathsForTest: markFileExplorerDeletedPaths,
   fileExplorerEntriesByWatchedDirectoryForTest: fileExplorerEntriesByWatchedDirectory,
+  refreshFileExplorerTreesInPlaceForTest: refreshFileExplorerTreesInPlace,
   refreshFileExplorerFromPushForTest: refreshFileExplorerFromPush,
   entriesByDirFromFilesystemPushForTest: entriesByDirFromFilesystemPush,
   refreshWatchedFilesystemForTest: refreshWatchedFilesystem,
@@ -1611,6 +1619,7 @@ globalThis.__layoutTestApi = {
     };
   },
   waitForApiOperationResultForTest: waitForApiOperationResult,
+  apiFetchDeadlineMsForTest: apiFetchDeadlineMs,
   apiFetchJsonForTest: apiFetchJson,
   fetchFilesystemOperationPayloadForTest: fetchFilesystemOperationPayload,
   apiOperationStateForTest() {
@@ -1995,6 +2004,9 @@ globalThis.__layoutTestApi = {
   dataTransferHasImagePayloadForTest: dataTransferHasImagePayload,
   dataTransferImageFilesForTest: dataTransferImageFiles,
   documentListenersForTest(type) { return [...(document.__listeners.get(type) || [])]; },
+  dispatchDocumentEventForTest(type, event) {
+    for (const listener of [...(document.__listeners.get(type) || [])]) listener(event);
+  },
   setDocumentQuerySelectorForTest(fn) { document.querySelector = fn; },
   setDocumentQuerySelectorAllForTest(fn) { document.querySelectorAll = fn; },
   setDocumentVisibilityForTest(value) { Object.defineProperty(document, 'visibilityState', {value: String(value || 'visible'), configurable: true}); },
@@ -2505,6 +2517,7 @@ globalThis.__layoutTestApi = {
   setAutoApproveStateForTest(session, state) { autoApproveStates.set(session, state); },
   autoApproveStateForTest(session) { return autoApproveStates.get(session); },
   applyAutoApprovePayloadForTest: applyAutoApprovePayload,
+  renderAutoApproveButtonsForTest: renderAutoApproveButtons,
   setAgentAuthForTest(value) { agentAuth = value || {}; },
   maxTabsPerPane,
   paneCapacityCheckForInsert,
@@ -2635,7 +2648,7 @@ globalThis.__layoutTestApi = {
     return state ? {...state} : null;
   },
   renderTreeChildrenForTest(container, parentPath, entries, depth = 0, entriesByDirPairs = [], options = {}) {
-    renderTreeChildren(container, parentPath, entries, depth, {...options, entriesByDir: new Map(entriesByDirPairs)});
+    return renderTreeChildren(container, parentPath, entries, depth, {...options, entriesByDir: new Map(entriesByDirPairs)});
   },
   renderTabberTreeForTest: renderTabberTree,
   treeRowContractForTest(row) {
@@ -2651,6 +2664,8 @@ globalThis.__layoutTestApi = {
   },
   expandDirectoryRowForTest: expandDirectoryRow,
   collapseDirectoryRowForTest: collapseDirectoryRow,
+  restoreFileExplorerExpandedPaths,
+  settleDirectoryRowExpansionAcrossSurfacesForTest: settleDirectoryRowExpansionAcrossSurfaces,
   setFileExplorerRepoInfoForTest(path, repo) {
     fileExplorerRepoInfoCache.set(normalizeDirectoryPath(path), repo);
   },
@@ -3022,6 +3037,7 @@ globalThis.__layoutTestApi = {
   tmuxWindowBarHtml,
   updatePanelInfoBarMetaForTest: updatePanelInfoBarMeta,
   updatePanelWindowStepButtonsForTest: updatePanelWindowStepButtons,
+  collectSessionControlNodesForTest: collectSessionControlNodes,
   agentWindowVisibleTonesForTest() { return [...AGENT_WINDOW_VISIBLE_TONES]; },
   agentWindowAggregateTonesForTest() { return [...AGENT_WINDOW_AGGREGATE_TONES]; },
   agentWindowVisibleToneForTest: agentWindowVisibleTone,
@@ -3128,6 +3144,10 @@ globalThis.__layoutTestApi = {
     for (const path of paths || []) fileExplorerExpanded.add(path);
   },
   fileExplorerExpandedForTest() { return Array.from(fileExplorerExpanded).sort(); },
+  fileExplorerPendingExpansionOwnerForTest(path) {
+    const owner = fileExplorerPendingExpansionOwners.get(path);
+    return owner ? {manual: owner.manual, generation: owner.generation} : null;
+  },
   setFileExplorerRootForTest(path) { fileExplorerRoot = normalizeDirectoryPath(path); },
   fileExplorerRootForTest() { return fileExplorerRoot; },
   fileExplorerTreeForTest() { return fileExplorerTree; },
@@ -3511,8 +3531,8 @@ function fileExplorerClosedOptions() {
   return {sessionStorage: {[FILE_EXPLORER_OPEN_INTENT_STORAGE_KEY_FOR_TEST]: '0'}};
 }
 
-function loadYolomuxWithFileExplorerClosed(search = '', sessions = ['1', '2', '3', '4', '5', '6'], protocol = 'http:', navigatorPlatform = 'Linux x86_64', accessRole = 'admin') {
-  return loadYolomux(search, sessions, protocol, navigatorPlatform, accessRole, fileExplorerClosedOptions());
+function loadYomuxWithFileExplorerClosed(search = '', sessions = ['1', '2', '3', '4', '5', '6'], protocol = 'http:', navigatorPlatform = 'Linux x86_64', accessRole = 'admin') {
+  return loadYomux(search, sessions, protocol, navigatorPlatform, accessRole, fileExplorerClosedOptions());
 }
 
 function treeKeyEvent(key, target, options = {}) {
@@ -3754,9 +3774,9 @@ module.exports = {
   controllableSseResponse,
   apiTransportRetirementScenario,
   settingsOverride,
-  loadYolomux,
+  loadYomux,
   fileExplorerClosedOptions,
-  loadYolomuxWithFileExplorerClosed,
+  loadYomuxWithFileExplorerClosed,
   treeKeyEvent,
   tabElement,
   tabStrip,

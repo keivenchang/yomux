@@ -11,12 +11,15 @@ from urllib.request import Request
 from urllib.request import urlopen
 
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.actions.wheel_input import ScrollOrigin
 
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _live_runtime_boot_fixture_html
 from tests.helpers.browser_stats_coverage import _current_stats_fixture_html
 from tests.helpers.browser_stats_coverage import _start_current_stats
 from tests.helpers.browser_stats_coverage import _write_current_stats_fixture_assets
+from tests.gate_harness import run_fixture_cleanup_phases
+from tests.helpers.gate_stats import stop_stats_current_service
 from yomux_lib import server as server_module
 from yomux_lib import web as web_module
 from yomux_lib.stats_current import client as stats_client
@@ -41,7 +44,7 @@ def test_live_runtime_boot_fixture_exposes_exact_stats_capabilities_before_logs_
           fetch('/api/stats-capabilities', {cache: 'no-store'}).then(response => response.json()),
           (async () => {
             document.querySelector('[data-js-debug-subtab="logs"]')?.click();
-            return window.__yolomuxTestWaitFor(
+            return window.__yomuxTestWaitFor(
               () => {
                 const view = document.querySelector('[data-js-debug-subview="logs"]');
                 return view && !view.hidden && view.querySelector('.js-debug-logs-toolbar')
@@ -485,14 +488,11 @@ def test_http_client_rpc_cache_and_browser_render_every_exact_matrix_cell(
         }
         assert json.loads(first_http_body)["cache_generation"] == first_metadata["cache_generation"]
     finally:
-        if second_server is not None and second_thread is not None:
-            stop_browser_server(second_server, second_thread)
-        if http_server is not None and http_thread is not None:
-            stop_browser_server(http_server, http_thread, browser=browser)
-        service.stop_event.set()
-        service.work_event.set()
-        service_thread.join(timeout=3)
-        assert not service_thread.is_alive()
+        run_fixture_cleanup_phases("stats reader parity browser", (
+            ("second HTTP server", lambda: stop_browser_server(second_server, second_thread) if second_server is not None and second_thread is not None else None),
+            ("first HTTP server", lambda: stop_browser_server(http_server, http_thread, browser=browser) if http_server is not None and http_thread is not None else None),
+            ("stats service", lambda: stop_stats_current_service(service, service_thread)),
+        ))
 
 
 def test_current_stats_one_second_motion_and_sse_delta_do_not_refetch_or_fabricate(browser, tmp_path):
@@ -868,3 +868,33 @@ def test_current_cost_pricing_link_dispatches_external_open(browser, tmp_path):
     assert result["opened"] == [["https://example.com/pricing", "_blank", "noopener,noreferrer"]], result
     assert result["defaultPrevented"] is True, result
     assert result["location"].endswith("current-stats-cost.html"), result
+
+
+def test_graph_refresh_preserves_scroll_before_native_wheel(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script("return typeof refreshDebugGraphElement === 'function' && document.querySelector('.js-debug-panel [data-js-debug-graph]') !== null"))
+    before = browser.execute_script("""
+      const graph = document.querySelector('.js-debug-panel [data-js-debug-graph]');
+      const owner = graph.closest('.js-debug-graph-view');
+      owner.style.height = '240px'; owner.style.maxHeight = '240px'; owner.style.width = '240px';
+      graph.style.minHeight = '1400px'; graph.style.minWidth = '1000px';
+      owner.scrollTop = 180; owner.scrollLeft = 65;
+      const before = {top:owner.scrollTop, left:owner.scrollLeft};
+      const original = restoreElementScrollPosition;
+      let deferredCalls = 0;
+      restoreElementScrollPosition = function(...args) {deferredCalls++; return original(...args);};
+      try {refreshDebugGraphElement(graph, {force:true});} finally {restoreElementScrollPosition = original;}
+      window.__graphScrollAudit = {owner, before};
+      return {before, after:{top:owner.scrollTop,left:owner.scrollLeft}, deferredCalls};
+    """)
+    assert before['before']['top'] == 180 and before['before']['left'] == 65, before
+    assert before['after'] == before['before'] and before['deferredCalls'] == 0, before
+    owner = browser.find_element(By.CSS_SELECTOR, '.js-debug-graph-view')
+    ActionChains(browser).scroll_from_origin(ScrollOrigin.from_element(owner), 0, 140).perform()
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return window.__graphScrollAudit.owner.scrollTop > window.__graphScrollAudit.before.top"))
+    after = browser.execute_async_script("""
+      const done = arguments[arguments.length-1], owner = window.__graphScrollAudit.owner;
+      const top = owner.scrollTop, left = owner.scrollLeft;
+      requestAnimationFrame(() => requestAnimationFrame(() => done({top,left,settledTop:owner.scrollTop,settledLeft:owner.scrollLeft})));
+    """)
+    assert after['top'] > 180 and after['settledTop'] == after['top'] and after['settledLeft'] == after['left'], after

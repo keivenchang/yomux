@@ -47,7 +47,7 @@ def _load_finder(browser, tmp_path) -> None:
 
 @pytest.mark.browser
 def test_b1_five_reexpansions_render_cached_children_before_fast_refresh_settles(browser, tmp_path):
-    """Cached children paint synchronously while a direct fast refresh runs in the background."""
+    """Cached children finish rendering while a direct fast refresh remains held."""
     _load_finder(browser, tmp_path)
     metrics = browser.execute_async_script(
         """
@@ -62,7 +62,7 @@ def test_b1_five_reexpansions_render_cached_children_before_fast_refresh_settles
           )).length;
 
           row().click();
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => child() && row()?.getAttribute('aria-expanded') === 'true' && !row()?.classList.contains('loading-children'),
             {timeoutMs: 2000, description: 'cold Finder directory expansion'},
           );
@@ -70,13 +70,24 @@ def test_b1_five_reexpansions_render_cached_children_before_fast_refresh_settles
           row().click();
           if (row()?.getAttribute('aria-expanded') !== 'false' || child()) throw new Error('cold expansion did not collapse synchronously');
 
+          const originalFetch = window.fetch;
           const cycles = [];
-          for (let index = 0; index < 5; index += 1) {
-            const requestsBefore = directoryRequests();
-            const startedAt = performance.now();
-            row().click();
-            await Promise.resolve();
-            await Promise.resolve();
+          let releaseRefresh;
+          window.fetch = async (input, options) => {
+            const url = new URL(String(input), location.href);
+            if (url.pathname === '/api/fs/fast/list' && url.searchParams.get('path') === directory) {
+              await new Promise(resolve => { releaseRefresh = resolve; });
+            }
+            return originalFetch(input, options);
+          };
+          try {
+            for (let index = 0; index < 5; index += 1) {
+              const requestsBefore = directoryRequests();
+              const startedAt = performance.now();
+              row().click();
+              await fileExplorerPendingExpansionOwners.get(directory)?.promise;
+              const refreshRequest = fileExplorerFsResourceRecords.get(fileExplorerFsBatchKey('list', directory))?.request;
+              if (!releaseRefresh || !refreshRequest) throw new Error(`cycle ${index} has no held fast refresh`);
               cycles.push({
                 index,
                 elapsedMs: performance.now() - startedAt,
@@ -86,12 +97,15 @@ def test_b1_five_reexpansions_render_cached_children_before_fast_refresh_settles
                 requestsBefore,
                 requestsAfter: directoryRequests(),
               });
-              await window.__yolomuxTestWaitFor(
-                () => child() && row()?.getAttribute('aria-expanded') === 'true' && !row()?.classList.contains('loading-children'),
-                {timeoutMs: 2000, description: `cached Finder re-expansion ${index}`},
-              );
               row().click();
               if (row()?.getAttribute('aria-expanded') !== 'false' || child()) throw new Error(`cycle ${index} did not collapse synchronously`);
+              releaseRefresh();
+              releaseRefresh = null;
+              await refreshRequest;
+            }
+          } finally {
+            releaseRefresh?.();
+            window.fetch = originalFetch;
           }
           done({coldRequests, cycles, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
         })().catch(error => done({error: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')}));
@@ -118,7 +132,7 @@ def test_b2_expansion_remains_rendered_after_its_disclosure_animation_settles(br
           const row = () => document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${directory}"]`);
           const child = () => document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${childPath}"]`);
           row().click();
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => child() && !row()?.classList.contains('loading-children'),
             {timeoutMs: 2000, description: 'Finder expansion content'},
           );
@@ -168,7 +182,7 @@ def test_expansion_uses_one_direct_fast_list_and_never_batches_list_work(browser
           };
 
           row().click();
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => child() && row()?.getAttribute('aria-expanded') === 'true' && !row()?.classList.contains('loading-children'),
             {timeoutMs: 2000, description: 'Finder direct fast-list expansion'},
           );
@@ -354,7 +368,7 @@ def test_deferred_git_info_patches_after_fast_paint_in_bounded_waves(browser, tm
             repoRows: finderRows().filter(row => row.dataset.isRepo === 'true').length,
             batchSizes: batchSizes.slice(),
           };
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => batchSizes.reduce((sum, size) => sum + size, 0) === 19
               && fileExplorerRepoInfoEnrichmentState.pending.size === 0
               && fileExplorerRepoInfoEnrichmentState.inFlight.size === 0
@@ -402,7 +416,7 @@ def test_finder_fast_paint_wins_when_session_files_completes_first(browser, tmp_
         """
         const done = arguments[0];
         const originalFetch = window.fetch.bind(window);
-        const waitFor = window.__yolomuxTestWaitFor;
+        const waitFor = window.__yomuxTestWaitFor;
         const jsonResponse = payload => new Response(JSON.stringify(payload), {headers: {'Content-Type': 'application/json'}});
         let releaseFastList = null;
         const requestOrder = [];
@@ -464,7 +478,7 @@ def test_finder_fast_paint_wins_when_an_existing_session_files_request_completes
         """
         const done = arguments[0];
         const originalFetch = window.fetch.bind(window);
-        const waitFor = window.__yolomuxTestWaitFor;
+        const waitFor = window.__yomuxTestWaitFor;
         const jsonResponse = payload => new Response(JSON.stringify(payload), {headers: {'Content-Type': 'application/json'}});
         const sessionFilesStreamResponse = value => new Response([
           `event: repo\ndata: ${JSON.stringify({session: value.session, repos: value.repos, files: value.files, refs_by_repo: value.refs_by_repo})}\n\n`,
@@ -538,7 +552,7 @@ def test_finder_fast_listing_paints_before_session_files_backfill_starts(browser
         """
         const done = arguments[0];
         const originalFetch = window.fetch.bind(window);
-        const waitFor = window.__yolomuxTestWaitFor;
+        const waitFor = window.__yomuxTestWaitFor;
         const jsonResponse = payload => new Response(JSON.stringify(payload), {headers: {'Content-Type': 'application/json'}});
         const sessionFilesStreamResponse = payload => new Response([
           `event: repo\ndata: ${JSON.stringify({session: payload.session, repos: payload.repos, files: payload.files, refs_by_repo: payload.refs_by_repo})}\n\n`,
@@ -637,7 +651,7 @@ def test_network_restore_retries_a_directory_expansion_lost_during_the_outage(br
           };
 
           row().click();
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => failedFastListCount === 1 && !fileExplorerPendingExpansions.has(directory),
             {timeoutMs: 2000, description: 'Finder expansion settles after network outage'},
           );
@@ -651,7 +665,7 @@ def test_network_restore_retries_a_directory_expansion_lost_during_the_outage(br
 
           window.fetch = originalFetch;
           window.dispatchEvent(new Event('online'));
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => child() && row()?.getAttribute('aria-expanded') === 'true' && !row()?.classList.contains('loading-children'),
             {timeoutMs: 3000, description: 'Finder expansion recovers after network restore'},
           );
@@ -736,7 +750,7 @@ def test_b3_second_click_cancels_a_pending_direct_fast_list_expansion(browser, t
           };
 
           row().click();
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => releaseList && fileExplorerPendingExpansions.has(directory) && row()?.classList.contains('loading-children'),
             {timeoutMs: 2000, description: 'pending production Finder fast LIST'},
           );
@@ -754,7 +768,7 @@ def test_b3_second_click_cancels_a_pending_direct_fast_list_expansion(browser, t
             childVisible: Boolean(child()),
           };
           releaseList();
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => !fileExplorerPendingExpansions.has(directory),
             {timeoutMs: 2000, description: 'settled cancelled Finder fast LIST'},
           );
@@ -820,7 +834,7 @@ def test_b5_failed_direct_list_clears_spinner_and_renders_typed_error(browser, t
             });
           };
           row().click();
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => !fileExplorerPendingExpansions.has(directory) && !row()?.classList.contains('loading-children'),
             {timeoutMs: 2000, description: 'failed Finder expansion settles'},
           );
@@ -890,12 +904,12 @@ def test_b3a_pending_expansion_settles_every_live_finder_surface(browser, tmp_pa
             });
           };
           panelRow().click();
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => releaseList && panelRow()?.classList.contains('loading-children'),
             {timeoutMs: 2000, description: 'held Finder panel expansion'},
           );
           toggleFileExplorer();
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => sidebarRow()?.classList.contains('loading-children'),
             {timeoutMs: 2000, description: 'sidebar row rendered while expansion is pending'},
           );
@@ -906,7 +920,7 @@ def test_b3a_pending_expansion_settles_every_live_finder_surface(browser, tmp_pa
             sidebarLoading: sidebarRow()?.classList.contains('loading-children') === true,
           };
           releaseList();
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => !fileExplorerPendingExpansions.has(directory),
             {timeoutMs: 2000, description: 'Finder expansion completion'},
           );
@@ -982,19 +996,19 @@ def test_b4_indexed_label_appears_after_context_index_and_survives_finder_refres
           };
 
           row().dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 32, clientY: 32}));
-          const indexButton = await window.__yolomuxTestWaitFor(
+          const indexButton = await window.__yomuxTestWaitFor(
             () => Array.from(document.querySelectorAll('.file-context-menu button')).find(button => button.textContent.trim() === 'Include in index'),
             {timeoutMs: 2000, description: 'Finder Index context action'},
           );
           indexButton.click();
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => row()?.dataset.indexed === 'true' && badge() === indexedLabel,
             {timeoutMs: 2000, description: 'rendered Finder Indexed label'},
           );
           const afterIndex = {indexed: row()?.dataset.indexed || '', badge: badge()};
           const requestsBeforeRefresh = directoryRequests();
           document.querySelector('#panel-__finder__ .file-explorer-refresh-cluster').click();
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => directoryRequests() > requestsBeforeRefresh && row()?.dataset.indexed === 'true' && badge() === indexedLabel,
             {timeoutMs: 2000, description: 'Indexed label after Finder refresh'},
           );

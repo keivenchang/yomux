@@ -1122,6 +1122,7 @@ func TestStatsDeltaReturnsSnapshotAfterAppendAnd304WhenUnchanged(t *testing.T) {
 	defer writer.Close()
 	now := time.Unix(time.Now().Unix(), 0)
 	lifecycle := stats.NewLifecycle(writer, stats.LifecycleConfig{WindowSeconds: 300, Now: func() time.Time { return now }})
+	t.Cleanup(lifecycle.Stop)
 	service := stats.NewStatsService(writer, stats.StatsServiceConfig{Products: []stats.ProductKey{{RangeSeconds: 300, ResolutionSeconds: 1}}, Now: func() time.Time { return now }})
 	for attempt := 0; attempt < 64 && !service.State().Ready; attempt++ {
 		if err := lifecycle.RunOnce(context.Background()); err != nil {
@@ -1345,6 +1346,7 @@ func TestSnapshotWireCostSourcesReconcileAfterLifecycleAndRingDecode(t *testing.
 		t.Fatal(err)
 	}
 	lifecycle := stats.NewLifecycle(writer, stats.LifecycleConfig{WindowSeconds: 30, MaxCells: 64, Price: resolver, Now: func() time.Time { return now }})
+	t.Cleanup(lifecycle.Stop)
 	lifecycle.DemandProduct(30, 10)
 	service := stats.NewStatsService(writer, stats.StatsServiceConfig{Products: []stats.ProductKey{{RangeSeconds: 30, ResolutionSeconds: 10}}, Price: resolver, Now: func() time.Time { return now }})
 	for attempt := 0; attempt < 16; attempt++ {
@@ -2314,38 +2316,16 @@ server.serve_forever()
 	command := exec.Command(python, pythonScript, fixturePath)
 	command.Dir = testsupport.RepoRoot(t)
 	command.Env = testsupport.SyntheticEnvironment("PYTHONDONTWRITEBYTECODE=1", "PYTHONPATH="+testsupport.RepoRoot(t))
-	stdout, err := command.StdoutPipe()
+	var output synchronizedBuffer
+	command.Stdout, command.Stderr = &output, &output
+	process := startParityProcess(t, command, &output)
+	defer process.checkStop(t)
+	readyLine, err := process.readyLine(5 * time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var stderr bytes.Buffer
-	command.Stderr = &stderr
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if command.Process != nil {
-			_ = command.Process.Kill()
-		}
-		_ = command.Wait()
-	}()
-	ready := make(chan string, 1)
-	go func() {
-		scanner := bufio.NewScanner(stdout)
-		if scanner.Scan() {
-			ready <- scanner.Text()
-			return
-		}
-		ready <- ""
-	}()
-	var readyLine string
-	select {
-	case readyLine = <-ready:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("Python HTTP server did not start; stderr=%s", stderr.String())
-	}
 	if !strings.HasPrefix(readyLine, "READY ") {
-		t.Fatalf("Python HTTP server readiness line = %q; stderr=%s", readyLine, stderr.String())
+		t.Fatalf("Python HTTP server readiness line = %q", readyLine)
 	}
 	pythonPort, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(readyLine, "READY ")))
 	if err != nil || pythonPort < 1 || pythonPort > 65535 {
@@ -2471,6 +2451,7 @@ func TestStatsSnapshotSeedsDeltaHistoryForSubsequentPublication(t *testing.T) {
 		t.Fatal(err)
 	}
 	lifecycle := stats.NewLifecycle(writer, stats.LifecycleConfig{WindowSeconds: 300, MaxCells: 64, Now: func() time.Time { return now }})
+	t.Cleanup(lifecycle.Stop)
 	service := stats.NewStatsService(writer, stats.StatsServiceConfig{Products: []stats.ProductKey{{RangeSeconds: 300, ResolutionSeconds: 10}}, Now: func() time.Time { return now }})
 	for attempt := 0; attempt < 8 && !service.State().Ready; attempt++ {
 		if err := lifecycle.RunOnce(ctx); err != nil {
@@ -2552,6 +2533,7 @@ func TestStatsStreamUsesReadyRevisionForFirstDelta(t *testing.T) {
 		t.Fatal(err)
 	}
 	lifecycle := stats.NewLifecycle(writer, stats.LifecycleConfig{WindowSeconds: 300, MaxCells: 64, Now: func() time.Time { return now }})
+	t.Cleanup(lifecycle.Stop)
 	service := stats.NewStatsService(writer, stats.StatsServiceConfig{Products: []stats.ProductKey{{RangeSeconds: 300, ResolutionSeconds: 10}}, Now: func() time.Time { return now }})
 	for attempt := 0; attempt < 8 && !service.State().Ready; attempt++ {
 		if err := lifecycle.RunOnce(context.Background()); err != nil {
@@ -2643,6 +2625,7 @@ func TestStatsStreamConcurrentClientsReceiveOnePublication(t *testing.T) {
 		t.Fatal(err)
 	}
 	lifecycle := stats.NewLifecycle(writer, stats.LifecycleConfig{WindowSeconds: 300, MaxCells: 64, Now: func() time.Time { return now }})
+	t.Cleanup(lifecycle.Stop)
 	service := stats.NewStatsService(writer, stats.StatsServiceConfig{Products: []stats.ProductKey{{RangeSeconds: 300, ResolutionSeconds: 10}}, Now: func() time.Time { return now }})
 	for attempt := 0; attempt < 8 && !service.State().Ready; attempt++ {
 		if err := lifecycle.RunOnce(ctx); err != nil {
@@ -2742,6 +2725,7 @@ func TestStatsHTTPAndSSEProcessSoakStaysBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	lifecycle := stats.NewLifecycle(writer, stats.LifecycleConfig{WindowSeconds: 300, MaxCells: 64, Now: func() time.Time { return now }})
+	t.Cleanup(lifecycle.Stop)
 	service := stats.NewStatsService(writer, stats.StatsServiceConfig{Products: []stats.ProductKey{{RangeSeconds: 300, ResolutionSeconds: 10}}, Now: func() time.Time { return now }})
 	for attempt := 0; attempt < 8 && !service.State().Ready; attempt++ {
 		if err := lifecycle.RunOnce(ctx); err != nil {
@@ -2932,6 +2916,7 @@ func TestStatsStreamEmitsRepairWhenDeltaBaseIsEvicted(t *testing.T) {
 		t.Fatal(err)
 	}
 	lifecycle := stats.NewLifecycle(writer, stats.LifecycleConfig{WindowSeconds: 300, MaxCells: 64, Now: func() time.Time { return now }})
+	t.Cleanup(lifecycle.Stop)
 	service := stats.NewStatsService(writer, stats.StatsServiceConfig{Products: []stats.ProductKey{{RangeSeconds: 300, ResolutionSeconds: 1}}, Now: func() time.Time { return now }})
 	for attempt := 0; attempt < 16 && !service.State().Ready; attempt++ {
 		if err := lifecycle.RunOnce(ctx); err != nil {
@@ -3076,6 +3061,7 @@ func TestStatsReadyReflectsLifecycleState(t *testing.T) {
 	}
 	defer writer.Close()
 	lifecycle := stats.NewLifecycle(writer, stats.LifecycleConfig{WindowSeconds: 300, MaxCells: 512, Now: func() time.Time { return time.Unix(1000, 0) }})
+	t.Cleanup(lifecycle.Stop)
 	service := stats.NewStatsService(writer, stats.StatsServiceConfig{Products: []stats.ProductKey{{RangeSeconds: 300, ResolutionSeconds: 1}}, Now: func() time.Time { return time.Unix(1000, 0) }})
 	s := &server{statsPath: path, statsWriter: writer, statsService: service, statsLifecycle: lifecycle}
 	before := httptest.NewRecorder()
@@ -3155,6 +3141,7 @@ func publishedStatsService(t *testing.T, writer *stats.Writer, keys []stats.Prod
 		}
 	}
 	lifecycle := stats.NewLifecycle(writer, stats.LifecycleConfig{WindowSeconds: int64(window), Now: func() time.Time { return now }})
+	t.Cleanup(lifecycle.Stop)
 	service := stats.NewStatsService(writer, stats.StatsServiceConfig{Products: keys, Now: func() time.Time { return now }})
 	for attempt := 0; attempt < 64; attempt++ {
 		if err := lifecycle.RunOnce(context.Background()); err != nil {
@@ -3315,6 +3302,7 @@ func TestStatsSnapshotReturnsPersistedFacts(t *testing.T) {
 		return 2400, 3000, nil, true, nil
 	}
 	lifecycle := stats.NewLifecycle(writer, stats.LifecycleConfig{WindowSeconds: 300, Now: func() time.Time { return nowTime }, Price: price})
+	t.Cleanup(lifecycle.Stop)
 	service := stats.NewStatsService(writer, stats.StatsServiceConfig{Products: []stats.ProductKey{{RangeSeconds: 300, ResolutionSeconds: 1}}, Now: func() time.Time { return nowTime }, Price: price})
 	for attempt := 0; attempt < 64 && !service.State().Ready; attempt++ {
 		if err := lifecycle.RunOnce(ctx); err != nil {
@@ -3401,6 +3389,7 @@ func TestStatsSnapshotCostUsesPythonShapedPricingCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	lifecycle := stats.NewLifecycle(writer, stats.LifecycleConfig{WindowSeconds: 300, MaxCells: 64, Price: resolver, Now: func() time.Time { return now }})
+	t.Cleanup(lifecycle.Stop)
 	lifecycle.DemandProduct(300, 10)
 	service := stats.NewStatsService(writer, stats.StatsServiceConfig{Products: []stats.ProductKey{{RangeSeconds: 300, ResolutionSeconds: 10}}, Price: resolver, Now: func() time.Time { return now }})
 	for attempt := 0; attempt < 64 && !service.State().Ready; attempt++ {

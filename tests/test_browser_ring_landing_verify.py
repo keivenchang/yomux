@@ -177,7 +177,6 @@ def _launch_server(
         environment["YOLOMUX_CODEX_TRANSCRIPT_ROOT"],
     ):
         Path(path).mkdir(parents=True, exist_ok=True)
-    environment["YOLOMUX_START_LOAD_WAIT_SECONDS"] = "30"
     environment.pop("YOLOMUX_ROOT", None)
     environment["YOLOMUX_RUNTIME_DIR"] = str(runtime_dir)
     environment["PYTHONUNBUFFERED"] = "1"
@@ -994,7 +993,7 @@ def _prepare_ring_runtime(
         runtime_patch.setattr(
             storage.common,
             "RUNTIME_DIR",
-            common.resolve_yolomux_roots(runtime_environ).runtime_dir,
+            common.resolve_yomux_roots(runtime_environ).runtime_dir,
         )
         requested_socket = storage.default_socket_path(gate_runtime_paths.state_dir)
     log_file = tempfile.NamedTemporaryFile(prefix="yolomux-ring-server-", suffix=".txt", dir="/tmp", delete=False)

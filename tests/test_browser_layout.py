@@ -79,7 +79,7 @@ def test_browser_paint_probe_resolves_scoped_tokens_from_the_component_owner(bro
     )
     paint = browser.execute_script(
         """
-        const {probePaint} = window.__yolomuxTestHelpers;
+        const {probePaint} = window.__yomuxTestHelpers;
         const owner = document.getElementById('owner');
         return {
           scoped: probePaint('background:var(--fixture-paint)', owner).background,
@@ -319,7 +319,7 @@ def test_classified_custom_radii_keep_computed_geometry_in_both_themes(browser, 
           <article id="transcript" class="transcript-item"></article>
           <article id="conversation" class="conversation-message"></article>
           <span id="file-date" class="file-tree-date"></span>
-        """),
+        """, extra_css="*, *::before, *::after { transition: none !important; animation: none !important; }"),
     )
     expected = {
         "transport": "7px", "drag": "7px", "submenu": "7px",
@@ -640,7 +640,7 @@ def test_agent_prompt_browser_cases_share_the_isolated_tmux_runtime_owner():
     real_source = function_sources["test_real_agent_prompts_render_ask_attention_in_live_server"]
     assert "getattr(" not in real_source
     assert "except Exception:" not in real_source
-    assert "window.__yolomuxTestWaitFor" in real_source
+    assert "window.__yomuxTestWaitFor" in real_source
     assert "ui_deadline" not in real_source
     assert "time.sleep(0.5)" not in real_source
 
@@ -657,7 +657,7 @@ def test_branch_list_title_uses_separate_dark_and_light_theme_tokens(browser, tm
         """
         const title = document.querySelector('.branch-list-title');
         const dark = getComputedStyle(title).color;
-        const {probePaint} = window.__yolomuxTestHelpers;
+        const {probePaint} = window.__yomuxTestHelpers;
         const darkExpected = probePaint('color:var(--neutral-text-cool)').color;
         document.body.classList.add('theme-light');
         const light = getComputedStyle(title).color;
@@ -1014,7 +1014,7 @@ def test_subwindow_attention_turns_gray_across_tmux_readback_before_removal(brow
     samples_by_window = expire_subwindow_gray_acknowledgements(browser, window_indexes)["samples"]
     browser.execute_script("window.__subwindowGrayHarness.restore();")
     expected_gray = browser.execute_script(
-        "return window.__yolomuxTestHelpers.probePaint('background:var(--muted)').background"
+        "return window.__yomuxTestHelpers.probePaint('background:var(--muted)').background"
     )
     for case in cases:
         assert_subwindow_gray_acknowledgement_sequence(case, samples_by_window[str(case["window_index"])], expected_gray)
@@ -1043,7 +1043,7 @@ def test_subwindow_attention_gray_sequence_detects_missing_gray_and_missing_remo
     samples_by_window = expire_subwindow_gray_acknowledgements(browser, [])["samples"]
     browser.execute_script("window.__subwindowGrayHarness.restore();")
     expected_gray = browser.execute_script(
-        "return window.__yolomuxTestHelpers.probePaint('background:var(--muted)').background"
+        "return window.__yomuxTestHelpers.probePaint('background:var(--muted)').background"
     )
     with pytest.raises(AssertionError) as missing_gray:
         assert_subwindow_gray_acknowledgement_sequence(missing_gray_case, samples_by_window[str(missing_gray_case["window_index"])], expected_gray)
@@ -1302,7 +1302,7 @@ def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narro
           const hiddenRequests = {...requests};
 
           systemButton.click();
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => requests.system === 1
               && panel.querySelector('[data-current-stats-system-body]')?.textContent.includes('system-status-1'),
             {timeoutMs: 2000, intervalMs: 10, description: 'current System first visible response'},
@@ -1315,7 +1315,7 @@ def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narro
           await pollJsCurrentStatsLogs();
           const logsWhileSystemVisible = requests.logs;
           view.querySelector('[data-current-stats-system-refresh]').click();
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => requests.system === 2
               && view.querySelector('[data-current-stats-system-body]')?.textContent.includes('system-status-2'),
             {timeoutMs: 2000, intervalMs: 10, description: 'current System explicit refresh'},
@@ -1507,7 +1507,12 @@ def test_current_stats_daemons_load_spike_scale_keeps_low_hover_value_true(brows
 
 
 def test_current_stats_daemons_load_mode_controls_repaint_retained_buckets_and_persist(browser, tmp_path):
-    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?debug=1&sessions=debug",
+        settings={"general": {"startup_tips": False}},
+    )
 
     def activate_debug_panel():
         browser.execute_async_script(
@@ -2261,10 +2266,10 @@ def test_current_stats_cpu_stacks_host_binaries_and_the_daemon_chart_emphasizes_
             const areas = [...(card?.querySelectorAll('[data-js-debug-area-series^="cpuBinary:"]') || [])];
             const areaLegendBlocks = [...(card?.querySelectorAll('[data-js-debug-legend^="cpuBinary:"] .js-debug-legend-area') || [])].map(node => ({width: getComputedStyle(node).width, height: getComputedStyle(node).height}));
             const systemLine = card?.querySelector('[data-js-debug-series="systemCpu"]');
-            const yolomuxLine = card?.querySelector('[data-js-debug-series^="cpu:port:"]');
-            const yolomuxOnDaemonCard = daemonCard?.querySelector('[data-js-debug-series^="cpu:port:"]');
+            const yomuxLine = card?.querySelector('[data-js-debug-series^="cpu:port:"]');
+            const yomuxOnDaemonCard = daemonCard?.querySelector('[data-js-debug-series^="cpu:port:"]');
             const systemLegend = card?.querySelector('[data-js-debug-legend="systemCpu"] .js-debug-legend-line .js-debug-line');
-            const yolomuxLegend = card?.querySelector('[data-js-debug-legend^="cpu:port:"] .js-debug-legend-line .js-debug-line');
+            const yomuxLegend = card?.querySelector('[data-js-debug-legend^="cpu:port:"] .js-debug-legend-line .js-debug-line');
             const legendOrder = [...(card?.querySelectorAll('[data-js-debug-legend]') || [])].map(node => node.dataset.jsDebugLegend);
             const linePaintOrder = [...(card?.querySelectorAll('.js-debug-line-chart [data-js-debug-series]') || [])].map(node => node.dataset.jsDebugSeries);
             const cpuCardLegendOrder = [...(card?.querySelectorAll('[data-js-debug-legend]') || [])].map(node => node.dataset.jsDebugLegend);
@@ -2282,12 +2287,12 @@ def test_current_stats_cpu_stacks_host_binaries_and_the_daemon_chart_emphasizes_
               stackedAreas: areas.every(node => node.dataset.jsDebugAreaStacked), areaStrokeWidths: areas.map(node => getComputedStyle(node).strokeWidth),
               lightOpacity, darkOpacity, areaLegendBlocks,
               systemLegendWidth: systemLegend ? getComputedStyle(systemLegend).strokeWidth : '',
-              yolomuxLegendWidth: yolomuxLegend ? getComputedStyle(yolomuxLegend).strokeWidth : '',
+              yomuxLegendWidth: yomuxLegend ? getComputedStyle(yomuxLegend).strokeWidth : '',
               systemLineWidth: systemLine ? getComputedStyle(systemLine).strokeWidth : '',
-              yolomuxLineWidth: yolomuxLine ? getComputedStyle(yolomuxLine).strokeWidth : '',
-              yolomuxEmphasized: yolomuxLine?.classList.contains('js-debug-line--current-process') || false,
-              yolomuxOnDaemonCard: Boolean(yolomuxOnDaemonCard), cpuCardLegendOrder,
-              legendOrder, linePaintOrder, systemPattern: systemLine?.dataset.jsDebugLinePattern, yolomuxPattern: yolomuxLine?.dataset.jsDebugLinePattern,
+              yomuxLineWidth: yomuxLine ? getComputedStyle(yomuxLine).strokeWidth : '',
+              yomuxEmphasized: yomuxLine?.classList.contains('js-debug-line--current-process') || false,
+              yomuxOnDaemonCard: Boolean(yomuxOnDaemonCard), cpuCardLegendOrder,
+              legendOrder, linePaintOrder, systemPattern: systemLine?.dataset.jsDebugLinePattern, yomuxPattern: yomuxLine?.dataset.jsDebugLinePattern,
             };
         """
     )
@@ -2300,15 +2305,15 @@ def test_current_stats_cpu_stacks_host_binaries_and_the_daemon_chart_emphasizes_
     assert result["lightOpacity"] == result["darkOpacity"] == "1", result
     assert result["areaLegendBlocks"] == [{"width": "18px", "height": "6px"}] * 4, result
     assert result["systemLegendWidth"] == "1.5px", result
-    assert float(result["yolomuxLegendWidth"].removesuffix("px")) > 1.5, result
-    assert float(result["yolomuxLineWidth"].removesuffix("px")) > float(result["systemLineWidth"].removesuffix("px")), result
-    assert result["yolomuxEmphasized"] is True, result
+    assert float(result["yomuxLegendWidth"].removesuffix("px")) > 1.5, result
+    assert float(result["yomuxLineWidth"].removesuffix("px")) > float(result["systemLineWidth"].removesuffix("px")), result
+    assert result["yomuxEmphasized"] is True, result
     # Process CPU remains in the CPU chart; the Daemons chart shows elapsed runtime occupancy.
     assert result["legendOrder"][0].startswith("cpu:port:"), result
     assert result["linePaintOrder"][-1].startswith("cpu:port:"), result
-    assert result["systemPattern"] == "dot" and result["yolomuxPattern"] == "solid", result
+    assert result["systemPattern"] == "dot" and result["yomuxPattern"] == "solid", result
     # And it is not drawn twice beside elapsed collector occupancy.
-    assert result["yolomuxOnDaemonCard"] is False, result
+    assert result["yomuxOnDaemonCard"] is False, result
     assert any(key.startswith("cpu:port:") for key in result["cpuCardLegendOrder"]), result
 
 
@@ -2801,7 +2806,7 @@ def test_current_stats_resolution_switch_keeps_old_chart_through_pending_watchdo
           jsDebugCurrentStatsClientState.selectionKey = `${rangeSeconds}:60`;
           jsDebugCurrentStatsClientState.startPromise = null;
           await client.start();
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => client.controller()?.generation()?.resolution_seconds === 60,
             {timeoutMs: 3000, intervalMs: 10, description: 'initial retained 60s chart'},
           );
@@ -2826,7 +2831,7 @@ def test_current_stats_resolution_switch_keeps_old_chart_through_pending_watchdo
             streamClosed: streams.at(-1)?.closed || false,
           };
           streams.at(-1)?.deliverSnapshot(2);
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => cpuDurations().length === 1 && cpuDurations()[0] === 300000,
             {timeoutMs: 3000, intervalMs: 10, description: 'accepted retained 300s chart'},
           );
@@ -3199,7 +3204,7 @@ def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(bro
             prune: false,
             forceFull: true,
           });
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => requests.logs === 1
               && document.querySelectorAll('article[data-js-debug-log-entry]').length === 2,
             {timeoutMs: 3000, intervalMs: 10, description: 'exact two-row rendered client Logs phase'},
@@ -3255,12 +3260,12 @@ def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(bro
             ),
           };
           applyLayoutSlots(layoutFromSessionList(['1']), {focusSession: '1', prune: false, forceFull: true});
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => !itemIsActivePaneTab(debugPaneItemId),
             {timeoutMs: 2000, intervalMs: 10, description: 'two-row Logs phase closed'},
           );
           clearRuntimeInterval('debug-logs');
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => jsDebugLogsState.inFlight === false,
             {timeoutMs: 2000, intervalMs: 10, description: 'two-row Logs poll settled'},
           );
@@ -3408,18 +3413,18 @@ def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(bro
             prune: false,
             forceFull: true,
           });
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => itemIsActivePaneTab(debugPaneItemId)
               && document.querySelector('[data-js-debug-subview="logs"]:not([hidden])'),
             {timeoutMs: 2000, intervalMs: 10, description: 'three-producer Logs phase visible'},
           );
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => jsDebugLogsState.inFlight === false,
             {timeoutMs: 2000, intervalMs: 10, description: 'three-producer automatic Logs poll settled'},
           );
           await pollDebugLogs({force: true});
           try {
-            await window.__yolomuxTestWaitFor(
+            await window.__yomuxTestWaitFor(
               () => requests.logs === 1
                 && document.querySelectorAll('article[data-js-debug-log-entry]').length === 4,
               {timeoutMs: 3000, intervalMs: 10, description: 'rendered merged Logs rows'},
@@ -3516,7 +3521,7 @@ def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(bro
           };
 
           applyLayoutSlots(layoutFromSessionList(['1']), {focusSession: '1', prune: false, forceFull: true});
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => !itemIsActivePaneTab(debugPaneItemId),
             {timeoutMs: 2000, intervalMs: 10, description: 'YO!stats closed'},
           );
@@ -3527,7 +3532,7 @@ def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(bro
             prune: false,
             forceFull: true,
           });
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => itemIsActivePaneTab(debugPaneItemId)
               && document.querySelector('[data-js-debug-subview="logs"]:not([hidden])'),
             {timeoutMs: 2000, intervalMs: 10, description: 'YO!stats reopened on Logs'},
@@ -3959,11 +3964,11 @@ def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(bro
             prune: false,
             forceFull: true,
           });
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => document.querySelector('[data-js-debug-subview="logs"]:not([hidden])') !== null,
             {timeoutMs: 3000, intervalMs: 10, description: 'reloaded Logs subview visible'},
           );
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => jsDebugLogsState.inFlight === false,
             {timeoutMs: 3000, intervalMs: 10, description: 'reloaded automatic Logs poll settled'},
           );
@@ -4284,6 +4289,8 @@ def test_adjacent_subwindow_run_glyphs_share_geometry_and_global_phase_after_rep
               const after = getComputedStyle(dot, '::after');
               const animation = dot.getAnimations().find(item => item.animationName === 'agent-status-opacity-pulse');
               const timing = animation?.effect?.getComputedTiming?.() || {};
+              const expectedProgress = attentionAnimationPhaseMs(performance.timeOrigin + document.timeline.currentTime) / agentStatusPulsePeriodMs;
+              const phaseDifference = Math.abs(Number(timing.progress) - expectedProgress);
               return {
                 kind: row.dataset.runKind,
                 dot: {width: dot.getBoundingClientRect().width, height: dot.getBoundingClientRect().height},
@@ -4295,6 +4302,7 @@ def test_adjacent_subwindow_run_glyphs_share_geometry_and_global_phase_after_rep
                 timingFunction: style.animationTimingFunction,
                 playState: animation?.playState || '',
                 progress: Number(timing.progress),
+                phaseDistance: Math.min(phaseDifference, 1 - phaseDifference),
                 opacity: Number(style.opacity),
               };
             };
@@ -4322,6 +4330,7 @@ def test_adjacent_subwindow_run_glyphs_share_geometry_and_global_phase_after_rep
         assert all(row["animationName"] == "agent-status-opacity-pulse" for row in rows), layouts
         assert all(row["duration"] == "1.55s" and row["timingFunction"].startswith("steps(12") for row in rows), layouts
         assert all(row["playState"] in {"pending", "running"} for row in rows), layouts
+        assert all(row["phaseDistance"] < 0.01 for row in rows), layouts
         assert abs(codex["progress"] - claude["progress"]) < 0.04, layouts
         if label == "normal":
             browser.save_screenshot("/tmp/yolomux-subwindow-run-sync.png")
@@ -4337,12 +4346,18 @@ def test_adjacent_subwindow_run_glyphs_share_geometry_and_global_phase_after_rep
           subwindowGlyphPulse: true,
         });
         row.querySelector('.tmux-window-name-label').innerHTML = `${runHtml}<span class="tmux-window-name-text">1:claude</span>`;
+        syncAgentWindowActivityAnimationDelays(row);
+        // A replacement's pending playback must keep phase when this frame is busy.
+        const heldUntil = performance.now() + 80;
+        while (performance.now() < heldUntil) {}
         requestAnimationFrame(() => requestAnimationFrame(() => {
           const dots = [...fixture.querySelectorAll('.agent-window-status-dot')];
           const details = dots.map(dot => {
             const animation = dot.getAnimations().find(item => item.animationName === 'agent-status-opacity-pulse');
             const timing = animation?.effect?.getComputedTiming?.() || {};
-            return {delay: getComputedStyle(dot).animationDelay, progress: Number(timing.progress), playState: animation?.playState || ''};
+            const expectedProgress = attentionAnimationPhaseMs(performance.timeOrigin + document.timeline.currentTime) / agentStatusPulsePeriodMs;
+            const phaseDifference = Math.abs(Number(timing.progress) - expectedProgress);
+            return {delay: getComputedStyle(dot).animationDelay, progress: Number(timing.progress), phaseDistance: Math.min(phaseDifference, 1 - phaseDifference), playState: animation?.playState || ''};
           });
           done({replaced: before !== row.querySelector('.agent-window-status-dot'), details});
         }));
@@ -4351,6 +4366,7 @@ def test_adjacent_subwindow_run_glyphs_share_geometry_and_global_phase_after_rep
     assert replacement["replaced"] is True, replacement
     assert len(replacement["details"]) == 2, replacement
     assert all(item["playState"] in {"pending", "running"} for item in replacement["details"]), replacement
+    assert all(item["phaseDistance"] < 0.01 for item in replacement["details"]), replacement
     assert len({item["delay"] for item in replacement["details"]}) == 1, replacement
     assert abs(replacement["details"][0]["progress"] - replacement["details"][1]["progress"]) < 0.04, replacement
 
@@ -4545,7 +4561,7 @@ def test_attention_status_ball_is_red_and_uses_the_shared_opacity_pulse(browser,
         const dim = read();
         if (animation && duration > 0) animation.currentTime = duration * 0.5;
         const bright = read();
-        const {probePaint} = window.__yolomuxTestHelpers;
+        const {probePaint} = window.__yomuxTestHelpers;
         const expected = probePaint('background:var(--agent-status-ball-fill);border:1px solid var(--agent-status-ball-border)', dot);
         return {animation: getComputedStyle(dot).animationName, dim, bright, expected};
         """
@@ -4678,7 +4694,7 @@ def test_subwindow_status_glyphs_are_solid_unclipped_shapes_without_tab_dot_over
             buttonColor: button ? getComputedStyle(button).color : '',
           };
         };
-        const {probePaint} = window.__yolomuxTestHelpers;
+        const {probePaint} = window.__yomuxTestHelpers;
         const expectedGrayDark = probePaint('background:var(--muted)').background;
         const expectedAttentionDark = probePaint('background:var(--subwindow-status-glyph-fill)', document.getElementById('popover-attention-dot')).background;
         const dark = {
@@ -5219,7 +5235,7 @@ def test_recreated_working_status_ball_keeps_wall_clock_pulse_phase(browser, tmp
             transitionPulseActive: true,
             acknowledged: false,
           };
-          const {frame} = window.__yolomuxTestHelpers;
+          const {frame} = window.__yomuxTestHelpers;
           const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
           const samples = [];
           let previousDot = null;
@@ -5577,7 +5593,7 @@ def test_pane_info_popover_uses_full_pane_width_not_metadata_anchor(browser, tmp
     )
     metrics = browser.execute_script(
         """
-        const {rect} = window.__yolomuxTestHelpers;
+        const {rect} = window.__yomuxTestHelpers;
         const panel = document.getElementById('panel');
         const zone = document.getElementById('zone');
         const popover = document.getElementById('popover');
@@ -5629,7 +5645,7 @@ def test_live_session_tab_popover_stays_near_owning_pane_width(browser, tmp_path
         fileTab.appendChild(filePopover);
         fileHost.appendChild(fileTab);
         document.body.appendChild(fileHost);
-        const {rect} = window.__yolomuxTestHelpers;
+        const {rect} = window.__yomuxTestHelpers;
         const fileWidthBefore = rect(filePopover).width;
         positionPaneTabPopover(tab, popover);
         tab.classList.add('popover-open');
@@ -6212,7 +6228,7 @@ def test_danger_status_and_light_panel_surface_paint_have_shared_computed_owners
     )
     metrics = browser.execute_script(
         """
-        const {paint: helperPaint, probePaint} = window.__yolomuxTestHelpers;
+        const {paint: helperPaint, probePaint} = window.__yomuxTestHelpers;
         const paint = id => helperPaint(document.getElementById(id));
         const frame = id => {
           const style = getComputedStyle(document.getElementById(id));
@@ -6376,7 +6392,7 @@ def test_inactive_markers_and_vanilla_code_surfaces_share_computed_paint(browser
     )
     metrics = browser.execute_script(
         """
-        const {paint: helperPaint, probePaint} = window.__yolomuxTestHelpers;
+        const {paint: helperPaint, probePaint} = window.__yomuxTestHelpers;
         const paint = id => helperPaint(document.getElementById(id));
         const markerTheme = light => {
           document.body.classList.toggle('theme-light', light);
@@ -7913,7 +7929,7 @@ def test_compact_activity_uses_desktop_right_rail_before_optional_icons(browser,
         // This static fixture has no application bundle. Match the measured packing state that
         // places compact activity ahead of Refresh after optional desktop chrome has yielded.
         document.body.classList.add('topbar-pack-hide-latency', 'topbar-pack-hide-logout', 'topbar-pack-hide-notify');
-        const {rect: baseRect} = window.__yolomuxTestHelpers;
+        const {rect: baseRect} = window.__yomuxTestHelpers;
         const rect = node => ({...baseRect(node), display: getComputedStyle(node).display});
         const activity = document.getElementById('topbarActivity');
         const refresh = document.getElementById('refreshMeta');
@@ -8310,7 +8326,7 @@ def test_topbar_menu_search_action_priority_matrix(browser, tmp_path):
             } else {
               menuBar.innerHTML = ['File', 'View', 'tmux', 'Tabs', 'Help'].map(name => `<div class="app-menu"><button id="matrix-${name.toLowerCase()}" class="app-menu-button">${name}</button></div>`).join('');
             }
-            const {rect: baseRect} = window.__yolomuxTestHelpers;
+            const {rect: baseRect} = window.__yomuxTestHelpers;
             const rect = node => ({...baseRect(node), display: getComputedStyle(node).display});
             const visible = node => node && getComputedStyle(node).display !== 'none';
             const menuNames = compact ? ['menus'] : ['file', 'view', 'tmux', 'tabs', 'help'];
@@ -8360,7 +8376,7 @@ def test_topbar_menu_search_action_priority_matrix(browser, tmp_path):
         document.documentElement.style.setProperty('--ui-font-size', '18px');
         document.querySelector('.app-menu-bar').innerHTML = ['File', 'View', 'tmux', 'Tabs', 'Help']
           .map(name => `<div class="app-menu"><button class="app-menu-button">${name}</button></div>`).join('');
-        const {rect: baseRect} = window.__yolomuxTestHelpers;
+        const {rect: baseRect} = window.__yomuxTestHelpers;
         const rect = node => {
           const box = baseRect(node);
           return {...box, center: (box.left + box.right) / 2};
@@ -8813,7 +8829,7 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
             const sessions = arguments[0];
             const done = arguments[arguments.length - 1];
             (async () => {
-              const prompted = await window.__yolomuxTestWaitFor(async () => {
+              const prompted = await window.__yomuxTestWaitFor(async () => {
                   await refreshAutoStatuses();
                   refreshActivePanelHeaders();
                   updateTopbarActivityStatus();
@@ -8925,12 +8941,16 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
             )
         )
     finally:
+        cleanup_phases = []
         if server is not None and thread is not None:
-            stop_browser_server(server, thread, browser=browser)
+            cleanup_phases.append(("browser server", lambda: stop_browser_server(server, thread, browser=browser)))
         elif app is not None:
-            app.control_server.stop()
-        stop_isolated_tmux_runtime(tmux_runtime)
-        cleanup_isolated_browser_runtime_paths(paths)
+            cleanup_phases.append(("control server", app.control_server.stop))
+        cleanup_phases.extend((
+            ("tmux runtime", lambda: stop_isolated_tmux_runtime(tmux_runtime)),
+            ("runtime paths", lambda: cleanup_isolated_browser_runtime_paths(paths)),
+        ))
+        run_fixture_cleanup_phases("browser layout fixture", cleanup_phases)
 
 
 def test_yoagent_settings_operator_updates_live_gui_and_denies_readonly(browser, tmp_path):
@@ -9169,7 +9189,7 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path, lab
                 pending_waits: [],
               },
             };
-            const {rect: rectFor} = window.__yolomuxTestHelpers;
+            const {rect: rectFor} = window.__yomuxTestHelpers;
             const boxFor = element => {
               if (!element) return null;
               const style = getComputedStyle(element);
@@ -9712,7 +9732,7 @@ def test_rename_marks_index_building_and_refresh_done_requeries_open_search(brow
         fileExplorerIndexedDirs = new Set(['/repo']);
         fileExplorerIndexStatus.set('/repo', 'ready');
         renameFileTreePath('/repo/migration-tools', {name: 'migration-tools', kind: 'dir'}, 'home-manifest').then(async renamed => {
-          const waitFor = window.__yolomuxTestWaitFor;
+          const waitFor = window.__yomuxTestWaitFor;
           await waitFor(
             () => fileExplorerIndexStatus.get('/repo') === 'building',
             {description: 'renamed root index building'}
@@ -9831,7 +9851,7 @@ def test_yoinfo_vertical_side_pane_stacks_fields_without_character_column_wrappi
     metrics = WebDriverWait(browser, 8).until(
         lambda driver: driver.execute_script(
             """
-        const {rect} = window.__yolomuxTestHelpers;
+        const {rect} = window.__yomuxTestHelpers;
         const fieldStyle = getComputedStyle(document.getElementById('branch-field'));
         const textStyle = getComputedStyle(document.getElementById('branch-text'));
         const metrics = {
@@ -9942,7 +9962,7 @@ def test_yoinfo_deep_narrow_record_and_toolbar_use_container_responsive_layout(b
     )
     metrics = browser.execute_script(
         """
-        const {rect} = window.__yolomuxTestHelpers;
+        const {rect} = window.__yomuxTestHelpers;
         const selects = [...document.querySelectorAll('.info-tree-order-select')];
         const separators = [...document.querySelectorAll('.info-tree-order-separator')];
         const textStyle = getComputedStyle(document.getElementById('branch-text'));
@@ -10233,7 +10253,7 @@ def test_tabber_session_rows_use_pane_tab_shape_and_keep_columns(browser, tmp_pa
         )
         metrics = browser.execute_script(
             """
-            const {rect: rectFor} = window.__yolomuxTestHelpers;
+            const {rect: rectFor} = window.__yomuxTestHelpers;
             const resolvedColor = (scope, value) => {
               const probe = document.createElement('span');
               probe.style.position = 'absolute';
@@ -10628,6 +10648,103 @@ def test_tabber_live_rows_use_custom_hover_without_native_titles(browser, tmp_pa
     assert cleanup_metrics["detachedPopoverCount"] == cleanup_metrics["detachedPopoverCountBefore"], cleanup_metrics
 
 
+def test_tabber_native_drag_image_snapshots_offscreen_cloned_rows(browser, tmp_path):
+    """A trusted native drag invokes snapshotting with renderable offscreen Tabber clones."""
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=__tabber__,1&layout=row@34(left,right)&tabs=left:__tabber__;right:1",
+        sessions=["1"],
+        transcript_sessions={
+            "1": {
+                "current_path": "/home/test/yolomux.dev8001",
+                "git_root": "/home/test/yolomux.dev8001",
+                "branch": "drag-image",
+                "panes": [{"window": "0", "pane": "0", "window_name": "claude", "process_label": "claude", "command": "claude", "window_active": True, "active": True, "pid": 12345}],
+            },
+        },
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof tabberNativeDragImageForRow === 'function' && document.querySelector('.file-tree-row[data-tabber-type=\"session\"] .tabber-session-tab') !== null"
+        )
+    )
+    start = browser.execute_script(
+        """
+        const tab = document.querySelector('.file-tree-row[data-tabber-type="session"] .tabber-session-tab');
+        const rect = tab.getBoundingClientRect();
+        const target = document.querySelector('#panel-1 .terminal')?.getBoundingClientRect();
+        return {
+          start: {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2},
+          end: target ? {x: target.left + target.width / 2, y: target.top + target.height / 2} : null,
+        };
+        """
+    )
+    assert start["end"] is not None, start
+    capture = browser.execute_script(
+        """
+        const original = DataTransfer.prototype.setDragImage;
+        window.__tabberNativeDragCapture = {called: false, trusted: false, rowCount: 0};
+        window.__tabberNativeDragOriginalSetImage = original;
+        window.__tabberNativeDragHandler = event => {
+          if (event.isTrusted) window.__tabberNativeDragCapture.trusted = true;
+        };
+        document.addEventListener('dragstart', window.__tabberNativeDragHandler, true);
+        DataTransfer.prototype.setDragImage = function(image, x, y) {
+          if (image?.classList?.contains('tabber-drag-image')) {
+            const root = image.querySelector('.file-tree-row[data-tabber-type="session"]');
+            const name = root?.querySelector('.file-tree-name');
+            if (name) {
+              const marker = document.createElement('span');
+              marker.dataset.nativeDragPixelProbe = 'true';
+              marker.style.cssText = 'display:inline-block;flex:0 0 32px;width:32px;height:16px;background:rgb(13,241,165);';
+              name.prepend(marker);
+            }
+            window.__tabberNativeDragCapture.called = true;
+            window.__tabberNativeDragCapture.rowCount = image.querySelectorAll('.file-tree-row[data-tabber-type]').length;
+          }
+          return original.call(this, image, x, y);
+        };
+        return {patched: DataTransfer.prototype.setDragImage !== original};
+        """
+    )
+    assert capture["patched"] is True, capture
+    try:
+        cdp_drag_hold(browser, start["start"], start["end"], steps=8)
+        native = browser.execute_script(
+            """
+            const capture = window.__tabberNativeDragCapture;
+            const marker = document.querySelector('.tabber-drag-image [data-native-drag-pixel-probe]');
+            const row = marker?.closest('.file-tree-row');
+            return {
+              ...capture,
+              contentVisibility: row ? getComputedStyle(row).contentVisibility : '',
+              markerRect: marker?.getBoundingClientRect().toJSON() || null,
+              cloneOffscreen: (Number.parseFloat(getComputedStyle(marker?.closest('.tabber-drag-image')).left) || 0) < -1000,
+            };
+            """
+        )
+        assert native["trusted"] and native["called"] and native["rowCount"] >= 2, native
+        assert native["cloneOffscreen"] is True, native
+        assert native["contentVisibility"] == "visible", native
+        assert native["markerRect"] and native["markerRect"]["width"] == 32 and native["markerRect"]["height"] == 16, native
+    finally:
+        cdp_release(browser, start["end"])
+        browser.execute_script(
+            """
+            if (window.__tabberNativeDragOriginalSetImage) {
+              DataTransfer.prototype.setDragImage = window.__tabberNativeDragOriginalSetImage;
+            }
+            if (window.__tabberNativeDragHandler) {
+              document.removeEventListener('dragstart', window.__tabberNativeDragHandler, true);
+            }
+            delete window.__tabberNativeDragCapture;
+            delete window.__tabberNativeDragOriginalSetImage;
+            delete window.__tabberNativeDragHandler;
+            """
+        )
+
+
 def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path)
     WebDriverWait(browser, 5).until(
@@ -10893,7 +11010,7 @@ def test_tmux_window_switch_masks_old_window_output_until_confirmed_target_paint
             const revealStartedAt = performance.now();
             releasePost({ok: true});
             socket.onmessage({data: binaryFrame('CODEX-WINDOW-0-READY')});
-            await window.__yolomuxTestWaitFor(() => !maskNode(), {timeoutMs: 2000, intervalMs: 5, description: 'instant reveal after POST success + painted repaint frame'});
+            await window.__yomuxTestWaitFor(() => !maskNode(), {timeoutMs: 2000, intervalMs: 5, description: 'instant reveal after POST success + painted repaint frame'});
             const revealMs = performance.now() - revealStartedAt;
             const container = document.getElementById('term-1');
             const refreshTxnFrames = refreshFrames(socket);
@@ -10974,7 +11091,7 @@ def test_tmux_window_switch_stalls_only_when_the_select_post_hangs_with_retry_an
             // A HANGING select POST is the only stall: no confirmation ever arrives, so the mask
             // degrades to the explicit stalled state instead of revealing unconfirmed content.
             tmuxWindow('1', {windowIndex: 0}, 'tmux sub-window 0:codex');
-            await window.__yolomuxTestWaitFor(
+            await window.__yomuxTestWaitFor(
               () => maskNode()?.dataset.terminalConnectionState === 'switch-stalled',
               {timeoutMs: 7000, intervalMs: 25, description: 'a hung select POST becomes an explicit stalled state'}
             );
@@ -10988,7 +11105,7 @@ def test_tmux_window_switch_stalls_only_when_the_select_post_hangs_with_retry_an
             // Retry reveals through the normal confirm+paint path (the user explicitly asked;
             // the terminal then honestly shows whatever tmux actually shows).
             maskNode().querySelector('[data-terminal-connection-retry]').click();
-            await window.__yolomuxTestWaitFor(() => !maskNode(), {timeoutMs: 2000, intervalMs: 10, description: 'retry reveals through the paint path'});
+            await window.__yomuxTestWaitFor(() => !maskNode(), {timeoutMs: 2000, intervalMs: 10, description: 'retry reveals through the paint path'});
             const afterRetry = {maskGone: !maskNode()};
             const stalePost = releasePost;
             if (stalePost) stalePost({ok: true}); // the hung POST resolving late must be inert
@@ -11005,8 +11122,8 @@ def test_tmux_window_switch_stalls_only_when_the_select_post_hangs_with_retry_an
               throw new Error('test-only second switch deadline did not reach the shared stalled state');
             }
             maskNode().querySelector('[data-terminal-connection-cancel]').click();
-            await window.__yolomuxTestWaitFor(() => !maskNode(), {timeoutMs: 3000, intervalMs: 10, description: 'cancel clears the mask'});
-            await window.__yolomuxTestWaitFor(() => activeWindowButtons().join(',') === '1', {timeoutMs: 3000, intervalMs: 10, description: 'cancel returns to the authoritative window'});
+            await window.__yomuxTestWaitFor(() => !maskNode(), {timeoutMs: 3000, intervalMs: 10, description: 'cancel clears the mask'});
+            await window.__yomuxTestWaitFor(() => activeWindowButtons().join(',') === '1', {timeoutMs: 3000, intervalMs: 10, description: 'cancel returns to the authoritative window'});
             return {
               stalled, afterRetry,
               afterCancel: {maskGone: !maskNode(), activeButtons: activeWindowButtons()},
@@ -11086,7 +11203,7 @@ def test_tmux_window_switch_rapid_and_relative_switches_reveal_only_newest_seque
             const revealStartedAt = performance.now();
             postReleases[2]({ok: true});
             socket.onmessage({data: binaryFrame('CLAUDE-WINDOW-1-READY')});
-            await window.__yolomuxTestWaitFor(() => !maskNode(), {timeoutMs: 2000, intervalMs: 5, description: 'newest transaction reveals instantly'});
+            await window.__yomuxTestWaitFor(() => !maskNode(), {timeoutMs: 2000, intervalMs: 5, description: 'newest transaction reveals instantly'});
             const afterReveal = {
               maskGone: !maskNode(),
               revealMs: performance.now() - revealStartedAt,
@@ -11101,12 +11218,12 @@ def test_tmux_window_switch_rapid_and_relative_switches_reveal_only_newest_seque
             await new Promise(resolve => requestAnimationFrame(resolve));
             const relative = {mask: maskMetrics(), inputFrame: sentFrames(socket).some(frame => frame.type === 'input' && frame.data === '\\u0002n')};
             socket.onmessage({data: binaryFrame('BASH-WINDOW-2-READY')});
-            await window.__yolomuxTestWaitFor(() => !maskNode(), {timeoutMs: 2000, intervalMs: 5, description: 'relative switch reveals instantly after the repaint frame'});
+            await window.__yomuxTestWaitFor(() => !maskNode(), {timeoutMs: 2000, intervalMs: 5, description: 'relative switch reveals instantly after the repaint frame'});
             const relativeRevealMs = performance.now() - relativeStartedAt;
             // Button truth reconciles through the readback once signals answer. Earlier
             // transactions' unanswered readbacks queue ahead: answer every request with the
             // authoritative window until the newest readback lands and reconciles.
-            await window.__yolomuxTestWaitFor(() => {
+            await window.__yomuxTestWaitFor(() => {
               while (signalReleases.length) signalReleases.shift()(signalsPayload(2));
               return activeWindowButtons().join(',') === '2';
             }, {timeoutMs: 4000, intervalMs: 25, description: 'buttons reconcile to the signalled window'});
@@ -12283,7 +12400,7 @@ def test_terminal_file_reference_underlines_are_visible_and_hover_subtle(browser
           };
         };
         const layer = getComputedStyle(document.querySelector('.terminal-file-link-underlines'));
-        const {probePaint} = window.__yolomuxTestHelpers;
+        const {probePaint} = window.__yomuxTestHelpers;
         return {
           darkRest: line('dark-rest'),
           darkHover: line('dark-hover'),
@@ -12334,9 +12451,11 @@ def test_terminal_file_reference_underlines_clear_on_same_viewport_output(browse
           container.appendChild(rows);
           document.body.appendChild(container);
           let text = 'Open static_src/js/yomux/00_bootstrap_state.js:283';
+          let writeParsed;
           const term = {
             cols: 100,
             rows: 3,
+            onWriteParsed: callback => { writeParsed = callback; return {dispose() {}}; },
             buffer: {active: {viewportY: 0, getLine: index => index === 0 ? {isWrapped: false, translateToString: () => text} : null}},
             _core: {_renderService: {dimensions: {css: {cell: {width: 10, height: 20}}}}},
           };
@@ -12344,7 +12463,7 @@ def test_terminal_file_reference_underlines_clear_on_same_viewport_output(browse
           const initial = await controller.refresh();
           const before = container.querySelectorAll('.terminal-file-link-underline').length;
           text = 'No file references here';
-          controller.schedule({reason: 'output'});
+          writeParsed();
           await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
           const after = container.querySelectorAll('.terminal-file-link-underline').length;
           controller.dispose();
@@ -12417,6 +12536,44 @@ def test_terminal_url_hover_underlines_cover_each_physical_row(browser, tmp_path
         {"left": 50, "top": 58, "width": 30, "borderBottomWidth": "1px"},
     ], metrics
     assert metrics["pointerEvents"] == "none", metrics
+
+
+def test_background_topbar_rebuild_does_not_measure_closed_menus(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+        "return typeof renderSessionButtons === 'function' && document.querySelector('.app-menu[data-app-menu=\"view\"] > .app-menu-button') !== null;"
+    ))
+    try:
+        result = browser.execute_script(
+            """
+            closeAppMenus();
+            const original = measureAppMenuContentWidth;
+            const state = {original, measured: []};
+            window.__closedMenuMeasurements = state;
+            measureAppMenuContentWidth = popover => {
+              state.measured.push({connected:popover.isConnected, label:popover.getAttribute('aria-label')});
+              return original(popover);
+            };
+            renderSessionButtons();
+            return {measurements:state.measured, menus:sessionButtons.querySelectorAll('.app-menu').length};
+            """
+        )
+        assert result['menus'] > 0 and result['measurements'] == [], result
+        click_visible_selector(browser, '.app-menu[data-app-menu="view"] > .app-menu-button')
+        opened = browser.execute_script(
+            """
+            const wrapper = sessionButtons.querySelector('.app-menu[data-app-menu="view"]');
+            const popover = wrapper.querySelector(':scope > .app-menu-popover');
+            return {open:wrapper.classList.contains('open'), width:popover.getBoundingClientRect().width,
+              fitted:popover.style.getPropertyValue('--app-menu-fit-width'), measurements:window.__closedMenuMeasurements.measured};
+            """
+        )
+        assert opened['open'] and opened['width'] > 0 and opened['fitted'] and opened['measurements'], opened
+        assert all(item['connected'] for item in opened['measurements']), opened
+    finally:
+        browser.execute_script(
+            "const state=window.__closedMenuMeasurements; if(state){measureAppMenuContentWidth=state.original;delete window.__closedMenuMeasurements;}closeAppMenus();"
+        )
 
 
 def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp_path):
@@ -12647,12 +12804,12 @@ def test_tabs_menu_keeps_cached_rows_visible_while_live_metadata_refreshes(brows
             session_order: ['1'],
             sessions: {'1': {panes: [], agents: [], work_graph: workGraph}},
           }, {source: 'push', refreshAuto: false});
-          window.__yolomuxTestWaitFor(
+          window.__yomuxTestWaitFor(
             () => (popover?.textContent || '').includes('menu-live-branch'),
             {description: 'live Tabs menu metadata'},
           ).then(() => {
             const refreshedAt = performance.now();
-            return window.__yolomuxTestWaitFor(
+            return window.__yomuxTestWaitFor(
               () => performance.now() - refreshedAt > popoverHideDelayMs + 50,
               {description: 'Tabs menu remains focused beyond its hide delay'},
             );
@@ -12699,7 +12856,7 @@ def test_measured_topbar_packing_reduces_and_restores_controls(browser, tmp_path
             const done = arguments[arguments.length - 1];
             const bar = document.querySelector('.topbar');
             const steps = ['hide-version', 'compact-brand', 'compact-search', 'compact-activity', 'hide-latency', 'hide-logout', 'hide-notify', 'hide-language', 'hide-nav', 'icon-search', 'compact-menu'];
-            const {settle} = window.__yolomuxTestHelpers;
+            const {settle} = window.__yomuxTestHelpers;
             (async () => {
               syncTopbarPacking();
               await settle(3);
@@ -12839,7 +12996,7 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
             const pairs = Array.from(root?.querySelectorAll('.app-menu-command-pair') || []);
             const shells = root?.querySelector('.app-menu-command-row--shells');
             if (!sheet || pairs.length !== 2 || !shells) return null;
-            const {rect} = window.__yolomuxTestHelpers;
+            const {rect} = window.__yomuxTestHelpers;
             return {sheet: rect(sheet), pairs: pairs.map(rect), pairButtons: pairs.map(pair => Array.from(pair.querySelectorAll('.app-menu-command')).map(rect)), shells: rect(shells), shellButtons: Array.from(shells.querySelectorAll('.app-menu-command')).map(rect), shellSeparators: shells.querySelectorAll('.app-menu-command-separator').length, viewport: {width: visualViewport.width, height: visualViewport.height}};
             """
         )
@@ -13052,8 +13209,8 @@ def test_client_events_ready_refetches_yolo_marker_after_reconnect(browser, tmp_
           };
           clientEventTransportState.connected = false;
           source.emit('ready');
-          const {frame} = window.__yolomuxTestHelpers;
-          const waitFor = window.__yolomuxTestWaitFor;
+          const {frame} = window.__yomuxTestHelpers;
+          const waitFor = window.__yomuxTestWaitFor;
           const ready = await waitFor(() => document.querySelector('[data-yolo-session="1"]')?.classList.contains('working'));
           const markerAfter = document.querySelector('[data-yolo-session="1"]');
           return {
@@ -13144,7 +13301,7 @@ def test_client_event_auto_approve_delta_updates_yolo_marker_without_refetch(bro
               removed_fields: [],
             },
           });
-          const ready = await window.__yolomuxTestWaitFor(() => marker()?.classList.contains('working'));
+          const ready = await window.__yomuxTestWaitFor(() => marker()?.classList.contains('working'));
           return {
             ready,
             className: marker()?.className || '',
@@ -13618,11 +13775,18 @@ def test_preferences_status_examples_share_pulse_period_phase_and_live_renderers
             "return document.querySelectorAll('.preferences-status-pulse-browser-fixture .agent-window-status-dot').length === 15"
         )
     )
+    browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const example = document.querySelector('.preferences-status-pulse-browser-fixture .preferences-status-pulse-example');
+        scheduleAgentWindowActivityAnimationSync(example);
+        requestAnimationFrame(() => done());
+        """
+    )
     metrics = browser.execute_script(
         """
         const example = document.querySelector('.preferences-status-pulse-browser-fixture .preferences-status-pulse-example');
-        const {probePaint} = window.__yolomuxTestHelpers;
-        scheduleAgentWindowActivityAnimationSync(example);
+        const {probePaint} = window.__yomuxTestHelpers;
         const first = value => String(value || '').split(',')[0].trim();
         const pseudo = (node, name) => {
           const style = getComputedStyle(node, name);
@@ -13890,7 +14054,7 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
         """
         const rootStyle = getComputedStyle(document.documentElement);
         const bodyStyle = getComputedStyle(document.body);
-        const {probePaint} = window.__yolomuxTestHelpers;
+        const {probePaint} = window.__yomuxTestHelpers;
         const tabStyle = getComputedStyle(document.querySelector('.dockview-pane-tab[data-pane-tab="1"].active'));
         const panelStyle = getComputedStyle(document.querySelector('#panel-1'));
         const prefsRange = document.querySelector('input[data-setting-path="appearance.inactive_pane_opacity"]');
@@ -14054,7 +14218,7 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
     )
     cursor_metrics = browser.execute_script(
         """
-        const {probePaint} = window.__yolomuxTestHelpers;
+        const {probePaint} = window.__yomuxTestHelpers;
         const activeThumb = probePaint('background:var(--pane-scrollbar-thumb-active)').background;
         return {
           rootCursorRgb: getComputedStyle(document.documentElement).getPropertyValue('--active-terminal-cursor-rgb').trim(),
@@ -14792,7 +14956,7 @@ def test_pane_tab_active_accent_theming(browser, tmp_path):
           const inactiveWindow = panel.querySelector('.tmux-window-button[data-window-agent]:not(.active)');
           const paneControl = panel.querySelector('.tabs .pane-minimize');
           const zoomControl = panel.querySelector('.tabs .pc-zoom');
-          const {probePaint} = window.__yolomuxTestHelpers;
+          const {probePaint} = window.__yomuxTestHelpers;
           return {
             panelBorder: getComputedStyle(panel).borderTopColor,
             panelHeadBg: getComputedStyle(panelHead).backgroundColor,
@@ -15065,7 +15229,7 @@ def test_editor_right_click_preserves_existing_codemirror_diff_selection(browser
           next[layoutTreeKey] = leafNode('left');
           next.left = paneStateWithTabs([item], item);
           applyLayoutSlots(next, {focusSession: item, forceFull: true});
-          const {frame} = window.__yolomuxTestHelpers;
+          const {frame} = window.__yomuxTestHelpers;
               for (let attempt = 0; attempt < 220; attempt += 1) {
             const panel = panelNodes.get(item);
             if (panel?._cmMode === 'diff' && panel._cmView?.contentDOM) {
@@ -15150,8 +15314,8 @@ def test_long_markdown_editor_scroll_survives_preferences_tab_roundtrip(browser,
           next[layoutTreeKey] = leafNode('left');
           next.left = paneStateWithTabs([item, prefsItemId], item);
           applyLayoutSlots(next, {focusSession: item, forceFull: true});
-          const {frame} = window.__yolomuxTestHelpers;
-          const waitFor = window.__yolomuxTestWaitFor;
+          const {frame} = window.__yomuxTestHelpers;
+          const waitFor = window.__yomuxTestWaitFor;
           const ready = await waitFor(() => {
             const panel = panelNodes.get(item);
             const scroller = panel?._cmView?.scrollDOM;
@@ -15249,8 +15413,8 @@ def test_long_markdown_editor_scroll_survives_dockview_tab_click_roundtrip(brows
           next[layoutTreeKey] = leafNode('left');
           next.left = paneStateWithTabs([item, prefsItemId], item);
           applyLayoutSlots(next, {focusSession: item, forceFull: true});
-          const {frame} = window.__yolomuxTestHelpers;
-          const waitFor = window.__yolomuxTestWaitFor;
+          const {frame} = window.__yomuxTestHelpers;
+          const waitFor = window.__yomuxTestWaitFor;
           const ready = await waitFor(() => {
             const panel = panelNodes.get(item);
             const scroller = panel?._cmView?.scrollDOM;
@@ -15332,7 +15496,7 @@ def test_long_markdown_editor_scroll_survives_dockview_tab_click_roundtrip(brows
         const item = arguments[0];
         const done = arguments[arguments.length - 1];
         (async () => {
-          const waitFor = window.__yolomuxTestWaitFor;
+          const waitFor = window.__yomuxTestWaitFor;
           const ready = await waitFor(() => Boolean(activeItemForSide('left') === item && panelNodes.get(item)?.isConnected && panelNodes.get(item)?._cmView?.scrollDOM));
           const scroller = await waitFor(() => {
             const candidate = panelNodes.get(item)?._cmView?.scrollDOM;
@@ -15370,8 +15534,8 @@ def test_preferences_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_p
           next[layoutTreeKey] = leafNode('left');
           next.left = paneStateWithTabs([prefsItemId, infoItemId], prefsItemId);
           applyLayoutSlots(next, {focusSession: prefsItemId, forceFull: true});
-          const {frame} = window.__yolomuxTestHelpers;
-          const waitFor = window.__yolomuxTestWaitFor;
+          const {frame} = window.__yomuxTestHelpers;
+          const waitFor = window.__yomuxTestWaitFor;
           const ready = await waitFor(() => {
             const scroller = panelNodes.get(prefsItemId)?.querySelector('.preferences-scroll');
             return dockviewLayoutActive()
@@ -15444,7 +15608,7 @@ def test_preferences_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_p
         const item = arguments[0];
         const done = arguments[arguments.length - 1];
         (async () => {
-          const waitFor = window.__yolomuxTestWaitFor;
+          const waitFor = window.__yomuxTestWaitFor;
           const scroller = await waitFor(() => {
             if (activeItemForSide('left') !== item) return null;
             const candidate = panelNodes.get(item)?.querySelector('.preferences-scroll');
@@ -15534,8 +15698,8 @@ def test_info_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
           next[layoutTreeKey] = leafNode('left');
           next.left = paneStateWithTabs([infoItemId, prefsItemId], infoItemId);
           applyLayoutSlots(next, {focusSession: infoItemId, forceFull: true});
-          const {frame} = window.__yolomuxTestHelpers;
-          const waitFor = window.__yolomuxTestWaitFor;
+          const {frame} = window.__yomuxTestHelpers;
+          const waitFor = window.__yomuxTestWaitFor;
           const ready = await waitFor(() => {
             const scroller = document.getElementById('info-content');
             return dockviewLayoutActive()
@@ -15611,7 +15775,7 @@ def test_info_scroll_survives_dockview_tab_click_roundtrip(browser, tmp_path):
         const item = arguments[0];
         const done = arguments[arguments.length - 1];
         (async () => {
-          const waitFor = window.__yolomuxTestWaitFor;
+          const waitFor = window.__yomuxTestWaitFor;
           const scroller = await waitFor(() => {
             if (activeItemForSide('left') !== item) return null;
             const candidate = document.getElementById('info-content');
@@ -15710,7 +15874,7 @@ def test_yoinfo_canonical_work_graph_refresh_keeps_session3_rows_and_scroll(brow
           await applySessionMetadataPayload({session_order: ['3'], sessions: {'3': {session: '3', work_graph: graph(1), selected_pane: {target: '%claude'}, panes: [{target: '%claude', window: '0', pane: '0', active: true, window_active: true}]}}}, {refreshAuto: false, refreshActivity: false, refreshContext: false});
           setInfoGrouping(['git-worktree', 'branch']);
           renderInfoPanel({force: true});
-          const waitFor = window.__yolomuxTestWaitFor;
+          const waitFor = window.__yomuxTestWaitFor;
           const scroller = await waitFor(() => {
             const candidate = document.getElementById('info-content');
             return candidate?.textContent.includes('#80') && candidate.textContent.includes('#11251') && candidate.scrollHeight > candidate.clientHeight * 2 ? candidate : null;
@@ -15998,7 +16162,7 @@ def test_finder_differ_row_hover_and_embedded_refresh_are_visible_in_light_mode(
     hover_tokens = browser.execute_script(
         """
         document.body.classList.add('theme-light');
-        const {probePaint} = window.__yolomuxTestHelpers;
+        const {probePaint} = window.__yomuxTestHelpers;
         const hoverBg = probePaint('background:var(--file-hover-bg)').background;
         const hoverBorder = probePaint('background:var(--file-hover-border)').background;
         return {hoverBg, hoverBorder, expectedHoverBg: probePaint('background:var(--file-hover-bg)').background};
@@ -16009,13 +16173,19 @@ def test_finder_differ_row_hover_and_embedded_refresh_are_visible_in_light_mode(
         """
         const row = document.getElementById('collapsed-dir');
         const style = getComputedStyle(row);
+        const tree = row.closest('.file-explorer-tree-panel');
         return {
           background: style.backgroundColor,
           boxShadow: style.boxShadow,
+          treeHeight: tree.clientHeight,
+          rowHeight: row.getBoundingClientRect().height,
+          hovered: row.matches(':hover'),
         };
         """
     )
     assert hover_tokens["hoverBg"] == hover_tokens["expectedHoverBg"]
+    assert row_metrics["treeHeight"] >= row_metrics["rowHeight"], row_metrics
+    assert row_metrics["hovered"] is True, row_metrics
     assert row_metrics["background"] == hover_tokens["hoverBg"]
     assert hover_tokens["hoverBorder"] in row_metrics["boxShadow"]
 
@@ -16588,6 +16758,7 @@ def test_finder_and_differ_fixed_panels_fill_their_panes(browser, tmp_path):
           noModeSwitcher: document.querySelector('.file-explorer-mode-switcher') === null,
           newFileDisplay: getComputedStyle(newFile).display,
           treeDisplay: getComputedStyle(tree).display,
+          treeContain: getComputedStyle(tree).contain,
         };
         """
     )
@@ -16596,6 +16767,7 @@ def test_finder_and_differ_fixed_panels_fill_their_panes(browser, tmp_path):
     assert before["noModeSwitcher"]
     assert before["newFileDisplay"] != "none"
     assert before["treeDisplay"] != "none"
+    assert before["treeContain"] == "strict"
 
     activate_finder_diff_fixture(browser)
     after = browser.execute_script(
@@ -16612,6 +16784,7 @@ def test_finder_and_differ_fixed_panels_fill_their_panes(browser, tmp_path):
           changesDisplay: changesStyle.display,
           changesFlexGrow: changesStyle.flexGrow,
           changesMaxBlockSize: changesStyle.maxBlockSize,
+          changesContain: changesStyle.contain,
           paneHeight: paneRect.height,
           changesHeight: changesRect.height,
           visibleRootControls: visible('.file-explorer-root-mode-toggle-panel').length,
@@ -16627,6 +16800,7 @@ def test_finder_and_differ_fixed_panels_fill_their_panes(browser, tmp_path):
     assert after["changesDisplay"] != "none"
     assert after["changesFlexGrow"] == "1"
     assert after["changesMaxBlockSize"] == "none"
+    assert after["changesContain"] == "strict"
     assert abs(after["changesHeight"] - after["paneHeight"]) <= 1
     assert after["visibleRootControls"] == 0
     assert after["visibleSessionSelects"] == 1

@@ -1,4 +1,4 @@
-const {assert, fs, deferredFetch, controllableSseResponse, sseFrame: rawSseFrame, loadYolomux, jsonResponse: rawJsonResponse, flushAsyncWork, canonical, test, testAsync, runSuites} = require('./browser_helpers/layout_test_helper');
+const {assert, fs, deferredFetch, controllableSseResponse, sseFrame: rawSseFrame, loadYomux, jsonResponse: rawJsonResponse, flushAsyncWork, canonical, test, testAsync, runSuites} = require('./browser_helpers/layout_test_helper');
 
 const withBoundary = payload => payload && typeof payload === 'object'
   && (typeof payload.repo === 'string' || Array.isArray(payload.commits))
@@ -18,7 +18,7 @@ function installVisibleGitDiffPanel(api, item) {
 
 async function runGitDiffHistorySuite() {
   test('Git history stats cannot publish across a changed shallow boundary', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const item = api.gitDiffItemFor('/repo');
     const sha = 'a'.repeat(40);
     const state = api.setGitDiffTabStateForTest(item, {shallowBoundary: 'current', commits: [{sha}]});
@@ -30,7 +30,7 @@ async function runGitDiffHistorySuite() {
   });
 
   test('Git history products without a shallow boundary fail closed', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const item = api.gitDiffItemFor('/repo');
     const sha = 'a'.repeat(40);
     const state = api.setGitDiffTabStateForTest(item, {shallowBoundary: '', commits: [{sha}]});
@@ -40,14 +40,14 @@ async function runGitDiffHistorySuite() {
   });
 
   test('Git history recognizes typed Go SSE stale errors', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     assert.equal(api.gitDiffHistorySnapshotIsStaleForTest({
       payload: {error_code: 'git_history_stale', message_key: 'fs.error.gitHistoryStale'},
     }), true);
   });
 
   await testAsync('Git history append refreshes when the shallow boundary changes without HEAD moving', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const item = api.gitDiffItemFor('/repo');
     const sha = 'a'.repeat(40);
     const state = api.setGitDiffTabStateForTest(item, {
@@ -73,7 +73,7 @@ async function runGitDiffHistorySuite() {
 
   for (const changedBoundary of [false, true]) {
     await testAsync(`Git history refresh ${changedBoundary ? 'invalidates' : 'reuses'} same-SHA products across shallow boundaries`, async () => {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const item = api.gitDiffItemFor('/repo');
       const sha = 'a'.repeat(40);
       const state = api.setGitDiffTabStateForTest(item, {
@@ -95,7 +95,7 @@ async function runGitDiffHistorySuite() {
   }
 
   await testAsync('Git history refresh prunes old SHA caches and records a reload cursor', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const item = api.gitDiffItemFor('/repo');
     const oldSha = 'a'.repeat(40), freshSha = 'b'.repeat(40), head = 'f'.repeat(40);
     const state = api.setGitDiffTabStateForTest(item, {path: '/repo', head: oldSha, commits: [{sha: oldSha}], loaded: true, loadAttempted: true});
@@ -112,7 +112,7 @@ async function runGitDiffHistorySuite() {
   });
 
   await testAsync('Git history fills the viewport and exposes two viewport pages without another Git request', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Python test'}, fireTimeoutDelays: [0]});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Python test'}, fireTimeoutDelays: [0]});
     const item = api.gitDiffItemFor('/repo');
     const commits = Array.from({length: 40}, (_, index) => ({
       sha: String(index).padStart(40, '0'), short: String(index).padStart(9, '0'), subject: `commit ${index}`,
@@ -176,7 +176,7 @@ async function runGitDiffHistorySuite() {
   });
 
   await testAsync('Python backend identity enables the separate Dirty row when backendLabel is empty', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backend: 'Python 3.12.8'}});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backend: 'Python 3.12.8'}});
     const item = api.gitDiffItemFor('/repo');
     const requests = [];
     api.setFetchForTest(url => {
@@ -205,7 +205,7 @@ async function runGitDiffHistorySuite() {
   });
 
   await testAsync('Python Git history progressively fetches stats for visible commits only', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Python test'}, fireTimeoutDelays: [0]});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Python test'}, fireTimeoutDelays: [0]});
     const item = api.gitDiffItemFor('/repo');
     const commits = Array.from({length: 25}, (_, index) => ({
       sha: String(index).padStart(40, '0'), short: String(index).padStart(9, '0'), subject: `commit ${index}`,
@@ -261,7 +261,7 @@ async function runGitDiffHistorySuite() {
   });
 
   await testAsync('Go Git history progressively prioritizes one visible SHA before wider batches', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}, fireTimeoutDelays: [0]});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}, fireTimeoutDelays: [0]});
     const item = api.gitDiffItemFor('/repo');
     const commits = Array.from({length: 20}, (_, index) => ({
       sha: String(index).padStart(40, '0'), short: String(index).padStart(9, '0'), subject: `commit ${index}`,
@@ -349,7 +349,7 @@ async function runGitDiffHistorySuite() {
   });
 
   await testAsync('Go cached history counts with deferred signature status still request SHA enrichment', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}, fireTimeoutDelays: [0]});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}, fireTimeoutDelays: [0]});
     const item = api.gitDiffItemFor('/repo');
     const sha = 'a'.repeat(40);
     const requests = [];
@@ -388,7 +388,7 @@ async function runGitDiffHistorySuite() {
   });
 
   await testAsync('Git history refresh cancels an in-flight stats backfill before applying stale counts', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}, fireTimeoutDelays: [0]});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}, fireTimeoutDelays: [0]});
     const item = api.gitDiffItemFor('/repo');
     const sha = 'a'.repeat(40);
     const statsStream = controllableSseResponse();
@@ -433,7 +433,7 @@ async function runGitDiffHistorySuite() {
   });
 
   await testAsync('Git history auto-loads when the initial rows do not create a scrollbar', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Python test'}});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Python test'}});
     const item = api.gitDiffItemFor('/repo');
     const commits = Array.from({length: 8}, (_, index) => ({
       sha: String(index).padStart(40, '0'), short: String(index).padStart(9, '0'), subject: `commit ${index}`,
@@ -460,7 +460,7 @@ async function runGitDiffHistorySuite() {
   });
 
   await testAsync('Git history freezes pagination and fences stale refresh generations without dropping valid rows', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Python test'}});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Python test'}});
     const item = api.gitDiffItemFor('/repo/src');
     const stale = deferredFetch();
     const fresh = deferredFetch();
@@ -502,7 +502,7 @@ async function runGitDiffHistorySuite() {
   });
 
   await testAsync('Git history retries once without a stale saved cursor', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Python test'}});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Python test'}});
     const item = api.gitDiffItemFor('/repo');
     const requests = [];
     api.setFetchForTest(url => {
@@ -529,7 +529,7 @@ async function runGitDiffHistorySuite() {
   });
 
   await testAsync('Git history drops a saved cursor when its snapshot is stale', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Python test'}});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Python test'}});
     const item = api.gitDiffItemFor('/repo');
     const requests = [];
     api.setFetchForTest(url => {
@@ -556,7 +556,7 @@ async function runGitDiffHistorySuite() {
   });
 
   await testAsync('Git history stops after one cursor-free retry when the new snapshot is also stale', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
     const item = api.gitDiffItemFor('/repo');
     const requests = [];
     api.setFetchForTest(url => {
@@ -582,7 +582,7 @@ async function runGitDiffHistorySuite() {
   });
 
   await testAsync('Git commit detail refreshes history once when its frozen head is stale', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const item = api.gitDiffItemFor('/repo');
     const sha = 'a'.repeat(40);
     const head = 'b'.repeat(40);
@@ -618,7 +618,7 @@ async function runGitDiffHistorySuite() {
   });
 
   await testAsync('Git commit stale-detail retry stops when its row scrolls offscreen during history refresh', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const item = api.gitDiffItemFor('/repo');
     const sha = 'a'.repeat(40);
     const head = 'b'.repeat(40);
@@ -677,7 +677,7 @@ async function runGitDiffHistorySuite() {
 
   for (const boundaryChange of [false, true]) {
   await testAsync(`Git commit refresh replaces delayed detail work when ${boundaryChange ? 'shallow boundary' : 'repository identity'} changes`, async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Python test'}});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Python test'}});
     const item = api.gitDiffItemFor('/repo/src');
     const sha = 'a'.repeat(40);
     const head = 'b'.repeat(40);
@@ -733,7 +733,7 @@ async function runGitDiffHistorySuite() {
   }
 
   await testAsync('Git commit detail loading follows the visible expanded rows', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const item = api.gitDiffItemFor('/repo');
     const shaA = 'a'.repeat(40);
     const shaB = 'b'.repeat(40);
@@ -796,7 +796,7 @@ async function runGitDiffHistorySuite() {
   });
 
   await testAsync('Git commit identity refinement retires in-flight detail while preserving disclosure state', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const item = api.gitDiffItemFor('/repo/src');
     const sha = 'c'.repeat(40);
     const head = 'd'.repeat(40);
@@ -857,7 +857,7 @@ async function runGitDiffHistorySuite() {
   });
 
   await testAsync('Git commit HEAD advance replaces detail work started during history refresh', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const item = api.gitDiffItemFor('/repo/src');
     const sha = 'e'.repeat(40);
     const oldHead = 'f'.repeat(40);
@@ -916,13 +916,13 @@ async function runGitDiffHistorySuite() {
   });
 
   test('Git commit messages render escaped newline markers as actual returns', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const message = api.gitDiffCommitMessageForTest({message: 'subject\\n\\nbody'});
     assert.equal(message.textContent, 'subject\n\nbody');
   });
 
   await testAsync('Git commit disclosures load independently and changed files retain status, rename, binary, and exact refs', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const item = api.gitDiffItemFor('/repo');
     const shaA = 'a'.repeat(40);
     const shaB = 'b'.repeat(40);

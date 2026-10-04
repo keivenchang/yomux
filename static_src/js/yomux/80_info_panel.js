@@ -203,7 +203,7 @@ function bindYoagentPanel(panel) {
     },
     'yoagent-chat-cancel': () => cancelActiveYoagentChatRequest(),
     'yoagent-queued-cancel': (_event, target) => cancelQueuedYoagentChatMessage(target.dataset.yoagentQueuedCancel || ''),
-    'yoagent-agent-restart': (_event, target) => createNextSession(target.dataset.yomuxAgentRestart || target.dataset.yolomuxAgentRestart || 'claude'),
+    'yoagent-agent-restart': (_event, target) => createNextSession(target.dataset.yomuxAgentRestart || 'claude'),
     'yoagent-action-send': (_event, target) => executeYoagentActionSend(target.dataset.yoagentActionSend || ''),
     'yoagent-job-confirm': (_event, target) => confirmYoagentJob(target.dataset.yoagentJobConfirm || ''),
     'yoagent-job-cancel': (_event, target) => cancelYoagentJob(target.dataset.yoagentJobCancel || ''),

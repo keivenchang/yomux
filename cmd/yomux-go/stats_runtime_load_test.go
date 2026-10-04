@@ -23,6 +23,7 @@ func TestStatsRuntimeLoadExcludesNestedLifecycleTimersFromCumulativeOwners(t *te
 		WindowSeconds: 1000,
 		Now:           func() time.Time { return time.Unix(1999, 0) },
 	})
+	t.Cleanup(lifecycle.Stop)
 	writer.AttachLifecycle(lifecycle)
 	if _, err := writer.AppendBatch(ctx, stats.AppendBatch{Observations: []stats.Observation{{
 		EventID: "runtime-load", Family: "cpu", SourceID: "host", ObservedAt: 1995, EpochID: "e",

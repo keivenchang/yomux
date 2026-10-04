@@ -1511,7 +1511,6 @@ body.resizing-file-explorer-changes {
   --changes-row-hover-bg: var(--changes-tree-row-hover-bg);
   --changes-folder-bg: color-mix(in srgb, var(--panel2) 76%, transparent);
   --changes-indent-line: var(--changes-tree-indent-line);
-  --changes-repo-head-bg: var(--pane-bar-bg, var(--panel2));
   --changes-folder-text: var(--accent-gold);
   --changes-path-text: var(--muted);
   --changes-icon-text: var(--changes-tree-icon-text);
@@ -1526,12 +1525,18 @@ body.resizing-file-explorer-changes {
   background: var(--file-explorer-changes-surface);
   padding: 0 var(--space-5) var(--space-5);
 }
+/* Scroll panes own their dimensions; tree publication must not reflow adjacent terminals. */
+.file-explorer-pane > .file-explorer-tree-panel,
+.file-explorer-pane > .file-explorer-changes-panel,
+.git-diff-panel > .git-diff-panel-body {
+  contain: strict;
+}
 /* Differ timestamps are supporting metadata, smaller than the changed-file names. */
 .file-explorer-changes-panel .file-tree-date {
   font-size: 70%;
 }
-.file-explorer-changes-panel:hover,
-.file-explorer-changes-panel:focus-within {
+/* Chrome focus colors must not invalidate the thousands of inherited tree rows. */
+.file-explorer-changes-panel:is(:hover, :focus-within) :is(.file-explorer-changes-head, .changes-repo-head) {
   --pane-bar-bg: var(--pane-tab-strip-bg);
 }
 .file-explorer-pane,
@@ -1746,6 +1751,7 @@ body :is(
   margin-bottom: var(--space-6);
 }
 .file-explorer-changes-panel .changes-repo-head {
+  --changes-repo-head-bg: var(--pane-bar-bg, var(--panel2));
   padding: var(--space-4) var(--space-6);
 }
 .file-explorer-path-inline {

@@ -51,7 +51,7 @@ class RootLayout:
 
     @classmethod
     def current(cls) -> "RootLayout":
-        return cls(common.CONFIG_DIR, common.STATE_DIR, common.YOLOMUX_CACHE_DIR, common.RUNTIME_DIR)
+        return cls(common.CONFIG_DIR, common.STATE_DIR, common.YOMUX_CACHE_DIR, common.RUNTIME_DIR)
 
 
 @dataclass(frozen=True)

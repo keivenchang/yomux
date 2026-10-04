@@ -4,9 +4,14 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
+
+from .host_identity import HostIdentity
+from .host_identity import current_host_identity
 
 from tools.instance_isolation import resolved_path
 from tools.instance_isolation import resolved_home_path
@@ -14,13 +19,13 @@ from tools.instance_isolation import resolved_product_path
 from tools.instance_isolation import resolved_state_dir
 from tools.instance_isolation import normalize_yomux_environment
 from tools.instance_isolation import rooted_product_path
-from tools.instance_isolation import YolomuxRootError
+from tools.instance_isolation import YomuxRootError
 
 YOLOMUX_ROOT_ENV = "YOLOMUX_ROOT"
 
 
 @dataclass(frozen=True)
-class YolomuxRoots:
+class YomuxRoots:
     """Resolved runtime roots; credentials remain user-owned unless explicitly overridden."""
 
     config_dir: Path
@@ -49,7 +54,7 @@ def config_dir_from_environ(values: Mapping[str, str]) -> Path:
     return rooted_override(values, "YOLOMUX_CONFIG_DIR", root, root / "config")
 
 
-def resolve_yolomux_roots(values: Mapping[str, str], *, default_runtime_dir: Path) -> YolomuxRoots:
+def resolve_yomux_roots(values: Mapping[str, str], *, default_runtime_dir: Path) -> YomuxRoots:
     """Resolve all product roots without creating any directory."""
     values = normalize_yomux_environment(values)
     home = resolved_home_path(values)
@@ -62,7 +67,7 @@ def resolve_yolomux_roots(values: Mapping[str, str], *, default_runtime_dir: Pat
             reject_home=False,
         )
         codex_home_key = "YOLOMUX_CODEX_HOME" if values.get("YOLOMUX_CODEX_HOME") else "CODEX_HOME"
-        return YolomuxRoots(
+        return YomuxRoots(
             config_dir_from_environ(values),
             resolved_state_dir(values),
             resolved_product_path(values, "YOLOMUX_CACHE_DIR", default_cache_home / "yomux"),
@@ -77,7 +82,7 @@ def resolve_yolomux_roots(values: Mapping[str, str], *, default_runtime_dir: Pat
         if configured_codex_home
         else home / ".codex"
     )
-    return YolomuxRoots(
+    return YomuxRoots(
         config_dir,
         resolved_state_dir(values),
         rooted_override(values, "YOLOMUX_CACHE_DIR", root, root / "cache"),
@@ -85,3 +90,44 @@ def resolve_yolomux_roots(values: Mapping[str, str], *, default_runtime_dir: Pat
         rooted_override(values, "YOLOMUX_RUNTIME_DIR", root, root / "runtime"),
         root,
     )
+
+
+def runtime_root(
+    *,
+    environ: Mapping[str, str] | None = None,
+    identity: HostIdentity | None = None,
+    temporary_dir: Path | None = None,
+    uid: int | None = None,
+) -> Path:
+    """Return the host- and boot-private root for sockets, leases, and locks.
+
+    XDG runtime storage is normally a local tmpfs cleared on reboot. Headless
+    shells and containers often lack it, so the fallback remains under the
+    machine's temporary directory and is still checked before use.
+    """
+    values = os.environ if environ is None else environ
+    if values.get(YOLOMUX_ROOT_ENV):
+        # A rooted run already has a unique, operator-selected parent. Keeping
+        # host/boot suffixes here would make the advertised <root>/runtime
+        # layout false and wastes the Unix-socket pathname budget.
+        return resolved_product_path(values, YOLOMUX_ROOT_ENV, values[YOLOMUX_ROOT_ENV]) / "runtime"
+    resolved_identity = identity or current_host_identity()
+    if values.get("YOLOMUX_RUNTIME_DIR"):
+        runtime_base = resolved_product_path(values, "YOLOMUX_RUNTIME_DIR", values["YOLOMUX_RUNTIME_DIR"]) / "yomux"
+    elif values.get("XDG_RUNTIME_DIR"):
+        runtime_base = resolved_product_path(
+            values,
+            "XDG_RUNTIME_DIR",
+            values["XDG_RUNTIME_DIR"],
+            reject_home=False,
+        ) / "yomux"
+    else:
+        resolved_uid = os.getuid() if uid is None else int(uid)
+        runtime_base = resolved_path(temporary_dir or tempfile.gettempdir()) / f"yomux-server-{resolved_uid}" / "shared"
+    # Keep the socket-bearing root readable while leaving enough sockaddr_un
+    # budget for the longest service filename. These stable prefixes identify
+    # the host and boot in diagnostics without an opaque hash.
+    host_scope = f"h-{resolved_identity.stable_host_id[:12]}"
+    boot_value = resolved_identity.boot_id or f"instance-{resolved_identity.instance_nonce}"
+    boot_scope = f"b-{boot_value[:12]}"
+    return runtime_base / host_scope / boot_scope

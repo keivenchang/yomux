@@ -328,7 +328,7 @@ def capture_measurement_metrics(
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
-            const measurementState = window.__yolomuxMeasurementFetch;
+            const measurementState = window.__yomuxMeasurementFetch;
             const fetchImpl = measurementState?.originalFetch || window.fetch.bind(window);
             const requests = [fetchImpl('/api/diagnostics/performance?measurement_scope=capture', {
               credentials: 'same-origin',
@@ -550,7 +550,7 @@ def validate_capture_request_join(
 
 
 MEASUREMENT_FETCH_INSTALL_SCRIPT = """
-        const marker = __YOLOMUX_MEASUREMENT_MARKER__;
+        const marker = __YOMUX_MEASUREMENT_MARKER__;
         const originalFetch = window.fetch.bind(window);
         let sequence = 0;
         let dropped = 0;
@@ -566,7 +566,7 @@ MEASUREMENT_FETCH_INSTALL_SCRIPT = """
           dropped,
           max_concurrent_api_fetches: maxConcurrentApiFetches,
           peak_api_fetches: peakApiFetches.map(entry => ({...entry})),
-          event_sources: window.__yolomuxMeasurementEventSources?.snapshot?.() || null,
+          event_sources: window.__yomuxMeasurementEventSources?.snapshot?.() || null,
           active: window.fetch === measurementFetch,
         });
         const measurementFetch = async (resource, init) => {
@@ -622,7 +622,7 @@ MEASUREMENT_FETCH_INSTALL_SCRIPT = """
           }
         };
         window.fetch = measurementFetch;
-        window.__yolomuxMeasurementFetch = {
+        window.__yomuxMeasurementFetch = {
           originalFetch,
           snapshot,
           stop: () => {
@@ -664,7 +664,7 @@ DETERMINISTIC_EVENT_SOURCE_INSTALL_SCRIPT = r"""
             },
           });
           window.EventSource = InstrumentedEventSource;
-          window.__yolomuxMeasurementEventSources = {
+          window.__yomuxMeasurementEventSources = {
             snapshot: () => ({
               created: [...created],
               closed: [...closed],
@@ -678,7 +678,7 @@ DETERMINISTIC_EVENT_SOURCE_INSTALL_SCRIPT = r"""
 
 
 def measurement_fetch_install_script(marker_expression: str) -> str:
-    return MEASUREMENT_FETCH_INSTALL_SCRIPT.replace("__YOLOMUX_MEASUREMENT_MARKER__", marker_expression)
+    return MEASUREMENT_FETCH_INSTALL_SCRIPT.replace("__YOMUX_MEASUREMENT_MARKER__", marker_expression)
 
 
 def deterministic_measurement_preload_script(marker: str) -> str:
@@ -708,13 +708,13 @@ def install_measurement_fetch_on_new_document(driver: webdriver.Chrome, marker: 
 
 def stop_and_collect_measurement_fetches(driver: webdriver.Chrome, timeout: int = 30) -> dict[str, object]:
     stopped = driver.execute_script(
-        "return window.__yolomuxMeasurementFetch ? window.__yolomuxMeasurementFetch.stop() : null"
+        "return window.__yomuxMeasurementFetch ? window.__yomuxMeasurementFetch.stop() : null"
     )
     if not isinstance(stopped, dict):
         raise RuntimeError("measurement fetch ledger is unavailable")
     settled = WebDriverWait(driver, timeout).until(
         lambda current: current.execute_script(
-            "const state = window.__yolomuxMeasurementFetch; const snapshot = state?.snapshot(); return snapshot && !snapshot.active && snapshot.pending.length === 0 ? snapshot : null"
+            "const state = window.__yomuxMeasurementFetch; const snapshot = state?.snapshot(); return snapshot && !snapshot.active && snapshot.pending.length === 0 ? snapshot : null"
         )
     )
     if not isinstance(settled, dict):
@@ -1471,7 +1471,7 @@ def install_ticker_callback_counter(driver: webdriver.Chrome) -> None:
     """Count only the live-graph scheduler callbacks, never unrelated browser timers."""
     driver.execute_script(
         """
-        const prior = window.__yolomuxTickerMeasurement;
+        const prior = window.__yomuxTickerMeasurement;
         if (prior) prior.restore();
         const names = new Set(['debugGraphLiveFrameTick', 'debugGraphLiveTimerTick']);
         const counter = {requestAnimationFrame: 0, timeout: 0};
@@ -1489,7 +1489,7 @@ def install_ticker_callback_counter(driver: webdriver.Chrome) -> None:
             return callback(...callbackArgs);
           }, delay, ...args);
         };
-        window.__yolomuxTickerMeasurement = {
+        window.__yomuxTickerMeasurement = {
           snapshot: () => ({...counter, total: counter.requestAnimationFrame + counter.timeout}),
           restore: () => { window.requestAnimationFrame = originalRaf; window.setTimeout = originalTimeout; },
         };
@@ -1499,7 +1499,7 @@ def install_ticker_callback_counter(driver: webdriver.Chrome) -> None:
 
 def ticker_callback_counter(driver: webdriver.Chrome) -> dict[str, int] | None:
     return driver.execute_script(
-        "return window.__yolomuxTickerMeasurement ? window.__yolomuxTickerMeasurement.snapshot() : null"
+        "return window.__yomuxTickerMeasurement ? window.__yomuxTickerMeasurement.snapshot() : null"
     )
 
 

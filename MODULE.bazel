@@ -1,31 +1,44 @@
-module(name = "yomux")
+module(
+    name = "yomux",
+    bazel_compatibility = [
+        ">=9.0.0",
+        "<10.0.0",
+    ],
+)
 
-bazel_dep(name = "rules_go", version = "0.50.1")
-bazel_dep(name = "gazelle", version = "0.36.0")
+bazel_dep(name = "rules_go", version = "0.64.0")
+bazel_dep(name = "gazelle", version = "0.54.0")
+bazel_dep(name = "rules_shell", version = "0.6.1")
+bazel_dep(name = "platforms", version = "1.1.0")
 
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
+
 # Keep the compiler independent of the host package manager and runtime network access. The explicit
 # archive map avoids rules_go's versions.json lookup when tests run with repository downloads disabled;
 # it also keeps local preview builds reproducible.
 go_sdk.download(
-    version = "1.22.2",
     sdks = {
-        "linux_amd64": ["go1.22.2.linux-amd64.tar.gz", "5901c52b7a78002aeff14a21f93e0f064f74ce1360fce51c6ee68cd471216a17"],
-        "linux_arm64": ["go1.22.2.linux-arm64.tar.gz", "36e720b2d564980c162a48c7e97da2e407dfcc4239e1e58d98082dfa2486a0c1"],
-        "darwin_amd64": ["go1.22.2.darwin-amd64.tar.gz", "33e7f63077b1c5bce4f1ecadd4d990cf229667c40bfb00686990c950911b7ab7"],
-        "darwin_arm64": ["go1.22.2.darwin-arm64.tar.gz", "660298be38648723e783ba0398e90431de1cb288c637880cdb124f39bd977f0d"],
+        "linux_amd64": [
+            "go1.27.1.linux-amd64.tar.gz",
+            "63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445",
+        ],
+        "linux_arm64": [
+            "go1.27.1.linux-arm64.tar.gz",
+            "3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec",
+        ],
+        "darwin_amd64": [
+            "go1.27.1.darwin-amd64.tar.gz",
+            "8f8f52c6649542cf027bbc9b9c68d1ec042f9f34808a40413f0b8b3f66f3caa4",
+        ],
+        "darwin_arm64": [
+            "go1.27.1.darwin-arm64.tar.gz",
+            "ee215d57e0ec269c60cc9ceca68e6bda321ba9ee5afe24f4b0988703c2d87d12",
+        ],
     },
+    version = "1.27.1",
 )
-# Go 1.24 adds Mach-O UUIDs required by current macOS for local-network binaries.
-go_sdk.download(
-    name = "yomux_darwin_go_sdk",
-    version = "1.24.13",
-    sdks = {
-        "darwin_amd64": ["go1.24.13.darwin-amd64.tar.gz", "6cc6549b06725220b342b740497ffd24e0ebdcef75781a77931ca199f46ad781"],
-        "darwin_arm64": ["go1.24.13.darwin-arm64.tar.gz", "f282d882c3353485e2fc6c634606d85caf36e855167d59b996dbeae19fa7629a"],
-    },
-)
-use_repo(go_sdk, "yomux_darwin_go_sdk")
+
+# Go 1.27.1 retains the Mach-O UUIDs required by macOS local-network binaries.
 
 go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
 go_deps.from_file(go_mod = "//:go.mod")

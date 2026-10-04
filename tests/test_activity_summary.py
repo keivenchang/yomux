@@ -17,7 +17,7 @@ from yomux_lib.activity_summary import changed_file_totals
 from yomux_lib.activity_summary import deterministic_yoagent_reply
 from yomux_lib.activity_summary import relative_age_text
 from yomux_lib.activity_summary import transcript_file_signature
-from yomux_lib.activity_summary import yolomux_help_primer
+from yomux_lib.activity_summary import yomux_help_primer
 from yomux_lib.activity_summary import yoagent_context_lines
 from yomux_lib.common import AgentInfo
 from yomux_lib.common import PaneInfo
@@ -607,7 +607,7 @@ def test_deterministic_yoagent_reply_explains_skill_locations():
 
 
 def test_yoagent_help_primer_and_deterministic_help_answers():
-    primer = yolomux_help_primer()
+    primer = yomux_help_primer()
     assert "YOmux help primer from README.md" in primer
     assert "Pane" in primer
     assert "Finder" in primer

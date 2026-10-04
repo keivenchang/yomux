@@ -70,7 +70,7 @@ sys.dont_write_bytecode = True
 from tools.instance_isolation import resolved_product_path
 from tools.instance_isolation import resolved_state_dir
 from tools.instance_isolation import validate_product_root_environment
-from tools.instance_isolation import YolomuxRootError
+from tools.instance_isolation import YomuxRootError
 from tools.tool_guard import host_expensive_tool_lock_path
 
 
@@ -81,7 +81,7 @@ def default_tool_lock_path() -> Path:
 try:
     validate_product_root_environment(os.environ)
     DEFAULT_TOOL_LOCK_PATH = default_tool_lock_path()
-except YolomuxRootError as error:
+except YomuxRootError as error:
     if __name__ == "__main__":
         print(f"CHECK REFUSED: {error}", file=sys.stderr, flush=True)
         raise SystemExit(2)
@@ -109,6 +109,7 @@ from tools.test_catalog import PYTEST_PHASE_FILES  # noqa: F401 - check-runner c
 from tools.test_catalog import pytest_files
 from tools.test_plan import LANE_SPECS
 from tools.test_plan import CHECK_LANE_ENV
+from tools.test_plan import BAZEL_GO_BROWSER_TESTS
 from tools.test_plan import StepId
 from tools.test_plan import resolved_lane_step_ids
 from tools.test_plan import validate_lane_specs
@@ -134,6 +135,7 @@ EXIT_NOT_CERTIFIABLE = 4
 # quiet host from a loaded one on this box. It runs last because it deliberately loads the host.
 CERTIFICATION_NODE_IDS = (
     "tests/test_gate_tmux.py::test_s1_certification_keystroke_wall_latency_holds_the_fixed_user_ceiling",
+    "tests/test_gate_tmux.py::test_s1_certification_tab_activation_native_echo_holds_fixed_user_ceilings",
     "tests/test_gate_interaction.py::test_i3a_certification_drag_preview_holds_the_fixed_ceiling",
     "tests/test_gate_interaction.py::test_i3b_certification_dockview_load_layout_holds_the_fixed_ceiling",
     "tests/test_gate_interaction.py::test_i3c_certification_terminal_navigation_ack_holds_the_fixed_ceiling",
@@ -292,13 +294,16 @@ def py_compile_files() -> list[str]:
 
 
 def check_cpu_percent(cpu_percent: int | None = None) -> int:
-    """Fraction of host CPUs the pytest pools may claim, 1-100.
+    """Fraction of host CPUs test lanes may claim, 1-100.
 
-    Precedence: explicit --cpu-percent, then YOLOMUX_CHECK_CPU_PERCENT, then
+    Precedence: explicit --cpu-percent, then YOMUX_CHECK_CPU_PERCENT or its
+    legacy YOLOMUX_CHECK_CPU_PERCENT name, then
     full schedulable CPU capacity. An explicit override may reduce the worker
     budget, but development does not reserve a fraction of the host by default.
     """
-    raw = str(cpu_percent) if cpu_percent is not None else os.environ.get("YOLOMUX_CHECK_CPU_PERCENT", "").strip()
+    raw = str(cpu_percent) if cpu_percent is not None else os.environ.get(
+        "YOMUX_CHECK_CPU_PERCENT", os.environ.get("YOLOMUX_CHECK_CPU_PERCENT", "")
+    ).strip()
     if raw:
         if not raw.isdigit() or not 1 <= int(raw) <= 100:
             raise ValueError("CPU percent must be an integer 1-100")
@@ -316,27 +321,147 @@ def schedulable_cpu_count() -> int:
         return logical
 
 
-def pytest_worker_counts(*, serial: bool = False, cpu_percent: int | None = None) -> tuple[str, str, str]:
-    """Divide the schedulable CPU budget across the concurrent pytest pools."""
+def concurrent_test_cpu_budget(cpu_percent: int | None = None) -> int:
+    """Return one CPU budget shared by the concurrently scheduled test lanes."""
+
+    return max(1, (schedulable_cpu_count() * check_cpu_percent(cpu_percent)) // 100)
+
+
+def schedulable_memory_bytes() -> int:
+    """Return the host or container memory ceiling available to test lanes."""
+
+    for path in (Path("/sys/fs/cgroup/memory.max"), Path("/sys/fs/cgroup/memory/memory.limit_in_bytes")):
+        try:
+            raw = path.read_text(encoding="ascii").strip()
+        except OSError:
+            continue
+        if raw == "max":
+            continue
+        try:
+            limit = int(raw)
+        except ValueError:
+            continue
+        if 0 < limit < (1 << 60):
+            return limit
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="ascii").splitlines():
+            if line.startswith("MemTotal:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
+
+
+def concurrent_test_worker_slots(*, serial: bool = False, cpu_percent: int | None = None) -> int:
+    """Count workers plus two possible one-worker phases sharing memory in parallel."""
+
     if serial:
-        return "1", "1", "1"
-    override = os.environ.get("YOLOMUX_PYTEST_WORKERS", "").strip()
+        return 1
+    pytest_workers = pytest_worker_counts(cpu_percent=cpu_percent)
+    return int(bazel_job_count(cpu_percent=cpu_percent)) + sum(map(int, pytest_workers)) + 2
+
+
+def bazel_memory_limit_mb(*, serial: bool = False, cpu_percent: int | None = None) -> str:
+    """Give Bazel its CPU-proportional share of an 80% memory budget."""
+
+    override = os.environ.get("YOMUX_BAZEL_MEMORY_MB", os.environ.get("YOLOMUX_BAZEL_MEMORY_MB", "")).strip()
     if override:
-        parts = [part.strip() for part in override.split(",")]
-        if len(parts) == 1 and parts[0].isdigit() and int(parts[0]) > 0:
-            return parts[0], parts[0], parts[0]
-        if len(parts) == 3 and all(part.isdigit() and int(part) > 0 for part in parts):
-            return parts[0], parts[1], parts[2]
-        raise ValueError("YOLOMUX_PYTEST_WORKERS must be N or nonbrowser,browser,e2e")
-    cpus = schedulable_cpu_count()
-    percent = check_cpu_percent(cpu_percent)
-    # The three pools run together and split one budget 1/2 non-browser,
-    # 1/3 browser, remainder E2E; the floor of 3 keeps every pool alive.
-    budget = max(3, (cpus * percent) // 100)
+        if not override.isdigit() or int(override) < 1024:
+            raise ValueError("YOMUX_BAZEL_MEMORY_MB must be an integer of at least 1024")
+        return override
+    bazel_jobs = int(bazel_job_count(serial=serial, cpu_percent=cpu_percent))
+    memory_budget = schedulable_memory_bytes() * 80 // 100
+    total_slots = concurrent_test_worker_slots(serial=serial, cpu_percent=cpu_percent)
+    return str(max(1024, memory_budget * min(total_slots, bazel_jobs) // total_slots // (1024 * 1024)))
+
+
+def pytest_memory_limit_mb(workers: int, *, serial: bool = False, cpu_percent: int | None = None) -> str:
+    """Give one pytest container its CPU-proportional share of the memory budget."""
+
+    override = os.environ.get("YOMUX_TEST_MEMORY_MB", os.environ.get("YOLOMUX_TEST_MEMORY_MB", "")).strip()
+    if override:
+        if not override.isdigit() or int(override) < 1024:
+            raise ValueError("YOMUX_TEST_MEMORY_MB must be an integer of at least 1024")
+        return override
+    memory_budget = schedulable_memory_bytes() * 80 // 100
+    total_slots = concurrent_test_worker_slots(serial=serial, cpu_percent=cpu_percent)
+    return str(max(1024, memory_budget * min(total_slots, max(1, workers)) // total_slots // (1024 * 1024)))
+
+
+def pytest_cpu_limit(workers: int, *, per_worker: int = 1, minimum: int = 1) -> str:
+    """Reserve CPU for each pytest worker's browser and fixture-server processes."""
+
+    return str(max(minimum, workers * per_worker))
+
+
+def pytest_cpu_limits(workers: tuple[str, str, str]) -> tuple[str, str, str]:
+    nonbrowser, browser, e2e = map(int, workers)
+    return pytest_cpu_limit(nonbrowser), pytest_cpu_limit(browser), pytest_cpu_limit(e2e, per_worker=2)
+
+
+def split_pytest_worker_budget(budget: int) -> tuple[str, str, str]:
     nonbrowser = max(1, budget // 2)
     browser = max(1, budget // 3)
     e2e = max(1, budget - nonbrowser - browser)
     return str(nonbrowser), str(browser), str(e2e)
+
+
+def pytest_worker_override() -> tuple[str, str, str] | None:
+    """Parse the explicit pytest worker override shared with Bazel budgeting."""
+
+    override = os.environ.get("YOLOMUX_PYTEST_WORKERS", "").strip()
+    if not override:
+        return None
+    parts = [part.strip() for part in override.split(",")]
+    if len(parts) == 1 and parts[0].isdigit() and int(parts[0]) > 0:
+        return parts[0], parts[0], parts[0]
+    if len(parts) == 3 and all(part.isdigit() and int(part) > 0 for part in parts):
+        return parts[0], parts[1], parts[2]
+    raise ValueError("YOLOMUX_PYTEST_WORKERS must be N or nonbrowser,browser,e2e")
+
+
+def bazel_jobs_override() -> str | None:
+    """Parse the explicit Bazel jobs override shared with pytest budgeting."""
+
+    override = os.environ.get("YOLOMUX_BAZEL_JOBS", "").strip()
+    if not override:
+        return None
+    if not override.isdigit() or int(override) < 1:
+        raise ValueError("YOLOMUX_BAZEL_JOBS must be a positive integer")
+    return override
+
+
+def default_pytest_cpu_budget(total_budget: int, *, bazel_jobs: str | None = None) -> int:
+    """Split the default budget, while preserving all explicit worker overrides.
+
+    The three pytest xdist pools each retain at least one worker. If an explicit
+    Bazel override leaves fewer CPUs than the minimum three pools require, it wins
+    and the resulting workload may exceed the default aggregate budget.
+    """
+
+    if bazel_jobs is not None:
+        remaining = total_budget - int(bazel_jobs)
+        budget = max(3, remaining)
+        # E2E workers spend two CPUs; the remaining CPU count is not a worker count.
+        while budget > 3 and sum(map(int, pytest_cpu_limits(split_pytest_worker_budget(budget)))) > remaining:
+            budget -= 1
+        return budget
+    return max(3, total_budget // 2)
+
+
+def pytest_worker_counts(*, serial: bool = False, cpu_percent: int | None = None) -> tuple[str, str, str]:
+    """Divide pytest's share of the aggregate CPU budget across concurrent pools."""
+    if serial:
+        return "1", "1", "1"
+    override = pytest_worker_override()
+    if override is not None:
+        return override
+    total_budget = concurrent_test_cpu_budget(cpu_percent)
+    bazel_jobs = bazel_jobs_override()
+    budget = default_pytest_cpu_budget(total_budget, bazel_jobs=bazel_jobs)
+    # These pools run concurrently. Keep the established 1/2, 1/3, remainder
+    # split inside pytest's share so every phase retains workers.
+    return split_pytest_worker_budget(budget)
 
 
 def pytest_xdist_args(workers: str, *, serial: bool = False, worksteal: bool = False) -> list[str]:
@@ -348,38 +473,49 @@ def pytest_xdist_args(workers: str, *, serial: bool = False, worksteal: bool = F
     return args
 
 
-def bazel_job_count(*, serial: bool = False) -> str:
+def bazel_job_count(*, serial: bool = False, cpu_percent: int | None = None) -> str:
     """Return the Bazel action budget for one isolated test container."""
 
     if serial:
         return "1"
-    override = os.environ.get("YOLOMUX_BAZEL_JOBS", "").strip()
+    override = bazel_jobs_override()
     if override:
-        if not override.isdigit() or int(override) < 1:
-            raise ValueError("YOLOMUX_BAZEL_JOBS must be a positive integer")
         return override
-    return str(schedulable_cpu_count())
+    total_budget = concurrent_test_cpu_budget(cpu_percent)
+    pytest_workers = pytest_worker_counts(cpu_percent=cpu_percent)
+    # Each E2E worker owns a browser and a fixture server; reserve a second CPU
+    # per worker before assigning the remaining capacity to Bazel actions.
+    pytest_cpu_budget = sum(map(int, pytest_cpu_limits(pytest_workers)))
+    return str(max(1, total_budget - pytest_cpu_budget))
 
 
 def step_catalog(*, serial: bool = False, cpu_percent: int | None = None) -> dict[StepId, Step]:
     nonbrowser_workers, browser_workers, e2e_workers = pytest_worker_counts(serial=serial, cpu_percent=cpu_percent)
-    bazel_jobs = bazel_job_count(serial=serial)
+    bazel_jobs = bazel_job_count(serial=serial, cpu_percent=cpu_percent)
+    bazel_memory = bazel_memory_limit_mb(serial=serial, cpu_percent=cpu_percent)
+    nonbrowser_memory = pytest_memory_limit_mb(int(nonbrowser_workers), serial=serial, cpu_percent=cpu_percent)
+    browser_memory = pytest_memory_limit_mb(int(browser_workers), serial=serial, cpu_percent=cpu_percent)
+    e2e_memory = pytest_memory_limit_mb(int(e2e_workers), serial=serial, cpu_percent=cpu_percent)
+    parallel_single_worker_memory = pytest_memory_limit_mb(1, serial=serial, cpu_percent=cpu_percent)
+    final_serial_memory = pytest_memory_limit_mb(1, serial=True, cpu_percent=cpu_percent)
+    nonbrowser_cpu, browser_cpu, e2e_cpu = pytest_cpu_limits((nonbrowser_workers, browser_workers, e2e_workers))
+    browser_single_cpu = pytest_cpu_limit(int(browser_workers), minimum=2)
     return {
         StepId.PY_COMPILE: Step("py_compile", ["python3", "-m", "py_compile", *py_compile_files()]),
         StepId.STATIC_BUILD: Step("static_build --check", ["python3", "tools/static_build.py", "--check"]),
         StepId.TEXTSHAPE: Step("textshape_assertion_guard", ["python3", "tools/textshape_assertion_guard.py"]),
         StepId.ARCHITECTURE_BUDGETS: Step("architecture budgets", ["python3", "tools/architecture_budgets.py"]),
         StepId.LOCAL_SERVICE_TYPES: Step("local-service type gate", ["python3", "tools/check_local_service_types.py"]),
-        StepId.NODE_YOLOMUX_SYNTAX: Step("node --check static/yomux.js", ["node", "--check", "static/yomux.js"]),
+        StepId.NODE_YOMUX_SYNTAX: Step("node --check static/yomux.js", ["node", "--check", "static/yomux.js"]),
         StepId.NODE_WALL_SYNTAX: Step("node --check static/tmux-wall.js", ["node", "--check", "static/tmux-wall.js"]),
         StepId.NODE_LAYOUT: Step("node tests/layout_url.test.js", ["node", "tests/layout_url.test.js", *NODE_LAYOUT_FILES]),
-        StepId.BAZEL_GO: Step("Bazel Go and Docker tests", ["tools/run_bazel_tests.sh", "--jobs", bazel_jobs]),
-        StepId.PYTEST_NONBROWSER: Step("pytest non-browser", ["python3", "-m", "pytest", *pytest_files("nonbrowser"), *pytest_xdist_args(nonbrowser_workers, serial=serial), "-m", "not node_bridge and not gate_serial and not e2e and not browser", "-q"]),
-        StepId.PYTEST_GATE_SERIAL: Step("pytest timing-sensitive serial", ["python3", "-m", "pytest", *pytest_files("gate_serial"), "-m", "gate_serial", "-q"]),
-        StepId.PYTEST_BOOT: Step("pytest boot smoke", ["python3", "-m", "pytest", *pytest_files("boot"), "-m", "boot", "-q"]),
-        StepId.PYTEST_BROWSER: Step("pytest browser", ["python3", "-m", "pytest", *pytest_files("browser"), *pytest_xdist_args(browser_workers, serial=serial, worksteal=True), "-m", "browser and not e2e and not boot and not visual_golden", "-q"]),
-        StepId.PYTEST_BROWSER_GOLDEN: Step("pytest browser visual goldens", ["python3", "-m", "pytest", *pytest_files("golden"), "-m", "visual_golden", "-q"]),
-        StepId.PYTEST_E2E: Step("pytest e2e", ["python3", "-m", "pytest", *pytest_files("e2e"), *pytest_xdist_args(e2e_workers, serial=serial), "-m", "e2e", "-q"]),
+        StepId.BAZEL_GO: Step("Bazel Go and Docker tests", ["tools/run_bazel_tests.sh", "--jobs", bazel_jobs, "--memory-mb", bazel_memory]),
+        StepId.PYTEST_NONBROWSER: Step("pytest non-browser", ["python3", "-m", "pytest", *pytest_files("nonbrowser"), *pytest_xdist_args(nonbrowser_workers, serial=serial), "-m", "not node_bridge and not gate_serial and not e2e and not browser", "-q"], env=(("YOMUX_TEST_CPU_COUNT", nonbrowser_cpu), ("YOMUX_TEST_MEMORY_MB", nonbrowser_memory))),
+        StepId.PYTEST_GATE_SERIAL: Step("pytest timing-sensitive serial", ["python3", "-m", "pytest", *pytest_files("gate_serial"), "-m", "gate_serial", "-q"], env=(("YOMUX_TEST_CPU_COUNT", "1"), ("YOMUX_TEST_MEMORY_MB", final_serial_memory))),
+        StepId.PYTEST_BOOT: Step("pytest boot smoke", ["python3", "-m", "pytest", *pytest_files("boot"), "-m", "boot", "-q"], env=(("YOMUX_TEST_CPU_COUNT", browser_single_cpu), ("YOMUX_TEST_MEMORY_MB", parallel_single_worker_memory))),
+        StepId.PYTEST_BROWSER: Step("pytest browser", ["python3", "-m", "pytest", *pytest_files("browser"), *pytest_xdist_args(browser_workers, serial=serial, worksteal=True), "-m", "browser and not e2e and not boot and not visual_golden", "-q"], env=(("YOMUX_TEST_CPU_COUNT", browser_cpu), ("YOMUX_TEST_MEMORY_MB", browser_memory))),
+        StepId.PYTEST_BROWSER_GOLDEN: Step("pytest browser visual goldens", ["python3", "-m", "pytest", *pytest_files("golden"), "-m", "visual_golden", "-q"], env=(("YOMUX_TEST_CPU_COUNT", browser_single_cpu), ("YOMUX_TEST_MEMORY_MB", parallel_single_worker_memory))),
+        StepId.PYTEST_E2E: Step("pytest e2e", ["python3", "-m", "pytest", *pytest_files("e2e"), *pytest_xdist_args(e2e_workers, serial=serial), "-m", "e2e", *[arg for nodeid in BAZEL_GO_BROWSER_TESTS for arg in ("--deselect", nodeid)], "-q"], env=(("YOMUX_TEST_CPU_COUNT", e2e_cpu), ("YOMUX_TEST_MEMORY_MB", e2e_memory))),
         StepId.WHITESPACE: Step("git diff --check", ["git", "-c", f"safe.directory={REPO_ROOT}", "diff", "--check"]),
     }
 
@@ -599,7 +735,7 @@ def state_dir_from_env() -> Path:
     return resolved_state_dir(os.environ)
 
 
-def active_yolomux_server_records(
+def active_yomux_server_records(
     *,
     state_dir: Path | None = None,
     now: float | None = None,
@@ -1857,7 +1993,7 @@ def main(argv: list[str] | None = None) -> int:
     scheduling = parser.add_mutually_exclusive_group()
     scheduling.add_argument("--serial", action="store_true", help="run lanes one at a time with one pytest worker per lane")
     scheduling.add_argument("--serial-lanes", action="store_true", help="run lanes one at a time while preserving each lane's normal pytest worker policy")
-    parser.add_argument("--cpu-percent", type=int, default=None, metavar="1-100", help="fraction of host CPUs the pytest pools may claim (default: 100; env YOLOMUX_CHECK_CPU_PERCENT)")
+    parser.add_argument("--cpu-percent", type=int, default=None, metavar="1-100", help="fraction of schedulable CPUs shared by pytest and Bazel (default: 100; env YOMUX_CHECK_CPU_PERCENT, with legacy YOLOMUX_CHECK_CPU_PERCENT fallback). Explicit worker/job overrides may exceed it.")
     parser.add_argument("--lane", action="append", choices=lane_names, help="run only this lane; may be repeated")
     parser.add_argument("--list-lanes", action="store_true", help="print lane names and exit")
     parser.add_argument("--no-tool-guard", action="store_true", help="skip the expensive-tool lock")
@@ -1917,7 +2053,7 @@ def main(argv: list[str] | None = None) -> int:
     guard_enabled = (certify or selected_needs_tool_guard(selected, args.lane)) and not args.no_tool_guard
     try:
         tool_lock_path = default_tool_lock_path()
-    except YolomuxRootError as exc:
+    except YomuxRootError as exc:
         print(f"CHECK REFUSED: {exc}", file=sys.stderr, flush=True)
         return EXIT_USAGE
     if guard_enabled:

@@ -2316,8 +2316,10 @@ def test_token_adapter_does_not_claim_zero_coverage_when_roster_is_cold():
     assert facts.receipt is None
 
 
-def test_background_scheduler_starts_only_the_current_stats_runtime():
+@pytest.mark.parametrize("disable_pricing_refresh", [False, True])
+def test_background_scheduler_starts_only_the_current_stats_runtime(monkeypatch, disable_pricing_refresh):
     calls = []
+    monkeypatch.setenv("YOMUX_TEST_DISABLE_PRICING_REFRESH", "1" if disable_pricing_refresh else "0")
     webapp = object.__new__(app_module.TmuxWebtermApp)
     webapp.background_scheduler = SimpleNamespace(status_payload=lambda: {"status": "local"}, can_run=lambda _role: True)
     # The local scheduler also leases indexd via refresh_search_indexer_schedule; with no
@@ -2342,7 +2344,11 @@ def test_background_scheduler_starts_only_the_current_stats_runtime():
 
     webapp.handle_background_scheduler_started()
 
-    assert calls == ["job", "pricing", "current", "tabber", "tabber-worker"]
+    expected = ["job"]
+    if not disable_pricing_refresh:
+        expected.append("pricing")
+    expected.extend(["current", "tabber", "tabber-worker"])
+    assert calls == expected
 
 
 def test_background_services_use_the_local_coordinator(monkeypatch, tmp_path):

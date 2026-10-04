@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/keivenchang/yomux/internal/testsupport"
 )
 
 func TestTmuxCommandArgsHonorsConfiguredSocket(t *testing.T) {
@@ -21,6 +23,24 @@ func TestTmuxCommandArgsHonorsConfiguredSocket(t *testing.T) {
 	t.Setenv("YOLOMUX_TMUX_SOCKET", "")
 	if got, want := tmuxCommandArgs("capture-pane"), []string{"tmux", "capture-pane"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("tmuxCommandArgs without socket = %#v, want %#v", got, want)
+	}
+}
+
+func TestTmuxCommandArgsCanonicalSocketWinsIncludingExplicitEmpty(t *testing.T) {
+	t.Setenv("YOLOMUX_TMUX_SOCKET", "/legacy/tmux.sock")
+	t.Setenv("YOMUX_TMUX_SOCKET", " /canonical/tmux.sock ")
+	if got, want := tmuxCommandArgs("list-panes"), []string{"tmux", "-S", "/canonical/tmux.sock", "list-panes"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("canonical tmux socket = %#v, want %#v", got, want)
+	}
+	if !syntheticTmuxSocketConfigured() {
+		t.Fatal("synthetic admission did not share the canonical socket owner")
+	}
+	t.Setenv("YOMUX_TMUX_SOCKET", "")
+	if got, want := tmuxCommandArgs("list-panes"), []string{"tmux", "list-panes"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("cleared canonical tmux socket = %#v, want %#v", got, want)
+	}
+	if syntheticTmuxSocketConfigured() {
+		t.Fatal("explicit empty canonical socket did not clear synthetic admission")
 	}
 }
 
@@ -111,7 +131,7 @@ func TestSyntheticAgentProcessUsesGoFixtureOpenCodeSession(t *testing.T) {
 }
 
 func TestLinuxTmuxRosterTreatsMissingServerAsEmpty(t *testing.T) {
-	t.Setenv("YOLOMUX_TMUX_SOCKET", filepath.Join(t.TempDir(), "tmux.sock"))
+	t.Setenv("YOMUX_TMUX_SOCKET", filepath.Join(testsupport.ShortTempDir(t), "tmux.sock"))
 	sessions, err := linuxTmuxSessions(context.Background())
 	if err != nil {
 		t.Fatalf("linuxTmuxSessions() error = %v", err)

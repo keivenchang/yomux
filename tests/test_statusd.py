@@ -179,6 +179,20 @@ def wait_for_direct_snapshot(service, request, timeout=2.0):
     return response, body
 
 
+def expire_status_snapshot(service, session=None):
+    # Wait for any unchanged refresh to publish before forcing fixture expiry;
+    # otherwise it can overwrite this old timestamp with its fresh working snapshot.
+    with service.build_lock, service.lock:
+        metadata, body = service.snapshot
+        service.snapshot = (
+            StatusSnapshotMetadata(metadata.generation, metadata.status, metadata.stale, metadata.built_at - 60.0),
+            body,
+        )
+        if session is not None:
+            service.session_capture_due_at[session] = 0.0
+        return metadata, body
+
+
 def test_status_generation_probe_is_immediate_within_the_existing_transport_budget(monkeypatch):
     client = object.__new__(StatusClient)
     calls = []
@@ -429,12 +443,7 @@ def test_statusd_rebuilds_after_max_age_without_bumping_an_unchanged_snapshot(mo
     first, _ = wait_for_direct_snapshot(service, request)
     assert FakeStatusApp.builds == 1
 
-    with service.lock:
-        metadata, body = service.snapshot
-        service.snapshot = (
-            StatusSnapshotMetadata(metadata.generation, metadata.status, metadata.stale, metadata.built_at - 60.0),
-            body,
-        )
+    expire_status_snapshot(service)
 
     second, _ = service.handle(request)
     deadline = time.monotonic() + 2.0
@@ -646,13 +655,7 @@ def test_statusd_dot_reflects_real_idle_pane_after_ttl_without_explicit_invalida
         service.handle(request)
         assert service.snapshot_payload["sessions"][session]["screen"]["key"] == "working"
 
-        with service.lock:
-            metadata, body = service.snapshot
-            service.snapshot = (
-                StatusSnapshotMetadata(metadata.generation, metadata.status, metadata.stale, metadata.built_at - 60.0),
-                body,
-            )
-            service.session_capture_due_at[session] = 0.0
+        metadata, body = expire_status_snapshot(service, session)
 
         refresh_completed = Event()
         real_build = service._build
@@ -764,10 +767,7 @@ def test_real_tmux_agent_window_status_tabber_and_stats_share_lifecycle_identity
         rendered, pane = wait_for_mockcase_render(tmux_binary, socket_path, session, idle_case["text"])
         assert rendered, pane
 
-        with service.lock:
-            metadata, body = service.snapshot
-            service.snapshot = (StatusSnapshotMetadata(metadata.generation, metadata.status, metadata.stale, metadata.built_at - 60.0), body)
-            service.session_capture_due_at[session] = 0.0
+        expire_status_snapshot(service, session)
         idle_response, idle_payload = snapshot()
         assert idle_response["generation"] > working_response["generation"]
         idle_rows = identity_rows(idle_payload)

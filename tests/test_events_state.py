@@ -14,7 +14,7 @@ def use_temp_state(monkeypatch, tmp_path):
 def test_state_write_uses_unique_temp_file(monkeypatch, tmp_path):
     use_temp_state(monkeypatch, tmp_path)
 
-    events.write_yolomux_state({"notify_enabled": True})
+    events.write_yomux_state({"notify_enabled": True})
 
     assert json.loads((tmp_path / "state.json").read_text(encoding="utf-8")) == {"notify_enabled": True}
     assert not (tmp_path / "state.json.tmp").exists()
@@ -23,12 +23,12 @@ def test_state_write_uses_unique_temp_file(monkeypatch, tmp_path):
 
 def test_state_updates_are_locked_across_threads(monkeypatch, tmp_path):
     use_temp_state(monkeypatch, tmp_path)
-    events.write_yolomux_state({"base": True})
+    events.write_yomux_state({"base": True})
     barrier = threading.Barrier(12)
 
     def update(index):
         barrier.wait()
-        events.update_yolomux_state({f"key_{index}": index})
+        events.update_yomux_state({f"key_{index}": index})
 
     threads = [threading.Thread(target=update, args=(index,)) for index in range(12)]
     for thread in threads:
@@ -36,7 +36,7 @@ def test_state_updates_are_locked_across_threads(monkeypatch, tmp_path):
     for thread in threads:
         thread.join()
 
-    state = events.read_yolomux_state()
+    state = events.read_yomux_state()
     assert state["base"] is True
     for index in range(12):
         assert state[f"key_{index}"] == index
