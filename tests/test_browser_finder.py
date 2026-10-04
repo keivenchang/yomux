@@ -1,10 +1,12 @@
 import json
+import math
 import re
 from pathlib import Path
 from urllib.parse import quote
 
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.actions.wheel_input import ScrollOrigin
 
 from yomux_lib import filesystem
 from yomux_lib import web
@@ -13,6 +15,1063 @@ from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 
 _BOOTSTRAP_SCRIPT_RE = re.compile(r'<script id="yomux-bootstrap"[^>]*>(.*?)</script>', re.DOTALL)
+
+
+def test_finder_restore_advances_ready_branches_while_another_listing_is_held(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        '?sessions=files,1&layout=left&tabs=left:files',
+        fs_entries={
+            '/home/test': [{'name': 'slow', 'kind': 'dir'}, {'name': 'fast', 'kind': 'dir'}],
+            '/home/test/slow': [{'name': 'deep', 'kind': 'dir'}],
+            '/home/test/slow/deep': [{'name': 'slow.txt', 'kind': 'file'}],
+            '/home/test/fast': [{'name': 'deep', 'kind': 'dir'}],
+            '/home/test/fast/deep': [{'name': 'fast.txt', 'kind': 'file'}],
+        },
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const root = '/home/test';
+          const slowPath = `${root}/slow`;
+          const fastDeepPath = `${root}/fast/deep`;
+          const originalFetch = window.fetch;
+          const requested = [];
+          let releaseSlow;
+          let fastDeepRequested = false;
+          window.fetch = (input, options) => {
+            const url = new URL(String(input), location.href);
+            if (url.pathname !== '/api/fs/fast/list') return originalFetch(input, options);
+            const path = url.searchParams.get('path');
+            requested.push(path);
+            if (path === slowPath) return new Promise(resolve => { releaseSlow = () => resolve(new Response(JSON.stringify({path, entries: [{name: 'deep', kind: 'dir'}]}), {headers: {'Content-Type': 'application/json'}})); });
+            if (path === fastDeepPath) fastDeepRequested = true;
+            const entries = path === `${root}/fast`
+              ? [{name: 'deep', kind: 'dir'}]
+              : path === fastDeepPath ? [{name: 'fast.txt', kind: 'file'}] : [{name: 'slow.txt', kind: 'file'}];
+            return Promise.resolve(new Response(JSON.stringify({path, entries}), {headers: {'Content-Type': 'application/json'}}));
+          };
+          try {
+            fileExplorerExpanded.clear();
+            invalidateFileExplorerRoots([`${root}/slow`, `${root}/fast`]);
+            const restore = restoreFileExplorerExpandedPaths([
+              `${root}/slow`, `${root}/slow/deep`, `${root}/fast`, fastDeepPath,
+            ], root);
+            const deadline = performance.now() + 1500;
+            while (!fastDeepRequested && performance.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+            const reachedWhileSlowWasHeld = fastDeepRequested;
+            const requestedBeforeSlowRelease = [...requested];
+            if (typeof releaseSlow !== 'function') return done({error:'slow listing was not held',requested,expanded:[...fileExplorerExpanded],pending:[...fileExplorerPendingExpansions]});
+            releaseSlow();
+            await restore;
+            done({
+              reachedWhileSlowWasHeld,
+              requested,
+              requestedBeforeSlowRelease,
+              expanded: [...fileExplorerExpanded].sort(),
+              pendingRows: [...document.querySelectorAll('.file-tree-row.loading-children')].map(row => row.dataset.path),
+              childPaths: [...document.querySelectorAll('.file-tree-row[data-path]')].map(row => row.dataset.path).sort(),
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } finally {
+          window.fetch = originalFetch;
+        }
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert not metrics.get('error'), metrics
+    assert metrics['reachedWhileSlowWasHeld'], metrics
+    assert '/home/test/fast/deep' in metrics['requestedBeforeSlowRelease'], metrics
+    assert set(metrics['expanded']) == {
+        '/home/test/fast', '/home/test/fast/deep', '/home/test/slow', '/home/test/slow/deep',
+    }, metrics
+    assert metrics['pendingRows'] == [], metrics
+    assert metrics['errors'] == [] and metrics['rejections'] == [], metrics
+
+
+def test_finder_manual_empty_directory_settles_expanded_without_loading(browser, tmp_path):
+    root, empty = '/home/test', '/home/test/empty'
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        '?sessions=files,1&layout=left&tabs=left:files',
+        fs_entries={root: [{'name': 'empty', 'kind': 'dir'}], empty: []},
+    )
+    selector = f'#panel-__finder__ .file-tree-row[data-path="{empty}"]'
+    WebDriverWait(browser, 8).until(lambda driver: driver.find_elements(By.CSS_SELECTOR, selector))
+    browser.find_element(By.CSS_SELECTOR, selector).click()
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+        "const row=document.querySelector(arguments[0]); return row?.getAttribute('aria-expanded')==='true' && !row.classList.contains('loading-children') && fileExplorerPendingExpansions.size===0;",
+        selector,
+    ))
+    result = browser.execute_script(
+        "const row=document.querySelector(arguments[0]); const children=childContainerForRow(row,arguments[1]); return {expanded:fileExplorerExpanded.has(arguments[1]),children:Boolean(children),childRows:children?.querySelectorAll('.file-tree-row[data-path]').length ?? -1,status:children?.querySelector('[role=status]')?.textContent || '',errors:jsDebugFailureEvents('error'),rejections:jsDebugFailureEvents('rejection')};",
+        selector,
+        empty,
+    )
+    assert result == {
+        'expanded': True,
+        'children': True,
+        'childRows': 0,
+        'status': '',
+        'errors': [],
+        'rejections': [],
+    }, result
+
+
+def test_finder_network_failed_expansion_retries_after_reconnect(browser, tmp_path):
+    root, branch = '/home/test', '/home/test/retry'
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        '?sessions=files,1&layout=left&tabs=left:files',
+        fs_entries={root: [{'name': 'retry', 'kind': 'dir'}], branch: [{'name': 'ready.txt', 'kind': 'file'}]},
+    )
+    selector = f'#panel-__finder__ .file-tree-row[data-path="{branch}"]'
+    WebDriverWait(browser, 8).until(lambda driver: driver.find_elements(By.CSS_SELECTOR, selector))
+    browser.execute_script(
+        """
+        const branch = arguments[0], original = fetchDirectory;
+        let attempts = 0;
+        fetchDirectory = (path, options = {}) => {
+          if (path !== branch || ++attempts !== 1) return original(path, options);
+          return Promise.reject(new Error('temporary listing disconnect'));
+        };
+        window.__finderReconnectRetry = {original, attempts: () => attempts};
+        """,
+        branch,
+    )
+    try:
+        browser.find_element(By.CSS_SELECTOR, selector).click()
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+            "const row=document.querySelector(arguments[0]); return row?.getAttribute('aria-expanded')==='false' && !row.classList.contains('loading-children') && Boolean(childContainerForRow(row,arguments[1])?.querySelector('[role=status]')) && fileExplorerPendingExpansions.size===0;",
+            selector,
+            branch,
+        ))
+        result = browser.execute_async_script(
+            """
+            const done=arguments[arguments.length-1], branch=arguments[0];
+            retryNetworkFailedFileExplorerExpansion().then(
+              retried => {
+                const row=document.querySelector(arguments[1]);
+                done({retried,expanded:row?.getAttribute('aria-expanded'),loading:row?.classList.contains('loading-children'),
+                  child:Boolean(childContainerForRow(row,branch)?.querySelector(`[data-path="${branch}/ready.txt"]`)),
+                  pending:fileExplorerPendingExpansions.has(branch),error:currentFileExplorerListError(branch),
+                  attempts:window.__finderReconnectRetry.attempts(),errors:jsDebugFailureEvents('error'),rejections:jsDebugFailureEvents('rejection')});
+              }, error => done({error:String(error?.stack || error)}),
+            );
+            """,
+            branch,
+            selector,
+        )
+        assert result == {
+            'retried': True,
+            'expanded': 'true',
+            'loading': False,
+            'child': True,
+            'pending': False,
+            'error': '',
+            'attempts': 2,
+            'errors': [],
+            'rejections': [],
+        }, result
+    finally:
+        browser.execute_script(
+            "const state=window.__finderReconnectRetry; if (state) {fetchDirectory=state.original; delete window.__finderReconnectRetry;}"
+        )
+
+
+def test_finder_reload_restores_ready_branch_while_saved_sibling_listing_is_held(browser, tmp_path):
+    root = '/home/test'
+    slow = f'{root}/slow'
+    fast = f'{root}/fast'
+    load_live_runtime_boot_fixture(
+        browser, tmp_path,
+        '?sessions=files,1&layout=left&tabs=left:files',
+        settings={'file_explorer': {'root_mode': 'fixed'}},
+        fs_entries={
+            root: [{'name': 'slow', 'kind': 'dir'}, {'name': 'fast', 'kind': 'dir'}],
+            slow: [{'name': 'slow.txt', 'kind': 'file'}],
+            fast: [{'name': 'fast.txt', 'kind': 'file'}],
+        },
+    )
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+        "return document.querySelector('#panel-__finder__ [data-path=\"/home/test/slow\"]') !== null && document.querySelector('#panel-__finder__ [data-path=\"/home/test/fast\"]') !== null"
+    ))
+    for path in (slow, fast):
+        browser.find_element(By.CSS_SELECTOR, f'#panel-__finder__ .file-tree-row[data-path="{path}"]').click()
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+            "const row=document.querySelector(arguments[0]); return row?.getAttribute('aria-expanded') === 'true' && childContainerForRow(row, arguments[1])?.querySelector('.file-tree-row[data-path]') !== null;",
+            f'#panel-__finder__ .file-tree-row[data-path="{path}"]', path,
+        ))
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+        "const paths=JSON.parse(new URLSearchParams(location.search).get('state') || '{}').finder?.expanded || []; return paths.includes('/home/test/slow') && paths.includes('/home/test/fast');"
+    ))
+    saved = browser.execute_script(
+        "return JSON.parse(new URLSearchParams(location.search).get('state') || '{}').finder?.expanded || [];"
+    )
+    assert slow in saved and fast in saved, saved
+    browser.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {'source': f"""
+      (() => {{
+        const slow = {json.dumps(slow)}, state = {{release:null, requests:[]}};
+        let current = window.fetch;
+        const wrap = next => function(input, options) {{
+          const url = new URL(String(input), location.href);
+          if (url.pathname !== '/api/fs/fast/list') return next(input, options);
+          const path = url.searchParams.get('path');
+          state.requests.push(path);
+          if (path !== slow) return next(input, options);
+          return new Promise((resolve, reject) => {{ state.release = () => next(input, options).then(resolve, reject); }});
+        }};
+        Object.defineProperty(window, 'fetch', {{configurable:true, enumerable:true, get:() => current, set:next => {{current = wrap(next);}}}});
+        current = wrap(current);
+        window.__finderReloadHold = state;
+      }})();
+    """})
+    browser.refresh()
+    ready = browser.execute_async_script(
+        """
+        const done=arguments[arguments.length-1], deadline=performance.now()+7000;
+        const check=()=>{
+          const state=window.__finderReloadHold;
+          const row=document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/fast"]');
+          const child=childContainerForRow(row,'/home/test/fast')?.querySelector('[data-path="/home/test/fast/fast.txt"]');
+          if (state?.release && row?.getAttribute('aria-expanded')==='true' && child) return done({ready:true});
+          if (performance.now()>=deadline) return done({ready:false,root:currentFileExplorerRoot(),expanded:[...fileExplorerExpanded],pending:[...fileExplorerPendingExpansions],requests:state?.requests || [],slowRelease:Boolean(state?.release),rows:[...document.querySelectorAll('#panel-__finder__ .file-tree-row[data-path]')].map(node=>node.dataset.path),errors:jsDebugFailureEvents('error'),rejections:jsDebugFailureEvents('rejection')});
+          setTimeout(check,25);
+        };
+        check();
+        """
+    )
+    assert ready['ready'], json.dumps(ready, sort_keys=True)
+    held = browser.execute_script(
+        "const state=window.__finderReloadHold, slowRow=document.querySelector('#panel-__finder__ .file-tree-row[data-path=\"/home/test/slow\"]'), fastRow=document.querySelector('#panel-__finder__ .file-tree-row[data-path=\"/home/test/fast\"]'); return {saved:JSON.parse(new URLSearchParams(location.search).get('state') || '{}').finder?.expanded || [],requests:state.requests,slowExpanded:slowRow?.getAttribute('aria-expanded'),slowLoading:slowRow?.classList.contains('loading-children'),fastLoading:fastRow?.classList.contains('loading-children'),fastChild:childContainerForRow(fastRow,'/home/test/fast')?.querySelector('[data-path=\"/home/test/fast/fast.txt\"]') !== null};"
+    )
+    assert slow in held['saved'] and fast in held['saved'], held
+    assert slow in held['requests'] and held['slowExpanded'] == 'true' and held['slowLoading'], held
+    assert held['fastLoading'] is False and held['fastChild'], held
+    browser.execute_script('window.__finderReloadHold.release()')
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+        "const rows=[...document.querySelectorAll('#panel-__finder__ .file-tree-row.loading-children')]; return rows.length === 0 && fileExplorerPendingExpansions.size === 0 && childContainerForRow(document.querySelector('#panel-__finder__ [data-path=\"/home/test/slow\"]'),'/home/test/slow')?.querySelector('[data-path=\"/home/test/slow/slow.txt\"]') !== null;"
+    ))
+    settled = browser.execute_script(
+        "return {expanded:[...fileExplorerExpanded].filter(path=>path==='/home/test/slow'||path==='/home/test/fast').sort(),pending:[...fileExplorerPendingExpansions],errors:jsDebugFailureEvents('error'),rejections:jsDebugFailureEvents('rejection')};"
+    )
+    assert settled['expanded'] == [fast, slow] and settled['pending'] == [], settled
+    assert settled['errors'] == [] and settled['rejections'] == [], settled
+
+
+@pytest.mark.parametrize('two_surfaces', [False, True], ids=['builtin-surfaces', 'extra-surface'])
+@pytest.mark.parametrize('hold_descendant', [False, True], ids=['reopen', 'collapse-during-fetch'])
+def test_finder_reload_preserves_nested_expansion_under_collapsed_parent(browser, tmp_path, two_surfaces, hold_descendant):
+    root, parent, child = '/home/test', '/home/test/a', '/home/test/a/b'
+    load_live_runtime_boot_fixture(
+        browser, tmp_path, '?sessions=files,1&layout=left&tabs=left:files',
+        settings={'file_explorer': {'root_mode': 'fixed'}},
+        fs_entries={root: [{'name': 'a', 'kind': 'dir'}],
+                    parent: [{'name': 'b', 'kind': 'dir'}],
+                    child: [{'name': 'leaf.txt', 'kind': 'file'}]},
+    )
+    for path in (parent, child):
+        selector = f'#panel-__finder__ .file-tree-row[data-path="{path}"]'
+        WebDriverWait(browser, 8).until(lambda driver: driver.find_elements(By.CSS_SELECTOR, selector))
+        browser.find_element(By.CSS_SELECTOR, selector).click()
+        WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+            "const row=document.querySelector(arguments[0]); return row?.getAttribute('aria-expanded')==='true' && childContainerForRow(row,arguments[1])?.querySelector('[data-path]') !== null;", selector, path,
+        ))
+    parent_selector = f'#panel-__finder__ .file-tree-row[data-path="{parent}"]'
+    browser.find_element(By.CSS_SELECTOR, parent_selector).click()
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+        "const paths=JSON.parse(new URLSearchParams(location.search).get('state')||'{}').finder?.expanded||[]; return paths.includes(arguments[0]) && !paths.includes(arguments[1]);", child, parent,
+    ))
+    browser.refresh()
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+        "return typeof fileExplorerPendingExpansions !== 'undefined' && document.querySelector(arguments[0])?.getAttribute('aria-expanded')==='false' && fileExplorerPendingExpansions.size===0;", parent_selector,
+    ))
+    state = browser.execute_script("return {expanded:[...fileExplorerExpanded],loading:document.querySelectorAll('.loading-children').length};")
+    assert child in state['expanded'] and parent not in state['expanded'] and state['loading'] == 0, state
+    browser.execute_script(
+        """
+        const [twoSurfaces, holdDescendant] = arguments;
+        const originalFetch = fetchDirectory;
+        const state = window.__latentExpansionTest = {originalFetch, secondary:null, release:null};
+        if (twoSurfaces) {
+          state.secondary = document.createElement('div');
+          state.secondary.className = 'file-explorer-tree-panel';
+          document.body.append(state.secondary);
+          renderTreeChildren(state.secondary, '/home/test', [{name:'a',kind:'dir'}], 0, {view:'finder'});
+        }
+        if (holdDescendant) fetchDirectory = (path, options) => path !== '/home/test/a/b'
+          ? originalFetch(path, options)
+          : new Promise((resolve, reject) => {
+            state.release = () => {
+              fetchDirectory = originalFetch;
+              originalFetch(path, options).then(resolve, reject);
+            };
+          });
+        """, two_surfaces, hold_descendant,
+    )
+    try:
+        browser.find_element(By.CSS_SELECTOR, parent_selector).click()
+        if hold_descendant:
+            WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+                "return !!window.__latentExpansionTest.release && fileExplorerPendingExpansions.has('/home/test/a/b');"
+            ))
+            browser.find_element(By.CSS_SELECTOR, parent_selector).click()
+            browser.execute_script('window.__latentExpansionTest.release()')
+            WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+                "return fileExplorerPendingExpansions.size===0 && liveDirectoryRows('/home/test/a',null).every(row=>row.getAttribute('aria-expanded')==='false' && !childContainerForRow(row,'/home/test/a'));"
+            ))
+            browser.find_element(By.CSS_SELECTOR, parent_selector).click()
+        WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+            "const rows=liveDirectoryRows(arguments[0],null);return rows.length===arguments[1] && rows.every(row=>row.getAttribute('aria-expanded')==='true' && !!childContainerForRow(row,arguments[0])?.querySelector('[data-path=\"/home/test/a/b/leaf.txt\"]')) && !document.querySelector('.loading-children') && fileExplorerPendingExpansions.size===0;", child, 3 if two_surfaces else 2,
+        ))
+    finally:
+        print('latent expansion settlement', browser.execute_script("return {rows:liveDirectoryRows('/home/test/a/b',null).map(row=>({expanded:row.getAttribute('aria-expanded'),children:childContainerForRow(row,'/home/test/a/b')?.innerText,tree:row.closest('.file-explorer-tree-panel')?.id})),parents:liveDirectoryRows('/home/test/a',null).length,pending:[...fileExplorerPendingExpansions],loading:[...document.querySelectorAll('.loading-children')].map(row=>row.dataset.path)};"))
+        browser.execute_script('fetchDirectory=window.__latentExpansionTest.originalFetch;window.__latentExpansionTest.secondary?.remove();delete window.__latentExpansionTest;')
+
+
+def test_finder_restore_reconciles_both_tree_surfaces_after_cache_eviction(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    result = browser.execute_async_script(
+        """
+        const done=arguments[arguments.length-1], root='/home/test', branch=`${root}/branch`;
+        (async()=>{
+          const primary=fileExplorerTree, secondary=document.createElement('div');
+          secondary.className='file-explorer-tree-panel'; secondary.id='finder-restore-secondary-tree';
+          document.body.append(secondary);
+          const rootEntries=[{name:'branch',kind:'dir'}], oldEntries=[{name:'old.txt',kind:'file'}];
+          renderTreeChildren(primary,root,rootEntries,0,{view:'finder'});
+          fileExplorerExpanded.add(branch);
+          const primaryRow=primary.querySelector(`[data-path="${branch}"]`);
+          const primaryChildren=createFileTreeChildContainer(branch);
+          primaryRow.insertAdjacentElement('afterend',primaryChildren);
+          renderTreeChildren(primaryChildren,branch,oldEntries,1,{view:'finder'});
+          renderTreeChildren(secondary,root,rootEntries,0,{view:'finder'});
+          const secondaryRow=secondary.querySelector(`[data-path="${branch}"]`);
+          const cacheKey=fileExplorerFsBatchKey('list',branch);
+          fileExplorerFsResourceRecords.delete(cacheKey);
+          const originalFetchDirectory=fetchDirectory;
+          fetchDirectory=(path,options={})=>path===branch?Promise.resolve([{name:'current.txt',kind:'file'}]):originalFetchDirectory(path,options);
+          try {
+            const restored=await restoreFileExplorerExpandedPaths([branch],root);
+            const read=tree=>[...tree.querySelectorAll(`.file-tree-row[data-path^="${branch}/"]`)].map(row=>row.dataset.path);
+            done({restored,primary:read(primary),secondary:read(secondary),secondaryExpanded:secondaryRow.getAttribute('aria-expanded'),pending:[...fileExplorerPendingExpansions]});
+          } finally {fetchDirectory=originalFetchDirectory; secondary.remove();}
+        })().catch(error=>done({error:String(error?.stack||error)}));
+        """
+    )
+    assert 'error' not in result, result
+    assert result['restored'] is True, result
+    assert result['primary'] == ['/home/test/branch/current.txt'], result
+    assert result['secondary'] == result['primary'], result
+    assert result['secondaryExpanded'] == 'true' and result['pending'] == [], result
+
+
+def test_finder_saved_restore_does_not_reclaim_a_newer_child_render(browser, tmp_path):
+    root = '/home/test'
+    bulk = f'{root}/bulk'
+    load_live_runtime_boot_fixture(
+        browser, tmp_path,
+        '?sessions=files,1&layout=left&tabs=left:files',
+        fs_entries={root: [{'name': 'bulk', 'kind': 'dir'}]},
+    )
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+        "return typeof restoreFileExplorerExpandedPaths === 'function' && fileExplorerTreeContainers().some(tree => itemIsActivePaneTab(finderItemId)"
+        " && tree.closest('.file-explorer-panel[data-file-explorer-view=\"finder\"]')"
+        " && tree.getBoundingClientRect().width > 0 && tree.getBoundingClientRect().height > 0"
+        " && tree.querySelector('.file-tree-row[data-path=\"/home/test/bulk\"]'))"
+    ))
+    result = browser.execute_async_script(
+        """
+        const done=arguments[arguments.length-1], root='/home/test', bulk=`${root}/bulk`;
+        (async()=>{
+          const visibleTree=fileExplorerTreeContainers().find(tree=>itemIsActivePaneTab(finderItemId)
+            && tree.closest('.file-explorer-panel[data-file-explorer-view="finder"]')
+            && tree.getBoundingClientRect().width>0&&tree.getBoundingClientRect().height>0);
+          const currentRow=()=>visibleTree?.querySelector(`.file-tree-row[data-path="${bulk}"]`);
+          if(!visibleTree||!currentRow())throw new Error('no active visible Finder row for the restore');
+          const state={superseded:false};
+          const entries=Array.from({length:1200},(_,index)=>({name:`old-${String(index).padStart(4,'0')}.txt`,kind:'file'}));
+          const originalFetchDirectory=fetchDirectory;
+          try {
+            fetchDirectory=(path,options={})=>path===bulk?Promise.resolve(entries):originalFetchDirectory(path,options);
+            fileExplorerExpanded.clear();
+            const restored=restoreFileExplorerExpandedPaths([bulk],root);
+            const deadline=performance.now()+5000;
+            let childContainer=null;
+            while(!childContainer&&performance.now()<deadline){childContainer=childContainerForRow(currentRow(),bulk);await new Promise(resolve=>setTimeout(resolve,0));}
+            if(!childContainer)throw new Error('restore did not create the child container in the visible Finder');
+            const partialDeadline=performance.now()+5000;
+            while((childContainer.querySelectorAll('.file-tree-row[data-path]').length===0||childContainer.querySelectorAll('.file-tree-row[data-path]').length>=entries.length)&&performance.now()<partialDeadline)await new Promise(resolve=>setTimeout(resolve,0));
+            const partialRows=childContainer.querySelectorAll('.file-tree-row[data-path]').length;
+            if(partialRows===0||partialRows>=entries.length)throw new Error(`render did not pause after a partial batch: ${partialRows}`);
+            await renderTreeChildren(childContainer,bulk,[{name:'replacement.txt',kind:'file'}],1,{view:'finder'});
+            state.superseded=true;
+            await restored;
+            const row=currentRow();
+            const currentChildContainer=childContainerForRow(row,bulk);
+            done({partialRows,superseded:state.superseded,paths:[...currentChildContainer?.querySelectorAll('.file-tree-row[data-path]')||[]].map(node=>node.dataset.path),pending:[...fileExplorerPendingExpansions],loading:row?.classList.contains('loading-children')||false,currentWrapperMatches:Boolean(row?.isConnected&&currentChildContainer?.isConnected&&currentChildContainer===childContainer)});
+          } finally {fetchDirectory=originalFetchDirectory;}
+        })().catch(error=>done({error:String(error?.stack||error)}));
+        """
+    )
+    assert 'error' not in result, result
+    assert result['superseded'] and 0 < result['partialRows'] < 1200, result
+    assert result['paths'] == [f'{bulk}/replacement.txt'], result
+    assert result['currentWrapperMatches'] is True, result
+    assert result['pending'] == [] and result['loading'] is False, result
+
+
+@pytest.mark.parametrize('restore', [False, True], ids=['active-reveal', 'saved-restore'])
+def test_finder_superseded_yielded_auto_expansion_removes_partial_rows(browser, tmp_path, restore):
+    root, bulk = '/home/test', '/home/test/bulk'
+    load_live_runtime_boot_fixture(
+        browser, tmp_path,
+        '?sessions=files,1&layout=left&tabs=left:files',
+        fs_entries={root: [{'name': 'bulk', 'kind': 'dir'}]},
+    )
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+        "return typeof expandDirectoryRow === 'function' && fileExplorerTreeContainers().some(tree => itemIsActivePaneTab(finderItemId)"
+        " && tree.closest('.file-explorer-panel[data-file-explorer-view=\"finder\"]')"
+        " && tree.getBoundingClientRect().width > 0 && tree.getBoundingClientRect().height > 0"
+        " && tree.querySelector('.file-tree-row[data-path=\"/home/test/bulk\"]'))"
+    ))
+    result = browser.execute_async_script("""
+      const done=arguments[arguments.length-1], useRestore=arguments[0], root='/home/test', bulk=`${root}/bulk`;
+      (async()=>{
+        if(useRestore){
+          const hiddenTree=fileExplorerTree;
+          hiddenTree.replaceChildren();
+          await renderTreeChildren(hiddenTree,'/',[{name:'home',kind:'dir'}],0,{view:'finder',yieldToInput:false});
+          const home=hiddenTree.querySelector('[data-path="/home"]');
+          const homeChildren=createFileTreeChildContainer('/home');
+          home.insertAdjacentElement('afterend',homeChildren);
+          await renderTreeChildren(homeChildren,'/home',[{name:'test',kind:'dir'}],1,{view:'finder',yieldToInput:false});
+          const testRow=homeChildren.querySelector('[data-path="/home/test"]');
+          const testChildren=createFileTreeChildContainer('/home/test');
+          testRow.insertAdjacentElement('afterend',testChildren);
+          await renderTreeChildren(testChildren,'/home/test',[{name:'bulk',kind:'dir'}],2,{view:'finder',yieldToInput:false});
+        }
+        const originalFetch=fetchDirectory;
+        const originalRender=renderTreeChildren;
+        const renders=[];
+        renderTreeChildren=(container,parentPath,...args)=>{
+          const index=renders.length;
+          const options=args[2]||{};
+          const owner=options.renderOwner;
+          renders.push({parentPath,owner,epoch:options.renderTransaction?.epoch,stack:new Error().stack});
+          const result=originalRender(container,parentPath,...args);
+          return Promise.resolve(result).then(value=>{
+            renders[index].result=value;
+            renders[index].ownsContainer=fileTreeRenderOwners.get(container)?.renderOwner===owner;
+            return value;
+          });
+        };
+        const secondary=document.createElement('div');
+        secondary.className='file-explorer-tree-panel';
+        document.body.append(secondary);
+        renderTreeChildren(secondary,root,[{name:'bulk',kind:'dir'}],0,{view:'finder'});
+        const capturedRows=liveDirectoryRows(bulk,null);
+        const visibleTree=fileExplorerTreeContainers().find(tree=>itemIsActivePaneTab(finderItemId)
+          && tree.closest('.file-explorer-panel[data-file-explorer-view="finder"]')
+          && tree.getBoundingClientRect().width>0&&tree.getBoundingClientRect().height>0);
+        const visibleRow=visibleTree?.querySelector(`.file-tree-row[data-path="${bulk}"]`);
+        const capturedRow=useRestore?capturedRows[0]:visibleRow;
+        const entries=Array.from({length:1200},(_,index)=>({name:`entry-${String(index).padStart(4,'0')}.txt`,kind:'file'}));
+        let releaseRootRefresh=null;
+        const heldFetch=(path,options={})=>path===root&&useRestore
+          ?new Promise((resolve,reject)=>{releaseRootRefresh=()=>{void Promise.resolve().then(()=>originalFetch(path,options)).then(resolve,reject);};})
+          :originalFetch(path,options);
+        const releaseHeldRootRefresh=()=>{const release=releaseRootRefresh;releaseRootRefresh=null;release?.();};
+        fetchDirectory=(path,options={})=>path===bulk?Promise.resolve(entries):heldFetch(path,options);
+        try {
+          if(!visibleTree||!visibleRow)throw new Error('no active visible Finder row for the expansion');
+          const generation=fileExplorerSyncState.generation;
+          fileExplorerExpanded.clear();
+          const expansion=useRestore
+            ? restoreFileExplorerExpandedPaths([bulk],root)
+            : expandDirectoryRow(capturedRow,bulk,{auto:true,generation});
+          if(useRestore){
+            const gateDeadline=performance.now()+1000;
+            while(!releaseRootRefresh&&performance.now()<gateDeadline)await new Promise(resolve=>setTimeout(resolve,0));
+            if(!releaseRootRefresh)throw new Error('restore did not start the held root refresh');
+            releaseHeldRootRefresh();
+          }
+          const expansionRow=useRestore
+            ?()=>visibleTree.querySelector(`.file-tree-row[data-path="${bulk}"]`)
+            :()=>visibleRow;
+          const deadline=performance.now()+5000;
+          let children=null;
+          while(!children&&performance.now()<deadline){children=childContainerForRow(expansionRow(),bulk);await new Promise(resolve=>setTimeout(resolve,0));}
+          if(!children)throw new Error(`expansion did not create a child wrapper: ${JSON.stringify({capturedConnected:capturedRow?.isConnected,visibleRows:visibleTree?[...visibleTree.querySelectorAll(`.file-tree-row[data-path="${bulk}"]`)].length:0})}`);
+          while((children.querySelectorAll('.file-tree-row[data-path]').length===0||children.querySelectorAll('.file-tree-row[data-path]').length>=entries.length)&&performance.now()<deadline)await new Promise(resolve=>setTimeout(resolve,0));
+          const partial=children.querySelectorAll('.file-tree-row[data-path]').length;
+          if(partial===0||partial>=entries.length)throw new Error(`render was not partially yielded: ${partial}`);
+          fileExplorerSyncState.generation+=1;
+          await expansion;
+          done({partial,capturedConnected:capturedRow?.isConnected,visibleTree:visibleTree?.id||'',rows:liveDirectoryRows(bulk,null).map(row=>({tree:row.closest('.file-explorer-tree-panel')?.id,expanded:row.getAttribute('aria-expanded'),loading:row.classList.contains('loading-children'),children:childContainerForRow(row,bulk)?.querySelectorAll('.file-tree-row[data-path]').length||0,wrapper:Boolean(childContainerForRow(row,bulk))})),renders:renders.map(({owner,...render})=>render),pending:fileExplorerPendingExpansions.has(bulk),expanded:fileExplorerExpanded.has(bulk)});
+        } finally {
+          releaseHeldRootRefresh();
+          fetchDirectory=originalFetch;
+          renderTreeChildren=originalRender;
+          secondary.remove();
+        }
+      })().catch(error=>done({error:String(error?.stack||error)}));
+    """, restore)
+    assert 'error' not in result, result
+    assert 0 < result['partial'] < 1200, result
+    assert result['capturedConnected'] is (not restore), result
+    assert result['pending'] is False and result['expanded'] is restore, result
+    assert len(result['rows']) >= 2 and all(
+        row['expanded'] == 'false' and row['loading'] is False and not row['wrapper']
+        for row in result['rows']
+    ), result
+
+
+def test_finder_bulk_failure_settlement_indexes_rows_and_publishes_once(browser, tmp_path):
+    root = '/home/test'
+    paths = [f'{root}/first', f'{root}/second']
+    load_live_runtime_boot_fixture(
+        browser, tmp_path,
+        '?sessions=files,1&layout=left&tabs=left:files',
+        fs_entries={root: [{'name': 'first', 'kind': 'dir'}, {'name': 'second', 'kind': 'dir'}]},
+    )
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+        "return typeof settleFileExplorerDirectoryFailures === 'function' && arguments[0].every(path => liveDirectoryRows(path, null).length > 0)",
+        paths,
+    ))
+    result = browser.execute_async_script("""
+      const done=arguments[arguments.length-1], paths=arguments[0];
+      const original={remember:rememberFileExplorerSyncExpandedState,url:refreshLayoutUrlStateSoon,watches:syncServerWatchRoots};
+      const calls={remember:0,url:0,watches:0};
+      rememberFileExplorerSyncExpandedState=()=>{calls.remember+=1;};
+      refreshLayoutUrlStateSoon=()=>{calls.url+=1;};
+      syncServerWatchRoots=()=>{calls.watches+=1;};
+      (async()=>{
+        try {
+          for(const path of paths){
+                fileExplorerExpanded.add(path);
+                fileExplorerPendingExpansions.add(path);
+                markFileExplorerDirectoryDemandNegative(path,503);
+          }
+          await settleFileExplorerDirectoryFailures(new Map(paths.map(path=>[path,0])),()=>true);
+          done({calls,rows:paths.map(path=>({path,rows:liveDirectoryRows(path,null).map(row=>({expanded:row.getAttribute('aria-expanded'),loading:row.classList.contains('loading-children'),error:childContainerForRow(row,path)?.querySelector('[role="status"]')?.textContent||''})),pending:fileExplorerPendingExpansions.has(path)}))});
+        } finally {
+          rememberFileExplorerSyncExpandedState=original.remember;
+          refreshLayoutUrlStateSoon=original.url;
+          syncServerWatchRoots=original.watches;
+        }
+      })().catch(error=>done({error:String(error?.stack||error)}));
+    """, paths)
+    assert 'error' not in result, result
+    assert result['calls'] == {'remember': 1, 'url': 1, 'watches': 1}, result
+    assert all(
+        not item['pending'] and item['rows'] and all(
+            row['expanded'] == 'false' and row['loading'] is False and row['error']
+            for row in item['rows']
+        )
+        for item in result['rows']
+    ), result
+
+
+@pytest.mark.parametrize('restore_scope', ['all-surfaces', 'visible-publication'])
+def test_finder_saved_restore_large_listing_yields_to_native_input(browser, tmp_path, restore_scope):
+    root = '/home/test'
+    bulk = f'{root}/bulk'
+    load_live_runtime_boot_fixture(
+        browser, tmp_path,
+        '?sessions=files,1&layout=left&tabs=left:files',
+        settings={'file_explorer': {'root_mode': 'fixed'}},
+        fs_entries={root: [{'name': 'keep.txt', 'kind': 'file'}, {'name': 'bulk', 'kind': 'dir'}]},
+    )
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+        "return typeof restoreFileExplorerExpandedPaths === 'function' && liveDirectoryRows('/home/test/bulk', null).length > 0"
+    ))
+    browser.execute_script(
+        """
+        const root = '/home/test', bulk = `${root}/bulk`;
+        const restoreScope = arguments[0];
+        const allTrees = fileExplorerTreeContainers();
+        const surfaces = allTrees.map(tree => ({
+          id:tree.id, panel:tree.closest('.panel')?.id || '',
+          hidden:Boolean(tree.closest('[hidden], [aria-hidden="true"]')),
+          width:tree.getBoundingClientRect().width, height:tree.getBoundingClientRect().height,
+        }));
+        const trees = allTrees.filter(tree => itemIsActivePaneTab(finderItemId)
+          && tree.closest('.file-explorer-panel[data-file-explorer-view="finder"]'));
+        if (trees.length !== 1 || !trees[0].getBoundingClientRect().width || !trees[0].getBoundingClientRect().height) {
+          throw new Error(`Expected one visible Finder tree: ${JSON.stringify(surfaces)}`);
+        }
+        const restorationTrees = restoreScope === 'all-surfaces' ? allTrees : trees;
+        const originalFetch = fetchDirectory;
+        const entries = Array.from({length:4000}, (_, index) => ({name:`entry-${String(index).padStart(4,'0')}.txt`,kind:'file'}));
+        fileExplorerExpanded.clear();
+        invalidateFileExplorerRoots([bulk]);
+        restorationTrees.forEach(tree => childContainerForRow(liveDirectoryRows(bulk, null).find(row => row.closest('.file-explorer-tree-panel') === tree), bulk)?.remove());
+        const input = document.createElement('input');
+        input.id = 'finder-saved-restore-input';
+        input.style.cssText = 'position:fixed;left:10px;top:0;z-index:99999';
+        document.body.append(input); input.focus();
+        const state = {trees:restorationTrees, surfaces, input, originalFetch, settled:false, events:[], paints:[], longTasks:[], fetchCalls:[]};
+        state.longTaskObserver = new PerformanceObserver(list => state.longTasks.push(...list.getEntries().map(entry => entry.duration)));
+        state.longTaskObserver.observe({type:'longtask'});
+        input.addEventListener('keydown', event => {
+          const rowsByTree = restorationTrees.map(tree => tree.querySelectorAll(`.file-tree-row[data-path^="${bulk}/"]`).length);
+          const sample = {trusted:event.isTrusted, rows:Math.min(...rowsByTree), pending:fileExplorerPendingExpansions.has(bulk)};
+          state.events.push(sample);
+          const started = performance.now();
+          requestAnimationFrame(() => state.paints.push(performance.now() - started));
+        });
+        fetchDirectory = (path, options = {}) => {
+          state.fetchCalls.push(path);
+          return path === bulk ? Promise.resolve(entries) : originalFetch(path, options);
+        };
+        const observer = new MutationObserver(() => {
+          const rows = trees[0].querySelectorAll(`.file-tree-row[data-path^="${bulk}/"]`).length;
+          if (rows > 0 && rows < entries.length) { state.partialRows = rows; observer.disconnect(); }
+        });
+        observer.observe(trees[0], {childList:true, subtree:true});
+        state.observer = observer;
+        window.__finderSavedRestore = state;
+        const restore = restoreScope === 'all-surfaces'
+          ? restoreFileExplorerExpandedPaths([bulk], root)
+          : restoreFileExplorerExpandedPaths([bulk], root, {containers:restorationTrees});
+        state.promise = restore.then(() => {state.settled = true;}, error => {state.error = String(error); state.settled = true;});
+        """,
+        restore_scope,
+    )
+    try:
+        if restore_scope == 'visible-publication':
+            WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+                "const state=window.__finderSavedRestore; return state.partialRows > 0 && state.partialRows < 4000 && !state.settled;"
+            ))
+        input_element = browser.find_element(By.ID, 'finder-saved-restore-input')
+        native_text = 'responsiveresponsiveresponsive'
+        for character in native_text:
+            input_element.send_keys(character)
+            browser.execute_async_script('const done = arguments[arguments.length-1]; requestAnimationFrame(() => requestAnimationFrame(done));')
+        metrics = browser.execute_script(
+            "const state = window.__finderSavedRestore; return {surfaces:state.surfaces,value:state.input.value,events:state.events,paints:state.paints,longTasks:state.longTasks,settled:state.settled,fetchCalls:state.fetchCalls,treeRows:state.trees.map(tree=>tree.querySelectorAll('.file-tree-row[data-path^=\"/home/test/bulk/\"]').length)};"
+        )
+        ordered = sorted(metrics['paints'])
+        p95 = ordered[max(0, math.ceil(len(ordered) * 0.95) - 1)]
+        long_tasks_over_200ms = [duration for duration in metrics['longTasks'] if duration > 200]
+        print('Finder saved restore input latency:', {'samples': len(ordered), 'p95_ms': p95, 'max_ms': max(ordered), 'long_tasks_over_200ms': long_tasks_over_200ms})
+        assert metrics['value'] == native_text, metrics
+        assert any(
+            event['trusted'] and event['pending'] and event['rows'] < 4000
+            and (restore_scope == 'all-surfaces' or event['rows'] > 0)
+            for event in metrics['events']
+        ), metrics
+        assert len(ordered) >= 30 and p95 <= 50 and max(ordered) <= 200, metrics
+        assert not long_tasks_over_200ms, metrics
+        final = browser.execute_async_script(
+            "const done = arguments[arguments.length-1], state = window.__finderSavedRestore; state.promise.then(() => done({error:state.error || null,rows:state.trees.map(tree => tree.querySelectorAll('.file-tree-row[data-path^=\"/home/test/bulk/\"]').length),surfaces:state.trees.map(tree=>({id:tree.id,connected:tree.isConnected,parentRows:tree.querySelectorAll('.file-tree-row[data-path=\"/home/test/bulk\"]').length,childContainers:tree.querySelectorAll('.file-tree-children[data-parent=\"/home/test/bulk\"]').length})),pending:[...fileExplorerPendingExpansions],loading:[...document.querySelectorAll('.file-tree-row.loading-children')].map(row => row.dataset.path),expanded:fileExplorerExpanded.has('/home/test/bulk')}));"
+        )
+        assert final['error'] is None and final['rows'] and all(count == 4000 for count in final['rows']), json.dumps(final, sort_keys=True)
+        assert '/home/test/bulk' not in final['pending'] and final['loading'] == [] and final['expanded'], final
+    finally:
+        browser.execute_script(
+            "const state = window.__finderSavedRestore; if (state) {fetchDirectory=state.originalFetch; state.observer.disconnect(); state.longTaskObserver.disconnect(); state.input.remove(); delete window.__finderSavedRestore;}"
+        )
+
+
+def test_sync_descendant_listing_failure_shows_error_and_settles_expansion(browser, tmp_path):
+    root = '/home/test'
+    denied = f'{root}/denied'
+    load_live_runtime_boot_fixture(
+        browser, tmp_path,
+        '?sessions=files,1&layout=left&tabs=left:files',
+        settings={'file_explorer': {'root_mode': 'fixed'}},
+        fs_entries={root: [{'name': 'denied', 'kind': 'dir'}]},
+    )
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+        "return typeof syncFileExplorerRootToPlan === 'function' && liveDirectoryRows('/home/test/denied', null).length > 0"
+    ))
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length-1], root = '/home/test', denied = `${root}/denied`;
+        const originalFetch = fetchDirectory;
+        fileExplorerRootMode = 'sync';
+        setFileExplorerVisibleSyncTarget('1', root);
+        fileExplorerExpanded.clear();
+        fetchDirectory = (path, options = {}) => {
+          if (path === denied) {
+            setFileExplorerListError(path, new Error('fixture permission denied'), 403);
+            return Promise.resolve(null);
+          }
+          return originalFetch(path, options);
+        };
+        syncFileExplorerRootToPlan({session:'1',root,expandPaths:[denied],affectedDirs:[root,denied]}, '1', {force:true})
+          .then(result => {
+            const row = liveDirectoryRows(denied, null)[0];
+            const status = childContainerForRow(row, denied)?.querySelector('[role="status"]');
+            done({result,expanded:row?.getAttribute('aria-expanded'),loading:row?.classList.contains('loading-children'),status:status?.textContent || '',remembered:fileExplorerExpanded.has(denied),pending:fileExplorerPendingExpansions.has(denied)});
+              }, error => done({error:String(error)}))
+          .finally(() => {fetchDirectory = originalFetch;});
+        """
+    )
+    assert 'error' not in metrics, metrics
+    assert metrics['expanded'] == 'false' and metrics['loading'] is False, metrics
+    assert 'permission denied' in metrics['status'] and metrics['remembered'] is False and metrics['pending'] is False, metrics
+
+
+@pytest.mark.parametrize('status', [400, 404], ids=['not-directory', 'not-found'])
+def test_manual_terminal_listing_failure_settles_expansion_row(browser, tmp_path, status):
+    root = '/home/test'
+    denied = f'{root}/denied'
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        '?sessions=files,1&layout=left&tabs=left:files',
+        settings={'file_explorer': {'root_mode': 'fixed'}},
+        fs_entries={root: [{'name': 'denied', 'kind': 'dir'}]},
+    )
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+        "return typeof expandDirectoryRow === 'function' && liveDirectoryRows('/home/test/denied', null).length > 0"
+    ))
+    browser.execute_script(
+        """
+        const status = arguments[0];
+        const denied = '/home/test/denied';
+        const originalFetchDirectory = fetchDirectory;
+        const secondary = document.createElement('div');
+        secondary.className = 'file-explorer-tree-panel';
+        secondary.id = 'finder-terminal-failure-secondary-tree';
+        document.body.append(secondary);
+        renderTreeChildren(secondary, '/home/test', [{name: 'denied', kind: 'dir'}], 0, {view: 'finder'});
+        fetchDirectory = (path, options = {}) => {
+          if (path !== denied) return originalFetchDirectory(path, options);
+          const payload = status === 400
+            ? {error: 'not a directory', user_message: {key: 'fs.error.notDirectory', params: {path: denied}, fallback: 'not a directory'}}
+            : {error: 'path not found', user_message: {key: 'common.pathNotFound', params: {path: denied}, fallback: 'path not found'}};
+          const error = Object.assign(new Error(payload.error), {status, payload});
+          handleFileExplorerDirectoryListFailure(path, error, status);
+          return Promise.reject(error);
+        };
+        window.__finderTerminalFailureFetchDirectory = originalFetchDirectory;
+        window.__finderTerminalFailureSecondary = secondary;
+        """,
+        status,
+    )
+    try:
+        row = browser.find_element(By.CSS_SELECTOR, '#panel-__finder__ .file-tree-row[data-path="/home/test/denied"]')
+        row.click()
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+            "return liveDirectoryRows('/home/test/denied', null).length === 2 && liveDirectoryRows('/home/test/denied', null).every(row => row.classList.contains('loading-children') === false && childContainerForRow(row,'/home/test/denied')?.querySelector('[role=status]')) && fileExplorerPendingExpansions.has('/home/test/denied') === false;"
+        ))
+        browser.execute_async_script("""
+          const done=arguments[arguments.length-1];
+          const containers = [...new Set(liveDirectoryRows('/home/test/denied', null).map(row => row.parentElement))];
+          Promise.all(containers.map(container => renderTreeChildren(
+            container,'/home/test',[{name:'denied',kind:'dir'}],0,{view:'finder',yieldToInput:true},
+          ))).then(()=>done(true),error=>done({error:String(error)}));
+        """)
+        state = browser.execute_script(
+            "const rows = liveDirectoryRows('/home/test/denied', null); return {rows:rows.map(row => ({expanded:row.getAttribute('aria-expanded'),loading:row.classList.contains('loading-children'),error:childContainerForRow(row, '/home/test/denied')?.querySelector('[role=\"status\"]')?.textContent || ''})),pending:fileExplorerPendingExpansions.has('/home/test/denied')};"
+        )
+        assert state['pending'] is False and len(state['rows']) == 2, state
+        assert all(row['expanded'] == 'false' and row['loading'] is False and row['error'] for row in state['rows']), state
+    finally:
+        browser.execute_script(
+            "if (window.__finderTerminalFailureFetchDirectory) {fetchDirectory = window.__finderTerminalFailureFetchDirectory; delete window.__finderTerminalFailureFetchDirectory;} window.__finderTerminalFailureSecondary?.remove(); delete window.__finderTerminalFailureSecondary;"
+        )
+
+
+def test_finder_listing_deadline_settles_all_surface_rows(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        '?sessions=files,1&layout=left&tabs=left:files',
+        settings={'file_explorer': {'root_mode': 'fixed'}},
+        fs_entries={'/home/test': [{'name': 'slow', 'kind': 'dir'}]},
+    )
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+        "return typeof expandDirectoryRow === 'function' && liveDirectoryRows('/home/test/slow', null).length > 0"
+    ))
+    browser.execute_script(
+        """
+        const slow = '/home/test/slow';
+        const originalFetchDirectory = fetchDirectory;
+        const directoryCalls = [];
+        const secondary = document.createElement('div');
+        secondary.className = 'file-explorer-tree-panel';
+        secondary.id = 'finder-deadline-secondary-tree';
+        document.body.append(secondary);
+        renderTreeChildren(secondary, '/home/test', [{name: 'slow', kind: 'dir'}], 0, {view: 'finder'});
+        fetchDirectory = (path, options = {}) => path !== slow
+          ? originalFetchDirectory(path, options)
+          : (directoryCalls.push(path), promiseWithDeadline(new Promise(() => {}), 20, 'Finder listing fixture'));
+        window.__finderDeadlineFixture = {originalFetchDirectory, secondary, directoryCalls};
+        """
+    )
+    try:
+        browser.find_element(By.CSS_SELECTOR, '#panel-__finder__ .file-tree-row[data-path="/home/test/slow"]').click()
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+            "return liveDirectoryRows('/home/test/slow', null).length === 2 && liveDirectoryRows('/home/test/slow', null).every(row => row.classList.contains('loading-children') === false && childContainerForRow(row, '/home/test/slow')?.querySelector('[role=status]')) && fileExplorerPendingExpansions.has('/home/test/slow') === false;"
+        ))
+        state = browser.execute_script(
+            "const state=window.__finderDeadlineFixture; const rows = liveDirectoryRows('/home/test/slow', null); return {rows: rows.map(row => ({expanded: row.getAttribute('aria-expanded'), loading: row.classList.contains('loading-children'), error: childContainerForRow(row, '/home/test/slow')?.querySelector('[role=\"status\"]')?.textContent || ''})), pending: fileExplorerPendingExpansions.has('/home/test/slow'), directoryCalls:state.directoryCalls};"
+        )
+        assert state['pending'] is False and len(state['rows']) == 2, state
+        assert state['directoryCalls'] == ['/home/test/slow'], state
+        assert all(row['expanded'] == 'false' and row['loading'] is False and row['error'] for row in state['rows']), state
+    finally:
+        browser.execute_script(
+            "if (window.__finderDeadlineFixture) {fetchDirectory=window.__finderDeadlineFixture.originalFetchDirectory; window.__finderDeadlineFixture.secondary.remove(); delete window.__finderDeadlineFixture;}"
+        )
+
+
+def test_finder_large_listing_publishes_between_native_input_and_wheel(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser, tmp_path,
+        '?sessions=files,1&layout=row@35(slot1,left)&tabs=slot1:files;left:1',
+        settings={'file_explorer': {'root_mode': 'fixed'}},
+        fs_entries={'/home/test': [{'name': '000-keep.txt', 'kind': 'file'}, {'name': 'bulk', 'kind': 'dir'}]},
+    )
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+        "return typeof syncFileExplorerRootToPlan === 'function' && document.querySelector('.panel.file-explorer-panel .file-tree-row[data-path=\"/home/test/000-keep.txt\"]') !== null"
+    ))
+    try:
+        first = browser.execute_async_script(
+            """
+            const done = arguments[arguments.length-1], root = '/home/test', bulk = `${root}/bulk`;
+            const tree = document.querySelector('.panel.file-explorer-panel .file-explorer-tree-panel');
+            const originalFetch = fetchDirectory;
+            const entries = Array.from({length:4000}, (_, index) => ({name:`entry-${String(index).padStart(4,'0')}.txt`,kind:'file'}));
+            const state = {tree, originalFetch, count:() => tree.querySelectorAll(`.file-tree-row[data-path^="${bulk}/"]`).length,
+              inputEvents:[], nextPaintMs:[], longTasks:[], rowsObserved:0, settled:false, keep:tree.querySelector('[data-path="/home/test/000-keep.txt"]')};
+            state.longTaskObserver = new PerformanceObserver(list => {
+              state.longTasks.push(...list.getEntries().map(entry => ({duration:entry.duration, startTime:entry.startTime})));
+            });
+            state.longTaskObserver.observe({type:'longtask'});
+            const input = document.createElement('input'); input.id = 'finder-bounded-input';
+            input.style.cssText = 'position:fixed;left:10px;top:0;z-index:99999';
+            document.body.append(input); input.focus(); state.input = input;
+            input.addEventListener('keydown', event => {
+              const sample = {key:event.key, rows:state.rowsObserved, settled:state.settled, trusted:event.isTrusted, nextPaintMs:null};
+              state.inputEvents.push(sample);
+              const started = performance.now();
+              requestAnimationFrame(() => {
+                sample.nextPaintMs = performance.now() - started;
+                state.nextPaintMs.push(sample.nextPaintMs);
+              });
+            });
+            fileExplorerRootMode = 'sync';
+            setFileExplorerVisibleSyncTarget('1', root);
+            selectFileTreePath('/home/test/000-keep.txt');
+            rememberFileExplorerSyncExpandedState('1', root);
+            fetchDirectory = async (path, options) => path === bulk ? entries : originalFetch(path, options);
+            const observer = new MutationObserver(() => {
+              const rows = state.count();
+              state.rowsObserved = rows;
+              if (rows > 0) {observer.disconnect(); done({rows});}
+            });
+            state.observer = observer; observer.observe(tree, {childList:true,subtree:true});
+            window.__finderBoundedInput = state;
+            state.promise = syncFileExplorerRootToPlan({session:'1',root,expandPaths:[bulk],affectedDirs:[root,bulk]}, '1', {force:true})
+              .then(() => {state.settled = true;}, error => {state.error = String(error); state.settled = true; observer.disconnect(); done({error:state.error});});
+            """
+        )
+        assert 'error' not in first and 0 < first['rows'] < 4000, first
+        input_element = browser.find_element(By.ID, 'finder-bounded-input')
+        native_text = 'responsiveresponsiveresponsive'
+        for character in native_text:
+            input_element.send_keys(character)
+            browser.execute_async_script(
+                'const done = arguments[arguments.length-1]; requestAnimationFrame(() => requestAnimationFrame(done));'
+            )
+        input_state = browser.execute_script(
+            'const state = window.__finderBoundedInput; return {events:state.inputEvents, nextPaintMs:state.nextPaintMs, longTasks:state.longTasks, value:state.input.value};'
+        )
+        assert input_state['value'] == native_text, input_state
+        assert any(event['rows'] < 4000 and not event['settled'] and event['trusted'] for event in input_state['events']), input_state
+        assert len(input_state['nextPaintMs']) == len(input_state['events']), input_state
+        ordered = sorted(input_state['nextPaintMs'])
+        p95 = ordered[max(0, math.ceil(len(ordered) * 0.95) - 1)]
+        long_tasks_over_200ms = [task for task in input_state['longTasks'] if task['duration'] > 200]
+        print('Finder restore input latency:', {'samples': len(ordered), 'p95_ms': p95, 'max_ms': max(ordered), 'long_tasks_over_200ms': long_tasks_over_200ms})
+        assert len(ordered) >= 30 and not long_tasks_over_200ms, input_state
+        assert p95 <= 50 and max(ordered) <= 200, input_state
+        tree = browser.find_element(By.CSS_SELECTOR, '.panel.file-explorer-panel .file-explorer-tree-panel')
+        ActionChains(browser).scroll_from_origin(ScrollOrigin.from_element(tree), 0, 120).perform()
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script('return window.__finderBoundedInput.tree.scrollTop > 0'))
+        scroll_after_wheel = browser.execute_script('return window.__finderBoundedInput.tree.scrollTop')
+        final = browser.execute_async_script(
+            """
+            const done = arguments[arguments.length-1], state = window.__finderBoundedInput;
+            const invalidContainers = [...state.tree.querySelectorAll('.file-tree-children[data-parent]')]
+              .filter(children => children.previousElementSibling?.dataset.path !== children.dataset.parent)
+              .map(children => children.dataset.parent);
+            state.promise.then(() => done({error:state.error,rows:state.count(),scroll:state.tree.scrollTop,invalidContainers,
+              paths:[...state.tree.querySelectorAll('.file-tree-row[data-path^="/home/test/bulk/"]')].map(row => row.dataset.path),
+              keepIdentity:state.keep === state.tree.querySelector('[data-path="/home/test/000-keep.txt"]'),
+              replacementIdentity:state.replacement === state.tree.querySelector('[data-path="/home/test/bulk/replacement.txt"]'),
+              otherTreeRows:fileExplorerTree.querySelectorAll('.file-tree-row[data-path^="/home/test/bulk/"]').length,
+              selected:fileExplorerSelectedPaths.has('/home/test/000-keep.txt'),value:state.input.value,invalidContainers}));
+            """
+        )
+        assert final['error'] is None and final['rows'] == 4000, final
+        assert not final['invalidContainers'], final['invalidContainers']
+        assert final['paths'] == [f'/home/test/bulk/entry-{index:04d}.txt' for index in range(4000)]
+        assert final['otherTreeRows'] == 4000, final
+        assert final['scroll'] == scroll_after_wheel and scroll_after_wheel > 0, final
+        assert final['keepIdentity'] and final['selected'] and final['value'] == native_text, final
+    finally:
+        browser.execute_script(
+            "const state = window.__finderBoundedInput; if (state) {cancelPendingFileExplorerActiveSync(); fetchDirectory=state.originalFetch; state.observer.disconnect(); state.longTaskObserver.disconnect(); state.input.remove(); delete window.__finderBoundedInput;}"
+        )
+
+
+def test_finder_async_scroll_restore_preserves_clamps_and_native_gestures(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+        "return typeof captureFileExplorerScrollPositions === 'function'"
+    ))
+    owner = None
+    try:
+        clamp = browser.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1];
+            (async () => {
+              const owner = document.createElement('div');
+              owner.id = 'finder-native-scroll-owner-fixture';
+              owner.className = 'file-explorer-tree-panel';
+              owner.style.cssText = 'position:fixed;left:50px;top:50px;width:250px;height:200px;overflow:scroll;z-index:99999;background:var(--panel);scrollbar-width:auto';
+              const content = document.createElement('div');
+              content.style.cssText = 'height:50000px;width:100px';
+              owner.append(content);
+              document.body.append(owner);
+              const capture = () => captureFileExplorerScrollPositions().filter(record => record.element === owner);
+              window.__finderNativeScrollOwnerFixture = {owner, capture};
+              owner.scrollTop = 300;
+              const records = capture();
+              content.style.height = '220px';
+              await new Promise(requestAnimationFrame);
+              const clamped = owner.scrollTop;
+              content.style.height = '50000px';
+              await new Promise(requestAnimationFrame);
+              restoreFileExplorerScrollPositions(records);
+              await new Promise(requestAnimationFrame);
+              done({clamped, restored: owner.scrollTop});
+            })().catch(error => done({error: String(error)}));
+            """
+        )
+        assert "error" not in clamp, clamp
+        assert 0 <= clamp["clamped"] < 300 and clamp["restored"] == 300, clamp
+        owner = browser.find_element(By.ID, "finder-native-scroll-owner-fixture")
+        browser.execute_script(
+            """
+            const state = window.__finderNativeScrollOwnerFixture;
+            state.owner.addEventListener('wheel', () => {state.records = state.capture();}, {once: true});
+            """
+        )
+        ActionChains(browser).scroll_from_origin(ScrollOrigin.from_element(owner), 0, 140).perform()
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+            "return window.__finderNativeScrollOwnerFixture.owner.scrollTop > 300"
+        ))
+        wheel = browser.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1], state = window.__finderNativeScrollOwnerFixture;
+            const captured = state.records[0].position.top, before = state.owner.scrollTop;
+            restoreFileExplorerScrollPositions(state.records);
+            requestAnimationFrame(() => done({captured, before, after: state.owner.scrollTop}));
+            """
+        )
+        assert wheel["before"] > wheel["captured"] and wheel["after"] == wheel["before"], wheel
+        # A stationary track press keeps scrolling without pointermove events. Its ownership
+        # must survive longer than the recent-input window, until the pointer is released.
+        browser.execute_script("window.__finderNativeScrollOwnerFixture.owner.scrollTop = 300")
+        ActionChains(browser).move_to_element_with_offset(owner, 122, 72).click_and_hold().perform()
+        held = browser.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1], state = window.__finderNativeScrollOwnerFixture;
+            setTimeout(() => {
+              const captured = state.owner.scrollTop, records = state.capture();
+              setTimeout(() => {
+                const before = state.owner.scrollTop;
+                restoreFileExplorerScrollPositions(records);
+                requestAnimationFrame(() => done({captured, before, after: state.owner.scrollTop}));
+              }, 400);
+            }, previewScrollRecentOwnershipMs + 300);
+            """
+        )
+        assert held["before"] > held["captured"] and held["after"] >= held["before"], held
+    finally:
+        if owner is not None:
+            ActionChains(browser).release().perform()
+        browser.execute_script(
+            """
+            window.__finderNativeScrollOwnerFixture?.owner.remove();
+            delete window.__finderNativeScrollOwnerFixture;
+            """
+        )
+
+
+def test_finder_sync_cursor_preserves_native_wheel_before_late_row_mount(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+        "return typeof syncFileExplorerTreeActiveDescendant === 'function'"
+    ))
+    try:
+        browser.execute_script(
+            """
+            const owner = document.createElement('div');
+            owner.id = 'finder-cursor-wheel-fixture';
+            owner.className = 'file-explorer-tree-panel';
+            owner.style.cssText = 'position:fixed;left:50px;top:50px;width:250px;height:200px;overflow:scroll;z-index:99999;background:var(--panel)';
+            const content = document.createElement('div');
+            content.style.height = '5000px';
+            owner.append(content); document.body.append(owner);
+            window.__finderCursorWheel = {owner, content, scrollOwner: createInputOwnedDeferredElementScrollOwner(owner)};
+            """
+        )
+        owner = browser.find_element(By.ID, 'finder-cursor-wheel-fixture')
+        ActionChains(browser).scroll_from_origin(ScrollOrigin.from_element(owner), 0, 480).perform()
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+            "return window.__finderCursorWheel.owner.scrollTop > 0"
+        ))
+        result = browser.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1], state = window.__finderCursorWheel;
+            const before = state.owner.scrollTop;
+            const row = document.createElement('div');
+            row.className = 'file-tree-row kind-file'; row.dataset.path = '/repo/late.txt';
+            row.dataset.kind = 'file'; row.textContent = 'late.txt'; row.style.height = '24px';
+            state.content.prepend(row);
+            syncFileExplorerTreeActiveDescendant('/repo/late.txt', {progressive:true, scrollOwner:state.scrollOwner});
+            requestAnimationFrame(() => done({before, after:state.owner.scrollTop, active:state.owner.getAttribute('aria-activedescendant'), rowId:row.id}));
+            """
+        )
+        assert result['after'] == result['before'], result
+        assert result['active'] == result['rowId'] and result['rowId'], result
+        browser.execute_script(
+            """
+            const state = window.__finderCursorWheel, replacement = state.owner.cloneNode(true);
+            replacement.removeAttribute('aria-activedescendant');
+            state.owner.replaceWith(replacement); state.owner = replacement;
+            """
+        )
+        owner = browser.find_element(By.ID, 'finder-cursor-wheel-fixture')
+        ActionChains(browser).scroll_from_origin(ScrollOrigin.from_element(owner), 0, 480).perform()
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+            "return window.__finderCursorWheel.owner.scrollTop > 0"
+        ))
+        replacement = browser.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1], state = window.__finderCursorWheel;
+            const before = state.owner.scrollTop;
+            syncFileExplorerTreeActiveDescendant('/repo/late.txt', {progressive:true, scrollOwner:state.scrollOwner});
+            requestAnimationFrame(() => done({before, after:state.owner.scrollTop}));
+            """
+        )
+        assert replacement['after'] == replacement['before'], replacement
+    finally:
+        browser.execute_script("window.__finderCursorWheel?.owner.remove(); delete window.__finderCursorWheel;")
 
 
 def test_finder_parent_collapse_converges_all_surfaces_before_reexpand(browser, tmp_path):
@@ -214,6 +1273,66 @@ def test_finder_reloaded_expansion_stops_spinning_after_failed_directory_push(br
     assert state["errors"] == [] and state["rejections"] == [], state
 
 
+def test_older_failed_filesystem_push_cannot_settle_after_newer_success(browser, tmp_path):
+    selector = '#panel-__finder__ .file-tree-row[data-path="/home/test/bin"]'
+    load_live_runtime_boot_fixture(
+        browser, tmp_path,
+        '?sessions=files,1&layout=left&tabs=left:files',
+        fs_entries={
+            '/home/test': [{'name': 'bin', 'kind': 'dir'}],
+            '/home/test/bin': [{'name': 'old.txt', 'kind': 'file'}],
+        },
+    )
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script(
+        "return typeof refreshFileExplorerFromPush === 'function' && document.querySelector(arguments[0]) !== null;",
+        selector,
+    ))
+    browser.find_element(By.CSS_SELECTOR, selector).click()
+    WebDriverWait(browser, 5).until(lambda driver: browser.execute_script(
+        "return document.querySelector(arguments[0])?.getAttribute('aria-expanded') === 'true';", selector,
+    ))
+    result = browser.execute_async_script(
+        """
+        const done=arguments[arguments.length-1], root='/home/test', path=`${root}/bin`;
+        const originalRefresh=refreshFileExplorerTreesInPlace;
+        let releaseOld=null;
+        let oldRefreshStarted=false;
+        refreshFileExplorerTreesInPlace=(...args)=>{
+          if (!oldRefreshStarted) {
+            oldRefreshStarted=true;
+            return new Promise((resolve,reject)=>{releaseOld=()=>originalRefresh(...args).then(resolve,reject);});
+          }
+          return originalRefresh(...args);
+        };
+        const cleanup=()=>{refreshFileExplorerTreesInPlace=originalRefresh;};
+        (async()=>{
+          const oldPush=refreshFileExplorerFromPush({token:'older-failure',directories:[
+            {path:root,ok:true,status:200,data:{path:root,entries:[{name:'bin',kind:'dir'}]}},
+            {path,ok:false,status:403,error:'older permission error'},
+          ]});
+          const deadline=performance.now()+5000;
+          while(!releaseOld && performance.now()<deadline) await new Promise(requestAnimationFrame);
+          if(!releaseOld) throw new Error('older push did not reach held tree publication');
+          await refreshFileExplorerFromPush({token:'newer-success',directories:[
+            {path:root,ok:true,status:200,data:{path:root,entries:[{name:'bin',kind:'dir'}]}},
+            {path,ok:true,status:200,data:{path,entries:[{name:'new.txt',kind:'file'}]}},
+          ]});
+          const row=()=>document.querySelector(`[data-path="${path}"]`);
+          const container=()=>childContainerForRow(row(),path);
+          const afterSuccess={expanded:fileExplorerExpanded.has(path),status:container()?.querySelector('[role=status]')?.textContent||'',children:[...(container()?.querySelectorAll('.file-tree-row[data-path]')||[])].map(node=>node.dataset.path)};
+          releaseOld();
+          await oldPush;
+          const afterOldSettlement={expanded:fileExplorerExpanded.has(path),status:container()?.querySelector('[role=status]')?.textContent||'',children:[...(container()?.querySelectorAll('.file-tree-row[data-path]')||[])].map(node=>node.dataset.path)};
+          cleanup();
+          done({afterSuccess,afterOldSettlement,generation:fileExplorerFsResourceRecord('list',path).record.generation,error:currentFileExplorerListError(path)});
+        })().catch(error=>{cleanup();done({error:String(error)});});
+        """
+    )
+    assert result['error'] == '', result
+    assert result['afterSuccess']['expanded'] is True and '/home/test/bin/new.txt' in result['afterSuccess']['children'], result
+    assert result['afterOldSettlement'] == result['afterSuccess'], result
+
+
 def test_finder_mobile_second_tap_collapses_directory_instead_of_being_discarded(browser, tmp_path):
     selector = '#panel-__finder__ .file-tree-row[data-path="/home/test/dev"]'
     with trusted_touch_emulation(browser, user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1"):
@@ -265,32 +1384,33 @@ def test_finder_mobile_delayed_synthetic_click_does_not_toggle_twice(browser, tm
             },
         )
         WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return document.querySelector(arguments[0])", selector))
-        browser.execute_script(
+        metrics = browser.execute_async_script(
             """
-            const row = document.querySelector(arguments[0]);
-            const rect = row.getBoundingClientRect();
-            const point = {bubbles: true, cancelable: true, pointerType: 'touch', button: 0, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2};
-            row.dispatchEvent(new PointerEvent('pointerdown', point));
-            row.dispatchEvent(new PointerEvent('pointerup', {...point, detail: 1}));
+            const selector = arguments[0];
+            const done = arguments[arguments.length - 1];
+            (async () => {
+              try {
+                const row = document.querySelector(selector);
+                const rect = row.getBoundingClientRect();
+                const point = {bubbles: true, cancelable: true, pointerType: 'touch', button: 0, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2};
+                row.dispatchEvent(new PointerEvent('pointerdown', point));
+                row.dispatchEvent(new PointerEvent('pointerup', {...point, detail: 1}));
+                await window.__yomuxTestWaitFor(
+                  () => row.getAttribute('aria-expanded') === 'true' && childContainerForRow(row, '/home/test/dev') !== null,
+                  {timeoutMs: 5000, description: 'directory expanded after touch'},
+                );
+                await new Promise(resolve => setTimeout(resolve, 50));
+                row.onclick(new MouseEvent('click', {bubbles: true, detail: 1}));
+                await new Promise(resolve => setTimeout(resolve, 50));
+                done({expanded: row.getAttribute('aria-expanded'), hasChildren: childContainerForRow(row, '/home/test/dev') !== null});
+              } catch (error) {
+                done({error: String(error?.stack || error)});
+              }
+            })();
             """,
             selector,
         )
-        WebDriverWait(browser, 5).until(
-            lambda driver: driver.execute_script(
-                "const row = document.querySelector(arguments[0]); return row?.getAttribute('aria-expanded') === 'true' && childContainerForRow(row, '/home/test/dev') !== null;",
-                selector,
-            )
-        )
-        browser.execute_async_script("setTimeout(arguments[arguments.length - 1], 50);")
-        browser.execute_script(
-            "const row = document.querySelector(arguments[0]); row.onclick(new MouseEvent('click', {bubbles: true, detail: 1}));",
-            selector,
-        )
-        browser.execute_async_script("setTimeout(arguments[arguments.length - 1], 50);")
-        metrics = browser.execute_script(
-            "const row = document.querySelector(arguments[0]); return {expanded: row?.getAttribute('aria-expanded'), hasChildren: childContainerForRow(row, '/home/test/dev') !== null};",
-            selector,
-        )
+        assert 'error' not in metrics, metrics
     assert metrics == {"expanded": "true", "hasChildren": True}, metrics
 
 
@@ -1151,7 +2271,7 @@ def test_finder_context_file_actions_share_one_dirty_editor_tab(browser, tmp_pat
         const done = arguments[arguments.length - 1];
         const originalFetch = window.fetch.bind(window);
         const requests = [];
-        const waitFor = window.__yolomuxTestWaitFor;
+        const waitFor = window.__yomuxTestWaitFor;
         const jsonResponse = payload => new Response(JSON.stringify(payload), {headers: {'Content-Type': 'application/json'}});
         window.fetch = async (input, options = {}) => {
           const url = new URL(String(input), location.href);
@@ -1313,7 +2433,7 @@ def test_finder_repo_context_menu_and_diff_tab_are_immediate_while_metadata_is_d
         const sha = arguments[1];
         const done = arguments[arguments.length - 1];
         const originalFetch = window.fetch.bind(window);
-        const waitFor = window.__yolomuxTestWaitFor;
+        const waitFor = window.__yomuxTestWaitFor;
         const jsonResponse = payload => new Response(JSON.stringify(payload), {headers: {'Content-Type': 'application/json'}});
         const batchResolvers = [];
         const historyResolvers = [];
@@ -1403,7 +2523,7 @@ def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_
         const sha = arguments[1];
         const done = arguments[arguments.length - 1];
         const originalFetch = window.fetch.bind(window);
-        const waitFor = window.__yolomuxTestWaitFor;
+        const waitFor = window.__yomuxTestWaitFor;
         const jsonResponse = payload => new Response(JSON.stringify(payload), {headers: {'Content-Type': 'application/json'}});
         const worktreeResponses = [];
         window.fetch = async (input, options = {}) => {
@@ -1536,7 +2656,7 @@ def test_finder_diff_dirty_worktree_is_commit_shaped_and_expandable(browser, tmp
         const sha = arguments[1];
         const done = arguments[arguments.length - 1];
         const originalFetch = window.fetch.bind(window);
-        const waitFor = window.__yolomuxTestWaitFor;
+        const waitFor = window.__yomuxTestWaitFor;
         const jsonResponse = payload => new Response(JSON.stringify(payload), {headers: {'Content-Type': 'application/json'}});
         const requests = [];
         window.fetch = async (input, options = {}) => {
@@ -1639,6 +2759,7 @@ def test_finder_diff_dirty_worktree_is_commit_shaped_and_expandable(browser, tmp
           const panelBodyRect = panel.querySelector('.git-diff-panel-body')?.getBoundingClientRect();
           const expanded = {
             open: details.open,
+            bodyContain: getComputedStyle(panel.querySelector('.git-diff-panel-body')).contain,
             entries: expandedRows.length,
             visibleEntries: visibleRows.length,
             visiblePathEntries: visibleRows.filter(row => {
@@ -1692,6 +2813,7 @@ def test_finder_diff_dirty_worktree_is_commit_shaped_and_expandable(browser, tmp
     assert metrics["expanded"]["visiblePathEntries"] == metrics["expanded"]["entries"], metrics["expanded"]
     assert metrics["expanded"] == {
         "open": True,
+        "bodyContain": "strict",
         "entries": 2,
         "visibleEntries": 2,
         "visiblePathEntries": 2,
@@ -1739,7 +2861,7 @@ def test_finder_context_diff_repo_eligibility_and_touch_long_press(browser, tmp_
         """
         const done = arguments[arguments.length - 1];
         const originalFetch = window.fetch.bind(window);
-        const waitFor = window.__yolomuxTestWaitFor;
+        const waitFor = window.__yomuxTestWaitFor;
         const jsonResponse = payload => new Response(JSON.stringify(payload), {headers: {'Content-Type': 'application/json'}});
         window.fetch = async (input, options = {}) => {
           const url = new URL(String(input), location.href);
@@ -1875,7 +2997,7 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
         const frCatalog = arguments[8];
         const done = arguments[arguments.length - 1];
         const originalFetch = window.fetch.bind(window);
-        const waitFor = window.__yolomuxTestWaitFor;
+        const waitFor = window.__yomuxTestWaitFor;
         const requests = [];
         const jsonResponse = payload => new Response(JSON.stringify(payload), {headers: {'Content-Type': 'application/json'}});
         window.fetch = async (input, options = {}) => {
@@ -2876,7 +3998,7 @@ def test_finder_context_relative_copy_uses_visible_root_and_fails_closed(browser
                 await openFileExplorerManualRoot(root);
                 const row = document.querySelector(`.file-tree-row[data-path="${selected}"]`);
                 await showFileTreeContextMenu(row, selected, {kind: 'file', name: 'note.md'}, 32, 32);
-                const copyRelative = await window.__yolomuxTestWaitFor(() => {
+                const copyRelative = await window.__yomuxTestWaitFor(() => {
                   const button = Array.from(document.querySelectorAll('.file-context-menu button')).find(button => /copy relative path/i.test(button.textContent));
                   return button && !button.disabled ? button : null;
                 }, {timeoutMs: 5000, description: 'enabled Copy relative path after deferred metadata'});
@@ -3015,7 +4137,22 @@ def test_differ_repo_folder_and_global_collapse_controls_use_real_events(browser
     metrics = browser.execute_async_script(
         """
         const done = arguments[0];
+        (async () => {
         const panel = document.querySelector('#panel-__differ__');
+        const pending = [];
+        const originalRender = renderChangesGroups;
+        const originalExpand = differTreeInteractionController.setExpanded;
+        const expansionCalls = [];
+        renderChangesGroups = (...args) => {
+          const result = originalRender(...args);
+          if (result?.then) pending.push(result);
+          return result;
+        };
+        differTreeInteractionController.setExpanded = (...args) => {
+          expansionCalls.push(args[2]);
+          return originalExpand(...args);
+        };
+        try {
         const click = selector => panel.querySelector(selector).click();
         const repo = '/repo/app';
         const folder = '/repo/app/src';
@@ -3023,19 +4160,43 @@ def test_differ_repo_folder_and_global_collapse_controls_use_real_events(browser
         const repoCollapsed = changesRepoCollapsed.has(repo);
         click('[data-changes-repo-toggle]');
         const repoExpanded = !changesRepoCollapsed.has(repo);
+        await Promise.all(pending.splice(0));
         click('[data-changes-folder-toggle="/repo/app/src"]');
         const folderCollapsed = changesFolderCollapsed.has(folder);
+        click('[data-changes-folder-toggle="/repo/app/src"]');
+        const bodyExpanded = !changesFolderCollapsed.has(folder);
+        click('[data-changes-folder-toggle="/repo/app/src"] .file-tree-icon');
+        const disclosureCollapsed = changesFolderCollapsed.has(folder);
+        click('[data-changes-folder-toggle="/repo/app/src"] .file-tree-icon');
+        const disclosureExpanded = !changesFolderCollapsed.has(folder);
+        await Promise.all(pending.splice(0));
+        const row = panel.querySelector('[data-changes-folder-toggle="/repo/app/src"]');
+        row.dispatchEvent(new KeyboardEvent('keydown', {key:'ArrowLeft', bubbles:true, cancelable:true}));
+        const keyboardCollapsed = changesFolderCollapsed.has(folder);
+        row.dispatchEvent(new KeyboardEvent('keydown', {key:'ArrowRight', bubbles:true, cancelable:true}));
+        const keyboardExpanded = !changesFolderCollapsed.has(folder);
+        await Promise.all(pending.splice(0));
         click('[data-file-tree-expand-collapse-all="collapse"]');
         const treesCollapsed = changesRepoCollapsed.has(repo) && changesFolderCollapsed.has(folder);
         click('[data-file-tree-expand-collapse-all="expand"]');
-        requestAnimationFrame(() => done({
-          repoCollapsed, repoExpanded, folderCollapsed, treesCollapsed,
+        await Promise.all(pending.splice(0));
+        done({
+          repoCollapsed, repoExpanded, folderCollapsed, bodyExpanded, disclosureCollapsed,
+          disclosureExpanded, keyboardCollapsed, keyboardExpanded, expansionCalls, treesCollapsed,
           treesExpanded: !changesRepoCollapsed.size && !changesFolderCollapsed.size,
           errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection'),
-        }));
+        });
+        } finally {
+          renderChangesGroups = originalRender;
+          differTreeInteractionController.setExpanded = originalExpand;
+        }
+        })().catch(error => done({error:String(error?.stack || error)}));
         """
     )
     assert metrics["repoCollapsed"] and metrics["repoExpanded"] and metrics["folderCollapsed"], metrics
+    assert metrics["bodyExpanded"] and metrics["disclosureCollapsed"] and metrics["disclosureExpanded"], metrics
+    assert metrics["keyboardCollapsed"] and metrics["keyboardExpanded"], metrics
+    assert metrics["expansionCalls"] == [False, True, False, True, False, True], metrics
     assert metrics["treesCollapsed"] and metrics["treesExpanded"], metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
@@ -3747,7 +4908,8 @@ def test_fetch_file_entry_status_succeeds_for_existing_preview_sample(browser, t
           })
           .catch(error => done({error: String(error), stack: String(error?.stack || '')}));
         """
-    )
+        )
+    print('Sync supersession repro metrics:', metrics)
     assert "error" not in metrics, metrics
     assert metrics["entry"] is not None, metrics
     assert metrics["entry"]["name"] == "03-mixed.md", metrics
@@ -3854,30 +5016,55 @@ def test_sync_finder_follows_clicked_editor_file_to_repo(browser, tmp_path):
     )
     assert collapsed["conformanceExpanded"] == "false", collapsed
     assert "/home/test/dynamo/frontend-crates/conformance" in collapsed["manualCollapsed"], collapsed
-    click_visible_selector(browser, f'.file-editor-panel[data-file-path="{path}"]')
     WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
-            """
-            const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
-            return tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/frontend-crates/conformance"]')?.getAttribute('aria-expanded') === 'true'
-              && tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/frontend-crates/conformance/utils/tests/parity/reasoning/table.py"]') !== null;
-            """
-        )
+        lambda driver: driver.execute_script("return fileExplorerSyncState.inFlightSignature === '';"),
     )
-    reveal_after_manual_collapse = browser.execute_script(
+    held = browser.execute_script(
         """
-        const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
-        const filePath = '/home/test/dynamo/frontend-crates/conformance/utils/tests/parity/reasoning/table.py';
-        return {
-          conformanceExpanded: tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/frontend-crates/conformance"]')?.getAttribute('aria-expanded') || '',
-          fileVisible: tree.querySelector(`.file-tree-row[data-path="${filePath}"]`) !== null,
-          manualCollapsed: Array.from(fileExplorerSyncManualCollapsedPaths),
+        const path = arguments[0], root = fileExplorerSyncPlanForFile(path).root;
+        const state = {originalFetch: fetchDirectory, release: null, released: false};
+        invalidateFileExplorerRoots([root]);
+        fetchDirectory = (directory, options) => {
+          if (directory !== root || state.release) return state.originalFetch(directory, options);
+          return new Promise(resolve => {state.release = () => {
+            if (state.released) return;
+            state.released = true;
+            resolve(state.originalFetch(directory, options));
+          };});
         };
-        """
+        window.__editorRevealHeldSync = state;
+        state.promise = syncFileExplorerRootToActiveFile(path, {force: true});
+        return {held: Boolean(state.release), generation: fileExplorerSyncState.generation, signature: fileExplorerSyncState.inFlightSignature};
+        """,
+        path,
     )
-    assert reveal_after_manual_collapse["conformanceExpanded"] == "true", reveal_after_manual_collapse
-    assert reveal_after_manual_collapse["fileVisible"] is True, reveal_after_manual_collapse
-    assert "/home/test/dynamo/frontend-crates/conformance" not in reveal_after_manual_collapse["manualCollapsed"], reveal_after_manual_collapse
+    try:
+        assert held["held"] and held["signature"], held
+        click_visible_selector(browser, f'.file-editor-panel[data-file-path="{path}"]')
+        reveal_state = browser.execute_script(
+            "return {manualCollapsed: Array.from(fileExplorerSyncManualCollapsedPaths), sync: {...fileExplorerSyncState}};"
+        )
+        assert "/home/test/dynamo/frontend-crates/conformance" not in reveal_state["manualCollapsed"], reveal_state
+        assert reveal_state["sync"]["generation"] > held["generation"], reveal_state
+        WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
+                """
+                const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+                return tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/frontend-crates/conformance"]')?.getAttribute('aria-expanded') === 'true'
+                  && tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/frontend-crates/conformance/utils/tests/parity/reasoning/table.py"]') !== null;
+                """
+            )
+        )
+        browser.execute_async_script(
+            "const done = arguments[0], state = window.__editorRevealHeldSync; state.release(); state.promise.then(() => done(), error => done(String(error)));"
+        )
+        assert browser.execute_script(
+            "return document.querySelector('.file-tree-row[data-path=\"/home/test/dynamo/frontend-crates/conformance/utils/tests/parity/reasoning/table.py\"]') !== null;"
+        ), "the released old same-signature transaction must not clobber the explicit reveal"
+    finally:
+        browser.execute_async_script(
+            "const done = arguments[0], state = window.__editorRevealHeldSync; if (!state) return done(); fetchDirectory = state.originalFetch; state.release?.(); Promise.resolve(state.promise).finally(() => {delete window.__editorRevealHeldSync; done();});"
+        )
 
 
 def test_sync_mode_remembers_collapsed_parent_directory(browser, tmp_path):
@@ -3946,7 +5133,7 @@ def test_sync_mode_remembers_collapsed_parent_directory(browser, tmp_path):
               manualCollapsed: Array.from(fileExplorerSyncManualCollapsedPaths),
               dynamoExpanded: current?.getAttribute('aria-expanded') || '',
               repoVisible: tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/repo-a"]') !== null,
-              yolomuxExpanded: tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev"]')?.getAttribute('aria-expanded') || '',
+              yomuxExpanded: tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev"]')?.getAttribute('aria-expanded') || '',
             });
           }));
         }).catch(error => done({error: String(error)}));
@@ -3964,7 +5151,7 @@ def test_sync_mode_remembers_collapsed_parent_directory(browser, tmp_path):
     assert "/home/test/dynamo" in collapsed_parent["manualCollapsed"], collapsed_parent
     assert collapsed_parent["dynamoExpanded"] == "false", collapsed_parent
     assert collapsed_parent["repoVisible"] is False, collapsed_parent
-    assert collapsed_parent["yolomuxExpanded"] == "true", collapsed_parent
+    assert collapsed_parent["yomuxExpanded"] == "true", collapsed_parent
 
 
 def test_sync_mode_typed_manual_path_disables_sync_before_slow_listing(browser, tmp_path):
@@ -4128,7 +5315,7 @@ def test_sync_finder_remembers_same_root_cursor_without_stealing_browser_focus(b
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
-            const root = '/home/test';
+        const root = '/home/test';
             const plan = session => ({session, root, expandPaths: [], affectedDirs: [root]});
             const sentinel = document.createElement('button');
             sentinel.type = 'button';
@@ -4831,6 +6018,7 @@ def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
             planSession: fileExplorerSyncPlan().session,
             planRoot: fileExplorerSyncPlan().root,
             payloadSession: fileExplorerSessionFilesState.payload?.session || '',
+            differVisible: fileExplorerSessionFilesPaneIsVisible(),
           });
         }));
         """
@@ -4839,7 +6027,10 @@ def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
     assert focus_report_metrics["activeTmux"] == "/home/test/yolomux.dev/src", focus_report_metrics
     assert focus_report_metrics["planSession"] == "5", focus_report_metrics
     assert focus_report_metrics["planRoot"] == "/home/test", focus_report_metrics
+    # The explicit click on pane 5 may synchronize Differ to 5. The later hover and focus
+    # report from pane 6 must not replace that explicit target.
     assert focus_report_metrics["payloadSession"] == "5", focus_report_metrics
+    assert focus_report_metrics["differVisible"] is False, focus_report_metrics
     passive_select_metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -4852,6 +6043,8 @@ def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
               root: document.querySelector('.file-explorer-path-inline')?.value || '',
               target: fileExplorerSessionFilesTargetSession(),
               payloadSession: fileExplorerSessionFilesState.payload?.session || '',
+              finderPayloadSession: fileExplorerFinderSessionFilesState.payload?.session || '',
+              differVisible: fileExplorerSessionFilesPaneIsVisible(),
               activeTmux: activeTmuxDirectoryPath(),
               planRoot: fileExplorerSyncPlan().root,
               otherExpanded: tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev/other"]')?.getAttribute('aria-expanded') || '',
@@ -4862,7 +6055,8 @@ def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
     )
     assert passive_select_metrics["root"] == "~", passive_select_metrics
     assert passive_select_metrics["target"] == "5", passive_select_metrics
-    assert passive_select_metrics["payloadSession"] == "5", passive_select_metrics
+    assert passive_select_metrics["payloadSession"] == "5" and passive_select_metrics["differVisible"] is False, passive_select_metrics
+    assert passive_select_metrics["finderPayloadSession"] == "5", passive_select_metrics
     assert passive_select_metrics["activeTmux"] == "/home/test/yolomux.dev/src", passive_select_metrics
     assert passive_select_metrics["planRoot"] == "/home/test", passive_select_metrics
     assert passive_select_metrics["otherExpanded"] == "true", passive_select_metrics
@@ -4967,10 +6161,12 @@ def test_sync_mode_explicit_pane_change_wins_over_stale_sync_open(browser, tmp_p
         openFileExplorerAt('/home/test', {syncSelection: true}).then(() => {
           invalidateFileExplorerRoots(['/home/test/yolomux.dev1', '/home/test/yolomux.dev2']);
           resetFileExplorerAppliedSyncPlan();
-          const realFetchDirectory = fetchDirectory;
-          let releaseDev1 = null;
-          fetchDirectory = (path, options = {}) => {
-            if (path === '/home/test/yolomux.dev1' && !releaseDev1) {
+              const realFetchDirectory = fetchDirectory;
+              const fetchCalls = [];
+              let releaseDev1 = null;
+              fetchDirectory = (path, options = {}) => {
+                fetchCalls.push(path);
+                if (path === '/home/test/yolomux.dev1' && !releaseDev1) {
               return new Promise(resolve => {
                 releaseDev1 = () => realFetchDirectory(path, options).then(resolve);
               });
@@ -5004,10 +6200,14 @@ def test_sync_mode_explicit_pane_change_wins_over_stale_sync_open(browser, tmp_p
                 done({
                   error: 'dev2 sync did not win',
                   root: document.querySelector('.file-explorer-path-inline')?.value || '',
-                  explicitSession: fileExplorerExplicitSyncSessionTarget(),
-                  manual: fileExplorerManualSelectionActive,
-                  planRoot: fileExplorerSyncPlan('6').root,
-                });
+                      explicitSession: fileExplorerExplicitSyncSessionTarget(),
+                      manual: fileExplorerManualSelectionActive,
+                      planRoot: fileExplorerSyncPlan('6').root,
+                      currentRoot: currentFileExplorerRoot(),
+                      visibleTarget: {session:fileExplorerVisibleSyncSession, root:fileExplorerVisibleSyncRoot},
+                      syncState: {...fileExplorerSyncState},
+                      fetchCalls,
+                    });
                 return;
               }
             const root = document.querySelector('.file-explorer-path-inline')?.value || '';
@@ -5076,7 +6276,7 @@ def test_sync_mode_session_switch_uses_transcript_root_before_session_files_refr
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
-        const {frame} = window.__yolomuxTestHelpers;
+        const {frame} = window.__yomuxTestHelpers;
         (async () => {
           try {
             await openFileExplorerAt('/home/test/yolomux.dev1', {syncSelection: true});
@@ -5190,7 +6390,7 @@ def test_sync_mode_session_switch_uses_cached_payload_before_refresh(browser, tm
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
-        const {frame} = window.__yolomuxTestHelpers;
+        const {frame} = window.__yomuxTestHelpers;
         (async () => {
           try {
             await openFileExplorerAt('/home/test/yolomux.dev1', {syncSelection: true});

@@ -6,6 +6,8 @@ package finder
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"io"
 	"os"
@@ -24,6 +26,333 @@ const darwinGitSnapshotMaxEntries = 250_000
 const darwinGitSnapshotMaxBytes = 2 << 30
 const darwinGitConfigDataMaxBytes = 16 << 20
 const darwinGitSnapshotCloneWorkers = 8
+const darwinGitObjectSnapshotCacheEntries = 2
+
+type darwinGitObjectSnapshotKey struct {
+	device uint64
+	inode  uint64
+	digest [sha256.Size]byte
+}
+
+type darwinGitObjectSnapshot struct {
+	path     string
+	bytes    int64
+	users    int
+	lastUsed uint64
+}
+
+type darwinGitObjectSnapshotCache struct {
+	mu       sync.Mutex
+	entries  map[darwinGitObjectSnapshotKey]*darwinGitObjectSnapshot
+	sequence uint64
+	bytes    int64
+	closed   bool
+}
+
+type darwinGitObjectSnapshotFingerprint struct {
+	digest  [sha256.Size]byte
+	bytes   int64
+	entries int
+}
+
+func newDarwinGitObjectSnapshotCache() *darwinGitObjectSnapshotCache {
+	return &darwinGitObjectSnapshotCache{entries: make(map[darwinGitObjectSnapshotKey]*darwinGitObjectSnapshot)}
+}
+
+func (cache *darwinGitObjectSnapshotCache) acquire(ctx context.Context, source *os.File) (string, func(), bool, error) {
+	return cache.acquireWithLimits(ctx, source, nil, darwinGitSnapshotMaxEntries, newDarwinSnapshotBudget())
+}
+
+func (cache *darwinGitObjectSnapshotCache) acquireWithInventoryHook(ctx context.Context, source *os.File, afterInitialScan func()) (string, func(), bool, error) {
+	return cache.acquireWithLimits(ctx, source, afterInitialScan, darwinGitSnapshotMaxEntries, newDarwinSnapshotBudget())
+}
+
+func (cache *darwinGitObjectSnapshotCache) acquireWithEntryLimit(ctx context.Context, source *os.File, afterInitialScan func(), maxEntries int) (string, func(), bool, error) {
+	return cache.acquireWithLimits(ctx, source, afterInitialScan, maxEntries, newDarwinSnapshotBudget())
+}
+
+func (cache *darwinGitObjectSnapshotCache) acquireWithLimits(ctx context.Context, source *os.File, afterInitialScan func(), maxEntries int, budget *darwinSnapshotBudget) (string, func(), bool, error) {
+	info, err := source.Stat()
+	if err != nil {
+		return "", nil, false, err
+	}
+	fingerprint, err := fingerprintDarwinGitObjects(ctx, source)
+	if err != nil {
+		return "", nil, false, err
+	}
+	if fingerprint.bytes > darwinGitSnapshotMaxBytes {
+		return "", nil, false, nil
+	}
+	if fingerprint.entries > maxEntries {
+		return "", nil, false, errors.New("Git snapshot entry limit exceeded")
+	}
+	identity := identityFor(info)
+	key := darwinGitObjectSnapshotKey{device: identity.dev, inode: identity.ino, digest: fingerprint.digest}
+	cache.mu.Lock()
+	if cached := cache.entries[key]; cached != nil && !cache.closed {
+		cache.sequence++
+		cached.lastUsed = cache.sequence
+		cached.users++
+		cache.mu.Unlock()
+		if err := verifyDarwinGitObjectFingerprint(ctx, source, fingerprint, afterInitialScan); err != nil {
+			cache.release(key, cached)()
+			return "", nil, false, err
+		}
+		return cached.path, cache.release(key, cached), true, nil
+	}
+	cache.mu.Unlock()
+
+	root, err := os.MkdirTemp("", "yomux-git-objects-")
+	if err != nil {
+		return "", nil, false, err
+	}
+	removeRoot := func() { removeDarwinSnapshot(root) }
+	destination, err := os.Open(root)
+	if err != nil {
+		removeRoot()
+		return "", nil, false, err
+	}
+	cloneErr := cloneDarwinTree(ctx, source, destination, budget, 0, darwinSnapshotTreeOptions{})
+	closeErr := destination.Close()
+	if cloneErr != nil || closeErr != nil {
+		removeRoot()
+		if cloneErr != nil {
+			return "", nil, false, cloneErr
+		}
+		return "", nil, false, closeErr
+	}
+	verified, err := fingerprintDarwinGitObjects(ctx, source)
+	if err != nil || verified != fingerprint {
+		removeRoot()
+		if err != nil {
+			return "", nil, false, err
+		}
+		return "", nil, false, errGitNamespaceChanged
+	}
+
+	cache.mu.Lock()
+	if existing := cache.entries[key]; existing != nil && !cache.closed {
+		cache.sequence++
+		existing.lastUsed = cache.sequence
+		existing.users++
+		cache.mu.Unlock()
+		removeRoot()
+		return existing.path, cache.release(key, existing), true, nil
+	}
+	if cache.closed {
+		cache.mu.Unlock()
+		return root, removeRoot, false, nil
+	}
+	evicted := cache.evictFor(fingerprint.bytes)
+	release := removeRoot
+	if len(cache.entries) < darwinGitObjectSnapshotCacheEntries && cache.bytes+fingerprint.bytes <= darwinGitSnapshotMaxBytes {
+		cache.sequence++
+		entry := &darwinGitObjectSnapshot{path: root, bytes: fingerprint.bytes, users: 1, lastUsed: cache.sequence}
+		cache.entries[key] = entry
+		cache.bytes += fingerprint.bytes
+		release = cache.release(key, entry)
+	}
+	cache.mu.Unlock()
+	for _, path := range evicted {
+		removeDarwinSnapshot(path)
+	}
+	return root, release, false, nil
+}
+
+func verifyDarwinGitObjectFingerprint(ctx context.Context, source *os.File, expected darwinGitObjectSnapshotFingerprint, afterInitialScan func()) error {
+	if afterInitialScan != nil {
+		afterInitialScan()
+	}
+	actual, err := fingerprintDarwinGitObjects(ctx, source)
+	if err != nil {
+		return err
+	}
+	if actual != expected {
+		return errGitNamespaceChanged
+	}
+	return nil
+}
+
+func (cache *darwinGitObjectSnapshotCache) evictFor(bytes int64) []string {
+	var removed []string
+	for len(cache.entries) >= darwinGitObjectSnapshotCacheEntries || cache.bytes+bytes > darwinGitSnapshotMaxBytes {
+		var oldestKey darwinGitObjectSnapshotKey
+		var oldest *darwinGitObjectSnapshot
+		for key, entry := range cache.entries {
+			if entry.users == 0 && (oldest == nil || entry.lastUsed < oldest.lastUsed) {
+				oldestKey, oldest = key, entry
+			}
+		}
+		if oldest == nil {
+			break
+		}
+		delete(cache.entries, oldestKey)
+		cache.bytes -= oldest.bytes
+		removed = append(removed, oldest.path)
+	}
+	return removed
+}
+
+func (cache *darwinGitObjectSnapshotCache) release(key darwinGitObjectSnapshotKey, entry *darwinGitObjectSnapshot) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			cache.mu.Lock()
+			if entry.users > 0 {
+				entry.users--
+			}
+			remove := cache.closed && entry.users == 0
+			if current := cache.entries[key]; current == entry && remove {
+				delete(cache.entries, key)
+				cache.bytes -= entry.bytes
+			}
+			path := entry.path
+			cache.mu.Unlock()
+			if remove {
+				removeDarwinSnapshot(path)
+			}
+		})
+	}
+}
+
+func (cache *darwinGitObjectSnapshotCache) close() {
+	cache.mu.Lock()
+	cache.closed = true
+	var paths []string
+	for key, entry := range cache.entries {
+		if entry.users > 0 {
+			continue
+		}
+		delete(cache.entries, key)
+		cache.bytes -= entry.bytes
+		paths = append(paths, entry.path)
+	}
+	cache.mu.Unlock()
+	for _, path := range paths {
+		removeDarwinSnapshot(path)
+	}
+}
+
+func fingerprintDarwinGitObjects(ctx context.Context, source *os.File) (darwinGitObjectSnapshotFingerprint, error) {
+	hasher := sha256.New()
+	var result darwinGitObjectSnapshotFingerprint
+	entries := 0
+	if err := fingerprintDarwinTree(ctx, source, ".", 0, hasher, &result.bytes, &entries); err != nil {
+		return darwinGitObjectSnapshotFingerprint{}, err
+	}
+	result.entries = entries
+	copy(result.digest[:], hasher.Sum(nil))
+	return result, nil
+}
+
+func fingerprintDarwinTree(ctx context.Context, source *os.File, relative string, depth int, hasher io.Writer, totalBytes *int64, entries *int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if depth > 256 {
+		return errors.New("Git snapshot directory depth exceeds limit")
+	}
+	before, err := source.Stat()
+	if err != nil {
+		return err
+	}
+	if err := writeDarwinSnapshotFingerprint(hasher, relative, before); err != nil {
+		return err
+	}
+	reader, err := openAt(source, ".", syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+	children, err := reader.ReadDir(-1)
+	if err != nil {
+		return err
+	}
+	sort.Slice(children, func(i, j int) bool { return children[i].Name() < children[j].Name() })
+	for _, childEntry := range children {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		name := childEntry.Name()
+		childRelative := filepath.Join(relative, name)
+		info, err := lstatAt(reader, name)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() && !info.IsDir() {
+			return errChangedOnDisk
+		}
+		*entries++
+		if *entries > darwinGitSnapshotMaxEntries {
+			return errors.New("Git snapshot entry limit exceeded")
+		}
+		if err := writeDarwinSnapshotFingerprint(hasher, childRelative, info); err != nil {
+			return err
+		}
+		childFlags := syscall.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
+		if info.IsDir() {
+			childFlags |= syscall.O_DIRECTORY
+		} else {
+			if info.Size() > int64(^uint64(0)>>1)-*totalBytes {
+				return errors.New("Git snapshot byte count overflow")
+			}
+			*totalBytes += info.Size()
+		}
+		child, err := openAt(reader, name, childFlags, 0)
+		if err != nil {
+			return errChangedOnDisk
+		}
+		opened, statErr := child.Stat()
+		if statErr != nil || !sameDarwinSnapshotStamp(info, opened) {
+			_ = child.Close()
+			return errChangedOnDisk
+		}
+		if info.IsDir() {
+			statErr = fingerprintDarwinTree(ctx, child, childRelative, depth+1, hasher, totalBytes, entries)
+		}
+		after, afterErr := child.Stat()
+		_ = child.Close()
+		if statErr != nil {
+			return statErr
+		}
+		if afterErr != nil || !sameDarwinSnapshotStamp(opened, after) {
+			return errChangedOnDisk
+		}
+	}
+	after, err := source.Stat()
+	if err != nil || !sameDarwinSnapshotStamp(before, after) {
+		return errChangedOnDisk
+	}
+	return nil
+}
+
+func writeDarwinSnapshotFingerprint(destination io.Writer, name string, info os.FileInfo) error {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return errors.New("Git snapshot identity is unavailable")
+	}
+	if _, err := io.WriteString(destination, name+"\x00"); err != nil {
+		return err
+	}
+	var encoded [8]byte
+	for _, value := range []uint64{
+		uint64(stat.Dev), uint64(stat.Ino), uint64(info.Mode()), uint64(info.Size()),
+		uint64(info.ModTime().UnixNano()), uint64(statCTime(stat)),
+	} {
+		binary.LittleEndian.PutUint64(encoded[:], value)
+		if _, err := destination.Write(encoded[:]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func sameDarwinSnapshotStamp(left, right os.FileInfo) bool {
+	leftStat, leftOK := left.Sys().(*syscall.Stat_t)
+	rightStat, rightOK := right.Sys().(*syscall.Stat_t)
+	leftIdentity, rightIdentity := identityFor(left), identityFor(right)
+	return leftOK && rightOK && leftIdentity.dev == rightIdentity.dev && leftIdentity.ino == rightIdentity.ino &&
+		left.Mode() == right.Mode() && left.Size() == right.Size() && left.ModTime().Equal(right.ModTime()) && statCTime(leftStat) == statCTime(rightStat)
+}
 
 var errGitAlternateObjectStore = errors.New("Git alternate object stores are not supported")
 
@@ -189,7 +518,7 @@ func (s *Service) openDarwinNamespaceAt(ctx context.Context, workTree *os.File, 
 		gitDir: gitDir, commonDir: commonDir, objects: objects,
 		gitDirPath: gitDirPath, commonPath: commonPath, objectsPath: objectPath,
 		alternates: filepath.Join(objectPath, "info", "alternates"), layoutCache: &s.gitObjectLayouts,
-		workTreePath: workTreePath,
+		workTreePath: workTreePath, objectSnapshotCache: s.gitObjectSnapshots,
 	}
 	if err := namespace.readDarwinAlternates(ctx); err != nil {
 		namespace.close()
@@ -306,20 +635,35 @@ func (namespace *gitNamespace) prepareSnapshot(ctx context.Context, _ *os.File) 
 		}
 		namespace.snapshotCommon = filepath.Join(root, "common")
 	}
-	if err := os.Mkdir(filepath.Join(namespace.snapshotCommon, "objects"), 0o700); err != nil {
-		namespace.snapshotErr = err
-		return err
+	objectsPath := filepath.Join(namespace.snapshotCommon, "objects")
+	if namespace.objectSnapshotCache != nil {
+		cachedPath, release, _, cacheErr := namespace.objectSnapshotCache.acquireWithLimits(ctx, namespace.objects, nil, darwinGitSnapshotMaxEntries-budget.entries, budget)
+		if cacheErr != nil {
+			namespace.snapshotErr = cacheErr
+			return cacheErr
+		}
+		if cachedPath != "" {
+			namespace.snapshotObjects = cachedPath
+			namespace.objectSnapshotRelease = release
+		}
 	}
-	objectsSnapshot, err := os.Open(filepath.Join(namespace.snapshotCommon, "objects"))
-	if err != nil {
-		namespace.snapshotErr = err
-		return err
-	}
-	objectsErr := cloneDarwinTree(ctx, namespace.objects, objectsSnapshot, budget, 0, darwinSnapshotTreeOptions{})
-	_ = objectsSnapshot.Close()
-	if objectsErr != nil {
-		namespace.snapshotErr = objectsErr
-		return objectsErr
+	if namespace.snapshotObjects == "" {
+		if err := os.Mkdir(objectsPath, 0o700); err != nil {
+			namespace.snapshotErr = err
+			return err
+		}
+		objectsSnapshot, err := os.Open(objectsPath)
+		if err != nil {
+			namespace.snapshotErr = err
+			return err
+		}
+		objectsErr := cloneDarwinTree(ctx, namespace.objects, objectsSnapshot, budget, 0, darwinSnapshotTreeOptions{})
+		_ = objectsSnapshot.Close()
+		if objectsErr != nil {
+			namespace.snapshotErr = objectsErr
+			return objectsErr
+		}
+		namespace.snapshotObjects = objectsPath
 	}
 	if err := writeDarwinSnapshotConfig(ctx, namespace.commonDir, namespace.snapshotCommon, namespace.workTreePath); err != nil {
 		namespace.snapshotErr = err

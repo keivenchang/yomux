@@ -86,7 +86,7 @@ def terminal_navigation_ack_metrics(browser: Any, tmp_path: Path) -> dict[str, o
             };
             const topologyTransactionCounts = structuredClone(topologyCounts);
             resolveEnsure(false);
-            await window.__yolomuxTestWaitFor(
+            await window.__yomuxTestWaitFor(
               () => document.querySelector('#term-2 [data-terminal-connection-state="unavailable"]'),
               {timeoutMs: 2000, intervalMs: 20, description: 'cold tmux unavailable state'}
             );
@@ -116,7 +116,7 @@ def terminal_navigation_ack_metrics(browser: Any, tmp_path: Path) -> dict[str, o
               dimmed: document.querySelector('#term-1')?.classList.contains('terminal-connection-pending') || false,
             };
             rejectWindow(new Error('switch failed'));
-            await window.__yolomuxTestWaitFor(
+            await window.__yomuxTestWaitFor(
               () => !document.querySelector('#term-1 [data-terminal-connection-state="switching"]'),
               {timeoutMs: 2000, intervalMs: 20, description: 'failed tmux switch rollback'}
             );

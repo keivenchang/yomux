@@ -103,7 +103,7 @@ def _create_session_in_browser(browser, agent: str, *, terminal: str = "") -> di
           tab: Boolean(document.querySelector(tabSelector)),
         };
         const elapsedWhen = async (predicate, description) => {
-          await window.__yolomuxTestWaitFor(predicate, {timeoutMs, description});
+          await window.__yomuxTestWaitFor(predicate, {timeoutMs, description});
           return performance.now() - started;
         };
         const roster = elapsedWhen(() => sessions.includes(target), `${target} in browser roster`);
@@ -145,7 +145,7 @@ def _kill_session_in_browser(browser) -> dict[str, object]:
         (async () => {
           try {
             const killed = await killTmuxSession(target);
-            await window.__yolomuxTestWaitFor(() => (
+            await window.__yomuxTestWaitFor(() => (
               !sessions.includes(target)
               && !document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(target)}"]`)
               && !document.getElementById(`panel-${target}`)
@@ -200,7 +200,7 @@ def _assert_agent_detected(browser, runtime, agent: str) -> None:
           try {
             const forced = await refreshSessionMetadata({force: true, refreshAuto: true, refreshActivity: true});
             const awaited = Number(transcriptMetadataState.pendingGeneration || 0);
-            await window.__yolomuxTestWaitFor(() => (
+            await window.__yomuxTestWaitFor(() => (
               Number(transcriptMetadataState.generation || 0) >= awaited
               && sessionAgentKind(target) === agent
             ), {

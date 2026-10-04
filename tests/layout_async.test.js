@@ -16,9 +16,9 @@ const {
   sseFrame,
   controllableSseResponse,
   settingsOverride,
-  loadYolomux,
+  loadYomux,
   fileExplorerClosedOptions,
-  loadYolomuxWithFileExplorerClosed,
+  loadYomuxWithFileExplorerClosed,
   treeKeyEvent,
   tabElement,
   tabStrip,
@@ -40,6 +40,1117 @@ const {spawn} = require('node:child_process');
 const {EventEmitter} = require('node:events');
 const {PassThrough} = require('node:stream');
 const {runSuite} = require('./layout_url.test.js');
+
+function installTreePublicationHelpers(context) {
+  for (const [path, names] of [
+    ['10_core_utils.js', ['setAttributeIfChanged', 'setInnerHtmlIfChanged', 'clientElementIsVisible']],
+    ['40_file_explorer_files.js', ['setRowDataset', 'setHiddenIfChanged']],
+    ['99_terminal_boot.js', ['setStylePropertyIfChanged']],
+  ]) {
+    const source = fs.readFileSync(`static_src/js/yomux/${path}`, 'utf8');
+    if (names.includes('setInnerHtmlIfChanged')) vm.runInContext('const elementHtmlState = new WeakMap();', context);
+    for (const name of names) {
+      if (name === 'clientElementIsVisible' && context[name]) continue;
+      const start = source.indexOf(`function ${name}(`);
+      vm.runInContext(source.slice(start, source.indexOf('\nfunction ', start + 1)), context);
+    }
+  }
+}
+
+test('directory expansion settlement cannot resurrect children on a reused file row', () => {
+  const source = fs.readFileSync('static_src/js/yomux/60_popovers_tabs.js', 'utf8');
+  const tree = new TestElement();
+  const row = new TestElement();
+  row.className = 'file-tree-row';
+  row.dataset.path = '/repo/reused';
+  row.dataset.kind = 'file';
+  tree.append(row);
+  const context = vm.createContext({Map, fileExplorerTreeContainers: () => [tree]});
+  const start = source.indexOf('function liveDirectoryRows(');
+  vm.runInContext(source.slice(start, source.indexOf('async function settleFileExplorerDirectoryFailures(', start)), context);
+  const indexed = new Map([['/repo/reused', [row]]]);
+  for (const index of [null, indexed]) {
+    assert.equal(context.liveDirectoryRows('/repo/reused', row, index).length, 0, 'old directory work must reject the current file kind');
+    row.dataset.kind = 'dir';
+    assert.equal(context.liveDirectoryRows('/repo/reused', row, index)[0], row, 'current directories still settle');
+    row.dataset.kind = 'file';
+  }
+});
+
+test('shared tree dataset updates preserve values without repeating DOM writes', () => {
+  const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  const start = source.indexOf('function setRowDataset(');
+  const context = vm.createContext({});
+  vm.runInContext(source.slice(start, source.indexOf('\nfunction ', start + 1)), context);
+  let writes = 0;
+  const row = {dataset: new Proxy({}, {
+    set(target, key, value) {
+      writes++;
+      target[key] = value;
+      return true;
+    },
+  })};
+  for (let index = 0; index < 5000; index++) context.setRowDataset(row, 'path', '/repo/file');
+  assert.equal(writes, 1);
+  assert.equal(row.dataset.path, '/repo/file');
+  for (const value of [0, false, '/repo/other']) {
+    context.setRowDataset(row, 'path', value);
+    assert.equal(row.dataset.path, String(value));
+  }
+  for (const value of [undefined, null, '']) {
+    context.setRowDataset(row, 'path', 'present');
+    context.setRowDataset(row, 'path', value);
+    assert.equal(Object.hasOwn(row.dataset, 'path'), false);
+  }
+});
+
+test('Differ static summaries retain the mounted tree without moving its rows', () => {
+  const source = fs.readFileSync('static_src/js/yomux/86_changes_20_differ.js', 'utf8');
+  const treeSource = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  const root = new TestElement(), oldHeader = new TestElement(), groups = new TestElement();
+  groups.className = 'changes-groups';
+  groups.append(...Array.from({length: 300}, () => new TestElement()));
+  root.append(oldHeader, groups);
+  const next = new TestElement(), newHeader = new TestElement(), placeholder = new TestElement();
+  placeholder.className = 'changes-groups';
+  Object.defineProperty(next, 'innerHTML', {set() {next.append(newHeader, placeholder);}});
+  const insertBefore = root.insertBefore.bind(root);
+  root.insertBefore = (node, before) => {
+    assert.notEqual(node, groups, 'the populated group never detaches or moves');
+    return insertBefore(node, before);
+  };
+  const context = {document: {createElement: () => next}, restoreElementScrollPosition() {}};
+  vm.createContext(context);
+  vm.runInContext(treeSource.slice(treeSource.indexOf('function reconcileChildNodes('), treeSource.indexOf('function setClassNameIfChanged('))
+    + source.slice(source.indexOf('function replaceChangesStaticHtml('), source.indexOf('function renderChangesRoot(')), context);
+  context.replaceChangesStaticHtml(root, '<header>second session</header><div class="changes-groups"></div>');
+  assert.deepEqual(root.children, [newHeader, groups]);
+  assert.equal(groups.parentElement, root);
+  assert.equal(groups.children.length, 300);
+});
+
+test('Differ preparation yields before publication and preserves repository order without sorting every file', () => {
+  const source = fs.readFileSync('static_src/js/yomux/86_changes_20_differ.js', 'utf8');
+  const sortSource = fs.readFileSync('static_src/js/yomux/86_changes_10_session_files.js', 'utf8');
+  const rendered = [];
+  const context = {
+    normalizeFileExplorerView: value => value, fileExplorerTreeSortModeForView: () => 'az',
+    FILE_TREE_NAME_COLLATOR: new Intl.Collator(undefined, {numeric: true, sensitivity: 'base'}),
+    repoPayloadByPath: () => new Map(), changesOutsideRepoKey: '__outside__',
+    document: {createElement: () => new TestElement()},
+    *renderChangesRepoSectionSteps(_section, repo, files) { rendered.push([repo, files.length]); },
+    sessionFileIsDifferVisible: () => true,
+    reconcileChildNodes() {},
+  };
+  vm.createContext(context);
+  vm.runInContext(sortSource.slice(sortSource.indexOf('function sessionFilesSortComparator('), sortSource.indexOf('function groupedSessionFiles('))
+    + 'const changesRepoSectionsByGroups = new WeakMap();\n'
+    + source.slice(source.indexOf('function* renderChangesGroupsSteps('), source.indexOf('function renderChangedChangesRepo(')), context);
+  const files = Array.from({length: 10000}, (_, index) => ({path: `${10000 - index}.js`, repo: index % 2 ? '/b' : '/a'}));
+  files.push({path: '0.js', repo: '/b'});
+  const steps = context.renderChangesGroupsSteps(new TestElement(), files, {isCurrent: () => true});
+  for (let index = 0; index < files.length; index += 1) {
+    assert.equal(steps.next().done, false);
+    assert.equal(rendered.length, 0, 'input can interrupt grouping before any rows publish');
+  }
+  let step = steps.next();
+  while (!step.done) step = steps.next();
+  assert.deepEqual(rendered, [['/b', 5001], ['/a', 5000]], 'minimum file representatives retain the old global-sort repository order');
+});
+
+test('visible Differ filtering yields and stops reading files after its render owner is retired', () => {
+  const source = fs.readFileSync('static_src/js/yomux/86_changes_20_differ.js', 'utf8');
+  let current = true, statusReads = 0;
+  const context = {
+    normalizeFileExplorerView: value => value,
+    sessionFilesSortComparator: () => () => 0,
+    repoPayloadByPath: () => new Map(),
+    sessionFileIsDifferVisible(item) {statusReads += 1; return String(item.status || 'M').toUpperCase() !== 'T';},
+    changesOutsideRepoKey: '__outside__',
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function* renderChangesGroupsSteps('), source.indexOf('function renderChangedChangesRepo(')), context);
+  const files = Array.from({length: 10000}, (_, index) => ({status: 'M', repo: '/repo', path: `file-${index}`}));
+  const steps = context.renderChangesGroupsSteps(new TestElement(), files, {
+    view: 'differ', isCurrent: () => current,
+  });
+  assert.equal(steps.next().done, false, 'preparation yields before inspecting a file');
+  assert.equal(statusReads, 0);
+  assert.equal(steps.next().done, false, 'the first visibility check is one interruptible slice');
+  assert.equal(statusReads, 1);
+  current = false;
+  const retired = steps.next();
+  assert.equal(retired.done, true);
+  assert.equal(retired.value, false);
+  assert.equal(statusReads, 1, 'a superseded or hidden render stops before filtering the next file');
+});
+
+test('visible Differ restarts iterate streamed repos without invoking the flattening files getter', () => {
+  const source = fs.readFileSync('static_src/js/yomux/86_changes_20_differ.js', 'utf8');
+  let flattenReads = 0;
+  const payload = {session: '1', loaded: false, repos: []};
+  Object.defineProperty(payload, 'files', {get() {flattenReads += 1; return [{repo: '/repo', path: 'file.txt'}];}});
+  const context = {
+    fileExplorerSessionFilesState: {payload, streamRepos: null},
+    fileTreeRenderOwners: new WeakMap(), fileTreeRenderEpoch: 0,
+    normalizeFileExplorerView: value => value, fileExplorerSessionFilesPaneIsVisible: () => true,
+    repoPayloadByPath: () => new Map(), sessionFilesSortComparator: () => () => 0,
+    sessionFileIsDifferVisible: () => true, changesOutsideRepoKey: '__outside__',
+    sessionFilesPanelIsLoading: () => false,
+    repoPayloadHasRenderableSection: () => true,
+    reconcileChildNodes() {}, document: {createElement: () => new TestElement()},
+    *renderChangesRepoSectionSteps() {},
+    drainFileTreeRenderStepsWithInput: steps => steps,
+  };
+  vm.createContext(context);
+  context.fileExplorerSessionFilesState.streamRepos = vm.runInContext("new Map([['/repo', {files: [{repo: '/repo', path: 'file.txt'}]}]])", context);
+  vm.runInContext(source.slice(source.indexOf('const changesRepoSectionsByGroups'), source.indexOf('function renderChangedChangesRepo(')), context);
+  const steps = context.renderChangesGroups(new TestElement(), [], {
+    payload, view: 'differ', yieldToInput: true, deferPreparation: true,
+  });
+  assert.equal(flattenReads, 0, 'constructing the visible update never reads the compatibility getter');
+  assert.equal(steps.next().done, false, 'stream file iteration starts through the yielding renderer');
+  assert.equal(flattenReads, 0, 'the first yielded stream file also avoids flattening');
+});
+
+test('deferred Differ loading checks visible files after tombstones are filtered', () => {
+  const source = fs.readFileSync('static_src/js/yomux/86_changes_10_session_files.js', 'utf8');
+  const context = {
+    fileExplorerSessionFilesState: {loading: false},
+    sessionFilesPayloadIsRefreshing: payload => payload.refreshing === true,
+    sessionFilesRepoRoots: () => ['/repo'],
+    sessionFilesPayloadIsRootlessEmpty: () => false,
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function sessionFilesPayloadHasVisibleDifferResult('), source.indexOf('function sessionFilesPayloadShouldPreserveCurrent(')), context);
+  const payload = {loaded: true, refreshing: true, repos: [{repo: '/repo'}], files: [{status: 'T'}], errors: [], warnings: []};
+  assert.equal(context.sessionFilesPanelIsLoading(payload, payload.files), false, 'the raw tombstone would look like a visible result');
+  assert.equal(context.sessionFilesPanelIsLoading(payload, []), true, 'deferred rendering keeps the loading state until it finds visible files');
+});
+
+function sessionFileTreeTestContext(options = {}) {
+  return {
+    normalizeDirectoryPath: value => value,
+    indexSessionFileIntoPathMap: (map, item, path) => map.set(path, item),
+    sessionFileDisplayStatus: item => item.status,
+    sessionFileDatePlaceholderNeeded: () => false,
+    sessionFileIsDifferVisible: () => true,
+    pathIsInsideDirectory: (path, root) => path === root || path.startsWith(`${root}/`),
+    dirnameOf: path => path.slice(0, path.lastIndexOf('/')) || '/',
+    basenameOf: path => path.slice(path.lastIndexOf('/') + 1),
+    changesFolderAutoCollapsed: new Set(), changesFolderCollapsed: new Set(),
+    drainFileTreeRenderSteps(steps) { let next = steps.next(); while (!next.done) next = steps.next(); return next.value; },
+    ...options,
+  };
+}
+
+test('indexed Differ preparation retains directory replacements of deleted files', () => {
+  const source = fs.readFileSync('static_src/js/yomux/86_changes_20_differ.js', 'utf8');
+  const context = sessionFileTreeTestContext();
+  vm.createContext(context);
+  vm.runInContext(source.slice(0, source.indexOf('// Render changed files')), context);
+  const files = [
+    {path: 'old', abs_path: '/repo/old', status: 'D'},
+    {path: 'old/new.js', abs_path: '/repo/old/new.js', status: 'A'},
+  ];
+  const tree = context.buildSessionFileTree('/repo', files);
+  assert.deepEqual(Array.from(tree.entries, entry => entry.kind), ['file', 'dir'], 'directory lookup cannot reuse the deleted file as an ancestor');
+  assert.equal(tree.entriesByDir.get('/repo/old')[0].name, 'new.js', 'the replacement directory retains its new child');
+});
+
+test('streamed Differ chunk filtering yields and stops after its render owner is retired', () => {
+  const source = fs.readFileSync('static_src/js/yomux/86_changes_20_differ.js', 'utf8');
+  let current = true, visibilityChecks = 0;
+  const context = sessionFileTreeTestContext({
+    sessionFileIsDifferVisible(item) {visibilityChecks += 1; return String(item.status || 'M').toUpperCase() !== 'T';},
+  });
+  vm.createContext(context);
+  vm.runInContext(source.slice(0, source.indexOf('// Render changed files')), context);
+  const files = Array.from({length: 10000}, (_, index) => ({path: `file-${index}`, status: 'M'}));
+  const steps = context.buildSessionFileTreeSteps('/repo', files, {
+    isCurrent: () => current,
+    isVisible: item => context.sessionFileIsDifferVisible(item),
+  });
+  assert.equal(steps.next().done, false);
+  assert.equal(visibilityChecks, 0, 'the first entry is not filtered before a yield');
+  assert.equal(steps.next().done, false);
+  assert.equal(visibilityChecks, 1);
+  current = false;
+  const retired = steps.next();
+  assert.equal(retired.done, true);
+  assert.equal(retired.value, false);
+  assert.equal(visibilityChecks, 1, 'a superseded chunk stops before filtering its next entry');
+});
+
+test('session-file stream chunks leave Differ visibility filtering to the yielding renderer', () => {
+  const source = fs.readFileSync('static_src/js/yomux/86_changes_10_session_files.js', 'utf8');
+  const producer = source.slice(source.indexOf('let changedRepo = null;'), source.indexOf('renderSessionFilesDestination(destination, changedRepo ?'));
+  assert.match(producer, /files:\s*repoFiles/);
+  assert.doesNotMatch(producer, /fileExplorerDifferFiles\(/, 'stream producers do not filter a complete repo chunk synchronously');
+});
+
+test('direct Differ preparation retires hidden superseded and caller-cancelled owners before another entry read', () => {
+  const source = fs.readFileSync('static_src/js/yomux/86_changes_20_differ.js', 'utf8');
+  let visible = true, current = true, reads = 0;
+  const context = sessionFileTreeTestContext({
+    fileTreeRenderOwners: new WeakMap(), fileTreeRenderEpoch: 0,
+    changesOutsideRepoKey: '__outside__', normalizeFileExplorerView: value => value,
+    fileExplorerSessionFilesPaneIsVisible: () => visible,
+  });
+  vm.createContext(context);
+  vm.runInContext(source.slice(0, source.indexOf('// C5:')), context);
+  const files = Array.from({length: 5000}, (_, index) => ({
+    get abs_path() {reads += 1; return `/repo/file-${index}`;},
+    path: `file-${index}`, status: 'M',
+  }));
+  for (const route of ['hidden', 'superseded', 'caller']) {
+    visible = true;
+    current = true;
+    reads = 0;
+    const container = new TestElement();
+    const steps = context.renderChangedFileListSteps(container, '/repo', files, {
+      view: 'differ', yieldToInput: true, ...(route === 'caller' ? {isCurrent: () => current} : {}),
+    });
+    assert.equal(steps.next().done, false);
+    assert.equal(reads, 0, 'the initial preparation handoff precedes path reads');
+    if (route === 'hidden') visible = false;
+    if (route === 'superseded') context.fileTreeRenderOwners.set(container, {renderOwner: {}});
+    if (route === 'caller') current = false;
+    const retired = steps.next();
+    assert.equal(reads, 0, `${route}: cancelled preparation must stop before the next entry getter`);
+    assert.equal(retired.done, true, route);
+    assert.equal(retired.value, false, route);
+  }
+  assert.equal(context.buildSessionFileTree('/repo', files, {isCurrent: () => false}), false, 'the existing build wrapper forwards the same preparation guard');
+  assert.equal(reads, 0);
+  current = true;
+  const conversion = context.buildSessionFileTreeSteps('/repo', [{path: '.uploads/a', abs_path: '/repo/.uploads/a', status: 'M'}], {isCurrent: () => current});
+  assert.equal(conversion.next().done, false);
+  assert.equal(conversion.next().done, false, 'directory conversion has its own guarded handoff');
+  current = false;
+  assert.equal(conversion.next().value, false);
+  assert.equal(context.changesFolderAutoCollapsed.size, 0, 'retired conversion cannot publish upload-folder collapse state');
+});
+
+test('yielding tree sort preserves every shared comparator and stable equal-key order', () => {
+  const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  const context = {
+    FILE_TREE_NAME_COLLATOR: new Intl.Collator(undefined, {numeric: true, sensitivity: 'base'}),
+    fileExplorerShowHidden: false, fileExplorerTreeSortModeForView: () => 'az',
+    drainFileTreeRenderSteps(steps) { let next = steps.next(); while (!next.done) next = steps.next(); return next.value; },
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function sortedFileTreeEntries('), source.indexOf('// One source for the git-status row classes')), context);
+  const entries = [
+    {name: 'file10', kind: 'file', mtime: 3}, {name: 'file2', kind: 'file', mtime: 5},
+    {name: 'folder', kind: 'dir', mtime: 4}, {name: 'gone', kind: 'file', deleted: true, mtime: 9},
+    {name: 'same', kind: 'file', mtime: 0}, {name: 'same', kind: 'file', mtime: 0},
+    {name: '.hidden', kind: 'file', mtime: 2},
+  ];
+  for (const mode of ['az', 'za', 'newest', 'oldest']) {
+    for (const options of [{}, {deletedLast: true}, {includeHidden: true}, {tabberWindowOrder: true}]) {
+      const expected = context.sortedFileTreeEntries(entries, mode, options);
+      const steps = context.sortedFileTreeEntrySteps(entries, mode, {...options, yieldToInput: true});
+      let next = steps.next();
+      let yields = 0;
+      while (!next.done) { yields += 1; next = steps.next(); }
+      assert.deepEqual([...next.value], [...expected]);
+      assert.ok(yields > entries.length, 'sorting comparisons yield through the shared renderer');
+    }
+  }
+});
+
+test('Shared HTML setter preserves canonical DOM and repairs external changes', () => {
+  const source = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+  const context = {};
+  vm.createContext(context);
+  vm.runInContext(source.slice(0, source.indexOf('const yomuxDragMimeTypes')), context);
+  let value = '';
+  let writes = 0;
+  const node = {
+    get innerHTML() { return value; },
+    set innerHTML(html) { writes += 1; value = html.replace('<path/>', '<path></path>'); },
+  };
+  const cleanups = [];
+  const cleanup = target => cleanups.push(target.innerHTML);
+  assert.equal(context.setInnerHtmlIfChanged(node, '<path/>', cleanup), true);
+  assert.equal(context.setInnerHtmlIfChanged(node, '<path/>', cleanup), false);
+  assert.equal(writes, 1);
+  value = 'external';
+  assert.equal(context.setInnerHtmlIfChanged(node, '<path/>', cleanup), true);
+  assert.equal(context.setInnerHtmlIfChanged(node, '', cleanup), true);
+  assert.equal(context.setInnerHtmlIfChanged(node, '', cleanup), false);
+  assert.deepStrictEqual(cleanups, ['', 'external', '<path></path>']);
+  assert.equal(writes, 3);
+});
+
+test('Finder expansion depth ordering derives each path depth once', () => {
+  const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  let depthCalls = 0;
+  const context = {
+    normalizeDirectoryPath: path => path,
+    pathIsInsideDirectory: (path, root) => path.startsWith(`${root}/`),
+    childPathParts: (root, path) => { depthCalls += 1; return path.slice(root.length + 1).split('/'); },
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function fileExplorerExpandedPathsForRoot('), source.indexOf('function fileExplorerDirectoryDemandTerminalError(')), context);
+  const paths = Array.from({length: 100}, (_, index) => `/repo/${99 - index}${index % 3 ? '/child' : ''}`);
+  const expected = [...paths].sort((left, right) => left.split('/').length - right.split('/').length || left.localeCompare(right));
+  assert.deepStrictEqual([...context.fileExplorerExpandedPathsForRoot('/repo', [...paths, paths[0], '/outside'])], expected);
+  assert.equal(depthCalls, paths.length);
+  const duplicates = ['/repo/z', '/repo/a/child', '/repo/a', '/repo/z'];
+  assert.deepStrictEqual([...context.fileExplorerPathsSortedByDepth('/repo', duplicates, false)], ['/repo/z', '/repo/a', '/repo/z', '/repo/a/child']);
+  assert.deepStrictEqual([...context.fileExplorerPathsSortedByDepth('/repo', duplicates)], ['/repo/a', '/repo/z', '/repo/z', '/repo/a/child']);
+  assert.deepStrictEqual(duplicates, ['/repo/z', '/repo/a/child', '/repo/a', '/repo/z']);
+});
+
+test('Finder highlight plans reuse payload work while tracking focus and manual collapse', () => {
+const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+let plans=0,cwd='/repo',gitRoot='/repo',collapsed=false;
+const c={fileExplorerRootMode:'sync',isTmuxSession:()=>true,tmuxGitRootForItem:()=>gitRoot,tmuxDirectoryForItem:()=>cwd,fileExplorerFinderSessionFilesState:{payload:{session:'1'}},sessionFilesPayloadOverlapsFocusedRoot:()=>true,sessionFilesRepoRoots:()=>['/repo'],fileExplorerSyncPlan:()=>{plans++;return{session:'1'};},fileExplorerSyncHighlightedRepoRoots:()=>collapsed?[]:['/repo'],fileExplorerSyncTargetDirs:()=>[],t:()=>'',emptyFileExplorerSessionHighlightSets:()=>({expandedDirs:new Set()})};
+vm.createContext(c);vm.runInContext(source.slice(source.indexOf('function fileExplorerSessionHighlightSets('),source.indexOf('function fileExplorerSessionHighlightClassForPath(')),c);
+const context={};c.fileExplorerSessionHighlightSets('1',context);c.fileExplorerSessionHighlightSets('1',context);assert.equal(plans,1);
+collapsed=true;assert.equal(c.fileExplorerSessionHighlightSets('1',context).expandedDirs.size,0);assert.equal(plans,1);
+cwd='/repo/other';c.fileExplorerSessionHighlightSets('1',context);assert.equal(plans,2);
+gitRoot='/newrepo';c.fileExplorerSessionHighlightSets('1',context);assert.equal(plans,3);
+c.fileExplorerFinderSessionFilesState.payload={session:'1'};c.fileExplorerSessionHighlightSets('1',context);assert.equal(plans,4);
+
+
+});
+
+test('Finder Sync qualification reuses paths and batches rejected directory demand', () => {
+  const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  let preparations = 0;
+  let comparisons = 0;
+  const retired = [];
+  const context = {
+    normalizeDirectoryPath: path => path,
+    fileExplorerExpandedPathsForRoot(root, paths) { preparations += 1; return paths; },
+    dirnameOf: path => path.slice(0, path.lastIndexOf('/')),
+    basenameOf: path => path.split('/').at(-1),
+    pathIsInsideDirectory(path, root) { comparisons += 1; return path.startsWith(`${root}/`); },
+    ancestorPathsUnderRoot: (root, path) => path.slice(root.length + 1).split('/').map((part, index, parts) => `${root}/${parts.slice(0, index + 1).join('/')}`),
+    fileExplorerFsResourceRecords: new Map(),
+    fileExplorerFsBatchKey: () => '',
+    clearFileExplorerFsResourceFailure() {},
+    clearFileExplorerListError() {},
+    markFileExplorerDirectoryDemandNegative() {},
+    retireFileExplorerDirectoryDemand: paths => retired.push([...paths]),
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function qualifyFileExplorerDirectoryPaths('), source.indexOf('function fileExplorerSyncUserExpansionEntries(')), context);
+  const paths = ['/repo/a'];
+  const entries = new Map([['/repo', [{name: 'a', kind: 'dir'}]]]);
+  const reuse = {};
+  assert.equal(context.qualifyFileExplorerDirectoryPaths('/repo', paths, entries, reuse).length, 1);
+  assert.equal(context.qualifyFileExplorerDirectoryPaths('/repo', paths, entries, reuse).length, 1);
+  assert.equal(preparations, 1, 'unchanged transaction paths prepare only once');
+  entries.set('/repo', []);
+  assert.equal(context.qualifyFileExplorerDirectoryPaths('/repo', paths, entries, reuse).length, 0);
+  entries.set('/repo', [{name: 'a', kind: 'dir'}]);
+  assert.equal(context.qualifyFileExplorerDirectoryPaths('/repo', paths, entries, reuse).length, 1);
+  assert.deepStrictEqual(retired, [['/repo/a']]);
+  const missing = Array.from({length: 100}, (_, index) => `/repo/missing${index}`);
+  context.qualifyFileExplorerDirectoryPaths('/repo', missing, new Map([['/repo', []]]), {});
+  assert.equal(comparisons, 0, 'prepared ancestor membership avoids quadratic retired-prefix comparisons');
+  assert.equal(retired.length, 2, 'all missing demands retire in one shared transaction');
+  assert.deepStrictEqual(retired[1], missing);
+});
+
+test('explicit editor reveal shares tab synchronization while passive reveal retains its guard', () => {
+  const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  for (const explicit of [true, false]) {
+    const calls = [];
+    const path = '/repo/src/file.py';
+    const context = {
+      activeFile: path, fileExplorerRootMode: 'sync',
+      normalizeDirectoryPath: value => value, updateFileExplorerCurrentFileHighlight() {},
+      fileExplorerExplicitSyncSessionTarget: () => '2', fileExplorerSyncPlanForFile: () => ({session: '2'}),
+      fileEditorItemFor: value => `file:${value}`,
+      scheduleFileExplorerActiveTabSync: (item, options) => calls.push(['explicit-sync', item, options]),
+      syncFileExplorerRootToActiveFile(value, options) {calls.push(['sync', value, options]); return Promise.resolve();},
+    };
+    vm.createContext(context);
+    const start = source.indexOf('function scheduleFileExplorerActiveFileReveal(');
+    vm.runInContext(source.slice(start, source.indexOf('\nconst fileTreeMetadataRefreshState', start)), context);
+    context.scheduleFileExplorerActiveFileReveal(path, {explicit});
+    assert.equal(calls.length, 1, 'each reveal enters only one synchronization path');
+    if (explicit) {
+      assert.equal(calls[0][0], 'explicit-sync');
+      assert.equal(calls[0][1], `file:${path}`);
+      assert.equal(calls[0][2].explicit, true, 'the existing explicit tab owner retires manual disclosure');
+    } else {
+      assert.equal(calls[0][0], 'sync');
+      assert.equal(calls[0][2].guardExplicitTarget, true, 'passive reveal keeps the existing target guard');
+    }
+  }
+});
+
+test('explicit file disclosure renewal retires an in-flight plan with the same signature', () => {
+  const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  for (const collapseChanged of [true, false]) {
+    const frames = [];
+    let interactions = 4;
+    let syncs = 0;
+    const context = {
+      fileExplorerRootMode: 'sync', fileExplorerManualSelectionActive: false,
+      fileExplorerVisibleSyncSession: '2', fileExplorerSyncState: {inFlightSignature: 'same', generation: 4},
+      fileExplorerIsOpen: () => true, setFileExplorerSelectionPin() {},
+      isTmuxSession: () => false, isFileEditorItem: () => true,
+      fileItemPath: () => '/repo/src/file.py', fileExplorerExplicitSyncSessionTarget: () => '2',
+      forgetFileExplorerSyncManualCollapse: () => collapseChanged,
+      fileExplorerSyncPlanForFile: () => ({session: '2', root: '/repo'}),
+      fileExplorerSyncExpansionPaths: () => ['/repo/src'], fileExplorerSyncPlanSignature: () => 'same',
+      currentFileExplorerRoot: () => '/repo', fileExplorerSyncPlanAlreadyApplied: () => false,
+      resetFileExplorerAppliedSyncPlan() {}, markFileExplorerSyncPlanApplied() {},
+      fileWorkspaceState: {invalidateInteraction() {interactions++;}, interactionGeneration: () => interactions, interactionIsCurrent: generation => generation === interactions},
+      requestAnimationFrame: callback => frames.push(callback),
+      syncFileExplorerRootToActiveFile() {syncs++; return Promise.resolve();},
+    };
+    vm.createContext(context);
+    const schedule = source.indexOf('function scheduleFileExplorerActiveTabSync(');
+    vm.runInContext(source.slice(schedule, source.indexOf('function fileExplorerSyncPlanTargetStillCurrent(', schedule)), context);
+    const cancel = source.indexOf('function cancelPendingFileExplorerActiveSync(');
+    vm.runInContext(source.slice(cancel, source.indexOf('async function syncFileExplorerRootToActiveTmux(', cancel)), context);
+    context.scheduleFileExplorerActiveTabSync('file:/repo/src/file.py', {explicit: true});
+    assert.equal(context.fileExplorerSyncState.generation, collapseChanged ? 5 : 4);
+    assert.equal(context.fileExplorerSyncState.inFlightSignature, collapseChanged ? '' : 'same');
+    assert.equal(frames.length, collapseChanged ? 1 : 0, 'unchanged disclosure deduplicates; renewed disclosure gets a new guarded sync');
+    frames.shift()?.();
+    assert.equal(syncs, collapseChanged ? 1 : 0);
+    if (collapseChanged) assert.equal(context.fileWorkspaceState.interactionIsCurrent(4), false, 'a previously queued explicit callback cannot publish the superseded disclosure');
+  }
+});
+
+test('shared tree preparation yields before scanning a large flat listing and retires replaced owners', () => {
+  const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  let nameReads = 0, kindReads = 0;
+  const entries = Array.from({length: 100000}, (_, index) => ({
+    get name() {nameReads += 1; return `file-${index}`;},
+    get kind() {kindReads += 1; return 'file';},
+  }));
+  const context = {
+    fileExplorerDeletedPathTombstones: new Set(['/repo/unrelated']),
+    normalizeDirectoryPath: path => path, childPath: (parent, name) => `${parent}/${name}`,
+    hydrateFileExplorerRepoInfoCache() {}, persistFileExplorerRepoInfoCache() {},
+    fileTreeRenderOwners: new WeakMap(), fileTreeRenderEpoch: 0,
+    indexSessionFilesByPath: () => new Map(), fileExplorerSessionHighlightSets: () => ({}),
+    fileExplorerFinderSessionFilesState: {payload: {files: []}},
+    *sortedFileTreeEntrySteps(values) {yield; return values;},
+  };
+  vm.createContext(context);
+  installTreePublicationHelpers(context);
+  vm.runInContext(source.slice(source.indexOf('function filterFileExplorerDeletedPathTombstones('), source.indexOf('function removeFileTreePathsImmediately('))
+    + source.slice(source.indexOf('function cacheFileExplorerRepoInfoEntries('), source.indexOf('function scheduleFileExplorerRepoInfoEnrichment('))
+    + source.slice(source.indexOf('function drainFileTreeRenderSteps('), source.indexOf('async function drainFileTreeRenderStepsWithInput('))
+    + source.slice(source.indexOf('function* renderTreeChildrenSteps('), source.indexOf('function zipFileDownloadUrl(')), context);
+  const container = new TestElement('preparation-tree');
+  const transaction = {epoch: 1, completed: true};
+  const steps = context.renderTreeChildrenSteps(container, '/repo', entries, 0, {differMode: true, renderTransaction: transaction});
+  assert.equal(steps.next().done, false);
+  assert.ok(nameReads <= 1 && kindReads <= 1, `first preparation step must be bounded; name=${nameReads}, kind=${kindReads}`);
+  context.fileTreeRenderOwners.set(container, {epoch: 2});
+  assert.equal(steps.next().value, false);
+  assert.equal(transaction.completed, false);
+  assert.ok(nameReads <= 1 && kindReads <= 1, 'replacing the tree owner stops preparation before another entry');
+  context.fileExplorerDeletedPathTombstones.clear();
+  nameReads = 0;
+  kindReads = 0;
+  const metadataTransaction = {epoch: 3, completed: true};
+  const metadataSteps = context.renderTreeChildrenSteps(container, '/repo', entries, 0, {differMode: true, renderTransaction: metadataTransaction});
+  assert.equal(metadataSteps.next().value, true, 'connected tree depth styling also hands off paint');
+  assert.equal(metadataSteps.next().done, false);
+  assert.equal(nameReads, 0);
+  assert.equal(kindReads, 1, 'the no-tombstone path also yields inside repository metadata preparation');
+  context.fileTreeRenderOwners.set(container, {epoch: 4});
+  assert.equal(metadataSteps.next().value, false);
+  assert.equal(metadataTransaction.completed, false);
+  assert.equal(kindReads, 1);
+  const hiddenParent = new TestElement('hidden-tree-owner');
+  hiddenParent.setAttribute('hidden', '');
+  hiddenParent.append(container);
+  const hiddenSteps = context.renderTreeChildrenSteps(container, '/repo', entries, 0, {
+    differMode: true, renderTransaction: {epoch: 5, completed: true},
+  });
+  assert.equal(hiddenSteps.next().value, false, 'hidden publications yield to input without waiting for a paint');
+  assert.equal(hiddenSteps.next().done, false, 'hidden preparation remains interruptible');
+  hiddenParent.removeAttribute('hidden');
+  const shownSteps = context.renderTreeChildrenSteps(container, '/repo', entries, 0, {
+    differMode: true, renderTransaction: {epoch: 6, completed: true},
+  });
+  assert.equal(shownSteps.next().value, true, 'the same destination requests paint once it becomes visible');
+});
+
+test('tree preparation synchronous wrappers and yielded owners preserve filtering and one metadata publication', () => {
+  const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  const tombstones = new Set(['/repo/deleted']);
+  const publications = [];
+  let persists = 0;
+  const context = {
+    fileExplorerDeletedPathTombstones: tombstones,
+    normalizeDirectoryPath: path => path, childPath: (parent, name) => `${parent}/${name}`,
+    hydrateFileExplorerRepoInfoCache() {}, persistFileExplorerRepoInfoCache() {persists += 1;},
+    cacheFileExplorerRepoInfo(path, repo, options) {publications.push({path, repo, persist: options.persist}); return true;},
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function filterFileExplorerDeletedPathTombstones('), source.indexOf('function removeFileTreePathsImmediately('))
+    + source.slice(source.indexOf('function cacheFileExplorerRepoInfoEntries('), source.indexOf('function scheduleFileExplorerRepoInfoEnrichment('))
+    + source.slice(source.indexOf('function drainFileTreeRenderSteps('), source.indexOf('async function drainFileTreeRenderStepsWithInput(')), context);
+  const entries = [{name: 'deleted', kind: 'file'}, {name: 'kept', kind: 'file'},
+    {name: 'nested', kind: 'dir', is_repo: true, repo: {root: '/repo/nested'}}];
+  const visible = context.filterFileExplorerDeletedPathTombstones('/repo', entries);
+  assert.deepEqual([...visible], entries.slice(1));
+  const yielded = context.drainFileTreeRenderSteps(context.filterFileExplorerDeletedPathTombstonesSteps('/repo', entries));
+  assert.deepEqual([...yielded], [...visible]);
+  tombstones.clear();
+  assert.equal(context.filterFileExplorerDeletedPathTombstones('/repo', entries), entries, 'the no-tombstone fast path retains its input');
+  context.cacheFileExplorerRepoInfoEntries('/repo', entries);
+  assert.equal(persists, 1);
+  assert.deepEqual(publications, [{path: '/repo/nested', repo: entries[2].repo, persist: false}]);
+  publications.length = 0;
+  persists = 0;
+  context.drainFileTreeRenderSteps(context.cacheFileExplorerRepoInfoEntrySteps('/repo', entries));
+  assert.equal(persists, 1);
+  assert.deepEqual(publications, [{path: '/repo/nested', repo: entries[2].repo, persist: false}]);
+});
+
+test('shared tree paint scheduling resumes work in a task after its frame', () => {
+  const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  for (const [hasFrames, hasPriorityTasks] of [[true, true], [true, false], [false, true], [false, false]]) {
+    const frames = [];
+    const tasks = [];
+    const priorities = [];
+    let resumed = false;
+    const context = {setTimeout: callback => tasks.push(callback)};
+    if (hasPriorityTasks) context.scheduler = {postTask(callback, options) {priorities.push(options.priority); tasks.push(callback);}};
+    if (hasFrames) context.requestAnimationFrame = callback => frames.push(callback);
+    vm.createContext(context);
+    vm.runInContext(source.slice(source.indexOf('function scheduleAfterFileExplorerFirstPaint('), source.indexOf('function scrollFileTreeRowIntoView(')), context);
+    context.scheduleAfterFileExplorerFirstPaint(() => {resumed = true;});
+    assert.equal(resumed, false, 'scheduling must not run the tree work immediately');
+    const initial = hasFrames ? frames : tasks;
+    assert.equal(initial.length, 1, 'the existing frame or fallback task owns the first boundary');
+    initial.shift()();
+    assert.equal(resumed, false, 'the frame callback must leave the paint opportunity free of tree work');
+    assert.equal(frames.length, 0, 'the tree must not mutate in another pre-paint frame callback');
+    assert.equal(tasks.length, 1, 'the frame schedules the continuation as a task');
+    assert.deepEqual(priorities, hasPriorityTasks ? ['background'] : [], 'pending input takes priority when the browser supports task scheduling');
+    tasks.shift()();
+    assert.equal(resumed, true, 'the continuation runs after the frame boundary');
+    resumed = false;
+    priorities.length = 0;
+    context.scheduleAfterFileExplorerFirstPaint(() => {resumed = true;}, {waitForPaint: false});
+    assert.equal(resumed, false, 'subsequent work still yields to the event loop');
+    assert.equal(frames.length, 0, 'subsequent slices do not spend an entire frame waiting after first paint');
+    assert.equal(tasks.length, 1, 'the same task scheduler owns continuation slices');
+    assert.deepEqual(priorities, hasPriorityTasks ? ['background'] : []);
+    tasks.shift()();
+    assert.equal(resumed, true);
+  }
+});
+
+test('batched directory retirement preserves siblings and can retire reintroduced demand', () => {
+  const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  let cancellations = 0;
+  const context = {
+    normalizeDirectoryPath: path => path,
+    dirnameOf: path => path === '/' ? '/' : path.slice(0, path.lastIndexOf('/')) || '/',
+    fileExplorerExpanded: new Set(['/repo/a', '/repo/a/child', '/repo/b', '/repository', '/repo/c']),
+    fileExplorerPendingExpansions: new Set(), fileExplorerPendingExpansionOwners: new Map(),
+    fileExplorerSyncUserExpansionState: new Map(), fileExplorerSyncTargetRecords: new Map(),
+    fileExplorerSyncManualCollapsedPaths: new Set(), fileExplorerFsResourceRecords: new Map(),
+    fileExplorerDirectoryRecords: new Map([['/repo/a', {}], ['/repo/a/child', {}], ['/repo/b', {}], ['/repo/c', {}]]),
+    cancelPendingFileExplorerActiveSync() { cancellations += 1; }, refreshLayoutUrlStateSoon() {}, syncServerWatchRoots() {},
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function retireFileExplorerDirectoryDemand('), source.indexOf('function qualifyFileExplorerDirectoryPaths(')), context);
+  assert.equal(context.retireFileExplorerDirectoryDemand(['/repo/a', '/repo/b']), true);
+  assert.deepStrictEqual([...context.fileExplorerExpanded], ['/repository', '/repo/c']);
+  assert.deepStrictEqual([...context.fileExplorerDirectoryRecords.keys()], ['/repo/a', '/repo/b', '/repo/c']);
+  assert.equal(cancellations, 1, 'one invalidation retires the complete batch');
+  context.fileExplorerExpanded.add('/repo/a/new');
+  assert.equal(context.retireFileExplorerDirectoryDemand(['/repo/a', '/repo/b']), true);
+  assert.equal(context.fileExplorerExpanded.has('/repo/a/new'), false, 'retirement is not memoized across transactions');
+  assert.equal(cancellations, 2);
+});
+
+test('Finder publication shares surface discovery without expanding its rendering scope', () => {
+  const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  let discoveries = 0;
+  const rendered = [];
+  const tree = (top, panel) => ({
+    scrollTop: top, scrollLeft: 0, isConnected: true,
+    querySelector: () => ({}), closest: () => panel ? {} : null,
+  });
+  const legacy = tree(100, false);
+  const proper = tree(200, true);
+  const standalone = tree(300, false);
+  const containers = [legacy, proper, standalone];
+  const context = {
+    fileExplorerTree: legacy, normalizeDirectoryPath: path => path,
+    qualifyFileExplorerDirectoryPaths: () => [], resetFileExplorerSyncManualCollapsesIfNeeded() {},
+    fileExplorerSyncPathSuppressed: () => false, currentFileExplorerRoot: () => '/repo',
+    fileExplorerTreeContainers() { discoveries += 1; return containers; },
+    document: {querySelectorAll(selector) {
+      discoveries += 1;
+      return selector === '.panel.file-explorer-panel' ? [{querySelector: () => proper}] : [proper];
+    }},
+    fileExplorerExpanded: new Set(), setFileExplorerPathDisplay() {}, renderFileExplorerRootModeControls() {},
+    fileExplorerSyncUserExpandedPathsForRoot: () => [], fileExplorerSessionHighlightSets: () => ({}),
+    fileTreeRenderEpoch: 0,
+    drainFileTreeRenderSteps(steps) { let next = steps.next(); while (!next.done) next = steps.next(); return next.value; },
+    *renderTreeChildrenSteps(node) { rendered.push(node); }, updateFileExplorerCurrentFileHighlight() {},
+    ownedElementScrollPosition: node => ({top: node.scrollTop, left: node.scrollLeft}),
+    writeOwnedElementScroll(node, position) { node.scrollTop = position.top; node.scrollLeft = position.left; },
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function renderCachedFileExplorerSyncPlan('), source.indexOf('async function fetchFileExplorerSyncListings('))
+    + source.slice(source.indexOf('function captureFileExplorerScrollPositions('), source.indexOf('function markFileExplorerInteraction(')), context);
+  context.renderCachedFileExplorerSyncPlan({root: '/repo'}, [], new Map([['/repo', []]]), {
+    preserveState: true, listingDirectories: new Set(['/repo']), reconcileDirectories: new Set(['/repo']), payloadContext: {},
+  });
+  assert.deepStrictEqual(rendered, [legacy, proper]);
+  assert.equal(standalone.scrollTop, 300, 'standalone scroll is preserved without rendering its rows');
+  assert.equal(discoveries, 1, 'one synchronous publication shares one fresh surface discovery');
+  proper.isConnected = false;
+  proper.scrollTop = 400;
+  context.restoreFileExplorerScrollPositions([{element: proper, position: {top: 200, left: 0}}], {containers});
+  assert.equal(proper.scrollTop, 400, 'a detached captured element is not written');
+});
+
+test('Finder Sync cursor restoration respects newer input for both existing and late rows', () => {
+  const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  const body = source.slice(source.indexOf('function syncFileExplorerTreeActiveDescendant('), source.indexOf('function restoreFileExplorerSyncCursorState('));
+  for (const mounted of [false, true]) {
+    let scrolls = 0;
+    const row = {id: '', dataset: {path: '/repo/late/file'}, scrollIntoView() { scrolls += 1; }};
+    const container = {getAttribute: () => mounted ? 'cursor' : null, querySelector: () => mounted ? row : null, setAttribute() {}, removeAttribute() {}};
+    const context = {
+      fileExplorerTreeContainers: () => [container], fileExplorerTreeActiveDescendantId: () => 'cursor',
+      selectableFileTreeRows: () => [row], scrollFileTreeRowIntoView() { scrolls += 1; return true; },
+      deferredElementScrollOwnerOwnsElement: () => false,
+    };
+    vm.createContext(context);
+    vm.runInContext(body, context);
+    context.syncFileExplorerTreeActiveDescendant('/repo/late/file', {progressive: true, scrollOwner: {expected: new WeakMap([[container, {}]])}});
+    assert.equal(scrolls, 0, 'newer input owns scroll even when the selected cursor first appears');
+    context.deferredElementScrollOwnerOwnsElement = () => true;
+    context.syncFileExplorerTreeActiveDescendant('/repo/late/file', {progressive: true, scrollOwner: {expected: new WeakMap()}});
+    assert.equal(scrolls, 0, 'a replaced container never inherits the captured element scroll ownership');
+  }
+});
+
+test('ancestor metadata shares directory chains and merges duplicate file attribution', () => {
+  const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  const start = source.indexOf('function fileTreeChangedAncestorStats(');
+  const end = source.indexOf('\nfunction normalizeGitStatus(', start);
+  let normalizations = 0;
+  const context = {
+    fileExplorerFinderSessionFilesState: {payload: null},
+    sessionFileIsDifferVisible: file => file.status !== 'T',
+    sessionFileAbsolutePath: file => file.abs_path,
+    sessionFileAgentKinds: file => file.agents || [],
+    dirnameOf: path => path.slice(0, path.lastIndexOf('/')) || '/',
+    normalizeDirectoryPath: path => { normalizations += 1; return path; },
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(start, end), context);
+  const files = Array.from({length: 100}, (_, index) => ({abs_path: `/repo/src/file-${index}`, status: 'M', added: 2, removed: 1, agents: ['codex'], mtime: 10}));
+  files.push({...files[0], added: 500, removed: 500, agents: ['claude'], mtime: 20});
+  files.push({abs_path: '/repo/src/transcript', status: 'T', added: 1000});
+  const result = context.fileTreeChangedAncestorStats({files});
+  for (const directory of ['/repo/src', '/repo']) {
+    assert.deepEqual(JSON.parse(JSON.stringify(result.get(directory))), {count: 100, agents: ['codex', 'claude'], mtime: 20, added: 200, removed: 100});
+  }
+  assert.ok(normalizations <= 3, `one directory chain, not one chain per file: ${normalizations}`);
+});
+
+test('Finder metadata never replaces Differ or repository diff status, including hidden rows', () => {
+  const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  const extract = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
+  for (const surface of ['.file-explorer-changes-panel', '.git-diff-file-tree']) {
+    for (const visible of [false, true]) {
+      for (const route of ['scheduled', 'direct', 'global']) {
+        const statuses = new Map(), highlights = [];
+        const makeRow = owner => ({
+          dataset: {path: '/repo/shared.py', kind: 'file', name: 'shared.py'},
+          classList: new TestClassList(),
+          closest: selector => owner && selector.includes(owner) ? {} : null,
+          querySelector: () => null,
+          removeAttribute() {},
+        });
+        const finder = makeRow(''), differ = makeRow(surface);
+        const payload = {session: 'finder-session', files: [{abs_path: '/repo/shared.py', status: '?'}]};
+        const timers = new Map();
+        let timerId = 0;
+        const context = {
+          document: {querySelectorAll: () => [finder, differ]}, performance: {now: () => 0}, fileTreeInputSliceMs: 1,
+          setTimeout(callback) {timers.set(++timerId, callback); return timerId;}, clearTimeout: id => timers.delete(id),
+          fileExplorerFinderSessionFilesState: {payload}, fileExplorerRootMode: 'sync',
+          fileExplorerExplicitSyncSessionTarget: () => 'finder-session', currentFileExplorerRoot: () => '/repo',
+          fileTreeSessionFilesRenderContext: (value = payload) => ({sessionFilesMap: new Map(value.files.map(file => [file.abs_path, file])), changedAncestorStats: new Map()}),
+          fileExplorerSessionFilesPaneIsVisible: () => visible, clientElementIsVisible: row => row === finder || visible,
+          fileExplorerSessionHighlightSets: () => ({}), updateFileExplorerCurrentFileHighlightRows: rows => highlights.push(...rows),
+          applyFileExplorerSessionHighlightRow() {}, exactFileExplorerRepoInfo: () => null,
+          basenameOf: path => path.split('/').pop(), fileTreeDirectoryExpanded: () => false,
+          finderSessionFilesDiffIsDeferred: () => false, fileExplorerPathIsExcluded: () => false,
+          sessionFileDisplayStatus: file => String(file.status || '').toUpperCase(),
+          fileTreeDisplayParts: (_path, entry) => ({text: entry.name, html: null}),
+          fileIconClassFor: () => '', fileIconFor: () => '', t: key => key,
+          gitStatusBadgeTitle: status => status, sessionFileDiffText: () => [], changeFileAgentsHtml: () => '',
+          fileTreeRepoBranchIsNonMain: () => false, fileExplorerIndexBadgeText: () => '', fileExplorerIndexBadgeTitle: () => '',
+          GIT_STATUS_ROW_CLASSES: ['git-untracked', 'git-deleted', 'git-staged', 'git-modified', 'git-transcript'],
+          updateFileTreeRowContents(row, _icon, _name, options) {statuses.set(row, options.gitStatus);},
+        };
+        vm.createContext(context);
+        for (const [start, end] of [
+          ['const fileTreeMetadataRefreshState =', '\nfunction selectFileTreePath('],
+          ['function fileTreeRowDerivedState(', '\nfunction buildFileTreeRowState('],
+          ['function normalizeGitStatus(', '\nfunction fileTreeRepoBranch('],
+          ['function gitStatusRowClass(', '\nfunction gitStatusBadgeTitle('],
+          ['function applyGitStatusRowClass(', '\nfunction applySessionHighlightRowClass('],
+        ]) vm.runInContext(extract(start, end), context);
+        const rowOwnerStart = source.indexOf('function fileTreeRowIsDiffer(');
+        if (rowOwnerStart >= 0) vm.runInContext(source.slice(rowOwnerStart, source.indexOf('\nconst fileTreeMetadataRefreshState =', rowOwnerStart)), context);
+        context.applyFileTreeRowDerivedState(differ, context.fileTreeRowDerivedState('/repo/shared.py', {kind: 'file', name: 'shared.py'}, {
+          sessionFilesMap: new Map([['/repo/shared.py', {abs_path: '/repo/shared.py', status: 'M'}]]), changedAncestorStats: new Map(),
+          differMode: true, preserveDiff: true, preserveDirCount: true,
+        }));
+        assert.equal(statuses.get(differ), 'M');
+        if (route === 'scheduled') {
+          context.scheduleFileTreeMetadataRefresh();
+          while (timers.size) {const [id, callback] = timers.entries().next().value; timers.delete(id); callback();}
+        } else context.updateFileTreeGitStatusRows(route === 'direct' ? [finder, differ] : null);
+        assert.equal(statuses.get(finder), '?', 'Finder continues to derive its own status');
+        assert.equal(statuses.get(differ), 'M', `${surface} ${visible ? 'visible' : 'hidden'} ${route}: Differ retains its own payload`);
+        assert.ok(differ.classList.contains('git-modified'));
+        assert.equal(differ.classList.contains('git-untracked'), false);
+        if (route === 'scheduled') assert.equal(highlights.includes(differ), visible, 'only visible Differ participates in pure highlights');
+      }
+    }
+  }
+});
+
+test('Finder sync highlights stay within Finder directories', () => {
+  const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  const start = source.indexOf('function applyFileExplorerSessionHighlightRow(');
+  const ownerStart = source.indexOf('function fileTreeRowIsDiffer(');
+  const sets = {syncTargetDirs: new Set(['/repo']), syncTargetTitle: 'Finder session'};
+  const markerWrites = [];
+  const context = {
+    normalizeDirectoryPath: value => value,
+    fileExplorerSessionHighlightClassForPath: () => 'file-tree-row--sync-expanded',
+    applySessionHighlightRowClass: (row, name) => row.classList.add(name),
+    updateFileTreeSyncTargetMarker: row => markerWrites.push(row),
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(start, source.indexOf('\nfunction fileExplorerPathInputs(', start))
+    + source.slice(ownerStart, source.indexOf('\nconst fileTreeMetadataRefreshState =', ownerStart)), context);
+  for (const owner of ['', '.file-explorer-changes-panel', '.git-diff-file-tree']) {
+    const row = new TestElement();
+    row.dataset.path = '/repo'; row.dataset.kind = 'dir';
+    row.closest = selector => owner && selector.includes(owner) ? {} : null;
+    context.applyFileExplorerSessionHighlightRow(row, sets);
+    assert.equal(row.classList.contains('file-tree-row--sync-expanded'), !owner);
+    assert.equal(row.classList.contains('file-tree-row--sync-target'), !owner);
+    assert.equal(row.dataset.syncTargetTitle, owner ? undefined : 'Finder session');
+    assert.equal(markerWrites.includes(row), !owner);
+  }
+});
+
+test('current-file highlights skip hidden trees and avoid unchanged ARIA writes', () => {
+  const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  const start = source.indexOf('function updateFileExplorerCurrentFileHighlightRows(');
+  const row = new TestElement();
+  row.dataset.path = '/repo/shared.py'; row.dataset.kind = 'file';
+  let writes = 0, visible = true;
+  const setAttribute = row.setAttribute.bind(row), removeAttribute = row.removeAttribute.bind(row);
+  row.setAttribute = (...args) => {writes++; setAttribute(...args);};
+  row.removeAttribute = (...args) => {writes++; removeAttribute(...args);};
+  const context = {
+    activeFinderDirectoryPath: () => '/repo', fileExplorerSelectedPaths: new Set(['/repo/shared.py']), activeFile: '/repo/shared.py',
+    CLS: {selected: 'selected'}, clientElementIsVisible: () => visible, fileExplorerSessionFilesPaneIsVisible: () => visible,
+  };
+  vm.createContext(context);
+  installTreePublicationHelpers(context);
+  vm.runInContext(source.slice(start, source.indexOf('\nfunction scheduleFileExplorerActiveFileReveal(', start)), context);
+  context.updateFileExplorerCurrentFileHighlightRows([row]);
+  assert.equal(writes, 2);
+  for (let index = 0; index < 5000; index++) context.updateFileExplorerCurrentFileHighlightRows([row]);
+  assert.equal(writes, 2, 'unchanged pure highlights never invalidate the tree');
+  visible = false; context.activeFile = ''; context.fileExplorerSelectedPaths.clear();
+  context.updateFileExplorerCurrentFileHighlightRows([row]);
+  assert.equal(writes, 2, 'hidden tree receives no highlight mutation');
+  visible = true;
+  context.updateFileExplorerCurrentFileHighlightRows([row]);
+  assert.equal(writes, 4);
+  assert.equal(row.getAttribute('aria-selected'), 'false');
+  assert.equal(row.hasAttribute('aria-current'), false);
+});
+
+test('targeted tree metadata enrichment does not mutate unrelated highlights', () => {
+  const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  const start = source.indexOf('function updateFileTreeGitStatusRows(');
+  const end = source.indexOf('\nfunction selectFileTreePath(', start);
+  const row = path => ({dataset: {path, kind: 'file'}, querySelector: () => null});
+  const first = row('/repo/first');
+  const second = row('/repo/second');
+  const highlighted = [];
+  const context = {
+    document: {querySelectorAll: () => [first, second]},
+    fileTreeSessionFilesRenderContext: () => ({}),
+    exactFileExplorerRepoInfo: () => null,
+    basenameOf: path => path.split('/').at(-1),
+    fileTreeRowDerivedState: () => ({}),
+    applyFileTreeRowDerivedState: () => {},
+    fileExplorerSessionHighlightSets: () => ({}),
+    applyFileExplorerSessionHighlightRow: target => highlighted.push(target),
+    fileTreeRowIsDiffer: () => false,
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(start, end), context);
+  context.updateFileTreeGitStatusRows([first]);
+  assert.deepEqual(highlighted, [first]);
+  highlighted.length = 0;
+  context.updateFileTreeGitStatusRows();
+  assert.deepEqual(highlighted, [first, second], 'global owner retains both rows');
+});
+
+test('Finder target changes finish pending metadata without another payload', () => {
+  const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  for (const route of ['mode', 'session']) {
+    let session = '1';
+    const rows = Array.from({length: 300}, (_, index) => ({isConnected: true, dataset: {path: `/repo/${index}`}, metadata: 'old'}));
+    const timers = new Map();
+    let timer = 0, clock = 0;
+    const context = {
+      document: {querySelectorAll: () => rows},
+      fileTreeRowIsDiffer: () => false,
+      fileTreeInputSliceMs: 1, performance: {now: () => clock += 4},
+      setTimeout(callback) {timers.set(++timer, callback); return timer;},
+      clearTimeout(id) {timers.delete(id);},
+      currentFileExplorerRoot: () => '/repo',
+      fileExplorerRootMode: 'sync',
+      fileExplorerExplicitSyncSessionTarget: () => session,
+      isTmuxSession: () => true, activeSessions: ['1', '2'], fileExplorerFinderSelectedSession: '1',
+      setExplicitPaneFocusItem(value) {const changed = session !== value; session = value; return changed;},
+      restoreCommittedFileExplorerRootDisplay() {}, cancelPendingFileExplorerActiveSync() {},
+      fileExplorerFinderSessionFilesState: {payload: {version: 'new'}},
+      fileTreeSessionFilesRenderContext: payload => ({payload}),
+      fileExplorerSessionHighlightSets: () => ({}),
+      updateFileTreeGitStatusRows(batch, options) {for (const row of batch) row.metadata = options.context.payload.version;},
+      applyFileExplorerSessionHighlightRow() {}, updateFileExplorerCurrentFileHighlightRows() {},
+      resetFileExplorerAppliedSyncPlan() {}, writeStoredFileExplorerRootMode() {},
+      renderFileExplorerRootModeControls() {},
+      saveFileExplorerRootMode() {}, scheduleFileExplorerActiveTabSync() {},
+    };
+    vm.createContext(context);
+    vm.runInContext(source.slice(source.indexOf('const fileTreeMetadataRefreshState ='), source.indexOf('\nfunction updateFileTreeGitStatusRows(')), context);
+    vm.runInContext(source.slice(source.indexOf('function setFileExplorerRootMode('), source.indexOf('\nfunction fileExplorerRootModeValue(')), context);
+    vm.runInContext(source.slice(source.indexOf('function rememberFileExplorerExplicitSyncSession('), source.indexOf('\nfunction fileExplorerRootForOpen(')), context);
+    const nextBatch = () => {const [id, callback] = timers.entries().next().value; timers.delete(id); callback();};
+    context.scheduleFileTreeMetadataRefresh();
+    nextBatch();
+    const before = rows.filter(row => row.metadata === 'new').length;
+    assert.ok(before > 0 && before < rows.length);
+    if (route === 'mode') context.setFileExplorerRootMode('fixed', {sync: false});
+    else context.rememberFileExplorerExplicitSyncSession('2');
+    while (timers.size) nextBatch();
+    const after = rows.filter(row => row.metadata === 'new').length;
+
+    assert.equal(after, rows.length, `${route} switch must retire old highlights without abandoning current metadata`);
+
+    context.scheduleFileTreeMetadataRefresh({pendingOnly: true});
+    assert.equal(timers.size, 0, 'completed metadata needs no new scan');
+  }
+});
+
+
+test('Finder metadata producer yields and retires superseded payload and root batches', () => {
+  const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  const start = source.indexOf('const fileTreeMetadataRefreshState =');
+  assert.ok(start >= 0);
+  const end = source.indexOf('\nfunction updateFileTreeGitStatusRows(', start);
+  const timers = new Map();
+  const calls = [];
+  const currentHighlights = [];
+  let timer = 0;
+  let root = '/old';
+  let payload = {session: 'one'};
+  let clock = 0;
+  const rows = Array.from({length: 300}, (_, index) => ({isConnected: true, dataset: {path: `/old/${index}`}}));
+  const context = {
+    document: {querySelectorAll: () => rows},
+    fileTreeRowIsDiffer: () => false,
+    fileTreeInputSliceMs: 1, performance: {now: () => clock++},
+    setTimeout: callback => { timers.set(++timer, callback); return timer; },
+    clearTimeout: id => timers.delete(id),
+    currentFileExplorerRoot: () => root,
+    fileExplorerRootMode: 'sync',
+    fileExplorerExplicitSyncSessionTarget: () => 'one',
+    fileExplorerFinderSessionFilesState: {get payload() { return payload; }},
+    fileTreeSessionFilesRenderContext: () => ({payload}),
+    fileExplorerSessionHighlightSets: () => ({payload}),
+    updateFileTreeGitStatusRows: (batch, options) => calls.push(...batch.map(row => ({row, payload: options.context.payload}))),
+    applyFileExplorerSessionHighlightRow: () => {},
+    updateFileExplorerCurrentFileHighlightRows: batch => currentHighlights.push(...batch),
+  };
+  const nextBatch = () => {
+    const [id, callback] = timers.entries().next().value;
+    timers.delete(id);
+    callback();
+  };
+  const flush = () => { while (timers.size) nextBatch(); };
+  vm.createContext(context);
+  vm.runInContext(source.slice(start, end), context);
+  context.scheduleFileTreeMetadataRefresh();
+  context.scheduleFileTreeMetadataRefresh();
+  assert.equal(timers.size, 1, 'same-turn producers coalesce before tree discovery');
+  assert.equal(calls.length, 0, 'producer never mutates rows before yielding');
+  assert.equal(currentHighlights.length, 0, 'current-file highlights share the deferred metadata owner');
+  nextBatch();
+  assert.ok(calls.length > 0 && calls.length < rows.length, 'producer yields before all rows');
+  assert.deepEqual(currentHighlights, calls.map(call => call.row), 'current-file highlights touch only the current metadata batch');
+  const oldCount = calls.length;
+  payload = {session: 'two'};
+  context.scheduleFileTreeMetadataRefresh({highlightsOnly: true});
+  flush();
+  assert.equal(calls.length - oldCount, rows.length);
+  assert.ok(calls.slice(oldCount).every(call => call.payload === payload), 'old payload never repaints after replacement');
+  calls.length = 0;
+  context.scheduleFileTreeMetadataRefresh();
+  root = '/new';
+  flush();
+  assert.ok(calls.length < rows.length, 'root switch cancels remaining old work');
+  assert.equal(vm.runInContext('fileTreeMetadataRefreshState.timer', context), 0);
+  calls.length = 0;
+  rows[0].isConnected = false;
+  context.scheduleFileTreeMetadataRefresh();
+  flush();
+  assert.equal(calls.length, rows.length - 1, 'detached rows are skipped');
+  calls.length = 0;
+  for (let index = 0; index < Math.ceil(rows.length / oldCount); index++) {
+    payload = {session: `revision-${index}`};
+    context.scheduleFileTreeMetadataRefresh();
+    nextBatch();
+  }
+  assert.equal(new Set(calls.map(call => call.row)).size, rows.length - 1, 'continuous replacement rotates through all retained rows');
+  flush();
+  calls.length = 0;
+  context.scheduleFileTreeMetadataRefresh();
+  context.fileExplorerRootMode = 'fixed';
+  flush();
+  assert.ok(calls.length < rows.length, 'mode switch fences captured highlights');
+  context.fileExplorerRootMode = 'sync';
+  calls.length = 0;
+  context.scheduleFileTreeMetadataRefresh();
+  nextBatch();
+  const beforeSwitch = calls.length;
+  context.fileExplorerExplicitSyncSessionTarget = () => 'two';
+  flush();
+  assert.equal(calls.length, beforeSwitch, 'same-root tab switch fences remaining old highlights');
+});
+
+test('Finder scroll restoration stays with its captured element and yields to newer scrolling', () => {
+  const core = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+  const explorer = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  const frames = [];
+  const first = {scrollTop: 100, scrollLeft: 15};
+  const replacement = {scrollTop: 900, scrollLeft: 35};
+  let containers = [first];
+  let writes = 0;
+  let nowMs = 10000;
+  const context = {
+    Date: {now: () => nowMs},
+    previewScrollTraceState: {active: null, last: null},
+    previewScrollGestureMaxActiveMs: 2000,
+    fileExplorerTreeContainers: () => containers,
+    requestAnimationFrame: callback => frames.push(callback),
+    writeOwnedElementScroll(element, coordinates) {
+      writes += 1;
+      element.scrollTop = coordinates.top;
+      element.scrollLeft = coordinates.left;
+      return true;
+    },
+  };
+  vm.runInNewContext(core.slice(core.indexOf('function ownedElementScrollPosition('), core.indexOf('function recordTerminalMobileInputTrace(')) + explorer.slice(explorer.indexOf('function captureFileExplorerScrollPositions('), explorer.indexOf('function markFileExplorerInteraction(')) + explorer.slice(explorer.indexOf('function claimFileExplorerScrollInputOwnership('), explorer.indexOf("document.addEventListener('pointerdown', event => {")), context);
+  const synchronous = context.captureFileExplorerScrollPositions({deferred: false});
+  first.scrollTop = 20;
+  context.restoreFileExplorerScrollPositions(synchronous);
+  assert.equal(first.scrollTop, 100, 'synchronous content replacement retains the previous viewport');
+  assert.equal(first.scrollLeft, 15);
+  assert.equal(frames.length, 0, 'progressive publication cannot replay scrolling on a later frame');
+
+  const clamped = context.captureFileExplorerScrollPositions();
+  first.scrollTop = 20;
+  context.restoreFileExplorerScrollPositions(clamped);
+  frames.shift()();
+  assert.equal(first.scrollTop, 100, 'asynchronous expansion recovers from a transaction-owned native clamp');
+
+  const userScrolled = context.captureFileExplorerScrollPositions();
+  context.restoreFileExplorerScrollPositions(userScrolled);
+  first.scrollTop = 240;
+  context.claimFileExplorerScrollInputOwnership({target: {closest: () => first}});
+  frames.shift()();
+  assert.equal(first.scrollTop, 240, 'a wheel gesture between scheduling and paint owns the viewport');
+  assert.equal(writes, 2);
+
+  const oldTree = context.captureFileExplorerScrollPositions();
+  context.restoreFileExplorerScrollPositions(oldTree);
+  containers = [replacement];
+  frames.shift()();
+  assert.equal(replacement.scrollTop, 900, 'an old snapshot cannot retarget a replacement tree by index');
+  assert.equal(writes, 2);
+
+  const claimed = context.captureFileExplorerScrollPositions();
+  context.restoreFileExplorerScrollPositions(claimed);
+  context.claimFileExplorerScrollInputOwnership({target: {closest: () => replacement}});
+  frames.shift()();
+  assert.equal(writes, 2, 'an unchanged position does not override a newer ownership generation');
+
+  const unchanged = context.captureFileExplorerScrollPositions();
+  context.restoreFileExplorerScrollPositions(unchanged);
+  frames.shift()();
+  assert.equal(writes, 2, 'a snapshot captured inside an existing gesture cannot adopt that gesture');
+  nowMs += 2001;
+  const settled = context.captureFileExplorerScrollPositions();
+  context.restoreFileExplorerScrollPositions(settled);
+  frames.shift()();
+  assert.equal(writes, 3, 'unclaimed asynchronous expansion still restores its captured viewport');
+  context.claimFileExplorerScrollInputOwnership({type: 'pointerdown', pointerId: 7, target: {closest: () => replacement}});
+  nowMs += 2300;
+  const held = context.captureFileExplorerScrollPositions();
+  replacement.scrollTop = 1200;
+  context.restoreFileExplorerScrollPositions(held);
+  frames.shift()();
+  assert.equal(replacement.scrollTop, 1200, 'a stationary held scrollbar owns its viewport beyond the recent-input window');
+  context.claimFileExplorerScrollInputOwnership({type: 'pointerup', pointerId: 7, target: {closest: () => null}});
+  nowMs += 2001;
+  const released = context.captureFileExplorerScrollPositions();
+  replacement.scrollTop = 20;
+  context.restoreFileExplorerScrollPositions(released);
+  frames.shift()();
+  assert.equal(replacement.scrollTop, 1200, 'release outside the tree retires the original active input');
+  context.claimFileExplorerScrollInputOwnership({type: 'pointerdown', pointerId: 8, target: {closest: () => replacement}});
+  context.releaseActiveElementScrollInputs();
+  nowMs += 2001;
+  const blurred = context.captureFileExplorerScrollPositions();
+  replacement.scrollTop = 20;
+  context.restoreFileExplorerScrollPositions(blurred);
+  frames.shift()();
+  assert.equal(replacement.scrollTop, 1200, 'window blur retires active input ownership');
+  const touchEvent = (type, identifier) => ({type, changedTouches: [{identifier}], target: {closest: () => replacement}});
+  context.claimFileExplorerScrollInputOwnership(touchEvent('touchstart', 1));
+  context.claimFileExplorerScrollInputOwnership(touchEvent('touchstart', 2));
+  context.claimFileExplorerScrollInputOwnership(touchEvent('touchend', 2));
+  nowMs += 2300;
+  const remainingTouch = context.captureFileExplorerScrollPositions();
+  replacement.scrollTop = 1500;
+  context.restoreFileExplorerScrollPositions(remainingTouch);
+  frames.shift()();
+  assert.equal(replacement.scrollTop, 1500, 'lifting one finger cannot release another active touch');
+  context.claimFileExplorerScrollInputOwnership(touchEvent('touchcancel', 1));
+});
 
 // The product stamps generated upload names in Pacific on purpose (pacificDateStamp() in
 // static_src/js/yomux/99_terminal_boot.js), because the operator contract is Pacific. Deriving the
@@ -79,9 +1190,509 @@ function summarizedHangingShard(closeOnSignal) {
   return {child, signals};
 }
 
+async function completeRenderFrames(rendering, frames) {
+  let settled = false;
+  rendering.then(() => { settled = true; }, () => { settled = true; });
+  while (!settled) {
+    for (const frame of frames.splice(0)) frame();
+    await flushAsyncWork();
+  }
+  return rendering;
+}
+
 async function runLayoutAsyncSuite() {
+await testAsync('yielding tree preparation hands off first paint once and retires superseded continuation work', async () => {
+  const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  const frames = [], tasks = [], priorities = [];
+  let clock = 0, current = true, steps = 0;
+  const context = {
+    fileTreeInputSliceMs: 1, performance: {now: () => ++clock},
+    requestAnimationFrame: callback => frames.push(callback),
+    scheduler: {postTask(callback, options) {tasks.push(callback); priorities.push(options.priority);}},
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function scheduleAfterFileExplorerFirstPaint('), source.indexOf('function scrollFileTreeRowIntoView('))
+    + source.slice(source.indexOf('function drainFileTreeRenderSteps('), source.indexOf('function renderTreeChildren(')), context);
+  const iterator = (function* () {for (let index = 0; index < 6; index += 1) {steps += 1; yield;} return true;})();
+  const completion = context.drainFileTreeRenderStepsWithInput(iterator, {isCurrent: () => current});
+  assert.equal(steps, 1);
+  assert.equal(frames.length, 1, 'the first slice gives terminal paint its frame');
+  frames.shift()();
+  assert.equal(steps, 1, 'the frame does no tree work');
+  tasks.shift()();
+  await Promise.resolve();
+  assert.equal(steps, 2);
+  assert.equal(frames.length, 0, 'only the first handoff waits for a frame');
+  assert.equal(tasks.length, 1, 'later slices yield as background tasks');
+  current = false;
+  tasks.shift()();
+  assert.equal(await completion, false);
+  assert.equal(steps, 2, 'superseded work is checked before another iterator step');
+  assert.deepEqual(priorities, ['background', 'background']);
+});
+
+await testAsync('connected tree publication hands off paint before another row slice accumulates', async () => {
+  const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  const frames = [], tasks = [];
+  let clock = 0, current = true, published = 0;
+  const context = {
+    fileTreeInputSliceMs: 1, performance: {now: () => ++clock},
+    requestAnimationFrame: callback => frames.push(callback),
+    scheduler: {postTask(callback) {tasks.push(callback);}},
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function scheduleAfterFileExplorerFirstPaint('), source.indexOf('function scrollFileTreeRowIntoView('))
+    + source.slice(source.indexOf('function drainFileTreeRenderSteps('), source.indexOf('function renderTreeChildren(')), context);
+  const iterator = (function* () {
+    yield;
+    yield;
+    published += 1;
+    yield true;
+    published += 1;
+    yield true;
+    return true;
+  })();
+  const completion = context.drainFileTreeRenderStepsWithInput(iterator, {isCurrent: () => current});
+  frames.shift()();
+  tasks.shift()();
+  await Promise.resolve();
+  assert.equal(frames.length, 0, 'pure preparation continues without another frame');
+  tasks.shift()();
+  await Promise.resolve();
+  assert.equal(published, 1);
+  assert.equal(frames.length, 1, 'a connected row publication must paint before another publication slice');
+  assert.equal(tasks.length, 0, 'held paint cannot accumulate another connected row');
+  current = false;
+  frames.shift()();
+  tasks.shift()();
+  assert.equal(await completion, false);
+  assert.equal(published, 1, 'input supersedes the second publication while paint is held');
+});
+
+await testAsync('Differ empty collapsed and missing repository chrome paints between publication slices', async () => {
+  const source = fs.readFileSync('static_src/js/yomux/86_changes_20_differ.js', 'utf8');
+  const treeSource = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  for (const mode of ['empty', 'collapsed', 'missing']) for (const mounted of [false, true]) {
+    const frames = [], tasks = [];
+    let clock = 0, current = true;
+    const repos = Array.from({length: 20}, (_, index) => ({repo: `/repo${index}`, added: 0, removed: 0, missing: mode === 'missing'}));
+    const context = {
+      Map, fileTreeInputSliceMs: 1, performance: {now: () => ++clock},
+      fileTreeRenderOwners: new WeakMap(), fileTreeRenderEpoch: 0,
+      requestAnimationFrame: callback => frames.push(callback),
+      scheduler: {postTask(callback) {tasks.push(callback);}},
+      document: {createElement: () => new TestElement(), activeElement: null},
+      makeButton: options => Object.assign(new TestElement(), options), CLS: {collapsed: 'collapsed'},
+      changesRepoCollapsed: new Set(mode === 'collapsed' ? repos.map(repo => repo.repo) : []),
+      normalizeFileExplorerView: value => value, fileExplorerSessionFilesPaneIsVisible: () => true,
+      repoPayloadByPath: () => new Map(repos.map(repo => [repo.repo, repo])),
+      repoPayloadHasRenderableSection: () => true, sessionFilesSortComparator: () => () => 0,
+      changesOutsideRepoKey: '__outside__', compactHomePath: value => value,
+      t: value => value, esc: value => value, disclosureTriangleHtml: () => '',
+      changesRepoTotalsHtml: () => '', repoComparisonErrorHtml: () => '',
+      changesRepoMetaHtml: () => '', diffRefComparisonLineHtml: () => '',
+    };
+    vm.createContext(context);
+    installTreePublicationHelpers(context);
+    vm.runInContext(treeSource.slice(treeSource.indexOf('function scheduleAfterFileExplorerFirstPaint('), treeSource.indexOf('function scrollFileTreeRowIntoView('))
+      + treeSource.slice(treeSource.indexOf('function drainFileTreeRenderSteps('), treeSource.indexOf('function renderTreeChildren('))
+      + source.slice(source.indexOf('const changesRepoSectionsByGroups ='), source.indexOf('// Returns the static toolbar/header HTML')), context);
+    const groups = new TestElement();
+    if (mounted) groups.append(...repos.map(repo => {
+      const section = new TestElement();
+      section.dataset.changesRepo = repo.repo;
+      return section;
+    }));
+    const completion = context.renderChangesGroups(groups, [], {
+      yieldToInput: true, payload: {repos}, includeEmptyRepoSections: true, isCurrent: () => current,
+    });
+    frames.shift()();
+    for (let index = 0; !(mounted ? groups.querySelectorAll('.changes-repo-head').length : groups.children.length) && index < repos.length; index += 1) {
+      assert.equal(tasks.length, 1);
+      tasks.shift()();
+      await Promise.resolve();
+    }
+    assert.equal(groups.children.length, mounted ? repos.length : 1, mode);
+    assert.equal(frames.length, 1, `${mode}: connected repository chrome must paint before another slice`);
+    assert.equal(tasks.length, 0, `${mode}: held paint cannot accumulate another section`);
+    if (!mounted) {
+      frames.shift()();
+      tasks.shift()();
+      await Promise.resolve();
+      assert.equal(frames.length, 1, `${mode}: the connected header and refs also hand off paint`);
+    }
+    assert.equal(groups.querySelectorAll('.changes-repo-head').length, 1, `${mode}: exactly one repository's chrome published`);
+    current = false;
+    frames.shift()();
+    tasks.shift()();
+    assert.equal(await completion, false, mode);
+    assert.equal(groups.querySelectorAll('.changes-repo-head').length, 1, `${mode}: superseded work cannot publish another repository`);
+  }
+});
+
+await testAsync('Differ preserves earlier repository publications at held row and final group paint', async () => {
+  const source = fs.readFileSync('static_src/js/yomux/86_changes_20_differ.js', 'utf8');
+  const treeSource = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  for (const hold of ['last-row', 'final-group']) {
+    const frames = [];
+    let clock = 0;
+    const payload = {repos: [{repo: '/first', added: 1, removed: 0}]};
+    const firstFile = {repo: '/first', path: 'z.txt'};
+    const secondFile = {repo: '/second', path: 'a.txt'};
+    const context = {
+      Map, fileTreeInputSliceMs: 1, performance: {now: () => ++clock},
+      fileTreeRenderOwners: new WeakMap(), fileTreeRenderEpoch: 0,
+      scheduleAfterFileExplorerFirstPaint: resolve => frames.push(resolve),
+      document: {createElement: () => new TestElement(), activeElement: null},
+      makeButton: options => Object.assign(new TestElement(), options), CLS: {collapsed: 'collapsed'},
+      changesRepoCollapsed: new Set(), normalizeFileExplorerView: value => value,
+      fileExplorerSessionFilesPaneIsVisible: () => true, sessionFileIsDifferVisible: () => true,
+      sessionFilesSortComparator: () => (left, right) => left.path.localeCompare(right.path),
+      repoPayloadByPath: value => new Map(value.repos.map(repo => [repo.repo, repo])),
+      changesOutsideRepoKey: '__outside__', compactHomePath: value => value,
+      t: value => value, esc: value => value, disclosureTriangleHtml: () => '',
+      changesRepoTotalsHtml: () => '', repoComparisonErrorHtml: () => '',
+      changesRepoMetaHtml: () => '', diffRefComparisonLineHtml: () => '',
+      fileExplorerSessionFilesState: {payload, streamRepos: new Map([['/first', {files: [firstFile]}]])},
+      reconcileChildNodes(container, children) {
+        for (const child of [...container.children]) if (!children.includes(child)) child.remove();
+      },
+      *renderChangedFileListSteps(list, _repo, files) {
+        context.setInnerHtmlIfChanged(list, files.map(file => file.path).join(''));
+        yield true;
+        return true;
+      },
+    };
+    vm.createContext(context);
+    installTreePublicationHelpers(context);
+    vm.runInContext(treeSource.slice(treeSource.indexOf('function drainFileTreeRenderSteps('), treeSource.indexOf('function renderTreeChildren('))
+      + source.slice(source.indexOf('const changesRepoSectionsByGroups ='), source.indexOf('// Returns the static toolbar/header HTML')), context);
+    const groups = new TestElement();
+    const first = context.renderChangesGroups(groups, [firstFile], {payload, yieldToInput: true});
+    for (let count = 0; count < 100; count += 1) {
+      const list = groups.querySelector('.changes-file-list');
+      const owner = context.fileTreeRenderOwners.get(groups);
+      if (list?.innerHTML === 'z.txt' && (hold === 'last-row' || owner.completed)) break;
+      for (const frame of frames.splice(0)) frame();
+      await flushAsyncWork();
+    }
+    const section = groups.children[0];
+    assert.equal(section.querySelector('.changes-file-list').innerHTML, 'z.txt');
+    assert.equal(context.fileTreeRenderOwners.get(groups).completed, hold === 'final-group');
+    let writes = 0;
+    const descendants = node => [node, ...node.children.flatMap(descendants)];
+    for (const node of descendants(section)) {
+      for (const name of ['innerHTML', 'hidden', 'disabled']) {
+        let value = node[name];
+        Object.defineProperty(node, name, {configurable: true, get: () => value, set(next) {writes += 1; value = next;}});
+      }
+      const setAttribute = node.setAttribute.bind(node);
+      node.setAttribute = (...args) => {writes += 1; return setAttribute(...args);};
+      node.dataset = new Proxy(node.dataset, {set(target, key, value) {writes += 1; target[key] = value; return true;}});
+    }
+    payload.repos.push({repo: '/second', added: 1, removed: 0});
+    context.fileExplorerSessionFilesState.streamRepos.set('/second', {files: [secondFile]});
+    const second = context.renderChangesGroups(groups, [], {payload, yieldToInput: true, changedRepo: {repo: '/second', files: [secondFile], repos: payload.repos}});
+    await completeRenderFrames(second, frames);
+    await first;
+    assert.deepEqual(groups.children.map(node => node.dataset.changesRepo), ['/first', '/second'], hold);
+    assert.equal(groups.children[0], section, hold);
+    assert.equal(writes, 0, `${hold}: unrelated chunk cannot rewrite earlier repository chrome or leaf publication`);
+  }
+});
+
+await testAsync('Differ repositories share one yielding job and interrupted stream chunks retain earlier repositories', async () => {
+  const source = fs.readFileSync('static_src/js/yomux/86_changes_20_differ.js', 'utf8');
+  const treeSource = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  const frames = [];
+  let clock = 0;
+  const context = {
+    normalizeFileExplorerView: value => value, fileExplorerSessionFilesPaneIsVisible: () => true,
+    sessionFileIsDifferVisible: () => true,
+    sessionFilesSortComparator: () => (left, right) => left.path.localeCompare(right.path),
+    repoPayloadByPath: () => new Map(), changesOutsideRepoKey: '__outside__',
+    Map, fileTreeInputSliceMs: 1, fileTreeRenderOwners: new WeakMap(), fileTreeRenderEpoch: 0,
+    performance: {now: () => ++clock},
+    scheduleAfterFileExplorerFirstPaint: resolve => frames.push(resolve),
+    document: {createElement: () => new TestElement()},
+    *renderChangesRepoSectionSteps(section, repo) {
+      assert.ok(section.parentElement, 'the empty repository is mounted before expensive row rendering');
+      for (let index = 0; index < 20; index += 1) yield;
+      section.dataset.finishedRepo = repo;
+    },
+    reconcileChildNodes(container, children) { container.replaceChildren(...children); },
+    fileExplorerSessionFilesState: {payload: {}, streamRepos: new Map()},
+  };
+  vm.createContext(context);
+  vm.runInContext(treeSource.slice(treeSource.indexOf('function drainFileTreeRenderSteps('), treeSource.indexOf('function renderTreeChildren('))
+    + source.slice(source.indexOf('const changesRepoSectionsByGroups ='), source.indexOf('function* renderChangesRepoSectionSteps(')), context);
+  const groups = new TestElement();
+  const files = Array.from({length: 12}, (_, index) => ({repo: `/repo${index}`, path: `${index}.js`}));
+  const first = context.renderChangesGroups(groups, files, {yieldToInput: true});
+  assert.equal(frames.length, 1, 'many repositories install only the root renderer frame');
+  const payload = context.fileExplorerSessionFilesState.payload;
+  context.fileExplorerSessionFilesState.streamRepos = new Map(files.map(file => [file.repo, {files: [file]}]));
+  const latest = {repo: '/latest', path: 'latest.js'};
+  context.fileExplorerSessionFilesState.streamRepos.set(latest.repo, {files: [latest]});
+  const second = context.renderChangesGroups(groups, [], {
+    yieldToInput: true, payload, changedRepo: {repo: latest.repo, files: [latest]},
+  });
+  assert.equal(typeof second?.then, 'function', 'an interrupted stream repository exposes its shared yielding completion');
+  assert.equal(frames.length, 2, `superseding a job leaves only its obsolete wakeup and the current wakeup: ${frames.length}`);
+  let maxCurrentFrames = 0;
+  while (frames.length) {
+    const pending = frames.splice(0);
+    for (const frame of pending) frame();
+    await flushAsyncWork();
+    maxCurrentFrames = Math.max(maxCurrentFrames, frames.length);
+  }
+  await Promise.all([first, second]);
+  assert.equal(maxCurrentFrames, 1, 'each slice continues one renderer instead of one renderer per repository');
+  assert.equal(groups.children.length, 13, 'the latest chunk finishes all repositories from the interrupted full update');
+  assert.ok(groups.children.every(section => section.dataset.finishedRepo === section.dataset.changesRepo), 'every retained section finishes under the latest owner');
+  const section = groups.children.find(node => node.dataset.changesRepo === latest.repo);
+  delete section.dataset.finishedRepo;
+  const targeted = context.renderChangesGroups(groups, [], {
+    yieldToInput: true, payload, changedRepo: {repo: latest.repo, files: [latest]},
+  });
+  assert.equal(typeof targeted?.then, 'function', 'a completed repository also exposes the same yielding completion');
+  let completed = false;
+  targeted.then(() => { completed = true; });
+  await flushAsyncWork();
+  assert.equal(completed, false, 'the completion remains pending while actual repository steps are held');
+  while (frames.length) {
+    for (const frame of frames.splice(0)) frame();
+    await flushAsyncWork();
+  }
+  assert.equal(await targeted, section, 'the completion resolves with its existing repository section');
+  assert.equal(section.dataset.finishedRepo, latest.repo, 'completion means the final row publication finished');
+  assert.equal(context.renderChangesGroups(groups, [], {payload, changedRepo: {repo: latest.repo, files: [latest]}}), section, 'synchronous repository callers retain the section result');
+});
+
+
+  await testAsync('Finder later listing waves preserve a newer container render and retire applied state', async () => {
+  const frames=[];
+  const api=loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {requestAnimationFrame(callback){frames.push(callback);return frames.length;},cancelAnimationFrame(){}});
+  api.setFileExplorerRootMode('sync',{sync:false});
+  const deep=deferredFetch();let requested=false;
+  api.setFetchForTest(url=>{
+    if(!String(url).startsWith('/api/fs/fast/list?'))return Promise.resolve(jsonResponse({}));
+    const path=new URL(url,'https://fixture').searchParams.get('path');
+    if(path==='/repo')return Promise.resolve(jsonResponse({entries:[{name:'a',kind:'dir'}]}));
+    if(path==='/repo/a')return Promise.resolve(jsonResponse({entries:[{name:'deep',kind:'dir'},{name:'old.txt',kind:'file'}]}));
+    if(path==='/repo/a/deep'){requested=true;return deep.promise;}
+    throw new Error(path);
+  });
+  const transaction=api.syncFileExplorerRootToPlanForTest({session:'1',root:'/repo',expandPaths:['/repo/a','/repo/a/deep'],affectedDirs:['/repo/a/deep']},'1');
+  for(let i=0;i<10;i++){await flushAsyncWork();for(const frame of frames.splice(0))frame();}
+  assert.ok(requested);
+  const tree=api.fileExplorerTreeForTest();
+  const row=tree.querySelector('.file-tree-row[data-path="/repo/a"]');
+  const child=row.nextElementSibling;
+  api.renderTreeChildrenForTest(child,'/repo/a',[{name:'manual.txt',kind:'file'}]);
+  deep.resolve(jsonResponse({entries:[{name:'late.txt',kind:'file'}]}));
+  for(let i=0;i<10;i++){await flushAsyncWork();for(const frame of frames.splice(0))frame();}
+  await transaction;
+  const actual=[...child.querySelectorAll('.file-tree-row')].map(row=>row.dataset.path);
+  assert.deepStrictEqual(actual,['/repo/a/manual.txt']);
+  assert.equal(api.fileExplorerSyncStateForTest().appliedPlanKey,'');
+  });
+  await testAsync('shared tree retires obsolete cached rows before publishing an authoritative replacement', async () => {
+    for (const scenario of ['file', 'dir', 'dir-to-file', 'collapsed-dir']) {
+      const frames = [];
+      let clock = 0;
+      const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+        performance: {now: () => ++clock},
+        requestAnimationFrame(callback) {frames.push(callback); return frames.length;},
+      });
+      const tree = new TestElement('authoritative-replacement');
+      const oldKind = scenario === 'file' ? 'file' : 'dir';
+      api.renderTreeChildrenForTest(tree, '/repo', [{name: 'cached', kind: oldKind}], 0,
+        oldKind === 'dir' ? [['/repo/cached', [{name: 'child', kind: 'file'}]]] : [], {autoExpand: true});
+      const placeholder = new TestElement();
+      placeholder.className = 'changes-empty';
+      tree.append(placeholder);
+      for (let index = 0; index < 2; index += 1) {
+        const status = new TestElement();
+        status.className = 'file-tree-row file-tree-status-row';
+        tree.append(status);
+      }
+      const samePath = scenario === 'dir-to-file' || scenario === 'collapsed-dir';
+      const newName = samePath ? 'cached' : 'new';
+      const newKind = scenario === 'collapsed-dir' ? 'dir' : 'file';
+      api.setFileExplorerExpandedForTest([]);
+      let observedReplacement = false;
+      const rendering = api.renderTreeChildrenForTest(tree, '/repo', [{name: newName, kind: newKind}], 0, [], {
+        yieldToInput: true,
+        afterSlice() {
+          const row = tree.querySelector(`.file-tree-row[data-path="/repo/${newName}"]`);
+          if (!row || row.dataset.kind !== newKind || (newKind === 'dir' && row.getAttribute('aria-expanded') !== 'false')) return;
+          observedReplacement = true;
+          if (!samePath) assert.equal(tree.querySelector('.file-tree-row[data-path="/repo/cached"]'), null, 'new rows cannot paint beside obsolete cached rows');
+          assert.equal(tree.querySelector('.file-tree-row[data-path="/repo/cached/child"]'), null, 'obsolete parent wrappers retire before replacement publication');
+          assert.equal(placeholder.parentElement, null);
+          assert.equal(tree.querySelectorAll('.file-tree-status-row').length, 0);
+        },
+      });
+      await completeRenderFrames(rendering, frames);
+      assert.equal(observedReplacement, true, scenario);
+    }
+  });
+
+  await testAsync('shared tree cleanup resumes after the saved next sibling is deleted during a yield', async () => {
+    const frames = [];
+    let clock = 0;
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      performance: {now: () => ++clock}, requestAnimationFrame(callback) {frames.push(callback); return frames.length;},
+    });
+    const tree = new TestElement('deleted-next-sibling');
+    api.renderTreeChildrenForTest(tree, '/repo', ['a', 'b', 'c'].map(name => ({name, kind: 'file'})));
+    const survivor = tree.querySelector('.file-tree-row[data-path="/repo/c"]');
+    const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+    const context = vm.createContext({normalizeDirectoryPath: value => value,
+      pathIsInsideDirectory: (path, root) => path.startsWith(`${root}/`),
+      document: {querySelectorAll: selector => tree.querySelectorAll(selector)},
+    });
+    vm.runInContext(source.slice(source.indexOf('function removeFileTreePathsImmediately('), source.indexOf('function fileExplorerFsResourceHasValue(')), context);
+    let removedNext = false;
+    const rendering = api.renderTreeChildrenForTest(tree, '/repo', [{name: 'c', kind: 'file'}], 0, [], {
+      yieldToInput: true, afterSlice() {
+        if (!removedNext && !tree.querySelector('.file-tree-row[data-path="/repo/a"]')) {
+          removedNext = true;
+          context.removeFileTreePathsImmediately(['/repo/b']);
+        }
+        assert.equal(tree.querySelectorAll('.file-tree-row[data-path="/repo/c"]').length, 1, 'a yielded scan cannot duplicate a retained sibling');
+      },
+    });
+    await completeRenderFrames(rendering, frames);
+    assert.equal(removedNext, true);
+    assert.equal(tree.children[0], survivor, 'concurrent deletion preserves the remaining row identity');
+  });
+
+  await testAsync('held directory expansion cannot publish children after its row becomes a file', async () => {
+    const api = loadYomux('', ['1']);
+    const tree = api.fileExplorerTreeForTest();
+    api.renderTreeChildrenForTest(tree, '/repo', [{name: 'reused', kind: 'dir'}]);
+    const row = tree.querySelector('.file-tree-row[data-path="/repo/reused"]');
+    const held = deferredFetch();
+    let requested = false;
+    api.setFetchForTest(url => {
+      if (String(url).startsWith('/api/fs/fast/list?')) {
+        requested = true;
+        return held.promise;
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+    const expansion = api.expandDirectoryRowForTest(row, '/repo/reused', {manual: true});
+    await flushAsyncWork();
+    assert.equal(requested, true, 'the old directory listing must be held in flight');
+    api.renderTreeChildrenForTest(tree, '/repo', [{name: 'reused', kind: 'file'}]);
+    assert.equal(tree.querySelector('.file-tree-row[data-path="/repo/reused"]'), row);
+    assert.equal(row.dataset.kind, 'file');
+    held.resolve(jsonResponse({path: '/repo/reused', entries: [{name: 'stale-child', kind: 'file'}]}));
+    await expansion;
+    assert.equal(tree.querySelector('.file-tree-children[data-parent="/repo/reused"]'), null, 'late directory work must not recreate a file row wrapper');
+    assert.equal(tree.querySelector('.file-tree-row[data-path="/repo/reused/stale-child"]'), null);
+  });
+
+  await testAsync('Finder publication yields within a single directory and retires replaced container work', async () => {
+    const frames = [];
+    let clock = 0;
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      performance: {now: () => ++clock},
+      requestAnimationFrame(callback) { frames.push(callback); return frames.length; },
+    });
+    const container = new TestElement('bounded-tree');
+    const entries = Array.from({length: 200}, (_, index) => ({name: `file-${String(index).padStart(3, '0')}`, kind: 'file'}));
+    let mountedBeforeInput = 0;
+    const rendering = api.renderTreeChildrenForTest(container, '/repo', entries, 0, [], {yieldToInput: true, afterSlice() {
+      if (mountedBeforeInput) return;
+      mountedBeforeInput = container.querySelectorAll('.file-tree-row').length;
+      if (mountedBeforeInput) api.renderTreeChildrenForTest(container, '/repo', [{name: 'new-target', kind: 'file'}]);
+    }});
+    assert.equal(container.querySelectorAll('.file-tree-row').length, 0, 'preparation yields before publishing the first row');
+    await completeRenderFrames(rendering, frames);
+    assert.ok(mountedBeforeInput > 0 && mountedBeforeInput < entries.length, `input must run before all ${entries.length} rows mount; got ${mountedBeforeInput}`);
+    assert.deepStrictEqual([...container.querySelectorAll('.file-tree-row')].map(row => row.dataset.path), ['/repo/new-target']);
+    const nested = new TestElement('nested-order');
+    const dirs = [{name: 'a', kind: 'dir'}, {name: 'b', kind: 'dir'}];
+    const listings = [['/repo/a', [{name: 'a.txt', kind: 'file'}]], ['/repo/b', [{name: 'b.txt', kind: 'file'}]]];
+    api.renderTreeChildrenForTest(nested, '/repo', dirs, 0, listings, {autoExpand: true});
+    const wrappers = [...nested.children].filter(node => node.classList.contains('file-tree-children'));
+    api.renderTreeChildrenForTest(nested, '/repo', dirs, 0, listings, {autoExpand: true, treeSortMode: 'za'});
+    assert.equal(nested.children[1], wrappers[1], 'reordered B retains its existing expanded wrapper');
+    assert.equal(nested.children[3], wrappers[0], 'reordered A retains its existing expanded wrapper');
+    assert.equal(nested.querySelectorAll('.file-tree-row').length, 4);
+  });
+  await testAsync('Finder deleting an ancestor retires its yielded child publication', async () => {
+    const frames = [];
+    let clock = 0;
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      performance: {now: () => ++clock},
+      requestAnimationFrame(callback) { frames.push(callback); return frames.length; },
+    });
+    const container = new TestElement('deleted-ancestor-tree');
+    const entries = Array.from({length: 200}, (_, index) => ({name: `file-${index}`, kind: 'file'}));
+    const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+    const context = {
+      normalizeDirectoryPath: path => path,
+      pathIsInsideDirectory: (path, root) => path.startsWith(`${root}/`),
+      document: {querySelectorAll: selector => container.querySelectorAll(selector)},
+    };
+    vm.createContext(context);
+    vm.runInContext(source.slice(source.indexOf('function removeFileTreePathsImmediately('), source.indexOf('\nfunction fileExplorerFsResourceHasValue(')), context);
+    let wrapper = null;
+    const rendering = api.renderTreeChildrenForTest(container, '/repo', [{name: 'dir', kind: 'dir'}, {name: 'survivor', kind: 'file'}], 0, [['/repo/dir', entries]], {autoExpand: true, yieldToInput: true, afterSlice() {
+      if (!wrapper) {
+        const candidate = container.querySelector('.file-tree-children[data-parent="/repo/dir"]');
+        if (!candidate?.children.length) return;
+        wrapper = candidate;
+        assert.ok(wrapper.children.length < entries.length, 'deletion interrupts an actual partially published child listing');
+        api.markFileExplorerDeletedPathsForTest(['/repo/dir']);
+        context.removeFileTreePathsImmediately(['/repo/dir']);
+        assert.equal(wrapper.parentElement, null, 'deletion detaches the child wrapper together with its row');
+      }
+      assert.equal([...container.querySelectorAll('.file-tree-row')].some(row => row.dataset.path.startsWith('/repo/dir/')), false, 'no later slice republishes a deleted descendant');
+    }});
+    await completeRenderFrames(rendering, frames);
+    assert.ok(wrapper, 'the renderer reached a partially published child listing before deletion');
+    assert.deepEqual([...container.querySelectorAll('.file-tree-row')].map(row => row.dataset.path), ['/repo/survivor']);
+  });
+  test('cold Git history and watch registration use the metadata deadline', () => {
+    const api = loadYomux();
+    assert.equal(api.apiFetchDeadlineMsForTest('/api/fs/git-history?path=%2Frepo'), 60000);
+    assert.equal(api.apiFetchDeadlineMsForTest('/api/watch/roots'), 60000);
+    assert.equal(api.apiFetchDeadlineMsForTest('/api/fs/read?path=%2Frepo%2Ffile'), 15000);
+  });
+
+  await testAsync('apiFetch deadline aborts its underlying request', async () => {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [20]});
+    let signal = null;
+    api.setFetchForTest((_url, options = {}) => {
+      signal = options.signal || null;
+      return new Promise(() => {});
+    });
+
+    await assert.rejects(
+      api.apiFetchJsonForTest('/api/fs/fast/list?path=%2Frepo%2Fslow', {timeoutMs: 20, startupImmediate: true}),
+      error => error?.name === 'AbortError' && error?.message === 'The operation was aborted.',
+    );
+    assert.equal(signal?.aborted, true);
+    assert.deepStrictEqual(canonical(api.jsDebugFailureEventsForTest('error').map(event => event.endpoint)), ['/api/fs/fast/list']);
+  });
+
+  await testAsync('capability-gated API probes are reported as unsupported, not errors', async () => {
+    const api = loadYomux('', ['1'], 'https:', 'Darwin arm64', 'admin', {
+      bootstrapOverrides: {capabilities: {capabilities: {'pane.chat.v1': {available: false}}}},
+    });
+    await assert.rejects(api.apiFetchJsonForTest('/api/chat/bootstrap'), error => error.status === 501);
+    const event = api.jsDebugEventsForTest().find(candidate => candidate.type === 'api' && candidate.endpoint === '/api/chat/bootstrap');
+    assert.equal(event.deliveryOutcome, 'unsupported');
+    assert.equal(api.jsDebugFailureEventsForTest().length, 0, 'an expected capability gate does not pollute the failure report');
+  });
+
   await testAsync('retired tmux status refreshes do not log expected generation aborts', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setFetchForTest(() => Promise.reject(new DOMException('session generation retired: 1', 'AbortError')));
 
     await api.refreshTmuxStatusModeAfterSocketOpenForTest('1');
@@ -96,7 +1707,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('ordinary foreground session-files fetch applies its accepted payload', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
     slots.left = api.paneStateWithTabs([api.finderItemId, api.differItemId], api.differItemId);
@@ -117,7 +1728,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('identical cache-only session-files responses settle loading without replacing canonical payload', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
     slots.left = api.paneStateWithTabs([api.finderItemId, api.differItemId], api.differItemId);
@@ -144,7 +1755,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('Quick Open SSE parser accepts split event frames and joins data lines', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const events = [];
     const parser = api.fileQuickOpenSseParserForTest((event, payload) => events.push({event, payload}));
     parser.feed('event: ch');
@@ -160,7 +1771,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Quick Open consumes indexed search chunks and repaints each arrival', async () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     api.setFileExplorerIndexedDirsForTest(['/home/test/yolomux.dev']);
     api.setFileQuickOpenCandidatesForTest('/home/test/yolomux.dev', []);
     api.installCommandPaletteFixtureForTest();
@@ -196,7 +1807,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Quick Open emits DIS basename matches in the first indexed stream chunk', async () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     api.setFileExplorerIndexedDirsForTest(['/home/test/yolomux.dev']);
     api.installCommandPaletteFixtureForTest();
     api.setCommandPaletteStateForTest('files', 'dis');
@@ -220,7 +1831,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('Quick Open priority is open tab, remembered file, active AI path, then index', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const openPath = '/repo/open/DIS-open.md';
     const rememberedPath = '/repo/history/DIS-history.md';
     const workingPath = '/repo/current/DIS-current.md';
@@ -244,7 +1855,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('Quick Open remembers only the newest 100 opened files', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     for (let index = 0; index < 105; index += 1) api.rememberQuickOpenFileForTest(`/repo/history-${index}.md`);
     const history = api.quickOpenFileHistoryForTest();
     assert.equal(history.length, 100, 'file history is capped at 100 entries');
@@ -253,7 +1864,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('opening empty Quick Open shows recent files without starting a search', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const requests = [];
     api.installCommandPaletteFixtureForTest();
     api.setFetchForTest(url => {
@@ -276,7 +1887,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Quick Open cancels a stale stream and fences its late chunk', async () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     api.setFileExplorerIndexedDirsForTest(['/home/test/yolomux.dev']);
     api.installCommandPaletteFixtureForTest();
     api.setFileQuickOpenCandidatesForTest('/home/test/yolomux.dev', []);
@@ -310,7 +1921,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('Git history commit rows keep the approved field order and responsive retention contract', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const item = api.gitDiffItemFor('/repo');
     api.setGitDiffTabStateForTest(item, {hostedRemote: {provider: 'github', base_url: 'https://github.com/owner/project'}});
     const row = api.gitDiffCommitRowForTest(item, {
@@ -401,7 +2012,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Git stats chunks patch only changed commit rows', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const item = api.gitDiffItemFor('/repo');
     const commits = Array.from({length: 6}, (_, index) => ({
       sha: String(index + 1).padStart(40, '0'),
@@ -447,7 +2058,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('Git worktree status is a clickable first-line dirty summary with path details', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const item = api.gitDiffItemFor('/repo');
     const state = api.setGitDiffTabStateForTest(item, {
       repo: '/repo',
@@ -500,7 +2111,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('Git history commit rows use shared roving focus and valid tree ownership', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const item = api.gitDiffItemFor('/repo');
     const first = 'a'.repeat(40), second = 'b'.repeat(40);
     api.setGitDiffTabStateForTest(item, {path: '/repo', head: 'f'.repeat(40), commits: [{sha: first, short: 'aaaaaaaaa', subject: 'first'}, {sha: second, short: 'bbbbbbbbb', subject: 'second'}], visibleCommitCount: 2, loaded: true, loadAttempted: true});
@@ -521,7 +2132,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('Git history panel shows branch and dirty paths immediately above commits', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const item = api.gitDiffItemFor('/repo');
     const sha = 'a'.repeat(40);
     api.setGitDiffTabStateForTest(item, {
@@ -549,7 +2160,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('historical file selection paints its exact loading tab before comparison completion', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const path = '/repo/src/app.js';
     const fromRef = 'b'.repeat(40);
     const toRef = 'a'.repeat(40);
@@ -577,7 +2188,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('attached Diff repo panels load once, render disclosure DOM, and open the exact historical Editor tuple', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const item = api.gitDiffItemFor('/repo/src');
     const sha = 'a'.repeat(40);
     const firstParent = 'b'.repeat(40);
@@ -665,10 +2276,10 @@ async function runLayoutAsyncSuite() {
   test('Diff repo relocalization rerenders labels and dates without replacing retained tab state', () => {
     const enCatalog = JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'));
     const frCatalog = JSON.parse(fs.readFileSync('static/locales/fr.json', 'utf8'));
-    const enApi = loadYolomux('', ['1']);
+    const enApi = loadYomux('', ['1']);
     const commit = {sha: 'd'.repeat(40), short: 'ddddddddd', parents: ['c'.repeat(40)], subject: 'Locale state', author: 'Keiven Chang', authored_at: 1786931640, files: 1, added: 2, removed: 1};
     const enDate = enApi.gitDiffCommitRowForTest(enApi.gitDiffItemFor('/repo'), commit).querySelector('.git-diff-commit-date').textContent;
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {locale: 'fr', strings: {en: enCatalog, fr: frCatalog}});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {locale: 'fr', strings: {en: enCatalog, fr: frCatalog}});
     const item = api.gitDiffItemFor('/repo');
     const state = api.setGitDiffTabStateForTest(item, {path: '/repo', repo: '/repo', branch: 'go_release', relativePath: '', head: 'f'.repeat(40), commits: [commit], visibleCommitCount: 1, loaded: true, loadAttempted: true});
     state.expanded.add(commit.sha);
@@ -696,7 +2307,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('historical Editor controls and preview updates cannot mutate or borrow working-tree state', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const path = '/repo/README.md';
     const fromRef = '1'.repeat(40);
     const toRef = '2'.repeat(40);
@@ -782,7 +2393,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('API transport retirement is request-scoped and keeps live failures blocking', async () => assert.deepStrictEqual(canonical(await apiTransportRetirementScenario()), {retired: {error: 'Failed to fetch', outcome: 'retired', reason: 'page_beforeunload', failures: 0, backendFailures: 0, consoleErrors: 0}, lateRetired: {error: 'Failed to fetch', outcome: 'retired', reason: 'page_beforeunload', failures: 0, backendFailures: 0, consoleErrors: 0}, resumedLive: {error: 'Failed to fetch', outcome: 'failed', failures: 1, backendFailures: 1, consoleErrors: 0}, raced: {error: 'Failed to fetch', outcome: 'retired', failures: 0}, live: {error: 'Failed to fetch', type: 'api', endpoint: '/api/auto-approve', outcome: 'failed', backendFailures: 1}}));
   await testAsync('a host-scoped terminal close still posts /api/event and checks /api/tmux-session-exists', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const requests = [];
     api.setFetchForTest((url, options = {}) => {
       requests.push({url: String(url), method: String(options.method || 'GET')});
@@ -803,7 +2414,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('background 401s retain the document while interactive commands still redirect to login', async () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     api.setFetchForTest(() => Promise.resolve({
       ok: false,
       status: 401,
@@ -828,7 +2439,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('one terminal authentication owner retires long-lived transports after the first 401', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [1500]});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [1500]});
     let requests = 0;
     api.setFetchForTest(() => {
       requests += 1;
@@ -870,7 +2481,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('client-events resolves its hidden HTTP failure through one bounded auth probe', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [15000]});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [15000]});
     const requests = [];
     api.setFetchForTest(url => {
       requests.push(String(url));
@@ -900,7 +2511,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('a rejected client-events candidate reaches the same bounded auth probe', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin');
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin');
     const requests = [];
     api.setFetchForTest(url => {
       requests.push(String(url));
@@ -937,7 +2548,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('the shared startup and refresh request owner admits at most eight API fetches', async () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const pending = [];
     api.setFetchForTest(url => {
       const request = deferredFetch();
@@ -957,7 +2568,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('a started startup request releases capacity when its fetch ignores abort', async () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const controller = new AbortController();
     const ignoredFetch = deferredFetch();
     api.setFetchForTest(() => ignoredFetch.promise);
@@ -1019,7 +2630,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('session metadata distinguishes fetch failure from a client apply failure', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const fetchFailure = await api.fetchAndApplySessionMetadataForTest(
       () => Promise.reject(new Error('network unavailable')),
       () => { throw new Error('must not apply after a fetch failure'); },
@@ -1037,7 +2648,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Finder keeps deferred INFO work pending until its batch operation terminal SSE result', async () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     api.setFetchForTest((url, options = {}) => {
       assert.equal(String(url), '/api/fs/batch');
       const requests = JSON.parse(options.body || '{}').requests || [];
@@ -1087,7 +2698,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('Finder paints names and dates before batched Git enrichment patches repo rows in place', async () => {
     const frames = [];
-    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
       requestAnimationFrame(callback) {
         frames.push(callback);
         return frames.length;
@@ -1219,7 +2830,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('Finder first paint defers cached repository +/- counts until session-files backfill', async () => {
     const frames = [];
-    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
       requestAnimationFrame(callback) {
         frames.push(callback);
         return frames.length;
@@ -1284,7 +2895,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Finder session-files completion backfills +/- after the fast row paint', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const repoPath = '/repos/project';
     api.setFinderSessionFilesPayloadForTest({
       session: '1',
@@ -1340,7 +2951,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Go Finder paints the fast list before streaming repository backfills and applies each chunk', async () => {
-    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.leafNode('left');
     slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
@@ -1370,9 +2981,11 @@ async function runLayoutAsyncSuite() {
 
     assert.equal(await api.openFileExplorerAtForTest('/repos', {manualSelection: true}), true);
     assert.equal(calls[0], '/api/fs/fast/list', 'the first Finder call is only the cheap direct listing');
-    assert.ok(calls.indexOf('/api/session-files-stream') > 0, 'the repository stream starts only after the fast listing');
     const tree = api.fileExplorerTreeForTest();
     assert.ok(tree.querySelector('.file-tree-row[data-path="/repos/one"]'), 'the first-paint directory rows are mounted before Git work');
+    assert.equal(calls.includes('/api/session-files-stream'), false, 'repository work waits for the post-paint task');
+    await flushAsyncWork();
+    assert.ok(calls.indexOf('/api/session-files-stream') > 0, 'the repository stream starts only after the fast listing paints');
 
     assert.deepStrictEqual(streamRepoPaths[0], ['/repos', '/repos/one', '/repos/two'], 'the later repo stream receives the Finder root and visible child repository paths after the listed parent paints');
     stream.push(sseFrame('start', {session: '1'}));
@@ -1400,7 +3013,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('Differ stream map handles fallback chunks and stale finalization without losing the current owner', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const current = () => true;
     const repositoryChunk = (repo, path) => ({
       session: '1', hours: 24, loaded: false, from_ref: 'HEAD', to_ref: 'current',
@@ -1429,8 +3042,75 @@ async function runLayoutAsyncSuite() {
     assert.deepStrictEqual([...api.fileExplorerSessionFilesStateForTest().payload.files.map(file => file.abs_path)], newerFiles, 'the current repository map remains available after stale completion');
   });
 
+  await testAsync('cached Go streams retain the current target until the first repository arrives', async () => {
+    const cases = ['finder', 'differ'].flatMap(destination => ['repository', 'empty', 'cold', 'fallback404', 'fallback501', 'superseded']
+      .map(route => ({destination, route})));
+    for (const {destination, route} of cases) {
+      const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
+      const slots = api.emptyLayoutSlots();
+      slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
+      const item = destination === 'finder' ? api.finderItemId : api.differItemId;
+      slots.left = api.paneStateWithTabs([item], item);
+      slots.right = api.paneStateWithTabs(['1'], '1');
+      api.setLayoutSlotsForTest(slots);
+      api.setFileExplorerFinderSelectedSessionForTest('1');
+      api.setFileExplorerChangesSelectedSessionForTest('1');
+      const cached = {session: '1', loaded: true, repos: [{repo: '/repo/app'}, {repo: '/repo/removed'}],
+        files: [{repo: '/repo/app', path: 'cached.txt', abs_path: '/repo/app/cached.txt', status: 'M'},
+          {repo: '/repo/removed', path: 'old.txt', abs_path: '/repo/removed/old.txt', status: 'M'}], errors: [], refs_by_repo: {}};
+      const state = () => destination === 'finder' ? api.fileExplorerFinderSessionFilesStateForTest() : api.fileExplorerSessionFilesStateForTest();
+      const publish = payload => destination === 'finder' ? api.setFinderSessionFilesPayloadForTest(payload) : api.setSessionFilesPayloadForTest(payload);
+      const initial = route === 'cold' ? {...cached, loaded: false, files: [], repos: []} : cached;
+      publish(initial);
+      const expectedInitialPaths = initial.files.map(file => file.abs_path);
+      const fresh = {session: '1', loaded: true, repos: [{repo: '/repo/app'}],
+        files: [{repo: '/repo/app', path: 'new.txt', abs_path: '/repo/app/new.txt', status: 'M'}], refs_by_repo: {}, errors: [], warnings: []};
+      const stream = controllableSseResponse();
+      const fallback = deferredFetch();
+      const calls = [];
+      api.setFetchForTest((url, options = {}) => {
+        const pathname = new URL(String(url), 'https://localhost').pathname;
+        calls.push(pathname);
+        if (pathname === '/api/session-files') return fallback.promise;
+        assert.equal(pathname, '/api/session-files-stream');
+        stream.bindSignal(options.signal);
+        if (route.startsWith('fallback')) return Promise.resolve(jsonResponse({}, Number(route.slice('fallback'.length))));
+        return Promise.resolve(stream.response);
+      });
+      const request = api.fetchSessionFilesForTest({destination, session: '1', silent: true, background: true});
+      try {
+        stream.push(sseFrame('start', {session: '1'}));
+        await flushAsyncWork();
+        assert.deepEqual([...state().payload.files.map(file => file.abs_path)], expectedInitialPaths, `${destination}/${route} retains the target rows while the first result is held`);
+        assert.equal(state().payload.loaded, initial.loaded, `${destination}/${route} retains the target's usable state`);
+        assert.deepEqual(calls, route.startsWith('fallback') ? ['/api/session-files-stream', '/api/session-files'] : ['/api/session-files-stream'], 'the active target actually owns its stream/fallback request');
+        if (destination === 'differ' && initial.loaded) assert.ok(api.fileExplorerChangesPanelHtml().includes('cached.txt'), 'a render while the stream is held still exposes cached rows');
+        if (route === 'superseded') publish({...fresh, session: '2'});
+        if (route === 'repository' || route === 'superseded') {
+          stream.push(sseFrame('repo', {...fresh, loaded: false}));
+          await flushAsyncWork();
+          assert.deepEqual([...state().payload.files.map(file => file.abs_path)], ['/repo/app/new.txt'], 'the first authoritative repository starts a fresh stream without cached duplicates');
+          assert.deepEqual([...state().payload.repos.map(repo => repo.repo)], ['/repo/app'], 'repositories missing from the new stream do not survive its initialization');
+          if (route === 'superseded') assert.equal(state().payload.session, '2', 'the retired callback cannot initialize over the newer target');
+        }
+      } finally {
+        const done = {session: '1', loaded: true, errors: [], warnings: []};
+        if (route === 'empty' || route === 'cold') Object.assign(done, {files: [], repos: [], refs_by_repo: {}});
+        stream.push(sseFrame('done', done));
+        stream.close();
+        fallback.resolve(jsonResponse(fresh));
+        await request;
+      }
+      const expectedFinalPaths = route === 'empty' ? cached.files.map(file => file.abs_path)
+        : route === 'cold' ? [] : ['/repo/app/new.txt'];
+      assert.deepEqual([...state().payload.files.map(file => file.abs_path)], expectedFinalPaths, `${destination}/${route} finalizes through the existing background preservation policy`);
+      assert.equal(state().payload.loaded, true, 'a completed cold or cached stream has a terminal payload');
+      if (route === 'superseded') assert.equal(state().payload.session, '2', 'the stale done event cannot replace the newer target');
+    }
+  });
+
   await testAsync('Go Differ can supersede a partially painted repository stream', async () => {
-    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
     slots.left = api.paneStateWithTabs([api.differItemId], api.differItemId);
@@ -1482,7 +3162,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Go Differ applies repository chunks before the attribution stream completes', async () => {
-    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
     slots.left = api.paneStateWithTabs([api.differItemId], api.differItemId);
@@ -1560,7 +3240,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Finder expansion keeps +/- counts deferred while session-files backfill is pending', async () => {
-    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin');
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin');
     const repoPath = '/repos/project';
     const childPath = `${repoPath}/nested.txt`;
     api.setFinderSessionFilesPayloadForTest({
@@ -1622,7 +3302,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('Finder re-enriches a full-push repo marker that replaced the fast listing', async () => {
     const frames = [];
-    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
       requestAnimationFrame(callback) {
         frames.push(callback);
         return frames.length;
@@ -1652,7 +3332,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('Finder discards invalidated in-flight Git enrichment before patching the mounted row', async () => {
     const frames = [];
-    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
       requestAnimationFrame(callback) {
         frames.push(callback);
         return frames.length;
@@ -1720,7 +3400,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('Finder LIST uses the direct fast route while Git enrichment stays batched', async () => {
     const frames = [];
-    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
       requestAnimationFrame(callback) {
         frames.push(callback);
         return frames.length;
@@ -1759,8 +3439,351 @@ async function runLayoutAsyncSuite() {
     assert.equal(requests[1].route, '/api/fs/batch');
   });
 
+  test('Finder affected directories preserve distinct repository ancestry for repeated file parents', () => {
+    const api = loadYomux('', ['1']);
+    const files = Array.from({length: 13595}, (_, index) => ({abs_path: `/repo/sub/leaf/file-${index}.txt`, repo: '/repo'}));
+    files.push({abs_path: '/repo/sub/leaf/other.txt', repo: '/repo/sub'});
+    files.push({abs_path: '/outside/file.txt', repo: '/repo'});
+    assert.deepStrictEqual([...api.sessionFilesAffectedDirsForTest({files, repos: []})], ['/repo', '/repo/sub', '/repo/sub/leaf', '/outside']);
+  });
+
+  await testAsync('Finder Sync retires queued directory demand after an explicit root switch', async () => {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin');
+    api.setFileExplorerRootMode('sync', {sync: false});
+    const directories = Array.from({length: 24}, (_, index) => `/repo/d${index}`);
+    const pending = new Map();
+    api.setFetchForTest(url => {
+      if (!String(url).startsWith('/api/fs/fast/list?')) return Promise.resolve(jsonResponse({}));
+      const path = new URL(url, 'https://test').searchParams.get('path');
+      if (path === '/repo') return Promise.resolve(jsonResponse({entries: directories.map(directory => ({name: directory.split('/').at(-1), kind: 'dir'}))}));
+      if (path === '/new') return Promise.resolve(jsonResponse({entries: [{name: 'new.txt', kind: 'file'}]}));
+      const deferred = deferredFetch();
+      pending.set(path, deferred);
+      return deferred.promise;
+    });
+    const oldSync = api.syncFileExplorerRootToPlanForTest({session: '1', root: '/repo', expandPaths: directories, affectedDirs: directories}, '1');
+    await flushAsyncWork();
+    assert.equal(pending.size, 8);
+    const newRoot = api.openFileExplorerAtForTest('/new', {manualSelection: true});
+    for (const deferred of pending.values()) deferred.resolve(jsonResponse({entries: []}));
+    await flushAsyncWork();
+    await newRoot;
+    const retiredRequestCount = pending.size;
+    // Drain the baseline's leaked work so this regression terminates with a real failing assertion.
+    for (const deferred of pending.values()) deferred.resolve(jsonResponse({entries: []}));
+    await flushAsyncWork();
+    for (const deferred of pending.values()) deferred.resolve(jsonResponse({entries: []}));
+    await oldSync;
+    assert.equal(retiredRequestCount, 8, 'superseded transactions cannot admit more directory requests');
+    assert.ok(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/new/new.txt"]'));
+  });
+
+  await testAsync('Finder active-tab expansion cleanup cannot clear a newer same-path transaction', async () => {
+    const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+    const pending = [];
+    const context = {
+      fileExplorerIsOpen: () => true, fileExplorerRootMode: 'sync',
+      activeFinderTargetPath: path => path, explicitFinderTargetPath: path => path,
+      currentFileExplorerRoot: () => '/repo', pathIsInsideDirectory: path => path.startsWith('/repo/'),
+      fileExplorerSyncState: {inFlightSignature: '', generation: 0},
+      expandFileExplorerTreesToPath: () => new Promise(resolve => pending.push(resolve)),
+    };
+    vm.createContext(context);
+    vm.runInContext(source.slice(source.indexOf('async function syncFileExplorerToActiveTab('), source.indexOf('\nfunction fileExplorerTreeContainers(')), context);
+    const old = context.syncFileExplorerToActiveTab('/repo/a');
+    const middle = context.syncFileExplorerToActiveTab('/repo/b');
+    const current = context.syncFileExplorerToActiveTab('/repo/a');
+    pending[0](false);
+    await old;
+    assert.equal(context.fileExplorerSyncState.inFlightSignature, '/repo/a', 'old same-path cleanup preserves successor ownership');
+    pending[1](false);
+    await middle;
+    assert.equal(context.fileExplorerSyncState.inFlightSignature, '/repo/a', 'intervening cleanup preserves successor ownership');
+    pending[2](true);
+    assert.equal(await current, true);
+    assert.equal(context.fileExplorerSyncState.inFlightSignature, '', 'current owner releases its own signature');
+  });
+
+  await testAsync('Finder yielded settlement preserves newer selection ownership', async () => {
+    const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+    for (const change of ['paths', 'anchor', 'lead', 'manual']) {
+      const record = {selectedPaths: ['/repo/remembered'], cursorPath: '/repo/remembered', anchorPath: '/repo/remembered'};
+      const context = {
+        fileExplorerSelectedPaths: new Set(['/repo/start']),
+        fileExplorerSelectionAnchor: '/repo/start', fileExplorerSelectionLead: '/repo/start',
+        fileExplorerManualSelectionActive: false,
+        fileExplorerSyncTargetKey: () => 'target', fileExplorerSyncTargetRecord: () => record,
+        fileExplorerSyncPathsForRoot: (_root, paths) => paths,
+        fileExplorerSyncCursorPathForRoot: (_root, path) => path,
+        fileExplorerVisibleSyncCursorPath: (_root, path) => path,
+        updateFileExplorerCurrentFileHighlight() {}, syncFileExplorerTreeActiveDescendant() {},
+      };
+      vm.createContext(context);
+      vm.runInContext(source.slice(source.indexOf('function createFileExplorerSyncSelectionOwner('), source.indexOf('\nfunction setFileExplorerVisibleSyncTarget(')), context);
+      const selectionOwner = context.createFileExplorerSyncSelectionOwner();
+      context.restoreFileExplorerSyncCursorState('1', '/repo', {selectionOwner});
+      assert.deepEqual([...context.fileExplorerSelectedPaths], ['/repo/remembered'], 'owned restore applies the remembered cursor');
+      await Promise.resolve();
+      if (change === 'paths') context.fileExplorerSelectedPaths.add('/repo/user');
+      else if (change === 'anchor') context.fileExplorerSelectionAnchor = '/repo/user';
+      else if (change === 'lead') context.fileExplorerSelectionLead = '/repo/user';
+      else context.fileExplorerManualSelectionActive = true;
+      const selected = [...context.fileExplorerSelectedPaths];
+      const anchor = context.fileExplorerSelectionAnchor;
+      const lead = context.fileExplorerSelectionLead;
+      record.selectedPaths = ['/repo/later'];
+      record.cursorPath = '/repo/later';
+      context.restoreFileExplorerSyncCursorState('1', '/repo', {selectionOwner, progressive: true});
+      assert.deepEqual([...context.fileExplorerSelectedPaths], selected, `${change} retains current selection`);
+      assert.equal(context.fileExplorerSelectionAnchor, anchor, `${change} retains anchor`);
+      assert.equal(context.fileExplorerSelectionLead, lead, `${change} retains keyboard cursor`);
+      assert.equal(selectionOwner.retired, true, `${change} retires later settlements`);
+      context.restoreFileExplorerSyncCursorState('1', '/repo', {selectionOwner, progressive: true});
+      assert.deepEqual([...context.fileExplorerSelectedPaths], selected, 'later publication cannot reclaim the selection');
+    }
+  });
+
+  await testAsync('Finder returning to an applied plan retires a different background target', async () => {
+    for (const route of ['scheduled', 'direct']) {
+      const frames = [];
+      const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+        requestAnimationFrame(callback) { frames.push(callback); return frames.length; },
+        cancelAnimationFrame() {},
+      });
+      api.setFileExplorerRootMode('sync', {sync: false});
+      api.setExplicitPaneFocusItemForTest('1');
+      let delayedB = null;
+      api.setFetchForTest(url => {
+        if (!String(url).startsWith('/api/fs/fast/list?')) return Promise.resolve(jsonResponse({}));
+        const path = new URL(url, 'https://fixture').searchParams.get('path');
+        if (path === '/tmp/b') { delayedB = deferredFetch(); return delayedB.promise; }
+        return Promise.resolve(jsonResponse({path, entries: [{name: 'a.txt', kind: 'file'}]}));
+      });
+      const target = root => {
+        api.setTranscriptInfoForTest('1', {project: {git: {cwd: root, root}}, selected_pane: {current_path: root}});
+        api.setFinderSessionFilesPayloadForTest({session: '1', repos: [{repo: root}], files: []});
+      };
+      target('/tmp/a');
+      await api.openFileExplorerAtForTest('/tmp/a', {syncSelection: true});
+      const planA = api.fileExplorerSyncPlanForTest('1');
+      assert.equal(planA.root, '/tmp/a');
+      await api.syncFileExplorerRootToPlanForTest(planA, '1');
+      // Settle earlier first-paint/revalidation frames before initiating the stale transaction.
+      for (let pass = 0; pass < 5; pass += 1) {
+        for (const frame of frames.splice(0)) frame();
+        await flushAsyncWork();
+      }
+      const retainedRow = api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/tmp/a/a.txt"]');
+      assert.ok(retainedRow);
+      api.setFileExplorerSelectionForTest(['/tmp/a/a.txt']);
+      target('/tmp/b');
+      assert.equal(api.fileExplorerSyncPlanForTest('1').root, '/tmp/b');
+      api.scheduleFileExplorerActiveTabSyncForTest('1');
+      for (const frame of frames.splice(0)) frame();
+      await flushAsyncWork();
+      assert.ok(delayedB, 'actual nonexplicit scheduler starts B');
+      target('/tmp/a');
+      if (route === 'scheduled') api.scheduleFileExplorerActiveTabSyncForTest('1');
+      else await api.syncFileExplorerRootToPlanForTest(api.fileExplorerSyncPlanForTest('1'), '1');
+      for (const frame of frames.splice(0)) frame();
+      await flushAsyncWork();
+      delayedB.resolve(jsonResponse({path: '/tmp/b', entries: [{name: 'stale-b.txt', kind: 'file'}]}));
+      for (let pass = 0; pass < 5; pass += 1) {
+        await flushAsyncWork();
+        for (const frame of frames.splice(0)) frame();
+      }
+      const actualRoot = api.fileExplorerRootForTest();
+      assert.equal(actualRoot, '/tmp/a', 'already-applied A must retire delayed B even for background same-session plans');
+      assert.equal(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/tmp/a/a.txt"]'), retainedRow, 'returning to A preserves the existing row');
+      assert.equal(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/tmp/b/stale-b.txt"]'), null, 'retired B never publishes rows');
+      assert.deepEqual([...api.fileExplorerSelectionForTest().paths], ['/tmp/a/a.txt'], 'returning to A preserves selection');
+    }
+  });
+
+  await testAsync('Finder Sync cancellation retires same-signature transactions independently', async () => {
+  for (const route of ['cancel', 'intervening-root']) {
+  const api = loadYomux('', ['1']);
+  api.setFileExplorerRootMode('sync', {sync: false});
+  const requests = [];
+  api.setFetchForTest(url => {
+    assert.ok(String(url).startsWith('/api/fs/fast/list?'));
+    const pending = deferredFetch();
+    requests.push(pending);
+    return pending.promise;
+  });
+  const plan = {session: '1', root: '/repo', expandPaths: [], affectedDirs: ['/repo']};
+  const old = api.syncFileExplorerRootToPlanForTest(plan, '1');
+  await flushAsyncWork();
+  assert.equal(requests.length, 1);
+  let middle = null;
+  if (route === 'cancel') api.cancelPendingFileExplorerActiveSync();
+  else {
+    middle = api.syncFileExplorerRootToPlanForTest({...plan, root: '/other', affectedDirs: ['/other']}, '1');
+    await flushAsyncWork();
+  }
+  const current = api.syncFileExplorerRootToPlanForTest(plan, '1', {force: true});
+  await flushAsyncWork();
+  assert.equal(requests.length, route === 'cancel' ? 2 : 3, 'user refresh takes ownership from the old background request');
+  const currentSignature = api.fileExplorerSyncStateForTest().inFlightSignature;
+  assert.ok(currentSignature);
+  requests[0].resolve(jsonResponse({path: '/repo', entries: [{name: 'stale.txt', kind: 'file'}]}));
+  await old;
+  const stalePublished = Boolean(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/repo/stale.txt"]'));
+  const currentSignatureRetained = api.fileExplorerSyncStateForTest().inFlightSignature === currentSignature;
+  requests.at(-1).resolve(jsonResponse({path: '/repo', entries: [{name: 'current.txt', kind: 'file'}]}));
+  await current;
+  if (middle) {
+    requests[1].resolve(jsonResponse({path: '/other', entries: []}));
+    await middle;
+  }
+  const currentPublished = Boolean(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/repo/current.txt"]'));
+  assert.equal(stalePublished, false, 'cancelled transaction must not publish after same-signature restart');
+  assert.equal(currentSignatureRetained, true, 'old finally must not clear the new transaction signature');
+  assert.equal(currentPublished, true, 'new transaction must finish normally');
+  }
+  });
+
+  await testAsync('Finder Sync preserves unchanged branches between listing frames', async () => {
+    const frames = [];
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) { frames.push(callback); return frames.length; },
+      cancelAnimationFrame() {},
+    });
+    api.setFileExplorerRootMode('sync', {sync: false});
+    const directories = Array.from({length: 8}, (_, index) => `/repo/d${index}`);
+    const pending = new Map();
+    api.setFetchForTest(url => {
+      const route = String(url);
+      if (!route.startsWith('/api/fs/fast/list?')) return Promise.resolve(jsonResponse({}));
+      const path = new URL(route, 'https://test').searchParams.get('path');
+      if (path === '/repo') return Promise.resolve(jsonResponse({entries: directories.map(directory => ({name: directory.split('/').at(-1), kind: 'dir'}))}));
+      const deferred = deferredFetch();
+      pending.set(path, deferred);
+      return deferred.promise;
+    });
+    const sync = api.syncFileExplorerRootToPlanForTest({session: '1', root: '/repo', expandPaths: directories, affectedDirs: directories}, '1');
+    await flushAsyncWork();
+    for (const frame of frames.splice(0)) frame();
+    await flushAsyncWork();
+    const tree = api.fileExplorerTreeForTest();
+    pending.get(directories[0]).resolve(jsonResponse({entries: [{name: 'unchanged.txt', kind: 'file'}]}));
+    await flushAsyncWork();
+    for (const frame of frames.splice(0)) frame();
+    await flushAsyncWork();
+    const row = tree.querySelector('.file-tree-row[data-path="/repo/d0/unchanged.txt"]');
+    assert.ok(row);
+    const pathInput = api.testElementForId('fileExplorerPath');
+    const pathProperty = 'value' in pathInput ? 'value' : 'textContent';
+    let pathValue = pathInput[pathProperty];
+    let pathWrites = 0;
+    Object.defineProperty(pathInput, pathProperty, {
+      get() { return pathValue; },
+      set(value) { pathWrites += 1; pathValue = value; },
+      configurable: true,
+    });
+    const directoryRow = tree.querySelector('.file-tree-row[data-path="/repo/d0"]');
+    let unchangedDirectoryWrites = 0;
+    const directoryToggle = directoryRow.classList.toggle.bind(directoryRow.classList);
+    directoryRow.classList.toggle = (name, value) => {
+      unchangedDirectoryWrites += 1;
+      return directoryToggle(name, value);
+    };
+    let unchangedBranchPaints = 0;
+    let unchangedRowWrites = 0;
+    const toggle = row.classList.toggle.bind(row.classList);
+    row.classList.toggle = (name, value) => {
+      unchangedRowWrites += 1;
+      return toggle(name, value);
+    };
+    const child = row.parentElement;
+    const setProperty = child.style.setProperty.bind(child.style);
+    child.style.setProperty = (key, value) => {
+      if (key === '--tree-depth') unchangedBranchPaints += 1;
+      setProperty(key, value);
+    };
+    let addedReads = 0;
+    api.setFinderSessionFilesPayloadForTest({session: '1', loaded: false, repos: [{repo: '/repo'}], files: [{
+      abs_path: '/repo/d0/other/file.txt', status: 'M',
+      get added() { addedReads += 1; return 3; }, removed: 0,
+    }]});
+    let firstWaveAddedReads = null;
+    for (const directory of directories.slice(1, -1)) {
+      pending.get(directory).resolve(jsonResponse({entries: [{name: 'new.txt', kind: 'file'}]}));
+      await flushAsyncWork();
+      for (const frame of frames.splice(0)) frame();
+    await flushAsyncWork();
+      if (firstWaveAddedReads === null) firstWaveAddedReads = addedReads;
+      else assert.equal(addedReads, firstWaveAddedReads, 'stable payload totals are derived once for the transaction');
+    }
+    assert.equal(unchangedBranchPaints, 0, 'arriving sibling frames preserve the settled branch');
+    assert.equal(unchangedRowWrites, 0, 'listing-only frames preserve unchanged row state too');
+    assert.equal(unchangedDirectoryWrites, 0, 'ancestor traversal preserves unaffected sibling directory rows');
+    let replacementReads = 0;
+    api.setFinderSessionFilesPayloadForTest({session: '1', loaded: false, repos: [{repo: '/repo'}], files: [{
+      abs_path: '/repo/d0/other/file.txt', status: 'M',
+      get added() { replacementReads += 1; return 7; }, removed: 0,
+    }]});
+    pending.get(directories.at(-1)).resolve(jsonResponse({entries: [{name: 'new.txt', kind: 'file'}]}));
+    await sync;
+    assert.ok(replacementReads > 0, 'producer replacement invalidates the transaction derived values');
+    assert.equal(unchangedBranchPaints, 0, 'settlement preserves branches whose listings already published');
+    assert.equal(pathWrites, 0, 'listing publication preserves the already-published root chrome');
+    assert.ok(directories.every(directory => tree.querySelector(`.file-tree-row[data-path="${directory}/${directory === directories[0] ? 'unchanged' : 'new'}.txt"]`)));
+  });
+
+  await testAsync('Finder Sync publishes one tree paint for a concurrent listing wave', async () => {
+    const frames = [];
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) { frames.push(callback); return frames.length; },
+      cancelAnimationFrame() {},
+    });
+    api.setFileExplorerRootMode('sync', {sync: false});
+    const pending = new Map();
+    const directories = Array.from({length: 8}, (_, index) => `/repo/dir-${index}`);
+    api.setFetchForTest(url => {
+      const route = String(url);
+      if (!route.startsWith('/api/fs/fast/list?')) return Promise.resolve(jsonResponse({}));
+      const path = new URL(route, 'https://yomux.test').searchParams.get('path');
+      if (path === '/repo') return Promise.resolve(jsonResponse({path, entries: directories.map(directory => ({name: directory.split('/').at(-1), kind: 'dir'}))}));
+      const deferred = deferredFetch();
+      pending.set(path, deferred);
+      return deferred.promise;
+    });
+    const plan = {session: '1', root: '/repo', expandPaths: [...directories, '/repo/dir-0/deeper'], affectedDirs: directories};
+    const sync = api.syncFileExplorerRootToPlanForTest(plan, '1');
+    await flushAsyncWork();
+    const tree = api.fileExplorerTreeForTest();
+    assert.ok(tree.querySelector('.file-tree-row[data-path="/repo/dir-0"]'), 'the root paints before any descendant arrives');
+    assert.equal(pending.size, 8, 'all eight sibling requests start concurrently');
+    for (const frame of frames.splice(0)) frame();
+    await flushAsyncWork();
+    let rootPaints = 0;
+    const setProperty = tree.style.setProperty.bind(tree.style);
+    tree.style.setProperty = (key, value) => { if (key === '--tree-depth') rootPaints += 1; setProperty(key, value); };
+    for (const directory of directories) {
+      pending.get(directory).resolve(jsonResponse({path: directory, entries: [
+        {name: 'leaf.txt', kind: 'file'},
+        ...(directory === directories[0] ? [{name: 'deeper', kind: 'dir'}] : []),
+      ]}));
+    }
+    await flushAsyncWork();
+    assert.ok(pending.has('/repo/dir-0/deeper'), 'deeper requests do not wait for the publication frame');
+    assert.equal(rootPaints, 0, 'response callbacks do not each repaint the growing tree');
+    for (const frame of frames.splice(0)) frame();
+    await flushAsyncWork();
+    assert.equal(rootPaints, 0, 'the sibling wave retains unchanged root depth styling');
+    for (const directory of directories) assert.ok(tree.querySelector(`.file-tree-row[data-path="${directory}/leaf.txt"]`));
+    pending.get('/repo/dir-0/deeper').resolve(jsonResponse({path: '/repo/dir-0/deeper', entries: [{name: 'last.txt', kind: 'file'}]}));
+    assert.equal(await sync, true);
+    assert.ok(tree.querySelector('.file-tree-row[data-path="/repo/dir-0/deeper/last.txt"]'), 'settlement publishes the final pending directory');
+    const paintsAtSettlement = rootPaints;
+    for (const frame of frames.splice(0)) frame();
+    await flushAsyncWork();
+    assert.equal(rootPaints, paintsAtSettlement, 'retired publication callbacks cannot repaint after settlement');
+  });
+
   await testAsync('Finder Sync paints the fast root before progressive descendant listings finish', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setFileExplorerRootMode('sync', {sync: false});
     const pending = new Map();
     const calls = [];
@@ -1809,7 +3832,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('Finder Sync cache-first paint backfills cached +/- after the root rows mount', async () => {
     const frames = [];
-    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
       requestAnimationFrame(callback) {
         frames.push(callback);
         return frames.length;
@@ -1841,7 +3864,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Finder Sync rejects a stale progressive descendant after a newer transaction takes ownership', async () => {
-    const api = loadYolomux('', ['1', '2']);
+    const api = loadYomux('', ['1', '2']);
     api.setFileExplorerRootMode('sync', {sync: false});
     const staleDescendant = deferredFetch();
     api.setFetchForTest(url => {
@@ -1884,7 +3907,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('operation receipts reuse the shared client-event stream', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.installClientEventStreamForTest();
     const initialSource = api.clientEventTransportStateForTest().source;
     initialSource.listeners.get('ready')[0]({data: '{}', type: 'ready', lastEventId: ''});
@@ -1924,7 +3947,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('an operation accepted before the first global stream is ready is present in that stream replay URL', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.installClientEventStreamForTest();
     const preReadySource = api.clientEventTransportStateForTest().source;
     const operationId = 'op-pre-ready-replay';
@@ -1963,7 +3986,7 @@ async function runLayoutAsyncSuite() {
 
   test('client-event pagehide disposes active and candidate streams exactly once and bfcache resumes demand', () => {
     const timers = [];
-    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
       setTimeout(callback, delay) {
         const timer = {callback, delay, cleared: false};
         timers.push(timer);
@@ -1994,7 +4017,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('operation terminals acknowledge browser consumption only after completion and in one batch', async () => {
     const timers = [];
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       setTimeout(callback, delay) {
         const handle = {callback, delay};
         timers.push(handle);
@@ -2053,7 +4076,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('a lost operation acknowledgment response retains and retries the exact batch', async () => {
     const timers = [];
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       setTimeout(callback, delay) {
         const handle = {callback, delay};
         timers.push(handle);
@@ -2092,7 +4115,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('channel replacement ignores operation churn while its subscriber opens', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.installClientEventStreamForTest();
     const servingSource = api.clientEventTransportStateForTest().source;
     servingSource.listeners.get('ready')[0]({data: '{}', type: 'ready', lastEventId: ''});
@@ -2134,7 +4157,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('sequential operation receipts retain one global client-event stream', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.installClientEventStreamForTest();
     const source = api.clientEventTransportStateForTest().source;
     source.listeners.get('ready')[0]({data: '{}', type: 'ready', lastEventId: ''});
@@ -2170,7 +4193,7 @@ async function runLayoutAsyncSuite() {
   await testAsync('filesystem read and diff receipts settle once through retained operation terminals', async () => {
     for (const timing of ['before-waiter', 'after-waiter', 'reconnect', 'native-reconnect']) {
       for (const operation of ['read', 'diff']) {
-        const api = loadYolomux('', ['1']);
+        const api = loadYomux('', ['1']);
         let terminalEvents = 0;
         api.addWindowEventListenerForTest('yomux:operation-terminal', () => { terminalEvents += 1; });
         api.clearJsDebugEventsForTest();
@@ -2266,7 +4289,7 @@ async function runLayoutAsyncSuite() {
       }
     }
 
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setFetchForTest(() => Promise.resolve(jsonResponse({
       state: 'queued',
       operation: {
@@ -2305,7 +4328,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('a pre-ready candidate failure does not strand demand and recovers on a fresh candidate', async () => {
     const timers = [];
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       setTimeout(callback, delay) {
         const handle = {callback, delay};
         timers.push(handle);
@@ -2371,7 +4394,7 @@ async function runLayoutAsyncSuite() {
         timer.callback();
       }
     };
-    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
       setTimeout,
       clearTimeout,
       performance: {now: () => now},
@@ -2447,7 +4470,7 @@ async function runLayoutAsyncSuite() {
         timer.callback();
       }
     };
-    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
       setTimeout,
       clearTimeout: id => timers.delete(id),
       performance: {now: () => now},
@@ -2493,7 +4516,7 @@ async function runLayoutAsyncSuite() {
         timer.callback();
       }
     };
-    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
       setTimeout,
       clearTimeout: id => timers.delete(id),
       performance: {now: () => now},
@@ -2536,7 +4559,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('operation replay retention is bounded while preserving delayed terminal-before-receipt delivery', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const retainedLimit = 128;
     const largePayload = 'x'.repeat(256 * 1024);
     for (let index = 0; index < retainedLimit + 2; index += 1) {
@@ -2587,7 +4610,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('session-scoped operation terminal settles globally but skips stale same-name generation paint', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'readonly', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'readonly', {
       locationHash: '#t=session-generation-operation',
     });
     const receipt = {
@@ -2635,7 +4658,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('same-name recreation rejects stale terminal socket close and reconnect work', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const requests = [];
     api.setFetchForTest(url => {
       requests.push(String(url));
@@ -2662,7 +4685,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('retired summary and transcript streams cannot paint or reconnect into a same-name generation', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [1500]});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [1500]});
     api.startSummaryStreamForTest('1');
     api.startTranscriptStreamForTest('1');
     const oldSummary = api.summaryStreamForTest('1');
@@ -2703,7 +4726,7 @@ async function runLayoutAsyncSuite() {
   await testAsync('chat lifecycle disposal aborts requests and suppresses owned timers', async () => {
     let nextTimer = 1;
     const timers = new Map();
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       setTimeout(callback) {
         const timer = nextTimer;
         nextTimer += 1;
@@ -2729,7 +4752,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('lifecycle scope disposes replacement and late resources exactly once', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const disposed = [];
     const scope = api.createLifecycleScopeForTest();
     const first = {name: 'first'};
@@ -2745,7 +4768,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('latest resource owns dedupe, latest-wins, last-good failure, and state order', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const pending = [];
     const phases = [];
     const resource = api.createLatestResourceForTest({
@@ -2775,7 +4798,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('retired terminal generation owns delayed resize scroll and blank refresh side effects', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [30, 220]});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [30, 220]});
     const sent = [];
     const term = {cols: 80, rows: 24, buffer: {active: {length: 0}}, refresh() {}};
     const item = api.registerTerminalForTest('1', term, {readyState: 1, send(value) { sent.push(value); }});
@@ -2796,7 +4819,7 @@ async function runLayoutAsyncSuite() {
       {status: 404, code: 'common.pathNotFound', error: 'path not found'},
       {status: 504, code: 'deadline_expired', error: 'backend operation deadline expired'},
     ]) {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const operationId = `op-detached-${terminal.status}`;
       const epoch = `detached-${terminal.status}-epoch`;
       const receipt = {
@@ -2853,7 +4876,7 @@ async function runLayoutAsyncSuite() {
       timers.set(id, {callback, delay: Number(delay), due: now + Number(delay)});
       return id;
     };
-    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
       setTimeout,
       clearTimeout: id => timers.delete(id),
       performance: {now: () => now},
@@ -2887,7 +4910,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('an admitted filesystem receipt rejects a later wrong-epoch terminal', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const operationId = 'op-wrong-epoch-after-receipt';
     const receipt = {
       state: 'queued',
@@ -2929,7 +4952,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('a pre-receipt wrong epoch still demands the exact operation on the shared stream', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.installClientEventStreamForTest();
     const initialSource = api.clientEventTransportStateForTest().source;
     initialSource.listeners.get('ready')[0]({data: '{}', type: 'ready', lastEventId: ''});
@@ -2996,7 +5019,7 @@ async function runLayoutAsyncSuite() {
       ['mkdir', '/api/fs/mkdir'],
     ];
     for (const [operation, url] of operations) {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       let fetches = 0;
       api.setFetchForTest(() => {
         fetches += 1;
@@ -3026,7 +5049,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('editor open diff and save consume cold filesystem terminals before mutating state', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const path = '/repo/cold-editor.txt';
     let sequence = 0;
     const receipts = [];
@@ -3121,7 +5144,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('editor serializes a newer save behind the active filesystem write', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const path = '/repo/serialized-save.md';
     const receipts = [];
     const writes = [];
@@ -3181,7 +5204,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('editor acknowledges an in-flight zero-byte self-write before its response', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const path = '/repo/in-flight-zero-byte.md';
     let release;
     api.setFetchForTest((url, options = {}) => {
@@ -3208,7 +5231,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('editor moves pending saves to a renamed path without changing the active request', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const oldPath = '/repo/renamed-save.md';
     const newPath = '/repo/moved-save.md';
     const receipts = [];
@@ -3245,7 +5268,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('editor keeps a genuine write conflict actionable and overwrite cannot deadlock', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const path = '/repo/external-conflict.md';
     const writes = [];
     api.setFetchForTest((url, options = {}) => {
@@ -3290,7 +5313,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('closing the last-editing tab releases its detached panel while another file tab remains', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const path = '/repo/multi-panel-owner.md';
     const ownerItem = api.fileEditorItemFor(path);
     const remainingItem = api.fileEditorCopyItemFor(path);
@@ -3310,7 +5333,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('a conflict does not report a queued newer save as successful', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const path = '/repo/pending-conflict.md';
     const writes = [];
     let chooseCancel;
@@ -3339,7 +5362,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('compare then overwrite resolves the queued newer save after its write', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const path = '/repo/compare-pending-conflict.md';
     const writes = [];
     api.setFetchForTest((url, options = {}) => {
@@ -3372,7 +5395,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('conflict overwrite uses the newer panel content', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const path = '/repo/panel-conflict.md';
     const writes = [];
     api.setFetchForTest((url, options = {}) => {
@@ -3401,7 +5424,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('conflict overwrite uses edits made while the dialog is open', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const path = '/repo/dialog-edit-conflict.md';
     const writes = [];
     api.setFetchForTest((url, options = {}) => {
@@ -3424,7 +5447,7 @@ async function runLayoutAsyncSuite() {
 
   test('push-owned operation kinds create no promise waiters or rejection diagnostics', () => {
     for (const kind of ['fs_batch', 'session_files']) {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       api.clearJsDebugEventsForTest();
       api.registerApiOperationReceiptForTest({
         request: {id: `r-${kind}`},
@@ -3442,7 +5465,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('panel-body reconciliation restores named anchors before one afterReplace hook', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const order = [];
     const oldScroller = {scrollTop: 31, scrollLeft: 7};
     const newScroller = {scrollTop: 0, scrollLeft: 0};
@@ -3472,7 +5495,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('search-index lifecycle generations reject a delayed older status response', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     api.setFileExplorerIndexedDirsForTest(['/repo']);
     assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {state: 'building', generation: 4}), true);
     assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {state: 'ready', generation: 3}), false, 'an older HTTP status cannot overwrite the newer lifecycle transition');
@@ -3484,7 +5507,7 @@ async function runLayoutAsyncSuite() {
   // degraded to "building" - honest about readiness, silent about staleness. One derivation now
   // answers both questions.
   test('a snapshot whose producer is dead reads as stale, never as building or ready', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     api.setFileExplorerIndexedDirsForTest(['/repo']);
     const orphaned = {
       state: 'stale',
@@ -3536,7 +5559,7 @@ async function runLayoutAsyncSuite() {
   // The user-visible half of the same incident: Quick Open kept answering from that snapshot and said
   // nothing. Rows stay - stale beats nothing - but the palette now says how old they are and why.
   test('quick open labels a stale snapshot inline, with its age, and keeps the rows usable', () => {
-    const staleApi = loadYolomux('', ['1']);
+    const staleApi = loadYomux('', ['1']);
     staleApi.setFileExplorerIndexedDirsForTest(['/home/test/dynamo']);
     staleApi.installCommandPaletteFixtureForTest();
     staleApi.setCommandPaletteQueryForTest('2026.md');
@@ -3591,7 +5614,7 @@ async function runLayoutAsyncSuite() {
     assert.ok(staleStatus.classList.names.has('stale'), 'the stale marker is a class, so the warning is not colour-only');
     assert.ok(staleApi.commandPaletteStateForTest().node.querySelector('.command-palette-results').innerHTML.includes('2026.md'), 'the stale rows are still rendered beneath the warning');
 
-    const freshApi = loadYolomux('', ['1']);
+    const freshApi = loadYomux('', ['1']);
     freshApi.setFileExplorerIndexedDirsForTest(['/home/test/dynamo']);
     freshApi.installCommandPaletteFixtureForTest();
     freshApi.setCommandPaletteQueryForTest('2026.md');
@@ -3614,7 +5637,7 @@ async function runLayoutAsyncSuite() {
     assert.equal(freshApi.commandPaletteStatusHtmlForTest(), '', 'a vouched snapshot leaves the palette status row hidden');
 
     // Empty AND stale is a false negative, not a completed "No matches".
-    const emptyApi = loadYolomux('', ['1']);
+    const emptyApi = loadYomux('', ['1']);
     emptyApi.installCommandPaletteFixtureForTest();
     emptyApi.setCommandPaletteQueryForTest('2026.md');
     emptyApi.setFileQuickOpenCandidatesForTest('/home/test/dynamo', []);
@@ -3648,7 +5671,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('search-index completion pushes its lifecycle snapshot without rereading the root', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const requests = [];
     api.setFetchForTest(url => {
       requests.push(String(url));
@@ -3666,7 +5689,7 @@ async function runLayoutAsyncSuite() {
   // read "file limit reached" and the Finder banner claimed "Indexed 0 files" — both false. The live
   // truth is `progressive_coverage`: a crawl that is not truncated and not yet full is still BUILDING.
   test('a progressive BFS crawl reads as building, not the terminal file-limit state, and clears a superseded warning', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     api.setFileExplorerIndexedDirsForTest(['/repo']);
     api.clearFileIndexPartialWarningsForTest();
 
@@ -3705,7 +5728,7 @@ async function runLayoutAsyncSuite() {
   // empty snapshot and never refreshed, even though the file was later indexed. The palette must
   // re-issue the CURRENT typed query when the index advances, with no retype.
   await testAsync('a search_progress signal streams the crawl\'s newly-published matches by cursor, not a repeated full query', async () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     api.setFileExplorerIndexedDirsForTest(['/repo']);
     const searches = [];
     api.setFetchForTest(url => {
@@ -3783,7 +5806,7 @@ async function runLayoutAsyncSuite() {
   }
 
   await testAsync('an out-of-order delta for a superseded request cannot mutate a newer palette', async () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const {searches} = await seedQuickOpenDeltaCursor(api, {deltaReply: () => ({changes: [], more: false, cursor: 'CUR1'})});
     const staleRequestId = api.fileQuickOpenDeltaRootsForTest()[0].requestId;
     // A newer search supersedes the cursor set (a query change bumps requestId + reseeds).
@@ -3804,7 +5827,7 @@ async function runLayoutAsyncSuite() {
     // `notes/t5t/t5t.md` at position 1 and that DOIT file at position 77 -- so the row on screen was
     // never an answer to `t5t.md`. It was the answer to the shorter `t5t`, still being presented while
     // the newer, more specific search sat accepted-but-unanswered behind the operation queue.
-    const api = loadYolomux('', ['1', '2', '3', '4', '5', '6'], 'http:', 'Linux x86_64', 'admin', {repoRoot: '/repo'});
+    const api = loadYomux('', ['1', '2', '3', '4', '5', '6'], 'http:', 'Linux x86_64', 'admin', {repoRoot: '/repo'});
     api.setFileExplorerIndexedDirsForTest(['/repo']);
     const decoy = '/repo/queues/DOIT.p1.e5.backend-lifetime-supervision.md';
     let answerLongQuery = null;
@@ -3852,7 +5875,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('a same-query refresh keeps its current rows visible until the new answer lands', async () => {
-    const api = loadYolomux('', ['1', '2', '3', '4', '5', '6'], 'http:', 'Linux x86_64', 'admin', {repoRoot: '/repo'});
+    const api = loadYomux('', ['1', '2', '3', '4', '5', '6'], 'http:', 'Linux x86_64', 'admin', {repoRoot: '/repo'});
     api.setFileExplorerIndexedDirsForTest(['/repo']);
     const retained = '/repo/notes/t5t/t5t.md';
     let searchCount = 0;
@@ -3887,7 +5910,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('a path query clears prior rows while its directory changes', async () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     let listCount = 0;
     let answerSecondDirectory = null;
     api.setFetchForTest(url => {
@@ -3920,7 +5943,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('a rebase_required verdict performs one full-snapshot repair, not a mixed merge', async () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const {searches, scopeId} = await seedQuickOpenDeltaCursor(api, {
       deltaReply: () => ({root: '/repo', root_realpath: '/repo', rebase_required: true, reason: 'generation_superseded'}),
     });
@@ -3933,7 +5956,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('a signal drains a paginated backlog bounded, advancing the cursor once settled', async () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const pages = [
       {changes: [{operation: 'upsert', path: '/repo/one.md', name: 'one.md', relative_path: 'one.md', realpath: '/repo/one.md'}], more: true, cursor: 'CUR1'},
       {changes: [{operation: 'upsert', path: '/repo/two.md', name: 'two.md', relative_path: 'two.md', realpath: '/repo/two.md'}], more: false, cursor: 'CUR2'},
@@ -3951,7 +5974,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('a search_progress signal after close or for another root pumps nothing', async () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const {searches, scopeId} = await seedQuickOpenDeltaCursor(api, {deltaReply: () => ({changes: [], more: false, cursor: 'CUR1'})});
     searches.length = 0;
     // A non-matching scope digest correlates to no open root.
@@ -3966,7 +5989,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('a root with no committed baseline repairs from a full snapshot on its first signal', async () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     // initial_cursor null: nothing committed yet, so a signal cannot delta-read and must repair.
     const {searches, scopeId} = await seedQuickOpenDeltaCursor(api, {initialCursor: null, deltaReply: () => ({changes: [], more: false, cursor: 'CUR1'})});
     assert.equal(api.fileQuickOpenDeltaRootsForTest()[0].cursor, null, 'a warming root with nothing committed stores a null baseline');
@@ -3979,7 +6002,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('auto-approve startup snapshots share one in-flight request', async () => {
     const pending = [];
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setFetchForTest(url => {
       assert.equal(String(url), '/api/auto-approve');
       return new Promise(resolve => pending.push(resolve));
@@ -3997,7 +6020,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('auto-status fallback imports working Codex activity when Go lacks auto-approve', async () => {
     const requests = [];
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setFetchForTest(url => {
       const target = String(url);
       requests.push(target);
@@ -4024,7 +6047,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Go activity fallback adopts an authoritative global session before legacy sessions converge', async () => {
-    const api = loadYolomux('', [], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', [], 'http:', 'Linux x86_64', 'admin', {
       bootstrapOverrides: {backendLabel: 'Go 0.1.0-test', statsOnly: true},
     });
     api.setFetchForTest(url => {
@@ -4049,7 +6072,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Go activity fallback repairs a transient unavailable Codex sample while SSE stays connected', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       bootstrapOverrides: {backendLabel: 'Go 0.1.0-test', statsOnly: true},
     });
     const requests = [];
@@ -4078,7 +6101,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Go activity fallback does not erase a live working marker on a capture miss', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       bootstrapOverrides: {backendLabel: 'Go 0.1.0-test', statsOnly: true},
     });
     const samples = ['working', 'unavailable'];
@@ -4103,7 +6126,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Go activity refresh promotes a newly working Codex pane into the shared marker model', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       bootstrapOverrides: {backendLabel: 'Go 0.1.0-test', statsOnly: true},
     });
     api.setFetchForTest(url => {
@@ -4122,7 +6145,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Go activity fallback paints a recovered working row over stale unavailable status', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       bootstrapOverrides: {backendLabel: 'Go 0.1.0-test', statsOnly: true},
     });
     api.setAutoApproveStateForTest('1', {agent_windows: [
@@ -4136,7 +6159,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Go activity fallback cannot resurrect a stale working row over a newer unavailable snapshot', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       bootstrapOverrides: {backendLabel: 'Go 0.1.0-test', statsOnly: true},
     });
     api.setAutoApproveStateForTest('1', {
@@ -4153,7 +6176,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Go activity adoption cannot replace a newer canonical working snapshot', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       bootstrapOverrides: {backendLabel: 'Go 0.1.0-test', statsOnly: true},
     });
     api.setAutoApproveStateForTest('1', {
@@ -4177,7 +6200,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('auto-approve accepted snapshot waits for its terminal without per-session recovery fetches', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const requests = [];
     api.setFetchForTest(url => {
       requests.push(String(url));
@@ -4206,7 +6229,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('Tabber snapshot owner coalesces repeated rendering consumers', async () => {
     const pending = [];
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setFileExplorerModeForTest('tabber');
     api.setFetchForTest(url => {
       assert.ok(String(url).startsWith('/api/activity?'));
@@ -4222,7 +6245,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('activity-summary request and push paths stay terminal-disabled', async () => {
     const requests = [];
-    const api = loadYolomux();
+    const api = loadYomux();
     api.setFetchForTest(url => {
       requests.push(String(url));
       return Promise.resolve(jsonResponse({marker: 'unexpected', sessions: {}, global: {lines: []}}));
@@ -4257,7 +6280,7 @@ async function runLayoutAsyncSuite() {
         marker: value => value.marker,
       },
     ]) {
-      const api = loadYolomux();
+      const api = loadYomux();
       const batches = [];
       api.setFetchForTest((url, options = {}) => {
         const directList = String(url).startsWith('/api/fs/fast/list?');
@@ -4327,7 +6350,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Finder filesystem current failure releases the shared resource request', async () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const batches = [];
     api.setFetchForTest((url, options = {}) => {
       const requests = JSON.parse(options.body || '{}').requests || [];
@@ -4364,7 +6387,7 @@ async function runLayoutAsyncSuite() {
   }
 
   await testAsync('bounded read pending is a typed retry instead of an invalid response contract', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setFetchForTest(() => Promise.resolve(jsonResponse({
       state: 'queued',
       request: {id: 'r-bounded-read-pending'},
@@ -4384,7 +6407,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('ready response envelopes expose only canonical data to current clients', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setFetchForTest(() => Promise.resolve(jsonResponse({
       state: 'ready',
       request: {id: 'r-canonical-metadata'},
@@ -4403,7 +6426,7 @@ async function runLayoutAsyncSuite() {
     const cancelledFrames = [];
     const timers = [];
     const clearedTimers = [];
-    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
       requestAnimationFrame(callback) {
         const id = 40 + frames.length + 1;
         frames.push({id, callback});
@@ -4506,7 +6529,7 @@ async function runLayoutAsyncSuite() {
         timer.callback();
       }
     };
-    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
       setTimeout,
       clearTimeout,
       performance: {now: () => now},
@@ -4546,7 +6569,7 @@ async function runLayoutAsyncSuite() {
     assert.equal(recovery[0].disconnectEpisode, failures[0].disconnectEpisode);
     assert.equal(api.jsDebugFailureEventsForTest().length, 1, 'recovery is not a second failure');
 
-    const removed = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {setTimeout, clearTimeout, performance: {now: () => now}});
+    const removed = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {setTimeout, clearTimeout, performance: {now: () => now}});
     removed.setEventSourceConstructorForTest(undefined);
     removed.installClientEventStreamForTest();
     const removalTimer = removed.clientEventTransportStateForTest().disconnectEpisode;
@@ -4557,7 +6580,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('client-event resource revisions reject stale events without rejecting a newer server epoch', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     assert.equal(api.handleClientPushEventForTest('fs_changed', {marker: 'new'}, {epoch: 'server-a', resource: 'fs_changed', resource_revision: 2}), true);
     assert.equal(api.handleClientPushEventForTest('fs_changed', {marker: 'old'}, {epoch: 'server-a', resource: 'fs_changed', resource_revision: 1}), false, 'a delayed resource update cannot replace the latest state');
     assert.equal(api.handleClientPushEventForTest('fs_changed', {marker: 'restart'}, {epoch: 'server-b', resource: 'fs_changed', resource_revision: 1}), true, 'a re-exec server epoch starts an independent sequence');
@@ -4565,21 +6588,21 @@ async function runLayoutAsyncSuite() {
   });
 
   test('client-event ready is a reconnect fence and does not discard an unread resource revision', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     assert.equal(api.applyClientEventReadyEnvelopeForTest({epoch: 'server-a', resource_revisions: {fs_changed: 9}}), true);
     assert.deepStrictEqual(canonical(api.clientEventTransportStateForTest().resourceRevisions), {}, 'ready does not pretend a resource fetch happened');
     assert.equal(api.handleClientPushEventForTest('fs_changed', {marker: 'queued'}, {epoch: 'server-a', resource: 'fs_changed', resource_revision: 9}), true, 'a frame at the ready fence remains deliverable');
   });
 
   test('client-event ready repairs only same-epoch resource gaps', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.handleClientPushEventForTest('fs_changed', {}, {epoch: 'server-a', resource: 'fs_changed', resource_revision: 4});
     assert.deepStrictEqual(canonical(api.clientEventReadyGapResourcesForTest({resource_revisions: {fs_changed: 4, 'event_log_changed:1': 3}})), ['event_log_changed:1']);
   });
 
   test('queued events from the retired server epoch are dropped at frame flush', () => {
     const frames = [];
-    const api = loadYolomux(
+    const api = loadYomux(
       '?sessions=old&layout=left&tabs=left:old',
       ['old'],
       'http:',
@@ -4633,7 +6656,7 @@ async function runLayoutAsyncSuite() {
     };
     const makeClient = () => {
       const requests = [];
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       api.setFetchForTest(url => {
         requests.push(String(url));
         if (String(url) === '/api/auto-approve') return Promise.resolve(jsonResponse(latestAuto));
@@ -4690,7 +6713,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('keyed patches at revisions 401/402/403 apply in one frame strictly in order', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const requests = [];
     api.setFetchForTest(url => { requests.push(String(url)); return Promise.resolve(jsonResponse({})); });
     api.setDocumentVisibilityForTest('hidden');
@@ -4728,7 +6751,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('a revision-only agent-window patch advances the revision without HTTP or a row rebuild', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const requests = [];
     api.setFetchForTest(url => { requests.push(String(url)); return Promise.resolve(jsonResponse({})); });
     api.setDocumentVisibilityForTest('hidden');
@@ -4762,7 +6785,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('auto-approve patches retain topology generation when the server omits its unchanged value', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.applyAutoApprovePayloadForTest({
       topology_generation: 1,
       session_order: ['1'],
@@ -4782,7 +6805,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('auto-approve patches retain changed-session scope while stamping every revision', () => {
-    const api = loadYolomux('', ['1', '2']);
+    const api = loadYomux('', ['1', '2']);
     api.applyAutoApprovePayloadForTest({agent_window_snapshot_revision: 10, session_order: ['1', '2'], sessions: {'1': {target: '1', agent_windows: [{kind: 'codex', window_index: 0}]}, '2': {target: '2'}}}, {render: false});
     api.setTabberActivityForTest({agent_window_snapshot_revision: 11, agent_windows: {'1': [{kind: 'codex', window_index: 0, path: '/fresh/path'}]}});
     assert.equal(api.sessionAgentWindowStatusModelForTest('1').agents[0].path || '', '');
@@ -4799,7 +6822,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('dedicated Tabber pane demands transcript metadata over client events', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     assert.equal(await api.openFileSurfacePane('__tabber__'), true);
     const demand = api.clientEventDemandDescriptorForTest();
     assert.ok(demand.active_panes.includes('__tabber__'), `the dedicated Tabber pane is active: ${JSON.stringify(demand)}`);
@@ -4808,7 +6831,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('open event logs demand and refresh only through their SSE invalidation', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const requests = [];
     api.setFetchForTest(url => {
       requests.push(String(url));
@@ -4832,7 +6855,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('event-log SSE reconnect repairs the active bounded reader once', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const requests = [];
     api.setFetchForTest(url => {
       requests.push(String(url));
@@ -4857,7 +6880,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('event-log SSE bursts coalesce to one in-flight repair plus one current follow-up', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const pending = [];
     api.setFetchForTest(url => {
       assert.equal(String(url), '/api/events?session=1&limit=120');
@@ -4895,7 +6918,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('transcript metadata record lets direct push payloads invalidate older HTTP work', async () => {
     const pending = [];
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setFetchForTest(url => {
       assert.ok(String(url).startsWith('/api/session-metadata'));
       const request = deferredFetch();
@@ -4925,7 +6948,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('lightweight metadata preserves only the same session incarnation', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const quiet = {refreshAuto: false, refreshActivity: false, refreshContext: false};
     const originalInfo = {
       session_identity: 'tmux-session-A',
@@ -4971,7 +6994,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('identity-less Python metadata applies fresh pane fields during graph loading', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const quiet = {refreshAuto: false, refreshActivity: false, refreshContext: false};
     await api.applySessionMetadataPayloadForTest({
       session_order: ['1'],
@@ -5007,7 +7030,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('a transcripts revision during an older metadata request owns one follow-up cache read', async () => {
     const pending = [];
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setFetchForTest(url => {
       assert.equal(String(url), '/api/session-metadata');
       const request = deferredFetch();
@@ -5037,7 +7060,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('forced post-mutation metadata supersedes pre-mutation work and rejects stale ABA apply', async () => {
     const pending = [];
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setFetchForTest(url => {
       assert.ok(String(url).startsWith('/api/session-metadata'));
       const request = deferredFetch();
@@ -5059,7 +7082,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('forced auto-status requests apply only the newest same-topology generation', async () => {
     const pending = [];
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setFetchForTest(url => {
       assert.equal(String(url), '/api/auto-approve');
       const request = deferredFetch();
@@ -5083,7 +7106,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('metadata and auto-status snapshots reject topology epochs crossed by same-name recreation', async () => {
     const pending = [];
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setFetchForTest(url => {
       const request = deferredFetch();
       pending.push({url: String(url), ...request});
@@ -5114,7 +7137,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('metadata roster responses cannot move topology backward or erase a rename', async () => {
     const pending = [];
-    const api = loadYolomuxWithFileExplorerClosed(
+    const api = loadYomuxWithFileExplorerClosed(
       '?sessions=glm-5_3&layout=left&tabs=left:glm-5_3',
       ['glm-5_3'],
     );
@@ -5187,7 +7210,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('a replacement server can apply its own topology generation', async () => {
-    const api = loadYolomuxWithFileExplorerClosed('', ['old']);
+    const api = loadYomuxWithFileExplorerClosed('', ['old']);
     const quiet = {refreshAuto: false, refreshActivity: false, refreshContext: false};
     await api.applySessionMetadataPayloadForTest({
       metadata_identity: {epoch: 'server-old', generation: 1},
@@ -5207,7 +7230,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('a delayed old-epoch metadata request cannot overwrite the replacement server', async () => {
-    const api = loadYolomuxWithFileExplorerClosed(
+    const api = loadYomuxWithFileExplorerClosed(
       '?sessions=old&layout=left&tabs=left:old',
       ['old'],
     );
@@ -5247,7 +7270,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('metadata survives same-epoch event-stream adoption during the request', async () => {
-    const api = loadYolomuxWithFileExplorerClosed('?sessions=old&layout=left&tabs=left:old', ['old']);
+    const api = loadYomuxWithFileExplorerClosed('?sessions=old&layout=left&tabs=left:old', ['old']);
     const quiet = {refreshAuto: false, refreshActivity: false, refreshContext: false};
     const pending = [];
     api.setFetchForTest(url => {
@@ -5272,7 +7295,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('the fast rename flow survives a delayed pre-rename metadata response without polling', async () => {
-    const api = loadYolomuxWithFileExplorerClosed(
+    const api = loadYomuxWithFileExplorerClosed(
       '?sessions=glm-5_3&layout=left&tabs=left:glm-5_3',
       ['glm-5_3'],
     );
@@ -5353,7 +7376,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('tmux lifecycle generations make kill-create reuse ABA-safe', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const originalToken = api.tmuxSessionLifecycleTokenForTest('1');
     const original = api.tmuxSessionLifecycleRecordForTest('1');
     const killed = api.beginTmuxSessionLifecycleMutationForTest('kill', {session: '1'});
@@ -5373,7 +7396,7 @@ async function runLayoutAsyncSuite() {
 
   test('superseding kill or rename retires a delayed rename target without stale commit', () => {
     for (const nextKind of ['kill', 'rename']) {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const delayed = api.beginTmuxSessionLifecycleMutationForTest('rename', {session: '1', newName: 'abandoned'});
       assert.equal(api.tmuxSessionLifecycleRecordForTest('abandoned').phase, 'renaming-in');
       const replacement = api.beginTmuxSessionLifecycleMutationForTest(nextKind, {
@@ -5389,7 +7412,7 @@ async function runLayoutAsyncSuite() {
       else assert.equal(api.tmuxSessionLifecycleRecordForTest('1').phase, 'retired');
     }
 
-    const api = loadYolomux('', ['1', '2']);
+    const api = loadYomux('', ['1', '2']);
     const delayed = api.beginTmuxSessionLifecycleMutationForTest('rename', {session: '1', newName: 'abandoned'});
     api.beginTmuxSessionLifecycleMutationForTest('kill', {session: '2'});
     assert.equal(delayed.state, 'superseded');
@@ -5398,7 +7421,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('tmux mutation blocks new old-generation requests and drains issued leases', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const lease = api.tmuxSessionLifecycleAcquireRequestForTest('1');
     const mutation = api.beginTmuxSessionLifecycleMutationForTest('rename', {session: '1', newName: 'renamed'});
     let drained = false;
@@ -5423,7 +7446,7 @@ async function runLayoutAsyncSuite() {
     // after its terminal early returns. A malformed, superseded, older-generation, or
     // committed-render-superseded outcome left the payload held with nothing recorded and nothing
     // scheduled to revisit it, so the published consumer revision could never advance again.
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const quiet = {refreshAuto: false, refreshActivity: false, refreshContext: false};
     const metadataFor = (generation, sessionOrder, extra = {}) => ({
       metadata_identity: {epoch: 'epoch-a', generation},
@@ -5488,7 +7511,7 @@ async function runLayoutAsyncSuite() {
     // FINDING 3: a PARTIAL per-session overtake must RETAIN, not discard. Session '1' is pushed
     // past the held revision while session '2' is left behind; a global maximum would wrongly
     // discard status that session '2' never received.
-    const api2 = loadYolomux('', ['1']);
+    const api2 = loadYomux('', ['1']);
     assert.equal(await api2.applySessionMetadataPayloadForTest(metadataFor(1, ['1']), quiet), true);
     assert.equal(api2.applyAutoApprovePayloadForTest(sealed(9)).deferred, true, 'partial: the seal is held');
     api2.setAutoApproveStateForTest('1', {target: '1', enabled: false, last_action: 'off', agent_window_snapshot_revision: 40});
@@ -5521,7 +7544,7 @@ async function runLayoutAsyncSuite() {
     // rendered model carried no identity, so "the refresh landed and had nothing new" and "the
     // refresh was silently discarded" were indistinguishable. A create-session gate could only tell
     // them apart by waiting 15s for a watchdog.
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     assert.equal(api.transcriptMetadataStateForTest().generation, 0, 'no metadata generation is claimed before one is applied');
 
     const applied = await api.applySessionMetadataPayloadForTest({
@@ -5588,7 +7611,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('tmux roster events update cached Tabs state without metadata polling', async () => {
-    const api = loadYolomux('?sessions=old&layout=left&tabs=left:old', ['old']);
+    const api = loadYomux('?sessions=old&layout=left&tabs=left:old', ['old']);
     await api.applySessionMetadataPayloadForTest({
       metadata_identity: {epoch: 'epoch-a', generation: 4},
       topology_generation: 1,
@@ -5650,7 +7673,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('HTTP metadata preserves a rename while its roster event is delayed', async () => {
-    const api = loadYolomux('?sessions=old&layout=left&tabs=left:old', ['old']);
+    const api = loadYomux('?sessions=old&layout=left&tabs=left:old', ['old']);
     const quiet = {refreshAuto: false, refreshActivity: false, refreshContext: false};
     await api.applySessionMetadataPayloadForTest({
       metadata_identity: {epoch: 'epoch-a', generation: 4},
@@ -5685,7 +7708,7 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.itemInLayout('renamed'), true, 'the delayed event does not undo the migrated pane');
     assert.deepStrictEqual(canonical(api.transcriptMetadataStateForTest().payload.session_order), ['renamed']);
 
-    const activityApi = loadYolomux('?sessions=old&layout=left&tabs=left:old', ['old']);
+    const activityApi = loadYomux('?sessions=old&layout=left&tabs=left:old', ['old']);
     await activityApi.applySessionMetadataPayloadForTest({
       metadata_identity: {epoch: 'epoch-b', generation: 4},
       topology_generation: 1,
@@ -5702,7 +7725,7 @@ async function runLayoutAsyncSuite() {
     assert.equal(activityApplied, true);
     assert.equal(activityApi.itemInLayout('renamed'), true, 'an activity response can arrive before the rename event without dropping the pane');
 
-    const reusedNameApi = loadYolomux('?sessions=old&layout=left&tabs=left:old', ['old']);
+    const reusedNameApi = loadYomux('?sessions=old&layout=left&tabs=left:old', ['old']);
     await reusedNameApi.applySessionMetadataPayloadForTest({
       metadata_identity: {epoch: 'epoch-c', generation: 4},
       topology_generation: 1,
@@ -5724,7 +7747,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('tmux roster removal rerenders panels after retiring the exited session', () => {
-    const api = loadYolomux('?sessions=exited&layout=left&tabs=left:exited', ['exited']);
+    const api = loadYomux('?sessions=exited&layout=left&tabs=left:exited', ['exited']);
     let renderCount = 0;
     let renderedPreviousActive = [];
     api.setRenderPanelsForTest(previousActive => {
@@ -5746,7 +7769,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('tmux roster rename chains migrate layout and keyed state atomically', async () => {
-    const api = loadYolomux(
+    const api = loadYomux(
       '?sessions=A,B&layout=row@50(left,right)&tabs=left:A;right:B',
       ['A', 'B'],
     );
@@ -5791,7 +7814,7 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.transcriptMetadataStateForTest().payload.sessions.C.session_identity, 'identity-B');
 
     const focusApiFor = async focus => {
-      const focusApi = loadYolomux(
+      const focusApi = loadYomux(
         '?sessions=A,B,D&layout=row@50(left,row@50(right,bottom))&tabs=left:A;right:B;bottom:D',
         ['A', 'B', 'D'],
       );
@@ -5833,7 +7856,7 @@ async function runLayoutAsyncSuite() {
     // every payload already satisfies -- while the forced settle, which reads the target from its
     // own response, still converged. The reload gate saw exactly that: the server named build 7 and
     // the browser reported awaiting build 0.
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     await api.applySessionMetadataPayloadForTest({
       metadata_identity: {epoch: 'epoch-a', generation: 7},
       cache: {pending_identity: {epoch: 'epoch-a', generation: 9}},
@@ -5905,7 +7928,7 @@ async function runLayoutAsyncSuite() {
   await testAsync('a forced refresh answered by a replacement server waits for that server\'s own build', async () => {
     // The exact reproduction: retained applied/pending generation 50, then a new process answers
     // `force=1` from its pre-request cache at generation 0 and promises generation 1.
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [151]});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [151]});
     await applyOldServerMetadata(api);
 
     const requests = [];
@@ -5947,7 +7970,7 @@ async function runLayoutAsyncSuite() {
     // Every assertion above goes red here -- the retained identity is never reset, no convergence
     // read is issued, and the force resolves against the payload that predates it. That is what
     // makes the assertions above evidence about the epoch rather than about anything else.
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [151]});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [151]});
     await api.applySessionMetadataPayloadForTest(
       metadataPayload(EPOCH_A, 50, {pending: {epoch: EPOCH_A, generation: 50}}),
       {refreshAuto: false, refreshActivity: false, refreshContext: false},
@@ -5976,7 +7999,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('a force whose response names no build identity is unsatisfiable, never converged', async () => {
     for (const pending of [undefined, {epoch: EPOCH_A, generation: 0}]) {
-      const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [151]});
+      const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [151]});
       await applyOldServerMetadata(api);
       api.setFetchForTest(async () => jsonResponse(metadataPayload(EPOCH_A, 50, pending ? {pending} : {})));
       const result = await api.refreshSessionMetadataForTest({force: true, refreshAuto: false, refreshActivity: false});
@@ -5985,7 +8008,7 @@ async function runLayoutAsyncSuite() {
 
     // Negative control: the SAME code path returns a converged verdict as soon as a real build
     // identity is named and observed, so the failure above is caused by the missing identity.
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [151]});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [151]});
     await applyOldServerMetadata(api);
     api.setFetchForTest(async () => jsonResponse(metadataPayload(EPOCH_A, 51, {pending: {epoch: EPOCH_A, generation: 51}})));
     const converged = await api.refreshSessionMetadataForTest({force: true, refreshAuto: false, refreshActivity: false});
@@ -5993,7 +8016,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('a delayed response from the superseded server cannot take the identity back', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin');
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin');
     await applyOldServerMetadata(api);
     await api.applySessionMetadataPayloadForTest(
       metadataPayload(EPOCH_B, 3, {sessions: {'1': {panes: [], marker: 'new-server'}}}),
@@ -6026,7 +8049,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('a force pinned to one server terminates when another server answers', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [151]});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [151]});
     await applyOldServerMetadata(api);
 
     const requests = [];
@@ -6049,7 +8072,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('forced convergence rejects a delayed read from the replaced server', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [151]});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [151]});
     await applyOldServerMetadata(api);
     const convergence = deferredFetch();
     let requestCount = 0;
@@ -6078,7 +8101,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('an epoch change drops the previous process\'s generation-dependent baseline', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin');
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin');
     await applyOldServerMetadata(api);
     assert.equal(api.transcriptMetadataStateForTest().payload.sessions['1'].work_graph.generation, 900);
 
@@ -6108,7 +8131,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('a pushed metadata payload must be stamped by the process that delivered it', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin');
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin');
     await applyOldServerMetadata(api, EPOCH_B);
     const refreshes = [];
     api.setFetchForTest(async input => {
@@ -6146,7 +8169,7 @@ async function runLayoutAsyncSuite() {
   });
 
   function createSessionFixture(sessionMetadataResponse) {
-    const api = loadYolomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1', ['1'], 'http:', 'Linux x86_64', 'admin');
+    const api = loadYomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1', ['1'], 'http:', 'Linux x86_64', 'admin');
     let metadataRequestCount = 0;
     api.setFetchForTest(url => {
       const parsed = new URL(String(url), 'http://localhost');
@@ -6188,7 +8211,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('explicit rename retains bounded forced metadata reconciliation', async () => {
-    const api = loadYolomux('', ['1', '2'], 'http:', 'Linux x86_64', 'admin');
+    const api = loadYomux('', ['1', '2'], 'http:', 'Linux x86_64', 'admin');
     let metadataRequests = 0;
     api.setFetchForTest(url => {
       const parsed = new URL(String(url), 'http://localhost');
@@ -6236,7 +8259,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('post-mutation reconciliation reports a typed reason for a metadata read that fails', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin');
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin');
     api.setFetchForTest(url => (String(url).startsWith('/api/session-metadata')
       ? Promise.reject(new Error('metadata unreachable'))
       : Promise.resolve(jsonResponse({ok: true}))));
@@ -6249,7 +8272,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('sealed agent-window status waits for its metadata roster before becoming visible', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin');
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin');
     await api.applySessionMetadataPayloadForTest({
       session_order: ['1'],
       sessions: {'1': {panes: []}},
@@ -6272,7 +8295,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Tabs menu opens from cached rows without forcing metadata refresh', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     let metadataReads = 0;
     api.setFetchForTest(() => {
       metadataReads += 1;
@@ -6292,7 +8315,7 @@ async function runLayoutAsyncSuite() {
   await testAsync('Search and Runs records reject stale query and refresh completions', async () => {
     const pendingSearch = [];
     const pendingRuns = [];
-    const api = loadYolomux();
+    const api = loadYomux();
     api.setFetchForTest(url => {
       const value = String(url);
       if (value.startsWith('/api/search?')) {
@@ -6337,7 +8360,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('YO!agent jobs record lets forced loads and direct pushes replace older hydration', async () => {
     const pending = [];
-    const api = loadYolomux();
+    const api = loadYomux();
     api.setFetchForTest(url => {
       assert.equal(String(url), '/api/yoagent/jobs');
       const request = deferredFetch();
@@ -6363,7 +8386,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('YO!agent conversation record does not drop forced or pushed updates during hydration', async () => {
     const pending = [];
-    const api = loadYolomux();
+    const api = loadYomux();
     api.setFetchForTest(url => {
       assert.equal(String(url), '/api/yoagent/conversation');
       const request = deferredFetch();
@@ -6393,7 +8416,7 @@ async function runLayoutAsyncSuite() {
   await testAsync('YO!agent read resources dedupe same targets and preserve consumer error policy', async () => {
     const pendingJobs = [];
     const pendingConversation = [];
-    const api = loadYolomux();
+    const api = loadYomux();
     api.setFetchForTest(url => {
       const request = deferredFetch();
       if (String(url) === '/api/yoagent/jobs') pendingJobs.push(request);
@@ -6442,7 +8465,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('Finder Sync record cancels stale root work and resets manual ownership atomically', async () => {
     const pending = [];
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setFileExplorerRootMode('sync', {sync: false});
     api.setFileExplorerSyncStateForTest({inFlightSignature: 'old-plan', appliedPlanKey: 'old-plan', generation: 4});
     api.setFetchForTest(url => {
@@ -6481,7 +8504,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('Finder Sync target record keeps expanded and manual-collapse state atomic through switches and eviction', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setFileExplorerRootMode('sync', {sync: false});
     api.setFileExplorerVisibleSyncTargetForTest('1', '/repo/a');
     api.resetFileExplorerSyncManualCollapsesForTest({session: '1', root: '/repo/a'});
@@ -6525,7 +8548,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Finder Sync merges touched paths without overriding manual disclosure state', async () => {
-    const api = loadYolomux('', ['1', '2']);
+    const api = loadYomux('', ['1', '2']);
     const root = '/home/test';
     api.setFileExplorerRootMode('sync', {sync: false});
     api.setFileExplorerDirListingForTest(root, [{name: 'dev', kind: 'dir'}, {name: 'other', kind: 'dir'}]);
@@ -6546,7 +8569,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Finder Sync remembers independent same-root keyboard cursors without taking focus', async () => {
-    const api = loadYolomux('', ['1', '2']);
+    const api = loadYomux('', ['1', '2']);
     api.setFileExplorerRootMode('sync', {sync: false});
     const root = '/home/test';
     api.setFileExplorerDirListingForTest(root, [
@@ -6588,7 +8611,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('Finder Sync cursor restore falls back to a visible ancestor without a fetch', async () => {
     const frames = [];
-    const api = loadYolomux('', ['1', '2'], 'https:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1', '2'], 'https:', 'Linux x86_64', 'admin', {
       requestAnimationFrame(callback) {
         frames.push(callback);
         return frames.length;
@@ -6617,7 +8640,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('Finder Sync warm session switches render synchronously from the bounded listing cache', async () => {
     const frames = [];
-    const api = loadYolomux('', ['1', '2'], 'https:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1', '2'], 'https:', 'Linux x86_64', 'admin', {
       requestAnimationFrame(callback) {
         frames.push(callback);
         return frames.length;
@@ -6665,7 +8688,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('Finder Sync revalidates a warm tree after its cache-first frame without collapsing it', async () => {
     const frames = [];
-    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
       requestAnimationFrame(callback) {
         frames.push(callback);
         return frames.length;
@@ -6697,9 +8720,114 @@ async function runLayoutAsyncSuite() {
     assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), [], 'background freshness does not collapse or invent disclosure state');
   });
 
+  await testAsync('Finder Sync lists a ready deep branch before an unrelated held sibling', async () => {
+    const api = loadYomux('', ['1']);
+    const heldSlow = deferredFetch();
+    const requests = [];
+    let fastDeepRequested = false;
+    api.setFetchForTest(url => {
+      const path = new URL(String(url), 'https://yolomux.test').searchParams.get('path');
+      requests.push(path);
+      if (path === '/repo/slow') return heldSlow.promise;
+      if (path === '/repo/fast/deep') fastDeepRequested = true;
+      const entries = path === '/repo' ? [{name: 'slow', kind: 'dir'}, {name: 'fast', kind: 'dir'}]
+        : path === '/repo/fast' ? [{name: 'deep', kind: 'dir'}]
+          : path === '/repo/fast/deep' ? [{name: 'ready.txt', kind: 'file'}]
+            : [{name: 'slow.txt', kind: 'file'}];
+      return Promise.resolve(jsonResponse({path, entries}));
+    });
+    const listings = api.fetchFileExplorerSyncListingsForTest([
+      '/repo', '/repo/slow', '/repo/fast', '/repo/fast/deep',
+    ]);
+    for (let index = 0; index < 8; index += 1) await flushAsyncWork();
+    assert.equal(fastDeepRequested, true, `ready descendant starts while sibling is held: ${requests.join(', ')}`);
+    heldSlow.resolve(jsonResponse({path: '/repo/slow', entries: [{name: 'slow.txt', kind: 'file'}]}));
+    const entriesByPath = await listings;
+    assert.deepStrictEqual([...entriesByPath.keys()].sort(), ['/repo', '/repo/fast', '/repo/fast/deep', '/repo/slow']);
+  });
+
+  for (const mode of ['sync', 'restore']) {
+    await testAsync(`Finder ${mode} refills all eight request slots after a single parent completes`, async () => {
+      const api = loadYomux('', ['1']);
+      const root = '/repo';
+      const parent = `${root}/parent`;
+      const rootEntries = [{name: 'parent', kind: 'dir'}];
+      const childEntries = Array.from({length: 12}, (_, index) => ({name: `child-${index}`, kind: 'dir'}));
+      const paths = [parent, ...childEntries.map(entry => `${parent}/${entry.name}`)];
+      api.setFileExplorerRootForTest(root);
+      api.setFileExplorerDirListingForTest(root, rootEntries);
+      api.renderTreeChildrenForTest(api.fileExplorerTreeForTest(), root, rootEntries, 0, [], {view: 'finder'});
+      const pending = [];
+      let releaseAll = false;
+      api.setFetchForTest(url => {
+        const path = new URL(String(url), 'https://yolomux.test').searchParams.get('path');
+        if (path === root) return Promise.resolve(jsonResponse({path, entries: rootEntries}));
+        if (path === parent) return Promise.resolve(jsonResponse({path, entries: childEntries}));
+        assert.ok(paths.includes(path), path);
+        if (releaseAll) return Promise.resolve(jsonResponse({path, entries: []}));
+        const request = {...deferredFetch(), path};
+        pending.push(request);
+        return request.promise;
+      });
+      const traversal = mode === 'sync'
+        ? api.fetchFileExplorerSyncListingsForTest([root, ...paths])
+        : api.restoreFileExplorerExpandedPaths(paths, root);
+      try {
+        for (let index = 0; index < 20 && pending.length < 8; index += 1) await flushAsyncWork();
+        assert.equal(pending.length, 8, 'ready children fill the existing eight slots despite starting from one parent');
+        for (const request of pending.slice(0, 8)) request.resolve(jsonResponse({path: request.path, entries: []}));
+        for (let index = 0; index < 20 && pending.length < 12; index += 1) await flushAsyncWork();
+        assert.equal(pending.length, 12, 'later children start when the first eight release capacity');
+      } finally {
+        releaseAll = true;
+        for (const request of pending) request.resolve(jsonResponse({path: request.path, entries: []}));
+        await traversal;
+      }
+    });
+  }
+
+  await testAsync('Finder manual refresh shares the bounded parent-driven listing scheduler', async () => {
+    const api = loadYomux('', ['1']);
+    const names = ['slow', 'fast', ...Array.from({length: 10}, (_, index) => `other-${index}`)];
+    const rootEntries = names.map(name => ({name, kind: 'dir'}));
+    const expandedPaths = names.map(name => `/repo/${name}`);
+    expandedPaths.push('/repo/fast/deep');
+    api.setFileExplorerRootForTest('/repo');
+    api.setFileExplorerExpandedForTest(expandedPaths);
+    const heldSlow = deferredFetch();
+    const requests = [];
+    let active = 0;
+    let maximumActive = 0;
+    let fastDeepRequested = false;
+    api.setFetchForTest(url => {
+      const path = new URL(String(url), 'https://yolomux.test').searchParams.get('path');
+      requests.push(path);
+      if (path === '/repo') return Promise.resolve(jsonResponse({path, entries: rootEntries}));
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      const finish = response => response.then(value => {
+        active -= 1;
+        return value;
+      });
+      if (path === '/repo/slow') return finish(heldSlow.promise);
+      if (path === '/repo/fast/deep') fastDeepRequested = true;
+      const entries = path === '/repo/fast' ? [{name: 'deep', kind: 'dir'}] : [];
+      return finish(Promise.resolve(jsonResponse({path, entries})));
+    });
+    const listings = api.fileExplorerEntriesByWatchedDirectoryForTest('/repo', {fresh: true});
+    for (let index = 0; index < 20 && !fastDeepRequested; index += 1) await flushAsyncWork();
+    assert.equal(fastDeepRequested, true, `manual refresh reaches a ready deep branch while its sibling is held: ${requests.join(', ')}`);
+    assert.ok(maximumActive <= 8, `manual refresh respects the shared eight-request limit: ${maximumActive}`);
+    assert.ok(requests.includes('/repo/fast'), 'the parent listing completes before a child listing is requested');
+    heldSlow.resolve(jsonResponse({path: '/repo/slow', entries: []}));
+    const entriesByPath = await listings;
+    assert.ok(entriesByPath.has('/repo/fast/deep'), 'the deep branch publishes after its parent');
+    assert.equal(active, 0, 'all requests settle before the traversal resolves');
+  });
+
   await testAsync('Finder Sync unchanged revalidation preserves the mounted row identity', async () => {
     const frames = [];
-    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
       requestAnimationFrame(callback) {
         frames.push(callback);
         return frames.length;
@@ -6722,9 +8850,9 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/repo/same.txt"]'), row, 'an unchanged signature skips reconciliation and preserves DOM identity');
   });
 
-  await testAsync('Finder Sync warm revalidation cannot resurrect a directory retired by a newer parent classification', async () => {
+  await testAsync('Finder stale Sync revalidation failure cannot collapse a manual re-expansion', async () => {
     const frames = [];
-    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
       requestAnimationFrame(callback) {
         frames.push(callback);
         return frames.length;
@@ -6733,6 +8861,163 @@ async function runLayoutAsyncSuite() {
     api.setFileExplorerRootMode('sync', {sync: false});
     api.setFileExplorerDirListingForTest('/repo', [{name: 'gone', kind: 'dir'}]);
     api.setFileExplorerDirListingForTest('/repo/gone', [{name: 'cached.txt', kind: 'file'}]);
+    const heldChild = deferredFetch();
+    let childRequests = 0;
+    api.setFetchForTest(url => {
+      const path = new URL(String(url), 'https://yolomux.test').searchParams.get('path');
+      if (path === '/repo/gone') {
+        childRequests += 1;
+        if (childRequests === 1) return heldChild.promise;
+        return Promise.resolve(jsonResponse({path, entries: [{name: 'fresh.txt', kind: 'file'}]}));
+      }
+      return Promise.resolve(jsonResponse({path, entries: [{name: 'gone', kind: 'dir'}]}));
+    });
+    const plan = {session: '1', root: '/repo', expandPaths: ['/repo/gone'], affectedDirs: ['/repo/gone']};
+    api.setFileExplorerSyncUserExpansionForTest('/repo/gone', true);
+    await api.syncFileExplorerRootToPlanForTest(plan, '1');
+    assert.equal(frames.length, 1, 'warm Sync schedules one deferred revalidation');
+    frames.shift()();
+    await flushAsyncWork();
+    await flushAsyncWork();
+    assert.equal(childRequests, 1, 'background revalidation is held on the cached expanded directory');
+
+    const tree = api.fileExplorerTreeForTest();
+    const row = tree.querySelector('.file-tree-row[data-path="/repo/gone"]');
+    api.collapseDirectoryRowForTest(row, '/repo/gone', {manual: true});
+    await api.expandDirectoryRowForTest(row, '/repo/gone', {manual: true, user: true});
+    assert.equal(row.getAttribute('aria-expanded'), 'true', 'the users new expansion is visibly open before stale work settles');
+    assert.ok(tree.querySelector('.file-tree-row[data-path="/repo/gone/cached.txt"]') || tree.querySelector('.file-tree-row[data-path="/repo/gone/fresh.txt"]'), 'the new expansion retains its current child listing');
+
+    heldChild.reject(new Error('stale revalidation failed'));
+    await flushAsyncWork();
+    await flushAsyncWork();
+    await flushAsyncWork();
+    assert.equal(row.getAttribute('aria-expanded'), 'true', 'the stale failure does not collapse the newer manual expansion');
+    assert.equal(api.fileExplorerExpandedForTest().includes('/repo/gone'), true, 'the newer manual expansion remains authoritative');
+    assert.ok(tree.querySelector('.file-tree-row[data-path="/repo/gone/fresh.txt"]'), 'the stale failure does not replace the newer child listing with an error');
+  });
+
+  await testAsync('Finder superseded old-root restore cannot clear the newer root tree', async () => {
+    const api = loadYomux('', ['1']);
+    const heldOldRoot = deferredFetch();
+    api.setFetchForTest(url => {
+      const path = new URL(String(url), 'https://yolomux.test').searchParams.get('path');
+      if (path === '/old') return heldOldRoot.promise;
+      if (path === '/new') return Promise.resolve(jsonResponse({path, entries: [{name: 'current.txt', kind: 'file'}]}));
+      return Promise.reject(new Error(`unexpected listing ${path}`));
+    });
+    const tree = api.fileExplorerTreeForTest();
+    const oldRestore = api.restoreFileExplorerExpandedPaths(['/old/child'], '/old');
+    await flushAsyncWork();
+    await api.restoreFileExplorerExpandedPaths(['/new/child'], '/new');
+    assert.ok(tree.querySelector('.file-tree-row[data-path="/new/current.txt"]'), 'the newer root has rendered while the old listing is held');
+    heldOldRoot.resolve(jsonResponse({path: '/old', entries: [{name: 'child', kind: 'dir'}]}));
+    await oldRestore;
+    assert.ok(tree.querySelector('.file-tree-row[data-path="/new/current.txt"]'), 'the late old-root response cannot erase the newer rows');
+    assert.equal(tree.querySelector('.file-tree-row[data-path="/old/child"]'), null, 'superseded root rows are not published');
+  });
+
+  await testAsync('Finder cold Sync failure cannot retire a newer manual retry', async () => {
+    const frames = [];
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      settingsPayload: settingsOverride({file_explorer: {dir_cache_ms: 0}}),
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+    });
+    api.setFileExplorerRootMode('sync', {sync: false});
+    api.setFileExplorerDirListingForTest('/repo/a', [{name: 'cached.txt', kind: 'file'}]);
+    const retry = deferredFetch();
+    const sibling = deferredFetch();
+    let branchRequests = 0;
+    api.setFetchForTest(url => {
+      const parsed = new URL(String(url), 'https://yolomux.test');
+      const path = parsed.searchParams.get('path');
+      if (path === '/repo') return Promise.resolve(jsonResponse({path, entries: [{name: 'a', kind: 'dir'}, {name: 'b', kind: 'dir'}]}));
+      if (path === '/repo/a') {
+        branchRequests += 1;
+        if (branchRequests === 1) return Promise.reject(new Error('cold Sync listing failed'));
+        return retry.promise;
+      }
+      if (path === '/repo/b') return sibling.promise;
+      return Promise.reject(new Error(`unexpected listing ${path}`));
+    });
+    api.setFileExplorerSyncUserExpansionForTest('/repo/a', true);
+    api.setFileExplorerSyncUserExpansionForTest('/repo/b', true);
+    const sync = api.syncFileExplorerRootToPlanForTest({
+      session: '1', root: '/repo', expandPaths: ['/repo/a', '/repo/b'], affectedDirs: ['/repo/a', '/repo/b'],
+    }, '1');
+    await flushAsyncWork();
+    for (const frame of frames.splice(0)) frame();
+    await flushAsyncWork();
+    assert.equal(branchRequests, 1, 'cold Sync has reached the failed branch while its sibling remains held');
+
+    const tree = api.fileExplorerTreeForTest();
+    const retryRow = tree.querySelector('.file-tree-row[data-path="/repo/a"]');
+    const manualRetry = api.expandDirectoryRowForTest(retryRow, '/repo/a', {manual: true, user: true});
+    await flushAsyncWork();
+    assert.equal(branchRequests, 2, 'manual expansion starts a fresh listing request');
+    assert.ok(api.fileExplorerExpandedForTest().includes('/repo/a'), `manual retry is expanded before sibling settles: ${api.fileExplorerExpandedForTest()}`);
+    assert.ok(tree.querySelector('.file-tree-row[data-path="/repo/a/cached.txt"]'), 'manual retry may paint the retained stale listing while its fresh request is pending');
+    assert.equal(retryRow.getAttribute('aria-expanded'), 'true', 'manual retry stays open before sibling settles');
+
+    sibling.resolve(jsonResponse({path: '/repo/b', entries: [{name: 'sibling.txt', kind: 'file'}]}));
+    await flushAsyncWork();
+    await sync;
+    assert.equal(retryRow.getAttribute('aria-expanded'), 'true', 'cold Sync failure leaves the manual retry expanded');
+    assert.equal(api.currentFileExplorerListErrorForTest('/repo/a'), '', 'cold Sync failure cannot publish over the newer manual retry generation');
+
+    retry.resolve(jsonResponse({path: '/repo/a', entries: [{name: 'fresh.txt', kind: 'file'}]}));
+    await manualRetry;
+    await flushAsyncWork();
+    await flushAsyncWork();
+    assert.ok(tree.querySelector('.file-tree-row[data-path="/repo/a/fresh.txt"]'), 'the newer manual retry publishes its successful listing');
+    assert.ok(tree.querySelector('.file-tree-row[data-path="/repo/b/sibling.txt"]'), 'the unrelated sibling listing also publishes');
+  });
+
+  await testAsync('Finder cached expansion refresh cannot overwrite newer pushed children', async () => {
+    const api = loadYomux('', ['1']);
+    const root = '/repo';
+    const directory = `${root}/branch`;
+    api.setFileExplorerRootForTest(root);
+    api.setFileExplorerDirListingForTest(root, [{name: 'branch', kind: 'dir'}]);
+    api.setFileExplorerDirListingForTest(directory, [{name: 'cached.txt', kind: 'file'}]);
+    const heldRefresh = deferredFetch();
+    api.setFetchForTest(url => {
+      const path = new URL(String(url), 'https://yolomux.test').searchParams.get('path');
+      if (path === directory) return heldRefresh.promise;
+      return Promise.resolve(jsonResponse({path, entries: [{name: 'branch', kind: 'dir'}]}));
+    });
+    const tree = api.fileExplorerTreeForTest();
+    api.renderTreeChildrenForTest(tree, root, [{name: 'branch', kind: 'dir'}], 0, [], {view: 'finder'});
+    const row = tree.querySelector(`.file-tree-row[data-path="${directory}"]`);
+    await api.expandDirectoryRowForTest(row, directory, {manual: true, user: true});
+    await flushAsyncWork();
+    assert.ok(tree.querySelector(`.file-tree-row[data-path="${directory}/cached.txt"]`), 'the cached listing paints before the background refresh');
+    const pushedEntries = [{name: 'pushed.txt', kind: 'file'}];
+    api.setFileExplorerDirListingForTest(directory, pushedEntries);
+    await api.settleDirectoryRowExpansionAcrossSurfacesForTest(row, directory, pushedEntries);
+    assert.ok(tree.querySelector(`.file-tree-row[data-path="${directory}/pushed.txt"]`), 'the pushed listing is visible before the held refresh settles');
+    heldRefresh.resolve(jsonResponse({path: directory, entries: [{name: 'stale.txt', kind: 'file'}]}));
+    await flushAsyncWork();
+    await flushAsyncWork();
+    assert.ok(tree.querySelector(`.file-tree-row[data-path="${directory}/pushed.txt"]`), 'the pushed listing remains visible');
+    assert.equal(tree.querySelector(`.file-tree-row[data-path="${directory}/stale.txt"]`), null, 'the obsolete refresh result cannot repaint stale children');
+  });
+
+  await testAsync('Finder Sync warm revalidation cannot resurrect a directory retired by a newer parent classification', async () => {
+    const frames = [];
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+    });
+    api.setFileExplorerRootMode('sync', {sync: false});
+    api.setFileExplorerDirListingForTest('/repo', [{name: 'gone', kind: 'dir'}, {name: 'good', kind: 'dir'}]);
+    api.setFileExplorerDirListingForTest('/repo/gone', [{name: 'cached.txt', kind: 'file'}]);
+    api.setFileExplorerDirListingForTest('/repo/good', [{name: 'cached-good.txt', kind: 'file'}]);
     const heldChild = deferredFetch();
     let rootRequests = 0;
     const requests = [];
@@ -6744,38 +9029,84 @@ async function runLayoutAsyncSuite() {
       if (parsed.pathname === '/api/fs/info') return Promise.resolve(jsonResponse({path, kind: 'dir'}));
       if (path === '/repo') {
         if (parsed.pathname === '/api/fs/fast/list') rootRequests += 1;
-        const kind = rootRequests === 1 ? 'dir' : 'file';
-        return Promise.resolve(jsonResponse({path, entries: [{name: 'gone', kind}]}));
+        const entries = rootRequests === 1
+          ? [{name: 'gone', kind: 'dir'}, {name: 'good', kind: 'dir'}]
+          : [{name: 'gone', kind: 'file'}, {name: 'good', kind: 'dir'}];
+        return Promise.resolve(jsonResponse({path, entries}));
       }
       if (path === '/repo/gone') return heldChild.promise;
+      if (path === '/repo/good') return Promise.resolve(jsonResponse({path, entries: [{name: 'fresh-good.txt', kind: 'file'}]}));
       return Promise.reject(new Error(`unexpected listing ${path}`));
     });
-    const plan = {session: '1', root: '/repo', expandPaths: ['/repo/gone'], affectedDirs: ['/repo/gone']};
+    const plan = {session: '1', root: '/repo', expandPaths: ['/repo/gone', '/repo/good'], affectedDirs: ['/repo/gone', '/repo/good']};
+    api.setFileExplorerSyncUserExpansionForTest('/repo/gone', true);
+    api.setFileExplorerSyncUserExpansionForTest('/repo/good', true);
     await api.syncFileExplorerRootToPlanForTest(plan, '1');
-    assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), ['/repo/gone'], 'the warm cache paints the directory before revalidation');
+    assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), ['/repo/gone', '/repo/good'], 'the warm cache paints both directories before revalidation');
     assert.equal(frames.length, 1, 'the warm cache schedules one deferred revalidation frame');
     const revalidationGeneration = api.fileExplorerSyncStateForTest().generation;
     frames.shift()();
     await flushAsyncWork();
     await flushAsyncWork();
-    assert.equal(rootRequests, 1, `the revalidation confirms the parent before requesting the held child (observed ${rootRequests}; ${requests.join(', ')})`);
+    assert.equal(rootRequests, 1, `the revalidation confirms the parent before requesting children (observed ${rootRequests}; ${requests.join(', ')})`);
 
-    await api.fileExplorerEntriesByWatchedDirectoryForTest('/repo', {fresh: true});
-    assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), [], 'the newer file classification retires warm disclosure state');
-    const cancelledState = api.fileExplorerSyncStateForTest();
-    assert.ok(cancelledState.generation > revalidationGeneration, 'retirement generation-fences the deferred warm revalidation');
-    assert.equal(cancelledState.inFlightSignature, '', 'retirement leaves no warm sync transaction owner');
+    const refreshed = await api.fileExplorerEntriesByWatchedDirectoryForTest('/repo', {fresh: true});
+    assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), ['/repo/good'], 'the newer file classification retires only the invalid branch');
+    assert.ok(refreshed.has('/repo/good'), 'the valid sibling listing completes despite retiring the stale branch');
+    await api.refreshFileExplorerTreesInPlaceForTest({root: '/repo', entriesByDir: refreshed});
+    assert.ok(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/repo/good/fresh-good.txt"]'), 'the valid sibling listing is published');
+    const continuingState = api.fileExplorerSyncStateForTest();
+    assert.equal(continuingState.generation, revalidationGeneration, 'path retirement does not supersede unrelated branch work');
+    assert.ok(requests.filter(request => request.endsWith(':/repo/good')).length >= 1, `the valid sibling listing was requested: ${requests.join(', ')}`);
 
     heldChild.resolve(jsonResponse({path: '/repo/gone', entries: [{name: 'stale.txt', kind: 'file'}]}));
     await flushAsyncWork();
     await flushAsyncWork();
     await flushAsyncWork();
-    assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), [], 'the held child response cannot resurrect the retired warm directory');
-    assert.deepStrictEqual(canonical(api.fileExplorerSyncStateForTest()), canonical(cancelledState), 'settling stale warm work cannot reclaim the cancelled generation or signature');
+    assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), ['/repo/good'], 'the held child response cannot resurrect the retired warm directory or collapse its valid sibling');
+    assert.equal(api.fileExplorerSyncStateForTest().generation, revalidationGeneration, 'settling stale work does not change the shared generation');
+    assert.equal(api.fileExplorerSyncStateForTest().inFlightSignature, '', 'the remaining sibling transaction settles normally');
+  });
+
+  test('Finder joins changed files once per render and preserves first duplicate status', () => {
+    const api = loadYomux('', ['1']);
+    const files = Array.from({length: 13644}, (_, index) => ({abs_path: `/repo/unshown-${index}`, status: 'M'}));
+    files.push({abs_path: '/repo/src/file.md', status: 'M', added: 2, removed: 1});
+    files.push({abs_path: '/repo/src/file.md', status: 'D', added: 0, removed: 9});
+    api.setFinderSessionFilesPayloadForTest({session: '1', loaded: true, repos: [], files, errors: []});
+    const retained = api.finderSessionFilesPayloadForTest().files;
+    let scannedItems = 0;
+    const originalFind = retained.find;
+    retained.find = function(predicate) {
+      return originalFind.call(this, (item, index) => {
+        scannedItems += 1;
+        return predicate(item, index);
+      });
+    };
+    api.setFileExplorerExpandedForTest(['/repo/src']);
+    const tree = api.testElementForId('finder-indexed-join');
+    const render = () => api.renderTreeChildrenForTest(tree, '/repo', [{name: 'src', kind: 'dir'}], 0,
+      [['/repo/src', [{name: 'file.md', kind: 'file'}]]], {view: 'finder'});
+    render();
+    const row = tree.querySelector('.file-tree-row[data-path="/repo/src/file.md"]');
+    assert.equal(row.querySelector('.file-tree-git-status').textContent, 'M', 'Finder retains first-match duplicate semantics');
+    assert.equal(scannedItems, 0, 'recursive rows must share an indexed lookup rather than scan the payload');
+    retained[13644].status = 'A';
+    render();
+    assert.equal(row.querySelector('.file-tree-git-status').textContent, 'A', 'a later render observes changed payload records');
+    retained[13644].status = 'D';
+    api.updateFileTreeGitStatusRowsForTest([row]);
+    assert.equal(row.querySelector('.file-tree-git-status').textContent, 'D', 'incremental status backfill uses the same lookup contract');
+    assert.equal(scannedItems, 0, 'incremental rows must also avoid repeated payload scans');
+    for (const malformed of [{}, [null]]) {
+      api.finderSessionFilesPayloadForTest().files = malformed;
+      render();
+      assert.equal(row.querySelector('.file-tree-git-status').textContent, '', 'malformed or missing changed-file records do not break Finder');
+    }
   });
 
   test('tree-row patch preserves normalized Finder file and Differ directory contracts in place', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const finder = api.testElementForId('tree-row-finder-contract');
     const file = {name: 'file.md', kind: 'file', size: 12, mtime: 100};
     api.renderTreeChildrenForTest(finder, '/repo', [file]);
@@ -6796,7 +9127,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Finder Sync cold descendant listings use eight bounded direct workers and share the LRU bound', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const directories = Array.from({length: 12}, (_value, index) => `/cold/${index}`);
     const pending = [];
     api.setFetchForTest(url => {
@@ -6829,7 +9160,10 @@ async function runLayoutAsyncSuite() {
   test('Finder Sync cold and stale paths share bounded parallel fetch and deferred revalidation owners', () => {
     const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
     const syncOwner = source.slice(source.indexOf('async function syncFileExplorerRootToPlan('), source.indexOf('async function syncFileExplorerToActiveTab('));
-    assert.ok(/function fetchFileExplorerSyncListings[\s\S]*workerCount = Math\.min\(8, queue\.length\)[\s\S]*Promise\.all\(Array\.from/.test(source), 'cold directory listings use one bounded parallel worker owner');
+    assert.ok(/function traverseFileExplorerDirectoryQueue[\s\S]*active\.size < 8[\s\S]*Promise\.race\(active\)/.test(source), 'cold directory listings use one bounded parallel queue owner');
+    assert.ok(/function fetchFileExplorerSyncListings[\s\S]*await traverseFileExplorerDirectoryQueue\(queue/.test(source), 'Sync uses the shared queue');
+    assert.ok(/function restoreFileExplorerExpandedPaths[\s\S]*await traverseFileExplorerDirectoryQueue\(queue/.test(source), 'saved restoration uses the shared queue');
+    assert.equal(source.includes('const restoreBranch ='), false, 'the duplicate restoration worker loop stays retired');
     assert.ok(/function scheduleFileExplorerSyncRevalidation[\s\S]*requestAnimationFrame[\s\S]*fresh: true, force: true/.test(source), 'stale-while-revalidate starts only after the cache-first frame and bypasses background suppression');
     assert.equal(syncOwner.includes('for (const path of expandPaths)'), false, 'the retired sequential per-folder expansion loop cannot return');
     assert.equal(syncOwner.includes('preserveExpanded: false'), false, 'session switches no longer enter the destructive subtree teardown path');
@@ -6859,7 +9193,7 @@ async function runLayoutAsyncSuite() {
     // the whole queue into ONE body, and the server refuses a
     // body above filesystem.MAX_BATCH_REQUESTS with a 400 invalid_request, so the entire operation
     // failed rather than being split. The stub refuses exactly the way the server does.
-    const api = loadYolomux();
+    const api = loadYomux();
     const bodies = [];
     api.setFetchForTest((url, options = {}) => {
       assert.equal(String(url), '/api/fs/batch');
@@ -6898,7 +9232,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('a failing filesystem batch chunk settles only its own items and never discards its siblings', async () => {
-    const api = loadYolomux('', ['1', '2', '3', '4', '5', '6'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1', '2', '3', '4', '5', '6'], 'http:', 'Linux x86_64', 'admin', {
       bootstrapOverrides: {filesystemBatchLimits: {maxRequests: 2, triggerCountLimit: 64}},
     });
     const posts = [];
@@ -6944,7 +9278,7 @@ async function runLayoutAsyncSuite() {
   await testAsync('a boot payload that states no filesystem batch bound posts one item per request', async () => {
     // Fail closed: a server that did not state a bound is one this bundle cannot promise a bounded
     // body to, so it sends the only size no server can refuse for being too large.
-    const api = loadYolomux('', ['1', '2', '3', '4', '5', '6'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1', '2', '3', '4', '5', '6'], 'http:', 'Linux x86_64', 'admin', {
       bootstrapOverrides: {filesystemBatchLimits: null},
     });
     const bodies = [];
@@ -6983,7 +9317,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('Tabber activity cache treats direct snapshots as newer than in-flight HTTP work', async () => {
     const pending = [];
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setFileExplorerModeForTest('tabber');
     api.setFetchForTest(url => {
       assert.ok(String(url).startsWith('/api/activity?'));
@@ -7011,7 +9345,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Tabber SSE completion refreshes only a visible Tabber', async () => {
-    const visible = loadYolomux('', ['1']);
+    const visible = loadYomux('', ['1']);
     visible.setLayoutSlotsForTest({left: visible.paneStateWithTabs([visible.tabberItemId], visible.tabberItemId)});
     visible.setFileExplorerModeForTest('tabber');
     const visibleCalls = [];
@@ -7023,7 +9357,7 @@ async function runLayoutAsyncSuite() {
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(visibleCalls.filter(url => url.startsWith('/api/activity?')).length, 1, 'a completed shared cache generation refreshes the visible Tabber once');
 
-    const hidden = loadYolomux('', ['1']);
+    const hidden = loadYomux('', ['1']);
     hidden.setLayoutSlotsForTest({left: hidden.paneStateWithTabs(['1'], '1')});
     const hiddenCalls = [];
     hidden.setFetchForTest(url => {
@@ -7036,7 +9370,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Quick Open reuses one cached parent listing across path filters', async () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const calls = [];
     api.installCommandPaletteFixtureForTest();
     api.setFetchForTest((url, options = {}) => {
@@ -7071,7 +9405,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('Quick Open path listing rejects stale completions after a parent change', async () => {
     const pending = [];
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.installCommandPaletteFixtureForTest();
     api.setFetchForTest((url, options = {}) => {
       const request = {
@@ -7102,7 +9436,7 @@ async function runLayoutAsyncSuite() {
   test('Quick Open debounce replacement has one timer owner and consumes its handle', () => {
     const timers = [];
     const cleared = [];
-    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
       setTimeout(callback, delay) {
         const id = timers.length + 1;
         timers.push({id, callback, delay});
@@ -7126,7 +9460,7 @@ async function runLayoutAsyncSuite() {
   await testAsync('YO!agent chat record drains queued asks after action work finishes', async () => {
     const pendingAction = [];
     const calls = [];
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
     api.applyYoagentConversationPayloadForTest({messages: [], pending_waits: []});
     api.setFetchForTest((url, options = {}) => {
       const path = String(url);
@@ -7163,7 +9497,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('YO!agent startup record freezes its disabled snapshot and keeps prewarm one-shot', async () => {
     const pending = [];
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
     api.setActivitySummaryPayloadForTest({global: {headline: 'old activity'}, sessions: {}, session_order: []});
     assert.equal(api.showYoagentStartupInfoOnceForTest(), true, 'startup info shows once');
     assert.equal(api.applyActivitySummaryPayloadFromPushForTest({global: {headline: 'new activity'}, sessions: {}, session_order: []}), false, 'disabled activity pushes are rejected');
@@ -7196,7 +9530,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('YO!agent timeline orders the activity snapshot with persisted answers by timestamp', () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
     api.setActivitySummaryPayloadForTest({
       generated_at: '2026-07-10T02:02:38Z',
       global: {headline: 'activity snapshot'},
@@ -7230,7 +9564,7 @@ async function runLayoutAsyncSuite() {
 
   test('layout URL record consumes pending state once and owns one refresh timer', () => {
     const timers = [];
-    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
       setTimeout(callback, delay) {
         const id = timers.length + 1;
         timers.push({id, callback, delay});
@@ -7266,7 +9600,7 @@ async function runLayoutAsyncSuite() {
       previewFontSize: 27,
       modes: [{path: '/tmp/ignored.txt', mode: 'edit'}],
     };
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const urlModes = [];
     api.applyEditorStateFieldsForTest(editor, {applyModeEntry: entry => urlModes.push(entry)});
     const {modes, ...expectedFields} = editor;
@@ -7278,7 +9612,7 @@ async function runLayoutAsyncSuite() {
     for (const firstDestination of ['finder', 'differ']) {
       const secondDestination = firstDestination === 'finder' ? 'differ' : 'finder';
       const pending = [];
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const slots = api.emptyLayoutSlots();
       slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
       slots.left = api.paneStateWithTabs([api.finderItemId, api.differItemId], api.differItemId);
@@ -7338,7 +9672,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('an uncached Finder session switch clears the prior +/- payload until backfill completes', async () => {
     const pending = deferredFetch();
-    const api = loadYolomux('', ['1', '2']);
+    const api = loadYomux('', ['1', '2']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.leafNode('left');
     slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
@@ -7362,7 +9696,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('a failed pushed Finder expansion settles when the root listing is absent', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.leafNode('left');
     slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
@@ -7386,7 +9720,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('a cached Finder session switch releases the fast-first metadata gate', async () => {
-    const api = loadYolomux('', ['1', '2']);
+    const api = loadYomux('', ['1', '2']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.leafNode('left');
     slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
@@ -7415,7 +9749,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('an fs_changed Finder refresh hides stale metadata until backfill completes', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.leafNode('left');
     slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
@@ -7456,7 +9790,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('an unchanged full watch-diff baseline does not reopen Finder session-files', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.leafNode('left');
     slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
@@ -7482,7 +9816,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('session-files background completion applies its ready payload without another accepted request', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
     slots.left = api.paneStateWithTabs([api.finderItemId, api.differItemId], api.differItemId);
@@ -7519,7 +9853,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('a later session-files refresh revalidates the same cache view under a new completion generation', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.leafNode('left');
     slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
@@ -7548,7 +9882,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('a cache-only pending response consumes its session-files completion once', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
     slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
@@ -7573,7 +9907,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('Go cache-only revalidation uses the bounded JSON endpoint', async () => {
-    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go test'}});
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.leafNode('left');
     slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
@@ -7593,7 +9927,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('a newer session-files completion queues behind its in-flight older cache view', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
     slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
@@ -7620,7 +9954,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('a completion waits for an ordinary session-files read before applying its cache view', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
     slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
@@ -7649,7 +9983,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('a hidden session-files surface ignores a redacted completion without opening a cache view', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     let fetches = 0;
     api.setFetchForTest(() => { fetches += 1; return Promise.resolve(jsonResponse({})); });
     api.handleClientPushEventNowForTest('background_refresh_done', {
@@ -7662,7 +9996,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('an EventSource reconnect replays one session-files completion without a second cache read', async () => {
     const frames = [];
-    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
       requestAnimationFrame(callback) { frames.push(callback); return frames.length; },
       cancelAnimationFrame() {},
     });
@@ -7700,7 +10034,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await test('watcher session-files receipt waits for its terminal payload instead of painting an empty ready state', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
     slots.left = api.paneStateWithTabs([api.finderItemId, api.differItemId], api.differItemId);
@@ -7737,7 +10071,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await test('replayed watcher terminal settles when its session-files receipt arrives later', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
     slots.left = api.paneStateWithTabs([api.finderItemId, api.differItemId], api.differItemId);
@@ -7770,7 +10104,7 @@ async function runLayoutAsyncSuite() {
 
   await testAsync('authoritative session-files push fences stale HTTP without aborting its finite transport', async () => {
     const pending = [];
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
     slots.left = api.paneStateWithTabs([api.differItemId], api.differItemId);
@@ -7823,7 +10157,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('session-files operation failure fences stale HTTP without aborting its finite transport', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
     slots.left = api.paneStateWithTabs([api.differItemId], api.differItemId);
@@ -7879,7 +10213,7 @@ async function runLayoutAsyncSuite() {
   });
 
   await testAsync('duplicate session-files receipt reuses its retained terminal result', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
     slots.left = api.paneStateWithTabs([api.differItemId], api.differItemId);
@@ -7932,7 +10266,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('command-palette record resets query, cursor, and rendered items together on open', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.installCommandPaletteFixtureForTest();
     api.setCommandPaletteStateForTest('command', 'stale query');
     api.invokeCommandPaletteItemForTest({run() {}});
@@ -7947,7 +10281,7 @@ async function runLayoutAsyncSuite() {
   });
 
   test('drag record prevents file payload leakage into a later tab drag and clears atomically', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.beginFileDragForTest({path: '/tmp/a.txt', paths: ['/tmp/a.txt'], kind: 'file'});
     assert.equal(api.dragStateForTest().filePayload.path, '/tmp/a.txt', 'file drag payload belongs to the shared record');
     const source = tabElement('1', 0, 100);
@@ -7977,7 +10311,7 @@ async function runLayoutAsyncSuite() {
   });
 
     await testAsync('changed-file open uses repository comparison refs alongside recent-ref rows', async () => {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const path = '/repo/app/src/main.py';
       const calls = [];
       api.setSessionFilesPayloadForTest({
@@ -8019,7 +10353,7 @@ async function runLayoutAsyncSuite() {
     });
 
     {
-      const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin');
+      const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin');
       const transcriptPath = '/home/test/.local/state/yolomux/yoagent/conversation.jsonl';
       api.applyYoagentConversationPayloadForTest({
         transcript_path: transcriptPath,
@@ -8050,7 +10384,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [300]});
+      const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [300]});
       const calls = [];
       api.setClientEventsSourceForTest({readyState: 1});
       api.setFileExplorerRootForTest('/repo');
@@ -8073,7 +10407,7 @@ async function runLayoutAsyncSuite() {
       const timers = [];
       const cleared = [];
       const calls = [];
-      const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
         setTimeout(callback, delay) {
           const id = timers.length + 1;
           timers.push({id, callback, delay});
@@ -8117,7 +10451,7 @@ async function runLayoutAsyncSuite() {
         timers.set(id, {callback, due: now + delay});
         return id;
       };
-      const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
         setTimeout,
         clearTimeout(id) { cleared.push(id); timers.delete(id); },
         performance: {now: () => now},
@@ -8152,7 +10486,7 @@ async function runLayoutAsyncSuite() {
       const timers = [];
       const firstRegistration = deferredFetch();
       const calls = [];
-      const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
         setTimeout(callback, delay) {
           const id = timers.length + 1;
           timers.push({id, callback, delay});
@@ -8198,7 +10532,7 @@ async function runLayoutAsyncSuite() {
         const timers = [];
         const firstRegistration = deferredFetch();
         const calls = [];
-        const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+        const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
           setTimeout(callback, delay) {
             const id = timers.length + 1;
             timers.push({id, callback, delay});
@@ -8255,7 +10589,7 @@ async function runLayoutAsyncSuite() {
 
       const recoveryTimers = [];
       const recoveryCalls = [];
-      const recoveryApi = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      const recoveryApi = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
         setTimeout(callback, delay) {
           const id = recoveryTimers.length + 1;
           recoveryTimers.push({id, callback, delay});
@@ -8299,7 +10633,7 @@ async function runLayoutAsyncSuite() {
       const timers = [];
       const firstRegistration = deferredFetch();
       const calls = [];
-      const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
         setTimeout(callback, delay) {
           const id = timers.length + 1;
           timers.push({id, callback, delay});
@@ -8346,7 +10680,7 @@ async function runLayoutAsyncSuite() {
 
     await testAsync('failed forced watch-root generation remains retryable', async () => {
       const calls = [];
-      const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin');
+      const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin');
       api.setClientEventsSourceForTest({readyState: 1});
       api.setFilesystemWatchTokenForTest('existing-token');
       api.setFileExplorerRootForTest('/repo');
@@ -8375,7 +10709,7 @@ async function runLayoutAsyncSuite() {
       const timers = [];
       const firstRegistration = deferredFetch();
       const calls = [];
-      const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
         setTimeout(callback, delay) {
           const id = timers.length + 1;
           timers.push({id, callback, delay});
@@ -8418,7 +10752,7 @@ async function runLayoutAsyncSuite() {
       const timers = [];
       const cleared = [];
       const calls = [];
-      const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
         setTimeout(callback, delay) {
           const id = timers.length + 1;
           timers.push({id, callback, delay});
@@ -8452,7 +10786,7 @@ async function runLayoutAsyncSuite() {
 
     await testAsync('slow successful watch-diff baseline remains lifecycle-visible', async () => {
       const baseline = deferredFetch();
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       api.setClientEventsSourceForTest({readyState: 1});
       api.setFileExplorerRootForTest('/repo');
       const visibleSlots = api.emptyLayoutSlots();
@@ -8479,7 +10813,7 @@ async function runLayoutAsyncSuite() {
     });
 
     await testAsync('ordinary watch-diff polling is not a startup baseline receipt', async () => {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       api.setClientEventsSourceForTest({readyState: 1});
       api.setFileExplorerRootForTest('/repo');
       api.setFilesystemWatchTokenForTest('existing-token');
@@ -8526,7 +10860,7 @@ async function runLayoutAsyncSuite() {
       const cleared = [];
       let resolveFetch = null;
       const calls = [];
-      const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
         setTimeout(callback, delay) {
           const id = timers.length + 1;
           timers.push({id, callback, delay});
@@ -8589,7 +10923,7 @@ async function runLayoutAsyncSuite() {
     });
 
     await testAsync('visible Finder startup owns one full watch baseline after root registration', async () => {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const registration = deferredFetch();
       const calls = [];
       api.setClientEventsSourceForTest({readyState: 1});
@@ -8679,7 +11013,7 @@ async function runLayoutAsyncSuite() {
     });
 
     await testAsync('hidden Finder/Differ refresh work is skipped', async () => {
-      const hiddenApi = loadYolomuxWithFileExplorerClosed('', ['1']);
+      const hiddenApi = loadYomuxWithFileExplorerClosed('', ['1']);
       const hiddenSlots = hiddenApi.emptyLayoutSlots();
       hiddenSlots.left = hiddenApi.paneStateWithTabs(['1'], '1');
       hiddenApi.setLayoutSlotsForTest(hiddenSlots);
@@ -8710,14 +11044,14 @@ async function runLayoutAsyncSuite() {
       await hiddenApi.refreshWatchedFilesystemForTest({full: true});
       assert.deepStrictEqual(hiddenCalls, [], 'hidden Finder/Differ skips session-files and tree refresh fetches');
 
-      const finderApi = loadYolomux('', ['1']);
+      const finderApi = loadYomux('', ['1']);
       finderApi.setFileExplorerRootForTest('/finder');
       const finderState = finderApi.clientServerWatchStateForTest();
       assert.deepStrictEqual(canonical(finderState.root_surfaces), [
         {path: '/finder', surfaces: ['finder']},
       ], 'Finder roots retain the surface that declared them');
 
-      const visibleApi = loadYolomux('', ['1']);
+      const visibleApi = loadYomux('', ['1']);
       const visibleSlots = visibleApi.emptyLayoutSlots();
       visibleSlots[visibleApi.layoutTreeKey] = visibleApi.splitNode('row', visibleApi.leafNode('left'), visibleApi.leafNode('right'));
       visibleSlots.left = visibleApi.paneStateWithTabs([visibleApi.differItemId], visibleApi.differItemId);
@@ -8759,7 +11093,7 @@ async function runLayoutAsyncSuite() {
     });
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const slots = api.emptyLayoutSlots();
       slots[api.layoutTreeKey] = api.leafNode('left');
       slots.left = api.paneStateWithTabs([api.finderItemId], api.finderItemId);
@@ -8786,7 +11120,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       api.setFileExplorerRootForTest('/repo');
       api.setFilesystemWatchTokenForTest('old-token');
 
@@ -8805,7 +11139,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const calls = [];
       api.setFileExplorerRootForTest('/repo');
       api.setFilesystemWatchTokenForTest('old-token');
@@ -8831,7 +11165,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const calls = [];
       api.setFileExplorerRootForTest('/repo');
       api.setFilesystemWatchTokenForTest('old-token');
@@ -8867,7 +11201,7 @@ async function runLayoutAsyncSuite() {
     }
 
     await testAsync('an out-of-order watch-diff response cannot regress a newer full keyframe cursor', async () => {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const pendingDiff = deferredFetch();
       api.setFileExplorerRootForTest('/repo');
       api.setFilesystemWatchTokenForTest('old-token');
@@ -8903,7 +11237,7 @@ async function runLayoutAsyncSuite() {
     });
 
     await testAsync('watch-diff 202 waits for its operation terminal result without a Finder batch fallback', async () => {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const calls = [];
       api.setFileExplorerRootForTest('/repo');
       api.setFilesystemWatchTokenForTest('old-token');
@@ -8961,7 +11295,7 @@ async function runLayoutAsyncSuite() {
     });
 
     await testAsync('concurrent filesystem invalidations share one watch-diff receipt and retain one trailing refresh', async () => {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const calls = [];
       api.setFileExplorerRootForTest('/repo');
       api.setFilesystemWatchTokenForTest('old-token');
@@ -9030,7 +11364,7 @@ async function runLayoutAsyncSuite() {
     });
 
     await testAsync('empty watch-diff terminal result advances once without recursively fetching', async () => {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const calls = [];
       api.setFileExplorerRootForTest('/repo');
       api.setFilesystemWatchTokenForTest('old-token');
@@ -9070,7 +11404,7 @@ async function runLayoutAsyncSuite() {
     });
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const calls = [];
       api.setFileExplorerRootForTest('/repo');
       api.setFilesystemWatchTokenForTest('old-token');
@@ -9094,7 +11428,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       api.applyTmuxSignalsPayloadForTest({data: {ok: true, windows: [
         {session: '1', window_index: 0, active: true},
         {session: '1', window_index: 1, active: false},
@@ -9115,7 +11449,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const calls = [];
       api.setFetchForTest(url => {
         calls.push(String(url));
@@ -9182,7 +11516,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const calls = [];
       api.setFetchForTest(url => {
         calls.push(String(url));
@@ -9208,7 +11542,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const writes = [];
       api.setFetchForTest((url, options = {}) => {
         assert.equal(String(url), '/api/fs/write');
@@ -9233,7 +11567,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const path = '/home/test/reload.txt';
       let fetchCount = 0;
       const confirmations = [];
@@ -9277,7 +11611,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1', '2']);
+      const api = loadYomux('', ['1', '2']);
       api.setFileExplorerModeForTest('tabber');
       const slots = api.emptyLayoutSlots();
       slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);
@@ -9312,7 +11646,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const path = '/repo/app/src/main.py';
       const item = api.fileEditorDiffPreviewItemFor(path);
       api.setOpenFileOwner(path, item);
@@ -9372,7 +11706,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const firstPath = '/repo/app/src/first.py';
       const secondPath = '/repo/app/src/second.py';
       const localBasename = path => String(path || '').split('/').pop() || '';
@@ -9418,7 +11752,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const path = '/repo/app/src/main.py';
       const existingItem = api.fileEditorItemFor(path);
       api.setOpenFileOwner(path, existingItem);
@@ -9482,7 +11816,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const realPath = '/repo/app/src/main.py';
       const linkPath = '/repo/app/link-main.py';
       const calls = [];
@@ -9530,7 +11864,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const path = '/repo/app/keep-preview.md';
       const aliasPath = '/repo/app/keep-preview-alias.md';
       const calls = [];
@@ -9564,7 +11898,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const path = '/repo/app/src/stale-git.md';
       const deferredGit = deferredFetch();
       api.setFetchForTest(url => {
@@ -9611,7 +11945,7 @@ async function runLayoutAsyncSuite() {
       () => jsonResponse({path: '/repo/app/src/closed.md', content: '# closed\n', size: 9, mtime: 1, mtime_ns: 1}),
       () => jsonResponse({error: 'path not found: /repo/app/src/closed.md', status: 404}, 404),
     ]) {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const path = '/repo/app/src/closed.md';
       const delayedRead = deferredFetch();
       api.setFetchForTest(() => delayedRead.promise);
@@ -9626,7 +11960,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const oldPath = '/repo/app/something.md';
       const newPath = '/repo/app/blah/something.md';
       const fileId = 'dev:10:ino:20';
@@ -9678,7 +12012,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const path = '/repo/app/src/main.py';
       const readResolvers = [];
       const calls = [];
@@ -9721,7 +12055,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const path = '/repo/app/src/canonical.md';
       api.setFetchForTest(url => {
         const text = String(url);
@@ -9766,7 +12100,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const path = '/repo/app/src/history.js';
       const firstFrom = '1'.repeat(40);
       const firstTo = '2'.repeat(40);
@@ -9805,7 +12139,7 @@ async function runLayoutAsyncSuite() {
 
     {
       const sessions = Array.from({length: 9}, (_, index) => String(index + 1));
-      const api = loadYolomux('', sessions);
+      const api = loadYomux('', sessions);
       const repo = '/repo/app';
       const path = `${repo}/src/return.js`;
       const fromRef = '5'.repeat(40);
@@ -9868,7 +12202,7 @@ async function runLayoutAsyncSuite() {
 
     {
       const zhHant = JSON.parse(fs.readFileSync('static/locales/zh-Hant.json', 'utf8'));
-      const differApi = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      const differApi = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
         strings: {en: JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8')), 'zh-Hant': zhHant},
       });
       differApi.i18nSetCatalogForTest('zh-Hant', zhHant);
@@ -9896,7 +12230,7 @@ async function runLayoutAsyncSuite() {
       const staleDoitPath = '/home/test/yolomux.dev1/DOIT.57.md';
       const dirtyMissingPath = '/home/test/yolomux.dev1/unsaved.md';
       const realDoitPath = '/home/test/yolomux.dev2/DOIT.57.md';
-      const validatingDoitApi = loadYolomux('', ['1']);
+      const validatingDoitApi = loadYomux('', ['1']);
       const validatingDoitItem = validatingDoitApi.registerFileEditorLayoutItemForTest(staleDoitPath);
       const dirtyMissingItem = validatingDoitApi.registerFileEditorLayoutItemForTest(dirtyMissingPath);
       const validatingDoitSlots = validatingDoitApi.emptyLayoutSlots();
@@ -9958,7 +12292,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const treeApi = loadYolomux('', ['1']);
+      const treeApi = loadYomux('', ['1']);
       treeApi.setFileExplorerRootMode('fixed', {sync: false});
       treeApi.setFileExplorerRootForTest('/repo');
       treeApi.setFileExplorerDirListingForTest('/repo', [
@@ -9980,7 +12314,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const restoredApi = loadYolomux('', ['1']);
+      const restoredApi = loadYomux('', ['1']);
       const container = new TestElement('restored-finder-tree');
       restoredApi.setFileExplorerExpandedForTest(['/repo/dynamo']);
       restoredApi.renderTreeChildrenForTest(container, '/repo', [{name: 'dynamo', kind: 'dir'}], 0);
@@ -9993,7 +12327,7 @@ async function runLayoutAsyncSuite() {
       ]);
       assert.equal(row.classList.contains('loading-children'), false, 'the restored directory clears the loading indicator once its child listing is available');
 
-      const cachedRestoredApi = loadYolomux('', ['1']);
+      const cachedRestoredApi = loadYomux('', ['1']);
       const cachedContainer = new TestElement('cached-restored-finder-tree');
       cachedRestoredApi.setFileExplorerExpandedForTest(['/repo/dynamo']);
       cachedRestoredApi.setFileExplorerDirListingForTest('/repo/dynamo', [{name: 'cached-child.txt', kind: 'file'}]);
@@ -10005,7 +12339,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const pendingApi = loadYolomux('', ['1']);
+      const pendingApi = loadYomux('', ['1']);
       const container = new TestElement('finder-tree');
       const longPath = '/repo/this/is/a/very/long/path/that/takes/time';
       const parent = longPath.slice(0, longPath.lastIndexOf('/'));
@@ -10032,7 +12366,28 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const syncTreeApi = loadYolomux('', ['1']);
+      const supersededApi = loadYomux('', ['1']);
+      const container = new TestElement('finder-superseded-tree');
+      const path = '/repo/slow';
+      supersededApi.renderTreeChildrenForTest(container, '/repo', [{name: 'slow', kind: 'dir'}]);
+      const row = container.children.find(node => node?.dataset?.path === path);
+      const held = deferredFetch();
+      supersededApi.setFetchForTest(() => held.promise);
+      const generation = supersededApi.fileExplorerSyncStateForTest().generation;
+      const expansion = supersededApi.expandDirectoryRowForTest(row, path, {manual: true, generation});
+      await flushAsyncWork();
+      assert.equal(row.classList.contains('loading-children'), true, 'a held listing paints its outstanding expansion state');
+      const nextGeneration = supersededApi.fileExplorerSyncStateForTest().generation + 1;
+      supersededApi.setFileExplorerSyncStateForTest({generation: nextGeneration});
+      held.resolve(jsonResponse({path, entries: [{name: 'child.txt', kind: 'file'}]}));
+      await expansion;
+      assert.equal(row.classList.contains('loading-children'), false, `superseded settlement reconciles the stale loading visual: ${JSON.stringify({expanded: supersededApi.fileExplorerExpandedForTest(), aria: row.getAttribute('aria-expanded'), classes: [...row.classList.names]})}`);
+      assert.equal(row.getAttribute('aria-expanded'), 'true', 'supersession preserves the still-requested expansion');
+      assert.ok(container.children.some(node => node?.classList?.contains('file-tree-children') && node.dataset.parent === path), 'the settled listing is rendered for the still-live expansion');
+    }
+
+    {
+      const syncTreeApi = loadYomux('', ['1']);
       syncTreeApi.setFileExplorerRootMode('sync', {sync: false});
       syncTreeApi.setFileExplorerRootForTest('/home/test');
       syncTreeApi.setTranscriptInfoForTest('1', {
@@ -10078,7 +12433,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1', '2']);
+      const api = loadYomux('', ['1', '2']);
       api.setFileExplorerRootMode('sync', {sync: false});
       api.setFileExplorerRootForTest('/home/test');
       api.setTranscriptInfoForTest('1', {
@@ -10125,7 +12480,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1', '2']);
+      const api = loadYomux('', ['1', '2']);
       api.setFileExplorerRootMode('sync', {sync: false});
       api.setFileExplorerDirListingForTest('/home/test', [{name: 'project', kind: 'dir'}]);
       api.setFileExplorerDirListingForTest('/home/test/project', [{name: '1', kind: 'dir'}, {name: '2', kind: 'dir'}, {name: '3', kind: 'dir'}]);
@@ -10204,7 +12559,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const slots = api.emptyLayoutSlots();
       slots[api.layoutTreeKey] = api.leafNode('left');
       slots.left = api.paneStateWithTabs(['1'], '1');
@@ -10298,7 +12653,7 @@ async function runLayoutAsyncSuite() {
         assert.ok(controlZone, 'two zones 26 hours apart always straddle the Pacific calendar day');
         assert.notEqual(ambientDateStamp(), pacificStamp, 'the control clock is genuinely a different calendar day, so this assertion can still fail');
 
-        const api = loadYolomux('', ['1']);
+        const api = loadYomux('', ['1']);
         const slots = api.emptyLayoutSlots();
         slots[api.layoutTreeKey] = api.leafNode('left');
         slots.left = api.paneStateWithTabs(['1'], '1');
@@ -10354,7 +12709,7 @@ async function runLayoutAsyncSuite() {
     // Selenium clipboard test) is the regression surface; live event wiring is covered by the paste
     // contracts below + the source-grep invariant.
     {
-      const api = loadYolomux();
+      const api = loadYomux();
       const dt = over => ({
         items: over.items || [],
         files: over.files || [],
@@ -10380,7 +12735,7 @@ async function runLayoutAsyncSuite() {
     // DOIT.78 (78.1): an image pasted as RICH DATA (text/html <img>, NO File) must still be CLAIMED
     // (preventDefault + stopPropagation) so the raw image cannot leak to the agent as an attachment.
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const slots = api.emptyLayoutSlots();
       slots[api.layoutTreeKey] = api.leafNode('left');
       slots.left = api.paneStateWithTabs(['1'], '1');
@@ -10410,7 +12765,7 @@ async function runLayoutAsyncSuite() {
     // DOIT.78 (78.4): pasting MULTIPLE image Files in one event uploads ALL of them and inserts a text
     // reference for each — never one ref + one attachment.
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const slots = api.emptyLayoutSlots();
       slots[api.layoutTreeKey] = api.leafNode('left');
       slots.left = api.paneStateWithTabs(['1'], '1');
@@ -10441,7 +12796,7 @@ async function runLayoutAsyncSuite() {
 
     // Markdown editor image paste inserts file-directory paths returned by the server into CodeMirror.
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const sent = [];
       api.registerTerminalForTest('1', {focus() {}}, {readyState: 1, send(message) { sent.push(JSON.parse(message)); }});
       api.setFocusedTerminal('1');
@@ -10506,7 +12861,7 @@ async function runLayoutAsyncSuite() {
 
     // Rich remote images are still claimed for Markdown editors even when no uploadable File can be extracted.
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const sent = [];
       api.registerTerminalForTest('1', {focus() {}}, {readyState: 1, send(message) { sent.push(JSON.parse(message)); }});
       api.setFocusedTerminal('1');
@@ -10550,7 +12905,7 @@ async function runLayoutAsyncSuite() {
 
     // Non-Markdown editors do not steal the terminal image paste path.
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const sent = [];
       api.registerTerminalForTest('1', {focus() {}}, {readyState: 1, send(message) { sent.push(JSON.parse(message)); }});
       api.setFocusedTerminal('1');
@@ -10598,7 +12953,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux();
+      const api = loadYomux();
       const calls = [];
       api.setFetchForTest((url, options = {}) => {
         calls.push({url: String(url), method: options.method || 'GET'});
@@ -10620,7 +12975,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux();
+      const api = loadYomux();
       const batches = [];
       api.setFetchForTest(url => {
         assert.equal(String(url), '/api/fs/fast/list?path=%2Fhome%2Ftest%2Fbootstrap');
@@ -10646,7 +13001,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux();
+      const api = loadYomux();
       const calls = [];
       api.setDocumentVisibilityForTest('hidden');
       api.setFetchForTest((url, options = {}) => {
@@ -10666,7 +13021,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux();
+      const api = loadYomux();
       const calls = [];
       api.setFetchForTest((url, options = {}) => {
         calls.push({url: String(url), method: options.method || 'GET'});
@@ -10685,7 +13040,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const calls = [];
       api.setFileExplorerRootForTest('/repo');
       api.setFileExplorerExpandedForTest(['/repo/src', '/repo/src/js', '/repo/tests']);
@@ -10710,7 +13065,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const calls = [];
       api.setFileExplorerRootForTest('/repo');
       api.setFileExplorerExpandedForTest(['/repo/STATUS-REPORT.md']);
@@ -10731,7 +13086,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const calls = [];
       api.setFileExplorerRootForTest('/repo');
       api.setFileExplorerExpandedForTest(['/repo/gone', '/repo/gone/nested']);
@@ -10762,7 +13117,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const staleChild = deferredFetch();
       api.setFileExplorerRootForTest('/repo');
       api.setFileExplorerExpandedForTest(['/repo/file']);
@@ -10783,7 +13138,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const heldDescendant = deferredFetch();
       let descendantRequests = 0;
       api.setFileExplorerRootForTest('/repo');
@@ -10811,7 +13166,7 @@ async function runLayoutAsyncSuite() {
     }
 
     await testAsync('Finder Sync cannot resurrect a directory retired by a newer parent classification', async () => {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       api.setFileExplorerRootMode('sync', {sync: false});
       const heldChild = deferredFetch();
       let rootRequests = 0;
@@ -10838,7 +13193,7 @@ async function runLayoutAsyncSuite() {
     });
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const calls = [];
       let rootKind = 'dir';
       api.setFetchForTest((url, options = {}) => {
@@ -10893,7 +13248,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const oldInfo = deferredFetch();
       let infoRequests = 0;
       const fastListPaths = [];
@@ -10933,7 +13288,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux();
+      const api = loadYomux();
       api.setFileExplorerLastListErrorForTest('/home/test/blocked', 'Cannot open blocked');
       api.setFileExplorerPushRefreshDepthForTest(1);
       assert.equal(await api.fetchDirectoryForTest('/home/test'), null, 'P4: push-refresh-depth returns a benign null');
@@ -10952,7 +13307,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux();
+      const api = loadYomux();
       const calls = [];
       api.setFetchForTest((url, options = {}) => {
         const body = JSON.parse(options.body || '{}');
@@ -10985,7 +13340,7 @@ async function runLayoutAsyncSuite() {
     {
       const deleteCalls = [];
       const runDelete = async ({path, kind = 'dir', count = 0, confirmResponses = [true], fetchRejectsCount = false, role = 'admin'}) => {
-        const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', role);
+        const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', role);
         const confirms = [];
         api.setConfirmForTest(message => {
           confirms.push(String(message));
@@ -11039,7 +13394,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       api.setTranscriptInfoForTest('1', {selected_pane: {target: '%test', current_path: '/home/test/yolomux.dev3'}, panes: [{target: '%test', active: true, window_active: true, current_path: '/home/test/yolomux.dev3'}]});
       const lines = [terminalLine('• Documented it in tests/SHARE_TEST_INVENTORY.md:123')];
       const term = {cols: 80, rows: 10, buffer: {active: {viewportY: 0, getLine: index => lines[index] || null}}};
@@ -11070,7 +13425,7 @@ async function runLayoutAsyncSuite() {
     }
 
     await testAsync('terminal file menus expose Open file without resolver admission and the selected tab owns its read', async () => {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const readRequest = deferredFetch();
       const requests = [];
       api.setFetchForTest(url => {
@@ -11100,7 +13455,7 @@ async function runLayoutAsyncSuite() {
     });
 
     await testAsync('terminal file menus reuse a warm positive target without a second backend admission', async () => {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const target = {type: 'file', path: '/tmp/warm-target.md', text: '/tmp/warm-target.md'};
       let fetches = 0;
       api.setFetchForTest(() => {
@@ -11117,7 +13472,7 @@ async function runLayoutAsyncSuite() {
     });
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const lines = [terminalLine('127.0.0.1 - - "GET /api/auto-approve HTTP/1.1" 404 -')];
       const term = {cols: 100, rows: 10, buffer: {active: {viewportY: 0, getLine: index => lines[index] || null}}};
 
@@ -11129,7 +13484,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const prefix = '/tmp/instruction-';
       const lines = [terminalLine(prefix), terminalLine('')];
       const term = {cols: prefix.length + 1, rows: 10, buffer: {active: {viewportY: 0, getLine: index => lines[index] || null}}};
@@ -11146,7 +13501,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/dynamo4/lib/llm/src'}});
       const lines = [terminalLine('protocols/openai/chat_completions/qwen3_coder_v2.rs')];
       const term = {cols: 100, rows: 10, buffer: {active: {viewportY: 0, getLine: index => lines[index] || null}}};
@@ -11177,7 +13532,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/cache-misses'}});
       const fileRef = {type: 'file', path: 'missing.js', text: 'missing.js'};
       let requestCount = 0;
@@ -11207,7 +13562,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/repo'}});
       let requestCount = 0;
       let resolveRequest;
@@ -11227,7 +13582,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       let requests = 0;
       api.setFetchForTest(() => {
         requests += 1;
@@ -11238,7 +13593,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/cache-ttl'}});
       let now = 1_000_000;
       let requestCount = 0;
@@ -11273,7 +13628,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/cache-lru'}});
       let requestCount = 0;
       api.setFetchForTest((_url, options = {}) => {
@@ -11301,7 +13656,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       api.applyYoagentJobsPayloadForTest({jobs: [{id: 'job-1', status: 'pending_confirmation', target: {session: '1'}, public_text: 'date'}]});
       const calls = [];
       api.setFetchForTest((url, options = {}) => {
@@ -11322,7 +13677,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
+      const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
       const calls = [];
       let firstChatResolve = null;
       api.setFetchForTest((url, options = {}) => {
@@ -11368,7 +13723,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
+      const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
       const hiddenToolOutput = 'hidden tool output '.repeat(20000);
       let chatBody = null;
       api.applyYoagentConversationPayloadForTest({
@@ -11402,7 +13757,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
+      const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
       api.setFetchForTest((url) => {
         if (String(url) === '/api/yoagent/chat') {
           return Promise.resolve(jsonResponse({error: 'Request Entity Too Large'}, 413));
@@ -11416,7 +13771,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
         bootstrapOverrides: {
           availableAgents: [],
           agentAuth: {},
@@ -11434,7 +13789,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
         bootstrapOverrides: {
           availableAgents: ['claude'],
           agentAuth: {claude: {installed: true, logged_in: false}},
@@ -11471,7 +13826,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
+      const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
       const calls = [];
       api.applyYoagentConversationPayloadForTest({
         messages: [{role: 'assistant', content: 'sent to target'}],
@@ -11499,7 +13854,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
+      const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {availableAgents: ['codex'], agentAuth: {codex: {installed: true, logged_in: true}}});
       const calls = [];
       api.setYoagentBusyForTest(true);
       await api.sendYoagentChatMessageForTest('queued only');
@@ -11541,7 +13896,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const detailsPreviews = html => [...String(html || '').matchAll(/<span class="[^"]*\byoagent-details-preview\b[^"]*">([\s\S]*?)<\/span>/g)].map(match => match[1]);
       const thinkingLine = 'thinking: scanning files reading activity context final synthesis';
       api.applyYoagentStreamPayloadForTest({
@@ -11613,7 +13968,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       api.applyYoagentStreamPayloadForTest({
         stream_id: 'stream-multiline-tool',
         phase: 'tool',
@@ -11632,7 +13987,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       api.applyYoagentStreamPayloadForTest({
         stream_id: 'stream-interleaved',
         phase: 'delta',
@@ -11659,7 +14014,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       api.applyYoagentStreamPayloadForTest({
         stream_id: 'stream-real-claude-thinking',
         phase: 'thinking',
@@ -11677,7 +14032,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       api.applyYoagentStreamPayloadForTest({
         stream_id: 'stream-coalesced',
         phase: 'delta',
@@ -11697,7 +14052,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       api.applyYoagentStreamPayloadForTest({
         stream_id: 'stream-thinking-count',
         phase: 'delta',
@@ -11714,7 +14069,7 @@ async function runLayoutAsyncSuite() {
     }
 
     {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       api.applyYoagentConversationPayloadForTest({
         messages: [],
         pending_waits: [{id: 'wait-1', session: '1', label: 'Waiting for tmux session `1` to reply', started_ts: Math.round(Date.now() / 1000) - 65}],
@@ -11744,7 +14099,7 @@ async function runLayoutAsyncSuite() {
 
     {
       const frames = [];
-      const api = loadYolomux('', ['1'], 'http:', 'iPhone', 'admin', {coarsePointer: true});
+      const api = loadYomux('', ['1'], 'http:', 'iPhone', 'admin', {coarsePointer: true});
       api.registerTerminalForTest('1', {focus() {}}, {
         readyState: WebSocket.OPEN,
         send(frame) { frames.push(JSON.parse(frame)); },
@@ -11804,7 +14159,7 @@ async function runLayoutAsyncSuite() {
 
     {
       const frames = [];
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       api.registerTerminalForTest('1', {focus() {}}, {
         readyState: WebSocket.OPEN,
         send(frame) { frames.push(JSON.parse(frame)); },
@@ -11822,10 +14177,13 @@ async function runLayoutAsyncSuite() {
       const perf = Object.fromEntries(api.clientPerfSummaryForTest().map(counter => [counter.name, counter]));
       assert.equal(perf['term.onData'].count, 1, 'the root input owner still records one terminal data handler');
       assert.equal(perf.wsSend.count, 1, 'the root input owner still sends one WebSocket frame');
+      api.handleTerminalDataForTest('1', '\x1b[I');
+      const afterPassive = Object.fromEntries(api.clientPerfSummaryForTest().map(counter => [counter.name, counter]));
+      assert.equal(afterPassive.keydownToTermData.count, 1, 'a consumed native timestamp cannot become page uptime for passive reports');
     }
 
     await testAsync('server/client version mismatch asks whether to reload the browser', async () => {
-      const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
         bootstrapOverrides: {
           version: '0.4.20',
           settingsPayload: settingsOverride({}, {general: {reload_on_update: true, reload_on_update_auto: false}}),
@@ -11847,7 +14205,7 @@ async function runLayoutAsyncSuite() {
       api.maybeHandleServerVersionChangeForTest('0.4.19');
       assert.equal(api.bodyChildren().some(node => node.id === 'serverUpdateBanner'), false, 'dismissed same mismatch does not immediately reopen');
 
-      const reloadApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      const reloadApi = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
         bootstrapOverrides: {
           version: '0.4.20',
           settingsPayload: settingsOverride({}, {general: {reload_on_update: true, reload_on_update_auto: false}}),
@@ -11858,7 +14216,7 @@ async function runLayoutAsyncSuite() {
       reloadBanner.children[1].children[0].listeners.get('click')[0]();
       assert.equal(reloadApi.reloadCountForTest(), 1, 'Reload action reloads the browser');
 
-      const autoApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      const autoApi = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
         bootstrapOverrides: {
           version: '0.4.20',
           settingsPayload: settingsOverride({}, {general: {reload_on_update: true, reload_on_update_auto: true}}),
@@ -11871,7 +14229,7 @@ async function runLayoutAsyncSuite() {
     });
 
     await testAsync('server/client bundle revision mismatch asks whether to reload the browser', async () => {
-      const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
         bootstrapOverrides: {
           version: '0.4.20',
           clientRevision: 'old-client-rev',
@@ -11886,7 +14244,7 @@ async function runLayoutAsyncSuite() {
       api.maybeHandleServerVersionChangeForTest('0.4.20', 'new-client-rev');
       assert.equal(api.bodyChildren().filter(node => node.id === 'serverUpdateBanner').length, 1, 'same bundle revision mismatch does not spawn repeated banners');
 
-      const autoApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      const autoApi = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
         bootstrapOverrides: {
           version: '0.4.20',
           clientRevision: 'old-client-rev',
@@ -11896,7 +14254,7 @@ async function runLayoutAsyncSuite() {
       autoApi.maybeHandleServerVersionChangeForTest('0.4.20', 'new-client-rev');
       assert.equal(autoApi.reloadCountForTest(), 1, 'safe automatic reload fires on same-version bundle revision mismatch');
 
-      const disabledApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      const disabledApi = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
         bootstrapOverrides: {
           version: '0.4.20',
           clientRevision: 'old-client-rev',
@@ -11909,7 +14267,7 @@ async function runLayoutAsyncSuite() {
     });
 
     await testAsync('self-update: Update Now removes toast and reloads after restart ping', async () => {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       api.setConfirmForTest(() => true);
       const toasts = [];
       const owner = api.testElementForId('update-toast');
@@ -11966,7 +14324,7 @@ async function runLayoutAsyncSuite() {
     });
 
     await testAsync('self-update: dirty edits and active typing defer automatic reload safely', async () => {
-      const dirtyApi = loadYolomux('', ['1']);
+      const dirtyApi = loadYomux('', ['1']);
       const dirtyToasts = [];
       dirtyApi.setShowToastForTest((title, lines) => {
         dirtyToasts.push({title, lines: Array.isArray(lines) ? lines : [lines]});
@@ -11982,7 +14340,7 @@ async function runLayoutAsyncSuite() {
       dirtyApi.maybeHandleServerVersionChangeForTest('0.4.19');
       assert.equal(dirtyApi.bodyChildren().some(node => node.id === 'serverUpdateBanner'), false, 'dirty self-update deferral still suppresses the generic reload banner');
 
-      const typingApi = loadYolomux('', ['1']);
+      const typingApi = loadYomux('', ['1']);
       const typingToasts = [];
       typingApi.setShowToastForTest((title, lines) => {
         typingToasts.push({title, lines: Array.isArray(lines) ? lines : [lines]});
@@ -12003,7 +14361,7 @@ async function runLayoutAsyncSuite() {
       const timers = [];
       const cleared = [];
       const toasts = [];
-      const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
         setTimeout(callback, delay) {
           const id = timers.length + 1;
           timers.push({id, callback, delay});
@@ -12059,7 +14417,7 @@ async function runLayoutAsyncSuite() {
     });
 
     test('YO!stats exact ranges offer only the server-supported resolution cells', () => {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const expected = new Map([
         [300, [1, 10]],
         [900, [10, 60]],
@@ -12081,7 +14439,7 @@ async function runLayoutAsyncSuite() {
     });
 
     test('YO!stats source gaps do not overpaint exact family data', () => {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const seriesValue = value => ({value, source_count: 1, first_timestamp: 0, last_timestamp: 0});
       const snapshot = {
         window_start: 0,
@@ -12110,7 +14468,7 @@ async function runLayoutAsyncSuite() {
     });
 
     test('YO!stats exact server buckets are never re-aggregated by legacy tiers', () => {
-      const api = loadYolomux('', ['1']);
+      const api = loadYomux('', ['1']);
       const now = Date.now();
       api.clearJsDebugGraphDataForTest();
       api.debugGraphApplyServerRecordForTest({start: (now - 16 * 60 * 60 * 1000) / 1000, duration: 300});

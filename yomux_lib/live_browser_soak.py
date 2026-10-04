@@ -320,7 +320,7 @@ def authenticated_server_log_reader(url: str, port: int, user: AuthUser) -> Any:
 
 def assert_stats_hidden(driver: Any) -> None:
     hidden = driver.execute_script("""
-        const sentinel = window.__yolomuxStatsHiddenSentinel;
+        const sentinel = window.__yomuxStatsHiddenSentinel;
         return Boolean(sentinel && sentinel.installed && sentinel.everVisible === false && typeof jsDebugStatsPanelVisible === 'function' && jsDebugStatsPanelVisible() === false);
     """)
     if hidden is not True:
@@ -512,8 +512,8 @@ def install_start_of_document_sentinels(driver: Any) -> None:
           const style = getComputedStyle(panel); const rect = panel.getBoundingClientRect();
           return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
         });
-        const stats = window.__yolomuxStatsHiddenSentinel = {installed: true, everVisible: false, checks: 0};
-        const journey = window.__yolomuxBrowserJourneyGate = {
+        const stats = window.__yomuxStatsHiddenSentinel = {installed: true, everVisible: false, checks: 0};
+        const journey = window.__yomuxBrowserJourneyGate = {
           visitedSurfaces: [], consumedServerLogIds: [], serverLogEpoch: null, observer: null, observe: null,
         };
         journey.observe = () => {
@@ -573,7 +573,7 @@ def sample_hidden_stats_stream(driver: Any, *, start: bool = False) -> dict[str,
         }
         if (typeof jsDebugCurrentStatsStreamEvidence !== 'function') return null;
         const evidence = jsDebugCurrentStatsStreamEvidence();
-        const sentinel = window.__yolomuxStatsHiddenSentinel;
+        const sentinel = window.__yomuxStatsHiddenSentinel;
         return {...evidence, sampledAtMs: Date.now(), everVisible: sentinel?.everVisible ?? null};
     """, start)
     return validate_hidden_stats_stream_evidence(value)
@@ -1198,9 +1198,9 @@ def finalize_live_browser_soak(
             const diagnostics = diagnosticSnapshot();
             const {events, failures, projection} = diagnostics;
             const stats = typeof window.jsDebugCurrentStatsStreamEvidence === 'function'
-              ? {...window.jsDebugCurrentStatsStreamEvidence(), sampledAtMs: Date.now(), everVisible: window.__yolomuxStatsHiddenSentinel?.everVisible ?? null}
+              ? {...window.jsDebugCurrentStatsStreamEvidence(), sampledAtMs: Date.now(), everVisible: window.__yomuxStatsHiddenSentinel?.everVisible ?? null}
               : null;
-            const gate = window.__yolomuxBrowserJourneyGate;
+            const gate = window.__yomuxBrowserJourneyGate;
             const gateReachable = Boolean(gate && typeof gate === 'object' && Array.isArray(gate.visitedSurfaces)
               && Array.isArray(gate.consumedServerLogIds) && typeof gate.observe === 'function' && gate.observer);
             if (gateReachable) gate.observe();
@@ -1211,7 +1211,7 @@ def finalize_live_browser_soak(
                 reachable: gateReachable,
                 visitedSurfaces: gateReachable ? [...gate.visitedSurfaces] : [],
               },
-              hiddenSentinel: window.__yolomuxStatsHiddenSentinel ? {...window.__yolomuxStatsHiddenSentinel} : null,
+              hiddenSentinel: window.__yomuxStatsHiddenSentinel ? {...window.__yomuxStatsHiddenSentinel} : null,
               panelVisible: typeof window.jsDebugStatsPanelVisible === 'function' ? window.jsDebugStatsPanelVisible() : null,
               page: {visibility: document.visibilityState, origin: location.origin, href: location.href},
             };

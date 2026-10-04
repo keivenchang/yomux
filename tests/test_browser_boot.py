@@ -5,6 +5,7 @@ import json
 import shlex
 import subprocess
 import time
+from pathlib import Path
 from urllib.parse import urlencode
 
 import pytest
@@ -15,6 +16,99 @@ from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F
 pytestmark = [pytest.mark.browser, pytest.mark.socket, pytest.mark.boot]
 
 TOUCH_LONG_PRESS_TEST_TIMEOUT_SECONDS = 8
+
+
+def _suspend_synthetic_terminal_output(browser, session):
+    browser.execute_script(
+        """
+        const socket = terminals.get(arguments[0])?.socket;
+        if (!socket) throw new Error('synthetic terminal socket is missing');
+        // Live PTY redraws can replace a test's injected history or switch buffers.
+        window.__fixtureSyntheticTerminalSocketOwner = {socket, onmessage: socket.onmessage, send: socket.send};
+        socket.onmessage = null;
+        """,
+        session,
+    )
+
+
+def _restore_synthetic_terminal_output(browser):
+    browser.execute_script(
+        """
+        const owner = window.__fixtureSyntheticTerminalSocketOwner;
+        if (owner) {
+          owner.socket.onmessage = owner.onmessage;
+          owner.socket.send = owner.send;
+        }
+        delete window.__fixtureSyntheticTerminalSocketOwner;
+        """
+    )
+
+
+@pytest.mark.parametrize("action", ["release", "replace", "dispose", "late"])
+def test_lifecycle_scope_cancels_native_animation_frames_without_illegal_receiver(browser, action):
+    source = (Path(__file__).resolve().parents[1] / "static_src/js/yomux/10_core_utils.js").read_text()
+    start = source.index("function createLifecycleScope(")
+    scope_source = source[start:source.index("\nfunction createLatestResource(", start)]
+    original_handle = browser.current_window_handle
+    browser.switch_to.new_window("tab")
+    try:
+        browser.get("about:blank")
+        receipt = browser.execute_async_script(scope_source + """
+            const action = arguments[0];
+            const done = arguments[arguments.length - 1];
+            const scope = createLifecycleScope();
+            let ran = false;
+            const frame = requestAnimationFrame(() => { ran = true; });
+            let error = null;
+            try {
+              if (action === 'late') scope.dispose();
+              scope.replace('dispatch-frame', frame, cancelAnimationFrame);
+              if (action === 'release') scope.release('dispatch-frame', frame);
+              if (action === 'replace') {
+                scope.replace('dispatch-frame', requestAnimationFrame(() => {}), cancelAnimationFrame);
+              }
+              scope.dispose();
+            } catch (caught) { error = String(caught); }
+            requestAnimationFrame(() => done({error, ran}));
+        """, action)
+        assert receipt == {"error": None, "ran": False}, receipt
+    finally:
+        browser.close()
+        browser.switch_to.window(original_handle)
+
+
+def test_shared_tree_columns_preserve_unchanged_native_text_nodes(browser, monkeypatch, tmp_path):
+    runtime = start_isolated_browser_app(monkeypatch, tmp_path)
+    server, thread = start_browser_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
+    try:
+        browser.get(f"http://127.0.0.1:{server.server_address[1]}/?sessions={runtime.sessions[0]}")
+        WebDriverWait(browser, 20).until(lambda driver: driver.execute_script("return typeof updateFileTreeRowContents === 'function';"))
+        result = browser.execute_script("""
+            const row = document.createElement('div');
+            document.body.appendChild(row);
+            try {
+              updateFileTreeRowContents(row, '', 'file.md', {dateText: '1m'});
+              const name = row.querySelector('.file-tree-name');
+              const date = row.querySelector('.file-tree-date');
+              const nameText = name.firstChild;
+              const dateText = date.firstChild;
+              const observer = new MutationObserver(() => {});
+              observer.observe(name, {childList:true, characterData:true, subtree:true});
+              observer.observe(date, {childList:true, characterData:true, subtree:true});
+              updateFileTreeRowContents(row, '', 'file.md', {dateText: '1m'});
+              const result = {mutations:observer.takeRecords().length, nameStable:name.firstChild === nameText, dateStable:date.firstChild === dateText};
+              observer.disconnect();
+              updateFileTreeRowContents(row, '', 'file.md', {nameHtml:'<em>file.md</em>', dateHtml:'<em>1m</em>'});
+              updateFileTreeRowContents(row, '', 'file.md', {dateText:'1m'});
+              result.richMarkupCleared = name.children.length === 0 && date.children.length === 0;
+              updateFileTreeRowContents(row, '', 'renamed.md', {dateText:'2m'});
+              result.changed = [name.textContent, date.textContent];
+              return result;
+            } finally { row.remove(); }
+        """)
+        assert result == {"mutations": 0, "nameStable": True, "dateStable": True, "richMarkupCleared": True, "changed": ["renamed.md", "2m"]}, result
+    finally:
+        stop_browser_fixture(server, thread, runtime, browser=browser)
 
 
 def xterm_only_search(session):
@@ -67,7 +161,7 @@ def test_full_bundle_boot_smoke_matrix_never_renders_a_blank_page(browser, monke
     server, thread = start_browser_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
     base_url = f"http://127.0.0.1:{server.server_address[1]}/"
     install_live_runtime_boot_error_tracker(browser)
-    browser._yolomux_server_log_boundary = server._fixture_server_log_boundary
+    browser._yomux_server_log_boundary = server._fixture_server_log_boundary
     cases = {
         "fresh-default": "?" + urlencode({"bootCase": "fresh-default", "sessions": session}),
         "saved-layout": saved_layout_search(session, finder_root),
@@ -82,10 +176,7 @@ def test_full_bundle_boot_smoke_matrix_never_renders_a_blank_page(browser, monke
                 assert "sizes" in metrics["collapsedPreferenceSectionIds"], metrics
                 assert "file_explorer" in metrics["collapsedPreferenceSectionIds"], metrics
     finally:
-        try:
-            stop_browser_server(server, thread, browser=browser)
-        finally:
-            stop_isolated_browser_app(runtime)
+        stop_browser_fixture(server, thread, runtime, browser=browser)
 
     successor_path = tmp_path / "xterm-successor"
     successor_path.mkdir()
@@ -98,7 +189,7 @@ def test_full_bundle_boot_smoke_matrix_never_renders_a_blank_page(browser, monke
         auth_bypass=True,
     )
     try:
-        browser._yolomux_server_log_boundary = successor_server._fixture_server_log_boundary
+        browser._yomux_server_log_boundary = successor_server._fixture_server_log_boundary
         browser.get(
             f"http://127.0.0.1:{successor_server.server_address[1]}/"
             f"{xterm_only_search(successor_session)}"
@@ -119,14 +210,7 @@ def test_full_bundle_boot_smoke_matrix_never_renders_a_blank_page(browser, monke
         assert mounted is True
         assert_browser_journey_error_free(browser, observation_seconds=2.0)
     finally:
-        try:
-            stop_browser_server(
-                successor_server,
-                successor_thread,
-                browser=browser,
-            )
-        finally:
-            stop_isolated_browser_app(successor_runtime)
+        stop_browser_fixture(successor_server, successor_thread, successor_runtime, browser=browser)
 
 
 def test_hard_loaded_yoagent_keeps_activity_summary_disabled_without_requests_or_spinner(browser, monkeypatch, tmp_path):
@@ -145,7 +229,7 @@ def test_hard_loaded_yoagent_keeps_activity_summary_disabled_without_requests_or
         "tabs": f"slot1:{session},yoagent",
     })
     try:
-        browser._yolomux_server_log_boundary = server._fixture_server_log_boundary
+        browser._yomux_server_log_boundary = server._fixture_server_log_boundary
         browser.get(base_url + search)
         assert_live_runtime_boot_healthy(browser, "activity-summary-disabled", timeout=12)
         selected = browser.execute_async_script(
@@ -180,8 +264,7 @@ def test_hard_loaded_yoagent_keeps_activity_summary_disabled_without_requests_or
         assert state["activityRequests"] == []
         assert_browser_journey_error_free(browser)
     finally:
-        stop_browser_server(server, thread, browser=browser)
-        stop_isolated_browser_app(runtime)
+        stop_browser_fixture(server, thread, runtime, browser=browser)
 
 
 def test_real_xterm_trusted_touch_long_press_selects_extends_and_offers_copy(browser, monkeypatch, tmp_path):
@@ -273,8 +356,7 @@ def test_real_xterm_trusted_touch_long_press_selects_extends_and_offers_copy(bro
         browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
         browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
         browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": original_user_agent})
-        stop_browser_server(server, thread, browser=browser)
-        stop_isolated_browser_app(runtime)
+        stop_browser_fixture(server, thread, runtime, browser=browser)
 
 
 @pytest.mark.parametrize(
@@ -1035,8 +1117,91 @@ def test_real_xterm_mobile_input_survives_pan_preview_pane_accessory_keyboard_an
         browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
         browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
         browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": original_user_agent})
-        stop_browser_server(server, thread, browser=browser)
-        stop_isolated_browser_app(runtime)
+        stop_browser_fixture(server, thread, runtime, browser=browser)
+
+
+def test_real_xterm_terminal_reference_scan_stays_bounded_under_latency(browser, monkeypatch, tmp_path):
+    """A long xterm scrollback must not stall discovery, repaint, or concurrent health latency."""
+    runtime = start_isolated_browser_app(monkeypatch, tmp_path)
+    session = runtime.sessions[0]
+    server, thread = start_browser_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
+    try:
+        browser.execute_cdp_cmd("Network.enable", {})
+        browser.execute_cdp_cmd("Network.emulateNetworkConditions", {
+            "offline": False,
+            "latency": 21,
+            "downloadThroughput": 10_000_000,
+            "uploadThroughput": 10_000_000,
+        })
+        browser.get(f"http://127.0.0.1:{server.server_address[1]}/{xterm_only_search(session)}")
+        assert_live_runtime_boot_healthy(browser, "real-xterm-terminal-reference-scan", timeout=12)
+        WebDriverWait(browser, 20).until(lambda driver: driver.execute_script(
+            "return !jsDebugClientHealthMeasurementState.inFlight;"
+        ))
+        _suspend_synthetic_terminal_output(browser, session)
+        browser.execute_async_script(
+            """
+            const session = arguments[0], done = arguments[arguments.length - 1];
+            const item = terminals.get(session), term = item?.term, socket = item?.socket;
+            if (!term || !socket) { done({error: 'real xterm did not mount'}); return; }
+            term.options.scrollback = 10000;
+            // tmux attaches in the alternate buffer, which cannot retain scrollback.
+            term.write('\\x1b[?1049l' + '    plain-token-without-any-url\\r\\n'.repeat(5000), done);
+            """,
+            session,
+        )
+        WebDriverWait(browser, 20).until(lambda driver: driver.execute_script(
+            "return terminals.get(arguments[0])?.term?.buffer?.active?.length >= 5000;", session
+        ))
+        assert browser.execute_script(
+            "return terminals.get(arguments[0])?.term?.buffer?.active?.type === 'normal';", session
+        )
+        WebDriverWait(browser, 20).until(lambda driver: driver.execute_script(
+            "return !jsDebugClientHealthMeasurementState.inFlight;"
+        ))
+        result = browser.execute_async_script(
+            """
+            const session = arguments[0], done = arguments[arguments.length - 1];
+            (async () => {
+              const item = terminals.get(session), term = item?.term;
+              const container = document.querySelector(`#term-${session}`);
+              const controller = item?.fileUnderlineController;
+              if (!term || !container?.querySelector('.xterm') || !controller) {
+                throw new Error('real xterm reference controller did not mount');
+              }
+              const measured = measureClientHealth();
+              const start = performance.now();
+              const nodes = controller.refresh();
+              const repaintMs = performance.now() - start;
+              const ping = await measured;
+              done({
+                rows: term.buffer.active.length,
+                viewportY: term.buffer.active.viewportY,
+                nodes,
+                repaintMs,
+                ping,
+                realXterm: Boolean(container.querySelector('.xterm')),
+              });
+            })().catch(error => done({error: String(error)}));
+            """,
+            session,
+        )
+        assert "error" not in result, result
+        print(f"real xterm terminal-reference measurement: {result}")
+        assert result["realXterm"] and result["rows"] >= 5000, result
+        assert result["nodes"] == 0, result
+        assert result["ping"] is not None, result
+        assert result["repaintMs"] < 50, result
+        assert result["ping"]["latencyMs"] < 100, result
+    finally:
+        _restore_synthetic_terminal_output(browser)
+        browser.execute_cdp_cmd("Network.emulateNetworkConditions", {
+            "offline": False,
+            "latency": 0,
+            "downloadThroughput": -1,
+            "uploadThroughput": -1,
+        })
+        stop_browser_fixture(server, thread, runtime, browser=browser)
 
 
 def test_real_xterm_renders_tmux_output_and_survives_pane_resize(browser, monkeypatch, tmp_path):
@@ -1234,8 +1399,7 @@ def test_real_xterm_renders_tmux_output_and_survives_pane_resize(browser, monkey
         assert after["connected"] is True and after["viewport"] > glyphs["viewport"], {"before": glyphs, "after": after}
         assert after["screenRect"] and after["screenRect"]["width"] > 0 and after["screenRect"]["height"] > 0, after
     finally:
-        stop_browser_server(server, thread, browser=browser)
-        stop_isolated_browser_app(runtime)
+        stop_browser_fixture(server, thread, runtime, browser=browser)
 
 
 def test_real_xterm_opencode_touch_scroll_matches_wheel_and_does_not_move_outer_page(browser, monkeypatch, tmp_path):
@@ -1266,6 +1430,7 @@ def test_real_xterm_opencode_touch_scroll_matches_wheel_and_does_not_move_outer_
                 session,
             )
         )
+        _suspend_synthetic_terminal_output(browser, session)
         metrics = browser.execute_script(
             """
             const item = terminals.get(arguments[0]);
@@ -1275,7 +1440,7 @@ def test_real_xterm_opencode_touch_scroll_matches_wheel_and_does_not_move_outer_
             const viewport = container.querySelector('.xterm-viewport');
             const paneTarget = container.dataset.terminalPaneTarget || `%${arguments[0]}`;
             container.dataset.terminalPaneTarget = paneTarget;
-            term.write(`\\x1b[?1000l\\x1b[?1002l\\x1b[?1003l${Array.from({length: 180}, (_, index) => `opencode-history-${index.toString().padStart(3, '0')}\\r\\n`).join('')}`, () => {
+            term.write(`\\x1b[?1049l\\x1b[?1000l\\x1b[?1002l\\x1b[?1003l${Array.from({length: 180}, (_, index) => `opencode-history-${index.toString().padStart(3, '0')}\\r\\n`).join('')}`, () => {
               term.scrollToBottom();
               window.__openCodeScrollReady = true;
             });
@@ -1293,6 +1458,15 @@ def test_real_xterm_opencode_touch_scroll_matches_wheel_and_does_not_move_outer_
             session,
         )
         WebDriverWait(browser, 12).until(lambda driver: driver.execute_script("return window.__openCodeScrollReady === true"))
+        xterm_mouse_mode = browser.execute_async_script(
+            """
+            const item = terminals.get(arguments[0]);
+            const done = arguments[arguments.length - 1];
+            item.term.write('\\x1b[?1000h\\x1b[?1006h', () => done(true));
+            """,
+            session,
+        )
+        assert xterm_mouse_mode is True
         metrics = browser.execute_script(
             """
             const item = terminals.get(arguments[0]);
@@ -1364,8 +1538,8 @@ def test_real_xterm_opencode_touch_scroll_matches_wheel_and_does_not_move_outer_
         assert touch["prevented"] and all(touch["prevented"]), touch
         assert metrics["touchAction"] == {key: "none" for key in metrics["touchAction"]}, metrics
     finally:
+        _restore_synthetic_terminal_output(browser)
         browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
         browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
         browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": original_user_agent})
-        stop_browser_server(server, thread, browser=browser)
-        stop_isolated_browser_app(runtime)
+        stop_browser_fixture(server, thread, runtime, browser=browser)

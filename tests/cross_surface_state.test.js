@@ -13,9 +13,9 @@ const {
   TestFormData,
   assertNoStandalonePrBadge,
   assertSingleCiBadge,
-  loadYolomux,
+  loadYomux,
   fileExplorerClosedOptions,
-  loadYolomuxWithFileExplorerClosed,
+  loadYomuxWithFileExplorerClosed,
   treeKeyEvent,
   tabElement,
   tabStrip,
@@ -36,12 +36,88 @@ const {
 const {registerCrossSurfaceQuickOpenSuite} = require('./browser_helpers/cross_surface_quick_open_suite');
 
 async function runCrossSurfaceStateSuite() {
+  test('closing session popovers scans only open anchors and preserves the current one', () => {
+    const source = fs.readFileSync('static_src/js/yomux/60_popovers_tabs.js', 'utf8');
+    const anchor = new TestElement('', 'div');
+    anchor.className = 'pane-tab popover-open';
+    const current = new TestElement('', 'div');
+    current.className = 'tabber-session-tab popover-open';
+    const popup = new TestElement('', 'div');
+    popup.className = 'session-popover popover-open';
+    anchor.__yomuxDetachedPopover = popup;
+    const context = {
+      document: {
+        querySelectorAll() { throw new Error('popover closure scanned mounted trees'); },
+        getElementsByClassName: () => [anchor, current, popup],
+      },
+      popoverStillActive: () => false,
+    };
+    vm.createContext(context);
+    vm.runInContext(source.slice(source.indexOf('function closeOtherSessionPopovers('), source.indexOf('function popoverLifecycleActive(')), context);
+    context.closeOtherSessionPopovers(current, {force: true});
+    assert.equal(anchor.classList.contains('popover-open'), false);
+    assert.equal(popup.classList.contains('popover-open'), false);
+    assert.equal(current.classList.contains('popover-open'), true);
+  });
+
+  test('terminal focus uses xterm without document scroll measurements', () => {
+    const source = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+    const window = {};
+    for (const name of ['scrollX', 'scrollY']) {
+      Object.defineProperty(window, name, {get() { throw new Error('terminal focus forced document layout'); }});
+    }
+    let focusCalls = 0;
+    let deferredFocus;
+    const textarea = {};
+    const context = {
+      window, document: {activeElement: textarea},
+      terminals: new Map([['1', {term: {focus() { focusCalls++; }}, container: {querySelector: () => textarea}}]]),
+      recordTerminalMobileInputTrace() {}, setTimeout: callback => { deferredFocus = callback; },
+    };
+    vm.createContext(context);
+    vm.runInContext(source.slice(source.indexOf('function focusTerminalDom('), source.indexOf('function clearFocusForInactiveLayout(')), context);
+    context.focusTerminalDom('1');
+    assert.equal(focusCalls, 1);
+    context.focusTerminalDom('1', 10);
+    assert.equal(focusCalls, 1);
+    deferredFocus();
+    assert.equal(focusCalls, 2);
+  });
+
+  test('scoped session controls retain local controls without scanning other trees', () => {
+    const api = loadYomux('', ['1']);
+    const body = api.testElementForId('body');
+    const panel = api.testElementForId('panel-1');
+    const header = new TestElement('', 'div');
+    const button = new TestElement('', 'button');
+    button.dataset.yoloSession = '1';
+    const bar = new TestElement('', 'div');
+    bar.dataset.tmuxWindowBar = '1';
+    header.appendChild(button);
+    panel.appendChild(bar);
+    body.append(panel, header);
+    const originalQuery = body.querySelectorAll;
+    body.querySelectorAll = () => { throw new Error('scoped controls scanned the document'); };
+    try {
+      const controls = api.collectSessionControlNodesForTest(['1'], [header, panel, header]).get('1');
+      assert.deepStrictEqual([...controls.yoloButtons], [button]);
+      assert.deepStrictEqual([...controls.windowBars], [bar]);
+    } finally {
+      body.querySelectorAll = originalQuery;
+    }
+    assert.deepStrictEqual([...api.collectSessionControlNodesForTest(['1']).get('1').windowBars], [bar]);
+  });
+
   test('Finder working-tree request stays HEAD/current when Differ selects historical refs', () => {
-    const requestApi = loadYolomux('', ['1']);
+    const requestApi = loadYomux('', ['1']);
     const slots = requestApi.emptyLayoutSlots();
-    slots[requestApi.layoutTreeKey] = requestApi.leafNode('left');
-    slots.left = requestApi.paneStateWithTabs([requestApi.finderItemId, requestApi.differItemId], requestApi.differItemId);
+    slots[requestApi.layoutTreeKey] = requestApi.splitNode('row', requestApi.leafNode('left'), requestApi.leafNode('right'));
+    slots.left = requestApi.paneStateWithTabs([requestApi.finderItemId], requestApi.finderItemId);
+    slots.right = requestApi.paneStateWithTabs([requestApi.differItemId], requestApi.differItemId);
     requestApi.setLayoutSlotsForTest(slots);
+    requestApi.activatePaneTab('left', requestApi.differItemId);
+    requestApi.setFileExplorerChangesSelectedSessionForTest('1');
+    requestApi.setFileExplorerFinderSelectedSessionForTest('1');
     requestApi.setFinderSessionFilesPayloadForTest({
       session: '1', loaded: true, from_ref: 'HEAD', to_ref: 'current', errors: [], repos: [{repo: '/repo/app', added: 2, removed: 1}],
       files: [{repo: '/repo/app', abs_path: '/repo/app/a.py', status: 'M', added: 2, removed: 1}],
@@ -59,7 +135,7 @@ async function runCrossSurfaceStateSuite() {
     assert.deepEqual(finderStats.get('/repo/app'), {count: 1, agents: [], mtime: 0, added: 2, removed: 1}, 'Finder annotations use only the fixed working-tree payload');
     assert.equal(requestApi.finderSessionFilesPayloadForTest().from_ref, 'HEAD', 'historical Differ state does not overwrite Finder refs');
 
-    const cacheApi = loadYolomux('', ['1']);
+    const cacheApi = loadYomux('', ['1']);
     cacheApi.setFinderSessionFilesCachePayloadForTest('1', {loaded: true, from_ref: 'HEAD', to_ref: 'current', repos: [{repo: '/repo/app'}], files: []});
     cacheApi.setSessionFilesCachePayloadForTest('1', {loaded: true, from_ref: 'HEAD', to_ref: 'current', repos: [{repo: '/repo/app'}], files: []});
     assert.deepEqual(cacheApi.sessionFilesCacheSizesForTest(), {finder: 1, differ: 1});
@@ -75,13 +151,13 @@ async function runCrossSurfaceStateSuite() {
       v: 1,
       gitDiff: [{item, head: sha, snapshotCursor: 'opaque-zero', expanded: [sha]}],
     }));
-    const api = loadYolomux(`?state=${state}`, ['1']);
+    const api = loadYomux(`?state=${state}`, ['1']);
     const restored = api.gitDiffTabStateForTest(item);
     assert.deepStrictEqual([restored.head, restored.snapshotCursor, ...restored.expanded], [sha, 'opaque-zero', sha]);
   });
 
   test('Git diff directory and historical editor identities are deterministic and use the existing pane contracts', () => {
-    const api = loadYolomux('', ['1', '2']);
+    const api = loadYomux('', ['1', '2']);
     const directoryPath = '/repo/space and % value/src';
     const directoryItem = api.gitDiffItemFor(directoryPath);
     assert.equal(api.gitDiffItemPath(directoryItem), directoryPath, 'gitdiff path encoding round-trips hostile URL characters');
@@ -115,7 +191,7 @@ async function runCrossSurfaceStateSuite() {
   });
 
   test('Finder builds the approved mode actions from one explicit registry', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const menuState = {openInNewTabDisabled: false};
     const fileContext = {
       fullPath: '/repo/app.js',
@@ -147,7 +223,7 @@ async function runCrossSurfaceStateSuite() {
     assert.deepStrictEqual([...repoActions.map(action => action.label)], ['ΔShow Diff']);
     assert.equal(repoActions[0].item, api.gitDiffItemFor('/repo'));
     assert.equal(repoActions[0].disabled, false, 'the listing-proven repository directory may open its Diff tab before deferred path metadata returns');
-    const readonlyApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'readonly');
+    const readonlyApi = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'readonly');
     const readonlyRepoAction = readonlyApi.finderOpenInNewTabActionsForContext({
       fullPath: '/repo',
       entry: {kind: 'dir', name: 'repo', is_repo: true},
@@ -175,7 +251,7 @@ async function runCrossSurfaceStateSuite() {
   });
 
   await testAsync('Finder Diff resets stale refs and reuses the existing working Editor in its current pane', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const path = '/repo/app.js';
     const existingItem = api.fileEditorDiffPreviewItemFor(path);
     api.setOpenFileStateForTest(path, {
@@ -219,7 +295,7 @@ async function runCrossSurfaceStateSuite() {
   });
 
   test('historical Editor chrome and close state are isolated from the working file record', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const path = '/repo/app.js';
     const item = api.historicalFileEditorItemFor(path, 'a'.repeat(40), 'b'.repeat(40));
     api.setOpenFileStateForTest(path, {kind: 'text', original: 'working', content: 'dirty', dirty: true, externalMissing: true});
@@ -231,7 +307,7 @@ async function runCrossSurfaceStateSuite() {
   });
 
   await testAsync('a historical-only Editor tab closes without requiring working file state', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const path = '/repo/deleted.js';
     const item = api.historicalFileEditorItemFor(path, 'a'.repeat(40), 'b'.repeat(40));
     api.setHistoricalFileStateForTest(item, {kind: 'text', original: 'old', content: '', dirty: false});
@@ -284,8 +360,37 @@ async function runCrossSurfaceStateSuite() {
   let moved, split, killedApi, killedNestedFinderSlots, fullSpanSlots, resizer;
   let event;
 
+  appSource = fs.readFileSync('static/yomux.js', 'utf8');
+  const parseOverviewStops = gradient => {
+    const stops = [];
+    const pattern = /(#[0-9a-f]{6}|transparent)\s+([0-9.]+)%\s+([0-9.]+)%/gi;
+    let match = pattern.exec(String(gradient || ''));
+    while (match) {
+      stops.push({
+        color: match[1].toLowerCase(),
+        startText: match[2],
+        endText: match[3],
+        start: Number.parseFloat(match[2]),
+        end: Number.parseFloat(match[3]),
+      });
+      match = pattern.exec(String(gradient || ''));
+    }
+    return stops;
+  };
+  changedOverviewStops = gradient => parseOverviewStops(gradient).filter(stop => stop.color !== 'transparent');
+  assertNoOverviewStopOverlap = stops => {
+    for (let index = 1; index < stops.length; index += 1) {
+      assert.equal(stops[index - 1].end <= stops[index].start, true, 'adjacent diff overview stops never overlap');
+    }
+  };
+  makeOverviewFixtureLines = (count, label) => Array.from({length: count}, (_, index) => `${label} ${String(index + 1).padStart(3, '0')}`);
+  c9Src = appSource;
+  changedFilesSource = appSource;
+  fileExplorerSource = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8') + fs.readFileSync('static_src/js/yomux/45_file_explorer_actions.js', 'utf8');
+  preferencesCss = fs.readFileSync('static/yomux.css', 'utf8');
+
   test('cross-surface host state 01: YO!info and YO!agent are independent virtual tabs; legacy yoagent/yosup aliases open...', () => {
-    api = loadYolomux('', ['1', '2']);
+    api = loadYomux('', ['1', '2']);
     api.setFileExplorerTreeDateModeForTest('date');
     assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,chat,chat-media,finder,differ,tabber,search-history,preferences,debug,git-diff,image-viewer,file-editor');
     const virtualItems = {
@@ -414,6 +519,10 @@ async function runCrossSurfaceStateSuite() {
   });
 
   test('cross-surface host state 02: D4: a per-agent transcript-missing message arrives in payload.warnings (NOT...', () => {
+    const visibleSlots = api.emptyLayoutSlots();
+    visibleSlots[api.layoutTreeKey] = api.leafNode('left');
+    visibleSlots.left = api.paneStateWithTabs([api.differItemId], api.differItemId);
+    api.setLayoutSlotsForTest(visibleSlots);
     // D4: a per-agent transcript-missing message arrives in payload.warnings (NOT payload.errors) and must
     // render as a non-blocking changes-warning notice while valid changed files/repos still render.
     api.setSessionFilesPayloadForTest({
@@ -892,7 +1001,11 @@ async function runCrossSurfaceStateSuite() {
       api.sessionFilesPayloadSignatureForPayloadForTest(reversedFiles),
       'disk-cache key sorting preserves file array order');
 
-    const updatedApi = loadYolomux('', ['1']);
+    const updatedApi = loadYomux('', ['1']);
+    const visibleSlots = updatedApi.emptyLayoutSlots();
+    visibleSlots[updatedApi.layoutTreeKey] = updatedApi.leafNode('left');
+    visibleSlots.left = updatedApi.paneStateWithTabs([updatedApi.differItemId], updatedApi.differItemId);
+    updatedApi.setLayoutSlotsForTest(visibleSlots);
     updatedApi.setFileExplorerModeForTest('diff');
     updatedApi.setFileExplorerChangesSelectedSessionForTest('1');
     const comparisonRequest = {session: '1', hours: 24, from_ref: 'HEAD', to_ref: 'current'};
@@ -1004,7 +1117,7 @@ async function runCrossSurfaceStateSuite() {
   });
 
   test('Finder and Differ keep explicitly selected sessions scoped to their own surfaces', () => {
-    const stickyApi = loadYolomux('', ['1', '2']);
+    const stickyApi = loadYomux('', ['1', '2']);
     stickyApi.setFileExplorerFinderSelectedSessionForTest('1');
     stickyApi.setFileExplorerChangesSelectedSessionForTest('1');
     assert.equal(stickyApi.fileExplorerFinderTargetSessionForTest(), '1', 'Finder starts from its committed session');
@@ -1017,7 +1130,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(stickyApi.fileExplorerSessionFilesTargetSessionForTest(), '2', 'explicit Differ interaction updates Differ only');
   });
   test('Differ session selector remains authoritative after switching away and back', () => {
-    const api = loadYolomux('', ['1', '2']);
+    const api = loadYomux('', ['1', '2']);
     api.setFileExplorerChangesSelectedSessionForTest('1');
     api.setFileExplorerSessionFilesPayloadForTest({session: '1', loaded: true, files: [], repos: [], errors: []});
     api.setFileExplorerChangesSelectedSessionForTest('2');
@@ -1026,7 +1139,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(api.fileExplorerSessionFilesTargetSessionForTest(), '2', 'later payload reads do not restore the previous session');
   });
   test('Finder sync prefers live tmux path over transcript metadata', () => {
-    const signalPathApi = loadYolomux('', ['5']);
+    const signalPathApi = loadYomux('', ['5']);
     signalPathApi.setTranscriptInfoForTest('5', {
       selected_pane: {current_path: '/home/test/stale-transcript-path'},
     });
@@ -1040,8 +1153,8 @@ async function runCrossSurfaceStateSuite() {
     });
     assert.equal(signalPathApi.activeTmuxDirectoryPath('5'), '/home/test/live-tmux-path', 'Finder sync prefers direct tmux pane_current_path over stale transcript metadata');
   });
-  test('passive Finder focus never commits the modified-files target', () => {
-    const hoverApi = loadYolomux('', ['5', '6']);
+  await testAsync('passive Finder focus never commits the modified-files target', async () => {
+    const hoverApi = loadYomux('', ['5', '6']);
     hoverApi.setTranscriptInfoForTest('5', {
       project: {git: {cwd: '/home/test/yolomux.dev/src', root: '/home/test/yolomux.dev'}},
       selected_pane: {current_path: '/home/test/yolomux.dev/src'},
@@ -1067,7 +1180,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(hoverApi.activeTmuxDirectoryPath(), '/home/test/yolomux.dev/src', 'passive xterm focus does not become the Finder tmux-directory source');
     hoverApi.selectSession('6');
     assert.equal(hoverApi.fileExplorerSessionFilesTargetSessionForTest(), '5', 'passive selectSession does not commit the Finder Modified-files target');
-    hoverApi.selectSession('6', {userInitiated: true});
+    await hoverApi.selectSession('6', {userInitiated: true});
     assert.equal(hoverApi.fileExplorerSessionFilesTargetSessionForTest(), '6', 'explicit selectSession can commit the Finder Modified-files target');
     hoverApi.setFileExplorerChangesSelectedSessionForTest('5');
     hoverApi.noteFileExplorerChangesSessionInteractionForTest('6');
@@ -1088,7 +1201,7 @@ async function runCrossSurfaceStateSuite() {
     hoverApi.setFileExplorerModeForTest('files');
   });
   test('passive xterm mouse reports never acknowledge attention', () => {
-    const mouseReportApi = loadYolomux('', ['1', '8002']);
+    const mouseReportApi = loadYomux('', ['1', '8002']);
     mouseReportApi.setFileExplorerModeForTest('diff');
     mouseReportApi.noteFileExplorerChangesSessionInteractionForTest('1');
     mouseReportApi.noteFileExplorerChangesSessionInteractionForTest('8002');
@@ -1114,7 +1227,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(mouseReportApi.fileExplorerSessionFilesTargetSessionForTest(), '8002', 'typed xterm bytes acknowledge attention without retargeting Differ through the explicit-input helper');
   });
   test('typed input acknowledgement survives a stale cooldown snapshot', () => {
-    const cooldownApi = loadYolomux('', ['1']);
+    const cooldownApi = loadYomux('', ['1']);
     const cooldownKey = '["agent-window","1","0","%1","codex","cooldown","4000"]';
     cooldownApi.registerTerminalForTest('1', {focus() {}}, {readyState: 1, send() {}});
     cooldownApi.setTranscriptInfoForTest('1', {panes: [{window: 0, target: '%1', active: true, window_active: true, process_label: 'codex'}]});
@@ -1128,7 +1241,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(cooldownApi.attentionAcknowledgementKeyIsRecordedForTest(cooldownKey, {cooldown_acknowledged: false}), true, 'a delayed pre-ack yellow snapshot cannot restore the active terminal badge');
   });
   test('attention acknowledgement coalesces unresolved transport requests', () => {
-    const acknowledgementApi = loadYolomux('', ['1']);
+    const acknowledgementApi = loadYomux('', ['1']);
     const attentionKey = '["agent-window","1","0","%1","claude","needs-input","burst"]';
     acknowledgementApi.setTranscriptInfoForTest('1', {panes: [{window: 0, target: '%1', active: true, window_active: true, process_label: 'claude'}]});
     acknowledgementApi.setAutoApproveStateForTest('1', {agent_windows: [
@@ -1399,8 +1512,8 @@ async function runCrossSurfaceStateSuite() {
     // the filename carries no semibold/bold weight (regular, not big bold white).
     assert.equal(changedFilesCss.includes('.changes-file-row'), false, '#46: modified-file rows use shared Finder file-tree rows, not standalone changes-file-row CSS');
     assert.ok(/:root\s*\{[\s\S]*--changes-tree-row-hover-bg:\s*var\(--active-control-soft-bg\)[\s\S]*--changes-tree-indent-line:\s*rgba\(148,\s*163,\s*184,\s*0\.50\)[\s\S]*--changes-tree-icon-text:\s*#a7c7ff/.test(changedFilesCss), 'all Changes trees share the exact dark row-hover, indent-guide, and icon paints');
-    assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*--changes-repo-head-bg:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(changedFilesCss), 'Differ/Finder changes repo headers read the same pane bar background as the Sort toolbar');
-    assert.ok(/body\.theme-light\s*\{[\s\S]*--changes-tree-row-hover-bg:\s*rgba\(31,\s*111,\s*235,\s*0\.08\)[\s\S]*--changes-tree-indent-line:\s*var\(--tree-indent-line\)[\s\S]*--changes-tree-icon-text:\s*var\(--menu-accent\)/.test(changedFilesCss) && /\.file-explorer-changes-panel\s*\{[\s\S]*--changes-repo-head-bg:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(changedFilesCss), 'all Changes trees share the exact light paints while repo-header geometry remains unchanged');
+    assert.ok(/\.file-explorer-changes-panel \.changes-repo-head\s*\{[^}]*--changes-repo-head-bg:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(changedFilesCss), 'Differ/Finder changes repo headers read the same pane bar background as the Sort toolbar without passing focus colors to file rows');
+    assert.ok(/body\.theme-light\s*\{[\s\S]*--changes-tree-row-hover-bg:\s*rgba\(31,\s*111,\s*235,\s*0\.08\)[\s\S]*--changes-tree-indent-line:\s*var\(--tree-indent-line\)[\s\S]*--changes-tree-icon-text:\s*var\(--menu-accent\)/.test(changedFilesCss) && /\.file-explorer-changes-panel \.changes-repo-head\s*\{[^}]*--changes-repo-head-bg:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(changedFilesCss), 'all Changes trees share the exact light paints while repo-header geometry remains unchanged');
     assert.ok(/\.ui-disclosure-triangle,[\s\S]*\.info-tree-group summary::before,[\s\S]*\.yoagent-message-details summary::before\s*\{[\s\S]*--disclosure-triangle-box-size:\s*1\.333333em[\s\S]*--disclosure-triangle-font-size:\s*100%[\s\S]*inline-size:\s*var\(--disclosure-triangle-box-size\)[\s\S]*color:\s*var\(--disclosure-triangle-collapsed-color\)[\s\S]*font-size:\s*var\(--disclosure-triangle-font-size\)/.test(changedFilesCss), 'all disclosure chevrons share the same scaled muted collapsed parent style');
     assert.ok(/\.ui-disclosure-triangle\[data-disclosure-expanded="true"\],[\s\S]*\.info-tree-group\[open\]\s*>\s*summary::before,[\s\S]*\.yoagent-message-details\[open\] summary::before\s*\{[\s\S]*color:\s*var\(--disclosure-triangle-expanded-color\)[\s\S]*transform:\s*rotate\(90deg\)/.test(changedFilesCss), 'expanded disclosure chevrons use the shared active color and rotate down');
     assert.ok(/\.changes-repo-caret\s*\{[\s\S]*margin-inline-end:\s*var\(--space-2\)/.test(changedFilesCss), 'Differ/Finder repo disclosure caret uses the shared disclosure triangle size instead of a bespoke larger width/font');
@@ -1455,30 +1568,6 @@ async function runCrossSurfaceStateSuite() {
     filesTab = api.fileExplorerPaneTabHtml();
     assert.equal(api.fileExplorerLabel(), 'File Explorer');
     assert.ok(filesTab.includes('File Explorer'));
-    appSource = fs.readFileSync('static/yomux.js', 'utf8');
-    const parseOverviewStops = gradient => {
-      const stops = [];
-      const pattern = /(#[0-9a-f]{6}|transparent)\s+([0-9.]+)%\s+([0-9.]+)%/gi;
-      let match = pattern.exec(String(gradient || ''));
-      while (match) {
-        stops.push({
-          color: match[1].toLowerCase(),
-          startText: match[2],
-          endText: match[3],
-          start: Number.parseFloat(match[2]),
-          end: Number.parseFloat(match[3]),
-        });
-        match = pattern.exec(String(gradient || ''));
-      }
-      return stops;
-    };
-    changedOverviewStops = gradient => parseOverviewStops(gradient).filter(stop => stop.color !== 'transparent');
-    assertNoOverviewStopOverlap = stops => {
-      for (let index = 1; index < stops.length; index += 1) {
-        assert.equal(stops[index - 1].end <= stops[index].start, true, 'adjacent diff overview stops never overlap');
-      }
-    };
-    makeOverviewFixtureLines = (count, label) => Array.from({length: count}, (_, index) => `${label} ${String(index + 1).padStart(3, '0')}`);
     assert.ok(appSource.includes("const editorViewModes = new Set(['edit', 'preview', 'split', 'diff'])"), 'file editor registers diff as a real view mode');
     assert.ok(appSource.includes('new api.MergeView'), 'wide diff mode uses CodeMirror MergeView');
     assert.ok(appSource.includes('api.unifiedMergeView'), 'narrow diff mode uses CodeMirror unified merge view');
@@ -1935,7 +2024,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/element\.addEventListener\('mousedown'[\s\S]*?captureDockviewPreviousPaneBeforeTabActivation\(element, item(?:, [^)]+)?\)/.test(dockviewTabRendererBody), 'mouse tab activation captures editor state before Dockview detaches the old panel');
     assert.ok(/element\.addEventListener\('keydown'[\s\S]*?captureDockviewPreviousPaneBeforeTabActivation\(element, item(?:, [^)]+)?\)/.test(dockviewTabRendererBody), 'keyboard tab activation captures editor state before Dockview detaches the old panel');
     assert.ok(/const commitExplicitTabInteraction = \([^)]*\) => \{[\s\S]*?dockviewCommitPanelActivation\(item, \{userInitiated: true, \.\.\.options\}\);[\s\S]*?\};/.test(dockviewTabRendererBody), 'Dockview tab gestures commit tmux Differ context through the shared explicit-activation owner');
-    assert.ok(/element\.addEventListener\('click', async event => \{[\s\S]*?commitExplicitTabInteraction\(\);[\s\S]*?\}\);/.test(dockviewTabRendererBody), 'Dockview tab click commits an explicit interaction without relying on active-panel changes');
+    assert.ok(/element\.addEventListener\('click', async event => \{[\s\S]*?commitExplicitTabInteraction\(\{nativeEvent: event\}\);[\s\S]*?\}\);/.test(dockviewTabRendererBody), 'Dockview tab click shares its native intent with the activation owner');
     assert.ok(dockviewTabRendererBody.includes("element.addEventListener('keydown', event => {") && dockviewTabRendererBody.includes('commitExplicitTabInteraction({focusTerminal: true});') && dockviewTabRendererBody.includes('api?.setActive?.();'), 'Dockview tab Enter/Space activation commits an explicit interaction before setting the active panel');
     assert.ok(/if \(isTmuxSession\(panelItem\) && userInitiated && typeof focusTerminalFromUserAction === 'function'\)/.test(appSource), 'every explicit Dockview activation focuses tmux input even after pending-gesture expiry');
     const dockviewCommitStart = appSource.indexOf('function dockviewCommitPanelActivation(');
@@ -1943,11 +2032,12 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(dockviewCommitBody.includes('const focusOptions = isTmuxSession(panelItem) && userInitiated')
       && dockviewCommitBody.includes('acknowledgeAgentWindow: false')
       && dockviewCommitBody.includes('acknowledgePromptAttention: false')
-      && dockviewCommitBody.includes('setFocusedPanelItem(panelItem, {...options, userInitiated})')
-      && dockviewCommitBody.includes('focusTerminalFromUserAction(panelItem, 25, {...focusOptions, userInitiated: true})'), 'Dockview focus reuses the already-acknowledged click and does not acknowledge terminal attention twice');
-    assert.ok(/function activatePaneTab\([^]*?noteFileExplorerChangesSessionInteraction\(session\)/.test(appSource), 'clicking a tmux pane tab commits the Finder Modified-files target');
+      && dockviewCommitBody.includes('else setFocusedPanelItem(panelItem, {...options, userInitiated, deferSideSync: userInitiated})')
+      && dockviewCommitBody.includes('commitUserTerminalTabActivation(panelItem, focusOptions, generation)'), 'Dockview focus reuses the already-acknowledged click through the shared activation owner');
+    const paneActivationBody = appSource.slice(appSource.indexOf('function activatePaneTab('), appSource.indexOf('async function selectSession('));
+    assert.ok(paneActivationBody.includes('commitUserTerminalTabActivation(session, focusOptions, generation)'), 'clicking a tmux pane tab routes through the shared deferred Finder owner');
     assert.ok(/function activatePaneTab\([^]*?isFileEditorItem\(session\)[^]*?changedFileOwnerSessionForPath\(path, \{owners\}\)[^]*?owners\.length === 1[^]*?noteFileExplorerChangesSessionInteraction\(owner\)/.test(appSource), 'clicking a file tab commits an exact-path Differ owner, falling back to a single owner only');
-    const exactOwnerApi = loadYolomux('', ['1', '2', '5']);
+    const exactOwnerApi = loadYomux('', ['1', '2', '5']);
     const exactPath = '/home/test/frontend-crates/tests/parity/toolcalling/table.py';
     const similarPath = '/home/test/frontend-crates/conformance/utils/tests/parity/toolcalling/table.py';
     const exactItem = exactOwnerApi.fileEditorItemFor(exactPath);
@@ -1991,7 +2081,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*scheduleFileExplorerActiveTabSync\(session, \{explicit: true\}\);[\s\S]*if \(itemInLayout\(tabberItemId\) && focusedPanelItem === tabberItemId\)/.test(appSource), 'Finder session switches sync the root from tmux metadata before choosing the lightweight Tabber or session-files path');
     assert.ok(/sessionFilesCacheForDestination\(destination\)\.set\(sessionFilesCacheKey\(session, destination\), \{payload: nextPayload, signature\}\)/.test(appSource), 'each destination stores payloads under the same comparison-aware key it reads');
     assert.ok(/function applySessionFilesPayloadFromPush\([\s\S]*sessionFilesDestinationsForRequest\(request, session\)/.test(appSource), 'SSE session-files payloads route only to Finder or Differ records whose current request matches');
-    const stalePushApi = loadYolomux('', ['1']);
+    const stalePushApi = loadYomux('', ['1']);
     stalePushApi.setFileExplorerModeForTest('diff');
     stalePushApi.setFileExplorerChangesSelectedSessionForTest('1');
     stalePushApi.setDiffRefsByRepoForTest('/home/test/vllm-0.22.0', {from: '0b3ba88', to: 'current'});
@@ -2016,55 +2106,59 @@ async function runCrossSurfaceStateSuite() {
     ), true, 'the worktree push updates Finder even while Differ uses historical refs');
     assert.equal(stalePushApi.sessionFilesPayloadForTest().repos[0].added, 270, 'Finder worktree push leaves the visible historical Differ payload intact');
     assert.equal(stalePushApi.finderSessionFilesPayloadForTest().repos[0].added, 0, 'Finder receives the matching worktree payload');
-    const rootlessDifferApi = loadYolomux('', ['8002']);
-    const yolomuxRepo = '/home/keivenc/yolomux.dev8002';
+    const rootlessDifferApi = loadYomux('', ['8002']);
+    const yomuxRepo = '/home/keivenc/yolomux.dev8002';
     rootlessDifferApi.setFileExplorerModeForTest('diff');
+    const rootlessSlots = rootlessDifferApi.emptyLayoutSlots();
+    rootlessSlots.left = rootlessDifferApi.paneStateWithTabs([rootlessDifferApi.finderItemId, rootlessDifferApi.differItemId], rootlessDifferApi.differItemId);
+    rootlessDifferApi.setLayoutSlotsForTest(rootlessSlots);
+    rootlessDifferApi.activatePaneTab('left', rootlessDifferApi.differItemId);
     rootlessDifferApi.setFileExplorerChangesSelectedSessionForTest('8002');
     rootlessDifferApi.setFileExplorerSessionFilesPayloadForTest({
       session: '8002',
       loaded: true,
-      files: [{session: '8002', repo: yolomuxRepo, path: 'docs/DONE.md', abs_path: `${yolomuxRepo}/docs/DONE.md`, status: 'M'}],
-      repos: [{repo: yolomuxRepo, count: 1, touched_count: 1, added: 4, removed: 0}],
+      files: [{session: '8002', repo: yomuxRepo, path: 'docs/DONE.md', abs_path: `${yomuxRepo}/docs/DONE.md`, status: 'M'}],
+      repos: [{repo: yomuxRepo, count: 1, touched_count: 1, added: 4, removed: 0}],
       errors: [],
     });
     assert.equal(rootlessDifferApi.applySessionFilesPayloadFromPushForTest(
       {session: '8002', loaded: true, files: [], repos: [], errors: []},
       {session: '8002', hours: 24, from_ref: 'HEAD', to_ref: 'current'},
     ), true, 'rootless worktree push can update Finder without blanking a loaded same-session Differ repo');
-    assert.equal(rootlessDifferApi.sessionFilesPayloadForTest().repos[0].repo, yolomuxRepo, 'rootless Finder push leaves the yolomux.dev8002 Differ repo visible');
+    assert.equal(rootlessDifferApi.sessionFilesPayloadForTest().repos[0].repo, yomuxRepo, 'rootless Finder push leaves the yolomux.dev8002 Differ repo visible');
     assert.equal(rootlessDifferApi.applySessionFilesPayloadFromPushForTest(
-      {session: '8002', loaded: true, refreshing: true, files: [], repos: [{repo: yolomuxRepo, count: 0, touched_count: 0, added: 0, removed: 0}], errors: []},
+      {session: '8002', loaded: true, refreshing: true, files: [], repos: [{repo: yomuxRepo, count: 0, touched_count: 0, added: 0, removed: 0}], errors: []},
       {session: '8002', hours: 24, from_ref: 'HEAD', to_ref: 'current'},
     ), true, 'local-refresh worktree placeholder can update Finder without replacing a loaded same-session Differ repo');
     assert.equal(rootlessDifferApi.sessionFilesPayloadForTest().repos[0].added, 4, 'Finder local-refresh placeholder leaves the visible Differ payload intact');
     assert.equal(rootlessDifferApi.sessionFilesPanelIsLoadingForTest(
-      {session: '8002', loaded: true, refreshing: true, files: [], repos: [{repo: yolomuxRepo, count: 0, touched_count: 0, added: 0, removed: 0}], errors: []},
+      {session: '8002', loaded: true, refreshing: true, files: [], repos: [{repo: yomuxRepo, count: 0, touched_count: 0, added: 0, removed: 0}], errors: []},
     ), true, 'a rooted local-refresh placeholder renders as loading instead of a completed zero-diff result');
     assert.equal(rootlessDifferApi.applySessionFilesPayloadFromPushForTest(
-      {session: '8002', loaded: true, files: [], repos: [{repo: yolomuxRepo, count: 0, touched_count: 0, added: 0, removed: 0}], errors: []},
+      {session: '8002', loaded: true, files: [], repos: [{repo: yomuxRepo, count: 0, touched_count: 0, added: 0, removed: 0}], errors: []},
       {session: '8002', hours: 24, from_ref: 'HEAD', to_ref: 'current'},
     ), true, 'clean session-files push with the live repo root still clears Differ rows');
     assert.equal(rootlessDifferApi.sessionFilesPayloadForTest().repos[0].count, 0, 'clean rooted payload replaces the previous dirty count');
-    const staleRefApi = loadYolomux('', ['8002']);
+    const staleRefApi = loadYomux('', ['8002']);
     staleRefApi.setFileExplorerModeForTest('diff');
     staleRefApi.setFileExplorerChangesSelectedSessionForTest('8002');
     staleRefApi.setFileExplorerSessionFilesPayloadForTest({
       session: '8002',
       loaded: true,
-      files: [{session: '8002', repo: yolomuxRepo, path: 'docs/DONE.md', abs_path: `${yolomuxRepo}/docs/DONE.md`, status: 'M'}],
-      repos: [{repo: yolomuxRepo, count: 1, touched_count: 1, added: 4, removed: 0}],
+      files: [{session: '8002', repo: yomuxRepo, path: 'docs/DONE.md', abs_path: `${yomuxRepo}/docs/DONE.md`, status: 'M'}],
+      repos: [{repo: yomuxRepo, count: 1, touched_count: 1, added: 4, removed: 0}],
       errors: [],
     });
     staleRefApi.setDiffRefsByRepoForTest('/home/keivenc/yolomux.dev2', {from: 'HEAD', to: 'current'});
     staleRefApi.setDiffRefsByRepoForTest('/home/keivenc/dynamo/vllm-0.22.0', {from: '0b3ba88f165976e77ca5e6a7a3f5bba4562b80af', to: 'current'});
     staleRefApi.setDiffRefsByRepoForTest('/home/keivenc/dynamo/dynamo-utils.dev', {from: 'bc81c855a74be44b19941546d624bfb647f48055', to: 'current'});
-    staleRefApi.setDiffRefsByRepoForTest(yolomuxRepo, {from: 'HEAD', to: 'current'});
+    staleRefApi.setDiffRefsByRepoForTest(yomuxRepo, {from: 'HEAD', to: 'current'});
     assert.equal(staleRefApi.sessionFilesCacheKeyForTest('8002').includes('&refs='), false, 'session-files requests omit stale repo refs and global-equivalent HEAD/current overrides');
-    staleRefApi.setDiffRefsByRepoForTest(yolomuxRepo, {from: 'abc1234', to: 'current'});
+    staleRefApi.setDiffRefsByRepoForTest(yomuxRepo, {from: 'abc1234', to: 'current'});
     const sessionFilesQuery = staleRefApi.sessionFilesCacheKeyForTest('8002').split('\x1f')[1];
     const sessionFilesRefs = JSON.parse(new URLSearchParams(sessionFilesQuery).get('refs'));
-    assert.deepStrictEqual(Object.keys(sessionFilesRefs), [yolomuxRepo], 'session-files requests keep only the current Differ repo override');
-    assert.deepStrictEqual(sessionFilesRefs[yolomuxRepo], {from: 'abc1234', to: 'current'}, 'the current repo override remains intact');
+    assert.deepStrictEqual(Object.keys(sessionFilesRefs), [yomuxRepo], 'session-files requests keep only the current Differ repo override');
+    assert.deepStrictEqual(sessionFilesRefs[yomuxRepo], {from: 'abc1234', to: 'current'}, 'the current repo override remains intact');
     assert.ok(/function sessionFilesPayloadIsFinderWorktree\([\s\S]*from_ref \|\| 'HEAD'[\s\S]*to_ref \|\| 'current'/.test(appSource), 'Finder file mode can preserve an already-loaded HEAD/current payload for sync planning');
     assert.ok(/function sessionFilesPayloadShouldPreserveCurrent\([\s\S]*sessionFilesPayloadIsRootlessEmpty\(nextPayload\)[\s\S]*sessionFilesRepoRoots\(current\)\.length > 0/.test(appSource), 'Differ ignores rootless empty session-files pushes after a rooted payload is already visible');
     assert.ok(/function sessionFilesPayloadShouldPreserveCurrent\([\s\S]*sessionFilesPayloadIsRefreshing\(nextPayload\)[\s\S]*sessionFilesRepoRoots\(current\)\.length > 0/.test(appSource), 'Differ ignores local-refresh placeholders after a rooted payload is already visible');
@@ -2125,7 +2219,7 @@ async function runCrossSurfaceStateSuite() {
   });
 
   test('platform-specific Finder controls and fresh layout URLs retain their independent defaults', () => {
-  const macApi = loadYolomux('', ['1'], 'http:', 'MacIntel');
+  const macApi = loadYomux('', ['1'], 'http:', 'MacIntel');
   assert.equal(macApi.fileExplorerLabel(), 'Finder');
   assert.equal(macApi.platformWindowControlClass('minimize'), 'pc-window-control pc-minimize');
   assert.equal(macApi.platformWindowControlClass('close'), 'pc-window-control pc-close');
@@ -2150,20 +2244,20 @@ async function runCrossSurfaceStateSuite() {
   assert.ok(macFinderFields.includes('File Explorer'), 'Finder tab also indexes the File Explorer alias');
   assert.equal(macApi.commandPaletteMatches({group: 'Tabs', label: 'Finder', detail: '', searchFields: macFinderFields}, 'File Explorer'), true, 'typing File Explorer finds the Finder command palette row');
 
-  const forcedPcApi = loadYolomux('?platform=pc', ['1'], 'http:', 'MacIntel');
+  const forcedPcApi = loadYomux('?platform=pc', ['1'], 'http:', 'MacIntel');
   assert.equal(forcedPcApi.fileExplorerLabel(), 'File Explorer');
   assert.ok(forcedPcApi.tabSearchFields(forcedPcApi.fileExplorerItemId).includes('Finder'), 'File Explorer tab also indexes the Finder alias');
   assert.equal(forcedPcApi.platformWindowControlClass('close'), 'pc-window-control pc-close');
   assert.equal(forcedPcApi.fileExplorerPanelCloseClass(), 'file-explorer-panel-close pc-window-control pc-close');
   assert.equal(forcedPcApi.fileEditorPanelCloseClass(), 'file-editor-panel-close pc-window-control pc-close');
 
-  const forcedMacApi = loadYolomux('?platform=mac', ['1'], 'http:', 'Linux x86_64');
+  const forcedMacApi = loadYomux('?platform=mac', ['1'], 'http:', 'Linux x86_64');
   assert.equal(forcedMacApi.fileExplorerLabel(), 'Finder');
   assert.equal(forcedMacApi.platformWindowControlClass('close'), 'pc-window-control pc-close');
   assert.equal(forcedMacApi.fileExplorerPanelCloseClass(), 'file-explorer-panel-close pc-window-control pc-close');
   assert.equal(forcedMacApi.fileEditorPanelCloseClass(), 'file-editor-panel-close pc-window-control pc-close');
 
-  const watchApi = loadYolomux('', ['1']);
+  const watchApi = loadYomux('', ['1']);
   const visiblePath = '/repo/README.md';
   const backgroundPath = '/repo/NOTES.md';
   const visibleItem = watchApi.registerFileEditorLayoutItem(visiblePath);
@@ -2189,7 +2283,7 @@ async function runCrossSurfaceStateSuite() {
     roots: [], root_surfaces_version: 1, root_surfaces: [], files: [], background_files: [], context_items: [], activity_summary: {visible: false}, session_files: [],
   }, 'hidden documents unregister every pane watch and producer request');
 
-  const transcriptWatchApi = loadYolomux('', ['1', '2']);
+  const transcriptWatchApi = loadYomux('', ['1', '2']);
   const transcriptWatchSlots = transcriptWatchApi.emptyLayoutSlots();
   transcriptWatchSlots[transcriptWatchApi.layoutTreeKey] = transcriptWatchApi.splitNode('row', transcriptWatchApi.leafNode('left'), transcriptWatchApi.leafNode('right'));
   transcriptWatchSlots.left = transcriptWatchApi.paneStateWithTabs(['1'], '1');
@@ -2201,10 +2295,10 @@ async function runCrossSurfaceStateSuite() {
   transcriptWatchApi.activateTerminalDetailTabForTest('1', 'terminal');
   assert.deepStrictEqual(canonical(transcriptWatchApi.clientServerWatchStateForTest().context_items), [], 'leaving the transcript pane removes the context subscription');
 
-  const selfHealingFinderUrlApi = loadYolomux('?sessions=1&layout=left&tabs=left:1,2,3,4,5,6,ant', ['1', '2', '3', '4', '5', '6', 'ant']);
+  const selfHealingFinderUrlApi = loadYomux('?sessions=1&layout=left&tabs=left:1,2,3,4,5,6,ant', ['1', '2', '3', '4', '5', '6', 'ant']);
   assert.deepStrictEqual([selfHealingFinderUrlApi.finderItemId, selfHealingFinderUrlApi.differItemId, selfHealingFinderUrlApi.tabberItemId].map(item => selfHealingFinderUrlApi.itemInLayout(item)), [false, false, false], 'an explicit file-surface-less URL remains authoritative');
   assert.deepStrictEqual(Array.from(selfHealingFinderUrlApi.layoutSlotKeys(selfHealingFinderUrlApi.currentSlots())), ['left']);
-  const singlePaneUrlApi = loadYolomux(
+  const singlePaneUrlApi = loadYomux(
     '?sessions=1&layout=left&tabs=left:1,2,3,4,5,6,ant',
     ['1', '2', '3', '4', '5', '6', 'ant'],
     'http:',
@@ -2217,7 +2311,7 @@ async function runCrossSurfaceStateSuite() {
   assert.equal(singlePaneUrlApi.canPaneExpand('1'), false);
   assert.ok(/data-pane-expand="1"[^>]* hidden/.test(singlePaneUrlApi.panelControlsHtml('1')));
 
-  const staleFinderWidthUrlApi = loadYolomux(
+  const staleFinderWidthUrlApi = loadYomux(
     '?sessions=1,2&layout=row@22(left,slot1)&tabs=left:1;slot1:2',
     ['1', '2'],
     'http:',
@@ -2234,7 +2328,7 @@ async function runCrossSurfaceStateSuite() {
   }, 'explicit generic pane roles preserve their serialized 22% split');
   assert.equal(staleFinderWidthUrlApi.layoutParamValue(staleFinderWidthUrlApi.currentSlots()), 'row@22(left,slot1)');
 
-  const finderBesideSinglePaneUrlApi = loadYolomux(
+  const finderBesideSinglePaneUrlApi = loadYomux(
     '?sessions=files,3&layout=row@22(slot1,left)&tabs=slot1:files;left:1,6,5,2,ant,4,3*',
     ['1', '2', '3', '4', '5', '6', 'ant'],
   );
@@ -2246,12 +2340,12 @@ async function runCrossSurfaceStateSuite() {
   assert.equal(finderBesideSinglePaneUrlApi.canPaneExpand('3'), false);
   assert.ok(/data-pane-expand="3"[^>]* hidden/.test(finderBesideSinglePaneUrlApi.panelControlsHtml('3')));
 
-  const defaultFinderApi = loadYolomux('', ['1', '2']);
+  const defaultFinderApi = loadYomux('', ['1', '2']);
   assert.equal(defaultFinderApi.itemInLayout(defaultFinderApi.finderItemId), true, 'param-less boot includes Finder');
   assert.equal(defaultFinderApi.itemInLayout(defaultFinderApi.differItemId), true, 'param-less boot includes Differ');
   assert.equal(defaultFinderApi.itemInLayout(defaultFinderApi.tabberItemId), true, 'param-less boot includes Tabber');
   assert.equal(defaultFinderApi.itemInLayout(defaultFinderApi.finderItemId, defaultFinderApi.defaultLayoutSlots()), true, 'defaultLayoutSlots includes the file-surface home');
-  const sessionsOnlyFinderApi = loadYolomux('?sessions=1', ['1', '2']);
+  const sessionsOnlyFinderApi = loadYomux('?sessions=1', ['1', '2']);
   assert.equal(sessionsOnlyFinderApi.itemInLayout(sessionsOnlyFinderApi.finderItemId), true, 'sessions-only boot includes Finder');
   assert.equal(sessionsOnlyFinderApi.itemInLayout(sessionsOnlyFinderApi.differItemId), true, 'sessions-only boot includes Differ');
   assert.equal(sessionsOnlyFinderApi.itemInLayout(sessionsOnlyFinderApi.tabberItemId), true, 'sessions-only boot includes Tabber');
@@ -2296,7 +2390,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(shortcutEvent.prevented, false, 'Cmd/Ctrl-B is not stolen while editor focus owns text formatting');
     assert.deepStrictEqual([api.finderItemId, api.differItemId, api.tabberItemId].map(item => api.itemInLayout(item)), [true, true, true], 'blocked Cmd/Ctrl-B does not hide the triplet from editor focus');
     api.setDocumentActiveElementForTest(null);
-    const macFinderShortcutApi = loadYolomux('?platform=mac', ['1'], 'http:', 'MacIntel');
+    const macFinderShortcutApi = loadYomux('?platform=mac', ['1'], 'http:', 'MacIntel');
     const macTerminalTarget = macFinderShortcutApi.testElementForId('mac-shortcut-xterm');
     macTerminalTarget.className = 'xterm';
     macFinderShortcutApi.setDocumentActiveElementForTest(macTerminalTarget);
@@ -3224,7 +3318,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(coreSource.includes("const APP_VIEWPORT_CHANGE_EVENT = 'yomux:app-viewport-change'"), 'one shared event owns downstream normal-mode viewport work');
     assert.ok(/function nativeUsableViewportHeight\([\s\S]*visualViewport\.scale[\s\S]*viewport\.height - visualHeight > KEYBOARD_MIN_REDUCTION_PX/.test(coreSource), 'visual viewport contributes only unzoomed usable height (large-reduction threshold)');
     assert.ok(/function installNativeAppViewportOwner\([\s\S]*visualViewport\?\.addEventListener\?\.\('resize'[\s\S]*visualViewport\?\.addEventListener\?\.\('scroll'[\s\S]*document\.addEventListener\('visibilitychange'[\s\S]*window\.addEventListener\('pageshow'/.test(coreSource), 'one owner remeasures visual-viewport geometry when a backgrounded tab returns');
-    const diagnosticsApi = loadYolomux('?debug=1', ['1']);
+    const diagnosticsApi = loadYomux('?debug=1', ['1']);
     diagnosticsApi.setNativeViewportForTest({width: 1366, height: 1024, visualHeight: 944, scale: 1});
     diagnostics = diagnosticsApi.viewportDiagnosticsSnapshotForTest();
     assert.deepEqual(canonical(diagnostics.layout), {width: 1366, height: 1024, w: 1366, h: 1024}, 'viewport diagnostics retain raw layout geometry');
@@ -3232,7 +3326,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(diagnostics.reduction, 80, 'viewport diagnostics expose the toolbar-sized reduction instead of hiding it behind the keyboard classifier');
     assert.equal(diagnostics.keyboardCandidate, false, 'viewport diagnostics distinguish the toolbar-sized reduction from a keyboard candidate');
     assert.ok(diagnosticsApi.viewportDiagnosticsTextForTest(diagnostics).includes('delta 80px · keyboard no (>140px)'), 'the temporary iPad overlay states the exact threshold decision');
-    const mobileApi = loadYolomux('', ['old', 'recent', 'newest', 'older', 'created'], 'http:', 'iPhone', 'admin', {
+    const mobileApi = loadYomux('', ['old', 'recent', 'newest', 'older', 'created'], 'http:', 'iPhone', 'admin', {
       coarsePointer: true,
       viewport: {width: 390, height: 844},
       bootstrapOverrides: {recentSessions: ['newest', 'recent', 'old', 'older']},
@@ -3259,7 +3353,7 @@ async function runCrossSurfaceStateSuite() {
     const mobileLayoutMenu = mobileViewMenu.items.find(item => item.type === 'submenu' && item.label === mobileApi.t('menu.view.layout'));
     assert.ok(mobileLayoutMenu, 'mobile keeps View > Layout visible so the one-column policy is explained rather than silently hiding split controls');
     assert.ok(mobileLayoutMenu.items.every(item => item.disabled === true && item.detail === mobileApi.t('menu.view.layout.narrow.detail')), 'mobile disables every layout command with the shared localized width hint');
-    const mobileRestoredApi = loadYolomux(
+    const mobileRestoredApi = loadYomux(
       '?sessions=old,recent,newest&layout=row@50(left,right)&tabs=left:old,recent;right:newest*',
       ['old', 'recent', 'newest'],
       'http:',
@@ -3271,7 +3365,7 @@ async function runCrossSurfaceStateSuite() {
       __tree: {slot: 'left'},
       left: {active: 'newest', tabs: ['old', 'recent', 'newest']},
     }, 'a desktop URL collapses through the shared phone owner without losing its restored active tab');
-    const desktopRestoredApi = loadYolomux(
+    const desktopRestoredApi = loadYomux(
       '?sessions=old,recent,newest&layout=row@50(left,right)&tabs=left:old,recent;right:newest*',
       ['old', 'recent', 'newest'],
       'http:',
@@ -3408,7 +3502,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(shellLaunchRow.separator, false, 'Shell choices omit visual separators to avoid wasting menu width');
     assert.deepEqual(shellLaunchRow.items.map(item => item.label), ['bash', 'tsh', 'zsh'], 'Shell commands are explicit and alphabetically sorted');
     assert.ok(shellLaunchRow.iconHtml.includes('app-menu-ui-icon-shell'), 'Shell uses the shared shell icon as a non-clickable row label');
-    const normalServerApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {dangerouslyYolo: false});
+    const normalServerApi = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {dangerouslyYolo: false});
     const normalServerFile = normalServerApi.appMenuTree().find(menu => menu.id === 'file');
     assert.equal(normalServerFile.items.some(item => item.type === 'command-pair'), false, 'normal servers do not expose dangerous-auto-approve agent launch controls');
     assert.ok(normalServerFile.items.some(item => item.type === 'command' && item.label === 'new Claude'), 'normal servers retain the ordinary Claude launch');
@@ -3532,7 +3626,7 @@ async function runCrossSurfaceStateSuite() {
     }
     const finderMenuItem = fileMenu.items.find(candidate => candidate.label === tripletLabel);
     assert.equal(finderMenuItem.detail, api.t('menu.file.browseFiles'), 'wide File navigation explains the one-line triplet command');
-    const macFileMenuApi = loadYolomux('?platform=mac', ['1'], 'http:', 'MacIntel');
+    const macFileMenuApi = loadYomux('?platform=mac', ['1'], 'http:', 'MacIntel');
     const macFinderMenuItem = macFileMenuApi.appMenuTree().find(menu => menu.id === 'file')?.items.find(candidate => candidate.label === macFileMenuApi.t('yoagent.capability.finderDifferTabber.name'));
     assert.equal(macFinderMenuItem?.detail, macFileMenuApi.t('menu.file.browseFiles'), 'wide File navigation keeps the same compact triplet detail on Mac');
     assert.ok(fileMenu.items.find(candidate => candidate.label === 'YO!agent').iconHtml.includes('app-menu-ui-icon-robot'));
@@ -3642,7 +3736,7 @@ async function runCrossSurfaceStateSuite() {
     const yoloTabsMenu = api.appMenuTree().find(menu => menu.id === 'tabs');
     assert.equal(yoloTabsMenu.badgeText, undefined, 'Tabs does not render a running-YOLO circle while work is active');
     assert.equal(yoloTabsMenu.badgeTitle, undefined, 'Tabs does not retain a circle tooltip while work is active');
-    const fallbackTerminalApi = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+    const fallbackTerminalApi = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
       bootstrapOverrides: {availableAgents: ['term'], terminalCommands: []},
     });
     const fallbackFileMenu = fallbackTerminalApi.appMenuTree().find(menu => menu.id === 'file');
@@ -3668,7 +3762,7 @@ async function runCrossSurfaceStateSuite() {
     api.setFocusedPanelItem('2');
     api.setFocusedPanelItem(api.finderItemId);
     assert.equal(api.currentSessionActionTarget(), '2');
-    const explicitFocusApi = loadYolomux('', ['1', '2']);
+    const explicitFocusApi = loadYomux('', ['1', '2']);
     const explicitFocusSlots = explicitFocusApi.emptyLayoutSlots();
     explicitFocusSlots[explicitFocusApi.layoutTreeKey] = explicitFocusApi.splitNode('row', explicitFocusApi.leafNode('left'), explicitFocusApi.leafNode('right'), 50);
     explicitFocusSlots.left = explicitFocusApi.paneStateWithTabs(['1'], '1');
@@ -3734,7 +3828,7 @@ async function runCrossSurfaceStateSuite() {
     const userFocusEnd = source.indexOf('function setFocusedPanelItem(', userFocusStart);
     const userFocusBody = source.slice(userFocusStart, userFocusEnd);
     assert.ok(userFocusBody.includes('const explicitFinderSync = isTmuxSession(item) || isFileEditorItem(item);'), 'explicit Finder sync is driven by clicked tmux panes and clicked editors');
-    assert.ok(userFocusBody.includes('if (!isFileExplorerItem(item)) scheduleFileExplorerActiveTabSync(item, {explicit: explicitFinderSync});'));
+    assert.ok(userFocusBody.includes('if (!isFileExplorerItem(item) && options.deferSideSync !== true) scheduleFileExplorerActiveTabSync(item, {explicit: explicitFinderSync});'), 'tab activation can defer terminal-side sync without removing explicit editor sync');
     assert.ok(source.slice(focusStart, focusEnd).includes('applyUserInitiatedPanelFocus(item, previousItem, options);'), 'new and already-focused interactions share one user-focus side-effect owner');
     const finderSyncStart = source.indexOf('function scheduleFileExplorerActiveTabSync(');
     const finderSyncEnd = source.indexOf('function cancelPendingFileExplorerActiveSync(', finderSyncStart);
@@ -3744,7 +3838,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/const syncItem = fileSyncPath \? preferredItem : \(isTmuxSession\(preferredItem\) \? preferredItem : explicitSession\);[\s\S]*if \(!syncItem \|\| \(!fileSyncPath && syncItem !== explicitSession\)\) return/.test(finderSyncBody), 'Finder Sync accepts clicked editor files without requiring a tmux target');
     assert.ok(finderSyncBody.includes('fileExplorerSyncPlanForFile(fileSyncPath)'), 'Finder Sync can plan from an explicit editor file');
     assert.ok(finderSyncBody.includes('syncFileExplorerRootToActiveFile(fileSyncPath, {force: explicit})'), 'Finder Sync can move the root to a clicked editor file and explicit sync forces a re-apply');
-    assert.ok(/const rootEntries = await fetchDirectory\(normalizedRoot, \{force: true, user: options\.force === true\}\)[\s\S]*fetchFileExplorerSyncListings\([\s\S]*listingDirectories,[\s\S]*\{force: true, user: options\.force === true\}[\s\S]*fetchedListings/.test(source), 'cold sync-driven Finder paints one fast root before bounded qualified descendants without entering the destructive root-open owner');
+    assert.ok(/const rootEntries = await fetchDirectory\(normalizedRoot, \{force: true, user: options\.force === true\}\)[\s\S]*fetchFileExplorerSyncListings\([\s\S]*listingDirectories,[\s\S]*\{force: true, user: options\.force === true, isCurrent\}[\s\S]*fetchedListings/.test(source), 'cold sync-driven Finder paints one fast root before bounded current-transaction descendants without entering the destructive root-open owner');
     assert.ok(finderSyncBody.includes('(explicit || !fileExplorerSyncPlanAlreadyApplied(syncPlan))'), '#automatic Finder Sync skips a repeated already-applied plan');
     const openFileExplorerAtStart = source.indexOf('async function openFileExplorerAt(');
     const openFileExplorerAtEnd = source.indexOf('function resetFileExplorerAppliedSyncPlan(', openFileExplorerAtStart);
@@ -3904,7 +3998,7 @@ async function runCrossSurfaceStateSuite() {
     terminalUrlLabels = Array.from(terminalUrlMenu.children).map(child => child.textContent).filter(Boolean);
     assert.deepStrictEqual(canonical(terminalUrlLabels), ['Open URL in a new tab', 'Copy URL', 'Copy selected text', 'Copy tmux selection', 'Copy without indent'], 'terminal URL menu labels the selected-text copy path explicitly when the visible text differs from the href');
     assert.ok(/function appendUrlContextMenuItems\(menu, href, closeMenu, options = \{\}\)[\s\S]*appendContextMenuButton\(menu, localizedLabel\('contextmenu\.openUrl'[\s\S]*action\('open-url'[\s\S]*appendContextMenuButton\(menu, localizedLabel\('contextmenu\.copyUrl'[\s\S]*action\('copy-url'[\s\S]*if \(options\.includeSelectedText && selectedText && selectedText !== url\)[\s\S]*appendContextMenuButton\(menu, t\('contextmenu\.copySelectedText'\)/.test(source), 'link menus share one helper that orders Open URL before copy actions and only shows Copy selected text when the selected text differs from the href');
-    terminalCopyApi = loadYolomux('?platform=mac', ['1'], 'https:', 'MacIntel');
+    terminalCopyApi = loadYomux('?platform=mac', ['1'], 'https:', 'MacIntel');
     fetchCalls = [];
     terminalCopyApi.setFetchForTest((url, options = {}) => {
       fetchCalls.push({url: String(url), method: options.method || 'GET'});
@@ -4006,7 +4100,7 @@ async function runCrossSurfaceStateSuite() {
   });
 
   test('cross-surface host state 22: focused terminal copy guard claims Cmd-C before Claude/xterm', () => {
-    const pcPageApi = loadYolomux('', ['1'], 'https:', 'Win32');
+    const pcPageApi = loadYomux('', ['1'], 'https:', 'Win32');
     for (const [name, api] of [['Mac', terminalCopyApi], ['PC', pcPageApi]]) {
       for (const key of ['ArrowUp', 'ArrowDown']) {
         let historyPrevented = 0;
@@ -4164,7 +4258,7 @@ async function runCrossSurfaceStateSuite() {
         assert.equal(navApi.visualActivePaneItemForTest(), current.item, `${label}: stale handler returns to ${current.item}`);
       }
     };
-    const terminalNavApi = loadYolomux('?platform=mac', ['1', '2', '3'], 'https:', 'MacIntel');
+    const terminalNavApi = loadYomux('?platform=mac', ['1', '2', '3'], 'https:', 'MacIntel');
     const terminalNavEditor = terminalNavApi.fileEditorItemFor('/repo/app/README.md');
     const terminalNavSlots = terminalNavApi.emptyLayoutSlots();
     terminalNavSlots[terminalNavApi.layoutTreeKey] = terminalNavApi.splitNode(
@@ -4180,7 +4274,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(terminalNavApi.adjacentPaneTabPosition(1, {item: '1'}).item, '2', 'Meta+Right spills from the last tab in a pane to the next pane');
     assert.equal(terminalNavApi.adjacentPaneTabPosition(-1, {item: '1'}).item, terminalNavApi.fileExplorerItemId, 'Meta+Left moves within a mixed pane to the previous non-tmux tab');
     assert.equal(terminalNavApi.adjacentPaneTabPosition(1, {item: '3'}), null, 'Meta+Right stops at the last pane tab instead of wrapping back to the first visible tab');
-    const roundTripApi = loadYolomux('?platform=mac', ['1', '2', '3'], 'https:', 'MacIntel');
+    const roundTripApi = loadYomux('?platform=mac', ['1', '2', '3'], 'https:', 'MacIntel');
     const roundTripEditorA = roundTripApi.registerFileEditorLayoutItemForTest('/repo/app/README.md');
     const roundTripEditorB = roundTripApi.registerFileEditorLayoutItemForTest('/repo/app/settings.json');
     const roundTripSlots = roundTripApi.emptyLayoutSlots();
@@ -4200,7 +4294,7 @@ async function runCrossSurfaceStateSuite() {
       'Meta+Arrow traversal is the pane list expanded as Pane1 tabs, then Pane2 tabs, then Pane3 tabs',
     );
     assertPaneTabTraversalRoundTrips(roundTripApi, 'serialized pane/tab structure');
-    const staleRoundTripApi = loadYolomux('?platform=mac', ['1', '2', '3'], 'https:', 'MacIntel');
+    const staleRoundTripApi = loadYomux('?platform=mac', ['1', '2', '3'], 'https:', 'MacIntel');
     const staleRoundTripEditorA = staleRoundTripApi.registerFileEditorLayoutItemForTest('/repo/app/README.md');
     const staleRoundTripEditorB = staleRoundTripApi.registerFileEditorLayoutItemForTest('/repo/app/settings.json');
     const staleRoundTripSlots = staleRoundTripApi.emptyLayoutSlots();
@@ -4256,7 +4350,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(stopped, 1, 'focused terminal Cmd-Left stops propagation before target handlers');
     assert.equal(stoppedImmediate, 1, 'focused terminal Cmd-Left stops sibling handlers');
     assert.equal(terminalNavApi.currentSessionActionTarget(), '1', 'Mac Cmd-Left moves back to the previous visible pane tab');
-    screenshotNavApi = loadYolomux('?platform=mac', ['8001', '8002', '8003'], 'https:', 'MacIntel');
+    screenshotNavApi = loadYomux('?platform=mac', ['8001', '8002', '8003'], 'https:', 'MacIntel');
     screenshotEditor = screenshotNavApi.fileEditorItemFor('/home/keivenc/yolomux.dev2/tests/TERMINAL_INVENTORY.md');
     screenshotNavSlots = screenshotNavApi.emptyLayoutSlots();
     screenshotNavSlots[screenshotNavApi.layoutTreeKey] = screenshotNavApi.splitNode(
@@ -4317,7 +4411,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(infoBackResult, false, 'stale terminal capture handles Cmd-Left from YO!info');
     assert.equal(prevented, 1, 'stale terminal capture prevents the terminal default from YO!info');
     assert.equal(screenshotNavApi.activeItemForSide('slot3'), '8003', 'Cmd-Left from YO!info goes to 8003 instead of reselecting YO!info');
-    const noPingPongApi = loadYolomux('?platform=mac', ['8002'], 'https:', 'MacIntel');
+    const noPingPongApi = loadYomux('?platform=mac', ['8002'], 'https:', 'MacIntel');
     const noPingPongSlots = noPingPongApi.emptyLayoutSlots();
     noPingPongSlots[noPingPongApi.layoutTreeKey] = noPingPongApi.leafNode('slot1');
     noPingPongSlots.slot1 = noPingPongApi.paneStateWithTabs(['8002', noPingPongApi.prefsItemId], '8002');
@@ -4341,7 +4435,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(noPingPongApi.activeItemForSide('slot1'), noPingPongApi.prefsItemId, 'first Cmd-Right moves 8002 to Preferences');
     assert.equal(noPingPongShortcutHandler(cmdRightFrom8002), false, 'stale terminal capture still owns the repeated Cmd-Right');
     assert.equal(noPingPongApi.activeItemForSide('slot1'), noPingPongApi.prefsItemId, 'repeated Cmd-Right stops on Preferences instead of toggling back to 8002');
-    const renderedOrderApi = loadYolomux('?platform=mac', ['8001', '8002', '8003'], 'https:', 'MacIntel');
+    const renderedOrderApi = loadYomux('?platform=mac', ['8001', '8002', '8003'], 'https:', 'MacIntel');
     const renderedOrderSlots = renderedOrderApi.emptyLayoutSlots();
     renderedOrderSlots[renderedOrderApi.layoutTreeKey] = renderedOrderApi.splitNode(
       'row',
@@ -4377,7 +4471,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(renderedOrderApi.adjacentPaneTabPosition(-1, {item: '8001'}).item, '8002', 'Cmd-Left reverses rendered middle tab order');
     assert.equal(renderedOrderApi.adjacentPaneTabPosition(1, {item: '8003'}), null, 'Cmd-Right stops at the last rendered tab instead of wrapping to Finder');
     assert.equal(renderedOrderApi.adjacentPaneTabPosition(-1, {item: renderedOrderApi.fileExplorerItemId}), null, 'Cmd-Left stops at Finder instead of wrapping to the last rendered tab');
-    const finderNavApi = loadYolomux('?platform=mac', ['1', '2'], 'https:', 'MacIntel');
+    const finderNavApi = loadYomux('?platform=mac', ['1', '2'], 'https:', 'MacIntel');
     const finderNavEditor = finderNavApi.fileEditorItemFor('/repo/app/notes.md');
     const finderNavSlots = finderNavApi.emptyLayoutSlots();
     finderNavSlots[finderNavApi.layoutTreeKey] = finderNavApi.splitNode('row', finderNavApi.leafNode('left'), finderNavApi.leafNode('slot1'), 50);
@@ -4414,11 +4508,11 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(source.includes("!mod && globalShortcutTargetAllowsAppAction(event.target) && (event.key === '?'"), 'question-mark shortcut does not fire while typing in editors or terminals');
     assert.equal(api.appModifier({ctrlKey: true, metaKey: false, altKey: false}), true, 'PC app modifier is Ctrl');
     assert.equal(api.appModifier({ctrlKey: false, metaKey: true, altKey: false}), false, 'PC app modifier ignores Cmd/meta');
-    const macShortcutApi = loadYolomux('?platform=mac', ['1'], 'http:', 'MacIntel');
+    const macShortcutApi = loadYomux('?platform=mac', ['1'], 'http:', 'MacIntel');
     assert.equal(macShortcutApi.appModifier({ctrlKey: false, metaKey: true, altKey: false}), true, 'Mac app modifier is Cmd');
     assert.equal(macShortcutApi.appModifier({ctrlKey: true, metaKey: false, altKey: false}), false, 'Mac app modifier reserves Ctrl for tmux');
     assert.equal(macShortcutApi.appShortcutText('B'), '⌘+B');
-    const pcOverrideShortcutApi = loadYolomux('?platform=pc', ['1'], 'http:', 'MacIntel');
+    const pcOverrideShortcutApi = loadYomux('?platform=pc', ['1'], 'http:', 'MacIntel');
     assert.equal(pcOverrideShortcutApi.appShortcutText('B'), 'Ctrl+B', 'platform override can force PC shortcut labels');
     assert.ok(Number.isFinite(api.fuzzySubsequenceScore('xy', 'hello X and blah Y')), 'fuzzy matcher allows ordered gaps');
     assert.equal(Number.isFinite(api.fuzzySubsequenceScore('xz', 'hello X and blah Y')), false, 'fuzzy matcher rejects missing characters');
@@ -4637,7 +4731,7 @@ async function runCrossSurfaceStateSuite() {
   });
 
   test('quick-open ranks local numbered DOIT files over fuzzy indexed paths', () => {
-  const doitApi = loadYolomux('', ['1']);
+  const doitApi = loadYomux('', ['1']);
   doitApi.setFileQuickOpenCandidatesForTest('/repo/yolomux', [
     {name: 'websocket.py', path: '/repo/yolomux/yomux_lib/websocket.py', relative_path: 'yomux_lib/websocket.py', kind: 'file'},
     {name: 'DOIT.53.md', path: '/repo/yolomux/DOIT.53.md', relative_path: 'DOIT.53.md', kind: 'file'},
@@ -4669,7 +4763,7 @@ async function runCrossSurfaceStateSuite() {
   assert.equal(exactDoitRows.some(item => item.label === 'report.html'), false, 'S15: external indexed full-path-only fuzzy noise is hidden for dotted filename queries');
   });
   test('external indexed search cannot assemble a filename match across unrelated path segments', () => {
-  const indexedApi = loadYolomux('', ['1']);
+  const indexedApi = loadYomux('', ['1']);
   const indexedRoot = '/Users/test/Library/Mobile Documents/com~apple~CloudDocs/ChangDerFamily';
   const scatteredPath = `${indexedRoot}/c/o/n/s/u/m/e/r-/l/a/w/s/Unit-2-Test-Attempt-review.pdf`;
   assert.ok(indexedApi.fuzzySubsequenceMatch('consumer-laws', scatteredPath), 'the generic fuzzy matcher reproduces the scattered full-path false positive');
@@ -4684,7 +4778,7 @@ async function runCrossSurfaceStateSuite() {
   assert.ok(html.includes(`class="command-palette-group" title="Indexed ${indexedRoot}"`), 'the clipped indexed-root group preserves its full path as a hover title');
   });
   test('quick-open restricts DOIT family search to sibling YOmux worktrees', () => {
-  const doitFamilyApi = loadYolomux('', ['1']);
+  const doitFamilyApi = loadYomux('', ['1']);
   assert.deepStrictEqual(canonical(doitFamilyApi.fileQuickOpenExtraRootsForSearchQuery('DOIT')), ['/home/test'], 'DOIT queries search the current YOmux workdir family parent');
   doitFamilyApi.setFileQuickOpenCandidatesForTest('/home/test/yolomux.dev3', [
     {name: 'DOIT.64.md', path: '/home/test/yolomux.dev1/DOIT.64.md', relative_path: 'yolomux.dev1/DOIT.64.md', indexed_root: '/home/test', kind: 'file'},
@@ -4750,7 +4844,7 @@ async function runCrossSurfaceStateSuite() {
     api.setTranscriptInfoForTest('1', {project: {git: {root: '/repo/workspace'}}, selected_pane: {current_path: '/repo/workspace/src'}});
     api.setFocusedPanelItem('1');
     assert.equal(api.fileQuickOpenRootForSearch(), '/repo/workspace', 'file quick-open searches the workspace root when tmux is inside a repo');
-    fileRootApi = loadYolomux('', ['1']);
+    fileRootApi = loadYomux('', ['1']);
     fileRootApi.setTranscriptInfoForTest('1', {project: {git: {root: '/repo/workspace'}}, selected_pane: {current_path: '/repo/workspace/src'}});
     fileRootApi.setFocusedPanelItem('1');
     const activeMdPath = '/home/test/yolomux.dev/DOIT.54.md';
@@ -4767,7 +4861,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(api.fileExplorerDirectoryIsIndexed('/repo/tools/src'), false, 'Finder compacts redundant child index marks under an indexed ancestor');
     assert.deepStrictEqual(canonical(api.fileQuickOpenRootsForSearch('/repo/workspace')), ['/repo/workspace', '/repo/other', '/repo/tools'], 'file quick-open adds indexed Finder directories and compacts nested search roots');
     assert.equal(api.fileQuickOpenScopeLabel('/repo/workspace'), '/repo/workspace + 2 indexed roots', 'file quick-open placeholder summarizes indexed search scope with the plural locale family');
-    const localizedScopeApi = loadYolomux('', ['1']);
+    const localizedScopeApi = loadYomux('', ['1']);
     localizedScopeApi.i18nSetCatalogForTest('fr', {
       'palette.scope.indexedRoot.one': '{path} + {count} racine indexée',
       'palette.scope.indexedRoot.other': '{path} + {count} racines indexées',
@@ -4789,7 +4883,7 @@ async function runCrossSurfaceStateSuite() {
   });
 
   test('quick-open does not claim a warming indexed search has no matches', () => {
-    const warmingApi = loadYolomux('', ['1']);
+    const warmingApi = loadYomux('', ['1']);
     warmingApi.setFileExplorerIndexedDirsForTest(['/home/test/dynamo']);
     warmingApi.setCommandPaletteQueryForTest('2026.md');
     const warming = warmingApi.fileQuickOpenSearchPayloadResultForTest({
@@ -4825,7 +4919,7 @@ async function runCrossSurfaceStateSuite() {
     assert.deepStrictEqual(canonical(api.fileQuickOpenExtraRootsForSearchQuery('yolo/TODO.md')), ['/home/test/yolomux.dev'], 'bare yolo/... queries add the app repo root without adding all of home');
     assert.deepStrictEqual(canonical(api.fileQuickOpenRootsForSearch('/home/test', 'yolo/TODO.md')), ['/home/test/dynamo', '/home/test/yolomux.dev'], 'yolo/TODO.md searches the YOmux checkout even when home is narrowed to indexed Dynamo');
     assert.deepStrictEqual(canonical(api.fileQuickOpenRootsForSearch('/home/test', 'src/file.js')), ['/home/test/dynamo'], 'unrelated slash queries do not add the YOmux root');
-    const staleDoitApi = loadYolomux('', ['1']);
+    const staleDoitApi = loadYomux('', ['1']);
     const staleDoitPath = '/home/test/yolomux.dev1/DOIT.57.md';
     const realDoitPath = '/home/test/yolomux.dev2/DOIT.57.md';
     const staleDoitItem = staleDoitApi.registerFileEditorLayoutItemForTest(staleDoitPath);
@@ -4844,7 +4938,7 @@ async function runCrossSurfaceStateSuite() {
       || (item.searchFields || []).includes(staleDoitPath));
     assert.deepStrictEqual(canonical(staleDoitRows), [], 'missing open file paths are hidden from quick search results');
     assert.ok(staleDoitItems.some(item => item.category === 'file' && item.path === realDoitPath), 'real indexed DOIT.57 result remains available when a stale tab path is hidden');
-    const quickTargetApi = loadYolomux('', ['1', '2']);
+    const quickTargetApi = loadYomux('', ['1', '2']);
     const quickOpenTargetSlots = quickTargetApi.emptyLayoutSlots();
     quickOpenTargetSlots.left = quickTargetApi.paneStateWithTabs(['1'], '1');
     quickOpenTargetSlots.slot1 = quickTargetApi.paneStateWithTabs(['2'], '2');
@@ -4919,7 +5013,7 @@ async function runCrossSurfaceStateSuite() {
     api.setTabsMenuSearchTextForTest('');
     assert.equal(helpMenu.items.find(item => item.label === 'Open README').disabled, false);
     assert.equal(api.tabMenuItems().map(item => item.label).filter(Boolean).includes('Current Tab'), false);
-    const namedSessionApi = loadYolomux('', ['1', 'dynamo2']);
+    const namedSessionApi = loadYomux('', ['1', 'dynamo2']);
     const tmuxOnlySlots = namedSessionApi.emptyLayoutSlots();
     tmuxOnlySlots[namedSessionApi.layoutTreeKey] = namedSessionApi.leafNode('left');
     tmuxOnlySlots.left = namedSessionApi.paneStateWithTabs(['1', 'dynamo2'], '1');
@@ -5126,9 +5220,9 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/function sendRemoteResize\(session, options = \{\}\)[\s\S]*terminalCanPublishRemoteSize\(\)[\s\S]*foreground:\s*true[\s\S]*message\.activate = true[\s\S]*message\.client = browserClientId/.test(source), 'terminal resize frames carry explicit foreground authority and browser identity');
     assert.ok(/function claimVisibleTerminalResizeAuthority\(reason = '', options = \{\}\)[\s\S]*visibleTerminalResizeAuthorityEntries\(\)[\s\S]*fitTerminal\(session, \{claim: true\}\)/.test(source), 'browser activation claims every visible xterm pane through the shared fit path');
     assert.ok(/function installTerminalResizeAuthorityHandlers\(\)[\s\S]*window\.addEventListener\('focus'[\s\S]*document\.addEventListener\('visibilitychange'/.test(source), 'browser focus/visibility activates visible xterm resize authority');
-    assert.ok(/window\.addEventListener\('pointerdown', \(\) => claimVisibleTerminalResizeAuthority\('pointerdown', \{force: true\}\)/.test(source), 'pointer activation bypasses the browser-local size cache because another server can change tmux ownership');
+    assert.ok(/window\.addEventListener\('pointerdown', \(\) => \{\s*scheduleTabSwitchPhaseTwo\(tabSwitchHighlightGeneration, \(\) => claimVisibleTerminalResizeAuthority\('pointerdown', \{force: true\}\)\)/.test(source), 'pointer authority uses the existing guarded scheduler after paint');
     assert.ok(/function scheduleRemoteResize\(session,[\s\S]*terminalCanPublishRemoteSize\(\)[\s\S]*item\.resizeTimer = null/.test(source), 'hidden/background tabs cancel pending terminal resize timers instead of shrinking tmux later');
-    const authorityApi = loadYolomux('', ['1', '2', '3']);
+    const authorityApi = loadYomux('', ['1', '2', '3']);
     const authoritySlots = authorityApi.emptyLayoutSlots();
     authoritySlots[authorityApi.layoutTreeKey] = authorityApi.splitNode('row', authorityApi.leafNode('left'), authorityApi.leafNode('right'), 50);
     authoritySlots.left = authorityApi.paneStateWithTabs(['1'], '1');
@@ -5162,6 +5256,13 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(authoritySends[2].message.activate, true, 'post-attach authority claim is explicit');
     authorityApi.processTerminalSocketFrameForTest('1', 'second attached frame');
     assert.equal(authoritySends.length, 3, 'post-attach authority claim runs once per socket');
+    const hiddenAuthorityPane = authorityApi.testElementForId('terminal-pane-2');
+    hiddenAuthorityPane.clientWidth = 0;
+    hiddenAuthorityPane.clientHeight = 0;
+    authorityApi.claimVisibleTerminalResizeAuthorityForTest('pointerdown', {force: true});
+    assert.deepEqual(authoritySends.slice(3).map(item => item.session), ['1'], 'an active-class terminal hidden by its parent cannot claim tmux size');
+    hiddenAuthorityPane.clientWidth = 900;
+    hiddenAuthorityPane.clientHeight = 260;
     const terminalPane = api.testElementForId('terminal-pane-1');
     terminalPane.classList.add('active');
     terminalPane.clientWidth = 720;
@@ -5191,11 +5292,11 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(serverShell.includes('id="fileExplorerRootMode"'));
     assert.ok(serverShell.includes('id="fileExplorerRootMode"') && serverShell.includes('server_string(locale, "finder.toolbar.syncLabel")'), 'Server-rendered Finder root toggle starts with the localized Sync label');
     assert.equal(serverShell.includes('>Root</button>'), false, 'Server-rendered Finder root toggle must not flash Root before JS runs');
-    const readonlyApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'readonly');
+    const readonlyApi = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'readonly');
     assert.equal(readonlyApi.tmuxSessionActionCommands('1').every(item => item.disabled), true);
     readonlyApi.setAutoApproveStateForTest('1', {enabled: true});
     assert.equal(readonlyApi.menuTabCommand('1', {toggleYolo: true}).html.includes('data-auto-session'), false);
-    const macFinderApi = loadYolomux('', ['1'], 'http:', 'MacIntel', 'admin', {homePath: '/Users/test'});
+    const macFinderApi = loadYomux('', ['1'], 'http:', 'MacIntel', 'admin', {homePath: '/Users/test'});
     macFinderApi.applyLayoutUrlStateSeedForTest({finder: {root: '/home', rootMode: 'fixed'}});
     assert.equal(macFinderApi.fileExplorerRootForTest(), '/Users/test', 'saved macOS /home Finder root migrates to the bootstrap home');
     api.setTranscriptInfoForTest('1', {
@@ -5478,7 +5579,7 @@ async function runCrossSurfaceStateSuite() {
       {path: '/repo', ok: true, data: {entries: restoredRootEntries}},
       {path: '/repo/bin', ok: false, status: 403, error: 'permission denied'},
     ]});
-    assert.deepStrictEqual([...pushResult.failedDirectories], ['/repo/bin'], 'failed watch baseline directories reach the shared list error owner');
+    assert.deepStrictEqual([...pushResult.failedDirectories.keys()], ['/repo/bin'], 'failed watch baseline directories reach the shared list error owner');
     api.renderTreeChildrenForTest(coldRestoreTree, '/repo', restoredRootEntries);
     assert.equal(coldRestoreTree.children[0].classList.contains('loading-children'), false, 'failed restored expansions stop showing an endless spinner');
     assert.equal(coldRestoreTree.children[0].getAttribute('aria-expanded'), 'true', 'tree rows preserve their expansion until the shared failure renderer settles them');
@@ -5707,7 +5808,7 @@ async function runCrossSurfaceStateSuite() {
     const placeholderParams = parseUrl(placeholderUrl);
     assert.equal(placeholderParams.get('layout'), 'row@22(left,slot1)');
     assert.equal(placeholderParams.get('tabs'), 'left:@side-left,finder;slot1:__empty_pane_v2__');
-    const reloadedPlaceholder = loadYolomux(`?${placeholderUrl.split('?')[1] || ''}`, ['1']);
+    const reloadedPlaceholder = loadYomux(`?${placeholderUrl.split('?')[1] || ''}`, ['1']);
     assert.deepStrictEqual(canonical(reloadedPlaceholder.serialize(reloadedPlaceholder.currentSlots())), canonical(api.serialize(placeholderSlots)));
 
     const finderAndTmux = api.emptyLayoutSlots();
@@ -6184,7 +6285,7 @@ async function runCrossSurfaceStateSuite() {
       panes: {left: {tabs: [], active: null, placeholder: true}},
     });
 
-    killedApi = loadYolomux('', ['2']);
+    killedApi = loadYomux('', ['2']);
     const killedSlots = killedApi.emptyLayoutSlots();
     killedSlots[killedApi.layoutTreeKey] = killedApi.splitNode('row', killedApi.leafNode('left'), killedApi.leafNode('slot1'), 22);
     killedSlots.left = killedApi.paneStateWithTabs([killedApi.finderItemId], killedApi.finderItemId);

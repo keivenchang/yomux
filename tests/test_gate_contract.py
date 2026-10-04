@@ -73,6 +73,7 @@ DISCOVERED_MUTATING_ACTIONS = {
     "editor-save": "pending",
     "stats-read-fence-retry": "background",
     "stats-manual-retry": "pending",
+    "stats-history-refill": "pending",
     "finder-file-create": "pending",
     "finder-folder-create": "pending",
     "finder-delete": "optimistic",
@@ -87,7 +88,7 @@ _USER_COMMAND_CONTRACT_CLASSES = frozenset({"pending", "optimistic"})
 @pytest.mark.socket
 def test_k0_browser_command_registry_exactly_matches_the_declared_inventory(browser, gate_live_server):
     """Every discovered mutation is declared once in the browser registry and assigned one lifecycle class."""
-    assert len(DISCOVERED_MUTATING_ACTIONS) == 50, DISCOVERED_MUTATING_ACTIONS
+    assert len(DISCOVERED_MUTATING_ACTIONS) == 51, DISCOVERED_MUTATING_ACTIONS
     load_gate_browser(browser, gate_live_server)
     inventory = browser.execute_script(
         """
@@ -225,7 +226,7 @@ def test_k0_each_user_command_class_executes_k1_through_k5(
               callerResults = results;
             });
             try {
-              await window.__yolomuxTestWaitFor(
+              await window.__yomuxTestWaitFor(
                 () => callerResults || null,
                 {timeoutMs: 2000, description: 'deduplicated gate command callers to settle'},
               );

@@ -300,6 +300,96 @@ func TestAppendBatchDuplicateReplayDoesNotAdvanceGeneration(t *testing.T) {
 	}
 }
 
+func TestAppendUsageChunkBoundariesPreserveReplayRepairAndRollback(t *testing.T) {
+	for _, size := range []int{1, maxUsageStatementRows - 1, maxUsageStatementRows, maxUsageStatementRows + 1, 2*maxUsageStatementRows + 1} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			ctx := context.Background()
+			writer, _ := checkpointTestWriter(t)
+			atoms := make([]UsageAtom, size)
+			var prior []UsageAtom
+			for index := range atoms {
+				atoms[index] = writerBatch().UsageAtoms[0]
+				atoms[index].EventID = fmt.Sprintf("codex:thread-1:chunk-%d", index)
+				atoms[index].Payload["model"] = "unknown"
+				if index%2 == 0 {
+					prior = append(prior, atoms[index])
+				}
+			}
+			if _, err := writer.AppendBatch(ctx, AppendBatch{UsageAtoms: prior}); err != nil {
+				t.Fatal(err)
+			}
+			atoms[0].Payload = cloneUsagePayload(atoms[0].Payload)
+			atoms[0].Payload["model"] = "gpt"
+			result, err := writer.AppendBatch(ctx, AppendBatch{UsageAtoms: atoms})
+			if err != nil || result.UsageAccepted != size-len(prior)+1 || result.UsageDuplicate != len(prior)-1 || result.Generation != 2 {
+				t.Fatalf("mixed chunk append = %+v, err=%v", result, err)
+			}
+			before, err := writer.refillBaseline(ctx, 0, 100)
+			if err != nil || len(before) != size {
+				t.Fatalf("mixed chunk readback = %d, err=%v", len(before), err)
+			}
+			// A conflict after a full fresh chunk must roll back facts and checkpoint.
+			fresh := append([]UsageAtom{}, atoms...)
+			for index := range fresh {
+				fresh[index].EventID += "-new"
+			}
+			conflict := atoms[0]
+			conflict.Payload = cloneUsagePayload(conflict.Payload)
+			conflict.Payload["quantity"] = 99.0
+			checkpoint := Checkpoint{Key: "chunk-test", Kind: "transcript", Version: 1}
+			_, err = writer.AppendWithCheckpoints(ctx, AppendBatch{UsageAtoms: append(fresh, conflict)}, []Checkpoint{checkpoint})
+			if err == nil || err.Error() != "usage atom identity conflicts with stored data" {
+				t.Fatalf("chunk conflict = %v", err)
+			}
+			after, err := writer.refillBaseline(ctx, 0, 100)
+			if err != nil || !reflect.DeepEqual(before, after) || writer.SourceGeneration() != 2 {
+				t.Fatalf("chunk conflict changed facts/generation: err=%v", err)
+			}
+			if _, found, err := writer.LoadCheckpoint(ctx, checkpoint.Key); err != nil || found {
+				t.Fatalf("chunk conflict committed checkpoint: found=%v err=%v", found, err)
+			}
+			for _, conflicting := range []bool{false, true} {
+				duplicate := atoms[0]
+				want := "append_batch.identity: duplicate idempotency key"
+				if conflicting {
+					duplicate = conflict
+					want = "append_batch.identity: conflicting duplicate idempotency key"
+				}
+				_, err := writer.AppendBatch(ctx, AppendBatch{UsageAtoms: append(append([]UsageAtom{}, atoms...), duplicate)})
+				if err == nil || err.Error() != want {
+					t.Fatalf("chunk duplicate = %v, want %q", err, want)
+				}
+			}
+			// A repair after capture must survive replacement across chunk boundaries.
+			repair := before[len(before)-1]
+			repair.Payload = cloneUsagePayload(repair.Payload)
+			if size > 1 {
+				repair.Payload["model"] = "gpt"
+				if _, err := writer.AppendBatch(ctx, AppendBatch{UsageAtoms: []UsageAtom{repair}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			expected := size
+			if size > 1 {
+				expected--
+			}
+			result, err = writer.appendReplacingUsage(ctx, AppendBatch{UsageAtoms: before}, nil, nil, before)
+			if err != nil || result.TombstonesAccepted != expected || result.UsageAccepted != expected || result.UsageDuplicate != 0 {
+				t.Fatalf("chunk replacement = %+v, err=%v", result, err)
+			}
+			after, err = writer.refillBaseline(ctx, 0, 100)
+			if err != nil || len(after) != size {
+				t.Fatalf("chunk replacement changed row count: rows=%d err=%v", len(after), err)
+			}
+			for _, item := range after {
+				if item.EventID == repair.EventID && !reflect.DeepEqual(item.Payload, repair.Payload) {
+					t.Fatalf("chunk replacement lost repaired atom: %+v", item)
+				}
+			}
+		})
+	}
+}
+
 func TestAppendBatchConflictRollsBackEarlierRows(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "stats.sqlite3")
 	writer, err := OpenWriter(context.Background(), path)

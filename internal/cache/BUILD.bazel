@@ -1,13 +1,9 @@
-package(default_visibility = ["//visibility:public"])
+load("@rules_go//go:def.bzl", "go_library")
+load("//:tools/bazel_rules.bzl", "go_test_pair")
+
+package(default_visibility = ["//:__subpackages__"])
 
 exports_files(["BUILD.bazel"])
-
-filegroup(
-    name = "docker_source_files",
-    srcs = ["BUILD.bazel", "lru.go", "lru_test.go"],
-)
-
-load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "cache_lib",
@@ -15,8 +11,8 @@ go_library(
     importpath = "github.com/keivenchang/yomux/internal/cache",
 )
 
-go_test(
-    name = "cache_test",
+go_test_pair(
+    name = "cache",
     srcs = ["lru_test.go"],
     embed = [":cache_lib"],
 )

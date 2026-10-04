@@ -12,8 +12,7 @@ from tests.browser_helpers.browser_layout import browser
 from tests.browser_helpers.browser_layout import load_live_runtime_boot_fixture
 from tests.browser_helpers.browser_layout import start_browser_server
 from tests.browser_helpers.browser_layout import start_isolated_browser_app
-from tests.browser_helpers.browser_layout import stop_browser_server
-from tests.browser_helpers.browser_layout import stop_isolated_browser_app
+from tests.browser_helpers.browser_layout import stop_browser_fixture
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.helpers.browser_scenarios import assert_terminal_wheel_observation
 from tests.helpers.browser_scenarios import terminal_wheel_observation
@@ -81,6 +80,7 @@ def test_n5_real_terminal_wrap_keeps_full_paths_and_passive_misses_are_not_error
         runtime.paths.config_dir,
         runtime.app,
         auth_bypass=True,
+        paths=gate_runtime_paths,
     )
     try:
         browser.get(
@@ -172,8 +172,7 @@ def test_n5_real_terminal_wrap_keeps_full_paths_and_passive_misses_are_not_error
         assert "/tmp/instruction-" not in paths, measured
         assert measured["clientFailures"] == [], measured
     finally:
-        stop_browser_server(server, thread, browser=browser)
-        stop_isolated_browser_app(runtime)
+        stop_browser_fixture(server, thread, runtime, browser=browser)
 
 
 @pytest.mark.browser

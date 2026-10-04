@@ -3,7 +3,7 @@ const {
   canonical,
   fs,
   TestElement,
-  loadYolomux,
+  loadYomux,
   test,
   testAsync,
   runSuites,
@@ -11,7 +11,7 @@ const {
 
 async function runSidePaneSuite() {
   test('Side Pane role inherits the generic pane contract and overrides only specialization data', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const generic = canonical(api.genericPaneRoleDefinition);
     const side = canonical(api.sidePaneRoleDefinition);
 
@@ -25,7 +25,7 @@ async function runSidePaneSuite() {
   });
 
   test('TAB_TYPES owns the complete side-pane item placement policy', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const policies = Object.fromEntries(api.TAB_TYPES.map(type => [type.key, type.panePlacement || api.panePlacementGenericOnly]));
     assert.deepStrictEqual(Object.entries(policies).filter(([, policy]) => policy === api.panePlacementSideRequired).map(([key]) => key), ['finder', 'differ', 'tabber']);
     assert.deepStrictEqual(Object.entries(policies).filter(([, policy]) => policy === api.panePlacementSideAllowed).map(([key]) => key), ['info', 'yoagent', 'chat', 'debug']);
@@ -35,7 +35,7 @@ async function runSidePaneSuite() {
   });
 
   test('one role classifier enforces required, allowed, and generic-only placement', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const generic = api.paneRoleDefinition(api.paneRoleGeneric);
     const sideLeft = api.paneRoleDefinition(api.paneRoleSide, api.paneSideLeft);
     assert.equal(api.paneRoleAllowsItem(sideLeft, api.finderItemId), true);
@@ -52,7 +52,7 @@ async function runSidePaneSuite() {
   });
 
   test('side role and edge round-trip through compact tab state while generic state stays compatible', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const sideLeft = api.paneRoleDefinition(api.paneRoleSide, api.paneSideLeft);
     const slots = {
       [api.layoutTreeKey]: api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 22),
@@ -67,7 +67,7 @@ async function runSidePaneSuite() {
   });
 
   test('legacy redundant empty panes are pruned while intentional and final fillers round-trip', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const stale = api.layoutFromParam(
       'row@24.6(slot1,row@24.6(slot2,left))',
       'slot1:@side-left,finder,differ,tabber;slot2:__empty_pane__;left:1,debug',
@@ -87,21 +87,21 @@ async function runSidePaneSuite() {
   });
 
   test('untyped legacy triplet home migrates to explicit left Side Pane role', () => {
-    const api = loadYolomux('?layout=row@22(slot1,right)&tabs=slot1:finder,differ,tabber;right:1', ['1']);
+    const api = loadYomux('?layout=row@22(slot1,right)&tabs=slot1:finder,differ,tabber;right:1', ['1']);
     const slot = api.currentSlots().slot1;
     assert.deepStrictEqual(canonical(api.paneRoleForState(slot)), canonical(api.paneRoleDefinition(api.paneRoleSide, api.paneSideLeft)));
     assert.equal(api.layoutTabsParamValue(api.currentSlots()).startsWith('slot1:@side-left,finder,differ,tabber'), true);
   });
 
   test('invalid serialized Side Pane edge normalizes to generic', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const decoded = api.layoutTabStatesFromParam('left:@side-top,1');
     assert.deepStrictEqual(canonical(decoded.get('left')), {tabs: ['1'], active: '1'});
     assert.deepStrictEqual(canonical(api.paneRoleForState(decoded.get('left'))), canonical(api.genericPaneRoleDefinition));
   });
 
   test('Dockview JSON adoption retains the prior explicit pane role', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const slots = {
       [api.layoutTreeKey]: api.splitNode('row', api.leafNode('side'), api.leafNode('main'), 22),
       side: api.paneStateWithTabs([api.finderItemId], api.finderItemId, api.paneRoleDefinition(api.paneRoleSide, api.paneSideLeft)),
@@ -113,7 +113,7 @@ async function runSidePaneSuite() {
   });
 
   test('Dockview adoption permits dual-role YO!* transfers and rejects incompatible transfers', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const previous = {
       [api.layoutTreeKey]: api.splitNode('row', api.leafNode('side'), api.leafNode('main'), 22),
       side: api.paneStateWithTabs([api.finderItemId, api.infoItemId], api.finderItemId,
@@ -140,7 +140,7 @@ async function runSidePaneSuite() {
   });
 
   test('pending renamed tmux tab survives an incomplete post-rename Dockview adoption', () => {
-    const api = loadYolomux('?sessions=1&layout=left&tabs=left:files,1', ['1']);
+    const api = loadYomux('?sessions=1&layout=left&tabs=left:files,1', ['1']);
     const incompleteDockview = api.dockviewJsonFromLayoutSlots(api.currentSlots());
     api.replaceTmuxSessionInClient('1', 'renamed', ['renamed']);
     const renamedLayout = api.currentSlots();
@@ -150,7 +150,7 @@ async function runSidePaneSuite() {
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), canonical(api.serialize(renamedLayout)), 'rejecting the incomplete snapshot preserves the app-owned renamed layout exactly');
     const [reasserted] = api.dockviewFromJsonCallsForTest();
     assert.deepStrictEqual(canonical(api.layoutSlotsFromDockviewJson(reasserted, renamedLayout)), canonical(renamedLayout), 'the vendor layout is reloaded with the renamed tab instead of retaining its incomplete snapshot');
-    const created = loadYolomux('?sessions=1&layout=left&tabs=left:files,1', ['1']);
+    const created = loadYomux('?sessions=1&layout=left&tabs=left:files,1', ['1']);
     const preCreateDockview = created.dockviewJsonFromLayoutSlots(created.currentSlots());
     created.markPendingTmuxSessionForTest('created');
     const withCreated = created.layoutWithItems(created.currentSlots(), ['created']);
@@ -160,7 +160,7 @@ async function runSidePaneSuite() {
     created.adoptQueuedDockviewLayoutForTest();
     const [createdReasserted] = created.dockviewFromJsonCallsForTest();
     assert.ok(createdReasserted?.panels?.created, `a post-create incomplete snapshot reasserts the created tab through the same owner: ${JSON.stringify({pending: created.pendingTmuxSessionNamesForTest(), layout: created.serialize(createdLayout), calls: created.dockviewFromJsonCallsForTest()})}`);
-    const control = loadYolomux('?sessions=1,2&layout=left&tabs=left:1,2', ['1', '2']);
+    const control = loadYomux('?sessions=1,2&layout=left&tabs=left:1,2', ['1', '2']);
     const withoutStableSession = control.layoutWithoutItem('1');
     control.queueDockviewLayoutAdoptionForTest(control.dockviewJsonFromLayoutSlots(withoutStableSession));
     control.adoptQueuedDockviewLayoutForTest();
@@ -168,7 +168,7 @@ async function runSidePaneSuite() {
   });
 
   test('legacy Finder dock adapter preserves the triplet in an explicit Side Pane', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const slots = {
       [api.layoutTreeKey]: api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 22),
       left: api.paneStateWithTabs([api.finderItemId, api.differItemId, api.tabberItemId], api.differItemId,
@@ -185,7 +185,7 @@ async function runSidePaneSuite() {
   });
 
   test('role-neutral Side Pane helpers own both edges and legacy inferred-home names are gone', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const generic = {
       [api.layoutTreeKey]: api.leafNode('main'),
       main: api.paneStateWithTabs([api.prefsItemId], api.prefsItemId),
@@ -225,7 +225,7 @@ async function runSidePaneSuite() {
   });
 
   test('normalization repairs malformed Side Panes to one outer vertical column per edge', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const malformed = {
       [api.layoutTreeKey]: api.splitNode(
         'row',
@@ -259,7 +259,7 @@ async function runSidePaneSuite() {
   });
 
   test('wide defaults create only a left Side Pane and side-only layouts retain a generic filler', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setNativeViewportForTest({width: 1200, height: 800});
     const defaults = api.defaultLayoutSlots();
     const defaultLeft = api.sidePaneSlot(api.paneSideLeft, defaults);
@@ -285,7 +285,7 @@ async function runSidePaneSuite() {
   });
 
   test('Fill and generic layout actions preserve both Side Panes', () => {
-    const api = loadYolomux('', ['1', '2']);
+    const api = loadYomux('', ['1', '2']);
     const slots = {
       [api.layoutTreeKey]: api.splitNode(
         'row',
@@ -312,7 +312,7 @@ async function runSidePaneSuite() {
   });
 
   test('Side Pane widths clamp to one third and survive generic compaction', () => {
-    const api = loadYolomux('', ['1', '2']);
+    const api = loadYomux('', ['1', '2']);
     const oversized = {
       [api.layoutTreeKey]: api.splitNode(
         'row',
@@ -338,7 +338,7 @@ async function runSidePaneSuite() {
   });
 
   test('viewport capability removes Side Panes when constrained and rehomes only the triplet when widened', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     assert.equal(api.sidePaneMinimumViewportWidthPx(), 900);
     assert.equal(api.sidePanesAvailable({width: 899, height: 700}), false);
     assert.equal(api.sidePanesAvailable({width: 900, height: 700}), true);
@@ -370,7 +370,7 @@ async function runSidePaneSuite() {
   });
 
   test('Side Pane role drives identical DOM data, intrinsic tabs, and minimize-only chrome', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const slots = {
       [api.layoutTreeKey]: api.splitNode('row', api.leafNode('side'), api.leafNode('main'), 22),
       side: api.paneStateWithTabs([api.finderItemId], api.finderItemId,
@@ -404,7 +404,7 @@ async function runSidePaneSuite() {
   });
 
   test('drop, split, root, gutter, and pane-swap capability matrix follows item placement capability', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const slots = {
       [api.layoutTreeKey]: api.splitNode(
         'row',
@@ -476,7 +476,7 @@ async function runSidePaneSuite() {
   });
 
   test('tab transfers allow only side-allowed items to cross pane roles', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const slots = {
       [api.layoutTreeKey]: api.splitNode('row', api.leafNode('side'), api.leafNode('main'), 22),
       side: api.paneStateWithTabs([api.finderItemId, api.infoItemId], api.finderItemId,
@@ -503,7 +503,7 @@ async function runSidePaneSuite() {
   });
 
   await testAsync('root-edge moves preserve the source role instead of deriving role from the edge', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const slots = {
       [api.layoutTreeKey]: api.splitNode('row', api.leafNode('side'), api.leafNode('main'), 22),
       side: api.paneStateWithTabs([api.finderItemId, api.infoItemId], api.finderItemId,
@@ -525,7 +525,7 @@ async function runSidePaneSuite() {
   });
 
   await testAsync('Side Pane minimize, tab close, final close, and reopen preserve role boundaries', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const itemsIn = slots => api.layoutSlotKeys(slots).flatMap(slot => api.paneTabs(slot, slots));
     const initial = {
       [api.layoutTreeKey]: api.splitNode('row', api.leafNode('side'), api.leafNode('main'), 22),
@@ -563,7 +563,7 @@ async function runSidePaneSuite() {
   });
 
   await testAsync('Generic to Side split prunes an emptied source when another Generic pane exists', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const slots = {
       [api.layoutTreeKey]: api.splitNode(
         'row',
@@ -592,7 +592,7 @@ async function runSidePaneSuite() {
   });
 
   await testAsync('Generic to Side split preserves the final Generic workspace filler', async () => {
-    const api = loadYolomux('', []);
+    const api = loadYomux('', []);
     const slots = {
       [api.layoutTreeKey]: api.splitNode('row', api.leafNode('side'), api.leafNode('chatSource'), 22),
       side: api.paneStateWithTabs([api.finderItemId], api.finderItemId,
@@ -606,7 +606,7 @@ async function runSidePaneSuite() {
   });
 
   test('empty Generic panes close independently while the final workspace filler remains', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const slots = {
       [api.layoutTreeKey]: api.splitNode(
         'row',
@@ -632,7 +632,7 @@ async function runSidePaneSuite() {
   });
 
   await testAsync('Side Pane tab actions expose only vertical Move and Swap within the fixed-width edge column', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const sideRole = api.paneRoleDefinition(api.paneRoleSide, api.paneSideLeft);
     const slots = {
       [api.layoutTreeKey]: api.splitNode(
@@ -701,7 +701,7 @@ async function runSidePaneSuite() {
   });
 
   test('closing one empty Generic pane preserves other intentional placeholders beside content', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const slots = {
       [api.layoutTreeKey]: api.splitNode(
         'row',

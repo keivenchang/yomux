@@ -5,15 +5,26 @@ function updateSyntheticTreeEntryMtime(entry, mtime) {
   if (!Number.isFinite(current) || value > current) entry.mtime = value;
 }
 
-function buildSessionFileTree(repoPath, sessionFiles) {
-  const entriesByDir = new Map(); // normalizedDirPath → [{name, kind, mtime?, size?}]
-  const sessionFilesMap = new Map(); // absPath → sessionFileItem
+function buildSessionFileTree(repoPath, sessionFiles, options = {}) {
+  const steps = buildSessionFileTreeSteps(repoPath, sessionFiles, options);
+  return options.yieldToInput === true
+    ? drainFileTreeRenderStepsWithInput(steps, options)
+    : drainFileTreeRenderSteps(steps);
+}
+
+function* buildSessionFileTreeSteps(repoPath, sessionFiles, options = {}) {
+  const entriesByDir = new Map();
+  const sessionFilesMap = new Map();
   const directoryStatusCounts = new Map(); // normalizedDirPath → {added, deleted} file counts
   const countedStatusPaths = new Set();
+  const indexOptions = {firstWins: false};
   for (const item of sessionFiles) {
+    yield;
+    if (options.isCurrent && !options.isCurrent()) return false;
+    if (options.isVisible && !options.isVisible(item)) continue;
     const absPath = normalizeDirectoryPath(item.abs_path || (repoPath && item.path ? `${repoPath}/${item.path}` : item.path || ''));
     if (!absPath) continue;
-    sessionFilesMap.set(absPath, item);
+    indexSessionFileIntoPathMap(sessionFilesMap, item, absPath, indexOptions);
     const status = sessionFileDisplayStatus(item);
     if ((status === 'A' || status === 'U' || status === '?' || status === 'D') && !countedStatusPaths.has(absPath)) {
       countedStatusPaths.add(absPath);
@@ -36,12 +47,13 @@ function buildSessionFileTree(repoPath, sessionFiles) {
     for (let i = 1; i < parts.length; i++) {
       const parentAbsPath = i === 1 ? repoPath : `${repoPath}/${parts.slice(0, i - 1).join('/')}`;
       const key = normalizeDirectoryPath(parentAbsPath);
-      if (!entriesByDir.has(key)) entriesByDir.set(key, []);
+      if (!entriesByDir.has(key)) entriesByDir.set(key, new Map());
       const siblings = entriesByDir.get(key);
-      let dirEntry = siblings.find(e => e.kind === 'dir' && e.name === parts[i - 1]);
+      const directoryKey = `${parts[i - 1]}/`;
+      let dirEntry = siblings.get(directoryKey);
       if (!dirEntry) {
         dirEntry = {name: parts[i - 1], kind: 'dir'};
-        siblings.push(dirEntry);
+        siblings.set(directoryKey, dirEntry);
       }
       updateSyntheticTreeEntryMtime(dirEntry, item.mtime);
     }
@@ -49,13 +61,13 @@ function buildSessionFileTree(repoPath, sessionFiles) {
     const fileName = parts[parts.length - 1];
     const fileParentAbsPath = parts.length === 1 ? repoPath : `${repoPath}/${parts.slice(0, -1).join('/')}`;
     const key = normalizeDirectoryPath(fileParentAbsPath);
-    if (!entriesByDir.has(key)) entriesByDir.set(key, []);
+    if (!entriesByDir.has(key)) entriesByDir.set(key, new Map());
     const siblings = entriesByDir.get(key);
-    if (!siblings.some(e => e.name === fileName)) {
+    if (!siblings.has(fileName) && !siblings.has(`${fileName}/`)) {
       // `deleted` is the DISPLAY classification from `sessionFileDisplayStatus`, kept under its own
       // name so it cannot be confused with `missing` ("not on disk") elsewhere in the payload: a
       // file created and then removed is missing but still displays A.
-      siblings.push({
+      siblings.set(fileName, {
         name: fileName,
         display_name: item.old_path ? `${item.old_path} → ${item.path}` : '',
         kind: 'file',
@@ -66,30 +78,52 @@ function buildSessionFileTree(repoPath, sessionFiles) {
       });
     }
   }
-  const topLevel = entriesByDir.get(normalizeDirectoryPath(repoPath)) || [];
-  return {entries: topLevel, entriesByDir, sessionFilesMap, directoryStatusCounts};
-}
-
-function initializeDefaultCollapsedChangesFolders(entriesByDir) {
+  let renderedRows = 0;
   for (const [directory, entries] of entriesByDir.entries()) {
-    for (const entry of entries || []) {
+    const children = [];
+    for (const entry of entries.values()) {
+      yield;
+      if (options.isCurrent && !options.isCurrent()) return false;
+      children.push(entry);
+      renderedRows += 1;
       if (entry?.kind !== 'dir' || entry.name !== '.uploads') continue;
       const fullPath = normalizeDirectoryPath(directory === '/' ? `/${entry.name}` : `${directory}/${entry.name}`);
       if (!fullPath || changesFolderAutoCollapsed.has(fullPath)) continue;
       changesFolderAutoCollapsed.add(fullPath);
       changesFolderCollapsed.add(fullPath);
     }
+    entriesByDir.set(directory, children);
   }
+  const topLevel = entriesByDir.get(normalizeDirectoryPath(repoPath)) || [];
+  return {entries: topLevel, entriesByDir, sessionFilesMap, directoryStatusCounts, renderedRows: renderedRows + topLevel.length};
 }
 
 // Render changed files for one repo section using the shared file-tree renderer.
 function renderChangedFileList(container, repoPath, sessionFiles, options = {}) {
+  const steps = renderChangedFileListSteps(container, repoPath, sessionFiles, options);
+  return options.yieldToInput === true
+    ? drainFileTreeRenderStepsWithInput(steps, options)
+    : drainFileTreeRenderSteps(steps);
+}
+
+function* renderChangedFileListSteps(container, repoPath, sessionFiles, options = {}) {
   const treeRoot = repoPath === changesOutsideRepoKey ? '/' : repoPath;
-  const {entries, entriesByDir, sessionFilesMap, directoryStatusCounts} = buildSessionFileTree(treeRoot, sessionFiles);
-  const renderedRows = entries.length + Array.from(entriesByDir.values()).reduce((total, childEntries) => total + (Array.isArray(childEntries) ? childEntries.length : 0), 0);
+  const renderOwner = {};
+  const transaction = {epoch: ++fileTreeRenderEpoch, completed: true};
+  fileTreeRenderOwners.set(container, {epoch: transaction.epoch, renderOwner});
+  const isCurrent = () => fileTreeRenderOwners.get(container)?.renderOwner === renderOwner
+    && (options.yieldToInput !== true
+      || normalizeFileExplorerView(options.view || 'differ') !== 'differ'
+      || fileExplorerSessionFilesPaneIsVisible())
+    && (!options.isCurrent || options.isCurrent());
+  const tree = yield* buildSessionFileTreeSteps(treeRoot, sessionFiles, {
+    isCurrent,
+    isVisible: normalizeFileExplorerView(options.view || 'differ') === 'differ' ? sessionFileIsDifferVisible : null,
+  });
+  if (tree === false || !isCurrent()) return false;
+  const {entries, entriesByDir, sessionFilesMap, directoryStatusCounts, renderedRows} = tree;
   recordClientPerfCounter('sessionFilesRender', 0, {nodes: entriesByDir.size, rows: renderedRows});
-  initializeDefaultCollapsedChangesFolders(entriesByDir);
-  renderTreeChildren(container, treeRoot, entries, 0, {
+  return yield* renderTreeChildrenSteps(container, treeRoot, entries, 0, {
     entriesByDir,
     sessionFilesMap,
     directoryStatusCounts,
@@ -99,6 +133,10 @@ function renderChangedFileList(container, repoPath, sessionFiles, options = {}) 
     view: options.view || 'differ',
     treeSortMode: fileExplorerTreeSortModeForView(options.view || 'differ'),
     includeHidden: true,
+    yieldToInput: options.yieldToInput === true,
+    renderOwner,
+    renderTransaction: transaction,
+    isCurrent,
   });
 }
 
@@ -130,12 +168,60 @@ const changesRepoSectionsByGroups = new WeakMap();
 
 function renderChangesGroups(groupsEl, files, options = {}) {
   if (!groupsEl) return;
-  if (options.changedRepo) return renderChangedChangesRepo(groupsEl, options.changedRepo, options);
+  const previousOwner = fileTreeRenderOwners.get(groupsEl);
+  const owner = {epoch: ++fileTreeRenderEpoch, completed: false};
+  fileTreeRenderOwners.set(groupsEl, owner);
+  const isCurrent = () => fileTreeRenderOwners.get(groupsEl) === owner
+    && (options.yieldToInput !== true || normalizeFileExplorerView(options.view || 'differ') !== 'differ'
+      || fileExplorerSessionFilesPaneIsVisible())
+    && (!options.isCurrent || options.isCurrent());
+  const renderOptions = {...options, isCurrent, renderOwner: owner};
+  if (options.changedRepo && previousOwner?.completed !== false) {
+    return renderChangedChangesRepo(groupsEl, options.changedRepo, renderOptions);
+  }
+  // Read streaming repositories incrementally; payload.files is a compatibility getter that flattens them.
+  if (typeof fileExplorerSessionFilesState !== 'undefined'
+    && options.payload === fileExplorerSessionFilesState.payload && fileExplorerSessionFilesState.streamRepos instanceof Map
+    && (options.changedRepo || options.deferPreparation === true)) {
+    files = (function* () {
+      for (const record of fileExplorerSessionFilesState.streamRepos.values()) yield* record.files;
+    })();
+  } else if (options.changedRepo) {
+    // A new stream chunk must finish repositories interrupted by the preceding chunk.
+    files = options.payload?.files || [];
+  }
+  const steps = renderChangesGroupsSteps(groupsEl, files, renderOptions);
+  return options.yieldToInput === true
+    ? drainFileTreeRenderStepsWithInput(steps, renderOptions)
+    : drainFileTreeRenderSteps(steps);
+}
+
+function* renderChangesGroupsSteps(groupsEl, files, options = {}) {
   const view = normalizeFileExplorerView(options.view || 'differ');
-  const regular = sortedSessionFiles(files, view);
   const payload = options.payload || {};
   const repoMap = repoPayloadByPath(payload);
-  const groups = new Map(groupedSessionFiles(regular));
+  const groups = new Map();
+  const firstFiles = new Map();
+  const compare = sessionFilesSortComparator(view);
+  let visibleFileCount = 0;
+  for (const file of files || []) {
+    yield;
+    if (options.isCurrent && !options.isCurrent()) return false;
+    if (view === 'differ' && !sessionFileIsDifferVisible(file)) continue;
+    visibleFileCount += 1;
+    const repo = file.repo || changesOutsideRepoKey;
+    if (!groups.has(repo)) groups.set(repo, []);
+    groups.get(repo).push(file);
+    if (!firstFiles.has(repo) || compare(file, firstFiles.get(repo)) < 0) firstFiles.set(repo, file);
+  }
+  const renderOptions = view === 'differ' && options.deferPreparation === true
+    ? {...options, loading: sessionFilesPanelIsLoading(payload, visibleFileCount ? [true] : [])}
+    : options;
+  // Repository chunks retain stream insertion order while earlier trees finish.
+  const orderedGroups = options.changedRepo ? Array.from(groups)
+    : Array.from(groups).sort(([left], [right]) => compare(firstFiles.get(left), firstFiles.get(right)));
+  groups.clear();
+  for (const [repo, repoFiles] of orderedGroups) groups.set(repo, repoFiles);
   if (options.includeEmptyRepoSections === true) {
     for (const repoInfo of Array.isArray(payload?.repos) ? payload.repos : []) {
       const repo = repoInfo?.repo || changesOutsideRepoKey;
@@ -152,18 +238,46 @@ function renderChangesGroups(groupsEl, files, options = {}) {
   }
   const nextNodes = [];
   for (const [repo, repoFiles] of groups.entries()) {
+    yield;
+    if (!options.isCurrent()) return false;
     let section = existing.get(repo);
     if (!section) {
       section = document.createElement('section');
       section.className = 'changes-repo-group';
       section.dataset.changesRepo = repo;
     }
+    const nextNode = nextNodes.length ? nextNodes[nextNodes.length - 1].nextElementSibling : groupsEl.firstElementChild;
+    // Mount before filling so the browser paints each slice instead of laying out a whole detached tree at completion.
+    if (nextNode !== section) {
+      groupsEl.insertBefore(section, nextNode || null);
+      yield true;
+      if (!options.isCurrent()) return false;
+    }
     const repoInfo = repoMap.get(repo) || {};
-    renderChangesRepoSection(section, repo, repoFiles, repoInfo, options);
+    if ((yield* renderChangesRepoSectionSteps(section, repo, repoFiles, repoInfo, renderOptions)) === false) return false;
     nextNodes.push(section);
   }
   reconcileChildNodes(groupsEl, nextNodes);
   changesRepoSectionsByGroups.set(groupsEl, new Map(nextNodes.map(section => [section.dataset.changesRepo, section])));
+  if (!options.changedRepo && view === 'differ') {
+    const repoCount = groups.size || (Array.isArray(payload?.repos)
+      ? payload.repos.filter(repoPayloadHasRenderableSection).length
+      : 0);
+    const summary = groupsEl.parentElement?.querySelector?.('.changes-comparison-summary');
+    if (summary && typeof changesSummaryHtml === 'function') {
+      summary.innerHTML = changesSummaryHtml(payload, null, payload?.session || '', renderOptions.loading === true, payload?.loaded === true, {
+        fileCount: visibleFileCount,
+        repoCount,
+      });
+    }
+    if (!renderOptions.loading && visibleFileCount === 0 && groups.size === 0) {
+      groupsEl.innerHTML = `<div class="changes-empty">${esc(t('changes.emptyModified'))}</div>`;
+    }
+  }
+  if (options.renderOwner) options.renderOwner.completed = true;
+  yield true;
+  if (!options.isCurrent()) return false;
+  return true;
 }
 
 function renderChangedChangesRepo(groupsEl, changedRepo, options) {
@@ -181,12 +295,29 @@ function renderChangedChangesRepo(groupsEl, changedRepo, options) {
     sections.set(repo, section);
   }
   const repoInfo = (changedRepo.repos || []).find(row => row?.repo === repo) || {};
-  renderChangesRepoSection(section, repo, changedRepo.files || [], repoInfo, options);
-  if (section.parentElement !== groupsEl) groupsEl.append(section);
-  return section;
+  const steps = (function* () {
+    if (section.parentElement !== groupsEl) {
+      groupsEl.append(section);
+      yield true;
+      if (!options.isCurrent()) return false;
+    }
+    if ((yield* renderChangesRepoSectionSteps(section, repo, changedRepo.files || [], repoInfo, options)) === false) return false;
+    if (options.isCurrent() && options.renderOwner) options.renderOwner.completed = true;
+    return section;
+  })();
+  return options.yieldToInput === true
+    ? drainFileTreeRenderStepsWithInput(steps, options)
+    : drainFileTreeRenderSteps(steps);
 }
 
-function renderChangesRepoSection(section, repo, repoFiles, repoInfo, options) {
+function* renderChangesRepoSectionSteps(section, repo, repoFiles, repoInfo, options) {
+  if (!Number.isFinite(Number(repoInfo?.added)) || !Number.isFinite(Number(repoInfo?.removed))) {
+    const fallback = yield* changeFileTotalsSteps(repoFiles);
+    repoInfo = {...repoInfo,
+      added: repoAggregateNumber(repoInfo?.added, fallback.added),
+      removed: repoAggregateNumber(repoInfo?.removed, fallback.removed),
+    };
+  }
   const view = normalizeFileExplorerView(options.view || 'differ');
   const compact = options.compact === true;
   const payload = options.payload || {};
@@ -197,7 +328,7 @@ function renderChangesRepoSection(section, repo, repoFiles, repoInfo, options) {
   const repoLabel = repo === changesOutsideRepoKey ? t('changes.outsideRepo') : compactHomePath(repo);
   // A missing repo has no working tree, so it gets no FROM/TO comparison controls either.
   const hasGit = repo && repo !== changesOutsideRepoKey && !repoIsMissing;
-  section.dataset.changesRepoMissing = repoIsMissing ? 'true' : 'false';
+  setRowDataset(section, 'changesRepoMissing', repoIsMissing ? 'true' : 'false');
   // Update repo header button (small HTML string — not performance sensitive)
   let head = section.querySelector(':scope > .changes-repo-head');
   if (!head) {
@@ -207,12 +338,10 @@ function renderChangesRepoSection(section, repo, repoFiles, repoInfo, options) {
   // A gone repo has no children, no refs and no open action, so it gets no disclosure control
   // and no child list -- one header row saying it is missing on disk, and nothing that offers to
   // reveal content that cannot exist.
-  if (repoIsMissing) delete head.dataset.changesRepoToggle;
-  else head.dataset.changesRepoToggle = repo;
-  if (repoIsMissing) head.removeAttribute('aria-expanded');
-  else head.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-  head.disabled = repoIsMissing;
-  head.innerHTML = `${repoIsMissing ? '' : disclosureTriangleHtml(!collapsed, 'changes-repo-caret')}<span class="changes-repo-title">${esc(repoLabel)}</span>${repoIsMissing ? `<span class="changes-repo-missing">${esc(t('filetab.missingTitle'))}</span>` : ''}${changesRepoTotalsHtml(repoInfo, repoFiles)}`;
+  setRowDataset(head, 'changesRepoToggle', repoIsMissing ? '' : repo);
+  setAttributeIfChanged(head, 'aria-expanded', repoIsMissing ? null : (collapsed ? 'false' : 'true'));
+  if (head.disabled !== repoIsMissing) head.disabled = repoIsMissing;
+  setInnerHtmlIfChanged(head, `${repoIsMissing ? '' : disclosureTriangleHtml(!collapsed, 'changes-repo-caret')}<span class="changes-repo-title">${esc(repoLabel)}</span>${repoIsMissing ? `<span class="changes-repo-missing">${esc(t('filetab.missingTitle'))}</span>` : ''}${changesRepoTotalsHtml(repoInfo, repoFiles)}`);
   // Update "Comparing FROM TO" refs row (per-repo, only for git repos)
   let refsRow = section.querySelector(':scope > .changes-repo-refs');
   if (hasGit && !collapsed) {
@@ -236,16 +365,16 @@ function renderChangesRepoSection(section, repo, repoFiles, repoInfo, options) {
           detail.className = 'changes-repo-refs-detail';
           refsRow.append(detail);
         }
-        detail.innerHTML = details;
+        setInnerHtmlIfChanged(detail, details);
       } else {
         detail?.remove();
       }
     } else {
-      refsRow.innerHTML = `<div class="changes-repo-refs-main">${diffRefComparisonLineHtml(repo)}</div>${details ? `<div class="changes-repo-refs-detail">${details}</div>` : ''}`;
+      setInnerHtmlIfChanged(refsRow, `<div class="changes-repo-refs-main">${diffRefComparisonLineHtml(repo)}</div>${details ? `<div class="changes-repo-refs-detail">${details}</div>` : ''}`);
     }
-    refsRow.hidden = false;
+    setHiddenIfChanged(refsRow, false);
   } else if (refsRow) {
-    refsRow.hidden = true;
+    setHiddenIfChanged(refsRow, true);
   }
   // Update file list using the unified tree renderer
   let fileList = section.querySelector(':scope > .changes-file-list');
@@ -257,17 +386,29 @@ function renderChangesRepoSection(section, repo, repoFiles, repoInfo, options) {
       fileList.className = 'changes-file-list';
       section.append(fileList);
     }
-    fileList.hidden = false;
+    setHiddenIfChanged(fileList, false);
+    yield true;
+    if (options.isCurrent && !options.isCurrent()) return false;
     if (repoFiles.length) {
-      renderChangedFileList(fileList, repo, repoFiles, {compact, view});
+      yield* renderChangedFileListSteps(fileList, repo, repoFiles, {
+        compact,
+        view,
+        yieldToInput: options.yieldToInput === true,
+        payload,
+        isCurrent: options.yieldToInput === true
+          ? (options.isCurrent || (() => fileExplorerSessionFilesState.payload === payload))
+          : null,
+      });
     } else if (options.loading === true) {
-      fileList.innerHTML = '';
+      setInnerHtmlIfChanged(fileList, '');
     } else {
-      fileList.innerHTML = `<div class="changes-empty">${esc(t('changes.emptyModified'))}</div>`;
+      setInnerHtmlIfChanged(fileList, `<div class="changes-empty">${esc(t('changes.emptyModified'))}</div>`);
     }
   } else if (fileList) {
-    fileList.hidden = true;
+    setHiddenIfChanged(fileList, true);
   }
+  yield true;
+  if (options.isCurrent && !options.isCurrent()) return false;
 }
 
 // Returns the static toolbar/header HTML for the main Changes panel.
@@ -343,7 +484,7 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
       <div class="changes-groups"></div>`;
   }
   const payload = fileExplorerSessionFilesState.payload;
-  const files = fileExplorerDifferFiles(payload);
+  const files = options.deferPreparation === true ? [] : fileExplorerDifferFiles(payload);
   const loading = sessionFilesPanelIsLoading(payload, files);
   const loaded = payload.loaded === true;
   const session = payload.session || fileExplorerSessionFilesTargetSession();
@@ -351,7 +492,8 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
   const warningHtml = (payload.warnings || []).map(warning => `<div class="changes-warning">${esc(messageDescriptorText(warning, String(warning || '')))}</div>`).join('');
   const full = options.full === true || view === 'differ';
   const showEmptyRepoSections = full && !loading && !files.length && payloadHasRenderableRepoSections(payload);
-  const empty = !loading && loaded && !files.length && !showEmptyRepoSections ? `<div class="changes-empty">${esc(t('changes.emptyModified'))}</div>` : '';
+  const empty = options.deferPreparation !== true && !loading && loaded && !files.length && !showEmptyRepoSections
+    ? `<div class="changes-empty">${esc(t('changes.emptyModified'))}</div>` : '';
   if (full) {
     return `
       <div class="changes-toolbar file-explorer-diff-toolbar">
@@ -360,7 +502,7 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
         ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
         <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}" aria-label="${esc(t('changes.refresh.title'))}">${esc(t('common.reload'))}</button>
       </div>
-      ${changesComparisonHeaderHtml(payload, files, {loading, inlineLoading: loading && payloadHasRenderableRepoSections(payload)})}
+      ${changesComparisonHeaderHtml(payload, files, {loading, deferSummary: options.deferPreparation === true, inlineLoading: loading && payloadHasRenderableRepoSections(payload)})}
       ${errorHtml}
       ${warningHtml}
       ${empty ? empty : '<div class="changes-groups"></div>'}`;
@@ -483,7 +625,18 @@ function replaceChangesStaticHtml(root, html, options = {}) {
   const scrollElement = options.scrollSelector ? root.querySelector(options.scrollSelector) : root;
   const scrollTop = scrollElement ? scrollElement.scrollTop : 0;
   const scrollLeft = scrollElement ? scrollElement.scrollLeft : 0;
-  root.innerHTML = html;
+  const groups = root.querySelector(':scope > .changes-groups');
+  const next = document.createElement('div');
+  next.innerHTML = html;
+  const nextGroups = next.querySelector(':scope > .changes-groups');
+  if (groups && nextGroups) {
+    const nextNodes = Array.from(next.children, child => child === nextGroups ? groups : child);
+    // Keep the mounted tree while session summaries change; replacing it blocks input on large caches.
+    for (const child of Array.from(root.children)) if (child !== groups) child.remove();
+    reconcileChildNodes(root, nextNodes);
+  } else {
+    root.innerHTML = html;
+  }
   root.__changesStaticHtml = html;
   const nextScrollElement = options.scrollSelector ? root.querySelector(options.scrollSelector) : root;
   if (nextScrollElement) restoreElementScrollPosition(nextScrollElement, scrollTop, scrollLeft);
@@ -695,16 +848,6 @@ function bindChangesPanel(panel) {
       renderFileExplorerChangesPanels({force: true});
       return;
     }
-    const folderToggle = event.target.closest('[data-changes-folder-toggle]');
-    if (folderToggle && panel.contains(folderToggle)) {
-      event.preventDefault();
-      const key = folderToggle.dataset.changesFolderToggle || '';
-      if (changesFolderCollapsed.has(key)) changesFolderCollapsed.delete(key);
-      else changesFolderCollapsed.add(key);
-      writeStoredChangesFolderCollapsed();
-      renderFileExplorerChangesPanels({force: true});
-      return;
-    }
     const diffRefReset = event.target.closest('[data-diff-ref-reset]');
     if (diffRefReset && panel.contains(diffRefReset)) {
       event.preventDefault();
@@ -841,7 +984,8 @@ const differTreeInteractionController = createSharedTreeInteractionController({
   selectFromClick(row, id, event) {
     return updateFileTreeSelectionFromClick(row, id || differTreeRowPath(row), event);
   },
-  isExpanded: row => row?.dataset?.kind === 'dir' && row.getAttribute?.('aria-expanded') === 'true',
+  // A second input can arrive before the yielding renderer updates the row's disclosure.
+  isExpanded: row => row?.dataset?.kind === 'dir' && !changesFolderCollapsed.has(differTreeRowPath(row)),
   setExpanded(row, expanded) {
     const key = row?.dataset?.changesFolderToggle || row?.dataset?.openChangeDirectory || row?.dataset?.path || '';
     if (!key || row?.dataset?.kind !== 'dir') return;

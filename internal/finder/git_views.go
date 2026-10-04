@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -107,31 +108,86 @@ func displayGitRootPath(requested, relative, resolvedRoot string) string {
 	return candidate
 }
 
+// relativePathWithinGitRoot accepts alternate mount paths for the same repository while still
+// requiring the pinned Git root to be an ancestor of the requested directory.
+func relativePathWithinGitRoot(root, target string, targetDirectory, rootDirectory *os.File) (string, error) {
+	relative, err := filepath.Rel(root, target)
+	if err == nil && !filepath.IsAbs(relative) && relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+		return relative, nil
+	}
+
+	pinnedRoot, err := rootDirectory.Stat()
+	if err != nil {
+		return "", err
+	}
+	pinnedIdentity := identityFor(pinnedRoot)
+	ancestor := filepath.Clean(target)
+	components := make([]string, 0)
+	current := targetDirectory
+	for {
+		info, statErr := current.Stat()
+		if statErr == nil && sameDescriptorIdentity(identityFor(info), pinnedIdentity) {
+			for left, right := 0, len(components)-1; left < right; left, right = left+1, right-1 {
+				components[left], components[right] = components[right], components[left]
+			}
+			if current != targetDirectory {
+				_ = current.Close()
+			}
+			return filepath.Join(components...), nil
+		}
+		parentPath := filepath.Dir(ancestor)
+		if parentPath == ancestor {
+			break
+		}
+		components = append(components, filepath.Base(ancestor))
+		parentFD, openErr := platformOpenat(int(current.Fd()), "..", syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
+		if openErr != nil {
+			if current != targetDirectory {
+				_ = current.Close()
+			}
+			return "", openErr
+		}
+		if current != targetDirectory {
+			_ = current.Close()
+		}
+		current = os.NewFile(uintptr(parentFD), parentPath)
+		ancestor = parentPath
+	}
+	if current != targetDirectory {
+		_ = current.Close()
+	}
+	return "", errGitPathOutsideRepository
+}
+
 var (
-	errGitOutputLimit      = errors.New("Git output exceeded limit")
-	errGitPathEncoding     = errors.New("Git path is not valid UTF-8")
-	errGitNamespaceChanged = errors.New("Git repository changed during the operation")
+	errGitOutputLimit           = errors.New("Git output exceeded limit")
+	errGitPathEncoding          = errors.New("Git path is not valid UTF-8")
+	errGitPathOutsideRepository = errors.New("path is outside Git repository")
+	errGitNamespaceChanged      = errors.New("Git repository changed during the operation")
 )
 
 type gitNamespace struct {
-	gitDir         *os.File
-	commonDir      *os.File
-	objects        *os.File
-	gitDirPath     string
-	commonPath     string
-	objectsPath    string
-	alternates     string
-	alternateID    descriptorIdentity
-	alternateSet   bool
-	layoutCache    *gitObjectLayoutCache
-	snapshotMu     sync.Mutex
-	snapshotRoot   string
-	snapshotWork   string
-	snapshotGit    string
-	snapshotCommon string
-	snapshotErr    error
-	snapshotReady  bool
-	workTreePath   string
+	gitDir                *os.File
+	commonDir             *os.File
+	objects               *os.File
+	gitDirPath            string
+	commonPath            string
+	objectsPath           string
+	alternates            string
+	alternateID           descriptorIdentity
+	alternateSet          bool
+	layoutCache           *gitObjectLayoutCache
+	snapshotMu            sync.Mutex
+	snapshotRoot          string
+	snapshotWork          string
+	snapshotGit           string
+	snapshotCommon        string
+	snapshotObjects       string
+	objectSnapshotRelease func()
+	objectSnapshotCache   *darwinGitObjectSnapshotCache
+	snapshotErr           error
+	snapshotReady         bool
+	workTreePath          string
 }
 
 func (namespace *gitNamespace) identity() string {
@@ -168,6 +224,9 @@ func (namespace *gitNamespace) close() {
 	}
 	if namespace.snapshotRoot != "" {
 		removeDarwinSnapshot(namespace.snapshotRoot)
+	}
+	if namespace.objectSnapshotRelease != nil {
+		namespace.objectSnapshotRelease()
 	}
 }
 
@@ -305,21 +364,32 @@ func (s *Service) openGitView(ctx context.Context, raw string) (*gitView, *Error
 		return nil, finderErr
 	}
 	view.namespace = namespace
-	relative, err := filepath.Rel(root, resolved)
-	if err != nil || relative == "." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) || filepath.IsAbs(relative) {
+	rootDirectory, rootErr := openGitRootDescriptor(ctx, root, requested)
+	if rootErr != nil {
+		view.close()
+		return nil, rootErr
+	}
+	parentRelative, relativeErr := relativePathWithinGitRoot(root, parentResolved, view.directory, rootDirectory)
+	if relativeErr != nil {
+		_ = rootDirectory.Close()
+		view.close()
+		return nil, forbidden(requested, "fs.error.outsideRoots", "path is outside the Git repository")
+	}
+	relative := filepath.Join(parentRelative, filepath.Base(resolved))
+	if parentRelative == "." || parentRelative == "" {
+		relative = filepath.Base(resolved)
+	}
+	if relative == "." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) || filepath.IsAbs(relative) {
+		_ = rootDirectory.Close()
 		view.close()
 		return nil, forbidden(requested, "fs.error.outsideRoots", "path is outside the Git repository")
 	}
 	view.repo = displayGitRootPath(requested, relative, root)
 	view.relative = filepath.ToSlash(relative)
 	if !utf8.ValidString(view.relative) {
+		_ = rootDirectory.Close()
 		view.close()
 		return nil, &Error{Status: http.StatusUnprocessableEntity, Code: "git_path_encoding", MessageKey: "fs.error.gitPathEncoding", Path: requested, Message: errGitPathEncoding.Error()}
-	}
-	rootDirectory, rootErr := openGitRootDescriptor(ctx, root, requested)
-	if rootErr != nil {
-		view.close()
-		return nil, rootErr
 	}
 	_ = view.directory.Close()
 	view.directory = rootDirectory
@@ -568,7 +638,7 @@ func runGitBoundedWithWorktree(ctx context.Context, directory, working *os.File,
 	if namespace != nil {
 		gitDir, commonDir, objects, workTree := platformGitPath(namespace.gitDir, namespaceFDs["git"]), platformGitPath(namespace.commonDir, namespaceFDs["common"]), platformGitPath(namespace.objects, namespaceFDs["objects"]), platformGitPath(directoryCopy, 3)
 		if runtime.GOOS == "darwin" {
-			gitDir, commonDir, objects, workTree = namespace.snapshotGit, namespace.snapshotCommon, filepath.Join(namespace.snapshotCommon, "objects"), namespace.snapshotWork
+			gitDir, commonDir, objects, workTree = namespace.snapshotGit, namespace.snapshotCommon, namespace.snapshotObjects, namespace.snapshotWork
 			if includeWorktree {
 				workTree = "."
 			}

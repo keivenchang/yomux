@@ -423,10 +423,12 @@ def run_local_rpc_service(
     # daemon so no service can go back to graceful-only. The launching
     # supervisor's identity is captured now, while that process is still
     # provable; after it exits, `getppid()` would name init and prove nothing.
+    service_identity = current_host_identity()
     lifetime_owner = ServiceLifetimeOwner.for_launching_parent(
         service_name,
         stop_event,
         parent_pid=launching_parent_pid,
+        host_identity=service_identity,
     )
     lifetime_path = socket_path.with_suffix(".lifetime.json")
     preflight_mutable_roots(unix_sockets=[socket_path])
@@ -538,6 +540,10 @@ def run_local_rpc_service(
                                 }, b""
                             finally:
                                 _CONNECTION_VERDICT.value = None
+                            # The registry's final startup probe requires the responder's
+                            # birth identity on the wire, including a late-ready daemon.
+                            if response.get("ok") is True and payload.get("action") in ("ping", "status"):
+                                response = {**service_identity.process_record_fields(), **response}
                             with capacity_lock:
                                 response_rejection_count = capacity_rejections
                             response_envelope = None if legacy or envelope is None else LocalRpcEnvelope(

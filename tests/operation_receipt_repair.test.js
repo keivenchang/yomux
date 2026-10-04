@@ -1,6 +1,6 @@
 const {
   assert,
-  loadYolomux,
+  loadYomux,
   flushAsyncWork,
   testAsync,
   runSuites,
@@ -8,7 +8,7 @@ const {
 
 async function runOperationReceiptRepairSuite() {
   await testAsync('a dropped operation terminal repairs from its durable receipt stream', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const sources = [];
     api.setEventSourceConstructorForTest(class {
       constructor(url) {
@@ -72,7 +72,7 @@ async function runOperationReceiptRepairSuite() {
   });
 
   await testAsync('pagehide closes an operation repair stream and preserves a retry marker', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const sources = [];
     api.setEventSourceConstructorForTest(class {
       constructor(url) {
@@ -108,7 +108,7 @@ async function runOperationReceiptRepairSuite() {
   });
 
   await testAsync('a repair stream error retries after the shared stream reconnects', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const sources = [];
     api.setEventSourceConstructorForTest(class {
       constructor(url) {

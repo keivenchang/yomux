@@ -34,6 +34,7 @@ from tests.browser_helpers.browser_layout import (
     stop_browser_server,
     stop_isolated_browser_app,
 )
+from tests.gate_harness import run_fixture_cleanup_phases
 
 FETCH_PROBE_SOURCE = """
 (() => {
@@ -150,7 +151,7 @@ def open_root(driver, root: str, expected_row: str, timeout: float) -> None:
                 const panel = document.querySelector('.file-explorer-panel');
                 if (!panel) throw new Error('Finder panel is missing');
                 await refreshFileExplorerPanelTree(panel, {force: true});
-                const waitFor = window.__yolomuxTestWaitFor;
+                const waitFor = window.__yomuxTestWaitFor;
                 await waitFor(() => document.querySelectorAll('.file-explorer-panel .file-tree-row').length > 0, {
                   timeoutMs: 6000,
                   description: 'Finder tree render',
@@ -490,10 +491,8 @@ def run_measurement(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, idle_sec
         server, thread = start_browser_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
         base_url = f"http://127.0.0.1:{server.server_address[1]}"
         marker = measurement_marker()
-        drivers = {
-            "client-a": new_chrome_driver(window_size=(1280, 900)),
-            "client-b": new_chrome_driver(window_size=(1280, 900)),
-        }
+        for name in ("client-a", "client-b"):
+            drivers[name] = new_chrome_driver(window_size=(1280, 900))
         for driver in drivers.values():
             install_fetch_probe(driver, marker)
         search = saved_layout_search(runtime.sessions[0], fixture["root"])
@@ -585,10 +584,11 @@ def run_measurement(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, idle_sec
     finally:
         # One shared owner retires both drivers: bounded quit -> TERM -> KILL -> reap -> final proof,
         # never a bare best-effort quit that leaves a chromedriver behind when quit() hangs.
-        retire_all([WebDriverLease.from_driver(driver) for driver in drivers.values()])
+        phases = [("drivers", lambda: retire_all([WebDriverLease.from_driver(driver) for driver in drivers.values()]))]
         if server is not None and thread is not None:
-            stop_browser_server(server, thread)
-        stop_isolated_browser_app(runtime)
+            phases.append(("server", lambda: stop_browser_server(server, thread)))
+        phases.append(("isolated runtime", lambda: stop_isolated_browser_app(runtime)))
+        run_fixture_cleanup_phases("Finder measurement", phases)
 
 
 def main(argv: list[str] | None = None) -> int:

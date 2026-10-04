@@ -10,6 +10,7 @@ from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 from tests.gate_harness import assert_fixture_client_event_demand_claimed
 from tests.gate_harness import claim_fixture_client_event_demand
+from tests.gate_harness import release_fixture_client_event_demand
 from tests.tmux_runtime import run_isolated_tmux
 
 
@@ -134,6 +135,48 @@ def test_dockview_active_tab_switch_uses_mounted_panel_without_layout_reload(bro
     assert result["elapsedMs"] < 300, result
 
 
+def test_dockview_native_click_leaves_only_one_tab_active_in_its_group(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
+    wait_for_dockview(browser, min_tabs=2)
+
+    initial = browser.execute_script(
+        """
+        return {
+          active: activeItemForSide('left'),
+        };
+        """
+    )
+    target = "2" if initial["active"] == "1" else "1"
+    for index in range(20):
+        point = browser.execute_script(
+            """
+            const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${arguments[0]}"]`);
+            const rect = tab.getBoundingClientRect();
+            return {x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2)};
+            """,
+            target,
+        )
+        browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": point["x"], "y": point["y"], "button": "none"})
+        browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mousePressed", "x": point["x"], "y": point["y"], "button": "left", "buttons": 1, "clickCount": 1})
+        browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": point["x"], "y": point["y"], "button": "left", "buttons": 0, "clickCount": 1})
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return activeItemForSide('left') === arguments[0]", target))
+        result = browser.execute_script(
+            """
+            const group = document.querySelector('.dv-groupview');
+            const tabs = [...(group?.querySelectorAll('.dockview-pane-tab') || [])].map(tab => ({
+              item: tab.dataset.paneTab,
+              shellActive: tab.classList.contains('active'),
+              dockviewActive: tab.closest('.dv-tab')?.classList.contains('dv-active-tab') === true,
+            }));
+            return {active: activeItemForSide('left'), tabs};
+            """
+        )
+        assert result["active"] == target, {"index": index, **result}
+        assert [tab["item"] for tab in result["tabs"] if tab["shellActive"]] == [target], {"index": index, **result}
+        assert [tab["item"] for tab in result["tabs"] if tab["dockviewActive"]] == [target], {"index": index, **result}
+        target = "1" if target == "2" else "2"
+
+
 def test_dockview_clicking_xterm_tab_mounts_visible_terminal(browser, tmp_path):
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
     wait_for_dockview(browser, min_tabs=2)
@@ -144,7 +187,7 @@ def test_dockview_clicking_xterm_tab_mounts_visible_terminal(browser, tmp_path):
         const done = arguments[0];
         (async () => {
           try {
-            const result = await window.__yolomuxTestWaitFor(() => {
+            const result = await window.__yomuxTestWaitFor(() => {
               const panel = document.getElementById('panel-2');
               const container = document.getElementById('term-2');
               const surface = container?.querySelector('.xterm');
@@ -196,8 +239,39 @@ def test_dockview_real_xterm_tab_switch_accepts_input_and_output(browser, monkey
         })
         browser.get(f"http://127.0.0.1:{server.server_address[1]}/?{query}")
         assert_live_runtime_boot_healthy(browser, "real-xterm-dockview-switch", timeout=12)
+        tabber_opened = browser.execute_async_script(
+            "const done=arguments[arguments.length-1]; openTabberActivityOverview().then(() => Promise.all([loadAutoStatuses.request, tabberActivityState.request])).then(() => done(true), error => done({error:String(error)}));"
+        )
+        assert tabber_opened is True, tabber_opened
+        viewport_before = browser.execute_script(
+            "return {x: window.scrollX, y: window.scrollY, top: document.querySelector('.topbar').getBoundingClientRect().top};"
+        )
+        browser.execute_script(
+            """
+            window.__yomuxTabSwitchPhaseTwoDelayMs = 300;
+            window.__phaseTwo = [];
+            window.__initialActivationPaints = clientPerfSummary().find(counter => counter.name === 'tabActivationPaint')?.count || 0;
+            window.__originalSessionSideSync = noteFileExplorerChangesSessionInteraction;
+            noteFileExplorerChangesSessionInteraction = (...args) => {
+              window.__phaseTwo.push(String(args[0] || ''));
+              return window.__originalSessionSideSync(...args);
+            };
+            """
+        )
         for index, session in enumerate((second, first, second)):
-            click_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{session}"]')
+            if index == 2:
+                assert browser.execute_script(
+                    "return itemInLayout(arguments[0]) && !activeSessions.includes(arguments[0]);", session,
+                ), "Tabber must exercise the background-tab activation path"
+            selector = (
+                f'#panel-__tabber__ .file-tree-row[data-tabber-type="session"][data-tabber-session="{session}"] .file-tree-name'
+                if index == 2 else f'.dockview-pane-tab[data-pane-tab="{session}"]'
+            )
+            click_visible_selector(browser, selector)
+            assert browser.execute_script(
+                "return document.activeElement === terminals.get(arguments[0])?.term?.textarea;",
+                session,
+            ), "tab activation must focus the real xterm textarea before deferred session-side work"
             WebDriverWait(browser, 12).until(
                 lambda driver: driver.execute_script(
                     """
@@ -219,6 +293,8 @@ def test_dockview_real_xterm_tab_switch_accepts_input_and_output(browser, monkey
                     session,
                 )
             )
+            if index == 0:
+                assert browser.execute_script("return window.__phaseTwo.length") == 0, "xterm focus must land before the deliberately delayed session-side sync"
             marker = f"dockview-switch-input-{index}"
             ready_path = tmp_path / f"dockview-switch-{index}.ready"
             acknowledgment_path = tmp_path / f"dockview-switch-{index}.ack"
@@ -255,9 +331,23 @@ def test_dockview_real_xterm_tab_switch_accepts_input_and_output(browser, monkey
             )
             WebDriverWait(browser, 12).until(lambda _driver: acknowledgment_path.is_file())
             assert acknowledgment_path.read_text(encoding="utf-8") == f"{marker}\n"
+            WebDriverWait(browser, 5).until(lambda driver: driver.execute_script(
+                "return !document.querySelector('.pane-tab.tab-activation-pending') && (clientPerfSummary().find(counter => counter.name === 'tabActivationPaint')?.count || 0) - window.__initialActivationPaints === arguments[0]",
+                index + 1,
+            ))
+            assert browser.execute_script(
+                "return {x: window.scrollX, y: window.scrollY, top: document.querySelector('.topbar').getBoundingClientRect().top};"
+            ) == viewport_before, "native terminal focus must preserve the viewport and topbar geometry"
     finally:
-        stop_browser_server(server, thread, browser=browser)
-        stop_isolated_browser_app(runtime)
+        browser.execute_script(
+            """
+            if (window.__originalSessionSideSync) noteFileExplorerChangesSessionInteraction = window.__originalSessionSideSync;
+            delete window.__originalSessionSideSync;
+            delete window.__yomuxTabSwitchPhaseTwoDelayMs;
+            delete window.__initialActivationPaints;
+            """
+        )
+        stop_browser_fixture(server, thread, runtime, browser=browser)
 
 
 def test_dockview_delayed_tab_activation_still_focuses_terminal(browser, monkeypatch, tmp_path):
@@ -278,21 +368,45 @@ def test_dockview_delayed_tab_activation_still_focuses_terminal(browser, monkeyp
                 second,
             )
         )
+        point = browser.execute_script(
+            """
+            const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(arguments[0])}"]`);
+            const rect = tab.getBoundingClientRect();
+            return {x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2)};
+            """,
+            second,
+        )
+        browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", **point, "button": "none"})
+        browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mousePressed", **point, "button": "left", "buttons": 1, "clickCount": 1})
+        expired = browser.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1];
+            const target = arguments[0];
+            const heldAt = performance.now();
+            (async () => {
+              try {
+                await window.__yomuxTestWaitFor(
+                  () => performance.now() - heldAt >= Math.max(DOCKVIEW_PRE_ACTIVATION_CAPTURE_TTL_MS, DOCKVIEW_PENDING_ACTIVATION_TTL_MS)
+                    && !panelNodes.get(arguments[1])?._dockviewPreActivationCaptured
+                    && dockviewLayoutState.pendingUserPanelActivation !== target,
+                  {timeoutMs: 5000, description: 'pre-activation capture expiry'},
+                );
+                done(true);
+              } catch (error) { done({error: String(error?.stack || error)}); }
+            })();
+            """,
+            second,
+            first,
+        )
+        assert expired is True, expired
+        browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", **point, "button": "left", "buttons": 0, "clickCount": 1})
         metrics = browser.execute_async_script(
             """
             const done = arguments[arguments.length - 1];
             const target = arguments[0];
             (async () => {
               try {
-                const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(target)}"]`);
-                tab.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, cancelable: true, pointerId: 7, pointerType: 'mouse', button: 0, buttons: 1}));
-                await window.__yolomuxTestWaitFor(
-                  () => !panelNodes.get(focusedPanelItem)?._dockviewPreActivationCaptured,
-                  {timeoutMs: 5000, description: 'pre-activation capture expiry'},
-                );
-                tab.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, button: 0}));
-                dockviewLayoutState.api?.getPanel?.(target)?.api?.setActive?.();
-                await window.__yolomuxTestWaitFor(
+                await window.__yomuxTestWaitFor(
                   () => document.activeElement === terminals.get(target)?.term?.textarea,
                   {timeoutMs: 5000, description: 'delayed Dockview tab terminal focus'},
                 );
@@ -306,8 +420,7 @@ def test_dockview_delayed_tab_activation_still_focuses_terminal(browser, monkeyp
         )
         assert "error" not in metrics and metrics == {"active": second, "focused": True}, metrics
     finally:
-        stop_browser_server(server, thread, browser=browser)
-        stop_isolated_browser_app(runtime)
+        stop_browser_fixture(server, thread, runtime, browser=browser)
 
 
 def test_dockview_prosemirror_failure_does_not_block_xterm_switch(browser, monkeypatch, tmp_path):
@@ -343,7 +456,7 @@ def test_dockview_prosemirror_failure_does_not_block_xterm_switch(browser, monke
                 const originalLoader = window.loadProseMirrorApi;
                 window.loadProseMirrorApi = () => Promise.reject(new Error('ProseMirror did not initialize'));
                 renderFileEditorPanel(panel, item);
-                await window.__yolomuxTestWaitFor(() => panel._pmError && panel.querySelector('.file-editor-prosemirror-error'), {timeoutMs: 12000, description: 'failed ViewEditor state'});
+                await window.__yomuxTestWaitFor(() => panel._pmError && panel.querySelector('.file-editor-prosemirror-error'), {timeoutMs: 12000, description: 'failed ViewEditor state'});
                 window.loadProseMirrorApi = originalLoader;
                 done({item, error: panel._pmError, state: panel.querySelector('.file-editor-preview-pane-panel')?.dataset.prosemirrorState || ''});
               } catch (error) {
@@ -377,8 +490,7 @@ def test_dockview_prosemirror_failure_does_not_block_xterm_switch(browser, monke
         assert "ProseMirror ViewEditor failed" in result["error"] and result["state"] == "error", result
         assert result["errors"] == [] and result["rejections"] == [], result
     finally:
-        stop_browser_server(server, thread, browser=browser)
-        stop_isolated_browser_app(runtime)
+        stop_browser_fixture(server, thread, runtime, browser=browser)
 
 
 def test_dockview_tmux_menu_retargets_after_terminal_tab_click(browser, tmp_path):
@@ -420,7 +532,7 @@ def test_dockview_tab_click_captures_editor_scroll_before_dockview_detach(browse
           destroyProseMirrorPanel(panel);
           delete panel._pmError;
           renderFileEditorPanel(panel, item);
-          await window.__yolomuxTestWaitFor(() => panel._pmView || panel._pmError, {timeoutMs: 5000});
+          await window.__yomuxTestWaitFor(() => panel._pmView || panel._pmError, {timeoutMs: 5000});
           const preview = panel.querySelector('.file-editor-preview-pane-panel');
           preview.scrollTop = 100;
           capturePaneViewState(item, panel);
@@ -466,7 +578,7 @@ def test_dockview_quick_open_keeps_distinct_notes_files_open(browser, tmp_path):
         const yearPath = arguments[1];
         const done = arguments[arguments.length - 1];
         const originalFetch = window.fetch.bind(window);
-        const waitFor = window.__yolomuxTestWaitFor;
+        const waitFor = window.__yomuxTestWaitFor;
         window.fetch = async (input, options = {}) => {
           const url = new URL(String(input), 'https://localhost');
           if (url.pathname === '/api/fs/search' || url.pathname === '/api/batch/search') {
@@ -553,7 +665,7 @@ def test_dockview_quick_open_hides_stale_rows_for_a_queued_new_query(browser, tm
         const currentPath = arguments[1];
         const done = arguments[arguments.length - 1];
         const originalFetch = window.fetch.bind(window);
-        const waitFor = window.__yolomuxTestWaitFor;
+        const waitFor = window.__yomuxTestWaitFor;
         let releaseCurrent = null;
         window.fetch = async (input, options = {}) => {
           const url = new URL(String(input), 'https://localhost');
@@ -609,7 +721,7 @@ def test_dockview_quick_open_highlights_contiguous_path_match(browser, tmp_path)
         const path = arguments[0];
         const done = arguments[arguments.length - 1];
         const originalFetch = window.fetch.bind(window);
-        const waitFor = window.__yolomuxTestWaitFor;
+        const waitFor = window.__yomuxTestWaitFor;
         window.fetch = async (input, options = {}) => {
           const url = new URL(String(input), 'https://localhost');
           if (url.pathname === '/api/fs/search' || url.pathname === '/api/batch/search') {
@@ -1376,6 +1488,10 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
         """
         const done = arguments[0];
         openTabberActivityOverview()
+          .then(async () => {
+            // Opening the pane does not settle the startup status/activity refresh that owns its tree.
+            await Promise.all([loadAutoStatuses.request, tabberActivityState.request]);
+          })
           .then(() => requestAnimationFrame(() => requestAnimationFrame(() => done(true))))
           .catch(error => done(String(error)));
         """
@@ -1386,179 +1502,257 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
         )
     )
     wait_for_dockview_tab_geometry(browser, min_tabs=6, min_width=45)
-    ownership = claim_fixture_client_event_demand(browser)
-    assert ownership["bound"]["sourceOrigin"] == ownership["bound"]["pageOrigin"]
-    setup = browser.execute_script(
-        """
-        clearClientPerfCounters();
-        const activationStartedAt = new Map();
-        const originalCommit = dockviewCommitPanelActivation;
-        dockviewCommitPanelActivation = (item, options) => {
-          const started = activationStartedAt.get(String(item || ''));
-          const commitStarted = performance.now();
-          const result = originalCommit(item, options);
-          if (started !== undefined) {
-            window.__tabSwitchPerf.commitSamples.push(performance.now() - started);
-            window.__tabSwitchPerf.commitWorkSamples.push(performance.now() - commitStarted);
-            activationStartedAt.delete(String(item || ''));
-          }
-          return result;
-        };
-        const api = dockviewLayoutState.api;
-        const originalFromJson = api.fromJSON.bind(api);
-        let fromJsonCalls = 0;
-        api.fromJSON = (...args) => {
-          fromJsonCalls += 1;
-          return originalFromJson(...args);
-        };
-        const originalRefresh = refreshTabberPanels;
-        let fullRefreshCalls = 0;
-        refreshTabberPanels = (...args) => {
-          fullRefreshCalls += 1;
-          return originalRefresh(...args);
-        };
-        const firstPanel = panelNodes.get('1');
-        const secondPanel = panelNodes.get('2');
-        firstPanel.__tabSwitchSentinel = 'first';
-        secondPanel.__tabSwitchSentinel = 'second';
-        window.__tabSwitchPerf = {samples: [], commitSamples: [], commitWorkSamples: [], immediate: [], fromJsonCalls: () => fromJsonCalls, fullRefreshCalls: () => fullRefreshCalls, firstPanel, secondPanel};
-        document.addEventListener('pointerdown', event => {
-          const tab = event.target.closest?.('.dockview-pane-tab[data-pane-tab]');
-          const item = tab?.dataset?.paneTab || '';
-          if (!['1', '2'].includes(item)) return;
-          const slot = slotForItem(item);
-          const started = performance.now();
-          activationStartedAt.set(item, started);
-          requestAnimationFrame(() => {
-            const active = activeItemForSide(slot) === item;
-            const activeClass = tab.classList.contains('active') || tab.closest('.dv-tab')?.classList.contains('dv-active-tab') === true;
-            window.__tabSwitchPerf.samples.push(performance.now() - started);
-            window.__tabSwitchPerf.immediate.push(active && activeClass);
-          });
-        }, true);
-        return {
-          initial: activeItemForSide(slotForItem('1')),
-          rows: document.querySelectorAll('[data-tabber-tree] .file-tree-row').length,
-          virtualRows: document.querySelectorAll('[data-tabber-tree] .file-tree-row[data-tabber-type="tab"]').length,
-          fileRow: Boolean(document.querySelector(`[data-tabber-item="${CSS.escape(arguments[0])}"]`)),
-        };
-        """,
-        file_item,
-    )
-    assert setup["rows"] >= 41, setup
-    assert setup["virtualRows"] >= 1 and setup["fileRow"] is True, setup
-
-    target = "2" if setup["initial"] == "1" else "1"
-    for index in range(30):
-        point = browser.execute_script(
+    try:
+        ownership = claim_fixture_client_event_demand(browser)
+        assert ownership["bound"]["sourceOrigin"] == ownership["bound"]["pageOrigin"]
+        prepared = browser.execute_async_script(
             """
-            const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${arguments[0]}"]`);
-            const rect = tab.getBoundingClientRect();
-            return {x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2)};
-            """,
-            target,
+            const done = arguments[arguments.length - 1];
+            (async () => {
+              await Promise.all([loadAutoStatuses.request, tabberActivityState.request]);
+              const originalFetch = window.fetch;
+              const state = window.__tabSwitchActivity = {heldCalls: 0, pollBefore: runtimeIntervalDiagnostics('auto-approve')[0].lastStartedAtMs};
+              state.barrier = new Promise(resolve => { state.release = resolve; });
+              state.restore = async () => {
+                window.fetch = originalFetch;
+                state.release();
+                try { await Promise.all([state.promise, loadAutoStatuses.request]); }
+                finally { delete window.__tabSwitchActivity; }
+              };
+              // The Go status recovery poll shares this request; keep it active while holding only its response.
+              window.fetch = async (...args) => {
+                const input = args[0];
+                const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+                if (url.pathname === '/api/activity') {
+                  state.heldCalls += 1;
+                  await state.barrier;
+                }
+                return originalFetch.apply(window, args);
+              };
+              state.promise = fetchTabberActivity({visible: true, allowHidden: true});
+              state.request = tabberActivityState.request;
+              return true;
+            })().then(done, error => done({error: String(error)}));
+            """
         )
-        browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": point["x"], "y": point["y"], "button": "none"})
-        browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mousePressed", "x": point["x"], "y": point["y"], "button": "left", "buttons": 1, "clickCount": 1})
-        browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": point["x"], "y": point["y"], "button": "left", "buttons": 0, "clickCount": 1})
-        expected_samples = index + 1
-        try:
-            WebDriverWait(browser, 2).until(
-                lambda driver: driver.execute_script(
-                    "return window.__tabSwitchPerf.samples.length >= arguments[0] && activeItemForSide(slotForItem(arguments[1])) === arguments[1]",
-                    expected_samples,
-                    target,
-                )
-            )
-        except TimeoutException as exc:
-            diagnostic = browser.execute_script(
+        assert prepared is True, prepared
+        WebDriverWait(browser, 10).until(lambda driver: driver.execute_script(
+            "const state=window.__tabSwitchActivity; return state?.heldCalls === 1"
+            " && runtimeIntervalDiagnostics('auto-approve')[0].lastStartedAtMs > state.pollBefore"
+            " && Boolean(loadAutoStatuses.request) && tabberActivityState.request === state.request;"
+        ))
+        setup = browser.execute_script(
+            """
+            clearClientPerfCounters();
+            const activationStartedAt = new Map();
+            const originalCommit = dockviewCommitPanelActivation;
+            const api = dockviewLayoutState.api;
+            const originalFromJson = api.fromJSON;
+            let fromJsonCalls = 0;
+            const originalRefresh = refreshTabberPanels;
+            let fullRefreshCalls = 0;
+            const fullRefreshStacks = [];
+            const firstPanel = panelNodes.get('1');
+            const secondPanel = panelNodes.get('2');
+            firstPanel.__tabSwitchSentinel = 'first';
+            secondPanel.__tabSwitchSentinel = 'second';
+            const perf = window.__tabSwitchPerf = {samples: [], commitSamples: [], commitWorkSamples: [], immediate: [], fromJsonCalls: () => fromJsonCalls, fullRefreshCalls: () => fullRefreshCalls, fullRefreshStacks, firstPanel, secondPanel};
+            const measurePointer = event => {
+              const tab = event.target.closest?.('.dockview-pane-tab[data-pane-tab]');
+              const item = tab?.dataset?.paneTab || '';
+              if (!['1', '2'].includes(item)) return;
+              const slot = slotForItem(item);
+              const started = performance.now();
+              activationStartedAt.set(item, started);
+              requestAnimationFrame(() => {
+                const active = activeItemForSide(slot) === item;
+                const activeClass = tab.classList.contains('active') || tab.closest('.dv-tab')?.classList.contains('dv-active-tab') === true;
+                perf.samples.push(performance.now() - started);
+                perf.immediate.push(active && activeClass);
+              });
+            };
+            perf.restore = () => {
+              dockviewCommitPanelActivation = originalCommit;
+              api.fromJSON = originalFromJson;
+              refreshTabberPanels = originalRefresh;
+              document.removeEventListener('pointerdown', measurePointer, true);
+              delete firstPanel.__tabSwitchSentinel;
+              delete secondPanel.__tabSwitchSentinel;
+              delete window.__tabSwitchPerf;
+            };
+            dockviewCommitPanelActivation = (item, options) => {
+              const started = activationStartedAt.get(String(item || ''));
+              const commitStarted = performance.now();
+              const result = originalCommit(item, options);
+              if (started !== undefined) {
+                perf.commitSamples.push(performance.now() - started);
+                perf.commitWorkSamples.push(performance.now() - commitStarted);
+                activationStartedAt.delete(String(item || ''));
+              }
+              return result;
+            };
+            api.fromJSON = (...args) => {
+              fromJsonCalls += 1;
+              return originalFromJson.apply(api, args);
+            };
+            refreshTabberPanels = (...args) => {
+              fullRefreshCalls += 1;
+              fullRefreshStacks.push(new Error().stack);
+              return originalRefresh(...args);
+            };
+            document.addEventListener('pointerdown', measurePointer, true);
+            return {
+              initial: activeItemForSide(slotForItem('1')),
+              rows: document.querySelectorAll('[data-tabber-tree] .file-tree-row').length,
+              virtualRows: document.querySelectorAll('[data-tabber-tree] .file-tree-row[data-tabber-type="tab"]').length,
+              fileRow: Boolean(document.querySelector(`[data-tabber-item="${CSS.escape(arguments[0])}"]`)),
+            };
+            """,
+            file_item,
+        )
+        assert setup["rows"] >= 41, setup
+        assert setup["virtualRows"] >= 1 and setup["fileRow"] is True, setup
+
+        target = "2" if setup["initial"] == "1" else "1"
+        for index in range(30):
+            point = browser.execute_script(
                 """
                 const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${arguments[0]}"]`);
-                const rect = tab?.getBoundingClientRect();
-                const hit = document.elementFromPoint(arguments[1], arguments[2]);
-                return {
-                  target: arguments[0],
-                  active: activeItemForSide(slotForItem(arguments[0])),
-                  samples: window.__tabSwitchPerf.samples.length,
-                  hitClass: hit?.className || '',
-                  hitItem: hit?.closest?.('[data-pane-tab]')?.dataset?.paneTab || '',
-                  tabRect: rect ? {left: rect.left, top: rect.top, width: rect.width, height: rect.height} : null,
-                  scrollY: window.scrollY,
-                  documentScrollTop: document.documentElement.scrollTop,
-                  visiblePopovers: document.querySelectorAll('.pane-tab-detached-popover.popover-open').length,
-                };
+                const rect = tab.getBoundingClientRect();
+                return {x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2)};
                 """,
                 target,
-                point["x"],
-                point["y"],
             )
-            raise AssertionError({"index": index, "point": point, **diagnostic}) from exc
-        target = "1" if target == "2" else "2"
+            browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": point["x"], "y": point["y"], "button": "none"})
+            browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mousePressed", "x": point["x"], "y": point["y"], "button": "left", "buttons": 1, "clickCount": 1})
+            browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": point["x"], "y": point["y"], "button": "left", "buttons": 0, "clickCount": 1})
+            expected_samples = index + 1
+            try:
+                WebDriverWait(browser, 2).until(
+                    lambda driver: driver.execute_script(
+                        "return window.__tabSwitchPerf.samples.length >= arguments[0] && activeItemForSide(slotForItem(arguments[1])) === arguments[1]",
+                        expected_samples,
+                        target,
+                    )
+                )
+            except TimeoutException as exc:
+                diagnostic = browser.execute_script(
+                    """
+                    const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${arguments[0]}"]`);
+                    const rect = tab?.getBoundingClientRect();
+                    const hit = document.elementFromPoint(arguments[1], arguments[2]);
+                    return {
+                      target: arguments[0],
+                      active: activeItemForSide(slotForItem(arguments[0])),
+                      samples: window.__tabSwitchPerf.samples.length,
+                      hitClass: hit?.className || '',
+                      hitItem: hit?.closest?.('[data-pane-tab]')?.dataset?.paneTab || '',
+                      tabRect: rect ? {left: rect.left, top: rect.top, width: rect.width, height: rect.height} : null,
+                      scrollY: window.scrollY,
+                      documentScrollTop: document.documentElement.scrollTop,
+                      visiblePopovers: document.querySelectorAll('.pane-tab-detached-popover.popover-open').length,
+                    };
+                    """,
+                    target,
+                    point["x"],
+                    point["y"],
+                )
+                raise AssertionError({"index": index, "point": point, **diagnostic}) from exc
+            target = "1" if target == "2" else "2"
 
-    result = browser.execute_script(
-        """
-        const samples = window.__tabSwitchPerf.samples.slice().sort((left, right) => left - right);
-        const p95 = samples[Math.min(samples.length - 1, Math.floor((samples.length - 1) * 0.95))];
-        const commitSamples = window.__tabSwitchPerf.commitSamples.slice().sort((left, right) => left - right);
-        const commitP95 = commitSamples[Math.min(commitSamples.length - 1, Math.floor((commitSamples.length - 1) * 0.95))];
-        const commitMax = commitSamples.at(-1) || 0;
-        const commitWorkSamples = window.__tabSwitchPerf.commitWorkSamples.slice().sort((left, right) => left - right);
-        const commitWorkP95 = commitWorkSamples[Math.min(commitWorkSamples.length - 1, Math.floor((commitWorkSamples.length - 1) * 0.95))];
-        const commitWorkMax = commitWorkSamples.at(-1) || 0;
-        const longTasks = clientPerfLongTaskSummary();
-        const counters = Object.fromEntries(clientPerfSummary().map(counter => [counter.name, counter]));
-        const attributableMax = Math.max(commitWorkMax, counters.tabberLayoutSync?.maxMs || 0);
-        return {
-          samples,
-          p95,
-          commitSamples,
-          commitP95,
-          commitMax,
-          commitWorkSamples,
-          commitWorkP95,
-          commitWorkMax,
-          longTasks,
-          attributableMax,
-          max: samples.at(-1),
-          immediate: window.__tabSwitchPerf.immediate.every(Boolean),
-          fromJsonCalls: window.__tabSwitchPerf.fromJsonCalls(),
-          fullRefreshCalls: window.__tabSwitchPerf.fullRefreshCalls(),
-          layoutSyncs: counters.tabberLayoutSync?.count || 0,
-          activationPaints: counters.tabActivationPaint?.count || 0,
-          activationPaintMax: counters.tabActivationPaint?.maxMs || 0,
-          firstPanelPreserved: panelNodes.get('1') === window.__tabSwitchPerf.firstPanel && panelNodes.get('1').__tabSwitchSentinel === 'first',
-          secondPanelPreserved: panelNodes.get('2') === window.__tabSwitchPerf.secondPanel && panelNodes.get('2').__tabSwitchSentinel === 'second',
-        };
-        """
-    )
-    assert result["fromJsonCalls"] == 0, result
-    assert result["fullRefreshCalls"] == 0, result
-    assert result["layoutSyncs"] <= 30, result
-    assert result["activationPaints"] == 30, result
-    assert len(result["commitSamples"]) == 30, result
-    assert len(result["commitWorkSamples"]) == 30, result
-    assert result["commitWorkP95"] < 50, result
-    assert result["immediate"] is True, result
-    assert result["firstPanelPreserved"] is True and result["secondPanelPreserved"] is True, result
-    assert_fixture_client_event_demand_claimed(browser)
-    if os.environ.get("PYTEST_XDIST_WORKER"):
-        # Shared browser workers can deschedule a renderer after pointerdown but before Dockview's
-        # activation callback, just as they can before requestAnimationFrame. Keep that end-to-end
-        # wall time diagnostic and attribute the fixed ceiling to work inside the callback plus its
-        # deferred layout sync; immediate state and operation counts still catch delayed/repeated work.
-        assert result["attributableMax"] < 500, result
-    else:
-        # Keep the tighter single-worker ceiling on product-owned activation and layout-sync work;
-        # raw animation-frame wall time remains diagnostic because host scheduling is not product work.
-        assert result["commitP95"] < 50, result
-        assert result["attributableMax"] < 100, result
+        result = browser.execute_script(
+            """
+            const samples = window.__tabSwitchPerf.samples.slice().sort((left, right) => left - right);
+            const p95 = samples[Math.min(samples.length - 1, Math.floor((samples.length - 1) * 0.95))];
+            const commitSamples = window.__tabSwitchPerf.commitSamples.slice().sort((left, right) => left - right);
+            const commitP95 = commitSamples[Math.min(commitSamples.length - 1, Math.floor((commitSamples.length - 1) * 0.95))];
+            const commitMax = commitSamples.at(-1) || 0;
+            const commitWorkSamples = window.__tabSwitchPerf.commitWorkSamples.slice().sort((left, right) => left - right);
+            const commitWorkP95 = commitWorkSamples[Math.min(commitWorkSamples.length - 1, Math.floor((commitWorkSamples.length - 1) * 0.95))];
+            const commitWorkMax = commitWorkSamples.at(-1) || 0;
+            const longTasks = clientPerfLongTaskSummary();
+            const counters = Object.fromEntries(clientPerfSummary().map(counter => [counter.name, counter]));
+            const attributableMax = Math.max(commitWorkMax, counters.tabberLayoutSync?.maxMs || 0);
+            return {
+              samples,
+              p95,
+              commitSamples,
+              commitP95,
+              commitMax,
+              commitWorkSamples,
+              commitWorkP95,
+              commitWorkMax,
+              longTasks,
+              attributableMax,
+              max: samples.at(-1),
+              immediate: window.__tabSwitchPerf.immediate.every(Boolean),
+              fromJsonCalls: window.__tabSwitchPerf.fromJsonCalls(),
+              fullRefreshCalls: window.__tabSwitchPerf.fullRefreshCalls(),
+              fullRefreshStacks: window.__tabSwitchPerf.fullRefreshStacks,
+              layoutSyncs: counters.tabberLayoutSync?.count || 0,
+              activationPaints: counters.tabActivationPaint?.count || 0,
+              activationPaintMax: counters.tabActivationPaint?.maxMs || 0,
+              firstPanelPreserved: panelNodes.get('1') === window.__tabSwitchPerf.firstPanel && panelNodes.get('1').__tabSwitchSentinel === 'first',
+              secondPanelPreserved: panelNodes.get('2') === window.__tabSwitchPerf.secondPanel && panelNodes.get('2').__tabSwitchSentinel === 'second',
+            };
+            """
+        )
+        assert result["fromJsonCalls"] == 0, result
+        print('Tabber full refresh producers:', result["fullRefreshStacks"])
+        assert result["fullRefreshCalls"] == 0, result
+        assert result["layoutSyncs"] <= 30, result
+        # This fixture has no xterm render events; the real-xterm native journey owns paint completion.
+        assert result["activationPaints"] == 0, result
+        assert len(result["commitSamples"]) == 30, result
+        assert len(result["commitWorkSamples"]) == 30, result
+        assert result["commitWorkP95"] < 50, result
+        assert result["immediate"] is True, result
+        assert result["firstPanelPreserved"] is True and result["secondPanelPreserved"] is True, result
+        assert_fixture_client_event_demand_claimed(browser)
+        print({key: result[key] for key in ("p95", "commitP95", "commitWorkP95", "commitWorkMax", "activationPaintMax", "longTasks", "immediate")})
+        if os.environ.get("PYTEST_XDIST_WORKER"):
+            # Shared browser workers can deschedule a renderer after pointerdown but before Dockview's
+            # activation callback, just as they can before requestAnimationFrame. Keep that end-to-end
+            # wall time diagnostic and attribute the fixed ceiling to work inside the callback plus its
+            # deferred layout sync; immediate state and operation counts still catch delayed/repeated work.
+            assert result["attributableMax"] < 500, result
+        else:
+            # Keep the tighter single-worker ceiling on product-owned activation and layout-sync work;
+            # raw animation-frame wall time remains diagnostic because host scheduling is not product work.
+            assert result["commitP95"] < 50, result
+            assert result["attributableMax"] < 100, result
+
+        released = browser.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1], state = window.__tabSwitchActivity;
+            state.release();
+            Promise.all([state.promise, loadAutoStatuses.request]).then(() => done({
+              heldCalls: state.heldCalls,
+              fullRefreshCalls: window.__tabSwitchPerf.fullRefreshCalls(),
+              timerActive: runtimeIntervalActive('auto-approve'),
+            }), error => done({error: String(error)}));
+            """
+        )
+        assert released == {"heldCalls": 1, "fullRefreshCalls": 1, "timerActive": True}, released
+    finally:
+        try:
+            restored = browser.execute_async_script(
+                """
+                const done = arguments[arguments.length - 1];
+                (async () => {
+                  try { window.__tabSwitchPerf?.restore?.(); }
+                  finally { await window.__tabSwitchActivity?.restore?.(); }
+                  return true;
+                })().then(done, error => done({error: String(error)}));
+                """
+            )
+            assert restored is True, restored
+        finally:
+            release_fixture_client_event_demand(browser)
 
 
-def test_dockview_tab_switch_flips_highlight_in_input_frame_before_deferred_content(browser, tmp_path):
-    """Highlight-first paint-order contract: the new tab's active chrome flips synchronously in the
-    input frame (highlight first), while the heavy terminal follow-up (phase 2) is deferred behind a
-    frame and the previous tab's content never lingers under the new highlight. A deliberately slowed
-    phase 2 (window.__yomuxTabSwitchPhaseTwoDelayMs) proves content strictly follows."""
+def test_dockview_tab_switch_updates_selection_before_deferred_side_sync(browser, tmp_path):
+    """The active tab and logical focus update in the click frame; session-side work waits through paint."""
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
     wait_for_dockview(browser, min_tabs=2)
     # Everything up to the `return` runs in one synchronous script — no animation frame or timeout can
@@ -1568,12 +1762,12 @@ def test_dockview_tab_switch_flips_highlight_in_input_frame_before_deferred_cont
         const previous = activeItemForSide('left');
         const target = previous === '1' ? '2' : '1';
         window.__phaseTwo = [];
-        const original = focusTerminalFromUserAction;
-        focusTerminalFromUserAction = (...args) => {
+        const original = noteFileExplorerChangesSessionInteraction;
+        noteFileExplorerChangesSessionInteraction = (...args) => {
           window.__phaseTwo.push(String(args[0] || ''));
           return original(...args);
         };
-        window.__restorePhaseTwo = () => { focusTerminalFromUserAction = original; };
+        window.__restorePhaseTwo = () => { noteFileExplorerChangesSessionInteraction = original; };
         window.__yomuxTabSwitchPhaseTwoDelayMs = 300;
         activatePaneTab('left', target, {userInitiated: true});
         const activeTab = document.querySelector('.dv-tab.dv-active-tab .dockview-pane-tab')?.dataset?.paneTab || '';
@@ -1590,6 +1784,8 @@ def test_dockview_tab_switch_flips_highlight_in_input_frame_before_deferred_cont
           activeTab,
           highlightFlipped,
           previousStillHighlighted,
+          focusedTerminal,
+          focusedPanelItem,
           phaseTwoCallsInInputFrame: window.__phaseTwo.length,
         };
         """
@@ -1599,9 +1795,10 @@ def test_dockview_tab_switch_flips_highlight_in_input_frame_before_deferred_cont
     assert frame["highlightFlipped"] is True and frame["activeTab"] == frame["target"], frame
     # Old content never lingers under the new highlight: the previous tab is no longer highlighted.
     assert frame["previousStillHighlighted"] is False, frame
-    # Content follows: the heavy terminal engagement did NOT run in the input frame.
+    # Terminal focus is immediate; side synchronization remains deferred.
+    assert frame["focusedTerminal"] == frame["target"] and frame["focusedPanelItem"] == frame["target"], frame
     assert frame["phaseTwoCallsInInputFrame"] == 0, frame
-    # Phase 2 runs after the highlight paints (slowed by the test hook), for the target only.
+    # Phase 2 runs after a paint opportunity (slowed by the test hook), for the target only.
     WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return window.__phaseTwo.length >= 1"))
     after = browser.execute_script(
         "const rows = window.__phaseTwo.slice(); window.__restorePhaseTwo(); delete window.__yomuxTabSwitchPhaseTwoDelayMs; return rows;"
@@ -1609,18 +1806,16 @@ def test_dockview_tab_switch_flips_highlight_in_input_frame_before_deferred_cont
     assert after == [frame["target"]], after
 
 
-def test_dockview_rapid_tab_cycling_coalesces_terminal_engagement_to_final_target(browser, tmp_path):
-    """Keyboard-cycling parity: rapid switches step the highlight instantly on every press, but the
-    heavy terminal engagement (phase 2) is generation-guarded and settles on the FINAL target only, so
-    intermediate tabs waste no xterm work and flash no stale content."""
+def test_dockview_rapid_tab_cycling_coalesces_side_sync_to_final_target(browser, tmp_path):
+    """Rapid tab selection and focus stay immediate; deferred session-side work settles on the final target."""
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2,3&layout=left&tabs=left:1,2,3", sessions=["1", "2", "3"])
     wait_for_dockview(browser, min_tabs=3)
     result = browser.execute_async_script(
         """
         const done = arguments[0];
         window.__phaseTwo = [];
-        const original = focusTerminalFromUserAction;
-        focusTerminalFromUserAction = (...args) => { window.__phaseTwo.push(String(args[0] || '')); return original(...args); };
+        const original = noteFileExplorerChangesSessionInteraction;
+        noteFileExplorerChangesSessionInteraction = (...args) => { window.__phaseTwo.push(String(args[0] || '')); return original(...args); };
         const order = ['2', '3', '1', '2', '3'];
         const highlightSteps = [];
         for (const item of order) {
@@ -1632,18 +1827,249 @@ def test_dockview_rapid_tab_cycling_coalesces_terminal_engagement_to_final_targe
         }
         const phaseTwoInInputFrame = window.__phaseTwo.length;
         requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(() => {
-          focusTerminalFromUserAction = original;
+          noteFileExplorerChangesSessionInteraction = original;
           done({highlightSteps, phaseTwoInInputFrame, phaseTwo: window.__phaseTwo.slice(), finalActive: activeItemForSide('left')});
         }, 60)));
         """
     )
     # Highlight tracks every press instantly, in its own frame.
     assert result["highlightSteps"] == [True, True, True, True, True], result
-    # No terminal engagement runs synchronously in the input frames.
+    # No session-side synchronization runs synchronously in the input frames.
     assert result["phaseTwoInInputFrame"] == 0, result
-    # Content settles only on the final target; intermediate targets are coalesced away.
+    # Session-side work settles only on the final target; intermediate targets are coalesced away.
     assert result["finalActive"] == "3", result
     assert result["phaseTwo"] == ["3"], result
+
+
+def test_cached_large_differ_does_not_block_terminal_activation(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
+    wait_for_dockview(browser, min_tabs=2)
+    original_script_timeout = browser.timeouts.script
+    browser.set_script_timeout(90)
+    try:
+        result = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+        const files = Array.from({length: 5000}, (_, index) => ({
+          session: '1', repo: '/repo/app', path: `file-${index}.txt`,
+          abs_path: `/repo/app/file-${index}.txt`, status: 'M', mtime: index + 1,
+        }));
+        const payloadFor = session => ({session, loaded: true, refreshing: false, errors: [], warnings: [],
+          repos: [{repo: '/repo/app', count: files.length, added: 0, removed: 0}], files});
+        const originalFetch = fetchSessionFiles;
+        const originalVisibility = fileExplorerSessionFilesPaneIsVisible;
+        let observer = null;
+        let cancelledTreeContainer = null;
+        const originalAfterPaint = scheduleAfterFileExplorerFirstPaint;
+        const originalRenderers = new Map();
+        let differLargeFilterCalls = 0;
+        let measureDifferFiltering = false;
+        try {
+        for (const session of ['1', '2']) {
+          const payload = payloadFor(session);
+          fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session, 'differ'), {
+            payload, signature: sessionFilesPayloadSignatureForPayload(payload),
+          });
+        }
+        fetchSessionFiles = () => Promise.resolve(false);
+        const pendingTrees = [];
+        const stageMs = {};
+        let inputYieldFrames = 0;
+        scheduleAfterFileExplorerFirstPaint = (...args) => { inputYieldFrames += 1; return originalAfterPaint(...args); };
+        for (const name of ['fileExplorerChangesPanelStaticHtml', 'fileExplorerDifferFiles', 'renderFileExplorerChangesPanel',
+          'renderChangesGroups', 'renderChangedFileList', 'drainFileTreeRenderStepsWithInput']) {
+          const original = globalThis[name];
+          originalRenderers.set(name, original);
+          globalThis[name] = (...args) => {
+            if (name === 'fileExplorerDifferFiles') {
+              const payload = args[0] || fileExplorerSessionFilesState.payload;
+              if (measureDifferFiltering && Array.isArray(payload?.files) && payload.files.length >= 5000) differLargeFilterCalls += 1;
+            }
+            const start = performance.now();
+            try {
+              const result = original(...args);
+              if (name === 'renderChangesGroups' && result?.then) pendingTrees.push(result);
+              return result;
+            }
+            finally { stageMs[name] = Math.max(stageMs[name] || 0, performance.now() - start); }
+          };
+        }
+        const slots = emptyLayoutSlots();
+        slots[layoutTreeKey] = splitNode('row', leafNode('left'), leafNode('right'), 0.5);
+        slots.left = paneStateWithTabs(['1', '2'], '1');
+        slots.right = paneStateWithTabs([differItemId], differItemId);
+        applyLayoutSlots(slots, {prune: false});
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        setSessionFilesPayloadForDestination('differ', payloadFor('1'));
+        fileExplorerSessionFilesState.signature = sessionFilesPayloadSignatureForPayload(fileExplorerSessionFilesState.payload);
+        measureDifferFiltering = true;
+        renderFileExplorerChangesPanel(panelNodes.get(differItemId), {force: true});
+        await Promise.all(pendingTrees.splice(0));
+        const streamChunk = files.map((item, index) => ({...item, status: index % 2 ? 'T' : 'M'}));
+        renderFileExplorerChangesPanel(panelNodes.get(differItemId), {changedRepo: {
+          repo: '/repo/app', files: streamChunk, repos: [{repo: '/repo/app', added: 0, removed: 0}],
+        }});
+        await Promise.all(pendingTrees.splice(0));
+        const streamChunkRows = panelNodes.get(differItemId)?.querySelectorAll('.file-tree-row')?.length || 0;
+        setSessionFilesPayloadForDestination('differ', payloadFor('1'));
+        fileExplorerSessionFilesState.signature = sessionFilesPayloadSignatureForPayload(fileExplorerSessionFilesState.payload);
+        renderFileExplorerChangesPanel(panelNodes.get(differItemId), {force: true});
+        await Promise.all(pendingTrees.splice(0));
+        const rows = panelNodes.get(differItemId)?.querySelectorAll('.file-tree-row')?.length || 0;
+        window.__yomuxTabSwitchPhaseTwoDelayMs = 300;
+        const longTasks = [];
+        observer = typeof PerformanceObserver === 'function'
+          ? new PerformanceObserver(entries => longTasks.push(...entries.getEntries().map(entry => entry.duration)))
+          : null;
+        observer?.observe({type: 'longtask', buffered: false});
+        const started = performance.now();
+        const paintOpportunity = new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(performance.now() - started))));
+        activatePaneTab('left', '2', {userInitiated: true});
+        const activationMs = performance.now() - started;
+        const immediate = {
+          active: activeItemForSide('left'),
+          focused: focusedTerminal,
+          panelFocus: focusedPanelItem,
+          activationMs,
+          explicitSyncTarget: fileExplorerExplicitSyncSessionTarget(),
+          differSessionBeforeFollowup: fileExplorerSessionFilesState.payload.session,
+          rows,
+        };
+        const clickToPaintOpportunityMs = await paintOpportunity;
+        const deadline = performance.now() + 15000;
+        while (fileExplorerSessionFilesState.payload.session !== '2' && performance.now() < deadline) {
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        await Promise.all(pendingTrees.splice(0));
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const session = fileExplorerSessionFilesState.payload.session;
+        const targetRows = panelNodes.get(differItemId)?.querySelectorAll('.file-tree-row')?.length || 0;
+        cancelledTreeContainer = document.createElement('div');
+        document.body.append(cancelledTreeContainer);
+        const wasDifferVisible = fileExplorerSessionFilesPaneIsVisible;
+        let visibilityChecks = 0;
+        let rowsWhenHidden = null;
+        let preparationReads = 0;
+        let readsWhenHidden = null;
+        const cancellationFiles = files.map(item => ({...item,
+          get abs_path() { preparationReads += 1; return item.abs_path; },
+        }));
+        const inputYieldFramesBeforeCancel = inputYieldFrames;
+        fileExplorerSessionFilesPaneIsVisible = () => {
+          if (++visibilityChecks <= 2500) return true;
+          rowsWhenHidden ??= cancelledTreeContainer.querySelectorAll('.file-tree-row').length;
+          readsWhenHidden ??= preparationReads;
+          return false;
+        };
+        const cancelledTree = renderChangedFileList(cancelledTreeContainer, '/repo/app', cancellationFiles, {
+          view: 'differ', yieldToInput: true,
+        });
+        const cancelledResult = await cancelledTree;
+        await Promise.all(pendingTrees.splice(0));
+        const rowsAfterCancellation = cancelledTreeContainer.querySelectorAll('.file-tree-row').length;
+        fileExplorerSessionFilesPaneIsVisible = wasDifferVisible;
+        cancelledTreeContainer.remove();
+        const cancellationYieldFrames = inputYieldFrames - inputYieldFramesBeforeCancel;
+        delete window.__yomuxTabSwitchPhaseTwoDelayMs;
+        longTasks.push(...(observer?.takeRecords?.() || []).map(entry => entry.duration));
+        observer?.disconnect();
+        done({...immediate, differSessionAfterFollowup: session, targetRows, clickToPaintOpportunityMs, differLargeFilterCalls, streamChunkRows,
+          longTaskMaxMs: Math.max(0, ...longTasks), longTasks, stageMs, inputYieldFrames,
+          visibilityChecks, rowsWhenHidden, rowsAfterCancellation, preparationReads, readsWhenHidden,
+          cancelledResult, cancellationYieldFrames});
+        } finally {
+          fetchSessionFiles = originalFetch;
+          fileExplorerSessionFilesPaneIsVisible = originalVisibility;
+          scheduleAfterFileExplorerFirstPaint = originalAfterPaint;
+          for (const [name, original] of originalRenderers) globalThis[name] = original;
+          delete window.__yomuxTabSwitchPhaseTwoDelayMs;
+          observer?.disconnect();
+          cancelledTreeContainer?.remove();
+        }
+            })().catch(error => done({error: String(error), stack: error?.stack || ''}));
+            """
+        )
+    finally:
+        browser.set_script_timeout(original_script_timeout)
+    assert "error" not in result, result
+    print('Cached Differ activation:', result)
+    assert result["rows"] >= 5000, result
+    assert result.get("setupTimedOut") is not True, result
+    assert result["active"] == "2" and result["focused"] == "2" and result["panelFocus"] == "2", result
+    assert result["explicitSyncTarget"] == "2", result
+    assert result["differSessionBeforeFollowup"] == "1", result
+    assert result["activationMs"] < 200, result
+    assert result["differSessionAfterFollowup"] == "2" and result["targetRows"] >= 5000, result
+    assert result["differLargeFilterCalls"] == 0, result
+    assert result["streamChunkRows"] == 2500, result
+    assert result["stageMs"]["renderFileExplorerChangesPanel"] < 50, result
+    assert result["longTaskMaxMs"] < 150, result
+    assert result["inputYieldFrames"] > 0, result
+    assert result["visibilityChecks"] > 2500 and result["cancelledResult"] is False, result
+    assert result["rowsWhenHidden"] is not None and result["rowsAfterCancellation"] == result["rowsWhenHidden"], result
+    assert result["readsWhenHidden"] is not None and result["preparationReads"] == result["readsWhenHidden"], result
+    assert 0 < result["preparationReads"] < 5000, result
+    assert result["cancellationYieldFrames"] > 0, result
+    print({key: result[key] for key in ("rows", "activationMs", "clickToPaintOpportunityMs", "longTaskMaxMs", "inputYieldFrames", "stageMs")})
+
+
+def test_hidden_differ_defers_tree_render_and_uses_latest_payload_on_activation(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2,3&layout=left&tabs=left:1,2,3", sessions=["1", "2", "3"])
+    wait_for_dockview(browser, min_tabs=3)
+    result = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          const slots = emptyLayoutSlots();
+          slots[layoutTreeKey] = splitNode('row', leafNode('left'), leafNode('right'), 0.5);
+          slots.left = paneStateWithTabs(['1', '2'], '1');
+          slots.right = paneStateWithTabs([differItemId, '3'], '3');
+          applyLayoutSlots(slots, {prune: false});
+          const differSlot = slotForItem(differItemId);
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const panel = panelNodes.get(differItemId);
+          let treeCalls = 0;
+          const pendingTrees = [];
+          const originalRenderChangesGroups = renderChangesGroups;
+          const wasVisible = fileExplorerSessionFilesPaneIsVisible;
+          try {
+          renderChangesGroups = (...args) => {
+            treeCalls += 1;
+            const result = originalRenderChangesGroups(...args);
+            if (result?.then) pendingTrees.push(result);
+            return result;
+          };
+          const latest = {session: '2', loaded: true, refreshing: false, errors: [], warnings: [],
+            repos: [{repo: '/repo/app', count: 1, added: 0, removed: 0}],
+            files: [{session: '2', repo: '/repo/app', path: 'latest.txt', abs_path: '/repo/app/latest.txt', status: 'M', mtime: 1}]};
+          setSessionFilesPayloadForDestination('differ', latest);
+          fileExplorerSessionFilesPaneIsVisible = () => false;
+          renderFileExplorerChangesPanel(panel, {force: true});
+          const hiddenCalls = treeCalls;
+          const hiddenRows = panel?.querySelectorAll('.file-tree-row')?.length || 0;
+          fileExplorerSessionFilesPaneIsVisible = wasVisible;
+          activatePaneTab(differSlot, differItemId);
+          await window.__yomuxTestWaitFor(
+            () => panel?.querySelector('.file-tree-row[data-path="/repo/app/latest.txt"]'),
+            {timeoutMs: 10000, description: 'latest retained Differ payload render'},
+          );
+          await Promise.all(pendingTrees.splice(0));
+          done({hiddenCalls, hiddenRows, active: activeItemForSide(differSlot),
+            differVisible: fileExplorerSessionFilesPaneIsVisible(), differSlot: slotForItem(differItemId),
+            session: fileExplorerSessionFilesState.payload.session,
+            latestRow: Boolean(panel.querySelector('.file-tree-row[data-path="/repo/app/latest.txt"]')), treeCalls});
+          } finally {
+            fileExplorerSessionFilesPaneIsVisible = wasVisible;
+            renderChangesGroups = originalRenderChangesGroups;
+          }
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in result, result
+    assert result["hiddenCalls"] == 0 and result["hiddenRows"] == 0, result
+    assert result["active"] == "__differ__" and result["session"] == "2" and result["latestRow"] is True, result
+    assert result["treeCalls"] == 1, result
 
 
 def test_dockview_tabs_keep_yolomux_active_inactive_style(browser, tmp_path):
@@ -2678,7 +3104,7 @@ def test_dockview_wrapped_tab_rows_share_one_control_reserved_flex_grid(browser,
                 const infoBar = panel?.querySelector('.pane-info-bar, .panel-detail-row');
                 const windowButton = infoBar?.querySelector('.tmux-window-button');
                 if (!header || !tabsContainer || !actions || !infoBar || !windowButton || tabs.length !== arguments[0]) return false;
-                const {rect, rowsByTop} = window.__yolomuxTestHelpers;
+                const {rect, rowsByTop} = window.__yomuxTestHelpers;
                 const tabRects = tabs.map(rect);
                 const rows = rowsByTop(tabRects);
                 const reservation = tabsContainer.querySelector(':scope > .dockview-tab-first-row-reservation');
@@ -4159,7 +4585,7 @@ def test_dockview_terminal_info_bar_alignment_and_detail_toggle_refits_xterm(bro
     )
     before = browser.execute_script(
         """
-        const {rect: rectFor} = window.__yolomuxTestHelpers;
+        const {rect: rectFor} = window.__yomuxTestHelpers;
         const panel = document.querySelector('#panel-1');
         const row = panel.querySelector('.panel-detail-row');
         const bar = row.querySelector('.tmux-window-bar');
@@ -4211,7 +4637,7 @@ def test_dockview_terminal_info_bar_alignment_and_detail_toggle_refits_xterm(bro
     )
     after = browser.execute_script(
         """
-        const {rect: rectFor} = window.__yolomuxTestHelpers;
+        const {rect: rectFor} = window.__yomuxTestHelpers;
         const panel = document.querySelector('#panel-1');
         const row = panel.querySelector('.panel-detail-row');
         const pane = panel.querySelector('#terminal-pane-1');
@@ -4832,7 +5258,7 @@ def test_differ_reopen_keeps_dragged_file_tab_home(browser, tmp_path):
           }
           return originalFetch(input, options);
         };
-        const waitFor = window.__yolomuxTestWaitFor;
+        const waitFor = window.__yomuxTestWaitFor;
         (async () => {
           await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
           activatePaneTab('slot1', '1', {userInitiated: true});
@@ -4893,7 +5319,7 @@ def test_differ_reopen_keeps_dragged_file_tab_home(browser, tmp_path):
         const path = arguments[0];
         const item = `filediff:${path}`;
         const done = arguments[arguments.length - 1];
-        const waitFor = window.__yolomuxTestWaitFor;
+        const waitFor = window.__yomuxTestWaitFor;
         (async () => {
           await waitFor(() => !dockviewTabContentInteractionSuppressed());
           setFileEditorViewMode(path, 'edit', item);
@@ -5222,12 +5648,7 @@ def test_dockview_pointercancel_reorders_from_last_tab_target(browser, tmp_path)
         dockviewBeginTabPointerDrag(start, '1');
         dockviewTrackTabPointerDrag(end);
         const canonicalPreview = document.querySelector('[data-yomux-tab-insertion-preview]');
-        const legacyPreview = document.querySelector('[data-yolomux-tab-insertion-preview]');
-        const previewAliases = {
-          canonical: Boolean(canonicalPreview),
-          legacy: Boolean(legacyPreview),
-          sameNode: Boolean(canonicalPreview && canonicalPreview === legacyPreview),
-        };
+        const previewAliases = {canonical: Boolean(canonicalPreview)};
         document.dispatchEvent(new PointerEvent('pointercancel', {
           bubbles: true,
           cancelable: true,
@@ -5240,7 +5661,6 @@ def test_dockview_pointercancel_reorders_from_last_tab_target(browser, tmp_path)
           pointerDragActive: Boolean(dockviewLayoutState.tabPointerDrag),
           previewAliases,
           insertionPreview: Boolean(document.querySelector('[data-yomux-tab-insertion-preview]')),
-          legacyInsertionPreview: Boolean(document.querySelector('[data-yolomux-tab-insertion-preview]')),
           errors: jsDebugFailureEvents('error'),
         }), 125);
         """
@@ -5248,9 +5668,8 @@ def test_dockview_pointercancel_reorders_from_last_tab_target(browser, tmp_path)
     assert result == {
         "tabs": ["2", "1", "3"],
         "pointerDragActive": False,
-        "previewAliases": {"canonical": True, "legacy": True, "sameNode": True},
+        "previewAliases": {"canonical": True},
         "insertionPreview": False,
-        "legacyInsertionPreview": False,
         "errors": [],
     }, result
 
@@ -6207,7 +6626,7 @@ def test_dockview_tab_drag_preview_is_between_tabs(browser, tmp_path):
         )
         metrics = browser.execute_script(
             """
-            const {rect: rectFor} = window.__yolomuxTestHelpers;
+            const {rect: rectFor} = window.__yomuxTestHelpers;
             const tab2 = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]');
             const tab3 = document.querySelector('.dockview-pane-tab[data-pane-tab="3"]');
             const selection = document.querySelector('.dv-tab.dv-drop-target .dv-drop-target-selection');
@@ -6316,13 +6735,10 @@ def test_dockview_top_split_begins_below_tab_header(browser, tmp_path):
             """
             const selection = document.querySelector('.dv-groupview .dv-drop-target-selection.dv-drop-target-top');
             const tabInsertion = document.querySelector('[data-yomux-tab-insertion-preview]');
-            const legacyTabInsertion = document.querySelector('[data-yolomux-tab-insertion-preview]');
             const grid = document.getElementById('grid');
             return {
               selectionHeight: Math.round(selection.getBoundingClientRect().height),
               tabInsertion: Boolean(tabInsertion),
-              legacyTabInsertion: Boolean(legacyTabInsertion),
-              tabInsertionMirrored: Boolean(tabInsertion && legacyTabInsertion && tabInsertion === legacyTabInsertion),
               rootPreview: grid.classList.contains('drop-preview-root'),
             };
             """
@@ -7486,8 +7902,8 @@ def test_dockview_finder_survives_hidden_host_adoption_and_reshow(browser, tmp_p
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const {frame} = window.__yolomuxTestHelpers;
-          const waitFor = window.__yolomuxTestWaitFor;
+          const {frame} = window.__yomuxTestHelpers;
+          const waitFor = window.__yomuxTestWaitFor;
           const finderGroup = () => document.querySelector('.dockview-pane-tab[data-pane-tab="__finder__"]')?.closest('.dv-groupview') || null;
           const widthOf = group => Math.round(group?.getBoundingClientRect?.().width || 0);
           const host = dockviewLayoutState.host;

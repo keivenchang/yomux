@@ -9,7 +9,7 @@
 //   2. a 413 carrying the file-size reason still must, and its detail must carry real numbers.
 const {
   assert,
-  loadYolomux,
+  loadYomux,
   jsonResponse,
   flushAsyncWork,
   testAsync,
@@ -46,7 +46,7 @@ async function openWithRefusal(api, messageKey, fallback, params = {}) {
 
 async function runOpenFile413ReasonSuite() {
   await testAsync('a Git budget refusal is not reported as an oversized file', async () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const state = await openWithRefusal(
       api,
       'fs.error.gitHistoryTooLarge',
@@ -56,7 +56,7 @@ async function runOpenFile413ReasonSuite() {
   });
 
   await testAsync('a genuine size refusal still reports an oversized file', async () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const state = await openWithRefusal(api, 'fs.error.tooLarge', 'file too large');
     assert.equal(state.kind, 'too-large', 'the server saying the file is oversized still means oversized');
   });
@@ -67,7 +67,7 @@ async function runOpenFile413ReasonSuite() {
     // before "; limit is 20 MB", because a limit that is not about size has no file size to report.
     // A genuine content oversize always carries `fs.error.tooLarge` from `FilesystemError
     // .file_too_large`, so nothing legitimate depends on this fallback.
-    const api = loadYolomux();
+    const api = loadYomux();
     api.setFetchForTest((url) => {
       if (String(url).startsWith('/api/fs/read')) {
         return Promise.resolve(jsonResponse({error: 'some other limit'}, 413));
@@ -85,7 +85,7 @@ async function runOpenFile413ReasonSuite() {
   await testAsync('a labelled oversize renders the real label and numbers, not placeholders', async () => {
     // Fixture parity with the server: `FilesystemError.file_too_large(21549, MAX_READ_BYTES)` emits
     // exactly this descriptor, verified against yomux_lib/filesystem/errors.py.
-    const api = loadYolomux();
+    const api = loadYomux();
     const state = await openWithRefusal(
       api,
       'fs.error.tooLarge',
@@ -115,7 +115,7 @@ async function runOpenFile413ReasonSuite() {
     // status/history/diff/blame is decoration on top of it. The server already answers this way -
     // `read_file` reports `git_enrichment: {available: false, reason}` instead of failing - so the
     // browser must open that payload as ordinary content, not as an error or an oversize.
-    const api = loadYolomux();
+    const api = loadYomux();
     const content = '# STATUS-REPORT\n\nreadable markdown body\n';
     api.setFetchForTest((url) => {
       if (String(url).startsWith('/api/fs/read')) {

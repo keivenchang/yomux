@@ -25,9 +25,11 @@ from tests.gate_harness import gate_http_request
 from tests.gate_harness import gate_live_server  # noqa: F401
 from tests.gate_harness import load_gate_browser
 from tests.gate_harness import open_gate_stats_surface
+from tests.gate_harness import run_fixture_cleanup_phases
 from tests.gate_harness import gate_tmux  # noqa: F401
 from tests.helpers.browser_stats_coverage import _current_stats_fixture_html, _start_current_stats, _write_current_stats_fixture_assets
 from tests.helpers.gate_stats import NOW, _seed_realistic_stats
+from tests.helpers.gate_stats import stop_stats_current_service
 from tools.mockers.transcript import append_record as _append_record
 from tools.mockers.transcript import codex_meta as _codex_meta
 from tools.mockers.transcript import codex_usage as _codex_usage
@@ -186,12 +188,12 @@ def test_g0_logs_copy_confirms_first_press_and_repeats_after_revert(browser, cop
         const expected = arguments[0];
         const done = arguments[arguments.length - 1];
         (async () => {
-              const clipboard = await window.__yolomuxTestWaitFor(async () => {
+              const clipboard = await window.__yomuxTestWaitFor(async () => {
                 const text = await navigator.clipboard.readText();
                 return text === expected ? text : '';
               }, {timeoutMs: 3000, intervalMs: 10, description: 'first Logs clipboard write'});
               refreshDebugLogsViews();
-              await window.__yolomuxTestHelpers.settle(2);
+              await window.__yomuxTestHelpers.settle(2);
           const measured = window.__statsLogsCopyMeasurement;
           done({
             clipboard,
@@ -236,7 +238,7 @@ def test_g0_logs_copy_confirms_first_press_and_repeats_after_revert(browser, cop
         const expected = arguments[0];
         const done = arguments[arguments.length - 1];
         (async () => {
-          const clipboard = await window.__yolomuxTestWaitFor(async () => {
+          const clipboard = await window.__yomuxTestWaitFor(async () => {
             const text = await navigator.clipboard.readText();
             return text === expected ? text : '';
           }, {timeoutMs: 3000, intervalMs: 10, description: 'second Logs clipboard write'});
@@ -322,13 +324,13 @@ def test_g0_api_sse_copy_confirms_across_rerender_and_repeats(browser, copy_feed
         const expected = arguments[0];
         const done = arguments[arguments.length - 1];
         (async () => {
-          const clipboard = await window.__yolomuxTestWaitFor(async () => {
+          const clipboard = await window.__yomuxTestWaitFor(async () => {
             const text = await navigator.clipboard.readText();
             return text.includes(expected) ? text : '';
           }, {timeoutMs: 3000, intervalMs: 10, description: 'first API/SSE clipboard write'});
           document.querySelector('[data-js-debug-subtab="logs"]').click();
           document.querySelector('[data-js-debug-subtab="events"]').click();
-          const button = await window.__yolomuxTestWaitFor(() => {
+          const button = await window.__yomuxTestWaitFor(() => {
             const current = document.querySelector('[data-js-debug-copy]');
             return current?.textContent.trim() === 'Copied' && current.getAttribute('aria-label') === 'Copied' ? current : null;
           }, {timeoutMs: 3000, intervalMs: 10, description: 'API/SSE copied feedback after rerender'});
@@ -362,7 +364,7 @@ def test_g0_api_sse_copy_confirms_across_rerender_and_repeats(browser, copy_feed
         const expected = arguments[0];
         const done = arguments[arguments.length - 1];
         (async () => {
-          const clipboard = await window.__yolomuxTestWaitFor(async () => {
+          const clipboard = await window.__yomuxTestWaitFor(async () => {
             const text = await navigator.clipboard.readText();
             return text.includes(expected) ? text : '';
           }, {timeoutMs: 3000, intervalMs: 10, description: 'second API/SSE clipboard write'});
@@ -475,12 +477,10 @@ def _seeded_stats_page(browser, monkeypatch, tmp_path: Path, state_dir: Path, *,
         browser.get(f"http://127.0.0.1:{http_server.server_address[1]}/static/{asset_name}")
         yield SimpleNamespace(service=service, client=client, app=app, clock_seconds=clock_seconds)
     finally:
-        if http_server is not None and http_thread is not None:
-            stop_browser_server(http_server, http_thread, browser=browser)
-        service.stop_event.set()
-        service.work_event.set()
-        service_thread.join(timeout=3)
-        assert not service_thread.is_alive()
+        run_fixture_cleanup_phases("gate stats browser", (
+            ("HTTP server", lambda: stop_browser_server(http_server, http_thread, browser=browser) if http_server is not None and http_thread is not None else None),
+            ("stats service", lambda: stop_stats_current_service(service, service_thread)),
+        ))
 
 
 def _start_current_stats_over_network(browser):
@@ -506,7 +506,7 @@ def _start_current_stats_over_network(browser):
         });
         window.__statsFixture.mounted = mounted;
         mounted.start().then(async () => {
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => root.querySelector('[data-stats-chart="cpu"]'),
             {description: 'live stats first exact generation'}
           );
@@ -614,12 +614,12 @@ def test_g1_real_token_and_cost_series_paint_while_repair_backlog_remains(
               };
             };
             (async () => {
-              const token = await window.__yolomuxTestWaitFor(() => {
+              const token = await window.__yomuxTestWaitFor(() => {
                 const value = painted('[data-stats-chart="agent-tokens"] [data-series^="agent_tokens_per_minute:"]');
                 return value.points > 1 ? value : null;
               }, {timeoutMs: 10000, description: 'token paint after backlogged producer publication'});
               root.querySelector('[data-stats-current-visibility="cost"]').click();
-              const cost = await window.__yolomuxTestWaitFor(() => {
+              const cost = await window.__yomuxTestWaitFor(() => {
                 const value = painted('[data-stats-chart="cost"] [data-series="cost_micro_usd"]');
                 return value.points > 1 ? value : null;
               }, {timeoutMs: 10000, description: 'cost paint after backlogged producer publication'});

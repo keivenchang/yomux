@@ -64,6 +64,8 @@ func (d *Database) ReadObservationsPage(ctx context.Context, start, end float64,
 FROM observations WHERE observed_at >= ? AND observed_at < ?`
 	args := []any{start, end}
 	if after != nil {
+		// Advance the indexed range too; the tie keyset alone rescans prior pages.
+		args[0] = max(start, after.ObservedAt)
 		query += ` AND (observed_at > ? OR (observed_at = ? AND (family > ? OR (family = ? AND (source_id > ? OR (source_id = ? AND event_id > ?))))))`
 		args = append(args, after.ObservedAt, after.ObservedAt, after.Family, after.Family, after.SourceID, after.SourceID, after.EventID)
 	}
@@ -243,6 +245,7 @@ func (d *Database) ReadUsageAtomsPage(ctx context.Context, start, end float64, a
 FROM usage_atoms WHERE observed_at >= ? AND observed_at < ?`
 	args := []any{start, end}
 	if after != nil {
+		args[0] = max(start, after.ObservedAt)
 		query += ` AND (observed_at > ? OR (observed_at = ? AND (event_id > ? OR (event_id = ? AND (direction > ? OR (direction = ? AND (modality > ? OR (modality = ? AND (cache_role > ? OR (cache_role = ? AND unit > ?))))))))))`
 		args = append(args, after.ObservedAt, after.ObservedAt, after.EventID, after.EventID, after.Direction, after.Direction, after.Modality, after.Modality, after.CacheRole, after.CacheRole, after.Unit)
 	}

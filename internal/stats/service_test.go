@@ -382,6 +382,7 @@ func TestStatsServiceDurablyInvalidatesCorruptRingPayloadForLifecycleRepair(t *t
 	lifecycle := NewLifecycle(writer, LifecycleConfig{
 		WindowSeconds: 10, MaxCells: 1, Now: func() time.Time { return time.Unix(99, 0) },
 	})
+	t.Cleanup(lifecycle.Stop)
 	lifecycle.DemandProduct(10, 10)
 	if err := lifecycle.RunOnce(ctx); err != nil {
 		t.Fatalf("lifecycle repair: %v", err)
@@ -1017,6 +1018,7 @@ func TestLifecycleRingPayloadRetainsUnavailableCoverage(t *testing.T) {
 		t.Fatal(err)
 	}
 	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: 10, Now: func() time.Time { return time.Unix(now-1, 0) }})
+	t.Cleanup(lifecycle.Stop)
 	if err := lifecycle.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -1051,6 +1053,7 @@ func TestStatsServiceConcurrentSnapshotsRemainBoundedDuringPublication(t *testin
 	}
 	key := ProductKey{RangeSeconds: 300, ResolutionSeconds: 10}
 	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: 300, MaxCells: 64, Now: func() time.Time { return now }})
+	t.Cleanup(lifecycle.Stop)
 	service := NewStatsService(writer, StatsServiceConfig{Products: []ProductKey{key}, Now: func() time.Time { return now }})
 	for attempt := 0; attempt < 16 && !service.State().Ready; attempt++ {
 		if err := lifecycle.RunOnce(ctx); err != nil {
@@ -1151,6 +1154,7 @@ func TestStatsServiceWaitForPublicationUsesGenerationNotification(t *testing.T) 
 	}
 	initialCache := service.State().CacheGeneration
 	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: 10, Now: func() time.Time { return now }})
+	t.Cleanup(lifecycle.Stop)
 	changed := make(chan bool, 1)
 	go func() {
 		value, _ := service.WaitForPublication(ctx, initialCache, time.Second)

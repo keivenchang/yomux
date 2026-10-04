@@ -1,12 +1,12 @@
 const {
   assert,
-  loadYolomux,
+  loadYomux,
   canonical,
 } = require('./layout_test_helper');
 
 function registerCrossSurfaceQuickOpenSuite(test) {
   test('search-progress scope digest matches the server-side opaque root digest', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     // Known SHA-256 test vector proves the synchronous implementation, then the 16-hex scope digest
     // must equal yomux_lib/search/file_index.py::_root_scope_id = sha256(canonical_root)[:16].
     assert.equal(api.sha256HexForTest('abc'), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad', 'sha256 matches the published abc vector');
@@ -15,7 +15,7 @@ function registerCrossSurfaceQuickOpenSuite(test) {
   });
 
   test('a delta merge upserts, deletes, dedupes by realpath, and keeps roots isolated', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const start = [
       {path: '/repo/a.md', name: 'a.md', relative_path: 'a.md', realpath: '/repo/a.md'},
       {path: '/repo/b.md', name: 'b.md', relative_path: 'b.md', realpath: '/repo/b.md'},
@@ -46,7 +46,7 @@ function registerCrossSurfaceQuickOpenSuite(test) {
   });
 
   test('a late exact-name delta can rank above earlier rows', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setFileQuickOpenCandidatesForTest('/repo', [
       {path: '/repo/deep/other/t5t-notes.md', name: 't5t-notes.md', relative_path: 'deep/other/t5t-notes.md', realpath: '/repo/deep/other/t5t-notes.md'},
     ]);
@@ -67,7 +67,7 @@ function registerCrossSurfaceQuickOpenSuite(test) {
   });
 
   test('an exact filename outranks fuzzy and recent path matches', () => {
-    const api = loadYolomux('', ['exact-filename-ranking']);
+    const api = loadYomux('', ['exact-filename-ranking']);
     api.setCommandPaletteStateForTest('files', 't5t.md');
     api.setFileQuickOpenCandidatesForTest('/repo', [
       {path: '/repo/notes/t5t-notes.md', name: 't5t-notes.md', relative_path: 'notes/t5t-notes.md', realpath: '/repo/notes/t5t-notes.md', mtime: Date.now()},

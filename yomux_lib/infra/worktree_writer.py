@@ -33,7 +33,7 @@ from tools.instance_isolation import GENERATED_PYTHON_CACHE_PREFIX_ENV
 from tools.instance_isolation import normalize_yomux_environment
 from tools.instance_isolation import resolved_path
 from tools.instance_isolation import rooted_product_path
-from tools.instance_isolation import YolomuxRootError
+from tools.instance_isolation import YomuxRootError
 
 
 WRITER_TOKEN_ENV = "YOLOMUX_WORKTREE_WRITER_TOKEN"
@@ -689,10 +689,11 @@ def configure_host_local_artifacts(
     target["NPM_CONFIG_CACHE"] = str(paths.package_cache / "npm")
     target["COVERAGE_FILE"] = str(paths.pytest_cache / ".coverage")
     if apply_process:
-        python_cache.mkdir(parents=True, exist_ok=True, mode=0o700)
+        write_bytecode = str(values.get("PYTHONDONTWRITEBYTECODE") or "").strip().lower() not in {"1", "true", "yes"}
+        if write_bytecode:
+            python_cache.mkdir(parents=True, exist_ok=True, mode=0o700)
         sys.pycache_prefix = str(python_cache)
-        if str(values.get("PYTHONDONTWRITEBYTECODE") or "").strip().lower() not in {"1", "true", "yes"}:
-            sys.dont_write_bytecode = False
+        sys.dont_write_bytecode = not write_bytecode
     return HostArtifactPaths(
         root=paths.root,
         python_cache=python_cache,
@@ -718,7 +719,7 @@ def child_process_artifact_environment(
         root = resolved_product_path(child, YOLOMUX_ROOT_ENV, configured_root)
         try:
             prefix = resolved_product_path(child, "PYTHONPYCACHEPREFIX", configured_prefix)
-        except YolomuxRootError:
+        except YomuxRootError:
             prefix = resolved_path(configured_prefix)
         if not prefix.is_relative_to(root):
             child.pop("PYTHONPYCACHEPREFIX", None)

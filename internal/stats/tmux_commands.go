@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/keivenchang/yomux/internal/productenv"
 )
 
 var errSyntheticTmuxSocketUnset = errors.New("synthetic tmux socket is not configured")
@@ -24,7 +26,7 @@ func TmuxNoServerError(output []byte) bool {
 // test-only environment variable can never redirect an operator scan.
 func tmuxCommandArgs(args ...string) []string {
 	command := []string{"tmux"}
-	socket := strings.TrimSpace(os.Getenv("YOLOMUX_TMUX_SOCKET"))
+	socket := strings.TrimSpace(productenv.Value("YOLOMUX_TMUX_SOCKET"))
 	if socket != "" {
 		command = append(command, "-S", socket)
 	}
@@ -36,14 +38,14 @@ func tmuxCommandArgs(args ...string) []string {
 // default server when no socket is configured; synthetic adapters must fail
 // closed instead of accidentally reading that server.
 func syntheticTmuxSocketConfigured() bool {
-	socket := strings.TrimSpace(os.Getenv("YOLOMUX_TMUX_SOCKET"))
+	socket := strings.TrimSpace(productenv.Value("YOLOMUX_TMUX_SOCKET"))
 	if socket == "" {
 		return false
 	}
-	if os.Getenv("YOLOMUX_STATS_SYNTHETIC") != "1" {
+	if productenv.Value("YOLOMUX_STATS_SYNTHETIC") != "1" {
 		return true
 	}
-	root := strings.TrimSpace(os.Getenv("YOLOMUX_STATS_SYNTHETIC_ROOT"))
+	root := strings.TrimSpace(productenv.Value("YOLOMUX_STATS_SYNTHETIC_ROOT"))
 	if root == "" {
 		return false
 	}

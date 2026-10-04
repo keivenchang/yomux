@@ -17,7 +17,13 @@ import tempfile
 import time
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+# Select the declared source tree before importing project modules. In Bazel,
+# resolving __file__ can follow the input symlink back into the checkout, which
+# would let undeclared files satisfy imports from an otherwise isolated action.
+_root_args = argparse.ArgumentParser(add_help=False)
+_root_args.add_argument("--source-root", type=Path, default=Path(__file__).resolve().parents[1])
+_root_options, _ = _root_args.parse_known_args()
+REPO_ROOT = _root_options.source_root.resolve()
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 sys.dont_write_bytecode = True
@@ -33,6 +39,7 @@ from yomux_lib.infra import worktree_writer
 # generates the en-XA pseudo-locale (accented + padded) to surface unextracted strings + overflow.
 LOCALES_SRC = REPO_ROOT / "static_src" / "locales"
 LOCALES_OUT = REPO_ROOT / "static" / "locales"
+OUTPUT_ROOT = REPO_ROOT / "static"
 SOURCE_LOCALE = FALLBACK_LOCALE
 WINDOW_VIEWPORT_ALLOW_MARKER = "static-build-allow-window-viewport"
 RAW_TOKEN_LITERAL_IGNORED_VALUES: set[str] = set()
@@ -829,7 +836,8 @@ def build_asset(asset: str) -> str:
 
 
 def write_asset(asset: str) -> bool:
-    output_path = repo_path("static") / asset
+    output_path = OUTPUT_ROOT / asset
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     next_text = build_asset(asset)
     try:
         current = read_text(output_path)
@@ -855,7 +863,7 @@ def write_asset(asset: str) -> bool:
 
 
 def check_asset(asset: str) -> bool:
-    output_path = repo_path("static") / asset
+    output_path = OUTPUT_ROOT / asset
     return read_text(output_path) == build_asset(asset)
 
 
@@ -2326,7 +2334,8 @@ def lint_undefined_css_vars() -> list[str]:
     js = build_asset("yomux.js")
     css_no_comments = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
     defined = set(re.findall(r"(--[\w-]+)\s*:", css_no_comments))
-    defined |= set(re.findall(r"setProperty\(\s*[`'\"]\s*(--[\w-]+)", js))
+    defined |= set(re.findall(r"\bsetProperty\(\s*[`'\"]\s*(--[\w-]+)", js))
+    defined |= set(re.findall(r"\bsetStylePropertyIfChanged\(\s*[^,;()]+,\s*[`'\"]\s*(--[\w-]+)", js))
     defined |= set(re.findall(r"(--[\w-]+)\s*:", js))
     referenced = set(re.findall(r"var\(\s*(--[\w-]+)", css_no_comments))
     return [f"undefined CSS var {name} (referenced via var() but never defined in CSS or set from JS)"
@@ -2775,7 +2784,7 @@ def watch_loop(assets: list[str], interval: float = 0.4) -> int:
 
 
 def _main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, epilog="--source-root PATH selects inputs; --output-directory PATH selects generated outputs (defaults: checkout and checkout/static).")
     parser.add_argument("assets", nargs="*", choices=sorted(ASSETS), help="assets to build; defaults to all")
     parser.add_argument("--check", action="store_true", help="fail if generated static files are stale")
     parser.add_argument("--watch", action="store_true", help="rebuild on source change (mtime poll) until interrupted")
@@ -2859,9 +2868,21 @@ def _main(argv: list[str] | None = None) -> int:
 
 
 def main(argv: list[str] | None = None, *, environ: dict[str, str] | None = None) -> int:
+    global REPO_ROOT, OUTPUT_ROOT, LOCALES_SRC, LOCALES_OUT
+    roots = argparse.ArgumentParser(add_help=False)
+    roots.add_argument("--source-root", type=Path, default=REPO_ROOT)
+    roots.add_argument("--output-directory", type=Path)
+    paths, remaining = roots.parse_known_args(argv)
+    REPO_ROOT = paths.source_root.resolve()
+    OUTPUT_ROOT = (paths.output_directory or REPO_ROOT / "static").resolve()
+    LOCALES_SRC = REPO_ROOT / "static_src" / "locales"
+    LOCALES_OUT = OUTPUT_ROOT / "locales"
     try:
+        # Declared Bazel outputs are private to the action, so no checkout writer is involved.
+        if OUTPUT_ROOT != REPO_ROOT / "static":
+            return _main(remaining)
         with worktree_writer.acquire_worktree_writer(REPO_ROOT, purpose="static-build", environ=environ):
-            return _main(argv)
+            return _main(remaining)
     except worktree_writer.WorktreeWriterBusy as error:
         print(f"STATIC BUILD REFUSED: {error}", file=sys.stderr)
         return 3

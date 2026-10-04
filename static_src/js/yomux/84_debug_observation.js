@@ -616,7 +616,7 @@ function syncJsDebugHistoryReadinessSurfaces() {
     }
     if (!overlay) continue;
     overlay.hidden = state.overlayVisible !== true;
-    if (overlay.innerHTML !== content) overlay.innerHTML = content;
+    setInnerHtmlIfChanged(overlay, content);
   }
   // YO!cost chart areas are not [data-js-debug-graph] surfaces (the graph-refresh
   // loops would rebuild them with YO!stats content); toggle their always-present
@@ -627,7 +627,7 @@ function syncJsDebugHistoryReadinessSurfaces() {
     const overlay = area.querySelector('[data-js-debug-history-overlay]');
     if (!overlay) continue;
     overlay.hidden = state.overlayVisible !== true;
-    if (overlay.innerHTML !== content) overlay.innerHTML = content;
+    setInnerHtmlIfChanged(overlay, content);
   }
 }
 
@@ -1231,6 +1231,7 @@ function debugEventTypeLabel(type) {
 }
 
 function debugEventStatusText(event) {
+  if (event.deliveryOutcome === 'unsupported') return 'unsupported';
   if (event.error) return 'error';
   if (Number.isFinite(event.status)) return `HTTP ${event.status}`;
   if (typeof event.ok === 'boolean') return event.ok ? 'ok' : 'not ok';
@@ -1250,6 +1251,7 @@ function debugEventDetailText(event) {
 }
 
 function debugClientLogLevel(event) {
+  if (event?.deliveryOutcome === 'unsupported') return 'info';
   if (event?.type === 'stats_history' && jsDebugLogLevels.includes(String(event?.level || ''))) return String(event.level);
   if (event?.type === 'error' || event?.type === 'unhandledrejection' || event?.type === 'client_failure' || event?.error || Number(event?.status || 0) >= 500) return 'error';
   if (Number(event?.status || 0) >= 400 || event?.ok === false) return 'warning';

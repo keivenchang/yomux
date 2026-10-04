@@ -922,7 +922,7 @@ function yoagentRecentAgentRestartHtml(agent, signal) {
   if (readOnlyMode || signal?.pane?.dead !== true) return '';
   const kind = String(agent?.agent_kind || tmuxSignalPaneCommand(signal.pane) || '').toLowerCase();
   if (!agentClientKindsWithCapability('restart').includes(kind)) return '';
-  return `<button type="button" class="yoagent-recent-agent-restart" data-action="yoagent-agent-restart" data-yomux-agent-restart="${esc(kind)}" data-yolomux-agent-restart="${esc(kind)}" title="${esc(t('yoagent.restart.title', {kind: agentLabel(kind)}))}">${esc(t('yoagent.restart'))}</button>`;
+  return `<button type="button" class="yoagent-recent-agent-restart" data-action="yoagent-agent-restart" data-yomux-agent-restart="${esc(kind)}" title="${esc(t('yoagent.restart.title', {kind: agentLabel(kind)}))}">${esc(t('yoagent.restart'))}</button>`;
 }
 
 function yoagentRecentAgentPathText(agent, signal = yoagentRecentAgentSignal(agent)) {

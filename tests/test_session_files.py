@@ -47,6 +47,7 @@ from tests.browser_helpers.browser_layout import register_browser_new_document_s
 from tests.browser_helpers.browser_layout import start_browser_server
 from tests.browser_helpers.browser_layout import stop_browser_server
 from tests.gate_harness import gate_http_port
+from tests.gate_harness import run_fixture_cleanup_phases
 from tests.isolated_dev_server import build_paths
 from tests.isolated_dev_server import start_isolated_dev_server
 from tests.isolated_dev_server import stop_and_reap_daemons
@@ -92,6 +93,13 @@ def tuple_return_args(value):
 def dict_return_args(value):
     assert get_origin(value) is dict
     return get_args(value)
+
+
+def stop_job_client_child(job_client) -> None:
+    process = job_client.registry.process
+    if process is not None and process.poll() is None:
+        process.terminate()
+        process.wait(timeout=2)
 
 
 def assert_e3_causal_ceilings(observed: dict[str, int], ceilings: dict[str, int]) -> None:
@@ -334,13 +342,11 @@ def test_session_files_scheduler_lease_keeps_batchd_alive_through_next_demand(
         assert webapp.job_client.socket_path.exists()
         assert webapp.job_client.registry.healthy()
     finally:
-        if server is not None:
-            stop_browser_server(server, thread)
-        process = webapp.job_client.registry.process
-        if process is not None and process.poll() is None:
-            process.terminate()
-            process.wait(timeout=2)
-        webapp.control_server.stop()
+        run_fixture_cleanup_phases("session-files public start", (
+            ("HTTP server", lambda: stop_browser_server(server, thread) if server is not None else None),
+            ("batchd child", lambda: stop_job_client_child(webapp.job_client)),
+            ("control server", webapp.control_server.stop),
+        ))
 
 
 def test_session_files_public_start_failure_is_typed_terminal_not_queued(monkeypatch, tmp_path):
@@ -376,9 +382,10 @@ def test_session_files_public_start_failure_is_typed_terminal_not_queued(monkeyp
         )
         assert len(retired) in {2, 3}
     finally:
-        if server is not None:
-            stop_browser_server(server, thread)
-        webapp.control_server.stop()
+        run_fixture_cleanup_phases("session-files typed failure", (
+            ("HTTP server", lambda: stop_browser_server(server, thread) if server is not None else None),
+            ("control server", webapp.control_server.stop),
+        ))
 
 
 def test_session_files_stale_background_refresh_publishes_materialized_payload(monkeypatch):
@@ -480,7 +487,7 @@ def test_session_files_cache_view_survives_real_server_restart(monkeypatch, tmp_
             Path(__file__).resolve().parents[1],
             server_paths,
             runtime,
-            port=gate_http_port.release(),
+            port_lease=gate_http_port,
         )
         assert process_environment_contains(server.process.pid, "TMPDIR", server_paths.tmp_dir), "server child did not inherit its fixture TMPDIR"
         session = runtime.sessions[0]
@@ -624,7 +631,7 @@ def test_session_files_one_generation_physical_disk_gate(monkeypatch, tmp_path, 
         warm_batchd_lane("freshness")
         server = start_isolated_dev_server(
             "session-files-physical", Path(__file__).resolve().parents[1], server_paths, runtime,
-            env_overrides={"YOLOMUX_RUNTIME_DIR": str(runtime_base)}, port=gate_http_port.release(),
+            env_overrides={"YOLOMUX_RUNTIME_DIR": str(runtime_base)}, port_lease=gate_http_port,
         )
         status_before = job_client.runtime_status()
         pids_before = qualified_pids(status_before)
@@ -810,7 +817,7 @@ def test_session_files_browser_completion_is_bounded_to_one_opaque_cache_read(mo
     try:
         server = start_isolated_dev_server(
             "session-files-browser", Path(__file__).resolve().parents[1], server_paths, runtime,
-            port=gate_http_port.release(),
+            port_lease=gate_http_port,
         )
         session = runtime.sessions[0]
         request_path = f"/api/session-files?session={quote(session, safe='')}&hours=24&from=HEAD&to=current&force=1&fresh_git=1"
@@ -896,7 +903,7 @@ def test_session_files_browser_completion_is_bounded_to_one_opaque_cache_read(mo
                     "requests: window.__e3SessionFilesRequests,"
                 "descriptor: sessionFilesDescriptorForDestination('finder', sessionFilesRequestForDestination('finder')),"
                 "payload: fileExplorerFinderSessionFilesState?.payload,"
-                "errors: window.__yolomuxDebugFailureEvents || []"
+                "errors: window.__yomuxDebugFailureEvents || []"
                 "};"
             )
             raise AssertionError(f"Finder missed session-files completion: {finder_state}") from error
@@ -1166,9 +1173,11 @@ def test_session_files_route_returns_operation_receipt_then_publishes_and_replay
         assert malformed_payload["state"] == "queued" and malformed_payload["status"] == "pending"
         assert len(submissions) == submission_count, "a malformed cache view must not submit batchd work"
     finally:
-        release_result.set()
-        if server is not None: stop_browser_server(server, thread)
-        webapp.control_server.stop()
+        run_fixture_cleanup_phases("session-files delayed completion", (
+            ("release held result", release_result.set),
+            ("HTTP server", lambda: stop_browser_server(server, thread) if server is not None else None),
+            ("control server", webapp.control_server.stop),
+        ))
 
 
 def test_session_files_completion_before_receipt_persistence_terminalizes_after_registration(no_control_socket, monkeypatch, tmp_path):
@@ -1557,9 +1566,10 @@ def test_session_files_failure_attributes_one_terminal_producer(failure_stage, m
         assert len(retired) == 2
         webapp.stop_background_scheduler()
     finally:
-        if server is not None:
-            stop_browser_server(server, thread)
-        webapp.control_server.stop()
+        run_fixture_cleanup_phases("session-files scheduler receipt", (
+            ("HTTP server", lambda: stop_browser_server(server, thread) if server is not None else None),
+            ("control server", webapp.control_server.stop),
+        ))
 
 
 def test_session_files_recovered_receipt_replays_producer_abandoned(monkeypatch, tmp_path):
@@ -1663,13 +1673,11 @@ def test_session_files_public_deleted_root_cache_keeps_batchd_serving(
         assert webapp.job_client.registry.healthy()
         assert webapp.job_client.runtime_status()["product_counters"]["session_files_view"]["completed"] >= 3
     finally:
-        if server is not None:
-            stop_browser_server(server, thread)
-        process = webapp.job_client.registry.process
-        if process is not None and process.poll() is None:
-            process.terminate()
-            process.wait(timeout=2)
-        webapp.control_server.stop()
+        run_fixture_cleanup_phases("session-files recovered receipt", (
+            ("HTTP server", lambda: stop_browser_server(server, thread) if server is not None else None),
+            ("batchd child", lambda: stop_job_client_child(webapp.job_client)),
+            ("control server", webapp.control_server.stop),
+        ))
 
 
 def test_shared_git_snapshot_reuses_one_worktree_build_and_invalidates_every_state_input(no_control_socket, monkeypatch, tmp_path):

@@ -582,7 +582,7 @@ def test_i3_calibration_probe_moves_under_independent_browser_pressure(browser, 
                 """
                 const done = arguments[arguments.length - 1];
                 const wait = () => {
-                  if ((window.__yolomuxCalibrationPressureTicks || 0) >= 2) return done(window.__yolomuxCalibrationPressureTicks);
+                  if ((window.__yomuxCalibrationPressureTicks || 0) >= 2) return done(window.__yomuxCalibrationPressureTicks);
                   setTimeout(wait, 0);
                 };
                 wait();

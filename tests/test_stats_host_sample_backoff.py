@@ -50,7 +50,7 @@ def _service(tmp_path, monkeypatch, clock):
     service._host_cpu_sampler = _Sampler()
     service._next_host_gpu_at = float("inf")
     monkeypatch.setattr(service, "_web_push_target", lambda: ({"control_socket": "s"}, ""))
-    monkeypatch.setattr(service_module, "send_yolomux_control_request",
+    monkeypatch.setattr(service_module, "send_yomux_control_request",
                         lambda owner, request, timeout: {"ok": True})
     return service
 

@@ -18,8 +18,7 @@ from tests.browser_helpers.browser_layout import browser
 from tests.browser_helpers.browser_layout import load_live_runtime_boot_fixture
 from tests.browser_helpers.browser_layout import start_browser_server
 from tests.browser_helpers.browser_layout import start_isolated_browser_app
-from tests.browser_helpers.browser_layout import stop_browser_server
-from tests.browser_helpers.browser_layout import stop_isolated_browser_app
+from tests.browser_helpers.browser_layout import stop_browser_fixture
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import wait_for_browser_boot
 from tests.gate_harness import wait_for_fixture_api_quiescence
@@ -519,7 +518,7 @@ def _wait_for_realistic_browser_roster(browser, sessions: list[str]) -> dict[str
             maximumRevision: Math.max(...revisions),
           };
         };
-        window.__yolomuxTestWaitFor(() => {
+        window.__yomuxTestWaitFor(() => {
           const observation = observe();
           return observation.browserSessionCount === expected.length
             && observation.metadataPresentCount === expected.length
@@ -588,21 +587,6 @@ def _assert_runtime_owns_durable_and_service_paths(runtime) -> None:
     )
 
 
-def _warm_realistic_status_snapshot(runtime) -> None:
-    refresh_errors = runtime.app.refresh_sessions(maintenance=False)
-    assert refresh_errors == [], refresh_errors
-    assert set(runtime.app.sessions) == set(runtime.sessions), {
-        "appSessions": runtime.app.sessions,
-        "fixtureSessions": runtime.sessions,
-    }
-    response, body = runtime.app.status_client.snapshot(runtime.app.sessions, timeout=1.0)
-    if response.get("ok") is not True:
-        waited = runtime.app.status_client.wait_generation(0, timeout=20.0)
-        assert waited.get("ok") is True and int(waited.get("generation") or 0) > 0, waited
-        response, body = runtime.app.status_client.snapshot(runtime.app.sessions, timeout=1.0)
-    assert response.get("ok") is True and body, response
-
-
 @contextmanager
 def _realistic_agent_browser_runtime(browser, monkeypatch, gate_runtime_paths, session_count: int):
     runtime = start_isolated_browser_app(
@@ -622,8 +606,8 @@ def _realistic_agent_browser_runtime(browser, monkeypatch, gate_runtime_paths, s
             gate_runtime_paths.config_dir,
             runtime.app,
             auth_bypass=True,
+            paths=gate_runtime_paths,
         )
-        _warm_realistic_status_snapshot(runtime)
         session = runtime.sessions[0]
         # Keep YO!info active so the production browser demand includes the transcripts SSE
         # channel; F6 then exercises the event-driven metadata refresh rather than a test call.
@@ -632,6 +616,8 @@ def _realistic_agent_browser_runtime(browser, monkeypatch, gate_runtime_paths, s
         assert_live_runtime_boot_healthy(browser, "regression-gate", timeout=20)
         wait_for_browser_boot(browser, globals_required=AGENT_STATE_GLOBALS, dom_anchors=("#grid",), timeout=20)
         wait_for_fixture_client_event_demand(browser)
+        # Browser demand starts statusd; waiting for a generation before its
+        # socket exists turns a transient startup into a transport failure.
         _wait_for_realistic_browser_roster(browser, runtime.sessions)
         wait_for_fixture_api_quiescence(browser, timeout=20)
         WebDriverWait(browser, 10).until(
@@ -642,9 +628,75 @@ def _realistic_agent_browser_runtime(browser, monkeypatch, gate_runtime_paths, s
         )
         yield SimpleNamespace(browser=browser, runtime=runtime, server=server)
     finally:
-        if server is not None and thread is not None:
-            stop_browser_server(server, thread, browser=browser)
-        stop_isolated_browser_app(runtime)
+        stop_browser_fixture(server, thread, runtime, browser=browser)
+
+
+@pytest.mark.no_browser
+@pytest.mark.parametrize("root_owned", [False, True])
+def test_browser_server_forwards_its_runtime_root_owner(monkeypatch, tmp_path, root_owned):
+    module = sys.modules[start_browser_server.__module__]
+    paths = SimpleNamespace(fixture_apps=[], local_service_ledger=object()) if root_owned else None
+    server = SimpleNamespace()
+    runtime = SimpleNamespace(server=server, thread=object(), server_log_boundary={})
+    forwarded = []
+    monkeypatch.setattr(
+        module, "start_fixture_live_server",
+        lambda *_args, **kwargs: forwarded.append(kwargs.get("paths")) or runtime,
+    )
+    actual_server, actual_thread = start_browser_server(monkeypatch, tmp_path, SimpleNamespace(), paths=paths)
+    assert actual_server is server
+    assert actual_thread is runtime.thread
+    assert forwarded == [paths]
+
+
+@pytest.mark.no_browser
+@pytest.mark.parametrize("terminal_startup", [False, True])
+def test_realistic_runtime_uses_browser_demand_to_establish_status_readiness(monkeypatch, tmp_path, terminal_startup):
+    module = sys.modules[__name__]
+    sessions = ["fixture-session"]
+    navigations = []
+    stopped = []
+    paths = SimpleNamespace(root=tmp_path, config_dir=tmp_path / "config", state_dir=tmp_path / "state")
+    client = SimpleNamespace(
+        snapshot=lambda *_args, **_kwargs: ({"ok": False, "status": 503, "error": "unavailable"}, b""),
+        wait_generation=lambda *_args, **_kwargs: {"ok": False, "_transport_error": "absent"},
+    )
+    app = SimpleNamespace(
+        sessions=sessions,
+        status_client=client,
+        refresh_sessions=lambda **_kwargs: [],
+        client_watch_service=SimpleNamespace(event_watcher_record=SimpleNamespace(
+            status_generation_worker=SimpleNamespace(is_alive=lambda: True),
+        )),
+    )
+    runtime = SimpleNamespace(paths=paths, sessions=sessions, app=app)
+
+    def rendered_roster(_script, expected):
+        assert navigations, "status readiness was observed before browser demand"
+        assert expected == sessions
+        if terminal_startup:
+            return {"error": "terminal status startup rejected", "serverObservation": {"status": 503}}
+        return {"sessionCount": 1, "metadataCount": 1, "rowCount": 1, "revisions": [1]}
+
+    driver = SimpleNamespace(get=navigations.append, execute_async_script=rendered_roster)
+    monkeypatch.setattr(module, "start_isolated_browser_app", lambda *_args, **_kwargs: runtime)
+    monkeypatch.setattr(module, "start_browser_server", lambda *_args, **_kwargs: (SimpleNamespace(server_address=("127.0.0.1", 1)), object()))
+    for name in (
+        "_assert_runtime_owns_durable_and_service_paths", "_launch_mock_agents",
+        "assert_live_runtime_boot_healthy", "wait_for_browser_boot",
+        "wait_for_fixture_client_event_demand", "wait_for_fixture_api_quiescence",
+    ):
+        monkeypatch.setattr(module, name, lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(module, "stop_browser_fixture", lambda *_args, **_kwargs: stopped.extend(("server", "app")))
+    if terminal_startup:
+        with pytest.raises(AssertionError, match="terminal status startup rejected"):
+            with _realistic_agent_browser_runtime(driver, monkeypatch, paths, len(sessions)):
+                pytest.fail("terminal status startup reached a ready fixture")
+    else:
+        with _realistic_agent_browser_runtime(driver, monkeypatch, paths, len(sessions)) as fixture:
+            assert fixture.runtime is runtime
+    assert len(navigations) == 1
+    assert stopped == ["server", "app"]
 
 
 @pytest.mark.browser
@@ -1242,7 +1294,7 @@ def test_f6_realistic_consumers_converge_to_the_published_roster_revision(
               // wait-failure evidence for a wait that had actually succeeded.
               let waitFailure = null;
               try {
-                await window.__yolomuxTestWaitFor(
+                await window.__yomuxTestWaitFor(
                   () => f6ConvergenceSatisfied(snapshot(), expected.length, initialRevision),
                   {timeoutMs: 20000, description: `${expected.length}-session higher-revision consumer convergence`},
                 );

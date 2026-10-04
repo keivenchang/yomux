@@ -37,14 +37,12 @@ from tools.instance_isolation import RowPlan
 
 
 def _launcher_path() -> Path:
-    override = os.environ.get("YOLO_DEV_START_SH")
+    override = os.environ.get("YOMUX_DEV_START_SH") or os.environ.get("YOLO_DEV_START_SH")
     if override:
         return Path(override)
     candidates = (
         Path.home() / ".agents" / "skills" / "yomux-dev-start" / "yomux-dev-start.sh",
         Path.home() / "dev" / "ai-config" / "agents" / "skills" / "yomux-dev-start" / "yomux-dev-start.sh",
-        Path.home() / ".agents" / "skills" / "yolo-dev-start" / "yolo-dev-start.sh",
-        Path.home() / "dev" / "ai-config" / "claude" / "skills" / "yolo-dev-start" / "yolo-dev-start.sh",
     )
     return next((candidate for candidate in candidates if candidate.is_file()), candidates[0])
 
@@ -115,7 +113,7 @@ def test_shared_macos_launcher_execs_plan_when_present_and_stays_direct_otherwis
     assert 'source "$repo/tools/startup_common.sh" || exit 2; yomux_normalize_environment;' in text
     assert 'instance_isolation.py" exec --plan-json "$plan_json" --' in text
     assert 'instance_isolation.py" plan-direct --port "$port"' in text
-    assert 'YOLOMUX_ROW_PLAN_FILE:-' not in text.split("yolomux_macos_server_launcher()", 1)[1].split("yolomux_submit_macos_server()", 1)[0]
+    assert 'YOLOMUX_ROW_PLAN_FILE:-' not in text.split("yomux_macos_server_launcher()", 1)[1].split("yomux_submit_macos_server()", 1)[0]
 
 
 def test_isolated_server_environment_does_not_inherit_a_parent_root(monkeypatch, tmp_path) -> None:

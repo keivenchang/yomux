@@ -320,7 +320,7 @@ def _current_stats_fixture_html(*, network_fetch=False) -> str:
       window.__statsFixture.mounted = mounted;
       await mounted.start();
       await window.__statsFixture.clock.advance(0);
-      await window.__yolomuxTestWaitFor(
+      await window.__yomuxTestWaitFor(
         () => root.querySelector(view === 'cost' ? '[data-stats-chart="cost"]' : '[data-stats-chart="cpu"]'),
         {description: 'current stats first exact generation'}
       );
@@ -337,7 +337,7 @@ def _current_stats_fixture_html(*, network_fetch=False) -> str:
         range.value = String(rangeSeconds);
         range.dispatchEvent(new Event('change', {bubbles: true}));
         await window.__statsFixture.clock.advance(0);
-        await window.__yolomuxTestWaitFor(
+        await window.__yomuxTestWaitFor(
           () => window.__statsFixture.generationEvents.slice(beforeRange).some(item => (
             JSON.parse(item.dataset).range_seconds === rangeSeconds
           )),
@@ -350,7 +350,7 @@ def _current_stats_fixture_html(*, network_fetch=False) -> str:
       resolution.value = String(requestedResolution);
       resolution.dispatchEvent(new Event('change', {bubbles: true}));
       await window.__statsFixture.clock.advance(0);
-      await window.__yolomuxTestWaitFor(
+      await window.__yomuxTestWaitFor(
         () => window.__statsFixture.generationEvents.slice(beforeGeneration).some(item => {
           const generation = JSON.parse(item.dataset);
           return generation.range_seconds === rangeSeconds

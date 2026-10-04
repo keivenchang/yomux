@@ -152,8 +152,8 @@ def install_state_store(monkeypatch, state):
     def update_state(updates):
         state.update(copy.deepcopy(updates))
 
-    monkeypatch.setattr(app_module, "read_yolomux_state", read_state)
-    monkeypatch.setattr(app_module, "update_yolomux_state", update_state)
+    monkeypatch.setattr(app_module, "read_yomux_state", read_state)
+    monkeypatch.setattr(app_module, "update_yomux_state", update_state)
 
 
 def test_metadata_badge_state_has_one_typed_session_owner():

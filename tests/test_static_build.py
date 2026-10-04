@@ -3,6 +3,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,28 @@ from tools.static_build import repo_path
 from tools.static_build import _color_luminance_alpha
 from tools.static_build import _first_color_literal
 from tools.static_build import _light_covers
+
+
+def test_static_build_does_not_import_project_modules_from_script_checkout(tmp_path):
+    source_root = tmp_path / "declared-inputs"
+    output_root = tmp_path / "generated"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(sb.__file__),
+            "--source-root",
+            str(source_root),
+            "--output-directory",
+            str(output_root),
+            "--check",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "No module named 'yomux_lib'" in result.stderr
 from tools.static_build import lint_light_mode_pairs
 
 
@@ -781,7 +804,7 @@ def test_browser_fixture_wait_loops_have_one_injected_owner():
         wait_for_declarations = re.findall(r"\bconst\s+waitFor\s*=\s*([^;]+);", source)
         assert wait_for_declarations, path
         assert {declaration.strip() for declaration in wait_for_declarations} == {
-            "window.__yolomuxTestWaitFor"
+            "window.__yomuxTestWaitFor"
         }, path
         assert "const waitFor = async" not in source, path
         assert "const waitFor = predicate" not in source, path
@@ -816,7 +839,7 @@ def test_current_yostats_diagnostics_browser_tests_use_shared_observable_waits()
 
     assert set(function_sources) == names
     for name, function_source in function_sources.items():
-        assert "window.__yolomuxTestWaitFor" in function_source, name
+        assert "window.__yomuxTestWaitFor" in function_source, name
         assert "const deadline = performance.now()" not in function_source, name
         assert "setTimeout(resolve, 650)" not in function_source, name
 
@@ -1347,6 +1370,34 @@ def test_standard_spacing_lint_rejects_physical_logical_compound_and_fallback_co
 def test_undefined_css_var_lint_is_clean():
     # every var(--x) in the bundle resolves to a CSS def or a JS setProperty/inline-style.
     assert lint_undefined_css_vars() == []
+
+
+@pytest.mark.parametrize("publication", [
+    "row.style.setProperty('--published-color', value);",
+    "setStylePropertyIfChanged(row.style, '--published-color', value);",
+])
+def test_undefined_css_var_lint_recognizes_shared_style_publication(monkeypatch, publication):
+    sources = {
+        "yomux.css": ".row { color: var(--published-color); background: var(--missing-color); }",
+        "yomux.js": publication,
+    }
+    monkeypatch.setattr("tools.static_build.build_asset", sources.__getitem__)
+    assert lint_undefined_css_vars() == [
+        "undefined CSS var --missing-color (referenced via var() but never defined in CSS or set from JS)"
+    ]
+
+
+@pytest.mark.parametrize("source", [
+    "resetProperty('--unpublished-color', value);",
+    "resetStylePropertyIfChanged(row.style, '--unpublished-color', value);",
+    "setStylePropertyIfChanged(row.style); unrelated(row.style, '--unpublished-color', value);",
+])
+def test_undefined_css_var_lint_rejects_unrelated_publication_names(monkeypatch, source):
+    sources = {"yomux.css": ".row { color: var(--unpublished-color); }", "yomux.js": source}
+    monkeypatch.setattr("tools.static_build.build_asset", sources.__getitem__)
+    assert lint_undefined_css_vars() == [
+        "undefined CSS var --unpublished-color (referenced via var() but never defined in CSS or set from JS)"
+    ]
 
 
 def test_raw_window_viewport_lint_tree_is_clean():

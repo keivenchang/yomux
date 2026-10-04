@@ -105,7 +105,7 @@ DEFAULT_BROWSER_WINDOW_SIZE = (1000, 700)
 SESSION_SCOPED_BROWSER_REUSE_ENV = "YOLOMUX_SESSION_SCOPED_BROWSER"
 GOLDEN_UPDATE_ENV = "YOLOMUX_UPDATE_GOLDENS"
 GOLDEN_DIR_ENV = "YOLOMUX_GOLDEN_DIR"
-LIVE_RUNTIME_BUNDLE_SENTINEL = "__yolomuxLiveRuntimeBundleLoaded"
+LIVE_RUNTIME_BUNDLE_SENTINEL = "__yomuxLiveRuntimeBundleLoaded"
 LIVE_RUNTIME_LATE_FUNCTION = "handleGlobalShortcutKeydown"
 LIVE_RUNTIME_BUNDLE_WAIT_SECONDS = 20.0
 BROWSER_WAIT_HELPER_SOURCE = r"""
@@ -217,11 +217,11 @@ BROWSER_WAIT_HELPER_SOURCE = r"""
       await poll();
     }
   };
-  Object.defineProperty(window, '__yolomuxTestWaitFor', {
+  Object.defineProperty(window, '__yomuxTestWaitFor', {
     configurable: true,
     value: waitFor,
   });
-  Object.defineProperty(window, '__yolomuxTestHelpers', {
+  Object.defineProperty(window, '__yomuxTestHelpers', {
     configurable: true,
     value: Object.freeze({frame, settle, rect, paint, probePaint, parseStops, rowsByTop}),
   });
@@ -424,17 +424,17 @@ def register_browser_new_document_script(driver, source: str, *, reset_after_tes
     result = driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": source})
     identifier = str(result.get("identifier") or "")
     if reset_after_test and identifier:
-        identifiers = getattr(driver, "_yolomux_test_script_ids", None)
+        identifiers = getattr(driver, "_yomux_test_script_ids", None)
         if identifiers is None:
             identifiers = []
-            driver._yolomux_test_script_ids = identifiers
+            driver._yomux_test_script_ids = identifiers
         identifiers.append(identifier)
     return identifier
 
 
 def remove_browser_test_new_document_scripts(driver):
-    identifiers = list(getattr(driver, "_yolomux_test_script_ids", []))
-    driver._yolomux_test_script_ids = []
+    identifiers = list(getattr(driver, "_yomux_test_script_ids", []))
+    driver._yomux_test_script_ids = []
     for identifier in identifiers:
         driver.execute_cdp_cmd("Page.removeScriptToEvaluateOnNewDocument", {"identifier": identifier})
 
@@ -482,7 +482,7 @@ def new_chrome_driver(window_size: str | tuple[int, int] | None = None, *, profi
         driver = webdriver.Chrome(service=ChromeService(executable_path=str(driver_path)), options=options)
     else:
         driver = webdriver.Chrome(options=options)
-    driver._yolomux_primary_window_handle = driver.current_window_handle
+    driver._yomux_primary_window_handle = driver.current_window_handle
     register_browser_new_document_script(driver, BROWSER_WAIT_HELPER_SOURCE, reset_after_test=False)
     driver.execute_script(BROWSER_WAIT_HELPER_SOURCE)
     return driver
@@ -501,9 +501,9 @@ def settle_browser_frames(browser, count=2):
         """
         const done = arguments[arguments.length - 1];
         const count = arguments[0];
-        const settle = window.__yolomuxTestHelpers?.settle;
+        const settle = window.__yomuxTestHelpers?.settle;
         if (typeof settle !== 'function') {
-          done({error: 'missing __yolomuxTestHelpers.settle'});
+          done({error: 'missing __yomuxTestHelpers.settle'});
           return;
         }
         settle(count).then(() => done({ok: true}), error => done({error: String(error?.stack || error)}));
@@ -863,7 +863,7 @@ def stop_isolated_browser_app(runtime):
     FixtureRuntime(runtime.app, list(getattr(runtime, "sessions", ())), runtime.tmux, runtime.paths).close()
 
 
-def start_browser_server(monkeypatch, tmp_path, app, *, tls_context=None, auth_bypass=False, pin_batchd_scheduler=None):
+def start_browser_server(monkeypatch, tmp_path, app, *, tls_context=None, auth_bypass=False, pin_batchd_scheduler=None, paths=None):
     auth_path = tmp_path / "auth.yaml"
     auth_path.write_text(browser_auth_yaml(), encoding="utf-8")
     monkeypatch.setattr(common, "AUTH_CONFIG_PATH", auth_path)
@@ -881,6 +881,7 @@ def start_browser_server(monkeypatch, tmp_path, app, *, tls_context=None, auth_b
             # protect and must not manufacture a batchd dependency.
             pin_batchd_scheduler=(hasattr(app, "job_client") if pin_batchd_scheduler is None else pin_batchd_scheduler),
         ),
+        paths=paths,
     )
     runtime.server._fixture_server_log_boundary = runtime.server_log_boundary
     runtime.server._fixture_gate_live_server = runtime
@@ -931,13 +932,24 @@ def stop_browser_server(
         raise validation_error
 
 
+def stop_browser_fixture(server, thread, runtime, *, browser=None):
+    """Retire the HTTP server and the remaining isolated-app owners even after a teardown error."""
+
+    phases = []
+    if server is not None and thread is not None:
+        phases.append(("browser server", lambda: stop_browser_server(server, thread, browser=browser)))
+    if runtime is not None:
+        phases.append(("isolated browser app", lambda: stop_isolated_browser_app(runtime)))
+    run_fixture_cleanup_phases("isolated browser fixture", phases)
+
+
 def install_browser_websocket_tracker(driver):
     register_browser_new_document_script(
         driver,
         """
         (() => {
           const NativeWebSocket = window.WebSocket;
-          if (!NativeWebSocket || NativeWebSocket.__yolomuxTracked) return;
+          if (!NativeWebSocket || NativeWebSocket.__yomuxTracked) return;
           const tracked = [];
           function TrackedWebSocket(url, protocols) {
             const socket = protocols === undefined ? new NativeWebSocket(url) : new NativeWebSocket(url, protocols);
@@ -949,8 +961,8 @@ def install_browser_websocket_tracker(driver):
           for (const key of ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED']) {
             Object.defineProperty(TrackedWebSocket, key, {value: NativeWebSocket[key]});
           }
-          Object.defineProperty(TrackedWebSocket, '__yolomuxTracked', {value: true});
-          window.__yolomuxTrackedSockets = tracked;
+          Object.defineProperty(TrackedWebSocket, '__yomuxTracked', {value: true});
+          window.__yomuxTrackedSockets = tracked;
           window.WebSocket = TrackedWebSocket;
         })();
         """,
@@ -1002,9 +1014,9 @@ class _BrowserDriverLease:
     def get(self, url):
         parsed = urlsplit(str(url))
         if parsed.scheme in {"http", "https"} and parsed.netloc:
-            origins = set(getattr(self._driver, "_yolomux_test_origins", set()))
+            origins = set(getattr(self._driver, "_yomux_test_origins", set()))
             origins.add(f"{parsed.scheme}://{parsed.netloc}")
-            self._driver._yolomux_test_origins = origins
+            self._driver._yomux_test_origins = origins
         return self._driver.get(url)
 
     def replace_after_invalid_session(self):
@@ -1026,10 +1038,10 @@ def _reset_browser_windows(driver):
     handles = list(driver.window_handles)
     if not handles:
         raise WebDriverException("Chrome has no remaining top-level window")
-    primary = getattr(driver, "_yolomux_primary_window_handle", None)
+    primary = getattr(driver, "_yomux_primary_window_handle", None)
     if primary not in handles:
         primary = handles[0]
-        driver._yolomux_primary_window_handle = primary
+        driver._yomux_primary_window_handle = primary
     for handle in handles:
         if handle == primary:
             continue
@@ -1045,7 +1057,7 @@ def _reset_reused_browser_state(driver, *, retired_origin=None):
     origin = retired_origin
     if origin is None:
         origin = driver.execute_script("return location.origin;")
-    origins = set(getattr(driver, "_yolomux_test_origins", set()))
+    origins = set(getattr(driver, "_yomux_test_origins", set()))
     if origin and origin != "null":
         origins.add(origin)
     fixture_origin = _FIXTURE_HTTP_BASE
@@ -1053,8 +1065,8 @@ def _reset_reused_browser_state(driver, *, retired_origin=None):
         origins.add(fixture_origin)
     for storage_origin in sorted(origins):
         driver.execute_cdp_cmd("Storage.clearDataForOrigin", {"origin": storage_origin, "storageTypes": "all"})
-    driver._yolomux_test_origins = set()
-    driver._yolomux_server_log_boundary = None
+    driver._yomux_test_origins = set()
+    driver._yomux_server_log_boundary = None
     driver.delete_all_cookies()
     driver.execute_cdp_cmd("Browser.resetPermissions", {})
     driver.execute_cdp_cmd("Browser.setDownloadBehavior", {"behavior": "deny"})
@@ -1134,7 +1146,7 @@ def reset_reused_browser_after_test(request):
     lease = request.node.funcargs.get("browser")
     if lease is None:
         return
-    if getattr(request.node, "_yolomux_skip_reused_browser_diagnostic", False):
+    if getattr(request.node, "_yomux_skip_reused_browser_diagnostic", False):
         _reset_reused_browser_state(lease, retired_origin=lease.execute_script("return location.origin;"))
         return
     try:
@@ -1621,7 +1633,7 @@ def codemirror_todo_diff_overview_fixture_html():
             const rows = diffOverviewRowsFromCodeMirrorChunks(chunks, current, original);
             const content = view.scrollDOM.querySelector('.cm-content');
             if (content) content.style.minHeight = `${{Math.ceil(rows.totalRows * diffOverviewLineHeight(view, container))}}px`;
-            const {{parseStops}} = window.__yolomuxTestHelpers;
+            const {{parseStops}} = window.__yomuxTestHelpers;
             const collectMetrics = () => {{
               const overview = container.querySelector('.cm-diff-overview');
               if (!overview) {{
@@ -1734,7 +1746,7 @@ def codemirror_file_explorer_diff_overview_fixture_html():
             panel._cmMode = 'diff';
             updateCodeMirrorDiffOverview(panel, container, {{diff: ''}}, current, original);
 
-            const {{settle, parseStops}} = window.__yolomuxTestHelpers;
+            const {{settle, parseStops}} = window.__yomuxTestHelpers;
             const normalizeColor = color => {{
               const value = String(color || '').toLowerCase();
               if (value === 'transparent' || value === '{deleted_color}' || value === '{added_color}') return value;
@@ -1930,7 +1942,7 @@ def codemirror_diff_wrapped_inserted_line_fixture_html():
             }});
             panel._cmView = view;
             panel._cmMode = 'diff';
-            const {{settle}} = window.__yolomuxTestHelpers;
+            const {{settle}} = window.__yomuxTestHelpers;
             window.__diffWrapMetrics = async function() {{
               await settle();
               const inserted = Array.from(container.querySelectorAll('.cm-insertedLine'))
@@ -2403,7 +2415,7 @@ def build_browser_bootstrap(scenario: BrowserBootScenario) -> dict[str, object]:
         "filesystemBatchLimits": web.filesystem_batch_limits_payload(),
         "serverHostname": "localhost",
         "cpuTopology": {"logical_cpus": 8, "physical_cores": 4},
-        "backend": web.YOLOMUX_BACKEND,
+        "backend": web.YOMUX_BACKEND,
         "version": "test",
         "versionStatus": "test",
         "backendLabel": "Go test",
@@ -3978,12 +3990,12 @@ def trusted_touch_tap(browser, selector, *, timeout=3):
     _assert_browser_point_hits_target(browser, point, selector=selector)
     browser.execute_script(
         """
-        window.__yolomuxTrustedTapProbe = [];
-        window.__yolomuxTrustedTapHandler = event => window.__yolomuxTrustedTapProbe.push({
+        window.__yomuxTrustedTapProbe = [];
+        window.__yomuxTrustedTapHandler = event => window.__yomuxTrustedTapProbe.push({
           type: event.type, trusted: event.isTrusted, pointerType: event.pointerType || '',
         });
         for (const type of ['pointerdown', 'pointerup', 'click']) {
-          document.addEventListener(type, window.__yolomuxTrustedTapHandler, true);
+          document.addEventListener(type, window.__yomuxTrustedTapHandler, true);
         }
         """
     )
@@ -3995,21 +4007,21 @@ def trusted_touch_tap(browser, selector, *, timeout=3):
         browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
         events = WebDriverWait(browser, timeout).until(
             lambda driver: driver.execute_script(
-                "return (window.__yolomuxTrustedTapProbe || []).some(event => event.type === 'click');"
+                "return (window.__yomuxTrustedTapProbe || []).some(event => event.type === 'click');"
             )
         )
     finally:
         events = browser.execute_script(
             """
-            const handler = window.__yolomuxTrustedTapHandler;
+            const handler = window.__yomuxTrustedTapHandler;
             if (handler) {
               for (const type of ['pointerdown', 'pointerup', 'click']) {
                 document.removeEventListener(type, handler, true);
               }
             }
-            const probe = window.__yolomuxTrustedTapProbe || [];
-            window.__yolomuxTrustedTapProbe = null;
-            window.__yolomuxTrustedTapHandler = null;
+            const probe = window.__yomuxTrustedTapProbe || [];
+            window.__yomuxTrustedTapProbe = null;
+            window.__yomuxTrustedTapHandler = null;
             return probe;
             """
         )
@@ -4033,9 +4045,9 @@ def trusted_touch_long_press(browser, selector, *, until, x_ratio=0.5, y_ratio=0
     point = wait_for_dockview_pointer_target(browser, selector, x_ratio, y_ratio)
     browser.execute_script(
         """
-        window.__yolomuxTrustedTouchProbe = [];
-        window.__yolomuxTrustedTouchHandler = event => window.__yolomuxTrustedTouchProbe.push({trusted: event.isTrusted, pointerType: event.pointerType || ''});
-        document.addEventListener('pointerdown', window.__yolomuxTrustedTouchHandler, true);
+        window.__yomuxTrustedTouchProbe = [];
+        window.__yomuxTrustedTouchHandler = event => window.__yomuxTrustedTouchProbe.push({trusted: event.isTrusted, pointerType: event.pointerType || ''});
+        document.addEventListener('pointerdown', window.__yomuxTrustedTouchHandler, true);
         """
     )
     browser.execute_cdp_cmd(
@@ -4049,11 +4061,11 @@ def trusted_touch_long_press(browser, selector, *, until, x_ratio=0.5, y_ratio=0
         browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
         pointerdown = browser.execute_script(
             """
-            const handler = window.__yolomuxTrustedTouchHandler;
+            const handler = window.__yomuxTrustedTouchHandler;
             if (handler) document.removeEventListener('pointerdown', handler, true);
-            const events = window.__yolomuxTrustedTouchProbe || [];
-            window.__yolomuxTrustedTouchProbe = null;
-            window.__yolomuxTrustedTouchHandler = null;
+            const events = window.__yomuxTrustedTouchProbe || [];
+            window.__yomuxTrustedTouchProbe = null;
+            window.__yomuxTrustedTouchHandler = null;
             return events;
             """
         )

@@ -1815,9 +1815,34 @@ function debugGraphServiceLoadModeControlsHtml(buckets = [], group = null) {
   }).join('')}</fieldset>`;
 }
 
+let jsDebugAgentHistoryRefill = null;
+
+function ensureJsDebugAgentHistoryRefill() {
+  if (jsDebugAgentHistoryRefill || readOnlyMode) return jsDebugAgentHistoryRefill;
+  const client = jsDebugCurrentStatsClientState.client;
+  if (client?.controller?.()?.capabilities?.()?.agent_history_refill !== true) return null;
+  jsDebugAgentHistoryRefill = debugGraphStatsCurrentModule().createAgentHistoryRefill({
+    fetch: apiFetch,
+    confirm: showFileEditorDecisionDialog,
+    onChange() {
+      for (const control of document.querySelectorAll('[data-js-debug-refill-controls]')) control.innerHTML = jsDebugAgentHistoryRefill.html();
+      refreshDebugPanelsFromEvents({force: true});
+      renderYoCostPanels({force: true});
+    },
+    onRefilled() { void client.retry(); },
+  });
+  jsDebugAgentHistoryRefill.start();
+  return jsDebugAgentHistoryRefill;
+}
+
+function debugGraphRefillControlsHtml() {
+  return `<div data-js-debug-refill-controls>${jsDebugAgentHistoryRefill?.html() || ''}</div>`;
+}
+
 function debugGraphControlsHtml(nowMs = Date.now()) {
   return `<div class="js-debug-graph-controls">
     ${debugGraphChartToggleControlsHtml()}
+    ${debugGraphRefillControlsHtml()}
     ${debugGraphLayoutControlsHtml()}
     ${debugGraphRangeResolutionControlsHtml(nowMs)}
   </div>`;
@@ -2676,7 +2701,7 @@ function debugGraphAxisHtml(group, max) {
   </div>`;
 }
 
-function debugGraphXAxisHtml(domain) {
+function debugGraphXAxisHtml(domain, renderedResolutionSeconds = null) {
   const startMs = Number(domain?.startMs);
   const endMs = Number(domain?.endMs);
   if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return '';
@@ -2691,7 +2716,7 @@ function debugGraphXAxisHtml(domain) {
   // range's span. Coarser resolutions (10s/60s/300s) show HH:MM because a seconds digit
   // there is fake precision. Keyed off the same effective-resolution owner the Resolution
   // label reads, not a span proxy.
-  const resolutionSeconds = debugGraphRenderedResolutionSeconds(Date.now());
+  const resolutionSeconds = renderedResolutionSeconds ?? debugGraphRenderedResolutionSeconds(Date.now());
   const includeSeconds = !includeDate && resolutionSeconds <= 1;
   return `<div class="js-debug-x-axis" data-js-debug-x-axis>
     ${ticks.map(tick => `<span data-js-debug-x-tick="${esc(tick.name)}"${includeDate ? ` data-js-debug-x-date="${esc(debugGraphLocalDateKey(tick.ms))}"` : ''}>${esc(debugGraphTimeLabel(tick.ms, {includeDate, includeSeconds}))}</span>`).join('')}
@@ -2877,8 +2902,8 @@ function debugGraphChartCapacityMax(group, buckets) {
   return 0;
 }
 
-function debugGraphBucketsForChartGroup(group, defaultBuckets, nowMs = Date.now()) {
-  if (group?.key === 'agentTokens' || group?.key === 'modelTokens') return debugGraphAgentTokenDisplayBuckets(nowMs);
+function debugGraphBucketsForChartGroup(group, defaultBuckets, nowMs = Date.now(), tokenBuckets = null) {
+  if (group?.key === 'agentTokens' || group?.key === 'modelTokens') return tokenBuckets || debugGraphAgentTokenDisplayBuckets(nowMs);
   const bucketSeconds = Number(group?.bucketSeconds);
   if (Number.isFinite(bucketSeconds) && bucketSeconds > 0) {
     return debugGraphDisplayBuckets(nowMs, {minimumResolutionSeconds: bucketSeconds, rangeSeconds: debugRuntimeState.graphRangeSeconds});
@@ -2886,11 +2911,9 @@ function debugGraphBucketsForChartGroup(group, defaultBuckets, nowMs = Date.now(
   return defaultBuckets;
 }
 
-function debugGraphRenderedResolutionSeconds(nowMs = Date.now()) {
-  const defaultBuckets = debugGraphDisplayBuckets(nowMs);
-  const resolutions = jsDebugGraphChartGroups
-    .filter(group => group?.key === 'agentTokens' || group?.key === 'modelTokens')
-    .flatMap(group => debugGraphBucketsForChartGroup(group, defaultBuckets, nowMs).map(bucket => Number(bucket?.durationMs) / 1000))
+function debugGraphRenderedResolutionSeconds(nowMs = Date.now(), tokenBuckets = debugGraphAgentTokenDisplayBuckets(nowMs)) {
+  const resolutions = tokenBuckets
+    .map(bucket => Number(bucket?.durationMs) / 1000)
     .filter(value => Number.isFinite(value) && value > 0);
   return Math.max(debugGraphDisplayResolutionMs(debugGraphDomain(nowMs), 0, nowMs) / 1000, ...resolutions);
 }
@@ -3367,6 +3390,9 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
   const chartClasses = ['js-debug-chart'];
   if (group.dynamicAgentTokens === true || group.dynamicTokenDimension) chartClasses.push('js-debug-chart--token-agents');
   if (group.macMemoryCard === true) chartClasses.push('js-debug-chart--mac-memory');
+  if (jsDebugAgentHistoryRefill?.busy() && ['agentTokens', 'modelTokens'].includes(group.key)) {
+    return `<div class="js-debug-chart" data-js-debug-chart="${esc(group.key)}">${jsDebugAgentHistoryRefill.waitHtml()}</div>`;
+  }
   const bucketSeconds = Number(group.bucketSeconds);
   const bucketAttr = Number.isFinite(bucketSeconds) && bucketSeconds > 0 ? ` data-js-debug-chart-bucket-seconds="${esc(bucketSeconds)}"` : '';
   const displayedSummary = debugGraphDisplayedSummary(group, buckets);
@@ -3430,7 +3456,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
           ${debugGraphInteractionOverlayHtml()}
         </svg>
       </div>
-      ${debugGraphXAxisHtml(domain)}
+      ${debugGraphXAxisHtml(domain, options.renderedResolutionSeconds)}
     </div>`}
     ${chartUnavailable ? '' : '<div class="js-debug-hover-tooltip" data-js-debug-hover-tooltip hidden><span data-js-debug-hover-max></span><span aria-hidden="true"> · </span><time data-js-debug-hover-time></time><span data-js-debug-hover-source-separator aria-hidden="true" hidden> · </span><span data-js-debug-hover-source hidden></span></div>'}
   </section>`;
@@ -4143,18 +4169,19 @@ function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisible
   const disconnectedRanges = debugGraphDisconnectedRanges(overlayBuckets, domain);
   const tokenBuckets = debugGraphAgentTokenDisplayBuckets(nowMs);
   const spikeAxis = debugGraphTokenSpikeAxisDescriptor(tokenBuckets);
+  const renderedResolutionSeconds = debugGraphRenderedResolutionSeconds(nowMs, tokenBuckets);
   const visibleGroupKeys = new Set(chartGroups.map(group => group.key));
   // `chartGroups` normally contains members of the top-level Graphs manifest, but Daemons/System
   // supplies its standalone runtime-owner group explicitly. Preserve manifest order and append
   // supplied groups that are intentionally outside Graphs.
   const requestedGroups = [...jsDebugGraphChartGroups, ...(chartGroups || []).filter(group => !jsDebugGraphChartGroups.some(item => item.key === group.key))];
-  const gridHtml = requestedGroups.flatMap(group => {
-      const groupBuckets = debugGraphBucketsForChartGroup(group, buckets, nowMs);
-      const groupSeriesItems = groupBuckets === buckets ? seriesItems : debugGraphSeriesData(groupBuckets);
-      const items = visibleGroupKeys.has(group.key)
-        ? [debugGraphChartHtml(group, groupSeriesItems, domain, groupBuckets, overlayBuckets, disconnectedRanges, {spikeAxis, patternScope: `${patternScope}-${group.key}`})]
-        : [];
-      return items;
+  // Share projections only within this render so subsequent snapshots cannot reuse stale cells.
+  const seriesByBuckets = new Map([[buckets, seriesItems]]);
+  const gridHtml = requestedGroups.filter(group => visibleGroupKeys.has(group.key)).map(group => {
+      const groupBuckets = debugGraphBucketsForChartGroup(group, buckets, nowMs, tokenBuckets);
+      if (!seriesByBuckets.has(groupBuckets)) seriesByBuckets.set(groupBuckets, debugGraphSeriesData(groupBuckets));
+      const groupSeriesItems = seriesByBuckets.get(groupBuckets);
+      return debugGraphChartHtml(group, groupSeriesItems, domain, groupBuckets, overlayBuckets, disconnectedRanges, {spikeAxis, renderedResolutionSeconds, patternScope: `${patternScope}-${group.key}`});
     }).join('');
   return debugGraphChartShellHtml(gridHtml, domain);
 }
@@ -4170,6 +4197,7 @@ function debugGraphBodyHtml(nowMs = Date.now()) {
   const clientPerf = debugClientPerfHtml();
   const buckets = debugGraphDisplayBuckets(nowMs);
   if (!buckets.length) {
+    if (jsDebugAgentHistoryRefill?.busy()) return `${clientPerf}${jsDebugAgentHistoryRefill.waitHtml()}${meta}`;
     const empty = debugGraphWaitingForServerStats() ? '' : `<div class="js-debug-graph-empty">${esc(t('debug.empty'))}</div>`;
     const loadingShell = jsDebugHistoryReadiness.overlayVisible === true || jsDebugHistoryReadinessBusy()
       ? debugGraphChartShellHtml('', debugGraphDomain(nowMs))
@@ -4443,6 +4471,7 @@ function syncJsDebugCurrentStatsClient({select = false} = {}) {
   if (!jsDebugCurrentStatsClientState.startPromise) {
     try {
       jsDebugCurrentStatsClientState.startPromise = Promise.resolve(client.start())
+        .then(() => { ensureJsDebugAgentHistoryRefill(); })
         .catch(error => {
           if (error?.terminalAuthentication === true
               || Number(error?.status) === 401
@@ -6832,6 +6861,7 @@ function debugSystemDaemonsChartHtml() {
   const domain = debugGraphDomain(nowMs);
   const sourceBuckets = debugGraphSourceBuckets(domain);
   const disconnectedRanges = debugGraphDisconnectedRanges(sourceBuckets, domain);
+  const renderedResolutionSeconds = debugGraphRenderedResolutionSeconds(nowMs);
   const charts = jsDebugGraphDaemonsChartGroups.map(group => {
     const buckets = debugGraphBucketsForChartGroup(group, defaultBuckets, nowMs);
     const chartGroup = debugGraphResolvedChartGroup(group, buckets);
@@ -6840,6 +6870,7 @@ function debugSystemDaemonsChartHtml() {
     const hasSamples = groupSeries.some(series => Number(series?.samples || 0) > 0);
     if (hasSamples) {
       return debugGraphChartHtml(chartGroup, seriesItems, domain, buckets, sourceBuckets, disconnectedRanges, {
+        renderedResolutionSeconds,
         patternScope: `daemons-${group.key}`,
         closable: false,
       });
@@ -7315,6 +7346,7 @@ function relocalizeDebugPanelChrome(panel = document.getElementById(panelDomId(d
 }
 
 function yoCostPanelHtml() {
+  if (jsDebugAgentHistoryRefill?.busy()) return `${jsDebugAgentHistoryRefill.html(false)}${jsDebugAgentHistoryRefill.waitHtml()}`;
   const nowMs = Date.now();
   const buckets = debugGraphDisplayBuckets(nowMs);
   const tokenGroups = jsDebugGraphChartGroups.filter(group => group.key === 'agentTokens' || group.key === 'modelTokens');
@@ -7709,7 +7741,6 @@ function refreshDebugGraphElement(graph, {force = false} = {}) {
       body.replaceChildren(...nextBody.childNodes);
     }
     syncDebugGraphControls(graph, nowMs);
-    restoreElementScrollPosition(scrollOwner, scrollTop, scrollLeft);
     bindDebugCostSummaryTabButtons(graph);
     graph.dataset.jsDebugGraphRenderedAt = String(nowMs);
     graph.dataset.jsDebugHistoryState = jsDebugHistoryReadinessStateName();
@@ -7720,6 +7751,9 @@ function refreshDebugGraphElement(graph, {force = false} = {}) {
     if (typeof scheduleAgentWindowActivityAnimationSync === 'function') scheduleAgentWindowActivityAnimationSync(graph);
     resolveDebugGraphResolutionChange(jsDebugHistoryReadiness, {painted: true});
     syncDebugGraphLiveTicker();
+    // The graph replacement is synchronous. A deferred replay would read layout
+    // again on the next frame and can compete with newer native scrolling.
+    writeOwnedElementScroll(scrollOwner, {top: scrollTop, left: scrollLeft}, 'debug-graph-render-restore');
   } finally {
     clientPerfEnd(perf);
   }
@@ -8509,6 +8543,11 @@ function handleDebugGraphControlEvent(event, panel) {
     event.preventDefault();
     const chartKey = chartToggle.dataset.jsDebugChartToggle;
     setDebugGraphChartVisible(chartKey, !debugGraphChartVisible(chartKey));
+    return true;
+  }
+  if (event.type === 'click' && event.target.closest('[data-stats-refill]')) event.target.blur?.();
+  if (event.type === 'click' && jsDebugAgentHistoryRefill?.handleClick(event)) {
+    event.preventDefault();
     return true;
   }
   const retry = event.target.closest('[data-js-debug-history-retry]');

@@ -17,6 +17,191 @@ import (
 	"time"
 )
 
+func TestDarwinGitObjectSnapshotCacheReusesAndInvalidatesInventory(t *testing.T) {
+	sourcePath := t.TempDir()
+	loosePath := filepath.Join(sourcePath, "ab")
+	if err := os.Mkdir(loosePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	objectPath := filepath.Join(loosePath, "1234")
+	if err := os.WriteFile(objectPath, []byte("old object"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+
+	cache := newDarwinGitObjectSnapshotCache()
+	t.Cleanup(cache.close)
+	firstPath, releaseFirst, reused, err := cache.acquire(context.Background(), source)
+	if err != nil || reused {
+		t.Fatalf("first snapshot = %q, reused=%t, error=%v; want a new snapshot", firstPath, reused, err)
+	}
+	t.Cleanup(releaseFirst)
+	secondPath, releaseSecond, reused, err := cache.acquire(context.Background(), source)
+	if err != nil || !reused || secondPath != firstPath {
+		t.Fatalf("unchanged snapshot = %q, reused=%t, error=%v; want reuse of %q", secondPath, reused, err, firstPath)
+	}
+	t.Cleanup(releaseSecond)
+	_, _, reused, err = cache.acquireWithInventoryHook(context.Background(), source, func() {
+		if writeErr := os.WriteFile(objectPath, []byte("new object"), 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	})
+	if !errors.Is(err, errGitNamespaceChanged) || reused {
+		t.Fatalf("cache hit during inventory mutation = reused %t, error %v; want rejection", reused, err)
+	}
+	cache.mu.Lock()
+	users := 0
+	for _, entry := range cache.entries {
+		if entry.path == firstPath {
+			users = entry.users
+			break
+		}
+	}
+	cache.mu.Unlock()
+	if users != 2 {
+		t.Fatalf("cache leases after rejected hit = %d, want 2 existing leases", users)
+	}
+	thirdPath, releaseThird, reused, err := cache.acquire(context.Background(), source)
+	if err != nil || reused || thirdPath == firstPath {
+		t.Fatalf("changed snapshot = %q, reused=%t, error=%v; want a fresh snapshot", thirdPath, reused, err)
+	}
+	t.Cleanup(releaseThird)
+	for _, snapshot := range []struct {
+		path string
+		want string
+	}{{firstPath, "old object"}, {thirdPath, "new object"}} {
+		got, err := os.ReadFile(filepath.Join(snapshot.path, "ab", "1234"))
+		if err != nil || string(got) != snapshot.want {
+			t.Fatalf("snapshot %q object = %q, error=%v; want %q", snapshot.path, got, err, snapshot.want)
+		}
+	}
+	releaseFirst()
+	releaseSecond()
+	releaseThird()
+	cache.close()
+	for _, path := range []string{firstPath, thirdPath} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("snapshot %q stat error = %v after close; want removed", path, err)
+		}
+	}
+}
+
+func TestDarwinGitObjectSnapshotClosePreservesActiveLeases(t *testing.T) {
+	source, err := os.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	cache := newDarwinGitObjectSnapshotCache()
+	t.Cleanup(cache.close)
+	path, releaseFirst, _, err := cache.acquire(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(releaseFirst)
+	_, releaseSecond, _, err := cache.acquire(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(releaseSecond)
+	cache.close()
+	releaseFirst()
+	releaseFirst()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("snapshot removed with an active lease: %v", err)
+	}
+	releaseSecond()
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("snapshot after final release: %v; want removed", err)
+	}
+	if cache.bytes != 0 || len(cache.entries) != 0 {
+		t.Fatal("closed cache retained snapshot accounting")
+	}
+}
+
+func TestDarwinGitObjectFingerprintRejectsCancelledEmptyTree(t *testing.T) {
+	source, err := os.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := fingerprintDarwinGitObjects(ctx, source); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled fingerprint = %v, want context.Canceled", err)
+	}
+}
+
+func TestDarwinGitObjectSnapshotHonorsRemainingNamespaceEntryBudget(t *testing.T) {
+	sourcePath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(sourcePath, "one"), []byte("1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourcePath, "two"), []byte("2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	cache := newDarwinGitObjectSnapshotCache()
+	t.Cleanup(cache.close)
+	if _, _, _, err := cache.acquireWithEntryLimit(context.Background(), source, nil, 1); err == nil || err.Error() != "Git snapshot entry limit exceeded" {
+		t.Fatalf("snapshot with one remaining namespace entry = %v, want entry limit error", err)
+	}
+	if len(cache.entries) != 0 {
+		t.Fatal("entry-limit rejection populated the object cache")
+	}
+}
+
+func TestDarwinGitObjectSnapshotCapacityPreservesLeases(t *testing.T) {
+	source, err := os.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	cache := newDarwinGitObjectSnapshotCache()
+	t.Cleanup(cache.close)
+	var paths []string
+	var releases []func()
+	for index := 0; index < darwinGitObjectSnapshotCacheEntries+2; index++ {
+		if err := os.WriteFile(filepath.Join(source.Name(), "object"), []byte(fmt.Sprintf("generation %d", index)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		path, release, reused, err := cache.acquire(context.Background(), source)
+		if err != nil || reused {
+			t.Fatalf("generation %d: reused=%t, error=%v", index, reused, err)
+		}
+		t.Cleanup(release)
+		paths = append(paths, path)
+		releases = append(releases, release)
+		if len(cache.entries) > darwinGitObjectSnapshotCacheEntries || cache.bytes > darwinGitSnapshotMaxBytes {
+			t.Fatal("cache exceeded capacity")
+		}
+		if index == darwinGitObjectSnapshotCacheEntries {
+			// With every cached generation leased, this snapshot must be private.
+			release()
+			if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("uncached snapshot retained after release: %v", err)
+			}
+			releases[0]()
+		}
+	}
+	if _, err := os.Stat(paths[0]); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unused oldest generation was not evicted: %v", err)
+	}
+	for _, index := range []int{1, len(paths) - 1} {
+		if _, err := os.Stat(paths[index]); err != nil {
+			t.Fatalf("leased generation %d removed: %v", index, err)
+		}
+	}
+}
+
 func TestDarwinGitSnapshotSharesCloneConcurrencyAcrossNestedDirectories(t *testing.T) {
 	root := t.TempDir()
 	sourcePath := filepath.Join(root, "source")
@@ -153,8 +338,8 @@ func TestDarwinGitMetadataSnapshotSkipsWorktreeFiles(t *testing.T) {
 			t.Fatalf("metadata snapshot entry %q stat error = %v, want excluded", name, err)
 		}
 	}
-	if info, err := os.Stat(filepath.Join(scope.namespace.snapshotCommon, "objects")); err != nil || !info.IsDir() {
-		t.Fatalf("metadata snapshot object copy = %v, error=%v, want pinned object directory", info, err)
+	if info, err := os.Stat(scope.namespace.snapshotObjects); err != nil || !info.IsDir() {
+		t.Fatalf("metadata object snapshot = %v, error=%v, want pinned object directory", info, err)
 	}
 	output, _, err := runGitMetadataBounded(context.Background(), scope.directory, nil, []string{"log", "-1", "--format=%H"}, 4096, scope.namespace)
 	if err != nil || strings.TrimSpace(string(output)) != head {

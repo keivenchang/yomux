@@ -202,7 +202,7 @@ def _open_differ(gate_browser_runtime, target):
             await openFileSurface(differItemId);
             await fetchSessionFiles({destination: 'differ', session, force: true, silent: true});
             renderFileExplorerChangesPanels({force: true, view: 'differ'});
-            const row = await window.__yolomuxTestWaitFor(
+            const row = await window.__yomuxTestWaitFor(
               () => document.querySelector(`#panel-__differ__ [data-open-change-file="${CSS.escape(path)}"]`),
               {timeoutMs: 10000, description: `Differ row for ${path}`},
             );
@@ -239,7 +239,7 @@ def _open_file_from_differ(gate_browser_runtime, target):
             const row = document.querySelector(`#panel-__differ__ [data-open-change-file="${CSS.escape(path)}"]`);
             if (!row) throw new Error(`listed Differ row missing for ${path}`);
             row.click();
-            await window.__yolomuxTestWaitFor(() => {
+            await window.__yomuxTestWaitFor(() => {
               const state = fileState.get(path);
               const panel = fileEditorPanelsForPath(path)[0];
               const item = panel?.dataset?.layoutItem || fileEditorItemFor(path);
@@ -273,7 +273,7 @@ def _a8_deleted_differ_row_snapshot(gate_browser_runtime, target):
         """
         const path = arguments[0];
         const done = arguments[arguments.length - 1];
-        window.__yolomuxTestWaitFor(() => {
+        window.__yomuxTestWaitFor(() => {
           const row = document.querySelector(`#panel-__differ__ [data-open-change-file="${CSS.escape(path)}"]`);
           return row?.querySelector('.file-tree-git-status')?.textContent?.trim() === 'D'
             && row.querySelector('.changes-diff-remove')?.textContent?.trim() === '-1';
@@ -319,7 +319,7 @@ def test_differ_only_open_reaches_content_or_typed_error_within_bound(gate_brows
           let releaseSessionFilesFetch = null;
           let sessionFilesSignal = null;
           try {
-            await window.__yolomuxTestWaitFor(
+            await window.__yomuxTestWaitFor(
               () => clientPushCanSupplyData() === true && clientEventTransportState.connected === true,
               {timeoutMs, description: 'connected client push before Differ-only open'},
             );
@@ -343,7 +343,7 @@ def test_differ_only_open_reaches_content_or_typed_error_within_bound(gate_brows
             };
             const started = performance.now();
             await openFileSurface(differItemId);
-            const panel = await window.__yolomuxTestWaitFor(
+            const panel = await window.__yomuxTestWaitFor(
               () => document.querySelector('#panel-__differ__'),
               {timeoutMs, description: 'Differ panel mount'},
             );
@@ -351,7 +351,7 @@ def test_differ_only_open_reaches_content_or_typed_error_within_bound(gate_brows
             let waitError = '';
             let pushApplied = false;
             try {
-              terminal = await window.__yolomuxTestWaitFor(() => {
+              terminal = await window.__yomuxTestWaitFor(() => {
                 const demand = clientEventDemandDescriptor();
                 if (!pushApplied && releaseSessionFilesFetch && demand.channels.includes('files')) {
                   const request = clientSessionFilesWatchRequests()[0] || {
@@ -374,7 +374,7 @@ def test_differ_only_open_reaches_content_or_typed_error_within_bound(gate_brows
             }
             const sessionFilesSignalAbortedAfterPush = sessionFilesSignal?.aborted === true;
             releaseSessionFilesFetch?.();
-            const lifecycle = await window.__yolomuxTestWaitFor(() => {
+            const lifecycle = await window.__yomuxTestWaitFor(() => {
               const state = window.__yomuxFixtureLifecycle?.operationState?.();
               if (!state) return null;
               return !state.pending.length
@@ -476,14 +476,14 @@ def test_mock_git_differ_stall_ends_in_visible_deadline_error(gate_browser_runti
               try {
                 const started = performance.now();
                 await openFileSurface(differItemId);
-                const panel = await window.__yolomuxTestWaitFor(
+                const panel = await window.__yomuxTestWaitFor(
                   () => document.querySelector('#panel-__differ__'),
                   {timeoutMs, description: 'mock-git Differ panel mount'},
                 );
                 let terminal = null;
                 let waitError = '';
                 try {
-                  terminal = await window.__yolomuxTestWaitFor(() => {
+                  terminal = await window.__yomuxTestWaitFor(() => {
                     const error = panel.querySelector('.changes-error');
                     if (error?.textContent?.trim() && getComputedStyle(error).display !== 'none') {
                       return {kind: 'error', text: error.textContent.trim()};
@@ -583,14 +583,14 @@ def test_mock_git_differ_pending_producer_without_publish_ends_in_visible_deadli
           try {
             const started = performance.now();
             await openFileSurface(differItemId);
-            const panel = await window.__yolomuxTestWaitFor(
+            const panel = await window.__yomuxTestWaitFor(
               () => document.querySelector('#panel-__differ__'),
               {timeoutMs, description: 'pending-producer Differ panel mount'},
             );
             let terminal = null;
             let waitError = '';
             try {
-              terminal = await window.__yolomuxTestWaitFor(() => {
+              terminal = await window.__yomuxTestWaitFor(() => {
                 const error = panel.querySelector('.changes-error');
                 if (error?.textContent?.trim() && getComputedStyle(error).display !== 'none') {
                   return {kind: 'error', text: error.textContent.trim()};
@@ -718,7 +718,7 @@ def test_mock_git_differ_queued_producer_completion_settles_every_visible_surfac
         (async () => {
           try {
             await openFileSurface(differItemId);
-            await window.__yolomuxTestWaitFor(() => (
+            await window.__yomuxTestWaitFor(() => (
               fileExplorerSessionFilesState.payload?.refreshing === true
               && fileExplorerSessionFilesState.loading === false
             ) ? true : false, {timeoutMs, description: 'queued session-files acknowledgement'});
@@ -739,7 +739,7 @@ def test_mock_git_differ_queued_producer_completion_settles_every_visible_surfac
                 warnings: [],
               },
             });
-            await window.__yolomuxTestWaitFor(() => (
+            await window.__yomuxTestWaitFor(() => (
               fileExplorerSessionFilesState.payload?.refreshing !== true
               && fileExplorerSessionFilesState.loading === false
             ) ? true : false, {timeoutMs, description: 'queued session-files terminal completion'});
@@ -853,7 +853,7 @@ def test_hung_fs_read_paints_visible_typed_deadline_error(gate_browser_runtime, 
               let terminal = null;
               let waitError = '';
               try {
-                terminal = await window.__yolomuxTestWaitFor(() => {
+                terminal = await window.__yomuxTestWaitFor(() => {
                   const state = fileState.get(path);
                   const panel = fileEditorPanelsForPath(path)[0];
                   const status = panel?.querySelector('.file-editor-status-message')?.textContent?.trim() || '';
@@ -938,7 +938,7 @@ def test_stalled_fs_read_body_paints_visible_typed_deadline_error(gate_browser_r
               let terminal = null;
               let waitError = '';
               try {
-                terminal = await window.__yolomuxTestWaitFor(() => {
+                terminal = await window.__yomuxTestWaitFor(() => {
                   const state = fileState.get(path);
                   const panel = fileEditorPanelsForPath(path)[0];
                   const status = panel?.querySelector('.file-editor-status-message')?.textContent?.trim() || '';
@@ -1006,7 +1006,7 @@ def test_hung_fs_diff_paints_visible_typed_deadline_error(gate_browser_runtime, 
               let terminal = null;
               let waitError = '';
               try {
-                terminal = await window.__yolomuxTestWaitFor(() => {
+                terminal = await window.__yomuxTestWaitFor(() => {
                   const state = fileState.get(path);
                   const panel = fileEditorPanelsForPath(path)[0];
                   const status = panel?.querySelector('.file-editor-status-message')?.textContent?.trim() || '';
@@ -1091,7 +1091,7 @@ def test_slow_fs_read_and_diff_below_deadline_render_normal_content(gate_browser
             const diffLoaded = await refreshOpenFileDiff(path, {silent: false});
             const diffElapsedMs = performance.now() - diffStarted;
             renderOpenFilePath(path);
-            const terminal = await window.__yolomuxTestWaitFor(() => {
+            const terminal = await window.__yomuxTestWaitFor(() => {
               const state = fileState.get(path);
               const panel = fileEditorPanelsForPath(path)[0];
               const text = panel?._cmView?.state?.doc?.toString?.() || '';
@@ -1136,7 +1136,7 @@ def test_c1_differ_opens_listed_file_twenty_consecutive_times(gate_browser_runti
                 const row = document.querySelector(`#panel-__differ__ [data-open-change-file="${CSS.escape(path)}"]`);
                 if (!row) throw new Error('listed Differ row disappeared');
                 row.click();
-                const opened = await window.__yolomuxTestWaitFor(() => {
+                const opened = await window.__yomuxTestWaitFor(() => {
                   const state = fileState.get(path);
                   const panels = fileEditorPanelsForPath(path);
                   return state?.diffLoaded === true
@@ -1149,7 +1149,7 @@ def test_c1_differ_opens_listed_file_twenty_consecutive_times(gate_browser_runti
                 await removeOpenFile(path, {confirmDirty: false});
                 await openFileSurface(differItemId);
                 renderFileExplorerChangesPanels({force: true, view: 'differ'});
-                await window.__yolomuxTestWaitFor(() => !fileState.has(path), {timeoutMs: 3000, description: `Differ close for ${path}`});
+                await window.__yomuxTestWaitFor(() => !fileState.has(path), {timeoutMs: 3000, description: `Differ close for ${path}`});
                 done({opened, text, status, stateError: state?.error || '', tabClosed: !fileState.has(path)});
               } catch (error) {
                 done({error: String(error?.stack || error)});
@@ -1179,14 +1179,14 @@ def test_c2_differ_control_is_clickable_when_diff_is_available(gate_browser_runt
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
-            const button = await window.__yolomuxTestWaitFor(() => {
+            const button = await window.__yomuxTestWaitFor(() => {
               const panel = fileEditorPanelsForPath(path)[0];
               const candidate = panel?.querySelector('.file-editor-diff-panel');
               return candidate && !candidate.hidden && !candidate.disabled ? candidate : null;
             }, {timeoutMs: 10000, description: `enabled Differ control for ${path}`});
             const before = {disabled: button.disabled, hidden: button.hidden, pointerEvents: getComputedStyle(button).pointerEvents};
             button.click();
-            const clicked = await window.__yolomuxTestWaitFor(() => {
+            const clicked = await window.__yomuxTestWaitFor(() => {
               const item = fileEditorPanelsForPath(path)[0]?.dataset?.layoutItem || fileEditorItemFor(path);
               return editorViewModeFor(path, item) === 'diff' && fileState.get(path)?.diffLoaded === true;
             }, {timeoutMs: 10000, description: `Differ mode after click for ${path}`});
@@ -1224,16 +1224,16 @@ def test_c1_c2_vanished_working_file_keeps_enabled_differ_and_renders_git_diff(
             const row = document.querySelector(`#panel-__differ__ [data-open-change-file="${CSS.escape(path)}"]`);
             if (!row) throw new Error(`listed Differ row missing for ${path}`);
             row.click();
-            const panel = await window.__yolomuxTestWaitFor(
+            const panel = await window.__yomuxTestWaitFor(
               () => fileEditorPanelsForPath(path)[0],
               {timeoutMs: 10000, description: `vanished Differ editor for ${path}`},
             );
-            const button = await window.__yolomuxTestWaitFor(() => {
+            const button = await window.__yomuxTestWaitFor(() => {
               const candidate = panel.querySelector('.file-editor-diff-panel');
               return candidate && !candidate.hidden && !candidate.disabled ? candidate : null;
             }, {timeoutMs: 10000, description: `enabled vanished Differ control for ${path}`});
             button.click();
-            await window.__yolomuxTestWaitFor(() => {
+            await window.__yomuxTestWaitFor(() => {
               const state = fileState.get(path);
               const item = panel.dataset.layoutItem || fileEditorItemFor(path);
               const rendered = [...panel.querySelectorAll('.cm-content')].map(node => node.textContent || '').join('\\n');
@@ -1317,7 +1317,7 @@ def test_c3_git_control_only_change_publishes_no_ignored_path_as_a_transport_sig
         const done = arguments[arguments.length - 1];
         const previousSyncedAt = Number(serverWatchRootsState.syncedAt || 0);
         syncServerWatchRoots({immediate: true, force: true});
-        window.__yolomuxTestWaitFor(() => {
+        window.__yomuxTestWaitFor(() => {
           const descriptor = clientEventDemandDescriptor();
           return descriptor.channels.includes('files')
             && descriptor.active_panes.includes(differItemId)
@@ -1396,7 +1396,7 @@ def test_c3_git_control_only_change_publishes_no_ignored_path_as_a_transport_sig
             rejections: jsDebugFailureEvents('rejection'),
           };
         };
-        window.__yolomuxTestWaitFor(() => {
+        window.__yomuxTestWaitFor(() => {
           const current = snapshot();
           return current.payloadBranch === branch
             && current.rowConnected
@@ -1456,7 +1456,8 @@ def test_c4_dirty_editor_survives_differ_open_and_external_refresh(gate_browser_
 
 
 @pytest.mark.browser
-def test_go_differ_paints_repository_stream_before_attribution_finishes(gate_browser_runtime, tmp_path):
+@pytest.mark.parametrize("recent_mtime", [False, True])
+def test_go_differ_paints_repository_stream_before_attribution_finishes(gate_browser_runtime, tmp_path, recent_mtime):
     """Go Differ must show each completed repository while transcript attribution is still running."""
     repo, target = _make_changed_repo(tmp_path)
     _configure_differ_payload(gate_browser_runtime, repo, target)
@@ -1466,6 +1467,7 @@ def test_go_differ_paints_repository_stream_before_attribution_finishes(gate_bro
         const target = arguments[0];
         const session = arguments[1];
         const repo = arguments[2];
+        const recentMtime = arguments[3];
         const streamPath = `${repo}/progressive-only.txt`;
         const secondRepo = `${repo}-second`;
         const secondStreamPath = `${secondRepo}/later.txt`;
@@ -1474,6 +1476,8 @@ def test_go_differ_paints_repository_stream_before_attribution_finishes(gate_bro
           const nativeFetch = window.fetch.bind(window);
           let controller = null;
           let firstRepoObserver = null;
+          const previousDateMode = fileExplorerTreeDateModeForView('differ');
+          if (recentMtime) setFileExplorerViewSetting('differ', 'treeDateMode', 'relative', {refresh: false, publish: false});
           bootstrap.backendLabel = 'Go test';
           window.fetch = (input, options = {}) => {
             const url = new URL(String(input), location.href);
@@ -1485,7 +1489,7 @@ def test_go_differ_paints_repository_stream_before_attribution_finishes(gate_bro
           const frame = (event, payload) => controller.enqueue(new TextEncoder().encode(`event: ${event}\\ndata: ${JSON.stringify(payload)}\\n\\n`));
           try {
             const request = fetchSessionFiles({destination: 'differ', session, force: true, silent: true});
-            await window.__yolomuxTestWaitFor(() => controller, {timeoutMs: 3000, description: 'Go Differ stream request'});
+            await window.__yomuxTestWaitFor(() => controller, {timeoutMs: 3000, description: 'Go Differ stream request'});
             const existingRow = Array.from(document.querySelectorAll('#panel-__differ__ [data-open-change-file]')).find(item => item.dataset.openChangeFile === streamPath);
             if (existingRow) throw new Error(`stream-only file unexpectedly existed before its chunk: ${streamPath}`);
             const refControls = Array.from(document.querySelectorAll('#panel-__differ__ [data-diff-ref-controls]')).find(item => item.dataset.diffRefRepo === repo);
@@ -1507,19 +1511,26 @@ def test_go_differ_paints_repository_stream_before_attribution_finishes(gate_bro
               session, hours: 24, loaded: false, from_ref: 'HEAD', to_ref: 'current',
               repos: [{repo, branch: 'feature/stream', count: 1, added: 5, removed: 2}],
               files: [
-                {session, repo, path: 'progressive-only.txt', abs_path: streamPath, status: 'M', added: 5, removed: 2},
+                {session, repo, path: 'progressive-only.txt', abs_path: streamPath, status: 'M', added: 5, removed: 2, mtime: recentMtime ? Date.now() / 1000 : 0},
                 {session, repo, path: 'transcript-only.txt', abs_path: `${repo}/transcript-only.txt`, status: 'T'},
               ],
               refs_by_repo: {[repo]: []}, errors: [], warnings: [],
             });
-            const row = await window.__yolomuxTestWaitFor(
+            const row = await window.__yomuxTestWaitFor(
               () => Array.from(document.querySelectorAll('#panel-__differ__ [data-open-change-file]')).find(item => item.dataset.openChangeFile === streamPath),
               {timeoutMs: 3000, description: 'Differ repository row before stream completion'},
             );
             const paintedBeforeDone = row.isConnected && row.textContent.includes('progressive-only.txt');
             const firstRepoSection = row.closest('.changes-repo-group');
+            const date = row.querySelector('.file-tree-date');
+            const datePulsing = date?.classList.contains('attention-pulse') && Boolean(date.style.getPropertyValue('--attention-animation-delay'));
+            if (recentMtime && !datePulsing) throw new Error('recent Differ row did not activate its date pulse');
             const firstRepoMutations = [];
-            firstRepoObserver = new MutationObserver(records => firstRepoMutations.push(...records));
+            const captureMutations = records => firstRepoMutations.push(...records.map(record => ({
+              type: record.type, attribute: record.attributeName,
+              target: record.target.className, oldValue: record.oldValue,
+            })));
+            firstRepoObserver = new MutationObserver(captureMutations);
             if (firstRepoSection) firstRepoObserver.observe(firstRepoSection, {subtree: true, childList: true, attributes: true, characterData: true});
             const transcriptOnlyRow = Array.from(document.querySelectorAll('#panel-__differ__ [data-open-change-file]')).find(item => item.dataset.openChangeFile === `${repo}/transcript-only.txt`);
             frame('repo', {
@@ -1528,11 +1539,11 @@ def test_go_differ_paints_repository_stream_before_attribution_finishes(gate_bro
               files: [{session, repo: secondRepo, path: 'later.txt', abs_path: secondStreamPath, status: 'A', added: 2, removed: 1}],
               refs_by_repo: {[secondRepo]: []}, errors: [], warnings: [],
             });
-            const secondRow = await window.__yolomuxTestWaitFor(
+            const secondRow = await window.__yomuxTestWaitFor(
               () => Array.from(document.querySelectorAll('#panel-__differ__ [data-open-change-file]')).find(item => item.dataset.openChangeFile === secondStreamPath),
               {timeoutMs: 3000, description: 'second Differ repository row before stream completion'},
             );
-            firstRepoMutations.push(...firstRepoObserver.takeRecords());
+            captureMutations(firstRepoObserver.takeRecords());
             firstRepoObserver.disconnect();
             firstRepoObserver = null;
             const firstRepoUntouched = Boolean(firstRepoSection?.isConnected && firstRepoSection.contains(row) && row.isConnected && firstRepoMutations.length === 0);
@@ -1553,12 +1564,13 @@ def test_go_differ_paints_repository_stream_before_attribution_finishes(gate_bro
             frame('done', {session, loaded: true, from_ref: 'HEAD', to_ref: 'current', errors: [], warnings: []});
             controller.close();
             await request;
-            done({paintedBeforeDone, secondPaintedBeforeDone, firstRepoUntouched, repoOrderPreserved: firstRepoIndex >= 0 && secondRepoIndex > firstRepoIndex, transcriptOnlyHiddenBeforeDone: !transcriptOnlyRow, refInputPreserved, refInputBefore, refInputState, rowPath: row.dataset.openChangeFile, errors: jsDebugFailureEvents('error')});
+            done({paintedBeforeDone, secondPaintedBeforeDone, firstRepoUntouched, firstRepoMutations, repoOrderPreserved: firstRepoIndex >= 0 && secondRepoIndex > firstRepoIndex, transcriptOnlyHiddenBeforeDone: !transcriptOnlyRow, refInputPreserved, refInputBefore, refInputState, rowPath: row.dataset.openChangeFile, errors: jsDebugFailureEvents('error')});
           } catch (error) {
             controller?.error(error);
             done({error: String(error?.stack || error)});
           } finally {
             firstRepoObserver?.disconnect();
+            setFileExplorerViewSetting('differ', 'treeDateMode', previousDateMode, {refresh: false, publish: false});
             window.fetch = nativeFetch;
           }
         })();
@@ -1566,6 +1578,7 @@ def test_go_differ_paints_repository_stream_before_attribution_finishes(gate_bro
         str(target),
         gate_browser_runtime.session,
         str(repo),
+        recent_mtime,
     )
     assert not metrics.get("error"), metrics
     assert metrics["paintedBeforeDone"] is True and metrics["rowPath"] == f"{repo}/progressive-only.txt", metrics
@@ -1606,12 +1619,12 @@ def test_c5_diff_list_generation_precedes_file_open_without_retry(gate_browser_r
           try {
             await fetchSessionFiles({destination: 'differ', session, force: true, silent: true});
             renderFileExplorerChangesPanels({force: true, view: 'differ'});
-            const row = await window.__yolomuxTestWaitFor(
+            const row = await window.__yomuxTestWaitFor(
               () => document.querySelector(`#panel-__differ__ [data-open-change-file="${CSS.escape(path)}"]`),
               {timeoutMs: 10000, description: `Differ row after list completion for ${path}`},
             );
             row.click();
-            await window.__yolomuxTestWaitFor(() => fileState.get(path)?.diffLoaded === true, {timeoutMs: 10000, description: `ordered diff open for ${path}`});
+            await window.__yomuxTestWaitFor(() => fileState.get(path)?.diffLoaded === true, {timeoutMs: 10000, description: `ordered diff open for ${path}`});
             done({requests: window.__gateDifferRequests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           } catch (error) {
             done({error: String(error?.stack || error), requests: window.__gateDifferRequests});

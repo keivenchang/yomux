@@ -33,7 +33,7 @@
   min-width: 0;
   min-height: 0;
 }
-.yomux-dockview .dv-groupview:has(.file-explorer-panel) {
+.yomux-dockview .dv-groupview:has(> :where(.dv-content-container) > :where(.dockview-panel-content) > .file-explorer-panel) {
   min-width: var(--file-pane-min-inline-size);
 }
 .yomux-dockview .yomux-dockview-core {
@@ -184,17 +184,17 @@ body.theme-light .yomux-dockview .yomux-dockview-core {
   border-radius: inherit;
   pointer-events: none;
 }
-.yomux-dockview .dv-groupview:has(.panel.active-pane),
-.yomux-dockview .dv-groupview:has(.panel.typing-ready-pane) {
+.yomux-dockview .dv-groupview:has(> :where(.dv-content-container) > :where(.dockview-panel-content) > .panel.active-pane),
+.yomux-dockview .dv-groupview:has(> :where(.dv-content-container) > :where(.dockview-panel-content) > .panel.typing-ready-pane) {
   --pane-bar-bg: var(--pane-tab-strip-bg);
   --panel-ring-color: var(--pane-tab-panel-ring);
   --panel-ring-opacity: var(--pane-active-ring-opacity);
   --pane-ring-radius: var(--pane-tab-top-radius);
   background: var(--panel);
 }
-.yomux-dockview .dv-groupview:has(.panel.needs-input-pane),
-.yomux-dockview .dv-groupview:has(.panel.needs-exec-pane),
-.yomux-dockview .dv-groupview:has(.panel.needs-blocked-pane) {
+.yomux-dockview .dv-groupview:has(> :where(.dv-content-container) > :where(.dockview-panel-content) > .panel.needs-input-pane),
+.yomux-dockview .dv-groupview:has(> :where(.dv-content-container) > :where(.dockview-panel-content) > .panel.needs-exec-pane),
+.yomux-dockview .dv-groupview:has(> :where(.dv-content-container) > :where(.dockview-panel-content) > .panel.needs-blocked-pane) {
   --panel-ring-color: var(--pane-ring-attention);
 }
 /* A phone's policy permits exactly one pane, so a wide pane-spacing ring cannot convey which sibling
@@ -986,8 +986,8 @@ body.layout-resizing {
 }
 .panel.file-explorer-panel > .file-explorer-head:hover,
 .panel.file-explorer-panel > .file-explorer-head:focus-within,
-.panel.file-explorer-panel:has(.file-explorer-tree-panel:hover) > .file-explorer-head,
-.panel.file-explorer-panel:has(.file-explorer-tree-panel:focus-within) > .file-explorer-head {
+.panel.file-explorer-panel:has(> :where(.panel-overlay-root.file-explorer-pane) > .file-explorer-tree-panel:hover) > .file-explorer-head,
+.panel.file-explorer-panel:has(> :where(.panel-overlay-root.file-explorer-pane) > .file-explorer-tree-panel:focus-within) > .file-explorer-head {
   /* Finder hover/focus colors only the Finder header, not the embedded Modified Files header. */
   --pane-bar-bg: var(--pane-tab-strip-bg);
 }
@@ -1322,6 +1322,8 @@ body.layout-resizing {
 }
 .pane-tab,
 .tmux-pane-tab-token {
+  --pane-tab-pending-bg: color-mix(in srgb, var(--pane-inactive-tab-bg) 50%, var(--pane-tab-active-bg));
+  --pane-tab-pending-text: var(--pane-tab-active-text);
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -1431,6 +1433,13 @@ body.layout-resizing {
 .pane-tab.active .session-button-dir,
 .pane-tab.active .session-button-detail {
   color: inherit;
+}
+.yomux-dockview .dv-tab.dv-active-tab > .dockview-pane-tab.tab-activation-pending,
+.panel .pane-tab.active.tab-activation-pending:not(.file-missing) {
+  color: var(--pane-tab-pending-text) !important;
+  background: var(--pane-tab-pending-bg);
+  border-color: var(--pane-tab-pending-bg);
+  border-bottom-color: var(--pane-tab-pending-bg);
 }
 .pane-tab.active {
   color: var(--pane-tab-unfocused-active-text);

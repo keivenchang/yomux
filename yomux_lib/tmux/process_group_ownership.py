@@ -16,7 +16,7 @@ from ..infra.host_identity import process_start_identity
 
 
 PROCESS_GROUP_DEPLOYMENT_ID = uuid.uuid4().hex
-PROCESS_GROUP_IDENTITY_ATTRIBUTE = "_yolomux_process_group_identity"
+PROCESS_GROUP_IDENTITY_ATTRIBUTE = "_yomux_process_group_identity"
 
 
 @dataclass(frozen=True)

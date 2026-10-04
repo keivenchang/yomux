@@ -71,7 +71,7 @@ def test_local_canonical_visual_goldens(browser, tmp_path, page, theme, dpr):
     browser.execute_async_script(
         """
         const done = arguments[0];
-        window.__yolomuxTestHelpers.settle(3).then(() => done(true));
+        window.__yomuxTestHelpers.settle(3).then(() => done(true));
         """
     )
     result = assert_local_golden_screenshot(browser, _golden_name(page, theme, dpr))

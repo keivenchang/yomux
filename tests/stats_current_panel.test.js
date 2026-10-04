@@ -1282,7 +1282,14 @@ test('saved Graphs visibility preferences override defaults instead of being bac
 
 test('AUTO resolution label reports the coarsest resolution actually rendered by token charts', () => {
   assert.match(sourceFunction('debugGraphResolutionLabelHtml', 'debugGraphRangeControlsHtml'), /debugGraphRenderedResolutionSeconds\(nowMs\)/);
-  assert.match(sourceFunction('debugGraphRenderedResolutionSeconds', 'debugGraphHoverBucketIndex'), /group\?\.key === 'agentTokens' \|\| group\?\.key === 'modelTokens'/);
+  const context = {
+    debugGraphAgentTokenDisplayBuckets: () => [{durationMs: 60000}],
+    debugGraphDisplayResolutionMs: () => 1000,
+    debugGraphDomain: () => ({}),
+  };
+  vm.runInNewContext(sourceFunction('debugGraphRenderedResolutionSeconds', 'debugGraphHoverBucketIndex'), context);
+  assert.equal(context.debugGraphRenderedResolutionSeconds(1), 60);
+  assert.equal(context.debugGraphRenderedResolutionSeconds(1, [{durationMs: 10000}]), 10);
   assert.match(sourceFunction('debugGraphResolutionLabelHtml', 'debugGraphRangeControlsHtml'), /data-js-debug-resolution-seconds/);
 });
 
@@ -3357,7 +3364,7 @@ test('current deltas replace the authoritative report without per-bucket cost st
 
 test('same-cursor requested-resolution switches paint and complete readiness in both directions', () => {
   const functionText = sourceFunction('jsDebugCurrentStatsGenerationKey', 'ensureJsDebugCurrentStatsClient');
-  const context = {result: null};
+  const context = {result: null, ensureJsDebugAgentHistoryRefill() {}, jsDebugAgentHistoryRefill: null};
   vm.runInNewContext(`
     const paints = [];
     const jsDebugCurrentStatsClientState = {paintedGenerationKey: ''};
@@ -3793,7 +3800,7 @@ test('focused Reset Zoom immediately repaints the shared full-range domain and s
      sourceFunction('refreshDebugGraphElement', 'bindDebugGraphTouchSelection'),
     sourceFunction('handleDebugGraphControlEvent', 'bindDebugPanel'),
   ].join('\n');
-  const context = {result: null};
+  const context = {result: null, ensureJsDebugAgentHistoryRefill() {}, jsDebugAgentHistoryRefill: null};
   vm.runInNewContext(`
     const nowMs = 3600000;
     const Date = {now: () => nowMs};
@@ -3859,7 +3866,7 @@ test('focused Reset Zoom immediately repaints the shared full-range domain and s
         label: domain.zoomed ? 'zoomed' : '15m',
       };
     }
-    function restoreElementScrollPosition() {}
+    function writeOwnedElementScroll(element, coordinates) { if (element) { element.scrollTop = coordinates.top; element.scrollLeft = coordinates.left; } }
     function bindDebugCostSummaryTabButtons() {}
     function clientPerfStart() { return null; }
     function clientPerfEnd() {}
@@ -4080,7 +4087,7 @@ test('current stats stream selector exposes exact production client evidence wit
 
 test('accepted current stats generations are not declared painted before a renderer commits', () => {
   const functionText = sourceFunction('paintJsDebugCurrentStatsGeneration', 'ensureJsDebugCurrentStatsClient');
-  const context = {result: null};
+  const context = {result: null, ensureJsDebugAgentHistoryRefill() {}, jsDebugAgentHistoryRefill: null};
   vm.runInNewContext(`
     const snapshot = {
       range_seconds: 300,
@@ -4118,7 +4125,7 @@ test('a focused stable graph control preserves focus while a newer generation co
     sourceFunction('paintJsDebugCurrentStatsGeneration', 'ensureJsDebugCurrentStatsClient'),
   ].join('\n');
   const refreshSource = sourceFunction('refreshDebugGraphElement', 'bindDebugGraphTouchSelection');
-  const context = {result: null};
+  const context = {result: null, ensureJsDebugAgentHistoryRefill() {}, jsDebugAgentHistoryRefill: null};
   vm.runInNewContext(`
     const toggle = {dataset: {jsDebugChartToggle: 'modelTokens'}};
     const panel = {};
@@ -4165,7 +4172,7 @@ test('a focused stable graph control preserves focus while a newer generation co
     function debugGraphBodyHtml() { return '<svg data-new-generation></svg>'; }
     function preserveDebugGraphBodyControls() {}
     function syncDebugGraphControls() {}
-    function restoreElementScrollPosition() {}
+    function writeOwnedElementScroll(element, coordinates) { if (element) { element.scrollTop = coordinates.top; element.scrollLeft = coordinates.left; } }
     function bindDebugCostSummaryTabButtons() {}
     function clientPerfStart() { return null; }
     function clientPerfEnd() {}
@@ -4216,7 +4223,7 @@ test('hidden panels start the document-visible client and paint only when opened
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
   const functionText = source.slice(start, end);
-  const context = {result: null};
+  const context = {result: null, ensureJsDebugAgentHistoryRefill() {}, jsDebugAgentHistoryRefill: null};
   vm.runInNewContext(`
     let panelVisible = false;
     const document = {visibilityState: 'visible'};
@@ -4272,7 +4279,7 @@ test('hidden boot loads saved exact selection before constructing the one curren
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
   const functionText = source.slice(start, end);
-  const context = {result: null};
+  const context = {result: null, ensureJsDebugAgentHistoryRefill() {}, jsDebugAgentHistoryRefill: null};
   vm.runInNewContext(`
     const document = {visibilityState: 'visible'};
     const debugModeEnabled = true;
@@ -4333,7 +4340,7 @@ testAsync('synchronous current-client construction failure cannot reject termina
   assert.notEqual(initializeStart, -1);
   assert.notEqual(initializeEnd, -1);
   const initializeSource = source.slice(initializeStart, initializeEnd);
-  const context = {result: null};
+  const context = {result: null, ensureJsDebugAgentHistoryRefill() {}, jsDebugAgentHistoryRefill: null};
   vm.runInNewContext(`
     const failures = [];
     const jsDebugGraphExactResolutionEnabled = true;
@@ -4370,6 +4377,8 @@ testAsync('a rejected current-client start retains the exact owner without start
       },
     };
     const context = {
+    ensureJsDebugAgentHistoryRefill() {},
+    jsDebugAgentHistoryRefill: null,
       client,
       calls,
       error,
@@ -5045,6 +5054,45 @@ test('Graphs and Cost give the same retained token range separate SVG pattern id
   assert.match(graphRenderer, /patternScope: `\$\{patternScope\}-\$\{group\.key\}`/);
 });
 
+test('one chart render shares token aggregation and skips hidden chart work', () => {
+  let tokenCalls = 0;
+  let hiddenCalls = 0;
+  let seriesCalls = 0;
+  let value = 1;
+  const charts = [];
+  const groups = [{key: 'hidden', bucketSeconds: 10}, {key: 'agentTokens'}, {key: 'modelTokens'}];
+  const context = {
+    jsDebugGraphChartGroups: groups,
+    debugRuntimeState: {graphRangeSeconds: 900},
+    debugGraphDomain: () => ({startMs: 0, endMs: 900000}),
+    debugGraphSourceBuckets: () => [],
+    debugGraphDisconnectedRanges: () => [],
+    debugGraphAgentTokenDisplayBuckets: () => { tokenCalls += 1; return [{value, durationMs: 1000}]; },
+    debugGraphDisplayBuckets: () => { hiddenCalls += 1; return []; },
+    debugGraphDisplayResolutionMs: () => 1000,
+    debugGraphLocalDateKey: () => 'same-day',
+    debugGraphTimeLabel: (_time, options) => options.includeSeconds ? 'seconds' : 'minutes',
+    esc: value => String(value),
+    debugGraphTokenSpikeAxisDescriptor: () => ({}),
+    debugGraphSeriesData: buckets => { seriesCalls += 1; return buckets.map(bucket => bucket.value); },
+    debugGraphChartHtml: (group, series, domain, _buckets, _overlays, _disconnected, options) => {
+      charts.push({key: group.key, series});
+      return group.key + context.debugGraphXAxisHtml(domain, options.renderedResolutionSeconds);
+    },
+    debugGraphChartShellHtml: html => html,
+  };
+  vm.runInNewContext(`${sourceFunction('debugGraphBucketsForChartGroup', 'debugGraphRenderedResolutionSeconds')}\n${sourceFunction('debugGraphRenderedResolutionSeconds', 'debugGraphHoverBucketIndex')}\n${sourceFunction('debugGraphXAxisHtml', 'debugGraphGroupSeriesItems')}\n${sourceFunction('debugGraphSvgHtml', 'debugGraphClassName')}`, context);
+  assert.match(context.debugGraphSvgHtml([], [], groups.slice(1), 1000), /agentTokens.*seconds.*modelTokens.*seconds/s);
+  assert.equal(tokenCalls, 1, 'both token charts and their shared axis use one aggregation');
+  assert.equal(hiddenCalls, 0, 'hidden chart resolutions do not trigger history aggregation');
+  assert.equal(seriesCalls, 1, 'the same aggregated cells project into series once');
+  assert.equal(charts[0].series, charts[1].series);
+  value = 2;
+  context.debugGraphSvgHtml([], [], groups.slice(1), 1000);
+  assert.equal(tokenCalls, 2, 'a later render observes changed source data even at the same timestamp');
+  assert.equal(charts[2].series[0], 2);
+});
+
 test('the YO!stats Daemons subtab keeps the system key and every locale carries a non-empty label', () => {
   const path = require('node:path');
   // The subtab wiring keeps the internal `system` key; only the human label changed.
@@ -5474,6 +5522,82 @@ test('Daemons memory series expose retained service RSS without mixing runtime o
   ])}}];
   vm.runInNewContext(`${valueSource}\n${seriesSource}\nconst defs = debugGraphServiceLoadSeriesDefs(buckets, {serviceLoad: true, serviceMetric: 'rss', processOnly: true}); result = defs.map(item => ({key: item.key, value: item.value(buckets[0]), samples: item.sampleCount(buckets[0]), hasData: item.hasData(buckets[0])}));`, context);
   assert.deepEqual(JSON.parse(JSON.stringify(context.result)), [{key: 'serviceMemory:yolomux-go', value: 40 * 1024 * 1024, samples: 1, hasData: true}]);
+});
+
+testAsync('refill confirmation, rejected request, retry and stale GET preserve one operation', async () => {
+  const timers = [];
+  const context = {setTimeout(callback) { timers.push(callback); return timers.length; }, clearTimeout() {}, TextEncoder, TextDecoder};
+  vm.runInNewContext(currentSource, context);
+  const requests = [];
+  const confirmations = [];
+  const listeners = new Set();
+  const document = {hidden: false, addEventListener(_event, callback) { listeners.add(callback); }, removeEventListener(_event, callback) { listeners.delete(callback); }};
+  const make = () => context.YOmuxStatsCurrent.createAgentHistoryRefill({document, confirm(options) {
+    return new Promise(resolve => confirmations.push({options, resolve}));
+  }, fetch(_url, options) {
+    return new Promise(resolve => requests.push({method: options.method, resolve}));
+  }});
+  const click = (owner, selector) => owner.handleClick({target: {closest: expected => expected === selector ? {} : null}});
+  const settle = async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); };
+  const owner = make();
+  owner.start();
+  assert.equal(requests[0].method, 'GET');
+  click(owner, '[data-stats-refill]');
+  assert.equal(confirmations.at(-1).options.title, 'Refill the last 24 hours?');
+  assert.match(confirmations.at(-1).options.message, /Deleted source history cannot be recovered/);
+  confirmations.at(-1).resolve('cancel');
+  await settle();
+  assert.equal(requests.length, 1);
+  click(owner, '[data-stats-refill]');
+  confirmations.at(-1).resolve('refill');
+  await settle();
+  assert.equal(requests[1].method, 'POST');
+  assert.equal(owner.busy(), true);
+  requests[1].resolve({ok: true, json: async () => ({state: 'running', operation_id: 'one', phase: 'Reading history'})});
+  await settle();
+  requests[0].resolve({ok: true, json: async () => ({state: 'idle'})});
+  await settle();
+  assert.equal(owner.status().operation_id, 'one');
+  assert.equal(owner.busy(), true);
+  const confirmationCount = confirmations.length;
+  click(owner, '[data-stats-refill]');
+  assert.equal(confirmations.length, confirmationCount);
+  document.hidden = true;
+  for (const listener of listeners) listener();
+  assert.equal(requests.length, 2);
+  document.hidden = false;
+  for (const listener of listeners) listener();
+  assert.equal(requests.at(-1).method, 'GET');
+  requests.at(-1).resolve({ok: true, json: async () => ({state: 'succeeded', message: 'Agent history refilled.'})});
+  await settle();
+  assert.equal(owner.busy(), false);
+  owner.destroy();
+  assert.equal(listeners.size, 0);
+
+  const failed = make();
+  click(failed, '[data-stats-refill]');
+  confirmations.at(-1).resolve('refill');
+  await settle();
+  requests.at(-1).resolve({ok: false, status: 503});
+  await settle();
+  assert.equal(failed.status().state, 'failed');
+  assert.match(failed.html(), /Your previous data is unchanged/);
+  assert.match(failed.html(), /Try again/);
+  const timerCount = timers.length;
+  timers.at(-1)();
+  requests.at(-1).resolve({ok: true, json: async () => ({state: 'idle'})});
+  await settle();
+  assert.equal(failed.status().state, 'failed');
+  assert.equal(timers.length, timerCount + 1);
+  click(failed, '[data-stats-refill]');
+  assert.equal(confirmations.at(-1).options.title, 'Refill the last 24 hours?');
+  confirmations.at(-1).resolve('refill');
+  await settle();
+  requests.at(-1).resolve({ok: true, json: async () => ({state: 'succeeded', message: 'Agent history refilled.'})});
+  await settle();
+  assert.match(failed.html(), /Agent history refilled\./);
+  assert.equal(failed.busy(), false);
+  failed.destroy();
 });
 
 Promise.all(pending).then(() => {

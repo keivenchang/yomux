@@ -72,6 +72,7 @@ const COMMAND_ROUTES = Object.freeze({
   'editor-save': commandRoute({id: 'editor-save', method: 'POST', path: '/api/fs/write', contractClass: 'pending'}),
   'stats-read-fence-retry': commandRoute({id: 'stats-read-fence-retry', method: 'POST', path: '/api/stats-retry', contractClass: 'background'}),
   'stats-manual-retry': commandRoute({id: 'stats-manual-retry', method: 'POST', path: '/api/stats-retry', contractClass: 'pending'}),
+  'stats-history-refill': commandRoute({id: 'stats-history-refill', method: 'POST', path: '/api/stats-refill', contractClass: 'pending'}),
   'finder-file-create': commandRoute({id: 'finder-file-create', method: 'POST', path: '/api/fs/write', contractClass: 'pending'}),
   'finder-folder-create': commandRoute({id: 'finder-folder-create', method: 'POST', path: '/api/fs/mkdir', contractClass: 'pending'}),
   'finder-delete': commandRoute({id: 'finder-delete', method: 'POST', path: '/api/fs/delete', contractClass: 'optimistic'}),

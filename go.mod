@@ -1,8 +1,9 @@
 module github.com/keivenchang/yomux
 
-go 1.22
+go 1.26.0
 
 require (
-	github.com/mattn/go-sqlite3 v1.14.24
-	golang.org/x/sys v0.30.0
+	github.com/bazelbuild/rules_go v0.64.0
+	github.com/mattn/go-sqlite3 v1.14.52
+	golang.org/x/sys v0.48.0
 )
