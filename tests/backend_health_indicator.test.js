@@ -16,7 +16,7 @@ const {
   assert,
   fs,
   TestElement,
-  loadYolomux,
+  loadYomux,
   flushAsyncWork,
   test,
   testAsync,
@@ -72,7 +72,7 @@ function renderHealth(api, payload) {
 
 async function runBackendHealthIndicatorSuite() {
   test('backend_health_changed is on the browser EventSource contract so the indicator is actually subscribed', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     assert.ok(
       api.clientServerPushEventTypesForTest().includes('backend_health_changed'),
       'an event name absent from clientServerPushEventTypes is never subscribed to, so the indicator would never fire in production',
@@ -80,7 +80,7 @@ async function runBackendHealthIndicatorSuite() {
   });
 
   test('a down service is named in the top-right indicator from the pushed event alone', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const {host, indicator} = renderHealth(api, healthPayload({
       overall_state: 'down',
       degraded_resources: [resource()],
@@ -97,7 +97,7 @@ async function runBackendHealthIndicatorSuite() {
   });
 
   test('web disconnected outranks a down service', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     api.handleClientPushEventNowForTest('backend_health_changed', healthPayload({
       overall_state: 'down',
       degraded_resources: [resource()],
@@ -111,7 +111,7 @@ async function runBackendHealthIndicatorSuite() {
   });
 
   test('a service warning never masks a disconnected browser, and recovering the transport reveals it again', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     for (let attempt = 0; attempt < 3; attempt += 1) api.noteBackendHealthFailureForTest();
     api.handleClientPushEventNowForTest('backend_health_changed', healthPayload({
       overall_state: 'degraded',
@@ -128,7 +128,7 @@ async function runBackendHealthIndicatorSuite() {
   });
 
   test('a down service outranks a degraded one and is the resource that gets named', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const {indicator} = renderHealth(api, healthPayload({
       overall_state: 'degraded',
       degraded_resources: [
@@ -143,7 +143,7 @@ async function runBackendHealthIndicatorSuite() {
   });
 
   test('the named resources are bounded: one label plus a count, never a wall of service names', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const labels = ['File watching', 'Quick Open index', 'Background jobs', 'Session status', 'Usage stats', 'Auto-approval'];
     const ids = ['watchd', 'indexd', 'batchd', 'statusd', 'statsd', 'approvald'];
     const {indicator} = renderHealth(api, healthPayload({
@@ -158,7 +158,7 @@ async function runBackendHealthIndicatorSuite() {
   });
 
   test('the rendered text uses the server label and never the raw service id', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const {indicator} = renderHealth(api, healthPayload({
       overall_state: 'down',
       degraded_resources: [resource({id: 'watchd', label: 'File watching', reason_code: 'service_absent'})],
@@ -172,7 +172,7 @@ async function runBackendHealthIndicatorSuite() {
   });
 
   test('an unlabelled resource falls back to a translated noun instead of leaking its id', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const {indicator} = renderHealth(api, healthPayload({
       overall_state: 'down',
       degraded_resources: [resource({id: 'watchd', label: ''})],
@@ -184,7 +184,7 @@ async function runBackendHealthIndicatorSuite() {
   });
 
   test('one accepted healthy revision immediately paints the same indicator green', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const host = topbarHost();
     api.handleClientPushEventNowForTest('backend_health_changed', healthPayload({
       revision: 1,
@@ -202,7 +202,7 @@ async function runBackendHealthIndicatorSuite() {
   });
 
   test('a replayed or older revision cannot walk the state backwards', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const host = topbarHost();
     api.handleClientPushEventNowForTest('backend_health_changed', healthPayload({
       revision: 7,
@@ -217,7 +217,7 @@ async function runBackendHealthIndicatorSuite() {
   });
 
   test('a new observer epoch can immediately publish its accepted healthy state', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const host = topbarHost();
     api.handleClientPushEventNowForTest('backend_health_changed', healthPayload({
       revision: 4,
@@ -230,7 +230,7 @@ async function runBackendHealthIndicatorSuite() {
   });
 
   test('starting and ready both render the non-alerting green state', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     for (const state of ['starting', 'ready']) {
       const {indicator, host} = renderHealth(api, healthPayload({
         revision: state === 'starting' ? 1 : 2,
@@ -244,14 +244,14 @@ async function runBackendHealthIndicatorSuite() {
   });
 
   test('the warning is carried by words, not by colour', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const down = renderHealth(api, healthPayload({
       revision: 1,
       overall_state: 'down',
       degraded_resources: [resource()],
     })).indicator;
     const downText = accessibleText(down);
-    const api2 = loadYolomux();
+    const api2 = loadYomux();
     const degraded = renderHealth(api2, healthPayload({
       revision: 1,
       overall_state: 'degraded',
@@ -268,7 +268,7 @@ async function runBackendHealthIndicatorSuite() {
   });
 
   test('the triangle severity is reduced from the same green yellow and red roster rows', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const serviceIds = ['indexd', 'statsd', 'batchd', 'statusd', 'watchd', 'approvald'];
     const measured = value => ({state: 'measured', value, reason_code: '', reason: ''});
     const payload = (states, revision) => ({
@@ -308,7 +308,7 @@ async function runBackendHealthIndicatorSuite() {
   });
 
   test('a delayed roster response from a retired observer epoch cannot clear a newer failure', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const host = topbarHost();
     api.handleClientPushEventNowForTest('backend_health_changed', healthPayload({
       epoch: 'old', revision: 20, overall_state: 'ready',
@@ -325,7 +325,7 @@ async function runBackendHealthIndicatorSuite() {
   });
 
   test('the typed unsupported-schema yellow row also makes the triangle yellow', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const host = topbarHost();
     api.handleClientPushEventNowForTest('backend_health_changed', healthPayload({
       epoch: 'observer-1', revision: 1, overall_state: 'ready',
@@ -340,7 +340,7 @@ async function runBackendHealthIndicatorSuite() {
   });
 
   test('the whole control is a details action that reuses the existing System view route', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const {indicator} = renderHealth(api, healthPayload({
       overall_state: 'down',
       degraded_resources: [resource()],
@@ -362,14 +362,14 @@ async function runBackendHealthIndicatorSuite() {
   });
 
   await testAsync('the details action selects the System view', async () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     api.setFetchForTest(async () => ({ok: true, status: 200, clone() { return this; }, json: async () => ({})}));
     await api.openBackendHealthDetailsForTest();
     assert.equal(api.debugSubTabForTest(), 'system');
   });
 
   await testAsync('no polling was added: health arrives on the pushed event and issues no request', async () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const requests = [];
     api.setFetchForTest(async (input, options = {}) => {
       requests.push({url: String(input), method: String(options.method || 'GET')});
@@ -408,7 +408,7 @@ async function runBackendHealthIndicatorSuite() {
   });
 
   test('there is one indicator, one state object and one insertion point', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const host = topbarHost();
     for (let revision = 1; revision <= 4; revision += 1) {
       api.handleClientPushEventNowForTest('backend_health_changed', healthPayload({

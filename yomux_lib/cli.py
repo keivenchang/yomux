@@ -20,7 +20,7 @@ from .backend_health.observer import BACKEND_HEALTH_OBSERVE_SECONDS
 from .backend_health.observer import BackendHealthObserver
 from .backend_health.store import BackendHealthDiagnostic
 from .backend_health.store import BackendHealthStore
-from .infra.common import _YOLOMUX_ROOTS
+from .infra.common import _YOMUX_ROOTS
 from .infra.common import AUTH_CONFIG_PATH
 from .infra.common import SERVER_HOSTNAME
 from .infra.common import STATE_DIR
@@ -30,9 +30,9 @@ from .infra.common import default_session_names
 from .infra.common import split_csv
 from .infra.common import unique_session_names
 from .infra.common import warn_unavailable_agent_commands_once
-from .infra.root_paths import YolomuxRoots
+from .infra.root_paths import YomuxRoots
 from .infra.worktree_writer import server_start_writer_warning
-from .control import send_yolomux_control_request
+from .control import send_yomux_control_request
 from .local_services.registry import bounded_process_table
 from .local_services.registry import set_local_service_launch_context
 from .local_services.registry import tracked_local_service_groups
@@ -293,7 +293,7 @@ def print_runtime_report(sessions: list[str], dangerously_yolo: bool = False) ->
     """
     del sessions, dangerously_yolo  # the bounded report never constructs an app
     scheduler_debug = {"status": "local-only"}
-    response = send_yolomux_control_request(None, {"action": "runtime_report"})
+    response = send_yomux_control_request(None, {"action": "runtime_report"})
     report = response.get("report") if response.get("ok") else None
     if isinstance(report, dict):
         report.setdefault("scheduler_diagnostics", {"debug": scheduler_debug})
@@ -460,12 +460,12 @@ def startup_path_line(
     port: int,
     *,
     environ: Mapping[str, str] | None = None,
-    roots: YolomuxRoots | None = None,
+    roots: YomuxRoots | None = None,
 ) -> str:
     """Describe path provenance using the early classifier and resolved root owner."""
 
     values = os.environ if environ is None else environ
-    resolved = _YOLOMUX_ROOTS if roots is None else roots
+    resolved = _YOMUX_ROOTS if roots is None else roots
     managed = is_managed_instance_port(port) if environ is None else is_managed_instance_port(port, values)
     if managed:
         root_description = (
@@ -525,7 +525,7 @@ def main() -> int:
 
     try:
         root_lease, lease = acquire_instance_and_port_leases(
-            _YOLOMUX_ROOTS,
+            _YOMUX_ROOTS,
             args.port,
             force=bool(getattr(args, "force", False)),
         )
@@ -661,7 +661,7 @@ def exec_go_backend(args: argparse.Namespace) -> int:
         return 2
     try:
         root_lease, port_lease = acquire_instance_and_port_leases(
-            _YOLOMUX_ROOTS,
+            _YOMUX_ROOTS,
             args.port,
             force=args.force,
         )

@@ -60,7 +60,7 @@ from .common import product_filename
 from .common import ready_response_envelope_bytes
 from .common import terminate_process_group
 from .common import validated_product_metadata
-from .common import yolomux_dev_bundle_revision
+from .common import yomux_dev_bundle_revision
 from .http_routes import dispatch_http_route
 from .http_routes import parse_query_float
 from .http_routes import parse_query_int
@@ -2622,7 +2622,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.record_http_response_bytes(HTTPStatus.NOT_FOUND, 0)
 
     def dev_bundle_signature(self) -> str:
-        return yolomux_dev_bundle_revision()
+        return yomux_dev_bundle_revision()
 
     def stream_dev_reload(self, client_bundle_revision: str = "") -> None:
         self.send_response(HTTPStatus.OK)

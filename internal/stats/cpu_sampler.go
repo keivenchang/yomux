@@ -401,7 +401,7 @@ func binaryPair(current, previous CPUSnapshot, binary string) (uint64, uint64, b
 func groupedProcessPercent(current, previous CPUSnapshot, wall time.Duration, logicalCPUs int, binaries []string) map[string]float64 {
 	values := make(map[string]float64)
 	for _, binary := range binaries {
-		if isYoloMuxGoBinary(binary) {
+		if isYomuxGoBinary(binary) {
 			currentRows, previousRows := binaryProcessRows(current, binary), binaryProcessRows(previous, binary)
 			if len(currentRows) == 0 || len(currentRows) != len(previousRows) {
 				continue
@@ -465,7 +465,7 @@ func binaryProcessRows(snapshot CPUSnapshot, binary string) map[string]CPUProces
 	return rows
 }
 
-func isYoloMuxGoBinary(binary string) bool {
+func isYomuxGoBinary(binary string) bool {
 	return binary == "yomux-go" || binary == "yolomux-go" || binary == "yolomux_go"
 }
 

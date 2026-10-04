@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..infra.common import resolve_yolomux_roots
+from ..infra.common import resolve_yomux_roots
 from ..runtime_env import healed_runtime_path
 from .json_rpc import json_rpc_notification
 from .json_rpc import json_rpc_request
@@ -34,7 +34,7 @@ def codex_runtime_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
     if base_env is not None:
         env.update(base_env)
     env["PATH"] = healed_runtime_path(env, home=Path.home())
-    codex_home = resolve_yolomux_roots(env).codex_home
+    codex_home = resolve_yomux_roots(env).codex_home
     codex_home.mkdir(parents=True, exist_ok=True)
     env["CODEX_HOME"] = str(codex_home)
     env["TERM"] = "xterm-256color"

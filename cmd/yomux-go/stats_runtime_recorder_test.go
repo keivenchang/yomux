@@ -433,6 +433,7 @@ func TestStatsRuntimeRecorderPersistsGoProcessMetricsThroughReloadedProduct(t *t
 	defer reopened.Close()
 	now := time.Unix(2000, 0)
 	lifecycle := stats.NewLifecycle(reopened, stats.LifecycleConfig{Cadence: time.Second, WindowSeconds: 120, Now: func() time.Time { return now }})
+	t.Cleanup(lifecycle.Stop)
 	lifecycle.DemandProduct(120, 10)
 	if err := lifecycle.RunOnce(ctx); err != nil {
 		t.Fatal(err)

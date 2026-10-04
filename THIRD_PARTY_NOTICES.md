@@ -10,7 +10,8 @@ Do not replace third-party notices with the YOmux project license. They are not 
 
 ## Runtime Go Dependency
 
-- `github.com/mattn/go-sqlite3` 1.14.24 - SQLite driver used by the Go backend and declared in `go.mod`; its upstream `LICENSE` is MIT.
+- `github.com/mattn/go-sqlite3` 1.14.52 - SQLite driver used by the Go backend and declared in `go.mod`; its upstream `LICENSE` is MIT.
+- `golang.org/x/sys` 0.48.0 - system-call interfaces declared in `go.mod`; its upstream `LICENSE` is BSD 3-Clause.
 
 ## Vendored Browser Assets
 
@@ -26,4 +27,4 @@ Do not replace third-party notices with the YOmux project license. They are not 
 
 - `pytest-xdist` is declared in the `dev` extra in `pyproject.toml` for local test parallelism.
 - Optional managed-agent SDK packages are declared in the `yoagent` extra in `pyproject.toml`; their upstream licenses remain separate from the YOmux project license.
-- Bazel `rules_go` 0.50.1 and Gazelle 0.36.0 are repository build dependencies declared in `MODULE.bazel`; both carry Apache License 2.0 upstream licenses.
+- Bazel `rules_go` 0.64.0, Gazelle 0.54.0, `rules_shell` 0.6.1, `platforms` 1.1.0, and Buildifier are repository build dependencies. These tools carry Apache License 2.0 upstream licenses; preserve their license files and notices when redistributing them.

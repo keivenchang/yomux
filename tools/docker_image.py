@@ -4,43 +4,44 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import os
 import shutil
 import stat
 import subprocess
+import tarfile
+import urllib.request
 import sys
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-IMAGE_SCHEMA_VERSION = 4
+IMAGE_SCHEMA_VERSION = 5
 IMAGE_REPOSITORY = "yomux-test"
 IMAGE_INPUT_FILES = (
     Path("docker") / "Dockerfile.test",
-    Path("docker") / "run-tests.sh",
     Path(".dockerignore"),
     Path("package.json"),
     Path(".bazelversion"),
+    Path("docker/bazel-registry.json"),
+    Path("docker/build-tools.json"),
     Path("MODULE.bazel"),
-    Path("BUILD.bazel"),
-    Path("WORKSPACE"),
+    Path("MODULE.bazel.lock"),
     Path("go.mod"),
     Path("go.sum"),
     Path("docker") / "requirements-test.txt",
     Path("docker") / "debian-packages.txt",
+    Path("tools") / "docker_image.py",
     Path("package-lock.json"),
     Path("docker") / "agent-clients" / "package.json",
     Path("docker") / "agent-clients" / "package-lock.json",
-    Path("tools") / "docker_image.py",
     Path("static/vendor/xterm.js"),
     Path("static/vendor/xterm.css"),
     Path("static/vendor/xterm-addon-unicode11.js"),
-    Path("tests") / "test_agent_status_docker.py",
-    Path("tools") / "fake_llm_server.py",
 )
-IMAGE_INPUT_DIRECTORIES = (Path("cmd"), Path("internal"))
+IMAGE_INPUT_DIRECTORIES = ()
 CONTAINER_MARKER_PATH = Path("/.dockerenv")
 CONTAINER_MOUNTINFO_PATH = Path("/proc/self/mountinfo")
 TEST_IMAGE_MARKER_PATH = Path("/opt/yomux-test-image.marker")
@@ -109,90 +110,125 @@ def image_input_paths(repo_root: Path = REPO_ROOT) -> tuple[Path, ...]:
     return tuple(paths)
 
 
+def _module_sdk(repo_root: Path) -> tuple[str, str]:
+    module = ast.parse((repo_root / "MODULE.bazel").read_text(encoding="utf-8"))
+    downloads = [node for node in ast.walk(module) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Attribute) and node.func.attr == "download"]
+    defaults = [node for node in downloads if not any(item.arg == "name" for item in node.keywords)]
+    if len(defaults) != 1:
+        raise ValueError("MODULE.bazel must declare exactly one default Go SDK download")
+    values = {item.arg: ast.literal_eval(item.value) for item in defaults[0].keywords}
+    return values["version"], values["sdks"]["linux_amd64"][1]
+
+
+def _download_verified(url: str, target: Path, expected_sha256: str | None = None) -> bool:
+    if not target.exists():
+        urllib.request.urlretrieve(url, target)
+    if expected_sha256 is not None:
+        return hashlib.sha256(target.read_bytes()).hexdigest() == expected_sha256
+    return True
+
+
+def _download_go_modules(pinned_go: Path, repo_root: Path, module_cache: Path) -> bool:
+    environment = {
+        **os.environ,
+        "GOMODCACHE": str(module_cache),
+        "GOWORK": "off",
+        "GOTOOLCHAIN": "local",
+        "GOPROXY": "https://proxy.golang.org,direct",
+        "GOSUMDB": "sum.golang.org",
+    }
+    completed = subprocess.run(
+        [str(pinned_go), "mod", "download", "-json"], cwd=repo_root, env=environment,
+        capture_output=True, text=True, check=False,
+    )
+    if completed.returncode:
+        return False
+    for path in (module_cache, *module_cache.rglob("*")):
+        if not path.is_symlink():
+            path.chmod(path.stat().st_mode | stat.S_IWUSR)
+    return True
+
+
 def prepare_go_module_cache(destination: Path, repo_root: Path = REPO_ROOT) -> bool:
-    """Copy only this checkout's already-cached Go modules into a build context."""
-
-    # Bazel scrubbed test actions do not always provide HOME. Go then returns
-    # empty GOPATH/GOMODCACHE values even though the invoking user's cache is
-    # available, causing the Docker wrapper to fall back to a network build.
-    go_environment = os.environ.copy()
-    if not go_environment.get("HOME"):
-        go_environment["HOME"] = str(Path.home())
-    try:
-        configured_cache = Path(
-            subprocess.check_output(
-                ["go", "env", "GOMODCACHE"], cwd=repo_root, env=go_environment, text=True, stderr=subprocess.DEVNULL
-            ).strip()
-        )
-        configured_gopath = subprocess.check_output(
-            ["go", "env", "GOPATH"], cwd=repo_root, env=go_environment, text=True, stderr=subprocess.DEVNULL
-        ).strip()
-    except (OSError, subprocess.CalledProcessError):
-        return False
-    candidates = [configured_cache]
-    candidates.extend(Path(entry) / "pkg" / "mod" for entry in configured_gopath.split(os.pathsep) if entry)
-    unique_candidates = []
-    for candidate in candidates:
-        candidate = candidate.resolve()
-        if candidate not in unique_candidates:
-            unique_candidates.append(candidate)
-
-    completed = None
-    module_cache = None
-    for candidate in unique_candidates:
-        environment = os.environ.copy()
-        environment.update(GOMODCACHE=str(candidate), GOWORK="off", GOPROXY="off", GOSUMDB="off")
-        probe = subprocess.run(
-            ["go", "mod", "download", "-json"],
-            cwd=repo_root,
-            env=environment,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if probe.returncode == 0:
-            completed = probe
-            module_cache = candidate
-            break
-    if completed is None or module_cache is None:
-        return False
+    """Acquire locked Go dependencies with the SDK pinned by MODULE.bazel."""
 
     destination.mkdir(parents=True, exist_ok=True)
-    cache_root = module_cache.resolve()
-    decoder = json.JSONDecoder()
-    position = 0
-    while position < len(completed.stdout):
-        while position < len(completed.stdout) and completed.stdout[position].isspace():
-            position += 1
-        if position == len(completed.stdout):
-            break
-        try:
-            module, position = decoder.raw_decode(completed.stdout, position)
-        except json.JSONDecodeError:
+    version, go_sha = _module_sdk(repo_root)
+    pins_root = destination / "build-inputs"
+    pins_root.mkdir(exist_ok=True)
+    bazel_version = (repo_root / ".bazelversion").read_text().strip()
+    go_archive = f"go{version}.linux-amd64.tar.gz"
+    go_tarball = pins_root / "go.tar.gz"
+    if not _download_verified(f"https://go.dev/dl/{go_archive}", go_tarball, go_sha):
+        return False
+    sdk_root = destination / "pinned-sdk"
+    if not (sdk_root / "go/bin/go").is_file():
+        sdk_root.mkdir(exist_ok=True)
+        with tarfile.open(go_tarball, "r:gz") as archive:
+            archive.extractall(sdk_root, filter="data")
+    pinned_go = sdk_root / "go/bin/go"
+
+    go_mod_cache = destination / "go-mod-cache"
+    go_mod_cache.mkdir(exist_ok=True)
+    if not _download_go_modules(pinned_go, repo_root, go_mod_cache):
+        return False
+
+    # Network acquisition is limited to this preparation step. Test execution
+    # consumes these immutable seeds with networking disabled.
+    build_tools = json.loads((repo_root / "docker/build-tools.json").read_text())
+    bazel_path = pins_root / "bazel"
+    bazel_url = f"https://releases.bazel.build/{bazel_version}/release/bazel-{bazel_version}-linux-x86_64"
+    if not _download_verified(bazel_url, bazel_path, build_tools["bazel_sha256_linux_x86_64"]):
+        return False
+    bazel_path.chmod(0o755)
+
+    buildifier = pins_root / "buildifier"
+    if not buildifier.exists():
+        install = subprocess.run(
+            [str(pinned_go), "install", "github.com/bazelbuild/buildtools/buildifier@" + build_tools["buildifier"]],
+            cwd=repo_root, env={**os.environ, "GOTOOLCHAIN": "local",
+                                "GOMODCACHE": str(destination / "tool-mod-cache"), "GOBIN": str(pins_root),
+                                "GOPROXY": "https://proxy.golang.org,direct", "GOSUMDB": "sum.golang.org"},
+            check=False)
+        if install.returncode:
             return False
-        for key in ("Info", "GoMod", "Zip", "Dir"):
-            source_value = module.get(key)
-            if not source_value:
-                continue
-            source = Path(source_value)
-            try:
-                relative = source.resolve().relative_to(cache_root)
-            except (OSError, ValueError):
-                return False
-            target = destination / relative
-            if source.is_dir():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if not target.exists():
-                    shutil.copytree(source, target, symlinks=True)
-                    for copied in (target, *target.rglob("*")):
-                        if not copied.is_symlink():
-                            copied.chmod(copied.stat().st_mode | stat.S_IWUSR)
-            elif source.is_file():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, target)
-                target.chmod(target.stat().st_mode | stat.S_IWUSR)
-            else:
-                return False
+    buildifier.chmod(0o755)
+
+    registry = json.loads((repo_root / "docker/bazel-registry.json").read_text())
+    registry_tar = pins_root / "registry.tar.gz"
+    if not registry_tar.exists():
+        urllib.request.urlretrieve(
+            f"https://github.com/bazelbuild/bazel-central-registry/archive/{registry['commit']}.tar.gz", registry_tar)
+    if hashlib.sha256(registry_tar.read_bytes()).hexdigest() != registry["sha256"]:
+        return False
+    registry_dir = pins_root / "registry"
+    if not registry_dir.exists():
+        registry_dir.mkdir()
+        with tarfile.open(registry_tar, "r:gz") as archive:
+            members = archive.getmembers()
+            for member in members:
+                parts = Path(member.name).parts
+                if len(parts) > 1:
+                    member.name = str(Path(*parts[1:]))
+                    archive.extract(member, registry_dir, filter="data")
+    registry_tar.unlink()
+
+    repository_cache = destination / "bazel-repository-cache"
+    repository_cache.mkdir(exist_ok=True)
+    fetch = subprocess.run(
+        [str(pins_root / "bazel"), "--batch", "--bazelrc=/dev/null",
+         "--output_user_root=" + str(pins_root / "output"), "fetch",
+         "--repository_cache=" + str(repository_cache), "--registry=file://" + str(registry_dir),
+         "--lockfile_mode=error", "--repo_env=GO_REPOSITORY_USE_HOST_MODCACHE=1",
+         "--repo_env=GOMODCACHE=" + str(go_mod_cache), "//:go_tests"], cwd=repo_root,
+        env={**os.environ, "GOMODCACHE": str(go_mod_cache), "GOPROXY": "off",
+             "GOSUMDB": "off", "GOTOOLCHAIN": "local"}, check=False)
+    if fetch.returncode:
+        return False
+    shutil.rmtree(pins_root / "output")
+    shutil.rmtree(sdk_root)
+    shutil.rmtree(destination / "tool-mod-cache", ignore_errors=True)
     return True
 
 
@@ -220,8 +256,7 @@ def running_inside_container() -> bool:
     if marker != "1":
         return False
     if (
-        not CONTAINER_MARKER_PATH.is_file()
-        or not CONTAINER_MOUNTINFO_PATH.is_file()
+        not CONTAINER_MOUNTINFO_PATH.is_file()
         or not TEST_IMAGE_MARKER_PATH.is_file()
     ):
         return False
@@ -230,8 +265,16 @@ def running_inside_container() -> bool:
             return False
         for line in CONTAINER_MOUNTINFO_PATH.read_text(encoding="utf-8").splitlines():
             fields, separator, filesystem = line.partition(" - ")
-            if separator and fields.split()[4] == "/" and filesystem.split()[0] in {"overlay", "fuse-overlayfs", "aufs"}:
-                return True
+            if separator and fields.split()[4] == "/":
+                if CONTAINER_MARKER_PATH.is_file() and filesystem.split()[0] in {"overlay", "fuse-overlayfs", "aufs"}:
+                    return True
+                # The hermetic action root hides /.dockerenv along with the outer
+                # checkout and HOME. Admission ran before Bazel cache lookup.
+                sandbox_root = fields.split()[3]
+                if ("/sandbox/linux-sandbox/" in sandbox_root and
+                        os.environ.get("YOMUX_BAZEL_CONTRACT") and
+                        os.environ.get("YOMUX_BAZEL_IMAGE_ID", "").startswith("sha256:")):
+                    return True
     except (OSError, IndexError):
         return False
     return False
@@ -259,6 +302,24 @@ def container_available(repo_root: Path = REPO_ROOT) -> tuple[bool, str]:
     return True, "docker is available"
 
 
+def toolchain_build_args(repo_root: Path = REPO_ROOT) -> list[str]:
+    """Read versions/checksums from their Bazel owners, without evaluating Starlark."""
+    module = ast.parse((repo_root / "MODULE.bazel").read_text())
+    downloads = [node for node in ast.walk(module) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Attribute) and node.func.attr == "download"]
+    default_downloads = [
+        node for node in downloads
+        if not any(item.arg == "name" for item in node.keywords)
+    ]
+    if len(default_downloads) != 1:
+        raise ValueError("MODULE.bazel must declare exactly one default Go SDK download")
+    pins = {item.arg: ast.literal_eval(item.value) for item in default_downloads[0].keywords}
+    build_tools = json.loads((repo_root / "docker/build-tools.json").read_text())
+    return ["BAZEL_VERSION=" + (repo_root / ".bazelversion").read_text().strip(),
+            "BAZEL_SHA256=" + build_tools["bazel_sha256_linux_x86_64"],
+            "GO_VERSION=" + pins["version"], "GO_SHA256=" + pins["sdks"]["linux_amd64"][1]]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--name", action="store_true", help="print the fully qualified image reference")
@@ -269,7 +330,11 @@ def main(argv: list[str] | None = None) -> int:
         metavar="DIRECTORY",
         help="copy this checkout's cached Go modules into DIRECTORY",
     )
+    parser.add_argument("--toolchain-build-args", action="store_true")
     args = parser.parse_args(argv)
+    if args.toolchain_build_args:
+        print("\n".join(toolchain_build_args()))
+        return 0
 
     if args.prepare_go_mod_cache:
         return 0 if prepare_go_module_cache(Path(args.prepare_go_mod_cache)) else 1

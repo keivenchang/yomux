@@ -12,7 +12,7 @@
 const {
   assert,
   deferredFetch,
-  loadYolomux,
+  loadYomux,
   jsonResponse,
   flushAsyncWork,
   testAsync,
@@ -129,7 +129,7 @@ async function applyNewerValidRender(api, mtime) {
 
 async function runOpenFileMissingGuardSuite() {
   await testAsync('poll lane: exact-path status checks progress independently', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     for (const path of [MD, OTHER_MD]) {
       api.setOpenFileStateForTest(path, {
         kind: 'text', mtime: 5, size: 100, dirty: true, content: 'local', original: 'disk',
@@ -161,7 +161,7 @@ async function runOpenFileMissingGuardSuite() {
   });
 
   await testAsync('poll lane: a fresh cached directory row supplies exact file status', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setOpenFileStateForTest(MD, {
       kind: 'text', mtime: 5, size: 100, dirty: true, content: 'local', original: 'disk',
     });
@@ -181,7 +181,7 @@ async function runOpenFileMissingGuardSuite() {
   });
 
   await testAsync('poll lane: an exact status that becomes a directory keeps loaded file content', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setOpenFileStateForTest(MD, {
       kind: 'text', mtime: 5, size: 100, dirty: false, content: 'loaded text', original: 'loaded text',
     });
@@ -199,7 +199,7 @@ async function runOpenFileMissingGuardSuite() {
   });
 
   await testAsync('poll lane: exact status clears a deletion tombstone and seeds the next cache read', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setOpenFileStateForTest(MD, {
       kind: 'text', mtime: 5, size: 100, dirty: true, content: 'local', original: 'disk',
     });
@@ -219,7 +219,7 @@ async function runOpenFileMissingGuardSuite() {
   });
 
   await testAsync('poll lane: a newer directory listing supersedes an older cached exact status', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setOpenFileStateForTest(MD, {
       kind: 'text', mtime: 5, size: 100, dirty: true, content: 'local', original: 'disk',
     });
@@ -242,7 +242,7 @@ async function runOpenFileMissingGuardSuite() {
   });
 
   await testAsync('poll lane: a listing published during exact status lookup fences the older response', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setOpenFileStateForTest(MD, {
       kind: 'text', mtime: 5, size: 100, dirty: true, content: 'local', original: 'disk',
     });
@@ -264,7 +264,7 @@ async function runOpenFileMissingGuardSuite() {
   });
 
   await testAsync('poll lane: a status response cannot clear a newer deletion tombstone', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setOpenFileStateForTest(MD, {
       kind: 'text', mtime: 5, size: 100, dirty: true, content: 'local', original: 'disk',
     });
@@ -284,7 +284,7 @@ async function runOpenFileMissingGuardSuite() {
   });
 
   await testAsync('poll lane: overlapping status checks for one path share one in-flight request', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setOpenFileStateForTest(MD, {
       kind: 'text', mtime: 5, size: 100, dirty: true, content: 'local', original: 'disk',
     });
@@ -309,7 +309,7 @@ async function runOpenFileMissingGuardSuite() {
   // ---------- Lane A: explicit/background reload (loadOpenFileStateFromDisk) ----------
 
   await testAsync('reload lane: an exact-path status result that says present keeps the editor loaded', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     await openValid(api);
     await reloadWithOmittedListing(api, () => Promise.resolve(readOkResponse(6)));
     await flush();
@@ -321,7 +321,7 @@ async function runOpenFileMissingGuardSuite() {
 
   // A late/stale exact-path status response must not overwrite a newer valid render.
   await testAsync('reload lane: a late/stale status response cannot overwrite a newer valid read', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     await openValid(api);
     await applyNewerValidRender(api, 6); // a newer valid render lands first (content mtime 6)
     const infoD = deferredFetch();
@@ -342,7 +342,7 @@ async function runOpenFileMissingGuardSuite() {
   });
 
   await testAsync('reload lane: a genuine exact-path 404 STILL marks the editor missing', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     await openValid(api);
     await reloadWithOmittedListing(api, () => Promise.resolve(jsonResponse({}, 404)), () => Promise.resolve(jsonResponse({}, 404)));
     await flush();
@@ -365,7 +365,7 @@ async function runOpenFileMissingGuardSuite() {
   }
 
   await testAsync('poll lane: an exact-path status result that says present keeps the editor loaded', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     await openValid(api);
     api.setFetchForTest((url, options = {}) => {
       const text = String(url);
@@ -382,7 +382,7 @@ async function runOpenFileMissingGuardSuite() {
   });
 
   await testAsync('poll lane: a late/stale status response cannot overwrite a newer valid read', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     await openValid(api);
     await applyNewerValidRender(api, 6);
     const infoD = deferredFetch();
@@ -403,7 +403,7 @@ async function runOpenFileMissingGuardSuite() {
   });
 
   await testAsync('poll lane: a genuine exact-path 404 STILL marks the editor missing', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     await openValid(api);
     api.setFetchForTest((url, options = {}) => {
       const text = String(url);
@@ -424,7 +424,7 @@ async function runOpenFileMissingGuardSuite() {
   // directory-listing omission must never flip an open media view to "missing".
 
   await testAsync('media lane: a directory-listing omission alone does NOT mark an open media editor missing', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const item = api.fileEditorItemForTest(IMG);
     api.setOpenFileStateForTest(IMG, {kind: 'image', size: 1024, mtime: 5, mtime_ns: 5, original: '', content: '', dirty: false});
     api.setFetchForTest((url, options = {}) => {
@@ -443,7 +443,7 @@ async function runOpenFileMissingGuardSuite() {
   });
 
   await testAsync('media lane: a late/stale omitting listing cannot overwrite a newer valid media render', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const item = api.fileEditorItemForTest(IMG);
     api.setOpenFileStateForTest(IMG, {kind: 'image', size: 1024, mtime: 5, mtime_ns: 5, original: '', content: '', dirty: false});
     // A newer valid media render lands first (good listing includes pic.png; advances the generation).
@@ -478,7 +478,7 @@ async function runOpenFileMissingGuardSuite() {
   });
 
   await testAsync('media lane: a genuine exact-path /api/fs/info 404 STILL marks the media editor missing', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const item = api.fileEditorItemForTest(IMG);
     api.setOpenFileStateForTest(IMG, {kind: 'image', size: 1024, mtime: 5, mtime_ns: 5, original: '', content: '', dirty: false});
     api.setFetchForTest((url, options = {}) => {
@@ -502,7 +502,7 @@ async function runOpenFileMissingGuardSuite() {
   // fenced against newer per-path state so a stale/late 404 cannot overwrite a newer valid render.
 
   await testAsync('command-palette validation: a stale/late 404 cannot overwrite a newer valid render', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     await openValid(api);
     const item = api.fileEditorItemForTest(MD);
     const infoD = deferredFetch();
@@ -526,7 +526,7 @@ async function runOpenFileMissingGuardSuite() {
   });
 
   await testAsync('command-palette validation: a genuine exact-path 404 STILL marks the tab missing', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     await openValid(api);
     const item = api.fileEditorItemForTest(MD);
     api.setFetchForTest((url, options = {}) => {

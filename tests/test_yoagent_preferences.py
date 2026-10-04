@@ -18,8 +18,8 @@ pytestmark = pytest.mark.usefixtures("isolated_yoagent_conversation_state")
 
 @pytest.fixture(autouse=True)
 def no_control_socket(monkeypatch):
-    monkeypatch.setattr(app_module.YolomuxControlServer, "start", lambda self: None)
-    monkeypatch.setattr(app_module.YolomuxControlServer, "stop", lambda self: None)
+    monkeypatch.setattr(app_module.YomuxControlServer, "start", lambda self: None)
+    monkeypatch.setattr(app_module.YomuxControlServer, "stop", lambda self: None)
 
 
 def settings_payload_for_path(path):

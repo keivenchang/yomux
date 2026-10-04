@@ -9,6 +9,13 @@ NOW = 1_700_000_000.0
 G9_CORRUPTION_BYTES = 4_096
 
 
+def stop_stats_current_service(service, thread, *, timeout: float = 3.0) -> None:
+    service.stop_event.set()
+    service.work_event.set()
+    thread.join(timeout=timeout)
+    assert not thread.is_alive(), "stats current service did not stop"
+
+
 def commit_scan(scanner, result):
     scanner.commit(result.receipt_id)
     return result

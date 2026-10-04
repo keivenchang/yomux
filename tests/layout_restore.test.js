@@ -13,9 +13,9 @@ const {
   TestFormData,
   assertNoStandalonePrBadge,
   assertSingleCiBadge,
-  loadYolomux,
+  loadYomux,
   fileExplorerClosedOptions,
-  loadYolomuxWithFileExplorerClosed,
+  loadYomuxWithFileExplorerClosed,
   treeKeyEvent,
   tabElement,
   tabStrip,
@@ -40,7 +40,7 @@ function layoutItemsAfterQueryRoundTrip(api, slots) {
 
 async function runLayoutRestoreSuite() {
   test('legacy browser storage keys migrate before reads and remain coordinated during transition', () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       localStorage: {
         'yolomux.fileExplorerMode.v1': 'diff',
         'yomux.fileExplorerMode.v1': 'files',
@@ -62,7 +62,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('new bundle reads a cached legacy bootstrap element ID', () => {
-    const api = loadYolomux('', ['legacy-dom'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['legacy-dom'], 'http:', 'Linux x86_64', 'admin', {
       bootstrapElementId: 'yolomux-bootstrap',
     });
     assert.deepStrictEqual([...api.sessionsForTest()], ['legacy-dom'], 'the legacy page identifier remains readable during cached-page transition');
@@ -70,7 +70,7 @@ async function runLayoutRestoreSuite() {
 
   test('paste upload lock observes an old tab lease written after namespace migration', () => {
     const legacyLock = {session: 'old-tab', expiresAt: Date.now() + 5000};
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       localStorage: {'yolomux.pasteUploadLock.v1': JSON.stringify(legacyLock)},
     });
 
@@ -81,7 +81,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('dynamic Git history tabs clean runtime state on close and restore from encoded URL items', () => {
-    const api = loadYolomux('', ['1']), item = api.gitDiffItemFor('/repo/src');
+    const api = loadYomux('', ['1']), item = api.gitDiffItemFor('/repo/src');
     assert.equal(api.resolveLayoutItem(item), item, 'encoded gitdiff URL items register through the dynamic descriptor');
     api.setGitDiffTabStateForTest(item, {path: '/repo/src', head: 'a'.repeat(40), commits: [{sha: 'a'.repeat(40)}]});
     const opened = api.layoutWithItems(api.emptyLayoutSlots(), [item]);
@@ -94,7 +94,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('historical Editor URL state reconstructs immutable tuple state without touching the working-tree file state', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const path = '/repo/src/app.js', fromRef = '1'.repeat(40), toRef = '2'.repeat(40);
     const item = api.historicalFileEditorItemFor(path, fromRef, toRef);
     const returnToItem = api.gitDiffItemFor('/repo');
@@ -113,7 +113,7 @@ async function runLayoutRestoreSuite() {
   });
 
   await testAsync('layout URL state restores the frozen Git history identity and disclosure focus through first scope binding', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const item = api.gitDiffItemFor('/repo/src');
     const sha = 'a'.repeat(40), head = 'f'.repeat(40);
     const state = api.setGitDiffTabStateForTest(item, {path: '/repo/src', head, snapshotCursor: 'opaque-zero', focusedSha: sha, loaded: true, loadAttempted: true});
@@ -123,7 +123,7 @@ async function runLayoutRestoreSuite() {
     api.applyLayoutSlotsForTest(api.layoutWithItems(api.emptyLayoutSlots(), [item]), {focusSession: item, prune: false});
     const snapshot = api.layoutUrlStateSnapshotForTest();
     assert.ok(snapshot.gitDiff, 'the shared layout state carries Git history tab identity');
-    const restored = loadYolomux('', ['1']);
+    const restored = loadYomux('', ['1']);
     restored.applyLayoutUrlStateSeedForTest(snapshot);
     restored.resolveLayoutItem(item);
     const restoredState = restored.gitDiffTabStateForTest(item);
@@ -152,7 +152,7 @@ async function runLayoutRestoreSuite() {
       {loggedIn: true, available: false, disabled: true, detail: 'Run codex login'},
     ];
     for (const expected of cases) {
-      const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
         availableAgents: ['codex'],
         agentAuth: {
           codex: {installed: true, logged_in: expected.loggedIn, available: expected.available},
@@ -167,7 +167,7 @@ async function runLayoutRestoreSuite() {
 
   await testAsync('activity summary is fail-closed across missing and malformed bootstrap values', async () => {
     for (const activitySummary of [undefined, null, {}, {enabled: false}, {enabled: 1}, {enabled: 'true'}]) {
-      const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {activitySummary}});
+      const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {activitySummary}});
       const requests = [];
       api.setFetchForTest((url) => {
         requests.push(String(url));
@@ -203,7 +203,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('JS debug failure classifier rejects stats warnings and errors but keeps info', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     api.clearJsDebugEventsForTest();
     api.recordJsDebugEventForTest('stats_history', {level: 'warning', message: 'stats warning'});
     api.recordJsDebugEventForTest('stats_history', {level: 'error', message: 'stats error'});
@@ -218,7 +218,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('API and page-load observations retain bounded attribution and phase timings', () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Mozilla/5.0 Chrome/140.0', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Mozilla/5.0 Chrome/140.0', 'admin', {
       bootstrapOverrides: {clientRevision: 'a25ff8ff3'},
     });
     const apiObservation = api.jsDebugCurrentObservationFromEventForTest({
@@ -269,7 +269,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('perceptual, operation, long-task, and upload-health observations are durable and path-free', () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Mozilla/5.0 Firefox/142.0', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Mozilla/5.0 Firefox/142.0', 'admin', {
       bootstrapOverrides: {clientRevision: 'revision-7'},
     });
     const common = {
@@ -292,7 +292,7 @@ async function runLayoutRestoreSuite() {
 
   test('page milestones, Finder paint, input timing, and accepted-operation wait use browser monotonic time', () => {
     let now = 10;
-    const api = loadYolomux('', ['1'], 'http:', 'Mozilla/5.0 Chrome/140.0', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Mozilla/5.0 Chrome/140.0', 'admin', {
       performance: {
         now: () => now,
         getEntriesByType: type => type === 'paint' ? [
@@ -359,7 +359,7 @@ async function runLayoutRestoreSuite() {
       constructor(callback) { this.callback = callback; observers.push(this); }
       observe(options) { this.options = options; }
     }
-    const api = loadYolomux('', ['1'], 'http:', 'Mozilla/5.0 Chrome/140.0', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Mozilla/5.0 Chrome/140.0', 'admin', {
       PerformanceObserver: TestPerformanceObserver,
     });
     assert.deepStrictEqual(observers.map(observer => observer.options.type || observer.options.entryTypes[0]), ['longtask', 'event']);
@@ -373,7 +373,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('resource timing phases are non-overlapping and observation uploads stay below the route limit', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const phases = api.jsDebugResourcePhaseTimingsForTest({
       startTime: 10, fetchStart: 12, connectStart: 13, secureConnectionStart: 14,
       connectEnd: 18, requestStart: 19, responseStart: 29, responseEnd: 39,
@@ -395,7 +395,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('normal API requests carry distinct correlatable request ids', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const first = {};
     const second = {};
     const firstId = api.applyApiRequestIdHeaderForTest('/api/ping', first);
@@ -420,7 +420,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('shared button builder owns attributes, accessibility state, dataset, and events', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const clicks = [];
     const contexts = [];
     const button = api.makeButtonForTest({
@@ -461,7 +461,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('bindOnce keeps implementation sentinels out of DOM and supports disposal plus remount', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const root = new TestElement('bind-once-root');
     const events = [];
     const install = () => {
@@ -481,7 +481,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('scoped bind-once owns listeners across double-bind, dispose, and reconstructed DOM', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const bind = root => api.bindScopedOnceForTest(root, 'click-owner', scope => (
       scope.ownEvent('click', root, 'click', () => { root.clickCount = (root.clickCount || 0) + 1; })
     ));
@@ -501,7 +501,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('shared control normalization covers raw app buttons without replacing component classes', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const root = new TestElement('control-root');
     const primary = new TestElement('primary', 'button');
     primary.classList.add('component-action');
@@ -515,7 +515,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('panel-body reconciliation normalizes reconstructed controls before afterReplace', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const body = new TestElement('reconstructed-panel-body');
     let observed = '';
     api.reconcilePanelBodyForTest({
@@ -532,7 +532,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('hover popovers use one child binding and dispose anchor plus child listeners', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const anchor = new TestElement('hover-anchor');
     const popover = new TestElement('hover-child');
     const controller = api.createHoverPopoverForTest({anchor, popover, showDelay: 0, hideDelay: 0});
@@ -546,7 +546,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('panel popover bind-once disposal removes listeners before remount', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const panel = new TestElement('panel-popover-owner');
     const zone = new TestElement('panel-popover-zone');
     zone.classList.add('panel-popover-zone');
@@ -566,8 +566,8 @@ async function runLayoutRestoreSuite() {
       .map(name => fs.readFileSync(`static_src/js/yomux/${name}`, 'utf8'))
       .join('\n');
     const retired = [
-      'mdTaskBound', 'mdLinkBound', '_yolomuxPreviewControlsBound', '__yolomuxInfoPanelBound',
-      '__yolomuxEmptySpaceContextMenuBound', '__yolomuxPaneDragBound', 'linkContextMenuBound',
+      'mdTaskBound', 'mdLinkBound', '__yomuxPreviewControlsBound', '__yomuxInfoPanelBound',
+      '__yomuxEmptySpaceContextMenuBound', '__yomuxPaneDragBound', 'linkContextMenuBound',
       'fileExplorerHeaderActionsBound', 'clipboardPasteBound', 'hoverPopoverBound',
       'tabInteractionBound', 'pathInputBound', 'imagePreviewBound', 'tabberChromeBound',
       'tabberBound', 'popoverBound', 'changesBound', 'yoagentSessionLinksBound', 'terminalHandlersBound',
@@ -579,7 +579,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('frontend orchestration facades expose the registered runtime families', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const debugPanel = api.debugRuntimeFacadeForTest('panel');
     assert.deepStrictEqual(Object.keys(debugPanel).sort(), ['createDebugPanel', 'renderDebugPanels', 'renderYoCostPanels']);
     assert.ok(Object.values(debugPanel).every(value => typeof value === 'function'));
@@ -606,7 +606,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('migrated framed-panel binders dispose and remount one listener without DOM sentinels', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const panel = api.appRootForTest().constructor === TestElement ? new TestElement('framed-panel') : api.appRootForTest();
     const first = api.bindPaneFrameControlsForTest(panel, '1');
     const duplicate = api.bindPaneFrameControlsForTest(panel, '1');
@@ -638,12 +638,12 @@ async function runLayoutRestoreSuite() {
       v: 1,
       preferences: {collapsedSections: ['Appearance', 'File Explorer']},
     }));
-    const api = loadYolomux(`?state=${state}`, ['1']);
+    const api = loadYomux(`?state=${state}`, ['1']);
     assert.equal(api.i18nActiveLocaleId(), 'en');
   });
 
   test('HTTP transport warning recommends self-signed HTTPS', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     api.renderTransportWarning();
     const warning = api.httpsWarningForTest();
     assert.equal(warning.hidden, false);
@@ -651,13 +651,13 @@ async function runLayoutRestoreSuite() {
     assert.ok(warning.dataset.tip.includes('--port 7770 --self-signed'));
     assert.equal(warning.dataset.tip.includes('--host 0.0.0.0'), false);
 
-    const secureApi = loadYolomux('', ['1'], 'https:');
+    const secureApi = loadYomux('', ['1'], 'https:');
     secureApi.renderTransportWarning();
     assert.equal(secureApi.httpsWarningForTest().hidden, true);
   });
 
   test('session-file lookback options are one shared source', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const expectedHours = [0.5, 1, 2, 4, 8, 12, 24, 48, 72, 96, 120, 144, 168, 192, 216, 240, 264, 288, 312, 336];
     const localJson = value => JSON.parse(JSON.stringify(value));
     assert.equal(api.sessionFileLookbackDefaultHoursForTest, 24);
@@ -762,7 +762,7 @@ async function runLayoutRestoreSuite() {
       selectionOther: '{count} selections',
     }, 'new CodeMirror and cursor-status locale families preserve their parameter contracts');
 
-    const codeMirrorLocaleApi = loadYolomux('', ['1']);
+    const codeMirrorLocaleApi = loadYomux('', ['1']);
     codeMirrorLocaleApi.i18nSetCatalogForTest('cm-test', {
       'editor.search.all': 'ALL-T',
       'common.find': 'FIND-T',
@@ -796,7 +796,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(codeMirrorLocaleApi.openFileStatus({kind: 'text', original: 'x'}).message, '1 glyph-T');
     assert.equal(codeMirrorLocaleApi.openFileStatus({kind: 'text', original: 'xy'}).message, '2 glyphs-T');
 
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.i18nSetCatalogForTest('terminal-test', {
       'common.tabs.one': '{count} tab test',
       'common.tabs.other': '{count} tabs test',
@@ -817,7 +817,7 @@ async function runLayoutRestoreSuite() {
 
   test('YO!info activity-summary lookback state uses shared options and refreshes activity summary', () => {
     const requests = [];
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       bootstrapOverrides: {activitySummary: {enabled: true}},
     });
     assert.equal(api.infoSessionFileLookbackHoursForTest(), 24, 'Info activity-summary lookback defaults to 24 hours');
@@ -848,7 +848,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('default layout places Finder beside three sessions', () => {
-    const api = loadYolomux('', ['1', '2', '3']);
+    const api = loadYomux('', ['1', '2', '3']);
     const layout = api.defaultLayoutForTest();
     assert.deepStrictEqual(canonical(layout), {
       tree: {split: 'row', pct: 22, children: [{slot: 'slot1'}, {split: 'row', pct: 50, children: [{slot: 'left'}, {slot: 'right'}]}]},
@@ -866,7 +866,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('empty default layout retains a Finder and placeholder pane', () => {
-    const api = loadYolomux('', []);
+    const api = loadYomux('', []);
     const layout = api.defaultLayoutForTest();
     assert.deepStrictEqual(canonical(layout), {
       tree: {split: 'row', pct: 22, children: [{slot: 'slot1'}, {slot: 'left'}]},
@@ -882,7 +882,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('session URL order restores the active pane layout', () => {
-    const api = loadYolomux('?sessions=3,2,1', ['1', '2', '3']);
+    const api = loadYomux('?sessions=3,2,1', ['1', '2', '3']);
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {split: 'row', pct: 22, children: [{slot: 'slot1'}, {split: 'row', pct: 50, children: [{slot: 'left'}, {slot: 'right'}]}]},
       panes: {
@@ -895,7 +895,7 @@ async function runLayoutRestoreSuite() {
 
   test('legacy layout URL modes migrate to independent Finder Differ Tabber tabs', () => {
     for (const [mode, active] of [['files', '__finder__'], ['diff', '__differ__'], ['tabber', '__tabber__']]) {
-      const restored = loadYolomux(
+      const restored = loadYomux(
         `?sessions=files,1&layout=row@22(slot1,left)&tabs=slot1:files;left:1&finder=${mode}`,
         ['1'],
         'http:',
@@ -917,13 +917,13 @@ async function runLayoutRestoreSuite() {
       assert.ok(params.get('tabs').includes(`slot1:@side-left,${tabs}`), `${mode} remains the active independent tab after serialization`);
     }
 
-    const noFinder = loadYolomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1&finder=tabber', ['1']);
+    const noFinder = loadYomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1&finder=tabber', ['1']);
     const noFinderParams = parseUrl(noFinder.syncInitialLayoutUrlForTest());
     assert.equal(noFinderParams.has('finder'), false, 'closed Finder/Differ/Tabber state is omitted from the URL');
   });
 
   await testAsync('renamed tmux tab survives stale session rosters and queued Dockview adoption', async () => {
-    const api = loadYolomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1', ['1', '2']);
+    const api = loadYomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1', ['1', '2']);
     api.queueDockviewLayoutAdoptionForTest(api.dockviewJsonFromLayoutSlots(api.currentSlots()));
     api.replaceTmuxSessionInClient('1', '8002b', ['2']);
     const renamedPanes = {left: {tabs: ['8002b'], active: '8002b'}};
@@ -937,7 +937,7 @@ async function runLayoutRestoreSuite() {
   });
 
   await testAsync('session rename resolves only after its delayed layout realization', async () => {
-    const api = loadYolomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1', ['1']);
+    const api = loadYomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1', ['1']);
     api.setFetchForTest(url => {
       const parsed = new URL(String(url), 'http://localhost');
       if (parsed.pathname === '/api/rename-session') {
@@ -989,7 +989,7 @@ async function runLayoutRestoreSuite() {
   });
 
   await testAsync('session rename keeps a target pending when the returned roster is stale', async () => {
-    const api = loadYolomuxWithFileExplorerClosed('?sessions=source&layout=left&tabs=left:source', ['source']);
+    const api = loadYomuxWithFileExplorerClosed('?sessions=source&layout=left&tabs=left:source', ['source']);
     api.setFetchForTest(url => {
       const parsed = new URL(String(url), 'http://localhost');
       if (parsed.pathname === '/api/rename-session') {
@@ -1021,7 +1021,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('authoritative rename roster drops the retired source identity', () => {
-    const api = loadYolomuxWithFileExplorerClosed('?sessions=source&layout=left&tabs=left:source', ['source']);
+    const api = loadYomuxWithFileExplorerClosed('?sessions=source&layout=left&tabs=left:source', ['source']);
     const mutation = api.beginTmuxSessionLifecycleMutationForTest('rename', {session: 'source', newName: 'missing-target'});
     api.commitTmuxSessionLifecycleMutationForTest(mutation, {newName: 'missing-target'});
     api.replaceTmuxSessionInClient('source', 'missing-target', ['source', 'missing-target'], {authoritativeRoster: true});
@@ -1039,7 +1039,7 @@ async function runLayoutRestoreSuite() {
   await testAsync('layout mutation completion reports refusals and bounds every waiter', async () => {
     const timers = new Map();
     let nextTimer = 1;
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       setTimeout(callback, milliseconds) {
         const id = nextTimer++;
         timers.set(id, {callback, milliseconds});
@@ -1086,7 +1086,7 @@ async function runLayoutRestoreSuite() {
   });
 
   await testAsync('server-successful superseded rename remains a committed mutation outcome', async () => {
-    const api = loadYolomux('', ['1', '2']);
+    const api = loadYomux('', ['1', '2']);
     api.setFetchForTest(url => {
       const parsed = new URL(String(url), 'http://localhost');
       if (parsed.pathname === '/api/session-metadata') {
@@ -1124,7 +1124,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('renaming a tmux tab preserves a YO!stats tab in its existing Vertical Side Pane', () => {
-    const api = loadYolomuxWithFileExplorerClosed('?sessions=5&layout=left&tabs=left:5', ['5']);
+    const api = loadYomuxWithFileExplorerClosed('?sessions=5&layout=left&tabs=left:5', ['5']);
     api.setLayoutSlotsForTest({
       [api.layoutTreeKey]: {split: 'row', pct: 28, children: [api.leafNode('side'), api.leafNode('main')]},
       side: api.paneStateWithTabs([api.finderItemId, api.debugPaneItemId], api.debugPaneItemId, {kind: api.paneRoleSide, side: api.paneSideLeft}),
@@ -1146,7 +1146,7 @@ async function runLayoutRestoreSuite() {
   });
 
   await testAsync('new Claude/Codex tab opens before delayed discovery lists it', async () => {
-    const api = loadYolomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1', ['1']);
+    const api = loadYomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1', ['1']);
     let createRequest = null;
     api.setFetchForTest(url => {
       const parsed = new URL(String(url), 'http://localhost');
@@ -1186,7 +1186,7 @@ async function runLayoutRestoreSuite() {
   });
 
   await testAsync('server-reserved create identity seals metadata and status until the matching response commits', async () => {
-    const api = loadYolomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1', ['1']);
+    const api = loadYomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1', ['1']);
     let resolveCreate;
     const createResponse = new Promise(resolve => { resolveCreate = resolve; });
     api.setFetchForTest(url => {
@@ -1213,7 +1213,7 @@ async function runLayoutRestoreSuite() {
   });
 
   await testAsync('new Xterm tab stays active when create-session is fresh but transcripts lag', async () => {
-    const api = loadYolomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1', ['1']);
+    const api = loadYomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1', ['1']);
     let createRequest = null;
     api.setFetchForTest(url => {
       const parsed = new URL(String(url), 'http://localhost');
@@ -1253,7 +1253,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('layout URL parser round-trips and clamps invalid splits', () => {
-    const api = loadYolomux('?keep=1');
+    const api = loadYomux('?keep=1');
     assert.equal(api.layoutFromParam('', ''), null, 'empty layout param falls back to default layout');
     assert.equal(api.layoutFromParam(null, ''), null, 'null layout param falls back to default layout');
     assert.equal(api.layoutFromParam('not-a-layout', ''), null, 'garbage layout param falls back to default layout');
@@ -1280,12 +1280,12 @@ async function runLayoutRestoreSuite() {
     const highPctLayout = api.layoutFromParam('row@120(left,slot1)', 'left:1;slot1:2');
     assert.equal(api.serialize(highPctLayout).tree.pct, 95, 'layout parser clamps high split percentages');
 
-    const reloaded = loadYolomuxWithFileExplorerClosed(`?${url.split('?')[1] || ''}`);
+    const reloaded = loadYomuxWithFileExplorerClosed(`?${url.split('?')[1] || ''}`);
     assert.deepStrictEqual(canonical(reloaded.serialize(reloaded.currentSlots())), canonical(api.serialize(slots)));
   });
 
   test('legacy tree layouts migrate to the current slot model', () => {
-    const api = loadYolomuxWithFileExplorerClosed();
+    const api = loadYomuxWithFileExplorerClosed();
     const oldPayload = {
       tree: {
         split: 'row',
@@ -1307,7 +1307,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(params.get('tabs'), 'left:5,6*;slot1:1;slot2:3');
 
     const encodedOldSearch = `?sessions=6%2C1%2C3&layout=${encodeURIComponent(`tree:${JSON.stringify(oldPayload)}`)}`;
-    const reloaded = loadYolomuxWithFileExplorerClosed(encodedOldSearch);
+    const reloaded = loadYomuxWithFileExplorerClosed(encodedOldSearch);
     assert.deepStrictEqual(canonical(reloaded.serialize(reloaded.currentSlots())), canonical(api.serialize(decoded)));
 
     const oldFourPanePayload = {
@@ -1353,7 +1353,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('layout URL carries editor viewport line state across reload', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const path = '/home/test/yolomux.dev8002/docs/specs/GUI.md';
     const item = api.registerFileEditorLayoutItemForTest(path);
     api.setOpenFileStateForTest(path, {mtime: 1, size: 64, kind: 'text', original: 'one\ntwo\nthree\nfour\n', content: 'one\ntwo\nthree\nfour\n', dirty: false});
@@ -1388,13 +1388,13 @@ async function runLayoutRestoreSuite() {
     assert.equal(mode.viewState.line, 3, 'URL editor state records the first visible CodeMirror line');
     assert.equal(mode.viewState.top, 420, 'URL editor state keeps the scroll offset fallback');
 
-    const restored = loadYolomux(`?${params.toString()}`, ['1']);
+    const restored = loadYomux(`?${params.toString()}`, ['1']);
     assert.equal(restored.fileEditorViewStateForTest(item).line, 3, 'reload seeds the editor view-state line from URL state');
     assert.equal(restored.pendingFileEditorLineTargetForTest(item), 3, 'reload schedules the saved line through the shared editor line-target path');
   });
 
   test('legacy compact session layout restores without Finder', () => {
-    const api = loadYolomuxWithFileExplorerClosed('?sessions=3&layout=left&tabs=left:3,2');
+    const api = loadYomuxWithFileExplorerClosed('?sessions=3&layout=left&tabs=left:3,2');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {slot: 'left'},
       panes: {
@@ -1405,7 +1405,7 @@ async function runLayoutRestoreSuite() {
 
   test('legacy Changes tokens migrate to Finder diff mode', () => {
   for (const legacyChangesToken of ['changes', '__changes__']) {
-    const api = loadYolomux(`?layout=left&tabs=left:${legacyChangesToken}`, ['1']);
+    const api = loadYomux(`?layout=left&tabs=left:${legacyChangesToken}`, ['1']);
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'main'}]},
       panes: {
@@ -1419,7 +1419,7 @@ async function runLayoutRestoreSuite() {
 
   test('legacy YO!agent tokens migrate to the chat tab', () => {
   for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
-    const api = loadYolomuxWithFileExplorerClosed(`?sessions=${yoagentToken}&layout=left&tabs=left:${yoagentToken}`, ['1']);
+    const api = loadYomuxWithFileExplorerClosed(`?sessions=${yoagentToken}&layout=left&tabs=left:${yoagentToken}`, ['1']);
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {slot: 'left'},
       panes: {left: {tabs: ['__yoagent__'], active: '__yoagent__'}},
@@ -1430,7 +1430,7 @@ async function runLayoutRestoreSuite() {
 
   test('file tabs survive URL layout restoration', () => {
     const search = '?sessions=files,file%3A%2Fhome%2Fkeivenc%2FAGENTS.md,5&layout=row@20.7(slot2,row@42(slot3,slot1))&tabs=slot2:files;slot3:file%3A%2Fhome%2Fkeivenc%2FAGENTS.md;slot1:5';
-    const api = loadYolomux(search, ['5']);
+    const api = loadYomux(search, ['5']);
     const serialized = api.serialize(api.currentSlots());
     assert.deepStrictEqual(canonical(serialized.panes), {
       slot1: {tabs: ['5'], active: '5'},
@@ -1445,7 +1445,7 @@ async function runLayoutRestoreSuite() {
 
   test('mixed virtual and file tabs restore from URL state', () => {
     const search = '?sessions=files,6&layout=row@22(slot2,slot3)&tabs=slot2:files;slot3:prefs,6*,file%3A%2Fhome%2Fkeivenc%2FAGENTS.md,ant,file%3A%2Fhome%2Fkeivenc%2Fyolomux.dev%2FTODO.md,file%3A%2Fhome%2Fkeivenc%2Fcomponents_metrics_README.md,file%3A%2Fhome%2Fkeivenc%2Fyolomux.dev%2F20260528-022.png';
-    const api = loadYolomux(search, ['6', 'ant']);
+    const api = loadYomux(search, ['6', 'ant']);
     const agentsItem = 'file:/home/keivenc/AGENTS.md';
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
       tree: {split: 'row', pct: 22, children: [{slot: 'slot2'}, {slot: 'slot3'}]},
@@ -1515,7 +1515,7 @@ async function runLayoutRestoreSuite() {
     // layoutSlotsFromDockviewJson being exact inverses (up to compaction); any drift silently
     // reshuffles panes/tabs on a Dockview-driven relayout, and is the single most fragile invariant
     // in the rewrite. See docs/specs/GUI.md (pane layout model).
-    const api = loadYolomux('', ['1', '2', '3', '4']);
+    const api = loadYomux('', ['1', '2', '3', '4']);
     const base = api.emptyLayoutSlots();
     base[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
     base.left = api.paneStateWithTabs(['__files__'], '__files__');
@@ -1558,7 +1558,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('file editor tabs use file identity chrome', () => {
-    const api = loadYolomux('', ['1', '2']);
+    const api = loadYomux('', ['1', '2']);
     const item = 'file:/home/keivenc/review.json';
     const paneTab = api.fileEditorPaneTabHtml(item);
     assert.ok(paneTab.includes('review.json'));
@@ -1958,7 +1958,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('preview-capable file types expose preview mode', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     assert.equal(api.editorPreviewModeAvailable('/home/test/README.md'), true);
     assert.equal(api.editorPreviewModeAvailable('/home/test/index.html'), true);
     assert.equal(api.editorPreviewModeAvailable('/home/test/app.py'), true);
@@ -2196,14 +2196,14 @@ async function runLayoutRestoreSuite() {
   });
 
   test('runtime interval delay normalizes invalid values', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     assert.equal(api.runtimeIntervalDelay(3000), 3000);
     assert.equal(api.runtimeIntervalDelay(1250), 1250);
     assert.equal(api.runtimeIntervalDelay(0), 1);
   });
 
   test('every production runtime interval has one source-of-truth classification', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const source = fs.readFileSync('static/yomux.js', 'utf8');
     const names = Array.from(source.matchAll(/resetRuntimeInterval\('([^']+)'/g), match => match[1]);
     const expected = [
@@ -2231,7 +2231,7 @@ async function runLayoutRestoreSuite() {
     const scheduled = [];
     const cleared = new Set();
     let nextTimer = 1;
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       setTimeout(callback, delay) {
         const timer = nextTimer++;
         scheduled.push({timer, callback, delay});
@@ -2268,7 +2268,7 @@ async function runLayoutRestoreSuite() {
   await testAsync('runtime interval diagnostics distinguish useful work from no-change work', async () => {
     const scheduled = [];
     let nextTimer = 1;
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       setTimeout(callback, delay) {
         const timer = nextTimer++;
         scheduled.push({timer, callback, delay});
@@ -2297,7 +2297,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('CodeMirror search supports literal and regexp options', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     assert.deepStrictEqual(canonical(api.codeMirrorSearchMatches('foo bar foo', 'foo')), [
       {from: 0, to: 3},
       {from: 8, to: 11},
@@ -2415,7 +2415,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/maybeHandleServerVersionChange[\s\S]*normalizedServerVersion !== bootVersion[\s\S]*updateNotificationAllowsVersion\(bootVersion, normalizedServerVersion\)/.test(source), 'server/client-version reload is gated on the boot version and the reload_on_update threshold');
     assert.ok(/function updateNotificationAllowsVersion\([^)]*\)[\s\S]*cleanLevel === 'none'[\s\S]*targetParts\[1\] !== currentParts\[1\][\s\S]*cleanLevel === 'patch'[\s\S]*targetParts\[2\] !== currentParts\[2\][\s\S]*cleanLevel === 'patch'/.test(source), 'update notification threshold follows SemVer major/minor/patch mismatches');
     assert.ok(/maybeHandleServerVersionChange[\s\S]*boolSetting\('general\.reload_on_update_auto'[\s\S]*reloadIsSafe\(\)/.test(source), 'auto-reload only fires when enabled and reloadIsSafe()');
-    const updateApi = loadYolomux('', ['1']);
+    const updateApi = loadYomux('', ['1']);
     assert.equal(updateApi.normalizeUpdateNotificationLevelForTest(true), 'patch', 'legacy true maps to patch notifications');
     assert.equal(updateApi.normalizeUpdateNotificationLevelForTest(false), 'none', 'legacy false maps to no update notifications');
     assert.equal(updateApi.updateNotificationAllowsVersionForTest('0.3.25', '0.3.26', 'patch'), true, 'patch threshold notifies for patch updates');
@@ -2606,7 +2606,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('tab popovers close on panel focus transitions', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const tab = new TestElement('tab');
     const popover = new TestElement('popover');
     tab.className = 'pane-tab popover-open';
@@ -2639,7 +2639,7 @@ async function runLayoutRestoreSuite() {
 
   test('global activity counts aggregate agent state', () => {
     // GLOBAL activity status line: cross-session YOLO-screen working / attention / blocked / idle rollup.
-    const api = loadYolomux('', ['1', '2', '3', '4']);
+    const api = loadYomux('', ['1', '2', '3', '4']);
     const css = fs.readFileSync('static/yomux.css', 'utf8');
     api.setAutoApproveStateForTest('1', {enabled: true, screen: {key: 'idle'}});
     api.setAutoApproveStateForTest('2', {enabled: true});
@@ -2668,7 +2668,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.browserFaviconBadgeCount({running: 0, attention: 0}), 0, 'favicon badge renders 0 when all sessions are idle');
     assert.equal(api.browserFaviconBadgeLabel(0), '0', 'favicon badge explicitly shows 0 when idle');
     assert.equal(api.browserFaviconBadgeLabel(107), '99+', 'favicon badge clamps large counts to a short label');
-    const tabberCountsApi = loadYolomux('', ['1', '2', '3', '4']);
+    const tabberCountsApi = loadYomux('', ['1', '2', '3', '4']);
     tabberCountsApi.setTranscriptSessionOrderForTest(['1', '2', '3', '4']);
     for (const [session, kind] of [['1', 'claude'], ['2', 'codex'], ['3', 'claude'], ['4', 'codex']]) {
       tabberCountsApi.setAutoApproveStateForTest(session, {enabled: true, screen: {key: 'idle'}});
@@ -2697,7 +2697,7 @@ async function runLayoutRestoreSuite() {
       {running: 1, ask: 1, blocked: 1, unavailable: 0, idle: 1, total: 4},
       'topbar counts reflect the same per-window states displayed by Tabber instead of stale session-level screen keys',
     );
-    const signalApi = loadYolomux('', ['1', '2']);
+    const signalApi = loadYomux('', ['1', '2']);
     signalApi.setDocumentTitleNowForTest(200000);
     signalApi.setTmuxSignalStateForTest({
       windows: [
@@ -2742,7 +2742,7 @@ async function runLayoutRestoreSuite() {
     const actionRequiredCounts = signalApi.globalActivityCounts();
     assert.equal(actionRequiredCounts.ask, 1, 'Codex action-required pane titles count as attention');
     assert.equal(actionRequiredCounts.attention, 2, 'Codex action-required attention combines with YO blocked attention');
-    const signalClearApi = loadYolomux('', ['1']);
+    const signalClearApi = loadYomux('', ['1']);
     signalClearApi.setAutoApproveStateForTest('1', {
       enabled: true,
       prompt: {visible: true, yes_selected: true, text: 'Would you like to run sleep 10?', signature: 'codex-sleep-10'},
@@ -2768,7 +2768,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(signalClearApi.globalActivityCounts().ask, 1, 'tmux title and prompt payload for the same session count once');
     assert.equal(signalClearApi.clearPromptAttentionForSessionForTest('1'), true, 'manual clear records the signal-backed prompt signature');
     assert.equal(signalClearApi.globalActivityCounts().ask, 0, 'manual clear suppresses signal-backed prompt attention');
-    const approvalApi = loadYolomux('', ['1', '2', '3']);
+    const approvalApi = loadYomux('', ['1', '2', '3']);
     approvalApi.setAutoApproveStateForTest('1', {
       enabled: true,
       prompt: {visible: true, yes_selected: true, text: 'Would you like to run sleep 10?', signature: 'codex-sleep-10'},
@@ -2833,7 +2833,7 @@ async function runLayoutRestoreSuite() {
     const promptClearHandlerBody = attentionSource.slice(promptClearHandlerStart, promptClearHandlerEnd);
     assert.ok(promptClearHandlerBody.includes('clearPromptAttentionForSession'), 'manual attention clear uses the prompt-attention clear path');
     assert.equal(/socket\.send|handleTerminalData|insertIntoTerminal|paste/.test(promptClearHandlerBody), false, 'manual attention clear handler does not send keystrokes or paste frames to tmux');
-    const falsePositiveApi = loadYolomux('', ['1', '2', '3', '4', '8001', '8002', '8003', '9']);
+    const falsePositiveApi = loadYomux('', ['1', '2', '3', '4', '8001', '8002', '8003', '9']);
     for (const session of ['1', '2', '3', '4', '8001', '8002', '8003', '9']) {
       falsePositiveApi.setAutoApproveStateForTest(session, {screen: {key: 'idle'}});
       falsePositiveApi.setTranscriptInfoForTest(session, {agents: [], panes: [{active: true, window_active: true}]});
@@ -2842,7 +2842,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(idlePaneCounts.running, 0, 'tmux selected panes are not active work');
     assert.equal(idlePaneCounts.idle, 0, 'idle selected panes without detected agents are not counted as AI idle work');
     assert.equal(falsePositiveApi.browserFaviconBadgeCount(idlePaneCounts), 0, 'favicon does not show 8 for idle tmux sessions');
-    const plainSignalApi = loadYolomux('', ['1']);
+    const plainSignalApi = loadYomux('', ['1']);
     plainSignalApi.setDocumentTitleNowForTest(200000);
     plainSignalApi.setTmuxSignalStateForTest({windows: Array.from({length: 20}, (_unused, index) => ({
       session: `plain-${index}`,
@@ -2853,7 +2853,7 @@ async function runLayoutRestoreSuite() {
     const plainSignalCounts = plainSignalApi.globalActivityCounts();
     assert.equal(plainSignalCounts.total, 0, 'plain tmux signal windows do not inflate the AI activity total');
     assert.equal(plainSignalCounts.idle, 0, 'plain tmux signal windows do not show as idle AI agents');
-    const openCodeSignalApi = loadYolomux('', ['open']);
+    const openCodeSignalApi = loadYomux('', ['open']);
     openCodeSignalApi.setDocumentTitleNowForTest(200000);
     openCodeSignalApi.setTmuxSignalStateForTest({windows: [{
       session: 'open', window_index: '0', activity_ts: 199,
@@ -2871,7 +2871,7 @@ async function runLayoutRestoreSuite() {
     const rosteredOpenCodeCounts = openCodeSignalApi.globalActivityCounts();
     assert.equal(rosteredOpenCodeCounts.total, 1, 'authoritative OpenCode roster admits the signal pane as one agent');
     assert.equal(rosteredOpenCodeCounts.running, 1, 'an authoritative OpenCode roster may admit matching signal activity');
-    const threeToneApi = loadYolomux('', ['working', 'attention', 'blocked', 'unavailable']);
+    const threeToneApi = loadYomux('', ['working', 'attention', 'blocked', 'unavailable']);
     for (const [session, state] of [['working', 'working'], ['attention', 'needs-input'], ['blocked', 'blocked']]) {
       threeToneApi.setTranscriptInfoForTest(session, {
         panes: [{window: '0', window_index: 0, target: `%${session}`, process_label: 'opencode'}],
@@ -2925,7 +2925,7 @@ async function runLayoutRestoreSuite() {
 
   test('session teardown distinguishes confirmed removals', () => {
     // Event-driven session-kill: a terminal WS close checks tmux existence once vs transient disconnect.
-    const api = loadYolomux('', ['1', '2', '3']);
+    const api = loadYomux('', ['1', '2', '3']);
     const source = fs.readFileSync('static/yomux.js', 'utf8');
     assert.equal(api.sessionConfirmedGone('2', ['1', '3']), true, 'a tmux session absent from the roster is confirmed gone');
     assert.equal(api.sessionConfirmedGone('2', ['1', '2', '3']), false, 'a session still in the roster is a transient disconnect, not gone');
@@ -2942,7 +2942,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('terminal teardown cannot leave a disposed xterm live in the session map', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const socket = {readyState: WebSocket.OPEN, closeCount: 0, close() { this.closeCount += 1; }};
     const term = {disposeCount: 0, dispose() { this.disposeCount += 1; }};
     const item = api.registerTerminalForTest('1', term, socket);
@@ -2955,7 +2955,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('terminal sizing falls back safely after xterm has disposed its renderer', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const renderService = {_renderer: undefined};
     Object.defineProperty(renderService, 'dimensions', {
       get() { throw new TypeError('disposed renderer dimensions getter'); },
@@ -2972,7 +2972,7 @@ async function runLayoutRestoreSuite() {
   });
 
   await testAsync('exited Xterm tab prunes through read-only tmux existence without stale roster fallback', async () => {
-    const api = loadYolomuxWithFileExplorerClosed('?sessions=1,2&layout=left&tabs=left:1,2*', ['1', '2']);
+    const api = loadYomuxWithFileExplorerClosed('?sessions=1,2&layout=left&tabs=left:1,2*', ['1', '2']);
     const fetches = [];
     api.setFetchForTest(url => {
       const parsed = new URL(String(url), 'http://localhost');
@@ -3010,7 +3010,7 @@ async function runLayoutRestoreSuite() {
   });
 
   await testAsync('clean terminal close checks tmux before deciding whether to prune', async () => {
-    const api = loadYolomuxWithFileExplorerClosed('?sessions=1,2&layout=left&tabs=left:1,2*', ['1', '2']);
+    const api = loadYomuxWithFileExplorerClosed('?sessions=1,2&layout=left&tabs=left:1,2*', ['1', '2']);
     const fetches = [];
     api.setFetchForTest(url => {
       fetches.push(String(url));
@@ -3044,7 +3044,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('tmux signal removed window records pane-death removal latency', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const eventAt = Date.now() / 1000 - 0.25;
     api.setTmuxSignalStateForTest({
       ok: true,
@@ -3104,7 +3104,7 @@ async function runLayoutRestoreSuite() {
   test('session teardown clears runtime records and toasts', () => {
     // T5: stopping a session clears every session-keyed UI map and closes live streams.
     const cleared = [];
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {clearTimeout(id) { cleared.push(id); }});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {clearTimeout(id) { cleared.push(id); }});
     api.registerTerminalForTest('1', {dispose() {}}, {readyState: 1, close() {}});
     const closed = api.seedSessionTeardownStateForTest('1');
     const alertId = api.seedSessionToastForTest('1', 'attention', 71);
@@ -3146,7 +3146,7 @@ async function runLayoutRestoreSuite() {
     const timers = new Map();
     const cleared = [];
     let nextTimer = 1;
-    const api = loadYolomux('', ['1', '2'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1', '2'], 'http:', 'Linux x86_64', 'admin', {
       setTimeout(callback, milliseconds) {
         const id = nextTimer++;
         timers.set(id, {callback, milliseconds});
@@ -3188,7 +3188,7 @@ async function runLayoutRestoreSuite() {
   });
 
   await testAsync('late acknowledgement response cannot recreate a detached session record', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const key = '["agent-window","1","0","%1","codex","needs-input","late"]';
     let resolveFetch;
     api.setFetchForTest(() => new Promise(resolve => { resolveFetch = resolve; }));
@@ -3207,7 +3207,7 @@ async function runLayoutRestoreSuite() {
     // never accept it) must not be resubmitted on every later acknowledgement attempt, while an
     // ordinary transient failure (network blip, 5xx) must still be retried -- this is a backstop
     // against a still-malformed key, not a general "stop retrying acknowledgements" switch.
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const rejectedKey = '["prompt","1","permanently-rejected"]';
     const transientKey = '["prompt","1","transient-failure"]';
     let rejectedCalls = 0;
@@ -3250,7 +3250,7 @@ async function runLayoutRestoreSuite() {
     const timers = new Map();
     const cleared = [];
     let nextTimer = 1;
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       setTimeout(callback, milliseconds) {
         const id = nextTimer++;
         timers.set(id, {callback, milliseconds});
@@ -3306,7 +3306,7 @@ async function runLayoutRestoreSuite() {
   test('session rename moves the whole upload result record before old-session teardown', () => {
     const cleared = [];
     let nextTimer = 100;
-    const api = loadYolomux('?sessions=1&layout=left&tabs=left:1', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('?sessions=1&layout=left&tabs=left:1', ['1'], 'http:', 'Linux x86_64', 'admin', {
       setTimeout() { return nextTimer++; },
       clearTimeout(id) { cleared.push(id); },
     });
@@ -3325,7 +3325,7 @@ async function runLayoutRestoreSuite() {
   });
 
   await testAsync('rename that resolves to the original session preserves metadata and lifecycle state', async () => {
-    const api = loadYolomux('?sessions=source&layout=left&tabs=left:source', ['source']);
+    const api = loadYomux('?sessions=source&layout=left&tabs=left:source', ['source']);
     const sourceInfo = {panes: [{pane_id: '%1'}], session_identity: 'stable-source', marker: 'keep'};
     await api.applySessionMetadataPayloadForTest({
       session_order: ['source'],
@@ -3363,7 +3363,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('session rename migrates the one lifecycle record instead of deleting or partially rekeying it', () => {
-    const api = loadYolomux('?sessions=1&layout=left&tabs=left:1', ['1']);
+    const api = loadYomux('?sessions=1&layout=left&tabs=left:1', ['1']);
     api.seedSessionLifecycleStateForTest('1');
     const alertId = api.seedSessionToastForTest('1');
 
@@ -3416,7 +3416,7 @@ async function runLayoutRestoreSuite() {
 
   test('Finder repo metadata renders shared sync markers', () => {
     // Git-aware Finder: repo-dir inline annotation (branch + ahead/behind/dirty) + hover popover.
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const css = fs.readFileSync('static/yomux.css', 'utf8');
     api.setFileExplorerRepoInfoForTest('/repo/app', {root: '/repo/app', name: 'app', branch: 'feature/x', upstream: 'origin/feature/x', ahead: 2, behind: 1, dirty_count: 3});
     const sync = api.fileTreeRepoSyncMeta('/repo/app').map(part => part.text);
@@ -3450,7 +3450,7 @@ async function runLayoutRestoreSuite() {
 
   testAsync('per-pane tab cap normalizes, refuses, and applies settings', async () => {
     // Max tabs per pane + LRU eviction (Preference).
-    const api = loadYolomux('', ['1', '2', '3', '4', '5', 'file:/x/draft.txt']);
+    const api = loadYomux('', ['1', '2', '3', '4', '5', 'file:/x/draft.txt']);
     const source = fs.readFileSync('static/yomux.js', 'utf8');
     api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 3}});
     assert.equal(api.maxTabsPerPane(), 3, 'tab cap reads appearance.max_tabs_per_pane');
@@ -3670,7 +3670,7 @@ async function runLayoutRestoreSuite() {
 
   test('pull request review badges render review outcomes', () => {
     // the session popover shows review status AND who reviewed.
-    const api = loadYolomux('', ['5']);
+    const api = loadYomux('', ['5']);
     const approved = api.pullRequestReviewInlineHtml({number: 12, review_decision: 'APPROVED', review_reviewers: [{login: 'alice', state: 'APPROVED'}]});
     assert.ok(/Approved by alice/.test(approved) && /pr-status-passing/.test(approved), 'popover shows "Approved by <login>"');
     const changes = api.pullRequestReviewInlineHtml({number: 12, review_decision: 'CHANGES_REQUESTED', review_reviewers: [{login: 'bob', state: 'CHANGES_REQUESTED'}]});
@@ -3685,7 +3685,7 @@ async function runLayoutRestoreSuite() {
 
   test('review-required badge has one readable theme owner', () => {
     // #1/#2/#3: tab badge legibility (light), drop the redundant PR pill, no duplicate tooltip.
-    const api = loadYolomux('', ['5']);
+    const api = loadYomux('', ['5']);
     const css = fs.readFileSync('static/yomux.css', 'utf8');
     // #1: light-theme overrides exist for the badge chips, incl. a readable (non-transparent) review-required.
     assert.ok(/:root\s*\{[\s\S]*--20-sessions-popovers-ci-indicator-fg-20:\s*#172033/.test(css) && /\.ci-indicator\.pr-review-required\s*\{[^}]*color:\s*var\(--20-sessions-popovers-ci-indicator-fg-20\)[\s\S]*background:\s*#e7ebf1[\s\S]*opacity:\s*1/.test(css), '#6: review-required chip is filled with centralized dark text, readable on bright active tabs');
@@ -3710,7 +3710,7 @@ async function runLayoutRestoreSuite() {
 
   test('approval indicators reflect review state', () => {
     // #38: tab APPROVAL badge driven by GitHub reviewDecision.
-    const api = loadYolomux('', ['5']);
+    const api = loadYomux('', ['5']);
     const css = fs.readFileSync('static/yomux.css', 'utf8');
     const approved = api.pullRequestApprovalIndicatorHtml('5', {number: 12345, state: 'open', review_decision: 'APPROVED'});
     assert.ok(/pr-review-approved/.test(approved) && />Approved</.test(approved), '#38: approved PR shows a green Approved badge');
@@ -3729,7 +3729,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('debug mobile capture names Preview scroll writers and terminal input transitions', () => {
-    const api = loadYolomux('?debug=1', ['1']);
+    const api = loadYomux('?debug=1', ['1']);
     const preview = new TestElement('preview');
     preview.className = 'file-editor-preview-pane-panel markdown-body';
     preview.scrollTop = 19;
@@ -3767,7 +3767,7 @@ async function runLayoutRestoreSuite() {
       textareaFocused: terminal.textareaFocused,
     }), {session: '1', phase: 'touch-focus-attempt', gesture: 'tap', textareaFocused: false});
 
-    const quiet = loadYolomux('', ['1']);
+    const quiet = loadYomux('', ['1']);
     const quietPreview = new TestElement('quiet-preview');
     quietPreview.className = 'file-editor-preview-pane-panel';
     quiet.clearJsDebugEventsForTest();
@@ -3808,7 +3808,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('debug mobile capture exports raw browser-local evidence without Web Inspector', () => {
-    const api = loadYolomux('?debug=1', ['1']);
+    const api = loadYomux('?debug=1', ['1']);
     api.clearJsDebugEventsForTest();
     api.recordJsDebugEventForTest('preview_scroll_trace', {
       phase: 'owned-write', owner: 'preview-render-restore', gesture: 7,
@@ -3855,7 +3855,7 @@ async function runLayoutRestoreSuite() {
 
   test('deferred Preview restore yields when native scroll takes ownership', () => {
     const frames = [];
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       requestAnimationFrame(callback) {
         frames.push(callback);
         return frames.length;
@@ -3883,7 +3883,7 @@ async function runLayoutRestoreSuite() {
 
   test('a native vertical Preview gesture invalidates deferred writes before geometry moves', () => {
     const frames = [];
-    const api = loadYolomux('?debug=1', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('?debug=1', ['1'], 'http:', 'Linux x86_64', 'admin', {
       requestAnimationFrame(callback) {
         frames.push(callback);
         return frames.length;
@@ -3897,8 +3897,8 @@ async function runLayoutRestoreSuite() {
       owner: 'preview-render-restore', previewSurface: 'markdown', renderGeneration: 11,
     });
     api.installPreviewScrollOwnershipCaptureForTest();
-    const touchstart = api.documentListenersForTest('touchstart')[0];
-    const touchmove = api.documentListenersForTest('touchmove')[0];
+    const touchstart = event => api.dispatchDocumentEventForTest('touchstart', event);
+    const touchmove = event => api.dispatchDocumentEventForTest('touchmove', event);
     touchstart({
       target: preview,
       touches: [{identifier: 7, clientX: 20, clientY: 30}],
@@ -3922,7 +3922,7 @@ async function runLayoutRestoreSuite() {
 
   test('a native Preview scroll claims ownership before touch slop is crossed', () => {
     const frames = [];
-    const api = loadYolomux('?debug=1', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('?debug=1', ['1'], 'http:', 'Linux x86_64', 'admin', {
       requestAnimationFrame(callback) {
         frames.push(callback);
         return frames.length;
@@ -3935,7 +3935,7 @@ async function runLayoutRestoreSuite() {
       owner: 'preview-render-restore', previewSurface: 'markdown', renderGeneration: 13,
     });
     api.installPreviewScrollOwnershipCaptureForTest();
-    api.documentListenersForTest('touchstart')[0]({
+    api.dispatchDocumentEventForTest('touchstart', {
       target: preview,
       touches: [{identifier: 12, clientX: 20, clientY: 30}],
     });
@@ -3956,7 +3956,7 @@ async function runLayoutRestoreSuite() {
 
   test('a passive Preview restore scheduled after touch ownership cannot adopt the gesture', () => {
     const frames = [];
-    const api = loadYolomux('?debug=1', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('?debug=1', ['1'], 'http:', 'Linux x86_64', 'admin', {
       requestAnimationFrame(callback) {
         frames.push(callback);
         return frames.length;
@@ -3967,8 +3967,8 @@ async function runLayoutRestoreSuite() {
     preview.scrollTop = 148;
     preview.scrollLeft = 9;
     api.installPreviewScrollOwnershipCaptureForTest();
-    const touchstart = api.documentListenersForTest('touchstart')[0];
-    const touchmove = api.documentListenersForTest('touchmove')[0];
+    const touchstart = event => api.dispatchDocumentEventForTest('touchstart', event);
+    const touchmove = event => api.dispatchDocumentEventForTest('touchmove', event);
     touchstart({target: preview, touches: [{identifier: 10, clientX: 20, clientY: 30}]});
     touchmove({target: preview, touches: [{identifier: 10, clientX: 20, clientY: 42}]});
 
@@ -3990,7 +3990,7 @@ async function runLayoutRestoreSuite() {
 
   test('a passive Preview rerender waits until touch ownership settles', () => {
     const timers = [];
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       setTimeout(callback, delay) {
         timers.push({callback, delay: Number(delay)});
         return timers.length;
@@ -4001,11 +4001,11 @@ async function runLayoutRestoreSuite() {
     api.renderEditorPreviewPane(preview, '/repo/touch-owned.md', '# Before');
     const renderedChild = preview.children[0];
     api.installPreviewScrollOwnershipCaptureForTest();
-    api.documentListenersForTest('touchstart')[0]({
+    api.dispatchDocumentEventForTest('touchstart', {
       target: preview,
       touches: [{identifier: 11, clientX: 20, clientY: 30}],
     });
-    api.documentListenersForTest('touchmove')[0]({
+    api.dispatchDocumentEventForTest('touchmove', {
       target: preview,
       touches: [{identifier: 11, clientX: 20, clientY: 42}],
     });
@@ -4017,7 +4017,7 @@ async function runLayoutRestoreSuite() {
 
   test('the shared Preview redraw wrapper defers all redraw side effects during native touch ownership', () => {
     const timers = [];
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       setTimeout(callback, delay) {
         timers.push({callback, delay: Number(delay)});
         return timers.length;
@@ -4030,11 +4030,11 @@ async function runLayoutRestoreSuite() {
     api.renderEditorPreviewPane(preview, '/repo/redraw.md', '# Before');
     const renderedChild = preview.firstElementChild;
     api.installPreviewScrollOwnershipCaptureForTest();
-    api.documentListenersForTest('touchstart')[0]({
+    api.dispatchDocumentEventForTest('touchstart', {
       target: preview,
       touches: [{identifier: 31, clientX: 20, clientY: 30}],
     });
-    api.documentListenersForTest('touchmove')[0]({
+    api.dispatchDocumentEventForTest('touchmove', {
       target: preview,
       touches: [{identifier: 31, clientX: 20, clientY: 44}],
     });
@@ -4053,7 +4053,7 @@ async function runLayoutRestoreSuite() {
     let renderStarted;
     const renderStartedPromise = new Promise(resolve => { renderStarted = resolve; });
     const renderPromise = new Promise(resolve => { resolveRender = resolve; });
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       setTimeout(callback, delay) {
         const timer = nextTimer++;
         timers.set(timer, {callback, delay: Number(delay)});
@@ -4080,7 +4080,7 @@ async function runLayoutRestoreSuite() {
     await renderStartedPromise;
     const loading = host.firstElementChild;
     api.installPreviewScrollOwnershipCaptureForTest();
-    api.documentListenersForTest('touchstart')[0]({
+    api.dispatchDocumentEventForTest('touchstart', {
       target: preview,
       touches: [{identifier: 21, clientX: 20, clientY: 30}],
     });
@@ -4101,7 +4101,7 @@ async function runLayoutRestoreSuite() {
 
   await testAsync('embedded Mermaid completions keep independent deferred-work owners', async () => {
     const timers = [];
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       setTimeout(callback, delay) {
         timers.push({callback, delay: Number(delay)});
         return timers.length;
@@ -4113,7 +4113,7 @@ async function runLayoutRestoreSuite() {
     const secondHost = new TestElement('second-mermaid-host');
     preview.append(firstHost, secondHost);
     api.installPreviewScrollOwnershipCaptureForTest();
-    api.documentListenersForTest('touchstart')[0]({
+    api.dispatchDocumentEventForTest('touchstart', {
       target: preview,
       touches: [{identifier: 23, clientX: 20, clientY: 30}],
     });
@@ -4135,7 +4135,7 @@ async function runLayoutRestoreSuite() {
 
   await testAsync('Mermaid SVG cache retries rejected renders and reuses completed SVG', async () => {
     let renderCalls = 0;
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin');
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin');
     api.setMermaidApiForTest({
       initialize() {},
       render() {
@@ -4160,7 +4160,7 @@ async function runLayoutRestoreSuite() {
     let resolveRenderResult;
     const renderStarted = new Promise(resolve => { resolveRenderStarted = resolve; });
     const renderResult = new Promise(resolve => { resolveRenderResult = resolve; });
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin');
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin');
     api.setMermaidApiForTest({
       initialize() {},
       render() {
@@ -4187,7 +4187,7 @@ async function runLayoutRestoreSuite() {
     let nextTimer = 1;
     let resolveFetch;
     const fetchPromise = new Promise(resolve => { resolveFetch = resolve; });
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       setTimeout(callback, delay) {
         const timer = nextTimer++;
         timers.set(timer, {callback, delay: Number(delay)});
@@ -4202,7 +4202,7 @@ async function runLayoutRestoreSuite() {
     const renderedSurface = preview.firstElementChild;
     const completion = preview._previewAsync;
     api.installPreviewScrollOwnershipCaptureForTest();
-    api.documentListenersForTest('touchstart')[0]({
+    api.dispatchDocumentEventForTest('touchstart', {
       target: preview,
       touches: [{identifier: 22, clientX: 20, clientY: 30}],
     });
@@ -4232,7 +4232,7 @@ async function runLayoutRestoreSuite() {
     let nextTimer = 1;
     let resolveFetch;
     const fetchPromise = new Promise(resolve => { resolveFetch = resolve; });
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       setTimeout(callback, delay) {
         const timer = nextTimer++;
         timers.set(timer, {callback, delay: Number(delay)});
@@ -4247,11 +4247,11 @@ async function runLayoutRestoreSuite() {
     const renderedSurface = imagePane.firstElementChild;
     const viewport = imagePane.querySelector('.file-editor-preview-zoom-viewport');
     api.installPreviewScrollOwnershipCaptureForTest();
-    api.documentListenersForTest('touchstart')[0]({
+    api.dispatchDocumentEventForTest('touchstart', {
       target: viewport,
       touches: [{identifier: 33, clientX: 20, clientY: 30}],
     });
-    api.documentListenersForTest('touchmove')[0]({
+    api.dispatchDocumentEventForTest('touchmove', {
       target: viewport,
       touches: [{identifier: 33, clientX: 20, clientY: 44}],
     });
@@ -4272,7 +4272,7 @@ async function runLayoutRestoreSuite() {
     const frames = [];
     const timers = [];
     let captureTimers = false;
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       requestAnimationFrame(callback) {
         frames.push(callback);
         return frames.length;
@@ -4307,7 +4307,7 @@ async function runLayoutRestoreSuite() {
 
   test('deferred Preview zoom yields when native scroll takes ownership', () => {
     const frames = [];
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       requestAnimationFrame(callback) {
         frames.push(callback);
         return frames.length;
@@ -4360,7 +4360,7 @@ async function runLayoutRestoreSuite() {
 
   test('Preview zoom hydration keeps its pre-gesture owner through delayed fit work', () => {
     const frames = [];
-    const api = loadYolomux('?debug=1', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('?debug=1', ['1'], 'http:', 'Linux x86_64', 'admin', {
       requestAnimationFrame(callback) {
         frames.push(callback);
         return frames.length;
@@ -4386,8 +4386,8 @@ async function runLayoutRestoreSuite() {
 
     assert.equal(api.hydratePreviewZoomSurfaceForTest(shell, content, {zoomKey: 'image'}), true);
     api.installPreviewScrollOwnershipCaptureForTest();
-    const touchstart = api.documentListenersForTest('touchstart')[0];
-    const touchmove = api.documentListenersForTest('touchmove')[0];
+    const touchstart = event => api.dispatchDocumentEventForTest('touchstart', event);
+    const touchmove = event => api.dispatchDocumentEventForTest('touchmove', event);
     touchstart({target: viewport, touches: [{identifier: 9, clientX: 20, clientY: 30}]});
     touchmove({target: viewport, touches: [{identifier: 9, clientX: 20, clientY: 42}]});
     viewport.scrollTop = 96;
@@ -4427,7 +4427,7 @@ async function runLayoutRestoreSuite() {
       observe() {}
       disconnect() {}
     }
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       ResizeObserver: TestResizeObserver,
       requestAnimationFrame(callback) {
         frames.push(callback);
@@ -4454,11 +4454,11 @@ async function runLayoutRestoreSuite() {
 
     assert.equal(api.hydratePreviewZoomSurfaceForTest(shell, content, {zoomKey: 'image'}), true);
     api.installPreviewScrollOwnershipCaptureForTest();
-    api.documentListenersForTest('touchstart')[0]({
+    api.dispatchDocumentEventForTest('touchstart', {
       target: viewport,
       touches: [{identifier: 32, clientX: 20, clientY: 30}],
     });
-    api.documentListenersForTest('touchmove')[0]({
+    api.dispatchDocumentEventForTest('touchmove', {
       target: viewport,
       touches: [{identifier: 32, clientX: 20, clientY: 44}],
     });
@@ -4478,7 +4478,7 @@ async function runLayoutRestoreSuite() {
 
   test('Preview zoom fit cannot mutate geometry after native touch claims the surface', () => {
     const frames = [];
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       requestAnimationFrame(callback) {
         frames.push(callback);
         return frames.length;
@@ -4507,8 +4507,8 @@ async function runLayoutRestoreSuite() {
     stage.appendChild(content);
 
     api.installPreviewScrollOwnershipCaptureForTest();
-    const touchstart = api.documentListenersForTest('touchstart')[0];
-    const touchmove = api.documentListenersForTest('touchmove')[0];
+    const touchstart = event => api.dispatchDocumentEventForTest('touchstart', event);
+    const touchmove = event => api.dispatchDocumentEventForTest('touchmove', event);
     touchstart({target: viewport, touches: [{identifier: 4, clientX: 20, clientY: 30}]});
     touchmove({target: viewport, touches: [{identifier: 4, clientX: 20, clientY: 45}]});
 
@@ -4526,7 +4526,7 @@ async function runLayoutRestoreSuite() {
 
   test('rehydrating a Preview zoom surface invalidates its already queued apply frame', () => {
     const frames = [];
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       requestAnimationFrame(callback) {
         frames.push(callback);
         return frames.length;
@@ -4573,7 +4573,7 @@ async function runLayoutRestoreSuite() {
       return timer;
     };
     const clearTestTimeout = timer => { timers.delete(timer); };
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       setTimeout: setTestTimeout,
       clearTimeout: clearTestTimeout,
     });
@@ -4617,7 +4617,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('tab popover placement follows the owning tab', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const strip = new TestElement('strip');
     const tab = new TestElement('tab');
     const popover = new TestElement('popover');
@@ -4635,7 +4635,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('image preview uses delayed shared hover timing', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const source = fs.readFileSync('static/yomux.js', 'utf8');
     const css = fs.readFileSync('static/yomux.css', 'utf8');
     assert.ok(source.includes('Math.max(Number(popoverShowDelayMs)'), 'image previews use the shared hover-open delay');
@@ -4808,7 +4808,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('file editor pane reattach does not overwrite saved CodeMirror scroll state', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const path = '/home/test/notes.md';
     const item = api.registerFileEditorLayoutItemForTest(path);
     const contentText = Array.from({length: 120}, (_, index) => `line ${index + 1}`).join('\n');
@@ -4879,7 +4879,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('Find count follows the first visible result after a manual editor scroll', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const text = 'Legal one\n'.repeat(1) + 'filler\n'.repeat(20) + 'Legal two\n' + 'filler\n'.repeat(20) + 'Legal three\n';
     const matches = api.codeMirrorSearchMatches(text, 'Legal');
     assert.equal(matches.length, 3);
@@ -4901,7 +4901,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('file editor save hygiene helper respects the two opt-in settings', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const source = 'alpha  \n beta\t\nlast';
     assert.equal(
       api.normalizeFileEditorSaveContentForTest(source, {trimTrailingWhitespace: false, ensureFinalNewline: false}),
@@ -4926,7 +4926,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('file editor status counts update from the live editor document', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const path = '/home/test/counts.txt';
     const panel = new TestElement('editor-counts-panel');
     panel.dataset.filePath = path;
@@ -4978,7 +4978,7 @@ async function runLayoutRestoreSuite() {
 
   test('file editor restore dispatches CodeMirror scroll snapshot for long documents', () => {
     const animationFrames = [];
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
       requestAnimationFrame(callback) {
         animationFrames.push(callback);
         return animationFrames.length;
@@ -5023,7 +5023,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('split geometry honors shared pane minimums', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const section = new TestElement('section');
     section.rect = {left: 0, top: 0, right: 1000, bottom: 500, width: 1000, height: 500};
     const row = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
@@ -5041,7 +5041,7 @@ async function runLayoutRestoreSuite() {
   });
 
   await testAsync('directional tab split retains an explicit empty peer and Fill workspace restores the saved layout', async () => {
-    const api = loadYolomuxWithFileExplorerClosed('', ['1', '2', '3', '4']);
+    const api = loadYomuxWithFileExplorerClosed('', ['1', '2', '3', '4']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.leafNode('left');
     slots.left = api.paneStateWithTabs(['__info__'], '__info__');
@@ -5074,7 +5074,7 @@ async function runLayoutRestoreSuite() {
   });
 
   await testAsync('a visually single pane can Move left or right despite a retained empty Dockview group', async () => {
-    const api = loadYolomuxWithFileExplorerClosed('', ['1']);
+    const api = loadYomuxWithFileExplorerClosed('', ['1']);
     const stale = api.emptyLayoutSlots();
     stale[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('stale'));
     stale.left = api.paneStateWithTabs(['__info__'], '__info__');
@@ -5098,7 +5098,7 @@ async function runLayoutRestoreSuite() {
   });
 
   await testAsync('an unrendered Dockview content group cannot disable a visually single pane split', async () => {
-    const api = loadYolomuxWithFileExplorerClosed('', ['1', '2']);
+    const api = loadYomuxWithFileExplorerClosed('', ['1', '2']);
     const stale = api.emptyLayoutSlots();
     stale[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('hidden'));
     stale.left = api.paneStateWithTabs(['__info__'], '__info__');
@@ -5114,7 +5114,7 @@ async function runLayoutRestoreSuite() {
   });
 
   await testAsync('a vertical pair still offers a local left or right Move when a hidden row group is stale', async () => {
-    const api = loadYolomuxWithFileExplorerClosed('', ['1', '2']);
+    const api = loadYomuxWithFileExplorerClosed('', ['1', '2']);
     const stale = api.emptyLayoutSlots();
     stale[api.layoutTreeKey] = api.splitNode('row',
       api.splitNode('column', api.leafNode('top'), api.leafNode('bottom')),
@@ -5145,7 +5145,7 @@ async function runLayoutRestoreSuite() {
   });
 
   await testAsync('a docked Finder is a reserved boundary, not a blocker for local terminal left or right Move', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('finder'), api.leafNode('content'));
     slots.finder = api.paneStateWithTabs([api.fileExplorerItemId], api.fileExplorerItemId);
@@ -5172,7 +5172,7 @@ async function runLayoutRestoreSuite() {
   });
 
   await testAsync('directional Move and Swap use visible leaf geometry, retain local nesting, and reject ambiguous targets', async () => {
-    const api = loadYolomuxWithFileExplorerClosed('', ['1', '2', '3', '4']);
+    const api = loadYomuxWithFileExplorerClosed('', ['1', '2', '3', '4']);
     const horizontalRects = {
       left: {left: 0, top: 0, right: 500, bottom: 700, width: 500, height: 700},
       right: {left: 504, top: 0, right: 1004, bottom: 700, width: 500, height: 700},
@@ -5278,7 +5278,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('editor focus restoration preserves CodeMirror selection', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const item = api.registerFileEditorLayoutItem('/home/test/AGENTS.md');
     let focusCount = 0;
     const panel = {
@@ -5319,7 +5319,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('auto-focus only follows hover when enabled', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     assert.equal(api.autoFocusEnabledForTest(), false, 'auto-focus is off by default');
     api.testElementForId('terminal-pane-1').classList.add('active');
     api.setAutoFocusEnabledForTest(false);
@@ -5328,7 +5328,7 @@ async function runLayoutRestoreSuite() {
     api.selectPanelOnHover('__files__');
     assert.equal(api.focusedPanelItemForTest(), null);
 
-    const enabledApi = loadYolomux('', ['1']);
+    const enabledApi = loadYomux('', ['1']);
     enabledApi.setAutoFocusEnabledForTest(true);
     enabledApi.testElementForId('terminal-pane-1').classList.add('active');
     enabledApi.selectPanelOnHover('1');
@@ -5336,7 +5336,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('explicit pane focus focuses terminal input', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     let focusCount = 0;
     api.registerTerminalForTest('1', {focus() { focusCount += 1; }});
     api.setAutoFocusEnabledForTest(false);
@@ -5352,7 +5352,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('shared textarea autosizing preserves a long list scroll position', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const textarea = new TestElement('excluded-directory-names', 'textarea');
     textarea.scrollTop = 184;
     textarea.scrollHeight = 960;
@@ -5363,7 +5363,7 @@ async function runLayoutRestoreSuite() {
   });
 
   test('terminal blur keeps visual active pane state', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setFocusedTerminal('1');
     assert.equal(api.focusedPanelItemForTest(), '1');
     assert.equal(api.lastActivePaneItemForTest(), '1');

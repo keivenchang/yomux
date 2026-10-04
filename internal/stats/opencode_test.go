@@ -15,26 +15,26 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-type opencodeQueryCaptureDB struct {
+type queryCaptureDB struct {
 	query string
 	args  []any
 }
 
-func (*opencodeQueryCaptureDB) Scalar(context.Context, string, ...any) (any, error) {
+func (*queryCaptureDB) Scalar(context.Context, string, ...any) (any, error) {
 	return nil, errors.New("unexpected scalar query")
 }
 
-func (db *opencodeQueryCaptureDB) Rows(_ context.Context, query string, args ...any) ([][]any, error) {
+func (db *queryCaptureDB) Rows(_ context.Context, query string, args ...any) ([][]any, error) {
 	db.query = query
 	db.args = append([]any(nil), args...)
 	return nil, nil
 }
 
-func (*opencodeQueryCaptureDB) QueryOnly(context.Context) error { return nil }
-func (*opencodeQueryCaptureDB) Close() error                    { return nil }
+func (*queryCaptureDB) QueryOnly(context.Context) error { return nil }
+func (*queryCaptureDB) Close() error                    { return nil }
 
 func TestOpenCodeSelectionQueryAvoidsHistoryCountAndCapsRevisionRows(t *testing.T) {
-	reader := &opencodeQueryCaptureDB{}
+	reader := &queryCaptureDB{}
 	database := &OpenCodeDatabase{reader: reader, sessionCounterColumns: map[string]bool{}, partSessionTimeIndex: true}
 	_, err := database.ReadStepFinishPartsForSelections(context.Background(), []OpenCodeStepFinishSelection{
 		{SessionID: "root", RootSessionID: "root", ActiveSince: 100, CursorRowID: 42},
@@ -61,7 +61,7 @@ func TestOpenCodeSelectionQueryAvoidsHistoryCountAndCapsRevisionRows(t *testing.
 	if revisionLimitErr != nil || revisionLimit != MaxOpenCodePartReadLimit+1 {
 		t.Fatalf("revision query limit = %v, want global result limit plus overflow sentinel (%d)", reader.args[11], MaxOpenCodePartReadLimit+1)
 	}
-	reader = &opencodeQueryCaptureDB{}
+	reader = &queryCaptureDB{}
 	database = &OpenCodeDatabase{reader: reader, sessionCounterColumns: map[string]bool{}, partSessionTimeIndex: true}
 	_, err = database.ReadStepFinishPartsForSelections(context.Background(), []OpenCodeStepFinishSelection{
 		{SessionID: "root", RootSessionID: "root", ActiveSince: 100},
@@ -79,7 +79,7 @@ func TestOpenCodeSelectionQueryAvoidsHistoryCountAndCapsRevisionRows(t *testing.
 	if initialTailLimitErr != nil || initialTailLimit != MaxOpenCodePartReadLimit+1 {
 		t.Fatalf("initial indexed tail limit = %v, want result limit plus overflow sentinel (%d)", reader.args[8], MaxOpenCodePartReadLimit+1)
 	}
-	reader = &opencodeQueryCaptureDB{}
+	reader = &queryCaptureDB{}
 	database = &OpenCodeDatabase{reader: reader, sessionCounterColumns: map[string]bool{}}
 	_, err = database.ReadStepFinishPartsForSelections(context.Background(), []OpenCodeStepFinishSelection{
 		{SessionID: "root", RootSessionID: "root", ActiveSince: 100},
@@ -97,7 +97,7 @@ func TestOpenCodeSelectionQueryAvoidsHistoryCountAndCapsRevisionRows(t *testing.
 	if globalTailLimitErr != nil || globalTailLimit != openCodeActivePartRows {
 		t.Fatalf("unindexed global rowid tail limit = %v, want conservative bound %d", reader.args[3], openCodeActivePartRows)
 	}
-	reader = &opencodeQueryCaptureDB{}
+	reader = &queryCaptureDB{}
 	database = &OpenCodeDatabase{reader: reader, sessionCounterColumns: map[string]bool{}, partSessionIndex: true}
 	_, err = database.ReadStepFinishPartsForSelections(context.Background(), []OpenCodeStepFinishSelection{
 		{SessionID: "root", RootSessionID: "root", ActiveSince: 100},
@@ -230,7 +230,7 @@ func TestOpenCodeRawPartPageSentinelAndMalformedPartRootError(t *testing.T) {
 }
 
 func TestOpenCodeRawPartPageRejectsInvalidBoundsAndSelectionIdentity(t *testing.T) {
-	database := &OpenCodeDatabase{reader: &opencodeQueryCaptureDB{}}
+	database := &OpenCodeDatabase{reader: &queryCaptureDB{}}
 	valid := []OpenCodeStepFinishSelection{{SessionID: "session", RootSessionID: "root"}}
 	tests := []struct {
 		name       string
@@ -322,17 +322,28 @@ func TestOpenCodeUnindexedRevisionLookupIsBoundedAndPartial(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Seed this private fixture atomically; per-row durable commits consume the shared disk budget.
+	tx, err := database.Begin()
+	if err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
 	for index := 0; index < openCodeActivePartRows+1; index++ {
 		messageID := fmt.Sprintf("msg-filler-%04d", index)
 		partID := fmt.Sprintf("part-filler-%04d", index)
-		if _, err := database.Exec(`INSERT INTO message VALUES (?, 'root', 100, 100, '{"role":"assistant"}')`, messageID); err != nil {
+		if _, err := tx.Exec(`INSERT INTO message VALUES (?, 'root', 100, 100, '{"role":"assistant"}')`, messageID); err != nil {
 			_ = database.Close()
 			t.Fatal(err)
 		}
-		if _, err := database.Exec(`INSERT INTO part VALUES (?, ?, 'root', 100, 100, '{"type":"step-finish","tokens":{"input":1}}')`, partID, messageID); err != nil {
+		if _, err := tx.Exec(`INSERT INTO part VALUES (?, ?, 'root', 100, 100, '{"type":"step-finish","tokens":{"input":1}}')`, partID, messageID); err != nil {
 			_ = database.Close()
 			t.Fatal(err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
 	}
 	var cursorRowID int64
 	if err := database.QueryRow(`SELECT MAX(rowid) FROM part WHERE session_id = 'root'`).Scan(&cursorRowID); err != nil {
@@ -351,7 +362,7 @@ func TestOpenCodeUnindexedRevisionLookupIsBoundedAndPartial(t *testing.T) {
 	// selected session's fresh part. The session index should let the bounded
 	// fallback retain that part instead of treating global rowid as a session
 	// cursor.
-	tx, err := database.Begin()
+	tx, err = database.Begin()
 	if err != nil {
 		_ = database.Close()
 		t.Fatal(err)
@@ -1538,6 +1549,49 @@ func TestOpenCodeRevisionOverflowKeepsNewestTiedRowsAndMarksPartial(t *testing.T
 	}
 	if len(window.Parts) != MaxOpenCodePartReadLimit || !foundNewestTie || foundOldestTie || !window.TruncatedRoots["root"] {
 		t.Fatalf("revision overflow result count=%d newest_tie=%v oldest_tie=%v truncated_roots=%v; want capped newest ties and a partial root", len(window.Parts), foundNewestTie, foundOldestTie, window.TruncatedRoots)
+	}
+}
+
+func TestOpenCodeSelectionFetchesBoundedPartsByRowID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "opencode-selection-plan.db")
+	writeOpenCodeManyRootHistory(t, path, 2, 16)
+	db, err := OpenOpenCodeReadOnly(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, indexedTime := range []bool{false, true} {
+		for _, cursor := range []int64{0, 1} {
+			capture := &queryCaptureDB{}
+			queryDB := &OpenCodeDatabase{reader: capture, partSessionIndex: true, partSessionTimeIndex: indexedTime}
+			_, err := queryDB.ReadStepFinishPartsForSelections(context.Background(), []OpenCodeStepFinishSelection{{
+				SessionID: "root-00", RootSessionID: "root-00", ActiveSince: 1, CursorRowID: cursor,
+			}}, 10_000_001, nil, MaxOpenCodePartReadLimit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := db.reader.Rows(context.Background(), "EXPLAIN QUERY PLAN "+capture.query, capture.args...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rowLookups := 0
+			for _, step := range plan {
+				detail, _ := step[3].(string)
+				if strings.Contains(detail, "SEARCH p USING INTEGER PRIMARY KEY (rowid=?)") {
+					rowLookups++
+				}
+				if strings.Contains(detail, "SEARCH p USING INDEX part_session_updated (session_id=?)") {
+					t.Fatalf("bounded selection walks outer session history: time_index=%v cursor=%d plan=%v", indexedTime, cursor, plan)
+				}
+			}
+			wantLookups := 1
+			if indexedTime {
+				wantLookups++
+			}
+			if rowLookups != wantLookups {
+				t.Fatalf("bounded part row lookups=%d want=%d: time_index=%v cursor=%d plan=%v", rowLookups, wantLookups, indexedTime, cursor, plan)
+			}
+		}
 	}
 }
 

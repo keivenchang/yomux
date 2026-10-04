@@ -44,6 +44,7 @@ function i18nNormalizeLocale(value, options = {}) {
 let i18nActiveLocale = i18nNormalizeLocale(typeof bootstrap === 'object' && bootstrap ? bootstrap.locale : '');
 const i18nCatalogs = new Map();  // locale -> {dottedKey: string}
 const i18nMissingKeys = new Set();
+const i18nPluralRules = new Map();
 let i18nApplyLocaleRequestId = 0;
 // seed from the INLINED bootstrap catalogs (active locale + en fallback) so t() resolves
 // SYNCHRONOUSLY on the very first render — the menu bar/tabs/wordmark paint at boot before any fetch.
@@ -102,7 +103,11 @@ function localizedLabel(key, fallback, params) {
 function tPlural(key, count, params) {
   const number = Number(count) || 0;
   let category = 'other';
-  try { category = new Intl.PluralRules(i18nActiveLocale).select(number); } catch (_) {}
+  try {
+    // Tree refreshes format thousands of labels; rules depend only on locale.
+    if (!i18nPluralRules.has(i18nActiveLocale)) i18nPluralRules.set(i18nActiveLocale, new Intl.PluralRules(i18nActiveLocale));
+    category = i18nPluralRules.get(i18nActiveLocale).select(number);
+  } catch (_) {}
   const value = i18nCatalogValue(i18nActiveLocale, `${key}.${category}`)
     ?? i18nCatalogValue(i18nActiveLocale, `${key}.other`)
     ?? i18nCatalogValue(i18nFallbackLocale, `${key}.${category}`)

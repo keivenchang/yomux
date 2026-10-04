@@ -24,11 +24,14 @@ const (
 	writerBuild    = 8
 	pruneStateFile = "stats-prune-v9.json"
 	vacuumBaseFile = "stats-vacuum-v9.json"
+	// Seven insert columns stay below SQLite's portable 999-bind limit.
+	maxUsageStatementRows = 128
 )
 
 // AppendResult describes the durable changes made by one transaction.
 type AppendResult struct {
 	Generation            int64
+	PublicationTargets    []InvalidationCell
 	ObservationsAccepted  int
 	ObservationsDuplicate int
 	// AcceptedObservationIDs preserves the request order-independent durable
@@ -777,6 +780,10 @@ func (w *Writer) AppendWithCheckpoints(ctx context.Context, batch AppendBatch, c
 // checkpoint retirement atomically without changing graph generation for
 // checkpoint-only work.
 func (w *Writer) AppendWithCheckpointsAndRetire(ctx context.Context, batch AppendBatch, checkpoints []Checkpoint, retirement *CheckpointRetirement) (AppendResult, error) {
+	return w.appendReplacingUsage(ctx, batch, checkpoints, retirement, nil)
+}
+
+func (w *Writer) appendReplacingUsage(ctx context.Context, batch AppendBatch, checkpoints []Checkpoint, retirement *CheckpointRetirement, replacement []UsageAtom) (AppendResult, error) {
 	var result AppendResult
 	if w == nil || w.db == nil {
 		return result, errors.New("nil YO!stats writer")
@@ -853,6 +860,47 @@ func (w *Writer) AppendWithCheckpointsAndRetire(ctx context.Context, batch Appen
 	}
 	acceptedTimestamps := make([]float64, 0, len(batch.Observations)+len(batch.UsageAtoms)+len(batch.UsageTombstones))
 	changedIntervals := make([]ringInvalidationInterval, 0, len(batch.CoverageEpochs)+len(batch.UnavailableSpans))
+	// Replacement and tombstone reads share one transaction-owned lookup.
+	var usageLookup *sql.Stmt
+	if len(replacement)+len(batch.UsageTombstones) > 0 {
+		usageLookup, err = tx.PrepareContext(ctx, "SELECT observed_at,payload_json FROM usage_atoms WHERE event_id=? AND direction=? AND modality=? AND cache_role=? AND unit=?")
+		if err != nil {
+			return rollback(err)
+		}
+		defer usageLookup.Close()
+	}
+	// Only facts captured before the refill are retired. Concurrent collection
+	// can add new facts without having them erased by historical publication.
+	replacementConflicts := map[string]struct{}{}
+	for _, item := range replacement {
+		var currentAt float64
+		var currentPayload string
+		identity := item.IdempotencyKey()
+		if err := usageLookup.QueryRowContext(ctx, item.EventID, item.Direction, item.Modality, item.CacheRole, item.Unit).Scan(&currentAt, &currentPayload); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				replacementConflicts[identity] = struct{}{}
+				continue
+			}
+			return rollback(err)
+		}
+		capturedPayload, marshalErr := json.Marshal(item.Payload)
+		if marshalErr != nil {
+			return rollback(marshalErr)
+		}
+		if currentAt != item.ObservedAt || currentPayload != string(capturedPayload) {
+			replacementConflicts[identity] = struct{}{}
+			continue
+		}
+		removed, removeErr := execRowsAffected(ctx, tx, "DELETE FROM usage_atoms WHERE event_id=? AND direction=? AND modality=? AND cache_role=? AND unit=? AND observed_at=? AND payload_json=?", item.EventID, item.Direction, item.Modality, item.CacheRole, item.Unit, item.ObservedAt, currentPayload)
+		if removeErr != nil {
+			return rollback(removeErr)
+		}
+		if removed > 0 {
+			result.TombstonesAccepted += removed
+			acceptedTimestamps = append(acceptedTimestamps, item.ObservedAt)
+		}
+	}
+
 	for _, item := range batch.Observations {
 		payload, _ := json.Marshal(item.Payload)
 		payloadJSON := string(payload)
@@ -941,40 +989,15 @@ func (w *Writer) AppendWithCheckpointsAndRetire(ctx context.Context, batch Appen
 			return rollback(errors.New("unavailable span identity conflicts with stored data"))
 		}
 	}
-	for _, item := range batch.UsageAtoms {
-		payload, _ := json.Marshal(item.Payload)
-		payloadJSON := string(payload)
-		var oldAt float64
-		var oldPayload string
-		err := tx.QueryRowContext(ctx, "SELECT observed_at,payload_json FROM usage_atoms WHERE event_id=? AND direction=? AND modality=? AND cache_role=? AND unit=?", item.EventID, item.Direction, item.Modality, item.CacheRole, item.Unit).Scan(&oldAt, &oldPayload)
-		if errors.Is(err, sql.ErrNoRows) {
-			if _, err = tx.ExecContext(ctx, "INSERT INTO usage_atoms VALUES(?,?,?,?,?,?,?)", item.EventID, item.Direction, item.Modality, item.CacheRole, item.Unit, item.ObservedAt, payloadJSON); err != nil {
-				return rollback(err)
-			}
-			result.UsageAccepted++
-			acceptedTimestamps = append(acceptedTimestamps, item.ObservedAt)
-		} else if err != nil {
-			return rollback(err)
-		} else {
-			updatedPayload, repaired, compatible := usageReplayPayloadChange(item.EventID, oldAt, oldPayload, item.ObservedAt, payloadJSON)
-			if !compatible {
-				return rollback(errors.New("usage atom identity conflicts with stored data"))
-			}
-			if repaired {
-				if _, err = tx.ExecContext(ctx, "UPDATE usage_atoms SET payload_json=? WHERE event_id=? AND direction=? AND modality=? AND cache_role=? AND unit=?", updatedPayload, item.EventID, item.Direction, item.Modality, item.CacheRole, item.Unit); err != nil {
-					return rollback(fmt.Errorf("repair unknown usage model: %w", err))
-				}
-				result.UsageAccepted++
-				acceptedTimestamps = append(acceptedTimestamps, item.ObservedAt)
-			} else {
-				result.UsageDuplicate++
-			}
-		}
+	usageTimestamps, err := appendUsageAtoms(ctx, tx, batch.UsageAtoms, replacementConflicts, &result)
+	if err != nil {
+		return rollback(err)
 	}
+	acceptedTimestamps = append(acceptedTimestamps, usageTimestamps...)
 	for _, item := range batch.UsageTombstones {
 		var observed float64
 		var payloadJSON string
-		err = tx.QueryRowContext(ctx, "SELECT observed_at,payload_json FROM usage_atoms WHERE event_id=? AND direction=? AND modality=? AND cache_role=? AND unit=?", item.EventID, item.Direction, item.Modality, item.CacheRole, item.Unit).Scan(&observed, &payloadJSON)
+		err = usageLookup.QueryRowContext(ctx, item.EventID, item.Direction, item.Modality, item.CacheRole, item.Unit).Scan(&observed, &payloadJSON)
 		if errors.Is(err, sql.ErrNoRows) {
 			result.TombstonesDuplicate++
 			continue
@@ -1022,6 +1045,25 @@ func (w *Writer) AppendWithCheckpointsAndRetire(ctx context.Context, batch Appen
 			}
 		}
 	}
+	if replacement != nil {
+		rows, queryErr := tx.QueryContext(ctx, "SELECT resolution_seconds,bucket_start,source_generation FROM ring_invalidations WHERE source_generation=? AND applied_at IS NULL", result.Generation)
+		if queryErr != nil {
+			return rollback(queryErr)
+		}
+		for rows.Next() {
+			var cell InvalidationCell
+			if queryErr = rows.Scan(&cell.ResolutionSeconds, &cell.BucketStart, &cell.SourceGeneration); queryErr != nil {
+				_ = rows.Close()
+				return rollback(queryErr)
+			}
+			result.PublicationTargets = append(result.PublicationTargets, cell)
+		}
+		queryErr = rows.Err()
+		_ = rows.Close()
+		if queryErr != nil {
+			return rollback(queryErr)
+		}
+	}
 	if err = tx.Commit(); err != nil {
 		return AppendResult{}, fmt.Errorf("commit stats append: %w", err)
 	}
@@ -1036,6 +1078,88 @@ func (w *Writer) AppendWithCheckpointsAndRetire(ctx context.Context, batch Appen
 		w.lifecycle.NotifyAppend()
 	}
 	return result, nil
+}
+
+// appendUsageAtoms batches identity reads and fresh inserts in the caller's
+// transaction. Duplicate and model-repair decisions keep their existing policy.
+func appendUsageAtoms(ctx context.Context, tx *sql.Tx, atoms []UsageAtom, skipped map[string]struct{}, result *AppendResult) ([]float64, error) {
+	accepted := make([]float64, 0, len(atoms))
+	for start := 0; start < len(atoms); start += maxUsageStatementRows {
+		end := min(start+maxUsageStatementRows, len(atoms))
+		chunk := atoms[start:end]
+		lookupArgs := make([]any, 0, len(chunk)*6)
+		for index, item := range chunk {
+			lookupArgs = append(lookupArgs, index, item.EventID, item.Direction, item.Modality, item.CacheRole, item.Unit)
+		}
+		candidates := strings.TrimRight(strings.Repeat("(?,?,?,?,?,?),", len(chunk)), ",")
+		rows, err := tx.QueryContext(ctx, "WITH candidates(row_index,event_id,direction,modality,cache_role,unit) AS (VALUES "+candidates+") SELECT candidates.row_index,usage.observed_at,usage.payload_json FROM candidates JOIN usage_atoms AS usage USING(event_id,direction,modality,cache_role,unit)", lookupArgs...)
+		if err != nil {
+			return nil, err
+		}
+		existing := make([]struct {
+			found    bool
+			observed float64
+			payload  string
+		}, len(chunk))
+		for rows.Next() {
+			var index int
+			var observed float64
+			var payload string
+			if err := rows.Scan(&index, &observed, &payload); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			existing[index].found, existing[index].observed, existing[index].payload = true, observed, payload
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
+		insertArgs := make([]any, 0, len(chunk)*7)
+		for index, item := range chunk {
+			if _, changedSinceSnapshot := skipped[item.IdempotencyKey()]; changedSinceSnapshot {
+				continue
+			}
+			payload, err := json.Marshal(item.Payload)
+			if err != nil {
+				return nil, err
+			}
+			payloadJSON := string(payload)
+			old := existing[index]
+			if !old.found {
+				insertArgs = append(insertArgs, item.EventID, item.Direction, item.Modality, item.CacheRole, item.Unit, item.ObservedAt, payloadJSON)
+				result.UsageAccepted++
+				accepted = append(accepted, item.ObservedAt)
+				continue
+			}
+			// Validated, identical replay needs no JSON decoding. Metadata differences
+			// still use the shared compatibility and repair policy.
+			updatedPayload, repaired, compatible := "", false, old.observed == item.ObservedAt && old.payload == payloadJSON
+			if !compatible {
+				updatedPayload, repaired, compatible = usageReplayPayloadChange(item.EventID, old.observed, old.payload, item.ObservedAt, payloadJSON)
+			}
+			if !compatible {
+				return nil, errors.New("usage atom identity conflicts with stored data")
+			}
+			if repaired {
+				if _, err := tx.ExecContext(ctx, "UPDATE usage_atoms SET payload_json=? WHERE event_id=? AND direction=? AND modality=? AND cache_role=? AND unit=?", updatedPayload, item.EventID, item.Direction, item.Modality, item.CacheRole, item.Unit); err != nil {
+					return nil, fmt.Errorf("repair unknown usage model: %w", err)
+				}
+				result.UsageAccepted++
+				accepted = append(accepted, item.ObservedAt)
+			} else {
+				result.UsageDuplicate++
+			}
+		}
+		if len(insertArgs) > 0 {
+			values := strings.TrimRight(strings.Repeat("(?,?,?,?,?,?,?),", len(insertArgs)/7), ",")
+			if _, err := tx.ExecContext(ctx, "INSERT INTO usage_atoms VALUES "+values, insertArgs...); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return accepted, nil
 }
 
 // Prune removes facts older than the retention window in one transaction.

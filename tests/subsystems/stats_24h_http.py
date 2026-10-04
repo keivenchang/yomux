@@ -18,6 +18,8 @@ import pytest
 
 from tests.browser_helpers.browser_layout import start_browser_server
 from tests.browser_helpers.browser_layout import stop_browser_server
+from tests.gate_harness import run_fixture_cleanup_phases
+from tests.helpers.gate_stats import stop_stats_current_service
 from tests.helpers.gate_stats import NOW
 from tests.helpers.gate_stats import _seed_realistic_stats
 from tests.helpers.gate_stats import record_current_database_migration
@@ -110,10 +112,7 @@ def assert_transcripts_fill_every_bucket(tmp_path: Path) -> None:
         assert len(values) == range_seconds // resolution_seconds
         assert all(value > 0 for value in values)
     finally:
-        service.stop_event.set()
-        service.work_event.set()
-        thread.join(timeout=3)
-        assert not thread.is_alive()
+        stop_stats_current_service(service, thread)
 
 
 def exercise_combined_observations_and_transcripts(monkeypatch, tmp_path: Path) -> list[dict[str, object]]:
@@ -160,6 +159,7 @@ def exercise_combined_observations_and_transcripts(monkeypatch, tmp_path: Path) 
     )
     thread = threading.Thread(target=service.run, daemon=True)
     thread.start()
+    http_server = http_thread = None
     try:
         assert service.cache_ready_event.wait(20), service._status()
         client = stats_client.StatsCurrentClient(socket_path, database)
@@ -348,12 +348,10 @@ def exercise_combined_observations_and_transcripts(monkeypatch, tmp_path: Path) 
         }
         return latency_samples
     finally:
-        if "http_server" in locals():
-            stop_browser_server(http_server, http_thread)
-        service.stop_event.set()
-        service.work_event.set()
-        thread.join(timeout=3)
-        assert not thread.is_alive()
+        run_fixture_cleanup_phases("24-hour stats HTTP measurement", (
+            ("HTTP server", lambda: stop_browser_server(http_server, http_thread) if http_server is not None and http_thread is not None else None),
+            ("stats service", lambda: stop_stats_current_service(service, thread)),
+        ))
 
 
 def exercise_empty_window(monkeypatch, tmp_path: Path, clock_seconds: float, label: str) -> dict[str, object]:
@@ -393,12 +391,10 @@ def exercise_empty_window(monkeypatch, tmp_path: Path, clock_seconds: float, lab
             "elapsed_ms": elapsed_ms, "bytes": response_bytes,
         }
     finally:
-        if http_server is not None and http_thread is not None:
-            stop_browser_server(http_server, http_thread)
-        service.stop_event.set()
-        service.work_event.set()
-        thread.join(timeout=3)
-        assert not thread.is_alive()
+        run_fixture_cleanup_phases(f"24-hour stats empty-window {label}", (
+            ("HTTP server", lambda: stop_browser_server(http_server, http_thread) if http_server is not None and http_thread is not None else None),
+            ("stats service", lambda: stop_stats_current_service(service, thread)),
+        ))
 
 
 def _series_values(snapshot: dict[str, object], name: str) -> list[int]:

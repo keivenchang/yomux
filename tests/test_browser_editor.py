@@ -57,7 +57,7 @@ def test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path):
     )
     metrics = browser.execute_script(
         """
-        const {probePaint} = window.__yolomuxTestHelpers;
+        const {probePaint} = window.__yomuxTestHelpers;
         function bg(selector) {
           return getComputedStyle(document.querySelector(selector)).backgroundColor;
         }
@@ -212,8 +212,8 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
               panel.classList.add('active-pane');
               panelNodes.set(item, panel);
               document.getElementById('mount').append(panel);
-              const {{frame}} = window.__yolomuxTestHelpers;
-              const waitFor = window.__yolomuxTestWaitFor;
+              const {{frame}} = window.__yomuxTestHelpers;
+              const waitFor = window.__yomuxTestWaitFor;
               renderFileEditorPanel(panel, item);
               await waitFor(() => window.__resolveReadmeDiffFetch);
               await frame();
@@ -375,8 +375,8 @@ def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser,
               panel.classList.add('active-pane');
               panelNodes.set(item, panel);
               document.getElementById('mount').append(panel);
-              const {{frame}} = window.__yolomuxTestHelpers;
-              const waitFor = window.__yolomuxTestWaitFor;
+              const {{frame}} = window.__yomuxTestHelpers;
+              const waitFor = window.__yomuxTestWaitFor;
               const snapshot = () => {{
                 const button = panel.querySelector('.file-editor-diff-panel');
                 const refs = panel.querySelector('.file-editor-diff-ref-panel');
@@ -582,7 +582,7 @@ def test_markdown_preview_prosemirror_pure_view_is_visible(browser, tmp_path):
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            const waitFor = window.__yolomuxTestWaitFor;
+            const waitFor = window.__yomuxTestWaitFor;
             await waitFor(() => panel.querySelector('.prosemirror-editor')?.textContent.includes('Preview text'));
             done({
               mode: editorViewModeFor(path, item),
@@ -631,7 +631,7 @@ def test_markdown_prosemirror_async_init_keeps_latest_state_and_cancels_detached
             setFileState(path, {kind: 'text', content: '# Latest state', original: '# Old state', dirty: true, language: 'markdown'});
             renderFileEditorPanel(panel, item);
             releaseLatest();
-            await window.__yolomuxTestWaitFor(() => panel._pmView?.state?.doc?.textContent === 'Latest state', {
+            await window.__yomuxTestWaitFor(() => panel._pmView?.state?.doc?.textContent === 'Latest state', {
               timeoutMs: 5000,
               description: 'latest generation after delayed ProseMirror load',
             });
@@ -705,7 +705,7 @@ def test_markdown_prosemirror_async_init_survives_transient_tab_detach(browser, 
             await Promise.resolve();
             document.getElementById('grid').append(panel);
 
-            await window.__yolomuxTestWaitFor(() => panel._pmView || panel._pmError, {
+            await window.__yomuxTestWaitFor(() => panel._pmView || panel._pmError, {
               timeoutMs: 5000,
               description: 'ViewEditor after transient tab detach',
             });
@@ -921,7 +921,7 @@ def test_codemirror_async_init_survives_transient_tab_detach(browser, tmp_path):
             releaseLoad();
             await Promise.resolve();
             document.getElementById('grid').append(panel);
-            await window.__yolomuxTestWaitFor(() => panel._cmView, {
+            await window.__yomuxTestWaitFor(() => panel._cmView, {
               timeoutMs: 5000,
               description: 'CodeMirror after transient tab detach',
             });
@@ -981,7 +981,7 @@ def test_markdown_prosemirror_delayed_load_survives_real_dockview_tab_switch(bro
             }
             const first = panelNodes.get(items[0]);
             renderFileEditorPanel(first, items[0]);
-            await window.__yolomuxTestWaitFor(() => first._pmView || first._pmError, {
+            await window.__yomuxTestWaitFor(() => first._pmView || first._pmError, {
               timeoutMs: 5000,
               description: 'first Dockview ViewEditor',
             });
@@ -1186,7 +1186,7 @@ def test_markdown_prosemirror_cancels_detached_local_image_hydration(browser, tm
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => fetchStarted && panel._pmView?.dom?.querySelector('img.prosemirror-image'), {
+            await window.__yomuxTestWaitFor(() => fetchStarted && panel._pmView?.dom?.querySelector('img.prosemirror-image'), {
               timeoutMs: 5000,
               description: 'held local image hydration',
             });
@@ -1271,14 +1271,14 @@ def test_markdown_prosemirror_blockquoted_fence_keeps_event_loop_responsive(brow
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => panel._pmView, {
+            await window.__yomuxTestWaitFor(() => panel._pmView, {
               timeoutMs: 12000,
               description: 'blockquoted JSON ViewEditor',
             });
             let heartbeat = false;
             setTimeout(() => { heartbeat = true; }, 0);
             await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-            await window.__yolomuxTestWaitFor(() => heartbeat, {
+            await window.__yomuxTestWaitFor(() => heartbeat, {
               timeoutMs: 1000,
               description: 'event loop after blockquoted JSON ViewEditor',
             });
@@ -1374,7 +1374,7 @@ def test_markdown_prosemirror_renders_readme_mermaid_fences_read_only(browser, t
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom?.querySelectorAll('img.mermaid-preview-image').length === 3, {
+            await window.__yomuxTestWaitFor(() => panel._pmView?.dom?.querySelectorAll('img.mermaid-preview-image').length === 3, {
               timeoutMs: 12000,
               description: 'full README Mermaid ViewEdit renders',
             });
@@ -1388,8 +1388,8 @@ def test_markdown_prosemirror_renders_readme_mermaid_fences_read_only(browser, t
             for (let index = 0; index < 5; index += 1) {
               wheelShell?.querySelector('[data-preview-zoom-action="in"]:not(:disabled)')?.click();
             }
-            await window.__yolomuxTestHelpers.frame();
-            await window.__yolomuxTestHelpers.frame();
+            await window.__yomuxTestHelpers.frame();
+            await window.__yomuxTestHelpers.frame();
             if (wheelViewport) {
               wheelViewport.dataset.prosemirrorMermaidWheelProbe = '1';
               const wheelStage = wheelViewport.querySelector('.file-editor-preview-zoom-stage');
@@ -1481,7 +1481,7 @@ def test_markdown_view_editor_search_is_read_only_and_counts_matches(browser, tm
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            const waitFor = window.__yolomuxTestWaitFor;
+            const waitFor = window.__yomuxTestWaitFor;
             await waitFor(() => panel._pmView?.dom?.textContent.includes('The theme'));
             const findButton = panel.querySelector('.file-editor-find-panel');
             findButton.click();
@@ -1538,7 +1538,7 @@ def test_split_search_follows_the_active_editor_surface(browser, tmp_path):
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            const waitFor = window.__yolomuxTestWaitFor;
+            const waitFor = window.__yomuxTestWaitFor;
             await waitFor(() => panel._cmView && panel._pmView);
             panel.querySelector('.file-editor-codemirror-panel').dispatchEvent(new PointerEvent('pointerdown', {bubbles: true}));
             await toggleEditorFind(panel);
@@ -1593,7 +1593,7 @@ def test_split_view_search_stays_open_after_query_redraw(browser, tmp_path):
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            const waitFor = window.__yolomuxTestWaitFor;
+            const waitFor = window.__yomuxTestWaitFor;
             await waitFor(() => panel._cmView && panel._pmView);
             rememberFileEditorSearchSurface(panel, 'preview');
             await toggleEditorFind(panel);
@@ -1641,7 +1641,7 @@ def test_markdown_view_editor_search_marks_only_the_query_text(browser, tmp_path
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            const waitFor = window.__yolomuxTestWaitFor;
+            const waitFor = window.__yomuxTestWaitFor;
             await waitFor(() => panel._pmView?.dom?.textContent.includes('long line'));
             panel.querySelector('.file-editor-find-panel').click();
             const input = panel.querySelector('.file-editor-preview-find-panel input');
@@ -1687,7 +1687,7 @@ def test_markdown_prosemirror_click_enter_and_delayed_source_sync(browser, tmp_p
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            const waitFor = window.__yolomuxTestWaitFor;
+            const waitFor = window.__yomuxTestWaitFor;
             await waitFor(() => panel._pmView && panel._cmView);
             const view = panel._pmView;
             const paragraph = view.state.doc.lastChild;
@@ -1859,7 +1859,7 @@ def test_markdown_viewedit_noop_flush_preserves_source_and_skips_autosave(browse
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => panel._pmView, {timeoutMs: 12000, description: 'no-op ViewEdit'});
+            await window.__yomuxTestWaitFor(() => panel._pmView, {timeoutMs: 12000, description: 'no-op ViewEdit'});
             const writes = [];
             const originalFetch = window.fetch.bind(window);
             window.fetch = async (input, options = {}) => {
@@ -1916,7 +1916,7 @@ def test_markdown_prosemirror_renders_single_source_newlines_as_soft_spaces(brow
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => panel._pmView, {timeoutMs: 12000, description: 'softbreak ViewEditor'});
+            await window.__yomuxTestWaitFor(() => panel._pmView, {timeoutMs: 12000, description: 'softbreak ViewEditor'});
             const paragraphs = [...panel._pmView.dom.querySelectorAll('p')];
             const first = paragraphs[0];
             const softBreaks = [...first.querySelectorAll('[data-markdown-soft-break]')];
@@ -1969,7 +1969,7 @@ def test_markdown_prosemirror_typing_defers_autosave_until_after_pause(browser, 
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => panel._pmView && panel._cmView);
+            await window.__yomuxTestWaitFor(() => panel._pmView && panel._cmView);
             const writes = [];
             const originalFetch = window.fetch.bind(window);
             window.fetch = async (input, options = {}) => {
@@ -1986,7 +1986,7 @@ def test_markdown_prosemirror_typing_defers_autosave_until_after_pause(browser, 
             const settledSource = fileEditorPanelState(panel).content;
             const writesBeforeAutosave = writes.length;
             view.someProp('handleKeyDown', handler => handler(view, new KeyboardEvent('keydown', {key: 's', ctrlKey: true})));
-            await window.__yolomuxTestWaitFor(() => writes.length === 1);
+            await window.__yomuxTestWaitFor(() => writes.length === 1);
             done({settledSource, writesBeforeAutosave, saved: writes[0]?.content || '', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           } catch (error) {
             done({error: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
@@ -2022,7 +2022,7 @@ def test_markdown_prosemirror_image_paste_uses_view_selection(browser, tmp_path)
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => panel._pmView && panel._cmView);
+            await window.__yomuxTestWaitFor(() => panel._pmView && panel._cmView);
             const view = panel._pmView;
             const start = 1 + 'before '.length;
             view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, start)));
@@ -2046,7 +2046,7 @@ def test_markdown_prosemirror_image_paste_uses_view_selection(browser, tmp_path)
             transfer.items.add(new File([png], 'screen.png', {type: 'image/png'}));
             const event = new ClipboardEvent('paste', {bubbles: true, cancelable: true, clipboardData: transfer});
             document.dispatchEvent(event);
-            await window.__yolomuxTestWaitFor(() => typeof releaseUpload === 'function');
+            await window.__yomuxTestWaitFor(() => typeof releaseUpload === 'function');
             view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, 1)));
             releaseUpload();
             await new Promise(resolve => setTimeout(resolve, 2250));
@@ -2103,13 +2103,13 @@ def test_markdown_prosemirror_inline_images_match_source_flow(browser, tmp_path)
             renderFileEditorPanel(panel, item);
             const previewPane = panel.querySelector('.file-editor-preview-pane-panel');
             if (previewPane?._previewAsync) await previewPane._previewAsync;
-            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom?.isConnected === true && panel._pmView.dom.getBoundingClientRect().width > 0 && panel._pmView.dom.querySelectorAll('img').length === 2, {timeoutMs: 12000, description: 'inline ProseMirror images'});
+            await window.__yomuxTestWaitFor(() => panel._pmView?.dom?.isConnected === true && panel._pmView.dom.getBoundingClientRect().width > 0 && panel._pmView.dom.querySelectorAll('img').length === 2, {timeoutMs: 12000, description: 'inline ProseMirror images'});
             const viewAtWait = panel._pmView;
             const rootAtWait = viewAtWait.dom;
             const initialParagraph = rootAtWait.querySelector('p');
             const initialImages = [...initialParagraph.querySelectorAll('img')];
             await Promise.all(initialImages.map(image => image.naturalWidth > 0 ? Promise.resolve() : new Promise(resolve => image.addEventListener('load', resolve, {once: true}))));
-            await window.__yolomuxTestWaitFor(() => rootAtWait.isConnected
+            await window.__yomuxTestWaitFor(() => rootAtWait.isConnected
               && rootAtWait.querySelectorAll('img').length === 2
               && [...rootAtWait.querySelectorAll('img')].every(image => image.naturalWidth > 0), {description: 'current inline ProseMirror images'});
             const paragraph = rootAtWait.querySelector('p');
@@ -2164,7 +2164,7 @@ def test_codemirror_idle_draft_survives_background_render_without_cursor_reset(b
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => panel._cmView, {timeoutMs: 12000, description: 'idle cursor CodeMirror'});
+            await window.__yomuxTestWaitFor(() => panel._cmView, {timeoutMs: 12000, description: 'idle cursor CodeMirror'});
             const view = panel._cmView;
             const caret = view.state.doc.line(300).from + 5;
             view.dispatch({selection: {anchor: caret}});
@@ -2213,7 +2213,7 @@ def test_markdown_vieweditor_failure_claims_image_paste_without_terminal_fallbac
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => panel._pmError && panel.querySelector('.file-editor-prosemirror-error'), {timeoutMs: 12000, description: 'ProseMirror failure'});
+            await window.__yomuxTestWaitFor(() => panel._pmError && panel.querySelector('.file-editor-prosemirror-error'), {timeoutMs: 12000, description: 'ProseMirror failure'});
             api.MarkdownParser = originalMarkdownParser;
             focusedTerminal = '1';
             const terminalUploads = [];
@@ -2260,7 +2260,7 @@ def test_markdown_prosemirror_ignores_incomplete_html_fragment_in_prose(browser,
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => panel._pmView || panel._pmError, {timeoutMs: 12000, description: 'incomplete tag ViewEditor'});
+            await window.__yomuxTestWaitFor(() => panel._pmView || panel._pmError, {timeoutMs: 12000, description: 'incomplete tag ViewEditor'});
             done({ready: Boolean(panel._pmView), error: panel._pmError || '', state: panel.querySelector('.file-editor-preview-pane-panel')?.dataset.prosemirrorState || '', text: panel.querySelector('[data-editor-surface="view-editor"]')?.textContent || '', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           } catch (error) {
             done({failure: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
@@ -2420,7 +2420,7 @@ def test_markdown_vieweditor_comments_preserve_source_without_hr_gaps_and_map_sc
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => panel._pmView && panel._cmView && panel._pmSourceLines?.length > 2);
+            await window.__yomuxTestWaitFor(() => panel._pmView && panel._cmView && panel._pmSourceLines?.length > 2);
             const preview = panel.querySelector('.file-editor-preview-pane-panel');
             const hr = preview.querySelector('hr');
             const anchors = previewScrollAnchors(preview);
@@ -2480,7 +2480,7 @@ def test_markdown_vieweditor_date_headings_keep_source_line_anchors_after_commen
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-                await window.__yolomuxTestWaitFor(() => panel._pmView, {timeoutMs: 15000, description: 'date heading ViewEditor'});
+                await window.__yomuxTestWaitFor(() => panel._pmView, {timeoutMs: 15000, description: 'date heading ViewEditor'});
                     const children = [...panel._pmView.dom.children];
                     done({
                       headings: [...panel._pmView.dom.querySelectorAll('h3')].map(node => ({
@@ -2519,7 +2519,7 @@ def test_markdown_vieweditor_repeated_nested_headings_use_distinct_source_lines(
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom?.querySelectorAll('h3[data-source-line]').length === 2);
+            await window.__yomuxTestWaitFor(() => panel._pmView?.dom?.querySelectorAll('h3[data-source-line]').length === 2);
             done({
               lines: [...panel._pmView.dom.querySelectorAll('h3')].map(node => Number(node.dataset.sourceLine)),
               text: [...panel._pmView.dom.querySelectorAll('h3')].map(node => node.textContent.trim()),
@@ -2551,10 +2551,10 @@ def test_markdown_vieweditor_task_source_lines_refresh_after_edit_above(browser,
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom?.querySelectorAll('input.markdown-task-checkbox').length === 2);
+            await window.__yomuxTestWaitFor(() => panel._pmView?.dom?.querySelectorAll('input.markdown-task-checkbox').length === 2);
             const inserted = panel._pmSchema.nodes.paragraph.create(null, panel._pmSchema.text('Inserted before tasks'));
             panel._pmView.dispatch(panel._pmView.state.tr.insert(0, inserted));
-            await window.__yolomuxTestWaitFor(() => (
+            await window.__yomuxTestWaitFor(() => (
               [...panel._pmView.dom.querySelectorAll('input.markdown-task-checkbox')]
                 .map(input => input.dataset.sourceLine)
                 .join(',') === '3,4'
@@ -2596,7 +2596,7 @@ def test_markdown_prosemirror_native_enter_keeps_typing_and_codemirror_keeps_vie
             window.__nativeMarkdownPanel = panel;
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => panel._pmView && panel._cmView);
+            await window.__yomuxTestWaitFor(() => panel._pmView && panel._cmView);
             const viewEditLabel = editorModeLabel('preview');
             const view = panel._pmView;
             const paragraph = view.state.doc.lastChild;
@@ -2681,7 +2681,7 @@ def test_markdown_split_native_click_typing_syncs_textedit_and_viewedit(browser,
             window.__nativeClickPanel = panel;
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => panel._pmView && panel._cmView);
+            await window.__yomuxTestWaitFor(() => panel._pmView && panel._cmView);
             done({ready: true});
           } catch (error) {
             done({error: String(error?.stack || error)});
@@ -2760,7 +2760,7 @@ def test_markdown_split_source_and_viewedit_converge_after_each_surface_blurs(br
           window.__blurSyncPanel = panel;
           document.getElementById('grid').append(panel);
           renderFileEditorPanel(panel, item);
-          await window.__yolomuxTestWaitFor(() => panel._pmView && panel._cmView);
+          await window.__yomuxTestWaitFor(() => panel._pmView && panel._cmView);
           panel._pmView.dispatch(panel._pmView.state.tr.insertText('V'));
           panel._pmView.dom.dispatchEvent(new FocusEvent('blur', {bubbles: false}));
           await new Promise(resolve => setTimeout(resolve, 100));
@@ -2806,7 +2806,7 @@ def test_markdown_split_enter_middle_and_end_have_distinct_markdown_results(brow
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => panel._pmView && panel._cmView);
+            await window.__yomuxTestWaitFor(() => panel._pmView && panel._cmView);
             return panel;
           };
           const middle = await makePanel('/home/test/yolomux.dev/MIDDLE.md', 'helloworld');
@@ -2866,9 +2866,9 @@ def test_markdown_viewedit_never_renders_literal_br_and_legacy_breaks_are_migrat
               panelNodes.set(item, panel);
               document.getElementById('grid').append(panel);
               renderFileEditorPanel(panel, item);
-              await window.__yolomuxTestWaitFor(() => panel._pmView && panel._cmView);
+              await window.__yomuxTestWaitFor(() => panel._pmView && panel._cmView);
               panel._pmView.dispatch(panel._pmView.state.tr.insertText('!', panel._pmView.state.doc.content.size - 1));
-              await window.__yolomuxTestWaitFor(() => fileEditorPanelState(panel).content.includes('!'));
+              await window.__yomuxTestWaitFor(() => fileEditorPanelState(panel).content.includes('!'));
               panel._pmView.dom.dispatchEvent(new FocusEvent('blur'));
           await new Promise(resolve => setTimeout(resolve, 100));
           done({
@@ -2908,7 +2908,7 @@ def test_markdown_viewedit_second_contextmenu_and_touch_longpress_keep_shared_me
           panelNodes.set(item, panel);
           document.getElementById('grid').append(panel);
           renderFileEditorPanel(panel, item);
-          await window.__yolomuxTestWaitFor(() => panel._pmView);
+          await window.__yomuxTestWaitFor(() => panel._pmView);
           const view = panel._pmView;
           const p = view.dom.querySelector('p');
           const select = () => view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, 1, 5)));
@@ -2984,14 +2984,14 @@ def test_markdown_viewedit_link_context_menu_offers_url_actions(browser, tmp_pat
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom.querySelector('a[href]'));
+            await window.__yomuxTestWaitFor(() => panel._pmView?.dom.querySelector('a[href]'));
             const link = panel._pmView.dom.querySelector('a[href]');
             const event = new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 20, clientY: 20});
             const prevented = !link.dispatchEvent(event);
            const menu = document.querySelector('.markdown-preview-context-menu');
            const modify = [...(menu?.querySelectorAll('button') || [])].find(button => button.textContent.trim() === 'Modify URL');
            modify?.click();
-           await window.__yolomuxTestWaitFor(() => document.querySelector('.markdown-link-url-dialog [data-markdown-link-url-input]'));
+           await window.__yomuxTestWaitFor(() => document.querySelector('.markdown-link-url-dialog [data-markdown-link-url-input]'));
            const urlDialog = document.querySelector('.markdown-link-url-dialog');
            const urlInput = urlDialog.querySelector('[data-markdown-link-url-input]');
            const dialogWidth = urlDialog.getBoundingClientRect().width;
@@ -2999,13 +2999,13 @@ def test_markdown_viewedit_link_context_menu_offers_url_actions(browser, tmp_pat
            urlInput.value = 'https://example.com/updated';
            urlInput.dispatchEvent(new Event('input', {bubbles: true}));
            urlInput.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true, cancelable: true}));
-           await window.__yolomuxTestWaitFor(() => serializeProseMirrorSource(panel).includes('https://example.com/updated'));
+           await window.__yomuxTestWaitFor(() => serializeProseMirrorSource(panel).includes('https://example.com/updated'));
            const modified = serializeProseMirrorSource(panel);
            const updatedLink = panel._pmView.dom.querySelector('a[href="https://example.com/updated"]');
            updatedLink.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 20, clientY: 20}));
            const remove = [...document.querySelectorAll('.markdown-preview-context-menu button')].find(button => button.textContent.trim() === 'Remove URL');
            remove?.click();
-           await window.__yolomuxTestWaitFor(() => !serializeProseMirrorSource(panel).includes('https://example.com/updated'));
+           await window.__yomuxTestWaitFor(() => !serializeProseMirrorSource(panel).includes('https://example.com/updated'));
            done({
               prevented,
               labels: [...(menu?.children || [])].map(node => node.matches('button') ? node.textContent.trim() : node.querySelector(':scope > button')?.textContent.trim()).filter(Boolean),
@@ -3051,7 +3051,7 @@ def test_markdown_viewedit_link_context_menu_selects_link_without_prior_highligh
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom.querySelector('a[href]'));
+            await window.__yomuxTestWaitFor(() => panel._pmView?.dom.querySelector('a[href]'));
             const view = panel._pmView;
             view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, 1, 1)));
             const link = view.dom.querySelector('a[href]');
@@ -3093,7 +3093,7 @@ def test_markdown_viewedit_selected_text_context_menu_adds_url(browser, tmp_path
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => panel._pmView);
+            await window.__yomuxTestWaitFor(() => panel._pmView);
             const view = panel._pmView;
             view.dispatch(view.state.tr.setSelection(YOmuxProseMirror.TextSelection.create(view.state.doc, 1, 5)));
             const event = new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 20, clientY: 20});
@@ -3101,13 +3101,13 @@ def test_markdown_viewedit_selected_text_context_menu_adds_url(browser, tmp_path
             const menu = document.querySelector('.markdown-preview-context-menu');
             const add = [...(menu?.querySelectorAll('button') || [])].find(button => button.textContent.trim() === 'Add URL');
             add?.click();
-            await window.__yolomuxTestWaitFor(() => document.querySelector('.markdown-link-url-dialog [data-markdown-link-url-input]'));
+            await window.__yomuxTestWaitFor(() => document.querySelector('.markdown-link-url-dialog [data-markdown-link-url-input]'));
             const dialog = document.querySelector('.markdown-link-url-dialog');
             const input = dialog.querySelector('[data-markdown-link-url-input]');
             input.value = 'https://example.com/added';
             input.dispatchEvent(new Event('input', {bubbles: true}));
             dialog.querySelector('[data-dialog-action="save"]').click();
-            await window.__yolomuxTestWaitFor(() => serializeProseMirrorSource(panel).includes('https://example.com/added'));
+            await window.__yomuxTestWaitFor(() => serializeProseMirrorSource(panel).includes('https://example.com/added'));
             done({
               prevented,
               labels: [...(menu?.querySelectorAll('button') || [])].map(button => button.textContent.trim()),
@@ -3144,7 +3144,7 @@ def test_markdown_viewedit_url_actions_do_not_show_i18n_keys(browser, tmp_path):
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom.querySelector('a[href]'));
+            await window.__yomuxTestWaitFor(() => panel._pmView?.dom.querySelector('a[href]'));
             const originalT = window.t;
             window.t = key => key;
             panel._pmView.dom.querySelector('a[href]').dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 20, clientY: 20}));
@@ -3176,7 +3176,7 @@ def test_markdown_viewedit_copy_image_uses_clipboard_formats(browser, tmp_path):
             setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
             setFileEditorViewMode(path, 'split', item); addFileEditorTabItem(path, item);
             const panel = createFileEditorPanel(item); panel.classList.add('active-pane'); panelNodes.set(item, panel); document.getElementById('grid').append(panel); renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom.querySelector('img'));
+            await window.__yomuxTestWaitFor(() => panel._pmView?.dom.querySelector('img'));
             const image = panel._pmView.dom.querySelector('img');
             const writes = [];
             const originalWrite = navigator.clipboard.write;
@@ -3211,7 +3211,7 @@ def test_markdown_viewedit_copy_mixed_text_and_image_uses_rich_clipboard(browser
             setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
             setFileEditorViewMode(path, 'split', item); addFileEditorTabItem(path, item);
             const panel = createFileEditorPanel(item); panel.classList.add('active-pane'); panelNodes.set(item, panel); document.getElementById('grid').append(panel); renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom.querySelector('img'));
+            await window.__yomuxTestWaitFor(() => panel._pmView?.dom.querySelector('img'));
             const view = panel._pmView; const paragraph = view.dom.querySelector('p');
             const range = document.createRange(); range.selectNodeContents(paragraph);
             const selection = document.getSelection(); selection.removeAllRanges(); selection.addRange(range);
@@ -3248,7 +3248,7 @@ def test_markdown_viewedit_link_context_menu_survives_panel_capture(browser, tmp
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom.querySelector('a[href]'));
+            await window.__yomuxTestWaitFor(() => panel._pmView?.dom.querySelector('a[href]'));
             const link = panel._pmView.dom.querySelector('a[href]');
             let captured = false;
             panel._pmPreviewPane.addEventListener('contextmenu', event => { captured = event.defaultPrevented; }, true);
@@ -3282,7 +3282,7 @@ def test_markdown_viewedit_global_link_guard_suppresses_native_menu(browser, tmp
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom.querySelector('a[href]'));
+            await window.__yomuxTestWaitFor(() => panel._pmView?.dom.querySelector('a[href]'));
             const link = panel._pmView.dom.querySelector('a[href]');
             let prevented = false;
             document.addEventListener('contextmenu', event => { prevented = event.defaultPrevented; }, true);
@@ -3547,7 +3547,7 @@ def test_editor_opens_mermaid_source_preview_by_default(browser, tmp_path):
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
-            const {frame} = window.__yolomuxTestHelpers;
+            const {frame} = window.__yomuxTestHelpers;
             const originalFetch = window.fetch.bind(window);
             const path = '/home/test/repo/chart.mmd';
             window.fetch = async (input, options = {}) => {
@@ -3661,7 +3661,7 @@ def test_markdown_vieweditor_renders_mermaid_code_blocks_read_only(browser, tmp_
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom?.querySelector('img.mermaid-preview-image'), {timeoutMs: 12000, description: 'ViewEditor Mermaid render'});
+            await window.__yomuxTestWaitFor(() => panel._pmView?.dom?.querySelector('img.mermaid-preview-image'), {timeoutMs: 12000, description: 'ViewEditor Mermaid render'});
             const host = panel._pmView.dom.querySelector('.mermaid-preview-host');
             const firstCallCount = mermaidCalls.length;
             syncProseMirrorPanelSource(panel, path, fileEditorPanelState(panel));
@@ -3706,7 +3706,7 @@ def test_editor_opens_jsonl_table_preview_by_default_and_keeps_raw_edit(browser,
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
-            const {frame} = window.__yolomuxTestHelpers;
+            const {frame} = window.__yomuxTestHelpers;
             const originalFetch = window.fetch.bind(window);
             const path = '/home/test/repo/transcript.jsonl';
             const content = [
@@ -3803,7 +3803,7 @@ def test_direct_mermaid_network_topology_uses_native_svg_labels(browser, tmp_pat
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
-            const waitFor = window.__yolomuxTestWaitFor;
+            const waitFor = window.__yomuxTestWaitFor;
             const waitImage = image => new Promise(resolve => {
               if (!image) return resolve(false);
               if (image.complete && image.naturalWidth > 0) return resolve(true);
@@ -3901,8 +3901,8 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
         const done = arguments[arguments.length - 1];
             (async () => {
               try {
-                const {frame} = window.__yolomuxTestHelpers;
-                const waitFor = window.__yolomuxTestWaitFor;
+                const {frame} = window.__yomuxTestHelpers;
+                const waitFor = window.__yomuxTestWaitFor;
                 const waitImage = image => new Promise(resolve => {
                   if (!image) {
                     resolve(false);
@@ -3916,7 +3916,7 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
                   image.addEventListener('load', finish, {once: true});
                   image.addEventListener('error', finish, {once: true});
                 });
-                const {rect} = window.__yolomuxTestHelpers;
+                const {rect} = window.__yomuxTestHelpers;
                 const readBlobText = url => new Promise((resolve, reject) => {
                   const request = new XMLHttpRequest();
                   request.open('GET', url);
@@ -4712,7 +4712,7 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
-            const {frame} = window.__yolomuxTestHelpers;
+            const {frame} = window.__yomuxTestHelpers;
             const originalFetch = window.fetch.bind(window);
             const rawRequests = [];
             const fixturePng = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='), ch => ch.charCodeAt(0));
@@ -5084,7 +5084,7 @@ def test_markdown_split_preview_scroll_sync_tracks_source_lines_with_tall_images
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
-            const {frame} = window.__yolomuxTestHelpers;
+            const {frame} = window.__yomuxTestHelpers;
             const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
             const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
             window.marked = {
@@ -5260,7 +5260,7 @@ def test_markdown_preview_visual_rendering_has_mermaid_labels_and_media(browser,
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
-            const {frame} = window.__yolomuxTestHelpers;
+            const {frame} = window.__yomuxTestHelpers;
             const waitImage = image => new Promise(resolve => {
               if (!image) {
                 resolve(false);
@@ -5274,7 +5274,7 @@ def test_markdown_preview_visual_rendering_has_mermaid_labels_and_media(browser,
               image.addEventListener('load', finish, {once: true});
               image.addEventListener('error', finish, {once: true});
             });
-            const {rect} = window.__yolomuxTestHelpers;
+            const {rect} = window.__yomuxTestHelpers;
             const readBlobText = url => new Promise((resolve, reject) => {
               const request = new XMLHttpRequest();
               request.open('GET', url);
@@ -5438,7 +5438,7 @@ def test_preview_popout_snapshot_waits_for_media_and_mermaid(browser, tmp_path):
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
-            const {frame} = window.__yolomuxTestHelpers;
+            const {frame} = window.__yomuxTestHelpers;
             const originalFetch = window.fetch.bind(window);
             const rawRequests = [];
             window.fetch = async (input, options = {}) => {
@@ -5547,7 +5547,7 @@ def test_preview_popout_zoom_controls_are_hydrated(browser, tmp_path):
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
-            const {frame} = window.__yolomuxTestHelpers;
+            const {frame} = window.__yomuxTestHelpers;
             const waitImage = image => new Promise(resolve => {
               if (!image) {
                 resolve(false);
@@ -5561,7 +5561,7 @@ def test_preview_popout_zoom_controls_are_hydrated(browser, tmp_path):
               image.addEventListener('load', finish, {once: true});
               image.addEventListener('error', finish, {once: true});
             });
-            const {rect} = window.__yolomuxTestHelpers;
+            const {rect} = window.__yomuxTestHelpers;
             window.mermaid = {
               initialize(config) {
                 window.__popoutZoomMermaidConfig = config;
@@ -5843,7 +5843,7 @@ def test_markdown_vieweditor_task_items_keep_source_and_split_surface(browser, t
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            const waitFor = window.__yolomuxTestWaitFor;
+            const waitFor = window.__yomuxTestWaitFor;
             const ready = await waitFor(() => panel._pmView?.dom?.textContent?.includes('first task') && panel._cmView?.state?.doc?.toString?.().includes('first task'));
             const checkboxCounts = () => ({
               legacyCheckboxes: [...panel.querySelectorAll('.file-editor-preview-pane-panel input.markdown-task-checkbox')]
@@ -5919,7 +5919,7 @@ def test_markdown_viewedit_prosemirror_edits_simple_text_and_inline_formatting(b
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            const waitFor = window.__yolomuxTestWaitFor;
+            const waitFor = window.__yomuxTestWaitFor;
             await waitFor(() => panel._pmView);
             const view = panel._pmView;
             debugView = view;
@@ -5984,7 +5984,7 @@ def test_markdown_viewedit_prosemirror_enter_preserves_soft_break_contract(brows
             panelNodes.set(item, panel);
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
-            const waitFor = window.__yolomuxTestWaitFor;
+            const waitFor = window.__yomuxTestWaitFor;
             await waitFor(() => panel._pmView);
             const view = panel._pmView;
             const paragraph = view.state.doc.lastChild;
@@ -6111,7 +6111,7 @@ python -V
         const mdCautionCodeStyle = style('#md-caution-code');
         const mdCautionBreakStyle = style('#md-caution-break');
         const mdCautionDirectStyle = style('#md-caution-direct');
-        const {probePaint} = window.__yolomuxTestHelpers;
+        const {probePaint} = window.__yomuxTestHelpers;
             const expectedPreview = probePaint('color:var(--text);background:var(--markdown-preview-bg);border:1px solid var(--line)', preview);
         const expectedWarning = probePaint('color:var(--markdown-html-dark-text);background:var(--markdown-html-dark-bg);border:1px solid var(--markdown-html-dark-border)');
         const expectedCaution = probePaint('color:var(--markdown-html-dark-text);background:var(--markdown-alert-caution-dark-bg)');
@@ -6246,7 +6246,7 @@ def test_markdown_preview_code_block_background_is_grayer_only_in_dark_mode(brow
         """
         const preview = document.querySelector('#preview');
         const pre = document.querySelector('#code-block');
-        const {probePaint} = window.__yolomuxTestHelpers;
+        const {probePaint} = window.__yomuxTestHelpers;
         const read = () => ({
           preview: getComputedStyle(preview).backgroundColor,
           code: getComputedStyle(pre).backgroundColor,
@@ -6308,8 +6308,8 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
         const done = arguments[arguments.length - 1];
             (async () => {
               try {
-                const {frame} = window.__yolomuxTestHelpers;
-                const waitFor = window.__yolomuxTestWaitFor;
+                const {frame} = window.__yomuxTestHelpers;
+                const waitFor = window.__yomuxTestWaitFor;
                 let scrollSyncWaitIndex = 0;
                 const waitForScrollSyncReady = (...records) => {
                   const waitIndex = ++scrollSyncWaitIndex;
@@ -7038,7 +7038,7 @@ def test_light_editor_and_preview_share_python_fence_token_colors(browser, tmp_p
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
-            const {frame} = window.__yolomuxTestHelpers;
+            const {frame} = window.__yomuxTestHelpers;
             const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
             window.marked = {
               parse(markdown) {
@@ -7296,8 +7296,8 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
               panelNodes.set(item, panel);
                   document.getElementById('mount').append(panel);
                   renderFileEditorPanel(panel, item);
-                  await window.__yolomuxTestWaitFor(() => panel._pmView?.dom?.querySelector('pre'), {{timeoutMs: 12000, description: 'vanilla preview ViewEditor'}});
-              const {{probePaint}} = window.__yolomuxTestHelpers;
+                  await window.__yomuxTestWaitFor(() => panel._pmView?.dom?.querySelector('pre'), {{timeoutMs: 12000, description: 'vanilla preview ViewEditor'}});
+              const {{probePaint}} = window.__yomuxTestHelpers;
                   const read = () => {{
                     const preview = panel.querySelector('.file-editor-preview-pane-panel');
                     const previewSurface = panel._pmView?.dom || preview.querySelector('[data-prosemirror-editor]') || preview;
@@ -7325,7 +7325,7 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
               }};
                       const normal = read();
                       setFileEditorPreviewDisplayMode('vanilla');
-                      await window.__yolomuxTestWaitFor(() => panel._pmView?.dom?.classList.contains('vanilla-preview-body'), {{timeoutMs: 12000, description: 'vanilla ViewEditor refresh'}});
+                      await window.__yomuxTestWaitFor(() => panel._pmView?.dom?.classList.contains('vanilla-preview-body'), {{timeoutMs: 12000, description: 'vanilla ViewEditor refresh'}});
                       const vanilla = read();
                   window.__previewVanillaReady = {{normal, vanilla}};
                 }})().catch(error => {{
@@ -7370,9 +7370,9 @@ def test_viewedit_vanilla_mode_updates_existing_prosemirror_surface(browser, tmp
             const panel = createFileEditorPanel(item);
             panel.classList.add('active-pane'); panel.style.width = '900px'; panel.style.height = '500px';
             panelNodes.set(item, panel); document.getElementById('grid').append(panel); renderFileEditorPanel(panel, item);
-            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom?.querySelector('h1'));
+            await window.__yomuxTestWaitFor(() => panel._pmView?.dom?.querySelector('h1'));
             setFileEditorPreviewDisplayMode('vanilla');
-            await window.__yolomuxTestWaitFor(() => panel._pmView?.dom?.classList.contains('vanilla-preview-body'));
+            await window.__yomuxTestWaitFor(() => panel._pmView?.dom?.classList.contains('vanilla-preview-body'));
             const heading = panel._pmView.dom.querySelector('h1');
             done({classes: panel._pmView.dom.className, background: getComputedStyle(panel._pmView.dom).backgroundColor, color: getComputedStyle(panel._pmView.dom).color, headingColor: getComputedStyle(heading).color, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           } catch (error) { done({failure: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')}); }
@@ -7448,7 +7448,7 @@ def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path
               panel.classList.add('active-pane');
               document.getElementById('mount').append(panel);
               renderFileEditorPanel(panel, item);
-              const {{frame, probePaint}} = window.__yolomuxTestHelpers;
+              const {{frame, probePaint}} = window.__yomuxTestHelpers;
               for (let attempt = 0; attempt < 120; attempt += 1) {{
                 if (panel.querySelector('.cm-content .md-heading')) break;
                 await frame();
@@ -7577,8 +7577,8 @@ def test_editor_search_button_toggles_pressed_state_with_codemirror_panel(browse
               panel.classList.add('active-pane');
               document.getElementById('mount').append(panel);
               renderFileEditorPanel(panel, item);
-              const {{frame}} = window.__yolomuxTestHelpers;
-              const waitFor = window.__yolomuxTestWaitFor;
+              const {{frame}} = window.__yomuxTestHelpers;
+              const waitFor = window.__yomuxTestWaitFor;
               await waitFor(() => panel._cmView && panel.querySelector('.file-editor-find-panel')?.hidden === false);
               const button = panel.querySelector('.file-editor-find-panel');
               const before = {{
@@ -7675,8 +7675,8 @@ def test_codemirror_find_scroll_advances_visible_result_without_snapping(browser
               panel.classList.add('active-pane');
               document.getElementById('mount').append(panel);
               renderFileEditorPanel(panel, item);
-              const {{frame}} = window.__yolomuxTestHelpers;
-              const waitFor = window.__yolomuxTestWaitFor;
+              const {{frame}} = window.__yomuxTestHelpers;
+              const waitFor = window.__yomuxTestWaitFor;
               const ready = await waitFor(() => panel._cmView?.scrollDOM?.scrollHeight > panel._cmView?.scrollDOM?.clientHeight * 3);
               if (!ready) return {{error: 'CodeMirror editor did not become scrollable'}};
               await openEditorFind(panel);
@@ -7794,8 +7794,8 @@ def test_long_markdown_editor_restores_scroll_after_codemirror_recreate(browser,
               panel.classList.add('active-pane');
               document.getElementById('mount').append(panel);
               renderFileEditorPanel(panel, item);
-              const {{frame}} = window.__yolomuxTestHelpers;
-              const waitFor = window.__yolomuxTestWaitFor;
+              const {{frame}} = window.__yomuxTestHelpers;
+              const waitFor = window.__yomuxTestWaitFor;
               const ready = await waitFor(() => {{
                 const scroller = panel._cmView?.scrollDOM;
                 return scroller && scroller.scrollHeight > scroller.clientHeight * 3;
@@ -7813,15 +7813,28 @@ def test_long_markdown_editor_restores_scroll_after_codemirror_recreate(browser,
               const recreated = await waitFor(() => panel._cmView?.scrollDOM && panel._cmView.scrollDOM !== firstScroller);
               if (!recreated) return {{error: 'CodeMirror editor was not recreated'}};
               restoreFileEditorPanelViewState(item, panel);
-              const restored = await waitFor(() => Math.abs((panel._cmView?.scrollDOM?.scrollTop || 0) - savedTop) < 32);
+              let restored = false;
+              let restoreError = '';
+              try {{
+                restored = await waitFor(() => Math.abs((panel._cmView?.scrollDOM?.scrollTop || 0) - savedTop) < 32);
+              }} catch (error) {{ restoreError = String(error); }}
               const finalScroller = panel._cmView.scrollDOM;
               return {{
+                ...(restoreError ? {{error: restoreError}} : {{}}),
                 savedTop,
                 restored,
                 restoredTop: finalScroller.scrollTop,
                 scrollHeight: finalScroller.scrollHeight,
                 clientHeight: finalScroller.clientHeight,
                 savedSnapshot,
+                ...(!restored ? {{diagnostics: {{
+                  savedStateTop: fileEditorViewState.get(item)?.scrollTop ?? null,
+                  savedLine: fileEditorViewState.get(item)?.line ?? null,
+                  generation: panel._cmGeneration ?? null,
+                  viewConnected: Boolean(panel._cmView?.dom?.isConnected),
+                  activeElement: document.activeElement?.className || document.activeElement?.tagName || null,
+                  viewHasFocus: Boolean(panel._cmView?.hasFocus),
+                }}}} : {{}}),
               }};
             }})();
           </script>
@@ -7885,8 +7898,8 @@ def test_focused_editor_background_rerender_keeps_live_selection_and_scroll(brow
               panel.classList.add('active-pane');
               document.getElementById('mount').append(panel);
               renderFileEditorPanel(panel, item);
-              const {{frame}} = window.__yolomuxTestHelpers;
-              const waitFor = window.__yolomuxTestWaitFor;
+              const {{frame}} = window.__yomuxTestHelpers;
+              const waitFor = window.__yomuxTestWaitFor;
               const ready = await waitFor(() => panel._cmView?.scrollDOM?.scrollHeight > panel._cmView?.scrollDOM?.clientHeight * 3);
               if (!ready) return {{error: 'CodeMirror editor did not become scrollable'}};
               const view = panel._cmView;

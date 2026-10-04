@@ -137,7 +137,7 @@ EARLY_PORT_ENV = "YOLOMUX_EARLY_INSTANCE_PORT"
 MANAGED_INSTANCE_PORT_ENV = "YOLOMUX_MANAGED_INSTANCE_PORT"
 
 
-class YolomuxRootError(ValueError):
+class YomuxRootError(ValueError):
     """A root configuration cannot safely contain every product path."""
 
 
@@ -150,15 +150,15 @@ def resolved_home_path(values: Mapping[str, str]) -> Path:
     configured = values.get("HOME")
     configured_path = Path(configured) if configured else None
     if configured_path is not None and not configured_path.is_absolute():
-        raise YolomuxRootError(f"HOME must be an absolute path, got {configured!r}")
+        raise YomuxRootError(f"HOME must be an absolute path, got {configured!r}")
     if configured_path is not None and configured_path == Path(configured_path.anchor):
-        raise YolomuxRootError(f"HOME cannot use the filesystem root: {configured_path}")
+        raise YomuxRootError(f"HOME cannot use the filesystem root: {configured_path}")
     expanded = configured_path if configured_path is not None else Path.home().expanduser()
     if not expanded.is_absolute():
-        raise YolomuxRootError(f"HOME must resolve to an absolute path, got {expanded!s}")
+        raise YomuxRootError(f"HOME must resolve to an absolute path, got {expanded!s}")
     candidate = resolved_path(expanded)
     if candidate == Path(candidate.anchor):
-        raise YolomuxRootError(f"HOME cannot use the filesystem root: {candidate}")
+        raise YomuxRootError(f"HOME cannot use the filesystem root: {candidate}")
     return candidate
 
 
@@ -174,19 +174,19 @@ def resolved_product_path(
     supplied = Path(configured) if configured else Path(default).expanduser()
     if not supplied.is_absolute():
         supplied = configured if configured else str(default)
-        raise YolomuxRootError(f"{key} must resolve from an absolute path, got {supplied!r}")
+        raise YomuxRootError(f"{key} must resolve from an absolute path, got {supplied!r}")
     candidate = resolved_path(supplied)
     if configured and candidate == Path(candidate.anchor):
-        raise YolomuxRootError(f"{key} cannot use the filesystem root as a product root: {candidate}")
+        raise YomuxRootError(f"{key} cannot use the filesystem root as a product root: {candidate}")
     if configured and reject_home and candidate == resolved_home_path(values):
-        raise YolomuxRootError(f"{key} cannot use the home directory as a product root: {candidate}")
+        raise YomuxRootError(f"{key} cannot use the home directory as a product root: {candidate}")
     reject_worktree_product_path(key, candidate)
     return candidate
 
 
 def reject_worktree_product_path(key: str, candidate: Path) -> None:
     if candidate.is_relative_to(REPO_ROOT):
-        raise YolomuxRootError(
+        raise YomuxRootError(
             f"{key} cannot resolve inside the shared worktree: {candidate}; choose a host-local path"
         )
 
@@ -200,7 +200,7 @@ def rooted_product_path(
     """Resolve one rooted override and require it to remain under its owner."""
     candidate = resolved_product_path(values, key, default)
     if not candidate.is_relative_to(root):
-        raise YolomuxRootError(
+        raise YomuxRootError(
             f"{key} resolves outside YOLOMUX_ROOT: {candidate}; unset {key} or choose a path inside {root}"
         )
     return candidate
@@ -225,7 +225,7 @@ def validate_rooted_socket_budget(runtime_dir: Path, *, platform: str = sys.plat
     length = len(os.fsencode(str(longest)))
     limit = local_rpc_socket_path_bytes(platform)
     if length > limit:
-        raise YolomuxRootError(
+        raise YomuxRootError(
             f"YOLOMUX_ROOT is too deep for product socket {longest} ({length} bytes; limit {limit}); choose a shorter YOLOMUX_ROOT"
         )
 
@@ -340,7 +340,7 @@ def resolve_instance_environment(port: int | None, environ: Mapping[str, str], *
     )
     try:
         validate_product_root_environment(validation_values, platform=platform)
-    except YolomuxRootError as error:
+    except YomuxRootError as error:
         return InstanceResolution(port, {}, str(error))
     if has_explicit_root:
         return InstanceResolution(port, {})
@@ -370,7 +370,7 @@ def resolve_instance_environment(port: int | None, environ: Mapping[str, str], *
     }
     try:
         validate_product_root_environment({**validation_values, **environment}, platform=platform)
-    except YolomuxRootError as error:
+    except YomuxRootError as error:
         return InstanceResolution(port, {}, str(error))
     return InstanceResolution(port, environment)
 
@@ -570,7 +570,7 @@ def main(argv: list[str]) -> int:
     if argv and argv[0] == "validate-roots":
         try:
             validate_product_root_environment(os.environ)
-        except YolomuxRootError as error:
+        except YomuxRootError as error:
             print(f"ERROR: {error}", file=sys.stderr)
             return 2
         return 0
@@ -583,7 +583,7 @@ def main(argv: list[str]) -> int:
         values[key] = value
         try:
             print(resolved_product_path(values, key, value))
-        except YolomuxRootError as error:
+        except YomuxRootError as error:
             print(f"ERROR: {error}", file=sys.stderr)
             return 2
         return 0
@@ -594,7 +594,7 @@ def main(argv: list[str]) -> int:
         try:
             validate_product_root_environment(os.environ, platform=os.uname().sysname)
             print(resolved_state_dir(os.environ))
-        except YolomuxRootError as error:
+        except YomuxRootError as error:
             print(f"ERROR: {error}", file=sys.stderr)
             return 2
         return 0

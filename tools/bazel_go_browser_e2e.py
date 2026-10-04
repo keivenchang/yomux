@@ -719,6 +719,7 @@ exec /bin/sleep 300
                     raise SystemExit(f"Go File -> New launch contract failed: {launch_contract}")
                 for launch in launch_contract["launches"]:
                     created_sessions.append(launch["session"])
+                expected_fixture_sessions = sorted(set(sessions) | set(created_sessions))
                 expected_launch_commands = {
                     "bash",
                     "claude",
@@ -756,6 +757,19 @@ exec /bin/sleep 300
                     f"&layout=row@34(left,right)&tabs=left:__tabber__;right:{session}"
                 )
                 driver.get(tabber_reload_url)
+                try:
+                    WebDriverWait(driver, 12).until(lambda browser: browser.execute_script("""
+                        const trace = window.__tabberReloadTrace;
+                        const session = new URLSearchParams(location.search).get('sessions')?.split(',')[1];
+                        const expectedSessions = arguments[0];
+                        return Boolean(trace?.requests?.some(request =>
+                          request.body?.cache?.stale === false
+                          && request.body?.cache?.refreshing === false
+                          && expectedSessions.every(name => request.body?.session_order?.includes(name))
+                          && request.body?.sessions?.[session]?.work_graph?.version === 1));
+                    """, expected_fixture_sessions))
+                except TimeoutException as error:
+                    raise SystemExit("Tabber initial load did not publish a fresh work graph for the complete fixture roster before the warm reload") from error
                 driver.refresh()
                 try:
                     WebDriverWait(driver, 12).until(lambda browser: browser.execute_script("""
@@ -1620,9 +1634,9 @@ exec /bin/sleep 300
                       } catch (error) {
                         throw new Error(`Finder Git repository enrichment timed out: ${JSON.stringify({initialRepo, row: row(gitRoot)?.outerHTML || '', pending: [...fileExplorerRepoInfoEnrichmentState.pending], inFlight: [...fileExplorerRepoInfoEnrichmentState.inFlight], resolved: [...fileExplorerRepoInfoEnrichmentState.resolved]})}`, {cause: error});
                       }
-                      window.__yolomuxFinderContextMenuProbe = {defaultPrevented: false};
+                      window.__yomuxFinderContextMenuProbe = {defaultPrevented: false};
                       gitRow.addEventListener('contextmenu', event => {
-                        window.__yolomuxFinderContextMenuProbe.defaultPrevented = event.defaultPrevented;
+                        window.__yomuxFinderContextMenuProbe.defaultPrevented = event.defaultPrevented;
                       }, {once: true});
                       done({initial, expanded, reexpanded, initialRepo, repoEnriched: row(gitRoot)?.dataset.isRepo === 'true'});
                     })().catch(error => done({error: String(error?.stack || error)}));
@@ -1675,7 +1689,7 @@ exec /bin/sleep 300
                         const url = new URL(typeof input === 'string' ? input : input.url, location.href);
                         if (url.pathname !== '/api/fs/git-history-stats-stream' || heldStatsResponse || !response.body) return response;
                         heldStatsResponse = true;
-                        window.__yolomuxGoStatsHeldRequestUrl = url.href;
+                        window.__yomuxGoStatsHeldRequestUrl = url.href;
                         const sourceReader = response.body.getReader();
                         let eventTail = '';
                         let statsStreamText = '';
@@ -1689,10 +1703,10 @@ exec /bin/sleep 300
                                 const text = decoder.decode(result.value, {stream: true});
                                 statsStreamText = (statsStreamText + text).slice(-1000);
                                 eventTail += text;
-                                window.__yolomuxGoStatsStreamText = statsStreamText;
+                                window.__yomuxGoStatsStreamText = statsStreamText;
                                 controller.enqueue(result.value);
                                 if (eventTail.includes('event: done')) {
-                                  window.__yolomuxGoStatsDoneHeldOpen = true;
+                                  window.__yomuxGoStatsDoneHeldOpen = true;
                                   return;
                                 }
                                 eventTail = eventTail.slice(-128);
@@ -1757,7 +1771,7 @@ exec /bin/sleep 300
                       try {
                         doneCompletion = await waitFor(() => {
                           const historyState = gitDiffTabState.get(gitDiffItem);
-                          return window.__yolomuxGoStatsDoneHeldOpen === true && historyState?.statsStage >= 1 && !historyState.statsLoading
+                          return window.__yomuxGoStatsDoneHeldOpen === true && historyState?.statsStage >= 1 && !historyState.statsLoading
                             ? {statsStage: historyState.statsStage, statsLoading: historyState.statsLoading}
                             : null;
                         }, 'Git stats done event completion while response stays open');
@@ -1765,8 +1779,8 @@ exec /bin/sleep 300
                         const historyState = gitDiffTabState.get(gitDiffItem);
                         throw new Error(`${error.message}: ${JSON.stringify({
                           heldStatsResponse,
-                          doneEventResponseHeldOpen: window.__yolomuxGoStatsDoneHeldOpen === true,
-                          statsStreamText: window.__yolomuxGoStatsStreamText || '',
+                          doneEventResponseHeldOpen: window.__yomuxGoStatsDoneHeldOpen === true,
+                          statsStreamText: window.__yomuxGoStatsStreamText || '',
                           state: historyState ? {statsLoading: historyState.statsLoading, statsStage: historyState.statsStage, statsError: historyState.statsError, commits: historyState.commits?.slice(0, 2)} : null,
                           statsRequests: performance.getEntriesByType('resource').map(entry => entry.name).filter(name => name.includes('/api/fs/git-history-stats-stream')),
                         })}`, {cause: error});
@@ -1782,7 +1796,7 @@ exec /bin/sleep 300
                       const historyRequestEntry = historyRequests.length
                         ? performance.getEntriesByName(historyRequests[0]).at(-1)
                         : null;
-                      const heldStatsRequestUrl = window.__yolomuxGoStatsHeldRequestUrl || '';
+                      const heldStatsRequestUrl = window.__yomuxGoStatsHeldRequestUrl || '';
                       const heldStatsRequest = heldStatsRequestUrl ? new URL(heldStatsRequestUrl, location.href) : null;
                       topCommit.click();
                       const topDetail = await waitFor(() => {
@@ -1791,7 +1805,7 @@ exec /bin/sleep 300
                       }, 'loaded top Git commit detail');
                       const renderedTopDetail = gitDiffPanel.querySelector('.git-diff-commit-detail .git-diff-file-tree');
                       const gitHistory = {
-                        nativeSuppressed: Boolean(window.__yolomuxFinderContextMenuProbe?.defaultPrevented),
+                        nativeSuppressed: Boolean(window.__yomuxFinderContextMenuProbe?.defaultPrevented),
                         item: gitDiffItem,
                         active: itemIsActivePaneTab(gitDiffItem),
                         head: shaRows[0]?.dataset.gitDiffCommit || '',
@@ -1800,7 +1814,7 @@ exec /bin/sleep 300
                         historyRequestMs: historyRequestEntry?.duration ?? null,
                         topStats,
                         doneCompletion,
-                        doneEventResponseHeldOpen: window.__yolomuxGoStatsDoneHeldOpen === true,
+                        doneEventResponseHeldOpen: window.__yomuxGoStatsDoneHeldOpen === true,
                         heldStatsBatchSizes: heldStatsRequest?.searchParams.get('batch_sizes') || '',
                         detailFiles: topDetail.files.map(file => file.path),
                         detailRendered: Boolean(renderedTopDetail),

@@ -530,6 +530,44 @@ def _run_echo_service(socket_path, lock_path, stop_event, *, monkeypatch=None, p
     )
 
 
+@pytest.mark.parametrize("action", ["ping", "status", "echo", None, ["ping"], {"action": "status"}])
+@pytest.mark.parametrize("ok", [True, False])
+@pytest.mark.parametrize("legacy", [True, False])
+@pytest.mark.parametrize("concurrent_handlers", [0, 2])
+@pytest.mark.parametrize("identity_claim", [{}, {"pid": 4242, "process_start_identity": "explicit:birth"}])
+def test_local_service_lifecycle_identity_is_shared_across_transport_and_handler_modes(
+    tmp_path, action, ok, legacy, concurrent_handlers, identity_claim,
+):
+    socket_path = rpc.safe_socket_path(tmp_path / "identity.sock", prefix="yomux-testd")
+    stop_event = threading.Event()
+    original = {"ok": ok, "service": {"nested": "diagnostics"}, "retained": True, **identity_claim}
+    worker = _start_local_rpc_service(
+        socket_path,
+        socket_path.with_suffix(".lock"),
+        stop_event,
+        service_name="testd",
+        handle=lambda _request, _binary: (dict(original), b""),
+        concurrent_handlers=concurrent_handlers,
+    )
+    try:
+        payload = {"action": action}
+        if legacy:
+            response = rpc.legacy_request(socket_path, payload, timeout_seconds=1.0)
+        else:
+            envelope = rpc.new_envelope("testd", str(action), payload, timeout_seconds=1.0)
+            response, binary = rpc.request(socket_path, envelope, timeout_seconds=1.0)
+            assert binary == b""
+        expected = dict(original)
+        if ok and action in ("ping", "status"):
+            expected = {**runtime.current_host_identity().process_record_fields(), **original}
+        assert response == expected
+        assert original == {"ok": ok, "service": {"nested": "diagnostics"}, "retained": True, **identity_claim}
+    finally:
+        stop_event.set()
+        worker.join(timeout=1.0)
+    assert worker.is_alive() is False
+
+
 def test_local_service_runtime_uses_mode_0600_unix_socket_and_survives_slow_clients(tmp_path, monkeypatch):
     socket_path = tmp_path / "service.sock"
     service_socket_path = rpc.safe_socket_path(socket_path, prefix="yomux-testd")

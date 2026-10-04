@@ -201,7 +201,7 @@ def switch_stats_range(harness: E2EBrowserHarness) -> dict[str, Any]:
         slider.value = String(next);
         slider.dispatchEvent(new Event('input', {bubbles: true}));
         slider.dispatchEvent(new Event('change', {bubbles: true}));
-        window.__yolomuxTestWaitFor(
+        window.__yomuxTestWaitFor(
           () => String(document.querySelector('[data-js-debug-range-slider]')?.value || '') === String(next),
           {timeoutMs: 12000, description: 'YO!stats range switch'},
         ).then(() => done({before, next: String(next), session}), error => done({error: String(error?.stack || error)}));
@@ -399,7 +399,7 @@ def test_statsd_deadline_snapshot_retries_24h_without_browser_api_failure(
         const done = arguments[arguments.length - 1];
         (async () => {
           document.querySelector('.js-debug-panel [data-js-debug-subtab="graph"]')?.click();
-          await window.__yolomuxTestWaitFor(
+          await window.__yomuxTestWaitFor(
             () => document.querySelector('.js-debug-panel [data-js-debug-range-slider]'),
             {timeoutMs: 12000, description: 'YO!stats 24-hour slider'},
           );
@@ -410,7 +410,7 @@ def test_statsd_deadline_snapshot_retries_24h_without_browser_api_failure(
           slider.value = String(index);
           slider.dispatchEvent(new Event('input', {bubbles: true}));
           slider.dispatchEvent(new Event('change', {bubbles: true}));
-          await window.__yolomuxTestWaitFor(() => {
+          await window.__yomuxTestWaitFor(() => {
             const controller = jsDebugCurrentStatsClientState?.client?.controller?.();
             const generation = controller?.generation?.();
             return generation?.range_seconds === 86400

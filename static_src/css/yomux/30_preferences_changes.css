@@ -2783,8 +2783,6 @@ body.theme-light .js-debug-line--moving-average {
   margin-inline-end: calc(-1 * var(--space-4));
 }
 .changes-file-list {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
   inline-size: 100%;
   min-inline-size: 0;
 }
@@ -3710,4 +3708,13 @@ body .file-explorer-changes-panel {
   --changes-indent-line: var(--changes-tree-indent-line);
   --changes-path-text: var(--30-preferences-changes-file-explorer-changes-panel-changes-path-text-31);
   --changes-icon-text: var(--changes-tree-icon-text);
+}
+
+[data-js-debug-refill-controls] {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+[data-stats-refill-wait] {
+  padding: 1rem;
 }

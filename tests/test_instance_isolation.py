@@ -24,7 +24,7 @@ from tools.instance_isolation import resolve_direct_launch_plan
 from tools.instance_isolation import resolve_row_plan
 from tools.instance_isolation import scan_port
 from tools.instance_isolation import synthetic_test_environment
-from yomux_lib.infra.root_paths import YolomuxRoots
+from yomux_lib.infra.root_paths import YomuxRoots
 
 SHORT_TEMP_ROOT = Path("/tmp/yi")
 
@@ -443,7 +443,7 @@ def test_legacy_individual_overrides_are_left_to_the_product_resolver(tmp_path: 
 def test_startup_path_line_names_auto_derived_root_and_resolved_paths(tmp_path: Path):
     resolution = resolve_instance_environment(17775, {}, platform="Linux", tempdir=SHORT_TEMP_ROOT)
     root = Path(resolution.environment[YOLOMUX_ROOT_ENV])
-    paths = YolomuxRoots(root / "config", root / "state", root / "cache", root / "codex", root / "runtime", root)
+    paths = YomuxRoots(root / "config", root / "state", root / "cache", root / "codex", root / "runtime", root)
 
     line = cli.startup_path_line(17775, environ=resolution.environment, roots=paths)
 
@@ -455,7 +455,7 @@ def test_startup_path_line_names_auto_derived_root_and_resolved_paths(tmp_path: 
 
 def test_startup_path_line_names_explicit_root(tmp_path: Path):
     root = tmp_path / "explicit-root"
-    paths = YolomuxRoots(root / "config", root / "state", root / "cache", root / "codex", root / "runtime", root)
+    paths = YomuxRoots(root / "config", root / "state", root / "cache", root / "codex", root / "runtime", root)
 
     line = cli.startup_path_line(17775, environ={YOLOMUX_ROOT_ENV: str(root)}, roots=paths)
 
@@ -467,7 +467,7 @@ def test_startup_path_line_explains_shared_config_runtime_launch(tmp_path: Path)
     state = tmp_path / "shared-state"
     cache = tmp_path / "shared-cache"
     runtime = tmp_path / "private-runtime"
-    paths = YolomuxRoots(config, state, cache, tmp_path / "codex", runtime)
+    paths = YomuxRoots(config, state, cache, tmp_path / "codex", runtime)
     environ = {
         "YOLOMUX_CONFIG_DIR": str(config),
         "YOLOMUX_RUNTIME_DIR": str(runtime),

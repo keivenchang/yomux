@@ -656,7 +656,7 @@ func topProcessMemory(rows []ProcessCensusRow) []ProcessCensusRow {
 		binary := normalizeHostBinary(row.Binary)
 		if binary != "" && row.RSSBytes > 0 {
 			key := binary
-			if isYoloMuxGoBinary(binary) && row.Identity != "" {
+			if isYomuxGoBinary(binary) && row.Identity != "" {
 				key = hostProcessInstanceSeriesKey(binary, row.Identity)
 			}
 			totals[key] += row.RSSBytes

@@ -60,7 +60,7 @@ def control_socket_path(token: str | None = None, pid: int | None = None) -> Pat
     )
 
 
-def send_yolomux_control_request(owner: dict[str, Any] | None, request: dict[str, Any], timeout: float = 2.0) -> dict[str, Any]:
+def send_yomux_control_request(owner: dict[str, Any] | None, request: dict[str, Any], timeout: float = 2.0) -> dict[str, Any]:
     socket_path = owner.get("control_socket") if isinstance(owner, dict) else None
     if not isinstance(socket_path, str) or not socket_path:
         return {"ok": False, "error": "owner has no control socket"}
@@ -253,7 +253,7 @@ def reclaim_own_predecessor_control_sockets(
     return rows
 
 
-class YolomuxControlServer:
+class YomuxControlServer:
     def __init__(self, handler: Callable[[dict[str, Any]], dict[str, Any]], *, host_identity: HostIdentity | None = None):
         self.handler = handler
         self.host_identity = host_identity or current_host_identity()

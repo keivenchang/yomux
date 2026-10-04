@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/keivenchang/yomux/internal/productenv"
 	"github.com/keivenchang/yomux/internal/stats"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -289,7 +290,7 @@ func validateSyntheticStatsTree(root string) error {
 }
 
 func validateSyntheticTmuxSocket(root string) error {
-	socket := strings.TrimSpace(os.Getenv("YOLOMUX_TMUX_SOCKET"))
+	socket := strings.TrimSpace(productenv.Value("YOLOMUX_TMUX_SOCKET"))
 	if socket == "" {
 		return errors.New("synthetic stats requires an explicit fixture-owned YOLOMUX_TMUX_SOCKET")
 	}

@@ -94,7 +94,7 @@ def compact_markdown_for_prompt(markdown: str, max_chars: int) -> str:
     return truncate_text(text, max_chars)
 
 
-def yolomux_help_primer(locale: str = "en") -> str:
+def yomux_help_primer(locale: str = "en") -> str:
     if locale not in _YOAGENT_HELP_PRIMER_CACHE:
         _YOAGENT_HELP_PRIMER_CACHE[locale] = "\n".join([
             server_string(locale, "yoagent.help.primer"),
@@ -1036,7 +1036,7 @@ def yoagent_concepts_prompt_block(locale: str = "en") -> list[str]:
     return [
         f"{server_string(locale, 'yoagent.prompt.contextGuard')} {server_string(locale, 'yoagent.prompt.toolOutputGuard')}".strip(),
         server_string(locale, "yoagent.prompt.concepts"),
-        yolomux_help_primer(locale),
+        yomux_help_primer(locale),
     ]
 
 

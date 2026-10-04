@@ -2245,21 +2245,41 @@ function windowStepButtonFromEvent(event) {
   return event?.target?.closest?.('[data-window-index]') || event?.target?.closest?.('[data-window-dir]') || null;
 }
 
-function syncTmuxWindowBarOverflow(session) {
-  document.body?.querySelectorAll?.(`[data-tmux-window-bar="${cssEscape(session)}"]`)?.forEach(bar => {
+function collectSessionControlNodes(sessionNames = sessions, roots = null) {
+  const controls = new Map(Array.from(sessionNames, session => [session, {yoloButtons: [], terminalTabs: [], windowBars: []}]));
+  const selector = '[data-yolo-session], [data-tab][data-tab-name="terminal"], [data-tmux-window-bar]';
+  const seen = new Set();
+  const collect = root => {
+    for (const node of root?.querySelectorAll?.(selector) || []) {
+      if (seen.has(node)) continue;
+      seen.add(node);
+      controls.get(node.dataset.yoloSession)?.yoloButtons.push(node);
+      if (node.dataset.tabName === 'terminal') controls.get(node.dataset.tab)?.terminalTabs.push(node);
+      controls.get(node.dataset.tmuxWindowBar)?.windowBars.push(node);
+    }
+  };
+  for (const root of roots || [document.body || document]) collect(root);
+  // A pane can be built before attachment. Include that pane without rescanning attached Finder trees.
+  for (const session of controls.keys()) {
+    const panel = document.getElementById(panelDomId(session));
+    if (panel && !document.body?.contains?.(panel)) collect(panel);
+  }
+  return controls;
+}
+
+function syncTmuxWindowBarOverflow(session, bars = null) {
+  const currentBars = bars || collectSessionControlNodes([session]).get(session).windowBars;
+  currentBars.forEach(bar => {
     if (bar?.dataset?.tmuxWindowBarContext === 'info-bar') return;
     if (!bar || bar.dataset.tmuxWindowLabelMode === 'numbers') return;
     if (bar.scrollWidth > bar.clientWidth + 1) bar.dataset.tmuxWindowLabelMode = 'numbers';
   });
 }
 
-function updatePanelWindowStepButtons(session, info) {
+function updatePanelWindowStepButtons(session, info, controlNodes = null) {
   const panel = document.getElementById(panelDomId(session));
-  const barSelector = `[data-tmux-window-bar="${cssEscape(session)}"]`;
-  const bars = [...new Set([
-    ...(document.body?.querySelectorAll?.(barSelector) || []),
-    ...(panel?.querySelectorAll?.(barSelector) || []),
-  ])];
+  const nodes = controlNodes || collectSessionControlNodes([session]).get(session);
+  const bars = nodes.windowBars;
   const html = tmuxWindowBarHtml(session, info, {infoBar: true});
   let changed = false;
   if (!html) {
@@ -2267,7 +2287,8 @@ function updatePanelWindowStepButtons(session, info) {
       bar.remove();
       changed = true;
     });
-    syncTmuxWindowBarOverflow(session);
+    bars.length = 0;
+    syncTmuxWindowBarOverflow(session, bars);
     if (changed) schedulePaneInfoBarMetaOverflowSync(panel);
     return;
   }
@@ -2286,27 +2307,29 @@ function updatePanelWindowStepButtons(session, info) {
     if (controls?.parentElement === row) row.insertBefore(replacement, controls);
     else if (close?.parentElement === row) row.insertBefore(replacement, close);
     else row.appendChild(replacement);
+    bars.push(replacement);
     changed = true;
     return true;
   };
   if (!bars.length) {
     insertBarIntoDetailRow();
-    syncTmuxWindowBarOverflow(session);
+    syncTmuxWindowBarOverflow(session, bars);
     if (changed) scheduleAgentWindowActivityAnimationSync(panel || document);
     if (changed) schedulePaneInfoBarMetaOverflowSync(panel);
     return;
   }
-  bars.forEach(existing => {
+  bars.forEach((existing, index) => {
     const existingSignature = agentWindowActivityMarkupSignature(existing.outerHTML);
     const nextSignature = agentWindowActivityMarkupSignature(html);
     if (existingSignature === nextSignature) return;
     const replacement = replacementFromHtml();
     if (replacement) {
       existing.replaceWith(replacement);
+      bars[index] = replacement;
       changed = true;
     }
   });
-  syncTmuxWindowBarOverflow(session);
+  syncTmuxWindowBarOverflow(session, bars);
   if (changed) scheduleAgentWindowActivityAnimationSync(panel || document);
   if (changed) schedulePaneInfoBarMetaOverflowSync(panel);
 }
@@ -2326,9 +2349,10 @@ function processLabelFromCommand(command) {
   return base;
 }
 
-function updatePanelControlLabels(session, info) {
-  const button = document.querySelector(`[data-tab="${cssEscape(session)}"][data-tab-name="terminal"]`);
-  updatePanelWindowStepButtons(session, info);
+function updatePanelControlLabels(session, info, controlNodes = null) {
+  const nodes = controlNodes || collectSessionControlNodes([session]).get(session);
+  const button = nodes.terminalTabs[0];
+  updatePanelWindowStepButtons(session, info, nodes);
   if (button) {
     const title = terminalTabTitle(session, info);
     button.title = title;

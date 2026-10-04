@@ -3668,6 +3668,8 @@ body.app-vw-lte-980 .tabs {
   touch-action: manipulation;
   white-space: nowrap;
   user-select: none;
+  /* Bound each row's work without tracking thousands of offscreen intersections every frame. */
+  contain: layout style paint;
 }
 .file-tree-row.compact {
   line-height: 1.05;
@@ -4008,11 +4010,13 @@ body.app-vw-lte-980 .tabs {
   font-weight: 800;
   line-height: 1;
 }
-.file-tree-row:has(> .file-tree-diff:not([hidden])) > .file-tree-diff,
-.file-tree-row:not(:has(> .file-tree-diff:not([hidden]))):has(> .file-tree-dir-count:not([hidden])) > .file-tree-dir-count,
-.file-tree-row:not(:has(> .file-tree-diff:not([hidden]))):not(:has(> .file-tree-dir-count:not([hidden]))):has(> .file-tree-git-status:not([hidden])) > .file-tree-git-status,
-.file-tree-row:not(:has(> .file-tree-diff:not([hidden]))):not(:has(> .file-tree-dir-count:not([hidden]))):not(:has(> .file-tree-git-status:not([hidden]))):has(> .file-tree-date:not([hidden])) > .file-tree-date {
+/* The shared row builder orders metadata columns. Sibling matching keeps visibility changes
+   local to that row; relational selectors invalidated metadata across large progressive trees. */
+.file-tree-row > :is(.file-tree-diff, .file-tree-dir-count, .file-tree-git-status, .file-tree-date) {
   margin-inline-start: auto;
+}
+.file-tree-row > :is(.file-tree-diff, .file-tree-dir-count, .file-tree-git-status):not([hidden]) ~ :is(.file-tree-diff, .file-tree-dir-count, .file-tree-git-status, .file-tree-date) {
+  margin-inline-start: 0;
 }
 .file-tree-agent .agent-icon {
   width: calc(var(--file-explorer-font-size) + 3px);

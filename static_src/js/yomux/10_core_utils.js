@@ -1,3 +1,24 @@
+const elementHtmlState = new WeakMap();
+
+function setAttributeIfChanged(node, name, value) {
+  const next = value == null ? null : String(value);
+  if (node.getAttribute(name) === next) return;
+  if (next == null) node.removeAttribute(name);
+  else node.setAttribute(name, next);
+}
+
+function setInnerHtmlIfChanged(node, source, beforeReplace = null) {
+  const current = node.innerHTML;
+  const previous = elementHtmlState.get(node);
+  // SVG closing tags and escaped entities serialize differently from generated HTML.
+  // Compare the last browser serialization too, while still repairing external edits.
+  if (current === source || (previous?.source === source && previous.serialized === current)) return false;
+  beforeReplace?.(node);
+  node.innerHTML = source;
+  elementHtmlState.set(node, {source, serialized: node.innerHTML});
+  return true;
+}
+
 const yomuxDragMimeTypes = Object.freeze({
   file: 'application/x-yomux-file',
   session: 'application/x-yomux-session',
@@ -387,6 +408,7 @@ function applyApiRequestIdHeader(url, requestOptions) {
 }
 
 const apiFetchDefaultDeadlineMs = 15000;
+const apiFetchFilesystemMetadataDeadlineMs = 60000;
 const apiFetchLongOperationDeadlineMs = 300000;
 // A 202 means the server ACCEPTED the work and keeps at it for its own
 // `FS_BATCH_OPERATION_DEADLINE_SECONDS` (app.py). Quitting sooner abandons work that is still
@@ -506,6 +528,7 @@ function apiFetchDeadlineMs(url, options = {}) {
   }
   if (typeof FormData === 'function' && options.body instanceof FormData) return apiFetchLongOperationDeadlineMs;
   const path = String(url || '').split('?', 1)[0];
+  if (path === '/api/fs/git-history' || path === '/api/watch/roots') return apiFetchFilesystemMetadataDeadlineMs;
   if (path.endsWith('/api/self-update')) return apiFetchLongOperationDeadlineMs;
   return apiFetchDefaultDeadlineMs;
 }
@@ -642,6 +665,7 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
       const event = recordApiDebugEvent(url, method, startedAt, {
         status: response.status,
         ok: response.ok,
+        deliveryOutcome: 'unsupported',
         requestBytes,
         requestId,
       });
@@ -1954,7 +1978,7 @@ function recordJsDebugEvent(type, payload = {}, options = {}) {
 function jsDebugFailureClassification(event) {
   const type = String(event?.type || '');
   if (type === 'unhandledrejection') return {releaseBlocking: true, kind: 'rejection', observationKind: type};
-  const apiFailure = type === 'api' && event?.deliveryOutcome !== 'retired' && (
+  const apiFailure = type === 'api' && !['retired', 'unsupported'].includes(event?.deliveryOutcome) && (
     event?.ok === false
     || (Number.isFinite(event?.status) && event.status >= 400)
     || Boolean(event?.error)
@@ -4180,11 +4204,13 @@ function setFocusedTerminalMeasured(session, options = {}) {
   clearPendingFileEditorFocusExcept(session);
   if (isTmuxSession(session)) lastFocusedTmuxSession = session;
   dismissAttentionAlertsForSession(session);
-  updateFocusOnlyChrome();
+  if (options.updateChrome !== false) updateFocusOnlyChrome();
   if (options.userInitiated === true) {
     acknowledgeTerminalAttentionFromUserAction(session, null, options);
-    rememberFileExplorerExplicitSyncSession(session);
-    scheduleFileExplorerActiveTabSync(session, {explicit: true});
+    if (options.syncFinder !== false) {
+      rememberFileExplorerExplicitSyncSession(session);
+      scheduleFileExplorerActiveTabSync(session, {explicit: true});
+    }
     recordFocusNavTransition(previousItem, session);
   }
   else recordAutoFocusNav(session, previousItem);
@@ -4209,7 +4235,7 @@ function applyUserInitiatedPanelFocus(item, previousItem, options = {}) {
     scheduleFileExplorerActiveFileReveal(activeFile, {explicit: true});
   }
   const explicitFinderSync = isTmuxSession(item) || isFileEditorItem(item);
-  if (!isFileExplorerItem(item)) scheduleFileExplorerActiveTabSync(item, {explicit: explicitFinderSync});
+  if (!isFileExplorerItem(item) && options.deferSideSync !== true) scheduleFileExplorerActiveTabSync(item, {explicit: explicitFinderSync});
   if (previousItem !== item) recordFocusNavTransition(previousItem, item);
 }
 
@@ -4271,30 +4297,28 @@ function focusTerminalFromUserAction(session, delay = 0, options = {}) {
   // A tab detail opened from a touch action has no hover-leave event. Terminal engagement is an
   // explicit change of context, so it must dismiss that detail before focusing the xterm surface.
   if (typeof closeOtherSessionPopovers === 'function') closeOtherSessionPopovers(null, {force: true});
-  noteFileExplorerChangesSessionInteraction(session);
-  setFocusedTerminal(session, {...options, userInitiated: true});
+  setFocusedTerminal(session, {...options, userInitiated: true, syncFinder: false});
   focusTerminalDom(session, delay);
+  if (options.syncFinder !== false) {
+    rememberFileExplorerExplicitSyncSession(session);
+    scheduleTabSwitchPhaseTwo(nextTabSwitchHighlightGeneration(), () => syncFileExplorerAfterTerminalActivation(session));
+  }
 }
 
 function focusTerminalDom(session, delay = 0) {
   const run = () => {
-    const scrollX = window.scrollX;
-    const scrollY = window.scrollY;
     const item = terminals.get(session);
     const textarea = item?.container?.querySelector?.('textarea.xterm-helper-textarea');
     recordTerminalMobileInputTrace(session, 'focus-attempt', {
       textareaPresent: Boolean(textarea),
       textareaFocused: document.activeElement === textarea,
     });
+    // The pinned xterm focuses with preventScroll; measuring the document here flushes sibling tree layout.
     item?.term?.focus?.();
     recordTerminalMobileInputTrace(session, 'touch-focus-result', {
       textareaPresent: Boolean(textarea),
       textareaFocused: document.activeElement === textarea,
     });
-    // xterm focuses its hidden textarea without a preventScroll option. In a full-height app with
-    // a tall sibling pane, Chrome can scroll the otherwise overflow-hidden document and move the
-    // entire top bar above the viewport when switching terminal tabs.
-    if (window.scrollX !== scrollX || window.scrollY !== scrollY) window.scrollTo(scrollX, scrollY);
   };
   if (delay > 0) setTimeout(run, delay);
   else run();
@@ -4362,10 +4386,12 @@ function disclosureTriangleHtml(expanded, className = '', attrs = '') {
 
 function setDisclosureTriangleElement(element, expanded) {
   if (!element) return;
-  element.classList?.add?.('ui-disclosure-triangle');
-  element.dataset.disclosureExpanded = expanded === true ? 'true' : 'false';
-  element.setAttribute?.('aria-hidden', 'true');
-  element.textContent = disclosureTriangleGlyph(expanded);
+  if (!element.classList?.contains?.('ui-disclosure-triangle')) element.classList?.add?.('ui-disclosure-triangle');
+  const flag = expanded === true ? 'true' : 'false';
+  if (element.dataset.disclosureExpanded !== flag) element.dataset.disclosureExpanded = flag;
+  if (element.getAttribute?.('aria-hidden') !== 'true') element.setAttribute?.('aria-hidden', 'true');
+  const glyph = disclosureTriangleGlyph(expanded);
+  if (element.textContent !== glyph || element.children?.length) element.textContent = glyph;
 }
 
 function stripTrailingEllipsisText(value) {
@@ -4622,17 +4648,52 @@ function ownedElementScrollPositionMatches(element, expected) {
   return current.top === Number(expected.top || 0) && current.left === Number(expected.left || 0);
 }
 
-const previewScrollUserOwnershipGenerations = new WeakMap();
+const elementScrollInputOwnership = new WeakMap();
+const activeElementScrollInputs = new Map();
+const previewScrollRecentOwnershipMs = 2000;
 
 function previewScrollUserOwnershipGeneration(element) {
-  return Number(previewScrollUserOwnershipGenerations.get(element) || 0);
+  return Number(elementScrollInputOwnership.get(element)?.generation || 0);
 }
 
 function claimPreviewScrollUserOwnership(element) {
   if (!element) return 0;
   const generation = previewScrollUserOwnershipGeneration(element) + 1;
-  previewScrollUserOwnershipGenerations.set(element, generation);
+  const activeInputs = elementScrollInputOwnership.get(element)?.activeInputs || new Set();
+  elementScrollInputOwnership.set(element, {generation, claimedAt: Date.now(), activeInputs});
   return generation;
+}
+
+function claimElementScrollInputEvent(element, event) {
+  const pointer = event?.type?.startsWith('pointer');
+  const touch = event?.type?.startsWith('touch');
+  const keys = pointer ? [`pointer:${event.pointerId}`]
+    : touch ? Array.from(event.changedTouches || [], point => `touch:${point.identifier}`) : [];
+  const finished = /(?:up|end|cancel)$/.test(event?.type || '');
+  for (const key of finished ? keys : []) {
+    const original = activeElementScrollInputs.get(key);
+    if (original) {
+      elementScrollInputOwnership.get(original)?.activeInputs.delete(key);
+      claimPreviewScrollUserOwnership(original);
+      activeElementScrollInputs.delete(key);
+    }
+  }
+  if (!element) return;
+  claimPreviewScrollUserOwnership(element);
+  for (const key of /(?:down|start)$/.test(event?.type || '') ? keys : []) {
+    const previous = activeElementScrollInputs.get(key);
+    if (previous) elementScrollInputOwnership.get(previous)?.activeInputs.delete(key);
+    activeElementScrollInputs.set(key, element);
+    elementScrollInputOwnership.get(element).activeInputs.add(key);
+  }
+}
+
+function releaseActiveElementScrollInputs() {
+  for (const [key, element] of activeElementScrollInputs) {
+    elementScrollInputOwnership.get(element)?.activeInputs.delete(key);
+    claimPreviewScrollUserOwnership(element);
+  }
+  activeElementScrollInputs.clear();
 }
 
 function deferredElementScrollExpectation(element) {
@@ -4642,13 +4703,13 @@ function deferredElementScrollExpectation(element) {
   };
 }
 
-function deferredElementScrollExpectationMatches(element, expected) {
-  return ownedElementScrollPositionMatches(element, expected)
+function deferredElementScrollExpectationMatches(element, expected, requireUnchangedPosition = true) {
+  return (!requireUnchangedPosition || ownedElementScrollPositionMatches(element, expected))
     && previewScrollUserOwnershipGeneration(element) === Number(expected?.userGeneration || 0);
 }
 
 function createDeferredElementScrollOwner(...elements) {
-  const state = {expected: new WeakMap(), superseded: new WeakSet()};
+  const state = {expected: new WeakMap(), superseded: new WeakSet(), requireUnchangedPosition: true};
   for (const element of elements) {
     if (element) state.expected.set(element, deferredElementScrollExpectation(element));
   }
@@ -4670,7 +4731,7 @@ function previewScrollUserOwnsElementNow(element) {
   const ended = previewScrollTraceState.last;
   return Boolean(
     ownsElement(ended)
-    && Date.now() - Math.max(Number(ended.endedAt || 0), Number(ended.lastScrollAt || 0)) <= 2000
+    && Date.now() - Math.max(Number(ended.endedAt || 0), Number(ended.lastScrollAt || 0)) <= previewScrollRecentOwnershipMs
   );
 }
 
@@ -4682,10 +4743,22 @@ function createPassiveDeferredElementScrollOwner(...elements) {
   return state;
 }
 
+function createInputOwnedDeferredElementScrollOwner(...elements) {
+  const state = createPassiveDeferredElementScrollOwner(...elements);
+  for (const element of elements) {
+    const input = elementScrollInputOwnership.get(element);
+    if (input && (input.activeInputs.size || Date.now() - input.claimedAt <= previewScrollRecentOwnershipMs)) state.superseded.add(element);
+  }
+  // Surfaces with native input ownership can shrink during async rendering. Their
+  // temporary scroll clamp is part of the transaction, rather than a user gesture.
+  state.requireUnchangedPosition = false;
+  return state;
+}
+
 function deferredElementScrollOwnerOwnsElement(state, element) {
   if (!state || !element || state.superseded.has(element)) return false;
   const expected = state.expected.get(element);
-  if (expected && !deferredElementScrollExpectationMatches(element, expected)) {
+  if (expected && !deferredElementScrollExpectationMatches(element, expected, state.requireUnchangedPosition !== false)) {
     state.superseded.add(element);
     return false;
   }
@@ -5241,22 +5314,26 @@ function terminalRowStartsNewUrlToken(text) {
 // (not a quote/bracket). Returns {indent, text} with the indent stripped, or null. isWrapped rows are
 // not hanging continuations (they are real terminal soft-wraps and are handled by the isWrapped sweep).
 function terminalRowHangingShape(buffer, index) {
-  const line = buffer.getLine(index);
-  if (!line || line.isWrapped === true) return null;
-  const raw = terminalBufferLineText(line);
-  const match = /^(\s*)([^\s<>"'`])/.exec(raw);
-  if (!match) return null;
-  const text = raw.slice(match[1].length);
-  if (!text || terminalRowStartsNewUrlToken(text)) return null;
-  return {indent: match[1].length, text};
+  return terminalMemoizedRowShape(buffer, 'hanging', index, () => {
+    const line = buffer.getLine(index);
+    if (!line || line.isWrapped === true) return null;
+    const raw = terminalBufferLineText(line);
+    const match = /^(\s*)([^\s<>"'`])/.exec(raw);
+    if (!match) return null;
+    const text = raw.slice(match[1].length);
+    if (!text || terminalRowStartsNewUrlToken(text)) return null;
+    return {indent: match[1].length, text};
+  });
 }
 
 function terminalQuoteGutterShape(buffer, index) {
-  const line = buffer.getLine(index);
-  if (!line || line.isWrapped === true) return null;
-  const raw = terminalBufferLineText(line);
-  const match = /^(\s*[│┃|]\s+)([^\s<>'"`].*)$/.exec(raw);
-  return match ? {prefix: match[1], indent: match[1].length, text: match[2]} : null;
+  return terminalMemoizedRowShape(buffer, 'quote', index, () => {
+    const line = buffer.getLine(index);
+    if (!line || line.isWrapped === true) return null;
+    const raw = terminalBufferLineText(line);
+    const match = /^(\s*[│┃|]\s+)([^\s<>'"`].*)$/.exec(raw);
+    return match ? {prefix: match[1], indent: match[1].length, text: match[2]} : null;
+  });
 }
 
 function terminalQuoteGutterUrlBaseContext(buffer, index, cols) {
@@ -5266,23 +5343,27 @@ function terminalQuoteGutterUrlBaseContext(buffer, index, cols) {
 }
 
 function terminalRepeatedGutterUrlBaseContext(buffer, index, cols) {
-  const line = buffer.getLine(index);
-  const raw = terminalBufferLineText(line);
-  const match = /^(\s*)(https?:\/\/|file:\/\/|www\.)/i.exec(raw);
-  if (!match || !match[1]) return null;
-  const indent = match[1].length;
-  const text = raw.slice(indent);
-  if (!['/', '-', '.', '?', '&', '=', '#', '%'].includes(text.at(-1))) return null;
-  if (!terminalRowReachesRightEdge(line, cols, 2) && !terminalTailIsUnterminatedUrl(text)) return null;
-  return {indent, text};
+  return terminalMemoizedRowShape(buffer, 'repeated-base', index, () => {
+    const line = buffer.getLine(index);
+    const raw = terminalBufferLineText(line);
+    const match = /^(\s*)(https?:\/\/|file:\/\/|www\.)/i.exec(raw);
+    if (!match || !match[1]) return null;
+    const indent = match[1].length;
+    const text = raw.slice(indent);
+    if (!['/', '-', '.', '?', '&', '=', '#', '%'].includes(text.at(-1))) return null;
+    if (!terminalRowReachesRightEdge(line, cols, 2) && !terminalTailIsUnterminatedUrl(text)) return null;
+    return {indent, text};
+  });
 }
 
 function terminalZeroIndentUrlBaseContext(buffer, index, cols) {
-  const line = buffer.getLine(index);
-  const text = terminalBufferLineText(line);
-  if (!/^https?:\/\/|^file:\/\/|^www\./i.test(text) || !terminalRowReachesRightEdge(line, cols, 2)) return null;
-  if (!['/', '-', '.', '?', '&', '=', '#', '%'].includes(text.at(-1))) return null;
-  return {text};
+  return terminalMemoizedRowShape(buffer, 'zero-base', index, () => {
+    const line = buffer.getLine(index);
+    const text = terminalBufferLineText(line);
+    if (!/^https?:\/\/|^file:\/\/|^www\./i.test(text) || !terminalRowReachesRightEdge(line, cols, 2)) return null;
+    if (!['/', '-', '.', '?', '&', '=', '#', '%'].includes(text.at(-1))) return null;
+    return {text};
+  });
 }
 
 function terminalUrlContinuationTextIsStrong(baseText, continuationText, requireSplitDelimiter = false) {
@@ -5317,7 +5398,7 @@ function terminalRowAllowsRepeatedGutterUrlContinuation(buffer, index, cols, sha
   // OpenCode reprints its gutter on every hard-wrapped row. Validate the complete adjacent chain from
   // its original URL row so a shorter middle row cannot make the forward sweep lose its context.
   let baseIndex = index - 1;
-  while (baseIndex >= 0) {
+  while (baseIndex >= Math.max(0, index - terminalWrappedUrlMaxRows + 1)) {
     const context = terminalRepeatedGutterUrlBaseContext(buffer, baseIndex, cols);
     if (!context) {
       const candidate = terminalRowHangingShape(buffer, baseIndex);
@@ -5341,7 +5422,7 @@ function terminalRowAllowsRepeatedGutterUrlContinuation(buffer, index, cols, sha
 
 function terminalQuoteGutterUrlBaseBefore(buffer, index, cols, shape) {
   if (!shape?.prefix || index < 1) return null;
-  for (let baseIndex = index - 1; baseIndex >= 0; baseIndex -= 1) {
+  for (let baseIndex = index - 1; baseIndex >= Math.max(0, index - terminalWrappedUrlMaxRows + 1); baseIndex -= 1) {
     const context = terminalQuoteGutterUrlBaseContext(buffer, baseIndex, cols);
     if (context) return context.prefix === shape.prefix ? {index: baseIndex, context} : null;
     const candidate = terminalQuoteGutterShape(buffer, baseIndex);
@@ -5352,7 +5433,7 @@ function terminalQuoteGutterUrlBaseBefore(buffer, index, cols, shape) {
 
 function terminalRowAllowsZeroIndentUrlContinuation(buffer, index, cols) {
   if (index < 1) return false;
-  for (let baseIndex = index - 1; baseIndex >= 0; baseIndex -= 1) {
+  for (let baseIndex = index - 1; baseIndex >= Math.max(0, index - terminalWrappedUrlMaxRows + 1); baseIndex -= 1) {
     const context = terminalZeroIndentUrlBaseContext(buffer, baseIndex, cols);
     if (!context) continue;
     let joined = context.text;
@@ -5399,8 +5480,40 @@ function terminalRowIsHangingUrlContinuation(buffer, index, cols, depth = 0) {
   return terminalRowIsHangingUrlContinuation(buffer, index - 1, cols, depth + 1);
 }
 
-function terminalWrappedLineGroup(term, y) {
-  const buffer = term.buffer?.active;
+// One discovery pass owns translated rows and parsed shapes; no cache survives a content revision.
+function terminalReferenceScanContext(term) {
+  const source = term.buffer?.active;
+  const lines = new Map();
+  const shapes = new Map();
+  const buffer = {
+    getLine(index) {
+      if (!lines.has(index)) {
+        const line = source?.getLine?.(index);
+        const translated = line?.translateToString?.(true) || '';
+        const text = translated.replace(/\s+$/, '');
+        lines.set(index, line ? {
+          isWrapped: line.isWrapped,
+          length: line.length,
+          terminalEndsWithWhitespace: /\s$/.test(translated),
+          translateToString: () => text,
+        } : null);
+      }
+      return lines.get(index);
+    },
+    shapes,
+  };
+  return {buffer};
+}
+
+function terminalMemoizedRowShape(buffer, kind, index, parse) {
+  if (!buffer.shapes) return parse();
+  const key = `${kind}:${index}`;
+  if (!buffer.shapes.has(key)) buffer.shapes.set(key, parse());
+  return buffer.shapes.get(key);
+}
+
+function terminalWrappedLineGroup(term, y, scan = terminalReferenceScanContext(term)) {
+  const buffer = scan.buffer;
   if (!buffer?.getLine) return null;
   // terminal width gates the hanging-URL stitch (a clipped URL fills to the right edge).
   const cols = Number(term.cols) || 0;
@@ -5413,16 +5526,35 @@ function terminalWrappedLineGroup(term, y) {
   // Walk back to the logical line's first row: over terminal soft-wraps (isWrapped) AND over
   // hanging-indent URL continuations (agent-hard-wrapped URLs whose continuation is its own
   // non-wrapped, indented row). So querying ANY row of the wrapped URL yields the same full group.
+  const continues = index => {
+    if (index < 1) return false;
+    if (buffer.getLine(index)?.isWrapped === true) return true;
+    if (allowsHangingIndent && terminalRowIsHangingUrlContinuation(buffer, index, cols)) return true;
+    if (allowsQuoteGutter && terminalQuoteGutterUrlBaseBefore(buffer, index, cols, terminalQuoteGutterShape(buffer, index))) return true;
+    return allowsRepeatedGutter && terminalRowAllowsZeroIndentUrlContinuation(buffer, index, cols);
+  };
   let start = requested;
-  for (;;) {
-    if (start > 0 && buffer.getLine(start)?.isWrapped === true) { start -= 1; continue; }
-    if (allowsHangingIndent && start > 0 && terminalRowIsHangingUrlContinuation(buffer, start, cols)) { start -= 1; continue; }
-    if (allowsQuoteGutter && start > 0) {
+  while (requested - start < terminalWrappedUrlMaxRows - 1 && continues(start)) start -= 1;
+  const atScanBoundary = requested - start === terminalWrappedUrlMaxRows - 1;
+  const boundaryLooksContinued = atScanBoundary && (
+    buffer.getLine(start)?.isWrapped === true
+    || (allowsHangingIndent && terminalRowHangingShape(buffer, start)?.indent > 0)
+    || (allowsQuoteGutter && Boolean(terminalQuoteGutterShape(buffer, start)) && !terminalQuoteGutterUrlBaseContext(buffer, start, cols))
+    || (allowsRepeatedGutter && terminalRowHangingShape(buffer, start)?.indent > 0 && !terminalRepeatedGutterUrlBaseContext(buffer, start, cols))
+    || (allowsRepeatedGutter && terminalRowAllowsZeroIndentUrlContinuation(buffer, start, cols))
+  );
+  const headIncomplete = continues(start) || boundaryLooksContinued;
+  let headStructuralPrefixLength = 0;
+  if (headIncomplete && buffer.getLine(start)?.isWrapped !== true) {
+    const hangingShape = allowsHangingIndent ? terminalRowHangingShape(buffer, start) : null;
+    if (hangingShape && terminalRowIsHangingUrlContinuation(buffer, start, cols)) {
+      headStructuralPrefixLength = hangingShape.indent;
+    } else if (allowsQuoteGutter) {
       const quoteShape = terminalQuoteGutterShape(buffer, start);
-      if (terminalQuoteGutterUrlBaseBefore(buffer, start, cols, quoteShape)) { start -= 1; continue; }
+      if (quoteShape && terminalQuoteGutterUrlBaseBefore(buffer, start, cols, quoteShape)) {
+        headStructuralPrefixLength = quoteShape.indent;
+      }
     }
-    if (allowsRepeatedGutter && start > 0 && terminalRowAllowsZeroIndentUrlContinuation(buffer, start, cols)) { start -= 1; continue; }
-    break;
   }
   // Forward pass from start. Include soft-wrap rows (indent 0) and, while the joined text still ends
   // mid-URL, hanging-indent continuation rows (indent stripped for link matching, but recorded so the
@@ -5433,6 +5565,8 @@ function terminalWrappedLineGroup(term, y) {
   let index = start;
   const repeatedGutterGroup = allowsRepeatedGutter && Boolean(terminalRepeatedGutterUrlBaseContext(buffer, start, cols));
   const zeroIndentGroup = allowsRepeatedGutter && Boolean(terminalZeroIndentUrlBaseContext(buffer, start, cols));
+  let tailIncomplete = false;
+  let boundaryRow = null;
   const quoteGutterBase = allowsQuoteGutter ? terminalQuoteGutterUrlBaseContext(buffer, start, cols) : null;
   for (;;) {
     let text;
@@ -5465,7 +5599,7 @@ function terminalWrappedLineGroup(term, y) {
         && (!terminalRowIsRepeatedGutterUrlRow(buffer, index, shape) || shape.indent === 4)
         && terminalUrlContinuationTextIsStrong(
           joined,
-          shape.text,
+          shape?.text,
           !(shape.indent === 4)
             && !terminalVisibleRowReachesRightEdge(buffer.getLine(index - 1), cols),
         );
@@ -5475,14 +5609,32 @@ function terminalWrappedLineGroup(term, y) {
     } else {
       break;
     }
-    rows.push({y: index + 1, text, indent, start: offset, end: offset + text.length});
+    // Inspect the boundary row using the same continuation rules before accepting a capped token.
+    if (rows.length === terminalWrappedUrlMaxRows) {
+      tailIncomplete = true;
+      boundaryRow = {
+        y: index + 1,
+        text,
+        indent,
+        startsAfterBoundary: buffer.getLine(index - 1)?.terminalEndsWithWhitespace === true,
+        terminalEndsWithWhitespace: buffer.getLine(index)?.terminalEndsWithWhitespace === true,
+      };
+      break;
+    }
+    rows.push({
+      y: index + 1,
+      text,
+      indent,
+      start: offset,
+      end: offset + text.length,
+      startsAfterBoundary: indent > 0 || buffer.getLine(index - 1)?.terminalEndsWithWhitespace === true,
+    });
     offset += text.length;
     joined += text;
     index += 1;
-    if (rows.length >= terminalWrappedUrlMaxRows) break;
     if (!buffer.getLine(index)) break;
   }
-  return {text: joined, rows, term};
+  return {text: joined, rows, term, buffer, headIncomplete, headStructuralPrefixLength, tailIncomplete, boundaryRow};
 }
 
 function terminalWrappedOffsetPosition(group, offset, endPosition = false) {
@@ -5539,34 +5691,89 @@ function terminalWrappedRange(group, startIndex, endIndex) {
 function terminalWrappedGroupTailMayContinue(term, group) {
   const lastRow = group?.rows?.[group.rows.length - 1];
   if (!lastRow) return false;
-  const buffer = term.buffer?.active;
+  const buffer = group.buffer || term.buffer?.active;
   const line = buffer?.getLine?.(lastRow.y - 1);
   if (!terminalRowReachesRightEdge(line, Number(term.cols) || 0)) return false;
   const nextLine = buffer?.getLine?.(lastRow.y);
   return nextLine?.isWrapped === true || !terminalBufferLineText(nextLine);
 }
 
+function terminalWrappedReferenceStartsIndependently(group, reference) {
+  const prefix = group.text.slice(0, reference.startIndex);
+  const lexicalPrefix = reference.type === 'file'
+    ? prefix.slice(Math.min(prefix.length, group.headStructuralPrefixLength || 0))
+    : prefix;
+  if (/[\s([{<"'`.,;:!?)}\]>]$/.test(lexicalPrefix)) return true;
+  if (group.headIncomplete && reference.type === 'url') {
+    return group.rows.some(row => row.start === reference.startIndex
+      && row.indent === 0
+      && terminalRowStartsNewUrlToken(group.text.slice(reference.startIndex)));
+  }
+  return group.rows.some(row => row.start === reference.startIndex
+    && row.startsAfterBoundary
+    && !group.headIncomplete);
+}
+
+function terminalWrappedReferenceEndsIndependently(text, reference) {
+  const suffix = text.slice(reference.endIndex);
+  if (!suffix) return false;
+  if (/^\s/.test(suffix)) return true;
+  if (reference.type === 'url') {
+    const delimiterRun = suffix.match(/^\S*/)?.[0] || '';
+    return Boolean(delimiterRun) && trimTerminalLinkCandidate(`${reference.text}${delimiterRun}`) === reference.text;
+  }
+  return /^[([{<)\]}>.,;:!?"'`]/.test(suffix);
+}
+
 function terminalCompletedWrappedReferences(term, group, references) {
-  if (!terminalWrappedGroupTailMayContinue(term, group)) return references;
-  return references.filter(reference => (
-    reference.type !== 'file' || Number(reference.endIndex) < group.text.length
-  ));
+  const pendingFileTail = terminalWrappedGroupTailMayContinue(term, group);
+  return references.filter(reference => {
+    if (group.headIncomplete && !terminalWrappedReferenceStartsIndependently(group, reference)) return false;
+    if (group.tailIncomplete && !terminalWrappedReferenceEndsIndependently(group.text, reference)) return false;
+    return !pendingFileTail || reference.type !== 'file' || Number(reference.endIndex) < group.text.length;
+  });
 }
 
 function terminalWrappedLineLinks(term, y) {
   return terminalWrappedLineReferences(term, y);
 }
 
-function terminalWrappedLineReferences(term, y) {
-  const group = terminalWrappedLineGroup(term, y);
+function terminalWrappedLineReferences(term, y, scan = terminalReferenceScanContext(term)) {
+  const group = terminalWrappedLineGroup(term, y, scan);
   if (!group) return [];
+  const queryIsInGroup = group.rows.some(row => row.y === y)
+    || group.boundaryRow?.y === y
+    || (group.boundaryRow?.terminalEndsWithWhitespace && group.boundaryRow.y + 1 === y);
+  if (!queryIsInGroup) return [];
   const references = group.rows.length === 1 && !group.rows[0].indent
     ? terminalTextReferences(group.text, (startIndex, endIndex) => ({
       start: {x: startIndex + 1, y},
       end: {x: endIndex, y},
     }), y)
-    : terminalTextReferences(group.text, (startIndex, endIndex) => terminalWrappedRange(group, startIndex, endIndex), y);
-  return terminalCompletedWrappedReferences(term, group, references);
+    : terminalTextReferences(group.text, (startIndex, endIndex) => terminalWrappedRange(group, startIndex, endIndex));
+  const complete = terminalCompletedWrappedReferences(term, group, references);
+  if (!group.boundaryRow) return complete;
+  const referencesOnIndependentRow = (row, startsAfterBoundary = false) => {
+    const rowGroup = {
+      text: row.text,
+      rows: [{y: row.y, text: row.text, indent: row.indent, start: 0, end: row.text.length, startsAfterBoundary}],
+      term,
+      buffer: group.buffer,
+      headIncomplete: false,
+      headStructuralPrefixLength: 0,
+      tailIncomplete: false,
+    };
+    return terminalTextReferences(row.text, (startIndex, endIndex) => terminalWrappedRange(rowGroup, startIndex, endIndex), row.y)
+      .filter(reference => terminalWrappedReferenceStartsIndependently(rowGroup, reference));
+  };
+  const boundary = group.boundaryRow;
+  const independent = referencesOnIndependentRow(boundary, boundary.startsAfterBoundary);
+  if (boundary.terminalEndsWithWhitespace) {
+    const nextLine = group.buffer.getLine(boundary.y);
+    const nextText = terminalBufferLineText(nextLine);
+    if (nextLine && nextText) independent.push(...referencesOnIndependentRow({y: boundary.y + 1, text: nextText, indent: 0}, true));
+  }
+  return [...complete, ...independent];
 }
 
 function terminalReferenceXtermLink(reference) {
@@ -5667,7 +5874,7 @@ function renderTerminalUrlReferenceUnderlines(term, container, reference) {
 
 async function terminalReferenceProviderLinks(session, term, y, container = null) {
   if (!term.yomuxAgentKind && typeof sessionAgentKind === 'function') term.yomuxAgentKind = sessionAgentKind(session);
-  const refs = terminalWrappedLineReferences(term, y);
+  const refs = terminalCurrentRowReferences(term, y);
   const links = refs.filter(ref => ref.type === 'url').flatMap(ref => terminalReferenceXtermLinks(ref, {
     row: y,
     underline: true,
@@ -5686,17 +5893,15 @@ async function terminalReferenceProviderLinks(session, term, y, container = null
   return links.sort((a, b) => a.range.start.y - b.range.start.y || a.range.start.x - b.range.start.x);
 }
 
-function terminalFileReferenceViewportSignature(term) {
-  const references = terminalVisibleFileReferences(term)
-    .map(terminalFileReferenceKey)
-    .sort()
-    .join('\x1e');
-  return [
-    Math.max(0, Math.floor(Number(term?.cols || 0))),
-    Math.max(0, Math.floor(Number(term?.rows || 0))),
-    Math.max(0, Math.floor(Number(term?.buffer?.active?.viewportY || 0))),
-    references,
-  ].join(':');
+const terminalReferenceControllers = new WeakMap();
+
+function terminalFileReferenceViewportSignature(term, revision = 0) {
+  return [term?.cols, term?.rows, term?.buffer?.active?.viewportY, term?.yomuxAgentKind, revision].join(':');
+}
+
+function terminalCurrentRowReferences(term, y) {
+  const cached = terminalReferenceControllers.get(term)?.referencesForRow(y);
+  return cached || terminalWrappedLineReferences(term, y);
 }
 
 function terminalFileReferenceKey(reference) {
@@ -5750,21 +5955,25 @@ function resolveTerminalFileReferenceCandidates(paths) {
   return resolution;
 }
 
-function terminalVisibleFileReferences(term) {
+function terminalVisibleReferences(term) {
+  const scan = terminalReferenceScanContext(term);
   const rows = Math.max(0, Math.floor(Number(term?.rows || 0)));
   const viewportY = Math.max(0, Math.floor(Number(term?.buffer?.active?.viewportY || 0)));
   const refs = [];
   const seen = new Set();
   for (let screenRow = 1; screenRow <= rows; screenRow += 1) {
-    for (const ref of terminalWrappedLineReferences(term, viewportY + screenRow)) {
-      if (ref.type !== 'file') continue;
-      const key = terminalFileReferenceKey(ref);
+    for (const ref of terminalWrappedLineReferences(term, viewportY + screenRow, scan)) {
+      const key = `${ref.type}:${ref.href || ''}:${terminalFileReferenceKey(ref)}`;
       if (seen.has(key)) continue;
       seen.add(key);
       refs.push(ref);
     }
   }
   return refs;
+}
+
+function terminalVisibleFileReferences(term) {
+  return terminalVisibleReferences(term).filter(ref => ref.type === 'file');
 }
 
 function terminalFileReferenceUnderlineSegments(term, reference) {
@@ -5819,7 +6028,7 @@ function renderTerminalFileReferenceUnderlines(term, container, references, opti
   let renderedNodes = 0;
   const perf = clientPerfStart('terminalUnderlineRender');
   try {
-    renderedNodes = renderTerminalFileReferenceUnderlinesMeasured(term, container, references, options);
+    renderedNodes = renderTerminalFileReferenceUnderlinesMeasured(term, container, typeof references === 'function' ? references() : references, options);
     return renderedNodes;
   } finally {
     clientPerfEnd(perf, {nodes: renderedNodes, rows: Math.max(0, Number(term?.rows || 0))});
@@ -5827,6 +6036,7 @@ function renderTerminalFileReferenceUnderlines(term, container, references, opti
 }
 
 function renderTerminalFileReferenceUnderlinesMeasured(term, container, references, options = {}) {
+  if (!references?.length) return clearTerminalFileReferenceUnderlines(container);
   const layer = terminalFileUnderlineLayer(container);
   if (!layer) return 0;
   const cell = terminalCellDimensions(term, container);
@@ -5875,7 +6085,10 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
   const disposables = [];
   let disposed = false;
   let renderFrame = 0;
-  let lastRenderedViewportSignature = '';
+  let contentRevision = 0;
+  let cachedBuffer = null;
+  let cachedSignature = '';
+  let cachedReferences = null;
   let existingReferenceKeys = new Set();
   let hoverKey = '';
 
@@ -5886,7 +6099,9 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
     renderFrame = 0;
     existingReferenceKeys = new Set();
     hoverKey = '';
-    lastRenderedViewportSignature = '';
+    cachedBuffer = null;
+    cachedReferences = null;
+    cachedSignature = '';
     return clearTerminalFileReferenceUnderlines(container);
   };
 
@@ -5905,46 +6120,50 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
 
   const clearHover = () => setHoverKey('');
 
+  const currentReferences = () => {
+    const signature = terminalFileReferenceViewportSignature(term, contentRevision);
+    if (!cachedReferences || cachedBuffer !== term.buffer?.active || signature !== cachedSignature) {
+      cachedReferences = terminalVisibleReferences(term);
+      cachedBuffer = term.buffer?.active;
+      cachedSignature = signature;
+    }
+    return cachedReferences;
+  };
+
   const renderCached = () => {
-    if (!active()) return clearInactive();
-    // Underlines are a syntactic affordance only. Resolving every visible token here turns terminal
-    // repaint/scroll into a filesystem request storm; the user gesture owns the real resolution.
-    const existingRefs = terminalVisibleFileReferences(term).map(ref => ({...ref, targetPath: ref.path}));
-    existingReferenceKeys = new Set(existingRefs.map(terminalFileReferenceKey));
+    const refs = currentReferences().filter(ref => ref.type === 'file');
+    existingReferenceKeys = new Set(refs.map(terminalFileReferenceKey));
     if (hoverKey && !existingReferenceKeys.has(hoverKey)) hoverKey = '';
-    const count = renderTerminalFileReferenceUnderlines(term, container, existingRefs, {hoverKey});
-    lastRenderedViewportSignature = terminalFileReferenceViewportSignature(term);
-    return count;
+    // A terminal without file references has no underline geometry to measure.
+    if (!refs.length) return clearTerminalFileReferenceUnderlines(container);
+    if (!active()) return clearInactive();
+    return renderTerminalFileReferenceUnderlines(term, container, refs, {hoverKey});
   };
 
   const refreshNow = () => {
     if (disposed) return 0;
-    if (!active()) return clearInactive();
+    if (renderFrame) cancelAnimationFrame(renderFrame);
+    renderFrame = 0;
+    contentRevision += 1;
     return renderCached();
   };
 
   const scheduleCachedRender = () => {
-    if (!active()) {
-      clearInactive();
-      return;
-    }
+    // Dimension reads can force layout after terminal output. Check visibility only in the owned paint.
+    if (disposed) return;
     if (renderFrame) return;
     renderFrame = requestAnimationFrame(() => {
       renderFrame = 0;
-      if (active()) renderCached();
-      else clearInactive();
+      renderCached();
     });
   };
 
   const schedule = (scheduleOptions = {}) => {
-    if (!active()) {
-      clearInactive();
-      return;
-    }
-    const viewportSignature = terminalFileReferenceViewportSignature(term);
-    const viewportChanged = scheduleOptions.viewportChanged === true || viewportSignature !== lastRenderedViewportSignature;
-    const contentChanged = scheduleOptions.contentChanged === true || ['output', 'render'].includes(scheduleOptions.reason);
-    if (viewportChanged || contentChanged) scheduleCachedRender();
+    if (disposed) return;
+    const contentChanged = scheduleOptions.contentChanged === true;
+    if (contentChanged) contentRevision += 1;
+    // An unchanged viewport can still have become inactive. The paint owns that check and reuses cached discovery.
+    scheduleCachedRender();
   };
 
   const bindTerminalEvent = (name, callback) => {
@@ -5953,13 +6172,24 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
   };
   bindTerminalEvent('onScroll', () => schedule({reason: 'scroll', viewportChanged: true}));
   bindTerminalEvent('onResize', () => schedule({reason: 'resize', viewportChanged: true}));
-  bindTerminalEvent('onRender', () => schedule({reason: 'render', contentChanged: true}));
+  bindTerminalEvent('onWriteParsed', () => schedule({reason: 'output', contentChanged: true}));
+  const bufferChange = term.buffer?.onBufferChange?.(() => schedule({viewportChanged: true}));
+  if (bufferChange?.dispose) disposables.push(bufferChange);
+  bindTerminalEvent('onRender', () => schedule({reason: 'render'}));
   container.addEventListener?.('mousemove', updateHover);
   container.addEventListener?.('mouseleave', clearHover);
   disposables.push({
     dispose() {
       container.removeEventListener?.('mousemove', updateHover);
       container.removeEventListener?.('mouseleave', clearHover);
+    },
+  });
+  terminalReferenceControllers.set(term, {
+    referencesForRow(y) {
+      if (!active()) { clearInactive(); return null; }
+      const viewportY = Number(term.buffer?.active?.viewportY || 0);
+      if (y <= viewportY || y > viewportY + Number(term.rows || 0)) return null;
+      return currentReferences().filter(ref => ref.range.start.y <= y && ref.range.end.y >= y);
     },
   });
   schedule();
@@ -5969,6 +6199,10 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
     refresh: refreshNow,
     dispose() {
       disposed = true;
+      terminalReferenceControllers.delete(term);
+      cachedReferences = null;
+      cachedBuffer = null;
+      existingReferenceKeys.clear();
       if (renderFrame) cancelAnimationFrame(renderFrame);
       renderFrame = 0;
       disposables.forEach(disposable => {
@@ -6098,7 +6332,7 @@ function terminalRangeContainsPosition(range, position) {
 
 function terminalReferenceAtPosition(term, position) {
   if (!position) return null;
-  const refs = terminalWrappedLineReferences(term, position.y);
+  const refs = terminalCurrentRowReferences(term, position.y);
   return refs.find(ref => terminalRangeContainsPosition(ref.range, position)) || null;
 }
 
@@ -6429,7 +6663,9 @@ function createLifecycleScope(options = {}) {
   const disposeResource = record => {
     if (!record || record.disposed) return false;
     record.disposed = true;
-    record.dispose?.(record.value);
+    // Native Window callbacks reject the resource record as their receiver.
+    const dispose = record.dispose;
+    dispose?.(record.value);
     return true;
   };
   const scope = {

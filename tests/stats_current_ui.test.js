@@ -706,6 +706,42 @@ test('accepts the producer-shaped snapshot before atomically replacing the gener
   assert.equal(controller.acceptSnapshot(empty), true, 'a validated empty generation is ready data');
 });
 
+test('series validation rejects malformed scalars, identities, and field sets atomically', () => {
+  const controller = loadController({capabilities: capabilities(), savedRange: 300, savedResolution: 1, clientId: 'strict-series'});
+  controller.acceptSnapshot(snapshot({requested: 1}));
+  const active = controller.generation();
+  const invalid = [];
+  for (const value of [NaN, Infinity, -Infinity, null, true, '1', {}, []]) {
+    invalid.push(series => { series.value = value; });
+  }
+  for (const count of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, null, '1']) {
+    invalid.push(series => { series.source_count = count; });
+  }
+  for (const field of ['first_timestamp', 'last_timestamp']) {
+    for (const value of [NaN, Infinity, -Infinity, null, '0']) {
+      invalid.push(series => { series[field] = value; });
+    }
+  }
+  invalid.push(series => { series.first_timestamp = -1; });
+  invalid.push(series => { series.first_timestamp = 1; series.last_timestamp = 0; });
+  invalid.push(series => { delete series.value; });
+  invalid.push(series => { series.unknown = 1; });
+  invalid.push(series => { series.unknown = NaN; });
+  invalid.push(series => {
+    Object.defineProperty(series, 'value', {value: 1, enumerable: false});
+    series.unknown = 1;
+  });
+  for (const unit of ['', '\ud800', '\udc00', '\ud800a', 'a\udc00', null, 1, {}, []]) {
+    invalid.push(series => { series.unit = unit; });
+  }
+  for (const mutate of invalid) {
+    const payload = snapshot({requested: 1, cache: 2});
+    mutate(payload.buckets[0].series.cpu);
+    assert.throws(() => controller.acceptSnapshot(payload));
+    assert.strictEqual(controller.generation(), active, 'malformed input cannot replace the active generation');
+  }
+});
+
 test('accepts the service-produced backfill field and no unlisted snapshot field', () => {
   const bareSnapshot = snapshot({requested: 1});
   delete bareSnapshot.usage_atom_backfill;
@@ -2833,6 +2869,109 @@ test('a pending SSE snapshot stays connected until exact 2h/300s data is ready',
   client.stop();
 });
 
+test('typed pending frames keep a cold stream live without satisfying its readiness timeout', async () => {
+  ManualEventSource.instances = [];
+  const clock = new FakeClock();
+  const failures = [];
+  const client = loadNamespace().createBrowserClient({
+    fetch: async url => {
+      if (url === '/api/stats-capabilities') return response(200, capabilities());
+      throw new Error(`unexpected history fetch: ${url}`);
+    },
+    EventSource: ManualEventSource,
+    clientId: 'pending-heartbeat',
+    savedRange: 300,
+    savedResolution: 1,
+    pendingReadinessTimeoutMs: 5000,
+    controllerOptions: {
+      clock,
+      onFailure: failure => failures.push(failure),
+    },
+  });
+
+  await client.start();
+  await clock.advance(0);
+  const stream = ManualEventSource.instances[0];
+  const deliverPending = () => stream.emit('pending', JSON.stringify({
+    status: 'pending',
+    retry_after_seconds: 1,
+  }));
+  deliverPending();
+  await flushPromises();
+  const initialDeliverySequence = client.streamEvidence().deliverySequence;
+
+  for (let beat = 0; beat < 4; beat += 1) {
+    await clock.advance(1000);
+    deliverPending();
+    await flushPromises();
+    assert.equal(client.controller().generation(), null, 'pending cannot make the generation ready');
+    assert.deepEqual(failures, [], `pending frame ${beat + 1} arrived within the cold-readiness bound`);
+  }
+
+  const evidence = client.streamEvidence();
+  assert.equal(evidence.deliverySequence, initialDeliverySequence + 4, 'each pending frame is recorded as delivery');
+  assert.equal(evidence.lastDeliveryKind, 'pending');
+  assert.equal(evidence.streamOpen, true, 'pending leaves the current SSE stream open');
+  assert.equal(ManualEventSource.instances.length, 1, 'pending does not create an HTTP-style retry stream');
+
+  await clock.advance(1000);
+  assert.equal(failures.length, 1, 'the independent readiness timeout still retires a stream that never becomes ready');
+  assert.match(failures[0].message, /current stats readiness timed out after 5000ms/);
+  assert.equal(failures[0].message.includes('generation stalled'), false, 'pending liveness does not extend readiness');
+  client.stop();
+});
+
+test('cold snapshot chunk deliveries keep transport liveness separate from generation readiness', async () => {
+  ManualEventSource.instances = [];
+  const clock = new FakeClock();
+  const failures = [];
+  const full = snapshot({range: 300, requested: 1, resolution: 1, cache: 9, sourceGeneration: 9});
+  const chunks = [0, 1, 2, 3].map(index => snapshotChunk(full, index, 4));
+  const client = loadNamespace().createBrowserClient({
+    fetch: async url => {
+      if (url === '/api/stats-capabilities') return response(200, capabilities());
+      throw new Error(`unexpected history fetch: ${url}`);
+    },
+    EventSource: ManualEventSource,
+    clientId: 'chunk-liveness',
+    savedRange: 300,
+    savedResolution: 1,
+    controllerOptions: {
+      clock,
+      onFailure: failure => failures.push(failure),
+    },
+  });
+
+  await client.start();
+  await clock.advance(0);
+  const stream = ManualEventSource.instances[0];
+  stream.emit('ack', JSON.stringify({
+    cache_generation: full.cache_generation,
+    chunk_count: chunks.length,
+    not_modified: false,
+    range_seconds: full.range_seconds,
+    requested_resolution: full.requested_resolution,
+    resolution_seconds: full.resolution_seconds,
+  }));
+  for (let index = 0; index < chunks.length; index += 1) {
+    if (index > 0) await clock.advance(1000);
+    stream.emit('snapshot', JSON.stringify(chunks[index]));
+    assert.equal(client.controller().generation(), null, `chunk ${index + 1} is not a complete generation`);
+    assert.deepEqual(failures, [], `chunk ${index + 1} arrived while readiness remained pending`);
+  }
+
+  await clock.advance(1000);
+  assert.deepEqual(failures, [], 'the validated final chunk keeps the stream live past three 1s cadences');
+  assert.equal(client.controller().generation(), null, 'transport progress does not publish a generation');
+  assert.equal(client.streamEvidence().deliverySequence, 5, 'ack and each chunk are recorded by the shared delivery owner');
+
+  stream.emit('ready', JSON.stringify({cache_generation: full.cache_generation, revision: 0}));
+  await flushPromises();
+  assert.equal(client.controller().generation().cache_generation, full.cache_generation);
+  assert.deepEqual(failures, []);
+  client.stop();
+});
+
 test('typed stream errors after readiness preserve their state and retry metadata', async () => {
   for (const [kind, payload, expectedState, check] of [
     ['pending', {status: 'pending', reason: 'generation is still building', retry_after_seconds: 2}, 'pending', error => {
@@ -2851,6 +2990,7 @@ test('typed stream errors after readiness preserve their state and retry metadat
     ManualEventSource.instances = [];
     const clock = new FakeClock();
     const states = [];
+    const failures = [];
     const client = loadNamespace().createBrowserClient({
       fetch: async (url, options) => {
         if (url === '/api/stats-capabilities') return response(200, capabilities());
@@ -2862,7 +3002,7 @@ test('typed stream errors after readiness preserve their state and retry metadat
       savedRange: 7200,
       savedResolution: 300,
       onState: (state, error) => states.push({state, error}),
-      controllerOptions: {clock, repairBaseMs: 100, repairMaxMs: 400},
+      controllerOptions: {clock, repairBaseMs: 100, repairMaxMs: 400, onFailure: failure => failures.push(failure)},
     });
     await client.start();
     await clock.advance(0);
@@ -2874,6 +3014,8 @@ test('typed stream errors after readiness preserve their state and retry metadat
     const state = states.at(-1);
     assert.equal(state.state, expectedState, `${kind} state`);
     check(state.error);
+    assert.equal(failures.length, kind === 'pending' ? 0 : 1, `${kind} reports failures while pending remains progress`);
+    if (kind !== 'pending') assert.equal(failures[0].source, '/api/stats-stream');
     assert.equal(ManualEventSource.instances[0].closeCount, 1, `${kind} closes the old stream`);
     client.stop();
   }
@@ -3455,7 +3597,32 @@ test('new controller has one namespace and no old temporal processing dependency
 test('isolated current-stats escaping and UTF-8 validation retain their fail-closed contract', () => {
   assert.match(source, /This module is intentionally self-contained:[\s\S]*escaping and UTF-8 validation helpers cannot depend on the app bundle's lexical core helpers\./);
   assert.match(source, /function currentStatsEscape\(value\) \{\s+return String\(value\)\.replace/);
-  assert.match(source, /function utf8ByteLength\(value\) \{\s+try \{\s+return encodeURIComponent\(value\)[\s\S]*?\} catch \(_error\) \{\s+return Infinity;/);
+  const context = vm.createContext({console});
+  vm.runInContext(source.replace(
+    '  const currentStatsModule = Object.freeze({',
+    '  globalThis.validationForTest = {utf8ByteLength};\n  const currentStatsModule = Object.freeze({',
+  ), context);
+  const byteLength = context.validationForTest.utf8ByteLength;
+  for (let point = 0; point <= 0xffff; point += 1) {
+    const value = String.fromCharCode(point);
+    const expected = point < 0x80 ? 1 : point < 0x800 ? 2 : point >= 0xd800 && point <= 0xdfff ? Infinity : 3;
+    assert.equal(byteLength(value), expected, `UTF-8 length for U+${point.toString(16)}`);
+  }
+  for (const point of [0x10000, 0x1f600, 0x10ffff]) assert.equal(byteLength(String.fromCodePoint(point)), 4);
+  for (const value of ['\ud800a', 'a\udc00', '\ud800\ud800', '\udc00\ud800', '\ud800']) {
+    assert.equal(byteLength(value), Infinity, 'an invalid surrogate sequence must fail closed');
+  }
+  for (const character of ['a', '\u00a1', '\u4e00', '\ud83d\ude00']) {
+    const controller = loadController({capabilities: capabilities(), savedRange: 300, savedResolution: 1, clientId: 'utf8'});
+    const width = Buffer.byteLength(character, 'utf8');
+    const acceptedName = character.repeat(Math.floor(256 / width));
+    const valid = snapshot({requested: 1, cache: 1});
+    valid.buckets[0].series = {[acceptedName]: seriesValue(1, 0)};
+    assert.equal(controller.acceptSnapshot(valid), true);
+    const invalid = snapshot({requested: 1, cache: 2});
+    invalid.buckets[0].series = {[acceptedName + character]: seriesValue(1, 0)};
+    assert.throws(() => controller.acceptSnapshot(invalid), /bounded non-empty text/);
+  }
 });
 
 (async () => {

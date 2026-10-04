@@ -109,11 +109,7 @@ func TestWriterLeaseCrossProcessOwnership(t *testing.T) {
 
 func TestWriterLeaseCrossLanguageOwnership(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "stats-v9.sqlite3")
-	repoRoot, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	repoRoot = filepath.Join(repoRoot, "..", "..")
+	repoRoot := testsupport.RepoRoot(t)
 	python := `
 import os, sys
 from pathlib import Path
@@ -216,11 +212,7 @@ func TestWriterLeasePythonRejectsGoOwner(t *testing.T) {
 	if err != nil || line != "ready\n" {
 		t.Fatalf("Go helper did not announce ownership: line=%q err=%v", line, err)
 	}
-	repoRoot, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	repoRoot = filepath.Join(repoRoot, "..", "..")
+	repoRoot := testsupport.RepoRoot(t)
 	python := `import os
 from pathlib import Path
 from yomux_lib.stats_current.storage import Store

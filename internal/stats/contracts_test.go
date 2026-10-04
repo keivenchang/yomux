@@ -108,14 +108,33 @@ func TestContractsRejectBoundedFields(t *testing.T) {
 }
 
 func TestAppendBatchRejectsDuplicateAndConflictingIdentity(t *testing.T) {
-	first := testObservation()
-	if _, err := (AppendBatch{Observations: []Observation{first, first}}).Validate(); err == nil || !strings.Contains(err.Error(), "duplicate") {
-		t.Fatalf("duplicate error = %v", err)
+	observation, usage, tombstone := testObservation(), testUsage(), testTombstone()
+	changedObservation, changedUsage, changedTombstone := observation, usage, tombstone
+	changedObservation.Payload = map[string]any{"value": 2}
+	changedUsage.Payload = map[string]any{"quantity": 5, "provider": "openai"}
+	changedTombstone.Quantity++
+	cases := []struct {
+		name     string
+		batch    AppendBatch
+		conflict bool
+	}{
+		{"observation duplicate", AppendBatch{Observations: []Observation{observation, observation}}, false},
+		{"observation conflict", AppendBatch{Observations: []Observation{observation, changedObservation}}, true},
+		{"usage duplicate", AppendBatch{UsageAtoms: []UsageAtom{usage, usage}}, false},
+		{"usage conflict", AppendBatch{UsageAtoms: []UsageAtom{usage, changedUsage}}, true},
+		{"tombstone duplicate", AppendBatch{UsageTombstones: []UsageTombstone{tombstone, tombstone}}, false},
+		{"tombstone conflict", AppendBatch{UsageTombstones: []UsageTombstone{tombstone, changedTombstone}}, true},
 	}
-	conflict := first
-	conflict.Payload = map[string]any{"value": 2}
-	if _, err := (AppendBatch{Observations: []Observation{first, conflict}}).Validate(); err == nil || !strings.Contains(err.Error(), "conflicting") {
-		t.Fatalf("conflict error = %v", err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			want := "append_batch.identity: duplicate idempotency key"
+			if tc.conflict {
+				want = "append_batch.identity: conflicting duplicate idempotency key"
+			}
+			if _, err := tc.batch.Validate(); err == nil || err.Error() != want {
+				t.Fatalf("identity diagnostic = %v, want %q", err, want)
+			}
+		})
 	}
 }
 

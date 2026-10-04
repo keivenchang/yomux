@@ -172,8 +172,15 @@ func (s *Service) openGitHistoryScopeWithOptions(ctx context.Context, raw string
 		_ = directory.Close()
 		return nil, finderErr
 	}
-	relative, err := filepath.Rel(root, resolved)
-	if err != nil || filepath.IsAbs(relative) || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+	rootDirectory, rootErr := openGitRootDescriptor(ctx, root, requested)
+	if rootErr != nil {
+		namespace.close()
+		_ = directory.Close()
+		return nil, rootErr
+	}
+	relative, err := relativePathWithinGitRoot(root, resolved, directory, rootDirectory)
+	if err != nil || filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+		_ = rootDirectory.Close()
 		namespace.close()
 		_ = directory.Close()
 		return nil, forbidden(requested, "fs.error.outsideRoots", "path is outside the Git repository")
@@ -183,15 +190,10 @@ func (s *Service) openGitHistoryScopeWithOptions(ctx context.Context, raw string
 	}
 	relative = filepath.ToSlash(relative)
 	if !utf8.ValidString(relative) {
+		_ = rootDirectory.Close()
 		namespace.close()
 		_ = directory.Close()
 		return nil, &Error{Status: http.StatusUnprocessableEntity, Code: "git_path_encoding", MessageKey: "fs.error.gitPathEncoding", Path: requested, Message: errGitPathEncoding.Error()}
-	}
-	rootDirectory, rootErr := openGitRootDescriptor(ctx, root, requested)
-	if rootErr != nil {
-		namespace.close()
-		_ = directory.Close()
-		return nil, rootErr
 	}
 	_ = directory.Close()
 	return &gitHistoryScope{path: requested, repo: displayGitRootPath(requested, relative, root), identity: namespace.identity(), relative: relative, branch: branch, hostedRemote: hostedRemote, directory: rootDirectory, namespace: namespace}, nil

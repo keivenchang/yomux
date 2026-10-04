@@ -23,7 +23,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 from yomux_lib import common
-from yomux_lib.control import send_yolomux_control_request
+from yomux_lib.control import send_yomux_control_request
 from yomux_lib.local_services.rpc import LOCAL_RPC_MAX_BINARY_BYTES, safe_socket_path
 from yomux_lib.local_services.command_router import LocalServiceCommandRouter
 from yomux_lib.local_services.runtime import acquire_client_lease, claim_gated_idle_due, reap_dead_client_leases, release_client_lease
@@ -2931,7 +2931,7 @@ class StatsCurrentService:
                         if owner is None:
                             self._record_host_push("memory", push_reason)
                         else:
-                            response = send_yolomux_control_request(
+                            response = send_yomux_control_request(
                                 owner,
                                 {
                                     "action": "stats_process_memory_sample",
@@ -2982,7 +2982,7 @@ class StatsCurrentService:
                     if owner is None:
                         self._record_host_push("cpu", push_reason)
                     else:
-                        response = send_yolomux_control_request(
+                        response = send_yomux_control_request(
                             owner, {"action": "stats_cpu_sample", "sample": sample}, timeout=0.25,
                         )
                         accepted = isinstance(response, dict) and response.get("ok") is True

@@ -66,14 +66,14 @@ def test_relative_product_root_is_refused_with_or_without_yolomux_root(
         values["YOLOMUX_ROOT"] = str(cwd)
 
     with pytest.raises(ValueError, match=rf"{key}.*absolute.*{relative_value}"):
-        common.resolve_yolomux_roots(values, identity=_identity(), temporary_dir=tmp_path / "tmp", uid=1000)
+        common.resolve_yomux_roots(values, identity=_identity(), temporary_dir=tmp_path / "tmp", uid=1000)
 
 
 def test_relative_yolomux_root_is_refused_before_cwd_can_choose_its_location(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
 
     with pytest.raises(ValueError, match=r"YOLOMUX_ROOT.*absolute.*relative-root"):
-        common.resolve_yolomux_roots({"YOLOMUX_ROOT": "relative-root"}, identity=_identity())
+        common.resolve_yomux_roots({"YOLOMUX_ROOT": "relative-root"}, identity=_identity())
 
 
 @pytest.mark.parametrize("key", CONFIGURED_PATH_KEYS)
@@ -88,13 +88,13 @@ def test_tilde_prefixed_configured_path_is_relative_and_refused(key: str) -> Non
 @pytest.mark.parametrize("key", ("YOLOMUX_ROOT", *PRODUCT_ROOT_KEYS))
 def test_explicit_home_directory_is_refused_as_a_product_root(key: str) -> None:
     with pytest.raises(ValueError, match=rf"{key}.*home directory"):
-        common.resolve_yolomux_roots({key: str(Path.home())}, identity=_identity())
+        common.resolve_yomux_roots({key: str(Path.home())}, identity=_identity())
 
 
 @pytest.mark.parametrize("key", ("YOLOMUX_ROOT", *PRODUCT_ROOT_KEYS))
 def test_filesystem_root_is_refused_as_a_product_root(key: str) -> None:
     with pytest.raises(ValueError, match=rf"{key}.*filesystem root"):
-        common.resolve_yolomux_roots({key: "/"}, identity=_identity())
+        common.resolve_yomux_roots({key: "/"}, identity=_identity())
 
 
 @pytest.mark.parametrize(
@@ -110,7 +110,7 @@ def test_filesystem_root_is_refused_as_a_product_root(key: str) -> None:
 def test_absolute_product_root_override_is_honored(tmp_path: Path, key: str, attribute: str) -> None:
     configured = tmp_path / key.lower()
 
-    paths = common.resolve_yolomux_roots({key: str(configured)}, identity=_identity())
+    paths = common.resolve_yomux_roots({key: str(configured)}, identity=_identity())
 
     actual = {
         "config_dir": paths.config_dir,
@@ -139,9 +139,9 @@ def test_absolute_product_roots_are_independent_of_process_cwd(monkeypatch, tmp_
     second_cwd.mkdir()
 
     monkeypatch.chdir(first_cwd)
-    first = common.resolve_yolomux_roots(values, identity=_identity())
+    first = common.resolve_yomux_roots(values, identity=_identity())
     monkeypatch.chdir(second_cwd)
-    second = common.resolve_yolomux_roots(values, identity=_identity())
+    second = common.resolve_yomux_roots(values, identity=_identity())
 
     assert first == second
 
@@ -151,7 +151,7 @@ def test_rooted_product_root_refuses_each_outside_override(tmp_path: Path, key: 
     outside = Path("/outside") / key.lower()
 
     with pytest.raises(ValueError, match=rf"{key}.*{outside}"):
-        common.resolve_yolomux_roots(
+        common.resolve_yomux_roots(
             {"YOLOMUX_ROOT": str(tmp_path / "root"), key: str(outside)},
             identity=_identity(),
         )
@@ -233,7 +233,7 @@ def test_rooted_instance_ignores_ambient_codex_home() -> None:
 
     assert resolution.error == ""
     assert resolution.environment == {}
-    paths = common.resolve_yolomux_roots(
+    paths = common.resolve_yomux_roots(
         {"YOLOMUX_ROOT": str(root), "CODEX_HOME": "relative-codex"},
         identity=_identity(),
     )
@@ -254,19 +254,19 @@ def test_explicit_yolomux_codex_home_ignores_ambient_codex_home(tmp_path: Path, 
     resolution = resolve_instance_environment(7111 if rooted else 7110, values, platform="Linux")
 
     assert resolution.error == ""
-    paths = common.resolve_yolomux_roots(values, identity=_identity())
+    paths = common.resolve_yomux_roots(values, identity=_identity())
     assert paths.codex_home == explicit_codex_home
 
 
 def test_home_mapping_owns_defaults_and_exact_home_refusal(tmp_path: Path) -> None:
     home = tmp_path / "home"
-    paths = common.resolve_yolomux_roots({"HOME": str(home)}, identity=_identity(), temporary_dir=tmp_path / "tmp")
+    paths = common.resolve_yomux_roots({"HOME": str(home)}, identity=_identity(), temporary_dir=tmp_path / "tmp")
 
     assert paths.config_dir == home / ".config" / "yomux"
     assert paths.state_dir == home / ".local" / "state" / "yomux"
     assert paths.codex_home == home / ".codex"
     with pytest.raises(ValueError, match=r"YOLOMUX_ROOT.*home directory"):
-        common.resolve_yolomux_roots(
+        common.resolve_yomux_roots(
             {"HOME": str(home), "YOLOMUX_ROOT": str(home)},
             identity=_identity(),
         )
@@ -328,6 +328,23 @@ def test_artifact_setup_does_not_materialize_stale_environment_aliases(tmp_path:
     assert paths.root.is_relative_to(tmp_path / "second-runtime")
 
 
+@pytest.mark.parametrize("disable_bytecode", (False, True))
+def test_artifact_setup_creates_bytecode_cache_only_when_writing(monkeypatch, tmp_path: Path, disable_bytecode: bool) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    values = {"YOLOMUX_HOST_ARTIFACT_DIR": str(tmp_path / "artifacts")}
+    if disable_bytecode:
+        values["PYTHONDONTWRITEBYTECODE"] = "1"
+    monkeypatch.setattr(sys, "pycache_prefix", sys.pycache_prefix)
+    monkeypatch.setattr(sys, "dont_write_bytecode", not disable_bytecode)
+
+    paths = worktree_writer.configure_host_local_artifacts(worktree, environ=values)
+
+    assert paths.python_cache.exists() is (not disable_bytecode)
+    assert sys.dont_write_bytecode is disable_bytecode
+    assert sys.pycache_prefix == str(paths.python_cache)
+
+
 def test_artifact_setup_mirrors_canonical_environment_for_legacy_readers(tmp_path: Path) -> None:
     worktree = tmp_path / "worktree"
     worktree.mkdir()
@@ -368,7 +385,7 @@ def test_shared_resolver_and_codex_adapter_refuse_worktree_product_roots() -> No
     unsafe_root = ROOT / ".unsafe-product-root-test"
 
     with pytest.raises(ValueError, match="shared worktree"):
-        common.resolve_yolomux_roots({"YOLOMUX_ROOT": str(unsafe_root)}, identity=_identity())
+        common.resolve_yomux_roots({"YOLOMUX_ROOT": str(unsafe_root)}, identity=_identity())
     with pytest.raises(ValueError, match="shared worktree"):
         common.codex_runtime_env(
             {
@@ -500,7 +517,7 @@ def test_shared_start_lock_rejects_unsafe_root_before_writing(tmp_path: Path) ->
             [
                 "bash",
                 "-c",
-                'source "$1"; repo_root="$2"; python_bin="$3"; yolomux_acquire_start_lock',
+                'source "$1"; repo_root="$2"; python_bin="$3"; yomux_acquire_start_lock',
                 "startup-lock-invalid-root",
                 str(STARTUP_COMMON),
                 str(ROOT),
@@ -534,10 +551,7 @@ def test_boot_rejects_unsafe_root_before_stopping_existing_listener(tmp_path: Pa
     try:
         assert listener.stdout is not None
         port = int(listener.stdout.readline().strip())
-        env = {
-            **os.environ,
-            "YOLOMUX_START_LOAD_WAIT_SECONDS": "30",
-        }
+        env = dict(os.environ)
         for configured_key in (*CONFIGURED_PATH_KEYS, "XDG_CONFIG_HOME", "XDG_STATE_HOME"):
             if configured_key != "HOME":
                 env.pop(configured_key, None)
@@ -590,7 +604,7 @@ def test_boot_rejects_relative_log_dir_before_stopping_existing_listener(tmp_pat
         result = subprocess.run(
             [str(ROOT / "boot.sh"), "--log-dir", "relative-logs", str(port)],
             cwd=tmp_path,
-            env={**os.environ, "YOLOMUX_START_LOAD_WAIT_SECONDS": "30"},
+            env=os.environ,
             text=True,
             capture_output=True,
         )
@@ -606,13 +620,7 @@ def test_boot_rejects_relative_log_dir_before_stopping_existing_listener(tmp_pat
 
 
 def test_boot_checks_absolute_log_sink_before_stopping_existing_listener(tmp_path: Path) -> None:
-    # YOLOMUX_START_LOAD_WAIT_SECONDS="0" forces the slow-ramp load gate to fail
-    # immediately on every host: its deadline is already expired, so it refuses
-    # without ever sampling load. That makes this an ordering assertion that host
-    # load cannot preempt -- boot.sh can only produce the log-sink error if the
-    # cheap writability check runs ahead of the gate. YOLOMUX_START_LOAD_DISCOUNT_CORES
-    # is deliberately not set: the discount is capped at the CPU budget in
-    # production, so no value of it is a bypass.
+    # The log-sink check must fail before boot can stop or replace the listener.
     blocker = tmp_path / "not-a-directory"
     blocker.write_text("block\n", encoding="utf-8")
     listener = subprocess.Popen(
@@ -632,17 +640,13 @@ def test_boot_checks_absolute_log_sink_before_stopping_existing_listener(tmp_pat
         result = subprocess.run(
             [str(ROOT / "boot.sh"), "--log-dir", str(blocker / "logs"), str(port)],
             cwd=tmp_path,
-            env={
-                **os.environ,
-                "YOLOMUX_START_LOAD_WAIT_SECONDS": "0",
-            },
+            env=os.environ,
             text=True,
             capture_output=True,
         )
 
         assert result.returncode != 0
         assert "log path is not writable" in result.stderr
-        assert "system load did not recover" not in result.stderr
         assert listener.poll() is None
         assert blocker.read_text(encoding="utf-8") == "block\n"
     finally:
@@ -651,9 +655,7 @@ def test_boot_checks_absolute_log_sink_before_stopping_existing_listener(tmp_pat
 
 
 def test_boot_rejects_tmpdir_inside_checkout_before_listener_or_worktree_mutation(tmp_path: Path) -> None:
-    # Same load-immune construction as the log-sink ordering test above: the
-    # forced-fail load gate proves the TMPDIR product-root check runs ahead of
-    # it, instead of relying on a discount value that the production cap clamps.
+    # Root validation must reject the unsafe TMPDIR before any listener or checkout mutation.
     checkout = tmp_path / "checkout"
     tools_dir = checkout / "tools"
     tools_dir.mkdir(parents=True)
@@ -683,7 +685,6 @@ def test_boot_rejects_tmpdir_inside_checkout_before_listener_or_worktree_mutatio
                 **os.environ,
                 "HOME": str(tmp_path / "home"),
                 "TMPDIR": str(checkout),
-                "YOLOMUX_START_LOAD_WAIT_SECONDS": "0",
             },
             text=True,
             capture_output=True,
@@ -691,7 +692,6 @@ def test_boot_rejects_tmpdir_inside_checkout_before_listener_or_worktree_mutatio
 
         assert result.returncode != 0
         assert "TMPDIR cannot resolve inside the shared worktree" in result.stderr
-        assert "system load did not recover" not in result.stderr
         assert listener.poll() is None
         assert sorted(path.relative_to(checkout) for path in checkout.rglob("*")) == before
     finally:

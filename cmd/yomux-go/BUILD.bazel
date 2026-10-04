@@ -1,24 +1,32 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+load("//:tools/bazel_rules.bzl", "go_test_pair")
+
 package(default_visibility = ["//visibility:public"])
 
 exports_files(["BUILD.bazel"])
 
-filegroup(
-    name = "docker_source_files",
-    srcs = ["BUILD.bazel"] + glob(["**"], exclude = ["BUILD.bazel"]),
-)
-
-load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
-
 SQLITE = "@com_github_mattn_go_sqlite3//:go_default_library"
+
+genrule(
+    name = "generate_product_version",
+    srcs = ["//:yomux_lib/version.py"],
+    outs = ["product_version_generated.go"],
+    cmd = "python3 \"$(location //:tools/generate_go_version.py)\" --source \"$(location //:yomux_lib/version.py)\" --output \"$@\"",
+    tools = ["//:tools/generate_go_version.py"],
+)
 
 go_library(
     name = "yomux_go_lib",
-    srcs = glob(["*.go"], exclude = ["*_test.go"]),
+    srcs = glob(
+        ["*.go"],
+        exclude = ["*_test.go"],
+    ) + [":product_version_generated.go"],
     importpath = "github.com/keivenchang/yomux/cmd/yomux-go",
     deps = [
         "//internal/cache:cache_lib",
         "//internal/capabilities:capabilities_lib",
         "//internal/finder:finder_lib",
+        "//internal/productenv:productenv_lib",
         "//internal/stats:stats_lib",
         "//internal/work:work_lib",
         SQLITE,
@@ -36,19 +44,78 @@ alias(
     actual = ":yomux-go",
 )
 
-go_test(
-    name = "yomux_go_test",
-    srcs = glob(["*_test.go"]),
-    data = ["//:go_test_support"],
-    deps = ["//internal/cache:cache_lib", "//internal/testsupport:testsupport_lib", SQLITE],
+go_test_pair(
+    name = "yomux_go",
+    srcs = glob(
+        ["*_test.go"],
+        exclude = ["external_parity_test.go"],
+    ),
+    data = ["//:go_cmd_test_support"],
     embed = [":yomux_go_lib"],
+    race_shard_count = 4,
+    repo_root_runfile = "yomux/go_cmd_test_support",
+    shard_count = 4,
+    deps = [
+        "//internal/cache:cache_lib",
+        "//internal/testsupport:testsupport_lib",
+        SQLITE,
+    ],
+)
+
+go_binary(
+    name = "yomux_go_race",
+    embed = [":yomux_go_lib"],
+    race = "on",
 )
 
 go_test(
-    name = "yomux_go_race_test",
+    name = "external_parity_test",
+    size = "medium",
     srcs = glob(["*_test.go"]),
-    data = ["//:go_test_support"],
-    deps = ["//internal/cache:cache_lib", "//internal/testsupport:testsupport_lib", SQLITE],
+    args = [
+        "-test.run=^TestStats(PythonAndExternalGoReceiveTheSameHTTPFixture|ProductionPythonAndGoReceiveTheSameHTTPFixture|ProductionPythonAndGoObservationBoundaryParity)$$",
+        "-test.v",
+    ],
+    data = [
+        ":yomux-go",
+        "//:go_cmd_test_support",
+    ],
     embed = [":yomux_go_lib"],
+    env = {
+        "YOMUX_GO_BINARY_RUNFILE": "$(rlocationpath :yomux-go)",
+        "YOMUX_REPO_ROOT_RUNFILE": "yomux/go_cmd_test_support",
+    },
+    race = "off",
+    deps = [
+        "//internal/cache:cache_lib",
+        "//internal/testsupport:testsupport_lib",
+        SQLITE,
+    ],
+)
+
+go_test(
+    name = "external_parity_race_test",
+    size = "medium",
+    srcs = glob(["*_test.go"]),
+    args = [
+        "-test.run=^TestStats(PythonAndExternalGoReceiveTheSameHTTPFixture|ProductionPythonAndGoReceiveTheSameHTTPFixture|ProductionPythonAndGoObservationBoundaryParity)$$",
+        "-test.v",
+    ],
+    data = [
+        ":yomux_go_race",
+        "//:go_cmd_test_support",
+    ],
+    embed = [":yomux_go_lib"],
+    env = {
+        "YOMUX_GO_BINARY_RUNFILE": "$(rlocationpath :yomux_go_race)",
+        "YOMUX_GO_BINARY_RACE": "1",
+        "YOMUX_REPO_ROOT_RUNFILE": "yomux/go_cmd_test_support",
+    },
     race = "on",
+    tags = ["cpu:8"],
+    deps = [
+        "//internal/cache:cache_lib",
+        "//internal/testsupport:testsupport_lib",
+        SQLITE,
+    ],
 )

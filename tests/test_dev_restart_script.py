@@ -21,16 +21,22 @@ ROOT = Path(__file__).resolve().parents[1]
 STARTUP_COMMON = ROOT / "tools" / "startup_common.sh"
 
 
-def startup_cpu_budget() -> int:
-    try:
-        schedulable = max(1, len(os.sched_getaffinity(0)))
-    except (AttributeError, OSError):
-        schedulable = max(1, os.cpu_count() or 1)
-    return min(schedulable, 8) if platform.system() == "Darwin" else schedulable
-
-
 def printable_command_text(output: str) -> str:
     return output.replace("\\ ", " ")
+
+
+def test_startup_load_wait_compatibility_helper_is_nonblocking():
+    env = {**os.environ, "YOMUX_START_LOAD_WAIT_SECONDS": "0", "YOLOMUX_START_LOAD_WAIT_SECONDS": "30"}
+    result = subprocess.run(
+        ["bash", "-c", 'source "$1"; yomux_wait_for_system_capacity false', "bash", str(STARTUP_COMMON)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=2,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert "startup CPU/memory admission disabled" in result.stdout
 
 
 def boot_function_source(name: str) -> str:
@@ -38,6 +44,47 @@ def boot_function_source(name: str) -> str:
     start = lines.index(f"{name}() {{")
     end = next(index for index in range(start + 1, len(lines)) if lines[index] == "}")
     return "\n".join(lines[start : end + 1])
+
+
+def test_boot_print_command_preserves_explicit_certificate_pair(tmp_path):
+    cert = tmp_path / "certificate.pem"
+    key = tmp_path / "key.pem"
+    cert.write_text("certificate fixture", encoding="utf-8")
+    key.write_text("key fixture", encoding="utf-8")
+    result = subprocess.run(
+        [str(ROOT / "boot.sh"), "--print-command", "--cert", cert.name, "--key", key.name, "48123"],
+        cwd=tmp_path,
+        env=os.environ,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    command = printable_command_text(result.stdout)
+    assert f"--cert {cert}" in command
+    assert f"--key {key}" in command
+    assert "--self-signed" not in command
+
+
+@pytest.mark.parametrize("case", ["missing-cert", "missing-key", "unreadable-pair"])
+def test_boot_rejects_invalid_certificate_pair_before_log_or_listener_mutation(tmp_path, case):
+    cert = tmp_path / "certificate.pem"
+    key = tmp_path / "key.pem"
+    log_dir = tmp_path / "logs"
+    options = ["--cert", str(cert), "--key", str(key)]
+    if case == "missing-cert":
+        options = ["--key", str(key)]
+    elif case == "missing-key":
+        options = ["--cert", str(cert)]
+    result = subprocess.run(
+        [str(ROOT / "boot.sh"), *options, "--log-dir", str(log_dir), "48123"],
+        cwd=tmp_path,
+        env=os.environ,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "certificate" in result.stderr or "--cert and --key" in result.stderr
+    assert not log_dir.exists()
 
 
 def test_boot_print_command_defaults_to_go_for_any_configured_primary_port():
@@ -274,7 +321,7 @@ def test_boot_print_command_refuses_relative_log_dir_without_writing(tmp_path):
     result = subprocess.run(
         [str(ROOT / "boot.sh"), "--print-command", "--log-dir", "relative-logs", "17775"],
         cwd=tmp_path,
-        env={**os.environ, "YOLOMUX_START_LOAD_WAIT_SECONDS": "30"},
+        env=os.environ,
         text=True,
         capture_output=True,
     )
@@ -379,6 +426,7 @@ def test_boot_restart_refuses_duplicate_without_blind_listener_kill():
     assert "wait_for_port_free" not in source
     assert "--force" in source
     assert "yomux_lib.server_lease" not in source
+    assert "acquire_instance_and_port_leases" not in source
     assert "exec --plan-json" not in source
     assert "boot.sh launching port" in source
     assert " >> %q 2>&1 < /dev/null" in source
@@ -386,14 +434,10 @@ def test_boot_restart_refuses_duplicate_without_blind_listener_kill():
     assert "acquire_port_restart_lock \"$port\"" in source
     assert "a YOmux restart for port $port is already in progress" in source
     assert "another YOmux stack start is already in progress" in startup_common
-    assert "yolomux_report_inotify_capacity" in startup_common
-    assert "WARNING: startup inotify capacity is below the YOmux gate floor" in startup_common
-    assert "inotify_capacity_verdict" in startup_common
     assert 'source "$repo_root/tools/startup_common.sh"' in source
-    assert "yolomux_acquire_start_lock" in source
-    assert "trap yolomux_release_start_lock EXIT" in source
-    assert "skipping only the startup CPU/load capacity wait" in source
-    assert 'yolomux_wait_for_system_capacity "$python_bin"' in source
+    assert "yomux_acquire_start_lock" in source
+    assert "trap yomux_release_start_lock EXIT" in source
+    assert 'yomux_wait_for_system_capacity "$python_bin"' not in source
     assert 'if [[ "$force_start" -eq 1 ]]; then' in source
     assert "already has listener(s)" in source
     assert 'wait_for_port "$port" "$previous_listener_pids" "$launched_pid" "$log_path"' in source
@@ -401,9 +445,9 @@ def test_boot_restart_refuses_duplicate_without_blind_listener_kill():
     assert "launch_process_is_alive" in source
     assert 'mkdir -p "$restart_lock_base"' in source
     assert 'launch_server "$log_path"' in source
-    assert "yolomux_submit_macos_server" in source
-    assert "yolomux_macos_server_launcher" in source
-    assert "yolomux_macos_server_tmux_socket" in startup_common
+    assert "yomux_submit_macos_server" in source
+    assert "yomux_macos_server_launcher" in source
+    assert "yomux_macos_server_tmux_socket" in startup_common
     assert 'tmux -L "$socket_name" new-session' in startup_common
     assert "launchctl submit" not in startup_common
     assert 'cd "$repo"' in startup_common
@@ -428,7 +472,6 @@ def test_boot_refuses_an_existing_listener_before_detached_launch():
                     "YOLOMUX_LOG_DIR": str(log_dir),
                     "TMPDIR": str(temp_dir),
                     "PYTHON": sys.executable,
-                    "YOLOMUX_START_LOAD_WAIT_SECONDS": "30",
                 }
             )
             for key in (
@@ -481,14 +524,13 @@ def test_boot_surfaces_same_root_duplicate_without_waiting_for_port_timeout():
         port = port_socket.getsockname()[1]
         port_socket.close()
         owner_code = (
-            "import sys,time; "
+            "import fcntl,sys,time; "
             "from pathlib import Path; "
-            "from yomux_lib.infra.root_paths import YolomuxRoots; "
-            "from yomux_lib.server_lease import acquire_instance_root_lease; "
             "root=Path(sys.argv[1]); "
-            "roots=YolomuxRoots(config_dir=root/'config', state_dir=root/'state', cache_dir=root/'cache', "
-            "codex_home=root/'codex', runtime_dir=root/'runtime'); "
-            "lease=acquire_instance_root_lease(roots); "
+            "paths=[root/name for name in ('config','state','cache','runtime')]; "
+            "[path.mkdir(parents=True) for path in paths]; "
+            "leases=[(path/'instance.lock').open('wb') for path in paths]; "
+            "[fcntl.flock(lease,fcntl.LOCK_EX) for lease in leases]; "
             "Path(sys.argv[2]).write_text('ready'); "
             "time.sleep(60)"
         )
@@ -503,13 +545,30 @@ def test_boot_surfaces_same_root_duplicate_without_waiting_for_port_timeout():
                 assert owner.poll() is None
                 time.sleep(0.02)
             assert ready.exists()
+            owned_before = {
+                str(path.relative_to(root)): (path.stat().st_mode, path.read_bytes() if path.is_file() else None)
+                for directory in (root / "config", root / "state", root / "cache", root / "runtime")
+                for path in (directory, *directory.rglob("*"))
+            }
+            imported_app = workspace_path / "imported-app"
+            (workspace_path / "sitecustomize.py").write_text(
+                "import sys\n"
+                "from pathlib import Path\n"
+                "class AppImportSentinel:\n"
+                "    def find_spec(self, fullname, path=None, target=None):\n"
+                "        if fullname == 'yomux_lib.app':\n"
+                f"            Path({str(imported_app)!r}).write_text('imported')\n"
+                "            raise RuntimeError('duplicate root reached expensive app import')\n"
+                "sys.meta_path.insert(0, AppImportSentinel())\n",
+                encoding="utf-8",
+            )
             env = dict(os.environ)
             env.update(
                 {
                     "YOLOMUX_ROOT": str(root),
                     "YOLOMUX_LOG_DIR": str(root / "logs"),
                     "TMPDIR": str(temp_dir),
-                    "PYTHONPATH": str(ROOT),
+                    "PYTHONPATH": os.pathsep.join((str(workspace_path), str(ROOT))),
                 }
             )
             for key in (
@@ -543,45 +602,42 @@ def test_boot_surfaces_same_root_duplicate_without_waiting_for_port_timeout():
                 capture_output=True,
                 timeout=5,
             )
+            assert not imported_app.exists(), "duplicate root was checked after importing the application"
+            owned_after = {
+                str(path.relative_to(root)): (path.stat().st_mode, path.read_bytes() if path.is_file() else None)
+                for directory in (root / "config", root / "state", root / "cache", root / "runtime")
+                for path in (directory, *directory.rglob("*"))
+            }
+            assert owned_after.keys() == owned_before.keys(), "refused startup changed an owned product tree"
+            assert all(owned_after[path] == before for path, before in owned_before.items()), "refused startup changed owned file bytes or modes"
         finally:
             if owner.poll() is None:
                 owner.terminate()
             owner.wait(timeout=5)
 
     assert result.returncode != 0
-    assert "launch process" in result.stderr
-    assert "see log" in result.stderr
+    assert "product root is already owned" in result.stderr
+    assert "restarted port" not in result.stdout
 
 
-def test_boot_ignore_load_is_explicit_and_preserves_other_startup_guards():
+def test_boot_load_flag_is_compatibility_only_and_preserves_startup_guards():
     source = (ROOT / "boot.sh").read_text(encoding="utf-8")
 
-    assert "--ignore-load" in source
-    assert 'yolomux_acquire_start_lock || die "startup lock unavailable"' in source
+    assert "--ignore-load (legacy no-op)" in source
+    assert 'yomux_acquire_start_lock || die "startup lock unavailable"' in source
     assert 'restart_port "$port"' in source
-    assert 'yolomux_wait_for_system_capacity "$python_bin"' in source
+    assert 'yomux_wait_for_system_capacity "$python_bin"' not in source
 
 
-@pytest.mark.parametrize(
-    ("mode", "ignored", "expected_waits"),
-    [("always", 0, 0), ("never", 0, 2), ("auto", 0, 1), ("never", 1, 0)],
-)
-def test_boot_development_ports_do_not_wait_for_resource_pressure(mode, ignored, expected_waits):
+def test_boot_never_waits_for_resource_pressure():
     source = (ROOT / "boot.sh").read_text(encoding="utf-8")
-    mode_function = source[source.index("use_dev_mode() {"):source.index("\nserver_args=()")]
     launch_loop = source[source.rindex('for port in "${ports[@]}"; do'):]
-    script = mode_function + """
-primary_port=7220
+    script = """
 ports=(7220 7221)
-python_bin=python3
-dev_mode="$1"
-ignore_load="$2"
-yolomux_wait_for_system_capacity() { printf 'wait\\n'; }
 restart_port() { printf 'restart %s\\n' "$1"; }
 """ + launch_loop
-    result = subprocess.run(["bash", "-c", script, "boot-resource-test", mode, str(ignored)], capture_output=True, text=True, check=True)
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True)
     lines = result.stdout.splitlines()
-    assert lines.count("wait") == expected_waits
     assert [line for line in lines if line.startswith("restart ")] == ["restart 7220", "restart 7221"]
 
 
@@ -600,7 +656,7 @@ def test_startup_listener_boundary_returns_the_exact_owned_listener_pid(tmp_path
     assert not 7110 <= port <= 7113, port
     try:
         result = subprocess.run(
-            ["/bin/bash", "-c", f'source "$1"; yolomux_port_listener_pids {port}',
+            ["/bin/bash", "-c", f'source "$1"; yomux_port_listener_pids {port}',
              "listener-probe", str(STARTUP_COMMON)],
             env={**os.environ, "PYTHON": sys.executable},
             text=True,
@@ -615,7 +671,7 @@ def test_startup_listener_boundary_returns_the_exact_owned_listener_pid(tmp_path
 
 
 def test_startup_unique_listener_gate_propagates_the_exact_owner(tmp_path):
-    """`yolomux_unique_listener_pid` is the shell-side exact-one gate; prove it passes the PID."""
+    """`yomux_unique_listener_pid` is the shell-side exact-one gate; prove it passes the PID."""
 
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
@@ -624,7 +680,7 @@ def test_startup_unique_listener_gate_propagates_the_exact_owner(tmp_path):
     assert not 7110 <= port <= 7113, port
     try:
         result = subprocess.run(
-            ["/bin/bash", "-c", f'source "$1"; yolomux_unique_listener_pid {port}',
+            ["/bin/bash", "-c", f'source "$1"; yomux_unique_listener_pid {port}',
              "listener-probe", str(STARTUP_COMMON)],
             env={**os.environ, "PYTHON": sys.executable},
             text=True,
@@ -647,7 +703,7 @@ def test_startup_listener_boundary_propagates_an_absent_listener_exactly(tmp_pat
     assert not 7110 <= free_port <= 7113, free_port
 
     result = subprocess.run(
-        ["/bin/bash", "-c", f'source "$1"; yolomux_unique_listener_pid {free_port}',
+        ["/bin/bash", "-c", f'source "$1"; yomux_unique_listener_pid {free_port}',
          "listener-probe", str(STARTUP_COMMON)],
         env={**os.environ, "PYTHON": sys.executable},
         text=True,
@@ -693,7 +749,7 @@ def test_startup_listener_boundary_uses_selected_interpreter_and_checkout_module
     wrapper.chmod(0o755)
 
     result = subprocess.run(
-        ["/bin/bash", "-c", 'source "$1"; yolomux_port_listener_pids 48124', "probe", str(STARTUP_COMMON)],
+        ["/bin/bash", "-c", 'source "$1"; yomux_port_listener_pids 48124', "probe", str(STARTUP_COMMON)],
         cwd=tmp_path,
         env={
             **os.environ,
@@ -760,7 +816,7 @@ def test_macos_submit_accepts_legacy_six_fields_and_server_options(tmp_path):
     result = subprocess.run([
         "bash", "-c",
         'source "$1"; tmux() { "$TEST_INTERPRETER" "$TEST_TMUX_STUB" "$@"; }; '
-        'yolomux_submit_macos_server "$2" "$3" /bin/bash "$PATH" 48125 "$4" --host 127.0.0.1 --port 48125 --backend go',
+        'yomux_submit_macos_server "$2" "$3" /bin/bash "$PATH" 48125 "$4" --host 127.0.0.1 --port 48125 --backend go',
         "legacy-submit", str(STARTUP_COMMON), str(checkout), sys.executable, str(tmp_path / "server.log"),
     ], env=environment, text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
@@ -866,9 +922,9 @@ subprocess.run(["tmux", "-L", sys.argv[2], "wait-for", "-S", "server-ready"], ch
             [
                 "bash",
                 "-c",
-                'source "$1"; test_socket="$2"; yolomux_macos_server_tmux_socket() { printf "%s" "$test_socket"; }; '
+                'source "$1"; test_socket="$2"; yomux_macos_server_tmux_socket() { printf "%s" "$test_socket"; }; '
                 'export YOLOMUX_ROW_PLAN_FILE="$3"; '
-                'yolomux_submit_macos_server "$4" "$5" "$6" "$7" 48125 "$8" 8 '
+                'yomux_submit_macos_server "$4" "$5" "$6" "$7" 48125 "$8" 8 '
                 '"YOMUX_GO_BINARY=/tmp/yomux-go-test" "YOMUX_GO_START_REASON=operator-demand" '
                 '"YOMUX_CLAUDE_TRANSCRIPT_ROOT=/tmp/claude projects" "YOMUX_CODEX_TRANSCRIPT_ROOT=/tmp/codex" '
                 '"YOMUX_OPENCODE_DATABASE=/tmp/opencode.db" "YOMUX_TEST_AUTH_BYPASS=1" '
@@ -910,9 +966,9 @@ subprocess.run(["tmux", "-L", sys.argv[2], "wait-for", "-S", "server-ready"], ch
             [
                 "bash",
                 "-c",
-                'source "$1"; test_socket="$2"; yolomux_macos_server_tmux_socket() { printf "%s" "$test_socket"; }; '
+                'source "$1"; test_socket="$2"; yomux_macos_server_tmux_socket() { printf "%s" "$test_socket"; }; '
                 'export YOLOMUX_ROW_PLAN_FILE="$3"; '
-                'yolomux_submit_macos_server "$4" "$5" "$6" "$7" 48125 "$8" 0 "$9" "$2"',
+                'yomux_submit_macos_server "$4" "$5" "$6" "$7" 48125 "$8" 0 "$9" "$2"',
                 "submit-empty-go-handoff",
                 str(STARTUP_COMMON),
                 socket_name,
@@ -961,7 +1017,7 @@ def test_instance_preflight_uses_the_direct_plan_not_ambient_tmpdir():
         [
             "bash",
             "-c",
-            'source "$1"; yolomux_validate_instance_isolation "$2" "$3" 8881',
+            'source "$1"; yomux_validate_instance_isolation "$2" "$3" 8881',
             "instance-preflight",
             str(STARTUP_COMMON),
             str(ROOT),
@@ -978,7 +1034,7 @@ def test_instance_preflight_uses_the_direct_plan_not_ambient_tmpdir():
 def _run_instance_preflight(row_plan_file, port=8881):
     """Drive the real production preflight exactly as `boot.sh` does.
 
-    `yolomux_validate_instance_isolation` is called unconditionally at `boot.sh:483`, outside the
+    `yomux_validate_instance_isolation` is called unconditionally at `boot.sh:483`, outside the
     `uname -s == Darwin` gate, so this is the one half of the retained-tmux-environment fix that
     executes on every platform. Setting `YOLOMUX_ROW_PLAN_FILE` here reproduces exactly what a
     long-lived tmux server leaks into a session created from a clean shell.
@@ -992,7 +1048,7 @@ def _run_instance_preflight(row_plan_file, port=8881):
         [
             "bash",
             "-c",
-            f'source "$1"; yolomux_validate_instance_isolation "$2" "$3" {port}',
+            f'source "$1"; yomux_validate_instance_isolation "$2" "$3" {port}',
             "instance-preflight",
             str(STARTUP_COMMON),
             str(ROOT),
@@ -1016,7 +1072,7 @@ def _run_instance_preflight(row_plan_file, port=8881):
 def test_a_stale_row_plan_file_is_refused_by_the_preflight_instead_of_silently_accepted(tmp_path, name, write):
     """The Linux-live half of the retained-tmux-environment fix, which had no regression at all.
 
-    Before the fix `yolomux_validate_instance_isolation` never read `YOLOMUX_ROW_PLAN_FILE`, so a
+    Before the fix `yomux_validate_instance_isolation` never read `YOLOMUX_ROW_PLAN_FILE`, so a
     server born from a poisoned tmux server started with a stale root and rc=0. Each row here is a
     plan a retained environment can actually point at: a path that no longer exists, and three that
     exist but cannot be a plan. All four must fail CLOSED with the typed message, not be ignored.
@@ -1056,7 +1112,7 @@ def test_shared_start_lock_rejects_concurrent_launcher_and_releases_cleanly(tmp_
         [
             "bash",
             "-c",
-            'source "$1"; export YOLOMUX_START_LOCK_DIR="$2"; trap yolomux_release_start_lock EXIT; yolomux_acquire_start_lock; echo ready; read -r _',
+            'source "$1"; export YOLOMUX_START_LOCK_DIR="$2"; trap yomux_release_start_lock EXIT; yomux_acquire_start_lock; echo ready; read -r _',
             "startup-lock-holder",
             str(STARTUP_COMMON),
             str(lock_dir),
@@ -1073,7 +1129,7 @@ def test_shared_start_lock_rejects_concurrent_launcher_and_releases_cleanly(tmp_
         [
             "bash",
             "-c",
-            'source "$1"; export YOLOMUX_START_LOCK_DIR="$2"; yolomux_acquire_start_lock',
+            'source "$1"; export YOLOMUX_START_LOCK_DIR="$2"; yomux_acquire_start_lock',
             "startup-lock-contender",
             str(STARTUP_COMMON),
             str(lock_dir),
@@ -1099,7 +1155,7 @@ def test_shared_start_lock_recovers_dead_owner(tmp_path):
         [
             "bash",
             "-c",
-            'source "$1"; export YOLOMUX_START_LOCK_DIR="$2"; yolomux_acquire_start_lock; yolomux_release_start_lock',
+            'source "$1"; export YOLOMUX_START_LOCK_DIR="$2"; yomux_acquire_start_lock; yomux_release_start_lock',
             "startup-lock-stale",
             str(STARTUP_COMMON),
             str(lock_dir),
@@ -1112,13 +1168,42 @@ def test_shared_start_lock_recovers_dead_owner(tmp_path):
     assert lock_dir.exists() is False
 
 
-def test_startup_capacity_uses_portable_eight_cpu_macos_ceiling():
+def test_shared_start_lock_reentry_requires_same_shell_owner(tmp_path):
+    lock_dir = tmp_path / "start.lock"
+    probe = r'''
+set -e
+source "$1"
+export YOLOMUX_START_LOCK_DIR="$2"
+trap yomux_release_start_lock EXIT
+yomux_acquire_start_lock
+export YOLOMUX_START_LOCK_ACQUIRED
+yomux_acquire_start_lock
+if (yomux_acquire_start_lock); then
+  exit 8
+fi
+(yomux_release_start_lock)
+test "$(cat "$2/pid")" = "$BASHPID"
+if bash -c 'source "$1"; yomux_acquire_start_lock' contender "$1"; then
+  exit 9
+fi
+test "$(cat "$2/pid")" = "$$"
+'''
+    result = subprocess.run(
+        ["bash", "-c", probe, "startup-lock-reentry", str(STARTUP_COMMON), str(lock_dir)],
+        text=True, capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "another YOmux stack start is already in progress" in result.stderr
+    assert not lock_dir.exists()
+
+
+def test_legacy_startup_admission_helpers_are_nonblocking():
     startup_common = STARTUP_COMMON.read_text(encoding="utf-8")
     result = subprocess.run(
         [
             "bash",
             "-c",
-            'source "$1"; yolomux_system_load_snapshot "$2"',
+            'source "$1"; yomux_wait_for_system_capacity "$2"; yomux_system_load_snapshot "$2"',
             "startup-capacity",
             str(STARTUP_COMMON),
             sys.executable,
@@ -1126,23 +1211,17 @@ def test_startup_capacity_uses_portable_eight_cpu_macos_ceiling():
         text=True,
         capture_output=True,
     )
-    expected = startup_cpu_budget()
-
-    assert result.returncode in {0, 1}
-    assert f"cpu_budget={expected}" in result.stdout
-    assert "cpu_idle=" in result.stdout
-    assert "cpu_stall_some <= 0.10 and idle_fraction >= 0.10" in startup_common
-    assert "defender_d_tasks = defender_d_state_tasks()" in startup_common
-    assert 'task_dir = f"/proc/{entry.name}/task"' in startup_common
-    assert "effective_load1 = max(0.0, load1 - defender_d_tasks)" in startup_common
-    assert "load_pressure_ok = effective_load1 <= cpus * 0.75" in startup_common
-    assert "ok = cpu_pressure_ok and load_pressure_ok" in startup_common
+    assert result.returncode == 0
+    assert result.stdout.count("startup CPU/memory admission disabled") == 2
+    assert "os.getloadavg" not in startup_common
+    assert "cpu_idle_fraction" not in startup_common
+    assert "memory_used_fraction" not in startup_common
 
 
 def test_default_start_lock_is_shared_outside_process_specific_tmpdir(tmp_path):
     rooted = tmp_path / "root"
     result = subprocess.run(
-        ["bash", "-c", 'source "$1"; TMPDIR="$2" yolomux_start_lock_path', "startup-lock-path", str(STARTUP_COMMON), str(tmp_path)],
+        ["bash", "-c", 'source "$1"; TMPDIR="$2" yomux_start_lock_path', "startup-lock-path", str(STARTUP_COMMON), str(tmp_path)],
         text=True,
         capture_output=True,
         check=True,

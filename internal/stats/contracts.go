@@ -272,15 +272,17 @@ func (b AppendBatch) Validate() (AppendValidationResult, error) {
 		ObservationCount: len(b.Observations), CoverageEpochCount: len(b.CoverageEpochs),
 		UnavailableSpanCount: len(b.UnavailableSpans), UsageAtomCount: len(b.UsageAtoms), TombstoneCount: len(b.UsageTombstones),
 	}
-	keys := make(map[string]string)
-	addKey := func(key, fingerprint string) error {
+	keys := make(map[string]any)
+	addKey := func(key string, item any) error {
 		if previous, ok := keys[key]; ok {
-			if previous != fingerprint {
+			// Formatting distinguishes duplicate diagnostics; unique identities
+			// need no record fingerprint.
+			if fmt.Sprintf("%#v", previous) != fmt.Sprintf("%#v", item) {
 				return invalid("append_batch", "identity", "conflicting duplicate idempotency key")
 			}
 			return invalid("append_batch", "identity", "duplicate idempotency key")
 		}
-		keys[key] = fingerprint
+		keys[key] = item
 		result.IdempotencyKeys = append(result.IdempotencyKeys, key)
 		return nil
 	}
@@ -288,7 +290,7 @@ func (b AppendBatch) Validate() (AppendValidationResult, error) {
 		if err := item.Validate(); err != nil {
 			return result, fmt.Errorf("observations[%d]: %w", i, err)
 		}
-		if err := addKey(item.IdempotencyKey(), fmt.Sprintf("%#v", item)); err != nil {
+		if err := addKey(item.IdempotencyKey(), item); err != nil {
 			return result, err
 		}
 	}
@@ -296,7 +298,7 @@ func (b AppendBatch) Validate() (AppendValidationResult, error) {
 		if err := item.Validate(); err != nil {
 			return result, fmt.Errorf("usage_atoms[%d]: %w", i, err)
 		}
-		if err := addKey(item.IdempotencyKey(), fmt.Sprintf("%#v", item)); err != nil {
+		if err := addKey(item.IdempotencyKey(), item); err != nil {
 			return result, err
 		}
 	}
@@ -304,7 +306,7 @@ func (b AppendBatch) Validate() (AppendValidationResult, error) {
 		if err := item.Validate(); err != nil {
 			return result, fmt.Errorf("usage_tombstones[%d]: %w", i, err)
 		}
-		if err := addKey(item.IdempotencyKey(), fmt.Sprintf("%#v", item)); err != nil {
+		if err := addKey(item.IdempotencyKey(), item); err != nil {
 			return result, err
 		}
 	}

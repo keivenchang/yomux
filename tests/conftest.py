@@ -22,6 +22,8 @@ import uuid
 
 import pytest
 
+_attribution_json_dumps = json.dumps
+
 # This suite's fixtures explicitly select legacy YOLOMUX_* names in several
 # tests. Remove canonical ambient root aliases so those fixtures exercise the
 # requested compatibility path instead of inheriting the test container's
@@ -129,8 +131,8 @@ def _test_path_imports_selenium(path: Path) -> bool:
 
 @pytest.fixture
 def no_control_socket(monkeypatch, tmp_path):
-    monkeypatch.setattr(app_module.YolomuxControlServer, "start", lambda self: None)
-    monkeypatch.setattr(app_module.YolomuxControlServer, "stop", lambda self: None)
+    monkeypatch.setattr(app_module.YomuxControlServer, "start", lambda self: None)
+    monkeypatch.setattr(app_module.YomuxControlServer, "stop", lambda self: None)
     monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
     monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations" / "session-files.json")
 
@@ -314,6 +316,6 @@ def pytest_runtest_logreport(report):
     # lost record, not a failed test.
     try:
         with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(row, sort_keys=True) + "\n")
+            handle.write(_attribution_json_dumps(row, sort_keys=True) + "\n")
     except OSError:
         return

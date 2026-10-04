@@ -1,7 +1,7 @@
 const {
   assert,
   fs,
-  loadYolomux,
+  loadYomux,
   canonical,
   test,
   testAsync,
@@ -19,7 +19,7 @@ test('YO!info prefers the normalized work graph without duplicating a shared wor
 });
 
 test('YO!info canonical relationship records ignore conflicting legacy projections and keep an empty graph empty', () => {
-  const api = loadYolomux('', ['graph-session']);
+  const api = loadYomux('', ['graph-session']);
   const graph = {
     version: 1,
     generation: 7,
@@ -61,7 +61,7 @@ test('YO!info canonical relationship records ignore conflicting legacy projectio
 });
 
 testAsync('metadata refresh retains a complete graph during lightweight payloads and rejects an older graph generation', async () => {
-  const api = loadYolomux('', ['graph-refresh']);
+  const api = loadYomux('', ['graph-refresh']);
   const completeGraph = {version: 1, generation: 20, tmux_sessions: {}, tmux_windows: {}, tmux_panes: {}, runtime_actors: {}, path_observations: {}, git_worktrees: {'worktree:complete': {id: 'worktree:complete', root: '/complete', local_repository_id: 'repo:complete'}}, local_repositories: {'repo:complete': {id: 'repo:complete', local_branch_ids: []}}, hosted_repositories: {}, local_branches: {}, pull_requests: {}, linear_issues: {}, worktree_branch_activity: {}};
   await api.applySessionMetadataPayloadForTest({session_order: ['graph-refresh'], sessions: {'graph-refresh': {work_graph: completeGraph, metadata_loading: false}}}, {refreshAuto: false, refreshActivity: false, refreshContext: false});
   await api.applySessionMetadataPayloadForTest({metadata_loading: true, session_order: ['graph-refresh'], sessions: {'graph-refresh': {work_graph: {version: 1, generation: 0, loading: true}, metadata_loading: true}}}, {refreshAuto: false, refreshActivity: false, refreshContext: false});

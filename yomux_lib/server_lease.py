@@ -15,7 +15,12 @@ from .infra.common import ensure_runtime_root
 from .infra.host_identity import HostIdentity
 from .infra.host_identity import current_host_identity
 from .infra.host_identity import is_current_local_process
-from .infra.root_paths import YolomuxRoots
+from .infra.root_paths import YomuxRoots
+from .infra.instance_locks import _instance_lock_paths
+from .infra.instance_locks import _instance_path_tuple
+from .infra.instance_locks import _release_fds
+from .infra.instance_locks import _try_lock_instance_path
+from .infra.instance_locks import instance_root_is_available
 
 
 INSTANCE_FORCE_GRACE_SECONDS = 5.0
@@ -98,16 +103,6 @@ def _signal_verified_instance_owner(record: dict, identity: HostIdentity, signum
         os.kill(pid, signum)
     except ProcessLookupError:
         return
-
-
-def _try_lock_instance_path(path: Path) -> int | None:
-    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        os.close(fd)
-        return None
-    return fd
 
 
 def _force_stop_instance_owner(
@@ -204,27 +199,6 @@ def _preflight_force_stop_owners(
     return owners
 
 
-def _instance_path_tuple(paths_or_root: YolomuxRoots | Path) -> tuple[Path, ...]:
-    if isinstance(paths_or_root, YolomuxRoots):
-        return tuple(Path(path).expanduser().resolve(strict=False) for path in paths_or_root.writable_paths())
-    root = Path(paths_or_root).expanduser().resolve(strict=False)
-    return (root,)
-
-
-def _instance_lock_paths(paths: tuple[Path, ...]) -> tuple[Path, ...]:
-    """Return one exclusive lock for every mutable path."""
-
-    return tuple(sorted({path / "instance.lock" for path in paths}, key=str))
-
-
-def _release_fds(fds: list[int]) -> None:
-    for fd in fds:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        finally:
-            os.close(fd)
-
-
 def _write_instance_record(fds: list[int], payload: bytes) -> None:
     for fd in fds:
         os.ftruncate(fd, 0)
@@ -287,7 +261,7 @@ def _path_record(paths: tuple[Path, ...]) -> dict[str, str]:
     )
 
 
-def acquire_instance_root_lease(paths_or_root: YolomuxRoots | Path, *, force: bool = False) -> ServerPortLease | None:
+def acquire_instance_root_lease(paths_or_root: YomuxRoots | Path, *, force: bool = False) -> ServerPortLease | None:
     """Claim one complete YOmux path tuple, independent of its HTTP port.
 
     IDX, STATS, and SESS are process-local services. Sharing their root between
@@ -375,7 +349,7 @@ def _port_record_path(port: int, state_dir: Path, identity: HostIdentity) -> Pat
 
 
 def acquire_instance_and_port_leases(
-    paths_or_root: YolomuxRoots | Path,
+    paths_or_root: YomuxRoots | Path,
     port: int,
     *,
     force: bool = False,
@@ -383,7 +357,7 @@ def acquire_instance_and_port_leases(
     """Claim the complete product-root and listener lease as one lock transaction."""
 
     identity = current_host_identity()
-    state_dir = paths_or_root.runtime_dir if isinstance(paths_or_root, YolomuxRoots) else RUNTIME_DIR
+    state_dir = paths_or_root.runtime_dir if isinstance(paths_or_root, YomuxRoots) else RUNTIME_DIR
     root_paths = _instance_path_tuple(paths_or_root)
     root_lock_paths = _instance_lock_paths(root_paths)
     port_path = _port_record_path(port, state_dir, identity)

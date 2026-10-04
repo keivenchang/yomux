@@ -221,6 +221,36 @@ vm.runInContext(
 );
 
 async function runI18nLocaleRegistrySuite() {
+  await testAsync('plural formatting reuses locale rules across tree labels without caching translations', async () => {
+    const constructions = [];
+    const pluralContext = {
+      bootstrap: {
+        locale: 'en',
+        localeRegistry: {fallback: 'en', locales: [{id: 'en'}, {id: 'fr'}]},
+        strings: {
+          en: {'row.one': '{count} row', 'row.other': '{count} rows'},
+          fr: {'row.one': '{count} ligne', 'row.other': '{count} lignes'},
+        },
+      },
+      Intl: {PluralRules: class extends Intl.PluralRules {
+        constructor(locale) { super(locale); constructions.push(locale); }
+      }},
+    };
+    vm.createContext(pluralContext);
+    vm.runInContext(`${source}\nthis.plural = tPlural;`, pluralContext);
+    for (let count = 0; count < 2210; count += 1) {
+      assert.equal(pluralContext.plural('row', count), `${count} ${count === 1 ? 'row' : 'rows'}`);
+    }
+    assert.deepStrictEqual(constructions, ['en'], 'one formatter serves the entire tree');
+    vm.runInContext("i18nActiveLocale = 'fr';", pluralContext);
+    assert.equal(pluralContext.plural('row', 0), '0 ligne');
+    assert.equal(pluralContext.plural('row', 2), '2 lignes');
+    vm.runInContext("i18nCatalogs.get('fr')['row.other'] = '{count} nouvelles';", pluralContext);
+    assert.equal(pluralContext.plural('row', 2), '2 nouvelles');
+    vm.runInContext("i18nActiveLocale = 'en';", pluralContext);
+    assert.equal(pluralContext.plural('row', 1), '1 row');
+    assert.deepStrictEqual(constructions, ['en', 'fr']);
+  });
   await testAsync('locale registry normalizes locales and relocalizes global chrome', async () => {
   const api = context.api;
   assert.equal(englishCatalog['app.latencyTitle'], 'Browser ↔ YOmux round-trip latency (ms)', 'latency hover explains browser round-trip units');

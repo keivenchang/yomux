@@ -633,7 +633,9 @@ function ensureAgentWindowActivityMutationObserver() {
   // so replacement markers still need the common wall-clock synchronizer in that mode.
   if (agentWindowActivityMutationObserver || typeof MutationObserver !== 'function' || !document?.body) return;
   agentWindowActivityMutationObserver = new MutationObserver(mutations => {
-    if (mutations.some(mutationTouchesAgentWindowActivity)) scheduleAgentWindowActivityAnimationSync();
+    for (const mutation of mutations) {
+      if (mutationTouchesAgentWindowActivity(mutation)) scheduleAgentWindowActivityAnimationSync(mutation.target);
+    }
   });
   agentWindowActivityMutationObserver.observe(document.body, {childList: true, subtree: true});
 }
@@ -653,27 +655,38 @@ function agentWindowActivityAnimationUsesGlobalPhase(node, name) {
     || Boolean(node?.querySelector?.('.agent-window-status-dot--acknowledgement-preview'));
 }
 
-function syncAgentWindowPulseAnimationCurrentTime(node, nowMs = Date.now()) {
-  const animations = typeof node?.getAnimations === 'function' ? node.getAnimations({subtree: true}) : [];
-  for (const animation of animations) {
-    const name = String(animation?.animationName || '').trim();
-    if (!agentWindowActivityAnimationUsesGlobalPhase(node, name)) continue;
-    const timing = animation.effect?.getTiming?.() || {};
-    const duration = Number(timing.duration) || attentionAnimationDurationMs();
-    if (!Number.isFinite(duration) || duration <= 0) continue;
-    animation.currentTime = Number(nowMs) || 0;
+function collectAgentWindowPulseNodes(root = document) {
+  const scopes = [...new Set((Array.isArray(root) ? root : [root])
+    .map(scope => scope?.querySelectorAll ? scope : document))];
+  const nodes = new Set();
+  for (const scope of scopes) {
+    if (scopes.some(parent => parent !== scope && parent.contains?.(scope))) continue;
+    if (scope.matches?.(agentWindowActivityPulseSelector)) nodes.add(scope);
+    for (const node of scope.querySelectorAll(agentWindowActivityPulseSelector)) nodes.add(node);
   }
+  return [...nodes];
+}
+
+function collectAgentWindowPulseAnimations(nodes) {
+  const result = new Set();
+  // Animation discovery flushes style. Finish every read before changing timelines,
+  // otherwise each marker can force another layout of the expanded file tree.
+  for (const node of nodes) {
+    const animations = typeof node?.getAnimations === 'function' ? node.getAnimations({subtree: true}) : [];
+    for (const animation of animations) {
+      const name = String(animation?.animationName || '').trim();
+      if (agentWindowActivityAnimationUsesGlobalPhase(node, name)) result.add(animation);
+    }
+  }
+  return result;
 }
 
 function syncAgentWindowActivityAnimationDelays(root = document) {
-  const scope = root?.querySelectorAll ? root : document;
-  const nodes = Array.from(scope?.querySelectorAll?.(agentWindowActivityPulseSelector) || []);
+  const nodes = collectAgentWindowPulseNodes(root);
   if (!nodes.length) return;
   const broadPulseEnabled = typeof statusPulseAnimationEnabled !== 'function' || statusPulseAnimationEnabled();
-  const nowMs = Date.now();
-  const delay = typeof attentionAnimationClockDelay === 'function'
-    ? attentionAnimationClockDelay(nowMs)
-    : attentionAnimationDelay(nowMs);
+  if (typeof attentionAnimationClockDelay === 'function') attentionAnimationClockDelay();
+  const activeNodes = [];
   for (const node of nodes) {
     if (!node?.style) continue;
     if (!node.classList?.contains?.('agent-window-status-dot') && !node.classList?.contains?.('status-indicator') && !node.classList?.contains?.('js-debug-live-pulse') && !node.querySelector?.('.agent-window-status-dot')) continue;
@@ -689,22 +702,24 @@ function syncAgentWindowActivityAnimationDelays(root = document) {
     if (!broadPulseEnabled && !subwindowGlyph && !preferencesPreview) continue;
     const localDelay = node.style.getPropertyValue('--attention-animation-delay').trim();
     if (localDelay) node.style.removeProperty('--attention-animation-delay');
-    syncAgentWindowPulseAnimationCurrentTime(node, nowMs);
+    activeNodes.push(node);
+  }
+  for (const animation of collectAgentWindowPulseAnimations(activeNodes)) {
+    const timing = animation.effect?.getTiming?.() || {};
+    const duration = Number(timing.duration) || attentionAnimationDurationMs();
+    if (!Number.isFinite(duration) || duration <= 0) continue;
+    // CSS delay must not offset the shared wall clock or a pending replacement's first frame.
+    animation.startTime = -performance.timeOrigin - (Number(timing.delay) || 0);
   }
 }
 
 function restartAgentWindowActivityPulseAnimations(root = document) {
-  const scope = root?.querySelectorAll ? root : document;
-  const nodes = Array.from(scope?.querySelectorAll?.(agentWindowActivityPulseSelector) || []);
-  for (const node of nodes) {
-    const animations = typeof node?.getAnimations === 'function' ? node.getAnimations({subtree: true}) : [];
-    for (const animation of animations) {
-      if (!agentWindowActivityAnimationUsesGlobalPhase(node, String(animation?.animationName || '').trim())) continue;
-      animation.cancel?.();
-      animation.play?.();
-    }
+  const nodes = collectAgentWindowPulseNodes(root);
+  for (const animation of collectAgentWindowPulseAnimations(nodes)) {
+    animation.cancel?.();
+    animation.play?.();
   }
-  syncAgentWindowActivityAnimationDelays(scope);
+  syncAgentWindowActivityAnimationDelays(root);
 }
 
 function scheduleAgentWindowActivityAnimationSync(root = document) {
@@ -724,7 +739,8 @@ function scheduleAgentWindowActivityAnimationSync(root = document) {
       : Array.from(agentWindowActivityAnimationSyncRoots);
     agentWindowActivityAnimationSyncDocument = false;
     agentWindowActivityAnimationSyncRoots.clear();
-    for (const pendingRoot of roots) syncAgentWindowActivityAnimationDelays(pendingRoot);
+    // Discover every pending scope before timeline writes can dirty style for another scope.
+    syncAgentWindowActivityAnimationDelays(roots);
   });
 }
 

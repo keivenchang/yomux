@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
+from types import SimpleNamespace
+
+import pytest
+
 from tools import finder_fs_repro as tool
 
 
@@ -101,3 +105,61 @@ def test_wait_for_finder_settled_requires_continuous_idle_after_pending_operatio
 
     assert any(state == "pending" for _, state in observed)
     assert now >= 0.55
+
+
+@pytest.mark.parametrize("failed_phase", ["drivers", "server"])
+def test_measurement_cleanup_attempts_every_owned_phase(monkeypatch, tmp_path, failed_phase):
+    runtime = SimpleNamespace(app=object())
+    server, thread = SimpleNamespace(server_address=("127.0.0.1", 12345)), object()
+    phases = []
+    cleanup_error = RuntimeError(f"{failed_phase} retirement failed")
+
+    def stop(phase):
+        phases.append(phase)
+        if phase == failed_phase:
+            raise cleanup_error
+
+    def fail_browser(**_options):
+        raise RuntimeError("browser startup failed")
+
+    monkeypatch.setattr(tool, "create_fixture_tree", lambda _path: {"root": tmp_path})
+    monkeypatch.setattr(tool, "start_isolated_browser_app", lambda *_args, **_kwargs: runtime)
+    monkeypatch.setattr(tool, "start_browser_server", lambda *_args, **_kwargs: (server, thread))
+    monkeypatch.setattr(tool, "new_chrome_driver", fail_browser)
+    monkeypatch.setattr(tool, "retire_all", lambda _leases: stop("drivers"))
+    monkeypatch.setattr(tool, "stop_browser_server", lambda *_args: stop("server"))
+    monkeypatch.setattr(tool, "stop_isolated_browser_app", lambda _runtime: stop("runtime"))
+
+    with pytest.raises(RuntimeError) as caught:
+        tool.run_measurement(monkeypatch, tmp_path)
+
+    assert caught.value is cleanup_error
+    assert phases == ["drivers", "server", "runtime"]
+
+
+def test_measurement_retires_first_client_when_second_client_startup_fails(monkeypatch, tmp_path):
+    runtime = SimpleNamespace(app=object())
+    server = SimpleNamespace(server_address=("127.0.0.1", 12345))
+    first_driver = object()
+    calls = []
+    retired = []
+
+    def start_browser(**_options):
+        calls.append("start")
+        if len(calls) == 2:
+            raise RuntimeError("second browser startup failed")
+        return first_driver
+
+    monkeypatch.setattr(tool, "create_fixture_tree", lambda _path: {"root": tmp_path})
+    monkeypatch.setattr(tool, "start_isolated_browser_app", lambda *_args, **_kwargs: runtime)
+    monkeypatch.setattr(tool, "start_browser_server", lambda *_args, **_kwargs: (server, object()))
+    monkeypatch.setattr(tool, "new_chrome_driver", start_browser)
+    monkeypatch.setattr(tool, "WebDriverLease", SimpleNamespace(from_driver=lambda driver: driver))
+    monkeypatch.setattr(tool, "retire_all", retired.extend)
+    monkeypatch.setattr(tool, "stop_browser_server", lambda *_args: None)
+    monkeypatch.setattr(tool, "stop_isolated_browser_app", lambda _runtime: None)
+
+    with pytest.raises(RuntimeError, match="second browser startup failed"):
+        tool.run_measurement(monkeypatch, tmp_path)
+
+    assert retired == [first_driver]

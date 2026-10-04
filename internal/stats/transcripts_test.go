@@ -568,6 +568,78 @@ func TestScanTranscriptCodexTokenUsageRecord(t *testing.T) {
 	}
 }
 
+func TestScanTranscriptCodexOrdinaryHandoffPreservesCumulativeThreadBaseline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-token-usage-handoff.jsonl")
+	threadID := "thread-synthetic"
+	writeJSONL(t, path,
+		map[string]any{"type": "session_meta", "payload": map[string]any{"id": threadID, "model": "gpt-synthetic"}},
+		usageCodexTokenUsageRecord(1, threadID, 1000000, 200000, 99473, 1000000, 200000, 99473),
+		map[string]any{"type": "inter_agent_communication_metadata", "payload": map[string]any{}},
+		map[string]any{"type": "event_msg", "payload": map[string]any{"type": "inter_agent_communication_metadata"}},
+		usageCodexTokenUsageRecord(2, threadID, 120, 20, 144, 1000120, 200020, 99617),
+	)
+
+	state := &TranscriptScannerState{}
+	source := TranscriptSource{Path: path, Provider: "codex", ThreadID: "tmux-session"}
+	transcriptSize := transcriptFixtureSize(t, path)
+	var output []float64
+	quantitiesByTime := make(map[float64]map[string]float64)
+	for cycle := 0; state.Offset < transcriptSize; cycle++ {
+		result, err := ScanTranscript(source, state, TranscriptScanOptions{MaxRecords: 1})
+		if err != nil {
+			t.Fatalf("scan cycle %d: %v", cycle, err)
+		}
+		for _, atom := range result.Atoms {
+			at := atom.ObservedAt
+			if quantitiesByTime[at] == nil {
+				quantitiesByTime[at] = make(map[string]float64)
+			}
+			key := atom.Direction + ":" + atom.CacheRole
+			quantitiesByTime[at][key] += atom.Payload["quantity"].(float64)
+			if atom.Direction == "output" {
+				output = append(output, atom.Payload["quantity"].(float64))
+				if atom.Payload["thread_id"] != threadID {
+					t.Fatalf("handoff changed transcript identity: %#v", atom.Payload)
+				}
+			}
+		}
+		result.Receipt.Commit()
+	}
+	if !reflect.DeepEqual(output, []float64{99473, 144}) {
+		t.Fatalf("incremental Codex output deltas = %v, want lifetime baseline then 144-token response", output)
+	}
+	wantByTime := map[float64]map[string]float64{
+		1: {"input:none": 800000, "input:read": 200000, "output:none": 99473},
+		2: {"input:none": 100, "input:read": 20, "output:none": 144},
+	}
+	if !reflect.DeepEqual(quantitiesByTime, wantByTime) {
+		t.Fatalf("incremental Codex usage deltas = %#v, want %#v", quantitiesByTime, wantByTime)
+	}
+}
+
+func TestScanTranscriptCodexOrdinaryHandoffUsesSourceIdentityWhenTranscriptIDMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-legacy-handoff.jsonl")
+	writeJSONL(t, path,
+		map[string]any{"type": "session_meta", "payload": map[string]any{"model": "gpt-synthetic"}},
+		usageCodex(1, 10, 2, 3),
+		map[string]any{"type": "event_msg", "payload": map[string]any{"type": "inter_agent_communication_metadata"}},
+		usageCodex(2, 20, 4, 6),
+	)
+
+	result, err := ScanTranscript(TranscriptSource{Path: path, Provider: "codex", ThreadID: "inventory-thread"}, &TranscriptScannerState{}, TranscriptScanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Atoms) != 6 {
+		t.Fatalf("legacy handoff atoms = %d, want input/cached/output for two records", len(result.Atoms))
+	}
+	for _, atom := range result.Atoms[3:] {
+		if atom.Payload["thread_id"] != "inventory-thread" {
+			t.Fatalf("legacy post-handoff usage lost inventory identity: %#v", atom.Payload)
+		}
+	}
+}
+
 func TestCodexTranscriptAtomsResolvePythonCatalogCost(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rollout-priced.jsonl")
 	observedAt := float64(1783728000)

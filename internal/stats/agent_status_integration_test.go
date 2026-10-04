@@ -38,7 +38,7 @@ func TestAgentStatusWithSyntheticInventoryAndMockClient(t *testing.T) {
 		t.Fatalf("mock client is unavailable: %v", err)
 	}
 
-	root := t.TempDir()
+	root := testsupport.ShortTempDir(t)
 	// The mock client and the host-side test image may probe this vendor
 	// directory during startup. Keep it inside the synthetic HOME so that a
 	// missing optional host directory cannot become visible pane error text.

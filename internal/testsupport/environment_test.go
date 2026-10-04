@@ -22,7 +22,7 @@ func TestPrivateTestEnvironmentKeepsNestedTmuxSocketPathsShort(t *testing.T) {
 		value, present := os.LookupEnv(key)
 		original[key] = savedValue{value: value, present: present}
 	}
-	for _, key := range []string{"YOMUX_PRIVATE_TEST_ENV_ROOT", "YOLOMUX_PRIVATE_TEST_ENV_ROOT", "PYTHONUSERBASE", "PYTHONDONTWRITEBYTECODE"} {
+	for _, key := range []string{"YOMUX_PRIVATE_TEST_ENV_ROOT", "YOLOMUX_PRIVATE_TEST_ENV_ROOT", "YOMUX_TMUX_SOCKET", "YOLOMUX_TMUX_SOCKET", "PYTHONUSERBASE", "PYTHONDONTWRITEBYTECODE"} {
 		value, present := os.LookupEnv(key)
 		original[key] = savedValue{value: value, present: present}
 	}
@@ -48,6 +48,12 @@ func TestPrivateTestEnvironmentKeepsNestedTmuxSocketPathsShort(t *testing.T) {
 	tempDir := os.Getenv("TMPDIR")
 	if !strings.HasPrefix(tempDir, "/tmp/ym-") {
 		t.Fatalf("private TMPDIR = %q, want a short private path under /tmp", tempDir)
+	}
+	if _, present := os.LookupEnv("YOMUX_TMUX_SOCKET"); present {
+		t.Fatal("private tmux default retained an ambient canonical override")
+	}
+	if got, want := os.Getenv("YOLOMUX_TMUX_SOCKET"), filepath.Join(filepath.Dir(tempDir), "tmux.sock"); got != want {
+		t.Fatalf("private tmux socket = %q, want %q", got, want)
 	}
 	socket := filepath.Join(tempDir, "TestActivityRouteIncludesEveryGlobalTmuxSession2333904820", "001", "tmux.sock")
 	if len(socket) > 104 {
@@ -112,6 +118,22 @@ func TestSyntheticEnvironmentDropsCanonicalAndLegacyProductRoots(t *testing.T) {
 		}
 		if key == "YOLOMUX_STATS_DISABLE_COLLECTORS" && value != "1" {
 			t.Fatalf("synthetic environment canonical override = %q, want fixture value", value)
+		}
+	}
+}
+
+func TestSyntheticEnvironmentDropsInheritedBazelSharding(t *testing.T) {
+	for _, name := range []string{
+		"TEST_SHARD_INDEX", "TEST_TOTAL_SHARDS", "TEST_SHARD_STATUS_FILE",
+		"TESTBRIDGE_TEST_ONLY", "TESTBRIDGE_TEST_RUNNER_FAIL_FAST",
+	} {
+		t.Setenv(name, "inherited-shard-state")
+	}
+	for _, entry := range SyntheticEnvironment() {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && (key == "TEST_SHARD_INDEX" || key == "TEST_TOTAL_SHARDS" || key == "TEST_SHARD_STATUS_FILE" ||
+			key == "TESTBRIDGE_TEST_ONLY" || key == "TESTBRIDGE_TEST_RUNNER_FAIL_FAST") {
+			t.Fatalf("synthetic subprocess inherited Bazel sharding variable %s", key)
 		}
 	}
 }

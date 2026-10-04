@@ -47,7 +47,7 @@ def _reset_stateful_server_log_ring(browser, journey) -> None:
 
     SERVER_LOGS.clear()
     boundary = SERVER_LOGS.payload()
-    browser._yolomux_server_log_boundary = boundary
+    browser._yomux_server_log_boundary = boundary
     journey.server_log_boundary = boundary
 
 
@@ -80,7 +80,7 @@ def test_stateful_journey_stop_rejects_browser_outside_fixture_origin(
     _load_browser_error_gate(browser, runtime)
     SERVER_LOGS.emit("warning", "fixture-regression", "stateful fixture escaped its server origin")
     if clear_boundary_marker:
-        browser._yolomux_server_log_boundary = None
+        browser._yomux_server_log_boundary = None
     retire_browser_after_strict_diagnostic_gate(browser)
 
     try:
@@ -411,7 +411,7 @@ def test_browser_journey_error_gate_rejects_reused_id_after_server_log_reset(bro
     _load_browser_error_gate(browser, runtime)
     retire_only_nonfailure_js_debug_events(browser)
     browser.get_log("browser")
-    browser._yolomux_server_log_boundary = None
+    browser._yomux_server_log_boundary = None
     first = {
         "level": "error",
         "source": "local-service:statusd",
@@ -466,14 +466,14 @@ def test_browser_journey_error_gate_rejects_reused_id_after_server_log_reset(bro
         with pytest.raises(AssertionError, match=second["message"]):
             assert_browser_journey_error_free(browser)
         tracking = browser.execute_script(
-            "return {epoch: __yolomuxBrowserJourneyGate.serverLogEpoch, ids: [...__yolomuxBrowserJourneyGate.consumedServerLogIds]};"
+            "return {epoch: __yomuxBrowserJourneyGate.serverLogEpoch, ids: [...__yomuxBrowserJourneyGate.consumedServerLogIds]};"
         )
         assert tracking == {"epoch": second_epoch, "ids": []}
     finally:
         browser.execute_script(
             "window.fetch = window.__gateOriginalFetch; delete window.__gateOriginalFetch; delete window.__gateServerLogPayload;"
         )
-        browser._yolomux_server_log_boundary = stateful_journey.server_log_boundary
+        browser._yomux_server_log_boundary = stateful_journey.server_log_boundary
 
 
 def test_browser_journey_error_gate_initializes_absent_consumption_state(browser, stateful_journey):
@@ -481,20 +481,20 @@ def test_browser_journey_error_gate_initializes_absent_consumption_state(browser
     _load_browser_error_gate(browser, runtime)
     _reset_stateful_server_log_ring(browser, stateful_journey)
     retire_only_nonfailure_js_debug_events(browser)
-    browser.execute_script("delete window.__yolomuxBrowserJourneyGate;")
+    browser.execute_script("delete window.__yomuxBrowserJourneyGate;")
     browser.get_log("browser")
 
     clean = assert_browser_journey_error_free(browser)
 
     assert clean["serverLogErrors"] == []
     tracking = browser.execute_script(
-        "return {epoch: __yolomuxBrowserJourneyGate.serverLogEpoch, ids: [...__yolomuxBrowserJourneyGate.consumedServerLogIds]};"
+        "return {epoch: __yomuxBrowserJourneyGate.serverLogEpoch, ids: [...__yomuxBrowserJourneyGate.consumedServerLogIds]};"
     )
     assert tracking == {"epoch": SERVER_LOGS.payload()["epoch"], "ids": []}
     started = begin_browser_journey_surface_tracking(browser)
     assert started == {"malformed": False, "visitedSurfaces": []}
     assert browser.execute_script(
-        "return __yolomuxBrowserJourneyGate.observer instanceof MutationObserver && typeof __yolomuxBrowserJourneyGate.observe === 'function';"
+        "return __yomuxBrowserJourneyGate.observer instanceof MutationObserver && typeof __yomuxBrowserJourneyGate.observe === 'function';"
     ) is True
 
 
@@ -503,13 +503,13 @@ def test_browser_journey_error_gate_rejects_malformed_existing_consumption_state
     _load_browser_error_gate(browser, runtime)
     _reset_stateful_server_log_ring(browser, stateful_journey)
     browser.execute_script(
-        "window.__yolomuxBrowserJourneyGate = {consumedServerLogIds: {invalid: true}};"
+        "window.__yomuxBrowserJourneyGate = {consumedServerLogIds: {invalid: true}};"
     )
     browser.get_log("browser")
 
     with pytest.raises(AssertionError, match="consumed server-log IDs are malformed"):
         assert_browser_journey_error_free(browser)
-    browser.execute_script("delete window.__yolomuxBrowserJourneyGate;")
+    browser.execute_script("delete window.__yomuxBrowserJourneyGate;")
     assert assert_browser_journey_error_free(browser)["serverLogErrors"] == []
 
 

@@ -55,7 +55,7 @@ def test_rooted_subprocess_isolates_instance_state_but_reuses_user_codex_credent
 import json
 from pathlib import Path
 from yomux_lib.infra import common
-paths = common._YOLOMUX_ROOTS
+paths = common._YOMUX_ROOTS
 longest = max(common.runtime_socket_candidates(paths), key=lambda value: len(str(value).encode()))
 print(json.dumps({
     'home': str(Path.home()),
@@ -104,7 +104,7 @@ print(json.dumps({
 
 def test_root_isolates_instance_state_but_not_user_owned_codex_credentials(tmp_path: Path):
     root = Path("/tmp/yr")
-    paths = common.resolve_yolomux_roots(
+    paths = common.resolve_yomux_roots(
         {"YOLOMUX_ROOT": str(root), "XDG_CACHE_HOME": "/outside/cache", "CODEX_HOME": "/outside/codex"},
         identity=_identity(),
     )
@@ -123,12 +123,12 @@ def test_root_isolates_instance_state_but_not_user_owned_codex_credentials(tmp_p
 )
 def test_root_refuses_each_outside_individual_override(tmp_path: Path, key: str, value: str):
     with pytest.raises(ValueError, match=rf"{key}.*{value}"):
-        common.resolve_yolomux_roots({"YOLOMUX_ROOT": str(tmp_path / "root"), key: value}, identity=_identity())
+        common.resolve_yomux_roots({"YOLOMUX_ROOT": str(tmp_path / "root"), key: value}, identity=_identity())
 
 
 def test_root_unset_preserves_existing_default_paths(monkeypatch, tmp_path: Path):
     monkeypatch.delenv("YOLOMUX_ROOT", raising=False)
-    paths = common.resolve_yolomux_roots({}, identity=_identity(), temporary_dir=tmp_path / "tmp", uid=1000)
+    paths = common.resolve_yomux_roots({}, identity=_identity(), temporary_dir=tmp_path / "tmp", uid=1000)
 
     assert paths.config_dir == Path.home() / ".config" / "yomux"
     assert paths.state_dir == Path.home() / ".local" / "state" / "yomux"
@@ -141,7 +141,7 @@ def test_deep_root_fails_socket_budget_before_creating_a_directory(tmp_path: Pat
     root = tmp_path / ("x" * 70)
 
     with pytest.raises(ValueError, match="YOLOMUX_ROOT.*shorter"):
-        common.resolve_yolomux_roots({"YOLOMUX_ROOT": str(root)}, identity=_identity())
+        common.resolve_yomux_roots({"YOLOMUX_ROOT": str(root)}, identity=_identity())
 
     assert not root.exists()
 
@@ -149,7 +149,7 @@ def test_deep_root_fails_socket_budget_before_creating_a_directory(tmp_path: Pat
 def test_socket_budget_accepts_a_realistic_development_root():
     root = Path("/home/keivenc/dev/yolomux-verify-7771")
 
-    paths = common.resolve_yolomux_roots({"YOLOMUX_ROOT": str(root)}, identity=_identity())
+    paths = common.resolve_yomux_roots({"YOLOMUX_ROOT": str(root)}, identity=_identity())
 
     longest = max(common.runtime_socket_candidates(paths, identity=_identity()), key=lambda path: len(str(path).encode()))
     assert len(str(longest).encode()) <= common.LOCAL_RPC_SOCKET_PATH_BYTES
@@ -197,7 +197,7 @@ def test_cli_reports_outside_codex_override_without_a_traceback(tmp_path: Path):
 
 
 def test_socket_budget_enumerates_product_candidates_not_a_guessed_suffix(tmp_path: Path):
-    paths = common.resolve_yolomux_roots({"YOLOMUX_ROOT": "/tmp/yr"}, identity=_identity())
+    paths = common.resolve_yomux_roots({"YOLOMUX_ROOT": "/tmp/yr"}, identity=_identity())
     candidates = common.runtime_socket_candidates(paths)
 
     assert {path.name for path in candidates} >= {"statusd.sock", "batchd.sock", "watchd.sock", "approvald.sock", "indexer.sock"}

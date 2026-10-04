@@ -11,6 +11,52 @@ import (
 	"time"
 )
 
+func TestLifecycleStopClosesRunOnceReader(t *testing.T) {
+	for _, started := range []bool{false, true} {
+		t.Run(fmt.Sprintf("started=%t", started), func(t *testing.T) {
+			ctx := context.Background()
+			writer, err := OpenWriter(ctx, filepath.Join(t.TempDir(), "stats.sqlite3"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer writer.Close()
+			lifecycle := NewLifecycle(writer, LifecycleConfig{
+				WindowSeconds: 1, MaxCells: 1, Cadence: time.Hour,
+				Now: func() time.Time { return time.Unix(1000, 0) },
+			})
+			t.Cleanup(lifecycle.Stop)
+			if err := lifecycle.RunOnce(ctx); err != nil {
+				t.Fatal(err)
+			}
+			reader := lifecycle.readDatabase
+			if reader == nil || reader.sqlDB == nil {
+				t.Fatal("RunOnce did not retain its read database")
+			}
+			if started {
+				if err := lifecycle.Start(ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			done := lifecycle.done
+			lifecycle.Stop()
+			if started {
+				select {
+				case <-done:
+				default:
+					t.Fatal("Stop returned before the lifecycle worker exited")
+				}
+			}
+			if lifecycle.readDatabase != nil || reader.sqlDB.PingContext(ctx) == nil {
+				t.Fatal("Stop retained an open lifecycle read database")
+			}
+			if err := writer.db.PingContext(ctx); err != nil {
+				t.Fatalf("Stop closed the independent writer: %v", err)
+			}
+			lifecycle.Stop()
+		})
+	}
+}
+
 func TestLifecycleCountersRetainLastPhaseDurations(t *testing.T) {
 	var counters lifecycleCounters
 	counters.recordSelection(60, 3*time.Millisecond)
@@ -39,6 +85,7 @@ func TestLifecycleDemandRefreshDoesNotReselectExistingProduct(t *testing.T) {
 	defer writer.Close()
 
 	lifecycle := NewLifecycle(writer, LifecycleConfig{Now: func() time.Time { return time.Unix(1000, 0) }})
+	t.Cleanup(lifecycle.Stop)
 	lifecycle.DemandProduct(900, 10)
 	first := lifecycle.demandRevision.Load()
 	lifecycle.DemandProduct(900, 10)
@@ -106,6 +153,7 @@ func TestLifecycleReconcilesExternalUnavailableSpanWhenGenerationIsReused(t *tes
 		MaxCells:      2,
 		Now:           func() time.Time { return time.Unix(1000, 0) },
 	})
+	t.Cleanup(lifecycle.Stop)
 	lifecycle.DemandProduct(900, 10)
 	if err := lifecycle.RunOnce(ctx); err != nil {
 		t.Fatal(err)
@@ -130,6 +178,34 @@ func TestLifecycleReconcilesExternalUnavailableSpanWhenGenerationIsReused(t *tes
 		}
 		if len(noData) != 1 || noData[0].Family != "gpu" || noData[0].Start != float64(bucketStart) || noData[0].End != float64(bucketStart+10) {
 			t.Fatalf("bucket %d no-data = %+v", bucketStart, noData)
+		}
+	}
+}
+
+func TestIndexedFactPagesAdvanceTheirTimeRangeWithTheCursor(t *testing.T) {
+	for _, family := range []string{"observations", "usage_atoms"} {
+		for _, cursorTime := range []float64{0, 25, 90} {
+			t.Run(fmt.Sprintf("%s/%g", family, cursorTime), func(t *testing.T) {
+				capture := &queryCaptureDB{}
+				database := &Database{reader: capture}
+				var err error
+				if family == "observations" {
+					_, _, err = database.ReadObservationsPage(context.Background(), 25, 100,
+						&observationPageCursor{ObservedAt: cursorTime}, 17)
+				} else {
+					_, _, err = database.ReadUsageAtomsPage(context.Background(), 25, 100,
+						&usagePageCursor{ObservedAt: cursorTime}, 17)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got, want := capture.args[0], max(float64(25), cursorTime); got != want {
+					t.Fatalf("indexed page lower bound=%v want=%v; previous pages would be scanned again", got, want)
+				}
+				if capture.args[1] != float64(100) || capture.args[len(capture.args)-1] != 17 {
+					t.Fatalf("page changed its end or row bound: args=%v", capture.args)
+				}
+			})
 		}
 	}
 }
@@ -266,6 +342,7 @@ func TestLifecyclePublishesFactsAndRepairsMutation(t *testing.T) {
 	}
 	defer writer.Close()
 	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: 1000, Now: func() time.Time { return time.Unix(1999, 0) }})
+	t.Cleanup(lifecycle.Stop)
 	writer.AttachLifecycle(lifecycle)
 	if _, err := writer.AppendBatch(ctx, AppendBatch{Observations: []Observation{{EventID: "one", Family: "cpu", SourceID: "host", ObservedAt: 1995, EpochID: "e", Payload: map[string]any{"process_percent": 2}}}}); err != nil {
 		t.Fatal(err)
@@ -322,6 +399,7 @@ func TestLifecycleAppendNotificationsDoNotBypassCadence(t *testing.T) {
 		MaxCells:      1,
 		Now:           time.Now,
 	})
+	t.Cleanup(lifecycle.Stop)
 	writer.AttachLifecycle(lifecycle)
 	if err := lifecycle.Start(ctx); err != nil {
 		t.Fatal(err)
@@ -386,6 +464,7 @@ func TestLifecycleDemandLeavesBudgetForUnrelatedPendingCells(t *testing.T) {
 	}
 
 	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: 900, MaxCells: 4, Now: func() time.Time { return time.Unix(1000, 0) }})
+	t.Cleanup(lifecycle.Stop)
 	lifecycle.DemandProduct(900, 10)
 	if err := lifecycle.RunOnce(ctx); err != nil {
 		t.Fatal(err)
@@ -433,6 +512,7 @@ func TestLifecycleSingleCellDemandBeatsUnrelatedPendingCell(t *testing.T) {
 
 	now := time.Unix(1000, 0)
 	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: 1000, MaxCells: 1, Now: func() time.Time { return now }})
+	t.Cleanup(lifecycle.Stop)
 	lifecycle.DemandProduct(900, 10)
 	cells, err := lifecycle.selectCells(ctx, now, writer.sourceGeneration.Load())
 	if err != nil {
@@ -458,6 +538,7 @@ func TestLifecycleDefersOpenCoarseCellUntilLiveCadence(t *testing.T) {
 		MaxCells:      1,
 		Now:           func() time.Time { return now },
 	})
+	t.Cleanup(lifecycle.Stop)
 	lifecycle.DemandProduct(86400, 300)
 	current := lifecycleCell{ResolutionSeconds: 300, BucketStart: NextWindowEnd(now, 300) - 300}
 	lifecycle.lastMaterializedAt[[2]int64{300, current.BucketStart}] = now
@@ -485,6 +566,7 @@ func TestLifecycleDefaultRetentionUsesEachRingHorizon(t *testing.T) {
 	}
 	defer writer.Close()
 	lifecycle := NewLifecycle(writer, LifecycleConfig{Now: func() time.Time { return time.Unix(2_000_000_000, 0) }})
+	t.Cleanup(lifecycle.Stop)
 	if err := lifecycle.RunOnce(ctx); err != nil {
 		t.Fatalf("default lifecycle run failed: %v", err)
 	}
@@ -509,6 +591,7 @@ func TestLifecycleDefersUnrequestedColdBackfill(t *testing.T) {
 		BackgroundBackfillInitialDelay: time.Minute,
 		Now:                            func() time.Time { return current },
 	})
+	t.Cleanup(lifecycle.Stop)
 	bucketStart := current.Unix() - 1
 	if _, err := writer.PublishRingBuckets(ctx, []RingBucketWrite{{
 		ResolutionSeconds: 1,
@@ -554,6 +637,7 @@ func TestLifecycleDefersUnrequestedColdBackfill(t *testing.T) {
 		BackgroundBackfillInitialDelay: time.Minute,
 		Now:                            func() time.Time { return current },
 	})
+	t.Cleanup(lifecycle.Stop)
 	current = now.Add(time.Minute)
 	cells, err = lifecycle.selectCells(ctx, current, writer.SourceGeneration())
 	if err != nil {
@@ -579,6 +663,7 @@ func TestLifecycleSelectCellsPrioritizesPendingAndHonorsCellBound(t *testing.T) 
 		t.Fatal(err)
 	}
 	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: 100, MaxCells: 2, Now: func() time.Time { return time.Unix(999, 0) }})
+	t.Cleanup(lifecycle.Stop)
 	cells, err := lifecycle.selectCells(ctx, time.Unix(999, 0), 2)
 	if err != nil {
 		t.Fatal(err)
@@ -598,6 +683,7 @@ func TestLifecycleDemandPrioritizesRequestedProductWindow(t *testing.T) {
 	defer writer.Close()
 	now := time.Unix(1000, 0)
 	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: 1000, MaxCells: 2, Now: func() time.Time { return now }})
+	t.Cleanup(lifecycle.Stop)
 	lifecycle.DemandProduct(900, 10)
 	cells, err := lifecycle.selectCells(ctx, now, 0)
 	if err != nil {
@@ -640,6 +726,7 @@ func TestLifecycleDemandDoesNotMaterializeUnrequestedColdResolutions(t *testing.
 	}
 	now := time.Unix(10000, 0)
 	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: 3600, MaxCells: 4, Now: func() time.Time { return now }})
+	t.Cleanup(lifecycle.Stop)
 	lifecycle.DemandProduct(3600, 300)
 	cells, err := lifecycle.selectCells(ctx, now, 1)
 	if err != nil {
@@ -688,6 +775,7 @@ func TestLifecycleDemandDoesNotTreatUnaffectedRowsAsStaleDuringGenerationChurn(t
 		t.Fatal(err)
 	}
 	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: 300, MaxCells: 64, Now: func() time.Time { return time.Unix(1000, 0) }})
+	t.Cleanup(lifecycle.Stop)
 	lifecycle.DemandProduct(300, 1)
 	cells, err := lifecycle.selectCells(ctx, time.Unix(1000, 0), result.Generation)
 	if err != nil {
@@ -737,6 +825,7 @@ func TestLifecycleReconcilesUntrackedGenerationAlongsidePendingTelemetry(t *test
 		t.Fatal(err)
 	}
 	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: 300, MaxCells: 4, Now: func() time.Time { return time.Unix(1000, 0) }})
+	t.Cleanup(lifecycle.Stop)
 	lifecycle.DemandProduct(300, 1)
 	cells, err := lifecycle.selectCells(ctx, time.Unix(1000, 0), 3)
 	if err != nil {
@@ -810,6 +899,7 @@ func TestLifecycleReconcilesHistoricalGenerationAfterWriterRestartAndTailChurn(t
 		MaxCells:      4,
 		Now:           func() time.Time { return time.Unix(base, 0) },
 	})
+	t.Cleanup(lifecycle.Stop)
 	lifecycle.DemandProduct(300, 1)
 	for attempt := 0; attempt < 8; attempt++ {
 		if _, err := writer.AppendBatch(ctx, AppendBatch{Observations: []Observation{{
@@ -903,6 +993,7 @@ func TestLifecycleReconcilesOlderRowsWhenPublicationGenerationCatchesUp(t *testi
 		MaxCells:      4,
 		Now:           func() time.Time { return time.Unix(base, 0) },
 	})
+	t.Cleanup(lifecycle.Stop)
 	lifecycle.DemandProduct(300, 1)
 	cells, err := lifecycle.selectCells(ctx, time.Unix(base, 0), writer.SourceGeneration())
 	if err != nil {
@@ -980,6 +1071,7 @@ func TestLifecyclePublishesAndSettlesStartupReconciliation(t *testing.T) {
 		MaxCells:      2,
 		Now:           func() time.Time { return time.Unix(base, 0) },
 	})
+	t.Cleanup(lifecycle.Stop)
 	lifecycle.DemandProduct(300, 1)
 	settled := false
 	for attempt := 0; attempt < 4; attempt++ {
@@ -1070,6 +1162,7 @@ func TestLifecyclePublishesAndSettlesStartupReconciliation(t *testing.T) {
 		MaxCells:      1,
 		Now:           func() time.Time { return time.Unix(base, 0) },
 	})
+	t.Cleanup(secondLifecycle.Stop)
 	secondLifecycle.DemandProduct(300, 1)
 	if err := secondLifecycle.RunOnce(ctx); err != nil {
 		t.Fatal(err)
@@ -1104,6 +1197,7 @@ func TestLifecycleSelectCellsRepairsNewestStaleRowsBeforeCarrier(t *testing.T) {
 		t.Fatal(err)
 	}
 	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: 100, MaxCells: 1, Now: func() time.Time { return time.Unix(999, 0) }})
+	t.Cleanup(lifecycle.Stop)
 	cells, err := lifecycle.selectCells(ctx, time.Unix(999, 0), 2)
 	if err != nil {
 		t.Fatal(err)
@@ -1122,6 +1216,7 @@ func TestLifecycleSelectCellsDoesNotStarveCoarseResolutions(t *testing.T) {
 	}
 	defer writer.Close()
 	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: 1000, MaxCells: 16, Now: func() time.Time { return time.Unix(1000, 0) }})
+	t.Cleanup(lifecycle.Stop)
 	cells, err := lifecycle.selectCells(ctx, time.Unix(1000, 0), 0)
 	if err != nil {
 		t.Fatal(err)
@@ -1153,6 +1248,7 @@ func TestLifecycleCellBoundLeavesMissingRingWorkDurable(t *testing.T) {
 	}
 	defer writer.Close()
 	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: 100, MaxCells: 2, Now: func() time.Time { return time.Unix(999, 0) }})
+	t.Cleanup(lifecycle.Stop)
 	if err := lifecycle.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -1175,6 +1271,7 @@ func TestLifecycleNoOpDoesNotAdvanceRingPublication(t *testing.T) {
 	defer writer.Close()
 	now := time.Unix(999, 0)
 	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: 10, MaxCells: 64, Now: func() time.Time { return now }})
+	t.Cleanup(lifecycle.Stop)
 	if err := lifecycle.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -1214,6 +1311,7 @@ func TestLifecycleFactBudgetLeavesOversizedCellUnpublished(t *testing.T) {
 	}
 	now := time.Unix(999, 0)
 	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: 100, MaxCells: 64, MaxFactRows: 2, Now: func() time.Time { return now }})
+	t.Cleanup(lifecycle.Stop)
 	if err := lifecycle.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -1251,6 +1349,7 @@ func TestLifecycleCompletesOneBoundedCoarseCellPastRunBudget(t *testing.T) {
 		MaxRunTime:    time.Nanosecond,
 		Now:           func() time.Time { return now },
 	})
+	t.Cleanup(lifecycle.Stop)
 	lifecycle.DemandProduct(3600, 300)
 	if err := lifecycle.RunOnce(ctx); err != nil {
 		t.Fatal(err)
@@ -1292,6 +1391,7 @@ func TestLifecycleFactBudgetDoesNotStarveLaterCells(t *testing.T) {
 	}
 	now := time.Unix(1100, 0)
 	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: 200, MaxCells: 64, MaxFactRows: 2, Now: func() time.Time { return now }})
+	t.Cleanup(lifecycle.Stop)
 	if err := lifecycle.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -1335,6 +1435,7 @@ func TestLifecycleDemandedPendingCellPublishesBeforeColdRingBacklog(t *testing.T
 		t.Fatal(err)
 	}
 	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: 1000, MaxCells: 1, Now: func() time.Time { return now }})
+	t.Cleanup(lifecycle.Stop)
 	lifecycle.DemandProduct(900, 10)
 	if err := lifecycle.RunOnce(ctx); err != nil {
 		t.Fatal(err)
@@ -1375,6 +1476,7 @@ func TestLifecycleFineDemandConvergesWithCatalogAndPriorDemand(t *testing.T) {
 		}
 	}
 	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: RetentionSeconds, Now: func() time.Time { return now }})
+	t.Cleanup(lifecycle.Stop)
 	service := NewStatsService(writer, StatsServiceConfig{Products: keys, Now: func() time.Time { return now }})
 	lifecycle.DemandProduct(900, 10)
 	for attempt := 0; attempt < 64; attempt++ {
@@ -1426,6 +1528,7 @@ func TestLifecycleDemandedCoarseRangeSplitsOversizedFold(t *testing.T) {
 		MaxCells:      40,
 		Now:           func() time.Time { return now },
 	})
+	t.Cleanup(lifecycle.Stop)
 	lifecycle.DemandProduct(86400, 300)
 	if err := lifecycle.RunOnce(ctx); err != nil {
 		t.Fatal(err)
@@ -1527,6 +1630,7 @@ func TestLifecycleVacuumFailureHonorsRetryDeadline(t *testing.T) {
 		VacuumRetry:   time.Hour,
 		Now:           func() time.Time { return time.Unix(100, 0) },
 	})
+	t.Cleanup(lifecycle.Stop)
 	// Close the writer to make the rewrite fail deterministically. The scheduler
 	// must retain the due state while suppressing the next one-second lifecycle
 	// tick until the configured retry deadline.
@@ -1589,6 +1693,7 @@ func TestLifecycleVacuumDefersOnActiveReaderDemandThenPersistsCompletion(t *test
 		Busy:           func() bool { return snapshotHeld },
 		Now:            func() time.Time { return time.Unix(100, 0) },
 	})
+	t.Cleanup(lifecycle.Stop)
 	if err := lifecycle.vacuumIfDue(ctx, 100); err != nil {
 		t.Fatalf("busy-reader vacuum returned an error: %v", err)
 	}
@@ -1658,6 +1763,7 @@ func TestLifecycleRepairsUnavailableSpanAfterExternalGenerationBump(t *testing.T
 		MaxCells:      2,
 		Now:           func() time.Time { return time.Unix(1000, 0) },
 	})
+	t.Cleanup(lifecycle.Stop)
 	lifecycle.DemandProduct(900, 10)
 	if err := lifecycle.RunOnce(ctx); err != nil {
 		t.Fatal(err)
@@ -1728,6 +1834,7 @@ func TestLifecycleDoesNotReselectIncompleteUnavailableHistoryAfterUnrelatedGener
 	}
 
 	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: 3600, MaxCells: 64, Now: func() time.Time { return now }})
+	t.Cleanup(lifecycle.Stop)
 	lifecycle.DemandProduct(3600, 300)
 	database, err := OpenReadOnly(ctx, path)
 	if err != nil {
@@ -1803,6 +1910,7 @@ func TestLifecycleStartupReconciliationPublishesAndConvergesAfterRestart(t *test
 		MaxCells:      1,
 		Now:           func() time.Time { return now },
 	})
+	t.Cleanup(lifecycle.Stop)
 	lifecycle.DemandProduct(900, 10)
 	if err := lifecycle.RunOnce(ctx); err != nil {
 		_ = restarted.Close()
@@ -1847,6 +1955,7 @@ func TestLifecycleStartupReconciliationPublishesAndConvergesAfterRestart(t *test
 		t.Fatal(err)
 	}
 	secondLifecycle := NewLifecycle(second, LifecycleConfig{WindowSeconds: 900, MaxCells: 1, Now: func() time.Time { return now }})
+	t.Cleanup(secondLifecycle.Stop)
 	secondLifecycle.DemandProduct(900, 10)
 	if err := secondLifecycle.RunOnce(ctx); err != nil {
 		_ = second.Close()

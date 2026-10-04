@@ -44,6 +44,7 @@ from tests.gate_harness import gate_http_request
 from tests.gate_harness import gate_runtime_paths  # noqa: F401 - fixture import
 from tests.gate_harness import gate_tmux  # noqa: F401 - fixture import
 from tests.helpers.http_routes import login_cookie
+from tests.helpers.http_routes import capturing_route_request
 from tests.helpers.operation_reservations import isolate_batchd_fs_batch_lease as _isolate_batchd_fs_batch_lease
 from tests.helpers.operation_reservations import replace_job_client_for_fs_batch as _replace_job_client_for_fs_batch
 from tests.helpers.operation_reservations import reservation_must_not_release as _reservation_must_not_release
@@ -2904,6 +2905,30 @@ def test_session_files_memory_cache_is_bounded():
         webapp.control_server.stop()
 
 
+@pytest.mark.parametrize("channels", [{"status", "core"}, {"attention", "core"}, {"files", "core"}])
+@pytest.mark.parametrize("worker_state", ["absent", "dead", "live"])
+@pytest.mark.parametrize("retry_at", [0.0, 99.0, 101.0])
+def test_client_event_watch_sleep_respects_pending_status_generation_retry(channels, worker_state, retry_at):
+    record = state_services.ClientEventWatcherRecord()
+    record.status_generation_retry_at = retry_at
+    record.next_watched_pr_poll_at = 160.0
+    record.next_yoagent_job_poll_at = 160.0
+    if worker_state != "absent":
+        record.status_generation_worker = SimpleNamespace(is_alive=lambda: worker_state == "live")
+    webapp = SimpleNamespace(
+        client_events=SimpleNamespace(aggregate_channels=lambda: channels),
+        tmux_signal_event_watcher_healthy=lambda: True,
+        search_progress_active_until=0.0,
+        server_event_poll_seconds=lambda: 2.0,
+    )
+    bridge = object.__new__(app_module.WatchBridge)
+    bridge.state = SimpleNamespace(event_watcher_record=record)
+    expected = 60.0
+    if not channels.isdisjoint({"status", "attention"}) and worker_state != "live" and retry_at > 0:
+        expected = max(0.01, retry_at - 100.0)
+    assert bridge.client_event_watch_sleep_seconds(webapp, 100.0, record) == pytest.approx(expected)
+
+
 def test_client_event_watch_sleep_ignores_watchd_owned_filesystem_deadlines(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     subscriber_id = None
@@ -3068,6 +3093,7 @@ def test_status_generation_waiter_publishes_once_per_advanced_generation(monkeyp
         return result
     monkeypatch.setattr(webapp, "publish_client_event", publish_then_stop)
     try:
+        record.status_generation_worker = threading.current_thread()
         webapp.status_generation_wait_loop(record)
     finally:
         webapp.control_server.stop()
@@ -3124,6 +3150,7 @@ def test_status_generation_waiter_uses_immediate_probe_and_stop_aware_cadence(mo
 
     monkeypatch.setattr(webapp, "publish_client_event", publish_then_stop)
     try:
+        record.status_generation_worker = threading.current_thread()
         webapp.status_generation_wait_loop(record)
     finally:
         webapp.control_server.stop()
@@ -3150,15 +3177,19 @@ def test_status_generation_waiter_publishes_a_minimal_revision_only_patch(monkey
     monkeypatch.setattr(webapp.status_client, "probe_generation", lambda _generation: {"ok": True, "changed": True, "generation": 8})
 
     def snapshot(_sessions, timeout):
-        record.stop_event.set()
         return (
             {"ok": True, "protocol_version": statusd_protocol.STATUSD_PROTOCOL_VERSION, "status": 200, "generation": 8, "stale": False, "built_at": 1.0, "content_type": "application/json"},
             b'{"agent_window_snapshot_revision":8,"session_order":[],"sessions":{}}',
         )
 
     monkeypatch.setattr(webapp.status_client, "snapshot", snapshot)
-    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
+    def publish_then_stop(event_type, payload=None, **_kwargs):
+        events.append((event_type, payload or {}))
+        record.status_generation_stop_event.set()
+
+    monkeypatch.setattr(webapp, "publish_client_event", publish_then_stop)
     try:
+        record.status_generation_worker = threading.current_thread()
         webapp.status_generation_wait_loop(record)
     finally:
         webapp.control_server.stop()
@@ -3201,6 +3232,7 @@ def test_status_generation_waiter_publishes_a_full_roster_for_new_sessions(monke
 
     monkeypatch.setattr(webapp, "publish_client_event", publish_then_stop)
     try:
+        record.status_generation_worker = threading.current_thread()
         webapp.status_generation_wait_loop(record)
     finally:
         webapp.control_server.stop()
@@ -3209,6 +3241,212 @@ def test_status_generation_waiter_publishes_a_full_roster_for_new_sessions(monke
     assert events[0][1]["refresh"] is False
     assert events[0][1]["fields"]["agent_window_snapshot_revision"] == 8
     assert events[0][1]["changes"]["two"]["agent_windows"][0]["state"] == "working"
+
+
+@pytest.mark.parametrize("initial_status", [HTTPStatus.ACCEPTED, HTTPStatus.OK])
+def test_status_generation_watcher_publishes_first_ready_snapshot_without_another_generation(monkeypatch, initial_status):
+    webapp = app_module.TmuxWebtermApp(["one"])
+    record = webapp.client_watch_service.event_watcher_record
+    payload = {
+        "agent_window_snapshot_revision": 7,
+        "session_order": ["one"],
+        "sessions": {"one": {"agent_windows": [{"window_index": 0, "state": "idle"}]}},
+    }
+    ready = (
+        {"ok": True, "protocol_version": statusd_protocol.STATUSD_PROTOCOL_VERSION, "status": 200, "generation": 7, "stale": False, "built_at": 1.0, "content_type": "application/json"},
+        json.dumps(payload).encode("utf-8"),
+    )
+    initial = ready if initial_status == HTTPStatus.OK else ({"ok": False, "status": 202, "error": "refreshing"}, b"")
+    snapshot_entered = threading.Event()
+    release_snapshot = threading.Event()
+    probe_entered = threading.Event()
+    events = []
+    snapshots = []
+    released = []
+
+    def snapshot(_sessions, **_kwargs):
+        snapshots.append(True)
+        if len(snapshots) == 1:
+            return initial
+        assert len(snapshots) == 2, "stable generation must not refetch status"
+        snapshot_entered.set()
+        assert release_snapshot.wait(timeout=1.0)
+        return ready
+
+    def probe_generation(generation):
+        assert generation == 7
+        probe_entered.set()
+        record.status_generation_stop_event.set()
+        return {"ok": True, "changed": False, "generation": generation}
+
+    monkeypatch.setattr(webapp, "merge_shared_attention_acks", lambda: False)
+    monkeypatch.setattr(webapp.status_client, "acquire_generation_lease", lambda: {"ok": True, "lease_id": "lease-1"})
+    monkeypatch.setattr(webapp.status_client, "snapshot", snapshot)
+    monkeypatch.setattr(webapp.status_client, "probe_generation", probe_generation)
+    monkeypatch.setattr(webapp.status_client, "release_generation_lease", lambda lease_id: released.append(lease_id) or {"ok": True})
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, data=None, **_kwargs: events.append((event_type, data)))
+    try:
+        dispatch, writes = capturing_route_request(webapp, "/api/auto-approve")
+        dispatch()
+        envelope, status = writes[0]
+        assert status == initial_status
+        if status == HTTPStatus.OK:
+            assert envelope["data"] == payload
+        else:
+            assert envelope["state"] == "queued"
+        # A new subscriber needs the baseline even when another consumer already seeded this cache.
+        if status == HTTPStatus.OK:
+            webapp.client_watch_service.auto_approve_payload = copy.deepcopy(payload)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            started = executor.submit(webapp.start_status_generation_watcher, record)
+            try:
+                assert snapshot_entered.wait(timeout=1.0)
+                assert events == []
+            finally:
+                release_snapshot.set()
+            assert started.result(timeout=1.0) is True
+        assert probe_entered.wait(timeout=1.0)
+        webapp.stop_status_generation_watcher(record)
+    finally:
+        release_snapshot.set()
+        webapp.stop_status_generation_watcher(record)
+        webapp.control_server.stop()
+
+    assert events == [("auto_approve_changed", {
+        "status": 200, "refresh": False, "generation": 7, "signature": "statusd:7:200", "data": payload,
+    })]
+    assert released == ["lease-1"]
+    assert len(snapshots) == 2
+
+
+@pytest.mark.parametrize("superseded", [False, True])
+def test_status_generation_watcher_discards_initial_snapshot_after_stop_or_supersession(monkeypatch, superseded):
+    webapp = app_module.TmuxWebtermApp(["one"])
+    record = webapp.client_watch_service.event_watcher_record
+    snapshot_entered = threading.Event()
+    release_snapshot = threading.Event()
+    released = []
+    events = []
+
+    def snapshot(_sessions, timeout):
+        snapshot_entered.set()
+        assert release_snapshot.wait(timeout=1.0)
+        return (
+            {"ok": True, "protocol_version": statusd_protocol.STATUSD_PROTOCOL_VERSION, "status": 200, "generation": 7, "stale": False, "built_at": 1.0, "content_type": "application/json"},
+            b'{"agent_window_snapshot_revision":7,"session_order":["one"],"sessions":{}}',
+        )
+
+    monkeypatch.setattr(webapp.status_client, "acquire_generation_lease", lambda: {"ok": True, "lease_id": "lease-1"})
+    monkeypatch.setattr(webapp.status_client, "snapshot", snapshot)
+    monkeypatch.setattr(webapp.status_client, "probe_generation", lambda _generation: pytest.fail("obsolete watcher must not probe"))
+    monkeypatch.setattr(webapp.status_client, "release_generation_lease", lambda lease_id: released.append(lease_id) or {"ok": True})
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **_kwargs: events.append(args))
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            started = executor.submit(webapp.start_status_generation_watcher, record)
+            try:
+                assert snapshot_entered.wait(timeout=1.0)
+                if superseded:
+                    webapp.client_watch_service.event_watcher_record = app_module.ClientEventWatcherRecord()
+                else:
+                    record.stop_event.set()
+            finally:
+                release_snapshot.set()
+            assert started.result(timeout=1.0) is False
+    finally:
+        release_snapshot.set()
+        webapp.control_server.stop()
+
+    assert events == []
+    assert released == ["lease-1"]
+    assert record.status_generation_worker is None
+
+
+@pytest.mark.parametrize("held_phase", ["validation", "roster", "patch"])
+def test_status_generation_replacement_fences_a_retired_worker_during_publication(monkeypatch, held_phase):
+    webapp = app_module.TmuxWebtermApp(["current"])
+    record = webapp.client_watch_service.event_watcher_record
+    validation_entered = threading.Event()
+    release_validation = threading.Event()
+    replacement_published = threading.Event()
+    events = []
+    rosters = []
+
+    def ready_snapshot(generation, session):
+        return (
+            {"ok": True, "protocol_version": statusd_protocol.STATUSD_PROTOCOL_VERSION, "status": 200, "generation": generation, "stale": False, "built_at": 1.0, "content_type": "application/json"},
+            json.dumps({"agent_window_snapshot_revision": generation, "session_order": [session], "sessions": {session: {}}}).encode("utf-8"),
+        )
+
+    retired = threading.Thread(target=webapp.status_generation_wait_loop, args=(record, ready_snapshot(7, "obsolete")))
+    original_validate = app_module.validate_status_snapshot
+    original_patch = webapp.auto_approve_client_event_patch
+    original_roster = webapp.apply_session_roster
+
+    def hold(phase):
+        if held_phase == phase and threading.current_thread() is retired:
+            validation_entered.set()
+            assert release_validation.wait(timeout=5.0)
+
+    def held_validation(response, body):
+        validated = original_validate(response, body)
+        hold("validation")
+        return validated
+
+    def apply_roster(roster, **kwargs):
+        hold("roster")
+        result = original_roster(roster, **kwargs)
+        if roster == webapp.sessions:
+            rosters.append(roster)
+        return result
+
+    def patch(previous, current):
+        hold("patch")
+        return original_patch(previous, current)
+
+    def publish(event_type, payload=None, **_kwargs):
+        events.append((event_type, payload))
+        if payload["generation"] == 8:
+            replacement_published.set()
+        else:
+            record.status_generation_stop_event.set()
+
+    monkeypatch.setattr(app_module, "validate_status_snapshot", held_validation)
+    monkeypatch.setattr(webapp.status_client, "acquire_generation_lease", lambda: {"ok": True, "lease_id": "replacement"})
+    monkeypatch.setattr(webapp.status_client, "release_generation_lease", lambda _lease_id: {"ok": True})
+    monkeypatch.setattr(webapp.status_client, "snapshot", lambda _sessions, timeout: ready_snapshot(8, "current"))
+    monkeypatch.setattr(webapp.status_client, "probe_generation", lambda generation: {"ok": True, "changed": False, "generation": generation})
+    monkeypatch.setattr(webapp, "publish_client_event", publish)
+    monkeypatch.setattr(webapp, "apply_session_roster", apply_roster)
+    monkeypatch.setattr(webapp, "auto_approve_client_event_patch", patch)
+    monkeypatch.setattr(webapp.status_client, "invalidate", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda **_kwargs: None)
+    record.status_generation = 7
+    record.status_generation_worker = retired
+    try:
+        retired.start()
+        assert validation_entered.wait(timeout=1.0)
+        # Retirement is bounded; a validator can outlive its join. The replacement owns
+        # this same record and clears its shared stop event before the old worker resumes.
+        webapp.stop_status_generation_watcher(record)
+        assert retired.is_alive()
+        assert webapp.start_status_generation_watcher(record) is True
+        assert replacement_published.wait(timeout=1.0)
+        release_validation.set()
+        retired.join(timeout=1.0)
+        assert not retired.is_alive()
+        webapp.stop_status_generation_watcher(record)
+    finally:
+        release_validation.set()
+        retired.join(timeout=1.0)
+        webapp.stop_status_generation_watcher(record)
+        webapp.control_server.stop()
+
+    assert [payload["generation"] for _event_type, payload in events] == [8]
+    assert rosters == ([["obsolete"], ["current"]] if held_phase == "patch" else [["current"]])
+    assert record.status_generation == 8
+    assert webapp.sessions == ["current"]
+    assert webapp.client_watch_service.auto_approve_payload == json.loads(ready_snapshot(8, "current")[1])
 
 
 def test_status_generation_watcher_is_demand_scoped_and_releases_its_lease(monkeypatch):
@@ -3232,6 +3470,36 @@ def test_status_generation_watcher_is_demand_scoped_and_releases_its_lease(monke
     finally:
         webapp.control_server.stop()
 
+    assert released == ["lease-1"]
+    assert record.status_generation_worker is None
+
+
+def test_status_generation_watcher_stop_can_race_before_thread_start(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    record = webapp.client_watch_service.event_watcher_record
+    released = []
+    probes = []
+    started_workers = []
+    monkeypatch.setattr(webapp.status_client, "acquire_generation_lease", lambda: {"ok": True, "lease_id": "lease-1"})
+    monkeypatch.setattr(webapp.status_client, "snapshot", lambda _sessions, timeout: ({"ok": True, "status": 200, "generation": 7}, b"{}"))
+    monkeypatch.setattr(webapp.status_client, "probe_generation", lambda _generation: probes.append(True))
+    monkeypatch.setattr(webapp.status_client, "release_generation_lease", lambda lease_id: released.append(lease_id) or {"ok": True})
+
+    def stop_before_thread_start(worker, _rollback):
+        started_workers.append(worker)
+        webapp.stop_status_generation_watcher(record)
+        worker.start()
+        worker.join(timeout=1.0)
+
+    monkeypatch.setattr(app_module.common, "start_thread_with_rollback", stop_before_thread_start)
+    try:
+        assert webapp.start_status_generation_watcher(record) is True
+    finally:
+        webapp.control_server.stop()
+
+    assert len(started_workers) == 1
+    assert started_workers[0].is_alive() is False
+    assert probes == []
     assert released == ["lease-1"]
     assert record.status_generation_worker is None
 
@@ -4514,8 +4782,8 @@ def test_auto_approve_persistence_uses_approvald_as_single_worker_owner(monkeypa
     webapp.sessions = ["6", "7"]
     webapp.approval_client = FakeApprovalClient()
     persisted = []
-    monkeypatch.setattr(app_module, "read_yolomux_state", lambda: {"auto_approve_enabled": ["6"]})
-    monkeypatch.setattr(app_module, "update_yolomux_state", lambda payload: persisted.append(payload))
+    monkeypatch.setattr(app_module, "read_yomux_state", lambda: {"auto_approve_enabled": ["6"]})
+    monkeypatch.setattr(app_module, "update_yomux_state", lambda payload: persisted.append(payload))
     webapp.auto_approve_session_lock_owner = lambda session: pytest.fail(f"local session {session} was misclassified as external")
 
     webapp.persist_auto_sessions()
@@ -5433,7 +5701,7 @@ def stub_transcripts_payload_refresh(calls, *, started=True, pending_generation=
 
 def test_transcripts_payload_exposes_server_version(monkeypatch):
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
-    monkeypatch.setattr(app_module, "yolomux_client_revision", lambda: "client-rev-test")
+    monkeypatch.setattr(app_module, "yomux_client_revision", lambda: "client-rev-test")
     webapp = app_module.TmuxWebtermApp([])
     monkeypatch.setattr(webapp, "refresh_sessions", lambda *args, **kwargs: [])
     monkeypatch.setattr(webapp, "warm_metadata_cache_async", lambda sessions: None)
@@ -11182,7 +11450,8 @@ def test_context_product_completed_without_mapping_terminalizes_protocol_failure
         receipt, status = webapp.context_items("5", 20)
         assert status == HTTPStatus.ACCEPTED
         operation_id = receipt["operation"]["id"]
-        assert terminal.wait(0.5), "malformed completed product did not terminalize promptly"
+        webapp.wait_for_batchd_operations_terminal(timeout=5.0)
+        assert terminal.is_set(), "malformed completed product did not publish its terminal event"
         result, result_status = webapp.operation_status_payload(operation_id)
     finally:
         webapp.stop_batchd_operation_service()
@@ -11227,7 +11496,8 @@ def test_context_product_unexpected_completion_failure_terminalizes_operation(mo
         receipt, status = webapp.context_items("5", 20)
         assert status == HTTPStatus.ACCEPTED
         operation_id = receipt["operation"]["id"]
-        assert terminal.wait(0.5), "unexpected completion failure left the accepted operation open"
+        webapp.wait_for_batchd_operations_terminal(timeout=5.0)
+        assert terminal.is_set(), "unexpected completion failure did not publish its terminal event"
         result, result_status = webapp.operation_status_payload(operation_id)
     finally:
         webapp.stop_batchd_operation_service()
@@ -13924,7 +14194,7 @@ def test_yoagent_session_summary_updates_from_transcript_delta(monkeypatch, tmp_
         with transcript.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps({"timestamp": "2026-06-07T10:05:00Z", "payload": {"type": "agent_message", "message": "Tests now pass."}}) + "\n")
         second = webapp.yoagent_controller.update_yoagent_session_summary("5", info, settings)
-        state = app_module.read_yolomux_state().get(app_module.YOAGENT_SESSION_SUMMARIES_STATE_KEY, {})
+        state = app_module.read_yomux_state().get(app_module.YOAGENT_SESSION_SUMMARIES_STATE_KEY, {})
     finally:
         webapp.control_server.stop()
 
@@ -16394,12 +16664,12 @@ def test_yoagent_chat_does_not_send_when_target_agent_is_working(monkeypatch):
     assert payload["actions"] == []
 
 
-def install_fake_yolomux_state(monkeypatch):
+def install_fake_yomux_state(monkeypatch):
     state = {}
     lock = threading.Lock()
-    monkeypatch.setattr(app_module, "read_yolomux_state", lambda: dict(state))
-    monkeypatch.setattr(app_module, "update_yolomux_state", lambda updates: state.update(updates))
-    monkeypatch.setattr(app_module, "mutate_yolomux_state", lambda mutator: lock_and_mutate(lock, state, mutator))
+    monkeypatch.setattr(app_module, "read_yomux_state", lambda: dict(state))
+    monkeypatch.setattr(app_module, "update_yomux_state", lambda updates: state.update(updates))
+    monkeypatch.setattr(app_module, "mutate_yomux_state", lambda mutator: lock_and_mutate(lock, state, mutator))
     return state
 
 
@@ -16409,7 +16679,7 @@ def lock_and_mutate(lock, state, mutator):
 
 
 def test_notify_status_defaults_browser_notifications_off(monkeypatch):
-    install_fake_yolomux_state(monkeypatch)
+    install_fake_yomux_state(monkeypatch)
     webapp = app_module.TmuxWebtermApp([])
 
     try:
@@ -16419,7 +16689,7 @@ def test_notify_status_defaults_browser_notifications_off(monkeypatch):
 
 
 def test_notify_status_respects_browser_notifications_opt_in(monkeypatch):
-    state = install_fake_yolomux_state(monkeypatch)
+    state = install_fake_yomux_state(monkeypatch)
     state["notify_enabled"] = True
     webapp = app_module.TmuxWebtermApp([])
 
@@ -16430,7 +16700,7 @@ def test_notify_status_respects_browser_notifications_opt_in(monkeypatch):
 
 
 def test_yoagent_notify_job_create_dedupe_and_cancel(monkeypatch):
-    state = install_fake_yolomux_state(monkeypatch)
+    state = install_fake_yomux_state(monkeypatch)
     events = []
     webapp = app_module.TmuxWebtermApp(["6"])
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": f"event-{len(events)}"})
@@ -16456,7 +16726,7 @@ def test_yoagent_notify_job_create_dedupe_and_cancel(monkeypatch):
 
 
 def test_yoagent_wait_then_send_job_fires_when_target_accepts(monkeypatch):
-    install_fake_yolomux_state(monkeypatch)
+    install_fake_yomux_state(monkeypatch)
     events = []
     webapp = app_module.TmuxWebtermApp(["6"])
     target = {
@@ -16506,7 +16776,7 @@ def test_yoagent_wait_then_send_job_fires_when_target_accepts(monkeypatch):
 
 
 def test_yoagent_wait_roster_then_send_job_validates_dedupes_and_redacts(monkeypatch):
-    state = install_fake_yolomux_state(monkeypatch)
+    state = install_fake_yomux_state(monkeypatch)
     webapp = app_module.TmuxWebtermApp(["1", "2", "3", "4"])
     wakes = []
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": "event"})
@@ -16584,7 +16854,7 @@ def test_yoagent_all_calm_requires_idle_or_done_without_draft_or_attention(monke
 
 
 def test_yoagent_roster_calm_quiet_window_resets_after_activity(monkeypatch):
-    install_fake_yolomux_state(monkeypatch)
+    install_fake_yomux_state(monkeypatch)
     webapp = app_module.TmuxWebtermApp(["1", "2"])
     state = {"2": "idle"}
     sent = []
@@ -16640,7 +16910,7 @@ def test_yoagent_roster_calm_quiet_window_resets_after_activity(monkeypatch):
 
 
 def test_yoagent_roster_job_revalidates_destination_and_resets_wait_without_sending(monkeypatch):
-    install_fake_yolomux_state(monkeypatch)
+    install_fake_yomux_state(monkeypatch)
     webapp = app_module.TmuxWebtermApp(["1", "2"])
     phase = {"value": "becomes_busy"}
     calls = []
@@ -16696,7 +16966,7 @@ def test_yoagent_roster_job_revalidates_destination_and_resets_wait_without_send
 
 
 def test_yoagent_roster_job_claim_allows_only_one_overlapping_send(monkeypatch):
-    install_fake_yolomux_state(monkeypatch)
+    install_fake_yomux_state(monkeypatch)
     webapp = app_module.TmuxWebtermApp(["1", "2"])
     send_started = threading.Event()
     allow_send_finish = threading.Event()
@@ -16748,7 +17018,7 @@ def test_yoagent_roster_job_claim_allows_only_one_overlapping_send(monkeypatch):
 
 
 def test_yoagent_roster_job_shared_state_claim_allows_only_one_server_send(monkeypatch):
-    install_fake_yolomux_state(monkeypatch)
+    install_fake_yomux_state(monkeypatch)
     first_app = app_module.TmuxWebtermApp(["1", "2"])
     second_app = None
     send_started = threading.Event()
@@ -16812,7 +17082,7 @@ def test_yoagent_roster_job_shared_state_claim_allows_only_one_server_send(monke
 
 
 def test_yoagent_roster_job_fails_for_missing_watched_session_and_cancels_by_roster_member(monkeypatch):
-    install_fake_yolomux_state(monkeypatch)
+    install_fake_yomux_state(monkeypatch)
     webapp = app_module.TmuxWebtermApp(["1", "2"])
     events = []
 
@@ -16862,7 +17132,7 @@ def test_yoagent_roster_job_fails_for_missing_watched_session_and_cancels_by_ros
 
 
 def test_yoagent_roster_job_times_out_without_sending(monkeypatch):
-    install_fake_yolomux_state(monkeypatch)
+    install_fake_yomux_state(monkeypatch)
     webapp = app_module.TmuxWebtermApp(["1", "2"])
     sends = []
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": "event"})
@@ -17043,7 +17313,7 @@ def test_yoagent_prompt_target_rejects_free_text_with_options_status(monkeypatch
 
 
 def test_yoagent_wait_then_send_job_uses_tmux_legacy_agent_tui_send(monkeypatch):
-    install_fake_yolomux_state(monkeypatch)
+    install_fake_yomux_state(monkeypatch)
     events = []
     webapp = app_module.TmuxWebtermApp(["6"])
     target = {
@@ -17120,7 +17390,7 @@ def test_yoagent_risky_chat_send_requires_preview_confirmation_and_redacts_secre
 
 
 def test_yoagent_risky_wait_then_send_job_starts_pending_confirmation_and_redacts(monkeypatch):
-    install_fake_yolomux_state(monkeypatch)
+    install_fake_yomux_state(monkeypatch)
     webapp = app_module.TmuxWebtermApp(["6"])
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": "event"})
     monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: {})
@@ -17145,7 +17415,7 @@ def test_yoagent_risky_wait_then_send_job_starts_pending_confirmation_and_redact
 
 
 def test_yoagent_notify_all_idle_job_tracks_blockers_then_fires(monkeypatch):
-    install_fake_yolomux_state(monkeypatch)
+    install_fake_yomux_state(monkeypatch)
     events = []
     webapp = app_module.TmuxWebtermApp(["1", "2"])
     states = {"1": "idle", "2": "working"}
@@ -17196,7 +17466,7 @@ def test_yoagent_notify_all_idle_job_tracks_blockers_then_fires(monkeypatch):
 
 
 def test_yoagent_notify_needs_input_and_blocked_jobs_fire_on_prompt_states(monkeypatch):
-    install_fake_yolomux_state(monkeypatch)
+    install_fake_yomux_state(monkeypatch)
     events = []
     webapp = app_module.TmuxWebtermApp(["6"])
     state = {"screen": "idle", "prompt_visible": False, "question": ""}
@@ -17243,7 +17513,7 @@ def test_yoagent_notify_needs_input_and_blocked_jobs_fire_on_prompt_states(monke
 
 
 def test_yoagent_done_after_working_job_requires_working_transition(monkeypatch):
-    install_fake_yolomux_state(monkeypatch)
+    install_fake_yomux_state(monkeypatch)
     events = []
     webapp = app_module.TmuxWebtermApp(["6"])
     state = {"screen": "idle"}
@@ -17286,7 +17556,7 @@ def test_yoagent_done_after_working_job_requires_working_transition(monkeypatch)
 
 
 def test_yoagent_cancel_pending_jobs_by_session(monkeypatch):
-    state = install_fake_yolomux_state(monkeypatch)
+    state = install_fake_yomux_state(monkeypatch)
     events = []
     webapp = app_module.TmuxWebtermApp(["6", "7"])
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": f"event-{len(events)}"})
@@ -17315,7 +17585,7 @@ def test_yoagent_cancel_pending_jobs_by_session(monkeypatch):
 
 
 def test_yoagent_jobs_reload_from_persisted_state(monkeypatch):
-    install_fake_yolomux_state(monkeypatch)
+    install_fake_yomux_state(monkeypatch)
     first_app = app_module.TmuxWebtermApp(["6"])
     second_app = None
     monkeypatch.setattr(first_app, "log_event", lambda *args, **kwargs: {"time": "event"})
@@ -17337,7 +17607,7 @@ def test_yoagent_jobs_reload_from_persisted_state(monkeypatch):
 
 
 def test_yoagent_roster_job_recovers_queued_and_suppresses_interrupted_firing_retry(monkeypatch):
-    state = install_fake_yolomux_state(monkeypatch)
+    state = install_fake_yomux_state(monkeypatch)
     first_app = app_module.TmuxWebtermApp(["1", "2"])
     second_app = None
     third_app = None
@@ -17373,7 +17643,7 @@ def test_yoagent_roster_job_recovers_queued_and_suppresses_interrupted_firing_re
 
 
 def test_yoagent_job_fails_and_notifies_when_target_disappears(monkeypatch):
-    install_fake_yolomux_state(monkeypatch)
+    install_fake_yomux_state(monkeypatch)
     events = []
     logged = []
     webapp = app_module.TmuxWebtermApp(["6"])
@@ -17428,7 +17698,7 @@ def test_yoagent_action_preview_blocks_approval_prompt(monkeypatch):
 
 
 def test_yoagent_chat_wait_then_send_queues_job_when_target_is_working(monkeypatch):
-    install_fake_yolomux_state(monkeypatch)
+    install_fake_yomux_state(monkeypatch)
     webapp = app_module.TmuxWebtermApp(["6"])
     target = {
         "session": "6",
@@ -17461,7 +17731,7 @@ def test_yoagent_chat_wait_then_send_queues_job_when_target_is_working(monkeypat
 
 
 def test_yoagent_chat_cancels_pending_jobs_for_session(monkeypatch):
-    install_fake_yolomux_state(monkeypatch)
+    install_fake_yomux_state(monkeypatch)
     webapp = app_module.TmuxWebtermApp(["6"])
     monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "deterministic", "invocation": "cli"})
     monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: {"time": "event"})
@@ -19012,7 +19282,7 @@ def _fake_update_git(remote_version="0.3.25", remote_sha="remoteabcdef1"):
 
 def test_update_check_status_ignores_sha_only_changes(monkeypatch):
     monkeypatch.setattr(app_module.common, "YOMUX_VERSION", "0.3.25")
-    monkeypatch.setattr(app_module.common, "yolomux_commit_sha", lambda: "localabcdef1")
+    monkeypatch.setattr(app_module.common, "yomux_commit_sha", lambda: "localabcdef1")
     monkeypatch.setattr(app_module.common, "git_ahead_behind_counts", lambda cwd, left: (0, 1))
     monkeypatch.setattr(app_module.common, "git", _fake_update_git(remote_version="0.3.25"))
 
@@ -19028,7 +19298,7 @@ def test_update_check_status_ignores_sha_only_changes(monkeypatch):
 
 def test_update_check_status_reports_newer_version(monkeypatch):
     monkeypatch.setattr(app_module.common, "YOMUX_VERSION", "0.3.25")
-    monkeypatch.setattr(app_module.common, "yolomux_commit_sha", lambda: "localabcdef1")
+    monkeypatch.setattr(app_module.common, "yomux_commit_sha", lambda: "localabcdef1")
     monkeypatch.setattr(app_module.common, "git_ahead_behind_counts", lambda cwd, left: (0, 1))
     monkeypatch.setattr(app_module.common, "git", _fake_update_git(remote_version="0.3.26"))
 

@@ -18,6 +18,9 @@ from yomux_lib.infra.host_identity import LocalProcessReason
 from yomux_lib.infra.host_identity import current_host_identity
 from yomux_lib import approvald
 from yomux_lib import batchd
+from yomux_lib.search.search_indexer import SearchIndexerClient
+from yomux_lib.statusd_client import StatusClient
+from yomux_lib.watchd_client import WatchClient
 from yomux_lib.local_services import registry as registry_mod
 from yomux_lib.local_services.client import LocalServiceClient
 from yomux_lib.local_services.client import TransportFailure
@@ -33,6 +36,7 @@ from yomux_lib.stats_current import client as stats_current_client
 from yomux_lib.stats_current import service as stats_current_service
 from yomux_lib.stats_current import storage as stats_current_storage
 from tests.gate_harness import FixtureLocalServiceProcess
+from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import stop_fixture_local_service_process
 from tests.helpers.local_service_records import FixtureLeaseRecordBuilder
 from tests.helpers.local_service_records import FixtureLocalServiceRecordBuilder
@@ -1263,6 +1267,88 @@ def _identity_probe_registry(tmp_path, monkeypatch, *, leader_pid, identities, s
 
     monkeypatch.setattr(registry, "_mark_failure", spy_mark_failure)
     return registry, starts, post_spawn_calls, mark_failure_reasons
+
+
+@pytest.mark.parametrize("service_name", ["batchd", "statusd", "watchd", "approvald", "indexd", "statsd"])
+def test_real_daemon_final_startup_probe_carries_its_spawned_identity(monkeypatch, gate_runtime_paths, service_name):
+    socket_path = gate_runtime_paths.runtime_dir / f"{service_name}.sock"
+    if service_name == "statsd":
+        registry = stats_current_client.StatsCurrentClient(
+            socket_path,
+            gate_runtime_paths.state_dir / stats_current_storage.DATABASE_FILENAME,
+        )._transport.registry
+    else:
+        clients = {
+            "batchd": batchd.BatchClient,
+            "statusd": StatusClient,
+            "watchd": WatchClient,
+            "approvald": approvald.ApprovalClient,
+            "indexd": SearchIndexerClient,
+        }
+        registry = clients[service_name](socket_path).registry
+    real_clock = registry.clock
+    real_healthy = registry.healthy
+    real_request = registry._request
+    real_spawn = registry._spawn
+    clock_shift = [0.0]
+    final_calls = []
+    spawned = []
+
+    def observed_spawn():
+        process = real_spawn()
+        spawned.append(process)
+        return process
+
+    def healthy_before_deadline():
+        healthy = real_healthy()
+        if healthy and registry.spawn_ownership is not None:
+            # Force the actual child to first prove readiness in the final probe,
+            # keeping its normal startup timeout and the real status transport.
+            clock_shift[0] = registry.spec.start_timeout_seconds
+            return False
+        return healthy
+
+    def observed_request(method, *args, **kwargs):
+        response = real_request(method, *args, **kwargs)
+        if clock_shift[0]:
+            final_calls.append((method, kwargs.get("timeout"), response))
+        return response
+
+    monkeypatch.setattr(registry, "clock", lambda: real_clock() + clock_shift[0])
+    monkeypatch.setattr(registry, "healthy", healthy_before_deadline)
+    monkeypatch.setattr(registry, "_request", observed_request)
+    monkeypatch.setattr(registry, "_spawn", observed_spawn)
+    try:
+        assert registry.ensure_started() is True, final_calls
+        assert [(method, timeout) for method, timeout, _response in final_calls] == [("status", 0.2)]
+        status = final_calls[0][2]
+        ownership = registry.spawn_ownership
+        assert ownership is not None
+        assert len(spawned) == 1 and spawned[0].pid == ownership.leader_pid
+        assert status["pid"] == ownership.leader_pid
+        assert status["process_start_identity"] == dict(ownership.member_identities)[ownership.leader_pid]
+        assert registry._read_record()["process_start_identity"] == status["process_start_identity"]
+        assert registry.failures == 0 and registry._failure_reason == "" and registry._terminal_failure is False
+        for action in ("ping", "status"):
+            response = real_request(action, timeout=0.2)
+            assert response["ok"] is True
+            assert response["pid"] == status["pid"]
+            assert response["process_start_identity"] == status["process_start_identity"]
+            assert response["stable_host_id"] == current_host_identity().stable_host_id
+            assert response["boot_id"] == current_host_identity().boot_id
+        refused = real_request("not-a-real-action", timeout=0.2)
+        assert refused.get("ok") is False or refused.get("status") == "unsupported"
+        assert "process_start_identity" not in refused
+        released = real_request("release", {"lease_id": "never-acquired"}, timeout=0.2)
+        assert released["ok"] is True and "process_start_identity" not in released
+    finally:
+        registry.seal_starts()
+        if registry.spawn_ownership is not None:
+            stop_fixture_local_service_process(
+                FixtureLocalServiceProcess(registry, registry.process, registry.spawn_ownership),
+                label=f"real {service_name} final startup probe",
+            )
+        registry.settle_reaper_threads()
 
 
 def test_registry_final_identity_probe_accepts_late_valid_and_fails_only_a_reused_pid_imposter(tmp_path, monkeypatch):

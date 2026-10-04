@@ -1516,7 +1516,6 @@ function createAppMenu(menu) {
   popover.setAttribute('role', 'menu');
   popover.setAttribute('aria-label', menu.label);
   for (const item of menu.items) popover.appendChild(createAppMenuItem(item));
-  fitAppMenuPopover(popover);
   const activateMenu = event => {
     event.preventDefault();
     event.stopPropagation();
@@ -1701,7 +1700,6 @@ function createAppSubmenu(item) {
   submenu.setAttribute('role', 'menu');
   submenu.setAttribute('aria-label', item.label);
   for (const child of item.items || []) submenu.appendChild(createAppMenuItem(child));
-  fitAppMenuPopover(submenu);
   const setOpen = open => {
     wrapper.classList.toggle(CLS.open, open);
     button.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -1962,7 +1960,6 @@ function refreshAppMenuForOpen(wrapper) {
   const popover = wrapper.querySelector(':scope > .app-menu-popover');
   if (!menu || !popover) return;
   popover.replaceChildren(...menu.items.map(createAppMenuItem));
-  fitAppMenuPopover(popover);
 }
 
 function closeAppMenus(keepOpen = null) {

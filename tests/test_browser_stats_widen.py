@@ -33,6 +33,7 @@ from tests.tmux_runtime import start_isolated_tmux_runtime
 from tools.verify_go_agent_status_live import copy_live_jsonl
 from tools.verify_go_agent_status_live import make_opencode_database
 from tools.instance_isolation import synthetic_test_environment
+from tools.generate_go_version import generate_go_version_overlay
 
 
 pytest_plugins = ("tests.e2e_browser_harness",)
@@ -290,7 +291,7 @@ def _prepare_go_collector_sources(root: Path) -> tuple[Path, Path, Path]:
 
 _STATS_ROUTE_INSTRUMENTATION = r"""
 (() => {
-  if (globalThis.__yolomuxStatsRouteCounts) return;
+  if (globalThis.__yomuxStatsRouteCounts) return;
   const tracked = new Set([
     '/api/stats-capabilities', '/api/stats-snapshot', '/api/stats-retry', '/api/stats-stream',
   ]);
@@ -301,9 +302,9 @@ _STATS_ROUTE_INSTRUMENTATION = r"""
   ]);
   const counts = Object.fromEntries([...tracked].map(path => [path, 0]));
   const unrelatedCounts = Object.fromEntries([...unrelatedTracked].map(path => [path, 0]));
-  globalThis.__yolomuxStatsRouteCounts = counts;
-  globalThis.__yolomuxStatsUnrelatedRouteCounts = unrelatedCounts;
-  globalThis.__yolomuxStatsStreamEvents = [];
+  globalThis.__yomuxStatsRouteCounts = counts;
+  globalThis.__yomuxStatsUnrelatedRouteCounts = unrelatedCounts;
+  globalThis.__yomuxStatsStreamEvents = [];
   const count = input => {
     try {
       const url = new URL(typeof input === 'string' ? input : input?.url || '', location.href);
@@ -329,12 +330,12 @@ _STATS_ROUTE_INSTRUMENTATION = r"""
         if (path !== '/api/stats-stream') return source;
         for (const eventName of ['ack', 'snapshot', 'ready', 'delta', 'unavailable', 'error']) {
           source.addEventListener(eventName, event => {
-            globalThis.__yolomuxStatsStreamEvents.push({
+            globalThis.__yomuxStatsStreamEvents.push({
               event: eventName,
               readyState: source.readyState,
               data: String(event?.data || '').slice(0, 240),
             });
-            if (globalThis.__yolomuxStatsStreamEvents.length > 64) globalThis.__yolomuxStatsStreamEvents.shift();
+            if (globalThis.__yomuxStatsStreamEvents.length > 64) globalThis.__yomuxStatsStreamEvents.shift();
           });
         }
         return source;
@@ -396,6 +397,14 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
         go_binary = shutil.which("go")
         if not go_binary:
             pytest.skip("Go browser regression requires the Go toolchain")
+        generated_version = tmp_path / "product_version_generated.go"
+        go_overlay = tmp_path / "go-overlay.json"
+        generate_go_version_overlay(
+            source_root / "yomux_lib" / "version.py",
+            generated_version,
+            go_overlay,
+            source_root / "cmd" / "yomux-go" / "product_version_generated.go",
+        )
         go_environment = {
             **os.environ,
             "GOTOOLCHAIN": "local",
@@ -414,7 +423,7 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
                 }
             )
         subprocess.run(
-            [go_binary, "build", "-buildvcs=false", "-o", str(binary), "./cmd/yomux-go"],
+            [go_binary, "build", "-buildvcs=false", "-overlay", str(go_overlay), "-o", str(binary), "./cmd/yomux-go"],
             cwd=source_root,
             check=True,
             env=go_environment,
@@ -516,7 +525,7 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
                 "return document.readyState === 'complete' && document.querySelector('#grid') !== null"
             )
         )
-        request.node._yolomux_skip_reused_browser_diagnostic = True
+        request.node._yomux_skip_reused_browser_diagnostic = True
         WebDriverWait(browser, 15, poll_frequency=0.05).until(
             lambda driver: driver.execute_script(
                 "return typeof setDebugGraphRange === 'function' "
@@ -551,8 +560,8 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
                     failureLatched: clientState.failureLatched === true,
                     startPromise: Boolean(clientState.startPromise),
                   },
-                  streamEvents: (globalThis.__yolomuxStatsStreamEvents || []).slice(-32),
-                  routeCounts: globalThis.__yolomuxStatsRouteCounts || null,
+                  streamEvents: (globalThis.__yomuxStatsStreamEvents || []).slice(-32),
+                  routeCounts: globalThis.__yomuxStatsRouteCounts || null,
                   graph: {
                     debugModeEnabled: globalThis.debugModeEnabled === true,
                     panelPresent: Boolean(panel),
@@ -637,7 +646,7 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
               for (const eventName of ['ack', 'snapshot', 'delta', 'ready']) {
                 stream.addEventListener(eventName, event => streamEvents.push({event: eventName, data: JSON.parse(event.data)}));
               }
-              await window.__yolomuxTestWaitFor(
+              await window.__yomuxTestWaitFor(
                 () => {
                   const ack = streamEvents.find(item => item.event === 'ack')?.data;
                   const expectedSnapshots = Number.isInteger(ack?.chunk_count) ? ack.chunk_count : 1;
@@ -684,7 +693,7 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
                  || Number(appendResult.source_generation) <= 0) {
                  throw new Error(`delta observation append failed: ${appendResponse.status} ${JSON.stringify(appendResult)}`);
                }
-               await window.__yolomuxTestWaitFor(
+               await window.__yomuxTestWaitFor(
                  () => streamEvents.find(item => item.event === 'delta' && Number(item.data?.cache_generation) > initialCacheGeneration),
                  {timeoutMs: 20000, intervalMs: 50, description: 'Go stats browser delta after append'},
                );
@@ -702,7 +711,7 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
                for (const eventName of ['ack', 'snapshot', 'ready', 'repair', 'unavailable', 'error']) {
                  reconnect.addEventListener(eventName, event => reconnectEvents.push({event: eventName, data: JSON.parse(event.data)}));
                }
-               await window.__yolomuxTestWaitFor(
+               await window.__yomuxTestWaitFor(
                  () => reconnectEvents.find(item => item.event === 'ready'),
                  {timeoutMs: 15000, intervalMs: 50, description: 'Go stats browser reconnect readiness'},
                );
@@ -719,7 +728,7 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
                if (retryResponse.status !== 200) {
                  throw new Error(`stats retry notification failed: ${retryResponse.status}`);
                }
-               const rawSnapshot = await window.__yolomuxTestWaitFor(async () => {
+               const rawSnapshot = await window.__yomuxTestWaitFor(async () => {
                  const response = await fetch('/api/stats-snapshot?range_seconds=900&resolution=AUTO&client_id=browser-go-e2e', {cache: 'no-store'});
                  if (response.status !== 200) return null;
                  const body = await response.json();
@@ -887,7 +896,7 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
                  throw new Error(`15m graph stats gate failed: missingRendered=${JSON.stringify(missingSeries)} missingSnapshot=${JSON.stringify(missingSnapshotSeries)} tokenRates=${JSON.stringify(tokenRates)} charts=${JSON.stringify(charts)} snapshotSeries=${JSON.stringify(snapshotSeries)}`);
                }
                setDebugGraphRange(300);
-               await window.__yolomuxTestWaitFor(
+               await window.__yomuxTestWaitFor(
                  () => jsDebugCurrentStatsClientState?.client?.controller?.()?.generation?.()?.range_seconds === 300
                    && jsDebugHistoryReadiness.phase === 'ready',
                  {timeoutMs: 15000, description: 'Go stats 5m generation'},
@@ -908,12 +917,12 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
                  || fiveMinuteMemoryGeometry <= 0) {
                  throw new Error(`5m memory graph stats gate failed: ${JSON.stringify({status: fiveMinuteSnapshotResponse.status, resolution: fiveMinuteSnapshot.resolution_seconds, values: fiveMinuteMemoryValues, geometry: fiveMinuteMemoryGeometry, chart: Boolean(fiveMinuteMemoryChart)})}`);
                }
-                done({status: response.status, readiness: jsDebugHistoryReadinessSnapshot?.(), routeCounts: {...globalThis.__yolomuxStatsRouteCounts}, unrelatedRouteCounts: {...globalThis.__yolomuxStatsUnrelatedRouteCounts}, defaultChartKeys, defaultDaemonsChecked: defaultDaemonsToggle?.checked ?? false, defaultGraphs, exact, streamEvolution: {initialCacheGeneration, delta, reconnectAck, reconnectReady, reconnectEvents}, generation: {
+                done({status: response.status, readiness: jsDebugHistoryReadinessSnapshot?.(), routeCounts: {...globalThis.__yomuxStatsRouteCounts}, unrelatedRouteCounts: {...globalThis.__yomuxStatsUnrelatedRouteCounts}, defaultChartKeys, defaultDaemonsChecked: defaultDaemonsToggle?.checked ?? false, defaultGraphs, exact, streamEvolution: {initialCacheGeneration, delta, reconnectAck, reconnectReady, reconnectEvents}, generation: {
                 range: generation.range_seconds,
                 resolution: generation.resolution_seconds,
                 buckets: generation.buckets.length,
                 }, stream: {events: streamEvents, ack, snapshotBuckets: snapshot.buckets.length, ready}, charts, requiredSeries, snapshotSeriesValues, tokenRates, costReport, warnings, warningsBeforeProbe, fiveMinute: {status: fiveMinuteSnapshotResponse.status, resolution: fiveMinuteSnapshot.resolution_seconds, memoryValues: fiveMinuteMemoryValues, geometry: fiveMinuteMemoryGeometry}});
-                })().catch(error => done({error: String(error?.stack || error), streamEvents, streamReadyState: stream?.readyState ?? null, readiness: globalThis.jsDebugHistoryReadinessSnapshot?.(), routeCounts: globalThis.__yolomuxStatsRouteCounts || null, serverEvents: globalThis.__yolomuxStatsStreamEvents?.slice(-32) || []}));
+                })().catch(error => done({error: String(error?.stack || error), streamEvents, streamReadyState: stream?.readyState ?? null, readiness: globalThis.jsDebugHistoryReadinessSnapshot?.(), routeCounts: globalThis.__yomuxStatsRouteCounts || null, serverEvents: globalThis.__yomuxStatsStreamEvents?.slice(-32) || []}));
             """.replace("__GO_STATS_SERIES__", json.dumps(GO_STATS_SERIES)).replace(
                 "__GO_STATS_SNAPSHOT_SERIES__", json.dumps(GO_STATS_SNAPSHOT_SERIES)
             )
@@ -995,6 +1004,43 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
     private_source_root = tmp_path / "source-root"
     for relative in ("static", "tools", "yomux_lib"):
         shutil.copytree(source_root / relative, private_source_root / relative)
+    configured_binary = os.environ.get("YOLOMUX_GO_BINARY", "").strip()
+    binary = Path(configured_binary) if configured_binary else tmp_path / "yolomux-go"
+    if not configured_binary:
+        go_binary = shutil.which("go")
+        if not go_binary:
+            pytest.skip("Go collector browser regression requires the Go toolchain")
+        build_environment = {
+            **os.environ,
+            "GOTOOLCHAIN": "local",
+            "GOWORK": "off",
+            "GO111MODULE": "on",
+        }
+        image_module_cache = Path("/opt/yomux-go-mod-cache")
+        if image_module_cache.is_dir():
+            build_environment.update(
+                {
+                    "GOMODCACHE": str(image_module_cache),
+                    "GOPROXY": "off",
+                    "GOSUMDB": "off",
+                    "GOCACHE": str(tmp_path / "go-cache"),
+                    "GOPATH": str(tmp_path / "go-path"),
+                }
+            )
+        generated_version = tmp_path / "product_version_generated.go"
+        go_overlay = tmp_path / "go-overlay.json"
+        generate_go_version_overlay(
+            source_root / "yomux_lib" / "version.py",
+            generated_version,
+            go_overlay,
+            source_root / "cmd" / "yomux-go" / "product_version_generated.go",
+        )
+        subprocess.run(
+            [go_binary, "build", "-buildvcs=false", "-overlay", str(go_overlay), "-o", str(binary), "./cmd/yomux-go"],
+            cwd=source_root,
+            check=True,
+            env=build_environment,
+        )
     home, opencode_database, opencode_interpreter = _prepare_go_collector_sources(tmp_path)
     config_dir = tmp_path / "config"
     config_dir.mkdir()
@@ -1023,40 +1069,11 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
         session_commands=session_commands,
         session_cwd=source_root,
     )
-    configured_binary = os.environ.get("YOLOMUX_GO_BINARY", "").strip()
-    binary = Path(configured_binary) if configured_binary else tmp_path / "yolomux-go"
-    if not configured_binary:
-        go_binary = shutil.which("go")
-        if not go_binary:
-            stop_isolated_tmux_runtime(tmux_runtime)
-            pytest.skip("Go collector browser regression requires the Go toolchain")
-        build_environment = {
-            **os.environ,
-            "GOTOOLCHAIN": "local",
-            "GOWORK": "off",
-            "GO111MODULE": "on",
-        }
-        image_module_cache = Path("/opt/yomux-go-mod-cache")
-        if image_module_cache.is_dir():
-            build_environment.update(
-                {
-                    "GOMODCACHE": str(image_module_cache),
-                    "GOPROXY": "off",
-                    "GOSUMDB": "off",
-                    "GOCACHE": str(tmp_path / "go-cache"),
-                    "GOPATH": str(tmp_path / "go-path"),
-                }
-            )
-        subprocess.run(
-            [go_binary, "build", "-buildvcs=false", "-o", str(binary), "./cmd/yomux-go"],
-            cwd=source_root,
-            check=True,
-            env=build_environment,
-        )
     port_lease = HttpPortLease.reserve()
     process = None
     server_log_path = tmp_path / "go-collector-server.log"
     server_log = server_log_path.open("w", encoding="utf-8")
+    original_script_timeout = browser.timeouts.script
     try:
         collector_environment = _synthetic_server_environment()
         collector_environment.update({
@@ -1123,12 +1140,13 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
         WebDriverWait(browser, 15, poll_frequency=0.05).until(
             lambda driver: driver.current_url.split("?", 1)[0].rstrip("/") == base_url
         )
-        request.node._yolomux_skip_reused_browser_diagnostic = True
+        request.node._yomux_skip_reused_browser_diagnostic = True
         sessions = ",".join(tmux_runtime.sessions)
         browser.get(f"{base_url}/?sessions={sessions},debug&layout=left&tabs=left:{tmux_runtime.sessions[0]},__debug__*&debug=1&stats_only=1")
         WebDriverWait(browser, 15, poll_frequency=0.05).until(
             lambda driver: driver.execute_script("return document.readyState === 'complete' && document.querySelector('#grid') !== null")
         )
+        browser.set_script_timeout(40)
         result = browser.execute_async_script(
             r"""
             const done = arguments[arguments.length - 1];
@@ -1136,6 +1154,7 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
             const wait = async () => {
               const deadline = Date.now() + 30000;
               let collectorFacts = null;
+              let missingFacts = null;
               const visibleChartState = () => {
                 const panel = document.querySelector('.js-debug-panel');
                 const panelRect = panel?.getBoundingClientRect();
@@ -1153,8 +1172,8 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
               while (Date.now() < deadline) {
                 try {
                   const [statusResponse, snapshotResponse] = await Promise.all([
-                    fetch('/api/stats-agent-status', {cache: 'no-store'}),
-                    fetch('/api/stats-snapshot?range_seconds=300&resolution=AUTO&client_id=collector-browser', {cache: 'no-store'}),
+                    fetch('/api/stats-agent-status', {cache: 'no-store', signal: AbortSignal.timeout(5000)}),
+                    fetch('/api/stats-snapshot?range_seconds=300&resolution=AUTO&client_id=collector-browser', {cache: 'no-store', signal: AbortSignal.timeout(5000)}),
                   ]);
                   const status = await statusResponse.json();
                   const snapshot = await snapshotResponse.json();
@@ -1173,6 +1192,7 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
                     && tokens.length > 0 && tokenSessions && activity.length > 0 && memory.length > 0 && cpu.length > 0
                     && (gpu.length > 0 || gpuNoData.length > 0)
                     && Number(cost.total_tokens) > 0;
+                  missingFacts = {status: statusResponse.status, snapshot: snapshotResponse.status, counts: status.counts, rates: status.token_rates, tokenSessions, tokenNames: tokens.map(item => item.name), activity: activity.length, memory: memory.length, cpu: cpu.length, gpu: gpu.length, gpuNoData: gpuNoData.length, costTokens: cost.total_tokens};
                   if (collectorFactsReady) {
                     collectorFacts = {status, snapshot, tokens, activity, memory, cpu, gpu, gpuNoData, cost};
                   }
@@ -1188,7 +1208,7 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
                 await new Promise(resolve => setTimeout(resolve, 250));
               }
               done({error: collectorFacts ? 'collector facts reached snapshot but history did not reach visible ready charts before deadline' : 'collector facts did not reach snapshot before deadline',
-                collectorFacts: Boolean(collectorFacts),
+                collectorFacts: Boolean(collectorFacts), missingFacts,
                 readiness: globalThis.jsDebugHistoryReadinessSnapshot?.() ?? null,
                 ui: visibleChartState(), body: document.body?.innerText?.slice(0, 1000)});
             };
@@ -1196,14 +1216,21 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
             """,
             list(tmux_runtime.sessions),
         )
+        browser.set_script_timeout(original_script_timeout)
+        if result.get("error") is not None:
+            print(json.dumps(result.get("missingFacts")), flush=True)
         assert result.get("error") is None, result
         assert result["gpu"] or result["gpuNoData"], result
         assert result["readiness"]["phase"] == "ready", result
         assert result["ui"]["panelVisible"], result
         assert all(item["present"] and item["visible"] and item["geometry"] > 0 and not item["waiting"] for item in result["ui"]["charts"].values()), result
+        _assert_go_refill_browser_journey(browser, tmp_path, home, opencode_database)
     finally:
+        browser.set_script_timeout(original_script_timeout)
         active_error = sys.exc_info()[1]
         browser_retirement_error = None
+        if active_error is not None:
+            print(server_log_path.read_text(encoding="utf-8")[-8000:], flush=True)
         try:
             browser.get("about:blank")
             WebDriverWait(browser, 3, poll_frequency=0.05).until(lambda driver: str(driver.current_url) == "about:blank")
@@ -1223,6 +1250,102 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
         stop_isolated_tmux_runtime(tmux_runtime)
         if browser_retirement_error is not None and active_error is None:
             raise browser_retirement_error
+
+
+def _assert_go_refill_browser_journey(browser, tmp_path, home, opencode_database):
+    """Exercise native controls against the Go host operation and real charts."""
+    wait = WebDriverWait(browser, 30, poll_frequency=0.05)
+    refill_selector = '[data-stats-refill]'
+    def status_contains(message):
+        return browser.execute_script("return document.querySelector('[data-stats-refill-status]')?.textContent.includes(arguments[0]) === true;", message)
+    def confirm_refill():
+        browser.find_element(By.CSS_SELECTOR, '[data-dialog-action="refill"]').click()
+        errors = [entry for entry in browser.get_log("browser") if "Uncaught" in entry["message"]]
+        assert not errors, errors
+    def wait_for_status(message):
+        try:
+            WebDriverWait(browser, 90, poll_frequency=0.05).until(lambda _driver: status_contains(message))
+        except TimeoutException:
+            state = browser.execute_async_script("const done=arguments[0]; fetch('/api/stats-refill').then(r=>r.json()).then(status=>done({status,text:document.querySelector('[data-stats-refill-status]')?.textContent}));")
+            state["browser_errors"] = browser.get_log("browser")
+            raise AssertionError(state) from None
+    wait.until(lambda driver: driver.find_elements(By.CSS_SELECTOR, refill_selector))
+    browser.find_element(By.CSS_SELECTOR, refill_selector).click()
+    dialog = browser.find_element(By.CSS_SELECTOR, '[role="dialog"][aria-label="Refill the last 24 hours?"]')
+    assert "Refill the last 24 hours?" in dialog.text
+    assert "CPU usage may rise" in dialog.text
+    assert "Deleted source history cannot be recovered" in dialog.text
+    dialog.find_element(By.CSS_SELECTOR, '[data-dialog-action="cancel"]').click()
+    assert not browser.find_elements(By.CSS_SELECTOR, '[role="dialog"][aria-label="Refill the last 24 hours?"]')
+    before_status = browser.execute_async_script("const done=arguments[0]; fetch('/api/stats-refill').then(r=>r.json()).then(done);")
+    assert before_status["state"] == "idle", before_status
+
+    original = browser.current_window_handle
+    url = browser.current_url
+    browser.switch_to.new_window("tab")
+    second = browser.current_window_handle
+    browser.get(url)
+    wait.until(lambda driver: driver.find_elements(By.CSS_SELECTOR, refill_selector))
+    browser.switch_to.window(original)
+
+    # The fixture-owned writer exposes running/reattachment, then injects
+    # the existing bounded SQLite busy failure without changing scheduling.
+    with sqlite3.connect(tmp_path / "stats.sqlite3", timeout=1) as blocker:
+        blocker.execute("BEGIN IMMEDIATE")
+        browser.find_element(By.CSS_SELECTOR, refill_selector).click()
+        confirm_refill()
+        wait.until(lambda driver: driver.find_elements(By.CSS_SELECTOR, '[data-js-debug-chart="agentTokens"] [data-stats-refill-wait]'))
+        assert not browser.find_element(By.CSS_SELECTOR, refill_selector).is_enabled()
+        assert browser.find_elements(By.CSS_SELECTOR, '[data-js-debug-chart="activity"] svg')
+        running = browser.execute_async_script("const done=arguments[0]; fetch('/api/stats-refill', {method:'POST'}).then(r=>r.json()).then(done);")
+        assert running["state"] == "running", running
+        assert running["window_end"] - running["window_start"] == 86400
+        browser.switch_to.window(second)
+        wait.until(lambda _driver: status_contains("Refilling agent history") or status_contains("Couldn’t refill agent history. Your previous data is unchanged."))
+        attached = browser.execute_async_script("const done=arguments[0]; fetch('/api/stats-refill').then(r=>r.json()).then(done);")
+        assert attached["operation_id"] == running["operation_id"], attached
+        # Begin navigation while running; the same job subsequently fails
+        # its bounded writer wait, and the new page must retain that outcome.
+        browser.execute_cdp_cmd("Page.reload", {})
+        wait_for_status("Couldn’t refill agent history. Your previous data is unchanged.")
+        blocker.rollback()
+    reloaded = browser.execute_async_script("const done=arguments[0]; fetch('/api/stats-refill').then(r=>r.json()).then(done);")
+    assert reloaded["operation_id"] == running["operation_id"], reloaded
+    browser.refresh()
+    wait_for_status("Couldn’t refill agent history. Your previous data is unchanged.")
+    browser.close()
+    browser.switch_to.window(original)
+    wait_for_status("Couldn’t refill agent history. Your previous data is unchanged.")
+    browser.find_element(By.CSS_SELECTOR, refill_selector).click()
+    confirm_refill()
+    wait_for_status("Agent history refilled.")
+
+    # All sources unavailable is a pre-publication failure. Reopening and
+    # retrying use the same native confirmation, then restore fixture roots.
+    moved = []
+    try:
+        for path in (home / "claude" / "projects", home / "codex" / "sessions", opencode_database):
+            saved = path.with_name(path.name + ".refill-saved")
+            path.rename(saved)
+            moved.append((path, saved))
+        browser.find_element(By.CSS_SELECTOR, refill_selector).click()
+        confirm_refill()
+        wait_for_status("Couldn’t refill agent history. Your previous data is unchanged.")
+        retry = next(button for button in browser.find_elements(By.CSS_SELECTOR, refill_selector) if button.text == "Try again")
+        retry.click()
+        assert browser.find_elements(By.CSS_SELECTOR, '[role="dialog"][aria-label="Refill the last 24 hours?"]')
+        for path, saved in moved:
+            saved.rename(path)
+        moved.clear()
+        confirm_refill()
+        wait_for_status("Agent history refilled.")
+    finally:
+        for path, saved in moved:
+            saved.rename(path)
+        if second in browser.window_handles:
+            browser.switch_to.window(second)
+            browser.close()
+            browser.switch_to.window(original)
 
 
 def _go_server_is_ready(port: int) -> bool:
@@ -1383,7 +1506,7 @@ def _production_stats_browser_pass(browser, base_url: str, session: str, request
     WebDriverWait(browser, 15, poll_frequency=0.05).until(
         lambda driver: driver.current_url.split("?", 1)[0].rstrip("/") == base_url
     )
-    request.node._yolomux_skip_reused_browser_diagnostic = True
+    request.node._yomux_skip_reused_browser_diagnostic = True
     stats_only_query = "&stats_only=1" if stats_only else ""
     browser.get(
         f"{base_url}/?sessions={session},debug&layout=left&tabs=left:{session},__debug__*&debug=1{stats_only_query}"
@@ -1498,7 +1621,7 @@ def _production_stats_browser_pass(browser, base_url: str, session: str, request
     )
     assert all(item["present"] and item["visible"] and item["geometry"] > 0 and not item["waiting"] for item in charts.values()), {"evidence": evidence, "charts": charts}
     stream_events = browser.execute_script(
-        "return (globalThis.__yolomuxStatsStreamEvents || []).map(item => ({event: item.event, data: item.data}));"
+        "return (globalThis.__yomuxStatsStreamEvents || []).map(item => ({event: item.event, data: item.data}));"
     )
     # EventSource can report a connection error before its first successful open. The protocol
     # handshake is the ordered ack/snapshot/ready sequence; a transient pre-open error does not
@@ -1507,7 +1630,7 @@ def _production_stats_browser_pass(browser, base_url: str, session: str, request
     if handshake != ["ack", "snapshot", "ready"]:
         raise AssertionError(f"initial stats stream did not settle to ack/snapshot/ready: {stream_events}")
     route_counts = browser.execute_script(
-        "return {stats: {...(globalThis.__yolomuxStatsRouteCounts || {})}, unrelated: {...(globalThis.__yolomuxStatsUnrelatedRouteCounts || {})}};"
+        "return {stats: {...(globalThis.__yomuxStatsRouteCounts || {})}, unrelated: {...(globalThis.__yomuxStatsUnrelatedRouteCounts || {})}};"
     )
     return {
         "capabilities": evidence["capabilities"],
@@ -1713,7 +1836,7 @@ def _register_stats_route_instrumentation(harness: Any) -> None:
 
 
 def _stats_route_counts(harness: Any) -> dict[str, int]:
-    return harness.driver.execute_script("return {...globalThis.__yolomuxStatsRouteCounts};")
+    return harness.driver.execute_script("return {...globalThis.__yomuxStatsRouteCounts};")
 
 
 def _browser_failure_fingerprint(client: Any, signature: str, minimum_count: int) -> dict[str, Any] | bool:
@@ -1965,7 +2088,7 @@ def test_retained_stats_widen_fetches_and_paints_the_full_exact_window(browser, 
             close() { this.closed = true; }
           }
           const waitForGeneration = async (rangeSeconds, resolutionSeconds) => {
-            await window.__yolomuxTestWaitFor(
+            await window.__yomuxTestWaitFor(
               () => {
                 const accepted = jsDebugCurrentStatsClientState.client?.controller?.()?.generation?.();
                 return accepted?.range_seconds === rangeSeconds
@@ -2101,7 +2224,7 @@ def _open_real_stats_graph(harness: Any, *, include_finder: bool = True) -> None
         const done = arguments[arguments.length - 1];
         const graphTab = document.querySelector('[data-js-debug-subtab="graph"]');
         graphTab?.click();
-        window.__yolomuxTestWaitFor(() => {
+        window.__yomuxTestWaitFor(() => {
           const client = jsDebugCurrentStatsClientState?.client;
           const select = document.querySelector('.js-debug-panel [data-js-debug-resolution-override]');
           return client?.controller?.()?.generation?.() && select ? true : null;
@@ -2183,7 +2306,7 @@ def _exercise_real_stats_interval_round_trip(harness: Any) -> dict[str, Any]:
             throw new Error(`5-minute stats capability missing: ${capabilitiesResponse.status}`);
           }
           const waitForSelection = async rangeSeconds => {
-            await window.__yolomuxTestWaitFor(() => {
+            await window.__yomuxTestWaitFor(() => {
               const controller = jsDebugCurrentStatsClientState?.client?.controller?.();
               const selection = controller?.selection?.();
               const generation = controller?.generation?.();
@@ -2213,7 +2336,7 @@ def _exercise_real_stats_interval_round_trip(harness: Any) -> dict[str, Any]:
             select.focus({preventScroll: true});
             select.value = String(resolutionSeconds);
             select.dispatchEvent(new Event('change', {bubbles: true}));
-            await window.__yolomuxTestWaitFor(() => {
+            await window.__yomuxTestWaitFor(() => {
               const controller = jsDebugCurrentStatsClientState?.client?.controller?.();
               const generation = controller?.generation?.();
               return controller?.selection?.()?.resolution === resolutionSeconds
@@ -2453,7 +2576,7 @@ def test_hidden_stats_panel_receives_push_then_opens_from_cached_generation(
               rangeSeconds: generation.range_seconds,
               resolutionSeconds: generation.resolution_seconds,
               paintedGenerationKey: jsDebugCurrentStatsClientState.paintedGenerationKey,
-              requestCounts: {...globalThis.__yolomuxStatsRouteCounts},
+              requestCounts: {...globalThis.__yomuxStatsRouteCounts},
             };
             """
         )
@@ -2550,7 +2673,7 @@ def test_hidden_stats_panel_receives_push_then_opens_from_cached_generation(
           paintedGenerationKey: jsDebugCurrentStatsClientState.paintedGenerationKey,
           panelVisible: jsDebugStatsPanelVisible(),
           stalls: stalls.map(event => String(event.message || '')),
-          requestCounts: {...globalThis.__yolomuxStatsRouteCounts},
+          requestCounts: {...globalThis.__yomuxStatsRouteCounts},
         };
         """
     )
@@ -2576,7 +2699,7 @@ def test_hidden_stats_panel_receives_push_then_opens_from_cached_generation(
               cacheGeneration: generation.cache_generation,
               sourceGeneration: generation.source_generation,
               paintedGenerationKey: jsDebugCurrentStatsClientState.paintedGenerationKey,
-              requestCounts: {...globalThis.__yolomuxStatsRouteCounts},
+              requestCounts: {...globalThis.__yomuxStatsRouteCounts},
             };
             """
         )
@@ -2627,7 +2750,7 @@ def test_stats_stream_failure_is_durable_latched_and_recovers_only_after_a_real_
             const failures = jsDebugEvents.filter(event => event?.type === 'stats_history'
               && event?.level === 'warning' && event?.route === '/api/stats-stream'
               && String(event?.message || '').includes('stats capabilities fields are not exact'));
-            const capabilities = globalThis.__yolomuxStatsRouteCounts?.['/api/stats-capabilities'] || 0;
+            const capabilities = globalThis.__yomuxStatsRouteCounts?.['/api/stats-capabilities'] || 0;
             if (failures.length !== 1 || capabilities < 2) return false;
             const event = failures[0];
             return {
@@ -2920,7 +3043,7 @@ def _select_one_second_five_minute_graph(harness: Any) -> None:
         const done = arguments[arguments.length - 1];
         setDebugGraphRange(300);
         setDebugGraphResolutionOverride(1);
-        window.__yolomuxTestWaitFor(() => {
+        window.__yomuxTestWaitFor(() => {
           const controller = jsDebugCurrentStatsClientState?.client?.controller?.();
           const generation = controller?.generation?.();
           return generation?.range_seconds === 300

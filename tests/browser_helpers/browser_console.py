@@ -371,7 +371,7 @@ def _consumed_server_log_ids(driver, epoch: str) -> set[int]:
     consumed = driver.execute_script(
         """
         const epoch = arguments[0];
-        let state = window.__yolomuxBrowserJourneyGate;
+        let state = window.__yomuxBrowserJourneyGate;
         if (typeof state === 'undefined') {
           state = {
             visitedSurfaces: [],
@@ -380,7 +380,7 @@ def _consumed_server_log_ids(driver, epoch: str) -> set[int]:
             observer: null,
             observe: null,
           };
-          window.__yolomuxBrowserJourneyGate = state;
+          window.__yomuxBrowserJourneyGate = state;
         } else if (!state || typeof state !== 'object'
             || !Array.isArray(state.consumedServerLogIds)
             || !Object.prototype.hasOwnProperty.call(state, 'serverLogEpoch')
@@ -642,7 +642,7 @@ def consume_only_expected_server_log_errors(
         raise AssertionError("expected server log failures to carry integer IDs")
     registered = driver.execute_script(
         """
-        const state = window.__yolomuxBrowserJourneyGate;
+        const state = window.__yomuxBrowserJourneyGate;
         if (!state || !Array.isArray(state.consumedServerLogIds)
             || state.serverLogEpoch !== arguments[0]) return false;
         const known = new Set(state.consumedServerLogIds);
@@ -664,7 +664,7 @@ def begin_browser_journey_surface_tracking(driver) -> dict[str, Any]:
 
     state = driver.execute_script(
         """
-        const existing = window.__yolomuxBrowserJourneyGate;
+        const existing = window.__yomuxBrowserJourneyGate;
         if (typeof existing !== 'undefined') {
           if (!existing || typeof existing !== 'object'
               || !Array.isArray(existing.visitedSurfaces)
@@ -707,7 +707,7 @@ def begin_browser_journey_surface_tracking(driver) -> dict[str, Any]:
           attributes: true,
           attributeFilter: ['class', 'hidden', 'style'],
         });
-        window.__yolomuxBrowserJourneyGate = state;
+        window.__yomuxBrowserJourneyGate = state;
         state.observe();
         return {malformed: false, visitedSurfaces: [...state.visitedSurfaces]};
         """
@@ -723,7 +723,7 @@ def begin_browser_journey_surface_tracking(driver) -> dict[str, Any]:
 def _read_browser_journey_surfaces(driver, claimed_clean_surfaces: Sequence[str]) -> dict[str, Any]:
     state = driver.execute_script(
         """
-        const state = window.__yolomuxBrowserJourneyGate;
+        const state = window.__yomuxBrowserJourneyGate;
         if (!state || !Array.isArray(state.visitedSurfaces)) return {reachable: false, visitedSurfaces: []};
         state.observe?.();
         return {reachable: true, visitedSurfaces: [...state.visitedSurfaces]};
@@ -925,7 +925,7 @@ def retire_browser_after_strict_diagnostic_gate(
             statsOnly: window.__fixtureStatsOnly === true,
           };
         }
-        const journeyState = window.__yolomuxBrowserJourneyGate;
+        const journeyState = window.__yomuxBrowserJourneyGate;
         journeyState?.observe?.();
         const journey = journeyState && Array.isArray(journeyState.visitedSurfaces)
           ? {reachable: true, visitedSurfaces: [...journeyState.visitedSurfaces]}
@@ -1041,7 +1041,7 @@ def assert_browser_journey_error_free(
     effective_server_log_boundary = (
         server_log_boundary
         if server_log_boundary is not None
-        else getattr(driver, "_yolomux_server_log_boundary", None)
+        else getattr(driver, "_yomux_server_log_boundary", None)
     )
 
     def read_evidence() -> dict[str, Any]:

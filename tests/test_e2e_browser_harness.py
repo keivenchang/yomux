@@ -24,11 +24,28 @@ from tests.browser_helpers.browser_layout import WebDriverWait
 from tests.gate_harness import wait_for_browser_boot
 from tests.gate_harness import retire_expected_fixture_server_log_errors
 from tests.tmux_runtime import run_isolated_tmux
+from yomux_lib import app as app_module
+from yomux_lib import web as web_module
 from yomux_lib.server_logs import SERVER_LOGS
+from yomux_lib.workspace import settings as workspace_settings
 
 
 pytest_plugins = ("tests.e2e_browser_harness",)
 pytestmark = [pytest.mark.browser, pytest.mark.socket, pytest.mark.e2e]
+
+
+@pytest.fixture
+def markdown_startup_settings(monkeypatch, e2e_browser):
+    """Keep timed startup tips from covering native editor click targets."""
+
+    settings_path = e2e_browser.runtime.paths.config_dir / "settings.yaml"
+    workspace_settings.save_settings({"general": {"startup_tips": False}}, settings_path)
+
+    def explicit_settings_payload():
+        return workspace_settings.settings_payload(settings_path)
+
+    monkeypatch.setattr(app_module, "settings_payload", explicit_settings_payload)
+    monkeypatch.setattr(web_module, "settings_payload", explicit_settings_payload)
 
 
 def _make_finder_repo(
@@ -86,6 +103,63 @@ def _differ_payload(harness: Any, repo: Path) -> tuple[dict[str, object], Path]:
     }, target
 
 
+@pytest.mark.parametrize("cached", [False, True], ids=["cold", "cached"])
+def test_finder_expand_waits_for_pending_owner_after_children_mount(e2e_browser: Any, cached: bool) -> None:
+    dev, repo, child = _make_finder_repo_tree(e2e_browser)
+    e2e_browser.load(tabs=("files",))
+    e2e_browser.expand(dev, child_path=repo)
+    e2e_browser._wait_for_row_state(dev, expanded=True)
+    if cached:
+        e2e_browser.expand(repo, child_path=child)
+        e2e_browser._wait_for_row_state(repo, expanded=True)
+        e2e_browser.collapse(repo)
+    e2e_browser.driver.execute_script(
+        """
+        const path = arguments[0], childPath = arguments[1];
+        const originalRender = renderTreeChildren, originalWait = window.__yomuxTestWaitFor;
+        const state = {first: null, held: false, release: null};
+        renderTreeChildren = (...args) => {
+          const result = originalRender(...args);
+          if (args[1] !== path || state.held) return result;
+          state.held = true;
+          const completion = new Promise(resolve => {state.release = resolve;});
+          return (async () => {
+            const rendered = await result;
+            await completion;
+            return rendered;
+          })();
+        };
+        const observeWait = (predicate, options) => originalWait(() => {
+          const result = predicate();
+          const content = Boolean(document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${CSS.escape(childPath)}"]`));
+          if (state.release && content && !state.first && String(options?.description || '').endsWith(path)) {
+            const row = document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${CSS.escape(path)}"]`);
+            state.first = {admitted: Boolean(result), pending: fileExplorerPendingExpansions.has(path),
+              loading: row?.classList.contains('loading-children') === true,
+              content};
+            state.release();
+          }
+          return result;
+        }, options);
+        Object.defineProperty(window, '__yomuxTestWaitFor', {configurable: true, value: observeWait});
+        state.restore = () => {
+          state.release?.(); renderTreeChildren = originalRender;
+          Object.defineProperty(window, '__yomuxTestWaitFor', {configurable: true, value: originalWait});
+          delete window.__heldFinderExpansion;
+        };
+        window.__heldFinderExpansion = state;
+        """,
+        str(repo), str(child),
+    )
+    try:
+        e2e_browser.expand(repo, child_path=child)
+        observed = e2e_browser.driver.execute_script("return window.__heldFinderExpansion.first;")
+        assert observed == {"admitted": False, "pending": True, "loading": True, "content": True}, observed
+        e2e_browser.assert_no_pending_indicator(repo)
+    finally:
+        e2e_browser.driver.execute_script("window.__heldFinderExpansion?.restore();")
+
+
 def test_real_page_harness_owns_7900s_runtime_and_user_action_helpers(e2e_browser: Any) -> None:
     dev, repo, child = _make_finder_repo_tree(e2e_browser)
     url = e2e_browser.load()
@@ -111,7 +185,7 @@ def test_real_page_harness_owns_7900s_runtime_and_user_action_helpers(e2e_browse
     assert session_state["terminal"] is True
 
 
-def test_real_chromium_markdown_split_native_sync_and_breaks(e2e_browser: Any) -> None:
+def test_real_chromium_markdown_split_native_sync_and_breaks(e2e_browser: Any, markdown_startup_settings) -> None:
     """Drive the actual page and both editor surfaces with native Chromium input."""
 
     target = e2e_browser.runtime.paths.home_dir / "dev" / "markdown-e2e.md"
@@ -140,7 +214,7 @@ def test_real_chromium_markdown_split_native_sync_and_breaks(e2e_browser: Any) -
               {name: 'markdown-e2e.md'},
               {userInitiated: true, viewMode: 'split'},
             );
-            const panel = await window.__yolomuxTestWaitFor(() => {
+            const panel = await window.__yomuxTestWaitFor(() => {
               const candidate = [...document.querySelectorAll('.file-editor-panel')]
                 .find(node => node.isConnected && node.dataset.filePath === path);
               return candidate?._cmView && candidate?._pmView
@@ -258,7 +332,7 @@ def test_real_chromium_markdown_vieweditor_double_enter_never_writes_backslash(e
         (async () => {
           try {
             await openFileInEditor(path, {name: 'markdown-double-enter.md'}, {userInitiated: true, viewMode: 'split'});
-            await window.__yolomuxTestWaitFor(() => [...document.querySelectorAll('.file-editor-panel')]
+            await window.__yomuxTestWaitFor(() => [...document.querySelectorAll('.file-editor-panel')]
               .find(node => node.isConnected && node.dataset.filePath === path && node._pmView && node._cmView),
               {timeoutMs: 15000, description: 'double Enter ViewEditor'});
             done(true);
@@ -305,7 +379,7 @@ def test_real_chromium_markdown_vieweditor_double_enter_never_writes_backslash(e
     assert_browser_journey_error_free(e2e_browser.driver, server_log_boundary=e2e_browser.runtime.server_log_boundary)
 
 
-def test_real_chromium_markdown_split_keeps_each_surface_local_until_idle(e2e_browser: Any) -> None:
+def test_real_chromium_markdown_split_keeps_each_surface_local_until_idle(e2e_browser: Any, markdown_startup_settings) -> None:
     """Every native key stays on its editing surface until the trailing idle commit."""
 
     target = e2e_browser.runtime.paths.home_dir / "dev" / "markdown-idle-sync.md"
@@ -325,7 +399,7 @@ def test_real_chromium_markdown_split_keeps_each_surface_local_until_idle(e2e_br
         (async () => {
           try {
             await openFileInEditor(path, {name: 'markdown-idle-sync.md'}, {userInitiated: true, viewMode: 'split'});
-            const panel = await window.__yolomuxTestWaitFor(() => [...document.querySelectorAll('.file-editor-panel')]
+            const panel = await window.__yomuxTestWaitFor(() => [...document.querySelectorAll('.file-editor-panel')]
               .find(node => node.isConnected && node.dataset.filePath === path && node._cmView && node._pmView),
               {timeoutMs: 15000, description: 'idle synchronization editor'});
             done(true);
@@ -413,7 +487,7 @@ def test_real_chromium_markdown_view_renders_unknown_html_without_legacy_preview
         (async () => {
           try {
             await openFileInEditor(path, {name: 'markdown-preview-fallback.md'}, {userInitiated: true, viewMode: 'preview'});
-            const panel = await window.__yolomuxTestWaitFor(() => [...document.querySelectorAll('.file-editor-panel')]
+            const panel = await window.__yomuxTestWaitFor(() => [...document.querySelectorAll('.file-editor-panel')]
               .find(node => node.isConnected && node.dataset.filePath === path),
               {timeoutMs: 12000, description: 'complex Markdown ViewEditor panel'});
             const samples = [];
@@ -447,7 +521,7 @@ def test_real_chromium_markdown_view_renders_unknown_html_without_legacy_preview
     assert_browser_journey_error_free(e2e_browser.driver, server_log_boundary=e2e_browser.runtime.server_log_boundary)
 
 
-def test_real_chromium_markdown_split_full_vieweditor_contract(e2e_browser: Any) -> None:
+def test_real_chromium_markdown_split_full_vieweditor_contract(e2e_browser: Any, markdown_startup_settings) -> None:
     """Cover the complete user-reported TextEditor/ViewEditor contract in real Chromium."""
 
     target = e2e_browser.runtime.paths.home_dir / "dev" / "markdown-full-e2e.md"
@@ -467,7 +541,7 @@ def test_real_chromium_markdown_split_full_vieweditor_contract(e2e_browser: Any)
         (async () => {
           try {
             await openFileInEditor(path, {name: 'markdown-full-e2e.md'}, {userInitiated: true, viewMode: 'split'});
-            const panel = await window.__yolomuxTestWaitFor(() => {
+            const panel = await window.__yomuxTestWaitFor(() => {
               const candidate = [...document.querySelectorAll('.file-editor-panel')]
                 .find(node => node.isConnected && node.dataset.filePath === path);
               return candidate?._cmView && candidate?._pmView
@@ -602,13 +676,13 @@ def test_direct_internal_differ_fixture_path_reaches_terminal_state(e2e_browser:
         (async () => {
           try {
             await openFileSurface(differItemId);
-            const request = await window.__yolomuxTestWaitFor(
+            const request = await window.__yomuxTestWaitFor(
               () => clientSessionFilesWatchRequests()[0] || null,
               {timeoutMs: 4000, description: 'fixture-driven Differ watch request'},
             );
             const applied = applySessionFilesPayloadFromPush(payload, request) === true;
             renderFileExplorerChangesPanels({force: true, view: 'differ'});
-            const row = await window.__yolomuxTestWaitFor(
+            const row = await window.__yomuxTestWaitFor(
               () => document.querySelector(`#panel-__differ__ [data-open-change-file="${CSS.escape(path)}"]`),
               {timeoutMs: 4000, description: `fixture-driven Differ row for ${path}`},
             );
@@ -655,6 +729,8 @@ def test_authenticated_real_page_finder_repeats_without_pending(authenticated_e2
     assert any(name.startswith("yomux_auth_") for name in authentication.cookie_names)
 
     session = str(authenticated_e2e_browser.runtime.tmux.sessions[0])
+    stale_metadata = authenticated_e2e_browser.runtime.app.build_transcripts_payload()
+    assert Path(stale_metadata["sessions"][session]["selected_pane"]["current_path"]).resolve() != ai_config.resolve()
     respawned = run_isolated_tmux(
         authenticated_e2e_browser.runtime.tmux,
         "respawn-pane",
@@ -689,9 +765,8 @@ def test_authenticated_real_page_finder_repeats_without_pending(authenticated_e2
             is None
         )
     )
-    authenticated_e2e_browser.runtime.app.set_transcripts_payload_cache(
-        authenticated_e2e_browser.runtime.app.build_transcripts_payload()
-    )
+    # Forced HTTP reads return the old cache and name the build the browser must observe.
+    authenticated_e2e_browser.runtime.app.set_transcripts_payload_cache(stale_metadata)
 
     authenticated_e2e_browser.load(tabs=("files", session))
     metadata = authenticated_e2e_browser.driver.execute_async_script(
@@ -701,9 +776,11 @@ def test_authenticated_real_page_finder_repeats_without_pending(authenticated_e2
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
-            const response = await fetch('/api/session-metadata?force=1', {cache: 'no-store'});
+            const refresh = await refreshSessionMetadata({force: true});
+            if (!refresh.ok || refresh.reason !== 'converged') throw new Error(JSON.stringify(refresh));
+            const response = await fetch('/api/session-metadata', {cache: 'no-store'});
             const raw = await response.json();
-            const rendered = await window.__yolomuxTestWaitFor(() => {
+            const rendered = await window.__yomuxTestWaitFor(() => {
               const info = transcriptMetadataState.payload.sessions?.[session];
               const summary = sessionWorkSummary(session, info);
               const tab = document.querySelector(`[data-pane-tab="${CSS.escape(session)}"]`);
@@ -723,6 +800,7 @@ def test_authenticated_real_page_finder_repeats_without_pending(authenticated_e2
               };
             }, {timeoutMs: 12000, description: 'authenticated metadata-driven tab and popover'});
             done({
+              refresh,
               status: response.status,
               state: raw?.state || '',
               requestId: raw?.request?.id || '',
@@ -739,6 +817,7 @@ def test_authenticated_real_page_finder_repeats_without_pending(authenticated_e2
             str(ai_config.resolve()),
         )
     assert not metadata.get("error"), metadata
+    assert metadata["refresh"]["ok"] is True and metadata["refresh"]["reason"] == "converged", metadata
     assert metadata["status"] == 200 and metadata["state"] == "ready" and metadata["requestId"], metadata
     assert metadata["hasCanonicalSession"] is True and metadata["hasFlattenedSessions"] is False, metadata
     assert metadata["rendered"]["grid"] is True, metadata
@@ -752,7 +831,7 @@ def test_authenticated_real_page_finder_repeats_without_pending(authenticated_e2
             const row = arguments[0];
             const branch = arguments[1];
             const done = arguments[arguments.length - 1];
-            window.__yolomuxTestWaitFor(
+            window.__yomuxTestWaitFor(
               () => String(row.innerText || '').includes(`[${branch}]`) ? String(row.innerText || '') : null,
               {timeoutMs: 12000, description: `authenticated Finder branch badge ${branch}`},
             ).then(done, error => done({error: String(error?.stack || error)}));

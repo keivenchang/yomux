@@ -241,6 +241,7 @@ class GateRuntimePaths:
     tmp_dir: Path
     chrome_profile_dir: Path
     patched_module_paths: tuple[tuple[str, Path], ...]
+    local_service_ledger: Any
     fixture_apps: list[Any] = field(default_factory=list)
 
 
@@ -486,6 +487,7 @@ def gate_runtime_paths(
         tmp_dir=tmp_dir,
         chrome_profile_dir=chrome_profile_dir,
         patched_module_paths=patched_module_paths,
+        local_service_ledger=ledger,
     )
     assert_writable_paths_beneath(root, resolved_gate_writable_paths(paths))
     try:
@@ -500,11 +502,17 @@ def gate_runtime_paths(
         # process is still mutating and fails with a masked ENOENT.  Route the
         # retirement through the same owner the app fixtures use.
         run_fixture_cleanup_phases("gate_runtime_paths", (
-            ("registered app retirement", lambda: [stop_fixture_app_runtime(app, label="gate_runtime_paths") for app in paths.fixture_apps]),
+            ("registered app retirement", lambda: [stop_fixture_app_runtime(
+                app, label="gate_runtime_paths", defer_local_service_retirement=True,
+            ) for app in paths.fixture_apps]),
             ("runtime root retirement", lambda: remove_fixture_runtime_root(
                 ledger,
                 root,
                 label="gate_runtime_paths",
+                after_retirement=lambda: join_deferred_fixture_metadata_warmers(
+                    paths.fixture_apps,
+                    label="gate_runtime_paths",
+                ),
             )),
             ("worker inotify baseline", lambda: assert_fixture_inotify_returned_to_baseline(self_baseline, label="gate_runtime_paths")),
         ))
@@ -656,8 +664,10 @@ def start_fixture_live_server(
     if options.clear_server_logs:
         SERVER_LOGS.clear()
     fixture_apps = getattr(paths, "fixture_apps", None) if paths is not None else None
-    if fixture_apps is not None and app not in fixture_apps:
-        fixture_apps.append(app)
+    if paths is not None and fixture_apps is not None:
+        if app not in fixture_apps:
+            fixture_apps.append(app)
+        app._fixture_local_service_ledger = paths.local_service_ledger
     server_log_boundary = SERVER_LOGS.payload()
     prepare_fixture_http_app(monkeypatch, app)
     if port_lease is not None:
@@ -741,7 +751,7 @@ def retire_expected_fixture_server_log_errors(
             f"{json.dumps({'expected': expected_shapes, 'actual': actual_shapes, **dict(transition)}, sort_keys=True)}"
         )
     runtime.server_log_boundary = current
-    driver._yolomux_server_log_boundary = current
+    driver._yomux_server_log_boundary = current
     return retired
 
 
@@ -847,7 +857,7 @@ def retire_expected_fixture_http_failures(
         server_log_boundary=start,
     )
     runtime.server_log_boundary = current
-    driver._yolomux_server_log_boundary = current
+    driver._yomux_server_log_boundary = current
     return {"browser": tuple(dict(entry) for entry in browser_failures), "server": retired}
 
 
@@ -920,7 +930,7 @@ def retire_expected_fixture_typed_api_failure(
     if unretired:
         raise AssertionError(f"typed API outcome retirement consumed unexpected rows: {unretired!r}")
     server._fixture_server_log_boundary = current
-    driver._yolomux_server_log_boundary = current
+    driver._yomux_server_log_boundary = current
     return dict(entry)
 
 
@@ -2117,15 +2127,53 @@ def retire_fixture_local_services(
     ))
 
 
+def retire_fixture_app_local_services(app: Any, *, label: str) -> None:
+    """Retire adopted children using the app's private service-root identity."""
+
+    registries = fixture_local_service_registries(app)
+    fixture_root_value = os.environ.get("YOLOMUX_TEST_ROOT", "").strip()
+    if not fixture_root_value:
+        return
+    fixture_root = Path(fixture_root_value).resolve()
+    sockets: set[Path] = set()
+    for registry in registries:
+        if not isinstance(registry, LocalServiceRegistry) or registry._adopted_reaper_pid <= 1:
+            continue
+        service_root = Path(registry.service_dir).resolve()
+        if not service_root.is_relative_to(fixture_root):
+            continue
+        sockets.add(Path(registry.socket_path).resolve())
+
+    phases = tuple(
+        (
+            f"adopted local service {socket_path}",
+            lambda socket_path=socket_path: retire_adopted_local_service_socket(socket_path, label=label),
+        )
+        for socket_path in sorted(sockets, key=str)
+    )
+    if phases:
+        run_fixture_cleanup_phases(f"{label} adopted local services", phases)
+
+
+def retire_adopted_local_service_socket(socket_path: Path, *, label: str) -> None:
+    """Retire a daemon found by its exact private socket path and process generation."""
+
+    retire_local_service_daemons_beneath(socket_path, label=label)
+    assert_no_surviving_local_service_daemons(socket_path, label=label)
+
+
 def remove_fixture_runtime_root(
     ledger: FixtureLocalServiceLedger,
     root: Path,
     *,
     label: str,
+    after_retirement: Callable[[], None] | None = None,
 ) -> None:
     """Remove one root only after every registry writer has settled successfully."""
 
     retire_fixture_local_services(ledger, root, label=label)
+    if after_retirement is not None:
+        after_retirement()
     try:
         shutil.rmtree(root)
     except OSError as error:
@@ -2192,11 +2240,17 @@ def run_fixture_cleanup_phases(label: str, phases: Sequence[tuple[str, Callable[
         raise BaseExceptionGroup(f"{label} teardown failed", errors)
 
 
-def stop_fixture_app_runtime(app: Any, *, label: str) -> None:
+def stop_fixture_app_runtime(
+    app: Any,
+    *,
+    label: str,
+    defer_local_service_retirement: bool = False,
+) -> None:
     """Join every app-owned writer before its fixture root becomes removable."""
 
     if vars(app).get("_fixture_runtime_stopped") is True:
         return
+    defer_local_services = defer_local_service_retirement or vars(app).get("_fixture_local_service_ledger") is not None
     errors: list[BaseException] = []
     local_service_processes: list[FixtureLocalServiceProcess] = []
     seen_local_service_processes: set[int] = set()
@@ -2257,9 +2311,7 @@ def stop_fixture_app_runtime(app: Any, *, label: str) -> None:
         seal_fixture_local_service_starts(fixture_local_service_registries(app))
 
     def join_metadata_warmer() -> None:
-        if metadata_thread is not None and metadata_thread is not threading.current_thread():
-            metadata_thread.join(timeout=2)
-            assert not metadata_thread.is_alive(), f"{label} metadata warmer did not stop"
+        join_fixture_metadata_warmer(metadata_thread, label=label)
 
     def stop_tabber_warmer() -> None:
         if tabber_wake is not None:
@@ -2288,20 +2340,52 @@ def stop_fixture_app_runtime(app: Any, *, label: str) -> None:
     attempt(stop_tabber_warmer)
     attempt(app.stop_auto_approve_all)
     attempt(capture_local_services)
-    attempt(lambda: stop_fixture_local_service_processes(local_service_processes, label=label))
-    attempt(lambda: settle_fixture_local_service_reapers(
-        fixture_local_service_registries(app),
-        label=label,
-    ))
-    # metadata_warm_view runs in batchd, not in this observer thread. Retire and reap the fixture's
-    # batchd process before joining the observer so no worker can write under the fixture root after
-    # teardown returns.
-    attempt(join_metadata_warmer)
+    if not defer_local_services:
+        attempt(lambda: stop_fixture_local_service_processes(local_service_processes, label=label))
+        attempt(lambda: retire_fixture_app_local_services(app, label=label))
+        attempt(lambda: settle_fixture_local_service_reapers(
+            fixture_local_service_registries(app),
+            label=label,
+        ))
+    # metadata_warm_view runs in batchd, not in this observer thread. When service retirement belongs
+    # to the fixture-root ledger, defer the observer join until that owner has reaped batchd.
+    if defer_local_services:
+        app._fixture_deferred_metadata_warmer = metadata_thread
+        app._fixture_deferred_metadata_label = label
+    else:
+        attempt(join_metadata_warmer)
     if len(errors) == 1:
         raise errors[0]
     if errors:
         raise BaseExceptionGroup(f"{label} fixture runtime teardown failed", errors)
     app._fixture_runtime_stopped = True
+
+
+def join_deferred_fixture_metadata_warmers(apps: Iterable[Any], *, label: str) -> None:
+    """Join metadata observers after root-owned batchd retirement and before root removal."""
+
+    errors: list[BaseException] = []
+    for app in apps:
+        worker = vars(app).get("_fixture_deferred_metadata_warmer")
+        if worker is None or worker is threading.current_thread():
+            continue
+        app_label = vars(app).get("_fixture_deferred_metadata_label", label)
+        try:
+            join_fixture_metadata_warmer(worker, label=app_label)
+        except BaseException as error:
+            errors.append(error)
+    if len(errors) == 1:
+        raise errors[0]
+    if errors:
+        raise BaseExceptionGroup(f"{label} deferred metadata warmers did not settle", errors)
+
+
+def join_fixture_metadata_warmer(worker: threading.Thread | None, *, label: str) -> None:
+    """Apply the one bounded join policy to an app's metadata warmer."""
+
+    if worker is not None and worker is not threading.current_thread():
+        worker.join(timeout=2)
+        assert not worker.is_alive(), f"{label} metadata warmer did not stop"
 
 
 def settle_fixture_app_evidence_boundary(app: Any, *, label: str) -> None:
@@ -2551,7 +2635,7 @@ const fs = require('fs');
 const helpers = require('./tests/browser_helpers/layout_test_helper');
 
 const input = JSON.parse(fs.readFileSync(0, 'utf8'));
-const api = helpers.loadYolomux(
+const api = helpers.loadYomux(
   String(input.search || ''),
   input.sessions,
   String(input.protocol || 'http:'),
@@ -3451,7 +3535,7 @@ def finish_browser_fixture_boundary(
         except BaseException as error:
             gate_errors.append(error)
         finally:
-            current_browser._yolomux_server_log_boundary = None
+            current_browser._yomux_server_log_boundary = None
     # Retire every page before joining app-owned producers. A page that remains live can enqueue an
     # 8 ms filesystem batch after its quiescence sample, racing a newly accepted batchd operation into
     # the gap between wait_for_idle() and the ledger read. Atomic retirement closes that admission
@@ -3617,7 +3701,7 @@ def load_gate_browser(driver, runtime: GateLiveServer, path: str = "/") -> None:
     target = str(path or "/")
     if not target.startswith("/"):
         raise ValueError("gate browser path must start with /")
-    driver._yolomux_server_log_boundary = runtime.server_log_boundary
+    driver._yomux_server_log_boundary = runtime.server_log_boundary
     driver.get(f"{runtime.base_url}{target}")
     run_when_browser_ready(
         driver,
@@ -3711,8 +3795,8 @@ def open_gate_stats_surface(driver, *, timeout: float = 8.0) -> dict[str, Any]:
               height: rect.height,
               statsVisible: typeof jsDebugStatsPanelVisible === 'function' && jsDebugStatsPanelVisible(),
               graphPresent: panel.querySelector('[data-js-debug-graph]') !== null,
-              visitedSurfaces: Array.isArray(window.__yolomuxBrowserJourneyGate?.visitedSurfaces)
-                ? [...window.__yolomuxBrowserJourneyGate.visitedSurfaces]
+              visitedSurfaces: Array.isArray(window.__yomuxBrowserJourneyGate?.visitedSurfaces)
+                ? [...window.__yomuxBrowserJourneyGate.visitedSurfaces]
                 : [],
             };
             """

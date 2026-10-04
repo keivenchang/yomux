@@ -16,17 +16,30 @@ function syncDirectoryRowExpansionVisual(row, expanded, loading = false) {
   if (icon) setDisclosureTriangleElement(icon, expanded);
 }
 
-function renderExpandedDirectoryRowChildren(row, fullPath, entries) {
+async function renderExpandedDirectoryRowChildren(row, fullPath, entries, options = {}) {
   fileExplorerExpanded.add(fullPath);
-  syncDirectoryRowExpansionVisual(row, true, false);
+  syncDirectoryRowExpansionVisual(row, true, fileExplorerPendingExpansions.has(fullPath));
   const existingChildren = childContainerForRow(row, fullPath);
   const children = existingChildren || createFileTreeChildContainer(fullPath);
   const nextDepth = fileTreeRowDepth(row) + 1;
-  renderTreeChildren(children, fullPath, entries, nextDepth, {view: 'finder'});
   if (!existingChildren) row.insertAdjacentElement('afterend', children);
-  rememberFileExplorerSyncExpandedState();
-  refreshLayoutUrlStateSoon();
-  if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+  const renderTransaction = options.renderTransaction || {epoch: ++fileTreeRenderEpoch, completed: true};
+  const renderOwner = options.renderOwner || {};
+  const rendered = await renderTreeChildren(children, fullPath, entries, nextDepth, {
+    ...options,
+    renderTransaction,
+    renderOwner,
+    view: 'finder',
+    yieldToInput: options.yieldToInput !== false,
+  });
+  if (rendered === false || options.isCurrent && !options.isCurrent()) {
+    if (fileTreeRenderOwners.get(children)?.renderOwner === renderOwner) children.remove();
+    return false;
+  }
+  syncDirectoryRowExpansionVisual(row, true, fileExplorerPendingExpansions.has(fullPath));
+  if (options.rowsByPath instanceof Map) indexFileTreeRowsByPath(children, options.rowsByPath);
+  if (options.publicationState) options.publicationState.changed = true;
+  return true;
 }
 
 function renderDirectoryRowExpansionError(row, fullPath) {
@@ -68,32 +81,95 @@ function settleSuppressedDirectoryRowExpansion(row, fullPath) {
   else syncDirectoryRowExpansionVisual(row, true, false);
 }
 
-function liveDirectoryRows(fullPath, fallbackRow) {
+function liveDirectoryRows(fullPath, fallbackRow, rowsByPath = null) {
+  const isDirectoryRow = row => row?.isConnected !== false && row?.dataset?.kind === 'dir' && row.dataset.path === fullPath;
+  const fallback = fallbackRow?.isConnected && isDirectoryRow(fallbackRow) ? [fallbackRow] : [];
+  if (rowsByPath instanceof Map) {
+    const indexedRows = (rowsByPath.get(fullPath) || []).filter(isDirectoryRow);
+    if (indexedRows.length) return indexedRows;
+    return fallback;
+  }
   const rows = [];
   for (const container of fileExplorerTreeContainers()) {
     for (const currentRow of container.querySelectorAll('.file-tree-row[data-path]')) {
-      if (currentRow.dataset?.path === fullPath) rows.push(currentRow);
+      if (isDirectoryRow(currentRow)) rows.push(currentRow);
     }
   }
-  return rows.length ? rows : (fallbackRow?.isConnected ? [fallbackRow] : []);
+  return rows.length ? rows : fallback;
 }
 
-function settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, entries) {
-  const rows = liveDirectoryRows(fullPath, row);
+async function settleFileExplorerDirectoryFailures(failures, isCurrentFailure, options = {}) {
+  const rowsByPath = indexFileExplorerRowsByPath();
+  const publicationState = {changed: false};
+  for (const [rawPath, failure] of failures) {
+    const fullPath = normalizeDirectoryPath(rawPath);
+    const isCurrent = () => isCurrentFailure(fullPath, failure);
+    if (!fullPath || !isCurrent()) continue;
+    const rows = liveDirectoryRows(fullPath, null, rowsByPath);
+    if (rows.length) {
+      await settleDirectoryRowExpansionAcrossSurfaces(rows[0], fullPath, null, {
+        rowsByPath, publicationState, isCurrent,
+      });
+    }
+  }
+  if (publicationState.changed && options.publish !== false) {
+    rememberFileExplorerSyncExpandedState();
+    refreshLayoutUrlStateSoon();
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+  }
+  return publicationState.changed;
+}
+
+async function settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, entries, options = {}) {
+  if (options.isCurrent && !options.isCurrent()) return false;
+  const rows = liveDirectoryRows(fullPath, row, options.rowsByPath);
   if (!entries) {
-    const failed = Boolean(currentFileExplorerListError(fullPath) || fileExplorerDirectoryListingFailed(fullPath));
+    if (options.isCurrent && !options.isCurrent()) return false;
+    if (fileExplorerFsResourceRecords.get(fileExplorerFsBatchKey('list', fullPath))?.request) return false;
+    const failed = fileExplorerDirectoryListingFailed(fullPath);
+    if (failed) {
+      fileExplorerPendingExpansionOwners.delete(fullPath);
+      fileExplorerPendingExpansions.delete(fullPath);
+    }
     rows.forEach(currentRow => {
       if (failed) renderDirectoryRowExpansionError(currentRow, fullPath);
       else settleSuppressedDirectoryRowExpansion(currentRow, fullPath);
     });
     if (failed) {
-      rememberFileExplorerSyncExpandedState();
-      refreshLayoutUrlStateSoon();
-      if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+      if (options.publicationState) options.publicationState.changed = true;
+      else {
+        rememberFileExplorerSyncExpandedState();
+        refreshLayoutUrlStateSoon();
+        if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+      }
     }
     return;
   }
-  rows.forEach(currentRow => renderExpandedDirectoryRowChildren(currentRow, fullPath, entries));
+  const renderOwner = {};
+  const renderOptions = {...options, renderOwner};
+  const removeOwnedChildren = () => {
+    for (const currentRow of rows) {
+      const children = childContainerForRow(currentRow, fullPath);
+      if (children && fileTreeRenderOwners.get(children)?.renderOwner === renderOwner) children.remove();
+    }
+  };
+  for (const currentRow of rows) {
+    if (options.isCurrent && !options.isCurrent()) return false;
+    if (!await renderExpandedDirectoryRowChildren(currentRow, fullPath, entries, renderOptions)) {
+      removeOwnedChildren();
+      return false;
+    }
+  }
+  if (options.isCurrent && !options.isCurrent()) {
+    removeOwnedChildren();
+    return false;
+  }
+  if (!options.publicationState) {
+    rememberFileExplorerSyncExpandedState();
+    refreshLayoutUrlStateSoon();
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+  }
+  return true;
 }
 
 function collapseDirectoryRowsAcrossSurfaces(row, fullPath) {
@@ -113,55 +189,112 @@ async function expandDirectoryRow(row, fullPath, options = {}) {
   const generationIsCurrent = () => expansionGeneration === undefined
     || expansionGeneration === fileExplorerSyncState.generation;
   if (!generationIsCurrent()) return;
+  const existingOwner = fileExplorerPendingExpansionOwners.get(fullPath);
+  if (
+    existingOwner
+    && existingOwner.generation === expansionGeneration
+    && existingOwner.promise
+    && !(options.manual === true && existingOwner.manual !== true)
+  ) return existingOwner.promise;
+  if (options.manual === true) {
+    forgetFileExplorerSyncManualCollapse(fullPath);
+    resetFileExplorerAppliedSyncPlan();
+    fileExplorerExpanded.add(fullPath);
+  }
   const cachedEntries = cachedFileExplorerFsResourceValue('list', fullPath);
+  const wasExpanded = fileExplorerExpanded.has(fullPath);
+  const expansionOwner = {
+    generation: expansionGeneration,
+    manual: options.manual === true,
+    promise: null,
+  };
+  fileExplorerPendingExpansions.add(fullPath);
+  fileExplorerPendingExpansionOwners.set(fullPath, expansionOwner);
+  const promise = settleDirectoryRowExpansionRequest(row, fullPath, cachedEntries, options, expansionOwner, wasExpanded);
+  expansionOwner.promise = promise;
+  await promise;
+  if (options.manual === true && fileExplorerExpanded.has(fullPath)) {
+    const containers = liveDirectoryRows(fullPath, row)
+      .map(currentRow => childContainerForRow(currentRow, fullPath)).filter(Boolean);
+    await restoreFileExplorerExpandedPaths(Array.from(fileExplorerExpanded), fullPath, {
+      containers,
+      generation: fileExplorerSyncState.generation,
+      isCurrent: () => fileExplorerExpanded.has(fullPath)
+        && containers.some(container => container.isConnected !== false),
+    });
+  }
+}
+
+async function settleDirectoryRowExpansionRequest(row, fullPath, cachedEntries, options, expansionOwner, wasExpanded) {
+  const expansionGeneration = expansionOwner.generation;
+  const generationIsCurrent = () => expansionGeneration === undefined
+    || expansionGeneration === fileExplorerSyncState.generation;
+  const ownsExpansion = () => fileExplorerPendingExpansionOwners.get(fullPath) === expansionOwner;
+  const isCurrent = () => ownsExpansion() && (options.manual === true || generationIsCurrent())
+    && (!options.isCurrent || options.isCurrent());
+  const settleOptions = {...options, isCurrent};
+  liveDirectoryRows(fullPath, row, options.rowsByPath).forEach(currentRow => syncDirectoryRowExpansionVisual(currentRow, true, true));
+  const releaseExpansion = () => {
+    if (!ownsExpansion()) return false;
+    fileExplorerPendingExpansionOwners.delete(fullPath);
+    fileExplorerPendingExpansions.delete(fullPath);
+    const requested = fileExplorerExpanded.has(fullPath);
+    const current = generationIsCurrent() && (!options.isCurrent || options.isCurrent());
+    const expanded = requested && (options.manual === true || current);
+    if (!expanded && !wasExpanded) fileExplorerExpanded.delete(fullPath);
+    liveDirectoryRows(fullPath, row, options.rowsByPath).forEach(currentRow => syncDirectoryRowExpansionVisual(currentRow, expanded, false));
+    return true;
+  };
   if (Array.isArray(cachedEntries)) {
-    if (options.manual === true) {
-      forgetFileExplorerSyncManualCollapse(fullPath);
-      resetFileExplorerAppliedSyncPlan();
-    }
     if (directoryRowExpansionIsSuppressed(fullPath, options)) {
       settleSuppressedDirectoryRowExpansion(row, fullPath);
+      releaseExpansion();
       return;
     }
-    settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, cachedEntries);
-    void fetchDirectory(fullPath, {user: options.user === true, fresh: true}).then(entries => {
-      if (!generationIsCurrent()) return;
+    await settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, cachedEntries, settleOptions);
+    if (!releaseExpansion()) return;
+    if (!generationIsCurrent() && options.manual !== true) return;
+    const listingKey = fileExplorerFsBatchKey('list', fullPath);
+    const listingRecord = fileExplorerFsResourceRecords.get(listingKey);
+    const refresh = fetchDirectory(fullPath, {user: options.user === true, fresh: true});
+    const refreshGeneration = listingRecord?.generation;
+    void refresh.then(entries => {
+      if (options.generation !== undefined && !generationIsCurrent()) return;
+      if (!listingRecord || !fileExplorerFsResourceCurrent(listingKey, listingRecord, refreshGeneration) || listingRecord.value !== entries) return;
       if (!Array.isArray(entries) || !fileExplorerExpanded.has(fullPath)) return;
       if (directoryRowExpansionIsSuppressed(fullPath, options)) return;
-      settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, entries);
+      return settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, entries, {
+        ...options,
+        isCurrent: () => fileExplorerExpanded.has(fullPath),
+      });
     });
     return;
   }
-  const expansionOwner = Symbol(fullPath);
-  fileExplorerPendingExpansions.add(fullPath);
-  fileExplorerPendingExpansionOwners.set(fullPath, expansionOwner);
-  syncDirectoryRowExpansionVisual(row, true, true);
   let entries;
   try {
     entries = await fetchDirectory(fullPath, {user: options.user === true});
   } catch (error) {
-    const ownsExpansion = fileExplorerPendingExpansionOwners.get(fullPath) === expansionOwner;
-    if (!ownsExpansion) return;
-    fileExplorerPendingExpansionOwners.delete(fullPath);
-    fileExplorerPendingExpansions.delete(fullPath);
+    if (!ownsExpansion()) return;
+    if (!isCurrent()) { releaseExpansion(); return; }
     setFileExplorerListError(fullPath, error, Number(error?.status) || 0);
-    settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, null);
+    await settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, null, settleOptions);
+    releaseExpansion();
     return;
   }
   // collapseDirectoryRow() deletes the pending path to cancel this reveal. The response may still
   // arrive, but it no longer owns this row and must not restore children the user just hid.
-  const ownsExpansion = fileExplorerPendingExpansionOwners.get(fullPath) === expansionOwner;
-  if (!ownsExpansion) return;
-  fileExplorerPendingExpansionOwners.delete(fullPath);
-  fileExplorerPendingExpansions.delete(fullPath);
-  if (!generationIsCurrent()) return;
+  if (!ownsExpansion()) return;
   if (!entries) {
-    settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, null);
+    if (!isCurrent()) { releaseExpansion(); return; }
+    await settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, null, settleOptions);
+    releaseExpansion();
     return;
   }
-  if (options.manual === true) {
-    forgetFileExplorerSyncManualCollapse(fullPath);
-    resetFileExplorerAppliedSyncPlan();
+  if (!isCurrent()) {
+    // A superseded restore or reveal no longer owns the requested expansion. Retire its spinner
+    // without publishing rows; a manual expansion has its own owner and survives this path.
+    releaseExpansion();
+    return;
   }
   // A manual collapse can land while fetchDirectory() is in flight, so an AUTO reveal (active-tab/file
   // reveal or sync expand-loop, both pass auto:true) must re-check suppression HERE -- the mutation
@@ -170,10 +303,12 @@ async function expandDirectoryRow(row, fullPath, options = {}) {
   // remembered-state restore path (auto:false), which has its own pre-await suppression filter and must
   // be free to restore a directory across sync-target switches.
   if (directoryRowExpansionIsSuppressed(fullPath, options)) {
-    settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, null);
+    await settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, null, settleOptions);
+    releaseExpansion();
     return;
   }
-  settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, entries);
+  await settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, entries, settleOptions);
+  releaseExpansion();
 }
 
 function collapseDirectoryRow(row, fullPath, options = {}) {
@@ -312,7 +447,8 @@ function stopPopoverEvent(event) {
 function closeOtherSessionPopovers(current, options = {}) {
   const force = options.force === true;
   let changed = false;
-  for (const other of document.querySelectorAll('.pane-tab.popover-open, .tabber-session-tab.popover-open, .panel-popover-zone.popover-open')) {
+  for (const other of Array.from(document.getElementsByClassName('popover-open'))) {
+    if (!other.matches('.pane-tab, .tabber-session-tab, .panel-popover-zone')) continue;
     if (other !== current) {
       const popover = other.querySelector?.(':scope > .session-popover, :scope > .panel-detail-popover')
         || other.__yomuxDetachedPopover;

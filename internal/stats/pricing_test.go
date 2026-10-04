@@ -137,7 +137,7 @@ func TestPricingCatalogRejectsPythonInvalidRateAndSourceFields(t *testing.T) {
 }
 
 func TestPricingCatalogNormalizesRepeatedRoutedOpenAIPrefix(t *testing.T) {
-	root := filepath.Join("..", "..")
+	root := testsupport.RepoRoot(t)
 	catalog, err := LoadRepositoryPricingCatalog(root, "")
 	if err != nil {
 		t.Fatal(err)
@@ -396,7 +396,7 @@ print(json.dumps({"catalog_revision": catalog["catalog_revision"], "models": mod
 }
 
 func TestPricingResolverMatchesPythonRoutedAndSubscriptionCases(t *testing.T) {
-	catalog, err := LoadRepositoryPricingCatalog(filepath.Join("..", ".."), "")
+	catalog, err := LoadRepositoryPricingCatalog(testsupport.RepoRoot(t), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -465,7 +465,7 @@ print(json.dumps({"micro_usd": projected.micro_usd, "api_list_micro_usd": projec
 	if err := json.Unmarshal([]byte(expectedRaw), &expected); err != nil {
 		t.Fatalf("decode Python pricing oracle: %v\n%s", err, expectedRaw)
 	}
-	catalog, err := LoadRepositoryPricingCatalog(filepath.Join("..", ".."), "")
+	catalog, err := LoadRepositoryPricingCatalog(testsupport.RepoRoot(t), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -569,6 +569,7 @@ func TestPricingCatalogRefreshInvalidatesPublishedUsageCost(t *testing.T) {
 		t.Fatal(err)
 	}
 	lifecycle := NewLifecycle(writer, LifecycleConfig{WindowSeconds: 100, MaxCells: 64, Price: resolver, Now: func() time.Time { return now }})
+	t.Cleanup(lifecycle.Stop)
 	lifecycle.DemandProduct(100, 10)
 	service := NewStatsService(writer, StatsServiceConfig{Products: []ProductKey{{RangeSeconds: 100, ResolutionSeconds: 10}}, Price: resolver, Now: func() time.Time { return now }})
 	refresh := func() StatsSnapshot {

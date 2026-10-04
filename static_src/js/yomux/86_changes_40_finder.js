@@ -95,24 +95,20 @@ function startFinderPanelListing(panel, options = {}) {
   const firstPaint = !panel?.querySelector?.('.file-tree-row[data-path]');
   if (firstPaint) beginFinderSessionFilesDiffBackfill();
   const listing = refreshFileExplorerPanelTree(panel, {...options, deferSessionFilesDiff: firstPaint});
-  void listing.then(
-    () => {
+  void listing.then(async () => {
       // Keep the fast directory rows on screen for one complete browser paint. This also applies
       // to a warm session-files payload: cached +/- totals are slower metadata, so they must not
       // change the first-paint result merely because another owner finished earlier.
       scheduleAfterFileExplorerFirstPaint(() => {
-        markFinderFastListingPainted();
-        ensureSessionFilesSurfaceLoaded('finder', {fetchEvenWhenPush: true});
-        releaseFinderSessionFilesDiffBackfillIfReady();
-        updateFileTreeGitStatusRows();
+        finishFinderFastPaint();
       });
-    },
-    error => {
+      if (options.preserveExpanded !== false && fileExplorerRootMode !== 'sync') {
+        const expandedPaths = fileExplorerExpandedPathsForRoot(currentFileExplorerRoot());
+        if (expandedPaths.length) await restoreFileExplorerExpandedPaths(expandedPaths, currentFileExplorerRoot());
+      }
+    }).catch(error => {
       scheduleAfterFileExplorerFirstPaint(() => {
-        markFinderFastListingPainted();
-        ensureSessionFilesSurfaceLoaded('finder', {fetchEvenWhenPush: true});
-        releaseFinderSessionFilesDiffBackfillIfReady();
-        updateFileTreeGitStatusRows();
+        finishFinderFastPaint();
       });
       console.warn('Finder initial listing failed', error);
     },
@@ -129,6 +125,7 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
   const dateBtn = panel.querySelector('[data-file-explorer-tree-dates]');
   const sortSelect = panel.querySelector('[data-file-explorer-tree-sort]');
   if (!treeEl) return;
+  const syncGeneration = fileExplorerSyncState.generation;
   const root = normalizeDirectoryPath(fileExplorerRoot || homePath || '/');
   setFileExplorerPathElementValue(pathEl, root);
   setFileExplorerPathError(pathEl);
@@ -153,6 +150,8 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
     ? options.entries
     : await fetchDirectory(root);
   if (!entries) return;
+  if (root !== normalizeDirectoryPath(currentFileExplorerRoot())
+      || (fileExplorerRootMode === 'sync' && syncGeneration !== fileExplorerSyncState.generation)) return;
   renderTreeChildren(treeEl, root, entries, 0, {
     entriesByDir: options.entriesByDir,
     view: 'finder',
@@ -163,7 +162,7 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
     entries,
     observabilityJourney,
   );
-  updateFileExplorerCurrentFileHighlight();
+  updateFileExplorerCurrentFileHighlight({yieldToInput: true});
   if (pushCanSupply && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
@@ -172,6 +171,7 @@ function renderFileExplorerChangesPanel(panel, options = {}) {
   if (!changes) return;
   const view = fileExplorerViewForItem(panel.dataset.panelItem) || 'finder';
   if (view === 'finder') return;
+  if (view === 'differ' && !fileExplorerSessionFilesPaneIsVisible()) return;
   if (view === 'tabber') {
     if (options.force === true || !changes.querySelector('.changes-groups')) {
       replaceChangesStaticHtml(changes, fileExplorerChangesPanelStaticHtml({view}));
@@ -180,23 +180,28 @@ function renderFileExplorerChangesPanel(panel, options = {}) {
     bindTabberPanel(panel);
     return;
   }
-  const files = options.changedRepo ? [] : fileExplorerDifferFiles();
-  const loading = sessionFilesPanelIsLoading(fileExplorerSessionFilesState.payload, files);
+  const payload = fileExplorerSessionFilesState.payload;
+  const streamedPayload = payload === fileExplorerSessionFilesState.payload
+    && fileExplorerSessionFilesState.streamRepos instanceof Map;
+  const files = options.changedRepo || streamedPayload
+    ? []
+    : (Array.isArray(payload?.files) ? payload.files : []);
+  const loading = sessionFilesPanelIsLoading(payload, []);
   const groups = changes.querySelector('.changes-groups');
-  let changedSection = null;
   if (options.changedRepo && groups) {
-    changedSection = renderChangesGroups(groups, [], {
+    renderChangesGroups(groups, [], {
       payload: fileExplorerSessionFilesState.payload,
       compact: false,
       loading,
       includeEmptyRepoSections: true,
       view,
       changedRepo: options.changedRepo,
+      yieldToInput: true,
     });
   } else if (options.force === true || !activeChangesControl(panel)) {
     renderChangesRoot(
       changes,
-      fileExplorerChangesPanelStaticHtml({view, full: true}),
+      fileExplorerChangesPanelStaticHtml({view, full: true, deferPreparation: true}),
       files,
       {
         payload: fileExplorerSessionFilesState.payload,
@@ -205,12 +210,17 @@ function renderFileExplorerChangesPanel(panel, options = {}) {
         includeEmptyRepoSections: true,
         view,
         changedRepo: options.changedRepo,
+        yieldToInput: true,
+        deferPreparation: true,
       },
       {force: options.force === true},
     );
   }
   syncFileExplorerDiffSessionControls();
   bindChangesPanel(panel);
+  const changedSection = options.changedRepo && groups
+    ? changesRepoSectionsByGroups.get(groups)?.get(String(options.changedRepo.repo || ''))
+    : null;
   bindChangedFileRowBehaviors(changedSection || panel);
   syncFileExplorerChangesCollapseButtons();
 }

@@ -1,73 +1,57 @@
-package(default_visibility = ["//visibility:public"])
+load("@rules_go//go:def.bzl", "go_library")
+load("//:tools/bazel_rules.bzl", "go_test_pair")
+
+package(default_visibility = ["//:__subpackages__"])
 
 exports_files(["BUILD.bazel"])
-
-filegroup(
-    name = "docker_source_files",
-    srcs = ["BUILD.bazel"] + glob(["**"], exclude = ["BUILD.bazel"]),
-)
-
-load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 SQLITE = "@com_github_mattn_go_sqlite3//:go_default_library"
 
 go_library(
     name = "stats_lib",
-    srcs = glob(["*.go"], exclude = ["*_test.go"]),
+    srcs = glob(
+        ["*.go"],
+        exclude = ["*_test.go"],
+    ),
     importpath = "github.com/keivenchang/yomux/internal/stats",
-    deps = [SQLITE, "@org_golang_x_sys//unix"],
+    deps = [
+        "//internal/productenv:productenv_lib",
+        SQLITE,
+        "@org_golang_x_sys//unix",
+    ],
 )
 
-go_test(
-    name = "stats_test",
-    srcs = glob(["*_test.go"], exclude = ["agent_status_integration_test.go"]),
+go_test_pair(
+    name = "stats",
+    size = "medium",
+    timeout = "moderate",
+    srcs = glob(
+        ["*_test.go"],
+        exclude = ["agent_status_integration_test.go"],
+    ),
     data = [
-        "//:go_test_support",
+        "//:go_stats_test_support",
     ] + glob(["testdata/**"]),
+    embed = [":stats_lib"],
+    race_shard_count = 8,
+    repo_root_runfile = "yomux/go_stats_test_support",
+    shard_count = 8,
     deps = [
         SQLITE,
         "//internal/testsupport:testsupport_lib",
     ],
-    embed = [":stats_lib"],
 )
 
-go_test(
-    name = "agent_status_integration_test",
+go_test_pair(
+    name = "agent_status_integration",
     srcs = ["agent_status_integration_test.go"],
     data = [
-        "//:go_test_support",
+        "//:go_stats_test_support",
     ],
+    embed = [":stats_lib"],
+    repo_root_runfile = "yomux/go_stats_test_support",
     deps = [
         SQLITE,
         "//internal/testsupport:testsupport_lib",
     ],
-    embed = [":stats_lib"],
-)
-
-go_test(
-    name = "stats_race_test",
-    srcs = glob(["*_test.go"], exclude = ["agent_status_integration_test.go"]),
-    data = [
-        "//:go_test_support",
-    ] + glob(["testdata/**"]),
-    deps = [
-        SQLITE,
-        "//internal/testsupport:testsupport_lib",
-    ],
-    embed = [":stats_lib"],
-    race = "on",
-)
-
-go_test(
-    name = "agent_status_integration_race_test",
-    srcs = ["agent_status_integration_test.go"],
-    data = [
-        "//:go_test_support",
-    ],
-    deps = [
-        SQLITE,
-        "//internal/testsupport:testsupport_lib",
-    ],
-    embed = [":stats_lib"],
-    race = "on",
 )

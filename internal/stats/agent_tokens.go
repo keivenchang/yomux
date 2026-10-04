@@ -3939,11 +3939,11 @@ func recentTranscriptCandidatesWithCursor(ctx context.Context, root string, boun
 		return candidates, err
 	}
 	sortCandidates()
-	if byteBudgetExceeded {
-		return candidates, errors.New("transcript-discovery-byte-budget-exhausted")
-	}
 	if discoveryErr != nil {
 		return candidates, discoveryErr
+	}
+	if byteBudgetExceeded {
+		return candidates, errors.New("transcript-discovery-byte-budget-exhausted")
 	}
 	return candidates, nil
 }

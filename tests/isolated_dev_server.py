@@ -316,6 +316,7 @@ class IsolatedDevServer:
     port: int
     process: subprocess.Popen[str]
     server_start_identity: str
+    port_lease: HttpPortLease | None
     auth_bypass: bool = True
     env_overrides: dict[str, str] | None = None
     output: list[str] = field(default_factory=list)
@@ -374,17 +375,38 @@ class IsolatedDevServer:
         instance's isolation changes -- same private tmux socket, same config/state/HOME root.
         """
 
+        old_descendants = process_descendants(self.process.pid) if Path("/proc").is_dir() else []
         self.stop()
-        replacement = start_isolated_dev_server(
-            self.label,
-            self.source_root,
-            self.paths,
-            self.tmux,
-            auth_bypass=self.auth_bypass,
-            sessions=sessions,
-            port=self.port,
-            env_overrides=self.env_overrides,
-        )
+        try:
+            if self.port_lease is None:
+                self.port_lease = HttpPortLease.reserve(ports=(self.port,))
+            else:
+                self.port_lease.reacquire()
+            replacement = start_isolated_dev_server(
+                self.label,
+                self.source_root,
+                self.paths,
+                self.tmux,
+                auth_bypass=self.auth_bypass,
+                sessions=sessions,
+                port=self.port,
+                port_lease=self.port_lease,
+                env_overrides=self.env_overrides,
+            )
+        except BaseException as restart_error:
+            cleanup_error: BaseException | None = None
+            try:
+                if self.port_lease is not None and self.port_lease.reserved:
+                    self.port_lease.release()
+            except BaseException as error:
+                cleanup_error = error
+            try:
+                reap_descendants(old_descendants)
+            except BaseException as error:
+                cleanup_error = cleanup_error or error
+            if cleanup_error is not None:
+                raise restart_error.with_traceback(restart_error.__traceback__) from cleanup_error
+            raise
         # Adopt the replacement process; the fixture finalizer stops `self`, so the live process
         # must be the one it signals.
         self.process = replacement.process
@@ -402,81 +424,117 @@ def start_isolated_dev_server(
     auth_bypass: bool = True,
     sessions: tuple[str, ...] = (),
     port: int | None = None,
+    port_lease: HttpPortLease | None = None,
     force: bool = False,
     env_overrides: dict[str, str] | None = None,
     exec_plan_json: str | None = None,
 ) -> IsolatedDevServer:
-    if port is None:
-        lease = HttpPortLease.reserve()
-        port = assert_isolated_dev_server_port(lease.port)
-        # The lease holds the port against every other worker until the instant before the server
-        # binds it, and only then is it handed over.
-        release_lease: Callable[[], None] = lease.release
-    else:
-        # Restart-on-the-same-port: the caller owns a port a just-stopped instance freed. There is
-        # no lease to release, only the same isolation guard so a restart can never target a live
-        # operator server either.
+    if port_lease is not None:
+        if port is not None and port != port_lease.port:
+            raise ValueError("isolated server port must match its port lease")
+        port = port_lease.port
+    elif port is None:
+        port_lease = HttpPortLease.reserve()
+        port = port_lease.port
+    elif force:
         port = assert_isolated_dev_server_port(port)
-        release_lease = lambda: None
-    session_names = sessions or tuple(tmux_runtime.sessions)
-    command = [
-        sys.executable,
-        "-u",
-        *server_entrypoint_arguments(source_root),
-        "--http",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        str(port),
-        "--sessions",
-        session_names[0],
-    ]
-    if exec_plan_json is not None:
-        # Launch through the real per-row exec mode the supported launcher uses:
-        # `instance_isolation.py exec --plan-file <p> -- <server cmd>` applies the
-        # captured RowPlan to the environment, then runs the server under it. The
-        # plan lives inside this instance's own root so it cannot escape isolation.
-        plan_path = paths.root / "row-plan.json"
-        plan_path.write_text(exec_plan_json, encoding="utf-8")
+    else:
+        port_lease = HttpPortLease.reserve(ports=(port,))
+    if port_lease is not None:
+        port = assert_isolated_dev_server_port(port)
+    process: subprocess.Popen[str] | None = None
+    server: IsolatedDevServer | None = None
+    try:
+        session_names = sessions or tuple(tmux_runtime.sessions)
         command = [
             sys.executable,
-            str(source_root / "tools" / "instance_isolation.py"),
-            "exec",
-            "--plan-file",
-            str(plan_path),
-            "--",
-            *command,
+            "-u",
+            *server_entrypoint_arguments(source_root),
+            "--http",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--sessions",
+            session_names[0],
         ]
-    if force:
-        command.append("--force")
-    release_lease()
-    process = subprocess.Popen(
-        command,
-        cwd=source_root,
-        env=build_environment(
-            source_root, paths, tmux_runtime, port, auth_bypass=auth_bypass, env_overrides=env_overrides
-        ),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        start_new_session=True,
-    )
-    server_start_identity = process_start_identity(process.pid)
-    assert server_start_identity, f"{label} server process has no stable start identity"
-    server = IsolatedDevServer(
-        label=label,
-        source_root=source_root,
-        paths=paths,
-        tmux=tmux_runtime,
-        port=port,
-        process=process,
-        server_start_identity=server_start_identity,
-        auth_bypass=auth_bypass,
-        env_overrides=env_overrides,
-    )
-    wait_until_serving(process, port, server.output, label=label)
-    return server
+        if exec_plan_json is not None:
+            # Launch through the real per-row exec mode the supported launcher uses:
+            # `instance_isolation.py exec --plan-file <p> -- <server cmd>` applies the
+            # captured RowPlan to the environment, then runs the server under it. The
+            # plan lives inside this instance's own root so it cannot escape isolation.
+            plan_path = paths.root / "row-plan.json"
+            plan_path.write_text(exec_plan_json, encoding="utf-8")
+            command = [
+                sys.executable,
+                str(source_root / "tools" / "instance_isolation.py"),
+                "exec",
+                "--plan-file",
+                str(plan_path),
+                "--",
+                *command,
+            ]
+        if force:
+            command.append("--force")
+        if port_lease is not None:
+            port_lease.release()
+        process = subprocess.Popen(
+            command,
+            cwd=source_root,
+            env=build_environment(
+                source_root, paths, tmux_runtime, port, auth_bypass=auth_bypass, env_overrides=env_overrides
+            ),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        )
+        server_start_identity = process_start_identity(process.pid) or ""
+        server = IsolatedDevServer(
+            label=label,
+            source_root=source_root,
+            paths=paths,
+            tmux=tmux_runtime,
+            port=port,
+            process=process,
+            server_start_identity=server_start_identity,
+            port_lease=port_lease,
+            auth_bypass=auth_bypass,
+            env_overrides=env_overrides,
+        )
+        if not server_start_identity:
+            raise AssertionError(f"{label} server process has no stable start identity")
+        wait_until_serving(process, port, server.output, label=label)
+        return server
+    except BaseException as start_error:
+        cleanup_error: BaseException | None = None
+        if process is not None:
+            try:
+                if server is None:
+                    server = IsolatedDevServer(
+                        label=label,
+                        source_root=source_root,
+                        paths=paths,
+                        tmux=tmux_runtime,
+                        port=port,
+                        process=process,
+                        server_start_identity="",
+                        port_lease=port_lease,
+                        auth_bypass=auth_bypass,
+                        env_overrides=env_overrides,
+                    )
+                stop_and_reap_daemons(server)
+            except BaseException as error:
+                cleanup_error = error
+        try:
+            if port_lease is not None and port_lease.reserved:
+                port_lease.release()
+        except BaseException as error:
+            cleanup_error = cleanup_error or error
+        if cleanup_error is not None:
+            raise start_error.with_traceback(start_error.__traceback__) from cleanup_error
+        raise
 
 
 def pid_is_alive(pid: int) -> bool:

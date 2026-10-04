@@ -39,6 +39,15 @@ PHASE_MARKER_PRECEDENCE: Final[tuple[tuple[str, str], ...]] = tuple(
     if spec.marker is not None
 )
 
+# These Go-backed browser scenarios run once through the Bazel integration
+# target with its declared external binary. The general pytest E2E lane
+# deselects the same cases; the Bazel wrapper imports this owner list directly.
+BAZEL_GO_BROWSER_TESTS: Final[tuple[str, ...]] = (
+    "tests/test_browser_stats_widen.py::test_go_stats_capabilities_validate_and_load_fifteen_minute_history",
+    "tests/test_browser_stats_widen.py::test_go_collectors_drive_browser_stats_without_seeded_facts",
+    "tests/test_browser_stats_widen.py::test_production_python_and_go_stats_share_one_fixture_and_browser_journey",
+)
+
 # These nodes are deliberately promoted within pytest collection so xdist can
 # start the longest units first. Static phase catalogs consume this same order;
 # otherwise a lane's argv and its runtime collection disagree about owner order.
@@ -97,7 +106,7 @@ class StepId(StrEnum):
     TEXTSHAPE = "textshape"
     ARCHITECTURE_BUDGETS = "architecture-budgets"
     LOCAL_SERVICE_TYPES = "local-service-types"
-    NODE_YOLOMUX_SYNTAX = "node-yolomux-syntax"
+    NODE_YOMUX_SYNTAX = "node-yomux-syntax"
     NODE_WALL_SYNTAX = "node-wall-syntax"
     NODE_LAYOUT = "node-layout"
     BAZEL_GO = "bazel-go"
@@ -116,7 +125,7 @@ STEP_PHASES: Final[dict[StepId, tuple[str, ...]]] = {
     StepId.TEXTSHAPE: (),
     StepId.ARCHITECTURE_BUDGETS: (),
     StepId.LOCAL_SERVICE_TYPES: (),
-    StepId.NODE_YOLOMUX_SYNTAX: (),
+    StepId.NODE_YOMUX_SYNTAX: (),
     StepId.NODE_WALL_SYNTAX: (),
     StepId.NODE_LAYOUT: (),
     StepId.BAZEL_GO: (),
@@ -133,7 +142,7 @@ STEP_PHASES: Final[dict[StepId, tuple[str, ...]]] = {
 LANE_SPECS: Final[tuple[LaneSpec, ...]] = (
     LaneSpec("py-compile", "py_compile", (StepId.PY_COMPILE,), True),
     LaneSpec("static", "static source checks", (StepId.STATIC_BUILD, StepId.TEXTSHAPE, StepId.ARCHITECTURE_BUDGETS, StepId.LOCAL_SERVICE_TYPES), True),
-    LaneSpec("node-syntax", "node syntax", (StepId.NODE_YOLOMUX_SYNTAX, StepId.NODE_WALL_SYNTAX), True),
+    LaneSpec("node-syntax", "node syntax", (StepId.NODE_YOMUX_SYNTAX, StepId.NODE_WALL_SYNTAX), True),
     LaneSpec("node-layout", "node layout suite", (StepId.NODE_LAYOUT,), True, worker_class="node"),
     LaneSpec("bazel-go", "Bazel Go and Docker tests", (StepId.BAZEL_GO,), True, worker_class="bazel"),
     LaneSpec("pytest", "pytest non-browser", (StepId.PYTEST_NONBROWSER,), True, phases=("nonbrowser",), worker_class="pytest-xdist"),

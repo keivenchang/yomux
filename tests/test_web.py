@@ -111,8 +111,8 @@ def test_html_page_bootstraps_backend_identity_and_brand_hover(monkeypatch):
     page = web.html_page([])
     bootstrap = json.loads(_bootstrap_json(page))
 
-    assert bootstrap["backend"] == common.YOLOMUX_BACKEND
-    assert page.count(f'title="0.8.8(7) [{common.YOLOMUX_BACKEND}]') == 2
+    assert bootstrap["backend"] == common.YOMUX_BACKEND
+    assert page.count(f'title="0.8.8(7) [{common.YOMUX_BACKEND}]') == 2
 
 def test_html_page_can_explicitly_advertise_stats_only_boot():
     bootstrap = json.loads(_bootstrap_json(web.html_page([], stats_only=True)))

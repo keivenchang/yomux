@@ -144,6 +144,14 @@ def _container_working_directory(repo_root: Path) -> str:
     return "/w" if str(relative) == "." else f"/w/{relative.as_posix()}"
 
 
+def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool | None:
+    """Keep cross-agent document lock directories out of xdist collection."""
+
+    if any(part.endswith(".agent-edit.lock") for part in collection_path.parts):
+        return True
+    return None
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_cmdline_main(config: pytest.Config) -> int | None:
     """Re-run this pytest invocation inside Docker before host collection."""

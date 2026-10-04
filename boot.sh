@@ -11,9 +11,10 @@ log_dir="${YOLOMUX_LOG_DIR:-/tmp}"
 restart_lock_base="${TMPDIR:-/tmp}"
 dev_mode="auto"
 backend="go"
+cert_path=""
+key_path=""
 print_command=0
 check_assets=0
-ignore_load=0
 force_start=0
 launched_pid=""
 ports=()
@@ -22,7 +23,7 @@ server_shell="${SHELL:-$(command -v bash)}"
 
 usage() {
   cat <<'EOF'
-Usage: boot.sh [--print-command|--check-assets] [--ignore-load] [--force] [--golang|--deprecated-python|--backend go] [--host HOST] [--log-dir DIR] [--dev|--no-dev] [--port PORT] [PORT ...]
+Usage: boot.sh [--print-command|--check-assets] [--ignore-load (legacy no-op)] [--force] [--golang|--deprecated-python|--backend go] [--cert CERT --key KEY] [--host HOST] [--log-dir DIR] [--dev|--no-dev] [--port PORT] [PORT ...]
 
 Restart this checkout's Go YOmux server. Use --deprecated-python to select the legacy Python backend. YOLOMUX_PORT or an explicit port argument selects the primary port; a no-argument launch requires YOLOMUX_DEFAULT_PORT. Non-primary ports use --dev by default.
 
@@ -32,7 +33,6 @@ Examples:
   ./boot.sh
   ./boot.sh <dev-port>
   ./boot.sh --force <port>
-  ./boot.sh --ignore-load <dev-port>
   ./boot.sh --deprecated-python <port>
   ./boot.sh --port <port-a> --port <port-b>
 EOF
@@ -65,10 +65,7 @@ while [[ "$#" -gt 0 ]]; do
       check_assets=1
       shift
       ;;
-    --ignore-load)
-      ignore_load=1
-      shift
-      ;;
+    --ignore-load) shift ;; # Compatibility no-op; startup has no load-admission gate.
     --force)
       force_start=1
       shift
@@ -93,6 +90,11 @@ while [[ "$#" -gt 0 ]]; do
     --host)
       [[ "$#" -ge 2 ]] || die "--host requires a value"
       host="$2"
+      shift 2
+      ;;
+    --cert|--key)
+      [[ "$#" -ge 2 ]] || die "$1 requires a path"
+      if [[ "$1" == "--cert" ]]; then cert_path="$2"; else key_path="$2"; fi
       shift 2
       ;;
     --log-dir)
@@ -130,6 +132,14 @@ while [[ "$#" -gt 0 ]]; do
   esac
 done
 
+if [[ -n "$cert_path" || -n "$key_path" ]]; then
+  [[ -n "$cert_path" && -n "$key_path" ]] || die "--cert and --key must be supplied together"
+  [[ -f "$cert_path" && -r "$cert_path" && -f "$key_path" && -r "$key_path" ]] || die "certificate and key must be readable files"
+  # Detached launches change cwd to this checkout; retain the caller's paths.
+  cert_path="$(cd -- "$(dirname -- "$cert_path")" && pwd -P)/$(basename -- "$cert_path")"
+  key_path="$(cd -- "$(dirname -- "$key_path")" && pwd -P)/$(basename -- "$key_path")"
+fi
+
 if [[ "${#ports[@]}" -eq 0 ]]; then
   if [[ "$check_assets" -eq 1 ]]; then
     add_port "${primary_port:-7110}"
@@ -156,7 +166,7 @@ export PATH
 export TERM="${TERM:-xterm-256color}"
 export PYTHONUNBUFFERED=1
 export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
-yolomux_use_machine_tmux
+yomux_use_machine_tmux
 
 # YO!agent's Claude backend runs `claude` non-interactively. On macOS, the `claude`
 # binary authenticates only via ANTHROPIC_API_KEY (or a Keychain login) and does NOT
@@ -200,7 +210,12 @@ use_dev_mode() {
 server_args=()
 build_server_args() {
   local port="$1"
-  server_args=(--host "$host" --port "$port" --dang --self-signed)
+  server_args=(--host "$host" --port "$port" --dang)
+  if [[ -n "$cert_path" ]]; then
+    server_args+=(--cert "$cert_path" --key "$key_path")
+  else
+    server_args+=(--self-signed)
+  fi
   if [[ "$force_start" -eq 1 ]]; then
     server_args+=(--force)
   fi
@@ -229,12 +244,12 @@ print_launch_command() {
   build_server_args "$port"
   if [[ "$(uname -s)" == "Darwin" ]]; then
     local launcher socket_name session_name plan_json env_count
-    launcher="$(yolomux_macos_server_launcher)"
-    socket_name="$(yolomux_macos_server_tmux_socket)"
-    session_name="$(yolomux_macos_server_tmux_session "$port")"
+    launcher="$(yomux_macos_server_launcher)"
+    socket_name="$(yomux_macos_server_tmux_socket)"
+    session_name="$(yomux_macos_server_tmux_session "$port")"
     plan_json="$("$python_bin" "$repo_root/tools/instance_isolation.py" plan-direct --port "$port")" || die "port $port launch refused by instance-isolation preflight"
     env_count="${#extra_env[@]}"
-    printf 'launchctl bootout %q 2>/dev/null || true\n' "$(yolomux_macos_launch_target "$port")"
+    printf 'launchctl bootout %q 2>/dev/null || true\n' "$(yomux_macos_launch_target "$port")"
     printf 'tmux -L %q kill-session -t %q 2>/dev/null || true\n' "$socket_name" "=$session_name"
     printf 'tmux -L %q new-session -d -s %q -c %q /bin/bash -c %q bash %q %q %q %q %q %q %q %q' \
       "$socket_name" "$session_name" "$repo_root" "$launcher" "$repo_root" "$PATH" "$server_shell" "$python_bin" "$repo_root/yomux.py" "$log_path" "$plan_json" "$env_count"
@@ -277,7 +292,7 @@ port_listener_pids() {
   # The listener census walks /proc; it needs no external scanner. A failure here is one of the
   # typed classes it reports: this port's listening inode had no visible owner, several visible
   # owners, a fatal read, or the walk exceeded its time budget. Its stderr names which.
-  yolomux_port_listener_pids "$1" || die "listener census could not identify a unique owner for port $1"
+  yomux_port_listener_pids "$1" || die "listener census could not identify a unique owner for port $1"
 }
 
 wait_for_pid_exit() {
@@ -429,12 +444,9 @@ ensure_log_sink_writable() {
 }
 
 # Prove every requested port's log sink resolves and is writable BEFORE the
-# startup lock and the slow-ramp load gate. This check is cheap, deterministic
-# and idempotent (mkdir -p plus an append); the load gate is expensive and
-# host-dependent, so running the gate first lets host load mask an unwritable
-# log directory behind a "system load did not recover" timeout. It runs before
-# any existing listener is stopped, so a bad log sink can never cost the
-# operator a running server.
+# startup lock. This check is cheap, deterministic and idempotent (mkdir -p plus
+# an append), and it runs before any existing listener is stopped so a bad log
+# sink can never cost the operator a running server.
 preflight_log_sinks() {
   local port log_path
   for port in "${ports[@]}"; do
@@ -443,19 +455,33 @@ preflight_log_sinks() {
   done
 }
 
+product_root_is_available() {
+  local port="$1"
+  (cd -- "$repo_root" && PYTHONDONTWRITEBYTECODE=1 "$python_bin" -c '
+import os
+import sys
+from tools.instance_isolation import apply_early_instance_environment
+from tools.instance_isolation import normalize_yomux_environment
+from yomux_lib.infra.root_paths import resolve_yomux_roots, runtime_root
+from yomux_lib.infra.instance_locks import instance_root_is_available
+apply_early_instance_environment(["--port", sys.argv[1]])
+values = normalize_yomux_environment(os.environ)
+roots = resolve_yomux_roots(values, default_runtime_dir=runtime_root(environ=values))
+raise SystemExit(0 if instance_root_is_available(roots) else 1)
+' "$port")
+}
+
 restart_port() {
   local port="$1"
   local log_path
   local previous_listener_pids
-  if ! yolomux_validate_instance_isolation "$repo_root" "$python_bin" "$port"; then
+  if ! yomux_validate_instance_isolation "$repo_root" "$python_bin" "$port"; then
     die "port $port launch refused by instance-isolation preflight"
   fi
   log_path="$(log_path_for "$port")"
   acquire_port_restart_lock "$port"
   previous_listener_pids="$(port_listener_pids "$port")"
-  # Repeat under the restart lock: the load gate between the preflight and here
-  # can block for minutes, and the sink can be removed or made read-only in that
-  # window. This remains before any replacement action.
+  # Repeat under the restart lock in case the sink changed after preflight.
   if ! ensure_log_sink_writable "$log_path"; then
     release_port_restart_lock "$port"
     die "log path is not writable: $log_path"
@@ -471,12 +497,12 @@ restart_port() {
     # The Python launch path performs the one identity-checked replacement.
     # Only remove the launchd wrapper here; a second force pass could kill a
     # different instance after the first replacement has already completed.
-    yolomux_bootout_macos_server "$port"
+    yomux_bootout_macos_server "$port"
   fi
 
   printf '\n[%s] boot.sh launching port %s from %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$port" "$repo_root" >> "$log_path"
   if [[ "$(uname -s)" == "Darwin" ]]; then
-    yolomux_submit_macos_server "$repo_root" "$python_bin" "$server_shell" "$PATH" "$port" "$log_path" "${#extra_env[@]}" "${extra_env[@]}" "${server_args[@]}"
+    yomux_submit_macos_server "$repo_root" "$python_bin" "$server_shell" "$PATH" "$port" "$log_path" "${#extra_env[@]}" "${extra_env[@]}" "${server_args[@]}"
   else
     launch_server "$log_path"
   fi
@@ -508,7 +534,7 @@ log_dir="$("$python_bin" "$repo_root/tools/instance_isolation.py" resolve-produc
   || die "log directory refused by product-root policy"
 restart_lock_base="$("$python_bin" "$repo_root/tools/instance_isolation.py" resolve-product-path TMPDIR "$restart_lock_base")" \
   || die "restart lock directory refused by product-root policy"
-if ! yolomux_validate_root_environment "$repo_root" "$python_bin"; then
+if ! yomux_validate_root_environment "$repo_root" "$python_bin"; then
   die "startup root validation failed before listener mutation"
 fi
 
@@ -519,17 +545,16 @@ if [[ "$print_command" -eq 1 ]]; then
   exit 0
 fi
 
-preflight_log_sinks
-yolomux_acquire_start_lock || die "startup lock unavailable"
-trap yolomux_release_start_lock EXIT
-if [[ "$ignore_load" -eq 1 ]]; then
-  printf 'WARNING: --ignore-load requested; skipping only the startup CPU/load capacity wait\n' >&2
+if [[ "$force_start" -ne 1 ]]; then
+  for port in "${ports[@]}"; do
+    product_root_is_available "$port" || die "port $port launch refused: product root is already owned or unavailable"
+  done
 fi
+preflight_log_sinks
+yomux_acquire_start_lock || die "startup lock unavailable"
+trap yomux_release_start_lock EXIT
 ensure_xterm_assets
 
 for port in "${ports[@]}"; do
-  if [[ "$ignore_load" -ne 1 ]] && ! use_dev_mode "$port"; then
-    yolomux_wait_for_system_capacity "$python_bin"
-  fi
   restart_port "$port"
 done

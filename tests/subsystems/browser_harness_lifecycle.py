@@ -49,7 +49,7 @@ def assert_reused_browser_reset_closes_popouts_and_clears_profile_state(monkeypa
     class Driver:
         window_handles = ["primary", "popout"]
         current_window_handle = "primary"
-        _yolomux_primary_window_handle = "primary"
+        _yomux_primary_window_handle = "primary"
         switch_to = SwitchTo()
 
         def close(self):
@@ -133,7 +133,7 @@ def assert_generic_browser_teardown_gates_local_diagnostics_without_requesting_s
                         "journey": {"reachable": False, "visitedSurfaces": []},
                     }
                 return js_debug
-            if "const state = window.__yolomuxBrowserJourneyGate" in source:
+            if "const state = window.__yomuxBrowserJourneyGate" in source:
                 return {"reachable": False, "visitedSurfaces": []}
             raise AssertionError(f"unexpected browser script: {source}")
 
@@ -176,18 +176,18 @@ def assert_browser_document_wait_helper_reports_values_and_timeout_context(brows
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const immediate = await window.__yolomuxTestWaitFor(
+          const immediate = await window.__yomuxTestWaitFor(
             () => document.getElementById('ready')?.textContent,
             {description: 'immediate fixture value'}
           );
           let delayedValue = '';
           setTimeout(() => { delayedValue = 'delayed-value'; }, 20);
-          const delayed = await window.__yolomuxTestWaitFor(
+          const delayed = await window.__yomuxTestWaitFor(
             () => delayedValue,
             {timeoutMs: 500, intervalMs: 5, description: 'delayed fixture value'}
           );
           let asyncAttempts = 0;
-          const asyncValue = await window.__yolomuxTestWaitFor(
+          const asyncValue = await window.__yomuxTestWaitFor(
             async () => {
               await Promise.resolve();
               asyncAttempts += 1;
@@ -197,7 +197,7 @@ def assert_browser_document_wait_helper_reports_values_and_timeout_context(brows
           );
           let timeout = '';
           try {
-            await window.__yolomuxTestWaitFor(
+            await window.__yomuxTestWaitFor(
               () => false,
               {timeoutMs: 15, intervalMs: 4, description: 'missing fixture state'}
             );

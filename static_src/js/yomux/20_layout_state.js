@@ -7059,6 +7059,13 @@ function applyLayoutSlots(nextSlots, options = {}) {
   activeSessions = sessionsFromLayout();
   clearFocusForInactiveLayout();
   updateActiveSessionParam();
+  if (options.userInitiated === true && isTmuxSession(options.focusSession) && activeSessions.includes(options.focusSession)) {
+    // Mount reconciliation paints focus once, after both layout and terminal ownership are final.
+    setFocusedTerminal(options.focusSession, {
+      userInitiated: true, syncFinder: false, updateChrome: false,
+      acknowledgeAgentWindow: false, acknowledgePromptAttention: false,
+    });
+  }
   requestLayoutRender({
     previousActive,
     prevShape,

@@ -2383,7 +2383,7 @@ def test_statsd_collects_registered_web_cpu_and_pushes_it_to_the_matching_owner(
     pushed = []
     service._host_cpu_sampler = CpuSampler()
     monkeypatch.setattr(service, "_web_push_target", lambda: ({"control_socket": "owned.sock"}, ""))
-    monkeypatch.setattr(service_module, "send_yolomux_control_request", lambda owner, request, timeout: pushed.append((owner, request, timeout)) or {"ok": True})
+    monkeypatch.setattr(service_module, "send_yomux_control_request", lambda owner, request, timeout: pushed.append((owner, request, timeout)) or {"ok": True})
 
     service._collect_host_facts_if_due(publisher)
 
@@ -2541,7 +2541,7 @@ def test_the_first_host_cpu_cycle_appends_nothing_and_pushes_nothing(tmp_path, m
     service._host_cpu_sampler = host_collectors.CpuSampler()
     pushed = []
     monkeypatch.setattr(service, "_web_push_target", lambda: ({"control_socket": "owned.sock"}, ""))
-    monkeypatch.setattr(service_module, "send_yolomux_control_request", lambda owner, request, timeout: pushed.append(request) or {"ok": True})
+    monkeypatch.setattr(service_module, "send_yomux_control_request", lambda owner, request, timeout: pushed.append(request) or {"ok": True})
 
     service._collect_host_facts_if_due(publisher)
 
@@ -2612,7 +2612,7 @@ def test_a_rejected_process_memory_push_is_counted_separately_from_cpu_absence(
 
     service._host_cpu_sampler = CpuSampler()
     monkeypatch.setattr(service, "_web_push_target", lambda: ({"control_socket": "owned.sock"}, ""))
-    monkeypatch.setattr(service_module, "send_yolomux_control_request", lambda *_a, **_k: response)
+    monkeypatch.setattr(service_module, "send_yomux_control_request", lambda *_a, **_k: response)
 
     service._collect_host_facts_if_due(publisher)
 
@@ -2645,7 +2645,7 @@ def test_a_skipped_cpu_push_is_counted_with_the_gate_that_stopped_it(tmp_path, m
 
     service._host_cpu_sampler = CpuSampler()
     monkeypatch.setattr(service, "_web_push_target", lambda: (None, "web_instance_no_control_socket"))
-    monkeypatch.setattr(service_module, "send_yolomux_control_request", lambda *_a, **_k: pytest.fail("no owner means no push"))
+    monkeypatch.setattr(service_module, "send_yomux_control_request", lambda *_a, **_k: pytest.fail("no owner means no push"))
 
     service._collect_host_facts_if_due(publisher)
 
@@ -2674,7 +2674,7 @@ def test_a_rejected_cpu_push_is_counted_as_not_delivered(tmp_path, monkeypatch):
     monkeypatch.setattr(service, "_web_push_target", lambda: ({"control_socket": "owned.sock"}, ""))
     # A push the web process REFUSES is not a delivery, and the old code could not tell the
     # difference because it never read the response.
-    monkeypatch.setattr(service_module, "send_yolomux_control_request", lambda *_a, **_k: {"ok": False, "error": "stats CPU sample PID mismatch"})
+    monkeypatch.setattr(service_module, "send_yomux_control_request", lambda *_a, **_k: {"ok": False, "error": "stats CPU sample PID mismatch"})
 
     service._collect_host_facts_if_due(publisher)
 
@@ -2697,7 +2697,7 @@ def test_a_delivered_cpu_push_clears_the_reason_and_records_when(tmp_path, monke
 
     service._host_cpu_sampler = CpuSampler()
     monkeypatch.setattr(service, "_web_push_target", lambda: ({"control_socket": "owned.sock"}, ""))
-    monkeypatch.setattr(service_module, "send_yolomux_control_request", lambda *_a, **_k: {"ok": True})
+    monkeypatch.setattr(service_module, "send_yomux_control_request", lambda *_a, **_k: {"ok": True})
 
     service._collect_host_facts_if_due(publisher)
 
@@ -2734,7 +2734,7 @@ def test_a_managed_instance_delivers_its_cpu_sample_from_the_handshake(tmp_path,
     pushed = []
     service._host_cpu_sampler = CpuSampler()
     monkeypatch.setattr(
-        service_module, "send_yolomux_control_request",
+        service_module, "send_yomux_control_request",
         lambda owner, request, timeout: pushed.append((owner, request)) or {"ok": True},
     )
 

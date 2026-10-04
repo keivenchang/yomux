@@ -12,9 +12,9 @@ const {
   TestFormData,
   assertNoStandalonePrBadge,
   assertSingleCiBadge,
-  loadYolomux,
+  loadYomux,
   fileExplorerClosedOptions,
-  loadYolomuxWithFileExplorerClosed,
+  loadYomuxWithFileExplorerClosed,
   treeKeyEvent,
   tabElement,
   tabStrip,
@@ -33,9 +33,528 @@ const {
   finishSuite,
 } = require('./browser_helpers/layout_test_helper');
 
+test('terminal tab activation focuses before its guarded authority and side work', () => {
+  const source = fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8');
+  const calls = [];
+  let deferred;
+  const context = {
+    dockviewBeginTabActivationPerf() {}, dockviewFinishTabActivationPerf() {},
+    activateTab: session => calls.push(`focus:${session}`),
+    rememberFileExplorerExplicitSyncSession: session => calls.push(`claim:${session}`),
+    scheduleTabSwitchPhaseTwo: (generation, work) => {assert.equal(generation, 7); deferred = work;},
+    claimVisibleTerminalResizeAuthority: () => calls.push('authority'),
+    syncFileExplorerAfterTerminalActivation: session => calls.push(`side:${session}`),
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function scheduleTerminalActivationFollowup('), source.indexOf('function activatePaneTab(')), context);
+  context.commitUserTerminalTabActivation('second', {}, 7);
+  assert.deepEqual(calls, ['focus:second', 'claim:second']);
+  deferred();
+  assert.deepEqual(calls, ['focus:second', 'claim:second', 'authority', 'side:second']);
+});
+
+async function checkBackgroundTabberActivation() {
+  const source = fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8');
+  for (const filesOnly of [false, true]) {
+    const calls = [];
+    const context = {
+      activeSessions: ['first'], isFileEditorItem: () => false,
+      layoutIsFileSurfaceItem: () => false, isTmuxSession: () => true,
+      filesOnlySlotForSession: () => filesOnly ? 'left' : null,
+      activateTabInExistingPane: (session, options) => calls.push({session, options}),
+      placeTmuxSession: (session, options) => calls.push({session, options}),
+    };
+    vm.createContext(context);
+    vm.runInContext(source.slice(source.indexOf('async function selectSession('), source.indexOf('function layoutPaneTabTraversalPositions(')), context);
+    await context.selectSession('second', {userInitiated: true});
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].session, 'second');
+    assert.equal(calls[0].options?.userInitiated, true, `background route filesOnly=${filesOnly}`);
+  }
+}
+
+test('user terminal activation leaves panel focus to the shared terminal owner', () => {
+  const actions = fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8');
+  const dockview = fs.readFileSync('static_src/js/yomux/75_dockview_layout.js', 'utf8');
+  const boot = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
+  for (const route of ['dockview', 'pending', 'pane-active', 'pane-switch']) {
+    for (const item of ['terminal', 'finder']) {
+      for (const userInitiated of [true, false]) {
+        if (route === 'pending' && !userInitiated) continue;
+        const calls = [];
+        let active = route === 'pane-switch' ? 'previous' : item;
+        const context = {
+          dockviewLayoutState: {pendingUserPanelActivation: route === 'pending' ? item : ''},
+          dockviewClearPendingUserPanelActivation: () => {context.dockviewLayoutState.pendingUserPanelActivation = '';},
+          isTmuxSession: session => session === 'terminal',
+          isFileExplorerItem: session => session === 'finder', isFileEditorItem: () => false,
+          rememberFileExplorerExplicitSyncSession() {},
+          nextTabSwitchHighlightGeneration: () => 7,
+          dockviewBeginTabActivationPerf() {}, dockviewFinishTabActivationPerf() {},
+          scheduleTabSwitchPhaseTwo() {},
+          setFocusedPanelItem: (session, options) => calls.push({kind: 'panel', session, options}),
+          focusTerminalFromUserAction: (session, delay, options) => calls.push({kind: 'terminal', session, options}),
+          focusTerminalWhenAutoFocus() {}, focusPanel: () => calls.push({kind: 'other'}),
+          stopTranscriptStream() {}, stopSummaryStream() {}, updateTypingIndicator() {},
+          scheduleTerminalReferenceUnderlineRepaint() {}, scheduleFit() {}, setTimeout() {},
+          refreshTerminal() {}, scheduleTerminalBlankScreenRefresh() {}, terminalRefreshAfterTabSelectMs: 0,
+          document: {querySelectorAll: () => [], getElementById: () => null},
+          dismissSessionToasts() {}, acknowledgeNotificationTarget() {},
+          acknowledgeTerminalAttentionFromUserAction: () => calls.push({kind: 'attention'}),
+          recordTabActivation() {}, layoutSlotKeys: () => ['left'], itemInLayout: () => true,
+          activeItemForSide: () => active, dockviewLayoutActive: () => false,
+          capturePaneViewStateForItemIfPresent() {},
+          emptyLayoutSlots: () => ({left: {}}), layoutTreeKey: 'tree', layoutSlots: {tree: {}},
+          paneStateForLayoutSlot: () => ({active}),
+          applyLayoutSlots: next => {active = next.left.active;},
+        };
+        vm.createContext(context);
+        vm.runInContext(boot.slice(boot.indexOf('function activateTab('), boot.indexOf('function tmuxWindow(')), context);
+        vm.runInContext(actions.slice(actions.indexOf('function scheduleTerminalActivationFollowup('), actions.indexOf('async function selectSession(')), context);
+        vm.runInContext(dockview.slice(dockview.indexOf('function dockviewCommitPanelActivation('), dockview.indexOf('function dockviewSetPendingUserPanelActivation(')), context);
+        if (route.startsWith('pane')) context.activatePaneTab('left', item, {userInitiated});
+        else context.dockviewCommitPanelActivation(item, {userInitiated: route === 'pending' ? false : userInitiated});
+        const label = `${route}/${item}/${userInitiated}`;
+        assert.equal(calls.filter(call => call.kind === 'panel').length, item === 'terminal' && userInitiated ? 0 : 1, `${label} does not clear terminal ownership before focusing`);
+        const terminalFocus = calls.find(call => call.kind === 'terminal');
+        assert.equal(Boolean(terminalFocus), item === 'terminal' && userInitiated, `${label} preserves terminal activation`);
+        if (terminalFocus) {
+          assert.equal(terminalFocus.options.acknowledgeAgentWindow, false, label);
+          assert.equal(terminalFocus.options.acknowledgePromptAttention, false, label);
+          assert.equal(terminalFocus.options.syncFinder, false, label);
+          if (route.startsWith('pane')) assert.equal(calls[0].kind, 'attention', `${label} acknowledges before focusing`);
+        }
+      }
+    }
+  }
+});
+
+test('terminal activation reconciles changed focus once and preserves repeated focus', () => {
+  const core = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+  const boot = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
+  const calls = [];
+  const context = {
+    focusedTerminal: 'first', focusedPanelItem: 'first', lastFocusedTmuxSession: 'first',
+    isTmuxSession: () => true, isFileExplorerItem: () => false, isFileEditorItem: () => false,
+    dockviewLayoutActive: () => true, rememberActivePaneItem() {}, clearPendingFileEditorFocusExcept() {},
+    dismissAttentionAlertsForSession() {}, dismissNotificationsForTarget() {},
+    acknowledgeTerminalAttentionFromUserAction() {}, recordAutoFocusNav() {},
+    recordFocusNavTransition: (previous, next) => calls.push(['nav', previous, next]),
+    applyUserInitiatedPanelFocus: (item, previous) => context.recordFocusNavTransition(previous, item),
+    updateFocusOnlyChrome: () => calls.push(['chrome', context.focusedPanelItem, context.focusedTerminal]),
+    setFocusedTerminal: (session, options) => context.setFocusedTerminalMeasured(session, options),
+    focusTerminalDom: session => calls.push(['dom', session]),
+    stopTranscriptStream() {}, stopSummaryStream() {}, updateTypingIndicator() {},
+    scheduleTerminalReferenceUnderlineRepaint() {}, scheduleFit() {}, setTimeout() {},
+    scheduleTerminalBlankScreenRefresh() {}, terminalRefreshAfterTabSelectMs: 0,
+    document: {querySelectorAll: () => [], getElementById: () => null},
+  };
+  vm.createContext(context);
+  vm.runInContext(core.slice(core.indexOf('function setFocusedTerminalMeasured('), core.indexOf('function clearFocusedTerminal(')), context);
+  vm.runInContext(core.slice(core.indexOf('function setFocusedPanelItem('), core.indexOf('let autoFocusNavTimer')), context);
+  vm.runInContext(core.slice(core.indexOf('function focusTerminalFromUserAction('), core.indexOf('function focusTerminalDom(')), context);
+  vm.runInContext(boot.slice(boot.indexOf('function activateTab('), boot.indexOf('function tmuxWindow(')), context);
+  context.activateTab('second', 'terminal', {userInitiated: true, syncFinder: false});
+  assert.deepEqual(calls, [['chrome', 'second', 'second'], ['nav', 'first', 'second'], ['dom', 'second']]);
+  calls.length = 0;
+  context.activateTab('second', 'terminal', {userInitiated: true, syncFinder: false});
+  assert.deepEqual(calls, [['dom', 'second']], 'a repeated activation keeps established terminal ownership');
+});
+
+test('direct user terminal focus defers Finder and Differ synchronization', () => {
+  const core = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+  const calls = [];
+  const deferred = [];
+  const context = {
+    focusedTerminal: 'first', focusedPanelItem: 'first', lastFocusedTmuxSession: 'first',
+    isTmuxSession: () => true, isFileExplorerItem: () => false, isFileEditorItem: () => false,
+    dockviewLayoutActive: () => true, rememberActivePaneItem() {}, clearPendingFileEditorFocusExcept() {},
+    dismissAttentionAlertsForSession() {}, dismissNotificationsForTarget() {},
+    acknowledgeTerminalAttentionFromUserAction() {}, recordAutoFocusNav() {},
+    recordFocusNavTransition: (previous, next) => calls.push(['nav', previous, next]),
+    applyUserInitiatedPanelFocus: (item, previous) => context.recordFocusNavTransition(previous, item),
+    updateFocusOnlyChrome: () => calls.push(['chrome', context.focusedPanelItem, context.focusedTerminal]),
+    setFocusedTerminal: (session, options) => {
+      context.focusedTerminal = session;
+      context.focusedPanelItem = session;
+      calls.push(['focus-state', session, options.userInitiated, options.syncFinder]);
+    },
+    focusTerminalDom: session => calls.push(['dom', session]),
+    rememberFileExplorerExplicitSyncSession: session => calls.push(['claim', session]),
+    scheduleTabSwitchPhaseTwo: (generation, work) => deferred.push({generation, work}),
+    nextTabSwitchHighlightGeneration: () => 7,
+    syncFileExplorerAfterTerminalActivation: session => calls.push(['sync', session]),
+    stopTranscriptStream() {}, stopSummaryStream() {}, updateTypingIndicator() {},
+    scheduleTerminalReferenceUnderlineRepaint() {}, scheduleFit() {}, setTimeout() {},
+    scheduleTerminalBlankScreenRefresh() {}, terminalRefreshAfterTabSelectMs: 0,
+    document: {querySelectorAll: () => [], getElementById: () => null},
+  };
+  vm.createContext(context);
+  vm.runInContext(core.slice(core.indexOf('function focusTerminalFromUserAction('), core.indexOf('function focusTerminalDom(')), context);
+
+  context.focusTerminalFromUserAction('second');
+
+  assert.deepEqual(calls, [['focus-state', 'second', true, false], ['dom', 'second'], ['claim', 'second']]);
+  assert.equal(deferred.length, 1, 'direct focus queues one post-paint Finder and Differ synchronization');
+  deferred[0].work();
+  assert.deepEqual(calls.at(-1), ['sync', 'second']);
+});
+
+test('terminal side sync rejects stale ownership and refreshes a stale Differ payload once', () => {
+  const source = fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8');
+  const calls = [];
+  let selected = 'second';
+  let interactionIsCurrent = false;
+  let differSession = 'first';
+  const context = {
+    focusedTerminal: 'third',
+    fileExplorerExplicitSyncSessionTarget: () => selected,
+    document: {querySelector: () => ({})},
+    fileExplorerChangesSessionInteractionIsCurrent: () => interactionIsCurrent,
+    fileExplorerSessionFilesState: {payload: {session: differSession}},
+    switchFileExplorerChangesSession: session => calls.push(`switch-owner:${session}`),
+    noteFileExplorerChangesSessionInteraction: session => calls.push(`note:${session}`),
+    scheduleFileExplorerActiveTabSync: session => calls.push(`finder:${session}`),
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(
+    source.indexOf('function syncFileExplorerAfterTerminalActivation('),
+    source.indexOf('function commitUserTerminalTabActivation('),
+  ), context);
+
+  assert.equal(context.syncFileExplorerAfterTerminalActivation('second'), false);
+  assert.deepEqual(calls, [], 'a later focused session retires the stale phase-two target');
+
+  context.focusedTerminal = 'second';
+  assert.equal(context.syncFileExplorerAfterTerminalActivation('second'), true);
+  assert.deepEqual(calls, ['switch-owner:second'], 'a changed selection lets Differ switching own the Finder sync');
+
+  calls.length = 0;
+  interactionIsCurrent = true;
+  context.syncFileExplorerAfterTerminalActivation('second');
+  assert.deepEqual(calls, ['switch-owner:second'], 'a matching selection still refreshes stale Differ content');
+
+  calls.length = 0;
+  differSession = 'second';
+  context.fileExplorerSessionFilesState.payload.session = differSession;
+  context.syncFileExplorerAfterTerminalActivation('second');
+  assert.deepEqual(calls, ['finder:second'], 'a current Differ payload schedules one explicit Finder sync');
+});
+
+test('user layout activation establishes terminal focus before mount reconciliation', () => {
+  const core = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+  const layout = fs.readFileSync('static_src/js/yomux/20_layout_state.js', 'utf8');
+  for (const userInitiated of [false, true]) {
+    const calls = [];
+    const context = {
+      layoutSlots: {items: ['first']}, activeSessions: ['first'], focusedPanelItem: 'first', focusedTerminal: 'first',
+      runtimeState: {layoutMutationSnapshot: () => ({pending: 0}), consumePendingLayoutMutation() {}},
+      paneItems: slots => slots.items, layoutShapeSignature: () => 'shape',
+      normalizeLayoutSlotsForViewport: next => next, cleanupRemovedDynamicLayoutItems() {},
+      sessionsFromLayout: () => context.layoutSlots.items, clearFocusForInactiveLayout() {}, updateActiveSessionParam() {},
+      isTmuxSession: item => ['first', 'second'].includes(item), dockviewLayoutActive: () => true,
+      rememberActivePaneItem() {}, clearPendingFileEditorFocusExcept() {}, dismissAttentionAlertsForSession() {},
+      acknowledgeTerminalAttentionFromUserAction: (_session, _window, options) => {
+        assert.equal(options.acknowledgeAgentWindow, false);
+        assert.equal(options.acknowledgePromptAttention, false);
+      },
+      recordFocusNavTransition: (previous, next) => calls.push(['nav', previous, next]), recordAutoFocusNav() {},
+      updateFocusOnlyChrome: () => calls.push(['chrome']),
+      setFocusedTerminal: (session, options) => context.setFocusedTerminalMeasured(session, options),
+      requestLayoutRender: () => calls.push(['mount', context.focusedPanelItem, context.focusedTerminal]),
+      autoFocusCanFollowCursor: () => false, resetLayoutStatusSurface() {}, updateStatus() {},
+      clientPushCanSupplyData: () => false,
+    };
+    vm.createContext(context);
+    vm.runInContext(core.slice(core.indexOf('function setFocusedTerminalMeasured('), core.indexOf('function clearFocusedTerminal(')), context);
+    vm.runInContext(layout.slice(layout.indexOf('function applyLayoutSlots('), layout.indexOf('function cleanupRemovedDynamicLayoutItems(')), context);
+    context.applyLayoutSlots({items: ['first', 'second']}, {focusSession: 'second', userInitiated});
+    assert.deepEqual(calls, userInitiated
+      ? [['nav', 'first', 'second'], ['mount', 'second', 'second']]
+      : [['mount', 'first', 'first']], 'only explicit activation prepares focus; mount owns its reconciliation');
+  }
+});
+
+test('cached terminal blank recovery avoids measuring a nonblank viewport', () => {
+  const source = fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8');
+  const item = {socket: {readyState: 1}, blankScreenRefreshAttempts: 2};
+  const context = {
+    terminals: new Map([['second', item]]), WebSocket: {OPEN: 1},
+    tmuxSessionLifecycleReleaseTimer() {}, tmuxSessionLifecycleTokenIsCurrent: () => true,
+    terminalBlankScreenRefreshAllowed: () => true, terminalRenderedContentPresent: () => true,
+    terminalIsVisible() {throw new Error('nonblank recovery must not force layout');},
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function runTerminalBlankScreenRefresh('), source.indexOf('function scheduleFit(')), context);
+  assert.doesNotThrow(() => context.scheduleTerminalBlankScreenRefresh('second'));
+  assert.doesNotThrow(() => context.runTerminalBlankScreenRefresh('second'));
+  assert.equal(item.blankScreenRefreshAttempts, 0);
+});
+
+test('preserved Dockview tabs position only their open popover', () => {
+  const source = fs.readFileSync('static_src/js/yomux/75_dockview_layout.js', 'utf8');
+  const element = new TestElement('', 'div');
+  const popover = new TestElement('', 'div');
+  element.addEventListener = () => {};
+  let positions = 0;
+  let fileRefreshes = 0;
+  const context = {
+    document: {createElement: () => element}, dockviewLayoutState: {},
+    dockviewEmptyPaneSlot: () => false, syncDockviewTabShell() {},
+    paneTabShouldPreserve: () => true, syncPaneTabPinnedChrome() {},
+    paneTabPopoverForAnchor: () => popover,
+    positionPaneTabPopover: () => {positions++;},
+    isFileEditorItem: () => true, refreshFileTabPopover: () => {fileRefreshes++;},
+    cleanupDetachedPaneTabPopover() {},
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function createDockviewTabRenderer('), source.indexOf('function captureDockviewPreviousPaneBeforeTabActivation(')), context);
+  const renderer = context.createDockviewTabRenderer();
+  renderer.init({params: {item: 'file'}});
+  assert.equal(positions, 0, 'a closed hovered/preserved popover must not force layout');
+  element.classList.add('popover-open');
+  renderer.update();
+  assert.equal(positions, 1, 'an open anchor retains repositioning');
+  element.classList.remove('popover-open');
+  popover.classList.add('popover-open');
+  renderer.update();
+  assert.equal(positions, 2, 'an open detached popover retains repositioning');
+  popover.classList.remove('popover-open');
+  renderer.update();
+  assert.equal(positions, 2, 'closing the detail stops geometry work');
+  assert.equal(fileRefreshes, 4, 'file details still refresh through their existing owner');
+});
+
+test('Dockview native click restores input without repeating consumed activation', () => {
+  const source = fs.readFileSync('static_src/js/yomux/75_dockview_layout.js', 'utf8');
+  const boot = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
+  for (const route of ['native', 'native-painted', 'touch', 'already-active', 'expired', 'expired-output', 'expired-prior', 'first-output', 'reconnect', 'programmatic', 'keyboard', 'finder', 'cancel', 'pointer-cancel', 'drag', 'cancel-virtual', 'cancel-committed', 'cancel-virtual-committed', 'drag-committed', 'blur', 'hidden', 'blur-expired', 'blur-virtual', 'blur-committed', 'hidden-committed', 'hidden-virtual-committed', 'visible']) {
+    const listeners = {};
+    const documentListeners = {};
+    const windowListeners = {};
+    const item = route === 'finder' || route.includes('virtual') ? 'finder' : 'terminal';
+    let active = ['already-active', 'expired', 'expired-output', 'expired-prior', 'blur-expired'].includes(route);
+    let activations = 0;
+    let followups = 0;
+    let inputFocused = false;
+    const element = new TestElement('', 'div');
+    element.addEventListener = (type, listener) => {listeners[type] = listener;};
+    element.dataset.paneTab = item;
+    let renderEvent;
+    const frames = [];
+    const terminal = {terminalOutputSeen: route !== 'first-output', term: {
+      rows: 3,
+      write(data, callback) {callback?.();},
+      onRender(callback) {renderEvent = callback; return {dispose() {}};},
+      refresh() {renderEvent({start: 0, end: 2});},
+    }};
+    const timers = [];
+    const context = {
+      document: {createElement: () => element, addEventListener: (type, listener) => {documentListeners[type] = listener;}, removeEventListener: type => {delete documentListeners[type];}, querySelectorAll: () => [element],
+        getElementsByClassName: classes => classes.split(' ').every(name => element.classList.contains(name)) ? [element] : []},
+      window: {setTimeout: callback => timers.push(callback), clearTimeout() {}, addEventListener: (type, listener) => {windowListeners[type] = listener;}, removeEventListener: type => {delete windowListeners[type];}},
+      dockviewLayoutState: {pendingUserPanelActivation: '', pendingUserPanelActivationTimer: 0},
+      DOCKVIEW_PENDING_ACTIVATION_TTL_MS: 1500,
+      isTmuxSession: session => session === 'terminal', isFileEditorItem: () => false,
+      itemIsActivePaneTab: () => active,
+      cleanupDetachedPaneTabPopover() {}, dockviewEmptyPaneSlot: () => true,
+      captureDockviewPreviousPaneBeforeTabActivation() {}, rememberFileExplorerExplicitSyncSession() {},
+      terminals: new Map([['terminal', terminal]]), requestAnimationFrame: callback => frames.push(callback), cancelAnimationFrame() {},
+      clientPerfStart() {}, clientPerfEnd() {}, utf8ByteLength: value => value.length,
+      consumeTerminalControlMessage: () => false, tmuxWindowSwitchPaintCallback() {},
+      terminalFrameRecoveryAttempts: new Map(), clearTerminalConnectionState() {},
+      terminalIsVisible: () => false, scheduleTerminalBlankScreenRefresh() {}, scheduleTerminalAttentionHighlight() {},
+      nextTabSwitchHighlightGeneration: () => 7,
+      scheduleTerminalActivationFollowup: () => {followups++;},
+      commitUserTerminalTabActivation: () => {activations++; inputFocused = true; context.dockviewFinishTabActivationPerf(item);},
+      setFocusedPanelItem() {}, focusTerminalFromUserAction() {},
+      focusTerminalDom: () => {inputFocused = true;},
+      dockviewBeginTabPointerDrag: () => {context.dockviewLayoutState.tabPointerDrag = {item, dragged: false};},
+      dockviewTabPointerEvent: event => event,
+      dockviewDropClassification: () => ({region: {kind: 'tabs'}}),
+      dockviewClearPreActivationCapture() {}, dockviewClearTabInsertionPreview() {},
+      dockviewSetInvalidTabDropPreview() {}, clearDropPreview() {},
+      dockviewTrackTabPointerDrag() {},
+    };
+    vm.createContext(context);
+    vm.runInContext(source.slice(source.indexOf('function dockviewBeginTabActivationPerf('), source.indexOf('function dockviewCore(')), context);
+    vm.runInContext(boot.slice(boot.indexOf('function processTerminalSocketFrame('), boot.indexOf('function bindTerminalContainerForSession(')), context);
+    const finishStart = source.indexOf('function dockviewFinishTabPointerDrag(');
+    vm.runInContext(source.slice(finishStart, finishStart + source.slice(finishStart).indexOf('\nfunction ')), context);
+    vm.runInContext(source.slice(source.indexOf('function dockviewInstallTabPointerReorderFallback('), source.indexOf('function dockviewInstallTabPointerReorderFallback(') + source.slice(source.indexOf('function dockviewInstallTabPointerReorderFallback(')).indexOf('\nfunction ')), context);
+    vm.runInContext(source.slice(source.indexOf('function createDockviewTabRenderer('), source.indexOf('function captureDockviewPreviousPaneBeforeTabActivation(')), context);
+    const renderer = context.createDockviewTabRenderer();
+    renderer.init({params: {item}, api: {setActive: () => {active = true;}}});
+    const installed = context.dockviewInstallTabPointerReorderFallback();
+    const event = {target: {closest: () => null}, detail: route === 'programmatic' ? 0 : 1, preventDefault() {}};
+    if (route === 'keyboard') {
+      listeners.keydown({...event, key: 'Enter'});
+      assert.equal(activations, 1, route);
+      assert.equal(inputFocused, true, route);
+      continue;
+    }
+    if (route === 'expired-prior') context.dockviewLayoutState.tabActivationPerf = {item, terminal};
+    if (route !== 'programmatic') listeners.pointerdown(event);
+    if (route === 'visible') {
+      context.document.hidden = false;
+      const paint = context.dockviewLayoutState.tabActivationPerf;
+      documentListeners.visibilitychange?.();
+      assert.equal(context.dockviewLayoutState.tabActivationPerf, paint, 'visible pages retain their held gesture');
+    }
+    if (route === 'expired-prior') assert.equal(context.dockviewLayoutState.tabActivationPerf.terminal, null, 'a new pointer intent replaces the previous committed marker');
+    if (['expired', 'expired-output', 'expired-prior'].includes(route)) {
+      if (route === 'expired-output') context.processTerminalSocketFrame(item, terminal, 'ambient output');
+      timers[0]();
+      assert.equal(context.dockviewLayoutState.pendingUserPanelActivation, '', `${route} expires pointer intent`);
+      assert.equal(context.dockviewLayoutState.tabActivationPerf.terminal, null, `${route} has not activated`);
+    }
+    if (['native', 'native-painted', 'touch', 'finder', 'first-output', 'reconnect'].includes(route) || route.endsWith('committed')) {
+      active = true;
+      context.dockviewCommitPanelActivation(item);
+      inputFocused = false; // Dockview's subsequent group focus steals xterm focus before click.
+    }
+    if (route === 'native-painted') {
+      frames.shift()();
+      frames.shift()();
+      assert.equal(context.dockviewLayoutState.tabActivationPerf, null, 'a completed activation releases its paint record');
+    }
+    if (route === 'first-output') {
+      assert.equal(context.dockviewLayoutState.tabActivationPerf.waitingForParse, false);
+      context.processTerminalSocketFrame(item, terminal, 'first output');
+      assert.equal(context.dockviewLayoutState.tabActivationPerf.waitingForParse, true, 'first output resumes the committed paint barrier');
+      frames.shift()();
+      frames.shift()();
+      assert.equal(context.dockviewLayoutState.tabActivationPerf, null, 'first output completes the committed paint barrier');
+    }
+    if (route === 'reconnect') {
+      const replacement = {...terminal};
+      context.terminals.set(item, replacement);
+      context.processTerminalSocketFrame(item, replacement, 'replacement output');
+      assert.equal(context.dockviewLayoutState.tabActivationPerf.terminal, replacement, 'output follows the replacement terminal');
+    }
+    if (route === 'touch') documentListeners.touchend({...event, type: 'touchend'});
+    if (route.includes('cancel') || route.startsWith('drag') || route.startsWith('blur') || route.startsWith('hidden')) {
+      const committed = route.endsWith('committed');
+      const paint = context.dockviewLayoutState.tabActivationPerf;
+      context.dockviewLayoutState.tabPointerDrag.dragged = route.startsWith('drag');
+      if (route.startsWith('blur')) {
+        if (route === 'blur-expired') timers[0]();
+        windowListeners.blur?.();
+      } else if (route.startsWith('hidden')) {
+        context.document.hidden = true;
+        documentListeners.visibilitychange?.();
+      } else {
+        const type = route === 'pointer-cancel' ? 'pointercancel' : route.startsWith('drag') ? 'touchend' : 'touchcancel';
+        documentListeners[type]({...event, type});
+      }
+      assert.equal(activations, committed && item === 'terminal' ? 1 : 0, `${route} does not activate on release`);
+      assert.equal(context.dockviewLayoutState.pendingUserPanelActivation, '', `${route} clears intent`);
+      assert.equal(context.dockviewLayoutState.tabPointerDrag, null, `${route} releases held pointer state`);
+      context.processTerminalSocketFrame('terminal', terminal, 'later ambient output');
+      assert.equal(context.dockviewLayoutState.tabActivationPerf, committed ? paint : null, `${route} retires only uncommitted paint`);
+      assert.equal(element.classList.contains('tab-activation-pending'), committed, `${route} cleans only uncommitted pending color`);
+      if (committed) {
+        frames.shift()();
+        frames.shift()();
+        assert.equal(context.dockviewLayoutState.tabActivationPerf, null, `${route} finishes committed paint`);
+        assert.equal(element.classList.contains('tab-activation-pending'), false, `${route} completes pending color`);
+      }
+      installed.dispose();
+      assert.equal(windowListeners.blur, undefined, `${route} disposes window blur`);
+      assert.equal(documentListeners.visibilitychange, undefined, `${route} disposes visibility changes`);
+      continue;
+    }
+    listeners.click(event);
+    assert.equal(activations, item === 'terminal' ? 1 : 0, `${route} activates once`);
+    if (['native', 'native-painted', 'touch'].includes(route)) assert.ok(followups > 0, `${route} keeps side work after the duplicate activation fast path`);
+    if (item === 'terminal') assert.equal(inputFocused, true, `${route} restores keyboard input`);
+  }
+});
+
 async function runTabberSuite() {
+  await testAsync('Tabber forwards user activation to background terminal tabs and placement', checkBackgroundTabberActivation);
+  await testAsync('terminal placement preserves user focus through every placement branch', async () => {
+    const source = fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8');
+    for (const route of ['existing', 'empty', 'finder', 'stack', 'refused']) {
+      for (const userInitiated of [false, true]) {
+        const activations = [];
+        let slot = route === 'existing' ? 'left' : null;
+        const context = {
+          slotForSession: () => slot, slotForNewTmuxSession: () => 'left',
+          paneIsPlaceholder: () => route === 'empty', paneTabs: () => ['first'],
+          activeItemForSide: () => route === 'finder' ? 'finder' : 'first',
+          isFileExplorerItem: item => item === 'finder', sidePaneDefaultWidthPercent: 25,
+          moveSessionToSlot: () => { if (route !== 'refused') slot = 'left'; },
+          splitSessionAtSlot: () => { slot = 'right'; }, itemInLayout: () => Boolean(slot),
+          activatePaneTab: (side, session, options) => activations.push({side, session, options}),
+        };
+        vm.createContext(context);
+        vm.runInContext(source.slice(source.indexOf('async function placeTmuxSession('), source.indexOf('// File -> Finder')), context);
+        await context.placeTmuxSession('second', {userInitiated});
+        const expected = route === 'existing' || (userInitiated && route !== 'refused');
+        assert.equal(activations.length, expected ? 1 : 0, `${route}/${userInitiated}`);
+        if (expected) {
+          assert.equal(activations[0].session, 'second');
+          assert.equal(activations[0].side, slot);
+          assert.equal(activations[0].options.userInitiated, userInitiated);
+        }
+      }
+    }
+  });
+  test('session control refresh shares one document scan and discovers replacement and detached controls', () => {
+    const sessionNames = Array.from({length: 20}, (_, index) => `control-${index}`);
+    const api = loadYomux('', sessionNames);
+    const body = api.testElementForId('body');
+    const buttons = [];
+    const tabs = [];
+    for (const session of sessionNames) {
+      const panel = api.testElementForId(`panel-${session}`);
+      body.appendChild(panel);
+      const wrapper = new TestElement('', 'div');
+      wrapper.className = 'tabber-session-tab';
+      const button = new TestElement('', 'button');
+      button.dataset.yoloSession = session;
+      button.title = 'stale';
+      wrapper.appendChild(button);
+      panel.appendChild(wrapper);
+      const tab = new TestElement('', 'button');
+      tab.dataset.tab = session;
+      tab.dataset.tabName = 'terminal';
+      panel.appendChild(tab);
+      buttons.push(button);
+      tabs.push(tab);
+      api.setAutoApproveStateForTest(session, {enabled: true});
+    }
+    const queryAll = body.querySelectorAll.bind(body);
+    let scans = 0;
+    body.querySelectorAll = selector => {
+      if (/data-yolo-session|data-tab-name|data-tmux-window-bar/.test(selector)) scans += 1;
+      return queryAll(selector);
+    };
+    api.renderAutoApproveButtonsForTest(sessionNames);
+    assert.equal(scans, 1, 'a many-session update scans global controls once');
+    for (let index = 0; index < sessionNames.length; index += 1) {
+      assert.equal(buttons[index].getAttribute('aria-pressed'), 'true');
+      assert.equal(buttons[index].getAttribute('title'), null, 'Tabber controls suppress native title hovers');
+      assert.ok(tabs[index].getAttribute('aria-label'), 'each terminal tab receives its current accessible label');
+    }
+    const replacement = new TestElement('', 'button');
+    replacement.dataset.yoloSession = sessionNames[0];
+    buttons[0].replaceWith(replacement);
+    const detachedPanel = api.testElementForId(`panel-${sessionNames[1]}`);
+    detachedPanel.remove();
+    api.setAutoApproveStateForTest(sessionNames[0], {enabled: false});
+    api.setAutoApproveStateForTest(sessionNames[1], {enabled: false});
+    scans = 0;
+    api.renderAutoApproveButtonsForTest(sessionNames);
+    assert.equal(scans, 1, 'the next refresh rebuilds its collection with one global scan');
+    assert.equal(replacement.getAttribute('aria-pressed'), 'false', 'a newly mounted control is discovered');
+    assert.equal(buttons[0].getAttribute('aria-pressed'), 'true', 'the removed control is no longer updated');
+    assert.equal(buttons[1].getAttribute('aria-pressed'), 'false', 'a pane constructed before attachment still updates');
+  });
+
   test('global activity payload creates one Tabber session row per tmux session', () => {
-    const api = loadYolomux('', []);
+    const api = loadYomux('', []);
     api.setFileExplorerModeForTest('tabber');
     api.setTabberActivityForTest({activity: {}, agents: []});
     const accepted = api.applyTabberActivityPayloadForTest({
@@ -55,7 +574,7 @@ async function runTabberSuite() {
   });
 
   test('authoritative global roster is rendered before the legacy session list converges', () => {
-    const api = loadYolomux('', []);
+    const api = loadYomux('', []);
     api.setFileExplorerModeForTest('tabber');
     api.setTranscriptSessionOrderForTest(['synthetic-global-a', 'synthetic-global-b']);
     const rows = api.buildTabberTree().entries.filter(entry => entry.tabber?.type === 'session');
@@ -63,7 +582,7 @@ async function runTabberSuite() {
   });
 
   await testAsync('Tabber falls back to session metadata topology when activity is unavailable', async () => {
-    const api = loadYolomux('', []);
+    const api = loadYomux('', []);
     api.setFileExplorerModeForTest('tabber');
     const requests = [];
     api.setFetchForTest(url => {
@@ -87,7 +606,7 @@ async function runTabberSuite() {
   });
 
   await testAsync('Tabber falls back to the global tmux roster when metadata is unavailable', async () => {
-    const api = loadYolomux('', []);
+    const api = loadYomux('', []);
     api.setFileExplorerModeForTest('tabber');
     const requests = [];
     api.setFetchForTest(url => {
@@ -109,7 +628,7 @@ async function runTabberSuite() {
   });
 
   test('terminal tabs use the live tmux pane path while transcript metadata is incomplete', () => {
-    const api = loadYolomux('', ['8882']);
+    const api = loadYomux('', ['8882']);
     api.setTmuxSignalStateForTest({windows: [{
       session: '8882',
       window_index: '1',
@@ -133,7 +652,7 @@ async function runTabberSuite() {
   test('shared tree controller is the Finder, Tabber, Differ, and Git history interaction parent', () => {
     const source = fs.readFileSync('static_src/js/yomux/86_changes_20_differ.js', 'utf8');
     const css = fs.readFileSync('static/yomux.css', 'utf8');
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     assert.deepStrictEqual(canonical(api.sharedTreeControllerNamesForTest()), ['differ', 'finder', 'git-diff-commits', 'git-diff-files', 'tabber'], 'Finder, Tabber, Differ, and both Git history trees register through the shared interaction controller');
     // Source ownership is enforced once by static_build's shared-ui ownership lint. This node
     // shard keeps the observable controller registration and keyboard behavior contract.
@@ -153,6 +672,7 @@ async function runTabberSuite() {
     const bootstrapSource = fs.readFileSync('static_src/js/yomux/00_bootstrap_state.js', 'utf8');
     const layoutSource = fs.readFileSync('static_src/js/yomux/20_layout_state.js', 'utf8');
     const actionsSource = fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8');
+    const coreSource = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
     const menuSource = fs.readFileSync('static_src/js/yomux/30_app_menus.js', 'utf8');
     const panelSource = fs.readFileSync('static/yomux.js', 'utf8');
     assert.ok(/const finderItemId = '__finder__';[\s\S]*const differItemId = '__differ__';[\s\S]*const tabberItemId = '__tabber__';[\s\S]*const fileExplorerItemIds = Object\.freeze\(\[finderItemId, differItemId, tabberItemId\]\)/.test(bootstrapSource), 'the triplet has three stable layout identities in one registry');
@@ -162,12 +682,21 @@ async function runTabberSuite() {
     assert.ok(/function fileMenuPanelCommands\(\)[\s\S]*narrowSingleColumnMode\(\)[\s\S]*virtualCommands\.unshift\(\.\.\.fileSurfaces\)[\s\S]*openFileSurfaceFromMenu\(finderItemId\)/.test(menuSource), 'File uses one desktop triplet command and separate narrow-screen commands through the shared placement entry point');
     assert.ok(/function createFileExplorerPanel\(item = finderItemId\)[\s\S]*fileExplorerViewForItem\(item\)[\s\S]*createFramedPanel\(\{\s*item,/.test(panelSource) && /function createFramedPanel\([\s\S]*panel\.id = panelDomId\(item\)/.test(fs.readFileSync('static_src/js/yomux/78_panel_shell.js', 'utf8')), 'one parameterized panel builder gives every triplet item a fixed view and unique panel DOM id through the shared frame factory');
     const terminalBootSource = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
-    assert.ok(/function syncPanelVisibility\(previousActive = \[\]\)[\s\S]*const previouslyVisible = new Set\(previousActive\);[\s\S]*activeSessions[\s\S]*isFileExplorerItem\(item\) && !previouslyVisible\.has\(item\)[\s\S]*activateFileExplorerSurface\(item\)/.test(terminalBootSource), 'one shared active-panel transition resumes whichever Finder/Differ/Tabber surface becomes newly visible');
+    const fileExplorerSource = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+    const differSource = fs.readFileSync('static_src/js/yomux/86_changes_20_differ.js', 'utf8');
+    const surfaceSource = fs.readFileSync('static_src/js/yomux/86_changes_40_finder.js', 'utf8');
+    assert.ok(/function syncPanelVisibility\(previousActive = \[\]\)[\s\S]*const previouslyVisible = new Set\(previousActive\);[\s\S]*newlyVisibleFileSurfaces[\s\S]*scheduleTabSwitchPhaseTwo\(generation, \(\) => \{[\s\S]*activateFileExplorerSurface\(item\)/.test(terminalBootSource), 'newly visible file surfaces activate through the shared post-paint generation guard');
+    assert.ok(/function scheduleTabSwitchPhaseTwo\(generation, work\)[\s\S]*raf\(\(\) => raf\(\(\) =>/.test(actionsSource), 'secondary tab work starts only after the first frame had a paint opportunity');
+    assert.ok(actionsSource.includes('function scheduleTerminalActivationFollowup(session, generation)') && actionsSource.includes('syncFileExplorerAfterTerminalActivation(session);') && actionsSource.includes('scheduleTerminalActivationFollowup(session, generation);'), 'normal and duplicate Dockview activation share focus-guarded phase-two work');
+    assert.ok(/function focusTerminalFromUserAction\(session, delay = 0, options = \{\}\)[\s\S]*setFocusedTerminal\(session, \{\.\.\.options, userInitiated: true, syncFinder: false\}\)[\s\S]*rememberFileExplorerExplicitSyncSession\(session\)[\s\S]*scheduleTabSwitchPhaseTwo\(nextTabSwitchHighlightGeneration\(\), \(\) => syncFileExplorerAfterTerminalActivation\(session\)\)/.test(coreSource), 'direct focus claims the existing Finder target immediately and defers rendering through the shared scheduler');
+    assert.ok(/function fileExplorerSessionFilesPaneIsVisible\(\)\s*\{\s*return itemIsActivePaneTab\(differItemId\);/.test(fileExplorerSource), 'Differ visibility follows the active pane item rather than mere layout membership');
+    assert.ok(/function renderFileExplorerChangesPanel\(panel, options = \{\}\)[\s\S]*view === 'differ' && !fileExplorerSessionFilesPaneIsVisible\(\)[\s\S]*return;/.test(surfaceSource), 'hidden Differ does not enter its tree renderer');
+    assert.ok(/function renderChangedFileList\(container, repoPath, sessionFiles, options = \{\}\)[\s\S]*yieldToInput: options\.yieldToInput === true/.test(differSource), 'visible Differ rows use the shared input-yielding tree renderer');
     assert.ok(/function fileExplorerModeSwitcherHtml\(\)\s*\{\s*return '';\s*\}/.test(panelSource), 'the retired in-panel mode switcher is a compatibility no-op');
   });
 
   test('Finder, Tabber, and Differ keep independent shared tree settings', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const source = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
     assert.ok(/function fileExplorerViewSettingsFor\(view = 'finder'\)[\s\S]*function setFileExplorerViewSetting\(view, key, value/.test(source), 'one keyed shared settings owner replaces global per-control variables');
     api.setFileExplorerViewSettingForTest('finder', 'treeSortMode', 'za');
@@ -187,7 +716,7 @@ async function runTabberSuite() {
   });
 
   test('Finder shared tree controller handles keyboard cursor navigation', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setFileExplorerModeForTest('files');
     api.setFocusedPanelItem(api.fileExplorerItemId);
     const panel = new TestElement('finder-keyboard-panel');
@@ -222,7 +751,7 @@ async function runTabberSuite() {
   });
 
   test('Finder Copy relative path is Finder-root-relative while Differ remains repo-relative', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     assert.equal(api.pathRelativeToDirectory('/repo/project/docs/nested/file.md', '/repo/project/docs'), 'nested/file.md', 'nested Finder roots produce a Finder-relative path');
     assert.equal(api.pathRelativeToDirectory('/repo/project/docs-two/file.md', '/repo/project/docs'), '/repo/project/docs-two/file.md', 'the shared helper rejects string-prefix siblings');
     assert.deepStrictEqual(
@@ -266,7 +795,7 @@ async function runTabberSuite() {
   });
 
   await testAsync('Finder relative-copy multi-selection fails closed as one clipboard action', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const root = '/repo/project/docs';
     const rootInfo = {realpath: '/real/project/docs'};
     const paths = [`${root}/first.md`, `${root}/nested/second.md`];
@@ -309,7 +838,7 @@ async function runTabberSuite() {
   });
 
   test('Tabber shared tree controller handles keyboard navigation and active-window sync', () => {
-    const api = loadYolomux('', ['1', '2']);
+    const api = loadYomux('', ['1', '2']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);
     slots.left = api.paneStateWithTabs(['1', '__tabber__', '__finder__'], '1');
@@ -395,7 +924,7 @@ async function runTabberSuite() {
   });
 
   test('Tabber highlights every visible tab, not only the focused one', () => {
-    const api = loadYolomux('', ['1', '2', '3']);
+    const api = loadYomux('', ['1', '2', '3']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);
     slots.left = api.paneStateWithTabs(['1', '__tabber__', '__finder__'], '1');
@@ -434,7 +963,7 @@ async function runTabberSuite() {
   });
 
   test('Tabber active window follows the optimistic tmux sub-window override', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setFocusedPanelItem('1');
     api.setFileExplorerModeForTest('tabber');
     api.setTranscriptInfoForTest('1', {
@@ -457,7 +986,7 @@ async function runTabberSuite() {
   });
 
   test('Tabber window click keeps the optimistic target through stale session updates', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setFocusedPanelItem('1');
     api.setFileExplorerModeForTest('tabber');
     const staleInfo = {
@@ -518,7 +1047,7 @@ async function runTabberSuite() {
   });
 
   await testAsync('Tabber confirmed direct window target ignores fresh stale signal bounce', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [4000]});
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [4000]});
     api.setFocusedPanelItem('1');
     api.setFileExplorerModeForTest('tabber');
     const staleInfo = {
@@ -570,7 +1099,7 @@ async function runTabberSuite() {
   });
 
   test('Tabber displays home-relative paths with the shared compact home formatter', () => {
-    const api = loadYolomux('', ['7', '8', '9', '10']);
+    const api = loadYomux('', ['7', '8', '9', '10']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.leafNode('main');
     slots.main = api.paneStateWithTabs(['7', '8', '9', '10'], '7');
@@ -605,7 +1134,7 @@ async function runTabberSuite() {
   });
 
   test('Tabber activity topology exposes one session row per global tmux session', () => {
-    const api = loadYolomux('', []);
+    const api = loadYomux('', []);
     api.applyTabberActivityPayloadForTest({
       activity: {
         'synthetic-a': {active_recency_ts: 100},
@@ -622,7 +1151,7 @@ async function runTabberSuite() {
   });
 
   test('Tabber keeps a live session row while pane metadata is unavailable', () => {
-    const api = loadYolomux('', []);
+    const api = loadYomux('', []);
     api.applyTabberActivityPayloadForTest({
       activity: {'synthetic-bare': {active_recency_ts: 100}},
       session_order: ['synthetic-bare'],
@@ -633,7 +1162,7 @@ async function runTabberSuite() {
   });
 
   test('Tabber activity topology removes sessions absent from the global tmux roster', () => {
-    const api = loadYolomux('', []);
+    const api = loadYomux('', []);
     const panes = [{window: '0', window_name: 'bash', window_active: true, active: true, command: 'bash'}];
     api.applyTabberActivityPayloadForTest({activity: {'synthetic-a': {active_recency_ts: 100}, 'synthetic-b': {active_recency_ts: 90}}, session_order: ['synthetic-a', 'synthetic-b'], sessions: {'synthetic-a': {panes}, 'synthetic-b': {panes}}});
     api.applyTabberActivityPayloadForTest({activity: {'synthetic-a': {active_recency_ts: 110}}, session_order: ['synthetic-a'], sessions: {'synthetic-a': {panes}}});
@@ -642,7 +1171,7 @@ async function runTabberSuite() {
   });
 
   test('Tabber ignores an activity response older than the metadata roster', () => {
-    const api = loadYolomux('', []);
+    const api = loadYomux('', []);
     api.applyTabberActivityPayloadForTest({
       activity: {}, topology_generation: 2, session_order: ['synthetic-new'], sessions: {'synthetic-new': {panes: []}},
     });
@@ -655,7 +1184,7 @@ async function runTabberSuite() {
   });
 
   test('Tabber rejects an unversioned activity roster that would remove a newer topology', () => {
-    const api = loadYolomux('', []);
+    const api = loadYomux('', []);
     api.applyTabberActivityPayloadForTest({
       activity: {}, topology_generation: 2, session_order: ['synthetic-a', 'synthetic-b'],
       sessions: {'synthetic-a': {panes: []}, 'synthetic-b': {panes: []}},
@@ -669,7 +1198,7 @@ async function runTabberSuite() {
   });
 
   test('Tabber does not adopt a generation from an unusable placeholder', () => {
-    const api = loadYolomux('', []);
+    const api = loadYomux('', []);
     assert.equal(api.applyTabberActivityPayloadForTest({topology_generation: 5}), false, 'a generation-only placeholder is not useful topology');
     assert.equal(api.applyTabberActivityPayloadForTest({
       activity: {}, topology_generation: 4, session_order: ['synthetic-valid'], sessions: {'synthetic-valid': {panes: []}},
@@ -679,7 +1208,7 @@ async function runTabberSuite() {
   });
 
   test('Tabber ignores metadata keys outside the authoritative session order', () => {
-    const api = loadYolomux('', []);
+    const api = loadYomux('', []);
     assert.equal(api.applyTabberActivityPayloadForTest({
       activity: {}, topology_generation: 2, session_order: ['synthetic-live'],
       sessions: {'synthetic-live': {panes: []}, 'synthetic-foreign': {panes: []}},
@@ -689,7 +1218,7 @@ async function runTabberSuite() {
   });
 
   test('Differ shared tree controller handles keys without taking diff-ref input keys', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.setFileExplorerModeForTest('diff');
     const panel = new TestElement('differ-keyboard-panel');
     panel.classList.add('file-explorer-panel', 'file-explorer-changes-panel');
@@ -745,7 +1274,7 @@ async function runTabberSuite() {
     const enc = encodeURIComponent('file:' + path);   // file%3A%2Frepo%2Fapp%2Fnotes.py
     // open the file as a real tab (slot3) via the layout URL — same shape as the passing test above
     const search = `?sessions=files,${enc},5&layout=row@20.7(slot2,row@42(slot3,slot1))&tabs=slot2:files;slot3:${enc};slot1:5`;
-    const api = loadYolomux(search, ['5']);
+    const api = loadYomux(search, ['5']);
     const panes = api.serialize(api.currentSlots()).panes;
     assert.ok(Object.values(panes).some(p => (p.tabs || []).includes('file:' + path)), 'S2 setup: the file is an open tab');
     // the SAME file is also recently-open (Recent) and a search candidate (Files) — both would dupe it
@@ -760,7 +1289,7 @@ async function runTabberSuite() {
 
   test('chrome labels, File triplet command, and theme refresh use shared owners', () => {
     // #8-#13: renames, toggles, theme propagation, README preview.
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const source = fs.readFileSync('static/yomux.js', 'utf8');
     const menuSource = fs.readFileSync('static_src/js/yomux/30_app_menus.js', 'utf8');
     const css = fs.readFileSync('static/yomux.css', 'utf8');
@@ -795,7 +1324,7 @@ async function runTabberSuite() {
   test('unfocused active tabs remain visible', () => {
     // Browser coverage owns the rendered token/opacity result.  Keep this named regression slot
     // so its behavior remains discoverable without duplicating CSS source selectors here.
-    const api = loadYolomux('', ['1', '2']);
+    const api = loadYomux('', ['1', '2']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);
     slots.left = api.paneStateWithTabs(['1'], '1');
@@ -808,7 +1337,7 @@ async function runTabberSuite() {
   test('active drags defer panel rendering and preserve tab chrome', () => {
     // re-renders + search-focus are deferred/suppressed mid-drag so the dragged DOM node
     // is not replaced (which aborts the native HTML5 drag); + 3-tab placement in a consistent index space.
-    const api = loadYolomux('', ['1', '2', '3']);
+    const api = loadYomux('', ['1', '2', '3']);
     api.setDragSessionForTest('2');
     api.renderPaneTabStrips();
     assert.equal(api.pendingTabStripRenderForTest(), true, '#30: tab-strip re-render is DEFERRED during a drag (node not replaced)');
@@ -890,7 +1419,7 @@ async function runTabberSuite() {
   test('same-strip tab drops reorder in both directions', () => {
     // same-strip drag-reorder works in BOTH directions. Dropping a tab anywhere onto a
     // neighbor moves it past that neighbor (no center-overshoot required for the left->right case).
-    const api = loadYolomux('', ['6']);
+    const api = loadYomux('', ['6']);
     const strip = tabStrip([tabElement('6', 100, 100), tabElement('P', 203, 100)]);
     // (re-open of #12): a drop ANYWHERE on the neighbor reorders — BOTH halves, BOTH ways.
     // P spans 203-303 (center 253); L spans 100-200 (center 150).
@@ -903,7 +1432,7 @@ async function runTabberSuite() {
   });
 
   test('an outermost tab header does not impersonate a root top-edge drop', () => {
-    const api = loadYolomux('', ['1', '2']);
+    const api = loadYomux('', ['1', '2']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);
     slots.left = api.paneStateWithTabs(['1'], '1');
@@ -931,7 +1460,7 @@ async function runTabberSuite() {
   });
 
   test('a tab header never previews a split while another tab is under the pointer', () => {
-    const api = loadYolomux('', ['1', '2']);
+    const api = loadYomux('', ['1', '2']);
     const tab = new TestElement('target-tab');
     tab.classList.add('dv-tab');
     tab.rect = {left: 0, top: 0, right: 160, bottom: 32, width: 160, height: 32};
@@ -969,7 +1498,7 @@ async function runTabberSuite() {
   });
 
   test('adjacent same-strip tab drops are no-ops', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const strip = tabStrip([
       tabElement('1', 100, 100),
       tabElement('2', 203, 100),
@@ -982,7 +1511,7 @@ async function runTabberSuite() {
   });
 
   test('Dockview tab drops preserve edge and pinned behavior', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const strip = new TestElement('dock-tabs');
     strip.classList.add('dv-tabs-container');
     strip.rect = {left: 100, right: 520, top: 0, bottom: 28, width: 420, height: 28};
@@ -1049,7 +1578,7 @@ async function runTabberSuite() {
   });
 
   test('tab-strip drop previews reflect insertion state', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const strip = tabStrip([
       tabElement('1', 100, 100),
       tabElement('2', 203, 100),
@@ -1081,7 +1610,7 @@ async function runTabberSuite() {
   });
 
   test('delegated window controls resolve nested button targets', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const container = new TestElement('dockview-actions');
     const button = new TestElement('window-next', 'button');
     button.dataset.windowDir = 'next';
@@ -1101,7 +1630,7 @@ async function runTabberSuite() {
   });
 
   test('file drags show pane split previews', () => {
-    const api = loadYolomux('?layout=left&tabs=left:1', ['1']);
+    const api = loadYomux('?layout=left&tabs=left:1', ['1']);
     const slot = new TestElement('slot-left');
     slot.classList.add('drop-slot');
     slot.dataset.slot = 'left';
@@ -1121,7 +1650,7 @@ async function runTabberSuite() {
   });
 
   test('terminal file drags bubble to pane split previews', () => {
-    const api = loadYolomux('?layout=left&tabs=left:1', ['1']);
+    const api = loadYomux('?layout=left&tabs=left:1', ['1']);
     const slot = new TestElement('slot-left');
     slot.classList.add('drop-slot');
     slot.dataset.slot = 'left';
@@ -1146,7 +1675,7 @@ async function runTabberSuite() {
   });
 
   test('terminal directory drags retain path insertion affordance', () => {
-    const api = loadYolomux('?layout=left&tabs=left:1', ['1']);
+    const api = loadYomux('?layout=left&tabs=left:1', ['1']);
     const slot = new TestElement('slot-left');
     slot.classList.add('drop-slot');
     slot.dataset.slot = 'left';
@@ -1167,7 +1696,7 @@ async function runTabberSuite() {
   });
 
   test('file tree drags retain copy payload through protected mode', () => {
-    const api = loadYolomux('?layout=left&tabs=left:1', ['1']);
+    const api = loadYomux('?layout=left&tabs=left:1', ['1']);
     const row = new TestElement('pic-row');
     row.rect = {left: 10, top: 20, right: 250, bottom: 40, width: 240, height: 20};
     const event = fileDragEvent(row, {path: '/home/test/pic.png', paths: ['/home/test/pic.png'], kind: 'file', name: 'pic.png'}, 30, 28);
@@ -1206,7 +1735,7 @@ async function runTabberSuite() {
   });
 
   test('native tab drags preserve their grab offset', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const source = tabElement('4', 100, 140);
     source.rect = {left: 100, right: 240, top: 20, bottom: 47, width: 140, height: 27};
     source.classList.add('pane-tab');
@@ -1243,7 +1772,7 @@ async function runTabberSuite() {
     assert.ok(/function dockviewHandleFileDragOver\(event\)[\s\S]*const drag = classifyLayoutDrag\(event, \{[\s\S]*intentForSession: dockviewGroupDropIntentForEvent[\s\S]*const capacityRefusal = dockviewCapacityRefusalForDrag\(drag\)[\s\S]*applyLayoutDragIntent\(event, drag\)/.test(source), 'Dockview accepts external shared tab drags through the shared classifier before applying capacity-aware preview rules');
     assert.ok(/function applyLayoutDragIntent\(event, drag,[\s\S]*dropSessionWithIntent\(drag\.payload\.session, drag\.intent/.test(source), 'Dockview drops external shared tab drags through the normal session action executor');
 
-    const api = loadYolomux('', ['1', '2']);
+    const api = loadYomux('', ['1', '2']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);
     slots.left = api.paneStateWithTabs(['1'], '1');
@@ -1291,7 +1820,7 @@ async function runTabberSuite() {
   });
 
   test('grid and Dockview drag payloads share acceptance and action classification', () => {
-    const api = loadYolomux('', ['1', '2']);
+    const api = loadYomux('', ['1', '2']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
     slots.left = api.paneStateWithTabs(['1'], '1');
@@ -1326,7 +1855,7 @@ async function runTabberSuite() {
 
   test('pane drags preview and swap complete pane stacks', () => {
     return;
-    const api = loadYolomux('', ['1', '2', '3']);
+    const api = loadYomux('', ['1', '2', '3']);
     const slots = api.emptyLayoutSlots();
     slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);
     slots.left = api.paneStateWithTabs(['1', '2'], '2');
@@ -1401,7 +1930,7 @@ async function runTabberSuite() {
   });
 
   test('tab-strip dragover clears stale pane previews', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const strip = tabStrip([
       tabElement('1', 100, 100),
       tabElement('2', 203, 100),
@@ -1438,7 +1967,7 @@ async function runTabberSuite() {
   // editor back/forward navigation history (Popular IDE-style file stack). Tests the record/dedupe/
   // truncate logic of recordEditorNav (the async back/forward re-open goes through the live open path).
   test('editor navigation records deduplicated bounded history', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     api.editorNav.stack = [];
     api.editorNav.index = -1;
     api.recordEditorNav('/repo/a.txt');
@@ -1480,7 +2009,7 @@ async function runTabberSuite() {
   // A user click/type focus transition records the pane being left and the pane being entered, so Back
   // becomes active even when the previous pane was only focused, not already present in the nav stack.
   test('user pane focus transitions activate navigation history', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     const back = api.testElementForId('topbarNavBack');
     let focusCount = 0;
     api.registerTerminalForTest('2', {focus() { focusCount += 1; }});
@@ -1496,7 +2025,7 @@ async function runTabberSuite() {
   });
 
   test('tmux terminal body clicks focus xterm, not only the pane ring', () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.renderPanels([]);
     const panel = api.testElementForId('panelPool').children.find(child => child.id === 'panel-1');
     const terminalTarget = new TestElement('terminal-target');
@@ -1513,7 +2042,7 @@ async function runTabberSuite() {
 
   // Tab history is bounded — the oldest entries drop past the cap so it can't grow without limit.
   test('navigation history retains its newest capped entries', () => {
-    const api = loadYolomux();
+    const api = loadYomux();
     api.editorNav.stack = [];
     api.editorNav.index = -1;
     for (let i = 0; i < 80; i += 1) api.recordEditorNav(`tab-${i}`);
@@ -1527,7 +2056,7 @@ async function runTabberSuite() {
   // edit/preview view chips (it used to emit two identical rows — same name + path).
   test('command palette deduplicates open files and ranks mixed results', () => {
     const source = fs.readFileSync('static/yomux.js', 'utf8');
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const candidateStart = source.indexOf('function commandPaletteCandidateItems(');
     const candidateEnd = source.indexOf('function commandPaletteItems(', candidateStart);
     const candidateBody = source.slice(candidateStart, candidateEnd);
@@ -1594,7 +2123,7 @@ async function runTabberSuite() {
   // S14: opt-in tab-drag timing instrumentation (OFF by default) to diagnose the ~500ms first-drag
   // delay by measuring the real bucket, instead of guessing setDragImage is the cause.
   test('OSC 52 terminal clipboard bridge handles safe payloads', () => {
-    const api = loadYolomux('?platform=mac', ['1'], 'https:', 'MacIntel');
+    const api = loadYomux('?platform=mac', ['1'], 'https:', 'MacIntel');
     const b64 = text => Buffer.from(text, 'utf8').toString('base64');
     // pure decoder
     assert.equal(api.osc52ClipboardText(`c;${b64('hello from claude')}`), 'hello from claude', 'OSC 52 base64 payload decodes');
@@ -1634,7 +2163,7 @@ async function runTabberSuite() {
     assert.ok(/function terminalContextMenuSelection\(session, term, container = null, presetSelection = null\)[\s\S]*recentTerminalAppClipboardText\(session\)/.test(source), 'N7: Claude/TUI OSC 52 clipboard text is the context-menu fallback when the app owns the visible selection');
     assert.ok(/copyTerminalSelection\(session, term, \{action, button, dedent, selectionText: selected\}, container\)/.test(source), 'N7: menu Copy uses the captured selection text while passing the ephemeral control to shared feedback');
     assert.ok(/const selected = options\.selectionText != null \? options\.selectionText : terminalSelectedText\(term, container\)/.test(source), 'N7: copyTerminalSelection honors an explicit captured selection');
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     const badLiveRead = {getSelection: () => 'under cursor'};
     assert.deepEqual(api.terminalContextMenuSelectionForTest('1', badLiveRead, null, ''), {text: '', source: 'none'}, 'captured empty right-click selection does not copy under-cursor live text');
     api.rememberTerminalAppClipboardTextForTest('1', 'claude selected block');
@@ -1672,7 +2201,7 @@ async function runTabberSuite() {
     assert.deepEqual({...capability('split', {paneTarget: '%claude'})}, {paneTarget: '%claude', clientKind: 'claude', preserveNativeContextMenu: false}, 'split panes use the matching pane agent instead of the first session agent');
      assert.deepEqual({...capability('split', {paneTarget: '%missing'})}, {paneTarget: '%missing', clientKind: '', preserveNativeContextMenu: false}, 'unknown pane identity retains the shared YOmux menu');
      assert.deepEqual({...capability('split', {paneTarget: ''})}, {paneTarget: '', clientKind: '', preserveNativeContextMenu: false}, 'missing terminal-container identity retains the shared YOmux menu');
-    const api = loadYolomux('', ['split']);
+    const api = loadYomux('', ['split']);
     api.setTranscriptInfoForTest('split', {
       agents: [
         {kind: 'opencode', pane_target: '%open'},
@@ -1800,13 +2329,13 @@ async function runTabberSuite() {
     assert.match(tabberSource, /function tabberWindowIsAgent\(name\)[\s\S]*key === 'claude' \|\| key === 'codex' \|\| key === 'opencode'/, 'OpenCode is included in the shared visible Tabber owner');
     assert.match(layoutSource, /const attentionCount = Number\(counts\.ask\) \|\| 0/, 'unavailable counts do not share the red attention slot');
     assert.match(layoutSource, /topbarActivityCountBallHtml\(counts\.blocked, 'cooldown', 'topbar-activity-blocked'\)/, 'blocked top-bar counts retain the yellow tone');
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     assert.equal(api.tabberWindowIsAgentForTest('opencode'), true, 'OpenCode is recognized by the shared tmux-window agent owner');
     assert.match(api.topbarActivityCountBallHtmlForTest(1, 'cooldown', 'topbar-activity-blocked'), /status-indicator--cooldown/, 'blocked count renders the yellow status class');
   });
 
   test('OpenCode green and red balls share one renderer across pane tabs, Tabber, popovers, and topbar', () => {
-    const api = loadYolomux('', ['open']);
+    const api = loadYomux('', ['open']);
     const info = {
       panes: [{window: '0', window_index: '0', target: '%open', pane: '0', active: true, window_active: true, process_label: 'opencode', command: 'opencode'}],
       agents: [{kind: 'opencode', pane_target: '%open', window_index: 0, window_active: true, current: true}],
@@ -1831,7 +2360,7 @@ async function runTabberSuite() {
   });
 
   test('Tabber window recency uses one timestamp for display, sorting, and parent bubbling', () => {
-    const api = loadYolomux('', ['4']);
+    const api = loadYomux('', ['4']);
     const beforeRender = Date.now() / 1000;
     api.setFileExplorerModeForTest('tabber');
     api.setFileExplorerTreeDateModeForTest('date');
@@ -1888,7 +2417,7 @@ async function runTabberSuite() {
   });
 
   test('Tabber preserves Ago timestamps across local refresh placeholders', () => {
-    const api = loadYolomux('', ['4']);
+    const api = loadYomux('', ['4']);
     api.setFileExplorerModeForTest('tabber');
     api.setFileExplorerTreeDateModeForTest('date');
     api.setTranscriptInfoForTest('4', {
@@ -2019,7 +2548,7 @@ async function runTabberSuite() {
     assert.ok(/function warmTabberDataOnLaunch\(\)[\s\S]*!tabberActivityVisibleConsumer\(\)[\s\S]*tabberLaunchWarmupStarted = true;[\s\S]*fetchTabberActivity\(\);[\s\S]*return true;/.test(source), 'Tabber launch warmup primes cached activity only for visible Tabber panes');
     assert.ok(/function tabberSessionPopoverRefreshIsUnsafe\(\)[\s\S]*\.tabber-session-tab\[data-popover-hover-state="open"\][\s\S]*popoverLifecycleActive\(tab, popover\)/.test(source), 'Tabber refresh detects active session-popover hover lifecycle before rebuilding rows');
     assert.ok(/function refreshTabberPanels\(\)[\s\S]*tabberSessionPopoverRefreshIsUnsafe\(\)[\s\S]*scheduleDeferredTabberRefresh\(\)[\s\S]*return/.test(source), 'Tabber activity refresh defers instead of replacing hovered session-tab DOM');
-    assert.ok(/function renderAutoApproveButton\(session, payload\)[\s\S]*button\.setAttribute\('aria-label', buttonLabel\)[\s\S]*button\.closest\('\.tabber-session-tab'\)[\s\S]*button\.removeAttribute\('title'\)/.test(source), 'Tabber YO controls keep aria-label but suppress native title hovers after live auto-state sync');
+    assert.ok(/function renderAutoApproveButton\(session, payload, controlNodes = null\)[\s\S]*button\.setAttribute\('aria-label', buttonLabel\)[\s\S]*button\.closest\('\.tabber-session-tab'\)[\s\S]*button\.removeAttribute\('title'\)/.test(source), 'Tabber YO controls keep aria-label but suppress native title hovers after live auto-state sync');
     assert.ok(/transcriptMetadataState\.loaded = true;[\s\S]*?warmTabberDataOnLaunch\(\)/.test(source), 'Tabber launch warmup runs as soon as transcript metadata is available');
     assert.ok(/function tabberAgentForWindow\(session, windowIndex, agentKey = ''\)/.test(source), 'Tabber can look up agent transcript activity by session/window');
     assert.ok(source.includes('function agentWindowPathEntries(agent)') && source.includes('function windowViewModel(session, windowIndex'), 'Tabber reads paths through the shared backend agent-window view model');
@@ -2063,7 +2592,7 @@ async function runTabberSuite() {
     assert.ok(/function setTabberPathExpanded\(fullPath, expanded\)[\s\S]*tabberPathDefaultsCollapsed\(fullPath\)[\s\S]*fileExplorerTabberExpanded\.add\(fullPath\)[\s\S]*setExpanded\(row, expanded\) \{[\s\S]*setTabberPathExpanded\(fullPath, expanded\)/.test(source), 'Tabber disclosure clicks and keyboard expansion reuse the default-collapse-aware expansion owner');
     assert.ok(/row\.dataset\.kind === 'dir' && fullPath && onDisclosure[\s\S]*toggleTabberCollapsed\(fullPath\)[\s\S]*type === 'session' && session\)[\s\S]*openTabberSession\(session\)/.test(source), 'Tabber session row text opens the session while the shared disclosure branch toggles collapse');
 
-    const api = loadYolomux();
+    const api = loadYomux();
     assert.equal(api.normalizeFileExplorerMode('tabber'), 'tabber');
     assert.equal(api.normalizeFileExplorerMode('bogus'), 'files');
     assert.equal(api.readStoredFileExplorerModeForTest('tabber'), 'files', 'legacy mode storage still normalizes to Finder for migration');
@@ -2073,14 +2602,14 @@ async function runTabberSuite() {
     assert.equal(source.includes('tabber-session-name') || source.includes('tabber-session-description'), false, 'TR5: Tabber does not keep bespoke session name/description chrome');
     assert.ok(/function bindTabberSessionChrome\(row, session\)[\s\S]*applySessionStateClasses\(tab, state\)[\s\S]*bindPaneTabPopover\(tab, session\)[\s\S]*toggleAutoApprove/.test(source), 'TR2: Tabber session rows reuse the shared state classes, popover binding, and YO toggle action');
     assert.ok(/const detached = tab\.classList\?\.contains\('dockview-pane-tab'\) === true\s*\|\| tab\.classList\?\.contains\('tabber-session-tab'\) === true/.test(source), 'TR2: Dockview and Tabber popovers detach through the same app-overlay path');
-    assert.ok(/if \(name\.innerHTML !== options\.nameHtml\) \{\s*cleanupDetachedPopoversWithin\(name\);\s*name\.innerHTML = options\.nameHtml;/.test(source), 'TR2: Tabber row replacement cleans detached popovers through the shared cleanup helper');
+    assert.ok(source.includes('setInnerHtmlIfChanged(name, options.nameHtml, cleanupDetachedPopoversWithin)'), 'TR2: Tabber row replacement cleans detached popovers through the shared cleanup helper');
     assert.ok(/function fileExplorerTreeSortSelectHtml\(extraClass = '', view = 'finder'\)[\s\S]*data-file-explorer-tree-sort[\s\S]*finder\.sort\.az[\s\S]*finder\.sort\.oldest/.test(source), 'TS1/TS4: Finder and Tabber share one tree sort select component and locale keys');
     assert.ok(/view === 'tabber'[\s\S]*tabberLookbackControlHtml\(\)[\s\S]*fileExplorerTreeSortSelectHtml\('changes-sort-select-compact', 'tabber'\)/.test(source), 'TS1: Tabber toolbar renders the shared A-Z/Z-A/recent/oldest sort control');
     assert.ok(/function createFileExplorerPanel\(item = finderItemId\)[\s\S]*fileExplorerTreeSortSelectHtml\('', 'finder'\)/.test(source), "TS3: Finder's fixed panel renders the shared tree sort select");
     assert.ok(/'tabber-active-session': data\.type === 'session' && data\.active === true/.test(source), 'A5: active-session styling is data-driven only for session rows');
     assert.ok(/function refreshTabberPanelsForFocusChange\(\)[\s\S]*scheduleTabberTreeLayoutStateSync\(\)/.test(source) && !/function refreshTabberPanelsForFocusChange\(\)[\s\S]{0,160}refreshTabberPanels\(\)/.test(source), 'focus changes schedule one Tabber layout-state patch without rebuilding the tree');
     assert.ok(/function updatePanelSlot\(panel, session, slot, options = \{\}\)[\s\S]*updatePaneTabStrip\(panel, slot\);\s*\}/.test(source), 'slot-local panel updates do not recursively synchronize global focus state');
-    assert.ok(/current: current \|\| \(data\.type === 'session' && data\.active === true\)/.test(source) && /if \(model\.current\) row\.setAttribute\('aria-current', 'true'\)/.test(source), 'A3/A5: the current tmux session/window exposes aria-current through the shared tree-row patch');
+    assert.ok(/current: current \|\| \(data\.type === 'session' && data\.active === true\)/.test(source) && /setAttributeIfChanged\(row, 'aria-current', model\.current \? 'true' : null\)/.test(source), 'A3/A5: the current tmux session/window exposes aria-current through the shared tree-row patch');
     assert.ok(/type === 'tab' && row\.dataset\.tabberItem[\s\S]*selectSession\(row\.dataset\.tabberItem, \{userInitiated: true\}\)/.test(source), 'Tabber virtual-tab rows activate their own layout item directly');
     assert.equal(/tabberOpenFile|tabberOpenStatus|tabberOpenRepo|type === 'path'|data-tabber-type="path"/.test(source), false, 'Tabber has no individual-file row data or activation path');
     api.setInfoPanelSubTabForTest('yoagent');
@@ -2176,7 +2705,7 @@ async function runTabberSuite() {
     assert.equal((scopedWindow0.tabber.activityIconHtml || '').includes('agent-window-status-dot'), false, 'current idle Codex Tabber window does not add a competing status dot');
     assert.equal((scopedWindow1.tabber.activityIconHtml || '').includes('agent-window-agent-icon--active'), false, 'inactive idle Codex Tabber window does not pulse');
 
-    const pulseApi = loadYolomux('', ['3']);
+    const pulseApi = loadYomux('', ['3']);
     pulseApi.setFileExplorerModeForTest('tabber');
     pulseApi.setTranscriptInfoForTest('3', {
       panes: [
@@ -2200,7 +2729,7 @@ async function runTabberSuite() {
     }, {label: 'working'});
     assert.match(directWorkingMarker, /status-indicator--working[^\"]*heartbeat-pulse|heartbeat-pulse[^\"]*status-indicator--working/, 'direct working status markers keep the continuous green heartbeat');
 
-    const sortedApi = loadYolomux('', ['1', '2', '3']);
+    const sortedApi = loadYomux('', ['1', '2', '3']);
     sortedApi.setTranscriptInfoForTest('1', {panes: [{window: '0', pane: '0', window_active: true, active: true, process_label: 'bash', command: 'bash'}]});
     sortedApi.setTranscriptInfoForTest('2', {panes: [{window: '0', pane: '0', window_active: true, active: true, process_label: 'bash', command: 'bash'}]});
     sortedApi.setTranscriptInfoForTest('3', {panes: [{window: '0', pane: '0', window_active: true, active: true, process_label: 'bash', command: 'bash'}]});
@@ -2228,7 +2757,7 @@ async function runTabberSuite() {
     sortedApi.setFileExplorerTreeSortModeForTest('za');
     const windowLabels = sortedApi.buildTabberTree().entriesByDir.get('/s_1').map(row => row.tabber.label);
     assert.deepEqual(windowLabels, ['0:codex', '1:claude', '2:bash'], 'TS2: tmux sub-window rows stay in tmux index order regardless of Tabber sort mode');
-    const renamedSessionApi = loadYolomux('', ['1', '2', '8002b']);
+    const renamedSessionApi = loadYomux('', ['1', '2', '8002b']);
     renamedSessionApi.setTranscriptInfoForTest('8002b', {panes: [{window: '0', pane: '0', window_active: true, active: true, process_label: 'claude', command: 'claude'}]});
     const renamedSessionHtml = renamedSessionApi.tmuxPaneTabHtml('8002b', renamedSessionApi.transcriptInfoForTest('8002b'), null, false);
     assert.equal(renamedSessionApi.itemLabel('8002b'), '8002b', 'renamed non-numeric tmux sessions use the tmux name as the visible label');
@@ -2266,7 +2795,8 @@ async function runTabberSuite() {
     assert.ok(activeWindowRow?.nameHtml.includes('(pid=12345)'), 'PD4: agent Tabber rows render pid beside the compact visible sub-window label');
     assert.equal(/\stitle=/.test(activeWindowRow?.nameHtml || ''), false, 'visible Tabber window chrome strips nested native title hovers');
     assert.equal(activeWindowRow?.ariaCurrent, 'true', 'N10: the active tmux sub-window row exposes aria-current');
-    assert.equal(activeWindowRow?.date, api.sessionFileRelativeTimeText(Date.now() / 1000, Date.now() / 1000), 'working agent Tabber rows use the shared live-status clock even without transcript history');
+    const activeWindowNow = Date.now() / 1000;
+    assert.equal(activeWindowRow?.date, api.sessionFileRelativeTimeText(activeWindowNow, activeWindowNow), 'working agent Tabber rows use the shared live-status clock even without transcript history');
     assert.equal(activeWindowRow?.dateHtml, '', 'working agent Tabber rows keep status out of the date column');
     api.setAutoApproveStateForTest('1', {agent_windows: [
       {kind: 'claude', state: 'needs-input', last_active_ts: Date.now() / 1000 - 5, window_index: 0, window_name: 'claude', window_label: '0:claude'},
@@ -2493,7 +3023,7 @@ async function runTabberSuite() {
 
   test('drop-action suggestions honor category, settings, and last-used state', () => {
     // DOIT.57: drag-into-terminal suggestion registry (the transient 1..9 overlay's data layer).
-    const api = loadYolomux();
+    const api = loadYomux();
     assert.equal(api.fileDropCategory('/x/shot.png'), 'image');
     assert.equal(api.fileDropCategory('build.log'), 'log');
     assert.equal(api.fileDropCategory('app.py'), 'code');
@@ -2554,8 +3084,75 @@ async function runTabberSuite() {
     // registry's observable category/settings/last-used behavior without pinning implementation text.
   });
 
+  test('programmatic terminal insertion preserves bytes and sends before GUI ownership', () => {
+    const source = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
+    const coreSource = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+    const insertion = source.slice(source.indexOf('function insertIntoTerminal('), source.indexOf('function noteTerminalExplicitInput('));
+    const transport = source.slice(source.indexOf('function handleTerminalData('), source.indexOf('function shellQuote('));
+    const filtering = coreSource.slice(coreSource.indexOf('function stripTerminalQueryResponses('), coreSource.indexOf('const terminalLinkPattern'));
+    const events = [];
+    const sent = [];
+    let modifierCalls = 0;
+    const item = {
+      lastExplicitInputStartedAt: null,
+      term: {focus() { events.push('focus'); }},
+      socket: {readyState: 1, send(payload) { events.push('send'); sent.push(JSON.parse(payload)); }},
+    };
+    const context = {
+      readOnlyMode: false,
+      autoFocusEnabled: true,
+      terminals: new Map([['1', item]]),
+      WebSocket: {OPEN: 1},
+      performanceNow() { return 10; },
+      utf8ByteLength(value) { return Buffer.byteLength(value); },
+      clientPerfStart() {},
+      clientPerfEnd() {},
+      recordClientPerfCounter() {},
+      terminalDataWithMobileAccessoryModifiers(session, value) { modifierCalls += 1; return `\x1b${value}`; },
+      observeTerminalTmuxPrefixWindowSwitches() { events.push('observe'); },
+      acknowledgeTerminalAttentionFromTransportInput() { events.push('attention'); },
+      terminalDataShouldAcknowledgeAttention() { return true; },
+      closeOtherSessionPopovers() { events.push('popover'); },
+      commitTerminalExplicitInputOwnership() { events.push('ownership'); },
+      localizedHtml(value) { return value; },
+      statusErr() { events.push('error'); },
+    };
+    vm.createContext(context);
+    vm.runInContext(`${filtering}\n${transport}\n${insertion}`, context);
+    const bytes = "'/tmp/a b.png' \x1b[?1;2c\r";
+    assert.equal(context.insertIntoTerminal('1', bytes), true);
+    assert.deepEqual(sent, [{type: 'input', data: "'/tmp/a b.png' \r"}]);
+    assert.deepEqual(events, ['send', 'observe', 'attention', 'popover', 'ownership', 'focus']);
+    assert.equal(modifierCalls, 0, 'inserted paths and commands bypass latched mobile modifiers');
+    assert.equal(item.lastInputSentAt, 10, 'insertion retains the shared echo timing owner');
+
+    events.length = 0;
+    assert.equal(context.handleTerminalData('1', 'a'), true);
+    assert.equal(modifierCalls, 1, 'native terminal input retains the accessory modifier path');
+    assert.equal(sent.at(-1).data, '\x1ba');
+    assert.equal(events[0], 'send', 'native input also reaches transport before secondary work');
+
+    for (const input of ['', '\x1b[?1;2c']) {
+      events.length = 0;
+      assert.equal(context.insertIntoTerminal('1', input), false);
+      assert.deepEqual(events, [], 'empty/passive reports neither send nor change ownership');
+    }
+    events.length = 0;
+    item.socket.readyState = 0;
+    assert.equal(context.insertIntoTerminal('1', 'offline'), false);
+    assert.deepEqual(events, [], 'disconnected insertion neither focuses nor updates side panes');
+    item.socket.readyState = 1;
+    context.autoFocusEnabled = false;
+    assert.equal(context.insertIntoTerminal('1', 'no-focus'), true);
+    assert.equal(events.includes('focus'), false, 'insertion preserves disabled autofocus');
+    events.length = 0;
+    context.readOnlyMode = true;
+    assert.equal(context.insertIntoTerminal('1', 'read-only'), false);
+    assert.deepEqual(events, ['error'], 'read-only insertion reports the error without sending');
+  });
+
   await testAsync('drop-action status reuses the localized display label', async () => {
-    const api = loadYolomux('', ['1']);
+    const api = loadYomux('', ['1']);
     api.i18nSetCatalogForTest('fr', {
       'drop.action.imgDescribe': 'Décrire l’image',
       'status.insertedDropAction': 'inséré {name}',

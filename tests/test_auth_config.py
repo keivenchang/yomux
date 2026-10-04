@@ -199,30 +199,30 @@ def test_commit_time_display_uses_pt(monkeypatch):
     class GitResult:
         stdout = "2026-01-15T12:34:56+00:00\n"
 
-    monkeypatch.setattr(common, "_YOLOMUX_COMMIT_TIME_PT", None)
+    monkeypatch.setattr(common, "_YOMUX_COMMIT_TIME_PT", None)
     monkeypatch.setattr(common.subprocess, "run", lambda *args, **kwargs: GitResult())
 
-    assert common.yolomux_commit_time_pt() == "2026-01-15 04:34:56 PT"
+    assert common.yomux_commit_time_pt() == "2026-01-15 04:34:56 PT"
 
 
 def test_commit_sha_display_uses_git_head(monkeypatch):
     class GitResult:
         stdout = "abcdef123456\n"
 
-    monkeypatch.setattr(common, "_YOLOMUX_COMMIT_SHA", None)
+    monkeypatch.setattr(common, "_YOMUX_COMMIT_SHA", None)
     monkeypatch.setattr(common.subprocess, "run", lambda *args, **kwargs: GitResult())
 
-    assert common.yolomux_commit_sha() == "abcdef123456"
+    assert common.yomux_commit_sha() == "abcdef123456"
 
 
 def test_commit_count_display_uses_git_head(monkeypatch):
     class GitResult:
         stdout = "1234\n"
 
-    monkeypatch.setattr(common, "_YOLOMUX_COMMIT_COUNT", None)
+    monkeypatch.setattr(common, "_YOMUX_COMMIT_COUNT", None)
     monkeypatch.setattr(common.subprocess, "run", lambda *args, **kwargs: GitResult())
 
-    assert common.yolomux_commit_count() == 1234
+    assert common.yomux_commit_count() == 1234
 
 
 def test_version_status_displays_post_release_commits_and_dirty_worktree(monkeypatch):
@@ -334,12 +334,12 @@ def test_main_page_bootstrap_includes_version_commit(monkeypatch):
     monkeypatch.setattr(web, "agent_auth_status", lambda: {})
     monkeypatch.setattr(web, "rules_status", lambda: {})
     monkeypatch.setattr(web, "settings_payload", lambda: {"settings": {"general": {"language": "en"}}})
-    monkeypatch.setattr(web, "yolomux_commit_sha", lambda: "abcdef123456")
-    monkeypatch.setattr(web, "yolomux_commit_time_pt", lambda: "2026-01-15 04:34:56 PT")
-    monkeypatch.setattr(web, "yolomux_commit_count", lambda: 1234)
+    monkeypatch.setattr(web, "yomux_commit_sha", lambda: "abcdef123456")
+    monkeypatch.setattr(web, "yomux_commit_time_pt", lambda: "2026-01-15 04:34:56 PT")
+    monkeypatch.setattr(web, "yomux_commit_count", lambda: 1234)
     monkeypatch.setattr(web, "yomux_version_metadata", lambda: ("0.8.1(3)*", ["2026-09-09 05:34:56 PT Fix the thing"]))
-    monkeypatch.setattr(web, "yolomux_client_revision", lambda: "client-rev-test")
-    monkeypatch.setattr(web, "yolomux_dev_bundle_revision", lambda: "bundle-rev-test")
+    monkeypatch.setattr(web, "yomux_client_revision", lambda: "client-rev-test")
+    monkeypatch.setattr(web, "yomux_dev_bundle_revision", lambda: "bundle-rev-test")
     monkeypatch.setattr(web, "SERVER_STARTED_AT", 1234.5)
 
     page = web.html_page([])

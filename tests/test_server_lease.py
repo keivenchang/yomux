@@ -6,6 +6,7 @@ import time
 import pytest
 
 from tests.gate_harness import HttpPortLease
+from tests import isolated_dev_server as isolated_server_module
 from tests.isolated_dev_server import build_environment
 from tests.isolated_dev_server import build_paths
 from tests.isolated_dev_server import start_isolated_dev_server
@@ -13,17 +14,18 @@ from tests.isolated_dev_server import stop_and_reap_daemons
 from tests.tmux_runtime import start_isolated_tmux_runtime
 from tests.tmux_runtime import stop_isolated_tmux_runtime
 from yomux_lib.infra.host_identity import HostIdentity
-from yomux_lib.infra.root_paths import YolomuxRoots
+from yomux_lib.infra.root_paths import YomuxRoots
 from yomux_lib import server_lease as server_lease_module
 from yomux_lib.server_lease import acquire_server_port_lease
 from yomux_lib.server_lease import acquire_instance_and_port_leases
 from yomux_lib.server_lease import acquire_instance_root_lease
+from yomux_lib.server_lease import instance_root_is_available
 from yomux_lib.server_lease import InstanceLeaseError
 
 
 def _roots(tmp_path, prefix=""):
     base = tmp_path / prefix if prefix else tmp_path
-    return YolomuxRoots(
+    return YomuxRoots(
         config_dir=base / "config",
         state_dir=base / "state",
         cache_dir=base / "cache",
@@ -86,6 +88,26 @@ def test_instance_root_lease_blocks_a_second_server_on_another_port(tmp_path):
         first.release()
 
 
+def test_instance_root_preflight_preserves_records_and_releases_probe_locks(tmp_path):
+    roots = _roots(tmp_path)
+    assert instance_root_is_available(roots)
+    assert not any(path.exists() for path in roots.writable_paths())
+    lease = acquire_instance_root_lease(roots)
+    assert lease is not None
+    paths = [path / "instance.lock" for path in roots.writable_paths()]
+    records = {path: path.read_bytes() for path in paths}
+    try:
+        assert not instance_root_is_available(roots)
+        assert {path: path.read_bytes() for path in paths} == records
+    finally:
+        lease.release()
+    assert instance_root_is_available(roots)
+    assert {path: path.read_bytes() for path in paths} == records
+    replacement = acquire_instance_root_lease(roots)
+    assert replacement is not None
+    replacement.release()
+
+
 def test_instance_root_lease_identity_covers_the_complete_path_tuple(tmp_path):
     roots = _roots(tmp_path)
     first = acquire_instance_root_lease(roots)
@@ -99,7 +121,7 @@ def test_instance_root_lease_identity_covers_the_complete_path_tuple(tmp_path):
             "runtime": str(roots.runtime_dir),
         }
         assert acquire_instance_root_lease(roots) is None
-        changed = YolomuxRoots(
+        changed = YomuxRoots(
             config_dir=roots.config_dir,
             state_dir=roots.state_dir,
             cache_dir=tmp_path / "different-cache",
@@ -120,7 +142,7 @@ def test_instance_root_lease_blocks_any_shared_mutable_path(tmp_path):
     first = acquire_instance_root_lease(roots)
     assert first is not None
     try:
-        overlapping = YolomuxRoots(
+        overlapping = YomuxRoots(
             config_dir=tmp_path / "other-config",
             state_dir=roots.state_dir,
             cache_dir=tmp_path / "other-cache",
@@ -184,14 +206,14 @@ def test_combined_force_waits_for_owner_exit_after_early_lease_release(tmp_path)
     code = """import signal
 import time
 from pathlib import Path
-from yomux_lib.infra.root_paths import YolomuxRoots
+from yomux_lib.infra.root_paths import YomuxRoots
 from yomux_lib.server_lease import acquire_instance_and_port_leases
 
 a, b, c, d, e = map(Path, __import__('sys').argv[1:6])
 ready_path = Path(__import__('sys').argv[6])
 released_path = Path(__import__('sys').argv[7])
 leases = acquire_instance_and_port_leases(
-    YolomuxRoots(config_dir=a, state_dir=b, cache_dir=c, codex_home=d, runtime_dir=e),
+    YomuxRoots(config_dir=a, state_dir=b, cache_dir=c, codex_home=d, runtime_dir=e),
     9126,
 )
 
@@ -306,10 +328,10 @@ def test_force_does_not_stop_root_owner_when_requested_port_is_foreign(tmp_path)
     code = (
         "import time; "
         "from pathlib import Path; "
-        "from yomux_lib.infra.root_paths import YolomuxRoots; "
+        "from yomux_lib.infra.root_paths import YomuxRoots; "
         "from yomux_lib.server_lease import acquire_instance_root_lease; "
         "a,b,c,d,e=map(Path,__import__('sys').argv[1:6]); "
-        "lease=acquire_instance_root_lease(YolomuxRoots(config_dir=a,state_dir=b,cache_dir=c,codex_home=d,runtime_dir=e)); "
+        "lease=acquire_instance_root_lease(YomuxRoots(config_dir=a,state_dir=b,cache_dir=c,codex_home=d,runtime_dir=e)); "
         "Path(__import__('sys').argv[6]).write_text('ready'); "
         "time.sleep(60)"
     )
@@ -437,6 +459,100 @@ def test_process_level_force_replaces_existing_server(monkeypatch, tmp_path):
             stop_and_reap_daemons(replacement)
         elif first is not None:
             stop_and_reap_daemons(first)
+        stop_isolated_tmux_runtime(runtime)
+
+
+def test_isolated_server_readiness_failure_reaps_child_and_releases_port_lease(monkeypatch, tmp_path):
+    source_root = Path(__file__).resolve().parents[1]
+    paths = build_paths(tmp_path / "server")
+    runtime = start_isolated_tmux_runtime(monkeypatch, tmp_path / "tmux", session_count=1)
+    lease = HttpPortLease.reserve()
+    real_popen = subprocess.Popen
+    children = []
+
+    def spawn_paused_child(command, **kwargs):
+        if not any(str(source_root / name) in command for name in ("yomux.py", "yolomux.py")):
+            return real_popen(command, **kwargs)
+        child = real_popen(
+            [sys.executable, "-c", "import signal; signal.pause()"],
+            stdin=kwargs.get("stdin", subprocess.DEVNULL),
+            stdout=kwargs.get("stdout", subprocess.PIPE),
+            stderr=kwargs.get("stderr", subprocess.STDOUT),
+            text=kwargs.get("text", True),
+            start_new_session=kwargs.get("start_new_session", True),
+        )
+        children.append(child)
+        return child
+
+    def fail_readiness(*_args, **_kwargs):
+        raise RuntimeError("controlled readiness failure")
+
+    monkeypatch.setattr(isolated_server_module, "build_environment", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(isolated_server_module, "wait_until_serving", fail_readiness)
+    monkeypatch.setattr(isolated_server_module.subprocess, "Popen", spawn_paused_child)
+    try:
+        with pytest.raises(RuntimeError, match="controlled readiness failure"):
+            start_isolated_dev_server("readiness-failure", source_root, paths, runtime, port_lease=lease)
+        assert len(children) == 1
+        assert children[0].poll() is not None
+        assert not lease.reserved
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=5)
+        lease.close()
+        stop_isolated_tmux_runtime(runtime)
+
+
+def test_isolated_server_restart_failure_reaps_descendants_without_adopting_child(monkeypatch, tmp_path):
+    source_root = Path(__file__).resolve().parents[1]
+    paths = build_paths(tmp_path / "server")
+    runtime = start_isolated_tmux_runtime(monkeypatch, tmp_path / "tmux", session_count=1)
+    server = None
+    try:
+        server = start_isolated_dev_server("restart-readiness-failure", source_root, paths, runtime)
+        old_process = server.process
+        real_process_descendants = isolated_server_module.process_descendants
+        restart_descendant_batches = []
+        real_reap_descendants = isolated_server_module.reap_descendants
+        reaped_batches = []
+
+        def fail_readiness(*_args, **_kwargs):
+            raise RuntimeError("controlled restart readiness failure")
+
+        def record_reap(descendants):
+            batch = list(descendants)
+            reaped_batches.append(batch)
+            return real_reap_descendants(batch)
+
+        def record_descendants(root_pid):
+            batch = real_process_descendants(root_pid)
+            if root_pid == old_process.pid:
+                restart_descendant_batches.append(list(batch))
+            return batch
+
+        monkeypatch.setattr(isolated_server_module, "wait_until_serving", fail_readiness)
+        monkeypatch.setattr(isolated_server_module, "process_descendants", record_descendants)
+        monkeypatch.setattr(isolated_server_module, "reap_descendants", record_reap)
+        with pytest.raises(RuntimeError, match="controlled restart readiness failure"):
+            server.restart()
+        assert server.stopped
+        assert server.process is old_process
+        assert old_process.poll() is not None
+        # A transient child can exit before restart; compare cleanup with its own census.
+        assert len(restart_descendant_batches) == (1 if Path("/proc").is_dir() else 0)
+        old_descendants = restart_descendant_batches[0] if restart_descendant_batches else []
+        reaped_identities = {
+            (pid, identity)
+            for batch in reaped_batches
+            for pid, identity, _cmdline in batch
+        }
+        assert {(pid, identity) for pid, identity, _cmdline in old_descendants} <= reaped_identities
+        assert server.port_lease is not None and not server.port_lease.reserved
+    finally:
+        if server is not None:
+            stop_and_reap_daemons(server)
         stop_isolated_tmux_runtime(runtime)
 
 

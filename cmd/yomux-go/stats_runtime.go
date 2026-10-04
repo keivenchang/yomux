@@ -879,6 +879,9 @@ func (s *server) statsCapabilities(w http.ResponseWriter, r *http.Request) {
 		ranges = append(ranges, map[string]any{"range_seconds": window, "auto_resolution_seconds": autoResolution(window), "explicit_resolution_seconds": resolutions, "buckets": buckets})
 	}
 	payload := map[string]any{"resolution_choices": []int{1, 10, 60, 300}, "max_buckets": 600, "min_buckets": 12, "max_live_cadence_seconds": 60, "ranges": ranges}
+	if s.tokenCollector != nil {
+		payload["agent_history_refill"] = true
+	}
 	if s.statsMigration != nil {
 		payload["migration"] = cloneMap(s.statsMigration)
 	}

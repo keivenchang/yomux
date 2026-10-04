@@ -136,6 +136,7 @@ type Service struct {
 	gitReachabilityCache       *cache.LRU[string, struct{}]
 	gitHistoryStatsCache       *cache.LRU[string, gitHistoryStatsInfo]
 	gitObjectLayouts           gitObjectLayoutCache
+	gitObjectSnapshots         *darwinGitObjectSnapshotCache
 }
 
 type watchRecord struct {
@@ -292,6 +293,7 @@ func newService(root string, publish EventPublisher, native nativeWatchControlle
 		gitCommitCache:       cache.NewLRU[string, map[string]any](maxGitProductCacheEntries),
 		gitReachabilityCache: cache.NewLRU[string, struct{}](maxGitHistoryStatsCacheEntries),
 		gitHistoryStatsCache: cache.NewLRU[string, gitHistoryStatsInfo](maxGitHistoryStatsCacheEntries),
+		gitObjectSnapshots:   newDarwinGitObjectSnapshotCache(),
 	}
 	go s.watchLoop()
 	return s
@@ -300,6 +302,7 @@ func newService(root string, publish EventPublisher, native nativeWatchControlle
 func (s *Service) Close() {
 	s.stopOnce.Do(func() {
 		close(s.stop)
+		s.gitObjectSnapshots.close()
 		if s.native != nil {
 			s.nativeMu.Lock()
 			s.native.Close()

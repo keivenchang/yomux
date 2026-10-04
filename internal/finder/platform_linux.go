@@ -12,6 +12,13 @@ import (
 	"unsafe"
 )
 
+type darwinGitObjectSnapshotCache struct{}
+
+func newDarwinGitObjectSnapshotCache() *darwinGitObjectSnapshotCache {
+	return &darwinGitObjectSnapshotCache{}
+}
+func (*darwinGitObjectSnapshotCache) close() {}
+
 const atRemovedir = 0x200
 const sysRenameat2 = 316
 

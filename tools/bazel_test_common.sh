@@ -5,8 +5,44 @@ set -euo pipefail
 # one source-root resolver and one containment decision.
 bazel_go_sdk_version() {
   if [ "$(uname -s)" = Darwin ]; then
-    printf '1.24.13\n'
+    printf '1.27.1\n'
   fi
+}
+
+bazel_assert_value() {
+  local name="$1"
+  local expected="$2"
+  local actual="${!name-}"
+  if [ "$actual" != "$expected" ]; then
+    echo "$name must be $expected, got $actual" >&2
+    exit 1
+  fi
+}
+
+bazel_test_assert_tool_environment() {
+  bazel_assert_value GOWORK off
+  bazel_assert_value GO111MODULE on
+  bazel_assert_value GOTOOLCHAIN local
+  case "${YOMUX_BAZEL_EXECUTION:-container}" in
+    native)
+      bazel_assert_value GOPROXY https://proxy.golang.org,direct
+      bazel_assert_value GOSUMDB sum.golang.org
+      bazel_assert_value YOMUX_TEST_CONTAINER 0
+      bazel_assert_value GOPATH ""
+      bazel_assert_value GOCACHE ""
+      bazel_assert_value GOMODCACHE ""
+      return
+      ;;
+    container|docker)
+      bazel_assert_value GOPROXY off
+      bazel_assert_value GOSUMDB off
+      bazel_assert_value GOMODCACHE /opt/yomux-go-mod-cache
+      bazel_assert_value YOMUX_TEST_CONTAINER 1
+      ;;
+    *) echo "unknown Bazel execution mode" >&2; return 2 ;;
+  esac
+  bazel_assert_value GOPATH /tmp/yomux-bazel-private/go-path
+  bazel_assert_value GOCACHE /tmp/yomux-bazel-private/go-cache
 }
 
 bazel_test_in_container() {
@@ -23,7 +59,7 @@ bazel_native_browser_resolve() {
   local chromedriver="${CHROMEDRIVER_BIN:-}"
   local candidate
   if [ -z "$chrome" ]; then
-    for candidate in chromium chromium-browser google-chrome "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"; do
+    for candidate in chromium chromium-browser google-chrome google-chrome-stable; do
       if command -v "$candidate" >/dev/null 2>&1; then
         chrome="$(command -v "$candidate")"
         break
@@ -42,21 +78,25 @@ bazel_native_browser_resolve() {
   if [ -n "$chromedriver" ] && [ ! -x "$chromedriver" ]; then
     chromedriver="$(command -v "$chromedriver" || true)"
   fi
-  if [ -n "$chrome" ] && [ -x "$chrome" ] && [ -z "$chromedriver" ]; then
-    local chrome_version chrome_build selenium_driver_cache
-    chrome_version="$("$chrome" --version 2>/dev/null | sed -E -n 's/.* ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | sed -n '1p')"
-    chrome_build="${chrome_version%.*}"
-    selenium_driver_cache="${HOME:-}/.cache/selenium/chromedriver"
-    if [ -n "$chrome_build" ] && [ -d "$selenium_driver_cache" ]; then
-      chromedriver="$(find "$selenium_driver_cache" -type f -name chromedriver -path "*/$chrome_build/chromedriver" -perm -111 -print -quit 2>/dev/null || true)"
-    fi
-  fi
-  if [ -n "$chrome" ] && [ -x "$chrome" ] && { [ -n "$chromedriver" ] && [ -x "$chromedriver" ] || python3 -c 'import importlib.util; raise SystemExit(importlib.util.find_spec("selenium") is None)' >/dev/null 2>&1; }; then
+  if [ -n "$chrome" ] && [ -x "$chrome" ] && [ -n "$chromedriver" ] && [ -x "$chromedriver" ]; then
     BAZEL_NATIVE_CHROME_BIN="$chrome"
     BAZEL_NATIVE_CHROMEDRIVER_BIN="$chromedriver"
     return 0
   fi
   return 1
+}
+
+# Generated Go SDK output can be read-only. Repair only this invocation's private
+# execution tree; persistent repository and action caches never enter this helper.
+bazel_test_remove_run_root() {
+  local root="$1"
+  if rm -rf -- "$root" 2>/dev/null; then
+    return 0
+  fi
+  echo "Repairing read-only generated entries in private Bazel run root: $root" >&2
+  find "$root" -type d -exec chmod u+rwx {} + || return
+  find "$root" -type f -exec chmod u+rw {} + || return
+  rm -rf -- "$root"
 }
 
 bazel_resolve_path() {
@@ -130,10 +170,29 @@ bazel_test_prepare_repository_cache() {
     echo "Bazel repository cache seed could not be copied: $seed_root" >&2
     return 1
   fi
-  # The image seed is mode 0555 so even an accidental root process cannot alter it. The private
-  # copy belongs to this runner and must let Bazel create its extraction temp files.
   find "$cache_root" -type d -exec chmod u+rwx {} +
   find "$cache_root" -type f -exec chmod u+rw {} +
+}
+
+bazel_test_rlocation() {
+  local runfile="$1"
+  python3 - "$runfile" "${RUNFILES_DIR:-}" "${RUNFILES_MANIFEST_FILE:-}" <<'PY_RLOCATION'
+from pathlib import Path
+import sys
+name, runfiles_dir, manifest = sys.argv[1:]
+if runfiles_dir:
+    candidate = Path(runfiles_dir) / name
+    if candidate.exists():
+        print(candidate)
+        raise SystemExit(0)
+if manifest and Path(manifest).is_file():
+    for line in Path(manifest).read_text(encoding="utf-8").splitlines():
+        key, separator, value = line.partition(" ")
+        if separator and key == name and Path(value).exists():
+            print(value)
+            raise SystemExit(0)
+raise SystemExit(f"required Bazel runfile is missing: {name}")
+PY_RLOCATION
 }
 
 bazel_test_prepare_environment() {
@@ -158,7 +217,7 @@ bazel_test_prepare_environment() {
   # the host or a parent action into Go/browser fixtures.
   while IFS= read -r variable; do
     case "$variable" in
-      YOMUX_TEST_CONTAINER|YOMUX_TEST_SOURCE_ROOT|YOMUX_TEST_IMAGE|YOMUX_TEST_IMAGE_REBUILD|YOMUX_IMAGE_RUNNER_UID|YOMUX_IMAGE_RUNNER_GID|YOMUX_GO_BINARY|YOMUX_GO_STATS_BROWSER_TEST|YOMUX_WORKTREE_WRITER_SLOT|YOLOMUX_GO_BINARY|YOLOMUX_GO_STATS_BROWSER_TEST|YOLOMUX_TEST_CONTAINER|YOLOMUX_TEST_SOURCE_ROOT|YOLOMUX_WORKTREE_WRITER_SLOT)
+      YOMUX_BAZEL_CONTRACT|YOMUX_BAZEL_IMAGE_ID|YOMUX_BAZEL_EXECUTION|YOLOMUX_BAZEL_EXECUTION|YOMUX_TEST_CONTAINER|YOMUX_TEST_SOURCE_ROOT|YOMUX_TEST_IMAGE|YOMUX_TEST_IMAGE_REBUILD|YOMUX_IMAGE_RUNNER_UID|YOMUX_IMAGE_RUNNER_GID|YOMUX_GO_BINARY|YOMUX_GO_STATS_BROWSER_TEST|YOMUX_WORKTREE_WRITER_SLOT|YOLOMUX_GO_BINARY|YOLOMUX_GO_STATS_BROWSER_TEST|YOLOMUX_TEST_CONTAINER|YOLOMUX_TEST_SOURCE_ROOT|YOLOMUX_WORKTREE_WRITER_SLOT)
         continue
         ;;
       YOMUX_*|YOLOMUX_*|XDG_*|OPENCODE_*|CODEX_*|CLAUDE_*|TMUX|TMUX_PANE|TMUX_TMPDIR|PYTHONPATH|PYTHONHOME|PYTHONPYCACHEPREFIX)
@@ -169,6 +228,11 @@ bazel_test_prepare_environment() {
         ;;
     esac
   done < <(compgen -e)
+
+  # Native actions use their declared runfiles directly; routing pytest to Docker would require undeclared inputs.
+  if [ "${YOMUX_BAZEL_EXECUTION:-container}" = native ]; then
+    export YOLOMUX_CHECK_CONTAINER=0
+  fi
 
   # Bazel gives every test action its own TEST_TMPDIR. Do not point parallel actions at shared
   # client state; the remaining client roots are fixture-owned below.
@@ -209,5 +273,9 @@ bazel_test_prepare_environment() {
   }
   trap bazel_test_cleanup EXIT
   export TMPDIR="$short_tmpdir"
+  export GOPATH="$root/go-path"
+  export GOCACHE="$root/go-cache"
+  export GOMODCACHE="$root/go-module-cache"
+  mkdir -p -- "$GOPATH" "$GOCACHE" "$GOMODCACHE"
   export YOLOMUX_BAZEL_TEST="1"
 }

@@ -39,11 +39,11 @@ from yomux_lib.infra.malloc_tuning import cap_malloc_arenas
 
 cap_malloc_arenas()
 
-from yomux_lib.infra.root_paths import YolomuxRootError
+from yomux_lib.infra.root_paths import YomuxRootError
 
 try:
     from yomux_lib.cli import main as _cli_main
-except YolomuxRootError as error:
+except YomuxRootError as error:
     print(f"ERROR: {error}", file=sys.stderr)
     raise SystemExit(2) from error
 

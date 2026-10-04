@@ -274,7 +274,9 @@ function setSessionFilesPayloadForDestination(destination, payload, options = {}
   if (options.invalidateRequest !== false) retireSessionFilesRequest(destination, options.retirementReason);
   state.payload = payload;
   scheduleSessionFilesProducerDeadline(destination, payload);
-  if (destination === 'finder') updateFileExplorerSessionHighlightRows();
+  if (destination === 'finder') {
+    scheduleFileTreeMetadataRefresh({highlightsOnly: true});
+  }
   if (
     destination === 'finder'
     && fileExplorerRootMode === 'sync'
@@ -352,7 +354,7 @@ function finishFinderFastPaint() {
   markFinderFastListingPainted();
   ensureSessionFilesSurfaceLoaded('finder', {fetchEvenWhenPush: true});
   releaseFinderSessionFilesDiffBackfillIfReady();
-  updateFileTreeGitStatusRows();
+  scheduleFileTreeMetadataRefresh();
 }
 
 function scheduleFinderSessionFilesBackfillAfterFastPaint(session) {
@@ -365,7 +367,7 @@ function scheduleFinderSessionFilesBackfillAfterFastPaint(session) {
       void fetchSessionFiles({destination: 'finder', session: expectedSession, silent: true, force: true});
     }
     releaseFinderSessionFilesDiffBackfillIfReady();
-    updateFileTreeGitStatusRows();
+    scheduleFileTreeMetadataRefresh();
   });
 }
 
@@ -489,7 +491,7 @@ function mergeSessionFilesStreamChunk(destination, session, chunk, requestIsCurr
       : chunkFiles;
     changedRepo = {
       repo: chunkRepos[0].repo,
-      files: destination === 'differ' ? fileExplorerDifferFiles({files: repoFiles}) : repoFiles,
+      files: repoFiles,
       repos: chunkRepos,
     };
   }
@@ -562,7 +564,7 @@ function renderSessionFilesDestination(destination, options = {}) {
     return;
   }
   if (destination === 'finder') {
-    updateFileTreeGitStatusRows();
+    scheduleFileTreeMetadataRefresh();
   } else {
     renderFileExplorerChangesPanels({...options, view: 'differ'});
   }
@@ -623,15 +625,24 @@ async function fetchSessionFiles(options = {}) {
     try {
       if (streamMode) {
         if (destination === 'finder') fileExplorerFinderSessionFilesState.partialBackfillPainted = false;
-        const partialPayload = {...emptySessionFilesPayload(session, false, destination), streaming: true};
-        setSessionFilesPayloadForDestination(destination, partialPayload, {invalidateRequest: false});
-        setSessionFilesSignatureForDestination(destination, sessionFilesPayloadSignatureForPayload(partialPayload));
+        const retainedPayload = backgroundRefresh && sessionFilesPayloadIsLoadedForSession(state.payload, session) ? state.payload : null;
+        const initializeStreamPayload = () => {
+          const partialPayload = {...emptySessionFilesPayload(session, false, destination), streaming: true};
+          setSessionFilesPayloadForDestination(destination, partialPayload, {invalidateRequest: false});
+          setSessionFilesSignatureForDestination(destination, sessionFilesPayloadSignatureForPayload(partialPayload));
+        };
+        if (!retainedPayload) initializeStreamPayload();
         try {
           const donePayload = await fetchSessionFilesStream(
             `/api/session-files-stream?${params.toString()}`,
             state,
             requestIsCurrent,
-            chunk => mergeSessionFilesStreamChunk(destination, session, chunk, requestIsCurrent),
+            chunk => {
+              if (!requestIsCurrent()) return false;
+              // The first repository starts a fresh aggregate; cached files must not be appended twice.
+              if (state.payload === retainedPayload) initializeStreamPayload();
+              return mergeSessionFilesStreamChunk(destination, session, chunk, requestIsCurrent);
+            },
           );
           if (!requestIsCurrent()) return;
           payload = finalizeSessionFilesStreamPayload(state, {
@@ -646,9 +657,11 @@ async function fetchSessionFiles(options = {}) {
           if (![404, 501].includes(Number(streamError?.status))) throw streamError;
           streamMode = false;
           clearSessionFilesStreamState(state);
-          const fallbackPayload = emptySessionFilesPayload(session, false, destination);
-          setSessionFilesPayloadForDestination(destination, fallbackPayload, {invalidateRequest: false});
-          setSessionFilesSignatureForDestination(destination, sessionFilesPayloadSignatureForPayload(fallbackPayload));
+          if (state.payload !== retainedPayload) {
+            const fallbackPayload = emptySessionFilesPayload(session, false, destination);
+            setSessionFilesPayloadForDestination(destination, fallbackPayload, {invalidateRequest: false});
+            setSessionFilesSignatureForDestination(destination, sessionFilesPayloadSignatureForPayload(fallbackPayload));
+          }
           payload = await apiFetchJson(
             requestUrl,
             {deadlineMs: 5000, ...(requestController ? {signal: requestController.signal} : {})},
@@ -675,7 +688,6 @@ async function fetchSessionFiles(options = {}) {
       });
     }
     const nextPayload = normalizedSessionFilesPayload(payload, {session, from_ref: request.from_ref, to_ref: request.to_ref});
-    const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     if (!requestIsCurrent()) return;
     if (backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination)) return;
     if (cacheOnly && sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination)) return true;
@@ -1066,22 +1078,26 @@ function sessionFileStatusCountParts(counts = {}) {
 
 function sortedSessionFiles(files, view = 'differ') {
   const items = Array.isArray(files) ? files.slice() : [];
+  return items.sort(sessionFilesSortComparator(view));
+}
+
+function sessionFilesSortComparator(view = 'differ') {
   const uploadOrder = item => item?.uploaded === true ? 1 : 0;
   const mode = fileExplorerTreeSortModeForView(view);
-  const nameCompare = (left, right) => String(left.path || '').localeCompare(String(right.path || ''), undefined, {numeric: true, sensitivity: 'base'})
-    || String(left.repo || '').localeCompare(String(right.repo || ''), undefined, {numeric: true, sensitivity: 'base'});
+  const nameCompare = (left, right) => FILE_TREE_NAME_COLLATOR.compare(String(left.path || ''), String(right.path || ''))
+    || FILE_TREE_NAME_COLLATOR.compare(String(left.repo || ''), String(right.repo || ''));
   if (mode === 'az' || mode === 'za') {
-    return items.sort((left, right) => uploadOrder(left) - uploadOrder(right)
-      || nameCompare(left, right) * (mode === 'za' ? -1 : 1));
+    return (left, right) => uploadOrder(left) - uploadOrder(right)
+      || nameCompare(left, right) * (mode === 'za' ? -1 : 1);
   }
-  return items.sort((left, right) => {
+  return (left, right) => {
     const uploadResult = uploadOrder(left) - uploadOrder(right);
     if (uploadResult !== 0) return uploadResult;
     const leftMtime = Number(left.mtime || 0);
     const rightMtime = Number(right.mtime || 0);
     const mtimeResult = mode === 'oldest' ? leftMtime - rightMtime : rightMtime - leftMtime;
     return mtimeResult || nameCompare(left, right);
-  });
+  };
 }
 
 function groupedSessionFiles(files) {
@@ -1195,9 +1211,14 @@ function fileExplorerDifferFiles(payload = fileExplorerSessionFilesState.payload
 }
 
 function changeFileTotals(files) {
+  return drainFileTreeRenderSteps(changeFileTotalsSteps(files));
+}
+
+function* changeFileTotalsSteps(files) {
   let added = 0;
   let removed = 0;
   for (const item of Array.isArray(files) ? files : []) {
+    yield;
     if (item?.diff_tracked !== true) continue;
     const add = Number(item?.added);
     const remove = Number(item?.removed);
@@ -1213,7 +1234,9 @@ function repoAggregateNumber(value, fallback = 0) {
 }
 
 function changesRepoTotals(repoInfo, entries) {
-  const fallback = changeFileTotals(entries);
+  const fallback = Number.isFinite(Number(repoInfo?.added)) && Number.isFinite(Number(repoInfo?.removed))
+    ? {added: 0, removed: 0}
+    : changeFileTotals(entries);
   return {
     added: repoAggregateNumber(repoInfo?.added, fallback.added),
     removed: repoAggregateNumber(repoInfo?.removed, fallback.removed),
@@ -1293,11 +1316,11 @@ function changesRepoCount(payload, files) {
   return repos.size;
 }
 
-function changesSummaryHtml(payload, files, session, loading, loaded) {
+function changesSummaryHtml(payload, files, session, loading, loaded, counts = null) {
   if (loading) return changesLoadingHtml(session);
   if (!loaded) return t('state.notLoaded');
-  const fileCount = Array.isArray(files) ? files.length : 0;
-  const repoCount = changesRepoCount(payload, files);
+  const fileCount = Number.isInteger(counts?.fileCount) ? counts.fileCount : Array.isArray(files) ? files.length : 0;
+  const repoCount = Number.isInteger(counts?.repoCount) ? counts.repoCount : changesRepoCount(payload, files);
   const repos = tPlural('changes.repoCount', repoCount);
   const count = tPlural('changes.fileCount', fileCount);
   const scope = session ? t('changes.inSession', {session: sessionLabel(session)}) : '';
@@ -1357,7 +1380,7 @@ function changesComparisonHeaderHtml(payload, files, options = {}) {
     if (!loaded) return `<section class="changes-comparison-head compact">${esc(t('state.notLoaded'))}</section>`;
     return '';
   }
-  const summary = changesSummaryHtml(payload, files, payload?.session || '', loading, loaded);
+  const summary = options.deferSummary === true ? '' : changesSummaryHtml(payload, files, payload?.session || '', loading, loaded);
   return `<section class="changes-comparison-head">
     <div class="changes-comparison-summary">${summary}</div>
   </section>`;

@@ -5,30 +5,70 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/bazelbuild/rules_go/go/runfiles"
 )
 
-// RepoRoot returns the source/runfiles root for the current test. Bazel tests must
-// resolve declared data through runfiles; the checkout walk keeps direct `go test`
-// useful without making tests depend on the caller's working directory.
+func inBazel() bool {
+	return os.Getenv("TEST_SRCDIR") != "" || os.Getenv("RUNFILES_DIR") != "" || os.Getenv("RUNFILES_MANIFEST_FILE") != ""
+}
+
+func requiredRunfile(t testing.TB, name string) string {
+	t.Helper()
+	path, err := resolveRequiredRunfile(name)
+	if err != nil {
+		t.Fatalf("resolve required runfile %q: %v", name, err)
+	}
+	return path
+}
+
+func resolveRequiredRunfile(name string) (string, error) {
+	path, err := resolveRunfile(name)
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(path); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func resolveRunfile(name string) (string, error) {
+	files, err := runfiles.New()
+	if err != nil {
+		return "", err
+	}
+	return files.Rlocation(name)
+}
+
+// RepoRoot resolves a declared physical tree. Python imports require a directory;
+// Bazel materializes precisely that consumer's inputs instead of inferring siblings
+// from the physical location of an arbitrary runfile marker.
 func RepoRoot(t testing.TB) string {
 	t.Helper()
-	if root, ok := rootFromRunfiles(); ok {
-		return root
+	if inBazel() {
+		name := os.Getenv("YOMUX_REPO_ROOT_RUNFILE")
+		if name == "" {
+			t.Fatal("Bazel target omitted YOMUX_REPO_ROOT_RUNFILE")
+		}
+		return requiredRunfile(t, name)
 	}
 	if root, ok := rootFromCheckout(); ok {
 		return root
 	}
-	t.Fatalf("could not locate the YOmux repository in Bazel runfiles or the checkout")
+	t.Fatal("could not locate the YOmux repository")
 	return ""
 }
 
-// RepoPath returns a declared repository file or directory and fails with the
-// requested relative path when the test data graph is incomplete.
+// RepoPath resolves individual data independently, including manifest-only layouts.
 func RepoPath(t testing.TB, relative string) string {
 	t.Helper()
 	clean := filepath.Clean(relative)
 	if clean == "." || filepath.IsAbs(relative) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 		t.Fatalf("repository data path must be relative and below the repository: %q", relative)
+	}
+	if inBazel() && strings.HasPrefix(filepath.ToSlash(clean), "internal/") {
+		return requiredRunfile(t, "yomux/"+filepath.ToSlash(clean))
 	}
 	path := filepath.Join(RepoRoot(t), clean)
 	if _, err := os.Stat(path); err != nil {
@@ -37,43 +77,23 @@ func RepoPath(t testing.TB, relative string) string {
 	return path
 }
 
-func rootFromRunfiles() (string, bool) {
-	const marker = "yomux_lib/__init__.py"
-	baseDirectories := make([]string, 0, 4)
-	for _, name := range []string{"RUNFILES_DIR", "TEST_SRCDIR"} {
-		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
-			baseDirectories = append(baseDirectories, value)
+// ExternalBinary is mandatory for the dedicated parity targets. A missing input
+// is a graph defect, never a reason to report a skipped parity case.
+func ExternalBinary(t testing.TB) string {
+	t.Helper()
+	name := os.Getenv("YOMUX_GO_BINARY_RUNFILE")
+	path := os.Getenv("YOMUX_GO_BINARY")
+	if inBazel() {
+		if name == "" {
+			t.Fatal("integration target omitted YOMUX_GO_BINARY_RUNFILE")
 		}
+		path = requiredRunfile(t, name)
 	}
-	relativeNames := []string{marker, "_main/" + marker, "yolomux/" + marker}
-	if workspace := os.Getenv("TEST_WORKSPACE"); workspace != "" {
-		relativeNames = append([]string{workspace + "/" + marker}, relativeNames...)
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() || info.Mode()&0111 == 0 {
+		t.Fatalf("required external Go executable %q is unavailable: %v", path, err)
 	}
-	for _, base := range baseDirectories {
-		for _, name := range relativeNames {
-			path := filepath.Join(base, filepath.FromSlash(name))
-			if _, err := os.Stat(path); err == nil {
-				return filepath.Dir(filepath.Dir(path)), true
-			}
-		}
-	}
-	// A manifest-only launcher may omit RUNFILES_DIR. Resolve just the marker
-	// entry; the remaining declared files stay under the same runfiles root.
-	manifestPath := strings.TrimSpace(os.Getenv("RUNFILES_MANIFEST_FILE"))
-	if manifestPath != "" {
-		data, err := os.ReadFile(manifestPath)
-		if err == nil {
-			for _, line := range strings.Split(string(data), "\n") {
-				fields := strings.Fields(line)
-				if len(fields) == 2 && fields[0] == marker {
-					if _, statErr := os.Stat(fields[1]); statErr == nil {
-						return filepath.Dir(filepath.Dir(fields[1])), true
-					}
-				}
-			}
-		}
-	}
-	return "", false
+	return path
 }
 
 func rootFromCheckout() (string, bool) {
@@ -85,8 +105,7 @@ func rootFromCheckout() (string, bool) {
 		if _, err := os.Stat(filepath.Join(directory, "yomux_lib", "__init__.py")); err == nil {
 			return directory, true
 		}
-		parent := filepath.Dir(directory)
-		if parent == directory {
+		if filepath.Dir(directory) == directory {
 			return "", false
 		}
 	}

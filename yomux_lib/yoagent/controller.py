@@ -523,7 +523,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
 
 
     def load_yoagent_jobs(self) -> dict[str, dict[str, Any]]:
-        raw = self.deps.read_yolomux_state().get(YOAGENT_JOBS_STATE_KEY, {})
+        raw = self.deps.read_yomux_state().get(YOAGENT_JOBS_STATE_KEY, {})
         items = raw.values() if isinstance(raw, dict) else raw if isinstance(raw, list) else []
         jobs: dict[str, dict[str, Any]] = {}
         recovered_firing = False
@@ -533,14 +533,14 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
                 jobs[str(job["id"])] = job
                 recovered_firing = recovered_firing or str(item.get("status") or "") == "firing"
         if recovered_firing:
-            self.deps.update_yolomux_state({YOAGENT_JOBS_STATE_KEY: jobs})
+            self.deps.update_yomux_state({YOAGENT_JOBS_STATE_KEY: jobs})
         return jobs
 
 
     def persist_yoagent_jobs_locked(self) -> None:
         jobs = dict(sorted(self.yoagent_jobs.items(), key=lambda item: float(item[1].get("created_ts") or 0), reverse=True)[:YOAGENT_JOB_MAX_ITEMS])
         self.yoagent_jobs = jobs
-        self.deps.update_yolomux_state({YOAGENT_JOBS_STATE_KEY: jobs})
+        self.deps.update_yomux_state({YOAGENT_JOBS_STATE_KEY: jobs})
 
 
     def publish_yoagent_jobs_changed(self, reason: str, job: dict[str, Any] | None = None) -> None:
@@ -1045,7 +1045,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             loop_due = predicate_type != "interval" or now >= self.float_value(job.get("next_run_ts"), now)
             return copy.deepcopy(job), ready and ready_after_working and loop_due and now - since >= quiet_seconds
 
-        current, should_fire = self.deps.mutate_yolomux_state(update)
+        current, should_fire = self.deps.mutate_yomux_state(update)
         if current:
             with self.yoagent_job_lock:
                 self.yoagent_jobs[job_id] = copy.deepcopy(current)
@@ -1066,7 +1066,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             state[YOAGENT_JOBS_STATE_KEY] = jobs
             return copy.deepcopy(job)
 
-        claimed = self.deps.mutate_yolomux_state(claim)
+        claimed = self.deps.mutate_yomux_state(claim)
         if not claimed:
             return None
         with self.yoagent_job_lock:

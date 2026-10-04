@@ -3966,18 +3966,9 @@ function insertIntoTerminal(session, text) {
     statusErr(localizedHtml('status.readOnlyTypeTerminals'));
     return false;
   }
-  const item = terminals.get(session);
-  if (!item) return false;
-  const filtered = stripTerminalQueryResponses(text);
-  if (!filtered) return false;
-  noteFileExplorerChangesSessionInteraction(session);
-  setFocusedTerminal(session, {userInitiated: true});
-  if (item.socket?.readyState !== WebSocket.OPEN) return false;
-  const sendPerf = clientPerfStart('wsSend');
-  item.socket.send(JSON.stringify({type: 'input', data: filtered}));
-  clientPerfEnd(sendPerf, {bytes: utf8ByteLength(filtered)});
-  item.lastInputSentAt = performanceNow();
-  if (autoFocusEnabled) item.term?.focus?.();
+  if (!handleTerminalData(session, text, {bypassMobileAccessoryModifiers: true})) return false;
+  commitTerminalExplicitInputOwnership(session);
+  if (autoFocusEnabled) terminals.get(session)?.term?.focus?.();
   return true;
 }
 
@@ -4392,28 +4383,28 @@ function handleTerminalDataMeasured(session, data, options = {}) {
   if (!filtered) return false;
   const current = terminals.get(session);
   const explicitInputStartedAt = Number(current?.lastExplicitInputStartedAt);
-  const explicitInput = Number.isFinite(explicitInputStartedAt);
+  const explicitInput = current?.lastExplicitInputStartedAt != null && Number.isFinite(explicitInputStartedAt);
   if (explicitInput) {
     const durationMs = performanceNow() - explicitInputStartedAt;
     current.lastExplicitInputStartedAt = null;
     recordClientPerfCounter('keydownToTermData', durationMs, {bytes: utf8ByteLength(filtered)});
-  }
-  // Physical/mobile key input can arrive without another pointer event. Retire a touch-opened
-  // tab detail here as well, while keeping passive terminal protocol reports from dismissing it.
-  if (terminalDataShouldAcknowledgeAttention(filtered) && typeof closeOtherSessionPopovers === 'function') {
-    closeOtherSessionPopovers(null, {force: true});
   }
   const socket = current?.socket;
   if (socket?.readyState !== WebSocket.OPEN) {
     if (explicitInput) commitTerminalExplicitInputOwnership(session);
     return false;
   }
-  observeTerminalTmuxPrefixWindowSwitches(session, filtered);
-  acknowledgeTerminalAttentionFromTransportInput(session, filtered, options);
   const sendPerf = clientPerfStart('wsSend');
   socket.send(JSON.stringify({type: 'input', data: filtered}));
   clientPerfEnd(sendPerf, {bytes: utf8ByteLength(filtered)});
   current.lastInputSentAt = performanceNow();
+  observeTerminalTmuxPrefixWindowSwitches(session, filtered);
+  acknowledgeTerminalAttentionFromTransportInput(session, filtered, options);
+  // Physical/mobile key input can arrive without another pointer event. Retire a touch-opened
+  // tab detail here as well, while keeping passive terminal protocol reports from dismissing it.
+  if (terminalDataShouldAcknowledgeAttention(filtered) && typeof closeOtherSessionPopovers === 'function') {
+    closeOtherSessionPopovers(null, {force: true});
+  }
   if (explicitInput) commitTerminalExplicitInputOwnership(session);
   return true;
 }
@@ -4586,11 +4577,21 @@ function updatePaneExpandButton(panel, session) {
   if (button) button.hidden = !canPaneExpand(session);
 }
 
+function scheduleTerminalReferenceUnderlineRepaint(session) {
+  terminals.get(session)?.fileUnderlineController?.schedule?.({reason: 'activation', viewportChanged: true});
+}
+
 function syncPanelVisibility(previousActive = []) {
   const visible = new Set(activeSessions);
   const previouslyVisible = new Set(previousActive);
-  for (const item of activeSessions) {
-    if (isFileExplorerItem(item) && !previouslyVisible.has(item)) activateFileExplorerSurface(item);
+  const newlyVisibleFileSurfaces = activeSessions.filter(item => isFileExplorerItem(item) && !previouslyVisible.has(item));
+  if (newlyVisibleFileSurfaces.length) {
+    const generation = tabSwitchHighlightGeneration;
+    scheduleTabSwitchPhaseTwo(generation, () => {
+      for (const item of newlyVisibleFileSurfaces) {
+        if (itemIsActivePaneTab(item)) activateFileExplorerSurface(item);
+      }
+    });
   }
   for (const session of sessions) {
     if (!visible.has(session)) {
@@ -4602,13 +4603,18 @@ function syncPanelVisibility(previousActive = []) {
   }
   for (const session of activeSessions.filter(isTmuxSession)) {
     const pane = document.getElementById(`terminal-pane-${session}`);
-    if (pane?.classList.contains(CLS.active)) scheduleFit(session);
+    if (pane?.classList.contains(CLS.active)) {
+      scheduleFit(session);
+      scheduleTerminalReferenceUnderlineRepaint(session);
+    }
   }
   if (typeof syncChatActiveLifecycle === 'function') syncChatActiveLifecycle();
 }
 
 function activateTab(session, name, options = {}) {
-  setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
+  if (name !== 'terminal' || options.userInitiated !== true) {
+    setFocusedPanelItem(session, {userInitiated: options.userInitiated === true, deferSideSync: options.userInitiated === true});
+  }
   if (name !== 'transcript') stopTranscriptStream(session);
   if (name !== 'summary') stopSummaryStream(session);
   document.querySelectorAll(`[data-tab="${session}"]`).forEach(button => {
@@ -4623,6 +4629,7 @@ function activateTab(session, name, options = {}) {
   }
   updateTypingIndicator(session);
   if (name === 'terminal') {
+    scheduleTerminalReferenceUnderlineRepaint(session);
     scheduleFit(session);
     setTimeout(() => refreshTerminal(session), terminalRefreshAfterTabSelectMs);
     scheduleTerminalBlankScreenRefresh(session, {reason: 'terminal-tab'});
@@ -5048,6 +5055,8 @@ function processTerminalSocketFrame(session, item, data) {
   if (consumedControl) return;
   const firstOutput = item.terminalOutputSeen !== true;
   item.terminalOutputSeen = true;
+  // Output resumes a committed paint barrier; it must not consume a held tab's pointer intent.
+  if (dockviewLayoutState.tabActivationPerf?.terminal) dockviewFinishTabActivationPerf(session);
   clearTerminalConnectionState(session);
   // The first resize frame can reach the server before tmux has registered its new attach client.
   // First PTY output proves the attach exists, so repeat the visible surface's authority claim once.
@@ -5732,14 +5741,16 @@ function autoApproveOwnerLabel(payload) {
 }
 
 function renderAutoApproveButtons(sessionNames = sessions) {
+  const controlNodes = collectSessionControlNodes(sessionNames);
   for (const session of sessionNames) {
     const state = autoApproveStates.get(session) || {target: session, enabled: false, last_action: 'off'};
-    renderAutoApproveButton(session, state);
+    renderAutoApproveButton(session, state, controlNodes.get(session));
   }
 }
 
-function renderAutoApproveButton(session, payload) {
-  const buttons = document.querySelectorAll(`[data-yolo-session="${cssEscape(session)}"]`);
+function renderAutoApproveButton(session, payload, controlNodes = null) {
+  const nodes = controlNodes || collectSessionControlNodes([session]).get(session);
+  const buttons = nodes.yoloButtons;
   const enabled = payload?.enabled === true;
   const locked = payload?.locked === true && !enabled;
   const working = sessionYoloIsWorking(session, payload);
@@ -5762,7 +5773,7 @@ function renderAutoApproveButton(session, payload) {
     if (button.closest('.tabber-session-tab')) button.removeAttribute('title');
     else button.title = buttonLabel;
   }
-  updatePanelHeader(session, transcriptMetadataState.payload.sessions?.[session]);
+  updatePanelHeader(session, transcriptMetadataState.payload.sessions?.[session], nodes);
   updateTypingIndicator(session);
 }
 
@@ -6613,19 +6624,18 @@ function updatePanelInfoBarMeta(session, info) {
   const controls = document.getElementById(`meta-controls-${session}`);
   const {controlsHtml, metadataHtml} = paneInfoBarMetaParts(session, info);
   const html = stripTitleAttrs(metadataHtml);
-  if (controls && controls.innerHTML !== controlsHtml) controls.innerHTML = controlsHtml;
-  const changed = meta.innerHTML !== html;
-  if (changed) meta.innerHTML = html;
+  if (controls) setInnerHtmlIfChanged(controls, controlsHtml);
+  const changed = setInnerHtmlIfChanged(meta, html);
   meta.removeAttribute('title');
   if (changed) schedulePaneInfoBarMetaOverflowSync(meta);
 }
 
-function updatePanelHeader(session, info) {
+function updatePanelHeader(session, info, controlNodes = null) {
   const tab = document.getElementById(paneTabDomId(session));
   const panel = document.getElementById(panelDomId(session));
   const auto = autoApproveStates.get(session)?.enabled === true;
   const state = sessionState(session, info);
-  updatePanelControlLabels(session, info);
+  updatePanelControlLabels(session, info, controlNodes);
   syncAttentionAnimation(panel, state.attention === true);
   if (tab) {
     tab.className = 'panel-session-label';

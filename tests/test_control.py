@@ -59,7 +59,7 @@ def response_from_fake_connection(conn):
 
 
 def test_control_server_does_not_leak_unexpected_handler_errors(caplog):
-    server = control.YolomuxControlServer(lambda _request: (_ for _ in ()).throw(RuntimeError("secret token")))
+    server = control.YomuxControlServer(lambda _request: (_ for _ in ()).throw(RuntimeError("secret token")))
     conn = FakeConnection(b'{"action":"boom"}\n')
 
     server.serve_connection(conn)
@@ -69,7 +69,7 @@ def test_control_server_does_not_leak_unexpected_handler_errors(caplog):
 
 
 def test_control_server_returns_expected_control_request_error():
-    server = control.YolomuxControlServer(lambda _request: (_ for _ in ()).throw(control.ControlRequestError("unknown action")))
+    server = control.YomuxControlServer(lambda _request: (_ for _ in ()).throw(control.ControlRequestError("unknown action")))
     conn = FakeConnection(b'{"action":"bad"}\n')
 
     server.serve_connection(conn)
@@ -78,7 +78,7 @@ def test_control_server_returns_expected_control_request_error():
 
 
 def test_control_server_ignores_broken_pipe_during_response():
-    server = control.YolomuxControlServer(lambda _request: {"ok": True})
+    server = control.YomuxControlServer(lambda _request: {"ok": True})
     conn = BrokenPipeConnection(b'{"action":"ping"}\n')
 
     server.serve_connection(conn)
@@ -109,7 +109,7 @@ def test_control_socket_path_keeps_control_budget_when_runtime_fallback_is_long(
     assert len(os.fsencode(str(path))) < control.CONTROL_SOCKET_PATH_LIMIT
 
 
-def test_send_yolomux_control_request_round_trips(monkeypatch):
+def test_send_yomux_control_request_round_trips(monkeypatch):
     response = {"ok": True, "echo": {"action": "ping"}}
     fake_socket = FakeClientSocket(b"")
     fake_socket.incoming.clear()
@@ -136,7 +136,7 @@ def test_send_yolomux_control_request_round_trips(monkeypatch):
     fake_socket.sendall = fake_sendall
     monkeypatch.setattr(control.socket, "socket", lambda *_args: fake_socket)
 
-    response = control.send_yolomux_control_request({"control_socket": "/tmp/yolomux.sock"}, {"action": "ping"})
+    response = control.send_yomux_control_request({"control_socket": "/tmp/yolomux.sock"}, {"action": "ping"})
 
     assert response == {"ok": True, "echo": {"action": "ping"}}
     assert fake_socket.connected_to == "/tmp/yolomux.sock"
@@ -147,13 +147,13 @@ def test_send_yolomux_control_request_round_trips(monkeypatch):
 
 
 def test_control_server_current_rpc_socket_round_trip():
-    server = control.YolomuxControlServer(lambda request: {"ok": True, "echo": request})
+    server = control.YomuxControlServer(lambda request: {"ok": True, "echo": request})
     server.start()
     try:
         deadline = time.monotonic() + 1.0
         response = {"ok": False}
         while time.monotonic() < deadline:
-            response = control.send_yolomux_control_request(server.owner_payload(), {"action": "ping"}, timeout=0.1)
+            response = control.send_yomux_control_request(server.owner_payload(), {"action": "ping"}, timeout=0.1)
             if response.get("ok"):
                 break
             time.sleep(0.01)
@@ -167,7 +167,7 @@ def test_control_server_current_rpc_socket_round_trip():
 # ---------------------------------------------------------------------------
 # Predecessor control-socket cleanup.
 #
-# `YolomuxControlServer.__init__` (control.py:52) names its socket
+# `YomuxControlServer.__init__` names its socket
 # `yolomux-<pid>-<id(self):x>.sock`. `id(self)` is a CPython object address: it
 # is reused as soon as a previous server object is collected, and it carries no
 # information about which generation owns the file. Nothing anywhere enumerates
@@ -194,7 +194,7 @@ def test_control_socket_name_is_not_a_reusable_memory_address(monkeypatch, tmp_p
     """
     monkeypatch.setattr(control, "CONTROL_SOCKET_DIR", tmp_path)
 
-    server = control.YolomuxControlServer(lambda request: {"ok": True, "echo": request})
+    server = control.YomuxControlServer(lambda request: {"ok": True, "echo": request})
 
     # Positive control: the name really is derived from this process at all.
     assert len(server.path.name) <= 20, "the bounded fallback socket name is not stable"
@@ -221,7 +221,7 @@ def test_control_server_start_reclaims_only_its_own_stale_predecessor_socket(mon
         path.write_bytes(b"leftover-socket-artifact")
     unrelated.write_bytes(b"unrelated")
 
-    server = control.YolomuxControlServer(lambda request: {"ok": True, "echo": request})
+    server = control.YomuxControlServer(lambda request: {"ok": True, "echo": request})
     server.start()
     try:
         survivors = {path.name for path in tmp_path.iterdir()} - {server.path.name}

@@ -32,42 +32,42 @@ T = TypeVar("T")
 
 
 @contextmanager
-def locked_yolomux_state_file() -> Any:
+def locked_yomux_state_file() -> Any:
     with shared_config_lock(STATE_PATH):
         yield
 
 
-def _read_yolomux_state_unlocked() -> dict[str, Any]:
+def _read_yomux_state_unlocked() -> dict[str, Any]:
     state = read_json_file(STATE_PATH, {})
     return state if isinstance(state, dict) else {}
 
 
-def read_yolomux_state() -> dict[str, Any]:
-    return _read_yolomux_state_unlocked()
+def read_yomux_state() -> dict[str, Any]:
+    return _read_yomux_state_unlocked()
 
 
-def _write_yolomux_state_unlocked(state: dict[str, Any]) -> None:
+def _write_yomux_state_unlocked(state: dict[str, Any]) -> None:
     atomic_write_text(STATE_PATH, json.dumps(state, indent=2, sort_keys=True) + "\n")
 
 
-def write_yolomux_state(state: dict[str, Any]) -> None:
-    with locked_yolomux_state_file():
-        _write_yolomux_state_unlocked(state)
+def write_yomux_state(state: dict[str, Any]) -> None:
+    with locked_yomux_state_file():
+        _write_yomux_state_unlocked(state)
 
 
-def update_yolomux_state(updates: dict[str, Any]) -> None:
-    with locked_yolomux_state_file():
-        state = _read_yolomux_state_unlocked()
+def update_yomux_state(updates: dict[str, Any]) -> None:
+    with locked_yomux_state_file():
+        state = _read_yomux_state_unlocked()
         state.update(updates)
-        _write_yolomux_state_unlocked(state)
+        _write_yomux_state_unlocked(state)
 
 
-def mutate_yolomux_state(mutator: Callable[[dict[str, Any]], T]) -> T:
+def mutate_yomux_state(mutator: Callable[[dict[str, Any]], T]) -> T:
     """Apply a state transition while holding the shared cross-server state lock."""
-    with locked_yolomux_state_file():
-        state = _read_yolomux_state_unlocked()
+    with locked_yomux_state_file():
+        state = _read_yomux_state_unlocked()
         result = mutator(state)
-        _write_yolomux_state_unlocked(state)
+        _write_yomux_state_unlocked(state)
         return result
 
 

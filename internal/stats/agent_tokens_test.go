@@ -1941,7 +1941,8 @@ func TestAgentTokenCollectorCommitsEmptyRawPagesAndResumesSyntheticHistory(t *te
 		OpenCodeInventory: func(context.Context) ([]AgentRecord, []error) {
 			return []AgentRecord{{Kind: "opencode", OpenCodeSession: "root", TmuxSession: "synthetic"}}, nil
 		},
-		CursorPath: cursorPath, SkipTranscriptScan: true, OpenCodeCollectionTimeout: 20 * time.Second,
+		CursorPath: cursorPath, SkipTranscriptScan: true,
+		OpenCodeCollectionTimeout: 20 * time.Second, OpenCodeAppendTimeout: 20 * time.Second,
 	})
 	collector.RunOnce(context.Background())
 	first, err := loadCollectorOpenCodeState(collector)
@@ -2523,6 +2524,43 @@ func TestAgentTokenCollectorSkipsUnchangedOpenCodePartScan(t *testing.T) {
 	}
 }
 
+func TestAgentTokenCollectorDenseOpenCodeUsageAppendAndReplayMeetBudget(t *testing.T) {
+	writer := newAgentTokenTestWriter(t)
+	root := t.TempDir()
+	databasePath := filepath.Join(root, "opencode-dense-usage.db")
+	writeOpenCodeManyRootHistory(t, databasePath, 1, MaxOpenCodePartReadLimit)
+	records := []AgentRecord{{Kind: "opencode", OpenCodeSession: "root-00", TmuxSession: "synthetic"}}
+	collector := NewAgentTokenCollector(writer, &agentStatusTestClock{now: time.Unix(10_000, 0)}, AgentTokenCollectorConfig{
+		OpenCodeDatabase: databasePath, CursorPath: filepath.Join(root, "cursor.json"), SkipTranscriptScan: true,
+	})
+	t.Cleanup(collector.Stop)
+	batch, _, err := collector.collectOpenCode(context.Background(), 10_000, AgentTokenActiveCadence.Seconds(), records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One bounded historical page plus the fresh row, with three token dimensions.
+	wantAtoms := (MaxOpenCodePartReadLimit + 1) * 3
+	if len(batch.UsageAtoms) != wantAtoms {
+		t.Fatalf("dense usage atoms = %d, want %d", len(batch.UsageAtoms), wantAtoms)
+	}
+	usage := AppendBatch{UsageAtoms: batch.UsageAtoms}
+	for _, replay := range []bool{false, true} {
+		ctx, cancel := context.WithTimeout(context.Background(), defaultOpenCodeAppendTimeout)
+		result, appendErr := writer.AppendBatch(ctx, usage)
+		cancel()
+		if appendErr != nil {
+			t.Fatalf("dense usage append replay=%v: %v", replay, appendErr)
+		}
+		accepted, duplicates := wantAtoms, 0
+		if replay {
+			accepted, duplicates = 0, wantAtoms
+		}
+		if result.UsageAccepted != accepted || result.UsageDuplicate != duplicates || result.Generation != 1 {
+			t.Fatalf("dense usage append replay=%v: %+v", replay, result)
+		}
+	}
+}
+
 func TestAgentTokenCollectorDoesNotRestartCompletedOpenCodeRawScanOnUnrelatedCommit(t *testing.T) {
 	testWriter := newAgentTokenTestWriter(t)
 
@@ -2536,7 +2574,7 @@ func TestAgentTokenCollectorDoesNotRestartCompletedOpenCodeRawScanOnUnrelatedCom
 		OpenCodeInventory: func(context.Context) ([]AgentRecord, []error) {
 			return []AgentRecord{{Kind: "opencode", OpenCodeSession: "root-00", TmuxSession: "synthetic"}}, nil
 		},
-		CursorPath: cursorPath, SkipTranscriptScan: true,
+		CursorPath: cursorPath, SkipTranscriptScan: true, OpenCodeCollectionTimeout: 20 * time.Second,
 	})
 	t.Cleanup(collector.Stop)
 	collector.RunOnce(context.Background())
@@ -2596,7 +2634,7 @@ func TestAgentTokenCollectorCompletesOpenCodeRawScanAfterTrailingRowsAreDeleted(
 		t.Fatal(err)
 	}
 	if pending.RawScan.ScannedThroughRowID >= pending.RawScan.HighWaterRowID {
-		t.Fatalf("synthetic raw scan did not leave a pending page: %+v", pending.RawScan)
+		t.Fatalf("synthetic raw scan did not leave a pending page: state=%+v collector=%+v", pending.RawScan, collector.Snapshot())
 	}
 
 	mutateSQLite(t, databasePath, `DELETE FROM part WHERE id = 'part-00-fresh'`)
@@ -4783,7 +4821,7 @@ func TestCodexForkRepairDiscoveryBoundsAndResumesLargeHeaders(t *testing.T) {
 	})
 	limitedRootID := codexForkRepairRootID(limitedRoot)
 	first, firstComplete, firstBytes, firstErr := limited.codexForkRepairSources(context.Background(), limitedRoot, limitedRootID)
-	if firstErr == nil || firstComplete || len(first) != 0 || firstBytes > 1<<20 {
+	if firstComplete || len(first) > 1 || (len(first) == 1 && first[0].ThreadID != "regular-child") || firstBytes > 1<<20 {
 		t.Fatalf("over-budget header discovery = sources=%#v complete=%t bytes=%d err=%v", first, firstComplete, firstBytes, firstErr)
 	}
 	second, secondComplete, secondBytes, secondErr := limited.codexForkRepairSources(context.Background(), limitedRoot, limitedRootID)

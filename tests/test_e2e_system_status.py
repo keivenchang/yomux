@@ -65,7 +65,7 @@ def test_corrupt_stats_database_recovery_is_unmissable_in_real_chrome(e2e_browse
                 fontSize: Number.parseFloat(style.fontSize),
               };
             };
-            window.__yolomuxTestWaitFor(inspect, {
+            window.__yomuxTestWaitFor(inspect, {
               timeoutMs: 12000,
               description: 'visible statsd corruption recovery banner',
             }).then(done, error => done({__e2eError: String(error?.stack || error)}));

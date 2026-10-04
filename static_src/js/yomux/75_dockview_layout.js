@@ -54,24 +54,74 @@ function dockviewEmptyPaneSlot(item) {
 
 function dockviewBeginTabActivationPerf(item) {
   const previous = dockviewLayoutState.tabActivationPerf;
-  if (previous?.frame) cancelAnimationFrame(previous.frame);
+  if (previous?.item === String(item || '') && itemIsActivePaneTab(previous.item)
+      && dockviewLayoutState.pendingUserPanelActivation !== previous.item) return;
+  dockviewClearTabActivationPerf();
   dockviewLayoutState.tabActivationPerf = {
     item: String(item || ''),
     token: clientPerfStart('tabActivationPaint'),
     frame: 0,
+    renderSubscription: null,
+    waitingForParse: false,
+    terminal: null,
   };
+  for (const tab of document.getElementsByClassName('pane-tab')) {
+    if (tab.dataset.paneTab === undefined) continue;
+    tab.classList.toggle('tab-activation-pending', tab.dataset.paneTab === String(item || ''));
+  }
+}
+
+function dockviewClearTabActivationPerf() {
+  const state = dockviewLayoutState.tabActivationPerf;
+  if (state?.frame) cancelAnimationFrame(state.frame);
+  state?.renderSubscription?.dispose();
+  Array.from(document.getElementsByClassName('pane-tab tab-activation-pending'))
+    .forEach(tab => tab.classList.remove('tab-activation-pending'));
+  dockviewLayoutState.tabActivationPerf = null;
 }
 
 function dockviewFinishTabActivationPerf(item) {
   const state = dockviewLayoutState.tabActivationPerf;
-  if (!state || state.item !== String(item || '') || state.frame) return;
-  state.frame = requestAnimationFrame(() => {
-    if (dockviewLayoutState.tabActivationPerf !== state) return;
-    const slot = slotForItem(state.item);
-    if (slot && activeItemForSide(slot) === state.item) {
-      clientPerfEnd(state.token, {nodes: document.querySelectorAll?.('.file-tree-row[data-tabber-type]')?.length || 0});
-    }
-    dockviewLayoutState.tabActivationPerf = null;
+  if (!state || state.item !== String(item || '')) return;
+  const terminal = isTmuxSession(state.item) ? terminals.get(state.item) : null;
+  if (state.terminal && state.terminal !== terminal) {
+    if (state.frame) cancelAnimationFrame(state.frame);
+    state.renderSubscription?.dispose();
+    state.renderSubscription = null;
+    state.frame = 0;
+    state.waitingForParse = false;
+  }
+  state.terminal = terminal;
+  if (state.frame || state.waitingForParse) return;
+  const current = () => dockviewLayoutState.tabActivationPerf === state && itemIsActivePaneTab(state.item)
+    && (!isTmuxSession(state.item) || terminals.get(state.item) === terminal);
+  const painted = () => {
+    state.frame = requestAnimationFrame(() => {
+      if (!current()) return;
+      state.frame = requestAnimationFrame(() => {
+        if (!current()) return;
+        clientPerfEnd(state.token);
+        dockviewClearTabActivationPerf();
+      });
+    });
+  };
+  if (!isTmuxSession(state.item)) {
+    painted();
+    return;
+  }
+  // New connections stay pending until their first output. For cached terminals the write
+  // callback fences output queued at activation; continuous output does not extend that boundary.
+  if (!terminal?.terminalOutputSeen || typeof terminal.term.onRender !== 'function') return;
+  state.waitingForParse = true;
+  terminal.term.write('', () => {
+    if (!current() || terminals.get(state.item) !== terminal) return;
+    state.renderSubscription = terminal.term.onRender(event => {
+      if (!current() || event.start > 0 || event.end < terminal.term.rows - 1) return;
+      state.renderSubscription.dispose();
+      state.renderSubscription = null;
+      painted();
+    });
+    terminal.term.refresh(0, terminal.term.rows - 1);
   });
 }
 
@@ -81,17 +131,27 @@ function dockviewCommitPanelActivation(item, options = {}) {
   const pendingUserGesture = dockviewLayoutState.pendingUserPanelActivation === panelItem;
   if (pendingUserGesture) dockviewClearPendingUserPanelActivation();
   const userInitiated = options.userInitiated === true || pendingUserGesture;
+  const activation = dockviewLayoutState.tabActivationPerf;
+  if (userInitiated && isTmuxSession(panelItem) && !pendingUserGesture
+      && (options.nativeEvent?.detail > 0 || options.nativeEvent?.type === 'touchend') && itemIsActivePaneTab(panelItem)
+      && (activation?.item !== panelItem || activation.terminal)) {
+    // Dockview consumed this pointer intent before its group focus stole xterm focus. Restore
+    // input and reschedule current side work without restarting the already-running activation.
+    const generation = nextTabSwitchHighlightGeneration();
+    rememberFileExplorerExplicitSyncSession(panelItem);
+    focusTerminalDom(panelItem);
+    dockviewFinishTabActivationPerf(panelItem);
+    scheduleTerminalActivationFollowup(panelItem, generation);
+    return true;
+  }
   const focusOptions = isTmuxSession(panelItem) && userInitiated
     ? {...options, acknowledgeAgentWindow: false, acknowledgePromptAttention: false}
     : options;
-  if (isTmuxSession(panelItem) && userInitiated) {
-    noteFileExplorerChangesSessionInteraction(panelItem);
-    scheduleFileExplorerActiveTabSync(panelItem, {explicit: true});
-  }
-  setFocusedPanelItem(panelItem, {...options, userInitiated});
+  if (isTmuxSession(panelItem) && userInitiated) rememberFileExplorerExplicitSyncSession(panelItem);
   if (isTmuxSession(panelItem) && userInitiated && typeof focusTerminalFromUserAction === 'function') {
-    focusTerminalFromUserAction(panelItem, 25, {...focusOptions, userInitiated: true});
-  }
+    const generation = nextTabSwitchHighlightGeneration();
+    commitUserTerminalTabActivation(panelItem, focusOptions, generation);
+  } else setFocusedPanelItem(panelItem, {...options, userInitiated, deferSideSync: userInitiated});
   dockviewFinishTabActivationPerf(panelItem);
   return true;
 }
@@ -113,6 +173,14 @@ function dockviewClearPendingUserPanelActivation(item = '') {
     dockviewLayoutState.pendingUserPanelActivationTimer = 0;
   }
   dockviewLayoutState.pendingUserPanelActivation = '';
+}
+
+function dockviewClearPendingTabActivation(item) {
+  dockviewClearPendingUserPanelActivation(item);
+  const activation = dockviewLayoutState.tabActivationPerf;
+  // Cancel the gesture's color, while retaining an activation already waiting on terminal paint.
+  if (activation && activation.item === String(item || '') && activation.terminal === null
+      && !activation.frame && !activation.waitingForParse) dockviewClearTabActivationPerf();
 }
 
 function dockviewCommitTouchTabActivation(event) {
@@ -788,8 +856,7 @@ function dockviewTabInsertionInfoForPointer(event, state) {
 
 function dockviewClearTabInsertionPreview() {
   const host = dockviewLayoutState.host;
-  const dropzone = host?.querySelector?.('[data-yomux-tab-insertion-preview]')
-    || host?.querySelector?.('[data-yolomux-tab-insertion-preview]');
+  const dropzone = host?.querySelector?.('[data-yomux-tab-insertion-preview]');
   const target = dropzone?.parentElement;
   dropzone?.remove?.();
   if (target && !target.querySelector?.('.dv-drop-target-dropzone')) target.classList.remove('dv-drop-target');
@@ -802,7 +869,6 @@ function dockviewShowTabInsertionPreview(info) {
   const dropzone = document.createElement('div');
   dropzone.className = 'dv-drop-target-dropzone';
   dropzone.dataset.yomuxTabInsertionPreview = 'true';
-  dropzone.dataset.yolomuxTabInsertionPreview = 'true';
   const selection = document.createElement('div');
   selection.className = `dv-drop-target-selection dv-drop-target-${info.position}`;
   dropzone.appendChild(selection);
@@ -1117,7 +1183,7 @@ function dockviewFinishTabPointerDrag(event) {
   const releaseRegion = classification.region;
   const canceled = ['pointercancel', 'touchcancel', 'dragend'].includes(event?.type);
   dockviewLayoutState.tabPointerDrag = null;
-  if (canceled || state?.dragged === true) dockviewClearPendingUserPanelActivation(state?.item || '');
+  if (canceled || state?.dragged === true) dockviewClearPendingTabActivation(state?.item || '');
   if (canceled) dockviewClearPreActivationCapture(state?.item || '');
   dockviewClearTabInsertionPreview();
   dockviewSetInvalidTabDropPreview(false);
@@ -1496,6 +1562,21 @@ function dockviewInstallTabPointerReorderFallback() {
   const track = event => {
     dockviewTrackTabPointerDrag(event);
   };
+  const abandon = () => {
+    const state = dockviewLayoutState.tabPointerDrag;
+    const item = state?.item || dockviewLayoutState.pendingUserPanelActivation;
+    if (!item) return;
+    if (state?.pointerCancelTimer) window.clearTimeout(state.pointerCancelTimer);
+    dockviewLayoutState.tabPointerDrag = null;
+    dockviewClearPendingTabActivation(item);
+    dockviewClearPreActivationCapture(item);
+    dockviewClearTabInsertionPreview();
+    dockviewSetInvalidTabDropPreview(false);
+    clearDropPreview();
+  };
+  const visibility = () => {
+    if (document.hidden) abandon();
+  };
   const finish = event => {
     // Dockview's pointer strategy cancels the browser pointer stream as it claims a mouse tab drag.
     // The matching mouseup still carries the real release coordinates, so retain the gesture until
@@ -1513,7 +1594,7 @@ function dockviewInstallTabPointerReorderFallback() {
     }
     if (dockviewCommitTouchTabActivation(event)) {
       const state = dockviewLayoutState.tabPointerDrag;
-      dockviewCommitPanelActivation(state.item, {userInitiated: true});
+      dockviewCommitPanelActivation(state.item, {userInitiated: true, nativeEvent: event});
     }
     dockviewFinishTabPointerDrag(event);
   };
@@ -1528,6 +1609,8 @@ function dockviewInstallTabPointerReorderFallback() {
   document.addEventListener('mousemove', track, true);
   document.addEventListener('dragover', track, true);
   document.addEventListener('dragend', finish, true);
+  window.addEventListener('blur', abandon);
+  document.addEventListener('visibilitychange', visibility);
   return {
     dispose() {
       document.removeEventListener('pointerup', finish, true);
@@ -1539,6 +1622,8 @@ function dockviewInstallTabPointerReorderFallback() {
       document.removeEventListener('mousemove', track, true);
       document.removeEventListener('dragover', track, true);
       document.removeEventListener('dragend', finish, true);
+      window.removeEventListener('blur', abandon);
+      document.removeEventListener('visibilitychange', visibility);
     },
   };
 }
@@ -2567,8 +2652,12 @@ function createDockviewHeaderActionsRenderer() {
     const html = dockviewHeaderActionsHtml(activeItem, slot);
     element.hidden = !html;
     element.innerHTML = html;
-    updatePanelWindowStepButtons(activeItem, transcriptMetadataState.payload.sessions?.[activeItem]);
     const panel = document.getElementById(panelDomId(activeItem));
+    // Header activation updates its own controls without walking mounted file trees.
+    if (isTmuxSession(activeItem)) {
+      const controls = collectSessionControlNodes([activeItem], [element, panel]).get(activeItem);
+      updatePanelWindowStepButtons(activeItem, transcriptMetadataState.payload.sessions?.[activeItem], controls);
+    }
     if (panel) {
       updatePaneExpandButton(panel, activeItem);
       syncPanelDetailsToggleState(panel);
@@ -2616,7 +2705,9 @@ function createDockviewTabRenderer() {
     if (paneTabShouldPreserve(element)) {
       syncPaneTabPinnedChrome(element, item);
       const popover = paneTabPopoverForAnchor(element);
-      if (popover) positionPaneTabPopover(element, popover);
+      if (popover && (element.classList.contains('popover-open') || popover.classList.contains('popover-open'))) {
+        positionPaneTabPopover(element, popover);
+      }
       if (isFileEditorItem(item)) refreshFileTabPopover(element, item);
       return;
     }
@@ -2642,8 +2733,8 @@ function createDockviewTabRenderer() {
     if (event.target.closest('[data-pane-tab-close], [data-auto-session]')) event.stopPropagation();
     else {
       captureDockviewPreviousPaneBeforeTabActivation(element, item);
-      dockviewBeginTabActivationPerf(item);
       dockviewSetPendingUserPanelActivation(item);
+      dockviewBeginTabActivationPerf(item);
       dockviewBeginTabPointerDrag(event, item);
     }
   });
@@ -2673,7 +2764,7 @@ function createDockviewTabRenderer() {
       if (shouldRefocus) focusPanel(item);
       return;
     }
-    commitExplicitTabInteraction();
+    commitExplicitTabInteraction({nativeEvent: event});
     dockviewFinishTabActivationPerf(item);
   });
   element.addEventListener('keydown', event => {
@@ -2746,6 +2837,7 @@ function dockviewClearPreActivationCapture(item = '') {
 
 function syncDockviewTabShell(tab, item, api = null) {
   tab.dataset.paneTab = item;
+  tab.classList.toggle('tab-activation-pending', dockviewLayoutState.tabActivationPerf?.item === item);
   syncDockviewTabActiveClass(tab, api);
   tab.classList.toggle('tmux-pane-tab-token', isTmuxSession(item));
   tab.classList.toggle('file-missing', isFileEditorItem(item) && fileEditorTabIsMissing(item));

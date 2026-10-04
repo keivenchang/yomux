@@ -944,14 +944,16 @@ func (d *OpenCodeDatabase) ReadStepFinishPartsForSelections(ctx context.Context,
   WHERE 0
 )`
 	}
+	// The bounded subqueries already select each session's row IDs. An outer
+	// session_id join makes SQLite walk that session's whole history before
+	// checking those IDs; CROSS JOIN keeps the bounded IDs ahead of row lookup.
 	revisionRows := `revised_old_parts AS MATERIALIZED (
   SELECT p.rowid, p.id, p.message_id, p.session_id, p.time_created, p.time_updated,
          p.data AS part_data, selected.root_session_id
   FROM selection_bounds AS selected
   CROSS JOIN max_part
-  JOIN part AS p
-    ON p.session_id = selected.session_id
-   AND p.rowid IN (
+  CROSS JOIN part AS p
+    ON p.rowid IN (
      SELECT revised.rowid
      FROM part AS revised
      WHERE revised.session_id = selected.session_id
@@ -1028,7 +1030,8 @@ func (d *OpenCodeDatabase) ReadStepFinishPartsForSelections(ctx context.Context,
     )
     AND (` + cursorPredicate + `)`
 		} else {
-			recentPartPredicate = `p.rowid > max_part.max_rowid - ?
+			recentPartPredicate = `p.session_id = selected.session_id
+    AND p.rowid > max_part.max_rowid - ?
     AND p.time_updated < ?
     AND (` + cursorPredicate + `)`
 		}
@@ -1066,9 +1069,9 @@ selection_bounds AS MATERIALIZED (
 recent_part AS MATERIALIZED (
   SELECT p.rowid, p.id, p.message_id, p.session_id, p.time_created, p.time_updated,
          p.data AS part_data
-  FROM part AS p
-  JOIN selection_bounds AS selected ON selected.session_id = p.session_id
+  FROM selection_bounds AS selected
   CROSS JOIN max_part
+  CROSS JOIN part AS p
   WHERE ` + recentPartPredicate + `
 ),
 ` + revisionRows + `,

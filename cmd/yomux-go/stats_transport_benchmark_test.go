@@ -32,6 +32,7 @@ func BenchmarkStatsTransport(b *testing.B) {
 		b.Fatal(err)
 	}
 	lifecycle := stats.NewLifecycle(writer, stats.LifecycleConfig{WindowSeconds: 300, Now: func() time.Time { return now }})
+	b.Cleanup(lifecycle.Stop)
 	service := stats.NewStatsService(writer, stats.StatsServiceConfig{Products: []stats.ProductKey{{RangeSeconds: 300, ResolutionSeconds: 1}}, Now: func() time.Time { return now }})
 	publish := func() {
 		for attempt := 0; attempt < 64; attempt++ {

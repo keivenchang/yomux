@@ -64,7 +64,7 @@ TYPED_ERROR_SELECTORS = (
 
 API_JOURNEY_OBSERVER_SOURCE = r"""
   (() => {
-    if (window.__yolomuxApiJourneyObserver?.installed === true) return;
+    if (window.__yomuxApiJourneyObserver?.installed === true) return;
     const state = {
       installed: true,
       records: [],
@@ -140,11 +140,11 @@ API_JOURNEY_OBSERVER_SOURCE = r"""
     const xhrOpen = XMLHttpRequest.prototype.open;
     const xhrSend = XMLHttpRequest.prototype.send;
     XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-      this.__yolomuxApiJourney = {method, target: apiTarget(url)};
+      this.__yomuxApiJourney = {method, target: apiTarget(url)};
       return xhrOpen.call(this, method, url, ...rest);
     };
     XMLHttpRequest.prototype.send = function(...args) {
-      const request = this.__yolomuxApiJourney;
+      const request = this.__yomuxApiJourney;
       if (request?.target) {
         const record = begin('xhr', request.method, request.target);
         let settle;
@@ -203,7 +203,7 @@ API_JOURNEY_OBSERVER_SOURCE = r"""
       }
       window.EventSource = ObservedEventSource;
     }
-    window.__yolomuxApiJourneyObserver = state;
+    window.__yomuxApiJourneyObserver = state;
   })();
 """
 
@@ -314,7 +314,7 @@ class E2EBrowserHarness:
 
         result = self.driver.execute_script(
             """
-            const state = window.__yolomuxApiJourneyObserver;
+            const state = window.__yomuxApiJourneyObserver;
             if (!state?.installed) return false;
             state.records.length = 0;
             state.sequence = 0;
@@ -330,7 +330,7 @@ class E2EBrowserHarness:
         result = self.driver.execute_async_script(
             """
             const done = arguments[arguments.length - 1];
-            const state = window.__yolomuxApiJourneyObserver;
+            const state = window.__yomuxApiJourneyObserver;
             if (!state?.installed) { done({error: 'API journey observer is not installed'}); return; }
             (async () => {
               for (let pass = 0; pass < 8; pass += 1) {
@@ -406,7 +406,7 @@ class E2EBrowserHarness:
             const timeoutMs = arguments[1];
             const done = arguments[arguments.length - 1];
             const selector = `#panel-__finder__ .file-tree-row[data-path="${CSS.escape(path)}"]`;
-            window.__yolomuxTestWaitFor(
+            window.__yomuxTestWaitFor(
               () => document.querySelector(selector),
               {timeoutMs, description: `connected Finder row for ${path}`},
             ).then(done, error => done({__e2eError: String(error?.stack || error)}));
@@ -441,31 +441,7 @@ class E2EBrowserHarness:
         element = target.element()
         if element.get_attribute("aria-expanded") != "true":
             element.click()
-        timeout_ms = round(float(bound or self.bound) * 1000)
-        result = self.driver.execute_async_script(
-            """
-            const path = arguments[0];
-            const childPath = arguments[1];
-            const timeoutMs = arguments[2];
-            const done = arguments[arguments.length - 1];
-            const rowFor = () => document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${CSS.escape(path)}"]`);
-            const childFor = () => childPath
-              ? document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${CSS.escape(childPath)}"]`)
-              : rowFor()?.nextElementSibling?.querySelector?.('.file-tree-row[data-path]');
-            window.__yolomuxTestWaitFor(
-              () => rowFor()?.getAttribute('aria-expanded') === 'true' && childFor(),
-              {timeoutMs, description: `rendered Finder children for ${path}`},
-            ).then(
-              child => done({path: child?.dataset?.path || '', contentPresent: true}),
-              error => done({__e2eError: String(error?.stack || error)}),
-            );
-            """,
-            self._path_text(target.path),
-            self._path_text(child_path) if child_path is not None else "",
-            timeout_ms,
-        )
-        if result.get("__e2eError"):
-            self._raise_with_evidence(str(result["__e2eError"]), label="finder-expand")
+        result = self._wait_for_row_state(target.path, expanded=True, child_path=child_path, require_children=True, bound=bound)
         if not result.get("contentPresent"):
             self._raise_with_evidence(f"Finder children did not render for {target.path}", label="finder-expand")
         return target
@@ -490,22 +466,29 @@ class E2EBrowserHarness:
         target = self.collapse(row, bound=bound)
         return self.expand(target, child_path=child_path, bound=bound)
 
-    def _wait_for_row_state(self, path: str | Path, *, expanded: bool, bound: float | None = None) -> dict[str, Any]:
+    def _wait_for_row_state(self, path: str | Path, *, expanded: bool, child_path: str | Path | None = None, require_children: bool = False, bound: float | None = None) -> dict[str, Any]:
         timeout_ms = round(float(bound or self.bound) * 1000)
         result = self.driver.execute_async_script(
             """
             const path = arguments[0];
             const expanded = arguments[1];
             const timeoutMs = arguments[2];
+            const childPath = arguments[3];
+            const requireChildren = arguments[4];
             const done = arguments[arguments.length - 1];
             const rowFor = () => document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${CSS.escape(path)}"]`);
-            window.__yolomuxTestWaitFor(() => {
+            const childFor = () => childPath
+              ? document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${CSS.escape(childPath)}"]`)
+              : rowFor()?.nextElementSibling?.querySelector?.('.file-tree-row[data-path]');
+            window.__yomuxTestWaitFor(() => {
               const row = rowFor();
-              return row && row.getAttribute('aria-expanded') === String(expanded) && !row.classList.contains('loading-children');
+              return row && row.getAttribute('aria-expanded') === String(expanded)
+                && !row.classList.contains('loading-children') && !fileExplorerPendingExpansions.has(path)
+                && (!requireChildren || childFor());
             }, {timeoutMs, description: `Finder ${expanded ? 'expanded' : 'collapsed'} state for ${path}`}).then(
               () => {
                 const row = rowFor();
-                done({expanded: row?.getAttribute('aria-expanded') || '', className: row?.className || ''});
+                done({expanded: row?.getAttribute('aria-expanded') || '', className: row?.className || '', contentPresent: Boolean(childFor())});
               },
               error => done({__e2eError: String(error?.stack || error)}),
             );
@@ -513,6 +496,8 @@ class E2EBrowserHarness:
             self._path_text(path),
             expanded,
             timeout_ms,
+            self._path_text(child_path) if child_path is not None else "",
+            require_children,
         )
         if result.get("__e2eError"):
             self._raise_with_evidence(str(result["__e2eError"]), label="finder-row-state")
@@ -540,7 +525,7 @@ class E2EBrowserHarness:
             const selector = arguments[0];
             const timeoutMs = arguments[1];
             const done = arguments[arguments.length - 1];
-            window.__yolomuxTestWaitFor(() => {
+            window.__yomuxTestWaitFor(() => {
               const node = document.querySelector(selector);
               if (!node) return null;
               const rect = node.getBoundingClientRect();
@@ -630,7 +615,7 @@ class E2EBrowserHarness:
               const contentRows = panel.querySelectorAll('.file-tree-row[data-path], .cm-content, .xterm-screen').length;
               return {pending, typedError, text, contentRows, terminal: pending.length === 0 && (Boolean(typedError) || contentRows > 0 || text.length > 0)};
             };
-            window.__yolomuxTestWaitFor(() => inspect()?.terminal ? inspect() : null, {
+            window.__yomuxTestWaitFor(() => inspect()?.terminal ? inspect() : null, {
               timeoutMs,
               description: 'panel content or typed error without a pending indicator',
             }).then(done, error => done({__e2eError: String(error?.stack || error), last: inspect()}));

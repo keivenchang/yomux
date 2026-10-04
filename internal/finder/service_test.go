@@ -2929,6 +2929,63 @@ func TestGitHistoryAndCommitAllowExternalLinkedWorktree(t *testing.T) {
 	}
 }
 
+func TestRelativePathWithinGitRootAcceptsFilesystemAlias(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "repo")
+	requestedAlias := filepath.Join(base, "mount-alias", "repo")
+	target := filepath.Join(root, "nested")
+	outside := filepath.Join(base, "outside")
+	for _, directory := range []string{root, target, outside, filepath.Dir(requestedAlias)} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(root, requestedAlias); err != nil {
+		t.Fatal(err)
+	}
+	rootDirectory, err := os.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rootDirectory.Close()
+	targetDirectory, err := os.Open(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer targetDirectory.Close()
+	outsideDirectory, err := os.Open(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer outsideDirectory.Close()
+
+	relative, err := relativePathWithinGitRoot(requestedAlias, target, targetDirectory, rootDirectory)
+	if err != nil || relative != "nested" {
+		t.Fatalf("relative path for filesystem alias = %q, error = %v", relative, err)
+	}
+	if runtime.GOOS == "linux" {
+		openFDs := func() int {
+			entries, readErr := os.ReadDir("/proc/self/fd")
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			return len(entries)
+		}
+		before := openFDs()
+		for range 32 {
+			if _, err := relativePathWithinGitRoot(requestedAlias, target, targetDirectory, rootDirectory); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if after := openFDs(); after != before {
+			t.Fatalf("open descriptors after repeated alias resolution = %d, before = %d", after, before)
+		}
+	}
+	if _, err := relativePathWithinGitRoot(requestedAlias, outside, outsideDirectory, rootDirectory); !errors.Is(err, errGitPathOutsideRepository) {
+		t.Fatalf("outside directory error = %v, want repository boundary rejection", err)
+	}
+}
+
 func TestGitHistoryEmptyRepositoryExposesShallowBoundary(t *testing.T) {
 	root := t.TempDir()
 	if output, err := exec.Command("git", "init", "-q", root).CombinedOutput(); err != nil {

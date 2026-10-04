@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"testing"
 )
 
 // SyntheticEnvironment removes ambient product and client-data inputs before
@@ -100,6 +101,13 @@ func NewPrivateTestEnvironment() (func(), error) {
 	environment["YOMUX_PRIVATE_TEST_ENV_ROOT"] = root
 	environment["PYTHONUSERBASE"] = pythonUserBase
 	environment["PYTHONDONTWRITEBYTECODE"] = "1"
+	// Direct adapter tests must also stay off the operator's machine-wide tmux.
+	// Keep only the legacy default so tests can override either supported alias.
+	if err := os.Unsetenv("YOMUX_TMUX_SOCKET"); err != nil {
+		_ = os.RemoveAll(root)
+		return nil, err
+	}
+	environment["YOLOMUX_TMUX_SOCKET"] = filepath.Join(root, "tmux.sock")
 	for key, value := range environment {
 		if err := os.Setenv(key, value); err != nil {
 			_ = os.RemoveAll(root)
@@ -121,13 +129,31 @@ var privateTestDirectories = map[string]string{
 	"XDG_RUNTIME_DIR":   "xdg-runtime",
 }
 
+// ShortTempDir keeps private fixture paths short enough for Unix-domain sockets
+// when Bazel supplies a deeply nested per-test temporary directory.
+func ShortTempDir(t testing.TB) string {
+	t.Helper()
+	directory, err := os.MkdirTemp("/tmp", "ym-")
+	if err != nil {
+		t.Fatalf("create short private temporary directory: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(directory); err != nil {
+			t.Errorf("remove short private temporary directory %q: %v", directory, err)
+		}
+	})
+	return directory
+}
+
 func ambientSyntheticInputKey(key string) bool {
 	if strings.HasPrefix(key, "YOMUX_") || strings.HasPrefix(key, "YOLOMUX_") || strings.HasPrefix(key, "XDG_") ||
 		strings.HasPrefix(key, "OPENCODE_") || strings.HasPrefix(key, "CODEX_") || strings.HasPrefix(key, "CLAUDE_") {
 		return true
 	}
 	switch key {
-	case "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+	case "TEST_SHARD_INDEX", "TEST_TOTAL_SHARDS", "TEST_SHARD_STATUS_FILE",
+		"TESTBRIDGE_TEST_ONLY", "TESTBRIDGE_TEST_RUNNER_FAIL_FAST",
+		"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
 		"GH_TOKEN", "GITHUB_TOKEN", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS",
 		"HF_TOKEN", "HUGGINGFACE_HUB_TOKEN", "LINEAR_KEY", "NGC_API_KEY", "OPENAI_API_KEY",
 		"HOME", "TMPDIR", "TMUX", "TMUX_PANE", "TMUX_TMPDIR", "PYTHONPATH", "PYTHONHOME", "PYTHONPYCACHEPREFIX":

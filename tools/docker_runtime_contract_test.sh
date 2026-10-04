@@ -10,7 +10,15 @@ fail() {
 }
 
 [ "${YOMUX_TEST_CONTAINER-${YOLOMUX_TEST_CONTAINER:-}}" = 1 ] || fail "test-container marker is absent"
-[ -f /.dockerenv ] || fail "generic Docker marker is absent"
+[ -n "${YOMUX_BAZEL_CONTRACT:-}" ] || fail "execution contract identity is absent"
+[ ! -e /.dockerenv ] || fail "outer container filesystem is visible"
+[ ! -e /w ] || fail "undeclared checkout is visible"
+[ ! -e /home/runner ] || fail "outer HOME is visible"
+[ ! -e /var/cache/yomux-bazel ] || fail "shared action cache is visible"
+for slot in 0 1 2 3 4 5 6 7; do
+  output_root="/var/cache/yomux-bazel-output-slot-$slot"
+  [ ! -e "$output_root" ] || fail "persistent Bazel output root is visible: $output_root"
+done
 [ -f /opt/yomux-test-image.marker ] || fail "test-image marker is absent"
 [ "$(cat /opt/yomux-test-image.marker)" = yomux-test-image-v1 ] || fail "wrong test image marker"
 case "${HOME:-}" in
@@ -24,10 +32,10 @@ for name in OPENAI_API_KEY ANTHROPIC_API_KEY GH_TOKEN GITHUB_TOKEN LINEAR_KEY; d
   fi
 done
 
-source_probe="/w/.yolomux-docker-runtime-probe-$$"
+source_probe="/usr/.yolomux-docker-runtime-probe-$$"
 if (umask 077; : > "$source_probe") 2>/dev/null; then
   rm -f -- "$source_probe"
-  fail "/w is writable"
+  fail "image tools are writable"
 fi
 
 for cache_root in /opt/yomux-go-mod-cache /opt/yomux-bazel-repository-cache; do

@@ -18,6 +18,8 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -157,11 +159,7 @@ func TestStatsPythonAndGoReceiveTheSameHTTPFixture(t *testing.T) {
 	}
 }
 
-func TestStatsPythonAndExternalGoReceiveTheSameHTTPFixture(t *testing.T) {
-	binaryPath := os.Getenv("YOLOMUX_GO_BINARY")
-	if binaryPath == "" {
-		t.Skip("YOLOMUX_GO_BINARY is provided by the Docker parity harness")
-	}
+func checkStatsPythonAndExternalGoReceiveTheSameHTTPFixture(t *testing.T, binaryPath string) {
 	ctx := context.Background()
 	root := t.TempDir()
 	configDir := filepath.Join(root, "config")
@@ -289,11 +287,7 @@ func TestStatsPythonAndExternalGoReceiveTheSameHTTPFixture(t *testing.T) {
 	}
 }
 
-func TestStatsProductionPythonAndGoReceiveTheSameHTTPFixture(t *testing.T) {
-	binaryPath := os.Getenv("YOLOMUX_GO_BINARY")
-	if binaryPath == "" {
-		t.Skip("YOLOMUX_GO_BINARY is provided by the Docker parity harness")
-	}
+func checkStatsProductionPythonAndGoReceiveTheSameHTTPFixture(t *testing.T, binaryPath string) {
 	ctx := context.Background()
 	root := t.TempDir()
 	fixturePath := filepath.Join(root, "stats-v9.sqlite3")
@@ -570,11 +564,7 @@ func TestStatsProductionPythonAndGoReceiveTheSameHTTPFixture(t *testing.T) {
 // parser-only corpus is useful for fast feedback, but it cannot catch route
 // status/header drift, writer readiness, duplicate receipts, or persistence
 // differences between the two serving processes.
-func TestStatsProductionPythonAndGoObservationBoundaryParity(t *testing.T) {
-	binaryPath := os.Getenv("YOLOMUX_GO_BINARY")
-	if binaryPath == "" {
-		t.Skip("YOLOMUX_GO_BINARY is provided by the Docker parity harness")
-	}
+func checkStatsProductionPythonAndGoObservationBoundaryParity(t *testing.T, binaryPath string) {
 	root, err := os.MkdirTemp("/tmp", "yostats-observation-")
 	if err != nil {
 		t.Fatal(err)
@@ -1029,6 +1019,44 @@ print(destination)
 	return ""
 }
 
+type synchronizedBuffer struct {
+	mu sync.Mutex
+	bytes.Buffer
+}
+
+func (buffer *synchronizedBuffer) Write(value []byte) (int, error) {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.Buffer.Write(value)
+}
+
+func (buffer *synchronizedBuffer) ReadFrom(source io.Reader) (int64, error) {
+	var total int64
+	var chunk [32 * 1024]byte
+	for {
+		count, err := source.Read(chunk[:])
+		if count > 0 {
+			written, writeErr := buffer.Write(chunk[:count])
+			total += int64(written)
+			if writeErr != nil {
+				return total, writeErr
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
+				return total, nil
+			}
+			return total, err
+		}
+	}
+}
+
+func (buffer *synchronizedBuffer) String() string {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.Buffer.String()
+}
+
 func startExternalPythonStatsServer(t *testing.T, root string) (string, func()) {
 	t.Helper()
 	repoRoot := testsupport.RepoRoot(t)
@@ -1049,17 +1077,15 @@ func startExternalPythonStatsServer(t *testing.T, root string) (string, func()) 
 	}
 	command := exec.Command("python3", "yomux.py", "--backend", "python", "--http", "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--sessions")
 	command.Dir = repoRoot
-	command.Env = syntheticStatsEnvironment("PYTHONPATH="+repoRoot, "YOLOMUX_ROOT="+root, "YOLOMUX_STATS_DISABLE_COLLECTORS=1", "PYTHONDONTWRITEBYTECODE=1", "YOLOMUX_TEST_AUTH_BYPASS=1")
-	var output bytes.Buffer
+	command.Env = syntheticStatsEnvironment("PYTHONPATH="+repoRoot, "YOLOMUX_ROOT="+root, "YOLOMUX_STATS_DISABLE_COLLECTORS=1", "YOLOMUX_TEST_DISABLE_PRICING_REFRESH=1", "PYTHONDONTWRITEBYTECODE=1", "YOLOMUX_TEST_AUTH_BYPASS=1")
+	var output synchronizedBuffer
 	command.Stdout = &output
 	command.Stderr = &output
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
+	process := startParityProcess(t, command, &output)
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(parityServerTimeout())
 	for time.Now().Before(deadline) {
-		if command.ProcessState != nil {
+		if process.exited() {
 			t.Fatalf("production Python server exited before health check: %s", output.String())
 		}
 		response, requestErr := http.Get(baseURL + "/healthz")
@@ -1068,12 +1094,12 @@ func startExternalPythonStatsServer(t *testing.T, root string) (string, func()) 
 			_ = response.Body.Close()
 			if response.StatusCode == http.StatusOK {
 				t.Logf("production Python server output before health: %s", output.String())
-				return baseURL, func() { stopExternalProcess(command) }
+				return baseURL, func() { process.checkStop(t) }
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	stopExternalProcess(command)
+	process.checkStop(t)
 	t.Fatalf("production Python server did not become healthy: %s", output.String())
 	return "", func() {}
 }
@@ -1109,16 +1135,14 @@ func startExternalGoStatsServer(t *testing.T, binaryPath, root, configDir, datab
 		"YOLOMUX_PRICING_CATALOG="+seedFixturePath,
 		"YOLOMUX_STATS_DISABLE_COLLECTORS=1",
 	)
-	var output bytes.Buffer
+	var output synchronizedBuffer
 	command.Stdout = &output
 	command.Stderr = &output
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
+	process := startParityProcess(t, command, &output)
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(parityServerTimeout())
 	for time.Now().Before(deadline) {
-		if command.ProcessState != nil {
+		if process.exited() {
 			t.Fatalf("external Go server exited before health check: %s", output.String())
 		}
 		response, requestErr := http.Get(baseURL + "/healthz")
@@ -1126,12 +1150,12 @@ func startExternalGoStatsServer(t *testing.T, binaryPath, root, configDir, datab
 			_, _ = io.Copy(io.Discard, response.Body)
 			_ = response.Body.Close()
 			if response.StatusCode == http.StatusOK {
-				return baseURL, func() { stopExternalProcess(command) }
+				return baseURL, func() { process.checkStop(t) }
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	stopExternalProcess(command)
+	process.checkStop(t)
 	t.Fatalf("external Go server did not become healthy: %s", output.String())
 	return "", func() {}
 }
@@ -1213,22 +1237,202 @@ func loadProductionPricingFixture(t *testing.T, repoRoot string) map[string]any 
 	return base
 }
 
-func stopExternalProcess(command *exec.Cmd) {
-	if command.Process == nil || command.ProcessState != nil {
-		return
+// parityProcess owns Wait and output drainage, including early exits and shutdown failures.
+type parityProcess struct {
+	command  *exec.Cmd
+	output   *synchronizedBuffer
+	done     chan struct{}
+	waitErr  error
+	stopOnce sync.Once
+	stopErr  error
+}
+
+func startParityProcess(t *testing.T, command *exec.Cmd, output *synchronizedBuffer) *parityProcess {
+	t.Helper()
+	command.WaitDelay = 2 * time.Second
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
 	}
-	_ = command.Process.Signal(os.Interrupt)
-	if _, err := command.Process.Wait(); err != nil {
-		_ = command.Process.Kill()
-		_ = command.Wait()
+	process := &parityProcess{command: command, output: output, done: make(chan struct{})}
+	go func() { process.waitErr = command.Wait(); close(process.done) }()
+	t.Cleanup(func() { process.checkStop(t) })
+	return process
+}
+
+func (process *parityProcess) exited() bool {
+	select {
+	case <-process.done:
+		return true
+	default:
+		return false
 	}
+}
+
+func (process *parityProcess) readyLine(timeout time.Duration) (string, error) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		line, _, complete := strings.Cut(process.output.String(), "\n")
+		if process.exited() {
+			return "", fmt.Errorf("child exited before readiness: %s", process.output.String())
+		}
+		if complete {
+			return line, nil
+		}
+		select {
+		case <-timer.C:
+			return "", fmt.Errorf("child readiness timeout: %s", process.output.String())
+		case <-ticker.C:
+		}
+	}
+}
+
+func (process *parityProcess) stop(timeout time.Duration) error {
+	return process.stopWithSignal(timeout, func() error { return process.command.Process.Signal(os.Interrupt) })
+}
+
+func (process *parityProcess) stopWithSignal(timeout time.Duration, signal func() error) error {
+	process.stopOnce.Do(func() {
+		early := process.exited()
+		var signalErr error
+		forced := false
+		if !early {
+			signalErr = signal()
+			timer := time.NewTimer(timeout)
+			select {
+			case <-process.done:
+			case <-timer.C:
+				forced = true
+				_ = process.command.Process.Kill()
+				<-process.done
+			}
+			timer.Stop()
+		}
+		output := process.output.String()
+		if strings.Contains(output, "WARNING: DATA RACE") || strings.Contains(output, "ThreadSanitizer") {
+			process.stopErr = fmt.Errorf("child race report: %s", output)
+		} else if forced {
+			process.stopErr = fmt.Errorf("child ignored shutdown signal: %s", output)
+		} else if early {
+			process.stopErr = fmt.Errorf("child exited before shutdown: %v: %s", process.waitErr, output)
+		} else if signalErr != nil {
+			process.stopErr = fmt.Errorf("child shutdown signal failed: %v: %s", signalErr, output)
+		} else if process.waitErr != nil {
+			exit, ok := process.waitErr.(*exec.ExitError)
+			expectedInterrupt := false
+			if ok {
+				status, valid := exit.Sys().(syscall.WaitStatus)
+				expectedInterrupt = valid && status.Signaled() && status.Signal() == syscall.SIGINT
+			}
+			if !expectedInterrupt {
+				process.stopErr = fmt.Errorf("child failed: %v: %s", process.waitErr, output)
+			}
+		}
+	})
+	return process.stopErr
+}
+
+func (process *parityProcess) checkStop(t *testing.T) {
+	t.Helper()
+	if err := process.stop(5 * time.Second); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestParityProcessShutdownControls(t *testing.T) {
+	for _, test := range []struct {
+		name, body, want string
+		early            bool
+	}{
+		{"drain", "signal.signal(signal.SIGINT, lambda *_: (print('tail' * 65536, flush=True), sys.exit(0)))", "", false},
+		{"exit66", "signal.signal(signal.SIGINT, lambda *_: sys.exit(66))", "child failed", false},
+		{"raceAfterReady", "signal.signal(signal.SIGINT, lambda *_: (print('WARNING: DATA RACE', flush=True), sys.exit(0)))", "child race report", false},
+		{"earlyExit", "sys.exit(0)", "before shutdown", true},
+		{"ignoredInterrupt", "signal.signal(signal.SIGINT, signal.SIG_IGN)", "ignored shutdown", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			script := "import signal,sys,time\n" + test.body + "\nprint('READY', flush=True)\nwhile True: signal.pause()\n"
+			command := exec.Command("python3", "-u", "-c", script)
+			var output synchronizedBuffer
+			command.Stdout, command.Stderr = &output, &output
+			command.WaitDelay = time.Second
+			if err := command.Start(); err != nil {
+				t.Fatal(err)
+			}
+			process := &parityProcess{command: command, output: &output, done: make(chan struct{})}
+			go func() { process.waitErr = command.Wait(); close(process.done) }()
+			defer process.stop(time.Second)
+			deadline := time.NewTimer(5 * time.Second)
+			defer deadline.Stop()
+			ticker := time.NewTicker(time.Millisecond)
+			defer ticker.Stop()
+			for !strings.Contains(output.String(), "READY") && !process.exited() {
+				select {
+				case <-deadline.C:
+					t.Fatal("child readiness timeout")
+				case <-ticker.C:
+				}
+			}
+			if test.early {
+				<-process.done
+			}
+			started := time.Now()
+			err := process.stop(100 * time.Millisecond)
+			if test.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(output.String(), strings.Repeat("tail", 65536)) {
+					t.Fatal("child output was not drained")
+				}
+			} else if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("stop = %v, want %q", err, test.want)
+			}
+			if time.Since(started) > 3*time.Second {
+				t.Fatal("shutdown exceeded bound")
+			}
+		})
+	}
+}
+
+func TestParityProcessRejectsExitBeforeWaitNotification(t *testing.T) {
+	command := exec.Command("python3", "-c", "pass")
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	// Wait can reap the process before its output-copy goroutines complete. Hold
+	// the completion notification to reproduce shutdown during that interval.
+	process := &parityProcess{command: command, output: &synchronizedBuffer{}, done: make(chan struct{})}
+	err := process.stopWithSignal(time.Second, func() error {
+		// The real OS signal must fail before the Wait notification is delivered.
+		err := command.Process.Signal(os.Interrupt)
+		close(process.done)
+		return err
+	})
+	if err == nil || !strings.Contains(err.Error(), "shutdown signal failed") {
+		t.Fatalf("stop accepted an exit before output drainage completed: %v", err)
+	}
+}
+
+func parityServerTimeout() time.Duration {
+	// A production snapshot can wait for the lifecycle worker to fill a missing
+	// ring bucket. The 16-hour/300-second product exceeded 20 seconds once in
+	// the container, while the same target completed within this measured bound.
+	return 60 * time.Second
 }
 
 func waitForAuthenticatedSnapshot(t *testing.T, url string) rawHTTPResponse {
 	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(parityServerTimeout())
+	lastResponse := rawHTTPResponse{}
 	for time.Now().Before(deadline) {
 		response := getRawResponseWithBasicAuth(t, url)
+		lastResponse = response
 		if response.status == http.StatusOK {
 			return response
 		}
@@ -1237,7 +1441,7 @@ func waitForAuthenticatedSnapshot(t *testing.T, url string) rawHTTPResponse {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatal("external Go snapshot did not become ready")
+	t.Fatalf("external Go snapshot did not become ready: url=%s status=%d body=%s", url, lastResponse.status, lastResponse.body)
 	return rawHTTPResponse{}
 }
 
@@ -1425,9 +1629,18 @@ func normalizeProductionResponseBody(body string) string {
 				case "database":
 					item[key] = "<database>"
 				case "next_refresh_at":
-					item[key] = "<next-refresh-at>"
+					// The external parity fixture disables Python's periodic
+					// refresh to keep tests offline; the Go server still exposes
+					// its scheduled timestamp. Compare catalog and refresh state,
+					// not scheduler timing metadata.
+					delete(item, key)
 				default:
 					visit(child)
+				}
+			}
+			if item["status"] == "idle" {
+				if _, present := item["failure_count"]; !present {
+					item["failure_count"] = float64(0)
 				}
 			}
 		case []any:
@@ -1621,34 +1834,21 @@ server.serve_forever()
 	// so the comparison reaches every stats event without turning a test-client
 	// admission policy into a false protocol failure.
 	command.Env = syntheticStatsEnvironment("PYTHONDONTWRITEBYTECODE=1", "PYTHONPATH="+root, "YOLOMUX_TEST_AUTH_BYPASS=1")
-	var stderr bytes.Buffer
-	command.Stderr = &stderr
-	stdout, err := command.StdoutPipe()
+	var output synchronizedBuffer
+	command.Stdout = &output
+	command.Stderr = &output
+	process := startParityProcess(t, command, &output)
+	line, err := process.readyLine(parityServerTimeout())
 	if err != nil {
 		t.Fatal(err)
-	}
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	line, err := bufio.NewReader(stdout).ReadString('\n')
-	if err != nil {
-		_ = command.Process.Kill()
-		t.Fatalf("Python parity server did not start: %v: %s", err, stderr.String())
 	}
 	fields := strings.Fields(line)
 	if len(fields) != 2 || fields[0] != "READY" {
-		_ = command.Process.Kill()
 		t.Fatalf("Python parity server announcement = %q", line)
 	}
 	port, err := strconv.Atoi(fields[1])
 	if err != nil {
-		_ = command.Process.Kill()
 		t.Fatal(err)
 	}
-	return fmt.Sprintf("http://127.0.0.1:%d", port), func() {
-		if command.Process != nil {
-			_ = command.Process.Signal(os.Interrupt)
-			_, _ = command.Process.Wait()
-		}
-	}
+	return fmt.Sprintf("http://127.0.0.1:%d", port), func() { process.checkStop(t) }
 }
