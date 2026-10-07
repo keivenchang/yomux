@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shlex
@@ -12,60 +13,45 @@ from pathlib import Path
 from typing import Mapping, MutableMapping
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-ROOT_KEYS = ("YOLOMUX_RUNTIME_DIR", "YOLOMUX_CONFIG_DIR", "YOLOMUX_STATE_DIR", "YOLOMUX_CACHE_DIR")
-YOLOMUX_ROOT_ENV = "YOLOMUX_ROOT"
-GENERATED_PYTHON_CACHE_PREFIX_ENV = "YOLOMUX_GENERATED_PYTHONPYCACHEPREFIX"
+
+# Older entrypoints import these names here; implementation has one owner.
+from tools.product_environment import apply_yomux_environment_assignments
+from tools.product_environment import clear_yomux_environment_assignments
+from tools.product_environment import expose_yomux_legacy_aliases
+from tools.product_environment import normalize_yomux_environment
+from tools.product_environment import environment_value
+from tools.product_environment import product_env
+from tools.product_environment import product_env_name
+from tools.product_environment import product_env_names
+from tools.product_environment import PRODUCT_PREFIXES
+
+ROOT_KEYS = (product_env_name('RUNTIME_DIR'), product_env_name('CONFIG_DIR'), product_env_name('STATE_DIR'), product_env_name('CACHE_DIR'))
+PRODUCT_ROOT_ENV = product_env_name('ROOT')
+GENERATED_PYTHON_CACHE_PREFIX_ENV = product_env_name('GENERATED_PYTHONPYCACHEPREFIX')
+
 _legacy_alias_warning_emitted = False
 
 
-def normalize_yomux_environment(values: Mapping[str, str], *, warn: bool = False) -> dict[str, str]:
-    """Mirror YOMUX_* names to their legacy readers before root resolution.
-
-    New names win when present, including explicit empty values; empty values
-    keep their existing meaning of unset. Warnings never expose values.
-    """
-    global _legacy_alias_warning_emitted
-    environment = dict(values)
-    used_legacy = any(key.startswith("YOLOMUX_") for key in environment)
-    for new_key in tuple(key for key in environment if key.startswith("YOMUX_")):
-        legacy_key = "YOLOMUX_" + new_key.removeprefix("YOMUX_")
-        environment.setdefault(legacy_key, environment[new_key])
-    for legacy_key in tuple(key for key in environment if key.startswith("YOLOMUX_")):
-        new_key = "YOMUX_" + legacy_key.removeprefix("YOLOMUX_")
-        if new_key in environment:
-            environment[legacy_key] = environment[new_key]
-        else:
-            environment[new_key] = environment[legacy_key]
-    if warn and used_legacy and environment.get("YOMUX_ENVIRONMENT_NORMALIZED") != "1" and not _legacy_alias_warning_emitted:
-        print("WARNING: YOLOMUX_* environment names are deprecated; use YOMUX_*.", file=sys.stderr)
-        _legacy_alias_warning_emitted = True
-    return environment
-
-
-def expose_yomux_legacy_aliases(values: MutableMapping[str, str]) -> None:
-    """Expose canonical names to legacy readers without promoting stale legacy values."""
-    canonical_keys = tuple(key for key in values if key.startswith("YOMUX_"))
-    for new_key in canonical_keys:
-        legacy_key = "YOLOMUX_" + new_key.removeprefix("YOMUX_")
-        values[legacy_key] = values[new_key]
-    if canonical_keys:
-        values["YOMUX_ENVIRONMENT_NORMALIZED"] = "1"
-
-
-PRODUCT_ROOT_KEYS = (
-    YOLOMUX_ROOT_ENV,
-    "YOLOMUX_CONFIG_DIR",
-    "YOLOMUX_STATE_DIR",
-    "YOLOMUX_CACHE_DIR",
-    "YOLOMUX_RUNTIME_DIR",
-    "YOLOMUX_CODEX_HOME",
+PRODUCT_ROOT_SETTINGS = (
+    "ROOT",
+    "CONFIG_DIR",
+    "STATE_DIR",
+    "CACHE_DIR",
+    "RUNTIME_DIR",
     "CODEX_HOME",
-    "YOLOMUX_HOST_ARTIFACT_DIR",
-    "YOLOMUX_START_LOCK_DIR",
-    "YOLOMUX_LOG_DIR",
-    "YOLOMUX_CA_DIR",
-    "YOLOMUX_TOOL_LOCK_PATH",
+    "HOST_ARTIFACT_DIR",
+    "START_LOCK_DIR",
+    "LOG_DIR",
+    "CA_DIR",
+    "TOOL_LOCK_PATH",
+)
+PRODUCT_ROOT_KEYS = tuple(
+    name for setting in PRODUCT_ROOT_SETTINGS for name in product_env_names(setting)
+) + (
+    "CODEX_HOME",
     "PYTHONPYCACHEPREFIX",
     "TMPDIR",
 )
@@ -92,7 +78,7 @@ def synthetic_test_environment(overrides: Mapping[str, str] | None = None) -> di
     environment = {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith(("YOLOMUX_", "YOMUX_", "XDG_", "OPENCODE_", "CODEX_", "CLAUDE_"))
+        if not key.startswith((*PRODUCT_PREFIXES, "XDG_", "OPENCODE_", "CODEX_", "CLAUDE_"))
         and key not in INHERITED_CREDENTIAL_ENV_KEYS
         and key not in {"HOME", "TMPDIR", "TMUX", "TMUX_PANE", "TMUX_TMPDIR", "PYTHONPATH", "PYTHONHOME", "PYTHONPYCACHEPREFIX"}
     }
@@ -100,8 +86,8 @@ def synthetic_test_environment(overrides: Mapping[str, str] | None = None) -> di
     return environment
 ROOTED_OVERRIDE_KEYS = (
     *ROOT_KEYS,
-    "YOLOMUX_CODEX_HOME",
-    "YOLOMUX_HOST_ARTIFACT_DIR",
+    product_env_name('CODEX_HOME'),
+    product_env_name('HOST_ARTIFACT_DIR'),
     "PYTHONPYCACHEPREFIX",
 )
 ROOTED_IGNORED_AMBIENT_KEYS = (
@@ -113,10 +99,9 @@ ROOTED_IGNORED_AMBIENT_KEYS = (
 )
 AUTO_ROOT_IGNORED_AMBIENT_KEYS = (
     *ROOTED_IGNORED_AMBIENT_KEYS,
-    "YOLOMUX_HOST_ARTIFACT_DIR",
-    "YOMUX_HOST_ARTIFACT_DIR",
+    *product_env_names("HOST_ARTIFACT_DIR"),
     "PYTHONPYCACHEPREFIX",
-    GENERATED_PYTHON_CACHE_PREFIX_ENV,
+    *product_env_names("GENERATED_PYTHONPYCACHEPREFIX"),
 )
 ROOTED_SOCKET_RELATIVE_PATHS = (
     Path("control/yolomux-4194304-ffffffffffffffff.sock"),
@@ -128,13 +113,13 @@ ROOTED_SOCKET_RELATIVE_PATHS = (
     Path("services/indexer.sock"),
 )
 # W1: one authoritative identity carrier. Replaces the three same-valued vars
-# (YOLOMUX_EARLY_INSTANCE_PORT, YOLOMUX_MANAGED_INSTANCE_PORT, and the managed
+# (YOMUX_EARLY_INSTANCE_PORT, YOMUX_MANAGED_INSTANCE_PORT, and the managed
 # use of the primary-port var) that previously had to be kept in sync by hand.
-INSTANCE_ENV = "YOLOMUX_INSTANCE"
+INSTANCE_ENV = product_env_name('INSTANCE')
 # Legacy env-var names retained ONLY so callers/tests can assert their absence in
 # a negative search. Nothing in this module emits or reads them any more.
-EARLY_PORT_ENV = "YOLOMUX_EARLY_INSTANCE_PORT"
-MANAGED_INSTANCE_PORT_ENV = "YOLOMUX_MANAGED_INSTANCE_PORT"
+EARLY_PORT_ENV = product_env_name('EARLY_INSTANCE_PORT')
+MANAGED_INSTANCE_PORT_ENV = product_env_name('MANAGED_INSTANCE_PORT')
 
 
 class YomuxRootError(ValueError):
@@ -170,7 +155,7 @@ def resolved_product_path(
     reject_home: bool = True,
 ) -> Path:
     """Resolve one configured path without letting process cwd choose its location."""
-    configured = values.get(key)
+    configured = environment_value(values, key)
     supplied = Path(configured) if configured else Path(default).expanduser()
     if not supplied.is_absolute():
         supplied = configured if configured else str(default)
@@ -201,7 +186,7 @@ def rooted_product_path(
     candidate = resolved_product_path(values, key, default)
     if not candidate.is_relative_to(root):
         raise YomuxRootError(
-            f"{key} resolves outside YOLOMUX_ROOT: {candidate}; unset {key} or choose a path inside {root}"
+            f"{key} resolves outside {product_env_name('ROOT')}: {candidate}; unset {key} or choose a path inside {root}"
         )
     return candidate
 
@@ -226,7 +211,7 @@ def validate_rooted_socket_budget(runtime_dir: Path, *, platform: str = sys.plat
     limit = local_rpc_socket_path_bytes(platform)
     if length > limit:
         raise YomuxRootError(
-            f"YOLOMUX_ROOT is too deep for product socket {longest} ({length} bytes; limit {limit}); choose a shorter YOLOMUX_ROOT"
+            f"{product_env_name('ROOT')} is too deep for product socket {longest} ({length} bytes; limit {limit}); choose a shorter {product_env_name('ROOT')}"
         )
 
 
@@ -234,11 +219,11 @@ def resolved_state_dir(values: Mapping[str, str]) -> Path:
     """Resolve the effective state directory without importing product modules."""
     values = normalize_yomux_environment(values)
     home = resolved_home_path(values)
-    configured_root = values.get(YOLOMUX_ROOT_ENV)
+    configured_root = product_env('ROOT', environ=values)
     if not configured_root:
-        return resolved_product_path(values, "YOLOMUX_STATE_DIR", home / ".local" / "state" / "yomux")
-    root = resolved_product_path(values, YOLOMUX_ROOT_ENV, configured_root)
-    return rooted_product_path(values, "YOLOMUX_STATE_DIR", root, root / "state")
+        return resolved_product_path(values, product_env_name('STATE_DIR'), home / ".local" / "state" / "yomux")
+    root = resolved_product_path(values, PRODUCT_ROOT_ENV, configured_root)
+    return rooted_product_path(values, product_env_name('STATE_DIR'), root, root / "state")
 
 
 def validate_product_root_environment(
@@ -250,22 +235,22 @@ def validate_product_root_environment(
     environ = normalize_yomux_environment(environ)
     home = resolved_home_path(environ)
     reject_worktree_product_path("HOME", home)
-    configured_root = environ.get(YOLOMUX_ROOT_ENV)
+    configured_root = product_env('ROOT', environ=environ)
     for key in PRODUCT_ROOT_KEYS:
-        if key == "CODEX_HOME" and (configured_root or environ.get("YOLOMUX_CODEX_HOME")):
+        if key == "CODEX_HOME" and (configured_root or product_env('CODEX_HOME', environ=environ)):
             continue
-        if environ.get(key):
+        if environment_value(environ, key):
             resolved_product_path(environ, key, environ[key])
     if configured_root:
-        root = resolved_product_path(environ, YOLOMUX_ROOT_ENV, configured_root)
+        root = resolved_product_path(environ, PRODUCT_ROOT_ENV, configured_root)
         for key in ROOTED_OVERRIDE_KEYS:
-            if environ.get(key):
+            if environment_value(environ, key):
                 rooted_product_path(environ, key, root, environ[key])
-        runtime_dir = rooted_product_path(environ, "YOLOMUX_RUNTIME_DIR", root, root / "runtime")
+        runtime_dir = rooted_product_path(environ, product_env_name('RUNTIME_DIR'), root, root / "runtime")
         validate_rooted_socket_budget(runtime_dir, platform=platform)
     else:
         for key in ("XDG_CACHE_HOME", "XDG_RUNTIME_DIR"):
-            if environ.get(key):
+            if environment_value(environ, key):
                 resolved_product_path(environ, key, environ[key], reject_home=False)
 
 
@@ -274,7 +259,7 @@ class InstanceIdentity:
     """The one per-row identity: which port this row is, and whether the
     auto-managed launcher granted it the private-root local-owner capability.
     `managed` is granted only by `resolve_instance_environment`; a caller-set
-    YOLOMUX_ROOT never produces this descriptor, so a bare path cannot grant it."""
+    YOMUX_ROOT never produces this descriptor, so a bare path cannot grant it."""
 
     port: int
     managed: bool
@@ -286,7 +271,7 @@ def format_instance(identity: InstanceIdentity) -> str:
 
 def parse_instance(environ: Mapping[str, str] | None = None) -> "InstanceIdentity | None":
     """Read the one authoritative identity, or None when no row descriptor is set."""
-    raw = (os.environ if environ is None else environ).get(INSTANCE_ENV, "")
+    raw = product_env('INSTANCE', "", environ=os.environ if environ is None else environ)
     port_text, separator, mode = raw.partition(":")
     if not separator or mode not in ("managed", "shared"):
         return None
@@ -331,7 +316,7 @@ def scan_port(argv: list[str]) -> int | None:
 def resolve_instance_environment(port: int | None, environ: Mapping[str, str], *, platform: str = sys.platform, home: Path | None = None, tempdir: Path | None = None) -> InstanceResolution:
     """Return the one root for a managed non-default instance."""
     values = normalize_yomux_environment(environ)
-    has_explicit_root = bool(values.get(YOLOMUX_ROOT_ENV) or any(values.get(key) for key in ROOT_KEYS))
+    has_explicit_root = bool(product_env('ROOT', environ=values) or any(environment_value(values, key) for key in ROOT_KEYS))
     auto_root = not has_explicit_root and port is not None and port != default_port(platform)
     validation_values = (
         {key: value for key, value in values.items() if key not in AUTO_ROOT_IGNORED_AMBIENT_KEYS}
@@ -361,9 +346,9 @@ def resolve_instance_environment(port: int | None, environ: Mapping[str, str], *
     runtime_base = runtime_base / f"y{os.getuid()}"
     instance = f"p{port}"
     environment = {
-        YOLOMUX_ROOT_ENV: str(runtime_base / instance),
+        PRODUCT_ROOT_ENV: str(runtime_base / instance),
         # One authoritative identity carrier - no separate same-valued vars. It is
-        # an assertion made only by the managed launcher: a caller-set YOLOMUX_ROOT
+        # an assertion made only by the managed launcher: a caller-set YOMUX_ROOT
         # reaches the early return above and never gets this descriptor, so a bare
         # path cannot grant the local-owner capability.
         INSTANCE_ENV: format_instance(InstanceIdentity(port=port, managed=True)),
@@ -379,20 +364,16 @@ def resolve_instance_environment(port: int | None, environ: Mapping[str, str], *
 # to another instance) could carry. The launcher strips all of these before it
 # resolves a row, so an ambient root can never contaminate a fresh launch.
 _INHERITED_INSTANCE_KEYS = (
-    INSTANCE_ENV,
-    EARLY_PORT_ENV,
-    MANAGED_INSTANCE_PORT_ENV,
+    *product_env_names("INSTANCE"),
+    *product_env_names("EARLY_INSTANCE_PORT"),
+    *product_env_names("MANAGED_INSTANCE_PORT"),
     *PRODUCT_ROOT_KEYS,
-    GENERATED_PYTHON_CACHE_PREFIX_ENV,
+    *product_env_names("GENERATED_PYTHONPYCACHEPREFIX"),
     "XDG_CONFIG_HOME",
     "XDG_STATE_HOME",
     "XDG_CACHE_HOME",
     "XDG_RUNTIME_DIR",
-    "YOLOMUX_ROW_PLAN_FILE",
-    INSTANCE_ENV.replace("YOLOMUX_", "YOMUX_"),
-    *tuple(key.replace("YOLOMUX_", "YOMUX_") for key in PRODUCT_ROOT_KEYS),
-    GENERATED_PYTHON_CACHE_PREFIX_ENV.replace("YOLOMUX_", "YOMUX_"),
-    "YOMUX_ROW_PLAN_FILE",
+    *product_env_names("ROW_PLAN_FILE"),
 )
 
 
@@ -446,13 +427,13 @@ def _apply_instance_resolution(port: int | None, target: dict[str, str], *, plat
     resolution = resolve_instance_environment(port, target, platform=platform, tempdir=tempdir)
     if resolution.error:
         raise RuntimeError(resolution.error)
-    if resolution.environment.get(YOLOMUX_ROOT_ENV):
+    if product_env('ROOT', environ=resolution.environment):
         for key in AUTO_ROOT_IGNORED_AMBIENT_KEYS:
             target.pop(key, None)
-    elif target.get(YOLOMUX_ROOT_ENV):
+    elif product_env('ROOT', environ=target):
         for key in ROOTED_IGNORED_AMBIENT_KEYS:
             target.pop(key, None)
-    target.update(resolution.environment)
+    apply_yomux_environment_assignments(target, resolution.environment)
     return resolution
 
 
@@ -462,22 +443,21 @@ def resolve_direct_launch_plan(port: int | None, base_environ: Mapping[str, str]
     and local-scheduler authority do not."""
     platform_name = platform or os.uname().sysname
     values = normalize_yomux_environment(base_environ)
-    has_explicit_root = bool(values.get(YOLOMUX_ROOT_ENV) or any(values.get(key) for key in ROOT_KEYS))
+    has_explicit_root = bool(product_env('ROOT', environ=values) or any(environment_value(values, key) for key in ROOT_KEYS))
     if port is not None and port != default_port(platform_name) and not has_explicit_root:
         return resolve_row_plan(port, values, platform=platform_name, tempdir=tempdir)
     for key in (
         INSTANCE_ENV,
         EARLY_PORT_ENV,
         MANAGED_INSTANCE_PORT_ENV,
-        INSTANCE_ENV.replace("YOLOMUX_", "YOMUX_"),
-        EARLY_PORT_ENV.replace("YOLOMUX_", "YOMUX_"),
-        MANAGED_INSTANCE_PORT_ENV.replace("YOLOMUX_", "YOMUX_"),
-        "YOLOMUX_ROW_PLAN_FILE",
-        "YOMUX_ROW_PLAN_FILE",
+        *product_env_names("INSTANCE"),
+        *product_env_names("EARLY_INSTANCE_PORT"),
+        *product_env_names("MANAGED_INSTANCE_PORT"),
+        *product_env_names("ROW_PLAN_FILE"),
     ):
         values.pop(key, None)
     _apply_instance_resolution(port, values, platform=platform_name, tempdir=tempdir)
-    assign = {key: values[key] for key in _INHERITED_INSTANCE_KEYS if values.get(key)}
+    assign = {key: values[key] for key in _INHERITED_INSTANCE_KEYS if environment_value(values, key)}
     return RowPlan(unset=_INHERITED_INSTANCE_KEYS, assign=assign)
 
 
@@ -486,7 +466,7 @@ def apply_row_plan(plan: RowPlan, base_environ: Mapping[str, str]) -> dict[str, 
     keys, overlay its assign keys. The parent `base_environ` is never mutated."""
     normalized = normalize_yomux_environment(base_environ)
     child = {key: value for key, value in normalized.items() if key not in plan.unset}
-    child.update(plan.assign)
+    apply_yomux_environment_assignments(child, plan.assign)
     return child
 
 
@@ -500,7 +480,7 @@ def clean_row_environment(port: int | None, base_environ: Mapping[str, str], *, 
 def apply_early_instance_environment(argv: list[str], environ: dict[str, str] | None = None) -> int | None:
     target = os.environ if environ is None else environ
     target.update(normalize_yomux_environment(target, warn=True))
-    target["YOMUX_ENVIRONMENT_NORMALIZED"] = "1"
+    target[product_env_name('ENVIRONMENT_NORMALIZED')] = "1"
     resolution = _apply_instance_resolution(scan_port(argv), target, platform=os.uname().sysname)
     return resolution.port
 
@@ -516,7 +496,7 @@ def assert_early_port(parsed_port: int, environ: Mapping[str, str] | None = None
 def is_managed_instance_port(port: int, environ: Mapping[str, str] | None = None) -> bool:
     """Whether this exact port received the auto-derived private-root contract.
     Reads the one authoritative descriptor; managed capability is granted there
-    only by the managed resolver, never inferred from a bare YOLOMUX_ROOT path."""
+    only by the managed resolver, never inferred from a bare YOMUX_ROOT path."""
     identity = parse_instance(environ)
     return bool(identity and identity.managed and identity.port == port)
 

@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 import errno
 import hashlib
-import hmac
 import json
 import math
 import platform
@@ -18,6 +17,8 @@ import ssl
 import subprocess
 import sys
 import time
+from http.client import HTTPConnection, HTTPSConnection
+from urllib.parse import urlencode
 import urllib.request
 import urllib.error
 
@@ -37,6 +38,8 @@ from yomux_lib.infra.listener_census import require_unique_listener_pid
 from yomux_lib.infra.root_paths import resolved_product_path
 from yomux_lib.local_services.registry import darwin_process_environment
 from yomux_lib.tmux.sessions import process_cwd
+from tools.product_environment import product_env, product_env_name
+from tools.instance_isolation import normalize_yomux_environment
 from tools.instance_isolation import resolve_instance_environment
 
 WARMUPS = 20
@@ -118,24 +121,25 @@ def process_identity(pid: int) -> dict[str, object]:
 
 
 def config_dir_from_process(environ: dict[str, str], port: int | None = None) -> Path:
-    root = environ.get("YOLOMUX_ROOT", "").strip()
-    configured = environ.get("YOLOMUX_CONFIG_DIR", "").strip()
+    environ = normalize_yomux_environment(environ)
+    root = product_env('ROOT', "", environ=environ).strip()
+    configured = product_env('CONFIG_DIR', "", environ=environ).strip()
     if root:
-        root_path = resolved_product_path(environ, "YOLOMUX_ROOT", root).resolve(strict=True)
-        config = resolved_product_path(environ, "YOLOMUX_CONFIG_DIR", root_path / "config").resolve(strict=True)
+        root_path = resolved_product_path(environ, product_env_name('ROOT'), root).resolve(strict=True)
+        config = resolved_product_path(environ, product_env_name('CONFIG_DIR'), root_path / "config").resolve(strict=True)
         if not config.resolve(strict=True).is_relative_to(root_path):
-            raise RuntimeError("listener config root escapes YOLOMUX_ROOT")
+            raise RuntimeError(f"listener config root escapes {product_env_name('ROOT')}")
         return config
     if not configured:
         resolution = resolve_instance_environment(port, environ, platform=platform.system())
-        root = resolution.environment.get("YOLOMUX_ROOT", "")
+        root = product_env('ROOT', "", environ=resolution.environment)
         if not root:
             raise RuntimeError("listener process exposes no authoritative config root")
         return Path(root).resolve(strict=True) / "config"
-    return resolved_product_path(environ, "YOLOMUX_CONFIG_DIR", configured).resolve(strict=True)
+    return resolved_product_path(environ, product_env_name('CONFIG_DIR'), configured).resolve(strict=True)
 
 
-def auth_cookie(config_dir: Path, port: int) -> str:
+def auth_cookie(config_dir: Path, port: int, scheme: str = "http") -> str:
     text = (config_dir / "auth.yaml").read_text(encoding="utf-8")
     blocks = text.split("  - ")[1:]
     selected: tuple[str, str] | None = None
@@ -153,9 +157,30 @@ def auth_cookie(config_dir: Path, port: int) -> str:
             selected = selected or candidate
     if selected is None:
         raise RuntimeError("listener root has no configured auth user")
-    secret = bytes.fromhex((config_dir / "auth-cookie-secret").read_text(encoding="utf-8").strip())
-    value = hmac.new(secret, f"{selected[0]}:{selected[1]}".encode(), hashlib.sha256).hexdigest()
-    return f"yolomux_auth_{port}={value}"
+    connection_type = HTTPSConnection if scheme == "https" else HTTPConnection
+    connection_options = {"context": ssl._create_unverified_context()} if scheme == "https" else {}
+    connection = connection_type("127.0.0.1", port, timeout=10, **connection_options)
+    try:
+        body = urlencode({"username": selected[0], "password": selected[1], "next": "/"})
+        connection.request(
+            "POST",
+            "/login",
+            body=body,
+            headers={"Content-Type": "application/x-www-form-urlencoded", "Connection": "close"},
+        )
+        response = connection.getresponse()
+        response.read()
+        if response.status != 303:
+            raise RuntimeError(f"listener login failed while creating probe cookie: HTTP {response.status}")
+        cookie = next(
+            (value.split(";", 1)[0] for name, value in response.getheaders() if name.lower() == "set-cookie" and value.startswith(f"yomux_auth_{port}=")),
+            "",
+        )
+        if not cookie:
+            raise RuntimeError("listener login succeeded without an authenticated cookie")
+        return cookie
+    finally:
+        connection.close()
 
 
 def get_json(url: str, cookie: str, marker: str = "") -> tuple[int, object]:
@@ -259,12 +284,12 @@ def run(port: int, scheme: str, output: Path) -> bool:
     # serving a port on a shared host; it is not asserting whole-host visibility.
     pid = require_unique_listener_pid(port, canonicalized_listener_census(port), strict=False)
     before = process_identity(pid)
-    cookie = auth_cookie(config_dir_from_process(process_environment(pid), port), port)
+    cookie = auth_cookie(config_dir_from_process(process_environment(pid), port), port, scheme)
     base = f"{scheme}://127.0.0.1:{port}"
     server_started_at = None
     for index in range(WARMUPS):
         status, body = get_json(base + "/api/system-status", cookie)
-        if status != 200 or not isinstance(body, dict) or body.get("ok") is not True:
+        if status != 200 or not isinstance(body, dict) or body.get("state") != "ready":
             raise RuntimeError("warmup returned unavailable/error response")
         server_started_at = require_response_server_identity(
             body,
@@ -280,7 +305,7 @@ def run(port: int, scheme: str, output: Path) -> bool:
         started = time.perf_counter()
         status, body = get_json(base + "/api/system-status", cookie, marker)
         round_trips.append((time.perf_counter() - started) * 1000)
-        if status != 200 or not isinstance(body, dict) or body.get("ok") is not True:
+        if status != 200 or not isinstance(body, dict) or body.get("state") != "ready":
             raise RuntimeError(f"sample {index} returned unavailable/error response")
         server_started_at = require_response_server_identity(
             body,

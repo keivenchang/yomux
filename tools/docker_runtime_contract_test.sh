@@ -4,13 +4,15 @@
 
 set -euo pipefail
 
+source "$1"
+
 fail() {
   echo "Docker runtime contract failed: $1" >&2
   exit 1
 }
 
-[ "${YOMUX_TEST_CONTAINER-${YOLOMUX_TEST_CONTAINER:-}}" = 1 ] || fail "test-container marker is absent"
-[ -n "${YOMUX_BAZEL_CONTRACT:-}" ] || fail "execution contract identity is absent"
+[ "$(product_env_print_present TEST_CONTAINER '')" = 1 ] || fail "test-container marker is absent"
+[ -n "$(product_env_print BAZEL_CONTRACT '')" ] || fail "execution contract identity is absent"
 [ ! -e /.dockerenv ] || fail "outer container filesystem is visible"
 [ ! -e /w ] || fail "undeclared checkout is visible"
 [ ! -e /home/runner ] || fail "outer HOME is visible"
@@ -32,11 +34,19 @@ for name in OPENAI_API_KEY ANTHROPIC_API_KEY GH_TOKEN GITHUB_TOKEN LINEAR_KEY; d
   fi
 done
 
-source_probe="/usr/.yolomux-docker-runtime-probe-$$"
-if (umask 077; : > "$source_probe") 2>/dev/null; then
-  rm -f -- "$source_probe"
-  fail "image tools are writable"
-fi
+for tool_root in /usr /bin /lib /lib64 /etc /opt; do
+  source_probe="$tool_root/.yomux-docker-runtime-probe-$$"
+  if (umask 077; : > "$source_probe") 2>/dev/null; then
+    rm -f -- "$source_probe"
+    fail "image tools are writable: $tool_root"
+  fi
+done
+python3 - <<'PY_CAPABILITIES'
+from pathlib import Path
+status = dict(line.split(':', 1) for line in Path('/proc/self/status').read_text().splitlines())
+for field in ('CapEff', 'CapPrm', 'CapInh', 'CapAmb'):
+    assert int(status[field].strip(), 16) == 0, field
+PY_CAPABILITIES
 
 for cache_root in /opt/yomux-go-mod-cache /opt/yomux-bazel-repository-cache; do
   [ -d "$cache_root" ] || fail "image cache is absent: $cache_root"

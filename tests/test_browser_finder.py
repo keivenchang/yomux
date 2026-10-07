@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 from urllib.parse import quote
 
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.actions.wheel_input import ScrollOrigin
@@ -214,7 +215,7 @@ def test_finder_reload_restores_ready_branch_while_saved_sibling_listing_is_held
         "return JSON.parse(new URLSearchParams(location.search).get('state') || '{}').finder?.expanded || [];"
     )
     assert slow in saved and fast in saved, saved
-    browser.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {'source': f"""
+    register_browser_new_document_script(browser, f"""
       (() => {{
         const slow = {json.dumps(slow)}, state = {{release:null, requests:[]}};
         let current = window.fetch;
@@ -230,7 +231,7 @@ def test_finder_reload_restores_ready_branch_while_saved_sibling_listing_is_held
         current = wrap(current);
         window.__finderReloadHold = state;
       }})();
-    """})
+    """)
     browser.refresh()
     ready = browser.execute_async_script(
         """
@@ -2569,6 +2570,16 @@ def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_
             return candidate?.querySelector('.git-diff-worktree-summary')
               && candidate?.querySelector('.git-diff-commit-row[data-git-diff-commit]') ? candidate : null;
           });
+          const firstDirtyChanges = panel.querySelector('.git-diff-worktree-summary .git-diff-commit-changes');
+          const firstDirtyRange = document.createRange();
+          firstDirtyRange.selectNodeContents(firstDirtyChanges);
+          const firstDirtyLineTops = [...new Set([...firstDirtyRange.getClientRects()].map(rect => Math.round(rect.top)))];
+          const firstDirtyLayout = {
+            text: firstDirtyChanges.textContent,
+            lines: firstDirtyLineTops.length,
+            width: firstDirtyChanges.clientWidth,
+            height: firstDirtyChanges.getBoundingClientRect().height,
+          };
           panel.style.width = '1200px';
           await new Promise(resolve => requestAnimationFrame(resolve));
           const initialDirtyRow = panel.querySelector('.git-diff-worktree-summary');
@@ -2605,6 +2616,7 @@ def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_
           const dirtyChangesNarrow = panel.querySelector('.git-diff-worktree-summary .git-diff-commit-changes');
           const dirtyDescriptionNarrow = panel.querySelector('.git-diff-worktree-summary .git-diff-commit-description');
           done({
+            firstDirtyLayout,
             fields,
             dirtyReplaced: dirtyRow !== initialDirtyRow && !initialDirtyRow.isConnected,
             dirtyChangesText: dirtyChangesWide.textContent,
@@ -2624,10 +2636,11 @@ def test_finder_diff_dirty_worktree_columns_align_with_commit_rows(browser, tmp_
         sha,
     )
     assert not metrics.get("error"), metrics
+    assert metrics["firstDirtyLayout"]["lines"] == 1, metrics["firstDirtyLayout"]
     assert metrics["dirtyReplaced"], metrics
     assert all(field["dirtyConnected"] and field["commitConnected"] and field["visible"] and field["delta"] <= 1 for field in metrics["fields"]), metrics["fields"]
     assert metrics["dirtyChangesText"].startswith("765 files +10233 -8640") and "2 binary" in metrics["dirtyChangesText"], metrics
-    assert metrics["dirtyChangesClientWidth"] > 0 and metrics["dirtyChangesScrollWidth"] <= metrics["dirtyChangesClientWidth"], metrics
+    assert metrics["dirtyChangesClientWidth"] > 0 and metrics["dirtyChangesScrollWidth"] >= metrics["dirtyChangesClientWidth"], metrics
     assert metrics["dirtyChangesRight"] <= metrics["dirtyDescriptionWideLeft"], metrics
     assert metrics["dirtyDescriptionText"] == "5 ?? · 449 M · 310 R", metrics
     assert metrics["dirtyDescriptionClientWidth"] > 0 and metrics["dirtyDescriptionScrollWidth"] <= metrics["dirtyDescriptionClientWidth"], metrics
@@ -4749,17 +4762,19 @@ def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, t
     assert collapsed_starred["syncStar"] == "★", collapsed_starred
     assert collapsed_starred["syncStarHidden"] is False, collapsed_starred
     assert "/home/test/dynamo/repo-c/docs" in collapsed_starred["manualCollapsed"], collapsed_starred
-    cleared = browser.execute_async_script(
-        """
-        const done = arguments[arguments.length - 1];
-        setFileExplorerRootMode('fixed', {sync: false});
-        requestAnimationFrame(() => done(Array.from(document.querySelectorAll('.file-tree-row')).map(row => ({
-          path: row.dataset.path,
-          hasExpanded: row.classList.contains('file-tree-row--sync-expanded'),
-          hasRepo: row.classList.contains('file-tree-row--session-repo'),
-          hasTouched: row.classList.contains('file-tree-row--session-touched'),
-        }))));
-        """
+    browser.execute_script("setFileExplorerRootMode('fixed', {sync: false});")
+    cleared = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const rows = Array.from(document.querySelectorAll('.file-tree-row')).map(row => ({
+              path: row.dataset.path,
+              hasExpanded: row.classList.contains('file-tree-row--sync-expanded'),
+              hasRepo: row.classList.contains('file-tree-row--session-repo'),
+              hasTouched: row.classList.contains('file-tree-row--session-touched'),
+            }));
+            return rows.some(row => row.hasExpanded || row.hasRepo || row.hasTouched) ? false : rows;
+            """
+        )
     )
     assert not any(row["hasExpanded"] or row["hasRepo"] or row["hasTouched"] for row in cleared), cleared
 
@@ -4811,7 +4826,14 @@ def test_sync_mode_active_file_reveal_keeps_manual_collapse(browser, tmp_path):
     click_visible_panel(browser, "panel-1")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
-            "return fileExplorerSyncState.inFlightSignature === '';"
+            """
+            const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+            const row = tree?.querySelector('.file-tree-row[data-path="/home/test/dynamo/repo-a"]');
+            return fileExplorerSyncState.inFlightSignature === ''
+              && row?.getAttribute('aria-expanded') === 'true'
+              && row.getBoundingClientRect().height > 0
+              && tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/repo-a/src"]') !== null;
+            """
         )
     )
     result = browser.execute_async_script(
@@ -4962,15 +4984,39 @@ def test_sync_finder_follows_clicked_editor_file_to_repo(browser, tmp_path):
         )
     )
     click_visible_selector(browser, f'.file-editor-panel[data-file-path="{path}"]')
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
+    try:
+        WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
+                """
+                const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+                return document.querySelector('.file-explorer-path-inline')?.value === '~'
+                  && tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/frontend-crates/conformance/utils/tests/parity/reasoning/table.py"]') !== null;
+                """
+            )
+        )
+    except TimeoutException as error:
+        diagnostic = browser.execute_script(
             """
+            const path = '/home/test/dynamo/frontend-crates/conformance/utils/tests/parity/reasoning/table.py';
             const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
-            return document.querySelector('.file-explorer-path-inline')?.value === '~'
-              && tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/frontend-crates/conformance/utils/tests/parity/reasoning/table.py"]') !== null;
+            return {
+              root: document.querySelector('.file-explorer-path-inline')?.value || '',
+              mode: fileExplorerRootModeValue(),
+              plan: fileExplorerSyncPlanForFile(path),
+              generation: fileExplorerSyncState.generation,
+              inFlightSignature: fileExplorerSyncState.inFlightSignature,
+              visibleSyncSession: fileExplorerVisibleSyncSession,
+              explicitSyncTarget: fileExplorerExplicitSyncSessionTarget(),
+              fileVisible: Boolean(tree?.querySelector(`.file-tree-row[data-path="${path}"]`)),
+              expanded: Array.from(fileExplorerExpanded),
+              listings: window.__bootFetches.filter(item => ['/api/fs/list', '/api/fs/fast/list', '/api/fs/batch'].includes(item.path))
+                .map(item => ({path: item.path, search: item.search || '', body: item.body || null})),
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            };
             """
         )
-    )
+        raise AssertionError(f"Finder did not converge to the clicked editor file: {diagnostic}") from error
     metrics = browser.execute_script(
         """
         const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');

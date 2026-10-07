@@ -15,14 +15,14 @@ usage() {
 }
 
 original_args=("$@")
-cache="${YOMUX_BAZEL_CACHE-${YOLOMUX_BAZEL_CACHE:-on}}"
+cache="$(product_env_print_present BAZEL_CACHE "on")"
 reuse_test_results=default
-jobs="${YOMUX_BAZEL_JOBS-${YOLOMUX_BAZEL_JOBS:-}}"
-memory_mb="${YOMUX_BAZEL_MEMORY_MB-${YOLOMUX_BAZEL_MEMORY_MB:-}}"
+jobs="$(product_env_print_present BAZEL_JOBS "")"
+memory_mb="$(product_env_print_present BAZEL_MEMORY_MB "")"
 memory_mb_set=no
 [ -z "$memory_mb" ] || memory_mb_set=yes
 target="//:go_tests"
-execution="${YOMUX_BAZEL_EXECUTION-${YOLOMUX_BAZEL_EXECUTION:-auto}}"
+execution="$(product_env_print_present BAZEL_EXECUTION "auto")"
 requested_execution="$execution"
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -72,7 +72,7 @@ case "$execution" in
   auto)
     if bazel_test_in_container; then
       execution=docker
-    elif [ "$(uname -s)" = Darwin ] || ! docker info >/dev/null 2>&1; then
+    elif [ "$(uname -s)" = Darwin ]; then
       execution=native
     else
       execution=docker
@@ -86,7 +86,9 @@ if [ "$execution" = native ] && bazel_test_in_container; then
   exit 2
 fi
 if [ "$execution" = docker ] && ! bazel_test_in_container && ! docker info >/dev/null 2>&1; then
-  echo "Docker execution requested, but the Docker daemon is unavailable" >&2
+  echo 'YOMUX_EXECUTION {"effective":"docker","admission":"failed","hermetic":false,"failure_phase":"daemon"}'
+  echo "WARNING: HERMETIC DOCKER TESTING FAILED: the Docker daemon is unavailable. No native fallback was run." >&2
+  echo "Native diagnostics require a separate explicit invocation: tools/run_bazel_tests.sh --execution native" >&2
   exit 2
 fi
 if [ "$execution" = native ]; then
@@ -108,21 +110,24 @@ if [ "$jobs" -lt 1 ]; then
   echo "--jobs must be a positive integer: $jobs" >&2
   exit 2
 fi
-export YOMUX_BAZEL_CPU_COUNT="$jobs"
-export YOLOMUX_BAZEL_CPU_COUNT="$jobs"
-export YOMUX_BAZEL_CACHE="$cache"
-export YOLOMUX_BAZEL_CACHE="$cache"
+product_env_assign "BAZEL_CPU_COUNT=$jobs"
+product_env_assign "BAZEL_CACHE=$cache"
 if [ "$memory_mb_set" = yes ]; then
   case "$memory_mb" in ''|*[!0-9]*) echo "--memory-mb must be a positive integer: $memory_mb" >&2; exit 2 ;; esac
   if [ "$memory_mb" -lt 1024 ]; then
     echo "--memory-mb must be at least 1024: $memory_mb" >&2
     exit 2
   fi
-  export YOMUX_BAZEL_MEMORY_MB="$memory_mb"
-  export YOLOMUX_BAZEL_MEMORY_MB="$memory_mb"
+  product_env_assign "BAZEL_MEMORY_MB=$memory_mb"
 fi
 
+yomux_normalize_environment
+
 trailing_args=("$@")
+python3 - "$requested_execution" "$execution" "$target" "${#trailing_args[@]}" "$reuse_test_results" <<'PY_EXECUTION'
+import json, sys
+print('YOMUX_EXECUTION ' + json.dumps(dict(requested=sys.argv[1], effective=sys.argv[2], target=sys.argv[3], admission='pending' if sys.argv[2]=='docker' else 'not-applicable', hermetic=False, full_suite_requested=sys.argv[3]=='//:go_tests' and sys.argv[4]=='0', freshness=sys.argv[5])))
+PY_EXECUTION
 explicit_reuse="$reuse_test_results"
 set -- "$target" "$@"
 
@@ -143,6 +148,7 @@ if [ "$execution" = native ]; then
     fi
   else
     native_test_filter_args+=(--test_tag_filters=-requires_chrome)
+    echo 'YOMUX_EXECUTION {"effective":"native","skipped_targets":["requires_chrome"]}'
     echo "Skipping Chrome E2E target because Chrome/Chromium or chromedriver is unavailable" >&2
   fi
 fi
@@ -152,6 +158,7 @@ if [ "$reuse_test_results" = default ]; then
   [ "$execution" = native ] || reuse_test_results=yes
 fi
 [ "$cache" != off ] || reuse_test_results=no
+printf 'YOMUX_EXECUTION {"test_result_reuse":"%s"}\n' "$reuse_test_results"
 test_result_cache=no
 if [ "$reuse_test_results" = yes ]; then
   test_result_cache=yes
@@ -164,12 +171,9 @@ fi
 if [ "$execution" != native ] && ! bazel_test_in_container; then
   status=0
   "$REPO_ROOT/docker/run-tests.sh" --bazel-contract -- /w/tools/run_bazel_tests.sh "${original_args[@]}" || status=$?
-  if [ "$status" = 78 ] && [ "$requested_execution" = auto ]; then
-    echo "WARNING: Docker isolation admission unavailable; selecting native execution outside the hermeticity guarantee." >&2
-    fallback_args=(--execution native --jobs "$jobs" --target "$target" --cache="$cache")
-    [ "$memory_mb_set" != yes ] || fallback_args+=(--memory-mb "$memory_mb")
-    [ "$explicit_reuse" != yes ] || fallback_args+=(--reuse-test-results)
-    exec "$REPO_ROOT/tools/run_bazel_tests.sh" "${fallback_args[@]}" -- "${trailing_args[@]}"
+  if [ "$status" -ne 0 ]; then
+    echo "WARNING: HERMETIC DOCKER TESTING FAILED (exit $status). No native fallback was run." >&2
+    echo "Native diagnostics require a separate explicit invocation: tools/run_bazel_tests.sh --execution native" >&2
   fi
   exit "$status"
 fi
@@ -191,6 +195,11 @@ if [ "$execution" = native ] && ! bazel_test_in_container; then
     if ! bazel_test_remove_run_root "$native_run_root"; then
       echo "Native Bazel execution root cleanup failed: $native_run_root" >&2
       [ "$status" -ne 0 ] || status=1
+    fi
+    if [ "$status" = 0 ]; then
+      echo "NATIVE DIAGNOSTICS PASSED - NON-HERMETIC"
+    else
+      echo "NATIVE DIAGNOSTICS FAILED - NON-HERMETIC" >&2
     fi
     exit "$status"
   }
@@ -243,10 +252,10 @@ PY_NATIVE_CACHE
     --test_output=errors
     --test_summary=terse
     --cache_test_results="$test_result_cache"
-    --test_env=YOMUX_BAZEL_EXECUTION=native
-    --test_env=YOLOMUX_BAZEL_EXECUTION=native
-    --test_env=YOMUX_TEST_CONTAINER=0
-    --test_env=YOLOMUX_TEST_CONTAINER=0
+    --test_env="$(product_env_name BAZEL_EXECUTION)"=native
+    --test_env="$(product_env_name BAZEL_EXECUTION)"=native
+    --test_env="$(product_env_name TEST_CONTAINER)"=0
+    --test_env="$(product_env_name TEST_CONTAINER)"=0
     --action_env=PATH="$PATH"
     --test_env=PATH="$PATH"
     --action_env=GOPATH=
@@ -366,8 +375,8 @@ find "$repository_cache" -type d -exec chmod u+rwx {} +
 find "$repository_cache" -type f -exec chmod u+rw {} +
 
 bazel_output_user_root="$bazel_run_root/output-user-root"
-if [ -n "${YOMUX_BAZEL_OUTPUT_USER_ROOT:-}" ]; then
-  bazel_output_user_root="$YOMUX_BAZEL_OUTPUT_USER_ROOT"
+if [ -n "$(product_env_print BAZEL_OUTPUT_USER_ROOT "")" ]; then
+  bazel_output_user_root="$(product_env_print BAZEL_OUTPUT_USER_ROOT)"
 fi
 bazel_batch_args=(--batch)
 bazel_args=(
@@ -381,8 +390,8 @@ bazel_args=(
   --test_output=errors
   --test_summary=terse
   --cache_test_results="$test_result_cache"
-  --test_env=YOMUX_BAZEL_EXECUTION="$execution"
-  --test_env=YOLOMUX_BAZEL_EXECUTION="$execution"
+  --test_env="$(product_env_name BAZEL_EXECUTION)"="$execution"
+  --test_env="$(product_env_name BAZEL_EXECUTION)"="$execution"
   --action_env=GOPATH="$test_gopath"
   --action_env=GOCACHE="$test_gocache"
   --action_env=GOWORK=off
@@ -402,11 +411,11 @@ bazel_args=(
   bazel_args+=(
     --repository_disable_download
     --registry=file:///opt/yomux-bazel-registry
-    --test_env=YOMUX_TEST_CONTAINER=1
-    --test_env=YOLOMUX_TEST_CONTAINER=1
+    --test_env="$(product_env_name TEST_CONTAINER)"=1
+    --test_env="$(product_env_name TEST_CONTAINER)"=1
     --action_env=GOMODCACHE=/opt/yomux-go-mod-cache
-    --action_env=YOMUX_BAZEL_GOMODCACHE=/opt/yomux-go-mod-cache
-    --action_env=YOLOMUX_BAZEL_GOMODCACHE=/opt/yomux-go-mod-cache
+    --action_env="$(product_env_name BAZEL_GOMODCACHE)"=/opt/yomux-go-mod-cache
+    --action_env="$(product_env_name BAZEL_GOMODCACHE)"=/opt/yomux-go-mod-cache
     --action_env=LANG=C.UTF-8
     --action_env=LC_ALL=C.UTF-8
     --action_env=GOPROXY=off
@@ -425,11 +434,13 @@ fi
 
 mapfile -t isolation_args < <(python3 "$REPO_ROOT/tools/bazel_execution_contract.py" --flags)
 bazel_args+=("$@" "${isolation_args[@]}"
-  --platform_suffix="$YOMUX_BAZEL_CONTRACT"
-  --action_env=YOMUX_BAZEL_IMAGE_ID="$YOMUX_BAZEL_IMAGE_ID"
-  --action_env=YOMUX_BAZEL_CONTRACT="$YOMUX_BAZEL_CONTRACT"
-  --test_env=YOMUX_BAZEL_IMAGE_ID="$YOMUX_BAZEL_IMAGE_ID"
-  --test_env=YOMUX_BAZEL_CONTRACT="$YOMUX_BAZEL_CONTRACT"
+  --platform_suffix="$(product_env_print BAZEL_CONTRACT)"
+  --action_env="$(product_env_name BAZEL_APPARMOR_SHA256)"="$(product_env_print BAZEL_APPARMOR_SHA256)"
+  --test_env="$(product_env_name BAZEL_APPARMOR_SHA256)"="$(product_env_print BAZEL_APPARMOR_SHA256)"
+  --action_env="$(product_env_name BAZEL_IMAGE_ID)"="$(product_env_print BAZEL_IMAGE_ID)"
+  --action_env="$(product_env_name BAZEL_CONTRACT)"="$(product_env_print BAZEL_CONTRACT)"
+  --test_env="$(product_env_name BAZEL_IMAGE_ID)"="$(product_env_print BAZEL_IMAGE_ID)"
+  --test_env="$(product_env_name BAZEL_CONTRACT)"="$(product_env_print BAZEL_CONTRACT)"
   --cache_test_results="$test_result_cache")
 
 if [ "$execution" = container ] || bazel_test_in_container; then

@@ -4,6 +4,7 @@ import ctypes
 import dataclasses
 import json
 import os
+import re
 import shutil
 import struct
 import tempfile
@@ -16,6 +17,7 @@ from typing import get_args
 from typing import get_origin
 from typing import get_type_hints
 from urllib.parse import quote
+from urllib.parse import urlencode
 
 import pytest
 
@@ -301,9 +303,11 @@ def test_session_files_payload_types_cover_builder_shapes_and_annotations():
     assert tuple_return_args(get_type_hints(TmuxWebtermApp.session_files_payload)["return"]) == (SessionFilesPayload, HTTPStatus)
 
 
+@pytest.mark.deprecated_python_server
 def test_session_files_scheduler_lease_keeps_batchd_alive_through_next_demand(
     isolated_real_batchd_runtime, monkeypatch, tmp_path,
 ):
+    monkeypatch.delenv("YOMUX_LOCAL_SERVICE_IDLE_SECONDS", raising=False)
     monkeypatch.setenv("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", "0.1")
     monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
     webapp = TmuxWebtermApp([])
@@ -349,6 +353,7 @@ def test_session_files_scheduler_lease_keeps_batchd_alive_through_next_demand(
         ))
 
 
+@pytest.mark.deprecated_python_server
 def test_session_files_public_start_failure_is_typed_terminal_not_queued(monkeypatch, tmp_path):
     monkeypatch.setattr(app_module.BatchClient, "start_for_scheduler", lambda self: False)
     monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
@@ -502,7 +507,8 @@ def test_session_files_cache_view_survives_real_server_restart(monkeypatch, tmp_
         assert terminal_status == HTTPStatus.OK
         assert terminal["state"] == "ready"
         views = sorted(
-            path for path in server_paths.state_dir.rglob("session-files-cache/*.json")
+            path for path in server_paths.state_dir.rglob("*.json")
+            if "session-files-cache" in path.parts
             if not path.name.endswith(".manifest.json") and path.name not in {"index.json", "cache-index.json"}
         )
         assert len(views) == 1
@@ -560,6 +566,7 @@ def test_session_files_cache_view_survives_real_server_restart(monkeypatch, tmp_
 
 
 @pytest.mark.skipif(not Path("/proc").is_dir(), reason="requires a fixture-owned Linux server process")
+@pytest.mark.deprecated_python_server
 def test_session_files_one_generation_physical_disk_gate(monkeypatch, tmp_path, gate_http_port):
     """One unchanged generation has one producer and bounded durable disk effects."""
 
@@ -829,7 +836,8 @@ def test_session_files_browser_completion_is_bounded_to_one_opaque_cache_read(mo
         assert receipt_response.status == HTTPStatus.ACCEPTED
         terminal_status, terminal = operation_terminal_response(server, receipt["operation"]["status_url"], timeout=20)
         assert terminal_status == HTTPStatus.OK and terminal["state"] == "ready"
-        views = [path for path in server_paths.state_dir.rglob("session-files-cache/*.json") if not path.name.endswith(".manifest.json") and path.name not in {"index.json", "cache-index.json"}]
+        cache_root = server_paths.state_dir / "session-files-cache"
+        views = [path for path in cache_root.rglob("*.json") if re.fullmatch(r"[0-9a-f]{64}\.json", path.name)]
         assert len(views) == 1
         view_id = views[0].stem
         browser = new_chrome_driver(profile_dir=tmp_path / "chrome-profile")
@@ -838,20 +846,46 @@ def test_session_files_browser_completion_is_bounded_to_one_opaque_cache_read(mo
         WebDriverWait(browser, 12).until(lambda driver: driver.execute_script("return Boolean(document.querySelector('#panel-__differ__'));"))
         WebDriverWait(browser, 12).until(lambda driver: driver.execute_script("return fileExplorerSessionFilesState?.payload?.loaded === true;"))
         WebDriverWait(browser, 12).until(lambda driver: driver.execute_script("return clientEventTransportState?.connected === true;"))
-        browser_descriptor = browser.execute_script("return sessionFilesDescriptorForDestination('differ', sessionFilesRequestForDestination('differ'));" )
+        browser_request = browser.execute_script("return sessionFilesRequestForDestination('differ');")
+        browser_descriptor = browser.execute_script("return sessionFilesDescriptorForDestination('differ', sessionFilesRequestForDestination('differ'));")
         assert browser_descriptor == json.loads(views[0].read_text(encoding="utf-8"))["request_descriptor"]
         finder = new_chrome_driver(profile_dir=tmp_path / "finder-profile")
         finder.get(f"http://127.0.0.1:{server.port}/?sessions=__finder__,{quote(session, safe='')}&layout=left&tabs=left:__finder__")
         WebDriverWait(finder, 12).until(lambda driver: driver.execute_script("return Boolean(document.querySelector('#panel-__finder__'));"))
         WebDriverWait(finder, 12).until(lambda driver: driver.execute_script("return fileExplorerFinderSessionFilesState?.payload?.loaded === true;"))
         WebDriverWait(finder, 12).until(lambda driver: driver.execute_script("return clientEventTransportState?.connected === true;"))
-        finder_descriptor = finder.execute_script("return sessionFilesDescriptorForDestination('finder', sessionFilesRequestForDestination('finder'));" )
-        assert finder_descriptor == browser_descriptor
+        finder_request = finder.execute_script("return sessionFilesRequestForDestination('finder');")
+        finder_descriptor = finder.execute_script("return sessionFilesDescriptorForDestination('finder', sessionFilesRequestForDestination('finder'));")
+        assert finder_descriptor != browser_descriptor, {
+            "differ_repo_paths": browser_request.get("repo_paths", []),
+            "finder_repo_paths": finder_request.get("repo_paths", []),
+        }
+        cache_records = [
+            (path, json.loads(path.read_text(encoding="utf-8")))
+            for path in cache_root.rglob("*.json")
+            if re.fullmatch(r"[0-9a-f]{64}\.json", path.name)
+        ]
+        record_by_descriptor = {record["request_descriptor"]: (path, record) for path, record in cache_records}
+        assert set(record_by_descriptor) == {browser_descriptor, finder_descriptor}
+        browser_view_id = record_by_descriptor[browser_descriptor][0].stem
+        finder_view_id = record_by_descriptor[finder_descriptor][0].stem
         for surface in (browser, finder):
             surface.execute_script(
             "window.__e3SessionFilesRequests = [];"
             "window.__e3SessionFilesApplications = 0;"
             "window.__e3SessionFilesApplicationCalls = [];"
+            "window.__e3ClientPushEvents = [];"
+            "window.__e3CompletionCalls = [];"
+            "const originalQueueClientPushEvent = queueClientPushEvent;"
+            "queueClientPushEvent = (...args) => {"
+            " window.__e3ClientPushEvents.push(args.slice(0, 2));"
+            " return originalQueueClientPushEvent(...args);"
+            "};"
+            "const originalRefreshSessionFilesCompletionSurfaces = refreshSessionFilesCompletionSurfaces;"
+            "refreshSessionFilesCompletionSurfaces = (...args) => {"
+            " window.__e3CompletionCalls.push({completion: args[0], candidates: sessionFilesCompletionCandidates(args[0])});"
+            " return originalRefreshSessionFilesCompletionSurfaces(...args);"
+            "};"
             "const originalFetch = window.fetch.bind(window);"
             "const originalApply = setSessionFilesPayloadForDestination;"
             "setSessionFilesPayloadForDestination = (...args) => {"
@@ -865,28 +899,64 @@ def test_session_files_browser_completion_is_bounded_to_one_opaque_cache_read(mo
             " return originalFetch(...args);"
             "};"
             )
-        for cache_record in (views[0], views[0].with_name(f"{view_id}.manifest.json")):
-            record = json.loads(cache_record.read_text(encoding="utf-8"))
-            record["stored_at"] = 0.0
-            cache_record.write_text(json.dumps(record), encoding="utf-8")
+        for cache_path, record in cache_records:
+            record["stored_at"] = 1
+            cache_path.write_text(json.dumps(record), encoding="utf-8")
+            manifest_path = cache_path.with_name(f"{cache_path.stem}.manifest.json")
+            if manifest_path.exists():
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest["stored_at"] = 1
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         # An expired durable view after a server restart is a recoverable state.  Do not pair the
         # expired record with a still-fresh memory entry: that split state cannot happen to a user and
         # used to leave this EventSource assertion waiting for an event that was never eligible.
         server.restart()
-        connection = HTTPConnection("127.0.0.1", server.port, timeout=10)
-        connection.request("GET", f"/api/session-files?session={quote(session, safe='')}&hours=24&from=HEAD&to=current")
-        stale_response = connection.getresponse()
-        assert stale_response.status == HTTPStatus.OK
-        stale_response.read()
-        connection.close()
-        WebDriverWait(browser, 12).until(lambda driver: driver.execute_script("return clientEventTransportState?.connected === true;"))
-        expected_cache_read = f"?from=HEAD&to=current&session={quote(session, safe='')}&hours=24&cache_only=1&cache_view={view_id}"
-        # The local scheduler publishes directly to this instance's EventSource. A completion is
-        # proven by the one opaque cache read in each connected browser, not by a persisted
-        # cross-instance manifest.
-        WebDriverWait(browser, 12).until(
-            lambda driver: driver.execute_script("return window.__e3SessionFilesRequests.length === 1;")
-        )
+        for request in (browser_request, finder_request):
+            query = [("from", request["from_ref"]), ("to", request["to_ref"])]
+            query.extend(("repo_path", path) for path in request.get("repo_paths", []))
+            query.extend((("session", session), ("hours", str(request["hours"]))))
+            connection = HTTPConnection("127.0.0.1", server.port, timeout=10)
+            connection.request("GET", f"/api/session-files?{urlencode(query)}")
+            stale_response = connection.getresponse()
+            assert stale_response.status == HTTPStatus.OK
+            stale_response.read()
+            connection.close()
+        for surface in (browser, finder):
+            WebDriverWait(surface, 12).until(lambda driver: driver.execute_script("return clientEventTransportState?.connected === true;"))
+        expected_cache_reads = {
+            "differ": "?" + urlencode([
+                ("from", browser_request["from_ref"]), ("to", browser_request["to_ref"]),
+                ("session", session), ("hours", str(browser_request["hours"])),
+                ("cache_only", "1"), ("cache_view", browser_view_id),
+            ]),
+            "finder": "?" + urlencode([
+                ("from", finder_request["from_ref"]), ("to", finder_request["to_ref"]),
+                *(("repo_path", path) for path in finder_request.get("repo_paths", [])),
+                ("session", session), ("hours", str(finder_request["hours"])),
+                ("cache_only", "1"), ("cache_view", finder_view_id),
+            ]),
+        }
+        # Each completion is tied to its canonical request identity, so Finder and Differ each
+        # perform one opaque cache read for their own view even when their repository roots differ.
+        try:
+            WebDriverWait(browser, 12).until(
+                lambda driver: driver.execute_script("return window.__e3SessionFilesRequests.length === 1;")
+            )
+        except TimeoutException as error:
+            browser_state = browser.execute_script(
+                "return {connected: clientEventTransportState?.connected, "
+                "sourceReadyState: clientEventTransportState?.source?.readyState, "
+                "requests: window.__e3SessionFilesRequests, "
+                "pushEvents: window.__e3ClientPushEvents, "
+                "completionCalls: window.__e3CompletionCalls, "
+                "visible: {differ: fileExplorerSessionFilesPaneIsVisible(), finder: fileExplorerTreePaneIsVisible()}, "
+                "documentVisibility: document.visibilityState, queued: [...clientEventTransportState.queue.values()], "
+                "frame: clientEventTransportState.frame, "
+                "descriptor: sessionFilesDescriptorForDestination('differ', sessionFilesRequestForDestination('differ')), "
+                "payload: fileExplorerSessionFilesState?.payload, "
+                "errors: window.__yomuxDebugFailureEvents || []};"
+            )
+            raise AssertionError(f"Differ missed session-files completion: {browser_state}; server={server.output[-30:]}") from error
         try:
             WebDriverWait(finder, 12).until(
                 lambda driver: driver.execute_script("return window.__e3SessionFilesRequests.length === 1;")
@@ -898,10 +968,13 @@ def test_session_files_browser_completion_is_bounded_to_one_opaque_cache_read(mo
                 "demand: clientEventTransportState?.demand,"
                 "sourceReadyState: clientEventTransportState?.source?.readyState,"
                 "replacementReadyState: clientEventTransportState?.replacementSource?.readyState,"
-                "resourceEpoch: clientEventTransportState?.resourceEpoch,"
-                "resourceRevisions: Object.fromEntries(clientEventTransportState?.resourceRevisions || []),"
-                    "requests: window.__e3SessionFilesRequests,"
-                "descriptor: sessionFilesDescriptorForDestination('finder', sessionFilesRequestForDestination('finder')),"
+                    "resourceEpoch: clientEventTransportState?.resourceEpoch,"
+                    "resourceRevisions: Object.fromEntries(clientEventTransportState?.resourceRevisions || []),"
+                        "requests: window.__e3SessionFilesRequests,"
+                    "pushEvents: window.__e3ClientPushEvents,"
+                    "completionCalls: window.__e3CompletionCalls,"
+                    "visible: {differ: fileExplorerSessionFilesPaneIsVisible(), finder: fileExplorerTreePaneIsVisible()},"
+                    "descriptor: sessionFilesDescriptorForDestination('finder', sessionFilesRequestForDestination('finder')),"
                 "payload: fileExplorerFinderSessionFilesState?.payload,"
                 "errors: window.__yomuxDebugFailureEvents || []"
                 "};"
@@ -917,8 +990,8 @@ def test_session_files_browser_completion_is_bounded_to_one_opaque_cache_read(mo
             )
             assert settled["ok"], settled
         requests = browser.execute_script("return [...window.__e3SessionFilesRequests];")
-        assert requests == [expected_cache_read]
-        assert finder.execute_script("return [...window.__e3SessionFilesRequests];") == [expected_cache_read]
+        assert requests == [expected_cache_reads["differ"]]
+        assert finder.execute_script("return [...window.__e3SessionFilesRequests];") == [expected_cache_reads["finder"]]
         browser_applications = browser.execute_script("return window.__e3SessionFilesApplicationCalls;")
         finder_applications = finder.execute_script("return window.__e3SessionFilesApplicationCalls;")
         assert len(browser_applications) <= 1, browser_applications
@@ -941,7 +1014,8 @@ def test_session_files_browser_completion_is_bounded_to_one_opaque_cache_read(mo
             )
             assert replaced
             WebDriverWait(surface, 12).until(lambda driver: driver.execute_script("return clientEventTransportState?.connected === true;"))
-            assert surface.execute_script("return [...window.__e3SessionFilesRequests];") == [expected_cache_read]
+            expected = expected_cache_reads["finder" if surface is finder else "differ"]
+            assert surface.execute_script("return [...window.__e3SessionFilesRequests];") == [expected]
             assert surface.execute_script(f"return {state_expression}.signature;") == before_signature
             assert surface.execute_script("return window.__e3SessionFilesApplications;") <= 1
     finally:
@@ -954,6 +1028,7 @@ def test_session_files_browser_completion_is_bounded_to_one_opaque_cache_read(mo
         stop_isolated_tmux_runtime(runtime)
 
 
+@pytest.mark.deprecated_python_server
 def test_session_files_route_returns_operation_receipt_then_publishes_and_replays_ready(monkeypatch, tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir(); init_repo(repo)
@@ -1460,6 +1535,7 @@ def test_session_files_operation_publishes_under_immutable_producer_identity(cha
 
 
 @pytest.mark.parametrize("failure_stage", ["result", "deadline"])
+@pytest.mark.deprecated_python_server
 def test_session_files_failure_attributes_one_terminal_producer(failure_stage, monkeypatch, tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -1613,6 +1689,7 @@ def test_session_files_recovered_receipt_replays_producer_abandoned(monkeypatch,
     )
 
 
+@pytest.mark.deprecated_python_server
 def test_session_files_public_deleted_root_cache_keeps_batchd_serving(
     isolated_real_batchd_runtime, monkeypatch, tmp_path,
 ):

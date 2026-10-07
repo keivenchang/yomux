@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/keivenchang/yomux/internal/productenv"
 )
 
 // SyntheticEnvironment removes ambient product and client-data inputs before
@@ -22,10 +24,7 @@ func SyntheticEnvironment(overrides ...string) []string {
 			overrideKeys[key] = struct{}{}
 		}
 	}
-	privateRoot, canonicalRootSet := os.LookupEnv("YOMUX_PRIVATE_TEST_ENV_ROOT")
-	if !canonicalRootSet {
-		privateRoot = os.Getenv("YOLOMUX_PRIVATE_TEST_ENV_ROOT")
-	}
+	privateRoot := productenv.Value("PRIVATE_TEST_ENV_ROOT")
 	privateDefaults := make([]string, 0, 4)
 	if privateRoot != "" {
 		if _, overridden := overrideKeys["HOME"]; !overridden {
@@ -97,17 +96,21 @@ func NewPrivateTestEnvironment() (func(), error) {
 	for key, directory := range privateTestDirectories {
 		environment[key] = filepath.Join(root, directory)
 	}
-	environment["YOLOMUX_PRIVATE_TEST_ENV_ROOT"] = root
-	environment["YOMUX_PRIVATE_TEST_ENV_ROOT"] = root
+	for _, key := range productenv.Names("PRIVATE_TEST_ENV_ROOT") {
+		environment[key] = root
+	}
 	environment["PYTHONUSERBASE"] = pythonUserBase
 	environment["PYTHONDONTWRITEBYTECODE"] = "1"
-	// Direct adapter tests must also stay off the operator's machine-wide tmux.
-	// Keep only the legacy default so tests can override either supported alias.
-	if err := os.Unsetenv("YOMUX_TMUX_SOCKET"); err != nil {
-		_ = os.RemoveAll(root)
-		return nil, err
+	// Direct adapter tests must stay off the operator's machine-wide tmux. Keep
+	// the legacy alias as the fixture default so the adapter exercises fallback.
+	tmuxSocketNames := productenv.Names("TMUX_SOCKET")
+	for _, name := range tmuxSocketNames[:len(tmuxSocketNames)-1] {
+		if err := os.Unsetenv(name); err != nil {
+			_ = os.RemoveAll(root)
+			return nil, err
+		}
 	}
-	environment["YOLOMUX_TMUX_SOCKET"] = filepath.Join(root, "tmux.sock")
+	environment[tmuxSocketNames[len(tmuxSocketNames)-1]] = filepath.Join(root, "tmux.sock")
 	for key, value := range environment {
 		if err := os.Setenv(key, value); err != nil {
 			_ = os.RemoveAll(root)
@@ -146,7 +149,7 @@ func ShortTempDir(t testing.TB) string {
 }
 
 func ambientSyntheticInputKey(key string) bool {
-	if strings.HasPrefix(key, "YOMUX_") || strings.HasPrefix(key, "YOLOMUX_") || strings.HasPrefix(key, "XDG_") ||
+	if _, product := productenv.Suffix(key); product || strings.HasPrefix(key, "XDG_") ||
 		strings.HasPrefix(key, "OPENCODE_") || strings.HasPrefix(key, "CODEX_") || strings.HasPrefix(key, "CLAUDE_") {
 		return true
 	}
@@ -161,4 +164,29 @@ func ambientSyntheticInputKey(key string) bool {
 	default:
 		return false
 	}
+}
+
+// PreserveProductEnvironment restores synthesized aliases and metadata as well as raw fixture inputs.
+func PreserveProductEnvironment(t testing.TB) {
+	t.Helper()
+	original := make(map[string]string)
+	for _, entry := range os.Environ() {
+		key, value, _ := strings.Cut(entry, "=")
+		if _, product := productenv.Suffix(key); product {
+			original[key] = value
+		}
+	}
+	t.Cleanup(func() {
+		for _, entry := range os.Environ() {
+			key, _, _ := strings.Cut(entry, "=")
+			if _, product := productenv.Suffix(key); product {
+				if _, existed := original[key]; !existed {
+					_ = os.Unsetenv(key)
+				}
+			}
+		}
+		for key, value := range original {
+			_ = os.Setenv(key, value)
+		}
+	})
 }

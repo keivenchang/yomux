@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from tools.instance_isolation import PRODUCT_ROOT_KEYS
+from tools.product_environment import product_env_name
 from yomux_lib.infra.inotify_capacity import inotify_watch_descriptor_count
 from yomux_lib.watchd_client import WatchClient
 
@@ -84,7 +85,7 @@ def _isolated_child_env(base: Path) -> dict[str, str]:
     tmp = base / "tmp"
     root.mkdir()
     tmp.mkdir()
-    env.update({"YOLOMUX_ROOT": str(root), "TMPDIR": str(tmp)})
+    env.update({product_env_name("ROOT"): str(root), "TMPDIR": str(tmp)})
     return env
 
 

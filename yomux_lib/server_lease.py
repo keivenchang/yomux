@@ -13,6 +13,7 @@ from pathlib import Path
 from .infra.common import RUNTIME_DIR
 from .infra.common import ensure_runtime_root
 from .infra.host_identity import HostIdentity
+from .infra.host_identity import LocalProcessReason
 from .infra.host_identity import current_host_identity
 from .infra.host_identity import is_current_local_process
 from .infra.root_paths import YomuxRoots
@@ -65,6 +66,17 @@ def _verified_instance_owner(record: dict | None, identity: HostIdentity) -> boo
     if not isinstance(record, dict):
         return False
     return is_current_local_process(record, host_identity=identity).current
+
+
+def _proven_stale_instance_owner(record: dict | None, identity: HostIdentity) -> bool:
+    if not isinstance(record, dict):
+        return False
+    diagnostic = is_current_local_process(record, host_identity=identity)
+    return diagnostic.reason in {
+        LocalProcessReason.PREVIOUS_BOOT,
+        LocalProcessReason.PROCESS_NOT_FOUND,
+        LocalProcessReason.PROCESS_IDENTITY_REUSED,
+    }
 
 
 def _same_process_record(left: dict, right: dict) -> bool:
@@ -225,6 +237,10 @@ def _acquire_instance_locks(
                     return None
                 record = _read_unlocked_instance_record(path)
                 if not _verified_instance_owner(record, identity):
+                    if _proven_stale_instance_owner(record, identity):
+                        raise InstanceLeaseError(
+                            "cannot force-start: the recorded server is no longer running, but another process still holds its product-path lease"
+                        )
                     raise InstanceLeaseError(
                         "cannot force-start: another instance owns a product path, but its host/boot/PID identity cannot be verified"
                     )
@@ -247,6 +263,11 @@ def _acquire_instance_locks(
                 except RuntimeError as error:
                     raise InstanceLeaseError(str(error)) from error
                 acquired.extend(owner_fds.items())
+        acquired_paths = {path for path, _fd in acquired}
+        if acquired_paths != set(lock_paths):
+            raise InstanceLeaseError(
+                "cannot force-start: the previous server exited, but inherited descriptors still hold one or more product-path leases"
+            )
     except BaseException:
         _release_fds([locked_fd for _locked_path, locked_fd in acquired])
         raise
@@ -370,10 +391,15 @@ def acquire_instance_and_port_leases(
         ]
         if port_record is not None:
             if not _verified_instance_owner(port_record, identity):
-                raise InstanceLeaseError(
-                    f"cannot force-start: requested port {int(port)} is owned by an instance whose identity cannot be verified"
-                )
-            if not any(
+                if not _proven_stale_instance_owner(port_record, identity):
+                    raise InstanceLeaseError(
+                        f"cannot force-start: requested port {int(port)} is owned by an instance whose identity cannot be verified"
+                    )
+                if any(_verified_instance_owner(root_record, identity) for root_record in root_records):
+                    raise InstanceLeaseError(
+                        f"cannot force-start: requested port {int(port)} has a stale lease record while a YOmux instance still owns the product root"
+                    )
+            elif not any(
                 _verified_instance_owner(root_record, identity)
                 and _same_process_record(root_record, port_record)
                 for root_record in root_records

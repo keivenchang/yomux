@@ -101,6 +101,7 @@ def test_rename_session_calls_tmux_and_updates_session_order(monkeypatch, make_a
     assert calls == [["rename-session", "-t", "=1:", "agent"]]
 
 
+@pytest.mark.deprecated_python_server
 def test_rename_session_http_exact_target_refuses_stale_prefix_without_renaming_sibling(
     monkeypatch,
     gate_runtime_paths,

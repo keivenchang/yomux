@@ -306,6 +306,7 @@ from .yoagent.controller import YoagentController
 from .yoagent.session_summaries import YOAGENT_SESSION_SUMMARIES_STATE_KEY  # noqa: F401 - compatibility re-export
 from .yoagent.session_summaries import YOAGENT_SESSION_SUMMARY_STATES
 from .yoagent.session_summaries import YoagentSummaryWorkerRecord
+from tools.product_environment import product_env, product_env_name
 
 
 logger = logging.getLogger(__name__)
@@ -1300,15 +1301,17 @@ TMUX_SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9_. -]{1,64}$")
 DEFAULT_APP_SETTINGS = default_settings()
 DEFAULT_PERFORMANCE_SETTINGS = DEFAULT_APP_SETTINGS["performance"]
 SELF_RESTART_LOG_PATH = str(Path(tempfile.gettempdir()) / f"yolomux-server-{os.getuid()}" / "shared" / "logs" / "self-update-restart.log")
+SELF_RESTART_ENV_SETTINGS = (
+    "EXTRA_PATH",
+    "CONFIG_DIR",
+    "STATE_DIR",
+    "TEST_AUTH_BYPASS",
+)
 SELF_RESTART_ENV_KEYS = (
     "PATH",
     "TERM",
     "PYTHONUNBUFFERED",
     "MALLOC_ARENA_MAX",
-    "YOLOMUX_EXTRA_PATH",
-    "YOLOMUX_CONFIG_DIR",
-    "YOLOMUX_STATE_DIR",
-    "YOLOMUX_TEST_AUTH_BYPASS",
     "VIRTUAL_ENV",
 )
 XTERM_RUNTIME_ASSETS = ("xterm.js", "xterm.css", "xterm-addon-unicode11.js")
@@ -2938,9 +2941,9 @@ class WatchBridge:
         ]
         files_changed = revision.get("files_changed") if isinstance(revision.get("files_changed"), list) else []
         roots = tuple(str(root) for root in revision.get("roots", []) if isinstance(root, str))
-        # watchd is a per-user daemon whose runtime socket derives from YOLOMUX_ROOT, not from a
-        # server's YOLOMUX_FS_ROOTS.  Two servers with different filesystem policies under the same
-        # YOLOMUX_ROOT therefore share ONE daemon, and its `wait_revision` takes no lease id and
+        # watchd is a per-user daemon whose runtime socket derives from YOMUX_ROOT, not from a
+        # server's YOMUX_FS_ROOTS.  Two servers with different filesystem policies under the same
+        # YOMUX_ROOT therefore share ONE daemon, and its `wait_revision` takes no lease id and
         # returns the caller-independent UNION of every co-tenant's leased roots and change paths.
         # This consumer must scope that union to THIS server's own authorization boundary BEFORE it
         # mirrors any state or fans an `fs_changed` SSE, or a narrow-policy server would disclose a
@@ -9337,14 +9340,14 @@ class TmuxWebtermApp:
         self.job_client.start_for_scheduler()
         composed_owner_for(self, "_session_files_coordinator", SessionFilesCoordinator).start()
         # Offline parity servers must not change response state through a failed provider fetch.
-        if os.environ.get("YOMUX_TEST_DISABLE_PRICING_REFRESH") != "1":
+        if product_env('TEST_DISABLE_PRICING_REFRESH', environ=os.environ) != "1":
             self.pricing_refresh_coordinator.start_periodic()
         self.start_status_collector_lease()
         # Parity and migration fixtures may supply a fixed stats database and
         # deliberately disable live collectors. Keep the production HTTP and
         # statsd paths active while preventing host/tmux/transcript collectors
         # from appending nondeterministic facts to that fixture.
-        if os.environ.get("YOLOMUX_STATS_DISABLE_COLLECTORS") != "1":
+        if product_env('STATS_DISABLE_COLLECTORS', environ=os.environ) != "1":
             self.stats_current_runtime.start()
         self.refresh_search_indexer_schedule()
         # Startup must bind before any repository snapshot work.  The old warm-cache probe
@@ -10907,6 +10910,11 @@ class TmuxWebtermApp:
             for key in SELF_RESTART_ENV_KEYS
             if (value := os.environ.get(key)) not in (None, "")
         }
+        env.update({
+            product_env_name(setting): value
+            for setting in SELF_RESTART_ENV_SETTINGS
+            if (value := product_env(setting, environ=os.environ)) not in (None, "")
+        })
         env["PATH"] = os.environ.get("PATH", env.get("PATH", ""))
         env["TERM"] = os.environ.get("TERM", env.get("TERM", "xterm-256color")) or "xterm-256color"
         env["PYTHONUNBUFFERED"] = "1"

@@ -28,9 +28,9 @@ source "$REPO_ROOT/tools/startup_common.sh"
 yomux_normalize_environment
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 STATE_DIR=""
-CA_DIR="${YOMUX_CA_DIR:-${YOLOMUX_CA_DIR:-$HOME/.local/share/yomux-ca}}"
-LEAF_DAYS="${YOMUX_LEAF_DAYS:-${YOLOMUX_LEAF_DAYS:-825}}"
-CA_DAYS="${YOMUX_CA_DAYS:-${YOLOMUX_CA_DAYS:-3650}}"
+CA_DIR="$(product_env_print CA_DIR "$HOME/.local/share/yomux-ca")"
+LEAF_DAYS="$(product_env_print LEAF_DAYS "825")"
+CA_DAYS="$(product_env_print CA_DAYS "3650")"
 INSTALL_TRUST=1
 DRY_RUN=0
 EXTRA_SANS=()
@@ -52,13 +52,13 @@ done
 
 command -v openssl >/dev/null || die "openssl not found"
 command -v "$PYTHON_BIN" >/dev/null || die "$PYTHON_BIN not found"
-CA_DIR="$("$PYTHON_BIN" "$REPO_ROOT/tools/instance_isolation.py" resolve-product-path YOMUX_CA_DIR "$CA_DIR")" \
+CA_DIR="$("$PYTHON_BIN" "$REPO_ROOT/tools/instance_isolation.py" resolve-product-path "$(product_env_name CA_DIR)" "$CA_DIR")" \
   || die "CA directory refused by product-root policy"
 if [ -z "$STATE_DIR" ]; then
   STATE_DIR="$("$PYTHON_BIN" "$REPO_ROOT/tools/instance_isolation.py" resolve-state-dir)" \
     || die "state directory refused by product-root policy"
 else
-  STATE_DIR="$(YOMUX_STATE_DIR="$STATE_DIR" "$PYTHON_BIN" "$REPO_ROOT/tools/instance_isolation.py" resolve-state-dir)" \
+  STATE_DIR="$(env "$(product_env_name STATE_DIR)=$STATE_DIR" "$PYTHON_BIN" "$REPO_ROOT/tools/instance_isolation.py" resolve-state-dir)" \
     || die "state directory refused by product-root policy"
 fi
 TLS_DIR="$STATE_DIR/tls"

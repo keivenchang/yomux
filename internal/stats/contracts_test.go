@@ -44,6 +44,28 @@ func TestCurrentAgentRosterAllowsBoundedObservationTime(t *testing.T) {
 	}
 }
 
+func TestCurrentSystemDiskObservationRequiresUsageOrUnavailableReason(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload map[string]any
+		wantErr bool
+	}{
+		{name: "sample", payload: map[string]any{"mountpoint": "/", "used_percent": float64(94)}},
+		{name: "unavailable inventory", payload: map[string]any{"mountpoint": "/mnt/remote", "unavailable_reason": "invalid_sample"}},
+		{name: "missing sample state", payload: map[string]any{"mountpoint": "/mnt/remote"}, wantErr: true},
+		{name: "conflicting sample state", payload: map[string]any{"mountpoint": "/mnt/remote", "used_percent": float64(0), "unavailable_reason": "invalid_sample"}, wantErr: true},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			item := Observation{Family: "system_disk", Payload: testCase.payload}
+			err := validateCurrentFamilyObservation(item)
+			if (err != nil) != testCase.wantErr {
+				t.Fatalf("validateCurrentFamilyObservation() error = %v, wantErr=%t", err, testCase.wantErr)
+			}
+		})
+	}
+}
+
 func testCoverage() CoverageEpoch {
 	end := 20.0
 	return CoverageEpoch{Family: "cpu", SourceID: "host", EpochID: "epoch-1", StartedAt: 10, EndedAt: &end, NativeCadenceSeconds: 1, OwnerGeneration: 1}

@@ -29,7 +29,7 @@ from yomux_lib.server import Handler
 from yomux_lib.server import TmuxWebtermHTTPServer
 
 
-pytestmark = pytest.mark.socket
+pytestmark = [pytest.mark.socket, pytest.mark.deprecated_python_server]
 
 _USERNAME = "framing-admin"
 _PASSWORD = "framing-password"

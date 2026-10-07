@@ -1,0 +1,12 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+package(default_visibility = ["//:__subpackages__"])
+
+exports_files(["BUILD.bazel"])
+
+go_library(
+    name = "tmuxcmd_lib",
+    srcs = ["command.go"],
+    importpath = "github.com/keivenchang/yomux/internal/tmuxcmd",
+    deps = ["//internal/productenv:productenv_lib"],
+)

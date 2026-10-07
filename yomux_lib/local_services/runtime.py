@@ -21,6 +21,7 @@ from collections.abc import Callable
 from pathlib import Path
 from threading import Event
 
+from tools.product_environment import environment_value
 from ..background_scheduler import pid_is_alive
 from ..host_identity import HostIdentity
 from ..host_identity import LocalProcessReason
@@ -279,7 +280,7 @@ def acquire_client_lease(
         # would share its pid with every request. Only a process that was itself
         # spawned as a local service -- proven by the spawn marker in its own
         # environment -- can be talking to itself.
-        is_self = bool(self_connection) and bool(os.environ.get(LOCAL_SERVICE_SPAWN_GENERATION_ENV))
+        is_self = bool(self_connection) and bool(environment_value(os.environ, LOCAL_SERVICE_SPAWN_GENERATION_ENV))
     if is_self:
         return {
             "ok": False,

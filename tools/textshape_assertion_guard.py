@@ -116,7 +116,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
     "tests/test_check_runner.py:test_module_bazel_uses_pinned_sdk_and_supported_platform_checksums": "The module's SDK archive names, checksums, direct rule modules, and WORKSPACE retirement are source-controlled pins; the Linux archive and offline module graph are exercised by the canonical Bazel suite, while Darwin archives require their native host.",
     "tests/test_check_runner.py:test_bazel_runner_uses_a_persistent_action_cache_and_private_output_roots": "The persistent cache partition and private output-root wiring define cross-invocation ownership; Docker integration exercises the cache, while this structural contract prevents shared execution state from returning.",
     "tests/test_check_runner.py:test_bazel_runtime_trees_are_consumer_scoped_and_frontend_is_generated": "Runfiles ownership and generated frontend outputs are Bazel graph contracts; the graph is consumed by the canonical Go and browser targets, and this assertion guards accidental source-group widening or checkout generation.",
-    "tests/test_check_runner.py:test_bazel_integration_runs_every_external_parity_case_without_skip": "These test target selectors, external binary owners, and the measured CPU reservation must stay declared in both normal and race lanes; the integration tests execute all selected cases in the canonical Bazel suite.",
+    "tests/test_check_runner.py:test_go_gate_excludes_deprecated_backend_comparison": "The canonical Go gate and Go browser lane must not select deprecated Python-versus-Go implementation comparisons.",
     "tests/test_check_runner.py:test_bazel_stats_integration_has_explicit_normal_and_race_owners": "The normal and race agent-status integration targets are deliberate Bazel ownership entries; the actual targets are executed in the canonical Dockerized suite, while this source contract prevents one mode from disappearing from the test graph.",
     "tests/test_browser_layout.py:test_static_browser_fixtures_have_one_write_and_navigation_owner": "The static browser fixture must keep one write/navigation owner; runtime scenarios exercise the behavior separately.",
     "tests/test_local_service_runtime_row_projection.py:test_every_registry_row_producer_delegates_to_the_shared_parent": "Every registry-backed runtime-row producer must delegate to the single shared projection owner.",
@@ -128,7 +128,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
 # text-shape assertion to an already allowlisted function still fails the guard
 # until a reviewer deliberately updates this value and its reason. The sequence
 # is stable when unrelated code moves an assertion to a different source line.
-TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "a4cc25961bad3de8856fa2bbb11cce7f0e2b16d760a433d28625fe20ca4aebcf"
+TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "84b29d45451e89a40dec5d0904b38b56d1aaa17580d58dc4f25289fab2dcddb3"
 
 
 @dataclass(frozen=True, slots=True)

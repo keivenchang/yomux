@@ -53,7 +53,9 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from yomux_lib.tmux.agent_tui import AgentPaneState
+from yomux_lib.tmux.agent_tui import AgentTuiSendResult
 from yomux_lib.tmux.agent_tui import classify_agent_pane
+from yomux_lib.tmux.agent_tui import send_prompt
 from yomux_lib.approval.approvals import blank_prompt_state
 from yomux_lib.approval.approvals import hybrid_approval_prompt_state
 from yomux_lib.approval.approvals import transcript_approval_prompt_state
@@ -67,6 +69,7 @@ from yomux_lib.approval.prompt_detector import (
     detect_prompt,
     extract_command,
     is_dangerous,
+    model_capacity_notice_visible,
     prompt_hash,
     prompt_text,
     selected_prompt_option,
@@ -96,6 +99,7 @@ _DETECTOR_REEXPORTS = (
     detect_prompt,
     extract_command,
     is_dangerous,
+    model_capacity_notice_visible,
     prompt_hash,
     prompt_text,
     selected_prompt_option,
@@ -113,6 +117,7 @@ log = logging.getLogger("auto_approve")
 from yomux_lib.approval.approvals import DEFAULT_PROMPT_SOURCE
 from yomux_lib.approval.approvals import PROMPT_RETRY_SECONDS
 from yomux_lib.approval.approvals import PROMPT_SOURCE_CHOICES
+from tools.product_environment import product_env_name
 
 # Re-export detector helpers from yomux_lib.approval.prompt_detector so existing
 # callers can keep importing them from this script.
@@ -145,6 +150,22 @@ def standalone_bash_decision(cmd: str | None, target: str = "", dangerously_yolo
     decision["action"] = action
     decision["command_missing"] = False
     return decision
+
+
+def capacity_recovery_pending(visible_text: str, state: AgentPaneState) -> bool:
+    # A retained transcript notice must not take precedence over a newer prompt.
+    return (
+        model_capacity_notice_visible(visible_text)
+        and not (state.approval or {}).get("approval_visible")
+        and state.reason_code != "needs-input"
+    )
+
+
+def send_capacity_recovery(target: str, *, dry_run: bool = False) -> AgentTuiSendResult:
+    """Reuse guarded delivery and the shared dry-run setting for both YO callers."""
+    if dry_run or yolo_rules.yolo_settings()["dry_run"]:
+        return AgentTuiSendResult(ok=True, sent=False, reason_code="dry-run")
+    return send_prompt(target, "continue\n\n", clear_existing=False)
 
 
 def classify_auto_approve_state(target: str, visible_text: str, prompt_source: str = DEFAULT_PROMPT_SOURCE) -> tuple[AgentPaneState, str | None]:
@@ -280,8 +301,8 @@ def _self_test() -> bool:
         test_root = Path(raw_root)
         test_root.chmod(0o700)
         env.setdefault("PYTHONPYCACHEPREFIX", str(test_root / "pyc"))
-        env.setdefault("YOLOMUX_CONFIG_DIR", str(test_root / "config"))
-        env.setdefault("YOLOMUX_STATE_DIR", str(test_root / "state"))
+        env.setdefault(product_env_name('CONFIG_DIR'), str(test_root / "config"))
+        env.setdefault(product_env_name('STATE_DIR'), str(test_root / "state"))
         cmd = [
             sys.executable,
             "-m",
@@ -307,6 +328,7 @@ class SessionState:
         self.last_hash = ""
         self.last_hash_at = 0.0
         self.last_blocked_hash = ""
+        self.capacity_retry_sent = False
         self.approved = 0
         self.blocked = 0
 
@@ -489,6 +511,22 @@ def main() -> None:
                 continue
 
             pane_state, pane_text = classify_auto_approve_state(st.target, visible_text, prompt_source=args.prompt_source)
+            approval_state = pane_state.approval or {}
+            if capacity_recovery_pending(visible_text, pane_state):
+                if not st.capacity_retry_sent:
+                    result = send_capacity_recovery(st.target, dry_run=args.dry_run)
+                    if result.reason_code == "dry-run":
+                        log_dedup(logging.INFO, f"[{st.label}] DRY RUN: capacity recovery would send continue")
+                    elif result.sent:
+                        st.capacity_retry_sent = True
+                        acted = True
+                        log.info("[%s] Capacity recovery sent continue", st.label)
+                    if (result.sent or result.reason_code == "dry-run") and should_exit_once(st, "capacity recovery"):
+                        return
+                continue
+            if not model_capacity_notice_visible(visible_text):
+                st.capacity_retry_sent = False
+
             prompt_state = pane_state.prompt
             approval_state = pane_state.approval or {}
             prompt_type = str(approval_state.get("approval_type") or prompt_state.get("type") or "")

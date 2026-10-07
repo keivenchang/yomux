@@ -75,90 +75,6 @@ func TestSyntheticStatsEnvironmentRemovesAmbientHostInputs(t *testing.T) {
 	}
 }
 
-// TestStatsPythonAndGoReceiveTheSameHTTPFixture keeps the parity claim at the
-// transport boundary. The Go and Python implementations run as separate HTTP
-// servers, receive the same fixture, and are compared through raw HTTP and
-// SSE responses. In-process oracle calls do not exercise this request path.
-func TestStatsPythonAndGoReceiveTheSameHTTPFixture(t *testing.T) {
-	ctx := context.Background()
-	now := time.Unix(2000, 0)
-	path := filepath.Join(t.TempDir(), "stats.sqlite3")
-	writer, err := stats.OpenWriter(ctx, path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer writer.Close()
-	observations := []stats.Observation{
-		{EventID: "server-cpu", Family: "cpu", SourceID: "host", ObservedAt: 1990, EpochID: "cpu", OwnerGeneration: 1, Payload: map[string]any{"process_percent": 20.0, "system_percent": 40.0, "process_cpu_percent": map[string]any{"yolomux-go": 7.0, "python": 5.0}}},
-		{EventID: "server-memory", Family: "system_memory", SourceID: "host", ObservedAt: 1991, EpochID: "memory", OwnerGeneration: 1, Payload: map[string]any{"used_bytes": 100.0, "capacity_bytes": 200.0}},
-	}
-	coverage := []stats.CoverageEpoch{
-		{Family: "cpu", SourceID: "host", EpochID: "cpu", StartedAt: 1800, NativeCadenceSeconds: 1, OwnerGeneration: 1},
-		{Family: "system_memory", SourceID: "host", EpochID: "memory", StartedAt: 1800, NativeCadenceSeconds: 60, OwnerGeneration: 1},
-	}
-	atoms := []stats.UsageAtom{{EventID: "server-usage", Direction: "input", Modality: "text", CacheRole: "none", Unit: "tokens", ObservedAt: 1992, Payload: map[string]any{"quantity": 10.0, "agent_id": "agent-a", "model": "model-a", "provider": "provider-a", "telemetry_complete": true}}}
-	if _, err := writer.AppendBatch(ctx, stats.AppendBatch{Observations: observations, CoverageEpochs: coverage, UsageAtoms: atoms}); err != nil {
-		t.Fatal(err)
-	}
-	service := publishedStatsService(t, writer, []stats.ProductKey{{RangeSeconds: 300, ResolutionSeconds: 10}}, now)
-	goServer := httptest.NewServer(statsParityMux(&server{statsPath: path, statsService: service, statsNow: func() time.Time { return now }, statsHeartbeat: time.Hour}))
-	defer goServer.Close()
-
-	fixturePath := filepath.Join(t.TempDir(), "fixture.json")
-	fixture := map[string]any{"observations": observations, "coverage": coverage, "atoms": atoms, "generated_at": float64(now.Unix()), "source_generation": service.State().SourceGeneration, "cache_generation": service.State().CacheGeneration, "pricing_root": filepath.Join(filepath.Dir(fixturePath), "python-pricing")}
-	fixtureBytes, err := json.Marshal(fixture)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(fixturePath, fixtureBytes, 0600); err != nil {
-		t.Fatal(err)
-	}
-	pythonURL, stopPython := startPythonStatsParityServer(t, fixturePath)
-	defer stopPython()
-
-	for _, path := range []string{"/api/stats-capabilities", "/api/stats-snapshot?range_seconds=300&resolution=10&client_id=server-parity"} {
-		goResponse := getRawResponse(t, goServer.URL+path)
-		pythonResponse := getRawResponse(t, pythonURL+path)
-		if path == "/api/stats-capabilities" {
-			goResponse.body = normalizeReadyRequestID(goResponse.body)
-			pythonResponse.body = normalizeReadyRequestID(pythonResponse.body)
-		}
-		if !reflect.DeepEqual(goResponse, pythonResponse) {
-			t.Fatalf("raw HTTP parity mismatch for %s\nGo: %+v\nPython: %+v", path, goResponse, pythonResponse)
-		}
-	}
-	// Error responses are part of the wire contract too. Exercise the same
-	// malformed, duplicate, retired, and delta queries against both HTTP
-	// boundaries; in-process parser tests cannot catch header/status drift.
-	for _, path := range []string{
-		"/api/stats-snapshot?range_seconds=300&resolution=AUTO&client_id=x&history=1",
-		"/api/stats-snapshot?range_seconds=300&resolution=AUTO&client_id=x&client_id=y",
-		"/api/stats-snapshot?range_seconds=300&resolution=AUTO&client_id=%ZZ",
-		"/api/stats-delta?range_seconds=300&resolution_seconds=1&client_id=x&after_cache_generation=0&after_revision=0&client_id=y",
-		"/api/stats-stream?range_seconds=300&resolution=AUTO&client_id=x&history=1",
-	} {
-		goResponse := getRawResponse(t, goServer.URL+path)
-		pythonResponse := getRawResponse(t, pythonURL+path)
-		// This first test deliberately uses the in-process Python forwarder as a
-		// fast transport oracle. Its low-level adapter returns the legacy
-		// unsupported payload, while the production server adds ApiResponseWriter
-		// failure framing; compare the shared legacy details here. The production
-		// server test below asserts the complete canonical envelope.
-		goResponse.body = normalizeStatsParityError(goResponse.body)
-		if !reflect.DeepEqual(goResponse, pythonResponse) {
-			t.Fatalf("raw HTTP error parity mismatch for %s\nGo: %+v\nPython: %+v", path, goResponse, pythonResponse)
-		}
-	}
-	goSSE := getInitialSSE(t, goServer.URL+"/api/stats-stream?range_seconds=300&resolution=10&client_id=server-parity")
-	pythonSSE := getInitialSSE(t, pythonURL+"/api/stats-stream?range_seconds=300&resolution=10&client_id=server-parity")
-	if goSSE.status != pythonSSE.status || goSSE.contentType != pythonSSE.contentType || !reflect.DeepEqual(goSSE.headers, pythonSSE.headers) {
-		t.Fatalf("raw SSE headers mismatch\nGo: %+v\nPython: %+v", goSSE, pythonSSE)
-	}
-	if normalizeSSEIDs(goSSE.body) != normalizeSSEIDs(pythonSSE.body) {
-		t.Fatalf("raw SSE parity mismatch\nGo: %s\nPython: %s", normalizeSSEIDs(goSSE.body), normalizeSSEIDs(pythonSSE.body))
-	}
-}
-
 func checkStatsPythonAndExternalGoReceiveTheSameHTTPFixture(t *testing.T, binaryPath string) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -543,18 +459,21 @@ func checkStatsProductionPythonAndGoReceiveTheSameHTTPFixture(t *testing.T, bina
 	if goSSEBody != pythonSSEBody {
 		t.Fatalf("production SSE initial frames mismatch\nGo: %s\nPython: %s", goSSEBody, pythonSSEBody)
 	}
-	// A reconnect carrying the accepted cache generation must resume the same
-	// immutable product without replaying a snapshot. Compare this through both
-	// production sockets so the browser's since_generation contract cannot drift
-	// behind the delta/not-modified response tested above.
-	goReconnectQuery := streamQuery + "&since_generation=" + strconv.FormatInt(int64(snapshotGeneration), 10)
-	pythonReconnectQuery := streamQuery + "&since_generation=" + strconv.FormatInt(int64(pythonGeneration), 10)
+	// Each live publisher owns its generation. Reconnect from the accepted SSE
+	// cursor, and validate replay against the returned generation; a publication
+	// between requests can advance either server independently.
+	goCursor := productionSSEGeneration(t, goSSE.body)
+	pythonCursor := productionSSEGeneration(t, pythonSSE.body)
+	goReconnectQuery := streamQuery + "&since_generation=" + strconv.FormatInt(int64(goCursor), 10)
+	pythonReconnectQuery := streamQuery + "&since_generation=" + strconv.FormatInt(int64(pythonCursor), 10)
 	goReconnect := getInitialSSEWithBasicAuth(t, goURL+goReconnectQuery)
 	pythonReconnect := getInitialSSEWithBasicAuth(t, pythonURL+pythonReconnectQuery)
 	if goReconnect.status != pythonReconnect.status || goReconnect.contentType != pythonReconnect.contentType || !reflect.DeepEqual(goReconnect.headers, pythonReconnect.headers) {
 		t.Fatalf("production SSE reconnect headers mismatch\nGo: %+v\nPython: %+v", goReconnect, pythonReconnect)
 	}
-	if normalizeProductionSSE(goReconnect.body) != normalizeProductionSSE(pythonReconnect.body) {
+	goUnchanged := assertProductionSSEReconnect(t, goCursor, goSSE.body, goReconnect.body)
+	pythonUnchanged := assertProductionSSEReconnect(t, pythonCursor, pythonSSE.body, pythonReconnect.body)
+	if goUnchanged == pythonUnchanged && normalizeProductionSSE(goReconnect.body) != normalizeProductionSSE(pythonReconnect.body) {
 		t.Fatalf("production SSE reconnect frames mismatch\nGo: %s\nPython: %s", normalizeProductionSSE(goReconnect.body), normalizeProductionSSE(pythonReconnect.body))
 	}
 }
@@ -753,6 +672,65 @@ func browserObservationPayload(t *testing.T, path string) string {
 	return payload
 }
 
+func productionSSEGeneration(t *testing.T, body string) float64 {
+	t.Helper()
+	frames := parseSSEFrames(t, body)
+	if len(frames) < 2 || frames[0].event != "ack" || frames[len(frames)-1].event != "ready" {
+		t.Fatalf("invalid SSE frame sequence: %s", body)
+	}
+	generation, ok := frames[0].data["cache_generation"].(float64)
+	if !ok || generation <= 0 || frames[len(frames)-1].data["cache_generation"] != generation {
+		t.Fatalf("invalid SSE generation: %s", body)
+	}
+	return generation
+}
+
+func assertProductionSSEReconnect(t *testing.T, cursor float64, initial, body string) bool {
+	t.Helper()
+	generation := productionSSEGeneration(t, body)
+	frames := parseSSEFrames(t, body)
+	unchanged := generation == cursor
+	if generation < cursor || frames[0].data["not_modified"] != unchanged {
+		t.Fatalf("reconnect cursor %v disagrees with ack: %s", cursor, body)
+	}
+	snapshots := frames[1 : len(frames)-1]
+	want := 0
+	if !unchanged {
+		want = 1
+	}
+	if len(snapshots) != want {
+		t.Fatalf("reconnect cursor %v has %d snapshots, want %d: %s", cursor, len(snapshots), want, body)
+	}
+	for _, frame := range snapshots {
+		if frame.event != "snapshot" || frame.data["cache_generation"] != generation {
+			t.Fatalf("reconnect snapshot differs from ack: %s", body)
+		}
+	}
+	// The fixture has no live collectors. Only wall-clock bucket boundaries and
+	// generations may change; replay must preserve the accepted populated data.
+	expected := parseSSEFrames(t, initial)
+	expected[0].data["not_modified"] = unchanged
+	if unchanged {
+		expected = []sseFrame{expected[0], expected[len(expected)-1]}
+	}
+	normalized := make([]string, 2)
+	for index, sequence := range [][]sseFrame{expected, frames} {
+		var wire strings.Builder
+		for _, frame := range sequence {
+			data, err := json.Marshal(frame.data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fmt.Fprintf(&wire, "event: %s\ndata: %s\n\n", frame.event, data)
+		}
+		normalized[index] = normalizeProductionSSE(wire.String())
+	}
+	if normalized[0] != normalized[1] {
+		t.Fatalf("reconnect payload changed for cursor %v\nAccepted: %s\nReconnect: %s", cursor, normalized[0], normalized[1])
+	}
+	return unchanged
+}
+
 func normalizeProductionSSE(body string) string {
 	lines := strings.Split(body, "\n")
 	event := ""
@@ -863,7 +841,7 @@ func productionNoDataShape(value any) (string, error) {
 	}
 	expectedFamilies := map[string]struct{}{
 		"agent_status": {}, "agent_tokens": {}, "browser": {}, "cost": {},
-		"cpu": {}, "gpu": {}, "service_load": {}, "system_memory": {},
+		"cpu": {}, "gpu": {}, "service_load": {}, "system_memory": {}, "system_disk": {},
 	}
 	if len(spans) != len(expectedFamilies) {
 		return "", fmt.Errorf("unexpected persisted-gap span count %d", len(spans))
@@ -998,7 +976,7 @@ from yomux_lib.stats_current.storage import default_database_path
 
 destination = default_database_path()
 destination.parent.mkdir(parents=True, exist_ok=True)
-source = os.environ["YOLOMUX_STATS_FIXTURE"]
+source = os.environ["YOMUX_STATS_FIXTURE"]
 # The fixture was written by the Go owner in WAL mode. Checkpoint its committed
 # rows before copying only the main file; otherwise Python would receive an
 # empty base database while the source reader still sees facts in -wal.
@@ -1009,7 +987,7 @@ print(destination)
 `
 	command := exec.Command("python3", "-c", script)
 	command.Dir = repoRoot
-	command.Env = syntheticStatsEnvironment("PYTHONPATH="+repoRoot, "YOLOMUX_ROOT="+root, "YOLOMUX_STATS_FIXTURE="+fixturePath)
+	command.Env = syntheticStatsEnvironment("PYTHONPATH="+repoRoot, "YOMUX_ROOT="+root, "YOMUX_STATS_FIXTURE="+fixturePath)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("seed production Python stats database: %v\n%s", err, output)
 	} else {
@@ -1077,7 +1055,7 @@ func startExternalPythonStatsServer(t *testing.T, root string) (string, func()) 
 	}
 	command := exec.Command("python3", "yomux.py", "--backend", "python", "--http", "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--sessions")
 	command.Dir = repoRoot
-	command.Env = syntheticStatsEnvironment("PYTHONPATH="+repoRoot, "YOLOMUX_ROOT="+root, "YOLOMUX_STATS_DISABLE_COLLECTORS=1", "YOLOMUX_TEST_DISABLE_PRICING_REFRESH=1", "PYTHONDONTWRITEBYTECODE=1", "YOLOMUX_TEST_AUTH_BYPASS=1")
+	command.Env = syntheticStatsEnvironment("PYTHONPATH="+repoRoot, "YOMUX_ROOT="+root, "YOMUX_STATS_DISABLE_COLLECTORS=1", "YOMUX_TEST_DISABLE_PRICING_REFRESH=1", "PYTHONDONTWRITEBYTECODE=1", "YOMUX_TEST_AUTH_BYPASS=1")
 	var output synchronizedBuffer
 	command.Stdout = &output
 	command.Stderr = &output
@@ -1132,8 +1110,8 @@ func startExternalGoStatsServer(t *testing.T, binaryPath, root, configDir, datab
 	// compiled server cannot append host observations after the fixture DB is
 	// prepared; production startup keeps all collectors enabled by default.
 	command.Env = syntheticStatsEnvironment(
-		"YOLOMUX_PRICING_CATALOG="+seedFixturePath,
-		"YOLOMUX_STATS_DISABLE_COLLECTORS=1",
+		"YOMUX_PRICING_CATALOG="+seedFixturePath,
+		"YOMUX_STATS_DISABLE_COLLECTORS=1",
 	)
 	var output synchronizedBuffer
 	command.Stdout = &output
@@ -1833,7 +1811,7 @@ server.serve_forever()
 	// from one loopback identity. Bypass only the login throttle (not route auth)
 	// so the comparison reaches every stats event without turning a test-client
 	// admission policy into a false protocol failure.
-	command.Env = syntheticStatsEnvironment("PYTHONDONTWRITEBYTECODE=1", "PYTHONPATH="+root, "YOLOMUX_TEST_AUTH_BYPASS=1")
+	command.Env = syntheticStatsEnvironment("PYTHONDONTWRITEBYTECODE=1", "PYTHONPATH="+root, "YOMUX_TEST_AUTH_BYPASS=1")
 	var output synchronizedBuffer
 	command.Stdout = &output
 	command.Stderr = &output

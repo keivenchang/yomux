@@ -8,4 +8,4 @@ bazel_test_prepare_environment
 test -x "$binary"
 test -f "$repo/tools/bazel_go_browser_e2e.py"
 cd "$repo"
-PYTHONPATH="$repo" YOMUX_GO_BINARY="$binary" python3 "$repo/tools/bazel_go_browser_e2e.py" "$binary"
+env PYTHONPATH="$repo" "$(product_env_name GO_BINARY)=$binary" python3 "$repo/tools/bazel_go_browser_e2e.py" "$binary"

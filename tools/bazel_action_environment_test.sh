@@ -54,7 +54,7 @@ export NGC_API_KEY=host-ngc-key
 export OPENAI_API_KEY=host-openai-key
 export YOLOMUX_CHECK_CONTAINER=host-container-routing
 bazel_test_prepare_environment
-if [ "${YOMUX_BAZEL_EXECUTION:-container}" = native ]; then
+if [ "$(product_env_print BAZEL_EXECUTION container)" = native ]; then
   bazel_assert_value YOLOMUX_CHECK_CONTAINER 0
 else
   bazel_assert_value YOLOMUX_CHECK_CONTAINER ""
@@ -73,7 +73,7 @@ if [ "$HOME" != "$TEST_TMPDIR/yolomux-agent-environment/home" ] || \
   [ "$CODEX_HOME" != "$TEST_TMPDIR/yolomux-agent-environment/codex-home" ] || \
   [ "$CLAUDE_CONFIG_DIR" != "$TEST_TMPDIR/yolomux-agent-environment/claude-config" ] || \
   [ "$XDG_RUNTIME_DIR" != "$TEST_TMPDIR/yolomux-agent-environment/xdg-runtime" ] || \
-  [ "$TMPDIR" != "$YOLOMUX_BAZEL_TMPDIR" ]; then
+  [ "$TMPDIR" != "$(product_env_print BAZEL_TMPDIR)" ]; then
   echo "Bazel test HOME/XDG/TMPDIR roots are not synthetic and action-owned" >&2
   exit 1
 fi

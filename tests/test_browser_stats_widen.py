@@ -6,6 +6,7 @@ import copy
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import ssl
@@ -53,6 +54,7 @@ GO_STATS_SERIES = {
         ("system_memory_used_bytes", "systemMemory"),
         ("process_memory_bytes:python", "memory:python"),
     ],
+    "systemDisk": [("system_disk_used_percent:/", "disk:/")],
 }
 GO_STATS_SNAPSHOT_SERIES = tuple(
     snapshot_name
@@ -148,6 +150,15 @@ def _seed_go_stats_fixture(database: Path) -> None:
                         separators=(",", ":"),
                     ),
                 ),
+                (
+                    f"go-disk-{index}",
+                    "system_disk",
+                    "mount:/",
+                    observed_at,
+                    "go-disk-epoch",
+                    1,
+                    json.dumps({"mountpoint": "/", "used_percent": 42 + index}, separators=(",", ":")),
+                ),
             )
         )
     atoms = [
@@ -195,6 +206,7 @@ def _seed_go_stats_fixture(database: Path) -> None:
         ("cpu", "host", "go-cpu-epoch", now - 180, None, 1, 1),
         ("agent_status", "host", "go-agent-epoch", now - 180, None, 60, 1),
         ("system_memory", "host", "go-memory-epoch", now - 180, None, 60, 1),
+        ("system_disk", "mount:/", "go-disk-epoch", now - 180, None, 300, 1),
     ]
     with sqlite3.connect(database) as connection:
         connection.executescript(
@@ -344,6 +356,19 @@ _STATS_ROUTE_INSTRUMENTATION = r"""
   }
 })();
 """
+
+
+def _raise_login_page_diagnostic(driver):
+    raise AssertionError(
+        "Go login page missing form: "
+        f"url={driver.current_url!r} title={driver.title!r} "
+        f"source={driver.page_source[:1200]!r}"
+    )
+
+
+def _register_stats_route_instrumentation(harness: Any) -> None:
+    register_browser_new_document_script(harness.driver, _STATS_ROUTE_INSTRUMENTATION)
+
 
 def test_stats_area_legend_key_is_a_thick_block(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug&layout=left&tabs=left:__debug__")
@@ -765,6 +790,11 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
                }
                const defaultChartKeys = [...document.querySelectorAll('.js-debug-panel [data-js-debug-chart]')]
                  .map(chart => chart.dataset.jsDebugChart);
+               const graphRoot = document.querySelector('.js-debug-panel [data-js-debug-graph]');
+               const graphBody = graphRoot?.querySelector('[data-js-debug-graph-body]');
+               const refillControl = graphRoot?.querySelector('[data-js-debug-refill-controls]');
+               const refillAfterCharts = !refillControl || Boolean(graphBody
+                 && (graphBody.compareDocumentPosition(refillControl) & Node.DOCUMENT_POSITION_FOLLOWING));
                const defaultDaemonsToggle = document.querySelector('[data-js-debug-chart-toggle="serversLoad"]');
                const defaultGraphs = Object.fromEntries(['activity', 'agentTokens', 'memory'].map(chart => {
                  const node = document.querySelector(`.js-debug-panel [data-js-debug-chart="${chart}"]`);
@@ -789,9 +819,10 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
                  || !defaultChartKeys.includes('activity')
                  || !defaultChartKeys.includes('agentTokens')
                  || !defaultChartKeys.includes('memory')
+                 || !refillAfterCharts
                  || defaultChartKeys.includes('serversLoad')
                  || defaultDaemonsToggle !== null) {
-                 throw new Error(`default Graphs state did not paint the required charts: ${JSON.stringify({readiness: jsDebugHistoryReadinessSnapshot?.(), defaultChartKeys, defaultDaemonsChecked: defaultDaemonsToggle?.checked, defaultGraphs})}`);
+                 throw new Error(`default Graphs state did not paint the required charts: ${JSON.stringify({readiness: jsDebugHistoryReadinessSnapshot?.(), defaultChartKeys, defaultDaemonsChecked: defaultDaemonsToggle?.checked, refillAfterCharts, defaultGraphs})}`);
                }
                const warningsBeforeProbe = jsDebugEvents.filter(event => event?.type === 'stats_history'
                  && event?.level === 'warning').map(event => String(event.message || ''));
@@ -824,7 +855,7 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
               updateJsDebugCurrentSnapshotState(snapshot, {forceGraphRefresh: true});
               const buckets = debugGraphDisplayBuckets(Date.now(), {rangeSeconds: 900});
               const seriesItems = debugGraphSeriesData(buckets);
-              const requiredGroups = jsDebugGraphChartGroups.filter(group => ['activity', 'agentTokens', 'memory'].includes(group.key));
+              const requiredGroups = jsDebugGraphChartGroups.filter(group => ['activity', 'agentTokens', 'memory', 'systemDisk'].includes(group.key));
               const render = document.createElement('div');
               render.innerHTML = debugGraphSvgHtml(
                 buckets,
@@ -893,7 +924,14 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
                  throw new Error(`cost report stats gate failed: ${JSON.stringify(costReport)}`);
                }
                if (!nonEmptyGeometry || missingSeries.length || missingSnapshotSeries.length || tokenRates.length <= 0) {
-                 throw new Error(`15m graph stats gate failed: missingRendered=${JSON.stringify(missingSeries)} missingSnapshot=${JSON.stringify(missingSnapshotSeries)} tokenRates=${JSON.stringify(tokenRates)} charts=${JSON.stringify(charts)} snapshotSeries=${JSON.stringify(snapshotSeries)}`);
+                 const disk = {
+                   snapshot: snapshotSeries['system_disk_used_percent:/'] || 0,
+                   values: snapshotSeriesValues['system_disk_used_percent:/'] || [],
+                   adapted: buckets.map(bucket => ({start: bucket.startMs, mounts: [...(bucket.hostMetrics?.diskMounts?.entries?.() || [])]}))
+                     .filter(bucket => bucket.mounts.length > 0),
+                   series: seriesItems.filter(series => series.hostMetric === 'diskUsage').map(series => ({key: series.key, samples: series.samples})),
+                 };
+                 throw new Error(`15m graph stats gate failed: missingRendered=${JSON.stringify(missingSeries)} missingSnapshot=${JSON.stringify(missingSnapshotSeries)} disk=${JSON.stringify(disk)} tokenRates=${JSON.stringify(tokenRates)} charts=${JSON.stringify(charts)}`);
                }
                setDebugGraphRange(300);
                await window.__yomuxTestWaitFor(
@@ -1001,6 +1039,13 @@ def test_go_stats_capabilities_validate_and_load_fifteen_minute_history(browser,
 def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_path, monkeypatch, request):
     """Prove collector -> SQLite -> lifecycle -> SSE -> unchanged UI in one fixture."""
     source_root = Path(__file__).resolve().parents[1]
+    df_listing = subprocess.run(["df", "-kP"], check=True, capture_output=True, text=True).stdout
+    expected_disk_mounts = []
+    for line in df_listing.splitlines()[1:]:
+        match = re.match(r"^.+\s+(\d+)\s+\d+\s+\d+\s+(\d+)%\s+(.+)$", line)
+        if not match:
+            continue
+        expected_disk_mounts.append({"mountpoint": match.group(3), "highUse": int(match.group(2)) > 80})
     private_source_root = tmp_path / "source-root"
     for relative in ("static", "tools", "yomux_lib"):
         shutil.copytree(source_root / relative, private_source_root / relative)
@@ -1074,6 +1119,7 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
     server_log_path = tmp_path / "go-collector-server.log"
     server_log = server_log_path.open("w", encoding="utf-8")
     original_script_timeout = browser.timeouts.script
+    stats_stream_script_id = None
     try:
         collector_environment = _synthetic_server_environment()
         collector_environment.update({
@@ -1141,16 +1187,37 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
             lambda driver: driver.current_url.split("?", 1)[0].rstrip("/") == base_url
         )
         request.node._yomux_skip_reused_browser_diagnostic = True
+        stats_stream_script_id = browser.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {"source": """
+              const NativeEventSource = window.EventSource;
+              Object.defineProperty(window, '__yomuxStatsStreams', {value: [], configurable: true});
+              window.EventSource = class extends NativeEventSource {
+                constructor(url, options) {
+                  super(url, options);
+                  const record = {url: String(url), events: []};
+                  if (record.url.includes('/api/stats-stream')) {
+                    window.__yomuxStatsStreams.push(record);
+                    for (const name of ['ack', 'snapshot', 'delta', 'ready', 'failure']) {
+                      this.addEventListener(name, () => record.events.push(name));
+                    }
+                  }
+                }
+              };
+            """},
+        )["identifier"]
         sessions = ",".join(tmux_runtime.sessions)
         browser.get(f"{base_url}/?sessions={sessions},debug&layout=left&tabs=left:{tmux_runtime.sessions[0]},__debug__*&debug=1&stats_only=1")
         WebDriverWait(browser, 15, poll_frequency=0.05).until(
             lambda driver: driver.execute_script("return document.readyState === 'complete' && document.querySelector('#grid') !== null")
         )
+        browser.execute_script("setDebugGraphChartVisible('systemDisk', true);")
         browser.set_script_timeout(40)
         result = browser.execute_async_script(
             r"""
             const done = arguments[arguments.length - 1];
             const expectedSessions = arguments[0];
+            const expectedDiskMounts = arguments[1];
             const wait = async () => {
               const deadline = Date.now() + 30000;
               let collectorFacts = null;
@@ -1159,12 +1226,13 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
                 const panel = document.querySelector('.js-debug-panel');
                 const panelRect = panel?.getBoundingClientRect();
                 const panelVisible = Boolean(panel && panelRect.width > 0 && panelRect.height > 0);
-                const charts = Object.fromEntries(['activity', 'agentTokens', 'memory'].map(name => {
+                const charts = Object.fromEntries(['activity', 'agentTokens', 'memory', 'systemDisk'].map(name => {
                   const chart = panel?.querySelector(`[data-js-debug-chart="${name}"]`);
                   const rect = chart?.getBoundingClientRect();
-                  const nodes = [...(chart?.querySelectorAll('[data-js-debug-series], [data-js-debug-area-series], [data-js-debug-bar-series]') || [])];
+                  const nodes = [...(chart?.querySelectorAll('[data-js-debug-series], [data-js-debug-singleton-series], [data-js-debug-area-series], [data-js-debug-bar-series]') || [])];
                   return [name, {present: Boolean(chart), visible: Boolean(chart && rect.width > 0 && rect.height > 0),
-                    geometry: nodes.filter(node => node.getAttribute('d') || node.getAttribute('points') || Number(node.getAttribute('height') || 0) > 0).length,
+                    legend: [...(chart?.querySelectorAll('[data-js-debug-legend]') || [])].map(item => item.textContent.trim()),
+                    geometry: nodes.filter(node => node.getAttribute('d') || node.getAttribute('points') || node.hasAttribute('cx') || Number(node.getAttribute('height') || 0) > 0).length,
                     waiting: chart?.textContent?.includes('Waiting for server stats') || false}];
                 }));
                 return {panelVisible, charts};
@@ -1181,27 +1249,35 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
                   const tokens = values.filter(item => item.name.startsWith('agent_tokens_per_minute:') && item.value > 0);
                   const activity = values.filter(item => ['ask_agents', 'run_agents', 'transition_agents', 'idle_agents'].includes(item.name) && item.value > 0);
                   const memory = values.filter(item => item.name === 'system_memory_used_bytes' && item.value > 0);
+                  const disk = values.filter(item => item.name.startsWith('system_disk_used_percent:') || item.name.startsWith('system_disk_inventory:'));
                   const cpu = values.filter(item => item.name === 'system_cpu_percent' && item.value > 0);
                   const gpu = values.filter(item => item.name.startsWith('gpu_') && item.value > 0);
                   const gpuNoData = (snapshot.no_data || []).filter(span => span.family === 'gpu');
                   const cost = snapshot.cost_report || {};
+                  const diskBucket = [...(snapshot.buckets || [])].reverse().find(bucket => Object.keys(bucket.series || {}).some(name => name.startsWith('system_disk_used_percent:') || name.startsWith('system_disk_inventory:')));
+                  const diskMounts = Object.keys(diskBucket?.series || {}).filter(name => name.startsWith('system_disk_used_percent:') || name.startsWith('system_disk_inventory:')).map(name => name.slice(name.indexOf(':') + 1));
+                  const expectedDiskNames = expectedDiskMounts.map(item => item.mountpoint).sort();
+                  const diskInventoryMatches = diskMounts.length === expectedDiskNames.length
+                    && [...diskMounts].sort().every((mountpoint, index) => mountpoint === expectedDiskNames[index]);
                   const tokenSessions = expectedSessions.every(session => tokens.some(item => item.name.includes(session)));
                   const collectorFactsReady = statusResponse.status === 200 && snapshotResponse.status === 200
                     && Number(status.counts?.total) >= 3
                     && Number(status.token_rates?.total_per_second) > 0
                     && tokens.length > 0 && tokenSessions && activity.length > 0 && memory.length > 0 && cpu.length > 0
+                    && disk.length > 0 && diskInventoryMatches
                     && (gpu.length > 0 || gpuNoData.length > 0)
                     && Number(cost.total_tokens) > 0;
-                  missingFacts = {status: statusResponse.status, snapshot: snapshotResponse.status, counts: status.counts, rates: status.token_rates, tokenSessions, tokenNames: tokens.map(item => item.name), activity: activity.length, memory: memory.length, cpu: cpu.length, gpu: gpu.length, gpuNoData: gpuNoData.length, costTokens: cost.total_tokens};
+                  missingFacts = {status: statusResponse.status, snapshot: snapshotResponse.status, counts: status.counts, rates: status.token_rates, tokenSessions, tokenNames: tokens.map(item => item.name), activity: activity.length, memory: memory.length, cpu: cpu.length, disk: disk.map(item => item.name), diskInventoryMatches, diskMounts, expectedDiskNames, gpu: gpu.length, gpuNoData: gpuNoData.length, costTokens: cost.total_tokens};
                   if (collectorFactsReady) {
-                    collectorFacts = {status, snapshot, tokens, activity, memory, cpu, gpu, gpuNoData, cost};
+                    collectorFacts = {status, snapshot, tokens, activity, memory, cpu, disk, diskMounts, expectedDiskMounts, gpu, gpuNoData, cost};
                   }
                   const readiness = globalThis.jsDebugHistoryReadinessSnapshot?.() ?? null;
                   const ui = visibleChartState();
-                  const chartsReady = Object.values(ui.charts).length === 3
-                    && Object.values(ui.charts).every(item => item.present && item.visible && item.geometry > 0 && !item.waiting);
+                  const chartsReady = Object.values(ui.charts).length === 4
+                    && Object.entries(ui.charts).every(([name, item]) => item.present && item.visible && !item.waiting
+                      && (name === 'systemDisk' ? item.legend.length > 0 : item.geometry > 0));
                   if (collectorFactsReady && readiness?.phase === 'ready' && ui.panelVisible && chartsReady) {
-                    done({...collectorFacts, readiness, ui});
+                    done({...collectorFacts, readiness, ui, expectedDiskMounts});
                     return;
                   }
                 } catch (_) {}
@@ -1215,6 +1291,7 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
             wait();
             """,
             list(tmux_runtime.sessions),
+            expected_disk_mounts,
         )
         browser.set_script_timeout(original_script_timeout)
         if result.get("error") is not None:
@@ -1223,7 +1300,87 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
         assert result["gpu"] or result["gpuNoData"], result
         assert result["readiness"]["phase"] == "ready", result
         assert result["ui"]["panelVisible"], result
-        assert all(item["present"] and item["visible"] and item["geometry"] > 0 and not item["waiting"] for item in result["ui"]["charts"].values()), result
+        assert all(item["present"] and item["visible"] and not item["waiting"] for item in result["ui"]["charts"].values()), result
+        assert result["ui"]["charts"]["systemDisk"]["legend"], result
+        disk_legend = result["ui"]["charts"]["systemDisk"]["legend"]
+        disk_legend_mounts = sorted(label.removesuffix(f" ({int(label.rsplit('(', 1)[1][:-2])}%)") if label.endswith(")") and "%" in label else label for label in disk_legend)
+        assert disk_legend_mounts == sorted(item["mountpoint"] for item in result["expectedDiskMounts"]), result
+        assert all(any(label.startswith(f"{item['mountpoint']} (") and label.endswith("%)") for label in disk_legend) for item in result["expectedDiskMounts"] if item["highUse"]), result
+        browser.set_script_timeout(150)
+        history_retry = browser.execute_async_script(
+            r"""
+            const done = arguments[arguments.length - 1];
+            (async () => {
+              const client = ensureJsDebugCurrentStatsClient();
+              const waitForRange = async range => {
+                setDebugGraphRange(range);
+                const deadline = Date.now() + 120000;
+                let last = null;
+                while (Date.now() < deadline) {
+                  const readiness = jsDebugHistoryReadinessSnapshot();
+                  const generation = client.controller().generation();
+                  last = {readiness, generation: generation && {
+                    range_seconds: generation.range_seconds,
+                    resolution_seconds: generation.resolution_seconds,
+                    cache_generation: generation.cache_generation,
+                    bucket_count: generation.buckets.length,
+                  }};
+                  const coverageSeconds = readiness.requestCoverageIntervals.reduce(
+                    (total, interval) => total + Math.max(0, interval.endSeconds - interval.startSeconds), 0,
+                  );
+                  if (readiness.phase === 'ready'
+                      && readiness.requestedRangeSeconds === range
+                      && generation?.range_seconds === range
+                      && coverageSeconds >= range) {
+                    return {range_seconds: range, coverage_seconds: coverageSeconds, ...last.generation};
+                  }
+                  if (readiness.phase === 'error') throw new Error(`history range ${range} failed: ${readiness.error}`);
+                  await new Promise(resolve => setTimeout(resolve, 50));
+                }
+                throw new Error(`history range ${range} timed out: ${JSON.stringify(last)}`);
+              };
+              const sixteenHour = await waitForRange(57600);
+              const twentyFourHour = await waitForRange(86400);
+              const streamCountBeforeRetry = globalThis.__yomuxStatsStreams.length;
+              await client.retry();
+              const retryDeadline = Date.now() + 120000;
+              let retried = null;
+              while (Date.now() < retryDeadline) {
+                const readiness = jsDebugHistoryReadinessSnapshot();
+                const generation = client.controller().generation();
+                const streams = globalThis.__yomuxStatsStreams.slice(streamCountBeforeRetry);
+                const retryStream = streams.find(stream => stream.url.includes('range_seconds=86400'));
+                retried = {readiness, generation: generation && {
+                  range_seconds: generation.range_seconds,
+                  resolution_seconds: generation.resolution_seconds,
+                  cache_generation: generation.cache_generation,
+                  bucket_count: generation.buckets.length,
+                }, retryStream};
+                const coverageSeconds = readiness.requestCoverageIntervals.reduce(
+                  (total, interval) => total + Math.max(0, interval.endSeconds - interval.startSeconds), 0,
+                );
+                if (retryStream?.events.includes('ready')
+                    && retryStream.events.includes('snapshot')
+                    && readiness.phase === 'ready'
+                    && readiness.requestedRangeSeconds === 86400
+                    && generation?.range_seconds === 86400
+                    && coverageSeconds >= 86400) {
+                  done({sixteenHour, twentyFourHour, retryStreamEvents: retryStream.events, retried: retried.generation});
+                  return;
+                }
+                if (readiness.phase === 'error') throw new Error(`24-hour Retry failed: ${readiness.error}`);
+                await new Promise(resolve => setTimeout(resolve, 50));
+              }
+              throw new Error(`24-hour Retry did not publish a complete stream snapshot: ${JSON.stringify(retried)}`);
+            })().catch(error => done({error: String(error?.stack || error)}));
+            """
+        )
+        browser.set_script_timeout(40)
+        assert history_retry.get("error") is None, history_retry
+        assert history_retry["sixteenHour"]["coverage_seconds"] >= 57600, history_retry
+        assert history_retry["twentyFourHour"]["coverage_seconds"] >= 86400, history_retry
+        assert history_retry["retried"]["bucket_count"] == 288, history_retry
+        assert "ready" in history_retry["retryStreamEvents"], history_retry
         _assert_go_refill_browser_journey(browser, tmp_path, home, opencode_database)
     finally:
         browser.set_script_timeout(original_script_timeout)
@@ -1232,6 +1389,8 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
         if active_error is not None:
             print(server_log_path.read_text(encoding="utf-8")[-8000:], flush=True)
         try:
+            if stats_stream_script_id is not None:
+                browser.execute_cdp_cmd("Page.removeScriptToEvaluateOnNewDocument", {"identifier": stats_stream_script_id})
             browser.get("about:blank")
             WebDriverWait(browser, 3, poll_frequency=0.05).until(lambda driver: str(driver.current_url) == "about:blank")
         except WebDriverException as error:
@@ -1384,13 +1543,13 @@ def _start_production_stats_server(
 ):
     """Start one production stats server with a private, already-seeded store."""
 
-    if kind not in {"python", "go"}:
-        raise ValueError(f"unknown production stats server kind: {kind!r}")
+    if kind != "go":
+        raise ValueError("production stats browser fixtures use the Go server")
     port_lease = HttpPortLease.reserve()
     environment = _synthetic_server_environment()
     environment.update({
         "HOME": str(root / "home"),
-        "YOLOMUX_ROOT": str(root),
+        "YOMUX_ROOT": str(root),
         "YOLOMUX_CONFIG_DIR": str(config_dir),
         "YOLOMUX_STATE_DIR": str(root / "state"),
         "YOLOMUX_CACHE_DIR": str(root / "cache"),
@@ -1414,39 +1573,22 @@ def _start_production_stats_server(
         environment["CODEX_HOME"], environment["CLAUDE_CONFIG_DIR"], environment["TMPDIR"],
     ):
         Path(private_path).mkdir(parents=True, exist_ok=True)
-    if kind == "python":
-        command = [
-            sys.executable,
-            "yomux.py",
-            "--backend",
-            "python",
-            "--http",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port_lease.port),
-            "--sessions",
-            session,
-        ]
-        cwd = source_root
-        ready = _python_server_is_ready
-    else:
-        command = [
-            str(binary),
-            "--http",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port_lease.port),
-            "--root",
-            str(project_root),
-            "--config",
-            str(config_dir),
-            "--stats",
-            str(database),
-        ]
-        cwd = root
-        ready = _go_server_http_is_ready
+    command = [
+        str(binary),
+        "--http",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port_lease.port),
+        "--root",
+        str(project_root),
+        "--config",
+        str(config_dir),
+        "--stats",
+        str(database),
+    ]
+    cwd = root
+    ready = _go_server_http_is_ready
     log_file = log_path.open("w", encoding="utf-8")
     process = subprocess.Popen(
         command,
@@ -1469,14 +1611,6 @@ def _start_production_stats_server(
     process.terminate()
     process.wait(timeout=10)
     raise AssertionError(f"{kind} production server did not become healthy: {log_path.read_text(encoding='utf-8')[-6000:]}")
-
-
-def _python_server_is_ready(port: int) -> bool:
-    try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=0.5) as response:
-            return response.status == 200
-    except OSError:
-        return False
 
 
 def _stop_production_stats_server(process, port_lease: HttpPortLease) -> None:
@@ -1702,137 +1836,6 @@ def _normalize_stats_snapshot_for_parity(payload: Any) -> Any:
                 comparable.append(bucket)
         normalized["buckets"] = comparable
     return normalized
-
-
-def test_production_python_and_go_stats_share_one_fixture_and_browser_journey(browser, tmp_path, monkeypatch, request):
-    """The Docker parity gate must exercise production servers, not only a synthetic oracle."""
-
-    configured_binary = os.environ.get("YOLOMUX_GO_BINARY", "").strip()
-    if not configured_binary:
-        pytest.skip("production Python/Go browser parity requires YOLOMUX_GO_BINARY")
-    binary = Path(configured_binary)
-    if not binary.is_file() or not os.access(binary, os.X_OK):
-        raise AssertionError(f"YOLOMUX_GO_BINARY is not executable: {binary}")
-    source_root = Path(__file__).resolve().parents[1]
-    fixture = tmp_path / "fixture.sqlite3"
-    _seed_go_stats_fixture(fixture)
-    tmux_runtime = start_isolated_tmux_runtime(monkeypatch, tmp_path, session_count=1)
-    session = tmux_runtime.sessions[0]
-    servers = []
-    runtime_dirs = []
-    state_roots = []
-    try:
-        for kind in ("python", "go"):
-            root = Path("/tmp") / f"yostats-browser-state-{os.getpid()}-{kind}"
-            if root.exists():
-                raise AssertionError(f"state root already exists: {root}")
-            root.mkdir(parents=True)
-            state_roots.append(root)
-            config_dir = root / "config"
-            config_dir.mkdir(parents=True)
-            (root / "home").mkdir()
-            (config_dir / "auth.yaml").write_text(
-                "users:\n  - username: e2e-admin\n    password: fixture-only-password\n    role: admin\n",
-                encoding="utf-8",
-            )
-            (config_dir / "auth-cookie-secret").write_text("11" * 32, encoding="ascii")
-            database = root / "stats-v9.sqlite3"
-            runtime_dir = root / "runtime"
-            runtime_dir.mkdir()
-            runtime_dirs.append(runtime_dir)
-            project_root = root / "project"
-            for relative in ("static", "tools", "yomux_lib"):
-                shutil.copytree(source_root / relative, project_root / relative)
-            monkeypatch.setenv("YOLOMUX_RUNTIME_DIR", str(runtime_dir))
-            if kind == "python":
-                seed_script = (
-                    "import os, shutil\n"
-                    "from yomux_lib.stats_current.storage import default_database_path\n"
-                    "destination = default_database_path()\n"
-                    "destination.parent.mkdir(parents=True, exist_ok=True)\n"
-                    "shutil.copyfile(os.environ['YOLOMUX_STATS_FIXTURE'], destination)\n"
-                    "print(destination)\n"
-                )
-                seed_environment = _synthetic_server_environment()
-                seed_environment.update({
-                    "HOME": str(root / "home"),
-                    "YOLOMUX_ROOT": str(root),
-                    "YOLOMUX_CONFIG_DIR": str(config_dir),
-                    "YOLOMUX_STATE_DIR": str(root / "state"),
-                    "YOLOMUX_CACHE_DIR": str(root / "cache"),
-                    "YOLOMUX_RUNTIME_DIR": str(runtime_dir),
-                    "YOLOMUX_STATS_FIXTURE": str(fixture),
-                    "PYTHONPATH": str(source_root),
-                })
-                seed_result = subprocess.run(
-                    [sys.executable, "-c", seed_script],
-                    cwd=source_root,
-                    env=seed_environment,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                )
-                if seed_result.returncode != 0:
-                    raise AssertionError(
-                        f"Python stats fixture seed failed ({seed_result.returncode}): "
-                        f"stdout={seed_result.stdout!r} stderr={seed_result.stderr!r}"
-                    )
-                database = Path(
-                    subprocess.check_output(
-                        [sys.executable, "-c", "from yomux_lib.stats_current.storage import default_database_path; print(default_database_path())"],
-                        cwd=source_root,
-                        env=seed_environment,
-                        text=True,
-                    ).strip()
-                )
-            else:
-                shutil.copyfile(fixture, database)
-            process, port_lease, base_url = _start_production_stats_server(
-                kind=kind,
-                    binary=binary,
-                    source_root=source_root,
-                    root=root,
-                    project_root=project_root,
-                database=database,
-                config_dir=config_dir,
-                tmux_socket=tmux_runtime.socket_path,
-                session=session,
-                runtime_dir=runtime_dir,
-                log_path=tmp_path / f"{kind}-server.log",
-            )
-            servers.append((process, port_lease))
-            browser.get("about:blank")
-            servers[-1] = (process, port_lease, _production_stats_browser_pass(browser, base_url, session, request, stats_only=True))
-        python_evidence = servers[0][2]
-        go_evidence = servers[1][2]
-        assert _normalize_stats_capabilities_for_parity(go_evidence["capabilities"]) == _normalize_stats_capabilities_for_parity(python_evidence["capabilities"]), {"python": python_evidence, "go": go_evidence}
-        assert _normalize_stats_snapshot_for_parity(go_evidence["snapshot"]) == _normalize_stats_snapshot_for_parity(python_evidence["snapshot"]), {"python": python_evidence, "go": go_evidence}
-        python_stream = python_evidence["stream_handshake"]
-        go_stream = go_evidence["stream_handshake"]
-        assert python_stream == go_stream, {"python_stream": python_evidence["stream_events_observed"], "go_stream": go_evidence["stream_events_observed"]}
-        assert python_stream == ["ack", "snapshot", "ready"], python_evidence["stream_events_observed"]
-        assert go_stream == ["ack", "snapshot", "ready"], go_evidence["stream_events_observed"]
-    finally:
-        browser.get("about:blank")
-        for process, port_lease, *_rest in reversed(servers):
-            _stop_production_stats_server(process, port_lease)
-        stop_isolated_tmux_runtime(tmux_runtime)
-        for runtime_dir in runtime_dirs:
-            shutil.rmtree(runtime_dir, ignore_errors=True)
-        for state_root in state_roots:
-            shutil.rmtree(state_root, ignore_errors=True)
-
-
-def _raise_login_page_diagnostic(driver):
-    raise AssertionError(
-        "Go login page missing form: "
-        f"url={driver.current_url!r} title={driver.title!r} "
-        f"source={driver.page_source[:1200]!r}"
-    )
-
-
-def _register_stats_route_instrumentation(harness: Any) -> None:
-    register_browser_new_document_script(harness.driver, _STATS_ROUTE_INSTRUMENTATION)
 
 
 def _stats_route_counts(harness: Any) -> dict[str, int]:

@@ -645,6 +645,7 @@ def test_auto_approve_tmux_reexports_detector_helpers():
     assert auto_approve_tmux.extract_command is prompt_detector.extract_command
     assert auto_approve_tmux.approval_prompt_state is prompt_detector.approval_prompt_state
     assert auto_approve_tmux.prompt_hash is prompt_detector.prompt_hash
+    assert auto_approve_tmux.model_capacity_notice_visible is prompt_detector.model_capacity_notice_visible
 
 
 def test_approval_detection_pipeline_has_one_shared_owner():
@@ -672,7 +673,8 @@ def test_auto_approve_cli_state_keeps_normal_questions_out_of_approval_path():
     assert state.approval["approval_visible"] is False
 
 
-def test_auto_approve_cli_once_sends_from_central_approval_state(monkeypatch):
+@pytest.mark.parametrize("retained_capacity_notice", [False, True])
+def test_auto_approve_cli_once_sends_from_central_approval_state(monkeypatch, retained_capacity_notice):
     sent = []
     previous_sigint = signal.getsignal(signal.SIGINT)
     previous_sigterm = signal.getsignal(signal.SIGTERM)
@@ -702,7 +704,10 @@ def test_auto_approve_cli_once_sends_from_central_approval_state(monkeypatch):
     monkeypatch.setattr(auto_approve_tmux.sys, "argv", ["auto_approve_tmux.py", "--once", "6"])
     monkeypatch.setattr(auto_approve_tmux, "resolve_targets", lambda _targets: ["6"])
     monkeypatch.setattr(auto_approve_tmux, "tmux_has_session", lambda _session: True)
-    monkeypatch.setattr(auto_approve_tmux, "tmux_capture_pane", lambda _target, visible_only=False: "visible approval")
+    visible = "visible approval"
+    if retained_capacity_notice:
+        visible = "■ Selected model is at capacity. Please try a different model.\n" + visible
+    monkeypatch.setattr(auto_approve_tmux, "tmux_capture_pane", lambda _target, visible_only=False: visible)
     monkeypatch.setattr(auto_approve_tmux, "classify_auto_approve_state", lambda _target, _visible, prompt_source="hybrid": (state, "make test"))
     monkeypatch.setattr(auto_approve_tmux, "standalone_bash_decision", lambda *_args, **_kwargs: {"action": "approve"})
     monkeypatch.setattr(auto_approve_tmux, "tmux_send_option", lambda target, option, selected_option=None: sent.append((target, option, selected_option)))
@@ -776,6 +781,46 @@ def test_capture_prompt_fixture_harness_contract(monkeypatch, tmp_path):
         ("capture-codex:", ("Would you like to run the following command?",), 12, False, "/tmp/yolomux-capture.sock"),
     ]
     assert tmux_calls == [("/tmp/yolomux-capture.sock", ["send-keys", "-t", "capture-codex:", "sleep 10", "Enter"], 10)]
+
+
+@pytest.mark.parametrize("configured,cli", [(False, False), (True, False), (False, True), (True, True)])
+def test_auto_approve_cli_capacity_once_respects_both_dry_run_inputs(monkeypatch, configured, cli):
+    sent = []
+    argv = ["auto_approve_tmux.py", "--once", "6"] + (["--dry-run"] if cli else [])
+    state = SimpleNamespace(prompt={}, approval={}, screen={}, reason_code="ready")
+    monkeypatch.setattr(auto_approve_tmux.sys, "argv", argv)
+    monkeypatch.setattr(auto_approve_tmux, "resolve_targets", lambda _targets: ["6"])
+    monkeypatch.setattr(auto_approve_tmux, "tmux_has_session", lambda _session: True)
+    monkeypatch.setattr(auto_approve_tmux, "tmux_capture_pane", lambda *args, **kwargs: "■ Selected model is at capacity. Please try a different model.")
+    monkeypatch.setattr(auto_approve_tmux, "classify_auto_approve_state", lambda *args, **kwargs: (state, ""))
+    monkeypatch.setattr(auto_approve_tmux.yolo_rules, "yolo_settings", lambda: {"dry_run": configured})
+    def send(target, text, **kwargs):
+        sent.append((target, text, kwargs))
+        return auto_approve_tmux.AgentTuiSendResult(ok=True, sent=True)
+    monkeypatch.setattr(auto_approve_tmux, "send_prompt", send)
+    auto_approve_tmux.main()
+    assert sent == ([] if configured or cli else [("6", "continue\n\n", {"clear_existing": False})])
+
+
+def test_auto_approve_cli_capacity_recovers_after_preferences_dry_run_is_disabled(monkeypatch):
+    sent = []
+    settings = iter([True, False])
+    state = SimpleNamespace(prompt={}, approval={}, screen={}, reason_code="ready")
+    monkeypatch.setattr(auto_approve_tmux.sys, "argv", ["auto_approve_tmux.py", "6"])
+    monkeypatch.setattr(auto_approve_tmux, "resolve_targets", lambda _targets: ["6"])
+    monkeypatch.setattr(auto_approve_tmux, "tmux_has_session", lambda _session: True)
+    monkeypatch.setattr(auto_approve_tmux, "tmux_capture_pane", lambda *args, **kwargs: "■ Selected model is at capacity. Please try a different model.")
+    monkeypatch.setattr(auto_approve_tmux, "classify_auto_approve_state", lambda *args, **kwargs: (state, ""))
+    monkeypatch.setattr(auto_approve_tmux.yolo_rules, "yolo_settings", lambda: {"dry_run": next(settings)})
+    monkeypatch.setattr(auto_approve_tmux.time, "sleep", lambda *_args: None)
+    monkeypatch.setattr(auto_approve_tmux.signal, "signal", lambda *_args: None)
+    def send(target, text, **kwargs):
+        sent.append((target, text, kwargs))
+        raise RuntimeError("test observed recovery")
+    monkeypatch.setattr(auto_approve_tmux, "send_prompt", send)
+    with pytest.raises(RuntimeError, match="test observed recovery"):
+        auto_approve_tmux.main()
+    assert sent == [("6", "continue\n\n", {"clear_existing": False})]
 
 
 def test_standalone_bash_decision_fails_closed_without_extracted_command(monkeypatch):
@@ -2210,6 +2255,14 @@ def test_detect_prompt_handles_real_codex_wrapped_command_header():
     assert prompt_state["command"] == "sleep 10"
     assert prompt_state["selected_option"] == 1
     assert screen_state["key"] == "approval"
+
+
+def test_model_capacity_notice_detection_matches_the_visible_codex_notice_only():
+    notice = "■ Selected model is at capacity. Please try a different model."
+
+    assert prompt_detector.model_capacity_notice_visible(f"\x1b[31m{notice}\x1b[0m") is True
+    assert prompt_detector.model_capacity_notice_visible("Selected model is at capacity. Please try a different model.") is False
+    assert prompt_detector.model_capacity_notice_visible("■ Selected model is at capacity. Try again later.") is False
 
 
 def test_detect_prompt_handles_real_claude_wrapped_plan_prompt():

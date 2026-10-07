@@ -189,81 +189,101 @@ func sameReason(left, right *Reason) bool {
 	return left.Code == right.Code && left.MessageKey == right.MessageKey && fmt.Sprint(left.MessageParams) == fmt.Sprint(right.MessageParams)
 }
 
-// RouteCapability maps browser-visible paths to the operation-level capability that admits them.
-// It is intentionally method-aware: a read-only batch and a mutation do not share permission or
-// rollout state merely because they use the same product prefix.
-func RouteCapability(method, rawPath string) string {
+// RoutePolicy owns method-sensitive role and capability admission. Handlers retain
+// their wire-compatible method validation and response bodies.
+type RoutePolicy struct {
+	Method, Path, Role, Capability string
+	Prefix                         bool
+}
+
+var routePolicies = []RoutePolicy{
+	{"GET", "/api/ping", "readonly", "core.diagnostics.v1", false},
+	{"GET", "/api/capabilities", "readonly", "core.diagnostics.v1", false},
+	{"GET", "/api/background/status", "readonly", "core.diagnostics.v1", false},
+	{"GET", "/api/system-status", "readonly", "core.diagnostics.v1", false},
+	{"GET", "/api/system-status/advanced", "readonly", "core.diagnostics.v1", false},
+	{"GET", "/api/logs", "readonly", "core.diagnostics.v1", false},
+	{"GET", "/api/diagnostics/performance", "admin", "core.diagnostics.v1", false},
+	{"GET", "/api/client-events", "readonly", "core.diagnostics.v1", false},
+	{"GET", "/api/operations/ack", "readonly", "core.diagnostics.v1", false},
+	{"POST", "/api/settings", "admin", "core.settings.v1", false},
+	{"*", "/api/settings", "readonly", "core.settings.v1", false},
+	{"*", "/api/update-status", "readonly", "core.integrations.v1", false},
+	{"*", "/api/watched-prs", "readonly", "core.integrations.v1", false},
+	{"*", "/ws", "readonly", "terminal.websocket.v1", false},
+	{"*", "/api/tmux", "readonly", "terminal.websocket.v1", false},
+	{"*", "/api/tmux-session-exists", "readonly", "terminal.websocket.v1", false},
+	{"*", "/api/ensure-session", "admin", "session.create.v1", false},
+	{"*", "/api/create-session-plan", "admin", "session.create.v1", false},
+	{"*", "/api/create-session", "admin", "session.create.v1", false},
+	{"*", "/api/kill-session", "admin", "session.kill.v1", false},
+	{"*", "/api/rename-session", "admin", "session.rename.v1", false},
+	{"*", "/api/session-metadata", "readonly", "core.bootstrap.v1", false},
+	{"*", "/api/transcripts", "readonly", "core.bootstrap.v1", false},
+	{"*", "/api/activity", "readonly", "pane.tabber.v1", false},
+	{"*", "/api/activity-summary", "readonly", "pane.tabber.v1", false},
+	{"*", "/api/auto-approve", "readonly", "terminal.status.v1", false},
+	{"*", "/api/transcript", "readonly", "terminal.status.v1", false},
+	{"*", "/api/context", "readonly", "terminal.status.v1", false},
+	{"*", "/api/context-items", "readonly", "terminal.status.v1", false},
+	{"*", "/api/context-stream", "readonly", "terminal.status.v1", false},
+	{"*", "/api/events", "readonly", "terminal.status.v1", false},
+	{"*", "/api/fs/diff", "readonly", "finder.git.v1", false},
+	{"*", "/api/fs/git-history", "readonly", "finder.git.v1", false},
+	{"*", "/api/fs/git-history-stats-stream", "readonly", "finder.git.v1", false},
+	{"*", "/api/fs/git-commit", "readonly", "finder.git.v1", false},
+	{"*", "/api/batch/blame", "admin", "finder.git.v1", false},
+	{"*", "/api/batch/zip", "admin", "finder.preview.v1", false},
+	{"*", "/api/batch/html-preview", "admin", "finder.preview.v1", false},
+	{"*", "/api/fs/write", "admin", "finder.write.v1", false},
+	{"*", "/api/fs/delete", "admin", "finder.write.v1", false},
+	{"*", "/api/fs/rename", "admin", "finder.write.v1", false},
+	{"*", "/api/fs/mkdir", "admin", "finder.write.v1", false},
+	{"*", "/api/upload", "admin", "finder.write.v1", false},
+	{"*", "/api/fs/search", "readonly", "finder.search.v1", false},
+	{"*", "/api/fs/search-stream", "readonly", "finder.search.v1", false},
+	{"*", "/api/fs/index-status", "readonly", "finder.search.v1", false},
+	{"*", "/api/fs/unindex", "admin", "finder.search.v1", false},
+	{"*", "/api/batch/search", "readonly", "finder.search.v1", false},
+	{"*", "/api/watch/roots", "admin", "finder.watch.v1", false},
+	{"*", "/api/fs/watch-diff", "readonly", "finder.watch.v1", false},
+	{"*", "/api/fs/batch", "admin", "finder.batch.v1", false},
+	{"*", "/api/batch/count", "admin", "finder.batch.v1", false},
+	{"*", "/api/pricing-catalog", "readonly", "pane.stats.v1", false},
+	{"*", "/api/pricing-catalog/refresh", "admin", "pane.stats.v1", false},
+	{"*", "/api/stats-refill", "admin", "pane.stats.v1", false},
+	{"*", "/api/agent-auth", "readonly", "pane.agent.v1", false},
+	{"*", "/api/tmux-window", "admin", "terminal.status.v1", false},
+	{"*", "/api/operations/cancel", "admin", "", false},
+	{"*", "/api/diagnostics/heap", "admin", "", false},
+	{"*", "/api/diagnostics/performance", "admin", "", false},
+	{"*", "/api/background/claim", "admin", "", false},
+	{"*", "/api/operations/accept", "admin", "", false},
+	{"*", "/api/operations/terminalize", "admin", "", false},
+	{"*", "/api/session-files", "readonly", "finder.git.v1", true},
+	{"*", "/api/tmux-", "readonly", "terminal.status.v1", true},
+	{"*", "/api/fs/", "readonly", "finder.read.v1", true},
+	{"*", "/api/batch/", "readonly", "finder.read.v1", true},
+	{"*", "/api/stats", "readonly", "pane.stats.v1", true},
+	{"*", "/api/yoagent/", "readonly", "pane.agent.v1", true},
+	{"*", "/api/chat/", "readonly", "pane.chat.v1", true},
+}
+
+func Policy(method, rawPath string) RoutePolicy {
 	method = strings.ToUpper(strings.TrimSpace(method))
 	path := rawPath
 	if parsed, err := url.Parse(rawPath); err == nil {
 		path = parsed.Path
 	}
-	if method == "GET" && (path == "/api/ping" || path == "/api/capabilities" || path == "/api/background/status" || path == "/api/system-status" || path == "/api/system-status/advanced" || path == "/api/logs" || path == "/api/diagnostics/performance" || path == "/api/client-events" || path == "/api/operations/ack") {
-		return "core.diagnostics.v1"
-	}
-	if path == "/api/settings" {
-		return "core.settings.v1"
-	}
-	if path == "/api/update-status" || path == "/api/watched-prs" {
-		return "core.integrations.v1"
-	}
-	if path == "/ws" || path == "/api/tmux" || path == "/api/tmux-session-exists" {
-		return "terminal.websocket.v1"
-	}
-	if path == "/api/ensure-session" || path == "/api/create-session-plan" || path == "/api/create-session" {
-		return "session.create.v1"
-	}
-	if path == "/api/kill-session" {
-		return "session.kill.v1"
-	}
-	if path == "/api/rename-session" {
-		return "session.rename.v1"
-	}
-	// Session metadata is a bootstrap identity probe, not the later Tabber product. The Go
-	// stats-only server implements this route so a full shell can establish its server epoch before
-	// opening other surfaces; gating it on the still-unimplemented Tabber capability would block the
-	// handler before it can return that identity.
-	if path == "/api/session-metadata" {
-		return "core.bootstrap.v1"
-	}
-	if path == "/api/transcripts" {
-		return "core.bootstrap.v1"
-	}
-	if path == "/api/activity" || path == "/api/activity-summary" {
-		return "pane.tabber.v1"
-	}
-	if strings.HasPrefix(path, "/api/session-files") {
-		return "finder.git.v1"
-	}
-	if strings.HasPrefix(path, "/api/tmux-") || path == "/api/auto-approve" || path == "/api/transcript" || path == "/api/context" || path == "/api/context-items" || path == "/api/context-stream" || path == "/api/events" {
-		return "terminal.status.v1"
-	}
-	if strings.HasPrefix(path, "/api/fs/") || path == "/api/watch/roots" || path == "/api/upload" || strings.HasPrefix(path, "/api/batch/") {
-		switch path {
-		case "/api/fs/diff", "/api/fs/git-history", "/api/fs/git-history-stats-stream", "/api/fs/git-commit", "/api/batch/blame":
-			return "finder.git.v1"
-		case "/api/batch/zip", "/api/batch/html-preview":
-			return "finder.preview.v1"
-		case "/api/fs/write", "/api/fs/delete", "/api/fs/rename", "/api/fs/mkdir", "/api/upload":
-			return "finder.write.v1"
-		case "/api/fs/search", "/api/fs/search-stream", "/api/fs/index-status", "/api/fs/unindex", "/api/batch/search":
-			return "finder.search.v1"
-		case "/api/watch/roots", "/api/fs/watch-diff":
-			return "finder.watch.v1"
-		case "/api/fs/batch", "/api/batch/count":
-			return "finder.batch.v1"
-		default:
-			return "finder.read.v1"
+	for _, policy := range routePolicies {
+		if policy.Method != "*" && policy.Method != method {
+			continue
+		}
+		if policy.Path == path || policy.Prefix && strings.HasPrefix(path, policy.Path) {
+			return policy
 		}
 	}
-	if strings.HasPrefix(path, "/api/stats") || path == "/api/pricing-catalog" || path == "/api/pricing-catalog/refresh" {
-		return "pane.stats.v1"
-	}
-	if strings.HasPrefix(path, "/api/yoagent/") || path == "/api/agent-auth" || path == "/api/activity-summary" {
-		return "pane.agent.v1"
-	}
-	if strings.HasPrefix(path, "/api/chat/") {
-		return "pane.chat.v1"
-	}
-	return ""
+	return RoutePolicy{Method: method, Path: path, Role: "readonly"}
 }
+
+func RouteCapability(method, rawPath string) string { return Policy(method, rawPath).Capability }

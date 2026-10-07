@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+source "$(cd -- "${BASH_SOURCE[0]%/*}" && pwd)/product_environment.sh"
+yomux_normalize_environment
+
 # Shared by Bazel E2E wrappers so runfiles, bazel test sandboxes, and the outer test container use
 # one source-root resolver and one containment decision.
 bazel_go_sdk_version() {
@@ -23,11 +26,11 @@ bazel_test_assert_tool_environment() {
   bazel_assert_value GOWORK off
   bazel_assert_value GO111MODULE on
   bazel_assert_value GOTOOLCHAIN local
-  case "${YOMUX_BAZEL_EXECUTION:-container}" in
+  case "$(product_env_print BAZEL_EXECUTION "container")" in
     native)
       bazel_assert_value GOPROXY https://proxy.golang.org,direct
       bazel_assert_value GOSUMDB sum.golang.org
-      bazel_assert_value YOMUX_TEST_CONTAINER 0
+      bazel_assert_value "$(product_env_name TEST_CONTAINER)" 0
       bazel_assert_value GOPATH ""
       bazel_assert_value GOCACHE ""
       bazel_assert_value GOMODCACHE ""
@@ -37,7 +40,7 @@ bazel_test_assert_tool_environment() {
       bazel_assert_value GOPROXY off
       bazel_assert_value GOSUMDB off
       bazel_assert_value GOMODCACHE /opt/yomux-go-mod-cache
-      bazel_assert_value YOMUX_TEST_CONTAINER 1
+      bazel_assert_value "$(product_env_name TEST_CONTAINER)" 1
       ;;
     *) echo "unknown Bazel execution mode" >&2; return 2 ;;
   esac
@@ -46,7 +49,7 @@ bazel_test_assert_tool_environment() {
 }
 
 bazel_test_in_container() {
-  [ "${YOMUX_TEST_CONTAINER-${YOLOMUX_TEST_CONTAINER:-}}" = 1 ] || return 1
+  [ "$(product_env_print_present TEST_CONTAINER "")" = 1 ] || return 1
   [ -f /.dockerenv ] || return 1
   [ -f /opt/yomux-test-image.marker ] || return 1
   grep -Fxq 'yomux-test-image-v1' /opt/yomux-test-image.marker || return 1
@@ -111,7 +114,7 @@ bazel_test_source_root() {
   if [ -n "${BUILD_WORKSPACE_DIRECTORY:-}" ]; then
     candidates+=("$BUILD_WORKSPACE_DIRECTORY")
   fi
-  local configured_source_root="${YOMUX_TEST_SOURCE_ROOT-${YOLOMUX_TEST_SOURCE_ROOT:-}}"
+  local configured_source_root="$(product_env_print_present TEST_SOURCE_ROOT "")"
   if [ -n "$configured_source_root" ]; then
     candidates+=("$configured_source_root")
   fi
@@ -136,7 +139,7 @@ bazel_test_source_root() {
       # lives outside the sandbox. Materialize the declared runfiles tree into the action-owned
       # TEST_TMPDIR instead of resolving the symlink back to the source checkout. Bazel removes
       # TEST_TMPDIR after the action, and the copy dereferences only declared runfiles.
-      if [ -L "$candidate/docker/Dockerfile.test" ] && [ "${YOMUX_BAZEL_EXECUTION-${YOLOMUX_BAZEL_EXECUTION:-}}" != native ]; then
+      if [ -L "$candidate/docker/Dockerfile.test" ] && [ "$(product_env_print_present BAZEL_EXECUTION "")" != native ]; then
         local materialized_root
         materialized_root="$(mktemp -d "${TEST_TMPDIR:-/tmp}/yolomux-bazel-source.XXXXXX")"
         # The source context is bind-mounted into the rootless Docker runner. mktemp creates a
@@ -216,11 +219,23 @@ bazel_test_prepare_environment() {
   # database/transcript overrides, tmux selection, and Python import roots must not leak from
   # the host or a parent action into Go/browser fixtures.
   while IFS= read -r variable; do
-    case "$variable" in
-      YOMUX_BAZEL_CONTRACT|YOMUX_BAZEL_IMAGE_ID|YOMUX_BAZEL_EXECUTION|YOLOMUX_BAZEL_EXECUTION|YOMUX_TEST_CONTAINER|YOMUX_TEST_SOURCE_ROOT|YOMUX_TEST_IMAGE|YOMUX_TEST_IMAGE_REBUILD|YOMUX_IMAGE_RUNNER_UID|YOMUX_IMAGE_RUNNER_GID|YOMUX_GO_BINARY|YOMUX_GO_STATS_BROWSER_TEST|YOMUX_WORKTREE_WRITER_SLOT|YOLOMUX_GO_BINARY|YOLOMUX_GO_STATS_BROWSER_TEST|YOLOMUX_TEST_CONTAINER|YOLOMUX_TEST_SOURCE_ROOT|YOLOMUX_WORKTREE_WRITER_SLOT)
+    product_setting="$(product_env_suffix "$variable")" || product_setting=
+    case "$product_setting" in
+      ENVIRONMENT_NORMALIZED|ENVIRONMENT_ALIASES|ENVIRONMENT_LEGACY_INPUT)
         continue
         ;;
-      YOMUX_*|YOLOMUX_*|XDG_*|OPENCODE_*|CODEX_*|CLAUDE_*|TMUX|TMUX_PANE|TMUX_TMPDIR|PYTHONPATH|PYTHONHOME|PYTHONPYCACHEPREFIX)
+    esac
+    case "$product_setting" in
+      BAZEL_CONTRACT|BAZEL_IMAGE_ID|BAZEL_APPARMOR_SHA256|BAZEL_EXECUTION|TEST_CONTAINER|TEST_SOURCE_ROOT|TEST_IMAGE|TEST_IMAGE_REBUILD|IMAGE_RUNNER_UID|IMAGE_RUNNER_GID|GO_BINARY|GO_STATS_BROWSER_TEST|WORKTREE_WRITER_SLOT)
+        continue
+        ;;
+      ?*)
+        unset "$variable"
+        continue
+        ;;
+    esac
+    case "$variable" in
+      XDG_*|OPENCODE_*|CODEX_*|CLAUDE_*|TMUX|TMUX_PANE|TMUX_TMPDIR|PYTHONPATH|PYTHONHOME|PYTHONPYCACHEPREFIX)
         unset "$variable"
         ;;
       ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|GH_TOKEN|GITHUB_TOKEN|GOOGLE_API_KEY|GOOGLE_APPLICATION_CREDENTIALS|HF_TOKEN|HUGGINGFACE_HUB_TOKEN|LINEAR_KEY|NGC_API_KEY|OPENAI_API_KEY)
@@ -230,8 +245,8 @@ bazel_test_prepare_environment() {
   done < <(compgen -e)
 
   # Native actions use their declared runfiles directly; routing pytest to Docker would require undeclared inputs.
-  if [ "${YOMUX_BAZEL_EXECUTION:-container}" = native ]; then
-    export YOLOMUX_CHECK_CONTAINER=0
+  if [ "$(product_env_print BAZEL_EXECUTION "container")" = native ]; then
+    product_env_assign "CHECK_CONTAINER=0"
   fi
 
   # Bazel gives every test action its own TEST_TMPDIR. Do not point parallel actions at shared
@@ -252,17 +267,17 @@ bazel_test_prepare_environment() {
   # mktemp-created directory after the wrapper has reaped its children.
   short_tmpdir="$(mktemp -d /tmp/yolomux-bazel-tmp.XXXXXX)"
   chmod 700 "$short_tmpdir"
-  export YOLOMUX_BAZEL_TMPDIR="$short_tmpdir"
+  product_env_assign "BAZEL_TMPDIR=$short_tmpdir"
   bazel_test_cleanup() {
     local status="$?"
     local cleanup_status=0
     trap - EXIT
-    if [ -e "${YOLOMUX_BAZEL_TMPDIR:-}" ]; then
-      if ! rm -rf -- "$YOLOMUX_BAZEL_TMPDIR"; then
-        echo "Bazel test temporary directory cleanup failed: $YOLOMUX_BAZEL_TMPDIR" >&2
+    if [ -e "$(product_env_print BAZEL_TMPDIR "")" ]; then
+      if ! rm -rf -- "$(product_env_print BAZEL_TMPDIR)"; then
+        echo "Bazel test temporary directory cleanup failed: $(product_env_print BAZEL_TMPDIR)" >&2
         cleanup_status=1
-      elif [ -e "$YOLOMUX_BAZEL_TMPDIR" ]; then
-        echo "Bazel test temporary directory remained after cleanup: $YOLOMUX_BAZEL_TMPDIR" >&2
+      elif [ -e "$(product_env_print BAZEL_TMPDIR)" ]; then
+        echo "Bazel test temporary directory remained after cleanup: $(product_env_print BAZEL_TMPDIR)" >&2
         cleanup_status=1
       fi
     fi
@@ -277,5 +292,6 @@ bazel_test_prepare_environment() {
   export GOCACHE="$root/go-cache"
   export GOMODCACHE="$root/go-module-cache"
   mkdir -p -- "$GOPATH" "$GOCACHE" "$GOMODCACHE"
-  export YOLOMUX_BAZEL_TEST="1"
+  product_env_assign "BAZEL_TEST=1"
+  yomux_normalize_environment
 }

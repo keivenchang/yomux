@@ -91,6 +91,28 @@ def test_system_memory_projection_emits_one_dynamic_series_per_binary():
     assert samples["process_memory_bytes:node"] == 200
 
 
+def test_system_disk_projection_keeps_each_mount_as_a_percent_series():
+    observations = [
+        Observation("disk-root", "system_disk", "mount:/", 10, "epoch", 60, {
+            "mountpoint": "/", "used_percent": 25,
+        }),
+        Observation("disk-data", "system_disk", "mount:/data", 10, "epoch", 60, {
+            "mountpoint": "/data", "used_percent": 70,
+        }),
+    ]
+
+    samples = {
+        sample.series: sample.value
+        for observation in observations
+        for sample in materializer._observation_samples(observation)
+    }
+
+    assert samples == {
+        "system_disk_used_percent:/": 25,
+        "system_disk_used_percent:/data": 70,
+    }
+
+
 def test_system_memory_projection_keeps_the_retained_eight_binary_wire_shape_readable():
     processes = {f"process-{index}": 100 - index for index in range(8)}
     observation = Observation("memory-processes-legacy", "system_memory", "host", 10, "epoch", 1, {

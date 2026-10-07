@@ -18,6 +18,12 @@ type HostSources interface {
 	GPU(context.Context) ([]GPUDevice, error)
 }
 
+// HostDiskSources is optional so older and synthetic host adapters can omit
+// disk telemetry without changing their unrelated collection contracts.
+type HostDiskSources interface {
+	Disk(context.Context) ([]DiskUsageSample, error)
+}
+
 // HostCPUTopology supplies the system-wide logical CPU count used to normalize
 // grouped process CPU. Sources that cannot measure it leave the series absent
 // instead of substituting the process affinity count.
@@ -110,6 +116,7 @@ type HostCollectorConfig struct {
 	GPUActiveCadence time.Duration
 	GPUIdleCadence   time.Duration
 	MemoryCadence    time.Duration
+	DiskCadence      time.Duration
 	SourceTimeout    time.Duration
 	EpochID          string
 	EpochStartedAt   float64
@@ -127,6 +134,7 @@ type HostCollectorConfig struct {
 const (
 	DefaultHostCPUBackgroundCadence = 5 * time.Second
 	DefaultHostMemoryCadence        = time.Minute
+	DefaultHostDiskCadence          = 5 * time.Minute
 )
 
 func (c HostCollectorConfig) withDefaults() HostCollectorConfig {
@@ -147,6 +155,9 @@ func (c HostCollectorConfig) withDefaults() HostCollectorConfig {
 	}
 	if c.MemoryCadence <= 0 {
 		c.MemoryCadence = DefaultHostMemoryCadence
+	}
+	if c.DiskCadence <= 0 {
+		c.DiskCadence = DefaultHostDiskCadence
 	}
 	if c.EpochID == "" {
 		c.EpochID = "host"
@@ -185,7 +196,7 @@ type hostCollectorCounters struct {
 	durationTotal                         atomic.Uint64
 	lastCPUProcessRows                    atomic.Uint64
 	lastMemoryProcessRows                 atomic.Uint64
-	family                                [3]hostFamilyTiming
+	family                                [4]hostFamilyTiming
 }
 
 type hostFamilyTiming struct {
@@ -208,7 +219,7 @@ func (c *hostCollectorCounters) snapshot() HostCollectorCounters {
 	}
 }
 
-var hostCollectorFamilies = [...]string{"cpu", "system_memory", "gpu"}
+var hostCollectorFamilies = [...]string{"cpu", "system_memory", "system_disk", "gpu"}
 
 // HostCollector owns exactly one collection goroutine when started. RunOnce
 // is also safe for deterministic callers, but must not be called concurrently
@@ -291,8 +302,8 @@ func (c *HostCollector) FamilyCadence(family string) time.Duration {
 	return c.familyCadence(family)
 }
 
-// FamilyDemanded reports whether a host family currently runs. CPU and system
-// memory keep background history; GPU remains gated by stats-view demand.
+// FamilyDemanded reports whether a host family currently runs. CPU, memory,
+// and disk keep background history; GPU remains gated by stats-view demand.
 func (c *HostCollector) FamilyDemanded(family string) bool {
 	if c == nil {
 		return false
@@ -357,7 +368,7 @@ func (c *HostCollector) loop(ctx context.Context) {
 		c.mu.Unlock()
 	}()
 	var workers sync.WaitGroup
-	workers.Add(3)
+	workers.Add(4)
 	go func() {
 		defer workers.Done()
 		runWithStatsProfileLabels(ctx, "host_collector", "cpu", func(ctx context.Context) {
@@ -368,6 +379,12 @@ func (c *HostCollector) loop(ctx context.Context) {
 		defer workers.Done()
 		runWithStatsProfileLabels(ctx, "host_collector", "system_memory", func(ctx context.Context) {
 			c.familyLoop(ctx, "system_memory", c.config.MemoryCadence, c.config.MemoryCadence)
+		})
+	}()
+	go func() {
+		defer workers.Done()
+		runWithStatsProfileLabels(ctx, "host_collector", "system_disk", func(ctx context.Context) {
+			c.familyLoop(ctx, "system_disk", c.config.DiskCadence, c.config.DiskCadence)
 		})
 	}()
 	go func() {
@@ -453,6 +470,8 @@ func (c *HostCollector) runFamilyWithCadence(parent context.Context, family stri
 			batch, cpuSampled = c.collectCPU(ctx, fact, started.Sub(lastSampleBefore))
 		case "system_memory":
 			batch = c.collectMemory(ctx, fact)
+		case "system_disk":
+			batch = c.collectDisk(ctx, fact)
 		case "gpu":
 			batch = c.collectGPU(ctx, fact)
 		}
@@ -509,6 +528,7 @@ func (c *HostCollector) RunOnce(parent context.Context) {
 	// A bad interval in one family must not roll back sibling observations.
 	c.runFamilyWithCadence(parent, "cpu", c.config.ActiveCadence)
 	c.runFamilyWithCadence(parent, "system_memory", c.config.MemoryCadence)
+	c.runFamilyWithCadence(parent, "system_disk", c.config.DiskCadence)
 	c.runFamilyWithCadence(parent, "gpu", c.config.ActiveCadence)
 	c.counters.lastDuration.Store(c.clock.Now().Sub(started).Nanoseconds())
 }
@@ -567,6 +587,8 @@ func (c *HostCollector) familyCadence(family string) time.Duration {
 	switch family {
 	case "system_memory":
 		return c.config.MemoryCadence
+	case "system_disk":
+		return c.config.DiskCadence
 	case "gpu":
 		return c.config.GPUActiveCadence
 	default:
@@ -581,7 +603,28 @@ func (c *HostCollector) familyIdleCadence(family string) time.Duration {
 	if family == "system_memory" {
 		return c.config.MemoryCadence
 	}
+	if family == "system_disk" {
+		return c.config.DiskCadence
+	}
 	return c.config.IdleCadence
+}
+
+func (c *HostCollector) collectDisk(parent context.Context, fact HostFactContext) AppendBatch {
+	source, ok := c.sources.(HostDiskSources)
+	if !ok {
+		return AppendBatch{}
+	}
+	// Bound the single df invocation without changing the disk sampling cadence.
+	ctx, cancel := context.WithTimeout(parent, 12*time.Second)
+	defer cancel()
+	samples, err := source.Disk(ctx)
+	batch := BuildSystemDiskFacts(samples, fact)
+	if err != nil {
+		c.counters.errors.Add(1)
+		unavailable := BuildUnavailableFacts("system_disk", fact, sourceReason(ctx, err))
+		batch.UnavailableSpans = append(batch.UnavailableSpans, unavailable.UnavailableSpans...)
+	}
+	return batch
 }
 
 func (c *HostCollector) append(ctx context.Context, batch AppendBatch) bool {

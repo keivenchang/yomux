@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import json
 import os
 import subprocess
@@ -25,6 +24,7 @@ from tests.browser_helpers.browser_console import validate_server_log_ring_trans
 from tests.browser_helpers.browser_layout import start_browser_server
 from tests.browser_helpers.browser_layout import start_isolated_browser_app
 from tests.browser_helpers.browser_layout import stop_browser_fixture
+from tests.helpers.fixture_http_server import basic_auth_header
 from tests.gate_harness import repeat
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import wait_for_browser_boot
@@ -48,8 +48,7 @@ EDITOR_GLOBALS = {
 
 
 def _auth_header() -> dict[str, str]:
-    encoded = base64.b64encode(b"gate-admin:gate-password").decode("ascii")
-    return {"Authorization": f"Basic {encoded}"}
+    return basic_auth_header("gate-admin", "gate-password")
 
 
 def _request_once(
@@ -153,6 +152,7 @@ from tests.helpers.gate_editor import gate_browser_runtime  # noqa: F401
 
 
 @pytest.mark.no_browser
+@pytest.mark.deprecated_python_server
 def test_a1_existing_file_opens_twenty_consecutive_times_under_budget(monkeypatch, tmp_path, gate_runtime_paths):
     """A1: GET /api/fs/read must terminalize the exact existing-file content 20 consecutive times under 500 ms without 503."""
     expected = "gate file content\n"
@@ -679,6 +679,7 @@ def test_a5_subsecond_replace_keeps_editor_path_tab_and_content_state(gate_brows
 
 
 @pytest.mark.no_browser
+@pytest.mark.deprecated_python_server
 def test_a6_rapid_read_connection_close_and_reopen_completes_every_request(monkeypatch, tmp_path, gate_runtime_paths):
     """A6: 10 rapid open/close/reopen cycles for the same file must return the exact content on both opens in every cycle, with each HTTP response fully consumed and no request left pending."""
     expected = "rapid reopen content\n"
@@ -798,6 +799,7 @@ def test_a6_reopen_replaces_cached_not_found_after_file_is_created(gate_browser_
 
 
 @pytest.mark.no_browser
+@pytest.mark.deprecated_python_server
 def test_a7_missing_file_is_typed_404_not_transport_failure(monkeypatch, tmp_path, gate_runtime_paths):
     """A7: GET /api/fs/read for a missing file must return 404 with the machine-readable common.pathNotFound reason, never 503 or a transport-failure reason rendered as File not found."""
     target = tmp_path / "missing.txt"
@@ -848,6 +850,7 @@ def test_a7_missing_file_is_typed_404_not_transport_failure(monkeypatch, tmp_pat
 
 
 @pytest.mark.no_browser
+@pytest.mark.deprecated_python_server
 def test_a7_fault_batch_above_the_server_bound_stays_an_operator_error(monkeypatch, gate_runtime_paths):
     """A7 fault side: a /api/fs/batch body above filesystem.MAX_BATCH_REQUESTS must be refused 400 invalid_request AND recorded at error.
 

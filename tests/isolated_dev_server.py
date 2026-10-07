@@ -33,11 +33,14 @@ WHAT ISOLATION MEANS HERE, and every clause is load-bearing:
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import os
 import selectors
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable
 from collections.abc import Iterable
@@ -57,6 +60,7 @@ from tests.tmux_runtime import start_isolated_tmux_runtime
 from tests.tmux_runtime import stop_isolated_tmux_runtime
 from yomux_lib.host_identity import process_start_identity
 from tools.instance_isolation import synthetic_test_environment
+from tools.generate_go_version import generate_go_version_overlay
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -68,21 +72,75 @@ SERVER_STOP_TIMEOUT_SECONDS = 10.0
 FORBIDDEN_LIVE_PORTS = frozenset(range(8880, 8884) if sys.platform == "darwin" else range(7110, 7114))
 
 
-def server_entrypoint(source_root: Path) -> Path:
-    """Select the canonical server script, with support for frozen old trees."""
+def go_test_server_binary(source_root: Path) -> Path:
+    """Return the Go server for process-level tests, building it hermetically if needed."""
 
-    for name in ("yomux.py", "yolomux.py"):
-        candidate = source_root / name
-        if candidate.is_file():
-            return candidate
-    raise FileNotFoundError(f"no YOmux server entrypoint under {source_root}")
+    configured = os.environ.get("YOMUX_GO_BINARY", "").strip()
+    if configured:
+        binary = Path(configured)
+        if not binary.is_file() or not os.access(binary, os.X_OK):
+            raise FileNotFoundError(f"configured Go test server is not executable: {binary}")
+        return binary
+
+    go_sources = sorted(
+        path
+        for directory in (source_root / "cmd", source_root / "internal")
+        if directory.is_dir()
+        for path in directory.rglob("*.go")
+    )
+    digest = hashlib.sha256()
+    for path in [source_root / "go.mod", source_root / "go.sum", source_root / "yomux_lib/version.py", *go_sources]:
+        if path.is_file():
+            digest.update(str(path.relative_to(source_root)).encode())
+            digest.update(path.read_bytes())
+    cache = Path(tempfile.gettempdir()) / "yomux-go-test-binaries" / digest.hexdigest()
+    binary = cache / "yomux-go"
+    cache.mkdir(parents=True, exist_ok=True)
+    with (cache / "build.lock").open("a+b") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        if binary.is_file() and os.access(binary, os.X_OK):
+            return binary
+        generated = cache / "product_version_generated.go"
+        overlay = cache / "go-overlay.json"
+        generate_go_version_overlay(
+            source_root / "yomux_lib/version.py",
+            generated,
+            overlay,
+            source_root / "cmd/yomux-go/product_version_generated.go",
+        )
+        environment = dict(os.environ)
+        environment.update({
+            "GOMODCACHE": os.environ.get("GOMODCACHE", "/opt/yomux-go-mod-cache"),
+            "GOPROXY": "off",
+            "GOSUMDB": "off",
+            "GOWORK": "off",
+        })
+        temporary_binary = cache / "yomux-go.building"
+        completed = subprocess.run(
+            ["go", "build", "-buildvcs=false", "-overlay", str(overlay), "-o", str(temporary_binary), "./cmd/yomux-go"],
+            cwd=source_root,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(f"offline Go test-server build failed: {completed.stderr.strip() or completed.stdout.strip()}")
+        os.replace(temporary_binary, binary)
+        binary.chmod(0o700)
+    return binary
+
+
+def server_entrypoint(source_root: Path) -> Path:
+    """Resolve the Go server process used by isolated integration tests."""
+
+    return go_test_server_binary(source_root)
 
 
 def server_entrypoint_arguments(source_root: Path) -> list[str]:
-    """Use backend selection only where the selected CLI supports it."""
+    """Return the Go server command, never the deprecated Python web server."""
 
-    entrypoint = server_entrypoint(source_root)
-    return [str(entrypoint), "--backend", "python"] if entrypoint.name == "yomux.py" else [str(entrypoint)]
+    return [str(server_entrypoint(source_root))]
 
 
 @dataclass(frozen=True)
@@ -169,6 +227,7 @@ def build_environment(
             "XDG_STATE_HOME": str(paths.root / "xdg-state"),
             "XDG_CACHE_HOME": str(paths.root / "xdg-cache"),
             "YOLOMUX_CONFIG_DIR": str(paths.config_dir),
+            "YOMUX_ROOT": str(paths.root),
             "YOLOMUX_STATE_DIR": str(paths.state_dir),
             "YOLOMUX_RUNTIME_DIR": str(paths.runtime_dir),
             "YOLOMUX_CACHE_DIR": str(paths.cache_dir),
@@ -234,6 +293,7 @@ def wait_until_serving(
     stdout = process.stdout
     assert stdout is not None
     expected = f"Serving {product_name} on http://127.0.0.1:{port}/"
+    go_expected = "YOmux Go backend version="
     deadline = time.monotonic() + timeout_seconds
     with selectors.DefaultSelector() as selector:
         selector.register(stdout, selectors.EVENT_READ)
@@ -256,8 +316,13 @@ def wait_until_serving(
             line = stdout.readline()
             if not line:
                 continue
-            output.append(line.rstrip("\n"))
-            if expected in line:
+            line = line.rstrip("\r\n")
+            output.append(line)
+            if expected in line or (
+                go_expected in line
+                and f"addr=127.0.0.1:{port}" in line
+                and "scheme=http" in line
+            ):
                 return
 
 
@@ -445,18 +510,19 @@ def start_isolated_dev_server(
     process: subprocess.Popen[str] | None = None
     server: IsolatedDevServer | None = None
     try:
-        session_names = sessions or tuple(tmux_runtime.sessions)
         command = [
-            sys.executable,
-            "-u",
             *server_entrypoint_arguments(source_root),
             "--http",
             "--host",
             "127.0.0.1",
             "--port",
             str(port),
-            "--sessions",
-            session_names[0],
+            "--root",
+            str(source_root),
+            "--config",
+            str(paths.config_dir),
+            "--stats",
+            str(paths.state_dir / "stats-v9.sqlite3"),
         ]
         if exec_plan_json is not None:
             # Launch through the real per-row exec mode the supported launcher uses:
@@ -472,10 +538,8 @@ def start_isolated_dev_server(
                 "--plan-file",
                 str(plan_path),
                 "--",
-                *command,
+            *command,
             ]
-        if force:
-            command.append("--force")
         if port_lease is not None:
             port_lease.release()
         process = subprocess.Popen(

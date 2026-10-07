@@ -184,8 +184,7 @@ function debugGraphApplyHostMetrics(bucket, source, {runtimeSse = false} = {}) {
       target.serviceLoad.set(key, item);
     }
   }
-  if (!source.gpu_devices || typeof source.gpu_devices !== 'object' || Array.isArray(source.gpu_devices)) return;
-  for (const [key, record] of Object.entries(source.gpu_devices)) {
+  for (const [key, record] of Object.entries(source.gpu_devices && typeof source.gpu_devices === 'object' && !Array.isArray(source.gpu_devices) ? source.gpu_devices : {})) {
     if (!record || typeof record !== 'object') continue;
     const samples = Number(record.samples || 0);
     if (!Number.isFinite(samples) || samples <= 0) continue;
@@ -196,6 +195,21 @@ function debugGraphApplyHostMetrics(bucket, source, {runtimeSse = false} = {}) {
     item.memoryCapacityTotalBytes = Math.max(item.memoryCapacityTotalBytes, Math.max(0, Number(record.memory_capacity_total_bytes || 0)));
     item.samples = Math.max(item.samples, Math.max(0, samples));
     target.gpuDevices.set(key, item);
+  }
+  if (source.disk_mounts && typeof source.disk_mounts === 'object' && !Array.isArray(source.disk_mounts)) {
+    for (const [key, record] of Object.entries(source.disk_mounts)) {
+      if (!record || typeof record !== 'object') continue;
+      const samples = Number(record.samples || 0);
+      const usedPercent = Number(record.used_percent);
+      const inventory = record.inventory === true;
+      if (!Number.isFinite(samples) || samples < 0 || (!inventory && samples <= 0) || (samples > 0 && (!Number.isFinite(usedPercent) || usedPercent < 0 || usedPercent / samples > 100))) continue;
+      const item = target.diskMounts.get(key) || debugGraphNewDiskMountItem(record.label || key);
+      item.label = String(record.label || item.label || key);
+      item.inventory = item.inventory || inventory;
+      if (samples > 0) item.usedPercent = Math.max(item.usedPercent, usedPercent);
+      item.samples = Math.max(item.samples, samples);
+      target.diskMounts.set(key, item);
+    }
   }
 }
 
@@ -1388,6 +1402,51 @@ function debugGraphGpuDeviceSeriesDefs(buckets, metric) {
     }));
 }
 
+function debugGraphDiskUsageSeriesDefs(buckets) {
+  const mounts = new Map();
+  let latestSampledStart = -Infinity;
+  for (const [index, bucket] of (buckets || []).entries()) {
+    const hasCensusState = Number.isFinite(bucket?.hostMetrics?.diskInventoryStartMs);
+    const entries = [...(bucket?.hostMetrics?.diskMounts?.entries?.() || [])]
+      .filter(([, item]) => item?.inventory === true || (!hasCensusState && Number(item?.samples || 0) > 0));
+    if (!entries.length) continue;
+    const bucketStart = Number(bucket?.startMs);
+    const sampledStart = Number.isFinite(bucketStart) ? bucketStart : index;
+    if (sampledStart < latestSampledStart) continue;
+    if (sampledStart > latestSampledStart) {
+      mounts.clear();
+      latestSampledStart = sampledStart;
+    }
+    for (const [key, item] of entries) {
+      if (item?.inventory === true || (!hasCensusState && Number(item?.samples || 0) > 0)) {
+        const samples = Number(item?.samples || 0);
+        const usedPercent = samples > 0 ? Number(item.usedPercent || 0) / samples : NaN;
+        const label = String(item.label || key);
+        mounts.set(key, Number.isFinite(usedPercent) && usedPercent > 80 ? `${label} (${Math.round(usedPercent)}%)` : label);
+      }
+    }
+  }
+  return [...mounts.entries()]
+    .sort((left, right) => left[1].localeCompare(right[1]) || left[0].localeCompare(right[0]))
+    .map(([mountId, label], index) => ({
+      key: `disk:${mountId}`, label, unit: 'percent', hostMetric: 'diskUsage', diskMountId: mountId,
+      color: jsDebugGraphAgentTokenColors[index % jsDebugGraphAgentTokenColors.length],
+      linePattern: jsDebugGraphServiceLoadLinePatterns[index % jsDebugGraphServiceLoadLinePatterns.length],
+      value: bucket => {
+        const item = bucket?.hostMetrics?.diskMounts?.get?.(mountId);
+        const samples = Number(item?.samples || 0);
+        return samples > 0 ? Number(item.usedPercent || 0) / samples : 0;
+      },
+      hasData: bucket => Number(bucket?.hostMetrics?.diskMounts?.get?.(mountId)?.samples || 0) > 0,
+      sampleCount: bucket => Number(bucket?.hostMetrics?.diskMounts?.get?.(mountId)?.samples || 0),
+      familyHasData: bucket => {
+        const mounts = bucket?.hostMetrics?.diskMounts;
+        return mounts instanceof Map && mounts.size > 0 && Number(mounts.get(mountId)?.samples || 0) <= 0;
+      },
+      displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.minuteGauge,
+    }));
+}
+
 const jsDebugGraphHostProcessVisualAssignments = Object.freeze({
   cpu: new Map(),
   memory: new Map(),
@@ -1500,6 +1559,7 @@ function debugGraphHostMetricSeriesDefs(buckets) {
     ...debugGraphMemoryProcessSeriesDefs(buckets),
     ...debugGraphGpuDeviceSeriesDefs(buckets, 'gpuUtil'),
     ...debugGraphGpuDeviceSeriesDefs(buckets, 'gpuMemory'),
+    ...debugGraphDiskUsageSeriesDefs(buckets),
   ];
 }
 
@@ -1654,6 +1714,7 @@ function debugGraphProjectSeriesSamples(def, buckets) {
   const values = [];
   const hasDataValues = [];
   const observedDataValues = [];
+  const censusGapValues = [];
   const provenanceValues = [];
   let heldSample = null;
   for (const [index, bucket] of (buckets || []).entries()) {
@@ -1677,11 +1738,13 @@ function debugGraphProjectSeriesSamples(def, buckets) {
       values.push(value);
       hasDataValues.push(true);
       observedDataValues.push(true);
+      censusGapValues.push(false);
       provenanceValues.push(provenance);
       heldSample = holdMs > 0 ? {value, provenance} : null;
       continue;
     }
     const familyObserved = typeof def.familyHasData === 'function' && def.familyHasData(bucket) === true;
+    censusGapValues.push(familyObserved);
     if (familyObserved || debugGraphDisplayHoldOutage(bucket)) heldSample = null;
     const bucketStartMs = Number(bucket?.startMs) || 0;
     const bucketDurationMs = Math.max(jsDebugGraphRawBucketMs, Number(bucket?.durationMs) || jsDebugGraphRawBucketMs);
@@ -1693,7 +1756,7 @@ function debugGraphProjectSeriesSamples(def, buckets) {
     observedDataValues.push(false);
     provenanceValues.push(held ? {...heldSample.provenance, held: true} : null);
   }
-  return {values, hasDataValues, observedDataValues, provenanceValues};
+  return {values, hasDataValues, observedDataValues, censusGapValues, provenanceValues};
 }
 
 function debugGraphSeriesData(buckets) {
@@ -1702,7 +1765,7 @@ function debugGraphSeriesData(buckets) {
   const defs = [...jsDebugGraphSeries, ...debugGraphClientMetricSeriesDefs(buckets), ...debugGraphProcessCpuSeriesDefs(buckets), ...debugGraphHostMetricSeriesDefs(buckets), ...jsDebugGraphDaemonsSeriesGroups.flatMap(group => debugGraphServiceLoadSeriesDefs(buckets, group)), ...debugGraphAgentTokenSeriesDefs(buckets), ...debugGraphModelTokenSeriesDefs(buckets)];
   return defs.map(def => {
     const localizedDef = {...def, label: debugGraphLocalizedLabel(def)};
-    const {values, hasDataValues, observedDataValues, provenanceValues} = debugGraphProjectSeriesSamples(def, buckets);
+    const {values, hasDataValues, observedDataValues, censusGapValues, provenanceValues} = debugGraphProjectSeriesSamples(def, buckets);
     const colorValues = typeof def.colorValue === 'function' ? buckets.map(bucket => def.colorValue(bucket)) : null;
     const sampleValues = values.filter((_value, index) => observedDataValues[index]);
     const sampleTimes = provenanceValues
@@ -1722,6 +1785,7 @@ function debugGraphSeriesData(buckets) {
       durations,
       hasDataValues,
       observedDataValues,
+      censusGapValues,
       provenanceValues,
       colorValues,
       movingAverageValues,
@@ -1842,7 +1906,6 @@ function debugGraphRefillControlsHtml() {
 function debugGraphControlsHtml(nowMs = Date.now()) {
   return `<div class="js-debug-graph-controls">
     ${debugGraphChartToggleControlsHtml()}
-    ${debugGraphRefillControlsHtml()}
     ${debugGraphLayoutControlsHtml()}
     ${debugGraphRangeResolutionControlsHtml(nowMs)}
   </div>`;
@@ -1905,7 +1968,7 @@ function debugGraphTimeInNoDataRange(noDataRanges, startMs, endMs) {
   return noDataRanges.some(range => Number(range?.startMs) < endMs && Number(range?.endMs) > startMs);
 }
 
-function debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDataValues = null, durations = [], gapThresholdMs = 0, logScale = false, noDataRanges = null, observedValues = null) {
+function debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDataValues = null, durations = [], gapThresholdMs = 0, logScale = false, noDataRanges = null, observedValues = null, censusGapValues = null) {
   // Coverage-aware breaking: when a genuine no-data range list is supplied, an
   // empty display cell never breaks the line on its own (a covered-but-coarser
   // span reads as one continuous, linearly interpolated line). The line breaks
@@ -1926,7 +1989,7 @@ function debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDat
     const heldInNoData = rangeBreak && !observed && hasDataValues && hasDataValues[index] === true
       && debugGraphTimeInNoDataRange(noDataRanges, timeMs, Number.isFinite(timeMs) ? timeMs + durationMs : timeMs + 1);
     if ((hasDataValues && hasDataValues[index] !== true) || heldInNoData) {
-      if (current.length && (heldInNoData || (!rangeBreak && gapThresholdMs <= 0))) {
+      if (current.length && (censusGapValues?.[index] === true || heldInNoData || (!rangeBreak && gapThresholdMs <= 0))) {
         segments.push(current);
         current = [];
       }
@@ -2432,6 +2495,7 @@ function debugGraphPolylineHtml(series, chartMax, domain, logScale = false, noDa
     logScale,
     rangeAware ? noDataRanges : null,
     rangeAware ? debugGraphSeriesPlotObservedValues(series) : null,
+    series?.censusGapValues || null,
   ).map((points, index) => {
     if (!points.length) return '';
     const segmentAttr = index > 0 ? ` data-js-debug-series-segment="${esc(index)}"` : '';
@@ -2451,6 +2515,7 @@ function debugGraphSingletonLineMarkersHtml(series, chartMax, domain, logScale =
     values, times, chartMax, domain, hasData, durations, 0, logScale,
     Array.isArray(noDataRanges) ? noDataRanges : null,
     Array.isArray(noDataRanges) ? debugGraphSeriesPlotObservedValues(series) : null,
+    series?.censusGapValues || null,
   );
   return segments.filter(segment => segment.length === 1).map(([point]) => {
     const [x, y] = String(point).split(',').map(Number);
@@ -2723,12 +2788,22 @@ function debugGraphXAxisHtml(domain, renderedResolutionSeconds = null) {
   </div>`;
 }
 
+function debugGraphIsGoProcessId(processId) {
+  const key = String(processId || '').trim().toLowerCase().replace(/-/g, '_');
+  return key === 'yomux_go' || key === 'yolomux_go';
+}
+
 function debugGraphGroupSeriesItems(group, seriesItems) {
   if (group.serviceLoad === true) {
     const metric = debugGraphServiceLoadMetric(group);
     const serviceSeries = seriesItems.filter(series => series.serviceLoad === true
       && (series.serviceMetric || 'cpu') === metric
       && (group.runtimeOnly !== true || String(series.key).startsWith('serviceLoad:runtime:')));
+    if (metric === 'cpu' && group.key === 'serversLoad' && group.includeGoProcessCpu === true) {
+      const goProcessCpu = seriesItems.filter(series => series.processCpu === true
+        && debugGraphIsGoProcessId(series.processId));
+      return [...serviceSeries, ...goProcessCpu];
+    }
     if (metric === 'cpu' && group.key === 'serversLoad'
       && group.runtimeOnly !== true) {
       return [...serviceSeries, ...seriesItems.filter(series => series.processCpu === true)];
@@ -2743,14 +2818,13 @@ function debugGraphGroupSeriesItems(group, seriesItems) {
   if (group.hostMetric) {
     const hostSeries = seriesItems.filter(series => series.hostMetric === group.hostMetric);
     if (group.hostMetric === 'cpu') {
-      return [...hostSeries, ...seriesItems.filter(series => series.key === 'cpu' || series.key === 'systemCpu' || series.processCpu === true)];
+      return [...hostSeries, ...seriesItems.filter(series => series.key === 'cpu' || series.key === 'systemCpu')];
     }
     if (hostSeries.length || group.hostMetric !== 'cpu') {
       return [...hostSeries, ...seriesItems.filter(series => group.hostMetric === 'memory' && series.key === 'systemMemory')];
     }
     // Existing history predates host process sampling. Keep it readable until those one-second
-    // buckets age out instead of rendering an empty CPU chart. Current process CPU series stay
-    // on this card; Daemons Load is available only in System -> Daemons.
+    // buckets age out instead of rendering an empty CPU chart.
     return seriesItems.filter(series => series.key === 'cpu' || series.key === 'systemCpu');
   }
   const seriesKeys = new Set(group.series);
@@ -2770,14 +2844,19 @@ function debugGraphResolvedChartGroup(group, buckets) {
       }
       return false;
     });
-    if (!goOwnedSample) {
-      return {
-        ...group,
-        descKey: 'debug.graph.chart.serversLoad.desc',
-        runtimeOnly: false,
-        unit: 'percent',
-      };
-    }
+    const goProcessCpuSample = (buckets || []).some(bucket => {
+      for (const [key, item] of bucket?.servers?.entries?.() || []) {
+        if (debugGraphIsGoProcessId(key) && Number(item?.cpuCount || 0) > 0) return true;
+      }
+      return false;
+    });
+    if (goOwnedSample || goProcessCpuSample) return {...group, includeGoProcessCpu: true};
+    return {
+      ...group,
+      descKey: 'debug.graph.chart.serversLoad.desc',
+      runtimeOnly: false,
+      unit: 'percent',
+    };
   }
   if (group?.key !== 'memory' || !debugGraphMacMemoryCardAvailable(buckets)) return group;
   return {
@@ -4210,7 +4289,7 @@ function debugGraphBodyHtml(nowMs = Date.now()) {
 }
 
 function debugGraphInnerHtml(nowMs = Date.now()) {
-  return `${debugGraphControlsHtml(nowMs)}<div data-js-debug-graph-body>${debugGraphBodyHtml(nowMs)}</div>`;
+  return `${debugGraphControlsHtml(nowMs)}<div data-js-debug-graph-body>${debugGraphBodyHtml(nowMs)}</div>${debugGraphRefillControlsHtml()}`;
 }
 
 function debugGraphHtml() {
@@ -4675,7 +4754,7 @@ function jsDebugCurrentBucketRecord(bucket) {
     duration,
     clients: {},
     servers: {},
-    host_metrics: {cpu_processes: {}, memory_processes: {}, gpu_devices: {}, service_load: {}},
+    host_metrics: {cpu_processes: {}, memory_processes: {}, gpu_devices: {}, disk_mounts: {}, service_load: {}},
     agent_token_rates: [],
   };
   const agentRates = new Map();
@@ -4753,6 +4832,15 @@ function jsDebugCurrentBucketRecord(bucket) {
       const device = record.host_metrics.gpu_devices[source] || {label: source, util_total_percent: 0, memory_used_total_bytes: 0, memory_capacity_total_bytes: 0, samples: 1};
       device.memory_used_total_bytes = value;
       record.host_metrics.gpu_devices[source] = device;
+    } else if (name.startsWith('system_disk_used_percent:')) {
+      const source = name.slice('system_disk_used_percent:'.length);
+      const samples = Math.max(1, Number(series[name]?.source_count) || 1);
+      record.host_metrics.disk_mounts[source] = {label: source, used_percent: value * samples, samples, inventory: true};
+    } else if (name.startsWith('system_disk_inventory:')) {
+      const source = name.slice('system_disk_inventory:'.length);
+      const mount = record.host_metrics.disk_mounts[source] || {label: source, used_percent: 0, samples: 0};
+      mount.inventory = value > 0;
+      record.host_metrics.disk_mounts[source] = mount;
     } else if (name.startsWith('service_cpu_percent:')) {
       const source = name.slice('service_cpu_percent:'.length);
       const sourceCount = Math.max(1, Number(series[name]?.source_count) || 1);
@@ -4813,6 +4901,7 @@ function jsDebugCurrentBucketHasFamilyData(bucket, family) {
   }
   if (family === 'gpu') return prefixed('gpu_util_percent:') || prefixed('gpu_memory_bytes:');
   if (family === 'system_memory') return names.includes('system_memory_used_bytes') || names.includes('system_memory_capacity_bytes') || names.some(name => name.startsWith('mac_'));
+  if (family === 'system_disk') return prefixed('system_disk_used_percent:') || prefixed('system_disk_inventory:');
   if (family === 'browser') return names.some(name => name.startsWith('browser_'));
   return false;
 }
@@ -4867,11 +4956,12 @@ function updateJsDebugCurrentSnapshotState(snapshot, {forceGraphRefresh = false}
   const requestIntervals = [{startSeconds: snapshot.window_start, endSeconds: snapshot.window_end, resolutionSeconds: snapshot.resolution_seconds, sourceResolutionSeconds: snapshot.resolution_seconds}];
   jsDebugHistoryReadiness.phase = 'ready';
   jsDebugHistoryReadiness.reason = '';
+  jsDebugHistoryReadiness.requestedRangeSeconds = snapshot.range_seconds;
   jsDebugHistoryReadiness.overlayVisible = false;
   jsDebugHistoryReadiness.requestCoverageIntervals = requestIntervals;
   jsDebugHistoryReadiness.coverageIntervals = requestIntervals;
   jsDebugHistoryReadiness.storeCoverageIntervals = Object.fromEntries(
-    ['cpu', 'service_load', 'agent_status', 'agent_tokens', 'cost', 'gpu', 'system_memory', 'browser'].map(family => [family, jsDebugCurrentCoverageIntervals(snapshot, family)]),
+    ['cpu', 'service_load', 'agent_status', 'agent_tokens', 'cost', 'gpu', 'system_memory', 'system_disk', 'browser'].map(family => [family, jsDebugCurrentCoverageIntervals(snapshot, family)]),
   );
   jsDebugHistoryReadiness.loadedStartSeconds = requestIntervals.length
     ? Math.min(...requestIntervals.map(interval => interval.startSeconds))
@@ -6884,7 +6974,7 @@ function debugSystemDaemonsChartHtml() {
   }).join('');
   const runtimeLoad = debugGraphResolvedChartGroup(jsDebugGraphDaemonsChartGroup, defaultBuckets).runtimeOnly === true;
   const note = runtimeLoad
-    ? 'Daemons load shows measured in-process occupancy; daemon memory shows retained process resident memory. Labels identify goroutines and SQLite cgo work; Unix child processes and OS threads remain in the expanded daemon details. The yolomux-go process CPU line is shown in CPU.'
+    ? 'Daemons load shows measured in-process occupancy with the yolomux-go process CPU as a comparison line; daemon memory shows retained process resident memory. Labels identify goroutines and SQLite cgo work; Unix child processes and OS threads remain in the expanded daemon details.'
     : 'Daemons load shows CPU use for local services; daemon memory shows retained process resident memory.';
   return `<div class="js-debug-daemons-chart" data-js-debug-daemons-graph><div class="js-debug-daemons-controls">${debugGraphRangeResolutionControlsHtml(nowMs, {idPrefix: 'daemons', focusKeyPrefix: 'daemons'})}</div><div class="js-debug-chart-shell"><div class="js-debug-chart-grid" data-js-debug-chart-grid data-js-debug-chart-layout="${esc(debugRuntimeState.graphChartLayout)}" data-js-debug-domain-start="${esc(Math.floor(domain.startMs))}" data-js-debug-domain-end="${esc(Math.floor(domain.endMs))}">${charts}</div></div><p class="js-debug-roster-note" data-js-debug-daemons-chart-note>${esc(note)}</p></div>`;
 }

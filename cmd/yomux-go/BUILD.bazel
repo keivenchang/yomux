@@ -23,11 +23,14 @@ go_library(
     ) + [":product_version_generated.go"],
     importpath = "github.com/keivenchang/yomux/cmd/yomux-go",
     deps = [
+        "//internal/atomicfile:atomicfile_lib",
         "//internal/cache:cache_lib",
         "//internal/capabilities:capabilities_lib",
         "//internal/finder:finder_lib",
+        "//internal/mutablefs:mutablefs_lib",
         "//internal/productenv:productenv_lib",
         "//internal/stats:stats_lib",
+        "//internal/tmuxcmd:tmuxcmd_lib",
         "//internal/work:work_lib",
         SQLITE,
         "@org_golang_x_sys//unix",
@@ -46,10 +49,7 @@ alias(
 
 go_test_pair(
     name = "yomux_go",
-    srcs = glob(
-        ["*_test.go"],
-        exclude = ["external_parity_test.go"],
-    ),
+    srcs = glob(["*_test.go"]),
     data = ["//:go_cmd_test_support"],
     embed = [":yomux_go_lib"],
     race_shard_count = 4,
@@ -66,56 +66,4 @@ go_binary(
     name = "yomux_go_race",
     embed = [":yomux_go_lib"],
     race = "on",
-)
-
-go_test(
-    name = "external_parity_test",
-    size = "medium",
-    srcs = glob(["*_test.go"]),
-    args = [
-        "-test.run=^TestStats(PythonAndExternalGoReceiveTheSameHTTPFixture|ProductionPythonAndGoReceiveTheSameHTTPFixture|ProductionPythonAndGoObservationBoundaryParity)$$",
-        "-test.v",
-    ],
-    data = [
-        ":yomux-go",
-        "//:go_cmd_test_support",
-    ],
-    embed = [":yomux_go_lib"],
-    env = {
-        "YOMUX_GO_BINARY_RUNFILE": "$(rlocationpath :yomux-go)",
-        "YOMUX_REPO_ROOT_RUNFILE": "yomux/go_cmd_test_support",
-    },
-    race = "off",
-    deps = [
-        "//internal/cache:cache_lib",
-        "//internal/testsupport:testsupport_lib",
-        SQLITE,
-    ],
-)
-
-go_test(
-    name = "external_parity_race_test",
-    size = "medium",
-    srcs = glob(["*_test.go"]),
-    args = [
-        "-test.run=^TestStats(PythonAndExternalGoReceiveTheSameHTTPFixture|ProductionPythonAndGoReceiveTheSameHTTPFixture|ProductionPythonAndGoObservationBoundaryParity)$$",
-        "-test.v",
-    ],
-    data = [
-        ":yomux_go_race",
-        "//:go_cmd_test_support",
-    ],
-    embed = [":yomux_go_lib"],
-    env = {
-        "YOMUX_GO_BINARY_RUNFILE": "$(rlocationpath :yomux_go_race)",
-        "YOMUX_GO_BINARY_RACE": "1",
-        "YOMUX_REPO_ROOT_RUNFILE": "yomux/go_cmd_test_support",
-    },
-    race = "on",
-    tags = ["cpu:8"],
-    deps = [
-        "//internal/cache:cache_lib",
-        "//internal/testsupport:testsupport_lib",
-        SQLITE,
-    ],
 )

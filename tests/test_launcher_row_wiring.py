@@ -17,8 +17,10 @@ Two kinds of proof live here:
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -99,7 +101,7 @@ def test_launcher_macos_carries_the_plan_through_the_shared_launcher() -> None:
     """The macOS row also launches through the exec plan (via the shared launcher)."""
     text = LAUNCHER.read_text(encoding="utf-8")
 
-    assert 'export YOLOMUX_ROW_PLAN_FILE="$plan_file"' in text
+    assert 'product_env_assign "ROW_PLAN_FILE=$plan_file"' in text
 
 
 def test_shared_macos_launcher_execs_plan_when_present_and_stays_direct_otherwise() -> None:
@@ -109,7 +111,7 @@ def test_shared_macos_launcher_execs_plan_when_present_and_stays_direct_otherwis
 
     assert 'plan_json=$7; env_count=$8; shift 8' in text
     assert 'export "$assignment"' in text
-    assert 'unset "YOMUX_$env_suffix" "YOLOMUX_$env_suffix"' in text
+    assert 'product_env_unset "$env_suffix"' in text
     assert 'source "$repo/tools/startup_common.sh" || exit 2; yomux_normalize_environment;' in text
     assert 'instance_isolation.py" exec --plan-json "$plan_json" --' in text
     assert 'instance_isolation.py" plan-direct --port "$port"' in text
@@ -146,7 +148,7 @@ def test_exec_launched_server_passes_the_real_session_probe_and_tears_down_by_pi
     mode, verify its tmux session with the real launcher probe (reusing the exact
     same captured plan file), tear down by exact process identity, and confirm
     nothing survives."""
-    root = tmp_path / "runtime"
+    root = Path(tempfile.mkdtemp(prefix="y-", dir="/tmp"))
     paths = build_paths(root)
     tmux_runtime = start_isolated_tmux_runtime(monkeypatch, root, session_count=1)
 
@@ -216,3 +218,4 @@ def test_exec_launched_server_passes_the_real_session_probe_and_tears_down_by_pi
         if server is not None and server.process.poll() is None:
             stop_and_reap_daemons(server)
         stop_isolated_tmux_runtime(tmux_runtime)
+        shutil.rmtree(root)

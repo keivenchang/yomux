@@ -5,6 +5,8 @@ __pycache__/
 .venv/
 node_modules/
 bazel-*
+# Required source pin, rather than generated Bazel output.
+!/docker/bazel-registry.json
 /instance.lock
 /yolomux-go
 /static/yolomux.css

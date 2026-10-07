@@ -1789,6 +1789,7 @@ body.theme-light :is(.changes-toolbar, .changes-repo-group, .file-explorer, .fil
 .js-debug-system-kv dd,
 .backend-health-indicator-text,
 .git-diff-path,
+.git-diff-commit-changes,
 .js-debug-cost-source-label {
   min-width: 0;
   overflow: hidden;

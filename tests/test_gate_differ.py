@@ -1567,7 +1567,12 @@ def test_go_differ_paints_repository_stream_before_attribution_finishes(gate_bro
             done({paintedBeforeDone, secondPaintedBeforeDone, firstRepoUntouched, firstRepoMutations, repoOrderPreserved: firstRepoIndex >= 0 && secondRepoIndex > firstRepoIndex, transcriptOnlyHiddenBeforeDone: !transcriptOnlyRow, refInputPreserved, refInputBefore, refInputState, rowPath: row.dataset.openChangeFile, errors: jsDebugFailureEvents('error')});
           } catch (error) {
             controller?.error(error);
-            done({error: String(error?.stack || error)});
+            const state = fileExplorerSessionFilesState;
+            done({error: String(error?.stack || error), loading: state.loading,
+              streaming: state.payload?.streaming === true,
+              payloadFiles: (state.payload?.files || []).map(file => String(file.abs_path || file.path || '')),
+              streamRepos: state.streamRepos instanceof Map ? [...state.streamRepos.keys()] : [],
+              renderedFiles: Array.from(document.querySelectorAll('#panel-__differ__ [data-open-change-file]')).map(row => row.dataset.openChangeFile)});
           } finally {
             firstRepoObserver?.disconnect();
             setFileExplorerViewSetting('differ', 'treeDateMode', previousDateMode, {refresh: false, publish: false});

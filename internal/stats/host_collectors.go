@@ -1,11 +1,14 @@
 package stats
 
 import (
+	"bytes"
 	"crypto/sha256"
+	"encoding/csv"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path"
@@ -44,6 +47,55 @@ type ServiceLoadSample struct {
 	Running    bool
 	CPUPercent *float64
 	RSSBytes   *float64
+}
+
+// DiskUsageSample is one mounted filesystem capacity sample. SourceID is a
+// stable mount identity; Reason marks an enumerated mount whose capacity could
+// not be read during this cadence.
+type DiskUsageSample struct {
+	SourceID      string
+	Mountpoint    string
+	UsedBytes     uint64
+	CapacityBytes uint64
+	Reason        string
+}
+
+func diskMountSourceID(mountpoint string) string {
+	return fmt.Sprintf("mount:%x", sha256.Sum256([]byte(mountpoint)))
+}
+
+// BuildSystemDiskFacts preserves a separate source series for every mount.
+// Invalid or inaccessible mounts produce unavailable spans rather than zeros.
+func BuildSystemDiskFacts(samples []DiskUsageSample, context HostFactContext) AppendBatch {
+	result := AppendBatch{}
+	for _, sample := range samples {
+		if strings.TrimSpace(sample.SourceID) == "" || strings.TrimSpace(sample.Mountpoint) == "" {
+			continue
+		}
+		itemContext := context
+		itemContext.SourceID = sample.SourceID
+		if sample.Reason != "" || sample.CapacityBytes == 0 || sample.UsedBytes > sample.CapacityBytes {
+			reason := sample.Reason
+			if reason == "" {
+				reason = "invalid_sample"
+			}
+			item := BuildUnavailableFacts("system_disk", itemContext, reason)
+			result.UnavailableSpans = append(result.UnavailableSpans, item.UnavailableSpans...)
+			inventory := singleHostFacts("system_disk", itemContext, map[string]any{
+				"mountpoint":         sample.Mountpoint,
+				"unavailable_reason": reason,
+			})
+			result.Observations = append(result.Observations, inventory.Observations...)
+			continue
+		}
+		item := singleHostFacts("system_disk", itemContext, map[string]any{
+			"mountpoint":   sample.Mountpoint,
+			"used_percent": float64(sample.UsedBytes) / float64(sample.CapacityBytes) * 100,
+		})
+		result.Observations = append(result.Observations, item.Observations...)
+		result.CoverageEpochs = append(result.CoverageEpochs, item.CoverageEpochs...)
+	}
+	return result
 }
 
 // BuildCPUFacts converts a measured CPU delta into current YO!stats facts.
@@ -315,9 +367,104 @@ func LinuxGPUDevices(inputs HostCollectorInputs, drmRoot string) ([]GPUDevice, b
 		if !usedOK || !capacityOK || capacity == 0 || used > capacity {
 			continue
 		}
-		devices = append(devices, GPUDevice{SourceID: fmt.Sprintf("gpu:%d", index), Label: fmt.Sprintf("GPU %d", index), Utilization: utilization, MemoryUsedBytes: used, MemoryTotalBytes: capacity})
+		devices = append(devices, GPUDevice{SourceID: fmt.Sprintf("gpu:%d", index), Label: fmt.Sprintf("GPU %d", index), Utilization: utilization, MemoryUsedBytes: used, MemoryTotalBytes: capacity, pciAddress: linuxPCIBusID(inputs.ReadFile, filepath.Join(devicePath, "uevent"))})
 	}
 	return devices, len(devices) > 0
+}
+
+// ParseNvidiaSMI reads the stable, machine-oriented CSV form of nvidia-smi.
+// Values reported as N/A or rows with incomplete counters remain unavailable.
+func ParseNvidiaSMI(data []byte) []GPUDevice {
+	if len(data) > maxHostInputBytes {
+		return nil
+	}
+	reader := csv.NewReader(bytes.NewReader(data))
+	reader.FieldsPerRecord = -1
+	reader.TrimLeadingSpace = true
+	devices := []GPUDevice{}
+	seen := map[int]struct{}{}
+	for {
+		row, err := reader.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil || len(row) != 6 {
+			continue
+		}
+		index, err := strconv.Atoi(strings.TrimSpace(row[0]))
+		if err != nil || index < 0 {
+			continue
+		}
+		if _, exists := seen[index]; exists {
+			continue
+		}
+		name := strings.TrimSpace(row[1])
+		pciAddress := normalizePCIBusID(row[2])
+		utilization, utilErr := strconv.ParseFloat(strings.TrimSpace(row[3]), 64)
+		usedMiB, usedErr := strconv.ParseUint(strings.TrimSpace(row[4]), 10, 64)
+		totalMiB, totalErr := strconv.ParseUint(strings.TrimSpace(row[5]), 10, 64)
+		const bytesPerMiB = uint64(1024 * 1024)
+		if name == "" || utilErr != nil || !finite(utilization) || utilization < 0 || utilization > 100 || usedErr != nil || totalErr != nil || totalMiB == 0 || usedMiB > totalMiB || usedMiB > ^uint64(0)/bytesPerMiB || totalMiB > ^uint64(0)/bytesPerMiB {
+			continue
+		}
+		seen[index] = struct{}{}
+		devices = append(devices, GPUDevice{
+			SourceID:         fmt.Sprintf("gpu:nvidia:%d", index),
+			Label:            fmt.Sprintf("GPU %d (%s)", index, name),
+			Utilization:      utilization,
+			MemoryUsedBytes:  usedMiB * bytesPerMiB,
+			MemoryTotalBytes: totalMiB * bytesPerMiB,
+			pciAddress:       pciAddress,
+		})
+	}
+	return devices
+}
+
+func CollectNvidiaSMI(inputs HostCollectorInputs) ([]GPUDevice, bool) {
+	if inputs.Run == nil {
+		return nil, false
+	}
+	result, err := inputs.Run([]string{"nvidia-smi", "--query-gpu=index,name,pci.bus_id,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"})
+	if err != nil || result.ExitCode != 0 || len(result.Stdout) > maxHostInputBytes {
+		return nil, false
+	}
+	devices := ParseNvidiaSMI(result.Stdout)
+	return devices, len(devices) > 0
+}
+
+func linuxPCIBusID(readFile func(string) ([]byte, error), path string) string {
+	if readFile == nil {
+		return ""
+	}
+	data, err := readFile(path)
+	if err != nil || len(data) > maxHostInputBytes {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if value, ok := strings.CutPrefix(strings.TrimSpace(line), "PCI_SLOT_NAME="); ok {
+			return normalizePCIBusID(value)
+		}
+	}
+	return ""
+}
+
+func normalizePCIBusID(value string) string {
+	parts := strings.Split(strings.ToLower(strings.TrimSpace(value)), ":")
+	if len(parts) != 3 {
+		return ""
+	}
+	functionParts := strings.Split(parts[2], ".")
+	if len(functionParts) != 2 {
+		return ""
+	}
+	domain, domainErr := strconv.ParseUint(parts[0], 16, 16)
+	bus, busErr := strconv.ParseUint(parts[1], 16, 8)
+	device, deviceErr := strconv.ParseUint(functionParts[0], 16, 8)
+	function, functionErr := strconv.ParseUint(functionParts[1], 16, 8)
+	if domainErr != nil || busErr != nil || deviceErr != nil || functionErr != nil {
+		return ""
+	}
+	return fmt.Sprintf("%04x:%02x:%02x.%x", domain, bus, device, function)
 }
 
 func readLinuxGPUCounter(readFile func(string) ([]byte, error), path string) (uint64, bool) {
@@ -376,6 +523,7 @@ type GPUDevice struct {
 	Utilization      float64
 	MemoryUsedBytes  uint64
 	MemoryTotalBytes uint64
+	pciAddress       string
 }
 
 type SystemMetadata struct {
@@ -908,15 +1056,9 @@ func normalizeHostBinary(value string) string {
 		return safe
 	}
 	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(name)))[:8]
-	prefix := strings.TrimRight(safe[:minInt(len(safe), 55)], "-._")
+	prefix := strings.TrimRight(safe[:min(len(safe), 55)], "-._")
 	if prefix == "" {
 		prefix = "binary"
 	}
 	return prefix + "-" + digest
-}
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

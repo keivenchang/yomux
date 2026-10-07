@@ -14,6 +14,7 @@ from pathlib import Path
 from ..infra.common import PROJECT_ROOT
 from ..infra.common import codex_runtime_env
 from ..infra.common import heal_server_path
+from tools.product_environment import product_env
 
 
 TERMINAL_COMMAND_CANDIDATES = ("bash", "zsh", "fish", "sh", "dash", "ksh", "csh", "tcsh", "nu", "pwsh", "tsh")
@@ -35,7 +36,7 @@ def session_workdir(session: str) -> Path:
     if dev_workdir is not None:
         return dev_workdir
     repo_name = f"project{session_index}" if session_index else session
-    workspace_base = Path(os.environ.get("YOLOMUX_WORKSPACE_BASE", str(Path.home() / "workspaces")))
+    workspace_base = Path(product_env('WORKSPACE_BASE', str(Path.home() / "workspaces"), environ=os.environ))
     repo_path = workspace_base / repo_name
     return repo_path if repo_path.is_dir() else Path.home()
 
@@ -49,7 +50,7 @@ def session_dev_workdir(session_index: str | None) -> Path | None:
     if not session_index:
         return None
     if session_index == "6":
-        dev_path = Path(os.environ.get("YOLOMUX_DEV_WORKDIR", str(PROJECT_ROOT)))
+        dev_path = Path(product_env('DEV_WORKDIR', str(PROJECT_ROOT), environ=os.environ))
         if dev_path.is_dir():
             return dev_path
     for name in (f"yomux.dev{session_index}", f"yolomux.dev{session_index}"):
@@ -59,7 +60,7 @@ def session_dev_workdir(session_index: str | None) -> Path | None:
     return None
 
 def numbered_project_workdir(session: str) -> Path | None:
-    workspace_base = Path(os.environ.get("YOLOMUX_WORKSPACE_BASE", str(Path.home() / "workspaces")))
+    workspace_base = Path(product_env('WORKSPACE_BASE', str(Path.home() / "workspaces"), environ=os.environ))
     repo_path = workspace_base / f"project{session}"
     return repo_path if repo_path.is_dir() else None
 

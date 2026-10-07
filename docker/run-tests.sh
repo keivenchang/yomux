@@ -3,6 +3,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$REPO_ROOT/tools/product_environment.sh"
+yomux_normalize_environment
 
 # Rootless Docker maps container root to the invoking host user, but the image's non-root runner
 # account can still read the read-only worktree. Keep the image-selected USER at runtime so a
@@ -13,15 +15,15 @@ if docker info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -q 'name=
 fi
 
 if [ "$rootless_docker" = 1 ]; then
-  export YOMUX_IMAGE_RUNNER_UID=1000
-  export YOMUX_IMAGE_RUNNER_GID=1000
+  product_env_assign "IMAGE_RUNNER_UID=1000"
+  product_env_assign "IMAGE_RUNNER_GID=1000"
 else
-  export YOMUX_IMAGE_RUNNER_UID="$(id -u)"
-  export YOMUX_IMAGE_RUNNER_GID="$(id -g)"
+  product_env_assign "IMAGE_RUNNER_UID=$(id -u)"
+  product_env_assign "IMAGE_RUNNER_GID=$(id -g)"
 fi
-export YOLOMUX_IMAGE_RUNNER_UID="$YOMUX_IMAGE_RUNNER_UID"
-export YOLOMUX_IMAGE_RUNNER_GID="$YOMUX_IMAGE_RUNNER_GID"
-IMAGE="${YOMUX_TEST_IMAGE-${YOLOMUX_TEST_IMAGE:-$(python3 "$REPO_ROOT/tools/docker_image.py" --name)}}"
+yomux_normalize_environment
+image_name="$(python3 "$REPO_ROOT/tools/docker_image.py" --name)" || { printf '%s\n' "$image_name"; echo "WARNING: HERMETIC DOCKER TESTING FAILED: image input validation/fingerprinting failed" >&2; exit 78; }
+IMAGE="$(product_env_print TEST_IMAGE "$image_name")"
 
 usage() {
   echo "usage: $0 [--build] [--bazel-contract] [--workdir <dir>] [-- <command>]" >&2
@@ -82,10 +84,19 @@ esac
 
 # tools/docker_image.py is the sole image-identity owner. A changed build input creates a
 # new tag, making stale-image reuse impossible without duplicating the hash in shell.
-if [ "$do_build" = 1 ] || [ "${YOMUX_TEST_IMAGE_REBUILD-${YOLOMUX_TEST_IMAGE_REBUILD:-0}}" = 1 ] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+# All parallel lanes share this image tag. Own construction once, then recheck
+# availability under the lock; tests themselves retain their independent lanes.
+image_lock_root="/tmp/yomux-image-build-$(id -u)"
+[ ! -L "$image_lock_root" ] || { echo "image lock root must not be a symlink" >&2; exit 2; }
+mkdir -p -m 700 "$image_lock_root"
+[ -O "$image_lock_root" ] && [ "$(stat -c %a "$image_lock_root")" = 700 ] || { echo "image lock root must be user-owned and mode 700" >&2; exit 2; }
+image_lock_key="$(printf '%s' "$IMAGE" | sha256sum | cut -d ' ' -f 1)"
+exec {image_build_lock_fd}>"$image_lock_root/$image_lock_key.lock"
+flock -x "$image_build_lock_fd"
+if [ "$do_build" = 1 ] || [ "$(product_env_print TEST_IMAGE_REBUILD "0")" = 1 ] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   echo "Building $IMAGE (this is cached after the first run)" >&2
   build_args=()
-  go_mod_context="$(mktemp -d /tmp/yomux-go-mod-context.XXXXXX)"
+  go_mod_context="$(mktemp -d "${TMPDIR:-/tmp}/yomux-go-mod-context.XXXXXX")"
   cleanup_go_mod_context() {
     [ -e "$go_mod_context" ] || return 0
     # Go's module extractor can leave files read-only. Repair only this exact
@@ -109,7 +120,7 @@ if [ "$do_build" = 1 ] || [ "${YOMUX_TEST_IMAGE_REBUILD-${YOLOMUX_TEST_IMAGE_REB
   }
   trap go_mod_context_cleanup EXIT
   if ! python3 "$REPO_ROOT/tools/docker_image.py" --prepare-go-mod-cache "$go_mod_context"; then
-    echo "No complete local Go module cache is available; refusing a non-hermetic Docker build." >&2
+    echo "WARNING: HERMETIC DOCKER TESTING FAILED: pinned dependency preparation failed; see the failing stage above." >&2
     exit 1
   fi
   build_context_args=(--build-context "go-mod-cache=$go_mod_context")
@@ -122,12 +133,16 @@ if [ "$do_build" = 1 ] || [ "${YOMUX_TEST_IMAGE_REBUILD-${YOLOMUX_TEST_IMAGE_REB
   # Image construction is the only network-enabled phase: it resolves pinned dependencies and
   # bakes them into the image. The test container below is always network-disabled. Use Docker's
   # default builder network; host networking would expose the host network namespace to a build.
+  build_status=0
   docker build "${build_args[@]+"${build_args[@]}"}" \
     "${build_context_args[@]+"${build_context_args[@]}"}" \
     -f "$REPO_ROOT/docker/Dockerfile.test" \
     -t "$IMAGE" \
-    "$REPO_ROOT" >&2
-  build_status=$?
+    "$REPO_ROOT" >&2 || build_status=$?
+  if [ "$build_status" -ne 0 ]; then
+    echo 'YOMUX_EXECUTION {"effective":"docker","hermetic":false,"failure_phase":"image-build"}'
+    echo "WARNING: HERMETIC DOCKER TESTING FAILED: Docker image construction exited $build_status." >&2
+  fi
   trap - EXIT
   if ! cleanup_go_mod_context; then
     echo "Go module build context cleanup failed: $go_mod_context" >&2
@@ -141,10 +156,16 @@ if [ "$do_build" = 1 ] || [ "${YOMUX_TEST_IMAGE_REBUILD-${YOLOMUX_TEST_IMAGE_REB
   fi
 fi
 
+flock -u "$image_build_lock_fd"
+exec {image_build_lock_fd}>&-
+
 image_id="$(docker image inspect --format '{{.Id}}' "$IMAGE")"
 IMAGE="$image_id"
 contract=
 if [ "$bazel_contract" = 1 ]; then
+  policy_record="$(python3 "$REPO_ROOT/tools/bazel_execution_contract.py" --apparmor-profile)" || { printf '%s\n' "$policy_record"; exit 78; }
+  read -r apparmor_profile apparmor_digest <<< "$policy_record"
+  product_env_assign "BAZEL_APPARMOR_SHA256=$apparmor_digest"
   contract="$(python3 "$REPO_ROOT/tools/bazel_execution_contract.py" --identity "$image_id")"
 fi
 # Linked worktrees store their gitdir outside the worktree bind mount. Mount that common
@@ -179,7 +200,7 @@ fi
 # The parent remains host-user owned. Rootless Docker owns only its private partition leaf.
 cache_mount=()
 output_cache_sources=()
-if [ "${YOMUX_BAZEL_CACHE-${YOLOMUX_BAZEL_CACHE:-on}}" = on ]; then
+if [ "$(product_env_print BAZEL_CACHE "on")" = on ]; then
   cache_parent="/tmp/yomux-bazel-cache-$(id -u)"
   if [ -L "$cache_parent" ]; then echo "cache parent must not be a symlink" >&2; exit 2; fi
   mkdir -p -m 700 -- "$cache_parent"
@@ -190,13 +211,13 @@ if [ "${YOMUX_BAZEL_CACHE-${YOLOMUX_BAZEL_CACHE:-on}}" = on ]; then
   case "$cache_fs" in ext2/ext3|xfs|tmpfs|btrfs|overlayfs) ;; *)
     echo "Bazel cache requires host-local storage, found $cache_fs: $cache_parent" >&2; exit 2 ;;
   esac
-  partition="$(uname -m)-${rootless_docker}-${YOMUX_IMAGE_RUNNER_UID}-${YOMUX_IMAGE_RUNNER_GID}-${image_id#sha256:}"
+  partition="$(uname -m)-${rootless_docker}-$(product_env_print IMAGE_RUNNER_UID)-$(product_env_print IMAGE_RUNNER_GID)-${image_id#sha256:}"
   umask 077
   cache_provision_user=0:0
   if [ "$rootless_docker" = 0 ]; then
     # A rootful daemon maps container root to host root, which cannot enter this 0700 host-owned
     # parent. Use the image's runner identity so it can create only its owned partition leaf.
-    cache_provision_user="${YOMUX_IMAGE_RUNNER_UID}:${YOMUX_IMAGE_RUNNER_GID}"
+    cache_provision_user="$(product_env_print IMAGE_RUNNER_UID):$(product_env_print IMAGE_RUNNER_GID)"
   fi
   flock -x "$cache_parent/.partition-provision.lock" docker run --rm --network none --read-only --cap-drop=ALL --cap-add=CHOWN --security-opt=no-new-privileges \
     --user="$cache_provision_user" -v "$cache_parent:/cache" "$IMAGE" python3 -c 'import os,stat,sys,uuid
@@ -217,7 +238,7 @@ if not validate():
   try: os.rmdir(staging)
   except FileNotFoundError: pass
  validate()
-  ' "$partition" "$YOMUX_IMAGE_RUNNER_UID" "$YOMUX_IMAGE_RUNNER_GID"
+  ' "$partition" "$(product_env_print IMAGE_RUNNER_UID)" "$(product_env_print IMAGE_RUNNER_GID)"
   output_slot_count="$(python3 "$REPO_ROOT/tools/bazel_execution_contract.py" --output-slots)"
   output_contract="${contract:-generic}"
   output_root_names=()
@@ -226,7 +247,7 @@ if not validate():
     output_root_names+=("$output_root_name")
   done
   flock -x "$cache_parent/.partition-provision.lock" docker run --rm --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
-    --user="$YOMUX_IMAGE_RUNNER_UID:$YOMUX_IMAGE_RUNNER_GID" -v "$cache_parent/$partition:/cache" "$IMAGE" python3 -c 'import os,stat,sys
+    --user="$(product_env_print IMAGE_RUNNER_UID):$(product_env_print IMAGE_RUNNER_GID)" -v "$cache_parent/$partition:/cache" "$IMAGE" python3 -c 'import os,stat,sys
 os.umask(0o077)
 for name in sys.argv[1:]:
  path="/cache/"+name
@@ -257,17 +278,19 @@ case "$shared_memory_bytes" in
     exit 1
     ;;
 esac
-cpu_limit="${YOMUX_TEST_CPU_COUNT:-${YOMUX_BAZEL_CPU_COUNT:-}}"
+cpu_limit="$(product_env_print TEST_CPU_COUNT "$(product_env_print BAZEL_CPU_COUNT "")")"
 cpu_args=()
 if [ -n "$cpu_limit" ]; then
-  case "$cpu_limit" in ''|*[!0-9]*) echo "test container CPU limit must be a positive integer" >&2; exit 2 ;; esac
-  if [ "$cpu_limit" -lt 1 ]; then
-    echo "test container CPU limit must be a positive integer" >&2
-    exit 2
+  if [ "$cpu_limit" != unlimited ]; then
+    case "$cpu_limit" in ''|*[!0-9]*) echo "test container CPU limit must be a positive integer or unlimited" >&2; exit 2 ;; esac
+    if [ "$cpu_limit" -lt 1 ]; then
+      echo "test container CPU limit must be a positive integer or unlimited" >&2
+      exit 2
+    fi
+    cpu_args+=(--cpus="$cpu_limit")
   fi
-  cpu_args+=(--cpus="$cpu_limit")
 fi
-memory_limit_mb="${YOMUX_TEST_MEMORY_MB:-${YOMUX_BAZEL_MEMORY_MB:-}}"
+memory_limit_mb="$(product_env_print TEST_MEMORY_MB "$(product_env_print BAZEL_MEMORY_MB "")")"
 memory_limit_bytes="$shared_memory_bytes"
 if [ -n "$memory_limit_mb" ]; then
   case "$memory_limit_mb" in ''|*[!0-9]*) echo "test container memory limit must be a positive integer" >&2; exit 2 ;; esac
@@ -286,16 +309,30 @@ if [ "$memory_limit_bytes" -lt "$shared_memory_bytes" ]; then
 fi
 
 
+# One allowlist for runner controls in both generic and Bazel containers.
+runner_env=()
+for runner_setting in BAZEL_CACHE BAZEL_EXECUTION BAZEL_JOBS BAZEL_CPU_COUNT BAZEL_MEMORY_MB; do
+  if product_env_present "$runner_setting"; then
+    runner_env+=(-e "$(product_env_name "$runner_setting")=$(product_env_print_present "$runner_setting")")
+  fi
+done
+
+owner_label=()
+if [ -n "$(product_env_print CHECK_RUN_TOKEN "")" ]; then
+  owner_label+=(--label "yolomux.check.run=$(product_env_print CHECK_RUN_TOKEN)")
+fi
+
 if [ "$bazel_contract" = 1 ]; then
   contract_container="$(docker create --init --network none --read-only --cap-drop ALL \
     "${cpu_args[@]+"${cpu_args[@]}"}" --memory="$memory_limit_bytes" --memory-swap="$memory_limit_bytes" --shm-size="$shared_memory_bytes" \
     --security-opt no-new-privileges --security-opt systempaths=unconfined \
-    --security-opt "seccomp=$REPO_ROOT/docker/sandbox-seccomp.json" \
-    --tmpfs /tmp:exec,mode=1777 --tmpfs /home/runner:exec,mode=700,uid="$YOMUX_IMAGE_RUNNER_UID",gid="$YOMUX_IMAGE_RUNNER_GID" \
+    --security-opt "apparmor=$apparmor_profile" --security-opt "seccomp=$REPO_ROOT/docker/sandbox-seccomp.json" \
+    --tmpfs /tmp:exec,mode=1777 --tmpfs /home/runner:exec,mode=700,uid="$(product_env_print IMAGE_RUNNER_UID)",gid="$(product_env_print IMAGE_RUNNER_GID)" \
     --label "yomux.bazel.contract=$contract" \
-    ${YOLOMUX_CHECK_RUN_TOKEN:+--label "yolomux.check.run=$YOLOMUX_CHECK_RUN_TOKEN"} \
+    "${owner_label[@]}" "${runner_env[@]}" \
     -v "$REPO_ROOT:/w:ro" "${cache_mount[@]+"${cache_mount[@]}"}" -w "$workdir" \
-    -e HOME=/home/runner -e "YOMUX_BAZEL_IMAGE_ID=$image_id" -e "YOMUX_BAZEL_CONTRACT=$contract" \
+    -e "$(product_env_name BAZEL_APPARMOR_SHA256)=$apparmor_digest" \
+    -e HOME=/home/runner -e "$(product_env_name BAZEL_IMAGE_ID)=$image_id" -e "$(product_env_name BAZEL_CONTRACT)=$contract" \
     "$IMAGE" /bin/bash -c '
       python3 /w/tools/bazel_execution_contract.py --admit-runtime || exit 78
       "$@"
@@ -326,19 +363,19 @@ if [ "$bazel_contract" = 1 ]; then
 fi
 
 agent_mounts=()
-test_env=()
+test_env=("${runner_env[@]}")
 go_binary_mount=()
-if [ -n "${YOLOMUX_GO_BINARY:-}" ]; then
-  go_binary_host="${YOLOMUX_GO_BINARY}"
+if [ -n "$(product_env_print GO_BINARY "")" ]; then
+  go_binary_host="$(product_env_print GO_BINARY)"
   case "$go_binary_host" in
     /w|/w/*) go_binary_host="$REPO_ROOT/${go_binary_host#/w/}" ;;
   esac
   if [ ! -x "$go_binary_host" ]; then
-    echo "YOLOMUX_GO_BINARY is not an executable host path: $go_binary_host" >&2
+    echo "$(product_env_name GO_BINARY) is not an executable host path: $go_binary_host" >&2
     exit 2
   fi
   go_binary_mount=(-v "$go_binary_host:/tmp/yolomux-go-binary:ro")
-  test_env+=(-e YOLOMUX_GO_BINARY=/tmp/yolomux-go-binary)
+  test_env+=(-e "$(product_env_name GO_BINARY)"=/tmp/yolomux-go-binary)
 fi
 # The complete forwarded-environment allowlist, in one place. pytest re-executes itself inside
 # this container (see conftest.pytest_cmdline_main), and `docker run` passes through only the
@@ -346,42 +383,37 @@ fi
 # loudly: the node is silently skipped and the run still reports green. Any new admission flag
 # must be added here in the same change that introduces it.
 FORWARDED_TEST_ENV=(
-  YOMUX_BAZEL_CACHE
-  YOMUX_BAZEL_CPU_COUNT
-  YOMUX_BAZEL_MEMORY_MB
-  YOMUX_TEST_CPU_COUNT
-  YOMUX_TEST_MEMORY_MB
-  YOMUX_TEST_MOCK_TRANSCRIPTS
-  YOMUX_WORKTREE_WRITER_TOKEN
-  YOMUX_WORKTREE_WRITER_SLOT
-  YOMUX_WORKTREE_WRITER_CONTAINER_SLOT
-  YOMUX_LATENCY_CERTIFICATION
-  YOMUX_CHAT_LATENCY_CERTIFICATION
-  YOMUX_MEASURE_SYSTEM_STATUS
-  YOMUX_STATS_APPEND_FLUSH_SECONDS
-  YOMUX_GO_STATS_BROWSER_TEST
-  YOMUX_AGENT_DOCKER_E2E
-  YOMUX_CHECK_IN_CONTAINER
-  YOLOMUX_LATENCY_CERTIFICATION
-  YOLOMUX_CHAT_LATENCY_CERTIFICATION
-  YOLOMUX_MEASURE_SYSTEM_STATUS
-  YOLOMUX_STATS_APPEND_FLUSH_SECONDS
+  TEST_CPU_COUNT
+  TEST_MEMORY_MB
+  TEST_MOCK_TRANSCRIPTS
+  WORKTREE_WRITER_TOKEN
+  WORKTREE_WRITER_SLOT
+  WORKTREE_WRITER_CONTAINER_SLOT
+  LATENCY_CERTIFICATION
+  CHAT_LATENCY_CERTIFICATION
+  MEASURE_SYSTEM_STATUS
+  STATS_APPEND_FLUSH_SECONDS
+  GO_STATS_BROWSER_TEST
+  AGENT_DOCKER_E2E
+  CHECK_IN_CONTAINER
+  CHECK_GO_ONLY
 )
 REAL_AGENT_ENV=(
   OPENAI_BASE_URL
   ANTHROPIC_BASE_URL
 )
-for forwarded_name in "${FORWARDED_TEST_ENV[@]}"; do
-  if [ -n "${!forwarded_name:-}" ]; then
+for forwarded_setting in "${FORWARDED_TEST_ENV[@]}"; do
+  forwarded_name="$(product_env_name "$forwarded_setting")"
+  if product_env_present "$forwarded_setting" && [ -n "$(product_env_print "$forwarded_setting")" ]; then
     test_env+=(-e "$forwarded_name")
   fi
 done
-if [ -n "${YOLOMUX_WORKTREE_WRITER_CONTAINER_SLOT:-}" ]; then
-  test_env+=(-e "YOLOMUX_WORKTREE_WRITER_SLOT=$YOLOMUX_WORKTREE_WRITER_CONTAINER_SLOT")
-elif [ -z "${YOLOMUX_WORKTREE_WRITER_SLOT:-}" ]; then
-  test_env+=(-e "YOLOMUX_WORKTREE_WRITER_SLOT=/tmp/yolomux-writer-${BASHPID}")
+if [ -n "$(product_env_print WORKTREE_WRITER_CONTAINER_SLOT "")" ]; then
+  test_env+=(-e "$(product_env_name WORKTREE_WRITER_SLOT)=$(product_env_print WORKTREE_WRITER_CONTAINER_SLOT)")
+elif [ -z "$(product_env_print WORKTREE_WRITER_SLOT "")" ]; then
+  test_env+=(-e "$(product_env_name WORKTREE_WRITER_SLOT)=/tmp/yolomux-writer-${BASHPID}")
 fi
-if [ "${YOLOMUX_AGENT_DOCKER_E2E:-0}" = 1 ]; then
+if [ "$(product_env_print AGENT_DOCKER_E2E "0")" = 1 ]; then
   for forwarded_name in "${REAL_AGENT_ENV[@]}"; do
     if [ -n "${!forwarded_name:-}" ]; then
       test_env+=(-e "$forwarded_name")
@@ -429,15 +461,15 @@ validate_tmp_directory() {
 
 # Browser failure evidence must outlive the throwaway container. Mount one host /tmp directory at
 # the same absolute path so the failure message remains actionable; arbitrary host paths are refused.
-evidence_dir="${YOLOMUX_E2E_EVIDENCE_DIR:-}"
+evidence_dir="$(product_env_print E2E_EVIDENCE_DIR "")"
 remove_empty_evidence_dir=0
 if [ -z "$evidence_dir" ]; then
-  test_root="${YOLOMUX_TEST_ROOT:-/tmp/yomux-test-${BASHPID}-$(id -u)}"
-  validate_tmp_directory "$test_root" "YOLOMUX_TEST_ROOT"
+  test_root="$(product_env_print TEST_ROOT "/tmp/yomux-test-${BASHPID}-$(id -u)")"
+  validate_tmp_directory "$test_root" "$(product_env_name TEST_ROOT)"
   evidence_dir="$(mktemp -d "$test_root/evidence.XXXXXX")"
   remove_empty_evidence_dir=1
 else
-  validate_tmp_directory "$evidence_dir" "YOLOMUX_E2E_EVIDENCE_DIR"
+  validate_tmp_directory "$evidence_dir" "$(product_env_name E2E_EVIDENCE_DIR)"
 fi
 # Rootless Docker maps the image's non-root UID to a subordinate host UID, so it cannot write a
 # host-owned 0700 bind source. The parent created above is 0700 and therefore private to the caller;
@@ -448,17 +480,14 @@ else
   chmod 700 -- "$evidence_dir"
 fi
 agent_mounts+=(-v "$evidence_dir:$evidence_dir")
-test_env+=(-e "YOLOMUX_E2E_EVIDENCE_DIR=$evidence_dir")
+test_env+=(-e "$(product_env_name E2E_EVIDENCE_DIR)=$evidence_dir")
 
 # Stamp the container with this gate run's owner label when tools/check.py minted a token, so its
 # retirement probe can prove ownership by the exact token instead of the shared image ancestor - a
 # foreign agent's container from the identical image then neither blocks nor falsely clears our
 # certification. Absent the token (a bare `docker/run-tests.sh` invocation) the container carries no
 # owner label and image-ancestor discovery remains the fallback.
-owner_label=()
-if [ -n "${YOLOMUX_CHECK_RUN_TOKEN:-}" ]; then
-  owner_label+=(--label "yolomux.check.run=$YOLOMUX_CHECK_RUN_TOKEN")
-fi
+
 
 
 # --rm provides a fresh writable layer and HOME. Do not tmpfs-mount /home/runner: that
@@ -493,7 +522,7 @@ docker run --rm --init \
   -e all_proxy=http://127.0.0.1:9 \
   -e NO_PROXY=127.0.0.1,localhost \
   -e no_proxy=127.0.0.1,localhost \
-  -e YOLOMUX_CHECK_IN_CONTAINER="${YOLOMUX_CHECK_IN_CONTAINER:-1}" \
+  -e "$(product_env_name CHECK_IN_CONTAINER)"="$(product_env_print CHECK_IN_CONTAINER "1")" \
   "${test_env[@]+"${test_env[@]}"}" \
   "$IMAGE" \
   "$@"

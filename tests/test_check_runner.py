@@ -36,6 +36,9 @@ from tools import test_plan
 from tools import pytest_catalog_plugin
 from tools.test_catalog import discover_pytest_phase_files
 from tools.tool_guard import container_command_with_host_tool_guard
+from tools.product_environment import product_env_name
+from tools.product_environment import product_env_suffix
+from tools.product_environment import product_env_names
 from yomux_lib.background_scheduler import pid_is_alive as background_scheduler_pid_is_alive
 from yomux_lib.infra.host_identity import process_state
 from yomux_lib.stats_current import service as service_module
@@ -114,7 +117,8 @@ def test_parent_check_lock_ownership_is_inherited_by_pytest(monkeypatch, tmp_pat
     check = load_check_module()
     lock_path = tmp_path / "shared" / "expensive-tools.lock"
     command = ["python3", "-m", "pytest"]
-    monkeypatch.delenv("YOLOMUX_CHECK_TOOL_LOCK_OWNER", raising=False)
+    for name in product_env_names("CHECK_TOOL_LOCK_OWNER"):
+        monkeypatch.delenv(name, raising=False)
 
     with check.expensive_tool_lock(lock_path=lock_path):
         assert os.environ["YOLOMUX_CHECK_TOOL_LOCK_OWNER"] == f"{os.getpid()}:{lock_path}"
@@ -150,13 +154,14 @@ def test_default_check_lanes_keep_full_pytest_gate():
         check.Step("local-service type gate", ["python3", "tools/check_local_service_types.py"]),
     )
     pytest_lane = next(lane for lane in lanes if lane.name == "pytest")
-    # The default pytest lane runs the full suite EXCEPT node_bridge and e2e: test_node_suite.py shells
+    # The default pytest lane runs the Python test suite EXCEPT node_bridge, e2e, and retired Python
+    # product-server tests: test_node_suite.py shells
     # out to the same launcher the always-on node-layout lane runs (so including
     # it ran that ~20s node suite twice concurrently), e2e tests launch real tmux + mock agents, and
     # browser tests need Selenium/Chrome. Each slow class has its own default lane so failures name the
     # failing subsystem instead of hiding under "pytest full".
-    assert pytest_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("nonbrowser"), "-n", nonbrowser_workers, "-m", "not node_bridge and not gate_serial and not e2e and not browser", "-q"]
-    assert pytest_lane.steps[0].env == (("YOMUX_TEST_CPU_COUNT", nonbrowser_workers), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(int(nonbrowser_workers))))
+    assert pytest_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("nonbrowser"), "-n", nonbrowser_workers, "-m", "not node_bridge and not gate_serial and not e2e and not browser and not deprecated_python_server", "-q"]
+    assert pytest_lane.steps[0].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", "unlimited"), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(int(nonbrowser_workers))))
     assert check.MOCK_TRANSCRIPT_FILES == ("tests/test_mock_transcripts.py",)
     assert set(check.MOCK_TRANSCRIPT_FILES).issubset(check.pytest_files("nonbrowser"))
     node_lane = next(lane for lane in lanes if lane.name == "node-layout")
@@ -168,32 +173,48 @@ def test_default_check_lanes_keep_full_pytest_gate():
     assert "tests/gate_panels.test.js" not in check.NODE_LAYOUT_FILES
     boot_lane = next(lane for lane in lanes if lane.name == "pytest-boot")
     assert boot_lane.default is False
-    assert boot_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("boot"), "-m", "boot", "-q"]
-    browser_single_cpu = check.pytest_cpu_limit(int(browser_workers), minimum=2)
-    e2e_cpu = check.pytest_cpu_limit(int(e2e_workers), per_worker=2)
-    assert boot_lane.steps[0].env == (("YOMUX_TEST_CPU_COUNT", browser_single_cpu), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(1)))
+    assert boot_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("boot"), "-m", "boot and not deprecated_python_server", "-q"]
+    assert boot_lane.steps[0].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", "unlimited"), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(1)))
     browser_lane = next(lane for lane in lanes if lane.name == "pytest-browser")
     assert browser_lane.default is True
-    assert browser_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("boot"), "-m", "boot", "-q"]
-    assert browser_lane.steps[0].env == (("YOMUX_TEST_CPU_COUNT", browser_single_cpu), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(1)))
-    assert browser_lane.steps[1].args == ["python3", "-m", "pytest", *check.pytest_files("browser"), "-n", browser_workers, "--dist", "worksteal", "-m", "browser and not e2e and not boot and not visual_golden", "-q"]
-    assert browser_lane.steps[1].env == (("YOMUX_TEST_CPU_COUNT", browser_workers), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(int(browser_workers))))
-    assert browser_lane.steps[2].args == ["python3", "-m", "pytest", *check.pytest_files("golden"), "-m", "visual_golden", "-q"]
-    assert browser_lane.steps[2].env == (("YOMUX_TEST_CPU_COUNT", browser_single_cpu), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(1)))
+    assert browser_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("boot"), "-m", "boot and not deprecated_python_server", "-q"]
+    assert browser_lane.steps[0].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", "unlimited"), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(1)))
+    assert browser_lane.steps[1].args == ["python3", "-m", "pytest", *check.pytest_files("browser"), "-n", browser_workers, "--dist", "worksteal", "-m", "browser and not e2e and not boot and not visual_golden and not deprecated_python_server", "-q"]
+    assert browser_lane.steps[1].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", "unlimited"), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(int(browser_workers))))
+    assert browser_lane.steps[2].args == ["python3", "-m", "pytest", *check.pytest_files("golden"), "-m", "visual_golden and not deprecated_python_server", "-q"]
+    assert browser_lane.steps[2].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", "unlimited"), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(1)))
     gate_serial_lane = next(lane for lane in lanes if lane.name == "pytest-gate-serial")
     assert gate_serial_lane.run_last is True
-    assert gate_serial_lane.steps[0].env == (("YOMUX_TEST_CPU_COUNT", "1"), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(1, serial=True)))
+    assert gate_serial_lane.steps[0].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", "unlimited"), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(1, serial=True)))
     e2e_lane = next(lane for lane in lanes if lane.name == "pytest-e2e")
     assert e2e_lane.default is True
     assert e2e_lane.steps[0].args == [
-        "python3", "-m", "pytest", *check.pytest_files("e2e"), "-n", e2e_workers, "-m", "e2e",
+        "python3", "-m", "pytest", *check.pytest_files("e2e"), "-n", e2e_workers, "-m", "e2e and not deprecated_python_server",
         *[arg for nodeid in test_plan.BAZEL_GO_BROWSER_TESTS for arg in ("--deselect", nodeid)], "-q",
     ]
-    assert e2e_lane.steps[0].env == (("YOMUX_TEST_CPU_COUNT", e2e_cpu), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(int(e2e_workers))))
+    assert e2e_lane.steps[0].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", "unlimited"), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(int(e2e_workers))))
     assert "pytest-unit" not in {lane.name for lane in lanes}
     assert "pytest-socket" not in {lane.name for lane in lanes}
     bazel_lane = next(lane for lane in lanes if lane.name == "bazel-go")
     assert bazel_lane.steps[0].args == ["tools/run_bazel_tests.sh", "--jobs", check.bazel_job_count(), "--memory-mb", check.bazel_memory_limit_mb()]
+
+
+def test_every_default_pytest_step_enforces_the_go_only_server_boundary():
+    check = load_check_module()
+    pytest_ids = (
+        check.StepId.PYTEST_NONBROWSER,
+        check.StepId.PYTEST_GATE_SERIAL,
+        check.StepId.PYTEST_BOOT,
+        check.StepId.PYTEST_BROWSER,
+        check.StepId.PYTEST_BROWSER_GOLDEN,
+        check.StepId.PYTEST_E2E,
+    )
+    steps = check.step_catalog()
+    for step_id in pytest_ids:
+        step = steps[step_id]
+        assert ("YOMUX_CHECK_GO_ONLY", "1") in step.env, (step_id, step.env)
+        assert any("deprecated_python_server" in arg for arg in step.args), (step_id, step.args)
+        assert ("YOMUX_TEST_CPU_COUNT", "unlimited") in step.env, (step_id, step.env)
 
 
 def test_heavy_lane_admission_includes_bazel_from_the_shared_lane_name_rule(monkeypatch):
@@ -277,7 +298,7 @@ def test_focused_pytest_lanes_retain_only_nonduplicated_entry_points():
         "pytest",
         *check.pytest_files("boot"),
         "-m",
-        "boot",
+        "boot and not deprecated_python_server",
         "-q",
     ]
     assert lanes["pytest-boot"].steps[0] is lanes["pytest-browser"].steps[0]
@@ -308,7 +329,7 @@ def test_lane_specs_are_the_one_owner_of_names_defaults_and_shared_steps():
         "pytest",
         *test_catalog.PYTEST_PHASE_FILES["gate_serial"],
         "-m",
-        "gate_serial",
+        "gate_serial and not deprecated_python_server",
         "-q",
     ]
     gate_serial_nodes = {
@@ -449,7 +470,7 @@ def test_browser_capability_preflight_reports_container_probe_failure(monkeypatc
     assert diagnostic.detail == "isolated test environment probe failed: docker probe failed"
 
 
-def test_requested_browser_lane_preflight_refuses_before_any_step(monkeypatch, capsys):
+def test_requested_browser_lane_preflight_refuses_before_any_step(monkeypatch, capsys, tmp_path):
     check = load_check_module()
     monkeypatch.setattr(check, "measure_functional_host", lambda _selected, *, evidence_dir: {"qualified": True})
     monkeypatch.setattr(
@@ -458,7 +479,11 @@ def test_requested_browser_lane_preflight_refuses_before_any_step(monkeypatch, c
         lambda: check.BrowserCapabilityDiagnostic(False, "driver", "missing exact driver"),
     )
     monkeypatch.setattr(check, "run_parallel", lambda _lanes: pytest.fail("lane must not start"))
-    assert check.main(["--lane", "pytest-browser", "--no-tool-guard"]) == check.EXIT_LANE_FAILED
+    report = check.performance_report_path("")
+    assert check.main(["--lane", "pytest-browser", "--no-tool-guard", "--performance-report", str(report)]) == check.EXIT_LANE_FAILED
+    payload = json.loads(report.read_text())
+    assert payload["preflight"]["available"] is False
+    assert payload["lanes"] == []
     assert "BROWSER PREFLIGHT FAILED [driver]: missing exact driver" in capsys.readouterr().err
 
 
@@ -512,8 +537,8 @@ def test_check_runner_cpu_percent_knob_tunes_the_worker_budget(monkeypatch):
     # Explicit argument (the --cpu-percent flag path) wins.
     assert check.pytest_worker_counts(cpu_percent=50) == ("4", "2", "2")
     assert check.pytest_worker_counts(cpu_percent=100) == ("8", "5", "3")
-    assert check.bazel_job_count(cpu_percent=50) == "6"
-    assert check.bazel_job_count(cpu_percent=100) == "13"
+    assert check.bazel_job_count(cpu_percent=50) == "4"
+    assert check.bazel_job_count(cpu_percent=100) == "8"
 
     # Environment knob applies when no explicit argument is given.
     monkeypatch.setenv("YOLOMUX_CHECK_CPU_PERCENT", "25")
@@ -536,8 +561,8 @@ def test_bazel_job_count_is_explicit_and_serializable(monkeypatch):
     check = load_check_module()
     monkeypatch.delenv("YOLOMUX_BAZEL_JOBS", raising=False)
     monkeypatch.setattr(check, "schedulable_cpu_count", lambda: 24)
-    assert check.bazel_job_count() == "10"
-    assert check.bazel_job_count(cpu_percent=50) == "5"
+    assert check.bazel_job_count() == "6"
+    assert check.bazel_job_count(cpu_percent=50) == "3"
     assert check.bazel_job_count(cpu_percent=1) == "1"
     assert check.bazel_job_count(serial=True) == "1"
 
@@ -545,7 +570,7 @@ def test_bazel_job_count_is_explicit_and_serializable(monkeypatch):
     assert check.bazel_job_count() == "4"
     monkeypatch.delenv("YOLOMUX_BAZEL_JOBS")
     monkeypatch.setenv("YOLOMUX_PYTEST_WORKERS", "5,3,1")
-    assert check.bazel_job_count() == "14"
+    assert check.bazel_job_count() == "11"
     monkeypatch.setenv("YOLOMUX_BAZEL_JOBS", "4")
     assert check.pytest_worker_counts() == ("5", "3", "1")
     assert check.bazel_job_count(serial=True) == "1"
@@ -568,12 +593,12 @@ def test_bazel_job_count_is_explicit_and_serializable(monkeypatch):
 
 
 @pytest.mark.parametrize("total_budget,bazel_jobs,expected_workers", [
-    (24, 4, ("8", "5", "3")),
-    (24, 10, ("6", "4", "2")),
-    (32, 13, ("8", "5", "3")),
+    (24, 4, ("6", "4", "3")),
+    (24, 10, ("4", "3", "2")),
+    (32, 13, ("6", "4", "2")),
     (4, 1, ("1", "1", "1")),
 ])
-def test_explicit_bazel_jobs_fit_default_pytest_cpu_quotas(monkeypatch, total_budget, bazel_jobs, expected_workers):
+def test_explicit_bazel_jobs_keep_pytest_worker_allocation_with_unlimited_container_cpu(monkeypatch, total_budget, bazel_jobs, expected_workers):
     check = load_check_module()
     monkeypatch.delenv("YOLOMUX_PYTEST_WORKERS", raising=False)
     monkeypatch.setattr(check, "concurrent_test_cpu_budget", lambda _percent=None: total_budget)
@@ -583,11 +608,12 @@ def test_explicit_bazel_jobs_fit_default_pytest_cpu_quotas(monkeypatch, total_bu
     assert check.bazel_job_count() == str(bazel_jobs)
     catalog = check.step_catalog()
     pool_ids = (check.StepId.PYTEST_NONBROWSER, check.StepId.PYTEST_BROWSER, check.StepId.PYTEST_E2E)
-    quotas = tuple(dict(catalog[step_id].env)["YOMUX_TEST_CPU_COUNT"] for step_id in pool_ids)
-    assert quotas == check.pytest_cpu_limits(workers)
+    cpu_limits = tuple(dict(catalog[step_id].env)["YOMUX_TEST_CPU_COUNT"] for step_id in pool_ids)
+    assert cpu_limits == ("unlimited", "unlimited", "unlimited")
     nonbrowser, browser, e2e = map(int, workers)
-    assert tuple(map(int, quotas)) == (nonbrowser, browser, e2e * 2)
-    assert sum(map(int, quotas)) <= max(4, total_budget - bazel_jobs)
+    planned_cpu_shares = check.pytest_cpu_limits(workers)
+    assert tuple(map(int, planned_cpu_shares)) == (nonbrowser, browser * 2, e2e * 2)
+    assert sum(map(int, planned_cpu_shares)) <= max(5, total_budget - bazel_jobs)
 
 
 def test_explicit_bazel_default_pytest_quota_property_matrix(monkeypatch):
@@ -599,13 +625,13 @@ def test_explicit_bazel_default_pytest_quota_property_matrix(monkeypatch):
             monkeypatch.setenv("YOLOMUX_BAZEL_JOBS", str(bazel_jobs))
             workers = check.pytest_worker_counts()
             nonbrowser, browser, e2e = map(int, workers)
-            quota = nonbrowser + browser + 2 * e2e
+            quota = nonbrowser + 2 * browser + 2 * e2e
             remaining = total_budget - bazel_jobs
             assert check.bazel_job_count() == str(bazel_jobs)
             assert min(nonbrowser, browser, e2e) >= 1
-            if remaining < 4:
+            if remaining < 5:
                 assert workers == ("1", "1", "1")
-                assert quota == 4
+                assert quota == 5
             else:
                 assert quota <= remaining, (total_budget, bazel_jobs, workers)
                 next_workers = check.split_pytest_worker_budget(nonbrowser + browser + e2e + 1)
@@ -618,8 +644,8 @@ def test_explicit_bazel_quota_fit_preserves_default_and_explicit_pytest_workers(
     monkeypatch.delenv("YOLOMUX_BAZEL_JOBS", raising=False)
     monkeypatch.setattr(check, "concurrent_test_cpu_budget", lambda _percent=None: 32)
     assert check.pytest_worker_counts() == ("8", "5", "3")
-    assert check.pytest_cpu_limits(check.pytest_worker_counts()) == ("8", "5", "6")
-    assert check.bazel_job_count() == "13"
+    assert check.pytest_cpu_limits(check.pytest_worker_counts()) == ("8", "10", "6")
+    assert check.bazel_job_count() == "8"
     monkeypatch.setenv("YOLOMUX_BAZEL_JOBS", "4")
     for override, expected in (("7", ("7", "7", "7")), ("20,5,1", ("20", "5", "1"))):
         monkeypatch.setenv("YOLOMUX_PYTEST_WORKERS", override)
@@ -639,14 +665,14 @@ def test_bazel_memory_limit_shares_the_test_budget_and_honors_override(monkeypat
     monkeypatch.setattr(check, "schedulable_cpu_count", lambda: 24)
     monkeypatch.setattr(check, "schedulable_memory_bytes", lambda: 16 * 1024 * 1024 * 1024)
 
-    assert check.bazel_memory_limit_mb() == "5461"
+    assert check.bazel_memory_limit_mb() == "3932"
     # A 50% CPU budget also lowers this action's share of the parallel memory budget.
-    assert check.bazel_memory_limit_mb(cpu_percent=50) == "5041"
+    assert check.bazel_memory_limit_mb(cpu_percent=50) == "3574"
     assert check.bazel_memory_limit_mb(serial=True) == "13107"
 
     monkeypatch.setenv("YOLOMUX_BAZEL_JOBS", "4")
-    # The corrected CPU split leaves 16 pytest workers sharing memory with four Bazel jobs.
-    assert check.bazel_memory_limit_mb() == "2383"
+    # The corrected CPU split leaves 13 pytest workers sharing memory with four Bazel jobs.
+    assert check.bazel_memory_limit_mb() == "2759"
     monkeypatch.setenv("YOLOMUX_BAZEL_MEMORY_MB", "2048")
     assert check.bazel_memory_limit_mb() == "2048"
     monkeypatch.setenv("YOLOMUX_BAZEL_MEMORY_MB", "512")
@@ -656,9 +682,9 @@ def test_bazel_memory_limit_shares_the_test_budget_and_honors_override(monkeypat
     monkeypatch.delenv("YOLOMUX_BAZEL_JOBS")
     monkeypatch.delenv("YOLOMUX_BAZEL_MEMORY_MB")
     monkeypatch.delenv("YOLOMUX_TEST_MEMORY_MB", raising=False)
-    assert check.pytest_memory_limit_mb(6) == "3276"
-    assert check.pytest_memory_limit_mb(4) == "2184"
-    assert check.pytest_memory_limit_mb(2) == "1092"
+    assert check.pytest_memory_limit_mb(6) == "3932"
+    assert check.pytest_memory_limit_mb(4) == "2621"
+    assert check.pytest_memory_limit_mb(2) == "1310"
     assert check.pytest_memory_limit_mb(1, serial=True) == "13107"
     monkeypatch.setenv("YOLOMUX_TEST_MEMORY_MB", "2048")
     assert check.pytest_memory_limit_mb(6) == "2048"
@@ -836,11 +862,13 @@ def test_bazel_runner_uses_a_persistent_action_cache_and_private_output_roots():
     assert 'test_result_cache=no' in runner
     assert 'reuse_test_results=yes' in runner
     assert '--cache_test_results="$test_result_cache"' in runner
-    assert 'export YOLOMUX_BAZEL_CPU_COUNT="$jobs"' in runner
-    assert 'YOLOMUX_BAZEL_CACHE' in outer
+    assert 'product_env_assign "BAZEL_CPU_COUNT=$jobs"' in runner
+    assert 'product_env_print BAZEL_CACHE' in outer
     assert 'cpu_args+=(--cpus="$cpu_limit")' in outer
-    assert 'YOMUX_TEST_CPU_COUNT:-${YOMUX_BAZEL_CPU_COUNT:-}' in outer
-    assert 'YOMUX_TEST_MEMORY_MB:-${YOMUX_BAZEL_MEMORY_MB:-}' in outer
+    assert 'product_env_print TEST_CPU_COUNT' in outer
+    assert 'product_env_print BAZEL_CPU_COUNT' in outer
+    assert 'product_env_print TEST_MEMORY_MB' in outer
+    assert 'product_env_print BAZEL_MEMORY_MB' in outer
     assert '--memory="$memory_limit_bytes"' in outer
     assert '--memory-swap="$memory_limit_bytes"' in outer
     assert 'cache_parent="/tmp/yomux-bazel-cache-' in outer
@@ -849,7 +877,8 @@ def test_bazel_runner_uses_a_persistent_action_cache_and_private_output_roots():
     assert 'flock -x "$cache_parent/.partition-provision.lock" docker run' in outer
     assert 'cache_provision_user=0:0' in outer
     assert 'if [ "$rootless_docker" = 0 ]; then' in outer
-    assert 'cache_provision_user="${YOMUX_IMAGE_RUNNER_UID}:${YOMUX_IMAGE_RUNNER_GID}"' in outer
+    assert 'product_env_print IMAGE_RUNNER_UID' in outer
+    assert 'product_env_print IMAGE_RUNNER_GID' in outer
     assert '--user="$cache_provision_user"' in outer
     assert '".partition-init-"+uuid.uuid4().hex' in outer
     assert 'os.chown(staging,uid,gid)' in outer
@@ -1286,7 +1315,7 @@ def test_performance_report_captures_steps_resources_and_worker_budget(tmp_path)
         "child_usage": {"max_rss": 1024, "max_rss_unit": "KiB", "system_seconds": 0.25, "user_seconds": 0.5},
         "cpu_percent": check.check_cpu_percent(),
         "interrupted": False,
-        "lanes": [{"label": "demo lane", "name": "demo", "ok": True, "steps": [{"command": "python3 -m demo", "label": "demo step", "returncode": 0, "test_durations": [], "wall_seconds": 0.75}], "wall_seconds": 1.25}],
+        "lanes": [{"execution": [], "label": "demo lane", "name": "demo", "ok": True, "steps": [{"command": "python3 -m demo", "label": "demo step", "returncode": 0, "test_durations": [], "wall_seconds": 0.75}], "wall_seconds": 1.25}],
         "mode": "parallel",
         "pytest_workers": {"browser": check.pytest_worker_counts()[1], "e2e": check.pytest_worker_counts()[2], "nonbrowser": check.pytest_worker_counts()[0]},
         "schema": 5,
@@ -1358,7 +1387,7 @@ def test_check_state_dir_uses_rooted_owner_and_refuses_outside_override(monkeypa
     assert check.state_dir_from_env() == root / "state"
 
     monkeypatch.setenv("YOLOMUX_STATE_DIR", str(tmp_path / "outside"))
-    with pytest.raises(ValueError, match="YOLOMUX_STATE_DIR resolves outside YOLOMUX_ROOT"):
+    with pytest.raises(ValueError, match="YOMUX_STATE_DIR resolves outside YOMUX_ROOT"):
         check.state_dir_from_env()
 
 
@@ -1843,9 +1872,13 @@ def test_docker_run_tests_forwards_every_certification_admission_variable():
 
     allowlist = _certification_env_allowlist()
     for name in latency_calibration.CERTIFICATION_ENV_NAMES:
-        assert name in allowlist, (name, allowlist)
+        assert product_env_suffix(name) in allowlist, (name, allowlist)
     # The pre-existing forwards must survive; the loop replaced two hand-written ifs.
-    assert {"YOMUX_BAZEL_CPU_COUNT", "YOMUX_BAZEL_MEMORY_MB", "YOMUX_TEST_CPU_COUNT", "YOMUX_TEST_MEMORY_MB", "YOMUX_TEST_MOCK_TRANSCRIPTS", "YOMUX_WORKTREE_WRITER_TOKEN"} <= set(allowlist), allowlist
+    assert {"TEST_CPU_COUNT", "TEST_MEMORY_MB", "TEST_MOCK_TRANSCRIPTS", "WORKTREE_WRITER_TOKEN"} <= set(allowlist), allowlist
+    source = (REPO_ROOT / "docker/run-tests.sh").read_text()
+    controls = re.search(r'^for runner_setting in (.*?)\; do$', source, re.MULTILINE)
+    assert controls
+    assert {"BAZEL_CPU_COUNT", "BAZEL_MEMORY_MB"} <= set(controls.group(1).split())
     assert len(allowlist) == len(set(allowlist)), allowlist
 
 
@@ -1857,14 +1890,17 @@ def _forwarding_loop(allowlist: list[str], environ: dict[str, str]) -> list[str]
     """
 
     text = (REPO_ROOT / "docker" / "run-tests.sh").read_text(encoding="utf-8")
+    common = REPO_ROOT / "tools" / "product_environment.sh"
     loop = re.search(
-        r'^(for forwarded_name in "\$\{FORWARDED_TEST_ENV\[@\]\}"; do\n(?:.|\n)*?^done)$',
+        r'^(for forwarded_setting in "\$\{FORWARDED_TEST_ENV\[@\]\}"; do\n(?:.|\n)*?^done)$',
         text,
         re.MULTILINE,
     )
     assert loop, text
     script = (
         "set -u\n"
+        + "source " + shlex.quote(str(common)) + "\n"
+        + "yomux_normalize_environment\n"
         + "FORWARDED_TEST_ENV=(" + " ".join(shlex.quote(name) for name in allowlist) + ")\n"
         + "test_env=()\n"
         + loop.group(1) + "\n"
@@ -1885,15 +1921,25 @@ def test_docker_run_tests_forwards_the_stats_persistence_arm_variable():
     from a real null. The name is read from its sole owner rather than restated here.
     """
 
-    assert service_module.APPEND_FLUSH_ENV_NAME in _certification_env_allowlist()
+    assert product_env_suffix(service_module.APPEND_FLUSH_ENV_NAME) in _certification_env_allowlist()
 
 
 def test_docker_run_tests_forwards_the_go_stats_browser_selector():
-    name = "YOMUX_GO_STATS_BROWSER_TEST"
+    suffix = "GO_STATS_BROWSER_TEST"
+    name = product_env_name(suffix)
     allowlist = _certification_env_allowlist()
-    assert name in allowlist
+    assert suffix in allowlist
     assert _forwarding_loop(allowlist, {name: "production_python_and_go_stats"}) == ["-e", name]
-    assert _forwarding_loop([item for item in allowlist if item != name], {name: "production_python_and_go_stats"}) == []
+    assert _forwarding_loop([item for item in allowlist if item != suffix], {name: "production_python_and_go_stats"}) == []
+
+
+def test_docker_run_tests_forwards_go_only_server_guard():
+    suffix = "CHECK_GO_ONLY"
+    name = product_env_name(suffix)
+    allowlist = _certification_env_allowlist()
+    assert suffix in allowlist
+    assert _forwarding_loop(allowlist, {name: "1"}) == ["-e", name]
+    assert _forwarding_loop([item for item in allowlist if item != suffix], {name: "1"}) == []
 
 
 def test_the_forwarding_loop_only_passes_names_the_allowlist_contains():
@@ -1906,8 +1952,8 @@ def test_the_forwarding_loop_only_passes_names_the_allowlist_contains():
 
     name = service_module.APPEND_FLUSH_ENV_NAME
     environ = {name: "0"}
-    with_name = _forwarding_loop(["YOLOMUX_TEST_MOCK_TRANSCRIPTS", name], environ)
-    without_name = _forwarding_loop(["YOLOMUX_TEST_MOCK_TRANSCRIPTS"], environ)
+    with_name = _forwarding_loop(["TEST_MOCK_TRANSCRIPTS", product_env_suffix(name)], environ)
+    without_name = _forwarding_loop(["TEST_MOCK_TRANSCRIPTS"], environ)
     assert with_name == ["-e", name], with_name
     assert without_name == [], without_name
 
@@ -1925,7 +1971,7 @@ def test_certification_step_runs_every_named_unit_serially_with_its_admission_en
     # xunit2, the pytest default, omits the `file` attribute the outcome reader matches on.
     assert ["-o", "junit_family=xunit1"] == step.args[step.args.index("-o"):step.args.index("-o") + 2], step.args
     environment = dict(step.env)
-    assert environment["YOLOMUX_E2E_EVIDENCE_DIR"] == "/tmp/yomux-certification-probe"
+    assert environment[product_env_name("E2E_EVIDENCE_DIR")] == "/tmp/yomux-certification-probe"
     assert environment[check.CHECK_LANE_ENV] == ""
     for name in latency_calibration.CERTIFICATION_ENV_NAMES:
         assert environment[name] == "1", environment
@@ -3018,6 +3064,7 @@ def test_retirement_counts_live_test_containers_the_process_walk_cannot_see(monk
 
     check = load_check_module()
     image = check.docker_image.image_name(check.REPO_ROOT)
+    monkeypatch.setattr(check.docker_image, "image_name", lambda _root: image)
     observed_command = []
 
     class Completed:
@@ -3028,7 +3075,8 @@ def test_retirement_counts_live_test_containers_the_process_walk_cannot_see(monk
         observed_command.append(command)
         return Completed()
 
-    monkeypatch.delenv(check.CHECK_RUN_TOKEN_ENV, raising=False)
+    for name in product_env_names("CHECK_RUN_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(check.subprocess, "run", fake_run)
     probe = check.running_test_containers()
     assert observed_command[0] == ["docker", "ps", "--filter", f"ancestor={image}", "--format", "{{.ID}}\t{{.Status}}"]
@@ -3057,6 +3105,9 @@ def test_running_test_containers_reports_why_it_could_not_observe_docker(monkeyp
 
     check = load_check_module()
     image = check.docker_image.image_name(check.REPO_ROOT)
+    monkeypatch.setattr(check.docker_image, "image_name", lambda _root: image)
+    for name in product_env_names("CHECK_RUN_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
 
     class Failed:
         returncode = 1
@@ -3398,8 +3449,8 @@ def test_run_tests_sh_stamps_the_owner_label_only_when_a_run_token_is_present():
 
     check = load_check_module()
     text = (REPO_ROOT / "docker" / "run-tests.sh").read_text(encoding="utf-8")
-    assert "YOLOMUX_CHECK_RUN_TOKEN" in text, text
-    assert f'--label "{check.CONTAINER_OWNER_LABEL}=$YOLOMUX_CHECK_RUN_TOKEN"' in text, text
+    assert 'product_env_print CHECK_RUN_TOKEN' in text, text
+    assert f'--label "{check.CONTAINER_OWNER_LABEL}=$(product_env_print CHECK_RUN_TOKEN)"' in text, text
     # The label array is threaded into the real docker run, not built and dropped.
     assert '"${owner_label[@]+"${owner_label[@]}"}"' in text, text
 
@@ -3410,9 +3461,9 @@ def test_run_tests_sh_keeps_go_and_writer_state_inside_each_container():
     text = (REPO_ROOT / "docker" / "run-tests.sh").read_text(encoding="utf-8")
     assert '-v "$REPO_ROOT:/w:ro"' in text, text
     assert "--network none" in text, text
-    assert "YOLOMUX_GO_BINARY=/tmp/yolomux-go-binary" in text, text
-    assert "YOLOMUX_WORKTREE_WRITER_SLOT=/tmp/yolomux-writer-${BASHPID}" in text, text
-    assert "YOLOMUX_WORKTREE_WRITER_CONTAINER_SLOT" in text, text
+    assert 'product_env_name GO_BINARY)"=/tmp/yolomux-go-binary' in text, text
+    assert 'product_env_name WORKTREE_WRITER_SLOT)=/tmp/yolomux-writer-${BASHPID}' in text, text
+    assert 'product_env_print WORKTREE_WRITER_CONTAINER_SLOT' in text, text
     assert "command -v claude" not in text, text
     assert "command -v codex" not in text, text
     assert '"/usr/share/fonts:/usr/share/fonts:ro"' not in text, text
@@ -3438,7 +3489,7 @@ def test_run_tests_sh_rejects_a_workdir_that_escapes_the_source_mount(tmp_path):
     environment = {
         **os.environ,
         "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}",
-        "YOLOMUX_TEST_IMAGE": "yomux-test:contract",
+        "YOMUX_TEST_IMAGE": "yomux-test:contract",
     }
     completed = subprocess.run(
         [str(REPO_ROOT / "docker" / "run-tests.sh"), "--workdir", "../", "--", "true"],
@@ -3479,10 +3530,10 @@ def test_run_tests_sh_rejects_a_symlinked_test_root_before_creating_outside_it(t
         environment = {
             **os.environ,
             "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}",
-            "YOLOMUX_TEST_IMAGE": "yomux-test:contract",
-            "YOLOMUX_TEST_ROOT": str(test_root),
-            "YOLOMUX_E2E_EVIDENCE_DIR": "",
-            "YOLOMUX_BAZEL_CACHE": "off",
+            "YOMUX_TEST_IMAGE": "yomux-test:contract",
+            "YOMUX_TEST_ROOT": str(test_root),
+            "YOMUX_E2E_EVIDENCE_DIR": "",
+            "YOMUX_BAZEL_CACHE": "off",
         }
         environment.pop("YOMUX_TEST_MEMORY_MB", None)
         environment.pop("YOMUX_BAZEL_MEMORY_MB", None)
@@ -3530,7 +3581,7 @@ def test_run_tests_sh_retains_auto_evidence_only_after_a_failed_container(tmp_pa
         "    fi\n"
         "    evidence=\"\"\n"
         "    for argument in \"$@\"; do\n"
-        "      case \"$argument\" in YOLOMUX_E2E_EVIDENCE_DIR=*) evidence=\"${argument#*=}\" ;; esac\n"
+        "      case \"$argument\" in YOMUX_E2E_EVIDENCE_DIR=*) evidence=\"${argument#*=}\" ;; esac\n"
         "    done\n"
         "    test -n \"$evidence\"\n"
         "    mkdir -p \"$evidence/latency-calibration\"\n"
@@ -3552,10 +3603,10 @@ def test_run_tests_sh_retains_auto_evidence_only_after_a_failed_container(tmp_pa
         environment = {
             **os.environ,
             "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}",
-            "YOLOMUX_TEST_IMAGE": "yomux-test:contract",
-            "YOLOMUX_TEST_ROOT": str(test_root),
-            "YOLOMUX_E2E_EVIDENCE_DIR": "",
-            "YOLOMUX_BAZEL_CACHE": "off",
+            "YOMUX_TEST_IMAGE": "yomux-test:contract",
+            "YOMUX_TEST_ROOT": str(test_root),
+            "YOMUX_E2E_EVIDENCE_DIR": "",
+            "YOMUX_BAZEL_CACHE": "off",
         }
         environment.pop("YOMUX_TEST_MEMORY_MB", None)
         environment.pop("YOMUX_BAZEL_MEMORY_MB", None)
@@ -3595,7 +3646,7 @@ def test_run_tests_sh_fails_when_successful_run_evidence_cleanup_fails(tmp_path)
             "    if printf '%s\\n' \"$*\" | grep -q -- 'sh -c'; then exit 23; fi\n"
         "    evidence=\"\"\n"
         "    for argument in \"$@\"; do\n"
-        "      case \"$argument\" in YOLOMUX_E2E_EVIDENCE_DIR=*) evidence=\"${argument#*=}\" ;; esac\n"
+        "      case \"$argument\" in YOMUX_E2E_EVIDENCE_DIR=*) evidence=\"${argument#*=}\" ;; esac\n"
         "    done\n"
         "    test -n \"$evidence\"\n"
         "    mkdir -p \"$evidence/latency-calibration\"\n"
@@ -3613,10 +3664,10 @@ def test_run_tests_sh_fails_when_successful_run_evidence_cleanup_fails(tmp_path)
         environment = {
             **os.environ,
             "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}",
-            "YOLOMUX_TEST_IMAGE": "yomux-test:contract",
-            "YOLOMUX_TEST_ROOT": str(test_root),
-            "YOLOMUX_E2E_EVIDENCE_DIR": "",
-            "YOLOMUX_BAZEL_CACHE": "off",
+            "YOMUX_TEST_IMAGE": "yomux-test:contract",
+            "YOMUX_TEST_ROOT": str(test_root),
+            "YOMUX_E2E_EVIDENCE_DIR": "",
+            "YOMUX_BAZEL_CACHE": "off",
         }
         environment.pop("YOMUX_TEST_MEMORY_MB", None)
         environment.pop("YOMUX_BAZEL_MEMORY_MB", None)
@@ -3758,35 +3809,23 @@ def test_bazel_runtime_trees_are_consumer_scoped_and_frontend_is_generated():
         assert '"//:go_cmd_test_support"' in (REPO_ROOT / relative).read_text() or '"//:go_stats_test_support"' in (REPO_ROOT / relative).read_text()
 
 
-def test_bazel_integration_runs_every_external_parity_case_without_skip():
-    source = (REPO_ROOT / "cmd/yomux-go/http_server_parity_test.go").read_text()
+def test_go_gate_excludes_deprecated_backend_comparison():
     integration = (REPO_ROOT / "cmd/yomux-go/BUILD.bazel").read_text()
-    for name in (
-        "StatsPythonAndExternalGoReceiveTheSameHTTPFixture",
-        "StatsProductionPythonAndGoReceiveTheSameHTTPFixture",
-        "StatsProductionPythonAndGoObservationBoundaryParity",
-    ):
-        assert f"func check{name}" in source
-        assert f"Test{name}" in (REPO_ROOT / "cmd/yomux-go/external_parity_test.go").read_text()
-    assert 'name = "external_parity_test"' in integration
-    assert 'name = "external_parity_race_test"' in integration
-    assert 'tags = ["cpu:8"]' in integration
-    assert 'race = "on"' in integration
-    assert "YOMUX_GO_BINARY_RUNFILE" in integration
+    assert 'name = "external_parity_test"' not in integration
+    assert 'name = "external_parity_race_test"' not in integration
     browser = (REPO_ROOT / "tools/bazel_go_stats_browser_docker_e2e.sh").read_text()
     assert 'go" test -count=1' not in browser
     assert "BAZEL_GO_BROWSER_TESTS" in browser
     assert "tests/test_browser_stats_coverage.py" not in browser
     native_suite = (REPO_ROOT / "BUILD.bazel").read_text().split('name = "go_native_tests"', 1)[1].split("\n)\n\n", 1)[0]
-    assert "//cmd/yomux-go:external_parity_test" in native_suite
-    assert "//cmd/yomux-go:external_parity_race_test" in native_suite
+    assert "external_parity" not in native_suite
+    assert "external_parity" not in integration
     assert ":yomux_go_stats_browser_docker_e2e" in native_suite
     stats_browser_target = (REPO_ROOT / "BUILD.bazel").read_text().split('name = "yomux_go_stats_browser_docker_e2e"', 1)[1].split("\n)\n\n", 1)[0]
     assert '"requires_chrome"' in stats_browser_target
     assert test_plan.BAZEL_GO_BROWSER_TESTS == (
         "tests/test_browser_stats_widen.py::test_go_stats_capabilities_validate_and_load_fifteen_minute_history",
         "tests/test_browser_stats_widen.py::test_go_collectors_drive_browser_stats_without_seeded_facts",
-        "tests/test_browser_stats_widen.py::test_production_python_and_go_stats_share_one_fixture_and_browser_journey",
     )
 
 
@@ -3899,7 +3938,7 @@ def test_linux_cpu_budget_is_the_same_number_in_code_help_text_and_docs(monkeypa
     assert percent == 100
     assert counts == ("6", "4", "2")
     assert sum(int(count) for count in counts) == 12
-    assert check.bazel_job_count() == "10"
+    assert check.bazel_job_count() == "6"
 
     with pytest.raises(SystemExit):
         check.main(["--help"])
@@ -3907,8 +3946,9 @@ def test_linux_cpu_budget_is_the_same_number_in_code_help_text_and_docs(monkeypa
     assert f"default: {percent}" in help_text, help_text
 
     documentation = " ".join((REPO_ROOT / "docs" / "DEVELOPMENT.md").read_text(encoding="utf-8").split())
-    assert f"Linux shares {percent}% of that capacity between pytest and Bazel" in documentation
-    assert f"32 logical but 24 schedulable Linux CPUs produce {counts[0]}/{counts[1]}/{counts[2]} pytest workers and 10 Bazel jobs" in documentation
+    assert f"Linux budgets pytest workers and Bazel jobs against {percent}% of schedulable capacity" in documentation
+    assert "Pytest containers keep their memory limits and worker counts but have no hard CPU quota" in documentation
+    assert f"32 logical but 24 schedulable Linux CPUs produce {counts[0]}/{counts[1]}/{counts[2]} pytest workers and 6 Bazel jobs" in documentation
 
 
 def _instr_lane(check, probe, extra=()):
@@ -4495,3 +4535,11 @@ async function scenario(stale, applyAt) {
     assert outcomes["current"]["at"] == 30
     assert outcomes["timely"]["at"] == 140
     assert outcomes["stuck"]["at"] == 500
+
+
+def test_execution_report_preserves_admission_and_malformed_failures():
+    check = load_check_module()
+    events = check.execution_evidence('YOMUX_EXECUTION {"admission":"failed","failure_phase":"image-preparation"}\nYOMUX_EXECUTION broken\n')
+    assert events[0]['failure_phase'] == 'image-preparation'
+    assert events[1]['admission'] == 'failed'
+    assert events[1]['hermetic'] is False

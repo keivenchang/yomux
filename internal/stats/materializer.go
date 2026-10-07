@@ -440,6 +440,7 @@ var coverageGapFamilies = map[string]string{
 	"gpu":           "gpu",
 	"service_load":  "service_load",
 	"system_memory": "system_memory",
+	"system_disk":   "system_disk",
 	"browser":       "browser",
 }
 
@@ -880,6 +881,15 @@ func addObservation(b *MaterializedBucket, o Observation) bool {
 				if v, err := number(raw); err == nil {
 					add("process_memory_bytes:"+binary, "gauge", v)
 				}
+			}
+		}
+	case "system_disk":
+		if mountpoint, valid := p["mountpoint"].(string); valid && mountpoint != "" {
+			if _, hasUsage := p["used_percent"]; !hasUsage {
+				add("system_disk_inventory:"+mountpoint, "gauge", 1)
+			}
+			if v, ok := num("used_percent"); ok {
+				add("system_disk_used_percent:"+mountpoint, "gauge", v)
 			}
 		}
 	case "agent_status":

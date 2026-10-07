@@ -34,6 +34,7 @@ from tests.isolated_dev_server import IsolatedDevServer
 from tests.isolated_dev_server import assert_isolated_dev_server_port
 from tests.isolated_dev_server import isolated_dev_server  # noqa: F401  -- fixture
 from tests.isolated_dev_server import isolated_dev_server_factory  # noqa: F401  -- fixture
+from yomux_lib.server import TmuxWebtermHTTPServer
 
 
 pytestmark = pytest.mark.socket
@@ -74,6 +75,8 @@ def test_m13_an_isolated_dev_server_serves_and_owns_every_root_it_writes(
     isolated_dev_server: IsolatedDevServer,
 ) -> None:
     server = isolated_dev_server
+    assert Path(server.process.args[0]).name == "yomux-go", server.process.args
+    assert "--backend" not in server.process.args
 
     # 1. It is serving, and it is the product answering rather than a socket the kernel is holding.
     server.assert_serving()
@@ -151,3 +154,17 @@ def test_m13_teardown_ends_the_process_and_releases_the_port(
     assert _port_is_free(port), f"port {port} is still bound after teardown"
     # Idempotent: the fixture finalizer stops every server again, and that must not raise.
     server.stop()
+
+
+def test_go_only_gate_rejects_python_listener_and_still_starts_go(
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_dev_server_factory: Callable[..., IsolatedDevServer],
+) -> None:
+    monkeypatch.setenv("YOMUX_CHECK_GO_ONLY", "1")
+
+    with pytest.raises(RuntimeError, match="deprecated Python product server is forbidden"):
+        TmuxWebtermHTTPServer(("127.0.0.1", 0), object())
+
+    server = isolated_dev_server_factory("go-only-gate")
+    assert Path(server.process.args[0]).name == "yomux-go", server.process.args
+    assert "--backend" not in server.process.args

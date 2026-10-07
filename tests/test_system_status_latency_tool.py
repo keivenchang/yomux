@@ -222,13 +222,13 @@ def test_probe_refuses_responses_or_records_from_another_server_lifetime(
     monkeypatch.setattr(probe, "process_identity", lambda _pid: {"pid": 123, "start_identity": "proc:1", "cwd": "/repo", "sha": "a" * 40})
     monkeypatch.setattr(probe, "process_environment", lambda _pid: {"YOLOMUX_CONFIG_DIR": str(tmp_path)})
     monkeypatch.setattr(probe, "config_dir_from_process", lambda _env, _port: tmp_path)
-    monkeypatch.setattr(probe, "auth_cookie", lambda _root, _port: "cookie")
+    monkeypatch.setattr(probe, "auth_cookie", lambda _root, _port, _scheme: "cookie")
     monkeypatch.setattr(probe.secrets, "token_hex", lambda _count: "0" * 32)
     request_id = probe.hashlib.sha256(("capture-" + "0" * 32).encode()).hexdigest()[:16]
     responses = iter(
         (
-            (200, {"ok": True, "server": {"pid": response_pids[0], "started_at": response_starts[0]}}),
-            (200, {"ok": True, "server": {"pid": response_pids[1], "started_at": response_starts[1]}}),
+            (200, {"state": "ready", "server": {"pid": response_pids[0], "started_at": response_starts[0]}}),
+            (200, {"state": "ready", "server": {"pid": response_pids[1], "started_at": response_starts[1]}}),
             (200, {"perf": {"recent": [{"details": {"measurement_request_id": request_id, probe.METRIC: 5.0, "process_pid": record_pid}}]}}),
         )
     )
@@ -245,7 +245,7 @@ def test_probe_acceptance_failure_is_nonzero(monkeypatch, tmp_path):
     monkeypatch.setattr(probe, "process_identity", lambda _pid: {"pid": 123, "start_identity": "proc:1", "cwd": "/repo", "sha": "a" * 40})
     monkeypatch.setattr(probe, "process_environment", lambda _pid: {"YOLOMUX_CONFIG_DIR": str(tmp_path)})
     monkeypatch.setattr(probe, "config_dir_from_process", lambda _env, _port: tmp_path)
-    monkeypatch.setattr(probe, "auth_cookie", lambda _root, _port: "cookie")
+    monkeypatch.setattr(probe, "auth_cookie", lambda _root, _port, _scheme: "cookie")
     values = [5.0] * 197 + [25.0, 25.5, 26.0]
     markers = iter(f"capture-{index:032x}" for index in range(probe.SAMPLES))
     monkeypatch.setattr(probe.secrets, "token_hex", lambda _count: next(markers).removeprefix("capture-"))
@@ -255,7 +255,7 @@ def test_probe_acceptance_failure_is_nonzero(monkeypatch, tmp_path):
         calls["count"] += 1
         if "diagnostics/performance" in url:
             return 200, {"perf": {"recent": records}}
-        return 200, {"ok": True, "server": {"pid": 123, "started_at": 10.0}}
+        return 200, {"state": "ready", "server": {"pid": 123, "started_at": 10.0}}
     monkeypatch.setattr(probe, "get_json", fake_get)
     assert probe.main(["--port", "49152", "--scheme", "http", "--output", str(output)]) == 1
     assert probe.json.loads(output.read_text())["acceptance_outcome"] == {"ok": False, "p99_ms": 25.0, "budget_ms": 20.0}
@@ -304,13 +304,8 @@ def test_standalone_probe_drives_an_ephemeral_authenticated_daemon(monkeypatch, 
             auth_bypass=False,
         )
         cookie = probe.auth_cookie(paths.config_dir, server.port)
-        deadline = probe.time.monotonic() + 10
-        while True:
-            status, body = probe.get_json(server.base_url + "/api/system-status", cookie)
-            if status == 200 and isinstance(body, dict) and body.get("ok") is True:
-                break
-            if probe.time.monotonic() >= deadline:
-                raise AssertionError(f"ephemeral server snapshot did not publish: {status} {body}")
+        status, body = probe.get_json(server.base_url + "/api/system-status", cookie)
+        assert status == 200 and isinstance(body, dict) and body.get("state") == "ready", (status, body)
         output = tmp_path / "latency.json"
         arguments = [sys.executable, str(Path(__file__).resolve().parents[1] / "tools" / "system_status_latency_probe.py"), "--port", str(server.port), "--scheme", "http", "--output", str(output)]
         completed = subprocess.run(

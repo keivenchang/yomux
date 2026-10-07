@@ -41,6 +41,8 @@ from urllib.parse import urlparse
 
 import yaml
 
+from tools.product_environment import product_env
+
 from . import filesystem
 from .approval import yolo_rules
 from .app import TmuxWebtermApp
@@ -3692,6 +3694,8 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
     tls_peek_timeout_seconds = 2.0
 
     def __init__(self, server_address: tuple[str, int], app: TmuxWebtermApp, tls_context: ssl.SSLContext | None = None, dev: bool = False):
+        if product_env("CHECK_GO_ONLY", environ=os.environ) == "1":
+            raise RuntimeError("deprecated Python product server is forbidden in the Go-only gate")
         super().__init__(server_address, Handler)
         self.app = app
         self.tls_context = tls_context

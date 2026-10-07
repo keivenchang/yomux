@@ -16,6 +16,8 @@ import (
 // remains synchronous for durability; NotifyAppend records that work exists
 // for the next fixed-cadence pass. It must not turn every producer append into
 // an extra materialization run while a repair backlog is already active.
+type productDemand struct{ expires, started time.Time }
+
 type Lifecycle struct {
 	writer         *Writer
 	config         LifecycleConfig
@@ -41,7 +43,7 @@ type Lifecycle struct {
 	busy           func() bool
 	vacuumMu       sync.Mutex
 	demandMu       sync.Mutex
-	demands        map[ProductKey]time.Time
+	demands        map[ProductKey]productDemand
 	demandRevision atomic.Uint64
 	// Open buckets are invalidated by every native sample, but the browser only
 	// consumes a concrete resolution at min(resolution, 60s). Retain the last
@@ -299,7 +301,7 @@ func NewLifecycle(writer *Writer, config LifecycleConfig) *Lifecycle {
 			lastVacuumAt = persisted
 		}
 	}
-	return &Lifecycle{writer: writer, config: config, materializer: Materializer{Price: config.Price}, trigger: make(chan struct{}, 1), completionWake: make(chan struct{}), pruneEvery: config.PruneCadence, lastPruneAt: lastPruneAt, vacuumEvery: config.VacuumCadence, vacuumRetry: config.VacuumRetry, vacuumMaxDefer: config.VacuumMaxDefer, lastVacuumAt: lastVacuumAt, busy: config.Busy, demands: make(map[ProductKey]time.Time), lastMaterializedAt: make(map[[2]int64]time.Time), windowMetadataCache: make(map[int]lifecycleWindowMetadataCache), backgroundBackfillNotBefore: backgroundBackfillNotBefore}
+	return &Lifecycle{writer: writer, config: config, materializer: Materializer{Price: config.Price}, trigger: make(chan struct{}, 1), completionWake: make(chan struct{}), pruneEvery: config.PruneCadence, lastPruneAt: lastPruneAt, vacuumEvery: config.VacuumCadence, vacuumRetry: config.VacuumRetry, vacuumMaxDefer: config.VacuumMaxDefer, lastVacuumAt: lastVacuumAt, busy: config.Busy, demands: make(map[ProductKey]productDemand), lastMaterializedAt: make(map[[2]int64]time.Time), windowMetadataCache: make(map[int]lifecycleWindowMetadataCache), backgroundBackfillNotBefore: backgroundBackfillNotBefore}
 }
 func (l *Lifecycle) Counters() LifecycleCounters {
 	result := l.counters.snapshot()
@@ -394,27 +396,31 @@ func (l *Lifecycle) DemandProduct(rangeSeconds, resolutionSeconds int) {
 	}
 	now := l.config.Now()
 	l.demandMu.Lock()
-	for demanded, expiry := range l.demands {
-		if !expiry.After(now) {
+	for demanded, demand := range l.demands {
+		if !demand.expires.After(now) {
 			delete(l.demands, demanded)
 		}
 	}
-	_, alreadyDemanded := l.demands[key]
+	demand, alreadyDemanded := l.demands[key]
 	// Product keys are a fixed finite catalog, but keep the map bounded if a
 	// caller supplies a future catalog extension before this owner is updated.
-	if len(l.demands) >= 64 {
+	if len(l.demands) >= 64 && !alreadyDemanded {
 		var oldest ProductKey
 		var oldestExpiry time.Time
-		for demanded, expiry := range l.demands {
-			if oldestExpiry.IsZero() || expiry.Before(oldestExpiry) {
-				oldest, oldestExpiry = demanded, expiry
+		for demanded, existing := range l.demands {
+			if oldestExpiry.IsZero() || existing.expires.Before(oldestExpiry) {
+				oldest, oldestExpiry = demanded, existing.expires
 			}
 		}
 		if !oldestExpiry.IsZero() {
 			delete(l.demands, oldest)
 		}
 	}
-	l.demands[key] = now.Add(2 * time.Minute)
+	if !alreadyDemanded {
+		demand.started = now
+	}
+	demand.expires = now.Add(2 * time.Minute)
+	l.demands[key] = demand
 	// Refreshing an existing browser demand only extends its lease. It does not
 	// change the selected product, so avoid forcing an in-flight bounded pass to
 	// reselect on every polling request. A new key still interrupts cold-ring
@@ -439,8 +445,8 @@ func (l *Lifecycle) demandedProducts(now time.Time) []ProductKey {
 	l.demandMu.Lock()
 	defer l.demandMu.Unlock()
 	products := make([]ProductKey, 0, len(l.demands))
-	for key, expiry := range l.demands {
-		if !expiry.After(now) {
+	for key, demand := range l.demands {
+		if !demand.expires.After(now) {
 			delete(l.demands, key)
 			continue
 		}
@@ -790,7 +796,19 @@ func (l *Lifecycle) openCellDue(now time.Time, cell lifecycleCell) bool {
 		if !ok {
 			return true
 		}
-		return cadence <= 0 || now.Sub(last) >= cadence
+		// A newly selected product gets one current fold even if background
+		// work populated its open bucket recently. Renewing the same demand keeps
+		// its original start time, so ordinary polling retains the coarse cadence.
+		l.demandMu.Lock()
+		freshDemand := false
+		for key, demand := range l.demands {
+			if key.ResolutionSeconds == cell.ResolutionSeconds && demand.expires.After(now) && demand.started.After(last) {
+				freshDemand = true
+				break
+			}
+		}
+		l.demandMu.Unlock()
+		return freshDemand || cadence <= 0 || now.Sub(last) >= cadence
 	}
 	return true
 }

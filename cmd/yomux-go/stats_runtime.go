@@ -23,6 +23,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/keivenchang/yomux/internal/productenv"
 	"github.com/keivenchang/yomux/internal/stats"
 )
 
@@ -586,6 +587,7 @@ func (s *server) statsRuntimeLoad() map[string]any {
 		labels := map[string]string{
 			"cpu":           "host CPU collector (runtime occupancy)",
 			"system_memory": "host memory collector (runtime occupancy)",
+			"system_disk":   "host disk collector (runtime occupancy)",
 			"gpu":           "host GPU collector (runtime occupancy)",
 		}
 		for family, timing := range counters.Family {
@@ -686,7 +688,7 @@ func (s *server) statsRuntimeServiceLoadSamples(at time.Time) []stats.ServiceLoa
 func (s *server) statsMainProcessSourceID() string {
 	s.statsProcessSourceOnce.Do(func() {
 		hostname, _ := os.Hostname()
-		host := readIdentityValue("YOLOMUX_HOST_ID", "/etc/machine-id", hostname)
+		host := readIdentityValue("HOST_ID", "/etc/machine-id", hostname)
 		boot := readIdentityValue("", "/proc/sys/kernel/random/boot_id", "unknown-boot")
 		start := processStartIdentity(os.Getpid())
 		owner := s.config + "\x00" + s.root + "\x00" + strconv.Itoa(s.port)
@@ -1304,52 +1306,20 @@ func snapshotWireSelected(snapshot stats.StatsSnapshot, query statsQuery, includ
 		}
 		return false
 	})
-	var totalTokens, totalMicroUSD, totalAPIListMicroUSD, priced, unpriced int64
-	dimensionTotals := map[string]map[string]int64{}
-	modelTotals := map[string]stats.MaterializedCostAttribution{}
-	agentTotals := map[string]stats.MaterializedCostAttribution{}
-	evidenceTotals := map[string]stats.PriceEvidence{}
-	omittedModels, omittedAgents, omittedEvidence := int64(0), int64(0), int64(0)
 	for _, bucket := range snapshot.Materialized.Buckets {
-		if os.Getenv("YOLOMUX_DEBUG_COST") == "1" {
+		if productenv.Value("DEBUG_COST") == "1" {
 			for _, agent := range bucket.Cost.Agents {
 				fmt.Fprintf(os.Stderr, "cost-debug bucket=%v agent=%s total=%d dims=%+v sources=%+v\\n", bucket.Start, agent.Key, agent.TotalTokens, agent.Dimensions, agent.Sources)
 			}
 		}
-		totalTokens += bucket.Cost.Tokens
-		totalMicroUSD += bucket.Cost.MicroUSD
-		totalAPIListMicroUSD += bucket.Cost.APIListMicroUSD
-		priced += int64(bucket.Cost.PricedAtoms)
-		unpriced += int64(bucket.Cost.UnpricedAtoms)
-		for _, dimension := range bucket.Cost.Dimensions {
-			totals := dimensionTotals[dimension.Dimension]
-			if totals == nil {
-				totals = map[string]int64{"tokens": 0, "micro_usd": 0, "api_list_micro_usd": 0}
-				dimensionTotals[dimension.Dimension] = totals
-			}
-			totals["tokens"] += dimension.Tokens
-			totals["micro_usd"] += dimension.MicroUSD
-			totals["api_list_micro_usd"] += dimension.APIListMicroUSD
-		}
-		for _, model := range bucket.Cost.Models {
-			mergeCostAttribution(modelTotals, model)
-		}
-		for _, agent := range bucket.Cost.Agents {
-			mergeCostAttribution(agentTotals, agent)
-		}
-		for _, evidence := range bucket.Cost.Evidence {
-			mergePriceEvidence(evidenceTotals, evidence)
-		}
-		omittedModels += int64(bucket.Cost.OmittedModels)
-		omittedAgents += int64(bucket.Cost.OmittedAgents)
-		omittedEvidence += int64(bucket.Cost.OmittedEvidence)
 	}
+	costReport := stats.CostReportWire(snapshot.Materialized.Buckets)
 	return map[string]any{"protocol_version": statsWireVersion, "range_seconds": query.rangeSeconds, "requested_resolution": func() any {
 		if query.resolutionAuto {
 			return "AUTO"
 		}
 		return query.resolution
-	}(), "resolution_seconds": query.resolution, "window_start": snapshot.Request.Start, "window_end": snapshot.Request.End, "generated_at": snapshot.GeneratedAt, "source_generation": snapshot.SourceGeneration, "cache_generation": snapshot.CacheGeneration, "rightmost_open": len(buckets) > 0 && buckets[len(buckets)-1]["open"] == true, "buckets": buckets, "no_data": noData, "cost_report": costReportWithEvidence(totalTokens, totalMicroUSD, totalAPIListMicroUSD, priced, unpriced, dimensionTotals, modelTotals, agentTotals, evidenceTotals, omittedModels, omittedAgents, omittedEvidence)}
+	}(), "resolution_seconds": query.resolution, "window_start": snapshot.Request.Start, "window_end": snapshot.Request.End, "generated_at": snapshot.GeneratedAt, "source_generation": snapshot.SourceGeneration, "cache_generation": snapshot.CacheGeneration, "rightmost_open": len(buckets) > 0 && buckets[len(buckets)-1]["open"] == true, "buckets": buckets, "no_data": noData, "cost_report": costReport}
 }
 
 // snapshotPayloadForQuery is the Go equivalent of Python's size-derived
@@ -1646,274 +1616,6 @@ func snapshotChunkWire(full map[string]any, index, count int) (map[string]any, e
 	return chunk, nil
 }
 
-func costReport(totalTokens, totalMicroUSD, totalAPIListMicroUSD, priced, unpriced int64, dimensionTotals map[string]map[string]int64, modelTotals, agentTotals map[string]stats.MaterializedCostAttribution) map[string]any {
-	return costReportWithEvidence(totalTokens, totalMicroUSD, totalAPIListMicroUSD, priced, unpriced, dimensionTotals, modelTotals, agentTotals, nil, 0, 0, 0)
-}
-
-func costReportWithEvidence(totalTokens, totalMicroUSD, totalAPIListMicroUSD, priced, unpriced int64, dimensionTotals map[string]map[string]int64, modelTotals, agentTotals map[string]stats.MaterializedCostAttribution, evidenceTotals map[string]stats.PriceEvidence, omittedModels, omittedAgents, omittedEvidence int64) map[string]any {
-	dimensions := map[string]any{}
-	for _, name := range []string{"input", "cache_read", "cache_write_5m", "cache_write_1h", "output", "other"} {
-		dimensions[name] = map[string]any{"tokens": int64(0), "micro_usd": int64(0), "api_list_micro_usd": int64(0)}
-	}
-	for name, totals := range dimensionTotals {
-		if _, known := dimensions[name]; known {
-			dimensions[name] = map[string]any{"tokens": totals["tokens"], "micro_usd": totals["micro_usd"], "api_list_micro_usd": totals["api_list_micro_usd"]}
-		}
-	}
-	// Non-token or legacy atoms have no typed dimension and remain explicit in
-	// the neutral bucket. Preserve aggregate totals if a caller supplies an old
-	// materialized layer without dimension detail.
-	knownTokens := int64(0)
-	knownMicroUSD := int64(0)
-	knownAPIListMicroUSD := int64(0)
-	for _, value := range dimensions {
-		row := value.(map[string]any)
-		knownTokens += row["tokens"].(int64)
-		knownMicroUSD += row["micro_usd"].(int64)
-		knownAPIListMicroUSD += row["api_list_micro_usd"].(int64)
-	}
-	if knownTokens < totalTokens || knownMicroUSD < totalMicroUSD || knownAPIListMicroUSD < totalAPIListMicroUSD {
-		dimensions["other"] = map[string]any{"tokens": totalTokens - knownTokens, "micro_usd": totalMicroUSD - knownMicroUSD, "api_list_micro_usd": totalAPIListMicroUSD - knownAPIListMicroUSD}
-	}
-	pricedTokens := int64(0)
-	unpricedTokens := int64(0)
-	for _, value := range modelTotals {
-		pricedTokens += value.PricedTokens
-		unpricedTokens += value.UnpricedTokens
-	}
-	// Atoms without a model cannot appear in an attribution row. Preserve
-	// their explicit priced/unpriced status in the aggregate rather than
-	// declaring every token unpriced when one unknown model is present.
-	if pricedTokens+unpricedTokens < totalTokens {
-		if unpriced == 0 {
-			pricedTokens += totalTokens - pricedTokens - unpricedTokens
-		} else {
-			unpricedTokens += totalTokens - pricedTokens - unpricedTokens
-		}
-	}
-	evidence := make([]stats.PriceEvidence, 0, len(evidenceTotals))
-	for _, value := range evidenceTotals {
-		evidence = append(evidence, value)
-	}
-	sort.Slice(evidence, func(i, j int) bool {
-		if evidence[i].Tokens != evidence[j].Tokens {
-			return evidence[i].Tokens > evidence[j].Tokens
-		}
-		if evidence[i].APIListMicroUSD != evidence[j].APIListMicroUSD {
-			return evidence[i].APIListMicroUSD > evidence[j].APIListMicroUSD
-		}
-		if evidence[i].MicroUSD != evidence[j].MicroUSD {
-			return evidence[i].MicroUSD > evidence[j].MicroUSD
-		}
-		return evidence[i].Key < evidence[j].Key
-	})
-	if len(evidence) > 32 {
-		omittedEvidence += int64(len(evidence) - 32)
-		evidence = evidence[:32]
-	}
-	evidenceRows := make([]any, 0, len(evidence))
-	catalogRevision := int64(0)
-	for _, value := range evidence {
-		if value.CatalogRevision > catalogRevision {
-			catalogRevision = value.CatalogRevision
-		}
-		evidenceRows = append(evidenceRows, map[string]any{
-			"key": value.Key, "provider": value.Provider, "model": value.Model, "dimension": value.Dimension,
-			"direction": value.Direction, "modality": value.Modality, "cache_role": value.CacheRole, "unit": value.Unit,
-			"pricing_profile": value.PricingProfile, "service_tier": value.ServiceTier, "catalog_model": value.CatalogModel,
-			"rate_usd": value.RateUSD, "rate_scale": value.RateScale, "effective_from": value.EffectiveFrom,
-			"source_kind": value.SourceKind, "source_url": value.SourceURL, "catalog_revision": value.CatalogRevision,
-			"tokens": value.Tokens, "micro_usd": value.MicroUSD, "api_list_micro_usd": value.APIListMicroUSD, "priced_atoms": value.PricedAtoms,
-		})
-	}
-	return map[string]any{
-		"schema_version":           4,
-		"total_micro_usd":          totalMicroUSD,
-		"total_api_list_micro_usd": totalAPIListMicroUSD,
-		"total_tokens":             totalTokens,
-		"dimensions":               dimensions,
-		"priced":                   map[string]any{"atoms": priced, "tokens": pricedTokens},
-		"unpriced":                 map[string]any{"atoms": unpriced, "tokens": unpricedTokens},
-		"models":                   costAttributionWire(modelTotals, false), "agents": costAttributionWire(agentTotals, true), "evidence": evidenceRows,
-		"catalog_revision":    catalogRevision,
-		"omissions":           map[string]any{"models": omittedModels, "agents": omittedAgents, "evidence": omittedEvidence},
-		"reasoning_available": false,
-	}
-}
-
-func mergeCostAttribution(target map[string]stats.MaterializedCostAttribution, value stats.MaterializedCostAttribution) {
-	current := target[value.Key]
-	current.Key, current.Provider, current.Model, current.Source, current.Label = value.Key, value.Provider, value.Model, value.Source, value.Label
-	current.TotalTokens += value.TotalTokens
-	current.MicroUSD += value.MicroUSD
-	current.APIListMicroUSD += value.APIListMicroUSD
-	current.PricedAtoms += value.PricedAtoms
-	current.UnpricedAtoms += value.UnpricedAtoms
-	current.PricedTokens += value.PricedTokens
-	current.UnpricedTokens += value.UnpricedTokens
-	for _, dimension := range value.Dimensions {
-		found := false
-		for index := range current.Dimensions {
-			if current.Dimensions[index].Dimension == dimension.Dimension {
-				current.Dimensions[index].Tokens += dimension.Tokens
-				current.Dimensions[index].MicroUSD += dimension.MicroUSD
-				current.Dimensions[index].APIListMicroUSD += dimension.APIListMicroUSD
-				found = true
-				break
-			}
-		}
-		if !found {
-			current.Dimensions = append(current.Dimensions, dimension)
-		}
-	}
-	for _, source := range value.Sources {
-		mergeCostSource(&current, source)
-	}
-	target[value.Key] = current
-}
-
-func mergeCostSource(target *stats.MaterializedCostAttribution, value stats.MaterializedCostSource) {
-	for index := range target.Sources {
-		current := &target.Sources[index]
-		if current.Source != value.Source {
-			continue
-		}
-		current.TotalTokens += value.TotalTokens
-		current.MicroUSD += value.MicroUSD
-		current.APIListMicroUSD += value.APIListMicroUSD
-		current.PricedAtoms += value.PricedAtoms
-		current.UnpricedAtoms += value.UnpricedAtoms
-		current.PricedTokens += value.PricedTokens
-		current.UnpricedTokens += value.UnpricedTokens
-		mergeCostDimensions(&current.Dimensions, value.Dimensions)
-		return
-	}
-	// The source dimensions belong to the immutable materialized bucket. Keep
-	// the aggregate's working copy independent so folding a later bucket cannot
-	// mutate an already-published bucket (or a prior wire response).
-	value.Dimensions = append([]stats.MaterializedCostDimension(nil), value.Dimensions...)
-	target.Sources = append(target.Sources, value)
-}
-
-func mergeCostDimensions(target *[]stats.MaterializedCostDimension, values []stats.MaterializedCostDimension) {
-	for _, value := range values {
-		found := false
-		for index := range *target {
-			if (*target)[index].Dimension == value.Dimension {
-				(*target)[index].Tokens += value.Tokens
-				(*target)[index].MicroUSD += value.MicroUSD
-				(*target)[index].APIListMicroUSD += value.APIListMicroUSD
-				found = true
-				break
-			}
-		}
-		if !found {
-			*target = append(*target, value)
-		}
-	}
-}
-
-func mergePriceEvidence(target map[string]stats.PriceEvidence, value stats.PriceEvidence) {
-	if current, ok := target[value.Key]; ok {
-		current.Tokens += value.Tokens
-		current.MicroUSD += value.MicroUSD
-		current.APIListMicroUSD += value.APIListMicroUSD
-		current.PricedAtoms += value.PricedAtoms
-		target[value.Key] = current
-		return
-	}
-	target[value.Key] = value
-}
-
-func costAttributionWire(values map[string]stats.MaterializedCostAttribution, agent bool) []any {
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		left, right := values[keys[i]], values[keys[j]]
-		if left.TotalTokens != right.TotalTokens {
-			return left.TotalTokens > right.TotalTokens
-		}
-		if left.APIListMicroUSD != right.APIListMicroUSD {
-			return left.APIListMicroUSD > right.APIListMicroUSD
-		}
-		if left.MicroUSD != right.MicroUSD {
-			return left.MicroUSD > right.MicroUSD
-		}
-		return keys[i] < keys[j]
-	})
-	result := make([]any, 0, len(keys))
-	for _, key := range keys {
-		value := values[key]
-		dimensions := make(map[string]any, 6)
-		for _, name := range []string{"input", "cache_read", "cache_write_5m", "cache_write_1h", "output", "other"} {
-			dimensions[name] = map[string]any{"tokens": int64(0), "micro_usd": int64(0), "api_list_micro_usd": int64(0)}
-		}
-		for _, dimension := range value.Dimensions {
-			dimensions[dimension.Dimension] = map[string]any{"tokens": dimension.Tokens, "micro_usd": dimension.MicroUSD, "api_list_micro_usd": dimension.APIListMicroUSD}
-		}
-		row := map[string]any{"key": value.Key, "total_tokens": value.TotalTokens, "total_micro_usd": value.MicroUSD, "total_api_list_micro_usd": value.APIListMicroUSD, "dimensions": dimensions, "priced": map[string]any{"atoms": value.PricedAtoms, "tokens": value.PricedTokens}, "unpriced": map[string]any{"atoms": value.UnpricedAtoms, "tokens": value.UnpricedTokens}}
-		if agent {
-			source := costSourceKind(value.Source)
-			label := value.Label
-			if label == "" {
-				label = value.Key
-			}
-			row["source"], row["label"] = source, label
-			row["sources"] = costSourceRows(value, source, dimensions)
-		} else {
-			row["provider"], row["model"] = value.Provider, value.Model
-		}
-		result = append(result, row)
-	}
-	return result
-}
-
-func costSourceRows(value stats.MaterializedCostAttribution, fallbackSource string, fallbackDimensions map[string]any) []any {
-	sources := make([]stats.MaterializedCostSource, len(value.Sources))
-	copy(sources, value.Sources)
-	if len(sources) == 0 {
-		sources = append(sources, stats.MaterializedCostSource{Source: fallbackSource, TotalTokens: value.TotalTokens, MicroUSD: value.MicroUSD, APIListMicroUSD: value.APIListMicroUSD, Dimensions: value.Dimensions, PricedAtoms: value.PricedAtoms, UnpricedAtoms: value.UnpricedAtoms, PricedTokens: value.PricedTokens, UnpricedTokens: value.UnpricedTokens})
-	}
-	sort.Slice(sources, func(i, j int) bool {
-		if sources[i].TotalTokens != sources[j].TotalTokens {
-			return sources[i].TotalTokens > sources[j].TotalTokens
-		}
-		if sources[i].APIListMicroUSD != sources[j].APIListMicroUSD {
-			return sources[i].APIListMicroUSD > sources[j].APIListMicroUSD
-		}
-		if sources[i].MicroUSD != sources[j].MicroUSD {
-			return sources[i].MicroUSD > sources[j].MicroUSD
-		}
-		return sources[i].Source < sources[j].Source
-	})
-	rows := make([]any, 0, len(sources))
-	for _, item := range sources {
-		dimensions := fallbackDimensions
-		if len(item.Dimensions) > 0 {
-			dimensions = make(map[string]any, 6)
-			for _, name := range []string{"input", "cache_read", "cache_write_5m", "cache_write_1h", "output", "other"} {
-				dimensions[name] = map[string]any{"tokens": int64(0), "micro_usd": int64(0), "api_list_micro_usd": int64(0)}
-			}
-			for _, dimension := range item.Dimensions {
-				dimensions[dimension.Dimension] = map[string]any{"tokens": dimension.Tokens, "micro_usd": dimension.MicroUSD, "api_list_micro_usd": dimension.APIListMicroUSD}
-			}
-		}
-		rows = append(rows, map[string]any{"source": costSourceKind(item.Source), "total_tokens": item.TotalTokens, "total_micro_usd": item.MicroUSD, "total_api_list_micro_usd": item.APIListMicroUSD, "dimensions": dimensions, "priced": map[string]any{"atoms": item.PricedAtoms, "tokens": item.PricedTokens}, "unpriced": map[string]any{"atoms": item.UnpricedAtoms, "tokens": item.UnpricedTokens}})
-	}
-	return rows
-}
-
-func costSourceKind(value string) string {
-	switch value {
-	case "claude", "codex", "opencode", "yoagent", "summary", "images", "responses", "legacy", "unknown":
-		return value
-	default:
-		return "unknown"
-	}
-}
-
 func deltaFromWireMaps(previous, current map[string]any, query statsQuery) map[string]any {
 	previousBuckets := wireBucketMap(previous["buckets"])
 	currentBuckets := wireBucketMap(current["buckets"])
@@ -2101,7 +1803,12 @@ func (s *server) statsObservations(w http.ResponseWriter, r *http.Request) {
 	}
 	user, ok := r.Context().Value(authContextKey{}).(authUser)
 	if !ok {
-		user, ok = s.identity(r)
+		var status int
+		user, status = s.identityStatus(r)
+		if rejectCredentialAdmission(w, status) {
+			return
+		}
+		ok = status == 0
 	}
 	if !ok || user.username == "" {
 		jsonResponse(w, http.StatusUnauthorized, map[string]any{"error": "authentication_required"})
@@ -2722,13 +2429,15 @@ func (s *server) statsStream(w http.ResponseWriter, r *http.Request) {
 	streamWriter := &statsSSEWriter{stream: frameWriter, startedAt: time.Now()}
 	s.statsDemand.Add(1)
 	defer s.statsDemand.Add(-1)
-	frameWriter.flush()
+	if err := frameWriter.flush(); err != nil {
+		return
+	}
 	heartbeat := s.statsHeartbeat
 	if heartbeat <= 0 {
 		// Python schedules one unchanged ready frame per min(resolution, 60)
 		// seconds. Keep test-only overrides while making the production stream
 		// use the same cadence instead of a fixed one-second poll.
-		heartbeat = time.Duration(minInt(query.resolution, 60)) * time.Second
+		heartbeat = time.Duration(min(query.resolution, 60)) * time.Second
 	}
 	var snapshot stats.StatsSnapshot
 	for {
@@ -2738,14 +2447,18 @@ func (s *server) statsStream(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if !errors.Is(err, stats.ErrProductPending) {
-			streamWriter.write("unavailable", statsError(err.Error()))
+			if err := streamWriter.write("unavailable", statsError(err.Error())); err != nil {
+				return
+			}
 			return
 		}
 		// A source generation can advance after the last immutable product was
 		// published. Keep the stream alive while the lifecycle repairs it; a
 		// terminal pending response would make callers race a new EventSource
 		// against the same stale product.
-		streamWriter.write("pending", statsPending(query, err.Error()))
+		if err := streamWriter.write("pending", statsPending(query, err.Error())); err != nil {
+			return
+		}
 		if s.statsService != nil {
 			key := stats.ProductKey{RangeSeconds: query.rangeSeconds, ResolutionSeconds: query.resolution}
 			if _, waitErr := s.statsService.WaitForProductPublication(r.Context(), key, 0, heartbeat); waitErr != nil {
@@ -2768,7 +2481,9 @@ func (s *server) statsStream(w http.ResponseWriter, r *http.Request) {
 			// lifecycle is attached) still has to keep an accepted SSE cursor
 			// alive. Emit the same liveness signal as a settled stream instead
 			// of silently polling until the client declares it stalled.
-			streamWriter.write("heartbeat", map[string]any{"status": "pending", "retry_after_seconds": 1})
+			if err := streamWriter.write("heartbeat", map[string]any{"status": "pending", "retry_after_seconds": 1}); err != nil {
+				return
+			}
 		}
 	}
 	requestedResolution := any(query.resolution)
@@ -2782,22 +2497,32 @@ func (s *server) statsStream(w http.ResponseWriter, r *http.Request) {
 		var payloadErr error
 		snapshotPayloads, payloadErr = snapshotPayloadsForQuery(snapshot, query)
 		if payloadErr != nil {
-			streamWriter.write("unavailable", statsError(payloadErr.Error()))
+			if err := streamWriter.write("unavailable", statsError(payloadErr.Error())); err != nil {
+				return
+			}
 			return
 		}
 		chunkCount = len(snapshotPayloads)
 	}
-	streamWriter.write("ack", map[string]any{"cache_generation": snapshot.CacheGeneration, "chunk_count": chunkCount, "not_modified": notModified, "range_seconds": query.rangeSeconds, "requested_resolution": requestedResolution, "resolution_seconds": query.resolution})
+	if err := streamWriter.write("ack", map[string]any{"cache_generation": snapshot.CacheGeneration, "chunk_count": chunkCount, "not_modified": notModified, "range_seconds": query.rangeSeconds, "requested_resolution": requestedResolution, "resolution_seconds": query.resolution}); err != nil {
+		return
+	}
 	s.statsDeliveryRevision(statsDeltaKey{rangeSeconds: query.rangeSeconds, resolution: query.resolution}, snapshot.CacheGeneration, true)
 	if !notModified {
 		for index, chunk := range snapshotPayloads {
-			streamWriter.write("snapshot", chunk)
+			if err := streamWriter.write("snapshot", chunk); err != nil {
+				return
+			}
 			snapshotPayloads[index] = nil
 		}
 	}
-	streamWriter.write("ready", map[string]any{"cache_generation": snapshot.CacheGeneration, "revision": 0})
+	if err := streamWriter.write("ready", map[string]any{"cache_generation": snapshot.CacheGeneration, "revision": 0}); err != nil {
+		return
+	}
 	cacheGeneration := snapshot.CacheGeneration
-	s.writeStatsRuntimeEvent(streamWriter, cacheGeneration)
+	if err := s.writeStatsRuntimeEvent(streamWriter, cacheGeneration); err != nil {
+		return
+	}
 	// The initial ready frame establishes revision zero for this cache cursor.
 	// Cache generations and delivery revisions are independent: a generation can
 	// be assigned a later revision, and using the generation here causes the first
@@ -2819,8 +2544,12 @@ func (s *server) statsStream(w http.ResponseWriter, r *http.Request) {
 				// `ready` is the Python wire event for an unchanged generation and
 				// the browser's liveness owner consumes only this event. A separate
 				// heartbeat event makes the stream appear stalled after three ticks.
-				streamWriter.write("ready", map[string]any{"cache_generation": cacheGeneration, "revision": revision})
-				s.writeStatsRuntimeEvent(streamWriter, cacheGeneration)
+				if err := streamWriter.write("ready", map[string]any{"cache_generation": cacheGeneration, "revision": revision}); err != nil {
+					return
+				}
+				if err := s.writeStatsRuntimeEvent(streamWriter, cacheGeneration); err != nil {
+					return
+				}
 				continue
 			}
 		} else {
@@ -2835,31 +2564,43 @@ func (s *server) statsStream(w http.ResponseWriter, r *http.Request) {
 		result := s.statsDeltaOperation(r.Context(), deltaQuery)
 		switch result.status {
 		case http.StatusNotModified:
-			streamWriter.write("ready", map[string]any{"cache_generation": cacheGeneration, "revision": revision})
+			if err := streamWriter.write("ready", map[string]any{"cache_generation": cacheGeneration, "revision": revision}); err != nil {
+				return
+			}
 			continue
 		case http.StatusAccepted:
-			streamWriter.write("pending", result.payload)
+			if err := streamWriter.write("pending", result.payload); err != nil {
+				return
+			}
 			continue
 		case http.StatusConflict:
-			streamWriter.write("repair", result.payload)
+			if err := streamWriter.write("repair", result.payload); err != nil {
+				return
+			}
 			return
 		case http.StatusOK:
-			streamWriter.write("delta", result.payload)
+			if err := streamWriter.write("delta", result.payload); err != nil {
+				return
+			}
 			cacheGeneration, revision = result.generation, result.revision
 		default:
-			streamWriter.write("unavailable", statsError("stats delta unavailable"))
+			if err := streamWriter.write("unavailable", statsError("stats delta unavailable")); err != nil {
+				return
+			}
 			return
 		}
-		s.writeStatsRuntimeEvent(streamWriter, cacheGeneration)
+		if err := s.writeStatsRuntimeEvent(streamWriter, cacheGeneration); err != nil {
+			return
+		}
 	}
 }
 
-func (s *server) writeStatsRuntimeEvent(stream *statsSSEWriter, cacheGeneration int64) {
+func (s *server) writeStatsRuntimeEvent(stream *statsSSEWriter, cacheGeneration int64) error {
 	load := s.statsRuntimeLoad()
 	if len(load) == 0 {
-		return
+		return nil
 	}
-	stream.write("runtime", map[string]any{"cache_generation": cacheGeneration, "load": load})
+	return stream.write("runtime", map[string]any{"cache_generation": cacheGeneration, "load": load})
 }
 
 // statsSSEWriter assigns a process-relative monotonic millisecond id to every
@@ -2870,13 +2611,13 @@ type statsSSEWriter struct {
 	lastID    int64
 }
 
-func (s *statsSSEWriter) write(event string, payload any) {
+func (s *statsSSEWriter) write(event string, payload any) error {
 	id := time.Since(s.startedAt).Milliseconds()
 	if id <= s.lastID {
 		id = s.lastID + 1
 	}
 	s.lastID = id
-	_ = s.stream.writeWithID(strconv.FormatInt(id, 10), event, payload)
+	return s.stream.writeWithID(strconv.FormatInt(id, 10), event, payload)
 }
 
 func (s *server) pricingCatalog(w http.ResponseWriter, r *http.Request) {
@@ -3025,7 +2766,7 @@ func (s *server) ready(w http.ResponseWriter, r *http.Request) {
 	if serviceState.LastError != "" {
 		failures = append(failures, "stats service refresh failed: "+serviceState.LastError)
 	}
-	response := map[string]any{"ready": ready, "source_generation": serviceState.SourceGeneration, "cache_generation": serviceState.CacheGeneration, "pending_cells": maxInt(pending, 0), "pending_cell_details": pendingCells, "startup_preparation": statsStartupPreparationWire(counters.StartupPreparation), "lifecycle_runs": counters.Runs, "lifecycle_publications": counters.Publications, "lifecycle_repairs": counters.Repairs, "lifecycle_errors": counters.Errors, "lifecycle_background_backfill_deferrals": counters.BackgroundBackfillDeferrals, "lifecycle_selected_cells": counters.SelectedCells, "lifecycle_materialized_buckets": counters.MaterializedBuckets, "lifecycle_fact_rows_read": counters.FactRowsRead, "lifecycle_decoded_bytes": counters.DecodedBytes, "lifecycle_selection_duration_ms": counters.SelectionDuration.Seconds() * 1000, "lifecycle_materialization_duration_ms": counters.MaterializationDuration.Seconds() * 1000, "lifecycle_by_resolution": counters.ByResolution, "lifecycle_last_run_succeeded": counters.LastRunSucceeded, "lifecycle_last_run_error": counters.LastRunError, "migration_state": "ready", "materializer_state": func() string {
+	response := map[string]any{"ready": ready, "source_generation": serviceState.SourceGeneration, "cache_generation": serviceState.CacheGeneration, "pending_cells": max(pending, 0), "pending_cell_details": pendingCells, "startup_preparation": statsStartupPreparationWire(counters.StartupPreparation), "lifecycle_runs": counters.Runs, "lifecycle_publications": counters.Publications, "lifecycle_repairs": counters.Repairs, "lifecycle_errors": counters.Errors, "lifecycle_background_backfill_deferrals": counters.BackgroundBackfillDeferrals, "lifecycle_selected_cells": counters.SelectedCells, "lifecycle_materialized_buckets": counters.MaterializedBuckets, "lifecycle_fact_rows_read": counters.FactRowsRead, "lifecycle_decoded_bytes": counters.DecodedBytes, "lifecycle_selection_duration_ms": counters.SelectionDuration.Seconds() * 1000, "lifecycle_materialization_duration_ms": counters.MaterializationDuration.Seconds() * 1000, "lifecycle_by_resolution": counters.ByResolution, "lifecycle_last_run_succeeded": counters.LastRunSucceeded, "lifecycle_last_run_error": counters.LastRunError, "migration_state": "ready", "materializer_state": func() string {
 		if counters.Runs > 0 && !counters.LastRunSucceeded {
 			return "error"
 		}

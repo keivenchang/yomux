@@ -27,16 +27,23 @@ from .host_identity import current_host_identity
 from .host_identity import HostIdentity
 from .host_identity import is_current_local_process
 from .host_identity import LocalProcessReason
-from .root_paths import YOLOMUX_ROOT_ENV
+from .root_paths import PRODUCT_ROOT_ENV
 from .root_paths import resolved_product_path
+from tools.product_environment import CANONICAL_PREFIX
+from tools.product_environment import environment_value
+from tools.product_environment import product_env
+from tools.product_environment import product_env_name
+from tools.product_environment import require_product_env
 from tools.instance_isolation import GENERATED_PYTHON_CACHE_PREFIX_ENV
+from tools.instance_isolation import apply_yomux_environment_assignments
+from tools.instance_isolation import clear_yomux_environment_assignments
 from tools.instance_isolation import normalize_yomux_environment
 from tools.instance_isolation import resolved_path
 from tools.instance_isolation import rooted_product_path
 from tools.instance_isolation import YomuxRootError
 
 
-WRITER_TOKEN_ENV = "YOLOMUX_WORKTREE_WRITER_TOKEN"
+WRITER_TOKEN_ENV = product_env_name('WORKTREE_WRITER_TOKEN')
 WRITER_RECORD_NAME = "owner.json"
 WRITER_SCHEMA = 1
 DEFAULT_STALE_SECONDS = 30.0
@@ -133,7 +140,7 @@ def _path_is_inside(path: Path, parent: Path) -> bool:
 def worktree_declaration_slot(worktree_root: Path) -> Path:
     """Return this physical worktree's shared marker slot without invoking Git."""
 
-    override = os.environ.get("YOLOMUX_WORKTREE_WRITER_SLOT", "").strip()
+    override = product_env('WORKTREE_WRITER_SLOT', "", environ=os.environ).strip()
     if override:
         return _resolved(Path(override))
 
@@ -423,11 +430,11 @@ class WorktreeWriterLease:
                     raise WorktreeWriterReleaseError(f"cannot verify writer token during release: {error}") from error
                 if str(current.get("token") or "") == self.token:
                     _remove_exact_slot(self.slot_dir)
-            if self.environ.get(WRITER_TOKEN_ENV) == self.token:
+            if product_env('WORKTREE_WRITER_TOKEN', environ=self.environ) == self.token:
                 if self.previous_token is None:
-                    self.environ.pop(WRITER_TOKEN_ENV, None)
+                    clear_yomux_environment_assignments(self.environ, WRITER_TOKEN_ENV)
                 else:
-                    self.environ[WRITER_TOKEN_ENV] = self.previous_token
+                    apply_yomux_environment_assignments(self.environ, {WRITER_TOKEN_ENV: self.previous_token})
             if self._heartbeat_error is not None:
                 raise WorktreeWriterReleaseError(
                     f"writer heartbeat failed: {type(self._heartbeat_error).__name__}: {self._heartbeat_error}"
@@ -458,7 +465,7 @@ def acquire_worktree_writer(
     slot = Path(slot_dir) if slot_dir is not None else worktree_declaration_slot(worktree_root)
     values = os.environ if environ is None else environ
     active_clock = time.time if clock is None else clock
-    inherited_token = str(values.get(WRITER_TOKEN_ENV) or "").strip()
+    inherited_token = str(product_env('WORKTREE_WRITER_TOKEN', environ=values) or "").strip()
     if inherited_token:
         status = inspect_worktree_writer(
             worktree_root,
@@ -508,7 +515,7 @@ def acquire_worktree_writer(
             # genuinely fresh declaration against a read-only directory lands here, which is the
             # in-container case this refusal exists for. `environ` is injectable, so read the
             # marker off `values` rather than `tools.docker_image.running_inside_container`.
-            if values.get("YOLOMUX_CHECK_IN_CONTAINER") == "1":
+            if product_env('CHECK_IN_CONTAINER', environ=values) == "1":
                 raise WorktreeWriterContainerRefusal(
                     CONTAINER_REFUSAL_STALE_TOKEN if inherited_token else CONTAINER_REFUSAL_NO_TOKEN,
                     inherited_token=inherited_token,
@@ -527,8 +534,8 @@ def acquire_worktree_writer(
                     f"writer claim failed and its incomplete slot could not be removed: {cleanup_error}"
                 ) from error
             raise
-        previous_token = values.get(WRITER_TOKEN_ENV)
-        values[WRITER_TOKEN_ENV] = token
+        previous_token = product_env('WORKTREE_WRITER_TOKEN', environ=values)
+        apply_yomux_environment_assignments(values, {WRITER_TOKEN_ENV: token})
         return WorktreeWriterLease(
             token=token,
             slot_dir=slot,
@@ -595,25 +602,25 @@ def host_artifact_paths(
     """Return tool artifact paths under one explicitly local runtime base."""
 
     values = normalize_yomux_environment(os.environ if environ is None else environ)
-    explicit = str(values.get("YOLOMUX_HOST_ARTIFACT_DIR") or "").strip()
+    explicit = str(product_env('HOST_ARTIFACT_DIR', environ=values) or "").strip()
     if explicit:
-        configured_root = str(values.get(YOLOMUX_ROOT_ENV) or "").strip()
+        configured_root = str(product_env("ROOT", environ=values) or "").strip()
         base = (
             rooted_product_path(
                 values,
-                "YOLOMUX_HOST_ARTIFACT_DIR",
-                resolved_product_path(values, YOLOMUX_ROOT_ENV, configured_root),
+                product_env_name('HOST_ARTIFACT_DIR'),
+                resolved_product_path(values, PRODUCT_ROOT_ENV, configured_root),
                 explicit,
             )
             if configured_root
-            else resolved_product_path(values, "YOLOMUX_HOST_ARTIFACT_DIR", explicit)
+            else resolved_product_path(values, product_env_name('HOST_ARTIFACT_DIR'), explicit)
         )
-    elif values.get(YOLOMUX_ROOT_ENV):
-        root = resolved_product_path(values, YOLOMUX_ROOT_ENV, values[YOLOMUX_ROOT_ENV])
-        runtime = rooted_product_path(values, "YOLOMUX_RUNTIME_DIR", root, root / "runtime")
+    elif product_env("ROOT", environ=values):
+        root = resolved_product_path(values, PRODUCT_ROOT_ENV, require_product_env("ROOT", environ=values))
+        runtime = rooted_product_path(values, product_env_name('RUNTIME_DIR'), root, root / "runtime")
         base = runtime / "yomux-worktree-artifacts"
-    elif values.get("YOLOMUX_RUNTIME_DIR"):
-        base = resolved_product_path(values, "YOLOMUX_RUNTIME_DIR", values["YOLOMUX_RUNTIME_DIR"]) / "yomux-worktree-artifacts"
+    elif product_env('RUNTIME_DIR', environ=values):
+        base = resolved_product_path(values, product_env_name('RUNTIME_DIR'), require_product_env('RUNTIME_DIR', environ=values)) / "yomux-worktree-artifacts"
     elif values.get("XDG_RUNTIME_DIR"):
         base = resolved_product_path(
             values,
@@ -656,11 +663,9 @@ def configure_host_local_artifacts(
     # before package initialization reaches them. Do not materialize canonical
     # aliases for legacy-only input: callers may still update those old values
     # later in this process, and an injected alias would then take precedence.
-    for key in tuple(target):
-        if key.startswith("YOMUX_"):
-            legacy_key = "YOLOMUX_" + key.removeprefix("YOMUX_")
-            if legacy_key in values:
-                target[legacy_key] = values[legacy_key]
+    canonical_assignments = {key: target[key] for key in tuple(target) if key.startswith(CANONICAL_PREFIX) and not key.startswith(product_env_name('ENVIRONMENT_'))}
+    if canonical_assignments:
+        apply_yomux_environment_assignments(target, canonical_assignments)
     paths = host_artifact_paths(
         worktree_root,
         environ=values,
@@ -668,10 +673,10 @@ def configure_host_local_artifacts(
         uid=uid,
     )
     configured_prefix = str(values.get("PYTHONPYCACHEPREFIX") or "").strip()
-    generated_marker = str(values.get(GENERATED_PYTHON_CACHE_PREFIX_ENV) or "").strip()
+    generated_marker = str(environment_value(values, GENERATED_PYTHON_CACHE_PREFIX_ENV) or "").strip()
     generated_prefix = not configured_prefix or generated_marker == configured_prefix
-    if configured_prefix and values.get(YOLOMUX_ROOT_ENV):
-        root = resolved_product_path(values, YOLOMUX_ROOT_ENV, values[YOLOMUX_ROOT_ENV])
+    if configured_prefix and product_env("ROOT", environ=values):
+        root = resolved_product_path(values, PRODUCT_ROOT_ENV, require_product_env("ROOT", environ=values))
         python_cache = rooted_product_path(values, "PYTHONPYCACHEPREFIX", root, configured_prefix)
     elif configured_prefix:
         python_cache = resolved_product_path(values, "PYTHONPYCACHEPREFIX", configured_prefix)
@@ -681,14 +686,15 @@ def configure_host_local_artifacts(
         raise WorktreeArtifactError(f"PYTHONPYCACHEPREFIX resolves inside shared worktree: {python_cache}")
     target["PYTHONPYCACHEPREFIX"] = str(python_cache)
     if generated_prefix:
-        target[GENERATED_PYTHON_CACHE_PREFIX_ENV] = str(python_cache)
+        apply_yomux_environment_assignments(target, {GENERATED_PYTHON_CACHE_PREFIX_ENV: str(python_cache)})
     else:
-        target.pop(GENERATED_PYTHON_CACHE_PREFIX_ENV, None)
+        clear_yomux_environment_assignments(target, GENERATED_PYTHON_CACHE_PREFIX_ENV)
     target["GIT_OPTIONAL_LOCKS"] = "0"
     target["PIP_CACHE_DIR"] = str(paths.package_cache / "pip")
     target["NPM_CONFIG_CACHE"] = str(paths.package_cache / "npm")
     target["COVERAGE_FILE"] = str(paths.pytest_cache / ".coverage")
     if apply_process:
+        target.update(normalize_yomux_environment(target))
         write_bytecode = str(values.get("PYTHONDONTWRITEBYTECODE") or "").strip().lower() not in {"1", "true", "yes"}
         if write_bytecode:
             python_cache.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -711,19 +717,19 @@ def child_process_artifact_environment(
     """Rebase only product-generated artifacts when a child uses a newer root."""
 
     child = normalize_yomux_environment(os.environ if environ is None else environ)
-    configured_root = str(child.get(YOLOMUX_ROOT_ENV) or "").strip()
+    configured_root = str(product_env("ROOT", environ=child) or "").strip()
     configured_prefix = str(child.get("PYTHONPYCACHEPREFIX") or "").strip()
     generated_marker = str(child.get(GENERATED_PYTHON_CACHE_PREFIX_ENV) or "").strip()
     active_python_cache = str(sys.pycache_prefix or "").strip()
     if configured_root and configured_prefix and generated_marker == configured_prefix == active_python_cache:
-        root = resolved_product_path(child, YOLOMUX_ROOT_ENV, configured_root)
+        root = resolved_product_path(child, PRODUCT_ROOT_ENV, configured_root)
         try:
             prefix = resolved_product_path(child, "PYTHONPYCACHEPREFIX", configured_prefix)
         except YomuxRootError:
             prefix = resolved_path(configured_prefix)
         if not prefix.is_relative_to(root):
             child.pop("PYTHONPYCACHEPREFIX", None)
-            child.pop(GENERATED_PYTHON_CACHE_PREFIX_ENV, None)
+            clear_yomux_environment_assignments(child, GENERATED_PYTHON_CACHE_PREFIX_ENV)
     configure_host_local_artifacts(worktree_root, environ=child, apply_process=False)
     return child
 

@@ -19,6 +19,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/keivenchang/yomux/internal/productenv"
 )
 
 const (
@@ -1272,7 +1274,7 @@ func (s *Service) Upload(ctx context.Context, session, username, editorPath, bas
 		}
 		template := uploadLimits.FilenameTemplate
 		if template == "" {
-			template = os.Getenv("YOLOMUX_UPLOAD_FILENAME_TEMPLATE")
+			template = productenv.Value("UPLOAD_FILENAME_TEMPLATE")
 		}
 		savedName, err := saveUploadAtWithTemplate(ctx, target, file.Name, file.Data, template)
 		if err != nil {
@@ -1404,7 +1406,7 @@ func ensurePrivateUploadTree(path string) (*os.File, error) {
 }
 
 func saveUploadAt(ctx context.Context, directory *os.File, original string, data []byte) (string, error) {
-	return saveUploadAtWithTemplate(ctx, directory, original, data, os.Getenv("YOLOMUX_UPLOAD_FILENAME_TEMPLATE"))
+	return saveUploadAtWithTemplate(ctx, directory, original, data, productenv.Value("UPLOAD_FILENAME_TEMPLATE"))
 }
 
 func saveUploadAtWithTemplate(ctx context.Context, directory *os.File, original string, data []byte, template string) (string, error) {

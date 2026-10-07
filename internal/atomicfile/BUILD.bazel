@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_library")
+load("//:tools/bazel_rules.bzl", "go_test_pair")
+
+package(default_visibility = ["//:__subpackages__"])
+
+exports_files(["BUILD.bazel"])
+
+go_library(
+    name = "atomicfile_lib",
+    srcs = ["atomicfile.go"],
+    importpath = "github.com/keivenchang/yomux/internal/atomicfile",
+)
+
+go_test_pair(
+    name = "atomicfile",
+    srcs = ["atomicfile_test.go"],
+    embed = [":atomicfile_lib"],
+)

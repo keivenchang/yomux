@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/keivenchang/yomux/internal/productenv"
+	"github.com/keivenchang/yomux/internal/tmuxcmd"
 )
 
 var errSyntheticTmuxSocketUnset = errors.New("synthetic tmux socket is not configured")
@@ -22,30 +23,23 @@ func TmuxNoServerError(output []byte) bool {
 
 // tmuxCommandArgs gives every stats tmux adapter the same server visibility as
 // the operator runtime. An unset socket deliberately keeps tmux's default
-// shared server; test sockets must be supplied through YOLOMUX_TMUX_SOCKET so a
+// shared server; test sockets must be supplied through YOMUX_TMUX_SOCKET so a
 // test-only environment variable can never redirect an operator scan.
-func tmuxCommandArgs(args ...string) []string {
-	command := []string{"tmux"}
-	socket := strings.TrimSpace(productenv.Value("YOLOMUX_TMUX_SOCKET"))
-	if socket != "" {
-		command = append(command, "-S", socket)
-	}
-	return append(command, args...)
-}
+func tmuxCommandArgs(args ...string) []string { return tmuxcmd.Args(args...) }
 
 // syntheticTmuxSocketConfigured is a separate admission check from
 // tmuxCommandArgs. Production adapters intentionally use the machine-wide
 // default server when no socket is configured; synthetic adapters must fail
 // closed instead of accidentally reading that server.
 func syntheticTmuxSocketConfigured() bool {
-	socket := strings.TrimSpace(productenv.Value("YOLOMUX_TMUX_SOCKET"))
+	socket := strings.TrimSpace(productenv.Value("TMUX_SOCKET"))
 	if socket == "" {
 		return false
 	}
-	if productenv.Value("YOLOMUX_STATS_SYNTHETIC") != "1" {
+	if productenv.Value("STATS_SYNTHETIC") != "1" {
 		return true
 	}
-	root := strings.TrimSpace(productenv.Value("YOLOMUX_STATS_SYNTHETIC_ROOT"))
+	root := strings.TrimSpace(productenv.Value("STATS_SYNTHETIC_ROOT"))
 	if root == "" {
 		return false
 	}

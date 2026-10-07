@@ -9,7 +9,7 @@ import pytest
 from yomux_lib import tmux
 
 
-@pytest.mark.xfail(strict=True, reason="F3: v0.6.10 has no recovery-row identity contract shared by live and Lost sessions.")
+@pytest.mark.xfail(strict=True, reason="Deferred: revision-bound Go recovery and shared live/Lost identity are not implemented.")
 def test_d8_recovered_live_session_has_no_duplicate_lost_row():
     """One recovered identity renders once, even when its old Lost record names another socket."""
     rows = tmux.recovery_rows_for_test(

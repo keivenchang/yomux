@@ -538,13 +538,12 @@ func TestMetadataRefreshReadsGitSnapshotOncePerWorktree(t *testing.T) {
 				t.Fatalf("Git snapshot path = %q, want shared worktree root %q", path, root)
 			}
 			return goGitSnapshot{Root: root, Branch: "main", HeadSHA: "abc", Head: "subject"}, true
-		},
-		metadataEnrichmentFn: func([]string) (map[string]map[string]any, error) {
+		}, tmuxMetadataState: tmuxMetadataState{metadataEnrichmentFn: func([]string) (map[string]map[string]any, error) {
 			return map[string]map[string]any{
 				"first":  makeInfo("%1", root),
 				"second": makeInfo("%2", nested),
 			}, nil
-		},
+		}},
 	}
 	s.buildMetadataPayload(1, []string{"first", "second"}, map[string]string{"first": "first", "second": "second"}, nil, 1)
 	if gitCalls != 1 {

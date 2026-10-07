@@ -13,7 +13,10 @@ go_library(
         "runfiles.go",
     ],
     importpath = "github.com/keivenchang/yomux/internal/testsupport",
-    deps = ["@rules_go//go/runfiles"],
+    deps = [
+        "//internal/productenv:productenv_lib",
+        "@rules_go//go/runfiles",
+    ],
 )
 
 go_test_pair(

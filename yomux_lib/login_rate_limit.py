@@ -17,8 +17,8 @@ Different threats need different math, so there are exactly two, both O(1) per k
 1. Token bucket, for the four NETWORK scopes (exact IP, nearby prefix, broad prefix,
    and a single global emergency key). State per key is just (tokens, updated_at):
    tokens refill continuously at `refill_per_minute` up to `capacity`. Every
-   credential-bearing attempt — including successful logins — consumes one token from
-   each applicable network bucket; a success never refunds network pressure. If ANY
+   credential-bearing attempt reserves one token from each applicable network bucket;
+   successful verification returns that reservation and failures keep their charge. If ANY
    applicable bucket is empty the attempt is blocked (and consumes nothing, so the
    buckets keep refilling on their own). Hierarchical prefixes (/32+/24+/16 for IPv4,
    /128+/64+/48 for IPv6) mean rotating addresses inside a subnet or provider block
@@ -650,18 +650,7 @@ class LoginRateLimiter:
                 band = RETRY_BAND_HOURS if state.locked else coarse_retry_band(state.cooldown_until - now)
                 return AdmissionDecision(admitted=False, retry_band=band, blocked_scope=SCOPE_USERNAME)
 
-        # 2. Network buckets. An unparseable peer address cannot be keyed to a prefix, so
-        #    it is charged only against the global emergency bucket (never unlimited).
-        if addr is None:
-            materials = {SCOPE_GLOBAL: GLOBAL_KEY_MATERIAL}
-        else:
-            materials = network_scope_material(addr, self.policy)
-        bucket_for = {
-            SCOPE_EXACT: self.policy.exact_bucket,
-            SCOPE_NEARBY: self.policy.nearby_bucket,
-            SCOPE_BROAD: self.policy.broad_bucket,
-            SCOPE_GLOBAL: self.policy.global_bucket,
-        }
+        materials, bucket_for = self._network_buckets(addr)
         loaded: dict[str, tuple[str, float, float]] = {}
         for scope, material in materials.items():
             bucket = bucket_for[scope]
@@ -692,10 +681,22 @@ class LoginRateLimiter:
         self._prune(connection, now)
         return ADMIT
 
+    def _network_buckets(
+        self, addr: ipaddress.IPv4Address | ipaddress.IPv6Address | None,
+    ) -> tuple[dict[str, bytes], dict[str, BucketPolicy]]:
+        # Unparseable peers still share the global emergency limit.
+        materials = network_scope_material(addr, self.policy) if addr is not None else {SCOPE_GLOBAL: GLOBAL_KEY_MATERIAL}
+        return materials, {
+            SCOPE_EXACT: self.policy.exact_bucket,
+            SCOPE_NEARBY: self.policy.nearby_bucket,
+            SCOPE_BROAD: self.policy.broad_bucket,
+            SCOPE_GLOBAL: self.policy.global_bucket,
+        }
+
     def record_result(self, client_ip: str, username: str, success: bool) -> None:
         """Record the outcome of an ADMITTED attempt (one that reached verification).
         Success resets the username's staged backoff; failure advances it. Network
-        buckets were already charged at admission and are untouched here. Never called
+        buckets keep failed attempts charged; success refunds one reserved token per scope. Never called
         for a request rejected at admission, so a blocked attempt cannot advance the
         username counter. Swallows store failures (best-effort accounting; admission
         already fails closed on a broken store)."""
@@ -718,6 +719,22 @@ class LoginRateLimiter:
                         locked=bool(row["locked"]) if row else False,
                     )
                     if success:
+                        materials, bucket_for = self._network_buckets(canonical_ip(client_ip))
+                        for scope, material in materials.items():
+                            key = scope_row_key(secret, scope, material)
+                            bucket = bucket_for[scope]
+                            network_row = connection.execute(
+                                "SELECT tokens, updated_at FROM login_buckets WHERE scope = ? AND row_key = ?",
+                                (scope, key),
+                            ).fetchone()
+                            if network_row is not None:
+                                tokens = min(float(bucket.capacity), refilled_tokens(
+                                    float(network_row["tokens"]), float(network_row["updated_at"]), now, bucket,
+                                ) + 1.0)
+                                connection.execute(
+                                    "UPDATE login_buckets SET tokens = ?, updated_at = ?, seen_at = ? WHERE scope = ? AND row_key = ?",
+                                    (tokens, now, now, scope, key),
+                                )
                         new_state = username_after_success()
                     else:
                         new_state = username_after_failure(state, now, self.policy)

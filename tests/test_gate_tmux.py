@@ -1,7 +1,6 @@
 """Regression gate D: tmux actions stay scoped and destructive defaults fail closed."""
 from __future__ import annotations
 
-import importlib.util
 import math
 import os
 import shlex
@@ -36,6 +35,8 @@ from tests.gate_harness import gate_live_server  # noqa: F401
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import gate_tmux  # noqa: F401
 from tests.gate_harness import load_gate_terminal_only_browser
+from tests.tmux_runtime import clear_isolated_product_environment
+from tests.tmux_runtime import patch_isolated_product_environment
 from tests.tmux_runtime import run_isolated_tmux
 from yomux_lib.server import TmuxWebtermHTTPServer
 from yomux_lib.tmux import tmux_utils
@@ -68,40 +69,49 @@ class TerminalOutputPressure:
     duration_seconds: float
 
 
-def _rename_harness_available() -> bool:
-    if importlib.util.find_spec("tests.gate_harness") is None:
-        return False
-    return hasattr(gate_harness, "held_rename_roster_probe")
+@pytest.mark.browser
+def test_d1_repeated_enter_posts_rename_exactly_once(browser, gate_live_server):
+    evidence = gate_harness.held_rename_roster_probe(browser, gate_live_server)
+    assert evidence["held"]["calls"] == evidence["final"]["calls"] == 1, evidence
 
 
-@pytest.mark.no_browser
-@pytest.mark.xfail(strict=True, reason="F3/D1: gate_harness rename transition probe is not present in v0.6.10.")
-def test_d1_repeated_enter_posts_rename_exactly_once():
-    assert _rename_harness_available(), "F3 must hold the reply and prove N Enter presses issue one POST /api/rename-session"
+@pytest.mark.browser
+def test_d2_successful_repeated_enter_rename_never_surfaces_error(browser, gate_live_server):
+    evidence = gate_harness.held_rename_roster_probe(browser, gate_live_server)
+    assert evidence["final"]["error"] == "", evidence
+    assert evidence["target"] in evidence["final"]["sessions"], evidence
 
 
-@pytest.mark.no_browser
-@pytest.mark.xfail(strict=True, reason="F3/D2: gate_harness rename transition probe is not present in v0.6.10.")
-def test_d2_successful_repeated_enter_rename_never_surfaces_error():
-    assert _rename_harness_available(), "F3 must prove a successful repeated-Enter rename leaves no visible error"
+@pytest.mark.parametrize("reject", [False, True])
+@pytest.mark.browser
+def test_d3_submit_control_is_visibly_disabled_then_reenabled_on_both_outcomes(browser, gate_live_server, reject):
+    evidence = gate_harness.held_rename_roster_probe(browser, gate_live_server, reject=reject)
+    assert evidence["held"]["disabled"] and evidence["held"]["opacity"] < 1, evidence
+    assert evidence["final"]["disabled"] is False, evidence
+    assert bool(evidence["final"]["error"]) == reject, evidence
 
 
-@pytest.mark.no_browser
-@pytest.mark.xfail(strict=True, reason="F3/D3: gate_harness rename transition probe is not present in v0.6.10.")
-def test_d3_submit_control_is_visibly_disabled_then_reenabled_on_both_outcomes():
-    assert _rename_harness_available(), "F3 must measure computed disabled style before resolution and finally restoration on success and failure"
+@pytest.mark.browser
+def test_d4_rename_survives_released_stale_roster_without_reversal(browser, gate_live_server):
+    evidence = gate_harness.held_rename_roster_probe(browser, gate_live_server, stale=True)
+    assert evidence["target"] in evidence["final"]["sessions"], evidence
+    assert evidence["session"] not in evidence["final"]["sessions"], evidence
+    assert evidence["target"] in evidence["final"]["layout"], evidence
+    assert evidence["target"] in evidence["final"]["tabText"], evidence
+    assert evidence["target"] in evidence["final"]["active"], evidence
+    assert evidence["session"] not in evidence["final"]["active"], evidence
+    assert evidence["final"]["focused"] == evidence["target"], evidence
+    assert evidence["session"] not in evidence["final"]["serverSessions"], evidence
 
 
-@pytest.mark.no_browser
-@pytest.mark.xfail(strict=True, reason="F3/D4: gate_harness lacks the held-old-roster probe on v0.6.10.")
-def test_d4_rename_survives_released_stale_roster_without_reversal():
-    assert _rename_harness_available(), "F3 must hold old roster, apply rename/new roster, release stale roster, and retain only the new tab/layout/active/roster name"
-
-
-@pytest.mark.no_browser
-@pytest.mark.xfail(strict=True, reason="F3/D10: gate_harness held-response rename transition probe is not present in v0.6.10.")
-def test_d10_rename_optimistically_changes_tab_before_reply_and_has_bounded_reconciliation():
-    assert _rename_harness_available(), "F3 must prove optimistic rename before held reply, rejection rollback, and bounded final reconciliation"
+@pytest.mark.parametrize("reject", [False, True])
+@pytest.mark.browser
+def test_d10_rename_optimistically_changes_tab_before_reply_and_has_bounded_reconciliation(browser, gate_live_server, reject):
+    evidence = gate_harness.held_rename_roster_probe(browser, gate_live_server, reject=reject)
+    assert evidence["target"] in evidence["held"]["tabText"], evidence
+    expected = evidence["session"] if reject else evidence["target"]
+    assert expected in evidence["final"]["tabText"], evidence
+    assert expected in evidence["final"]["sessions"], evidence
 
 
 def _tmux(socket_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -118,6 +128,7 @@ def _request(port: int, path: str) -> tuple[int, bytes]:
 
 
 @pytest.mark.no_browser
+@pytest.mark.deprecated_python_server
 def test_gate_d5_kill_session_only_affects_registered_tmux_socket(monkeypatch, tmp_path, make_tmux_webterm_app, no_control_socket, isolated_yoagent_conversation_state):
     if shutil.which("tmux") is None:
         pytest.skip("tmux is not installed")
@@ -128,8 +139,10 @@ def test_gate_d5_kill_session_only_affects_registered_tmux_socket(monkeypatch, t
     for socket_path in (socket_one, socket_two):
         created = _tmux(socket_path, "new-session", "-d", "-s", session, "exec /bin/bash --noprofile --norc")
         assert created.returncode == 0, created.stderr or created.stdout
-    monkeypatch.setenv("YOLOMUX_TMUX_SOCKET", str(socket_one))
-    monkeypatch.setenv("YOLOMUX_TEST_AUTH_BYPASS", "1")
+    patch_isolated_product_environment(monkeypatch, {
+        "YOMUX_TMUX_SOCKET": str(socket_one),
+        "YOMUX_TEST_AUTH_BYPASS": "1",
+    })
     app = make_tmux_webterm_app([session])
     server = TmuxWebtermHTTPServer(("127.0.0.1", 0), app)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -149,13 +162,12 @@ def test_gate_d5_kill_session_only_affects_registered_tmux_socket(monkeypatch, t
 
 @pytest.mark.no_browser
 def test_gate_d6_destructive_default_server_policy_is_explicit(monkeypatch):
-    monkeypatch.delenv("YOLOMUX_TMUX_SOCKET", raising=False)
-    monkeypatch.delenv("YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER", raising=False)
+    clear_isolated_product_environment(monkeypatch, "TMUX_SOCKET", "TMUX_ALLOW_DEFAULT_SERVER")
     with pytest.raises(tmux_utils.TmuxSocketTargetError):
         tmux_utils.tmux_command(["kill-session", "-t", tmux_utils.tmux_session_target("yt-gate")])
     with pytest.raises(tmux_utils.TmuxSocketTargetError):
         tmux_utils.tmux_command(["kill-server"])
-    monkeypatch.setenv("YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER", "1")
+    patch_isolated_product_environment(monkeypatch, {"YOMUX_TMUX_ALLOW_DEFAULT_SERVER": "1"})
     exact = tmux_utils.tmux_session_target("yt-gate")
     assert exact == "=yt-gate:"
     assert tmux_utils.tmux_command(["kill-session", "-t", exact]) == ["tmux", "kill-session", "-t", exact]
@@ -168,6 +180,7 @@ def test_gate_d6_destructive_default_server_policy_is_explicit(monkeypatch):
 
 @pytest.mark.gate_serial
 @pytest.mark.no_browser
+@pytest.mark.deprecated_python_server
 def test_gate_d7_kill_session_api_returns_promptly_and_removes_scoped_session(monkeypatch, tmp_path, make_tmux_webterm_app, no_control_socket, isolated_yoagent_conversation_state):
     if shutil.which("tmux") is None:
         pytest.skip("tmux is not installed")
@@ -175,8 +188,10 @@ def test_gate_d7_kill_session_api_returns_promptly_and_removes_scoped_session(mo
     session = f"yt-{uuid.uuid4().hex[:12]}"
     created = _tmux(socket_path, "new-session", "-d", "-s", session, "exec /bin/bash --noprofile --norc")
     assert created.returncode == 0, created.stderr or created.stdout
-    monkeypatch.setenv("YOLOMUX_TMUX_SOCKET", str(socket_path))
-    monkeypatch.setenv("YOLOMUX_TEST_AUTH_BYPASS", "1")
+    patch_isolated_product_environment(monkeypatch, {
+        "YOMUX_TMUX_SOCKET": str(socket_path),
+        "YOMUX_TEST_AUTH_BYPASS": "1",
+    })
     app = make_tmux_webterm_app([session])
     server = TmuxWebtermHTTPServer(("127.0.0.1", 0), app)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -1185,6 +1200,7 @@ def _run_tab_activation_native_echo_journey(browser, monkeypatch, tmp_path) -> d
 
 
 @pytest.mark.browser
+@pytest.mark.deprecated_python_server
 def test_s1_tab_activation_keeps_native_echo_live_while_cached_differ_renders(browser, monkeypatch, tmp_path):
     evidence = _run_tab_activation_native_echo_journey(browser, monkeypatch, tmp_path)
     print({key: evidence[key] for key in ("quiet", "quiet_timeline", "static_replacements", "busy", "phase_two", "phase_two_transition", "phase_two_state", "quiet_transition", "busy_transition", "busy_render_timeline", "differ_rows", "held_delay_ms")})

@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/keivenchang/yomux/internal/tmuxcmd"
 	"io"
 	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,8 +25,11 @@ const maxHostCommandOutput = 8 << 20
 // NewHostCommand creates a host collector command with the deterministic C
 // locale required by parsers of ps output.
 func NewHostCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
+	if filepath.Base(name) == "tmux" {
+		return tmuxcmd.Command(ctx, args...)
+	}
 	command := exec.CommandContext(ctx, name, args...)
-	if filepath.Base(name) == "ps" {
+	if filepath.Base(name) == "ps" || filepath.Base(name) == "df" {
 		command.Env = hostCommandEnvironment("LC_ALL", "C")
 	}
 	return command
@@ -78,6 +83,7 @@ type LinuxHostSources struct {
 const linuxProcessCensusCacheTTL = 500 * time.Millisecond
 
 const linuxClockTickQueryTimeout = 500 * time.Millisecond
+const maxDiskMounts = 512
 
 // DarwinHostSources adapts bounded macOS system commands and native Mach/libproc
 // snapshots to the common host collector boundary.
@@ -279,6 +285,10 @@ func (s *DarwinHostSources) GPU(ctx context.Context) ([]GPUDevice, error) {
 	return devices, nil
 }
 
+func (s *DarwinHostSources) Disk(ctx context.Context) ([]DiskUsageSample, error) {
+	return collectDiskUsageFromDF(ctx, s.run)
+}
+
 func darwinAvailableMemory(s *DarwinHostSources, ctx context.Context, total uint64) uint64 {
 	result, err := s.run(ctx, []string{"vm_stat"})
 	if err != nil || result.ExitCode != 0 {
@@ -435,11 +445,49 @@ func (s *LinuxHostSources) GPU(ctx context.Context) ([]GPUDevice, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	devices, ok := LinuxGPUDevices(HostCollectorInputs{ReadFile: s.readFile, ReadDir: s.readDir}, s.gpuRoot)
-	if !ok {
+	inputs := HostCollectorInputs{
+		ReadFile: s.readFile,
+		ReadDir:  s.readDir,
+		Run: func(args []string) (CommandOutput, error) {
+			if s.run == nil {
+				return CommandOutput{}, errors.New("Linux GPU command unavailable")
+			}
+			return s.run(ctx, args)
+		},
+	}
+	devices, _ := LinuxGPUDevices(inputs, s.gpuRoot)
+	if nvidiaDevices, ok := CollectNvidiaSMI(inputs); ok {
+		devices = withoutDuplicateNvidiaDRMDevices(devices, nvidiaDevices)
+		devices = append(devices, nvidiaDevices...)
+	}
+	if len(devices) == 0 {
 		return nil, errors.New("Linux GPU metrics unavailable")
 	}
 	return devices, nil
+}
+
+func withoutDuplicateNvidiaDRMDevices(drmDevices, nvidiaDevices []GPUDevice) []GPUDevice {
+	nvidiaPCIAddresses := make(map[string]struct{}, len(nvidiaDevices))
+	for _, device := range nvidiaDevices {
+		if device.pciAddress != "" {
+			nvidiaPCIAddresses[device.pciAddress] = struct{}{}
+		}
+	}
+	result := make([]GPUDevice, 0, len(drmDevices))
+	for _, device := range drmDevices {
+		if _, duplicate := nvidiaPCIAddresses[device.pciAddress]; device.pciAddress != "" && duplicate {
+			continue
+		}
+		result = append(result, device)
+	}
+	return result
+}
+
+func (s *LinuxHostSources) Disk(ctx context.Context) ([]DiskUsageSample, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return collectDiskUsageFromDF(ctx, s.run)
 }
 
 type unavailableHostSources struct{}
@@ -452,6 +500,183 @@ func (unavailableHostSources) Memory(context.Context) (MemoryCounters, []Process
 }
 func (unavailableHostSources) GPU(context.Context) ([]GPUDevice, error) {
 	return nil, errors.New("host sources unavailable on this platform")
+}
+func (unavailableHostSources) Disk(context.Context) ([]DiskUsageSample, error) {
+	return nil, errors.New("host sources unavailable on this platform")
+}
+
+func ParseLinuxMountInfo(data []byte) ([]string, bool) {
+	mounts := make(map[string]struct{})
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 10 {
+			return nil, false
+		}
+		mountpoint, ok := unescapeMountInfoPath(fields[4])
+		if !ok || !filepath.IsAbs(mountpoint) || len(mountpoint) > 4096 {
+			return nil, false
+		}
+		mounts[mountpoint] = struct{}{}
+		if len(mounts) > maxDiskMounts {
+			return nil, false
+		}
+	}
+	return sortedMountpoints(mounts), true
+}
+
+func unescapeMountInfoPath(value string) (string, bool) {
+	var result strings.Builder
+	for index := 0; index < len(value); index++ {
+		if value[index] != '\\' {
+			result.WriteByte(value[index])
+			continue
+		}
+		if index+3 >= len(value) {
+			return "", false
+		}
+		code := value[index+1 : index+4]
+		var decoded byte
+		switch code {
+		case "040":
+			decoded = ' '
+		case "011":
+			decoded = '\t'
+		case "012":
+			decoded = '\n'
+		case "134":
+			decoded = '\\'
+		default:
+			return "", false
+		}
+		result.WriteByte(decoded)
+		index += 3
+	}
+	return result.String(), true
+}
+
+func parseFstabMountpoints(data []byte) []string {
+	mounts := make(map[string]struct{})
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		mountpoint, ok := unescapeMountInfoPath(fields[1])
+		if !ok || !filepath.IsAbs(mountpoint) || len(mountpoint) > 4096 {
+			continue
+		}
+		mounts[mountpoint] = struct{}{}
+		if len(mounts) >= maxDiskMounts {
+			break
+		}
+	}
+	return sortedMountpoints(mounts)
+}
+
+func sortedMountpoints(mounts map[string]struct{}) []string {
+	result := make([]string, 0, len(mounts))
+	for mountpoint := range mounts {
+		result = append(result, mountpoint)
+	}
+	sort.Strings(result)
+	return result
+}
+
+// collectDiskUsageFromDF uses df's own visible filesystem list as the chart's
+// source of truth. Mount tables also contain implementation mounts that df
+// intentionally omits, which should not become graph series.
+func collectDiskUsageFromDF(ctx context.Context, run func(context.Context, []string) (CommandOutput, error)) ([]DiskUsageSample, error) {
+	if run == nil {
+		return nil, errors.New("disk probe unavailable")
+	}
+	result, err := run(ctx, []string{"df", "-kP"})
+	samples, ok := ParseDiskUsageDFListing(result.Stdout)
+	if result.ExitCode != 0 {
+		err = errors.Join(err, errors.New("disk usage partially unavailable"))
+	}
+	if !ok {
+		err = errors.Join(err, errors.New("invalid disk usage listing"))
+	}
+	return samples, err
+}
+
+// ParseDiskUsageDFListing parses the POSIX one-filesystem-per-line form of
+// df -kP and retains only mounts that df reports. It locates the four numeric
+// columns from the right so filesystem names and mountpoints may contain
+// whitespace.
+func ParseDiskUsageDFListing(data []byte) ([]DiskUsageSample, bool) {
+	if len(data) == 0 || len(data) > maxHostCommandOutput {
+		return nil, false
+	}
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	if len(lines) < 2 || len(lines) > maxDiskMounts+1 {
+		return nil, false
+	}
+	valid := true
+	samples := make([]DiskUsageSample, 0, len(lines)-1)
+	seen := make(map[string]struct{}, len(lines)-1)
+	for _, line := range lines[1:] {
+		fields := strings.Fields(line)
+		positions := make([]int, 0, len(fields))
+		offset := 0
+		for _, field := range fields {
+			start := strings.Index(line[offset:], field) + offset
+			positions = append(positions, start)
+			offset = start + len(field)
+		}
+		if len(fields) < 6 {
+			valid = false
+			continue
+		}
+		percentIndex := -1
+		for index := 4; index < len(fields)-1; index++ {
+			mountpoint := line[positions[index+1]:]
+			if !filepath.IsAbs(mountpoint) {
+				continue
+			}
+			marker := strings.ToLower(fields[index])
+			if strings.HasSuffix(marker, "%") || marker == "-" || marker == "n/a" || marker == "na" || marker == "?" {
+				percentIndex = index
+				break
+			}
+		}
+		if percentIndex < 4 {
+			valid = false
+			continue
+		}
+		blocks, blocksErr := strconv.ParseUint(fields[percentIndex-3], 10, 64)
+		used, usedErr := strconv.ParseUint(fields[percentIndex-2], 10, 64)
+		available, availableErr := strconv.ParseUint(fields[percentIndex-1], 10, 64)
+		percentText := strings.TrimSuffix(fields[percentIndex], "%")
+		percent, percentErr := strconv.ParseUint(percentText, 10, 8)
+		mountpoint := line[positions[percentIndex+1]:]
+		if !filepath.IsAbs(mountpoint) || len(mountpoint) > 4096 {
+			valid = false
+			continue
+		}
+		if _, exists := seen[mountpoint]; exists {
+			continue
+		}
+		seen[mountpoint] = struct{}{}
+		sample := DiskUsageSample{
+			SourceID:   diskMountSourceID(mountpoint),
+			Mountpoint: mountpoint,
+		}
+		if blocksErr != nil || usedErr != nil || availableErr != nil || percentErr != nil || blocks == 0 || used > blocks || available > blocks || percent > 100 || used > ^uint64(0)-available || used+available == 0 || used > ^uint64(0)/1024 || used+available > ^uint64(0)/1024 {
+			sample.Reason = "invalid_sample"
+		} else {
+			sample.UsedBytes = used * 1024
+			sample.CapacityBytes = (used + available) * 1024
+		}
+		samples = append(samples, sample)
+	}
+	if len(samples) == 0 {
+		return nil, false
+	}
+	return samples, valid
 }
 
 func boundedOSReadFile(name string) ([]byte, error) {

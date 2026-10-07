@@ -13,9 +13,13 @@ go_library(
         ["*.go"],
         exclude = ["*_test.go"],
     ),
+    cgo = True,
     importpath = "github.com/keivenchang/yomux/internal/stats",
     deps = [
+        "//internal/atomicfile:atomicfile_lib",
+        "//internal/mutablefs:mutablefs_lib",
         "//internal/productenv:productenv_lib",
+        "//internal/tmuxcmd:tmuxcmd_lib",
         SQLITE,
         "@org_golang_x_sys//unix",
     ],

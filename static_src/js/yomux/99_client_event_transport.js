@@ -456,6 +456,10 @@ function clientPushEventCoalesceKey(type, payload = {}) {
     const operationId = String(payload?.operation?.id || '');
     if (operationId) return `${key}:${operationId}`;
   }
+  if (type === 'background_refresh_done' && payload?.role === 'session-files') {
+    const cacheView = String(payload.cache_view_id || '');
+    if (cacheView) return `${key}:${cacheView}`;
+  }
   const session = clientPushEventSessionKey(payload);
   if (session) return `${key}:${session}`;
   return key;

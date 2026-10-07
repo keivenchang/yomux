@@ -23,14 +23,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from tools.product_environment import product_env, product_env_name
 from tools.instance_isolation import normalize_yomux_environment
 
 MIGRATION_HOME = Path(".local/share/yomux-migrations")
 LEGACY_ROOT_KEYS = {
-    "config": "YOLOMUX_CONFIG_DIR",
-    "state": "YOLOMUX_STATE_DIR",
-    "cache": "YOLOMUX_CACHE_DIR",
-    "ca": "YOLOMUX_CA_DIR",
+    "config": product_env_name('CONFIG_DIR'),
+    "state": product_env_name('STATE_DIR'),
+    "cache": product_env_name('CACHE_DIR'),
+    "ca": product_env_name('CA_DIR'),
 }
 
 
@@ -79,18 +80,17 @@ def root_inventory(source: Path, target: Path, label: str) -> dict[str, Any]:
 
 def default_roots(home: Path, environ: dict[str, str]) -> list[dict[str, str]]:
     environ = normalize_yomux_environment(environ)
-    if environ.get("YOMUX_ROOT") or environ.get("YOLOMUX_ROOT"):
+    if product_env('ROOT', environ=environ):
         return []
     roots = []
     definitions = (
-        ("config", ".config/yolomux", ".config/yomux", "YOMUX_CONFIG_DIR"),
-        ("state", ".local/state/yolomux", ".local/state/yomux", "YOMUX_STATE_DIR"),
-        ("cache", ".cache/yolomux", ".cache/yomux", "YOMUX_CACHE_DIR"),
-        ("ca", ".local/share/yolomux-ca", ".local/share/yomux-ca", "YOMUX_CA_DIR"),
+        ("config", ".config/yolomux", ".config/yomux", "CONFIG_DIR"),
+        ("state", ".local/state/yolomux", ".local/state/yomux", "STATE_DIR"),
+        ("cache", ".cache/yolomux", ".cache/yomux", "CACHE_DIR"),
+        ("ca", ".local/share/yolomux-ca", ".local/share/yomux-ca", "CA_DIR"),
     )
-    for label, source, target, new_key in definitions:
-        old_key = LEGACY_ROOT_KEYS[label]
-        if environ.get(new_key) or environ.get(old_key):
+    for label, source, target, setting in definitions:
+        if product_env(setting, environ=environ):
             continue
         if label == "cache" and environ.get("XDG_CACHE_HOME"):
             cache_home = Path(environ["XDG_CACHE_HOME"]).expanduser()
@@ -200,7 +200,8 @@ def process_uses_migrated_roots(
         candidate = path.expanduser().resolve(strict=False)
         return any(candidate == root or candidate.is_relative_to(root) or root.is_relative_to(candidate) for root in selected)
 
-    for key in ("YOMUX_ROOT", "YOLOMUX_ROOT", "YOMUX_CONFIG_DIR", "YOLOMUX_CONFIG_DIR", "YOMUX_STATE_DIR", "YOLOMUX_STATE_DIR", "YOMUX_CACHE_DIR", "YOLOMUX_CACHE_DIR", "YOMUX_CA_DIR", "YOLOMUX_CA_DIR"):
+    for setting in ("ROOT", "CONFIG_DIR", "STATE_DIR", "CACHE_DIR", "CA_DIR"):
+        key = product_env_name(setting)
         value = environment.get(key, "")
         if value and overlaps(Path(value)):
             return True
@@ -246,7 +247,7 @@ def configured_go_binary_matches(command: str, environment: dict[str, str]) -> b
     if not arguments:
         return False
     executable = Path(arguments[0]).expanduser().resolve(strict=False)
-    configured = normalize_yomux_environment(environment).get("YOMUX_GO_BINARY", "").strip()
+    configured = product_env('GO_BINARY', "", environ=environment).strip()
     return bool(configured) and executable == Path(configured).expanduser().resolve(strict=False)
 
 
