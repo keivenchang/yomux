@@ -85,7 +85,7 @@ class AuthMixin:
 
         Checks admission BEFORE the PBKDF2 verifier, so a blocked attempt never hashes;
         records the outcome after so the username staged-backoff advances on failure and
-        resets on success while the network buckets keep their charge. Returns
+        resets on success while successful attempts return their network reservation. Returns
         (identity_or_None, decision); when `decision.admitted` is False the caller must
         emit a generic 429 without having leaked whether the account exists."""
         limiter = self.login_rate_limiter()

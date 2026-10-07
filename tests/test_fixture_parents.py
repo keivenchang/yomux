@@ -11,6 +11,7 @@ from tests.helpers.prompt_corpus import PromptCorpus
 from tests.helpers.prompt_corpus import PromptCorpusPreset
 
 
+@pytest.mark.deprecated_python_server
 def test_fixture_http_server_binds_ephemeral_port_preserves_headers_and_stops_thread(monkeypatch):
     app = SimpleNamespace(sessions=[], dangerously_yolo=False)
     monkeypatch.setenv("YOLOMUX_TEST_AUTH_BYPASS", "1")

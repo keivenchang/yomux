@@ -62,6 +62,7 @@ def test_n4_live_source_revision_change_restarts_without_orphaning_old_backends(
 
 
 @pytest.mark.browser
+@pytest.mark.deprecated_python_server
 def test_n5_real_terminal_wrap_keeps_full_paths_and_passive_misses_are_not_errors(
     browser,
     monkeypatch,

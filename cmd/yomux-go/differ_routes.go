@@ -19,6 +19,8 @@ import (
 
 	"github.com/keivenchang/yomux/internal/cache"
 	"github.com/keivenchang/yomux/internal/finder"
+	"github.com/keivenchang/yomux/internal/productenv"
+	"github.com/keivenchang/yomux/internal/stats"
 )
 
 const maxSessionFilesHours = 24.0 * 14.0
@@ -27,16 +29,22 @@ const maxClaudeTranscriptPathCacheEntries = 512
 const maxSessionFilesRepositoryPaths = 128
 
 type claudeTranscriptLookupCache struct {
-	mu    sync.Mutex
-	paths *cache.LRU[string, string]
-	find  func(string, string) string
+	mu          sync.Mutex
+	paths       *cache.LRU[string, string]
+	find        func(string, string) string
+	discoveries *cache.LRU[string, *stats.TranscriptPathDiscovery]
 }
 
 func newClaudeTranscriptLookupCache(find func(string, string) string) *claudeTranscriptLookupCache {
-	return &claudeTranscriptLookupCache{
-		paths: cache.NewLRU[string, string](maxClaudeTranscriptPathCacheEntries),
-		find:  find,
+	lookup := &claudeTranscriptLookupCache{
+		paths:       cache.NewLRU[string, string](maxClaudeTranscriptPathCacheEntries),
+		find:        find,
+		discoveries: cache.NewLRU[string, *stats.TranscriptPathDiscovery](maxClaudeTranscriptPathCacheEntries),
 	}
+	if lookup.find == nil {
+		lookup.find = lookup.findOnDisk
+	}
+	return lookup
 }
 
 func (lookup *claudeTranscriptLookupCache) transcriptPath(root, sessionID string) string {
@@ -68,7 +76,7 @@ func (lookup *claudeTranscriptLookupCache) transcriptPath(root, sessionID string
 	return path
 }
 
-var claudeTranscriptPaths = newClaudeTranscriptLookupCache(findClaudeTranscriptOnDisk)
+var claudeTranscriptPaths = newClaudeTranscriptLookupCache(nil)
 
 type sessionFilesRequest struct {
 	session   string
@@ -97,7 +105,7 @@ func claudeSessionRoots() (string, string) {
 		home, _ = os.UserHomeDir()
 	}
 	sessionsRoot := filepath.Join(home, ".claude", "sessions")
-	transcriptsRoot := strings.TrimSpace(os.Getenv("YOLOMUX_CLAUDE_TRANSCRIPT_ROOT"))
+	transcriptsRoot := strings.TrimSpace(productenv.Value("CLAUDE_TRANSCRIPT_ROOT"))
 	if transcriptsRoot == "" {
 		transcriptsRoot = filepath.Join(home, ".claude", "projects")
 	}
@@ -112,27 +120,27 @@ func findClaudeTranscript(transcriptsRoot, sessionID string) string {
 }
 
 func findClaudeTranscriptOnDisk(transcriptsRoot, sessionID string) string {
-	wanted := sessionID + ".jsonl"
-	entries := 0
-	var found string
-	_ = filepath.WalkDir(transcriptsRoot, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil || entry == nil || found != "" {
-			return nil
+	return claudeTranscriptPaths.findOnDisk(transcriptsRoot, sessionID)
+}
+
+func (lookup *claudeTranscriptLookupCache) findOnDisk(transcriptsRoot, sessionID string) string {
+	key := transcriptsRoot + "\x00" + sessionID
+	lookup.mu.Lock()
+	discovery, ok := lookup.discoveries.Get(key)
+	if !ok {
+		discovery = &stats.TranscriptPathDiscovery{}
+		lookup.discoveries.Set(key, discovery)
+	}
+	lookup.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	paths, _ := discovery.Next(ctx, transcriptsRoot, maxClaudeTranscriptLookupEntries)
+	for _, path := range paths {
+		if filepath.Base(path) == sessionID+".jsonl" {
+			return path
 		}
-		if entry.IsDir() {
-			return nil
-		}
-		entries++
-		if entry.Name() == wanted {
-			found = filepath.Clean(path)
-			return filepath.SkipAll
-		}
-		if entries >= maxClaudeTranscriptLookupEntries {
-			return filepath.SkipAll
-		}
-		return nil
-	})
-	return found
+	}
+	return ""
 }
 
 func resolveClaudePaneIdentity(pid, fallbackCWD string) (string, string, string) {
@@ -209,7 +217,7 @@ func firstQueryValue(values []string) string {
 }
 
 func sessionFilesRepositoryPaths(values []string) []string {
-	paths := make([]string, 0, minInt(len(values), maxSessionFilesRepositoryPaths))
+	paths := make([]string, 0, min(len(values), maxSessionFilesRepositoryPaths))
 	seen := make(map[string]bool, len(values))
 	for _, raw := range values {
 		path := strings.TrimSpace(raw)
@@ -227,7 +235,7 @@ func sessionFilesRepositoryPaths(values []string) []string {
 }
 
 func sessionFilesStreamRoots(visiblePaths, liveRoots []string) []string {
-	roots := make([]string, 0, minInt(len(visiblePaths)+len(liveRoots), maxSessionFilesRepositoryPaths))
+	roots := make([]string, 0, min(len(visiblePaths)+len(liveRoots), maxSessionFilesRepositoryPaths))
 	seen := make(map[string]bool, len(visiblePaths)+len(liveRoots))
 	for _, values := range [][]string{visiblePaths, liveRoots} {
 		for _, raw := range values {
@@ -282,11 +290,6 @@ func parseSessionFilesRepoRefs(raw string) map[string]map[string]string {
 		return nil
 	}
 	return result
-}
-
-func (s *server) sessionFilesPaneRoots(session string) ([]string, *finder.Error) {
-	roots, _, finderErr := s.sessionFilesPaneInputs(session)
-	return roots, finderErr
 }
 
 func (s *server) sessionFilesSessionIdentity(session string) (string, bool) {
@@ -590,14 +593,19 @@ func (s *server) sessionFilesStream(w http.ResponseWriter, r *http.Request) {
 	admission := s.admitLiveSessionFilesCache(request, viewID)
 	request = admission.request
 	if admission.hit {
-		for _, chunk := range sessionFilesCachedChunks(admission.record.Payload) {
+		payload := sessionFilesCachePayload(admission.record)
+		if payload == nil {
+			_ = writeEvent("error", map[string]any{"error": "cached session-files payload is invalid"})
+			return
+		}
+		for _, chunk := range sessionFilesCachedChunks(payload) {
 			if err := writeEvent("repo", chunk); err != nil {
 				return
 			}
 		}
 		_ = writeEvent("done", map[string]any{
-			"session": request.session, "loaded": true, "errors": []any{}, "warnings": admission.record.Payload["warnings"],
-			"from_ref": admission.record.Payload["from_ref"], "to_ref": admission.record.Payload["to_ref"],
+			"session": request.session, "loaded": true, "errors": []any{}, "warnings": payload["warnings"],
+			"from_ref": payload["from_ref"], "to_ref": payload["to_ref"],
 			"cache": sessionFilesStreamCacheMetadata(admission.record, descriptor, viewID, admission.stale, admission.refreshing, time.Now()),
 		})
 		return

@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
@@ -45,6 +44,7 @@ import (
 	"github.com/keivenchang/yomux/internal/finder"
 	"github.com/keivenchang/yomux/internal/productenv"
 	"github.com/keivenchang/yomux/internal/stats"
+	"github.com/keivenchang/yomux/internal/tmuxcmd"
 	"github.com/keivenchang/yomux/internal/work"
 )
 
@@ -57,163 +57,117 @@ func goRuntimeLabel() string {
 }
 
 type server struct {
-	runtimeMemory                      runtimeMemoryState
-	root                               string
-	host                               string
-	port                               int
-	sessionFilesListener               string
-	dangerouslyYolo                    bool
-	config                             string
-	httpMode                           bool
-	mu                                 sync.Mutex
-	children                           map[*exec.Cmd]struct{}
-	events                             *eventBroker
-	operationsMu                       sync.Mutex
-	operations                         map[string]*goOperation
-	operationsPath                     string
-	operationsJournal                  string
-	eventLogPath                       string
-	background                         *goBackgroundOwner
-	finder                             *finder.Service
-	finderJobs                         *work.Scheduler
-	finderBulkJobs                     *work.Scheduler
-	finderStreamJobs                   *work.Scheduler
-	capabilities                       *capabilities.Catalog
-	statsPath                          string
-	statsNow                           func() time.Time
-	statsHeartbeat                     time.Duration
-	refillMu                           sync.Mutex
-	refillRoot                         string
-	refillContext                      context.Context
-	refillRun                          func(context.Context, time.Time, func(string)) (stats.AgentHistoryRefillResult, error)
-	statsWriter                        *stats.Writer
-	statsService                       *stats.StatsService
-	statsLifecycle                     *stats.Lifecycle
-	statsRuntimeRecorder               *statsRuntimeRecorder
-	syntheticHostInputs                bool
-	statsMigration                     map[string]any
-	statsProcessSourceOnce             sync.Once
-	statsProcessSource                 string
-	statsDeltaMu                       sync.Mutex
-	statsDeltaRevisions                map[statsDeltaKey]map[int64]int64
-	statsDeltaNextRevision             map[statsDeltaKey]int64
-	statsDemand                        atomic.Int64
-	hostCollector                      *stats.HostCollector
-	agentStatusCollector               *stats.AgentStatusCollector
-	tokenCollector                     *stats.AgentTokenCollector
-	pricing                            *stats.PricingCatalog
-	pricingRefreshMu                   sync.Mutex
-	pricingRefreshing                  bool
-	pricingRefreshState                map[string]any
-	pricingRefreshEpoch                uint64
-	metadataMu                         sync.Mutex
-	metadataTopologyMu                 sync.Mutex
-	metadataGeneration                 uint64
-	metadataNextGeneration             uint64
-	metadataTopologyGeneration         uint64
-	metadataTopologySignature          string
-	metadataTopologySessions           []string
-	metadataTopologyIdentities         map[string]string
-	metadataTopologyRenames            []map[string]any
-	metadataPayload                    map[string]any
-	metadataBuiltAt                    time.Time
-	metadataBuilding                   bool
-	metadataBuildingGeneration         uint64
-	metadataBuildingTopologyGeneration uint64
-	metadataQueuedGeneration           uint64
-	metadataQueuedSessions             []string
-	metadataQueuedIdentities           map[string]string
-	metadataQueuedRosterErr            error
-	metadataQueuedTopologyGeneration   uint64
-	metadataEnrichmentFn               func([]string) (map[string]map[string]any, error)
-	gitMetadataSnapshotFn              func(string) (goGitSnapshot, bool)
-	ignoreSizeMu                       sync.Mutex
-	ignoreSizeChecked                  bool
-	ignoreSizeSupported                bool
-	sessionPlanGeneration              atomic.Int64
-	logRing                            *goLogRing
-	rootLease                          *os.File
-	shutdownOnce                       sync.Once
-	startedAt                          time.Time
-	healthLedgerMu                     sync.Mutex
-	healthLedger                       *goHealthLedger
-	healthLifecycle                    *goHealthLifecycle
-	authMu                             sync.Mutex
-	authFailures                       map[string]authFailure
-	homeRendererMu                     sync.Mutex
-	homeRenderer                       *pythonHomeRenderer
-	performanceMu                      sync.Mutex
-	performanceRecords                 []goPerformanceRecord
-	performanceCaptureTotal            uint64
-	state                              string
-	finderBackgroundJobs               *work.Scheduler
-	sessionFilesCache                  sessionFilesCacheState
-	tmuxRosterMu                       sync.RWMutex
-	tmuxRosterFetchMu                  sync.Mutex
-	tmuxRoster                         []string
-	tmuxRosterIdentities               map[string]string
-	tmuxRosterKnown                    bool
-	tmuxRosterRevision                 uint64
-	tmuxRosterSampledAt                time.Time
-	tmuxSessionRosterFn                func() ([]string, error)
-	tmuxRosterWatchCancel              context.CancelFunc
-	tmuxRosterWatchDone                chan struct{}
-	tmuxSessionActivityFn              func() (map[string]float64, error)
-	tmuxWindowActivityFn               func() (map[string]float64, error)
-	processEntriesFn                   func() ([]procEntry, error)
-	processEntriesCacheMu              sync.Mutex
-	processEntriesCacheAt              time.Time
-	processEntriesCache                []procEntry
-	processEntriesCacheValid           bool
-	processEntriesCacheHits            uint64
-	processEntriesCacheMisses          uint64
-	processEntriesCacheLastDuration    time.Duration
-	processEntriesCacheDurationTotal   time.Duration
-	childProcessEntriesFn              func(int) ([]procEntry, error)
-	agentStatusClassifier              func(context.Context, stats.AgentStatusRequest) stats.AgentStatusResult
-	processMetricsFn                   func(time.Time) goProcessMetrics
-	childProcessMetricsFn              func(time.Time) []goChildProcessMetric
-	goroutineCountFn                   func() int
-	agentInventoryMu                   sync.Mutex
-	agentInventoryAt                   time.Time
-	agentInventoryRecords              []stats.AgentRecord
-	agentInventoryErrors               []error
-	agentInventoryCacheValid           bool
-	agentInventoryCacheHits            uint64
-	agentInventoryCacheMisses          uint64
-	agentInventoryLastDuration         time.Duration
-	agentInventoryDurationTotal        time.Duration
-	processMetricsCacheMu              sync.Mutex
-	processMetricsCacheAt              time.Time
-	processMetricsCache                goProcessMetrics
-	processMetricsCacheValid           bool
-	processMetricsCacheHits            uint64
-	processMetricsCacheMisses          uint64
-	processMetricsLastDuration         time.Duration
-	processMetricsDurationTotal        time.Duration
-	processMetricsLastThreadRows       uint64
-	processMetricsLastChildRows        uint64
-	processMetricsMu                   sync.Mutex
-	processMetricsAt                   time.Time
-	processCPUSeconds                  float64
-	processCPUValid                    bool
-	childCPU                           map[string]childCPUState
-	threadCPU                          map[string]childCPUState
-}
+	runtimeMemory        runtimeMemoryState
+	root                 string
+	host                 string
+	port                 int
+	sessionFilesListener string
+	dangerouslyYolo      bool
+	config               string
+	httpMode             bool
+	mu                   sync.Mutex
+	children             map[*exec.Cmd]struct{}
+	events               *eventBroker
 
-type tmuxSessionRosterSnapshot struct {
-	sessions   []string
-	identities map[string]string
-	known      bool
-	revision   uint64
-}
+	eventLogPath           string
+	background             *goBackgroundOwner
+	finder                 *finder.Service
+	finderJobs             *work.Scheduler
+	finderBulkJobs         *work.Scheduler
+	finderStreamJobs       *work.Scheduler
+	capabilities           *capabilities.Catalog
+	statsPath              string
+	statsNow               func() time.Time
+	statsHeartbeat         time.Duration
+	refillMu               sync.Mutex
+	refillRoot             string
+	refillContext          context.Context
+	refillRun              func(context.Context, time.Time, func(string)) (stats.AgentHistoryRefillResult, error)
+	statsWriter            *stats.Writer
+	statsService           *stats.StatsService
+	statsLifecycle         *stats.Lifecycle
+	statsRuntimeRecorder   *statsRuntimeRecorder
+	syntheticHostInputs    bool
+	statsMigration         map[string]any
+	statsProcessSourceOnce sync.Once
+	statsProcessSource     string
+	statsDeltaMu           sync.Mutex
+	statsDeltaRevisions    map[statsDeltaKey]map[int64]int64
+	statsDeltaNextRevision map[statsDeltaKey]int64
+	statsDemand            atomic.Int64
+	hostCollector          *stats.HostCollector
+	agentStatusCollector   *stats.AgentStatusCollector
+	tokenCollector         *stats.AgentTokenCollector
+	pricing                *stats.PricingCatalog
+	pricingRefreshMu       sync.Mutex
+	pricingRefreshing      bool
+	pricingRefreshState    map[string]any
+	pricingRefreshEpoch    uint64
 
-type goTmuxTopology struct {
-	sessions       []string
-	identities     map[string]string
-	generation     uint64
-	rosterRevision uint64
-	renames        []map[string]any
+	gitMetadataSnapshotFn func(string) (goGitSnapshot, bool)
+	ignoreSizeMu          sync.Mutex
+	ignoreSizeChecked     bool
+	ignoreSizeSupported   bool
+	sessionPlanGeneration atomic.Int64
+	logRing               *goLogRing
+	rootLease             *os.File
+	shutdownOnce          sync.Once
+	startedAt             time.Time
+	healthLedgerMu        sync.Mutex
+	healthLedger          *goHealthLedger
+	healthLifecycle       *goHealthLifecycle
+
+	performanceMu           sync.Mutex
+	performanceRecords      []goPerformanceRecord
+	performanceCaptureTotal uint64
+	state                   string
+	finderBackgroundJobs    *work.Scheduler
+	sessionFilesCache       sessionFilesCacheState
+
+	tmuxWindowActivityFn             func() (map[string]float64, error)
+	processEntriesFn                 func() ([]procEntry, error)
+	processEntriesCacheMu            sync.Mutex
+	processEntriesCacheAt            time.Time
+	processEntriesCache              []procEntry
+	processEntriesCacheValid         bool
+	processEntriesCacheHits          uint64
+	processEntriesCacheMisses        uint64
+	processEntriesCacheLastDuration  time.Duration
+	processEntriesCacheDurationTotal time.Duration
+	childProcessEntriesFn            func(int) ([]procEntry, error)
+	agentStatusClassifier            func(context.Context, stats.AgentStatusRequest) stats.AgentStatusResult
+	processMetricsFn                 func(time.Time) goProcessMetrics
+	childProcessMetricsFn            func(time.Time) []goChildProcessMetric
+	goroutineCountFn                 func() int
+	agentInventoryMu                 sync.Mutex
+	agentInventoryAt                 time.Time
+	agentInventoryRecords            []stats.AgentRecord
+	agentInventoryErrors             []error
+	agentInventoryCacheValid         bool
+	agentInventoryCacheHits          uint64
+	agentInventoryCacheMisses        uint64
+	agentInventoryLastDuration       time.Duration
+	agentInventoryDurationTotal      time.Duration
+	processMetricsCacheMu            sync.Mutex
+	processMetricsCacheAt            time.Time
+	processMetricsCache              goProcessMetrics
+	processMetricsCacheValid         bool
+	processMetricsCacheHits          uint64
+	processMetricsCacheMisses        uint64
+	processMetricsLastDuration       time.Duration
+	processMetricsDurationTotal      time.Duration
+	processMetricsLastThreadRows     uint64
+	processMetricsLastChildRows      uint64
+	processMetricsMu                 sync.Mutex
+	processMetricsAt                 time.Time
+	processCPUSeconds                float64
+	processCPUValid                  bool
+	childCPU                         map[string]childCPUState
+	threadCPU                        map[string]childCPUState
+	authState
+	pythonHTMLState
+	tmuxMetadataState
+	operationState
 }
 
 const goPerformanceRecordLimit = 4096
@@ -299,139 +253,6 @@ type goChildProcessMetric struct {
 	RSSReason     string
 }
 
-type authFailure struct {
-	count   int
-	expires time.Time
-}
-
-type goOperation struct {
-	ID                   string         `json:"id"`
-	State                string         `json:"state"`
-	Epoch                string         `json:"epoch"`
-	Seq                  int            `json:"seq"`
-	RequestID            string         `json:"request_id,omitempty"`
-	Route                string         `json:"route,omitempty"`
-	Kind                 string         `json:"kind,omitempty"`
-	Context              map[string]any `json:"context,omitempty"`
-	Progress             map[string]any `json:"progress,omitempty"`
-	Receipt              map[string]any `json:"receipt,omitempty"`
-	TerminalEvent        map[string]any `json:"terminal_event,omitempty"`
-	CreatedAt            int64          `json:"created_at,omitempty"`
-	DeadlineAt           int64          `json:"deadline_at,omitempty"`
-	TerminalAt           int64          `json:"terminal_at,omitempty"`
-	Producer             map[string]any `json:"producer,omitempty"`
-	ProducerGeneration   int            `json:"producer_generation,omitempty"`
-	Schedule             map[string]any `json:"schedule,omitempty"`
-	Result               map[string]any `json:"result,omitempty"`
-	HTTPStatus           int            `json:"http_status,omitempty"`
-	Acknowledged         bool           `json:"acknowledged,omitempty"`
-	DeliveryAcknowledged bool           `json:"delivery_acknowledged,omitempty"`
-	EventPublished       bool           `json:"event_published,omitempty"`
-	CancelRequested      bool           `json:"cancel_requested,omitempty"`
-	UpdatedAt            int64          `json:"updated_at,omitempty"`
-}
-
-type operationJournalEntry struct {
-	Version      int            `json:"version"`
-	Type         string         `json:"type"`
-	Record       *goOperation   `json:"record"`
-	Operations   []*goOperation `json:"operations"`
-	ID           string         `json:"id"`
-	Acknowledged bool           `json:"acknowledged"`
-	Acks         []operationAck `json:"acks"`
-}
-
-type clientEvent struct {
-	ID              int            `json:"id"`
-	Type            string         `json:"type"`
-	Time            float64        `json:"time"`
-	Payload         map[string]any `json:"payload"`
-	Epoch           string         `json:"epoch"`
-	Resource        string         `json:"resource"`
-	Base            int            `json:"base_resource_revision"`
-	Revision        int            `json:"resource_revision"`
-	Replay          bool           `json:"replay,omitempty"`
-	RepairResources []string       `json:"repair_resources,omitempty"`
-}
-
-type eventJournalEntry struct {
-	Version           int            `json:"version"`
-	Type              string         `json:"type"`
-	Event             *clientEvent   `json:"event"`
-	Events            []clientEvent  `json:"events"`
-	ResourceRevisions map[string]int `json:"resource_revisions"`
-	NextID            int            `json:"next_id"`
-}
-
-type eventBroker struct {
-	mu                  sync.Mutex
-	epoch               string
-	nextID              int
-	revisions           map[string]int
-	retained            map[string]clientEvent
-	terminalEvents      map[string]clientEvent
-	events              []clientEvent
-	subscribers         map[chan clientEvent]struct{}
-	channels            map[chan clientEvent]map[string]bool
-	channelFilters      map[chan clientEvent]bool
-	clientIDs           map[chan clientEvent]string
-	clientStats         map[chan clientEvent]*eventSubscriberStats
-	pending             map[chan clientEvent]map[string]clientEvent
-	repair              map[chan clientEvent]map[string]bool
-	journalPath         string
-	published           int
-	delivered           int
-	filtered            int
-	coalesced           int
-	dropped             int
-	replayed            int
-	heartbeats          int
-	lastHeartbeatAt     float64
-	publishedBytes      int
-	deliveredBytes      int
-	filteredBytes       int
-	publishedByType     map[string]eventMetric
-	deliveredByType     map[string]eventMetric
-	filteredByType      map[string]eventMetric
-	publishedByResource map[string]eventMetric
-	deliveredByResource map[string]eventMetric
-	coalescedByResource map[string]eventMetric
-	droppedByResource   map[string]eventMetric
-	queueSize           int
-}
-
-type eventMetric struct {
-	Events int `json:"events"`
-	Bytes  int `json:"bytes"`
-}
-
-type eventSubscriberStats struct {
-	deliveredEvents int
-	deliveredBytes  int
-	coalescedEvents int
-	droppedEvents   int
-}
-
-var eventTypeChannels = map[string][]string{
-	"activity_summary_ready": {"activity"}, "backend_health_changed": {"core"},
-	"attention_acks_changed": {"status", "attention"}, "auto_approve_changed": {"status", "attention"},
-	"background_owner_changed": {"core"}, "background_refresh_done": {"core"},
-	"background_refresh_requested": {"core"}, "chat_messages_changed": {"chat"},
-	"chat_typing_changed": {"chat"}, "context_changed": {"transcripts"},
-	"context_items_ready": {"transcripts"}, "event_log_changed": {"events"},
-	"files_changed": {"files"}, "fs_changed": {"files"}, "operation_terminal": {"core", "files"},
-	"pricing_catalog_changed": {"core"}, "roots_changed": {"files"}, "search_progress": {"core"},
-	"session_files_ready": {"files"}, "settings_changed": {"core"}, "stats_sample": {"stats"},
-	"transcripts_changed": {"transcripts"}, "tmux_roster_changed": {"core"}, "tmux_signals_changed": {"status", "attention"},
-	"update_available": {"core"}, "watched_prs_changed": {"core", "attention"},
-	"yoagent_conversation_changed": {"yoagent"}, "yoagent_jobs_changed": {"yoagent", "attention"},
-	"yoagent_skills_changed": {"yoagent"}, "yoagent_stream_delta": {"yoagent"},
-}
-
-var eventChannels = []string{"activity", "attention", "chat", "core", "events", "files", "status", "stats", "transcripts", "yoagent"}
-
-var retainedEventTypes = map[string]bool{"backend_health_changed": true, "search_progress": true}
-
 const backgroundRefreshCoalesce = 5 * time.Second
 const eventQueueSize = 256
 const retainedEventLimit = 8
@@ -447,804 +268,6 @@ const eventQueueHistoryLimit = 256
 const eventJournalCompactEvery = eventQueueHistoryLimit
 const backgroundHeartbeatInterval = 500 * time.Millisecond
 const backgroundOwnerStaleAfter = 3 * time.Second
-
-type goBackgroundOwner struct {
-	mu                    sync.Mutex
-	config                string
-	root                  string
-	port                  int
-	serverID              string
-	hostnameValue         string
-	stableHostID          string
-	bootID                string
-	processStartIdentity  string
-	owner                 bool
-	status                string
-	startedAt             int64
-	generationID          string
-	lastTransition        string
-	lastError             string
-	roles                 map[string]map[string]any
-	counters              map[string]int
-	refreshRequests       map[string]int
-	fallbackCounts        map[string]int
-	recentRefreshes       map[string]time.Time
-	lockFile              *os.File
-	ownerPath             string
-	generationPath        string
-	generationIndexPath   string
-	priority              int
-	nonce                 string
-	lastTransitionDetails map[string]any
-	processDiagnostics    []map[string]any
-	maintenanceFailures   []map[string]any
-	capabilities          map[string]int
-	controlSocket         string
-	stopHeartbeat         chan struct{}
-	heartbeatDone         chan struct{}
-	eventPublish          func(string, map[string]any) error
-	writeFile             func(string, []byte) error
-}
-
-var backgroundRoles = []string{"tabber-activity", "session-files", "search-index", "stats-sampler", "watch-roots"}
-
-func readIdentityValue(environmentName, path, fallback string) string {
-	value := ""
-	if environmentName != "" {
-		value = strings.TrimSpace(os.Getenv(environmentName))
-	}
-	if value == "" && path != "" {
-		if data, err := os.ReadFile(path); err == nil {
-			value = strings.TrimSpace(string(data))
-		}
-	}
-	if value == "" {
-		value = strings.TrimSpace(fallback)
-	}
-	value = strings.ToLower(value)
-	if value == "" {
-		return "unknown"
-	}
-	for _, character := range value {
-		if !(character >= 'a' && character <= 'z') && !(character >= '0' && character <= '9') && !strings.ContainsRune("._-", character) {
-			digest := sha256.Sum256([]byte(value))
-			return hex.EncodeToString(digest[:])
-		}
-	}
-	return value[:minInt(len(value), 128)]
-}
-
-func processStartIdentity(pid int) string {
-	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
-	if err != nil {
-		return ""
-	}
-	closingParen := strings.LastIndexByte(string(data), ')')
-	if closingParen < 0 {
-		return ""
-	}
-	fields := strings.Fields(string(data)[closingParen+1:])
-	if len(fields) <= 19 {
-		return ""
-	}
-	return "proc:" + fields[19]
-}
-
-func sameOwnerHostBoot(record map[string]any, owner *goBackgroundOwner) bool {
-	recordedHost, hostPresent := record["stable_host_id"].(string)
-	recordedBoot, bootPresent := record["boot_id"].(string)
-	if hostPresent && recordedHost != "" && recordedHost != owner.stableHostID {
-		return false
-	}
-	if bootPresent && recordedBoot != "" && recordedBoot != owner.bootID {
-		return false
-	}
-	return true
-}
-
-func sameOwnerProcess(record map[string]any, owner *goBackgroundOwner) bool {
-	pid := int(backgroundRecordInt64(record, "pid"))
-	if pid <= 0 || !pidIsAlive(pid) {
-		return false
-	}
-	recordedStart, startPresent := record["process_start_identity"].(string)
-	if startPresent && recordedStart != "" {
-		currentStart := processStartIdentity(pid)
-		return currentStart != "" && currentStart == recordedStart
-	}
-	return true
-}
-
-func backgroundOwnerPriority(port int) int {
-	preferred, err := strconv.Atoi(strings.TrimSpace(os.Getenv("YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT")))
-	if err == nil && port != 0 && port == preferred {
-		return 100
-	}
-	return 0
-}
-
-func newGoBackgroundOwner(config, root string, ports ...int) *goBackgroundOwner {
-	startedAt := time.Now().UnixNano()
-	port := 0
-	if len(ports) > 0 {
-		port = ports[0]
-	}
-	hostname, _ := os.Hostname()
-	stableHostID := readIdentityValue("YOLOMUX_HOST_ID", "/etc/machine-id", hostname)
-	bootID := readIdentityValue("", "/proc/sys/kernel/random/boot_id", "unknown-boot")
-	processStart := processStartIdentity(os.Getpid())
-	roles := map[string]map[string]any{}
-	refreshRequests := map[string]int{}
-	fallbackCounts := map[string]int{}
-	for _, role := range backgroundRoles {
-		roles[role] = map[string]any{"role": role, "owner": true, "status": "local", "refresh_requests": 0, "fallback_count": 0, "last_error": ""}
-		refreshRequests[role] = 0
-		fallbackCounts[role] = 0
-	}
-	owner := &goBackgroundOwner{
-		config: config, root: root, port: port, serverID: fmt.Sprintf("go-%d", os.Getpid()), hostnameValue: hostname,
-		stableHostID: stableHostID, bootID: bootID, processStartIdentity: processStart,
-		owner: true, status: "local", startedAt: startedAt,
-		generationID: fmt.Sprintf("%d-%d", startedAt, os.Getpid()), lastTransition: "local",
-		roles: roles, counters: map[string]int{
-			"avoided_recomputes": 0, "coalesced_refresh_requests": 0, "follower_stale_reads": 0,
-			"owner_acquired": 1, "owner_released": 0, "owner_refresh_requests": 0,
-			"search_index_bytes_written": 0, "takeover_failed": 0, "takeover_success": 0,
-		}, refreshRequests: refreshRequests, fallbackCounts: fallbackCounts, recentRefreshes: map[string]time.Time{},
-		lastTransitionDetails: map[string]any{}, capabilities: map[string]int{}, nonce: fmt.Sprintf("%d-%d", startedAt, os.Getpid()),
-	}
-	owner.priority = backgroundOwnerPriority(port)
-	owner.writeFile = writeAtomicFile
-	if config != "" {
-		if err := os.MkdirAll(config, 0o700); err == nil {
-			owner.ownerPath = filepath.Join(config, "go-background-owner.json")
-			generationDir := filepath.Join(config, "go-background-generations")
-			_ = os.MkdirAll(generationDir, 0o700)
-			owner.generationPath = filepath.Join(generationDir, owner.generationID+".json")
-			owner.generationIndexPath = filepath.Join(generationDir, "index.json")
-			if file, err := os.OpenFile(filepath.Join(config, "go-background-owner.lock"), os.O_CREATE|os.O_RDWR, 0o600); err == nil {
-				owner.lockFile = file
-				if syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
-					owner.owner = false
-					owner.status = "follower"
-					// Keep the descriptor open: a follower must be able to acquire the
-					// same lock after the incumbent exits.
-				}
-			}
-		}
-	}
-	_ = owner.writeGenerationRecord()
-	if owner.owner {
-		if err := owner.writeRecord(); err != nil {
-			owner.owner = false
-			owner.status = "owner_record_error"
-			owner.lastError = err.Error()
-			owner.releaseLock()
-		} else {
-			owner.startHeartbeat()
-		}
-	}
-	if !owner.owner && owner.lockFile != nil {
-		owner.startHeartbeat()
-	}
-	return owner
-}
-
-func writeAtomicFile(path string, data []byte) error {
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
-	if err != nil {
-		return err
-	}
-	if _, err = f.Write(data); err == nil {
-		err = f.Sync()
-	}
-	closeErr := f.Close()
-	if err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
-}
-
-func (o *goBackgroundOwner) roleNames() []string {
-	roles := make([]string, 0, len(o.roles))
-	for role := range o.roles {
-		roles = append(roles, role)
-	}
-	sort.Strings(roles)
-	return roles
-}
-
-func (o *goBackgroundOwner) roleStatusPayloadLocked() map[string]any {
-	roles := map[string]any{}
-	for role, value := range o.roles {
-		roleCopy := cloneMap(value)
-		roleCopy["owner"] = o.owner
-		roleCopy["status"] = o.status
-		roleCopy["refresh_requests"] = o.refreshRequests[role]
-		roleCopy["fallback_count"] = o.fallbackCounts[role]
-		roles[role] = roleCopy
-	}
-	return roles
-}
-
-func (o *goBackgroundOwner) writeRecord() error {
-	if o.ownerPath == "" {
-		return nil
-	}
-	record, err := json.Marshal(map[string]any{"server_id": o.serverID, "generation": o.generationID, "generation_id": o.generationID, "pid": os.Getpid(), "hostname": o.hostnameValue, "stable_host_id": o.stableHostID, "boot_id": o.bootID, "process_start_identity": o.processStartIdentity, "port": o.port, "root": o.root, "project_root": o.root, "control_socket": o.controlSocket, "status": o.status, "priority": o.priority, "started_at_ns": o.startedAt, "last_heartbeat": float64(time.Now().UnixNano()) / 1e9, "updated_at": time.Now().UnixMilli(), "nonce": o.nonce, "roles": o.roleNames(), "role_status": o.roleStatusPayloadLocked(), "counters": cloneIntMap(o.counters), "capabilities": cloneIntMap(o.capabilities)})
-	if err != nil {
-		return err
-	}
-	if o.writeFile == nil {
-		o.writeFile = writeAtomicFile
-	}
-	return o.writeFile(o.ownerPath, record)
-}
-
-func (o *goBackgroundOwner) writeGenerationRecord() error {
-	if o.generationPath == "" {
-		return nil
-	}
-	record, err := json.Marshal(map[string]any{"server_id": o.serverID, "generation": o.generationID, "generation_id": o.generationID, "pid": os.Getpid(), "hostname": o.hostnameValue, "stable_host_id": o.stableHostID, "boot_id": o.bootID, "process_start_identity": o.processStartIdentity, "port": o.port, "root": o.root, "project_root": o.root, "control_socket": o.controlSocket, "status": o.status, "owner": o.owner, "priority": o.priority, "started_at_ns": o.startedAt, "last_heartbeat": float64(time.Now().UnixNano()) / 1e9, "updated_at": time.Now().UnixMilli(), "nonce": o.nonce, "roles": o.roleNames(), "role_status": o.roleStatusPayloadLocked(), "counters": cloneIntMap(o.counters), "capabilities": cloneIntMap(o.capabilities), "last_transition": o.lastTransition, "last_error": o.lastError})
-	if err != nil {
-		return err
-	}
-	if o.writeFile == nil {
-		o.writeFile = writeAtomicFile
-	}
-	if err := o.writeFile(o.generationPath, record); err != nil {
-		return err
-	}
-	if o.generationIndexPath == "" {
-		return nil
-	}
-	return withFileLock(o.generationIndexPath, func() error {
-		entries := map[string]map[string]any{}
-		if data, err := os.ReadFile(o.generationIndexPath); err == nil {
-			var index struct {
-				Records map[string]map[string]any `json:"records"`
-			}
-			if json.Unmarshal(data, &index) == nil && index.Records != nil {
-				entries = index.Records
-			}
-		}
-		var recordMap map[string]any
-		if json.Unmarshal(record, &recordMap) != nil {
-			return fmt.Errorf("invalid generation record")
-		}
-		entries[o.generationID] = recordMap
-		ids := make([]string, 0, len(entries))
-		for id := range entries {
-			ids = append(ids, id)
-		}
-		sort.Slice(ids, func(i, j int) bool { return backgroundGenerationLess(entries[ids[j]], entries[ids[i]]) })
-		if len(ids) > 64 {
-			ids = ids[:64]
-		}
-		compacted := map[string]map[string]any{}
-		for _, id := range ids {
-			compacted[id] = entries[id]
-		}
-		data, err := json.Marshal(map[string]any{"version": 1, "records": compacted})
-		if err != nil {
-			return err
-		}
-		return o.writeFile(o.generationIndexPath, data)
-	})
-}
-
-func (o *goBackgroundOwner) releaseLock() {
-	if o.lockFile != nil {
-		_ = syscall.Flock(int(o.lockFile.Fd()), syscall.LOCK_UN)
-	}
-}
-
-func (o *goBackgroundOwner) startHeartbeat() {
-	o.mu.Lock()
-	if o.stopHeartbeat != nil {
-		o.mu.Unlock()
-		return
-	}
-	stopHeartbeat := make(chan struct{})
-	heartbeatDone := make(chan struct{})
-	o.stopHeartbeat = stopHeartbeat
-	o.heartbeatDone = heartbeatDone
-	o.mu.Unlock()
-	go func(stop <-chan struct{}, done chan<- struct{}) {
-		ticker := time.NewTicker(backgroundHeartbeatInterval)
-		defer ticker.Stop()
-		defer close(done)
-		for {
-			select {
-			case <-ticker.C:
-				o.mu.Lock()
-				if o.owner {
-					if o.shouldYieldToNewerGenerationLocked() {
-						o.demoteLocked("newer_generation", fmt.Errorf("a newer live generation has priority"))
-					} else if err := o.writeRecord(); err != nil {
-						o.demoteLocked("owner_record_error", err)
-					} else if err := o.writeGenerationRecord(); err != nil {
-						o.demoteLocked("generation_record_error", err)
-					}
-				} else {
-					o.tryTakeoverLocked()
-				}
-				o.mu.Unlock()
-			case <-stop:
-				return
-			}
-		}
-	}(stopHeartbeat, heartbeatDone)
-}
-
-func (o *goBackgroundOwner) shouldYieldToNewerGenerationLocked() bool {
-	latest := o.latestGeneration()
-	if latest == nil {
-		return false
-	}
-	latestID, _ := latest["generation_id"].(string)
-	if latestID == "" {
-		latestID, _ = latest["generation"].(string)
-	}
-	if latestID == o.generationID {
-		return false
-	}
-	pid := int(backgroundRecordInt64(latest, "pid"))
-	return pid > 0 && pid != os.Getpid() && sameOwnerHostBoot(latest, o) && sameOwnerProcess(latest, o) && !o.ownerRecordStale(latest)
-}
-
-func pidIsAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	err := syscall.Kill(pid, 0)
-	return err == nil || err == syscall.EPERM
-}
-
-func (o *goBackgroundOwner) demoteLocked(status string, err error) {
-	wasOwner := o.owner
-	o.owner = false
-	o.status = status
-	o.lastTransition = "demote"
-	o.lastError = err.Error()
-	if wasOwner {
-		o.releaseLock()
-	}
-	_ = o.writeGenerationRecord()
-	if wasOwner {
-		o.publishOwnerChangedLocked()
-	}
-}
-
-func (o *goBackgroundOwner) readCurrentOwner() map[string]any {
-	if o.ownerPath == "" {
-		return nil
-	}
-	data, err := os.ReadFile(o.ownerPath)
-	if err != nil {
-		return nil
-	}
-	var record map[string]any
-	if json.Unmarshal(data, &record) != nil {
-		return nil
-	}
-	return record
-}
-
-func backgroundRecordTime(record map[string]any) time.Time {
-	value, ok := record["last_heartbeat"].(float64)
-	if !ok || value <= 0 {
-		return time.Time{}
-	}
-	seconds := int64(value)
-	return time.Unix(seconds, int64((value-float64(seconds))*1e9))
-}
-
-func backgroundRecordInt64(record map[string]any, key string) int64 {
-	value, ok := record[key].(float64)
-	if !ok {
-		return 0
-	}
-	return int64(value)
-}
-
-func backgroundGenerationLess(left, right map[string]any) bool {
-	leftPriority, rightPriority := backgroundRecordInt64(left, "priority"), backgroundRecordInt64(right, "priority")
-	if leftPriority != rightPriority {
-		return leftPriority < rightPriority
-	}
-	leftStarted, rightStarted := backgroundRecordInt64(left, "started_at_ns"), backgroundRecordInt64(right, "started_at_ns")
-	if leftStarted != rightStarted {
-		return leftStarted < rightStarted
-	}
-	leftPID, rightPID := backgroundRecordInt64(left, "pid"), backgroundRecordInt64(right, "pid")
-	if leftPID != rightPID {
-		return leftPID < rightPID
-	}
-	return fmt.Sprint(left["generation_id"], left["generation"]) < fmt.Sprint(right["generation_id"], right["generation"])
-}
-
-func (o *goBackgroundOwner) latestGeneration() map[string]any {
-	if o.generationPath == "" {
-		return nil
-	}
-	if o.generationIndexPath != "" {
-		if data, err := os.ReadFile(o.generationIndexPath); err == nil {
-			var index struct {
-				Records map[string]map[string]any `json:"records"`
-			}
-			if json.Unmarshal(data, &index) == nil {
-				var latest map[string]any
-				for _, record := range index.Records {
-					if !sameOwnerHostBoot(record, o) {
-						continue
-					}
-					if latest == nil || backgroundGenerationLess(latest, record) {
-						latest = record
-					}
-				}
-				if latest != nil {
-					return latest
-				}
-			}
-		}
-	}
-	entries, err := os.ReadDir(filepath.Dir(o.generationPath))
-	if err != nil {
-		return nil
-	}
-	var latest map[string]any
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(filepath.Dir(o.generationPath), entry.Name()))
-		if err != nil {
-			continue
-		}
-		var record map[string]any
-		if json.Unmarshal(data, &record) != nil || record["generation_id"] == nil && record["generation"] == nil || !sameOwnerHostBoot(record, o) {
-			continue
-		}
-		if latest == nil || backgroundGenerationLess(latest, record) {
-			latest = record
-		}
-	}
-	return latest
-}
-
-func (o *goBackgroundOwner) ownerRecordStale(record map[string]any) bool {
-	when := backgroundRecordTime(record)
-	return !when.IsZero() && time.Since(when) > backgroundOwnerStaleAfter
-}
-
-func (o *goBackgroundOwner) tryTakeoverLocked() bool {
-	if o.owner || o.lockFile == nil || syscall.Flock(int(o.lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
-		return false
-	}
-	latest := o.latestGeneration()
-	latestID := ""
-	if latest != nil {
-		latestID, _ = latest["generation_id"].(string)
-		if latestID == "" {
-			latestID, _ = latest["generation"].(string)
-		}
-	}
-	if latest != nil && latestID != "" && latestID != o.generationID && sameOwnerHostBoot(latest, o) && sameOwnerProcess(latest, o) && !o.ownerRecordStale(latest) && latest["status"] != "stopped" {
-		o.releaseLock()
-		o.status = "blocked_by_newer_generation"
-		o.lastTransition = "takeover_blocked"
-		o.lastError = "a newer live generation is present"
-		o.counters["takeover_failed"]++
-		return false
-	}
-	previous := o.readCurrentOwner()
-	if previous != nil && !sameOwnerHostBoot(previous, o) {
-		o.releaseLock()
-		o.status = "blocked_by_foreign_owner"
-		o.lastTransition = "takeover_blocked"
-		o.lastError = "owner belongs to another host or boot"
-		return false
-	}
-	if previous != nil && previous["generation_id"] != o.generationID && previous["generation"] != o.generationID && sameOwnerProcess(previous, o) && !o.ownerRecordStale(previous) && previous["status"] != "stopped" {
-		o.releaseLock()
-		o.status = "blocked_by_fresh_owner"
-		o.lastTransition = "takeover_blocked"
-		return false
-	}
-	o.owner = true
-	o.status = "local"
-	o.lastTransition = "takeover"
-	if err := o.writeRecord(); err != nil {
-		o.demoteLocked("owner_record_error", err)
-		return false
-	}
-	if err := o.writeGenerationRecord(); err != nil {
-		o.demoteLocked("generation_record_error", err)
-		return false
-	}
-	if previous == nil || o.ownerRecordStale(previous) || previous["generation_id"] != o.generationID {
-		o.publishOwnerChangedLocked()
-	}
-	return true
-}
-
-func (o *goBackgroundOwner) publishOwnerChangedLocked() {
-	if o.eventPublish == nil {
-		return
-	}
-	if err := o.eventPublish("background_owner_changed", o.statusPayloadLocked()); err != nil {
-		o.lastError = err.Error()
-	}
-}
-
-func (o *goBackgroundOwner) setEventPublisher(publish func(string, map[string]any) error) {
-	o.mu.Lock()
-	o.eventPublish = publish
-	o.mu.Unlock()
-}
-
-func (o *goBackgroundOwner) refreshRequestKey(role string, payload map[string]any) string {
-	keyPayload := map[string]any{}
-	if cacheKey, ok := payload["cache_key"]; ok && fmt.Sprint(cacheKey) != "" {
-		keyPayload["cache_key"] = fmt.Sprint(cacheKey)
-	} else if nested, ok := payload["payload"].(map[string]any); ok {
-		if cacheKey, nestedOK := nested["cache_key"]; nestedOK && fmt.Sprint(cacheKey) != "" {
-			keyPayload["cache_key"] = fmt.Sprint(cacheKey)
-		} else {
-			keyPayload = nested
-		}
-	} else {
-		for key, value := range payload {
-			if key != "action" && key != "reason" && key != "requester" && key != "role" && key != "trigger" {
-				keyPayload[key] = value
-			}
-		}
-	}
-	data, err := json.Marshal(keyPayload)
-	if err != nil {
-		data = []byte(fmt.Sprint(keyPayload))
-	}
-	return role + "\x00" + string(data)
-}
-
-func (o *goBackgroundOwner) coalesceRefreshRequestLocked(role string, payload map[string]any) bool {
-	now := time.Now()
-	for key, expires := range o.recentRefreshes {
-		if !expires.After(now) {
-			delete(o.recentRefreshes, key)
-		}
-	}
-	key := o.refreshRequestKey(role, payload)
-	if expires, ok := o.recentRefreshes[key]; ok && expires.After(now) {
-		o.counters["coalesced_refresh_requests"]++
-		return true
-	}
-	o.recentRefreshes[key] = now.Add(backgroundRefreshCoalesce)
-	return false
-}
-
-func (o *goBackgroundOwner) recordRefreshRequestLocked(role string) {
-	o.refreshRequests[role]++
-	o.counters["owner_refresh_requests"]++
-}
-
-func (o *goBackgroundOwner) requestRefresh(role string, payload map[string]any) map[string]any {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if _, ok := o.roles[role]; !ok {
-		o.fallbackCounts[role]++
-		return map[string]any{"ok": false, "accepted": false, "role": role, "error": "unknown background role", "fallback": true}
-	}
-	if !o.owner {
-		o.fallbackCounts[role]++
-		return map[string]any{"ok": false, "accepted": false, "role": role, "error": "background owner is not local", "fallback": true}
-	}
-	if o.coalesceRefreshRequestLocked(role, payload) {
-		return map[string]any{"ok": true, "accepted": true, "role": role, "local_owner": true, "fallback": false, "already_pending": true, "coalesced": true}
-	}
-	o.recordRefreshRequestLocked(role)
-	return map[string]any{"ok": true, "accepted": true, "role": role, "local_owner": true, "fallback": false}
-}
-
-func (o *goBackgroundOwner) refreshQueuePayloadLocked() map[string]any {
-	now := time.Now()
-	pendingByRole := map[string]int{}
-	nextExpires := 0.0
-	for key, expires := range o.recentRefreshes {
-		if !expires.After(now) {
-			delete(o.recentRefreshes, key)
-			continue
-		}
-		role, _, _ := strings.Cut(key, "\x00")
-		pendingByRole[role]++
-		remaining := expires.Sub(now).Seconds()
-		if nextExpires == 0 || remaining < nextExpires {
-			nextExpires = remaining
-		}
-	}
-	return map[string]any{"coalesce_window_seconds": backgroundRefreshCoalesce.Seconds(), "recent_pending_count": len(o.recentRefreshes), "recent_pending_by_role": pendingByRole, "next_expires_seconds": nextExpires}
-}
-
-func (o *goBackgroundOwner) recordMaintenanceFailureLocked(operation, path string, err error) {
-	o.maintenanceFailures = append(o.maintenanceFailures, map[string]any{
-		"operation": operation, "path": path, "error": err.Error(), "at": time.Now().Unix(), "generation_id": o.generationID,
-	})
-	if len(o.maintenanceFailures) > 64 {
-		o.maintenanceFailures = o.maintenanceFailures[len(o.maintenanceFailures)-64:]
-	}
-	o.lastError = operation + " failed: " + err.Error()
-}
-
-func (o *goBackgroundOwner) removeOwnedRecordsLocked() {
-	if o.ownerPath != "" {
-		current := o.readCurrentOwner()
-		currentID := fmt.Sprint(current["generation_id"])
-		if currentID == "" || currentID == "<nil>" {
-			currentID = fmt.Sprint(current["generation"])
-		}
-		if current != nil && currentID == o.generationID {
-			if err := os.Remove(o.ownerPath); err != nil && !os.IsNotExist(err) {
-				o.recordMaintenanceFailureLocked("stop_owner_record_unlink", o.ownerPath, err)
-			}
-		}
-	}
-	if o.generationPath == "" {
-		return
-	}
-	if err := os.Remove(o.generationPath); err != nil && !os.IsNotExist(err) {
-		o.recordMaintenanceFailureLocked("stop_generation_record_unlink", o.generationPath, err)
-	}
-	if o.generationIndexPath == "" {
-		return
-	}
-	if err := withFileLock(o.generationIndexPath, func() error {
-		entries := map[string]map[string]any{}
-		if data, readErr := os.ReadFile(o.generationIndexPath); readErr == nil {
-			var index struct {
-				Records map[string]map[string]any `json:"records"`
-			}
-			if json.Unmarshal(data, &index) == nil && index.Records != nil {
-				entries = index.Records
-			}
-		}
-		delete(entries, o.generationID)
-		data, marshalErr := json.Marshal(map[string]any{"version": 1, "records": entries})
-		if marshalErr != nil {
-			return marshalErr
-		}
-		return o.writeFile(o.generationIndexPath, data)
-	}); err != nil {
-		o.recordMaintenanceFailureLocked("stop_generation_index_write", o.generationIndexPath, err)
-	}
-}
-
-func (o *goBackgroundOwner) statusPayloadLocked() map[string]any {
-	owner := map[string]any{"server_id": o.serverID, "pid": os.Getpid(), "hostname": o.hostnameValue, "stable_host_id": o.stableHostID, "boot_id": o.bootID, "process_start_identity": o.processStartIdentity, "port": o.port, "project_root": o.root, "control_socket": o.controlSocket, "generation_id": o.generationID, "started_at_ns": o.startedAt, "nonce": o.nonce, "priority": o.priority, "capabilities": cloneIntMap(o.capabilities)}
-	latest := o.latestGeneration()
-	if latest == nil {
-		latest = owner
-	}
-	currentOwner := any(owner)
-	if persisted := o.readCurrentOwner(); persisted != nil {
-		currentOwner = persisted
-	}
-	return map[string]any{"owner": o.owner, "status": o.status, "generation": owner, "latest_generation": latest, "current_owner": currentOwner, "roles": o.roleStatusPayloadLocked(), "counters": cloneIntMap(o.counters), "refresh_queue": o.refreshQueuePayloadLocked(), "last_transition": o.lastTransition, "last_transition_details": cloneMap(o.lastTransitionDetails), "last_error": o.lastError, "process_diagnostics": o.processDiagnostics, "maintenance_failures": o.maintenanceFailures, "search_index": map[string]any{"role": "search-index", "owner": o.owner, "mode": map[bool]string{true: "indexing-server", false: "read-server"}[o.owner], "current_server": owner, "owner_server": currentOwner, "status": o.status}}
-}
-
-func (o *goBackgroundOwner) statusPayload() map[string]any {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	return o.statusPayloadLocked()
-}
-
-func (o *goBackgroundOwner) claim() map[string]any {
-	o.mu.Lock()
-	wasOwner := o.owner
-	claimed := !wasOwner && o.tryTakeoverLocked()
-	o.mu.Unlock()
-	if claimed {
-		o.startHeartbeat()
-	}
-	ok := wasOwner || claimed
-	payload := map[string]any{"ok": ok, "claimed": claimed, "was_owner": wasOwner, "status": o.statusPayload()}
-	if !ok {
-		diagnostic := o.statusPayload()
-		message := fmt.Sprint(diagnostic["last_error"])
-		if message == "<nil>" || message == "" {
-			message = "background owner takeover failed"
-		}
-		payload["error"] = message
-		payload["diagnostic"] = message
-	}
-	return payload
-}
-
-func (o *goBackgroundOwner) close() {
-	o.mu.Lock()
-	wasOwner := o.owner
-	if o.owner {
-		o.owner = false
-		o.status = "stopped"
-		o.lastTransition = "stop"
-		_ = o.writeRecord()
-		_ = o.writeGenerationRecord()
-		if wasOwner {
-			o.publishOwnerChangedLocked()
-		}
-	}
-	o.removeOwnedRecordsLocked()
-	stop, done := o.stopHeartbeat, o.heartbeatDone
-	o.stopHeartbeat, o.heartbeatDone = nil, nil
-	if stop != nil {
-		close(stop)
-	}
-	lockFile := o.lockFile
-	o.lockFile = nil
-	o.mu.Unlock()
-	if done != nil {
-		<-done
-	}
-	if lockFile != nil {
-		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
-		_ = lockFile.Close()
-	}
-}
-
-func acquireInstanceRootLease(root string) (*os.File, error) {
-	rootPath, err := filepath.Abs(root)
-	if err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(rootPath, 0o700); err != nil {
-		return nil, err
-	}
-	path := filepath.Join(rootPath, "instance.lock")
-	lock, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		_ = lock.Close()
-		return nil, err
-	}
-	payload, err := json.Marshal(map[string]any{"pid": os.Getpid(), "root": rootPath, "updated_at": time.Now().UnixMilli()})
-	if err != nil {
-		releaseInstanceRootLease(lock)
-		return nil, err
-	}
-	if err := lock.Truncate(0); err == nil {
-		_, err = lock.Seek(0, io.SeekStart)
-	}
-	if err == nil {
-		_, err = lock.Write(append(payload, '\n'))
-	}
-	if err == nil {
-		err = lock.Sync()
-	}
-	if err != nil {
-		releaseInstanceRootLease(lock)
-		return nil, err
-	}
-	return lock, nil
-}
-
-func releaseInstanceRootLease(lock *os.File) {
-	if lock == nil {
-		return
-	}
-	_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-	_ = lock.Close()
-}
 
 func cloneMap(value map[string]any) map[string]any {
 	result := make(map[string]any, len(value))
@@ -1321,1335 +344,10 @@ func (l *goLogRing) payload() map[string]any {
 	return map[string]any{"ok": true, "epoch": l.epoch, "logs": entries, "sequence": l.sequence, "capacity": l.capacity, "dropped": map[string]any{"count": l.dropped, "first_id": firstID, "last_id": lastID, "by_level": cloneIntMap(l.droppedByLevel)}}
 }
 
-func newEventBroker() *eventBroker {
-	queueSize := eventQueueSize
-	if value, err := strconv.Atoi(strings.TrimSpace(os.Getenv("YOLOMUX_GO_EVENT_QUEUE_SIZE"))); err == nil && value > 0 && value <= eventQueueSize {
-		queueSize = value
-	}
-	return &eventBroker{
-		epoch: fmt.Sprintf("go-%d", time.Now().UnixNano()), revisions: map[string]int{}, retained: map[string]clientEvent{}, terminalEvents: map[string]clientEvent{},
-		subscribers: map[chan clientEvent]struct{}{}, channels: map[chan clientEvent]map[string]bool{}, channelFilters: map[chan clientEvent]bool{}, clientIDs: map[chan clientEvent]string{},
-		clientStats: map[chan clientEvent]*eventSubscriberStats{}, pending: map[chan clientEvent]map[string]clientEvent{}, repair: map[chan clientEvent]map[string]bool{},
-		publishedByType: map[string]eventMetric{}, deliveredByType: map[string]eventMetric{}, filteredByType: map[string]eventMetric{},
-		publishedByResource: map[string]eventMetric{}, deliveredByResource: map[string]eventMetric{}, coalescedByResource: map[string]eventMetric{}, droppedByResource: map[string]eventMetric{},
-		queueSize: queueSize,
-	}
-}
-
-func incrementEventMetric(metrics map[string]eventMetric, key string, bytes int) {
-	metric := metrics[key]
-	metric.Events++
-	metric.Bytes += bytes
-	metrics[key] = metric
-}
-
-func eventBytes(event clientEvent) int {
-	data, err := json.Marshal(event)
-	if err != nil {
-		return 0
-	}
-	return len(data)
-}
-
-func validClientEventRecord(event clientEvent) bool {
-	return event.ID > 0 && strings.TrimSpace(event.Type) != "" && strings.TrimSpace(event.Resource) != "" && event.Base >= 0 && event.Revision > 0 && event.Revision == event.Base+1
-}
-
-func validEventSnapshot(entry eventJournalEntry) bool {
-	if entry.Version != eventJournalSnapshotVersion || entry.Type != "snapshot" || entry.NextID < 0 || entry.Events == nil || entry.ResourceRevisions == nil {
-		return false
-	}
-	for resource, revision := range entry.ResourceRevisions {
-		if strings.TrimSpace(resource) == "" || revision < 0 {
-			return false
-		}
-	}
-	previousID := 0
-	for _, event := range entry.Events {
-		if !validClientEventRecord(event) || event.ID <= previousID || event.ID > entry.NextID || entry.ResourceRevisions[event.Resource] < event.Revision {
-			return false
-		}
-		previousID = event.ID
-	}
-	return true
-}
-
-func metricSnapshot(metrics map[string]eventMetric) map[string]map[string]int {
-	result := make(map[string]map[string]int, len(metrics))
-	for key, metric := range metrics {
-		result[key] = map[string]int{"events": metric.Events, "bytes": metric.Bytes}
-	}
-	return result
-}
-
-func loadEventBroker(path string) *eventBroker {
-	b := newEventBroker()
-	b.journalPath = path
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return b
-	}
-	validBytes := 0
-	legacyRecords := false
-	for _, chunk := range strings.SplitAfter(string(data), "\n") {
-		line := strings.TrimSuffix(chunk, "\n")
-		if strings.TrimSpace(line) == "" {
-			validBytes += len(chunk)
-			continue
-		}
-		var event clientEvent
-		var entry eventJournalEntry
-		if json.Unmarshal([]byte(line), &entry) == nil && validEventSnapshot(entry) {
-			b.events = nil
-			b.retained = map[string]clientEvent{}
-			b.terminalEvents = map[string]clientEvent{}
-			b.revisions = map[string]int{}
-			b.nextID = entry.NextID
-			for resource, revision := range entry.ResourceRevisions {
-				b.revisions[resource] = revision
-			}
-			for _, snapshotEvent := range entry.Events {
-				if !validClientEventRecord(snapshotEvent) {
-					break
-				}
-				snapshotEvent.Epoch = b.epoch
-				b.nextID = maxInt(b.nextID, snapshotEvent.ID)
-				b.events = append(b.events, snapshotEvent)
-				if snapshotEvent.Type == "operation_terminal" {
-					b.terminalEvents[snapshotEvent.Resource] = snapshotEvent
-				}
-				if retainedEventTypes[snapshotEvent.Type] && (b.retained[snapshotEvent.Resource].ID != 0 || len(b.retained) < retainedEventLimit) {
-					b.retained[snapshotEvent.Resource] = snapshotEvent
-				}
-			}
-			validBytes += len(chunk)
-			continue
-		} else if json.Unmarshal([]byte(line), &entry) == nil && entry.Version == eventJournalVersion && entry.Type == "event" && entry.Event != nil {
-			event = *entry.Event
-		} else if json.Unmarshal([]byte(line), &event) != nil {
-			break
-		} else {
-			legacyRecords = true
-			var legacy struct {
-				Revision int `json:"revision"`
-			}
-			if event.Revision == 0 && json.Unmarshal([]byte(line), &legacy) == nil && legacy.Revision > 0 {
-				event.Revision = legacy.Revision
-				if event.Base == 0 {
-					event.Base = legacy.Revision - 1
-				}
-			}
-		}
-		if !validClientEventRecord(event) {
-			break
-		}
-		validBytes += len(chunk)
-		// The journal is durable history, not process identity.  Keep the fresh
-		// epoch minted by newEventBroker so reconnecting clients can fence events
-		// from the previous server instance after a restart.
-		event.Epoch = b.epoch
-		b.nextID = maxInt(b.nextID, event.ID)
-		b.revisions[event.Resource] = maxInt(b.revisions[event.Resource], event.Revision)
-		b.events = append(b.events, event)
-		if event.Type == "operation_terminal" {
-			b.terminalEvents[event.Resource] = event
-		}
-		if retainedEventTypes[event.Type] && (b.retained[event.Resource].ID != 0 || len(b.retained) < retainedEventLimit) {
-			b.retained[event.Resource] = event
-		}
-	}
-	if len(b.events) > 256 {
-		b.events = b.events[len(b.events)-256:]
-	}
-	if validBytes < len(data) {
-		_ = truncateDurable(path, data[:validBytes])
-	}
-	if legacyRecords {
-		if err := rewriteEventJournal(path, b.events); err != nil {
-			slog.Warn("event journal legacy migration failed", "path", path, "error", err)
-		}
-	}
-	return b
-}
-
-func rewriteEventJournal(path string, events []clientEvent) error {
-	return withFileLock(path, func() error {
-		tmp := path + ".migrate"
-		file, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
-		if err != nil {
-			return err
-		}
-		for _, event := range events {
-			event.Replay = false
-			data, marshalErr := json.Marshal(map[string]any{"version": eventJournalVersion, "type": "event", "epoch": event.Epoch, "event": event})
-			if marshalErr != nil {
-				_ = file.Close()
-				_ = os.Remove(tmp)
-				return marshalErr
-			}
-			if _, err = file.Write(append(data, '\n')); err != nil {
-				_ = file.Close()
-				_ = os.Remove(tmp)
-				return err
-			}
-		}
-		if err = file.Sync(); err != nil {
-			_ = file.Close()
-			_ = os.Remove(tmp)
-			return err
-		}
-		if err = file.Close(); err != nil {
-			_ = os.Remove(tmp)
-			return err
-		}
-		if err = os.Rename(tmp, path); err != nil {
-			_ = os.Remove(tmp)
-			return err
-		}
-		return syncDirectory(filepath.Dir(path))
-	})
-}
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-func (b *eventBroker) appendDurable(event clientEvent) error {
-	if b.journalPath == "" {
-		return nil
-	}
-	data, err := json.Marshal(map[string]any{"version": eventJournalVersion, "type": "event", "epoch": event.Epoch, "event": event})
-	if err != nil {
-		return err
-	}
-	return withFileLock(b.journalPath, func() error {
-		if err := os.MkdirAll(filepath.Dir(b.journalPath), 0o700); err != nil {
-			return err
-		}
-		f, err := os.OpenFile(b.journalPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
-		if err != nil {
-			return err
-		}
-		if _, err = f.Write(append(data, '\n')); err == nil {
-			err = f.Sync()
-		}
-		closeErr := f.Close()
-		if err == nil {
-			err = closeErr
-		}
-		return err
-	})
-}
-
-func compactEventJournal(path string, events []clientEvent, revisions map[string]int, nextID int) error {
-	if path == "" {
-		return nil
-	}
-	return withFileLock(path, func() error {
-		tmp := path + ".compact"
-		file, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
-		if err != nil {
-			return err
-		}
-		entry := map[string]any{
-			"version":            eventJournalSnapshotVersion,
-			"type":               "snapshot",
-			"next_id":            nextID,
-			"resource_revisions": revisions,
-			"events":             events,
-		}
-		data, marshalErr := json.Marshal(entry)
-		if marshalErr == nil {
-			_, marshalErr = file.Write(append(data, '\n'))
-		}
-		if marshalErr == nil {
-			marshalErr = file.Sync()
-		}
-		closeErr := file.Close()
-		if marshalErr == nil {
-			marshalErr = closeErr
-		}
-		if marshalErr != nil {
-			_ = os.Remove(tmp)
-			return marshalErr
-		}
-		if err := os.Rename(tmp, path); err != nil {
-			_ = os.Remove(tmp)
-			return err
-		}
-		return syncDirectory(filepath.Dir(path))
-	})
-}
-
-func withFileLock(path string, action func() error) error {
-	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		return err
-	}
-	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-	return action()
-}
-
-func (b *eventBroker) readySnapshot() map[string]int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	result := map[string]int{}
-	for resource, revision := range b.revisions {
-		result[resource] = revision
-	}
-	return result
-}
-
-func (b *eventBroker) hasResource(resource string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for _, event := range b.events {
-		if event.Resource == resource {
-			return true
-		}
-	}
-	return false
-}
-
-func (b *eventBroker) readySnapshotFor(ch chan clientEvent) map[string]int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	selected := b.channels[ch]
-	result := map[string]int{}
-	for resource, revision := range b.revisions {
-		if !b.channelFilters[ch] || eventMatchesChannels(strings.SplitN(resource, ":", 2)[0], mapKeys(selected)) {
-			result[resource] = revision
-		}
-	}
-	return result
-}
-
-func loadOperations(path string) map[string]*goOperation {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return map[string]*goOperation{}
-	}
-	var records map[string]*goOperation
-	if json.Unmarshal(data, &records) != nil || records == nil {
-		return map[string]*goOperation{}
-	}
-	return records
-}
-func loadOperationJournal(path string, records map[string]*goOperation) map[string]*goOperation {
-	if records == nil {
-		records = map[string]*goOperation{}
-	}
-	if path == "" {
-		retainOperationRecords(records)
-		return records
-	}
-	result := records
-	if err := withOperationJournalLock(path, func() error {
-		result = loadOperationJournalUnlocked(path, records, true)
-		if retainOperationRecords(result) {
-			return compactOperationJournalUnlocked(path, result)
-		}
-		return nil
-	}); err != nil {
-		slog.Error("operation journal recovery failed", "error", err)
-	}
-	return result
-}
-
-func loadOperationJournalUnlocked(path string, records map[string]*goOperation, repairTail bool) map[string]*goOperation {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return records
-	}
-	validBytes := 0
-	for _, chunk := range strings.SplitAfter(string(data), "\n") {
-		line := strings.TrimSuffix(chunk, "\n")
-		if strings.TrimSpace(line) == "" {
-			validBytes += len(chunk)
-			continue
-		}
-		var entry operationJournalEntry
-		if json.Unmarshal([]byte(line), &entry) != nil || !validOperationJournalEntry(entry) {
-			break
-		}
-		validBytes += len(chunk)
-		if entry.Version == operationJournalVersion && entry.Type == "snapshot" {
-			records = map[string]*goOperation{}
-			for _, record := range entry.Operations {
-				if record != nil && record.ID != "" {
-					records[record.ID] = record
-				}
-			}
-		}
-		if entry.Version == operationJournalVersion && entry.Type == "operations" {
-			for _, record := range entry.Operations {
-				if record != nil && record.ID != "" {
-					records[record.ID] = record
-				}
-			}
-		}
-		if (entry.Version == 0 || entry.Version == 1 || entry.Version == operationJournalVersion) && entry.Type == "operation" && entry.Record != nil {
-			records[entry.Record.ID] = entry.Record
-		}
-		if (entry.Version == 0 || entry.Version == 1) && entry.Type == "ack" && records[entry.ID] != nil {
-			records[entry.ID].Acknowledged = entry.Acknowledged
-			records[entry.ID].DeliveryAcknowledged = entry.Acknowledged
-		}
-		if entry.Version == operationAckJournalVersion && entry.Type == "ack" {
-			for _, ack := range entry.Acks {
-				record := records[ack.ID]
-				epoch, seq, validCursor := operationAckCursor(ack)
-				if record != nil && validCursor && operationCursorMatches(record, epoch, seq) {
-					record.Acknowledged = true
-					record.DeliveryAcknowledged = true
-				}
-			}
-		}
-	}
-	if repairTail && validBytes < len(data) {
-		_ = truncateDurableUnlocked(path, data[:validBytes])
-	}
-	return records
-}
-
-type operationAck struct {
-	ID     string         `json:"id"`
-	Epoch  string         `json:"-"`
-	Seq    int            `json:"-"`
-	Cursor map[string]any `json:"cursor"`
-}
-
-func validOperationRecord(record *goOperation) bool {
-	return record != nil && strings.TrimSpace(record.ID) != "" && len(record.ID) <= 128
-}
-
-func validOperationAckRecord(ack operationAck) bool {
-	if strings.TrimSpace(ack.ID) == "" || len(ack.ID) > 128 || len(ack.Cursor) != 2 {
-		return false
-	}
-	_, _, ok := operationAckCursor(ack)
-	return ok
-}
-
-func validOperationJournalEntry(entry operationJournalEntry) bool {
-	switch {
-	case (entry.Version == 0 || entry.Version == 1) && entry.Type == "operation":
-		return validOperationRecord(entry.Record)
-	case (entry.Version == 0 || entry.Version == 1) && entry.Type == "ack":
-		return strings.TrimSpace(entry.ID) != "" && len(entry.ID) <= 128
-	case entry.Version == operationJournalVersion && entry.Type == "operation":
-		return validOperationRecord(entry.Record)
-	case entry.Version == operationJournalVersion && (entry.Type == "snapshot" || entry.Type == "operations"):
-		if entry.Operations == nil {
-			return false
-		}
-		for _, record := range entry.Operations {
-			if !validOperationRecord(record) {
-				return false
-			}
-		}
-		return true
-	case entry.Version == operationAckJournalVersion && entry.Type == "ack":
-		if entry.Acks == nil {
-			return false
-		}
-		for _, ack := range entry.Acks {
-			if !validOperationAckRecord(ack) {
-				return false
-			}
-		}
-		return true
-	default:
-		return false
-	}
-}
-
-func operationAckCursor(ack operationAck) (string, int, bool) {
-	epoch, _ := ack.Cursor["epoch"].(string)
-	seq, ok := ack.Cursor["seq"].(int)
-	if !ok {
-		if value, floatOK := ack.Cursor["seq"].(float64); floatOK && value == float64(int(value)) {
-			seq, ok = int(value), true
-		}
-	}
-	if epoch == "" || !ok {
-		return "", 0, false
-	}
-	return epoch, seq, true
-}
-
-func appendOperationJournal(path string, entry any) error {
-	if path == "" {
-		return nil
-	}
-	return withOperationJournalLock(path, func() error {
-		data, err := json.Marshal(entry)
-		if err != nil {
-			return err
-		}
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
-		if err != nil {
-			return err
-		}
-		_, err = f.Write(append(data, '\n'))
-		if err == nil {
-			err = f.Sync()
-		}
-		closeErr := f.Close()
-		if err == nil {
-			err = closeErr
-		}
-		return err
-	})
-}
-
-func withOperationJournalLock(path string, action func() error) error {
-	return withFileLock(path, action)
-}
-
-func compactOperationJournal(path string, records map[string]*goOperation) error {
-	if path == "" {
-		return nil
-	}
-	return withOperationJournalLock(path, func() error {
-		// Re-read the journal while holding the same lock as append. A compactor that
-		// snapshots only its caller's in-memory map can erase a record appended by a
-		// different process that won the file lock immediately before compaction.
-		merged := loadOperationJournalUnlocked(path, cloneOperationMap(records), false)
-		// A snapshot replaces the seed map. Apply the same replay/retention policy
-		// after merging so old snapshots cannot resurrect pruned or evicted data.
-		retainOperationRecords(merged)
-		return compactOperationJournalUnlocked(path, merged)
-	})
-}
-
-func compactOperationJournalUnlocked(path string, records map[string]*goOperation) error {
-	tmp := path + ".compact"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
-	if err != nil {
-		return err
-	}
-	ids := make([]string, 0, len(records))
-	for id := range records {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	operations := make([]*goOperation, 0, len(ids))
-	for _, id := range ids {
-		operations = append(operations, records[id])
-	}
-	epoch := ""
-	if len(operations) > 0 {
-		epoch = operations[0].Epoch
-	}
-	data, marshalErr := json.Marshal(map[string]any{"version": operationJournalVersion, "type": "snapshot", "epoch": epoch, "operations": operations})
-	if marshalErr != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return marshalErr
-	}
-	if _, err = f.Write(append(data, '\n')); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err = f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err = f.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err = os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return syncDirectory(filepath.Dir(path))
-}
-
-func syncDirectory(path string) error {
-	directory, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	return directory.Sync()
-}
-
-func truncateDurable(path string, data []byte) error {
-	return withFileLock(path, func() error {
-		return truncateDurableUnlocked(path, data)
-	})
-}
-
-func truncateDurableUnlocked(path string, data []byte) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0600)
-	if err != nil {
-		return err
-	}
-	if _, err := file.Write(data); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	return syncDirectory(filepath.Dir(path))
-}
-func (s *server) saveOperationsLocked() error {
-	if s.operationsPath == "" {
-		return nil
-	}
-	data, err := json.Marshal(s.operations)
-	if err != nil {
-		return err
-	}
-	tmp := s.operationsPath + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
-	if err != nil {
-		return err
-	}
-	_, err = f.Write(data)
-	if err == nil {
-		err = f.Sync()
-	}
-	_ = f.Close()
-	if err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, s.operationsPath); err != nil {
-		return err
-	}
-	return syncDirectory(filepath.Dir(s.operationsPath))
-}
-
-func cloneOperation(record *goOperation) *goOperation {
-	if record == nil {
-		return nil
-	}
-	data, err := json.Marshal(record)
-	if err != nil {
-		return nil
-	}
-	var result goOperation
-	if json.Unmarshal(data, &result) != nil {
-		return nil
-	}
-	return &result
-}
-
-func cloneOperationMap(records map[string]*goOperation) map[string]*goOperation {
-	result := make(map[string]*goOperation, len(records))
-	for id, record := range records {
-		if copy := cloneOperation(record); copy != nil {
-			result[id] = copy
-		}
-	}
-	return result
-}
-
-func (s *server) pruneOperationsLocked() {
-	pruneOperationRecords(s.operations)
-}
-
-func pruneOperationRecords(records map[string]*goOperation) {
-	now := time.Now().UnixMilli()
-	for id, record := range records {
-		if record == nil || record.State == "queued" {
-			continue
-		}
-		at := record.TerminalAt
-		if at == 0 {
-			at = record.CreatedAt
-		}
-		if at > 0 && now-at > operationRetention.Milliseconds() {
-			delete(records, id)
-		}
-	}
-	if len(records) <= operationRecordLimit {
-		return
-	}
-	ids := make([]string, 0, len(records))
-	for id, record := range records {
-		if record != nil && record.State != "queued" {
-			ids = append(ids, id)
-		}
-	}
-	sort.Slice(ids, func(i, j int) bool {
-		left, right := records[ids[i]], records[ids[j]]
-		leftAt, rightAt := left.TerminalAt, right.TerminalAt
-		if leftAt == 0 {
-			leftAt = left.CreatedAt
-		}
-		if rightAt == 0 {
-			rightAt = right.CreatedAt
-		}
-		if leftAt == rightAt {
-			return ids[i] < ids[j]
-		}
-		return leftAt < rightAt
-	})
-	for _, id := range ids[:minInt(len(ids), len(records)-operationRecordLimit)] {
-		delete(records, id)
-	}
-}
-
-func boundedOperationTerminal(record *goOperation) map[string]any {
-	return map[string]any{
-		"operation": map[string]any{"id": record.ID, "cursor": map[string]any{"epoch": record.Epoch, "seq": record.Seq}},
-		"result": map[string]any{
-			"state": "failed", "request": map[string]any{"id": record.RequestID},
-			"error": map[string]any{
-				"code":    "operation_replay_evicted",
-				"message": map[string]any{"key": "common.operationReplayEvicted", "params": map[string]any{"operation_id": record.ID}, "fallback": "The completed operation is no longer available for replay."},
-				"origin":  "server.operation_ledger", "retryable": false, "details": map[string]any{"operation_id": record.ID},
-				"stack": []any{map[string]any{"component": "server.operation_ledger", "operation": "GET /api/operations/{id}", "code": "operation_replay_evicted"}},
-			},
-		},
-		"status": http.StatusGone,
-	}
-}
-
-func boundOperationReplays(records map[string]*goOperation) bool {
-	exposed := make([]*goOperation, 0)
-	totalBytes := 0
-	for _, record := range records {
-		if record != nil && record.DeliveryAcknowledged && record.TerminalEvent != nil {
-			exposed = append(exposed, record)
-			totalBytes += eventBytes(clientEvent{Payload: record.TerminalEvent})
-		}
-	}
-	sort.Slice(exposed, func(i, j int) bool {
-		left, right := exposed[i].TerminalAt, exposed[j].TerminalAt
-		if left == right {
-			return exposed[i].ID < exposed[j].ID
-		}
-		return left < right
-	})
-	changed := false
-	for _, record := range exposed {
-		bytes := eventBytes(clientEvent{Payload: record.TerminalEvent})
-		if bytes <= operationReplayRecordBytes && totalBytes <= operationReplayTotalBytes {
-			continue
-		}
-		bounded := boundedOperationTerminal(record)
-		boundedBytes := eventBytes(clientEvent{Payload: bounded})
-		record.TerminalEvent = bounded
-		if result, ok := bounded["result"].(map[string]any); ok {
-			record.Result = result
-		}
-		record.HTTPStatus = http.StatusGone
-		totalBytes += boundedBytes - bytes
-		changed = true
-	}
-	return changed
-}
-
-func retainOperationRecords(records map[string]*goOperation) bool {
-	count := len(records)
-	pruneOperationRecords(records)
-	bounded := boundOperationReplays(records)
-	return bounded || len(records) != count
-}
-func (s *server) operationRecord(id string) *goOperation {
-	s.operationsMu.Lock()
-	defer s.operationsMu.Unlock()
-	if record := s.operations[id]; record != nil {
-		return cloneOperation(record)
-	}
-	return nil
-}
-
-func operationIsTerminal(record *goOperation) bool {
-	return record != nil && (record.TerminalEvent != nil || record.State == "terminal" || record.State == "cancelled")
-}
-func (s *server) acceptOperation(id string) error {
-	return s.acceptOperationWithMetadata(id, "", "", "")
-}
-
-func (s *server) acceptOperationWithMetadata(id, requestID, route, kind string) error {
-	return s.acceptOperationWithDetails(id, requestID, route, kind, 0, nil, nil, nil)
-}
-
-func (s *server) acceptOperationWithDetails(id, requestID, route, kind string, deadlineAt int64, progress, producer, context map[string]any) error {
-	if id == "" {
-		return fmt.Errorf("missing operation id")
-	}
-	if s.events == nil {
-		return fmt.Errorf("event broker unavailable")
-	}
-	s.operationsMu.Lock()
-	defer s.operationsMu.Unlock()
-	if s.operations == nil {
-		s.operations = map[string]*goOperation{}
-	}
-	if s.operations[id] != nil {
-		return fmt.Errorf("operation already exists: %s", id)
-	}
-	now := time.Now().UnixMilli()
-	if requestID == "" {
-		requestID = "r-" + strconv.FormatInt(now, 10) + "-" + id
-	}
-	if deadlineAt <= now {
-		deadlineAt = time.Now().Add(10 * time.Minute).UnixMilli()
-	}
-	if progress == nil {
-		progress = map[string]any{}
-	}
-	if producer == nil {
-		producer = map[string]any{}
-	}
-	if context == nil {
-		context = map[string]any{}
-	}
-	deadlineText := time.UnixMilli(deadlineAt).UTC().Format(time.RFC3339Nano)
-	operation := map[string]any{"id": id, "deadline_at": deadlineText, "cursor": map[string]any{"epoch": s.events.epoch, "seq": 0}, "status_url": "/api/operations/" + url.PathEscape(id), "events_url": "/api/client-events?operation_id=" + url.QueryEscape(id), "progress": cloneMap(progress)}
-	if kind != "" {
-		operation["kind"] = kind
-	}
-	if len(context) > 0 {
-		operation["context"] = cloneMap(context)
-	}
-	receipt := map[string]any{"state": "queued", "request": map[string]any{"id": requestID}, "operation": operation}
-	record := &goOperation{ID: id, State: "queued", Epoch: s.events.epoch, RequestID: requestID, Route: route, Kind: kind, Context: cloneMap(context), Progress: cloneMap(progress), Producer: cloneMap(producer), Receipt: receipt, DeadlineAt: deadlineAt, CreatedAt: now, UpdatedAt: now}
-	if err := appendOperationJournal(s.operationsJournal, map[string]any{"version": operationJournalVersion, "type": "operation", "epoch": record.Epoch, "record": record}); err != nil {
-		return err
-	}
-	s.operations[id] = record
-	s.pruneOperationsLocked()
-	return s.saveOperationsLocked()
-}
-
-func (s *server) updateOperationProducers(ids []string, producer map[string]any, generation int) ([]string, error) {
-	s.operationsMu.Lock()
-	defer s.operationsMu.Unlock()
-	updated := make([]*goOperation, 0, len(ids))
-	for _, id := range ids {
-		record := s.operations[id]
-		if record == nil || record.State != "queued" || generation < record.ProducerGeneration {
-			continue
-		}
-		copy := *record
-		copy.Producer = cloneMap(producer)
-		copy.ProducerGeneration = generation
-		copy.UpdatedAt = time.Now().UnixMilli()
-		if chain, ok := producer["chain"].([]any); ok && len(chain) > 0 {
-			if current, ok := chain[len(chain)-1].(map[string]any); ok {
-				copy.Progress = cloneMap(record.Progress)
-				copy.Progress["producer_stage"] = fmt.Sprint(current["stage"])
-				copy.Progress["producer_state"] = fmt.Sprint(current["state"])
-			}
-		}
-		copy.Receipt = cloneMap(record.Receipt)
-		if operation, ok := record.Receipt["operation"].(map[string]any); ok {
-			operationCopy := cloneMap(operation)
-			operationCopy["progress"] = cloneMap(copy.Progress)
-			copy.Receipt["operation"] = operationCopy
-		}
-		updated = append(updated, &copy)
-	}
-	if len(updated) == 0 {
-		return nil, nil
-	}
-	if err := appendOperationJournal(s.operationsJournal, map[string]any{"version": operationJournalVersion, "type": "operations", "epoch": s.events.epoch, "operations": updated}); err != nil {
-		return nil, err
-	}
-	for _, record := range updated {
-		s.operations[record.ID] = record
-	}
-	if err := s.saveOperationsLocked(); err != nil {
-		return nil, err
-	}
-	result := make([]string, 0, len(updated))
-	for _, record := range updated {
-		result = append(result, record.ID)
-	}
-	return result, nil
-}
-
-func (s *server) updateOperationProducer(id string, producer map[string]any, generation int) (bool, error) {
-	updated, err := s.updateOperationProducers([]string{id}, producer, generation)
-	return len(updated) == 1, err
-}
-
-func (s *server) recordOperationSchedule(id string, schedule map[string]any) bool {
-	allowed := map[string]bool{"task": true, "priority": true, "lane": true, "submitted_at": true, "running_started_at": true, "completed_at": true, "queue_wait_ms": true, "execution_ms": true, "transient_polls": true}
-	bounded := map[string]any{}
-	for key, value := range schedule {
-		if allowed[key] {
-			if number, ok := value.(float64); ok {
-				bounded[key] = number
-			} else {
-				bounded[key] = fmt.Sprint(value)[:minInt(len(fmt.Sprint(value)), 64)]
-			}
-		}
-	}
-	if len(bounded) == 0 {
-		return false
-	}
-	s.operationsMu.Lock()
-	defer s.operationsMu.Unlock()
-	record := s.operations[id]
-	if record == nil {
-		return false
-	}
-	updated := *record
-	updated.Schedule = bounded
-	updated.UpdatedAt = time.Now().UnixMilli()
-	if err := appendOperationJournal(s.operationsJournal, map[string]any{"version": operationJournalVersion, "type": "operation", "epoch": updated.Epoch, "record": &updated}); err != nil {
-		return false
-	}
-	*record = updated
-	if err := s.saveOperationsLocked(); err != nil {
-		return false
-	}
-	return true
-}
-func (s *server) terminalizeOperation(id string, result map[string]any, status int) (clientEvent, error) {
-	s.operationsMu.Lock()
-	defer s.operationsMu.Unlock()
-	record := s.operations[id]
-	if record == nil {
-		return clientEvent{}, fmt.Errorf("operation not found: %s", id)
-	}
-	if operationIsTerminal(record) {
-		if record.TerminalEvent != nil && !record.EventPublished {
-			event, err := s.events.publish("operation_terminal", record.TerminalEvent)
-			if err != nil {
-				return clientEvent{}, err
-			}
-			record.EventPublished = true
-			if err := appendOperationJournal(s.operationsJournal, map[string]any{"version": operationJournalVersion, "type": "operation", "epoch": record.Epoch, "record": record}); err != nil {
-				return event, err
-			}
-			if err := s.saveOperationsLocked(); err != nil {
-				return event, err
-			}
-			return event, nil
-		}
-		return clientEvent{}, fmt.Errorf("operation already terminal: %s", id)
-	}
-	updated := *record
-	updated.State = "failed"
-	if state, ok := result["state"].(string); ok && state != "" {
-		updated.State = state
-	}
-	updated.Result = result
-	updated.HTTPStatus = status
-	updated.Seq++
-	updated.TerminalAt = time.Now().UnixMilli()
-	updated.UpdatedAt = time.Now().UnixMilli()
-	payload := map[string]any{"operation": map[string]any{"id": id, "cursor": map[string]any{"epoch": updated.Epoch, "seq": updated.Seq}}, "result": result, "status": status}
-	updated.TerminalEvent = payload
-	if err := appendOperationJournal(s.operationsJournal, map[string]any{"version": operationJournalVersion, "type": "operation", "epoch": updated.Epoch, "record": &updated}); err != nil {
-		return clientEvent{}, err
-	}
-	*record = updated
-	s.pruneOperationsLocked()
-	if err := s.saveOperationsLocked(); err != nil {
-		return clientEvent{}, err
-	}
-	event, err := s.events.publish("operation_terminal", payload)
-	if err != nil {
-		return clientEvent{}, err
-	}
-	record.EventPublished = true
-	if err := appendOperationJournal(s.operationsJournal, map[string]any{"version": operationJournalVersion, "type": "operation", "epoch": record.Epoch, "record": record}); err != nil {
-		return event, err
-	}
-	if err := s.saveOperationsLocked(); err != nil {
-		return event, err
-	}
-	return event, err
-}
-func (s *server) cancelOperation(id string) error {
-	s.operationsMu.Lock()
-	defer s.operationsMu.Unlock()
-	record := s.operations[id]
-	if record == nil {
-		return fmt.Errorf("operation not found: %s", id)
-	}
-	if operationIsTerminal(record) {
-		if record.State == "cancelled" && record.TerminalEvent != nil && !record.EventPublished {
-			if _, err := s.events.publish("operation_terminal", record.TerminalEvent); err != nil {
-				return err
-			}
-			record.EventPublished = true
-			if err := appendOperationJournal(s.operationsJournal, map[string]any{"version": operationJournalVersion, "type": "operation", "epoch": record.Epoch, "record": record}); err != nil {
-				return err
-			}
-			return s.saveOperationsLocked()
-		}
-		return fmt.Errorf("operation already terminal: %s", id)
-	}
-	updated := *record
-	updated.State = "cancelled"
-	updated.CancelRequested = true
-	updated.Seq++
-	updated.TerminalAt = time.Now().UnixMilli()
-	updated.UpdatedAt = time.Now().UnixMilli()
-	updated.Result = map[string]any{"state": "cancelled", "request": map[string]any{"id": updated.RequestID}}
-	updated.HTTPStatus = http.StatusOK
-	updated.TerminalEvent = map[string]any{"operation": map[string]any{"id": id, "cursor": map[string]any{"epoch": updated.Epoch, "seq": updated.Seq}}, "result": updated.Result, "status": updated.HTTPStatus}
-	if err := appendOperationJournal(s.operationsJournal, map[string]any{"version": operationJournalVersion, "type": "operation", "epoch": updated.Epoch, "record": &updated}); err != nil {
-		return err
-	}
-	*record = updated
-	s.pruneOperationsLocked()
-	if err := s.saveOperationsLocked(); err != nil {
-		return err
-	}
-	if _, err := s.events.publish("operation_terminal", updated.TerminalEvent); err != nil {
-		return err
-	}
-	record.EventPublished = true
-	if err := appendOperationJournal(s.operationsJournal, map[string]any{"version": operationJournalVersion, "type": "operation", "epoch": record.Epoch, "record": record}); err != nil {
-		return err
-	}
-	return s.saveOperationsLocked()
-}
-func (b *eventBroker) publish(kind string, payload map[string]any) (clientEvent, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if payload == nil {
-		payload = map[string]any{}
-	}
-	resource := eventResource(kind, payload)
-	if kind == "operation_terminal" {
-		if existing, ok := b.terminalEvents[resource]; ok {
-			return existing, nil
-		}
-		for index := len(b.events) - 1; index >= 0; index-- {
-			if b.events[index].Resource == resource {
-				b.terminalEvents[resource] = b.events[index]
-				return b.events[index], nil
-			}
-		}
-	}
-	base := b.revisions[resource]
-	b.revisions[resource] = base + 1
-	b.nextID++
-	e := clientEvent{ID: b.nextID, Type: kind, Time: float64(time.Now().UnixNano()) / 1e9, Payload: payload, Epoch: b.epoch, Resource: resource, Base: base, Revision: base + 1}
-	if err := b.appendDurable(e); err != nil {
-		b.nextID--
-		b.revisions[resource] = base
-		return clientEvent{}, err
-	}
-	b.published++
-	bytes := eventBytes(e)
-	b.publishedBytes += bytes
-	incrementEventMetric(b.publishedByType, kind, bytes)
-	incrementEventMetric(b.publishedByResource, resource, bytes)
-	b.events = append(b.events, e)
-	if kind == "operation_terminal" {
-		b.terminalEvents[resource] = e
-	}
-	if len(b.events) > eventQueueHistoryLimit {
-		b.events = b.events[len(b.events)-eventQueueHistoryLimit:]
-	}
-	if b.journalPath != "" && b.nextID%eventJournalCompactEvery == 0 {
-		if err := compactEventJournal(b.journalPath, b.events, b.revisions, b.nextID); err != nil {
-			slog.Warn("event journal compaction failed", "path", b.journalPath, "error", err)
-		}
-	}
-	if retainedEventTypes[kind] && (b.retained[resource].ID != 0 || len(b.retained) < retainedEventLimit) {
-		b.retained[resource] = e
-	}
-	for ch := range b.subscribers {
-		if selected := b.channels[ch]; b.channelFilters[ch] && !eventMatchesChannels(kind, mapKeys(selected)) {
-			b.filtered++
-			b.filteredBytes += bytes
-			incrementEventMetric(b.filteredByType, kind, bytes)
-			continue
-		}
-		if pending := b.pending[ch]; pending != nil {
-			if _, ok := pending[resource]; ok {
-				prior := pending[resource]
-				priorPatch, _ := prior.Payload["patch"].(bool)
-				currentPatch, _ := payload["patch"].(bool)
-				if priorPatch || currentPatch {
-					if b.repair[ch] == nil {
-						b.repair[ch] = map[string]bool{}
-					}
-					b.repair[ch][resource] = true
-				}
-				pending[resource] = e
-				b.replaceQueuedResource(ch, resource, e)
-				b.coalesced++
-				incrementEventMetric(b.coalescedByResource, resource, bytes)
-				if stats := b.clientStats[ch]; stats != nil {
-					stats.coalescedEvents++
-				}
-				continue
-			}
-		}
-		select {
-		case ch <- b.withRepair(ch, e):
-			b.pending[ch][resource] = e
-			b.delivered++
-			b.deliveredBytes += bytes
-			incrementEventMetric(b.deliveredByType, kind, bytes)
-			incrementEventMetric(b.deliveredByResource, resource, bytes)
-			if stats := b.clientStats[ch]; stats != nil {
-				stats.deliveredEvents++
-				stats.deliveredBytes += bytes
-			}
-		default:
-			select {
-			case dropped := <-ch:
-				delete(b.pending[ch], dropped.Resource)
-				if dropped.Resource != "" {
-					if b.repair[ch] == nil {
-						b.repair[ch] = map[string]bool{}
-					}
-					b.repair[ch][dropped.Resource] = true
-				}
-				droppedBytes := eventBytes(dropped)
-				droppedResource := dropped.Resource
-				if droppedResource == "" {
-					droppedResource = "event"
-				}
-				incrementEventMetric(b.droppedByResource, droppedResource, droppedBytes)
-				if stats := b.clientStats[ch]; stats != nil {
-					stats.droppedEvents++
-				}
-				b.dropped++
-			default:
-			}
-			select {
-			case ch <- b.withRepair(ch, e):
-				b.pending[ch][resource] = e
-				b.delivered++
-				b.deliveredBytes += bytes
-				incrementEventMetric(b.deliveredByType, kind, bytes)
-				incrementEventMetric(b.deliveredByResource, resource, bytes)
-				if stats := b.clientStats[ch]; stats != nil {
-					stats.deliveredEvents++
-					stats.deliveredBytes += bytes
-				}
-			default:
-				droppedResource := resource
-				if droppedResource == "" {
-					droppedResource = "event"
-				}
-				incrementEventMetric(b.droppedByResource, droppedResource, bytes)
-				if stats := b.clientStats[ch]; stats != nil {
-					stats.droppedEvents++
-				}
-				b.dropped++
-			}
-		}
-	}
-	return e, nil
-}
-func (b *eventBroker) replaceQueuedResource(ch chan clientEvent, resource string, replacement clientEvent) {
-	items := make([]clientEvent, 0, len(ch))
-	for {
-		select {
-		case item := <-ch:
-			if item.Resource != resource {
-				items = append(items, item)
-			}
-		default:
-			goto drained
-		}
-	}
-drained:
-	for _, item := range items {
-		select {
-		case ch <- item:
-		default:
-			return
-		}
-	}
-	select {
-	case ch <- replacement:
-	default:
-	}
-}
-func (b *eventBroker) withRepair(ch chan clientEvent, event clientEvent) clientEvent {
-	if values := b.repair[ch]; len(values) > 0 {
-		for resource := range values {
-			event.RepairResources = append(event.RepairResources, resource)
-		}
-		sort.Strings(event.RepairResources)
-	}
-	return event
-}
-func eventResource(kind string, payload map[string]any) string {
-	if kind == "background_refresh_done" {
-		role, _ := payload["role"].(string)
-		if role == "" {
-			role = "unknown"
-		}
-		scope, _ := payload["session"].(string)
-		if scope == "" {
-			scope, _ = payload["root"].(string)
-		}
-		if scope != "" {
-			digest := sha256.Sum256([]byte(scope))
-			return "background:" + role + ":" + hex.EncodeToString(digest[:])[:16]
-		}
-		return "background:" + role
-	}
-	if kind == "operation_terminal" {
-		if op, ok := payload["operation"].(map[string]any); ok {
-			if id, ok := op["id"].(string); ok && id != "" {
-				return "operation_terminal:" + id
-			}
-		}
-	}
-	if kind == "search_progress" {
-		if id, ok := payload["scope_id"].(string); ok && id != "" {
-			return "search_progress:" + id
-		}
-	}
-	for _, scoped := range []string{"event_log_changed", "session_files_ready", "context_items_ready", "yoagent_conversation_changed", "yoagent_jobs_changed", "yoagent_stream_delta"} {
-		if kind != scoped {
-			continue
-		}
-		if session, ok := payload["session"].(string); ok && session != "" {
-			return kind + ":" + session
-		}
-		if request, ok := payload["request"].(map[string]any); ok {
-			if session, ok := request["session"].(string); ok && session != "" {
-				return kind + ":" + session
-			}
-		}
-	}
-	return kind
-}
-
-func operationDemandIDs(operationID, operations string) []string {
-	seen := map[string]bool{}
-	ids := []string{}
-	add := func(id string) {
-		if id != "" && !seen[id] {
-			seen[id] = true
-			ids = append(ids, id)
-		}
-	}
-	add(strings.TrimSpace(operationID))
-	for _, id := range strings.Split(operations, ",") {
-		id = strings.TrimSpace(id)
-		if id == "" || len(id) > 128 {
-			continue
-		}
-		add(id)
-	}
-	return ids
-}
-
-func (b *eventBroker) subscribe(requested ...string) (chan clientEvent, func()) {
-	return b.subscribeClient("", requested...)
-}
-
-func (b *eventBroker) subscribeClient(clientID string, requested ...string) (chan clientEvent, func()) {
-	queueSize := b.queueSize
-	if queueSize <= 0 {
-		queueSize = eventQueueSize
-	}
-	ch := make(chan clientEvent, queueSize)
-	b.mu.Lock()
-	if b.subscribers == nil {
-		b.subscribers = map[chan clientEvent]struct{}{}
-	}
-	if b.channels == nil {
-		b.channels = map[chan clientEvent]map[string]bool{}
-	}
-	if b.channelFilters == nil {
-		b.channelFilters = map[chan clientEvent]bool{}
-	}
-	if b.clientIDs == nil {
-		b.clientIDs = map[chan clientEvent]string{}
-	}
-	if b.clientStats == nil {
-		b.clientStats = map[chan clientEvent]*eventSubscriberStats{}
-	}
-	if b.pending == nil {
-		b.pending = map[chan clientEvent]map[string]clientEvent{}
-	}
-	if b.repair == nil {
-		b.repair = map[chan clientEvent]map[string]bool{}
-	}
-	b.subscribers[ch] = struct{}{}
-	var selected map[string]bool
-	if requested != nil {
-		selected = map[string]bool{}
-		for _, value := range requested {
-			selected[value] = true
-		}
-	}
-	b.channels[ch] = selected
-	b.channelFilters[ch] = requested != nil
-	b.clientIDs[ch] = normalizeClientID(clientID)
-	b.clientStats[ch] = &eventSubscriberStats{}
-	b.pending[ch] = map[string]clientEvent{}
-	b.repair[ch] = map[string]bool{}
-	resources := make([]string, 0, len(b.retained))
-	for resource := range b.retained {
-		resources = append(resources, resource)
-	}
-	sort.Strings(resources)
-	replay := make([]clientEvent, 0, len(resources))
-	for _, resource := range resources {
-		replay = append(replay, b.retained[resource])
-	}
-	for _, e := range replay {
-		if b.channelFilters[ch] && !eventMatchesChannels(e.Type, mapKeys(selected)) {
-			continue
-		}
-		e.Replay = true
-		select {
-		case ch <- e:
-			b.pending[ch][e.Resource] = e
-			b.replayed++
-		default:
-			droppedResource := e.Resource
-			if droppedResource == "" {
-				droppedResource = "event"
-			}
-			incrementEventMetric(b.droppedByResource, droppedResource, eventBytes(e))
-			b.clientStats[ch].droppedEvents++
-			if e.Resource != "" {
-				b.repair[ch][e.Resource] = true
-			}
-			b.dropped++
-		}
-	}
-	b.mu.Unlock()
-	return ch, func() {
-		b.mu.Lock()
-		delete(b.subscribers, ch)
-		delete(b.channels, ch)
-		delete(b.channelFilters, ch)
-		delete(b.clientIDs, ch)
-		delete(b.clientStats, ch)
-		delete(b.pending, ch)
-		delete(b.repair, ch)
-		close(ch)
-		b.mu.Unlock()
-	}
-}
-
 type wsConn struct {
 	net.Conn
 	writeMu sync.Mutex
 }
-
-type authUser struct{ username, password, role string }
-type authContextKey struct{}
 
 type winsize struct{ rows, cols, x, y uint16 }
 
@@ -2682,43 +380,43 @@ func (c *wsConn) frame(opcode byte, payload []byte) error {
 }
 
 func (s *server) registerFilesystemRoutes(mux *http.ServeMux) {
-	mux.Handle("/api/session-files", s.protected(http.HandlerFunc(s.sessionFiles), "readonly"))
-	mux.Handle("/api/session-files-stream", s.protected(http.HandlerFunc(s.sessionFilesStream), "readonly"))
-	mux.Handle("/api/session-files-batch", s.protected(http.HandlerFunc(s.sessionFilesBatch), "readonly"))
-	mux.Handle("/api/fs/fast/list", s.protected(http.HandlerFunc(s.fsFastList), "readonly"))
-	mux.Handle("/api/fs/list", s.protected(http.HandlerFunc(s.fsList), "readonly"))
-	mux.Handle("/api/fs/read", s.protected(http.HandlerFunc(s.fsRead), "readonly"))
-	mux.Handle("/api/fs/info", s.protected(http.HandlerFunc(s.fsInfo), "readonly"))
-	mux.Handle("/api/fs/diff", s.protected(http.HandlerFunc(s.fsDiff), "readonly"))
-	mux.Handle("/api/fs/git-history", s.protected(http.HandlerFunc(s.fsGitHistory), "readonly"))
-	mux.Handle("/api/fs/git-history-stats-stream", s.protected(http.HandlerFunc(s.fsGitHistoryStatsStream), "readonly"))
-	mux.Handle("/api/fs/git-commit", s.protected(http.HandlerFunc(s.fsGitCommit), "readonly"))
-	mux.Handle("/api/fs/raw", s.protected(http.HandlerFunc(s.fsRaw), "readonly"))
-	mux.Handle("/api/fs/search", s.protected(http.HandlerFunc(s.fsSearch), "readonly"))
-	mux.Handle("/api/fs/search-stream", s.protected(http.HandlerFunc(s.fsSearch), "readonly"))
-	mux.Handle("/api/fs/index-status", s.protected(http.HandlerFunc(s.fsIndexStatus), "readonly"))
-	mux.Handle("/api/fs/watch-diff", s.protected(http.HandlerFunc(s.fsWatchDiff), "readonly"))
-	mux.Handle("/api/fs/resolve-file-candidates", s.protected(http.HandlerFunc(s.fsResolveCandidates), "readonly"))
-	mux.Handle("/api/fs/write", s.protected(http.HandlerFunc(s.fsWrite), "admin"))
-	mux.Handle("/api/fs/delete", s.protected(http.HandlerFunc(s.fsDelete), "admin"))
-	mux.Handle("/api/fs/unindex", s.protected(http.HandlerFunc(s.fsUnindex), "admin"))
-	mux.Handle("/api/fs/rename", s.protected(http.HandlerFunc(s.fsRename), "admin"))
-	mux.Handle("/api/fs/mkdir", s.protected(http.HandlerFunc(s.fsMkdir), "admin"))
-	mux.Handle("/api/fs/batch", s.protected(http.HandlerFunc(s.fsBatch), "admin"))
-	mux.Handle("/api/upload", s.protected(http.HandlerFunc(s.upload), "admin"))
-	mux.Handle("/api/batch/search", s.protected(http.HandlerFunc(s.fsSearch), "readonly"))
-	mux.Handle("/api/batch/blame", s.protected(http.HandlerFunc(s.fsBlame), "admin"))
-	mux.Handle("/api/batch/zip", s.protected(http.HandlerFunc(s.fsZip), "admin"))
-	mux.Handle("/api/batch/count", s.protected(http.HandlerFunc(s.fsCount), "admin"))
-	mux.Handle("/api/batch/html-preview", s.protected(http.HandlerFunc(s.fsHTMLPreview), "admin"))
+	mux.Handle("/api/session-files", s.protected(http.HandlerFunc(s.sessionFiles)))
+	mux.Handle("/api/session-files-stream", s.protected(http.HandlerFunc(s.sessionFilesStream)))
+	mux.Handle("/api/session-files-batch", s.protected(http.HandlerFunc(s.sessionFilesBatch)))
+	mux.Handle("/api/fs/fast/list", s.protected(http.HandlerFunc(s.fsFastList)))
+	mux.Handle("/api/fs/list", s.protected(http.HandlerFunc(s.fsList)))
+	mux.Handle("/api/fs/read", s.protected(http.HandlerFunc(s.fsRead)))
+	mux.Handle("/api/fs/info", s.protected(http.HandlerFunc(s.fsInfo)))
+	mux.Handle("/api/fs/diff", s.protected(http.HandlerFunc(s.fsDiff)))
+	mux.Handle("/api/fs/git-history", s.protected(http.HandlerFunc(s.fsGitHistory)))
+	mux.Handle("/api/fs/git-history-stats-stream", s.protected(http.HandlerFunc(s.fsGitHistoryStatsStream)))
+	mux.Handle("/api/fs/git-commit", s.protected(http.HandlerFunc(s.fsGitCommit)))
+	mux.Handle("/api/fs/raw", s.protected(http.HandlerFunc(s.fsRaw)))
+	mux.Handle("/api/fs/search", s.protected(http.HandlerFunc(s.fsSearch)))
+	mux.Handle("/api/fs/search-stream", s.protected(http.HandlerFunc(s.fsSearch)))
+	mux.Handle("/api/fs/index-status", s.protected(http.HandlerFunc(s.fsIndexStatus)))
+	mux.Handle("/api/fs/watch-diff", s.protected(http.HandlerFunc(s.fsWatchDiff)))
+	mux.Handle("/api/fs/resolve-file-candidates", s.protected(http.HandlerFunc(s.fsResolveCandidates)))
+	mux.Handle("/api/fs/write", s.protected(http.HandlerFunc(s.fsWrite)))
+	mux.Handle("/api/fs/delete", s.protected(http.HandlerFunc(s.fsDelete)))
+	mux.Handle("/api/fs/unindex", s.protected(http.HandlerFunc(s.fsUnindex)))
+	mux.Handle("/api/fs/rename", s.protected(http.HandlerFunc(s.fsRename)))
+	mux.Handle("/api/fs/mkdir", s.protected(http.HandlerFunc(s.fsMkdir)))
+	mux.Handle("/api/fs/batch", s.protected(http.HandlerFunc(s.fsBatch)))
+	mux.Handle("/api/upload", s.protected(http.HandlerFunc(s.upload)))
+	mux.Handle("/api/batch/search", s.protected(http.HandlerFunc(s.fsSearch)))
+	mux.Handle("/api/batch/blame", s.protected(http.HandlerFunc(s.fsBlame)))
+	mux.Handle("/api/batch/zip", s.protected(http.HandlerFunc(s.fsZip)))
+	mux.Handle("/api/batch/count", s.protected(http.HandlerFunc(s.fsCount)))
+	mux.Handle("/api/batch/html-preview", s.protected(http.HandlerFunc(s.fsHTMLPreview)))
 }
 
 func (s *server) registerSessionRoutes(mux *http.ServeMux) {
-	mux.Handle("/api/ensure-session", s.protected(http.HandlerFunc(s.ensureSession), "admin"))
-	mux.Handle("/api/create-session-plan", s.protected(http.HandlerFunc(s.createSessionPlan), "admin"))
-	mux.Handle("/api/create-session", s.protected(http.HandlerFunc(s.createSession), "admin"))
-	mux.Handle("/api/rename-session", s.protected(http.HandlerFunc(s.renameSession), "admin"))
-	mux.Handle("/api/kill-session", s.protected(http.HandlerFunc(s.killSession), "admin"))
+	mux.Handle("/api/ensure-session", s.protected(http.HandlerFunc(s.ensureSession)))
+	mux.Handle("/api/create-session-plan", s.protected(http.HandlerFunc(s.createSessionPlan)))
+	mux.Handle("/api/create-session", s.protected(http.HandlerFunc(s.createSession)))
+	mux.Handle("/api/rename-session", s.protected(http.HandlerFunc(s.renameSession)))
+	mux.Handle("/api/kill-session", s.protected(http.HandlerFunc(s.killSession)))
 }
 
 // explicitCollectorPaths is deliberately fail-closed. Collector inputs are
@@ -2727,32 +425,32 @@ func (s *server) registerSessionRoutes(mux *http.ServeMux) {
 // Production may opt in by passing all three absolute paths explicitly.
 func explicitCollectorPaths() (claudeRoot, codexRoot, opencodeDatabase string, err error) {
 	values := []struct {
-		name  string
-		value *string
+		setting string
+		value   *string
 	}{
-		{"YOLOMUX_CLAUDE_TRANSCRIPT_ROOT", &claudeRoot},
-		{"YOLOMUX_CODEX_TRANSCRIPT_ROOT", &codexRoot},
-		{"YOLOMUX_OPENCODE_DATABASE", &opencodeDatabase},
+		{"CLAUDE_TRANSCRIPT_ROOT", &claudeRoot},
+		{"CODEX_TRANSCRIPT_ROOT", &codexRoot},
+		{"OPENCODE_DATABASE", &opencodeDatabase},
 	}
 	for _, item := range values {
-		*item.value = strings.TrimSpace(os.Getenv(item.name))
+		*item.value = strings.TrimSpace(productenv.Value(item.setting))
 		if *item.value == "" {
-			return "", "", "", fmt.Errorf("stats collectors require explicit %s", item.name)
+			return "", "", "", fmt.Errorf("stats collectors require explicit %s", productenv.Name(item.setting))
 		}
 		if !filepath.IsAbs(*item.value) {
-			return "", "", "", fmt.Errorf("stats collector path %s must be absolute", item.name)
+			return "", "", "", fmt.Errorf("stats collector path %s must be absolute", productenv.Name(item.setting))
 		}
 	}
 	return claudeRoot, codexRoot, opencodeDatabase, nil
 }
 
 func useMachineTmuxForOperatorLaunch() {
-	if strings.TrimSpace(productenv.Value("YOLOMUX_TMUX_SOCKET")) != "" {
+	if strings.TrimSpace(productenv.Value("TMUX_SOCKET")) != "" {
 		return
 	}
 	_ = os.Unsetenv("TMUX")
 	_ = os.Unsetenv("TMUX_PANE")
-	_ = os.Setenv("YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER", "1")
+	productenv.Assign("TMUX_ALLOW_DEFAULT_SERVER", "1")
 }
 
 func main() {
@@ -2762,8 +460,8 @@ func main() {
 	listenFD := flag.Int("listen-fd", -1, "use an already-bound TCP listener file descriptor")
 	host := flag.String("host", "127.0.0.1", "bind address")
 	root := flag.String("root", ".", "YOmux checkout root")
-	configDir := flag.String("config", os.Getenv("YOLOMUX_CONFIG_DIR"), "YOmux config directory")
-	statsPath := flag.String("stats", os.Getenv("YOLOMUX_STATS_DATABASE"), "YO!stats database path")
+	configDir := flag.String("config", productenv.Value("CONFIG_DIR"), "YOmux config directory")
+	statsPath := flag.String("stats", productenv.Value("STATS_DATABASE"), "YO!stats database path")
 	httpMode := flag.Bool("http", false, "serve plain HTTP instead of the default HTTPS")
 	certPath := flag.String("cert", "", "TLS certificate PEM path")
 	keyPath := flag.String("key", "", "TLS private key PEM path")
@@ -2788,28 +486,47 @@ func main() {
 	if err != nil {
 		fatal("invalid root: " + err.Error())
 	}
-	pricing, pricingErr := stats.LoadRepositoryPricingCatalog(rootPath, os.Getenv("YOLOMUX_PRICING_CATALOG"))
+	productRootPath := productenv.Value("ROOT")
+	if productRootPath == "" {
+		productRootPath = rootPath
+	}
+	productRootPath, err = filepath.Abs(productRootPath)
+	if err != nil {
+		fatal("invalid product root: " + err.Error())
+	}
+	pricing, pricingErr := stats.LoadRepositoryPricingCatalog(rootPath, productenv.Value("PRICING_CATALOG"))
 	if pricingErr != nil {
 		fatal("pricing catalog setup failed: " + pricingErr.Error())
 	}
-	rootLease, err := acquireInstanceRootLease(rootPath)
+	rootLease, err := acquireInstanceRootLease(productRootPath)
 	if err != nil {
 		fatal("YOmux product root is already owned by another server or unavailable: " + err.Error())
 	}
+	configLease, err := acquireConfigLease(*configDir)
+	if err != nil {
+		releaseInstanceRootLease(rootLease)
+		fatal("Go config/journal storage is already owned or unavailable: " + err.Error())
+	}
+	// Hold this descriptor until process exit, including fatal startup and shutdown.
+	// shutdown() precedes HTTP drainage and deferred collector/health writes;
+	// releasing here would let a replacement process race those final mutations.
+	defer func() { runtime.KeepAlive(configLease) }()
 	eventPath := filepath.Join(*configDir, "go-events.jsonl")
-	stateDir := strings.TrimSpace(os.Getenv("YOLOMUX_STATE_DIR"))
+	stateDir := strings.TrimSpace(productenv.Value("STATE_DIR"))
 	if stateDir == "" {
 		stateDir = *configDir
 	}
-	s := &server{root: rootPath, host: *host, port: *port, dangerouslyYolo: *dangerouslyYolo, config: *configDir, state: stateDir, httpMode: *httpMode, statsPath: *statsPath, pricing: pricing, children: make(map[*exec.Cmd]struct{}), processEntriesFn: processEntries, childProcessEntriesFn: descendantProcessEntries, startedAt: time.Now(), events: loadEventBroker(eventPath), eventLogPath: filepath.Join(*configDir, "event-log.jsonl"), operationsPath: filepath.Join(*configDir, "go-operations.json"), operationsJournal: filepath.Join(*configDir, "go-operations.jsonl"), logRing: newGoLogRing(), rootLease: rootLease, capabilities: capabilities.New(version), finderJobs: newFinderJobScheduler(), finderBackgroundJobs: newFinderBackgroundJobScheduler(), finderBulkJobs: newFinderBulkJobScheduler(), finderStreamJobs: newFinderStreamScheduler()}
+	s := &server{root: rootPath, host: *host, port: *port, dangerouslyYolo: *dangerouslyYolo, config: *configDir, state: stateDir, httpMode: *httpMode, statsPath: *statsPath, pricing: pricing, children: make(map[*exec.Cmd]struct{}), processEntriesFn: processEntries, childProcessEntriesFn: descendantProcessEntries, startedAt: time.Now(), events: loadEventBroker(eventPath), eventLogPath: filepath.Join(*configDir, "event-log.jsonl"), logRing: newGoLogRing(), rootLease: rootLease, capabilities: capabilities.New(version), finderJobs: newFinderJobScheduler(), finderBackgroundJobs: newFinderBackgroundJobScheduler(), finderBulkJobs: newFinderBulkJobScheduler(), finderStreamJobs: newFinderStreamScheduler(), operationState:
 	// The Go server has no parent observer to retain lifecycle history. Keep the
 	// port-scoped ledger in the configured state directory so normal operator
 	// restarts expose measured restart/demand counters instead of zeros or an
 	// unconditional unavailable envelope. A launch without an explicit reason
 	// remains partial rather than being guessed as demand-driven.
+	operationState{operationsPath: filepath.Join(*configDir, "go-operations.json"), operationsJournal: filepath.Join(*configDir, "go-operations.jsonl")}}
+
 	healthEpoch := fmt.Sprintf("pid:%d:start:%d", os.Getpid(), s.startedAt.UnixNano())
 	healthHistoryPath := filepath.Join(stateDir, "go-backend-health", fmt.Sprintf("%d.json", *port))
-	if lifecycle, lifecycleErr := newGoHealthLifecycle(healthHistoryPath, healthEpoch, os.Getpid(), s.startedAt, os.Getenv("YOLOMUX_GO_START_REASON")); lifecycleErr != nil {
+	if lifecycle, lifecycleErr := newGoHealthLifecycle(healthHistoryPath, healthEpoch, os.Getpid(), s.startedAt, productenv.Value("GO_START_REASON")); lifecycleErr != nil {
 		slog.Warn("Go backend-health history unavailable", "error", lifecycleErr)
 	} else {
 		s.healthLifecycle = lifecycle
@@ -2857,57 +574,57 @@ func main() {
 	mux.HandleFunc("/login", s.login)
 	mux.HandleFunc("/logout", s.logout)
 	mux.HandleFunc("/api/auth-setup", s.authSetup)
-	mux.Handle("/api/ping", s.protected(http.HandlerFunc(s.ping), "readonly"))
-	mux.Handle("/api/capabilities", s.protected(http.HandlerFunc(s.capabilitySnapshot), "readonly"))
-	mux.Handle("/api/client-events", s.protected(http.HandlerFunc(s.clientEvents), "readonly"))
-	mux.Handle("/api/stats-agent-status", s.protected(http.HandlerFunc(s.statsAgentStatus), "readonly"))
-	mux.Handle("/api/stats-capabilities", s.protected(http.HandlerFunc(s.statsCapabilities), "readonly"))
-	mux.Handle("/api/stats-observations", s.protected(http.HandlerFunc(s.statsObservations), "readonly"))
-	mux.Handle("/api/stats-refill", s.protected(http.HandlerFunc(s.statsRefill), "admin"))
-	mux.Handle("/api/stats-retry", s.protected(http.HandlerFunc(s.statsRetry), "readonly"))
-	mux.Handle("/api/stats-snapshot", s.protected(http.HandlerFunc(s.statsSnapshot), "readonly"))
-	mux.Handle("/api/stats-delta", s.protected(http.HandlerFunc(s.statsDelta), "readonly"))
-	mux.Handle("/api/stats-stream", s.protected(http.HandlerFunc(s.statsStream), "readonly"))
-	mux.Handle("/api/pricing-catalog", s.protected(http.HandlerFunc(s.pricingCatalog), "readonly"))
-	mux.Handle("/api/pricing-catalog/refresh", s.protected(http.HandlerFunc(s.pricingCatalogRefresh), "admin"))
-	mux.Handle("/readyz", s.protected(http.HandlerFunc(s.ready), "readonly"))
-	mux.Handle("/api/operations/ack", s.protected(http.HandlerFunc(s.operationAck), "readonly"))
-	mux.Handle("/api/operations/cancel", s.protected(http.HandlerFunc(s.operationCancel), "admin"))
-	mux.Handle("/api/background/status", s.protected(http.HandlerFunc(s.backgroundStatus), "readonly"))
-	mux.Handle("/api/diagnostics/heap", s.protected(http.HandlerFunc(s.runtimeHeapProfile), "admin"))
-	mux.Handle("/api/diagnostics/performance", s.protected(http.HandlerFunc(s.diagnosticsPerformance), "admin"))
-	mux.Handle("/api/settings", s.protected(http.HandlerFunc(s.settings), "readonly"))
+	mux.Handle("/api/ping", s.protected(http.HandlerFunc(s.ping)))
+	mux.Handle("/api/capabilities", s.protected(http.HandlerFunc(s.capabilitySnapshot)))
+	mux.Handle("/api/client-events", s.protected(http.HandlerFunc(s.clientEvents)))
+	mux.Handle("/api/stats-agent-status", s.protected(http.HandlerFunc(s.statsAgentStatus)))
+	mux.Handle("/api/stats-capabilities", s.protected(http.HandlerFunc(s.statsCapabilities)))
+	mux.Handle("/api/stats-observations", s.protected(http.HandlerFunc(s.statsObservations)))
+	mux.Handle("/api/stats-refill", s.protected(http.HandlerFunc(s.statsRefill)))
+	mux.Handle("/api/stats-retry", s.protected(http.HandlerFunc(s.statsRetry)))
+	mux.Handle("/api/stats-snapshot", s.protected(http.HandlerFunc(s.statsSnapshot)))
+	mux.Handle("/api/stats-delta", s.protected(http.HandlerFunc(s.statsDelta)))
+	mux.Handle("/api/stats-stream", s.protected(http.HandlerFunc(s.statsStream)))
+	mux.Handle("/api/pricing-catalog", s.protected(http.HandlerFunc(s.pricingCatalog)))
+	mux.Handle("/api/pricing-catalog/refresh", s.protected(http.HandlerFunc(s.pricingCatalogRefresh)))
+	mux.Handle("/readyz", s.protected(http.HandlerFunc(s.ready)))
+	mux.Handle("/api/operations/ack", s.protected(http.HandlerFunc(s.operationAck)))
+	mux.Handle("/api/operations/cancel", s.protected(http.HandlerFunc(s.operationCancel)))
+	mux.Handle("/api/background/status", s.protected(http.HandlerFunc(s.backgroundStatus)))
+	mux.Handle("/api/diagnostics/heap", s.protected(http.HandlerFunc(s.runtimeHeapProfile)))
+	mux.Handle("/api/diagnostics/performance", s.protected(http.HandlerFunc(s.diagnosticsPerformance)))
+	mux.Handle("/api/settings", s.protected(http.HandlerFunc(s.settings)))
 	// The browser requests session metadata during boot, before it opens the
 	// stats surface. Keep this route on the Go mux so a stats-capable process
 	// does not turn a boot identity probe into the generic unsupported response.
-	mux.Handle("/api/session-metadata", s.protected(http.HandlerFunc(s.sessionMetadata), "readonly"))
-	mux.Handle("/api/activity", s.protected(http.HandlerFunc(s.activity), "readonly"))
-	mux.Handle("/api/background/claim", s.protected(http.HandlerFunc(s.backgroundClaim), "admin"))
-	mux.Handle("/api/operations/accept", s.protected(http.HandlerFunc(s.operationAccept), "admin"))
-	mux.Handle("/api/operations/terminalize", s.protected(http.HandlerFunc(s.operationTerminalize), "admin"))
-	mux.Handle("/api/system-status", s.protected(http.HandlerFunc(s.systemStatus), "readonly"))
-	mux.Handle("/api/system-status/advanced", s.protected(http.HandlerFunc(s.systemStatus), "readonly"))
-	mux.Handle("/api/logs", s.protected(http.HandlerFunc(s.logs), "readonly"))
-	mux.Handle("/api/watch/roots", s.protected(http.HandlerFunc(s.watchRoots), "admin"))
+	mux.Handle("/api/session-metadata", s.protected(http.HandlerFunc(s.sessionMetadata)))
+	mux.Handle("/api/activity", s.protected(http.HandlerFunc(s.activity)))
+	mux.Handle("/api/background/claim", s.protected(http.HandlerFunc(s.backgroundClaim)))
+	mux.Handle("/api/operations/accept", s.protected(http.HandlerFunc(s.operationAccept)))
+	mux.Handle("/api/operations/terminalize", s.protected(http.HandlerFunc(s.operationTerminalize)))
+	mux.Handle("/api/system-status", s.protected(http.HandlerFunc(s.systemStatus)))
+	mux.Handle("/api/system-status/advanced", s.protected(http.HandlerFunc(s.systemStatus)))
+	mux.Handle("/api/logs", s.protected(http.HandlerFunc(s.logs)))
+	mux.Handle("/api/watch/roots", s.protected(http.HandlerFunc(s.watchRoots)))
 	s.registerFilesystemRoutes(mux)
-	mux.Handle("/api/event", s.protected(http.HandlerFunc(s.eventPost), "readonly"))
-	mux.Handle("/api/events", s.protected(http.HandlerFunc(s.eventsList), "readonly"))
-	mux.Handle("/api/transcripts", s.protected(http.HandlerFunc(s.sessionMetadata), "readonly"))
-	mux.Handle("/api/transcript", s.protected(http.HandlerFunc(s.transcript), "readonly"))
-	mux.Handle("/api/context", s.protected(http.HandlerFunc(s.context), "readonly"))
-	mux.Handle("/api/context-items", s.protected(http.HandlerFunc(s.contextItems), "readonly"))
-	mux.Handle("/api/context-stream", s.protected(http.HandlerFunc(s.contextStream), "readonly"))
-	mux.Handle("/api/tmux-status", s.protected(http.HandlerFunc(s.tmuxStatus), "readonly"))
-	mux.Handle("/api/tmux-signals", s.protected(http.HandlerFunc(s.tmuxSignals), "readonly"))
-	mux.Handle("/api/tmux", s.protected(http.HandlerFunc(s.tmux), "readonly"))
-	mux.Handle("/api/tmux-window", s.protected(http.HandlerFunc(s.tmuxWindow), "admin"))
-	mux.Handle("/api/tmux-session-exists", s.protected(http.HandlerFunc(s.sessionExists), "readonly"))
+	mux.Handle("/api/event", s.protected(http.HandlerFunc(s.eventPost)))
+	mux.Handle("/api/events", s.protected(http.HandlerFunc(s.eventsList)))
+	mux.Handle("/api/transcripts", s.protected(http.HandlerFunc(s.sessionMetadata)))
+	mux.Handle("/api/transcript", s.protected(http.HandlerFunc(s.transcript)))
+	mux.Handle("/api/context", s.protected(http.HandlerFunc(s.context)))
+	mux.Handle("/api/context-items", s.protected(http.HandlerFunc(s.contextItems)))
+	mux.Handle("/api/context-stream", s.protected(http.HandlerFunc(s.contextStream)))
+	mux.Handle("/api/tmux-status", s.protected(http.HandlerFunc(s.tmuxStatus)))
+	mux.Handle("/api/tmux-signals", s.protected(http.HandlerFunc(s.tmuxSignals)))
+	mux.Handle("/api/tmux", s.protected(http.HandlerFunc(s.tmux)))
+	mux.Handle("/api/tmux-window", s.protected(http.HandlerFunc(s.tmuxWindow)))
+	mux.Handle("/api/tmux-session-exists", s.protected(http.HandlerFunc(s.sessionExists)))
 	s.registerSessionRoutes(mux)
-	mux.Handle("/api/operations/", s.protected(http.HandlerFunc(s.operation), "readonly"))
+	mux.Handle("/api/operations/", s.protected(http.HandlerFunc(s.operation)))
 	// Keep stale clients on a typed capability error instead of an unexplained 404. More specific
 	// handlers above win under ServeMux's longest-pattern rule.
-	mux.Handle("/api/", s.protected(http.HandlerFunc(s.unsupported), "readonly"))
-	mux.Handle("/", s.protected(http.HandlerFunc(s.index), "readonly"))
+	mux.Handle("/api/", s.protected(http.HandlerFunc(s.unsupported)))
+	mux.Handle("/", s.protected(http.HandlerFunc(s.index)))
 	mux.HandleFunc("/ws", s.websocket)
 	mux.HandleFunc("/static/", s.static)
 	addr := fmt.Sprintf("%s:%d", *host, *port)
@@ -3039,8 +756,8 @@ func main() {
 		fatal("stats lifecycle setup failed: " + err.Error())
 	}
 	defer statsLifecycle.Stop()
-	collectorsDisabled := os.Getenv("YOLOMUX_STATS_DISABLE_COLLECTORS") == "1"
-	s.syntheticHostInputs = os.Getenv("YOLOMUX_STATS_SYNTHETIC_HOST") == "1"
+	collectorsDisabled := productenv.Value("STATS_DISABLE_COLLECTORS") == "1"
+	s.syntheticHostInputs = productenv.Value("STATS_SYNTHETIC_HOST") == "1"
 	if s.syntheticHostInputs {
 		s.processMetricsFn = syntheticGoProcessMetrics
 	}
@@ -3058,7 +775,7 @@ func main() {
 	// use the same screen classifier. Tests replace this seam with a synthetic
 	// classifier so no host pane, process, transcript, or database is needed.
 	statusSources := stats.CurrentPlatformAgentStatusSources(opencodeDatabase)
-	if os.Getenv("YOLOMUX_STATS_SYNTHETIC_INVENTORY") == "1" {
+	if productenv.Value("STATS_SYNTHETIC_INVENTORY") == "1" {
 		statusSources = stats.SyntheticAgentStatusSources(opencodeDatabase)
 	}
 	s.agentStatusClassifier = func(ctx context.Context, request stats.AgentStatusRequest) stats.AgentStatusResult {
@@ -3066,7 +783,7 @@ func main() {
 	}
 	if !collectorsDisabled {
 		agentInventorySources := stats.CurrentPlatformAgentInventorySources()
-		if os.Getenv("YOLOMUX_STATS_SYNTHETIC_INVENTORY") == "1" {
+		if productenv.Value("STATS_SYNTHETIC_INVENTORY") == "1" {
 			agentInventorySources = stats.SyntheticAgentInventorySources()
 		}
 		agentInventory := func(ctx context.Context) ([]stats.AgentRecord, []error) {
@@ -3114,7 +831,7 @@ func main() {
 		}
 		defer tokenCollector.Stop()
 		hostSources := stats.NewHostSources()
-		if os.Getenv("YOLOMUX_STATS_SYNTHETIC_HOST") == "1" {
+		if productenv.Value("STATS_SYNTHETIC_HOST") == "1" {
 			// Development and integration fixtures must not inspect the host's
 			// /proc, process table, memory, or GPU state. The explicit opt-in
 			// source is deterministic and carries a same-named co-tenant so the
@@ -3122,7 +839,7 @@ func main() {
 			hostSources = stats.NewSyntheticHostSources(processIdentityForRuntime(), processKeyForRuntime())
 		}
 		hostCollector := stats.NewHostCollector(hostSources, statsWriter, nil, stats.HostCollectorConfig{
-			ActiveCadence: stats.DefaultHostCPUBackgroundCadence, IdleCadence: stats.DefaultHostCPUBackgroundCadence, MemoryCadence: stats.DefaultHostMemoryCadence, SourceTimeout: 900 * time.Millisecond,
+			ActiveCadence: stats.DefaultHostCPUBackgroundCadence, IdleCadence: stats.DefaultHostCPUBackgroundCadence, MemoryCadence: stats.DefaultHostMemoryCadence, DiskCadence: stats.DefaultHostDiskCadence, SourceTimeout: 900 * time.Millisecond,
 			EpochID: fmt.Sprintf("host-%d", time.Now().UnixNano()), EpochStartedAt: float64(time.Now().UnixNano()) / 1e9,
 			OwnerGeneration: uint64(os.Getpid()), SourceID: "host", ProcessKey: processKeyForRuntime(), ProcessIdentity: processIdentityForRuntime(),
 			// CPU is a host view: keep the bounded top process binaries so the Go
@@ -3178,39 +895,9 @@ func main() {
 func fatal(message string) { slog.Error(message); os.Exit(1) }
 
 func normalizeYomuxEnvironment() bool {
-	legacyUsed := false
-	for _, entry := range os.Environ() {
-		legacyKey, _, ok := strings.Cut(entry, "=")
-		if ok && strings.HasPrefix(legacyKey, "YOLOMUX_") {
-			legacyUsed = true
-			break
-		}
-	}
-	for _, entry := range os.Environ() {
-		newKey, newValue, ok := strings.Cut(entry, "=")
-		if !ok || !strings.HasPrefix(newKey, "YOMUX_") {
-			continue
-		}
-		legacyKey := "YOLOMUX_" + strings.TrimPrefix(newKey, "YOMUX_")
-		if _, exists := os.LookupEnv(legacyKey); !exists {
-			_ = os.Setenv(legacyKey, newValue)
-		}
-	}
-	for _, entry := range os.Environ() {
-		legacyKey, _, ok := strings.Cut(entry, "=")
-		if !ok || !strings.HasPrefix(legacyKey, "YOLOMUX_") {
-			continue
-		}
-		newKey := "YOMUX_" + strings.TrimPrefix(legacyKey, "YOLOMUX_")
-		if newValue, exists := os.LookupEnv(newKey); exists {
-			_ = os.Setenv(legacyKey, newValue)
-			continue
-		}
-		legacyValue, _ := os.LookupEnv(legacyKey)
-		_ = os.Setenv(newKey, legacyValue)
-	}
-	if legacyUsed && os.Getenv("YOMUX_ENVIRONMENT_NORMALIZED") != "1" {
-		slog.Warn("YOLOMUX_* environment names are deprecated; use YOMUX_*")
+	legacyUsed := productenv.Normalize()
+	if legacyUsed {
+		slog.Warn(productenv.DeprecationWarning())
 	}
 	return legacyUsed
 }
@@ -3259,10 +946,10 @@ func (g *statsProjectionRefreshGate) record(counters stats.LifecycleCounters) {
 }
 
 func defaultConfigDir() string {
-	if configured := productenv.Value("YOLOMUX_CONFIG_DIR"); configured != "" {
+	if configured := productenv.Value("CONFIG_DIR"); configured != "" {
 		return configured
 	}
-	if root := productenv.Value("YOLOMUX_ROOT"); root != "" {
+	if root := productenv.Value("ROOT"); root != "" {
 		return filepath.Join(root, "config")
 	}
 	return filepath.Join(os.Getenv("HOME"), ".config", "yomux")
@@ -3295,535 +982,6 @@ func (s *server) repairMissingTerminalEvents() {
 		}
 		s.operationsMu.Unlock()
 	}
-}
-
-func (s *server) shutdown() {
-	s.shutdownOnce.Do(func() {
-		if s.tmuxRosterWatchCancel != nil {
-			s.tmuxRosterWatchCancel()
-			<-s.tmuxRosterWatchDone
-		}
-		s.homeRendererMu.Lock()
-		if s.homeRenderer != nil {
-			s.homeRenderer.close()
-			s.homeRenderer = nil
-		}
-		s.homeRendererMu.Unlock()
-		if s.finderJobs != nil {
-			if !s.finderJobs.CloseWithTimeout(5 * time.Second) {
-				slog.Warn("finder job scheduler did not stop before shutdown timeout")
-			}
-		}
-		if s.finderBackgroundJobs != nil {
-			if !s.finderBackgroundJobs.CloseWithTimeout(5 * time.Second) {
-				slog.Warn("finder background scheduler did not stop before shutdown timeout")
-			}
-		}
-		if s.finderBulkJobs != nil {
-			if !s.finderBulkJobs.CloseWithTimeout(5 * time.Second) {
-				slog.Warn("finder bulk job scheduler did not stop before shutdown timeout")
-			}
-		}
-		if s.finderStreamJobs != nil {
-			if !s.finderStreamJobs.CloseWithTimeout(5 * time.Second) {
-				slog.Warn("finder stream scheduler did not stop before shutdown timeout")
-			}
-		}
-		if s.finder != nil {
-			s.finder.Close()
-		}
-		if s.background != nil {
-			s.background.close()
-		}
-		s.mu.Lock()
-		rootLease := s.rootLease
-		s.rootLease = nil
-		children := make([]*exec.Cmd, 0, len(s.children))
-		for command := range s.children {
-			children = append(children, command)
-		}
-		s.mu.Unlock()
-		releaseInstanceRootLease(rootLease)
-		for _, command := range children {
-			if command.Process == nil || command.ProcessState != nil {
-				continue
-			}
-			_ = syscall.Kill(-command.Process.Pid, syscall.SIGTERM)
-			_ = command.Process.Kill()
-		}
-	})
-}
-
-func (s *server) users() []authUser {
-	b, err := os.ReadFile(filepath.Join(s.config, "auth.yaml"))
-	if err != nil {
-		return nil
-	}
-	var users []authUser
-	var current authUser
-	seen := false
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(strings.SplitN(line, "#", 2)[0])
-		if strings.HasPrefix(line, "- username:") {
-			if seen && current.username != "" && current.password != "" {
-				users = append(users, current)
-			}
-			current = authUser{username: yamlValue(strings.TrimSpace(strings.TrimPrefix(line, "- username:")))}
-			seen = true
-		} else if strings.HasPrefix(line, "password:") || strings.HasPrefix(line, "password_hash:") {
-			current.password = yamlValue(strings.TrimSpace(strings.SplitN(line, ":", 2)[1]))
-		} else if strings.HasPrefix(line, "role:") {
-			current.role = strings.ToLower(yamlValue(strings.TrimSpace(strings.SplitN(line, ":", 2)[1])))
-		}
-	}
-	if seen && current.username != "" && current.password != "" {
-		users = append(users, current)
-	}
-	return users
-}
-
-func yamlValue(value string) string {
-	value = strings.TrimSpace(value)
-	if len(value) >= 2 && ((value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'')) {
-		value = value[1 : len(value)-1]
-	}
-	return strings.ReplaceAll(value, `\"`, `"`)
-}
-
-func (s *server) identity(r *http.Request) (authUser, bool) {
-	for _, cookieName := range []string{s.authCookieName(), s.legacyAuthCookieName()} {
-		cookie, err := r.Cookie(cookieName)
-		if err != nil {
-			continue
-		}
-		for _, user := range s.users() {
-			if cookie.Value != "" && hmac.Equal([]byte(cookie.Value), []byte(s.cookieValue(user))) {
-				return user, true
-			}
-		}
-	}
-	for _, marker := range []string{"yomux_logged_out", "yolomux_logged_out"} {
-		if cookie, err := r.Cookie(marker); err == nil && cookie.Value == "1" {
-			return authUser{}, false
-		}
-	}
-	basic := r.Header.Get("Authorization")
-	if strings.HasPrefix(strings.ToLower(basic), "basic ") {
-		decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(basic[6:]))
-		if err == nil {
-			username, password, ok := strings.Cut(string(decoded), ":")
-			if ok {
-				for _, user := range s.users() {
-					if user.username == username && passwordMatches(password, user.password) {
-						return user, true
-					}
-				}
-			}
-		}
-	}
-	return authUser{}, false
-}
-
-func (s *server) basicIdentity(r *http.Request) (authUser, bool) {
-	basic := r.Header.Get("Authorization")
-	if !strings.HasPrefix(strings.ToLower(basic), "basic ") {
-		return authUser{}, false
-	}
-	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(basic[6:]))
-	if err != nil {
-		return authUser{}, false
-	}
-	username, password, ok := strings.Cut(string(decoded), ":")
-	if !ok {
-		return authUser{}, false
-	}
-	for _, user := range s.users() {
-		if user.username == username && passwordMatches(password, user.password) {
-			return user, true
-		}
-	}
-	return authUser{}, false
-}
-
-func (s *server) cookieValue(user authUser) string {
-	secret := s.authSecret()
-	if len(secret) != 32 {
-		return ""
-	}
-	h := hmac.New(sha256.New, secret)
-	_, _ = h.Write([]byte(user.username + ":" + user.password))
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-func (s *server) authCookieName() string {
-	return "yomux_auth_" + strconv.Itoa(s.port)
-}
-
-func (s *server) legacyAuthCookieName() string {
-	return "yolomux_auth_" + strconv.Itoa(s.port)
-}
-
-func (s *server) authSecret() []byte {
-	if s.config == "" {
-		return nil
-	}
-	path := filepath.Join(s.config, "auth-cookie-secret")
-	if raw, err := os.ReadFile(path); err == nil {
-		secret, decodeErr := hex.DecodeString(strings.TrimSpace(string(raw)))
-		if decodeErr == nil && len(secret) == 32 {
-			return secret
-		}
-	}
-	secret := make([]byte, 32)
-	if _, err := rand.Read(secret); err != nil {
-		return nil
-	}
-	if err := os.MkdirAll(s.config, 0o700); err != nil {
-		return nil
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err == nil {
-		_, writeErr := file.WriteString(hex.EncodeToString(secret) + "\n")
-		syncErr := file.Sync()
-		closeErr := file.Close()
-		if writeErr == nil {
-			writeErr = syncErr
-		}
-		if writeErr == nil {
-			writeErr = closeErr
-		}
-		if writeErr == nil {
-			return secret
-		}
-		return nil
-	}
-	// Another server may have initialized the shared secret between the read and
-	// create.  Never replace it; reload the existing value instead.
-	if raw, readErr := os.ReadFile(path); readErr == nil {
-		secret, decodeErr := hex.DecodeString(strings.TrimSpace(string(raw)))
-		if decodeErr == nil && len(secret) == 32 {
-			return secret
-		}
-	}
-	return nil
-}
-
-func (s *server) secureCookies() bool { return !s.httpMode }
-
-func passwordMatches(password, stored string) bool {
-	parts := strings.Split(stored, "$")
-	if len(parts) != 4 || parts[0] != "pbkdf2_sha256" {
-		return hmac.Equal([]byte(password), []byte(stored))
-	}
-	iterations, err := strconv.Atoi(parts[1])
-	if err != nil || iterations < 1 {
-		return false
-	}
-	salt := []byte(parts[2])
-	digest := pbkdf2SHA256([]byte(password), salt, iterations, 32)
-	expected, err := hex.DecodeString(parts[3])
-	return err == nil && hmac.Equal(digest, expected)
-}
-
-func pbkdf2SHA256(password, salt []byte, iterations, length int) []byte {
-	result := make([]byte, 0, length)
-	for block := 1; len(result) < length; block++ {
-		mac := hmac.New(sha256.New, password)
-		_, _ = mac.Write(salt)
-		mac.Write([]byte{byte(block >> 24), byte(block >> 16), byte(block >> 8), byte(block)})
-		u := mac.Sum(nil)
-		t := append([]byte(nil), u...)
-		for i := 1; i < iterations; i++ {
-			mac = hmac.New(sha256.New, password)
-			_, _ = mac.Write(u)
-			u = mac.Sum(nil)
-			for j := range t {
-				t[j] ^= u[j]
-			}
-		}
-		result = append(result, t...)
-	}
-	return result[:length]
-}
-
-func (s *server) protected(next http.Handler, role string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, ok := s.identity(r)
-		if !ok {
-			s.rejectUnauthorized(w, r)
-			return
-		}
-		if filesystemRouteRequiresAdmin(r) && user.role == "readonly" {
-			s.rejectForbidden(w, user, "admin")
-			return
-		}
-		if !roleAllows(user, role) {
-			s.rejectForbidden(w, user, role)
-			return
-		}
-		if s.capabilities != nil {
-			capability := capabilities.RouteCapability(r.Method, r.URL.RequestURI())
-			if capability != "" && !s.capabilities.Available(capability) {
-				entry := s.capabilities.Entry(capability)
-				jsonResponse(w, http.StatusNotImplemented, map[string]any{
-					"error": "feature_unavailable", "reason": entry.Reason, "capability": capability,
-				})
-				return
-			}
-		}
-		// Basic auth is a compatibility path. Mint the port-scoped cookie before the
-		// downstream handler writes headers so polling can move to cookie auth without
-		// exposing credentials on every request. A logout marker deliberately blocks
-		// this path until the user submits the login form again.
-		canonicalValid := false
-		if cookie, err := r.Cookie(s.authCookieName()); err == nil {
-			canonicalValid = hmac.Equal([]byte(cookie.Value), []byte(s.cookieValue(user)))
-		}
-		legacyValid := false
-		if cookie, err := r.Cookie(s.legacyAuthCookieName()); err == nil {
-			legacyValid = hmac.Equal([]byte(cookie.Value), []byte(s.cookieValue(user)))
-		}
-		if legacyValid && !canonicalValid {
-			http.SetCookie(w, &http.Cookie{Name: s.authCookieName(), Value: s.cookieValue(user), Path: "/", MaxAge: 90 * 24 * 60 * 60, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.secureCookies()})
-		}
-		if !canonicalValid {
-			_, newMarkerErr := r.Cookie("yomux_logged_out")
-			_, legacyMarkerErr := r.Cookie("yolomux_logged_out")
-			if !legacyValid && newMarkerErr != nil && legacyMarkerErr != nil {
-				if basicUser, basicOK := s.basicIdentity(r); basicOK {
-					http.SetCookie(w, &http.Cookie{Name: s.authCookieName(), Value: s.cookieValue(basicUser), Path: "/", MaxAge: 90 * 24 * 60 * 60, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.secureCookies()})
-				}
-			}
-		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, user)))
-	})
-}
-
-func filesystemRouteRequiresAdmin(r *http.Request) bool {
-	if r.URL.Path == "/api/watch/roots" || r.URL.Path == "/api/fs/batch" {
-		return true
-	}
-	if r.URL.Path == "/api/fs/write" || r.URL.Path == "/api/fs/delete" || r.URL.Path == "/api/fs/unindex" || r.URL.Path == "/api/fs/rename" || r.URL.Path == "/api/fs/mkdir" || r.URL.Path == "/api/upload" {
-		return true
-	}
-	if r.URL.Path == "/api/settings" {
-		return r.Method == http.MethodPost
-	}
-	return r.URL.Path == "/api/batch/zip" || r.URL.Path == "/api/batch/count" || r.URL.Path == "/api/batch/html-preview"
-}
-
-func requestWantsHTML(r *http.Request) bool {
-	if r.URL.Path == "/" || r.URL.Path == "/login" {
-		return true
-	}
-	accept := r.Header.Get("Accept")
-	return strings.Contains(accept, "text/html") && !strings.Contains(accept, "application/json")
-}
-
-func roleAllows(user authUser, requiredRole string) bool {
-	switch requiredRole {
-	case "readonly":
-		return user.role == "admin" || user.role == "readonly"
-	case "admin":
-		return user.role == "admin"
-	default:
-		return false
-	}
-}
-
-func safeLoginNextValue(next string) string {
-	if next == "" || !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") || strings.ContainsAny(next, "\\\r\n") {
-		return "/"
-	}
-	return next
-}
-
-func safeLoginNext(r *http.Request) string {
-	return safeLoginNextValue(r.URL.RequestURI())
-}
-
-func (s *server) rejectUnauthorized(w http.ResponseWriter, r *http.Request) {
-	if requestWantsHTML(r) {
-		http.Redirect(w, r, "/login?next="+url.QueryEscape(safeLoginNext(r)), http.StatusSeeOther)
-		return
-	}
-	jsonResponse(w, http.StatusUnauthorized, map[string]any{
-		"user_message": map[string]any{
-			"key": "auth.error.authenticationRequired", "params": map[string]any{}, "fallback": "authentication required",
-		},
-		"login_url": "/login?next=" + url.QueryEscape("/"),
-	})
-}
-
-func (s *server) rejectForbidden(w http.ResponseWriter, user authUser, role string) {
-	fallback := role + " access required"
-	jsonResponse(w, http.StatusForbidden, map[string]any{
-		"user_message": map[string]any{
-			"key": "auth.error.accessRequired", "params": map[string]any{"role": role}, "fallback": fallback,
-		},
-		"role": user.role,
-	})
-}
-
-func (s *server) authSetupRequired() bool {
-	users := s.users()
-	return len(users) == 0 || len(users) == 1 && users[0].username == "user" && users[0].password == "password"
-}
-
-func (s *server) authSetup(w http.ResponseWriter, _ *http.Request) {
-	jsonResponse(w, http.StatusOK, map[string]any{"setup_required": s.authSetupRequired()})
-}
-
-func (s *server) login(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if s.authSetupRequired() {
-		s.writePythonSetupAuth(w, r)
-		return
-	}
-	if r.Method == http.MethodGet {
-		next := safeLoginNextValue(r.URL.Query().Get("next"))
-		s.writePythonLogin(w, r, next, "")
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
-	if err := r.ParseForm(); err != nil {
-		jsonResponse(w, http.StatusBadRequest, typedError("invalid login request", "request.error.invalidForm", false))
-		return
-	}
-	username, password := r.FormValue("username"), r.FormValue("password")
-	if !s.loginAllowed(r, username) {
-		jsonResponse(w, http.StatusTooManyRequests, typedError("too many requests", "auth.error.rateLimitedMinutes", true))
-		return
-	}
-	for _, user := range s.users() {
-		if user.username == username && passwordMatches(password, user.password) {
-			s.loginSucceeded(r, username)
-			http.SetCookie(w, &http.Cookie{Name: s.authCookieName(), Value: s.cookieValue(user), Path: "/", MaxAge: 90 * 24 * 60 * 60, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.secureCookies()})
-			http.SetCookie(w, &http.Cookie{Name: "yomux_logged_out", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.secureCookies()})
-			http.SetCookie(w, &http.Cookie{Name: "yolomux_logged_out", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.secureCookies()})
-			next := safeLoginNextValue(r.FormValue("next"))
-			http.Redirect(w, r, next, http.StatusSeeOther)
-			return
-		}
-	}
-	s.loginFailed(r, username)
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusUnauthorized)
-	s.writePythonLogin(w, r, r.FormValue("next"), "Invalid username or password.")
-}
-
-func (s *server) loginKey(r *http.Request, username string) string {
-	peer, _, _ := strings.Cut(r.RemoteAddr, ":")
-	if peer == "" {
-		peer = r.RemoteAddr
-	}
-	return peer + "\x00" + boundedText(username, 128)
-}
-
-func (s *server) loginAllowed(r *http.Request, username string) bool {
-	s.authMu.Lock()
-	defer s.authMu.Unlock()
-	if s.authFailures == nil {
-		s.authFailures = map[string]authFailure{}
-	}
-	key := s.loginKey(r, username)
-	entry, ok := s.authFailures[key]
-	if !ok || time.Now().After(entry.expires) {
-		return true
-	}
-	return entry.count < 5
-}
-
-func (s *server) loginFailed(r *http.Request, username string) {
-	s.authMu.Lock()
-	defer s.authMu.Unlock()
-	if s.authFailures == nil {
-		s.authFailures = map[string]authFailure{}
-	}
-	key := s.loginKey(r, username)
-	entry := s.authFailures[key]
-	if time.Now().After(entry.expires) {
-		entry = authFailure{}
-	}
-	entry.count++
-	entry.expires = time.Now().Add(time.Minute)
-	s.authFailures[key] = entry
-}
-
-func (s *server) loginSucceeded(r *http.Request, username string) {
-	s.authMu.Lock()
-	defer s.authMu.Unlock()
-	if s.authFailures != nil {
-		delete(s.authFailures, s.loginKey(r, username))
-	}
-}
-
-func (s *server) writePythonLogin(w http.ResponseWriter, r *http.Request, next, message string) {
-	next = safeLoginNextValue(next)
-	locale := requestLocale(r)
-	script := `import sys
-from yomux_lib.web import login_html
-print(login_html(next_path=sys.argv[1], error=sys.argv[2], secure=sys.argv[3] == "1", current_locale=sys.argv[4], accept_language=sys.argv[5]), end="")`
-	secure := "0"
-	if s.secureCookies() {
-		secure = "1"
-	}
-	command := exec.Command("python3", "-c", script, next, message, secure, locale, r.Header.Get("Accept-Language"))
-	command.Dir = s.root
-	command.Env = pythonBridgeEnvironment(s.root, s.config)
-	body, err := command.Output()
-	if err != nil {
-		http.Error(w, "login page unavailable", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write(body)
-}
-
-func (s *server) writePythonSetupAuth(w http.ResponseWriter, r *http.Request) {
-	locale := requestLocale(r)
-	secure := "0"
-	if s.secureCookies() {
-		secure = "1"
-	}
-	script := `import sys
-from yomux_lib.web import setup_auth_html
-print(setup_auth_html(current_locale=sys.argv[1], accept_language=sys.argv[2], secure=sys.argv[3] == "1"), end="")`
-	command := exec.Command("python3", "-c", script, locale, r.Header.Get("Accept-Language"), secure)
-	command.Dir = s.root
-	command.Env = pythonBridgeEnvironment(s.root, s.config)
-	body, err := command.Output()
-	if err != nil {
-		http.Error(w, "authentication setup page unavailable", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write(body)
-}
-
-func requestLocale(r *http.Request) string {
-	if cookie, err := r.Cookie("yomux_locale"); err == nil {
-		return cookie.Value
-	}
-	if cookie, err := r.Cookie("yolomux_locale"); err == nil {
-		return cookie.Value
-	}
-	return ""
-}
-
-func (s *server) logout(w http.ResponseWriter, r *http.Request) {
-	for _, name := range []string{s.authCookieName(), s.legacyAuthCookieName(), "yolomux_auth"} {
-		http.SetCookie(w, &http.Cookie{Name: name, Value: "", Path: "/", MaxAge: 0, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: false, Expires: time.Unix(0, 0)})
-		if s.secureCookies() {
-			http.SetCookie(w, &http.Cookie{Name: name, Value: "", Path: "/", MaxAge: 0, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: true, Expires: time.Unix(0, 0)})
-		}
-	}
-	http.SetCookie(w, &http.Cookie{Name: "yomux_logged_out", Value: "1", Path: "/", MaxAge: 90 * 24 * 60 * 60, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.secureCookies()})
-	http.SetCookie(w, &http.Cookie{Name: "yolomux_logged_out", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.secureCookies()})
-	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
 func tlsFiles(certPath, keyPath, host string, port int) (string, string, error) {
@@ -3905,14 +1063,16 @@ func tlsConfig(certFile, keyFile string) (*tls.Config, error) {
 
 type loggingResponseWriter struct {
 	http.ResponseWriter
-	status int
-	bytes  int
+	status                int
+	bytes                 int
+	representationReadyAt time.Time
 }
 
 func (w *loggingResponseWriter) WriteHeader(status int) {
 	if w.status != 0 {
 		return
 	}
+	w.representationReadyAt = time.Now()
 	w.status = status
 	w.ResponseWriter.WriteHeader(status)
 }
@@ -3926,13 +1086,12 @@ func (w *loggingResponseWriter) Write(value []byte) (int, error) {
 	return n, err
 }
 
-func (w *loggingResponseWriter) Flush() {
+func (w *loggingResponseWriter) Flush() { _ = w.FlushError() }
+func (w *loggingResponseWriter) FlushError() error {
 	if w.status == 0 {
 		w.WriteHeader(http.StatusOK)
 	}
-	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
-		flusher.Flush()
-	}
+	return http.NewResponseController(w.ResponseWriter).Flush()
 }
 
 func (w *loggingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
@@ -3981,11 +1140,16 @@ func (s *server) logging(next http.Handler) http.Handler {
 		}
 		completed = true
 		slog.Info("request", "method", r.Method, "path", r.URL.Path, "status", status, "duration_ms", elapsed.Milliseconds())
-		s.recordPerformance(r, status, logged.bytes, elapsed)
+		var routeToRepresentationReady *time.Duration
+		if !logged.representationReadyAt.IsZero() {
+			ready := logged.representationReadyAt.Sub(start)
+			routeToRepresentationReady = &ready
+		}
+		s.recordPerformance(r, status, logged.bytes, elapsed, routeToRepresentationReady)
 	})
 }
 
-func (s *server) recordPerformance(r *http.Request, status, payloadBytes int, elapsed time.Duration) {
+func (s *server) recordPerformance(r *http.Request, status, payloadBytes int, elapsed time.Duration, routeToRepresentationReady *time.Duration) {
 	marker := strings.TrimSpace(r.Header.Get("X-YOmux-Measurement"))
 	if marker == "" {
 		return
@@ -4001,7 +1165,11 @@ func (s *server) recordPerformance(r *http.Request, status, payloadBytes int, el
 			"measurement_scope": "capture", "measurement_request_id": digest,
 			"transport_request_id": requestID, "method": r.Method, "path": r.URL.Path,
 			"status": status, "request_total_ms": float64(elapsed.Microseconds()) / 1000,
+			"process_pid": os.Getpid(),
 		},
+	}
+	if routeToRepresentationReady != nil {
+		record.Details["route_to_representation_ready_ms"] = float64(routeToRepresentationReady.Microseconds()) / 1000
 	}
 	s.performanceMu.Lock()
 	defer s.performanceMu.Unlock()
@@ -4037,16 +1205,9 @@ func (s *server) diagnosticsPerformance(w http.ResponseWriter, r *http.Request) 
 	perf := map[string]any{
 		"window_seconds": 60.0, "record_limit": goPerformanceRecordLimit,
 		"record_count": len(records), "summary": []any{}, "top_payload_bytes": []any{}, "recent": recent,
-		"capture": map[string]any{"capacity": goPerformanceRecordLimit, "retained": len(recent), "total": captureTotal, "evicted": maxInt(0, int(captureTotal)-len(recent)), "first_sequence": maxUint64(1, captureTotal-uint64(len(recent))+1), "last_sequence": captureTotal},
+		"capture": map[string]any{"capacity": goPerformanceRecordLimit, "retained": len(recent), "total": captureTotal, "evicted": max(0, int(captureTotal)-len(recent)), "first_sequence": max(1, captureTotal-uint64(len(recent))+1), "last_sequence": captureTotal},
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"perf": perf, "transport": map[string]any{"teardowns_total": 0, "teardowns_by_exception": map[string]any{}}, "shared_phase_counters": []any{}, "repeated_work": []any{}, "browser_profiles": map[string]any{}, "browser_observation_status": map[string]any{}})
-}
-
-func maxUint64(left, right uint64) uint64 {
-	if left > right {
-		return left
-	}
-	return right
 }
 
 func (s *server) health(w http.ResponseWriter, _ *http.Request) {
@@ -5060,7 +2221,13 @@ func (s *server) upload(w http.ResponseWriter, r *http.Request) {
 		}
 		files = append(files, finder.UploadFile{Name: header.Filename, Data: data})
 	}
-	user, _ := s.identity(r)
+	user, status := s.identityStatus(r)
+	if status != 0 {
+		if !rejectCredentialAdmission(w, status) {
+			s.rejectUnauthorized(w, r)
+		}
+		return
+	}
 	session := r.URL.Query().Get("session")
 	editorPath := r.URL.Query().Get("editor_path")
 	baseDir := r.URL.Query().Get("base_dir")
@@ -5087,8 +2254,8 @@ func (s *server) fileTransferMaxBytes() int64 {
 	const minimumLimit = int64(1 * 1024 * 1024)
 	const maximumLimit = int64(512 * 1024 * 1024)
 	limit := defaultLimit
-	for _, name := range []string{"YOLOMUX_FILE_TRANSFER_MAX_BYTES", "YOLOMUX_UPLOAD_MAX_BYTES"} {
-		if value, present := os.LookupEnv(name); present {
+	for _, name := range []string{"FILE_TRANSFER_MAX_BYTES", "UPLOAD_MAX_BYTES"} {
+		if value, present := productenv.Lookup(name); present {
 			if parsed, parseErr := strconv.ParseInt(strings.TrimSpace(value), 10, 64); parseErr == nil && parsed > 0 {
 				limit = parsed
 			}
@@ -5108,7 +2275,7 @@ func (s *server) fileTransferMaxBytes() int64 {
 	}
 	inUploads := false
 	for _, line := range strings.Split(string(data), "\n") {
-		trimmed := strings.TrimSpace(strings.SplitN(line, "#", 2)[0])
+		trimmed := strings.TrimSpace(stripYAMLComment(line))
 		if trimmed == "uploads:" {
 			inUploads = true
 			continue
@@ -5145,7 +2312,7 @@ func (s *server) fileTransferMaxBytes() int64 {
 func (s *server) fileTransferMaxFiles() int {
 	const defaultLimit = 16
 	limit := defaultLimit
-	if value, present := os.LookupEnv("YOLOMUX_UPLOAD_MAX_FILES"); present {
+	if value, present := productenv.Lookup("UPLOAD_MAX_FILES"); present {
 		if parsed, parseErr := strconv.Atoi(strings.TrimSpace(value)); parseErr == nil && parsed > 0 {
 			limit = parsed
 		}
@@ -5154,7 +2321,7 @@ func (s *server) fileTransferMaxFiles() int {
 }
 
 func (s *server) fileTransferFilenameTemplate() string {
-	if value, present := os.LookupEnv("YOLOMUX_UPLOAD_FILENAME_TEMPLATE"); present {
+	if value, present := productenv.Lookup("UPLOAD_FILENAME_TEMPLATE"); present {
 		return strings.TrimSpace(value)
 	}
 	data, err := os.ReadFile(filepath.Join(s.config, "settings.yaml"))
@@ -5163,7 +2330,7 @@ func (s *server) fileTransferFilenameTemplate() string {
 	}
 	inUploads := false
 	for _, line := range strings.Split(string(data), "\n") {
-		trimmed := strings.TrimSpace(strings.SplitN(line, "#", 2)[0])
+		trimmed := strings.TrimSpace(stripYAMLComment(line))
 		if trimmed == "uploads:" {
 			inUploads = true
 			continue
@@ -5295,7 +2462,7 @@ func (s *server) clientEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeDemandedOperationTerminals()
-	if value, err := strconv.Atoi(strings.TrimSpace(os.Getenv("YOLOMUX_GO_EVENT_STREAM_DELAY_MS"))); err == nil && value > 0 {
+	if value, err := strconv.Atoi(strings.TrimSpace(productenv.Value("GO_EVENT_STREAM_DELAY_MS"))); err == nil && value > 0 {
 		timer := time.NewTimer(time.Duration(value) * time.Millisecond)
 		select {
 		case <-timer.C:
@@ -5401,13 +2568,6 @@ func normalizeClientID(value string) string {
 		}
 	}
 	return result.String()
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 func (b *eventBroker) nextEvent(ch chan clientEvent) (clientEvent, bool) {
@@ -5812,7 +2972,7 @@ func (s *server) eventsList(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "unknown session", "session": session})
 		return
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{"events": s.eventLogTail(session, limit), "session": session, "limit": minInt(limit, 1000)})
+	jsonResponse(w, http.StatusOK, map[string]any{"events": s.eventLogTail(session, limit), "session": session, "limit": min(limit, 1000)})
 }
 
 func goMetric(value any, reasonCode, reason string) map[string]any {
@@ -5963,7 +3123,7 @@ func currentDarwinGoProcess(pid int) (procEntry, bool) {
 const maxGoThreads = 256
 
 func (s *server) readGoThreadMetrics(now time.Time, pid int, tasks []os.DirEntry) []goThreadMetric {
-	threads := make([]goThreadMetric, 0, minInt(len(tasks), maxGoThreads))
+	threads := make([]goThreadMetric, 0, min(len(tasks), maxGoThreads))
 	for _, task := range tasks {
 		if len(threads) >= maxGoThreads || !task.IsDir() {
 			continue
@@ -6615,7 +3775,7 @@ func safeEventDetails(details map[string]any) map[string]any {
 		case bool, float64:
 			result[cleanKey] = item
 		case []any:
-			values := make([]any, 0, minInt(len(item), 20))
+			values := make([]any, 0, min(len(item), 20))
 			for _, entry := range item {
 				switch scalar := entry.(type) {
 				case string:
@@ -6994,489 +4154,6 @@ func activityHours(raw string) (float64, error) {
 	return value, nil
 }
 
-func (s *server) sessionMetadata(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	force := r.URL.Query().Get("force") == "1" || r.URL.Query().Get("force") == "true"
-	published, publishedGeneration, stale := s.metadataSnapshot()
-	topology, _ := s.cachedTmuxTopologySnapshot()
-	var rosterErr error
-	if force || published == nil || !s.tmuxSessionRosterFresh() {
-		topology, rosterErr = s.tmuxTopologySnapshot(force)
-	}
-	sessions := topology.sessions
-	if rosterErr != nil && len(sessions) == 0 && topology.generation == 0 {
-		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{
-			"status": "unavailable", "sessions": map[string]any{}, "session_order": []string{},
-			"session_scope": "all", "errors": []string{rosterErr.Error()}, "backend": "go",
-		})
-		return
-	}
-	servedGeneration := publishedGeneration
-	s.metadataMu.Lock()
-	if s.metadataNextGeneration < servedGeneration {
-		s.metadataNextGeneration = servedGeneration
-	}
-	s.metadataMu.Unlock()
-	topologyChanged := published != nil && metadataPayloadTopologyGeneration(published) != topology.generation
-	metadataSessions := metadataSessionsForTopology(published, servedGeneration, topology)
-	cache := map[string]any{"hit": true, "stale": false, "generation": servedGeneration, "refreshing": s.metadataRefreshInFlight()}
-	if force || published == nil || stale || topologyChanged {
-		pending := s.queueMetadataRefresh(force, sessions, topology.identities, rosterErr, topology.generation)
-		cache = map[string]any{
-			"hit": published != nil, "stale": true, "refreshing": s.metadataRefreshInFlight(),
-			"generation": servedGeneration,
-		}
-		if force {
-			cache["pending_generation"] = pending
-			cache["pending_identity"] = map[string]any{"epoch": s.metadataEpoch(), "generation": pending}
-		}
-	}
-	responseErrors := metadataErrors(rosterErr, nil)
-	if published != nil {
-		responseErrors = appendMetadataErrorValues(responseErrors, published["errors"])
-	}
-	jsonResponse(w, http.StatusOK, map[string]any{
-		"sessions": metadataSessions, "session_order": sessions, "session_scope": "all",
-		"metadata_generation": servedGeneration, "metadata_identity": map[string]any{"epoch": s.metadataEpoch(), "generation": servedGeneration},
-		"topology_generation": topology.generation, "errors": responseErrors, "cache": cache,
-		"renames": topology.renames,
-	})
-}
-
-func metadataSessionsForTopology(published map[string]any, generation uint64, topology goTmuxTopology) map[string]any {
-	publishedSessions := map[string]any{}
-	if published != nil {
-		publishedSessions, _ = published["sessions"].(map[string]any)
-	}
-	metadataSessions := make(map[string]any, len(topology.sessions))
-	for _, session := range topology.sessions {
-		sessionIdentity := goTmuxSessionIdentity(session, topology.identities[session])
-		info, cached := publishedSessions[session].(map[string]any)
-		if cached && info["session_identity"] == sessionIdentity {
-			info = cloneMap(info)
-		} else {
-			info = map[string]any{
-				"panes": []map[string]any{}, "selected_pane": nil, "agents": []map[string]any{}, "window_metadata": []map[string]any{},
-			}
-			graph := emptyGoWorkGraph(generation)
-			graph["loading"] = true
-			info["work_graph"] = graph
-		}
-		info["session"] = session
-		info["label"] = session
-		info["session_identity"] = sessionIdentity
-		metadataSessions[session] = info
-	}
-	return metadataSessions
-}
-
-func metadataPayloadTopologyGeneration(payload map[string]any) uint64 {
-	if payload == nil {
-		return 0
-	}
-	generation, _ := payload["topology_generation"].(uint64)
-	return generation
-}
-
-func (s *server) metadataRefreshInFlight() bool {
-	s.metadataMu.Lock()
-	defer s.metadataMu.Unlock()
-	return s.metadataBuilding
-}
-
-func (s *server) metadataEpoch() string {
-	if s.events == nil {
-		return ""
-	}
-	s.events.mu.Lock()
-	defer s.events.mu.Unlock()
-	return s.events.epoch
-}
-
-func (s *server) buildMetadataPayload(generation uint64, sessions []string, identities map[string]string, rosterErr error, topologyGeneration uint64) map[string]any {
-	metadataSessions := make(map[string]any, len(sessions))
-	liveMetadata, metadataErr := s.enrichSessionMetadata(sessions)
-	gitCache := map[string]goGitSnapshotResult{}
-	for _, session := range sessions {
-		info := liveMetadata[session]
-		if info == nil {
-			info = map[string]any{
-				"panes": []map[string]any{}, "selected_pane": nil, "agents": []map[string]any{}, "window_metadata": []map[string]any{},
-			}
-		}
-		info["session"] = session
-		info["label"] = session
-		info["session_identity"] = goTmuxSessionIdentity(session, identities[session])
-		info["work_graph"] = s.sessionWorkGraphWithGitCache(session, info, generation, gitCache)
-		metadataSessions[session] = info
-	}
-	identity := map[string]any{"epoch": s.metadataEpoch(), "generation": generation}
-	s.metadataTopologyMu.Lock()
-	var renames []map[string]any
-	if topologyGeneration == s.metadataTopologyGeneration {
-		renames = cloneTmuxRosterRenames(s.metadataTopologyRenames)
-	}
-	s.metadataTopologyMu.Unlock()
-	return map[string]any{
-		"sessions":            metadataSessions,
-		"session_order":       sessions,
-		"session_scope":       "all",
-		"metadata_generation": generation,
-		"metadata_identity":   identity,
-		"topology_generation": topologyGeneration,
-		"renames":             renames,
-		"errors":              metadataErrors(rosterErr, metadataErr),
-	}
-}
-
-func (s *server) enrichSessionMetadata(sessions []string) (map[string]map[string]any, error) {
-	if s.metadataEnrichmentFn != nil {
-		return s.metadataEnrichmentFn(sessions)
-	}
-	return s.liveSessionMetadataForSessionsWithError(sessions)
-}
-
-func metadataErrors(rosterErr, metadataErr error) []string {
-	result := make([]string, 0, 2)
-	if rosterErr != nil {
-		result = append(result, rosterErr.Error())
-	}
-	if metadataErr != nil {
-		result = append(result, metadataErr.Error())
-	}
-	return result
-}
-
-func appendMetadataErrorValues(result []string, value any) []string {
-	seen := make(map[string]struct{}, len(result))
-	for _, message := range result {
-		seen[message] = struct{}{}
-	}
-	appendMessage := func(message string) {
-		if message == "" {
-			return
-		}
-		if _, exists := seen[message]; exists {
-			return
-		}
-		seen[message] = struct{}{}
-		result = append(result, message)
-	}
-	switch messages := value.(type) {
-	case []string:
-		for _, message := range messages {
-			appendMessage(message)
-		}
-	case []any:
-		for _, raw := range messages {
-			if message, ok := raw.(string); ok {
-				appendMessage(message)
-			}
-		}
-	}
-	return result
-}
-
-func (s *server) metadataSnapshot() (map[string]any, uint64, bool) {
-	payload, generation, stale, _ := s.metadataSnapshotWithBuiltAt()
-	return payload, generation, stale
-}
-
-func (s *server) metadataSnapshotWithBuiltAt() (map[string]any, uint64, bool, time.Time) {
-	s.metadataMu.Lock()
-	defer s.metadataMu.Unlock()
-	if s.metadataPayload == nil {
-		return nil, 0, true, time.Time{}
-	}
-	return cloneMap(s.metadataPayload), s.metadataGeneration, s.metadataBuiltAt.IsZero() || time.Since(s.metadataBuiltAt) >= goMetadataCacheTTL, s.metadataBuiltAt
-}
-
-func (s *server) queueMetadataRefresh(force bool, sessions []string, identities map[string]string, rosterErr error, topologyGeneration uint64) uint64 {
-	s.metadataMu.Lock()
-	defer s.metadataMu.Unlock()
-	latestTopology := uint64(0)
-	latestGeneration := uint64(0)
-	if s.metadataPayload != nil {
-		latestTopology, _ = s.metadataPayload["topology_generation"].(uint64)
-		latestGeneration = s.metadataGeneration
-	}
-	if s.metadataBuilding && s.metadataBuildingTopologyGeneration >= latestTopology {
-		latestTopology = s.metadataBuildingTopologyGeneration
-		latestGeneration = s.metadataBuildingGeneration
-	}
-	if s.metadataQueuedGeneration != 0 && s.metadataQueuedTopologyGeneration >= latestTopology {
-		latestTopology = s.metadataQueuedTopologyGeneration
-		latestGeneration = s.metadataQueuedGeneration
-	}
-	if topologyGeneration < latestTopology {
-		if force {
-			return latestGeneration
-		}
-		return 0
-	}
-	if s.metadataQueuedGeneration != 0 {
-		if force || topologyGeneration > s.metadataQueuedTopologyGeneration {
-			if topologyGeneration >= s.metadataQueuedTopologyGeneration {
-				s.metadataQueuedSessions = append([]string(nil), sessions...)
-				s.metadataQueuedIdentities = identities
-				s.metadataQueuedRosterErr = rosterErr
-				s.metadataQueuedTopologyGeneration = topologyGeneration
-			}
-			return s.metadataQueuedGeneration
-		}
-		return 0
-	}
-	if s.metadataBuilding {
-		if !force && topologyGeneration <= s.metadataBuildingTopologyGeneration {
-			return 0
-		}
-		s.metadataNextGeneration++
-		generation := s.metadataNextGeneration
-		s.metadataQueuedGeneration = generation
-		s.metadataQueuedSessions = append([]string(nil), sessions...)
-		s.metadataQueuedIdentities = identities
-		s.metadataQueuedRosterErr = rosterErr
-		s.metadataQueuedTopologyGeneration = topologyGeneration
-		return generation
-	}
-	s.metadataNextGeneration++
-	generation := s.metadataNextGeneration
-	s.metadataBuilding = true
-	s.metadataBuildingGeneration = generation
-	s.metadataBuildingTopologyGeneration = topologyGeneration
-	go s.buildMetadataRefresh(generation, sessions, identities, rosterErr, topologyGeneration)
-	return generation
-}
-
-func (s *server) buildMetadataRefresh(generation uint64, sessions []string, identities map[string]string, rosterErr error, topologyGeneration uint64) {
-	payload := s.buildMetadataPayload(generation, sessions, identities, rosterErr, topologyGeneration)
-	s.metadataMu.Lock()
-	s.metadataTopologyMu.Lock()
-	topologyAdvanced := s.metadataTopologyGeneration > topologyGeneration
-	s.metadataTopologyMu.Unlock()
-	newerBuildQueued := s.metadataQueuedGeneration > generation
-	publish := !topologyAdvanced && !newerBuildQueued
-	if publish {
-		s.metadataPayload = payload
-		s.metadataGeneration = generation
-		s.metadataBuiltAt = time.Now()
-	}
-	queued := s.metadataQueuedGeneration
-	queuedSessions := s.metadataQueuedSessions
-	queuedIdentities := s.metadataQueuedIdentities
-	queuedRosterErr := s.metadataQueuedRosterErr
-	queuedTopologyGeneration := s.metadataQueuedTopologyGeneration
-	s.metadataQueuedGeneration = 0
-	s.metadataQueuedSessions = nil
-	s.metadataQueuedIdentities = nil
-	s.metadataQueuedRosterErr = nil
-	s.metadataQueuedTopologyGeneration = 0
-	if queued == 0 {
-		s.metadataBuilding = false
-		s.metadataBuildingGeneration = 0
-	} else {
-		s.metadataBuildingGeneration = queued
-		s.metadataBuildingTopologyGeneration = queuedTopologyGeneration
-	}
-	s.metadataMu.Unlock()
-	if publish && s.events != nil {
-		_, _ = s.events.publish("transcripts_changed", map[string]any{"data": cloneMap(payload)})
-	}
-	if queued != 0 {
-		s.buildMetadataRefresh(queued, queuedSessions, queuedIdentities, queuedRosterErr, queuedTopologyGeneration)
-	}
-}
-
-// tmuxTopologySnapshot serializes the machine-wide roster read and advances its
-// generation only when session names or tmux session IDs change. Unchanged
-// reads cannot invalidate an enrichment build, while changed snapshots retain
-// their read order so an older response cannot roll the browser back.
-//
-// A cached roster returned after a failed read keeps its successful names and
-// session IDs together. If another route refreshed that cache first, reconcile
-// its identity here so a warm metadata payload cannot hide the newer roster.
-func (s *server) tmuxTopologySnapshot(forceFresh ...bool) (goTmuxTopology, error) {
-	force := len(forceFresh) != 0 && forceFresh[0]
-	roster, err := s.tmuxSessionRosterSnapshot(force)
-	return s.tmuxTopologyFromRoster(roster, err)
-}
-
-func (s *server) tmuxTopologyFromRoster(roster tmuxSessionRosterSnapshot, err error) (goTmuxTopology, error) {
-	// Never hold the topology lock while waiting for tmux. Reconcile the latest
-	// cached roster inside topology serialization so an older caller cannot publish
-	// a snapshot copied before a newer topology transition.
-	eventEpoch := s.metadataEpoch()
-	s.metadataTopologyMu.Lock()
-	if latest := s.cachedTmuxSessionRosterSnapshot(); latest.known {
-		roster = latest
-	}
-	var topology goTmuxTopology
-	var previous goTmuxTopology
-	changed := false
-	if err != nil {
-		if roster.known {
-			previous, changed = s.observeMetadataTopology(roster)
-			topology = goTmuxTopology{sessions: roster.sessions, identities: roster.identities, generation: s.metadataTopologyGeneration, rosterRevision: roster.revision}
-		} else {
-			topology = goTmuxTopology{generation: s.metadataTopologyGeneration}
-		}
-	} else {
-		previous, changed = s.observeMetadataTopology(roster)
-		topology = goTmuxTopology{sessions: roster.sessions, identities: roster.identities, generation: s.metadataTopologyGeneration, rosterRevision: roster.revision}
-	}
-	if changed {
-		topology.renames = tmuxRosterRenames(previous, topology)
-		s.metadataTopologyRenames = cloneTmuxRosterRenames(topology.renames)
-	} else {
-		topology.renames = cloneTmuxRosterRenames(s.metadataTopologyRenames)
-	}
-	if changed && previous.generation != 0 && s.events != nil {
-		_, publishErr := s.events.publish("tmux_roster_changed", map[string]any{
-			"sessions": append([]string{}, topology.sessions...), "session_order": append([]string{}, topology.sessions...),
-			"roster_generation": topology.generation, "topology_generation": topology.generation,
-			"server_epoch": eventEpoch, "renames": topology.renames,
-		})
-		if publishErr != nil {
-			slog.Warn("tmux roster event publish failed", "error", publishErr)
-		}
-	}
-	s.metadataTopologyMu.Unlock()
-	return topology, err
-}
-
-func (s *server) cachedTmuxTopologySnapshot() (goTmuxTopology, bool) {
-	roster := s.cachedTmuxSessionRosterSnapshot()
-	if !roster.known {
-		return goTmuxTopology{}, false
-	}
-	topology, _ := s.tmuxTopologyFromRoster(roster, nil)
-	return topology, true
-}
-
-func (s *server) observeMetadataTopology(roster tmuxSessionRosterSnapshot) (goTmuxTopology, bool) {
-	signature := tmuxTopologySignature(roster.sessions, roster.identities)
-	if signature == s.metadataTopologySignature {
-		return goTmuxTopology{}, false
-	}
-	previous := goTmuxTopology{
-		sessions:   append([]string(nil), s.metadataTopologySessions...),
-		identities: cloneTmuxSessionIdentities(s.metadataTopologyIdentities), generation: s.metadataTopologyGeneration,
-	}
-	s.metadataTopologyGeneration++
-	s.metadataTopologySignature = signature
-	s.metadataTopologySessions = append([]string(nil), roster.sessions...)
-	s.metadataTopologyIdentities = cloneTmuxSessionIdentities(roster.identities)
-	return previous, true
-}
-
-func cloneTmuxRosterRenames(renames []map[string]any) []map[string]any {
-	cloned := make([]map[string]any, len(renames))
-	for index, rename := range renames {
-		cloned[index] = cloneMap(rename)
-	}
-	return cloned
-}
-
-func cloneTmuxSessionIdentities(identities map[string]string) map[string]string {
-	cloned := make(map[string]string, len(identities))
-	for session, identity := range identities {
-		cloned[session] = identity
-	}
-	return cloned
-}
-
-func (s *server) startTmuxRosterWatcher(parent context.Context) {
-	s.startTmuxRosterWatcherWithInterval(parent, goTmuxRosterWatchInterval)
-}
-
-func (s *server) startTmuxRosterWatcherWithInterval(parent context.Context, interval time.Duration) {
-	ctx, cancel := context.WithCancel(parent)
-	s.tmuxRosterWatchCancel = cancel
-	s.tmuxRosterWatchDone = make(chan struct{})
-	go func() {
-		defer close(s.tmuxRosterWatchDone)
-		s.watchTmuxRoster(ctx, interval)
-	}()
-}
-
-func (s *server) watchTmuxRoster(ctx context.Context, interval time.Duration) {
-	if interval <= 0 {
-		interval = goTmuxRosterWatchInterval
-	}
-	previous, err := s.tmuxTopologySnapshot(true)
-	if err != nil {
-		slog.Warn("initial tmux roster watch snapshot failed", "error", err)
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		next, snapshotErr := s.tmuxTopologySnapshot(true)
-		if snapshotErr != nil {
-			continue
-		}
-		if tmuxTopologySignature(previous.sessions, previous.identities) == tmuxTopologySignature(next.sessions, next.identities) {
-			previous = next
-			continue
-		}
-		s.queueMetadataRefresh(true, next.sessions, next.identities, nil, next.generation)
-		previous = next
-	}
-}
-
-func tmuxRosterRenames(previous, next goTmuxTopology) []map[string]any {
-	nextByIdentity := make(map[string]string, len(next.sessions))
-	for _, session := range next.sessions {
-		if identity := next.identities[session]; identity != "" {
-			nextByIdentity[identity] = session
-		}
-	}
-	renamed := make([]map[string]any, 0)
-	used := make(map[string]bool, len(nextByIdentity))
-	for _, session := range previous.sessions {
-		identity := previous.identities[session]
-		if identity == "" || next.identities[session] == identity {
-			continue
-		}
-		newSession := nextByIdentity[identity]
-		if newSession == "" || used[newSession] {
-			continue
-		}
-		used[newSession] = true
-		renamed = append(renamed, map[string]any{
-			"old_session": session, "new_session": newSession,
-			"old_session_identity": goTmuxSessionIdentity(session, identity),
-		})
-	}
-	return renamed
-}
-
-func tmuxTopologySignature(sessions []string, identities map[string]string) string {
-	parts := make([]string, 0, len(sessions))
-	for _, session := range sessions {
-		identity := identities[session]
-		if identity == "" {
-			identity = session
-		}
-		parts = append(parts, session+"\x1f"+identity)
-	}
-	return strings.Join(parts, "\x00")
-}
-
-func goTmuxSessionIdentity(session, rosterIdentity string) string {
-	if rosterIdentity == "" {
-		rosterIdentity = session
-	}
-	return goGraphID("tmux-session-incarnation", session+"\x1f"+rosterIdentity)
-}
-
 func (s *server) sessionExists(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("session")
 	err := s.tmuxCommand("has-session", "-t", name).Run()
@@ -7772,14 +4449,14 @@ print(json.dumps(result, separators=(",", ":"), ensure_ascii=False), end="")`
 func pythonBridgeEnvironment(root, config string) []string {
 	env := make([]string, 0, len(os.Environ())+2)
 	for _, value := range os.Environ() {
-		if strings.HasPrefix(value, "YOMUX_ROOT=") || strings.HasPrefix(value, "YOLOMUX_ROOT=") ||
-			strings.HasPrefix(value, "YOMUX_CONFIG_DIR=") || strings.HasPrefix(value, "YOLOMUX_CONFIG_DIR=") ||
-			strings.HasPrefix(value, "PYTHONPATH=") {
+		key, _, _ := strings.Cut(value, "=")
+		setting, product := productenv.Suffix(key)
+		if product && (setting == "ROOT" || setting == "CONFIG_DIR") || key == "PYTHONPATH" {
 			continue
 		}
 		env = append(env, value)
 	}
-	env = append(env, "PYTHONPATH="+root, "YOMUX_CONFIG_DIR="+config, "YOMUX_AUTH_CONFIG_READ_ONLY=1")
+	env = append(env, "PYTHONPATH="+root, productenv.Name("CONFIG_DIR")+"="+config, productenv.Name("AUTH_CONFIG_READ_ONLY")+"=1")
 	return env
 }
 
@@ -7800,7 +4477,7 @@ func (s *server) nextSessionPlanGeneration() int64 {
 }
 
 func (s *server) unsupported(w http.ResponseWriter, r *http.Request) {
-	capability := capabilities.RouteCapability(r.Method, r.URL.RequestURI())
+	capability := capabilities.Policy(r.Method, r.URL.RequestURI()).Capability
 	if capability == "" {
 		capability = "core.bootstrap.v1"
 	}
@@ -7983,7 +4660,13 @@ func (s *server) index(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	user, _ := s.identity(r)
+	user, status := s.identityStatus(r)
+	if status != 0 {
+		if !rejectCredentialAdmission(w, status) {
+			s.rejectUnauthorized(w, r)
+		}
+		return
+	}
 	s.writePythonHome(w, r, user)
 }
 
@@ -7994,22 +4677,31 @@ func (s *server) writePythonHome(w http.ResponseWriter, r *http.Request, user au
 		"stats_only": queryTrue(r.URL.Query().Get("stats_only")), "backend": goRuntimeLabel(),
 		"dangerously_yolo": s.dangerouslyYolo,
 	}
-	s.homeRendererMu.Lock()
-	if s.homeRenderer == nil {
-		s.homeRenderer, _ = startPythonHomeRenderer(s.root, s.config)
+	ctx, release, err := s.admitPythonRender(r.Context())
+	if err != nil {
+		http.Error(w, "application unavailable", http.StatusServiceUnavailable)
+		return
 	}
+	defer release()
+	s.homeRendererMu.Lock()
+	if s.homeRenderer == nil && !s.htmlClosed {
+		s.homeRenderer, err = startPythonHomeRenderer(s.root, s.config)
+	}
+	renderer := s.homeRenderer
+	s.homeRendererMu.Unlock()
 	var body []byte
-	var err error
-	if s.homeRenderer == nil {
-		err = fmt.Errorf("Python HTML renderer could not start")
+	if renderer == nil {
+		err = fmt.Errorf("Python HTML renderer unavailable")
 	} else {
-		body, err = s.homeRenderer.render(request)
-		if err != nil {
-			s.homeRenderer.close()
+		body, err = renderer.renderContext(ctx, request)
+	}
+	if err != nil {
+		s.homeRendererMu.Lock()
+		if s.homeRenderer == renderer {
 			s.homeRenderer = nil
 		}
+		s.homeRendererMu.Unlock()
 	}
-	s.homeRendererMu.Unlock()
 	if err != nil {
 		http.Error(w, "application unavailable", http.StatusInternalServerError)
 		return
@@ -8037,265 +4729,12 @@ func (s *server) static(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, path)
 }
 
-func (s *server) sessionNames() []string {
-	sessions, err := s.tmuxSessionRoster()
-	if err != nil {
-		cached, known := s.cachedTmuxSessionRoster()
-		if known {
-			return cached
-		}
-		return []string{}
-	}
-	return sessions
-}
-
-func (s *server) cachedTmuxSessionRoster() ([]string, bool) {
-	s.tmuxRosterMu.RLock()
-	defer s.tmuxRosterMu.RUnlock()
-	return append([]string(nil), s.tmuxRoster...), s.tmuxRosterKnown
-}
-
-func (s *server) cachedTmuxSessionRosterSnapshot() tmuxSessionRosterSnapshot {
-	s.tmuxRosterMu.RLock()
-	defer s.tmuxRosterMu.RUnlock()
-	identities := make(map[string]string, len(s.tmuxRosterIdentities))
-	for session, id := range s.tmuxRosterIdentities {
-		identities[session] = id
-	}
-	return tmuxSessionRosterSnapshot{
-		sessions: append([]string(nil), s.tmuxRoster...), identities: identities, known: s.tmuxRosterKnown, revision: s.tmuxRosterRevision,
-	}
-}
-
-func (s *server) tmuxSessionRosterFresh() bool {
-	s.tmuxRosterMu.RLock()
-	known := s.tmuxRosterKnown
-	sampledAt := s.tmuxRosterSampledAt
-	s.tmuxRosterMu.RUnlock()
-	return known && !sampledAt.IsZero() && time.Since(sampledAt) < goProcessMetricsCacheTTL
-}
-
-func (s *server) rememberTmuxSessionRoster(sessions []string, identities map[string]string) {
-	s.tmuxRosterMu.Lock()
-	s.tmuxRoster = append([]string(nil), sessions...)
-	s.tmuxRosterIdentities = make(map[string]string, len(sessions))
-	for _, session := range sessions {
-		identity := identities[session]
-		if identity == "" {
-			identity = session
-		}
-		s.tmuxRosterIdentities[session] = identity
-	}
-	s.tmuxRosterKnown = true
-	s.tmuxRosterRevision++
-	s.tmuxRosterSampledAt = time.Now()
-	s.tmuxRosterMu.Unlock()
-}
-
-func (s *server) tmuxSessionRoster() ([]string, error) {
-	roster, err := s.tmuxSessionRosterSnapshot(false)
-	return roster.sessions, err
-}
-
-func (s *server) tmuxSessionRosterSnapshot(forceFresh bool) (tmuxSessionRosterSnapshot, error) {
-	s.tmuxRosterFetchMu.Lock()
-	defer s.tmuxRosterFetchMu.Unlock()
-	return s.tmuxSessionRosterSnapshotLocked(forceFresh)
-}
-
-func (s *server) tmuxSessionRosterSnapshotLocked(forceFresh bool) (tmuxSessionRosterSnapshot, error) {
-	if s.tmuxSessionRosterFn != nil {
-		sessions, err := s.tmuxSessionRosterFn()
-		if err == nil {
-			sessions = normalizeTmuxSessionRoster(sessions)
-			s.rememberTmuxSessionRoster(sessions, nil)
-			return s.cachedTmuxSessionRosterSnapshot(), nil
-		}
-		return s.cachedTmuxSessionRosterSnapshot(), err
-	}
-	s.tmuxRosterMu.RLock()
-	if !forceFresh && s.tmuxRosterKnown && !s.tmuxRosterSampledAt.IsZero() && time.Since(s.tmuxRosterSampledAt) < goProcessMetricsCacheTTL {
-		roster := tmuxSessionRosterSnapshot{
-			sessions: append([]string(nil), s.tmuxRoster...), identities: make(map[string]string, len(s.tmuxRosterIdentities)), known: true, revision: s.tmuxRosterRevision,
-		}
-		for session, id := range s.tmuxRosterIdentities {
-			roster.identities[session] = id
-		}
-		s.tmuxRosterMu.RUnlock()
-		return roster, nil
-	}
-	s.tmuxRosterMu.RUnlock()
-	commandContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	out, err := s.tmuxCommandContext(commandContext, "list-sessions", "-F", "#{session_name}\t#{session_id}\t#{session_created}\t#{pid}").CombinedOutput()
-	if err != nil {
-		if stats.TmuxNoServerError(out) {
-			s.rememberTmuxSessionRoster([]string{}, nil)
-			return s.cachedTmuxSessionRosterSnapshot(), nil
-		}
-		return s.cachedTmuxSessionRosterSnapshot(), err
-	}
-	var result []string
-	identities := map[string]string{}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		fields := strings.SplitN(line, "\t", 2)
-		if len(fields) == 0 || fields[0] == "" {
-			continue
-		}
-		result = append(result, fields[0])
-		if len(fields) > 1 {
-			identities[fields[0]] = strings.Join(fields[1:], "\x1f")
-		}
-	}
-	result = normalizeTmuxSessionRoster(result)
-	s.rememberTmuxSessionRoster(result, identities)
-	return s.cachedTmuxSessionRosterSnapshot(), nil
-}
-
-func normalizeTmuxSessionRoster(raw []string) []string {
-	seen := make(map[string]struct{}, len(raw))
-	result := make([]string, 0, len(raw))
-	for _, value := range raw {
-		name := strings.TrimSpace(value)
-		if name == "" {
-			continue
-		}
-		if _, exists := seen[name]; exists {
-			continue
-		}
-		seen[name] = struct{}{}
-		result = append(result, name)
-	}
-	sort.SliceStable(result, func(i, j int) bool {
-		left := tmuxSessionSortKey(result[i])
-		right := tmuxSessionSortKey(result[j])
-		if left.rank != right.rank {
-			return left.rank < right.rank
-		}
-		if left.group != right.group {
-			return left.group < right.group
-		}
-		return left.number < right.number
-	})
-	return result
-}
-
-type tmuxSessionSortValue struct {
-	rank   int
-	group  string
-	number int
-}
-
-// tmuxSessionSortKey mirrors Python's list_tmux_session_names ordering. Numeric
-// YOmux/project names stay naturally ordered (2 before 10), while arbitrary
-// session names use a case-insensitive lexical order.
-func tmuxSessionSortKey(name string) tmuxSessionSortValue {
-	for rank, prefix := range []string{"yolomux", "project"} {
-		suffix := strings.TrimPrefix(name, prefix)
-		if suffix == "" {
-			continue
-		}
-		allDigits := true
-		for _, char := range suffix {
-			if char < '0' || char > '9' {
-				allDigits = false
-				break
-			}
-		}
-		if allDigits {
-			number, err := strconv.Atoi(suffix)
-			if err == nil {
-				return tmuxSessionSortValue{rank: rank, group: prefix, number: number}
-			}
-		}
-	}
-	return tmuxSessionSortValue{rank: 2, group: strings.ToLower(name)}
-}
-
-func (s *server) tmuxSessionActivityRoster() (map[string]float64, error) {
-	commandContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	out, err := s.tmuxCommandContext(commandContext, "list-sessions", "-F", "#{session_name}\t#{session_activity}").CombinedOutput()
-	if err != nil {
-		if stats.TmuxNoServerError(out) {
-			return map[string]float64{}, nil
-		}
-		return nil, err
-	}
-	result := make(map[string]float64)
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := splitTmuxFields(line)
-		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
-			continue
-		}
-		value, parseErr := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
-		if parseErr != nil || value < 0 {
-			continue
-		}
-		result[parts[0]] = value
-	}
-	return result, nil
-}
-
-func (s *server) tmuxWindowActivityRoster() (map[string]float64, error) {
-	commandContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	out, err := s.tmuxCommandContext(commandContext, "list-windows", "-a", "-F", "#{session_name}\t#{window_index}\t#{window_activity}").CombinedOutput()
-	if err != nil {
-		if stats.TmuxNoServerError(out) {
-			return map[string]float64{}, nil
-		}
-		return nil, err
-	}
-	result := make(map[string]float64)
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := splitTmuxFields(line)
-		if len(parts) != 3 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
-			continue
-		}
-		value, parseErr := strconv.ParseFloat(strings.TrimSpace(parts[2]), 64)
-		if parseErr != nil || value < 0 {
-			continue
-		}
-		result[parts[0]+":"+parts[1]] = value
-	}
-	return result, nil
-}
-
 func (s *server) tmuxCommand(args ...string) *exec.Cmd {
 	return s.tmuxCommandContext(context.Background(), args...)
 }
 
 func (s *server) tmuxCommandContext(ctx context.Context, args ...string) *exec.Cmd {
-	values := []string{}
-	socket := strings.TrimSpace(productenv.Value("YOLOMUX_TMUX_SOCKET"))
-	if socket != "" {
-		values = append(values, "-S", socket)
-	}
-	command := exec.CommandContext(ctx, "tmux", append(values, args...)...)
-	// A direct Go entrypoint can be started from inside a nested/private tmux client,
-	// where tmux would otherwise ignore the machine-wide default server and follow the
-	// inherited TMUX socket. Operator launches use the global server unless an explicit
-	// fixture socket was supplied; enforce that boundary at every command call so the
-	// Tabber roster cannot silently come from the launcher's supervisor server.
-	environment := make([]string, 0, len(os.Environ())+1)
-	for _, value := range os.Environ() {
-		if socket == "" && (strings.HasPrefix(value, "TMUX=") || strings.HasPrefix(value, "TMUX_PANE=")) {
-			continue
-		}
-		// tmux renders whitespace format separators as underscores under the empty
-		// locale used by Bazel's hermetic tests. Keep the wire format stable without
-		// changing an operator's configured locale when one is already present.
-		if os.Getenv("LC_ALL") == "" && os.Getenv("LC_CTYPE") == "" && os.Getenv("LANG") == "" && (strings.HasPrefix(value, "LC_ALL=") || strings.HasPrefix(value, "LC_CTYPE=") || strings.HasPrefix(value, "LANG=")) {
-			continue
-		}
-		environment = append(environment, value)
-	}
-	if os.Getenv("LC_ALL") == "" && os.Getenv("LC_CTYPE") == "" && os.Getenv("LANG") == "" {
-		environment = append(environment, "LC_ALL=C.UTF-8")
-	}
-	command.Env = environment
-	return command
+	return tmuxcmd.Command(ctx, tmuxcmd.Args(args...)[1:]...)
 }
 
 func (s *server) exactTarget(session string) string { return "=" + session + ":" }
@@ -8428,8 +4867,11 @@ func (s *server) startTerminalControls(conn *wsConn, session, tty string) (func(
 }
 
 func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
-	user, ok := s.identity(r)
-	if !ok {
+	user, status := s.identityStatus(r)
+	if status != 0 {
+		if rejectCredentialAdmission(w, status) {
+			return
+		}
 		http.Error(w, "authentication required", http.StatusUnauthorized)
 		return
 	}
@@ -8764,7 +5206,8 @@ func writeFrame(w io.Writer, opcode byte, payload []byte) error {
 	} else if n <= 65535 {
 		h = append(h, 126, byte(n>>8), byte(n))
 	} else {
-		h = append(h, 127, 0, 0, 0, 0, 0, 0, 0, 0, byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
+		h = append(h, 127)
+		h = binary.BigEndian.AppendUint64(h, uint64(n))
 	}
 	_, err := w.Write(append(h, payload...))
 	return err

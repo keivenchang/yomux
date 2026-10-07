@@ -29,7 +29,7 @@ def test_preflight_allows_a_known_local_ext_root(tmp_path):
 
 
 def test_preflight_refuses_wal_and_socket_on_nfs_with_actionable_paths(tmp_path):
-    with pytest.raises(FilesystemPreflightError, match="YOLOMUX_ALLOW_NETWORK_FILESYSTEM_MUTABLE_ROOTS=1") as raised:
+    with pytest.raises(FilesystemPreflightError, match=f"{filesystem_preflight.NETWORK_FILESYSTEM_ESCAPE_HATCH}=1") as raised:
         preflight_mutable_roots(
             wal_databases=[tmp_path / "stats.sqlite3"],
             unix_sockets=[tmp_path / "service.sock"],
@@ -49,8 +49,8 @@ def test_preflight_refuses_unknown_filesystem_and_escape_hatch_warns(tmp_path, m
     with pytest.raises(FilesystemPreflightError, match="unknown"):
         preflight_mutable_roots(wal_databases=[tmp_path / "stats.sqlite3"], classifier=classifier)
 
-    monkeypatch.setenv("YOLOMUX_ALLOW_NETWORK_FILESYSTEM_MUTABLE_ROOTS", "1")
-    with pytest.warns(RuntimeWarning, match="YOLOMUX_ALLOW_NETWORK_FILESYSTEM_MUTABLE_ROOTS=1"):
+    monkeypatch.setenv(filesystem_preflight.NETWORK_FILESYSTEM_ESCAPE_HATCH, "1")
+    with pytest.warns(RuntimeWarning, match=f"{filesystem_preflight.NETWORK_FILESYSTEM_ESCAPE_HATCH}=1"):
         preflight_mutable_roots(wal_databases=[tmp_path / "stats.sqlite3"], classifier=classifier)
 
 

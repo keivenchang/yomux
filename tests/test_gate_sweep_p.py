@@ -3,6 +3,13 @@
 """User-boundary P regression sentinels deferred beyond the current release."""
 from __future__ import annotations
 import pytest
+from http import HTTPStatus
+from tests.helpers.login_throttle import (
+    VALID_USER, VALID_PASSWORD, start_server, stop_server,
+)
+from tests.helpers.fixture_http_server import basic_auth_header as auth_header
+from tests.helpers.fixture_http_server import request_fixture_http_tuple as request
+from yomux_lib.login_rate_limit import BucketPolicy, LoginRatePolicy
 
 def _missing(item: str, contract: str) -> None:
     assert False, f"{item} waits for its deferred user-boundary contract: {contract}"
@@ -27,7 +34,20 @@ def test_p8_dev_deployment_retains_real_agent_history(): _missing("F-P8", "dev b
 def test_p11_unreadable_skill_dirs_are_not_empty_lists(): _missing("F-P11", "HTTP/DOM distinguishes unreadable from empty")
 @pytest.mark.xfail(strict=True, reason="Deferred, not in current release scope: F-P12 named raw-image authentication errors")
 def test_p12_native_image_preview_names_authentication_failure(): _missing("F-P12", "image DOM names authentication failure")
-@pytest.mark.xfail(strict=True, reason="Deferred, not in current release scope: F-P13 valid Basic replay exemption")
-def test_p13_repeated_valid_basic_requests_are_not_throttled(): _missing("F-P13", "repeated valid Basic API HTTP responses remain successful")
+@pytest.mark.socket
+@pytest.mark.no_browser
+@pytest.mark.deprecated_python_server
+def test_p13_repeated_valid_basic_requests_are_not_throttled(monkeypatch, tmp_path):
+    bucket = BucketPolicy(2, 0.001)
+    policy = LoginRatePolicy(exact_bucket=bucket, nearby_bucket=bucket,
+                             broad_bucket=bucket, global_bucket=bucket)
+    server, thread, _limiter = start_server(monkeypatch, tmp_path, policy=policy)
+    try:
+        for _ in range(6):
+            status, _headers, _body = request(server.server_address[1], "GET", "/api/ping",
+                                            headers=auth_header(VALID_USER, VALID_PASSWORD))
+            assert status == HTTPStatus.OK
+    finally:
+        stop_server(server, thread)
 @pytest.mark.xfail(strict=True, reason="Deferred, not in current release scope: F-P14 narrow tab menu geometry contract")
 def test_p14_narrow_tab_context_menu_remains_usable(): _missing("F-P14", "rendered menu stays in viewport with usable rows")

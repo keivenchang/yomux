@@ -21,20 +21,23 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/keivenchang/yomux/internal/atomicfile"
 	"github.com/keivenchang/yomux/internal/cache"
 	"github.com/keivenchang/yomux/internal/finder"
 )
 
 const sessionFilesCacheMaxEntries = 128
+const sessionFilesCacheMaxBytes = 64 << 20
+const sessionFilesCacheMaxEntryBytes = 8 << 20
 const sessionFilesCacheTTL = 30 * time.Second
 
 type sessionFilesCacheRecord struct {
-	RequestDescriptor string         `json:"request_descriptor"`
-	CacheViewID       string         `json:"cache_view_id"`
-	StoredAt          int64          `json:"stored_at"`
-	Status            int            `json:"status"`
-	SessionIdentity   string         `json:"session_identity,omitempty"`
-	Payload           map[string]any `json:"payload"`
+	RequestDescriptor string          `json:"request_descriptor"`
+	CacheViewID       string          `json:"cache_view_id"`
+	StoredAt          int64           `json:"stored_at"`
+	Status            int             `json:"status"`
+	SessionIdentity   string          `json:"session_identity,omitempty"`
+	Payload           json.RawMessage `json:"payload"`
 }
 
 type sessionFilesCacheState struct {
@@ -44,10 +47,59 @@ type sessionFilesCacheState struct {
 	// publicationMu fences durable renames against generation changes without blocking cache hits.
 	publicationMu sync.Mutex
 	records       *cache.LRU[string, sessionFilesCacheRecord]
+	payloadBytes  int64
 	generations   *cache.LRU[string, uint64]
 	generation    uint64
 	recencyTouch  map[string]chan struct{}
 	refresh       map[string]uint64
+}
+
+func sessionFilesCachePayload(record sessionFilesCacheRecord) map[string]any {
+	var payload map[string]any
+	if !sessionFilesCachePayloadIsObject(record.Payload) || json.Unmarshal(record.Payload, &payload) != nil {
+		return nil
+	}
+	return payload
+}
+
+func sessionFilesCachePayloadIsObject(payload json.RawMessage) bool {
+	for _, character := range payload {
+		switch character {
+		case ' ', '\n', '\r', '\t':
+			continue
+		default:
+			return character == '{'
+		}
+	}
+	return false
+}
+
+func (s *server) setSessionFilesCacheRecordLocked(viewID string, record sessionFilesCacheRecord) bool {
+	entryBytes := int64(len(record.Payload))
+	if entryBytes > sessionFilesCacheMaxEntryBytes {
+		return false
+	}
+	if s.sessionFilesCache.records == nil {
+		s.sessionFilesCache.records = cache.NewLRU[string, sessionFilesCacheRecord](sessionFilesCacheMaxEntries)
+	}
+	if previous, exists := s.sessionFilesCache.records.Peek(viewID); exists {
+		s.sessionFilesCache.payloadBytes -= int64(len(previous.Payload))
+		s.sessionFilesCache.records.Delete(viewID)
+	}
+	for s.sessionFilesCache.records.Len() >= sessionFilesCacheMaxEntries || s.sessionFilesCache.payloadBytes+entryBytes > sessionFilesCacheMaxBytes {
+		oldest := s.sessionFilesCache.records.KeysLeastRecentFirst()
+		if len(oldest) == 0 {
+			break
+		}
+		victim := oldest[0]
+		if previous, exists := s.sessionFilesCache.records.Peek(victim); exists {
+			s.sessionFilesCache.payloadBytes -= int64(len(previous.Payload))
+		}
+		s.sessionFilesCache.records.Delete(victim)
+	}
+	s.sessionFilesCache.records.Set(viewID, record)
+	s.sessionFilesCache.payloadBytes += entryBytes
+	return true
 }
 
 func sessionFilesRequestDescriptor(request sessionFilesRequest) string {
@@ -78,22 +130,6 @@ func sessionFilesRequestDescriptor(request sessionFilesRequest) string {
 func sessionFilesCacheViewID(requestDescriptor string) string {
 	digest := sha256.Sum256([]byte("session-files-view\x1f" + requestDescriptor))
 	return hex.EncodeToString(digest[:])
-}
-
-func cloneSessionFilesPayload(payload map[string]any) map[string]any {
-	// Copy once when a payload enters the cache; published nested rows are immutable to keep hits cheap.
-	if payload == nil {
-		return nil
-	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return cloneFinderMap(payload)
-	}
-	var cloned map[string]any
-	if json.Unmarshal(encoded, &cloned) != nil {
-		return cloneFinderMap(payload)
-	}
-	return cloned
 }
 
 func sessionFilesCacheAge(record sessionFilesCacheRecord, now time.Time) float64 {
@@ -290,7 +326,7 @@ func openSessionFilesCacheFile(directory, viewID string) (*os.File, bool) {
 
 func sessionFilesCacheRecordMatches(record sessionFilesCacheRecord, descriptor, viewID, sessionIdentity string) bool {
 	return record.RequestDescriptor == descriptor && record.CacheViewID == viewID && record.StoredAt > 0 &&
-		record.Status >= http.StatusOK && record.Status < http.StatusMultipleChoices && record.Payload != nil &&
+		record.Status >= http.StatusOK && record.Status < http.StatusMultipleChoices && sessionFilesCachePayloadIsObject(record.Payload) &&
 		(sessionIdentity == "" || record.SessionIdentity == sessionIdentity)
 }
 
@@ -340,15 +376,12 @@ func (s *server) readSessionFilesCacheWithSource(request sessionFilesRequest, vi
 	if err := file.Close(); err != nil {
 		return sessionFilesCacheRecord{}, false, false
 	}
-	return s.publishLoadedSessionFilesCacheRecord(descriptor, viewID, diskRecord, request.sessionIdentity), true, true
+	return s.publishLoadedSessionFilesCacheRecord(viewID, diskRecord), true, true
 }
 
-func (s *server) publishLoadedSessionFilesCacheRecord(descriptor, viewID string, diskRecord sessionFilesCacheRecord, sessionIdentity string) sessionFilesCacheRecord {
+func (s *server) publishLoadedSessionFilesCacheRecord(viewID string, diskRecord sessionFilesCacheRecord) sessionFilesCacheRecord {
 	s.sessionFilesCache.mu.Lock()
 	defer s.sessionFilesCache.mu.Unlock()
-	if s.sessionFilesCache.records == nil {
-		s.sessionFilesCache.records = cache.NewLRU[string, sessionFilesCacheRecord](sessionFilesCacheMaxEntries)
-	}
 	current, exists := s.sessionFilesCache.records.Peek(viewID)
 	if exists {
 		// The memory publication may have changed incarnation while the disk read
@@ -362,7 +395,10 @@ func (s *server) publishLoadedSessionFilesCacheRecord(descriptor, viewID string,
 		StoredAt: diskRecord.StoredAt, Status: diskRecord.Status, SessionIdentity: diskRecord.SessionIdentity,
 		Payload: diskRecord.Payload,
 	}
-	s.sessionFilesCache.records.Set(viewID, record)
+	if int64(len(record.Payload)) > sessionFilesCacheMaxEntryBytes {
+		return record
+	}
+	s.setSessionFilesCacheRecordLocked(viewID, record)
 	return record
 }
 
@@ -424,7 +460,7 @@ func (s *server) admitLiveSessionFilesCache(request sessionFilesRequest, viewID 
 
 func sessionFilesPayloadWithCache(record sessionFilesCacheRecord, requestDescriptor, viewID string, hit, stale, refreshing bool, now time.Time) map[string]any {
 	// Cached rows stay immutable; only the response envelope needs a new top-level map.
-	payload := cloneFinderMap(record.Payload)
+	payload := sessionFilesCachePayload(record)
 	if payload == nil {
 		payload = make(map[string]any)
 	}
@@ -580,25 +616,58 @@ func sessionFilesCacheRecordMatchesRequestIdentity(request sessionFilesRequest, 
 }
 
 func (s *server) writeSessionFilesCache(request sessionFilesRequest, viewID string, payload map[string]any, status int, expectedGeneration ...uint64) bool {
-	directory := s.sessionFilesCacheDirectory()
-	if directory == "" || payload == nil || status < http.StatusOK || status >= http.StatusMultipleChoices || (request.session != "" && request.sessionIdentity == "") {
+	if payload == nil || status < http.StatusOK || status >= http.StatusMultipleChoices || (request.session != "" && request.sessionIdentity == "") {
+		return false
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
 		return false
 	}
 	s.sessionFilesCache.writeMu.Lock()
 	defer s.sessionFilesCache.writeMu.Unlock()
+	oversized := int64(len(payloadJSON)) > sessionFilesCacheMaxEntryBytes
 	s.sessionFilesCache.mu.Lock()
 	var existing sessionFilesCacheRecord
 	var exists bool
 	if s.sessionFilesCache.records != nil {
-		existing, exists = s.sessionFilesCache.records.Get(viewID)
+		existing, exists = s.sessionFilesCache.records.Peek(viewID)
 	}
 	s.sessionFilesCache.mu.Unlock()
 	if exists && request.session != "" && existing.SessionIdentity != request.sessionIdentity && !s.sessionFilesIdentityMatches(request.session, request.sessionIdentity) {
 		return false
 	}
+	if oversized {
+		s.sessionFilesCache.publicationMu.Lock()
+		s.sessionFilesCache.mu.Lock()
+		generation := uint64(0)
+		if len(expectedGeneration) > 0 {
+			generation = expectedGeneration[0]
+		}
+		if generation != 0 && s.currentSessionFilesCacheGenerationLocked(viewID) != generation {
+			s.sessionFilesCache.mu.Unlock()
+			s.sessionFilesCache.publicationMu.Unlock()
+			return false
+		}
+		if generation == 0 {
+			s.nextSessionFilesCacheGenerationLocked(viewID)
+		}
+		if s.sessionFilesCache.records != nil {
+			if previous, present := s.sessionFilesCache.records.Peek(viewID); present && (request.session == "" || previous.SessionIdentity == request.sessionIdentity) {
+				s.sessionFilesCache.payloadBytes -= int64(len(previous.Payload))
+				s.sessionFilesCache.records.Delete(viewID)
+			}
+		}
+		s.sessionFilesCache.mu.Unlock()
+		s.sessionFilesCache.publicationMu.Unlock()
+		return false
+	}
+	directory := s.sessionFilesCacheDirectory()
+	if directory == "" {
+		return false
+	}
 	record := sessionFilesCacheRecord{
 		RequestDescriptor: sessionFilesRequestDescriptor(request), CacheViewID: viewID,
-		StoredAt: time.Now().UnixNano(), Status: status, SessionIdentity: request.sessionIdentity, Payload: cloneSessionFilesPayload(payload),
+		StoredAt: time.Now().UnixNano(), Status: status, SessionIdentity: request.sessionIdentity, Payload: payloadJSON,
 	}
 	s.sessionFilesCache.publicationMu.Lock()
 	s.sessionFilesCache.mu.Lock()
@@ -613,10 +682,7 @@ func (s *server) writeSessionFilesCache(request sessionFilesRequest, viewID stri
 		s.sessionFilesCache.publicationMu.Unlock()
 		return false
 	}
-	if s.sessionFilesCache.records == nil {
-		s.sessionFilesCache.records = cache.NewLRU[string, sessionFilesCacheRecord](sessionFilesCacheMaxEntries)
-	}
-	s.sessionFilesCache.records.Set(viewID, record)
+	s.setSessionFilesCacheRecordLocked(viewID, record)
 	s.sessionFilesCache.mu.Unlock()
 	s.sessionFilesCache.publicationMu.Unlock()
 	if err := os.MkdirAll(directory, 0o700); err != nil {
@@ -626,20 +692,11 @@ func (s *server) writeSessionFilesCache(request sessionFilesRequest, viewID stri
 	if err != nil {
 		return true
 	}
-	temporary, err := os.CreateTemp(directory, ".session-files-*.tmp")
+	staged, err := atomicfile.Stage(filepath.Join(directory, viewID+".json"), data)
 	if err != nil {
 		return true
 	}
-	temporaryName := temporary.Name()
-	defer os.Remove(temporaryName)
-	if err := temporary.Chmod(0o600); err == nil {
-		if _, err = temporary.Write(data); err == nil {
-			err = temporary.Sync()
-		}
-	}
-	if closeErr := temporary.Close(); err == nil {
-		err = closeErr
-	}
+	defer staged.Cleanup()
 	if err == nil {
 		s.sessionFilesCache.publicationMu.Lock()
 		s.sessionFilesCache.mu.Lock()
@@ -649,7 +706,7 @@ func (s *server) writeSessionFilesCache(request sessionFilesRequest, viewID stri
 			return true
 		}
 		s.sessionFilesCache.mu.Unlock()
-		err = os.Rename(temporaryName, filepath.Join(directory, viewID+".json"))
+		err = staged.Commit()
 		s.sessionFilesCache.publicationMu.Unlock()
 	}
 	if err == nil {

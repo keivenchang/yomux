@@ -2,6 +2,7 @@ from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 from tests.browser_helpers.browser_console import assert_only_expected_browser_network_error
 from tests.browser_helpers.browser_console import assert_only_expected_browser_warning
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.actions.wheel_input import ScrollOrigin
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -1451,13 +1452,32 @@ def test_markdown_prosemirror_renders_readme_mermaid_fences_read_only(browser, t
     assert metrics["maxHeartbeatGap"] < 5000, metrics
     assert metrics["wheelReady"] is True, metrics
     assert wheel_before["outerHeight"] > wheel_before["outerClient"], wheel_before
-    # ProseMirror Mermaid surfaces intentionally let wheel input bubble to the outer preview pane;
-    # the viewport is visible rather than an independent nested scroll container.
-    assert wheel_before["viewportOverflow"] == "visible", wheel_before
+    # ProseMirror Mermaid surfaces keep the viewport clipped for pan gestures, while custom wheel
+    # routing still sends ordinary scrolling to the outer preview pane.
+    assert wheel_before["viewportOverflow"] == "hidden", wheel_before
     assert wheel_before["viewportHeight"] > wheel_before["viewportClient"], wheel_before
-    assert wheel_before["viewportTop"] == 0, wheel_before
+    assert wheel_before["viewportTop"] > 0, wheel_before
     assert wheel_after["outerTop"] > wheel_before["outerTop"], {"before": wheel_before, "after": wheel_after}
     assert wheel_after["viewportTop"] == wheel_before["viewportTop"], {"before": wheel_before, "after": wheel_after}
+    zoom_shell = wheel_probe.find_element(By.XPATH, "ancestor::div[contains(@class, 'file-editor-preview-zoom-shell')]")
+    pan_before = browser.execute_script(
+        """const shell = arguments[0]; const viewport = shell.querySelector('.file-editor-preview-zoom-viewport');
+        viewport.scrollLeft = Math.max(0, (viewport.scrollWidth - viewport.clientWidth) / 2);
+        viewport.scrollTop = Math.max(0, (viewport.scrollHeight - viewport.clientHeight) / 2);
+        return {left: viewport.scrollLeft, top: viewport.scrollTop, maxLeft: viewport.scrollWidth - viewport.clientWidth,
+          maxTop: viewport.scrollHeight - viewport.clientHeight};""",
+        zoom_shell,
+    )
+    ActionChains(browser).move_to_element(wheel_probe).click_and_hold().move_by_offset(-80, -60).release().perform()
+    pan_after = browser.execute_script(
+        """const shell = arguments[0]; const viewport = shell.querySelector('.file-editor-preview-zoom-viewport');
+        return {left: viewport.scrollLeft, top: viewport.scrollTop,
+          panning: shell.classList.contains('file-editor-preview-zoom-panning')};""",
+        zoom_shell,
+    )
+    assert pan_before["maxLeft"] > 0 or pan_before["maxTop"] > 0, pan_before
+    assert pan_after["left"] > pan_before["left"] or pan_after["top"] > pan_before["top"], {"before": pan_before, "after": pan_after}
+    assert pan_after["panning"] is False, pan_after
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
@@ -3035,6 +3055,101 @@ def test_markdown_viewedit_link_context_menu_offers_url_actions(browser, tmp_pat
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
+def test_markdown_relative_link_context_menu_opens_yomux_editor(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const path = '/home/test/repo/README.md';
+            const source = '[Development](docs/DEVELOPMENT.md)';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            const openedFiles = [];
+            const openedUrls = [];
+            const originalOpenFileInEditor = window.openFileInEditor;
+            const originalWindowOpen = window.open;
+            window.openFileInEditor = async (...args) => { openedFiles.push(args); return true; };
+            window.open = (...args) => { openedUrls.push(args); return {}; };
+            const originalMarked = window.marked;
+            window.marked = {parse: () => '<p><a href="docs/DEVELOPMENT.md">Development</a></p>'};
+            const previewPanel = document.createElement('div');
+            previewPanel.className = 'file-editor-panel';
+            previewPanel.dataset.filePath = path;
+            const preview = document.createElement('div');
+            preview.className = 'file-editor-preview-pane-panel markdown-body';
+            previewPanel.append(preview);
+            document.getElementById('grid').replaceChildren(previewPanel);
+            renderMarkdownPreviewInto(preview, source, path, {context: 'local-link-menu'});
+            if (preview._previewAsync) await preview._previewAsync;
+            window.marked = originalMarked;
+            const link = preview.querySelector('a[href]');
+            link.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 20, clientY: 20}));
+            const previewMenu = document.querySelector('.markdown-preview-context-menu');
+            const previewLabels = [...(previewMenu?.querySelectorAll('button') || [])].map(button => button.textContent.trim());
+            previewMenu?.querySelector('button')?.click();
+            window.marked = {parse: () => '<p><a href="docs/DEVELOPMENT.md">Development</a></p>'};
+            renderMarkdownPreviewInto(preview, source, path, {context: 'local-link-menu-readonly', readOnly: true});
+            if (preview._previewAsync) await preview._previewAsync;
+            window.marked = originalMarked;
+            const readOnlyLink = preview.querySelector('a[href]');
+            readOnlyLink.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 20, clientY: 20}));
+            const readOnlyMenu = document.querySelector('.link-context-menu');
+            const readOnlyLabels = [...(readOnlyMenu?.querySelectorAll('button') || [])].map(button => button.textContent.trim());
+            readOnlyMenu?.querySelector('button')?.click();
+            window.marked = {parse: () => '<p><a href="https://example.com/docs">External</a></p>'};
+            renderMarkdownPreviewInto(preview, '[External](https://example.com/docs)', path, {context: 'external-link-menu', readOnly: true});
+            if (preview._previewAsync) await preview._previewAsync;
+            const externalLink = preview.querySelector('a[href]');
+            const externalClickPrevented = !externalLink.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+            window.marked = originalMarked;
+            setFileEditorViewMode(path, 'split', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panelNodes.set(item, panel);
+            document.getElementById('grid').replaceChildren(panel);
+            renderFileEditorPanel(panel, item);
+            await window.__yomuxTestWaitFor(() => panel._pmView?.dom.querySelector('a[href]'));
+            const viewEditLink = panel._pmView.dom.querySelector('a[href]');
+            viewEditLink.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 20, clientY: 20}));
+            const viewEditMenu = document.querySelector('.markdown-preview-context-menu');
+            const viewEditLabels = [...(viewEditMenu?.querySelectorAll('button') || [])].map(button => button.textContent.trim());
+            viewEditMenu?.querySelector('button')?.click();
+            await Promise.resolve();
+            window.openFileInEditor = originalOpenFileInEditor;
+            window.open = originalWindowOpen;
+            done({
+              previewLabels,
+              readOnlyLabels,
+              viewEditLabels,
+              externalClickPrevented,
+              openedFiles: openedFiles.map(args => ({path: args[0], title: args[1], viewMode: args[2]?.viewMode})),
+              openedUrls,
+              anchorHref: link?.href || '',
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            done({failure: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "failure" not in metrics, metrics
+    assert metrics["previewLabels"][0] == "Open in a new Editor", metrics
+    assert metrics["readOnlyLabels"][0] == "Open in a new Editor", metrics
+    assert metrics["viewEditLabels"][:3] == ["Open in a new Editor", "Copy URL", "Modify URL"], metrics
+    assert metrics["externalClickPrevented"] is True, metrics
+    assert metrics["openedUrls"] == [["https://example.com/docs", "_blank", "noopener,noreferrer"]], metrics
+    assert metrics["openedFiles"] == [
+        {"path": "/home/test/repo/docs/DEVELOPMENT.md", "title": "DEVELOPMENT.md", "viewMode": "preview"},
+        {"path": "/home/test/repo/docs/DEVELOPMENT.md", "title": "DEVELOPMENT.md", "viewMode": "preview"},
+        {"path": "/home/test/repo/docs/DEVELOPMENT.md", "title": "DEVELOPMENT.md", "viewMode": "preview"},
+    ], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
 def test_markdown_viewedit_link_context_menu_selects_link_without_prior_highlight(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(
@@ -3072,6 +3187,47 @@ def test_markdown_viewedit_link_context_menu_selects_link_without_prior_highligh
     assert "failure" not in metrics, metrics
     assert metrics["selectedText"] == "Link", metrics
     assert metrics["labels"][:4] == ["Open URL in a new tab", "Copy URL", "Modify URL", "Remove URL"], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_markdown_viewedit_table_link_context_menu_opens(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const path = '/home/test/yolomux.dev/TABLE_LINK.md';
+            const source = '| Name | Link |\\n| --- | --- |\\n| Example | [Link](https://example.com) |';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+            setFileEditorViewMode(path, 'split', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            await window.__yomuxTestWaitFor(() => panel._pmView?.dom.querySelector('table a[href]'));
+            const view = panel._pmView;
+            const link = view.dom.querySelector('table a[href]');
+            const event = new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 20, clientY: 20});
+            const prevented = !link.dispatchEvent(event);
+            const menu = document.querySelector('.markdown-preview-context-menu');
+            done({
+              prevented,
+              labels: [...(menu?.querySelectorAll('button') || [])].map(button => button.textContent.trim()),
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            done({failure: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "failure" not in metrics, metrics
+    assert metrics["prevented"] is True, metrics
+    assert metrics["labels"][:2] == ["Open URL in a new tab", "Copy URL"], metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
@@ -3313,11 +3469,14 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
                 const externalDataUrl = `data:image/png;base64,${btoa(String.fromCharCode(...fixturePng))}`;
                 window.fetch = async (input, options = {}) => {
           const url = new URL(String(input), window.location.href);
-          if (url.pathname === '/api/fs/raw') {
-            rawRequests.push(`${url.pathname}${url.search}`);
-            if (!['.mp3', '.mp4'].some(suffix => String(url.searchParams.get('path') || '').toLowerCase().endsWith(suffix))) {
-              return new Response(fixturePng, {status: 200, headers: {'Content-Type': 'image/png'}});
-            }
+                if (url.pathname === '/api/fs/raw') {
+                  rawRequests.push(`${url.pathname}${url.search}`);
+                  if (String(url.searchParams.get('path') || '').endsWith('/diagram.svg')) {
+                    return new Response('<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1200" viewBox="0 0 1800 1200"><rect width="1800" height="1200" fill="#202938"/><rect x="160" y="160" width="420" height="200" fill="#3c78d8"/><text x="370" y="275" fill="white" font-size="64" text-anchor="middle">Start</text><rect x="1220" y="820" width="420" height="200" fill="#38845f"/><text x="1430" y="935" fill="white" font-size="64" text-anchor="middle">Finish</text></svg>', {status: 200, headers: {'Content-Type': 'image/svg+xml'}});
+                  }
+                  if (!['.mp3', '.mp4'].some(suffix => String(url.searchParams.get('path') || '').toLowerCase().endsWith(suffix))) {
+                    return new Response(fixturePng, {status: 200, headers: {'Content-Type': 'image/png'}});
+                  }
           }
           return originalFetch(input, options);
         };
@@ -3538,6 +3697,30 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
     assert "binary preview blocked" in metrics["unsupported"]["text"], metrics
     assert metrics["errors"] == [], metrics
     assert metrics["rejections"] == [], metrics
+
+    image_viewport = browser.find_element(
+        By.CSS_SELECTOR,
+        '[data-file-path="/home/test/repo/assets/diagram.svg"] .file-editor-preview-zoom-viewport',
+    )
+    pan_before = browser.execute_script(
+        """const viewport = arguments[0];
+        const shell = viewport.closest('.file-editor-preview-zoom-shell');
+        for (let index = 0; index < 4; index += 1) shell.querySelector('[data-preview-zoom-action="in"]').click();
+        viewport.scrollLeft = Math.max(0, (viewport.scrollWidth - viewport.clientWidth) / 2);
+        viewport.scrollTop = Math.max(0, (viewport.scrollHeight - viewport.clientHeight) / 2);
+        return {left: viewport.scrollLeft, top: viewport.scrollTop, maxLeft: viewport.scrollWidth - viewport.clientWidth,
+          maxTop: viewport.scrollHeight - viewport.clientHeight};""",
+        image_viewport,
+    )
+    ActionChains(browser).move_to_element(image_viewport).click_and_hold().move_by_offset(-90, -70).release().perform()
+    pan_after = browser.execute_script(
+        """const viewport = arguments[0]; return {left: viewport.scrollLeft, top: viewport.scrollTop,
+        panning: viewport.closest('.file-editor-preview-zoom-shell')?.classList.contains('file-editor-preview-zoom-panning')};""",
+        image_viewport,
+    )
+    assert pan_before["maxLeft"] > 0 or pan_before["maxTop"] > 0, pan_before
+    assert pan_after["left"] > pan_before["left"] or pan_after["top"] > pan_before["top"], {"before": pan_before, "after": pan_after}
+    assert pan_after["panning"] is False, pan_after
 
 
 def test_editor_opens_mermaid_source_preview_by_default(browser, tmp_path):
@@ -5075,8 +5258,7 @@ def test_preview_touch_claim_rejects_a_deferred_stale_scroll_restore_across_fram
     assert 100 not in frames, frames
 
 
-@pytest.mark.xfail(reason="Legacy Markdown Preview scroll-sync is superseded by ProseMirror-only ViewEdit", strict=True)
-def test_markdown_split_preview_scroll_sync_tracks_source_lines_with_tall_images(browser, tmp_path):
+def test_markdown_split_viewedit_scroll_sync_tracks_source_lines_with_tall_images(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"], grid_width=920, grid_height=620)
     metrics = browser.execute_async_script(
         """
@@ -5086,31 +5268,6 @@ def test_markdown_split_preview_scroll_sync_tracks_source_lines_with_tall_images
           try {
             const {frame} = window.__yomuxTestHelpers;
             const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-            const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
-            window.marked = {
-              parse(markdown) {
-                const parts = [];
-                for (const line of String(markdown || '').split('\\n')) {
-                  const trimmed = line.trim();
-                  if (trimmed === '<details>' || trimmed === '</details>' || /^<summary>.*<\\/summary>$/.test(trimmed)) {
-                    parts.push(trimmed);
-                    continue;
-                  }
-                  const heading = trimmed.match(/^(#{1,6})\\s+(.+)$/);
-                  if (heading) {
-                    const level = heading[1].length;
-                    parts.push(`<h${level}>${escapeHtml(heading[2])}</h${level}>`);
-                    continue;
-                  }
-                  if (trimmed.startsWith('<img ')) {
-                    parts.push(trimmed);
-                    continue;
-                  }
-                  if (trimmed) parts.push(`<p>${escapeHtml(trimmed)}</p>`);
-                }
-                return parts.join('');
-              },
-            };
             const canvas = document.createElement('canvas');
             canvas.width = 120;
             canvas.height = 720;
@@ -5120,7 +5277,7 @@ def test_markdown_split_preview_scroll_sync_tracks_source_lines_with_tall_images
             ctx.fillStyle = neutralDark;
             ctx.font = '700 20px Arial';
             ctx.fillText('TALL', 30, 360);
-            const tallImage = canvas.toDataURL('image/png');
+            const tallImage = URL.createObjectURL(await new Promise(resolve => canvas.toBlob(resolve, 'image/png')));
             const path = '/home/test/repo/docs/media-scroll.md';
             const intro = Array.from({length: 18}, (_, index) => `Intro paragraph ${index + 1} before the expandable image block.`);
             const content = [
@@ -5142,7 +5299,7 @@ def test_markdown_split_preview_scroll_sync_tracks_source_lines_with_tall_images
               '',
               'The editor and preview should agree that this is the current section.',
               '',
-              ...Array.from({length: 30}, (_, index) => `Tail paragraph ${index + 1}`),
+              ...Array.from({length: 30}, (_, index) => [`Tail paragraph ${index + 1}`, '']).flat(),
               '',
             ].join('\\n');
             const targetLine = content.split('\\n').findIndex(line => line.startsWith('## 2.')) + 1;
@@ -5160,13 +5317,16 @@ def test_markdown_split_preview_scroll_sync_tracks_source_lines_with_tall_images
             for (let attempt = 0; attempt < 120; attempt += 1) {
               const image = panel.querySelector('img[alt="tall media"]');
               const preview = panel.querySelector('.file-editor-preview-pane-panel');
-              if (panel._cmView?.scrollDOM && preview && !preview.hidden && image?.complete && image.naturalHeight > 0 && preview.scrollHeight > preview.clientHeight) break;
+              if (panel._pmView?.dom && panel._cmView?.scrollDOM && preview && !preview.hidden && image?.complete && image.naturalHeight > 0 && preview.scrollHeight > preview.clientHeight) break;
               await frame();
             }
+            if (!panel._pmView?.dom) throw new Error('ProseMirror ViewEditor did not load: ' + panel._pmError);
             const editorScroller = panel._cmView.scrollDOM;
             const preview = panel.querySelector('.file-editor-preview-pane-panel');
             const targetHeading = preview.querySelector(`h2[data-source-line="${targetLine}"]`);
+            if (!targetHeading) throw new Error('target heading missing: ' + JSON.stringify({targetLine, headings: [...preview.querySelectorAll('h2')].map(node => ({text: node.textContent, line: node.dataset.sourceLine})), pmError: panel._pmError}));
             const tall = preview.querySelector('img[alt="tall media"]');
+            if (!tall) throw new Error('tall image missing: ' + JSON.stringify({images: [...preview.querySelectorAll('img')].map(image => ({alt: image.alt, height: image.naturalHeight})), details: preview.querySelector('details')?.outerHTML.slice(0, 500), nodes: panel._pmView.state.doc.content.content.map(node => ({type: node.type.name, text: node.textContent.slice(0, 100)})).slice(15,30)}));
             const details = preview.querySelector('details');
             const summary = details?.querySelector('summary');
             const maxScroll = element => Math.max(0, Number(element.scrollHeight || 0) - Number(element.clientHeight || 0));
@@ -5189,17 +5349,19 @@ def test_markdown_split_preview_scroll_sync_tracks_source_lines_with_tall_images
               previewTop: preview.scrollTop,
               targetCenterDelta: centerDelta(),
               editorCenterLine: editorCenterLine(),
-              detailsOpen: details?.open === true,
+              detailsOpen: details?.open === true, editorLines: panel._cmView.state.doc.lines, editorTextMatches: panel._cmView.state.doc.toString() === content, editorMax: maxScroll(editorScroller), targetBlock: panel._cmView.lineBlockAt(panel._cmView.state.doc.line(targetLine).from).top,
               tallHeight: tall.getBoundingClientRect().height,
               previewClientHeight: preview.clientHeight,
             });
             const centerEditorOnTarget = async () => {
-              const targetBlock = panel._cmView.lineBlockAt(panel._cmView.state.doc.line(targetLine).from);
-              editorScroller.scrollTop = Math.min(maxScroll(editorScroller), Math.max(0, targetBlock.top - (editorScroller.clientHeight / 4)));
+              panel._cmView.dispatch({effects: panel._cmView.constructor.scrollIntoView(panel._cmView.state.doc.line(targetLine).from, {y: 'start', yMargin: editorScroller.clientHeight / 4})});
+              await settle(80);
               editorScroller.dispatchEvent(new Event('scroll', {bubbles: true}));
               await settle();
               return snapshot();
             };
+            if (details.open) summary.click();
+            await settle(80);
             const afterClosedEditorDrive = await centerEditorOnTarget();
             summary.click();
             await settle(80);
@@ -5236,7 +5398,7 @@ def test_markdown_split_preview_scroll_sync_tracks_source_lines_with_tall_images
         """,
         ui_pin("paneMetaPathLight"),
     )
-    assert "error" not in metrics, metrics
+    assert "error" not in metrics, metrics.get("error", metrics)
     assert metrics["errors"] == [], metrics
     assert metrics["rejections"] == [], metrics
     assert metrics["afterClosedEditorDrive"]["detailsOpen"] is False, metrics
@@ -5245,7 +5407,7 @@ def test_markdown_split_preview_scroll_sync_tracks_source_lines_with_tall_images
     assert metrics["afterOpenToggle"]["tallHeight"] > metrics["afterOpenToggle"]["previewClientHeight"], metrics
     assert metrics["afterClosedEditorDrive"]["previewTop"] > 0, metrics
     assert metrics["afterOpenToggle"]["previewTop"] > metrics["afterClosedEditorDrive"]["previewTop"], metrics
-    assert abs(metrics["afterClosedEditorDrive"]["targetCenterDelta"]) <= 32, metrics
+    assert abs(metrics["afterClosedEditorDrive"]["targetCenterDelta"]) <= 32, json.dumps(metrics)
     assert abs(metrics["afterOpenToggle"]["targetCenterDelta"]) <= 32, metrics
     assert abs(metrics["afterCloseToggle"]["targetCenterDelta"]) <= 32, metrics
     assert metrics["targetLine"] <= metrics["afterPreviewDrive"]["editorCenterLine"] <= metrics["targetLine"] + 1, metrics
@@ -5655,7 +5817,7 @@ def test_preview_popout_zoom_controls_are_hydrated(browser, tmp_path):
               bubbles: true,
               cancelable: true,
             }));
-            const pointerMovePrevented = !viewport.dispatchEvent(new win.PointerEvent('pointermove', {
+            const pointerMovePrevented = !doc.dispatchEvent(new win.PointerEvent('pointermove', {
               pointerId: 4,
               pointerType: 'mouse',
               buttons: 1,
@@ -5664,7 +5826,7 @@ def test_preview_popout_zoom_controls_are_hydrated(browser, tmp_path):
               bubbles: true,
               cancelable: true,
             }));
-            viewport.dispatchEvent(new win.PointerEvent('pointerup', {
+            doc.dispatchEvent(new win.PointerEvent('pointerup', {
               pointerId: 4,
               pointerType: 'mouse',
               button: 0,
@@ -5675,7 +5837,11 @@ def test_preview_popout_zoom_controls_are_hydrated(browser, tmp_path):
               cancelable: true,
             }));
             await frame(win);
-            const panAfter = {scrollLeft: viewport.scrollLeft, scrollTop: viewport.scrollTop};
+            const panAfter = {
+              scrollLeft: viewport.scrollLeft,
+              scrollTop: viewport.scrollTop,
+              panning: root.classList.contains('file-editor-preview-zoom-panning'),
+            };
             await click('fit');
             const fit = {value: value(), mode: root.dataset.previewZoomMode || '', rect: rect(image)};
             done({
@@ -5726,8 +5892,36 @@ def test_preview_popout_zoom_controls_are_hydrated(browser, tmp_path):
     assert metrics["panAfter"]["scrollLeft"] > metrics["panStart"]["scrollLeft"] or metrics["panAfter"]["scrollTop"] > metrics["panStart"]["scrollTop"], (
         f"zoomed={metrics['zoomed']} panBefore={metrics['panBefore']} panStart={metrics['panStart']} panAfter={metrics['panAfter']}"
     )
+    assert metrics["panAfter"]["panning"] is False, metrics
     assert metrics["fit"]["mode"] == "fit", metrics
     assert metrics["fit"]["rect"]["width"] <= metrics["initial"]["viewport"]["width"] + 2, metrics
+    popout_frame = browser.find_element(By.CSS_SELECTOR, "iframe")
+    browser.switch_to.frame(popout_frame)
+    zoom_viewport = browser.find_element(By.CSS_SELECTOR, ".file-editor-preview-zoom-viewport")
+    real_pan_before = browser.execute_script(
+        """const viewport = arguments[0];
+        for (let index = 0; index < 4; index += 1) {
+          viewport.closest('.file-editor-preview-zoom-shell')?.querySelector('[data-preview-zoom-action="in"]')?.click();
+        }
+        viewport.scrollLeft = Math.max(0, (viewport.scrollWidth - viewport.clientWidth) / 2);
+        viewport.scrollTop = Math.max(0, (viewport.scrollHeight - viewport.clientHeight) / 2);
+        return {left: viewport.scrollLeft, top: viewport.scrollTop, maxLeft: viewport.scrollWidth - viewport.clientWidth,
+          maxTop: viewport.scrollHeight - viewport.clientHeight};""",
+        zoom_viewport,
+    )
+    ActionChains(browser).move_to_element(zoom_viewport).click_and_hold().move_by_offset(-90, -70).release().perform()
+    real_pan_after = browser.execute_script(
+        """const viewport = arguments[0]; return {left: viewport.scrollLeft, top: viewport.scrollTop,
+        panning: viewport.closest('.file-editor-preview-zoom-shell')?.classList.contains('file-editor-preview-zoom-panning')};""",
+        zoom_viewport,
+    )
+    browser.switch_to.default_content()
+    assert real_pan_before["maxLeft"] > 0 or real_pan_before["maxTop"] > 0, real_pan_before
+    assert real_pan_after["left"] > real_pan_before["left"] or real_pan_after["top"] > real_pan_before["top"], {
+        "before": real_pan_before,
+        "after": real_pan_after,
+    }
+    assert real_pan_after["panning"] is False, real_pan_after
     assert metrics["errors"] == [], metrics
     assert metrics["rejections"] == [], metrics
 
@@ -7970,3 +8164,77 @@ def test_focused_editor_background_rerender_keeps_live_selection_and_scroll(brow
     assert metrics["passiveAfter"]["anchor"] == metrics["passiveBefore"]["anchor"], metrics
     assert metrics["passiveAfter"]["head"] == metrics["passiveBefore"]["head"], metrics
     assert abs(metrics["passiveAfter"]["top"] - metrics["passiveBefore"]["top"]) < 32, metrics
+
+
+def test_viewedit_raw_image_shapes_survive_native_edit_and_reopen(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    ready = browser.execute_async_script(r"""
+      const done = arguments[arguments.length - 1];
+      (async () => {
+        const path = '/home/test/raw-image-round-trip.md';
+        const canvas = document.createElement('canvas');
+        canvas.width = 120; canvas.height = 720;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#14b8a6'; ctx.fillRect(0, 0, 120, 720);
+        const src = URL.createObjectURL(await new Promise(resolve => canvas.toBlob(resolve, 'image/png')));
+        const image = alt => `<img src="${src}" alt="${alt}" width="120">`;
+        const source = ['# Title', '', `Before ${image('inline')} after.`, '', image('standalone'), '',
+          '<details>', '<summary>Images\ncontinued</summary>', '', '<details>', '<summary>Inner</summary>', '', image('nested'), '', 'Inside.', '', '</details>', '', '</details>', '',
+          '## **Bold** title', '', '## Bold title', '', '## `code`', '', '## [Link](https://example.com)', '',
+          '<widget>Unsupported neighbor</widget>', ''].join('\n');
+        const item = fileEditorItemFor(path);
+        setFileState(path, {kind: 'text', content: source, original: source, dirty: false, language: 'markdown'});
+        setFileEditorViewMode(path, 'split', item);
+        addFileEditorTabItem(path, item);
+        const mount = async () => {
+          registerFileEditorLayoutItem(path, {item});
+          const next = emptyLayoutSlots();
+          next[layoutTreeKey] = leafNode('left');
+          next.left = paneStateWithTabs([item], item);
+          applyLayoutSlots(next, {focusSession: item, forceFull: true});
+          await window.__yomuxTestWaitFor(() => panelNodes.get(item)?._pmView);
+          return panelNodes.get(item);
+        };
+        const panel = await mount();
+        window.__rawImageRoundTrip = {panel, path, item, source, mount};
+        await window.__yomuxTestWaitFor(() => panel._pmView?.dom?.querySelectorAll('img.prosemirror-image').length === 3);
+        await window.__yomuxTestWaitFor(() => [...panel._pmView.dom.querySelectorAll('img.prosemirror-image')].every(image => image.naturalWidth === 120 && image.naturalHeight === 720));
+        const anchors = [...panel._pmView.dom.querySelectorAll('h2')].map(node => Number(node.dataset.sourceLine));
+        done({anchors, geometry: [...panel._pmView.dom.getClientRects()].map(rect => ({width:rect.width,height:rect.height})), hidden: panel.hidden, expected: source.split('\n').flatMap((line, index) => line.startsWith('## ') ? [index + 1] : [])});
+      })().catch(error => done({error: String(error), pmError: window.__rawImageRoundTrip?.panel?._pmError, dom: window.__rawImageRoundTrip?.panel?._pmView?.dom?.innerHTML.slice(0,2500)}));
+    """)
+    assert "error" not in ready, json.dumps(ready)
+    assert ready["anchors"] == ready["expected"], ready
+    heading = browser.execute_script("return window.__rawImageRoundTrip.panel._pmView.dom.querySelector('h1')")
+    assert heading.is_displayed(), json.dumps(ready)
+    heading.click()
+    ActionChains(browser).send_keys(Keys.END).perform()
+    for character in " amended":
+        ActionChains(browser).send_keys(character).perform()
+    reopened = browser.execute_async_script(r"""
+      const done = arguments[arguments.length - 1];
+      (async () => {
+        const probe = window.__rawImageRoundTrip;
+        const changed = probe.panel._pmDocumentChanged === true;
+        const serialized = serializeProseMirrorSource(probe.panel);
+        const before = probe.panel._pmView.state.doc;
+        const reparsed = probe.panel._pmParser.parse(serialized, {});
+        applyLayoutSlots(layoutFromSessionList(['1']), {focusSession: '1', forceFull: true});
+        await window.__yomuxTestWaitFor(() => !paneItems(layoutSlots).includes(probe.item));
+        removePanelForItem(probe.item);
+        setFileState(probe.path, {kind: 'text', content: serialized, original: serialized, dirty: false, language: 'markdown'});
+        probe.panel = await probe.mount();
+        await window.__yomuxTestWaitFor(() => probe.panel._pmView?.dom?.querySelectorAll('img.prosemirror-image').length === 3);
+        await window.__yomuxTestWaitFor(() => [...probe.panel._pmView.dom.querySelectorAll('img.prosemirror-image')].every(image => image.naturalWidth === 120));
+        done({changed, equal: before.eq(reparsed), serialized,
+          images: [...probe.panel._pmView.dom.querySelectorAll('img.prosemirror-image')].map(image => image.alt),
+          nested: probe.panel._pmView.dom.querySelector('details img.prosemirror-image')?.alt,
+          title: probe.panel._pmView.dom.querySelector('h1')?.textContent});
+      })().catch(error => done({error: String(error)}));
+    """)
+    assert "error" not in reopened, reopened
+    assert reopened["changed"] and reopened["equal"], reopened
+    assert reopened["images"] == ["inline", "standalone", "nested"], reopened
+    assert reopened["nested"] == "nested" and "amended" in reopened["title"], reopened
+    assert '<widget>Unsupported neighbor</widget>' in reopened["serialized"], reopened
+    assert '</details>\n\n## **Bold** title' in reopened["serialized"], reopened

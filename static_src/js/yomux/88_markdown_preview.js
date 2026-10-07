@@ -1381,7 +1381,13 @@ function markdownFormattingContextMenu(event, context, options = {}) {
   const closeMenu = () => markdownPreviewContextMenuController.close();
   const apply = command => options.applyCommand?.(command, context) === true;
   if (options.href) {
-    appendUrlContextMenuItems(menu, options.href, closeMenu, {modifyUrl: options.modifyUrl, removeUrl: options.removeUrl});
+    const markdownPath = options.markdownPath || options.container?.dataset?.mdPath || '';
+    const localLinkOptions = markdownPreviewLinkContextMenuOptions(markdownPath, options.href);
+    appendUrlContextMenuItems(menu, options.copyHref || options.href, closeMenu, {
+      ...localLinkOptions,
+      modifyUrl: options.modifyUrl,
+      removeUrl: options.removeUrl,
+    });
     appendContextMenuSeparator(menu);
   } else if (context.selectedText && typeof options.addUrl === 'function') {
     appendContextMenuButton(menu, localizedLabel('contextmenu.addUrl', 'Add URL'), options.addUrl, closeMenu);
@@ -1416,10 +1422,13 @@ function markdownFormattingContextMenu(event, context, options = {}) {
   markdownPreviewContextMenuController.open(menu, event.clientX, event.clientY);
 }
 
-function markdownPreviewContextMenu(container, event, context) {
+function markdownPreviewContextMenu(container, event, context, link = null) {
   markdownFormattingContextMenu(event, context, {
     ...context,
     container,
+    markdownPath: container?.dataset?.mdPath || '',
+    href: link?.getAttribute?.('href') || '',
+    copyHref: link?.href || '',
     applyCommand: command => markdownPreviewSelectionTransform(container, command, context),
     paste: () => markdownPreviewPasteSelection(container, context),
     isActive: command => markdownPreviewFormatActive(container, context, command),
@@ -1428,6 +1437,7 @@ function markdownPreviewContextMenu(container, event, context) {
 
 function markdownEditorContextMenu(view, panel, path, event, context) {
   markdownFormattingContextMenu(event, context, {
+    markdownPath: path,
     applyCommand: command => markdownEditorSelectionTransform(view, panel, path, command, context),
     isActive: command => markdownEditorFormatActive(panel, context, command),
   });
@@ -1504,9 +1514,10 @@ function bindMarkdownPreviewEditing(container, text, markdownPath) {
       }
       const context = container._markdownPreviewSelectionContext || markdownPreviewCaptureSelection(container) || markdownPreviewSelectionContext(container, event);
       if (!context || !context.block) return;
+      const link = event.target?.closest?.('a[href]');
       event.preventDefault();
       event.stopPropagation();
-      markdownPreviewContextMenu(container, event, context);
+      markdownPreviewContextMenu(container, event, context, link && container.contains(link) ? link : null);
     }, {capture: true});
     scope.ownEvent('keydown', container, 'keydown', event => {
       if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey || String(event.key).toLowerCase() !== 's') return;

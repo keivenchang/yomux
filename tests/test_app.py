@@ -19200,8 +19200,8 @@ def test_self_update_restart_context_preserves_module_launcher(monkeypatch, tmp_
 
 def test_self_update_restart_context_preserves_stripped_launcher_env(monkeypatch, tmp_path):
     monkeypatch.setenv("PATH", "/usr/bin")
-    monkeypatch.setenv("YOLOMUX_EXTRA_PATH", "/opt/yomux-agents")
-    monkeypatch.setenv("YOLOMUX_TEST_AUTH_BYPASS", "1")
+    monkeypatch.setenv("YOMUX_EXTRA_PATH", "/opt/yomux-agents")
+    monkeypatch.setenv("YOMUX_TEST_AUTH_BYPASS", "1")
     monkeypatch.setenv("MALLOC_ARENA_MAX", "2")
     monkeypatch.delenv("TERM", raising=False)
     monkeypatch.delenv("PYTHONUNBUFFERED", raising=False)
@@ -19218,7 +19218,7 @@ def test_self_update_restart_context_preserves_stripped_launcher_env(monkeypatch
     assert context.env["TERM"] == "xterm-256color"
     assert context.env["PYTHONUNBUFFERED"] == "1"
     assert context.env["MALLOC_ARENA_MAX"] == "2"
-    assert context.env["YOLOMUX_TEST_AUTH_BYPASS"] == "1"
+    assert context.env["YOMUX_TEST_AUTH_BYPASS"] == "1"
 
 
 def test_self_update_restart_uses_running_checkout(monkeypatch, tmp_path):

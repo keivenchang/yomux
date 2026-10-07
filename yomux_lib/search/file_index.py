@@ -38,6 +38,7 @@ from ..common import start_thread_with_rollback
 from ..infra.filesystem_preflight import preflight_mutable_roots
 from ..infra.host_identity import process_start_identity
 from ..infra.host_partition import host_partitioned_state_dir
+from tools.product_environment import product_env, product_env_name
 
 
 def default_index_dir(state_dir: Path | None = None) -> Path:
@@ -50,7 +51,7 @@ INDEX_DIR = default_index_dir()
 
 def _bounded_env_int(name: str, default: int, lower: int, upper: int) -> int:
     try:
-        value = int(os.environ.get(name, str(default)))
+        value = int(product_env(name, str(default)))
     except (TypeError, ValueError):
         return default
     return max(lower, min(upper, value))
@@ -58,9 +59,9 @@ def _bounded_env_int(name: str, default: int, lower: int, upper: int) -> int:
 
 # Settings normally supply these values per root; environment defaults remain
 # useful for standalone module callers and recovery before settings are loaded.
-MAX_INDEX_FILES = _bounded_env_int("YOLOMUX_SEARCH_INDEX_MAX_FILES", 100_000, 1_000, 1_000_000)
-MAX_PERSISTED_INDEX_FILES = _bounded_env_int("YOLOMUX_SEARCH_INDEX_PERSIST_MAX_FILES", 100_000, 1_000, 1_000_000)
-MAX_PERSISTED_INDEX_BYTES = _bounded_env_int("YOLOMUX_SEARCH_INDEX_PERSIST_MAX_MB", 64, 1, 1_024) * 1024 * 1024
+MAX_INDEX_FILES = _bounded_env_int('SEARCH_INDEX_MAX_FILES', 100_000, 1_000, 1_000_000)
+MAX_PERSISTED_INDEX_FILES = _bounded_env_int('SEARCH_INDEX_PERSIST_MAX_FILES', 100_000, 1_000, 1_000_000)
+MAX_PERSISTED_INDEX_BYTES = _bounded_env_int('SEARCH_INDEX_PERSIST_MAX_MB', 64, 1, 1_024) * 1024 * 1024
 # The persistent indexer batches dirty paths for two seconds. Its writes are
 # row deltas, so this can stay responsive without rewriting an entire index.
 PERSIST_DEBOUNCE_SECONDS = 2.0

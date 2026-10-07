@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 
 import pytest
 
+from tests.tmux_runtime import clear_isolated_product_environment
 
 from yomux_lib import app as app_module
 from yomux_lib import http_routes
@@ -1010,7 +1011,7 @@ def test_configure_session_tmux_options_uses_active_surface_authority(monkeypatc
     # green tmux status line across the orphaned rows. YOmux keeps `largest`, starts each attach
     # as ignore-size, and lets the active browser surface clear ignore-size for its own client while
     # silencing every wider client on the session (see claim_tmux_resize_authority).
-    monkeypatch.delenv("YOLOMUX_TMUX_SOCKET", raising=False)
+    clear_isolated_product_environment(monkeypatch, "TMUX_SOCKET")
     calls: list[list[str]] = []
     monkeypatch.setattr(server_module, "tmux", lambda args: calls.append(list(args)))
     monkeypatch.setattr(server_module, "tmux_supports_ignore_size_flag", lambda: True)
@@ -1025,7 +1026,7 @@ def test_configure_session_tmux_options_uses_active_surface_authority(monkeypatc
 
 
 def test_tmux_attach_command_falls_back_when_client_flags_are_unsupported(monkeypatch):
-    monkeypatch.delenv("YOLOMUX_TMUX_SOCKET", raising=False)
+    clear_isolated_product_environment(monkeypatch, "TMUX_SOCKET")
     monkeypatch.setattr(server_module, "tmux_supports_ignore_size_flag", lambda: False)
 
     assert server_module.tmux_attach_command(readonly=False) == ["tmux", "attach-session"]
@@ -1059,7 +1060,7 @@ def _client_list_runner(stdout, calls):
 def test_claim_tmux_resize_authority_silences_clients_exceeding_either_dimension(monkeypatch):
     # A 110x84 browser must take ownership back from a 112x34 sibling in both dimensions. Width-only
     # ownership left the larger browser displaying a 33-row shared screen until page reload.
-    monkeypatch.delenv("YOLOMUX_TMUX_SOCKET", raising=False)
+    clear_isolated_product_environment(monkeypatch, "TMUX_SOCKET")
     calls: list[list[str]] = []
     stdout = (
         "/dev/pts/1\t6\t110\t84\tattached,ignore-size,UTF-8\n"  # active surface, wrongly ignored
@@ -1080,7 +1081,7 @@ def test_claim_tmux_resize_authority_silences_clients_exceeding_either_dimension
 
 
 def test_claim_tmux_resize_authority_noop_when_active_dominates_both_dimensions(monkeypatch):
-    monkeypatch.delenv("YOLOMUX_TMUX_SOCKET", raising=False)
+    clear_isolated_product_environment(monkeypatch, "TMUX_SOCKET")
     calls: list[list[str]] = []
     stdout = (
         "/dev/pts/1\t6\t120\t80\tattached,UTF-8\n"
@@ -1869,6 +1870,7 @@ def test_operation_acknowledgment_route_rejects_invalid_batches(payload):
     assert writes[0][1] == HTTPStatus.BAD_REQUEST
 
 
+@pytest.mark.deprecated_python_server
 def test_server_bind_failure_preserves_original_os_error():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))

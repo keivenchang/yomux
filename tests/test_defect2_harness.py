@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from tools import defect2_harness as harness
+from tools import product_environment
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -338,7 +339,7 @@ def test_an_arm_variable_missing_from_the_container_allowlist_is_refused_before_
     """
 
     allowlist = harness.forwarded_test_env()
-    assert "YOMUX_WORKTREE_WRITER_TOKEN" in allowlist, allowlist
+    assert "WORKTREE_WRITER_TOKEN" in allowlist, allowlist
 
     refused = harness.arm_env_admission("YOLOMUX_DEFECT2_NOT_FORWARDED")
     assert refused["admitted"] is False
@@ -346,11 +347,33 @@ def test_an_arm_variable_missing_from_the_container_allowlist_is_refused_before_
 
     assert harness.arm_env_admission("")["reason"] == "no_arm_env_name"
     assert harness.arm_env_admission(allowlist[0])["admitted"] is True
+    for name in (
+        "STATS_APPEND_FLUSH_SECONDS",
+        "YOMUX_STATS_APPEND_FLUSH_SECONDS",
+        "YOLOMUX_STATS_APPEND_FLUSH_SECONDS",
+    ):
+        assert harness.arm_env_admission(name)["admitted"] is True
+
+
+def test_arm_admission_tracks_a_renamed_product_namespace(monkeypatch):
+    monkeypatch.setattr(product_environment, "CANONICAL_PREFIX", "NEXT_")
+    monkeypatch.setattr(product_environment, "PRODUCT_PREFIXES", ("NEXT_", "YOLOMUX_"))
+
+    assert harness.arm_env_admission("NEXT_WORKTREE_WRITER_TOKEN")["admitted"] is True
+
+
+def test_arm_admission_accepts_historical_full_prefix_allowlist_entries():
+    old_allowlist = "FORWARDED_TEST_ENV=(\n  YOMUX_STATS_APPEND_FLUSH_SECONDS\n  YOLOMUX_WORKTREE_WRITER_TOKEN\n)"
+
+    assert harness.arm_env_admission(
+        "STATS_APPEND_FLUSH_SECONDS",
+        allowlist_source=old_allowlist,
+    )["admitted"] is True
 
 
 SERVICE_SOURCE_WITH_OWNER = '''
 APPEND_FLUSH_SECONDS = 10.0
-APPEND_FLUSH_ENV_NAME = "YOLOMUX_STATS_APPEND_FLUSH_SECONDS"
+APPEND_FLUSH_ENV_NAME = product_env_name("STATS_APPEND_FLUSH_SECONDS")
 '''
 
 
@@ -361,7 +384,9 @@ def test_the_arm_variable_name_is_read_from_its_owner_not_restated():
     how an arm variable stops reaching the subject without anything going red.
     """
 
-    assert harness.arm_env_name(SERVICE_SOURCE_WITH_OWNER) == "YOLOMUX_STATS_APPEND_FLUSH_SECONDS"
+    assert harness.arm_env_name(SERVICE_SOURCE_WITH_OWNER) == "YOMUX_STATS_APPEND_FLUSH_SECONDS"
+    legacy_source = 'APPEND_FLUSH_ENV_NAME = "YOLOMUX_STATS_APPEND_FLUSH_SECONDS"\n'
+    assert harness.arm_env_name(legacy_source) == "YOMUX_STATS_APPEND_FLUSH_SECONDS"
     with pytest.raises(ValueError):
         harness.arm_env_name("APPEND_FLUSH_SECONDS = 10.0\n")
 
@@ -466,7 +491,7 @@ def test_the_conftest_hook_never_writes_from_the_xdist_controller(tmp_path, monk
     """The controller sees every report with `node` set; only the process that ran it may record."""
 
     conftest = _conftest_module()
-    monkeypatch.setenv("YOLOMUX_E2E_EVIDENCE_DIR", str(tmp_path))
+    monkeypatch.setenv("YOMUX_E2E_EVIDENCE_DIR", str(tmp_path))
     monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
     harness.enable_attribution(tmp_path)
 
@@ -491,7 +516,7 @@ def test_attribution_never_breaks_the_run_it_observes(tmp_path, monkeypatch):
     """A lost record is acceptable; a test that fails because of its own instrumentation is not."""
 
     conftest = _conftest_module()
-    monkeypatch.setenv("YOLOMUX_E2E_EVIDENCE_DIR", str(tmp_path))
+    monkeypatch.setenv("YOMUX_E2E_EVIDENCE_DIR", str(tmp_path))
     harness.enable_attribution(tmp_path)
     # Replace the writable file with a directory so the append raises OSError.
     conftest._defect2_attribution_path().mkdir()
@@ -499,7 +524,7 @@ def test_attribution_never_breaks_the_run_it_observes(tmp_path, monkeypatch):
         SimpleNamespace(when="call", outcome="passed", nodeid="tests/a.py::x", duration=0.1, start=100.0)
     )
 
-    monkeypatch.delenv("YOLOMUX_E2E_EVIDENCE_DIR", raising=False)
+    monkeypatch.delenv("YOMUX_E2E_EVIDENCE_DIR", raising=False)
     conftest.pytest_runtest_logreport(
         SimpleNamespace(when="call", outcome="passed", nodeid="tests/a.py::x", duration=0.1, start=100.0)
     )
@@ -510,7 +535,7 @@ def test_attribution_uses_a_stable_encoder_when_shared_json_is_patched(tmp_path,
     """A test that patches json.dumps must not make the pytest report hook fail too."""
 
     conftest = _conftest_module()
-    monkeypatch.setenv("YOLOMUX_E2E_EVIDENCE_DIR", str(tmp_path))
+    monkeypatch.setenv("YOMUX_E2E_EVIDENCE_DIR", str(tmp_path))
     monkeypatch.setenv("PYTEST_XDIST_WORKER", worker)
     harness.enable_attribution(tmp_path)
 

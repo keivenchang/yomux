@@ -53,6 +53,10 @@ _OPENCODE_PERMISSION_OPTIONS_RE = re.compile(
 )
 _OPENCODE_PERMISSION_HEADER_RE = re.compile(r"^△\s+Permission\s+required\s*$", re.IGNORECASE)
 _OPENCODE_QUESTION_OPTION_RE = re.compile(r"^\s*(?:[│┃]?\s*(?:\d+[.)]|[○◉])\s+\S|[│┃]?\s*[-+]\s+\S)", re.IGNORECASE)
+_MODEL_CAPACITY_NOTICE_RE = re.compile(
+    r"^\s*■\s*Selected model is at capacity\. Please try a different model\.\s*$",
+    re.MULTILINE,
+)
 
 
 def _visual_wrap_candidate_cols(lines: list[str]) -> set[int]:
@@ -113,6 +117,11 @@ def normalize_capture_text(text: str, *, join_visual_wraps: bool = True) -> str:
     normalized = _ANSI_ESCAPE_RE.sub("", normalized)
     normalized = _CONTROL_CHAR_RE.sub("", normalized)
     return _join_visual_wraps(normalized) if join_visual_wraps else normalized
+
+
+def model_capacity_notice_visible(visible_text: str) -> bool:
+    """Recognize the Codex capacity screen that accepts a follow-up prompt."""
+    return bool(_MODEL_CAPACITY_NOTICE_RE.search(normalize_capture_text(visible_text)))
 
 
 def is_dangerous(cmd_line: str) -> bool:
@@ -2190,6 +2199,7 @@ __all__ = [
     "detect_prompt",
     "extract_command",
     "is_dangerous",
+    "model_capacity_notice_visible",
     "normalize_capture_text",
     "parse_agent_status_counter",
     "prompt_hash",

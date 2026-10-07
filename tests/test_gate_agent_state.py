@@ -700,6 +700,7 @@ def test_realistic_runtime_uses_browser_demand_to_establish_status_readiness(mon
 
 
 @pytest.mark.browser
+@pytest.mark.deprecated_python_server
 def test_f5_realistic_roster_count_matches_its_stale_session_breakdown(
     browser, monkeypatch, gate_runtime_paths
 ):
@@ -1165,6 +1166,7 @@ def test_f6_convergence_predicate_still_rejects_incomplete_convergence():
 
 
 @pytest.mark.browser
+@pytest.mark.deprecated_python_server
 def test_f6_failure_diagnostic_projection_is_reachable_and_serializable(
     browser, monkeypatch, gate_runtime_paths
 ):
@@ -1203,6 +1205,7 @@ def test_f6_failure_diagnostic_projection_is_reachable_and_serializable(
 
 
 @pytest.mark.browser
+@pytest.mark.deprecated_python_server
 def test_f6_realistic_consumers_converge_to_the_published_roster_revision(
     browser, monkeypatch, gate_runtime_paths
 ):

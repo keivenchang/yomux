@@ -46,6 +46,7 @@ assert.match(adapter, /if \(panel\._pmDocumentChanged !== true\) return true/);
 assert.match(adapter, /state\?\.content\?\.endsWith\('\\n'\)/);
 assert.match(adapter, /sourceSurface: 'view-editor'/);
 assert.match(adapter, /prosemirrorSelectionAtClientPoint/);
+assert.match(adapter, /closest\?\.\('p,h1,h2,h3,h4,h5,h6,td,th'\)/);
 assert.match(adapter, /prosemirrorSelectionHasMark/);
 assert.match(adapter, /marks\.strike/);
 assert.match(adapter, /marks\.underline/);

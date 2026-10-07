@@ -21,6 +21,13 @@ import unicodedata
 
 import yaml
 
+_SOURCE_ROOT = Path(__file__).resolve().parents[2]
+if str(_SOURCE_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SOURCE_ROOT))
+
+from tools.product_environment import product_env
+from tools.instance_isolation import normalize_yomux_environment
+
 
 AGENT_NAME = "claude"
 AGENT_DISPLAY_NAME = "Claude"
@@ -428,7 +435,7 @@ def print_startup(state: dict[str, str] | None = None) -> None:
 
 def publish_mock_input_ready() -> None:
     """Publish the test-only input handshake after startup output has been flushed."""
-    ready_file = os.environ.get("YOLOMUX_MOCK_INPUT_READY_FILE", "").strip()
+    ready_file = product_env('MOCK_INPUT_READY_FILE', "", environ=os.environ).strip()
     if not ready_file:
         return
     destination = Path(ready_file)

@@ -3514,11 +3514,23 @@ func TestFinderMutationsConflictAndCandidateResolution(t *testing.T) {
 	if identityFor(beforeInfo).ino == identityFor(afterInfo).ino {
 		t.Fatalf("write reused the old inode: before=%#v after=%#v", identityFor(beforeInfo), identityFor(afterInfo))
 	}
-	// Keep the deliberately stale value outside Python's 10 ms precision tolerance. A replacement
-	// write can legitimately land 20 ms after the original read on a loaded test host.
-	wrongMtime := int64(read["mtime_ns"].(int64) + 100_000_000)
+	// Force the replacement into the timestamp window that made the old stale
+	// fixture accidentally current, without depending on scheduler timing.
+	replacementTime := time.Unix(0, expectedMtime).Add(100 * time.Millisecond)
+	if err := os.Chtimes(filepath.Join(root, "created.txt"), replacementTime, replacementTime); err != nil {
+		t.Fatal(err)
+	}
+	afterInfo, err = os.Stat(filepath.Join(root, "created.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongMtime := afterInfo.ModTime().UnixNano() - 100_000_000
 	if _, finderErr = service.Write(context.Background(), filepath.Join(root, "created.txt"), "bad", &wrongMtime); finderErr == nil || finderErr.Status != 409 {
 		t.Fatalf("write conflict = %#v", finderErr)
+	}
+	preserved, finderErr := service.Read(context.Background(), filepath.Join(root, "created.txt"))
+	if finderErr != nil || preserved["content"] != "updated" {
+		t.Fatalf("conflicting write changed content = %#v, error = %v", preserved, finderErr)
 	}
 	moved, finderErr := service.Rename(context.Background(), filepath.Join(root, "created.txt"), "moved.txt")
 	if finderErr != nil || moved["path"] != filepath.Join(root, "moved.txt") {

@@ -30,6 +30,8 @@ from typing import Any
 
 import pytest
 
+from tools.instance_isolation import normalize_yomux_environment
+
 
 CALIBRATION_SAMPLE_COUNT = 7
 # Two thresholds on ONE measurement, deliberately distinct, both owned here.
@@ -46,6 +48,7 @@ CALIBRATION_SAMPLE_COUNT = 7
 # value alone refused five of nine otherwise-qualified runs. No observed sample reached two frames
 # (33.3 ms). The envelope therefore admits a host that spills partially into a second frame and
 # refuses one that loses a whole frame.
+
 CALIBRATION_REFERENCE_MS = 16.7
 CALIBRATION_ADMISSION_MS = 25.0
 CALIBRATION_REFERENCE_CONDITIONS = (
@@ -60,8 +63,8 @@ NOT_CERTIFIABLE = "NOT CERTIFIABLE"
 
 # Both certification units are admitted by env flag. docker/run-tests.sh forwards only a fixed
 # allowlist, so every name here must also appear in that allowlist or the node is silently skipped.
-LATENCY_CERTIFICATION_ENV = "YOLOMUX_LATENCY_CERTIFICATION"
-CHAT_LATENCY_CERTIFICATION_ENV = "YOLOMUX_CHAT_LATENCY_CERTIFICATION"
+LATENCY_CERTIFICATION_ENV = "YOMUX_LATENCY_CERTIFICATION"
+CHAT_LATENCY_CERTIFICATION_ENV = "YOMUX_CHAT_LATENCY_CERTIFICATION"
 CERTIFICATION_ENV_NAMES = (LATENCY_CERTIFICATION_ENV, CHAT_LATENCY_CERTIFICATION_ENV)
 
 
@@ -1019,7 +1022,7 @@ def calibration_pressure_verdict(
 
 
 def _latency_evidence_root(explicit_root: Path | None = None) -> Path:
-    root = explicit_root or Path(os.environ.get("YOLOMUX_E2E_EVIDENCE_DIR", "/tmp/yolomux-latency-evidence"))
+    root = explicit_root or Path(normalize_yomux_environment(os.environ).get("YOMUX_E2E_EVIDENCE_DIR", "/tmp/yolomux-latency-evidence"))
     resolved = root.resolve()
     if not resolved.is_relative_to(Path("/tmp").resolve()):
         raise ValueError(f"latency evidence root must stay under /tmp: {root}")
@@ -1147,7 +1150,7 @@ def certification_phase_requested(request: Any, *, env_name: str = LATENCY_CERTI
     every accepted name must also appear in that allowlist or the node is silently skipped.
     """
 
-    if os.environ.get(env_name) == "1":
+    if normalize_yomux_environment(os.environ).get(env_name) == "1":
         return True
     return any(request.node.name in str(argument) for argument in request.config.invocation_params.args)
 

@@ -27,8 +27,9 @@ import yomux_lib.approval.yolo_rules as yolo_rules_module
 import yomux_lib.yoagent.conversation as yoagent_conversation_module
 import yomux_lib.yoagent.transports as transport_module
 from yomux_lib.app import TmuxWebtermApp
-from yomux_lib.tmux_utils import YOLOMUX_TMUX_SOCKET_ENV
+from yomux_lib.tmux_utils import PRODUCT_TMUX_SOCKET_ENV
 from tests.gate_harness import patch_imported_writable_constants
+from tests.tmux_runtime import patch_isolated_product_environment
 from tests.tmux_runtime import run_isolated_tmux
 from tests.tmux_runtime import wait_for_isolated_tmux_panes
 
@@ -91,9 +92,7 @@ def _isolate_state(monkeypatch, tmp_path, control_dir):
     monkeypatch.setattr(common, "CONFIG_DIR", config_dir)
     monkeypatch.setattr(common, "STATE_DIR", state_dir)
     monkeypatch.setattr(common, "RUNTIME_DIR", runtime_dir)
-    monkeypatch.setenv("YOLOMUX_STATE_DIR", str(state_dir))
-    monkeypatch.setenv("YOLOMUX_CONFIG_DIR", str(config_dir))
-    monkeypatch.setenv("YOLOMUX_RUNTIME_DIR", str(runtime_base_dir))
+    patch_isolated_product_environment(monkeypatch, {"YOMUX_STATE_DIR": str(state_dir), "YOMUX_CONFIG_DIR": str(config_dir), "YOMUX_RUNTIME_DIR": str(runtime_base_dir)})
     monkeypatch.setattr(common, "CONTROL_SOCKET_DIR", control_dir)
     monkeypatch.setattr(control_module, "CONTROL_SOCKET_DIR", control_dir)
     monkeypatch.setattr(settings_module, "SETTINGS_PATH", config_dir / "settings.yaml")
@@ -118,7 +117,7 @@ def test_e2e_mock_prompt_reaches_structured_ask_payload(monkeypatch, tmp_path, a
 
     socket_path = sock_base / "s"
     session = f"ya-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-    monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
+    patch_isolated_product_environment(monkeypatch, {"YOMUX_TMUX_SOCKET": str(socket_path)})
 
     created = _tmux(
         socket_path, "new-session", "-d", "-s", session, "-x", "120", "-y", "40",
@@ -162,7 +161,7 @@ def test_e2e_mock_codex_sleep_10_uses_working_turn_without_approval(monkeypatch,
 
     socket_path = sock_base / "s"
     session = f"yc-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-    monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
+    patch_isolated_product_environment(monkeypatch, {"YOMUX_TMUX_SOCKET": str(socket_path)})
 
     created = _tmux(
         socket_path, "new-session", "-d", "-s", session, "-x", "120", "-y", "40",
@@ -205,7 +204,7 @@ def test_e2e_yoagent_mock_sends_capture_multiple_results(monkeypatch, tmp_path):
         "claude": f"ymc-{os.getpid()}-{uuid.uuid4().hex[:6]}",
         "codex": f"ymx-{os.getpid()}-{uuid.uuid4().hex[:6]}",
     }
-    monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
+    patch_isolated_product_environment(monkeypatch, {"YOMUX_TMUX_SOCKET": str(socket_path)})
     mock_cwd = tmp_path / "mock-cwd"
     mock_cwd.mkdir()
 
@@ -294,7 +293,7 @@ def test_e2e_yoagent_roster_job_sends_exact_command_once(monkeypatch, tmp_path):
     _isolate_state(monkeypatch, tmp_path, control_dir)
     socket_path = sock_base / "s"
     sessions = ["1", "2", "3", "4"]
-    monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
+    patch_isolated_product_environment(monkeypatch, {"YOMUX_TMUX_SOCKET": str(socket_path)})
     mock_cwd = tmp_path / "mock-cwd"
     mock_cwd.mkdir()
     for session in sessions:
@@ -358,7 +357,7 @@ def test_e2e_yo_auto_approves_mock_yesno(monkeypatch, tmp_path, agent, steps):
 
     socket_path = sock_base / "s"
     session = f"yt-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-    monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
+    patch_isolated_product_environment(monkeypatch, {"YOMUX_TMUX_SOCKET": str(socket_path)})
 
     created = _tmux(
         socket_path, "new-session", "-d", "-s", session, "-x", "120", "-y", "40",

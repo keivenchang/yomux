@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/keivenchang/yomux/internal/atomicfile"
+	"github.com/keivenchang/yomux/internal/mutablefs"
 	"io"
 	"math"
 	"os"
@@ -163,6 +165,9 @@ func OpenWriter(ctx context.Context, path string) (*Writer, error) {
 		return nil, err
 	}
 	path = canonical
+	if err := mutablefs.RequireLocal(path); err != nil {
+		return nil, err
+	}
 	// Take the cross-language lease before reading the fence. The fence and
 	// read-only schema preflight are one ownership boundary; validating before
 	// the lease allowed another writer to publish or replace the fence between
@@ -1380,41 +1385,7 @@ func atomicSidecarWrite(path string, value any) error {
 	if err != nil {
 		return err
 	}
-	dir := filepath.Dir(path)
-	temp, err := os.CreateTemp(dir, ".stats-maintenance-*")
-	if err != nil {
-		return err
-	}
-	tempName := temp.Name()
-	defer os.Remove(tempName)
-	if err := temp.Chmod(0o600); err != nil {
-		_ = temp.Close()
-		return err
-	}
-	if _, err := temp.Write(append(data, '\n')); err != nil {
-		_ = temp.Close()
-		return err
-	}
-	if err := temp.Sync(); err != nil {
-		_ = temp.Close()
-		return err
-	}
-	if err := temp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tempName, path); err != nil {
-		return err
-	}
-	directory, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	syncErr := directory.Sync()
-	closeErr := directory.Close()
-	if syncErr != nil {
-		return syncErr
-	}
-	return closeErr
+	return atomicfile.Write(path, append(data, '\n'))
 }
 
 // AttachLifecycle installs the background publication owner. It is separate

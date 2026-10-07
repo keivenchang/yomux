@@ -104,7 +104,7 @@ func finderReadyEnvelope(requestID string, payload map[string]any) map[string]an
 func finderFailedEnvelope(requestID string, finderErr *finder.Error) map[string]any {
 	messageParams := map[string]any{"path": finderErr.Path}
 	if finderErr.MessageParams != nil {
-		messageParams = cloneFinderMap(finderErr.MessageParams)
+		messageParams = cloneMap(finderErr.MessageParams)
 	}
 	message := map[string]any{
 		"key":      finderErr.MessageKey,
@@ -113,7 +113,7 @@ func finderFailedEnvelope(requestID string, finderErr *finder.Error) map[string]
 	}
 	details := finderErr.Payload()
 	if finderErr.Details != nil {
-		details = cloneFinderMap(finderErr.Details)
+		details = cloneMap(finderErr.Details)
 	}
 	origin := finderErr.Origin
 	if origin == "" {
@@ -123,7 +123,7 @@ func finderFailedEnvelope(requestID string, finderErr *finder.Error) map[string]
 	if len(finderErr.Stack) > 0 {
 		stack = make([]any, 0, len(finderErr.Stack))
 		for _, frame := range finderErr.Stack {
-			stack = append(stack, cloneFinderMap(frame))
+			stack = append(stack, cloneMap(frame))
 		}
 	}
 	return map[string]any{
@@ -133,7 +133,7 @@ func finderFailedEnvelope(requestID string, finderErr *finder.Error) map[string]
 			"code": finderErr.Code, "origin": origin, "retryable": finderErr.Retryable,
 			"message": message, "details": details, "stack": stack,
 		},
-		"user_message": finderMessageCopy(message),
+		"user_message": cloneMap(message),
 		"legacy_error": finderErr.Message,
 		"error_code":   finderErr.Code,
 		"retryable":    finderErr.Retryable,
@@ -141,22 +141,6 @@ func finderFailedEnvelope(requestID string, finderErr *finder.Error) map[string]
 		"ok":           false,
 		"terminal":     true,
 	}
-}
-
-func cloneFinderMap(values map[string]any) map[string]any {
-	copy := make(map[string]any, len(values))
-	for key, value := range values {
-		copy[key] = value
-	}
-	return copy
-}
-
-func finderMessageCopy(message map[string]any) map[string]any {
-	copy := make(map[string]any, len(message))
-	for key, value := range message {
-		copy[key] = value
-	}
-	return copy
 }
 
 func finderHTTPJSON(w http.ResponseWriter, requestID string, payload map[string]any, finderErr *finder.Error) {

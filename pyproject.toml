@@ -48,6 +48,7 @@ include = ["tools*", "yomux_lib*"]
 
 [tool.setuptools.package-data]
 yomux_lib = ["data/*.json"]
+tools = ["product_namespace.json"]
 
 # Single source of truth for the version: read YOMUX_VERSION from yomux_lib/version.py.
 [tool.setuptools.dynamic]

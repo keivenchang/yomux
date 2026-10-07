@@ -7599,6 +7599,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     shown = false; controller.schedule();
     flush();
     assert.equal(frames.size, 0);
+    const hiddenReferenceReads = reads;
+    for (let redraw = 0; redraw < 5; redraw += 1) { events.onWriteParsed(); flush(); }
+    assert.equal(reads, hiddenReferenceReads, 'hidden redraws with known references clear without rescanning terminal rows');
     shown = true;
     const beforeActivation = reads;
     const beforeActivationFrames = frames.size;
@@ -7616,6 +7619,21 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(Object.keys(events).length, 0, 'dispose releases event subscriptions');
     controller.schedule({reason: 'output'}); controller.refresh(); flush();
     assert.equal(reads, beforeDispose, 'disposed controller cannot discover');
+
+    const emptyEvents = {};
+    let emptyReads = 0;
+    let emptyShown = false;
+    const emptyTerm = {
+      cols: 80, rows: 24, buffer: {active: {getLine() { emptyReads += 1; return null; }}},
+      onWriteParsed(callback) { emptyEvents.onWriteParsed = callback; return {dispose() { delete emptyEvents.onWriteParsed; }}; },
+    };
+    const emptyController = api.installTerminalFileReferenceUnderlines('1', emptyTerm, new TestElement('empty-terminal-scanner'), {isActive: () => emptyShown});
+    for (let redraw = 0; redraw < 5; redraw += 1) { emptyEvents.onWriteParsed(); flush(); }
+    assert.equal(emptyReads, 0, 'hidden redraws skip row discovery even before file references exist');
+    emptyShown = true;
+    emptyController.schedule(); flush();
+    assert.ok(emptyReads > 0, 'activation performs the deferred empty-buffer discovery');
+    emptyController.dispose();
   });
 
   await testAsync('terminal underlines mark syntactic file references without resolving them', async () => {
@@ -7678,7 +7696,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     controller.schedule({reason: 'output', contentChanged: true});
     assert.equal(layer.children.length, 0, 'same-viewport terminal output clears stale underline segments on the coalesced cached repaint');
     assert.equal(await controller.refresh(), 0, 'a refresh with no syntactic references clears the overlay');
-    assert.equal(visibilityReads, beforeEmptyVisibilityReads, 'empty references skip dimensional activity checks');
+    assert.ok(visibilityReads > beforeEmptyVisibilityReads, 'empty redraws check shown state before resolving references');
     controller.dispose();
     assert.equal(container.listeners.get('mousemove').length, 0, 'terminal file underline hover listener is removed on dispose');
     assert.equal(container.listeners.get('mouseleave').length, 0, 'terminal file underline leave listener is removed on dispose');
@@ -8711,14 +8729,14 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.joinAndNormalize('/a/b', '/abs/x.md'), '/abs/x.md', '#133: an absolute rel ignores the base');
     assert.equal(api.joinAndNormalize('/a/b/c', '../../top.md'), '/a/top.md', '#133: multiple ../ collapse');
     const src = fs.readFileSync('static/yomux.js', 'utf8');
-    // The handler reads the RAW href, opens external links in a new tab, and routes file:// + relative
-    // file links through openFileInEditor with a preview/edit mode + a failure toast.
+    // One path resolver routes file:// + relative Markdown links through the editor while explicit
+    // external links retain browser navigation; context-menu actions use that same resolver.
     assert.ok(/function handleMarkdownPreviewLinkClick/.test(src), '#133: the markdown-preview link handler exists');
-    assert.ok(/a\.getAttribute\('href'\)/.test(src), '#133: the handler reads the raw href attribute');
+    assert.ok(/anchor\.getAttribute\('href'\)/.test(src), '#133: the handler reads the raw href attribute');
     assert.ok(/function localPathFromFileHref/.test(src), '#133: file:// preview links are converted to server-side paths');
-    assert.ok(src.indexOf('localPathFromFileHref(href)') > -1, '#133: file:// links use the local-path helper');
-    assert.ok(src.indexOf('localPathFromFileHref(href)') < src.indexOf("window.open(a.href, '_blank', 'noopener,noreferrer')"), '#133: file:// links are handled before the external window.open branch');
-    assert.ok(/window\.open\(a\.href, '_blank', 'noopener,noreferrer'\)/.test(src), '#133: external/other-scheme links open in a new tab');
+    assert.ok(/function markdownPreviewLinkTarget\(markdownPath, value, basePath = ''\)[\s\S]*localPathFromFileHref\(href\)/.test(src), '#133: file:// and relative links share one source-aware resolver');
+    assert.ok(/function markdownPreviewLinkContextMenuOptions\([\s\S]*openMarkdownPreviewPathLink\(markdownPath, target\.path\)/.test(src), '#133: local link context actions route through the same editor-opening path');
+    assert.ok(/if \(target\.kind === 'external'\)[\s\S]*window\.open\(anchor\.href, '_blank', 'noopener,noreferrer'\)/.test(src), '#133: explicit external links open in a new tab');
     assert.ok(/openFileInEditor\(resolved, basenameOf\(resolved\), \{[\s\S]*?viewMode: editorPreviewModeAvailable\(resolved\) \? 'preview' : 'edit'/.test(src), '#133: preview-capable file links open in preview (md/html), else edit');
     assert.ok(/t\('preview\.openFailed'/.test(src), "#133: a failed open surfaces a toast");
     // The handler is wired ONLY to the file-editor preview (path provided), not to yoagent bodies.

@@ -183,11 +183,6 @@ body.theme-light .git-diff-panel {
   display: block;
   grid-template-columns: none;
 }
-.git-diff-worktree-summary > .git-diff-commit-changes {
-  min-width: 0;
-  overflow-wrap: anywhere;
-  white-space: normal;
-}
 .git-diff-worktree-summary > .git-diff-commit-description {
   min-width: 0;
   overflow: visible;

@@ -21,8 +21,8 @@ import (
 
 const memoryHistoryLimit = 720
 const memorySampleInterval = 5 * time.Second
-const heapProfileLimit = 8 << 20
-const heapRecordLimit = 16384
+const heapProfileLimit = 32 << 20
+const heapRecordLimit = 131072
 const heapCaptureInterval = time.Minute
 
 // These classes partition runtime-managed, unreleased memory. They are not RSS:
@@ -257,7 +257,7 @@ func collectHeapCapture() (*heapCapture, []byte, error) {
 	rankedAt := time.Now()
 	n, _ := runtime.MemProfile(nil, true)
 	if n > heapRecordLimit {
-		return nil, nil, fmt.Errorf("heap profile exceeds %d allocation stacks", heapRecordLimit)
+		return nil, nil, fmt.Errorf("heap profile has %d allocation stacks; limit is %d", n, heapRecordLimit)
 	}
 	// A little headroom permits new stacks during the read without an unbounded retry.
 	records := make([]runtime.MemProfileRecord, min(n+256, heapRecordLimit))
@@ -311,7 +311,7 @@ func collectHeapCapture() (*heapCapture, []byte, error) {
 	}
 	artifactRecords, _ := runtime.MemProfile(nil, true)
 	if artifactRecords > heapRecordLimit {
-		return nil, nil, fmt.Errorf("heap profile exceeds %d allocation stacks", heapRecordLimit)
+		return nil, nil, fmt.Errorf("heap profile grew to %d allocation stacks; limit is %d", artifactRecords, heapRecordLimit)
 	}
 	result.ArtifactBytes = writer.data.Len()
 	result.DurationMS = time.Since(started).Seconds() * 1000

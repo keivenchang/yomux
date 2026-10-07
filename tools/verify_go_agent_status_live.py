@@ -21,6 +21,8 @@ SYNTHETIC_OPENCODE_SESSION_ID = "ses-synthetic"
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+from tools.product_environment import product_env, product_env_name, require_product_env
+from tools.instance_isolation import normalize_yomux_environment
 from tools.instance_isolation import synthetic_test_environment
 from tools.generate_go_version import generate_go_version_overlay
 
@@ -224,9 +226,9 @@ def main() -> int:
             "HOME": str(home),
             **{key: str(value) for key, value in private_environment_roots.items()},
             "PYTHONPATH": str(REPO), "TERM": "xterm-256color", "PYTHONUNBUFFERED": "1",
-            "YOLOMUX_TMUX_SOCKET": str(socket_path), "YOLOMUX_OPENCODE_DATABASE": str(root / "opencode.db"),
-            "YOLOMUX_CLAUDE_TRANSCRIPT_ROOT": str(home / "claude" / "projects"),
-            "YOLOMUX_CODEX_TRANSCRIPT_ROOT": str(home / "codex" / "sessions"),
+            product_env_name('TMUX_SOCKET'): str(socket_path), product_env_name('OPENCODE_DATABASE'): str(root / "opencode.db"),
+            product_env_name('CLAUDE_TRANSCRIPT_ROOT'): str(home / "claude" / "projects"),
+            product_env_name('CODEX_TRANSCRIPT_ROOT'): str(home / "codex" / "sessions"),
             "PATH": os.environ.get("PATH", ""),
         })
         started_sessions: list[str] = []
@@ -260,7 +262,7 @@ def main() -> int:
             inventory = run(tmux, "-S", str(socket_path), "list-panes", "-a", "-F", "#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}", env=env).stdout
 
             port = free_port()
-            configured_binary = os.environ.get("YOLOMUX_GO_BINARY", "").strip()
+            configured_binary = product_env('GO_BINARY', "", environ=os.environ).strip()
             go_binary = Path(configured_binary) if configured_binary else None
             if go_binary is None:
                 go_binary = root / "yolomux-go"
@@ -275,25 +277,25 @@ def main() -> int:
                 )
                 run("go", "build", "-buildvcs=false", "-overlay", str(go_overlay), "-o", str(go_binary), "./cmd/yomux-go", env=build_env)
             server_env = env | {
-                "YOLOMUX_DEBUG_AGENT_STATUS": "1",
+                product_env_name('DEBUG_AGENT_STATUS'): "1",
                 # This verifier owns a private tmux socket. Scope native
                 # OpenCode discovery to that socket so unrelated operator
                 # processes cannot contaminate the isolated fixture's root.
-                "YOLOMUX_OPENCODE_TMUX_SCOPE": "1",
-                "YOLOMUX_OPENCODE_DATABASE": str(root / "opencode.db"),
+                product_env_name('OPENCODE_TMUX_SCOPE'): "1",
+                product_env_name('OPENCODE_DATABASE'): str(root / "opencode.db"),
                 # Never admit host /proc, memory, or GPU input into a
                 # development verifier. The Go server's explicit synthetic
                 # source carries the measured CPU fixtures instead.
-                "YOLOMUX_STATS_SYNTHETIC_HOST": "1",
-                "YOLOMUX_STATS_SYNTHETIC_INVENTORY": "1",
-                "YOLOMUX_CLAUDE_TRANSCRIPT_ROOT": str(home / "claude" / "projects"),
-                "YOLOMUX_CODEX_TRANSCRIPT_ROOT": str(home / "codex" / "sessions"),
-                "YOLOMUX_PRICING_CATALOG": str(REPO / "yomux_lib" / "data" / "model_pricing.json"),
+                product_env_name('STATS_SYNTHETIC_HOST'): "1",
+                product_env_name('STATS_SYNTHETIC_INVENTORY'): "1",
+                product_env_name('CLAUDE_TRANSCRIPT_ROOT'): str(home / "claude" / "projects"),
+                product_env_name('CODEX_TRANSCRIPT_ROOT'): str(home / "codex" / "sessions"),
+                product_env_name('PRICING_CATALOG'): str(REPO / "yomux_lib" / "data" / "model_pricing.json"),
             }
-            print(json.dumps({"verification": "starting", "YOLOMUX_TMUX_SOCKET": server_env["YOLOMUX_TMUX_SOCKET"], "tmux_panes": inventory.splitlines()}, sort_keys=True), flush=True)
+            print(json.dumps({"verification": "starting", product_env_name('TMUX_SOCKET'): require_product_env('TMUX_SOCKET', environ=server_env), "tmux_panes": inventory.splitlines()}, sort_keys=True), flush=True)
             server_log = server_log_path.open("w", encoding="utf-8")
             command = [str(go_binary), "--http", "--host", "127.0.0.1", "--port", str(port), "--root", str(server_root), "--config", str(config), "--stats", str(stats)]
-            if os.environ.get("YOLOMUX_LIVE_STRACE"):
+            if product_env('LIVE_STRACE', environ=os.environ):
                 command = ["strace", "-f", "-e", "trace=execve", "-o", str(root / "strace.log"), *command]
             server = subprocess.Popen(command, env=server_env, stdout=server_log, stderr=subprocess.STDOUT, text=True)
             base = f"http://127.0.0.1:{port}"

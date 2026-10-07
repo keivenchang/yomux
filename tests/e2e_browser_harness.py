@@ -23,6 +23,8 @@ from urllib.parse import urlparse
 import uuid
 
 import pytest
+from tools.product_environment import product_env
+from tools.product_environment import product_env_name
 
 from tests.browser_helpers.browser_layout import assert_live_runtime_boot_healthy
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
@@ -43,8 +45,8 @@ from tests.gate_harness import wait_for_fixture_client_event_demand
 
 
 T = TypeVar("T")
-E2E_EVIDENCE_ROOT_ENV = "YOLOMUX_E2E_EVIDENCE_DIR"
-DEFAULT_E2E_EVIDENCE_ROOT = Path(os.environ.get("YOLOMUX_TEST_ROOT", "/tmp/yomux-test-e2e")) / "evidence"
+E2E_EVIDENCE_ROOT_ENV = product_env_name("E2E_EVIDENCE_DIR")
+DEFAULT_E2E_EVIDENCE_ROOT = Path(product_env("TEST_ROOT", "/tmp/yomux-test-e2e") or "/tmp/yomux-test-e2e") / "evidence"
 DEFAULT_BROWSER_BOUND_SECONDS = 20.0
 FINDER_PANEL_SELECTOR = "#panel-__finder__"
 DIFFER_PANEL_SELECTOR = "#panel-__differ__"

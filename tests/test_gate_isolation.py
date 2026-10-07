@@ -150,7 +150,18 @@ def test_collection_time_writable_roots_stay_beneath_generated_test_root():
     assert_writable_paths_beneath(root, writable_paths)
 
 
+@pytest.mark.parametrize("canonical", ["1", ""])
+def test_fixture_http_app_owns_service_idle_setting(monkeypatch, canonical):
+    monkeypatch.setenv("YOMUX_LOCAL_SERVICE_IDLE_SECONDS", canonical)
+    monkeypatch.setenv("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", "0.1")
+    gate_harness_module.prepare_fixture_http_app(monkeypatch, SimpleNamespace())
+    values = gate_harness_module.normalize_yomux_environment(os.environ)
+    assert values["YOMUX_LOCAL_SERVICE_IDLE_SECONDS"] == gate_harness_module.GATE_LOCAL_SERVICE_IDLE_SECONDS
+    assert values["YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS"] == gate_harness_module.GATE_LOCAL_SERVICE_IDLE_SECONDS
+
+
 @pytest.mark.socket
+@pytest.mark.deprecated_python_server
 def test_rendered_fixture_get_suppresses_process_lifetime_agent_auth_refresh(monkeypatch, gate_runtime_paths):
     refresh_calls = []
     gate_harness_module.workdir_module._clear_agent_auth_status_cache_for_tests()
@@ -183,6 +194,27 @@ def test_rendered_fixture_get_suppresses_process_lifetime_agent_auth_refresh(mon
         connection.close()
         gate_harness_module.stop_fixture_http_app(app, server, thread, label="rendered auth suppression")
         gate_harness_module.workdir_module._clear_agent_auth_status_cache_for_tests()
+
+
+def test_browser_runtime_paths_override_inherited_canonical_roots(monkeypatch, tmp_path):
+    for suffix in ("ROOT", "CONFIG_DIR", "STATE_DIR", "RUNTIME_DIR"):
+        monkeypatch.setenv("YOMUX_" + suffix, str(tmp_path / "inherited" / suffix))
+        monkeypatch.setenv("YOLOMUX_" + suffix, str(tmp_path / "legacy" / suffix))
+    paths = browser_layout.isolate_browser_runtime_paths(monkeypatch, tmp_path)
+    try:
+        for suffix, expected in {
+            "ROOT": "",
+            "CONFIG_DIR": str(paths.config_dir),
+            "STATE_DIR": str(paths.state_dir),
+            "RUNTIME_DIR": str(paths.runtime_dir.parent),
+        }.items():
+            assert os.environ["YOMUX_" + suffix] == expected
+            assert os.environ["YOLOMUX_" + suffix] == expected
+        resolved = browser_layout.common.runtime_root()
+        assert resolved.is_relative_to(paths.runtime_dir.parent)
+        assert "inherited" not in resolved.parts
+    finally:
+        browser_layout.cleanup_isolated_browser_runtime_paths(paths)
 
 
 def test_gate_runtime_paths_and_imported_constants_are_fixture_owned(gate_runtime_paths):
@@ -4251,7 +4283,7 @@ def test_fixture_app_cleanup_retires_adopted_statusd_from_its_private_service_ro
     unrelated_root = root.with_name(f"{root.name}-unrelated")
     root.mkdir(mode=0o700)
     unrelated_root.mkdir(mode=0o700)
-    monkeypatch.setenv("YOLOMUX_TEST_ROOT", str(root))
+    gate_harness_module.patch_isolated_product_environment(monkeypatch, {gate_harness_module.product_env_name("TEST_ROOT"): str(root)})
     monkeypatch.delenv("YOLOMUX_ROOT", raising=False)
     for name in ("CONFIG", "STATE", "CACHE", "RUNTIME"):
         monkeypatch.setenv(f"YOLOMUX_{name}_DIR", str(root / name.lower()))
@@ -4259,7 +4291,7 @@ def test_fixture_app_cleanup_retires_adopted_statusd_from_its_private_service_ro
     monkeypatch.delenv("YOLOMUX_CODEX_HOME", raising=False)
     monkeypatch.delenv("YOMUX_CODEX_HOME", raising=False)
     monkeypatch.delenv("PYTHONPYCACHEPREFIX", raising=False)
-    monkeypatch.setenv("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", "600")
+    gate_harness_module.patch_isolated_product_environment(monkeypatch, {gate_harness_module.product_env_name("LOCAL_SERVICE_IDLE_SECONDS"): "600"})
     monkeypatch.setattr(local_service_registry, "MANAGED_PRIVATE_ROOT", True)
 
     socket_path = root / "runtime" / "services" / "statusd.sock"
@@ -4348,7 +4380,7 @@ def test_adopted_app_cleanup_attempts_every_private_socket_root(monkeypatch, tmp
     second_socket = tmp_path / "two" / "statusd.sock"
     first = Registry(first_socket.parent, first_socket)
     second = Registry(second_socket.parent, second_socket)
-    monkeypatch.setenv("YOLOMUX_TEST_ROOT", str(tmp_path))
+    gate_harness_module.patch_isolated_product_environment(monkeypatch, {gate_harness_module.product_env_name("TEST_ROOT"): str(tmp_path)})
     attempted = []
 
     def retire(socket_path, *, label):

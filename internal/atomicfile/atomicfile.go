@@ -1,0 +1,118 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
+// Package atomicfile stages private state before a caller-controlled publication.
+package atomicfile
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+type Staged struct{ temporary, destination string }
+
+type durableFile interface {
+	io.Writer
+	Sync() error
+	Close() error
+}
+
+func prepare(file durableFile, data []byte) error {
+	n, err := file.Write(data)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
+	if err == nil {
+		err = file.Sync()
+	}
+	return errors.Join(err, file.Close())
+}
+
+func Stage(path string, data []byte) (*Staged, error) {
+	file, err := os.CreateTemp(filepath.Dir(path), ".atomic-*")
+	if err != nil {
+		return nil, err
+	}
+	staged := &Staged{temporary: file.Name(), destination: path}
+	if err = prepare(file, data); err != nil {
+		staged.Cleanup()
+		return nil, err
+	}
+	return staged, nil
+}
+
+func (s *Staged) Cleanup()      { _ = os.Remove(s.temporary) }
+func (s *Staged) Commit() error { return os.Rename(s.temporary, s.destination) }
+
+func Write(path string, data []byte) error {
+	staged, err := Stage(path, data)
+	if err != nil {
+		return err
+	}
+	defer staged.Cleanup()
+	if err = staged.Commit(); err != nil {
+		return err
+	}
+	directory, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	return errors.Join(directory.Sync(), directory.Close())
+}
+
+// LoadOrCreateSecret publishes a complete 32-byte key without replacing a
+// concurrent creator's key. Hard-link publication prevents partial readers.
+func LoadOrCreateSecret(path string) ([]byte, error) {
+	read := func() ([]byte, error) {
+		info, err := os.Lstat(path)
+		if err != nil {
+			return nil, err
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("secret must be a regular file")
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		key, err := hex.DecodeString(strings.TrimSpace(string(raw)))
+		if err != nil || len(key) != 32 {
+			return nil, fmt.Errorf("invalid secret")
+		}
+		return key, nil
+	}
+	if key, err := read(); err == nil {
+		return key, nil
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return nil, err
+	}
+	staged, err := Stage(path, []byte(hex.EncodeToString(key)+"\n"))
+	if err != nil {
+		return nil, err
+	}
+	defer staged.Cleanup()
+	if err = os.Link(staged.temporary, path); err != nil {
+		if os.IsExist(err) {
+			return read()
+		}
+		return nil, err
+	}
+	directory, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	if err = errors.Join(directory.Sync(), directory.Close()); err != nil {
+		return nil, err
+	}
+	return key, nil
+}

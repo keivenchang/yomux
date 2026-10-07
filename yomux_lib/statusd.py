@@ -702,10 +702,10 @@ class PersistentStatusService(LocalRpcServiceState):
             # A test worker or a crashed web process cannot release its lease. Reap before
             # deciding idleness so its abandoned lease cannot pin a private daemon forever.
             reap_dead_client_leases(self.leases)
-            # claim_gated_idle_due is the one shared owner of the
-            # transition/deadline algorithm every local service routes
-            # through; statusd's claim predicate is a held lease.
-            return claim_gated_idle_due(self, bool(self.leases))
+            # A refreshing response accepts work even when the caller releases its
+            # startup lease. Retire only after that queued or active build finishes.
+            has_claim = bool(self.leases) or self.refresh_requested_sessions is not None or self.refresh_build_sessions is not None
+            return claim_gated_idle_due(self, has_claim)
 
     def status(self) -> dict[str, object]:
         with self.lock:

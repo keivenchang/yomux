@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/bazelbuild/rules_go/go/runfiles"
+	"github.com/keivenchang/yomux/internal/productenv"
 )
 
 func inBazel() bool {
@@ -47,7 +48,7 @@ func resolveRunfile(name string) (string, error) {
 func RepoRoot(t testing.TB) string {
 	t.Helper()
 	if inBazel() {
-		name := os.Getenv("YOMUX_REPO_ROOT_RUNFILE")
+		name := productenv.Value("REPO_ROOT_RUNFILE")
 		if name == "" {
 			t.Fatal("Bazel target omitted YOMUX_REPO_ROOT_RUNFILE")
 		}
@@ -81,8 +82,8 @@ func RepoPath(t testing.TB, relative string) string {
 // is a graph defect, never a reason to report a skipped parity case.
 func ExternalBinary(t testing.TB) string {
 	t.Helper()
-	name := os.Getenv("YOMUX_GO_BINARY_RUNFILE")
-	path := os.Getenv("YOMUX_GO_BINARY")
+	name := productenv.Value("GO_BINARY_RUNFILE")
+	path := productenv.Value("GO_BINARY")
 	if inBazel() {
 		if name == "" {
 			t.Fatal("integration target omitted YOMUX_GO_BINARY_RUNFILE")

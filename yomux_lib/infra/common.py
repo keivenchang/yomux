@@ -40,10 +40,10 @@ from .host_identity import HostIdentity
 from .host_partition import HOST_PARTITION_DIRNAME
 from .host_partition import host_partitioned_state_dir
 from ..local_services.rpc import LOCAL_RPC_SOCKET_PATH_BYTES
-from .root_paths import YOLOMUX_ROOT_ENV
 from .root_paths import YomuxRootError
 from .root_paths import YomuxRoots
 from .root_paths import resolve_yomux_roots as _resolve_root_paths
+from tools.product_environment import product_env, product_env_name, product_env_present
 from tools.instance_isolation import normalize_yomux_environment
 from .root_paths import resolved_path
 from .root_paths import runtime_root
@@ -77,10 +77,10 @@ UPDATE_NOTIFY_LEVELS: tuple[str, ...] = ("major", "minor", "patch", "none")
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
 SUMMARY_CODEX_TIMEOUT_SECONDS = 600
-SUMMARY_CODEX_MODEL = os.environ.get("YOLOMUX_SUMMARY_MODEL", "gpt-5.5")
-SUMMARY_CODEX_EFFORT = os.environ.get("YOLOMUX_SUMMARY_EFFORT", "low")
-SUMMARY_CODEX_SERVICE_TIER = os.environ.get("YOLOMUX_SUMMARY_SERVICE_TIER", "fast")
-YOAGENT_CLAUDE_SUMMARY_MODEL = os.environ.get("YOLOMUX_YOAGENT_CLAUDE_SUMMARY_MODEL", "claude-haiku-4-5")
+SUMMARY_CODEX_MODEL = product_env('SUMMARY_MODEL', "gpt-5.5", environ=os.environ)
+SUMMARY_CODEX_EFFORT = product_env('SUMMARY_EFFORT', "low", environ=os.environ)
+SUMMARY_CODEX_SERVICE_TIER = product_env('SUMMARY_SERVICE_TIER', "fast", environ=os.environ)
+YOAGENT_CLAUDE_SUMMARY_MODEL = product_env('YOAGENT_CLAUDE_SUMMARY_MODEL', "claude-haiku-4-5", environ=os.environ)
 def resolve_yomux_roots(
     environ: Mapping[str, str] | None = None,
     *,
@@ -91,7 +91,7 @@ def resolve_yomux_roots(
     """Resolve all writable product roots from one parent without creating paths.
 
     A rooted run isolates YOmux-owned XDG state. Codex credentials and
-    configuration remain user-owned by default; only YOLOMUX_CODEX_HOME opts
+    configuration remain user-owned by default; only YOMUX_CODEX_HOME opts
     into a Codex home inside the root.
     """
     values = normalize_yomux_environment(os.environ if environ is None else environ)
@@ -132,7 +132,7 @@ def validate_rooted_socket_paths(paths: YomuxRoots, *, identity: HostIdentity | 
     length = len(os.fsencode(str(longest)))
     if length > LOCAL_RPC_SOCKET_PATH_BYTES:
         raise YomuxRootError(
-            f"YOLOMUX_ROOT is too deep for product socket {longest} ({length} bytes; limit {LOCAL_RPC_SOCKET_PATH_BYTES}); choose a shorter YOLOMUX_ROOT"
+            f"{product_env_name('ROOT')} is too deep for product socket {longest} ({length} bytes; limit {LOCAL_RPC_SOCKET_PATH_BYTES}); choose a shorter {product_env_name('ROOT')}"
         )
 
 
@@ -186,7 +186,7 @@ def _ensure_private_runtime_directory(candidate: Path) -> None:
     if metadata.st_uid != os.getuid():
         raise _runtime_directory_error(
             candidate, metadata, "path is owned by another uid",
-            "do not reuse it; choose a different YOLOMUX_RUNTIME_DIR or have its owner remove it",
+            "do not reuse it; choose a different YOMUX_RUNTIME_DIR or have its owner remove it",
         )
     if stat.S_IMODE(metadata.st_mode) != 0o700:
         try:
@@ -224,7 +224,7 @@ def cleanup_previous_boot_runtime_dirs(root: Path) -> tuple[Path, ...]:
 
 
 _YOMUX_ROOTS = resolve_yomux_roots()
-# Whether the caller pinned every product path under one YOLOMUX_ROOT. That is
+# Whether the caller pinned every product path under one YOMUX_ROOT. That is
 # the difference between "several YOmux servers share this runtime directory,
 # so a survivor there may legitimately belong to one of them" and "this root has
 # exactly one launcher, so a survivor has no successor to be handed to". Every
@@ -919,7 +919,7 @@ def yomux_version_metadata() -> tuple[str, list[str]]:
 
 
 def positive_env_int(name: str, default: int) -> int:
-    value = os.environ.get(name)
+    value = product_env(name)
     if value is None:
         return default
     parsed = int(value)
@@ -929,12 +929,12 @@ def positive_env_int(name: str, default: int) -> int:
 
 
 _FILE_TRANSFER_MAX_BYTES_DEFAULT = 300 * 1024 * 1024
-if "YOLOMUX_FILE_TRANSFER_MAX_BYTES" in os.environ:
-    FILE_TRANSFER_MAX_BYTES = positive_env_int("YOLOMUX_FILE_TRANSFER_MAX_BYTES", _FILE_TRANSFER_MAX_BYTES_DEFAULT)
+if product_env_present('FILE_TRANSFER_MAX_BYTES', environ=os.environ):
+    FILE_TRANSFER_MAX_BYTES = positive_env_int('FILE_TRANSFER_MAX_BYTES', _FILE_TRANSFER_MAX_BYTES_DEFAULT)
 else:
-    FILE_TRANSFER_MAX_BYTES = positive_env_int("YOLOMUX_UPLOAD_MAX_BYTES", _FILE_TRANSFER_MAX_BYTES_DEFAULT)
+    FILE_TRANSFER_MAX_BYTES = positive_env_int('UPLOAD_MAX_BYTES', _FILE_TRANSFER_MAX_BYTES_DEFAULT)
 UPLOAD_MAX_BYTES = FILE_TRANSFER_MAX_BYTES
-UPLOAD_MAX_FILES = positive_env_int("YOLOMUX_UPLOAD_MAX_FILES", 16)
+UPLOAD_MAX_FILES = positive_env_int('UPLOAD_MAX_FILES', 16)
 DEFAULT_UPLOAD_FILENAME_TEMPLATE = "{date:%Y%m%d}-{seq:03d}-{name}{ext}"
 UPLOAD_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._ -]+")
 PASTE_UPLOAD_NAME_RE = re.compile(r"^(?P<date>\d{8})-(?P<index>\d{3})(?P<suffix>\.[A-Za-z0-9]{1,8})$")

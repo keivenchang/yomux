@@ -110,7 +110,7 @@ def _build_repository_snapshot_in_child(repo_text, state_dir_text, counter_text,
         with Path(counter_text).open("a", encoding="utf-8") as handle:
             handle.write("build\n")
         in_builder.set()
-        assert release.wait(timeout=10.0), "builder was never released by the parent"
+        release.wait()
         return _empty_repository_snapshot()
 
     session_files.cached_repository_snapshot(Path(repo_text), None, None, 9, build)
@@ -1249,18 +1249,22 @@ def test_repository_snapshot_cache_single_flights_across_spawned_workers(tmp_pat
         target=_build_repository_snapshot_in_child,
         args=(str(repo), state_dir, counter_text, second_ready, in_builder, release),
     )
-    # Phase 1: the first worker becomes the builder and holds the cross-process lock.
-    first.start()
-    _await_worker_ready(first, first_ready)
-    assert in_builder.wait(timeout=30.0), "first worker never reached the single-flight builder (deadlock)"
-    # Phase 2: only now start the second worker, so it must contend against the held lock rather
-    # than race a not-yet-locked cache.  Its readiness proves it imported and reached the builder
-    # entry; single-flight must then keep it out of the builder entirely.
-    second.start()
-    _await_worker_ready(second, second_ready)
-    release.set()
-    first.join(timeout=30.0)
-    second.join(timeout=30.0)
+    try:
+        # Phase 1: the first worker becomes the builder and holds the cross-process lock.
+        first.start()
+        _await_worker_ready(first, first_ready)
+        assert in_builder.wait(timeout=30.0), "first worker never reached the single-flight builder (deadlock)"
+        # Phase 2: only now start the second worker, so it must contend against the held lock rather
+        # than race a not-yet-locked cache.  Its readiness proves it imported and reached the builder
+        # entry; single-flight must then keep it out of the builder entirely.
+        second.start()
+        _await_worker_ready(second, second_ready)
+    finally:
+        release.set()
+        if first.pid is not None:
+            first.join(timeout=30.0)
+        if second.pid is not None:
+            second.join(timeout=30.0)
     assert not first.is_alive() and not second.is_alive(), "a worker never retired"
     assert first.exitcode == second.exitcode == 0
     assert counter.read_text(encoding="utf-8").splitlines() == ["build"]

@@ -34,6 +34,8 @@ type job struct {
 }
 
 type Scheduler struct {
+	ctx    context.Context
+	cancel context.CancelFunc
 	queue  chan job
 	stop   chan struct{}
 	wg     sync.WaitGroup
@@ -51,7 +53,8 @@ func New(workers, queueSize int) *Scheduler {
 	if queueSize < 1 {
 		queueSize = workers
 	}
-	scheduler := &Scheduler{queue: make(chan job, queueSize), stop: make(chan struct{}), jobs: make(map[string]context.CancelFunc), done: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	scheduler := &Scheduler{ctx: ctx, cancel: cancel, queue: make(chan job, queueSize), stop: make(chan struct{}), jobs: make(map[string]context.CancelFunc), done: make(chan struct{})}
 	scheduler.wg.Add(workers)
 	for range workers {
 		go scheduler.worker()
@@ -67,7 +70,9 @@ func (s *Scheduler) Submit(parent context.Context, id string, task Task) (<-chan
 	if parent == nil {
 		parent = context.Background()
 	}
-	ctx, cancel := context.WithCancel(parent)
+	ctx, cancelTask := context.WithCancel(parent)
+	stop := context.AfterFunc(s.ctx, cancelTask)
+	cancel := func() { stop(); cancelTask() }
 	result := make(chan Result, 1)
 	item := job{id: id, ctx: ctx, cancel: cancel, task: task, result: result}
 	s.mu.Lock()
@@ -122,6 +127,7 @@ func (s *Scheduler) CloseWithTimeout(timeout time.Duration) bool {
 	s.close.Do(func() {
 		s.mu.Lock()
 		s.closed = true
+		s.cancel()
 		close(s.stop)
 		for _, cancel := range s.jobs {
 			cancel()

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/keivenchang/yomux/internal/atomicfile"
 	"html"
 	"io"
 	"net/http"
@@ -468,36 +469,7 @@ func writePricingCache(path string, catalog *PricingCatalog, checks map[string]p
 	if err != nil {
 		return err
 	}
-	file, err := os.CreateTemp(filepath.Dir(path), ".pricing-cache-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create pricing cache: %w", err)
-	}
-	tempPath := file.Name()
-	defer os.Remove(tempPath)
-	if err := file.Chmod(0600); err != nil {
-		file.Close()
-		return err
-	}
-	if _, err := file.Write(data); err != nil {
-		file.Close()
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		file.Close()
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tempPath, path); err != nil {
-		return fmt.Errorf("install pricing cache: %w", err)
-	}
-	directory, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	return directory.Sync()
+	return atomicfile.Write(path, data)
 }
 
 func clonePricingSourceChecks(checks map[string]pricingSourceCheck) map[string]pricingSourceCheck {

@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+from tools.product_environment import product_env, product_env_name
+from tools.instance_isolation import normalize_yomux_environment
+
 import argparse
 import gc
 import hashlib
@@ -97,11 +100,11 @@ WRITE_THROUGH_FAMILIES = frozenset({"browser"})
 # docker/run-tests.sh must forward it, or the subject process inside the container never sees
 # the arm and both arms silently run identical code. tests/test_check_runner.py asserts the
 # allowlist against this constant rather than restating the name.
-APPEND_FLUSH_ENV_NAME = "YOLOMUX_STATS_APPEND_FLUSH_SECONDS"
+APPEND_FLUSH_ENV_NAME = product_env_name('STATS_APPEND_FLUSH_SECONDS')
 # The test container sets this on the container it builds (docker/run-tests.sh) and it is NOT in
 # FORWARDED_TEST_ENV, so it cannot be forwarded in from a host. Nothing on the production launch
 # path sets it: the live statsd's environment carries neither this name nor the arm's.
-APPEND_FLUSH_TEST_MARKER_ENV = "YOLOMUX_CHECK_IN_CONTAINER"
+APPEND_FLUSH_TEST_MARKER_ENV = product_env_name('CHECK_IN_CONTAINER')
 # How many consecutive flushes may fail WITHOUT the offender being identifiable before the
 # buffer is discarded. The probe is what names offenders, so when the probe is itself failing --
 # a full or corrupt store, which is when losing data matters most -- nothing can be separated.
@@ -147,11 +150,11 @@ def resolve_append_flush_arm(environ: Mapping[str, str] | None = None) -> Append
     there a silently-defaulted arm measures nothing and reports a clean null.
     """
 
-    values = os.environ if environ is None else environ
-    raw = values.get(APPEND_FLUSH_ENV_NAME)
+    values = normalize_yomux_environment(os.environ if environ is None else environ)
+    raw = product_env('STATS_APPEND_FLUSH_SECONDS', environ=values)
     if raw is None or not raw.strip():
         return AppendFlushArm(APPEND_FLUSH_SECONDS, None, "")
-    if values.get(APPEND_FLUSH_TEST_MARKER_ENV) != "1":
+    if product_env('CHECK_IN_CONTAINER', environ=values) != "1":
         return AppendFlushArm(
             APPEND_FLUSH_SECONDS,
             None,

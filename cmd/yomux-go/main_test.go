@@ -35,32 +35,8 @@ import (
 	"github.com/keivenchang/yomux/internal/work"
 )
 
-func preserveProductEnvironment(t *testing.T) {
-	t.Helper()
-	original := make(map[string]string)
-	for _, entry := range os.Environ() {
-		key, value, _ := strings.Cut(entry, "=")
-		if strings.HasPrefix(key, "YOMUX_") || strings.HasPrefix(key, "YOLOMUX_") {
-			original[key] = value
-		}
-	}
-	t.Cleanup(func() {
-		for _, entry := range os.Environ() {
-			key, _, _ := strings.Cut(entry, "=")
-			if strings.HasPrefix(key, "YOMUX_") || strings.HasPrefix(key, "YOLOMUX_") {
-				if _, existed := original[key]; !existed {
-					_ = os.Unsetenv(key)
-				}
-			}
-		}
-		for key, value := range original {
-			_ = os.Setenv(key, value)
-		}
-	})
-}
-
 func TestNormalizeYomuxEnvironmentMirrorsCanonicalValuesToLegacyReaders(t *testing.T) {
-	preserveProductEnvironment(t)
+	testsupport.PreserveProductEnvironment(t)
 	t.Setenv("YOMUX_CONFIG_DIR", "/new/config")
 	t.Setenv("YOLOMUX_CONFIG_DIR", "/old/config")
 	t.Setenv("YOMUX_STATE_DIR", "")
@@ -79,7 +55,7 @@ func TestNormalizeYomuxEnvironmentMirrorsCanonicalValuesToLegacyReaders(t *testi
 }
 
 func TestNormalizeYomuxEnvironmentDoesNotWarnForCanonicalOnlyValues(t *testing.T) {
-	preserveProductEnvironment(t)
+	testsupport.PreserveProductEnvironment(t)
 	for _, entry := range os.Environ() {
 		key, _, ok := strings.Cut(entry, "=")
 		if ok && strings.HasPrefix(key, "YOLOMUX_") {
@@ -96,9 +72,13 @@ func TestNormalizeYomuxEnvironmentDoesNotWarnForCanonicalOnlyValues(t *testing.T
 	if got := os.Getenv("YOLOMUX_RUNTIME_DIR"); got != "/private/runtime" {
 		t.Fatalf("legacy runtime reader = %q, want canonical value", got)
 	}
+	if normalizeYomuxEnvironment() {
+		t.Fatal("generated aliases must not trigger repeated legacy warnings")
+	}
 }
 
 func TestUseMachineTmuxForOperatorLaunch(t *testing.T) {
+	testsupport.PreserveProductEnvironment(t)
 	t.Setenv("TMUX", "/tmp/private-tmux,123,0")
 	t.Setenv("TMUX_PANE", "%7")
 	t.Setenv("YOLOMUX_TMUX_SOCKET", "")
@@ -118,6 +98,7 @@ func TestUseMachineTmuxForOperatorLaunch(t *testing.T) {
 }
 
 func TestUseMachineTmuxPreservesExplicitFixtureSocket(t *testing.T) {
+	testsupport.PreserveProductEnvironment(t)
 	t.Setenv("TMUX", "/tmp/private-tmux,123,0")
 	t.Setenv("TMUX_PANE", "%7")
 	t.Setenv("YOLOMUX_TMUX_SOCKET", "/tmp/private-yolomux-tmux.sock")
@@ -798,10 +779,9 @@ func TestGoRenameSessionTmuxCommandHasRequestBoundedTimeout(t *testing.T) {
 	}
 	srv := &server{
 		config:       config,
-		capabilities: capabilities.New("go-test"),
-		tmuxSessionRosterFn: func() ([]string, error) {
+		capabilities: capabilities.New("go-test"), tmuxMetadataState: tmuxMetadataState{tmuxSessionRosterFn: func() ([]string, error) {
 			return []string{"source"}, nil
-		},
+		}},
 	}
 	mux := http.NewServeMux()
 	srv.registerSessionRoutes(mux)
@@ -828,9 +808,9 @@ func TestGoRenameSessionTmuxCommandHasRequestBoundedTimeout(t *testing.T) {
 }
 
 func TestGoCreateSessionPlanReturnsJavaScriptSafeMonotonicGeneration(t *testing.T) {
-	srv := &server{tmuxSessionRosterFn: func() ([]string, error) {
+	srv := &server{tmuxMetadataState: tmuxMetadataState{tmuxSessionRosterFn: func() ([]string, error) {
 		return []string{"1", "3"}, nil
-	}}
+	}}}
 	var generations []int64
 	for range 2 {
 		record := httptest.NewRecorder()
@@ -891,10 +871,9 @@ func TestGoCreateSessionDefaultsToFirstAvailableNumberedName(t *testing.T) {
 	t.Cleanup(func() { _ = exec.Command("tmux", "-S", tmuxSocket, "kill-server").Run() })
 
 	srv := &server{
-		root: t.TempDir(),
-		tmuxSessionRosterFn: func() ([]string, error) {
+		root: t.TempDir(), tmuxMetadataState: tmuxMetadataState{tmuxSessionRosterFn: func() ([]string, error) {
 			return []string{"1", "3"}, nil
-		},
+		}},
 	}
 	record := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/api/create-session?agent=term&terminal=bash", nil)
@@ -914,9 +893,9 @@ func TestGoCreateSessionDefaultsToFirstAvailableNumberedName(t *testing.T) {
 }
 
 func TestGoCreateSessionRejectsStaleNumberedSessionPlan(t *testing.T) {
-	srv := &server{tmuxSessionRosterFn: func() ([]string, error) {
+	srv := &server{tmuxMetadataState: tmuxMetadataState{tmuxSessionRosterFn: func() ([]string, error) {
 		return []string{"2", "3"}, nil
-	}}
+	}}}
 	record := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/api/create-session?agent=term&terminal=bash&session=2&generation=1", nil)
 	srv.createSession(record, request)
@@ -929,9 +908,9 @@ func TestGoCreateSessionRejectsStaleNumberedSessionPlan(t *testing.T) {
 }
 
 func TestGoCreateSessionRejectsExplicitNameWithoutPlanGeneration(t *testing.T) {
-	srv := &server{tmuxSessionRosterFn: func() ([]string, error) {
+	srv := &server{tmuxMetadataState: tmuxMetadataState{tmuxSessionRosterFn: func() ([]string, error) {
 		return []string{"1", "3"}, nil
-	}}
+	}}}
 	record := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/api/create-session?agent=term&terminal=bash&session=2", nil)
 	srv.createSession(record, request)
@@ -945,9 +924,9 @@ func TestGoCreateSessionEnforcesMaximumTabsWithExplicitName(t *testing.T) {
 	for index := range sessions {
 		sessions[index] = strconv.Itoa(index + 1)
 	}
-	srv := &server{tmuxSessionRosterFn: func() ([]string, error) {
+	srv := &server{tmuxMetadataState: tmuxMetadataState{tmuxSessionRosterFn: func() ([]string, error) {
 		return sessions, nil
-	}}
+	}}}
 	record := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/api/create-session?agent=term&terminal=bash&session=100&generation=1", nil)
 	srv.createSession(record, request)
@@ -980,7 +959,7 @@ func TestExplicitCollectorPathsRequireAbsoluteSyntheticOrProductionInputs(t *tes
 	for _, name := range []string{"YOLOMUX_CLAUDE_TRANSCRIPT_ROOT", "YOLOMUX_CODEX_TRANSCRIPT_ROOT", "YOLOMUX_OPENCODE_DATABASE"} {
 		t.Setenv(name, "")
 	}
-	if _, _, _, err := explicitCollectorPaths(); err == nil || !strings.Contains(err.Error(), "explicit YOLOMUX_CLAUDE_TRANSCRIPT_ROOT") {
+	if _, _, _, err := explicitCollectorPaths(); err == nil || !strings.Contains(err.Error(), "explicit YOMUX_CLAUDE_TRANSCRIPT_ROOT") {
 		t.Fatalf("missing collector roots error = %v", err)
 	}
 	t.Setenv("YOLOMUX_CLAUDE_TRANSCRIPT_ROOT", "fixture/claude")
@@ -993,6 +972,39 @@ func TestExplicitCollectorPathsRequireAbsoluteSyntheticOrProductionInputs(t *tes
 	claude, codex, opencode, err := explicitCollectorPaths()
 	if err != nil || claude != "/tmp/fixture/claude" || codex != "/tmp/fixture/codex" || opencode != "/tmp/fixture/opencode.db" {
 		t.Fatalf("explicit collector paths = %q %q %q err=%v", claude, codex, opencode, err)
+	}
+}
+
+func TestDynamicProductReadersHonorCanonicalPresence(t *testing.T) {
+	t.Setenv("YOLOMUX_HOST_ID", "legacy")
+	t.Setenv("YOMUX_HOST_ID", "canonical")
+	if got := readIdentityValue("YOLOMUX_HOST_ID", "", "fallback"); got != "canonical" {
+		t.Fatalf("identity = %q", got)
+	}
+	for _, suffix := range []string{"CLAUDE_TRANSCRIPT_ROOT", "CODEX_TRANSCRIPT_ROOT", "OPENCODE_DATABASE"} {
+		t.Setenv("YOLOMUX_"+suffix, "")
+		t.Setenv("YOMUX_"+suffix, "/tmp/canonical/"+suffix)
+	}
+	if _, _, _, err := explicitCollectorPaths(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("YOLOMUX_FILE_TRANSFER_MAX_BYTES", "8388608")
+	t.Setenv("YOMUX_FILE_TRANSFER_MAX_BYTES", "4194304")
+	s := &server{config: t.TempDir()}
+	if got := s.fileTransferMaxBytes(); got != 4194304 {
+		t.Fatalf("canonical transfer limit = %d", got)
+	}
+	t.Setenv("YOMUX_FILE_TRANSFER_MAX_BYTES", "")
+	if got := s.fileTransferMaxBytes(); got != 300*1024*1024 {
+		t.Fatalf("empty canonical transfer limit = %d", got)
+	}
+	t.Setenv("YOMUX_HOST_ID", "")
+	if got := readIdentityValue("YOLOMUX_HOST_ID", "", "fallback"); got != "fallback" {
+		t.Fatalf("empty canonical identity = %q", got)
+	}
+	t.Setenv("YOMUX_CLAUDE_TRANSCRIPT_ROOT", "")
+	if _, _, _, err := explicitCollectorPaths(); err == nil {
+		t.Fatal("empty canonical collector root accepted")
 	}
 }
 
@@ -1667,7 +1679,8 @@ func TestDiagnosticsPerformanceCapturesMarkedHTTPRequests(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/api/stats-snapshot", nil)
 	request.Header.Set("X-YOmux-Measurement", "capture-test-marker")
 	request.Header.Set("X-YOmux-Request-ID", "r-capture-test")
-	s.recordPerformance(request, http.StatusOK, 123, 2*time.Millisecond)
+	routeReady := 1500 * time.Microsecond
+	s.recordPerformance(request, http.StatusOK, 123, 2*time.Millisecond, &routeReady)
 	record := httptest.NewRecorder()
 	s.diagnosticsPerformance(record, httptest.NewRequest(http.MethodGet, "/api/diagnostics/performance?measurement_scope=capture", nil))
 	if record.Code != http.StatusOK {
@@ -1690,7 +1703,7 @@ func TestDiagnosticsPerformanceCapturesMarkedHTTPRequests(t *testing.T) {
 		t.Fatalf("diagnostics performance entry = %#v", recent[0])
 	}
 	details, ok := entry["details"].(map[string]any)
-	if !ok || details["transport_request_id"] != "r-capture-test" || details["measurement_request_id"] != "06df7f1729931f89" {
+	if !ok || details["transport_request_id"] != "r-capture-test" || details["measurement_request_id"] != "06df7f1729931f89" || details["process_pid"] != float64(os.Getpid()) || details["route_to_representation_ready_ms"] != 1.5 {
 		t.Fatalf("diagnostics performance details = %#v", entry["details"])
 	}
 }
@@ -1717,7 +1730,7 @@ func TestFinderJobContextEnforcesDeadline(t *testing.T) {
 }
 
 func TestUnknownOperationUsesCanonicalPythonError(t *testing.T) {
-	s := &server{operations: map[string]*goOperation{}}
+	s := &server{operationState: operationState{operations: map[string]*goOperation{}}}
 	record := httptest.NewRecorder()
 	s.operation(record, httptest.NewRequest(http.MethodGet, "/api/operations/missing", nil))
 	if record.Code != http.StatusNotFound {
@@ -1970,7 +1983,7 @@ func TestPhase45ExpectedMtimeAsyncWriteCompletes(t *testing.T) {
 	defer service.Close()
 	scheduler := newFinderJobScheduler()
 	defer scheduler.Close()
-	s := &server{root: root, finder: service, events: newEventBroker(), operations: map[string]*goOperation{}, operationsPath: filepath.Join(root, "ops.json"), operationsJournal: filepath.Join(root, "ops.jsonl"), finderJobs: scheduler}
+	s := &server{root: root, finder: service, events: newEventBroker(), finderJobs: scheduler, operationState: operationState{operations: map[string]*goOperation{}, operationsPath: filepath.Join(root, "ops.json"), operationsJournal: filepath.Join(root, "ops.jsonl")}}
 	info, ferr := service.Info(context.Background(), path)
 	if ferr != nil {
 		t.Fatal(ferr)
@@ -2366,7 +2379,16 @@ func TestLiveSessionMetadataSharesProcessInventoryAcrossSessions(t *testing.T) {
 }
 
 func TestActivityPublishesCodexWorkingFooterAsWorkingWindowState(t *testing.T) {
-	visibleText := "Working (1m 43s • esc to interrupt)\n\n› Ask Codex to do anything\n"
+	visibleText := `
+● Ran gh pr view 332 --repo ai-dynamo/frontend-crates --json headRefOid,mergeable,mergeStateSt...
+└ Description updated with all three PNG tags preserved
+  + Show details
+
+◦ Working (16m 26s • esc to interrupt)
+  └ Tip: Use /export to save your conversation as Markdown.
+
+› Ask Codex to do anything
+`
 	statsService := stats.NewStatsService(nil, stats.StatsServiceConfig{
 		AgentStatus: func(context.Context) (stats.AgentStatusSnapshot, error) {
 			return stats.AgentStatusSnapshot{
@@ -2380,17 +2402,9 @@ func TestActivityPublishesCodexWorkingFooterAsWorkingWindowState(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := &server{
-		statsService:               statsService,
-		metadataGeneration:         1,
-		metadataTopologyGeneration: 1,
-		metadataTopologySignature:  tmuxTopologySignature([]string{"codex-live"}, map[string]string{"codex-live": "codex-live"}),
-		metadataBuiltAt:            time.Now(),
-		tmuxRoster:                 []string{"codex-live"},
-		tmuxRosterIdentities:       map[string]string{"codex-live": "codex-live"},
-		tmuxRosterKnown:            true,
-		tmuxRosterSampledAt:        time.Now(),
-		tmuxSessionActivityFn:      func() (map[string]float64, error) { return map[string]float64{}, nil },
-		tmuxWindowActivityFn:       func() (map[string]float64, error) { return map[string]float64{}, nil },
+		statsService: statsService,
+
+		tmuxWindowActivityFn: func() (map[string]float64, error) { return map[string]float64{}, nil },
 		agentStatusClassifier: func(ctx context.Context, request stats.AgentStatusRequest) stats.AgentStatusResult {
 			return stats.ClassifyAgentStatus(ctx, request, stats.AgentStatusSources{
 				Process: func(context.Context, int) (stats.AgentStatusProcess, error) {
@@ -2400,7 +2414,15 @@ func TestActivityPublishesCodexWorkingFooterAsWorkingWindowState(t *testing.T) {
 					return stats.AgentStatusPane{Target: target, VisibleText: visibleText}, nil
 				},
 			})
-		},
+		}, tmuxMetadataState: tmuxMetadataState{metadataGeneration: 1,
+			metadataTopologyGeneration: 1,
+			metadataTopologySignature:  tmuxTopologySignature([]string{"codex-live"}, map[string]string{"codex-live": "codex-live"}),
+			metadataBuiltAt:            time.Now(),
+			tmuxRoster:                 []string{"codex-live"},
+			tmuxRosterIdentities:       map[string]string{"codex-live": "codex-live"},
+			tmuxRosterKnown:            true,
+			tmuxRosterSampledAt:        time.Now(),
+			tmuxSessionActivityFn:      func() (map[string]float64, error) { return map[string]float64{}, nil }},
 	}
 	metadata := s.liveSessionMetadataFromOutput("codex-live", []byte("codex-live\t0\tmain\t0\t%42\t/tmp/synthetic\tcodex\tCodex\t42\t1\t1\n"), nil)
 	metadata["session_identity"] = goTmuxSessionIdentity("codex-live", "codex-live")
@@ -2463,9 +2485,9 @@ func TestActivityRouteKeepsRosterWhenActivityReadFails(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
 
-	s := &server{tmuxSessionActivityFn: func() (map[string]float64, error) {
+	s := &server{tmuxMetadataState: tmuxMetadataState{tmuxSessionActivityFn: func() (map[string]float64, error) {
 		return nil, errors.New("synthetic activity read failed")
-	}}
+	}}}
 	record := httptest.NewRecorder()
 	s.activity(record, httptest.NewRequest(http.MethodGet, "/api/activity?scope=all", nil))
 	if record.Code != http.StatusOK {
@@ -2487,13 +2509,13 @@ func TestActivityRouteKeepsRosterWhenActivityReadFails(t *testing.T) {
 
 func TestActivityRoutePublishesPerWindowTmuxRecency(t *testing.T) {
 	s := &server{
-		tmuxSessionRosterFn: func() ([]string, error) { return []string{"synthetic-window-activity"}, nil },
-		tmuxSessionActivityFn: func() (map[string]float64, error) {
-			return map[string]float64{"synthetic-window-activity": 100}, nil
-		},
+
 		tmuxWindowActivityFn: func() (map[string]float64, error) {
 			return map[string]float64{"synthetic-window-activity:0": 125}, nil
-		},
+		}, tmuxMetadataState: tmuxMetadataState{tmuxSessionRosterFn: func() ([]string, error) { return []string{"synthetic-window-activity"}, nil },
+			tmuxSessionActivityFn: func() (map[string]float64, error) {
+				return map[string]float64{"synthetic-window-activity": 100}, nil
+			}},
 	}
 	record := httptest.NewRecorder()
 	s.activity(record, httptest.NewRequest(http.MethodGet, "/api/activity?scope=all", nil))
@@ -2534,9 +2556,9 @@ func waitForMetadataGeneration(t *testing.T, s *server, want uint64) {
 }
 
 func TestSessionMetadataDoesNotClearRosterOnInitialDiscoveryFailure(t *testing.T) {
-	s := &server{tmuxSessionRosterFn: func() ([]string, error) {
+	s := &server{tmuxMetadataState: tmuxMetadataState{tmuxSessionRosterFn: func() ([]string, error) {
 		return nil, errors.New("synthetic initial tmux roster failure")
-	}}
+	}}}
 	record := httptest.NewRecorder()
 	s.sessionMetadata(record, httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil))
 	if record.Code != http.StatusServiceUnavailable {
@@ -2549,9 +2571,9 @@ func TestSessionMetadataDoesNotClearRosterOnInitialDiscoveryFailure(t *testing.T
 
 func TestSessionMetadataKeepsRosterAndReportsPaneInventoryFailure(t *testing.T) {
 	t.Setenv("YOMUX_TMUX_SOCKET", filepath.Join(testsupport.ShortTempDir(t), "missing-tmux.sock"))
-	s := &server{tmuxSessionRosterFn: func() ([]string, error) {
+	s := &server{tmuxMetadataState: tmuxMetadataState{tmuxSessionRosterFn: func() ([]string, error) {
 		return []string{"synthetic-pane-failure"}, nil
-	}}
+	}}}
 	record := httptest.NewRecorder()
 	s.sessionMetadata(record, httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil))
 	if record.Code != http.StatusOK {
@@ -2736,9 +2758,9 @@ func TestTmuxSessionSortKeyMatchesPythonRosterOrdering(t *testing.T) {
 }
 
 func TestTmuxSessionRosterNormalizesInjectedAndCommandRows(t *testing.T) {
-	s := &server{tmuxSessionRosterFn: func() ([]string, error) {
+	s := &server{tmuxMetadataState: tmuxMetadataState{tmuxSessionRosterFn: func() ([]string, error) {
 		return []string{" project10 ", "yolomux10", "project2", "", "project2", " yolomux2"}, nil
-	}}
+	}}}
 	got, err := s.tmuxSessionRoster()
 	if err != nil {
 		t.Fatal(err)
@@ -2809,7 +2831,9 @@ func TestGoRootAdvertisesTheFullCapabilityGatedApplicationShell(t *testing.T) {
 	catalog.Set("pane.stats.v1", capabilities.Entry{Available: true})
 	s := &server{root: testsupport.RepoRoot(t), config: config, port: 7221, capabilities: catalog}
 	page := httptest.NewRecorder()
-	s.index(page, httptest.NewRequest(http.MethodGet, "/", nil))
+	pageRequest := httptest.NewRequest(http.MethodGet, "/", nil)
+	pageRequest.SetBasicAuth("admin", "secret")
+	s.protected(http.HandlerFunc(s.index)).ServeHTTP(page, pageRequest)
 	if page.Code != http.StatusOK {
 		t.Fatalf("full root status = %d, body=%s", page.Code, page.Body.String())
 	}
@@ -2852,13 +2876,15 @@ func TestGoRootAdvertisesTheFullCapabilityGatedApplicationShell(t *testing.T) {
 		t.Fatalf("root bootstrap statsOnly = %#v, want false", bootstrap["statsOnly"])
 	}
 	statsPage := httptest.NewRecorder()
-	s.index(statsPage, httptest.NewRequest(http.MethodGet, "/?stats_only=1", nil))
+	statsRequest := pageRequest.Clone(context.Background())
+	statsRequest.URL = &url.URL{Path: "/", RawQuery: "stats_only=1"}
+	s.protected(http.HandlerFunc(s.index)).ServeHTTP(statsPage, statsRequest)
 	if statsPage.Code != http.StatusOK || !bytes.Contains(statsPage.Body.Bytes(), []byte(`"statsOnly":true`)) {
 		t.Fatalf("explicit stats-only root = %d, body=%s", statsPage.Code, statsPage.Body.String())
 	}
 	dangerous := &server{root: testsupport.RepoRoot(t), config: config, port: 7221, dangerouslyYolo: true, capabilities: catalog}
 	dangerousPage := httptest.NewRecorder()
-	dangerous.index(dangerousPage, httptest.NewRequest(http.MethodGet, "/", nil))
+	dangerous.protected(http.HandlerFunc(dangerous.index)).ServeHTTP(dangerousPage, pageRequest.Clone(context.Background()))
 	if dangerousPage.Code != http.StatusOK || !bytes.Contains(dangerousPage.Body.Bytes(), []byte(`"dangerouslyYolo":true`)) || !bytes.Contains(dangerousPage.Body.Bytes(), []byte(`--dangerously-bypass-approvals-and-sandbox`)) {
 		t.Fatalf("Go dangerous bootstrap = %d, body=%s", dangerousPage.Code, dangerousPage.Body.String())
 	}
@@ -3013,6 +3039,7 @@ func TestUploadRejectsUnknownSessionBeforeFinderMutation(t *testing.T) {
 	}
 	request := httptest.NewRequest(http.MethodPost, "/api/upload?session=missing", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request = request.WithContext(context.WithValue(request.Context(), authContextKey{}, authUser{role: "admin"}))
 	record := httptest.NewRecorder()
 	s.upload(record, request)
 	if record.Code != http.StatusNotFound || !bytes.Contains(record.Body.Bytes(), []byte(`"error_code":"session_not_found"`)) {
@@ -3047,6 +3074,7 @@ func TestUploadReturnsSynchronousCanonicalResultThroughFinderScheduler(t *testin
 	}
 	request := httptest.NewRequest(http.MethodPost, "/api/upload?editor_path="+url.QueryEscape(filepath.Join(root, "note.md")), &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request = request.WithContext(context.WithValue(request.Context(), authContextKey{}, authUser{role: "admin"}))
 	record := httptest.NewRecorder()
 	s.upload(record, request)
 	if record.Code != http.StatusOK {
@@ -3357,6 +3385,20 @@ func TestPhase8SessionFilesRoutesExposeParityEnvelopes(t *testing.T) {
 	if cacheMetadata["hit"] != true {
 		t.Fatalf("warm session-files cache metadata = %#v", cacheMetadata)
 	}
+	cacheOnlyWarmURL := singleURL + "&cache_only=1&cache_view=" + url.QueryEscape(cacheMetadata["cache_view_id"].(string))
+	cacheOnlyWarmData := decode(serve(cacheOnlyWarmURL))["data"].(map[string]any)
+	withoutCacheMetadata := func(payload map[string]any) map[string]any {
+		copy := make(map[string]any, len(payload)-1)
+		for key, value := range payload {
+			if key != "cache" {
+				copy[key] = value
+			}
+		}
+		return copy
+	}
+	if !reflect.DeepEqual(withoutCacheMetadata(warmData), withoutCacheMetadata(cacheOnlyWarmData)) {
+		t.Fatalf("standard and cache-only warm payloads differ: standard=%#v cache-only=%#v", withoutCacheMetadata(warmData), withoutCacheMetadata(cacheOnlyWarmData))
+	}
 	if processEntryScans != coldProcessEntryScans {
 		t.Fatalf("warm session-files rescanned pane processes: before=%d after=%d", coldProcessEntryScans, processEntryScans)
 	}
@@ -3364,8 +3406,8 @@ func TestPhase8SessionFilesRoutesExposeParityEnvelopes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(tmuxCalls), "list-panes") || strings.Contains(string(tmuxCalls), "has-session") || strings.Count(string(tmuxCalls), "display-message") != 1 {
-		t.Fatalf("warm cache tmux calls = %q, want one lightweight incarnation lookup", tmuxCalls)
+	if strings.Contains(string(tmuxCalls), "list-panes") || strings.Contains(string(tmuxCalls), "has-session") || strings.Count(string(tmuxCalls), "display-message") != 2 {
+		t.Fatalf("standard and cache-only warm tmux calls = %q, want one lightweight incarnation lookup each", tmuxCalls)
 	}
 	if err := os.WriteFile(tmuxLog, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -3406,6 +3448,32 @@ func TestPhase8SessionFilesRoutesExposeParityEnvelopes(t *testing.T) {
 	warmStream := serve(streamURL)
 	if warmStream.Code != http.StatusOK || !strings.Contains(warmStream.Body.String(), "event: repo") || !strings.Contains(warmStream.Body.String(), "event: done") || !strings.Contains(warmStream.Body.String(), visibleRepo) {
 		t.Fatalf("warm session-files stream = %d %s", warmStream.Code, warmStream.Body.String())
+	}
+	streamFiles := make([]any, 0)
+	for _, frame := range strings.Split(warmStream.Body.String(), "\n\n") {
+		if !strings.HasPrefix(frame, "event: repo\ndata: ") {
+			continue
+		}
+		var chunk map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(frame, "event: repo\ndata: ")), &chunk); err != nil {
+			t.Fatalf("warm stream repo chunk: %v (%s)", err, frame)
+		}
+		streamFiles = append(streamFiles, chunk["files"].([]any)...)
+	}
+	sortedFileRows := func(rows []any) []string {
+		encodedRows := make([]string, 0, len(rows))
+		for _, row := range rows {
+			encoded, err := json.Marshal(row)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encodedRows = append(encodedRows, string(encoded))
+		}
+		sort.Strings(encodedRows)
+		return encodedRows
+	}
+	if !reflect.DeepEqual(sortedFileRows(warmData["files"].([]any)), sortedFileRows(streamFiles)) {
+		t.Fatalf("standard and streaming warm file rows differ: standard=%#v stream=%#v", warmData["files"], streamFiles)
 	}
 	if processEntryScans != beforeWarmStreamScans {
 		t.Fatalf("warm session-files stream rescanned pane processes: before=%d after=%d", beforeWarmStreamScans, processEntryScans)
@@ -3482,6 +3550,9 @@ func TestPhase8SessionFilesRoutesExposeParityEnvelopes(t *testing.T) {
 	warmBatchCache := warmBatchSession["cache"].(map[string]any)
 	if warmBatchCache["hit"] != true {
 		t.Fatalf("warm batch cache metadata = %#v", warmBatchCache)
+	}
+	if !reflect.DeepEqual(batchSession["files"], warmBatchSession["files"]) || !reflect.DeepEqual(batchSession["repos"], warmBatchSession["repos"]) {
+		t.Fatalf("cold and warm batch payloads differ: cold=%#v warm=%#v", batchSession, warmBatchSession)
 	}
 	if processEntryScans != beforeWarmBatchScans {
 		t.Fatalf("warm batch rescanned pane processes: before=%d after=%d", beforeWarmBatchScans, processEntryScans)
@@ -3673,6 +3744,14 @@ func TestPhase8CacheOnlySessionFilesReadSkipsSessionDiscovery(t *testing.T) {
 	}
 }
 
+func testSessionFilesCachePayload(payload map[string]any) json.RawMessage {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		panic(err)
+	}
+	return encoded
+}
+
 func TestPhase8SessionFilesCachePersistsAndRejectsMismatchedViews(t *testing.T) {
 	config := t.TempDir()
 	request := sessionFilesRequest{session: "session-1", hours: 24, fromRef: "HEAD", toRef: "current", sessionIdentity: "test-incarnation"}
@@ -3684,21 +3763,22 @@ func TestPhase8SessionFilesCachePersistsAndRejectsMismatchedViews(t *testing.T) 
 	payload["session"] = "caller-mutation"
 	payload["files"].([]any)[0] = "caller-mutation.py"
 	memoryRecord, ok := writer.readSessionFilesCache(request, viewID)
-	if !ok || memoryRecord.Payload["session"] != request.session || memoryRecord.Payload["files"].([]any)[0] != "changed.py" {
-		t.Fatalf("cache publication retained caller-owned payload data: %#v, ok=%t", memoryRecord.Payload, ok)
+	memoryPayload := sessionFilesCachePayload(memoryRecord)
+	if !ok || memoryPayload["session"] != request.session || memoryPayload["files"].([]any)[0] != "changed.py" {
+		t.Fatalf("cache publication retained caller-owned payload data: %#v, ok=%t", memoryPayload, ok)
 	}
 
 	reader := &server{config: config}
 	record, ok := reader.readSessionFilesCache(request, viewID)
-	if !ok || record.Payload["session"] != request.session {
-		t.Fatalf("persisted cache read = %#v, ok=%t", record, ok)
+	if !ok || sessionFilesCachePayload(record)["session"] != request.session {
+		t.Fatalf("persisted cache read = %#v, ok=%t", sessionFilesCachePayload(record), ok)
 	}
 	responsePayload := sessionFilesPayloadWithCache(record, descriptor, viewID, true, false, false, time.Now())
 	responsePayload["session"] = "response-only"
-	if record.Payload["session"] != request.session {
+	if sessionFilesCachePayload(record)["session"] != request.session {
 		t.Fatalf("response envelope mutation changed cached payload: %#v", record.Payload)
 	}
-	if _, exists := record.Payload["cache"]; exists {
+	if _, exists := sessionFilesCachePayload(record)["cache"]; exists {
 		t.Fatalf("cache metadata was added to the immutable cached payload: %#v", record.Payload)
 	}
 	mismatched := request
@@ -3718,7 +3798,7 @@ func TestSessionFilesWarmMemoryReadDoesNotWaitForDiskPublication(t *testing.T) {
 		CacheViewID:       viewID,
 		StoredAt:          time.Now().UnixNano(),
 		Status:            http.StatusOK,
-		Payload:           map[string]any{"files": []any{}},
+		Payload:           testSessionFilesCachePayload(map[string]any{"files": []any{}}),
 	})
 	s := &server{sessionFilesCache: sessionFilesCacheState{records: records}}
 	s.sessionFilesCache.publicationMu.Lock()
@@ -3749,11 +3829,11 @@ func TestSessionFilesRejectedIncarnationDoesNotRefreshMemoryRecency(t *testing.T
 	records := cache.NewLRU[string, sessionFilesCacheRecord](2)
 	records.Set(viewID, sessionFilesCacheRecord{
 		RequestDescriptor: descriptor, CacheViewID: viewID, StoredAt: time.Now().UnixNano(), Status: http.StatusOK,
-		SessionIdentity: "old-incarnation", Payload: map[string]any{"files": []any{}},
+		SessionIdentity: "old-incarnation", Payload: testSessionFilesCachePayload(map[string]any{"files": []any{}}),
 	})
 	records.Set(otherView, sessionFilesCacheRecord{
 		RequestDescriptor: "other", CacheViewID: otherView, StoredAt: time.Now().UnixNano(), Status: http.StatusOK,
-		Payload: map[string]any{"files": []any{}},
+		Payload: testSessionFilesCachePayload(map[string]any{"files": []any{}}),
 	})
 	wantOrder := records.KeysLeastRecentFirst()
 	s := &server{sessionFilesCache: sessionFilesCacheState{records: records}}
@@ -3779,7 +3859,7 @@ func TestSessionFilesCacheRejectsLateWriteFromOtherIncarnation(t *testing.T) {
 
 	reader := &server{config: config}
 	record, ok := reader.readSessionFilesCache(newRequest, viewID)
-	if !ok || record.SessionIdentity != "new-incarnation" || record.Payload["files"].([]any)[0] != "new.py" {
+	if !ok || record.SessionIdentity != "new-incarnation" || sessionFilesCachePayload(record)["files"].([]any)[0] != "new.py" {
 		t.Fatalf("late old-incarnation cache write replaced current record: %#v, ok=%t", record, ok)
 	}
 }
@@ -3790,11 +3870,11 @@ func TestSessionFilesDiskPromotionPreservesNewerMemoryPublication(t *testing.T) 
 	viewID := sessionFilesCacheViewID(descriptor)
 	newRecord := sessionFilesCacheRecord{
 		RequestDescriptor: descriptor, CacheViewID: viewID, StoredAt: time.Now().UnixNano(), Status: http.StatusOK,
-		SessionIdentity: "new-incarnation", Payload: map[string]any{"files": []any{"new.py"}},
+		SessionIdentity: "new-incarnation", Payload: testSessionFilesCachePayload(map[string]any{"files": []any{"new.py"}}),
 	}
 	oldDiskRecord := sessionFilesCacheRecord{
 		RequestDescriptor: descriptor, CacheViewID: viewID, StoredAt: newRecord.StoredAt - int64(time.Second), Status: http.StatusOK,
-		SessionIdentity: "old-incarnation", Payload: map[string]any{"files": []any{"old.py"}},
+		SessionIdentity: "old-incarnation", Payload: testSessionFilesCachePayload(map[string]any{"files": []any{"old.py"}}),
 	}
 	cacheServer := &server{config: t.TempDir(), host: "127.0.0.1", port: 7220}
 	directory := cacheServer.sessionFilesCacheDirectory()
@@ -3824,11 +3904,11 @@ func TestSessionFilesDiskPromotionPreservesNewerMemoryPublication(t *testing.T) 
 	}
 	newRequest := request
 	newRequest.sessionIdentity = "new-incarnation"
-	if !cacheServer.writeSessionFilesCache(newRequest, viewID, newRecord.Payload, http.StatusOK) {
+	if !cacheServer.writeSessionFilesCache(newRequest, viewID, sessionFilesCachePayload(newRecord), http.StatusOK) {
 		t.Fatal("new incarnation cache publication failed")
 	}
-	loaded := cacheServer.publishLoadedSessionFilesCacheRecord(descriptor, viewID, loadedDiskRecord, "old-incarnation")
-	if loaded.SessionIdentity != "new-incarnation" || loaded.Payload["files"].([]any)[0] != "new.py" {
+	loaded := cacheServer.publishLoadedSessionFilesCacheRecord(viewID, loadedDiskRecord)
+	if loaded.SessionIdentity != "new-incarnation" || sessionFilesCachePayload(loaded)["files"].([]any)[0] != "new.py" {
 		t.Fatalf("late disk promotion replaced newer memory publication: %#v", loaded)
 	}
 }
@@ -3843,7 +3923,7 @@ func TestSessionFilesMemoryCacheEvictsLeastRecentlyUsedView(t *testing.T) {
 		viewIDs[index] = sessionFilesCacheViewID(descriptor)
 		records.Set(viewIDs[index], sessionFilesCacheRecord{
 			RequestDescriptor: descriptor, CacheViewID: viewIDs[index], StoredAt: time.Now().UnixNano(),
-			Status: http.StatusOK, Payload: map[string]any{"files": []any{}},
+			Status: http.StatusOK, Payload: testSessionFilesCachePayload(map[string]any{"files": []any{}}),
 		})
 	}
 	cacheServer := &server{sessionFilesCache: sessionFilesCacheState{records: records}}
@@ -3857,7 +3937,7 @@ func TestSessionFilesMemoryCacheEvictsLeastRecentlyUsedView(t *testing.T) {
 	cacheServer.sessionFilesCache.mu.Lock()
 	cacheServer.sessionFilesCache.records.Set(newViewID, sessionFilesCacheRecord{
 		RequestDescriptor: newDescriptor, CacheViewID: newViewID, StoredAt: time.Now().UnixNano(),
-		Status: http.StatusOK, Payload: map[string]any{"files": []any{}},
+		Status: http.StatusOK, Payload: testSessionFilesCachePayload(map[string]any{"files": []any{}}),
 	})
 	cacheServer.sessionFilesCache.mu.Unlock()
 	if _, ok := cacheServer.readSessionFilesCache(requests[0], viewIDs[0]); !ok {
@@ -3865,6 +3945,160 @@ func TestSessionFilesMemoryCacheEvictsLeastRecentlyUsedView(t *testing.T) {
 	}
 	if _, ok := cacheServer.readSessionFilesCache(requests[1], viewIDs[1]); ok {
 		t.Fatal("least-recently-used memory cache view remained")
+	}
+}
+
+func sessionFilesCacheJSONOfSize(size int) json.RawMessage {
+	if size < 2 {
+		panic("JSON payload size must be at least two bytes")
+	}
+	encoded := make([]byte, size)
+	for index := range encoded[:size-2] {
+		encoded[index] = ' '
+	}
+	copy(encoded[size-2:], "{}")
+	return encoded
+}
+
+func TestSessionFilesMemoryCacheAccountsPayloadBytesAndReplacement(t *testing.T) {
+	state := sessionFilesCacheState{records: cache.NewLRU[string, sessionFilesCacheRecord](sessionFilesCacheMaxEntries)}
+	for index := range 8 {
+		viewID := fmt.Sprintf("%064x", index+1)
+		state.records.Set(viewID, sessionFilesCacheRecord{Payload: sessionFilesCacheJSONOfSize(sessionFilesCacheMaxEntryBytes)})
+		state.payloadBytes += sessionFilesCacheMaxEntryBytes
+	}
+	server := &server{sessionFilesCache: state}
+	if server.sessionFilesCache.payloadBytes != sessionFilesCacheMaxBytes {
+		t.Fatalf("initial cached payload bytes = %d, want %d", server.sessionFilesCache.payloadBytes, sessionFilesCacheMaxBytes)
+	}
+	server.sessionFilesCache.mu.Lock()
+	if !server.setSessionFilesCacheRecordLocked("new-view", sessionFilesCacheRecord{Payload: sessionFilesCacheJSONOfSize(2)}) {
+		server.sessionFilesCache.mu.Unlock()
+		t.Fatal("payload under the byte ceiling was not admitted")
+	}
+	gotBytes := server.sessionFilesCache.payloadBytes
+	gotEntries := server.sessionFilesCache.records.Len()
+	_, oldestPresent := server.sessionFilesCache.records.Peek(fmt.Sprintf("%064x", 1))
+	server.sessionFilesCache.mu.Unlock()
+	if gotBytes != sessionFilesCacheMaxBytes-sessionFilesCacheMaxEntryBytes+2 || gotEntries != 8 || oldestPresent {
+		t.Fatalf("post-eviction state = bytes:%d entries:%d oldest-present:%t", gotBytes, gotEntries, oldestPresent)
+	}
+
+	server.sessionFilesCache.mu.Lock()
+	if !server.setSessionFilesCacheRecordLocked("new-view", sessionFilesCacheRecord{Payload: sessionFilesCacheJSONOfSize(3)}) {
+		server.sessionFilesCache.mu.Unlock()
+		t.Fatal("replacement payload was not admitted")
+	}
+	gotBytes = server.sessionFilesCache.payloadBytes
+	server.sessionFilesCache.mu.Unlock()
+	wantBytes := int64(sessionFilesCacheMaxBytes-sessionFilesCacheMaxEntryBytes) + 3
+	if gotBytes != wantBytes {
+		t.Fatalf("replacement accounting = %d bytes, want %d", gotBytes, wantBytes)
+	}
+}
+
+func TestSessionFilesMemoryCacheAcceptsEntryBoundaryAndRejectsOversize(t *testing.T) {
+	server := &server{sessionFilesCache: sessionFilesCacheState{records: cache.NewLRU[string, sessionFilesCacheRecord](sessionFilesCacheMaxEntries)}}
+	server.sessionFilesCache.mu.Lock()
+	if !server.setSessionFilesCacheRecordLocked("at-limit", sessionFilesCacheRecord{Payload: sessionFilesCacheJSONOfSize(sessionFilesCacheMaxEntryBytes)}) {
+		server.sessionFilesCache.mu.Unlock()
+		t.Fatal("entry at the 8 MiB limit was rejected")
+	}
+	if server.setSessionFilesCacheRecordLocked("over-limit", sessionFilesCacheRecord{Payload: sessionFilesCacheJSONOfSize(sessionFilesCacheMaxEntryBytes + 1)}) {
+		server.sessionFilesCache.mu.Unlock()
+		t.Fatal("entry over the 8 MiB limit was retained")
+	}
+	gotBytes := server.sessionFilesCache.payloadBytes
+	gotEntries := server.sessionFilesCache.records.Len()
+	_, retained := server.sessionFilesCache.records.Peek("over-limit")
+	server.sessionFilesCache.mu.Unlock()
+	if gotBytes != sessionFilesCacheMaxEntryBytes || gotEntries != 1 || retained {
+		t.Fatalf("entry boundary state = bytes:%d entries:%d oversized-retained:%t", gotBytes, gotEntries, retained)
+	}
+}
+
+func TestSessionFilesOversizedComputedPayloadIsNotPersisted(t *testing.T) {
+	config := t.TempDir()
+	request := sessionFilesRequest{hours: 24}
+	viewID := sessionFilesCacheViewID(sessionFilesRequestDescriptor(request))
+	server := &server{config: config}
+	if !server.writeSessionFilesCache(request, viewID, map[string]any{"files": []any{"old.py"}}, http.StatusOK) {
+		t.Fatal("small payload was not written")
+	}
+	path := filepath.Join(server.sessionFilesCacheDirectory(), viewID+".json")
+	diskBefore, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var diskShape map[string]json.RawMessage
+	if err := json.Unmarshal(diskBefore, &diskShape); err != nil {
+		t.Fatal(err)
+	}
+	if len(diskShape) != 5 || len(diskShape["payload"]) == 0 || diskShape["payload"][0] != '{' {
+		t.Fatalf("disk record shape changed: %s", diskBefore)
+	}
+	oversized := map[string]any{"files": []any{strings.Repeat("x", sessionFilesCacheMaxEntryBytes)}}
+	if server.writeSessionFilesCache(request, viewID, oversized, http.StatusOK) {
+		t.Fatal("oversized payload was reported as cached")
+	}
+	server.sessionFilesCache.mu.Lock()
+	entries := server.sessionFilesCache.records.Len()
+	payloadBytes := server.sessionFilesCache.payloadBytes
+	server.sessionFilesCache.mu.Unlock()
+	diskAfter, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entries != 0 || payloadBytes != 0 {
+		t.Fatalf("oversized payload retained in memory: entries=%d bytes=%d", entries, payloadBytes)
+	}
+	if !bytes.Equal(diskAfter, diskBefore) {
+		t.Fatal("oversized payload changed the existing disk cache record")
+	}
+}
+
+func TestSessionFilesOversizedLegacyDiskPayloadServesWithoutMemoryAdmission(t *testing.T) {
+	request := sessionFilesRequest{hours: 24}
+	descriptor := sessionFilesRequestDescriptor(request)
+	viewID := sessionFilesCacheViewID(descriptor)
+	cacheServer := &server{config: t.TempDir()}
+	directory := cacheServer.sessionFilesCacheDirectory()
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	padding := strings.Repeat("x", sessionFilesCacheMaxEntryBytes)
+	payload, err := json.Marshal(map[string]any{"files": []any{}, "padding": padding})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := sessionFilesCacheRecord{
+		RequestDescriptor: descriptor,
+		CacheViewID:       viewID,
+		StoredAt:          time.Now().UnixNano(),
+		Status:            http.StatusOK,
+		Payload:           payload,
+	}
+	encodedRecord, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, viewID+".json"), encodedRecord, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, ok := cacheServer.readSessionFilesCache(request, viewID)
+	if !ok {
+		t.Fatal("oversized legacy disk record was not returned for this request")
+	}
+	decoded := sessionFilesCachePayload(loaded)
+	if len(decoded["padding"].(string)) != sessionFilesCacheMaxEntryBytes {
+		t.Fatalf("legacy disk payload was truncated: got %d bytes", len(decoded["padding"].(string)))
+	}
+	cacheServer.sessionFilesCache.mu.Lock()
+	entries := cacheServer.sessionFilesCache.records.Len()
+	payloadBytes := cacheServer.sessionFilesCache.payloadBytes
+	cacheServer.sessionFilesCache.mu.Unlock()
+	if entries != 0 || payloadBytes != 0 {
+		t.Fatalf("oversized legacy payload entered memory: entries=%d bytes=%d", entries, payloadBytes)
 	}
 }
 
@@ -3910,7 +4144,7 @@ func TestSessionFilesCacheHitsRefreshDurableEvictionRecency(t *testing.T) {
 				viewIDs[index] = sessionFilesCacheViewID(descriptor)
 				record := sessionFilesCacheRecord{
 					RequestDescriptor: descriptor, CacheViewID: viewIDs[index], StoredAt: time.Now().UnixNano(),
-					Status: http.StatusOK, Payload: map[string]any{"files": []any{}},
+					Status: http.StatusOK, Payload: testSessionFilesCachePayload(map[string]any{"files": []any{}}),
 				}
 				data, err := json.Marshal(record)
 				if err != nil {
@@ -3972,7 +4206,7 @@ func TestSessionFilesMemoryCacheReadPreservesDiskEvictionRecency(t *testing.T) {
 		viewIDs[index] = sessionFilesCacheViewID(descriptor)
 		record := sessionFilesCacheRecord{
 			RequestDescriptor: descriptor, CacheViewID: viewIDs[index], StoredAt: time.Now().UnixNano(),
-			Status: http.StatusOK, Payload: map[string]any{"files": []any{}},
+			Status: http.StatusOK, Payload: testSessionFilesCachePayload(map[string]any{"files": []any{}}),
 		}
 		data, err := json.Marshal(record)
 		if err != nil {
@@ -4061,7 +4295,8 @@ func TestPhase8SessionFilesStaleRefreshIsSingleFlight(t *testing.T) {
 	defer deadline.Stop()
 	for {
 		record, ok := server.readSessionFilesCache(request, viewID)
-		if ok && len(record.Payload["files"].([]any)) == 1 && record.Payload["files"].([]any)[0] == "new.py" {
+		payload := sessionFilesCachePayload(record)
+		if ok && len(payload["files"].([]any)) == 1 && payload["files"].([]any)[0] == "new.py" {
 			return
 		}
 		select {
@@ -4114,7 +4349,7 @@ func TestSessionFilesStaleRefreshCannotOverwriteNewerForegroundWrite(t *testing.
 		}
 	}
 	record, ok := server.readSessionFilesCache(request, viewID)
-	if !ok || record.Payload["files"].([]any)[0] != "fresh.py" {
+	if !ok || sessionFilesCachePayload(record)["files"].([]any)[0] != "fresh.py" {
 		t.Fatalf("stale refresh replaced newer foreground cache payload: %#v, ok=%t", record, ok)
 	}
 }
@@ -4296,34 +4531,33 @@ func TestSessionMetadataWarmReadUsesPublishedEnrichment(t *testing.T) {
 		gitMetadataSnapshotFn: func(string) (goGitSnapshot, bool) {
 			gitSnapshotCalls.Add(1)
 			return goGitSnapshot{}, false
-		},
-		metadataEnrichmentFn: func([]string) (map[string]map[string]any, error) {
+		}, tmuxMetadataState: tmuxMetadataState{metadataEnrichmentFn: func([]string) (map[string]map[string]any, error) {
 			enrichmentMu.Lock()
 			enrichmentCalls++
 			enrichmentMu.Unlock()
 			return nil, nil
 		},
-		metadataGeneration:         7,
-		metadataTopologyGeneration: 7,
-		metadataTopologySignature:  tmuxTopologySignature([]string{"cached"}, map[string]string{"cached": "cached"}),
-		metadataPayload: map[string]any{
-			"sessions": map[string]any{"cached": map[string]any{
-				"session_identity": goTmuxSessionIdentity("cached", "cached"),
-				"work_graph":       map[string]any{"marker": "cached-work-graph"},
+			metadataGeneration:         7,
+			metadataTopologyGeneration: 7,
+			metadataTopologySignature:  tmuxTopologySignature([]string{"cached"}, map[string]string{"cached": "cached"}),
+			metadataPayload: map[string]any{
+				"sessions": map[string]any{"cached": map[string]any{
+					"session_identity": goTmuxSessionIdentity("cached", "cached"),
+					"work_graph":       map[string]any{"marker": "cached-work-graph"},
+				}},
+				"session_order": []string{"cached"}, "session_scope": "all",
+				"metadata_generation": uint64(7), "metadata_identity": map[string]any{"epoch": "test-epoch", "generation": uint64(7)},
+				"topology_generation": uint64(7), "published_marker": "cached-enrichment",
+			},
+			metadataBuiltAt:      time.Now(),
+			tmuxRoster:           []string{"cached"},
+			tmuxRosterIdentities: map[string]string{"cached": "cached"},
+			tmuxRosterKnown:      true,
+			tmuxRosterSampledAt:  time.Now(),
+			tmuxSessionRosterFn: func() ([]string, error) {
+				rosterCalls++
+				return []string{"cached"}, nil
 			}},
-			"session_order": []string{"cached"}, "session_scope": "all",
-			"metadata_generation": uint64(7), "metadata_identity": map[string]any{"epoch": "test-epoch", "generation": uint64(7)},
-			"topology_generation": uint64(7), "published_marker": "cached-enrichment",
-		},
-		metadataBuiltAt:      time.Now(),
-		tmuxRoster:           []string{"cached"},
-		tmuxRosterIdentities: map[string]string{"cached": "cached"},
-		tmuxRosterKnown:      true,
-		tmuxRosterSampledAt:  time.Now(),
-		tmuxSessionRosterFn: func() ([]string, error) {
-			rosterCalls++
-			return []string{"cached"}, nil
-		},
 	}
 	response := httptest.NewRecorder()
 	s.sessionMetadata(response, httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil))
@@ -4367,25 +4601,25 @@ func TestActivityWarmReadUsesPublishedMetadata(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
 	s := &server{
-		metadataGeneration:         7,
-		metadataTopologyGeneration: 7,
-		metadataTopologySignature:  tmuxTopologySignature([]string{"cached"}, map[string]string{"cached": "cached"}),
-		metadataPayload: map[string]any{
-			"sessions": map[string]any{"cached": map[string]any{
-				"session_identity": goTmuxSessionIdentity("cached", "cached"),
-				"panes":            []map[string]any{{"pane_id": "%7", "current_path": "/cached/repo"}},
-				"agents":           []map[string]any{{"window_index": 3, "pane_target": "%7", "kind": "codex", "status": "working"}},
-				"work_graph":       map[string]any{"marker": "published"},
-			}},
-			"topology_generation": uint64(7), "errors": []string{},
-		},
-		metadataBuiltAt:       time.Now(),
-		tmuxRoster:            []string{"cached"},
-		tmuxRosterIdentities:  map[string]string{"cached": "cached"},
-		tmuxRosterKnown:       true,
-		tmuxRosterSampledAt:   time.Now(),
-		tmuxSessionActivityFn: func() (map[string]float64, error) { return map[string]float64{}, nil },
-		tmuxWindowActivityFn:  func() (map[string]float64, error) { return map[string]float64{}, nil },
+
+		tmuxWindowActivityFn: func() (map[string]float64, error) { return map[string]float64{}, nil }, tmuxMetadataState: tmuxMetadataState{metadataGeneration: 7,
+			metadataTopologyGeneration: 7,
+			metadataTopologySignature:  tmuxTopologySignature([]string{"cached"}, map[string]string{"cached": "cached"}),
+			metadataPayload: map[string]any{
+				"sessions": map[string]any{"cached": map[string]any{
+					"session_identity": goTmuxSessionIdentity("cached", "cached"),
+					"panes":            []map[string]any{{"pane_id": "%7", "current_path": "/cached/repo"}},
+					"agents":           []map[string]any{{"window_index": 3, "pane_target": "%7", "kind": "codex", "status": "working"}},
+					"work_graph":       map[string]any{"marker": "published"},
+				}},
+				"topology_generation": uint64(7), "errors": []string{},
+			},
+			metadataBuiltAt:       time.Now(),
+			tmuxRoster:            []string{"cached"},
+			tmuxRosterIdentities:  map[string]string{"cached": "cached"},
+			tmuxRosterKnown:       true,
+			tmuxRosterSampledAt:   time.Now(),
+			tmuxSessionActivityFn: func() (map[string]float64, error) { return map[string]float64{}, nil }},
 	}
 	record := httptest.NewRecorder()
 	s.activity(record, httptest.NewRequest(http.MethodGet, "/api/activity?scope=all", nil))
@@ -4434,24 +4668,24 @@ func TestActivityUsesFreshPublishedAgentStatusInsteadOfMetadataCache(t *testing.
 		t.Fatal(err)
 	}
 	s := &server{
-		statsService:       service,
-		metadataGeneration: 7, metadataTopologyGeneration: 7,
-		metadataTopologySignature: tmuxTopologySignature([]string{"cached"}, map[string]string{"cached": "cached"}),
-		metadataPayload: map[string]any{
-			"sessions": map[string]any{"cached": map[string]any{
-				"session_identity": goTmuxSessionIdentity("cached", "cached"),
-				"agents": []map[string]any{{
-					"window_index": 3, "pane_target": "%7", "kind": "codex", "status": "working",
-					"status_observed_at": float64(observedAt.Add(-2*time.Second).UnixNano()) / 1e9,
-					"window_active":      true, "current": true,
+		statsService: service,
+
+		tmuxWindowActivityFn: func() (map[string]float64, error) { return map[string]float64{}, nil }, tmuxMetadataState: tmuxMetadataState{metadataGeneration: 7, metadataTopologyGeneration: 7,
+			metadataTopologySignature: tmuxTopologySignature([]string{"cached"}, map[string]string{"cached": "cached"}),
+			metadataPayload: map[string]any{
+				"sessions": map[string]any{"cached": map[string]any{
+					"session_identity": goTmuxSessionIdentity("cached", "cached"),
+					"agents": []map[string]any{{
+						"window_index": 3, "pane_target": "%7", "kind": "codex", "status": "working",
+						"status_observed_at": float64(observedAt.Add(-2*time.Second).UnixNano()) / 1e9,
+						"window_active":      true, "current": true,
+					}},
 				}},
-			}},
-			"topology_generation": uint64(7), "errors": []string{},
-		},
-		metadataBuiltAt:       observedAt.Add(time.Second),
-		tmuxSessionRosterFn:   func() ([]string, error) { return []string{"cached"}, nil },
-		tmuxSessionActivityFn: func() (map[string]float64, error) { return map[string]float64{}, nil },
-		tmuxWindowActivityFn:  func() (map[string]float64, error) { return map[string]float64{}, nil },
+				"topology_generation": uint64(7), "errors": []string{},
+			},
+			metadataBuiltAt:       observedAt.Add(time.Second),
+			tmuxSessionRosterFn:   func() ([]string, error) { return []string{"cached"}, nil },
+			tmuxSessionActivityFn: func() (map[string]float64, error) { return map[string]float64{}, nil }},
 	}
 	response := httptest.NewRecorder()
 	s.activity(response, httptest.NewRequest(http.MethodGet, "/api/activity", nil))
@@ -4479,45 +4713,46 @@ func TestActivityTopologyChangeQueuesMetadataAfterHeldBuild(t *testing.T) {
 	var enrichmentMu sync.Mutex
 	enrichmentCalls := 0
 	s := &server{
-		metadataGeneration:         1,
-		metadataNextGeneration:     1,
-		metadataTopologyGeneration: 1,
-		metadataTopologySignature:  tmuxTopologySignature([]string{"old"}, map[string]string{"old": "old"}),
-		metadataPayload: map[string]any{
-			"sessions":            map[string]any{"old": map[string]any{"session_identity": goTmuxSessionIdentity("old", "old")}},
-			"topology_generation": uint64(1), "errors": []string{},
-		},
-		metadataBuiltAt: time.Now(),
-		tmuxRoster:      []string{"old"},
-		tmuxRosterIdentities: map[string]string{
-			"old": "old",
-		},
-		tmuxRosterKnown:     true,
-		tmuxRosterSampledAt: time.Now(),
-		tmuxSessionRosterFn: func() ([]string, error) { return []string{"new"}, nil },
-		tmuxSessionActivityFn: func() (map[string]float64, error) {
-			return map[string]float64{}, nil
-		},
+
 		tmuxWindowActivityFn: func() (map[string]float64, error) {
 			return map[string]float64{}, nil
-		},
-		metadataEnrichmentFn: func(sessions []string) (map[string]map[string]any, error) {
-			enrichmentMu.Lock()
-			enrichmentCalls++
-			call := enrichmentCalls
-			enrichmentMu.Unlock()
-			switch call {
-			case 1:
-				close(firstStarted)
-				<-releaseFirst
-			case 2:
-				close(secondStarted)
-				<-releaseSecond
-			default:
-				t.Errorf("unexpected metadata enrichment call %d for %v", call, sessions)
-			}
-			return map[string]map[string]any{}, nil
-		},
+		}, tmuxMetadataState: tmuxMetadataState{metadataGeneration: 1,
+			metadataNextGeneration:     1,
+			metadataTopologyGeneration: 1,
+			metadataTopologySignature:  tmuxTopologySignature([]string{"old"}, map[string]string{"old": "old"}),
+			metadataPayload: map[string]any{
+				"sessions":            map[string]any{"old": map[string]any{"session_identity": goTmuxSessionIdentity("old", "old")}},
+				"topology_generation": uint64(1), "errors": []string{},
+			},
+			metadataBuiltAt: time.Now(),
+			tmuxRoster:      []string{"old"},
+			tmuxRosterIdentities: map[string]string{
+				"old": "old",
+			},
+			tmuxRosterKnown:     true,
+			tmuxRosterSampledAt: time.Now(),
+			tmuxSessionRosterFn: func() ([]string, error) { return []string{"new"}, nil },
+			tmuxSessionActivityFn: func() (map[string]float64, error) {
+				return map[string]float64{}, nil
+			},
+
+			metadataEnrichmentFn: func(sessions []string) (map[string]map[string]any, error) {
+				enrichmentMu.Lock()
+				enrichmentCalls++
+				call := enrichmentCalls
+				enrichmentMu.Unlock()
+				switch call {
+				case 1:
+					close(firstStarted)
+					<-releaseFirst
+				case 2:
+					close(secondStarted)
+					<-releaseSecond
+				default:
+					t.Errorf("unexpected metadata enrichment call %d for %v", call, sessions)
+				}
+				return map[string]map[string]any{}, nil
+			}},
 	}
 	if generation := s.queueMetadataRefresh(false, []string{"old"}, map[string]string{"old": "old"}, nil, 1); generation != 2 {
 		t.Fatalf("initial refresh generation = %d, want 2", generation)
@@ -4563,19 +4798,20 @@ func TestColdForcedSessionMetadataDoesNotClaimAnUnpublishedBuild(t *testing.T) {
 	var releaseOnce sync.Once
 	releaseEnrichment := func() { releaseOnce.Do(func() { close(release) }) }
 	s := &server{
-		events:              newEventBroker(),
-		tmuxSessionRosterFn: func() ([]string, error) { return []string{"held"}, nil },
-		tmuxSessionActivityFn: func() (map[string]float64, error) {
-			return map[string]float64{}, nil
-		},
+		events: newEventBroker(),
+
 		tmuxWindowActivityFn: func() (map[string]float64, error) {
 			return map[string]float64{}, nil
-		},
-		metadataEnrichmentFn: func(sessions []string) (map[string]map[string]any, error) {
-			close(started)
-			<-release
-			return map[string]map[string]any{"held": {"panes": []map[string]any{}, "agents": []map[string]any{}}}, nil
-		},
+		}, tmuxMetadataState: tmuxMetadataState{tmuxSessionRosterFn: func() ([]string, error) { return []string{"held"}, nil },
+			tmuxSessionActivityFn: func() (map[string]float64, error) {
+				return map[string]float64{}, nil
+			},
+
+			metadataEnrichmentFn: func(sessions []string) (map[string]map[string]any, error) {
+				close(started)
+				<-release
+				return map[string]map[string]any{"held": {"panes": []map[string]any{}, "agents": []map[string]any{}}}, nil
+			}},
 	}
 	defer releaseEnrichment()
 	first := httptest.NewRecorder()
@@ -4639,8 +4875,7 @@ func TestColdForcedSessionMetadataDoesNotClaimAnUnpublishedBuild(t *testing.T) {
 func TestSessionMetadataRosterAdditionSchedulesEnrichment(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
-	s := &server{
-		metadataGeneration:         5,
+	s := &server{tmuxMetadataState: tmuxMetadataState{metadataGeneration: 5,
 		metadataNextGeneration:     5,
 		metadataTopologyGeneration: 1,
 		metadataTopologySignature:  tmuxTopologySignature([]string{"existing"}, map[string]string{"existing": "existing"}),
@@ -4658,7 +4893,7 @@ func TestSessionMetadataRosterAdditionSchedulesEnrichment(t *testing.T) {
 			close(started)
 			<-release
 			return map[string]map[string]any{"added": {"panes": []map[string]any{}}}, nil
-		},
+		}},
 	}
 	defer close(release)
 	response := httptest.NewRecorder()
@@ -4690,15 +4925,14 @@ func TestSessionMetadataRosterAdditionSchedulesEnrichment(t *testing.T) {
 
 func TestOrdinarySessionMetadataRefreshesExpiredRoster(t *testing.T) {
 	roster := []string{"before"}
-	s := &server{
-		tmuxSessionRosterFn: func() ([]string, error) { return append([]string(nil), roster...), nil },
+	s := &server{tmuxMetadataState: tmuxMetadataState{tmuxSessionRosterFn: func() ([]string, error) { return append([]string(nil), roster...), nil },
 		metadataEnrichmentFn: func(sessions []string) (map[string]map[string]any, error) {
 			result := make(map[string]map[string]any, len(sessions))
 			for _, session := range sessions {
 				result[session] = map[string]any{"panes": []map[string]any{}, "agents": []map[string]any{}, "window_metadata": []map[string]any{}}
 			}
 			return result, nil
-		},
+		}},
 	}
 	first := httptest.NewRecorder()
 	s.sessionMetadata(first, httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil))
@@ -4723,13 +4957,12 @@ func TestOrdinarySessionMetadataRefreshesExpiredRoster(t *testing.T) {
 }
 
 func TestForcedMetadataQueueKeepsNewestCapturedRoster(t *testing.T) {
-	s := &server{
-		metadataBuilding:                 true,
+	s := &server{tmuxMetadataState: tmuxMetadataState{metadataBuilding: true,
 		metadataBuildingGeneration:       10,
 		metadataNextGeneration:           10,
 		metadataQueuedGeneration:         11,
 		metadataQueuedSessions:           []string{"new"},
-		metadataQueuedTopologyGeneration: 2,
+		metadataQueuedTopologyGeneration: 2},
 	}
 	if got := s.queueMetadataRefresh(true, []string{"old"}, nil, nil, 1); got != 11 {
 		t.Fatalf("queued generation = %d, want existing queued generation 11", got)
@@ -4737,21 +4970,20 @@ func TestForcedMetadataQueueKeepsNewestCapturedRoster(t *testing.T) {
 	if s.metadataQueuedTopologyGeneration != 2 || len(s.metadataQueuedSessions) != 1 || s.metadataQueuedSessions[0] != "new" {
 		t.Fatalf("older forced request replaced queued roster: generation=%d sessions=%v", s.metadataQueuedTopologyGeneration, s.metadataQueuedSessions)
 	}
-	changed := &server{metadataBuilding: true, metadataBuildingTopologyGeneration: 1, metadataNextGeneration: 4}
+	changed := &server{tmuxMetadataState: tmuxMetadataState{metadataBuilding: true, metadataBuildingTopologyGeneration: 1, metadataNextGeneration: 4}}
 	if got := changed.queueMetadataRefresh(false, []string{"added"}, nil, nil, 2); got != 5 {
 		t.Fatalf("changed topology queued generation = %d, want 5", got)
 	}
 	if changed.metadataQueuedTopologyGeneration != 2 || len(changed.metadataQueuedSessions) != 1 || changed.metadataQueuedSessions[0] != "added" {
 		t.Fatalf("topology change was not queued behind active build: generation=%d sessions=%v", changed.metadataQueuedTopologyGeneration, changed.metadataQueuedSessions)
 	}
-	activeNewer := &server{metadataBuilding: true, metadataBuildingGeneration: 20, metadataBuildingTopologyGeneration: 2, metadataNextGeneration: 20}
+	activeNewer := &server{tmuxMetadataState: tmuxMetadataState{metadataBuilding: true, metadataBuildingGeneration: 20, metadataBuildingTopologyGeneration: 2, metadataNextGeneration: 20}}
 	if got := activeNewer.queueMetadataRefresh(true, []string{"old"}, nil, nil, 1); got != 20 || activeNewer.metadataQueuedGeneration != 0 {
 		t.Fatalf("old force queued behind newer active build: returned=%d queued=%d", got, activeNewer.metadataQueuedGeneration)
 	}
-	idleNewer := &server{
-		metadataGeneration:     20,
+	idleNewer := &server{tmuxMetadataState: tmuxMetadataState{metadataGeneration: 20,
 		metadataNextGeneration: 20,
-		metadataPayload:        map[string]any{"topology_generation": uint64(2)},
+		metadataPayload:        map[string]any{"topology_generation": uint64(2)}},
 	}
 	if got := idleNewer.queueMetadataRefresh(true, []string{"old"}, nil, nil, 1); got != 20 || idleNewer.metadataBuilding {
 		t.Fatalf("old force started stale refresh after newer publication: returned=%d building=%t", got, idleNewer.metadataBuilding)
@@ -4768,25 +5000,26 @@ func TestMetadataRefreshSkipsPublicationWhenNewerTopologyIsQueued(t *testing.T) 
 	releaseSecondBuild := func() { releaseSecondOnce.Do(func() { close(releaseSecond) }) }
 	calls := 0
 	s := &server{
-		metadataPayload:            map[string]any{"marker": "previous", "topology_generation": uint64(1)},
-		metadataGeneration:         4,
-		metadataNextGeneration:     4,
-		metadataTopologyGeneration: 1,
-		events:                     newEventBroker(),
-		metadataEnrichmentFn: func(sessions []string) (map[string]map[string]any, error) {
-			calls++
-			switch calls {
-			case 1:
-				close(firstStarted)
-				<-releaseFirst
-			case 2:
-				close(secondStarted)
-				<-releaseSecond
-			default:
-				t.Error("unexpected metadata build")
-			}
-			return map[string]map[string]any{}, nil
-		},
+
+		events: newEventBroker(), tmuxMetadataState: tmuxMetadataState{metadataPayload: map[string]any{"marker": "previous", "topology_generation": uint64(1)},
+			metadataGeneration:         4,
+			metadataNextGeneration:     4,
+			metadataTopologyGeneration: 1,
+
+			metadataEnrichmentFn: func(sessions []string) (map[string]map[string]any, error) {
+				calls++
+				switch calls {
+				case 1:
+					close(firstStarted)
+					<-releaseFirst
+				case 2:
+					close(secondStarted)
+					<-releaseSecond
+				default:
+					t.Error("unexpected metadata build")
+				}
+				return map[string]map[string]any{}, nil
+			}},
 	}
 	defer releaseFirstBuild()
 	defer releaseSecondBuild()
@@ -4835,33 +5068,33 @@ func TestFailedRosterReadReconcilesNewerCachedSnapshot(t *testing.T) {
 	release := make(chan struct{})
 	calls := 0
 	s := &server{
-		metadataGeneration:         5,
-		metadataNextGeneration:     5,
-		metadataTopologyGeneration: 1,
-		metadataTopologySignature:  tmuxTopologySignature([]string{"existing"}, map[string]string{"existing": "existing"}),
-		metadataPayload: map[string]any{
-			"sessions":      map[string]any{"existing": map[string]any{"work_graph": emptyGoWorkGraph(5)}},
-			"session_order": []string{"existing"}, "topology_generation": uint64(1), "errors": []string{},
-		},
-		metadataBuiltAt: time.Now(),
-		tmuxSessionRosterFn: func() ([]string, error) {
-			calls++
-			if calls == 1 {
-				return []string{"existing", "added"}, nil
-			}
-			return nil, errors.New("synthetic roster outage")
-		},
-		metadataEnrichmentFn: func(sessions []string) (map[string]map[string]any, error) {
-			close(started)
-			<-release
-			return map[string]map[string]any{"added": {"panes": []map[string]any{}}}, nil
-		},
-		tmuxSessionActivityFn: func() (map[string]float64, error) {
-			return map[string]float64{}, nil
-		},
+
 		tmuxWindowActivityFn: func() (map[string]float64, error) {
 			return map[string]float64{}, nil
-		},
+		}, tmuxMetadataState: tmuxMetadataState{metadataGeneration: 5,
+			metadataNextGeneration:     5,
+			metadataTopologyGeneration: 1,
+			metadataTopologySignature:  tmuxTopologySignature([]string{"existing"}, map[string]string{"existing": "existing"}),
+			metadataPayload: map[string]any{
+				"sessions":      map[string]any{"existing": map[string]any{"work_graph": emptyGoWorkGraph(5)}},
+				"session_order": []string{"existing"}, "topology_generation": uint64(1), "errors": []string{},
+			},
+			metadataBuiltAt: time.Now(),
+			tmuxSessionRosterFn: func() ([]string, error) {
+				calls++
+				if calls == 1 {
+					return []string{"existing", "added"}, nil
+				}
+				return nil, errors.New("synthetic roster outage")
+			},
+			metadataEnrichmentFn: func(sessions []string) (map[string]map[string]any, error) {
+				close(started)
+				<-release
+				return map[string]map[string]any{"added": {"panes": []map[string]any{}}}, nil
+			},
+			tmuxSessionActivityFn: func() (map[string]float64, error) {
+				return map[string]float64{}, nil
+			}},
 	}
 	defer close(release)
 	if _, err := s.tmuxSessionRoster(); err != nil {
@@ -4925,7 +5158,7 @@ func TestForcedSessionMetadataRefreshPublishesThePendingGeneration(t *testing.T)
 func TestFinderJSONEarlyCancellationConsumesOneResultAndReturnsTerminalReceipt(t *testing.T) {
 	scheduler := work.New(1, 1)
 	defer scheduler.Close()
-	s := &server{events: newEventBroker(), operations: map[string]*goOperation{}}
+	s := &server{events: newEventBroker(), operationState: operationState{operations: map[string]*goOperation{}}}
 	started := make(chan struct{})
 	response := httptest.NewRecorder()
 	done := make(chan struct{})
@@ -5066,11 +5299,11 @@ func TestTmuxTopologyGenerationTracksSessionRecreationWithSameName(t *testing.T)
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(releaseEnrichment) }) }
 	defer release()
-	s := &server{metadataEnrichmentFn: func(sessions []string) (map[string]map[string]any, error) {
+	s := &server{tmuxMetadataState: tmuxMetadataState{metadataEnrichmentFn: func(sessions []string) (map[string]map[string]any, error) {
 		close(enrichmentStarted)
 		<-releaseEnrichment
 		return map[string]map[string]any{}, nil
-	}}
+	}}}
 	firstTopology, firstErr := s.tmuxTopologySnapshot()
 	if firstErr != nil || len(firstTopology.sessions) != 2 || firstTopology.generation != 1 {
 		t.Fatalf("first topology = %v, %v, generation %d", firstTopology.sessions, firstErr, firstTopology.generation)
@@ -5131,7 +5364,7 @@ func TestForcedTopologyReadStartsAfterAnOlderRosterRead(t *testing.T) {
 	release := make(chan struct{})
 	var callsMu sync.Mutex
 	calls := 0
-	s := &server{tmuxSessionRosterFn: func() ([]string, error) {
+	s := &server{tmuxMetadataState: tmuxMetadataState{tmuxSessionRosterFn: func() ([]string, error) {
 		callsMu.Lock()
 		calls++
 		call := calls
@@ -5142,7 +5375,7 @@ func TestForcedTopologyReadStartsAfterAnOlderRosterRead(t *testing.T) {
 			return []string{"before-mutation"}, nil
 		}
 		return []string{"after-mutation"}, nil
-	}}
+	}}}
 	firstDone := make(chan struct{})
 	go func() {
 		s.tmuxSessionRoster()
@@ -5175,14 +5408,13 @@ func TestBlockedTopologyRosterReadDoesNotBlockMetadataSnapshot(t *testing.T) {
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(releaseRoster) }) }
 	defer release()
-	s := &server{
-		metadataPayload:    map[string]any{"marker": "warm"},
+	s := &server{tmuxMetadataState: tmuxMetadataState{metadataPayload: map[string]any{"marker": "warm"},
 		metadataGeneration: 7,
 		tmuxSessionRosterFn: func() ([]string, error) {
 			close(rosterStarted)
 			<-releaseRoster
 			return []string{"synthetic"}, nil
-		},
+		}},
 	}
 	topologyDone := make(chan struct{})
 	go func() {
@@ -5221,14 +5453,13 @@ func TestForcedRosterReadDoesNotBlockWarmSessionMetadataRoute(t *testing.T) {
 	release := func() { releaseOnce.Do(func() { close(releaseRoster) }) }
 	defer release()
 	const session = "warm-session"
-	s := &server{
-		metadataPayload: map[string]any{
-			"sessions": map[string]any{session: map[string]any{
-				"session_identity": goTmuxSessionIdentity(session, session),
-				"work_graph":       map[string]any{"marker": "warm"},
-			}},
-			"session_order": []string{session}, "topology_generation": uint64(1), "errors": []string{},
-		},
+	s := &server{tmuxMetadataState: tmuxMetadataState{metadataPayload: map[string]any{
+		"sessions": map[string]any{session: map[string]any{
+			"session_identity": goTmuxSessionIdentity(session, session),
+			"work_graph":       map[string]any{"marker": "warm"},
+		}},
+		"session_order": []string{session}, "topology_generation": uint64(1), "errors": []string{},
+	},
 		metadataGeneration:         4,
 		metadataTopologyGeneration: 1,
 		metadataTopologySignature:  tmuxTopologySignature([]string{session}, map[string]string{session: session}),
@@ -5241,7 +5472,7 @@ func TestForcedRosterReadDoesNotBlockWarmSessionMetadataRoute(t *testing.T) {
 			close(rosterStarted)
 			<-releaseRoster
 			return []string{session}, nil
-		},
+		}},
 	}
 	forcedReadDone := make(chan struct{})
 	go func() {
@@ -5312,14 +5543,13 @@ func TestTmuxServerRestartChangesTopologyForSameSessionNameAndID(t *testing.T) {
 func TestSessionMetadataKeepsLastKnownGlobalRosterWhenDiscoveryFails(t *testing.T) {
 	reads := 0
 	s := &server{
-		events: newEventBroker(),
-		tmuxSessionRosterFn: func() ([]string, error) {
+		events: newEventBroker(), tmuxMetadataState: tmuxMetadataState{tmuxSessionRosterFn: func() ([]string, error) {
 			reads++
 			if reads == 1 {
 				return []string{"synthetic-tab-a", "synthetic-tab-b"}, nil
 			}
 			return nil, errors.New("synthetic tmux roster read failed")
-		},
+		}},
 	}
 	first := httptest.NewRecorder()
 	s.sessionMetadata(first, httptest.NewRequest(http.MethodGet, "/api/session-metadata", nil))
@@ -5368,23 +5598,26 @@ func TestSessionMetadataAndActivitySerializeRosterReadBeforeStampingTopologyGene
 	releaseFirst := make(chan struct{})
 	var callsMu sync.Mutex
 	calls := 0
-	s := &server{events: newEventBroker(), tmuxSessionRosterFn: func() ([]string, error) {
-		callsMu.Lock()
-		calls++
-		call := calls
-		callsMu.Unlock()
-		if call == 1 {
-			close(firstStarted)
-			<-releaseFirst
-			return []string{"synthetic-old"}, nil
-		}
-		close(secondEntered)
-		return []string{"synthetic-new"}, nil
-	}, tmuxSessionActivityFn: func() (map[string]float64, error) {
-		return map[string]float64{}, nil
-	}, tmuxWindowActivityFn: func() (map[string]float64, error) {
-		return map[string]float64{}, nil
-	}}
+	s := &server{events: newEventBroker(),
+
+		tmuxWindowActivityFn: func() (map[string]float64, error) {
+			return map[string]float64{}, nil
+		}, tmuxMetadataState: tmuxMetadataState{tmuxSessionRosterFn: func() ([]string, error) {
+			callsMu.Lock()
+			calls++
+			call := calls
+			callsMu.Unlock()
+			if call == 1 {
+				close(firstStarted)
+				<-releaseFirst
+				return []string{"synthetic-old"}, nil
+			}
+			close(secondEntered)
+			return []string{"synthetic-new"}, nil
+		}, tmuxSessionActivityFn: func() (map[string]float64, error) {
+			return map[string]float64{}, nil
+		}},
+	}
 	first := httptest.NewRecorder()
 	second := httptest.NewRecorder()
 	firstDone := make(chan struct{})
@@ -5551,7 +5784,7 @@ func TestPhase45FinderBatchReturnsDurableReceiptWhenWorkerIsBusy(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-started
-	s := &server{root: root, finder: service, events: newEventBroker(), operations: map[string]*goOperation{}, finderJobs: scheduler}
+	s := &server{root: root, finder: service, events: newEventBroker(), finderJobs: scheduler, operationState: operationState{operations: map[string]*goOperation{}}}
 	record := httptest.NewRecorder()
 	s.fsBatch(record, httptest.NewRequest(http.MethodPost, "/api/fs/batch", bytes.NewBufferString(`{"requests":[{"id":"info","type":"info","path":"`+filepath.Join(root, "note.txt")+`"}]}`)))
 	close(release)
@@ -5597,13 +5830,13 @@ func TestPhase45FinderBatchReturnsReadyProductOrAcceptedOperation(t *testing.T) 
 	scheduler := newFinderJobScheduler()
 	defer scheduler.Close()
 	s := &server{
-		root:              root,
-		finder:            service,
-		events:            newEventBroker(),
-		operations:        map[string]*goOperation{},
-		operationsPath:    filepath.Join(root, "operations.json"),
-		operationsJournal: filepath.Join(root, "operations.jsonl"),
-		finderJobs:        scheduler,
+		root:   root,
+		finder: service,
+		events: newEventBroker(),
+
+		finderJobs: scheduler, operationState: operationState{operations: map[string]*goOperation{},
+			operationsPath:    filepath.Join(root, "operations.json"),
+			operationsJournal: filepath.Join(root, "operations.jsonl")},
 	}
 	record := httptest.NewRecorder()
 	s.fsBatch(record, httptest.NewRequest(http.MethodPost, "/api/fs/batch", bytes.NewBufferString(`{"requests":[{"id":"info","type":"info","path":"`+filepath.Join(root, "note.txt")+`"}]}`)))
@@ -5696,7 +5929,7 @@ func TestPhase45ExpensiveFinderRoutesUseBoundedOperations(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer service.Close()
-	s := &server{root: root, finder: service, events: newEventBroker(), operations: map[string]*goOperation{}, finderJobs: newFinderJobScheduler()}
+	s := &server{root: root, finder: service, events: newEventBroker(), finderJobs: newFinderJobScheduler(), operationState: operationState{operations: map[string]*goOperation{}}}
 	defer s.finderJobs.Close()
 
 	count := httptest.NewRecorder()
@@ -5770,7 +6003,7 @@ func TestRecursiveDeleteEscalatesToBulkLaneWhenBulkIsSaturated(t *testing.T) {
 	if _, err := bulk.Submit(context.Background(), "bulk-queued", func(context.Context) (any, error) { return nil, nil }); err != nil {
 		t.Fatal(err)
 	}
-	s := &server{root: root, finder: service, events: newEventBroker(), operations: map[string]*goOperation{}, finderJobs: point, finderBulkJobs: bulk}
+	s := &server{root: root, finder: service, events: newEventBroker(), finderJobs: point, finderBulkJobs: bulk, operationState: operationState{operations: map[string]*goOperation{}}}
 	record := httptest.NewRecorder()
 	s.fsDelete(record, httptest.NewRequest(http.MethodPost, "/api/fs/delete", bytes.NewBufferString(`{"path":"`+subtree+`"}`)))
 	if record.Code != http.StatusAccepted {
@@ -6014,7 +6247,7 @@ func TestFinderPointReadsDoNotBlockOnSpecialFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer service.Close()
-	s := &server{root: root, finder: service, events: newEventBroker(), operations: map[string]*goOperation{}, finderJobs: newFinderJobScheduler()}
+	s := &server{root: root, finder: service, events: newEventBroker(), finderJobs: newFinderJobScheduler(), operationState: operationState{operations: map[string]*goOperation{}}}
 	defer s.finderJobs.Close()
 	handlers := []func(http.ResponseWriter, *http.Request){s.fsRead, s.fsInfo, s.fsRaw}
 	for _, handler := range handlers {
@@ -6083,7 +6316,7 @@ func TestEventChannelFilterRejectsExplicitlyInvalidChannels(t *testing.T) {
 }
 
 func TestPhase3JSONRoutesRejectTrailingAndOversizedBodies(t *testing.T) {
-	s := &server{config: t.TempDir(), events: newEventBroker(), children: make(map[*exec.Cmd]struct{}), operations: map[string]*goOperation{}}
+	s := &server{config: t.TempDir(), events: newEventBroker(), children: make(map[*exec.Cmd]struct{}), operationState: operationState{operations: map[string]*goOperation{}}}
 	trailing := httptest.NewRecorder()
 	s.eventPost(trailing, httptest.NewRequest(http.MethodPost, "/api/event", strings.NewReader(`{"source":"one"}{"source":"two"}`)))
 	if trailing.Code != http.StatusBadRequest {
@@ -6098,7 +6331,7 @@ func TestPhase3JSONRoutesRejectTrailingAndOversizedBodies(t *testing.T) {
 
 func TestOperationTerminalPersistsAndAcknowledgesExactCursor(t *testing.T) {
 	dir := t.TempDir()
-	s := &server{config: dir, events: newEventBroker(), children: make(map[*exec.Cmd]struct{}), operationsPath: filepath.Join(dir, "operations.json"), operationsJournal: filepath.Join(dir, "operations.jsonl"), operations: map[string]*goOperation{}}
+	s := &server{config: dir, events: newEventBroker(), children: make(map[*exec.Cmd]struct{}), operationState: operationState{operationsPath: filepath.Join(dir, "operations.json"), operationsJournal: filepath.Join(dir, "operations.jsonl"), operations: map[string]*goOperation{}}}
 	if err := s.acceptOperation("op-phase3"); err != nil {
 		t.Fatal(err)
 	}
@@ -6109,7 +6342,7 @@ func TestOperationTerminalPersistsAndAcknowledgesExactCursor(t *testing.T) {
 	if event.Type != "operation_terminal" || event.Resource != "operation_terminal:op-phase3" {
 		t.Fatalf("terminal event = %+v", event)
 	}
-	reloaded := &server{config: dir, events: newEventBroker(), children: make(map[*exec.Cmd]struct{}), operationsPath: s.operationsPath, operationsJournal: s.operationsJournal, operations: loadOperationJournal(s.operationsJournal, loadOperations(s.operationsPath))}
+	reloaded := &server{config: dir, events: newEventBroker(), children: make(map[*exec.Cmd]struct{}), operationState: operationState{operationsPath: s.operationsPath, operationsJournal: s.operationsJournal, operations: loadOperationJournal(s.operationsJournal, loadOperations(s.operationsPath))}}
 	if record := reloaded.operationRecord("op-phase3"); record == nil || record.State != "succeeded" || record.Seq != 1 {
 		t.Fatalf("reloaded operation = %+v", record)
 	}
@@ -6163,7 +6396,7 @@ func TestRetainedEventReplayUsesStableResourceOrder(t *testing.T) {
 }
 
 func TestUnknownOperationCannotBeTerminalized(t *testing.T) {
-	s := &server{events: newEventBroker(), operations: map[string]*goOperation{}}
+	s := &server{events: newEventBroker(), operationState: operationState{operations: map[string]*goOperation{}}}
 	if _, err := s.terminalizeOperation("missing", map[string]any{"state": "succeeded"}, http.StatusOK); err == nil {
 		t.Fatal("unknown operation was terminalized")
 	}
@@ -6171,7 +6404,7 @@ func TestUnknownOperationCannotBeTerminalized(t *testing.T) {
 
 func TestOperationTerminalizationIsIdempotentAndCancellationPersists(t *testing.T) {
 	dir := t.TempDir()
-	s := &server{events: newEventBroker(), operations: map[string]*goOperation{}, operationsJournal: filepath.Join(dir, "ops.jsonl"), operationsPath: filepath.Join(dir, "ops.json")}
+	s := &server{events: newEventBroker(), operationState: operationState{operations: map[string]*goOperation{}, operationsJournal: filepath.Join(dir, "ops.jsonl"), operationsPath: filepath.Join(dir, "ops.json")}}
 	if err := s.acceptOperation("op-cancel"); err != nil {
 		t.Fatal(err)
 	}
@@ -6209,7 +6442,7 @@ func TestEventOverflowTracksRepairResource(t *testing.T) {
 
 func TestOperationJournalReloadsAfterTerminalAndAck(t *testing.T) {
 	dir := t.TempDir()
-	s := &server{events: newEventBroker(), operations: map[string]*goOperation{}, operationsPath: filepath.Join(dir, "snapshot.json"), operationsJournal: filepath.Join(dir, "journal.jsonl")}
+	s := &server{events: newEventBroker(), operationState: operationState{operations: map[string]*goOperation{}, operationsPath: filepath.Join(dir, "snapshot.json"), operationsJournal: filepath.Join(dir, "journal.jsonl")}}
 	if err := s.acceptOperation("op-journal"); err != nil {
 		t.Fatal(err)
 	}
@@ -6223,7 +6456,7 @@ func TestOperationJournalReloadsAfterTerminalAndAck(t *testing.T) {
 	if response.Code != 200 {
 		t.Fatal(response.Code)
 	}
-	reloaded := &server{events: newEventBroker(), operationsPath: s.operationsPath, operationsJournal: s.operationsJournal, operations: loadOperationJournal(s.operationsJournal, loadOperations(s.operationsPath))}
+	reloaded := &server{events: newEventBroker(), operationState: operationState{operationsPath: s.operationsPath, operationsJournal: s.operationsJournal, operations: loadOperationJournal(s.operationsJournal, loadOperations(s.operationsPath))}}
 	if !reloaded.operationRecord("op-journal").Acknowledged {
 		t.Fatal("ack not recovered")
 	}
@@ -6348,16 +6581,15 @@ func TestTmuxRosterWatcherPublishesExternalRemovalAndStops(t *testing.T) {
 	defer unsubscribe()
 	var reads atomic.Int32
 	srv := &server{
-		events: broker,
-		tmuxSessionRosterFn: func() ([]string, error) {
+		events: broker, tmuxMetadataState: tmuxMetadataState{tmuxSessionRosterFn: func() ([]string, error) {
 			if reads.Add(1) == 1 {
 				return []string{"1"}, nil
 			}
 			return []string{}, nil
 		},
-		metadataEnrichmentFn: func([]string) (map[string]map[string]any, error) {
-			return map[string]map[string]any{}, nil
-		},
+			metadataEnrichmentFn: func([]string) (map[string]map[string]any, error) {
+				return map[string]map[string]any{}, nil
+			}},
 	}
 	// The watcher's initial sample contains session 1 and establishes generation 1.
 	const initialGeneration = uint64(1)
@@ -6428,12 +6660,11 @@ func TestSessionMetadataPublishesRosterRenameBeforeEnrichment(t *testing.T) {
 	enrichmentStarted := make(chan struct{})
 	releaseEnrichment := make(chan struct{})
 	srv := &server{
-		events: broker,
-		metadataEnrichmentFn: func([]string) (map[string]map[string]any, error) {
+		events: broker, tmuxMetadataState: tmuxMetadataState{metadataEnrichmentFn: func([]string) (map[string]map[string]any, error) {
 			close(enrichmentStarted)
 			<-releaseEnrichment
 			return map[string]map[string]any{}, nil
-		},
+		}},
 	}
 	initial, err := srv.tmuxTopologySnapshot()
 	if err != nil || len(initial.sessions) != 1 || initial.sessions[0] != oldName {
@@ -6599,7 +6830,7 @@ func TestTmuxRosterRenamesRequireStableTmuxIdentity(t *testing.T) {
 
 func TestPhase3OperationStatusAndAcknowledgementAreExact(t *testing.T) {
 	dir := t.TempDir()
-	s := &server{config: dir, events: newEventBroker(), children: make(map[*exec.Cmd]struct{}), operationsPath: filepath.Join(dir, "snapshot.json"), operationsJournal: filepath.Join(dir, "journal.jsonl"), operations: map[string]*goOperation{}}
+	s := &server{config: dir, events: newEventBroker(), children: make(map[*exec.Cmd]struct{}), operationState: operationState{operationsPath: filepath.Join(dir, "snapshot.json"), operationsJournal: filepath.Join(dir, "journal.jsonl"), operations: map[string]*goOperation{}}}
 	if err := s.acceptOperation("op-exact"); err != nil {
 		t.Fatal(err)
 	}
@@ -6627,7 +6858,7 @@ func TestPhase3OperationStatusAndAcknowledgementAreExact(t *testing.T) {
 }
 
 func TestOperationTerminalizationPreservesResultState(t *testing.T) {
-	s := &server{events: newEventBroker(), operations: map[string]*goOperation{}}
+	s := &server{events: newEventBroker(), operationState: operationState{operations: map[string]*goOperation{}}}
 	if err := s.acceptOperation("op-ready-state"); err != nil {
 		t.Fatal(err)
 	}
@@ -6640,7 +6871,7 @@ func TestOperationTerminalizationPreservesResultState(t *testing.T) {
 }
 
 func TestOperationProducerUpdateRefreshesThePublicReceipt(t *testing.T) {
-	s := &server{events: newEventBroker(), operations: map[string]*goOperation{}}
+	s := &server{events: newEventBroker(), operationState: operationState{operations: map[string]*goOperation{}}}
 	if err := s.acceptOperationWithDetails("op-producer", "request", "GET /api/test", "test", 0, map[string]any{"phase": "queued"}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -6763,7 +6994,7 @@ func TestEventBrokerKeepsRepairFenceUntilTheSubscriberDequeues(t *testing.T) {
 }
 
 func TestCancellationPublishesTerminalEvent(t *testing.T) {
-	s := &server{events: newEventBroker(), operations: map[string]*goOperation{}}
+	s := &server{events: newEventBroker(), operationState: operationState{operations: map[string]*goOperation{}}}
 	ch, unsubscribe := s.events.subscribe()
 	defer unsubscribe()
 	if err := s.acceptOperation("op-cancel-event"); err != nil {
@@ -7108,7 +7339,7 @@ func TestLogRingReportsDroppedRangeAndLevels(t *testing.T) {
 
 func TestAcknowledgedLargeOperationReplayIsBoundedAndJournalIsVersioned(t *testing.T) {
 	dir := t.TempDir()
-	s := &server{events: newEventBroker(), operations: map[string]*goOperation{}, operationsPath: filepath.Join(dir, "snapshot.json"), operationsJournal: filepath.Join(dir, "journal.jsonl")}
+	s := &server{events: newEventBroker(), operationState: operationState{operations: map[string]*goOperation{}, operationsPath: filepath.Join(dir, "snapshot.json"), operationsJournal: filepath.Join(dir, "journal.jsonl")}}
 	if err := s.acceptOperation("op-large"); err != nil {
 		t.Fatal(err)
 	}
@@ -7159,7 +7390,7 @@ func TestOperationCompactionBoundsRecoveredRecordsWithoutLosingForeignWrites(t *
 		t.Fatal(err)
 	}
 	// The caller has already evicted and pruned its copies; replaying the old snapshot must not undo that policy.
-	s := &server{operations: cloneOperationMap(records)}
+	s := &server{operationState: operationState{operations: cloneOperationMap(records)}}
 	s.pruneOperationsLocked()
 	boundOperationReplays(s.operations)
 	if err := compactOperationJournal(path, s.operations); err != nil {
@@ -7295,11 +7526,10 @@ func TestCancelledOperationRecoveryPublishesItsTerminalEvent(t *testing.T) {
 	dir := t.TempDir()
 	events := newEventBroker()
 	s := &server{
-		config:            dir,
-		events:            events,
-		operationsPath:    filepath.Join(dir, "snapshot.json"),
-		operationsJournal: filepath.Join(dir, "journal.jsonl"),
-		operations:        map[string]*goOperation{},
+		config: dir,
+		events: events, operationState: operationState{operationsPath: filepath.Join(dir, "snapshot.json"),
+			operationsJournal: filepath.Join(dir, "journal.jsonl"),
+			operations:        map[string]*goOperation{}},
 	}
 	s.operations["op-cancel-recovery"] = &goOperation{
 		ID:            "op-cancel-recovery",
@@ -7316,8 +7546,7 @@ func TestCancelledOperationRecoveryPublishesItsTerminalEvent(t *testing.T) {
 func TestPublishedTerminalOperationIsNotRepublishedOnRestart(t *testing.T) {
 	events := newEventBroker()
 	s := &server{
-		events:     events,
-		operations: map[string]*goOperation{},
+		events: events, operationState: operationState{operations: map[string]*goOperation{}},
 	}
 	s.operations["op-published"] = &goOperation{
 		ID:             "op-published",
@@ -7383,6 +7612,44 @@ func stopHeartbeat(t *testing.T, owner *goBackgroundOwner) {
 func TestBackgroundRefreshWithoutRoleUsesUnknownResource(t *testing.T) {
 	if got := eventResource("background_refresh_done", map[string]any{}); got != "background:unknown" {
 		t.Fatalf("background resource = %q", got)
+	}
+}
+
+func TestSessionFilesBackgroundCompletionsReplayByCacheViewAcrossRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	first := loadEventBroker(path)
+	views := []string{
+		strings.Repeat("a", 64),
+		strings.Repeat("b", 64),
+	}
+	for _, viewID := range views {
+		payload := map[string]any{
+			"role": "session-files", "session": "yt-test-1", "cache_view_id": viewID,
+			"request_descriptor": strings.Repeat("c", 64), "completion_generation": "generation-" + viewID[:1],
+		}
+		if _, err := first.publish("background_refresh_done", payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	restarted := loadEventBroker(path)
+	stream, unsubscribe := restarted.subscribe("core")
+	defer unsubscribe()
+	got := map[string]bool{}
+	for range views {
+		select {
+		case event := <-stream:
+			viewID, _ := event.Payload["cache_view_id"].(string)
+			if !event.Replay || event.Type != "background_refresh_done" || viewID == "" {
+				t.Fatalf("replayed session-files completion = %+v", event)
+			}
+			got[viewID] = true
+		case <-time.After(time.Second):
+			t.Fatalf("session-files completion views replayed = %v, want %v", got, views)
+		}
+	}
+	if len(got) != len(views) {
+		t.Fatalf("session-files completion views replayed = %v, want %v", got, views)
 	}
 }
 
@@ -7533,17 +7800,17 @@ func TestAuthCookiesArePortScopedAndHTTPSafe(t *testing.T) {
 	}
 	valid := httptest.NewRequest(http.MethodGet, "/api/ping", nil)
 	valid.Header.Set("Cookie", setCookie[:strings.IndexByte(setCookie, ';')])
-	if _, ok := s.identity(valid); !ok {
+	if _, status := s.identityStatus(valid); status != 0 {
 		t.Fatal("scoped cookie was not accepted")
 	}
 	legacyCookie := httptest.NewRequest(http.MethodGet, "/api/ping", nil)
 	legacyCookie.AddCookie(&http.Cookie{Name: "yolomux_auth_7221", Value: s.cookieValue(authUser{username: "admin", password: "secret", role: "admin"})})
-	if _, ok := s.identity(legacyCookie); !ok {
+	if _, status := s.identityStatus(legacyCookie); status != 0 {
 		t.Fatal("legacy same-port cookie was not accepted during transition")
 	}
 	legacy := httptest.NewRequest(http.MethodGet, "/api/ping", nil)
 	legacy.Header.Set("Cookie", "yolomux_auth="+s.cookieValue(authUser{username: "admin", password: "secret", role: "admin"}))
-	if _, ok := s.identity(legacy); ok {
+	if _, status := s.identityStatus(legacy); status == 0 {
 		t.Fatal("unscoped cookie was accepted")
 	}
 	logout := httptest.NewRecorder()

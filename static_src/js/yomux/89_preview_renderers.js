@@ -304,6 +304,7 @@ function setPreviewZoomSurfaceState(shell, content, options = {}, zoomState = {}
 
 function bindPreviewZoomDragPan(shell, viewport, bind, options) {
   let drag = null;
+  const ownerDocument = viewport.ownerDocument || shell.ownerDocument;
   const finish = event => {
     if (!drag || (event.pointerId !== undefined && event.pointerId !== drag.pointerId)) return;
     try { viewport.releasePointerCapture?.(drag.pointerId); } catch (_) {}
@@ -322,8 +323,8 @@ function bindPreviewZoomDragPan(shell, viewport, bind, options) {
     };
     shell.classList.add('file-editor-preview-zoom-panning');
     try { viewport.setPointerCapture?.(event.pointerId); } catch (_) {}
-  }, {passive: false});
-  bind(viewport, 'pointermove', event => {
+  }, {capture: true, passive: false});
+  bind(ownerDocument, 'pointermove', event => {
     if (!drag || (event.pointerId !== undefined && event.pointerId !== drag.pointerId)) return;
     const dx = event.clientX - drag.x;
     const dy = event.clientY - drag.y;
@@ -332,9 +333,10 @@ function bindPreviewZoomDragPan(shell, viewport, bind, options) {
       left: Math.max(0, drag.scrollLeft - dx),
       top: Math.max(0, drag.scrollTop - dy),
     }, 'preview-zoom-drag-pan', {previewSurface: options.zoomKey || 'zoom'});
-  }, {passive: false});
-  bind(viewport, 'pointerup', finish);
-  bind(viewport, 'pointercancel', finish);
+  }, {capture: true, passive: false});
+  bind(ownerDocument, 'pointerup', finish, {capture: true});
+  bind(ownerDocument, 'pointercancel', finish, {capture: true});
+  bind(ownerDocument, 'lostpointercapture', finish, {capture: true});
 }
 
 function bindPreviewZoomParentWheel(shell, viewport, bind) {
@@ -618,7 +620,6 @@ async function renderMermaidSourceInto(container, source, options = {}) {
        if (options.controlsOnly === true) {
          installPreviewZoomSurface(container, img, previewZoomOptionsForKind(fullPreview ? 'mermaidFull' : 'mermaidInline', {
            ...options,
-           panDrag: false,
            path: options.path || '',
            full: fullPreview,
          }));
@@ -689,40 +690,53 @@ function localPathFromFileHref(href) {
   }
 }
 
-function openMarkdownPreviewPathLink(container, resolved) {
-  const owner = openFileOwnerSessionsForPath(container?.dataset?.mdPath || '')[0] || undefined;
+function openMarkdownPreviewPathLink(markdownPath, resolved) {
+  const owner = openFileOwnerSessionsForPath(markdownPath || '')[0] || undefined;
   return Promise.resolve(openFileInEditor(resolved, basenameOf(resolved), {
     viewMode: editorPreviewModeAvailable(resolved) ? 'preview' : 'edit',
     ownerSession: owner,
-  })).catch(() => emitNotification('previewOpen', {item: fileEditorItemFor(container?.dataset?.mdPath || ''), title: t('preview.openFailed', {path: resolved}), className: 'attention-alert toast'}));
+  })).catch(() => emitNotification('previewOpen', {item: fileEditorItemFor(markdownPath || ''), title: t('preview.openFailed', {path: resolved}), className: 'attention-alert toast'}));
 }
 
-// in the file-editor markdown preview, route link clicks: in-page #anchors keep default;
-// file:// server paths and relative file links open through the YOmux editor, while external links
-// open in a new browser tab. The server's read endpoint still rejects paths outside allowed roots.
-function handleMarkdownPreviewLinkClick(event) {
-  const a = event.target.closest?.('a');
-  if (!a) return;
-  const container = event.currentTarget;
-  const href = a.getAttribute('href') || '';
-  if (!href || href.startsWith('#')) return;
+function markdownPreviewLinkTarget(markdownPath, value, basePath = '') {
+  const href = String(value || '').trim();
+  if (!href || href.startsWith('#')) return {kind: 'anchor'};
   if (/^file:/i.test(href)) {
-    event.preventDefault();
-    const resolved = localPathFromFileHref(href);
-    if (resolved) openMarkdownPreviewPathLink(container, resolved);
-    return;
+    const path = localPathFromFileHref(href);
+    return path ? {kind: 'local', path} : {kind: 'invalid'};
   }
-  if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('//')) {
-    event.preventDefault();
-    window.open(a.href, '_blank', 'noopener,noreferrer');
-    return;
-  }
-  event.preventDefault();
+  if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('//')) return {kind: 'external'};
+  if (!markdownPath) return {kind: 'relative'};
   const clean = href.split('#')[0].split('?')[0];
-  if (!clean) return;
-  const basePath = container?.dataset?.basePath || '/';
-  const resolved = joinAndNormalize(clean.startsWith('/') ? '/' : basePath, clean);
-  openMarkdownPreviewPathLink(container, resolved);
+  if (!clean) return {kind: 'anchor'};
+  const sourceDirectory = basePath || dirnameOf(markdownPath) || '/';
+  return {kind: 'local', path: joinAndNormalize(clean.startsWith('/') ? '/' : sourceDirectory, clean)};
+}
+
+function markdownPreviewLinkContextMenuOptions(markdownPath, href, basePath = '') {
+  const target = markdownPreviewLinkTarget(markdownPath, href, basePath);
+  if (target.kind !== 'local') return {};
+  return {
+    openLabel: localizedLabel('contextmenu.openNewEditor', 'Open in a new Editor'),
+    openHandler: () => openMarkdownPreviewPathLink(markdownPath, target.path),
+  };
+}
+
+// File links use the owning Markdown path for both clicks and context-menu actions; explicit URLs
+// retain browser navigation, and the server's read endpoint still enforces filesystem access.
+function handleMarkdownPreviewLinkClick(event) {
+  const anchor = event.target.closest?.('a');
+  if (!anchor) return;
+  const container = event.currentTarget;
+  const href = anchor.getAttribute('href') || '';
+  const target = markdownPreviewLinkTarget(container?.dataset?.mdPath || '', href, container?.dataset?.basePath || '');
+  if (target.kind === 'anchor') return;
+  event.preventDefault();
+  if (target.kind === 'external') {
+    window.open(anchor.href, '_blank', 'noopener,noreferrer');
+    return;
+  }
+  if (target.kind === 'local') openMarkdownPreviewPathLink(container?.dataset?.mdPath || '', target.path);
 }
 
 function editorPreviewModeAvailable(path, state = null) {

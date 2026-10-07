@@ -8,6 +8,7 @@ import pytest
 
 from yomux_lib.infra import common
 from yomux_lib.local_services import rpc
+from tools.product_environment import product_env_name
 
 
 def _identity() -> common.HostIdentity:
@@ -122,7 +123,7 @@ def test_root_isolates_instance_state_but_not_user_owned_codex_credentials(tmp_p
     (("YOLOMUX_CONFIG_DIR", "/outside/config"), ("YOLOMUX_RUNTIME_DIR", "/outside/runtime"), ("YOLOMUX_CODEX_HOME", "/outside/codex")),
 )
 def test_root_refuses_each_outside_individual_override(tmp_path: Path, key: str, value: str):
-    with pytest.raises(ValueError, match=rf"{key}.*{value}"):
+    with pytest.raises(ValueError, match=rf"{product_env_name(key)}.*{value}"):
         common.resolve_yomux_roots({"YOLOMUX_ROOT": str(tmp_path / "root"), key: value}, identity=_identity())
 
 
@@ -140,7 +141,7 @@ def test_root_unset_preserves_existing_default_paths(monkeypatch, tmp_path: Path
 def test_deep_root_fails_socket_budget_before_creating_a_directory(tmp_path: Path):
     root = tmp_path / ("x" * 70)
 
-    with pytest.raises(ValueError, match="YOLOMUX_ROOT.*shorter"):
+    with pytest.raises(ValueError, match="YOMUX_ROOT.*shorter"):
         common.resolve_yomux_roots({"YOLOMUX_ROOT": str(root)}, identity=_identity())
 
     assert not root.exists()
@@ -169,7 +170,7 @@ def test_rooted_import_refuses_an_outside_config_before_creating_the_root(tmp_pa
     )
 
     assert result.returncode != 0
-    assert "YOLOMUX_CONFIG_DIR" in result.stderr
+    assert "YOMUX_CONFIG_DIR" in result.stderr
     assert "/outside/config" in result.stderr
     assert not root.exists()
 
@@ -191,7 +192,7 @@ def test_cli_reports_outside_codex_override_without_a_traceback(tmp_path: Path):
     )
 
     assert result.returncode == 2
-    assert "ERROR: YOLOMUX_CODEX_HOME resolves outside YOLOMUX_ROOT: /outside/codex" in result.stderr
+    assert "ERROR: YOMUX_CODEX_HOME resolves outside YOMUX_ROOT: /outside/codex" in result.stderr
     assert "Traceback" not in result.stderr
     assert not root.exists()
 

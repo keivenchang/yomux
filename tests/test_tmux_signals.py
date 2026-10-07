@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests.tmux_runtime import adaptive_tmux_poll_interval
+from tests.tmux_runtime import patch_isolated_product_environment
 from tests.tmux_runtime import run_isolated_tmux
 from tests.tmux_runtime import start_isolated_default_tmux_runtime
 from tests.tmux_runtime import start_isolated_tmux_runtime
@@ -114,6 +115,7 @@ def test_client_event_lifecycle_requires_a_live_tmux_control_client(
         app.stop_client_event_watcher()
 
 
+@pytest.mark.deprecated_python_server
 def test_client_event_sse_lifecycle_recreates_a_stopped_tmux_control_client(
     monkeypatch,
     tmp_path,
@@ -306,7 +308,7 @@ def test_parse_pane_signal_row_does_not_promote_an_arbitrary_opencode_command():
 
 
 def test_tmux_control_attach_command_is_readonly_and_ignores_size(monkeypatch):
-    monkeypatch.setenv("YOLOMUX_TMUX_SOCKET", "/tmp/yomux-test.sock")
+    patch_isolated_product_environment(monkeypatch, {"YOMUX_TMUX_SOCKET": "/tmp/yomux-test.sock"})
 
     command = tmux_control_attach_command("alpha")
 
@@ -409,7 +411,7 @@ def test_run_control_client_spawns_with_parent_death_preexec(monkeypatch):
         return FakeProcess()
 
     monkeypatch.setattr(tmux_signals.subprocess, "Popen", fake_popen)
-    monkeypatch.setenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, "/tmp/control-client.sock")
+    patch_isolated_product_environment(monkeypatch, {"YOMUX_TMUX_SOCKET": "/tmp/control-client.sock"})
 
     watcher = tmux_signals.TmuxSignalEventWatcher(sessions=lambda: ["alpha"], on_event=lambda event: None)
     watcher.run_control_client("alpha")
