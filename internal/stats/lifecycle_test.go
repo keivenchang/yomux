@@ -1987,3 +1987,29 @@ func TestLifecycleStartupReconciliationPublishesAndConvergesAfterRestart(t *test
 		t.Fatal(err)
 	}
 }
+
+func TestLifecycleNewCoarseDemandRefreshesCachedOpenCell(t *testing.T) {
+	writer, err := OpenWriter(context.Background(), filepath.Join(t.TempDir(), "stats.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	now := time.Unix(2_000_000_000, 0)
+	lifecycle := NewLifecycle(writer, LifecycleConfig{Now: func() time.Time { return now }})
+	t.Cleanup(lifecycle.Stop)
+	cell := lifecycleCell{ResolutionSeconds: 300, BucketStart: NextWindowEnd(now, 300) - 300}
+	lifecycle.lastMaterializedAt[[2]int64{300, cell.BucketStart}] = now.Add(-30 * time.Second)
+	if lifecycle.openCellDue(now, cell) {
+		t.Fatal("background fold bypassed ordinary cadence")
+	}
+	lifecycle.DemandProduct(86400, 300)
+	if !lifecycle.openCellDue(now, cell) {
+		t.Fatal("new coarse demand remained behind the sixty-second background cadence")
+	}
+	lifecycle.lastMaterializedAt[[2]int64{300, cell.BucketStart}] = now
+	now = now.Add(time.Second)
+	lifecycle.DemandProduct(86400, 300)
+	if lifecycle.openCellDue(now, cell) {
+		t.Fatal("polling the same product repeatedly forced a coarse fold")
+	}
+}

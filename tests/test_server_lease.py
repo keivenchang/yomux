@@ -9,11 +9,13 @@ from tests.gate_harness import HttpPortLease
 from tests import isolated_dev_server as isolated_server_module
 from tests.isolated_dev_server import build_environment
 from tests.isolated_dev_server import build_paths
+from tests.isolated_dev_server import go_test_server_binary
 from tests.isolated_dev_server import start_isolated_dev_server
 from tests.isolated_dev_server import stop_and_reap_daemons
 from tests.tmux_runtime import start_isolated_tmux_runtime
 from tests.tmux_runtime import stop_isolated_tmux_runtime
 from yomux_lib.infra.host_identity import HostIdentity
+from yomux_lib.infra.host_identity import current_host_identity
 from yomux_lib.infra.root_paths import YomuxRoots
 from yomux_lib import server_lease as server_lease_module
 from yomux_lib.server_lease import acquire_server_port_lease
@@ -322,6 +324,29 @@ def test_force_rechecks_every_verified_blocker_before_signaling_any_owner(monkey
     assert signalled == []
 
 
+def test_force_rejects_partial_lock_set_when_descendants_retain_descriptors(monkeypatch, tmp_path):
+    first_path = tmp_path / "first" / "instance.lock"
+    second_path = tmp_path / "second" / "instance.lock"
+    record = {"owner": "verified"}
+    identity = HostIdentity("host", "host", "boot", 2, "proc:2", 2, "nonce", "fixture")
+    try_lock = server_lease_module._try_lock_instance_path
+    monkeypatch.setattr(server_lease_module, "_try_lock_instance_path", lambda _path: None)
+    monkeypatch.setattr(server_lease_module, "_read_unlocked_instance_record", lambda _path: record)
+    monkeypatch.setattr(server_lease_module, "_verified_instance_owner", lambda _record, _identity: True)
+    monkeypatch.setattr(
+        server_lease_module,
+        "_force_stop_instance_owner",
+        lambda paths, *_args: {paths[0]: try_lock(paths[0])},
+    )
+
+    with pytest.raises(InstanceLeaseError, match="inherited descriptors still hold"):
+        server_lease_module._acquire_instance_locks(
+            (first_path, second_path),
+            force=True,
+            identity=identity,
+        )
+
+
 def test_force_does_not_stop_root_owner_when_requested_port_is_foreign(tmp_path):
     roots = _roots(tmp_path)
     ready = tmp_path / "ready"
@@ -380,6 +405,36 @@ def test_force_refuses_unverified_port_before_stopping_root_owner(monkeypatch, t
         acquire_instance_and_port_leases(tmp_path / "root", 9124, force=True)
 
 
+def test_force_reclaims_unlocked_leases_from_a_verified_dead_server(tmp_path):
+    roots = _roots(tmp_path)
+    identity = current_host_identity()
+    stale_record = {
+        **identity.process_record_fields(),
+        "pid": 2_000_000_000,
+        "process_start_identity": "proc:1",
+        "process_start_ticks": 1,
+        "instance_nonce": "dead-owner",
+        "pgid": 2_000_000_000,
+    }
+    paths = [path / "instance.lock" for path in roots.writable_paths()]
+    paths.append(roots.runtime_dir / "server-leases" / identity.stable_host_id / "9124.lock")
+    for path in paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(stale_record), encoding="utf-8")
+
+    replacement = acquire_instance_and_port_leases(roots, 9124, force=True)
+    assert replacement[0] is not None and replacement[1] is not None
+    try:
+        for path in paths:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            assert record["pid"] == identity.pid
+            assert record["instance_nonce"] != "dead-owner"
+    finally:
+        for lease in replacement:
+            if lease is not None:
+                lease.release()
+
+
 def test_force_refuses_verified_port_without_the_same_product_root(tmp_path):
     roots = _roots(tmp_path)
     foreign_port = acquire_server_port_lease(9124, state_dir=roots.runtime_dir)
@@ -406,18 +461,18 @@ def test_process_level_root_lease_refuses_second_server_on_another_port(monkeypa
         second_port = second_port_lease.release()
         second = subprocess.run(
             [
-                sys.executable,
-                "-u",
-                str(source_root / "yolomux.py"),
-                "--backend",
-                "python",
+                str(go_test_server_binary(source_root)),
                 "--http",
                 "--host",
                 "127.0.0.1",
                 "--port",
                 str(second_port),
-                "--sessions",
-                runtime.sessions[0],
+                "--root",
+                str(source_root),
+                "--config",
+                str(paths.config_dir),
+                "--stats",
+                str(paths.state_dir / "stats-v9.sqlite3"),
             ],
             cwd=source_root,
             env=build_environment(source_root, paths, runtime, second_port),
@@ -433,31 +488,24 @@ def test_process_level_root_lease_refuses_second_server_on_another_port(monkeypa
 
     assert second is not None
     assert second.returncode == 1
-    assert "Another YOmux instance is already running" in second.stderr
+    assert "product root is already owned by another server" in second.stderr
 
 
-def test_process_level_force_replaces_existing_server(monkeypatch, tmp_path):
+def test_go_process_level_force_does_not_override_root_lease(monkeypatch, tmp_path):
     source_root = Path(__file__).resolve().parents[1]
     paths = build_paths(tmp_path / "server")
     runtime = start_isolated_tmux_runtime(monkeypatch, tmp_path / "tmux", session_count=1)
     first = None
-    replacement = None
     try:
         first = start_isolated_dev_server("force-owner", source_root, paths, runtime)
-        replacement = start_isolated_dev_server(
-            "force-replacement",
-            source_root,
-            paths,
-            runtime,
-            port=first.port,
-            force=True,
-        )
-        assert first.process.wait(timeout=10.0) is not None
-        replacement.assert_serving()
+        with pytest.raises(AssertionError, match="product root is already owned by another server"):
+            start_isolated_dev_server(
+                "force-replacement", source_root, paths, runtime, port=first.port, force=True,
+            )
+        assert first.process.poll() is None
+        first.assert_serving()
     finally:
-        if replacement is not None:
-            stop_and_reap_daemons(replacement)
-        elif first is not None:
+        if first is not None:
             stop_and_reap_daemons(first)
         stop_isolated_tmux_runtime(runtime)
 
@@ -469,9 +517,10 @@ def test_isolated_server_readiness_failure_reaps_child_and_releases_port_lease(m
     lease = HttpPortLease.reserve()
     real_popen = subprocess.Popen
     children = []
+    monkeypatch.setattr(isolated_server_module, "server_entrypoint_arguments", lambda _root: [str(source_root / "cmd/yomux-go")])
 
     def spawn_paused_child(command, **kwargs):
-        if not any(str(source_root / name) in command for name in ("yomux.py", "yolomux.py")):
+        if not any(str(source_root / name) in command for name in ("yomux.py", "yolomux.py", "cmd/yomux-go")):
             return real_popen(command, **kwargs)
         child = real_popen(
             [sys.executable, "-c", "import signal; signal.pause()"],
@@ -556,27 +605,18 @@ def test_isolated_server_restart_failure_reaps_descendants_without_adopting_chil
         stop_isolated_tmux_runtime(runtime)
 
 
-def test_process_level_force_replaces_existing_server_on_a_different_port(monkeypatch, tmp_path):
+def test_go_process_level_force_does_not_override_root_lease_on_a_different_port(monkeypatch, tmp_path):
     source_root = Path(__file__).resolve().parents[1]
     paths = build_paths(tmp_path / "server")
     runtime = start_isolated_tmux_runtime(monkeypatch, tmp_path / "tmux", session_count=1)
     first = None
-    replacement = None
     try:
         first = start_isolated_dev_server("cross-port-force-owner", source_root, paths, runtime)
-        replacement = start_isolated_dev_server(
-            "cross-port-force-replacement",
-            source_root,
-            paths,
-            runtime,
-            force=True,
-        )
-        assert replacement.port != first.port
-        assert first.process.wait(timeout=10.0) is not None
-        replacement.assert_serving()
+        with pytest.raises(AssertionError, match="product root is already owned by another server"):
+            start_isolated_dev_server("cross-port-force-replacement", source_root, paths, runtime, force=True)
+        assert first.process.poll() is None
+        first.assert_serving()
     finally:
-        if replacement is not None:
-            stop_and_reap_daemons(replacement)
-        elif first is not None:
+        if first is not None:
             stop_and_reap_daemons(first)
         stop_isolated_tmux_runtime(runtime)

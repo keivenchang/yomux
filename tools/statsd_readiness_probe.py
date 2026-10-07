@@ -51,6 +51,7 @@ from yomux_lib.stats_current import storage  # noqa: E402
 from yomux_lib.stats_current.client import SERVICE_NAME  # noqa: E402
 from yomux_lib.stats_current.client import _append_payload  # noqa: E402
 from yomux_lib.stats_current.client import _wire_rpc  # noqa: E402
+from tools.product_environment import product_env_name
 from tools.instance_isolation import synthetic_test_environment  # noqa: E402
 
 DATABASE_FILENAME = storage.DATABASE_FILENAME
@@ -363,7 +364,7 @@ def _prepare_root(master: Path, root: Path, label: str) -> dict:
     """Persistent private root, plus a per-run private copy of the store with its WAL.
 
     The root persists across runs on purpose. Live statsd runs with
-    `PYTHONPYCACHEPREFIX` under its own `YOLOMUX_ROOT`, so that bytecode cache
+    `PYTHONPYCACHEPREFIX` under its own `YOMUX_ROOT`, so that bytecode cache
     survives a restart; recreating it per run would charge every cold start a
     full recompilation that a real restart never pays, and inflate both the
     readiness time and the peak. Only the database directory is fresh, because
@@ -404,13 +405,13 @@ def _launch_daemon(master: Path, root: Path, label: str) -> dict:
     log = scratch / "daemon.log"
 
     env = synthetic_test_environment()
-    env["YOLOMUX_ROOT"] = str(root)
-    env["YOLOMUX_CONFIG_DIR"] = str(root / "config")
-    env["YOLOMUX_STATE_DIR"] = str(root / "state")
-    env["YOLOMUX_CACHE_DIR"] = str(root / "cache")
-    env["YOLOMUX_RUNTIME_DIR"] = str(root / "runtime")
+    env[product_env_name('ROOT')] = str(root)
+    env[product_env_name('CONFIG_DIR')] = str(root / "config")
+    env[product_env_name('STATE_DIR')] = str(root / "state")
+    env[product_env_name('CACHE_DIR')] = str(root / "cache")
+    env[product_env_name('RUNTIME_DIR')] = str(root / "runtime")
     env["PYTHONPYCACHEPREFIX"] = str(root / "runtime" / "python-cache")
-    env.pop("YOLOMUX_GENERATED_PYTHONPYCACHEPREFIX", None)
+    env.pop(product_env_name('GENERATED_PYTHONPYCACHEPREFIX'), None)
     env["PYTHONPATH"] = os.pathsep.join([str(REPO_ROOT), env.get("PYTHONPATH", "")]).strip(os.pathsep)
     env.setdefault("MALLOC_ARENA_MAX", "2")
 
@@ -848,7 +849,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     runner = sub.add_parser("run", help="one cold start, measured end to end")
     runner.add_argument("--master", required=True, help="pristine store to copy; never opened in place")
-    runner.add_argument("--root", required=True, help="persistent private YOLOMUX_ROOT; reused across runs")
+    runner.add_argument("--root", required=True, help="persistent private YOMUX_ROOT; reused across runs")
     runner.add_argument("--label", required=True)
     runner.add_argument("--out", default="")
     runner.add_argument("--ready-timeout", type=float, default=600.0)

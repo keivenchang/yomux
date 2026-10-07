@@ -65,6 +65,7 @@ from yomux_lib.workspace import workdir as workdir_module
 from tests.browser_helpers.browser_console import assert_browser_journey_error_free
 from tests.browser_helpers.browser_console import acknowledge_browser_diagnostic_receipts
 from tests.browser_helpers.browser_console import begin_browser_journey_surface_tracking
+from tests.browser_helpers.browser_console import consume_only_expected_js_debug_api_error
 from tests.browser_helpers.browser_console import consume_only_expected_server_log_errors
 from tests.browser_helpers.browser_console import read_browser_console_log
 from tests.browser_helpers.browser_console import retire_browser_after_strict_diagnostic_gate
@@ -72,6 +73,8 @@ from tests.browser_helpers.browser_console import validate_server_log_ring_paylo
 from tests.browser_helpers.browser_console import validate_server_log_ring_transition
 from tests.aged_state import AgedStateRecipeResult
 from tests.aged_state import AgedStateRoot
+from tests.tmux_runtime import run_isolated_tmux
+from tests.tmux_runtime import patch_isolated_product_environment
 from tests.tmux_runtime import start_isolated_tmux_runtime
 from tests.tmux_runtime import stop_isolated_tmux_runtime
 from tests.gate_helpers import CounterDelta
@@ -79,6 +82,10 @@ from tests.gate_helpers import RepeatFailure
 from tests.gate_helpers import assert_counter_delta
 from tests.gate_helpers import repeat
 from tools.instance_isolation import normalize_yomux_environment
+from tools.product_environment import product_env
+from tools.product_environment import product_env_name
+from tools.product_environment import require_product_env
+from tools.product_environment import environment_value
 from tests.gate_helpers import sample_counter_delta
 from tools.test_plan import CHECK_LANE_ENV
 from tools.test_plan import PYTEST_LANE_NAMES
@@ -249,21 +256,21 @@ GATE_WRITABLE_ENV_VARS = (
     "XDG_CONFIG_HOME",
     "XDG_STATE_HOME",
     "XDG_CACHE_HOME",
-    "YOLOMUX_CONFIG_DIR",
-    "YOLOMUX_STATE_DIR",
-    "YOLOMUX_CACHE_DIR",
-    "YOLOMUX_RUNTIME_DIR",
-    "YOLOMUX_CODEX_HOME",
+    product_env_name("CONFIG_DIR"),
+    product_env_name("STATE_DIR"),
+    product_env_name("CACHE_DIR"),
+    product_env_name("RUNTIME_DIR"),
+    product_env_name("CODEX_HOME"),
     "CODEX_HOME",
-    "YOLOMUX_START_LOCK_DIR",
-    "YOLOMUX_TOOL_LOCK_PATH",
-    "YOLOMUX_CA_DIR",
-    "YOLOMUX_LOG_DIR",
-    "YOLOMUX_WORKSPACE_BASE",
+    product_env_name("START_LOCK_DIR"),
+    product_env_name("TOOL_LOCK_PATH"),
+    product_env_name("CA_DIR"),
+    product_env_name("LOG_DIR"),
+    product_env_name("WORKSPACE_BASE"),
 )
-GATE_TMUX_SOCKET_ENV_VAR = "YOLOMUX_TMUX_SOCKET"
+GATE_TMUX_SOCKET_ENV_VAR = product_env_name("TMUX_SOCKET")
 GATE_HOME_ENV_VAR = "HOME"
-GATE_ROOT_ENV_VAR = "YOLOMUX_ROOT"
+GATE_ROOT_ENV_VAR = product_env_name("ROOT")
 GATE_BOOTSTRAP_PATH_ENV_VARS = (*GATE_WRITABLE_ENV_VARS, GATE_TMUX_SOCKET_ENV_VAR)
 
 
@@ -303,16 +310,16 @@ def assert_writable_paths_beneath(root: Path, paths: Mapping[str, Path]) -> None
 def bootstrap_writable_paths() -> tuple[Path, dict[str, Path]]:
     """Return the collection-time isolation root and all environment paths."""
 
-    root = Path(os.environ["YOLOMUX_TEST_ROOT"])
-    return root, {name: Path(os.environ[name]) for name in GATE_BOOTSTRAP_PATH_ENV_VARS}
+    root = Path(require_product_env("TEST_ROOT"))
+    return root, {name: Path(environment_value(os.environ, name, "") or "") for name in GATE_BOOTSTRAP_PATH_ENV_VARS}
 
 
 def resolved_gate_writable_paths(paths: GateRuntimePaths) -> dict[str, Path]:
     """Return every environment and imported-module path owned by one gate test."""
 
-    resolved = {f"env:{name}": Path(os.environ[name]) for name in GATE_WRITABLE_ENV_VARS}
+    resolved = {f"env:{name}": Path(environment_value(os.environ, name, "") or "") for name in GATE_WRITABLE_ENV_VARS}
     resolved[f"env:{GATE_HOME_ENV_VAR}"] = Path(os.environ[GATE_HOME_ENV_VAR])
-    resolved[f"env:{GATE_ROOT_ENV_VAR}"] = Path(os.environ[GATE_ROOT_ENV_VAR])
+    resolved[f"env:{GATE_ROOT_ENV_VAR}"] = Path(product_env("ROOT") or "")
     resolved.update({f"module:{label}": path for label, path in paths.patched_module_paths})
     resolved["module:yomux_lib.workspace.uploads.UPLOAD_TMP_BASE"] = uploads_module.UPLOAD_TMP_BASE
     resolved["env:TMPDIR"] = Path(os.environ["TMPDIR"])
@@ -363,10 +370,10 @@ def gate_runtime_paths(
     # fixture redirects TMPDIR into its disposable product root; otherwise tearing down one gate
     # deletes pytest's cached base and every later tmp_path fixture fails during setup.
     tmp_path_factory.getbasetemp()
-    # ``YOLOMUX_TEST_ROOT`` is already a per-run, identity-fenced root. Keep
+    # ``YOMUX_TEST_ROOT`` is already a per-run, identity-fenced root. Keep
     # the per-test discriminator short so the deepest rooted control socket
     # remains bindable under Linux's fixed sockaddr_un path limit.
-    root = Path(os.environ["YOLOMUX_TEST_ROOT"]) / f"g-{uuid.uuid4().hex[:4]}"
+    root = Path(require_product_env("TEST_ROOT")) / f"g-{uuid.uuid4().hex[:4]}"
     root.mkdir(mode=0o700)
     ledger = install_fixture_local_service_ledger(monkeypatch)
     self_baseline = capture_fixture_self_baseline()
@@ -402,30 +409,28 @@ def gate_runtime_paths(
     ):
         directory.mkdir(parents=True, exist_ok=True)
 
-    old_roots = {name: Path(os.environ[name]) for name in GATE_WRITABLE_ENV_VARS}
-    tmux_socket_path = Path(os.environ[GATE_TMUX_SOCKET_ENV_VAR])
+    old_roots = {name: Path(environment_value(os.environ, name, "") or "") for name in GATE_WRITABLE_ENV_VARS}
+    tmux_socket_path = Path(require_product_env("TMUX_SOCKET"))
     assert_unix_socket_path_fits(tmux_socket_path)
     per_test_env = {
         "XDG_CONFIG_HOME": root / "xdg-config",
         "XDG_STATE_HOME": root / "xdg-state",
         "XDG_CACHE_HOME": root / "xdg-cache",
-        "YOLOMUX_CONFIG_DIR": config_dir,
-        "YOLOMUX_STATE_DIR": state_dir,
-        "YOLOMUX_CACHE_DIR": cache_dir,
-        "YOLOMUX_RUNTIME_DIR": runtime_base_dir,
-        "YOLOMUX_CODEX_HOME": codex_home,
+        product_env_name("CONFIG_DIR"): config_dir,
+        product_env_name("STATE_DIR"): state_dir,
+        product_env_name("CACHE_DIR"): cache_dir,
+        product_env_name("RUNTIME_DIR"): runtime_base_dir,
+        product_env_name("CODEX_HOME"): codex_home,
         "CODEX_HOME": codex_home,
-        "YOLOMUX_START_LOCK_DIR": start_lock_dir,
-        "YOLOMUX_TOOL_LOCK_PATH": tool_lock_path,
-        "YOLOMUX_CA_DIR": ca_dir,
-        "YOLOMUX_LOG_DIR": log_dir,
-        "YOLOMUX_WORKSPACE_BASE": workspace_dir,
+        product_env_name("START_LOCK_DIR"): start_lock_dir,
+        product_env_name("TOOL_LOCK_PATH"): tool_lock_path,
+        product_env_name("CA_DIR"): ca_dir,
+        product_env_name("LOG_DIR"): log_dir,
+        product_env_name("WORKSPACE_BASE"): workspace_dir,
         GATE_ROOT_ENV_VAR: root,
         GATE_TMUX_SOCKET_ENV_VAR: tmux_socket_path,
     }
-    normalized_test_env = normalize_yomux_environment({name: str(path) for name, path in per_test_env.items()})
-    for name, value in normalized_test_env.items():
-        monkeypatch.setenv(name, value)
+    patch_isolated_product_environment(monkeypatch, {name: str(path) for name, path in per_test_env.items()})
     monkeypatch.setenv("TMPDIR", str(tmp_dir))
     previous_tempdir = tempfile.tempdir
     tempfile.tempdir = None
@@ -937,7 +942,7 @@ def retire_expected_fixture_typed_api_failure(
 def prepare_fixture_http_app(monkeypatch: pytest.MonkeyPatch, app: Any) -> None:
     """Disable process-lifetime work that has no fixture teardown boundary."""
 
-    monkeypatch.setenv("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", GATE_LOCAL_SERVICE_IDLE_SECONDS)
+    patch_isolated_product_environment(monkeypatch, {product_env_name("LOCAL_SERVICE_IDLE_SECONDS"): GATE_LOCAL_SERVICE_IDLE_SECONDS})
     monkeypatch.setattr(app, "start_update_check_thread", lambda: False, raising=False)
     # The production auth cache is process-global and probes external CLIs on a daemon thread.
     # A fixture server cannot join that owner, so never let it outlive the fixture HOME.
@@ -1040,14 +1045,36 @@ def pin_fixture_batchd_scheduler(app: FixtureSchedulerApp) -> None:
     """
 
     if not app.job_client.start_for_scheduler():
-        status = app.job_client.registry.status()
+        registry = app.job_client.registry
+        status = registry.status()
+        child = registry.process
+        proof = registry.refresh_spawn_ownership_proof()
+        ownership = registry.spawn_ownership
+        # An absent published record says nothing about the child this owner just spawned.
+        # Capture that separate identity before fixture rollback retires it and its stderr.
+        startup = {
+            "child_pid": int(child.pid) if child is not None else 0,
+            "child_exit_code": child.poll() if child is not None else None,
+            "observed_child_start_identity": process_start_identity(child.pid) if child is not None else None,
+            "owned_leader_pid": ownership.leader_pid if ownership is not None else 0,
+            "owned_process_group": ownership.process_group if ownership is not None else 0,
+            "owned_session_id": ownership.session_id if ownership is not None else 0,
+            "recorded_member_identities": ownership.member_identities if ownership is not None else (),
+            "group_exists": proof.group_exists if proof is not None else None,
+            "proven_member_identities": proof.owned_member_identities if proof is not None else (),
+            "disproven_occupants": proof.disproven_occupants if proof is not None else (),
+            "start_timeout_seconds": registry.spec.start_timeout_seconds,
+            "next_start_at": registry.next_start_at,
+            "backoff_remaining_seconds": max(0.0, registry.next_start_at - registry.clock()),
+            "stderr_tail": registry._stderr_tail(),
+        }
         raise AssertionError(
             "fixture could not start local batchd scheduler lease: "
-            f"socket={app.job_client.registry.socket_path} "
-            f"service_dir={app.job_client.registry.service_dir} "
+            f"socket={registry.socket_path} "
+            f"service_dir={registry.service_dir} "
             f"status={status.get('status') or status.get('error')} "
             f"failure={status.get('failure_reason')} terminal={status.get('terminal_failure')} "
-            f"process={status.get('process_diagnostic')}"
+            f"process={status.get('process_diagnostic')} startup={startup}"
         )
 
 
@@ -2131,7 +2158,7 @@ def retire_fixture_app_local_services(app: Any, *, label: str) -> None:
     """Retire adopted children using the app's private service-root identity."""
 
     registries = fixture_local_service_registries(app)
-    fixture_root_value = os.environ.get("YOLOMUX_TEST_ROOT", "").strip()
+    fixture_root_value = (product_env("TEST_ROOT", "") or "").strip()
     if not fixture_root_value:
         return
     fixture_root = Path(fixture_root_value).resolve()
@@ -3753,6 +3780,83 @@ def load_gate_terminal_only_browser(driver, runtime: GateLiveServer, *, timeout:
         timeout=timeout,
     )
     return session
+
+
+def held_rename_roster_probe(driver, runtime, *, reject=False, stale=False):
+    """Hold the real rename transport while exercising native dialog submission."""
+    session = load_gate_terminal_only_browser(driver, runtime)
+    target = session + "-renamed"
+    driver.execute_script("""
+      const nativeFetch = window.fetch.bind(window);
+      const probe = window.__renameProbe = {calls: 0, releases: [], nativeFetch, staleRelease: null};
+      let holdRoster = arguments[0];
+      window.fetch = async (input, options) => {
+        const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+        const rename = url.pathname === '/api/rename-session';
+        const oldRoster = holdRoster && url.pathname === '/api/session-metadata';
+        if (oldRoster) holdRoster = false;
+        if (rename) probe.calls += 1;
+        const response = await nativeFetch(input, options);
+        if (rename) await new Promise(resolve => { probe.release = resolve; probe.releases.push(resolve); });
+        if (oldRoster) await new Promise(resolve => { probe.staleRelease = resolve; });
+        return response;
+      };
+      if (arguments[0]) probe.staleRequest = refreshTranscripts({force: true, refreshAuto: false, refreshContext: false, refreshActivity: false});
+    """, stale)
+    if stale:
+        WebDriverWait(driver, 8).until(lambda current: current.execute_script("return Boolean(window.__renameProbe.staleRelease)"))
+    driver.execute_script("showSessionRenameDialog(arguments[0]);", session)
+    # A collision rejects through the real API without fabricating a response.
+    if reject:
+        created = run_isolated_tmux(runtime.tmux, "new-session", "-d", "-s", target)
+        assert created.returncode == 0, created.stderr
+    field = driver.find_element(By.CSS_SELECTOR, '.session-rename-input')
+    field.clear()
+    field.send_keys(target)
+    field.send_keys("\ue007")
+    WebDriverWait(driver, 8).until(lambda current: current.execute_script("return Boolean(window.__renameProbe.release)"))
+    for _ in range(4):
+        field.send_keys("\ue007")
+    held = driver.execute_script("""
+      const button = document.querySelector('.session-rename-submit');
+      window.__renameProbe.button = button;
+      return {calls: window.__renameProbe.calls, disabled: button.disabled,
+        opacity: Number(getComputedStyle(button).opacity),
+        tabText: Array.from(document.querySelectorAll('.dv-tab')).map(tab => tab.textContent).join(' ')};
+    """)
+    try:
+        driver.execute_script("window.__renameProbe.releases.forEach(release => release());")
+        WebDriverWait(driver, 12).until(lambda current: current.execute_script("""
+          return arguments[0] ? !document.querySelector('.session-rename-error')?.hidden
+            : !document.querySelector('.session-rename-dialog') && !window.__renameProbe.button.disabled;
+        """, reject))
+        if stale:
+            driver.execute_async_script("""
+              const done = arguments[arguments.length - 1];
+              window.__renameProbe.staleRelease();
+              Promise.allSettled([window.__renameProbe.staleRequest]).then(() => requestAnimationFrame(() => done(true)));
+            """)
+        final = driver.execute_script("""
+          const error = document.querySelector('.session-rename-error');
+          return {calls: window.__renameProbe.calls, disabled: window.__renameProbe.button.disabled,
+            error: error && !error.hidden ? error.textContent : '', sessions: [...sessions],
+            layout: JSON.stringify(layoutSlots), focused: dockviewLayoutState.api?.activePanel?.id, active: activePaneItems(),
+            tabText: Array.from(document.querySelectorAll('.dv-tab')).map(tab => tab.textContent).join(' ')};
+        """)
+        server_sessions = run_isolated_tmux(runtime.tmux, "list-sessions", "-F", "#{session_name}")
+        assert server_sessions.returncode == 0, server_sessions.stderr
+        final["serverSessions"] = server_sessions.stdout.splitlines()
+        if reject:
+            query = {"session": session, "new_name": target}
+            event = consume_only_expected_js_debug_api_error(driver, path="/api/rename-session",
+                status=409, method="POST", query=query)
+            retire_expected_fixture_http_failures(driver, runtime, ({
+                "path": "/api/rename-session", "status": 409, "method": "POST", "query": query,
+                "code": "conflict", "request_id": event["requestId"],
+            },))
+        return {"held": held, "final": final, "session": session, "target": target}
+    finally:
+        driver.execute_script("window.__renameProbe.staleRelease?.(); window.__renameProbe.releases.forEach(release => release()); window.fetch = window.__renameProbe.nativeFetch;")
 
 
 def open_gate_stats_surface(driver, *, timeout: float = 8.0) -> dict[str, Any]:

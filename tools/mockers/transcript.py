@@ -10,9 +10,10 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from tools.product_environment import product_env, product_env_name
 
 
-MOCK_TRANSCRIPTS_ENV = "YOLOMUX_TEST_MOCK_TRANSCRIPTS"
+MOCK_TRANSCRIPTS_ENV = product_env_name('TEST_MOCK_TRANSCRIPTS')
 DEFAULT_START_TIMESTAMP = 1_700_000_000
 
 
@@ -327,7 +328,7 @@ def generate_mock_transcripts(root: Path, spec: MockTranscriptSpec) -> MockTrans
 def generate_mock_transcripts_from_env(root: Path) -> MockTranscriptCorpus:
     """Generate from the explicit test-only environment contract."""
 
-    raw = os.environ.get(MOCK_TRANSCRIPTS_ENV, "").strip()
+    raw = product_env('TEST_MOCK_TRANSCRIPTS', "", environ=os.environ).strip()
     if not raw:
         raise RuntimeError(f"{MOCK_TRANSCRIPTS_ENV} must be set for mock transcript routing")
     try:

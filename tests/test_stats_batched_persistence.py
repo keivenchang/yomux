@@ -525,7 +525,7 @@ def test_batched_persistence_ships_disabled_until_the_generation_collision_is_re
     Resolve that tension first, run those two gates, and only then change this number.
     """
 
-    monkeypatch.delenv(service_module.APPEND_FLUSH_ENV_NAME, raising=False)
+    monkeypatch.setenv(service_module.APPEND_FLUSH_ENV_NAME, "")
     assert service_module.APPEND_FLUSH_SECONDS == 0.0
     assert service_module.resolve_append_flush_seconds() == 0.0
     # The measured interval survives as the value to select, not as the default.
@@ -545,7 +545,7 @@ def test_a_shipped_statsd_cannot_enable_the_broken_arm_from_its_environment(tmp_
     look like the feature working.
     """
 
-    monkeypatch.delenv(service_module.APPEND_FLUSH_TEST_MARKER_ENV, raising=False)
+    monkeypatch.setenv(service_module.APPEND_FLUSH_TEST_MARKER_ENV, "")
     monkeypatch.setenv(service_module.APPEND_FLUSH_ENV_NAME, "10.0")
 
     path = tmp_path / storage.DATABASE_FILENAME
@@ -572,7 +572,7 @@ def test_the_test_container_marker_alone_does_not_enable_it_either(tmp_path, mon
     """Both names are required, so neither one on its own is a switch."""
 
     monkeypatch.setenv(service_module.APPEND_FLUSH_TEST_MARKER_ENV, "1")
-    monkeypatch.delenv(service_module.APPEND_FLUSH_ENV_NAME, raising=False)
+    monkeypatch.setenv(service_module.APPEND_FLUSH_ENV_NAME, "")
     service = _service(tmp_path, tmp_path / storage.DATABASE_FILENAME)
     assert service._append_flush_seconds == 0.0
     assert service._status()["append_persistence"]["refused_reason"] == ""
@@ -592,7 +592,7 @@ def test_a_malformed_arm_still_raises_inside_the_test_container(tmp_path, monkey
 
     # ... and the same malformed value on a production process is ignored, not fatal: a stray
     # export must not take statsd down.
-    monkeypatch.delenv(service_module.APPEND_FLUSH_TEST_MARKER_ENV)
+    monkeypatch.setenv(service_module.APPEND_FLUSH_TEST_MARKER_ENV, "")
     assert service_module.resolve_append_flush_arm().seconds == 0.0
 
 

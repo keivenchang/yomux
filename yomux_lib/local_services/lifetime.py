@@ -91,6 +91,7 @@ from ..infra.process_claims import CLAIM_REASON_SUPERVISOR_ALIVE
 from ..infra.process_claims import CLAIM_ROOT_CALLER_SHARED
 from ..infra.process_claims import CLAIM_ROOT_MANAGED_PRIVATE
 from ..infra.process_claims import ProcessClaimLedger
+from tools.product_environment import product_env_name
 
 
 # Every dimension a destructive decision is bound to.  Named so a refusal can
@@ -227,7 +228,7 @@ SUPERVISOR_STATE_UNPROVEN = "supervisor_identity_unproven"
 # Set by `LocalServiceRegistry._spawn` in every daemon it launches. Its presence
 # in this process's own environment is the only proof a process has that it IS a
 # standalone local service rather than a daemon object hosted inside a caller.
-LOCAL_SERVICE_SPAWN_GENERATION_ENV = "YOLOMUX_LOCAL_SERVICE_SPAWN_GENERATION"
+LOCAL_SERVICE_SPAWN_GENERATION_ENV = product_env_name('LOCAL_SERVICE_SPAWN_GENERATION')
 
 SERVICE_SELF_RETIRE_GRACE_SECONDS = 3.0
 SERVICE_SELF_RETIRE_FORCE_SECONDS = 2.0
@@ -242,7 +243,7 @@ def service_claim_kind(service_name: str) -> str:
 def root_sharing_mode(*, private_root: bool) -> str:
     """Map a resolved product root onto the claim matrix's sharing mode.
 
-    A ``YOLOMUX_ROOT`` run owns every path it uses, so exactly one launcher can
+    A ``YOMUX_ROOT`` run owns every path it uses, so exactly one launcher can
     ever be a candidate supervisor for its daemons and there is no successor to
     elect.  The default per-user runtime directory is shared by every YOmux
     server that user runs, so a survivor there may legitimately be inherited.

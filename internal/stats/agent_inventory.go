@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/keivenchang/yomux/internal/productenv"
 )
 
 const (
@@ -553,12 +555,12 @@ func syntheticPaneAgentKind(session string) string {
 // reads command lines only for OpenCode candidates. Tmux enrichment is bounded
 // separately by the token collector; the serving process enables the global
 // roster requirement explicitly, while isolated tests can opt into their own
-// private socket through YOLOMUX_OPENCODE_TMUX_SCOPE.
+// private socket through YOMUX_OPENCODE_TMUX_SCOPE.
 func LinuxOpenCodeInventorySources() OpenCodeInventorySources {
 	return OpenCodeInventorySources{
 		Processes: linuxOpenCodeProcesses, Panes: linuxTmuxPanes, CWD: linuxCWD,
 		Started: linuxStartedIdentity, StartTime: linuxProcessStartedAt,
-		RequireTmuxPane: os.Getenv("YOLOMUX_OPENCODE_TMUX_SCOPE") == "1",
+		RequireTmuxPane: productenv.Value("OPENCODE_TMUX_SCOPE") == "1",
 	}
 }
 

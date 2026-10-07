@@ -39,7 +39,9 @@ if str(_SCRIPT_SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_SOURCE_ROOT))
 
 from tests.browser_helpers.webdriver_lease import WebDriverLease
+from tools.product_environment import product_env, product_env_name, require_product_env
 from tools.instance_isolation import synthetic_test_environment as isolated_test_environment
+from tools.instance_isolation import normalize_yomux_environment
 from tools.tmux_paths import short_tmux_socket_path
 
 
@@ -57,7 +59,7 @@ def synthetic_server_environment(overrides: dict[str, str]) -> dict[str, str]:
 
 
 def resolve_source_root() -> Path:
-    configured = os.environ.get("YOMUX_E2E_SOURCE_ROOT", os.environ.get("YOLOMUX_E2E_SOURCE_ROOT", "")).strip()
+    configured = product_env('E2E_SOURCE_ROOT', "", environ=os.environ).strip()
     source_root = Path(configured) if configured else Path.cwd()
     required = (source_root / "static/yomux.js", source_root / "tools", source_root / "yomux_lib")
     if not all(path.exists() for path in required):
@@ -154,12 +156,12 @@ def main(binary: str) -> None:
             "XDG_CACHE_HOME": root / "xdg-cache",
             "XDG_RUNTIME_DIR": root / "xdg-runtime",
             "CODEX_HOME": root / "codex-home",
-            "YOLOMUX_CODEX_HOME": root / "codex-home",
+            product_env_name('CODEX_HOME'): root / "codex-home",
             "CLAUDE_CONFIG_DIR": root / "claude-config",
             "TMPDIR": root / "tmp",
-            "YOLOMUX_CLAUDE_TRANSCRIPT_ROOT": root / "claude-transcripts",
-            "YOLOMUX_CODEX_TRANSCRIPT_ROOT": root / "codex-transcripts",
-            "YOLOMUX_OPENCODE_DATABASE": root / "opencode.db",
+            product_env_name('CLAUDE_TRANSCRIPT_ROOT'): root / "claude-transcripts",
+            product_env_name('CODEX_TRANSCRIPT_ROOT'): root / "codex-transcripts",
+            product_env_name('OPENCODE_DATABASE'): root / "opencode.db",
         }
         for key, private_root in private_environment_roots.items():
             if key.endswith("DATABASE"):
@@ -254,8 +256,8 @@ def main(binary: str) -> None:
 case "$1" in
   --version|auth|login) exit 0 ;;
 esac
-if [ -n "${YOLOMUX_E2E_LAUNCH_RECORD:-}" ]; then
-  printf '%s %s\\n' "$0" "$*" >> "$YOLOMUX_E2E_LAUNCH_RECORD"
+if [ -n "${YOMUX_E2E_LAUNCH_RECORD:-}" ]; then
+  printf '%s %s\\n' "$0" "$*" >> "$YOMUX_E2E_LAUNCH_RECORD"
 fi
 exec /bin/sleep 300
 """
@@ -281,13 +283,13 @@ exec /bin/sleep 300
         agent_pane_pid = subprocess.check_output((*tmux, "display-message", "-p", "-t", f"={session}:0.0", "#{pane_pid}"), text=True).strip()
         second_agent_pane_pid = subprocess.check_output((*tmux, "display-message", "-p", "-t", f"={session}:1.0", "#{pane_pid}"), text=True).strip()
         second_agent_pane_target = subprocess.check_output((*tmux, "display-message", "-p", "-t", f"={session}:1.0", "#{pane_id}"), text=True).strip()
-        claude_transcript = private_environment_roots["YOLOMUX_CLAUDE_TRANSCRIPT_ROOT"] / "fixture" / "claude-session.jsonl"
+        claude_transcript = require_product_env('CLAUDE_TRANSCRIPT_ROOT', environ=private_environment_roots) / "fixture" / "claude-session.jsonl"
         claude_transcript.parent.mkdir(parents=True)
         claude_transcript.write_text(
             json.dumps({"type": "assistant", "cwd": str(git_root), "message": {"role": "assistant", "content": "Docker transcript first"}}) + "\n",
             encoding="utf-8",
         )
-        second_claude_transcript = private_environment_roots["YOLOMUX_CLAUDE_TRANSCRIPT_ROOT"] / "fixture" / "claude-session-2.jsonl"
+        second_claude_transcript = require_product_env('CLAUDE_TRANSCRIPT_ROOT', environ=private_environment_roots) / "fixture" / "claude-session-2.jsonl"
         second_claude_transcript.write_text(
             json.dumps({"type": "assistant", "cwd": str(git_root), "message": {"role": "assistant", "content": "Docker transcript second"}}) + "\n",
             encoding="utf-8",
@@ -347,18 +349,18 @@ exec /bin/sleep 300
                 **{key: str(value) for key, value in private_environment_roots.items()},
                 # This terminal/browser contract uses seeded stats facts and must
                 # never scan the host's client databases or transcripts.
-                "YOLOMUX_STATS_DISABLE_COLLECTORS": "1",
+                product_env_name('STATS_DISABLE_COLLECTORS'): "1",
             })
-            environment["YOLOMUX_TMUX_SOCKET"] = tmux_socket
+            environment[product_env_name('TMUX_SOCKET')] = tmux_socket
             environment["PATH"] = str(agent_bin) + os.pathsep + environment.get("PATH", "")
-            environment["YOLOMUX_E2E_LAUNCH_RECORD"] = str(launch_record)
+            environment[product_env_name('E2E_LAUNCH_RECORD')] = str(launch_record)
             subprocess.run((*tmux, "set-environment", "-g", "PATH", environment["PATH"]), env=environment, check=True)
-            subprocess.run((*tmux, "set-environment", "-g", "YOLOMUX_E2E_LAUNCH_RECORD", str(launch_record)), env=environment, check=True)
+            subprocess.run((*tmux, "set-environment", "-g", product_env_name('E2E_LAUNCH_RECORD'), str(launch_record)), env=environment, check=True)
             # Keep this deliberate backpressure fixture private to the uncached browser contract:
             # the normal queue remains 256, while Chromium proves that an evicted resource reaches
             # the browser's repair path instead of silently disappearing.
-            environment["YOLOMUX_GO_EVENT_QUEUE_SIZE"] = "1"
-            environment["YOLOMUX_GO_EVENT_STREAM_DELAY_MS"] = "500"
+            environment[product_env_name('GO_EVENT_QUEUE_SIZE')] = "1"
+            environment[product_env_name('GO_EVENT_STREAM_DELAY_MS')] = "500"
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
                 probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 probe.bind(("0.0.0.0", port))
@@ -2303,7 +2305,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the Docker/Bazel Go Chromium E2E contract.")
     parser.add_argument("binary", nargs="?", help="path to the Bazel-built Go server binary")
     arguments = parser.parse_args()
-    binary = arguments.binary or os.environ.get("YOMUX_GO_BINARY", os.environ.get("YOLOMUX_GO_BINARY"))
+    binary = arguments.binary or product_env('GO_BINARY', environ=os.environ)
     if not binary:
         parser.error("a Go server binary argument or YOMUX_GO_BINARY is required")
     main(binary)

@@ -4,10 +4,10 @@ set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$repo_root/tools/startup_common.sh"
 yomux_normalize_environment
-primary_port="${YOLOMUX_PORT:-${YOLOMUX_DEFAULT_PORT:-}}"
+primary_port="$(product_env_print PORT "$(product_env_print DEFAULT_PORT "")")"
 default_port="$primary_port"
-host="${YOLOMUX_HOST:-0.0.0.0}"
-log_dir="${YOLOMUX_LOG_DIR:-/tmp}"
+host="$(product_env_print HOST "0.0.0.0")"
+log_dir="$(product_env_print LOG_DIR "/tmp")"
 restart_lock_base="${TMPDIR:-/tmp}"
 dev_mode="auto"
 backend="go"
@@ -25,9 +25,9 @@ usage() {
   cat <<'EOF'
 Usage: boot.sh [--print-command|--check-assets] [--ignore-load (legacy no-op)] [--force] [--golang|--deprecated-python|--backend go] [--cert CERT --key KEY] [--host HOST] [--log-dir DIR] [--dev|--no-dev] [--port PORT] [PORT ...]
 
-Restart this checkout's Go YOmux server. Use --deprecated-python to select the legacy Python backend. YOLOMUX_PORT or an explicit port argument selects the primary port; a no-argument launch requires YOLOMUX_DEFAULT_PORT. Non-primary ports use --dev by default.
+Restart this checkout's Go YOmux server. Use --deprecated-python to select the legacy Python backend. YOMUX_PORT or an explicit port argument selects the primary port; a no-argument launch requires YOMUX_DEFAULT_PORT. Non-primary ports use --dev by default.
 
-Operator launches always use this Unix user's machine-wide tmux server, so every session visible to `tmux list-sessions` is eligible for discovery. The launcher clears inherited nested-tmux and private-socket routing; only isolated test fixtures should set YOLOMUX_TMUX_SOCKET explicitly.
+Operator launches always use this Unix user's machine-wide tmux server, so every session visible to `tmux list-sessions` is eligible for discovery. The launcher clears inherited nested-tmux and private-socket routing; only isolated test fixtures should set YOMUX_TMUX_SOCKET explicitly.
 
 Examples:
   ./boot.sh
@@ -144,7 +144,7 @@ if [[ "${#ports[@]}" -eq 0 ]]; then
   if [[ "$check_assets" -eq 1 ]]; then
     add_port "${primary_port:-7110}"
   else
-    [[ -n "$primary_port" ]] || die "no port selected; set YOLOMUX_DEFAULT_PORT or pass an explicit port"
+    [[ -n "$primary_port" ]] || die "no port selected; set YOMUX_DEFAULT_PORT or pass an explicit port"
     add_port "$default_port"
   fi
 elif [[ -z "$primary_port" ]]; then
@@ -188,7 +188,7 @@ fi
 extra_env=()
 go_binary=""
 if [[ "$backend" == "go" ]]; then
-  go_binary="${YOLOMUX_GO_BINARY:-}"
+  go_binary="$(product_env_print GO_BINARY "")"
   if [[ -z "$go_binary" ]]; then
     go_binary="$("$python_bin" "$repo_root/tools/go_binary.py" "$repo_root")"
   fi
@@ -243,16 +243,15 @@ print_launch_command() {
   log_path="$(log_path_for "$port")"
   build_server_args "$port"
   if [[ "$(uname -s)" == "Darwin" ]]; then
-    local launcher socket_name session_name plan_json env_count
+    local launcher session_name plan_json env_count
     launcher="$(yomux_macos_server_launcher)"
-    socket_name="$(yomux_macos_server_tmux_socket)"
     session_name="$(yomux_macos_server_tmux_session "$port")"
     plan_json="$("$python_bin" "$repo_root/tools/instance_isolation.py" plan-direct --port "$port")" || die "port $port launch refused by instance-isolation preflight"
     env_count="${#extra_env[@]}"
     printf 'launchctl bootout %q 2>/dev/null || true\n' "$(yomux_macos_launch_target "$port")"
-    printf 'tmux -L %q kill-session -t %q 2>/dev/null || true\n' "$socket_name" "=$session_name"
-    printf 'tmux -L %q new-session -d -s %q -c %q /bin/bash -c %q bash %q %q %q %q %q %q %q %q' \
-      "$socket_name" "$session_name" "$repo_root" "$launcher" "$repo_root" "$PATH" "$server_shell" "$python_bin" "$repo_root/yomux.py" "$log_path" "$plan_json" "$env_count"
+    printf 'env -u TMUX -u TMUX_PANE tmux kill-session -t %q 2>/dev/null || true\n' "=$session_name"
+    printf 'env -u TMUX -u TMUX_PANE tmux new-session -d -s %q -c %q /bin/bash -c %q bash %q %q %q %q %q %q %q %q' \
+      "$session_name" "$repo_root" "$launcher" "$repo_root" "$PATH" "$server_shell" "$python_bin" "$repo_root/yomux.py" "$log_path" "$plan_json" "$env_count"
     for item in "${extra_env[@]}"; do
       printf ' %q' "$item"
     done
@@ -271,7 +270,7 @@ shell_command_for() {
   local log_path="$1"
   # A server started from inside a tmux client inherits TMUX and would then operate on
   # that client socket instead of the user's shared default server. Managed launches
-  # always clear YOLOMUX_TMUX_SOCKET below; isolated fixtures launch their own process
+  # always clear YOMUX_TMUX_SOCKET below; isolated fixtures launch their own process
   # directly with a private socket instead of going through this operator path.
   printf 'cd %q && exec env TMUX= TMUX_PANE= TERM=%q PYTHONUNBUFFERED=%q MALLOC_ARENA_MAX=%q PATH=%q' "$repo_root" "$TERM" "$PYTHONUNBUFFERED" "$MALLOC_ARENA_MAX" "$PATH"
   for item in "${extra_env[@]}"; do
@@ -530,7 +529,7 @@ if [[ "$check_assets" -eq 1 ]]; then
   exit 0
 fi
 
-log_dir="$("$python_bin" "$repo_root/tools/instance_isolation.py" resolve-product-path YOLOMUX_LOG_DIR "$log_dir")" \
+log_dir="$("$python_bin" "$repo_root/tools/instance_isolation.py" resolve-product-path "$(product_env_name LOG_DIR)" "$log_dir")" \
   || die "log directory refused by product-root policy"
 restart_lock_base="$("$python_bin" "$repo_root/tools/instance_isolation.py" resolve-product-path TMPDIR "$restart_lock_base")" \
   || die "restart lock directory refused by product-root policy"

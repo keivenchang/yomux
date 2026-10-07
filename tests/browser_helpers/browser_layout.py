@@ -29,6 +29,8 @@ from urllib.parse import urlunsplit
 import pytest
 
 from tools import static_build
+from tools.instance_isolation import apply_yomux_environment_assignments
+from tools.instance_isolation import normalize_yomux_environment
 from yomux_lib import common
 from yomux_lib import app as app_module
 from yomux_lib import auto_approve_worker as auto_approve_worker_module
@@ -76,6 +78,7 @@ from tests.gate_harness import track_fixture_http_requests
 from tests.gate_harness import wait_for_fixture_api_quiescence
 from tests.gate_harness import wait_for_fixture_client_event_demand
 from tests.tmux_runtime import capture_isolated_tmux_pane
+from tests.tmux_runtime import patch_isolated_product_environment
 from tests.tmux_runtime import run_isolated_tmux
 from tests.tmux_runtime import start_isolated_tmux_runtime
 from tests.tmux_runtime import stop_isolated_tmux_runtime
@@ -742,7 +745,7 @@ def isolate_browser_runtime_paths(monkeypatch, tmp_path):
     # This helper supplies explicit per-app roots below tmp_path. Keeping the suite-wide rooted-run
     # override active makes common.runtime_root() rebuild a longer <test-root>/runtime path and can
     # push the local-service socket beyond Linux's sockaddr_un limit.
-    monkeypatch.delenv("YOLOMUX_ROOT", raising=False)
+    patch_isolated_product_environment(monkeypatch, {"YOMUX_ROOT": ""})
     config_dir = tmp_path / "yolomux-config"
     state_dir = tmp_path / "yolomux-state"
     runtime_base_dir = tmp_path / "yolomux-runtime"
@@ -755,16 +758,18 @@ def isolate_browser_runtime_paths(monkeypatch, tmp_path):
         common.STATE_DIR: state_dir,
         common.RUNTIME_DIR: runtime_dir,
     }
-    monkeypatch.setenv("YOLOMUX_CONFIG_DIR", str(config_dir))
-    monkeypatch.setenv("YOLOMUX_STATE_DIR", str(state_dir))
-    monkeypatch.setenv("YOLOMUX_RUNTIME_DIR", str(runtime_base_dir))
+    patch_isolated_product_environment(monkeypatch, {
+        "YOMUX_CONFIG_DIR": str(config_dir),
+        "YOMUX_STATE_DIR": str(state_dir),
+        "YOMUX_RUNTIME_DIR": str(runtime_base_dir),
+    })
     state_path = config_dir / "state.json"
     event_log_path = state_dir / "events.jsonl"
     activity_path = state_dir / "activity.json"
     activity_heartbeats_path = state_dir / "activity-heartbeats.jsonl"
     watch_index_path = state_dir / "watch-index.json"
     auto_approve_lock_dir = state_dir / "locks"
-    control_socket_dir = Path(os.environ["YOLOMUX_TEST_ROOT"]) / "browser" / f"c-{os.getpid()}-{uuid.uuid4().hex[:4]}"
+    control_socket_dir = Path(normalize_yomux_environment(os.environ)["YOMUX_TEST_ROOT"]) / "browser" / f"c-{os.getpid()}-{uuid.uuid4().hex[:4]}"
     control_socket_dir.parent.mkdir(mode=0o700, exist_ok=True)
     control_socket_dir.mkdir(mode=0o700)
     for module in (common,):
@@ -1001,12 +1006,13 @@ class _BrowserDriverLease:
 
     def __init__(self, driver):
         object.__setattr__(self, "_driver", driver)
+        object.__setattr__(self, "_retirement_lease", WebDriverLease.from_driver(driver))
 
     def __getattr__(self, name):
         return getattr(self._driver, name)
 
     def __setattr__(self, name, value):
-        if name == "_driver":
+        if name in {"_driver", "_retirement_lease"}:
             object.__setattr__(self, name, value)
         else:
             setattr(self._driver, name, value)
@@ -1023,14 +1029,18 @@ class _BrowserDriverLease:
         # Retire the crashed driver through the one shared owner - bounded quit -> TERM -> KILL ->
         # reap -> final proof, guarded by the driver's captured generation - so a wedged chromedriver
         # from the invalid session cannot linger while we spawn its replacement.
-        previous = self._driver
-        retire_all([WebDriverLease.from_driver(previous)])
-        self._driver = new_chrome_driver()
+        self.quit()
+        self.__init__(new_chrome_driver())
 
     def quit(self):
         # One owner retires this driver: a bare best-effort quit leaves a chromedriver behind when
         # quit() hangs, and the lease proves the leased process gone (or records why it could not).
-        retire_all([WebDriverLease.from_driver(self._driver)])
+        result = retire_all([self._retirement_lease])
+        if not result["proven_gone"]:
+            raise RuntimeError(f"worker browser retirement failed: {result}")
+
+
+_WORKER_BROWSER_LEASE_KEY = pytest.StashKey[_BrowserDriverLease]()
 
 
 def _reset_browser_windows(driver):
@@ -1116,8 +1126,7 @@ def _require_current_generated_bundle(workerinput: Mapping[str, object] | None =
         token = str(workerinput.get("yomux_worktree_writer_token") or "")
         slot = str(workerinput.get("yomux_worktree_writer_slot") or "")
         if token and slot:
-            environment["YOLOMUX_WORKTREE_WRITER_TOKEN"] = token
-            environment["YOLOMUX_WORKTREE_WRITER_SLOT"] = slot
+            apply_yomux_environment_assignments(environment, {"YOMUX_WORKTREE_WRITER_TOKEN": token, "YOMUX_WORKTREE_WRITER_SLOT": slot})
     stdout = StringIO()
     stderr = StringIO()
     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
@@ -1128,16 +1137,17 @@ def _require_current_generated_bundle(workerinput: Mapping[str, object] | None =
 
 
 @pytest.fixture(scope=_browser_fixture_scope)
-def browser(pytestconfig: pytest.Config):
-    # Session scope creates exactly one lease per pytest-xdist worker, while the autouse teardown
-    # removes cross-test state after every test.
+def browser(pytestconfig: pytest.Config, request: pytest.FixtureRequest):
+    # Imports register a separate session FixtureDef in each module. The worker's
+    # Config owns the lease so crossing modules cannot retain extra browsers.
     workerinput = pytestconfig.workerinput if hasattr(pytestconfig, "workerinput") else None
     _require_current_generated_bundle(workerinput)
-    lease = _BrowserDriverLease(new_chrome_driver())
-    try:
-        yield lease
-    finally:
-        lease.quit()
+    lease = pytestconfig.stash.get(_WORKER_BROWSER_LEASE_KEY, None)
+    if lease is None:
+        lease = _BrowserDriverLease(new_chrome_driver())
+        pytestconfig.stash[_WORKER_BROWSER_LEASE_KEY] = lease
+        request.session.addfinalizer(lease.quit)
+    return lease
 
 
 def reset_reused_browser_after_test(request):

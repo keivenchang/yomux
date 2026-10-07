@@ -26,6 +26,7 @@ from .locales import LANGUAGE_PREFERENCES
 from .locales import LANGUAGE_VALUE_ALIASES
 from .locales import SYSTEM_LOCALE_PREFERENCE
 from .locales import language_preference_description
+from tools.product_environment import product_env, product_env_name
 
 
 SETTINGS_PATH = CONFIG_DIR / "settings.yaml"
@@ -79,13 +80,13 @@ SUMMARY_DEFAULT_CODEX_TIMEOUT_SECONDS = 600
 
 
 def env_choice_default(name: str, default: str, choices: tuple[str, ...]) -> str:
-    value = str(os.environ.get(name, "") or "").strip()
+    value = str(product_env(name, "") or "").strip()
     return value if value in choices else default
 
 
-SUMMARY_DEFAULT_CODEX_MODEL = env_choice_default("YOLOMUX_SUMMARY_MODEL", YOAGENT_DEFAULT_CODEX_MODEL, YOAGENT_CODEX_MODEL_CHOICES)
-SUMMARY_DEFAULT_CODEX_EFFORT = env_choice_default("YOLOMUX_SUMMARY_EFFORT", "low", YOAGENT_CODEX_EFFORT_CHOICES)
-SUMMARY_DEFAULT_CODEX_SERVICE_TIER = env_choice_default("YOLOMUX_SUMMARY_SERVICE_TIER", "fast", SUMMARY_CODEX_SERVICE_TIER_CHOICES)
+SUMMARY_DEFAULT_CODEX_MODEL = env_choice_default('SUMMARY_MODEL', YOAGENT_DEFAULT_CODEX_MODEL, YOAGENT_CODEX_MODEL_CHOICES)
+SUMMARY_DEFAULT_CODEX_EFFORT = env_choice_default('SUMMARY_EFFORT', "low", YOAGENT_CODEX_EFFORT_CHOICES)
+SUMMARY_DEFAULT_CODEX_SERVICE_TIER = env_choice_default('SUMMARY_SERVICE_TIER', "fast", SUMMARY_CODEX_SERVICE_TIER_CHOICES)
 DEFAULT_INDEX_EXCLUDE_DIR_NAMES: tuple[str, ...] = (
     ".git",
     ".hg",
@@ -609,9 +610,9 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("cost", "openai_pricing_profile"): "default | subscription. Billing profile stamped on new subscription-covered OpenAI CLI usage. Direct API and Images usage stays default/API-priced.",
     ("cost", "anthropic_pricing_profile"): "default | subscription. Billing profile stamped on new subscription-covered Anthropic CLI usage. Direct API usage stays default/API-priced.",
     ("summary", "backend"): "codex | disabled. Controls the AI summary tab provider. Codex requires the local codex CLI to be installed and logged in.",
-    ("summary", "codex_model"): "Codex model for the AI summary tab. Uses the same validated catalog as YO!agent Codex. The YOLOMUX_SUMMARY_MODEL env var only seeds the default when it names a valid catalog model.",
-    ("summary", "codex_effort"): "Effort level for the AI summary tab Codex call: low, medium, high, xhigh. The YOLOMUX_SUMMARY_EFFORT env var only seeds a valid default.",
-    ("summary", "codex_service_tier"): "Codex service tier for the AI summary tab: fast, auto, default. The YOLOMUX_SUMMARY_SERVICE_TIER env var only seeds a valid default.",
+    ("summary", "codex_model"): "Codex model for the AI summary tab. Uses the same validated catalog as YO!agent Codex. The YOMUX_SUMMARY_MODEL env var only seeds the default when it names a valid catalog model.",
+    ("summary", "codex_effort"): "Effort level for the AI summary tab Codex call: low, medium, high, xhigh. The YOMUX_SUMMARY_EFFORT env var only seeds a valid default.",
+    ("summary", "codex_service_tier"): "Codex service tier for the AI summary tab: fast, auto, default. The YOMUX_SUMMARY_SERVICE_TIER env var only seeds a valid default.",
     ("summary", "lookback_seconds"): "Seconds, 60-86400. Default transcript lookback for the AI summary tab when the request does not supply lookback.",
     ("summary", "timeout_seconds"): "Seconds, 30-3600. Maximum time to wait for a Codex summary response before the stream reports a timeout.",
     ("yoagent", "backend"): "auto | codex | claude | deterministic. Default auto. Auto prefers codex then claude when a logged-in CLI is available; deterministic shows as No agent.",

@@ -6085,6 +6085,7 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
   const disposables = [];
   let disposed = false;
   let renderFrame = 0;
+  let lastRenderedViewportSignature = '';
   let contentRevision = 0;
   let cachedBuffer = null;
   let cachedSignature = '';
@@ -6099,6 +6100,7 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
     renderFrame = 0;
     existingReferenceKeys = new Set();
     hoverKey = '';
+    lastRenderedViewportSignature = '';
     cachedBuffer = null;
     cachedReferences = null;
     cachedSignature = '';
@@ -6131,13 +6133,15 @@ function installTerminalFileReferenceUnderlines(session, term, container, option
   };
 
   const renderCached = () => {
-    const refs = currentReferences().filter(ref => ref.type === 'file');
-    existingReferenceKeys = new Set(refs.map(terminalFileReferenceKey));
-    if (hoverKey && !existingReferenceKeys.has(hoverKey)) hoverKey = '';
-    // A terminal without file references has no underline geometry to measure.
-    if (!refs.length) return clearTerminalFileReferenceUnderlines(container);
     if (!active()) return clearInactive();
-    return renderTerminalFileReferenceUnderlines(term, container, refs, {hoverKey});
+    const count = renderTerminalFileReferenceUnderlines(term, container, () => {
+      const refs = currentReferences().filter(ref => ref.type === 'file');
+      existingReferenceKeys = new Set(refs.map(terminalFileReferenceKey));
+      if (hoverKey && !existingReferenceKeys.has(hoverKey)) hoverKey = '';
+      return refs;
+    }, {hoverKey});
+    lastRenderedViewportSignature = terminalFileReferenceViewportSignature(term, contentRevision);
+    return count;
   };
 
   const refreshNow = () => {
@@ -7045,7 +7049,11 @@ function appendUrlContextMenuItems(menu, href, closeMenu, options = {}) {
       ? consumeTerminalSelection(options.session, options.term, options.container, reason, handler)
       : handler
   );
-  appendContextMenuButton(menu, localizedLabel('contextmenu.openUrl', 'Open URL in a new tab'), action('open-url', () => window.open(url, '_blank', 'noopener,noreferrer')), closeMenu);
+  const openHandler = typeof options.openHandler === 'function'
+    ? options.openHandler
+    : () => window.open(url, '_blank', 'noopener,noreferrer');
+  const openLabel = options.openLabel || localizedLabel('contextmenu.openUrl', 'Open URL in a new tab');
+  appendContextMenuButton(menu, openLabel, action('open-url', openHandler), closeMenu);
   appendContextMenuButton(menu, localizedLabel('contextmenu.copyUrl', 'Copy URL'), action('copy-url', button => copyTextWithFeedback(url, {button})), closeMenu);
   if (typeof options.modifyUrl === 'function') {
     appendContextMenuButton(menu, localizedLabel('contextmenu.modifyUrl', 'Modify URL'), action('modify-url', options.modifyUrl), closeMenu);
@@ -7109,7 +7117,7 @@ function showImageContextMenu(image, x, y) {
 
 // right-click menu for links in AI/markdown content — Open URL / Copy URL. Bound on the
 // YO!agent body and markdown previews via installLinkContextMenu(container).
-function showLinkContextMenu(anchor, x, y) {
+function showLinkContextMenu(anchor, x, y, container = null) {
   closeTerminalContextMenu();
   closeFileContextMenu();
   closeSessionContextMenu();
@@ -7119,7 +7127,9 @@ function showLinkContextMenu(anchor, x, y) {
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu link-context-menu';
   menu.setAttribute('role', 'menu');
-  appendUrlContextMenuItems(menu, href, closeLinkContextMenu);
+  const authoredHref = anchor.getAttribute?.('href') || href;
+  const markdownOptions = markdownPreviewLinkContextMenuOptions(container?.dataset?.mdPath || '', authoredHref);
+  appendUrlContextMenuItems(menu, href, closeLinkContextMenu, markdownOptions);
   linkContextMenu.open(menu, x, y);
 }
 
@@ -7139,7 +7149,7 @@ function installLinkContextMenu(container) {
       if (anchor.closest?.('[data-prosemirror-editor]')) return;
       event.preventDefault();
       event.stopPropagation();
-      showLinkContextMenu(anchor, event.clientX, event.clientY);
+      showLinkContextMenu(anchor, event.clientX, event.clientY, container);
     });
   });
 }

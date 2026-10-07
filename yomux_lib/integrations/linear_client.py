@@ -10,6 +10,7 @@ from ..common import HTTP_METADATA_TIMEOUT_SECONDS
 from ..common import LINEAR_API_URL
 from ..common import _CACHE_MISS
 from .github_client import http_json
+from tools.product_environment import product_env
 
 
 def linear_issue_metadata(identifier: str, cache: Any, allow_network: bool = True) -> dict[str, Any]:
@@ -69,7 +70,7 @@ def fallback_linear_issue(identifier: str) -> dict[str, Any]:
 
 
 def linear_issue_url(identifier: str) -> str:
-    base_url = os.environ.get("YOLOMUX_LINEAR_ISSUE_BASE_URL", DEFAULT_LINEAR_ISSUE_BASE_URL).rstrip("/")
+    base_url = product_env('LINEAR_ISSUE_BASE_URL', DEFAULT_LINEAR_ISSUE_BASE_URL, environ=os.environ).rstrip("/")
     return f"{base_url}/{quote(identifier)}"
 
 

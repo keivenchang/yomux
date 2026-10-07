@@ -1982,10 +1982,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.match(css, /\.git-diff-commit\s*\{[\s\S]*grid-template-columns:\s*subgrid/,
       'each commit group inherits the list tracks');
     assert.match(css, /\.git-diff-worktree-status\s*\{[\s\S]*display:\s*block/,
-      'the native details disclosure keeps its expanded content in normal flow');
-    const gitDiffSource = fs.readFileSync('static_src/js/yomux/85_git_diff_viewer.js', 'utf8');
-    assert.match(gitDiffSource, /function syncGitDiffWorktreeSummaryColumns\(list\)[\s\S]*gridTemplateColumns\s*=\s*columns/,
-      'the Dirty summary copies the resolved shared grid tracks instead of sizing separate max-content columns');
+      'the native details disclosure retains normal block flow for its expanded file tree');
     assert.match(css, /\.git-diff-commit-row\s*\{[\s\S]*grid-template-columns:\s*subgrid/,
       'each summary row inherits the same list tracks');
     assert.match(css, /\.git-diff-commits\s*\{[\s\S]*gap:\s*0 var\(--space-6\)/,
@@ -1994,6 +1991,9 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       'commit summaries keep compact vertical spacing while preserving horizontal padding');
     assert.match(css, /\.git-diff-commit-row\s*\{[\s\S]*white-space:\s*nowrap/);
     assert.match(css, /\.git-diff-commit-decoration\s*\{[\s\S]*font:\s*var\(--ui-font-size-2xs\)/);
+    const sharedCss = fs.readFileSync('static_src/css/yomux/00_tokens_base.css', 'utf8');
+    assert.match(sharedCss, /\.git-diff-commit-changes\s*,[\s\S]*\{[\s\S]*white-space:\s*nowrap/,
+      'Dirty and commit changes fields use the shared single-line ellipsis treatment from first paint');
     assert.match(css, /\.git-diff-dirty-entry\s*\{[\s\S]*overflow-wrap:\s*anywhere/);
     assert.match(css, /body\.theme-light \.git-diff-panel\s*\{[\s\S]*--git-diff-row-separator:\s*#[0-9a-f]+;[\s\S]*--git-diff-secondary-text:\s*#[0-9a-f]+/i);
     assert.match(css, /\.git-diff-commit-added\s*\{[\s\S]*color:\s*var\(--git-diff-added\)/);
@@ -6624,6 +6624,25 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     const state = api.transcriptMetadataStateForTest();
     assert.equal(state.epoch, 'server-new');
     assert.equal(state.payload.sessions?.old, undefined, 'the queued old-server transcript event never applies');
+  });
+
+  await testAsync('session-files completion events coalesce by cache view rather than session', async () => {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame() { return 1; },
+      cancelAnimationFrame() {},
+    });
+    const session = '1';
+    api.queueClientPushEventForTest('background_refresh_done', {
+      role: 'session-files', session, cache_view_id: 'a'.repeat(64), completion_generation: 'a1',
+    });
+    api.queueClientPushEventForTest('background_refresh_done', {
+      role: 'session-files', session, cache_view_id: 'b'.repeat(64), completion_generation: 'b1',
+    });
+    assert.equal(api.clientEventTransportStateForTest().queued, 2, 'Finder and Differ cache completions for one session stay independently deliverable');
+    api.queueClientPushEventForTest('background_refresh_done', {
+      role: 'session-files', session, cache_view_id: 'a'.repeat(64), completion_generation: 'a2',
+    });
+    assert.equal(api.clientEventTransportStateForTest().queued, 2, 'a newer generation replaces only the same cache view');
   });
 
   await testAsync('status deltas repair a missed revision and a late joiner to the latest snapshots', async () => {

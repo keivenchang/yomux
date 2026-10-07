@@ -1268,16 +1268,25 @@ func TestStatsSnapshotUsesPublishedServiceProduct(t *testing.T) {
 }
 
 func TestCostReportPreservesMixedPricedAndUnpricedTokens(t *testing.T) {
-	report := costReport(30, 10, 12, 1, 1, map[string]map[string]int64{
-		"input": {"tokens": 30, "micro_usd": 10, "api_list_micro_usd": 12},
-	}, map[string]stats.MaterializedCostAttribution{
-		"priced":   {Key: "priced", PricedTokens: 10, UnpricedTokens: 0},
-		"unpriced": {Key: "unpriced", PricedTokens: 0, UnpricedTokens: 20},
-	}, nil)
-	priced := report["priced"].(map[string]any)
-	unpriced := report["unpriced"].(map[string]any)
-	if priced["tokens"] != int64(10) || unpriced["tokens"] != int64(20) {
-		t.Fatalf("mixed cost coverage = priced=%v unpriced=%v", priced, unpriced)
+	priced := stats.MaterializedCostAttribution{
+		Key: "000000000000000000000001", Provider: "provider", Model: "priced", TotalTokens: 10,
+		MicroUSD: 10, APIListMicroUSD: 12, PricedAtoms: 1, PricedTokens: 10,
+		Dimensions: []stats.MaterializedCostDimension{{Dimension: "input", Tokens: 10, MicroUSD: 10, APIListMicroUSD: 12}},
+	}
+	unpriced := stats.MaterializedCostAttribution{
+		Key: "000000000000000000000002", Provider: "provider", Model: "unpriced", TotalTokens: 20,
+		UnpricedAtoms: 1, UnpricedTokens: 20,
+		Dimensions: []stats.MaterializedCostDimension{{Dimension: "input", Tokens: 20}},
+	}
+	report := stats.CostReportWire([]stats.MaterializedBucket{{Cost: stats.MaterializedCostDetail{
+		Tokens: 30, MicroUSD: 10, APIListMicroUSD: 12, PricedAtoms: 1, UnpricedAtoms: 1,
+		Dimensions: []stats.MaterializedCostDimension{{Dimension: "input", Tokens: 30, MicroUSD: 10, APIListMicroUSD: 12}},
+		Models: []stats.MaterializedCostAttribution{priced, unpriced},
+	}}})
+	pricedCoverage := report["priced"].(map[string]any)
+	unpricedCoverage := report["unpriced"].(map[string]any)
+	if pricedCoverage["tokens"] != int64(10) || unpricedCoverage["tokens"] != int64(20) {
+		t.Fatalf("mixed cost coverage = priced=%v unpriced=%v", pricedCoverage, unpricedCoverage)
 	}
 }
 

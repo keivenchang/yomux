@@ -15,10 +15,16 @@ import pytest
 
 from tools.instance_isolation import synthetic_test_environment
 from tools.go_binary import go_backend_binary_candidates
+from tools.product_environment import product_env_names
 
 
 ROOT = Path(__file__).resolve().parents[1]
 STARTUP_COMMON = ROOT / "tools" / "startup_common.sh"
+
+
+def _copy_product_environment_owner(tools_dir: Path) -> None:
+    for name in ("product_environment.py", "product_namespace.json"):
+        shutil.copy2(ROOT / "tools" / name, tools_dir / name)
 
 
 def printable_command_text(output: str) -> str:
@@ -26,7 +32,7 @@ def printable_command_text(output: str) -> str:
 
 
 def test_startup_load_wait_compatibility_helper_is_nonblocking():
-    env = {**os.environ, "YOMUX_START_LOAD_WAIT_SECONDS": "0", "YOLOMUX_START_LOAD_WAIT_SECONDS": "30"}
+    env = {**os.environ, "YOMUX_START_LOAD_WAIT_SECONDS": "0"}
     result = subprocess.run(
         ["bash", "-c", 'source "$1"; yomux_wait_for_system_capacity false', "bash", str(STARTUP_COMMON)],
         capture_output=True,
@@ -107,7 +113,7 @@ def test_boot_print_command_defaults_to_go_for_any_configured_primary_port():
     command = printable_command_text(result.stdout)
     assert "yomux.py" in command
     assert "--backend go" in command
-    assert "YOLOMUX_GO_BINARY=/tmp/yolomux-go-test" in command
+    assert "YOMUX_GO_BINARY=/tmp/yolomux-go-test" in command
     assert "--host 127.0.0.1" in command
     assert "--port 48123" in command
     assert "--dang --self-signed" in command
@@ -121,11 +127,14 @@ def test_boot_print_command_defaults_to_go_for_any_configured_primary_port():
         'env.pop("TMUX", None)' in command
         and 'env.pop("TMUX_PANE", None)' in command
     )
-    clears_tmux_in_macos_launcher = "unset TMUX TMUX_PANE" in command
+    clears_tmux_in_macos_launcher = (
+        "unset TMUX TMUX_PANE" in command
+        and "TMUX_SOCKET TMUX_ALLOW_DEFAULT_SERVER" in command
+    )
     assert clears_tmux_inline or clears_tmux_in_detacher or clears_tmux_in_macos_launcher
     if platform.system() == "Darwin":
         assert "/bin/bash -c" in command
-        assert "tmux -L yolomux-services new-session" in command
+        assert "env -u TMUX -u TMUX_PANE tmux new-session" in command
         assert "yolomux-48123" in command
         assert "launchctl submit" not in command
         assert "cd" in command
@@ -149,7 +158,7 @@ def test_boot_print_command_uses_canonical_go_binary_environment_name():
         capture_output=True,
     )
 
-    assert "YOLOMUX_GO_BINARY=/tmp/yomux-go-canonical" in printable_command_text(result.stdout)
+    assert "YOMUX_GO_BINARY=/tmp/yomux-go-canonical" in printable_command_text(result.stdout)
 
 
 def test_boot_print_command_canonical_go_binary_wins_conflicting_legacy_value():
@@ -169,8 +178,8 @@ def test_boot_print_command_canonical_go_binary_wins_conflicting_legacy_value():
     )
 
     command = printable_command_text(result.stdout)
-    assert "YOLOMUX_GO_BINARY=/tmp/yomux-go-canonical" in command
-    assert "YOLOMUX_GO_BINARY=/tmp/yolomux-go-legacy" not in command
+    assert "YOMUX_GO_BINARY=/tmp/yomux-go-canonical" in command
+    assert "YOMUX_GO_BINARY=/tmp/yolomux-go-legacy" not in command
 
 
 def test_boot_print_command_empty_canonical_go_binary_clears_legacy_override():
@@ -190,7 +199,7 @@ def test_boot_print_command_empty_canonical_go_binary_clears_legacy_override():
     )
 
     command = printable_command_text(result.stdout)
-    assert "YOLOMUX_GO_BINARY=/tmp/yolomux-go-legacy" not in command
+    assert "YOMUX_GO_BINARY=/tmp/yolomux-go-legacy" not in command
 
 
 @pytest.mark.parametrize("relative_binary", [
@@ -202,8 +211,9 @@ def test_boot_print_command_selects_the_executable_bazel_wrapper(tmp_path, relat
     checkout = tmp_path / "checkout"
     tools_dir = checkout / "tools"
     tools_dir.mkdir(parents=True)
-    for source in (ROOT / "boot.sh", STARTUP_COMMON, ROOT / "tools" / "instance_isolation.py", ROOT / "tools" / "go_binary.py"):
+    for source in (ROOT / "boot.sh", STARTUP_COMMON, ROOT / "tools" / "product_environment.sh", ROOT / "tools" / "instance_isolation.py", ROOT / "tools" / "go_binary.py"):
         shutil.copy2(source, checkout / "boot.sh" if source.name == "boot.sh" else tools_dir / source.name)
+    _copy_product_environment_owner(tools_dir)
     binary = checkout / relative_binary
     binary.parent.mkdir(parents=True)
     shutil.copy2(sys.executable, binary)
@@ -217,7 +227,7 @@ def test_boot_print_command_selects_the_executable_bazel_wrapper(tmp_path, relat
             text=True,
             check=True,
         )
-    assert f"YOLOMUX_GO_BINARY={binary}" in printable_command_text(result.stdout)
+    assert f"YOMUX_GO_BINARY={binary}" in printable_command_text(result.stdout)
 
 
 def test_boot_print_command_launches_dev_ports_in_dev_mode():
@@ -259,10 +269,10 @@ def test_boot_print_command_selects_go_backend_and_defaults_to_all_interfaces():
     assert "yomux.py" in command
     assert "--backend go" in command
     assert "--host 0.0.0.0" in command
-    assert "YOLOMUX_GO_BINARY=/tmp/yolomux-go-test" in command
-    assert "YOLOMUX_CLAUDE_TRANSCRIPT_ROOT=" in command
-    assert "YOLOMUX_CODEX_TRANSCRIPT_ROOT=" in command
-    assert "YOLOMUX_OPENCODE_DATABASE=" in command
+    assert "YOMUX_GO_BINARY=/tmp/yolomux-go-test" in command
+    assert "YOMUX_CLAUDE_TRANSCRIPT_ROOT=" in command
+    assert "YOMUX_CODEX_TRANSCRIPT_ROOT=" in command
+    assert "YOMUX_OPENCODE_DATABASE=" in command
 
 
 def test_boot_print_command_accepts_backend_go_alias():
@@ -327,7 +337,7 @@ def test_boot_print_command_refuses_relative_log_dir_without_writing(tmp_path):
     )
 
     assert result.returncode != 0
-    assert "YOLOMUX_LOG_DIR" in result.stderr
+    assert "YOMUX_LOG_DIR" in result.stderr
     assert list(tmp_path.iterdir()) == []
 
 
@@ -358,7 +368,9 @@ def test_boot_asset_check_uses_only_tracked_vendor_files_without_package_tools(t
     tools_dir.mkdir()
     shutil.copy2(ROOT / "boot.sh", checkout / "boot.sh")
     shutil.copy2(STARTUP_COMMON, tools_dir / "startup_common.sh")
+    shutil.copy2(ROOT / "tools" / "product_environment.sh", tools_dir / "product_environment.sh")
     shutil.copy2(ROOT / "tools" / "go_binary.py", tools_dir / "go_binary.py")
+    _copy_product_environment_owner(tools_dir)
     asset_names = ("xterm.js", "xterm.css", "xterm-addon-unicode11.js")
     for name in asset_names:
         shutil.copy2(ROOT / "static" / "vendor" / name, vendor_dir / name)
@@ -447,8 +459,8 @@ def test_boot_restart_refuses_duplicate_without_blind_listener_kill():
     assert 'launch_server "$log_path"' in source
     assert "yomux_submit_macos_server" in source
     assert "yomux_macos_server_launcher" in source
-    assert "yomux_macos_server_tmux_socket" in startup_common
-    assert 'tmux -L "$socket_name" new-session' in startup_common
+    assert "yomux_macos_server_tmux()" in startup_common
+    assert 'env -u TMUX -u TMUX_PANE tmux "$@"' in startup_common
     assert "launchctl submit" not in startup_common
     assert 'cd "$repo"' in startup_common
 
@@ -468,25 +480,26 @@ def test_boot_refuses_an_existing_listener_before_detached_launch():
             env = dict(os.environ)
             env.update(
                 {
-                    "YOLOMUX_ROOT": str(root),
-                    "YOLOMUX_LOG_DIR": str(log_dir),
+                    "YOMUX_ROOT": str(root),
+                    "YOMUX_LOG_DIR": str(log_dir),
                     "TMPDIR": str(temp_dir),
                     "PYTHON": sys.executable,
                 }
             )
-            for key in (
-                "YOLOMUX_CONFIG_DIR",
-                "YOLOMUX_STATE_DIR",
-                "YOLOMUX_RUNTIME_DIR",
-                "YOLOMUX_CACHE_DIR",
-                "YOLOMUX_CODEX_HOME",
+            for suffix in (
+                "CONFIG_DIR",
+                "STATE_DIR",
+                "RUNTIME_DIR",
+                "CACHE_DIR",
                 "CODEX_HOME",
-                "YOLOMUX_START_LOCK_DIR",
-                "YOLOMUX_TOOL_LOCK_PATH",
-                "YOLOMUX_CA_DIR",
-                "YOLOMUX_WORKSPACE_BASE",
+                "START_LOCK_DIR",
+                "TOOL_LOCK_PATH",
+                "CA_DIR",
+                "WORKSPACE_BASE",
             ):
-                env.pop(key, None)
+                for key in product_env_names(suffix):
+                    env.pop(key, None)
+            env.pop("CODEX_HOME", None)
             env.pop("PYTHONPYCACHEPREFIX", None)
             result = subprocess.run(
                 [
@@ -565,25 +578,26 @@ def test_boot_surfaces_same_root_duplicate_without_waiting_for_port_timeout():
             env = dict(os.environ)
             env.update(
                 {
-                    "YOLOMUX_ROOT": str(root),
-                    "YOLOMUX_LOG_DIR": str(root / "logs"),
+                    "YOMUX_ROOT": str(root),
+                    "YOMUX_LOG_DIR": str(root / "logs"),
                     "TMPDIR": str(temp_dir),
                     "PYTHONPATH": os.pathsep.join((str(workspace_path), str(ROOT))),
                 }
             )
-            for key in (
-                "YOLOMUX_CONFIG_DIR",
-                "YOLOMUX_STATE_DIR",
-                "YOLOMUX_RUNTIME_DIR",
-                "YOLOMUX_CACHE_DIR",
-                "YOLOMUX_CODEX_HOME",
+            for suffix in (
+                "CONFIG_DIR",
+                "STATE_DIR",
+                "RUNTIME_DIR",
+                "CACHE_DIR",
                 "CODEX_HOME",
-                "YOLOMUX_START_LOCK_DIR",
-                "YOLOMUX_TOOL_LOCK_PATH",
-                "YOLOMUX_CA_DIR",
-                "YOLOMUX_WORKSPACE_BASE",
+                "START_LOCK_DIR",
+                "TOOL_LOCK_PATH",
+                "CA_DIR",
+                "WORKSPACE_BASE",
             ):
-                env.pop(key, None)
+                for key in product_env_names(suffix):
+                    env.pop(key, None)
+            env.pop("CODEX_HOME", None)
             env.pop("PYTHONPYCACHEPREFIX", None)
             result = subprocess.run(
                 [
@@ -658,7 +672,7 @@ def test_startup_listener_boundary_returns_the_exact_owned_listener_pid(tmp_path
         result = subprocess.run(
             ["/bin/bash", "-c", f'source "$1"; yomux_port_listener_pids {port}',
              "listener-probe", str(STARTUP_COMMON)],
-            env={**os.environ, "PYTHON": sys.executable},
+            env={**{key: value for key, value in os.environ.items() if not key.startswith("YOLOMUX_") and key != "YOMUX_ENVIRONMENT_LEGACY_INPUT"}, "PYTHON": sys.executable},
             text=True,
             capture_output=True,
         )
@@ -736,6 +750,9 @@ def test_startup_listener_boundary_uses_selected_interpreter_and_checkout_module
     scanner = command_dir / "ss"
     scanner.write_text("#!/bin/sh\n" + scanner_body, encoding="utf-8")
     scanner.chmod(0o755)
+    listener_census = command_dir / "lsof"
+    listener_census.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    listener_census.chmod(0o755)
     (command_dir / "dirname").symlink_to("/usr/bin/dirname")
     record = tmp_path / "interpreter-record"
     wrapper = tmp_path / "selected-python"
@@ -754,7 +771,7 @@ def test_startup_listener_boundary_uses_selected_interpreter_and_checkout_module
         env={
             **os.environ,
             "PATH": str(command_dir),
-            "YOLOMUX_PYTHON": str(wrapper),
+            "YOMUX_PYTHON": str(wrapper),
             "REAL_PYTHON": sys.executable,
             "WRAPPER_RECORD": str(record),
         },
@@ -778,6 +795,8 @@ def test_macos_submit_accepts_legacy_six_fields_and_server_options(tmp_path):
     tools_dir.mkdir(parents=True)
     shutil.copy2(ROOT / "tools" / "instance_isolation.py", tools_dir / "instance_isolation.py")
     shutil.copy2(STARTUP_COMMON, tools_dir / "startup_common.sh")
+    shutil.copy2(ROOT / "tools" / "product_environment.sh", tools_dir / "product_environment.sh")
+    _copy_product_environment_owner(tools_dir)
     result_path = tmp_path / "result.json"
     plan_path = tmp_path / "plan.json"
     plan_path.write_text(json.dumps({"unset": ["YOMUX_ROOT", "YOLOMUX_ROOT", "YOMUX_ROW_PLAN_FILE", "YOLOMUX_ROW_PLAN_FILE"], "assign": {"YOMUX_ROOT": str(tmp_path / "fresh-root"), "YOLOMUX_ROOT": str(tmp_path / "fresh-root")}}), encoding="utf-8")
@@ -815,7 +834,7 @@ def test_macos_submit_accepts_legacy_six_fields_and_server_options(tmp_path):
     })
     result = subprocess.run([
         "bash", "-c",
-        'source "$1"; tmux() { "$TEST_INTERPRETER" "$TEST_TMUX_STUB" "$@"; }; '
+        'source "$1"; yomux_macos_server_tmux() { "$TEST_INTERPRETER" "$TEST_TMUX_STUB" "$@"; }; '
         'yomux_submit_macos_server "$2" "$3" /bin/bash "$PATH" 48125 "$4" --host 127.0.0.1 --port 48125 --backend go',
         "legacy-submit", str(STARTUP_COMMON), str(checkout), sys.executable, str(tmp_path / "server.log"),
     ], env=environment, text=True, capture_output=True)
@@ -842,6 +861,8 @@ def test_macos_submit_uses_callers_row_plan_not_tmux_daemon_environment(tmp_path
     tools_dir.mkdir(parents=True)
     shutil.copy2(ROOT / "tools" / "instance_isolation.py", tools_dir / "instance_isolation.py")
     shutil.copy2(STARTUP_COMMON, tools_dir / "startup_common.sh")
+    shutil.copy2(ROOT / "tools" / "product_environment.sh", tools_dir / "product_environment.sh")
+    _copy_product_environment_owner(tools_dir)
     result_path = tmp_path / "result.json"
     server_script = checkout / "yomux.py"
     server_script.write_text(
@@ -922,7 +943,7 @@ subprocess.run(["tmux", "-L", sys.argv[2], "wait-for", "-S", "server-ready"], ch
             [
                 "bash",
                 "-c",
-                'source "$1"; test_socket="$2"; yomux_macos_server_tmux_socket() { printf "%s" "$test_socket"; }; '
+                'source "$1"; test_socket="$2"; yomux_macos_server_tmux() { env -u TMUX -u TMUX_PANE tmux -L "$test_socket" "$@"; }; '
                 'export YOLOMUX_ROW_PLAN_FILE="$3"; '
                 'yomux_submit_macos_server "$4" "$5" "$6" "$7" 48125 "$8" 8 '
                 '"YOMUX_GO_BINARY=/tmp/yomux-go-test" "YOMUX_GO_START_REASON=operator-demand" '
@@ -966,7 +987,7 @@ subprocess.run(["tmux", "-L", sys.argv[2], "wait-for", "-S", "server-ready"], ch
             [
                 "bash",
                 "-c",
-                'source "$1"; test_socket="$2"; yomux_macos_server_tmux_socket() { printf "%s" "$test_socket"; }; '
+                'source "$1"; test_socket="$2"; yomux_macos_server_tmux() { env -u TMUX -u TMUX_PANE tmux -L "$test_socket" "$@"; }; '
                 'export YOLOMUX_ROW_PLAN_FILE="$3"; '
                 'yomux_submit_macos_server "$4" "$5" "$6" "$7" 48125 "$8" 0 "$9" "$2"',
                 "submit-empty-go-handoff",
@@ -1112,7 +1133,7 @@ def test_shared_start_lock_rejects_concurrent_launcher_and_releases_cleanly(tmp_
         [
             "bash",
             "-c",
-            'source "$1"; export YOLOMUX_START_LOCK_DIR="$2"; trap yomux_release_start_lock EXIT; yomux_acquire_start_lock; echo ready; read -r _',
+            'source "$1"; export YOMUX_START_LOCK_DIR="$2"; trap yomux_release_start_lock EXIT; yomux_acquire_start_lock; echo ready; read -r _',
             "startup-lock-holder",
             str(STARTUP_COMMON),
             str(lock_dir),
@@ -1129,7 +1150,7 @@ def test_shared_start_lock_rejects_concurrent_launcher_and_releases_cleanly(tmp_
         [
             "bash",
             "-c",
-            'source "$1"; export YOLOMUX_START_LOCK_DIR="$2"; yomux_acquire_start_lock',
+            'source "$1"; export YOMUX_START_LOCK_DIR="$2"; yomux_acquire_start_lock',
             "startup-lock-contender",
             str(STARTUP_COMMON),
             str(lock_dir),
@@ -1155,7 +1176,7 @@ def test_shared_start_lock_recovers_dead_owner(tmp_path):
         [
             "bash",
             "-c",
-            'source "$1"; export YOLOMUX_START_LOCK_DIR="$2"; yomux_acquire_start_lock; yomux_release_start_lock',
+            'source "$1"; export YOMUX_START_LOCK_DIR="$2"; yomux_acquire_start_lock; yomux_release_start_lock',
             "startup-lock-stale",
             str(STARTUP_COMMON),
             str(lock_dir),
@@ -1173,7 +1194,7 @@ def test_shared_start_lock_reentry_requires_same_shell_owner(tmp_path):
     probe = r'''
 set -e
 source "$1"
-export YOLOMUX_START_LOCK_DIR="$2"
+export YOMUX_START_LOCK_DIR="$2"
 trap yomux_release_start_lock EXIT
 yomux_acquire_start_lock
 export YOLOMUX_START_LOCK_ACQUIRED

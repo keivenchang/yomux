@@ -35,11 +35,14 @@ filegroup(
     name = "integration_python_tools",
     srcs = [
         "tools/auto_approve_tmux.py",
+        "tools/bazel_execution_contract.py",
         "tools/bazel_go_browser_e2e.py",
         "tools/docker_image.py",
         "tools/generate_go_version.py",
         "tools/go_binary.py",
         "tools/instance_isolation.py",
+        "tools/product_environment.py",
+        "tools/product_namespace.json",
         "tools/static_build.py",
         "tools/test_plan.py",
         "tools/tls_san.py",
@@ -83,6 +86,8 @@ filegroup(
         "tools/mockers/codex.py",
         "tools/mockers/common.py",
         "tools/mockers/text_client_common.py",
+        "tools/product_environment.py",
+        "tools/product_namespace.json",
         "tools/tls_san.py",
     ],
 )
@@ -135,6 +140,8 @@ frontend_assets(
     name = "frontend_assets",
     srcs = [
         "tools/instance_isolation.py",
+        "tools/product_environment.py",
+        "tools/product_namespace.json",
         "tools/static_build.py",
         ":python_runtime",
     ] + glob(["static_src/**"]),
@@ -213,9 +220,12 @@ filegroup(
         "tests/conftest.py",
         "tests/test_agent_status_docker.py",
         "tools/auto_approve_tmux.py",
+        "tools/bazel_execution_contract.py",
         "tools/docker_image.py",
         "tools/fake_llm_server.py",
         "tools/instance_isolation.py",
+        "tools/product_environment.py",
+        "tools/product_namespace.json",
         "tools/test_plan.py",
         "tools/tls_san.py",
         "tools/tool_guard.py",
@@ -239,12 +249,15 @@ filegroup(
         "tools/bazel_rules.bzl",
         "//cmd/fake-llm:BUILD.bazel",
         "//cmd/yomux-go:BUILD.bazel",
+        "//internal/atomicfile:BUILD.bazel",
         "//internal/cache:BUILD.bazel",
         "//internal/capabilities:BUILD.bazel",
         "//internal/fakellm:BUILD.bazel",
         "//internal/finder:BUILD.bazel",
+        "//internal/mutablefs:BUILD.bazel",
         "//internal/stats:BUILD.bazel",
         "//internal/testsupport:BUILD.bazel",
+        "//internal/tmuxcmd:BUILD.bazel",
         "//internal/work:BUILD.bazel",
     ],
 )
@@ -269,10 +282,13 @@ test_suite(
     name = "go_unit_tests",
     tests = [
         "//cmd/yomux-go:yomux_go_test",
+        "//internal/atomicfile:atomicfile_test",
         "//internal/cache:cache_test",
         "//internal/capabilities:capabilities_test",
         "//internal/fakellm:fakellm_test",
         "//internal/finder:finder_test",
+        "//internal/mutablefs:mutablefs_test",
+        "//internal/productenv:productenv_test",
         "//internal/stats:agent_status_integration_test",
         "//internal/stats:stats_test",
         "//internal/testsupport:testsupport_test",
@@ -284,10 +300,12 @@ test_suite(
     name = "go_race_tests",
     tests = [
         "//cmd/yomux-go:yomux_go_race_test",
+        "//internal/atomicfile:atomicfile_race_test",
         "//internal/cache:cache_race_test",
         "//internal/capabilities:capabilities_race_test",
         "//internal/fakellm:fakellm_race_test",
         "//internal/finder:finder_race_test",
+        "//internal/mutablefs:mutablefs_race_test",
         "//internal/stats:agent_status_integration_race_test",
         "//internal/stats:stats_race_test",
         "//internal/testsupport:testsupport_race_test",
@@ -304,12 +322,11 @@ test_suite(
         ":docker_runtime_contract_test",
         ":fake_llm_contract_test",
         ":go_race_tests",
+        ":go_runtime_safety_e2e",
         ":go_unit_tests",
         ":yomux_go_browser_e2e",
         ":yomux_go_contract_test",
         ":yomux_go_stats_browser_docker_e2e",
-        "//cmd/yomux-go:external_parity_race_test",
-        "//cmd/yomux-go:external_parity_test",
     ],
 )
 
@@ -318,12 +335,11 @@ test_suite(
     tests = [
         ":bazel_action_environment_test",
         ":go_race_tests",
+        ":go_runtime_safety_e2e",
         ":go_unit_tests",
         ":yomux_go_browser_e2e",
         ":yomux_go_contract_test",
         ":yomux_go_stats_browser_docker_e2e",
-        "//cmd/yomux-go:external_parity_race_test",
-        "//cmd/yomux-go:external_parity_test",
     ],
 )
 
@@ -341,7 +357,10 @@ sh_test(
     size = "small",
     timeout = "short",
     srcs = ["tools/bazel_action_environment_test.sh"],
-    data = ["tools/bazel_test_common.sh"],
+    data = [
+        "tools/bazel_test_common.sh",
+        "tools/product_environment.sh",
+    ],
 )
 
 sh_test(
@@ -349,6 +368,8 @@ sh_test(
     size = "small",
     timeout = "short",
     srcs = ["tools/docker_runtime_contract_test.sh"],
+    args = ["$(location tools/product_environment.sh)"],
+    data = ["tools/product_environment.sh"],
 )
 
 sh_test(
@@ -366,6 +387,7 @@ sh_test(
         "tests/browser_helpers/webdriver_lease.py",
         "tools/bazel_go_browser_e2e.py",
         "tools/bazel_test_common.sh",
+        "tools/product_environment.sh",
         ":go_browser_runtime",
         ":yomux-go",
     ],
@@ -387,6 +409,7 @@ sh_test(
     ],
     data = [
         "tools/bazel_test_common.sh",
+        "tools/product_environment.sh",
         ":stats_browser_runtime",
         ":yomux-go",
     ],
@@ -407,6 +430,7 @@ sh_test(
     ],
     data = [
         "tools/bazel_test_common.sh",
+        "tools/product_environment.sh",
         ":agent_status_runtime",
     ],
     tags = [
@@ -421,4 +445,32 @@ sh_test(
     srcs = ["tools/fake_llm_contract_test.sh"],
     args = ["$(location :fake_llm)"],
     data = [":fake_llm"],
+)
+
+runtime_tree(
+    name = "go_runtime_safety_runtime",
+    srcs = [
+        "tools/verify_go_stats_restart.py",
+        ":integration_python_tools",
+        ":python_runtime",
+    ],
+)
+
+sh_test(
+    name = "go_runtime_safety_e2e",
+    size = "medium",
+    timeout = "long",
+    srcs = ["tools/bazel_go_runtime_safety_e2e.sh"],
+    args = [
+        "$(rlocationpath :yomux-go)",
+        "$(location :go_runtime_safety_runtime)",
+        "$(location tools/bazel_test_common.sh)",
+    ],
+    data = [
+        "tools/bazel_test_common.sh",
+        "tools/product_environment.sh",
+        ":go_runtime_safety_runtime",
+        ":yomux-go",
+    ],
+    tags = ["cpu:2"],
 )

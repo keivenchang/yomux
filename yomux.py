@@ -53,7 +53,7 @@ def main() -> int:
 
     The installed ``yomux`` console script calls this exported function
     directly, so normalization cannot live only in the ``__main__`` block.
-    An explicit ``YOLOMUX_TMUX_SOCKET`` remains reserved for isolated
+    An explicit ``YOMUX_TMUX_SOCKET`` remains reserved for isolated
     fixtures and is preserved by the shared helper.
     """
 

@@ -187,3 +187,23 @@ func TestSchedulerCloseDoesNotRunQueuedTask(t *testing.T) {
 		t.Fatal("queued shutdown result was not delivered")
 	}
 }
+
+func TestCloseCancelsAnonymousTask(t *testing.T) {
+	s := New(1, 1)
+	started := make(chan struct{})
+	result, err := s.Submit(context.Background(), "", func(ctx context.Context) (any, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if !s.CloseWithTimeout(time.Second) {
+		t.Fatal("anonymous task survived shutdown")
+	}
+	if got := <-result; got.Err != context.Canceled {
+		t.Fatalf("result: %v", got.Err)
+	}
+}

@@ -5,7 +5,7 @@
 and the test-auth bypass are preserved; and that a blocked attempt never runs PBKDF2."""
 from __future__ import annotations
 
-import base64
+from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from types import SimpleNamespace
 from urllib.parse import urlencode
@@ -20,60 +20,15 @@ from yomux_lib.login_escalation import EdgeBlockController
 from yomux_lib.login_rate_limit import BucketPolicy
 from yomux_lib.login_rate_limit import LoginRatePolicy
 from yomux_lib.login_rate_limit import LoginRateLimiter
+from tests.helpers.fixture_http_server import basic_auth_header as auth_header
 from tests.helpers.fixture_http_server import FixtureHttpServer
 from tests.helpers.fixture_http_server import request_fixture_http_tuple as request
 
-pytestmark = pytest.mark.socket
+from tests.helpers.login_throttle import (
+    VALID_USER, VALID_PASSWORD, loose_network_policy, start_server, stop_server,
+)
 
-VALID_USER = "keivenc"
-VALID_PASSWORD = "random-password"
-
-
-def active_auth_yaml() -> str:
-    return f"""users:
-  - username: "{VALID_USER}"
-    password: "{VALID_PASSWORD}"
-    role: "admin"
-"""
-
-
-def auth_header(username, password):
-    encoded = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
-    return {"Authorization": f"Basic {encoded}"}
-
-
-def loose_network_policy(**overrides):
-    """Network buckets wide open so a test exercises the username backoff without the
-    shared loopback IP bucket interfering; username allowance small to trip quickly."""
-    base = dict(
-        exact_bucket=BucketPolicy(10_000, 10_000),
-        nearby_bucket=BucketPolicy(10_000, 10_000),
-        broad_bucket=BucketPolicy(20_000, 20_000),
-        global_bucket=BucketPolicy(50_000, 50_000),
-        username_initial_allowance=3,
-    )
-    base.update(overrides)
-    return LoginRatePolicy(**base)
-
-
-def start_server(monkeypatch, tmp_path, *, policy=None, extra_app=None):
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    auth_path = tmp_path / "auth.yaml"
-    auth_path.write_text(active_auth_yaml(), encoding="utf-8")
-    monkeypatch.setattr(common, "AUTH_CONFIG_PATH", auth_path)
-    monkeypatch.setattr(server_auth, "current_language_pref", lambda: "system")
-    limiter = LoginRateLimiter(tmp_path / "login-throttle.sqlite3", policy=policy or loose_network_policy())
-    app = SimpleNamespace(sessions=[], dangerously_yolo=False, login_rate_limiter=limiter)
-    if extra_app:
-        for key, value in extra_app.items():
-            setattr(app, key, value)
-    runtime = FixtureHttpServer.start(app, label="login-throttle fixture HTTP server")
-    return runtime.server, runtime.thread, limiter
-
-
-def stop_server(server, thread):
-    FixtureHttpServer(server, thread, "login-throttle fixture HTTP server").close()
-
+pytestmark = [pytest.mark.socket, pytest.mark.deprecated_python_server]
 
 def post_login(port, username, password):
     body = urlencode({"username": username, "password": password, "next": "/"})
@@ -249,3 +204,25 @@ def test_unknown_and_known_usernames_are_throttled_identically(monkeypatch, tmp_
         assert set(known) == set(unknown) == {HTTPStatus.UNAUTHORIZED, HTTPStatus.TOO_MANY_REQUESTS}
     finally:
         stop_server(server2, thread2)
+
+
+
+def test_concurrent_valid_basic_requests_return_network_reservations(monkeypatch, tmp_path):
+    bucket = BucketPolicy(8, 0.001)
+    policy = LoginRatePolicy(exact_bucket=bucket, nearby_bucket=bucket,
+                             broad_bucket=bucket, global_bucket=bucket,
+                             username_initial_allowance=50)
+    server, thread, _limiter = start_server(monkeypatch, tmp_path, policy=policy)
+    port = server.server_address[1]
+
+    def valid_request(_index):
+        return request(port, "GET", "/api/ping", headers=auth_header(VALID_USER, VALID_PASSWORD))[0]
+
+    try:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            assert list(pool.map(valid_request, range(24))) == [HTTPStatus.OK] * 24
+        statuses = [request(port, "GET", "/api/ping", headers=auth_header(f"unknown{index}", "wrong"))[0]
+                    for index in range(9)]
+        assert statuses == [HTTPStatus.UNAUTHORIZED] * 8 + [HTTPStatus.TOO_MANY_REQUESTS]
+    finally:
+        stop_server(server, thread)

@@ -227,6 +227,7 @@ def test_dockview_clicking_xterm_tab_mounts_visible_terminal(browser, tmp_path):
     }
 
 
+@pytest.mark.deprecated_python_server
 def test_dockview_real_xterm_tab_switch_accepts_input_and_output(browser, monkeypatch, tmp_path):
     runtime = start_isolated_browser_app(monkeypatch, tmp_path, session_count=2)
     server, thread = start_browser_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
@@ -350,6 +351,7 @@ def test_dockview_real_xterm_tab_switch_accepts_input_and_output(browser, monkey
         stop_browser_fixture(server, thread, runtime, browser=browser)
 
 
+@pytest.mark.deprecated_python_server
 def test_dockview_delayed_tab_activation_still_focuses_terminal(browser, monkeypatch, tmp_path):
     runtime = start_isolated_browser_app(monkeypatch, tmp_path, session_count=2)
     server, thread = start_browser_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
@@ -423,6 +425,7 @@ def test_dockview_delayed_tab_activation_still_focuses_terminal(browser, monkeyp
         stop_browser_fixture(server, thread, runtime, browser=browser)
 
 
+@pytest.mark.deprecated_python_server
 def test_dockview_prosemirror_failure_does_not_block_xterm_switch(browser, monkeypatch, tmp_path):
     runtime = start_isolated_browser_app(monkeypatch, tmp_path, session_count=2)
     server, thread = start_browser_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
@@ -1874,11 +1877,13 @@ def test_cached_large_differ_does_not_block_terminal_activation(browser, tmp_pat
         }
         fetchSessionFiles = () => Promise.resolve(false);
         const pendingTrees = [];
-        const stageMs = {};
-        let inputYieldFrames = 0;
-        scheduleAfterFileExplorerFirstPaint = (...args) => { inputYieldFrames += 1; return originalAfterPaint(...args); };
-        for (const name of ['fileExplorerChangesPanelStaticHtml', 'fileExplorerDifferFiles', 'renderFileExplorerChangesPanel',
-          'renderChangesGroups', 'renderChangedFileList', 'drainFileTreeRenderStepsWithInput']) {
+            const stageMs = {};
+            let inputYieldFrames = 0;
+            scheduleAfterFileExplorerFirstPaint = (...args) => { inputYieldFrames += 1; return originalAfterPaint(...args); };
+            for (const name of ['fileExplorerChangesPanelStaticHtml', 'fileExplorerDifferFiles', 'renderFileExplorerChangesPanel',
+              'renderChangesRoot', 'renderChangesGroups', 'renderChangedFileList', 'drainFileTreeRenderStepsWithInput',
+              'syncFileExplorerDiffSessionControls', 'bindChangesPanel', 'syncFileExplorerChangesCollapseButtons',
+              'fileExplorerChangesCollapseToggleState', 'fileExplorerChangesRepoKeys']) {
           const original = globalThis[name];
           originalRenderers.set(name, original);
           globalThis[name] = (...args) => {
@@ -2003,7 +2008,7 @@ def test_cached_large_differ_does_not_block_terminal_activation(browser, tmp_pat
     assert result["differSessionAfterFollowup"] == "2" and result["targetRows"] >= 5000, result
     assert result["differLargeFilterCalls"] == 0, result
     assert result["streamChunkRows"] == 2500, result
-    assert result["stageMs"]["renderFileExplorerChangesPanel"] < 50, result
+    assert result["stageMs"]["renderFileExplorerChangesPanel"] < 50, result["stageMs"]
     assert result["longTaskMaxMs"] < 150, result
     assert result["inputYieldFrames"] > 0, result
     assert result["visibilityChecks"] > 2500 and result["cancelledResult"] is False, result
@@ -2186,6 +2191,7 @@ def test_dockview_tab_status_and_numeric_session_spacing_stays_compact(browser, 
             statusWidth: statusRect.width,
             statusOffset: statusRect.left - coreRect.left,
             prefixWidth: prefixRect.width,
+            numberWidth: number.getBoundingClientRect().width,
             prefixOffset: prefixRect.left - coreRect.left,
             numberJustifyContent: getComputedStyle(number).justifyContent,
             textOffset: textRect.left - coreRect.left,
@@ -2197,7 +2203,7 @@ def test_dockview_tab_status_and_numeric_session_spacing_stays_compact(browser, 
     assert all(item["numberJustifyContent"] == "flex-start" for item in metrics), metrics
     for key in ("statusWidth", "statusOffset", "prefixOffset"):
         assert_close(max(item[key] for item in metrics), min(item[key] for item in metrics), context={key: metrics})
-    assert metrics[0]["prefixWidth"] < metrics[1]["prefixWidth"], metrics
+    assert metrics[0]["numberWidth"] < metrics[1]["numberWidth"], metrics
     assert metrics[1]["textOffset"] - metrics[0]["textOffset"] < 20, metrics
 
 

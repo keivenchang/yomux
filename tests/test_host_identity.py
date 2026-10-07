@@ -55,7 +55,7 @@ def test_explicit_host_id_is_normalized_and_recorded_with_boot_and_process_ident
     )
 
     assert identity.stable_host_id == "container_a"
-    assert identity.stable_host_id_source == "YOLOMUX_HOST_ID"
+    assert identity.stable_host_id_source == infra_host_identity_module.HOST_ID_OVERRIDE_ENV
     assert identity.display_hostname == "display-host"
     assert identity.boot_id == "boot_a"
     assert identity.process_start_ticks == 6262
@@ -73,7 +73,7 @@ def test_explicit_host_id_is_normalized_and_recorded_with_boot_and_process_ident
 @pytest.mark.parametrize("value", ["", " ", ".", "..", "../host", "host/name", "host name", "host:name", "host-unicode-☃"])
 def test_host_id_override_rejects_unsafe_path_text(value: str) -> None:
     with pytest.raises(HostIdentityError, match="invalid stable host ID"):
-        normalize_stable_host_id(value, source="YOLOMUX_HOST_ID")
+        normalize_stable_host_id(value, source=infra_host_identity_module.HOST_ID_OVERRIDE_ENV)
 
 
 def test_host_identity_constructor_preserves_the_path_safety_invariant() -> None:
@@ -172,7 +172,7 @@ def test_late_host_id_override_fails_instead_of_returning_cached_machine_identit
     current_host_identity.cache_clear()
     try:
         identity = current_host_identity()
-        assert identity.stable_host_id_source != "YOLOMUX_HOST_ID"
+        assert identity.stable_host_id_source != infra_host_identity_module.HOST_ID_OVERRIDE_ENV
 
         monkeypatch.setenv("YOLOMUX_HOST_ID", "some-other-machine")
 

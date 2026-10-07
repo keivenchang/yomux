@@ -8,14 +8,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/keivenchang/yomux/internal/productenv"
-	"github.com/keivenchang/yomux/internal/stats"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/keivenchang/yomux/internal/atomicfile"
+	"github.com/keivenchang/yomux/internal/productenv"
+	"github.com/keivenchang/yomux/internal/stats"
 )
 
 // The host lease is separate from database ownership: other tabs and server
@@ -32,7 +34,7 @@ func (s *server) statsRefill(w http.ResponseWriter, r *http.Request) {
 		hostTmp := "/tmp"
 		// A private tmux fixture represents an isolated host and must never
 		// contend with the operator runtime during automated tests.
-		if productenv.Value("YOLOMUX_TMUX_SOCKET") != "" {
+		if productenv.Value("TMUX_SOCKET") != "" {
 			hostTmp = os.TempDir()
 		}
 		root = filepath.Join(hostTmp, fmt.Sprintf("yomux-refill-%d", os.Getuid()))
@@ -70,6 +72,12 @@ func (s *server) statsRefill(w http.ResponseWriter, r *http.Request) {
 		var status map[string]any
 		if json.Unmarshal(data, &status) != nil {
 			return map[string]any{"state": "idle"}
+		}
+		// Publication precedes lease release. Do not advertise completion
+		// until an immediate retry can acquire ownership of a new refill.
+		if lockErr != nil && (status["state"] == "succeeded" || status["state"] == "failed") {
+			status["state"] = "running"
+			delete(status, "message")
 		}
 		if lockErr == nil && (status["state"] == "running" || status["state"] == "queued") {
 			message := "Couldn’t refill agent history. Your previous data is unchanged."
@@ -189,10 +197,7 @@ func writeRefillStatus(root string, status map[string]any) error {
 		return err
 	}
 	path := filepath.Join(root, "status.json")
-	if err := os.WriteFile(path+".tmp", data, 0600); err != nil {
-		return err
-	}
-	return os.Rename(path+".tmp", path)
+	return atomicfile.Write(path, data)
 }
 
 func (s *server) refillProgress(id, phase string) error {

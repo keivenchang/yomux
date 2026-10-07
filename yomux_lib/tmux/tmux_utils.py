@@ -11,10 +11,13 @@ import subprocess
 import time
 from collections.abc import Sequence
 from typing import Any
+from tools.product_environment import product_env, product_env_name
+from tools.instance_isolation import apply_yomux_environment_assignments
+from tools.instance_isolation import normalize_yomux_environment
 
 
-YOLOMUX_TMUX_SOCKET_ENV = "YOLOMUX_TMUX_SOCKET"
-YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV = "YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER"
+PRODUCT_TMUX_SOCKET_ENV = product_env_name('TMUX_SOCKET')
+PRODUCT_TMUX_ALLOW_DEFAULT_SERVER_ENV = product_env_name('TMUX_ALLOW_DEFAULT_SERVER')
 TMUX_CONTROL_MODE_FLAG = "-C"
 TMUX_CLIENT_ATTACH_VERB = "attach-session"
 TMUX_KILL_SESSION_VERB = "kill-session"
@@ -48,11 +51,11 @@ def use_machine_tmux_for_operator_launch() -> None:
     reserved for isolated fixtures and is therefore left untouched.
     """
 
-    if os.environ.get(YOLOMUX_TMUX_SOCKET_ENV, "").strip():
+    if product_env('TMUX_SOCKET', "", environ=os.environ).strip():
         return
     os.environ.pop("TMUX", None)
     os.environ.pop("TMUX_PANE", None)
-    os.environ[YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV] = "1"
+    apply_yomux_environment_assignments(os.environ, {product_env_name('TMUX_ALLOW_DEFAULT_SERVER'): "1"})
 
 
 def tmux_explicit_socket_argument(args: Sequence[str]) -> str:
@@ -127,7 +130,7 @@ def tmux_guarded_refusal(args: Sequence[str], *, server_is_explicit: bool) -> tu
         return "", ""
     if TMUX_KILL_SERVER_VERB in values:
         return TMUX_KILL_SERVER_VERB, TmuxSocketTargetError.IMPLICIT_SERVER_REASON
-    if TMUX_KILL_SESSION_VERB in values and os.environ.get(YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV) != "1":
+    if TMUX_KILL_SESSION_VERB in values and product_env('TMUX_ALLOW_DEFAULT_SERVER', environ=os.environ) != "1":
         return TMUX_KILL_SESSION_VERB, TmuxSocketTargetError.IMPLICIT_SERVER_REASON
     if (
         TMUX_CONTROL_MODE_FLAG in values
@@ -147,7 +150,7 @@ def run_cmd(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProces
 
 def tmux_command(args: list[str] | tuple[str, ...]) -> list[str]:
     values = [str(arg) for arg in args]
-    socket_path = os.environ.get(YOLOMUX_TMUX_SOCKET_ENV, "").strip()
+    socket_path = product_env('TMUX_SOCKET', "", environ=os.environ).strip()
     server_is_explicit = bool(socket_path or tmux_explicit_socket_argument(values))
     verb, reason = tmux_guarded_refusal(values, server_is_explicit=server_is_explicit)
     if verb:

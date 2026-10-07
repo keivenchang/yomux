@@ -1072,22 +1072,3 @@ async function openChangedDirectoryInFinder(path) {
     statusErr(localizedHtml('status.expandDirectoryFailed', {error}));
   }
 }
-
-// C5: per-render binding for Modified-files rows (rows are recreated each render). Binds the Finder image
-// hover preview on image rows under the preview cap (unknown size -> bind and let /api/fs/raw fail
-// gracefully, like Finder).
-function bindChangedFileRowBehaviors(panel) {
-  if (!panel) return;
-  panel.querySelectorAll('[data-open-change-file]').forEach(row => {
-    const path = row.dataset.openChangeFile || '';
-    if (!path) return;
-    const name = basenameOf(path);
-    if (previewMediaKindForPath(name) === 'image') {
-      const sizeText = row.dataset.changeSize;
-      const size = sizeText === undefined || sizeText === '' ? null : Number(sizeText);
-      if (size === null || !Number.isFinite(size) || size <= MAX_FILE_PREVIEW_BYTES) {
-        bindFileImagePreview(row, path, {kind: 'file', name, size});
-      }
-    }
-  });
-}

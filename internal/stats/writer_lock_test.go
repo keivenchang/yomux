@@ -40,8 +40,8 @@ func TestWriterLeaseRejectsSecondOwnerAndReleasesOnClose(t *testing.T) {
 }
 
 func TestWriterLeaseCrossProcessOwnership(t *testing.T) {
-	if os.Getenv("YOLOMUX_WRITER_LEASE_HELPER") == "1" {
-		path := os.Getenv("YOLOMUX_WRITER_LEASE_PATH")
+	if os.Getenv("YOMUX_WRITER_LEASE_HELPER") == "1" {
+		path := os.Getenv("YOMUX_WRITER_LEASE_PATH")
 		writer, err := OpenWriter(context.Background(), path)
 		if err != nil {
 			fmt.Fprintln(os.Stdout, "helper open failed:", err)
@@ -58,7 +58,7 @@ func TestWriterLeaseCrossProcessOwnership(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "stats.sqlite3")
 	command := exec.Command(os.Args[0], "-test.run=^TestWriterLeaseCrossProcessOwnership$")
-	command.Env = testsupport.SyntheticEnvironment("YOLOMUX_WRITER_LEASE_HELPER=1", "YOLOMUX_WRITER_LEASE_PATH="+path)
+	command.Env = testsupport.SyntheticEnvironment("YOMUX_WRITER_LEASE_HELPER=1", "YOMUX_WRITER_LEASE_PATH="+path)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -114,14 +114,14 @@ func TestWriterLeaseCrossLanguageOwnership(t *testing.T) {
 import os, sys
 from pathlib import Path
 from yomux_lib.stats_current.storage import Store
-store = Store.open(Path(os.environ["YOLOMUX_WRITER_LEASE_PATH"]))
+store = Store.open(Path(os.environ["YOMUX_WRITER_LEASE_PATH"]))
 print("ready", flush=True)
 sys.stdin.readline()
 store.close()
 `
 	command := exec.Command("python3", "-c", python)
 	command.Dir = repoRoot
-	command.Env = testsupport.SyntheticEnvironment("PYTHONPATH="+repoRoot, "YOLOMUX_WRITER_LEASE_PATH="+path)
+	command.Env = testsupport.SyntheticEnvironment("PYTHONPATH="+repoRoot, "YOMUX_WRITER_LEASE_PATH="+path)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -171,8 +171,8 @@ store.close()
 }
 
 func TestWriterLeasePythonRejectsGoOwner(t *testing.T) {
-	if os.Getenv("YOLOMUX_WRITER_LEASE_HELPER") == "1" {
-		path := os.Getenv("YOLOMUX_WRITER_LEASE_PATH")
+	if os.Getenv("YOMUX_WRITER_LEASE_HELPER") == "1" {
+		path := os.Getenv("YOMUX_WRITER_LEASE_PATH")
 		writer, err := OpenWriter(context.Background(), path)
 		if err != nil {
 			fmt.Fprintln(os.Stdout, "helper open failed:", err)
@@ -188,7 +188,7 @@ func TestWriterLeasePythonRejectsGoOwner(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), "stats-v9.sqlite3")
 	command := exec.Command(os.Args[0], "-test.run=^TestWriterLeasePythonRejectsGoOwner$")
-	command.Env = testsupport.SyntheticEnvironment("YOLOMUX_WRITER_LEASE_HELPER=1", "YOLOMUX_WRITER_LEASE_PATH="+path)
+	command.Env = testsupport.SyntheticEnvironment("YOMUX_WRITER_LEASE_HELPER=1", "YOMUX_WRITER_LEASE_PATH="+path)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -217,7 +217,7 @@ func TestWriterLeasePythonRejectsGoOwner(t *testing.T) {
 from pathlib import Path
 from yomux_lib.stats_current.storage import Store
 try:
-    Store.open(Path(os.environ["YOLOMUX_WRITER_LEASE_PATH"]))
+    Store.open(Path(os.environ["YOMUX_WRITER_LEASE_PATH"]))
 except Exception as error:
     print(type(error).__name__ + ": " + str(error), flush=True)
 else:
@@ -225,7 +225,7 @@ else:
 `
 	probe := exec.Command("python3", "-c", python)
 	probe.Dir = repoRoot
-	probe.Env = testsupport.SyntheticEnvironment("PYTHONPATH="+repoRoot, "YOLOMUX_WRITER_LEASE_PATH="+path, "YOLOMUX_STATS_GO_WRITER=")
+	probe.Env = testsupport.SyntheticEnvironment("PYTHONPATH="+repoRoot, "YOMUX_WRITER_LEASE_PATH="+path, "YOMUX_STATS_GO_WRITER=")
 	output, err := probe.CombinedOutput()
 	if err != nil {
 		t.Fatalf("Python lease probe failed: %v output=%s", err, output)
@@ -246,12 +246,12 @@ else:
 	acquire := exec.Command("python3", "-c", `import os
 from pathlib import Path
 from yomux_lib.stats_current.storage import Store
-store = Store.open(Path(os.environ["YOLOMUX_WRITER_LEASE_PATH"]))
+store = Store.open(Path(os.environ["YOMUX_WRITER_LEASE_PATH"]))
 print("ready", flush=True)
 store.close()
 `)
 	acquire.Dir = repoRoot
-	acquire.Env = testsupport.SyntheticEnvironment("PYTHONPATH="+repoRoot, "YOLOMUX_WRITER_LEASE_PATH="+path, "YOLOMUX_STATS_GO_WRITER=")
+	acquire.Env = testsupport.SyntheticEnvironment("PYTHONPATH="+repoRoot, "YOMUX_WRITER_LEASE_PATH="+path, "YOMUX_STATS_GO_WRITER=")
 	output, err = acquire.CombinedOutput()
 	if err != nil || string(output) != "ready\n" {
 		t.Fatalf("Python did not acquire lease after Go release: err=%v output=%q", err, output)
@@ -259,8 +259,8 @@ store.close()
 }
 
 func TestWriterPreflightReadsSchemaCommittedInWALAfterCrash(t *testing.T) {
-	if os.Getenv("YOLOMUX_WRITER_CRASH_HELPER") == "1" {
-		path := os.Getenv("YOLOMUX_WRITER_CRASH_PATH")
+	if os.Getenv("YOMUX_WRITER_CRASH_HELPER") == "1" {
+		path := os.Getenv("YOMUX_WRITER_CRASH_PATH")
 		if _, err := OpenWriter(context.Background(), path); err != nil {
 			fmt.Fprintln(os.Stdout, "helper open failed:", err)
 			os.Exit(2)
@@ -273,7 +273,7 @@ func TestWriterPreflightReadsSchemaCommittedInWALAfterCrash(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "stats-v9.sqlite3")
 	command := exec.Command(os.Args[0], "-test.run=^TestWriterPreflightReadsSchemaCommittedInWALAfterCrash$")
-	command.Env = testsupport.SyntheticEnvironment("YOLOMUX_WRITER_CRASH_HELPER=1", "YOLOMUX_WRITER_CRASH_PATH="+path)
+	command.Env = testsupport.SyntheticEnvironment("YOMUX_WRITER_CRASH_HELPER=1", "YOMUX_WRITER_CRASH_PATH="+path)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)

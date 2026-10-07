@@ -15,6 +15,7 @@ import pytest
 from yomux_lib import local_service_projection
 from yomux_lib.stats_current import resolution as stats_resolution
 from yomux_lib.stats_current import storage
+from yomux_lib.stats_current.service import APPEND_FLUSH_ENV_NAME
 
 
 def test_service_sampling_skips_system_only_diagnostics():
@@ -182,7 +183,6 @@ PRODUCTION_STORE_CEILINGS = CostCeilings(
 # fixture cannot demonstrate. Absent, those tests skip rather than pretend.
 PRODUCTION_STORE_ENV = "YOLOMUX_COST_GATE_STORE"
 # The product override that a service-append probe mode would drive; see the test below.
-APPEND_FLUSH_ENV_NAME = "YOLOMUX_STATS_APPEND_FLUSH_SECONDS"
 COST_PROBE = Path(__file__).resolve().parents[1] / "tools" / "statsd_cost_probe.py"
 
 

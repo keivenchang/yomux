@@ -13,19 +13,22 @@ import signal
 import subprocess
 import time
 
+from tools.product_environment import product_env, product_env_name
 from tools.instance_isolation import normalize_yomux_environment
+from tools.instance_isolation import apply_yomux_environment_assignments
+from tools.instance_isolation import clear_yomux_environment_assignments
 from tools.instance_isolation import resolved_home_path
 from tools.instance_isolation import resolved_product_path
 
 
-TOOL_LOCK_OWNER_ENV = "YOLOMUX_CHECK_TOOL_LOCK_OWNER"
+TOOL_LOCK_OWNER_ENV = product_env_name('CHECK_TOOL_LOCK_OWNER')
 
 
 def host_expensive_tool_lock_path(environ: Mapping[str, str]) -> Path:
     values = normalize_yomux_environment(environ)
     home = resolved_home_path(values)
     # Existing checkouts must contend on this same inode during the rename transition.
-    return resolved_product_path(values, "YOLOMUX_TOOL_LOCK_PATH", home / ".cache" / "yolomux" / "expensive-tools.lock")
+    return resolved_product_path(values, product_env_name('TOOL_LOCK_PATH'), home / ".cache" / "yolomux" / "expensive-tools.lock")
 
 
 def tool_lock_owner_marker(lock_path: Path, *, pid: int | None = None) -> str:
@@ -43,7 +46,7 @@ def parent_owns_tool_lock(
 ) -> bool:
     """Return whether the direct parent declares ownership of this exact lock."""
 
-    return environ.get(TOOL_LOCK_OWNER_ENV) == tool_lock_owner_marker(lock_path, pid=parent_pid)
+    return product_env('CHECK_TOOL_LOCK_OWNER', environ=environ) == tool_lock_owner_marker(lock_path, pid=parent_pid)
 
 
 def container_command_with_host_tool_guard(
@@ -83,15 +86,15 @@ def hold_host_tool_flock(
     handle = lock_path.open("a+", encoding="utf-8")
     try:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB)
-        previous_owner = environ.get(TOOL_LOCK_OWNER_ENV)
-        environ[TOOL_LOCK_OWNER_ENV] = tool_lock_owner_marker(lock_path)
+        previous_owner = product_env('CHECK_TOOL_LOCK_OWNER', environ=environ)
+        apply_yomux_environment_assignments(environ, {TOOL_LOCK_OWNER_ENV: tool_lock_owner_marker(lock_path)})
         try:
             yield handle.fileno()
         finally:
             if previous_owner is None:
-                environ.pop(TOOL_LOCK_OWNER_ENV, None)
+                clear_yomux_environment_assignments(environ, TOOL_LOCK_OWNER_ENV)
             else:
-                environ[TOOL_LOCK_OWNER_ENV] = previous_owner
+                apply_yomux_environment_assignments(environ, {TOOL_LOCK_OWNER_ENV: previous_owner})
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     finally:
         handle.close()

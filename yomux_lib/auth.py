@@ -16,6 +16,7 @@ from .infra.atomic_file import atomic_write_text
 from .infra.root_paths import config_dir_from_environ
 from .infra.shared_config_lock import shared_config_lock
 from .infra.shared_config_lock import write_shared_document
+from tools.product_environment import product_env, product_env_name
 
 
 CONFIG_DIR = config_dir_from_environ(os.environ)
@@ -26,7 +27,7 @@ GUEST_AUTH_USERNAME = "guest"
 GUEST_AUTH_PASSWORD = "guest"
 PASSWORD_HASH_PREFIX = "pbkdf2_sha256"
 PASSWORD_HASH_ITERATIONS = 210_000
-TEST_AUTH_BYPASS_ENV = "YOLOMUX_TEST_AUTH_BYPASS"
+TEST_AUTH_BYPASS_ENV = product_env_name('TEST_AUTH_BYPASS')
 TEST_AUTH_BYPASS_TRUE_VALUES = {"1", "true", "yes", "on"}
 
 
@@ -217,7 +218,7 @@ def initialize_auth_config(path: Path) -> tuple[AuthUser, ...]:
     transaction: two processes that derive independently could otherwise each
     return a valid but different hash, immediately invalidating one login.
     """
-    if os.environ.get(AUTH_CONFIG_READ_ONLY_ENV, "").strip().lower() in {"1", "true", "yes"}:
+    if product_env('AUTH_CONFIG_READ_ONLY', "", environ=os.environ).strip().lower() in {"1", "true", "yes"}:
         if not path.exists():
             return ()
         return read_auth_users(path)
@@ -242,7 +243,7 @@ def current_auth_users() -> tuple[AuthUser, ...]:
 
 
 def test_auth_bypass_enabled() -> bool:
-    return os.environ.get(TEST_AUTH_BYPASS_ENV, "").strip().lower() in TEST_AUTH_BYPASS_TRUE_VALUES
+    return product_env('TEST_AUTH_BYPASS', "", environ=os.environ).strip().lower() in TEST_AUTH_BYPASS_TRUE_VALUES
 
 
 def legacy_placeholder_auth_active(users: tuple[AuthUser, ...]) -> bool:
@@ -292,7 +293,7 @@ LEGACY_AUTH_COOKIE_NAME = "yolomux_auth"
 LEGACY_AUTH_LOGOUT_COOKIE_NAME = "yolomux_logged_out"
 AUTH_COOKIE_MAX_AGE_SECONDS = 90 * 24 * 60 * 60
 AUTH_COOKIE_SECRET_PATH = CONFIG_DIR / "auth-cookie-secret"
-AUTH_CONFIG_READ_ONLY_ENV = "YOLOMUX_AUTH_CONFIG_READ_ONLY"
+AUTH_CONFIG_READ_ONLY_ENV = product_env_name('AUTH_CONFIG_READ_ONLY')
 
 
 def load_auth_cookie_secret(path: Path = AUTH_COOKIE_SECRET_PATH) -> bytes:

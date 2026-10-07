@@ -19,9 +19,11 @@ import subprocess
 import sys
 from typing import Any
 import uuid
+from tools.product_environment import product_env, product_env_name, product_env_present, require_product_env
+from tools.instance_isolation import normalize_yomux_environment
 
 
-HOST_ID_OVERRIDE_ENV = "YOLOMUX_HOST_ID"
+HOST_ID_OVERRIDE_ENV = product_env_name('HOST_ID')
 MACHINE_ID_PATH = Path("/etc/machine-id")
 BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 _SAFE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}")
@@ -262,9 +264,10 @@ def _read_required_identity(path: Path, *, label: str, missing_hint: str = "") -
 
 
 def _host_id_override_state(environ: Mapping[str, str]) -> tuple[bool, str]:
-    if HOST_ID_OVERRIDE_ENV not in environ:
+    environ = normalize_yomux_environment(environ)
+    if not product_env_present('HOST_ID', environ=environ):
         return False, ""
-    return True, normalize_stable_host_id(environ[HOST_ID_OVERRIDE_ENV], source=HOST_ID_OVERRIDE_ENV)
+    return True, normalize_stable_host_id(require_product_env('HOST_ID', environ=environ), source=HOST_ID_OVERRIDE_ENV)
 
 
 def _darwin_command_identity(
@@ -352,9 +355,10 @@ class HostIdentity:
         command_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     ) -> HostIdentity:
         values = os.environ if environ is None else environ
-        if HOST_ID_OVERRIDE_ENV in values:
-            source = HOST_ID_OVERRIDE_ENV
-            stable_host_id = normalize_stable_host_id(values[HOST_ID_OVERRIDE_ENV], source=source)
+        source = product_env_name('HOST_ID') if product_env_present('HOST_ID', environ=values) else HOST_ID_OVERRIDE_ENV
+        values = normalize_yomux_environment(values)
+        if product_env_present('HOST_ID', environ=values):
+            stable_host_id = normalize_stable_host_id(require_product_env('HOST_ID', environ=values), source=source)
         elif platform_name == "darwin" and machine_id_path == MACHINE_ID_PATH:
             source = "ioreg IOPlatformUUID"
             stable_host_id = _darwin_stable_host_id(runner=command_runner)
@@ -461,10 +465,8 @@ def current_host_identity() -> HostIdentity:
     """Return the fixed process identity; configure the override before the first call."""
 
     identity, resolved_override = _resolved_current_host_identity()
-    raw_current_override = (
-        HOST_ID_OVERRIDE_ENV in os.environ,
-        str(os.environ.get(HOST_ID_OVERRIDE_ENV, "")),
-    )
+    values = normalize_yomux_environment(os.environ)
+    raw_current_override = (product_env_present('HOST_ID', environ=values), str(product_env('HOST_ID', "", environ=values)))
     try:
         current_override = _host_id_override_state(os.environ)
     except HostIdentityError as exc:

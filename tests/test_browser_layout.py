@@ -29,6 +29,8 @@ from yomux_lib.watchd_client import WatchClient
 
 def test_browser_wait_timeout_has_one_xdist_only_floor(): browser_harness_lifecycle.assert_browser_wait_timeout_has_one_xdist_only_floor()
 def test_session_scoped_browser_reuse_is_the_default(monkeypatch): browser_harness_lifecycle.assert_session_scoped_browser_reuse_is_the_default(monkeypatch)
+def test_imported_browser_fixtures_share_one_worker_lease_across_modules(tmp_path): browser_harness_lifecycle.assert_imported_browser_fixtures_share_one_worker_lease_across_modules(tmp_path)
+def test_worker_browser_captures_generation_at_creation_and_rejects_failed_retirement(monkeypatch): browser_harness_lifecycle.assert_worker_browser_captures_generation_at_creation_and_rejects_failed_retirement(monkeypatch)
 def test_browser_bundle_guard_passes_through_static_build_failure(monkeypatch): browser_harness_lifecycle.assert_browser_bundle_guard_passes_through_static_build_failure(monkeypatch)
 def test_reused_browser_reset_closes_popouts_and_clears_profile_state(monkeypatch): browser_harness_lifecycle.assert_reused_browser_reset_closes_popouts_and_clears_profile_state(monkeypatch)
 
@@ -1152,14 +1154,91 @@ def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narro
         "primitive": False,
         "range": True,
         "resolution": True,
-        "toggles": 10,
-        "toggleLabels": ["CPU", "System memory", "Agents", "Session tokens/min", "Model output tokens/min", "GPU utilization", "GPU memory", "Client latency", "Client API&SSE/sec", "Client bandwidth/sec"],
+        "toggles": 11,
+        "toggleLabels": ["CPU", "System memory", "Agents", "Session tokens/min", "Model output tokens/min", "GPU utilization", "GPU memory", "Space used %", "Client latency", "Client API&SSE/sec", "Client bandwidth/sec"],
         "layouts": ["AUTO", "S", "M", "L", "MAX"],
         "cards": metrics["cards"],
         "closeButtons": metrics["cards"],
         "headings": metrics["headings"],
         "semanticCards": True,
     }
+    browser.find_element("css selector", '[data-js-debug-chart-menu] summary').click()
+    disk_toggle = browser.find_element("css selector", '[data-js-debug-chart-toggle="systemDisk"]')
+    assert not disk_toggle.is_selected()
+    assert browser.execute_script("return Boolean(document.querySelector('[data-js-debug-chart=\"systemDisk\"]'));") is False
+    disk_toggle.click()
+    disk_chart = WebDriverWait(browser, 8).until(
+        lambda driver: driver.execute_script(
+            """
+            const chart = document.querySelector('[data-js-debug-chart="systemDisk"]');
+            if (!chart) return false;
+            return {
+              title: chart.querySelector('.js-debug-chart-title')?.textContent.trim(),
+              axisMax: chart.dataset.jsDebugChartAxisMax,
+              unit: chart.dataset.jsDebugChartUnit,
+              ariaLabel: chart.querySelector('svg')?.getAttribute('aria-label'),
+            };
+            """
+        )
+    )
+    assert disk_toggle.is_selected()
+    assert disk_chart == {
+        "title": "Space used %",
+        "axisMax": "100",
+        "unit": "percent",
+        "ariaLabel": "Space used %",
+    }
+    disk_series = browser.execute_script(
+        """
+        const nowMs = Date.now();
+        const buckets = [
+          debugGraphNewBucket(nowMs - 180_000, 60_000),
+          debugGraphNewBucket(nowMs - 120_000, 60_000),
+          debugGraphNewBucket(nowMs - 60_000, 60_000),
+        ];
+        const valuesByBucket = [
+          {'/': {used_percent: 20, samples: 1}, '/mnt/data': {used_percent: 70, samples: 1}},
+          {'/': {used_percent: 22, samples: 1}, '/mnt/data': {used_percent: 0, samples: 0, inventory: true}},
+          {'/': {used_percent: 24, samples: 1}, '/mnt/data': {used_percent: 82, samples: 1}},
+        ];
+        for (const [index, bucket] of buckets.entries()) {
+          const values = valuesByBucket[index];
+          debugGraphApplyHostMetrics(bucket, {
+            disk_mounts: Object.fromEntries(Object.entries(values).map(([mountpoint, item]) => [
+              mountpoint,
+              {label: mountpoint, ...item},
+            ])),
+          });
+        }
+        const group = jsDebugGraphChartGroups.find(item => item.key === 'systemDisk');
+        const seriesItems = debugGraphSeriesData(buckets);
+        const domain = {startMs: nowMs - 300_000, endMs: nowMs, rangeSeconds: 300, zoomed: false};
+        const fixture = document.createElement('div');
+        fixture.dataset.testDiskChart = 'true';
+        const hadHoverData = jsDebugGraphHoverChartData.has('systemDisk');
+        const priorHoverData = jsDebugGraphHoverChartData.get('systemDisk');
+        let result;
+        try {
+          fixture.innerHTML = debugGraphChartHtml(group, seriesItems, domain, buckets, buckets, []);
+          document.body.append(fixture);
+          const chart = fixture.querySelector('[data-js-debug-chart="systemDisk"]');
+          const seriesNodes = [...(chart?.querySelectorAll('[data-js-debug-series]') || [])];
+          const series = [...new Set(seriesNodes.map(node => node.dataset.jsDebugSeries))].sort();
+          const unavailableMountSegments = seriesNodes.filter(node => node.dataset.jsDebugSeries === 'disk:/mnt/data')
+            .map(node => node.dataset.jsDebugSeriesSegment || '0');
+          const labels = [...(chart?.querySelectorAll('[data-js-debug-legend] span:last-child') || [])]
+            .map(node => node.textContent.trim()).sort();
+          const axisMax = chart?.dataset.jsDebugChartAxisMax;
+          result = {series, labels, axisMax, unavailableMountSegments};
+        } finally {
+          fixture.remove();
+          if (hadHoverData) jsDebugGraphHoverChartData.set('systemDisk', priorHoverData);
+          else jsDebugGraphHoverChartData.delete('systemDisk');
+        }
+        return result;
+        """
+    )
+    assert disk_series == {"series": ["disk:/", "disk:/mnt/data"], "labels": ["/", "/mnt/data (82%)"], "axisMax": "100", "unavailableMountSegments": ["0", "1"]}
     session_tokens = browser.execute_script(
         """
         const bucket = {
@@ -2220,7 +2299,7 @@ def test_current_stats_daemons_highlight_and_zoom_use_the_clicked_chart_surface(
     assert result["fullPanelRefresh"] == {"selectionCleared": True, "oldSvgDetached": True, "newSvgPresent": True, "zoomCommitted": False}, result
 
 
-def test_current_stats_cpu_stacks_host_binaries_and_the_daemon_chart_emphasizes_the_yolomux_line(browser, tmp_path):
+def test_current_stats_cpu_stacks_host_binaries_and_daemons_load_shows_yolomux_cpu(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 8).until(lambda driver: driver.execute_script("return document.querySelector('.js-debug-panel [data-js-debug-graph]') !== null"))
     result = browser.execute_script(
@@ -2241,7 +2320,7 @@ def test_current_stats_cpu_stacks_host_binaries_and_the_daemon_chart_emphasizes_
             ];
             processSamples.forEach((values, index) => debugGraphApplyServerRecord({
               start: startedAt + index, duration: 1, system_cpu_total_percent: 60 + index, system_cpu_count: 1,
-              servers: {[`port:${servingPort}`]: {label: `port:${servingPort}`, cpu_total_percent: 35 + index, cpu_count: 1}},
+              servers: {'yolomux-go': {label: `yolomux-go (PID 4242, port ${servingPort})`, cpu_total_percent: 12 + index, cpu_count: 1}},
               host_metrics: {
                 cpu_processes: Object.fromEntries(Object.entries(values).map(([key, value]) => [key, {label: key, total_percent: value, samples: 1}])),
                 service_load: {
@@ -2252,9 +2331,12 @@ def test_current_stats_cpu_stacks_host_binaries_and_the_daemon_chart_emphasizes_
             }));
             refreshDebugGraphElement(graph, {force: true, deferFocusedControl: false});
             refreshDebugSystemViews();
+            const daemonMount = document.createElement('div');
+            daemonMount.innerHTML = debugSystemDaemonsChartHtml();
+            document.body.append(daemonMount);
             const card = graph.querySelector('[data-js-debug-chart="cpu"]');
-            // The Daemons chart resolves Go owners as elapsed runtime occupancy, separate from CPU.
-            const daemonCard = document.querySelector('[data-js-debug-daemons-graph] [data-js-debug-chart="serversLoad"]');
+            // Go process CPU belongs in Daemons load as a comparison to runtime-owner areas.
+            const daemonCard = daemonMount.querySelector('[data-js-debug-chart="serversLoad"]');
             const area = card?.querySelector('[data-js-debug-area-series^="cpuBinary:"]');
             const originalBodyClass = document.body.className;
             document.body.classList.remove('theme-dark', 'theme-resolved-dark');
@@ -2266,13 +2348,18 @@ def test_current_stats_cpu_stacks_host_binaries_and_the_daemon_chart_emphasizes_
             const areas = [...(card?.querySelectorAll('[data-js-debug-area-series^="cpuBinary:"]') || [])];
             const areaLegendBlocks = [...(card?.querySelectorAll('[data-js-debug-legend^="cpuBinary:"] .js-debug-legend-area') || [])].map(node => ({width: getComputedStyle(node).width, height: getComputedStyle(node).height}));
             const systemLine = card?.querySelector('[data-js-debug-series="systemCpu"]');
-            const yomuxLine = card?.querySelector('[data-js-debug-series^="cpu:port:"]');
-            const yomuxOnDaemonCard = daemonCard?.querySelector('[data-js-debug-series^="cpu:port:"]');
+            const processCpuLine = card?.querySelector('[data-js-debug-series^="cpu:"]');
+            const goProcessLine = daemonCard?.querySelector('[data-js-debug-series="cpu:yolomux-go"]');
             const systemLegend = card?.querySelector('[data-js-debug-legend="systemCpu"] .js-debug-legend-line .js-debug-line');
-            const yomuxLegend = card?.querySelector('[data-js-debug-legend^="cpu:port:"] .js-debug-legend-line .js-debug-line');
+            const goProcessLegend = daemonCard?.querySelector('[data-js-debug-legend="cpu:yolomux-go"] .js-debug-legend-line .js-debug-line');
             const legendOrder = [...(card?.querySelectorAll('[data-js-debug-legend]') || [])].map(node => node.dataset.jsDebugLegend);
             const linePaintOrder = [...(card?.querySelectorAll('.js-debug-line-chart [data-js-debug-series]') || [])].map(node => node.dataset.jsDebugSeries);
             const cpuCardLegendOrder = [...(card?.querySelectorAll('[data-js-debug-legend]') || [])].map(node => node.dataset.jsDebugLegend);
+            const daemonData = jsDebugGraphHoverChartData.get('serversLoad');
+            const daemonLegendOrder = [...(daemonCard?.querySelectorAll('[data-js-debug-legend]') || [])].map(node => node.dataset.jsDebugLegend);
+            const daemonBuckets = debugGraphBucketsForChartGroup(jsDebugGraphDaemonsChartGroup, debugGraphDisplayBuckets(Date.now(), {rangeSeconds: 300}), Date.now());
+            const daemonResolvedGroup = debugGraphResolvedChartGroup(jsDebugGraphDaemonsChartGroup, daemonBuckets);
+            const daemonComputedSeries = debugGraphGroupSeriesItems(daemonResolvedGroup, debugGraphSeriesData(daemonBuckets)).map(series => ({key: series.key, samples: series.samples}));
             const areaSeries = [...new Set(areas.map(node => node.dataset.jsDebugAreaSeries))];
             const areaPoints = node => [...String(node.getAttribute('d') || '').matchAll(/[ML] (-?[0-9]+(?:[.][0-9]+)?),(-?[0-9]+(?:[.][0-9]+)?)/g)].map(match => [Number(match[1]), Number(match[2])]);
             const areaHasSlope = node => ((points) => points.slice(1).some((point, index) => Math.abs(point[0] - points[index][0]) > 0.01 && Math.abs(point[1] - points[index][1]) > 0.01))(areaPoints(node));
@@ -2287,12 +2374,11 @@ def test_current_stats_cpu_stacks_host_binaries_and_the_daemon_chart_emphasizes_
               stackedAreas: areas.every(node => node.dataset.jsDebugAreaStacked), areaStrokeWidths: areas.map(node => getComputedStyle(node).strokeWidth),
               lightOpacity, darkOpacity, areaLegendBlocks,
               systemLegendWidth: systemLegend ? getComputedStyle(systemLegend).strokeWidth : '',
-              yomuxLegendWidth: yomuxLegend ? getComputedStyle(yomuxLegend).strokeWidth : '',
+              goProcessLegendWidth: goProcessLegend ? getComputedStyle(goProcessLegend).strokeWidth : '',
               systemLineWidth: systemLine ? getComputedStyle(systemLine).strokeWidth : '',
-              yomuxLineWidth: yomuxLine ? getComputedStyle(yomuxLine).strokeWidth : '',
-              yomuxEmphasized: yomuxLine?.classList.contains('js-debug-line--current-process') || false,
-              yomuxOnDaemonCard: Boolean(yomuxOnDaemonCard), cpuCardLegendOrder,
-              legendOrder, linePaintOrder, systemPattern: systemLine?.dataset.jsDebugLinePattern, yomuxPattern: yomuxLine?.dataset.jsDebugLinePattern,
+              processCpuOnCpuCard: Boolean(processCpuLine),
+              goProcessLineOnDaemonCard: Boolean(goProcessLine), daemonCardPresent: Boolean(daemonCard), daemonLegendOrder, daemonGroupSeries: daemonData?.groupSeries?.map(series => series.key) || [], daemonComputedSeries, cpuCardLegendOrder,
+              legendOrder, linePaintOrder, systemPattern: systemLine?.dataset.jsDebugLinePattern, goProcessPattern: goProcessLine?.dataset.jsDebugLinePattern,
             };
         """
     )
@@ -2305,16 +2391,13 @@ def test_current_stats_cpu_stacks_host_binaries_and_the_daemon_chart_emphasizes_
     assert result["lightOpacity"] == result["darkOpacity"] == "1", result
     assert result["areaLegendBlocks"] == [{"width": "18px", "height": "6px"}] * 4, result
     assert result["systemLegendWidth"] == "1.5px", result
-    assert float(result["yomuxLegendWidth"].removesuffix("px")) > 1.5, result
-    assert float(result["yomuxLineWidth"].removesuffix("px")) > float(result["systemLineWidth"].removesuffix("px")), result
-    assert result["yomuxEmphasized"] is True, result
-    # Process CPU remains in the CPU chart; the Daemons chart shows elapsed runtime occupancy.
-    assert result["legendOrder"][0].startswith("cpu:port:"), result
-    assert result["linePaintOrder"][-1].startswith("cpu:port:"), result
-    assert result["systemPattern"] == "dot" and result["yomuxPattern"] == "solid", result
-    # And it is not drawn twice beside elapsed collector occupancy.
-    assert result["yomuxOnDaemonCard"] is False, result
-    assert any(key.startswith("cpu:port:") for key in result["cpuCardLegendOrder"]), result
+    assert result["goProcessLineOnDaemonCard"] is True, {"daemonCardPresent": result["daemonCardPresent"], "daemonGroupSeries": result["daemonGroupSeries"], "daemonComputedSeries": result["daemonComputedSeries"], "daemonLegendOrder": result["daemonLegendOrder"], "cpuCardLegendOrder": result["cpuCardLegendOrder"]}
+    assert float(result["goProcessLegendWidth"].removesuffix("px")) > 0, result
+    assert "cpu:yolomux-go" in result["daemonLegendOrder"], result
+    assert result["processCpuOnCpuCard"] is False, result
+    assert result["systemPattern"] == "dot" and result["goProcessPattern"] == "dot", result
+    assert result["linePaintOrder"] == ["systemCpu"], result
+    assert result["cpuCardLegendOrder"] == ["cpuBinary:python", "cpuBinary:node", "cpuBinary:rustc", "cpuBinary:chromium", "systemCpu"], result
 
 
 def test_current_stats_system_usage_warning_renders_and_clears(browser, tmp_path):
@@ -2852,7 +2935,7 @@ def test_current_stats_resolution_switch_keeps_old_chart_through_pending_watchdo
     assert result["immediate"]["durations"] == [60000], result
     assert result["immediate"]["surface"] == {
         "busy": "true",
-        "state": "loading-older",
+        "state": "loading-initial",
         "overlayVisible": True,
     }, result
     assert result["immediate"]["pendingTarget"] == 300, result
@@ -11915,7 +11998,7 @@ def test_yochat_live_panel_unicode_status_search_and_emoji_geometry(browser, tmp
             "return Math.max(0, ...Object.values(window.__fixtureChatReaders).map(Number)) === window.__fixtureChatMessages.at(-1).id"
         )
     )
-    media_url = "https://encrypted-tbn0.gstatic.com/images?q=fixture&s=10"
+    media_url = browser.execute_script("return location.origin") + "/fixture-missing-image.png"
     browser.execute_script(
         "window.__fixtureChatSendAs('guest-media', 'browser-media', `picture ${arguments[0]}`, false)",
         media_url,
@@ -11959,7 +12042,7 @@ def test_yochat_live_panel_unicode_status_search_and_emoji_geometry(browser, tmp
             media_url,
         )
     )
-    assert_only_expected_browser_network_error(browser, url=media_url, reason="ERR_PROXY_CONNECTION_FAILED", count=3)
+    assert_only_expected_browser_network_error(browser, url=media_url, reason="404", count=3)
     browser.execute_script("selectSession(chatItemId, {userInitiated: true})")
     journey.enter("reload-paging-and-cleanup")
     reload_result = browser.execute_async_script(

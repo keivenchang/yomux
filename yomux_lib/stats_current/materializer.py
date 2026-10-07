@@ -1141,6 +1141,15 @@ def _observation_samples(observation: Observation) -> tuple[_Sample, ...]:
                 _number(payload, "rss_bytes"), at, source,
             ))
         return tuple(samples)
+    if observation.family == "system_disk":
+        mountpoint = payload["mountpoint"]
+        return (_Sample(
+            f"system_disk_used_percent:{mountpoint}",
+            spec.fold_kind.value,
+            _number(payload, "used_percent"),
+            at,
+            source,
+        ),)
     fields: Mapping[str, str] | None = {
         "gpu": {
             f"gpu_util_percent:{source}": "util_percent",

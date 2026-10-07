@@ -6,7 +6,7 @@ import pytest
 from tools import finder_fs_repro as tool
 
 
-pytestmark = [pytest.mark.browser, pytest.mark.socket]
+pytestmark = [pytest.mark.browser, pytest.mark.socket, pytest.mark.deprecated_python_server]
 
 
 def test_two_client_measurement_records_idle_change_failure_reload_and_navigation(monkeypatch, tmp_path):

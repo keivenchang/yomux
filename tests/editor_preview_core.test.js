@@ -255,8 +255,9 @@ test('Markdown Preview editing converts plain paragraph and inline emphasis chan
   assert.match(previewSource, /function markdownFormattingContextMenu/, 'Editor and Preview share one formatting context-menu owner');
   assert.match(previewSource, /markdownEditorContextMenu\(view, panel, path/, 'Markdown CodeMirror selection opens the shared formatting menu');
   assert.ok(prosemirrorSource.includes("const link = event.target?.closest?.('a[href]')"), 'ViewEdit links own the shared URL context menu before formatting selection handling');
-  assert.match(prosemirrorSource, /href: link && view\.dom\.contains\(link\) \? link\.href : ''/, 'ViewEdit link context menus include URL actions in the full formatting menu');
-  assert.match(prosemirrorSource, /href: link && view\.dom\.contains\(link\) \? link\.href : ''/, 'ViewEdit links include URL actions in the full formatting menu');
+  assert.match(prosemirrorSource, /href: link && view\.dom\.contains\(link\) \? link\.getAttribute\('href'\) \|\| '' : ''/, 'ViewEdit link context menus pass authored URLs to the shared Markdown path resolver');
+  assert.match(prosemirrorSource, /copyHref: link && view\.dom\.contains\(link\) \? link\.href : ''/, 'ViewEdit link menus preserve the browser-resolved URL for Copy URL');
+  assert.match(prosemirrorSource, /markdownPath: path/, 'ViewEdit link context menus pass their owning Markdown file to the shared resolver');
   assert.match(previewSource, /clearInlineFormatting|markdownTextWithInlineFormat/, 'Preview formatting has a source-level toggle path');
 });
 

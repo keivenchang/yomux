@@ -32,6 +32,8 @@ from urllib.parse import urlparse
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from tools.product_environment import product_env
+from tools.instance_isolation import normalize_yomux_environment
 from yomux_lib.tmux.agent_tui import capture_agent_pane
 from yomux_lib.tmux.agent_tui import classify_agent_pane
 from yomux_lib.common import split_csv
@@ -196,7 +198,7 @@ def static_asset_path(asset: str) -> Path | None:
 
 
 def container_helper_path() -> Path:
-    return Path(os.environ.get("YOLOMUX_CONTAINER_HELPER", str(DEFAULT_CONTAINER_HELPER)))
+    return Path(product_env('CONTAINER_HELPER', str(DEFAULT_CONTAINER_HELPER), environ=os.environ))
 
 
 def is_loopback_bind_host(host: str) -> bool:

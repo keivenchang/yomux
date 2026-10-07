@@ -9,5 +9,5 @@ cd "$repo"
 claude --version
 codex --version
 opencode --version
-YOMUX_AGENT_DOCKER_E2E=1 YOMUX_WORKTREE_WRITER_SLOT="${YOMUX_WORKTREE_WRITER_SLOT:-/tmp/yomux-bazel-writer-$$}" \
+env "$(product_env_name AGENT_DOCKER_E2E)=1" "$(product_env_name WORKTREE_WRITER_SLOT)=$(product_env_print WORKTREE_WRITER_SLOT "/tmp/yomux-bazel-writer-$$")" \
     python3 -m pytest tests/test_agent_status_docker.py -q -rs

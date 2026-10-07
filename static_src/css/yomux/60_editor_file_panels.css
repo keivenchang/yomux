@@ -775,10 +775,6 @@ body.editor-theme-light .file-editor-image {
   overscroll-behavior: contain;
   cursor: default;
 }
-.prosemirror-editor .mermaid-preview-host .file-editor-preview-zoom-viewport {
-  overflow: visible;
-  overscroll-behavior: contain;
-}
 .prosemirror-editor .mermaid-preview-host .file-editor-preview-zoom-stage {
   overflow: visible;
 }

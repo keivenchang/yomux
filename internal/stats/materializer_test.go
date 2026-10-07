@@ -370,6 +370,35 @@ func TestMaterializerEmitsSystemAndProcessMemorySeries(t *testing.T) {
 	}
 }
 
+func TestMaterializerKeepsMountedFilesystemSeriesSeparateAndGapped(t *testing.T) {
+	layer, err := (Materializer{}).Build(MaterializeRequest{Start: 0, End: 60, Resolution: 60}, []Observation{
+		{EventID: "disk-root", Family: "system_disk", SourceID: "mount:/", ObservedAt: 30, EpochID: "disk", Payload: map[string]any{"mountpoint": "/", "used_percent": float64(25)}},
+		{EventID: "disk-temp", Family: "system_disk", SourceID: "mount:/tmp", ObservedAt: 30, EpochID: "disk", Payload: map[string]any{"mountpoint": "/tmp", "used_percent": float64(0)}},
+		{EventID: "disk-net-unavailable", Family: "system_disk", SourceID: "mount:/net", ObservedAt: 30, EpochID: "disk-gap", Payload: map[string]any{"mountpoint": "/net", "unavailable_reason": "mount_unavailable"}},
+	}, []CoverageEpoch{
+		{Family: "system_disk", SourceID: "mount:/", EpochID: "disk", StartedAt: 0, NativeCadenceSeconds: 60},
+		{Family: "system_disk", SourceID: "mount:/tmp", EpochID: "disk", StartedAt: 0, NativeCadenceSeconds: 60},
+	}, []UnavailableSpan{{Family: "system_disk", SourceID: "mount:/net", EpochID: "disk-gap", StartedAt: 0, EndedAt: 60, NativeCadenceSeconds: 60, Reason: "mount_unavailable"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := seriesValue(layer.Buckets[0], "system_disk_used_percent:/"); got != 25 {
+		t.Fatalf("root usage = %v", got)
+	}
+	if got := seriesValue(layer.Buckets[0], "system_disk_used_percent:/tmp"); got != 0 {
+		t.Fatalf("valid zero-use filesystem = %v", got)
+	}
+	if got := seriesValue(layer.Buckets[0], "system_disk_inventory:/net"); got != 1 {
+		t.Fatalf("unavailable filesystem inventory = %v", got)
+	}
+	if got := seriesValue(layer.Buckets[0], "system_disk_inventory:/"); got != -1 {
+		t.Fatalf("valid filesystem emitted an inventory-only metric = %v", got)
+	}
+	if len(layer.NoData) != 1 || layer.NoData[0].Family != "system_disk" || layer.NoData[0].SourceID != "mount:/net" || layer.NoData[0].Reason != "mount_unavailable" {
+		t.Fatalf("inaccessible filesystem gap = %+v", layer.NoData)
+	}
+}
+
 func TestMemoryWindowDistinguishesCoverageGapFromUnavailableHost(t *testing.T) {
 	request := MaterializeRequest{Start: 120, End: 180, Resolution: 60}
 	observations := []Observation{{

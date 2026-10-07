@@ -11,9 +11,11 @@ import time
 import uuid
 from pathlib import Path
 from threading import Event
+from types import SimpleNamespace
 
 import pytest
 
+from tools.instance_isolation import apply_yomux_environment_assignments
 from yomux_lib.infra.host_identity import LocalProcessReason
 from yomux_lib.infra.host_identity import current_host_identity
 from yomux_lib import approvald
@@ -37,6 +39,7 @@ from yomux_lib.stats_current import service as stats_current_service
 from yomux_lib.stats_current import storage as stats_current_storage
 from tests.gate_harness import FixtureLocalServiceProcess
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
+from tests.gate_harness import pin_fixture_batchd_scheduler
 from tests.gate_harness import stop_fixture_local_service_process
 from tests.helpers.local_service_records import FixtureLeaseRecordBuilder
 from tests.helpers.local_service_records import FixtureLocalServiceRecordBuilder
@@ -412,6 +415,27 @@ def test_process_spawn_generation_reads_exact_named_environment_value(tmp_path):
         assert registry_mod.process_spawn_generation(43221, proc_root=proc_root) is None
 
 
+@pytest.mark.parametrize("name", registry_mod.product_env_names("LOCAL_SERVICE_SPAWN_GENERATION"))
+def test_process_spawn_generation_accepts_canonical_and_legacy_inherited_names(tmp_path, name):
+    marker = "f" * 32
+    process_root = tmp_path / "proc" / "43226"
+    process_root.mkdir(parents=True)
+    (process_root / "environ").write_bytes(f"{name}={marker}".encode("ascii") + b"\0")
+
+    assert registry_mod.process_spawn_generation(43226, proc_root=tmp_path / "proc") == marker
+
+
+def test_process_spawn_generation_canonical_empty_or_invalid_value_blocks_legacy_fallback(tmp_path):
+    canonical, legacy = registry_mod.product_env_names("LOCAL_SERVICE_SPAWN_GENERATION")
+    process_root = tmp_path / "proc" / "43227"
+    process_root.mkdir(parents=True)
+    (process_root / "environ").write_bytes(
+        f"{canonical}=\0{legacy}={'a' * 32}".encode("ascii") + b"\0"
+    )
+
+    assert registry_mod.process_spawn_generation(43227, proc_root=tmp_path / "proc") is None
+
+
 def test_process_spawn_generation_rejects_invalid_duplicates_and_uses_structured_portable_fallback(tmp_path):
     marker = "b" * 32
     proc_root = tmp_path / "missing-proc"
@@ -490,9 +514,9 @@ def test_darwin_process_environment_parser_excludes_argv_generation_token(tmp_pa
 @pytest.mark.parametrize(
     ("environment", "expected"),
     (
-        ((b"YOLOMUX_LOCAL_SERVICE_SPAWN_GENERATION_PREFIX=" + (b"f" * 32),), None),
-        ((b"YOLOMUX_LOCAL_SERVICE_SPAWN_GENERATION=" + (b"a" * 32),) * 2, None),
-        ((b"YOLOMUX_LOCAL_SERVICE_SPAWN_GENERATION=" + (b"a" * 32), b"OTHER=" + (b"z" * 8192)), "a" * 32),
+        ((b"YOMUX_LOCAL_SERVICE_SPAWN_GENERATION_PREFIX=" + (b"f" * 32),), None),
+        ((b"YOMUX_LOCAL_SERVICE_SPAWN_GENERATION=" + (b"a" * 32),) * 2, None),
+        ((b"YOMUX_LOCAL_SERVICE_SPAWN_GENERATION=" + (b"a" * 32), b"OTHER=" + (b"z" * 8192)), "a" * 32),
     ),
 )
 def test_darwin_process_environment_generation_rows_fail_closed(tmp_path, environment, expected):
@@ -550,6 +574,7 @@ def test_pyproject_package_discovery_includes_local_service_subpackages():
 
 def test_registry_spawn_uses_current_interpreter_module_and_quoted_args(tmp_path, monkeypatch):
     monkeypatch.delenv("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", raising=False)
+    monkeypatch.delenv("YOMUX_LOCAL_SERVICE_IDLE_SECONDS", raising=False)
     starts = []
 
     class FakeProcess:
@@ -606,37 +631,39 @@ def test_registry_spawn_rebases_only_generated_artifacts_outside_current_root(tm
     root = Path("/tmp") / f"yls-{os.getpid()}"
     generated_prefix = str(tmp_path / "bootstrap-python-cache")
     for key in (
-        "YOLOMUX_CONFIG_DIR",
-        "YOLOMUX_STATE_DIR",
-        "YOLOMUX_CACHE_DIR",
-        "YOLOMUX_RUNTIME_DIR",
-        "YOLOMUX_CODEX_HOME",
+        "YOMUX_CONFIG_DIR",
+        "YOMUX_STATE_DIR",
+        "YOMUX_CACHE_DIR",
+        "YOMUX_RUNTIME_DIR",
+        "YOMUX_CODEX_HOME",
         "CODEX_HOME",
-        "YOLOMUX_HOST_ARTIFACT_DIR",
+        "YOMUX_HOST_ARTIFACT_DIR",
         "PYTHONPYCACHEPREFIX",
-        "YOLOMUX_GENERATED_PYTHONPYCACHEPREFIX",
+        "YOMUX_GENERATED_PYTHONPYCACHEPREFIX",
     ):
         monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("YOLOMUX_ROOT", str(root))
+        if key.startswith("YOMUX_"):
+            monkeypatch.delenv(key.replace("YOMUX_", "YOLOMUX_"), raising=False)
+    monkeypatch.setenv("YOMUX_ROOT", str(root))
     if artifact_location == "generated-outside":
         monkeypatch.setenv("PYTHONPYCACHEPREFIX", generated_prefix)
-        monkeypatch.setenv("YOLOMUX_GENERATED_PYTHONPYCACHEPREFIX", generated_prefix)
+        monkeypatch.setenv("YOMUX_GENERATED_PYTHONPYCACHEPREFIX", generated_prefix)
         monkeypatch.setattr(sys, "pycache_prefix", generated_prefix)
     elif artifact_location == "generated-inside":
         contained_generated = str(root / "generated-python-cache")
         monkeypatch.setenv("PYTHONPYCACHEPREFIX", contained_generated)
-        monkeypatch.setenv("YOLOMUX_GENERATED_PYTHONPYCACHEPREFIX", contained_generated)
+        monkeypatch.setenv("YOMUX_GENERATED_PYTHONPYCACHEPREFIX", contained_generated)
         monkeypatch.setattr(sys, "pycache_prefix", contained_generated)
     elif artifact_location == "contained-explicit":
-        monkeypatch.setenv("YOLOMUX_HOST_ARTIFACT_DIR", str(root / "artifacts"))
+        monkeypatch.setenv("YOMUX_HOST_ARTIFACT_DIR", str(root / "artifacts"))
         monkeypatch.setenv("PYTHONPYCACHEPREFIX", str(root / "explicit-python-cache"))
-        monkeypatch.delenv("YOLOMUX_GENERATED_PYTHONPYCACHEPREFIX", raising=False)
+        monkeypatch.delenv("YOMUX_GENERATED_PYTHONPYCACHEPREFIX", raising=False)
     elif artifact_location == "outside-explicit":
         monkeypatch.setenv("PYTHONPYCACHEPREFIX", generated_prefix)
-        monkeypatch.setenv("YOLOMUX_GENERATED_PYTHONPYCACHEPREFIX", str(tmp_path / "different-prefix"))
+        monkeypatch.setenv("YOMUX_GENERATED_PYTHONPYCACHEPREFIX", str(tmp_path / "different-prefix"))
     else:
         monkeypatch.setenv("PYTHONPYCACHEPREFIX", generated_prefix)
-        monkeypatch.setenv("YOLOMUX_GENERATED_PYTHONPYCACHEPREFIX", generated_prefix)
+        monkeypatch.setenv("YOMUX_GENERATED_PYTHONPYCACHEPREFIX", generated_prefix)
         monkeypatch.setattr(sys, "pycache_prefix", str(tmp_path / "different-prefix"))
     registry = LocalServiceRegistry(
         tmp_path,
@@ -645,7 +672,7 @@ def test_registry_spawn_rebases_only_generated_artifacts_outside_current_root(tm
     )
 
     if artifact_location in {"outside-explicit", "forged-exact"}:
-        with pytest.raises(ValueError, match="PYTHONPYCACHEPREFIX resolves outside YOLOMUX_ROOT"):
+        with pytest.raises(ValueError, match="PYTHONPYCACHEPREFIX resolves outside YOMUX_ROOT"):
             registry._spawn()
         assert starts == []
         return
@@ -658,14 +685,14 @@ def test_registry_spawn_rebases_only_generated_artifacts_outside_current_root(tm
     assert Path(child["COVERAGE_FILE"]).is_relative_to(root)
     if artifact_location == "generated-outside":
         assert child["PYTHONPYCACHEPREFIX"] != generated_prefix
-        assert child["YOLOMUX_GENERATED_PYTHONPYCACHEPREFIX"] == child["PYTHONPYCACHEPREFIX"]
+        assert child["YOMUX_GENERATED_PYTHONPYCACHEPREFIX"] == child["PYTHONPYCACHEPREFIX"]
     elif artifact_location == "generated-inside":
         assert child["PYTHONPYCACHEPREFIX"] == str(root / "generated-python-cache")
-        assert child["YOLOMUX_GENERATED_PYTHONPYCACHEPREFIX"] == child["PYTHONPYCACHEPREFIX"]
+        assert child["YOMUX_GENERATED_PYTHONPYCACHEPREFIX"] == child["PYTHONPYCACHEPREFIX"]
     else:
-        assert child["YOLOMUX_HOST_ARTIFACT_DIR"] == str(root / "artifacts")
+        assert child["YOMUX_HOST_ARTIFACT_DIR"] == str(root / "artifacts")
         assert child["PYTHONPYCACHEPREFIX"] == str(root / "explicit-python-cache")
-        assert "YOLOMUX_GENERATED_PYTHONPYCACHEPREFIX" not in child
+        assert "YOMUX_GENERATED_PYTHONPYCACHEPREFIX" not in child
 
 
 def test_registry_spawn_honors_isolated_idle_override(tmp_path, monkeypatch):
@@ -675,6 +702,7 @@ def test_registry_spawn_honors_isolated_idle_override(tmp_path, monkeypatch):
         def poll(self):
             return None
 
+    monkeypatch.delenv("YOMUX_LOCAL_SERVICE_IDLE_SECONDS", raising=False)
     monkeypatch.setenv("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", "0.5")
     registry = LocalServiceRegistry(
         tmp_path,
@@ -1271,6 +1299,7 @@ def _identity_probe_registry(tmp_path, monkeypatch, *, leader_pid, identities, s
 
 @pytest.mark.parametrize("service_name", ["batchd", "statusd", "watchd", "approvald", "indexd", "statsd"])
 def test_real_daemon_final_startup_probe_carries_its_spawned_identity(monkeypatch, gate_runtime_paths, service_name):
+    monkeypatch.setenv(registry_mod.LOCAL_SERVICE_IDLE_SECONDS_ENV, "60")
     socket_path = gate_runtime_paths.runtime_dir / f"{service_name}.sock"
     if service_name == "statsd":
         registry = stats_current_client.StatsCurrentClient(
@@ -1726,6 +1755,39 @@ def test_registry_never_publishes_a_record_from_a_lost_post_ping_status(tmp_path
         "permanently_blocked": False,
     }, {**measured, "failure_reason": failure_reason}
     assert spawned == [True]
+
+
+@pytest.mark.parametrize("stderr", ["batchd fixture waiting for listener", "api_key=fixture-secret-do-not-display"])
+def test_fixture_batchd_pin_reports_owned_pending_child_before_rollback(tmp_path, monkeypatch, stderr):
+    registry, starts, calls, failures = _identity_probe_registry(
+        tmp_path, monkeypatch, leader_pid=44400, identities=["ps:spawned"], status_response={"ok": False}
+    )
+    monkeypatch.setattr(
+        registry,
+        "refresh_spawn_ownership_proof",
+        lambda: registry_mod.SpawnOwnershipProof(registry.spawn_ownership, True, ((44400, "ps:spawned"),)),
+    )
+    monkeypatch.setattr("tests.gate_harness.process_start_identity", lambda _pid: "ps:spawned")
+
+    def start_for_scheduler():
+        response = registry.acquire_lease()
+        registry.stderr_path.write_text(stderr)
+        return response.get("ok") is True
+
+    app = SimpleNamespace(job_client=SimpleNamespace(registry=registry, start_for_scheduler=start_for_scheduler))
+    with pytest.raises(AssertionError) as error:
+        pin_fixture_batchd_scheduler(app)
+    diagnostic = str(error.value)
+    assert "'child_pid': 44400" in diagnostic
+    assert "'child_exit_code': None" in diagnostic
+    assert "'observed_child_start_identity': 'ps:spawned'" in diagnostic
+    assert "'owned_leader_pid': 44400" in diagnostic
+    assert "'proven_member_identities': ((44400, 'ps:spawned'),)" in diagnostic
+    assert f"'backoff_remaining_seconds': {registry_mod.LOCAL_SERVICE_BACKOFF_SECONDS}" in diagnostic
+    assert "fixture-secret-do-not-display" not in diagnostic
+    assert ("[redacted]" if "api_key" in stderr else stderr) in diagnostic
+    assert starts == [True] and failures == []
+    assert calls.count(("status", 0.2)) == 1
 
 
 def test_registry_recovers_a_lost_status_on_the_next_attempt_with_a_real_record(tmp_path, monkeypatch):
@@ -2902,13 +2964,26 @@ def test_service_module_entrypoint_exits_cleanly_on_sigterm(tmp_path, module, se
     ]
     for item in extra_args:
         argv.append(str(socket_path.parent / stats_current_storage.DATABASE_FILENAME) if item == "{database}" else item)
-    process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    environment = {}
+    apply_yomux_environment_assignments(environment, {key: value for key, value in os.environ.items() if not key.startswith("YOMUX_ENVIRONMENT_")})
+    process = subprocess.Popen(argv, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     client = client_factory(socket_path)
     try:
         deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline and not client.registry.healthy():
             time.sleep(0.02)
-        assert client.registry.healthy() is True
+        if not client.registry.healthy():
+            startup = {
+                'pid': process.pid,
+                'exit_code': process.poll(),
+                'start_identity': registry_mod.process_start_identity(process.pid),
+                'socket_exists': socket_path.exists(),
+                'database_exists': (socket_path.parent / stats_current_storage.DATABASE_FILENAME).exists(),
+            }
+            if process.poll() is None:
+                process.terminate()
+            stdout, stderr = process.communicate(timeout=3.0)
+            pytest.fail(f'{service_name} entrypoint was not ready: {startup}; stdout={stdout!r}; stderr={stderr!r}')
 
         process.terminate()
         stdout, stderr = process.communicate(timeout=3.0)

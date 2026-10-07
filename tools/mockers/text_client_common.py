@@ -18,6 +18,7 @@ import tty
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
+from tools.product_environment import environment_value, product_env_name
 
 
 ANSI_AUX_DARK = "\033[38;5;250m"
@@ -962,8 +963,8 @@ def query_terminal_background(timeout: float = OSC11_QUERY_TIMEOUT_SECONDS) -> T
 
 
 def background_from_override() -> TerminalBackground | None:
-    for name in ("TEXT_CLIENT_BACKGROUND", "YOLOMUX_TEXT_CLIENT_BACKGROUND"):
-        override = os.environ.get(name)
+    for name in ("TEXT_CLIENT_BACKGROUND", product_env_name('TEXT_CLIENT_BACKGROUND')):
+        override = environment_value(os.environ, name)
         if not override:
             continue
         normalized = override.strip().lower()

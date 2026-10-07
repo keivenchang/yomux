@@ -67,7 +67,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 sys.dont_write_bytecode = True
 
+from tools.product_environment import product_env, product_env_name
 from tools.instance_isolation import resolved_product_path
+from tools.instance_isolation import apply_yomux_environment_assignments
+from tools.instance_isolation import clear_yomux_environment_assignments
+from tools.instance_isolation import normalize_yomux_environment
 from tools.instance_isolation import resolved_state_dir
 from tools.instance_isolation import validate_product_root_environment
 from tools.instance_isolation import YomuxRootError
@@ -163,7 +167,7 @@ LANE_STEP_TIMEOUT_RETURN_CODE = 124
 # exact label instead of the image ancestor, so a foreign agent's container built from the identical
 # test image is never mistaken for one this run owns and never blocks - or falsely clears - our
 # certification. Image-wide discovery is the fallback only when no run owns the gate.
-CHECK_RUN_TOKEN_ENV = "YOLOMUX_CHECK_RUN_TOKEN"
+CHECK_RUN_TOKEN_ENV = product_env_name('CHECK_RUN_TOKEN')
 CONTAINER_OWNER_LABEL = "yolomux.check.run"
 
 
@@ -194,6 +198,7 @@ class BrowserCapabilityDiagnostic:
     available: bool
     component: str
     detail: str
+    execution: tuple[dict[str, object], ...] = ()
 
     def refusal_text(self) -> str:
         return f"BROWSER PREFLIGHT FAILED [{self.component}]: {self.detail}"
@@ -202,6 +207,7 @@ class BrowserCapabilityDiagnostic:
         return json.dumps(
             {
                 "available": self.available,
+                "execution": self.execution,
                 "component": self.component,
                 "detail": self.detail,
             },
@@ -301,9 +307,7 @@ def check_cpu_percent(cpu_percent: int | None = None) -> int:
     full schedulable CPU capacity. An explicit override may reduce the worker
     budget, but development does not reserve a fraction of the host by default.
     """
-    raw = str(cpu_percent) if cpu_percent is not None else os.environ.get(
-        "YOMUX_CHECK_CPU_PERCENT", os.environ.get("YOLOMUX_CHECK_CPU_PERCENT", "")
-    ).strip()
+    raw = str(cpu_percent) if cpu_percent is not None else product_env('CHECK_CPU_PERCENT', "", environ=os.environ).strip()
     if raw:
         if not raw.isdigit() or not 1 <= int(raw) <= 100:
             raise ValueError("CPU percent must be an integer 1-100")
@@ -364,7 +368,7 @@ def concurrent_test_worker_slots(*, serial: bool = False, cpu_percent: int | Non
 def bazel_memory_limit_mb(*, serial: bool = False, cpu_percent: int | None = None) -> str:
     """Give Bazel its CPU-proportional share of an 80% memory budget."""
 
-    override = os.environ.get("YOMUX_BAZEL_MEMORY_MB", os.environ.get("YOLOMUX_BAZEL_MEMORY_MB", "")).strip()
+    override = product_env('BAZEL_MEMORY_MB', "", environ=os.environ).strip()
     if override:
         if not override.isdigit() or int(override) < 1024:
             raise ValueError("YOMUX_BAZEL_MEMORY_MB must be an integer of at least 1024")
@@ -378,7 +382,7 @@ def bazel_memory_limit_mb(*, serial: bool = False, cpu_percent: int | None = Non
 def pytest_memory_limit_mb(workers: int, *, serial: bool = False, cpu_percent: int | None = None) -> str:
     """Give one pytest container its CPU-proportional share of the memory budget."""
 
-    override = os.environ.get("YOMUX_TEST_MEMORY_MB", os.environ.get("YOLOMUX_TEST_MEMORY_MB", "")).strip()
+    override = product_env('TEST_MEMORY_MB', "", environ=os.environ).strip()
     if override:
         if not override.isdigit() or int(override) < 1024:
             raise ValueError("YOMUX_TEST_MEMORY_MB must be an integer of at least 1024")
@@ -396,7 +400,7 @@ def pytest_cpu_limit(workers: int, *, per_worker: int = 1, minimum: int = 1) -> 
 
 def pytest_cpu_limits(workers: tuple[str, str, str]) -> tuple[str, str, str]:
     nonbrowser, browser, e2e = map(int, workers)
-    return pytest_cpu_limit(nonbrowser), pytest_cpu_limit(browser), pytest_cpu_limit(e2e, per_worker=2)
+    return pytest_cpu_limit(nonbrowser), pytest_cpu_limit(browser, per_worker=2), pytest_cpu_limit(e2e, per_worker=2)
 
 
 def split_pytest_worker_budget(budget: int) -> tuple[str, str, str]:
@@ -409,7 +413,7 @@ def split_pytest_worker_budget(budget: int) -> tuple[str, str, str]:
 def pytest_worker_override() -> tuple[str, str, str] | None:
     """Parse the explicit pytest worker override shared with Bazel budgeting."""
 
-    override = os.environ.get("YOLOMUX_PYTEST_WORKERS", "").strip()
+    override = product_env('PYTEST_WORKERS', "", environ=os.environ).strip()
     if not override:
         return None
     parts = [part.strip() for part in override.split(",")]
@@ -417,17 +421,17 @@ def pytest_worker_override() -> tuple[str, str, str] | None:
         return parts[0], parts[0], parts[0]
     if len(parts) == 3 and all(part.isdigit() and int(part) > 0 for part in parts):
         return parts[0], parts[1], parts[2]
-    raise ValueError("YOLOMUX_PYTEST_WORKERS must be N or nonbrowser,browser,e2e")
+    raise ValueError("YOMUX_PYTEST_WORKERS must be N or nonbrowser,browser,e2e")
 
 
 def bazel_jobs_override() -> str | None:
     """Parse the explicit Bazel jobs override shared with pytest budgeting."""
 
-    override = os.environ.get("YOLOMUX_BAZEL_JOBS", "").strip()
+    override = product_env('BAZEL_JOBS', "", environ=os.environ).strip()
     if not override:
         return None
     if not override.isdigit() or int(override) < 1:
-        raise ValueError("YOLOMUX_BAZEL_JOBS must be a positive integer")
+        raise ValueError("YOMUX_BAZEL_JOBS must be a positive integer")
     return override
 
 
@@ -442,7 +446,8 @@ def default_pytest_cpu_budget(total_budget: int, *, bazel_jobs: str | None = Non
     if bazel_jobs is not None:
         remaining = total_budget - int(bazel_jobs)
         budget = max(3, remaining)
-        # E2E workers spend two CPUs; the remaining CPU count is not a worker count.
+        # Browser and E2E workers each own a browser plus a fixture server, so
+        # the remaining CPU count is not the pytest worker count.
         while budget > 3 and sum(map(int, pytest_cpu_limits(split_pytest_worker_budget(budget)))) > remaining:
             budget -= 1
         return budget
@@ -483,8 +488,8 @@ def bazel_job_count(*, serial: bool = False, cpu_percent: int | None = None) -> 
         return override
     total_budget = concurrent_test_cpu_budget(cpu_percent)
     pytest_workers = pytest_worker_counts(cpu_percent=cpu_percent)
-    # Each E2E worker owns a browser and a fixture server; reserve a second CPU
-    # per worker before assigning the remaining capacity to Bazel actions.
+    # Browser and E2E workers own Chromium plus a fixture server; reserve two
+    # CPUs per worker before assigning the remaining capacity to Bazel actions.
     pytest_cpu_budget = sum(map(int, pytest_cpu_limits(pytest_workers)))
     return str(max(1, total_budget - pytest_cpu_budget))
 
@@ -498,8 +503,10 @@ def step_catalog(*, serial: bool = False, cpu_percent: int | None = None) -> dic
     e2e_memory = pytest_memory_limit_mb(int(e2e_workers), serial=serial, cpu_percent=cpu_percent)
     parallel_single_worker_memory = pytest_memory_limit_mb(1, serial=serial, cpu_percent=cpu_percent)
     final_serial_memory = pytest_memory_limit_mb(1, serial=True, cpu_percent=cpu_percent)
-    nonbrowser_cpu, browser_cpu, e2e_cpu = pytest_cpu_limits((nonbrowser_workers, browser_workers, e2e_workers))
-    browser_single_cpu = pytest_cpu_limit(int(browser_workers), minimum=2)
+    # Keep worker allocation bounded, but let pytest containers borrow idle host
+    # capacity when other lanes finish early or reuse cached results.
+    pytest_container_cpu_limit = "unlimited"
+    browser_single_cpu = pytest_cpu_limit(1, per_worker=2, minimum=2)
     return {
         StepId.PY_COMPILE: Step("py_compile", ["python3", "-m", "py_compile", *py_compile_files()]),
         StepId.STATIC_BUILD: Step("static_build --check", ["python3", "tools/static_build.py", "--check"]),
@@ -510,12 +517,12 @@ def step_catalog(*, serial: bool = False, cpu_percent: int | None = None) -> dic
         StepId.NODE_WALL_SYNTAX: Step("node --check static/tmux-wall.js", ["node", "--check", "static/tmux-wall.js"]),
         StepId.NODE_LAYOUT: Step("node tests/layout_url.test.js", ["node", "tests/layout_url.test.js", *NODE_LAYOUT_FILES]),
         StepId.BAZEL_GO: Step("Bazel Go and Docker tests", ["tools/run_bazel_tests.sh", "--jobs", bazel_jobs, "--memory-mb", bazel_memory]),
-        StepId.PYTEST_NONBROWSER: Step("pytest non-browser", ["python3", "-m", "pytest", *pytest_files("nonbrowser"), *pytest_xdist_args(nonbrowser_workers, serial=serial), "-m", "not node_bridge and not gate_serial and not e2e and not browser", "-q"], env=(("YOMUX_TEST_CPU_COUNT", nonbrowser_cpu), ("YOMUX_TEST_MEMORY_MB", nonbrowser_memory))),
-        StepId.PYTEST_GATE_SERIAL: Step("pytest timing-sensitive serial", ["python3", "-m", "pytest", *pytest_files("gate_serial"), "-m", "gate_serial", "-q"], env=(("YOMUX_TEST_CPU_COUNT", "1"), ("YOMUX_TEST_MEMORY_MB", final_serial_memory))),
-        StepId.PYTEST_BOOT: Step("pytest boot smoke", ["python3", "-m", "pytest", *pytest_files("boot"), "-m", "boot", "-q"], env=(("YOMUX_TEST_CPU_COUNT", browser_single_cpu), ("YOMUX_TEST_MEMORY_MB", parallel_single_worker_memory))),
-        StepId.PYTEST_BROWSER: Step("pytest browser", ["python3", "-m", "pytest", *pytest_files("browser"), *pytest_xdist_args(browser_workers, serial=serial, worksteal=True), "-m", "browser and not e2e and not boot and not visual_golden", "-q"], env=(("YOMUX_TEST_CPU_COUNT", browser_cpu), ("YOMUX_TEST_MEMORY_MB", browser_memory))),
-        StepId.PYTEST_BROWSER_GOLDEN: Step("pytest browser visual goldens", ["python3", "-m", "pytest", *pytest_files("golden"), "-m", "visual_golden", "-q"], env=(("YOMUX_TEST_CPU_COUNT", browser_single_cpu), ("YOMUX_TEST_MEMORY_MB", parallel_single_worker_memory))),
-        StepId.PYTEST_E2E: Step("pytest e2e", ["python3", "-m", "pytest", *pytest_files("e2e"), *pytest_xdist_args(e2e_workers, serial=serial), "-m", "e2e", *[arg for nodeid in BAZEL_GO_BROWSER_TESTS for arg in ("--deselect", nodeid)], "-q"], env=(("YOMUX_TEST_CPU_COUNT", e2e_cpu), ("YOMUX_TEST_MEMORY_MB", e2e_memory))),
+        StepId.PYTEST_NONBROWSER: Step("pytest non-browser", ["python3", "-m", "pytest", *pytest_files("nonbrowser"), *pytest_xdist_args(nonbrowser_workers, serial=serial), "-m", "not node_bridge and not gate_serial and not e2e and not browser and not deprecated_python_server", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), nonbrowser_memory))),
+        StepId.PYTEST_GATE_SERIAL: Step("pytest timing-sensitive serial", ["python3", "-m", "pytest", *pytest_files("gate_serial"), "-m", "gate_serial and not deprecated_python_server", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), final_serial_memory))),
+        StepId.PYTEST_BOOT: Step("pytest boot smoke", ["python3", "-m", "pytest", *pytest_files("boot"), "-m", "boot and not deprecated_python_server", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), parallel_single_worker_memory))),
+        StepId.PYTEST_BROWSER: Step("pytest browser", ["python3", "-m", "pytest", *pytest_files("browser"), *pytest_xdist_args(browser_workers, serial=serial, worksteal=True), "-m", "browser and not e2e and not boot and not visual_golden and not deprecated_python_server", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), browser_memory))),
+        StepId.PYTEST_BROWSER_GOLDEN: Step("pytest browser visual goldens", ["python3", "-m", "pytest", *pytest_files("golden"), "-m", "visual_golden and not deprecated_python_server", "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), parallel_single_worker_memory))),
+        StepId.PYTEST_E2E: Step("pytest e2e", ["python3", "-m", "pytest", *pytest_files("e2e"), *pytest_xdist_args(e2e_workers, serial=serial), "-m", "e2e and not deprecated_python_server", *[arg for nodeid in BAZEL_GO_BROWSER_TESTS for arg in ("--deselect", nodeid)], "-q"], env=(("YOMUX_CHECK_GO_ONLY", "1"), (product_env_name('TEST_CPU_COUNT'), pytest_container_cpu_limit), (product_env_name('TEST_MEMORY_MB'), e2e_memory))),
         StepId.WHITESPACE: Step("git diff --check", ["git", "-c", f"safe.directory={REPO_ROOT}", "diff", "--check"]),
     }
 
@@ -612,13 +619,14 @@ def browser_capability_preflight() -> BrowserCapabilityDiagnostic:
     )
     if probe.returncode != 0:
         detail = (probe.stderr or probe.stdout or f"probe exited {probe.returncode}").strip().splitlines()[-1]
-        return BrowserCapabilityDiagnostic(False, "environment", f"isolated test environment probe failed: {detail}")
+        return BrowserCapabilityDiagnostic(False, "environment", f"isolated test environment probe failed: {detail}", tuple(execution_evidence(probe.stdout)))
     try:
         payload = json.loads(probe.stdout.strip().splitlines()[-1])
         return BrowserCapabilityDiagnostic(
             bool(payload["available"]),
             str(payload["component"]),
             str(payload["detail"]),
+            tuple(payload.get("execution", ())),
         )
     except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         return BrowserCapabilityDiagnostic(False, "environment", f"isolated test environment returned an invalid diagnostic: {error}")
@@ -743,7 +751,7 @@ def active_yomux_server_records(
 ) -> list[dict[str, object]]:
     root = Path(state_dir) if state_dir is not None else state_dir_from_env()
     lock_paths = [root / "instance.lock"]
-    configured_root = os.environ.get("YOLOMUX_ROOT")
+    configured_root = product_env('ROOT', environ=os.environ)
     if configured_root:
         lock_paths.append(Path(configured_root).expanduser().resolve(strict=False) / "instance.lock")
     timestamp = time.time() if now is None else float(now)
@@ -835,8 +843,8 @@ def expensive_tool_lock(enabled: bool = True, lock_path: Path | None = None):
         yield False
         return
     lock_path = default_tool_lock_path() if lock_path is None else resolved_product_path(
-        {**os.environ, "YOLOMUX_TOOL_LOCK_PATH": str(lock_path)},
-        "YOLOMUX_TOOL_LOCK_PATH",
+        {**os.environ, product_env_name('TOOL_LOCK_PATH'): str(lock_path)},
+        product_env_name('TOOL_LOCK_PATH'),
         lock_path,
     )
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -845,15 +853,15 @@ def expensive_tool_lock(enabled: bool = True, lock_path: Path | None = None):
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise ToolGuardBusy(f"another expensive YOmux check already owns {lock_path}") from exc
-        previous_owner = os.environ.get(TOOL_LOCK_OWNER_ENV)
-        os.environ[TOOL_LOCK_OWNER_ENV] = tool_lock_owner_marker(lock_path)
+        previous_owner = normalize_yomux_environment(os.environ).get(TOOL_LOCK_OWNER_ENV)
+        apply_yomux_environment_assignments(os.environ, {TOOL_LOCK_OWNER_ENV: tool_lock_owner_marker(lock_path)})
         try:
             yield True
         finally:
             if previous_owner is None:
-                os.environ.pop(TOOL_LOCK_OWNER_ENV, None)
+                clear_yomux_environment_assignments(os.environ, TOOL_LOCK_OWNER_ENV)
             else:
-                os.environ[TOOL_LOCK_OWNER_ENV] = previous_owner
+                apply_yomux_environment_assignments(os.environ, {TOOL_LOCK_OWNER_ENV: previous_owner})
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
@@ -866,7 +874,7 @@ def check_run_token_environment(token: str | None = None):
     later run's container probe and turning its ancestor fallback into a stale label filter.
     """
 
-    previous = os.environ.get(CHECK_RUN_TOKEN_ENV)
+    previous = product_env('CHECK_RUN_TOKEN', environ=os.environ)
     minted = token or uuid.uuid4().hex
     os.environ[CHECK_RUN_TOKEN_ENV] = minted
     try:
@@ -962,7 +970,8 @@ def run_lane(lane: Lane, *, output_root: Path | None = None) -> LaneResult:
     for step in lane.steps:
         chunks.append(f"$ {command_text(step.args)}\n")
         step_started = time.monotonic()
-        environment = {**os.environ, CHECK_LANE_ENV: lane.name, **dict(step.env)}
+        environment = {**os.environ, **dict(step.env)}
+        apply_yomux_environment_assignments(environment, {CHECK_LANE_ENV: lane.name})
         result = run_lane_step(step, environment=environment)
         step_results.append(StepResult(step.label, command_text(step.args), time.monotonic() - step_started, result.returncode, pytest_duration_phases(result.stdout)))
         if result.stdout:
@@ -1296,6 +1305,26 @@ def lane_output_report_fields(result: LaneResult | None) -> dict[str, object]:
     return fields
 
 
+def execution_evidence(output: str) -> list[dict[str, object]]:
+    records = []
+    for line in output.splitlines():
+        if line.startswith("YOMUX_EXECUTION "):
+            try:
+                record = json.loads(line.removeprefix("YOMUX_EXECUTION "))
+                if not isinstance(record, dict):
+                    raise ValueError("execution record must be an object")
+            except (ValueError, json.JSONDecodeError):
+                record = {"admission": "failed", "hermetic": False, "failure_phase": "execution-report", "detail": "malformed execution record"}
+            records.append(record)
+    for executed, total, summary in re.findall(r"Executed (\d+) out of (\d+) tests?: ([^\n]+)", output):
+        records.append({"executed_tests": int(executed), "total_tests": int(total), "cached_or_unexecuted_tests": int(total) - int(executed), "summary": summary})
+    return records
+
+
+def execution_failed(output: str) -> bool:
+    return any(record.get("admission") == "failed" or record.get("failure_phase") for record in execution_evidence(output))
+
+
 def performance_report_payload(*, selected: list[Lane], results: list[LaneResult], serial: bool, elapsed: float, child_usage: dict[str, float | int | str], interrupted: bool = False, cpu_percent: int | None = None, certification: dict[str, object] | None = None, serial_lanes: bool = False) -> dict[str, object]:
     """Create stable opt-in machine output without adding noise to normal checks."""
 
@@ -1313,7 +1342,8 @@ def performance_report_payload(*, selected: list[Lane], results: list[LaneResult
             {
                 "name": result.name,
                 "label": result.label,
-                "ok": result.ok,
+                "ok": result.ok and not execution_failed(result.output),
+                "execution": execution_evidence(result.output),
                 "wall_seconds": round(result.seconds, 6),
                 **lane_output_report_fields(result),
                 "steps": [
@@ -1336,7 +1366,7 @@ def performance_report_payload(*, selected: list[Lane], results: list[LaneResult
 def performance_report_path(value: str) -> Path:
     """Limit raw machine evidence to /tmp, never the source tree or docs."""
 
-    path = Path(value) if value else Path(os.environ.get("YOLOMUX_TEST_ROOT", f"/tmp/yomux-test-{os.getpid()}-{os.getuid()}")) / "check" / f"check-{time.time_ns()}.json"
+    path = Path(value) if value else Path(product_env('TEST_ROOT', f"/tmp/yomux-test-{os.getpid()}-{os.getuid()}", environ=os.environ)) / "check" / f"check-{time.time_ns()}.json"
     _tmp_only_path(path, label="--performance-report")
     # Keep the caller-visible `/tmp/...` spelling on macOS, where resolving the path turns it
     # into `/private/tmp/...`; the resolved value above remains the security check.
@@ -1488,7 +1518,7 @@ def running_test_containers(run_token: str | None = None) -> dict[str, object]:
     """
 
     image = docker_image.image_name(REPO_ROOT)
-    token = run_token if run_token is not None else (os.environ.get(CHECK_RUN_TOKEN_ENV) or None)
+    token = run_token if run_token is not None else (product_env('CHECK_RUN_TOKEN', environ=os.environ) or None)
     scope_filter = ["--filter", f"label={CONTAINER_OWNER_LABEL}={token}"] if token else ["--filter", f"ancestor={image}"]
     try:
         completed = subprocess.run(
@@ -1600,11 +1630,11 @@ def retire_owned_processes(
 def certification_evidence_dir(explicit: str | None = None) -> Path:
     """One /tmp directory holding the junit outcomes and every raw latency artifact.
 
-    docker/run-tests.sh bind-mounts YOLOMUX_E2E_EVIDENCE_DIR at the identical absolute path, so
+    docker/run-tests.sh bind-mounts YOMUX_E2E_EVIDENCE_DIR at the identical absolute path, so
     evidence written by the containerized run is readable here without a second transport.
     """
 
-    path = Path(explicit) if explicit else Path(os.environ.get("YOLOMUX_TEST_ROOT", f"/tmp/yomux-test-{os.getpid()}-{os.getuid()}")) / "certification" / f"cert-{time.time_ns()}"
+    path = Path(explicit) if explicit else Path(product_env('TEST_ROOT', f"/tmp/yomux-test-{os.getpid()}-{os.getuid()}", environ=os.environ)) / "certification" / f"cert-{time.time_ns()}"
     if not path.resolve().is_relative_to(Path("/tmp").resolve()):
         raise ValueError("certification evidence dir must be under /tmp")
     return path
@@ -1624,7 +1654,7 @@ def certification_step(evidence_dir: Path) -> Step:
         tuple(
             [(name, "1") for name in latency_calibration.CERTIFICATION_ENV_NAMES]
             + [
-                ("YOLOMUX_E2E_EVIDENCE_DIR", str(evidence_dir)),
+                (product_env_name('E2E_EVIDENCE_DIR'), str(evidence_dir)),
                 # Certification runs alone and owns the complete port range; a synthetic lane
                 # name would be rejected by gate_http_port_candidates before any unit runs.
                 (CHECK_LANE_ENV, ""),
@@ -2086,6 +2116,12 @@ def main(argv: list[str] | None = None) -> int:
                     browser_capability = browser_capability_preflight()
                     if not browser_capability.available:
                         print(browser_capability.refusal_text(), file=sys.stderr, flush=True)
+                        elapsed = time.monotonic() - started
+                        payload = performance_report_payload(selected=selected, results=[], serial=args.serial, serial_lanes=args.serial_lanes, elapsed=elapsed, child_usage=child_usage_delta(usage_before, child_usage_snapshot()), cpu_percent=args.cpu_percent)
+                        payload["preflight"] = json.loads(browser_capability.json_text())
+                        payload["ok"] = False
+                        write_performance_report(report_path, payload)
+                        print(f"Test runtime report: {report_path}", flush=True)
                         return EXIT_LANE_FAILED
                 cross_lane_serial = args.serial or args.serial_lanes
                 mode = "serial" if args.serial else "serial lanes (xdist preserved)" if args.serial_lanes else "parallel plus final serial" if any(lane.run_last for lane in selected) else "parallel"
@@ -2121,8 +2157,13 @@ def main(argv: list[str] | None = None) -> int:
 
     write_performance_report(report_path, performance_report_payload(selected=selected, results=results, serial=args.serial, serial_lanes=args.serial_lanes, elapsed=elapsed, child_usage=child_usage_delta(usage_before, child_usage_snapshot()), cpu_percent=args.cpu_percent, certification=certification))
     print(f"Test runtime report: {report_path}", flush=True)
+    native_diagnostics = any(record.get("effective") == "native" for result in results for record in execution_evidence(result.output))
+    if native_diagnostics and not certify and all(result.ok and not execution_failed(result.output) for result in results):
+        print("NATIVE DIAGNOSTICS PASSED - NON-HERMETIC; canonical Docker acceptance remains unverified", flush=True)
+        return 0
 
-    failed = [result.label for result in results if not result.ok]
+
+    failed = [result.label for result in results if not result.ok or execution_failed(result.output)]
     print("\n" + ("=" * 40))
     if failed:
         # A failed lane is a definite product red and outranks "could not be measured"; the
@@ -2143,6 +2184,9 @@ def main(argv: list[str] | None = None) -> int:
     if certification["result"] != "certified":
         print(f"CHECK FAILED in {elapsed:.2f}s: {certification['reason']}")
         return EXIT_LANE_FAILED
+    if native_diagnostics:
+        print("NATIVE DIAGNOSTICS PASSED - NON-HERMETIC; canonical Docker acceptance remains unverified", flush=True)
+        return EXIT_NOT_CERTIFIABLE
     print(f"CHECK PASSED in {elapsed:.2f}s")
     return 0
 

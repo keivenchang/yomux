@@ -76,12 +76,6 @@ func sessionFilesCandidateRoots(roots []string, agents []SessionFileAgent) []str
 	return candidateRoots
 }
 
-func sessionFilesDiscoveryInputs(ctx context.Context, roots []string, agents []SessionFileAgent, hours float64) ([]string, map[string]*sessionFileAttribution) {
-	candidateRoots := sessionFilesCandidateRoots(roots, agents)
-	touched := collectSessionFileAttributions(ctx, agents, candidateRoots, hours)
-	return candidateRoots, touched
-}
-
 func sessionFilesRepositoryScopePath(rawPath string, missingIsFile bool) string {
 	path := strings.TrimSpace(rawPath)
 	if path == "" {
@@ -132,10 +126,6 @@ func sessionFilesHasNestedGitBoundary(directory, repo string) bool {
 	return false
 }
 
-func (s *Service) sessionFilesRepositoryForPath(ctx context.Context, rawRoot string) (string, *Error) {
-	return s.sessionFilesRepositoryForTarget(ctx, rawRoot, false)
-}
-
 func (s *Service) sessionFilesRepositoryForTouchedPath(ctx context.Context, rawPath string) (string, *Error) {
 	root := sessionFilesRepositoryScopePath(rawPath, true)
 	for root != "" {
@@ -167,52 +157,6 @@ func (s *Service) sessionFilesRepositoryForTarget(ctx context.Context, rawPath s
 	repo := filepath.Clean(scope.repo)
 	scope.close()
 	return repo, nil
-}
-
-func (s *Service) discoverSessionFiles(ctx context.Context, session string, roots []string, agents []SessionFileAgent, hours float64, fromRef, toRef string, repoRefs map[string]map[string]string) (sessionFilesDiscovery, *Error) {
-	hours = boundedSessionFilesHours(hours)
-	candidateRoots, touched := sessionFilesDiscoveryInputs(ctx, roots, agents, hours)
-	repositories := make([]string, 0, len(candidateRoots))
-	seen := make(map[string]bool)
-	for _, rawRoot := range candidateRoots {
-		root := strings.TrimSpace(rawRoot)
-		if root == "" || seen[root] {
-			continue
-		}
-		repo, finderErr := s.sessionFilesRepositoryForPath(ctx, root)
-		if finderErr != nil {
-			if finderErr.Code == "not_git_repo" {
-				continue
-			}
-			return sessionFilesDiscovery{}, finderErr
-		}
-		if !seen[repo] {
-			seen[repo] = true
-			repositories = append(repositories, repo)
-		}
-	}
-	// Transcript paths can identify a repository even when an agent was launched from $HOME or
-	// its live pane has already disappeared. Resolve existing touched paths through the same Git
-	// scope owner, while missing paths remain attributable through the known candidate roots.
-	for path := range touched {
-		if ctx.Err() != nil {
-			break
-		}
-		repo, finderErr := s.sessionFilesRepositoryForTouchedPath(ctx, path)
-		if finderErr != nil {
-			continue
-		}
-		if !seen[repo] {
-			seen[repo] = true
-			repositories = append(repositories, repo)
-		}
-	}
-	sort.Strings(repositories)
-	return sessionFilesDiscovery{
-		session: session, hours: hours, fromRef: fromRef, toRef: toRef, repoRefs: repoRefs,
-		candidateRoots: candidateRoots, repositories: repositories, touched: touched,
-		repositoryScopes: make(map[string]*gitHistoryScope),
-	}, nil
 }
 
 func (s *Service) sessionFilesRepositoryViewsBounded(ctx context.Context, discovery sessionFilesDiscovery, paths []string, emit func(int, sessionFilesRepositoryView) error) ([]sessionFilesRepositoryView, map[string]int, *Error) {
@@ -593,9 +537,6 @@ func (s *Service) SessionFilesWithAgentsStream(ctx context.Context, session stri
 		candidateRoots: candidateRoots, touched: touched, repositoryScopes: make(map[string]*gitHistoryScope),
 	}
 	candidates := append([]string(nil), candidateRoots...)
-	for path := range touched {
-		candidates = append(candidates, path)
-	}
 	defer discovery.closeRepositoryScopes()
 	views, viewIndexByRepo, finderErr := s.sessionFilesRepositoryViewsBounded(ctx, discovery, candidates, func(_ int, view sessionFilesRepositoryView) error {
 		if emit == nil {

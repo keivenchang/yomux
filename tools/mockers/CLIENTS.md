@@ -23,7 +23,7 @@ Shared behavior:
 
 ## Background Color Handling
 
-The clients auto-detect light vs dark terminal backgrounds and adjust prompt/auxiliary text intensity from the shared base class. `TEXT_CLIENT_BACKGROUND=light|dark` wins, then `YOLOMUX_TEXT_CLIENT_BACKGROUND=light|dark`, then an OSC 11 xterm-compatible background query, then `COLORFGBG` if the terminal exposes it. If none of those work, the client reports `Terminal bg: unknown (fallback)` and uses the dark-background palette.
+The clients auto-detect light vs dark terminal backgrounds and adjust prompt/auxiliary text intensity from the shared base class. `TEXT_CLIENT_BACKGROUND=light|dark` wins, then `YOMUX_TEXT_CLIENT_BACKGROUND=light|dark` (with `YOLOMUX_TEXT_CLIENT_BACKGROUND` accepted as a deprecated alias), then an OSC 11 xterm-compatible background query, then `COLORFGBG` if the terminal exposes it. If none of those work, the client reports `Terminal bg: unknown (fallback)` and uses the dark-background palette.
 
 OSC 11 is only attempted when stdin and stdout are real TTYs. The query runs against `/dev/tty`, restores terminal settings immediately, and has a short timeout so non-responsive terminals fall back cleanly. To force the palette, run one of:
 

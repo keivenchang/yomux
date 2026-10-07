@@ -174,6 +174,7 @@ NODE_TEST_HELPER_OWNERS: Final[tuple[str, ...]] = (
 # because pytest collection alone cannot discover a non-test-named owner.
 PYTHON_TEST_HELPER_OWNERS: Final[tuple[str, ...]] = (
     "tests/helpers/fixture_http_server.py",
+    "tests/helpers/login_throttle.py",
     "tests/subsystems/app_darwin_memory.py",
     "tests/subsystems/app_batchd_product.py",
     "tests/subsystems/browser_harness_lifecycle.py",

@@ -4186,6 +4186,11 @@ def _bounded_git_read_scope(
                         read_namespace,
                     ) = control
                     try:
+                        # Darwin's /dev/fd entries duplicate descriptors but cannot be traversed
+                        # as directory paths. Git needs pathname access to its control and object
+                        # directories there; keep descriptor paths on platforms where they are
+                        # traversable, and use the already-authorized paths on Darwin.
+                        use_git_pathnames = sys.platform == "darwin"
                         yield BoundedGitReadScope(
                             path=requested_target,
                             repo=repo,
@@ -4199,9 +4204,21 @@ def _bounded_git_read_scope(
                             # Git's own repository discovery needs pathname semantics for the
                             # control directory. The descriptor pins and pre/post identity checks
                             # keep this bounded read from accepting a repointed control namespace.
-                            git_directory=str(git_dir_handle.descriptor_path()),
-                            git_common_directory=str(git_common_dir_handle.descriptor_path()),
-                            git_object_directory=str(objects_handle.descriptor_path()),
+                            git_directory=str(
+                                git_dir_handle.resolved
+                                if use_git_pathnames
+                                else git_dir_handle.descriptor_path()
+                            ),
+                            git_common_directory=str(
+                                git_common_dir_handle.resolved
+                                if use_git_pathnames
+                                else git_common_dir_handle.descriptor_path()
+                            ),
+                            git_object_directory=str(
+                                objects_handle.resolved
+                                if use_git_pathnames
+                                else objects_handle.descriptor_path()
+                            ),
                             git_object_descriptors=(objects_handle.descriptor,),
                             deadline=deadline,
                             shallow_snapshot=shallow_snapshot,

@@ -59,7 +59,7 @@ All YOmux operator launches (`boot.sh`, `make run`, `yomux-dev-start`, the insta
 
 The Go process generates and reuses its own self-signed certificate under `${TMPDIR:-/tmp}/yomux-go-tls-<port>/`; it does not reuse Python's state-root certificate or local-CA helper. The managed launcher forwards host, port, checkout root, environment-selected config/state, `--http`, `--cert`, `--key`, and `--dang` as Go's `--dangerously-yolo`. Python-only `--sessions`, transcript-report, runtime-report, and `--dev` options return an error on Go rather than being silently dropped.
 
-`YOMUX_*` is the canonical environment prefix. `YOLOMUX_*` remains accepted as a warning alias for 30 days after fleet cutover; when both forms are present, `YOMUX_*` wins, including an explicitly empty value. The `yolomux` command and `yolomux.py` entrypoint follow the same transition window.
+`YOMUX_*` is the canonical environment prefix. Legacy `YOLOMUX_*` inputs remain accepted with a deprecation warning; when both forms are present, `YOMUX_*` wins, including an explicitly empty value. Legacy environment support is reviewed separately and remains while supported callers need it. The `yolomux` command and `yolomux.py` entrypoint remain compatibility aliases for 30 days after fleet cutover.
 
 Automated Go validation runs inside isolated Docker state with fixture-owned test ports and Chromium. Port 7221 is reserved for a manual smoke after those checks. Automated checks never connect to the operator runtime on port 7220; use the managed operator workflow for an explicitly requested live restart or smoke.
 
@@ -106,7 +106,7 @@ flowchart TB
     subgraph schedulers["Small in-process schedulers"]
       direction LR
       events["SSE/event fanout"]
-      metrics["elected YO!stats metric workers\nCPU 1s · Agent 10s · GPU 10s\nMemory 60s · Tokens 10s/60s"]
+      metrics["elected YO!stats metric workers\nCPU 1s · Agent 10s · GPU 10s\nMemory 60s · Disk 5m · Tokens 10s/60s"]
       native["watchfiles or bounded poll"]
       signals["tmux control watcher"]
       owner["background-owner election"]
@@ -341,7 +341,7 @@ To add a read-only guest account, uncomment (or add) a `readonly` entry:
 
 YOmux is not a shared-state cluster. The safe current shape is one independent YOmux deployment per machine, with each machine using local configuration, state, cache, tmux, sockets, databases, and writable worktrees. A mounted home may supply read-only source or transcript files, but two hosts must not use one shared `YOMUX_STATE_DIR`, one writable worktree, or concurrently writable configuration files.
 
-The detailed variables and support matrix below describe the legacy Python backend. Go has no Python service/runtime/cache topology and does not implement the legacy backend's complete host-partition and network-filesystem preflight. Give each Go process private host-local `YOMUX_CONFIG_DIR` and `YOMUX_STATE_DIR` roots through `boot.sh`; do not share its config-rooted journals, background-owner records, auth material, or default stats database between hosts.
+The detailed variables and support matrix below describe the legacy Python backend. Go has no Python service/runtime/cache topology or automatic host partition. Go validates local filesystem admission for its config/journal directory and auth/stats WAL stores, and holds one canonical config/journal lease until process exit. A second process using that config directory is refused before journal loading, including through symlink aliases. Give each Go process private host-local `YOMUX_CONFIG_DIR` and `YOMUX_STATE_DIR` roots through `boot.sh`; do not share its config-rooted journals, background-owner records, auth material, or default stats database between hosts.
 
 ### Safe launch shape
 
@@ -565,9 +565,9 @@ Go issues a port-scoped 90-day cookie backed by its config-rooted secret, but it
 
 ### Login rate limiting
 
-On Python, every password path (the browser login form and HTTP Basic auth) is throttled before the password is ever hashed, so brute force, credential stuffing, and password spraying are bounded and cannot burn the server's password-hash CPU. Two independent limits apply together: a per-username limit (5 failed attempts, then escalating waits of 30s, 1m, 2m, 5m, 10m, 30m, up to 1h, reset on a successful login, with a hard lock after 100 consecutive failures) and per-network limits keyed on the client address at several prefix widths (a single address, its /24 or /64 neighborhood, and its /16 or /48 provider block) plus one global emergency limit. When a limit is hit the response is a generic `429 Too Many Requests` that says only "wait a few minutes" or "wait a few hours" — it never reveals which limit fired, whether the username exists, how many attempts remain, or an exact retry time. Correct credentials for an account that is not itself locked always work. The limiter lives in one SQLite file under `YOMUX_STATE_DIR`, so the policy holds across every Python port that shares a state directory and survives restarts.
+On Python, every password path (the browser login form and HTTP Basic auth) is throttled before the password is ever hashed, so brute force, credential stuffing, and password spraying are bounded and cannot burn the server's password-hash CPU. Two independent limits apply together: a per-username limit (5 failed attempts, then escalating waits of 30s, 1m, 2m, 5m, 10m, 30m, up to 1h, reset on a successful login, with a hard lock after 100 consecutive failures) and per-network limits keyed on the client address at several prefix widths (a single address, its /24 or /64 neighborhood, and its /16 or /48 provider block) plus one global emergency limit. When a limit is hit the response is a generic `429 Too Many Requests` that says only "wait a few minutes" or "wait a few hours" — it never reveals which limit fired, whether the username exists, how many attempts remain, or an exact retry time. Successful verification returns its network reservation, so repeated valid Basic requests do not exhaust the network budget. Failed attempts remain charged; an already depleted bucket or blocked username rejects before verification. The limiter lives in one SQLite file under `YOMUX_STATE_DIR`, so the policy holds across every Python port that shares a state directory and survives restarts.
 
-Go login-rate limiting is less complete than the legacy Python backend. Its browser form uses a process-local in-memory counter keyed by socket peer and username, blocks after five failed verifications for a one-minute window, and forgets the counter on restart. Go Basic auth does not use that limiter, and Go has no durable HMAC keys, hierarchical network buckets, hard username lock, shared-port state, policy override, recovery database, or optional edge escalation. Keep Go on a trusted network or loopback tunnel until that gap is closed.
+Go applies one durable admission policy before password verification in form login, Basic API requests, and WebSocket authentication. It uses the same default network capacities, prefix widths, username allowance, cooldown ladder, hard ceiling, and `login-rate-limit.json` override keys described here. Successful verification refunds its network reservations; failed or abandoned attempts remain charged. Cookie authentication bypasses password admission. Throttling returns generic 429 guidance, and unavailable storage returns retryable 503 before password hashing. Configured-account hard locks persist. Idle unknown usernames, including unknown hard locks, expire after six hours to bound retained state. Go does not implement Python's recovery CLI, admin throttle diagnostics, decoy, or firewall escalation.
 
 For Python, the client address is the socket peer. Python deliberately does not trust `X-Forwarded-For`/`Forwarded` headers (any client can forge them). Behind a reverse proxy or an SSH tunnel all clients therefore share the proxy/tunnel address and one network bucket — safe, but intentionally coarser; run YOmux with a trusted edge if you need per-client network limits from a real reverse proxy.
 
@@ -630,7 +630,7 @@ The optional `risk:` field is a label shown in the YOLO event log. Keep it to th
 
 The managed Go launcher and the legacy Python backend bind `--host 0.0.0.0` (all interfaces) by default: YOmux supports reaching sessions from another machine on a trusted LAN, and every product request is gated by login. The Go binary itself defaults to `127.0.0.1` when run directly. If you use the managed all-interface launch, restrict the port to trusted IPs at the firewall:
 
-For Go, this firewall/tunnel boundary is required rather than optional hardening because login throttling is not yet at legacy Python parity.
+For Go, this firewall/tunnel boundary is required rather than optional hardening because Go does not provide the legacy Python recovery CLI, throttle diagnostics, or optional firewall escalation.
 
 ```bash
 sudo ufw allow from <client-ip> to any port 9998 proto tcp
@@ -646,6 +646,8 @@ autossh -M 0 -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -L 9998:127.0
 ## Companion: `tools/auto_approve_tmux.py`
 
 Standalone YOLO auto-approval without the browser UI:
+
+When Codex shows `■ Selected model is at capacity. Please try a different model.`, YO sends `continue\n\n` through the shared prompt transport. Recovery waits for an idle agent with an empty composer and sends once until the notice disappears. The standalone companion uses the same behavior; `--dry-run` reports the intended send without entering text.
 
 ```bash
 python3 tools/auto_approve_tmux.py --list                       # list tmux sessions

@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from pathlib import Path
+from tools.product_environment import product_env
 
 
 def _path_entries(value: object) -> list[str]:
@@ -25,7 +26,7 @@ def healed_runtime_path(env: Mapping[str, object], *, home: Path | None = None) 
     """Return PATH with configured agent locations prepended once, in stable order."""
     path_entries = _path_entries(env.get("PATH", ""))
     active_home = home or Path.home()
-    candidates = [_expand_path_entry(entry, active_home) for entry in _path_entries(env.get("YOLOMUX_EXTRA_PATH", ""))]
+    candidates = [_expand_path_entry(entry, active_home) for entry in _path_entries(product_env('EXTRA_PATH', "", environ=env))]
     local_bin = active_home / ".local" / "bin"
     if local_bin.is_dir():
         candidates.append(str(local_bin))

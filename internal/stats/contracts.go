@@ -368,9 +368,31 @@ func validateCurrentFamilyObservation(item Observation) error {
 		}
 		return nil
 	}
-	for _, name := range []string{"process_percent", "system_percent", "util_percent", "memory_used_bytes", "memory_capacity_bytes", "cpu_percent", "used_bytes", "capacity_bytes", "snapshot_revision", "pressure_percent", "mac_physical_memory_bytes", "mac_memory_used_bytes", "mac_cached_files_bytes", "mac_swap_used_bytes", "mac_app_memory_bytes", "mac_wired_memory_bytes", "mac_compressed_memory_bytes", "mac_pressure_percent", "mac_pressure_level"} {
+	for _, name := range []string{"process_percent", "system_percent", "util_percent", "memory_used_bytes", "memory_capacity_bytes", "cpu_percent", "used_bytes", "capacity_bytes", "used_percent", "snapshot_revision", "pressure_percent", "mac_physical_memory_bytes", "mac_memory_used_bytes", "mac_cached_files_bytes", "mac_swap_used_bytes", "mac_app_memory_bytes", "mac_wired_memory_bytes", "mac_compressed_memory_bytes", "mac_pressure_percent", "mac_pressure_level"} {
 		if err := validateNumberField(name, false); err != nil {
 			return err
+		}
+	}
+	if item.Family == "system_disk" {
+		mountpoint, ok := item.Payload["mountpoint"].(string)
+		if !ok || strings.TrimSpace(mountpoint) == "" || len(mountpoint) > 4096 {
+			return invalid("observation", "payload", "system_disk.mountpoint must be a non-empty path")
+		}
+		if percentage, present := item.Payload["used_percent"]; present {
+			value, ok := percentage.(float64)
+			if !ok || value < 0 || value > 100 || !currentFiniteNonNegative(value) {
+				return invalid("observation", "payload", "system_disk.used_percent must be between 0 and 100")
+			}
+		}
+		if reason, present := item.Payload["unavailable_reason"]; present {
+			if value, ok := reason.(string); !ok || strings.TrimSpace(value) == "" || len(value) > MaxIdentityBytes {
+				return invalid("observation", "payload", "system_disk.unavailable_reason must be a non-empty reason")
+			}
+		}
+		_, hasPercentage := item.Payload["used_percent"]
+		_, hasUnavailableReason := item.Payload["unavailable_reason"]
+		if hasPercentage == hasUnavailableReason {
+			return invalid("observation", "payload", "system_disk must contain either used_percent or unavailable_reason")
 		}
 	}
 	if err := validateNumberField("rss_bytes", true); err != nil {
@@ -429,12 +451,14 @@ func currentFamilyFields(family string) (map[string]bool, map[string]bool) {
 		"gpu":           {"util_percent", "memory_used_bytes", "memory_capacity_bytes", "label"},
 		"service_load":  {"running", "cpu_percent", "rss_bytes"},
 		"system_memory": {"used_bytes", "capacity_bytes", "mac_physical_memory_bytes", "mac_memory_used_bytes", "mac_cached_files_bytes", "mac_swap_used_bytes", "mac_app_memory_bytes", "mac_wired_memory_bytes", "mac_compressed_memory_bytes", "mac_pressure_percent", "mac_pressure_level", "process_memory_bytes", "pressure_percent"},
+		"system_disk":   {"mountpoint", "used_percent", "unavailable_reason"},
 		"browser":       {"kind", "latency_ms", "bytes", "duration_ms", "endpoint", "method", "request_id", "status", "journey_id", "code_revision", "browser_family", "connection_protocol", "max_concurrency", "entry_count", "input_delay_ms", "processing_ms", "presentation_delay_ms", "interaction_type", "operation_kind", "outcome", "signature", "message", "stack", "source", "provenance", "route", "event_type", "wall_time", "delivery_outcome", "line", "column", "fanout_count", "queue_ms", "connect_ms", "tls_ms", "ttfb_ms", "download_ms", "apply_render_ms", "navigation_ms", "bundle_parse_eval_ms", "first_paint_ms", "first_contentful_paint_ms", "first_api_ms", "fanout_ms", "interactive_ms", "app_ready_ms", "upload_queue_depth", "upload_drops", "upload_retries", "instrumentation_cost_ms"},
 	}
 	requiredFields := map[string][]string{
 		"cpu": {"process_percent", "system_percent"}, "agent_status": {"states"},
 		"gpu":          {"util_percent", "memory_used_bytes", "memory_capacity_bytes", "label"},
-		"service_load": {"running", "cpu_percent"}, "system_memory": {"used_bytes", "capacity_bytes"}, "browser": {"kind"},
+		"service_load": {"running", "cpu_percent"}, "system_memory": {"used_bytes", "capacity_bytes"},
+		"system_disk": {"mountpoint"}, "browser": {"kind"},
 	}
 	names, ok := fields[family]
 	if !ok {

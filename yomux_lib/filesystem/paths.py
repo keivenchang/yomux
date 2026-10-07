@@ -22,10 +22,11 @@ from ..common import AUTH_CONFIG_PATH
 from ..common import AUTH_COOKIE_SECRET_PATH
 from ..common import CONFIG_DIR
 from .errors import FilesystemError
+from tools.product_environment import product_env, product_env_name
 
 MAX_READ_BYTES = 20 * 1024 * 1024  # 20 MB cap on file read
 BINARY_SNIFF_BYTES = 8 * 1024  # bytes inspected for NUL when classifying
-FS_ROOTS_ENV = "YOLOMUX_FS_ROOTS"
+FS_ROOTS_ENV = product_env_name('FS_ROOTS')
 DEFAULT_FS_ROOTS = ("/",)
 # `F_GETPATH` (darwin) answers "what pathname does this descriptor currently have", which is a
 # RE-RESOLUTION, not a pin: the consumer that receives it opens the name again.  It is retained only
@@ -280,7 +281,7 @@ def _normalized_absolute_path_is_within(path: Path, root: Path) -> bool:
 
 
 def _configured_fs_roots() -> tuple[Path, ...]:
-    raw = os.environ.get(FS_ROOTS_ENV, "")
+    raw = product_env('FS_ROOTS', "", environ=os.environ)
     return _configured_fs_roots_for_value(_PATH_POLICY_GENERATION, raw, tuple(str(root) for root in DEFAULT_FS_ROOTS))
 
 
@@ -306,7 +307,7 @@ def _configured_fs_roots_for_value(generation: int, raw: str, default_roots: tup
 # `batchd` and `watchd` are shared per-user daemons: the first server to need one launches it, and
 # every other server on every other port then reuses that same process.  A filesystem job
 # descriptor used to carry only `op`, `path` and `args`, so the worker authorized the path against
-# `YOLOMUX_FS_ROOTS` in its OWN environment -- the environment of whichever server launched it
+# `YOMUX_FS_ROOTS` in its OWN environment -- the environment of whichever server launched it
 # first.  A server configured with narrow roots therefore borrowed a broader launcher's authority:
 # its own direct read answered `403 fs.error.outsideRoots`, and the identical descriptor executed
 # in the shared daemon returned the file's contents.  That is a confused deputy, and the reverse
@@ -376,7 +377,7 @@ def capture_access_policy() -> FilesystemAccessPolicy:
     Canonicalizing roots costs real syscalls, and this now runs on the request thread, so the
     captured value is cached on the same generation/configuration key the roots themselves use.
     """
-    return _captured_access_policy(_PATH_POLICY_GENERATION, os.environ.get(FS_ROOTS_ENV, ""))
+    return _captured_access_policy(_PATH_POLICY_GENERATION, product_env('FS_ROOTS', "", environ=os.environ))
 
 
 @lru_cache(maxsize=32)

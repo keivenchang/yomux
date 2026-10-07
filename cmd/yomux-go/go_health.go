@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/keivenchang/yomux/internal/atomicfile"
 )
 
 // goHealthLedger owns measurements made by this Go web process. Request counters are
@@ -181,28 +183,7 @@ func (l *goHealthLifecycle) persistLocked() error {
 	if err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(l.path), ".go-health-history-*")
-	if err != nil {
-		return err
-	}
-	temporaryName := temporary.Name()
-	defer func() { _ = os.Remove(temporaryName) }()
-	if err := temporary.Chmod(0o600); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if _, err := temporary.Write(data); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	return os.Rename(temporaryName, l.path)
+	return atomicfile.Write(l.path, data)
 }
 
 func (l *goHealthLifecycle) markCleanShutdown() {

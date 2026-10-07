@@ -1610,6 +1610,10 @@ function sessionShortcutLabel(session) {
 }
 
 function sessionLabel(session) {
+  const rename = tmuxSessionMutationCurrent;
+  if (rename?.state === 'active' && rename.kind === 'rename' && rename.session === session) {
+    session = rename.newName;
+  }
   const numeric = numericSessionName(session);
   return numeric !== null ? String(numeric) : String(session);
 }
@@ -2436,6 +2440,9 @@ function replaceSessionMetadataEntries(replacements) {
 }
 
 function replaceTmuxSessionsInClient(renameEntries, nextSessions, options = {}) {
+  // Detaching the old terminal clears focus; retain it for the replacement.
+  const previousFocusedTerminal = focusedTerminal;
+  const previousFocusedPanelItem = focusedPanelItem;
   const replacements = renameEntries instanceof Map ? new Map(renameEntries) : new Map(renameEntries || []);
   for (const [oldSession, newSession] of Array.from(replacements)) {
     if (!oldSession || !newSession || oldSession === newSession) replacements.delete(oldSession);
@@ -2455,11 +2462,11 @@ function replaceTmuxSessionsInClient(renameEntries, nextSessions, options = {}) 
   moveUploadResultRecords(replacements);
   replaceSessionMetadataEntries(replacements);
   setSessionOrder(next);
-  const focusSession = focusedPanelItem
-    ? replacements.get(focusedPanelItem) || focusedPanelItem
+  const focusSession = previousFocusedPanelItem
+    ? replacements.get(previousFocusedPanelItem) || previousFocusedPanelItem
     : replacements.values().next().value;
-  focusedTerminal = replacements.get(focusedTerminal) || focusedTerminal;
-  focusedPanelItem = replacements.get(focusedPanelItem) || focusedPanelItem;
+  focusedTerminal = replacements.get(previousFocusedTerminal) || previousFocusedTerminal;
+  focusedPanelItem = replacements.get(previousFocusedPanelItem) || previousFocusedPanelItem;
   lastFocusedTmuxSession = replacements.get(lastFocusedTmuxSession) || lastFocusedTmuxSession;
   const layoutOptions = {
     focusSession,
@@ -2519,6 +2526,7 @@ function showSessionRenameDialog(session) {
   const input = overlay.querySelector('.session-rename-input');
   const errorNode = overlay.querySelector('.session-rename-error');
   const cancel = overlay.querySelector('.session-rename-cancel');
+  const submit = overlay.querySelector('.session-rename-submit');
   const showError = message => {
     errorNode.textContent = message;
     errorNode.hidden = false;
@@ -2529,6 +2537,7 @@ function showSessionRenameDialog(session) {
   cancel.addEventListener('click', closeSessionRenameDialog);
   form.addEventListener('submit', async event => {
     event.preventDefault();
+    if (submit.disabled) return;
     const nextName = input.value.trim();
     const nameError = tmuxSessionNameError(nextName);
     if (nameError) {
@@ -2537,10 +2546,17 @@ function showSessionRenameDialog(session) {
       return;
     }
     errorNode.hidden = true;
-    const renameResult = await renameTmuxSession(session, nextName);
-    if (renameResult !== true) {
-      showError(renameResult?.error || t('status.renameFailedSeeStatus'));
-      input.focus();
+    submit.disabled = true;
+    input.readOnly = true;
+    try {
+      const renameResult = await renameTmuxSession(session, nextName);
+      if (renameResult !== true) {
+        showError(renameResult?.error || t('status.renameFailedSeeStatus'));
+        input.focus();
+      }
+    } finally {
+      submit.disabled = false;
+      input.readOnly = false;
     }
   });
   appOverlayRootElement().appendChild(overlay);
@@ -2577,6 +2593,10 @@ async function renameTmuxSession(session, proposedName) {
       'rename',
       {session, newName},
       async () => {
+        // Paint the lifecycle owner's proposed name while transport is pending.
+        // Keep the real session identity until the backend accepts the rename.
+        renderPaneTabStrips();
+        renderSessionButtons({force: true});
         return apiFetchJson(`/api/rename-session?session=${encodeURIComponent(session)}&new_name=${encodeURIComponent(newName)}`, {method: 'POST', lifecycleBypass: true});
       },
       async payload => {
@@ -2620,6 +2640,9 @@ async function renameTmuxSession(session, proposedName) {
       : t('status.sessionRenameFailed', {error: error?.message || String(error)});
     statusErr(esc(errorText));
     return {error: errorText};
+  } finally {
+    renderPaneTabStrips();
+    renderSessionButtons({force: true});
   }
 }
 

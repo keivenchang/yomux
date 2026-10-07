@@ -581,6 +581,7 @@ def test_g4_revisiting_unchanged_selection_reuses_cache_and_repair_reconnects_wi
 
 
 @pytest.mark.browser
+@pytest.mark.deprecated_python_server
 def test_g1_real_token_and_cost_series_paint_while_repair_backlog_remains(
     browser, monkeypatch, tmp_path, gate_runtime_paths
 ):

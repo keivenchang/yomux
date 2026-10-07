@@ -148,6 +148,8 @@ def test_active_browser_window_import_is_read_only_and_cli_resolves_before_produ
         "XDG_RUNTIME_DIR",
     ):
         environment.pop(key, None)
+        if key.startswith("YOLOMUX_"):
+            environment.pop(key.replace("YOLOMUX_", "YOMUX_"), None)
     legacy_runtime = tmp_path / "legacy-runtime"
     environment["YOLOMUX_RUNTIME_DIR"] = str(legacy_runtime)
     import_probe = subprocess.run(
@@ -168,7 +170,7 @@ def test_active_browser_window_import_is_read_only_and_cli_resolves_before_produ
         check=True,
     )
     import_result = json.loads(import_probe.stdout)
-    assert import_result["canonical"] is None
+    assert import_result["canonical"] == str(legacy_runtime)
     assert Path(import_result["runtime"]).is_relative_to(legacy_runtime)
 
     cli_probe = subprocess.run(

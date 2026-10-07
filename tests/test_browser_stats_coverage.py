@@ -308,6 +308,7 @@ def test_current_stats_browser_traverses_every_exact_matrix_cell(browser, tmp_pa
         assert all(path["paths"] == path["series"] for path in cell["paths"]), cell
 
 
+@pytest.mark.deprecated_python_server
 def test_http_client_rpc_cache_and_browser_render_every_exact_matrix_cell(
     browser,
     monkeypatch,

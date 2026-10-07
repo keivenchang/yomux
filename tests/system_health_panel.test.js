@@ -812,7 +812,7 @@ test('there is no second Daemons renderer and no second service-state classifier
     'the schema guard has one definition, the guarded reader, roster adapter, and triangle publisher');
 });
 
-test('the Daemons System region mounts the runtime-owner chart without the Go process line', () => {
+test('the Daemons System region mounts runtime-owner occupancy with a Go process comparison line', () => {
   assert.match(source, /const DEBUG_SYSTEM_REGIONS = Object\.freeze\(\['announce', 'summary', 'alerts', 'chart', 'roster', 'advanced'\]\)/);
   const dispatcher = sourceFunction('debugSystemRegionHtml', 'debugSystemAdvancedView');
   assert.match(dispatcher, /if \(region === 'chart'\) return debugSystemDaemonsChartHtml\(\);/);
@@ -825,7 +825,7 @@ test('the Daemons System region mounts the runtime-owner chart without the Go pr
   assert.match(chart, /data-js-debug-daemons-graph/);
   assert.match(chart, /data-js-debug-daemons-chart-note/);
   assert.match(chart, /goroutines and SQLite cgo work/);
-  assert.match(chart, /yolomux-go process CPU line is shown in CPU/);
+  assert.match(chart, /yolomux-go process CPU as a comparison line/);
 });
 
 test('a running daemon whose transport failed is an issue with its typed reason, not "down"', () => {

@@ -1,8 +1,15 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "productenv_lib",
     srcs = ["value.go"],
+    embedsrcs = ["namespace.json"],
     importpath = "github.com/keivenchang/yomux/internal/productenv",
     visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "productenv_test",
+    srcs = ["value_test.go"],
+    embed = [":productenv_lib"],
 )

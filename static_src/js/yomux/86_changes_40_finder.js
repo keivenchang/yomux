@@ -218,10 +218,6 @@ function renderFileExplorerChangesPanel(panel, options = {}) {
   }
   syncFileExplorerDiffSessionControls();
   bindChangesPanel(panel);
-  const changedSection = options.changedRepo && groups
-    ? changesRepoSectionsByGroups.get(groups)?.get(String(options.changedRepo.repo || ''))
-    : null;
-  bindChangedFileRowBehaviors(changedSection || panel);
   syncFileExplorerChangesCollapseButtons();
 }
 

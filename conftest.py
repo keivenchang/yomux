@@ -20,6 +20,10 @@ sys.dont_write_bytecode = True
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 from yomux_lib.infra import worktree_writer
+from tools.product_environment import apply_product_environment_assignments
+from tools.product_environment import clear_product_environment_assignments
+from tools.product_environment import product_env
+from tools.product_environment import product_env_name
 from tools.tool_guard import host_expensive_tool_lock_path
 
 _HOST_ARTIFACTS = worktree_writer.configure_host_local_artifacts(REPO_ROOT)
@@ -27,7 +31,7 @@ sys.dont_write_bytecode = _previous_dont_write_bytecode
 del _previous_dont_write_bytecode
 
 # Resolve the cross-run host lock before fallback environment variables replace HOME and
-# YOLOMUX_TOOL_LOCK_PATH. The lock must serialize container launches on the host; a path
+# YOMUX_TOOL_LOCK_PATH. The lock must serialize container launches on the host; a path
 # created inside a container or fixture namespace has no other run to contend with.
 HOST_EXPENSIVE_TOOL_LOCK = host_expensive_tool_lock_path(os.environ)
 
@@ -59,7 +63,7 @@ def _install_fallback_environment() -> None:
     # The container runner may provide canonical YOMUX_* roots. Unit fixtures
     # intentionally exercise legacy YOLOMUX_* overrides, so clear both halves
     # of each ambient root pair before installing this process's isolated paths.
-    for name in (
+    clear_product_environment_assignments(os.environ,
         "ROOT",
         "CONFIG_DIR",
         "STATE_DIR",
@@ -71,19 +75,17 @@ def _install_fallback_environment() -> None:
         "TOOL_LOCK_PATH",
         "CA_DIR",
         "LOG_DIR",
-    ):
-        os.environ.pop(f"YOMUX_{name}", None)
-        os.environ.pop(f"YOLOMUX_{name}", None)
+    )
 
-    test_root_env = "YOLOMUX_TEST_ROOT"
-    inherited_test_root = os.environ.get(test_root_env, "").strip()
+    test_root_env = product_env_name("TEST_ROOT")
+    inherited_test_root = (product_env("TEST_ROOT", "") or "").strip()
     if inherited_test_root:
         test_root = Path(inherited_test_root)
         test_root.mkdir(parents=True, exist_ok=True)
     else:
         test_root = Path(tempfile.mkdtemp(prefix=f"yomux-test-{os.getpid()}-{os.getuid()}-", dir="/tmp"))
         test_root.chmod(0o700)
-        os.environ[test_root_env] = str(test_root)
+        apply_product_environment_assignments(os.environ, {"TEST_ROOT": str(test_root)})
 
     process_root = test_root / f"p{os.getpid()}"
     process_root.mkdir(parents=True, exist_ok=True)
@@ -94,30 +96,32 @@ def _install_fallback_environment() -> None:
         "XDG_CONFIG_HOME": process_root / "xdg-config",
         "XDG_STATE_HOME": process_root / "xdg-state",
         "XDG_CACHE_HOME": process_root / "xdg-cache",
-        "YOLOMUX_CONFIG_DIR": process_root / "config",
-        "YOLOMUX_STATE_DIR": process_root / "state",
-        "YOLOMUX_CACHE_DIR": process_root / "cache",
-        "YOLOMUX_RUNTIME_DIR": process_root / "runtime",
-        "YOLOMUX_CODEX_HOME": process_root / "codex-home",
         "CODEX_HOME": process_root / "codex-home",
-        "YOLOMUX_START_LOCK_DIR": process_root / "locks" / "start.lock",
-        "YOLOMUX_TOOL_LOCK_PATH": process_root / "locks" / "expensive-tools.lock",
-        "YOLOMUX_CA_DIR": process_root / "ca",
-        "YOLOMUX_LOG_DIR": process_root / "logs",
-        "YOLOMUX_WORKSPACE_BASE": process_root / "workspaces",
-        "YOLOMUX_TMUX_SOCKET": process_root / "tmux" / "socket",
     }
     for name, path in writable_env_paths.items():
         os.environ[name] = str(path)
+    apply_product_environment_assignments(os.environ, {
+        "CONFIG_DIR": str(process_root / "config"),
+        "STATE_DIR": str(process_root / "state"),
+        "CACHE_DIR": str(process_root / "cache"),
+        "RUNTIME_DIR": str(process_root / "runtime"),
+        "CODEX_HOME": str(process_root / "codex-home"),
+        "START_LOCK_DIR": str(process_root / "locks" / "start.lock"),
+        "TOOL_LOCK_PATH": str(process_root / "locks" / "expensive-tools.lock"),
+        "CA_DIR": str(process_root / "ca"),
+        "LOG_DIR": str(process_root / "logs"),
+        "WORKSPACE_BASE": str(process_root / "workspaces"),
+        "TMUX_SOCKET": str(process_root / "tmux" / "socket"),
+    })
 
 
 # On a Docker-capable host, leave host test state untouched because the hook delegates before
 # collection. Inside the container, retain the Phase 1 protection and its short Unix-socket paths.
 # A host invocation without Docker is a refusal by default: a green host fallback is not evidence
-# for a Dockerized gate. The explicit YOLOMUX_CHECK_CONTAINER=0 escape hatch remains for small
+# for a Dockerized gate. The explicit YOMUX_CHECK_CONTAINER=0 escape hatch remains for small
 # unit-test subprocesses that intentionally exercise the host-only fallback.
 _CONTAINER_AVAILABLE, _CONTAINER_REASON = docker_image.container_available(REPO_ROOT)
-if docker_image.running_inside_container() or (not _CONTAINER_AVAILABLE and os.environ.get("YOLOMUX_CHECK_CONTAINER") == "0"):
+if docker_image.running_inside_container() or (not _CONTAINER_AVAILABLE and product_env("CHECK_CONTAINER") == "0"):
     _install_fallback_environment()
 
 
@@ -160,7 +164,7 @@ def pytest_cmdline_main(config: pytest.Config) -> int | None:
     if not available:
         if docker_image.running_inside_container():
             return None
-        if os.environ.get("YOLOMUX_CHECK_CONTAINER") == "0":
+        if product_env("CHECK_CONTAINER") == "0":
             return None
         print(f"PYTEST REFUSED: Docker is required for this test invocation: {reason}", file=sys.stderr, flush=True)
         return 3
@@ -169,7 +173,7 @@ def pytest_cmdline_main(config: pytest.Config) -> int | None:
     arguments.extend(["-o", f"cache_dir={host_local_cache_dir()}"])
     print(
         "pytest running in the isolated test container "
-        "(YOLOMUX_CHECK_CONTAINER=0 to opt out)",
+        f"({product_env_name('CHECK_CONTAINER')}=0 to opt out)",
         file=sys.stderr,
         flush=True,
     )
@@ -193,7 +197,7 @@ def pytest_cmdline_main(config: pytest.Config) -> int | None:
     # detached and holding the lock.
     #
     # The writer lease MUST write its token into the exact env forwarded to the container:
-    # acquire_worktree_writer(environ=child_env) sets YOLOMUX_WORKTREE_WRITER_TOKEN there, and
+    # acquire_worktree_writer(environ=child_env) sets YOMUX_WORKTREE_WRITER_TOKEN there, and
     # run-tests.sh forwards that name so the in-container pytest borrows this lease instead of
     # declaring a second, conflicting writer and refusing itself.
     serialize = not (
@@ -244,8 +248,7 @@ def pytest_sessionstart(session: pytest.Session) -> None:
         token = str(workerinput.get("yomux_worktree_writer_token") or "")
         slot = str(workerinput.get("yomux_worktree_writer_slot") or "")
         if token and slot:
-            os.environ[worktree_writer.WRITER_TOKEN_ENV] = token
-            os.environ["YOLOMUX_WORKTREE_WRITER_SLOT"] = slot
+            apply_product_environment_assignments(os.environ, {worktree_writer.WRITER_TOKEN_ENV: token, "WORKTREE_WRITER_SLOT": slot})
     try:
         _SESSION_WRITER_LEASE = worktree_writer.acquire_worktree_writer(REPO_ROOT, purpose="pytest")
     except (worktree_writer.WorktreeWriterBusy, worktree_writer.WorktreeWriterContainerRefusal) as error:

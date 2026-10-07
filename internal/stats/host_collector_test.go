@@ -24,6 +24,18 @@ type topologyHostSources struct {
 	logicalCPUs int
 }
 
+type capturedDiskHostSources struct {
+	*capturedHostSources
+	diskSamples []DiskUsageSample
+	diskErr     error
+	diskCalls   int
+}
+
+func (s *capturedDiskHostSources) Disk(context.Context) ([]DiskUsageSample, error) {
+	s.diskCalls++
+	return append([]DiskUsageSample(nil), s.diskSamples...), s.diskErr
+}
+
 func (s topologyHostSources) SystemLogicalCPUs() int { return s.logicalCPUs }
 
 func (s *capturedHostSources) CPU(context.Context) (CPUSnapshot, error) {
@@ -142,6 +154,44 @@ func TestHostCollectorRunOnceWritesCapturedFactsAndUnavailable(t *testing.T) {
 	}
 	if seen["cpu"] != 2 || seen["system_memory"] != 3 || seen["gpu"] != 2 {
 		t.Fatalf("family rows = %#v", seen)
+	}
+}
+
+func TestHostCollectorCollectsDiskOnFiveMinuteCadenceWithPerMountIdentity(t *testing.T) {
+	sources := &capturedDiskHostSources{
+		capturedHostSources: &capturedHostSources{
+			cpu:    []CPUSnapshot{snapshot(50, 100, 10)},
+			memory: []MemoryCounters{{UsedBytes: 8, CapacityBytes: 16}},
+			gpu:    [][]GPUDevice{{{SourceID: "gpu:0", Label: "Synthetic GPU", Utilization: 5}}},
+		},
+		diskSamples: []DiskUsageSample{
+			{SourceID: "mount:/", Mountpoint: "/", UsedBytes: 25, CapacityBytes: 100},
+			{SourceID: "mount:/tmp", Mountpoint: "/tmp", UsedBytes: 0, CapacityBytes: 100},
+		},
+	}
+	writer := &recordingBatchWriter{}
+	clock := &collectorClock{now: time.Unix(100, 0)}
+	collector := NewHostCollector(sources, writer, clock, HostCollectorConfig{
+		ActiveCadence: time.Second, MemoryCadence: time.Minute, SourceTimeout: time.Second,
+		EpochID: "disk-cadence", EpochStartedAt: 100, OwnerGeneration: 1, SourceID: "host", ProcessKey: "python",
+	})
+	if got := collector.FamilyCadence("system_disk"); got != 5*time.Minute {
+		t.Fatalf("disk family cadence = %s, want five minutes", got)
+	}
+	collector.RunOnce(context.Background())
+	var diskObservations []Observation
+	for _, batch := range writer.snapshot() {
+		for _, observation := range batch.Observations {
+			if observation.Family == "system_disk" {
+				diskObservations = append(diskObservations, observation)
+			}
+		}
+	}
+	if sources.diskCalls != 1 || len(diskObservations) != 2 {
+		t.Fatalf("disk collection calls=%d observations=%+v", sources.diskCalls, diskObservations)
+	}
+	if diskObservations[0].SourceID != "mount:/" || diskObservations[1].SourceID != "mount:/tmp" || diskObservations[0].Payload["used_percent"] != 25.0 || diskObservations[1].Payload["used_percent"] != 0.0 {
+		t.Fatalf("disk observations lost distinct mounts or valid zero: %+v", diskObservations)
 	}
 }
 
@@ -524,6 +574,16 @@ func TestHostCollectorDefaultMemoryCadenceMatchesPythonContract(t *testing.T) {
 	}
 }
 
+func TestHostCollectorDefaultDiskCadenceIsFiveMinutes(t *testing.T) {
+	config := (HostCollectorConfig{}).withDefaults()
+	if config.DiskCadence != 5*time.Minute {
+		t.Fatalf("disk cadence = %s, want 5m", config.DiskCadence)
+	}
+	if config.DiskCadence != DefaultHostDiskCadence {
+		t.Fatalf("default disk cadence drifted: %s != %s", config.DiskCadence, DefaultHostDiskCadence)
+	}
+}
+
 func TestHostCollectorDefaultCPUBackgroundCadenceIsFiveSeconds(t *testing.T) {
 	if DefaultHostCPUBackgroundCadence != 5*time.Second {
 		t.Fatalf("CPU background cadence = %s, want 5s", DefaultHostCPUBackgroundCadence)
@@ -865,4 +925,58 @@ func (w *recordingBatchWriter) snapshot() []AppendBatch {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return append([]AppendBatch(nil), w.batches...)
+}
+
+type auditDiskAdapter struct {
+	*capturedHostSources
+	disk *LinuxHostSources
+}
+
+func (s auditDiskAdapter) Disk(ctx context.Context) ([]DiskUsageSample, error) {
+	return s.disk.Disk(ctx)
+}
+func TestAuditPartialDiskPersistsHealthyRowsAndGaps(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "disk.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	source := auditDiskAdapter{disk: &LinuxHostSources{run: func(context.Context, []string) (CommandOutput, error) {
+		return CommandOutput{ExitCode: 1, Stdout: []byte("Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/a 100 20 80 20% /mnt/a  b\n/dev/b 100 30 70 30% /mnt/a b\n/dev/c 0 0 0 N/A /missing\n")}, errors.New("partial df")
+	}}}
+	collector := NewHostCollector(source, writer, &collectorClock{now: time.Unix(100, 0)}, HostCollectorConfig{EpochID: "partial", EpochStartedAt: 100, OwnerGeneration: 1, SourceID: "host"})
+	batch := collector.collectDisk(ctx, HostFactContext{EpochID: "partial", EpochStartedAt: 100, ObservedAt: 101, CadenceSeconds: 900, OwnerGeneration: 1, SourceID: "host"})
+	if _, err := writer.AppendBatch(ctx, batch); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := OpenReadOnly(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	rows, err := reader.ReadObservations(ctx, 0, 2000, MaxFactReadLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("lost disk rows: %d", len(rows))
+	}
+	ids := map[string]bool{}
+	for _, row := range rows {
+		ids[row.SourceID] = true
+		if row.Payload["mountpoint"] == "/missing" {
+			if _, exists := row.Payload["used_percent"]; exists {
+				t.Fatal("missing sample became zero")
+			}
+		}
+	}
+	if len(ids) != 3 {
+		t.Fatal("mount identities collapsed")
+	}
+	gaps, err := reader.ReadUnavailableSpans(ctx, 0, 2000, MaxFactReadLimit)
+	if err != nil || len(gaps) != 2 {
+		t.Fatalf("gaps: %+v, %v", gaps, err)
+	}
 }

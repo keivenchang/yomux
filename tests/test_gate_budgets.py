@@ -71,8 +71,8 @@ def test_gate_runtime_paths_are_fixture_owned(gate_runtime_paths):
     assert gate_runtime_paths.config_dir.is_dir()
     assert gate_runtime_paths.state_dir.is_dir()
     assert os.environ["HOME"] == str(gate_runtime_paths.home_dir)
-    assert os.environ["YOLOMUX_CONFIG_DIR"] == str(gate_runtime_paths.config_dir)
-    assert os.environ["YOLOMUX_STATE_DIR"] == str(gate_runtime_paths.state_dir)
+    assert os.environ["YOMUX_CONFIG_DIR"] == str(gate_runtime_paths.config_dir)
+    assert os.environ["YOMUX_STATE_DIR"] == str(gate_runtime_paths.state_dir)
     assert os.environ["TMPDIR"] == str(gate_runtime_paths.tmp_dir)
     assert Path(tempfile.gettempdir()).resolve() == gate_runtime_paths.tmp_dir.resolve()
     assert gate_runtime_paths.chrome_profile_dir.is_dir()
@@ -172,7 +172,7 @@ def test_gate_http_port_candidates_are_partitioned_across_parallel_check_lanes_a
 
 def test_gate_tmux_uses_private_socket_and_fixture_session_name(gate_tmux):
     assert re.fullmatch(rf"yt-{os.getpid()}-[0-9a-f]+-1", gate_tmux.sessions[0])
-    assert os.environ["YOLOMUX_TMUX_SOCKET"] == str(gate_tmux.socket_path)
+    assert os.environ["YOMUX_TMUX_SOCKET"] == str(gate_tmux.socket_path)
     listed = run_isolated_tmux(gate_tmux, "list-sessions", "-F", "#{session_name}")
     assert listed.returncode == 0, listed.stderr
     assert listed.stdout.splitlines() == gate_tmux.sessions

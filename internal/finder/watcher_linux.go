@@ -8,6 +8,7 @@ package finder
 import (
 	"context"
 	"errors"
+	"golang.org/x/sys/unix"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -194,14 +195,8 @@ func (w *linuxNativeWatcher) readLoop() {
 	defer close(w.events)
 	buffer := make([]byte, 64*1024)
 	for {
-		readSet := syscall.FdSet{}
-		setLinuxFD(&readSet, w.fd)
-		setLinuxFD(&readSet, w.wakeRead)
-		maxFD := w.fd
-		if w.wakeRead > maxFD {
-			maxFD = w.wakeRead
-		}
-		_, err := syscall.Select(maxFD+1, &readSet, nil, nil, nil)
+		descriptors := []unix.PollFd{{Fd: int32(w.fd), Events: unix.POLLIN}, {Fd: int32(w.wakeRead), Events: unix.POLLIN}}
+		_, err := unix.Poll(descriptors, -1)
 		if err != nil {
 			if errors.Is(err, syscall.EINTR) {
 				continue
@@ -213,7 +208,10 @@ func (w *linuxNativeWatcher) readLoop() {
 			return
 		default:
 		}
-		if !isLinuxFDSet(&readSet, w.fd) {
+		if descriptors[0].Revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 {
+			return
+		}
+		if descriptors[0].Revents&unix.POLLIN == 0 {
 			continue
 		}
 		count, err := syscall.Read(w.fd, buffer)
@@ -262,14 +260,6 @@ func (w *linuxNativeWatcher) readLoop() {
 			offset += recordLength
 		}
 	}
-}
-
-func setLinuxFD(set *syscall.FdSet, fd int) {
-	set.Bits[fd/64] |= int64(1) << uint(fd%64)
-}
-
-func isLinuxFDSet(set *syscall.FdSet, fd int) bool {
-	return set.Bits[fd/64]&(int64(1)<<uint(fd%64)) != 0
 }
 
 func (w *linuxNativeWatcher) addDirectoryTree(ctx context.Context, root, watchRoot string) {

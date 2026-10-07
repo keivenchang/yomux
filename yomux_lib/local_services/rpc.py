@@ -28,6 +28,7 @@ from time import sleep as sleep_clock
 from typing import Any
 from typing import TypeVar
 
+from tools.product_environment import product_env
 from tools.instance_isolation import local_rpc_socket_path_bytes
 
 
@@ -602,8 +603,8 @@ def safe_socket_path(
     uid = getattr(os, "getuid", lambda: "nouid")()
     fallback_leaf = fallback_name or candidate.name
     bounded_name = hashlib.sha256(os.fsencode(fallback_leaf)).hexdigest()[:16]
-    configured_root = os.environ.get("YOLOMUX_ROOT", "").strip()
-    configured_runtime = os.environ.get("YOLOMUX_RUNTIME_DIR", "").strip()
+    configured_root = product_env('ROOT', "", environ=os.environ).strip()
+    configured_runtime = product_env('RUNTIME_DIR', "", environ=os.environ).strip()
     if configured_root:
         fallback_base = Path(configured_root).expanduser() / "runtime" / "s"
     elif configured_runtime:

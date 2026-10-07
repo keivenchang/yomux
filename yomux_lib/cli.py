@@ -39,6 +39,7 @@ from .local_services.registry import tracked_local_service_groups
 from .local_services.registry import tracked_port_process_group
 from .local_services.watchdog import GroupOverloadWatchdog
 from .ptrace import allow_diagnostic_ptrace
+from tools.product_environment import environment_value, product_env, product_env_name
 from tools.tls_san import self_signed_interface_ips as discover_self_signed_interface_ips
 from tools.tls_san import self_signed_san as build_self_signed_san
 from tools.go_binary import find_go_backend_binary
@@ -50,7 +51,7 @@ from .server_logs import emit_server_log
 from .server_logs import install_server_log_handler
 from .tmux.tmux_utils import cmd_error
 from tools.instance_isolation import ROOT_KEYS
-from tools.instance_isolation import YOLOMUX_ROOT_ENV
+from tools.instance_isolation import PRODUCT_ROOT_ENV
 from tools.instance_isolation import assert_early_port
 from tools.instance_isolation import is_managed_instance_port
 from tools.instance_isolation import normalize_yomux_environment
@@ -95,7 +96,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--backend",
         choices=("python", "go", "auto"),
-        default=normalized_environment.get("YOMUX_BACKEND", "go"),
+        default=product_env('BACKEND', "go", environ=normalized_environment),
         help="backend selected before startup; Go is the default, Python is deprecated",
     )
     parser.add_argument(
@@ -321,7 +322,7 @@ def print_runtime_report(sessions: list[str], dangerously_yolo: bool = False) ->
     return 0
 
 
-STARTUP_WATCHDOG_SECONDS_ENV = "YOLOMUX_STARTUP_WATCHDOG_SECONDS"
+STARTUP_WATCHDOG_SECONDS_ENV = product_env_name('STARTUP_WATCHDOG_SECONDS')
 STARTUP_WATCHDOG_DEFAULT_SECONDS = 120.0
 
 
@@ -333,7 +334,7 @@ def start_startup_overload_watchdog(port: int) -> threading.Thread | None:
     CPU). The watchdog samples only the ledger-tracked group for this port and
     disarms itself when the window ends; set the env var to 0 to disable.
     """
-    raw = os.environ.get(STARTUP_WATCHDOG_SECONDS_ENV, "")
+    raw = product_env('STARTUP_WATCHDOG_SECONDS', "", environ=os.environ)
     try:
         seconds = float(raw) if raw else STARTUP_WATCHDOG_DEFAULT_SECONDS
     except ValueError:
@@ -351,7 +352,7 @@ def start_startup_overload_watchdog(port: int) -> threading.Thread | None:
     return thread
 
 
-BACKEND_HEALTH_OBSERVE_SECONDS_ENV = "YOLOMUX_BACKEND_HEALTH_OBSERVE_SECONDS"
+BACKEND_HEALTH_OBSERVE_SECONDS_ENV = product_env_name('BACKEND_HEALTH_OBSERVE_SECONDS')
 
 
 def backend_health_label_source(app: TmuxWebtermApp) -> Any:
@@ -389,7 +390,7 @@ def start_backend_health_observer(port: int, app: TmuxWebtermApp) -> BackendHeal
     The observer is armed identically for every leased instance.
     """
 
-    raw = os.environ.get(BACKEND_HEALTH_OBSERVE_SECONDS_ENV, "")
+    raw = product_env('BACKEND_HEALTH_OBSERVE_SECONDS', "", environ=os.environ)
     try:
         seconds = float(raw) if raw else BACKEND_HEALTH_OBSERVE_SECONDS
     except ValueError:
@@ -472,10 +473,10 @@ def startup_path_line(
             f"{resolved.root} (auto-derived for non-default port {port} "
             "because no root-family override was set)"
         )
-    elif values.get(YOLOMUX_ROOT_ENV):
+    elif environment_value(values, PRODUCT_ROOT_ENV):
         root_description = f"{resolved.root} (explicit)"
     else:
-        overrides = sorted(key for key in ROOT_KEYS if values.get(key))
+        overrides = sorted(key for key in ROOT_KEYS if environment_value(values, key))
         if overrides:
             verb = "was" if len(overrides) == 1 else "were"
             reason = f"{', '.join(overrides)} {verb} explicitly set"
@@ -483,7 +484,7 @@ def startup_path_line(
             reason = "no managed instance root contract was applied"
         root_description = f"unset (auto-derivation skipped because {reason})"
     return (
-        f"YOmux paths: YOLOMUX_ROOT={root_description}; config={resolved.config_dir}; "
+        f"YOmux paths: YOMUX_ROOT={root_description}; config={resolved.config_dir}; "
         f"state={resolved.state_dir}; cache={resolved.cache_dir}; runtime={resolved.runtime_dir}"
     )
 
@@ -685,10 +686,10 @@ def exec_go_backend(args: argparse.Namespace) -> int:
         command.extend(("--cert", str(args.cert)))
     if args.key:
         command.extend(("--key", str(args.key)))
-    config_dir = environment.get("YOLOMUX_CONFIG_DIR", "").strip()
+    config_dir = product_env('CONFIG_DIR', "", environ=environment).strip()
     if config_dir:
         command.extend(("--config", config_dir))
-    stats_path = environment.get("YOLOMUX_STATS_DATABASE", "").strip()
+    stats_path = product_env('STATS_DATABASE', "", environ=environment).strip()
     if stats_path:
         command.extend(("--stats", stats_path))
     if args.dangerously_yolo:

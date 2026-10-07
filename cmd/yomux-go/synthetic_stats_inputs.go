@@ -28,7 +28,7 @@ type statsCollectorInputs struct {
 const (
 	syntheticStatsFixtureManifest = ".yolomux-stats-fixture"
 	syntheticStatsFixtureVersion  = "yolomux-stats-fixture-v1\n"
-	syntheticStatsFixtureTimeEnv  = "YOLOMUX_STATS_SYNTHETIC_FIXTURE_TIME"
+	syntheticStatsFixtureTimeEnv  = "STATS_SYNTHETIC_FIXTURE_TIME"
 	syntheticStatsWriterFence     = "stats-writer-compat-v9.json"
 	syntheticStatsVacuumBaseline  = "stats-vacuum-v9.json"
 	syntheticStatsWriterLock      = "yostats.sqlite3.writer.lock"
@@ -40,7 +40,7 @@ const (
 // otherwise an otherwise synthetic run could still inspect the operator's
 // default tmux server.
 func resolveStatsCollectorInputs() (statsCollectorInputs, error) {
-	if os.Getenv("YOLOMUX_STATS_SYNTHETIC") != "1" {
+	if productenv.Value("STATS_SYNTHETIC") != "1" {
 		claude, codex, opencode, err := explicitCollectorPaths()
 		if err != nil {
 			return statsCollectorInputs{}, err
@@ -69,9 +69,9 @@ func resolveStatsCollectorInputs() (statsCollectorInputs, error) {
 }
 
 func syntheticStatsRoot() (string, error) {
-	root := strings.TrimSpace(os.Getenv("YOLOMUX_STATS_SYNTHETIC_ROOT"))
+	root := strings.TrimSpace(productenv.Value("STATS_SYNTHETIC_ROOT"))
 	if root == "" {
-		return "", errors.New("synthetic stats requires an explicit YOLOMUX_STATS_SYNTHETIC_ROOT")
+		return "", errors.New("synthetic stats requires an explicit YOMUX_STATS_SYNTHETIC_ROOT")
 	}
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
@@ -95,7 +95,7 @@ func syntheticStatsDatabasePath() (string, error) {
 // including the separate in-process Daemons process sampler. A fixture that
 // opts into synthetic host facts must not leave one collector on live /proc.
 func syntheticHostInputsEnabled(syntheticStats bool) bool {
-	return syntheticStats || os.Getenv("YOLOMUX_STATS_SYNTHETIC_HOST") == "1"
+	return syntheticStats || productenv.Value("STATS_SYNTHETIC_HOST") == "1"
 }
 
 func selectHostSources(synthetic bool, production, fixture func() stats.HostSources) stats.HostSources {
@@ -199,7 +199,7 @@ func prepareSyntheticStatsInputs(root string) error {
 // synthetic server has current-window data; tests and parity harnesses can pin
 // it to an RFC3339 timestamp when they need byte-stable source inputs.
 func syntheticStatsFixtureNow() (time.Time, error) {
-	raw := strings.TrimSpace(os.Getenv(syntheticStatsFixtureTimeEnv))
+	raw := strings.TrimSpace(productenv.Value(syntheticStatsFixtureTimeEnv))
 	if raw == "" {
 		return time.Now().UTC(), nil
 	}
@@ -290,19 +290,19 @@ func validateSyntheticStatsTree(root string) error {
 }
 
 func validateSyntheticTmuxSocket(root string) error {
-	socket := strings.TrimSpace(productenv.Value("YOLOMUX_TMUX_SOCKET"))
+	socket := strings.TrimSpace(productenv.Value("TMUX_SOCKET"))
 	if socket == "" {
-		return errors.New("synthetic stats requires an explicit fixture-owned YOLOMUX_TMUX_SOCKET")
+		return errors.New("synthetic stats requires an explicit fixture-owned YOMUX_TMUX_SOCKET")
 	}
 	absSocket, err := filepath.Abs(socket)
 	if err != nil || !syntheticPathWithinRoot(filepath.Clean(absSocket), root) {
-		return errors.New("synthetic stats YOLOMUX_TMUX_SOCKET must be inside YOLOMUX_STATS_SYNTHETIC_ROOT")
+		return errors.New("synthetic stats YOMUX_TMUX_SOCKET must be inside YOMUX_STATS_SYNTHETIC_ROOT")
 	}
 	if filepath.Dir(filepath.Clean(absSocket)) != filepath.Clean(root) || filepath.Base(absSocket) != "tmux.sock" {
-		return errors.New("synthetic stats YOLOMUX_TMUX_SOCKET must be the fixture-owned tmux.sock at the fixture root")
+		return errors.New("synthetic stats YOMUX_TMUX_SOCKET must be the fixture-owned tmux.sock at the fixture root")
 	}
 	if info, err := os.Lstat(absSocket); err == nil && info.Mode()&os.ModeSocket == 0 {
-		return errors.New("synthetic stats YOLOMUX_TMUX_SOCKET exists but is not a Unix socket")
+		return errors.New("synthetic stats YOMUX_TMUX_SOCKET exists but is not a Unix socket")
 	} else if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("inspect synthetic tmux socket: %w", err)
 	}

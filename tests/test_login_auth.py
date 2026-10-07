@@ -1,4 +1,3 @@
-import base64
 import io
 import json
 import os
@@ -24,12 +23,13 @@ from yomux_lib.app import TmuxWebtermApp
 from yomux_lib.app import filesystem_operation_descriptor
 from yomux_lib.infra import batchd
 from yomux_lib.server import Handler
+from tests.helpers.fixture_http_server import basic_auth_header as auth_header
 from tests.helpers.fixture_http_server import FixtureArtifactTransfer
 from tests.helpers.fixture_http_server import FixtureHttpServer
 from tests.helpers.fixture_http_server import request_fixture_http_header_list as request_header_list
 from tests.helpers.fixture_http_server import request_fixture_http_tuple as request
 
-pytestmark = pytest.mark.socket
+pytestmark = [pytest.mark.socket, pytest.mark.deprecated_python_server]
 
 SOURCE_STATIC_DIR = Path(__file__).resolve().parents[1] / "static_src"
 
@@ -79,11 +79,6 @@ def request_operation_terminal(server, method, path, body=None, headers=None):
     assert terminal["state"] in {"ready", "failed"}, terminal
     assert terminal["request"]["id"] == request_id, terminal
     return terminal_status, terminal_headers, terminal_body
-
-
-def auth_header(username, password):
-    encoded = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
-    return {"Authorization": f"Basic {encoded}"}
 
 
 def start_server(monkeypatch, tmp_path, app=None, tls_context=None):
@@ -890,28 +885,35 @@ def test_authenticated_png_subresource_above_generic_job_budget_returns_image_by
     target.write_bytes(body)
     socket_path = tmp_path / "batchd.sock"
     client = batchd.BatchClient(socket_path)
-    assert client.ensure_started() is True
-    app = TmuxWebtermApp([], status_service_mode=True)
-    app.job_client = client
-    server, thread = start_server(monkeypatch, tmp_path, app=app)
-    port = server.server_address[1]
+    # The HTTP relay runs inline, so only this fixture's lease keeps the broker
+    # alive through server teardown and the explicit shutdown below.
+    lease = client.registry.acquire_lease()
+    assert lease.get('ok') is True and lease.get('lease_id'), lease
     try:
-        cookie = _login_and_extract_auth_cookie(port)
-        ping_status, _ping_headers, ping_body = request(port, "GET", "/api/ping", headers={"Cookie": cookie})
-        status, headers, returned = request(
-            port,
-            "GET",
-            f"/api/fs/raw?{urlencode({'path': str(target)})}",
-            headers={"Cookie": cookie, "Sec-Fetch-Dest": "image", "Sec-Fetch-Mode": "no-cors"},
-        )
+        idle_shutdown = client.request({'action': 'shutdown_if_idle'})
+        assert idle_shutdown.get('shutdown') is False and idle_shutdown.get('leases', 0) > 0, idle_shutdown
+        app = TmuxWebtermApp([], status_service_mode=True)
+        app.job_client = client
+        server, thread = start_server(monkeypatch, tmp_path, app=app)
+        port = server.server_address[1]
+        try:
+            cookie = _login_and_extract_auth_cookie(port)
+            ping_status, _ping_headers, ping_body = request(port, "GET", "/api/ping", headers={"Cookie": cookie})
+            status, headers, returned = request(
+                port,
+                "GET",
+                f"/api/fs/raw?{urlencode({'path': str(target)})}",
+                headers={"Cookie": cookie, "Sec-Fetch-Dest": "image", "Sec-Fetch-Mode": "no-cors"},
+            )
 
-        assert ping_status == HTTPStatus.OK and json.loads(ping_body)["ok"] is True
-        assert status == HTTPStatus.OK
-        assert headers["Content-Type"] == "image/png"
-        assert returned == body
+            assert ping_status == HTTPStatus.OK and json.loads(ping_body)["ok"] is True
+            assert status == HTTPStatus.OK
+            assert headers["Content-Type"] == "image/png"
+            assert returned == body
+        finally:
+            stop_server(server, thread)
+            app.stop_batchd_operation_service()
     finally:
-        stop_server(server, thread)
-        app.stop_batchd_operation_service()
         assert client.request({"action": "shutdown"}) == {"ok": True, "shutdown": True}
 
 

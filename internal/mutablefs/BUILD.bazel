@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_library")
+load("//:tools/bazel_rules.bzl", "go_test_pair")
+
+package(default_visibility = ["//:__subpackages__"])
+
+exports_files(["BUILD.bazel"])
+
+go_library(
+    name = "mutablefs_lib",
+    srcs = glob(
+        ["*.go"],
+        exclude = ["*_test.go"],
+    ),
+    importpath = "github.com/keivenchang/yomux/internal/mutablefs",
+    deps = ["//internal/productenv:productenv_lib"],
+)
+
+go_test_pair(
+    name = "mutablefs",
+    srcs = glob(["*_test.go"]),
+    embed = [":mutablefs_lib"],
+)

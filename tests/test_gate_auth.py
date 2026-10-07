@@ -21,7 +21,7 @@ from yomux_lib.login_rate_limit import LoginRatePolicy
 from yomux_lib.server import TmuxWebtermHTTPServer
 
 
-pytestmark = pytest.mark.socket
+pytestmark = [pytest.mark.socket, pytest.mark.deprecated_python_server]
 
 _USERNAME = "gate-admin"
 _PASSWORD = "gate-password"

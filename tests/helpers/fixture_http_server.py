@@ -1,6 +1,7 @@
 """Typed loopback HTTP client and server lifetime for socket tests."""
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 from http.client import HTTPConnection
 import os
@@ -10,6 +11,11 @@ from typing import Mapping
 from typing import Sequence
 
 from yomux_lib.server import TmuxWebtermHTTPServer
+
+
+def basic_auth_header(username: str, password: str) -> dict[str, str]:
+    encoded = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+    return {"Authorization": f"Basic {encoded}"}
 
 
 @dataclass

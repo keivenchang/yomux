@@ -270,18 +270,17 @@ def test_unknown_and_known_usernames_are_indistinguishable_to_the_limiter(tmp_pa
     assert known.admitted == unknown.admitted is True
 
 
-# --- successful logins still consume network pressure ---------------------------
+# --- successful logins return reserved network pressure ---------------------------
 
 
-def test_success_does_not_refund_network_tokens(tmp_path):
+def test_success_refunds_network_tokens(tmp_path):
     limiter, _ = make_limiter(tmp_path)
     cap = limiter.policy.exact_bucket.capacity
-    for _ in range(cap):
+    for _ in range(cap * 3):
         decision = limiter.check_and_reserve("203.0.113.7", "admin")
         assert decision.admitted
         limiter.record_result("203.0.113.7", "admin", success=True)  # all succeed
-    # Even though every attempt succeeded, the exact bucket is now empty.
-    assert limiter.check_and_reserve("203.0.113.7", "admin").admitted is False
+    assert limiter.check_and_reserve("203.0.113.7", "admin").admitted is True
 
 
 # --- global emergency bucket + unparseable peer ---------------------------------
@@ -418,3 +417,42 @@ def test_diagnostics_expose_only_aggregates(tmp_path):
     # No raw identifiers anywhere in the payload.
     blob = repr(diag)
     assert "203.0.113.7" not in blob and "\"u\"" not in blob
+
+
+@pytest.mark.parametrize('peer', ['203.0.113.7', '2001:db8::1', 'malformed'])
+def test_concurrent_success_refunds_preserve_failed_reservations(tmp_path, peer):
+    bucket = lrl.BucketPolicy(8, 0.001)
+    policy = LoginRatePolicy(exact_bucket=bucket, nearby_bucket=bucket,
+                             broad_bucket=bucket, global_bucket=bucket,
+                             username_initial_allowance=50)
+    limiter, clock = make_limiter(tmp_path, policy=policy)
+    second = LoginRateLimiter(limiter.path, clock=clock, policy=policy)
+    barrier = threading.Barrier(8)
+    errors = []
+
+    def attempt(index):
+        owner = limiter if index % 2 else second
+        try:
+            assert owner.check_and_reserve(peer, f'u{index}').admitted
+            barrier.wait(timeout=5)
+            owner.record_result(peer, f'u{index}', success=index % 2 == 0)
+        except BaseException as error:
+            errors.append(error)
+
+    workers = [threading.Thread(target=attempt, args=(index,)) for index in range(8)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=8)
+    assert not any(worker.is_alive() for worker in workers)
+    assert errors == []
+    with limiter._connection() as connection:
+        rows = connection.execute('SELECT scope, tokens FROM login_buckets WHERE scope != ?',
+                                  (lrl.SCOPE_USERNAME,)).fetchall()
+    expected_scopes = {lrl.SCOPE_GLOBAL} if peer == 'malformed' else set(lrl.NETWORK_SCOPES)
+    assert {row['scope'] for row in rows} == expected_scopes
+    assert all(row['tokens'] == 4 for row in rows)
+    for index in range(4):
+        assert second.check_and_reserve(peer, f'bad{index}').admitted
+        second.record_result(peer, f'bad{index}', success=False)
+    assert not limiter.check_and_reserve(peer, 'blocked').admitted

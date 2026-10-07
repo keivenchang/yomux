@@ -638,7 +638,7 @@ func TestStatsServiceProjectsInteriorOpenRingBucketAsPersistedGap(t *testing.T) 
 	if snapshot.Materialized.Buckets[1].Complete != true {
 		t.Fatalf("right-edge bucket changed unexpectedly: %+v", snapshot.Materialized.Buckets[1])
 	}
-	if got, want := len(snapshot.Materialized.NoData), 8; got != want {
+	if got, want := len(snapshot.Materialized.NoData), 9; got != want {
 		t.Fatalf("persisted gap no-data spans = %d, want %d", got, want)
 	}
 	for _, span := range snapshot.Materialized.NoData {
@@ -707,13 +707,28 @@ func TestStatsServiceBuilds24HourProductWithLargeUnavailableHistory(t *testing.T
 	const now = int64(2_000_000_100)
 	const bucketCount = 288
 	const sourceCount = 2000
-	costDetail := MaterializedCostDetail{Evidence: make([]PriceEvidence, 4)}
+	costDetail := MaterializedCostDetail{
+		Tokens: 210, MicroUSD: 210, APIListMicroUSD: 420, PricedAtoms: 20, PricedTokens: 210,
+		Dimensions: []MaterializedCostDimension{{Dimension: "output", Tokens: 210, MicroUSD: 210, APIListMicroUSD: 420}},
+		Evidence:   make([]PriceEvidence, 4), Models: make([]MaterializedCostAttribution, 20), Agents: make([]MaterializedCostAttribution, 20),
+	}
+	for index := 0; index < 20; index++ {
+		key := fmt.Sprintf("identity-%02d", index)
+		value := int64(index + 1)
+		row := MaterializedCostAttribution{
+			Key: key, Provider: "provider", Model: strings.Repeat("m", 256), Source: "claude", Label: strings.Repeat("a", 256),
+			TotalTokens: value, MicroUSD: value, APIListMicroUSD: 2 * value, PricedAtoms: 1, PricedTokens: value,
+			Dimensions: []MaterializedCostDimension{{Dimension: "output", Tokens: value, MicroUSD: value, APIListMicroUSD: 2 * value}},
+		}
+		costDetail.Models[index] = row
+		costDetail.Agents[index] = row
+	}
 	for index := range costDetail.Evidence {
 		costDetail.Evidence[index] = PriceEvidence{
 			Key: fmt.Sprintf("fixture-price-evidence-%d", index), Provider: "provider", Model: "model", Dimension: "input", Direction: "input",
 			Modality: "text", CacheRole: "none", Unit: "tokens", PricingProfile: "default", ServiceTier: "standard",
 			CatalogModel: "model", RateUSD: "0", EffectiveFrom: "1970-01-01T00:00:00Z", SourceKind: "fixture",
-			SourceURL: strings.Repeat("x", 4096),
+			SourceURL: strings.Repeat("x", 128),
 		}
 	}
 	costJSON, err := json.Marshal(costDetail)
@@ -722,8 +737,7 @@ func TestStatsServiceBuilds24HourProductWithLargeUnavailableHistory(t *testing.T
 	}
 	bucketSizes := make([]int, bucketCount)
 	bucketStarts := make([]int64, bucketCount)
-	costEvidence := make(map[string]struct{})
-	costReportBytes := 0
+	costBuckets := make([]MaterializedBucket, 0, bucketCount)
 	for index := range bucketSizes {
 		start := now - int64(bucketCount-index)*300
 		bucketStarts[index] = start
@@ -733,11 +747,11 @@ func TestStatsServiceBuilds24HourProductWithLargeUnavailableHistory(t *testing.T
 			t.Fatal(marshalErr)
 		}
 		bucketSizes[index] = len(bucketJSON)
-		costBytes, costErr := statsCostReportBytes(costDetail, costEvidence)
-		if costErr != nil {
-			t.Fatal(costErr)
-		}
-		costReportBytes += costBytes
+		costBuckets = append(costBuckets, MaterializedBucket{Start: float64(start), Duration: 300, Complete: true, Cost: costDetail})
+	}
+	costReportBytes, err := CostReportDetailBytes(costBuckets)
+	if err != nil {
+		t.Fatal(err)
 	}
 	mergedNoData := make([]MaterializedNoData, sourceCount)
 	for sourceIndex := range mergedNoData {
@@ -748,7 +762,10 @@ func TestStatsServiceBuilds24HourProductWithLargeUnavailableHistory(t *testing.T
 		}
 	}
 	if bucketCount*len(costJSON) <= MaxStatsSnapshotChunkBytes {
-		t.Fatal("fixture does not distinguish repeated evidence from the shared report")
+		t.Fatal("fixture does not distinguish repeated window detail from the bounded shared report")
+	}
+	if costReportBytes >= MaxStatsSnapshotChunkTargetBytes {
+		t.Fatalf("bounded 24-hour cost report = %d bytes, want below the snapshot chunk target", costReportBytes)
 	}
 	if !statsSnapshotChunksFit(bucketSizes, bucketStarts, 300, mergedNoData, costReportBytes) {
 		t.Fatalf("24-hour product with repeated cost evidence did not fit its shared report bound: report=%d bytes", costReportBytes)

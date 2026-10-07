@@ -13,6 +13,19 @@ def _identity() -> HostIdentity:
     return HostIdentity("host-a", "host-a.example", "boot-a", 42, "proc:1", 1, "nonce-a", "fixture")
 
 
+@pytest.mark.parametrize("values,relative", [
+    ({"YOMUX_ROOT": "canonical"}, "canonical/runtime"),
+    ({"YOMUX_ROOT": "canonical", "YOLOMUX_ROOT": "legacy"}, "canonical/runtime"),
+    ({"YOMUX_ROOT": "", "YOLOMUX_ROOT": "legacy", "YOMUX_RUNTIME_DIR": "canonical"}, "canonical/yomux/h-host-a/b-boot-a"),
+    ({"YOMUX_RUNTIME_DIR": "canonical"}, "canonical/yomux/h-host-a/b-boot-a"),
+    ({"YOMUX_RUNTIME_DIR": "canonical", "YOLOMUX_RUNTIME_DIR": "legacy"}, "canonical/yomux/h-host-a/b-boot-a"),
+    ({"YOMUX_RUNTIME_DIR": "", "YOLOMUX_RUNTIME_DIR": "legacy"}, "temporary/yomux-server-1000/shared/h-host-a/b-boot-a"),
+])
+def test_runtime_root_canonical_presence_controls_branch_selection(tmp_path, values, relative):
+    environ = {name: str(tmp_path / value) if value else "" for name, value in values.items()}
+    assert common.runtime_root(environ=environ, identity=_identity(), temporary_dir=tmp_path / "temporary", uid=1000) == tmp_path / relative
+
+
 def test_runtime_root_prefers_xdg_and_is_scoped_to_host_and_boot(tmp_path):
     root = common.runtime_root(
         environ={"XDG_RUNTIME_DIR": str(tmp_path / "xdg-runtime")},

@@ -211,7 +211,7 @@ def test_container_writer_slot_override_uses_the_caller_owned_namespace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     slot = tmp_path / "container-writer"
-    monkeypatch.setenv("YOLOMUX_WORKTREE_WRITER_SLOT", str(slot))
+    monkeypatch.setenv("YOMUX_WORKTREE_WRITER_SLOT", str(slot))
     monkeypatch.setenv("YOLOMUX_CHECK_IN_CONTAINER", "1")
 
     lease = worktree_writer.acquire_worktree_writer(

@@ -34,6 +34,14 @@ from zoneinfo import ZoneInfo
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from tools.product_environment import product_env
+from tools.product_environment import product_env_name
+from tools.product_environment import product_env_suffix
+from tools.instance_isolation import normalize_yomux_environment
+
 PACIFIC = ZoneInfo("America/Los_Angeles")
 
 ATTEMPT_SCHEMA = 1
@@ -116,7 +124,16 @@ def arm_env_admission(
     if not name:
         return {"admitted": False, "reason": "no_arm_env_name", "forwarded": []}
     allowlist = forwarded_test_env(repo_root, source_text=allowlist_source)
-    if name not in allowlist:
+    forwarded_suffixes = {
+        product_env_suffix(product_env_name(forwarded_name))
+        for forwarded_name in allowlist
+    }
+    try:
+        canonical_name = product_env_name(name)
+    except ValueError:
+        canonical_name = ""
+    suffix = product_env_suffix(canonical_name) or ""
+    if suffix not in forwarded_suffixes:
         return {
             "admitted": False,
             "reason": "arm_env_not_forwarded_into_container",
@@ -139,7 +156,16 @@ def arm_env_name(service_source: str) -> str:
         for target in node.targets:
             if isinstance(target, ast.Name) and target.id == ARM_ENV_OWNER_CONSTANT:
                 if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-                    return node.value.value
+                    return product_env_name(node.value.value)
+                if (
+                    isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Name)
+                    and node.value.func.id == "product_env_name"
+                    and len(node.value.args) == 1
+                    and isinstance(node.value.args[0], ast.Constant)
+                    and isinstance(node.value.args[0].value, str)
+                ):
+                    return product_env_name(node.value.args[0].value)
     raise ValueError(f"{ARM_ENV_OWNER.as_posix()} does not define {ARM_ENV_OWNER_CONSTANT}")
 
 
@@ -539,7 +565,7 @@ def first_transition_timeline(bundle: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def retention_root(explicit: str | None = None) -> Path:
-    path = Path(explicit) if explicit else Path(os.environ.get("YOLOMUX_TEST_ROOT", "/tmp/yomux-test-defect2")) / "defect2" / f"run-{time.time_ns()}"
+    path = Path(explicit) if explicit else Path(product_env('TEST_ROOT', "/tmp/yomux-test-defect2", environ=os.environ)) / "defect2" / f"run-{time.time_ns()}"
     if not path.resolve().is_relative_to(Path("/tmp").resolve()):
         raise ValueError("defect2 retention root must be under /tmp")
     return path
@@ -633,7 +659,7 @@ def enable_attribution(evidence_dir: Path) -> Path:
     """Create the directory whose existence turns the conftest attribution hook on.
 
     A directory rather than an environment variable on purpose: docker/run-tests.sh forwards a
-    fixed allowlist, and YOLOMUX_E2E_EVIDENCE_DIR is the only channel already bind-mounted at an
+    fixed allowlist, and YOMUX_E2E_EVIDENCE_DIR is the only channel already bind-mounted at an
     identical absolute path on both sides.
     """
 

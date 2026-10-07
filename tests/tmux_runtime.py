@@ -15,9 +15,12 @@ import uuid
 
 import pytest
 
+from tools.product_environment import apply_yomux_environment_assignments
+from tools.product_environment import product_env
+from tools.product_environment import product_env_names
 from yomux_lib.background_scheduler import pid_is_alive
 from yomux_lib.host_identity import process_start_identity
-from yomux_lib.tmux_utils import YOLOMUX_TMUX_SOCKET_ENV
+from yomux_lib.tmux_utils import PRODUCT_TMUX_SOCKET_ENV
 
 
 TMUX_WAIT_INITIAL_POLL_SECONDS = 0.05
@@ -26,6 +29,22 @@ TMUX_WAIT_FAST_ATTEMPTS = 4
 TMUX_PROCESS_EXIT_TIMEOUT_SECONDS = 5.0
 TMUX_PROCESS_EXIT_POLL_SECONDS = 0.01
 _TMUX_PROCESS_EXIT_POLL = threading.Event()
+
+
+def patch_isolated_product_environment(monkeypatch, assignments: dict[str, str]) -> None:
+    """Own canonical settings, compatibility aliases, and provenance as one fixture change."""
+    environment = dict(os.environ)
+    apply_yomux_environment_assignments(environment, assignments)
+    for name, value in environment.items():
+        if os.environ.get(name) != value:
+            monkeypatch.setenv(name, value)
+
+
+def clear_isolated_product_environment(monkeypatch, *settings: str) -> None:
+    """Clear every spelling of selected product settings in the active test environment."""
+    for setting in settings:
+        for name in product_env_names(setting):
+            monkeypatch.delenv(name, raising=False)
 
 
 def adaptive_tmux_poll_interval(attempt: int, *, initial: float = TMUX_WAIT_INITIAL_POLL_SECONDS, maximum: float = TMUX_WAIT_MAX_POLL_SECONDS, fast_attempts: int = TMUX_WAIT_FAST_ATTEMPTS) -> float:
@@ -206,7 +225,7 @@ def start_isolated_tmux_runtime(
     tmux_binary = shutil.which("tmux")
     if not tmux_binary:
         pytest.skip("tmux is not installed")
-    socket_dir = Path(os.environ["YOLOMUX_TEST_ROOT"]) / "tmux" / f"e-{os.getpid()}-{uuid.uuid4().hex[:4]}"
+    socket_dir = Path(product_env("TEST_ROOT", "") or "") / "tmux" / f"e-{os.getpid()}-{uuid.uuid4().hex[:4]}"
     socket_dir.parent.mkdir(mode=0o700, exist_ok=True)
     socket_dir.mkdir(mode=0o700)
     socket_path = socket_dir / "s"
@@ -217,8 +236,7 @@ def start_isolated_tmux_runtime(
         raise ValueError("at least one isolated tmux session is required")
     monkeypatch.delenv("TMUX", raising=False)
     monkeypatch.delenv("TMUX_PANE", raising=False)
-    monkeypatch.setenv("YOMUX_TMUX_SOCKET", str(socket_path))
-    monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
+    patch_isolated_product_environment(monkeypatch, {"YOMUX_TMUX_SOCKET": str(socket_path)})
     monkeypatch.setenv("HISTFILE", os.devnull)
     owned_cwd = Path(session_cwd) if session_cwd is not None else tmp_path
     runtime = SimpleNamespace(tmux_binary=tmux_binary, tmux_args=["-S", str(socket_path)], socket_path=socket_path, socket_dir=socket_dir, sessions=session_names, session_cwd=owned_cwd, stopped=False)
@@ -252,11 +270,11 @@ def start_isolated_default_tmux_runtime(monkeypatch, tmp_path: Path, session_cou
     tmux_binary = shutil.which("tmux")
     if not tmux_binary:
         pytest.skip("tmux is not installed")
-    socket_dir = Path(os.environ["YOLOMUX_TEST_ROOT"]) / "tmux" / f"d-{os.getpid()}-{uuid.uuid4().hex[:4]}"
+    socket_dir = Path(product_env("TEST_ROOT", "") or "") / "tmux" / f"d-{os.getpid()}-{uuid.uuid4().hex[:4]}"
     socket_dir.parent.mkdir(mode=0o700, exist_ok=True)
     socket_dir.mkdir(mode=0o700)
     session_names = [f"yt-{os.getpid()}-{uuid.uuid4().hex[:10]}-{index + 1}" for index in range(session_count)]
-    monkeypatch.delenv(YOLOMUX_TMUX_SOCKET_ENV, raising=False)
+    clear_isolated_product_environment(monkeypatch, "TMUX_SOCKET")
     monkeypatch.delenv("TMUX", raising=False)
     monkeypatch.delenv("TMUX_PANE", raising=False)
     monkeypatch.setenv("TMUX_TMPDIR", str(socket_dir))

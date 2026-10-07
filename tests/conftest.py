@@ -1,6 +1,6 @@
 """Shared pytest configuration + isolation for the yolomux test suite.
 
-Point YOLOMUX_CONFIG_DIR / YOLOMUX_STATE_DIR at FRESH per-run temp dirs *before* any test module
+Point YOMUX_CONFIG_DIR / YOMUX_STATE_DIR at FRESH per-run temp dirs *before* any test module
 imports `yomux_lib.common` (which binds CONFIG_DIR / STATE_DIR / SETTINGS_PATH at import time). pytest
 imports conftest.py ahead of the test modules, so this is the one place that owns the config/state
 location — replacing the `os.environ.setdefault(..., "/tmp/yomux-test-config")` lines that were
@@ -21,6 +21,9 @@ import time
 import uuid
 
 import pytest
+from tools.product_environment import product_env
+from tools.product_environment import product_env_name
+from tools.product_environment import product_env_names
 
 _attribution_json_dumps = json.dumps
 
@@ -41,7 +44,7 @@ for _name in (
     "CA_DIR",
     "LOG_DIR",
 ):
-    os.environ.pop(f"YOMUX_{_name}", None)
+    os.environ.pop(product_env_name(_name), None)
 
 
 @pytest.fixture(autouse=True)
@@ -60,36 +63,36 @@ def clear_ambient_canonical_product_roots(monkeypatch):
         "CA_DIR",
         "LOG_DIR",
     ):
-        monkeypatch.delenv(f"YOMUX_{_name}", raising=False)
+        monkeypatch.delenv(product_env_names(_name)[0], raising=False)
 
 from yomux_lib.infra.transient_paths import create_run_root
 from yomux_lib.infra.transient_paths import remove_run_root
 
 # Each process needs its OWN config/state dir. Under pytest-xdist, worker subprocesses INHERIT the
-# parent's environment, so a plain setdefault makes every parallel worker share ONE YOLOMUX_CONFIG_DIR
+# parent's environment, so a plain setdefault makes every parallel worker share ONE YOMUX_CONFIG_DIR
 # -> one state.json. Concurrent TmuxWebtermApp construction in different workers then prunes each
 # other's session summaries out of that shared file (prune_yoagent_session_summaries keeps only its
 # own sessions), a ~6% KeyError flake under `-n auto`. Give each xdist worker a distinct dir; keep
 # setdefault's external override (CI/dev) for the serial / controller process.
-_inherited_test_root = os.environ.get("YOLOMUX_TEST_ROOT", "").strip()
+_inherited_test_root = (product_env("TEST_ROOT", "") or "").strip()
 if _inherited_test_root:
     _test_run_root = None
     _test_process_root = Path(_inherited_test_root) / f"p{os.getpid()}"
 else:
-    _test_run_root = create_run_root(namespace="test", owner_role="pytest-controller")
+    _test_run_root = create_run_root(namespace="test", owner_role="pytest-controller", temporary_base=Path("/tmp"))
     _test_process_root = _test_run_root.child("pytest")
-    os.environ["YOLOMUX_TEST_ROOT"] = str(_test_run_root.path)
+    os.environ[product_env_name("TEST_ROOT")] = str(_test_run_root.path)
 _test_config_dir = _test_process_root / "config"
 _test_state_dir = _test_process_root / "state"
 _test_process_root.mkdir(mode=0o700, exist_ok=True)
 _test_config_dir.mkdir(mode=0o700, exist_ok=True)
 _test_state_dir.mkdir(mode=0o700, exist_ok=True)
-os.environ["YOLOMUX_CONFIG_DIR"] = str(_test_config_dir)
-os.environ["YOLOMUX_STATE_DIR"] = str(_test_state_dir)
+os.environ[product_env_name("CONFIG_DIR")] = str(_test_config_dir)
+os.environ[product_env_name("STATE_DIR")] = str(_test_state_dir)
 if _test_run_root is not None:
     atexit.register(partial(remove_run_root, _test_run_root))
 
-os.environ.setdefault("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", "1")
+os.environ.setdefault(product_env_name("LOCAL_SERVICE_IDLE_SECONDS"), "1")
 
 
 from yomux_lib import app as app_module
@@ -114,6 +117,13 @@ def legacy_activity_summary_enabled(monkeypatch):
 NONBROWSER_TEST_TIMEOUT_SECONDS = 180
 BROWSER_TEST_TIMEOUT_SECONDS = 300
 E2E_TEST_TIMEOUT_SECONDS = 600
+GO_ONLY_GATE_ENV = "YOMUX_CHECK_GO_ONLY"
+DEPRECATED_PYTHON_SERVER_FIXTURES = frozenset({
+    "gate_browser_runtime",
+    "gate_live_server",
+    "gate_authenticated_live_server",
+    "stateful_journey",
+})
 
 _SOCKET_AVAILABILITY: tuple[bool, str] | None = None
 _SELENIUM_IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+selenium(?:\.|\s|$)|pytest\.importorskip\([\"']selenium", re.MULTILINE)
@@ -168,10 +178,11 @@ def isolated_yoagent_conversation_state(monkeypatch, tmp_path):
 
 @pytest.fixture
 def isolated_tmux_socket(monkeypatch):
-    socket_parent = Path(os.environ["YOLOMUX_TEST_ROOT"]) / "tmux"
+    socket_parent = Path(product_env("TEST_ROOT", "") or "") / "tmux"
     socket_parent.mkdir(mode=0o700, exist_ok=True)
     sock_dir = Path(tempfile.mkdtemp(prefix=f"c-{os.getpid()}-{uuid.uuid4().hex[:4]}-", dir=socket_parent))
-    monkeypatch.setenv("YOLOMUX_TMUX_SOCKET", str(sock_dir / "s"))
+    for _name in product_env_names("TMUX_SOCKET"):
+        monkeypatch.setenv(_name, str(sock_dir / "s"))
     yield
     try:
         (sock_dir / "s").unlink()
@@ -235,6 +246,9 @@ def pytest_collection_modifyitems(config, items):
         path = _test_path(item)
         for marker_name in automatic_test_markers(path):
             item.add_marker(getattr(pytest.mark, marker_name))
+        fixture_names = getattr(item, "fixturenames", ())
+        if os.environ.get(GO_ONLY_GATE_ENV) == "1" and DEPRECATED_PYTHON_SERVER_FIXTURES.intersection(fixture_names):
+            item.add_marker(pytest.mark.deprecated_python_server)
 
     selenium_paths = {_test_path(item) for item in items if _test_path_imports_selenium(_test_path(item))}
     for item in items:
@@ -278,11 +292,11 @@ def pytest_runtest_setup(item):
 # predecessors a test actually shares a browser with are decided by xdist sharding, not by file
 # order -- and nothing in a normal run records that. This hook is the only route that crosses the
 # test-container boundary: docker/run-tests.sh forwards a fixed environment allowlist, and
-# YOLOMUX_E2E_EVIDENCE_DIR is the one path bind-mounted at an identical absolute path on both
+# YOMUX_E2E_EVIDENCE_DIR is the one path bind-mounted at an identical absolute path on both
 # sides. It is off unless tools/defect2_harness.py has created the directory, so an ordinary run
 # writes nothing and pays one directory check per test.
 def _defect2_attribution_path():
-    evidence_dir = os.environ.get("YOLOMUX_E2E_EVIDENCE_DIR", "")
+    evidence_dir = product_env("E2E_EVIDENCE_DIR", "") or ""
     if not evidence_dir:
         return None
     directory = Path(evidence_dir) / "defect2-attempt"

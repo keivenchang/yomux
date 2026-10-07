@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/keivenchang/yomux/internal/finder"
+	"github.com/keivenchang/yomux/internal/productenv"
 	"github.com/keivenchang/yomux/internal/stats"
 )
 
@@ -543,7 +544,7 @@ func (s *server) tmuxSignalPaneAgent(panePID int, paneCommand string) (string, i
 
 func transcriptRoot(kind string) string {
 	if kind == "claude" {
-		if root := strings.TrimSpace(os.Getenv("YOLOMUX_CLAUDE_TRANSCRIPT_ROOT")); root != "" {
+		if root := strings.TrimSpace(productenv.Value("CLAUDE_TRANSCRIPT_ROOT")); root != "" {
 			return root
 		}
 		home, _ := os.UserHomeDir()
@@ -552,7 +553,7 @@ func transcriptRoot(kind string) string {
 	if kind == "opencode" {
 		return ""
 	}
-	if root := strings.TrimSpace(os.Getenv("YOLOMUX_CODEX_TRANSCRIPT_ROOT")); root != "" {
+	if root := strings.TrimSpace(productenv.Value("CODEX_TRANSCRIPT_ROOT")); root != "" {
 		return root
 	}
 	home, _ := os.UserHomeDir()
@@ -659,7 +660,7 @@ func agentTranscriptWithTitle(kind string, pid int, cwd, title string) (string, 
 
 func agentTranscriptWithCommand(kind string, pid int, cwd, title, command string) (string, string, string) {
 	if kind == "opencode" {
-		databasePath := strings.TrimSpace(os.Getenv("YOLOMUX_OPENCODE_DATABASE"))
+		databasePath := strings.TrimSpace(productenv.Value("OPENCODE_DATABASE"))
 		if databasePath == "" {
 			return "", "", cwd
 		}
@@ -715,8 +716,14 @@ func (s *server) tmuxStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPost {
-		user, ok := s.identity(r)
-		if !ok || user.role != "admin" {
+		user, status := s.identityStatus(r)
+		if status != 0 {
+			if !rejectCredentialAdmission(w, status) {
+				s.rejectUnauthorized(w, r)
+			}
+			return
+		}
+		if user.role != "admin" {
 			s.rejectForbidden(w, user, "admin")
 			return
 		}
@@ -1288,7 +1295,7 @@ func (s *server) liveSessionMetadataFromOutputWithIndex(session string, output [
 			"window_name": parts[2],
 		}
 		panes = append(panes, pane)
-		if selected == nil && windowActive && active {
+		if windowActive && active {
 			selected = pane
 		}
 		if selected == nil && active {

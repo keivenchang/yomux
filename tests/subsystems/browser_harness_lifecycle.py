@@ -1,5 +1,9 @@
 """Browser harness lifecycle contracts retained under tests.test_browser_layout node IDs."""
 
+import json
+import os
+from pathlib import Path
+import subprocess
 import sys
 
 import pytest
@@ -214,3 +218,67 @@ def assert_browser_document_wait_helper_reports_values_and_timeout_context(brows
     assert metrics["asyncValue"] == {"ready": True}, metrics
     assert metrics["asyncAttempts"] == 2, metrics
     assert metrics["timeout"] == "Timed out after 15ms waiting for missing fixture state", metrics
+
+
+def assert_imported_browser_fixtures_share_one_worker_lease_across_modules(tmp_path):
+    """Separate module FixtureDefs must borrow one driver and retire it once."""
+    (tmp_path / "conftest.py").write_text('''import json
+from pathlib import Path
+from tests.browser_helpers import browser_layout as owner
+created = []
+retired = []
+class Lease:
+    def __init__(self, driver):
+        self.identity = len(created)
+    def quit(self):
+        retired.append(self.identity)
+def create():
+    created.append(len(created) + 1)
+    return object()
+def pytest_configure(config):
+    owner.new_chrome_driver = create
+    owner._BrowserDriverLease = Lease
+    owner._require_current_generated_bundle = lambda *args, **kwargs: None
+def pytest_sessionfinish(session, exitstatus):
+    Path(__file__).with_name("ownership.json").write_text(json.dumps({"created": created, "retired": retired}))
+''')
+    for name in ("a", "b"):
+        (tmp_path / f"test_{name}.py").write_text(
+            "from tests.browser_helpers.browser_layout import browser\n"
+            "def test_owner(browser):\n"
+            "    assert browser.identity == 1\n"
+        )
+    environment = {key: os.environ[key] for key in ("PATH", "HOME", "LANG", "TMPDIR", "SYSTEMROOT") if key in os.environ}
+    environment["PYTHONPATH"] = str(browser_layout_module.REPO_ROOT)
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", str(tmp_path)],
+        cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads((tmp_path / "ownership.json").read_text()) == {"created": [1], "retired": [1]}
+
+
+def assert_worker_browser_captures_generation_at_creation_and_rejects_failed_retirement(monkeypatch):
+    captured = []
+    driver = object()
+    retirement = object()
+
+    def capture(actual):
+        assert actual is driver
+        captured.append(actual)
+        return retirement
+
+    monkeypatch.setattr(browser_layout_module.WebDriverLease, "from_driver", capture)
+    lease = browser_layout_module._BrowserDriverLease(driver)
+    assert captured == [driver]
+    retired = []
+
+    def fail_retirement(leases):
+        retired.extend(leases)
+        return {"proven_gone": False, "errors": ["owned process still alive"]}
+
+    monkeypatch.setattr(browser_layout_module, "retire_all", fail_retirement)
+    monkeypatch.setattr(browser_layout_module, "new_chrome_driver", lambda: pytest.fail("replacement before retirement"))
+    with pytest.raises(RuntimeError, match="owned process still alive"):
+        lease.replace_after_invalid_session()
+    assert captured == [driver] and retired == [retirement]

@@ -303,7 +303,7 @@ const jsDebugStatsHistoryPostMaxBytes = 96 * 1024;
 const jsDebugStatsClientStorageKey = 'yomux.stats.client_id.v1';
 const jsDebugStatsDisconnectedStorageKey = 'yomux.stats.disconnected_at.v1';
 const jsDebugStatsUiPreferencesStorageKey = 'yomux.stats.ui_preferences.v1';
-const jsDebugGraphDefaultHiddenChartKeys = Object.freeze(['gpuUtil', 'gpuMemory']);
+const jsDebugGraphDefaultHiddenChartKeys = Object.freeze(['gpuUtil', 'gpuMemory', 'systemDisk']);
 const jsDebugGraphMovingAverageSamples = 10;
 const jsDebugGraphAgentTokenBucketSeconds = 60;
 const jsDebugGraphDisplayHoldExpiryMs = Object.freeze({
@@ -487,7 +487,8 @@ const jsDebugGraphSeries = Object.freeze([
     displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.minuteGauge,
   },
 ]);
-// Mirror of yomux_lib/stats_current/families.py — the ONE YO!stats family manifest.
+// Browser mirror of the shared YO!stats history families. Collection remains backend-owned;
+// system_disk is sampled by Go and has no deprecated Python collector.
 // Per family: the canonical name (identical to the server's
 // stats_coverage_intervals family), the legacy alias names an OLDER server may
 // still write into coverage payloads (canonical is tried first), the true
@@ -503,12 +504,13 @@ const jsDebugStatsFamilyManifest = Object.freeze({
   cost: Object.freeze({legacyAliases: Object.freeze(['cost_atoms', 'usage_atoms']), cadenceSeconds: 10, idleCadenceSeconds: 60, chartGroups: Object.freeze([]), series: Object.freeze([])}),
   gpu: Object.freeze({legacyAliases: Object.freeze(['gpu_metrics']), cadenceSeconds: 10, chartGroups: Object.freeze(['gpuUtil', 'gpuMemory']), series: Object.freeze([])}),
   system_memory: Object.freeze({legacyAliases: Object.freeze(['memory']), cadenceSeconds: 60, chartGroups: Object.freeze(['memory']), series: Object.freeze(['systemMemory', 'macMemoryPressure'])}),
+  system_disk: Object.freeze({legacyAliases: Object.freeze([]), cadenceSeconds: 300, chartGroups: Object.freeze(['systemDisk']), series: Object.freeze([])}),
 });
 const jsDebugStatsFamilyByChartGroup = Object.freeze(Object.fromEntries(Object.entries(jsDebugStatsFamilyManifest)
   .flatMap(([family, entry]) => entry.chartGroups.map(group => [group, family]))));
 const jsDebugGraphDaemonsChartGroup = Object.freeze({
   key: 'serversLoad', labelKey: 'debug.graph.chart.serversLoad',
-  descKey: 'debug.graph.chart.serversLoad.runtimeDesc',
+  descKey: 'debug.graph.chart.serversLoad.desc',
   series: [], unit: 'runtimeOccupancy', kind: 'area', stacked: true,
   serviceLoad: true, runtimeOnly: true,
   bucketSeconds: jsDebugStatsFamilyManifest.service_load.cadenceSeconds,
@@ -541,6 +543,7 @@ const jsDebugGraphChartGroups = Object.freeze([
   {key: 'modelTokens', labelKey: 'debug.graph.chart.modelTokens', descKey: 'debug.graph.chart.modelTokens.desc', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicTokenDimension: 'model', noDataWhenEmpty: true, displayedSummary: 'modelTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
   {key: 'gpuUtil', labelKey: 'debug.graph.chart.gpuUtil', descKey: 'debug.graph.chart.gpuUtil.desc', series: [], unit: 'percent', fixedMax: 100, kind: 'bar', zeroBar: true, hostMetric: 'gpuUtil'},
   {key: 'gpuMemory', labelKey: 'debug.graph.chart.gpuMemory', descKey: 'debug.graph.chart.gpuMemory.desc', series: [], unit: 'bytes', hostMetric: 'gpuMemory', capacityMetric: 'gpuMemory'},
+  {key: 'systemDisk', labelKey: 'debug.graph.chart.systemDisk', descKey: 'debug.graph.chart.systemDisk.desc', series: [], unit: 'percent', fixedMax: 100, kind: 'line', hostMetric: 'diskUsage'},
   {key: 'latency', labelKey: 'common.clientLatency', descKey: 'debug.graph.chart.latency.desc', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
   {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', descKey: 'debug.graph.chart.clientApiSse.desc', series: ['api', 'sse'], unit: 'countPerSecond', displayedSummary: 'clientRequests', disconnectedOverlay: true, noDataOverlay: true},
   {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', descKey: 'debug.graph.chart.clientBandwidth.desc', series: ['bandwidth'], unit: 'bytesPerSecond', displayedSummary: 'bandwidth', disconnectedOverlay: true, noDataOverlay: true},
@@ -1656,8 +1659,14 @@ function debugGraphNewHostMetrics() {
     gpuUtilProcesses: new Map(),
     gpuMemoryProcesses: new Map(),
     gpuDevices: new Map(),
+    diskMounts: new Map(),
+    diskInventoryStartMs: null,
     serviceLoad: new Map(),
   };
+}
+
+function debugGraphNewDiskMountItem(label) {
+  return {label: String(label || ''), usedPercent: 0, samples: 0, inventory: false};
 }
 
 function debugGraphNewServiceLoadItem(label) {
@@ -1988,6 +1997,28 @@ function debugGraphMergeBucket(target, source, multiplier = 1) {
         item.memoryCapacityTotalBytes += Number(sourceItem.memoryCapacityTotalBytes || 0) * scale;
         item.samples += Number(sourceItem.samples || 0) * scale;
         targetHost.gpuDevices.set(key, item);
+      }
+    }
+    if (sourceHost.diskMounts instanceof Map) {
+      const sourceStartMs = Number(source.startMs);
+      const hasInventory = [...sourceHost.diskMounts.values()].some(item => item?.inventory === true);
+      const targetInventoryStartMs = targetHost.diskInventoryStartMs;
+      const sourceHasNewestInventory = hasInventory && Number.isFinite(sourceStartMs)
+        && (!Number.isFinite(targetInventoryStartMs) || sourceStartMs >= targetInventoryStartMs);
+      if (sourceHasNewestInventory) {
+        targetHost.diskInventoryStartMs = sourceStartMs;
+        for (const item of targetHost.diskMounts.values()) item.inventory = false;
+      }
+      for (const [key, sourceItem] of sourceHost.diskMounts.entries()) {
+        const sourceSamples = Number(sourceItem.samples || 0) * scale;
+        if (sourceSamples <= 0 && sourceItem.inventory !== true) continue;
+        const item = targetHost.diskMounts.get(key) || debugGraphNewDiskMountItem(sourceItem.label || key);
+        item.label = sourceItem.label || item.label;
+        if (sourceHasNewestInventory) item.inventory = sourceItem.inventory === true;
+        else if (!Number.isFinite(targetHost.diskInventoryStartMs)) item.inventory = item.inventory || sourceItem.inventory === true;
+        item.usedPercent += Number(sourceItem.usedPercent || 0) * scale;
+        item.samples += sourceSamples;
+        targetHost.diskMounts.set(key, item);
       }
     }
     if (sourceHost.serviceLoad instanceof Map) {

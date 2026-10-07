@@ -184,6 +184,7 @@ class AutoApproveWorker:
         self.last_hash = ""
         self.last_hash_at = 0.0
         self.last_blocked_hash = ""
+        self.capacity_retry_sent = False
         self.pending_prompt = False
         self.missing_capture_count = 0
         self.capture_gate_observed = False
@@ -250,7 +251,12 @@ class AutoApproveWorker:
             }
 
     def has_pending_prompt(self) -> bool:
-        return self.pending_prompt or bool(self.last_hash) or bool(self.last_blocked_hash)
+        return (
+            self.pending_prompt
+            or bool(self.last_hash)
+            or bool(self.last_blocked_hash)
+            or bool(self.capacity_retry_sent)
+        )
 
     def update(self, **values: Any) -> None:
         with self.lock:
@@ -335,7 +341,7 @@ class AutoApproveWorker:
 
     def process_once(self, module: Any) -> bool:
         self.last_poll_is_quiet = False
-        if self.capture_gate is not None and self.capture_gate_observed and not self.pending_prompt and not self.last_hash and not self.last_blocked_hash:
+        if self.capture_gate is not None and self.capture_gate_observed and not self.has_pending_prompt():
             try:
                 should_capture = self.capture_gate(self.target)
             except EXPECTED_AUTO_APPROVE_ERRORS as exc:
@@ -373,6 +379,29 @@ class AutoApproveWorker:
         self.capture_gate_observed = True
 
         state, pane_text = self.classify_pane_state(module, visible_text)
+        approval_state = state.approval or {}
+        if auto_approve_tmux.capacity_recovery_pending(visible_text, state):
+            if self.capacity_retry_sent:
+                return False
+            result = module.send_capacity_recovery(self.target)
+            if not result.sent:
+                if result.reason_code == "dry-run":
+                    self.pending_prompt = True
+                    LOGGER.info("dry-run: capacity recovery would send continue to %s", self.target)
+                return False
+            self.capacity_retry_sent = True
+            self.last_hash = ""
+            self.last_hash_at = 0.0
+            self.last_blocked_hash = ""
+            self.pending_prompt = False
+            self.update_last_action(
+                "yolo.status.capacityRecoverySent",
+                "capacity notice detected; sent continue",
+            )
+            return True
+        if not auto_approve_tmux.model_capacity_notice_visible(visible_text):
+            self.capacity_retry_sent = False
+
         screen_key = str(state.screen.get("key") or "")
         visible_hash = hashlib.sha256(visible_text.encode("utf-8", errors="replace")).hexdigest()
         screen_changed = bool(self.last_visible_screen_hash) and visible_hash != self.last_visible_screen_hash

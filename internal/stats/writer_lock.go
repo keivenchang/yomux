@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/keivenchang/yomux/internal/atomicfile"
+	"github.com/keivenchang/yomux/internal/mutablefs"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -40,12 +42,9 @@ func canonicalWriterPath(path string) (string, error) {
 	if err != nil && !os.IsNotExist(err) {
 		return "", fmt.Errorf("inspect YO!stats database path: %w", err)
 	}
-	parent, err := filepath.EvalSymlinks(filepath.Dir(abs))
+	parent, err := mutablefs.Canonical(filepath.Dir(abs))
 	if err != nil {
-		if !os.IsNotExist(err) {
-			return "", fmt.Errorf("resolve YO!stats database directory: %w", err)
-		}
-		parent = filepath.Dir(abs)
+		return "", fmt.Errorf("resolve YO!stats database directory: %w", err)
 	}
 	return filepath.Join(parent, filepath.Base(abs)), nil
 }
@@ -125,27 +124,5 @@ func publishWriterFenceVersion(path string, version int64, protocol int) error {
 	if err != nil {
 		return err
 	}
-	dir := filepath.Dir(path)
-	temp, err := os.CreateTemp(dir, ".stats-writer-fence-*")
-	if err != nil {
-		return err
-	}
-	tempName := temp.Name()
-	defer os.Remove(tempName)
-	if err := temp.Chmod(0o600); err != nil {
-		_ = temp.Close()
-		return err
-	}
-	if _, err := temp.Write(append(data, '\n')); err != nil {
-		_ = temp.Close()
-		return err
-	}
-	if err := temp.Sync(); err != nil {
-		_ = temp.Close()
-		return err
-	}
-	if err := temp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tempName, filepath.Join(dir, writerFenceFilename))
+	return atomicfile.Write(filepath.Join(filepath.Dir(path), writerFenceFilename), append(data, '\n'))
 }

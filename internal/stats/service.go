@@ -215,6 +215,7 @@ var persistedRingGapFamilies = [...]string{
 	"gpu",
 	"service_load",
 	"system_memory",
+	"system_disk",
 	"agent_tokens",
 	"cost",
 	"browser",
@@ -346,33 +347,6 @@ func estimatedNoDataBytesInRange(spans []MaterializedNoData, sizes []int, start,
 		}
 	}
 	return total
-}
-
-func statsCostReportBytes(cost MaterializedCostDetail, seenEvidence map[string]struct{}) (int, error) {
-	// Snapshot buckets carry series and coverage on the wire; cost is folded into
-	// one shared report. Keep the per-bucket attribution bound, but account for
-	// price evidence once because the wire report merges it by evidence key.
-	evidenceRows := cost.Evidence
-	cost.Evidence = nil
-	encodedCost, err := json.Marshal(cost)
-	if err != nil {
-		return 0, err
-	}
-	total := len(encodedCost)
-	const maxInt64 = int64(1<<63 - 1)
-	for _, evidence := range evidenceRows {
-		if _, exists := seenEvidence[evidence.Key]; exists {
-			continue
-		}
-		seenEvidence[evidence.Key] = struct{}{}
-		evidence.Tokens, evidence.MicroUSD, evidence.APIListMicroUSD, evidence.PricedAtoms = maxInt64, maxInt64, maxInt64, maxInt64
-		encodedEvidence, marshalErr := json.Marshal(evidence)
-		if marshalErr != nil {
-			return 0, marshalErr
-		}
-		total += len(encodedEvidence) + 1
-	}
-	return total, nil
 }
 
 func statsSnapshotChunksFit(bucketSizes []int, bucketStarts []int64, resolution int, noData []MaterializedNoData, costReportBytes int) bool {
@@ -753,8 +727,6 @@ func (s *StatsService) Refresh(ctx context.Context) (refreshErr error) {
 			cacheGeneration := int64(0)
 			generatedAt := window.PublishedAt
 			windowBucketBytes := 0
-			windowCostBytes := 0
-			windowCostEvidence := make(map[string]struct{})
 			for rowIndex, row := range window.Rows {
 				cacheKey := ringBucketCacheKey{resolution: resolution, bucket: row.BucketStart}
 				cached, cacheHit := s.ringBucketCache[cacheKey]
@@ -835,16 +807,6 @@ func (s *StatsService) Refresh(ctx context.Context) (refreshErr error) {
 				}
 				bucket := cached.bucket
 				bucketJSONBytes = cached.wireBytes
-				costBytes, costErr := statsCostReportBytes(bucket.Cost, windowCostEvidence)
-				if costErr != nil {
-					pending[key] = fmt.Sprintf("encode ring bucket %d cost report: %v", row.BucketStart, costErr)
-					if firstErr == nil {
-						firstErr = costErr
-					}
-					break
-				}
-				windowCostBytes += costBytes
-				costReportBytes := windowCostBytes
 				if bucketJSONBytes > MaxStatsSnapshotChunkBytes-maxSnapshotBucketReserveBytes {
 					transportErr := fmt.Errorf("ring bucket %d exceeds the stats snapshot transport chunk limit", row.BucketStart)
 					pending[key] = transportErr.Error()
@@ -854,14 +816,6 @@ func (s *StatsService) Refresh(ctx context.Context) (refreshErr error) {
 					break
 				}
 				windowBucketBytes += bucketJSONBytes + 1
-				if windowBucketBytes+layerNoData.estimatedBytes+costReportBytes > MaxStatsSnapshotBytes-maxSnapshotEnvelopeReserveBytes {
-					transportErr := errors.New("materialized stats snapshot exceeds the transport size limit")
-					pending[key] = transportErr.Error()
-					if firstErr == nil {
-						firstErr = transportErr
-					}
-					break
-				}
 				if bucket.Start != float64(row.BucketStart) || bucket.Duration != float64(key.ResolutionSeconds) || bucket.Complete != row.Complete {
 					pending[key] = fmt.Sprintf("ring bucket %d has inconsistent bounds", row.BucketStart)
 					boundErr := markCorruptPayload(row, payloads[row.BucketStart].Value, errors.New("inconsistent ring bucket bounds"))
@@ -890,7 +844,7 @@ func (s *StatsService) Refresh(ctx context.Context) (refreshErr error) {
 				bucketStarts = append(bucketStarts, row.BucketStart)
 				layerNoData.appendShifted(cached.noData.spans, bucket.Start)
 				versions[rowIndex].noData = cached.noData
-				if windowBucketBytes+layerNoData.estimatedBytes+costReportBytes > MaxStatsSnapshotBytes-maxSnapshotEnvelopeReserveBytes {
+				if windowBucketBytes+layerNoData.estimatedBytes > MaxStatsSnapshotBytes-maxSnapshotEnvelopeReserveBytes {
 					transportErr := errors.New("materialized stats snapshot exceeds the transport size limit")
 					pending[key] = transportErr.Error()
 					if firstErr == nil {
@@ -900,6 +854,22 @@ func (s *StatsService) Refresh(ctx context.Context) (refreshErr error) {
 				}
 			}
 			if _, blocked := pending[key]; blocked {
+				continue
+			}
+			windowCostBytes, costErr := CostReportDetailBytes(buckets)
+			if costErr != nil {
+				pending[key] = fmt.Sprintf("encode window cost report: %v", costErr)
+				if firstErr == nil {
+					firstErr = costErr
+				}
+				continue
+			}
+			if windowBucketBytes+layerNoData.estimatedBytes+windowCostBytes > MaxStatsSnapshotBytes-maxSnapshotEnvelopeReserveBytes {
+				transportErr := errors.New("materialized stats snapshot exceeds the transport size limit")
+				pending[key] = transportErr.Error()
+				if firstErr == nil {
+					firstErr = transportErr
+				}
 				continue
 			}
 			if !statsSnapshotChunksFit(bucketSizes, bucketStarts, key.ResolutionSeconds, layerNoData.spans, windowCostBytes) {

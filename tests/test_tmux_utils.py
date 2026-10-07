@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from tools import auto_approve_tmux
+from tests.tmux_runtime import clear_isolated_product_environment
+from tests.tmux_runtime import patch_isolated_product_environment
 from yomux_lib import tmux_utils
 
 
@@ -60,7 +62,7 @@ def test_run_cmd_decodes_with_replacement_errors(monkeypatch):
 
 
 def test_tmux_command_uses_configured_socket(monkeypatch):
-    monkeypatch.setenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, "/tmp/yomux-test-tmux.sock")
+    patch_isolated_product_environment(monkeypatch, {"YOMUX_TMUX_SOCKET": "/tmp/yomux-test-tmux.sock"})
 
     assert tmux_utils.tmux_command(["list-sessions"]) == ["tmux", "-S", "/tmp/yomux-test-tmux.sock", "list-sessions"]
 
@@ -68,35 +70,36 @@ def test_tmux_command_uses_configured_socket(monkeypatch):
 def test_direct_operator_launch_uses_machine_tmux(monkeypatch):
     monkeypatch.setenv("TMUX", "/tmp/private-tmux,123,0")
     monkeypatch.setenv("TMUX_PANE", "%7")
-    monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, raising=False)
-    monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV, raising=False)
+    clear_isolated_product_environment(monkeypatch, "TMUX_SOCKET", "TMUX_ALLOW_DEFAULT_SERVER")
+    monkeypatch.setenv("YOMUX_TMUX_SOCKET", "")
+    monkeypatch.setenv("YOMUX_TMUX_ALLOW_DEFAULT_SERVER", "0")
 
     tmux_utils.use_machine_tmux_for_operator_launch()
 
     assert "TMUX" not in os.environ
     assert "TMUX_PANE" not in os.environ
-    assert os.environ[tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV] == "1"
+    assert os.environ[tmux_utils.PRODUCT_TMUX_ALLOW_DEFAULT_SERVER_ENV] == "1"
 
 
 def test_direct_fixture_launch_keeps_explicit_private_tmux(monkeypatch):
     private_socket = "/tmp/private-yolomux-tmux.sock"
     monkeypatch.setenv("TMUX", "/tmp/private-tmux,123,0")
     monkeypatch.setenv("TMUX_PANE", "%7")
-    monkeypatch.setenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, private_socket)
-    monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV, raising=False)
+    patch_isolated_product_environment(monkeypatch, {"YOMUX_TMUX_SOCKET": private_socket})
+    clear_isolated_product_environment(monkeypatch, "TMUX_ALLOW_DEFAULT_SERVER")
 
     tmux_utils.use_machine_tmux_for_operator_launch()
 
     assert os.environ["TMUX"] == "/tmp/private-tmux,123,0"
     assert os.environ["TMUX_PANE"] == "%7"
-    assert os.environ[tmux_utils.YOLOMUX_TMUX_SOCKET_ENV] == private_socket
-    assert tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV not in os.environ
+    assert os.environ[tmux_utils.PRODUCT_TMUX_SOCKET_ENV] == private_socket
+    assert tmux_utils.PRODUCT_TMUX_ALLOW_DEFAULT_SERVER_ENV not in os.environ
 
 
 def test_startup_common_operator_launch_clears_inherited_tmux(monkeypatch):
     monkeypatch.setenv("TMUX", "/tmp/private-tmux,123,0")
     monkeypatch.setenv("TMUX_PANE", "%7")
-    monkeypatch.setenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, "/tmp/private-yolomux-tmux.sock")
+    patch_isolated_product_environment(monkeypatch, {"YOMUX_TMUX_SOCKET": "/tmp/private-yolomux-tmux.sock"})
     monkeypatch.setenv("YOMUX_TMUX_SOCKET", "/tmp/private-yomux-tmux.sock")
 
     result = subprocess.run(
@@ -180,13 +183,12 @@ def test_list_tmux_session_activity_reads_the_roster_in_one_bulk_call(monkeypatc
 
 
 def test_readonly_control_mode_attach_allows_default_server(monkeypatch):
-    monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, raising=False)
-    monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV, raising=False)
+    clear_isolated_product_environment(monkeypatch, "TMUX_SOCKET", "TMUX_ALLOW_DEFAULT_SERVER")
     argv = ["-C", "attach-session", "-f", "read-only,ignore-size", "-t", "alpha:"]
 
     assert tmux_utils.tmux_command(argv) == ["tmux", *argv]
 
-    monkeypatch.setenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, "/tmp/declared.sock")
+    patch_isolated_product_environment(monkeypatch, {"YOMUX_TMUX_SOCKET": "/tmp/declared.sock"})
     assert tmux_utils.tmux_command(argv) == ["tmux", "-S", "/tmp/declared.sock", *argv]
 
 
@@ -199,21 +201,20 @@ def test_readonly_control_mode_attach_allows_default_server(monkeypatch):
     ],
 )
 def test_default_server_refuses_destructive_and_writable_control_commands(monkeypatch, argv, verb):
-    monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, raising=False)
-    monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV, raising=False)
+    clear_isolated_product_environment(monkeypatch, "TMUX_SOCKET", "TMUX_ALLOW_DEFAULT_SERVER")
 
     with pytest.raises(tmux_utils.TmuxSocketTargetError) as raised:
         tmux_utils.tmux_command(argv)
 
     assert raised.value.verb == verb
 
-    monkeypatch.setenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, "/tmp/declared-private.sock")
+    patch_isolated_product_environment(monkeypatch, {"YOMUX_TMUX_SOCKET": "/tmp/declared-private.sock"})
     assert tmux_utils.tmux_command(argv) == ["tmux", "-S", "/tmp/declared-private.sock", *argv]
 
 
 def test_launchers_declare_the_default_server_intent_for_control_mode(monkeypatch):
     root = Path(__file__).resolve().parents[1]
-    monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV, raising=False)
+    clear_isolated_product_environment(monkeypatch, "TMUX_ALLOW_DEFAULT_SERVER")
     optin = subprocess.run(
         ["bash", "-c", "source tools/startup_common.sh; yomux_default_server_optin"],
         cwd=root,
@@ -221,7 +222,7 @@ def test_launchers_declare_the_default_server_intent_for_control_mode(monkeypatc
         text=True,
         check=True,
     ).stdout
-    assert optin == f"{tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV}=1"
+    assert optin == "YOMUX_TMUX_ALLOW_DEFAULT_SERVER=1"
     assert f'export PATH="$launch_path"' in subprocess.run(
         ["bash", "-c", "source tools/startup_common.sh; yomux_macos_server_launcher"],
         cwd=root,
@@ -229,7 +230,7 @@ def test_launchers_declare_the_default_server_intent_for_control_mode(monkeypatc
         text=True,
         check=True,
     ).stdout
-    assert tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV in subprocess.run(
+    assert "YOMUX_TMUX_ALLOW_DEFAULT_SERVER" in subprocess.run(
         ["bash", "-c", "source tools/startup_common.sh; yomux_macos_server_launcher"],
         cwd=root,
         capture_output=True,
@@ -246,14 +247,14 @@ def test_launchers_declare_the_default_server_intent_for_control_mode(monkeypatc
     assert 'env_count=$8; shift 8' in launcher
     assert 'unset TMUX TMUX_PANE;' in launcher
     assert 'for env_suffix in GO_BINARY GO_START_REASON CLAUDE_TRANSCRIPT_ROOT CODEX_TRANSCRIPT_ROOT OPENCODE_DATABASE TEST_AUTH_BYPASS TMUX_SOCKET TMUX_ALLOW_DEFAULT_SERVER;' in launcher
-    assert 'unset "YOMUX_$env_suffix" "YOLOMUX_$env_suffix"' in launcher
+    assert 'product_env_unset "$env_suffix"' in launcher
     assert 'source "$repo/tools/startup_common.sh" || exit 2; yomux_normalize_environment;' in launcher
     assert 'export "$assignment"' in launcher
     assert '"$repo/tools/instance_isolation.py" exec --plan-json "$plan_json"' in launcher
     boot_source = (root / "boot.sh").read_text(encoding="utf-8")
     assert 'yomux_server_launch_environment "$backend" "$go_binary"' in boot_source
     startup_source = (root / "tools" / "startup_common.sh").read_text(encoding="utf-8")
-    assert 'local assignments=("$(yomux_default_server_optin)" "YOLOMUX_TMUX_SOCKET=")' in startup_source
+    assert 'local assignments=("$(yomux_default_server_optin)" "$(product_env_name TMUX_SOCKET)=")' in startup_source
 
 
 def test_tmux_move_to_option_walks_highlight_without_crashing(monkeypatch):
@@ -321,7 +322,7 @@ def test_tmux_paste_text_submits_with_enter_key_not_pasted_newline(monkeypatch):
     monkeypatch.setattr(tmux_utils, "tmux_run", fake_tmux_run)
 
     result = tmux_utils.tmux_paste_text("%6", "date", submit=True)
-    private_socket = os.environ[tmux_utils.YOLOMUX_TMUX_SOCKET_ENV]
+    private_socket = os.environ[tmux_utils.PRODUCT_TMUX_SOCKET_ENV]
 
     assert result.returncode == 0
     assert calls == [
@@ -364,7 +365,7 @@ def test_target_resolution_self_test_cases_live_in_pytest():
 
 
 def _private_socket(monkeypatch, path: str = "/tmp/declared-private.sock") -> None:
-    monkeypatch.setenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, path)
+    patch_isolated_product_environment(monkeypatch, {"YOMUX_TMUX_SOCKET": path})
 
 
 def test_session_target_is_an_exact_match_target():
@@ -416,14 +417,13 @@ def test_kill_session_accepts_the_exact_target_on_a_private_socket(monkeypatch):
 
 
 def test_default_server_kill_session_needs_both_the_optin_and_an_exact_target(monkeypatch):
-    monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, raising=False)
-    monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV, raising=False)
+    clear_isolated_product_environment(monkeypatch, "TMUX_SOCKET", "TMUX_ALLOW_DEFAULT_SERVER")
     exact = ["kill-session", "-t", tmux_utils.tmux_session_target("alpha")]
 
     with pytest.raises(tmux_utils.TmuxSocketTargetError):
         tmux_utils.tmux_command(exact)
 
-    monkeypatch.setenv(tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV, "1")
+    patch_isolated_product_environment(monkeypatch, {"YOMUX_TMUX_ALLOW_DEFAULT_SERVER": "1"})
     assert tmux_utils.tmux_command(exact) == ["tmux", "kill-session", "-t", "=alpha:"]
 
     with pytest.raises(tmux_utils.TmuxSocketTargetError) as raised:
@@ -433,11 +433,11 @@ def test_default_server_kill_session_needs_both_the_optin_and_an_exact_target(mo
 
 @pytest.mark.parametrize("optin", [None, "", "0", "true", "yes", "1"])
 def test_default_server_kill_server_is_refused_in_every_optin_mode(monkeypatch, optin):
-    monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, raising=False)
+    clear_isolated_product_environment(monkeypatch, "TMUX_SOCKET")
     if optin is None:
-        monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV, raising=False)
+        clear_isolated_product_environment(monkeypatch, "TMUX_ALLOW_DEFAULT_SERVER")
     else:
-        monkeypatch.setenv(tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV, optin)
+        patch_isolated_product_environment(monkeypatch, {"YOMUX_TMUX_ALLOW_DEFAULT_SERVER": optin})
 
     with pytest.raises(tmux_utils.TmuxSocketTargetError) as raised:
         tmux_utils.tmux_command(["kill-server"])
@@ -459,7 +459,7 @@ def test_exact_target_cannot_kill_a_prefix_named_sibling_session(monkeypatch, tm
         check=False,
     )
     assert created.returncode == 0, created.stderr
-    monkeypatch.setenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, socket_path)
+    patch_isolated_product_environment(monkeypatch, {"YOMUX_TMUX_SOCKET": socket_path})
     try:
         missed = tmux_utils.tmux(["kill-session", "-t", tmux_utils.tmux_session_target(prefix)])
         assert missed.returncode != 0

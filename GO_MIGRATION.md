@@ -254,9 +254,9 @@ The wrapper accepts an optional positive integer `--jobs`; when the flag is omit
 
 * Go HTML rendering still depends on a Python subprocess and Python package environment.
 
-* Authentication storage and throttling are not at Python parity. Go reads the shared `auth.yaml` format and enforces route roles, but its browser-form limiter is an in-memory five-failure window keyed by socket peer and username; it is not durable or shared across ports, and Go HTTP Basic authentication does not pass through that limiter. Keep the preview behind a trusted network boundary.
+* Go credential admission is durable and shared across form, Basic API, and WebSocket paths. Network reservations, successful refunds, username cooldowns, hard locks, HMAC identifiers, and bounded in-flight claims live in a separate state-rooted SQLite store. Go accepts the documented policy override keys; Python recovery CLI, throttle diagnostics, decoy, and firewall escalation remain unavailable.
 
-* Go consumes `YOMUX_CONFIG_DIR`, `YOMUX_STATE_DIR`, `YOMUX_ROOT`, and `YOMUX_STATS_DATABASE`, but it does not implement Python's `YOMUX_RUNTIME_DIR`/`YOMUX_CACHE_DIR` service topology or root-policy validation. Event/operation journals, auth material, background-owner records, and the default stats database are config-rooted; the session-files cache uses the state root. Use the managed launcher so each preview gets private local roots.
+* Go consumes `YOMUX_CONFIG_DIR`, `YOMUX_STATE_DIR`, `YOMUX_ROOT`, and `YOMUX_STATS_DATABASE`, and admits its config/journal directory and auth/stats WAL stores only on supported local filesystems unless the explicit emergency override is set. Go does not implement Python's `YOMUX_RUNTIME_DIR`/`YOMUX_CACHE_DIR` service topology or automatic host partition. Event/operation journals, cookie auth material, background-owner records, and the default stats database remain config-rooted; the session-files cache and credential-admission database use the state root. A canonical config lifetime lease prevents independent event brokers from sharing those journals. Use the managed launcher so each preview gets private local roots.
 
 * Go YO!stats owns its storage and collectors in process; it does not implement the legacy Python statsd RPC/lifecycle topology. Keep both backends on isolated roots while comparing them.
 

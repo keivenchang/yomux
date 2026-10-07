@@ -1,4 +1,5 @@
 import os
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -36,6 +37,10 @@ class DummyApproveModule:
 
     def tmux_send_option(self, target: str, option: int, selected_option: int | None = None) -> None:
         self.sent.append(("option", target, option, selected_option))
+
+    def send_capacity_recovery(self, target: str):
+        self.sent.append(("paste", target, "continue\n\n", True))
+        return SimpleNamespace(sent=True)
 
 
 class DummyProcessModule(DummyApproveModule):
@@ -130,6 +135,16 @@ class PostWalkMoveModule(StableWalkModule):
 class MissingPaneModule(DummyApproveModule):
     def tmux_capture_pane(self, _target: str, visible_only: bool = False) -> None:
         return None
+
+
+class CapacityRetryModule(DummyProcessModule):
+    def __init__(self, visible_text: str):
+        super().__init__({"visible": False, "type": "", "hash": "", "reason": "idle"})
+        self.visible_text = visible_text
+
+    def tmux_capture_pane(self, _target: str, visible_only: bool = False) -> str:
+        self.capture_calls.append((_target, visible_only))
+        return self.visible_text
 
 
 def test_quiet_polling_requires_static_non_working_screen_and_caps_at_four_seconds():
@@ -406,6 +421,85 @@ def test_process_once_captures_idle_target_when_prompt_hash_is_pending():
     assert module.capture_calls == [("6", True)]
     assert worker.last_action == "idle; prompt cleared"
     assert worker.last_hash == ""
+
+
+def test_process_once_sends_one_capacity_recovery_prompt_until_notice_clears():
+    module = CapacityRetryModule("■ Selected model is at capacity. Please try a different model.")
+    worker = auto_approve_worker.AutoApproveWorker("6", interval=0.01)
+
+    assert worker.process_once(module) is True
+    assert worker.last_action == "capacity notice detected; sent continue"
+    assert worker.process_once(module) is False
+    assert module.sent == [("paste", "6", "continue\n\n", True)]
+    assert worker.last_action == "capacity notice detected; sent continue"
+
+    module.visible_text = "Ask Codex to do anything"
+    assert worker.process_once(module) is False
+    module.visible_text = "■ Selected model is at capacity. Please try a different model."
+    assert worker.process_once(module) is True
+    assert module.sent == [
+        ("paste", "6", "continue\n\n", True),
+        ("paste", "6", "continue\n\n", True),
+    ]
+
+
+@pytest.mark.parametrize("already_sent", [False, True])
+def test_retained_capacity_notice_does_not_suppress_new_approval(monkeypatch, already_sent):
+    module = CapacityRetryModule("■ Selected model is at capacity. Please try a different model.\nWould you like to run the following command?\n  echo ready\n❯ 1. Yes\n  2. No")
+    module.prompt_state = {
+        "visible": True, "type": "bash", "hash": "new-approval",
+        "action": "option1", "selected_option": 1, "yes_selected": True,
+        "command": "echo ready",
+    }
+    worker = auto_approve_worker.AutoApproveWorker("6", interval=0.01)
+    worker.capacity_retry_sent = already_sent
+    monkeypatch.setattr(auto_approve_worker.yolo_rules, "evaluate", lambda *_args, **_kwargs: rule_decision("approve"))
+    assert worker.process_once(module) is True
+    assert module.sent == [("option", "6", 1, 1)]
+    assert worker.approved == 1
+    assert worker.capacity_retry_sent is already_sent
+
+
+@pytest.mark.parametrize("reason", ["busy", "draft-clearable", "needs-input", "tmux-paste-failed"])
+def test_capacity_recovery_retries_only_after_guard_allows_send(monkeypatch, reason):
+    module = CapacityRetryModule("■ Selected model is at capacity. Please try a different model.")
+    worker = auto_approve_worker.AutoApproveWorker("6", interval=0.01)
+    monkeypatch.setattr(module, "send_capacity_recovery", lambda target: SimpleNamespace(sent=False, reason_code=reason))
+    assert worker.process_once(module) is False
+    assert worker.capacity_retry_sent is False
+    assert module.sent == []
+    monkeypatch.setattr(module, "send_capacity_recovery", lambda target: SimpleNamespace(sent=True))
+    assert worker.process_once(module) is True
+    assert worker.process_once(module) is False
+
+
+def test_capacity_recovery_uses_shared_guarded_transport(monkeypatch):
+    calls = []
+    monkeypatch.setattr(auto_approve_worker.auto_approve_tmux.yolo_rules, "yolo_settings", lambda: {"dry_run": False})
+    monkeypatch.setattr(auto_approve_worker.auto_approve_tmux, "send_prompt", lambda *args, **kwargs: calls.append((args, kwargs)))
+    auto_approve_worker.auto_approve_tmux.send_capacity_recovery("6")
+    assert calls == [(("6", "continue\n\n"), {"clear_existing": False})]
+
+
+@pytest.mark.parametrize("configured,cli", [(True, False), (False, True), (True, True)])
+def test_capacity_recovery_shared_transport_respects_dry_run(monkeypatch, configured, cli):
+    monkeypatch.setattr(auto_approve_worker.auto_approve_tmux.yolo_rules, "yolo_settings", lambda: {"dry_run": configured})
+    def forbidden_send(*args, **kwargs):
+        pytest.fail("dry-run must not send a prompt")
+    monkeypatch.setattr(auto_approve_worker.auto_approve_tmux, "send_prompt", forbidden_send)
+    result = auto_approve_worker.auto_approve_tmux.send_capacity_recovery("6", dry_run=cli)
+    assert result.sent is False
+    assert result.reason_code == "dry-run"
+
+
+def test_capacity_recovery_worker_keeps_dry_run_pending_for_setting_changes(monkeypatch):
+    module = CapacityRetryModule("■ Selected model is at capacity. Please try a different model.")
+    monkeypatch.setattr(module, "send_capacity_recovery", lambda target: SimpleNamespace(sent=False, reason_code="dry-run"))
+    worker = auto_approve_worker.AutoApproveWorker("6", interval=0.01)
+    assert worker.process_once(module) is False
+    assert worker.has_pending_prompt() is True
+    assert worker.capacity_retry_sent is False
+    assert module.sent == []
 
 
 def test_bash_prompt_dry_run_does_not_send_key(monkeypatch):

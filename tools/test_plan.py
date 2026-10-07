@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from enum import StrEnum, unique
 from pathlib import Path
 from typing import Collection, Final
+from tools.product_environment import product_env_name
 
 
 @dataclass(frozen=True)
@@ -40,12 +41,10 @@ PHASE_MARKER_PRECEDENCE: Final[tuple[tuple[str, str], ...]] = tuple(
 )
 
 # These Go-backed browser scenarios run once through the Bazel integration
-# target with its declared external binary. The general pytest E2E lane
-# deselects the same cases; the Bazel wrapper imports this owner list directly.
+# target with its declared binary; pytest E2E deselects the same cases.
 BAZEL_GO_BROWSER_TESTS: Final[tuple[str, ...]] = (
     "tests/test_browser_stats_widen.py::test_go_stats_capabilities_validate_and_load_fifteen_minute_history",
     "tests/test_browser_stats_widen.py::test_go_collectors_drive_browser_stats_without_seeded_facts",
-    "tests/test_browser_stats_widen.py::test_production_python_and_go_stats_share_one_fixture_and_browser_journey",
 )
 
 # These nodes are deliberately promoted within pytest collection so xdist can
@@ -160,7 +159,7 @@ LANE_SPECS: Final[tuple[LaneSpec, ...]] = (
     LaneSpec("pytest-gate-serial", "pytest timing-sensitive serial", (StepId.PYTEST_GATE_SERIAL,), True, phases=("gate_serial",), worker_class="pytest-serial", run_last=True),
     LaneSpec("whitespace", "git diff --check", (StepId.WHITESPACE,), True),
 )
-CHECK_LANE_ENV: Final[str] = "YOLOMUX_CHECK_LANE"
+CHECK_LANE_ENV: Final[str] = product_env_name('CHECK_LANE')
 PYTEST_LANE_NAMES: Final[tuple[str, ...]] = tuple(spec.name for spec in LANE_SPECS if spec.phases)
 
 

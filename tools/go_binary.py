@@ -8,10 +8,16 @@ import argparse
 from collections.abc import Mapping
 import os
 from pathlib import Path
+import sys
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from tools.product_environment import product_env
 
 
 def go_backend_binary_candidates(repo_root: Path, environment: Mapping[str, str]) -> list[Path]:
-    configured = environment.get("YOMUX_GO_BINARY", environment.get("YOLOMUX_GO_BINARY", "")).strip()
+    configured = product_env('GO_BINARY', "", environ=environment).strip()
     if configured:
         return [Path(configured)]
     return [repo_root / relative for relative in (

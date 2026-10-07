@@ -30,6 +30,7 @@ from threading import Lock
 from typing import Any
 
 import pytest
+from tools.product_environment import product_env
 
 import tests.gate_harness as gate_harness_module
 from tests.gate_harness import HttpPortLease
@@ -42,7 +43,6 @@ from tests.isolated_dev_server import SERVER_STOP_TIMEOUT_SECONDS
 from tests.isolated_dev_server import build_environment
 from tests.isolated_dev_server import build_paths as _build_paths
 from tests.isolated_dev_server import signal_server_exactly
-from tests.isolated_dev_server import server_entrypoint
 from tests.isolated_dev_server import server_entrypoint_arguments
 from tests.isolated_dev_server import wait_until_serving
 from tests.tmux_runtime import start_isolated_tmux_runtime
@@ -643,13 +643,11 @@ def test_o1_service_capture_is_serialized_while_health_requests_converge(monkeyp
 def _wait_until_serving(build: RunningBuild) -> None:
     """Adapter only: the readiness rule itself belongs to `isolated_dev_server`."""
 
-    historical_name = server_entrypoint(build.source_root).name == "yolomux.py"
     wait_until_serving(
         build.process,
         build.port,
         build.output,
         label=build.label,
-        product_name="YOLOmux" if historical_name else "YOmux",
     )
 
 
@@ -666,16 +664,18 @@ def _spawn_build(
     lease = HttpPortLease.reserve()
     port = lease.port
     command = [
-        sys.executable,
-        "-u",
         *server_entrypoint_arguments(source_root),
         "--http",
         "--host",
         "127.0.0.1",
         "--port",
         str(port),
-        "--sessions",
-        tmux_runtime.sessions[0],
+        "--root",
+        str(source_root),
+        "--config",
+        str(paths.config_dir),
+        "--stats",
+        str(paths.state_dir / "stats-v9.sqlite3"),
     ]
     lease.release()
     process = subprocess.Popen(
@@ -742,23 +742,11 @@ def _assert_build_wrote_own_stats(build: RunningBuild) -> tuple[Path, ...]:
 
 def _seed_v0610_artifacts(
     state_dir: Path,
-    v0610_source: Path,
-    running_build_factory: Callable[..., RunningBuild],
 ) -> dict[str, str]:
+    """Create immutable legacy-shaped artifacts without booting a retired backend."""
     state_dir.mkdir(parents=True, exist_ok=True)
-    old = running_build_factory(
-        "v0610-artifact-fixture",
-        v0610_source,
-        state_dir=state_dir,
-        legacy_service_capture=True,
-    )
-    _assert_healthy(old)
-    _assert_build_wrote_own_stats(old)
-    old.stop()
-    for name in OLD_SQLITE_ARTIFACTS[1:]:
+    for name in OLD_SQLITE_ARTIFACTS:
         path = state_dir / name
-        if path.exists():
-            continue
         connection = sqlite3.connect(path)
         try:
             connection.execute("CREATE TABLE gate_v0610_fixture (marker TEXT NOT NULL)")
@@ -907,9 +895,11 @@ def running_build_factory(
         runtime_root = tmp_path / f"runtime-{len(builds) + 1}-{label}"
         paths = _build_paths(runtime_root, state_dir=state_dir)
         tmux_runtime = private_tmux_factory()
+        # Historical Python snapshots remain migration fixtures only. Every live
+        # process in this gate is the current Go server.
         build = _spawn_build(
             label,
-            source_root,
+            REPO_ROOT,
             paths,
             tmux_runtime,
             builds.append,
@@ -942,12 +932,11 @@ def test_o1_two_builds_serve_together_without_blocking_or_sharing_state(
 
 
 def test_o2_rebuilt_process_never_writes_or_write_locks_v0610_artifacts(
-    v0610_source: Path,
     running_build_factory: Callable[..., RunningBuild],
     tmp_path: Path,
 ) -> None:
     state_dir = tmp_path / "o2-v0610-state"
-    before = _seed_v0610_artifacts(state_dir, v0610_source, running_build_factory)
+    before = _seed_v0610_artifacts(state_dir)
     rebuilt = running_build_factory("rebuilt-old-state", REPO_ROOT, state_dir=state_dir)
 
     _assert_healthy(rebuilt)
@@ -960,12 +949,11 @@ def test_o2_rebuilt_process_never_writes_or_write_locks_v0610_artifacts(
 
 
 def test_o3_new_stats_schema_uses_a_new_versioned_file_beside_v6(
-    v0610_source: Path,
     running_build_factory: Callable[..., RunningBuild],
     tmp_path: Path,
 ) -> None:
     state_dir = tmp_path / "o3-versioned-state"
-    before = _seed_v0610_artifacts(state_dir, v0610_source, running_build_factory)
+    before = _seed_v0610_artifacts(state_dir)
     rebuilt = running_build_factory("rebuilt-versioned", REPO_ROOT, state_dir=state_dir)
 
     _assert_healthy(rebuilt)
@@ -1032,12 +1020,11 @@ def test_o5_concurrent_builds_observe_disjoint_sockets_and_locks(
 
 
 def test_o6_first_run_creates_new_artifacts_without_adopting_or_removing_old(
-    v0610_source: Path,
     running_build_factory: Callable[..., RunningBuild],
     tmp_path: Path,
 ) -> None:
     state_dir = tmp_path / "o6-first-run-state"
-    before = _seed_v0610_artifacts(state_dir, v0610_source, running_build_factory)
+    before = _seed_v0610_artifacts(state_dir)
     assert not _newer_stats_artifacts(state_dir)
     rebuilt = running_build_factory("rebuilt-first-run", REPO_ROOT, state_dir=state_dir)
 
@@ -2302,18 +2289,19 @@ def test_o7_gate_tests_are_fixture_scoped_and_bootstrap_guard_rejects_escapes(
     assert not violations, f"gate tests reference operator-owned paths: {violations}"
     assert_writable_paths_beneath(root, bootstrap_paths)
 
-    fixture_state_dir = os.environ["YOLOMUX_STATE_DIR"]
+    fixture_state_dir = product_env("STATE_DIR")
+    assert fixture_state_dir is not None
     operator_root = Path(os.environ["HOME"]).resolve(strict=False)
     operator_state_dir = (operator_root / ".local" / "state" / "yolomux").resolve(strict=False)
     # Pass the operator path only to the isolation guard so the guard fires
     # before product code or a writable filesystem operation can receive it.
-    monkeypatch.setenv("YOLOMUX_STATE_DIR", str(operator_state_dir))
+    monkeypatch.setenv("YOMUX_STATE_DIR", str(operator_state_dir))
     escaped_root, escaped_paths = bootstrap_writable_paths()
     with pytest.raises(AssertionError, match="writable paths escape fixture root") as escaped:
         assert_writable_paths_beneath(escaped_root, escaped_paths)
-    assert f"YOLOMUX_STATE_DIR={operator_state_dir}" in str(escaped.value)
+    assert f"YOMUX_STATE_DIR={operator_state_dir}" in str(escaped.value)
 
-    monkeypatch.setenv("YOLOMUX_STATE_DIR", fixture_state_dir)
+    monkeypatch.setenv("YOMUX_STATE_DIR", fixture_state_dir)
     restored_root, restored_paths = bootstrap_writable_paths()
     assert restored_root == root
     assert restored_paths == bootstrap_paths

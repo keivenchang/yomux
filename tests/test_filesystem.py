@@ -3126,6 +3126,27 @@ def test_git_history_can_list_commits_without_waiting_for_worktree_status(tmp_pa
     assert not any("log" in args or "cat-file" in args for args in calls)
 
 
+def test_bounded_git_reads_use_traversable_git_paths_on_darwin(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    repo.git("gc", "--prune=now")
+    worktree = tmp_path / "linked-worktree"
+    repo.git("worktree", "add", "--detach", str(worktree), "HEAD")
+    monkeypatch.setattr(git_ops.sys, "platform", "darwin")
+
+    history = filesystem.git_history(str(worktree), limit=2, worktree="0")
+
+    assert history["repo"] == str(worktree)
+    assert history["head"] == repo.merge_sha
+    assert history["commits"][0]["sha"] == repo.merge_sha
+    stats = filesystem.git_history_stats_batches(
+        str(worktree), cursor=history["snapshot_cursor"], offset=0, batch_sizes=[1],
+    )[0]
+    detail = filesystem.git_commit(str(worktree), commit=repo.merge_sha, head=history["head"])
+
+    assert stats["commits"][0]["sha"] == repo.merge_sha
+    assert detail["sha"] == repo.merge_sha
+
+
 def test_pinned_git_view_reuses_warm_loose_objects_without_the_cross_process_writer_lock(tmp_path, monkeypatch):
     runtime_root = tmp_path / "runtime"
     runtime_root.mkdir()
@@ -4943,6 +4964,7 @@ def test_git_history_and_detail_ignore_mutable_graph_overrides(tmp_path, graph_o
 def test_git_history_rejects_git_control_replacement(tmp_path, monkeypatch):
     repo = create_git_history_repository(tmp_path / "history")
     replacement = create_git_history_repository(tmp_path / "replacement")
+    monkeypatch.setattr(git_ops.sys, "platform", "darwin")
     original_git = git_ops._git_with_pinned_repo
     replaced = False
 

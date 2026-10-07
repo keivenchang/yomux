@@ -8,6 +8,24 @@ import (
 	"testing"
 )
 
+func TestPreserveProductEnvironmentOwnsGeneratedPeers(t *testing.T) {
+	t.Setenv("YOMUX_FIXTURE_OWNER", "original")
+	t.Setenv("YOLOMUX_FIXTURE_OWNER", "original")
+	before, present := os.LookupEnv("YOMUX_ENVIRONMENT_ALIASES")
+	t.Run("normalize-and-assign", func(t *testing.T) {
+		PreserveProductEnvironment(t)
+		t.Setenv("YOLOMUX_FIXTURE_OWNER", "raw")
+		_ = os.Setenv("YOMUX_FIXTURE_OWNER", "generated")
+		_ = os.Setenv("YOMUX_ENVIRONMENT_ALIASES", "generated-metadata")
+	})
+	if os.Getenv("YOMUX_FIXTURE_OWNER") != "original" || os.Getenv("YOLOMUX_FIXTURE_OWNER") != "original" {
+		t.Fatal("fixture cleanup failed to restore the complete alias pair")
+	}
+	if after, exists := os.LookupEnv("YOMUX_ENVIRONMENT_ALIASES"); after != before || exists != present {
+		t.Fatal("fixture cleanup failed to restore synthesized metadata")
+	}
+}
+
 func TestPrivateTestEnvironmentKeepsNestedTmuxSocketPathsShort(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("short Unix temp roots are selected on Linux and macOS")

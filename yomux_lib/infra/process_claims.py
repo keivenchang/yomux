@@ -37,7 +37,7 @@ not of the helper:
 - a **caller-shared** root (the per-user runtime directory several YOmux
   servers share) may hand a surviving helper to a successor, because another
   live caller can legitimately still be using it;
-- a **managed-private** root (one isolated ``YOLOMUX_ROOT``) may not.  Its
+- a **managed-private** root (one isolated ``YOMUX_ROOT``) may not.  Its
   helpers belong to exactly one launcher, so there is no successor to elect and
   no cross-root reuse, signal, unlink, reclaim, or adoption is ever performed.
 

@@ -209,6 +209,10 @@ test('the established Graph API-SSE System Logs shell remains the renderer owner
   assert.match(source, /debugSubTabButtonHtml\('system'/);
   assert.match(source, /debugSubTabButtonHtml\('logs'/);
   assert.match(source, /function debugGraphInnerHtml\(/);
+  const graphControls = sourceFunction('debugGraphControlsHtml', 'debugGraphLocalDateKey');
+  const graphInner = sourceFunction('debugGraphInnerHtml', 'debugGraphHtml');
+  assert.doesNotMatch(graphControls, /debugGraphRefillControlsHtml\(\)/, 'refill is not in the graph toolbar');
+  assert.match(graphInner, /data-js-debug-graph-body>[\s\S]*?<\/div>\$\{debugGraphRefillControlsHtml\(\)\}/, 'refill follows the complete chart body');
   assert.match(source, /function debugSystemInnerHtml\(/);
   assert.match(source, /function debugLogsInnerHtml\(/);
   assert.doesNotMatch(source, /data-stats-current-view/);
@@ -518,13 +522,12 @@ test('CPU serving-port series stands alone on the default port with no aggregate
   assert.equal(context.result.some(series => series.key === 'cpu'), false);
 });
 
-test('Go process CPU stays in CPU while the Daemons chart keeps runtime owners only', () => {
-  // The whole Go process belongs in CPU. The Daemons/System chart is deliberately narrower: it
-  // carries only measured in-process runtime owners so a large process line cannot flatten them.
+test('CPU keeps cumulative host and total System CPU while Daemons load carries Go process CPU', () => {
   const context = {result: null, debugGraphServiceLoadMetric: group => group?.serviceMetric === 'rss' ? 'rss' : 'cpu'};
   vm.runInNewContext(`
+    ${sourceFunction('debugGraphIsGoProcessId', 'debugGraphGroupSeriesItems')}
     ${sourceFunction('debugGraphGroupSeriesItems', 'debugGraphMacMemoryCardAvailable')}
-    const go = {key: 'cpu:port:7222', processCpu: true, currentProcessCpu: true};
+    const go = {key: 'cpu:yolomux-go', processId: 'yolomux-go', processCpu: true};
     const peer = {key: 'cpu:port:7001', processCpu: true};
     const systemCpu = {key: 'systemCpu'};
     const hostProcess = {key: 'cpuBinary:node', hostMetric: 'cpu'};
@@ -532,18 +535,19 @@ test('Go process CPU stays in CPU while the Daemons chart keeps runtime owners o
     const processService = {key: 'serviceLoad:batchd', serviceLoad: true};
     const items = [go, peer, systemCpu, hostProcess, runtime, processService];
     result = {
-      daemons: debugGraphGroupSeriesItems({key: 'serversLoad', serviceLoad: true, runtimeOnly: true}, items).map(series => series.key).sort(),
+      daemons: debugGraphGroupSeriesItems({key: 'serversLoad', serviceLoad: true, runtimeOnly: true, includeGoProcessCpu: true}, items).map(series => series.key).sort(),
       cpu: debugGraphGroupSeriesItems({key: 'cpu', hostMetric: 'cpu'}, items).map(series => series.key).sort(),
     };
   `, context);
-  assert.deepEqual([...context.result.daemons], ['serviceLoad:runtime:agent_tokens:opencode:session_tree']);
-  assert.deepEqual([...context.result.cpu], ['cpu:port:7001', 'cpu:port:7222', 'cpuBinary:node', 'systemCpu']);
+  assert.deepEqual([...context.result.daemons], ['cpu:yolomux-go', 'serviceLoad:runtime:agent_tokens:opencode:session_tree']);
+  assert.deepEqual([...context.result.cpu], ['cpuBinary:node', 'systemCpu']);
 });
 
-test('the shared Daemons chart retains Python service CPU while Go shows runtime occupancy', () => {
+test('the shared Daemons chart retains Python service CPU while Go shows runtime occupancy and process CPU', () => {
   const source = [
-    sourceFunction('debugGraphResolvedChartGroup', 'debugGraphMacMemoryDetailsHtml'),
+    sourceFunction('debugGraphIsGoProcessId', 'debugGraphGroupSeriesItems'),
     sourceFunction('debugGraphGroupSeriesItems', 'debugGraphMacMemoryCardAvailable'),
+    sourceFunction('debugGraphResolvedChartGroup', 'debugGraphMacMemoryDetailsHtml'),
   ].join('\n');
   const context = {
     Map,
@@ -561,7 +565,7 @@ test('the shared Daemons chart retains Python service CPU while Go shows runtime
     ])}}];
     const group = debugGraphResolvedChartGroup({
       key: 'serversLoad', serviceLoad: true, runtimeOnly: true, unit: 'runtimeOccupancy',
-      descKey: 'debug.graph.chart.serversLoad.runtimeDesc',
+      descKey: 'debug.graph.chart.serversLoad.desc',
     }, buckets);
     const items = [
       {key: 'serviceLoad:claude', serviceLoad: true},
@@ -574,7 +578,7 @@ test('the shared Daemons chart retains Python service CPU while Go shows runtime
     ])}}];
     const goGroup = debugGraphResolvedChartGroup({
       key: 'serversLoad', serviceLoad: true, runtimeOnly: true, unit: 'runtimeOccupancy',
-      descKey: 'debug.graph.chart.serversLoad.runtimeDesc',
+      descKey: 'debug.graph.chart.serversLoad.desc',
     }, goBuckets);
     result = {
       unit: group.unit,
@@ -582,10 +586,12 @@ test('the shared Daemons chart retains Python service CPU while Go shows runtime
       series: debugGraphGroupSeriesItems(group, items).map(item => item.key).sort(),
       goUnit: goGroup.unit,
       goDescKey: goGroup.descKey,
+      goIncludesProcessCpu: goGroup.includeGoProcessCpu,
       goSeries: debugGraphGroupSeriesItems(goGroup, [
         {key: 'serviceLoad:runtime:stats_lifecycle', serviceLoad: true},
         {key: 'serviceLoad:yolomux-go', serviceLoad: true},
-        {key: 'cpu:yolomux_go', processCpu: true},
+        {key: 'cpu:yolomux-go', processId: 'yolomux-go', processCpu: true},
+        {key: 'cpu:port:7001', processId: 'port:7001', processCpu: true},
       ]).map(item => item.key),
     };
   `, context);
@@ -594,8 +600,9 @@ test('the shared Daemons chart retains Python service CPU while Go shows runtime
     descKey: 'debug.graph.chart.serversLoad.desc',
     series: ['cpu:python', 'serviceLoad:claude', 'serviceLoad:codex'],
     goUnit: 'runtimeOccupancy',
-    goDescKey: 'debug.graph.chart.serversLoad.runtimeDesc',
-    goSeries: ['serviceLoad:runtime:stats_lifecycle'],
+    goDescKey: 'debug.graph.chart.serversLoad.desc',
+    goIncludesProcessCpu: true,
+    goSeries: ['serviceLoad:runtime:stats_lifecycle', 'cpu:yolomux-go'],
   });
   const chartSource = sourceFunction('debugSystemDaemonsChartHtml', 'debugSystemRegionHtml');
   assert.ok(
@@ -1192,12 +1199,18 @@ test('model output chart is fixed to generated output without a dimension picker
   assert.match(source, /function debugGraphModelTokenSeriesDefs\(buckets\) \{\s*return debugGraphTokenSeriesDefs\(buckets, 'model'\);/);
 });
 
-test('fresh Graphs defaults show Agents, Session tokens/min, and system/process memory without Daemons', () => {
+test('fresh Graphs defaults show Agents and memory while keeping Space used hidden after GPU memory', () => {
   assert.match(source, /\{key: 'activity',[^\n]+series: jsDebugAgentStatusSeriesKeys/);
   assert.match(source, /\{key: 'agentTokens',[^\n]+noDataWhenEmpty: true,[^\n]+displayedSummary: 'agentTokens'/);
   assert.match(source, /\{key: 'modelTokens',[^\n]+noDataWhenEmpty: true,[^\n]+displayedSummary: 'modelTokens'/);
   assert.match(source, /\{key: 'memory',[^\n]+hostMetric: 'memory'/);
-  assert.match(source, /const jsDebugGraphDefaultHiddenChartKeys = Object\.freeze\(\['gpuUtil', 'gpuMemory'\]\)/);
+  assert.match(source, /const jsDebugGraphDefaultHiddenChartKeys = Object\.freeze\(\['gpuUtil', 'gpuMemory', 'systemDisk'\]\)/);
+  const graphDefinitions = source.slice(source.indexOf('const jsDebugGraphChartGroups = Object.freeze(['), source.indexOf('const jsDebugGraphChartControlItems ='));
+  assert.match(graphDefinitions, /\{key: 'systemDisk',[^\n]+fixedMax: 100, kind: 'line', hostMetric: 'diskUsage'\}/);
+  assert.match(graphDefinitions, /\{key: 'gpuMemory',[^\n]*\n\s*\{key: 'systemDisk'/, 'Space used % immediately follows GPU memory');
+  assert.match(source, /system_disk: Object\.freeze\(\{legacyAliases: Object\.freeze\(\[\]\), cadenceSeconds: 300, chartGroups: Object\.freeze\(\['systemDisk'\]\)/, 'the client mirrors Go disk sampling every five minutes');
+  assert.ok(graphDefinitions.indexOf("key: 'systemDisk'") > graphDefinitions.indexOf("key: 'gpuMemory'"), 'Space used % follows GPU memory');
+  assert.ok(graphDefinitions.indexOf("key: 'systemDisk'") < graphDefinitions.indexOf("key: 'latency'"), 'Space used % precedes client charts');
   assert.doesNotMatch(source.slice(source.indexOf('const jsDebugGraphChartGroups = Object.freeze(['), source.indexOf('const jsDebugGraphChartControlItems =')), /key: 'serversLoad'/, 'Daemons load is not a Graphs chart');
   const context = {
     result: null,
@@ -1211,7 +1224,7 @@ test('fresh Graphs defaults show Agents, Session tokens/min, and system/process 
     storageGet: key => context.window.localStorage.getItem(key),
     storageSet: (key, value) => context.window.localStorage.setItem(key, String(value)),
     jsDebugGraphChartGroups: [
-      {key: 'activity'}, {key: 'agentTokens'}, {key: 'modelTokens'}, {key: 'memory'},
+      {key: 'activity'}, {key: 'agentTokens'}, {key: 'modelTokens'}, {key: 'memory'}, {key: 'systemDisk'},
     ],
     jsDebugStatsUiPreferencesStorageKey: 'stats',
     legacyYoCostMigrationRequested: false,
@@ -1239,6 +1252,256 @@ test('fresh Graphs defaults show Agents, Session tokens/min, and system/process 
   `, context);
   assert.deepEqual([...context.result], ['activity', 'agentTokens', 'memory']);
   assert.equal(context.result.includes('serversLoad'), false, 'Daemons load is absent from the Graphs chart registry');
+});
+
+test('Space used chart control enables its chart and marks the checkbox checked', () => {
+  const facadeStart = debugRuntimeSource.indexOf('function debugGraphHiddenChartKeys(');
+  const facadeEnd = debugRuntimeSource.indexOf('\nfunction jsDebugGraphRangeOptionIndex(', facadeStart);
+  const facadeCharts = debugRuntimeSource.slice(facadeStart, facadeEnd);
+  const controlStart = source.indexOf('function debugGraphChartToggleControlsHtml(');
+  const controlEnd = source.indexOf('\nfunction debugGraphLayoutControlsHtml(', controlStart);
+  const controls = source.slice(controlStart, controlEnd);
+  const visibleGroups = sourceFunction('debugGraphVisibleChartGroups', 'debugGraphStackedSeries');
+  const context = {
+    result: null,
+    debugRuntimeState: {statsUiPreferencesLoaded: true, graphHiddenCharts: new Set(['systemDisk']), graphVisibleCharts: new Set()},
+    jsDebugGraphChartControlItems: [{key: 'systemDisk', label: 'Space used %'}],
+    jsDebugGraphChartGroups: [{key: 'systemDisk'}],
+    loadJsDebugStatsUiPreferences: () => {},
+    saveJsDebugStatsUiPreferences: () => {},
+    refreshDebugGraphSurfaces: () => {},
+    esc: String,
+    t: key => key,
+    debugGraphLocalizedLabel: group => group.label,
+  };
+  vm.runInNewContext(`${facadeCharts}\n${controls}\n${visibleGroups}\ndebugRuntimeState.graphHiddenCharts = new Set(['systemDisk']); debugRuntimeState.graphVisibleCharts = new Set(); result = {before: debugGraphChartToggleControlsHtml(), initial: debugGraphVisibleChartGroups([]).map(group => group.key)}; setDebugGraphChartVisible('systemDisk', true); result.after = debugGraphChartToggleControlsHtml(); result.enabled = debugGraphVisibleChartGroups([]).map(group => group.key);`, context);
+  assert.match(context.result.before, /data-js-debug-chart-toggle="systemDisk"(?! checked)/);
+  assert.deepEqual([...context.result.initial], []);
+  assert.match(context.result.after, /data-js-debug-chart-toggle="systemDisk" checked/);
+  assert.deepEqual([...context.result.enabled], ['systemDisk']);
+});
+
+test('Space used series label each mount and stay on a 0 to 100 percent scale', () => {
+  const definitionStart = source.indexOf('function debugGraphDiskUsageSeriesDefs(');
+  const definitionEnd = source.indexOf('\nconst jsDebugGraphHostProcessVisualAssignments', definitionStart);
+  const definitionSource = source.slice(definitionStart, definitionEnd);
+  const axisSource = sourceFunction('debugGraphChartAxisMax', 'debugGraphChartCapacityMax');
+  const context = {
+    result: null,
+    jsDebugGraphAgentTokenColors: ['#111', '#222'],
+    jsDebugGraphServiceLoadLinePatterns: ['solid', 'dot'],
+    jsDebugGraphDisplayHoldExpiryMs: {minuteGauge: 60000},
+    debugGraphNiceAxisMax: () => 120,
+    jsDebugGraphChartGroups: [{key: 'systemDisk', fixedMax: 100, unit: 'percent'}],
+  };
+  vm.runInNewContext(`${definitionSource}\n${axisSource}\nresult = {series: debugGraphDiskUsageSeriesDefs([{hostMetrics: {diskMounts: new Map([['/data', {label: '/data', usedPercent: 42, samples: 1}]])}}]), axis: debugGraphChartAxisMax(jsDebugGraphChartGroups[0], 42)};`, context);
+  assert.equal(context.result.series.length, 1);
+  assert.equal(context.result.series[0].label, '/data');
+  assert.equal(context.result.series[0].value({hostMetrics: {diskMounts: new Map([['/data', {usedPercent: 42, samples: 1}]])}}), 42);
+  assert.equal(context.result.axis, 100);
+});
+
+test('Space used labels only the latest df inventory, annotates high use, and retains history', () => {
+  const seriesStart = source.indexOf('function debugGraphDiskUsageSeriesDefs(');
+  const seriesEnd = source.indexOf('\nconst jsDebugGraphHostProcessVisualAssignments', seriesStart);
+  const seriesSource = source.slice(seriesStart, seriesEnd);
+  const context = {
+    result: null,
+    jsDebugGraphAgentTokenColors: ['#111', '#222', '#333'],
+    jsDebugGraphServiceLoadLinePatterns: ['solid', 'dot'],
+    jsDebugGraphDisplayHoldExpiryMs: {minuteGauge: 60000},
+  };
+  vm.runInNewContext(`${seriesSource}
+    const oldBucket = {startMs: 100, hostMetrics: {diskMounts: new Map([
+      ['/snap/old', {label: '/snap/old', usedPercent: 100, samples: 1}],
+      ['/', {label: '/', usedPercent: 70, samples: 1}],
+    ])}};
+    const currentBucket = {startMs: 200, hostMetrics: {diskMounts: new Map([
+      ['/', {label: '/', usedPercent: 94, samples: 1, inventory: true}],
+      ['/boot', {label: '/boot', usedPercent: 4, samples: 1, inventory: true}],
+      ['/nfs/keivenc', {label: '/nfs/keivenc', usedPercent: 67, samples: 1, inventory: true}],
+      ['/mnt/unavailable', {label: '/mnt/unavailable', usedPercent: 0, samples: 0, inventory: true}],
+    ])}};
+    const series = debugGraphDiskUsageSeriesDefs([oldBucket, currentBucket]);
+    result = {labels: series.map(item => item.label), rootHistory: series.find(item => item.label === '/ (94%)')?.value(oldBucket), unavailableHasData: series.find(item => item.label === '/mnt/unavailable')?.hasData(currentBucket)};`, context);
+  assert.deepEqual([...context.result.labels], ['/ (94%)', '/boot', '/mnt/unavailable', '/nfs/keivenc']);
+  assert.equal(context.result.rootHistory, 70);
+  assert.equal(context.result.unavailableHasData, false);
+});
+
+test('materialized disk metrics reach separate mountpoint-labeled Graphs series', () => {
+  const currentBucketSource = sourceFunction('jsDebugCurrentBucketRecord', 'jsDebugCurrentBucketHasFamilyData');
+  const hostMetricsSource = sourceFunction('debugGraphApplyHostMetrics', 'debugGraphAgentStatusSnapshot');
+  const processMetricsSource = sourceFunction('debugGraphApplyHostMetricProcesses', 'debugGraphApplyHostMetrics');
+  const hostMetricsDefaultsSource = sourceFunction('debugGraphNewHostMetrics', 'debugGraphNewServiceLoadItem');
+  const seriesStart = source.indexOf('function debugGraphDiskUsageSeriesDefs(');
+  const seriesEnd = source.indexOf('\nconst jsDebugGraphHostProcessVisualAssignments', seriesStart);
+  const seriesSource = source.slice(seriesStart, seriesEnd);
+  const context = {
+    result: null,
+    Number,
+    Object,
+    jsDebugCurrentSeriesValue: (series, name) => series[name]?.value === undefined ? null : Number(series[name].value),
+    jsDebugGraphAgentTokenColors: ['blue', 'orange'],
+    jsDebugGraphServiceLoadLinePatterns: ['solid', 'dot'],
+    jsDebugGraphDisplayHoldExpiryMs: {minuteGauge: 60000},
+  };
+  vm.runInNewContext(`${currentBucketSource}\n${processMetricsSource}\n${hostMetricsDefaultsSource}\n${hostMetricsSource}\n${seriesSource}
+    const record = jsDebugCurrentBucketRecord({start: 100, duration: 900, series: {
+      'system_disk_used_percent:/': {value: 23.5, source_count: 3},
+      'system_disk_used_percent:/mnt/data': {value: 82},
+      'system_disk_inventory:/mnt/n-a': {value: 1},
+    }});
+    const bucket = {hostMetrics: debugGraphNewHostMetrics()};
+    debugGraphApplyHostMetrics(bucket, record.host_metrics);
+    const series = debugGraphDiskUsageSeriesDefs([bucket]);
+    result = series.map(item => ({label: item.label, value: item.value(bucket), samples: item.sampleCount(bucket)}));`, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.result)), [
+    {label: '/', value: 23.5, samples: 3},
+    {label: '/mnt/data (82%)', value: 82, samples: 1},
+    {label: '/mnt/n-a', value: 0, samples: 0},
+  ]);
+});
+
+test('an unavailable mounted filesystem breaks only its own usage line', () => {
+  const seriesStart = source.indexOf('function debugGraphDiskUsageSeriesDefs(');
+  const seriesEnd = source.indexOf('\nconst jsDebugGraphHostProcessVisualAssignments', seriesStart);
+  const seriesSource = source.slice(seriesStart, seriesEnd);
+  const projectSource = sourceFunction('debugGraphProjectSeriesSamples', 'debugGraphSeriesData');
+  const noDataSource = sourceFunction('debugGraphTimeInNoDataRange', 'debugGraphPolylinePointSegments');
+  const segmentSource = sourceFunction('debugGraphPolylinePointSegments', 'debugGraphPointForValue');
+  const context = {
+    result: null,
+    Number, Math, Array, Map,
+    jsDebugGraphAgentTokenColors: ['blue', 'orange'],
+    jsDebugGraphServiceLoadLinePatterns: ['solid', 'dot'],
+    jsDebugGraphDisplayHoldExpiryMs: {minuteGauge: 60000},
+    jsDebugGraphRawBucketMs: 5000,
+    debugGraphDisplayHoldOutage: () => false,
+    debugGraphPointForValue: (value, timeMs) => [timeMs, value],
+  };
+  vm.runInNewContext(`${seriesSource}\n${projectSource}\n${noDataSource}\n${segmentSource}
+    const buckets = [
+      {startMs: 0, durationMs: 5000, hostMetrics: {diskMounts: new Map([
+        ['/', {label: '/', usedPercent: 84, samples: 1, inventory: true}],
+      ])}},
+      {startMs: 5000, durationMs: 5000, hostMetrics: {diskMounts: new Map([
+        ['/', {label: '/', usedPercent: 0, samples: 0, inventory: true}],
+        ['/boot', {label: '/boot', usedPercent: 4, samples: 1, inventory: true}],
+      ])}},
+      {startMs: 10000, durationMs: 5000, hostMetrics: {diskMounts: new Map([
+        ['/', {label: '/', usedPercent: 86, samples: 1, inventory: true}],
+        ['/boot', {label: '/boot', usedPercent: 4, samples: 1, inventory: true}],
+      ])}},
+    ];
+    const series = debugGraphDiskUsageSeriesDefs(buckets).find(item => item.diskMountId === '/');
+    const projection = debugGraphProjectSeriesSamples(series, buckets);
+    const segments = debugGraphPolylinePointSegments(
+      projection.values, buckets.map(bucket => bucket.startMs), 100,
+      {startMs: 0, endMs: 15000}, projection.hasDataValues,
+      buckets.map(bucket => bucket.durationMs), 0, false, [],
+      projection.observedDataValues, projection.censusGapValues,
+    );
+    result = {censusGaps: projection.censusGapValues, segmentLengths: segments.map(segment => segment.length)};`, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.result.censusGaps || [])), [false, true, false]);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.result.segmentLengths)), [1, 1]);
+});
+
+test('retained display-bucket merging preserves disk mount samples and their average', () => {
+  const mergeSource = sourceFunction('debugGraphMergeBucket', 'compactJsDebugGraphBuckets');
+  const diskItemSource = sourceFunction('debugGraphNewDiskMountItem', 'debugGraphNewServiceLoadItem');
+  const hostMetricsSource = sourceFunction('debugGraphNewHostMetrics', 'debugGraphNewDiskMountItem');
+  const context = {
+    Number,
+    Math,
+    Map,
+    String,
+    debugGraphMergeAgentTokenRates: () => {},
+    result: null,
+  };
+  vm.runInNewContext(`${hostMetricsSource}\n${diskItemSource}\n${mergeSource}
+    const target = {
+      apiCount: 0, sseCount: 0, latencyTotalMs: 0, latencyCount: 0, bandwidthBytes: 0, disconnectedMs: 0,
+      cpuTotalPercent: 0, cpuCount: 0, systemCpuTotalPercent: 0, systemCpuCount: 0,
+      askAgentTotal: 0, runAgentTotal: 0, transitionAgentTotal: 0, idleAgentTotal: 0,
+      activeAgentTotal: 0, inactiveAgentTotal: 0, agentActivitySamples: 0, agentStatusSequence: -1,
+      tokensPerAgentTotal: 0, agentTokenSamples: 0, agentTokenRates: new Map(),
+      hostMetrics: debugGraphNewHostMetrics(),
+    };
+    const source = {
+      agentTokenRates: new Map(),
+      hostMetrics: {diskMounts: new Map([
+        ['/', {label: '/', usedPercent: 80, samples: 2}],
+        ['/data', {label: '/data', usedPercent: 60, samples: 1}],
+        ['/mnt/unavailable', {label: '/mnt/unavailable', usedPercent: 0, samples: 0, inventory: true}],
+      ])},
+    };
+    debugGraphMergeBucket(target, source, 0.5);
+    result = [...target.hostMetrics.diskMounts.entries()];`, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.result)), [
+    ['/', {label: '/', usedPercent: 40, samples: 1, inventory: false}],
+    ['/data', {label: '/data', usedPercent: 30, samples: 0.5, inventory: false}],
+    ['/mnt/unavailable', {label: '/mnt/unavailable', usedPercent: 0, samples: 0, inventory: true}],
+  ]);
+});
+
+test('retained disk compaction replaces inventory membership with the newest df census', () => {
+  const mergeSource = sourceFunction('debugGraphMergeBucket', 'compactJsDebugGraphBuckets');
+  const diskItemSource = sourceFunction('debugGraphNewDiskMountItem', 'debugGraphNewServiceLoadItem');
+  const hostMetricsSource = sourceFunction('debugGraphNewHostMetrics', 'debugGraphNewDiskMountItem');
+  const seriesStart = source.indexOf('function debugGraphDiskUsageSeriesDefs(');
+  const seriesEnd = source.indexOf('\nconst jsDebugGraphHostProcessVisualAssignments', seriesStart);
+  const seriesSource = source.slice(seriesStart, seriesEnd);
+  const context = {
+    Number,
+    Math,
+    Map,
+    String,
+    debugGraphMergeAgentTokenRates: () => {},
+    jsDebugGraphAgentTokenColors: ['#111', '#222', '#333'],
+    jsDebugGraphServiceLoadLinePatterns: ['solid', 'dot'],
+    jsDebugGraphDisplayHoldExpiryMs: {minuteGauge: 60000},
+    result: null,
+  };
+  vm.runInNewContext(`${hostMetricsSource}\n${diskItemSource}\n${mergeSource}\n${seriesSource}
+    const target = {
+      startMs: 0, apiCount: 0, sseCount: 0, latencyTotalMs: 0, latencyCount: 0, bandwidthBytes: 0, disconnectedMs: 0,
+      cpuTotalPercent: 0, cpuCount: 0, systemCpuTotalPercent: 0, systemCpuCount: 0,
+      askAgentTotal: 0, runAgentTotal: 0, transitionAgentTotal: 0, idleAgentTotal: 0,
+      activeAgentTotal: 0, inactiveAgentTotal: 0, agentActivitySamples: 0, agentStatusSequence: -1,
+      tokensPerAgentTotal: 0, agentTokenSamples: 0, agentTokenRates: new Map(),
+      hostMetrics: debugGraphNewHostMetrics(),
+    };
+    const oldCensus = {startMs: 100, agentTokenRates: new Map(), hostMetrics: {diskMounts: new Map([
+      ['/old', {label: '/old', usedPercent: 90, samples: 1, inventory: true}],
+      ['/', {label: '/', usedPercent: 70, samples: 1, inventory: true}],
+    ])}};
+    const newCensus = {startMs: 200, agentTokenRates: new Map(), hostMetrics: {diskMounts: new Map([
+      ['/', {label: '/', usedPercent: 94, samples: 1, inventory: true}],
+      ['/boot', {label: '/boot', usedPercent: 4, samples: 1, inventory: true}],
+    ])}};
+    debugGraphMergeBucket(target, oldCensus);
+    debugGraphMergeBucket(target, newCensus);
+    result = {inventoryStartMs: target.hostMetrics.diskInventoryStartMs, labels: debugGraphDiskUsageSeriesDefs([target]).map(item => item.label)};`, context);
+  assert.equal(context.result.inventoryStartMs, 200);
+  assert.deepEqual([...context.result.labels], ['/ (82%)', '/boot']);
+});
+
+test('disk history coverage is tracked independently and keeps sampled buckets covered', () => {
+  assert.match(source, /\['cpu', 'service_load', 'agent_status', 'agent_tokens', 'cost', 'gpu', 'system_memory', 'system_disk', 'browser'\]\.map\(family => \[family, jsDebugCurrentCoverageIntervals\(snapshot, family\)\]\)/);
+  const familySource = sourceFunction('jsDebugCurrentBucketHasFamilyData', 'jsDebugCurrentCoverageIntervals');
+  const coverageSource = sourceFunction('jsDebugCurrentCoverageIntervals', 'updateJsDebugCurrentSnapshotState');
+  const context = {Number, Array, Math, Object};
+  vm.runInNewContext(`${familySource}\n${coverageSource}\nresult = jsDebugCurrentCoverageIntervals({
+    window_start: 100,
+    window_end: 1000,
+    resolution_seconds: 60,
+    buckets: [{start: 100, duration: 900, series: {'system_disk_used_percent:/': {value: 23}}}],
+    no_data: [{family: 'system_disk', start: 100, end: 1000}],
+  }, 'system_disk');`, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.result)), [
+    {startSeconds: 100, endSeconds: 1000, resolutionSeconds: 60, sourceResolutionSeconds: 60},
+  ]);
 });
 
 test('saved Graphs visibility preferences override defaults instead of being backfilled', () => {
@@ -3256,7 +3519,7 @@ test('a complete snapshot replaces graph data once and resolves readiness', () =
     const applied = [];
     const resolved = [];
     let jsDebugStatsServerSequence = 0;
-    const jsDebugHistoryReadiness = {phase: 'loading-older', reason: 'range', overlayVisible: true};
+    const jsDebugHistoryReadiness = {phase: 'loading-older', reason: 'range', requestedRangeSeconds: 900, overlayVisible: true};
     const jsDebugStatsPollState = {firstSampleReceived: true};
     function clearJsDebugGraphData() { applied.length = 0; }
     function jsDebugCurrentBucketRecord(bucket, includeRangeCost) { return {bucket, includeRangeCost}; }
@@ -3271,13 +3534,14 @@ test('a complete snapshot replaces graph data once and resolves readiness', () =
     function scheduleJsDebugPanelRefresh() {}
     ${functionText}
     const snapshot = {
-      window_start: 0, window_end: 7200, resolution_seconds: 60, cache_generation: 9,
+      range_seconds: 7200, window_start: 0, window_end: 7200, resolution_seconds: 60, cache_generation: 9,
       buckets: [{start: 0, duration: 60}, {start: 3600, duration: 60}],
       no_data: [], cost_report: {},
     };
     applyJsDebugCurrentSnapshot(snapshot);
     result = {
       phase: jsDebugHistoryReadiness.phase,
+      requestedRangeSeconds: jsDebugHistoryReadiness.requestedRangeSeconds,
       overlayVisible: jsDebugHistoryReadiness.overlayVisible,
       intervals: jsDebugHistoryReadiness.requestCoverageIntervals,
       rangeCostFlags: applied.map(record => record.includeRangeCost),
@@ -3285,6 +3549,7 @@ test('a complete snapshot replaces graph data once and resolves readiness', () =
     };
   `, context);
   assert.equal(context.result.phase, 'ready');
+  assert.equal(context.result.requestedRangeSeconds, 7200, 'the accepted snapshot owns readiness range state');
   assert.equal(context.result.overlayVisible, false);
   assert.deepEqual([...context.result.intervals].map(interval => [interval.startSeconds, interval.endSeconds]), [[0, 7200]]);
   assert.deepEqual([...context.result.rangeCostFlags], [undefined, undefined]);
@@ -4841,11 +5106,16 @@ test('the current snapshot adapter merges both GPU dimensions into one device', 
     series: {
       'gpu_memory_bytes:gpu:0': {value: 1234567890},
       'gpu_util_percent:gpu:0': {value: 8},
+      'gpu_memory_bytes:gpu:nvidia:0': {value: 2097152},
+      'gpu_util_percent:gpu:nvidia:0': {value: 12.5},
     },
   });`, context);
   const device = context.result.host_metrics.gpu_devices['gpu:0'];
   assert.equal(device.util_total_percent, 8);
   assert.equal(device.memory_used_total_bytes, 1234567890);
+  const nvidiaDevice = context.result.host_metrics.gpu_devices['gpu:nvidia:0'];
+  assert.equal(nvidiaDevice.util_total_percent, 12.5);
+  assert.equal(nvidiaDevice.memory_used_total_bytes, 2097152);
 });
 
 test('the current snapshot adapter maps binary RSS series into memory processes', () => {

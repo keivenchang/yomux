@@ -13,9 +13,46 @@ import (
 	"os"
 	"path/filepath"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
+
+func TestRefillTerminalStatusWaitsForLeaseRelease(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.OpenFile(filepath.Join(root, "owner.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeRefillStatus(root, map[string]any{"state": "succeeded"}); err != nil {
+		t.Fatal(err)
+	}
+	s := &server{refillRoot: root}
+	check := func(want string) {
+		t.Helper()
+		out := httptest.NewRecorder()
+		s.statsRefill(out, httptest.NewRequest("GET", "/api/stats-refill", nil))
+		var status map[string]any
+		if err := json.Unmarshal(out.Body.Bytes(), &status); err != nil {
+			t.Fatal(err)
+		}
+		if status["state"] != want {
+			t.Fatalf("state=%v, want %s", status["state"], want)
+		}
+	}
+	check("running")
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	check("succeeded")
+}
 
 func TestRefillHostSingletonReloadProgressFailureAndRetry(t *testing.T) {
 	root := t.TempDir()
@@ -42,7 +79,7 @@ func TestRefillHostSingletonReloadProgressFailureAndRetry(t *testing.T) {
 			return stats.AgentHistoryRefillResult{}, ctx.Err()
 		}
 	}
-	s := &server{events: newEventBroker(), refillRoot: root, refillRun: run, operationsPath: filepath.Join(root, "operations.json"), operationsJournal: filepath.Join(root, "journal.jsonl")}
+	s := &server{events: newEventBroker(), refillRoot: root, refillRun: run, operationState: operationState{operationsPath: filepath.Join(root, "operations.json"), operationsJournal: filepath.Join(root, "journal.jsonl")}}
 	other := &server{events: newEventBroker(), refillRoot: root, refillRun: run}
 	request := func(s *server, method string) map[string]any {
 		t.Helper()

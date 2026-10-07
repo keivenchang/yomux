@@ -3,6 +3,7 @@ package stats
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -36,6 +37,125 @@ func TestParseLinuxOnlineCPUCountUsesSyntheticTopology(t *testing.T) {
 				t.Fatalf("ParseLinuxOnlineCPUCount(%q) = %d, want %d", test.text, got, test.want)
 			}
 		})
+	}
+}
+
+func TestParseLinuxMountInfoKeepsStableDecodedMountpoints(t *testing.T) {
+	data := []byte("36 25 0:32 / / rw,relatime - overlay overlay rw\n37 36 0:44 / /mnt/data\\040set rw,relatime - ext4 /dev/vdb rw\n38 36 0:45 / /mnt/share\\134archive rw,relatime - nfs server:/export rw\n")
+	got, ok := ParseLinuxMountInfo(data)
+	want := []string{"/", "/mnt/data set", "/mnt/share\\archive"}
+	if !ok || !reflect.DeepEqual(got, want) {
+		t.Fatalf("synthetic mountpoints = %#v, %v; want %#v", got, ok, want)
+	}
+	for _, invalid := range [][]byte{[]byte("not mountinfo\n"), []byte("36 25 0:32 / /bad\\999 rw - ext4 x rw\n")} {
+		if _, ok := ParseLinuxMountInfo(invalid); ok {
+			t.Fatalf("invalid mount table accepted: %q", invalid)
+		}
+	}
+}
+
+func TestParseFstabMountpointsDecodesEscapedWhitespace(t *testing.T) {
+	got := parseFstabMountpoints([]byte("server:/export /Volumes/My\\040Drive nfs rw 0 0\n/dev/disk3s1 /Volumes/Archive\\134Set apfs rw 0 0\n"))
+	want := []string{"/Volumes/Archive\\Set", "/Volumes/My Drive"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("synthetic fstab mountpoints = %#v, want %#v", got, want)
+	}
+}
+
+func TestParseDiskUsageDFListingUsesOnlyReportedPartitions(t *testing.T) {
+	listing := []byte("Filesystem 1024-blocks Used Available Capacity Mounted on\n" +
+		"tmpfs 13114300 6876 13107424 1% /run\n" +
+		"efivarfs 192 175 13 94% /sys/firmware/efi/efivars\n" +
+		"/dev/mapper/ubuntu--vg-ubuntu--lv 3829049440 3383289952 251179624 94% /\n" +
+		"tmpfs 65571480 7708 65563772 1% /dev/shm\n" +
+		"tmpfs 5120 16 5104 1% /run/lock\n" +
+		"tmpfs 65571480 0 65571480 0% /run/qemu\n" +
+		"/dev/nvme1n1p2 10218772 370312 9307788 4% /boot\n" +
+		"/dev/nvme1n1p1 5232640 6288 5226352 1% /boot/efi\n" +
+		"tmpfs 13114296 2856 13111440 1% /run/user/1776734304\n" +
+		"10.77.0.1:/home/keivenc 1906225152 1195702272 613617664 67% /nfs/keivenc\n")
+	samples, ok := ParseDiskUsageDFListing(listing)
+	want := []string{"/run", "/sys/firmware/efi/efivars", "/", "/dev/shm", "/run/lock", "/run/qemu", "/boot", "/boot/efi", "/run/user/1776734304", "/nfs/keivenc"}
+	if !ok || len(samples) != len(want) {
+		t.Fatalf("df partitions = %#v, %t; want %d rows", samples, ok, len(want))
+	}
+	for index, mountpoint := range want {
+		if samples[index].Mountpoint != mountpoint || samples[index].SourceID != diskMountSourceID(mountpoint) {
+			t.Fatalf("df partition[%d] = %+v, want mount %q", index, samples[index], mountpoint)
+		}
+	}
+	spaced, ok := ParseDiskUsageDFListing([]byte("Filesystem 1024-blocks Used Available Capacity Mounted on\nserver:/export name 1000 250 750 25% /Volumes/My Data\n"))
+	if !ok || len(spaced) != 1 || spaced[0].Mountpoint != "/Volumes/My Data" {
+		t.Fatalf("df listing did not preserve whitespace in filesystem and mountpoint: %#v, %t", spaced, ok)
+	}
+	mixed, ok := ParseDiskUsageDFListing([]byte("Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/root 100 25 75 25% /\n/dev/unavailable 100 20 N/A N/A /mnt/unavailable\ntmpfs 80 8 72 10% /run\n"))
+	if !ok || len(mixed) != 3 || mixed[0].Reason != "" || mixed[1].Mountpoint != "/mnt/unavailable" || mixed[1].Reason != "invalid_sample" || mixed[2].Mountpoint != "/run" || mixed[2].Reason != "" {
+		t.Fatalf("one unavailable df row suppressed other partition samples: %#v, %t", mixed, ok)
+	}
+	for _, invalid := range [][]byte{
+		[]byte("Filesystem 1024-blocks Used Available Capacity Mounted on\n"),
+		[]byte("Filesystem 1024-blocks Used Available Capacity Mounted on\nbad row\n"),
+		[]byte("Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/x 100 20 80 20% relative\n"),
+	} {
+		if _, ok := ParseDiskUsageDFListing(invalid); ok {
+			t.Fatalf("invalid df listing accepted: %q", invalid)
+		}
+	}
+}
+
+func TestLinuxDiskCollectorUsesDFPartitionListAsItsSource(t *testing.T) {
+	want := []string{"df", "-kP"}
+	called := false
+	sources := &LinuxHostSources{
+		procRoot: "/missing/proc",
+		run: func(ctx context.Context, args []string) (CommandOutput, error) {
+			called = true
+			if !reflect.DeepEqual(args, want) {
+				t.Fatalf("disk command = %#v, want %#v", args, want)
+			}
+			return CommandOutput{Stdout: []byte("Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/root 100 25 75 25% /\ntmpfs 80 8 72 10% /run\n")}, nil
+		},
+	}
+	samples, err := sources.Disk(context.Background())
+	if err != nil || !called || len(samples) != 2 || samples[0].Mountpoint != "/" || samples[1].Mountpoint != "/run" {
+		t.Fatalf("Linux df disk samples = %#v, called=%t, err=%v", samples, called, err)
+	}
+}
+
+func TestDiskAdapterKeepsGapsAndChangingSets(t *testing.T) {
+	listing := "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/a 100 40 60 40% /\n/dev/b 0 0 0 0% /net\n"
+	source := &LinuxHostSources{run: func(context.Context, []string) (CommandOutput, error) {
+		return CommandOutput{Stdout: []byte(listing)}, nil
+	}}
+	samples, err := source.Disk(context.Background())
+	if err != nil || len(samples) != 2 || samples[0].UsedBytes != 40*1024 || samples[1].Reason != "invalid_sample" {
+		t.Fatalf("samples: %+v, %v", samples, err)
+	}
+	listing = "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/a 100 40 60 40% /\n/dev/c 100 10 90 10% /new\n"
+	next, err := source.Disk(context.Background())
+	if err != nil || len(next) != 2 || next[0].SourceID != samples[0].SourceID || next[1].SourceID != diskMountSourceID("/new") {
+		t.Fatalf("changed mounts: %+v, %v", next, err)
+	}
+}
+
+func TestBuildSystemDiskFactsValidAndUnavailablePerMount(t *testing.T) {
+	context := hostFactContext()
+	batch := BuildSystemDiskFacts([]DiskUsageSample{
+		{SourceID: "mount:/", Mountpoint: "/", UsedBytes: 25, CapacityBytes: 100},
+		{SourceID: "mount:/net", Mountpoint: "/net", Reason: "mount_unavailable"},
+		{SourceID: "mount:/invalid", Mountpoint: "/invalid", UsedBytes: 101, CapacityBytes: 100},
+	}, context)
+	if len(batch.Observations) != 3 || len(batch.UnavailableSpans) != 2 || batch.Observations[0].SourceID != "mount:/" {
+		t.Fatalf("disk facts did not preserve per-mount data and gaps: %+v", batch)
+	}
+	if batch.Observations[0].Payload["used_percent"] != 25.0 || batch.Observations[0].Payload["mountpoint"] != "/" {
+		t.Fatalf("disk percentage/label payload = %#v", batch.Observations[0].Payload)
+	}
+	if batch.Observations[1].Payload["mountpoint"] != "/net" || batch.Observations[1].Payload["unavailable_reason"] != "mount_unavailable" {
+		t.Fatalf("unavailable mount inventory metadata = %#v", batch.Observations[1].Payload)
+	}
+	if _, err := batch.Validate(); err != nil {
+		t.Fatalf("disk facts failed validation: %v", err)
 	}
 }
 
@@ -771,6 +891,143 @@ func TestLinuxGPUDevicesLeaveMissingMetricsUnavailable(t *testing.T) {
 	}
 }
 
+func TestParseNvidiaSMIReportsUtilizationAndMemoryForEveryValidDevice(t *testing.T) {
+	data := []byte("0, NVIDIA RTX 6000 Ada Generation, 00000000:02:00.0, 12.5, 2048, 49140\nmalformed, row\n1, \"NVIDIA, Test GPU\", 00000000:03:00.0, 0, 0, 8192\n2, NVIDIA GPU, 00000000:04:00.0, N/A, 10, 1024\n3, NVIDIA GPU, 00000000:05:00.0, 4, 2048, 1024\n")
+	got := ParseNvidiaSMI(data)
+	want := []GPUDevice{
+		{SourceID: "gpu:nvidia:0", Label: "GPU 0 (NVIDIA RTX 6000 Ada Generation)", Utilization: 12.5, MemoryUsedBytes: 2048 * 1024 * 1024, MemoryTotalBytes: 49140 * 1024 * 1024, pciAddress: "0000:02:00.0"},
+		{SourceID: "gpu:nvidia:1", Label: "GPU 1 (NVIDIA, Test GPU)", MemoryTotalBytes: 8192 * 1024 * 1024, pciAddress: "0000:03:00.0"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("nvidia-smi devices = %#v, want %#v", got, want)
+	}
+	if got := ParseNvidiaSMI([]byte("0, NVIDIA GPU, 00000000:02:00.0, 10, 1, 18446744073709551615\n")); len(got) != 0 {
+		t.Fatalf("overflowing memory counters accepted: %#v", got)
+	}
+	if normalizePCIBusID("invalid") != "" || normalizePCIBusID("00000000:02:00.0") != "0000:02:00.0" {
+		t.Fatal("PCI bus ID normalization failed")
+	}
+}
+
+func TestLinuxHostSourcesUsesNvidiaSMIWhenDRMHasNoCompleteGPUCounters(t *testing.T) {
+	wantCommand := []string{"nvidia-smi", "--query-gpu=index,name,pci.bus_id,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"}
+	sources := &LinuxHostSources{
+		gpuRoot: "/sys/class/drm",
+		readDir: func(path string) ([]string, error) {
+			if path != "/sys/class/drm" {
+				t.Fatalf("unexpected DRM root %q", path)
+			}
+			return []string{"card0", "card1"}, nil
+		},
+		readFile: func(string) ([]byte, error) { return nil, os.ErrNotExist },
+		run: func(ctx context.Context, args []string) (CommandOutput, error) {
+			if err := ctx.Err(); err != nil {
+				t.Fatalf("GPU command context already canceled: %v", err)
+			}
+			if !reflect.DeepEqual(args, wantCommand) {
+				t.Fatalf("GPU command = %#v, want %#v", args, wantCommand)
+			}
+			return CommandOutput{Stdout: []byte("0, NVIDIA RTX 6000 Ada Generation, 00000000:02:00.0, 0, 2, 49140\n")}, nil
+		},
+	}
+	got, err := sources.GPU(context.Background())
+	want := []GPUDevice{{SourceID: "gpu:nvidia:0", Label: "GPU 0 (NVIDIA RTX 6000 Ada Generation)", MemoryUsedBytes: 2 * 1024 * 1024, MemoryTotalBytes: 49140 * 1024 * 1024, pciAddress: "0000:02:00.0"}}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("GPU() = %#v, %v; want %#v, nil", got, err, want)
+	}
+}
+
+func TestLinuxHostSourcesCombinesNvidiaSMIWithDRMDevices(t *testing.T) {
+	files := map[string][]byte{
+		"/sys/class/drm/card0/device/gpu_busy_percent":    []byte("25\n"),
+		"/sys/class/drm/card0/device/mem_info_vram_used":  []byte("1024\n"),
+		"/sys/class/drm/card0/device/mem_info_vram_total": []byte("4096\n"),
+		"/sys/class/drm/card0/device/uevent":              []byte("PCI_SLOT_NAME=0000:03:00.0\n"),
+	}
+	sources := &LinuxHostSources{
+		gpuRoot: "/sys/class/drm",
+		readDir: func(string) ([]string, error) { return []string{"card0"}, nil },
+		readFile: func(path string) ([]byte, error) {
+			if value, ok := files[path]; ok {
+				return value, nil
+			}
+			return nil, os.ErrNotExist
+		},
+		run: func(context.Context, []string) (CommandOutput, error) {
+			return CommandOutput{Stdout: []byte("0, NVIDIA RTX 6000 Ada Generation, 00000000:02:00.0, 0, 2, 49140\n")}, nil
+		},
+	}
+	got, err := sources.GPU(context.Background())
+	want := []GPUDevice{
+		{SourceID: "gpu:0", Label: "GPU 0", Utilization: 25, MemoryUsedBytes: 1024, MemoryTotalBytes: 4096, pciAddress: "0000:03:00.0"},
+		{SourceID: "gpu:nvidia:0", Label: "GPU 0 (NVIDIA RTX 6000 Ada Generation)", MemoryUsedBytes: 2 * 1024 * 1024, MemoryTotalBytes: 49140 * 1024 * 1024, pciAddress: "0000:02:00.0"},
+	}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("GPU() = %#v, %v; want %#v, nil", got, err, want)
+	}
+}
+
+func TestLinuxHostSourcesDoesNotDuplicateNvidiaDRMDevice(t *testing.T) {
+	files := map[string][]byte{
+		"/sys/class/drm/card0/device/gpu_busy_percent":    []byte("25\n"),
+		"/sys/class/drm/card0/device/mem_info_vram_used":  []byte("1024\n"),
+		"/sys/class/drm/card0/device/mem_info_vram_total": []byte("4096\n"),
+		"/sys/class/drm/card0/device/uevent":              []byte("PCI_SLOT_NAME=0000:02:00.0\n"),
+	}
+	sources := &LinuxHostSources{
+		gpuRoot: "/sys/class/drm",
+		readDir: func(string) ([]string, error) { return []string{"card0"}, nil },
+		readFile: func(path string) ([]byte, error) {
+			if value, ok := files[path]; ok {
+				return value, nil
+			}
+			return nil, os.ErrNotExist
+		},
+		run: func(context.Context, []string) (CommandOutput, error) {
+			return CommandOutput{Stdout: []byte("0, NVIDIA RTX 6000 Ada Generation, 00000000:02:00.0, 0, 2, 49140\n")}, nil
+		},
+	}
+	got, err := sources.GPU(context.Background())
+	want := []GPUDevice{{SourceID: "gpu:nvidia:0", Label: "GPU 0 (NVIDIA RTX 6000 Ada Generation)", MemoryUsedBytes: 2 * 1024 * 1024, MemoryTotalBytes: 49140 * 1024 * 1024, pciAddress: "0000:02:00.0"}}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("GPU() = %#v, %v; want only the nvidia-smi device %#v", got, err, want)
+	}
+}
+
+func TestLinuxHostSourcesKeepsUnmatchedNvidiaDRMDeviceWhenNvidiaSMIIsPartial(t *testing.T) {
+	files := map[string][]byte{
+		"/sys/class/drm/card0/device/gpu_busy_percent":    []byte("25\n"),
+		"/sys/class/drm/card0/device/mem_info_vram_used":  []byte("1024\n"),
+		"/sys/class/drm/card0/device/mem_info_vram_total": []byte("4096\n"),
+		"/sys/class/drm/card0/device/uevent":              []byte("PCI_SLOT_NAME=0000:02:00.0\n"),
+		"/sys/class/drm/card1/device/gpu_busy_percent":    []byte("30\n"),
+		"/sys/class/drm/card1/device/mem_info_vram_used":  []byte("2048\n"),
+		"/sys/class/drm/card1/device/mem_info_vram_total": []byte("8192\n"),
+		"/sys/class/drm/card1/device/uevent":              []byte("PCI_SLOT_NAME=0000:03:00.0\n"),
+	}
+	sources := &LinuxHostSources{
+		gpuRoot: "/sys/class/drm",
+		readDir: func(string) ([]string, error) { return []string{"card0", "card1"}, nil },
+		readFile: func(path string) ([]byte, error) {
+			if value, ok := files[path]; ok {
+				return value, nil
+			}
+			return nil, os.ErrNotExist
+		},
+		run: func(context.Context, []string) (CommandOutput, error) {
+			return CommandOutput{Stdout: []byte("0, NVIDIA RTX 6000 Ada Generation, 00000000:02:00.0, 0, 2, 49140\n1, NVIDIA GPU, 00000000:03:00.0, N/A, 10, 1024\n")}, nil
+		},
+	}
+	got, err := sources.GPU(context.Background())
+	want := []GPUDevice{
+		{SourceID: "gpu:1", Label: "GPU 1", Utilization: 30, MemoryUsedBytes: 2048, MemoryTotalBytes: 8192, pciAddress: "0000:03:00.0"},
+		{SourceID: "gpu:nvidia:0", Label: "GPU 0 (NVIDIA RTX 6000 Ada Generation)", MemoryUsedBytes: 2 * 1024 * 1024, MemoryTotalBytes: 49140 * 1024 * 1024, pciAddress: "0000:02:00.0"},
+	}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("GPU() = %#v, %v; want unmatched DRM and valid NVIDIA devices %#v", got, err, want)
+	}
+}
+
 func TestParseMacOSInputs(t *testing.T) {
 	ioreg := `[{"PerformanceStatistics":{"GPU Activity(%)":"8","In use video memory":12}}]`
 	devices := ParseIOAcceleratorJSON([]byte(ioreg))
@@ -792,6 +1049,21 @@ func TestParseMacOSInputs(t *testing.T) {
 	}
 }
 
+func TestDarwinHostSourcesCollectsIOAcceleratorMetrics(t *testing.T) {
+	wantCommand := []string{"ioreg", "-a", "-r", "-d1", "-w0", "-c", "IOAccelerator"}
+	sources := &DarwinHostSources{run: func(_ context.Context, args []string) (CommandOutput, error) {
+		if !reflect.DeepEqual(args, wantCommand) {
+			t.Fatalf("GPU command = %#v, want %#v", args, wantCommand)
+		}
+		return CommandOutput{Stdout: []byte(`[{"PerformanceStatistics":{"GPU Activity(%)":"8","In use video memory":12}}]`)}, nil
+	}}
+	got, err := sources.GPU(context.Background())
+	want := []GPUDevice{{SourceID: "gpu:0", Label: "GPU 0", Utilization: 8, MemoryUsedBytes: 12}}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("GPU() = %#v, %v; want %#v, nil", got, err, want)
+	}
+}
+
 func TestParserBoundsAndPythonIdentity(t *testing.T) {
 	stat := "7 (x) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22"
 	if _, ok := ParseLinuxProcessStat(stat, "/bin/x", ^uint64(0), 100); ok {
@@ -799,5 +1071,17 @@ func TestParserBoundsAndPythonIdentity(t *testing.T) {
 	}
 	if pythonFloatHex(math.Copysign(0, -1)) != "-0x0.0p+0" {
 		t.Fatal("negative zero was normalized")
+	}
+}
+
+func TestAuditPartialDFPreservesMountBytes(t *testing.T) {
+	samples, err := collectDiskUsageFromDF(context.Background(), func(context.Context, []string) (CommandOutput, error) {
+		return CommandOutput{Stdout: []byte("Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/a 100 20 80 20% /mnt/a  b\n/dev/b 100 30 70 30% /mnt/a b\n"), ExitCode: 1}, errors.New("one mount failed")
+	})
+	if err == nil || len(samples) != 2 {
+		t.Fatalf("partial output lost: %d samples, %v", len(samples), err)
+	}
+	if samples[0].Mountpoint != "/mnt/a  b" || samples[1].Mountpoint != "/mnt/a b" || samples[0].SourceID == samples[1].SourceID {
+		t.Fatal("mount identities collapsed")
 	}
 }

@@ -32,6 +32,7 @@ from yomux_lib.infra.host_partition import host_partitioned_state_dir
 
 from . import identity
 from . import resolution as stats_resolution
+from tools.product_environment import product_env
 
 
 # Keep the existing YOST identity and advance beyond legacy schema 4. That
@@ -2343,7 +2344,7 @@ class Store:
         writer_build: int = MIN_WRITER_BUILD,
         include_browser_diagnostics: bool = True,
     ) -> Store:
-        if os.environ.get("YOLOMUX_STATS_GO_WRITER") == "1":
+        if product_env('STATS_GO_WRITER', environ=os.environ) == "1":
             raise StatsCurrentError("Python YO!stats writer is disabled while the Go writer owns cutover")
         database_path = Path(path)
         protocol = _validate_nonnegative_integer(writer_protocol, "writer_protocol")

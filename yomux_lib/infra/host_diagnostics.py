@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Callable
 from typing import Iterable
 from typing import Mapping
+from tools.product_environment import environment_value, product_env
+from tools.instance_isolation import normalize_yomux_environment
 
 from ..chat.chat_store import CHAT_DATABASE_NAME
 from ..chat.chat_store import default_chat_database_path
@@ -227,8 +229,8 @@ def collect_host_diagnostics(
     environ: Mapping[str, str] | None = None,
 ) -> HostDiagnosticsReport:
     """Collect current diagnostics without creating directories or mutable state."""
-    values = os.environ if environ is None else environ
-    if values.get("YOLOMUX_STATS_SYNTHETIC_HOST") == "1":
+    values = normalize_yomux_environment(os.environ if environ is None else environ)
+    if product_env('STATS_SYNTHETIC_HOST', environ=values) == "1":
         reason = "Synthetic host diagnostics are active"
         return HostDiagnosticsReport(
             identity=None,
@@ -285,5 +287,5 @@ def collect_host_diagnostics(
         roots=(*diagnostics, runtime),
         database_partitions=resolved_partitions,
         rejected_paths=tuple(rejected_paths),
-        escape_hatch_enabled=values.get(NETWORK_FILESYSTEM_ESCAPE_HATCH) == "1",
+        escape_hatch_enabled=environment_value(values, NETWORK_FILESYSTEM_ESCAPE_HATCH) == "1",
     )

@@ -14,7 +14,6 @@ sequence at the old protected route and proves the zero-ERROR assertion still fa
 """
 from __future__ import annotations
 
-import base64
 import json
 import re
 import ssl
@@ -29,6 +28,8 @@ from typing import Any
 
 import pytest
 
+from tests.helpers.fixture_http_server import basic_auth_header
+
 from yomux_lib import common
 from yomux_lib import http_routes
 from yomux_lib import server_auth
@@ -38,7 +39,7 @@ from yomux_lib.login_rate_limit import LoginRateLimiter
 from yomux_lib.login_rate_limit import LoginRatePolicy
 from yomux_lib.server import TmuxWebtermHTTPServer
 
-pytestmark = pytest.mark.socket
+pytestmark = [pytest.mark.socket, pytest.mark.deprecated_python_server]
 
 ROOT = Path(__file__).resolve().parents[1]
 BOOT_SH = ROOT / "boot.sh"
@@ -85,11 +86,6 @@ def auth_yaml() -> str:
     password: "{VALID_PASSWORD}"
     role: "admin"
 """
-
-
-def basic_auth_header(username: str, password: str) -> dict[str, str]:
-    encoded = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
-    return {"Authorization": f"Basic {encoded}"}
 
 
 def request(port: int, method: str, path: str, headers: dict[str, str] | None = None) -> tuple[int, bytes]:

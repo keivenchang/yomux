@@ -14,6 +14,7 @@ import pytest
 
 from tools import system_status_latency_probe as probe
 from tools.instance_isolation import resolve_instance_environment
+from tools.product_environment import product_env_name
 from yomux_lib.agent_comms import codex_app_server
 from yomux_lib.infra import common
 from yomux_lib.infra import worktree_writer
@@ -49,6 +50,10 @@ def _identity() -> common.HostIdentity:
     return common.HostIdentity("host-a", "host-a.example", "boot-a", 42, "proc:1", 1, "nonce-a", "fixture")
 
 
+def _diagnostic_name(key: str) -> str:
+    return product_env_name(key) if key.startswith(("YOMUX_", "YOLOMUX_")) else key
+
+
 @pytest.mark.parametrize("key", PRODUCT_ROOT_KEYS)
 @pytest.mark.parametrize("rooted", (False, True))
 def test_relative_product_root_is_refused_with_or_without_yolomux_root(
@@ -65,14 +70,14 @@ def test_relative_product_root_is_refused_with_or_without_yolomux_root(
     if rooted:
         values["YOLOMUX_ROOT"] = str(cwd)
 
-    with pytest.raises(ValueError, match=rf"{key}.*absolute.*{relative_value}"):
+    with pytest.raises(ValueError, match=rf"{_diagnostic_name(key)}.*absolute.*{relative_value}"):
         common.resolve_yomux_roots(values, identity=_identity(), temporary_dir=tmp_path / "tmp", uid=1000)
 
 
 def test_relative_yolomux_root_is_refused_before_cwd_can_choose_its_location(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
 
-    with pytest.raises(ValueError, match=r"YOLOMUX_ROOT.*absolute.*relative-root"):
+    with pytest.raises(ValueError, match=rf"{product_env_name('ROOT')}.*absolute.*relative-root"):
         common.resolve_yomux_roots({"YOLOMUX_ROOT": "relative-root"}, identity=_identity())
 
 
@@ -80,20 +85,20 @@ def test_relative_yolomux_root_is_refused_before_cwd_can_choose_its_location(mon
 def test_tilde_prefixed_configured_path_is_relative_and_refused(key: str) -> None:
     resolution = resolve_instance_environment(7110, {key: "~/unsafe-root"}, platform="Linux")
 
-    assert key in resolution.error
+    assert _diagnostic_name(key) in resolution.error
     assert "absolute" in resolution.error
     assert resolution.environment == {}
 
 
 @pytest.mark.parametrize("key", ("YOLOMUX_ROOT", *PRODUCT_ROOT_KEYS))
 def test_explicit_home_directory_is_refused_as_a_product_root(key: str) -> None:
-    with pytest.raises(ValueError, match=rf"{key}.*home directory"):
+    with pytest.raises(ValueError, match=rf"{_diagnostic_name(key)}.*home directory"):
         common.resolve_yomux_roots({key: str(Path.home())}, identity=_identity())
 
 
 @pytest.mark.parametrize("key", ("YOLOMUX_ROOT", *PRODUCT_ROOT_KEYS))
 def test_filesystem_root_is_refused_as_a_product_root(key: str) -> None:
-    with pytest.raises(ValueError, match=rf"{key}.*filesystem root"):
+    with pytest.raises(ValueError, match=rf"{_diagnostic_name(key)}.*filesystem root"):
         common.resolve_yomux_roots({key: "/"}, identity=_identity())
 
 
@@ -150,7 +155,7 @@ def test_absolute_product_roots_are_independent_of_process_cwd(monkeypatch, tmp_
 def test_rooted_product_root_refuses_each_outside_override(tmp_path: Path, key: str) -> None:
     outside = Path("/outside") / key.lower()
 
-    with pytest.raises(ValueError, match=rf"{key}.*{outside}"):
+    with pytest.raises(ValueError, match=rf"{_diagnostic_name(key)}.*{outside}"):
         common.resolve_yomux_roots(
             {"YOLOMUX_ROOT": str(tmp_path / "root"), key: str(outside)},
             identity=_identity(),
@@ -187,7 +192,7 @@ def test_cli_refuses_relative_product_roots_before_writing_to_cwd(tmp_path: Path
     )
 
     assert result.returncode == 2
-    assert relative_key in result.stderr
+    assert _diagnostic_name(relative_key) in result.stderr
     assert "relative-product-root" in result.stderr
     assert "absolute" in result.stderr
     assert "Traceback" not in result.stderr
@@ -218,7 +223,7 @@ def test_cli_refuses_relative_product_roots_before_writing_to_cwd(tmp_path: Path
 def test_instance_resolution_rejects_unsafe_explicit_roots(key: str, value: str, message: str) -> None:
     resolution = resolve_instance_environment(7110, {key: value}, platform="Linux")
 
-    assert key in resolution.error
+    assert _diagnostic_name(key) in resolution.error
     assert message in resolution.error
     assert resolution.environment == {}
 
@@ -265,7 +270,7 @@ def test_home_mapping_owns_defaults_and_exact_home_refusal(tmp_path: Path) -> No
     assert paths.config_dir == home / ".config" / "yomux"
     assert paths.state_dir == home / ".local" / "state" / "yomux"
     assert paths.codex_home == home / ".codex"
-    with pytest.raises(ValueError, match=r"YOLOMUX_ROOT.*home directory"):
+    with pytest.raises(ValueError, match=rf"{product_env_name('ROOT')}.*home directory"):
         common.resolve_yomux_roots(
             {"HOME": str(home), "YOLOMUX_ROOT": str(home)},
             identity=_identity(),
@@ -304,7 +309,7 @@ def test_host_artifact_paths_refuse_relative_runtime_before_writing(tmp_path: Pa
     worktree = tmp_path / "shared" / "repo"
     worktree.mkdir(parents=True)
 
-    with pytest.raises(ValueError, match=r"YOLOMUX_RUNTIME_DIR.*absolute.*relative-runtime"):
+    with pytest.raises(ValueError, match=rf"{product_env_name('RUNTIME_DIR')}.*absolute.*relative-runtime"):
         worktree_writer.configure_host_local_artifacts(
             worktree,
             environ={"YOLOMUX_RUNTIME_DIR": "relative-runtime"},
@@ -421,7 +426,7 @@ def test_rooted_package_import_refuses_outside_artifact_overrides_before_writing
     )
 
     assert result.returncode != 0
-    expected_key = "YOMUX_CA_DIR" if key == "YOLOMUX_CA_DIR" else key
+    expected_key = _diagnostic_name(key)
     assert expected_key in result.stderr
     assert not root.exists()
     assert not outside.exists()
@@ -489,9 +494,9 @@ def test_codex_runtime_adapters_refuse_relative_home_without_creating_it(monkeyp
     if key == "CODEX_HOME":
         base_env["YOLOMUX_CODEX_HOME"] = ""
 
-    with pytest.raises(ValueError, match=rf"{key}.*absolute.*relative-codex"):
+    with pytest.raises(ValueError, match=rf"{_diagnostic_name(key)}.*absolute.*relative-codex"):
         common.codex_runtime_env(base_env)
-    with pytest.raises(ValueError, match=rf"{key}.*absolute.*relative-codex"):
+    with pytest.raises(ValueError, match=rf"{_diagnostic_name(key)}.*absolute.*relative-codex"):
         codex_app_server.codex_runtime_env(base_env)
 
     assert not (tmp_path / "relative-codex").exists()
@@ -500,7 +505,7 @@ def test_codex_runtime_adapters_refuse_relative_home_without_creating_it(monkeyp
 def test_config_root_rejects_relative_process_environment(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
 
-    with pytest.raises(ValueError, match=r"YOLOMUX_CONFIG_DIR.*absolute"):
+    with pytest.raises(ValueError, match=rf"{product_env_name('CONFIG_DIR')}.*absolute"):
         probe.config_dir_from_process({"YOLOMUX_CONFIG_DIR": "relative-config"})
 
 
@@ -577,7 +582,7 @@ def test_boot_rejects_unsafe_root_before_stopping_existing_listener(tmp_path: Pa
         assert result.returncode != 0
         assert "startup root validation failed" in result.stderr
         if unsafe_kind == "outside-and-deep":
-            assert "YOLOMUX_CONFIG_DIR resolves outside YOLOMUX_ROOT" in result.stderr
+            assert f"{product_env_name('CONFIG_DIR')} resolves outside {product_env_name('ROOT')}" in result.stderr
             assert "too deep for product socket" not in result.stderr
         assert listener.poll() is None
         assert list(tmp_path.iterdir()) == []
@@ -610,7 +615,7 @@ def test_boot_rejects_relative_log_dir_before_stopping_existing_listener(tmp_pat
         )
 
         assert result.returncode != 0
-        assert "YOLOMUX_LOG_DIR" in result.stderr
+        assert "YOMUX_LOG_DIR" in result.stderr
         assert "absolute" in result.stderr
         assert listener.poll() is None
         assert list(tmp_path.iterdir()) == []
@@ -661,8 +666,11 @@ def test_boot_rejects_tmpdir_inside_checkout_before_listener_or_worktree_mutatio
     tools_dir.mkdir(parents=True)
     shutil.copy2(ROOT / "boot.sh", checkout / "boot.sh")
     shutil.copy2(ROOT / "tools" / "startup_common.sh", tools_dir / "startup_common.sh")
+    shutil.copy2(ROOT / "tools" / "product_environment.sh", tools_dir / "product_environment.sh")
     shutil.copy2(ROOT / "tools" / "instance_isolation.py", tools_dir / "instance_isolation.py")
     shutil.copy2(ROOT / "tools" / "go_binary.py", tools_dir / "go_binary.py")
+    shutil.copy2(ROOT / "tools" / "product_environment.py", tools_dir / "product_environment.py")
+    shutil.copy2(ROOT / "tools" / "product_namespace.json", tools_dir / "product_namespace.json")
     before = sorted(path.relative_to(checkout) for path in checkout.rglob("*"))
     listener = subprocess.Popen(
         [
@@ -721,7 +729,7 @@ def test_setup_tls_dry_run_rejects_relative_output_roots_before_writing(
     result = subprocess.run(arguments, cwd=tmp_path, env=environment, text=True, capture_output=True)
 
     assert result.returncode != 0
-    expected_key = "YOMUX_CA_DIR" if key == "YOLOMUX_CA_DIR" else key
+    expected_key = _diagnostic_name(key)
     assert expected_key in result.stderr
     assert "absolute" in result.stderr
     assert list(tmp_path.iterdir()) == []
@@ -773,7 +781,7 @@ def test_setup_tls_rejects_relative_environment_state_before_product_import(tmp_
     )
 
     assert result.returncode != 0
-    assert "YOLOMUX_STATE_DIR" in result.stderr
+    assert product_env_name("STATE_DIR") in result.stderr
     assert not home.exists()
 
 
@@ -793,7 +801,7 @@ def test_setup_tls_rooted_dry_run_refuses_outside_cli_state_without_writing(tmp_
     )
 
     assert result.returncode != 0
-    assert "YOLOMUX_STATE_DIR resolves outside YOLOMUX_ROOT" in result.stderr
+    assert f"{product_env_name('STATE_DIR')} resolves outside {product_env_name('ROOT')}" in result.stderr
     assert not root.exists()
     assert not outside.exists()
 
@@ -869,7 +877,7 @@ def test_check_refuses_relative_tool_lock_before_writing(tmp_path: Path) -> None
     )
 
     assert result.returncode == 2
-    assert "YOLOMUX_TOOL_LOCK_PATH" in result.stderr
+    assert product_env_name("TOOL_LOCK_PATH") in result.stderr
     assert "absolute" in result.stderr
     assert not (cwd / "relative-tool.lock").exists()
     assert not (tmp_path / "runtime").exists()

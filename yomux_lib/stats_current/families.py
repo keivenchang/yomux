@@ -100,6 +100,13 @@ class FamilySpec:
                 browser_family.validate_payload(payload)
             except browser_family.BrowserPayloadError as error:
                 raise FamilyValidationError(str(error)) from error
+        if self.name == "system_disk":
+            mountpoint = payload.get("mountpoint")
+            used_percent = payload.get("used_percent")
+            if not isinstance(mountpoint, str) or not mountpoint.strip() or len(mountpoint) > 4096:
+                raise FamilyValidationError("system_disk.mountpoint must be a non-empty path")
+            if not isinstance(used_percent, (int, float)) or not 0 <= used_percent <= 100:
+                raise FamilyValidationError("system_disk.used_percent must be between 0 and 100")
         return MappingProxyType(dict(payload))
 
 
@@ -166,6 +173,14 @@ CURRENT_FAMILIES = (
             "mac_compressed_memory_bytes", "mac_pressure_percent", "mac_pressure_level",
             "process_memory_bytes",
         ), True,
+    ),
+    FamilySpec(
+        # Go owns collection. None keeps the deprecated Python scheduler from
+        # creating a collector job while preserving the shared read contract.
+        # It also avoids inventing Python outage spans for an unowned family.
+        "system_disk", "system_disk", None, None, FoldKind.GAUGE,
+        (_field("mountpoint", STRING), _field("used_percent", NUMBER)),
+        ("system_disk_used_percent",), False,
     ),
     # Usage atoms are event-derived. The transcript scan cadence controls when
     # additional atoms are discovered; it is not evidence that an atom-free

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from yomux_lib.stats_current import families
+from yomux_lib.stats_current.scheduler import COLLECTED_FAMILIES
 
 
 def test_manifest_owns_every_current_family_cadence_and_fold():
@@ -19,6 +20,7 @@ def test_manifest_owns_every_current_family_cadence_and_fold():
         "gpu": ("gpu", 10, 60, families.FoldKind.GAUGE, True),
         "service_load": ("service_load", 1, 1, families.FoldKind.AVERAGE, True),
         "system_memory": ("system_memory", 60, 60, families.FoldKind.GAUGE, True),
+        "system_disk": ("system_disk", None, None, families.FoldKind.GAUGE, False),
         "agent_tokens": ("agent_tokens", 10, 60, families.FoldKind.RATE, False),
         "cost": ("agent_tokens", 10, 60, families.FoldKind.USAGE, False),
         "browser": ("browser", None, None, families.FoldKind.RATE, True),
@@ -42,6 +44,11 @@ def test_manifest_owns_every_current_family_cadence_and_fold():
     assert families.FAMILY_BY_NAME["service_load"].cadence_seconds(watched=False) == 1
     assert families.FAMILY_BY_NAME["browser"].cadence_seconds(watched=True) is None
     assert families.FAMILY_BY_NAME["cost"].coverage_family == "agent_tokens"
+
+
+def test_system_disk_is_readable_but_not_collected_by_the_deprecated_python_scheduler():
+    assert "system_disk" in families.FAMILY_BY_NAME
+    assert "system_disk" not in COLLECTED_FAMILIES
 
 
 def test_every_server_final_series_has_one_owner():
@@ -74,6 +81,7 @@ def test_every_server_final_series_has_one_owner():
         ("service_load", {"running": False, "cpu_percent": 0, "rss_bytes": None}),
         ("cpu", {"process_percent": 5, "system_percent": 20, "process_cpu_percent": {"python": 4}}),
         ("system_memory", {"used_bytes": 10, "capacity_bytes": 20}),
+        ("system_disk", {"mountpoint": "/data", "used_percent": 25.0}),
         ("system_memory", {"used_bytes": 10, "capacity_bytes": 20, "process_memory_bytes": {"python": 8, "node": 4}}),
         ("system_memory", {"used_bytes": 10, "capacity_bytes": 20, "pressure_percent": 35}),
         ("system_memory", {"used_bytes": 10, "capacity_bytes": 20, "mac_pressure_percent": 35, "mac_pressure_level": 4}),
@@ -96,6 +104,8 @@ def test_present_collector_payload_envelopes_validate(family_name, payload):
         ("missing", {}, "unknown current stats family"),
         ("cpu", {}, "missing fields"),
         ("cpu", {"process_percent": -1, "system_percent": 1}, "non-negative finite"),
+        ("system_disk", {"mountpoint": "/data", "used_percent": 101}, "between 0 and 100"),
+        ("system_disk", {"mountpoint": "", "used_percent": 50}, "non-empty string"),
         ("agent_status", {"states": {"agent-a": "working"}}, "must be one of"),
         ("agent_status", {"states": {"": "idle"}}, "agent ids must be non-empty"),
         ("gpu", {

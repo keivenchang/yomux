@@ -36,7 +36,7 @@ from yomux_lib.statusd_client import StatusClient
 from yomux_lib.statusd_protocol import validate_inventory
 from yomux_lib.statusd_protocol import StatusSnapshotMetadata
 from yomux_lib.statusd_protocol import stamped_request
-from yomux_lib.tmux_utils import YOLOMUX_TMUX_SOCKET_ENV
+from yomux_lib.tmux_utils import PRODUCT_TMUX_SOCKET_ENV
 
 
 class FakeStatusApp:
@@ -617,7 +617,7 @@ def test_statusd_dot_reflects_real_idle_pane_after_ttl_without_explicit_invalida
     idle_case = _find_claude_case("try_suggestion_idle")
     socket_path = short_tmux_socket_path("yostatusd")
     session = f"ymock-{uuid.uuid4().hex[:8]}"
-    monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
+    monkeypatch.setenv(PRODUCT_TMUX_SOCKET_ENV, str(socket_path))
     created = tmux_cmd(
         tmux_binary, socket_path, "new-session", "-d", "-s", session, "-x", "78", "-y", "35",
         f"cd {REPO_ROOT} && exec python3 tools/mockers/claude.py --mock",
@@ -633,7 +633,7 @@ def test_statusd_dot_reflects_real_idle_pane_after_ttl_without_explicit_invalida
 
         service = statusd.PersistentStatusService(tmp_path / "statusd.sock")
         request = {"action": "snapshot", "protocol_version": statusd.STATUSD_PROTOCOL_VERSION, "sessions": [session]}
-        wait_for_direct_snapshot(service, request)
+        wait_for_direct_snapshot(service, request, timeout=10.0)
         assert service.snapshot_payload["sessions"][session]["screen"]["key"] == "working"
 
         # The mock TUI ignores keystrokes while "working" (matching real Claude behavior of not
@@ -695,7 +695,7 @@ def test_real_tmux_agent_window_status_tabber_and_stats_share_lifecycle_identity
     socket_path = short_tmux_socket_path("yoagent-window")
     status_socket = tmp_path / "statusd.sock"
     session = f"ymock-{uuid.uuid4().hex[:8]}"
-    monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
+    monkeypatch.setenv(PRODUCT_TMUX_SOCKET_ENV, str(socket_path))
     created = tmux_cmd(
         tmux_binary, socket_path, "new-session", "-d", "-s", session, "-x", "78", "-y", "35",
         f"cd {REPO_ROOT} && exec python3 tools/mockers/claude.py --mock",
@@ -1914,3 +1914,20 @@ def test_statusd_orphan_diagnostics_reports_without_signalling_and_retains_age(t
 
     third_response, _ = service.handle({"action": "orphan_diagnostics", "protocol_version": statusd.STATUSD_PROTOCOL_VERSION})
     assert child.pid not in {row["pid"] for row in third_response["orphans"]}, "a reaped pid must not remain in retained state forever"
+
+
+@pytest.mark.parametrize("claim", ["queued", "building"])
+def test_statusd_accepted_snapshot_work_prevents_idle_retirement(tmp_path, claim):
+    service = statusd.PersistentStatusService(tmp_path / "status.sock", idle_seconds=0.1)
+    service.last_client_at = time.monotonic() - 10
+    assert service.idle_due() is True
+    if claim == "queued":
+        with service.lock:
+            service._retain_refresh_request(("one",))
+    else:
+        service.refresh_build_sessions = ("one",)
+    assert service.idle_due() is False
+    service.refresh_requested_sessions = None
+    service.refresh_build_sessions = None
+    service.last_client_at = time.monotonic() - 10
+    assert service.idle_due() is True

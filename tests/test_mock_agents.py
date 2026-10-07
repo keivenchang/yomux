@@ -20,7 +20,7 @@ from tests.helpers.mock_agents import tmux_cmd
 from tests.helpers.mock_agents import wait_for_mockcase_render
 
 from yomux_lib.agent_tui import classify_agent_pane
-from yomux_lib.tmux_utils import YOLOMUX_TMUX_SOCKET_ENV
+from yomux_lib.tmux_utils import PRODUCT_TMUX_SOCKET_ENV
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -76,7 +76,7 @@ def run_mockcase(monkeypatch, tmp_path, case):
     socket_path = short_tmux_socket_path("yomockcase")
     sock_base = socket_path.parent
     session = f"ymock-{uuid.uuid4().hex[:8]}"
-    monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
+    monkeypatch.setenv(PRODUCT_TMUX_SOCKET_ENV, str(socket_path))
     created = tmux_cmd(
         tmux_binary,
         socket_path,
@@ -218,7 +218,7 @@ def visual_tmux(monkeypatch):
         pytest.skip("tmux is not installed")
     socket_path = short_tmux_socket_path("yovisual")
     cleanup_visual_test_sessions(tmux_binary, socket_path)
-    monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
+    monkeypatch.setenv(PRODUCT_TMUX_SOCKET_ENV, str(socket_path))
     harness = VisualTmuxHarness(tmux_binary, socket_path)
     try:
         yield harness

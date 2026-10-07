@@ -1334,6 +1334,226 @@ test('repair failures use one bounded exponential backoff owner', async () => {
   await clock.advance(200);
   assert.equal(calls, 2);
   assert.equal(clock.nextDelay(), 250, 'backoff is capped');
+  assert.equal(controller.retryNow(), true);
+  assert.equal(clock.nextDelay(), 0, 'explicit Retry bypasses the capped automatic backoff');
+  assert.equal(controller.buildRequest().since_generation, 0, 'explicit Retry requests a full snapshot');
+  await clock.advance(0);
+  assert.equal(calls, 3, 'explicit Retry starts one immediate repair');
+});
+
+test('a warm manual Retry times out a silent snapshot and leaves a visible error', async () => {
+  ManualEventSource.instances = [];
+  const clock = new FakeClock();
+  const states = [];
+  const failures = [];
+  const client = loadNamespace().createBrowserClient({
+    fetch: async (url, options) => {
+      if (url === '/api/stats-capabilities') return response(200, capabilities());
+      if (url === '/api/stats-retry' && options?.method === 'POST') return response(200, {ok: true});
+      throw new Error(`unexpected fetch: ${url}`);
+    },
+    EventSource: ManualEventSource,
+    clientId: 'warm-silent-retry',
+    savedRange: 300,
+    savedResolution: 1,
+    clock,
+    readinessTimeoutMs: 100,
+    onState: (state, error) => states.push({state, error}),
+    controllerOptions: {clock, onFailure: failure => failures.push(failure)},
+  });
+
+  await client.start();
+  await clock.advance(0);
+  emitSnapshotSequence(ManualEventSource.instances[0], snapshot({requested: 1}));
+  await flushPromises();
+  assert.equal(states.at(-1).state, 'ready');
+
+  await client.retry();
+  assert.equal(clock.nextDelay(), 0, 'manual Retry starts immediately despite prior automatic state');
+  await clock.advance(0);
+  assert.equal(ManualEventSource.instances.length, 2, 'manual Retry opens exactly one replacement snapshot stream');
+  assert.equal(clock.nextDelay(), 100, 'the warm stream owns its readiness deadline');
+  await clock.advance(100);
+  await flushPromises();
+  assert.equal(states.at(-1).state, 'error');
+  assert.match(states.at(-1).error.message, /readiness timed out after 100ms/);
+  assert.equal(failures.length, 0, 'transient stream silence is a visible transport error, not a schema violation');
+  await clock.advance(1000);
+  const recovered = snapshot({requested: 1, cache: 2, sourceGeneration: 2});
+  emitSnapshotSequence(ManualEventSource.instances[2], recovered);
+  await flushPromises();
+  await flushPromises();
+  assert.equal(states.at(-1).state, 'ready', 'a later valid snapshot recovers from the timed-out retry');
+  assert.equal(client.controller().generation().cache_generation, 2);
+  client.stop();
+});
+
+test('a warm manual Retry reports rejected current snapshot generations', async () => {
+  for (const {range, resolution} of [{range: 300, resolution: 1}, {range: 86400, resolution: 300}]) {
+    const rejected = [
+      ['stale cache generation', snapshot({range, requested: resolution, resolution, cache: 1, sourceGeneration: 2})],
+      ['changed immutable generation', {...snapshot({range, requested: resolution, resolution, cache: 2, sourceGeneration: 2}), generated_at: 301}],
+      ['regressed source generation', snapshot({range, requested: resolution, resolution, cache: 3, sourceGeneration: 1})],
+    ];
+    for (const [name, candidate] of rejected) {
+      ManualEventSource.instances = [];
+      const clock = new FakeClock();
+      const states = [];
+      const failures = [];
+      const client = loadNamespace().createBrowserClient({
+        fetch: async (url, options) => {
+          if (url === '/api/stats-capabilities') return response(200, capabilities());
+          if (url === '/api/stats-retry' && options?.method === 'POST') return response(200, {ok: true});
+          throw new Error(`unexpected fetch: ${url}`);
+        },
+        EventSource: ManualEventSource,
+        clientId: `rejected-retry-${range}-${name.replaceAll(' ', '-')}`,
+        savedRange: range,
+        savedResolution: resolution,
+        clock,
+        readinessTimeoutMs: 100,
+        onState: (state, error) => states.push({state, error}),
+        controllerOptions: {clock, onFailure: failure => failures.push(failure)},
+      });
+
+      await client.start();
+      await clock.advance(0);
+      emitSnapshotSequence(ManualEventSource.instances[0], snapshot({range, requested: resolution, resolution, cache: 2, sourceGeneration: 2}));
+      await flushPromises();
+      assert.equal(states.at(-1).state, 'ready', `${range}s ${name}: initial snapshot is accepted`);
+
+      await client.retry();
+      await clock.advance(0);
+      assert.equal(ManualEventSource.instances.length, 2, `${range}s ${name}: Retry opens one full-snapshot stream`);
+      emitSnapshotSequence(ManualEventSource.instances[1], candidate);
+      await flushPromises();
+      await flushPromises();
+      assert.equal(states.at(-1).state, 'error', `${range}s ${name}: rejected current response is visible`);
+      assert.match(states.at(-1).error.message, /snapshot/);
+      assert.equal(failures.length, 1, `${range}s ${name}: rejection is recorded once`);
+      assert.equal(client.controller().generation().cache_generation, 2, `${range}s ${name}: last accepted generation is retained`);
+      client.stop();
+    }
+  }
+});
+
+test('a 24-hour manual Retry accepts one complete chunked snapshot', async () => {
+  ManualEventSource.instances = [];
+  const clock = new FakeClock();
+  const states = [];
+  const failures = [];
+  const client = loadNamespace().createBrowserClient({
+    fetch: async (url, options) => {
+      if (url === '/api/stats-capabilities') return response(200, capabilities());
+      if (url === '/api/stats-retry' && options?.method === 'POST') return response(200, {ok: true});
+      throw new Error(`unexpected fetch: ${url}`);
+    },
+    EventSource: ManualEventSource,
+    clientId: '24-hour-manual-retry',
+    savedRange: 86400,
+    savedResolution: 300,
+    clock,
+    readinessTimeoutMs: 100,
+    onState: (state, error) => states.push({state, error}),
+    controllerOptions: {clock, onFailure: failure => failures.push(failure)},
+  });
+
+  await client.start();
+  await clock.advance(0);
+  emitSnapshotSequence(ManualEventSource.instances[0], snapshot({range: 86400, requested: 300, resolution: 300, cache: 1}));
+  await flushPromises();
+  assert.equal(states.at(-1).state, 'ready', 'the initial 24-hour snapshot is accepted');
+
+  await client.retry();
+  await clock.advance(0);
+  assert.equal(ManualEventSource.instances.length, 2, 'Retry opens exactly one replacement snapshot stream');
+  const retried = snapshot({range: 86400, requested: 300, resolution: 300, cache: 2, sourceGeneration: 2});
+  emitSnapshotSequence(ManualEventSource.instances[1], [snapshotChunk(retried, 0, 2), snapshotChunk(retried, 1, 2)]);
+  await flushPromises();
+  await flushPromises();
+  assert.equal(states.at(-1).state, 'ready', 'the complete 24-hour chunk sequence returns history to ready');
+  assert.equal(client.controller().generation().cache_generation, 2);
+  assert.equal(failures.length, 0);
+  client.stop();
+});
+
+test('full and chunked invalid snapshots share one visible contract diagnostic', async () => {
+  for (const chunked of [false, true]) {
+    ManualEventSource.instances = [];
+    const clock = new FakeClock();
+    const states = [];
+    const failures = [];
+    const client = loadNamespace().createBrowserClient({
+      fetch: async url => {
+        if (url === '/api/stats-capabilities') return response(200, capabilities());
+        throw new Error(`unexpected fetch: ${url}`);
+      },
+      EventSource: ManualEventSource,
+      clientId: `invalid-snapshot-${chunked ? 'chunked' : 'full'}`,
+      savedRange: 300,
+      savedResolution: 1,
+      clock,
+      readinessTimeoutMs: 1000,
+      onState: (state, error) => states.push({state, error}),
+      controllerOptions: {clock, onFailure: failure => failures.push(failure)},
+    });
+    await client.start();
+    await clock.advance(0);
+    const invalid = snapshot({requested: 1});
+    invalid.cost_report.models = Array.from({length: 17}, () => ({}));
+    const payload = chunked ? [snapshotChunk(invalid, 0, 2), snapshotChunk(invalid, 1, 2)] : invalid;
+    emitSnapshotSequence(ManualEventSource.instances[0], payload);
+    await flushPromises();
+    await flushPromises();
+    assert.equal(states.at(-1).state, 'error', `${chunked ? 'chunked' : 'full'} invalid snapshot has an error state`);
+    assert.equal(failures.length, 1, `${chunked ? 'chunked' : 'full'} invalid snapshot reports once`);
+    assert.match(failures[0].message, /cannot read this server's data/);
+    assert.match(failures[0].message, /cost_report\.models is not bounded/);
+    client.stop();
+  }
+});
+
+test('retired invalid snapshot replies cannot report into a changed or inactive view', async () => {
+  for (const transition of ['select', 'hide', 'stop']) {
+    ManualEventSource.instances = [];
+    const clock = new FakeClock();
+    const states = [];
+    const failures = [];
+    const client = loadNamespace().createBrowserClient({
+      fetch: async url => {
+        if (url === '/api/stats-capabilities') return response(200, capabilities());
+        throw new Error(`unexpected fetch: ${url}`);
+      },
+      EventSource: ManualEventSource,
+      clientId: `retired-invalid-${transition}`,
+      savedRange: 300,
+      savedResolution: 1,
+      clock,
+      onState: (state, error) => states.push({state, error}),
+      controllerOptions: {clock, onFailure: failure => failures.push(failure)},
+    });
+    await client.start();
+    await clock.advance(0);
+    const stream = ManualEventSource.instances[0];
+    const invalid = snapshot({requested: 1});
+    invalid.cost_report.models = Array.from({length: 17}, () => ({}));
+    const first = snapshotChunk(invalid, 0, 2);
+    stream.emit('ack', JSON.stringify({
+      cache_generation: invalid.cache_generation, chunk_count: 2, not_modified: false,
+      range_seconds: invalid.range_seconds, requested_resolution: invalid.requested_resolution,
+      resolution_seconds: invalid.resolution_seconds,
+    }));
+    stream.emit('snapshot', JSON.stringify(first));
+    if (transition === 'select') client.select(900, 10);
+    else if (transition === 'hide') client.setVisible(false);
+    else client.stop();
+    await flushPromises();
+    await flushPromises();
+    assert.equal(failures.length, 0, `${transition} suppresses the retired contract diagnostic`);
+    assert.equal(states.some(item => item.state === 'error' && /cost_report\.models/.test(item.error?.message || '')), false,
+      `${transition} suppresses the retired view error`);
+    client.stop();
+  }
 });
 
 test('hidden and static states suspend repairs then resume one coalesced repair', async () => {

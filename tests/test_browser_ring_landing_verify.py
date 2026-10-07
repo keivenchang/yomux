@@ -4,18 +4,21 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
 import signal
-import shlex
 import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 from types import SimpleNamespace
+from urllib.error import HTTPError
+from urllib.parse import urlencode
+from urllib.request import Request
 from urllib.request import urlopen
 
 import pytest
@@ -33,6 +36,7 @@ from tests.gate_harness import gate_auth_credentials  # noqa: F401
 from tests.gate_harness import gate_http_port  # noqa: F401
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import gate_tmux  # noqa: F401
+from tests.isolated_dev_server import go_test_server_binary
 from tests.gate_harness import assert_no_surviving_local_service_daemons
 from tests.gate_harness import retire_local_service_daemons_beneath
 from tests.gate_harness import run_fixture_cleanup_phases
@@ -40,9 +44,6 @@ from yomux_lib import auth as auth_module
 from yomux_lib import common
 from yomux_lib import server_auth
 from yomux_lib.infra.worktree_writer import child_process_artifact_environment
-from yomux_lib.local_services.registry import bounded_process_table
-from yomux_lib.local_services.registry import inherited_python_path
-from yomux_lib.stats_current import client as stats_client
 from yomux_lib.stats_current import service as stats_service
 from yomux_lib.stats_current import storage
 from tools.instance_isolation import synthetic_test_environment
@@ -105,23 +106,35 @@ class ExternalRuntime:
         return f"http://127.0.0.1:{self.port}"
 
 
-def _wait_http(browser_driver, port: int) -> None:
+def _wait_http(browser_driver, port: int, log_path: Path) -> None:
+    last_failure = ["no HTTP response yet"]
+
     def serving(_driver) -> bool:
         try:
-            with urlopen(f"http://127.0.0.1:{port}/login", timeout=0.5) as response:
+            with urlopen(f"http://127.0.0.1:{port}/login", timeout=5.0) as response:
+                last_failure[0] = f"HTTP {response.status}"
                 return response.status == 200
+        except HTTPError as error:
+            last_failure[0] = f"HTTP {error.code}"
+            body = error.read().decode("utf-8", errors="replace")
+            last_failure[0] += f": {body[:1000]}"
+            return False
         except OSError:
             return False
 
-    WebDriverWait(browser_driver, 20, poll_frequency=0.1).until(serving)
+    try:
+        WebDriverWait(browser_driver, 20, poll_frequency=0.1).until(serving)
+    except TimeoutException as error:
+        log = log_path.read_text(encoding="utf-8", errors="replace") if log_path.is_file() else "<server log missing>"
+        raise AssertionError(f"Go server did not expose /login on port {port}: {last_failure[0]}\n{log[-6000:]}") from error
 
 
 def _launch_server(
     port: int,
-    session: str,
     log_path: Path,
     runtime_dir: Path,
     tmux_socket: Path,
+    database_path: Path,
 ) -> subprocess.Popen[bytes]:
     output = log_path.open("ab")
     fixture_root = runtime_dir.parent
@@ -138,6 +151,7 @@ def _launch_server(
         "XDG_RUNTIME_DIR": str(fixture_root / "xdg-runtime"),
         "CLAUDE_CONFIG_DIR": str(fixture_root / "claude-config"),
         "YOLOMUX_CONFIG_DIR": str(fixture_root / "config"),
+        "YOMUX_ROOT": str(fixture_root),
         "YOLOMUX_STATE_DIR": str(fixture_root / "state"),
         "YOLOMUX_CACHE_DIR": str(fixture_root / "cache"),
         "YOLOMUX_CODEX_HOME": str(fixture_root / "codex-home"),
@@ -179,22 +193,25 @@ def _launch_server(
         Path(path).mkdir(parents=True, exist_ok=True)
     environment.pop("YOLOMUX_ROOT", None)
     environment["YOLOMUX_RUNTIME_DIR"] = str(runtime_dir)
+    environment.pop("YOMUX_TEST_AUTH_BYPASS", None)
+    environment.pop("YOLOMUX_TEST_AUTH_BYPASS", None)
+    environment["YOLOMUX_STATS_DISABLE_COLLECTORS"] = "1"
     environment["PYTHONUNBUFFERED"] = "1"
     environment = child_process_artifact_environment(REPO_ROOT, environ=environment)
-    environment["PYTHONPATH"] = inherited_python_path(environment)
     process = subprocess.Popen(
         (
-            sys.executable,
-            str(REPO_ROOT / "yomux.py"),
-            "--backend",
-            "python",
+            str(go_test_server_binary(REPO_ROOT)),
             "--host",
             "127.0.0.1",
             "--port",
             str(port),
-            "--sessions",
-            session,
             "--http",
+            "--root",
+            str(REPO_ROOT),
+            "--config",
+            str(fixture_root / "config"),
+            "--stats",
+            str(database_path),
         ),
         cwd=REPO_ROOT,
         env=environment,
@@ -226,14 +243,15 @@ def test_ring_server_launch_replaces_ambient_client_roots(monkeypatch, tmp_path:
     monkeypatch.setenv("TMPDIR", "/host/tmp")
     monkeypatch.setenv("YOLOMUX_CODEX_HOME", "/host/codex")
     monkeypatch.setenv("YOLOMUX_OPENCODE_DATABASE", "/host/opencode.db")
+    monkeypatch.setattr(sys.modules[__name__], "go_test_server_binary", lambda _root: Path("/tmp/yomux-go"))
     monkeypatch.setattr(subprocess, "Popen", capture)
 
     process = _launch_server(
         7222,
-        "fixture-session",
         tmp_path / "server.log",
         runtime_dir,
         tmp_path / "tmux.sock",
+        tmp_path / storage.DATABASE_FILENAME,
     )
 
     assert isinstance(process, FakeProcess)
@@ -246,6 +264,12 @@ def test_ring_server_launch_replaces_ambient_client_roots(monkeypatch, tmp_path:
     assert environment["YOLOMUX_CODEX_HOME"] == str(tmp_path / "codex-home")
     assert environment["YOLOMUX_OPENCODE_DATABASE"] == str(tmp_path / "opencode.db")
     assert environment["YOLOMUX_TMUX_SOCKET"] == str(tmp_path / "tmux.sock")
+    assert environment["YOLOMUX_STATS_DISABLE_COLLECTORS"] == "1"
+    assert "YOMUX_TEST_AUTH_BYPASS" not in environment
+    assert "YOLOMUX_TEST_AUTH_BYPASS" not in environment
+    command = captured["command"]
+    assert Path(command[0]).name == "yomux-go"
+    assert command[command.index("--stats") + 1] == str(tmp_path / storage.DATABASE_FILENAME)
     assert all("/host/" not in value for value in environment.values())
 
 
@@ -310,44 +334,40 @@ def test_ring_server_stop_preserves_retirement_failure_after_stopping_process(mo
     assert events == [("retire", browser_driver), ("stop", process)]
 
 
-def _statsd_processes_for_database(database_path: Path) -> list[dict[str, object]]:
-    matches = []
-    for pid, process in bounded_process_table(require_complete=True).items():
-        try:
-            arguments = shlex.split(process.command)
-        except ValueError:
-            continue
-        if "yomux_lib.stats_current.service" not in arguments:
-            continue
-        try:
-            database = arguments[arguments.index("--database") + 1]
-            socket_value = arguments[arguments.index("--socket") + 1]
-        except (IndexError, ValueError):
-            continue
-        if Path(database).resolve() != database_path.resolve():
-            continue
-        matches.append({"pid": pid, "socket": socket_value, "arguments": arguments})
-    return matches
+def _go_stats_request(
+    port: int,
+    path: str,
+    *,
+    method: str = "GET",
+    payload: dict[str, object] | None = None,
+    credentials: GateAuthCredentials,
+) -> tuple[int, dict[str, object]]:
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    authorization = base64.b64encode(f"{credentials.username}:{credentials.password}".encode("utf-8")).decode("ascii")
+    request = Request(
+        f"http://127.0.0.1:{port}{path}",
+        data=body,
+        headers={
+            "Authorization": f"Basic {authorization}",
+            **({"Content-Type": "application/json"} if body is not None else {}),
+        },
+        method=method,
+    )
+    try:
+        with urlopen(request, timeout=5.0) as response:
+            return response.status, json.loads(response.read())
+    except HTTPError as error:
+        return error.code, json.loads(error.read())
 
 
-def _production_stats_client(
-    browser_driver,
-    database_path: Path,
-    requested_socket: Path,
-) -> tuple[stats_client.StatsCurrentClient, dict[str, object]]:
-    def sole_daemon(_driver):
-        processes = _statsd_processes_for_database(database_path)
-        return processes[0] if len(processes) == 1 else False
-
-    process = WebDriverWait(browser_driver, 10, poll_frequency=0.05).until(sole_daemon)
-    actual_socket = Path(str(process["socket"]))
-    expected_socket = stats_service.safe_socket_path(requested_socket, prefix="yolomux-statsd")
-    assert actual_socket == expected_socket or actual_socket.name == expected_socket.name
-    return stats_client.StatsCurrentClient(actual_socket, database_path), process
+def _request_stats_retry(port: int, credentials: GateAuthCredentials) -> dict[str, object]:
+    status, payload = _go_stats_request(port, "/api/stats-retry", method="POST", credentials=credentials)
+    assert status == 200 and payload.get("ok") is True, (status, payload)
+    return payload
 
 
 def _retire_ring_fixture_daemons(paths: GateRuntimePaths) -> None:
-    """Settle every root-owned sidecar through the gate's shared lifecycle owner."""
+    """Settle any fixture-owned helper processes through the shared lifecycle owner."""
 
     label = "ring browser restart"
     retire_local_service_daemons_beneath(paths.root, label=label)
@@ -376,15 +396,18 @@ def test_ring_fixture_daemon_retirement_uses_shared_root_owner(monkeypatch, tmp_
     ]
 
 
-def _wait_ring_published(browser_driver, client: stats_client.StatsCurrentClient, source_generation: int) -> dict[str, object]:
+def _wait_ring_published(
+    browser_driver, port: int, source_generation: int, credentials: GateAuthCredentials,
+) -> dict[str, object]:
     def published(_driver):
-        status = client.status()
-        ring = status.get("ring_writer") if isinstance(status, dict) else None
-        if not isinstance(ring, dict):
+        status_code, status = _go_stats_request(port, "/readyz", credentials=credentials)
+        if status_code not in {200, 503} or not isinstance(status, dict):
             return False
-        if int(ring.get("publications") or 0) < 1:
+        if int(status.get("lifecycle_publications") or 0) < 1:
             return False
-        if int(ring.get("last_source_generation") or 0) < source_generation:
+        if int(status.get("source_generation") or 0) < source_generation:
+            return False
+        if int(status.get("pending_cells") or 0) != 0:
             return False
         return status
 
@@ -393,21 +416,25 @@ def _wait_ring_published(browser_driver, client: stats_client.StatsCurrentClient
     except TimeoutException as error:
         raise AssertionError({
             "expected_source_generation": source_generation,
-            "status": client.status(),
+            "status": _go_stats_request(port, "/readyz", credentials=credentials),
         }) from error
 
 
 def _wait_snapshot_ready(
     browser_driver,
-    client: stats_client.StatsCurrentClient,
+    port: int,
     request: dict[str, object],
-) -> tuple[dict[str, object], bytes]:
+    credentials: GateAuthCredentials,
+) -> dict[str, object]:
     """Wait for the cache to converge after a ring publication before reading it."""
 
     def ready(_driver):
-        metadata, binary = client.snapshot(request)
-        if metadata.get("ok") is True and binary:
-            return metadata, binary
+        query = urlencode(request)
+        status, payload = _go_stats_request(
+            port, f"/api/stats-snapshot?{query}", credentials=credentials,
+        )
+        if status == 200 and isinstance(payload.get("buckets"), list):
+            return payload
         return False
 
     try:
@@ -415,86 +442,69 @@ def _wait_snapshot_ready(
     except TimeoutException as error:
         raise AssertionError({
             "request": request,
-            "status": client.status(),
-            "resource_state": client.resource_state(),
+            "status": _go_stats_request(port, "/readyz", credentials=credentials),
         }) from error
 
 
 def _seed_zero_and_gap(
-    client: stats_client.StatsCurrentClient,
+    database_path: Path,
     usage_source: str,
+    *,
+    include_aging_cell: bool = False,
 ) -> tuple[dict[str, object], dict[str, int]]:
     now = int(time.time())
     aligned = now - now % 10
     start = aligned - 120
     gap_start = aligned - 60
     gap_end = aligned - 40
+    left_edge = aligned - 240
     source = "gpu:ring-e2e"
-    result = client.append(
-        observations=(
-            storage.Observation(
-                "ring-e2e-nonzero-before",
-                "gpu",
-                source,
-                start + 10,
-                "ring-e2e-before",
-                1,
-                {"util_percent": 40, "memory_used_bytes": 400, "memory_capacity_bytes": 1000, "label": "Ring E2E GPU"},
-            ),
-            storage.Observation(
-                "ring-e2e-explicit-zero",
-                "gpu",
-                source,
-                gap_end + 10,
-                "ring-e2e-after",
-                1,
-                {"util_percent": 0, "memory_used_bytes": 0, "memory_capacity_bytes": 1000, "label": "Ring E2E GPU"},
-            ),
-            storage.Observation(
-                "ring-e2e-nonzero-after",
-                "gpu",
-                source,
-                aligned - 5,
-                "ring-e2e-after",
-                1,
-                {"util_percent": 70, "memory_used_bytes": 700, "memory_capacity_bytes": 1000, "label": "Ring E2E GPU"},
-            ),
+    observations = (
+        storage.Observation(
+            "ring-e2e-nonzero-before", "gpu", source, start + 10, "ring-e2e-before", 1,
+            {"util_percent": 40, "memory_used_bytes": 400, "memory_capacity_bytes": 1000, "label": "Ring E2E GPU"},
         ),
-        usage_atoms=(storage.UsageAtom(
-            "ring-e2e-usage",
-            "input",
-            "text",
-            "none",
-            "tokens",
-            aligned - 5,
-            {
-                "quantity": 12,
-                "provider": "openai",
-                "model": "gpt",
-                "agent_id": "ring-writer",
-                "telemetry_complete": True,
-            },
-        ),),
-        coverage_epochs=(
-            storage.CoverageEpoch("gpu", source, "ring-e2e-before", start, gap_start, 10, 1),
-            storage.CoverageEpoch("gpu", source, "ring-e2e-after", gap_end, None, 10, 1),
-            storage.CoverageEpoch(
-                "agent_tokens",
-                usage_source,
-                "usage-scan-before-direct-atom",
-                start,
-                gap_start,
-                60,
-                1,
-            ),
+        storage.Observation(
+            "ring-e2e-explicit-zero", "gpu", source, gap_end + 10, "ring-e2e-after", 1,
+            {"util_percent": 0, "memory_used_bytes": 0, "memory_capacity_bytes": 1000, "label": "Ring E2E GPU"},
         ),
-        unavailable_spans=(
-            storage.UnavailableSpan("gpu", source, "ring-e2e-gap", gap_start, gap_end, 10, "fixture_downtime", 1),
+        storage.Observation(
+            "ring-e2e-nonzero-after", "gpu", source, aligned - 5, "ring-e2e-after", 1,
+            {"util_percent": 70, "memory_used_bytes": 700, "memory_capacity_bytes": 1000, "label": "Ring E2E GPU"},
         ),
     )
-    assert result.get("ok") is True, result
-    assert int(result.get("accepted") or 0) == 8, result
-    return result, {"gap_start": gap_start, "gap_end": gap_end, "zero_start": gap_end + 10}
+    if include_aging_cell:
+        observations += (_ring_observation("ring-e2e-left-edge", float(left_edge) + 0.5, 55),)
+    with storage.Store.open(database_path) as store:
+        result = store.append_batch(
+            observations=observations,
+            usage_atoms=(storage.UsageAtom(
+                "ring-e2e-usage", "input", "text", "none", "tokens", aligned - 5,
+                {
+                    "quantity": 12,
+                    "provider": "openai",
+                    "model": "gpt",
+                    "agent_id": "ring-writer",
+                    "telemetry_complete": True,
+                },
+            ),),
+            coverage_epochs=(
+                storage.CoverageEpoch("gpu", source, "ring-e2e-before", start, gap_start, 10, 1),
+                storage.CoverageEpoch("gpu", source, "ring-e2e-after", gap_end, None, 10, 1),
+                storage.CoverageEpoch("agent_tokens", usage_source, "usage-scan-before-direct-atom", start, gap_start, 60, 1),
+            ),
+            unavailable_spans=(
+                storage.UnavailableSpan("gpu", source, "ring-e2e-gap", gap_start, gap_end, 10, "fixture_downtime", 1),
+            ),
+        )
+    assert result.observations_accepted == len(observations), result
+    assert result.usage_atoms_accepted == 1, result
+    assert result.coverage_changed == 3, result
+    return {
+        "ok": True,
+        "accepted": result.observations_accepted + result.usage_atoms_accepted,
+        "source_generation": result.source_generation,
+    }, {"gap_start": gap_start, "gap_end": gap_end, "zero_start": gap_end + 10, "left_edge": left_edge}
 
 
 def test_ring_writer_accepts_explicit_zero_beside_downtime_gap(tmp_path: Path) -> None:
@@ -730,7 +740,7 @@ def _set_range_from_slider(driver, target: int) -> None:
     )
     try:
         WebDriverWait(driver, 10, poll_frequency=0.05).until(
-            lambda _driver: int(_graph_state(driver)["range"]) == target
+            lambda _driver: int(_graph_state(driver)["selection"]["range_seconds"]) == target
         )
     except TimeoutException as error:
         current = driver.find_element(By.CSS_SELECTOR, ".js-debug-panel [data-js-debug-range-slider]")
@@ -930,7 +940,6 @@ class _RingRuntime:
     port: int
     session: str
     database_path: Path
-    requested_socket: Path
     service_runtime_dir: Path
     log_path: Path
 
@@ -967,35 +976,6 @@ def _prepare_ring_runtime(
 
     port = gate_http_port.release()
     service_runtime_dir = Path(tempfile.mkdtemp(prefix="ring-runtime-", dir=gate_runtime_paths.root))
-    runtime_environ = synthetic_test_environment({
-        "HOME": str(gate_runtime_paths.home_dir),
-        "TMPDIR": str(gate_runtime_paths.root / "tmp"),
-        "XDG_CONFIG_HOME": str(gate_runtime_paths.config_dir),
-        "XDG_DATA_HOME": str(gate_runtime_paths.root / "xdg-data"),
-        "XDG_STATE_HOME": str(gate_runtime_paths.state_dir),
-        "XDG_CACHE_HOME": str(gate_runtime_paths.cache_dir),
-        "XDG_RUNTIME_DIR": str(gate_runtime_paths.root / "xdg-runtime"),
-        "CLAUDE_CONFIG_DIR": str(gate_runtime_paths.root / "claude-config"),
-        "YOLOMUX_CODEX_HOME": str(gate_runtime_paths.root / "codex-home"),
-        "CODEX_HOME": str(gate_runtime_paths.root / "codex-home"),
-        "YOLOMUX_CLAUDE_TRANSCRIPT_ROOT": str(gate_runtime_paths.root / "claude-transcripts"),
-        "YOLOMUX_CODEX_TRANSCRIPT_ROOT": str(gate_runtime_paths.root / "codex-transcripts"),
-        "YOLOMUX_OPENCODE_DATABASE": str(gate_runtime_paths.root / "opencode.db"),
-        "YOLOMUX_TMUX_SOCKET": str(gate_tmux.socket_path),
-    })
-    # This journey passes an explicit runtime directory to an external process. Do not let the
-    # suite-wide YOLOMUX_ROOT reinterpret that path and prepend the long gate root a second time;
-    # the resulting control socket can exceed Linux's sockaddr_un pathname limit before the server
-    # starts.
-    runtime_environ.pop("YOLOMUX_ROOT", None)
-    runtime_environ["YOLOMUX_RUNTIME_DIR"] = str(service_runtime_dir)
-    with monkeypatch.context() as runtime_patch:
-        runtime_patch.setattr(
-            storage.common,
-            "RUNTIME_DIR",
-            common.resolve_yomux_roots(runtime_environ).runtime_dir,
-        )
-        requested_socket = storage.default_socket_path(gate_runtime_paths.state_dir)
     log_file = tempfile.NamedTemporaryFile(prefix="yolomux-ring-server-", suffix=".txt", dir="/tmp", delete=False)
     log_path = Path(log_file.name)
     log_file.close()
@@ -1004,7 +984,6 @@ def _prepare_ring_runtime(
         port=port,
         session=str(gate_tmux.sessions[0]),
         database_path=storage.default_database_path(gate_runtime_paths.state_dir),
-        requested_socket=requested_socket,
         service_runtime_dir=service_runtime_dir,
         log_path=log_path,
     )
@@ -1028,22 +1007,16 @@ def test_ring_landing_real_page_restart_and_zero_gap(
     runtime = prepared.runtime
     service_runtime_dir = prepared.service_runtime_dir
     database_path = prepared.database_path
-    requested_socket = prepared.requested_socket
     log_path = prepared.log_path
-    process = _launch_server(port, prepared.session, log_path, service_runtime_dir, gate_tmux.socket_path)
-    latest_statsd_pid = 0
+    seeded, markers = _seed_zero_and_gap(database_path, f"port:{port}")
+    process = _launch_server(port, log_path, service_runtime_dir, gate_tmux.socket_path, database_path)
+    assert Path(process.args[0]).name == "yomux-go", process.args
     try:
-        _wait_http(browser, port)
-        client, initial_statsd = _production_stats_client(
-            browser,
-            database_path,
-            requested_socket,
+        _wait_http(browser, port, log_path)
+        _request_stats_retry(port, gate_auth_credentials)
+        first_status = _wait_ring_published(
+            browser, port, int(seeded["source_generation"]), gate_auth_credentials,
         )
-        assert client.ensure_started()
-        seeded, markers = _seed_zero_and_gap(client, f"port:{port}")
-        first_status = _wait_ring_published(browser, client, int(seeded["source_generation"]))
-        latest_statsd_pid = int(first_status.get("pid") or 0)
-        assert latest_statsd_pid == initial_statsd["pid"]
 
         _load_real_stats_page(request, browser, runtime, gate_auth_credentials)
         _wait_pair(browser, 900, "AUTO", 10)
@@ -1065,22 +1038,20 @@ def test_ring_landing_real_page_restart_and_zero_gap(
         assert first_zero_gap["gapRects"], first_zero_gap
 
         _retire_browser_and_stop_server(browser, runtime, process)
-        sidecar_survived_server_stop = latest_statsd_pid > 0 and latest_statsd_pid in bounded_process_table(require_complete=True)
+        server_process_retired = process.poll() is not None
+        assert server_process_retired, process.pid
         _retire_ring_fixture_daemons(gate_runtime_paths)
 
         restart_started = time.monotonic()
-        process = _launch_server(port, str(gate_tmux.sessions[0]), log_path, service_runtime_dir, gate_tmux.socket_path)
-        _wait_http(browser, port)
+        previous_server_pid = process.pid
+        process = _launch_server(port, log_path, service_runtime_dir, gate_tmux.socket_path, database_path)
+        _wait_http(browser, port, log_path)
         server_ready_ms = round((time.monotonic() - restart_started) * 1000, 1)
-        restarted_client, restarted_statsd = _production_stats_client(
-            browser,
-            database_path,
-            requested_socket,
+        assert process.pid != previous_server_pid
+        _request_stats_retry(port, gate_auth_credentials)
+        restarted_status_before_browser = _wait_ring_published(
+            browser, port, int(seeded["source_generation"]), gate_auth_credentials,
         )
-        assert restarted_client.ensure_started()
-        restarted_status_before_browser = restarted_client.status()
-        latest_statsd_pid = int(restarted_status_before_browser.get("pid") or 0)
-        assert latest_statsd_pid == int(restarted_statsd["pid"])
         browser_started = time.monotonic()
         _load_real_stats_page(request, browser, runtime, gate_auth_credentials)
         _show_gpu_util(browser)
@@ -1127,8 +1098,8 @@ def test_ring_landing_real_page_restart_and_zero_gap(
                 "zero_bars": restarted["zeroBars"],
                 "gap_rects": restarted["gapRects"],
                 "cost_tokens": restarted_total,
-                "ring_publications_before_browser": int((restarted_status_before_browser.get("ring_writer") or {}).get("publications") or 0),
-                "sidecar_survived_server_stop": sidecar_survived_server_stop,
+                "ring_publications_before_browser": int(restarted_status_before_browser.get("lifecycle_publications") or 0),
+                "server_process_retired": server_process_retired,
             },
         }
         print("RING_BROWSER_EVIDENCE=" + json.dumps(evidence, sort_keys=True), flush=True)
@@ -1213,48 +1184,70 @@ def test_ring_landing_republishes_rebuildable_and_gaps_unrebuildable_owed_cells(
     and the row retired, so nothing stale can be served. The second must be republished before
     readiness and must still render the retained cost on the first authenticated page read.
     """
+    # A cold per-worker Go build can take longer than the 1-second ring's near-edge
+    # fixture window. Build before seeding so elapsed compilation cannot age out the
+    # bucket this restart journey is meant to observe before it is contradicted.
+    go_test_server_binary(REPO_ROOT)
     prepared = _prepare_ring_runtime(
         monkeypatch, gate_runtime_paths, gate_http_port, gate_tmux, gate_auth_credentials,
     )
     second_capacity = storage.stats_resolution.RING_CAPACITIES[1]
-    process = _launch_server(prepared.port, prepared.session, prepared.log_path, prepared.service_runtime_dir, gate_tmux.socket_path)
-    latest_statsd_pid = 0
+    seeded, seed_markers = _seed_zero_and_gap(
+        prepared.database_path, f"port:{prepared.port}", include_aging_cell=True,
+    )
+    process = _launch_server(
+        prepared.port, prepared.log_path, prepared.service_runtime_dir,
+        gate_tmux.socket_path, prepared.database_path,
+    )
     try:
-        _wait_http(browser, prepared.port)
-        client, _initial = _production_stats_client(
-            browser, prepared.database_path, prepared.requested_socket,
+        _wait_http(browser, prepared.port, prepared.log_path)
+        _request_stats_retry(prepared.port, gate_auth_credentials)
+        _wait_snapshot_ready(browser, prepared.port, {
+            "range_seconds": 300,
+            "resolution": 1,
+            "client_id": "ring-landing-seed-1s",
+        }, gate_auth_credentials)
+        _wait_snapshot_ready(browser, prepared.port, {
+            "range_seconds": 900,
+            "resolution": 60,
+            "client_id": "ring-landing-seed-60s",
+        }, gate_auth_credentials)
+        published_status = _wait_ring_published(
+            browser, prepared.port, int(seeded["source_generation"]), gate_auth_credentials,
         )
-        assert client.ensure_started()
-        seeded, _markers = _seed_zero_and_gap(client, f"port:{prepared.port}")
         # A fact far enough back that its 1-second bucket is still inside the 300-slot window now
         # and provably outside it after the restart wait below. Everything else in the journey is
         # derived from what the product then publishes, not from these constants.
-        aligned = int(time.time())
-        aligned -= aligned % 10
-        left_edge = aligned - 240
-        aging = client.append(observations=(
-            _ring_observation("ring-e2e-left-edge", float(left_edge) + 0.5, 55),
-        ))
-        assert aging.get("ok") is True, aging
-        published_status = _wait_ring_published(browser, client, int(aging["source_generation"]))
-        latest_statsd_pid = int(published_status.get("pid") or 0)
+        left_edge = seed_markers["left_edge"]
 
         before = _durable_ring_state(prepared.database_path)
         aging_address = _slot_address(1, left_edge)
-        assert before["slots"][aging_address]["bucket_start"] == left_edge, (
-            "the 1-second slot under test was never published"
-        )
+        if before["slots"][aging_address]["bucket_start"] != left_edge:
+            populated_one_second = sorted(
+                (slot_index, value["bucket_start"], value["source_generation"])
+                for (resolution, slot_index), value in before["slots"].items()
+                if resolution == 1 and value["bucket_start"] is not None
+            )
+            raise AssertionError({
+                "error": "the 1-second slot under test was never published",
+                "expected_bucket": left_edge,
+                "expected_slot_index": aging_address[1],
+                "actual_slot": before["slots"][aging_address],
+                "populated_one_second_count": len(populated_one_second),
+                "populated_one_second_head": populated_one_second[:5],
+                "populated_one_second_tail": populated_one_second[-5:],
+                "published_status": published_status,
+            })
         rebuildable_start = left_edge - left_edge % 60
         rebuildable_address = _slot_address(60, rebuildable_start)
         assert before["slots"][rebuildable_address]["bucket_start"] == rebuildable_start
 
-        # Production-style restart: the page retires, the server stops, the sidecar stops.
+        # Production-style restart: the page and the Go server stop before offline mutation.
         _retire_browser_and_stop_server(browser, prepared.runtime, process)
         _retire_ring_fixture_daemons(gate_runtime_paths)
-        latest_statsd_pid = 0
 
-        # With no daemon running, wait out the 1-second window and contradict both cells through
-        # the same storage owner statsd itself appends with. Contradicting while nothing can
+        # With the Go owner stopped, wait out the 1-second window and contradict both cells through
+        # the fixture Store. Contradicting while nothing can
         # republish is what makes the two outcomes deterministic rather than a race with a flush.
         window_clear_at = left_edge + second_capacity + 1
         WebDriverWait(browser, 300, poll_frequency=0.5).until(
@@ -1269,14 +1262,15 @@ def test_ring_landing_republishes_rebuildable_and_gaps_unrebuildable_owed_cells(
         assert (1, left_edge) in owed, owed
         assert (60, rebuildable_start) in owed, owed
 
-        process = _launch_server(prepared.port, prepared.session, prepared.log_path, prepared.service_runtime_dir, gate_tmux.socket_path)
-        _wait_http(browser, prepared.port)
-        restarted_client, restarted_statsd = _production_stats_client(
-            browser, prepared.database_path, prepared.requested_socket,
+        process = _launch_server(
+            prepared.port, prepared.log_path, prepared.service_runtime_dir,
+            gate_tmux.socket_path, prepared.database_path,
         )
-        assert restarted_client.ensure_started()
-        latest_statsd_pid = int(restarted_statsd["pid"])
-        restarted_status = _wait_ring_published(browser, restarted_client, int(contradiction.source_generation))
+        _wait_http(browser, prepared.port, prepared.log_path)
+        _request_stats_retry(prepared.port, gate_auth_credentials)
+        restarted_status = _wait_ring_published(
+            browser, prepared.port, int(contradiction.source_generation), gate_auth_credentials,
+        )
 
         # Measured BEFORE the first page read: readiness already owns both outcomes.
         after = _durable_ring_state(prepared.database_path)
@@ -1285,7 +1279,7 @@ def test_ring_landing_republishes_rebuildable_and_gaps_unrebuildable_owed_cells(
             "before_slot": before["slots"][aging_address],
             "after_slot": after["slots"][aging_address],
             "still_pending": (1, left_edge) in after["pending"],
-            "ring_writer": restarted_status.get("ring_writer"),
+            "readyz": restarted_status,
         }
         assert (1, left_edge) not in after["pending"], aged_out
         # The modular slot may already hold its next-lap bucket. The logical contract is only that
@@ -1303,12 +1297,11 @@ def test_ring_landing_republishes_rebuildable_and_gaps_unrebuildable_owed_cells(
             > before["slots"][rebuildable_address]["published_at"]
         ), "the rebuildable owed cell was never republished"
 
-        snapshot_metadata, snapshot_binary = _wait_snapshot_ready(browser, restarted_client, {
+        pre_page_snapshot = _wait_snapshot_ready(browser, prepared.port, {
             "range_seconds": 3_600,
             "resolution": 60,
             "client_id": "ring-owed-pre-page",
-        })
-        pre_page_snapshot = json.loads(snapshot_binary)
+        }, gate_auth_credentials)
         assert pre_page_snapshot["cost_report"]["total_tokens"] == 12, pre_page_snapshot
 
         _load_real_stats_page(request, browser, prepared.runtime, gate_auth_credentials)
@@ -1330,9 +1323,7 @@ def test_ring_landing_republishes_rebuildable_and_gaps_unrebuildable_owed_cells(
             "left_edge": left_edge,
             "rebuildable_start": rebuildable_start,
             "second_capacity": second_capacity,
-            "ring_publications_before_page": int(
-                (restarted_status.get("ring_writer") or {}).get("publications") or 0
-            ),
+            "ring_publications_before_page": int(restarted_status.get("lifecycle_publications") or 0),
             "cost_tokens": rendered_total,
         }, sort_keys=True), flush=True)
     finally:

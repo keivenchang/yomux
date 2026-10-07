@@ -13,6 +13,7 @@ from typing import Mapping
 from .host_identity import HostIdentity
 from .host_identity import current_host_identity
 
+from tools.product_environment import product_env, product_env_name, require_product_env
 from tools.instance_isolation import resolved_path
 from tools.instance_isolation import resolved_home_path
 from tools.instance_isolation import resolved_product_path
@@ -21,7 +22,7 @@ from tools.instance_isolation import normalize_yomux_environment
 from tools.instance_isolation import rooted_product_path
 from tools.instance_isolation import YomuxRootError
 
-YOLOMUX_ROOT_ENV = "YOLOMUX_ROOT"
+PRODUCT_ROOT_ENV = product_env_name('ROOT')
 
 
 @dataclass(frozen=True)
@@ -47,18 +48,18 @@ def rooted_override(values: Mapping[str, str], key: str, root: Path, default: Pa
 def config_dir_from_environ(values: Mapping[str, str]) -> Path:
     """Resolve auth's early configuration import through the shared parent."""
     values = normalize_yomux_environment(values)
-    configured_root = values.get(YOLOMUX_ROOT_ENV)
+    configured_root = product_env('ROOT', environ=values)
     if not configured_root:
-        return resolved_product_path(values, "YOLOMUX_CONFIG_DIR", resolved_home_path(values) / ".config" / "yomux")
-    root = resolved_product_path(values, YOLOMUX_ROOT_ENV, configured_root)
-    return rooted_override(values, "YOLOMUX_CONFIG_DIR", root, root / "config")
+        return resolved_product_path(values, product_env_name('CONFIG_DIR'), resolved_home_path(values) / ".config" / "yomux")
+    root = resolved_product_path(values, PRODUCT_ROOT_ENV, configured_root)
+    return rooted_override(values, product_env_name('CONFIG_DIR'), root, root / "config")
 
 
 def resolve_yomux_roots(values: Mapping[str, str], *, default_runtime_dir: Path) -> YomuxRoots:
     """Resolve all product roots without creating any directory."""
     values = normalize_yomux_environment(values)
     home = resolved_home_path(values)
-    configured_root = values.get(YOLOMUX_ROOT_ENV)
+    configured_root = product_env('ROOT', environ=values)
     if not configured_root:
         default_cache_home = resolved_product_path(
             values,
@@ -66,28 +67,28 @@ def resolve_yomux_roots(values: Mapping[str, str], *, default_runtime_dir: Path)
             home / ".cache",
             reject_home=False,
         )
-        codex_home_key = "YOLOMUX_CODEX_HOME" if values.get("YOLOMUX_CODEX_HOME") else "CODEX_HOME"
+        codex_home_key = product_env_name('CODEX_HOME') if product_env('CODEX_HOME', environ=values) else "CODEX_HOME"
         return YomuxRoots(
             config_dir_from_environ(values),
             resolved_state_dir(values),
-            resolved_product_path(values, "YOLOMUX_CACHE_DIR", default_cache_home / "yomux"),
+            resolved_product_path(values, product_env_name('CACHE_DIR'), default_cache_home / "yomux"),
             resolved_product_path(values, codex_home_key, home / ".codex"),
             resolved_path(default_runtime_dir),
         )
-    root = resolved_product_path(values, YOLOMUX_ROOT_ENV, configured_root)
+    root = resolved_product_path(values, PRODUCT_ROOT_ENV, configured_root)
     config_dir = config_dir_from_environ(values)
-    configured_codex_home = values.get("YOLOMUX_CODEX_HOME")
+    configured_codex_home = product_env('CODEX_HOME', environ=values)
     codex_home = (
-        rooted_override(values, "YOLOMUX_CODEX_HOME", root, root / "codex")
+        rooted_override(values, product_env_name('CODEX_HOME'), root, root / "codex")
         if configured_codex_home
         else home / ".codex"
     )
     return YomuxRoots(
         config_dir,
         resolved_state_dir(values),
-        rooted_override(values, "YOLOMUX_CACHE_DIR", root, root / "cache"),
+        rooted_override(values, product_env_name('CACHE_DIR'), root, root / "cache"),
         codex_home,
-        rooted_override(values, "YOLOMUX_RUNTIME_DIR", root, root / "runtime"),
+        rooted_override(values, product_env_name('RUNTIME_DIR'), root, root / "runtime"),
         root,
     )
 
@@ -105,15 +106,15 @@ def runtime_root(
     shells and containers often lack it, so the fallback remains under the
     machine's temporary directory and is still checked before use.
     """
-    values = os.environ if environ is None else environ
-    if values.get(YOLOMUX_ROOT_ENV):
+    values = normalize_yomux_environment(os.environ if environ is None else environ)
+    if product_env('ROOT', environ=values):
         # A rooted run already has a unique, operator-selected parent. Keeping
         # host/boot suffixes here would make the advertised <root>/runtime
         # layout false and wastes the Unix-socket pathname budget.
-        return resolved_product_path(values, YOLOMUX_ROOT_ENV, values[YOLOMUX_ROOT_ENV]) / "runtime"
+        return resolved_product_path(values, PRODUCT_ROOT_ENV, require_product_env('ROOT', environ=values)) / "runtime"
     resolved_identity = identity or current_host_identity()
-    if values.get("YOLOMUX_RUNTIME_DIR"):
-        runtime_base = resolved_product_path(values, "YOLOMUX_RUNTIME_DIR", values["YOLOMUX_RUNTIME_DIR"]) / "yomux"
+    if product_env('RUNTIME_DIR', environ=values):
+        runtime_base = resolved_product_path(values, product_env_name('RUNTIME_DIR'), require_product_env('RUNTIME_DIR', environ=values)) / "yomux"
     elif values.get("XDG_RUNTIME_DIR"):
         runtime_base = resolved_product_path(
             values,

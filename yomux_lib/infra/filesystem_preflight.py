@@ -12,11 +12,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 from typing import Iterable
+from tools.product_environment import product_env, product_env_name
+from tools.instance_isolation import normalize_yomux_environment
 
 
 NETWORK_FILESYSTEM_TYPES = frozenset({"nfs", "nfs4", "cifs", "smb", "smbfs", "9p"})
 LOCAL_FILESYSTEM_TYPES = frozenset({"apfs", "btrfs", "ext2", "ext3", "ext4", "overlay", "tmpfs", "xfs", "zfs"})
-NETWORK_FILESYSTEM_ESCAPE_HATCH = "YOLOMUX_ALLOW_NETWORK_FILESYSTEM_MUTABLE_ROOTS"
+NETWORK_FILESYSTEM_ESCAPE_HATCH = product_env_name('ALLOW_NETWORK_FILESYSTEM_MUTABLE_ROOTS')
 _CLASSIFICATION_CACHE: dict[tuple[Path, Path], "FilesystemClassification"] = {}
 _CACHE_MOUNTINFO_SIGNATURE: tuple[int, int] | None = None
 _CACHE_LOCK = threading.Lock()
@@ -154,8 +156,8 @@ def preflight_mutable_roots(
     if not unsafe:
         return classifications
     message = "; ".join(unsafe) + f"; set {NETWORK_FILESYSTEM_ESCAPE_HATCH}=1 only for a proven supported local setup, or choose a host-local runtime/data root"
-    values = os.environ if environ is None else environ
-    if values.get(NETWORK_FILESYSTEM_ESCAPE_HATCH) == "1":
+    values = normalize_yomux_environment(os.environ if environ is None else environ)
+    if product_env('ALLOW_NETWORK_FILESYSTEM_MUTABLE_ROOTS', environ=values) == "1":
         warnings.warn(message, RuntimeWarning, stacklevel=2)
         return classifications
     raise FilesystemPreflightError(message)

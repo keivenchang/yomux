@@ -143,6 +143,7 @@
     const onDelta = options.onDelta || onGeneration;
     const onRepairNeeded = options.onRepairNeeded || (() => {});
     const onRepairComplete = options.onRepairComplete || (() => {});
+    const onRepairFailure = options.onRepairFailure || (() => {});
     const onViewport = options.onViewport || (() => {});
     const onTick = options.onTick || (() => null);
     const onPushProof = options.onPushProof || (() => {});
@@ -166,6 +167,7 @@
     let tickBusy = false;
     let repairTimer = null;
     let repairBusy = false;
+    let manualRetryPending = false;
     let repairNeeded = false;
     let repairRequiresFullSnapshot = false;
     let repairDelayMs = repairBaseMs;
@@ -222,9 +224,13 @@
     }
 
     function acceptSnapshot(snapshot) {
-      validateSnapshot(snapshot, selection, concreteResolution(), capabilities.max_buckets);
+      try {
+        validateSnapshot(snapshot, selection, concreteResolution(), capabilities.max_buckets);
+      } catch (error) {
+        throw currentStatsContractViolation(error);
+      }
       if (activeGeneration && snapshot.cache_generation < activeGeneration.cache_generation) {
-        throw new Error('snapshot generation is stale');
+        throw currentStatsSnapshotRejection('snapshot generation is stale');
       }
       if (activeGeneration && snapshot.cache_generation === activeGeneration.cache_generation) {
         if (activeDeltaRevision > 0) {
@@ -234,12 +240,12 @@
           return true;
         }
         if (!sameJson(snapshot, activeGeneration)) {
-          throw new Error('snapshot generation is not immutable');
+          throw currentStatsSnapshotRejection('snapshot generation is not immutable');
         }
         return false;
       }
       if (snapshot.source_generation < (selectionSourceGenerationFloors.get(selectionSnapshotKey()) ?? 0)) {
-        throw new Error('snapshot source generation regressed');
+        throw currentStatsSnapshotRejection('snapshot source generation regressed');
       }
       activeDeltaRevision = 0;
       publish(snapshot, true);
@@ -627,12 +633,22 @@
         // Transport and server-unavailable errors do not: repair owns their
         // bounded retry path and must not relabel a transient outage as a
         // schema violation in the browser failure ledger.
-        if (error?.pending !== true) {
+        const currentRequest = requestMatches(request, serial) && running && visible && !zoomedStatic;
+        if (error?.pending !== true && currentRequest && repairRequiresFullSnapshot
+            && error?.statsSnapshotRejection === true) {
+          reportFailure(`YO!stats rejected the requested full history snapshot (${error.message}); Retry to request fresh data`);
+          onRepairFailure(error);
+        } else if (error?.pending !== true && error?.statsContractViolation === true && currentRequest) {
           reportContractViolation(error);
+          onRepairFailure(error);
         }
       } finally {
         repairBusy = false;
-        if (succeeded) {
+        if (manualRetryPending) {
+          manualRetryPending = false;
+          repairDelayMs = repairBaseMs;
+          scheduleRepair(true);
+        } else if (succeeded) {
           repairDelayMs = repairBaseMs;
         } else {
           repairDelayMs = pendingRetryMs !== null
@@ -784,6 +800,21 @@
       scheduleRepair();
     }
 
+    function retryNow() {
+      repairRequiresFullSnapshot = true;
+      repairDelayMs = repairBaseMs;
+      if (repairTimer !== null) clock.clearTimeout(repairTimer);
+      repairTimer = null;
+      repairNeeded = true;
+      if (!visible || zoomedStatic) return false;
+      if (repairBusy) {
+        manualRetryPending = true;
+        return true;
+      }
+      scheduleRepair(true);
+      return true;
+    }
+
     function handleTransportFailure(message = 'YO!stats stream unavailable') {
       reportFailure(message);
       handleReconnect({requiresFullSnapshot: false});
@@ -808,6 +839,7 @@
       generation: () => activeGeneration,
       deltaRequest: buildDeltaRequest,
       handleReconnect,
+      retryNow,
       handleTransportFailure,
       handleTransportRetirement,
       noteStreamHeartbeat,
@@ -1111,6 +1143,7 @@
       return new Promise((resolve, reject) => {
         let settled = false;
         let pendingBeforeReadiness = false;
+        let pendingDeadlineExtended = false;
         let acknowledgement = null;
         let fullSnapshot = null;
         let assembly = null;
@@ -1121,12 +1154,14 @@
         const finish = value => {
           if (settled) return;
           settled = true;
+          scope.release('snapshot-attempt-deadline');
           scope.relinquish('snapshot-request', cancel);
           resolve(value);
         };
         const fail = async error => {
           if (settled) return false;
           settled = true;
+          scope.release('snapshot-attempt-deadline');
           scope.relinquish('snapshot-request', cancel);
           closeStream();
           if (retireForTerminalAuthentication(error)) {
@@ -1134,7 +1169,7 @@
             return true;
           }
           if (error?.recoverableReadFence === true) await recoverReadFence(error);
-          onState(error?.pending === true ? 'pending' : 'error', error);
+          if (error?.statsContractViolation !== true) onState(error?.pending === true ? 'pending' : 'error', error);
           reject(error);
           return true;
         };
@@ -1143,8 +1178,18 @@
           const error = new Error('snapshot request was cancelled');
           error.cancelled = true;
           settled = true;
+          scope.release('snapshot-attempt-deadline');
           reject(error);
         };
+        const armAttemptDeadline = timeoutMs => {
+          if (typeof clock.setTimeout !== 'function') return;
+          const timer = clock.setTimeout(() => {
+            scope.release('snapshot-attempt-deadline', timer);
+            void fail(new Error(`current stats readiness timed out after ${timeoutMs}ms`));
+          }, timeoutMs);
+          scope.ownTimer('snapshot-attempt-deadline', timer, value => clock.clearTimeout(value));
+        };
+        armAttemptDeadline(readinessTimeoutMs);
         const handleTypedStreamError = (event, kind) => {
           try {
             const error = snapshotStreamError(JSON.parse(event.data), kind);
@@ -1157,13 +1202,18 @@
                 pendingReadinessEpoch = readiness;
                 armReadinessTimer(readiness, pendingReadinessTimeoutMs, null, true);
               }
+              if (!pendingDeadlineExtended) {
+                pendingDeadlineExtended = true;
+                armAttemptDeadline(pendingReadinessTimeoutMs);
+              }
               return;
             }
             if (!settled) void fail(error);
             else void routeTypedStreamError(candidate, epoch, error);
           } catch (error) {
-            if (!settled) void fail(error);
-            else void routeTypedStreamError(candidate, epoch, error);
+            const violation = currentStatsContractViolation(error);
+            if (!settled) void fail(violation);
+            else void routeTypedStreamError(candidate, epoch, violation);
           }
         };
         scope.replace('snapshot-request', cancel, callback => callback());
@@ -1183,7 +1233,7 @@
             acknowledgement = Object.freeze(value);
             recordStreamDelivery('ack', epoch, {emitId: event.lastEventId});
           } catch (error) {
-            void fail(error);
+            void fail(currentStatsContractViolation(error));
           }
         });
         scope.ownEvent('stream-snapshot', candidate, 'snapshot', event => {
@@ -1201,7 +1251,7 @@
             }
             recordStreamDelivery('snapshot', epoch, {emitId: event.lastEventId});
           } catch (error) {
-            void fail(error);
+            void fail(currentStatsContractViolation(error));
           }
         });
         scope.ownEvent('stream-delta', candidate, 'delta', event => {
@@ -1280,7 +1330,7 @@
             }
             recordStreamDelivery('ready', epoch, {emitId: event.lastEventId});
           } catch (error) {
-            if (!settled) void fail(error);
+            if (!settled) void fail(currentStatsContractViolation(error));
             else routeStreamFailure(candidate, epoch);
           }
         });
@@ -1389,6 +1439,9 @@
           onRepairComplete(generation) {
             onState('ready');
             userOnRepairComplete(generation);
+          },
+          onRepairFailure(error) {
+            onState('error', error);
           },
         });
       }
@@ -1520,7 +1573,7 @@
         running = true;
         controller.setVisible(visible);
         controller.start();
-        controller.handleReconnect();
+        controller.retryNow();
         return controller;
       },
       start,
@@ -3259,6 +3312,18 @@
   function currentStatsContractError(message) {
     const error = new Error(message);
     error.statsContractViolation = true;
+    return error;
+  }
+
+  function currentStatsContractViolation(value) {
+    const error = value instanceof Error ? value : new Error(String(value || 'invalid stats response'));
+    error.statsContractViolation = true;
+    return error;
+  }
+
+  function currentStatsSnapshotRejection(message) {
+    const error = new Error(message);
+    error.statsSnapshotRejection = true;
     return error;
   }
 

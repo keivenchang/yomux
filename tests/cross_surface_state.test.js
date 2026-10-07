@@ -880,9 +880,13 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/diffReady && fileStateCanRenderDiffView\(resolvedPath, current\)[\s\S]*setFileEditorViewMode\(resolvedPath, 'diff', item\)[\s\S]*setFileEditorViewMode\(resolvedPath, 'edit', item\)[\s\S]*t\('editor\.diffUnavailable'/.test(changedFilesSource), 'failed or non-renderable diff opens visibly fall back to edit mode through the converged editor identity');
     const touchedOnlyHtml = api.changesGroupsSnapshotHtmlForTest([
       {session: '1', agent: 'codex', status: 'T', repo: '/repo/app', path: 'src/merged.py', abs_path: '/repo/app/src/merged.py', mtime: 100, source: 'transcript'},
-    ], {compact: true});
-    assert.ok(touchedOnlyHtml.includes('git-transcript') && touchedOnlyHtml.includes('>T</span>'), 'touched-only transcript rows carry a neutral T status badge');
+    ], {compact: true, view: 'finder'});
+    assert.ok(touchedOnlyHtml.includes('git-transcript') && touchedOnlyHtml.includes('>T</span>'), 'Finder touched-only transcript rows carry a neutral T status badge');
     assert.ok(/file-tree-git-status[^>]*title="T: touched by AI transcript"[^>]*aria-label="T: touched by AI transcript"[^>]*>T<\/span>/.test(touchedOnlyHtml), 'touched-only T badge explains itself on hover');
+    const touchedOnlyDifferHtml = api.changesGroupsSnapshotHtmlForTest([
+      {session: '1', agent: 'codex', status: 'T', repo: '/repo/app', path: 'src/merged.py', abs_path: '/repo/app/src/merged.py', mtime: 100, source: 'transcript'},
+    ], {compact: true, view: 'differ'});
+    assert.equal(touchedOnlyDifferHtml.includes('merged.py'), false, 'Differ excludes touched-only files with no Git changes');
   });
 
   test('Differ groups deleted files after live ones instead of interleaving them', () => {
@@ -1044,9 +1048,10 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(imageRow.includes('data-change-size="4096"'), 'C5: image rows carry the file size for preview gating');
     assert.ok(imageRow.includes('data-change-rel="pic.png"'), 'C5: rows carry the relative path for Copy path');
     assert.equal(/title="[^"]*pic\.png"/.test(imageRow), false, 'C5: image rows drop the native title so it does not duplicate the hover preview');
-    // C5 / per-render row binder + shared Finder selection/context menu for Modified-files rows.
-    assert.ok(changedFilesSource.includes('function bindChangedFileRowBehaviors('), 'C5: a per-render binder hooks Modified-files rows');
-    assert.ok(/function bindChangedFileRowBehaviors\([\s\S]*?bindFileImagePreview\(row, path/.test(changedFilesSource), 'C5: image rows get the Finder hover preview');
+    // Differ and Finder rows share image-preview binding during row updates; panel refreshes must
+    // not rescan every retained Changed-files row after the shared renderer has already bound it.
+    assert.equal(changedFilesSource.includes('function bindChangedFileRowBehaviors('), false, 'C5: Changed-files does not duplicate the shared per-row image-preview binding');
+    assert.ok(/function bindFinderRowHandlers\([\s\S]*?state\.imagePreviewEligible\) bindFileImagePreview\(row, fullPath, entry\)/.test(fileExplorerSource), 'C5: shared tree-row updates bind eligible Finder and Differ image previews');
     assert.equal(changedFilesSource.includes('function selectChangedFileRow('), false, 'Differ no longer has bespoke single-row selected state');
     assert.equal(changedFilesSource.includes('function showChangedFileContextMenu('), false, 'Differ file rows no longer fork a safe-only context menu');
     assert.ok(/Single-clicks route through the shared tree controller[\s\S]{0,680}scope\.ownEvent\('tree-click', panel, 'click', event => \{[\s\S]*?const row = event\.target\.closest\('\.file-tree-row\[data-path\]'\)[\s\S]*?differTreeInteractionController\.handleClick\(event, panel, \{row\}\)/.test(changedFilesSource), 'Differ click selection routes through the shared tree controller');
@@ -3962,7 +3967,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(source.includes('appendContextMenuButton(menu, terminalCopyActionLabel(TERMINAL_COPY_ACTIONS.tmux), button => copyTmuxSelectionToClipboard(session, term, container, {button}), closeTerminalContextMenu)'), 'terminal context menu exposes explicit tmux copy through the shared action descriptor');
     assert.ok(/function withTerminalVisibleSelectionCleanup\(session, term, container, reason, handler\)[\s\S]*clearTerminalVisibleSelection\(session, term, container, reason\)/.test(source), 'terminal menu actions share one cleanup wrapper after consuming selected text');
     assert.ok(/function copyTerminalSelectionToClipboardEvent\(session, term, event, container = null\)[\s\S]*event\.clipboardData\.setData\('text\/plain', selected\)[\s\S]*clearTerminalVisibleSelection\(session, term, container, TERMINAL_COPY_ACTIONS\.selected\.reason\)/.test(source), 'terminal DOM copy-event path also clears visible terminal selection after capturing clipboard text');
-    assert.ok(/function appendUrlContextMenuItems\(menu, href, closeMenu, options = \{\}\)[\s\S]*const action = \(reason, handler\) => \([\s\S]*consumeTerminalSelection\(options\.session, options\.term, options\.container, reason, handler\)[\s\S]*appendContextMenuButton\(menu, localizedLabel\('contextmenu\.openUrl'[\s\S]*action\('open-url'[\s\S]*appendContextMenuButton\(menu, localizedLabel\('contextmenu\.copyUrl'[\s\S]*action\('copy-url'/.test(source), 'terminal URL menu open/copy actions route through visible-selection cleanup');
+    assert.ok(/function appendUrlContextMenuItems\(menu, href, closeMenu, options = \{\}\)[\s\S]*const action = \(reason, handler\) => \([\s\S]*consumeTerminalSelection\(options\.session, options\.term, options\.container, reason, handler\)[\s\S]*const openHandler = typeof options\.openHandler[\s\S]*const openLabel = options\.openLabel \|\| localizedLabel\('contextmenu\.openUrl'[\s\S]*appendContextMenuButton\(menu, openLabel, action\('open-url', openHandler\)[\s\S]*appendContextMenuButton\(menu, localizedLabel\('contextmenu\.copyUrl'[\s\S]*action\('copy-url'/.test(source), 'terminal URL menu open/copy actions route through visible-selection cleanup while allowing Markdown-specific open actions');
     assert.ok(/if \(!selected\) \{[\s\S]*?if \(isCmdC\) \{[\s\S]*?event\.preventDefault\(\);[\s\S]*?statusEl\.textContent = isMacPlatform\(\)[\s\S]*?t\('terminal\.copyHintMac'\)[\s\S]*?t\('terminal\.copyHintPc'\)[\s\S]*?return true;[\s\S]*?return false; \/\/ no selection: let Ctrl-C through as SIGINT/.test(source), 'Cmd-C without browser selection is swallowed with localized select/copy hints while Ctrl-C still falls through as SIGINT');
     assert.equal(source.includes("'Copy without indent'"), false, 'terminal copy menu labels are locale keys, not raw strings in the bundle');
     assert.equal(source.includes('copied ${text.length} chars'), false, 'terminal copied-count status text is locale/plural-key driven');
@@ -3997,7 +4002,7 @@ async function runCrossSurfaceStateSuite() {
     terminalUrlMenu = terminalContextMenuNode();
     terminalUrlLabels = Array.from(terminalUrlMenu.children).map(child => child.textContent).filter(Boolean);
     assert.deepStrictEqual(canonical(terminalUrlLabels), ['Open URL in a new tab', 'Copy URL', 'Copy selected text', 'Copy tmux selection', 'Copy without indent'], 'terminal URL menu labels the selected-text copy path explicitly when the visible text differs from the href');
-    assert.ok(/function appendUrlContextMenuItems\(menu, href, closeMenu, options = \{\}\)[\s\S]*appendContextMenuButton\(menu, localizedLabel\('contextmenu\.openUrl'[\s\S]*action\('open-url'[\s\S]*appendContextMenuButton\(menu, localizedLabel\('contextmenu\.copyUrl'[\s\S]*action\('copy-url'[\s\S]*if \(options\.includeSelectedText && selectedText && selectedText !== url\)[\s\S]*appendContextMenuButton\(menu, t\('contextmenu\.copySelectedText'\)/.test(source), 'link menus share one helper that orders Open URL before copy actions and only shows Copy selected text when the selected text differs from the href');
+    assert.ok(/function appendUrlContextMenuItems\(menu, href, closeMenu, options = \{\}\)[\s\S]*appendContextMenuButton\(menu, openLabel, action\('open-url', openHandler\)[\s\S]*appendContextMenuButton\(menu, localizedLabel\('contextmenu\.copyUrl'[\s\S]*action\('copy-url'[\s\S]*if \(options\.includeSelectedText && selectedText && selectedText !== url\)[\s\S]*appendContextMenuButton\(menu, t\('contextmenu\.copySelectedText'\)/.test(source), 'link menus share one helper that orders the configured open action before copy actions and only shows Copy selected text when the selected text differs from the href');
     terminalCopyApi = loadYomux('?platform=mac', ['1'], 'https:', 'MacIntel');
     fetchCalls = [];
     terminalCopyApi.setFetchForTest((url, options = {}) => {

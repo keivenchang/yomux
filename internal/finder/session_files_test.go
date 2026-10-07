@@ -83,7 +83,7 @@ func TestSessionFilesRepositoryResolverAcceptsFileAndDirectoryTargets(t *testing
 	defer service.Close()
 
 	for _, target := range []string{root, filepath.Join(root, "note.txt")} {
-		repo, finderErr := service.sessionFilesRepositoryForPath(context.Background(), target)
+		repo, finderErr := service.sessionFilesRepositoryForTarget(context.Background(), target, false)
 		if finderErr != nil || repo != root {
 			t.Fatalf("repository for %q = %q, error=%#v; want %q", target, repo, finderErr, root)
 		}
@@ -92,7 +92,7 @@ func TestSessionFilesRepositoryResolverAcceptsFileAndDirectoryTargets(t *testing
 	if finderErr != nil || repo != root {
 		t.Fatalf("repository for missing transcript file = %q, error=%#v; want %q", repo, finderErr, root)
 	}
-	if _, finderErr := service.sessionFilesRepositoryForPath(context.Background(), filepath.Join(root, "missing-directory")); finderErr == nil || finderErr.Code != "path_not_found" {
+	if _, finderErr := service.sessionFilesRepositoryForTarget(context.Background(), filepath.Join(root, "missing-directory"), false); finderErr == nil || finderErr.Code != "path_not_found" {
 		t.Fatalf("missing candidate root error = %#v, want path_not_found", finderErr)
 	}
 }

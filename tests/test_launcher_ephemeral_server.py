@@ -36,6 +36,20 @@ def _get(port: int, path: str, *, cookie: str | None = None) -> int:
         connection.close()
 
 
+def _login_cookie(port: int, username: str, password: str) -> str:
+    connection = HTTPConnection("127.0.0.1", port, timeout=5.0)
+    try:
+        body = f"username={username}&password={password}"
+        connection.request("POST", "/login", body=body, headers={"Content-Type": "application/x-www-form-urlencoded"})
+        response = connection.getresponse()
+        response.read()
+        assert response.status == HTTPStatus.SEE_OTHER
+        cookie = next(value.split(";", 1)[0] for name, value in response.getheaders() if name.lower() == "set-cookie" and value.startswith(f"yomux_auth_{port}="))
+        return cookie
+    finally:
+        connection.close()
+
+
 def test_row_probe_endpoint_authenticates_against_its_own_root_not_a_foreign_cookie(monkeypatch, tmp_path):
     root = tmp_path / "harness"
     paths = build_paths(root)
@@ -59,14 +73,14 @@ def test_row_probe_endpoint_authenticates_against_its_own_root_not_a_foreign_coo
         # design. start_isolated_dev_server already blocked on the server's own serving line.
         port = server.port
 
-        # Mint the correct cookie the way the row's own probe does: HMAC over the row's own
-        # secret (stored hex) and the row's own (now hashed) stored password.
+        # Exercise the real login path, which lazily creates the row's cookie secret.
+        correct_cookie = _login_cookie(port, "rowadmin", "row-secret-password")
         secret = bytes.fromhex((paths.config_dir / "auth-cookie-secret").read_text(encoding="utf-8").strip())
         users = read_auth_users(paths.auth_config_path)
         assert users, "row auth config produced no users"
         user = users[0]
-        correct = hmac.new(secret, f"{user.username}:{user.password}".encode("utf-8"), hashlib.sha256).hexdigest()
-        assert _get(port, "/api/ping", cookie=f"{AUTH_COOKIE_NAME}_{port}={correct}") == HTTPStatus.OK
+        assert correct_cookie.startswith(f"{AUTH_COOKIE_NAME}_{port}=")
+        assert _get(port, "/api/ping", cookie=correct_cookie) == HTTPStatus.OK
 
         # A wrong cookie (same user, wrong password -> wrong HMAC) is refused, not silently
         # accepted. A cookie minted from a foreign root's secret would fail identically.

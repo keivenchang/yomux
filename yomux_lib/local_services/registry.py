@@ -84,6 +84,7 @@ from .rpc import safe_socket_path
 from .runtime import local_service_exception_cause
 from .runtime import redact_local_service_text
 from .protocol_types import Clock
+from tools.product_environment import product_env, product_env_name, product_env_names
 
 
 LOCAL_SERVICE_REGISTRY_VERSION = 2
@@ -99,7 +100,7 @@ LOCAL_SERVICE_HEALTH_CACHE_SECONDS = 1.0
 # cooperative-stop backstop. Registry cannot import batchd without creating a cycle, so keep the
 # replacement-side bound explicit and leave one second for the broker to publish terminal state.
 LOCAL_SERVICE_BATCHD_DRAIN_GRACE_SECONDS = 123.0
-LOCAL_SERVICE_IDLE_SECONDS_ENV = "YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS"
+LOCAL_SERVICE_IDLE_SECONDS_ENV = product_env_name('LOCAL_SERVICE_IDLE_SECONDS')
 LOCAL_SERVICE_START_EXIT_LIMIT = 3
 LOCAL_SERVICE_STDERR_TAIL_BYTES = 4096
 
@@ -389,7 +390,7 @@ def process_spawn_generation(
     clean_pid = int(pid)
     if clean_pid <= 1:
         return None
-    prefix = f"{LOCAL_SERVICE_SPAWN_GENERATION_ENV}=".encode("ascii")
+    prefixes = tuple(f"{name}=".encode("ascii") for name in product_env_names("LOCAL_SERVICE_SPAWN_GENERATION"))
     try:
         environ = (proc_root / str(clean_pid) / "environ").read_bytes()
     except OSError:
@@ -406,7 +407,10 @@ def process_spawn_generation(
             entries = tuple(reader(clean_pid))
         except (OSError, ValueError):
             return None
-    matches = [item[len(prefix):] for item in entries if item.startswith(prefix)]
+    selected_prefix = next((prefix for prefix in prefixes if any(item.startswith(prefix) for item in entries)), None)
+    if selected_prefix is None:
+        return None
+    matches = [item[len(selected_prefix):] for item in entries if item.startswith(selected_prefix)]
     if len(matches) != 1 or re.fullmatch(rb"[0-9a-f]{32}", matches[0]) is None:
         return None
     return matches[0].decode("ascii")
@@ -1777,7 +1781,7 @@ class LocalServiceRegistry:
     def managed_private_root(self) -> bool:
         """Whether this registry's root has exactly one possible supervisor.
 
-        A ``YOLOMUX_ROOT`` run owns every path it uses, so a daemon there can
+        A ``YOMUX_ROOT`` run owns every path it uses, so a daemon there can
         never be inherited: there is no other caller who could be using it. The
         per-user runtime directory is shared by every YOmux server that user
         runs, so a survivor there may legitimately outlive its launcher.
@@ -3088,7 +3092,7 @@ class LocalServiceRegistry:
 
     def _spawn(self) -> subprocess.Popen[Any] | None:
         idle_seconds = self.spec.idle_seconds
-        configured_idle = os.environ.get(LOCAL_SERVICE_IDLE_SECONDS_ENV)
+        configured_idle = product_env('LOCAL_SERVICE_IDLE_SECONDS', environ=os.environ)
         if configured_idle:
             try:
                 idle_seconds = max(0.1, float(configured_idle))
@@ -3110,7 +3114,7 @@ class LocalServiceRegistry:
         # A local service is shared per user, so this inherited environment belongs to whichever
         # server happened to launch it first and is NOT authority for any other server's request.
         # Filesystem access policy in particular travels on the job descriptor
-        # (`filesystem.paths.FilesystemAccessPolicy`), never through `YOLOMUX_FS_ROOTS` here.
+        # (`filesystem.paths.FilesystemAccessPolicy`), never through `YOMUX_FS_ROOTS` here.
         spawn_environ = child_process_artifact_environment(Path(__file__).resolve().parents[2], environ=os.environ)
         spawn_environ[LOCAL_SERVICE_SPAWN_GENERATION_ENV] = generation_marker
         spawn_environ["PYTHONPATH"] = inherited_python_path(spawn_environ)
