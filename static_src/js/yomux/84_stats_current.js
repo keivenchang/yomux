@@ -1748,7 +1748,7 @@
       if (target?.closest?.('[data-stats-refill]')) {
         if (!busy() && !confirming) {
           confirming = true;
-          void options.confirm({title, message: warning, actions: [{id: 'cancel', label: 'Cancel'}, {id: 'refill', label: 'Refill'}]}).then(action => {
+          void options.confirm({title, message: warning, messageVariant: 'danger', actions: [{id: 'cancel', label: 'Cancel'}, {id: 'refill', label: 'Refill'}]}).then(action => {
             confirming = false;
             if (destroyed) return;
             if (action === 'refill' && !busy()) { submitting = true; options.onChange?.(); void poll('POST'); }

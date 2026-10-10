@@ -918,6 +918,8 @@ def running_build_factory(
         )
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_o1_two_builds_serve_together_without_blocking_or_sharing_state(
     v0610_source: Path,
     running_build_factory: Callable[..., RunningBuild],
@@ -931,6 +933,8 @@ def test_o1_two_builds_serve_together_without_blocking_or_sharing_state(
     _assert_survivor_does_not_touch_stopped_peer(rebuilt_reverse, old_reverse)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_o2_rebuilt_process_never_writes_or_write_locks_v0610_artifacts(
     running_build_factory: Callable[..., RunningBuild],
     tmp_path: Path,
@@ -948,6 +952,8 @@ def test_o2_rebuilt_process_never_writes_or_write_locks_v0610_artifacts(
     assert not locked, f"rebuilt process holds SQLite write locks on old artifacts: {locked}"
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_o3_new_stats_schema_uses_a_new_versioned_file_beside_v6(
     running_build_factory: Callable[..., RunningBuild],
     tmp_path: Path,
@@ -964,6 +970,8 @@ def test_o3_new_stats_schema_uses_a_new_versioned_file_beside_v6(
     assert _artifact_hashes(state_dir)["stats-v6.sqlite3"] == before["stats-v6.sqlite3"]
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_o4_v0610_still_serves_after_rebuilt_process_used_the_same_state(
     v0610_source: Path,
     running_build_factory: Callable[..., RunningBuild],
@@ -985,6 +993,8 @@ def test_o4_v0610_still_serves_after_rebuilt_process_used_the_same_state(
     assert old.process.poll() is None
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_o5_concurrent_builds_observe_disjoint_sockets_and_locks(
     v0610_source: Path,
     running_build_factory: Callable[..., RunningBuild],
@@ -1019,6 +1029,8 @@ def test_o5_concurrent_builds_observe_disjoint_sockets_and_locks(
     _assert_observed_paths_confined(rebuilt.label, rebuilt_locks, (rebuilt.paths.root,))
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_o6_first_run_creates_new_artifacts_without_adopting_or_removing_old(
     running_build_factory: Callable[..., RunningBuild],
     tmp_path: Path,
@@ -1735,6 +1747,7 @@ def test_o6_spawn_registers_cleanup_and_captures_ownership_before_readiness(
         socket_path = tmp_path / "tmux.sock"
 
     monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: Process())
+    monkeypatch.setattr(f"{__name__}.server_entrypoint_arguments", lambda _root: ["/fixture/yomux-go"])
     monkeypatch.setattr(f"{__name__}.process_start_identity", lambda _pid: "proc:1200")
     monkeypatch.setattr(
         f"{__name__}._capture_fixture_services",
@@ -1872,6 +1885,7 @@ def test_o6_running_build_factory_cleans_process_when_start_identity_acquisition
 
     process = Process()
     monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(f"{__name__}.server_entrypoint_arguments", lambda _root: ["/fixture/yomux-go"])
     monkeypatch.setattr(f"{__name__}.process_start_identity", lambda _pid: None)
     fixture = running_build_factory.__wrapped__(lambda: Tmux(), tmp_path)
     start = next(fixture)

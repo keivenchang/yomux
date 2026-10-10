@@ -59,6 +59,10 @@ func (s *server) sessionMetadata(w http.ResponseWriter, r *http.Request) {
 	s.metadataMu.Unlock()
 	topologyChanged := published != nil && metadataPayloadTopologyGeneration(published) != topology.generation
 	metadataSessions := metadataSessionsForTopology(published, servedGeneration, topology)
+	agentStatusOverrides, statusErr := s.currentAgentStatusOverrides(r.Context())
+	if lifecycleErr := s.applyAgentStatusLifecycle(metadataSessions, agentStatusOverrides); lifecycleErr != nil && statusErr == nil {
+		statusErr = lifecycleErr
+	}
 	cache := map[string]any{"hit": true, "stale": false, "generation": servedGeneration, "refreshing": s.metadataRefreshInFlight()}
 	if force || published == nil || stale || topologyChanged {
 		pending := s.queueMetadataRefresh(force, sessions, topology.identities, rosterErr, topology.generation)
@@ -72,6 +76,9 @@ func (s *server) sessionMetadata(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	responseErrors := metadataErrors(rosterErr, nil)
+	if statusErr != nil {
+		responseErrors = append(responseErrors, statusErr.Error())
+	}
 	if published != nil {
 		responseErrors = appendMetadataErrorValues(responseErrors, published["errors"])
 	}
@@ -94,6 +101,13 @@ func metadataSessionsForTopology(published map[string]any, generation uint64, to
 		info, cached := publishedSessions[session].(map[string]any)
 		if cached && info["session_identity"] == sessionIdentity {
 			info = cloneMap(info)
+			// Lifecycle fields belong to this response, not the immutable published agents.
+			agents, _ := info["agents"].([]map[string]any)
+			ownedAgents := make([]map[string]any, len(agents))
+			for index, agent := range agents {
+				ownedAgents[index] = cloneMap(agent)
+			}
+			info["agents"] = ownedAgents
 		} else {
 			info = map[string]any{
 				"panes": []map[string]any{}, "selected_pane": nil, "agents": []map[string]any{}, "window_metadata": []map[string]any{},
@@ -627,6 +641,26 @@ func (s *server) tmuxSessionRosterSnapshotLocked(forceFresh bool) (tmuxSessionRo
 	result = normalizeTmuxSessionRoster(result)
 	s.rememberTmuxSessionRoster(result, identities)
 	return s.cachedTmuxSessionRosterSnapshot(), nil
+}
+
+// refreshTmuxMetadataAfterMutationLocked confirms topology before the mutation
+// response escapes. Readers and the event publisher then share its revision.
+// The caller holds tmuxRosterFetchMu across the tmux command and this read.
+func (s *server) refreshTmuxMetadataAfterMutationLocked() goTmuxTopology {
+	topology, err := s.confirmTmuxTopologyAfterMutationLocked()
+	if err != nil {
+		slog.Warn("tmux topology refresh failed after mutation", "error", err)
+	}
+	s.queueMetadataRefresh(false, topology.sessions, topology.identities, err, topology.generation)
+	return topology
+}
+
+func (s *server) confirmTmuxTopologyAfterMutationLocked() (goTmuxTopology, error) {
+	s.tmuxRosterMu.Lock()
+	s.tmuxRosterSampledAt = time.Time{}
+	s.tmuxRosterMu.Unlock()
+	roster, err := s.tmuxSessionRosterSnapshotLocked(true)
+	return s.tmuxTopologyFromRoster(roster, err)
 }
 
 func normalizeTmuxSessionRoster(raw []string) []string {

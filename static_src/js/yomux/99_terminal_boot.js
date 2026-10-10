@@ -4002,7 +4002,12 @@ function commitTerminalExplicitInputOwnership(session) {
 }
 
 function terminalDataWithoutPassiveReports(data) {
-  return String(data || '')
+  return stripTerminalQueryResponses(String(data || ''))
+    .replace(/\x1b\[\??\d+(?:;\d+)?[Rn]/g, '')
+    .replace(/\x1b\[\??\d+;\d+\$y/g, '')
+    .replace(/\x1b\[(?:4|6|8);\d+;\d+t/g, '')
+    .replace(/\x1bP[01]\$r[^\x1b\x9c]*(?:\x1b\\|\x9c)/g, '')
+    .replace(/\x1b\](?:4;\d+|1\d);(?:rgb|rgba):[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)/g, '')
     .replace(/\x1b\[[IO]/g, '')
     .replace(/\x1b\[<\d+(?:;\d+){2}[mM]/g, '')
     .replace(/\x1b\[M[\s\S]{3}/g, '');
@@ -4629,10 +4634,9 @@ function activateTab(session, name, options = {}) {
   }
   updateTypingIndicator(session);
   if (name === 'terminal') {
-    scheduleTerminalReferenceUnderlineRepaint(session);
     scheduleFit(session);
-    setTimeout(() => refreshTerminal(session), terminalRefreshAfterTabSelectMs);
-    scheduleTerminalBlankScreenRefresh(session, {reason: 'terminal-tab'});
+    refreshTerminal(session, {visibleOnly: true});
+    // The pending fit owns geometry checks and blank-screen recovery after activation.
     if (options.userInitiated) focusTerminalFromUserAction(session, 0, options);
     else focusTerminalWhenAutoFocus(session, 25);
   } else {
@@ -5362,8 +5366,22 @@ function goAgentStatusUsesActivityFallback() {
   return statsOnlyBootEnabled() || /^go(?:\s|$)/i.test(String(bootstrap?.backendLabel || '').trim());
 }
 
-function adoptTabberActivityAsAutoStatusFallback() {
+function fetchAutoApproveSnapshot() {
+  return apiFetchJson('/api/auto-approve').catch(error => {
+    if (!isApiPendingResponse(error)) throw error;
+    return waitForApiOperationResult(error, {
+      kind: String(error?.operation?.kind || ''),
+      url: '/api/auto-approve',
+      method: 'GET',
+    });
+  });
+}
+
+function adoptTabberActivityAsAutoStatusFallback(options = {}) {
   const payload = tabberActivityPayload;
+  const authoritativeStatus = agentWindowSnapshotIsAuthoritative(payload);
+  const onlyMissingStatusRows = options.onlyMissingStatusRows === true && !authoritativeStatus;
+  if (typeof agentWindowActivitySnapshotFresh === 'function' && !agentWindowActivitySnapshotFresh(payload)) return 0;
   const sessionsPayload = payload?.agent_windows;
   if (!sessionsPayload || typeof sessionsPayload !== 'object' || Array.isArray(sessionsPayload)) return 0;
   const snapshotRevision = agentWindowSnapshotRevision(payload);
@@ -5377,7 +5395,7 @@ function adoptTabberActivityAsAutoStatusFallback() {
   // session list may not contain the machine-wide tmux sessions yet. The
   // activity payload itself is the authoritative roster; include both sources
   // so a working pane receives its marker before Tabber is opened.
-  const candidateSessions = new Set([...activeSessions, ...Object.keys(sessionsPayload)]);
+  const candidateSessions = new Set([...activeSessions, ...rosterSessions, ...Object.keys(sessionsPayload)]);
   for (const session of [...candidateSessions].filter(session => (
     isTmuxSession(session) || rosterSessions.has(String(session))
   ))) {
@@ -5385,7 +5403,7 @@ function adoptTabberActivityAsAutoStatusFallback() {
     // promote those rows and accidentally erase a previously known canonical status.
     const rows = agentWindowPayloadRows(sessionsPayload[String(session)])
       .filter(row => String(row?.state || '').trim() !== '');
-    if (!rows.length) continue;
+    if (!rows.length && !authoritativeStatus) continue;
     const existing = autoApproveStates.get(session);
     const existingRevision = agentWindowSnapshotRevision(existing);
     // Activity responses can complete out of order. Never let an older (or an
@@ -5397,15 +5415,42 @@ function adoptTabberActivityAsAutoStatusFallback() {
     // this merge, a single transient capture miss clears the pane marker while the Agents graph
     // (which has its own aggregate sample) still shows the run.
     const existingRows = agentWindowPayloadRows(existing?.agent_windows);
-    const mergedRows = rows.map(row => {
-      if (agentWindowStateKey(row?.state) !== 'unavailable') return row;
-      const prior = existingRows.find(candidate => agentWindowPayloadKey(candidate) === agentWindowPayloadKey(row));
-      if (!prior || agentWindowStateKey(prior?.state) === 'unavailable') return row;
-      return {...prior, ...row, state: prior.state};
-    });
+    if (onlyMissingStatusRows && existingRows.length > 0
+        && agentWindowSnapshotRevision(existing) !== snapshotRevision) continue;
+    let mergedRows;
+    if (onlyMissingStatusRows) {
+      const activityByKey = new Map(rows.map(row => [agentWindowPayloadKey(row), row]).filter(([key]) => key));
+      const matchedKeys = new Set();
+      mergedRows = existingRows.map(row => {
+        const key = agentWindowPayloadKey(row);
+        const activityRow = key ? activityByKey.get(key) : null;
+        if (!activityRow || !agentWindowSameInstance(activityRow, row)) return row;
+        matchedKeys.add(key);
+        const currentState = String(row?.state || '').trim();
+        if (currentState && agentWindowStateKey(currentState) !== 'unavailable') return row;
+        return {...row, ...activityRow};
+      });
+      for (const row of rows) {
+        const key = agentWindowPayloadKey(row);
+        if (key && !matchedKeys.has(key) && !existingRows.some(existingRow => agentWindowPayloadKey(existingRow) === key)) {
+          mergedRows.push(row);
+        }
+      }
+    } else {
+      mergedRows = rows.map(row => {
+        if (agentWindowStateKey(row?.state) !== 'unavailable') return row;
+        const prior = existingRows.find(candidate => agentWindowSameInstance(candidate, row));
+        if (!prior || agentWindowStateKey(prior?.state) === 'unavailable') return row;
+        return {...prior, ...row, state: prior.state};
+      });
+    }
+    if (existingRevision === snapshotRevision && existingRows.length === mergedRows.length
+        && existingRows.every((row, index) => row === mergedRows[index])) continue;
     const nextState = autoApproveStateWithSnapshotRevision({
+      ...existing,
       target: session,
-      enabled: false,
+      enabled: existing?.enabled === true,
+      agent_window_status_fresh: payload.agent_window_status_fresh,
       agent_windows: mergedRows,
     }, snapshotRevision);
     autoApproveStates.set(session, nextState);
@@ -5428,25 +5473,27 @@ function loadAutoStatuses(options = {}) {
   let result = null;
   try {
     if (goAgentStatusUsesActivityFallback()) {
-      // Go owns live agent status in the activity product and does not expose
-      // Python's auto-approve route. Read that one shared snapshot directly so
-      // a transient unavailable sample can be repaired without a 501 probe.
-      await fetchTabberActivity({visible: true, allowHidden: true});
-      if (!requestIsCurrent()) return {applied: false, staleRequest: true, sessionsChanged: false, previousActive: activeSessions.slice()};
-      const adopted = adoptTabberActivityAsAutoStatusFallback();
-      result = {applied: adopted > 0, sessionsChanged: false, previousActive: activeSessions.slice()};
-    } else {
-      let payload;
-      try {
-        payload = await apiFetchJson('/api/auto-approve');
-      } catch (error) {
-        if (!isApiPendingResponse(error)) throw error;
-        payload = await waitForApiOperationResult(error, {
-          kind: String(error?.operation?.kind || ''),
-          url: '/api/auto-approve',
-          method: 'GET',
-        });
+      let routeResult = null;
+      if (!statsOnlyBootEnabled()) {
+        const payload = await fetchAutoApproveSnapshot();
+        if (!requestIsCurrent()) return {applied: false, staleRequest: true, sessionsChanged: false, previousActive: activeSessions.slice()};
+        routeResult = applyAutoApprovePayload(payload, {...options, topologyEpoch});
       }
+      // Go owns agent status through the activity product. Seed the activity cache
+      // when the full app starts, and continue using it as the live-status repair
+      // source while preserving YO state from the Go toggle route.
+      if (statsOnlyBootEnabled() || loadAutoStatuses.goActivitySeeded !== true) {
+        await fetchTabberActivity({visible: true, allowHidden: true});
+        if (!statsOnlyBootEnabled()) loadAutoStatuses.goActivitySeeded = true;
+      }
+      if (!requestIsCurrent()) return {applied: false, staleRequest: true, sessionsChanged: false, previousActive: activeSessions.slice()};
+      const adopted = statsOnlyBootEnabled() || routeResult?.applied !== true
+        ? adoptTabberActivityAsAutoStatusFallback()
+        : adoptTabberActivityAsAutoStatusFallback({onlyMissingStatusRows: true});
+      result = routeResult || {applied: false, sessionsChanged: false, previousActive: activeSessions.slice()};
+      result.applied = result.applied || adopted > 0;
+    } else {
+      const payload = await fetchAutoApproveSnapshot();
       if (!requestIsCurrent()) return {applied: false, staleRequest: true, sessionsChanged: false, previousActive: activeSessions.slice()};
       result = applyAutoApprovePayload(payload, {...options, topologyEpoch});
     }
@@ -5456,9 +5503,9 @@ function loadAutoStatuses(options = {}) {
     }
   } catch (_) {
     if (!requestIsCurrent()) return {applied: false, staleRequest: true, sessionsChanged: false, previousActive: activeSessions.slice()};
-    // Go owns the machine-wide agent status product but does not expose Python's
-    // auto-approve worker route.  Keep the terminal/tab status authoritative by
-    // consuming that shared activity snapshot when the canonical route is absent;
+    // Go owns the machine-wide agent status product. Keep terminal/tab status
+    // authoritative when the YO capability is unavailable or its route fails by
+    // consuming that shared activity snapshot;
     // otherwise metadata-only fallback downgrades a working Codex pane to merely
     // "Active" and drops the green working marker.
     if (typeof fetchTabberActivity === 'function') {
@@ -5492,6 +5539,7 @@ function loadAutoStatuses(options = {}) {
 loadAutoStatuses.request = null;
 loadAutoStatuses.lastResult = null;
 loadAutoStatuses.updatedAt = 0;
+loadAutoStatuses.goActivitySeeded = false;
 loadAutoStatuses.guard = makeGenerationGuard();
 
 function autoApproveStateWithSnapshotRevision(state, revision = agentWindowSnapshotRevision(state)) {
@@ -5670,6 +5718,10 @@ function applyAutoApprovePayload(payload, options = {}) {
   for (const session of sessions) {
     const previousState = autoApproveStates.get(session) || {};
     const state = autoApproveStateWithSnapshotRevision(payload.sessions?.[session] || {target: session, enabled: false, last_action: 'off'}, snapshotRevision);
+    const stateRevision = agentWindowSnapshotRevision(state);
+    const previousRevision = agentWindowSnapshotRevision(previousState);
+    if (previousRevision > 0 && (stateRevision > 0 && stateRevision < previousRevision
+        || stateRevision === 0 && (typeof state.agent_window_status_fresh === 'boolean' || agentWindowPayloadRows(state.agent_windows).length > 0))) continue;
     const previousMismatch = agentWindowSnapshotRevisionsMismatch(agentWindowPayloadRows(previousState.agent_windows).length > 0, agentWindowSnapshotRevision(previousState), activityRevision);
     const nextMismatch = agentWindowSnapshotRevisionsMismatch(agentWindowPayloadRows(state.agent_windows).length > 0, snapshotRevision, activityRevision);
     if (previousMismatch !== nextMismatch) changedSessionSet.add(session);
@@ -6178,6 +6230,9 @@ async function applySessionMetadataPayload(payload, options = {}) {
   const previousActive = activeSessions.slice();
   const sessionsChanged = updateSessionList(transcriptMetadataState.payload.session_order || []);
   finalizeSessionMetadataOutcome(true, 'applied', payload);
+  // SSE enrichment can advance the roster after Tabber's one-time launch
+  // warmup. Repaint from the accepted model even when activity polling is held.
+  if (typeof scheduleTabberTreeLayoutStateSync === 'function') scheduleTabberTreeLayoutStateSync({refreshTree: true});
   // The payload is committed before the slower auto-status refresh. Refresh only the cached rows
   // now so an open Tabs menu reflects this accepted metadata generation without waiting for that
   // unrelated request or losing the render tail to a newer refresh.
@@ -7168,10 +7223,8 @@ function scheduleReconnectResync(reason = '') {
 
 function resyncVisibleTerminalRemoteSizes(reason = '') {
   void reason;
-  for (const session of activeSessions.filter(isTmuxSession)) {
-    scheduleFit(session);
-    forceRemoteResize(session);
-  }
+  for (const session of activeSessions.filter(isTmuxSession)) scheduleFit(session);
+  scheduleVisibleTerminalResizeAuthority();
 }
 
 function installReconnectResyncHandlers() {
@@ -7255,9 +7308,8 @@ async function boot() {
       await refreshTranscripts({refreshAuto: false, refreshContext: false, refreshActivity: false});
     }
     await fetchTabberActivity({visible: true, allowHidden: true});
-    // Go's stats-only surface deliberately has no `/api/auto-approve` route. The
-    // activity snapshot is therefore the canonical live-status source for this
-    // boot path as well as the full-app error fallback. Adopt it before painting
+    // Stats-only Go boot deliberately uses the activity snapshot as its live-status
+    // source. Adopt it before painting
     // pane tabs, otherwise every session keeps the neutral placeholder even when
     // the activity payload says the Codex pane is working.
     adoptTabberActivityAsAutoStatusFallback();

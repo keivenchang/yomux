@@ -39,6 +39,9 @@ from yomux_lib.stats_current import materializer as materializer_module
 from yomux_lib.stats_current import resolution as stats_resolution
 from yomux_lib.stats_current import storage as storage_module
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def _observation(family: str, source_id: str, observed_at: float) -> Observation:
     return Observation(

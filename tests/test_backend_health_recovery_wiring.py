@@ -54,6 +54,9 @@ from yomux_lib.local_service_projection import LOCAL_SERVICE_INVENTORY
 from yomux_lib.server_logs import SERVER_LOGS
 from yomux_lib.local_services.rpc import reset_local_service_traffic
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 # Every operation that could touch a process, a socket, or another owner's state, copied from
 # the M7 list so the wired control is held to exactly the rule the injected one was.

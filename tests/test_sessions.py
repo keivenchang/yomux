@@ -9,6 +9,11 @@ from yomux_lib.sessions import list_processes
 from yomux_lib.sessions import pane_process_label
 from yomux_lib.server_logs import SERVER_LOGS
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def clear_transcript_lookup_cache():
     # the lookup cache is now a shared TtlCache (was a hand-rolled dict + lock).

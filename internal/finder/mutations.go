@@ -74,7 +74,10 @@ func alnumSearchText(value string) string {
 }
 
 func fuzzySubsequenceSpan(query, text string) (int, bool) {
-	needle := compactSearchText(query)
+	return fuzzySubsequenceSpanPrepared(compactSearchText(query), text)
+}
+
+func fuzzySubsequenceSpanPrepared(needle, text string) (int, bool) {
 	if needle == "" {
 		return 0, true
 	}
@@ -94,8 +97,33 @@ func fuzzySubsequenceSpan(query, text string) (int, bool) {
 	return end - start + 1, true
 }
 
+type preparedSearchToken struct {
+	needle     string
+	doitNeedle string
+	doitMode   bool
+}
+
+func prepareSearchTokens(tokens []string) []preparedSearchToken {
+	prepared := make([]preparedSearchToken, 0, len(tokens))
+	for _, token := range tokens {
+		needle := compactSearchText(token)
+		doitNeedle := alnumSearchText(token)
+		doitMode := strings.HasPrefix(doitNeedle, "doit") && len(doitNeedle) >= 4
+		if !doitMode {
+			doitNeedle = ""
+		}
+		prepared = append(prepared, preparedSearchToken{needle: needle, doitNeedle: doitNeedle, doitMode: doitMode})
+	}
+	return prepared
+}
+
 func searchTokenNameRank(token, name string) (int, bool) {
-	needle := compactSearchText(token)
+	prepared := prepareSearchTokens([]string{token})[0]
+	return searchTokenNameRankPrepared(prepared, name)
+}
+
+func searchTokenNameRankPrepared(token preparedSearchToken, name string) (int, bool) {
+	needle := token.needle
 	if needle == "" {
 		return 0, true
 	}
@@ -105,10 +133,7 @@ func searchTokenNameRank(token, name string) (int, bool) {
 		stemName = strings.TrimSuffix(name, extension)
 	}
 	stem := compactSearchText(stemName)
-	doitNeedle := alnumSearchText(token)
-	if !strings.HasPrefix(doitNeedle, "doit") || len(doitNeedle) < 4 {
-		doitNeedle = ""
-	}
+	doitNeedle := token.doitNeedle
 	if doitNeedle != "" {
 		basenameAlnum, stemAlnum := alnumSearchText(name), alnumSearchText(stemName)
 		if doitNeedle == stemAlnum || doitNeedle == basenameAlnum {
@@ -137,45 +162,65 @@ func searchTokenNameRank(token, name string) (int, bool) {
 	if index := strings.Index(basename, needle); index >= 0 {
 		return 30 + index, true
 	}
-	if span, ok := fuzzySubsequenceSpan(needle, stem); ok {
+	if span, ok := fuzzySubsequenceSpanPrepared(needle, stem); ok {
 		return 50 + span, true
 	}
-	if span, ok := fuzzySubsequenceSpan(needle, basename); ok {
+	if span, ok := fuzzySubsequenceSpanPrepared(needle, basename); ok {
 		return 60 + span, true
 	}
 	return 0, false
 }
 
 func searchTokenRank(token, name, relative string) (int, bool) {
-	if rank, ok := searchTokenNameRank(token, name); ok {
+	prepared := prepareSearchTokens([]string{token})[0]
+	return searchTokenRankPrepared(prepared, name, relative)
+}
+
+func searchTokenRankPrepared(token preparedSearchToken, name, relative string) (int, bool) {
+	if rank, ok := searchTokenNameRankPrepared(token, name); ok {
 		return rank, true
 	}
-	needle := compactSearchText(token)
-	doitNeedle := alnumSearchText(token)
-	if strings.HasPrefix(doitNeedle, "doit") && len(doitNeedle) >= 4 {
-		if index := strings.Index(alnumSearchText(relative), doitNeedle); index >= 0 {
-			return 90 + index, true
+	for start := 0; start <= len(relative); {
+		end := strings.IndexByte(relative[start:], '/')
+		if end < 0 {
+			end = len(relative)
+		} else {
+			end += start
 		}
-		return 0, false
-	}
-	relativeText := compactSearchText(relative)
-	if index := strings.Index(relativeText, needle); index >= 0 {
-		return 90 + index, true
-	}
-	if span, ok := fuzzySubsequenceSpan(needle, relativeText); ok {
-		return 130 + strings.Count(relative, "/")*4 + span, true
+		segment := relative[start:end]
+		if token.doitMode {
+			if index := strings.Index(alnumSearchText(segment), token.doitNeedle); index >= 0 {
+				return 90 + index, true
+			}
+		} else {
+			segmentText := compactSearchText(segment)
+			if index := strings.Index(segmentText, token.needle); index >= 0 {
+				return 90 + index, true
+			}
+			if span, ok := fuzzySubsequenceSpanPrepared(token.needle, segmentText); ok {
+				return 130 + strings.Count(relative, "/")*4 + span, true
+			}
+		}
+		if end == len(relative) {
+			break
+		}
+		start = end + 1
 	}
 	return 0, false
 }
 
 func searchEntrySortKey(name, relative string, tokens []string) (searchSortKey, bool) {
+	return searchEntrySortKeyPrepared(name, relative, prepareSearchTokens(tokens))
+}
+
+func searchEntrySortKeyPrepared(name, relative string, tokens []preparedSearchToken) (searchSortKey, bool) {
 	key := searchSortKey{minimum: 0, total: 0, negative: 0, depth: strings.Count(relative, "/"), length: len(relative), lowerName: strings.ToLower(relative)}
 	if len(tokens) == 0 {
 		return key, true
 	}
 	key.minimum = 1 << 30
 	for _, token := range tokens {
-		rank, ok := searchTokenRank(token, name, relative)
+		rank, ok := searchTokenRankPrepared(token, name, relative)
 		if !ok {
 			return searchSortKey{}, false
 		}
@@ -706,8 +751,15 @@ func (s *Service) ResolveCandidates(ctx context.Context, values []string) (map[s
 type SearchChunkPublisher func(files []map[string]any, coverage map[string]any) error
 
 type SearchOptions struct {
-	Cursor      string
-	IndexedOnly bool
+	Cursor           string
+	IndexedOnly      bool
+	Indexed          bool
+	MaxFiles         int
+	MaxBytes         int64
+	RefreshSec       int
+	ExcludeDirs      []string
+	ExcludePaths     []string
+	SettingsRevision uint64
 }
 
 func (s *Service) Search(ctx context.Context, root, query string, limit int, recursive, directOnly, minimal bool) (map[string]any, *Error) {
@@ -722,6 +774,33 @@ func (s *Service) SearchStream(ctx context.Context, root, query string, limit in
 	return s.search(ctx, root, query, limit, recursive, directOnly, minimal, SearchOptions{}, publish)
 }
 
+func (s *Service) SearchStreamWithOptions(ctx context.Context, root, query string, limit int, recursive, directOnly, minimal bool, options SearchOptions, publish SearchChunkPublisher) (map[string]any, *Error) {
+	return s.search(ctx, root, query, limit, recursive, directOnly, minimal, options, publish)
+}
+
+func (s *Service) SetSearchIndexWorker(worker *SearchIndexWorkerClient) {
+	s.searchIndex = worker
+}
+
+func (s *Service) QueueIndexRepair(root string, options SearchOptions, onScheduled func()) {
+	if s.searchIndex == nil || !options.Indexed {
+		return
+	}
+	directory, requested, _, finderErr := s.open(root, true)
+	if finderErr != nil {
+		return
+	}
+	defer directory.Close()
+	info, err := directory.Stat()
+	if err != nil {
+		return
+	}
+	s.searchIndex.QueueRepair(indexRequest{
+		Action: "repair", Root: requested, Identity: fileID(info), MaxFiles: options.MaxFiles, MaxBytes: options.MaxBytes,
+		RefreshSec: options.RefreshSec, ExcludeDirs: options.ExcludeDirs, ExcludePaths: options.ExcludePaths, SettingsRevision: options.SettingsRevision,
+	}, onScheduled)
+}
+
 func (s *Service) search(ctx context.Context, root, query string, limit int, recursive, directOnly, minimal bool, options SearchOptions, publish SearchChunkPublisher) (map[string]any, *Error) {
 	if limit < 1 {
 		limit = 1
@@ -734,18 +813,84 @@ func (s *Service) search(ctx context.Context, root, query string, limit int, rec
 	}
 	defer directory.Close()
 	query = strings.TrimSpace(strings.ToLower(query))
-	if options.Cursor != "" {
-		return map[string]any{
-			"root": requested, "query": query, "limit": limit,
-			"rebase_required": true, "reason": "index_unavailable", "indexed": false,
-		}, nil
+	if recursive && !directOnly && s.searchIndex != nil && options.Indexed {
+		rootInfo, statErr := directory.Stat()
+		if statErr != nil {
+			return nil, filesystemError(requested, statErr)
+		}
+		indexed, indexErr := s.searchIndex.Request(ctx, indexRequest{
+			Action: "search", Root: requested, Identity: fileID(rootInfo), Query: query, Limit: limit, Cursor: options.Cursor,
+			MaxFiles: options.MaxFiles, MaxBytes: options.MaxBytes, RefreshSec: options.RefreshSec, ExcludeDirs: options.ExcludeDirs, ExcludePaths: options.ExcludePaths, SettingsRevision: options.SettingsRevision,
+		})
+		if indexErr == nil && indexed["indexed"] == true {
+			files, _ := indexed["files"].([]any)
+			verified := make([]map[string]any, 0, len(files))
+			for _, value := range files {
+				row, ok := value.(map[string]any)
+				if !ok {
+					continue
+				}
+				path, _ := row["path"].(string)
+				file, _, _, openErr := s.open(path, false)
+				if openErr != nil {
+					continue
+				}
+				info, infoErr := file.Stat()
+				_ = file.Close()
+				indexedIdentity, _ := row["file_identity"].(string)
+				indexedIdentity = strings.TrimPrefix(indexedIdentity, "id:")
+				if infoErr != nil || (indexedIdentity != "" && fileID(info) != indexedIdentity) {
+					continue
+				}
+				row["file_id"], row["file_identity"] = fileID(info), "id:"+fileID(info)
+				row["size"], row["mtime"], row["mtime_ns"] = info.Size(), info.ModTime().Unix(), info.ModTime().UnixNano()
+				if minimal {
+					row = map[string]any{"path": row["path"], "name": row["name"], "relative_path": row["relative_path"], "kind": row["kind"]}
+				}
+				verified = append(verified, row)
+			}
+			indexed["files"], indexed["count"] = verified, len(verified)
+			if publish != nil {
+				for start := 0; start < len(verified); start += 64 {
+					end := start + 64
+					if end > len(verified) {
+						end = len(verified)
+					}
+					if err := publish(verified[start:end], indexed["progressive_coverage"].(map[string]any)); err != nil {
+						return nil, cancelled(requested)
+					}
+				}
+				indexed["files"] = []map[string]any{}
+			}
+			return indexed, nil
+		}
+		if indexErr != nil && (options.Indexed || options.IndexedOnly) {
+			return nil, &Error{Status: http.StatusServiceUnavailable, Code: "index_worker_unavailable", MessageKey: "common.requestFailed", Path: requested, Retryable: true, Message: indexErr.Error()}
+		}
+		if options.Indexed || options.IndexedOnly {
+			if indexed == nil {
+				indexed = map[string]any{}
+			}
+			indexed["root"], indexed["query"], indexed["files"], indexed["count"] = requested, query, []map[string]any{}, 0
+			indexed["limit"], indexed["complete"], indexed["truncated"], indexed["recursive"] = limit, false, false, true
+			indexed["indexed"], indexed["index_state"], indexed["index_coverage"] = false, "warming", "pending"
+			indexed["cursor"], indexed["generation"] = "0", 0
+			indexed["progressive_coverage"] = map[string]any{"full_coverage": false}
+			return indexed, nil
+		}
 	}
 	if options.IndexedOnly {
 		return map[string]any{
 			"root": requested, "query": query, "limit": limit,
 			"files": []map[string]any{}, "count": 0, "complete": false, "truncated": false,
-			"recursive": recursive, "indexed": false, "index_state": "warming", "index_coverage": "pending",
+			"recursive": recursive, "indexed": false, "index_state": "not_indexed", "index_coverage": "pending",
 			"progressive_coverage": map[string]any{"full_coverage": false, "visited_files": 0, "visited_directories": 0},
+		}, nil
+	}
+	if options.Cursor != "" {
+		return map[string]any{
+			"root": requested, "query": query, "limit": limit,
+			"rebase_required": true, "reason": "index_unavailable", "indexed": false,
 		}, nil
 	}
 	tokens := strings.Fields(query)
@@ -916,7 +1061,41 @@ func (s *Service) IndexStatus(ctx context.Context, root string) (map[string]any,
 	if err := ctx.Err(); err != nil {
 		return nil, cancelled(requested)
 	}
+	if s.searchIndex != nil {
+		info, statErr := directory.Stat()
+		if statErr == nil {
+			if payload, workerErr := s.searchIndex.Request(ctx, indexRequest{Action: "status", Root: requested, Identity: fileID(info)}); workerErr == nil && payload != nil {
+				return payload, nil
+			}
+		}
+	}
 	return map[string]any{"root": requested, "status": "on_demand", "index_state": "not_indexed", "indexed": false, "ready": false, "stale": false, "refresh_pending": false, "progressive_coverage": map[string]any{"full_coverage": false}}, nil
+}
+
+func (s *Service) EnsureIndex(ctx context.Context, root string, options SearchOptions) (map[string]any, *Error) {
+	if s.searchIndex == nil || !options.Indexed {
+		return nil, nil
+	}
+	directory, requested, _, finderErr := s.open(root, true)
+	if finderErr != nil {
+		return nil, finderErr
+	}
+	defer directory.Close()
+	if err := ctx.Err(); err != nil {
+		return nil, cancelled(requested)
+	}
+	info, err := directory.Stat()
+	if err != nil {
+		return nil, filesystemError(requested, err)
+	}
+	payload, err := s.searchIndex.Request(ctx, indexRequest{
+		Action: "ensure", Root: requested, Identity: fileID(info), MaxFiles: options.MaxFiles, MaxBytes: options.MaxBytes,
+		RefreshSec: options.RefreshSec, ExcludeDirs: options.ExcludeDirs, ExcludePaths: options.ExcludePaths, SettingsRevision: options.SettingsRevision,
+	})
+	if err != nil {
+		return nil, filesystemError(requested, err)
+	}
+	return payload, nil
 }
 
 // Unindex is intentionally idempotent while Go uses bounded on-demand search. It still
@@ -930,6 +1109,11 @@ func (s *Service) Unindex(ctx context.Context, root string) (map[string]any, *Er
 	defer directory.Close()
 	if err := ctx.Err(); err != nil {
 		return nil, cancelled(requested)
+	}
+	if s.searchIndex != nil {
+		if err := s.searchIndex.Unindex(ctx, requested); err != nil {
+			return nil, &Error{Status: http.StatusServiceUnavailable, Code: "index_worker_unavailable", MessageKey: "common.requestFailed", Path: requested, Retryable: true, Message: err.Error()}
+		}
 	}
 	return map[string]any{"root": requested, "ok": true, "indexed": false, "index_state": "not_indexed"}, nil
 }

@@ -39,6 +39,9 @@ from yomux_lib.server import parse_repo_refs_param
 from yomux_lib.server import ws_resize_dimensions
 from yomux_lib.web import html_page
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 SOURCE_STATIC_DIR = Path(__file__).resolve().parents[1] / "static_src"
 
@@ -1870,6 +1873,7 @@ def test_operation_acknowledgment_route_rejects_invalid_batches(payload):
     assert writes[0][1] == HTTPStatus.BAD_REQUEST
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_server_bind_failure_preserves_original_os_error():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:

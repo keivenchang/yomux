@@ -5319,6 +5319,7 @@ const DEBUG_SYSTEM_HEALTH_REASON_TEXT = Object.freeze({
   history_unreadable: 'the retained history file could not be read and was reset',
   history_schema_unsupported: 'the retained history was written by a newer schema and was reset',
   history_port_mismatch: 'the retained history belonged to another port and was reset',
+  start_reason_unknown: 'the launch reason was not recorded, so this restart cannot be classified; the restart total is still retained',
   // The roster's two STRUCTURAL absences. Neither is a failure and neither is a zero: the
   // observer watches the six local services from this web process, so it has no restart,
   // request, error or latency series for the web process itself. The Go child row is an
@@ -5531,7 +5532,11 @@ function debugSystemHealthExplanations(health = {}) {
   const alerts = alerting ? [['backend-health', headline]] : [];
   const resetReason = String(health.history_reset_reason || '');
   if (resetReason) {
-    alerts.push(['history-reset', `${resetReason} — ${debugSystemHealthReasonText(resetReason)}; counts from before the reset are gone.`]);
+    const explanation = debugSystemHealthReasonText(resetReason);
+    const detail = resetReason === 'start_reason_unknown'
+      ? explanation
+      : `${explanation}; counts from before the reset are gone`;
+    alerts.push(['history-reset', `${resetReason} — ${detail}.`]);
   }
   const persistenceState = String(health.persistence_state || '');
   if (persistenceState && persistenceState !== 'ok') {
@@ -5572,7 +5577,7 @@ function debugSystemHealthSnapshotHtml(health = {}) {
   // The reason CODE, not its sentence. The sentence is an explanation and the alert slot above the
   // roster owns every one of those; this row's job is to name the machine-readable field the
   // backend published, which is a measured value like every other row here.
-  if (resetReason) rows.push(['History reset', resetReason]);
+  if (resetReason) rows.push(['History status', resetReason]);
   else if (String(health.history_coverage || '')) rows.push(['History coverage', String(health.history_coverage)]);
   if (persistenceDegraded) {
     const why = String(health.persistence_reason_code || '');
@@ -5666,7 +5671,7 @@ function debugSystemHealthDetailText(health = {}) {
     `observer samples: ${debugSystemMetricText(metrics.observations, 'observations')}`,
     `process starts: ${debugSystemMetricText(metrics.process_start_count, 'process_start_count')}`,
     `demand starts: ${debugSystemMetricText(metrics.demand_start_count, 'demand_start_count')}`,
-    `unexpected restarts: ${debugSystemMetricText(metrics.unexpected_restart_count, 'unexpected_restart_count')}`,
+    `restarts without a recorded graceful shutdown: ${debugSystemMetricText(metrics.unexpected_restart_count, 'unexpected_restart_count')}`,
     `completed requests: ${debugSystemMetricText(metrics.completed_count, 'completed_count')}`,
   ];
   // A pid and a revision are identifiers, not quantities: `4,242` is not a pid anyone can grep for.

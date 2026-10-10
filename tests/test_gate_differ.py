@@ -290,6 +290,8 @@ def _a8_deleted_differ_row_snapshot(gate_browser_runtime, target):
     )
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_differ_only_open_reaches_content_or_typed_error_within_bound(gate_browser_runtime, tmp_path):
     """A Differ-only open must leave its loading state for content or a typed error within twelve seconds."""
@@ -438,6 +440,8 @@ def test_differ_only_open_reaches_content_or_typed_error_within_bound(gate_brows
     assert metrics["panelActive"] is True and metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_mock_git_differ_stall_ends_in_visible_deadline_error(gate_browser_runtime, tmp_path):
     """A hung real-repository Differ request must paint a typed error and remove its spinner within eight seconds."""
@@ -546,6 +550,8 @@ def test_mock_git_differ_stall_ends_in_visible_deadline_error(gate_browser_runti
     assert metrics["errors"] == list(expected_api_errors) and metrics["rejections"] == [], metrics
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_mock_git_differ_pending_producer_without_publish_ends_in_visible_deadline_error(
     gate_browser_runtime, tmp_path
@@ -649,6 +655,8 @@ def test_mock_git_differ_pending_producer_without_publish_ends_in_visible_deadli
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_mock_git_differ_queued_producer_completion_settles_every_visible_surface(
     gate_browser_runtime, tmp_path
@@ -818,6 +826,8 @@ def test_mock_git_differ_queued_producer_completion_settles_every_visible_surfac
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_hung_fs_read_paints_visible_typed_deadline_error(gate_browser_runtime, tmp_path, monkeypatch):
     """A real fixture-server read that never answers must become a persistent typed editor error."""
@@ -901,6 +911,8 @@ def test_hung_fs_read_paints_visible_typed_deadline_error(gate_browser_runtime, 
     assert metrics["errors"] == list(expected_api_errors) and metrics["rejections"] == [], metrics
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_stalled_fs_read_body_paints_visible_typed_deadline_error(gate_browser_runtime, tmp_path, monkeypatch):
     """Headers alone are not completion: a stalled real response body must retain the typed deadline."""
@@ -974,6 +986,8 @@ def test_stalled_fs_read_body_paints_visible_typed_deadline_error(gate_browser_r
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_hung_fs_diff_paints_visible_typed_deadline_error(gate_browser_runtime, tmp_path, monkeypatch):
     """A real fixture-server diff that never answers must leave the editor in a visible typed state."""
@@ -1051,6 +1065,8 @@ def test_hung_fs_diff_paints_visible_typed_deadline_error(gate_browser_runtime, 
     assert metrics["errors"] == list(expected_api_errors) and metrics["rejections"] == [], metrics
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_slow_fs_read_and_diff_below_deadline_render_normal_content(gate_browser_runtime, tmp_path, monkeypatch):
     """Delayed job products below the deadline must still render their normal payloads."""
@@ -1119,6 +1135,8 @@ def test_slow_fs_read_and_diff_below_deadline_render_normal_content(gate_browser
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_c1_differ_opens_listed_file_twenty_consecutive_times(gate_browser_runtime, tmp_path):
     """C1: a file listed by Differ must open successfully in the rendered editor 20 consecutive times with zero failures; one successful open is insufficient."""
@@ -1168,6 +1186,8 @@ def test_c1_differ_opens_listed_file_twenty_consecutive_times(gate_browser_runti
     assert len(results) == 20
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_c2_differ_control_is_clickable_when_diff_is_available(gate_browser_runtime, tmp_path):
     """C2: for a fixture file with committed history and an available diff, the rendered Differ control must be present, enabled, and clickable, not merely present in the DOM."""
@@ -1203,6 +1223,8 @@ def test_c2_differ_control_is_clickable_when_diff_is_available(gate_browser_runt
     assert metrics["clicked"] is True and metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_c1_c2_vanished_working_file_keeps_enabled_differ_and_renders_git_diff(
     gate_browser_runtime, tmp_path
@@ -1286,6 +1308,8 @@ def test_c1_c2_vanished_working_file_keeps_enabled_differ_and_renders_git_diff(
     )
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_c3_git_control_only_change_publishes_no_ignored_path_as_a_transport_signal(gate_browser_runtime, tmp_path):
     """C3: a .git-only branch change must publish no changed path at all.
@@ -1421,6 +1445,8 @@ def test_c3_git_control_only_change_publishes_no_ignored_path_as_a_transport_sig
     assert final_watchd[1] >= changed_watchd["revision"]
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_c4_dirty_editor_survives_differ_open_and_external_refresh(gate_browser_runtime, tmp_path):
     """C4: unsaved editor text must survive opening Differ for the same file and must still survive an external files-channel refresh while Differ remains open."""
@@ -1455,6 +1481,8 @@ def test_c4_dirty_editor_survives_differ_open_and_external_refresh(gate_browser_
     assert metrics["status"] and metrics["missing"] is False, metrics
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 @pytest.mark.parametrize("recent_mtime", [False, True])
 def test_go_differ_paints_repository_stream_before_attribution_finishes(gate_browser_runtime, tmp_path, recent_mtime):
@@ -1594,6 +1622,8 @@ def test_go_differ_paints_repository_stream_before_attribution_finishes(gate_bro
     assert metrics["errors"] == [], metrics
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_c5_diff_list_generation_precedes_file_open_without_retry(gate_browser_runtime, tmp_path):
     """C5: the observable diff-list-to-file-open transition must prove the listed revision is ready before the browser issues its one file-open request, with no retry masking an ordering race."""
@@ -1652,6 +1682,8 @@ def test_c5_diff_list_generation_precedes_file_open_without_retry(gate_browser_r
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_a8_differ_recovers_from_ten_atomic_inode_swaps_and_keeps_real_delete_typed(gate_browser_runtime, tmp_path):
     """A8 Differ: ten varying sub-second os.replace inode swaps must recover without reload/reopen and clear the tab decoration; a real delete remains visibly missing while Git diff content stays rendered."""

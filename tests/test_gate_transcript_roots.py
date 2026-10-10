@@ -25,6 +25,9 @@ from yomux_lib.infra.filesystem_preflight import FilesystemClassification
 from yomux_lib.tmux import sessions
 from yomux_lib.workspace import session_files
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 TRANSCRIPT_ROOTS_MODULE = "yomux_lib.workspace.session_files"
 

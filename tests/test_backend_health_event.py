@@ -35,6 +35,9 @@ from yomux_lib.client_events import ClientEventBroker
 from yomux_lib.client_events import client_event_resource
 from yomux_lib.local_services.rpc import reset_local_service_traffic
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 PAYLOAD_KEYS = {"epoch", "revision", "overall_state", "degraded_resources"}
 DEGRADED_KEYS = {"id", "label", "state", "reason_code"}

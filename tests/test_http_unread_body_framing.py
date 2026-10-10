@@ -29,6 +29,7 @@ from yomux_lib.server import Handler
 from yomux_lib.server import TmuxWebtermHTTPServer
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 pytestmark = [pytest.mark.socket, pytest.mark.deprecated_python_server]
 
 _USERNAME = "framing-admin"

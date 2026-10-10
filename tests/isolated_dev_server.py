@@ -730,11 +730,12 @@ def isolated_dev_server_factory(
         source_root: Path = REPO_ROOT,
         state_dir: Path | None = None,
         auth_bypass: bool = True,
+        session_count: int = 1,
         env_overrides: dict[str, str] | None = None,
     ) -> IsolatedDevServer:
         root = tmp_path / f"runtime-{len(servers) + 1}-{label}"
         paths = build_paths(root, state_dir=state_dir)
-        tmux_runtime = start_isolated_tmux_runtime(monkeypatch, root, session_count=1)
+        tmux_runtime = start_isolated_tmux_runtime(monkeypatch, root, session_count=session_count)
         runtimes.append(tmux_runtime)
         server = start_isolated_dev_server(
             label,

@@ -137,6 +137,7 @@ type Service struct {
 	gitHistoryStatsCache       *cache.LRU[string, gitHistoryStatsInfo]
 	gitObjectLayouts           gitObjectLayoutCache
 	gitObjectSnapshots         *darwinGitObjectSnapshotCache
+	searchIndex                *SearchIndexWorkerClient
 }
 
 type watchRecord struct {

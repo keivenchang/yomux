@@ -22,6 +22,9 @@ from yomux_lib.common import PaneInfo
 from yomux_lib.common import SessionInfo
 from yomux_lib.server import TmuxWebtermHTTPServer
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 class FakeTmuxResult:
     def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = ""):
@@ -101,6 +104,7 @@ def test_rename_session_calls_tmux_and_updates_session_order(monkeypatch, make_a
     assert calls == [["rename-session", "-t", "=1:", "agent"]]
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_rename_session_http_exact_target_refuses_stale_prefix_without_renaming_sibling(
     monkeypatch,

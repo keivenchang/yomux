@@ -11,6 +11,9 @@ from yomux_lib.server_logs import SERVER_LOGS
 from yomux_lib.server_logs import install_server_log_handler
 from yomux_lib.server_logs import ServerLogRing
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def test_server_log_ring_preserves_levels_order_and_metadata():
     ring = ServerLogRing(capacity=8)

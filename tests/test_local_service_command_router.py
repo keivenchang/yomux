@@ -17,6 +17,9 @@ from yomux_lib.search import search_indexer
 from yomux_lib.stats_current import service as stats_service
 from yomux_lib.local_services.command_router import LocalServiceCommandRouter
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def test_router_has_fixed_vocabulary_and_unknown_is_not_dispatched():
     router = LocalServiceCommandRouter({"one": "handle_one"})

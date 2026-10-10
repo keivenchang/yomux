@@ -171,6 +171,26 @@ def _download_go_modules(pinned_go: Path, repo_root: Path, module_cache: Path) -
     for name in ("go.mod", "go.sum"):
         if (source / name).read_bytes() != (repo_root / name).read_bytes():
             raise ValueError("Go module preparation attempted to change locked " + name)
+    sum_entries = (source / "go.sum").read_text(encoding="utf-8").splitlines()
+    test_dependency_versions = set()
+    for entry in sum_entries:
+        fields = entry.split()
+        if len(fields) != 3:
+            raise ValueError("go.sum contains a malformed checksum entry")
+        module, version, _checksum = fields
+        if version.endswith("/go.mod"):
+            version = version.removesuffix("/go.mod")
+        test_dependency_versions.add((module, version))
+    for module, version in sorted(test_dependency_versions):
+        completed = subprocess.run(
+            [str(pinned_go), "mod", "download", f"{module}@{version}"], cwd=source, env=environment,
+            capture_output=True, text=True, check=False,
+        )
+        if completed.returncode:
+            raise ValueError("Go module checksum seed failed for " + module + "@" + version + ": " + redact_local_service_text(completed.stderr))
+    for name in ("go.mod", "go.sum"):
+        if (source / name).read_bytes() != (repo_root / name).read_bytes():
+            raise ValueError("Go module preparation attempted to change locked " + name)
     for path in (module_cache, *module_cache.rglob("*")):
         if not path.is_symlink():
             path.chmod(path.stat().st_mode | stat.S_IWUSR)

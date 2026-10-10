@@ -7,6 +7,9 @@ import pytest
 from yomux_lib.infra.refresh_outcome import RefreshOutcome
 from yomux_lib.infra.refresh_outcome import RefreshOutcomeState
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 ACCEPTED_LOCAL = {"ok": True, "accepted": True, "role": "r", "local": True, "fallback": False}
 COALESCED_LOCAL = {

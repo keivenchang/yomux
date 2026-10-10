@@ -35,6 +35,8 @@ def test_current_stats_fixture_uses_canonical_resolution_policy():
     assert "window.__statsFixtureCapabilities" in source
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_live_runtime_boot_fixture_exposes_exact_stats_capabilities_before_logs_render(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     observed = browser.execute_async_script(
@@ -259,6 +261,8 @@ def _load_current_stats(browser, tmp_path, view="stats"):
     _start_current_stats(browser, view)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_current_stats_browser_traverses_every_exact_matrix_cell(browser, tmp_path):
     _load_current_stats(browser, tmp_path)
     cells = browser.execute_async_script(
@@ -308,6 +312,7 @@ def test_current_stats_browser_traverses_every_exact_matrix_cell(browser, tmp_pa
         assert all(path["paths"] == path["series"] for path in cell["paths"]), cell
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_http_client_rpc_cache_and_browser_render_every_exact_matrix_cell(
     browser,
@@ -496,6 +501,8 @@ def test_http_client_rpc_cache_and_browser_render_every_exact_matrix_cell(
         ))
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_current_stats_one_second_motion_and_sse_delta_do_not_refetch_or_fabricate(browser, tmp_path):
     _load_current_stats(browser, tmp_path)
     result = browser.execute_async_script(
@@ -546,6 +553,8 @@ def test_current_stats_one_second_motion_and_sse_delta_do_not_refetch_or_fabrica
     assert any(label.count(":") == 2 for label in result["afterDelta"]["labels"]), result
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_current_stats_one_second_motion_preserves_sparse_native_cadence_series(browser, tmp_path):
     _load_current_stats(browser, tmp_path)
     result = browser.execute_async_script(
@@ -850,6 +859,8 @@ def _retired_current_cost_summary_opens_an_internal_scroll_modal_and_dismisses_b
     assert browser.execute_script("return document.querySelector('[role=dialog]') === null;") is True
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_current_cost_pricing_link_dispatches_external_open(browser, tmp_path):
     _load_current_stats(browser, tmp_path, view="cost")
     browser.find_element(By.CSS_SELECTOR, "[data-stats-current-cost-more]").click()

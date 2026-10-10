@@ -15,6 +15,9 @@ from yomux_lib.stats_current import client as stats_client
 from yomux_lib.stats_current import families
 from yomux_lib.stats_current import observations, service, storage
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def payload(**changes):
     value = {

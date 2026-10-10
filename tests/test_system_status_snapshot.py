@@ -28,6 +28,9 @@ from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import gate_tmux  # noqa: F401
 from tests.helpers.http_routes import login_cookie as _login_cookie
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 

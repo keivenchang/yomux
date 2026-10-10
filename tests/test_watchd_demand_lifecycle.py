@@ -11,6 +11,9 @@ from yomux_lib.infra.state_services import ClientEventWatcherRecord
 from yomux_lib.infra.state_services import ClientWatchDescriptor
 from yomux_lib.local_services import client as local_service_client
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 class _WatchdDemandRetirementClient:
     def __init__(self, stop_event=None, on_first_release=None):

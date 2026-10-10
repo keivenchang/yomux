@@ -101,6 +101,8 @@ def copy_feedback_stats_runtime(monkeypatch, gate_runtime_paths):
     monkeypatch.setattr(app_module.TmuxWebtermApp, "start_status_generation_watcher", lambda self, record: False)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_g0_logs_copy_confirms_first_press_and_repeats_after_revert(browser, copy_feedback_stats_runtime, gate_live_server):
     """One real Logs-button activation copies its text and shows transient confirmation."""
@@ -256,6 +258,8 @@ def test_g0_logs_copy_confirms_first_press_and_repeats_after_revert(browser, cop
     assert js_errors["severeBrowserLogEntries"] == [], js_errors
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_g0_api_sse_copy_confirms_across_rerender_and_repeats(browser, copy_feedback_stats_runtime, gate_live_server):
     """The API/SSE control keeps its first-press confirmation through a panel render."""
@@ -517,6 +521,8 @@ def _start_current_stats_over_network(browser):
     assert result.get("error") is None, result
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_g4_revisiting_unchanged_selection_reuses_cache_and_repair_reconnects_without_refetch(browser, tmp_path):
     """G4: exact cached selections and a server-requested reconnect avoid redundant snapshots."""
@@ -581,6 +587,7 @@ def test_g4_revisiting_unchanged_selection_reuses_cache_and_repair_reconnects_wi
 
 
 @pytest.mark.browser
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_g1_real_token_and_cost_series_paint_while_repair_backlog_remains(
     browser, monkeypatch, tmp_path, gate_runtime_paths

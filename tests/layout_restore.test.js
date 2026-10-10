@@ -2223,7 +2223,8 @@ async function runLayoutRestoreSuite() {
     for (const timerClass of ['poll:no-change', 'sample', 'lease', 'external-reconcile', 'repair', 'fallback', 'local-display']) {
       assert.equal(typeof api.runtimeTimerClassCatalogForTest()[timerClass], 'string', `${timerClass} remains a distinct timer class`);
     }
-    assert.ok(/function syncFileIndexStatusPollInterval\(\)[\s\S]*clientEventTransportState\.connected === true[\s\S]*clearRuntimeInterval\('file-index-refresh'\)[\s\S]*resetRuntimeInterval\('file-index-refresh', refreshAllIndexedDirsStatus/.test(source), 'indexed-root status polling is installed only while the push transport is disconnected');
+    assert.ok(/function syncFileIndexStatusPollInterval\(\)[\s\S]*clientEventTransportState\.connected === true[\s\S]*clearRuntimeInterval\('file-index-refresh'\)[\s\S]*resetRuntimeInterval\('file-index-refresh', refreshAllIndexedDirsStatus/.test(source), 'full indexed-root reconciliation remains disconnected-transport repair');
+    assert.ok(/if \(!fileIndexStatusPollRoots\.size\)[\s\S]*clearRuntimeInterval\('file-index-building'\)[\s\S]*resetRuntimeInterval\('file-index-building', refreshBuildingFileIndexStatuses/.test(source), 'building roots keep targeted read-only status checks until their badges settle');
     assert.deepStrictEqual(canonical(api.runtimeIntervalCatalogForTest('events')), null, 'the normal event-log discovery loop remains retired');
   });
 
@@ -2544,7 +2545,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(/function fileExplorerIndexBadgeText\(path\) \{[\s\S]*?fileExplorerTreeDateMode !== 'none'[\s\S]*?return ''/.test(source), false, '#31: Date/Ago rows retain the readable index status beside the date');
     assert.ok(/function fileExplorerIndexBadgeTitle\(path\)[\s\S]*?status === 'too_large'[\s\S]*?finder\.index\.partial/.test(source), 'the indexed badge title reports partial coverage');
     assert.ok(/function fileIndexStatusFromPayload\(payload\)[\s\S]*payload\.too_large === true[\s\S]*if \(payload\.ready === true \|\| state === 'ready'\) return 'ready'/.test(source), 'partial coverage wins over the generic ready state');
-    assert.ok(/function showFileIndexPartialCoverageWarning[\s\S]*emitNotification\('indexCoverage'[\s\S]*finder\.index\.partialBody/.test(source), 'capped indexes emit a persistent user-facing warning');
+    assert.ok(/function showFileIndexPartialCoverageWarning[\s\S]*emitNotification\('indexCoverage'[\s\S]*finder\.index\.partial/.test(source), 'partial indexes emit a persistent user-facing warning');
     assert.ok(/payload\.role === 'search-index'[\s\S]*payload\.root[\s\S]*refreshFileIndexStatus\(payload\.root\)/.test(source), 'search-index build completion checks coverage even when Finder and Quick Open are closed');
     assert.ok(/function reconcileIndexedDirsFromSetting[\s\S]*options\.initial[\s\S]*for \(const root of desired\)[\s\S]*refreshFileIndexStatus\(root\)/.test(source), 'initial browser startup checks every configured index for partial coverage');
     assert.ok(/fileExplorerIndexStatus\.set\(normalized, 'building'\);\s*refreshFileIndexStatus\(normalized\)/.test(source), '#30: indexing a directory eagerly warms its backend index (no cold first-query live walk)');
@@ -3683,6 +3684,67 @@ async function runLayoutRestoreSuite() {
     assert.ok(/Approved</.test(approvedNoWho) && !/ by /.test(approvedNoWho), 'approved with no reviewer omits the "by" clause');
   });
 
+  test('mixed ASK and BLK target the same current child and suppress stale session fallback', () => {
+    const timers = [];
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {setTimeout(callback, ms) {timers.push({callback, ms}); return timers.length;}, clearTimeout() {}});
+    const info = {agents: [
+      {kind: 'codex', state: 'needs-input', window_index: 0, attention_key: 'go:attention:ask'},
+      {kind: 'codex', state: 'blocked', window_index: 1, current: true, attention_key: 'go:attention:blk'},
+    ]};
+    api.setTranscriptInfoForTest('1', info);
+    api.setAutoApproveStateForTest('1', {agent_windows: info.agents, prompt: {visible: true, signature: 'stale-session-question'}, prompt_attention_key: 'go:attention:stale-session'});
+    const render = () => api.tmuxPaneTabHtml('1', info, api.sessionState('1', info), false);
+    assert.match(render(), />BLK<\/span>/);
+    assert.equal(api.acknowledgeTerminalAttentionFromUserActionForTest('1', null, {localOnly: true, refresh: false, acknowledgeAgentWindowDelayMs: 0}), true);
+    assert.equal(api.attentionAcknowledgementKeyIsRecordedForTest('go:attention:blk'), true);
+    assert.equal(api.attentionAcknowledgementKeyIsRecordedForTest('go:attention:ask'), false);
+    timers.findLast(timer => timer.ms === 1550).callback();
+    assert.match(render(), />ASK<\/span>/);
+    api.acknowledgeTerminalAttentionFromUserActionForTest('1', 0, {localOnly: true, refresh: false, acknowledgeAgentWindowDelayMs: 0});
+    timers.findLast(timer => timer.ms === 1550).callback();
+    assert.equal(render().includes('status-indicator--attention'), false, 'cleared attributed events cannot revive the stale session prompt');
+  });
+
+  test('yellow completion becomes steady after sixty seconds and survives refresh', () => {
+    const api = loadYomux('', ['1']);
+    api.setWorkflowTransitionGlowSecondsForTest(60);
+    const stoppedAt = Date.now() / 1000 - 61;
+    const options = {session: '1', window_index: 9, working_stopped_ts: stoppedAt, scheduleRefresh: false};
+    const flashing = api.agentWindowActivityIconForTest('codex', 'idle', 0, {...options, nowSeconds: stoppedAt + 1});
+    assert.equal(flashing.state, 'cooldown');
+    assert.equal(flashing.transitionPulseActive, true);
+    for (const elapsed of [60, 61, 300]) {
+      const steady = api.agentWindowActivityIconForTest('codex', 'idle', 0, {...options, nowSeconds: stoppedAt + elapsed});
+      assert.equal(steady.state, 'cooldown');
+      assert.equal(steady.transitionPulseActive, false);
+      assert.equal(steady.acknowledged, false);
+    }
+  });
+
+  test('ASK and BLK share their event dot acknowledgement and queued ASK preserves green', () => {
+    const timers = [];
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      setTimeout(callback, ms) { timers.push({callback, ms}); return timers.length; },
+      clearTimeout() {},
+    });
+    for (const [state, queued, label] of [['needs-input', false, 'ASK'], ['blocked', false, 'BLK'], ['working', true, 'ASK']]) {
+      const key = `go:attention:${state}`;
+      const info = {agents: [{kind: 'codex', state, window_index: 0, pane_target: '%1', queued_followup_question: queued, attention_key: key}]};
+      api.setTranscriptInfoForTest('1', info);
+      api.setAutoApproveStateForTest('1', {agent_windows: info.agents});
+      const render = () => api.tmuxPaneTabHtml('1', info, api.sessionState('1', info), false);
+      assert.ok(render().includes(`>${label}</span>`), `${state} arrives without interaction`);
+      assert.equal(api.acknowledgeTerminalAttentionFromUserActionForTest('1', null, {localOnly: true, refresh: false, acknowledgeAgentWindowDelayMs: 0}), true);
+      const gray = render();
+      assert.match(gray, /session-tab-(?:state-marker|queued-question)[^>]*status-indicator--acknowledged|status-indicator--acknowledged[^>]*session-tab-(?:state-marker|queued-question)/);
+      if (queued) assert.match(gray, /status-indicator--working/);
+      const fade = timers.findLast(timer => timer.ms === 1550);
+      assert.ok(fade); fade.callback();
+      assert.equal(render().includes(`>${label}</span>`), false, `${state} retires its badge`);
+      if (queued) assert.match(render(), /status-indicator--working/);
+    }
+  });
+
   test('review-required badge has one readable theme owner', () => {
     // #1/#2/#3: tab badge legibility (light), drop the redundant PR pill, no duplicate tooltip.
     const api = loadYomux('', ['5']);
@@ -3692,11 +3754,30 @@ async function runLayoutRestoreSuite() {
     assert.ok(/body\.theme-light\s*\{[\s\S]*--20-sessions-popovers-ci-indicator-fg-20:\s*#41506a/.test(css) && /\.ci-indicator\.pr-review-required\s*\{[^}]*color:\s*var\(--20-sessions-popovers-ci-indicator-fg-20\)/.test(css), '#6: review-required chip consumes the centralized readable light-theme text token');
     assert.equal((css.match(/background:\s*#e7ebf1/g) || []).length, 1, '#6: review-required fill has one shared owner instead of a repeated light-theme copy');
     assert.ok(/body\.theme-light\s*\{[\s\S]*--20-sessions-popovers-ci-indicator-fg-7:\s*var\(--paint-white\)[\s\S]*--20-sessions-popovers-ci-indicator-fg-8:\s*#06340f/.test(css), '#6: centralized light tokens cover number + review chips');
-    // #2: the ready-review "PR" state pill is dropped (PR chips convey it now); red attention states use balls/rings instead of text badges.
+    // #2: the ready-review "PR" state pill is dropped (PR chips convey it now); queued Codex questions add attention without changing Working.
     assert.equal(api.sessionStateHtml({key: 'ready-review', short: 'PR', label: 'Ready for review', reason: 'checks pass'}), '', '#7: the redundant ready-review PR pill is suppressed');
     assert.equal(api.sessionStateHtml({key: 'idle', short: '-', label: 'Idle', reason: 'no active work'}), '', '#7: idle state does not add a meaningless dash before branch metadata');
-    const needsInputBadge = api.sessionStateHtml({key: 'needs-input', short: '?', label: 'Needs input', reason: 'waiting'});
-    assert.equal(needsInputBadge, '', '#7: input-needed attention does not render a redundant text badge');
+    const queuedQuestionInfo = {agents: [{kind: 'codex', state: 'working', window_index: 0, pane_target: '%1', queued_followup_question: true}]};
+    const queuedQuestionTab = api.tmuxPaneTabHtml('5', queuedQuestionInfo, {key: 'working', label: 'Working', reason: 'agent is working'}, false);
+    const queuedQuestionLeading = queuedQuestionTab.match(/<span class="session-tab-leading-activity">([\s\S]*?)<\/span><span class="session-button-prefix">/)?.[1] || '';
+    assert.match(queuedQuestionLeading, /session-tab-status-and-markers[\s\S]*session-tab-queued-question[^>]*>ASK</, '#7: queued Codex questions place red ASK in the leading status group');
+    assert.ok(queuedQuestionLeading.indexOf('agent-window-status-dot') < queuedQuestionLeading.indexOf('ASK'), '#7: ASK follows the status circle');
+    assert.ok(queuedQuestionTab.indexOf('ASK') < queuedQuestionTab.indexOf('session-button-prefix'), '#7: ASK appears before the session title text');
+    const noQueuedQuestionTab = api.tmuxPaneTabHtml('5', {agents: [{kind: 'codex', state: 'working'}]}, {key: 'working', label: 'Working', reason: 'agent is working'}, false);
+    assert.equal(noQueuedQuestionTab.includes('ASK'), false, '#7: working Codex panes without a queued question keep the normal title');
+    for (const [key, label, marker] of [['blocked', 'Blocked', 'BLK'], ['tests-running', 'Tests running', 'TEST'], ['disconnected', 'Disconnected', 'OFF'], ['yolo-approval', 'YOLO pending approval', 'YOLO?']]) {
+      if (key === 'blocked') api.setAutoApproveStateForTest('5', {screen: {key: 'blocked', text: 'Current blocker'}});
+      else api.setAutoApproveStateForTest('5', {});
+      const tab = api.tmuxPaneTabHtml('5', {}, {key, label, reason: 'state reason'}, false);
+      const leading = tab.match(/<span class="session-tab-leading-activity">([\s\S]*?)<\/span><span class="session-button-prefix">/)?.[1] || '';
+      assert.ok(leading.includes(`>${marker}</span>`), `#7: ${key} renders ${marker} beside the status circle`);
+      assert.ok(leading.indexOf('agent-window-status-dot') < leading.indexOf(marker), `#7: ${marker} follows the status circle`);
+      assert.ok(tab.indexOf(marker) < tab.indexOf('session-button-prefix'), `#7: ${marker} precedes the session title`);
+      assert.equal(tab.slice(tab.indexOf('session-button-text')).includes(marker), false, `#7: ${marker} is not repeated after the title`);
+    }
+    assert.equal(api.sessionStateHtml({key: 'tests-running', short: 'TEST', label: 'Tests running', reason: 'active'}, {leadingTab: true}), '', '#7: TEST is emitted through the shared leading marker group');
+    assert.equal(api.sessionStateHtml({key: 'tests-running', short: 'TEST', label: 'Tests running', reason: 'active'}), '', '#7: TEST remains absent from the trailing title badge path');
+    assert.equal(api.sessionStateHtml({key: 'needs-input', short: '?', label: 'Needs input', reason: 'waiting'}), '', '#7: generic screen asks keep their existing title treatment');
     // #3: tab badge chips carry no native title (the custom popover is the single source).
     assert.ok(!api.pullRequestNumberIndicatorHtml('5', {number: 123}).includes('title='), '#8: the PR number chip has no native title tooltip');
     assert.ok(!api.pullRequestApprovalIndicatorHtml('5', {number: 123, state: 'open', review_decision: 'APPROVED'}).includes('title='), '#8: the approval chip has no native title tooltip');
@@ -4289,6 +4370,11 @@ async function runLayoutRestoreSuite() {
     preview.clientWidth = 320;
     preview.clientHeight = 240;
     panel.appendChild(preview);
+
+    const hiddenSibling = new TestElement('hidden-summary');
+    hiddenSibling.className = 'summary-preview';
+    Object.defineProperty(hiddenSibling, 'scrollTop', {get() {throw new Error('unrelated hidden scroll surface was measured');}});
+    panel.appendChild(hiddenSibling);
 
     api.restorePaneElementScrollStateForTest(panel, {
       scrollContainers: [{key: 'id:preview-scroll-container', scrollTop: 80, scrollLeft: 2}],
@@ -5338,7 +5424,7 @@ async function runLayoutRestoreSuite() {
   test('explicit pane focus focuses terminal input', () => {
     const api = loadYomux('', ['1']);
     let focusCount = 0;
-    api.registerTerminalForTest('1', {focus() { focusCount += 1; }});
+    api.registerTerminalForTest('1', {focus() { focusCount += 1; }, refresh() {}});
     api.setAutoFocusEnabledForTest(false);
     api.focusPanel('1');
     assert.equal(api.focusedPanelItemForTest(), '1');

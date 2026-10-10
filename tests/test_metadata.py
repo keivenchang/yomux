@@ -29,6 +29,9 @@ from yomux_lib.sessions import discover_sessions
 
 from _git_helpers import git as _git
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def _pane(session, index, path):
     return TmuxPaneInfo(

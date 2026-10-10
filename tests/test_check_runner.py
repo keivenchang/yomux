@@ -101,6 +101,7 @@ def test_runtime_and_tool_function_bodies_are_not_exact_duplicates():
     assert duplicates == []
 
 
+@pytest.mark.shared_tooling
 def test_check_runner_reuses_background_scheduler_process_liveness():
     check = load_check_module()
     assert check.pid_is_alive is background_scheduler_pid_is_alive
@@ -170,7 +171,6 @@ def test_default_check_lanes_keep_full_pytest_gate():
     # missing here runs in no gate lane at all: test_node_suite.py runs the bare launcher but carries
     # the node_bridge marker the default pytest lane excludes.
     assert "tests/cross_surface_state.test.js" in check.NODE_LAYOUT_FILES
-    assert "tests/gate_panels.test.js" not in check.NODE_LAYOUT_FILES
     boot_lane = next(lane for lane in lanes if lane.name == "pytest-boot")
     assert boot_lane.default is False
     assert boot_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("boot"), "-m", "boot and not deprecated_python_server", "-q"]
@@ -185,7 +185,8 @@ def test_default_check_lanes_keep_full_pytest_gate():
     assert browser_lane.steps[2].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", "unlimited"), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(1)))
     gate_serial_lane = next(lane for lane in lanes if lane.name == "pytest-gate-serial")
     assert gate_serial_lane.run_last is True
-    assert gate_serial_lane.steps[0].env == (("YOMUX_CHECK_GO_ONLY", "1"), ("YOMUX_TEST_CPU_COUNT", "unlimited"), ("YOMUX_TEST_MEMORY_MB", check.pytest_memory_limit_mb(1, serial=True)))
+    assert not check.pytest_files("gate_serial")
+    assert "No enabled tests" in gate_serial_lane.steps[0].args[-1]
     e2e_lane = next(lane for lane in lanes if lane.name == "pytest-e2e")
     assert e2e_lane.default is True
     assert e2e_lane.steps[0].args == [
@@ -212,6 +213,9 @@ def test_every_default_pytest_step_enforces_the_go_only_server_boundary():
     steps = check.step_catalog()
     for step_id in pytest_ids:
         step = steps[step_id]
+        if step.args[:3] != ["python3", "-m", "pytest"]:
+            assert "No enabled tests" in step.args[-1]
+            continue
         assert ("YOMUX_CHECK_GO_ONLY", "1") in step.env, (step_id, step.env)
         assert any("deprecated_python_server" in arg for arg in step.args), (step_id, step.args)
         assert ("YOMUX_TEST_CPU_COUNT", "unlimited") in step.env, (step_id, step.env)
@@ -323,39 +327,15 @@ def test_lane_specs_are_the_one_owner_of_names_defaults_and_shared_steps():
     timing = next(lane for lane in built if lane.name == "pytest-gate-serial")
     assert browser.steps[0] is boot.steps[0]
     assert timing.run_last is True
-    assert timing.steps[0].args == [
-        "python3",
-        "-m",
-        "pytest",
-        *test_catalog.PYTEST_PHASE_FILES["gate_serial"],
-        "-m",
-        "gate_serial and not deprecated_python_server",
-        "-q",
-    ]
+    assert not check.pytest_files("gate_serial")
+    assert "No enabled tests" in timing.steps[0].args[-1]
     gate_serial_nodes = {
         nodeid
         for relative in test_catalog.PYTEST_PHASE_FILES["gate_serial"]
         for nodeid, phase in test_catalog.test_definitions(REPO_ROOT / relative)
         if phase == "gate_serial"
     }
-    assert gate_serial_nodes == {
-        "tests/test_client_event_broker_backlog_disambiguation.py::test_enqueue_to_dequeue_and_sse_send_are_not_the_backlog_owner",
-        "tests/test_client_event_broker_backlog_disambiguation.py::test_independent_publishers_can_serialize_events_concurrently",
-        "tests/test_client_event_broker_backlog_disambiguation.py::test_payload_serialization_never_runs_inside_the_ordering_critical_section",
-        "tests/test_client_event_broker_backlog_disambiguation.py::test_the_broker_lock_genuinely_serializes_every_concurrent_publisher",
-        "tests/test_gate_tmux.py::test_gate_d7_kill_session_api_returns_promptly_and_removes_scoped_session",
-        "tests/test_hot_path_owner.py::test_churn_abandon_and_restart_leaves_no_deleted_fds_and_one_generation",
-        "tests/test_batchd.py::test_fs_batch_completion_holds_a_batchd_lease_across_the_broker_idle_window",
-        "tests/test_batchd.py::test_batchd_control_plane_is_ready_before_blocked_data_plane_setup",
-        "tests/test_batchd.py::test_zero_wait_produce_returns_a_browser_opaque_byte_product_without_a_relay",
-        "tests/test_stats_current_service_performance.py::test_batched_recording_holds_the_joint_cost_ceilings",
-        "tests/test_stats_current_service_performance.py::test_per_fact_commits_breach_the_ceiling_that_batching_clears",
-        "tests/test_stats_current_service_performance.py::test_recording_facts_holds_the_joint_cost_ceilings_on_a_production_store",
-        "tests/test_stats_current_service_performance.py::test_the_cost_gate_states_the_smallest_regression_it_can_resolve",
-        "tests/test_stats_current_service_performance.py::test_the_probe_publishes_a_ring_head_before_it_measures",
-        "tests/test_stats_current_service_performance.py::test_the_probe_still_covers_the_products_real_append_path",
-        "tests/test_stats_current_service_performance.py::test_whole_history_cold_start_breaches_the_peak_ceiling",
-    }
+    assert gate_serial_nodes == set()
 
     default_step_owners = {}
     for spec in test_plan.LANE_SPECS:
@@ -1032,7 +1012,9 @@ def test_canonical_catalog_covers_every_collected_node_once(tmp_path):
     collection_rows = json.loads(output_path.read_text(encoding="utf-8"))
     collected = {row["nodeid"] for row in collection_rows}
     collected_base = {nodeid.split("[", 1)[0] for nodeid in collected}
-    missing = [nodeid for nodeid in test_config.SLOWEST_FIRST_TESTS if nodeid not in collected_base]
+    enabled_static = {nodeid for path in (REPO_ROOT / "tests").glob("test_*.py")
+                      for nodeid, _phase in test_catalog.test_definitions(path, run_deprecated_python=False)}
+    missing = [nodeid for nodeid in test_config.SLOWEST_FIRST_TESTS if nodeid in enabled_static and nodeid not in collected_base]
     assert missing == []
     check = load_check_module()
     catalog_files = {phase: set(paths) for phase, paths in check.PYTEST_PHASE_FILES.items()}
@@ -1913,6 +1895,8 @@ def _forwarding_loop(allowlist: list[str], environ: dict[str, str]) -> list[str]
     return [line for line in completed.stdout.split("\n") if line]
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_docker_run_tests_forwards_the_stats_persistence_arm_variable():
     """The persistence A/B selects its arm at statsd start, inside the test container.
 
@@ -1942,6 +1926,8 @@ def test_docker_run_tests_forwards_go_only_server_guard():
     assert _forwarding_loop([item for item in allowlist if item != suffix], {name: "1"}) == []
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_the_forwarding_loop_only_passes_names_the_allowlist_contains():
     """The control the allowlist doc names: one input, two allowlists, only that differing.
 
@@ -1964,6 +1950,7 @@ def test_certification_step_runs_every_named_unit_serially_with_its_admission_en
 
     for nodeid in check.CERTIFICATION_NODE_IDS:
         assert nodeid in step.args, (nodeid, step.args)
+    assert "--run-deprecated-python" in step.args, step.args
     # Serial by construction: the phase must never hand its units to an xdist pool.
     assert "-n" not in step.args, step.args
     assert ["-p", "no:xdist"] == step.args[step.args.index("-p"):step.args.index("-p") + 2], step.args

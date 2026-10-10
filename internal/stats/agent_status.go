@@ -2,14 +2,19 @@ package stats
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // AgentStatus is the normalized family value consumed by the current stats
@@ -64,10 +69,11 @@ type AgentStatusPane struct {
 }
 
 type AgentStatusProcess struct {
-	PID        int
-	Command    string
-	Executable string
-	Alive      bool
+	PID             int
+	Command         string
+	Executable      string
+	StartedIdentity string
+	Alive           bool
 }
 
 type AgentStatusRequest struct {
@@ -86,12 +92,14 @@ type AgentStatusRequest struct {
 }
 
 type AgentStatusResult struct {
-	Status           AgentStatus
-	Evidence         []string
-	Reason           string
-	RawStatus        string
-	Acknowledged     bool
-	WorkingStoppedAt time.Time
+	Status                 AgentStatus
+	Evidence               []string
+	QueuedFollowupQuestion bool
+	AttentionSignature     string
+	Reason                 string
+	RawStatus              string
+	Acknowledged           bool
+	WorkingStoppedAt       time.Time
 	// ObservedAt carries the pane evidence timestamp through the classifier result.
 	ObservedAt time.Time
 }
@@ -167,6 +175,26 @@ func ClassifyAgentStatus(ctx context.Context, request AgentStatusRequest, source
 		return unavailableAt("empty-pane-capture", pane.ObservedAt)
 	}
 	classified := classifyPaneStatus(pane, request)
+	if classified.Status == AgentStatusAsk || classified.Status == AgentStatusError || classified.QueuedFollowupQuestion {
+		text := currentAgentPaneText(pane.VisibleText)
+		lines := strings.Split(text, "\n")
+		if classified.QueuedFollowupQuestion {
+			for index := currentWorkingFooterIndex(lines) + 1; index < len(lines); index++ {
+				line := lines[index]
+				if strings.Contains(strings.ToLower(line), "queued follow-up inputs") {
+					lines = lines[index:min(index+6, len(lines))]
+					break
+				}
+			}
+		} else if len(lines) > 24 {
+			lines = lines[len(lines)-24:]
+		}
+		for index := range lines {
+			lines[index] = strings.TrimRight(lines[index], " \t")
+		}
+		digest := sha256.Sum256([]byte(strings.Join(lines, "\n")))
+		classified.AttentionSignature = string(classified.Status) + ":" + hex.EncodeToString(digest[:])
+	}
 	classified.ObservedAt = pane.ObservedAt
 	return classified
 }
@@ -180,12 +208,10 @@ func classifyPaneStatus(pane AgentStatusPane, request AgentStatusRequest) AgentS
 	}
 	result := AgentStatusResult{RawStatus: raw, Acknowledged: acknowledged, WorkingStoppedAt: stoppedAt}
 	switch raw {
-	case "approval", "needs-approval", "needs-input", "attention", "interrupted", "blocked":
-		if !acknowledged {
-			result.Status = AgentStatusAsk
-			result.Evidence = []string{"structured-ask-status"}
-			return result
-		}
+	case "approval", "needs-approval", "needs-input", "attention", "interrupted":
+		result.Status = AgentStatusAsk
+		result.Evidence = []string{"structured-ask-status"}
+		return result
 	case "working":
 		result.Status = AgentStatusRun
 		result.Evidence = []string{"structured-working-status"}
@@ -196,7 +222,7 @@ func classifyPaneStatus(pane AgentStatusPane, request AgentStatusRequest) AgentS
 			result.Evidence = []string{"structured-transition-status"}
 			return result
 		}
-	case "error", "failed", "failure":
+	case "blocked", "error", "failed", "failure":
 		result.Status = AgentStatusError
 		result.Evidence = []string{"structured-error-status"}
 		return result
@@ -209,51 +235,92 @@ func classifyPaneStatus(pane AgentStatusPane, request AgentStatusRequest) AgentS
 	if window <= 0 {
 		window = DefaultAgentTransitionWindow
 	}
-	if !acknowledged && !stoppedAt.IsZero() && !now.Before(stoppedAt) && now.Sub(stoppedAt) < window {
-		result.Status = AgentStatusTransition
-		result.Evidence = []string{"recent-working-stopped"}
-		return result
-	}
 	if raw == "" {
 		legacy := classifyVisibleAgentText(pane.VisibleText)
 		legacy.RawStatus = raw
 		legacy.Acknowledged = acknowledged
 		legacy.WorkingStoppedAt = stoppedAt
+		if legacy.Status == AgentStatusIdle && !acknowledged && !stoppedAt.IsZero() && !now.Before(stoppedAt) && now.Sub(stoppedAt) < window {
+			legacy.Status = AgentStatusTransition
+			legacy.Evidence = []string{"recent-working-stopped"}
+		}
+		if legacy.Status == AgentStatusTransition && (acknowledged || (!stoppedAt.IsZero() && !now.Before(stoppedAt) && now.Sub(stoppedAt) >= window)) {
+			legacy.Status = AgentStatusIdle
+			legacy.Evidence = []string{"settled-completion"}
+		}
 		return legacy
+	}
+	if !acknowledged && !stoppedAt.IsZero() && !now.Before(stoppedAt) && now.Sub(stoppedAt) < window {
+		result.Status = AgentStatusTransition
+		result.Evidence = []string{"recent-working-stopped"}
+		return result
 	}
 	result.Status = AgentStatusIdle
 	result.Evidence = []string{"settled-status"}
 	return result
 }
 
+// Empty terminal rows below the composer must not displace current evidence or its identity.
+func currentAgentPaneText(text string) string {
+	return strings.TrimRight(strings.ReplaceAll(text, "\r", ""), " \t\n")
+}
+
 func classifyVisibleAgentText(text string) AgentStatusResult {
-	// The Python detector evaluates the current prompt/footer before looking at
-	// stale transcript prose. A visible Codex pane commonly contains old
-	// completion text above the live `Ask Codex to do anything` composer; a
-	// whole-screen substring search incorrectly reports a conflict and drops the
-	// agent. Keep the same precedence by limiting activity evidence to the
-	// current tail and letting a current idle composer win over stale completion
-	// words.
-	lower := strings.ToLower(strings.ReplaceAll(text, "\r", ""))
+	// A visible Codex pane commonly contains old completion text above the live
+	// `Ask Codex to do anything` composer. Limit evidence to the current tail and
+	// let a current idle composer win over stale completion words.
+	lower := strings.ToLower(currentAgentPaneText(text))
 	lines := strings.Split(lower, "\n")
 	tailStart := 0
 	if len(lines) > 24 {
 		tailStart = len(lines) - 24
 	}
 	tail := strings.Join(lines[tailStart:], "\n")
-	ask := containsAny(tail, "enter to select", "esc to cancel", "yes, and don't ask", "yes/no", "what should claude", "what should codex", "approve this", "approve command", "approval required", "approval needed", "allow this", "would you like to run the following")
-	run := containsAny(tail, "esc to interrupt", "thinking", "pursuing goal", "goal active", "still running", "tool use", "working")
-	transition := containsAny(tail, "goal achieved", "all tasks complete", "all tasks completed", "task completed", "finished")
+	approvalText := currentUnquotedPromptText(lines[tailStart:])
+	ask := containsAny(approvalText, "enter to select", "esc to cancel", "yes, and don't ask", "yes/no", "what should claude", "what should codex", "approve this", "approve command", "approval required", "approval needed", "allow this", "would you like to run the following")
+	run := containsWorkingScreenSignal(tail)
+	transition := containsStatusLinePrefix(tail, "goal achieved", "all tasks complete", "all tasks completed", "task completed", "finished")
 	// Generic words such as "errors" can be part of an idle suggestion. Keep
 	// error evidence to explicit failure-shaped markers, matching the prompt
 	// detector's actionable error screens rather than classifying prose.
-	errorState := containsAny(tail, "error:", "fatal", "traceback", "command failed", "exited with code")
+	errorState := containsStatusLinePrefix(tail, "error:", "fatal", "traceback", "command failed", "exited with code")
 	// A Codex/Claude working footer is the current screen boundary. Tool output
 	// above it can contain a traceback or command failure from an earlier turn;
 	// treating that scrollback as simultaneous current evidence paints a false
 	// unavailable state over a live working pane. Only error evidence at or below
 	// the current working footer can conflict with that footer.
-	workingFooter := currentWorkingFooterIndex(lines[tailStart:])
+	visibleLines := lines[tailStart:]
+	workingFooter := currentWorkingFooterIndex(visibleLines)
+	workedForFooter := currentWorkedForFooterIndex(visibleLines)
+	interruptedIndex := currentConversationInterruptedIndex(visibleLines)
+	interruptionWins := interruptedIndex > workingFooter && interruptedIndex > workedForFooter && !containsWorkingScreenSignal(strings.Join(visibleLines[interruptedIndex+1:], "\n"))
+	workedForCompletion := workedForFooter > workingFooter && workedForFooter > interruptedIndex
+	if workedForCompletion {
+		// Codex leaves this duration footer after finishing a turn. It is a newer
+		// screen boundary than stale activity above it. Re-evaluate everything
+		// below the footer so fresh work, prompts, and errors take precedence.
+		completionLines := visibleLines[workedForFooter+1:]
+		completionText := strings.Join(completionLines, "\n")
+		approvalText = currentUnquotedPromptText(completionLines)
+		ask = containsAny(approvalText, "enter to select", "esc to cancel", "yes, and don't ask", "yes/no", "what should claude", "what should codex", "approve this", "approve command", "approval required", "approval needed", "allow this", "would you like to run the following")
+		workingFooter = -1
+		run = containsWorkingScreenSignal(completionText)
+		transition = containsStatusLinePrefix(completionText, "goal achieved", "all tasks complete", "all tasks completed", "task completed", "finished")
+		errorState = containsStatusLinePrefix(completionText, "error:", "fatal", "traceback", "command failed", "exited with code")
+	}
+	if interruptionWins {
+		workingFooter = -1
+	}
+	if ask {
+		// Approval controls and conflicts must describe the same current segment.
+		statusText := currentPromptStatusText(approvalText)
+		transition = containsStatusLinePrefix(statusText, "goal achieved", "all tasks complete", "all tasks completed", "task completed", "finished")
+		errorState = containsStatusLinePrefix(statusText, "error:", "fatal", "traceback", "command failed", "exited with code")
+		if workingFooter < 0 {
+			run = containsWorkingScreenSignal(statusText)
+		}
+	}
+	queuedFollowupQuestion := workingFooter >= 0 && codexQueuedFollowupQuestionAfter(lines[tailStart:], workingFooter)
 	if workingFooter >= 0 {
 		// Completion and failure text from an earlier turn can remain above the
 		// current working footer. Treat the footer as the live screen boundary
@@ -262,12 +329,25 @@ func classifyVisibleAgentText(text string) AgentStatusResult {
 		// achieved" prose in its visible scrollback.
 		transition = false
 		errorState = false
+		ask = containsAny(currentUnquotedPromptText(lines[tailStart+workingFooter+1:]), "enter to select", "esc to cancel", "approval required", "would you like to run the following")
+	}
+	if workingFooter < 0 && currentComposerQuestion(lines[tailStart:]) {
+		ask, run, transition, errorState = true, false, false, false
+	}
+	if interruptionWins {
+		// An explicit Codex interruption after the last work marker ends that
+		// run; otherwise its stale footer can keep an idle composer green.
+		ask, run, transition, errorState = false, false, false, false
+		queuedFollowupQuestion = false
+	}
+	if workedForCompletion && !interruptionWins && !ask && !run && !errorState {
+		return result(AgentStatusTransition, []string{"completion-screen"})
 	}
 	idle := containsAny(tail, "ask anything", "ask codex to do anything", "type your message", "use /", "new task", "claude code") || hasIdleComposerLine(lines[tailStart:])
 	// A live status counter is stronger than generic footer words such as
-	// "background terminals running". Require the current interrupt affordance
-	// or a line that starts with a working marker, as the Python detector does.
-	if !containsAny(tail, "esc to interrupt", "working", "thinking", "pursuing goal", "goal active", "still running", "tool use") {
+	// "background terminals running". Compaction and background-terminal wait
+	// lines are also working states without the interrupt affordance.
+	if !containsWorkingScreenSignal(tail) {
 		run = false
 	}
 	if idle && !ask && !run && !errorState {
@@ -286,7 +366,9 @@ func classifyVisibleAgentText(text string) AgentStatusResult {
 		return result(AgentStatusAsk, []string{"prompt-or-approval"})
 	}
 	if run {
-		return result(AgentStatusRun, []string{"working-screen"})
+		classified := result(AgentStatusRun, []string{"working-screen"})
+		classified.QueuedFollowupQuestion = queuedFollowupQuestion
+		return classified
 	}
 	if transition {
 		return result(AgentStatusTransition, []string{"completion-screen"})
@@ -300,14 +382,193 @@ func classifyVisibleAgentText(text string) AgentStatusResult {
 	return unavailable("ambiguous-pane-evidence")
 }
 
+func codexQueuedFollowupQuestionAfter(lines []string, workingFooter int) bool {
+	for index := workingFooter + 1; index < len(lines); index++ {
+		if !strings.Contains(strings.ToLower(strings.TrimSpace(lines[index])), "queued follow-up inputs") {
+			continue
+		}
+		questionCount := false
+		answerHint := false
+		end := min(index+5, len(lines))
+		for _, line := range lines[index+1 : end] {
+			fields := strings.Fields(strings.ToLower(strings.TrimSpace(line)))
+			if len(fields) == 3 && fields[0] == "?" && (fields[2] == "question" || fields[2] == "questions") {
+				count, err := strconv.Atoi(fields[1])
+				questionCount = err == nil && count > 0
+			}
+			if strings.Join(fields, " ") == "shift+← to answer" {
+				answerHint = true
+			}
+		}
+		if questionCount && answerHint {
+			return true
+		}
+	}
+	return false
+}
+
 func currentWorkingFooterIndex(lines []string) int {
 	for index := len(lines) - 1; index >= 0; index-- {
-		line := strings.ToLower(strings.TrimSpace(lines[index]))
-		if strings.Contains(line, "esc to interrupt") && containsAny(line, "working", "thinking", "pursuing goal", "goal active", "still running", "tool use") {
+		if isWorkingStatusLine(lines[index]) {
 			return index
 		}
 	}
 	return -1
+}
+
+func currentWorkedForFooterIndex(lines []string) int {
+	for index := len(lines) - 1; index >= 0; index-- {
+		line := normalizedStatusLine(lines[index])
+		if !strings.HasPrefix(line, "worked for ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		duration := strings.TrimRight(fields[2], ",.")
+		if len(duration) < 2 {
+			continue
+		}
+		unit := duration[len(duration)-1]
+		if unit != 'h' && unit != 'm' && unit != 's' {
+			continue
+		}
+		value := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(duration, "h"), "m"), "s")
+		if parsed, err := strconv.ParseFloat(value, 64); err == nil && parsed >= 0 && parsed < 1e9 {
+			return index
+		}
+	}
+	return -1
+}
+
+func currentConversationInterruptedIndex(lines []string) int {
+	for index := len(lines) - 1; index >= 0; index-- {
+		if hasStatusLinePrefix(normalizedStatusLine(lines[index]), "conversation interrupted") {
+			return index
+		}
+	}
+	return -1
+}
+
+func containsWorkingScreenSignal(text string) bool {
+	for _, line := range strings.Split(text, "\n") {
+		if isWorkingStatusLine(line) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsStatusLinePrefix(text string, prefixes ...string) bool {
+	for _, line := range strings.Split(text, "\n") {
+		line = normalizedStatusLine(line)
+		for _, prefix := range prefixes {
+			if hasStatusLinePrefix(line, prefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isWorkingStatusLine(line string) bool {
+	line = normalizedStatusLine(line)
+	for _, marker := range []string{"working", "thinking", "pursuing goal", "goal active", "still running", "tool use", "compacting context", "waiting for background terminal"} {
+		if !strings.HasPrefix(line, marker) {
+			continue
+		}
+		suffix := strings.TrimSpace(strings.TrimPrefix(line, marker))
+		if suffix == "" {
+			return true
+		}
+		first, _ := utf8.DecodeRuneInString(suffix)
+		if first == '(' || first == ':' || first == '·' || first == '…' || first == '-' {
+			return true
+		}
+		if strings.HasPrefix(suffix, "...") {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizedStatusLine(line string) string {
+	line = strings.ToLower(strings.TrimSpace(line))
+	return strings.TrimLeft(line, "◦•*· ")
+}
+
+func hasStatusLinePrefix(line, prefix string) bool {
+	if !strings.HasPrefix(line, prefix) {
+		return false
+	}
+	suffix := strings.TrimPrefix(line, prefix)
+	if suffix == "" {
+		return true
+	}
+	first, _ := utf8.DecodeRuneInString(suffix)
+	return unicode.IsSpace(first) || unicode.IsPunct(first) || unicode.IsSymbol(first)
+}
+
+// Command bodies in approval dialogs can mention status words without being status rows.
+func currentPromptStatusText(text string) string {
+	current := []string{}
+	for _, line := range strings.Split(text, "\n") {
+		line = normalizedStatusLine(line)
+		for _, prefix := range []string{"working", "thinking", "pursuing goal", "goal active", "still running", "tool use", "compacting context", "waiting for background terminal", "esc to interrupt", "goal achieved", "all tasks complete", "task completed", "finished", "error:", "fatal", "traceback", "command failed", "exited with code"} {
+			if hasStatusLinePrefix(line, prefix) {
+				current = append(current, line)
+				break
+			}
+		}
+	}
+	return strings.Join(current, "\n")
+}
+
+// Quoted examples and tool/code blocks are terminal content, not prompt controls.
+func currentUnquotedPromptText(lines []string) string {
+	current := []string{}
+	fenced := false
+	for _, line := range lines {
+		text := strings.TrimSpace(line)
+		if strings.HasPrefix(text, "```") {
+			fenced = !fenced
+			continue
+		}
+		if fenced || strings.HasPrefix(text, ">") || strings.HasPrefix(text, "\"") || strings.HasPrefix(text, "'") {
+			continue
+		}
+		lower := strings.ToLower(text)
+		completed := strings.HasPrefix(lower, "• ") && containsAny(lower, "all done", "goal achieved", "all tasks complete", "task completed", "finished")
+		if strings.HasPrefix(text, "$") || strings.HasPrefix(lower, "• ran ") || completed {
+			current = nil
+			continue
+		}
+		current = append(current, text)
+	}
+	return strings.Join(current, "\n")
+}
+
+// Only a current unquoted question immediately above the idle composer requests input.
+func currentComposerQuestion(lines []string) bool {
+	for index := len(lines) - 1; index >= 0; index-- {
+		line := strings.TrimSpace(lines[index])
+		if !strings.HasPrefix(line, "›") && !strings.HasPrefix(line, "❯") {
+			continue
+		}
+		for previous := index - 1; previous >= max(0, index-8); previous-- {
+			text := strings.TrimSpace(lines[previous])
+			if text == "" || strings.Trim(text, "─━-") == "" {
+				continue
+			}
+			if strings.HasPrefix(text, ">") || strings.HasPrefix(text, "`") || strings.HasPrefix(text, "$") || strings.HasPrefix(text, "›") || strings.HasPrefix(text, "❯") {
+				return false
+			}
+			return strings.HasSuffix(text, "?")
+		}
+		return false
+	}
+	return false
 }
 
 func containsAny(text string, needles ...string) bool {
@@ -459,14 +720,16 @@ type AgentStatusInventory func(context.Context) ([]AgentRecord, []error)
 type AgentStatusClassifier func(context.Context, AgentStatusRequest) AgentStatusResult
 
 type AgentStatusCollectorConfig struct {
-	ActiveCadence    time.Duration
-	IdleCadence      time.Duration
-	EpochID          string
-	EpochStartedAt   float64
-	OwnerGeneration  uint64
-	SourceID         string
-	SnapshotRevision func() uint64
-	ActiveFunc       func() bool
+	ActiveCadence         time.Duration
+	IdleCadence           time.Duration
+	EpochID               string
+	EpochStartedAt        float64
+	OwnerGeneration       uint64
+	SourceID              string
+	SnapshotRevision      func() uint64
+	ActiveFunc            func() bool
+	AttentionAcknowledged func(string) (bool, error)
+	AttentionCommitted    func([]string) error
 }
 
 func (c AgentStatusCollectorConfig) withDefaults() AgentStatusCollectorConfig {
@@ -529,10 +792,17 @@ type AgentStatusCollector struct {
 }
 
 type agentStatusCacheEntry struct {
-	acknowledged     bool
-	workingStoppedAt time.Time
-	updatedAt        time.Time
-	lastStatus       AgentStatus
+	acknowledged         bool
+	processInstanceID    string
+	workingStoppedAt     time.Time
+	transitionID         string
+	cooldownAttentionKey string
+	updatedAt            time.Time
+	lastStatus           AgentStatus
+	completionSettled    bool
+	attentionSignature   string
+	attentionKey         string
+	attentionSettled     bool
 }
 
 func NewAgentStatusCollector(inventory AgentStatusInventory, classifier AgentStatusClassifier, writer BatchWriter, clock HostCollectorClock, config AgentStatusCollectorConfig) *AgentStatusCollector {
@@ -546,6 +816,49 @@ func NewAgentStatusCollector(inventory AgentStatusInventory, classifier AgentSta
 	}
 	config = config.withDefaults()
 	return &AgentStatusCollector{inventory: inventory, classifier: classifier, writer: writer, clock: clock, config: config, epochID: config.EpochID, epochStart: config.EpochStartedAt, statusCache: make(map[string]agentStatusCacheEntry)}
+}
+
+func (c *AgentStatusCollector) RestoreRecentLifecycles(lifecycles []AgentStatusLifecycleState) {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	for _, lifecycle := range lifecycles {
+		if lifecycle.ID == "" || lifecycle.ObservedAt.IsZero() {
+			continue
+		}
+		if lifecycle.AttentionKey == "" && !lifecycle.CompletionSettled && (lifecycle.WorkingStoppedAt.IsZero() || lifecycle.TransitionID == "" || lifecycle.CooldownAttentionKey == "") {
+			continue
+		}
+		if len(c.statusCache) >= MaxAgentStatusEntries {
+			break
+		}
+		state := AgentStatusTransition
+		if lifecycle.CompletionSettled {
+			state = AgentStatusIdle
+		}
+		c.statusCache[lifecycle.ID] = agentStatusCacheEntry{
+			lastStatus: state, processInstanceID: lifecycle.ProcessInstanceID, updatedAt: lifecycle.ObservedAt,
+			workingStoppedAt: lifecycle.WorkingStoppedAt,
+			transitionID:     lifecycle.TransitionID, cooldownAttentionKey: lifecycle.CooldownAttentionKey,
+			completionSettled:  lifecycle.CompletionSettled,
+			attentionSignature: lifecycle.AttentionSignature, attentionKey: lifecycle.AttentionKey, attentionSettled: lifecycle.AttentionSettled,
+		}
+	}
+}
+
+// CurrentAttentionKeys bounds durable pending settlements to the live inventory.
+func (c *AgentStatusCollector) CurrentAttentionKeys() map[string]bool {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	keys := map[string]bool{}
+	for _, entry := range c.statusCache {
+		if entry.attentionKey != "" {
+			keys[entry.attentionKey] = true
+		}
+		if entry.cooldownAttentionKey != "" {
+			keys[entry.cooldownAttentionKey] = true
+		}
+	}
+	return keys
 }
 
 func (c *AgentStatusCollector) Counters() AgentStatusCollectorCounters { return c.counters.snapshot() }
@@ -654,7 +967,26 @@ func (c *AgentStatusCollector) runOnce(parent context.Context) {
 			c.counters.unavailable.Add(uint64(result.UnavailableAccepted))
 		}
 	}
+	if len(batch.UnavailableSpans) > 0 {
+		c.restoreStatusState(statusCache, lastSignature, lastRevision, revisionSet)
+	}
 	if appendSucceeded {
+		if len(batch.Observations) > 0 && c.config.AttentionCommitted != nil {
+			pending := []string{}
+			c.stateMu.Lock()
+			for _, entry := range c.statusCache {
+				if !entry.attentionSettled && entry.attentionKey != "" {
+					pending = append(pending, entry.attentionKey)
+				}
+				if !entry.completionSettled && entry.cooldownAttentionKey != "" {
+					pending = append(pending, entry.cooldownAttentionKey)
+				}
+			}
+			c.stateMu.Unlock()
+			if err := c.config.AttentionCommitted(pending); err != nil {
+				c.counters.errors.Add(1)
+			}
+		}
 		c.stateMu.Lock()
 		c.epochID, c.epochStart, c.hadSuccess, c.lastCadence = nextEpochID, nextEpochStart, nextHadSuccess, nextCadence
 		c.stateMu.Unlock()
@@ -740,32 +1072,98 @@ func (c *AgentStatusCollector) collect(parent context.Context, fact HostFactCont
 		}
 		seen[key] = true
 		now := time.Unix(0, int64(fact.ObservedAt*1e9))
+		processInstanceID := AgentStatusProcessInstanceID(record)
 		request := AgentStatusRequest{Kind: record.Kind, PID: record.PID, Command: record.Command, Executable: record.Executable, PaneTarget: record.TmuxPaneID, Directory: record.Directory, OpenCodeSession: record.OpenCodeSession, Now: now, TransitionWindow: DefaultAgentTransitionWindow}
 		c.stateMu.Lock()
 		cached := c.statusCache[key]
-		if cached.updatedAt.IsZero() || now.Sub(cached.updatedAt) > 2*DefaultAgentTransitionWindow {
+		if cached.updatedAt.IsZero() || (cached.processInstanceID != "" && processInstanceID != "" && cached.processInstanceID != processInstanceID) {
 			cached = agentStatusCacheEntry{}
 		}
 		request.Acknowledged = cached.acknowledged
 		request.WorkingStoppedAt = cached.workingStoppedAt
 		c.stateMu.Unlock()
 		result := c.classifier(parent, request)
+		if cached.completionSettled && result.Status == AgentStatusTransition && containsAny(strings.Join(result.Evidence, " "), "completion-screen") {
+			result.Status = AgentStatusIdle
+			result.Evidence = []string{"settled-completion"}
+		}
 		if result.Status == AgentStatusIdle && cached.lastStatus == AgentStatusRun && !request.Acknowledged {
 			result.Status = AgentStatusTransition
 			result.Evidence = []string{"recent-working-stopped"}
 			result.WorkingStoppedAt = now
 		}
-		c.stateMu.Lock()
-		if len(c.statusCache) >= 1024 {
-			for oldKey := range c.statusCache {
-				delete(c.statusCache, oldKey)
-				break
-			}
+		if result.Status == AgentStatusTransition && result.WorkingStoppedAt.IsZero() && cached.workingStoppedAt.IsZero() {
+			// A Codex completion screen can be the first sample after the pane
+			// inventory appears. Give that observed transition a stable lifecycle
+			// identity so the browser can acknowledge it just like a sampled
+			// run-to-idle transition.
+			result.WorkingStoppedAt = now
 		}
-		entry := agentStatusCacheEntry{acknowledged: result.Acknowledged || request.Acknowledged, workingStoppedAt: result.WorkingStoppedAt, updatedAt: now, lastStatus: result.Status}
+		transitionID, cooldownAttentionKey := cached.transitionID, cached.cooldownAttentionKey
+		if result.Status == AgentStatusTransition && !result.WorkingStoppedAt.IsZero() && (transitionID == "" || cooldownAttentionKey == "") {
+			transitionIdentity := fmt.Sprintf("%s:%s:%d", key, processInstanceID, result.WorkingStoppedAt.UnixNano())
+			transitionDigest := sha256.Sum256([]byte(transitionIdentity))
+			digest := hex.EncodeToString(transitionDigest[:])
+			transitionID = "go:transition:" + digest
+			cooldownAttentionKey = "go:cooldown:" + digest
+		}
+		entry := agentStatusCacheEntry{
+			acknowledged: result.Acknowledged || request.Acknowledged, processInstanceID: processInstanceID,
+			workingStoppedAt: result.WorkingStoppedAt, transitionID: transitionID, cooldownAttentionKey: cooldownAttentionKey,
+			updatedAt: now, lastStatus: result.Status, completionSettled: cached.completionSettled,
+		}
+		if entry.workingStoppedAt.IsZero() && result.Status == AgentStatusIdle {
+			entry.workingStoppedAt = cached.workingStoppedAt
+		}
 		if result.Status == AgentStatusRun {
 			entry.workingStoppedAt = time.Time{}
+			entry.transitionID, entry.cooldownAttentionKey = "", ""
+			entry.acknowledged, entry.completionSettled = false, false
 		}
+		signature := result.AttentionSignature
+		if signature == "" && (result.Status == AgentStatusAsk || result.Status == AgentStatusError || result.QueuedFollowupQuestion) {
+			signature = fmt.Sprintf("%s:%t:%s", result.Status, result.QueuedFollowupQuestion, strings.Join(result.Evidence, "|"))
+		}
+		if signature != "" {
+			entry.attentionSignature = signature
+			if signature == cached.attentionSignature {
+				entry.attentionKey, entry.attentionSettled = cached.attentionKey, cached.attentionSettled
+			} else {
+				digest := sha256.Sum256([]byte(fmt.Sprintf("%s:%s:%s:%d", key, processInstanceID, signature, now.UnixNano())))
+				entry.attentionKey = "go:attention:" + hex.EncodeToString(digest[:])
+			}
+		} else if result.Status == AgentStatusUnavailable {
+			// A capture failure is not evidence that the prompt disappeared.
+			entry.attentionSignature, entry.attentionKey, entry.attentionSettled = cached.attentionSignature, cached.attentionKey, cached.attentionSettled
+		}
+		if c.config.AttentionAcknowledged != nil {
+			for _, attentionKey := range []string{entry.attentionKey, entry.cooldownAttentionKey} {
+				if attentionKey == "" {
+					continue
+				}
+				acknowledged, err := c.config.AttentionAcknowledged(attentionKey)
+				if err != nil {
+					return BuildUnavailableFacts("agent_status", fact, "attention-state-unavailable")
+				}
+				if acknowledged {
+					if attentionKey == entry.attentionKey {
+						entry.attentionSettled = true
+					}
+					if attentionKey == entry.cooldownAttentionKey {
+						entry.completionSettled, entry.acknowledged = true, true
+					}
+				}
+			}
+		}
+		if entry.completionSettled {
+			entry.workingStoppedAt = time.Time{}
+			entry.transitionID, entry.cooldownAttentionKey = "", ""
+			if result.Status == AgentStatusTransition {
+				result.Status = AgentStatusIdle
+				entry.lastStatus = result.Status
+			}
+		}
+		c.stateMu.Lock()
 		c.statusCache[key] = entry
 		c.stateMu.Unlock()
 		state := string(result.Status)
@@ -775,6 +1173,24 @@ func (c *AgentStatusCollector) collect(parent context.Context, fact HostFactCont
 		}
 		observedAtSeconds := float64(observedAt.UnixNano()) / 1e9
 		rosterEntry := map[string]any{"id": key, "kind": strings.ToLower(strings.TrimSpace(record.Kind)), "state": state, "session": record.TmuxSession, "pane": tmuxPaneTarget(record), "observed_at": observedAtSeconds}
+		if entry.processInstanceID != "" {
+			rosterEntry["process_instance_id"] = entry.processInstanceID
+		}
+		if !entry.workingStoppedAt.IsZero() {
+			stoppedAt := float64(entry.workingStoppedAt.UnixNano()) / 1e9
+			rosterEntry["working_stopped_ts"] = stoppedAt
+			rosterEntry["transition_id"] = entry.transitionID
+			rosterEntry["cooldown_attention_key"] = entry.cooldownAttentionKey
+		}
+		if entry.attentionKey != "" {
+			rosterEntry["attention_signature"] = entry.attentionSignature
+			rosterEntry["attention_key"] = entry.attentionKey
+			rosterEntry["attention_acknowledged"] = entry.attentionSettled
+		}
+		rosterEntry["queued_followup_question"] = result.QueuedFollowupQuestion
+		if entry.completionSettled {
+			rosterEntry["completion_settled"] = true
+		}
 		roster = append(roster, rosterEntry)
 		counts.Total++
 		switch result.Status {
@@ -803,6 +1219,13 @@ func (c *AgentStatusCollector) collect(parent context.Context, fact HostFactCont
 			sessions[session] = mergeAgentStatus(sessions[session], result.Status)
 		}
 	}
+	c.stateMu.Lock()
+	for key := range c.statusCache {
+		if !seen[key] {
+			delete(c.statusCache, key)
+		}
+	}
+	c.stateMu.Unlock()
 	signature := agentStatusPayloadSignature(states, sessions, counts, roster)
 	snapshotRevision := c.agentStatusRevision(signature)
 	return BuildAgentStatusFacts(states, sessions, snapshotRevision, counts, roster, fact)
@@ -825,6 +1248,16 @@ func agentStatusIdentity(record AgentRecord, fallbackIndex int) (string, bool) {
 		return fmt.Sprintf("agent-%d", fallbackIndex), true
 	}
 	return strings.Join(keyParts, "|"), true
+}
+
+func AgentStatusProcessInstanceID(record AgentRecord) string {
+	startedIdentity := strings.TrimSpace(record.StartedIdentity)
+	if record.PID <= 0 && startedIdentity == "" {
+		return ""
+	}
+	identity := fmt.Sprintf("%d\x1f%s", record.PID, startedIdentity)
+	digest := sha256.Sum256([]byte(identity))
+	return "process:" + hex.EncodeToString(digest[:])
 }
 
 func tmuxWindowIndexOrFallback(record AgentRecord) string {

@@ -76,6 +76,8 @@ def _stats_stream_state(port: int, *, timeout: float = 5.0) -> tuple[int, str]:
         connection.close()
 
 
+# Go is the subject; Python imports only construct the fixture or verify its ownership.
+@pytest.mark.go_backend
 def test_go_stats_ignore_poisoned_legacy_statsd_record_end_to_end(monkeypatch, tmp_path):
     """Stale Python service files do not block Go capabilities, streaming, or ingestion."""
 

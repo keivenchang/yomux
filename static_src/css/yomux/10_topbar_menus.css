@@ -1143,7 +1143,7 @@ body.app-topbar-touch-compact .app-menu-command-row--shells .app-menu-command-ro
 .app-menu-tab-command .session-button-prefix {
   gap: var(--space-1);
 }
-.app-menu-tab-command .pane-tab-core > .session-yolo-marker {
+.app-menu-tab-command .session-tab-status-and-markers > .session-yolo-marker {
   min-width: 16px;
   height: 16px;
   padding: 0;

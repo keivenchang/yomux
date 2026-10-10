@@ -161,6 +161,7 @@ def test_fixture_http_app_owns_service_idle_setting(monkeypatch, canonical):
 
 
 @pytest.mark.socket
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_rendered_fixture_get_suppresses_process_lifetime_agent_auth_refresh(monkeypatch, gate_runtime_paths):
     refresh_calls = []
@@ -417,6 +418,8 @@ def test_gate_browser_boundary_timeout_names_the_owned_pending_work():
         wait_for_fixture_api_quiescence(StuckApiDriver(), timeout=0.01)
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_minimal_fixture_finite_work_reaches_gate_retirement_and_cleanup(monkeypatch):
     calls = []
     ring = ServerLogRing(capacity=8)
@@ -1114,6 +1117,8 @@ def test_browser_gate_uses_strict_in_process_ring_reader_without_opening_http_lo
     assert driver.ring_requests == 1
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_full_browser_gate_scopes_shared_ring_to_server_epoch_sequence_boundary():
     ring = ServerLogRing(capacity=8)
 
@@ -1763,6 +1768,7 @@ def test_fixture_connection_retirement_waits_for_handler_exit_after_socket_close
     assert not handler_threads[0].is_alive()
 
 
+@pytest.mark.shared_tooling
 def test_fixture_persistent_route_protocols_are_not_counted_as_finite_requests():
     called = []
 
@@ -1846,6 +1852,7 @@ def test_fixture_request_tracker_wraps_inherited_handler_methods():
     assert calls == ["/api/ping"]
 
 
+@pytest.mark.shared_tooling
 def test_browser_fixture_closes_every_persistent_route_before_finite_teardown(monkeypatch):
     persistent_routes = [
         route
@@ -2008,6 +2015,8 @@ def test_browser_fixture_gate_failure_disconnects_before_app_cleanup_and_preserv
     ]
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_browser_fixture_finish_reads_ring_before_stop_and_rejects_late_warning(monkeypatch):
     calls = []
     ring = ServerLogRing(capacity=8)
@@ -2249,6 +2258,8 @@ def test_browser_fixture_finish_rejects_browser_warning_at_atomic_retirement(mon
     assert calls == ["quiesce", "full-gate", "atomic-retirement", "stop"]
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_browser_fixture_finish_gates_and_blanks_every_owned_driver(monkeypatch):
     calls = []
     viewer_failure = AssertionError("viewer retained JS failure")
@@ -2301,6 +2312,8 @@ def test_browser_fixture_finish_gates_and_blanks_every_owned_driver(monkeypatch)
     ]
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_browser_fixture_finish_uses_process_ring_and_never_fetches_for_off_origin_browser():
     ring = ServerLogRing(capacity=8)
     boundary = ring.payload()
@@ -2376,6 +2389,8 @@ def test_browser_fixture_origin_ownership_requires_exact_port(monkeypatch):
     assert calls == ["stop"]
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_browser_fixture_start_boundary_warning_is_aggregated_with_exact_origin_failure():
     ring = ServerLogRing(capacity=8)
     boundary = ring.payload()
@@ -2426,6 +2441,8 @@ def test_stop_browser_server_rejects_singular_and_plural_browser_inputs_after_cl
     assert cleaned[0][3] == "isolated browser"
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.parametrize("failure_stage", ("paths", "tmux", "app"))
 def test_fixture_runtime_start_rolls_back_each_acquired_owner(monkeypatch, tmp_path, failure_stage):
     calls = []
@@ -2483,6 +2500,8 @@ def test_fixture_runtime_start_rolls_back_each_acquired_owner(monkeypatch, tmp_p
     assert calls == expected
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.parametrize("failure_stage", ("bind", "request-tracker", "thread-start"))
 def test_browser_server_start_rolls_back_each_acquired_owner(monkeypatch, tmp_path, failure_stage):
     calls = []
@@ -4142,6 +4161,8 @@ def test_registry_reaper_settlement_failure_precedes_runtime_root_removal(tmp_pa
     assert removed == []
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_gate_root_retirement_stops_spawn_owner_before_adopter_reaper_and_root_removal(monkeypatch):
     root = Path("/tmp") / f"ysd-{os.getpid()}-{time.time_ns():x}"
     unrelated_root = root.with_name(f"{root.name}-unrelated")
@@ -4278,6 +4299,8 @@ def test_gate_root_retirement_stops_spawn_owner_before_adopter_reaper_and_root_r
         shutil.rmtree(unrelated_root, ignore_errors=True)
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_fixture_app_cleanup_retires_adopted_statusd_from_its_private_service_root(monkeypatch):
     root = Path("/tmp") / f"ysd-app-{os.getpid()}-{time.time_ns():x}-{'x' * 80}"
     unrelated_root = root.with_name(f"{root.name}-unrelated")

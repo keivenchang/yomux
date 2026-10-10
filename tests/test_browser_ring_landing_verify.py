@@ -223,6 +223,8 @@ def _launch_server(
     return process
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_ring_server_launch_replaces_ambient_client_roots(monkeypatch, tmp_path: Path) -> None:
     """A hostile operator environment must not reach the ring fixture child."""
 
@@ -507,6 +509,8 @@ def _seed_zero_and_gap(
     }, {"gap_start": gap_start, "gap_end": gap_end, "zero_start": gap_end + 10, "left_edge": left_edge}
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_ring_writer_accepts_explicit_zero_beside_downtime_gap(tmp_path: Path) -> None:
     wall_now = 1_800_000_000
     monotonic_now = [0.0]
@@ -989,6 +993,8 @@ def _prepare_ring_runtime(
     )
 
 
+# Go is the subject; Python imports only construct the fixture or verify its ownership.
+@pytest.mark.go_backend
 @pytest.mark.e2e
 @pytest.mark.socket
 def test_ring_landing_real_page_restart_and_zero_gap(
@@ -1164,6 +1170,8 @@ def _ring_observation(event_id: str, observed_at: float, util_percent: int) -> s
     )
 
 
+# Go is the subject; Python imports only construct the fixture or verify its ownership.
+@pytest.mark.go_backend
 @pytest.mark.e2e
 @pytest.mark.socket
 def test_ring_landing_republishes_rebuildable_and_gaps_unrebuildable_owed_cells(

@@ -11,6 +11,9 @@ from yomux_lib import server as server_module
 from yomux_lib import web
 from yomux_lib.server import Handler
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 SOURCE_STATIC_DIR = Path(__file__).resolve().parents[1] / "static_src"
 

@@ -25,9 +25,13 @@ const dockviewLayoutState = {
   pendingCompletionFrame: 0,
   lastHostLayoutSignature: '',
   lastAppliedLayoutSignature: '',
+  tabRenderPending: false,
+  deferredTabRefreshFrame: 0,
+  deferredTabRefreshItems: new Set(),
   lastAppliedActiveOnlySignature: '',
   groupSlots: new Map(),
   pendingRootBoundaryDrop: null,
+  tabAttentionGesture: null,
   reloadAfterAdoption: false,
   tabPointerDrag: null,
   tabContentInteractionSuppressedUntil: 0,
@@ -96,13 +100,17 @@ function dockviewFinishTabActivationPerf(item) {
   const current = () => dockviewLayoutState.tabActivationPerf === state && itemIsActivePaneTab(state.item)
     && (!isTmuxSession(state.item) || terminals.get(state.item) === terminal);
   const painted = () => {
+    const complete = () => {
+      if (!current()) return;
+      clientPerfEnd(state.token);
+      dockviewClearTabActivationPerf();
+    };
     state.frame = requestAnimationFrame(() => {
       if (!current()) return;
-      state.frame = requestAnimationFrame(() => {
-        if (!current()) return;
-        clientPerfEnd(state.token);
-        dockviewClearTabActivationPerf();
-      });
+      // onRender runs in xterm's renderer frame. The next frame crosses its paint;
+      // non-terminal activation starts outside a renderer and needs two frames.
+      if (terminal) complete();
+      else state.frame = requestAnimationFrame(complete);
     });
   };
   if (!isTmuxSession(state.item)) {
@@ -113,7 +121,7 @@ function dockviewFinishTabActivationPerf(item) {
   // callback fences output queued at activation; continuous output does not extend that boundary.
   if (!terminal?.terminalOutputSeen || typeof terminal.term.onRender !== 'function') return;
   state.waitingForParse = true;
-  terminal.term.write('', () => {
+  refreshTerminal(state.item, {visibleOnly: true, afterParse: () => {
     if (!current() || terminals.get(state.item) !== terminal) return;
     state.renderSubscription = terminal.term.onRender(event => {
       if (!current() || event.start > 0 || event.end < terminal.term.rows - 1) return;
@@ -121,16 +129,32 @@ function dockviewFinishTabActivationPerf(item) {
       state.renderSubscription = null;
       painted();
     });
-    terminal.term.refresh(0, terminal.term.rows - 1);
-  });
+  }});
 }
 
 function dockviewCommitPanelActivation(item, options = {}) {
   const panelItem = String(item || '');
   if (!panelItem) return false;
   const pendingUserGesture = dockviewLayoutState.pendingUserPanelActivation === panelItem;
+  // Focus and subsequent navigation must observe the same active pane as Dockview.
+  // Drain the shared adoption owner before committing the gesture's focus.
+  if (!itemIsActivePaneTab(panelItem) && !dockviewLayoutState.adoptingFromDockview) {
+    queueDockviewLayoutAdoption();
+    if (dockviewLayoutState.syncQueued) adoptDockviewLayout({activationItem: panelItem});
+  }
+  if (pendingUserGesture) options = {...dockviewLayoutState.tabAttentionGesture?.activationOptions, ...options};
   if (pendingUserGesture) dockviewClearPendingUserPanelActivation();
   const userInitiated = options.userInitiated === true || pendingUserGesture;
+  if (userInitiated) {
+    dismissSessionToasts(panelItem);
+    acknowledgeNotificationTarget(panelItem);
+    recordTabActivation(panelItem);
+  }
+  const gesture = dockviewLayoutState.tabAttentionGesture;
+  const sharedGesture = gesture?.item === panelItem && (pendingUserGesture || options.nativeEvent?.detail > 0 || options.nativeEvent?.type === 'touchend') ? gesture : null;
+  const focusOptions = isTmuxSession(panelItem) && userInitiated
+    ? acknowledgeUserTerminalTabActivation(panelItem, options, sharedGesture)
+    : options;
   const activation = dockviewLayoutState.tabActivationPerf;
   if (userInitiated && isTmuxSession(panelItem) && !pendingUserGesture
       && (options.nativeEvent?.detail > 0 || options.nativeEvent?.type === 'touchend') && itemIsActivePaneTab(panelItem)
@@ -141,16 +165,13 @@ function dockviewCommitPanelActivation(item, options = {}) {
     rememberFileExplorerExplicitSyncSession(panelItem);
     focusTerminalDom(panelItem);
     dockviewFinishTabActivationPerf(panelItem);
-    scheduleTerminalActivationFollowup(panelItem, generation);
+    scheduleTerminalActivationFollowup(panelItem, generation, sharedGesture);
     return true;
   }
-  const focusOptions = isTmuxSession(panelItem) && userInitiated
-    ? {...options, acknowledgeAgentWindow: false, acknowledgePromptAttention: false}
-    : options;
   if (isTmuxSession(panelItem) && userInitiated) rememberFileExplorerExplicitSyncSession(panelItem);
   if (isTmuxSession(panelItem) && userInitiated && typeof focusTerminalFromUserAction === 'function') {
     const generation = nextTabSwitchHighlightGeneration();
-    commitUserTerminalTabActivation(panelItem, focusOptions, generation);
+    commitUserTerminalTabActivation(panelItem, focusOptions, generation, sharedGesture);
   } else setFocusedPanelItem(panelItem, {...options, userInitiated, deferSideSync: userInitiated});
   dockviewFinishTabActivationPerf(panelItem);
   return true;
@@ -161,9 +182,32 @@ function dockviewSetPendingUserPanelActivation(item) {
   const panelItem = String(item || '');
   if (!panelItem) return;
   dockviewLayoutState.pendingUserPanelActivation = panelItem;
+  dockviewLayoutState.tabAttentionGesture = {item: panelItem, attentionAttempted: false};
   dockviewLayoutState.pendingUserPanelActivationTimer = window.setTimeout(() => {
     if (dockviewLayoutState.pendingUserPanelActivation === panelItem) dockviewClearPendingUserPanelActivation();
   }, DOCKVIEW_PENDING_ACTIVATION_TTL_MS);
+}
+
+function dockviewActivateUserTerminalTab(item, options = {}) {
+  if (!dockviewLayoutActive()) return false;
+  const panel = dockviewLayoutState.api?.getPanel?.(item);
+  if (typeof panel?.api?.setActive !== 'function') return false;
+  // Tabber and keyboard navigation use the same immediate activation as native tabs.
+  // The activation commit drains layout adoption before returning to navigation callers.
+  dockviewSetPendingUserPanelActivation(item);
+  dockviewLayoutState.tabAttentionGesture.activationOptions = options;
+  dockviewBeginTabActivationPerf(item);
+  // Vendor mount callbacks must leave reconciliation to the same owner used
+  // by app-driven layout activation.
+  const applyingFromLayout = dockviewLayoutState.applyingFromLayout;
+  dockviewLayoutState.applyingFromLayout = true;
+  try {
+    panel.api.setActive();
+  } finally {
+    dockviewLayoutState.applyingFromLayout = applyingFromLayout;
+  }
+  if (dockviewLayoutState.pendingUserPanelActivation === item) dockviewCommitPanelActivation(item);
+  return true;
 }
 
 function dockviewClearPendingUserPanelActivation(item = '') {
@@ -178,6 +222,7 @@ function dockviewClearPendingUserPanelActivation(item = '') {
 function dockviewClearPendingTabActivation(item) {
   dockviewClearPendingUserPanelActivation(item);
   const activation = dockviewLayoutState.tabActivationPerf;
+  if (dockviewLayoutState.tabAttentionGesture?.item === String(item || '') && !dockviewLayoutState.tabAttentionGesture.attentionAttempted) dockviewLayoutState.tabAttentionGesture = null;
   // Cancel the gesture's color, while retaining an activation already waiting on terminal paint.
   if (activation && activation.item === String(item || '') && activation.terminal === null
       && !activation.frame && !activation.waitingForParse) dockviewClearTabActivationPerf();
@@ -1002,10 +1047,14 @@ function dockviewTabDropTargetActive(event) {
 
 function dockviewBeginTabPointerDrag(event, item) {
   if (event.button !== undefined && event.button !== 0) return;
+  const current = dockviewLayoutState.tabPointerDrag;
+  // Compatibility mouse events belong to the pointer gesture, including its pre-activation geometry.
+  if (event.type === 'mousedown' && current?.item === item && current.pointerDown) return;
   const slot = slotForItem(item);
   if (!slot) return;
   dockviewLayoutState.tabPointerDrag = {
     item,
+    pointerDown: event.type === 'pointerdown',
     slot,
     x: Number(event.clientX) || 0,
     y: Number(event.clientY) || 0,
@@ -1994,12 +2043,12 @@ function renderPanelsDockview(previousActive = [], options = {}) {
   const activePaneCount = layoutSlotKeys().filter(side => activeItemForSide(side) || paneIsPlaceholder(side)).length;
   grid.className = `grid dockview-grid ${activePaneCount === 1 ? 'full' : ''} ${activePaneCount === 0 ? 'empty' : ''}`.trim();
   dockviewEnsureHost();
-  const signature = layoutSlotsSignature(layoutSlots);
   const activeOnlySignature = dockviewLayoutActiveOnlySignature(layoutSlots);
   let activeOnlyChange = (
     dockviewLayoutState.adoptingFromDockview
     && dockviewLayoutState.lastAppliedActiveOnlySignature === activeOnlySignature
   );
+  const signature = activeOnlyChange ? layoutSlotsExactSignature(layoutSlots) : layoutSlotsSignature(layoutSlots);
   let layoutReloaded = false;
   let layoutLoadDeferred = false;
   let layoutCompletionDeferred = false;
@@ -2029,8 +2078,18 @@ function renderPanelsDockview(previousActive = [], options = {}) {
     // state that Dockview does not own; skip attached-content rendering because that repeats the
     // complete switch and makes large editors block unrelated tab activation.
     const activeItems = new Set(layoutSlotKeys().map(slot => activeItemForSide(slot)).filter(Boolean));
-    dockviewRefreshTabs({items: activeOnlyTransitionItems});
-    dockviewSyncMountedPanels({items: activeItems, renderAttached: false, ensureMounted: true});
+    if (dockviewLayoutState.adoptingFromDockview) {
+      activeOnlyTransitionItems = new Set([
+        ...previousActive.filter(item => !activeItems.has(item)),
+        ...[...activeItems].filter(item => !previousActive.includes(item)),
+      ]);
+    }
+    const mountedItems = new Set([...activeItems].filter(item => !previousActive.includes(item)));
+    dockviewSyncTabShells({items: activeOnlyTransitionItems});
+    dockviewRefreshHeaderActions({items: activeOnlyTransitionItems});
+    dockviewScheduleDeferredTabRefresh(activeOnlyTransitionItems);
+    dockviewSyncMountedPanels({items: mountedItems, renderAttached: false, ensureMounted: true,
+      restoreViewState: dockviewLayoutState.adoptingFromDockview});
     syncPanelVisibility(previousActive);
     completeLayoutMutationGeneration(options.completionGeneration);
     return true;
@@ -2244,24 +2303,34 @@ function queueDockviewLayoutAdoption() {
   if (dockviewLayoutState.syncQueued) return;
   dockviewLayoutState.syncQueued = true;
   dockviewLayoutState.syncQueuedLayoutSignature = layoutSlotsExactSignature(layoutSlots);
-  queueMicrotask(adoptDockviewLayout);
+  queueMicrotask(() => {
+    if (dockviewLayoutState.syncQueued) adoptDockviewLayout();
+  });
 }
 
-function adoptDockviewLayout() {
+function adoptDockviewLayout(options = {}) {
   dockviewLayoutState.syncQueued = false;
   const queuedLayoutSignature = dockviewLayoutState.syncQueuedLayoutSignature;
   dockviewLayoutState.syncQueuedLayoutSignature = '';
   const api = dockviewLayoutState.api;
   if (!api || dockviewLayoutState.applyingFromLayout) return;
   if (!dockviewLayoutAdoptionAllowed()) return;
-  if (!dockviewHostCanAdoptLayout()) return;
   if (queuedLayoutSignature && queuedLayoutSignature !== layoutSlotsExactSignature(layoutSlots)) {
     // A server/app mutation won while this vendor callback was queued. Reassert that newer layout;
     // adopting the stale Dockview snapshot would make a renamed or newly created tab inactive.
     dockviewLoadLayout(layoutSlots);
     return;
   }
-  let next = layoutSlotsFromDockviewJson(api.toJSON());
+  let next = layoutSlotsFromDockviewJson(api.toJSON(), layoutSlots, {activationItem: options.activationItem});
+  if (!dockviewLayoutState.tabRenderPending
+      && layoutSlotsExactSignature(next) === layoutSlotsExactSignature(layoutSlots)) return;
+  // A vendor-confirmed active-tab change preserves topology even if layout is
+  // dirty. Reading host geometry here forces unrelated large panes to lay out
+  // before focus; structural adoption still requires a measurable host.
+  const activeOnlyActivation = options.activationItem
+    && api.activePanel?.id === options.activationItem
+    && dockviewLayoutActiveOnlySignature(next) === dockviewLayoutActiveOnlySignature(layoutSlots);
+  if (!activeOnlyActivation && !dockviewHostCanAdoptLayout()) return;
   const missingPendingSessions = pendingTmuxSessionNames()
     .filter(item => itemInLayout(item, layoutSlots) && !itemInLayout(item, next));
   if (missingPendingSessions.length) {
@@ -2277,8 +2346,9 @@ function adoptDockviewLayout() {
     dockviewLayoutState.reloadAfterAdoption = true;
   }
   if (!layoutHasRestorableContent(next)) return;
-  const nextSignature = layoutSlotsSignature(next);
-  if (nextSignature === layoutSlotsSignature(layoutSlots)) {
+  const nextSignature = activeOnlyActivation ? layoutSlotsExactSignature(next) : layoutSlotsSignature(next);
+  if (nextSignature === (activeOnlyActivation ? layoutSlotsExactSignature(layoutSlots) : layoutSlotsSignature(layoutSlots))) {
+    if (!dockviewLayoutState.tabRenderPending) return;
     // fromJSON creates tab renderers while applyingFromLayout is true, so their first render
     // deliberately leaves the shell empty. The queued adoption is the first callback after that
     // guard clears: populate tab chrome here without repeating mounted-panel reconciliation.
@@ -2288,7 +2358,7 @@ function adoptDockviewLayout() {
   dockviewLayoutState.lastAppliedLayoutSignature = nextSignature;
   dockviewLayoutState.adoptingFromDockview = true;
   try {
-    applyLayoutSlots(next, {prune: false, preservePlaceholderSlots: true});
+    applyLayoutSlots(next, {prune: false, preservePlaceholderSlots: true, activeOnlyActivation});
     if (dockviewLayoutState.reloadAfterAdoption) {
       dockviewLayoutState.reloadAfterAdoption = false;
       dockviewLoadLayout(layoutSlots);
@@ -2299,7 +2369,7 @@ function adoptDockviewLayout() {
   }
 }
 
-function layoutSlotsFromDockviewJson(data, previous = layoutSlots) {
+function layoutSlotsFromDockviewJson(data, previous = layoutSlots, options = {}) {
   const next = emptyLayoutSlots();
   const usedSlots = new Set();
   const parse = (node, orientation) => {
@@ -2352,6 +2422,16 @@ function layoutSlotsFromDockviewJson(data, previous = layoutSlots) {
     return cloneLayoutSlots(previous);
   }
   preserveDockviewSidePaneSplit(next, previous);
+  if (layoutSlotsExactSignature(next) === layoutSlotsExactSignature(previous)) return cloneLayoutSlots(previous);
+  // A confirmed tab activation changes only selection in an already normalized
+  // layout. Rechecking CSS/viewport capacity here would flush unrelated dirty trees.
+  if (options.activationItem
+      && dockviewLayoutState.api?.activePanel?.id === options.activationItem
+      && dockviewLayoutActiveOnlySignature(next) === dockviewLayoutActiveOnlySignature(previous)) {
+    const activated = cloneLayoutSlots(previous);
+    for (const slot of layoutSlotKeys(activated)) activated[slot].active = next[slot].active;
+    return activated;
+  }
   return normalizeLayoutSlots(
     compactLayoutSlots(next, {preservePlaceholderSlots: true}),
     {preservePlaceholderSlots: true},
@@ -2518,6 +2598,12 @@ function createDockviewPanelRenderer() {
     }
     element.replaceChildren(panel);
     if (dockviewLayoutState.applyingFromLayout) return;
+    // A native switch mounts before its activation callback adopts the layout. That
+    // adoption owns slot updates and startup, just as app-driven switches do.
+    if (isTmuxSession(item) && !itemIsActivePaneTab(item)) {
+      restorePaneViewState(item, panel);
+      return;
+    }
     const slot = slotForItem(item) || dockviewSlotForGroupId(params?.api?.group?.id || '');
     updatePanelSlot(panel, item, slot);
     renderAttachedPanelContent(item);
@@ -2694,7 +2780,7 @@ function createDockviewTabRenderer() {
   let api = null;
   let disposables = [];
   const render = () => {
-    if (dockviewLayoutState.applyingFromLayout) return;
+    if (dockviewLayoutState.applyingFromLayout) {dockviewLayoutState.tabRenderPending = true; return;}
     if (!item) return;
     if (dockviewEmptyPaneSlot(item)) {
       element.hidden = true;
@@ -2771,6 +2857,7 @@ function createDockviewTabRenderer() {
     if (!['Enter', ' '].includes(event.key)) return;
     event.preventDefault();
     captureDockviewPreviousPaneBeforeTabActivation(element, item);
+    dockviewSetPendingUserPanelActivation(item);
     commitExplicitTabInteraction({focusTerminal: true});
     api?.setActive?.();
   });
@@ -2869,28 +2956,67 @@ function dockviewActiveTabTransitionItems(slots = layoutSlots) {
   return affected;
 }
 
-function dockviewRefreshTabs(options = {}) {
+function dockviewSyncTabShells(options = {}) {
   if (!dockviewLayoutActive()) return;
+  if (!dockviewLayoutState.applyingFromLayout) dockviewLayoutState.tabRenderPending = false;
   const itemSet = options.items instanceof Set ? options.items : null;
   const tabs = itemSet
     ? Array.from(itemSet).map(item => dockviewLayoutState.host?.querySelector?.(`.dockview-pane-tab[data-pane-tab="${CSS.escape(item)}"]`)).filter(Boolean)
     : Array.from(document.querySelectorAll('.dockview-pane-tab'));
-  const groups = new Set();
+  tabs.forEach(tab => syncDockviewTabShell(tab, tab.dataset.paneTab || ''));
+}
+
+function dockviewScheduleDeferredTabRefresh(items) {
+  const pendingItems = dockviewLayoutState.deferredTabRefreshItems;
+  for (const item of items || []) pendingItems.add(item);
+  if (dockviewLayoutState.deferredTabRefreshFrame || !pendingItems.size) return;
+  dockviewLayoutState.deferredTabRefreshFrame = requestAnimationFrame(() => {
+    dockviewLayoutState.deferredTabRefreshFrame = requestAnimationFrame(() => {
+      dockviewLayoutState.deferredTabRefreshFrame = 0;
+      const nextItems = new Set(pendingItems);
+      pendingItems.clear();
+      if (nextItems.size) dockviewRefreshTabs({items: nextItems, refreshHeaderActions: false});
+    });
+  });
+}
+
+function dockviewRefreshTabs(options = {}) {
+  if (!dockviewLayoutActive()) return;
+  if (!dockviewLayoutState.applyingFromLayout) dockviewLayoutState.tabRenderPending = false;
+  let itemSet = options.items instanceof Set ? new Set(options.items) : null;
+  const pendingItems = dockviewLayoutState.deferredTabRefreshItems;
+  if (dockviewLayoutState.deferredTabRefreshFrame) {
+    cancelAnimationFrame(dockviewLayoutState.deferredTabRefreshFrame);
+    dockviewLayoutState.deferredTabRefreshFrame = 0;
+    if (itemSet) for (const item of pendingItems) itemSet.add(item);
+    pendingItems.clear();
+  }
+  const tabs = itemSet
+    ? Array.from(itemSet).map(item => dockviewLayoutState.host?.querySelector?.(`.dockview-pane-tab[data-pane-tab="${CSS.escape(item)}"]`)).filter(Boolean)
+    : Array.from(document.querySelectorAll('.dockview-pane-tab'));
   tabs.forEach(tab => {
     syncDockviewTabActiveClass(tab);
     tab.__yomuxDockviewRefresh?.();
-    const group = tab.closest?.('.dv-groupview');
-    if (group) groups.add(group);
   });
+  if (options.refreshHeaderActions !== false) dockviewRefreshHeaderActions({items: itemSet});
+  dockviewSyncHeaderBackgroundDragSources();
+  dockviewSyncHeaderActionReservations();
+  scheduleAgentWindowActivityAnimationSync();
+}
+
+function dockviewRefreshHeaderActions(options = {}) {
+  if (!dockviewLayoutActive()) return;
+  const itemSet = options.items instanceof Set ? options.items : null;
+  const tabs = itemSet
+    ? Array.from(itemSet).map(item => dockviewLayoutState.host?.querySelector?.(`.dockview-pane-tab[data-pane-tab="${CSS.escape(item)}"]`)).filter(Boolean)
+    : null;
+  const groups = new Set((tabs || []).map(tab => tab.closest?.('.dv-groupview')).filter(Boolean));
   const headerActions = itemSet
     ? Array.from(groups).map(group => group.querySelector('.dockview-pane-header-actions')).filter(Boolean)
     : Array.from(document.querySelectorAll('.dockview-pane-header-actions'));
   headerActions.forEach(actions => {
     actions.__yomuxDockviewRefresh?.();
   });
-  dockviewSyncHeaderBackgroundDragSources();
-  dockviewSyncHeaderActionReservations();
-  scheduleAgentWindowActivityAnimationSync();
 }
 
 function syncDockviewTabActiveClass(tab, api = null) {

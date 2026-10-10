@@ -254,7 +254,7 @@ function menuTabRowHtml(item, options = {}) {
   const desc = sessionTabDescription(item, info);
   const detailHtml = desc ? `<span class="session-button-dir tab-inline-detail">${esc(desc)}</span>` : '';
   return `<span class="pane-tab-core">${sessionTabLeadingActivityContainerHtml(item, info, auto, {enabledOnly: false, toggle: options.toggleYolo === true && !readOnlyMode, state})}<span class="session-button-prefix">${sessionNumberNameHtml(item)}</span>
-    <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(item, info)}${pullRequestSummaryBadgesHtml(item, info)}${detailHtml}</span></span>`;
+    <span class="session-button-text">${state ? sessionStateHtml(state, {leadingTab: true}) : ''}${defaultBranchBadgeHtml(item, info)}${pullRequestSummaryBadgesHtml(item, info)}${detailHtml}</span></span>`;
 }
 
 function menuTabCommand(item, options = {}) {

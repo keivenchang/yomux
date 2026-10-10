@@ -15,6 +15,9 @@ from yomux_lib.stats_current import materializer, pricing, storage, usage
 from yomux_lib.stats_current import service as service_module
 from tests.cross_layer_matrix import observed_fixture_atoms
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def _atom(
     *, event_id="usage-1", model="gpt-5.6-sol", quantity=1_000_000,

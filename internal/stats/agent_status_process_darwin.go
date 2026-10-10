@@ -21,11 +21,11 @@ func platformAgentProcess(ctx context.Context, pid int) (AgentStatusProcess, err
 		return AgentStatusProcess{}, errors.New("agent-process-unavailable")
 	}
 	if runtime.GOOS == "darwin" {
-		row, ok := darwinProcessIdentity(pid)
+		row, ok := darwinProcessIdentityFresh(pid)
 		if !ok {
 			return AgentStatusProcess{}, errors.New("agent-process-unavailable")
 		}
-		return AgentStatusProcess{Command: row.Command, Executable: row.Executable, Alive: true}, nil
+		return AgentStatusProcess{Command: row.Command, Executable: row.Executable, StartedIdentity: row.Identity, Alive: true}, nil
 	}
 	commandContext, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()

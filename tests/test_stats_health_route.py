@@ -19,6 +19,9 @@ from yomux_lib import http_routes
 from yomux_lib.stats_current import http as stats_http
 from yomux_lib.stats_current import service as service_module
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def _service(tmp_path):
     return service_module.StatsCurrentService(tmp_path / "stats.sock", tmp_path / "stats.sqlite3")

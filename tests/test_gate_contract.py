@@ -84,6 +84,8 @@ DISCOVERED_MUTATING_ACTIONS = {
 _USER_COMMAND_CONTRACT_CLASSES = frozenset({"pending", "optimistic"})
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 @pytest.mark.socket
 def test_k0_browser_command_registry_exactly_matches_the_declared_inventory(browser, gate_live_server):
@@ -100,6 +102,8 @@ def test_k0_browser_command_registry_exactly_matches_the_declared_inventory(brow
     assert inventory == DISCOVERED_MUTATING_ACTIONS
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 @pytest.mark.socket
 def test_k0_unregistered_mutating_request_fails_closed_before_network(browser, gate_live_server):
@@ -131,6 +135,8 @@ def test_k0_unregistered_mutating_request_fails_closed_before_network(browser, g
     }
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 @pytest.mark.socket
 @pytest.mark.parametrize("contract_class", sorted(_USER_COMMAND_CONTRACT_CLASSES))
@@ -328,6 +334,8 @@ def test_k0_each_user_command_class_executes_k1_through_k5(
         assert result["settled"]["optimisticState"] is False, result
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 @pytest.mark.socket
 def test_m1_first_delivery_is_not_retried_and_one_replacement_stream_repairs(browser, gate_live_server):
@@ -501,6 +509,8 @@ def test_m1_first_delivery_is_not_retried_and_one_replacement_stream_repairs(bro
     }
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 @pytest.mark.socket
 def test_m2_api_fetch_applies_timeout_and_abort_signal(browser, gate_live_server):
@@ -599,6 +609,8 @@ def test_m2_api_fetch_applies_timeout_and_abort_signal(browser, gate_live_server
     assert [item["id"] for item in retired_blocking] == [item["id"] for item in blocking]
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 @pytest.mark.socket
 def test_m3_live_daemon_transport_failure_is_not_reported_as_process_down(browser, gate_live_server):
@@ -664,6 +676,8 @@ def test_m3_live_daemon_transport_failure_is_not_reported_as_process_down(browse
     assert rendered["tone"] not in {"muted", "good"}, rendered
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_m4_ready_queued_and_typed_errors_keep_distinct_http_schemas(gate_live_server, monkeypatch):
     forwarder = gate_live_server.app.stats_current_http
     monkeypatch.setattr(forwarder.client, "ensure_started", lambda: True)

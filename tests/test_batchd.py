@@ -38,6 +38,9 @@ from yomux_lib.local_services import runtime
 from _git_helpers import git
 from _git_helpers import init_repo
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def _blocking_worker_task():
     """Module-level so the spawn context can pickle it; simulates a worker mid-task at shutdown."""

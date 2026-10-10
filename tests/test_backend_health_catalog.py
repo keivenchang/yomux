@@ -117,6 +117,9 @@ from yomux_lib.backend_health.observer import ABSENCE_EXPECTED_REASON_FIELD
 
 from yomux_lib import app as app_module
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 # Names from the abandoned `abandoned/0.6.12` topology. None of them exist in this tree, and
 # none may come back as a service id, a spawned module, or a declared owner.

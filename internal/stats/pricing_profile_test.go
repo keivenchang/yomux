@@ -2,6 +2,7 @@ package stats
 
 import (
 	"encoding/json"
+	"github.com/keivenchang/yomux/internal/testsupport"
 	"os"
 	"path/filepath"
 	"testing"
@@ -51,6 +52,8 @@ func TestResolveUsagePricingProfileMatchesSettingsTimeline(t *testing.T) {
 }
 
 func TestPythonAndGoPricingProfilesMatchSyntheticSettings(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	settings := map[string]any{
 		"cost": map[string]any{
 			"openai_pricing_profile":             "default",

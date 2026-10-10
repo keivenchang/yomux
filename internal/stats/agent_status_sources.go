@@ -26,6 +26,12 @@ func CurrentPlatformAgentStatusSources(database string) AgentStatusSources {
 	return agentStatusSources(database, platformAgentProcess)
 }
 
+// CurrentPlatformAgentStatusProcess returns the live process evidence used by
+// the shared status classifier, including its start identity for guarded sends.
+func CurrentPlatformAgentStatusProcess(ctx context.Context, pid int) (AgentStatusProcess, error) {
+	return platformAgentProcess(ctx, pid)
+}
+
 func agentStatusSources(database string, process func(context.Context, int) (AgentStatusProcess, error)) AgentStatusSources {
 	return AgentStatusSources{
 		CapturePane: linuxCaptureAgentPane,
@@ -102,5 +108,9 @@ func linuxAgentProcess(ctx context.Context, pid int) (AgentStatusProcess, error)
 	if err != nil {
 		return AgentStatusProcess{}, errors.New("agent-process-identity-unavailable")
 	}
-	return AgentStatusProcess{Command: strings.TrimSpace(commandText), Alive: true, Executable: executable}, nil
+	startedIdentity, err := linuxStartedIdentity(pid)
+	if err != nil {
+		return AgentStatusProcess{}, errors.New("agent-process-identity-unavailable")
+	}
+	return AgentStatusProcess{Command: strings.TrimSpace(commandText), Alive: true, Executable: executable, StartedIdentity: startedIdentity}, nil
 }

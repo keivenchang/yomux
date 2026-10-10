@@ -20,7 +20,11 @@ from yomux_lib.stats_current.usage import usage_atom_from_source
 
 
 @pytest.fixture(autouse=True)
-def _isolated_transcript_scan_store(tmp_path, monkeypatch):
+def _isolated_transcript_scan_store(tmp_path, monkeypatch, request):
+    # Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+    if request.node.get_closest_marker("deprecated_python_server") is None:
+        yield
+        return
     monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "scanner-state")
     with session_files._TRANSCRIPT_SCAN_CACHE_GUARD:
         session_files._TRANSCRIPT_SCAN_CACHE.clear()
@@ -73,6 +77,8 @@ def _generated_yostats_usage_value(tmp_path, seed: str, instance: str) -> tuple[
     return painted_value, corpus.expected_input_tokens + corpus.expected_output_tokens
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_seed_is_byte_reproducible_and_changes_generated_yostats_value(tmp_path):
     spec = MockTranscriptSpec(seed="repeatable-seed", usage_records=24, span_seconds=7_200)
     first = generate_mock_transcripts(tmp_path / "first", spec)
@@ -105,6 +111,8 @@ def test_realistic_volume_and_span_are_explicit(tmp_path):
     assert last_timestamp - first_timestamp == 86_400
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_append_exercises_offset_observed_size_and_prefix_digest(tmp_path):
     corpus = generate_mock_transcripts(
         tmp_path / "append",
@@ -148,6 +156,8 @@ def test_test_env_routes_only_to_generated_namespace(tmp_path, monkeypatch):
     assert all(row["transcript"].startswith(str(mock_root)) for row in corpus.scanner_rows)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_awkward_cases_include_unknown_model_companion_values_and_repair_backlog(tmp_path):
     corpus = generate_mock_transcripts(
         tmp_path / "awkward",

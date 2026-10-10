@@ -24,6 +24,9 @@ from yomux_lib import server_logs
 
 from tests.helpers.http_routes import capturing_route_request as _capturing_route_request
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 class _RefusingFilesystemJob:
     """Record any batchd traffic a refused request should never have produced."""

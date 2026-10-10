@@ -266,7 +266,9 @@ TMUX_AI_STATUS_PATH = STATE_DIR / "tmux-AI-status.json"
 LEGACY_ATTENTION_ACKS_PATH = STATE_DIR / "attention-acks.json"
 ACTIVITY_HEARTBEATS_PATH = STATE_DIR / "activity-heartbeats.jsonl"
 WATCH_INDEX_PATH = STATE_DIR / "watch-index.json"
-AUTO_APPROVE_LOCK_DIR = RUNTIME_DIR / "locks"
+# YO writer locks are shared by Python and Go instances controlling the same
+# tmux socket, even when those instances use separate config/runtime roots.
+AUTO_APPROVE_LOCK_DIR = Path(tempfile.gettempdir()) / f"yomux-auto-approve-{os.getuid()}"
 CONTROL_SOCKET_DIR = RUNTIME_DIR / "control"
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 @dataclass(frozen=True, slots=True)

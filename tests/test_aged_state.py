@@ -55,6 +55,8 @@ def test_aged_state_recipes_are_opt_in_and_shared_host_caches_coexist(aged_state
         aged_state_root.apply("coexisting_transcript_caches", shared_count=1, host_count=1)
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_aged_state_eof_cursor_and_nonempty_wal_use_current_product_owners(aged_state_root):
     cursor_result = aged_state_root.apply("eof_transcript_cursor")
     wal_result = aged_state_root.apply("stats_wal", minimum_wal_bytes=32 * 1024, payload_bytes=512)

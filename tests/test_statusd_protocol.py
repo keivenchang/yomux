@@ -11,6 +11,9 @@ from yomux_lib.statusd_protocol import validate_inventory
 from yomux_lib.statusd_protocol import validate_request
 from yomux_lib.statusd_protocol import validate_snapshot
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def test_statusd_snapshot_contract_accepts_public_preencoded_json():
     metadata = {

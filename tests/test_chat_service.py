@@ -12,6 +12,9 @@ from yomux_lib.chat_service import ChatService
 from yomux_lib.chat_service import ChatServiceError
 from yomux_lib.chat_store import ChatStore
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 QUESTION_CASES = {
     "ar": "كيف يعمل", "de": "Wie funktioniert das", "en": "How does this work", "es": "Cómo funciona",

@@ -59,6 +59,8 @@ def test_lease_release_terminal_upgrade_response_is_recorded_without_retry(monke
     ]
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.parametrize("method", ("result", "product"))
 def test_job_client_observation_does_not_launch_an_absent_service(method, tmp_path, monkeypatch):
     client = batchd.BatchClient(tmp_path / "batchd.sock")
@@ -85,6 +87,8 @@ def test_job_client_observation_does_not_launch_an_absent_service(method, tmp_pa
     assert launch_calls == []
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.parametrize("method", ("submit", "produce"))
 def test_job_client_retries_explicit_prehandler_busy_within_one_rpc_budget(method, tmp_path, monkeypatch):
     client = batchd.BatchClient(tmp_path / "batchd.sock")
@@ -124,6 +128,8 @@ def test_job_client_retries_explicit_prehandler_busy_within_one_rpc_budget(metho
     assert waits == [pytest.approx(rpc.LOCAL_SERVICE_BUSY_RETRY_INITIAL_SECONDS)]
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_job_client_retries_shutdown_admission_refusal_within_one_rpc_budget(tmp_path, monkeypatch):
     client = batchd.BatchClient(tmp_path / "batchd.sock")
     clock = [100.0]
@@ -153,6 +159,8 @@ def test_job_client_retries_shutdown_admission_refusal_within_one_rpc_budget(tmp
     assert attempts[0][0] == attempts[1][0]
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_job_client_does_not_retry_generic_busy_without_prehandler_provenance(tmp_path, monkeypatch):
     client = batchd.BatchClient(tmp_path / "batchd.sock")
     attempts = []
@@ -316,6 +324,8 @@ def test_registry_release_lease_retries_capacity_busy_then_succeeds(tmp_path, mo
     assert waits == [pytest.approx(rpc.LOCAL_SERVICE_BUSY_RETRY_INITIAL_SECONDS)]
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_job_client_does_not_retry_ambiguous_service_unavailable_response(tmp_path, monkeypatch):
     client = batchd.BatchClient(tmp_path / "batchd.sock")
     attempts = []

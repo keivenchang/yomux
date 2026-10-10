@@ -21,6 +21,9 @@ from yomux_lib.local_services import registry as registry_mod
 from yomux_lib.local_services.runtime import local_service_failure_text
 from yomux_lib.search.search_indexer import SearchIndexerClient
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def classify(row: dict[str, Any]) -> dict[str, Any]:
     """Run the one server-side owner that derives state/reason for a service row."""

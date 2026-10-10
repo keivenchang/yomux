@@ -9,6 +9,11 @@ from yomux_lib.yoagent.model_intents import parse_model_intent_plan
 from yomux_lib.yoagent.model_intents import select_model_intent
 from yomux_lib.yoagent.skills import load_yoagent_skills
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def roster_skill_payload():
     return load_yoagent_skills()["skills"]

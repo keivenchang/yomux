@@ -319,6 +319,8 @@ def _process_group_exists(process_group_id: int) -> bool:
     return process_group_has_serving_member(process_group_id)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_r1_create_session_reaches_roster_and_rendered_tab_within_measured_budget(browser, gate_live_server):
     (gate_live_server.paths.workspace_dir / f"project{NEW_SESSION}").mkdir()
@@ -344,6 +346,8 @@ def test_r1_create_session_reaches_roster_and_rendered_tab_within_measured_budge
     assert max(elapsed_samples) <= CREATE_TRANSITION_BUDGET_SECONDS, measurements
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_r2_launch_claude_mock_is_live_and_detected_as_claude(browser, gate_live_server, monkeypatch):
     _prepare_launch_runtime(monkeypatch, gate_live_server)
@@ -353,6 +357,8 @@ def test_r2_launch_claude_mock_is_live_and_detected_as_claude(browser, gate_live
     _assert_agent_detected(browser, gate_live_server, "claude")
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_r3_launch_codex_mock_is_live_and_detected_as_codex(browser, gate_live_server, monkeypatch):
     _prepare_launch_runtime(monkeypatch, gate_live_server)
@@ -362,6 +368,8 @@ def test_r3_launch_codex_mock_is_live_and_detected_as_codex(browser, gate_live_s
     _assert_agent_detected(browser, gate_live_server, "codex")
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_r3a_launch_opencode_mock_is_live_and_detected_as_opencode(browser, gate_live_server, monkeypatch):
     _prepare_launch_runtime(monkeypatch, gate_live_server)
@@ -371,6 +379,8 @@ def test_r3a_launch_opencode_mock_is_live_and_detected_as_opencode(browser, gate
     _assert_agent_detected(browser, gate_live_server, "opencode")
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_r4_browser_xterm_input_receives_mock_output(browser, gate_live_server, monkeypatch):
     _prepare_launch_runtime(monkeypatch, gate_live_server)
@@ -406,6 +416,8 @@ def test_r4_browser_xterm_input_receives_mock_output(browser, gate_live_server, 
     assert observed, panes
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_r5_reload_preserves_session_attachment_and_agent_detection(browser, gate_live_server, monkeypatch):
     _prepare_launch_runtime(monkeypatch, gate_live_server)
@@ -443,6 +455,8 @@ def test_r5_reload_preserves_session_attachment_and_agent_detection(browser, gat
     _assert_agent_detected(browser, gate_live_server, "claude")
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_r6_kill_removes_row_and_process_group_without_touching_another_socket(browser, gate_live_server, monkeypatch):
     _prepare_launch_runtime(monkeypatch, gate_live_server)

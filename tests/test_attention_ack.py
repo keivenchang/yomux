@@ -14,6 +14,9 @@ from yomux_lib import common
 from yomux_lib.app import ATTENTION_ACK_KEY_MAX_LENGTH
 from yomux_lib.app import ATTENTION_ACK_TTL_SECONDS
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 @pytest.fixture
 def make_app(monkeypatch, make_tmux_webterm_app):

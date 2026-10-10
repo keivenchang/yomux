@@ -29,6 +29,9 @@ from yomux_lib import web as web_module
 from yomux_lib.server_logs import SERVER_LOGS
 from yomux_lib.workspace import settings as workspace_settings
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 pytest_plugins = ("tests.e2e_browser_harness",)
 pytestmark = [pytest.mark.browser, pytest.mark.socket, pytest.mark.e2e]

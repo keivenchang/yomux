@@ -108,6 +108,8 @@ func TestWriterLeaseCrossProcessOwnership(t *testing.T) {
 }
 
 func TestWriterLeaseCrossLanguageOwnership(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	path := filepath.Join(t.TempDir(), "stats-v9.sqlite3")
 	repoRoot := testsupport.RepoRoot(t)
 	python := `
@@ -171,6 +173,8 @@ store.close()
 }
 
 func TestWriterLeasePythonRejectsGoOwner(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	if os.Getenv("YOMUX_WRITER_LEASE_HELPER") == "1" {
 		path := os.Getenv("YOMUX_WRITER_LEASE_PATH")
 		writer, err := OpenWriter(context.Background(), path)
@@ -188,7 +192,7 @@ func TestWriterLeasePythonRejectsGoOwner(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), "stats-v9.sqlite3")
 	command := exec.Command(os.Args[0], "-test.run=^TestWriterLeasePythonRejectsGoOwner$")
-	command.Env = testsupport.SyntheticEnvironment("YOMUX_WRITER_LEASE_HELPER=1", "YOMUX_WRITER_LEASE_PATH="+path)
+	command.Env = testsupport.SyntheticEnvironment("YOMUX_RUN_DEPRECATED_PYTHON=1", "YOMUX_WRITER_LEASE_HELPER=1", "YOMUX_WRITER_LEASE_PATH="+path)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)

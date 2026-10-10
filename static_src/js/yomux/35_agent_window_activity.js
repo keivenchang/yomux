@@ -7,6 +7,7 @@ const AGENT_WINDOW_AGGREGATE_TONES = Object.freeze(['attention', 'blocked', 'una
 const AGENT_WINDOW_METADATA_FIELDS = Object.freeze([
   'pane', 'pane_target', 'pid', 'window_name', 'label', 'window_label', 'current', 'window_active',
     'path', 'paths', 'path_entries', 'git', 'transcript', 'transcript_id', 'agent_session_id', 'cwd',
+  'queued_followup_question',
 ]);
 
 function agentWindowVisibleTone(value) {
@@ -56,6 +57,17 @@ function agentWindowPayloadKey(agent) {
   const index = agentWindowIndex(agent);
   const kind = agentWindowKind(agent?.kind);
   return index !== null && kind ? `${index}:${kind}` : '';
+}
+
+function agentWindowSameInstance(left, right) {
+  if (agentWindowPayloadKey(left) !== agentWindowPayloadKey(right)) return false;
+  const leftProcess = String(left?.process_instance_id || '');
+  const rightProcess = String(right?.process_instance_id || '');
+  if (leftProcess || rightProcess) {
+    return leftProcess !== '' && leftProcess === rightProcess
+      && String(left?.pane_target || left?.pane || '') === String(right?.pane_target || right?.pane || '');
+  }
+  return true;
 }
 
 function agentWindowInfoPane(info, agent) {
@@ -241,6 +253,7 @@ function agentWindowStatusVisualSignature(payload = {}) {
     .map(agent => normalizedAgentWindowPayload(agent))
     .map(agent => ({
       kind: agent.kind,
+      process_instance_id: String(agent.process_instance_id || ''),
       window_index: agentWindowIndex(agent),
       state: agentWindowStateKey(agent.state),
       current: agentWindowPayloadCurrent(agent) === true,
@@ -319,6 +332,16 @@ function agentWindowSnapshotRevision(payload) {
   return Number.isInteger(revision) && revision > 0 ? revision : 0;
 }
 
+function agentWindowSnapshotIsAuthoritative(payload) {
+  return payload?.agent_window_status_fresh === true && agentWindowSnapshotRevision(payload) > 0
+    && typeof goAgentStatusUsesActivityFallback === 'function' && goAgentStatusUsesActivityFallback();
+}
+
+function agentWindowActivitySnapshotFresh(payload) {
+  if (typeof payload?.agent_window_status_fresh === 'boolean') return payload.agent_window_status_fresh;
+  return payload?.cache?.stale !== true;
+}
+
 function agentWindowSnapshotRevisionsMismatch(hasStateRows, stateRevision, activityRevision) {
   return hasStateRows && stateRevision > 0 && activityRevision > 0 && stateRevision !== activityRevision;
 }
@@ -328,8 +351,10 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
   const activityPayload = tabberActivityPayload?.agent_windows && typeof tabberActivityPayload.agent_windows === 'object'
     ? tabberActivityPayload.agent_windows[String(session || '')]
     : null;
-  let stateRows = agentWindowPayloadRows(statePayload.agent_windows);
-  const activityRows = agentWindowPayloadRows(activityPayload);
+  let stateRows = agentWindowActivitySnapshotFresh(statePayload) ? agentWindowPayloadRows(statePayload.agent_windows) : [];
+  const activityRows = agentWindowActivitySnapshotFresh(tabberActivityPayload)
+    ? agentWindowPayloadRows(activityPayload)
+    : [];
   const stateRevision = agentWindowSnapshotRevision(statePayload);
   const activityRevision = agentWindowSnapshotRevision(tabberActivityPayload);
   // Go has no Python auto-approve snapshot. During a pane-capture miss, its shared activity
@@ -342,7 +367,7 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
     stateRows = stateRows.map(stateRow => {
       if (agentWindowStateKey(stateRow?.state) !== 'unavailable') return stateRow;
       const replacement = activityRows.find(activityRow => (
-        agentWindowPayloadKey(activityRow) === agentWindowPayloadKey(stateRow)
+        agentWindowSameInstance(activityRow, stateRow)
         && agentWindowStateKey(activityRow?.state) !== 'unavailable'
       ));
       return replacement ? {...stateRow, ...replacement} : stateRow;
@@ -354,12 +379,13 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
   const revisionMismatch = agentWindowSnapshotRevisionsMismatch(stateRows.length > 0, stateRevision, activityRevision);
   const trustedActivityRows = revisionMismatch ? [] : activityRows;
   const infoRows = agentWindowPayloadRows(info?.agent_windows);
-  // `/api/auto-approve` owns every visible agent-status field. Tabber and transcript
-  // metadata can identify a window and enrich its path/git details, but never provide a
-  // color, transition, or acknowledgement when the canonical status is unavailable.
+  const liveAgentRows = agentWindowPayloadRows(info?.agents);
+  // `/api/auto-approve` owns each window's visible status. Tabber metadata may identify the
+  // physical pane and carry the Go classifier's queued-question hint, but it cannot replace
+  // the canonical row state, tone, transition, or acknowledgement.
   const metadataRows = mergedAgentWindowMetadataRows(
     trustedActivityRows,
-    [...infoRows, ...agentWindowPayloadRows(info?.agents)],
+    [...infoRows, ...liveAgentRows],
     info,
   );
   const source = stateRows.length ? stateRows : metadataRows;
@@ -385,7 +411,7 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
     }));
   const activeIndex = activeTmuxWindowIndexFromInfo(info);
   const agents = fallback
-    .map(agent => mergeAgentWindowPayload(agent, [trustedActivityRows, infoRows]))
+    .map(agent => mergeAgentWindowPayload(agent, [liveAgentRows, trustedActivityRows, metadataRows]))
     .map(agent => agentWindowWithInfoActiveWindow(agent, activeIndex))
     .filter(agent => agent.kind);
   for (const agent of agents) {
@@ -406,7 +432,13 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
     agents.push(agentWindowWithInfoActiveWindow(visualAgent, activeIndex));
   }
   const hasAttributedWindows = agents.some(agent => agentWindowIndex(agent) !== null);
-  const screenWorking = sessionAgentWindowScreenIsWorking(statePayload);
+  const authoritativeStatus = agentWindowSnapshotIsAuthoritative(statePayload);
+  if (authoritativeStatus) {
+    for (const agent of agents) {
+      if (!stateRows.some(row => agentWindowSameInstance(row, agent))) agent.queued_followup_question = false;
+    }
+  }
+  const screenWorking = !authoritativeStatus && sessionAgentWindowScreenIsWorking(statePayload);
   const hasWorkingWindow = agents.some(agent => agentWindowIsWorkingState(agent.state));
   // The screen capture is authoritative for a current working turn even before the per-window
   // activity poll catches up. Promote one non-attention window here, at the shared model boundary,
@@ -426,6 +458,57 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
 
 function sessionAgentWindowStatusPayloads(session, info = null, autoPayload = null) {
   return sessionAgentWindowStatusModel(session, info, autoPayload).agents;
+}
+
+// A queued question owns attention independently of its still-running window.
+function agentWindowAttentionEvent(agent, session, options = {}) {
+  const itemOptions = agentWindowActivityOptionsForStatus(agent, session, options);
+  const queued = agent?.queued_followup_question === true && (!agent?.state || agentWindowIsWorkingState(agent?.state));
+  if (queued) itemOptions.transitionKey = `${agentWindowActivityTransitionKey(agent.kind, itemOptions)}:question`;
+  const state = queued ? STATE_KEY.needsInput : agent?.state;
+  const item = agentWindowActivityIcon(agent.kind, state, agentWindowIdleSeconds(agent), itemOptions);
+  return {agent, item, options: itemOptions, queued, state};
+}
+
+function sessionPromptAttentionEvent(session, payload = autoApproveStates.get(session) || {}) {
+  const signature = promptAttentionPayloadSignature(payload);
+  if (!signature) return null;
+  const state = payload.screen?.key === STATE_KEY.blocked ? STATE_KEY.blocked : STATE_KEY.needsInput;
+  const agent = {kind: agentWindowKind(payload.agent_kind || payload.screen?.agent_kind) || 'codex', state,
+    attention_key: promptAttentionClearKey(session, signature, payload),
+    attention_acknowledged: payload.prompt_attention_acknowledged === true || payload.prompt?.attention_acknowledged === true};
+  return agentWindowAttentionEvent(agent, session, {transitionKey: `prompt:${session}`, scheduleRefresh: false});
+}
+
+function sessionAttentionEvent(session, info = null, payload = null) {
+  const model = sessionAgentWindowStatusModel(session, info, payload);
+  const events = model.agents.map(agent => agentWindowAttentionEvent(agent, session));
+  if (!model.hasAttributedWindows) {
+    const prompt = sessionPromptAttentionEvent(session, payload || autoApproveStates.get(session) || {});
+    if (prompt) events.push(prompt);
+  }
+  const visible = events.filter(event => ['attention', 'blocked'].includes(event.item?.state) && event.item?.acknowledged !== true);
+  const summary = sessionAgentWindowStatusSummary(session, info, payload);
+  const indicated = summary?.acknowledgement;
+  return visible.sort((a, b) => {
+    const rank = event => event.item.acknowledging === true ? -2
+      : indicated && ['attention', 'blocked'].includes(indicated.item?.state) && agentWindowPhysicalKey(event.agent, info) === agentWindowPhysicalKey(indicated.agent, info) ? -1
+      : event.queued ? 1 : 0;
+    return rank(a) - rank(b) || Number(agentWindowPayloadCurrent(b.agent) === true) - Number(agentWindowPayloadCurrent(a.agent) === true);
+  })[0] || null;
+}
+
+function agentWindowAttentionBadgeHtml(event) {
+  if (!event || event.item?.acknowledged === true) return '';
+  const {item, queued} = event;
+  const tone = agentWindowStatusToneForItem(item);
+  if (!['attention', 'blocked', 'acknowledged'].includes(tone)) return '';
+  const short = item.state === 'blocked' ? 'BLK' : 'ASK';
+  const classes = statusIndicatorTextClasses(tone, 'badge-base', 'session-state-badge',
+    queued ? 'session-tab-queued-question' : 'session-tab-state-marker',
+    `session-state-${item.state === 'blocked' ? 'blocked' : 'needs-input'}`,
+    item.acknowledging ? 'agent-window-status-dot--acknowledging status-indicator--acknowledged' : '', {pulse: item.pulseActive === true});
+  return `<span class="${esc(classes)}"${agentWindowActivityStyleAttribute(item.state, item)} title="${esc(item.label)}">${short}</span>`;
 }
 
 function sessionAgentWindowHasWorkingSignal(session, info = null, autoPayload = null) {
@@ -755,7 +838,10 @@ function agentWindowActivityTransitionKey(agentKey, options = {}) {
   // A tmux window index is stable across selection, while pane_target may arrive only in the
   // async readback. Use the pane only when no window identity exists so the acknowledgment visual
   // does not move to a different key immediately after the click.
-  return [session, windowIndex ?? '', windowIndex === null ? pane : '', kind].join(':');
+  const identity = [session, windowIndex ?? '', windowIndex === null ? pane : '', kind];
+  const process = String(options.process_instance_id || '').trim();
+  if (process) identity.push(pane, process);
+  return identity.join(':');
 }
 
 function scheduleAgentWindowStoppedRefresh(key, untilMs, options = {}) {
@@ -962,7 +1048,8 @@ function agentWindowActivityAcknowledgementTarget(session, windowIndex = null, o
   let summaryIndex = null;
   if (explicitIndex === null && options.preferSummary === true) {
     const summary = sessionAgentWindowStatusSummary(sessionKey, info, autoApproveStates.get(sessionKey));
-    summaryIndex = tmuxWindowIndexKey(summary?.acknowledgement?.agent?.window_index ?? summary?.acknowledgement?.agent?.window);
+    const attention = sessionAttentionEvent(sessionKey, info, autoApproveStates.get(sessionKey));
+    summaryIndex = tmuxWindowIndexKey(attention?.agent?.window_index ?? summary?.acknowledgement?.agent?.window_index ?? summary?.acknowledgement?.agent?.window);
   }
   const activeIndex = explicitIndex !== null
     ? explicitIndex
@@ -977,15 +1064,16 @@ function agentWindowActivityAcknowledgementTarget(session, windowIndex = null, o
   const agent = windowViewModel(sessionKey, activeIndex, info);
   if (!agent) return null;
   const itemOptions = agentWindowActivityOptionsForStatus(agent, sessionKey, {scheduleRefresh: false});
-  const item = agentWindowActivityIconForStatusItem(agent, agent.kind, sessionKey, itemOptions);
+  const event = agentWindowAttentionEvent(agent, sessionKey, itemOptions);
+  const item = event.queued ? event.item : agentWindowActivityIconForStatusItem(agent, agent.kind, sessionKey, itemOptions);
   if (item?.acknowledged === true) return null;
   if (!['attention', 'blocked', 'cooldown'].includes(item?.state)) return null;
-  const transitionKey = agentWindowActivityTransitionKey(agent.kind, itemOptions);
+  const transitionKey = agentWindowActivityTransitionKey(agent.kind, event.options);
   const previous = transitionKey ? agentWindowActivityRecord(transitionKey)?.activity : null;
   const stoppedAt = Number(previous?.stoppedAt || itemOptions.working_stopped_ts || 0);
   const ackKey = item.state === 'cooldown'
     ? agentWindowActivityAcknowledgementKey(agent.kind, 'cooldown', itemOptions, stoppedAt)
-    : agentWindowActivityAcknowledgementKey(agent.kind, agentWindowStateKey(agent.state), itemOptions, itemOptions.attention_signature || itemOptions.screen_text || agentWindowStateKey(agent.state));
+    : agentWindowActivityAcknowledgementKey(agent.kind, agentWindowStateKey(event.state), event.options, itemOptions.attention_signature || itemOptions.screen_text || agentWindowStateKey(event.state));
   if (ackKey) return {ackKey, transitionKey, stoppedAt, state: item.state, agent};
   return transitionKey && stoppedAt > 0 ? {transitionKey, stoppedAt, state: item.state, agent} : null;
 }
@@ -1052,6 +1140,10 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   const previous = record?.activity || {};
   const stateKey = agentWindowStateKey(state);
   const current = options.current === true || options.window_active === true;
+  const currentAckKey = agentWindowIsAttentionState(stateKey) ? String(options.attention_key || '') : String(options.cooldown_attention_key || '');
+  if (record?.acknowledgementVisual?.acknowledgementKey && currentAckKey && record.acknowledgementVisual.acknowledgementKey !== currentAckKey) {
+    clearAgentWindowAcknowledgementVisual(transitionKey);
+  }
   const acknowledgementVisualActive = transitionKey ? agentWindowAcknowledgementVisualActive(transitionKey) : false;
   const acknowledgementVisual = acknowledgementVisualActive ? record.acknowledgementVisual : null;
   const acknowledgementTiming = acknowledgementVisual ? {
@@ -1136,7 +1228,7 @@ function agentWindowActivityIcon(agentKey, state, idleSeconds, options = {}) {
   const workingStoppedTs = Number(options.working_stopped_ts || options.workingStoppedTs || 0);
   let stoppedAt = Number.isFinite(workingStoppedTs) && workingStoppedTs > 0 ? workingStoppedTs : 0;
   const seenWorking = previous.seenWorking === true || stoppedAt > 0;
-  const cooldownTransitionStartedAt = agentWindowTransitionStartedAt(previous, 'cooldown', nowSeconds);
+  const cooldownTransitionStartedAt = stoppedAt || agentWindowTransitionStartedAt(previous, 'cooldown', nowSeconds);
   if (transitionKey) record.activity = {state: String(state || STATE_KEY.idle), visualTone: seenWorking && stoppedAt > 0 ? 'cooldown' : '', seenWorking, stoppedAt, transitionStartedAt: cooldownTransitionStartedAt};
   if (seenWorking && stoppedAt > 0) {
     const cooldownAckKey = agentWindowActivityAcknowledgementKey(kind, 'cooldown', options, stoppedAt);
@@ -1170,6 +1262,7 @@ function agentWindowActivityOptionsForStatus(agent, session = '', options = {}) 
     window_index: agent?.window_index,
     pane: agent?.pane,
     pane_target: agent?.pane_target,
+    process_instance_id: agent?.process_instance_id,
     current: agentWindowPayloadCurrent(agent) === true,
     window_active: agent?.window_active === true,
     working_stopped_ts: agent?.working_stopped_ts,

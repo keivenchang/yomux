@@ -14,6 +14,9 @@ from yomux_lib.metadata import empty_work_graph
 from yomux_lib.transcripts import format_transcript_item
 from yomux_lib.transcripts import transcript_items_from_raw_line
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def write_event_lines(path, events):
     path.write_text(

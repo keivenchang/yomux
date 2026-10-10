@@ -143,6 +143,13 @@ def test_hard_floor_blocks_unrelaxable_cases():
     assert yolo_rules.hard_floor_decision("mkfs.ext4 /dev/sda1")["action"] == "block"
 
 
+def test_rm_brace_expansion_split_across_arguments_fails_closed():
+    decision = yolo_rules.hard_floor_decision("rm -rf /{, etc}")
+    assert decision["action"] == "ask"
+    assert decision["reason_code"] == "command_parse_failed"
+    assert decision["source"] == "error"
+
+
 def test_schema_validation_reports_errors():
     bad = {
         "default": "approve",

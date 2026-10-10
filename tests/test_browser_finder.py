@@ -1513,6 +1513,7 @@ def test_finder_64_item_batch_settles_from_operation_terminal_event(browser, tmp
     assert metrics["rejections"] == []
 
 
+@pytest.mark.shared_tooling
 def test_live_bundle_batches_at_the_bound_a_real_boot_page_states(browser, tmp_path):
     """The size the flush splits at must be the bound a REAL rendered page states.
 

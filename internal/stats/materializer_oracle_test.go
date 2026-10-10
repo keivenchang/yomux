@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"sort"
 	"testing"
+
+	"github.com/keivenchang/yomux/internal/testsupport"
 )
 
 // TestMaterializerMatchesPythonAcrossCurrentMatrix keeps the two materializers
@@ -16,6 +18,8 @@ import (
 // provenance, completion, and cost attribution are part of the current wire
 // contract too.
 func TestMaterializerMatchesPythonAcrossCurrentMatrix(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	python := pythonExecutable(t)
 	root := t.TempDir()
 	fixturePath := filepath.Join(root, "materializer-fixture.json")
@@ -182,6 +186,8 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
 // the fold arithmetic and equal-timestamp tie-break under the cross-language
 // oracle instead of allowing an empty layer to pass.
 func TestMaterializerFoldOrderingMatchesPython(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	python := pythonExecutable(t)
 	root := t.TempDir()
 	fixturePath := filepath.Join(root, "fold-fixture.json")
@@ -241,6 +247,8 @@ print(json.dumps({"memory": memory_values["system_memory_used_bytes"], "cpu": cp
 }
 
 func TestMemoryNoDataMatchesPythonOracle(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	python := pythonExecutable(t)
 	root := t.TempDir()
 	fixturePath := filepath.Join(root, "memory-no-data-fixture.json")

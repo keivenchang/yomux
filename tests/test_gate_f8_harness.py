@@ -813,6 +813,8 @@ def test_read_state_rejects_a_malformed_ownership_field_in_browser_console_mode(
         wait_for_fixture_api_quiescence(MalformedOwnershipDriver(), timeout=0.01)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_generated_lifecycle_adapter_partitions_pending_by_terminal_owner(browser, gate_live_server):
     # Behavioral proof that the REAL generated adapter derives watchDiffPendingOperationIds from each

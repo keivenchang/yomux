@@ -1104,7 +1104,7 @@ test('the disclosure repeats the columns that can DROP, and only those', () => {
 
 test('the published fields the columns have no room for are rendered, not dropped', () => {
   const html = renderStatsdOpen(localServices({}, {errors_by_reason: {transport_refused: 4, timeout: 3, never_seen: 0}}));
-  assert.match(html, /<p data-subsystem-health-detail>observer samples: 450 · process starts: 4 · demand starts: 3 · unexpected restarts: 0 · completed requests: 1,197 · peer pid 4242 \(epoch pid:4242:start:98\)\.<\/p>/);
+  assert.match(html, /<p data-subsystem-health-detail>observer samples: 450 · process starts: 4 · demand starts: 3 · restarts without a recorded graceful shutdown: 0 · completed requests: 1,197 · peer pid 4242 \(epoch pid:4242:start:98\)\.<\/p>/);
   assert.match(html, /<p data-subsystem-errors-by-reason>Errors by reason: transport_refused 4, timeout 3\.<\/p>/);
   assert.doesNotMatch(html, /never_seen/, 'a reason with no error is not an error row');
 
@@ -1118,7 +1118,7 @@ test('the published fields the columns have no room for are rendered, not droppe
       completed_count: absent('counters_unreadable', 'The local-service RPC ledger returned no usable counter'),
     },
   }));
-  assert.match(unobserved, /<p data-subsystem-health-detail>observer samples: The health observer has not recorded this service yet · process starts: 4 · demand starts: 3 · unexpected restarts: 0 · completed requests: The local-service RPC ledger returned no usable counter\.<\/p>/);
+  assert.match(unobserved, /<p data-subsystem-health-detail>observer samples: The health observer has not recorded this service yet · process starts: 4 · demand starts: 3 · restarts without a recorded graceful shutdown: 0 · completed requests: The local-service RPC ledger returned no usable counter\.<\/p>/);
   assert.doesNotMatch(unobserved, /observer samples: 0/, 'an unobserved sample count rendered as 0 is a fabricated measurement');
   assert.doesNotMatch(unobserved, /peer pid/, 'an unverified pid is not published as a fact');
 });
@@ -1244,7 +1244,7 @@ test('legacy lifecycle history reports a partial classification without inventin
       counter_scope: 'web_process',
     },
   }));
-  assert.match(html, /unexpected restarts: 0/);
+  assert.match(html, /restarts without a recorded graceful shutdown: 0/);
   assert.match(html, /Restart classification is PARTIAL: legacy_lifecycle_unclassified \(older retained process replacements did not record whether the preceding absence was expected\)\./);
 });
 
@@ -1426,6 +1426,9 @@ test('only a stopped or unavailable observer raises the ONE compact alert above 
   const reset = alerts({history_reset_reason: 'history_corrupt', persistence_state: 'degraded'});
   assert.match(reset, /data-system-alert="history-reset">history_corrupt — the retained history file was unreadable and was reset/);
   assert.match(reset, /data-system-alert="persistence">Retained history persistence is degraded/);
+  const unknownStartReason = alerts({history_reset_reason: 'start_reason_unknown'});
+  assert.match(unknownStartReason, /data-system-alert="history-reset">start_reason_unknown — the launch reason was not recorded, so this restart cannot be classified; the restart total is still retained\./);
+  assert.doesNotMatch(unknownStartReason, /counts from before the reset are gone/);
 });
 
 test('a recovered corrupt database is named in the same one compact alert', () => {
@@ -1498,7 +1501,7 @@ test('snapshot provenance shows the revision, a reset history and a degraded per
   assert.match(html, /<dt>Services retained<\/dt><dd>6<\/dd>/);
   // The reason CODE, which is a published field. The SENTENCE that explains it belongs to the
   // alert slot, and printing it here as well is the two-copies defect the one-owner test pins.
-  assert.match(html, /<dt>History reset<\/dt><dd>history_corrupt<\/dd>/);
+  assert.match(html, /<dt>History status<\/dt><dd>history_corrupt<\/dd>/);
   assert.match(html, /<dt>Persistence<\/dt><dd>degraded — write_failed<\/dd>/);
   assert.doesNotMatch(html, /the retained history file was unreadable and was reset/, 'the alert slot owns the explanation');
   assert.doesNotMatch(html, /may not survive a restart/, 'the alert slot owns the explanation');

@@ -1921,9 +1921,10 @@ function showFileEditorDecisionDialog(options = {}) {
     const actionButtons = actions.map(action => (
       `<button type="button" class="file-editor-dialog-action ${esc(action.variant || '')}" data-dialog-action="${esc(action.id)}">${esc(action.label || action.id)}</button>`
     )).join('');
+    const messageVariant = options.messageVariant === 'danger' ? ' danger' : '';
     const body = options.bodyHtml
       ? `<div class="file-editor-dialog-body custom">${options.bodyHtml}</div>`
-      : `<div class="file-editor-dialog-body">${esc(options.message || '')}</div>`;
+      : `<div class="file-editor-dialog-body${messageVariant}">${esc(options.message || '')}</div>`;
     backdrop.innerHTML = `
       <section class="file-editor-dialog" role="dialog" aria-modal="true" aria-label="${esc(options.title || t('dialog.defaultTitle'))}">
         <div class="file-editor-dialog-title">${esc(options.title || t('dialog.defaultTitle'))}</div>

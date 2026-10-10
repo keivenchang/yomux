@@ -8,6 +8,11 @@ from yomux_lib.app import METADATA_BADGE_PULSE_UNTIL_STATE_KEY
 from yomux_lib.app import METADATA_BADGE_SIGNATURES_STATE_KEY
 from yomux_lib.app import TmuxWebtermApp
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def make_metadata_app():
     app = object.__new__(TmuxWebtermApp)

@@ -40,7 +40,8 @@ from yomux_lib.stats_current.client import StatsCurrentClient
 from yomux_lib.watchd_client import WatchClient
 
 
-pytestmark = pytest.mark.usefixtures("no_control_socket", "isolated_yoagent_conversation_state", "isolated_tmux_socket")
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = [pytest.mark.usefixtures("no_control_socket", "isolated_yoagent_conversation_state", "isolated_tmux_socket"), pytest.mark.deprecated_python_server]
 
 
 # The exact schema this milestone freezes. Rendered payload, top level.

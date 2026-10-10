@@ -25,6 +25,9 @@ from yomux_lib import common
 from yomux_lib import http_routes
 from yomux_lib import server
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 class _StoppedCompletionService(app_module.BatchedOperationService):
     """Accept the reservation and retain the submitted worker without running it."""

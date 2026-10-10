@@ -25,6 +25,9 @@ from yomux_lib.filesystem import paths as filesystem_paths
 from yomux_lib.search import bfs_index
 from yomux_lib.search import file_index
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 @pytest.fixture(autouse=True)
 def _isolated_index_dir(tmp_path, monkeypatch):

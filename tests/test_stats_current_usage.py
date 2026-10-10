@@ -12,6 +12,9 @@ import pytest
 from yomux_lib.stats_current.storage import UsageAtom
 from yomux_lib.stats_current import usage
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def _atom(**updates) -> UsageAtom:
     values = {

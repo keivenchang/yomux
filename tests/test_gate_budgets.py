@@ -66,6 +66,7 @@ ENDPOINT_COMPUTE_BUDGET_MS = 750.0
 TERMINAL_KEYPRESS_BUDGET_SECONDS = 3.5
 
 
+@pytest.mark.shared_tooling
 def test_gate_runtime_paths_are_fixture_owned(gate_runtime_paths):
     assert gate_runtime_paths.home_dir.is_dir()
     assert gate_runtime_paths.config_dir.is_dir()
@@ -320,6 +321,8 @@ def test_l1_failed_transport_increments_the_teardown_counter_once(
     assert after_payload["teardowns_by_exception"]["TimeoutError"] - before_by_type == 1
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_l1_transport_diagnostics_record_maps_through_http(gate_live_server, monkeypatch):
     expected = {
         "teardowns_total": 7,
@@ -397,6 +400,8 @@ def _endpoint_compute_sample(runtime, path, surface):
     return float(compute_ms)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_l2_healthy_endpoint_compute_stays_within_budget(gate_live_server, monkeypatch, tmp_path):
     readable = tmp_path / "endpoint-budget.txt"
     readable.write_text("fixture-owned endpoint budget\n", encoding="utf-8")
@@ -428,6 +433,8 @@ def test_l2_healthy_endpoint_compute_stays_within_budget(gate_live_server, monke
     assert all(value <= ENDPOINT_COMPUTE_BUDGET_MS for values in samples.values() for value in values), samples
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_l2_unreadable_descendant_keeps_endpoints_available_and_within_budget(
     gate_live_server,
     monkeypatch,
@@ -486,6 +493,8 @@ def test_l2_unreadable_descendant_keeps_endpoints_available_and_within_budget(
     assert all(value <= ENDPOINT_COMPUTE_BUDGET_MS for values in samples.values() for value in values), samples
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 @pytest.mark.socket
 def test_l3_keypress_reaches_terminal_data_within_budget(browser, gate_live_server):
@@ -524,6 +533,8 @@ def test_l3_keypress_reaches_terminal_data_within_budget(browser, gate_live_serv
     assert released["settled"]["batchOperations"] == 0, released
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 @pytest.mark.socket
 def test_l4_one_rename_mutation_issues_one_forced_metadata_refresh(browser, gate_live_server):
@@ -557,6 +568,8 @@ def test_l4_one_rename_mutation_issues_one_forced_metadata_refresh(browser, gate
     assert result["metadataRequests"] == ["/api/session-metadata?force=1"], result
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_l5_runtime_process_ledger_keeps_launcher_and_finds_untracked_orphan(
     gate_live_server,
     gate_runtime_paths,
@@ -625,6 +638,8 @@ def test_l5_runtime_process_ledger_keeps_launcher_and_finds_untracked_orphan(
     }
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.parametrize(
     ("error", "expected_type"),
     (
@@ -681,6 +696,8 @@ def test_l6_transport_error_records_name_a_varying_exception_type(
     gate_live_server.server_log_boundary = SERVER_LOGS.payload()
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_l6_absent_socket_recovery_does_not_emit_a_transport_error(
     gate_live_server,
     gate_runtime_paths,
@@ -713,6 +730,8 @@ def test_l6_absent_socket_recovery_does_not_emit_a_transport_error(
     assert "local-service:gate-recover" not in visible_text
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.parametrize(
     ("service", "action"),
     (
@@ -776,6 +795,8 @@ def test_l6_idle_exited_service_request_recovers_without_transport_error(
             )
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.parametrize(
     ("handler_limit", "served_while_occupied"),
     (
@@ -912,6 +933,8 @@ def test_l6_local_service_over_budget_response_is_delivered_not_raised():
     ) is False
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_l6_batchd_product_response_past_deadline_is_delivered_not_retried(
     gate_runtime_paths,
     monkeypatch,
@@ -981,6 +1004,8 @@ def test_l6_batchd_product_response_past_deadline_is_delivered_not_retried(
         WebDriverWait(service_thread, 2.0, poll_frequency=0.02).until(lambda thread: not thread.is_alive())
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_l7_every_http_accepted_ticket_is_visible_as_outstanding(gate_live_server, monkeypatch):
     ticket = {
         "ok": True,
@@ -1033,6 +1058,8 @@ def test_l7_every_http_accepted_ticket_is_visible_as_outstanding(gate_live_serve
     assert all("epoch" in frame and "seq" in frame for frame in completed_frames), completed_frames
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_l7_real_pricing_ticket_identity_survives_until_terminal():
     class ImmediateCatalog:
         def refresh(self, _adapters):

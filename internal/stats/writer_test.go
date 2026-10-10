@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/keivenchang/yomux/internal/testsupport"
 )
 
 func writerBatch() AppendBatch {
@@ -96,7 +98,9 @@ func TestOpenWriterRepairsMissingRingTriggers(t *testing.T) {
 	}
 }
 
+// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 func TestOpenWriterInitializesRingForCoreOnlyDatabase(t *testing.T) {
+	testsupport.RequireDeprecatedPythonBackend(t)
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "stats.sqlite3")
 	pythonScript := filepath.Join(t.TempDir(), "create-core-only.py")

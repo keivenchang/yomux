@@ -91,12 +91,12 @@ function sidePaneMinimumViewportWidthPx() {
   return minSplitPaneWidthPx() / sidePaneRoleDefinition.maxViewportFraction;
 }
 
-function sidePanesAvailable(viewport = nativeViewport()) {
+function sidePanesAvailable(viewport = nativeViewport({widthOnly: true})) {
   const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
   return width >= sidePaneMinimumViewportWidthPx();
 }
 
-function sidePaneConstrainedMode(viewport = nativeViewport()) {
+function sidePaneConstrainedMode(viewport) {
   return !sidePanesAvailable(viewport);
 }
 
@@ -2340,10 +2340,14 @@ function capturePaneElementScrollState(panel) {
 function restorePaneElementScrollState(panel, state) {
   const entries = Array.isArray(state?.scrollContainers) ? state.scrollContainers : [];
   if (!entries.length) return;
+  const keys = new Set(entries.map(entry => entry.key));
   const current = new Map();
   paneScrollContainers(panel).forEach((element, index) => {
-    current.set(paneScrollContainerKey(element, index), element);
+    const key = paneScrollContainerKey(element, index);
+    if (keys.has(key)) current.set(key, element);
   });
+  // Hidden sibling surfaces are not part of this restore and must not force layout snapshots.
+  if (!current.size) return;
   const deferredOwner = createPassiveDeferredElementScrollOwner(...current.values());
   const restore = () => {
     for (const entry of entries) {
@@ -2654,7 +2658,7 @@ function attentionAcknowledgementKeyIsGeneratedWindowKey(key) {
   // changes before a genuinely later prompt can reuse a key, so a delayed pre-ack snapshot must
   // not resurrect a red/yellow marker that the shared ledger has already acknowledged.
   const value = String(key || '');
-  return value.startsWith('["agent-window",') && value.split(',').length >= 7;
+  return value.startsWith('go:attention:') || value.startsWith('go:cooldown:') || (value.startsWith('["agent-window",') && value.split(',').length >= 7);
 }
 
 function attentionAcknowledgementKeyIsRecorded(key, payload = null) {
@@ -2839,6 +2843,9 @@ function clearPromptAttentionForSession(session, options = {}) {
   const signature = promptAttentionPayloadSignature(payload);
   if (!signature) return false;
   const key = promptAttentionClearKey(session, signature, payload);
+  const event = sessionPromptAttentionEvent(session, payload);
+  if (!event || event.item?.acknowledged === true || event.item?.acknowledging === true) return false;
+  showAgentWindowAcknowledgementVisual(event.options.transitionKey, {...options, acknowledgementKey: key, session, visualState: event.item.state});
   return acknowledgeAttentionKeys([key], options);
 }
 
@@ -2864,8 +2871,6 @@ function sessionState(session, info = transcriptMetadataState.payload.sessions?.
   const agentWindowSummary = typeof sessionAgentWindowStatusSummary === 'function'
     ? sessionAgentWindowStatusSummary(session, info, auto)
     : null;
-  const agentWindowRows = Array.isArray(agentWindowSummary?.agents) ? agentWindowSummary.agents : [];
-  const hasBlockedAgentWindow = agentWindowRows.some(agent => agentWindowStateKey(agent?.state) === STATE_KEY.blocked);
   const hasAttributedAgentWindows = agentWindowSummary?.hasAttributedWindows === true;
   const agentWindowTone = typeof agentWindowStatusToneForItem === 'function'
     ? agentWindowStatusToneForItem(agentWindowSummary?.item)
@@ -2876,8 +2881,8 @@ function sessionState(session, info = transcriptMetadataState.payload.sessions?.
     .map(agent => `${agent.kind || ''} ${agent.status || ''} ${agent.error || ''}`)
     .join(' ')
     .toLowerCase();
-  const paneText = panes
-    .map(pane => `${pane.command || ''} ${pane.title || ''}`)
+  const paneCommandText = panes
+    .map(pane => `${pane.command || ''} ${pane.current_command || ''}`)
     .join(' ')
     .toLowerCase();
   const pr = displayPullRequest(info);
@@ -2893,8 +2898,8 @@ function sessionState(session, info = transcriptMetadataState.payload.sessions?.
       : stateReason('terminalScreenUnavailable');
     return stateValue('disconnected', disconnectedReason);
   }
-  if (screenKey === STATE_KEY.blocked) {
-    return stateValue(STATE_KEY.blocked, screenText || stateReason('agentErrorBlocker'));
+  if (!hasAttributedAgentWindows && screenKey === STATE_KEY.blocked) {
+    return stateValue(STATE_KEY.blocked, screenText || stateReason('agentErrorBlocker'), promptAttentionExtra(session, auto));
   }
   if (/blocked|denied|rejected/.test(lastAction)) {
     return stateValue(STATE_KEY.blocked, stateReason('yoloBlockedApproval'));
@@ -2922,8 +2927,8 @@ function sessionState(session, info = transcriptMetadataState.payload.sessions?.
       attentionAgentItem: agentWindowSummary.item,
     });
   }
-  if (agentWindowTone === 'blocked' || hasBlockedAgentWindow) {
-    const agent = agentWindowSummary.agent || agentWindowRows.find(item => agentWindowStateKey(item?.state) === STATE_KEY.blocked);
+  if (agentWindowTone === 'blocked') {
+    const agent = agentWindowSummary.agent;
     const windowLabel = String(agent?.window_label || agent?.window || agent?.kind || '').trim();
     const reasonText = String(agent?.screen_text || agent?.error || '').trim() || stateReason('agentErrorBlocker');
     return stateValue(STATE_KEY.blocked, windowLabel ? `${windowLabel}: ${reasonText}` : reasonText, {
@@ -2956,10 +2961,12 @@ function sessionState(session, info = transcriptMetadataState.payload.sessions?.
   if (/needs input|waiting for input|awaiting input|user input|input required|waiting for user|paused/.test(agentText)) {
     return stateValue(STATE_KEY.needsInput, stateReason('agentWaitingInput'));
   }
-  if (agents.some(agent => agentErrorIsBlocking(agent.error)) || /blocked|error|failed|failure|stuck/.test(agentText)) {
+  if (!hasAttributedAgentWindows && (agents.some(agent => agentErrorIsBlocking(agent.error)) || /blocked|error|failed|failure|stuck/.test(agentText))) {
     return stateValue(STATE_KEY.blocked, stateReason('agentErrorBlocker'));
   }
-  if (/pytest|cargo test|npm test|pnpm test|yarn test|vitest|jest|ctest|go test|python3 -m pytest|python -m pytest|ruff|mypy|pre-commit/.test(paneText)) {
+  // Terminal titles can be arbitrary agent-written task names (for example,
+  // "Make Go tests default"). Only live pane commands can establish a test run.
+  if (/pytest|cargo test|npm test|pnpm test|yarn test|vitest|jest|ctest|go test|python3 -m pytest|python -m pytest|ruff|mypy|pre-commit/.test(paneCommandText)) {
     return stateValue('tests-running', stateReason('testsActive'));
   }
   if (pr?.number && !pr.draft && prStatus !== 'closed' && prStatus !== 'merged' && checksState === 'passing') {
@@ -3765,7 +3772,10 @@ function statusIndicatorLabelHtml(text, tone, ...classes) {
 }
 
 function stateBadgeHtml(key, short, title, options = {}) {
-  const classes = ['badge-base', 'session-state-badge', 'tab-symbol', `session-state-${key}`];
+  const classes = ['badge-base', 'session-state-badge'];
+  if (options.tabSymbol !== false) classes.push('tab-symbol');
+  if (options.extraClass) classes.push(options.extraClass);
+  classes.push(`session-state-${key}`);
   const attention = stateDef(key).attention;
   const tone = attention ? 'attention' : '';
   if (attention) classes.push('session-state-reminder');
@@ -3777,16 +3787,37 @@ function stateBadgeHtml(key, short, title, options = {}) {
   return `<span class="${esc(statusIndicatorTextClasses(tone, classes))}"${style} title="${esc(title)}"${attrs}>${esc(short)}</span>`;
 }
 
-function sessionStateHtml(state) {
+function sessionStateHtml(state, options = {}) {
   // 'ready-review' is dropped — the dedicated #NNNN / CI / Approved PR chips already convey
   // "PR ready", so the standalone "PR" state pill is redundant on the tab.
   if (state?.promptAttentionCleared) return '';
+  if (options.leadingTab === true && sessionTabStateMarkerShort(state)) return '';
   if ([STATE_KEY.needsApproval, STATE_KEY.needsInput].includes(state?.key)) return '';
   if (!state || [STATE_KEY.idle, STATE_KEY.working, 'done', 'cooldown'].includes(state.key) || (!state.showBadge && ['tests-running', 'disconnected', 'yolo-approval', 'ready-review'].includes(state.key))) return '';
   return stateBadgeHtml(state.key, state.short || stateDef(state.key).short, `${state.label}: ${state.reason}`, {
     clearable: [STATE_KEY.needsApproval, STATE_KEY.needsInput].includes(state.key) && Boolean(state.promptSignature),
     session: state.session,
     promptSignature: state.promptSignature,
+  });
+}
+
+function sessionTabStateMarkerShort(state) {
+  if (!state || state.promptAttentionCleared) return '';
+  return ({
+    [STATE_KEY.blocked]: 'BLK',
+    disconnected: 'OFF',
+    'tests-running': 'TEST',
+    'yolo-approval': 'YOLO?',
+  })[state.key] || '';
+}
+
+function sessionTabStateMarkerHtml(state) {
+  const short = sessionTabStateMarkerShort(state);
+  if (!short) return '';
+  const title = `${state.label || stateDef(state.key).label}: ${state.reason || ''}`.trim();
+  return stateBadgeHtml(state.key, short, title, {
+    tabSymbol: false,
+    extraClass: 'session-tab-state-marker',
   });
 }
 
@@ -5384,14 +5415,17 @@ function fileQuickOpenSearchPayloadResult(payload, searchRoot) {
     // The opaque baseline cursor the client seeds incremental delta reads with (null when nothing is
     // committed yet — the client re-baselines from the next snapshot once the crawl publishes layer 1),
     // and the canonical realpath whose digest correlates a path-free search_progress signal to this root.
-    cursor: payload?.initial_cursor ?? null,
+    cursor: payload?.initial_cursor ?? payload?.cursor ?? null,
     realpath: String(payload?.root_realpath || payload?.root || searchRoot),
     // This is deliberately data-driven. The UI must not turn an explicit in-progress
     // backend response into a completed empty search just because it has no rows yet.
-    indexWarming: payload?.index_state === 'warming' || payload?.index_coverage === 'pending',
+    indexWarming: fileIndexSearchIsWarming(payload),
     // Same rule for the opposite failure: a snapshot served without a live producer must not read as
     // a current answer. One derivation, shared with the Finder index badge.
     freshness: fileIndexFreshnessFromPayload(payload),
+    generation: payload?.generation ?? null,
+    workerIncarnation: payload?.worker_incarnation ?? null,
+    coverage: payload?.index_coverage ?? payload?.progressive_coverage ?? null,
   };
 }
 
@@ -5399,8 +5433,8 @@ function fileQuickOpenSearchPayloadResult(payload, searchRoot) {
 // from which snapshot. Report the worst freshness any answering root returned: orphaned before
 // stale, then the oldest snapshot.
 function fileQuickOpenWorstFreshness(records) {
-  const stale = (Array.isArray(records) ? records : []).filter(record => record?.stale === true);
-  const rank = record => (record.state === 'orphaned' ? 2 : 1);
+  const stale = (Array.isArray(records) ? records : []).filter(record => record?.stale === true || record?.partial === true);
+  const rank = record => (record.state === 'orphaned' ? 3 : record.stale === true ? 2 : 1);
   return stale
     .slice()
     .sort((left, right) => (rank(right) - rank(left))
@@ -5478,7 +5512,9 @@ function applyFileQuickOpenSearchChunk(requestId, searchRoot, files) {
       const basename = String(file.name || basenameOf(file.path || ''));
       const stem = basename.includes('.') ? basename.slice(0, basename.lastIndexOf('.')) : basename;
       const segments = String(file.relative_path || '').split('/').filter(Boolean);
-      return [basename, stem, ...segments].some(value => Number.isFinite(fuzzySubsequenceScore(query, value)));
+      const fields = [basename, stem, ...segments];
+      const tokens = String(query || '').trim().split(/\s+/).filter(Boolean);
+      return tokens.every(token => fields.some(value => Number.isFinite(fuzzySubsequenceScore(token, value))));
     })
     .map(file => ({...file, operation: 'upsert'}));
   if (!changes.length) return true;
@@ -5494,14 +5530,25 @@ function applyFileQuickOpenSearchChunk(requestId, searchRoot, files) {
 
 function quickOpenStreamResultSummary(payload) {
   return {
-    indexWarming: payload?.index_state === 'warming' || payload?.index_coverage === 'pending',
+    indexWarming: fileIndexSearchIsWarming(payload),
     freshness: fileIndexFreshnessFromPayload(payload),
+    cursor: payload?.cursor ?? null,
+    generation: payload?.generation ?? null,
+    workerIncarnation: payload?.worker_incarnation ?? null,
+    coverage: payload?.index_coverage ?? payload?.progressive_coverage ?? null,
+    terminal: payload?.terminal === true,
   };
 }
 
+function fileQuickOpenSearchQueryString(searchRoot, query) {
+  // Both routes search the same nested scope, including while the tab's index
+  // settings are still catching up with the server's configured roots.
+  return `root=${encodeURIComponent(searchRoot)}&query=${encodeURIComponent(query)}`
+    + `&limit=${fileQuickOpenResultLimit}&recursive=true`;
+}
+
 async function consumeFileQuickOpenSearchStream(searchRoot, query, requestId, fetchOptions) {
-  const url = `/api/fs/search-stream?root=${encodeURIComponent(searchRoot)}`
-    + `&query=${encodeURIComponent(query)}&limit=${fileQuickOpenResultLimit}`;
+  const url = `/api/fs/search-stream?${fileQuickOpenSearchQueryString(searchRoot, query)}`;
   const response = await apiFetch(url, fileQuickOpenSseStreamOptions(fetchOptions), {recordDebug: true});
   if (!response.ok) {
     const error = new Error(response.statusText || `HTTP ${response.status}`);
@@ -5534,6 +5581,9 @@ async function consumeFileQuickOpenSearchStream(searchRoot, query, requestId, fe
       streamSummary = quickOpenStreamResultSummary(payload);
     } else if (event === 'error') {
       streamError = new Error(String(payload?.error || payload?.reason || 'indexed search stream failed'));
+    } else if (event === 'done') {
+      const summary = payload?.summary && typeof payload.summary === 'object' ? payload.summary : payload;
+      streamSummary = quickOpenStreamResultSummary({...summary, terminal: payload?.terminal === true});
     }
   });
 
@@ -5562,7 +5612,7 @@ async function fileQuickOpenSearchRootResult(searchRoot, query, requestId, fetch
     return {ok: true, ...fileQuickOpenSearchPayloadResult(result.legacyPayload, searchRoot)};
   }
   const payload = await apiFetchJson(
-    `/api/fs/search?root=${encodeURIComponent(searchRoot)}&query=${encodeURIComponent(query)}&limit=${fileQuickOpenResultLimit}`,
+    `/api/fs/search?${fileQuickOpenSearchQueryString(searchRoot, query)}`,
     fetchOptions,
   );
   return {ok: true, ...fileQuickOpenSearchPayloadResult(payload, searchRoot)};
@@ -5583,6 +5633,8 @@ async function refreshFileQuickOpenCandidates(query = '') {
   const root = pathQuery.active ? (fileQuickOpenState.root || fileQuickOpenRootForSearch()) : fileQuickOpenRootForSearch();
   if (!root) return;
   const searchQuery = commandPaletteSearchQuery(query);
+  const progressAtStart = new Map(fileQuickOpenState.searchProgressSequences);
+  const incarnationsAtStart = new Map(fileQuickOpenState.searchProgressIncarnations);
   const candidateQueryIdentity = fileQuickOpenCandidateQueryIdentity(query, root);
   const previousCandidateQueryIdentity = fileQuickOpenState.candidateQueryIdentity;
   const previousSearchQuery = fileQuickOpenState.activeSearchQuery;
@@ -5646,10 +5698,9 @@ async function refreshFileQuickOpenCandidates(query = '') {
       fileQuickOpenState.indexWarming = fileQuickOpenState.candidates.length === 0 && successful.some(result => result.indexWarming);
       // Stale rows stay in the list. What changes is that the palette now says they are stale.
       fileQuickOpenState.freshness = fileQuickOpenWorstFreshness(successful.map(result => result.freshness));
-      // The stream has no cursor: it owns the complete indexed crawl for this request. Direct roots
-      // retain their existing cursor metadata for the later progress-signal repair path.
-      const cursorResults = successful.filter(result => result.stream !== true && result.cursor !== undefined);
-      seedFileQuickOpenDeltaCursors(cursorResults, requestId);
+      // The terminal stream summary and direct responses share the same cursor reconciliation.
+      const cursorResults = successful.filter(result => result.cursor !== undefined);
+      seedFileQuickOpenDeltaCursors(cursorResults, requestId, progressAtStart, incarnationsAtStart);
     }
     fileQuickOpenState.error = '';
   } catch (error) {
@@ -5690,7 +5741,17 @@ function resetFileQuickOpenDeltaCursors(query = '') {
 // After a snapshot settles, register one incremental-read cursor per answering root. `cursor` is the
 // opaque baseline (null until the root commits its first rows); `scopeId` is the opaque digest a
 // path-free search_progress signal carries, so a signal correlates to the exact root it names.
-function seedFileQuickOpenDeltaCursors(results, requestId) {
+function fileSearchWorkerIncarnationIsOlder(candidate, current) {
+  // The Go worker uses PID-start_nanoseconds. Compare the timestamp as decimal text so a retained
+  // event cannot replace a newer worker, without rounding nanoseconds through JavaScript Number.
+  const candidateTime = String(candidate || '').match(/^\d+-(\d+)$/)?.[1];
+  const currentTime = String(current || '').match(/^\d+-(\d+)$/)?.[1];
+  if (!candidateTime || !currentTime) return false;
+  return candidateTime.length < currentTime.length
+    || (candidateTime.length === currentTime.length && candidateTime < currentTime);
+}
+
+function seedFileQuickOpenDeltaCursors(results, requestId, progressAtStart = new Map(fileQuickOpenState.searchProgressSequences), incarnationsAtStart = new Map(fileQuickOpenState.searchProgressIncarnations)) {
   const deltaRoots = new Map();
   for (const result of Array.isArray(results) ? results : []) {
     const searchRoot = result.searchRoot || result.root;
@@ -5699,7 +5760,11 @@ function seedFileQuickOpenDeltaCursors(results, requestId) {
     deltaRoots.set(normalizedRoot, {
       searchRoot,
       normalizedRoot,
-      cursor: result.cursor ?? null,
+      cursor: result.cursor === '0' ? null : result.cursor ?? null,
+      generation: Number(result.generation) || 0,
+      workerIncarnation: String(result.workerIncarnation || ''),
+      freshness: result.freshness,
+      indexWarming: result.indexWarming === true,
       realpath: String(result.realpath || result.root || searchRoot),
       scopeId: fileSearchScopeId(result.realpath || result.root || searchRoot),
       more: false,
@@ -5708,6 +5773,36 @@ function seedFileQuickOpenDeltaCursors(results, requestId) {
     });
   }
   fileQuickOpenState.deltaRoots = deltaRoots;
+  let workerIncarnationMismatch = false;
+  for (const deltaRoot of deltaRoots.values()) {
+    const publishedIncarnation = fileQuickOpenState.searchProgressIncarnations.get(deltaRoot.scopeId) || '';
+    if (publishedIncarnation && deltaRoot.workerIncarnation && publishedIncarnation !== deltaRoot.workerIncarnation) {
+      // Retained events may describe the previous server's worker. A fresh response supersedes
+      // events already present when its search started; only a concurrent worker change needs repair.
+      if (fileSearchWorkerIncarnationIsOlder(publishedIncarnation, deltaRoot.workerIncarnation)
+        || publishedIncarnation === incarnationsAtStart.get(deltaRoot.scopeId)) {
+        fileQuickOpenState.searchProgressIncarnations.set(deltaRoot.scopeId, deltaRoot.workerIncarnation);
+        fileQuickOpenState.searchProgressGenerations.set(deltaRoot.scopeId, deltaRoot.generation);
+        fileQuickOpenState.reconciledProgressGenerations.delete(deltaRoot.scopeId);
+        continue;
+      }
+      workerIncarnationMismatch = true;
+      continue;
+    }
+    const failureDuringSearch = (fileQuickOpenState.searchProgressSequences.get(deltaRoot.scopeId) || 0) > (progressAtStart.get(deltaRoot.scopeId) || 0);
+    if (failureDuringSearch && deltaRoot.cursor === null && deltaRoot.freshness?.stale !== true) {
+      requeryOpenFileQuickOpenForIndexChange({force: true});
+      continue;
+    }
+    const publishedGeneration = fileQuickOpenState.searchProgressGenerations.get(deltaRoot.scopeId) || 0;
+    const reconciledGeneration = fileQuickOpenState.reconciledProgressGenerations.get(deltaRoot.scopeId) || 0;
+    if ((publishedGeneration > deltaRoot.generation && publishedGeneration > reconciledGeneration)
+      || (failureDuringSearch && deltaRoot.freshness?.stale !== true)) {
+      pumpFileQuickOpenDeltasForRoot(deltaRoot.normalizedRoot)
+        .catch(error => console.warn('quick-open initial cursor reconciliation failed', error));
+    }
+  }
+  if (workerIncarnationMismatch) requeryOpenFileQuickOpenForIndexChange({force: true});
 }
 
 // Fold true duplicates the way the snapshot read does, then keep only the best `limit` rows by the ONE
@@ -5784,6 +5879,14 @@ function ingestFileQuickOpenDeltaPayload(normalizedRoot, requestId, payload) {
     deltaRoot.more = false;
     return {applied: false, rebase: true, reason: String(payload.reason || '')};
   }
+  const hasSummary = payload?.index_state || payload?.index_coverage || payload?.freshness;
+  if (hasSummary) {
+    deltaRoot.freshness = fileIndexFreshnessFromPayload(payload);
+    deltaRoot.indexWarming = fileIndexSearchIsWarming(payload);
+    fileQuickOpenState.freshness = fileQuickOpenWorstFreshness(Array.from(fileQuickOpenState.deltaRoots.values(), root => root.freshness));
+    fileQuickOpenState.indexWarming = fileQuickOpenState.candidates.length === 0
+      && Array.from(fileQuickOpenState.deltaRoots.values()).some(root => root.indexWarming);
+  }
   const changes = Array.isArray(payload?.changes) ? payload.changes : [];
   deltaRoot.cursor = payload?.cursor ?? deltaRoot.cursor;
   deltaRoot.more = payload?.more === true;
@@ -5795,8 +5898,8 @@ function ingestFileQuickOpenDeltaPayload(normalizedRoot, requestId, payload) {
     // A delta that lands rows clears the transient "Indexing…" state: the palette now has committed
     // matches, so it must not keep claiming an empty warming index.
     if (fileQuickOpenState.candidates.length) fileQuickOpenState.indexWarming = false;
-    renderCommandPaletteResults();
   }
+  if (changes.length || hasSummary) renderCommandPaletteResults();
   return {applied: true, more: deltaRoot.more, changed: changes.length};
 }
 
@@ -5832,8 +5935,17 @@ async function pumpFileQuickOpenDeltasForRoot(normalizedRoot) {
   if (!deltaRoot || deltaRoot.fetching) return;
   if (!fileQuickOpenDeltasActive()) return;
   if (deltaRoot.cursor === null || deltaRoot.cursor === undefined) {
+    const publishedGeneration = fileQuickOpenState.searchProgressGenerations.get(deltaRoot.scopeId) || 0;
+    const reconciledGeneration = fileQuickOpenState.reconciledProgressGenerations.get(deltaRoot.scopeId) || 0;
+    if (publishedGeneration <= deltaRoot.generation || publishedGeneration <= reconciledGeneration) return;
+    fileQuickOpenState.reconciledProgressGenerations.set(deltaRoot.scopeId, publishedGeneration);
     requeryOpenFileQuickOpenForIndexChange({force: true});
     return;
+  }
+  const publishedGeneration = fileQuickOpenState.searchProgressGenerations.get(deltaRoot.scopeId) || 0;
+  const reconciledGeneration = fileQuickOpenState.reconciledProgressGenerations.get(deltaRoot.scopeId) || 0;
+  if (publishedGeneration > reconciledGeneration) {
+    fileQuickOpenState.reconciledProgressGenerations.set(deltaRoot.scopeId, publishedGeneration);
   }
   deltaRoot.fetching = true;
   try {
@@ -5866,9 +5978,45 @@ async function pumpFileQuickOpenDeltasForRoot(normalizedRoot) {
 // closed palette) does nothing, so one client's crawl never re-queries another root's palette.
 function handleFileSearchProgressSignal(payload) {
   const scopeId = String(payload?.scope_id || '');
-  if (!scopeId || !fileQuickOpenDeltasActive()) return;
+  if (!scopeId) return;
+  const workerIncarnation = String(payload?.worker_incarnation || '');
+  const previousIncarnation = fileQuickOpenState.searchProgressIncarnations.get(scopeId) || '';
+  if (fileSearchWorkerIncarnationIsOlder(workerIncarnation, previousIncarnation)
+    || Array.from(fileQuickOpenState.deltaRoots.values()).some(deltaRoot => deltaRoot.scopeId === scopeId
+      && fileSearchWorkerIncarnationIsOlder(workerIncarnation, deltaRoot.workerIncarnation))) return;
+  if (payload?.index_state === 'error' || payload?.stale === true) {
+    fileQuickOpenState.searchProgressSequences.set(scopeId, (fileQuickOpenState.searchProgressSequences.get(scopeId) || 0) + 1);
+  }
+  const generation = Number(payload?.generation ?? payload?.revision) || 0;
+  const rootIncarnationChanged = workerIncarnation && Array.from(fileQuickOpenState.deltaRoots.values())
+    .some(deltaRoot => deltaRoot.scopeId === scopeId && deltaRoot.workerIncarnation && deltaRoot.workerIncarnation !== workerIncarnation);
+  if (workerIncarnation) fileQuickOpenState.searchProgressIncarnations.set(scopeId, workerIncarnation);
+  if (workerIncarnation && (rootIncarnationChanged || (previousIncarnation && previousIncarnation !== workerIncarnation))) {
+    fileQuickOpenState.reconciledProgressGenerations.delete(scopeId);
+    fileQuickOpenState.searchProgressGenerations.set(scopeId, generation);
+    for (const deltaRoot of fileQuickOpenState.deltaRoots.values()) {
+      if (deltaRoot.scopeId === scopeId) deltaRoot.workerIncarnation = workerIncarnation;
+    }
+    if (fileQuickOpenDeltasActive()) requeryOpenFileQuickOpenForIndexChange({force: true});
+    return;
+  }
+  const previousGeneration = fileQuickOpenState.searchProgressGenerations.get(scopeId);
+  if (previousGeneration !== undefined && generation < previousGeneration) {
+    // A non-persistent worker starts its generation counter over after a restart. Drop the old
+    // reconciliation watermark so an open warming cursor can recover from the new worker's first
+    // publication instead of treating the lower generation as an already-seen event.
+    fileQuickOpenState.reconciledProgressGenerations.delete(scopeId);
+    fileQuickOpenState.searchProgressGenerations.set(scopeId, generation);
+  } else if (generation > (previousGeneration || 0)) {
+    fileQuickOpenState.searchProgressGenerations.set(scopeId, generation);
+  }
+  if (!fileQuickOpenDeltasActive()) return;
   for (const deltaRoot of fileQuickOpenState.deltaRoots.values()) {
     if (deltaRoot.scopeId !== scopeId) continue;
+    if ((payload?.index_state === 'error' || payload?.stale === true) && deltaRoot.cursor === null) {
+      requeryOpenFileQuickOpenForIndexChange({force: true});
+      continue;
+    }
     pumpFileQuickOpenDeltasForRoot(deltaRoot.normalizedRoot)
       .catch(error => console.warn('quick-open delta pump failed', error));
   }
@@ -7050,7 +7198,9 @@ function applyLayoutSlots(nextSlots, options = {}) {
   // detect a same-shape change (reorder/activate/move/replace) so we can skip the full
   // topbar + grid teardown. Compute the shape signature before and after the slot reassignment.
   const prevShape = layoutShapeSignature(layoutSlots);
-  layoutSlots = normalizeLayoutSlotsForViewport(nextSlots, {
+  const activeOnlyActivation = options.activeOnlyActivation === true
+    && dockviewLayoutActiveOnlySignature(nextSlots) === dockviewLayoutActiveOnlySignature(layoutSlots);
+  layoutSlots = activeOnlyActivation ? cloneLayoutSlots(nextSlots) : normalizeLayoutSlotsForViewport(nextSlots, {
     focusSession: options.focusSession,
     preserveMissingSidePane: options.preserveMissingSidePane === true,
     preservePlaceholderSlots: options.preservePlaceholderSlots === true,

@@ -102,6 +102,8 @@ def test_real_atomic_wal_helper_refuses_before_creating_database(tmp_path, monke
     assert not path.exists()
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_real_search_wal_writer_refuses_before_creating_database(tmp_path, monkeypatch):
     monkeypatch.setattr(filesystem_preflight, "classify_filesystem", _network_classifier)
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path)
@@ -110,6 +112,8 @@ def test_real_search_wal_writer_refuses_before_creating_database(tmp_path, monke
     assert not list(tmp_path.glob("*.sqlite3"))
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_real_pricing_wal_writer_refuses_before_creating_database(tmp_path, monkeypatch):
     monkeypatch.setattr(filesystem_preflight, "classify_filesystem", _network_classifier)
     catalog = PricingCatalog(root=tmp_path)
@@ -118,6 +122,8 @@ def test_real_pricing_wal_writer_refuses_before_creating_database(tmp_path, monk
     assert not (tmp_path / "pricing.sqlite3").exists()
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_real_stats_wal_writer_refuses_before_creating_database(tmp_path, monkeypatch):
     monkeypatch.setattr(filesystem_preflight, "classify_filesystem", _network_classifier)
     path = tmp_path / DATABASE_FILENAME

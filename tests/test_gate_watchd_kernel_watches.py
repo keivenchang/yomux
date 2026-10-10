@@ -138,6 +138,8 @@ def _stop(child: subprocess.Popen) -> None:
         child.wait(timeout=10)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @linux_only
 @pytest.mark.socket
 def test_a_large_indexed_root_holds_no_kernel_watch_per_directory(short_tmp_root):

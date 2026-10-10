@@ -212,6 +212,8 @@ func TestStatsQueryErrorCorpusMatchesPythonProtocol(t *testing.T) {
 }
 
 func TestStatsQueryFailureCorpusIsGeneratedByPythonProtocol(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	// Keep the Go parser's failure envelope tied to the Python parser itself. A
 	// hand-maintained expected reason can stay green while a new retired field,
 	// range choice, or delta-specific resolution list drifts on one side.
@@ -757,6 +759,8 @@ func TestStatsObservationsAcceptsAuthenticatedFailureFieldsAndHeartbeat(t *testi
 }
 
 func TestBrowserObservationCorpusMatchesPythonBoundary(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	// The browser upload is a durable input boundary, so compare the accepted
 	// privacy-bound records as well as reject/accept decisions. This catches
 	// validator drift that a single successful heartbeat cannot expose.
@@ -1281,7 +1285,7 @@ func TestCostReportPreservesMixedPricedAndUnpricedTokens(t *testing.T) {
 	report := stats.CostReportWire([]stats.MaterializedBucket{{Cost: stats.MaterializedCostDetail{
 		Tokens: 30, MicroUSD: 10, APIListMicroUSD: 12, PricedAtoms: 1, UnpricedAtoms: 1,
 		Dimensions: []stats.MaterializedCostDimension{{Dimension: "input", Tokens: 30, MicroUSD: 10, APIListMicroUSD: 12}},
-		Models: []stats.MaterializedCostAttribution{priced, unpriced},
+		Models:     []stats.MaterializedCostAttribution{priced, unpriced},
 	}}})
 	pricedCoverage := report["priced"].(map[string]any)
 	unpricedCoverage := report["unpriced"].(map[string]any)
@@ -1564,6 +1568,8 @@ func TestStatsStreamSnapshotMatchesBrowserWireContract(t *testing.T) {
 // fixed fact fixture. Cache generations are process-local publication identity;
 // normalize that value while keeping every other event field and ordering exact.
 func TestStatsStreamInitialFramesMatchPythonWireFixture(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	ctx := context.Background()
 	now := time.Unix(2000, 0)
 	path := filepath.Join(t.TempDir(), "stats.sqlite3")
@@ -1656,6 +1662,8 @@ func normalizeSSECacheGeneration(value map[string]any) {
 }
 
 func TestStatsWireMatchesPythonMaterializerFixture(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	root := t.TempDir()
 	fixturePath := filepath.Join(root, "wire-fixture.json")
 	scriptPath := filepath.Join(root, "wire-oracle.py")
@@ -1787,6 +1795,8 @@ print(json.dumps({"snapshot": wire, "delta": delta}, sort_keys=True, separators=
 // representative request can miss resolution-specific bucket, no-data, and
 // cost-shape drift, so this stays as a deterministic cross-language oracle.
 func TestStatsSnapshotWireMatchesPythonAcrossCurrentMatrix(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	root := t.TempDir()
 	fixturePath := filepath.Join(root, "wire-matrix-fixture.json")
 	scriptPath := filepath.Join(root, "wire-matrix-oracle.py")
@@ -1901,6 +1911,8 @@ func matrixRequestedResolution(rangeSeconds int, requested any) int {
 // cross-language oracle. The broader matrix above exercises pure builders; this test
 // also proves the published ring, request parser, JSON response, and headers agree.
 func TestStatsSnapshotHTTPMatchesPythonMaterializerWire(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "stats.sqlite3")
 	writer, err := stats.OpenWriter(ctx, path)
@@ -1994,6 +2006,8 @@ print(json.dumps(service._wire_snapshot(generation, layer, 300, 10, materializer
 // sequence. Keeping the Python side behind the real StatsHttpForwarder catches
 // drift in request binding and response classification as well as projection.
 func TestStatsHTTPAndSSEInitialRawEnvelopeMatchesPython(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	ctx := context.Background()
 	now := time.Unix(2000, 0)
 	path := filepath.Join(t.TempDir(), "stats.sqlite3")
@@ -2183,6 +2197,8 @@ func normalizeSSEIDs(body string) string {
 // the in-process wire tests: a handler-only test cannot catch response
 // buffering, status/header mistakes, or SSE framing changes at the socket.
 func TestStatsHTTPAndSSEOverRealSocketsMatchesPython(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	ctx := context.Background()
 	now := time.Unix(2000, 0)
 	path := filepath.Join(t.TempDir(), "stats.sqlite3")

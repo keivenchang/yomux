@@ -18,6 +18,9 @@ from yomux_lib.uploads import prune_expired_uploads
 from yomux_lib.uploads import upload_path_component
 from yomux_lib.uploads import unique_upload_path
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def test_unique_upload_path_uses_template_with_original_name(tmp_path):
     path = unique_upload_path(tmp_path, "diagram.png", DEFAULT_UPLOAD_FILENAME_TEMPLATE)

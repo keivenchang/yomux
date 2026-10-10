@@ -68,6 +68,9 @@ import pytest
 import yomux_lib.client_events as client_events
 from yomux_lib.client_events import ClientEventBroker
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 PUBLISHER_COUNT = 55
 # Liveness guards. On a defective implementation the rendezvous they bound is impossible, so they
 # only decide how long the failing run takes. On a correct one they are slack for threads that are

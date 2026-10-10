@@ -72,6 +72,9 @@ from yomux_lib.infra.batchd import BatchClient
 from yomux_lib.infra.batchd import BATCHD_ABSENT_WITHOUT_SCHEDULER_LEASE
 from yomux_lib.approval.approvald import ApprovalClient
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OBSERVER_SOURCE = REPO_ROOT / "yomux_lib" / "backend_health" / "observer.py"

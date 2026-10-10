@@ -50,6 +50,9 @@ from yomux_lib.backend_health.store import HealthSnapshot
 from yomux_lib.backend_health.store import ResourceObservation
 from yomux_lib.local_service_projection import LOCAL_SERVICE_INVENTORY
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 PORT = 17999
 
 

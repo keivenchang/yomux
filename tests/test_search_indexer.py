@@ -13,6 +13,9 @@ from yomux_lib.local_services.registry import LocalServiceSpec
 from yomux_lib.local_services import runtime as local_service_runtime
 from yomux_lib.search import file_index
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 SEARCH_INDEXER_ENSURE_STARTED = search_indexer.SearchIndexerClient.ensure_started
 

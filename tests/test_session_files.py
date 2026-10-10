@@ -65,6 +65,9 @@ from yomux_lib.infra import batchd as batchd_module
 from yomux_lib.infra.common import runtime_root
 from yomux_lib.infra.host_partition import host_partitioned_state_dir
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 @contextlib.contextmanager
 def pinned_test_snapshot_runner(repo: Path):
@@ -303,6 +306,7 @@ def test_session_files_payload_types_cover_builder_shapes_and_annotations():
     assert tuple_return_args(get_type_hints(TmuxWebtermApp.session_files_payload)["return"]) == (SessionFilesPayload, HTTPStatus)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_session_files_scheduler_lease_keeps_batchd_alive_through_next_demand(
     isolated_real_batchd_runtime, monkeypatch, tmp_path,
@@ -353,6 +357,7 @@ def test_session_files_scheduler_lease_keeps_batchd_alive_through_next_demand(
         ))
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_session_files_public_start_failure_is_typed_terminal_not_queued(monkeypatch, tmp_path):
     monkeypatch.setattr(app_module.BatchClient, "start_for_scheduler", lambda self: False)
@@ -566,6 +571,7 @@ def test_session_files_cache_view_survives_real_server_restart(monkeypatch, tmp_
 
 
 @pytest.mark.skipif(not Path("/proc").is_dir(), reason="requires a fixture-owned Linux server process")
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_session_files_one_generation_physical_disk_gate(monkeypatch, tmp_path, gate_http_port):
     """One unchanged generation has one producer and bounded durable disk effects."""
@@ -1028,6 +1034,7 @@ def test_session_files_browser_completion_is_bounded_to_one_opaque_cache_read(mo
         stop_isolated_tmux_runtime(runtime)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_session_files_route_returns_operation_receipt_then_publishes_and_replays_ready(monkeypatch, tmp_path):
     repo = tmp_path / "repo"
@@ -1535,6 +1542,7 @@ def test_session_files_operation_publishes_under_immutable_producer_identity(cha
 
 
 @pytest.mark.parametrize("failure_stage", ["result", "deadline"])
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_session_files_failure_attributes_one_terminal_producer(failure_stage, monkeypatch, tmp_path):
     repo = tmp_path / "repo"
@@ -1689,6 +1697,7 @@ def test_session_files_recovered_receipt_replays_producer_abandoned(monkeypatch,
     )
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_session_files_public_deleted_root_cache_keeps_batchd_serving(
     isolated_real_batchd_runtime, monkeypatch, tmp_path,

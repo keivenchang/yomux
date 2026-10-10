@@ -21,6 +21,9 @@ import pytest
 from yomux_lib.stats_current import migration as migration_module
 from yomux_lib.stats_current import storage
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 V7_SCHEMA_VERSION = migration_module.V7_SCHEMA_VERSION
 V7_DATABASE_FILENAME = migration_module.V7_DATABASE_FILENAME
 

@@ -4,6 +4,11 @@ from pathlib import Path
 import threading
 from yomux_lib import file_index
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def test_reset_clears_leaked_search_progress_notifier_and_coalescing():
     calls: list[dict] = []

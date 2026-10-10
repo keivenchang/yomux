@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import pytest
 from yomux_lib import cli
 from yomux_lib import ptrace
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
 
 
 def test_diagnostic_ptrace_is_off_without_dang(monkeypatch, capsys):

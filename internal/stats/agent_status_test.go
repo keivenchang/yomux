@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -93,6 +94,46 @@ func TestClassifyAgentStatusRealShapedClaudeCodexOpenCodePanes(t *testing.T) {
 	}
 }
 
+func TestClassifyVisibleAgentTextPreservesWorkingWithQueuedCodexFollowupQuestion(t *testing.T) {
+	tests := []struct {
+		name                  string
+		text                  string
+		want                  AgentStatus
+		wantQueuedFollowupAsk bool
+	}{
+		{
+			name: "queued question while working",
+			text: `◦ Working (50m 22s • esc to interrupt)
+
+• Queued follow-up inputs
+  ? 1 question
+    shift+← to answer
+
+	› Ask Codex to do anything`,
+			want:                  AgentStatusRun,
+			wantQueuedFollowupAsk: true,
+		},
+		{
+			name: "queued statement is still working",
+			text: "Working (1m • esc to interrupt)\n• Queued follow-up inputs\n↳ keep going\nshift+← to answer",
+			want: AgentStatusRun,
+		},
+		{
+			name: "old queued question above current working footer is stale",
+			text: "Working (1m • esc to interrupt)\n• Queued follow-up inputs\n  ? 1 question\n  shift+← to answer\n\nWorking (2m • esc to interrupt)",
+			want: AgentStatusRun,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyVisibleAgentText(tc.text)
+			if got.Status != tc.want || got.QueuedFollowupQuestion != tc.wantQueuedFollowupAsk {
+				t.Fatalf("queued follow-up classification = %+v, want status %q and queued question %t", got, tc.want, tc.wantQueuedFollowupAsk)
+			}
+		})
+	}
+}
+
 func TestClassifyAgentStatusAcceptsAdmittedNodeCodexWrapper(t *testing.T) {
 	got := ClassifyAgentStatus(context.Background(), AgentStatusRequest{
 		Kind: "codex", PID: 10, Executable: "/usr/bin/node", PaneTarget: "%1",
@@ -133,6 +174,50 @@ func TestClassifyVisibleAgentTextRecognizesCurrentCodexWorkingCounter(t *testing
 	got := classifyVisibleAgentText(text)
 	if got.Status != AgentStatusRun {
 		t.Fatalf("status = %+v, want run for the current working counter", got)
+	}
+}
+
+func TestCodexScreenFixturesCoverStatusLifecycleInputs(t *testing.T) {
+	fixtures := []struct {
+		name                  string
+		text                  string
+		captureError          error
+		want                  AgentStatus
+		wantQueuedFollowupAsk bool
+	}{
+		{name: "working with queued follow-up", text: "◦ Working (12s • esc to interrupt)\n• Queued follow-up inputs\n  ? 1 question\n  shift+← to answer\n› Ask Codex to do anything", want: AgentStatusRun, wantQueuedFollowupAsk: true},
+		{name: "compacting context is working", text: "Error: previous command failed\nGoal achieved (4h ago)\n◦ Compacting context (49s)\n  └ Making room to continue.\n› Ask Codex to do anything", want: AgentStatusRun},
+		{name: "waiting for background terminal is working", text: "◦ Waiting for background terminal (1m 10s)\n› Ask Codex to do anything", want: AgentStatusRun},
+		{name: "interrupted working pane returns idle", text: "◦ Working (3m 08s • esc to interrupt)\nConversation interrupted - use /feedback if something went wrong\n› Ask Codex to do anything", want: AgentStatusIdle},
+		{name: "new work after interruption is working", text: "Conversation interrupted - use /feedback if something went wrong\n◦ Working (1s • esc to interrupt)\n› Ask Codex to do anything", want: AgentStatusRun},
+		{name: "worked-for footer completes the current turn", text: "The old Working footer was current and the Conversation interrupted line came later. I added an interruption boundary, so the stale footer now yields idle while a newer work marker still yields green; approval prompts containing only Esc to interrupt remain ASK.\nWorked for 17m 52s · 5:11 PM\n› Ask Codex to do anything", want: AgentStatusTransition},
+		{name: "worked-for footer supersedes stale working row", text: "◦ Working (3m 08s • esc to interrupt)\nWorked for 14m 54s · 5:31 PM\n› Ask Codex to do anything", want: AgentStatusTransition},
+		{name: "error after worked-for footer remains current", text: "Worked for 1s\nError: authentication failed\n› Ask Codex to do anything", want: AgentStatusError},
+		{name: "approval after worked-for footer remains current", text: "Worked for 1s\nAllow this command?\nEnter to select · Esc to cancel", want: AgentStatusAsk},
+		{name: "working after worked-for footer remains current", text: "Worked for 1s\n◦ Working (3s • esc to interrupt)\n› Ask Codex to do anything", want: AgentStatusRun},
+		{name: "worked-for prose without a duration is not a completion footer", text: "Worked for the right fix by adding a regression.\n› Ask Codex to do anything", want: AgentStatusIdle},
+		{name: "ordinary idle completion", text: "• Finished task\n› Ask Codex to do anything", want: AgentStatusIdle},
+		{name: "ask", text: "Allow this command?\nEnter to select · Esc to cancel", want: AgentStatusAsk},
+		{name: "blocked", text: "Error: command failed with exit code 1", want: AgentStatusError},
+		{name: "capture unavailable", captureError: errors.New("pane disappeared"), want: AgentStatusUnavailable},
+	}
+	for _, fixture := range fixtures {
+		t.Run(fixture.name, func(t *testing.T) {
+			sources := AgentStatusSources{CapturePane: func(_ context.Context, target string) (AgentStatusPane, error) {
+				if target != "%7" {
+					t.Fatalf("captured pane target = %q, want %%7", target)
+				}
+				return AgentStatusPane{VisibleText: fixture.text, ObservedAt: time.Unix(100, 0)}, fixture.captureError
+			}}
+			got := ClassifyAgentStatus(context.Background(), AgentStatusRequest{Kind: "codex", PaneTarget: "%7", Now: time.Unix(100, 0)}, sources)
+			if got.Status != fixture.want || got.QueuedFollowupQuestion != fixture.wantQueuedFollowupAsk {
+				t.Fatalf("classification = %+v, want %q and queued follow-up %t", got, fixture.want, fixture.wantQueuedFollowupAsk)
+			}
+		})
+	}
+	missing := ClassifyAgentStatus(context.Background(), AgentStatusRequest{Kind: "codex", PaneTarget: "%7"}, AgentStatusSources{})
+	if missing.Status != AgentStatusUnavailable {
+		t.Fatalf("missing pane source = %+v, want unavailable", missing)
 	}
 }
 
@@ -193,7 +278,9 @@ func TestClassifyAgentStatusStructuredPythonParity(t *testing.T) {
 		{name: "cooldown transitions", pane: AgentStatusPane{Status: "cooldown"}, request: AgentStatusRequest{Now: now}, want: AgentStatusTransition},
 		{name: "recent completion transitions", pane: AgentStatusPane{Status: "idle", WorkingStoppedAt: recent}, request: AgentStatusRequest{Now: now}, want: AgentStatusTransition},
 		{name: "settled completion idles", pane: AgentStatusPane{Status: "idle", WorkingStoppedAt: old}, request: AgentStatusRequest{Now: now}, want: AgentStatusIdle},
-		{name: "acknowledged ask idles", pane: AgentStatusPane{Status: "needs-input", Acknowledged: true}, request: AgentStatusRequest{Now: now}, want: AgentStatusIdle},
+		{name: "completion screen settles after transition window", pane: AgentStatusPane{VisibleText: "Task completed successfully", WorkingStoppedAt: old}, request: AgentStatusRequest{Now: now}, want: AgentStatusIdle},
+		{name: "acknowledged completion screen settles immediately", pane: AgentStatusPane{VisibleText: "Task completed successfully"}, request: AgentStatusRequest{Now: now, Acknowledged: true}, want: AgentStatusIdle},
+		{name: "acknowledged ask remains red", pane: AgentStatusPane{Status: "needs-input", Acknowledged: true}, request: AgentStatusRequest{Now: now}, want: AgentStatusAsk},
 		{name: "acknowledged cooldown idles", pane: AgentStatusPane{Status: "cooldown", Acknowledged: true}, request: AgentStatusRequest{Now: now}, want: AgentStatusIdle},
 	}
 	for _, tc := range tests {
@@ -210,7 +297,6 @@ func TestClassifyAgentStatusFailsClosedOnAmbiguityAndBounds(t *testing.T) {
 	for _, text := range []string{
 		"some output with no prompt or spinner",
 		"working and goal achieved",
-		"Allow this command?\n\nEsc to interrupt",
 		"Task completed successfully.\n\nError: command failed",
 	} {
 		got := ClassifyAgentStatus(context.Background(), AgentStatusRequest{Kind: "claude", PaneTarget: "%1"}, AgentStatusSources{
@@ -219,6 +305,14 @@ func TestClassifyAgentStatusFailsClosedOnAmbiguityAndBounds(t *testing.T) {
 		if got.Status != AgentStatusUnavailable {
 			t.Errorf("%q classified as %q", text, got.Status)
 		}
+	}
+	gotApproval := ClassifyAgentStatus(context.Background(), AgentStatusRequest{Kind: "claude", PaneTarget: "%1"}, AgentStatusSources{
+		CapturePane: func(context.Context, string) (AgentStatusPane, error) {
+			return AgentStatusPane{VisibleText: "Allow this command?\n\nEsc to interrupt"}, nil
+		},
+	})
+	if gotApproval.Status != AgentStatusAsk {
+		t.Fatalf("approval prompt with interrupt affordance = %q, want %q (%+v)", gotApproval.Status, AgentStatusAsk, gotApproval)
 	}
 	got := ClassifyAgentStatus(context.Background(), AgentStatusRequest{Kind: "codex", PaneTarget: "%1"}, AgentStatusSources{
 		CapturePane: func(context.Context, string) (AgentStatusPane, error) {
@@ -686,6 +780,297 @@ func TestAgentStatusCollectorRevisionStaysStableAcrossUnchangedCycles(t *testing
 	}
 }
 
+func TestAgentStatusCollectorPublishesOnlyObservedCompletionWindow(t *testing.T) {
+	base := time.Unix(200, 0)
+	clock := &agentStatusTestClock{now: base}
+	status := AgentStatusRun
+	collector := NewAgentStatusCollector(
+		func(context.Context) ([]AgentRecord, []error) {
+			return []AgentRecord{{Kind: "codex", TmuxSession: "session", TmuxWindow: "3", TmuxPaneID: "%7"}}, nil
+		},
+		func(_ context.Context, request AgentStatusRequest) AgentStatusResult {
+			if status == AgentStatusIdle && !request.WorkingStoppedAt.IsZero() && request.Now.Sub(request.WorkingStoppedAt) < DefaultAgentTransitionWindow {
+				return AgentStatusResult{Status: AgentStatusTransition, WorkingStoppedAt: request.WorkingStoppedAt, ObservedAt: request.Now}
+			}
+			return AgentStatusResult{Status: status, ObservedAt: request.Now}
+		}, nil, clock, AgentStatusCollectorConfig{EpochID: "lifecycle", EpochStartedAt: float64(base.Unix()), SourceID: "test"},
+	)
+	collect := func(at time.Time) map[string]any {
+		clock.mu.Lock()
+		clock.now = at
+		clock.mu.Unlock()
+		batch := collector.collect(context.Background(), HostFactContext{EpochID: "lifecycle", EpochStartedAt: float64(base.Unix()), ObservedAt: float64(at.UnixNano()) / 1e9, CadenceSeconds: 10, SourceID: "test"})
+		if len(batch.Observations) != 1 {
+			t.Fatalf("observation count at %s = %d", at, len(batch.Observations))
+		}
+		rows, ok := batch.Observations[0].Payload["agents"].([]map[string]any)
+		if !ok || len(rows) != 1 {
+			t.Fatalf("agent roster at %s = %#v", at, batch.Observations[0].Payload["agents"])
+		}
+		return rows[0]
+	}
+	if row := collect(base); row["state"] != "run" || row["working_stopped_ts"] != nil {
+		t.Fatalf("working sample = %#v, want run without a completion timestamp", row)
+	}
+	status = AgentStatusIdle
+	completedAt := base.Add(10 * time.Second)
+	row := collect(completedAt)
+	if row["state"] != "transition" || row["working_stopped_ts"] != float64(completedAt.UnixNano())/1e9 {
+		t.Fatalf("first observed idle = %#v, want transition stamped at %s", row, completedAt)
+	}
+	transitionID, _ := row["transition_id"].(string)
+	attentionKey, _ := row["cooldown_attention_key"].(string)
+	if transitionID == "" || attentionKey == "" {
+		t.Fatalf("completion identity missing from row: %#v", row)
+	}
+	row = collect(completedAt.Add(DefaultAgentTransitionWindow - time.Nanosecond))
+	if row["state"] != "transition" || row["transition_id"] != transitionID || row["cooldown_attention_key"] != attentionKey {
+		t.Fatalf("recent completion = %#v, want same transition until its deadline", row)
+	}
+	row = collect(completedAt.Add(DefaultAgentTransitionWindow))
+	if row["state"] != "idle" || row["working_stopped_ts"] == nil || row["transition_id"] != transitionID || row["cooldown_attention_key"] != attentionKey || row["completion_settled"] != nil {
+		t.Fatalf("expired completion = %#v, want idle with its solid yellow reminder identity", row)
+	}
+}
+
+func TestAgentStatusCollectorIdentifiesDirectCompletionScreen(t *testing.T) {
+	base := time.Unix(400, 0)
+	clock := &agentStatusTestClock{now: base}
+	visibleText := "Worked for 14m 54s · 5:31 PM\n› Ask Codex to do anything"
+	collector := NewAgentStatusCollector(
+		func(context.Context) ([]AgentRecord, []error) {
+			return []AgentRecord{{Kind: "codex", TmuxSession: "session", TmuxWindow: "3", TmuxPaneID: "%7"}}, nil
+		},
+		func(ctx context.Context, request AgentStatusRequest) AgentStatusResult {
+			return ClassifyAgentStatus(ctx, request, AgentStatusSources{
+				CapturePane: func(context.Context, string) (AgentStatusPane, error) {
+					return AgentStatusPane{VisibleText: visibleText, ObservedAt: request.Now}, nil
+				},
+			})
+		}, nil, clock, AgentStatusCollectorConfig{EpochID: "direct-completion", EpochStartedAt: float64(base.Unix()), SourceID: "test"},
+	)
+	collect := func(at time.Time) map[string]any {
+		clock.mu.Lock()
+		clock.now = at
+		clock.mu.Unlock()
+		batch := collector.collect(context.Background(), HostFactContext{EpochID: "direct-completion", EpochStartedAt: float64(base.Unix()), ObservedAt: float64(at.UnixNano()) / 1e9, CadenceSeconds: 10, SourceID: "test"})
+		rows, ok := batch.Observations[0].Payload["agents"].([]map[string]any)
+		if !ok || len(rows) != 1 {
+			t.Fatalf("agent roster at %s = %#v", at, batch.Observations[0].Payload["agents"])
+		}
+		return rows[0]
+	}
+	row := collect(base)
+	if row["state"] != "transition" || row["working_stopped_ts"] != float64(base.UnixNano())/1e9 {
+		t.Fatalf("direct completion = %#v, want lifecycle start at %s", row, base)
+	}
+	transitionID, _ := row["transition_id"].(string)
+	attentionKey, _ := row["cooldown_attention_key"].(string)
+	if transitionID == "" || attentionKey == "" {
+		t.Fatalf("direct completion identity missing: %#v", row)
+	}
+	visibleText = "Worked for 14m 54s · 5:31 PM\nError: authentication failed\n› Ask Codex to do anything"
+	row = collect(base.Add(10 * time.Second))
+	if row["state"] != "error" {
+		t.Fatalf("fresh pane error during completion cooldown = %#v, want error", row)
+	}
+	visibleText = "Worked for 14m 54s · 5:31 PM\n› Ask Codex to do anything"
+	row = collect(base.Add(DefaultAgentTransitionWindow - time.Nanosecond))
+	if row["transition_id"] != transitionID || row["cooldown_attention_key"] != attentionKey {
+		t.Fatalf("direct completion identity changed during transition: %#v", row)
+	}
+	row = collect(base.Add(DefaultAgentTransitionWindow))
+	if row["state"] != "idle" || row["working_stopped_ts"] == nil || row["transition_id"] != transitionID || row["cooldown_attention_key"] != attentionKey || row["completion_settled"] == true {
+		t.Fatalf("direct completion did not expire at its deadline: %#v", row)
+	}
+	row = collect(base.Add(DefaultAgentTransitionWindow + 10*time.Second))
+	if row["state"] != "idle" || row["working_stopped_ts"] == nil || row["transition_id"] != transitionID || row["cooldown_attention_key"] != attentionKey || row["completion_settled"] == true {
+		t.Fatalf("persistent completion screen re-armed after expiry: %#v", row)
+	}
+}
+
+func TestAgentStatusCollectorRestoresCompletionIdentityAcrossRestart(t *testing.T) {
+	base := time.Unix(500, 123456789)
+	clock := &agentStatusTestClock{now: base.Add(time.Second)}
+	wantTransitionID := "go:transition:restored-exact-key"
+	wantAttentionKey := "go:cooldown:restored-exact-key"
+	record := AgentRecord{PID: 701, StartedIdentity: "proc:701:old", Kind: "codex", TmuxSession: "session", TmuxWindow: "3", TmuxPaneID: "%7"}
+	collector := NewAgentStatusCollector(
+		func(context.Context) ([]AgentRecord, []error) { return []AgentRecord{record}, nil },
+		func(ctx context.Context, request AgentStatusRequest) AgentStatusResult {
+			return ClassifyAgentStatus(ctx, request, AgentStatusSources{
+				CapturePane: func(context.Context, string) (AgentStatusPane, error) {
+					return AgentStatusPane{VisibleText: "Task completed successfully", ObservedAt: request.Now}, nil
+				},
+			})
+		}, nil, clock, AgentStatusCollectorConfig{EpochID: "restart", EpochStartedAt: float64(base.Unix()), SourceID: "test"},
+	)
+	collector.RestoreRecentLifecycles([]AgentStatusLifecycleState{{
+		ID: "session|3|%7|codex", ObservedAt: base, WorkingStoppedAt: base,
+		TransitionID: wantTransitionID, CooldownAttentionKey: wantAttentionKey,
+	}})
+	batch := collector.collect(context.Background(), HostFactContext{
+		EpochID: "restart", EpochStartedAt: float64(base.Unix()), ObservedAt: float64(clock.now.UnixNano()) / 1e9,
+		CadenceSeconds: 10, SourceID: "test",
+	})
+	rows, ok := batch.Observations[0].Payload["agents"].([]map[string]any)
+	if !ok || len(rows) != 1 {
+		t.Fatalf("restored collector roster = %#v", batch.Observations[0].Payload["agents"])
+	}
+	row := rows[0]
+	wantStoppedAt := float64(base.UnixNano()) / 1e9
+	if row["state"] != "transition" || row["working_stopped_ts"] != wantStoppedAt {
+		t.Fatalf("restored completion = %#v, want original transition timestamp %.9f", row, wantStoppedAt)
+	}
+	if row["transition_id"] != wantTransitionID || row["cooldown_attention_key"] != wantAttentionKey {
+		t.Fatalf("restored completion identity changed across restart: %#v", row)
+	}
+}
+
+func TestReadRecentAgentStatusLifecyclesRetainsAcknowledgedCompletionIdentity(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	completedAt := time.Unix(600, 123456789)
+	record := AgentRecord{Kind: "codex", TmuxSession: "session", TmuxWindow: "3", TmuxPaneID: "%7"}
+	collector := NewAgentStatusCollector(
+		func(context.Context) ([]AgentRecord, []error) { return []AgentRecord{record}, nil },
+		func(ctx context.Context, request AgentStatusRequest) AgentStatusResult {
+			return ClassifyAgentStatus(ctx, request, AgentStatusSources{
+				CapturePane: func(context.Context, string) (AgentStatusPane, error) {
+					return AgentStatusPane{VisibleText: "Task completed successfully", ObservedAt: request.Now}, nil
+				},
+			})
+		}, nil, &agentStatusTestClock{now: completedAt}, AgentStatusCollectorConfig{EpochID: "persisted-transition", EpochStartedAt: float64(completedAt.Unix()), SourceID: "test"},
+	)
+	batch := collector.collect(ctx, HostFactContext{EpochID: "persisted-transition", EpochStartedAt: float64(completedAt.Unix()), ObservedAt: float64(completedAt.UnixNano()) / 1e9, CadenceSeconds: 10, SourceID: "test"})
+	if _, err := writer.AppendBatch(ctx, batch); err != nil {
+		t.Fatal(err)
+	}
+	rows, ok := batch.Observations[0].Payload["agents"].([]map[string]any)
+	if !ok || len(rows) != 1 {
+		t.Fatalf("persisted completion roster = %#v", batch.Observations[0].Payload["agents"])
+	}
+	wantTransitionID, _ := rows[0]["transition_id"].(string)
+	wantAttentionKey, _ := rows[0]["cooldown_attention_key"].(string)
+	restored, err := ReadRecentAgentStatusLifecycles(ctx, path, completedAt.Add(10*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(restored) != 1 || restored[0].ID != "session|3|%7|codex" || restored[0].TransitionID != wantTransitionID || restored[0].CooldownAttentionKey != wantAttentionKey {
+		t.Fatalf("restored lifecycles = %+v, want the original in-window completion", restored)
+	}
+	expired, err := ReadRecentAgentStatusLifecycles(ctx, path, completedAt.Add(DefaultAgentTransitionWindow))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(expired) != 1 || expired[0].CooldownAttentionKey != wantAttentionKey {
+		t.Fatalf("solid reminder recovery = %+v, want original identity", expired)
+	}
+}
+
+func TestAgentStatusSettledCompletionDoesNotRearmAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	base := time.Unix(700, 456789123)
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	record := AgentRecord{PID: 701, StartedIdentity: "proc:701:old", Kind: "codex", TmuxSession: "session", TmuxWindow: "3", TmuxPaneID: "%7"}
+	screen := "Task completed successfully"
+	newCollector := func(clock *agentStatusTestClock, epoch string) *AgentStatusCollector {
+		return NewAgentStatusCollector(
+			func(context.Context) ([]AgentRecord, []error) { return []AgentRecord{record}, nil },
+			func(ctx context.Context, request AgentStatusRequest) AgentStatusResult {
+				return ClassifyAgentStatus(ctx, request, AgentStatusSources{
+					CapturePane: func(context.Context, string) (AgentStatusPane, error) {
+						return AgentStatusPane{VisibleText: screen, ObservedAt: request.Now}, nil
+					},
+				})
+			}, nil, clock, AgentStatusCollectorConfig{EpochID: epoch, EpochStartedAt: float64(base.Unix()), SourceID: "test"},
+		)
+	}
+	collect := func(collector *AgentStatusCollector, clock *agentStatusTestClock, at time.Time, epoch string) (AppendBatch, map[string]any) {
+		clock.mu.Lock()
+		clock.now = at
+		clock.mu.Unlock()
+		batch := collector.collect(ctx, HostFactContext{EpochID: epoch, EpochStartedAt: float64(base.Unix()), ObservedAt: float64(at.UnixNano()) / 1e9, CadenceSeconds: 10, SourceID: "test"})
+		rows, ok := batch.Observations[0].Payload["agents"].([]map[string]any)
+		if !ok || len(rows) != 1 {
+			t.Fatalf("agent roster at %s = %#v", at, batch.Observations[0].Payload["agents"])
+		}
+		return batch, rows[0]
+	}
+	clock := &agentStatusTestClock{now: base}
+	collector := newCollector(clock, "before-restart")
+	firstBatch, firstRow := collect(collector, clock, base, "before-restart")
+	if firstRow["state"] != "transition" {
+		t.Fatalf("initial completion = %#v, want transition", firstRow)
+	}
+	if _, err := writer.AppendBatch(ctx, firstBatch); err != nil {
+		t.Fatal(err)
+	}
+	collector.config.AttentionAcknowledged = func(key string) (bool, error) { return key == firstRow["cooldown_attention_key"], nil }
+	settledAt := base.Add(DefaultAgentTransitionWindow)
+	settledBatch, settledRow := collect(collector, clock, settledAt, "before-restart")
+	if settledRow["state"] != "idle" || settledRow["completion_settled"] != true {
+		t.Fatalf("expired completion = %#v, want persisted settled marker", settledRow)
+	}
+	processInstanceID, _ := settledRow["process_instance_id"].(string)
+	if processInstanceID == "" {
+		t.Fatalf("settled completion has no process identity: %#v", settledRow)
+	}
+	if _, err := writer.AppendBatch(ctx, settledBatch); err != nil {
+		t.Fatal(err)
+	}
+
+	// A red prompt can be the latest persisted sample while the collector
+	// still remembers that this completion screen has already settled.
+	screen = "Allow this command?\nEnter to select · Esc to cancel"
+	askAt := settledAt.Add(10 * time.Second)
+	askBatch, askRow := collect(collector, clock, askAt, "before-restart")
+	if askRow["state"] != "ask" || askRow["completion_settled"] != true {
+		t.Fatalf("ASK after settled completion = %#v, want red state with suppression marker", askRow)
+	}
+	if _, err := writer.AppendBatch(ctx, askBatch); err != nil {
+		t.Fatal(err)
+	}
+
+	restartedAt := askAt.Add(time.Hour)
+	lifecycles, err := ReadRecentAgentStatusLifecycles(ctx, path, restartedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lifecycles) != 1 || !lifecycles[0].CompletionSettled || lifecycles[0].ProcessInstanceID != processInstanceID {
+		t.Fatalf("restored settled completion = %+v, want its suppression marker", lifecycles)
+	}
+	screen = "Task completed successfully"
+	restartedClock := &agentStatusTestClock{now: restartedAt}
+	restarted := newCollector(restartedClock, "after-restart")
+	restarted.RestoreRecentLifecycles(lifecycles)
+	_, row := collect(restarted, restartedClock, restartedAt, "after-restart")
+	if row["state"] != "idle" || row["completion_settled"] != true || row["working_stopped_ts"] != nil {
+		t.Fatalf("completion re-armed after restart: %#v", row)
+	}
+
+	// A new process in the same window owns a new completion lifecycle.
+	record.PID = 702
+	record.StartedIdentity = "proc:702:new"
+	newProcessClock := &agentStatusTestClock{now: restartedAt}
+	newProcess := newCollector(newProcessClock, "after-process-replacement")
+	newProcess.RestoreRecentLifecycles(lifecycles)
+	_, row = collect(newProcess, newProcessClock, restartedAt, "after-process-replacement")
+	if row["state"] != "transition" || row["completion_settled"] == true {
+		t.Fatalf("new process inherited settled completion: %#v", row)
+	}
+}
+
 func TestAgentStatusPayloadIncludesBoundedCountsAndRoster(t *testing.T) {
 	clock := &agentStatusTestClock{now: time.Unix(200, 0)}
 	statuses := []AgentStatus{AgentStatusRun, AgentStatusAsk, AgentStatusError, AgentStatusTransition, AgentStatusIdle}
@@ -898,4 +1283,144 @@ func TestClassifyAgentStatusTimestampsOpenCodeReadAndUnavailableEvidence(t *test
 			t.Fatalf("pane error classification = %+v, want timestamp %v", got, observedAt)
 		}
 	})
+}
+
+func TestCurrentQuestionControlsIgnoreQuotedAndStaleQuestions(t *testing.T) {
+	for _, item := range []struct {
+		text string
+		want AgentStatus
+	}{
+		{"Which implementation should I use?\n\n› Ask Codex to do anything", AgentStatusAsk},
+		{"Should I keep working?\n› Ask Codex to do anything", AgentStatusAsk},
+		{"Would you like to run the following command?\n  python3 working.py\n  1. Yes\nEnter to select · Esc to cancel", AgentStatusAsk},
+		{"Would you like to run the following command?\n  echo finished\n  1. Yes\nEnter to select · Esc to cancel", AgentStatusAsk},
+		{"Would you like to run the following command?\n  echo 'Error: command failed'\n  1. Yes\nEnter to select · Esc to cancel", AgentStatusAsk},
+		{"Allow this command?\nEnter to select · Esc to cancel\n• All done\n› Ask Codex to do anything", AgentStatusIdle},
+		{"Allow this command?\nEnter to select · Esc to cancel\n• Finished\n› Ask Codex to do anything", AgentStatusIdle},
+		{"• All done\nAllow this command?\nEnter to select · Esc to cancel\n› Ask Codex to do anything", AgentStatusAsk},
+		{"• Finished\nAllow this command?\nEnter to select · Esc to cancel\n› Ask Codex to do anything", AgentStatusAsk},
+		{"• Finished\nAllow this command?\nEnter to select · Esc to cancel\nError: command failed\n› Ask Codex to do anything", AgentStatusUnavailable},
+		{"Error: command failed\n• Finished\nAllow this command?\nEnter to select · Esc to cancel\n› Ask Codex to do anything", AgentStatusAsk},
+		{"Allow this command?\nEnter to select · Esc to cancel\nError: command failed\n› Ask Codex to do anything", AgentStatusUnavailable},
+		{"Allow this command?\nEnter to select · Esc to cancel\n• Working (12s • esc to interrupt)\n› Ask Codex to do anything", AgentStatusRun},
+		{"> Which implementation should I use?\n\n› Ask Codex to do anything", AgentStatusIdle},
+		{"> Would you like to run the following?\n› Ask Codex to do anything", AgentStatusIdle},
+		{"> approval required\n› Ask Codex to do anything", AgentStatusIdle},
+		{"Which implementation should I use?\n• Working (12s • esc to interrupt)\n› Ask Codex to do anything", AgentStatusRun},
+	} {
+		for _, text := range []string{item.text, item.text + strings.Repeat("\n", 40)} {
+			if got := classifyVisibleAgentText(text); got.Status != item.want {
+				t.Fatalf("%q: got %s want %s", text, got.Status, item.want)
+			}
+		}
+	}
+}
+
+func TestAttentionSignaturePreservesCommandArgumentsAndIgnoresTerminalPadding(t *testing.T) {
+	classify := func(text string) AgentStatusResult {
+		return ClassifyAgentStatus(context.Background(), AgentStatusRequest{Kind: "codex", PaneTarget: "%1"}, AgentStatusSources{
+			CapturePane: func(context.Context, string) (AgentStatusPane, error) {
+				return AgentStatusPane{VisibleText: text}, nil
+			},
+		})
+	}
+	first := "Would you like to run the following command?\n  printf '%s' 'a  b'\nEnter to select · Esc to cancel"
+	second := strings.Replace(first, "a  b", "a b", 1)
+	a, b := classify(first), classify(second)
+	if a.Status != AgentStatusAsk || b.Status != AgentStatusAsk || a.AttentionSignature == b.AttentionSignature {
+		t.Fatalf("changed command arguments must create distinct ASK identities: %+v %+v", a, b)
+	}
+	padded := strings.ReplaceAll(first, "\n", " \t\r\n") + strings.Repeat(" \t\r\n", 40)
+	if got := classify(padded); got.Status != a.Status || got.AttentionSignature != a.AttentionSignature {
+		t.Fatalf("terminal padding changed attention identity: %+v vs %+v", got, a)
+	}
+}
+
+func TestAttentionSettlementSurvivesExpiryRestartAndRearmsNewEvents(t *testing.T) {
+	ctx := context.Background()
+	base := time.Unix(20000, 0)
+	clock := &agentStatusTestClock{now: base}
+	record := AgentRecord{PID: 11, StartedIdentity: "first", Kind: "codex", TmuxSession: "session", TmuxWindow: "0", TmuxPaneID: "%1"}
+	result := AgentStatusResult{Status: AgentStatusRun, QueuedFollowupQuestion: true, AttentionSignature: "queued:which-option"}
+	ack := map[string]bool{}
+	path := filepath.Join(t.TempDir(), "stats.sqlite3")
+	writer, err := OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	config := AgentStatusCollectorConfig{EpochID: "attention", EpochStartedAt: float64(base.Unix()), SourceID: "test", AttentionAcknowledged: func(key string) (bool, error) { return ack[key], nil }}
+	create := func() *AgentStatusCollector {
+		return NewAgentStatusCollector(func(context.Context) ([]AgentRecord, []error) { return []AgentRecord{record}, nil }, func(context.Context, AgentStatusRequest) AgentStatusResult { return result }, writer, clock, config)
+	}
+	collector := create()
+	row := func(c *AgentStatusCollector) map[string]any {
+		batch := c.collect(ctx, HostFactContext{EpochID: "attention", EpochStartedAt: float64(base.Unix()), ObservedAt: float64(clock.Now().Unix()), CadenceSeconds: 10, SourceID: "test"})
+		if len(batch.Observations) != 1 {
+			t.Fatalf("missing observation: %+v", batch)
+		}
+		if _, err := writer.AppendBatch(ctx, batch); err != nil {
+			t.Fatal(err)
+		}
+		return batch.Observations[0].Payload["agents"].([]map[string]any)[0]
+	}
+	first := row(collector)
+	key := first["attention_key"].(string)
+	ack[key] = true
+	clock.now = base.Add(10 * time.Second)
+	settled := row(collector)
+	if settled["state"] != "run" || settled["attention_acknowledged"] != true {
+		t.Fatalf("queued ACK lost run: %#v", settled)
+	}
+	delete(ack, key) // Emulate TTL/cap pruning after snapshot settlement.
+	clock.now = base.Add(8 * 24 * time.Hour)
+	lifecycles, err := ReadRecentAgentStatusLifecycles(ctx, path, clock.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := create()
+	restarted.RestoreRecentLifecycles(lifecycles)
+	if got := row(restarted); got["attention_key"] != key || got["attention_acknowledged"] != true {
+		t.Fatalf("settled prompt resurrected: %#v", got)
+	}
+	result.QueuedFollowupQuestion, result.AttentionSignature = false, ""
+	clock.now = clock.now.Add(10 * time.Second)
+	row(restarted)
+	result.QueuedFollowupQuestion, result.AttentionSignature = true, "queued:which-option"
+	clock.now = clock.now.Add(10 * time.Second)
+	if got := row(restarted); got["attention_key"] == key || got["attention_acknowledged"] != false {
+		t.Fatalf("new identical question did not rearm: %#v", got)
+	}
+	record.PID, record.StartedIdentity = 12, "replacement"
+	clock.now = clock.now.Add(10 * time.Second)
+	if got := row(restarted); got["attention_key"] == key || got["attention_acknowledged"] != false {
+		t.Fatalf("replacement inherited ACK: %#v", got)
+	}
+}
+
+func TestAttentionProtectionWaitsForCommittedObservation(t *testing.T) {
+	base := time.Unix(21000, 0)
+	clock := &agentStatusTestClock{now: base}
+	writer := &agentStatusFailingWriter{}
+	commits := 0
+	collector := NewAgentStatusCollector(func(context.Context) ([]AgentRecord, []error) {
+		return []AgentRecord{{Kind: "codex", TmuxSession: "session", TmuxWindow: "0", TmuxPaneID: "%1"}}, nil
+	}, func(context.Context, AgentStatusRequest) AgentStatusResult {
+		return AgentStatusResult{Status: AgentStatusAsk, AttentionSignature: "question"}
+	}, writer, clock, AgentStatusCollectorConfig{AttentionAcknowledged: func(string) (bool, error) { return true, nil }, AttentionCommitted: func([]string) error { commits++; return nil }})
+	collector.RunOnce(context.Background())
+	if commits != 0 {
+		t.Fatal("failed append released protection")
+	}
+	clock.now = base.Add(10 * time.Second)
+	collector.RunOnce(context.Background())
+	if commits != 1 {
+		t.Fatal("committed settlement did not release protection")
+	}
+	collector.config.AttentionAcknowledged = func(string) (bool, error) { return false, errors.New("ACK read failed") }
+	clock.now = base.Add(20 * time.Second)
+	collector.RunOnce(context.Background())
+	if commits != 1 {
+		t.Fatal("unavailable append released protection")
+	}
 }

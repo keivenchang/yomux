@@ -3,6 +3,11 @@ import subprocess
 from yomux_lib import drop_actions
 from yomux_lib import filesystem
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def test_drop_action_server_head_and_info_use_validated_files(monkeypatch, tmp_path):
     monkeypatch.setenv(filesystem.FS_ROOTS_ENV, str(tmp_path))

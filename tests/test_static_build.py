@@ -1134,7 +1134,6 @@ def test_node_shard_launcher_has_unique_behavior_owners_and_a_terminal_summary()
     assert len(suite_files) == len(set(suite_files)) and set(suite_files) == {f"tests/{path.name}" for path in repo_path("tests").glob("*.test.js") if path.name != "layout_url.test.js"}
     assert "defaultGateExcludedSuiteFiles" in launcher
     assert "tests/cross_surface_state.test.js" in launcher
-    assert "tests/gate_panels.test.js" in launcher
     assert "allSuiteFiles.filter(file => !defaultGateExcludedSuiteFiles.has(file))" in launcher
     assert "layout suite shards:" in launcher
     assert "if (failed) process.exitCode = 1" in launcher

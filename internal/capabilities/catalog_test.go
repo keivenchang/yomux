@@ -21,7 +21,7 @@ func TestSnapshotHasStableContractAndConservativeEntries(t *testing.T) {
 	if !catalog.Available("finder.write.v1") || !catalog.Available("finder.search.v1") || !catalog.Available("finder.batch.v1") || !catalog.Available("finder.preview.v1") || !catalog.Available("finder.git.v1") || !catalog.Available("pane.stats.v1") || !catalog.Available("pane.tabber.v1") || !catalog.Available("session.create.v1") || !catalog.Available("session.kill.v1") || !catalog.Available("session.rename.v1") {
 		t.Fatal("capability availability does not match the implemented Finder, Tabber, and stats surfaces")
 	}
-	for _, name := range []string{"core.settings.v1", "core.integrations.v1", "pane.chat.v1"} {
+	for _, name := range []string{"core.settings.v1", "core.integrations.v1", "pane.chat.v1", "yolo.auto-approve.v1"} {
 		if catalog.Available(name) {
 			t.Fatalf("unimplemented capability %q is unexpectedly available", name)
 		}
@@ -60,7 +60,12 @@ func TestRouteCapabilityIsMethodAndOperationAware(t *testing.T) {
 		"POST /api/settings":                "core.settings.v1",
 		"GET /api/update-status":            "core.integrations.v1",
 		"GET /api/watched-prs":              "core.integrations.v1",
-		"GET /api/auto-approve":             "terminal.status.v1",
+		"GET /api/auto-approve":             "yolo.auto-approve.v1",
+		"POST /api/auto-approve":            "yolo.auto-approve.v1",
+		"GET /api/yolo-rules":               "yolo.auto-approve.v1",
+		"POST /api/yolo-rules/open":         "yolo.auto-approve.v1",
+		"POST /api/yolo-rules/reload":       "yolo.auto-approve.v1",
+		"POST /api/attention-ack":           "terminal.status.v1",
 	}
 	for request, want := range checks {
 		var method, path string

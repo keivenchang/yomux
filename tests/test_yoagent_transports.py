@@ -25,6 +25,11 @@ from yomux_lib.yoagent.transports import TransportInterrupted
 from yomux_lib.yoagent.transports import default_yoagent_transport_registry
 from yomux_lib.yoagent.transports import normalize_yoagent_transport_id
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def test_transport_registry_order_and_aliases():
     registry = default_yoagent_transport_registry()

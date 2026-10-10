@@ -58,6 +58,19 @@ type AgentStatusSnapshot struct {
 	Unavailable      *AgentStatusQueryUnavailable  `json:"unavailable,omitempty"`
 }
 
+type AgentStatusLifecycleState struct {
+	ID                   string
+	ProcessInstanceID    string
+	ObservedAt           time.Time
+	WorkingStoppedAt     time.Time
+	TransitionID         string
+	CooldownAttentionKey string
+	CompletionSettled    bool
+	AttentionSignature   string
+	AttentionKey         string
+	AttentionSettled     bool
+}
+
 // ReadAgentStatus is the stats-owner read boundary for the public status
 // projection. HTTP callers should receive this through StatsService rather
 // than opening the SQLite database in a request handler.
@@ -68,6 +81,70 @@ func ReadAgentStatus(ctx context.Context, path string, query AgentStatusQuery) (
 	}
 	defer database.Close()
 	return database.QueryAgentStatus(ctx, query)
+}
+
+// ReadRecentAgentStatusLifecycles restores active completion identity and
+// settled-completion suppression from the last committed status row. The
+// public status projection may already be stale while a yellow completion is
+// still retained. Startup recovery validates it against the live process
+// inventory; transient unavailable spans must not erase settled identities.
+// This does not weaken the HTTP freshness contract.
+func ReadRecentAgentStatusLifecycles(ctx context.Context, path string, now time.Time) ([]AgentStatusLifecycleState, error) {
+	database, err := OpenReadOnly(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	defer database.Close()
+	rows, err := database.reader.Rows(ctx, `SELECT observed_at, payload_json FROM observations
+WHERE family = 'agent_status' ORDER BY observed_at DESC, event_id DESC LIMIT 1`)
+	if err != nil {
+		return nil, fmt.Errorf("read recent agent status lifecycles: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	if len(rows[0]) != 2 {
+		return nil, fmt.Errorf("recent agent status row has %d columns", len(rows[0]))
+	}
+	observedAtSeconds, err := number(rows[0][0])
+	if err != nil {
+		return nil, fmt.Errorf("recent agent status timestamp: %w", err)
+	}
+	observedAt := time.Unix(int64(observedAtSeconds), int64((observedAtSeconds-float64(int64(observedAtSeconds)))*1e9))
+	payload, err := decodePayload(rows[0][1])
+	if err != nil {
+		return nil, fmt.Errorf("recent agent status payload: %w", err)
+	}
+	agents, _ := payload["agents"].([]any)
+	lifecycles := make([]AgentStatusLifecycleState, 0, len(agents))
+	for _, value := range agents {
+		row, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		id := rowString(row["id"])
+		if id == "" {
+			continue
+		}
+		completionSettled, _ := row["completion_settled"].(bool)
+		processInstanceID := rowString(row["process_instance_id"])
+		lifecycle := AgentStatusLifecycleState{ID: id, ProcessInstanceID: processInstanceID, ObservedAt: observedAt, CompletionSettled: completionSettled,
+			AttentionSignature: rowString(row["attention_signature"]), AttentionKey: rowString(row["attention_key"])}
+		lifecycle.AttentionSettled, _ = row["attention_acknowledged"].(bool)
+		if stoppedSeconds, stoppedErr := number(row["working_stopped_ts"]); stoppedErr == nil && stoppedSeconds > 0 {
+			stoppedAt := time.Unix(int64(stoppedSeconds), int64((stoppedSeconds-float64(int64(stoppedSeconds)))*1e9))
+			if !now.Before(stoppedAt) {
+				lifecycle.WorkingStoppedAt = stoppedAt
+				lifecycle.TransitionID = rowString(row["transition_id"])
+				lifecycle.CooldownAttentionKey = rowString(row["cooldown_attention_key"])
+			}
+		}
+		if lifecycle.AttentionKey != "" || lifecycle.CompletionSettled || (!lifecycle.WorkingStoppedAt.IsZero() && lifecycle.CooldownAttentionKey != "") {
+			lifecycles = append(lifecycles, lifecycle)
+		}
+
+	}
+	return lifecycles, nil
 }
 
 // QueryAgentStatus returns the latest committed agent_status payload and a

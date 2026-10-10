@@ -50,6 +50,9 @@ from yomux_lib.workspace.session_files import DEFAULT_INDEX_EXCLUDE_DIR_NAMES
 from yomux_lib.filesystem import exclusions
 from _git_helpers import git, init_repo
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def _request(action: str, **fields: object) -> dict[str, object]:
     return {"action": action, "protocol_version": WATCHD_PROTOCOL_VERSION, **fields}

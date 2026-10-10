@@ -15,6 +15,11 @@ from yomux_lib.approval import approvald
 from yomux_lib.infra import batchd
 from yomux_lib.search import search_indexer
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 class RegistryStub:
     def __init__(self) -> None:

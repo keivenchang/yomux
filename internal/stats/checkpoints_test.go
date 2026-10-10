@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/keivenchang/yomux/internal/testsupport"
 	"os"
 	"path/filepath"
 	"sync"
@@ -294,6 +295,8 @@ func TestCheckpointMigrationPairsBackupAndFencesOldWriter(t *testing.T) {
 }
 
 func TestCheckpointMigrationPythonRejectionAndPairedRollback(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	ctx := context.Background()
 	w, path := checkpointTestWriter(t)
 	if _, err := w.AppendWithCheckpoints(ctx, writerBatch(), []Checkpoint{{Key: "new", Kind: "transcript", Version: 1}}); err != nil {

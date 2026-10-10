@@ -24,6 +24,9 @@ from yomux_lib.search import file_index
 
 from _git_helpers import git, init_repo
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 BLOCKED_SENTINEL = "BLOCKED_SENTINEL_DO_NOT_EXPOSE"
 PROPERTY_MATRIX_ENV = "YOLOMUX_PROPERTY_MATRIX_TSV"

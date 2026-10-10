@@ -81,6 +81,8 @@ def test_spawn_environment_hands_the_published_cap_to_children(monkeypatch):
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="glibc malloc_info is Linux-only")
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_capped_statsd_child_stays_at_two_arenas_under_construction_contention(monkeypatch):
     """Positive control: the inherited cap holds while eight threads build the service."""
 
@@ -95,6 +97,8 @@ def test_capped_statsd_child_stays_at_two_arenas_under_construction_contention(m
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="glibc malloc_info is Linux-only")
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_uncapped_statsd_child_opens_more_than_two_arenas(monkeypatch):
     """Negative control: without the inherited cap the same construction runs past two.
 

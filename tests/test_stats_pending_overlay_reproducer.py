@@ -25,6 +25,11 @@ from dataclasses import replace
 from yomux_lib.stats_current import service as service_module
 from yomux_lib.stats_current import storage
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 CLOCK = 100_000.0
 OBSERVED_AT = CLOCK - 0.25
 

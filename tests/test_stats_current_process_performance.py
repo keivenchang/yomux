@@ -6,6 +6,11 @@ import os
 
 from yomux_lib.stats_current import families, process_memory
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def _write_stat(root, pid, comm, *, started_at_ticks=12_345):
     process = root / str(pid)

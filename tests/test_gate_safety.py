@@ -175,6 +175,8 @@ def _write_malformed_settings(path: Path) -> bytes:
     return malformed
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_p9_malformed_settings_are_preserved_and_surfaced_without_default_substitution(
     gate_live_server,
     monkeypatch,
@@ -199,6 +201,8 @@ def test_p9_malformed_settings_are_preserved_and_surfaced_without_default_substi
     _retire_expected_settings_failure(gate_live_server, response, "GET /api/settings")
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_p9_malformed_settings_never_trigger_chat_retention_from_defaults(
     gate_live_server,
     monkeypatch,

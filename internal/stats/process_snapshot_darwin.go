@@ -195,22 +195,29 @@ func readDarwinSnapshot() darwinSnapshot {
 		processIDs = append(processIDs, int(pid))
 	}
 	result, censusComplete := assembleDarwinProcessSnapshot(processIDs, complete != 0, func(pid int) (DarwinProcess, error) {
-		var row C.struct_yomux_process
-		status := C.yomux_process(C.int(pid), &row)
-		if status == 0 {
-			return DarwinProcess{}, os.ErrNotExist
-		}
-		if status < 0 {
-			return DarwinProcess{}, errors.New("Darwin process observation unavailable")
-		}
-		path := C.GoString(&row.path[0])
-		start := fmt.Sprintf("%d:%d", uint64(row.start_sec), uint64(row.start_usec))
-		startedAt := float64(uint64(row.start_sec)) + float64(uint64(row.start_usec))/1e6
-		return DarwinProcess{PID: int(row.pid), PPID: int(row.ppid), Identity: fmt.Sprintf("%d:%s", int(row.pid), start), Command: C.GoString(&row.command[0]), Executable: path, Directory: C.GoString(&row.cwd[0]), CPUSeconds: float64(uint64(row.cpu_ns)) / 1e9, RSSBytes: uint64(row.rss), StartedAt: startedAt}, nil
+		return readDarwinProcess(pid)
 	})
 	var total, idle C.uint64_t
 	C.yomux_host_cpu(&total, &idle)
 	return darwinSnapshot{at: time.Now(), rows: result, complete: censusComplete, total: uint64(total), idle: uint64(idle)}
+}
+
+func readDarwinProcess(pid int) (DarwinProcess, error) {
+	if pid <= 0 {
+		return DarwinProcess{}, os.ErrNotExist
+	}
+	var row C.struct_yomux_process
+	status := C.yomux_process(C.int(pid), &row)
+	if status == 0 {
+		return DarwinProcess{}, os.ErrNotExist
+	}
+	if status < 0 {
+		return DarwinProcess{}, errors.New("Darwin process observation unavailable")
+	}
+	path := C.GoString(&row.path[0])
+	start := fmt.Sprintf("%d:%d", uint64(row.start_sec), uint64(row.start_usec))
+	startedAt := float64(uint64(row.start_sec)) + float64(uint64(row.start_usec))/1e6
+	return DarwinProcess{PID: int(row.pid), PPID: int(row.ppid), Identity: fmt.Sprintf("%d:%s", int(row.pid), start), Command: C.GoString(&row.command[0]), Executable: path, Directory: C.GoString(&row.cwd[0]), CPUSeconds: float64(uint64(row.cpu_ns)) / 1e9, RSSBytes: uint64(row.rss), StartedAt: startedAt}, nil
 }
 
 func darwinSystemLogicalCPUs() int { return int(C.yomux_logical_cpus()) }
@@ -247,6 +254,11 @@ func darwinProcessIdentity(pid int) (DarwinProcess, bool) {
 		return DarwinProcess{}, false
 	}
 	return rows[index], true
+}
+
+func darwinProcessIdentityFresh(pid int) (DarwinProcess, bool) {
+	row, err := readDarwinProcess(pid)
+	return row, err == nil
 }
 
 func DarwinProcessMetricsForPID(pid int) (ProcessCensusRow, bool) {

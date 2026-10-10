@@ -1317,19 +1317,34 @@ func (s *server) liveSessionMetadataFromOutputWithIndex(session string, output [
 			cwd = resolvedCWD
 		}
 		status := "idle"
+		queuedFollowupQuestion := false
+		attentionSignature := ""
 		statusObservedAt := time.Now()
 		if s.agentStatusClassifier != nil {
 			classified := s.agentStatusClassifier(context.Background(), stats.AgentStatusRequest{
 				Kind: kind, PID: agentPID, Command: agentCommand, Executable: agentExecutable, PaneTarget: parts[4], Directory: cwd,
 			})
 			status = liveAgentWindowState(classified.Status)
+			queuedFollowupQuestion = classified.QueuedFollowupQuestion
+			attentionSignature = classified.AttentionSignature
 			if !classified.ObservedAt.IsZero() {
 				statusObservedAt = classified.ObservedAt
 			}
 		}
+		processInstanceID := ""
+		if s.agentStatusCollector != nil {
+			sources := stats.CurrentPlatformAgentInventorySources()
+			if sources.Started != nil {
+				if started, err := sources.Started(agentPID); err == nil {
+					processInstanceID = stats.AgentStatusProcessInstanceID(stats.AgentRecord{PID: agentPID, StartedIdentity: started})
+				}
+			}
+		}
 		agents = append(agents, map[string]any{
-			"session": session, "kind": kind, "pid": agentPID, "pane_target": parts[4], "command": agentCommand,
-			"cwd": cwd, "status": status, "status_observed_at": float64(statusObservedAt.UnixNano()) / 1e9, "session_id": sessionID, "transcript": transcript,
+			"session": session, "kind": kind, "pid": agentPID, "pane_target": parts[4], "command": agentCommand, "executable": agentExecutable,
+			"cwd": cwd, "status": status, "queued_followup_question": queuedFollowupQuestion, "attention_signature": attentionSignature,
+			"status_observed_at": float64(statusObservedAt.UnixNano()) / 1e9, "session_id": sessionID, "transcript": transcript,
+			"process_instance_id": processInstanceID, "attention_pending": s.agentStatusCollector != nil && attentionSignature != "",
 			"error": "", "window": parts[1], "window_index": windowIndex, "pane": parts[3],
 			"window_active": windowActive, "current": active && windowActive,
 		})
@@ -1373,12 +1388,24 @@ func activityStatusObservedAt(seconds float64) time.Time {
 	return time.Unix(wholeSeconds, nanoseconds)
 }
 
-func activityAgentStatusOverrides(snapshot stats.AgentStatusSnapshot) (map[string]string, map[string]time.Time) {
+type goAgentStatusOverride struct {
+	processInstanceID      string
+	state                  string
+	observedAt             time.Time
+	workingStoppedTS       float64
+	transitionID           string
+	cooldownAttentionKey   string
+	attentionKey           string
+	attentionSignature     string
+	attentionAcknowledged  bool
+	queuedFollowupQuestion bool
+}
+
+func activityAgentStatusOverrides(snapshot stats.AgentStatusSnapshot) map[string]goAgentStatusOverride {
 	if !snapshot.Available {
-		return nil, nil
+		return nil
 	}
-	result := make(map[string]string, len(snapshot.Agents))
-	observedAtByAgent := make(map[string]time.Time, len(snapshot.Agents))
+	result := make(map[string]goAgentStatusOverride, len(snapshot.Agents))
 	cycleObservedAt := time.Time{}
 	if snapshot.Freshness != nil {
 		cycleObservedAt = activityStatusObservedAt(snapshot.Freshness.ObservedAt)
@@ -1396,14 +1423,115 @@ func activityAgentStatusOverrides(snapshot stats.AgentStatusSnapshot) (map[strin
 			continue
 		}
 		key := activityAgentStatusKey(session, pane, kind)
-		result[key] = liveAgentWindowState(state)
 		observedAt := cycleObservedAt
 		if value, ok := row["observed_at"].(float64); ok && value > 0 {
 			observedAt = activityStatusObservedAt(value)
 		}
-		observedAtByAgent[key] = observedAt
+		workingStoppedTS, _ := row["working_stopped_ts"].(float64)
+		result[key] = goAgentStatusOverride{
+			state: liveAgentWindowState(state), observedAt: observedAt, processInstanceID: stringValue(row["process_instance_id"]),
+			workingStoppedTS:     workingStoppedTS,
+			transitionID:         stringValue(row["transition_id"]),
+			cooldownAttentionKey: stringValue(row["cooldown_attention_key"]),
+			attentionKey:         stringValue(row["attention_key"]), attentionSignature: stringValue(row["attention_signature"]),
+			attentionAcknowledged: row["attention_acknowledged"] == true, queuedFollowupQuestion: row["queued_followup_question"] == true,
+		}
 	}
-	return result, observedAtByAgent
+	return result
+}
+
+func (s *server) currentAgentStatusOverrides(ctx context.Context) (map[string]goAgentStatusOverride, error) {
+	snapshot, err := s.currentAgentStatusSnapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return activityAgentStatusOverrides(snapshot), nil
+}
+
+func (s *server) currentAgentStatusSnapshot(ctx context.Context) (stats.AgentStatusSnapshot, error) {
+	if s.statsService == nil {
+		return stats.AgentStatusSnapshot{}, nil
+	}
+	return s.statsService.AgentStatus(ctx)
+}
+
+// A newer metadata capture can confirm the same state, or the idle side of a
+// retained completion, without invalidating the collector lifecycle identity.
+func agentStatusOverrideObservationMatches(agent map[string]any, override goAgentStatusOverride, now time.Time) bool {
+	observed, _ := agent["status_observed_at"].(float64)
+	if observed <= 0 || !override.observedAt.Before(activityStatusObservedAt(observed)) {
+		return true
+	}
+	currentState := stringValue(agent["status"])
+	stoppedAt := time.Unix(0, int64(override.workingStoppedTS*1e9))
+	completionIsCurrent := (override.state == "cooldown" || override.state == "idle") && currentState == "idle" && override.workingStoppedTS > 0 && !now.Before(stoppedAt)
+	return completionIsCurrent || (currentState == override.state && stringValue(agent["attention_signature"]) == override.attentionSignature)
+}
+
+func (s *server) applyAgentStatusLifecycle(sessions map[string]any, overrides map[string]goAgentStatusOverride) error {
+	for session, raw := range sessions {
+		info, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		agents, _ := info["agents"].([]map[string]any)
+		for _, agent := range agents {
+			key := activityAgentStatusKey(session, stringValue(agent["pane_target"]), stringValue(agent["kind"]))
+			override, exists := overrides[key]
+			if exists && stringValue(agent["process_instance_id"]) != "" && override.processInstanceID != "" && override.processInstanceID != stringValue(agent["process_instance_id"]) {
+				exists = false
+			}
+			if agent["attention_pending"] == true {
+				observed, _ := agent["status_observed_at"].(float64)
+				newerSameProcess := exists && override.processInstanceID != "" && override.processInstanceID == stringValue(agent["process_instance_id"]) && observed > 0 && override.observedAt.After(activityStatusObservedAt(observed))
+				if !newerSameProcess && (!exists || override.processInstanceID == "" || override.processInstanceID != stringValue(agent["process_instance_id"]) || override.attentionKey == "" || override.attentionSignature != stringValue(agent["attention_signature"])) {
+					if agent["status"] != "working" {
+						agent["status"] = "unavailable"
+					}
+					agent["queued_followup_question"] = false
+					continue
+				}
+			}
+			if !exists {
+				continue
+			}
+			if !agentStatusOverrideObservationMatches(agent, override, s.attentionAckNow()) {
+				continue
+			}
+			delete(agent, "attention_pending")
+			delete(agent, "attention_key")
+			delete(agent, "attention_signature")
+			delete(agent, "attention_acknowledged")
+			agent["queued_followup_question"] = override.queuedFollowupQuestion
+			if override.attentionKey != "" {
+				_, acknowledged, err := s.attentionAckStore().acknowledged(override.attentionKey, s.attentionAckNow())
+				if err != nil {
+					return err
+				}
+				agent["attention_key"] = override.attentionKey
+				agent["attention_signature"] = override.attentionSignature
+				agent["attention_acknowledged"] = acknowledged || override.attentionAcknowledged
+			}
+			agent["status"] = override.state
+			agent["status_observed_at"] = float64(override.observedAt.UnixNano()) / 1e9
+			delete(agent, "working_stopped_ts")
+			delete(agent, "transition_id")
+			delete(agent, "cooldown_attention_key")
+			delete(agent, "cooldown_acknowledged")
+			if override.workingStoppedTS <= 0 || override.cooldownAttentionKey == "" {
+				continue
+			}
+			agent["working_stopped_ts"] = override.workingStoppedTS
+			agent["transition_id"] = override.transitionID
+			agent["cooldown_attention_key"] = override.cooldownAttentionKey
+			_, acknowledged, err := s.attentionAckStore().acknowledged(override.cooldownAttentionKey, s.attentionAckNow())
+			if err != nil {
+				return err
+			}
+			agent["cooldown_acknowledged"] = acknowledged
+		}
+	}
+	return nil
 }
 
 func goTmuxSignalFields(line string, want int) ([]string, bool) {

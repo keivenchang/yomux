@@ -27,6 +27,9 @@ from tests.cross_layer_matrix import render_cost_model_table
 from tests.helpers.gate_stats import commit_scan as _commit
 from tests.terminal_state_guard import assert_terminal_transition
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 @pytest.fixture(autouse=True)
 def _isolated_transcript_scan_store(tmp_path, monkeypatch):

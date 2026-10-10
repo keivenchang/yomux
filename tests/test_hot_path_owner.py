@@ -21,6 +21,9 @@ from yomux_lib.filesystem import SEARCH_SKIP_DIRS
 from yomux_lib.filesystem import search as fs_search
 from yomux_lib.search import bfs_index
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def _clear_registry():
     # Route through the ONE lifecycle owner so a lingering BFS worker is signalled to stop and

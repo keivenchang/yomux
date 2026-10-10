@@ -30,6 +30,9 @@ from yomux_lib.web import server_plural
 
 from _git_helpers import git, init_repo
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def make_agent(session, transcript, cwd):
     return AgentInfo(

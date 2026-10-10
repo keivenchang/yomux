@@ -32,6 +32,15 @@ filegroup(
 )
 
 filegroup(
+    name = "pytest_collection_support",
+    srcs = [
+        "tools/pytest_catalog_plugin.py",
+        "tools/test_catalog.py",
+        "tools/test_plan.py",
+    ],
+)
+
+filegroup(
     name = "integration_python_tools",
     srcs = [
         "tools/auto_approve_tmux.py",
@@ -44,11 +53,11 @@ filegroup(
         "tools/product_environment.py",
         "tools/product_namespace.json",
         "tools/static_build.py",
-        "tools/test_plan.py",
         "tools/tls_san.py",
         "tools/tmux_paths.py",
         "tools/tool_guard.py",
         "tools/verify_go_agent_status_live.py",
+        ":pytest_collection_support",
     ] + glob(["tools/mockers/**/*.py"]),
 )
 
@@ -209,6 +218,7 @@ runtime_tree(
     name = "go_browser_runtime",
     srcs = [":go_browser_runtime_inputs"],
     frontend = ":frontend_assets",
+    visibility = ["//cmd/yomux-go:__pkg__"],
 )
 
 filegroup(
@@ -226,10 +236,10 @@ filegroup(
         "tools/instance_isolation.py",
         "tools/product_environment.py",
         "tools/product_namespace.json",
-        "tools/test_plan.py",
         "tools/tls_san.py",
         "tools/tool_guard.py",
         ":agent_status_prompt_fixtures",
+        ":pytest_collection_support",
         ":python_runtime",
     ] + glob(["tools/mockers/**/*.py"]),
 )
@@ -327,6 +337,7 @@ test_suite(
         ":yomux_go_browser_e2e",
         ":yomux_go_contract_test",
         ":yomux_go_stats_browser_docker_e2e",
+        "//cmd/yomux-go:agent_window_browser_test",
     ],
 )
 

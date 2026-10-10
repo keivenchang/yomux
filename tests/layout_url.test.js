@@ -30,17 +30,12 @@ const allSuiteFiles = [
   'tests/backend_health_indicator.test.js',
   'tests/system_health_panel.test.js',
   'tests/diagnostic_redaction.test.js',
-  'tests/gate_panels.test.js',
   'tests/open_file_missing_guard.test.js',
   'tests/open_file_413_reason.test.js',
 ];
 // Keep this in step with NODE_LAYOUT_EXCLUDED_FILES in tools/test_catalog.py, which is what the gate
 // actually passes as argv; tests/test_check_runner.py pins the two sets equal.
-const defaultGateExcludedSuiteFiles = new Set([
-  // gate_panels pins the decorator prose of tests/test_gate_panels.py, whose own xfail(strict=True)
-  // markers already own that guarantee. It is written to go red when F9 SubsystemSpec lands.
-  'tests/gate_panels.test.js',
-]);
+const defaultGateExcludedSuiteFiles = new Set([]);
 const suiteFiles = process.argv.length > 2
   ? process.argv.slice(2)
   : allSuiteFiles.filter(file => !defaultGateExcludedSuiteFiles.has(file));

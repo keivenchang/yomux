@@ -8,6 +8,22 @@ import (
 	"testing"
 )
 
+func TestDeprecatedPythonBackendRequiresExplicitAdmission(t *testing.T) {
+	for _, value := range []string{"", "0", "true", "1"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("YOMUX_RUN_DEPRECATED_PYTHON", value)
+			ran := false
+			t.Run("backend", func(t *testing.T) {
+				RequireDeprecatedPythonBackend(t)
+				ran = true
+			})
+			if ran != (value == "1") {
+				t.Fatalf("backend admitted with maintenance flag %q: %v", value, ran)
+			}
+		})
+	}
+}
+
 func TestPreserveProductEnvironmentOwnsGeneratedPeers(t *testing.T) {
 	t.Setenv("YOMUX_FIXTURE_OWNER", "original")
 	t.Setenv("YOLOMUX_FIXTURE_OWNER", "original")

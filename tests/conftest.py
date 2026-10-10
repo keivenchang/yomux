@@ -98,12 +98,14 @@ os.environ.setdefault(product_env_name("LOCAL_SERVICE_IDLE_SECONDS"), "1")
 from yomux_lib import app as app_module
 from yomux_lib import file_index
 from yomux_lib import statusd_protocol
+from yomux_lib.server import TmuxWebtermHTTPServer
 from tools.test_plan import automatic_test_markers
 from tools.test_plan import SLOWEST_FIRST_TESTS
 from tools.test_plan import test_node_sort_key
 
 
 @pytest.fixture
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 def legacy_activity_summary_enabled(monkeypatch):
     """Explicitly admit the retired synchronous algorithm for its isolated contract tests."""
 
@@ -117,13 +119,6 @@ def legacy_activity_summary_enabled(monkeypatch):
 NONBROWSER_TEST_TIMEOUT_SECONDS = 180
 BROWSER_TEST_TIMEOUT_SECONDS = 300
 E2E_TEST_TIMEOUT_SECONDS = 600
-GO_ONLY_GATE_ENV = "YOMUX_CHECK_GO_ONLY"
-DEPRECATED_PYTHON_SERVER_FIXTURES = frozenset({
-    "gate_browser_runtime",
-    "gate_live_server",
-    "gate_authenticated_live_server",
-    "stateful_journey",
-})
 
 _SOCKET_AVAILABILITY: tuple[bool, str] | None = None
 _SELENIUM_IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+selenium(?:\.|\s|$)|pytest\.importorskip\([\"']selenium", re.MULTILINE)
@@ -148,6 +143,7 @@ def no_control_socket(monkeypatch, tmp_path):
 
 
 @pytest.fixture
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 def make_tmux_webterm_app(monkeypatch):
     """Build full apps with their background/control resources torn down after the test."""
     created = []
@@ -166,6 +162,7 @@ def make_tmux_webterm_app(monkeypatch):
 
 
 @pytest.fixture
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 def isolated_yoagent_conversation_state(monkeypatch, tmp_path):
     state_dir = tmp_path / "yoagent-state"
     monkeypatch.setattr(app_module.yoagent_conversation, "YOAGENT_CONVERSATION_PATH", state_dir / "conversation.jsonl")
@@ -220,7 +217,23 @@ def local_socket_capability() -> tuple[bool, str]:
 
 
 @pytest.fixture(autouse=True)
-def isolated_file_index_background_hooks(monkeypatch):
+def deny_legacy_python_server_without_opt_in(monkeypatch, request):
+    # Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+    if request.config.getoption("run_deprecated_python"):
+        return
+
+    def forbidden_start(*args, **kwargs):
+        raise RuntimeError("deprecated Python product server is forbidden without --run-deprecated-python")
+
+    monkeypatch.setattr(TmuxWebtermHTTPServer, "__init__", forbidden_start)
+
+
+@pytest.fixture(autouse=True)
+def isolated_file_index_background_hooks(monkeypatch, request):
+    # Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+    if request.node.get_closest_marker("deprecated_python_server") is None:
+        yield
+        return
     # The real indexer is intentionally detached and persistent. Test cases
     # use a temporary state directory that pytest removes at process exit, so
     # never leave a detached child pointed at that vanished state behind.
@@ -246,9 +259,6 @@ def pytest_collection_modifyitems(config, items):
         path = _test_path(item)
         for marker_name in automatic_test_markers(path):
             item.add_marker(getattr(pytest.mark, marker_name))
-        fixture_names = getattr(item, "fixturenames", ())
-        if os.environ.get(GO_ONLY_GATE_ENV) == "1" and DEPRECATED_PYTHON_SERVER_FIXTURES.intersection(fixture_names):
-            item.add_marker(pytest.mark.deprecated_python_server)
 
     selenium_paths = {_test_path(item) for item in items if _test_path_imports_selenium(_test_path(item))}
     for item in items:

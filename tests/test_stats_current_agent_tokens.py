@@ -6,6 +6,11 @@ from types import SimpleNamespace
 
 from yomux_lib.stats_current import agent_tokens, opencode, storage
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 class _Scanner:
     def scan(self, _rows):

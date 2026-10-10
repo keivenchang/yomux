@@ -12,7 +12,8 @@ from yomux_lib.yoagent import controller as controller_module
 from yomux_lib.yoagent import transports as transport_module
 
 
-pytestmark = pytest.mark.usefixtures("no_control_socket", "isolated_yoagent_conversation_state")
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = [pytest.mark.usefixtures("no_control_socket", "isolated_yoagent_conversation_state"), pytest.mark.deprecated_python_server]
 
 
 def install_fake_yomux_state(monkeypatch):

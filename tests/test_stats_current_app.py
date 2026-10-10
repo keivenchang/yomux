@@ -23,6 +23,9 @@ from yomux_lib.stats_current import usage as usage_module
 from yomux_lib.stats_current import opencode as opencode_module
 from yomux_lib.stats_current.transcripts import ScannedUsageAtom, StatsCurrentTranscriptUsageScanner, TranscriptUsageScanResult
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def attempt(family, cadence):
     return SimpleNamespace(

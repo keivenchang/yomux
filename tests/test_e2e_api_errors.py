@@ -32,7 +32,8 @@ from yomux_lib.statusd_client import StatusClient
 
 
 pytest_plugins = ("tests.e2e_browser_harness",)
-pytestmark = [pytest.mark.browser, pytest.mark.socket, pytest.mark.e2e]
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = [pytest.mark.browser, pytest.mark.socket, pytest.mark.e2e, pytest.mark.deprecated_python_server]
 
 
 # Any route added here needs a user-visible reason.

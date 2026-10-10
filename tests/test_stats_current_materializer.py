@@ -36,6 +36,9 @@ from yomux_lib.stats_current.storage import UsageAtom
 from yomux_lib.stats_current.storage import UnavailableSpan
 from yomux_lib.stats_current import resolution as stats_resolution
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def _snapshot(*, observations=(), coverage=(), usage=(), unavailable=()):
     return StoreSnapshot(

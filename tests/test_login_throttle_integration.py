@@ -28,6 +28,7 @@ from tests.helpers.login_throttle import (
     VALID_USER, VALID_PASSWORD, loose_network_policy, start_server, stop_server,
 )
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 pytestmark = [pytest.mark.socket, pytest.mark.deprecated_python_server]
 
 def post_login(port, username, password):

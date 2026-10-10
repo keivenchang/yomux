@@ -9,6 +9,8 @@ work across hosts, so the partition is what stops them meeting at all.
 
 from __future__ import annotations
 
+import pytest
+
 from pathlib import Path
 
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
@@ -16,6 +18,9 @@ from yomux_lib.infra.host_identity import current_host_identity
 from yomux_lib.stats_current import client as stats_client
 from yomux_lib.stats_current import service as stats_service
 from yomux_lib.stats_current import storage
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
 
 
 def test_m_db_default_path_is_partitioned_by_stable_host_id(gate_runtime_paths):

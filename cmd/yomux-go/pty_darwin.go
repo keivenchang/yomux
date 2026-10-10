@@ -51,7 +51,7 @@ func openPTY(rows, cols int) (*ptyPair, error) {
 	}
 	return pair, nil
 }
-func (p *ptyPair) resize(rows, cols int) error {
+func (p *ptyPair) resizeDimensions(rows, cols int) error {
 	size := winsize{rows: uint16(rows), cols: uint16(cols)}
 	return unix.IoctlSetWinsize(int(p.master.Fd()), unix.TIOCSWINSZ, &unix.Winsize{Row: size.rows, Col: size.cols})
 }

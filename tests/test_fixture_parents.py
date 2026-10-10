@@ -11,6 +11,7 @@ from tests.helpers.prompt_corpus import PromptCorpus
 from tests.helpers.prompt_corpus import PromptCorpusPreset
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_fixture_http_server_binds_ephemeral_port_preserves_headers_and_stops_thread(monkeypatch):
     app = SimpleNamespace(sessions=[], dangerously_yolo=False)
@@ -27,6 +28,8 @@ def test_fixture_http_server_binds_ephemeral_port_preserves_headers_and_stops_th
     assert not runtime.thread.is_alive()
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_fixture_http_server_cleanup_keeps_order_and_first_error(monkeypatch):
     events = []
 

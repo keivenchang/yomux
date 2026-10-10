@@ -29,6 +29,9 @@ from yomux_lib.workspace import metadata
 from _git_helpers import git, init_repo
 from mock_git_repo import create_git_history_repository
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def _open_descriptors_beneath(root: Path) -> dict[str, str]:
     if sys.platform == "darwin":

@@ -181,6 +181,8 @@ def test_debug_stats_sample_endpoint_is_not_a_live_client_contract():
     assert "/api/stats-sample" not in source
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_stats_24h_query_policy_is_limited_to_five_minute_buckets():
     """The 600-bucket ceiling deliberately makes a 24-hour view queryable only at 300 seconds."""
 
@@ -191,12 +193,15 @@ def test_stats_24h_transcript_window_guard_rejects_a_bunched_corpus(tmp_path):
     assert_bunched_transcript_window_rejected(tmp_path)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_stats_24h_transcripts_fill_every_five_minute_bucket_without_direct_seed(tmp_path):
     """The graph's 24-hour token series must come from transcript atoms, not the direct seed."""
 
     assert_transcripts_fill_every_bucket(tmp_path)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_stats_24h_combined_observations_and_transcripts_reconcile_at_300_seconds(monkeypatch, tmp_path):
     """The parallel lane owns 24-hour semantics; exclusive certification owns wall time."""
@@ -211,6 +216,7 @@ def test_stats_24h_combined_observations_and_transcripts_reconcile_at_300_second
         (NOW + 2 * 86_400, "empty-tail"),
     ),
 )
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_stats_24h_http_empty_windows_are_not_clamped(monkeypatch, tmp_path, clock_seconds, label):
     """Browser HTTP requests outside the seeded day preserve their requested empty window.
@@ -223,6 +229,8 @@ def test_stats_24h_http_empty_windows_are_not_clamped(monkeypatch, tmp_path, clo
     exercise_empty_window(monkeypatch, tmp_path, clock_seconds, label)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_stats_24h_http_wall_latency_certification(
     certification_phase_only, monkeypatch, tmp_path, request,
 ):
@@ -258,6 +266,7 @@ def test_stats_24h_http_wall_latency_certification(
     )
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_v0610_stats_range_shift_g4b_keeps_each_transition_fast_and_complete(browser, monkeypatch, tmp_path):
     """G4b: enforce each range transition's max and rendered completion."""

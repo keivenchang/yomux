@@ -5,7 +5,8 @@ from yomux_lib import app as app_module
 from yomux_lib.agent_comms.stream_events import ClaudeStreamJsonNormalizer
 
 
-pytestmark = pytest.mark.usefixtures("no_control_socket", "isolated_yoagent_conversation_state")
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = [pytest.mark.usefixtures("no_control_socket", "isolated_yoagent_conversation_state"), pytest.mark.deprecated_python_server]
 
 
 def test_yoagent_stream_hidden_thinking_is_not_exposed():

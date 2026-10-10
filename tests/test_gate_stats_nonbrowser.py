@@ -19,6 +19,11 @@ from yomux_lib.stats_current import migration
 from yomux_lib.stats_current import service as stats_service
 from yomux_lib.stats_current import storage
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 G8_COVERAGE_EPOCHS = 15_000
 G8_CPU_WINDOW_SECONDS = 1.0

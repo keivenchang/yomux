@@ -12,6 +12,14 @@ import (
 	"github.com/keivenchang/yomux/internal/productenv"
 )
 
+// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+func RequireDeprecatedPythonBackend(t *testing.T) {
+	t.Helper()
+	if os.Getenv("YOMUX_RUN_DEPRECATED_PYTHON") != "1" {
+		t.Skip("deprecated Python backend comparison requires --run-deprecated-python (Bazel: --test_env=YOMUX_RUN_DEPRECATED_PYTHON=1)")
+	}
+}
+
 // SyntheticEnvironment removes ambient product and client-data inputs before
 // a development/test child is started. Callers must add every fixture-owned
 // value explicitly; overrides are deduplicated so the child cannot retain an

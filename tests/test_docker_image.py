@@ -143,6 +143,29 @@ def test_dependency_preparation_uses_module_pinned_go_without_host_go(tmp_path, 
     assert (module_cache / "seed.zip").stat().st_mode & 0o200
 
 
+def test_dependency_preparation_seeds_locked_test_only_modules(tmp_path, monkeypatch):
+    pinned_go = tmp_path / "pinned" / "go" / "bin" / "go"
+    module_cache = tmp_path / "module-cache"
+    module_cache.mkdir()
+    (tmp_path / "go.mod").write_text("module fixture\n", encoding="utf-8")
+    (tmp_path / "go.sum").write_text(
+        "example.com/test-only v1.2.3 h1:checksum\nexample.com/test-only v1.2.3/go.mod h1:modchecksum\n",
+        encoding="utf-8",
+    )
+    calls = []
+
+    def fake_run(command, *, env, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "{}", "")
+
+    monkeypatch.setattr(docker_image.subprocess, "run", fake_run)
+    assert docker_image._download_go_modules(pinned_go, tmp_path, module_cache)
+    assert calls == [
+        [str(pinned_go), "mod", "download", "-json"],
+        [str(pinned_go), "mod", "download", "example.com/test-only@v1.2.3"],
+    ]
+
+
 def test_bazel_container_admission_rejects_security_or_mount_drift(tmp_path):
     root = tmp_path / "checkout"
     cache = tmp_path / "cache"

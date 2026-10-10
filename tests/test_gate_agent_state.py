@@ -350,9 +350,11 @@ def _browser_transition(browser, screens_and_states: list[tuple[dict[str, object
         const transitions = arguments[0];
         const session = '1';
         const snapshots = [];
+        window.__gateAgentTransitionRevision ??= 100;
         for (const [screen, state] of transitions) {
           const result = applyAutoApprovePayload({
-            agent_window_snapshot_revision: snapshots.length + 101,
+            agent_window_snapshot_revision: ++window.__gateAgentTransitionRevision,
+            topology_generation: tmuxTopologyGeneration,
             session_order: [session],
             sessions: {
               [session]: {
@@ -388,6 +390,8 @@ def _browser_transition(browser, screens_and_states: list[tuple[dict[str, object
     )
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_f1_working_to_idle_and_blocked_clears_the_rendered_green_indicator(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
@@ -407,6 +411,8 @@ def test_f1_working_to_idle_and_blocked_clears_the_rendered_green_indicator(brow
     assert "agent-window-activity--working" not in blocked_transition[1]["classes"], blocked_transition
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_f2_active_working_capture_renders_the_green_indicator(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
@@ -420,6 +426,8 @@ def test_f2_active_working_capture_renders_the_green_indicator(browser, tmp_path
     assert "agent-window-activity--working" in rendered["classes"], rendered
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_f3_goal_blocked_renders_distinctly_from_goal_achieved(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
@@ -437,6 +445,8 @@ def test_f3_goal_blocked_renders_distinctly_from_goal_achieved(browser, tmp_path
 
 @pytest.mark.socket
 @pytest.mark.browser
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_f4_python3_claude_mock_process_is_recognised_as_an_ai_agent(gate_tmux, gate_runtime_paths):
     session = gate_tmux.sessions[0]
     command = shlex.join([sys.executable, str(REPO_ROOT / "tools" / "mockers" / "claude.py"), "--mock"])
@@ -631,6 +641,8 @@ def _realistic_agent_browser_runtime(browser, monkeypatch, gate_runtime_paths, s
         stop_browser_fixture(server, thread, runtime, browser=browser)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.no_browser
 @pytest.mark.parametrize("root_owned", [False, True])
 def test_browser_server_forwards_its_runtime_root_owner(monkeypatch, tmp_path, root_owned):
@@ -649,6 +661,8 @@ def test_browser_server_forwards_its_runtime_root_owner(monkeypatch, tmp_path, r
     assert forwarded == [paths]
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.no_browser
 @pytest.mark.parametrize("terminal_startup", [False, True])
 def test_realistic_runtime_uses_browser_demand_to_establish_status_readiness(monkeypatch, tmp_path, terminal_startup):
@@ -700,6 +714,7 @@ def test_realistic_runtime_uses_browser_demand_to_establish_status_readiness(mon
 
 
 @pytest.mark.browser
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_f5_realistic_roster_count_matches_its_stale_session_breakdown(
     browser, monkeypatch, gate_runtime_paths
@@ -1166,6 +1181,7 @@ def test_f6_convergence_predicate_still_rejects_incomplete_convergence():
 
 
 @pytest.mark.browser
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_f6_failure_diagnostic_projection_is_reachable_and_serializable(
     browser, monkeypatch, gate_runtime_paths
@@ -1205,6 +1221,7 @@ def test_f6_failure_diagnostic_projection_is_reachable_and_serializable(
 
 
 @pytest.mark.browser
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_f6_realistic_consumers_converge_to_the_published_roster_revision(
     browser, monkeypatch, gate_runtime_paths

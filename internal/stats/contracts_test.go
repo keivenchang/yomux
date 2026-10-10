@@ -21,6 +21,11 @@ func TestCurrentAgentRosterAllowsBoundedObservationTime(t *testing.T) {
 	}{
 		{"historical", nil, true},
 		{"current", map[string]any{"observed_at": 123.5}, true},
+		{"settled completion", map[string]any{"observed_at": 123.5, "completion_settled": true}, true},
+		{"process instance", map[string]any{"observed_at": 123.5, "process_instance_id": "process:abc"}, true},
+		{"transition with settled marker", map[string]any{"observed_at": 123.5, "completion_settled": true, "process_instance_id": "process:abc", "working_stopped_ts": 100.0, "transition_id": "transition:abc", "cooldown_attention_key": "cooldown:abc"}, true},
+		{"invalid process instance", map[string]any{"observed_at": 123.5, "process_instance_id": " "}, false},
+		{"invalid settled completion", map[string]any{"observed_at": 123.5, "completion_settled": "true"}, false},
 		{"zero", map[string]any{"observed_at": 0.0}, true},
 		{"negative", map[string]any{"observed_at": -1.0}, false},
 		{"nan", map[string]any{"observed_at": math.NaN()}, false},

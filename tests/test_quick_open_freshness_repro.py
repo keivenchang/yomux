@@ -75,6 +75,9 @@ from yomux_lib import file_index
 from yomux_lib import filesystem
 from yomux_lib.filesystem import search as filesystem_search
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 ONE_DAY_SECONDS = 24.0 * 60.0 * 60.0
 # Deliberately absurd: 200 days is far past any plausible "this is still current" window and

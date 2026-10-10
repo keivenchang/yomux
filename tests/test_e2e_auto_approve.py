@@ -33,7 +33,8 @@ from tests.tmux_runtime import patch_isolated_product_environment
 from tests.tmux_runtime import run_isolated_tmux
 from tests.tmux_runtime import wait_for_isolated_tmux_panes
 
-pytestmark = [pytest.mark.e2e, pytest.mark.socket]
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = [pytest.mark.e2e, pytest.mark.socket, pytest.mark.deprecated_python_server]
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 

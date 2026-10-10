@@ -10,6 +10,9 @@ import pytest
 from yomux_lib.stats_current import runtime, scheduler
 from yomux_lib.stats_current import storage
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def test_manifest_and_web_scheduler_ownership_are_explicit():
     assert scheduler.COLLECTED_FAMILIES == {

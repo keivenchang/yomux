@@ -23,6 +23,7 @@ from yomux_lib.stats_current.storage import RETENTION_SECONDS
 from yomux_lib.stats_current.storage import StatsCurrentError
 from yomux_lib.stats_current.storage import Store
 
+
 PACIFIC = "America/Los_Angeles"
 # 2026 US transitions: clocks jump 02:00 -> 03:00 on March 8 and 02:00 -> 01:00
 # on November 1. 02:30 is exactly the hour that does not exist in spring, and
@@ -115,6 +116,8 @@ def build_service(tmp_path: Path, *, clock, monotonic, prune_time_reader) -> ser
 # --------------------------------------------------------------------------
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_retention_covers_the_largest_display_window():
     # THE invariant. Retention and the display window are separate knobs, and
     # this ordering is the only thing tying them together: if retention ever
@@ -131,6 +134,8 @@ def test_retention_covers_the_largest_display_window():
     assert stats_resolution.RANGE_SECONDS[-1] == stats_resolution.MAX_RANGE_SECONDS
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_prune_refuses_when_retention_drops_below_the_display_window(tmp_path, monkeypatch):
     path = tmp_path / DATABASE_FILENAME
     now = RETENTION_SECONDS + 10_000.0
@@ -150,6 +155,8 @@ def test_prune_refuses_when_retention_drops_below_the_display_window(tmp_path, m
         assert len(store.read_snapshot().observations) == 1
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_prune_records_its_time_so_a_restart_does_not_repeat_the_night(tmp_path):
     path = tmp_path / DATABASE_FILENAME
     now = RETENTION_SECONDS + 10_000.0
@@ -172,6 +179,8 @@ def test_prune_records_its_time_so_a_restart_does_not_repeat_the_night(tmp_path)
 # --------------------------------------------------------------------------
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_default_prune_time_is_half_past_two_and_is_offered():
     assert prune_schedule.DEFAULT_PRUNE_LOCAL_TIME == "02:30"
     assert prune_schedule.DEFAULT_PRUNE_LOCAL_TIME in prune_schedule.PRUNE_LOCAL_TIME_CHOICES
@@ -181,6 +190,8 @@ def test_default_prune_time_is_half_past_two_and_is_offered():
     assert list(prune_schedule.PRUNE_LOCAL_TIME_CHOICES) == sorted(prune_schedule.PRUNE_LOCAL_TIME_CHOICES)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.parametrize("value", ["02:30", "00:00", "23:59", "2:30"])
 def test_valid_prune_times_are_used_as_written(value):
     resolved = prune_schedule.resolve_local_time(value)
@@ -188,6 +199,8 @@ def test_valid_prune_times_are_used_as_written(value):
     assert (resolved.hour, resolved.minute) == prune_schedule.parse_local_time(value)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.parametrize("value", ["", "banana", "24:00", "02:60", "-1:00", "0230", "2.30", None, 230, "02:3"])
 def test_unusable_prune_times_fall_back_and_never_disable_cleanup(value):
     resolved = prune_schedule.resolve_local_time(value)
@@ -198,6 +211,8 @@ def test_unusable_prune_times_fall_back_and_never_disable_cleanup(value):
     assert (resolved.hour, resolved.minute) == (2, 30)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_settings_expose_the_schedule_as_an_editable_preference():
     catalog = settings_module.settings_catalog(settings_module.default_settings())
     entry = catalog["stats.prune_at_local_time"]
@@ -209,6 +224,8 @@ def test_settings_expose_the_schedule_as_an_editable_preference():
     assert entry["write_role"] == "admin"
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_settings_file_round_trip_keeps_a_valid_time_and_replaces_an_invalid_one(tmp_path):
     path = tmp_path / "settings.yaml"
     settings_module.write_settings_file(
@@ -239,6 +256,8 @@ def test_preferences_panel_offers_the_schedule_in_the_stats_section():
 # --------------------------------------------------------------------------
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_a_plain_night_prunes_exactly_once_at_the_configured_local_time():
     with local_zone(PACIFIC):
         prune_time = prune_schedule.resolve_local_time("02:30")
@@ -251,6 +270,8 @@ def test_a_plain_night_prunes_exactly_once_at_the_configured_local_time():
         assert local_text(prune_schedule.next_occurrence(local_epoch(2026, 6, 2, 12, 0), prune_time)) == "2026-06-03 02:30 PDT"
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_a_missed_window_is_caught_up_rather_than_skipped():
     with local_zone(PACIFIC):
         prune_time = prune_schedule.resolve_local_time("02:30")
@@ -268,6 +289,8 @@ def test_a_missed_window_is_caught_up_rather_than_skipped():
         assert prune_schedule.is_due(wake, 0.0, prune_time) is True
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_spring_forward_prunes_once_even_though_the_configured_time_does_not_exist():
     with local_zone(PACIFIC):
         prune_time = prune_schedule.resolve_local_time("02:30")
@@ -285,6 +308,8 @@ def test_spring_forward_prunes_once_even_though_the_configured_time_does_not_exi
         ) == "2026-03-09 02:30 PDT"
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_fall_back_prunes_once_even_though_the_ambiguous_hour_happens_twice():
     with local_zone(PACIFIC):
         year, month, day = FALL_BACK
@@ -305,6 +330,8 @@ def test_fall_back_prunes_once_even_though_the_ambiguous_hour_happens_twice():
         assert prune_schedule.is_due(second_pass, first_pass, ambiguous) is False
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_a_fixed_offset_captured_once_would_drift_but_the_local_time_does_not():
     with local_zone(PACIFIC):
         prune_time = prune_schedule.resolve_local_time("02:30")
@@ -322,6 +349,8 @@ def test_a_fixed_offset_captured_once_would_drift_but_the_local_time_does_not():
 # --------------------------------------------------------------------------
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_materializer_worker_owns_cutoff_deadline_when_listener_never_idles(tmp_path):
     with local_zone(PACIFIC):
         wall = [local_epoch(2026, 6, 1, 12, 0)]
@@ -348,6 +377,8 @@ def test_materializer_worker_owns_cutoff_deadline_when_listener_never_idles(tmp_
         assert service._ring_wait_timeout() == service_module.PRUNE_CHECK_SECONDS
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_cutoff_scheduler_rechecks_fractional_wall_clock_shortfall(tmp_path):
     wall = [1_700_000_059.999]
     monotonic = [60.0]
@@ -371,6 +402,8 @@ def test_cutoff_scheduler_rechecks_fractional_wall_clock_shortfall(tmp_path):
     assert store.prunes == [wall[0]]
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_materializer_worker_enforces_vacuum_cap_when_listener_never_idles(tmp_path):
     wall = [1_700_000_000.0]
     monotonic = [service_module.VACUUM_MAX_DEFER_SECONDS]
@@ -394,6 +427,8 @@ def test_materializer_worker_enforces_vacuum_cap_when_listener_never_idles(tmp_p
     assert listener_store.vacuums == []
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_service_bounds_cutoff_sweeps_and_catches_up_after_a_missed_window(tmp_path):
     with local_zone(PACIFIC):
         wall = [local_epoch(2026, 6, 1, 12, 0)]
@@ -445,6 +480,8 @@ def test_service_bounds_cutoff_sweeps_and_catches_up_after_a_missed_window(tmp_p
         assert local_text(status["next_at"]) == "2026-06-05 02:30 PDT"
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_service_never_prunes_on_the_request_path(tmp_path):
     with local_zone(PACIFIC):
         store = FakePruneStore()
@@ -469,6 +506,8 @@ def test_service_never_prunes_on_the_request_path(tmp_path):
         assert len(store.prunes) == 1
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_service_falls_back_to_the_default_time_when_the_preference_is_unusable(tmp_path):
     with local_zone(PACIFIC):
         store = FakePruneStore()
@@ -498,6 +537,8 @@ def test_service_falls_back_to_the_default_time_when_the_preference_is_unusable(
         assert store.prunes == [wall[0]]
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_service_keeps_cleaning_up_when_the_preference_cannot_be_read(tmp_path):
     with local_zone(PACIFIC):
         def unreadable() -> str:
