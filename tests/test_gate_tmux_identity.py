@@ -19,6 +19,9 @@ from yomux_lib.observability.activity import ActivityLedger
 from yomux_lib.workspace import metadata
 from tests.helpers.local_service_records import FixtureHostIdentityBuilder
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 TARGET = "yo7771:0.0"
 SESSION = "yo7771"

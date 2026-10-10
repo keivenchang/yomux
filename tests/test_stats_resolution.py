@@ -15,6 +15,9 @@ import pytest
 from yomux_lib import app as app_module
 from yomux_lib.stats_current import resolution as sr
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 # The canonical contract table, as {range: (auto, (explicit...))}.
 EXPECTED_MATRIX = {
     5 * 60: (1, (1, 10)),

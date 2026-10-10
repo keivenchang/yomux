@@ -20,6 +20,9 @@ from yomux_lib import server_logs
 from yomux_lib.stats_current import http, protocol, resolution as stats_resolution
 from tests.terminal_state_guard import assert_terminal_transition
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 class FakeClient:
     def __init__(self, metadata: dict[str, object], body: bytes = b""):

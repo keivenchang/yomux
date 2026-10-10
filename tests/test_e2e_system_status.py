@@ -12,6 +12,8 @@ pytest_plugins = ("tests.e2e_browser_harness",)
 pytestmark = [pytest.mark.browser, pytest.mark.socket, pytest.mark.e2e]
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_corrupt_stats_database_recovery_is_unmissable_in_real_chrome(e2e_browser: Any) -> None:
     """The real statsd recovery channel reaches a visible alert on the real page."""
     client = e2e_browser.runtime.app.stats_current_client

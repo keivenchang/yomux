@@ -620,10 +620,16 @@ func validateCurrentAgentRoster(value any) error {
 		return invalid("observation", "payload", "agent_status.agents exceeds its bound")
 	}
 	validStates := map[string]bool{"ask": true, "run": true, "transition": true, "idle": true, "error": true, "unavailable": true}
+	allowedFields := map[string]bool{"id": true, "kind": true, "state": true, "session": true, "pane": true, "observed_at": true, "working_stopped_ts": true, "transition_id": true, "cooldown_attention_key": true, "completion_settled": true, "process_instance_id": true, "attention_signature": true, "attention_key": true, "attention_acknowledged": true, "queued_followup_question": true}
 	for _, row := range rows {
 		observedAt, hasObservedAt := row["observed_at"]
-		if len(row) != 5 && !(len(row) == 6 && hasObservedAt) {
+		if len(row) < 5 || len(row) > len(allowedFields) || len(row) == 6 && !hasObservedAt {
 			return invalid("observation", "payload", "agent_status.agents contains an invalid row")
+		}
+		for name := range row {
+			if !allowedFields[name] {
+				return invalid("observation", "payload", "agent_status.agents contains an unknown field")
+			}
 		}
 		for _, name := range []string{"id", "kind", "state", "session", "pane"} {
 			if _, ok := row[name].(string); !ok || strings.TrimSpace(row[name].(string)) == "" {
@@ -635,6 +641,30 @@ func validateCurrentAgentRoster(value any) error {
 		}
 		if hasObservedAt && !currentNonNegativeNumber(observedAt) {
 			return invalid("observation", "payload", "agent_status.agents.observed_at must be a non-negative finite number")
+		}
+		if value, present := row["working_stopped_ts"]; present && !currentNonNegativeNumber(value) {
+			return invalid("observation", "payload", "agent_status.agents.working_stopped_ts must be a non-negative finite number")
+		}
+		for _, name := range []string{"completion_settled", "attention_acknowledged", "queued_followup_question"} {
+			if value, present := row[name]; present {
+				if _, valid := value.(bool); !valid {
+					return invalid("observation", "payload", "agent_status.agents."+name+" must be a boolean")
+				}
+			}
+		}
+		if value, present := row["process_instance_id"]; present {
+			text, valid := value.(string)
+			if !valid || strings.TrimSpace(text) == "" || len(text) > 128 {
+				return invalid("observation", "payload", "agent_status.agents.process_instance_id must be a bounded string")
+			}
+		}
+		for _, name := range []string{"transition_id", "cooldown_attention_key", "attention_signature", "attention_key"} {
+			if value, present := row[name]; present {
+				text, valid := value.(string)
+				if !valid || strings.TrimSpace(text) == "" || len(text) > 512 {
+					return invalid("observation", "payload", "agent_status.agents contains an invalid lifecycle identity")
+				}
+			}
 		}
 	}
 	return nil

@@ -11,6 +11,9 @@ from yomux_lib.client_events import ClientEventBroker
 from yomux_lib.search import file_index
 from yomux_lib.search.search_indexer import PersistentSearchIndexer
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def test_client_event_broker_skips_json_byte_measurement_without_subscribers(monkeypatch):
     broker = ClientEventBroker()

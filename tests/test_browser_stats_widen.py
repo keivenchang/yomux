@@ -1411,6 +1411,328 @@ def test_go_collectors_drive_browser_stats_without_seeded_facts(browser, tmp_pat
             raise browser_retirement_error
 
 
+def test_go_codex_completion_acknowledges_through_live_activity_and_client_events(browser, tmp_path, monkeypatch):
+    """Exercise collector, Go activity API, SSE acknowledgement, and shared UI together."""
+    source_root = Path(__file__).resolve().parents[1]
+    private_source_root = tmp_path / "source-root"
+    for relative in ("static", "tools", "yomux_lib"):
+        shutil.copytree(source_root / relative, private_source_root / relative)
+    configured_binary = os.environ.get("YOLOMUX_GO_BINARY", "").strip()
+    binary = Path(configured_binary) if configured_binary else tmp_path / "yolomux-go"
+    if not configured_binary:
+        go_binary = shutil.which("go")
+        if not go_binary:
+            pytest.skip("Go Codex lifecycle browser regression requires the Go toolchain")
+        build_environment = {**os.environ, "GOTOOLCHAIN": "local", "GOWORK": "off", "GO111MODULE": "on"}
+        image_module_cache = Path("/opt/yomux-go-mod-cache")
+        if image_module_cache.is_dir():
+            build_environment.update({"GOMODCACHE": str(image_module_cache), "GOPROXY": "off", "GOSUMDB": "off", "GOCACHE": str(tmp_path / "go-cache"), "GOPATH": str(tmp_path / "go-path")})
+        generated_version = tmp_path / "product_version_generated.go"
+        go_overlay = tmp_path / "go-overlay.json"
+        generate_go_version_overlay(source_root / "yomux_lib" / "version.py", generated_version, go_overlay, source_root / "cmd" / "yomux-go" / "product_version_generated.go")
+        subprocess.run([go_binary, "build", "-buildvcs=false", "-overlay", str(go_overlay), "-o", str(binary), "./cmd/yomux-go"], cwd=source_root, check=True, env=build_environment)
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "auth.yaml").write_text("users:\n  - username: lifecycle-admin\n    password: fixture-only-password\n    role: admin\n", encoding="utf-8")
+    (config_dir / "auth-cookie-secret").write_text("22" * 32, encoding="ascii")
+    state_file = tmp_path / "codex-screen-state"
+    state_file.write_text("working", encoding="ascii")
+    attention_state_file = tmp_path / "codex-attention-screen-state"
+    attention_state_file.write_text("attention", encoding="ascii")
+    screen_driver = tmp_path / "codex"
+    screen_driver.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys, time\n"
+        "state = pathlib.Path(sys.argv[1])\n"
+        "screens = {\n"
+        " 'working': 'OpenAI Codex\\nWorking...\\nEsc to interrupt',\n"
+        " 'completion': 'OpenAI Codex\\nGoal achieved',\n"
+        " 'attention': 'OpenAI Codex\\nWould you like to run the following command?\\nEnter to select    Esc to cancel',\n"
+        "}\n"
+        "while True:\n"
+        " text = screens.get(state.read_text(encoding='ascii').strip(), 'Codex status unavailable')\n"
+        " sys.stdout.write('\\x1b[2J\\x1b[H' + text + '\\n')\n"
+        " sys.stdout.flush()\n"
+        " time.sleep(0.1)\n",
+        encoding="utf-8",
+    )
+    screen_driver.chmod(0o700)
+    prefix = f"yt-codex-lifecycle-{os.getpid()}"
+    codex_session = f"{prefix}-codex"
+    working_screen_command = " ".join(shlex.quote(value) for value in ("exec", "-a", "codex", sys.executable, str(screen_driver), str(state_file)))
+    attention_screen_command = " ".join(shlex.quote(value) for value in ("exec", "-a", "codex", sys.executable, str(screen_driver), str(attention_state_file)))
+    tmux_runtime = start_isolated_tmux_runtime(
+        monkeypatch,
+        tmp_path,
+        session_commands={
+            codex_session: f"bash -c {shlex.quote(working_screen_command)}",
+        },
+        session_cwd=source_root,
+    )
+    port_lease = HttpPortLease.reserve()
+    private_roots = {"HOME": tmp_path / "home", "XDG_CONFIG_HOME": tmp_path / "xdg-config", "XDG_DATA_HOME": tmp_path / "xdg-data", "XDG_STATE_HOME": tmp_path / "xdg-state", "XDG_CACHE_HOME": tmp_path / "xdg-cache", "XDG_RUNTIME_DIR": tmp_path / "xdg-runtime", "TMPDIR": tmp_path / "tmp"}
+    for path in private_roots.values():
+        path.mkdir(parents=True, exist_ok=True)
+    environment = _synthetic_server_environment()
+    environment.update({key: str(path) for key, path in private_roots.items()})
+    environment.update({
+        "YOMUX_TMUX_SOCKET": str(tmux_runtime.socket_path),
+        "YOMUX_STATS_SYNTHETIC_HOST": "1",
+        "YOMUX_CODEX_TRANSCRIPT_ROOT": str(tmp_path / "codex-sessions"),
+        "YOMUX_CLAUDE_TRANSCRIPT_ROOT": str(tmp_path / "claude-projects"),
+        "YOMUX_OPENCODE_DATABASE": str(tmp_path / "missing-opencode.sqlite3"),
+        "PYTHONPATH": str(private_source_root),
+    })
+    (tmp_path / "codex-sessions").mkdir()
+    (tmp_path / "claude-projects").mkdir()
+    server_log_path = tmp_path / "go-codex-lifecycle.log"
+    server_log = server_log_path.open("w", encoding="utf-8")
+    process = None
+    try:
+        subprocess.run(
+            [tmux_runtime.tmux_binary, "-S", str(tmux_runtime.socket_path), "new-window", "-d", "-t", codex_session, "-n", "attention", f"bash -c {shlex.quote(attention_screen_command)}"],
+            check=True,
+            env=os.environ,
+        )
+        process = subprocess.Popen(
+            [str(binary), "--http", "--host", "127.0.0.1", "--port", str(port_lease.port), "--root", str(private_source_root), "--config", str(config_dir), "--stats", str(tmp_path / "stats.sqlite3")],
+            cwd=private_source_root, env=environment, stdout=server_log, stderr=subprocess.STDOUT, text=True, start_new_session=True,
+        )
+        server_log.close()
+        server_log = None
+        port_lease.release()
+        WebDriverWait(browser, 30, poll_frequency=0.05).until(lambda _driver: _go_server_http_is_ready(port_lease.port))
+        base_url = f"http://127.0.0.1:{port_lease.port}"
+        browser.get(f"{base_url}/login")
+        login_form = WebDriverWait(browser, 15, poll_frequency=0.05).until(lambda driver: driver.find_elements(By.CSS_SELECTOR, 'form[action="/login"]') or driver.find_elements(By.CSS_SELECTOR, 'input[name="username"]') or _raise_login_page_diagnostic(driver))[0]
+        login_form.find_element(By.NAME, "username").send_keys("lifecycle-admin")
+        login_form.find_element(By.NAME, "password").send_keys("fixture-only-password")
+        login_form.find_element(By.CSS_SELECTOR, "button[type=submit]").click()
+        WebDriverWait(browser, 15, poll_frequency=0.05).until(lambda driver: driver.current_url.split("?", 1)[0].rstrip("/") == base_url)
+        script_id = browser.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": """
+          const NativeEventSource = window.EventSource;
+          Object.defineProperty(window, '__goLifecycleEvents', {value: [], configurable: true});
+          Object.defineProperty(window, '__goLifecycleYoloEvents', {value: [], configurable: true});
+          window.EventSource = class extends NativeEventSource {
+            constructor(url, options) {
+              super(url, options);
+              if (String(url).includes('/api/client-events')) {
+                this.addEventListener('attention_acks_changed', event => window.__goLifecycleEvents.push(JSON.parse(event.data)));
+                this.addEventListener('auto_approve_changed', event => window.__goLifecycleYoloEvents.push(JSON.parse(event.data)));
+              }
+            }
+          };
+          const nativeFetch = window.fetch.bind(window);
+          Object.defineProperty(window, '__goLifecycleAckResponses', {value: [], configurable: true});
+          Object.defineProperty(window, '__goLifecycleYoloResponses', {value: [], configurable: true});
+          window.fetch = async (input, init = {}) => {
+            const response = await nativeFetch(input, init);
+            const requestPath = new URL(typeof input === 'string' ? input : input.url, location.href).pathname;
+            if (requestPath.includes('/api/attention-ack')) {
+              const body = await response.clone().json();
+              window.__goLifecycleAckResponses.push({status: response.status, body});
+            }
+            if (requestPath === '/api/auto-approve' && String(init.method || input.method || 'GET').toUpperCase() === 'POST') {
+              const body = await response.clone().json();
+              window.__goLifecycleYoloResponses.push({status: response.status, body});
+            }
+            return response;
+          };
+        """})["identifier"]
+        browser.get(f"{base_url}/?sessions={codex_session}&layout=left&tabs=left:{codex_session}")
+        WebDriverWait(browser, 20, poll_frequency=0.05).until(lambda driver: driver.execute_script("return document.readyState === 'complete' && document.querySelector('#grid') !== null"))
+
+        def get_activity():
+            return browser.execute_async_script("const done=arguments[0]; fetch('/api/activity?session_file_hours=24', {cache:'no-store'}).then(async r => done({status:r.status, payload:await r.json()})).catch(e=>done({error:String(e)}));")
+
+        def refresh_ui_activity():
+            browser.execute_async_script("const done=arguments[0]; fetchTabberActivity({visible:true, allowHidden:true}).then(done).catch(error=>done({error:String(error)}));")
+
+        WebDriverWait(browser, 30, poll_frequency=0.1).until(lambda _driver: browser.execute_script("return document.querySelector('.panel-detail-row') !== null"))
+        browser.execute_script("window.__goLifecycleStatsStream = new EventSource('/api/stats-stream?range_seconds=300&resolution=AUTO&client_id=codex-lifecycle-browser');")
+        latest_activity = {}
+        def activity_has_working_codex(_driver):
+            latest_activity.update(get_activity())
+            return latest_activity.get("status") == 200 and any(row.get("state") == "working" for row in latest_activity.get("payload", {}).get("agent_windows", {}).get(codex_session, []))
+        WebDriverWait(browser, 45, poll_frequency=0.5).until(activity_has_working_codex)
+        initial = latest_activity
+        initial_rows = initial.get("payload", {}).get("agent_windows", {}).get(codex_session, [])
+        assert any(row.get("state") == "working" for row in initial_rows), initial
+        refresh_ui_activity()
+        WebDriverWait(browser, 20, poll_frequency=0.1).until(lambda _driver: browser.execute_script("return [...document.querySelectorAll('.panel-detail-row .agent-window-status-dot')].some(dot => dot.classList.contains('status-indicator--working'))"))
+
+        # The second window is already at an approval prompt, so the session tab
+        # exposes the real YO control while the first Codex pane remains working.
+        first_tab = browser.current_window_handle
+        browser.switch_to.new_window("tab")
+        second_tab = browser.current_window_handle
+        browser.get(f"{base_url}/?sessions={codex_session}&layout=left&tabs=left:{codex_session}")
+        WebDriverWait(browser, 20, poll_frequency=0.1).until(lambda driver: driver.execute_script("""
+          const marker = document.querySelector(`.pane-tab[data-pane-tab="${CSS.escape(arguments[0])}"] [data-action="pane-tab-auto-approve"]`);
+          return document.readyState === 'complete' && document.querySelector('#grid')
+            && marker?.classList.contains('inactive') === true;
+        """, codex_session))
+        WebDriverWait(browser, 10, poll_frequency=0.1).until(lambda _driver: browser.execute_script("return clientEventTransportState?.source?.readyState === EventSource.OPEN"))
+        browser.execute_script("""
+          window.__goLifecycleYoloEvents = [];
+          clientEventTransportState.source.addEventListener('auto_approve_changed', event => window.__goLifecycleYoloEvents.push(JSON.parse(event.data)));
+        """)
+        yolo_revision_before_enable = browser.execute_script("return Number(clientEventTransportState.resourceRevisions.get('auto_approve_changed') || 0)")
+        browser.switch_to.window(first_tab)
+        yolo_marker = WebDriverWait(browser, 15, poll_frequency=0.1).until(lambda driver: driver.execute_script("""
+          const marker = document.querySelector(`.pane-tab[data-pane-tab="${CSS.escape(arguments[0])}"] [data-action="pane-tab-auto-approve"]`);
+          return marker && marker.classList.contains('inactive') ? marker : false;
+        """, codex_session))
+        yolo_marker.click()
+        WebDriverWait(browser, 15, poll_frequency=0.1).until(lambda _driver: browser.execute_script("""
+          const state = autoApproveStates.get(arguments[0]);
+          const marker = document.querySelector(`.pane-tab[data-pane-tab="${CSS.escape(arguments[0])}"] .session-yolo-marker`);
+          return state?.enabled === true && marker?.classList.contains('active') === true
+            && window.__goLifecycleYoloResponses?.some(item => item.status === 200 && item.body?.enabled === true)
+            && window.__goLifecycleYoloEvents?.some(event => event.payload?.changes?.[arguments[0]]?.enabled === true);
+        """, codex_session))
+        yolo_enable = browser.execute_script("""
+          const marker = document.querySelector(`.pane-tab[data-pane-tab="${CSS.escape(arguments[0])}"] .session-yolo-marker`);
+          return {state: autoApproveStates.get(arguments[0]), marker: marker?.className,
+            response: window.__goLifecycleYoloResponses.at(-1), event: window.__goLifecycleYoloEvents.at(-1)};
+        """, codex_session)
+        assert yolo_enable["response"]["body"]["enabled"] is True and "active" in yolo_enable["marker"], yolo_enable
+        browser.switch_to.window(second_tab)
+        try:
+            WebDriverWait(browser, 10, poll_frequency=0.1).until(lambda _driver: browser.execute_script("""
+              const marker = document.querySelector(`.pane-tab[data-pane-tab="${CSS.escape(arguments[0])}"] .session-yolo-marker`);
+              const revision = Number(clientEventTransportState?.resourceRevisions?.get('auto_approve_changed') || 0);
+              return autoApproveStates.get(arguments[0])?.enabled === true && marker?.classList.contains('active') === true
+                && revision > arguments[1];
+            """, codex_session, yolo_revision_before_enable))
+        except TimeoutException as error:
+            state = browser.execute_script("""
+              return {enabled: autoApproveStates.get(arguments[0]),
+                marker: document.querySelector(`.pane-tab[data-pane-tab="${CSS.escape(arguments[0])}"] .session-yolo-marker`)?.className,
+                yoloEvents: window.__goLifecycleYoloEvents,
+                connection: clientEventTransportState?.connected,
+                resourceEpoch: clientEventTransportState?.resourceEpoch,
+                revisions: [...(clientEventTransportState?.resourceRevisions || new Map()).entries()]};
+                """, codex_session)
+            raise AssertionError(state) from error
+        yolo_revision_after_enable = browser.execute_script("return Number(clientEventTransportState.resourceRevisions.get('auto_approve_changed') || 0)")
+        browser.switch_to.window(first_tab)
+        browser.refresh()
+        WebDriverWait(browser, 20, poll_frequency=0.1).until(lambda _driver: browser.execute_script("""
+          const state = autoApproveStates.get(arguments[0]);
+          const marker = document.querySelector(`.pane-tab[data-pane-tab="${CSS.escape(arguments[0])}"] .session-yolo-marker`);
+          return state?.enabled === true && marker?.classList.contains('active') === true;
+        """, codex_session))
+        browser.execute_async_script("const done=arguments[0]; fetchTabberActivity({visible:true, allowHidden:true}).then(done).catch(error=>done({error:String(error)}));")
+        WebDriverWait(browser, 10, poll_frequency=0.1).until(lambda _driver: browser.execute_script("""
+          const state = autoApproveStates.get(arguments[0]);
+          const marker = document.querySelector(`.pane-tab[data-pane-tab="${CSS.escape(arguments[0])}"] .session-yolo-marker`);
+          return state?.enabled === true && marker?.classList.contains('active') === true;
+        """, codex_session))
+        browser.execute_script("document.querySelector(`.pane-tab[data-pane-tab=\"${CSS.escape(arguments[0])}\"] [data-action=\"pane-tab-auto-approve\"]`).click();", codex_session)
+        WebDriverWait(browser, 15, poll_frequency=0.1).until(lambda _driver: browser.execute_script("""
+          const state = autoApproveStates.get(arguments[0]);
+          const marker = document.querySelector(`.pane-tab[data-pane-tab="${CSS.escape(arguments[0])}"] .session-yolo-marker`);
+          return state?.enabled === false && marker?.classList.contains('inactive') === true
+            && window.__goLifecycleYoloResponses?.some(item => item.status === 200 && item.body?.enabled === false)
+            && window.__goLifecycleYoloEvents?.some(event => event.payload?.changes?.[arguments[0]]?.enabled === false);
+        """, codex_session))
+        browser.switch_to.window(second_tab)
+        WebDriverWait(browser, 10, poll_frequency=0.1).until(lambda _driver: browser.execute_script("""
+          const marker = document.querySelector(`.pane-tab[data-pane-tab="${CSS.escape(arguments[0])}"] .session-yolo-marker`);
+          const revision = Number(clientEventTransportState?.resourceRevisions?.get('auto_approve_changed') || 0);
+          return autoApproveStates.get(arguments[0])?.enabled === false && marker?.classList.contains('inactive') === true
+            && revision > arguments[1];
+        """, codex_session, yolo_revision_after_enable))
+        browser.switch_to.window(first_tab)
+
+        state_file.write_text("completion", encoding="ascii")
+        WebDriverWait(browser, 45, poll_frequency=0.5).until(lambda _driver: any(row.get("state") == "cooldown" and row.get("cooldown_attention_key") for row in get_activity().get("payload", {}).get("agent_windows", {}).get(codex_session, [])))
+        refresh_ui_activity()
+        WebDriverWait(browser, 10, poll_frequency=0.1).until(lambda _driver: browser.execute_script("return [...document.querySelectorAll('.panel-detail-row .agent-window-status-dot')].some(dot => dot.classList.contains('status-indicator--cooldown'))"))
+        try:
+            WebDriverWait(browser, 10, poll_frequency=0.1).until(lambda _driver: browser.execute_script("return [...document.querySelectorAll('.panel-detail-row .agent-window-status-dot')].some(dot => dot.classList.contains('status-indicator--attention'))"))
+        except TimeoutException as error:
+            state = browser.execute_script("return {activity:tabberActivityPayload.agent_windows?.[arguments[0]], canonical:autoApproveStates.get(arguments[0]), model:sessionAgentWindowStatusPayloads(arguments[0]), buttons:[...document.querySelectorAll('.panel-detail-row [data-window-index]')].map(b=>({index:b.dataset.windowIndex,classes:b.querySelector('.agent-window-status-dot')?.className}))};", codex_session)
+            raise AssertionError(state) from error
+
+        clicked_yellow_row = browser.execute_script("""
+          const row = [...document.querySelectorAll('.panel-detail-row [data-window-index]')]
+            .find(candidate => candidate.querySelector('.status-indicator--cooldown'));
+          if (!row) return false;
+          const target = {index: row.dataset.windowIndex, session: row.dataset.windowSession};
+          row.click();
+          return target;
+        """)
+        assert clicked_yellow_row, "yellow Codex window row disappeared before acknowledgement click"
+        assert clicked_yellow_row == {"index": "0", "session": codex_session}, clicked_yellow_row
+        WebDriverWait(browser, 15, poll_frequency=0.1).until(lambda driver: driver.execute_script("return window.__goLifecycleAckResponses?.length === 1 && window.__goLifecycleEvents?.length >= 1"))
+        acknowledgement = browser.execute_script("return {post:window.__goLifecycleAckResponses[0], event:window.__goLifecycleEvents[0]};")
+        posted_keys = acknowledgement["post"]["body"].get("acknowledged", [])
+        assert acknowledgement["post"]["status"] == 200 and posted_keys and posted_keys[0].startswith("go:cooldown:"), acknowledgement
+        assert posted_keys[0] in acknowledgement["event"].get("payload", {}).get("acknowledged", []), acknowledgement
+        WebDriverWait(browser, 20, poll_frequency=0.1).until(lambda _driver: any(row.get("cooldown_acknowledged") is True for row in get_activity()["payload"].get("agent_windows", {}).get(codex_session, [])))
+        try:
+            WebDriverWait(browser, 15, poll_frequency=0.1).until(lambda driver: driver.execute_script("""
+              const yellow = document.querySelector('.panel-detail-row .agent-window-status-dot--acknowledging');
+              const tab = document.querySelector(`.pane-tab[data-pane-tab="${CSS.escape(arguments[0])}"] .session-agent-activity-marker .agent-window-status-dot`);
+              const red = [...document.querySelectorAll('.panel-detail-row .agent-window-status-dot')].some(dot => dot.classList.contains('status-indicator--attention'));
+              return !yellow && red && tab && !tab.classList.contains('agent-window-status-dot--tone-cooldown');
+            """, codex_session))
+        except TimeoutException as error:
+            state = browser.execute_script("""
+              const session = arguments[0];
+              const tab = document.querySelector(`.pane-tab[data-pane-tab="${CSS.escape(session)}"] .session-agent-activity-marker .agent-window-status-dot`);
+              return {
+                activityStatus: {
+                  stale: tabberActivityPayload?.cache?.stale === true,
+                  revision: tabberActivityPayload?.agent_window_snapshot_revision || 0,
+                  rows: (tabberActivityPayload?.agent_windows?.[session] || []).map(row => ({window: row.window_index, state: row.state})),
+                },
+                canonical: autoApproveStates.get(session),
+                model: sessionAgentWindowStatusPayloads(session),
+                detailRows: [...document.querySelectorAll('.panel-detail-row [data-window-index]')].map(row => ({
+                  index: row.dataset.windowIndex,
+                  status: row.querySelector('.agent-window-status-dot')?.className,
+                })),
+                tab: tab?.className || null,
+              };
+            """, codex_session)
+            raise AssertionError(state) from error
+        errors = [entry for entry in browser.get_log("browser") if "Uncaught" in entry["message"]]
+        assert not errors, errors
+    finally:
+        active_error = sys.exc_info()[1]
+        browser_retirement_error = None
+        for window_handle in list(browser.window_handles):
+            try:
+                browser.switch_to.window(window_handle)
+                browser.get("about:blank")
+                WebDriverWait(browser, 3, poll_frequency=0.05).until(lambda driver: str(driver.current_url) == "about:blank")
+            except WebDriverException as error:
+                browser_retirement_error = AssertionError(f"Go Codex lifecycle browser page did not retire: {error}")
+        if 'script_id' in locals():
+            try:
+                browser.execute_cdp_cmd("Page.removeScriptToEvaluateOnNewDocument", {"identifier": script_id})
+            except WebDriverException:
+                pass
+        port_lease.close()
+        if server_log is not None:
+            server_log.close()
+        if process is not None:
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        stop_isolated_tmux_runtime(tmux_runtime)
+        if browser_retirement_error is not None and active_error is None:
+            raise browser_retirement_error
+
+
 def _assert_go_refill_browser_journey(browser, tmp_path, home, opencode_database):
     """Exercise native controls against the Go host operation and real charts."""
     wait = WebDriverWait(browser, 30, poll_frequency=0.05)
@@ -1434,6 +1756,21 @@ def _assert_go_refill_browser_journey(browser, tmp_path, home, opencode_database
     assert "Refill the last 24 hours?" in dialog.text
     assert "CPU usage may rise" in dialog.text
     assert "Deleted source history cannot be recovered" in dialog.text
+    warning = dialog.find_element(By.CSS_SELECTOR, '.file-editor-dialog-body.danger')
+    warning_style = browser.execute_script(
+        """
+        const warning = arguments[0];
+        const color = getComputedStyle(warning).color.match(/[0-9.]+/g).map(Number);
+        const surface = getComputedStyle(warning.closest('.file-editor-dialog')).backgroundColor.match(/[0-9.]+/g).map(Number);
+        const luminance = ([r, g, b]) => [r, g, b].map(value => value / 255).map(value => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4).reduce((sum, value, index) => sum + value * [0.2126, 0.7152, 0.0722][index], 0);
+        const [lighter, darker] = [luminance(color), luminance(surface)].sort((left, right) => right - left);
+        return {color, contrast: (lighter + 0.05) / (darker + 0.05), fontWeight: getComputedStyle(warning).fontWeight};
+        """,
+        warning,
+    )
+    assert warning_style["color"][0] > warning_style["color"][1], warning_style
+    assert warning_style["contrast"] >= 4.5, warning_style
+    assert int(warning_style["fontWeight"]) >= 700, warning_style
     dialog.find_element(By.CSS_SELECTOR, '[data-dialog-action="cancel"]').click()
     assert not browser.find_elements(By.CSS_SELECTOR, '[role="dialog"][aria-label="Refill the last 24 hours?"]')
     before_status = browser.execute_async_script("const done=arguments[0]; fetch('/api/stats-refill').then(r=>r.json()).then(done);")
@@ -1452,9 +1789,18 @@ def _assert_go_refill_browser_journey(browser, tmp_path, home, opencode_database
     with sqlite3.connect(tmp_path / "stats.sqlite3", timeout=1) as blocker:
         blocker.execute("BEGIN IMMEDIATE")
         browser.find_element(By.CSS_SELECTOR, refill_selector).click()
+        browser.execute_script("window.__refillBeforeSubmit = document.querySelector(arguments[0]);", refill_selector)
         confirm_refill()
         wait.until(lambda driver: driver.find_elements(By.CSS_SELECTOR, '[data-js-debug-chart="agentTokens"] [data-stats-refill-wait]'))
-        assert not browser.find_element(By.CSS_SELECTOR, refill_selector).is_enabled()
+        # Status changes replace the control. Observe its current state in the
+        # same browser task rather than retaining a node across WebDriver calls.
+        refill_control = browser.execute_script("""
+            const previous = window.__refillBeforeSubmit;
+            delete window.__refillBeforeSubmit;
+            const current = document.querySelector(arguments[0]);
+            return {previousDetached: previous?.isConnected === false, present: Boolean(current), disabled: current?.disabled};
+        """, refill_selector)
+        assert refill_control == {"previousDetached": True, "present": True, "disabled": True}, refill_control
         assert browser.find_elements(By.CSS_SELECTOR, '[data-js-debug-chart="activity"] svg')
         running = browser.execute_async_script("const done=arguments[0]; fetch('/api/stats-refill', {method:'POST'}).then(r=>r.json()).then(done);")
         assert running["state"] == "running", running
@@ -2488,6 +2834,8 @@ def _wait_for_stats_warning(harness: Any) -> dict[str, Any] | bool:
     return state if state["warnings"] else False
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_real_stats_cleanup_settles_start_and_stops_before_final_flush(authenticated_e2e_browser: Any) -> None:
     wait_for_fixture_api_quiescence(authenticated_e2e_browser.driver, timeout=20)
     _open_real_stats_graph(authenticated_e2e_browser, include_finder=False)
@@ -2538,6 +2886,8 @@ def test_real_stats_cleanup_settles_start_and_stops_before_final_flush(authentic
     _flush_and_stop_real_stats_graph(authenticated_e2e_browser, require_client=True)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_hidden_stats_panel_receives_push_then_opens_from_cached_generation(
     authenticated_e2e_browser: Any,
     request: pytest.FixtureRequest,
@@ -2713,6 +3063,8 @@ def test_hidden_stats_panel_receives_push_then_opens_from_cached_generation(
     _flush_and_stop_real_stats_graph(authenticated_e2e_browser, require_client=True)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_stats_stream_failure_is_durable_latched_and_recovers_only_after_a_real_push(
     authenticated_e2e_browser: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -3060,6 +3412,8 @@ def _select_one_second_five_minute_graph(harness: Any) -> None:
     assert result == {"ok": True}, result
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_real_stats_cpu_value_round_trips_through_rpc_and_rendered_svg(
     authenticated_e2e_browser: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -3151,6 +3505,8 @@ def test_real_stats_cpu_value_round_trips_through_rpc_and_rendered_svg(
     _flush_and_stop_real_stats_graph(authenticated_e2e_browser)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_real_stats_interval_options_return_after_range_round_trip_and_reload(authenticated_e2e_browser: Any) -> None:
     client = authenticated_e2e_browser.runtime.app.stats_current_client
     assert client.ensure_started() is True

@@ -227,6 +227,7 @@ def test_dockview_clicking_xterm_tab_mounts_visible_terminal(browser, tmp_path):
     }
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_dockview_real_xterm_tab_switch_accepts_input_and_output(browser, monkeypatch, tmp_path):
     runtime = start_isolated_browser_app(monkeypatch, tmp_path, session_count=2)
@@ -351,6 +352,7 @@ def test_dockview_real_xterm_tab_switch_accepts_input_and_output(browser, monkey
         stop_browser_fixture(server, thread, runtime, browser=browser)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_dockview_delayed_tab_activation_still_focuses_terminal(browser, monkeypatch, tmp_path):
     runtime = start_isolated_browser_app(monkeypatch, tmp_path, session_count=2)
@@ -425,6 +427,7 @@ def test_dockview_delayed_tab_activation_still_focuses_terminal(browser, monkeyp
         stop_browser_fixture(server, thread, runtime, browser=browser)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_dockview_prosemirror_failure_does_not_block_xterm_switch(browser, monkeypatch, tmp_path):
     runtime = start_isolated_browser_app(monkeypatch, tmp_path, session_count=2)
@@ -1514,21 +1517,28 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
             (async () => {
               await Promise.all([loadAutoStatuses.request, tabberActivityState.request]);
               const originalFetch = window.fetch;
-              const state = window.__tabSwitchActivity = {heldCalls: 0, pollBefore: runtimeIntervalDiagnostics('auto-approve')[0].lastStartedAtMs};
+              const state = window.__tabSwitchActivity = {heldCalls: 0, heldStatusCalls: 0, pollBefore: runtimeIntervalDiagnostics('auto-approve')[0].lastStartedAtMs};
               state.barrier = new Promise(resolve => { state.release = resolve; });
+              state.statusBarrier = new Promise(resolve => { state.releaseStatus = resolve; });
               state.restore = async () => {
                 window.fetch = originalFetch;
                 state.release();
+                state.releaseStatus();
                 try { await Promise.all([state.promise, loadAutoStatuses.request]); }
                 finally { delete window.__tabSwitchActivity; }
               };
-              // The Go status recovery poll shares this request; keep it active while holding only its response.
+              // Go auto-approval snapshots and Tabber activity are separate owners. Hold both routes
+              // until the timer proves it entered the status refresh path.
               window.fetch = async (...args) => {
                 const input = args[0];
                 const url = new URL(typeof input === 'string' ? input : input.url, location.href);
                 if (url.pathname === '/api/activity') {
                   state.heldCalls += 1;
                   await state.barrier;
+                }
+                if (url.pathname === '/api/auto-approve' && (args[1]?.method || input?.method || 'GET').toUpperCase() === 'GET') {
+                  state.heldStatusCalls += 1;
+                  await state.statusBarrier;
                 }
                 return originalFetch.apply(window, args);
               };
@@ -1540,10 +1550,11 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
         )
         assert prepared is True, prepared
         WebDriverWait(browser, 10).until(lambda driver: driver.execute_script(
-            "const state=window.__tabSwitchActivity; return state?.heldCalls === 1"
+            "const state=window.__tabSwitchActivity; return state?.heldCalls === 1 && state.heldStatusCalls === 1"
             " && runtimeIntervalDiagnostics('auto-approve')[0].lastStartedAtMs > state.pollBefore"
-            " && Boolean(loadAutoStatuses.request) && tabberActivityState.request === state.request;"
+            " && tabberActivityState.request === state.request;"
         ))
+        browser.execute_script("window.__tabSwitchActivity.releaseStatus();")
         setup = browser.execute_script(
             """
             clearClientPerfCounters();
@@ -1553,13 +1564,26 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
             const originalFromJson = api.fromJSON;
             let fromJsonCalls = 0;
             const originalRefresh = refreshTabberPanels;
+            const originalReservations = dockviewSyncHeaderActionReservations;
+            const originalTabRefreshes = new Map();
+            let tabRefreshCalls = 0;
+            let reservationCalls = 0;
             let fullRefreshCalls = 0;
             const fullRefreshStacks = [];
             const firstPanel = panelNodes.get('1');
             const secondPanel = panelNodes.get('2');
             firstPanel.__tabSwitchSentinel = 'first';
             secondPanel.__tabSwitchSentinel = 'second';
-            const perf = window.__tabSwitchPerf = {samples: [], commitSamples: [], commitWorkSamples: [], immediate: [], fromJsonCalls: () => fromJsonCalls, fullRefreshCalls: () => fullRefreshCalls, fullRefreshStacks, firstPanel, secondPanel};
+            const perf = window.__tabSwitchPerf = {samples: [], commitSamples: [], commitWorkSamples: [], commitChromeCalls: [], immediate: [], fromJsonCalls: () => fromJsonCalls, fullRefreshCalls: () => fullRefreshCalls, tabRefreshCalls: () => tabRefreshCalls, reservationCalls: () => reservationCalls, fullRefreshStacks, firstPanel, secondPanel};
+            for (const tab of document.querySelectorAll('.dockview-pane-tab')) {
+              const original = tab.__yomuxDockviewRefresh;
+              if (typeof original !== 'function') continue;
+              originalTabRefreshes.set(tab, original);
+              tab.__yomuxDockviewRefresh = (...args) => {
+                tabRefreshCalls += 1;
+                return original.apply(tab, args);
+              };
+            }
             const measurePointer = event => {
               const tab = event.target.closest?.('.dockview-pane-tab[data-pane-tab]');
               const item = tab?.dataset?.paneTab || '';
@@ -1577,6 +1601,8 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
             perf.restore = () => {
               dockviewCommitPanelActivation = originalCommit;
               api.fromJSON = originalFromJson;
+              dockviewSyncHeaderActionReservations = originalReservations;
+              for (const [tab, refresh] of originalTabRefreshes) tab.__yomuxDockviewRefresh = refresh;
               refreshTabberPanels = originalRefresh;
               document.removeEventListener('pointerdown', measurePointer, true);
               delete firstPanel.__tabSwitchSentinel;
@@ -1586,10 +1612,12 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
             dockviewCommitPanelActivation = (item, options) => {
               const started = activationStartedAt.get(String(item || ''));
               const commitStarted = performance.now();
+              const chromeBefore = [tabRefreshCalls, reservationCalls];
               const result = originalCommit(item, options);
               if (started !== undefined) {
                 perf.commitSamples.push(performance.now() - started);
                 perf.commitWorkSamples.push(performance.now() - commitStarted);
+                perf.commitChromeCalls.push([tabRefreshCalls - chromeBefore[0], reservationCalls - chromeBefore[1]]);
                 activationStartedAt.delete(String(item || ''));
               }
               return result;
@@ -1602,6 +1630,10 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
               fullRefreshCalls += 1;
               fullRefreshStacks.push(new Error().stack);
               return originalRefresh(...args);
+            };
+            dockviewSyncHeaderActionReservations = (...args) => {
+              reservationCalls += 1;
+              return originalReservations(...args);
             };
             document.addEventListener('pointerdown', measurePointer, true);
             return {
@@ -1685,6 +1717,7 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
               commitWorkSamples,
               commitWorkP95,
               commitWorkMax,
+              commitChromeCalls: window.__tabSwitchPerf.commitChromeCalls,
               longTasks,
               attributableMax,
               max: samples.at(-1),
@@ -1703,6 +1736,7 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
         assert result["fromJsonCalls"] == 0, result
         print('Tabber full refresh producers:', result["fullRefreshStacks"])
         assert result["fullRefreshCalls"] == 0, result
+        assert all(calls == [0, 0] for calls in result["commitChromeCalls"]), result
         assert result["layoutSyncs"] <= 30, result
         # This fixture has no xterm render events; the real-xterm native journey owns paint completion.
         assert result["activationPaints"] == 0, result
@@ -1711,6 +1745,9 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
         assert result["commitWorkP95"] < 50, result
         assert result["immediate"] is True, result
         assert result["firstPanelPreserved"] is True and result["secondPanelPreserved"] is True, result
+        browser.execute_async_script("const done=arguments[arguments.length-1]; requestAnimationFrame(() => requestAnimationFrame(() => done(true))); ")
+        deferred = browser.execute_script("return {tabs: window.__tabSwitchPerf.tabRefreshCalls(), reservations: window.__tabSwitchPerf.reservationCalls()};")
+        assert deferred["tabs"] > 0 and deferred["reservations"] > 0, deferred
         assert_fixture_client_event_demand_claimed(browser)
         print({key: result[key] for key in ("p95", "commitP95", "commitWorkP95", "commitWorkMax", "activationPaintMax", "longTasks", "immediate")})
         if os.environ.get("PYTEST_XDIST_WORKER"):
@@ -1752,6 +1789,36 @@ def test_dockview_tabber_switch_uses_one_lightweight_sync_and_meets_activation_b
             assert restored is True, restored
         finally:
             release_fixture_client_event_demand(browser)
+
+
+def test_dockview_app_activation_updates_header_targets_before_deferred_refresh(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
+    wait_for_dockview(browser, min_tabs=2)
+    result = browser.execute_script(
+        """
+        const group = document.querySelector('.dv-groupview');
+        const header = group?.querySelector('.dockview-pane-header-actions');
+        const targets = () => Array.from(header?.querySelectorAll('button') || []).map(button => ({
+          tab: button.dataset.tab || '',
+          windowSession: button.dataset.windowSession || '',
+          detailToggle: button.dataset.detailToggle || '',
+          paneMinimize: button.dataset.paneMinimize || '',
+        }));
+        const before = targets();
+        const activated = dockviewActivateUserTerminalTab('2', {userInitiated: true});
+        return {
+          activated,
+          active: activeItemForSide('left'),
+          before,
+          after: targets(),
+          deferredRefreshPending: dockviewLayoutState.deferredTabRefreshFrame !== 0,
+        };
+        """
+    )
+    assert result["activated"] is True and result["active"] == "2", result
+    assert result["before"] and any(target == "1" for row in result["before"] for target in row.values()), result
+    assert result["after"] and all(target in {"", "2"} for row in result["after"] for target in row.values()), result
+    assert result["deferredRefreshPending"] is True, result
 
 
 def test_dockview_tab_switch_updates_selection_before_deferred_side_sync(browser, tmp_path):
@@ -1848,7 +1915,9 @@ def test_cached_large_differ_does_not_block_terminal_activation(browser, tmp_pat
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
     wait_for_dockview(browser, min_tabs=2)
     original_script_timeout = browser.timeouts.script
-    browser.set_script_timeout(90)
+    # This stress fixture renders and cancels two 5,000-row trees beside other browser workers.
+    # The assertions below keep activation and long-task latency bounded independently.
+    browser.set_script_timeout(150)
     try:
         result = browser.execute_async_script(
         """
@@ -1878,12 +1947,25 @@ def test_cached_large_differ_does_not_block_terminal_activation(browser, tmp_pat
         fetchSessionFiles = () => Promise.resolve(false);
         const pendingTrees = [];
             const stageMs = {};
+            const activationLayoutTrace = [];
             let inputYieldFrames = 0;
             scheduleAfterFileExplorerFirstPaint = (...args) => { inputYieldFrames += 1; return originalAfterPaint(...args); };
             for (const name of ['fileExplorerChangesPanelStaticHtml', 'fileExplorerDifferFiles', 'renderFileExplorerChangesPanel',
               'renderChangesRoot', 'renderChangesGroups', 'renderChangedFileList', 'drainFileTreeRenderStepsWithInput',
               'syncFileExplorerDiffSessionControls', 'bindChangesPanel', 'syncFileExplorerChangesCollapseButtons',
-              'fileExplorerChangesCollapseToggleState', 'fileExplorerChangesRepoKeys']) {
+              'fileExplorerChangesCollapseToggleState', 'fileExplorerChangesRepoKeys',
+              'dockviewSyncHeaderActionReservations', 'dockviewSyncMountedPanels', 'dockviewHostCanAdoptLayout',
+              'dockviewActivateUserTerminalTab', 'adoptDockviewLayout', 'layoutSlotsFromDockviewJson',
+              'applyLayoutSlots', 'dockviewRefreshTabs', 'focusTerminalFromUserAction', 'restorePaneViewState',
+              'normalizeLayoutSlots', 'canonicalizeSidePaneLayout', 'compactLayoutSlots', 'nativeViewport',
+              'rootCssLengthPx', 'sidePaneConstrainedMode', 'preserveDockviewSidePaneSplit',
+              'capturePaneViewState', 'capturePaneElementScrollState', 'paneScrollContainerHasLayout',
+              'dockviewCommitPanelActivation', 'dockviewBeginTabActivationPerf',
+              'dockviewSetPendingUserPanelActivation', 'dockviewFinishTabActivationPerf',
+              'acknowledgeUserTerminalTabActivation', 'acknowledgeNotificationTarget', 'recordTabActivation',
+              'dismissSessionToasts', 'setFocusedPanelItem', 'commitUserTerminalTabActivation',
+              'activateTab', 'refreshTerminal', 'scheduleTerminalBlankScreenRefresh', 'terminalIsVisible',
+              'terminalRenderedContentPresent', 'updateTypingIndicator', 'syncClientEventDemand', 'syncServerWatchRoots']) {
           const original = globalThis[name];
           originalRenderers.set(name, original);
           globalThis[name] = (...args) => {
@@ -1894,6 +1976,10 @@ def test_cached_large_differ_does_not_block_terminal_activation(browser, tmp_pat
             const start = performance.now();
             try {
               const result = original(...args);
+              if (name === 'layoutSlotsFromDockviewJson' && args[2]?.activationItem) activationLayoutTrace.push({
+                options: args[2], vendorActive: dockviewLayoutState.api.activePanel?.id,
+                previous: dockviewLayoutActiveOnlySignature(args[1]), next: dockviewLayoutActiveOnlySignature(result),
+              });
               if (name === 'renderChangesGroups' && result?.then) pendingTrees.push(result);
               return result;
             }
@@ -1928,15 +2014,17 @@ def test_cached_large_differ_does_not_block_terminal_activation(browser, tmp_pat
           ? new PerformanceObserver(entries => longTasks.push(...entries.getEntries().map(entry => entry.duration)))
           : null;
         observer?.observe({type: 'longtask', buffered: false});
-        const started = performance.now();
+        for (const key of Object.keys(stageMs)) delete stageMs[key];
+            const started = performance.now();
         const paintOpportunity = new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(performance.now() - started))));
         activatePaneTab('left', '2', {userInitiated: true});
         const activationMs = performance.now() - started;
+            const immediateStageMs = {...stageMs};
         const immediate = {
           active: activeItemForSide('left'),
           focused: focusedTerminal,
           panelFocus: focusedPanelItem,
-          activationMs,
+          activationMs, immediateStageMs,
           explicitSyncTarget: fileExplorerExplicitSyncSessionTarget(),
           differSessionBeforeFollowup: fileExplorerSessionFilesState.payload.session,
           rows,
@@ -1980,7 +2068,7 @@ def test_cached_large_differ_does_not_block_terminal_activation(browser, tmp_pat
         longTasks.push(...(observer?.takeRecords?.() || []).map(entry => entry.duration));
         observer?.disconnect();
         done({...immediate, differSessionAfterFollowup: session, targetRows, clickToPaintOpportunityMs, differLargeFilterCalls, streamChunkRows,
-          longTaskMaxMs: Math.max(0, ...longTasks), longTasks, stageMs, inputYieldFrames,
+          longTaskMaxMs: Math.max(0, ...longTasks), longTasks, stageMs, activationLayoutTrace, inputYieldFrames,
           visibilityChecks, rowsWhenHidden, rowsAfterCancellation, preparationReads, readsWhenHidden,
           cancelledResult, cancellationYieldFrames});
         } finally {
@@ -3490,6 +3578,103 @@ def test_dockview_yellow_window_ball_click_switches_and_acknowledges(browser, tm
     assert acknowledged_state == {"hasWindowLabel": True, "activityCount": 1, "dotCount": 0, "ackPosts": 1}
 
 
+def test_go_status_payload_renders_working_completion_and_attention_together(browser, tmp_path):
+    stopped_ts = int(time.time()) - 5
+    cooldown_key = "go:cooldown:fixture-transition"
+    transcript_sessions = {
+        "1": {
+            "panes": [
+                {"target": "%1", "window": 0, "window_name": "bash", "window_active": True, "active": True, "process_label": "bash"},
+                {"target": "%2", "window": 1, "window_name": "codex", "window_active": False, "active": True, "process_label": "codex"},
+                {"target": "%3", "window": 2, "window_name": "codex", "window_active": False, "active": True, "process_label": "codex"},
+                {"target": "%4", "window": 3, "window_name": "codex", "window_active": False, "active": True, "process_label": "codex"},
+            ],
+        },
+    }
+    auto_approve_payload = {
+        "session_order": ["1"],
+        "sessions": {
+            "1": {
+                "target": "1",
+                "enabled": True,
+                "agent_windows": [
+                    {"kind": "codex", "state": "working", "window_index": 1, "window_label": "1:codex"},
+                    {"kind": "codex", "state": "idle", "window_index": 2, "window_label": "2:codex", "working_stopped_ts": stopped_ts, "transition_id": "go:transition:fixture-transition", "cooldown_attention_key": cooldown_key, "cooldown_acknowledged": False},
+                    {"kind": "codex", "state": "needs-input", "window_index": 3, "window_label": "3:codex", "attention_key": "go:attention:fixture"},
+                ],
+            },
+        },
+        "rules": {"path": "/fixture/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
+    }
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=left&tabs=left:1",
+        sessions=["1"],
+        transcript_sessions=transcript_sessions,
+        auto_approve_payload=auto_approve_payload,
+    )
+    wait_for_dockview(browser, min_tabs=1)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const dot = index => document.querySelector(`.panel-detail-row [data-window-index="${index}"] .agent-window-status-dot`);
+            return dot(1)?.classList.contains('status-indicator--working')
+              && dot(2)?.classList.contains('status-indicator--cooldown')
+              && dot(3)?.classList.contains('status-indicator--attention');
+            """
+        )
+    )
+    browser.find_element("css selector", '.panel-detail-row [data-window-index="2"]').click()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const posted = window.__bootFetches.find(entry => entry.path === '/api/attention-ack');
+            const red = document.querySelector('.panel-detail-row [data-window-index="3"] .agent-window-status-dot');
+            return posted?.body?.keys?.includes('go:cooldown:fixture-transition') === true
+              && red?.classList.contains('status-indicator--attention') === true;
+            """
+        )
+    )
+    browser.execute_script(
+        """
+        const key = 'go:cooldown:fixture-transition';
+        return handleClientPushEvent('attention_acks_changed', {
+          acknowledged: [key], acknowledged_at: {[key]: Date.now() / 1000},
+        }, {
+          epoch: 'go-fixture', resource: 'attention', base_resource_revision: 0, resource_revision: 1,
+        });
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const panelDot = document.querySelector('.panel-detail-row [data-window-index="2"] .agent-window-status-dot');
+            const tabDot = document.querySelector('.pane-tab[data-pane-tab="1"] .session-agent-activity-marker .agent-window-status-dot');
+            const redDot = document.querySelector('.panel-detail-row [data-window-index="3"] .agent-window-status-dot');
+            return panelDot?.classList.contains('agent-window-status-dot--acknowledging')
+              && tabDot?.classList.contains('agent-window-status-dot--acknowledging')
+              && redDot?.classList.contains('status-indicator--attention');
+            """
+        )
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const panel = document.querySelector('.panel-detail-row [data-window-index="2"]');
+            const tabDot = document.querySelector('.pane-tab[data-pane-tab="1"] .session-agent-activity-marker .agent-window-status-dot');
+            const redDot = document.querySelector('.panel-detail-row [data-window-index="3"] .agent-window-status-dot');
+            const acknowledged = autoApproveStates.get('1')?.agent_windows?.find(agent => agent.cooldown_attention_key === 'go:cooldown:fixture-transition')?.cooldown_acknowledged === true;
+            return acknowledged
+              && panel?.textContent.includes('2:codex')
+              && !panel.querySelector('.agent-window-status-dot.status-indicator--cooldown')
+              && !tabDot?.classList.contains('agent-window-status-dot--tone-cooldown')
+              && redDot?.classList.contains('status-indicator--attention');
+            """
+        )
+    )
+
+
 def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_path):
     attention_key = '["agent-window","1","2","","claude","needs-input","waiting"]'
     cooldown_key = '["agent-window","1","3","","codex","cooldown","1234"]'
@@ -3534,7 +3719,7 @@ def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_p
             return !!button
               && !!button.querySelector('.agent-window-agent-icon')
               && !!button.querySelector('.agent-window-status-dot.status-indicator--attention')
-              && !tab?.querySelector('.session-state-badge.session-state-needs-input')
+              && tab?.querySelector('.session-state-badge.session-state-needs-input')?.textContent === 'ASK'
               && !!tab?.querySelector('.session-agent-activity-marker .agent-window-status-dot.status-indicator--attention')
               && document.querySelector('.panel-detail-row [data-window-index="0"]')?.classList.contains('active');
             """
@@ -3605,6 +3790,217 @@ def test_dockview_red_window_ball_click_switches_and_acknowledges(browser, tmp_p
     )
     acked_keys = {key for body in ack_bodies for key in body.get("keys", [])}
     assert acked_keys == {attention_key}
+
+
+def test_codex_queued_followup_question_shows_red_ask_without_replacing_working(browser, tmp_path):
+    transcript_sessions = {
+        "1": {
+            "panes": [
+                {"target": "%42", "window": 0, "window_name": "codex", "window_active": True, "active": True, "process_label": "codex"},
+            ],
+            "agents": [
+                {"kind": "codex", "status": "working", "window_index": 0, "window_label": "0:codex", "pane_target": "%42", "queued_followup_question": True},
+            ],
+        },
+    }
+    auto_approve_payload = {
+        "session_order": ["1"],
+        "sessions": {
+            "1": {
+                "target": "1",
+                "enabled": False,
+                "screen": {"key": "working", "text": "agent is working"},
+                "agent_windows": [
+                    {"kind": "codex", "state": "working", "window_index": 0, "window_label": "0:codex", "pane_target": "%42", "current": True, "window_active": True},
+                ],
+            },
+        },
+        "rules": {"path": "/home/test/.config/yolomux/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
+    }
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=left&tabs=left:1",
+        sessions=["1"],
+        transcript_sessions=transcript_sessions,
+        auto_approve_payload=auto_approve_payload,
+    )
+    wait_for_dockview(browser, min_tabs=1)
+    state = browser.execute_script(
+        """
+        const tab = document.querySelector('.pane-tab[data-pane-tab="1"]');
+        const leading = tab?.querySelector('.session-tab-leading-activity');
+        const ask = leading?.querySelector('.session-tab-queued-question');
+        const workingDot = tab?.querySelector('.session-agent-activity-marker .agent-window-status-dot.status-indicator--working');
+        const askRect = ask?.getBoundingClientRect();
+        const dotRect = workingDot?.getBoundingClientRect();
+        const tabRect = tab?.getBoundingClientRect();
+        const titlePrefix = tab?.querySelector('.session-button-prefix');
+        return {
+          ask: ask?.textContent || '',
+          askAttention: ask?.classList.contains('status-indicator--attention') || false,
+          askVisible: !!askRect && askRect.width > 0 && askRect.height > 0,
+          askBeforeTitle: !!ask && !!titlePrefix && !!(ask.compareDocumentPosition(titlePrefix) & Node.DOCUMENT_POSITION_FOLLOWING),
+          askBesideDot: !!askRect && !!dotRect && askRect.left >= dotRect.right && askRect.left - dotRect.right <= 5,
+          askInsideTab: !!askRect && !!tabRect && askRect.left >= tabRect.left && askRect.right <= tabRect.right,
+          askColor: ask ? getComputedStyle(ask).color : '',
+          workingDot: !!workingDot,
+          workingColor: workingDot ? getComputedStyle(workingDot).color : '',
+          errors: jsDebugFailureEvents('error'),
+          rejections: jsDebugFailureEvents('rejection'),
+        };
+        """
+    )
+    assert state["ask"] == "ASK", state
+    assert state["askAttention"] is True, state
+    assert state["askVisible"] is True, state
+    assert state["askBeforeTitle"] is True, state
+    assert state["askBesideDot"] is True, state
+    assert state["askInsideTab"] is True, state
+    assert state["askColor"] != state["workingColor"], state
+    assert state["workingDot"] is True, state
+    assert state["errors"] == []
+    assert state["rejections"] == []
+
+
+
+@pytest.mark.parametrize("layout", ["classic", "dockview"])
+@pytest.mark.parametrize("gesture", ["body", "tab"])
+@pytest.mark.parametrize("state,queued,label", [("needs-input", False, "ASK"), ("blocked", False, "BLK"), ("working", True, "ASK")])
+def test_attention_badge_and_ball_acknowledge_already_focused_body(browser, tmp_path, layout, gesture, state, queued, label):
+    agent = {"kind": "codex", "state": state, "window_index": 0, "pane_target": "%42", "attention_key": f"go:attention:body-{state}", "queued_followup_question": queued, "current": True, "window_active": True}
+    info = {"panes": [{"target": "%42", "window": 0, "window_name": "codex", "active": True, "window_active": True, "process_label": "codex"}], "agents": [agent]}
+    payload = {"session_order": ["1"], "sessions": {"1": {"target": "1", "enabled": False, "agent_windows": [agent]}}}
+    loader = load_dockview_runtime_boot_fixture if layout == "dockview" else load_live_runtime_boot_fixture
+    browser.execute_cdp_cmd("Network.enable", {})
+    browser.execute_cdp_cmd("Network.setBlockedURLs", {"urls": ["*dockview-core.noStyle.js"] if layout == "classic" else []})
+    try:
+        loader(browser, tmp_path, "?sessions=1&layout=left&tabs=left:1", sessions=["1"], transcript_sessions={"1": info}, auto_approve_payload=payload)
+        assert browser.execute_script("return dockviewLayoutActive()") is (layout == "dockview")
+    finally:
+        browser.execute_cdp_cmd("Network.setBlockedURLs", {"urls": []})
+    WebDriverWait(browser, 5).until(lambda _driver: browser.execute_script("return !!document.querySelector('.pane-tab[data-pane-tab=\"1\"] .session-state-badge')"))
+    before = browser.execute_script("""
+      const tab = document.querySelector('.pane-tab[data-pane-tab="1"]');
+      const badge = tab.querySelector('.session-state-badge');
+      return {label: badge.textContent, color: getComputedStyle(badge).color};
+    """)
+    assert before["label"] == label, before
+    # Automatic focus must remain passive; the next pointer gesture is on the same Pane.
+    browser.execute_script("setFocusedTerminal('1', {userInitiated:false, syncFinder:false});")
+    target = browser.find_element("css selector", ".pane-tab[data-pane-tab=\"1\"]") if gesture == "tab" else browser.find_element("id", "terminal-pane-1")
+    fast_pointer_actions(browser).move_to_element(target).click().perform()
+    immediate = browser.execute_script("""
+      const tab = document.querySelector('.pane-tab[data-pane-tab="1"]');
+      const badge = tab.querySelector('.session-state-badge');
+      return {gray: badge?.classList.contains('status-indicator--acknowledged'), color: badge ? getComputedStyle(badge).color : '', green: !!tab.querySelector('.status-indicator--working')};
+    """)
+    assert immediate["gray"] is True and immediate["color"] != before["color"], immediate
+    if queued:
+        assert immediate["green"] is True, immediate
+    WebDriverWait(browser, 5).until(lambda _driver: browser.execute_script("return !document.querySelector('.pane-tab[data-pane-tab=\"1\"] .session-state-badge')"))
+    if queued:
+        assert browser.execute_script("return !!document.querySelector('.pane-tab[data-pane-tab=\"1\"] .status-indicator--working')")
+
+def test_active_test_command_shows_test_beside_tab_status_circle(browser, tmp_path):
+    transcript_sessions = {
+        "1": {
+            "panes": [
+                {"target": "%42", "window": 0, "window_name": "shell", "command": "go test ./...", "active": True, "window_active": True},
+            ],
+            "agents": [],
+        },
+    }
+    auto_approve_payload = {
+        "session_order": ["1"],
+        "sessions": {
+            "1": {
+                "target": "1",
+                "enabled": False,
+                "screen": {"key": "idle", "text": "no active agent"},
+                "agent_windows": [],
+            },
+        },
+        "rules": {"path": "/home/test/.config/yolomux/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
+    }
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=left&tabs=left:1",
+        sessions=["1"],
+        transcript_sessions=transcript_sessions,
+        auto_approve_payload=auto_approve_payload,
+    )
+    wait_for_dockview(browser, min_tabs=1)
+    state = browser.execute_script(
+        """
+        const tab = document.querySelector('.pane-tab[data-pane-tab="1"]');
+        const leading = tab?.querySelector('.session-tab-leading-activity');
+        const test = leading?.querySelector('.session-tab-state-marker.session-state-tests-running');
+        const dot = leading?.querySelector('.agent-window-status-dot');
+        const testRect = test?.getBoundingClientRect();
+        const dotRect = dot?.getBoundingClientRect();
+        const tabRect = tab?.getBoundingClientRect();
+        const titlePrefix = tab?.querySelector('.session-button-prefix');
+        return {
+          text: test?.textContent || '',
+          besideDot: !!testRect && !!dotRect && testRect.left >= dotRect.right && testRect.left - dotRect.right <= 5,
+          beforeTitle: !!test && !!titlePrefix && !!(test.compareDocumentPosition(titlePrefix) & Node.DOCUMENT_POSITION_FOLLOWING),
+          insideTab: !!testRect && !!tabRect && testRect.left >= tabRect.left && testRect.right <= tabRect.right,
+          afterTitle: !!tab?.querySelector('.session-button-text')?.querySelector('.session-state-tests-running'),
+        };
+        """
+    )
+    assert state == {"text": "TEST", "besideDot": True, "beforeTitle": True, "insideTab": True, "afterTitle": False}, state
+
+
+def test_codex_display_name_containing_go_tests_does_not_show_test_badge(browser, tmp_path):
+    agent = {"kind": "codex", "state": "working", "window_index": 0, "window_label": "0:codex", "current": True, "window_active": True}
+    transcript_sessions = {
+        "1": {
+            "panes": [
+                {"target": "%42", "window": 0, "window_name": "codex", "command": "node", "title": "⠙ Make Go tests default | yolomux", "active": True, "window_active": True, "process_label": "Make Go tests default"},
+            ],
+            "agents": [],
+        },
+    }
+    auto_approve_payload = {
+        "session_order": ["1"],
+        "sessions": {
+            "1": {
+                "target": "1",
+                "enabled": False,
+                "screen": {"key": "idle", "text": "no active agent"},
+                "agent_windows": [agent],
+            },
+        },
+        "rules": {"path": "/home/test/.config/yolomux/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
+    }
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=left&tabs=left:1",
+        sessions=["1"],
+        transcript_sessions=transcript_sessions,
+        auto_approve_payload=auto_approve_payload,
+    )
+    wait_for_dockview(browser, min_tabs=1)
+    state = browser.execute_script(
+        """
+        const tab = document.querySelector('.pane-tab[data-pane-tab="1"]');
+        const info = transcriptMetadataState.payload.sessions?.['1'] || {};
+        return {
+          testBadge: !!tab?.querySelector('.session-state-tests-running'),
+          working: !!tab?.querySelector('.status-indicator--working'),
+          paneTitle: info.panes?.[0]?.title || '',
+          sessionState: sessionState('1', info).key,
+        };
+        """
+    )
+    assert state["testBadge"] is False, state
+    assert state["working"] is True, state
+    assert "Make Go tests default" in state["paneTitle"], state
+    assert state["sessionState"] == "working", state
 
 
 def test_dockview_red_window_ball_keypress_acknowledges_after_delay(browser, tmp_path):

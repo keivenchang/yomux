@@ -24,6 +24,9 @@ from tools.mockers.transcript import codex_meta
 from tools.mockers.transcript import codex_usage
 from tools.mockers.transcript import write_records
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 @pytest.fixture(autouse=True)
 def _isolated_transcript_scan_store(tmp_path, monkeypatch):

@@ -568,6 +568,7 @@ def aged_state_root(gate_runtime_paths: GateRuntimePaths) -> Iterable[AgedStateR
 
 
 @pytest.fixture
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 def stateful_journey(
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
@@ -655,6 +656,7 @@ class GateLiveServerOptions:
     pin_batchd_scheduler: bool = False
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 def start_fixture_live_server(
     monkeypatch: pytest.MonkeyPatch,
     app: Any,
@@ -4308,6 +4310,7 @@ def _serve_gate_live_server(
 
 
 @pytest.fixture
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 def gate_live_server(
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
@@ -4337,6 +4340,7 @@ def gate_auth_credentials() -> GateAuthCredentials:
 
 
 @pytest.fixture
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 def gate_authenticated_live_server(
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,

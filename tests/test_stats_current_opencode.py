@@ -10,6 +10,11 @@ from pathlib import Path
 
 from yomux_lib.stats_current import opencode
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def _database(path: Path, sessions: list[tuple[object, ...]], messages: list[tuple[object, ...]], parts: list[tuple[object, ...]]) -> None:
     with sqlite3.connect(path) as connection:

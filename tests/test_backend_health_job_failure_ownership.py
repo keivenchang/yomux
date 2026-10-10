@@ -37,6 +37,9 @@ from yomux_lib.infra.batchd import JobRecord
 from yomux_lib.infra.batchd import PersistentJobBroker
 from yomux_lib.local_services.runtime import local_service_failure_text
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 # The exact error text the live batchd was reporting when it was measured healthy.
 LIVE_STALE_ERROR = "deadline exceeded while executing"

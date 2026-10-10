@@ -154,9 +154,9 @@ func (r *statsRuntimeRecorder) loop(ctx context.Context) {
 	}
 }
 
-func (r *statsRuntimeRecorder) Stop() {
+func (r *statsRuntimeRecorder) Stop() error {
 	if r == nil {
-		return
+		return nil
 	}
 	r.mu.Lock()
 	running := r.run
@@ -171,10 +171,12 @@ func (r *statsRuntimeRecorder) Stop() {
 	// that was never started, so shutdown does not silently discard the last
 	// measured Daemons sample.
 	flushCtx, cancel := context.WithTimeout(context.Background(), runtimeRecorderStopFlushTimeout)
-	if err := r.flushPending(flushCtx); err != nil {
+	err := r.flushPending(flushCtx)
+	cancel()
+	if err != nil {
 		slog.Warn("stats runtime recorder shutdown flush failed", "error", err)
 	}
-	cancel()
+	return err
 }
 
 func (r *statsRuntimeRecorder) flushPending(ctx context.Context) error {

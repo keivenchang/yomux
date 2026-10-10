@@ -61,6 +61,9 @@ from yomux_lib.backend_health.store import _REASON_CODE_RE
 from yomux_lib.backend_health.store import process_epoch_token
 from yomux_lib.infra.atomic_file import atomic_write_text
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 PORT = 7111
 OTHER_PORT = 7112

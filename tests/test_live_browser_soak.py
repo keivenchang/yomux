@@ -1360,6 +1360,8 @@ def test_negative_probe_baseline_allows_historical_browser_failure_with_a_differ
     assert soak.validate_negative_probe_baseline(receipt_projection([collision], epoch="all"))["receipts"] == [collision]
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 @pytest.mark.socket
 def test_negative_probe_owned_product_to_statsd_receipt_lifecycle(browser, gate_live_server):
@@ -1869,6 +1871,8 @@ def test_atomic_finalizer_clean_call_order_and_retirement(monkeypatch):
     assert not soak.evidence_failed(boundary["evidence"])
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 @pytest.mark.socket
 @pytest.mark.parametrize(
@@ -2084,6 +2088,8 @@ const done = arguments[arguments.length - 1];
 """
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 @pytest.mark.socket
 def test_atomic_finalizer_accepts_observed_browser_ring_eviction_during_retirement(browser, gate_live_server):
@@ -2351,6 +2357,8 @@ def test_browser_event_ring_extension_reports_observed_eviction_and_intact_windo
     assert intact["reason"] == soak.BROWSER_EVENT_RING_INTACT and intact["evicted"] == 0 and intact["appended"] == 1
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 @pytest.mark.socket
 def test_atomic_finalizer_rejects_warning_recorded_during_saturated_ring_retirement(browser, gate_live_server):
@@ -3676,6 +3684,8 @@ def test_atomic_boundary_still_fails_a_substituted_page(monkeypatch, page, journ
     assert boundary["status"] == "failed"
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_live_page_identity_survives_the_app_rewriting_its_own_url_but_catches_substitution(browser, gate_live_server):  # noqa: F811
     load_gate_browser(browser, gate_live_server)

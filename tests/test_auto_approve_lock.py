@@ -8,7 +8,8 @@ import pytest
 
 from yomux_lib import auto_approve_worker
 
-pytestmark = pytest.mark.socket
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = [pytest.mark.socket, pytest.mark.deprecated_python_server]
 
 
 def test_auto_approve_lock_blocks_second_process(tmp_path, monkeypatch):

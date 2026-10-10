@@ -17,6 +17,9 @@ from yomux_lib.stats_current import resolution as stats_resolution
 from yomux_lib.stats_current import storage
 from yomux_lib.stats_current.service import APPEND_FLUSH_ENV_NAME
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def test_service_sampling_skips_system_only_diagnostics():
     diagnostic_calls = []

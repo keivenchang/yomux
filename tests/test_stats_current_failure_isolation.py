@@ -15,6 +15,11 @@ from yomux_lib.observability.failure_severity import BROWSER_UPLOAD_OUTCOME_OWNE
 from yomux_lib.observability.failure_severity import CALLER_OUTCOME_OWNER_FIELD
 from yomux_lib.observability.failure_severity import expected_caller_outcome, failure_record_level
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 class _FutureServiceClient:
     def __init__(self):

@@ -20,6 +20,9 @@ from yomux_lib.stats_current import resolution
 from yomux_lib.stats_current import service as service_module
 from yomux_lib.stats_current import storage
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 RING_CAPACITIES = {1: 300, 10: 180, 60: 480, 300: 288}
 TOTAL_RING_SLOTS = 1_248

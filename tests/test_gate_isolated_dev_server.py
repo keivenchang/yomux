@@ -156,6 +156,8 @@ def test_m13_teardown_ends_the_process_and_releases_the_port(
     server.stop()
 
 
+# Go is the subject; Python imports only construct the fixture or verify its ownership.
+@pytest.mark.go_backend
 def test_go_only_gate_rejects_python_listener_and_still_starts_go(
     monkeypatch: pytest.MonkeyPatch,
     isolated_dev_server_factory: Callable[..., IsolatedDevServer],

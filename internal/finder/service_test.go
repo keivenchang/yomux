@@ -28,6 +28,23 @@ func newTestService(t *testing.T, publish EventPublisher) (*Service, string) {
 	return newTestServiceWithNative(t, publish, nil, nativeWatchStatus{})
 }
 
+func TestFinderDescriptorCopiesPreserveCloseOnExec(t *testing.T) {
+	original, err := os.CreateTemp(t.TempDir(), "finder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer original.Close()
+	copy, err := copyDescriptor(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer copy.Close()
+	flags, _, errno := syscall.Syscall(syscall.SYS_FCNTL, copy.Fd(), syscall.F_GETFD, 0)
+	if errno != 0 || flags&syscall.FD_CLOEXEC == 0 {
+		t.Fatalf("copied finder descriptor can escape into workers: %d %v", flags, errno)
+	}
+}
+
 func newTestServiceWithNative(t *testing.T, publish EventPublisher, native nativeWatchController, nativeStatus nativeWatchStatus) (*Service, string) {
 	t.Helper()
 	root := t.TempDir()
@@ -4125,7 +4142,7 @@ func TestSearchOptionsDoNotFallThroughToOnDemandTraversal(t *testing.T) {
 		t.Fatal(err)
 	}
 	indexed, finderErr := service.SearchWithOptions(context.Background(), root, "needle", 10, true, false, false, SearchOptions{IndexedOnly: true})
-	if finderErr != nil || indexed["index_state"] != "warming" || indexed["count"] != 0 {
+	if finderErr != nil || indexed["index_state"] != "not_indexed" || indexed["count"] != 0 {
 		t.Fatalf("indexed-only search = %#v, error = %v", indexed, finderErr)
 	}
 	cursor, finderErr := service.SearchWithOptions(context.Background(), root, "needle", 10, true, false, false, SearchOptions{Cursor: "cursor"})

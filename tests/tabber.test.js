@@ -33,6 +33,360 @@ const {
   finishSuite,
 } = require('./browser_helpers/layout_test_helper');
 
+test('touch layout predicates skip viewport layout reads on fine pointers and retain touch geometry', () => {
+  const source = fs.readFileSync('static_src/js/yomux/00_bootstrap_state.js', 'utf8');
+  let coarse = false, tablet = false, reads = 0;
+  const context = {
+    nativeViewport: () => {reads++; return {width: 700, height: 900};},
+    browserUsesCoarsePointer: () => coarse, browserUsesTabletViewport: () => tablet,
+    tabletDesktopLayoutMinWidthPx: 1024, mobileSinglePaneMaxWidthPx: 600,
+    mobileSinglePaneLandscapeMaxWidthPx: 900, mobileSinglePaneLandscapeMaxHeightPx: 500,
+    narrowTouchSingleColumnMaxWidthPx: 800, minSplitPaneWidthPx: () => 400,
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function tabletUsesDesktopLayout('), source.indexOf('const debugModeExplicitUrlEnabled')), context);
+  for (const name of ['tabletUsesDesktopLayout', 'phoneLikeMobileViewport', 'mobileSinglePaneMode', 'narrowTouchSingleColumnViewport', 'narrowSingleColumnMode']) {
+    assert.equal(context[name](), false, `${name} excludes fine pointers`);
+  }
+  assert.equal(reads, 0, 'fine-pointer header rendering cannot force viewport layout');
+  coarse = true;
+  assert.equal(context.narrowSingleColumnMode(), true);
+  assert.equal(reads, 1, 'touch mode still reads the current native viewport');
+  assert.equal(context.mobileSinglePaneMode({width: 400, height: 900}), true);
+  assert.equal(context.narrowSingleColumnMode({width: 1000, height: 900}), false);
+  assert.equal(context.narrowSingleColumnMode(null), true, 'explicit null retains its previous zero-width semantics');
+  tablet = true;
+  assert.equal(context.tabletUsesDesktopLayout({width: 1366, height: 900}), true);
+  assert.equal(context.mobileSinglePaneMode({width: 400, height: 900}), false);
+  assert.equal(context.narrowSingleColumnMode(), true, 'narrow tablets still honor minimum pane widths');
+  assert.equal(reads, 2, 'explicit geometry never triggers another viewport read');
+});
+
+test('width-only viewport policies do not read visual height and full viewport retains height recovery', () => {
+  const source = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+  let heightReads = 0;
+  const context = {
+    document: {documentElement: {}},
+    window: {innerWidth: 900, innerHeight: 700,
+      visualViewport: {get height() {heightReads++; return 800;}, scale: 1}},
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function nativeViewport('), source.indexOf('// A soft keyboard', source.indexOf('function nativeViewport('))), context);
+  assert.equal(context.nativeViewport({widthOnly: true}).width, 900);
+  assert.equal(heightReads, 0);
+  assert.equal(context.nativeViewport().height, 800);
+  assert.equal(heightReads, 1);
+  context.window.visualViewport.scale = 2;
+  assert.equal(context.nativeViewport().height, 700);
+  assert.ok(fs.readFileSync('static_src/js/yomux/20_layout_state.js', 'utf8').includes('function sidePanesAvailable(viewport = nativeViewport({widthOnly: true}))'));
+});
+
+test('activation refresh uses mounted selection without measuring dirty viewport geometry', () => {
+  const source = fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8');
+  let active = true;
+  const context = {
+    CLS: {active: 'active'}, itemIsActivePaneTab: () => active,
+    document: {getElementById: () => ({classList: {contains: () => true}})},
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function terminalIsVisible('), source.indexOf('const terminalAttentionQuestionRowClass')), context);
+  const container = {isConnected: true, get clientWidth() {throw new Error('forced layout');}};
+  assert.equal(context.terminalIsVisible('1', container, {measure: false}), true);
+  active = false;
+  assert.equal(context.terminalIsVisible('1', container, {measure: false}), false);
+  assert.throws(() => context.terminalIsVisible('1', container), /forced layout/, 'fit and recovery retain physical geometry checks');
+});
+
+test('shared CSS length owner resolves pixel literals without layout probes and measures relative units', () => {
+  const source = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
+  let value = '300px', probes = 0;
+  const context = {
+    window: {getComputedStyle: () => ({getPropertyValue: () => value})},
+    document: {documentElement: {}, body: {appendChild() {probes++;}},
+      createElement() {
+        const style = {};
+        return {style, getBoundingClientRect: () => ({width: style.width.endsWith('px') ? Number.parseFloat(style.width) : 48}), remove() {}};
+      }},
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function rootCssLengthPx('), source.indexOf('function minSplitPaneWidthPx(')), context);
+  assert.equal(context.rootCssLengthPx('--size'), 300);
+  assert.equal(probes, 0, 'literal pane dimensions do not flush unrelated dirty layout');
+  value = ' 320.5px ';
+  assert.equal(context.rootCssLengthPx('--size'), 320.5, 'changed settings are read live');
+  value = '3rem';
+  assert.equal(context.rootCssLengthPx('--size'), 48);
+  assert.equal(probes, 1, 'font-relative geometry retains the measurement owner');
+});
+
+test('resize renewal coalesces focus, visibility and gestures independently of Finder cancellation', () => {
+  const source = fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8');
+  const frames = [], listeners = {}, calls = [];
+  const context = {
+    requestAnimationFrame: callback => { frames.push(callback); return frames.length; },
+    window: {addEventListener: (type, listener) => { listeners[type] = listener; }},
+    document: {visibilityState: 'visible', addEventListener: (type, listener) => { listeners[type] = listener; }},
+    tabSwitchHighlightGeneration: 1,
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf("let lastTerminalResizeAuthoritySignature"), source.indexOf('function fitTerminal(')), context);
+  context.claimVisibleTerminalResizeAuthority = () => calls.push('claim');
+  context.installTerminalResizeAuthorityHandlers();
+  listeners.focus();
+  listeners.pointerdown({target: {closest: () => null}});
+  listeners.visibilitychange();
+  context.tabSwitchHighlightGeneration++;
+  frames.shift()(); frames.shift()();
+  assert.deepEqual(calls, ['claim'], 'one foreground gesture renews even when Finder changes generation');
+  listeners.pointerdown({target: {closest: () => ({dataset: {paneTab: 'second'}})}});
+  assert.equal(frames.length, 0, 'held tabs leave ownership to release-time activation');
+  context.scheduleVisibleTerminalResizeAuthority();
+  frames.shift()(); frames.shift()();
+  assert.equal(calls.length, 2, 'a later gesture can recover ownership from a competing client');
+});
+
+test('focus cursor work coalesces and reads current terminal, theme and connection owners', () => {
+  const source = fs.readFileSync('static_src/js/yomux/50_editor_settings_runtime.js', 'utf8');
+  const frames = new Map(), writes = [];
+  let nextFrame = 0, focus = 'a', palette = 'dark', bad = false;
+  const makeItem = name => {
+    let theme = {cursor: 'default', cursorAccent: 'accent', background: palette};
+    return {term: {options: {
+      get theme() { return theme; },
+      set theme(value) { theme = value; writes.push(name); },
+    }}};
+  };
+  const a = makeItem('a'), b = makeItem('b');
+  const context = {
+    terminals: new Map([['a', a], ['b', b]]),
+    requestAnimationFrame: callback => {const id = ++nextFrame; frames.set(id, callback); return id;},
+    cancelAnimationFrame: id => frames.delete(id),
+    terminalRenderThemeForGlobalTheme: () => ({cursor: 'default', cursorAccent: 'accent', background: palette}),
+    badConnectionCursorStateActive: () => bad,
+    terminalCursorColorsForSession: session => ({cursor: bad ? 'bad' : session === focus ? palette : 'default', cursorAccent: 'accent'}),
+  };
+  const flush = () => {
+    const pending = [...frames.values()]; frames.clear(); pending.forEach(callback => callback());
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('let activeTerminalCursorFrame'), source.indexOf('function refreshMetaButtonChrome(')), context);
+  context.refreshActiveTerminalCursor({defer: true});
+  focus = 'b'; context.refreshActiveTerminalCursor({defer: true});
+  focus = 'a'; context.refreshActiveTerminalCursor({defer: true});
+  assert.equal(frames.size, 1);
+  flush();
+  assert.deepEqual(writes, [], 'first paint is free of xterm theme writes');
+  flush();
+  assert.deepEqual(writes, ['a'], 'rapid focus resolves once to its final owner');
+  context.refreshActiveTerminalCursor({defer: true}); flush(); flush();
+  assert.deepEqual(writes, ['a'], 'unchanged focus does not rewrite xterm theme');
+  context.refreshActiveTerminalCursor({defer: true});
+  flush();
+  const replacement = makeItem('replacement');
+  context.terminals.set('a', replacement); context.terminals.delete('b');
+  palette = 'light'; replacement.term.options.theme = {cursor: 'default', cursorAccent: 'accent', background: 'light'};
+  flush();
+  assert.equal(replacement.term.options.theme.cursor, 'light');
+  assert.equal(replacement.term.options.theme.background, 'light', 'cursor refresh preserves current settings');
+  assert.equal(a.term.options.theme.cursor, 'dark', 'retired terminal receives no writes');
+  context.refreshActiveTerminalCursor({defer: true}); flush();
+  bad = true; context.refreshActiveTerminalCursor();
+  assert.equal(frames.size, 0, 'immediate connection update cancels the second scheduler stage');
+  assert.equal(replacement.term.options.theme.cursor, 'bad');
+  assert.equal(replacement.term.options.cursorBlink, false);
+  context.refreshActiveTerminalCursor({defer: true});
+  bad = false; focus = '__editor__'; context.refreshActiveTerminalCursor();
+  assert.equal(frames.size, 0, 'immediate settings update cancels the first scheduler stage');
+  assert.equal(replacement.term.options.theme.cursor, 'default', 'nonterminal focus clears active terminal cursor');
+  assert.equal(replacement.term.options.cursorBlink, true);
+});
+
+test('activation fit and paint share one parse fence and reject replaced terminals', () => {
+  const source = fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8');
+  const frames = [], parses = [], calls = [];
+  let visible = true;
+  const item = {term: {rows: 24, write(data, callback) {parses.push(callback);}, refresh() {calls.push('refresh');}}, container: {}};
+  const context = {
+    terminals: new Map([['one', item]]),
+    requestAnimationFrame: callback => {frames.push(callback); return frames.length;},
+    terminalIsVisible: () => visible,
+    scheduleTerminalReferenceUnderlineRepaint: () => calls.push('underlines'),
+    syncTerminalAttentionHighlight: () => calls.push('attention'),
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function refreshTerminal('), source.indexOf('function terminalIsVisible(')), context);
+  context.refreshTerminal('one', {visibleOnly: true});
+  parses.push(() => calls.push('output'));
+  context.refreshTerminal('one', {visibleOnly: true, afterParse: () => calls.push('subscribed')});
+  assert.equal(parses.length, 3, 'activation advances the fence beyond intervening output');
+  parses.shift()();
+  assert.deepEqual(calls, [], 'the superseded fit fence cannot repaint or drain activation');
+  parses.shift()();
+  parses.shift()();
+  assert.deepEqual(calls, ['output', 'subscribed', 'refresh', 'underlines', 'attention']);
+  context.refreshTerminal('one', {visibleOnly: true, afterParse: () => calls.push('late-subscribed')});
+  assert.equal(parses.length, 1, 'activation after parsing fences newly queued output even before paint');
+  assert.equal(calls.includes('late-subscribed'), false);
+  parses.shift()();
+  assert.equal(calls.filter(call => call === 'late-subscribed').length, 1);
+  calls.length = 0;
+  context.refreshTerminal('one', {visibleOnly: true});
+  context.terminals.set('one', {...item, refreshPending: false});
+  parses.shift()();
+  assert.deepEqual(calls, [], 'a queued refresh never paints a replaced instance');
+  context.terminals.set('one', item);
+  item.refreshPending = false;
+  visible = false;
+  context.refreshTerminal('one', {visibleOnly: true}); parses.shift()();
+  assert.deepEqual(calls, [], 'rapid switch cancels an invisible activation');
+  context.refreshTerminal('one'); parses.shift()();
+  assert.deepEqual(calls, ['refresh', 'underlines', 'attention'], 'hidden theme changes still repaint');
+});
+
+test('Tabber session opening selects the terminal before refreshing its tree', () => {
+  const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  const calls = [], deferred = [];
+  const context = {
+    tabberSessionPath: session => session, expandTabberPath: () => true,
+    selectSession: session => calls.push(`select:${session}`),
+    tabSwitchHighlightGeneration: 7,
+    scheduleTabSwitchPhaseTwo: (generation, callback) => {assert.equal(generation, 7); deferred.push(callback);},
+    itemIsActivePaneTab: () => true, refreshTabberPanels: () => calls.push('tree'),
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function openTabberSession('), source.indexOf('// Delegated activation for Tabber rows')), context);
+  context.openTabberSession('second');
+  assert.deepEqual(calls, ['select:second']);
+  deferred.shift()();
+  assert.deepEqual(calls, ['select:second', 'tree']);
+});
+
+test('Tabber keeps keyboard selection immediate and coalesces DOM updates after terminal paint', () => {
+  const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  const frames = [], calls = [];
+  const context = {
+    document: {}, tabberItemId: 'tabber', itemInLayout: () => true, tabberLayoutStateFrame: 0, tabberLayoutStateScrollIntoView: false,
+    tabberLayoutStateRefreshTree: false,
+    refreshTabberPanels: () => calls.push('tree'),
+    syncTabberTreeActiveSelection: (panel, options) => calls.push(options.modelOnly ? 'model' : 'DOM'),
+    syncTabberTreeLayoutState: (panel, options) => calls.push(options.scrollIntoView ? 'DOM:scroll' : 'DOM'),
+    requestAnimationFrame: callback => {frames.push(callback); return frames.length;},
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function scheduleTabberTreeLayoutStateSync('), source.indexOf('function bindTabberPanel(')), context);
+  context.scheduleTabberTreeLayoutStateSync(); context.scheduleTabberTreeLayoutStateSync({scrollIntoView: true});
+  assert.deepEqual(calls, ['model', 'model']);
+  assert.equal(frames.length, 1);
+  frames.shift()();
+  assert.deepEqual(calls, ['model', 'model'], 'first terminal frame has no tree DOM walk');
+  frames.shift()();
+  assert.deepEqual(calls, ['model', 'model', 'DOM:scroll']);
+  context.scheduleTabberTreeLayoutStateSync(); frames.shift()(); frames.shift()();
+  assert.equal(calls.at(-1), 'DOM', 'a later layout sync does not retain the previous scroll request');
+  context.scheduleTabberTreeLayoutStateSync({refreshTree: true});
+  context.scheduleTabberTreeLayoutStateSync({refreshTree: true});
+  frames.shift()(); frames.shift()();
+  assert.equal(calls.filter(call => call === 'tree').length, 1, 'accepted metadata coalesces through the same tree owner');
+});
+
+test('unchanged Tabber layout still applies a deferred selection change', () => {
+  const source = fs.readFileSync('static_src/js/yomux/40_file_explorer_files.js', 'utf8');
+  let domSelection = 'other';
+  const context = {
+    document: {querySelectorAll: () => [{}]}, tabberItemId: 'tabber', itemInLayout: () => true,
+    activeTabberRowPath: () => '/current', activePaneItems: () => ['one'], visualActivePaneItem: () => 'one',
+    tabberLayoutStateSignature: 'one\u001eone\u001e/current',
+    syncTabberTreeActiveSelection: () => {domSelection = 'current'; return true;},
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function syncTabberTreeLayoutState('), source.indexOf('function scheduleTabberTreeLayoutStateSync(')), context);
+  context.syncTabberTreeLayoutState();
+  assert.equal(domSelection, 'current', 'cached layout never strands a model-only selection update');
+});
+
+test('programmatic terminal tabs share the native Dockview gesture and activation owner', () => {
+  const source = fs.readFileSync('static_src/js/yomux/75_dockview_layout.js', 'utf8');
+  const calls = [], state = {api: {getPanel: () => ({api: {setActive() { calls.push('active'); }}})}};
+  const context = {
+    dockviewLayoutState: state, dockviewLayoutActive: () => true,
+    dockviewSetPendingUserPanelActivation: item => {state.pendingUserPanelActivation = item; state.tabAttentionGesture = {}; calls.push('gesture');},
+    dockviewBeginTabActivationPerf: () => calls.push('paint'),
+    dockviewCommitPanelActivation: () => {state.pendingUserPanelActivation = ''; calls.push('commit');},
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function dockviewActivateUserTerminalTab('), source.indexOf('function dockviewClearPendingUserPanelActivation(')), context);
+  assert.equal(context.dockviewActivateUserTerminalTab('one'), true);
+  assert.deepEqual(calls, ['gesture', 'paint', 'active', 'commit']);
+  calls.length = 0;
+  state.api.getPanel = () => ({api: {setActive() {context.dockviewCommitPanelActivation();}}});
+  context.dockviewActivateUserTerminalTab('one');
+  assert.equal(calls.filter(call => call === 'commit').length, 1, 'native callback consumes the gesture only once');
+});
+
+test('shared user-tab commit preserves activation options, dismisses toasts and protects the recent tab from eviction', () => {
+  const api = loadYomux('', ['1', '2', '3']);
+  api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 2}});
+  api.setTabLastActivatedForTest('1', 1);
+  api.setTabLastActivatedForTest('2', 2);
+  const source = fs.readFileSync('static_src/js/yomux/75_dockview_layout.js', 'utf8');
+  const dismissed = [];
+  let committedOptions;
+  let active = false;
+  const context = {
+    dockviewLayoutState: {pendingUserPanelActivation: '1', tabAttentionGesture: {item: '1', activationOptions: {acknowledgePromptAttention: false}}},
+    dockviewClearPendingUserPanelActivation() {},
+    itemIsActivePaneTab: () => active,
+    queueDockviewLayoutAdoption() {context.dockviewLayoutState.syncQueued = true;},
+    adoptDockviewLayout() {active = true; context.dockviewLayoutState.syncQueued = false;},
+    isTmuxSession: () => true, dismissSessionToasts: item => dismissed.push(item),
+    acknowledgeNotificationTarget() {}, recordTabActivation: api.recordTabActivation,
+    acknowledgeUserTerminalTabActivation: (item, options) => options,
+    rememberFileExplorerExplicitSyncSession() {}, nextTabSwitchHighlightGeneration: () => 1,
+    focusTerminalFromUserAction() {},
+    commitUserTerminalTabActivation: (item, options) => {
+      assert.equal(active, true, 'focus observes the adopted active pane');
+      committedOptions = options;
+    },
+    dockviewFinishTabActivationPerf() {},
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function dockviewCommitPanelActivation('), source.indexOf('function dockviewSetPendingUserPanelActivation(')), context);
+  context.dockviewCommitPanelActivation('1');
+  assert.deepEqual(dismissed, ['1']);
+  assert.equal(committedOptions.acknowledgePromptAttention, false);
+  const slots = api.emptyLayoutSlots();
+  slots[api.layoutTreeKey] = api.leafNode('left');
+  slots.left = {tabs: ['1', '2'], active: '1'};
+  assert.deepEqual([...api.paneCapacityCheckForInsert('left', ['3'], '3', slots).evicted], ['2']);
+});
+
+test('compatibility mouse drag start preserves pointer geometry while fresh gestures initialize', () => {
+  const source = fs.readFileSync('static_src/js/yomux/75_dockview_layout.js', 'utf8');
+  let reads = 0;
+  const context = {
+    dockviewLayoutState: {}, slotForItem: () => 'left',
+    dockviewRootBoundaryEdgesAtPoint: () => {reads++; return {left: true};},
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function dockviewBeginTabPointerDrag('), source.indexOf('function dockviewTabContentInteractionSuppressed(')), context);
+  const event = {type: 'pointerdown', button: 0, clientX: 10, clientY: 20};
+  context.dockviewBeginTabPointerDrag(event, 'one');
+  const pointer = context.dockviewLayoutState.tabPointerDrag;
+  pointer.rootBoundaryExitedEdges.left = true;
+  context.dockviewBeginTabPointerDrag({...event, type: 'mousedown', clientX: 30}, 'one');
+  assert.equal(context.dockviewLayoutState.tabPointerDrag, pointer);
+  assert.equal(pointer.x, 10);
+  assert.equal(pointer.rootBoundaryExitedEdges.left, true);
+  assert.equal(reads, 1);
+  context.dockviewBeginTabPointerDrag({...event, type: 'mousedown'}, 'two');
+  assert.equal(reads, 2, 'different-item mouse fallback starts independently');
+  context.dockviewBeginTabPointerDrag(event, 'two');
+  assert.equal(reads, 3, 'every fresh pointerdown initializes its own geometry');
+  context.dockviewLayoutState.tabPointerDrag = null;
+  context.dockviewBeginTabPointerDrag({...event, type: 'mousedown'}, 'one');
+  assert.equal(reads, 4, 'mouse-only environments keep their fallback');
+});
+
 test('terminal tab activation focuses before its guarded authority and side work', () => {
   const source = fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8');
   const calls = [];
@@ -42,13 +396,13 @@ test('terminal tab activation focuses before its guarded authority and side work
     activateTab: session => calls.push(`focus:${session}`),
     rememberFileExplorerExplicitSyncSession: session => calls.push(`claim:${session}`),
     scheduleTabSwitchPhaseTwo: (generation, work) => {assert.equal(generation, 7); deferred = work;},
-    claimVisibleTerminalResizeAuthority: () => calls.push('authority'),
+    scheduleVisibleTerminalResizeAuthority: () => calls.push('authority'),
     syncFileExplorerAfterTerminalActivation: session => calls.push(`side:${session}`),
   };
   vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf('function scheduleTerminalActivationFollowup('), source.indexOf('function activatePaneTab(')), context);
   context.commitUserTerminalTabActivation('second', {}, 7);
-  assert.deepEqual(calls, ['focus:second', 'claim:second']);
+  assert.deepEqual(calls, ['focus:second', 'claim:second', 'authority']);
   deferred();
   assert.deepEqual(calls, ['focus:second', 'claim:second', 'authority', 'side:second']);
 });
@@ -91,18 +445,20 @@ test('user terminal activation leaves panel focus to the shared terminal owner',
           rememberFileExplorerExplicitSyncSession() {},
           nextTabSwitchHighlightGeneration: () => 7,
           dockviewBeginTabActivationPerf() {}, dockviewFinishTabActivationPerf() {},
-          scheduleTabSwitchPhaseTwo() {},
+          scheduleTabSwitchPhaseTwo() {}, scheduleVisibleTerminalResizeAuthority() {},
           setFocusedPanelItem: (session, options) => calls.push({kind: 'panel', session, options}),
           focusTerminalFromUserAction: (session, delay, options) => calls.push({kind: 'terminal', session, options}),
           focusTerminalWhenAutoFocus() {}, focusPanel: () => calls.push({kind: 'other'}),
           stopTranscriptStream() {}, stopSummaryStream() {}, updateTypingIndicator() {},
-          scheduleTerminalReferenceUnderlineRepaint() {}, scheduleFit() {}, setTimeout() {},
-          refreshTerminal() {}, scheduleTerminalBlankScreenRefresh() {}, terminalRefreshAfterTabSelectMs: 0,
+          scheduleTerminalReferenceUnderlineRepaint() {}, scheduleFit() {}, setTimeout() {}, refreshTerminal() {},
+          refreshTerminal() {}, scheduleTerminalBlankScreenRefresh() {},
           document: {querySelectorAll: () => [], getElementById: () => null},
           dismissSessionToasts() {}, acknowledgeNotificationTarget() {},
           acknowledgeTerminalAttentionFromUserAction: () => calls.push({kind: 'attention'}),
           recordTabActivation() {}, layoutSlotKeys: () => ['left'], itemInLayout: () => true,
           activeItemForSide: () => active, dockviewLayoutActive: () => false,
+          itemIsActivePaneTab: session => session === active,
+          queueDockviewLayoutAdoption() {},
           capturePaneViewStateForItemIfPresent() {},
           emptyLayoutSlots: () => ({left: {}}), layoutTreeKey: 'tree', layoutSlots: {tree: {}},
           paneStateForLayoutSlot: () => ({active}),
@@ -122,7 +478,7 @@ test('user terminal activation leaves panel focus to the shared terminal owner',
           assert.equal(terminalFocus.options.acknowledgeAgentWindow, false, label);
           assert.equal(terminalFocus.options.acknowledgePromptAttention, false, label);
           assert.equal(terminalFocus.options.syncFinder, false, label);
-          if (route.startsWith('pane')) assert.equal(calls[0].kind, 'attention', `${label} acknowledges before focusing`);
+          assert.equal(calls[0].kind, 'attention', `${label} acknowledges before focusing`);
         }
       }
     }
@@ -146,7 +502,7 @@ test('terminal activation reconciles changed focus once and preserves repeated f
     focusTerminalDom: session => calls.push(['dom', session]),
     stopTranscriptStream() {}, stopSummaryStream() {}, updateTypingIndicator() {},
     scheduleTerminalReferenceUnderlineRepaint() {}, scheduleFit() {}, setTimeout() {},
-    scheduleTerminalBlankScreenRefresh() {}, terminalRefreshAfterTabSelectMs: 0,
+    refreshTerminal() {}, scheduleTerminalBlankScreenRefresh() {},
     document: {querySelectorAll: () => [], getElementById: () => null},
   };
   vm.createContext(context);
@@ -186,7 +542,7 @@ test('direct user terminal focus defers Finder and Differ synchronization', () =
     syncFileExplorerAfterTerminalActivation: session => calls.push(['sync', session]),
     stopTranscriptStream() {}, stopSummaryStream() {}, updateTypingIndicator() {},
     scheduleTerminalReferenceUnderlineRepaint() {}, scheduleFit() {}, setTimeout() {},
-    scheduleTerminalBlankScreenRefresh() {}, terminalRefreshAfterTabSelectMs: 0,
+    refreshTerminal() {}, scheduleTerminalBlankScreenRefresh() {},
     document: {querySelectorAll: () => [], getElementById: () => null},
   };
   vm.createContext(context);
@@ -246,11 +602,13 @@ test('user layout activation establishes terminal focus before mount reconciliat
   const layout = fs.readFileSync('static_src/js/yomux/20_layout_state.js', 'utf8');
   for (const userInitiated of [false, true]) {
     const calls = [];
+    let normalizations = 0;
     const context = {
       layoutSlots: {items: ['first']}, activeSessions: ['first'], focusedPanelItem: 'first', focusedTerminal: 'first',
       runtimeState: {layoutMutationSnapshot: () => ({pending: 0}), consumePendingLayoutMutation() {}},
       paneItems: slots => slots.items, layoutShapeSignature: () => 'shape',
-      normalizeLayoutSlotsForViewport: next => next, cleanupRemovedDynamicLayoutItems() {},
+      normalizeLayoutSlotsForViewport: next => {normalizations++; return next;},
+      dockviewLayoutActiveOnlySignature: slots => JSON.stringify(slots.items), cloneLayoutSlots: slots => JSON.parse(JSON.stringify(slots)), cleanupRemovedDynamicLayoutItems() {},
       sessionsFromLayout: () => context.layoutSlots.items, clearFocusForInactiveLayout() {}, updateActiveSessionParam() {},
       isTmuxSession: item => ['first', 'second'].includes(item), dockviewLayoutActive: () => true,
       rememberActivePaneItem() {}, clearPendingFileEditorFocusExcept() {}, dismissAttentionAlertsForSession() {},
@@ -272,6 +630,10 @@ test('user layout activation establishes terminal focus before mount reconciliat
     assert.deepEqual(calls, userInitiated
       ? [['nav', 'first', 'second'], ['mount', 'second', 'second']]
       : [['mount', 'first', 'first']], 'only explicit activation prepares focus; mount owns its reconciliation');
+    context.applyLayoutSlots({items: ['first', 'second']}, {activeOnlyActivation: true});
+    assert.equal(normalizations, 1, 'confirmed selection changes reuse the normalized snapshot');
+    context.applyLayoutSlots({items: ['second']}, {activeOnlyActivation: true});
+    assert.equal(normalizations, 2, 'structural changes still normalize even with an activation hint');
   }
 });
 
@@ -327,6 +689,7 @@ test('preserved Dockview tabs position only their open popover', () => {
 
 test('Dockview native click restores input without repeating consumed activation', () => {
   const source = fs.readFileSync('static_src/js/yomux/75_dockview_layout.js', 'utf8');
+  const actions = fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8');
   const boot = fs.readFileSync('static_src/js/yomux/99_terminal_boot.js', 'utf8');
   for (const route of ['native', 'native-painted', 'touch', 'already-active', 'expired', 'expired-output', 'expired-prior', 'first-output', 'reconnect', 'programmatic', 'keyboard', 'finder', 'cancel', 'pointer-cancel', 'drag', 'cancel-virtual', 'cancel-committed', 'cancel-virtual-committed', 'drag-committed', 'blur', 'hidden', 'blur-expired', 'blur-virtual', 'blur-committed', 'hidden-committed', 'hidden-virtual-committed', 'visible']) {
     const listeners = {};
@@ -335,6 +698,7 @@ test('Dockview native click restores input without repeating consumed activation
     const item = route === 'finder' || route.includes('virtual') ? 'finder' : 'terminal';
     let active = ['already-active', 'expired', 'expired-output', 'expired-prior', 'blur-expired'].includes(route);
     let activations = 0;
+    let acknowledgements = 0;
     let followups = 0;
     let inputFocused = false;
     const element = new TestElement('', 'div');
@@ -346,7 +710,7 @@ test('Dockview native click restores input without repeating consumed activation
       rows: 3,
       write(data, callback) {callback?.();},
       onRender(callback) {renderEvent = callback; return {dispose() {}};},
-      refresh() {renderEvent({start: 0, end: 2});},
+      refresh() {renderEvent?.({start: 0, end: 2});},
     }};
     const timers = [];
     const context = {
@@ -357,6 +721,7 @@ test('Dockview native click restores input without repeating consumed activation
       DOCKVIEW_PENDING_ACTIVATION_TTL_MS: 1500,
       isTmuxSession: session => session === 'terminal', isFileEditorItem: () => false,
       itemIsActivePaneTab: () => active,
+      queueDockviewLayoutAdoption() {},
       cleanupDetachedPaneTabPopover() {}, dockviewEmptyPaneSlot: () => true,
       captureDockviewPreviousPaneBeforeTabActivation() {}, rememberFileExplorerExplicitSyncSession() {},
       terminals: new Map([['terminal', terminal]]), requestAnimationFrame: callback => frames.push(callback), cancelAnimationFrame() {},
@@ -364,10 +729,13 @@ test('Dockview native click restores input without repeating consumed activation
       consumeTerminalControlMessage: () => false, tmuxWindowSwitchPaintCallback() {},
       terminalFrameRecoveryAttempts: new Map(), clearTerminalConnectionState() {},
       terminalIsVisible: () => false, scheduleTerminalBlankScreenRefresh() {}, scheduleTerminalAttentionHighlight() {},
+      refreshTerminal(session, options) { options.afterParse?.(); terminal.term.refresh(); },
+      dismissSessionToasts() {}, acknowledgeNotificationTarget() {}, recordTabActivation() {},
       nextTabSwitchHighlightGeneration: () => 7,
       scheduleTerminalActivationFollowup: () => {followups++;},
       commitUserTerminalTabActivation: () => {activations++; inputFocused = true; context.dockviewFinishTabActivationPerf(item);},
       setFocusedPanelItem() {}, focusTerminalFromUserAction() {},
+      acknowledgeTerminalAttentionFromUserAction: () => {acknowledgements++;},
       focusTerminalDom: () => {inputFocused = true;},
       dockviewBeginTabPointerDrag: () => {context.dockviewLayoutState.tabPointerDrag = {item, dragged: false};},
       dockviewTabPointerEvent: event => event,
@@ -377,6 +745,7 @@ test('Dockview native click restores input without repeating consumed activation
       dockviewTrackTabPointerDrag() {},
     };
     vm.createContext(context);
+    vm.runInContext(actions.slice(actions.indexOf('function acknowledgeUserTerminalTabActivation('), actions.indexOf('function commitUserTerminalTabActivation(')), context);
     vm.runInContext(source.slice(source.indexOf('function dockviewBeginTabActivationPerf('), source.indexOf('function dockviewCore(')), context);
     vm.runInContext(boot.slice(boot.indexOf('function processTerminalSocketFrame('), boot.indexOf('function bindTerminalContainerForSession(')), context);
     const finishStart = source.indexOf('function dockviewFinishTabPointerDrag(');
@@ -391,6 +760,7 @@ test('Dockview native click restores input without repeating consumed activation
       listeners.keydown({...event, key: 'Enter'});
       assert.equal(activations, 1, route);
       assert.equal(inputFocused, true, route);
+      assert.equal(acknowledgements, item === 'terminal' ? 1 : 0, `${route} acknowledges before focusing`);
       continue;
     }
     if (route === 'expired-prior') context.dockviewLayoutState.tabActivationPerf = {item, terminal};
@@ -415,14 +785,12 @@ test('Dockview native click restores input without repeating consumed activation
     }
     if (route === 'native-painted') {
       frames.shift()();
-      frames.shift()();
       assert.equal(context.dockviewLayoutState.tabActivationPerf, null, 'a completed activation releases its paint record');
     }
     if (route === 'first-output') {
       assert.equal(context.dockviewLayoutState.tabActivationPerf.waitingForParse, false);
       context.processTerminalSocketFrame(item, terminal, 'first output');
       assert.equal(context.dockviewLayoutState.tabActivationPerf.waitingForParse, true, 'first output resumes the committed paint barrier');
-      frames.shift()();
       frames.shift()();
       assert.equal(context.dockviewLayoutState.tabActivationPerf, null, 'first output completes the committed paint barrier');
     }
@@ -448,6 +816,7 @@ test('Dockview native click restores input without repeating consumed activation
         documentListeners[type]({...event, type});
       }
       assert.equal(activations, committed && item === 'terminal' ? 1 : 0, `${route} does not activate on release`);
+      assert.equal(acknowledgements, committed && item === 'terminal' ? 1 : 0, `${route} does not acknowledge an uncommitted cancel or drag`);
       assert.equal(context.dockviewLayoutState.pendingUserPanelActivation, '', `${route} clears intent`);
       assert.equal(context.dockviewLayoutState.tabPointerDrag, null, `${route} releases held pointer state`);
       context.processTerminalSocketFrame('terminal', terminal, 'later ambient output');
@@ -455,7 +824,7 @@ test('Dockview native click restores input without repeating consumed activation
       assert.equal(element.classList.contains('tab-activation-pending'), committed, `${route} cleans only uncommitted pending color`);
       if (committed) {
         frames.shift()();
-        frames.shift()();
+        if (item !== 'terminal') frames.shift()();
         assert.equal(context.dockviewLayoutState.tabActivationPerf, null, `${route} finishes committed paint`);
         assert.equal(element.classList.contains('tab-activation-pending'), false, `${route} completes pending color`);
       }
@@ -466,12 +835,35 @@ test('Dockview native click restores input without repeating consumed activation
     }
     listeners.click(event);
     assert.equal(activations, item === 'terminal' ? 1 : 0, `${route} activates once`);
+    assert.equal(acknowledgements, item === 'terminal' ? 1 : 0, `${route} acknowledges exactly once across native callback and click`);
+    if (item === 'terminal') {
+      listeners.pointerdown(event);
+      listeners.click(event);
+      assert.equal(acknowledgements, 2, `${route} a new gesture can acknowledge new attention`);
+    }
     if (['native', 'native-painted', 'touch'].includes(route)) assert.ok(followups > 0, `${route} keeps side work after the duplicate activation fast path`);
     if (item === 'terminal') assert.equal(inputFocused, true, `${route} restores keyboard input`);
   }
 });
 
 async function runTabberSuite() {
+  await testAsync('session selection wrapper shares deferred Tabber scrolling with row activation', async () => {
+    const source = fs.readFileSync('static_src/js/yomux/86_changes_20_differ.js', 'utf8');
+    const calls = [];
+    const context = {
+      selectSession: async (session, options) => {calls.push(`selected:${session}:${options.userInitiated}`); return 'selected';},
+      itemInLayout: () => true, tabberItemId: 'tabber',
+      scheduleTabberTreeLayoutStateSync: options => calls.push(`scheduled:${options.scrollIntoView}`),
+      syncTabberTreeActiveSelection: () => {throw new Error('synchronous Tabber scroll forces layout before terminal paint');},
+    };
+    vm.createContext(context);
+    vm.runInContext(source.slice(source.indexOf('const originalSelectSessionForTabberTree'), source.indexOf('function showChangedDirectoryContextMenu(')), context);
+    assert.equal(await context.selectSession('second', {userInitiated: true}), 'selected');
+    assert.deepEqual(calls, ['selected:second:true', 'scheduled:true']);
+    context.itemInLayout = () => false;
+    await context.selectSession('first', {});
+    assert.equal(calls.at(-1), 'selected:first:undefined', 'closed Tabber does not schedule scrolling');
+  });
   await testAsync('Tabber forwards user activation to background terminal tabs and placement', checkBackgroundTabberActivation);
   await testAsync('terminal placement preserves user focus through every placement branch', async () => {
     const source = fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8');
@@ -687,7 +1079,7 @@ async function runTabberSuite() {
     const surfaceSource = fs.readFileSync('static_src/js/yomux/86_changes_40_finder.js', 'utf8');
     assert.ok(/function syncPanelVisibility\(previousActive = \[\]\)[\s\S]*const previouslyVisible = new Set\(previousActive\);[\s\S]*newlyVisibleFileSurfaces[\s\S]*scheduleTabSwitchPhaseTwo\(generation, \(\) => \{[\s\S]*activateFileExplorerSurface\(item\)/.test(terminalBootSource), 'newly visible file surfaces activate through the shared post-paint generation guard');
     assert.ok(/function scheduleTabSwitchPhaseTwo\(generation, work\)[\s\S]*raf\(\(\) => raf\(\(\) =>/.test(actionsSource), 'secondary tab work starts only after the first frame had a paint opportunity');
-    assert.ok(actionsSource.includes('function scheduleTerminalActivationFollowup(session, generation)') && actionsSource.includes('syncFileExplorerAfterTerminalActivation(session);') && actionsSource.includes('scheduleTerminalActivationFollowup(session, generation);'), 'normal and duplicate Dockview activation share focus-guarded phase-two work');
+    assert.ok(actionsSource.includes('function scheduleTerminalActivationFollowup(session, generation, gesture = null)') && actionsSource.includes('syncFileExplorerAfterTerminalActivation(session);') && actionsSource.includes('scheduleTerminalActivationFollowup(session, generation, gesture);'), 'normal and duplicate Dockview activation share focus-guarded phase-two work');
     assert.ok(/function focusTerminalFromUserAction\(session, delay = 0, options = \{\}\)[\s\S]*setFocusedTerminal\(session, \{\.\.\.options, userInitiated: true, syncFinder: false\}\)[\s\S]*rememberFileExplorerExplicitSyncSession\(session\)[\s\S]*scheduleTabSwitchPhaseTwo\(nextTabSwitchHighlightGeneration\(\), \(\) => syncFileExplorerAfterTerminalActivation\(session\)\)/.test(coreSource), 'direct focus claims the existing Finder target immediately and defers rendering through the shared scheduler');
     assert.ok(/function fileExplorerSessionFilesPaneIsVisible\(\)\s*\{\s*return itemIsActivePaneTab\(differItemId\);/.test(fileExplorerSource), 'Differ visibility follows the active pane item rather than mere layout membership');
     assert.ok(/function renderFileExplorerChangesPanel\(panel, options = \{\}\)[\s\S]*view === 'differ' && !fileExplorerSessionFilesPaneIsVisible\(\)[\s\S]*return;/.test(surfaceSource), 'hidden Differ does not enter its tree renderer');
@@ -1408,10 +1800,10 @@ async function runTabberSuite() {
     assert.match(source, /function createDockviewPanelRenderer[\s\S]*?element\.replaceChildren\(panel\);[\s\S]*?if \(dockviewLayoutState\.applyingFromLayout\) return;[\s\S]*?updatePanelSlot\(panel, item, slot\);[\s\S]*?renderAttachedPanelContent\(item\);/, 'fromJSON panel reuse only reparents during the vendor load; the shared post-load owner performs the one slot update and content render');
     assert.match(source, /layout: \(\) => \{\s*if \(dockviewLayoutState\.applyingFromLayout \|\| !isTmuxSession\(item\)\) return;\s*dockviewEnsureMountedTerminal\(item, panel\);\s*\}/, 'vendor layout callbacks defer terminal startup to the shared post-load owner during fromJSON');
     const adoptBody = source.slice(source.indexOf('function adoptDockviewLayout'), source.indexOf('function layoutSlotsFromDockviewJson'));
-    assert.match(adoptBody, /if \(nextSignature === layoutSlotsSignature\(layoutSlots\)\) \{\s*[\s\S]*?dockviewRefreshTabs\(\);\s*return;\s*\}/, 'a queued same-signature adoption completes the tab shells skipped during fromJSON');
-    assert.equal(/if \(nextSignature === layoutSlotsSignature\(layoutSlots\)\) \{[\s\S]*?dockviewSyncMountedPanels\(/.test(adoptBody), false, 'same-signature adoption does not repeat mounted-panel reconciliation');
+    assert.match(adoptBody, /if \(nextSignature === \(activeOnlyActivation \? layoutSlotsExactSignature\(layoutSlots\) : layoutSlotsSignature\(layoutSlots\)\)\) \{\s*[\s\S]*?dockviewRefreshTabs\(\);\s*return;\s*\}/, 'a queued same-signature adoption completes the tab shells skipped during fromJSON');
+    assert.equal(/if \(nextSignature === \(activeOnlyActivation \? layoutSlotsExactSignature\(layoutSlots\) : layoutSlotsSignature\(layoutSlots\)\)\) \{[\s\S]*?dockviewSyncMountedPanels\(/.test(adoptBody), false, 'same-signature adoption does not repeat mounted-panel reconciliation');
     assert.match(source, /function createDockviewHeaderActionsRenderer[\s\S]*?const render = \(\) => \{[\s\S]*?if \(dockviewLayoutState\.applyingFromLayout\) return;/, 'fromJSON header callbacks defer their render to the shared post-load tab refresh');
-    assert.match(source, /function createDockviewTabRenderer[\s\S]*?const render = \(\) => \{[\s\S]*?if \(dockviewLayoutState\.applyingFromLayout\) return;/, 'fromJSON tab callbacks defer their render to the shared post-load tab refresh');
+    assert.match(source, /function createDockviewTabRenderer[\s\S]*?const render = \(\) => \{[\s\S]*?if \(dockviewLayoutState\.applyingFromLayout\) \{dockviewLayoutState\.tabRenderPending = true; return;\}/, 'fromJSON tab callbacks defer their render to the shared post-load tab refresh');
     assert.match(source, /function dockviewRefreshLoadedLayout[\s\S]*?dockviewSyncMountedPanels\(\{restoreViewState: true, ensureMounted: true\}\);/, 'the shared post-load owner restores view state and terminal mounting exactly once after vendor reuse finishes');
     assert.match(source, /function dockviewSyncMountedPanels\(options = \{\}\)[\s\S]*?options\.restoreViewState === true[\s\S]*?restorePaneViewState\(item, panel\);[\s\S]*?options\.ensureMounted === true[\s\S]*?dockviewEnsureMountedTerminal\(item, panel\);/, 'mounted-panel reconciliation owns the deferred restore and terminal ensure steps');
   });
@@ -2563,7 +2955,7 @@ async function runTabberSuite() {
     assert.equal(source.includes("initialSetting('performance.tabber_activity_refresh_ms', 15000)"), false, 'Tabber activity refresh does not keep a duplicated bootstrap fallback');
     assert.equal(source.includes("numberSetting('performance.tabber_activity_refresh_ms', 15000)"), false, 'Tabber activity refresh does not keep a duplicated reload fallback');
     assert.ok(/Promise\.resolve\(state\.callback\(\)\)[\s\S]*?\.finally\(scheduleNext\)/.test(source), 'runtime intervals wait for async callbacks to settle before starting the next wait');
-    assert.ok(/if \(!fileIndexStatusPollRoots\.size \|\| clientEventTransportState\.connected === true\)[\s\S]*clearRuntimeInterval\('file-index-building'\)[\s\S]*resetRuntimeInterval\('file-index-building', refreshBuildingFileIndexStatuses, Math\.min\(1501, proactiveMs\)\)/.test(source), 'a building index uses the odd 1501ms repair cadence only after SSE disconnects');
+    assert.ok(/if \(!fileIndexStatusPollRoots\.size\)[\s\S]*clearRuntimeInterval\('file-index-building'\)[\s\S]*resetRuntimeInterval\('file-index-building', refreshBuildingFileIndexStatuses, Math\.min\(1501, statusIntervalMs\)\)/.test(source), 'a building index keeps the odd 1501ms targeted status cadence while SSE is connected');
     assert.equal(source.includes('tabber-row-detail'), false, 'DOIT.61 A4: Tabber no longer carries a dead visible detail slot');
     assert.equal(source.includes("type === 'path' && row.dataset.tabberOpenFile"), false, 'DOIT.61 A3: Tabber has no unreachable path-row activation branch');
     assert.ok(source.includes('function setRowDataset(row, key, value)'), 'DOIT.61 B1: row dataset set/delete is centralized');

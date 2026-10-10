@@ -12,6 +12,9 @@ from yomux_lib.stats_current.families import validate_payload
 from yomux_lib.stats_current.storage import Store
 from yomux_lib.stats_current.storage import UsageAtom
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 BASE = {
     "epoch_id": "boot-1",

@@ -20,6 +20,11 @@ from yomux_lib.yoagent.transports import BACKEND_REASON_NO_PROVIDER
 from yomux_lib.yoagent.transports import BackendAvailability
 from yomux_lib.yoagent.transports import backend_availability
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 EN_LOCALE_PATH = Path(__file__).resolve().parents[1] / "static_src" / "locales" / "en.json"
 

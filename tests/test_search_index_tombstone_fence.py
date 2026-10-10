@@ -21,6 +21,9 @@ from yomux_lib.search import search_indexer
 from yomux_lib.filesystem import paths as filesystem_paths
 from yomux_lib.filesystem import search as filesystem_search
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def _reset_registry():
     # P1-5 teardown: NEVER close a live worker's fd directly. The old reset closed each root fd out

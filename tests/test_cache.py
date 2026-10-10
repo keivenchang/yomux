@@ -6,6 +6,11 @@ from yomux_lib import common
 from yomux_lib.cache import MISS
 from yomux_lib.cache import TtlCache
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def test_get_or_miss_distinguishes_cached_none_from_absent():
     c = TtlCache(ttl_seconds=100)

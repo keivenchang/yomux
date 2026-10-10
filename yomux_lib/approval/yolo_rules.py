@@ -656,6 +656,15 @@ def hard_floor_decision(cmd_line: str) -> dict[str, Any] | None:
             return {"action": "block", **rule_name_fields("built-in hard floor: dd block device", "yolo.rule.hardFloor.ddBlockDevice"), "risk": "device"}
         if command == "rm" and rm_targets_root(args):
             return {"action": "block", **rule_name_fields("built-in hard floor: rm root", "yolo.rule.hardFloor.rmRoot"), "risk": "delete"}
+        if command == "rm" and has_ambiguous_rm_brace_expansion(args):
+            return {
+                "action": "ask",
+                **rule_name_fields("ambiguous rm brace expansion"),
+                "risk": "delete",
+                **rule_source_fields("error"),
+                "reason_code": "command_parse_failed",
+                "error": "rm brace expansion cannot be safely evaluated by the YO policy parser",
+            }
         if command == "rmdir" and any(arg == "/" for arg in args):
             return {"action": "block", **rule_name_fields("built-in hard floor: rmdir root", "yolo.rule.hardFloor.rmdirRoot"), "risk": "delete"}
     return None
@@ -683,6 +692,11 @@ def rm_targets_root(args: list[str]) -> bool:
         or "--force" in long_flags
     )
     return has_recursive_or_force and any(rm_target_is_root_like(target) for target in targets)
+
+
+def has_ambiguous_rm_brace_expansion(args: list[str]) -> bool:
+    compact = "".join("".join(args).split())
+    return "{" in compact and "}" in compact and "," in compact
 
 
 def rm_target_is_root_like(target: str) -> bool:

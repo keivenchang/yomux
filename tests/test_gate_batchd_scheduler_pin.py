@@ -29,6 +29,8 @@ from tests.gate_harness import prepare_fixture_http_app
 from tests.gate_harness import stop_fixture_app_runtime
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_gate_live_server_pins_batchd_scheduler_lease_for_the_window(gate_live_server) -> None:
     """A background refresh worker cannot race an absent batchd socket during the window."""
 
@@ -42,6 +44,8 @@ def test_gate_live_server_pins_batchd_scheduler_lease_for_the_window(gate_live_s
     assert app.job_client.socket_path.exists()
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_pinned_batchd_scheduler_lease_is_released_exactly_once_on_teardown(
     monkeypatch: pytest.MonkeyPatch,
     gate_runtime_paths,

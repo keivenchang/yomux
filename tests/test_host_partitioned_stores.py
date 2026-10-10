@@ -6,6 +6,11 @@ from yomux_lib import login_rate_limit
 from yomux_lib.observability import pricing_catalog
 from yomux_lib.search import file_index
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def _host_root(root: Path, calls: list[Path]) -> Path:
     calls.append(root)

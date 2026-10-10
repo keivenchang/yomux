@@ -13,6 +13,9 @@ from yomux_lib.stats_current import http as stats_http
 from yomux_lib.stats_current import service as stats_service
 from yomux_lib.stats_current import storage
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 pytest_plugins = ("tests.gate_harness",)
 

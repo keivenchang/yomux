@@ -1027,7 +1027,7 @@ handleFileExplorerArrowNav = event => {
 const originalSelectSessionForTabberTree = selectSession;
 selectSession = async (session, options = {}) => {
   const result = await originalSelectSessionForTabberTree(session, options);
-  if (itemInLayout(tabberItemId)) syncTabberTreeActiveSelection(document, {scrollIntoView: true});
+  if (itemInLayout(tabberItemId)) scheduleTabberTreeLayoutStateSync({scrollIntoView: true});
   return result;
 };
 

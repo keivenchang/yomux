@@ -36,6 +36,23 @@ const {
 const {registerCrossSurfaceQuickOpenSuite} = require('./browser_helpers/cross_surface_quick_open_suite');
 
 async function runCrossSurfaceStateSuite() {
+  test('refill confirmation warning uses the themed danger text treatment', () => {
+    const dialogSource = fs.readFileSync('static_src/js/yomux/45_file_explorer_actions.js', 'utf8');
+    const refillSource = fs.readFileSync('static_src/js/yomux/84_stats_current.js', 'utf8');
+    const dialogCss = fs.readFileSync('static_src/css/yomux/60_editor_file_panels.css', 'utf8');
+    const themeTokens = fs.readFileSync('static_src/css/yomux/00_tokens_base.css', 'utf8');
+    assert.match(dialogSource, /options\.messageVariant === 'danger' \? ' danger' : ''/,
+      'dialog message variant is allowlisted before it enters the body class');
+    assert.match(refillSource, /confirm\(\{title, message: warning, messageVariant: 'danger'/,
+      'refill warning opts into danger text');
+    assert.match(dialogCss, /\.file-editor-dialog-body\.danger\s*\{[^}]*color:\s*var\(--danger-text-soft\)[^}]*font-weight:\s*700/s,
+      'danger dialog copy is prominent and uses the theme-aware danger text token');
+    assert.match(themeTokens, /--danger-text-soft:\s*#ffd8dc/,
+      'dark theme danger text is a bright red');
+    assert.match(themeTokens, /--danger-text-soft:\s*var\(--danger-light-text\)/,
+      'light theme danger text uses the darker red token');
+  });
+
   test('closing session popovers scans only open anchors and preserves the current one', () => {
     const source = fs.readFileSync('static_src/js/yomux/60_popovers_tabs.js', 'utf8');
     const anchor = new TestElement('', 'div');
@@ -1224,10 +1241,17 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(mouseReportApi.handleTerminalDataForTest('1', '\x1b[<35;12;7M'), true, 'xterm mouse-report bytes are still forwarded to the terminal backend');
     assert.equal(socketMessages[0]?.data, '\x1b[<35;12;7M', 'xterm mouse-report bytes stay a transport concern');
     assert.equal(mouseReportApi.attentionAcknowledgementKeyIsRecordedForTest(attentionKey), false, 'xterm mouse-report bytes do not acknowledge red/yellow agent attention');
+    for (const report of ['\x1b[1;1R', '\x1b[?1;1R', '\x1b[0n', '\x1b[?2026;2$y', '\x1b[4;2$y', '\x1b[4;800;1200t', '\x1b[6;16;8t', '\x1b[8;24;80t', '\x1bP1$r0m\x1b\\', '\x1bP1$r1;24r\x1b\\', '\x1bP0$r\x1b\\', '\x1b]10;rgb:ffff/ffff/ffff\x1b\\', '\x1b]11;rgb:0000/0000/0000\x07', '\x1b]4;0;rgb:0000/0000/0000\x1b\\']) {
+      assert.equal(mouseReportApi.terminalDataShouldAcknowledgeAttentionForTest(report), false, 'terminal query replies do not represent user input');
+      assert.equal(mouseReportApi.handleTerminalDataForTest('1', report), true, 'cursor and color replies still reach the backend');
+      assert.equal(socketMessages.at(-1)?.data, report);
+      assert.equal(mouseReportApi.attentionAcknowledgementKeyIsRecordedForTest(attentionKey), false);
+      assert.equal(mouseReportApi.terminalDataShouldAcknowledgeAttentionForTest(`${report}a`), true, 'explicit text mixed with a report still acknowledges');
+    }
     assert.equal(mouseReportApi.fileExplorerSessionFilesTargetSessionForTest(), '8002', 'xterm hover/mouse-report bytes from pane 1 do not auto-select Differ session 1');
     assert.equal(mouseReportApi.terminalDataShouldAcknowledgeAttentionForTest('a'), true, 'printable terminal bytes are treated as user input for attention acknowledgement');
     assert.equal(mouseReportApi.handleTerminalDataForTest('1', 'a', {attentionOptions: {localOnly: true, acknowledgeAgentWindowDelayMs: 0}}), true, 'typed xterm bytes still forward while acknowledging attention');
-    assert.equal(socketMessages[1]?.data, 'a', 'typed xterm bytes are still sent to the terminal backend');
+    assert.equal(socketMessages.at(-1)?.data, 'a', 'typed xterm bytes are still sent to the terminal backend');
     assert.equal(mouseReportApi.attentionAcknowledgementKeyIsRecordedForTest(attentionKey), true, 'typed xterm bytes acknowledge the active red/yellow agent status');
     assert.equal(mouseReportApi.fileExplorerSessionFilesTargetSessionForTest(), '8002', 'typed xterm bytes acknowledge attention without retargeting Differ through the explicit-input helper');
   });
@@ -1491,7 +1515,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/\.badge-base,\s*\.chip-base\s*\{[\s\S]*flex:\s*0 0 auto;[\s\S]*display:\s*inline-flex;[\s\S]*align-items:\s*center;/.test(c9Css), 'D7: badge-base and chip-base own compact inline geometry');
     assert.ok(/\.badge-base\s*\{[\s\S]*justify-content:\s*center;/.test(c9Css), 'D7: badge-base owns centered badge content');
     assert.ok(c9Src.includes('badge-base app-menu-button-badge'), 'D7: menu count badge uses the shared badge base');
-    assert.ok(c9Src.includes("['badge-base', 'session-state-badge', 'tab-symbol'"), 'D7: session-state badges use the shared badge base');
+    assert.ok(/const classes = \['badge-base', 'session-state-badge'\][\s\S]*if \(options\.tabSymbol !== false\) classes\.push\('tab-symbol'\)/.test(c9Src), 'D7: session-state badges use the shared badge base with an explicit tab-symbol opt-out for leading markers');
     assert.ok(c9Src.includes('chip-base command-palette-view-chip'), 'D7: command-palette view chips use the shared chip base');
     assert.ok(c9Src.includes('btn-base chip-base meta-repo-chip'), 'D7: repository switcher chips use the shared chip base');
   });
@@ -2035,10 +2059,9 @@ async function runCrossSurfaceStateSuite() {
     const dockviewCommitStart = appSource.indexOf('function dockviewCommitPanelActivation(');
     const dockviewCommitBody = appSource.slice(dockviewCommitStart, appSource.indexOf('function dockviewSetPendingUserPanelActivation', dockviewCommitStart));
     assert.ok(dockviewCommitBody.includes('const focusOptions = isTmuxSession(panelItem) && userInitiated')
-      && dockviewCommitBody.includes('acknowledgeAgentWindow: false')
-      && dockviewCommitBody.includes('acknowledgePromptAttention: false')
+      && dockviewCommitBody.includes('acknowledgeUserTerminalTabActivation(panelItem, options, sharedGesture)')
       && dockviewCommitBody.includes('else setFocusedPanelItem(panelItem, {...options, userInitiated, deferSideSync: userInitiated})')
-      && dockviewCommitBody.includes('commitUserTerminalTabActivation(panelItem, focusOptions, generation)'), 'Dockview focus reuses the already-acknowledged click through the shared activation owner');
+      && dockviewCommitBody.includes('commitUserTerminalTabActivation(panelItem, focusOptions, generation, sharedGesture)'), 'Dockview focus reuses the already-acknowledged click through the shared activation owner');
     const paneActivationBody = appSource.slice(appSource.indexOf('function activatePaneTab('), appSource.indexOf('async function selectSession('));
     assert.ok(paneActivationBody.includes('commitUserTerminalTabActivation(session, focusOptions, generation)'), 'clicking a tmux pane tab routes through the shared deferred Finder owner');
     assert.ok(/function activatePaneTab\([^]*?isFileEditorItem\(session\)[^]*?changedFileOwnerSessionForPath\(path, \{owners\}\)[^]*?owners\.length === 1[^]*?noteFileExplorerChangesSessionInteraction\(owner\)/.test(appSource), 'clicking a file tab commits an exact-path Differ owner, falling back to a single owner only');
@@ -2922,7 +2945,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/\.keyboard-legend-row\s*\{[\s\S]*grid-template-columns:\s*minmax\(34px,\s*max-content\) minmax\(0,\s*1fr\)[\s\S]*padding:\s*var\(--space-2\) 0/.test(preferencesCss), 'Keyboard legend rows use compact sample/detail columns');
     assert.ok(/\.session-yolo-marker\s*\{[^}]*border-radius:\s*var\(--radius-control\)/.test(preferencesCss), 'YO buttons use the shared square control radius, not a circular pill');
     assert.ok(/\.panel-session-label \.session-yolo-marker\s*\{[^}]*border-radius:\s*var\(--radius-control\)/.test(preferencesCss), 'Info Bar YO buttons use the same square control radius');
-    assert.ok(/\.pane-tab-core > \.session-yolo-marker\s*\{[^}]*border-radius:\s*var\(--radius-control\)/.test(preferencesCss), 'pane tab YO buttons keep the same square control radius');
+    assert.ok(/\.session-tab-status-and-markers > \.session-yolo-marker\s*\{[^}]*border-radius:\s*var\(--radius-control\)/.test(preferencesCss), 'pane tab YO buttons keep the same square control radius beside the status marker');
     assert.equal(/\.session-yolo-marker\s*\{[^}]*border-radius:\s*var\(--radius-pill\)/.test(preferencesCss), false, 'YO button base chrome must not use the circular pill radius');
     assert.ok(preferencesHtml.includes('>New tab<'), 'hyphenated string radio labels use their localized descriptor');
     // "No agent" (deterministic) is no longer a selectable backend — Auto still falls back to it internally,
@@ -5225,7 +5248,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/function sendRemoteResize\(session, options = \{\}\)[\s\S]*terminalCanPublishRemoteSize\(\)[\s\S]*foreground:\s*true[\s\S]*message\.activate = true[\s\S]*message\.client = browserClientId/.test(source), 'terminal resize frames carry explicit foreground authority and browser identity');
     assert.ok(/function claimVisibleTerminalResizeAuthority\(reason = '', options = \{\}\)[\s\S]*visibleTerminalResizeAuthorityEntries\(\)[\s\S]*fitTerminal\(session, \{claim: true\}\)/.test(source), 'browser activation claims every visible xterm pane through the shared fit path');
     assert.ok(/function installTerminalResizeAuthorityHandlers\(\)[\s\S]*window\.addEventListener\('focus'[\s\S]*document\.addEventListener\('visibilitychange'/.test(source), 'browser focus/visibility activates visible xterm resize authority');
-    assert.ok(/window\.addEventListener\('pointerdown', \(\) => \{\s*scheduleTabSwitchPhaseTwo\(tabSwitchHighlightGeneration, \(\) => claimVisibleTerminalResizeAuthority\('pointerdown', \{force: true\}\)\)/.test(source), 'pointer authority uses the existing guarded scheduler after paint');
+    assert.ok(/window\.addEventListener\('pointerdown', event => \{[\s\S]*scheduleVisibleTerminalResizeAuthority\(\)/.test(source), 'pointer authority has a separate coalescing owner from Finder generations');
     assert.ok(/function scheduleRemoteResize\(session,[\s\S]*terminalCanPublishRemoteSize\(\)[\s\S]*item\.resizeTimer = null/.test(source), 'hidden/background tabs cancel pending terminal resize timers instead of shrinking tmux later');
     const authorityApi = loadYomux('', ['1', '2', '3']);
     const authoritySlots = authorityApi.emptyLayoutSlots();
@@ -5234,6 +5257,7 @@ async function runCrossSurfaceStateSuite() {
     authoritySlots.right = authorityApi.paneStateWithTabs(['2'], '2');
     authorityApi.setLayoutSlotsForTest(authoritySlots);
     const authoritySends = [];
+    let authorityRefreshes = 0;
     for (const session of ['1', '2', '3']) {
       const pane = authorityApi.testElementForId(`terminal-pane-${session}`);
       pane.classList.add('active');
@@ -5247,13 +5271,17 @@ async function runCrossSurfaceStateSuite() {
           this.cols = cols;
           this.rows = rows;
         },
-        write() {},
-        refresh() {},
+        write(data, callback) { callback?.(); },
+        refresh() { authorityRefreshes++; },
       }, {readyState: WebSocket.OPEN, send(message) { authoritySends.push({session, message: JSON.parse(message)}); }});
     }
     authorityApi.claimVisibleTerminalResizeAuthorityForTest('test', {force: true});
     assert.deepEqual(authoritySends.map(item => item.session).sort(), ['1', '2'], 'browser activation claims all visible xterm panes and skips hidden/background tabs');
     assert.equal(authoritySends.every(item => item.message.type === 'resize' && item.message.foreground === true && item.message.activate === true && item.message.client), true, 'activation resize frames carry foreground authority, activation, and browser id');
+    authorityRefreshes = 0;
+    authorityApi.claimVisibleTerminalResizeAuthorityForTest('test', {force: true});
+    assert.equal(authorityRefreshes, 0, 'unchanged ownership renewal never repaints the local viewport');
+    authoritySends.splice(2);
     authorityApi.claimVisibleTerminalResizeAuthorityForTest('test');
     assert.equal(authoritySends.length, 2, 'same browser surface does not keep re-sending unchanged visible terminal authority');
     authorityApi.processTerminalSocketFrameForTest('1', 'first attached frame');
@@ -5285,7 +5313,9 @@ async function runCrossSurfaceStateSuite() {
     });
     api.setPanelDetailsCollapsedForTest(detailsPanel, false);
     assert.ok(fits.length >= 1, 'hiding or showing the Info Bar schedules a visible tmux terminal fit');
-    assert.ok(api.tmuxPaneTabHtml('1', null, {key: 'blocked', short: 'Blocked', label: 'Blocked', reason: 'test'}).includes('tab-symbol'));
+    api.setAutoApproveStateForTest('1', {screen: {key: 'blocked', text: 'test'}});
+    const blockedTab = api.tmuxPaneTabHtml('1', null, {key: 'blocked', short: 'Blocked', label: 'Blocked', reason: 'test'});
+    assert.ok(/session-tab-state-marker[^>]*>BLK<\/span>/.test(blockedTab), 'blocked status appears as an always-visible BLK marker beside the status circle');
     assert.equal(api.tmuxSessionNameError('good_name-1.2'), '');
     assert.equal(api.tmuxSessionNameError('dynamo 2'), '');
     assert.equal(api.tmuxSessionNameError('bad/name').includes('letters'), true);

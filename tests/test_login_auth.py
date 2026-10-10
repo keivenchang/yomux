@@ -29,6 +29,7 @@ from tests.helpers.fixture_http_server import FixtureHttpServer
 from tests.helpers.fixture_http_server import request_fixture_http_header_list as request_header_list
 from tests.helpers.fixture_http_server import request_fixture_http_tuple as request
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 pytestmark = [pytest.mark.socket, pytest.mark.deprecated_python_server]
 
 SOURCE_STATIC_DIR = Path(__file__).resolve().parents[1] / "static_src"

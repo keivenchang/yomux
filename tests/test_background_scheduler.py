@@ -4,9 +4,13 @@
 
 from __future__ import annotations
 
+import pytest
 import threading
 
 from yomux_lib.infra.background_scheduler import BackgroundScheduler
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
 
 
 def test_coordinator_reports_all_roles_as_local(tmp_path):

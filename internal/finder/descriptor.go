@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // Go's syscall package does not expose these Linux constants on every supported Go release. The
@@ -307,7 +309,7 @@ func isRepositoryMarkerAt(parent *os.File, name string) bool {
 }
 
 func copyDescriptor(file *os.File) (*os.File, error) {
-	fd, err := syscall.Dup(int(file.Fd()))
+	fd, err := unix.FcntlInt(file.Fd(), unix.F_DUPFD_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}

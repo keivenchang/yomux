@@ -8,6 +8,9 @@ import pytest
 
 from yomux_lib.stats_current import protocol, resolution as resolution_policy
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def request(range_seconds: str = "300", resolution: str = "AUTO", **extra: object) -> protocol.SnapshotRequest:
     return protocol.parse_snapshot_request({"range_seconds": range_seconds, "resolution": resolution, "client_id": "browser-a", **extra})

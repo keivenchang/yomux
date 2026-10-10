@@ -65,6 +65,49 @@ type goBackgroundOwner struct {
 
 var backgroundRoles = []string{"tabber-activity", "session-files", "search-index", "stats-sampler", "watch-roots"}
 
+func acceptLaunchDescriptors(manifest string, listenerFD int) error {
+	if manifest == "" && listenerFD < 0 {
+		return nil
+	}
+	descriptors := []int{}
+	seen := map[int]bool{}
+	for _, value := range strings.Split(manifest, ",") {
+		if manifest == "" {
+			break
+		}
+		fd, err := strconv.Atoi(value)
+		if err != nil || fd < 3 || seen[fd] {
+			return fmt.Errorf("invalid or duplicate descriptor %q", value)
+		}
+		var stat syscall.Stat_t
+		if err := syscall.Fstat(fd, &stat); err != nil || stat.Mode&syscall.S_IFMT != syscall.S_IFREG {
+			return fmt.Errorf("descriptor %d is not an open regular lease file", fd)
+		}
+		data := make([]byte, 16384)
+		n, err := syscall.Pread(fd, data, 0)
+		var record struct {
+			PID int `json:"pid"`
+		}
+		if err != nil || json.Unmarshal(data[:n], &record) != nil || record.PID != os.Getpid() {
+			return fmt.Errorf("descriptor %d is not owned by this launch", fd)
+		}
+		seen[fd] = true
+		descriptors = append(descriptors, fd)
+	}
+	if listenerFD >= 0 {
+		listening, err := syscall.GetsockoptInt(listenerFD, syscall.SOL_SOCKET, syscall.SO_ACCEPTCONN)
+		if listenerFD < 3 || seen[listenerFD] || err != nil || listening != 1 {
+			return fmt.Errorf("descriptor %d is not a listening socket", listenerFD)
+		}
+		descriptors = append(descriptors, listenerFD)
+	}
+	// Python retains these descriptors across exec; only the server may keep them, not its terminal or worker children.
+	for _, fd := range descriptors {
+		syscall.CloseOnExec(fd)
+	}
+	return nil
+}
+
 func readIdentityValue(environmentName, path, fallback string) string {
 	value := ""
 	if environmentName != "" {
@@ -814,6 +857,13 @@ func releaseInstanceRootLease(lock *os.File) {
 
 func (s *server) shutdown() {
 	s.shutdownOnce.Do(func() {
+		shutdownClean := true
+		s.indexMonitorMu.Lock()
+		for _, monitor := range s.indexMonitors {
+			monitor.cancel()
+		}
+		s.indexMonitors = nil
+		s.indexMonitorMu.Unlock()
 		if s.tmuxRosterWatchCancel != nil {
 			s.tmuxRosterWatchCancel()
 			<-s.tmuxRosterWatchDone
@@ -831,29 +881,39 @@ func (s *server) shutdown() {
 		}
 		if s.finderJobs != nil {
 			if !s.finderJobs.CloseWithTimeout(5 * time.Second) {
+				shutdownClean = false
 				slog.Warn("finder job scheduler did not stop before shutdown timeout")
 			}
 		}
 		if s.finderBackgroundJobs != nil {
 			if !s.finderBackgroundJobs.CloseWithTimeout(5 * time.Second) {
+				shutdownClean = false
 				slog.Warn("finder background scheduler did not stop before shutdown timeout")
 			}
 		}
 		if s.finderBulkJobs != nil {
 			if !s.finderBulkJobs.CloseWithTimeout(5 * time.Second) {
+				shutdownClean = false
 				slog.Warn("finder bulk job scheduler did not stop before shutdown timeout")
 			}
 		}
 		if s.finderStreamJobs != nil {
 			if !s.finderStreamJobs.CloseWithTimeout(5 * time.Second) {
+				shutdownClean = false
 				slog.Warn("finder stream scheduler did not stop before shutdown timeout")
 			}
 		}
 		if s.finder != nil {
 			s.finder.Close()
 		}
+		if s.searchIndex != nil {
+			s.searchIndex.Close()
+		}
 		if s.background != nil {
 			s.background.close()
+		}
+		if s.yolo != nil {
+			s.yolo.close()
 		}
 		s.mu.Lock()
 		rootLease := s.rootLease
@@ -871,5 +931,8 @@ func (s *server) shutdown() {
 			_ = syscall.Kill(-command.Process.Pid, syscall.SIGTERM)
 			_ = command.Process.Kill()
 		}
+		s.shutdownClean = shutdownClean
 	})
 }
+
+func (s *server) shutdownCompletedCleanly() bool { return s.shutdownClean }

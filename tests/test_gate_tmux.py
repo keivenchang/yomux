@@ -22,6 +22,7 @@ import pytest
 
 from tests import gate_harness
 from tests import latency_calibration
+from tests.isolated_dev_server import isolated_dev_server_factory  # noqa: F401
 from tests.browser_helpers.browser_layout import WebDriverWait  # noqa: F401
 from tests.browser_helpers.browser_layout import TimeoutException
 from tests.browser_helpers.browser_layout import assert_live_runtime_boot_healthy
@@ -69,12 +70,16 @@ class TerminalOutputPressure:
     duration_seconds: float
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_d1_repeated_enter_posts_rename_exactly_once(browser, gate_live_server):
     evidence = gate_harness.held_rename_roster_probe(browser, gate_live_server)
     assert evidence["held"]["calls"] == evidence["final"]["calls"] == 1, evidence
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_d2_successful_repeated_enter_rename_never_surfaces_error(browser, gate_live_server):
     evidence = gate_harness.held_rename_roster_probe(browser, gate_live_server)
@@ -82,6 +87,8 @@ def test_d2_successful_repeated_enter_rename_never_surfaces_error(browser, gate_
     assert evidence["target"] in evidence["final"]["sessions"], evidence
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.parametrize("reject", [False, True])
 @pytest.mark.browser
 def test_d3_submit_control_is_visibly_disabled_then_reenabled_on_both_outcomes(browser, gate_live_server, reject):
@@ -91,6 +98,8 @@ def test_d3_submit_control_is_visibly_disabled_then_reenabled_on_both_outcomes(b
     assert bool(evidence["final"]["error"]) == reject, evidence
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_d4_rename_survives_released_stale_roster_without_reversal(browser, gate_live_server):
     evidence = gate_harness.held_rename_roster_probe(browser, gate_live_server, stale=True)
@@ -104,6 +113,8 @@ def test_d4_rename_survives_released_stale_roster_without_reversal(browser, gate
     assert evidence["session"] not in evidence["final"]["serverSessions"], evidence
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.parametrize("reject", [False, True])
 @pytest.mark.browser
 def test_d10_rename_optimistically_changes_tab_before_reply_and_has_bounded_reconciliation(browser, gate_live_server, reject):
@@ -128,6 +139,7 @@ def _request(port: int, path: str) -> tuple[int, bytes]:
 
 
 @pytest.mark.no_browser
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_gate_d5_kill_session_only_affects_registered_tmux_socket(monkeypatch, tmp_path, make_tmux_webterm_app, no_control_socket, isolated_yoagent_conversation_state):
     if shutil.which("tmux") is None:
@@ -180,6 +192,7 @@ def test_gate_d6_destructive_default_server_policy_is_explicit(monkeypatch):
 
 @pytest.mark.gate_serial
 @pytest.mark.no_browser
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_gate_d7_kill_session_api_returns_promptly_and_removes_scoped_session(monkeypatch, tmp_path, make_tmux_webterm_app, no_control_socket, isolated_yoagent_conversation_state):
     if shutil.which("tmux") is None:
@@ -308,14 +321,19 @@ def _send_native_key(driver, character: str) -> None:
     driver.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyUp", **common})
 
 
-def _start_marker_echo_process(runtime, session: str) -> None:
+def _start_marker_echo_process(runtime, session: str, *, pressure: bool = False) -> None:
     """Replace an isolated shell with a raw-tty process that visibly acknowledges every `a`."""
 
     code = (
-        "import os,sys,termios,tty\n"
+        "import os,sys,termios,tty,threading,time\n"
         "fd=sys.stdin.fileno()\n"
         "tty.setraw(fd)\n"
         "os.write(sys.stdout.fileno(), b'READY\\r\\n')\n"
+        f"if {pressure!r}:\n"
+        " def output():\n"
+        "  while True:\n"
+        "   os.write(sys.stdout.fileno(), b'background-output\\r\\n'); time.sleep(0.02)\n"
+        " threading.Thread(target=output,daemon=True).start()\n"
         "count=0\n"
         "while True:\n"
         " data=os.read(fd,1)\n"
@@ -1200,6 +1218,7 @@ def _run_tab_activation_native_echo_journey(browser, monkeypatch, tmp_path) -> d
 
 
 @pytest.mark.browser
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_s1_tab_activation_keeps_native_echo_live_while_cached_differ_renders(browser, monkeypatch, tmp_path):
     evidence = _run_tab_activation_native_echo_journey(browser, monkeypatch, tmp_path)
@@ -1210,6 +1229,8 @@ def test_s1_tab_activation_keeps_native_echo_live_while_cached_differ_renders(br
     assert evidence["differ_rows"] >= 5000, evidence
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_s1_certification_tab_activation_native_echo_holds_fixed_user_ceilings(certification_phase_only, request, browser, monkeypatch, tmp_path):
     """Certify native visible echo in quiet and busy real-xterm tab activations."""
@@ -1251,6 +1272,8 @@ def test_s1_certification_tab_activation_native_echo_holds_fixed_user_ceilings(c
     print({"quiet": evidence["quiet"], "busy": evidence["busy"], "heldDelayMs": evidence["held_delay_ms"], "verdicts": evidence["verdicts"], "artifact": certified["artifact"]})
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_s1_keystroke_delivery_is_complete_under_terminal_output_pressure(browser, gate_live_server):
     """Every one of 120 native keys reaches xterm, the websocket and the session while it streams 4 KiB every 20 ms.
@@ -1273,6 +1296,8 @@ def test_s1_keystroke_delivery_is_complete_under_terminal_output_pressure(browse
     _assert_keystroke_delivery_complete(observed)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_s1_keystroke_delivery_survives_a_deterministic_renderer_cpu_slowdown(browser, gate_live_server):
     """A deterministic renderer CPU slowdown must change wall latency only, never delivery.
@@ -1308,6 +1333,8 @@ def test_s1_keystroke_delivery_survives_a_deterministic_renderer_cpu_slowdown(br
     _assert_keystroke_delivery_complete(observed)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.no_browser
 def test_s1_cpu_slowdown_starts_only_after_pressure_is_established(monkeypatch):
     """The parallel completeness control must not throttle its pressure-readiness prerequisite."""
@@ -1433,6 +1460,8 @@ def _certification_verdict(summary: dict[str, object], certified_statistic: str)
 certification_phase_only = latency_calibration.certification_phase_fixture()
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_s1_certification_keystroke_wall_latency_holds_the_fixed_user_ceiling(certification_phase_only, request, browser, gate_live_server):
     """Certify the user-visible keystroke wall latency on a quiet and a pressured round in ONE browser.
@@ -1490,6 +1519,8 @@ def _negative_control_reasons(observed: dict[str, object]) -> list[str]:
     return [failure.split(":", 1)[0] for failure in _keystroke_delivery_failures(observed)]
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_s1_negative_control_dropped_keystroke_fails_delivery_completeness(browser, gate_live_server):
     """A single key that never reaches xterm must red the retained delivery contract."""
@@ -1529,6 +1560,8 @@ def test_s1_negative_control_dropped_keystroke_fails_delivery_completeness(brows
     assert observed["counts"][-1] == KEYSTROKE_LATENCY_SAMPLE_COUNT - 1, observed["counts"]
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_s1_negative_control_stolen_focus_fails_the_focus_invariant(browser, gate_live_server):
     """Focus leaving and returning to the terminal mid-burst must red the retained focus invariant."""
@@ -1565,6 +1598,8 @@ def test_s1_negative_control_stolen_focus_fails_the_focus_invariant(browser, gat
     assert reasons == ["focus-invariant"], {"reasons": reasons, "summary": _keystroke_summary(observed)}
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_s1_negative_control_stalled_websocket_fails_send_completeness(browser, gate_live_server):
     """A transport that stops accepting input mid-burst must red the retained websocket contract.
@@ -1684,3 +1719,334 @@ def test_s1_certification_qualification_selects_the_statistic_and_never_widens_t
         assert verdict["ceiling_ms"] == KEYSTROKE_LATENCY_CEILING_MS
         assert verdict["passed"] is False
     assert {_certification_verdict(outlier, statistic)["ceiling_ms"] for statistic in (qualified, unqualified)} == {KEYSTROKE_LATENCY_CEILING_MS}
+
+
+def _run_go_tab_and_body_activation(browser, isolated_dev_server_factory, mode="plain", profile=False):
+    """Trusted Chromium gestures measure the real Go/PTY/xterm path, with no operator state."""
+    runtime = isolated_dev_server_factory("activation", session_count=3 if mode == "split" else 2)
+    first, second = runtime.tmux.sessions[:2]
+    for session in (first, second):
+        _start_marker_echo_process(runtime, session, pressure=mode == "busy")
+    query = urlencode({"sessions": f"{first},{second}", "layout": "left", "tabs": f"left:{first},{second}"})
+    try:
+        navigation_started = time.monotonic()
+        browser.get(f"{runtime.base_url}/?{query}")
+        assert_live_runtime_boot_healthy(browser, "go-activation", timeout=20)
+        cold_started = time.monotonic()
+        for session in (second, first):
+            click_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{session}"]')
+            WebDriverWait(browser, 20).until(lambda driver: driver.execute_script(
+                "const item=terminals.get(arguments[0]); return item?.terminalOutputSeen && item.term?.onRender && item.container.querySelector('.xterm-screen');", session))
+        cold_connection_seconds = time.monotonic() - navigation_started
+        if mode == "split":
+            browser.execute_script("const slots=emptyLayoutSlots(); slots[layoutTreeKey]=splitNode('row',leafNode('left'),leafNode('right'),0.5); slots.left=paneStateWithTabs(arguments[0],arguments[0][0]); slots.right=paneStateWithTabs([arguments[1]],arguments[1]); applyLayoutSlots(slots,{prune:false});", [first, second], runtime.tmux.sessions[2])
+        elif mode == "tabber":
+            browser.execute_async_script("const done=arguments[arguments.length-1]; openTabberActivityOverview().then(() => done(true), error => done({error:String(error)}));")
+        elif mode == "busy":
+            browser.execute_script("""
+              const fetch = window.fetch.bind(window);
+              window.__activationHeldMetadata = [];
+              window.fetch = async (...args) => {
+                const response = await fetch(...args);
+                if (String(args[0]).includes('/api/session-metadata')) await new Promise(resolve => window.__activationHeldMetadata.push(resolve));
+                return response;
+              };
+              window.__activationRestoreFetch = () => { window.fetch = fetch; window.__activationHeldMetadata.splice(0).forEach(resolve => resolve()); };
+              refreshTranscripts({force:true}); refreshAutoStatuses();
+            """)
+            WebDriverWait(browser, 10).until(lambda driver: driver.execute_script("return window.__activationHeldMetadata.length > 0;"))
+        # Layout changes are cold work; a warm gesture starts only after the real fit/paint owners settle.
+        for session in (second, first):
+            click_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{session}"]')
+            WebDriverWait(browser, 10, poll_frequency=0.01).until(lambda driver: driver.execute_script(
+                "const item=terminals.get(arguments[0]); return item && !item.fitFrame && !item.refreshPending && !dockviewLayoutState.tabActivationPerf && terminalFitIsUnchanged(item,estimateTerminalSize(item.container,item.term));", session))
+        cold_seconds = time.monotonic() - cold_started
+        browser.execute_async_script("const done=arguments[arguments.length-1]; requestAnimationFrame(() => requestAnimationFrame(() => done(true)));")
+        browser.execute_script(
+            r"""
+            const probe = window.__activationProbe = {samples: [], disposables: [], originals: [], echoes: new Map()};
+            const now = () => performance.now();
+            for (const name of ['applyLayoutSlots', 'refreshTabberPanels', 'syncTabberTreeActiveSelection', 'syncTabberTreeLayoutState', 'refreshTerminal', 'dockviewRefreshTabs', 'dockviewBeginTabPointerDrag', 'captureDockviewPaneBeforeDetach', 'capturePaneViewState', 'dockviewCommitPanelActivation', 'activateTab', 'setFocusedTerminal', 'focusTerminalDom', 'closeOtherSessionPopovers', 'dockviewRootBoundaryEdgesAtPoint']) {
+              const original = eval(name);
+              const wrapper = (...args) => {
+                const started = now();
+                try { return original(...args); }
+                finally { const sample=probe.samples.at(-1); if (sample) (sample.work ||= []).push({name, at:started, ms:now()-started}); }
+              };
+              eval(`${name} = wrapper`);
+              probe.originals.push(() => { eval(`${name} = original`); });
+            }
+            const perfEnd = clientPerfEnd;
+            probe.originals.push(() => { clientPerfEnd = perfEnd; });
+            clientPerfEnd = (token, ...args) => {
+              const sample = probe.samples.at(-1);
+              if (token?.name === 'tabActivationPaint' && sample && !sample.body) sample.paintAt = now();
+              return perfEnd(token, ...args);
+            };
+            for (const session of arguments[0]) {
+              const item = terminals.get(session), term = item.term;
+              const send = item.socket.send.bind(item.socket), refresh = term.refresh.bind(term);
+              probe.originals.push(() => { item.socket.send = send; term.refresh = refresh; });
+              item.socket.send = data => {
+                const message = JSON.parse(data), sample = probe.samples.at(-1);
+                if (sample?.session === session) {
+                  if (message.type === 'resize') { sample.resizes++; (sample.resizeMessages ||= []).push({...message, at: now(), stack: new Error().stack}); }
+                  if (message.type === 'input') sample.sentAt = now();
+                }
+                return send(data);
+              };
+              term.refresh = (...args) => {
+                const sample = probe.samples.at(-1);
+                if (sample?.session === session) { sample.refreshes++; (sample.refreshStacks ||= []).push(new Error().stack); }
+                return refresh(...args);
+              };
+              probe.disposables.push(term.onRender(() => {
+                const sample = probe.samples.at(-1);
+                if (sample?.session !== session) return;
+                sample.renderAt ??= now();
+                const buffer = term.buffer.active;
+                const text = Array.from({length: term.rows}, (_, i) => buffer.getLine(buffer.viewportY + i)?.translateToString(true) || '').join('\n');
+                if (sample.marker && text.includes(sample.marker) && !sample.echoAt) {
+                  sample.echoRenderAt = now();
+                  requestAnimationFrame(() => { sample.echoAt ??= now(); });
+                }
+              }));
+            }
+            const renderedHighlight = session => {
+              const dockTab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(session)}"]`);
+              if (dockTab) return dockTab.classList.contains('active') && dockTab.closest('.dv-tab')?.classList.contains('dv-active-tab') === true;
+              const row = document.querySelector(`.file-tree-row[data-tabber-session="${CSS.escape(session)}"]`);
+              return row?.classList.contains('tabber-active-session') === true && row.querySelector('.tabber-session-tab')?.classList.contains('active') === true;
+            };
+            const renderedPreviousHighlights = session => {
+              const dockTab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(session)}"]`);
+              if (dockTab) return [...(dockTab.closest('.dv-groupview')?.querySelectorAll('.dockview-pane-tab.active') || [])]
+                .map(tab => tab.dataset.paneTab).filter(item => item && item !== session);
+              return [...document.querySelectorAll('.file-tree-row.tabber-active-session')]
+                .map(row => row.dataset.tabberSession).filter(item => item && item !== session);
+            };
+            const observeHighlight = sample => requestAnimationFrame(() => {
+              const ready = renderedHighlight(sample.session) && sample.previousHighlights.every(item => !renderedHighlight(item));
+              sample.highlightReadyAt = ready ? now() : null;
+              requestAnimationFrame(() => {
+                const painted = renderedHighlight(sample.session) && sample.previousHighlights.every(item => !renderedHighlight(item));
+                sample.highlightAt = painted ? now() : null;
+                sample.focusAt ??= document.activeElement === terminals.get(sample.session)?.term.textarea ? now() : null;
+              });
+            });
+            const pointer = event => {
+              const tab = event.target.closest('[data-pane-tab], [data-tabber-session]');
+              const entry = [...terminals].find(([, item]) => item.container.contains(event.target));
+              const session = tab?.dataset.paneTab || tab?.dataset.tabberSession || entry?.[0];
+              if (!session || !arguments[0].includes(session)) return;
+              const sample = {session, body: !tab, trusted: event.isTrusted, eventAt: event.timeStamp,
+                activationAt: event.timeStamp, releaseActivation: Boolean(event.target.closest('.file-tree-row[data-tabber-type="session"]')),
+                handlerAt: now(), previousHighlights: renderedPreviousHighlights(session), resizes: 0, refreshes: 0};
+              probe.samples.push(sample);
+              if (sample.body && document.activeElement === terminals.get(session)?.term.textarea) sample.focusAt = now();
+              if (!sample.releaseActivation) observeHighlight(sample);
+            };
+            const handled = () => { const sample = probe.samples.at(-1); if (sample) sample.handlerEndAt = now(); };
+            const focused = event => {
+              const sample = probe.samples.at(-1);
+              if (sample && event.target === terminals.get(sample.session)?.term.textarea) sample.focusAt ??= now();
+            };
+            const released = event => {
+              const sample = probe.samples.at(-1);
+              if (!sample) return;
+              sample.releasedAt = now();
+              if (sample.releaseActivation) { sample.activationAt = event.timeStamp; observeHighlight(sample); }
+              Promise.resolve().then(() => {
+                sample.focusAt ??= document.activeElement === terminals.get(sample.session)?.term.textarea ? now() : null;
+              });
+            };
+            const key = event => {
+              if (event.key !== 'a') return;
+              const sample = probe.samples.at(-1), count = (probe.echoes.get(sample.session) || 0) + 1;
+              probe.echoes.set(sample.session, count);
+              sample.keyAt = event.timeStamp; sample.keyTrusted = event.isTrusted;
+              sample.marker = `<E:${String(count).padStart(4, '0')}>`;
+            };
+            document.addEventListener('pointerdown', pointer, true);
+            document.addEventListener('pointerup', released, true);
+            window.addEventListener('pointerdown', handled);
+            document.addEventListener('focusin', focused, true);
+            document.addEventListener('keydown', key, true);
+            probe.dispose = () => {
+              document.removeEventListener('pointerdown', pointer, true);
+              document.removeEventListener('pointerup', released, true);
+              window.removeEventListener('pointerdown', handled);
+              document.removeEventListener('focusin', focused, true);
+              document.removeEventListener('keydown', key, true);
+              probe.disposables.forEach(d => d.dispose()); probe.originals.forEach(restore => restore());
+            };
+            """, [first, second])
+        if profile:
+            browser.execute_cdp_cmd("Profiler.enable", {})
+            browser.execute_cdp_cmd("Profiler.start", {})
+        for index in range(40):
+            session = second if (index // 2) % 2 == 0 else first
+            selector = (f'#term-{session} .xterm-screen' if index % 2 else
+                        f'#panel-__tabber__ .file-tree-row[data-tabber-type="session"][data-tabber-session="{session}"] .file-tree-name' if mode == 'tabber' else
+                        f'.dockview-pane-tab[data-pane-tab="{session}"]')
+            click_visible_selector(browser, selector)
+            _send_native_key(browser, "a")
+            WebDriverWait(browser, 5, poll_frequency=0.01).until(lambda driver: driver.execute_script(
+                "return Boolean(window.__activationProbe.samples.at(-1)?.echoAt);"))
+            # Cross the ownership scheduler boundary, rather than a fixed sleep.
+            browser.execute_async_script("const done=arguments[arguments.length-1]; requestAnimationFrame(() => requestAnimationFrame(() => done(true)));")
+        if profile:
+            cpu_profile = browser.execute_cdp_cmd("Profiler.stop", {})["profile"]
+            profile_path = latency_calibration.write_latency_evidence(
+                nodeid=f"go-activation-{mode}", label="activation-cpu", payload={"profile": cpu_profile})
+            nodes = {node["id"]: node["callFrame"]["functionName"] for node in cpu_profile["nodes"]}
+            durations = {}
+            for node_id, duration in zip(cpu_profile["samples"], cpu_profile["timeDeltas"]):
+                name = nodes[node_id]
+                durations[name] = durations.get(name, 0) + duration / 1000
+            print({"activation_cpu_ms": sorted(durations.items(), key=lambda entry: entry[1], reverse=True)[:30], "profile": str(profile_path)})
+        samples = browser.execute_script("return window.__activationProbe.samples;")
+        print({"activation_samples": samples})
+        assert len(samples) == 40, samples
+        assert all(s["trusted"] and s["keyTrusted"] and s["focusAt"] is not None and s["highlightAt"] is not None for s in samples), samples
+        tab_samples = [s for s in samples if not s["body"]]
+        body_samples = [s for s in samples if s["body"]]
+        counts = {"tab": len(tab_samples), "body": len(body_samples)}
+        assert counts == {"tab": 20, "body": 20}, counts
+        assert all(s.get("paintAt") for s in tab_samples), tab_samples
+        metrics = (("queue", samples, "eventAt", "handlerAt"), ("handler", samples, "handlerAt", "handlerEndAt"),
+                   ("highlight", tab_samples, "activationAt", "highlightAt"), ("focus", tab_samples, "activationAt", "focusAt"),
+                   ("input", samples, "keyAt", "sentAt"), ("echo", tab_samples, "keyAt", "echoAt"),
+                   ("bodyHighlight", body_samples, "activationAt", "highlightAt"), ("bodyFocus", body_samples, "activationAt", "focusAt"),
+                   ("bodyEcho", body_samples, "keyAt", "echoAt"), ("paint", tab_samples, "activationAt", "paintAt"))
+        delays = {name: [s[end] - s[start] for s in population] for name, population, start, end in metrics}
+        assert all(delay >= 0 for values in delays.values() for delay in values), delays
+        summary = {name: _nearest_rank_ms(values, 0.95) for name, values in delays.items()}
+        maxima = {name: max(values) for name, values in delays.items()}
+        trace_path = latency_calibration.write_latency_evidence(
+            nodeid=f"go-activation-{mode}", label=f"activation-{mode}",
+            payload={"samples": samples, "summary": summary, "maxima": maxima, "counts": counts, "cold_navigation_and_terminals_ready_seconds": cold_connection_seconds, "cold_warmup_seconds": cold_seconds})
+        print({"go_activation_p95_ms": summary, "maxima": maxima, "counts": counts, "mode": mode, "cold_navigation_and_terminals_ready_seconds": cold_connection_seconds, "cold_warmup_seconds": cold_seconds, "samples": samples, "trace": str(trace_path)})
+        assert all(s["resizes"] == 1 for s in samples), samples
+        assert all(s["refreshes"] == 0 for s in samples if s["body"]), samples
+        assert all(s["refreshes"] <= 1 for s in samples if not s["body"]), samples
+        assert browser.execute_script("return focusedTerminal === arguments[0] && document.activeElement === terminals.get(arguments[0]).term.textarea;", session)
+        return summary
+    finally:
+        if profile:
+            browser.execute_cdp_cmd("Profiler.disable", {})
+        browser.execute_script("window.__activationProbe?.dispose(); window.__activationRestoreFetch?.();")
+        browser.get("about:blank")
+
+
+@pytest.mark.parametrize("mode", ["plain", "split", "tabber", "busy"])
+@pytest.mark.browser
+def test_go_tab_and_body_activation_coalesces_work_and_preserves_native_echo(browser, isolated_dev_server_factory, mode):
+    _run_go_tab_and_body_activation(browser, isolated_dev_server_factory, mode, profile=mode in ("plain", "tabber"))
+
+
+@pytest.mark.browser
+def test_go_activation_certification_meets_highlight_paint_and_echo_budgets(certification_phase_only, request, browser, isolated_dev_server_factory):
+    calibration = latency_calibration.run_browser_latency_calibration(browser)
+    summaries = {mode: _run_go_tab_and_body_activation(browser, isolated_dev_server_factory, mode)
+                 for mode in ("plain", "split", "tabber", "busy")}
+    verdicts = [latency_calibration.fixed_ceiling_verdict(
+        label=f"{mode} activation {name}", raw_measured_ms=summary[name], ceiling_ms=ceiling, statistic="p95")
+        for mode, summary in summaries.items()
+        for name, ceiling in (("highlight", 50), ("focus", 50), ("paint", 100), ("echo", 100),
+                              ("bodyHighlight", 50), ("bodyFocus", 50), ("bodyEcho", 100))]
+    latency_calibration.certify_verdicts(
+        nodeid=request.node.nodeid, label="go-activation", verdicts=verdicts,
+        qualification=latency_calibration.merged_qualification(
+            certification_phase_only, latency_calibration.browser_calibration_qualification(calibration)),
+        extra_evidence={"summaries": summaries, "browser_calibration": calibration})
+
+
+@pytest.mark.browser
+def test_go_competing_clients_and_rapid_switch_preserve_draft_viewport_and_panel(browser, isolated_dev_server_factory):
+    runtime = isolated_dev_server_factory("competing-activation", session_count=2)
+    first, second = runtime.tmux.sessions
+    query = urlencode({"sessions": f"{first},{second}", "layout": "left", "tabs": f"left:{first},{second}"})
+    primary = browser.current_window_handle
+    browser.get(f"{runtime.base_url}/?{query}")
+    try:
+        assert_live_runtime_boot_healthy(browser, "go-competing", timeout=20)
+        for session in (second, first):
+            click_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{session}"]')
+            WebDriverWait(browser, 20).until(lambda driver: driver.execute_script(
+                "return terminals.get(arguments[0])?.terminalOutputSeen && terminals.get(arguments[0]).socket.readyState === WebSocket.OPEN;", session))
+        browser.execute_script("window.__activationOriginalItem=terminals.get(arguments[0]); window.__activationOriginalPanel=panelNodes.get(arguments[0]);", first)
+        # A real shell draft survives switches; submitting it proves the text reached tmux.
+        draft = "printf 'activation-draft-preserved\\n'"
+        browser.switch_to.active_element.send_keys(draft)
+        for session in (second, first, second, first):
+            click_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{session}"]')
+        browser.switch_to.active_element.send_keys("\n")
+        WebDriverWait(browser, 10).until(lambda _driver: "activation-draft-preserved" in run_isolated_tmux(
+            runtime.tmux, "capture-pane", "-p", "-t", f"{first}:").stdout.splitlines())
+        seeded = run_isolated_tmux(runtime.tmux, "send-keys", "-t", f"{first}:", "seq 1 100", "Enter")
+        assert seeded.returncode == 0, seeded.stderr
+        WebDriverWait(browser, 10).until(lambda _driver: "100" in run_isolated_tmux(
+            runtime.tmux, "capture-pane", "-p", "-t", f"{first}:").stdout.splitlines())
+        # tmux owns history in its alternate screen; scroll its real copy-mode viewport.
+        before_scroll = run_isolated_tmux(runtime.tmux, "capture-pane", "-p", "-t", f"{first}:").stdout
+        for args in (("copy-mode", "-t", f"{first}:"), ("send-keys", "-t", f"{first}:", "-X", "history-top")):
+            result = run_isolated_tmux(runtime.tmux, *args)
+            assert result.returncode == 0, result.stderr
+        assert run_isolated_tmux(runtime.tmux, "capture-pane", "-M", "-p", "-t", f"{first}:").stdout != before_scroll
+        WebDriverWait(browser, 10).until(lambda driver: driver.execute_script(
+            "const term=terminals.get(arguments[0]).term; return Array.from({length:term.rows},(_,i)=>term.buffer.active.getLine(i)?.translateToString()).join('\\n').includes('activation-draft-preserved');", first))
+        browser.execute_script("const term=terminals.get(arguments[0]).term; window.__activationScroll=term.buffer.active.viewportY; window.__activationScreen=Array.from({length:term.rows},(_,i)=>term.buffer.active.getLine(term.buffer.active.viewportY+i)?.translateToString()).join('\\n');", first)
+        for session in (second, first):
+            click_visible_selector(browser, f'.dockview-pane-tab[data-pane-tab="{session}"]')
+        assert browser.execute_script("return terminals.get(arguments[0]) === window.__activationOriginalItem && panelNodes.get(arguments[0]) === window.__activationOriginalPanel && terminals.get(arguments[0]).term.buffer.active.viewportY === window.__activationScroll;", first)
+        WebDriverWait(browser, 10).until(lambda driver: driver.execute_script("const term=terminals.get(arguments[0]).term; return Array.from({length:term.rows-1},(_,i)=>term.buffer.active.getLine(term.buffer.active.viewportY+i)?.translateToString()).join('\\n') === window.__activationScreen.split('\\n').slice(0,-1).join('\\n');", first))
+        result = run_isolated_tmux(runtime.tmux, "send-keys", "-t", f"{first}:", "-X", "cancel")
+        assert result.returncode == 0, result.stderr
+        browser.switch_to.new_window("tab")
+        competitor = browser.current_window_handle
+        browser.get(f"{runtime.base_url}/?{urlencode({'sessions': first, 'layout': 'left', 'tabs': f'left:{first}'})}")
+        assert_live_runtime_boot_healthy(browser, "go-competing-second", timeout=20)
+        WebDriverWait(browser, 20).until(lambda driver: driver.execute_script("return terminals.get(arguments[0])?.terminalOutputSeen;", first))
+        # Two independent documents own two tmux clients; the second claims a larger viewport.
+        browser.execute_script("const item=terminals.get(arguments[0]); item.container.style.width='600px'; fitTerminal(arguments[0],{claim:true});", first)
+        def window_dimensions():
+            result = run_isolated_tmux(runtime.tmux, "display-message", "-p", "-t", f"{first}:", "#{window_width}")
+            assert result.returncode == 0, result.stderr
+            return result.stdout.strip()
+        competitor_dimensions = browser.execute_script("return String(terminals.get(arguments[0]).term.cols);", first)
+        WebDriverWait(browser, 10).until(lambda _driver: window_dimensions() == competitor_dimensions)
+        browser.switch_to.window(primary)
+        primary_dimensions = browser.execute_script("return String(terminals.get(arguments[0]).term.cols);", first)
+        assert primary_dimensions != competitor_dimensions, (primary_dimensions, competitor_dimensions)
+        click_visible_selector(browser, f'#term-{first} .xterm-screen')
+        WebDriverWait(browser, 10).until(lambda _driver: window_dimensions() == primary_dimensions)
+        # Reconnect uses the existing terminal and panel, then recovers remote ownership again.
+        browser.execute_script("window.__activationOriginalSocket=terminals.get(arguments[0]).socket; terminals.get(arguments[0]).socket.close();", first)
+        WebDriverWait(browser, 15).until(lambda driver: driver.execute_script("const item=terminals.get(arguments[0]); return item.socket !== window.__activationOriginalSocket && item.socket.readyState === WebSocket.OPEN;", first))
+        click_visible_selector(browser, f'#term-{first} .xterm-screen')
+        WebDriverWait(browser, 10).until(lambda _driver: window_dimensions() == primary_dimensions)
+        assert browser.execute_script("return terminals.get(arguments[0]) === window.__activationOriginalItem && panelNodes.get(arguments[0]) === window.__activationOriginalPanel && document.activeElement === terminals.get(arguments[0]).term.textarea;", first)
+        # Hold a real xterm parse completion across replacement; it must not repaint the retired item.
+        browser.execute_script("""
+          const session=arguments[0], old=terminals.get(session), write=old.term.write.bind(old.term);
+          window.__retiredActivationCallbacks=[]; window.__retiredActivationCallbackRan=false;
+          old.term.write=(data, callback)=>write(data, () => { if (callback) window.__retiredActivationCallbacks.push(callback); });
+          refreshTerminal(session, {afterParse:()=>{window.__retiredActivationCallbackRan=true;}});
+        """, first)
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return window.__retiredActivationCallbacks.length > 0;"))
+        browser.execute_script("closeTerminalItem(arguments[0], terminals.get(arguments[0])); startTerminal(arguments[0]); window.__retiredActivationCallbacks.splice(0).forEach(callback=>callback());", first)
+        WebDriverWait(browser, 20).until(lambda driver: driver.execute_script("const item=terminals.get(arguments[0]); return item !== window.__activationOriginalItem && item?.terminalOutputSeen && item.socket.readyState === WebSocket.OPEN;", first))
+        click_visible_selector(browser, f'#term-{first} .xterm-screen')
+        assert browser.execute_script("return !window.__retiredActivationCallbackRan && panelNodes.get(arguments[0]) === window.__activationOriginalPanel && document.activeElement === terminals.get(arguments[0]).term.textarea;", first)
+        browser.switch_to.active_element.send_keys("printf 'replacement-input-preserved\\n'\n")
+        WebDriverWait(browser, 10).until(lambda _driver: "replacement-input-preserved" in run_isolated_tmux(
+            runtime.tmux, "capture-pane", "-p", "-t", f"{first}:").stdout.splitlines())
+        browser.switch_to.window(competitor)
+        browser.close()
+        browser.switch_to.window(primary)
+    finally:
+        for handle in list(browser.window_handles):
+            browser.switch_to.window(handle)
+            browser.get("about:blank")
+        browser.switch_to.window(primary)

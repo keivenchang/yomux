@@ -11,6 +11,11 @@ from yomux_lib.transcripts import transcript_delta_result_state
 from yomux_lib.transcripts import transcript_pending_approval
 from yomux_lib.transcripts import transcript_pending_approval_from_text
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def jsonl(*records):
     return "\n".join(json.dumps(record) for record in records)

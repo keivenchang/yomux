@@ -27,6 +27,9 @@ from yomux_lib.local_services.client import LocalServiceClient
 from yomux_lib.local_services.client import local_service_failure_is_transient
 from yomux_lib.observability.queued_delivery import QueuedDeliveryLedger
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def _route_registrations() -> list[ast.Call]:
     tree = ast.parse(inspect.getsource(http_routes))

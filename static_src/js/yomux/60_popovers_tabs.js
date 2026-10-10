@@ -906,7 +906,9 @@ function yoloMarkerHtml(session, auto, options = {}) {
   if (options.yoloWorking) classes.push('working');
   if (readOnlyMode) classes.push('readonly');
   const yoloAttr = ` data-yolo-session="${esc(session)}"`;
-  const toggleAttr = options.toggle && !readOnlyMode ? ` data-auto-session="${esc(session)}" data-action="pane-tab-auto-approve"` : '';
+  const toggleAttr = options.toggle && capabilityAvailable('yolo.auto-approve.v1') && !readOnlyMode
+    ? ` data-auto-session="${esc(session)}" data-action="pane-tab-auto-approve"`
+    : '';
   const stateText = auto ? t('yolo.state.onHere') : (locked ? t('yolo.state.onElsewhere') : t('state.off'));
   const title = options.toggle && readOnlyMode
     ? t('yolo.titleReadonly', {state: stateText, session: sessionLabel(session)})
@@ -934,6 +936,9 @@ function sessionTabLeadingActivityContainerHtml(session, info, auto, options = {
 function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
   const payload = options.payload || autoApproveStates.get(session);
   const state = Object.prototype.hasOwnProperty.call(options, 'state') ? options.state : sessionState(session, info);
+  const attentionEvent = sessionAttentionEvent(session, info, payload);
+  const stateMarker = attentionEvent ? agentWindowAttentionBadgeHtml(attentionEvent)
+    : ['blocked', 'needs-input', 'needs-approval'].includes(state?.key) ? '' : sessionTabStateMarkerHtml(state);
   const offerYolo = sessionShouldOfferYoloMarker(session, info, payload, auto, state);
   const yoloHtml = offerYolo
     ? yoloMarkerHtml(session, auto, {...options, enabledOnly: false, yoloWorking: false, payload})
@@ -948,9 +953,14 @@ function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
       statusOnly: true,
     });
     if (iconHtml) {
-      return `${yoloHtml}<span class="session-agent-activity-marker">${iconHtml}</span>`;
+      return `<span class="session-tab-status-and-markers"><span class="session-agent-activity-marker">${iconHtml}</span>${stateMarker}${yoloHtml}</span>`;
     }
   }
+  const fallbackEvent = attentionEvent;
+  const fallbackIcon = fallbackEvent ? agentWindowActivityIconHtml(fallbackEvent.agent.kind, fallbackEvent.state, 0, {
+    ...fallbackEvent.options, item: fallbackEvent.item, statusOnly: true,
+  }) : '';
+  const fallbackBall = fallbackIcon ? `<span class="session-agent-activity-marker">${fallbackIcon}</span>` : sessionStatusBallPlaceholderHtml();
   const fallbackYoloHtml = offerYolo
     ? yoloMarkerHtml(session, auto, {
       ...options,
@@ -959,7 +969,7 @@ function sessionTabLeadingActivityHtml(session, info, auto, options = {}) {
       payload,
     })
     : '';
-  return `${fallbackYoloHtml}${sessionStatusBallPlaceholderHtml()}`;
+  return `<span class="session-tab-status-and-markers">${fallbackBall}${stateMarker}${fallbackYoloHtml}</span>`;
 }
 
 // Hovering a tab keeps its popover DOM mounted. Do not let that presentation concern freeze the

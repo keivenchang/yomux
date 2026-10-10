@@ -12,6 +12,11 @@ from yomux_lib.common import AgentInfo
 from yomux_lib.common import PaneInfo
 from yomux_lib.common import SessionInfo
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def _ledger(tmp_path, idle_gap_seconds=120.0, retention_days=14.0):
     return ActivityLedger(

@@ -4546,7 +4546,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/session-agent-activity-marker[\s\S]*agent-window-activity--status-only[\s\S]*agent-window-status-dot[\s\S]*status-indicator--working/.test(workingMarkerHtml), 'working Claude session tabs show the shared green status ball');
     assert.equal(workingMarkerHtml.includes('agent-window-status-dot--segmented'), false, 'a single-tone working session tab uses the full-green parent-circle pulse path');
     assert.equal(workingMarkerHtml.includes('agent-icon claude'), false, 'working Claude session tabs omit the Claude icon');
-    assert.ok(workingHtml.indexOf('session-yolo-marker') < workingHtml.indexOf('session-agent-activity-marker'), 'YO button stays before the working status ball');
+    assert.ok(workingHtml.indexOf('session-agent-activity-marker') < workingHtml.indexOf('session-yolo-marker'), 'YO button follows the working status ball in the shared leading marker group');
 
     api.setAutoApproveStateForTest('4', {enabled: true, screen: {key: 'working'}, agent_windows: [
       {kind: 'claude', state: 'idle', window_index: 1, window_label: '1:claude', current: true, window_active: true},
@@ -5728,7 +5728,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/<span class="info-tree-field-label">GitHub PR:<\/span>[\s\S]*<a href="https:\/\/example\.test\/pull\/11"[\s\S]*>#11<\/a>[\s\S]*App feature PR linked through path[\s\S]*ci-indicator tab-symbol pr-status-merged[\s\S]*MERGED/.test(pathOnlyHtml), 'YO!info PR rows reuse the shared purple merged badge');
     assert.ok(/<span class="info-tree-field-label">Linear:<\/span>[\s\S]*<a href="https:\/\/linear\.test\/DYN-10"[\s\S]*>DYN-10<\/a>[\s\S]*Main Linear description/.test(pathOnlyHtml), 'YO!info generated rows make the Linear identifier clickable and render the Linear description after it');
     assert.ok(pathOnlyHtml.includes('data-info-open-tab="tab-a"') && pathOnlyHtml.includes('data-info-open-ai-window="0"'), 'YO!info Tab and AI fields are actionable links to the owning tab/window');
-    assert.ok(pathOnlyHtml.includes('agent-window-status-dot') && pathOnlyHtml.includes('status-indicator--working') && pathOnlyHtml.includes('status-indicator--attention') && !/\bA(?:S)K\b/.test(pathOnlyHtml), 'YO!info AI rows show shared working/attention activity indicators without a text attention label');
+    assert.ok(pathOnlyHtml.includes('agent-window-status-dot') && pathOnlyHtml.includes('status-indicator--working') && pathOnlyHtml.includes('status-indicator--attention') && /\bASK\b/.test(pathOnlyHtml), 'YO!info Tab fields share automatic ASK labels with their attention dots');
     assert.ok(/info-tree-ai-window-token[\s\S]*data-tmux-window-bar-context="info"[\s\S]*class="tab tmux-window-button info-tree-ai-window-button[^"]*"[\s\S]*data-info-open-ai-window="0"[\s\S]*0:claude/.test(pathOnlyHtml), 'YO!info tmux sub-window rows render through the same tmux-window-button shell as the Info Bar');
     assert.ok(pathOnlyHtml.includes('<span class="info-tree-field-label">Tab(tmux session):</span>') && pathOnlyHtml.includes('<span class="info-tree-field-label">AI:</span>'), 'YO!info leaf rows keep legacy Tab actions and explicitly label the RuntimeActor view as AI');
     assert.ok(/info-tree-field-tab[\s\S]*session-button-name session-button-identifier">\[tab-a\]<\/strong>[\s\S]*tab-inline-detail">App main PR full description<\/span>/.test(pathOnlyHtml), 'YO!info Tab leaf values use the shared tab detail without repeating the PR badge');
@@ -5985,7 +5985,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/\.info-tree-field-tab\s*\{[\s\S]*--info-tree-field-color:\s*var\(--info-tree-tab-color\)[\s\S]*\.info-tree-field-linear\s*\{[\s\S]*--info-tree-field-color:\s*var\(--info-tree-linear-color\)/.test(infoTreeCss), 'YO!info record rows route each dimension through its own color token');
     assert.ok(/\.info-tree-field-ai\s*\{[\s\S]*--info-tree-field-color:\s*var\(--pane-tab-active-bg\)[\s\S]*--info-tree-field-hover:\s*var\(--pane-tab-active-border\)/.test(infoTreeCss), 'YO!info tmux sub-window leaf rows follow the active theme color');
     assert.ok(/\.pane-tab,\s*\.tmux-pane-tab-token\s*\{[\s\S]*background:\s*var\(--pane-inactive-tab-bg\)[\s\S]*border-radius:\s*var\(--pane-tab-top-radius\) var\(--pane-tab-top-radius\) 0 0[\s\S]*font-size:\s*var\(--tab-label-size\)/.test(paneTabCss) && /\.yomux-dockview \.dv-tab\.dv-active-tab > \.dockview-pane-tab:not\(\.file-missing\),[\s\S]*\.tmux-pane-tab-token\.active,[\s\S]*\{[\s\S]*background:\s*var\(--pane-tab-active-bg\)/.test(paneTabCss), 'regular and compact tmux pane tabs share inactive and active paint owners');
-    assert.ok(/function sessionShouldOfferYoloMarker\(session, info, payload, auto, state = null\)[\s\S]*autoApproveEnabledElsewhere\(payload\)[\s\S]*STATE_KEY\.needsApproval[\s\S]*STATE_KEY\.needsInput/.test(fs.readFileSync('static_src/js/yomux/60_popovers_tabs.js', 'utf8')), 'tmux session tabs offer the YO button only for enabled, externally locked, or prompted sessions');
+    const yoloTabSource = fs.readFileSync('static_src/js/yomux/60_popovers_tabs.js', 'utf8');
+    assert.ok(/function yoloMarkerHtml\(session, auto, options = \{\}\)[\s\S]*options\.toggle && capabilityAvailable\('yolo\.auto-approve\.v1'\)[\s\S]*data-action=["]pane-tab-auto-approve["]/.test(yoloTabSource), 'YO status remains visible while its toggle action waits for the dedicated capability');
+    assert.ok(/function sessionShouldOfferYoloMarker\(session, info, payload, auto, state = null\)[\s\S]*if \(auto\) return true[\s\S]*autoApproveEnabledElsewhere\(payload\)[\s\S]*STATE_KEY\.needsApproval[\s\S]*STATE_KEY\.needsInput/.test(yoloTabSource), 'YO marker visibility follows authoritative enabled, locked, and prompted state');
     assert.ok(/function tmuxPaneTabHtml\(session, info, state, auto, options = \{\}\)[\s\S]*sessionTabLeadingActivityHtml\(session, info, auto,[\s\S]*state/.test(fs.readFileSync('static_src/js/yomux/78_panel_shell.js', 'utf8')), 'real tabs, Tabber, and YO!info pass the shared tab state into the shared YO marker offer rule');
     assert.ok(/function infoRecordTabValueHtml\(record = \{\}, options = \{\}\)[\s\S]*tmuxPaneTabTokenHtml\(record\.tabSession,[\s\S]*sessionLabelHtml,/.test(infoSource), 'YO!info Tab values delegate their content unchanged to the shared compact tmux pane-tab renderer');
     assert.equal(infoSource.includes('tabWorkDescription'), false, 'YO!info has no parallel Tab detail source that can duplicate the shared PR badge');
@@ -7562,7 +7564,13 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     }
     const container = new TestElement('terminal-scanner');
     const controller = api.installTerminalFileReferenceUnderlines('1', term, container, {isActive: () => { visibilityReads += 1; return shown; }});
-    api.registerTerminalForTest('1', term).fileUnderlineController = controller;
+    term.refresh = () => {};
+    term.resize = (cols, rows) => { term.cols = cols; term.rows = rows; };
+    const item = api.registerTerminalForTest('1', term);
+    item.container.classList.add('active');
+    item.container.clientWidth = 720;
+    item.container.clientHeight = 480;
+    item.fileUnderlineController = controller;
     const flush = () => { const pending = [...frames.values()]; frames.clear(); pending.forEach(callback => callback()); };
     for (let index = 0; index < 20; index += 1) {
       events.onRender(); events.onWriteParsed(); events.onResize(); events.onScroll();
@@ -8252,7 +8260,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(notificationSource.includes('dismissSessionToasts(session);\n        void focusAgentToastTarget(session, target);'), 'clicking a working transition popup dismisses it before opening the target');
     const layoutActionsSource = fs.readFileSync('static_src/js/yomux/70_layout_actions.js', 'utf8');
     assert.ok(/function activatePaneTab\(side, session, options = \{\}\)[\s\S]*options\.userInitiated === true\)[\s\S]*dismissSessionToasts\(session\);[\s\S]*acknowledgeNotificationTarget\(session\)/.test(layoutActionsSource) && /function focusPanel\(session, options = \{\}\)[\s\S]*options\.userInitiated === true\)[\s\S]*dismissSessionToasts\(session\);[\s\S]*acknowledgeNotificationTarget\(session\)/.test(layoutActionsSource), 'tab activation and direct user navigation dismiss addressed popups and advance the shared notification-target acknowledgement');
-    assert.ok(/function activatePaneTab\(side, session, options = \{\}\)[\s\S]*options\.userInitiated === true[\s\S]*isTmuxSession\(session\)[\s\S]*acknowledgeTerminalAttentionFromUserAction\(session, null, options\);[\s\S]*focusOptions\.acknowledgeAgentWindow = false;[\s\S]*focusOptions\.acknowledgePromptAttention = false;/.test(layoutActionsSource), 'a user-clicked session Tab captures its current red/yellow attention child before pane activation and prevents deferred focus from acknowledging a different child');
+    assert.ok(/function activatePaneTab\(side, session, options = \{\}\)[\s\S]*options\.userInitiated === true[\s\S]*isTmuxSession\(session\)[\s\S]*Object\.assign\(focusOptions, acknowledgeUserTerminalTabActivation\(session, options\)\);/.test(layoutActionsSource), 'a user-clicked session Tab captures its current red/yellow attention child before pane activation and prevents deferred focus from acknowledging a different child');
     assert.ok(/function focusPanel\(session, options = \{\}\)[\s\S]*activateTab\(session, 'terminal', options\);/.test(layoutActionsSource) && /function activateTab\(session, name, options = \{\}\)[\s\S]*focusTerminalFromUserAction\(session, 0, options\);/.test(autoApproveSource), 'Tab activation preserves the captured acknowledgement options through panel and terminal focus');
     const workingPayload = {sessions: {'1': {agent_windows: [{kind: 'claude', state: 'working', window_index: 1, window_label: '1:claude'}]}}};
     const attentionPayload = {sessions: {'1': {agent_windows: [{kind: 'claude', state: 'needs-input', window_index: 1, window_label: '1:claude', attention_key: 'working-to-attention'}]}}};
@@ -8547,7 +8555,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/item\.term\.options\.cursorBlink = terminalCursorBlinkEnabled\(\)[\s\S]*?item\.term\.options\.theme = terminalThemeForSession\(session, renderTheme\)/.test(source), 'active-terminal cursor: applyTerminalRuntimeSettings updates blink state and themes the active terminal with the configured render cursor color');
     assert.ok(/cursorBlink: typeof terminalCursorBlinkEnabled === 'function' \? terminalCursorBlinkEnabled\(\) : true/.test(source) && /theme: terminalThemeForSession\(session, renderTheme\)/.test(source), 'active-terminal cursor: a newly-created terminal uses shared blink/theme cursor helpers');
     assert.ok(/function refreshActiveTerminalCursor[\s\S]*?item\.term\.options\.cursorBlink = !badConnection/.test(source), 'active-terminal cursor: connection changes can disable cursor blinking without a full terminal rebuild');
-    assert.ok(/function updatePanelInactiveOverlays[\s\S]*?refreshActiveTerminalCursor\(\)/.test(source), 'active-terminal cursor: focus changes refresh the cursor color (refreshActiveTerminalCursor)');
+    assert.ok(/function updatePanelInactiveOverlays[\s\S]*?refreshActiveTerminalCursor\(\{defer: true\}\)/.test(source), 'active-terminal cursor: focus changes defer renderer theme work until after the first paint');
   });
 
   test('recent agents sort and render tmux activity consistently', () => {
@@ -9253,7 +9261,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.commandPaletteItems().some(item => String(item.detail || '').includes('raw English filesystem error')), false, 'the raw filesystem diagnostic does not replace the localized command-palette error');
 
     const layoutSource = fs.readFileSync('static_src/js/yomux/20_layout_state.js', 'utf8');
-    assert.ok(layoutSource.includes('/api/fs/search?root=') && layoutSource.includes('/api/fs/search-stream?root='), 'command-palette search preserves direct and streamed filesystem error descriptors');
+    assert.ok(layoutSource.includes('/api/fs/search?${fileQuickOpenSearchQueryString(') && layoutSource.includes('/api/fs/search-stream?${fileQuickOpenSearchQueryString('), 'command-palette direct and streamed searches share the same query builder');
     assert.ok(layoutSource.includes('fileQuickOpenSearchRootResult') && layoutSource.includes('search-stream'), 'command-palette search splits direct and indexed filesystem paths');
 
     assert.deepStrictEqual(

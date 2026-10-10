@@ -168,6 +168,8 @@ def test_registry_prunes_runtime_locks_before_adopting_a_recently_healthy_servic
     assert later_stale_lock.exists() is True
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_stats_current_client_prunes_runtime_locks_before_its_healthy_shortcut(tmp_path, monkeypatch):
     service_dir = tmp_path / "services"
     socket_path = service_dir / "statsd.p24s7.active.sock"
@@ -572,6 +574,8 @@ def test_pyproject_package_discovery_includes_local_service_subpackages():
         assert importlib.util.find_spec(module_name) is not None
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_registry_spawn_uses_current_interpreter_module_and_quoted_args(tmp_path, monkeypatch):
     monkeypatch.delenv("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", raising=False)
     monkeypatch.delenv("YOMUX_LOCAL_SERVICE_IDLE_SECONDS", raising=False)
@@ -617,6 +621,8 @@ def test_registry_spawn_uses_current_interpreter_module_and_quoted_args(tmp_path
     assert kwargs["stderr"] is subprocess.STDOUT
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 @pytest.mark.parametrize(
     "artifact_location",
     ("generated-outside", "generated-inside", "contained-explicit", "outside-explicit", "forged-exact"),
@@ -695,6 +701,8 @@ def test_registry_spawn_rebases_only_generated_artifacts_outside_current_root(tm
         assert "YOMUX_GENERATED_PYTHONPYCACHEPREFIX" not in child
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_registry_spawn_honors_isolated_idle_override(tmp_path, monkeypatch):
     starts = []
 
@@ -715,6 +723,8 @@ def test_registry_spawn_honors_isolated_idle_override(tmp_path, monkeypatch):
     assert args[args.index("--idle-seconds") + 1] == "0.5"
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_registry_spawn_captures_durable_session_ownership(tmp_path, monkeypatch):
     class FakeProcess:
         pid = 43230
@@ -744,6 +754,8 @@ def test_registry_spawn_captures_durable_session_ownership(tmp_path, monkeypatch
     )
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_registry_refreshes_spawn_members_only_while_original_leader_matches(tmp_path, monkeypatch):
     generation_marker = "a" * 32
     registry = LocalServiceRegistry(
@@ -781,6 +793,8 @@ def test_registry_refreshes_spawn_members_only_while_original_leader_matches(tmp
     assert retained.member_identities == ((43231, "proc:1235"), (43232, "proc:1236"))
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_registry_first_descendant_discovery_survives_leader_exit(tmp_path, monkeypatch):
     generation_marker = "a" * 32
     registry = LocalServiceRegistry(
@@ -808,6 +822,8 @@ def test_registry_first_descendant_discovery_survives_leader_exit(tmp_path, monk
     assert refreshed.member_identities == ((43235, "proc:1238"), (43236, "proc:1239"))
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_registry_proves_inherited_worker_when_leader_exits_after_snapshot(tmp_path, monkeypatch):
     """A stale leader row cannot hide a live same-generation worker from fixture retirement."""
 
@@ -838,6 +854,8 @@ def test_registry_proves_inherited_worker_when_leader_exits_after_snapshot(tmp_p
     assert registry.spawn_ownership.member_identities == ((43251, "proc:worker"),)
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_registry_absent_leader_rejects_numeric_group_reuse_by_foreign_generation(tmp_path, monkeypatch):
     registry = LocalServiceRegistry(
         tmp_path,
@@ -873,6 +891,8 @@ def test_registry_absent_leader_rejects_numeric_group_reuse_by_foreign_generatio
     assert registry.spawn_ownership.member_identities == ((43239, "proc:1242"),)
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_registry_rejects_recycled_retained_child_identity(tmp_path, monkeypatch):
     generation_marker = "a" * 32
     registry = LocalServiceRegistry(
@@ -1048,6 +1068,8 @@ def test_transport_diagnostics_returns_total_and_per_exception_counters(monkeypa
     }
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_registry_real_ensure_started_preserves_generation_proof_through_cleanup(tmp_path, monkeypatch):
     monkeypatch.delenv("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", raising=False)
     registry = LocalServiceRegistry(
@@ -1097,6 +1119,8 @@ def test_registry_real_ensure_started_preserves_generation_proof_through_cleanup
             )
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_long_default_socket_fallback_keeps_registry_lock_out_of_tmp(tmp_path, monkeypatch):
     state_dir = tmp_path / ("long-state-segment-" * 8)
     monkeypatch.setattr(approvald.common, "RUNTIME_DIR", state_dir)
@@ -1297,6 +1321,8 @@ def _identity_probe_registry(tmp_path, monkeypatch, *, leader_pid, identities, s
     return registry, starts, post_spawn_calls, mark_failure_reasons
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 @pytest.mark.parametrize("service_name", ["batchd", "statusd", "watchd", "approvald", "indexd", "statsd"])
 def test_real_daemon_final_startup_probe_carries_its_spawned_identity(monkeypatch, gate_runtime_paths, service_name):
     monkeypatch.setenv(registry_mod.LOCAL_SERVICE_IDLE_SECONDS_ENV, "60")
@@ -2934,6 +2960,8 @@ def test_registry_does_not_retire_newer_same_protocol_build(tmp_path, monkeypatc
     assert actions == ["ping"]
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 @pytest.mark.parametrize(
     ("module", "service_name", "client_factory", "extra_args"),
     (

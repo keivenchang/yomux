@@ -14,6 +14,9 @@ from yomux_lib.filesystem import search as fs_search
 from yomux_lib.search import bfs_index
 from yomux_lib.search import search_indexer
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def _clear_registry():
     retirement = file_index.clear_memory_indexes()

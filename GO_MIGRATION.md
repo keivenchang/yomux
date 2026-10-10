@@ -1,6 +1,10 @@
 # YOmux Go Backend Status
 
-This document records the Go backend capabilities implemented in this tree. Go is the default server for managed/operator launches, including `boot.sh`, `make run`, and `yomux-dev-start`. The Python server is already deprecated and is available only as an explicit temporary fallback while the remaining Go gaps close; its planned removal is around late October 2026, about one month from this release. The Go server still uses Python to render the shared HTML shell, which does not select the Python server. Go exposes only the capabilities and routes it owns.
+This document records the Go backend capabilities implemented in this tree and owns the migration inventory. Go is the target backend and the default server for managed/operator launches, including `boot.sh`, `make run`, and `yomux-dev-start`. Python is a deprecated temporary fallback. Every currently supported Python-only product behavior must be ported to Go before Python removal; it must not disappear just because its old server is removed. The removal gate also includes the shared HTML renderer, runtime dependencies, contributor/build tooling, and companion tools that still require Python. The current late-October 2026 removal date is a target, conditional on closing this inventory and proving the Go-only build and runtime path. Go exposes only the capabilities and routes it owns; unsupported behavior stays unavailable until its Go owner is implemented.
+
+## Migration Rule
+
+Treat each Python-only product feature as a Go migration gap unless the user explicitly decides to retire that feature. Track its Go owner, capability, route, tests, and user-facing behavior here or in one linked active work queue. Python may remain during migration, but it receives no new product behavior. The final Python-removal gate must show that supported user-facing behavior, runtime entrypoints, required tooling, the HTML renderer, and companion utilities no longer depend on Python.
 
 ## Launch And Backend Selection
 
@@ -26,7 +30,7 @@ A Go process launched by an older managed launcher may not hold the shared root 
 Go owns TLS after the `exec`: by default it generates a self-signed certificate with Go's crypto library under `${TMPDIR:-/tmp}/yomux-go-tls-<port>/`. The managed Python launcher forwards `--http`, `--cert`, and `--key`, and maps `--dang` to Go's `--dangerously-yolo`. Python-only `--sessions`, transcript-report, runtime-report, and `--dev` options return a clear error on Go. The Go binary also accepts its own `--cert`, `--key`, `--http`, and `--dangerously-yolo` flags for fixture/direct use, but a direct launch does not replace `boot.sh` lifecycle and isolation checks.
 All operator launch forms use the machine-wide default tmux server for the launching Unix user. Managed launchers remove inherited `TMUX`, `TMUX_PANE`, and `YOMUX_TMUX_SOCKET` routing before starting Python or Go, so `tmux list-sessions` and the Go/Python session APIs see every session on that server. Direct Python, Go, and companion-tool entrypoints apply the same normalization for ordinary launches; an explicit `YOMUX_TMUX_SOCKET` is preserved only when an isolated test or fixture deliberately supplies it. A different Unix user's tmux server is not implicitly accessible.
 
-The Go server still requires Python runtime dependencies and this checkout's generated static assets. It invokes `python3` to render `login_html()` and `html_page()` from `yomux_lib.web`; it does not contain a second HTML shell.
+The Go server still requires Python runtime dependencies and this checkout's generated static assets. It invokes `python3` to render `login_html()` and `html_page()` from `yomux_lib.web`; replacing this renderer is required for the final Go-only runtime.
 
 Automated tests must not use an operator port. `tools/run_bazel_tests.sh` starts disposable Docker state and fixture-owned ports. Port 7221 is reserved for a final manual check after the Dockerized gate. The operator runtime on port 7220 is outside automated test workflows and should only be restarted or smoke-tested as an explicit operator action.
 
@@ -93,6 +97,8 @@ The current catalog marks these capabilities available:
 
 * `finder.read.v1`, `finder.watch.v1`, `finder.write.v1`, `finder.search.v1`, `finder.batch.v1`, `finder.git.v1`, `finder.preview.v1`
 
+* `yolo.auto-approve.v1`
+
 The current catalog marks these pane capabilities unavailable:
 
 * `pane.chat.v1`
@@ -127,11 +133,15 @@ The following routes have concrete handlers in `cmd/yomux-go`.
 
 * `/api/session-metadata`, `/api/activity`
 
+* `POST /api/attention-ack`
+
 * `/api/ensure-session`, `/api/create-session-plan`, `/api/create-session`, `/api/rename-session`, `/api/kill-session`
 
 * `/api/transcripts`, `/api/transcript`, `/api/context`, `/api/context-items`, `/api/context-stream`
 
-The shared browser must capability-gate other Python terminal/session paths. Auto-approval, self-update, and YO!agent are not made available merely because the terminal itself works. Go's Tabber activity route is admitted by the machine-wide tmux roster, so every live session gets one top-level row before pane metadata or agent enrichment arrives. Transcript routes accept an optional `pane_target` or `window`; without either, Go resolves the active tmux pane. This prevents a session containing multiple Claude, Codex, or OpenCode windows from returning the first unrelated transcript.
+* `/api/auto-approve`, `/api/yolo-rules`, `/api/yolo-rules/open`, `/api/yolo-rules/reload`
+
+The shared browser must capability-gate other Python terminal/session paths. Go publishes per-window completion timestamps and transition identities through session metadata and Tabber activity; `POST /api/attention-ack` stores bounded acknowledgements and publishes `attention_acks_changed` so other tabs converge. `yolo.auto-approve.v1` owns the authenticated per-session toggle and status route. Its worker uses the shared Python/Go target lock, pins tmux session and pane identity plus the live agent process, and suspends when fresh status or terminal evidence is unavailable. It applies the configured `approve`, `decline`, `block`, `ask`, `notify`, and `off` actions to supported Claude and Codex prompts, honors `yolo.dry_run`, and retries only the exact current Codex capacity notice with `continue\n\n` at a minimum three-second interval. Self-update and YO!agent remain unavailable in Go. Go's Tabber activity route is admitted by the machine-wide tmux roster, so every live session gets one top-level row before pane metadata or agent enrichment arrives. Transcript routes accept an optional `pane_target` or `window`; without either, Go resolves the active tmux pane. This prevents a session containing multiple Claude, Codex, or OpenCode windows from returning the first unrelated transcript.
 
 ### Finder, Editor, And Differ
 
@@ -248,13 +258,13 @@ The wrapper accepts an optional positive integer `--jobs`; when the flag is omit
 
 ## Remaining Gaps
 
-* YO!chat and YO!agent remain Python-only; Go now serves the global tmux roster/activity API used by Tabber.
+* YO!chat and YO!agent remain Python-only and must be ported to Go before Python removal; Go now serves the global tmux roster/activity API used by Tabber.
 
-* Python self-update/restart and several Python diagnostic/automation routes are not implemented in Go.
+* Python self-update/restart and several Python diagnostic/automation routes are not implemented in Go; classify every supported product behavior for porting before removing Python.
 
-* Go HTML rendering still depends on a Python subprocess and Python package environment.
+* Go HTML rendering still depends on a Python subprocess and Python package environment; both are removal blockers.
 
-* Go credential admission is durable and shared across form, Basic API, and WebSocket paths. Network reservations, successful refunds, username cooldowns, hard locks, HMAC identifiers, and bounded in-flight claims live in a separate state-rooted SQLite store. Go accepts the documented policy override keys; Python recovery CLI, throttle diagnostics, decoy, and firewall escalation remain unavailable.
+* Go credential admission is durable and shared across form, Basic API, and WebSocket paths. Network reservations, successful refunds, username cooldowns, hard locks, HMAC identifiers, and bounded in-flight claims live in a separate state-rooted SQLite store. Go accepts the documented policy override keys; the Python recovery CLI, throttle diagnostics, decoy, and firewall escalation remain unavailable and need explicit Go migration dispositions before Python removal.
 
 * Go consumes `YOMUX_CONFIG_DIR`, `YOMUX_STATE_DIR`, `YOMUX_ROOT`, and `YOMUX_STATS_DATABASE`, and admits its config/journal directory and auth/stats WAL stores only on supported local filesystems unless the explicit emergency override is set. Go does not implement Python's `YOMUX_RUNTIME_DIR`/`YOMUX_CACHE_DIR` service topology or automatic host partition. Event/operation journals, cookie auth material, background-owner records, and the default stats database remain config-rooted; the session-files cache and credential-admission database use the state root. A canonical config lifetime lease prevents independent event brokers from sharing those journals. Use the managed launcher so each preview gets private local roots.
 
@@ -280,7 +290,7 @@ The wrapper accepts an optional positive integer `--jobs`; when the flag is omit
 
 5. Verify the listener, `/healthz`, capability snapshot, and exact browser workflow against the rebuilt bundle.
 
-6. Keep the deprecated Python server as an explicit temporary fallback while the remaining documented capability gaps close. Remove it around late October 2026; use capability admission until then to avoid presenting unsupported Go behavior.
+6. Keep the deprecated Python server as an explicit temporary fallback while Go migration work continues. Remove it only after the supported-feature inventory is closed, every Python runtime/build/tool dependency is replaced or eliminated, and the exact Go-only gate and browser journeys pass; late October 2026 remains the target, not permission to drop open behavior.
 
 ## Related Documents
 

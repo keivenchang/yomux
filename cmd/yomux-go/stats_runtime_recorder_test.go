@@ -344,7 +344,9 @@ func TestStatsRuntimeRecorderStopFlushesPendingBatch(t *testing.T) {
 
 	// Stop must drain a pending batch even when the loop was not started. This
 	// models a graceful shutdown immediately after a transient writer failure.
-	recorder.Stop()
+	if err := recorder.Stop(); err != nil {
+		t.Fatalf("shutdown flush failed: %v", err)
+	}
 	if len(underlying.seen) != 1 || len(underlying.seen[0].Observations) != 1 {
 		t.Fatalf("shutdown flush = %#v, want one persisted observation", underlying.seen)
 	}
@@ -363,6 +365,30 @@ func TestStatsRuntimeRecorderStopFlushesPendingBatch(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].SourceID != "yolomux-go" {
 		t.Fatalf("shutdown-flushed observations = %#v", rows)
+	}
+}
+
+func TestStatsRuntimeRecorderStopReportsPendingFlushFailure(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "synthetic-runtime-stop-failure.sqlite3")
+	writer, err := stats.OpenWriter(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	writer.EnableCurrentFamilyValidation()
+	underlying := &runtimeRecorderFailCountWriter{delegate: writer, failuresRemaining: 2}
+	cpu := 13.0
+	recorder := newStatsRuntimeRecorder(underlying, func(time.Time) []stats.ServiceLoadSample {
+		return []stats.ServiceLoadSample{{SourceID: "yolomux-go", Running: true, CPUPercent: &cpu}}
+	}, func() time.Time { return time.Unix(2150, 0) }, time.Second, "synthetic-runtime-stop-failure", 7222)
+	recorder.RunOnce(ctx)
+
+	if err := recorder.Stop(); err == nil {
+		t.Fatal("shutdown flush failure was not returned")
+	}
+	if pending := recorder.diagnostics()["pending_batches"]; pending != 1 {
+		t.Fatalf("pending recorder batches after failed shutdown flush = %v, want 1", pending)
 	}
 }
 

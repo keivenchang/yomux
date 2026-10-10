@@ -5,6 +5,11 @@ from yomux_lib.yoagent.skills import read_user_skill_file
 from yomux_lib.yoagent.skills import write_user_skill_file
 from yomux_lib.yoagent.skills import delete_user_skill_file
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def test_builtin_yoagent_skills_load_with_context(tmp_path):
     payload = load_yoagent_skills(

@@ -89,7 +89,9 @@ function capabilityNameForRequest(url, options = {}) {
   if (pathname === '/api/session-metadata') return 'core.bootstrap.v1';
   if (pathname === '/api/transcripts') return 'core.bootstrap.v1';
   if (pathname === '/api/activity' || pathname === '/api/activity-summary') return 'pane.tabber.v1';
-  if (pathname.startsWith('/api/tmux-') || pathname === '/api/auto-approve' || pathname === '/api/transcript' || pathname === '/api/context' || pathname === '/api/context-items' || pathname === '/api/context-stream' || pathname === '/api/events') return 'terminal.status.v1';
+  if (pathname === '/api/auto-approve') return 'yolo.auto-approve.v1';
+  if (pathname === '/api/yolo-rules' || pathname.startsWith('/api/yolo-rules/')) return 'yolo.auto-approve.v1';
+  if (pathname.startsWith('/api/tmux-') || pathname === '/api/transcript' || pathname === '/api/context' || pathname === '/api/context-items' || pathname === '/api/context-stream' || pathname === '/api/events') return 'terminal.status.v1';
 	if (pathname.startsWith('/api/fs/') || pathname === '/api/watch/roots' || pathname === '/api/upload' || pathname.startsWith('/api/batch/')) {
 		if (['/api/fs/diff', '/api/fs/git-history', '/api/fs/git-commit', '/api/batch/blame'].includes(pathname)) return 'finder.git.v1';
 		if (['/api/fs/write', '/api/fs/delete', '/api/fs/rename', '/api/fs/mkdir', '/api/upload'].includes(pathname)) return 'finder.write.v1';
@@ -100,7 +102,7 @@ function capabilityNameForRequest(url, options = {}) {
     return 'finder.read.v1';
   }
   if (pathname.startsWith('/api/stats') || pathname === '/api/pricing-catalog' || pathname === '/api/pricing-catalog/refresh') return 'pane.stats.v1';
-  if (pathname.startsWith('/api/yoagent/') || pathname === '/api/agent-auth' || pathname === '/api/yolo-rules' || pathname.startsWith('/api/yolo-rules/')) return 'pane.agent.v1';
+  if (pathname.startsWith('/api/yoagent/') || pathname === '/api/agent-auth') return 'pane.agent.v1';
   if (pathname.startsWith('/api/chat/')) return 'pane.chat.v1';
   return '';
 }
@@ -713,7 +715,10 @@ let fileExplorerViewSettings = readStoredFileExplorerViewSettings();
 let fileExplorerIndexedDirs = readStoredFileExplorerIndexedDirs();
 let fileExplorerIndexExcludePaths = new Set();
 const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready' | 'stale' | 'too_large' | 'error'
+const fileExplorerIndexStatusPayload = new Map();  // normalized indexed root -> latest authoritative status details
 const fileExplorerIndexGeneration = new Map();  // normalized indexed root -> accepted backend lifecycle generation
+const fileExplorerIndexWorkerIncarnation = new Map();  // normalized indexed root -> worker that owns the accepted generation
+const fileExplorerIndexRetiredWorkerIncarnations = new Map();  // normalized indexed root -> workers whose delayed status responses are fenced
 const fileExplorerIndexPublishedGeneration = new Map();  // normalized indexed root -> last-seen progressive published generation (drives Quick Open re-query as BFS publishes rows)
 const fileIndexStatusPollRoots = new Set();  // normalized indexed roots still building
 const fileIndexPartialWarningRoots = new Set();  // warned once per root until it regains full coverage
@@ -763,6 +768,10 @@ const fileQuickOpenState = {
   // server can stream committed match deltas instead of the client re-issuing the whole query.
   deltaQuery: '',
   deltaRoots: new Map(),
+  searchProgressGenerations: new Map(),
+  searchProgressSequences: new Map(),
+  searchProgressIncarnations: new Map(),
+  reconciledProgressGenerations: new Map(),
   // Candidate retention also includes the requested root or path directory; two path queries can
   // share a filter while naming different directories and must not present each other's rows.
   candidateQueryIdentity: '',
@@ -1108,8 +1117,9 @@ function browserUsesTabletViewport() {
     || (/Android/i.test(userAgent) && !/Mobile/i.test(userAgent));
 }
 
-function tabletUsesDesktopLayout(viewport = nativeViewport()) {
+function tabletUsesDesktopLayout(viewport) {
   if (!browserUsesCoarsePointer() || !browserUsesTabletViewport()) return false;
+  if (viewport === undefined) viewport = nativeViewport({widthOnly: true});
   const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
   return width >= tabletDesktopLayoutMinWidthPx;
 }
@@ -1118,20 +1128,24 @@ function fileExplorerUsesNormalTabMovement() {
   return !sidePanesAvailable();
 }
 
-function phoneLikeMobileViewport(viewport = nativeViewport()) {
+function phoneLikeMobileViewport(viewport) {
   if (!browserUsesCoarsePointer() || browserUsesTabletViewport()) return false;
+  if (viewport === undefined) viewport = nativeViewport();
   const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
   const height = Math.max(0, Number(viewport?.height ?? viewport?.h) || 0);
   return width <= mobileSinglePaneMaxWidthPx
     || (width <= mobileSinglePaneLandscapeMaxWidthPx && height <= mobileSinglePaneLandscapeMaxHeightPx);
 }
 
-function mobileSinglePaneMode(viewport = nativeViewport()) {
+function mobileSinglePaneMode(viewport) {
   return phoneLikeMobileViewport(viewport);
 }
 
-function narrowTouchSingleColumnViewport(viewport = nativeViewport()) {
+function narrowTouchSingleColumnViewport(viewport) {
   if (!browserUsesCoarsePointer()) return false;
+  // Reading the visual viewport can force layout after Dockview writes header chrome.
+  // Fine-pointer layouts never need these touch-only dimensions.
+  if (viewport === undefined) viewport = nativeViewport();
   const width = Math.max(0, Number(viewport?.width ?? viewport?.w) || 0);
   const tablet = browserUsesTabletViewport();
   return phoneLikeMobileViewport(viewport)
@@ -1139,7 +1153,7 @@ function narrowTouchSingleColumnViewport(viewport = nativeViewport()) {
     || (!tablet && width <= narrowTouchSingleColumnMaxWidthPx);
 }
 
-function narrowSingleColumnMode(viewport = nativeViewport()) {
+function narrowSingleColumnMode(viewport) {
   return narrowTouchSingleColumnViewport(viewport);
 }
 const debugModeExplicitUrlEnabled = urlFlagEnabled('debug');

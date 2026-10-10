@@ -16,6 +16,7 @@ const graphDefaultsSource = source.slice(
   source.indexOf('\nconst jsDebugGraphMovingAverageSamples', source.indexOf('const jsDebugGraphDefaultHiddenChartKeys =')),
 );
 const currentSource = fs.readFileSync('static_src/js/yomux/84_stats_current.js', 'utf8');
+const agentActivitySource = fs.readFileSync('static_src/js/yomux/35_agent_window_activity.js', 'utf8');
 const debugRuntimeSource = fs.readFileSync('static_src/js/yomux/84_debug_runtime_facade.js', 'utf8');
 const bootstrapSource = fs.readFileSync('static_src/js/yomux/00_bootstrap_state.js', 'utf8');
 const coreSource = fs.readFileSync('static_src/js/yomux/10_core_utils.js', 'utf8');
@@ -42,13 +43,17 @@ const terminalSource = [
   'static_src/js/yomux/99_client_event_transport.js',
   'static_src/js/yomux/99_terminal_shortcuts_boot.js',
 ].map(path => fs.readFileSync(path, 'utf8')).join('\n');
+const activityFreshnessSource = agentActivitySource.slice(
+  agentActivitySource.indexOf('function agentWindowActivitySnapshotFresh('),
+  agentActivitySource.indexOf('\nfunction ', agentActivitySource.indexOf('function agentWindowActivitySnapshotFresh(') + 1),
+);
 const css = fs.readFileSync('static_src/css/yomux/30_preferences_changes.css', 'utf8');
 const localeEn = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'));
 let passed = 0;
 let failed = 0;
 const pending = [];
 
-test('bootstrap capability mapping keeps bootstrap, Tabber, and agent routes distinct', () => {
+test('bootstrap capability mapping keeps bootstrap, Tabber, agent, and YO routes distinct', () => {
   const context = {URL, globalThis: {location: {href: 'https://example.test/'}}};
   vm.runInNewContext(`${capabilityRequestSource}\nresult = [
     capabilityNameForRequest('/api/session-metadata?force=1'),
@@ -62,8 +67,20 @@ test('bootstrap capability mapping keeps bootstrap, Tabber, and agent routes dis
     'core.bootstrap.v1',
     'pane.tabber.v1',
     'pane.agent.v1',
-    'pane.agent.v1',
+    'yolo.auto-approve.v1',
   ]);
+});
+
+test('stale Go activity snapshots are not adopted as current agent status', () => {
+  const context = {result: null};
+  vm.runInNewContext(`${activityFreshnessSource}\nresult = [
+    agentWindowActivitySnapshotFresh({cache: {stale: false}}),
+    agentWindowActivitySnapshotFresh({cache: {stale: true}}),
+    agentWindowActivitySnapshotFresh({}),
+  ];`, context);
+  assert.deepEqual([...context.result], [true, false, true]);
+  assert.match(terminalSource, /function adoptTabberActivityAsAutoStatusFallback\(options = \{\}\) \{[\s\S]*agentWindowActivitySnapshotFresh\(payload\)/);
+  assert.match(agentActivitySource, /const activityRows = agentWindowActivitySnapshotFresh\(tabberActivityPayload\)/);
 });
 
 function test(name, body) {
@@ -3469,7 +3486,7 @@ test('stats-only boot loads Tabber topology before returning', () => {
   assert.match(statsOnlyBranch, /adoptTabberActivityAsAutoStatusFallback\(\)/, 'stats-only boot promotes the Go activity snapshot into the shared live-status model');
   assert.match(statsOnlyBranch, /adoptTabberActivityAsAutoStatusFallback\(\);[\s\S]*renderPaneTabStrips\(\)/, 'stats-only boot paints the working marker after adopting activity');
   assert.match(statsOnlyBranch, /refreshTabberPanels\(\)/, 'stats-only boot paints the loaded Tabber rows');
-  assert.match(boot, /function adoptTabberActivityAsAutoStatusFallback\(\)[\s\S]*new Set\(\[\.\.\.activeSessions, \.\.\.Object\.keys\(sessionsPayload\)\]\)/, 'activity fallback covers a Debug-only layout before Tabber has populated activeSessions');
+  assert.match(boot, /function adoptTabberActivityAsAutoStatusFallback\(options = \{\}\)[\s\S]*new Set\(\[\.\.\.activeSessions, \.\.\.rosterSessions, \.\.\.Object\.keys\(sessionsPayload\)\]\)/, 'activity fallback covers a Debug-only layout before Tabber has populated activeSessions');
 });
 
 testAsync('stats-agent-status refresh is coalesced and bounded by the collector cadence', async () => {
@@ -5815,6 +5832,7 @@ testAsync('refill confirmation, rejected request, retry and stale GET preserve o
   click(owner, '[data-stats-refill]');
   assert.equal(confirmations.at(-1).options.title, 'Refill the last 24 hours?');
   assert.match(confirmations.at(-1).options.message, /Deleted source history cannot be recovered/);
+  assert.equal(confirmations.at(-1).options.messageVariant, 'danger');
   confirmations.at(-1).resolve('cancel');
   await settle();
   assert.equal(requests.length, 1);

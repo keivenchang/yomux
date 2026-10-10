@@ -42,6 +42,8 @@ def i18n_source_bundle(monkeypatch, tmp_path):
     monkeypatch.setattr(web_module, "STATIC_DIR", asset_dir)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_rendered_ui_has_no_recorded_raw_i18n_keys(i18n_source_bundle, gate_browser_runtime):
     """Rendered UI text may not equal a key the i18n runtime failed to resolve.
 

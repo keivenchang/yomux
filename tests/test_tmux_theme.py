@@ -1,3 +1,4 @@
+import pytest
 import json
 import subprocess
 from pathlib import Path
@@ -7,6 +8,9 @@ from yomux_lib.tmux_theme import normalized_tmux_theme_color
 from yomux_lib.tmux_theme import tmux_theme_commands_for_existing
 from yomux_lib.tmux_theme import tmux_theme_commands_for_new_session
 from yomux_lib.tmux_theme import tmux_theme_color_from_settings
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
 
 
 UI_PINS = json.loads((Path(__file__).parent / "fixtures" / "ui_pins.json").read_text(encoding="utf-8"))

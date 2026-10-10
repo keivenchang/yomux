@@ -30,6 +30,9 @@ from yomux_lib.chat_store import ChatStore
 from yomux_lib.chat_store import ChatStoreMigrationError
 from yomux_lib.chat_store import ChatStoreValidationError
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 EMOJI_MATRIX = (
     "😀",

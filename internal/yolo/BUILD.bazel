@@ -1,0 +1,19 @@
+load("@rules_go//go:def.bzl", "go_library")
+load("//:tools/bazel_rules.bzl", "go_test_pair")
+
+package(default_visibility = ["//:__subpackages__"])
+
+exports_files(["BUILD.bazel"])
+
+go_library(
+    name = "yolo_lib",
+    srcs = ["policy.go", "prompt.go"],
+    importpath = "github.com/keivenchang/yomux/internal/yolo",
+    deps = ["@in_gopkg_yaml_v3//:go_default_library"],
+)
+
+go_test_pair(
+    name = "yolo",
+    srcs = ["policy_test.go", "prompt_test.go"],
+    embed = [":yolo_lib"],
+)

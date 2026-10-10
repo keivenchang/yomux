@@ -93,7 +93,8 @@ assert BROWSER_OPERATION_DEADLINE_SECONDS >= app_module.FS_BATCH_OPERATION_DEADL
 # The reserved point lane must serve an editor open PROMPTLY under saturation -- a server property,
 # independent of how long the browser is then willing to wait.
 POINT_LANE_EDITOR_OPEN_BUDGET_SECONDS = 15.0
-pytestmark = pytest.mark.usefixtures("no_control_socket", "isolated_yoagent_conversation_state", "isolated_tmux_socket")
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = [pytest.mark.usefixtures("no_control_socket", "isolated_yoagent_conversation_state", "isolated_tmux_socket"), pytest.mark.deprecated_python_server]
 
 
 def _search_refresh_test_app(enqueue, mark_progress=None):

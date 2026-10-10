@@ -734,6 +734,8 @@ def route_fixture(gate_runtime_paths, gate_tmux, gate_authenticated_live_server:
     )
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_route_sweep_gate_proves_a_raised_route_is_red(
     monkeypatch: pytest.MonkeyPatch,
     capfd: pytest.CaptureFixture[str],
@@ -837,6 +839,8 @@ def test_route_sweep_accepts_only_correlated_batchd_timeout_phases(event: str) -
         _assert_route_sweep_batchd_transport_failure({**entry, "event": "relay"})
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_authenticated_private_server_exercises_every_registered_route(
     capfd: pytest.CaptureFixture[str],
     gate_authenticated_live_server: GateLiveServer,
@@ -910,6 +914,8 @@ def test_authenticated_private_server_exercises_every_registered_route(
         _retire_route_sweep_server_failures(gate_authenticated_live_server, outcomes)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.parametrize(
     "failure_case,method,path",
     (

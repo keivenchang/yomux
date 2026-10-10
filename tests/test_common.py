@@ -163,6 +163,8 @@ def test_git_version_reader_falls_back_to_historical_package_path(monkeypatch):
     ]
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_record_owned_thread_starts_use_shared_rollback_owner():
     root = Path(common.PROJECT_ROOT)
     owners = {
@@ -207,6 +209,8 @@ def test_record_owned_thread_starts_use_shared_rollback_owner():
     assert rolled_back == [True]
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_main_process_cpu_work_has_named_allowlist():
     root = Path(common.PROJECT_ROOT)
     app_path = root / "yomux_lib" / "app.py"
@@ -287,6 +291,8 @@ def test_positive_finite_number_normalizes_counter_inputs():
     assert common.positive_finite_number("invalid") == 0.0
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_backend_primitive_consumers_share_the_canonical_owners():
     assert app.normalized_prompt_state is agent_tui.normalized_prompt_state
     assert app.cached_agent_auth_status_snapshot is web.bootstrap_agent_auth_status
@@ -307,6 +313,8 @@ def test_backend_primitive_consumers_share_the_canonical_owners():
     assert calls == [payload]
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_backend_primitive_implementation_bodies_have_one_owner():
     root = Path(common.PROJECT_ROOT) / "yomux_lib"
     functions = []

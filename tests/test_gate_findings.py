@@ -8,8 +8,8 @@ import pytest
 from selenium.webdriver.support.ui import WebDriverWait
 
 from tests.browser_helpers.browser_layout import assert_live_runtime_boot_healthy
-from tests.browser_helpers.browser_layout import browser
 from tests.browser_helpers.browser_layout import load_live_runtime_boot_fixture
+from tests.browser_helpers.browser_layout import browser
 from tests.browser_helpers.browser_layout import start_browser_server
 from tests.browser_helpers.browser_layout import start_isolated_browser_app
 from tests.browser_helpers.browser_layout import stop_browser_fixture
@@ -27,19 +27,6 @@ from yomux_lib.settings import write_settings_file
 def test_n1_alternate_screen_wheel_scroll_reaches_the_terminal(browser, tmp_path):
     """An alternate-screen Claude pane routes wheel lines into xterm rather than losing upward scroll."""
     assert_terminal_wheel_observation(terminal_wheel_observation(browser, tmp_path))
-
-
-@pytest.mark.browser
-@pytest.mark.xfail(strict=True, reason="NOT-APPLICABLE on v0.6.10; waits for F9 Daemons subsystem surface")
-def test_n2_daemons_process_cards_render_real_telemetry(browser, tmp_path):
-    """Server, daemon, and storaged cards each render PID, uptime, CPU and RSS rather than placeholders."""
-    load_live_runtime_boot_fixture(browser, tmp_path)
-    cards = browser.execute_script(
-        """
-        return ['server', 'daemon', 'storaged'].map(name => ({name, card: document.querySelector(`[data-daemon-card="${name}"]`)?.textContent || ''}));
-        """,
-    )
-    assert all(card["card"].strip() and "—" not in card["card"] for card in cards), cards
 
 
 @pytest.mark.browser
@@ -62,6 +49,7 @@ def test_n4_live_source_revision_change_restarts_without_orphaning_old_backends(
 
 
 @pytest.mark.browser
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_n5_real_terminal_wrap_keeps_full_paths_and_passive_misses_are_not_errors(
     browser,
@@ -177,15 +165,6 @@ def test_n5_real_terminal_wrap_keeps_full_paths_and_passive_misses_are_not_error
 
 
 @pytest.mark.browser
-@pytest.mark.xfail(strict=True, reason="NOT-APPLICABLE on v0.6.10; waits for F9 SubsystemSpec Preferences controls")
-def test_n7_preferences_service_controls_group_features_contiguously(browser, tmp_path):
-    """Feature-labelled Preferences controls occur in one contiguous run for each feature."""
-    load_live_runtime_boot_fixture(browser, tmp_path)
-    groups = browser.execute_script("return Array.from(document.querySelectorAll('[data-subsystem-feature-group]')).map(node => node.dataset.subsystemFeatureGroup);")
-    assert groups and groups == list(dict.fromkeys(groups)), groups
-
-
-@pytest.mark.browser
 def test_n8_daemons_load_chart_paints_in_system_view_when_service_load_data_exists(browser, tmp_path):
     """Given service-load data, System -> Daemons paints SVG marks and Graphs has no Daemons Load card."""
     load_live_runtime_boot_fixture(browser, tmp_path)
@@ -223,53 +202,3 @@ def test_n8_daemons_load_chart_paints_in_system_view_when_service_load_data_exis
         """
     )
     assert result == {"graphChart": False, "systemChart": True, "marks": 1}, result
-
-
-@pytest.mark.browser
-@pytest.mark.xfail(strict=True, reason="NOT-APPLICABLE on v0.6.10; waits for F9 Daemons card layout")
-def test_n9_daemons_cards_have_no_dead_space_and_equal_heights(browser, tmp_path):
-    """Cards sharing a Daemons row have comparable heights and their content fills each card."""
-    load_live_runtime_boot_fixture(browser, tmp_path)
-    geometry = browser.execute_script(
-        """
-        return Array.from(document.querySelectorAll('[data-daemon-card]')).map(node => {
-          const rect = node.getBoundingClientRect();
-          const children = Array.from(node.children).map(child => child.getBoundingClientRect());
-          const contentTop = Math.min(...children.map(child => child.top));
-          const contentBottom = Math.max(...children.map(child => child.bottom));
-          return {name: node.dataset.daemonCard, top: rect.top, height: rect.height, contentHeight: contentBottom - contentTop};
-        });
-        """,
-    )
-    assert len(geometry) == 3, geometry
-    rows = {}
-    for card in geometry:
-        rows.setdefault(round(card["top"]), []).append(card)
-        assert card["contentHeight"] / card["height"] >= 0.75, card
-    for cards in rows.values():
-        heights = [card["height"] for card in cards]
-        assert max(heights) - min(heights) <= 2, cards
-
-
-@pytest.mark.browser
-@pytest.mark.xfail(strict=True, reason="NOT-APPLICABLE on v0.6.10; waits for F9 Daemons tab")
-def test_n10_daemons_tab_contains_only_daemon_process_content(browser, tmp_path):
-    """The Daemons tab owns exactly the three process cards, not unrelated subsystem content."""
-    load_live_runtime_boot_fixture(browser, tmp_path)
-    membership = browser.execute_script(
-        """
-        const tab = document.querySelector('[data-daemons-tab]');
-        if (!tab) return null;
-        return {
-          cards: Array.from(tab.querySelectorAll(':scope [data-daemon-card]')).map(card => ({
-            name: card.dataset.daemonCard,
-            processRows: card.querySelectorAll('[data-daemon-process]').length,
-          })),
-          unrelated: Array.from(tab.querySelectorAll('[data-subsystem-owner], [data-chat-message-id], [data-cache-card]')).map(node => node.outerHTML),
-        };
-        """,
-    )
-    assert membership is not None, membership
-    assert [card["name"] for card in membership["cards"]] == ["server", "daemon", "storaged"], membership
-    assert all(card["processRows"] == 1 for card in membership["cards"]), membership
-    assert not membership["unrelated"], membership

@@ -1770,6 +1770,28 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     ]);
   });
 
+  await testAsync('Quick Open fallback searches nested techblog files recursively', async () => {
+    const api = loadYomux();
+    api.setFileExplorerIndexedDirsForTest([]);
+    api.installCommandPaletteFixtureForTest();
+    api.setCommandPaletteStateForTest('files', 'techblog');
+    api.setCommandPaletteQueryForTest('techblog');
+    const root = api.fileQuickOpenRootForSearch();
+    const file = {path: `${root}/notes/currently-used/DIS-2656__techblog.md`, name: 'DIS-2656__techblog.md', relative_path: 'notes/currently-used/DIS-2656__techblog.md'};
+    const requests = [];
+    api.setFetchForTest(url => {
+      const parsed = new URL(String(url), 'http://test');
+      requests.push(parsed);
+      return Promise.resolve(jsonResponse({root, files: parsed.searchParams.get('recursive') === 'true' ? [file] : [], complete: true}));
+    });
+    await api.refreshFileQuickOpenCandidatesForTest('techblog');
+    assert.equal(requests[0].pathname, '/api/fs/search');
+    assert.equal(requests[0].searchParams.get('recursive'), 'true', 'the fallback keeps the same recursive scope as indexed streaming');
+    assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates.map(row => row.path)), [file.path]);
+    const renderedText = api.commandPaletteStateForTest().node.querySelector('.command-palette-results').innerHTML.replace(/<[^>]+>/g, '');
+    assert.ok(renderedText.includes('DIS-2656__techblog.md'), 'the nested result remains visible through match highlighting');
+  });
+
   await testAsync('Quick Open consumes indexed search chunks and repaints each arrival', async () => {
     const api = loadYomux();
     api.setFileExplorerIndexedDirsForTest(['/home/test/yolomux.dev']);
@@ -1788,7 +1810,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     renderResults.scrollTop = 240;
     const search = api.refreshFileQuickOpenCandidatesForTest('t5t');
     await flushAsyncWork();
-    assert.equal(requests[0].url, '/api/fs/search-stream?root=%2Fhome%2Ftest%2Fyolomux.dev&query=t5t&limit=500');
+    assert.equal(requests[0].url, '/api/fs/search-stream?root=%2Fhome%2Ftest%2Fyolomux.dev&query=t5t&limit=500&recursive=true');
     stream.push(sseFrame('start', {root: '/home/test/yolomux.dev', query: 't5t'}));
     await flushAsyncWork();
     await flushAsyncWork();
@@ -1814,7 +1836,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     api.setCommandPaletteQueryForTest('dis');
     const stream = controllableSseResponse();
     api.setFetchForTest(url => {
-      assert.equal(String(url), '/api/fs/search-stream?root=%2Fhome%2Ftest%2Fyolomux.dev&query=dis&limit=500');
+      assert.equal(String(url), '/api/fs/search-stream?root=%2Fhome%2Ftest%2Fyolomux.dev&query=dis&limit=500&recursive=true');
       return Promise.resolve(stream.response);
     });
     const search = api.refreshFileQuickOpenCandidatesForTest('dis');
@@ -1827,6 +1849,39 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates.map(file => file.path)), ['/home/test/yolomux.dev/notes/DIS-123.md'], 'a basename match is admitted while a weaker path-fragment row is not');
     assert.equal(api.commandPaletteStateForTest().items[0].label, 'DIS-123.md', 'the basename match is visible immediately');
     stream.close();
+    await search;
+  });
+
+  await testAsync('Quick Open renders the indexed techblog file from a nested first stream chunk', async () => {
+    const api = loadYomux();
+    const root = '/home/test/dev';
+    const path = `${root}/notes/tool-calling/2026-09__techblog/currently-used/DIS-2656__techblog.md`;
+    api.setFileExplorerIndexedDirsForTest([root]);
+    api.installCommandPaletteFixtureForTest();
+    api.setCommandPaletteStateForTest('files', 'techblog');
+    api.setCommandPaletteQueryForTest('techblog');
+    const stream = controllableSseResponse();
+    api.setFetchForTest(url => {
+      assert.equal(String(url), `/api/fs/search-stream?root=${encodeURIComponent(root)}&query=techblog&limit=500&recursive=true`);
+      return Promise.resolve(stream.response);
+    });
+
+    const search = api.refreshFileQuickOpenCandidatesForTest('techblog');
+    await flushAsyncWork();
+    stream.push(sseFrame('start', {root, query: 'techblog'}));
+    stream.push(sseFrame('chunk', {files: [{
+      path,
+      name: 'DIS-2656__techblog.md',
+      relative_path: 'notes/tool-calling/2026-09__techblog/currently-used/DIS-2656__techblog.md',
+    }]}));
+    await flushAsyncWork();
+
+    assert.deepStrictEqual(canonical(api.fileQuickOpenStateForTest().candidates.map(file => file.path)), [path]);
+    const renderedText = api.commandPaletteStateForTest().node.querySelector('.command-palette-results').innerHTML.replace(/<[^>]+>/g, '');
+    assert.ok(renderedText.includes('DIS-2656__techblog.md'), 'the expected nested indexed file is visible in Quick Open');
+    stream.push(sseFrame('done', {files: 1, summary: {root, files: [], count: 1, cursor: '61', generation: 61, index_coverage: 'partial'}, terminal: true}));
+    stream.close();
+    await flushAsyncWork();
     await search;
   });
 
@@ -5503,6 +5558,113 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.equal(api.fileIndexStatusFromPayloadForTest({state: 'error', error: 'walk failed'}), 'error');
   });
 
+  test('search-index lifecycle generations reset when the worker incarnation changes', () => {
+    const api = loadYomux();
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {state: 'ready', generation: 12, worker_incarnation: 'worker-old'}), true);
+    assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {state: 'building', generation: 1, worker_incarnation: 'worker-new'}), true,
+      'a replacement worker can restart its generation counter');
+    assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {state: 'error', generation: 13, worker_incarnation: 'worker-old'}), false,
+      'a delayed response from the retired worker cannot reclaim the root');
+    assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {state: 'ready', generation: 2, worker_incarnation: 'worker-new'}), true,
+      'the replacement worker continues with its own generation sequence');
+  });
+
+  test('search-index lifecycle status rejects delayed responses from an older unseen worker', () => {
+    const api = loadYomux();
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    const oldWorker = '100-1791437951032045007';
+    const newWorker = '101-1791437951032045008';
+    assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {
+      state: 'ready', generation: 2000, worker_incarnation: newWorker,
+    }), true);
+    assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {
+      state: 'building', generation: 1000, worker_incarnation: oldWorker,
+    }), false, 'a delayed HTTP response cannot retire the current worker');
+    assert.equal(api.fileExplorerIndexStatusForTest('/repo'), 'ready', 'the current worker status remains visible');
+    assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {
+      state: 'ready', generation: 2001, worker_incarnation: newWorker,
+    }), true, 'the current worker continues publishing after the stale response');
+  });
+
+  await testAsync('changing an index limit refreshes settled root status details', async () => {
+    const api = loadYomux();
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    api.setClientSettingsPatchForTest({file_explorer: {index_max_files: 100000}});
+    const state = api.settingsStateForTest();
+    const nextSettings = JSON.parse(JSON.stringify(state.settings));
+    nextSettings.file_explorer.index_max_files = 1000000;
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      return Promise.resolve(jsonResponse({state: 'partial', generation: 1, worker_incarnation: 'worker-1',
+        count: 80000, max_files: 1000000, max_bytes: 536870912, coverage_reason: 'some eligible paths could not be traversed'}));
+    });
+    assert.equal(api.applySettingsPayloadForTest({settings: nextSettings, defaults: state.defaults, mtime_ns: 999999999999999999}), true);
+    await flushAsyncWork();
+    assert.deepStrictEqual(requests, ['/api/fs/index-status?root=%2Frepo'],
+      'saving a file-count limit refreshes settled index status and tooltip details');
+  });
+
+  test('Go partial and failed refresh summaries remain visible without result chunks', () => {
+    const api = loadYomux();
+    const partial = api.fileIndexFreshnessFromPayloadForTest({index_state: 'partial', index_coverage: 'partial', coverage_reason: 'storage budget reached'});
+    assert.equal(partial.partial, true);
+    assert.equal(api.fileIndexFreshnessMessageForTest(partial), 'Partial index: some files may be missing');
+    assert.equal(api.fileIndexStatusFromPayloadForTest({index_state: 'partial', index_coverage: 'partial', ready: true}), 'too_large');
+    const failed = api.fileIndexFreshnessFromPayloadForTest({index_state: 'error', index_coverage: 'complete', error: 'disk full'});
+    assert.equal(failed.stale, true);
+    assert.equal(api.fileIndexStatusFromPayloadForTest({index_state: 'error', index_coverage: 'partial', error: 'disk full'}), 'error');
+    assert.ok(api.fileIndexFreshnessMessageForTest(failed));
+  });
+
+  await testAsync('a connected event stream keeps polling a building root until its badge settles', async () => {
+    const api = loadYomux();
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    api.setClientEventConnectedForTest(true);
+    api.setFileExplorerIndexRefreshSecondsForTest(0);
+    assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {state: 'building', generation: 1}), true);
+    assert.equal(api.runtimeIntervalActiveForTest('file-index-building'), true,
+      'the read-only targeted status timer stays active with SSE connected and rebuild reconciliation disabled');
+    api.seedFileIndexPartialWarningRootForTest('/repo');
+
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      return Promise.resolve(jsonResponse({
+        state: 'partial', index_state: 'partial', index_coverage: 'partial',
+        generation: 2, count: 100000, max_files: 100000, max_bytes: 536870912,
+        coverage_reason: 'per-root file limit reached',
+      }));
+    });
+    await api.refreshBuildingFileIndexStatusesForTest();
+    assert.deepStrictEqual(requests, ['/api/fs/index-status?root=%2Frepo']);
+    assert.equal(api.fileExplorerIndexStatusForTest('/repo'), 'too_large',
+      'the status response replaces the building state with partial coverage');
+    assert.equal(api.fileExplorerIndexBadgeText('/repo'), '!', 'the settled partial status is visible in the row');
+    assert.equal(api.fileExplorerIndexBadgeTitleForTest('/repo'),
+      'Partial index\nHit the per-root limit of 100,000 files after indexing 100,000.\nDetails: per-root file limit reached.',
+      'hovering the partial badge states the configured limit and the reason it stopped');
+    assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {
+      state: 'partial', index_state: 'partial', index_coverage: 'partial', generation: 3,
+      count: 250000, max_files: 1000000, max_bytes: 536870912,
+      coverage_reason: 'snapshot storage budget reached',
+    }), true);
+    assert.equal(api.fileExplorerIndexBadgeTitleForTest('/repo'),
+      'Partial index\nHit the 512 MiB snapshot storage budget after indexing 250,000 files.\nDetails: snapshot storage budget reached.',
+      'storage-limited coverage does not claim the file-count limit was reached');
+    assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {
+      state: 'partial', index_state: 'partial', index_coverage: 'partial', generation: 4,
+      count: 426492, max_files: 1000000, max_bytes: 536870912,
+      coverage_reason: 'some eligible paths could not be traversed',
+    }), true);
+    assert.equal(api.fileExplorerIndexBadgeTitleForTest('/repo'),
+      'Partial index\nStopped after indexing 426,492 files; the per-root limit is 1,000,000.\nDetails: some eligible paths could not be traversed.',
+      'a traversal-limited crawl does not claim that any configured budget was reached');
+    assert.equal(api.runtimeIntervalActiveForTest('file-index-building'), false,
+      'the targeted timer retires after the badge settles');
+  });
+
   // M11: the live 7771 incident. A persisted snapshot whose `indexd` producer was dead silently
   // degraded to "building" - honest about readiness, silent about staleness. One derivation now
   // answers both questions.
@@ -5780,9 +5942,52 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.equal(api.fileQuickOpenDeltaRootsForTest()[0].cursor, 'CUR1', 'the root advances to the returned cursor');
   });
 
+  await testAsync('an early search_progress signal is reconciled once after the warming cursor registers', async () => {
+    const api = loadYomux();
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    const searches = [];
+    let resolveInitial;
+    const streamResponse = (workerIncarnation, path) => {
+      const frames = [
+        `event: start\ndata: ${JSON.stringify({root: '/repo', query: 'techblog.md', limit: 500})}\n\n`,
+        `event: chunk\ndata: ${JSON.stringify({files: [{path, name: 'techblog.md', relative_path: 'docs/techblog.md'}], coverage: {}})}\n\n`,
+        `event: done\ndata: ${JSON.stringify({summary: {root: '/repo', query: 'techblog.md', generation: 1,
+          cursor: `${workerIncarnation}:1`, worker_incarnation: workerIncarnation, index_state: 'ready'}, terminal: true})}\n\n`,
+      ].join('');
+      const bytes = new TextEncoder().encode(frames);
+      return new Response(new ReadableStream({start(controller) { controller.enqueue(bytes); controller.close(); }}), {
+        headers: {'Content-Type': 'text/event-stream'},
+      });
+    };
+    api.setFetchForTest(url => {
+      const target = String(url);
+      searches.push(target);
+      if (searches.length === 1) return new Promise(resolve => { resolveInitial = resolve; });
+      return Promise.resolve(streamResponse('worker-new', '/repo/docs/techblog.md'));
+    });
+    api.installCommandPaletteFixtureForTest();
+    api.setCommandPaletteStateForTest('files', 'techblog.md');
+    api.setCommandPaletteQueryForTest('techblog.md');
+    const search = api.refreshFileQuickOpenCandidatesForTest('techblog.md');
+    await flushAsyncWork();
+    api.handleClientPushEventNowForTest('search_progress', {
+      scope_id: api.fileSearchScopeIdForTest('/repo'), generation: 1, revision: 1,
+      worker_incarnation: 'worker-new', coverage: {},
+    });
+    resolveInitial(streamResponse('worker-old', '/repo/docs/old-techblog.md'));
+    await search;
+    for (let attempt = 0; attempt < 10 && api.fileQuickOpenStateForTest().loading; attempt += 1) await flushAsyncWork();
+    assert.equal(searches.filter(target => !target.includes('cursor=')).length, 2,
+      'the early publication triggers one guarded full snapshot reconciliation');
+    assert.equal(searches.filter(target => target.includes('cursor=')).length, 0,
+      'an uncommitted cursor is never sent as a delta request');
+    assert.ok(api.fileQuickOpenStateForTest().candidates.some(candidate => candidate.path === '/repo/docs/techblog.md'),
+      'the new worker snapshot replaces the old equal-generation result without another keystroke');
+  });
+
   // Seed one delta cursor for /repo through a real snapshot fetch, returning the recorded requests and
   // a fetch-response controller so each streaming test drives its own delta/rebase/pagination replies.
-  async function seedQuickOpenDeltaCursor(api, {snapshotFiles = [], initialCursor = 'CUR0', deltaReply} = {}) {
+  async function seedQuickOpenDeltaCursor(api, {snapshotFiles = [], initialCursor = 'CUR0', deltaReply, initialGeneration = 0, workerIncarnation = 'worker-1'} = {}) {
     api.setFileExplorerIndexedDirsForTest(['/repo']);
     const searches = [];
     api.setFetchForTest(url => {
@@ -5792,6 +5997,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         if (target.includes('cursor=')) return Promise.resolve(jsonResponse(deltaReply(target)));
         return Promise.resolve(jsonResponse({
           root: '/repo', root_realpath: '/repo', query: 't5t', index_state: 'warming',
+          generation: initialGeneration, worker_incarnation: workerIncarnation,
           files: snapshotFiles, initial_cursor: initialCursor,
         }));
       }
@@ -5804,6 +6010,102 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     await api.refreshFileQuickOpenCandidatesForTest('t5t');
     return {searches, scopeId: api.fileSearchScopeIdForTest('/repo')};
   }
+
+  await testAsync('a retained progress event from an old worker cannot loop a fresh snapshot search', async () => {
+    const api = loadYomux();
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    api.handleClientPushEventNowForTest('search_progress', {
+      scope_id: api.fileSearchScopeIdForTest('/repo'), generation: 47,
+      worker_incarnation: 'worker-old', coverage: {},
+    });
+    let searches = 0;
+    api.setFetchForTest(url => {
+      if (!String(url).includes('/api/fs/search') || new URL(String(url), 'http://test').searchParams.get('root') !== '/repo') {
+        return Promise.resolve(jsonResponse({files: []}));
+      }
+      searches += 1;
+      if (searches > 5) throw new Error('unbounded retained-event reconciliation');
+      return Promise.resolve(jsonResponse({root: '/repo', files: [{path: '/repo/t5t.md', name: 't5t.md'}],
+        cursor: 'worker-new:47', generation: 47, worker_incarnation: 'worker-new', index_state: 'ready'}));
+    });
+    api.installCommandPaletteFixtureForTest();
+    api.setFileQuickOpenCandidatesForTest('/repo', []);
+    api.setCommandPaletteStateForTest('files', 't5t');
+    api.setCommandPaletteQueryForTest('t5t');
+    await api.refreshFileQuickOpenCandidatesForTest('t5t');
+    for (let attempt = 0; attempt < 10; attempt += 1) await flushAsyncWork();
+    assert.equal(searches, 1, 'a fresh response supersedes progress retained before the search');
+    assert.equal(api.fileQuickOpenStateForTest().loading, false);
+    assert.equal(api.fileQuickOpenDeltaRootsForTest().find(root => root.normalizedRoot === '/repo').workerIncarnation, 'worker-new');
+  });
+
+  await testAsync('retained old-worker events during and after a search cannot replace its newer cursor', async () => {
+    const api = loadYomux();
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    const scopeId = api.fileSearchScopeIdForTest('/repo');
+    const oldWorker = '100-1791437951032045007';
+    const newWorker = '101-1791437951032045008';
+    let resolveSearch;
+    let searches = 0;
+    const snapshot = {root: '/repo', files: [{path: '/repo/t5t.md', name: 't5t.md'}],
+      cursor: `${newWorker}:47`, generation: 47, worker_incarnation: newWorker, index_state: 'ready'};
+    api.setFetchForTest(url => {
+      if (!String(url).includes('/api/fs/search') || new URL(String(url), 'http://test').searchParams.get('root') !== '/repo') {
+        return Promise.resolve(jsonResponse({files: []}));
+      }
+      searches += 1;
+      if (searches > 5) throw new Error('unbounded delayed-event reconciliation');
+      if (searches === 1) return new Promise(resolve => { resolveSearch = resolve; });
+      return Promise.resolve(jsonResponse(snapshot));
+    });
+    api.installCommandPaletteFixtureForTest();
+    api.setFileQuickOpenCandidatesForTest('/repo', []);
+    api.setCommandPaletteStateForTest('files', 't5t');
+    api.setCommandPaletteQueryForTest('t5t');
+    const search = api.refreshFileQuickOpenCandidatesForTest('t5t');
+    await flushAsyncWork();
+    const staleEvent = {scope_id: scopeId, generation: 99, worker_incarnation: oldWorker, coverage: {}};
+    api.handleClientPushEventNowForTest('search_progress', staleEvent);
+    resolveSearch(jsonResponse(snapshot));
+    await search;
+    for (let attempt = 0; attempt < 10; attempt += 1) await flushAsyncWork();
+    api.handleClientPushEventNowForTest('search_progress', staleEvent);
+    for (let attempt = 0; attempt < 10; attempt += 1) await flushAsyncWork();
+    assert.equal(searches, 1, 'the newer response supersedes delayed and replayed old events');
+    assert.equal(api.fileQuickOpenStateForTest().loading, false);
+    assert.equal(api.fileQuickOpenDeltaRootsForTest().find(root => root.normalizedRoot === '/repo').workerIncarnation, newWorker);
+  });
+
+  await testAsync('a failed first build clears warming without sending an uncommitted cursor', async () => {
+    const api = loadYomux();
+    const {scopeId} = await seedQuickOpenDeltaCursor(api, {initialCursor: '0', initialGeneration: 0});
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      return Promise.resolve(jsonResponse({root: '/repo', files: [], cursor: '0', generation: 0,
+        index_state: 'error', index_coverage: 'pending', indexed: false, stale: true}));
+    });
+    api.handleClientPushEventNowForTest('search_progress', {scope_id: scopeId, generation: 0, index_state: 'error', stale: true});
+    for (let attempt = 0; attempt < 10; attempt += 1) await flushAsyncWork();
+    assert.ok(requests.length);
+    assert.equal(requests.some(url => url.includes('cursor=')), false);
+    assert.equal(api.fileQuickOpenStateForTest().indexWarming, false);
+    assert.equal(api.commandPaletteEmptyTextForTest(), 'Search failed');
+  });
+
+  await testAsync('a failed refresh updates freshness through an unchanged cursor without dropping rows', async () => {
+    const api = loadYomux();
+    await seedQuickOpenDeltaCursor(api, {initialGeneration: 7, snapshotFiles: [{path: '/repo/t5t.md', name: 't5t.md'}]});
+    const requestId = api.fileQuickOpenDeltaRootsForTest()[0].requestId;
+    const status = api.ingestFileQuickOpenDeltaForTest('/repo', requestId, {
+      changes: [], more: false, unchanged: true, cursor: 'CUR0', generation: 7,
+      index_state: 'error', index_coverage: 'partial', stale: true,
+    });
+    assert.equal(status.applied, true);
+    assert.equal(api.fileQuickOpenStateForTest().freshness.stale, true);
+    assert.equal(api.fileQuickOpenStateForTest().candidates.length, 1);
+    assert.ok(api.commandPaletteStatusTextForTest());
+  });
 
   await testAsync('an out-of-order delta for a superseded request cannot mutate a newer palette', async () => {
     const api = loadYomux();
@@ -6000,6 +6302,62 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.ok(searches.filter(target => !target.includes('cursor=')).length > snapshotsBefore, 'it repairs from one full snapshot to pick up pre-cursor rows');
   });
 
+  await testAsync('a lower progress generation after worker restart resets the warming cursor watermark', async () => {
+    const api = loadYomux();
+    const {searches, scopeId} = await seedQuickOpenDeltaCursor(api, {initialCursor: null, deltaReply: () => ({changes: [], more: false, cursor: 'CUR1'})});
+    api.handleClientPushEventNowForTest('search_progress', {scope_id: scopeId, generation: 5, revision: 5, coverage: {}});
+    await flushAsyncWork();
+    const snapshotsBeforeRestartSignal = searches.filter(target => !target.includes('cursor=')).length;
+    api.handleClientPushEventNowForTest('search_progress', {scope_id: scopeId, generation: 1, revision: 1, coverage: {}});
+    await flushAsyncWork();
+    assert.ok(searches.filter(target => !target.includes('cursor=')).length > snapshotsBeforeRestartSignal,
+      'the restarted worker publication triggers a fresh snapshot for the open warming cursor');
+  });
+
+  await testAsync('an equal progress generation from a new worker incarnation refreshes the open snapshot', async () => {
+    const api = loadYomux();
+    let workerIncarnation = 'worker-old';
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    const searches = [];
+    const streamResponse = incarnation => {
+      const frames = [
+        `event: start\ndata: ${JSON.stringify({root: '/repo', query: 't5t', limit: 500})}\n\n`,
+        `event: chunk\ndata: ${JSON.stringify({files: [{path: '/repo/old.md', name: 'old.md', relative_path: 'old.md'}], coverage: {}})}\n\n`,
+        `event: done\ndata: ${JSON.stringify({summary: {root: '/repo', query: 't5t', generation: 1,
+          worker_incarnation: incarnation, cursor: `${incarnation}:1`, index_state: 'ready'}, terminal: true})}\n\n`,
+      ].join('');
+      const bytes = new TextEncoder().encode(frames);
+      return new Response(new ReadableStream({start(controller) { controller.enqueue(bytes); controller.close(); }}), {
+        headers: {'Content-Type': 'text/event-stream'},
+      });
+    };
+    api.setFetchForTest(url => {
+      const target = String(url);
+      if (target.includes('/api/fs/search') || target.includes('/api/batch/search')) {
+        searches.push(target);
+        return Promise.resolve(streamResponse(workerIncarnation));
+      }
+      return Promise.resolve(jsonResponse({state: 'building'}));
+    });
+    api.installCommandPaletteFixtureForTest();
+    api.setFileQuickOpenCandidatesForTest('/repo', []);
+    api.setCommandPaletteStateForTest('files', 't5t');
+    api.setCommandPaletteQueryForTest('t5t');
+    await api.refreshFileQuickOpenCandidatesForTest('t5t');
+    const snapshotsBeforeRestart = searches.length;
+    workerIncarnation = 'worker-new';
+    api.handleClientPushEventNowForTest('search_progress', {
+      scope_id: api.fileSearchScopeIdForTest('/repo'), generation: 1, revision: 1,
+      worker_incarnation: workerIncarnation, coverage: {},
+    });
+    await flushAsyncWork();
+    for (let attempt = 0; attempt < 10 && api.fileQuickOpenStateForTest().loading; attempt += 1) await flushAsyncWork();
+    assert.ok(searches.length > snapshotsBeforeRestart, 'the equal-generation restart triggers one full snapshot rebase');
+    assert.equal(api.fileQuickOpenStateForTest().loading, false, 'the replacement snapshot settles');
+    assert.equal(api.fileQuickOpenDeltaRootsForTest().find(root => root.normalizedRoot === '/repo')?.workerIncarnation,
+      'worker-new', 'the new worker owns the refreshed cursor');
+  });
+
   await testAsync('auto-approve startup snapshots share one in-flight request', async () => {
     const pending = [];
     const api = loadYomux('', ['1']);
@@ -6018,32 +6376,118 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     assert.equal(pending.length, 1, 'a ready event immediately after boot reuses the fresh auto-approve snapshot');
   });
 
-  await testAsync('auto-status fallback imports working Codex activity when Go lacks auto-approve', async () => {
+  await testAsync('full Go auto-status combines YO enablement with the Tabber activity owner', async () => {
     const requests = [];
-    const api = loadYomux('', ['1']);
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      bootstrapOverrides: {backendLabel: 'Go 0.10.3'},
+    });
     api.setFetchForTest(url => {
       const target = String(url);
       requests.push(target);
-      if (target === '/api/auto-approve') return Promise.reject(new Error('route unavailable'));
-      if (target.startsWith('/api/activity?')) {
+      if (target === '/api/auto-approve') {
         return Promise.resolve(jsonResponse({
-          activity: {},
-          agents: [],
-          agent_windows: {
-            '1': [{kind: 'codex', pane_target: '%73', window_index: 0, state: 'working'}],
-          },
           session_order: ['1'],
+          sessions: {
+            '1': {
+              target: '1', enabled: true,
+              agent_windows: [{kind: 'codex', pane_target: '%73', window_index: 0, state: 'working'}],
+            },
+          },
         }));
       }
-      assert.fail(`unexpected fallback request: ${target}`);
+      if (target.startsWith('/api/activity?')) {
+        return Promise.resolve(jsonResponse({
+          activity: {}, agents: [], session_order: ['1'],
+          agent_windows: {'1': [{kind: 'codex', pane_target: '%73', window_index: 0, state: 'working'}]},
+        }));
+      }
+      assert.fail(`unexpected auto-status request: ${target}`);
     });
 
     await api.loadAutoStatusesForTest({render: false, sessionFallback: false});
-    assert.deepStrictEqual(requests, ['/api/auto-approve', '/api/activity?hours=24&visible=1&scope=all'], 'an unavailable Go auto-status route falls back to one machine-wide activity snapshot');
+    assert.deepStrictEqual(requests, ['/api/auto-approve', '/api/activity?hours=24&visible=1&scope=all'], 'full Go combines the authoritative YO route with one initial activity-owner snapshot');
+    assert.equal(api.autoApproveStateForTest('1').enabled, true, 'the tab marker receives authoritative YO state');
+    const tabMarkers = api.sessionTabLeadingActivityHtmlForTest('1', null, true, {enabledOnly: false, toggle: true, state: null});
+    assert.match(tabMarkers, /class="session-yolo-marker active"/, 'the enabled state inserts the active YO marker into terminal tab markup');
+    assert.match(tabMarkers, /data-yolo-session="1"[^>]*>YO<\//, 'the tab marker keeps its session identity and visible symbol');
     const model = api.sessionAgentWindowStatusModelForTest('1');
     assert.equal(model.agents.length, 1, 'the activity snapshot supplies the Codex window row');
     assert.equal(model.agents[0].kind, 'codex');
     assert.equal(model.agents[0].state, 'working', 'the shared activity state preserves the working marker');
+  });
+
+  await testAsync('an applied Go status snapshot fills missing rows from fresh activity without losing YO state', async () => {
+    const api = loadYomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      bootstrapOverrides: {backendLabel: 'Go 0.10.3'},
+    });
+    let statusReads = 0;
+    api.setFetchForTest(url => {
+      const target = String(url);
+      if (target === '/api/auto-approve') {
+        statusReads += 1;
+        if (statusReads === 1) {
+          return Promise.resolve(jsonResponse({
+            agent_window_snapshot_revision: 8,
+            session_order: ['1'],
+            sessions: {'1': {target: '1', enabled: true, worker_state: 'watching', attempts: 4, agent_windows: [
+              {kind: 'codex', pane_target: '%73', window_index: 0, state: 'working'},
+            ]}},
+          }));
+        }
+        if (statusReads === 2) {
+          return Promise.resolve(jsonResponse({
+            agent_window_snapshot_revision: 8,
+            session_order: ['1'],
+            sessions: {'1': {target: '1', enabled: true, worker_state: 'dry-run', attempts: 5, last_action: 'dry-run:approve', agent_windows: [
+              {kind: 'codex', pane_target: '%73', window_index: 0, state: 'approval'},
+            ]}},
+          }));
+        }
+        return Promise.resolve(jsonResponse({
+          session_order: ['1'],
+          sessions: {'1': {target: '1', enabled: true, worker_state: 'dry-run', attempts: 6, last_action: 'dry-run:approve', agent_windows: []}},
+        }));
+      }
+      if (target.startsWith('/api/activity?')) {
+        return Promise.resolve(jsonResponse({
+          cache: {stale: false},
+          agent_window_snapshot_revision: 8,
+          activity: {},
+          agents: [],
+          agent_windows: {1: [
+            {kind: 'codex', pane_target: '%73', window_index: 0, state: 'working'},
+            {kind: 'codex', pane_target: '%74', window_index: 1, state: 'needs-input'},
+          ]},
+          session_order: ['1'],
+        }));
+      }
+      assert.fail(`unexpected Go auto-status request: ${target}`);
+    });
+
+    await api.loadAutoStatusesForTest({render: false});
+    assert.equal(api.autoApproveStateForTest('1').agent_windows.length, 2, 'the first activity snapshot seeds both live pane rows');
+    await api.loadAutoStatusesForTest({force: true, render: false});
+    const state = api.autoApproveStateForTest('1');
+    assert.equal(state.enabled, true, 'the authoritative YO toggle remains enabled');
+    assert.equal(state.worker_state, 'dry-run', 'the worker state survives status-row adoption');
+    assert.equal(state.attempts, 5, 'worker counters survive status-row adoption');
+    assert.equal(state.last_action, 'dry-run:approve', 'the latest YO action survives status-row adoption');
+    assert.equal(state.agent_windows.find(row => row.window_index === 0)?.state, 'approval', 'a concrete row from the applied status response remains authoritative');
+    assert.equal(state.agent_windows.find(row => row.window_index === 1)?.state, 'needs-input', 'fresh activity fills the missing pane row');
+
+    await api.loadAutoStatusesForTest({force: true, render: false});
+    const recovered = api.autoApproveStateForTest('1');
+    assert.equal(recovered.agent_windows.length, 2, 'a successful empty route snapshot recovers both rows from fresh activity');
+    assert.equal(recovered.agent_windows.find(row => row.window_index === 1)?.state, 'needs-input');
+    assert.equal(recovered.worker_state, 'dry-run', 'empty-row recovery preserves authoritative YO state');
+
+    api.setTabberActivityForTest({
+      cache: {stale: true},
+      agent_window_snapshot_revision: 9,
+      agent_windows: {1: [{kind: 'codex', pane_target: '%75', window_index: 2, state: 'working'}]},
+    });
+    await api.loadAutoStatusesForTest({force: true, render: false});
+    assert.equal(api.autoApproveStateForTest('1').agent_windows.length, 0, 'a stale activity cache cannot repopulate the applied status snapshot');
   });
 
   await testAsync('Go activity fallback adopts an authoritative global session before legacy sessions converge', async () => {
@@ -6123,6 +6567,53 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     await api.fetchTabberActivityForTest({visible: true});
     assert.equal(api.autoApproveStateForTest('1').agent_windows[0].state, 'working', 'a transient capture miss preserves the known live marker');
     assert.equal(api.sessionAgentWindowStatusModelForTest('1').agents[0].state, 'working');
+  });
+
+  await testAsync('fresh Go status remains working during stale metadata and rejects delayed running replies', async () => {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      bootstrapOverrides: {backendLabel: 'Go fixture', statsOnly: true},
+    });
+    const row = {kind: 'codex', pane_target: '%73', process_instance_id: 'codex:1', window_index: 0, state: 'working'};
+    api.setFetchForTest(() => Promise.resolve(jsonResponse({
+      agent_window_snapshot_revision: 23, agent_window_status_fresh: true,
+      cache: {stale: true, refreshing: true}, agent_windows: {'1': [row]}, session_order: ['1'],
+    })));
+    await api.fetchTabberActivityForTest({visible: true});
+    assert.equal(api.autoApproveStateForTest('1').agent_windows[0].state, 'working');
+    assert.equal(api.sessionAgentWindowStatusModelForTest('1').agents[0].process_instance_id, 'codex:1');
+    const stopped = {...row, state: 'cooldown', cooldown_attention_key: 'codex:1:stop', cooldown_acknowledged: true};
+    api.applyAutoApprovePayloadForTest({agent_window_snapshot_revision: 24, session_order: ['1'], sessions: {'1': {agent_windows: [stopped]}}}, {render: false});
+    api.applyAutoApprovePayloadForTest({agent_window_snapshot_revision: 23, session_order: ['1'], sessions: {'1': {agent_windows: [row]}}}, {render: false});
+    api.applyAutoApprovePayloadForTest({session_order: ['1'], sessions: {'1': {agent_windows: [row]}}}, {render: false});
+    assert.equal(api.autoApproveStateForTest('1').agent_window_snapshot_revision, 24);
+    assert.equal(api.autoApproveStateForTest('1').agent_windows[0].cooldown_acknowledged, true);
+    assert.equal(api.sessionAgentWindowStatusModelForTest('1').agents[0].state, 'cooldown');
+  });
+
+  await testAsync('Go unavailable process replacement cannot inherit an old running row', async () => {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go fixture', statsOnly: true}});
+    api.setAutoApproveStateForTest('1', {agent_window_snapshot_revision: 23, agent_windows: [{kind: 'codex', pane_target: '%73', process_instance_id: 'old', window_index: 0, state: 'working'}]});
+    api.setFetchForTest(() => Promise.resolve(jsonResponse({agent_window_snapshot_revision: 24, agent_window_status_fresh: true, cache: {stale: true}, session_order: ['1'], agent_windows: {'1': [{kind: 'codex', pane_target: '%73', process_instance_id: 'new', window_index: 0, state: 'unavailable'}]}})));
+    await api.fetchTabberActivityForTest({visible: true});
+    assert.equal(api.autoApproveStateForTest('1').agent_windows[0].state, 'unavailable');
+    assert.equal(api.sessionAgentWindowStatusModelForTest('1').agents[0].process_instance_id, 'new');
+  });
+
+  await testAsync('fresh Go empty status clears rejected process evidence without reviving metadata attention', async () => {
+    const api = loadYomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {backendLabel: 'Go fixture', statsOnly: true}});
+    const old = {kind: 'codex', pane_target: '%73', process_instance_id: 'old', window_index: 0, state: 'working', queued_followup_question: true};
+    api.setAutoApproveStateForTest('1', {agent_window_snapshot_revision: 23, agent_windows: [old], screen: {key: 'working'}});
+    api.setFetchForTest(() => Promise.resolve(jsonResponse({agent_window_snapshot_revision: 24, agent_window_status_fresh: true, cache: {stale: true}, session_order: ['1'], agent_windows: {}})));
+    await api.fetchTabberActivityForTest({visible: true});
+    assert.deepEqual(Array.from(api.autoApproveStateForTest('1').agent_windows), []);
+    assert.equal(api.autoApproveStateForTest('1').agent_window_snapshot_revision, 24);
+    const model = api.sessionAgentWindowStatusModelForTest('1', {agents: [old], panes: []});
+    assert.equal(model.screenWorking, false);
+    assert.equal(model.agents.some(row => row.state === 'working' || row.queued_followup_question), false);
+    api.setFetchForTest(() => Promise.resolve(jsonResponse({agent_window_snapshot_revision: 23, agent_window_status_fresh: true, session_order: ['1'], agent_windows: {'1': [old]}})));
+    await api.fetchTabberActivityForTest({visible: true});
+    assert.equal(api.autoApproveStateForTest('1').agent_window_snapshot_revision, 24);
+    assert.equal(api.autoApproveStateForTest('1').agent_windows.length, 0);
   });
 
   await testAsync('Go activity refresh promotes a newly working Codex pane into the shared marker model', async () => {
@@ -12585,7 +13076,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       api.setLayoutSlotsForTest(slots);
 
       const sent = [];
-      api.registerTerminalForTest('1', {focus() {}}, {
+      api.registerTerminalForTest('1', {focus() {}, refresh() {}, rows: 24, cols: 80, resize(cols, rows) { this.cols = cols; this.rows = rows; }}, {
         readyState: 1,
         send(message) {
           sent.push(JSON.parse(message));
@@ -12677,7 +13168,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
         slots[api.layoutTreeKey] = api.leafNode('left');
         slots.left = api.paneStateWithTabs(['1'], '1');
         api.setLayoutSlotsForTest(slots);
-        api.registerTerminalForTest('1', {focus() {}}, {readyState: 1, send() {}});
+        api.registerTerminalForTest('1', {focus() {}, refresh() {}, rows: 24, cols: 80, resize(cols, rows) { this.cols = cols; this.rows = rows; }}, {readyState: 1, send() {}});
 
         const calls = [];
         api.setFetchForTest((url, options = {}) => {
@@ -12759,7 +13250,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       slots[api.layoutTreeKey] = api.leafNode('left');
       slots.left = api.paneStateWithTabs(['1'], '1');
       api.setLayoutSlotsForTest(slots);
-      api.registerTerminalForTest('1', {focus() {}}, {readyState: 1, send() {}});
+      api.registerTerminalForTest('1', {focus() {}, refresh() {}, rows: 24, cols: 80, resize(cols, rows) { this.cols = cols; this.rows = rows; }}, {readyState: 1, send() {}});
       api.setFetchForTest(() => Promise.resolve(jsonResponse({items: [], session: '1'})));
       api.bindClipboardPasteForTest();
       const pasteListeners = api.documentListenersForTest('paste');
@@ -12790,7 +13281,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
       slots.left = api.paneStateWithTabs(['1'], '1');
       api.setLayoutSlotsForTest(slots);
       const sent = [];
-      api.registerTerminalForTest('1', {focus() {}}, {readyState: 1, send(message) { sent.push(JSON.parse(message)); }});
+      api.registerTerminalForTest('1', {focus() {}, refresh() {}, rows: 24, cols: 80, resize(cols, rows) { this.cols = cols; this.rows = rows; }}, {readyState: 1, send(message) { sent.push(JSON.parse(message)); }});
       api.setFetchForTest(url => {
         if (String(url).startsWith('/api/upload')) return Promise.resolve(jsonResponse({files: [{path: '/home/test/multi-a.png'}, {path: '/home/test/multi-b.png'}]}));
         return Promise.resolve(jsonResponse({items: [], session: '1'}));
@@ -12817,7 +13308,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     {
       const api = loadYomux('', ['1']);
       const sent = [];
-      api.registerTerminalForTest('1', {focus() {}}, {readyState: 1, send(message) { sent.push(JSON.parse(message)); }});
+      api.registerTerminalForTest('1', {focus() {}, refresh() {}, rows: 24, cols: 80, resize(cols, rows) { this.cols = cols; this.rows = rows; }}, {readyState: 1, send(message) { sent.push(JSON.parse(message)); }});
       api.setFocusedTerminal('1');
       const path = '/repo/docs/note.md';
       const item = api.fileEditorItemFor(path);
@@ -12882,7 +13373,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     {
       const api = loadYomux('', ['1']);
       const sent = [];
-      api.registerTerminalForTest('1', {focus() {}}, {readyState: 1, send(message) { sent.push(JSON.parse(message)); }});
+      api.registerTerminalForTest('1', {focus() {}, refresh() {}, rows: 24, cols: 80, resize(cols, rows) { this.cols = cols; this.rows = rows; }}, {readyState: 1, send(message) { sent.push(JSON.parse(message)); }});
       api.setFocusedTerminal('1');
       const path = '/repo/docs/note.md';
       const item = api.fileEditorItemFor(path);
@@ -12926,7 +13417,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     {
       const api = loadYomux('', ['1']);
       const sent = [];
-      api.registerTerminalForTest('1', {focus() {}}, {readyState: 1, send(message) { sent.push(JSON.parse(message)); }});
+      api.registerTerminalForTest('1', {focus() {}, refresh() {}, rows: 24, cols: 80, resize(cols, rows) { this.cols = cols; this.rows = rows; }}, {readyState: 1, send(message) { sent.push(JSON.parse(message)); }});
       api.setFocusedTerminal('1');
       const path = '/repo/src/app.py';
       const panel = new TestElement('panel-editor-python');
@@ -14119,7 +14610,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     {
       const frames = [];
       const api = loadYomux('', ['1'], 'http:', 'iPhone', 'admin', {coarsePointer: true});
-      api.registerTerminalForTest('1', {focus() {}}, {
+      api.registerTerminalForTest('1', {focus() {}, refresh() {}, rows: 24, cols: 80, resize(cols, rows) { this.cols = cols; this.rows = rows; }}, {
         readyState: WebSocket.OPEN,
         send(frame) { frames.push(JSON.parse(frame)); },
       });
@@ -14179,7 +14670,7 @@ await testAsync('Differ repositories share one yielding job and interrupted stre
     {
       const frames = [];
       const api = loadYomux('', ['1']);
-      api.registerTerminalForTest('1', {focus() {}}, {
+      api.registerTerminalForTest('1', {focus() {}, refresh() {}, rows: 24, cols: 80, resize(cols, rows) { this.cols = cols; this.rows = rows; }}, {
         readyState: WebSocket.OPEN,
         send(frame) { frames.push(JSON.parse(frame)); },
       });

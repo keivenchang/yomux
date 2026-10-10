@@ -764,14 +764,54 @@ exec /bin/sleep 300
                         const trace = window.__tabberReloadTrace;
                         const session = new URLSearchParams(location.search).get('sessions')?.split(',')[1];
                         const expectedSessions = arguments[0];
-                        return Boolean(trace?.requests?.some(request =>
+                        const state = typeof transcriptMetadataState === 'object' ? transcriptMetadataState : null;
+                        const rendered = new Set(Array.from(document.querySelectorAll('#panel-__tabber__ .file-tree-row[data-tabber-type="session"]'))
+                          .map(row => row.dataset.tabberSession));
+                        const freshRequest = trace?.requests?.some(request =>
                           request.body?.cache?.stale === false
                           && request.body?.cache?.refreshing === false
                           && expectedSessions.every(name => request.body?.session_order?.includes(name))
-                          && request.body?.sessions?.[session]?.work_graph?.version === 1));
+                          && request.body?.sessions?.[session]?.work_graph?.version === 1);
+                        // Completed metadata is also published over SSE. Require that
+                        // exact generation in the model and every roster row in the DOM.
+                        const freshPush = state?.payload?.metadata_identity?.generation === state?.generation
+                          && state?.payload?.cache?.stale !== true && state?.payload?.cache?.refreshing !== true
+                          && expectedSessions.every(name => state?.payload?.session_order?.includes(name))
+                          && state?.payload?.sessions?.[session]?.work_graph?.version === 1;
+                        return Boolean((freshRequest || freshPush) && expectedSessions.every(name => rendered.has(name)));
                     """, expected_fixture_sessions))
                 except TimeoutException as error:
-                    raise SystemExit("Tabber initial load did not publish a fresh work graph for the complete fixture roster before the warm reload") from error
+                    trace = driver.execute_script("""
+                        const session = new URLSearchParams(location.search).get('sessions')?.split(',')[1];
+                        const expected = arguments[0];
+                        return {
+                          readyState: document.readyState,
+                          expectedRoster: expected,
+                          browserRoster: typeof sessionNames !== 'undefined' ? sessionNames : null,
+                          metadataState: typeof transcriptMetadataState !== 'undefined' ? {
+                            generation: transcriptMetadataState.generation,
+                            lastApply: transcriptMetadataState.lastApply,
+                            topology: transcriptMetadataState.payload?.topology_generation,
+                            roster: transcriptMetadataState.payload?.session_order,
+                          } : null,
+                          domRows: Array.from(document.querySelectorAll('#panel-__tabber__ .file-tree-row')).map(row => ({text: row.textContent, type: row.dataset.tabberType})),
+                          requests: (window.__tabberReloadTrace?.requests || []).map(request => ({
+                            path: request.path, status: request.status, cache: request.body?.cache,
+                            roster: request.body?.session_order,
+                            missing: expected.filter(name => !request.body?.session_order?.includes(name)),
+                            graphVersion: request.body?.sessions?.[session]?.work_graph?.version,
+                            topology: request.body?.topology_generation,
+                            metadataGeneration: request.body?.metadata_generation,
+                            graphVersions: Object.fromEntries(Object.entries(request.body?.sessions || {}).map(([name, info]) => [name, info.work_graph?.version])),
+                          })),
+                        };
+                    """, expected_fixture_sessions)
+                    trace["browser_errors"] = driver.get_log("browser")
+                    trace["tmux_roster"] = subprocess.run(
+                        (*tmux, "list-sessions", "-F", "#{session_name}"),
+                        check=False, capture_output=True, text=True,
+                    ).stdout.splitlines()
+                    raise SystemExit("Tabber initial load did not publish a fresh work graph for the complete fixture roster before the warm reload: " + json.dumps(trace, sort_keys=True)) from error
                 driver.refresh()
                 try:
                     WebDriverWait(driver, 12).until(lambda browser: browser.execute_script("""

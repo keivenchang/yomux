@@ -207,6 +207,7 @@
   color: var(--agent-status-cooldown);
   border: 1px solid transparent;
 }
+.status-indicator--text.status-indicator--acknowledged,
 .status-indicator--dot.status-indicator--acknowledged,
 .agent-window-status-dot--acknowledging {
   color: var(--muted);

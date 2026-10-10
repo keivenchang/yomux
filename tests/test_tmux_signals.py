@@ -26,6 +26,9 @@ from yomux_lib.tmux_signals import tmux_control_event_relevant
 from yomux_lib.tmux_signals import tmux_control_event_type
 from yomux_lib.tmux_signals import window_record_key
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def test_tmux_signal_watcher_status_preserves_typed_absence_states():
     watcher = tmux_signals.TmuxSignalEventWatcher(sessions=lambda: [], on_event=lambda event: None)
@@ -115,6 +118,7 @@ def test_client_event_lifecycle_requires_a_live_tmux_control_client(
         app.stop_client_event_watcher()
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_client_event_sse_lifecycle_recreates_a_stopped_tmux_control_client(
     monkeypatch,

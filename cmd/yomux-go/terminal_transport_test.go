@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -47,6 +48,20 @@ esac
 	t.Setenv("YOLOMUX_TMUX_SOCKET", "")
 	t.Setenv("TERMINAL_CONTROL_FIXTURE", root)
 	return &server{ignoreSizeChecked: true, ignoreSizeSupported: true, children: make(map[*exec.Cmd]struct{})}, root
+}
+
+func TestTerminalPTYDescriptorsDoNotLeakIntoUnrelatedChildren(t *testing.T) {
+	pair, err := openPTY(36, 120)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pair.close()
+	for _, file := range []*os.File{pair.master, pair.slave} {
+		flags, _, errno := syscall.Syscall(syscall.SYS_FCNTL, file.Fd(), syscall.F_GETFD, 0)
+		if errno != 0 || flags&syscall.FD_CLOEXEC == 0 {
+			t.Fatalf("PTY descriptor can escape into workers: %d %v", flags, errno)
+		}
+	}
 }
 
 func waitTerminalControlFile(t *testing.T, path string, timeout time.Duration) {
@@ -246,4 +261,52 @@ func TestTerminalControlsCancelSupersededSizeAndAcknowledgeLatestRefresh(t *test
 	if strings.Count(string(commands), "/dev/other") != 1 || !strings.HasSuffix(string(commands), "refresh-client -t =fixture:\n") {
 		t.Fatalf("superseded authority ran after the latest size: %s", commands)
 	}
+}
+
+func TestTerminalUnchangedOwnershipReconcilesWithoutSIGWINCH(t *testing.T) {
+	s, _ := terminalControlFixture(t)
+	pair, err := openPTY(36, 120)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pair.close()
+	controls := 0
+	pair.requestControl = func(cols, rows, txn int) {
+		if cols != 120 || rows != 36 || txn != 0 {
+			t.Fatalf("ownership dimensions: %d %d %d", cols, rows, txn)
+		}
+		controls++
+	}
+	signals := make(chan os.Signal, 4)
+	signal.Notify(signals, syscall.SIGWINCH)
+	defer signal.Stop(signals)
+	process := &exec.Cmd{Process: mustFindTerminalTestProcess(t)}
+	s.handleMessage(&bytes.Buffer{}, pair, process, nil, "fixture", "", []byte(`{"type":"resize","rows":36,"cols":120,"foreground":true,"activate":true}`), true)
+	if controls != 1 {
+		t.Fatalf("unchanged ownership was not reconciled: %d", controls)
+	}
+	select {
+	case <-signals:
+		t.Fatal("unchanged ownership sent SIGWINCH")
+	case <-time.After(100 * time.Millisecond):
+	}
+	// Closing the descriptor makes a redundant ioctl observable as EBADF.
+	if err := pair.master.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := pair.resize(36, 120); err != nil {
+		t.Fatalf("unchanged dimensions performed ioctl: %v", err)
+	}
+	if err := pair.resize(40, 120); err == nil {
+		t.Fatal("changed dimensions skipped the closed descriptor")
+	}
+}
+
+func mustFindTerminalTestProcess(t *testing.T) *os.Process {
+	t.Helper()
+	process, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return process
 }

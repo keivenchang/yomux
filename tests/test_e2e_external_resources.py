@@ -13,6 +13,8 @@ pytest_plugins = ("tests.e2e_browser_harness",)
 pytestmark = [pytest.mark.browser, pytest.mark.socket, pytest.mark.e2e]
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_authenticated_page_loads_no_external_resources(e2e_browser: Any) -> None:
     """The normal application shell remains functional without public CDNs."""
     e2e_browser.load(tabs=("files", str(e2e_browser.runtime.tmux.sessions[0])))

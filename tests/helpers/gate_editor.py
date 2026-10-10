@@ -26,6 +26,7 @@ EDITOR_GLOBALS = {
 }
 
 @pytest.fixture
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 def gate_browser_runtime(browser, monkeypatch, gate_runtime_paths):
     runtime = start_isolated_browser_app(monkeypatch, gate_runtime_paths.root, dangerously_yolo=False)
     assert runtime.paths.config_dir.parent == gate_runtime_paths.root

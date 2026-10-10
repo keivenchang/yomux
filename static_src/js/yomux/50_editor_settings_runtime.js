@@ -1250,9 +1250,25 @@ function applyTerminalRuntimeSettings(options = {}) {
   }
 }
 
-// Lightweight cursor-only refresh for focus changes: re-color just the cursor so the active pane's
-// terminal blinks yellow and the rest revert to their theme default, without re-fitting every pane.
-function refreshActiveTerminalCursor() {
+let activeTerminalCursorFrame = 0;
+
+function refreshActiveTerminalCursor(options = {}) {
+  // xterm rebuilds renderer CSS when its cursor theme changes. Focus and pane highlight must
+  // paint first; connection and settings callers still apply their state immediately.
+  if (options.defer === true) {
+    if (activeTerminalCursorFrame) return;
+    activeTerminalCursorFrame = requestAnimationFrame(() => {
+      activeTerminalCursorFrame = requestAnimationFrame(() => {
+        activeTerminalCursorFrame = 0;
+        refreshActiveTerminalCursor();
+      });
+    });
+    return;
+  }
+  if (activeTerminalCursorFrame) {
+    cancelAnimationFrame(activeTerminalCursorFrame);
+    activeTerminalCursorFrame = 0;
+  }
   const base = terminalRenderThemeForGlobalTheme();
   const badConnection = badConnectionCursorStateActive();
   for (const [session, item] of terminals.entries()) {
@@ -1297,6 +1313,7 @@ const SETTINGS_APPLY_DEPENDENCIES = Object.freeze({
   explorerRoot: ['file_explorer.root_mode'],
   indexedDirs: ['file_explorer.indexed_dirs'],
   indexExcludes: ['file_explorer.index_exclude_paths'],
+  indexLimits: ['file_explorer.index_max_files', 'file_explorer.index_persist_max_files', 'file_explorer.index_persist_max_mb'],
   metaChrome: ['performance.latency_refresh_ms', 'performance.event_log_refresh_ms', 'performance.tabber_activity_refresh_ms'],
   runtimeIntervals: [
     'performance.latency_refresh_ms', 'performance.event_log_refresh_ms', 'performance.tabber_activity_refresh_ms',
@@ -1372,6 +1389,9 @@ function applySettingsPayload(payload, options = {}) {
   fileExplorerImageOpenMode = normalizedImageOpenMode(initialSetting('file_explorer.image_open_mode'));
   if (options.initial || groupChanged.indexedDirs) reconcileIndexedDirsFromSetting({initial: options.initial === true});
   if (options.initial || groupChanged.indexExcludes) reconcileIndexExcludePathsFromSetting();
+  if (!options.initial && groupChanged.indexLimits) {
+    for (const root of fileExplorerIndexedDirs) refreshFileIndexStatus(root);
+  }
   uploadMaxBytes = numberSetting('uploads.max_bytes');
   terminalFontSize = numberSetting('appearance.terminal_font_size', 14);
   editorFontSize = numberSetting('appearance.editor_font_size', 14);
@@ -1495,7 +1515,7 @@ const runtimeIntervalCatalog = Object.freeze({
   'auto-approve': Object.freeze({classes: Object.freeze(['fallback']), source: 'auto-approve SSE/status revisions are authoritative while connected; visible pages repair after transport loss.'}),
   'tabber-activity-fallback': Object.freeze({classes: Object.freeze(['fallback']), source: 'Tabber cache completion normally arrives through the shared SSE stream; this repairs an active Tabber only while that stream is disconnected.'}),
   'file-index-refresh': Object.freeze({classes: Object.freeze(['fallback']), source: 'Index lifecycle events are authoritative while SSE is connected; visible Finder/search uses this status repair path only after transport loss.'}),
-  'file-index-building': Object.freeze({classes: Object.freeze(['fallback']), source: 'Search-index lifecycle invalidations are authoritative while SSE is connected; a building root is repaired only after transport loss.'}),
+  'file-index-building': Object.freeze({classes: Object.freeze(['poll:no-change']), source: 'Building indexed roots use targeted status reads until their directory badge reaches a terminal state, including while SSE streams Quick Open results.'}),
   'debug-stats': Object.freeze({classes: Object.freeze(['fallback']), source: 'Exact YO!stats SSE owns a live short range; HTTP supplies initial, legacy, coarse, and disconnected repair data.'}),
   'debug-system': Object.freeze({classes: Object.freeze(['poll:no-change']), source: 'System diagnostics aggregate independently changing local-service state without a producer revision.'}),
   'debug-logs': Object.freeze({classes: Object.freeze(['poll:no-change']), source: 'Debug log retention has no push revision; the visible Logs tab reconciles its bounded server snapshot.'}),
@@ -1610,9 +1630,8 @@ function installRuntimeIntervals() {
   resetRuntimeInterval('auto-approve', () => {
     if (!clientCanUseUnscopedHostRequests()) return null;
     if (document.visibilityState === 'hidden') return null;
-    // Python publishes auto_approve_changed over the shared SSE stream. Go has
-    // no auto-approve route/event, so its activity fallback must keep repairing
-    // a transient unavailable sample while the general event stream is healthy.
+    // The Go auto-approve snapshot carries the authoritative YO state and agent
+    // rows; refresh it while connected so transient status gaps can converge.
     if (clientEventTransportState.connected === true
         && !(typeof goAgentStatusUsesActivityFallback === 'function' && goAgentStatusUsesActivityFallback())) return null;
     return refreshAutoStatuses();

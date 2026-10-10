@@ -1212,6 +1212,7 @@ globalThis.__layoutTestApi = {
   fileIndexFreshnessMessageForTest: fileIndexFreshnessMessage,
   fileQuickOpenWorstFreshnessForTest: fileQuickOpenWorstFreshness,
   applyFileIndexStatusPayloadForTest: applyFileIndexStatusPayload,
+  refreshBuildingFileIndexStatusesForTest: refreshBuildingFileIndexStatuses,
   fileExplorerIndexBadgeTitleForTest: fileExplorerIndexBadgeTitle,
   fileExplorerIndexStatusForTest(root) { return fileExplorerIndexStatus.get(normalizeStoredFileExplorerIndexedDir(root)) || ''; },
   showFileIndexPartialCoverageWarningForTest: showFileIndexPartialCoverageWarning,
@@ -1229,6 +1230,7 @@ globalThis.__layoutTestApi = {
     fileExplorerIndexExcludePaths = new Set((paths || []).map(normalizeStoredFileExplorerIndexedDir).filter(Boolean));
   },
   setFileExplorerIndexStatusForTest(root, status) { fileExplorerIndexStatus.set(normalizeStoredFileExplorerIndexedDir(root), status); },
+  setFileExplorerIndexRefreshSecondsForTest(value) { fileExplorerIndexRefreshSeconds = Number(value) || 0; },
   createTopbarSearch,
   createTopbarNav,
   normalizeWatchedPrRef,
@@ -1454,6 +1456,10 @@ globalThis.__layoutTestApi = {
   clientPushCanSupplyDataForTest: clientPushCanSupplyData,
   readOnlyModeForTest() { return readOnlyMode; },
   setClientEventsSourceForTest(value = {}) { clientEventTransportState.source = value; },
+  setClientEventConnectedForTest(value) {
+    clientEventTransportState.connected = value === true;
+    syncFileIndexStatusPollInterval();
+  },
   setEventSourceConstructorForTest(value) { globalThis.EventSource = value; },
   addWindowEventListenerForTest(type, listener) { window.addEventListener(type, listener); },
   clientEventTransportStateForTest() {
@@ -2518,6 +2524,7 @@ globalThis.__layoutTestApi = {
   autoApproveStateForTest(session) { return autoApproveStates.get(session); },
   applyAutoApprovePayloadForTest: applyAutoApprovePayload,
   renderAutoApproveButtonsForTest: renderAutoApproveButtons,
+  sessionTabLeadingActivityHtmlForTest: sessionTabLeadingActivityHtml,
   setAgentAuthForTest(value) { agentAuth = value || {}; },
   maxTabsPerPane,
   paneCapacityCheckForInsert,

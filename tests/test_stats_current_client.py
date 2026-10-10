@@ -13,6 +13,9 @@ from yomux_lib.stats_current import client as client_module
 from yomux_lib.stats_current import protocol, revision, storage
 from yomux_lib.local_services.rpc import safe_socket_path
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def observation(index: int = 1) -> storage.Observation:
     return storage.Observation(f"cpu-{index}", "cpu", "host", float(index), "cpu:1", 1, {"value": index})

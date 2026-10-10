@@ -1683,7 +1683,25 @@ body.app-topbar-touch-compact .yomux-dockview .dv-right-actions-container {
   gap: var(--space-2);
   flex: 0 0 auto;
 }
-.pane-tab-core > .session-yolo-marker {
+.session-tab-status-and-markers {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 0 0 auto;
+}
+.session-tab-state-marker,
+.session-tab-queued-question {
+  min-width: 18px;
+  height: 14px;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-control);
+  font: 800 var(--ui-font-size-3xs)/1 var(--mono-font);
+  white-space: nowrap;
+}
+.session-tab-queued-question {
+  border: 1px solid var(--danger-border);
+}
+.session-tab-status-and-markers > .session-yolo-marker {
   flex: 0 0 auto;
   min-width: 18px;
   height: 18px;

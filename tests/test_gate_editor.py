@@ -152,6 +152,7 @@ from tests.helpers.gate_editor import gate_browser_runtime  # noqa: F401
 
 
 @pytest.mark.no_browser
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_a1_existing_file_opens_twenty_consecutive_times_under_budget(monkeypatch, tmp_path, gate_runtime_paths):
     """A1: GET /api/fs/read must terminalize the exact existing-file content 20 consecutive times under 500 ms without 503."""
@@ -178,6 +179,8 @@ def test_a1_existing_file_opens_twenty_consecutive_times_under_budget(monkeypatc
             )
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_a2_editor_renders_exact_disk_content_in_codemirror(gate_browser_runtime, tmp_path):
     """A2: opening a fixture file in the browser must render a non-empty CodeMirror document whose text exactly matches the file on disk, not merely return a successful API payload."""
@@ -187,6 +190,8 @@ def test_a2_editor_renders_exact_disk_content_in_codemirror(gate_browser_runtime
     _open_editor(gate_browser_runtime, target, expected)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_a3_clean_buffer_converges_after_external_rewrite(gate_browser_runtime, tmp_path):
     """A3: after an external process rewrites an open file whose editor buffer is clean, the rendered CodeMirror document must converge to the new disk content without a manual reload."""
@@ -301,6 +306,8 @@ const done = arguments[arguments.length - 1];
 """
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_explicit_reload_and_push_refresh_for_one_path_share_one_read(gate_browser_runtime, tmp_path):
     """An explicit reload and a files_changed push for the same file issue one /api/fs/read.
@@ -337,6 +344,8 @@ def test_explicit_reload_and_push_refresh_for_one_path_share_one_read(gate_brows
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_push_refresh_naming_newer_content_than_the_shared_reload_still_reads_again(gate_browser_runtime, tmp_path):
     """Negative control: the shared reload is only reused when it reaches the pushed content.
@@ -373,6 +382,8 @@ def test_push_refresh_naming_newer_content_than_the_shared_reload_still_reads_ag
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_a3_explicit_reload_waits_for_exact_bytes_after_external_rewrite(gate_browser_runtime, tmp_path):
     """A3 amend: an explicit reload renders exact bytes from its queued operation terminal."""
@@ -470,6 +481,8 @@ def test_a3_explicit_reload_waits_for_exact_bytes_after_external_rewrite(gate_br
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_a4_dirty_buffer_survives_external_rewrite_and_surfaces_conflict(gate_browser_runtime, tmp_path):
     """A4: after typing unsaved text and externally rewriting that same file, the rendered CodeMirror document must preserve the user's unsaved text and the editor must show a visible conflict state; this test remains in the same file as A3."""
@@ -488,6 +501,8 @@ def test_a4_dirty_buffer_survives_external_rewrite_and_surfaces_conflict(gate_br
     assert metrics["status"] and metrics["statusDisplay"] != "none", metrics
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_editor_autosave_uses_the_last_edited_panel_and_serializes_its_writes(gate_browser_runtime, tmp_path):
     """Two live editor panels must save the latest panel content in order."""
@@ -629,6 +644,8 @@ def test_editor_autosave_uses_the_last_edited_panel_and_serializes_its_writes(ga
     assert metrics["rejections"] == [], metrics
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_a5_subsecond_replace_keeps_editor_path_tab_and_content_state(gate_browser_runtime, tmp_path):
     """A5: across 10 cp-or-mv replacements completed in under one second at varying sub-second intervals, the editor must retain the same path and tab, never render File not found, and show either new clean content or the preserved dirty buffer with a visible conflict notice."""
@@ -679,6 +696,7 @@ def test_a5_subsecond_replace_keeps_editor_path_tab_and_content_state(gate_brows
 
 
 @pytest.mark.no_browser
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_a6_rapid_read_connection_close_and_reopen_completes_every_request(monkeypatch, tmp_path, gate_runtime_paths):
     """A6: 10 rapid open/close/reopen cycles for the same file must return the exact content on both opens in every cycle, with each HTTP response fully consumed and no request left pending."""
@@ -697,6 +715,8 @@ def test_a6_rapid_read_connection_close_and_reopen_completes_every_request(monke
                 assert payload["data"]["content"] == expected, f"cycle {iteration} {phase} returned the wrong content"
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_a6_reopen_replaces_cached_not_found_after_file_is_created(gate_browser_runtime, tmp_path):
     """A6 amend: creating a file after a typed not-found must make an explicit reopen render its bytes."""
@@ -799,6 +819,7 @@ def test_a6_reopen_replaces_cached_not_found_after_file_is_created(gate_browser_
 
 
 @pytest.mark.no_browser
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_a7_missing_file_is_typed_404_not_transport_failure(monkeypatch, tmp_path, gate_runtime_paths):
     """A7: GET /api/fs/read for a missing file must return 404 with the machine-readable common.pathNotFound reason, never 503 or a transport-failure reason rendered as File not found."""
@@ -850,6 +871,7 @@ def test_a7_missing_file_is_typed_404_not_transport_failure(monkeypatch, tmp_pat
 
 
 @pytest.mark.no_browser
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_a7_fault_batch_above_the_server_bound_stays_an_operator_error(monkeypatch, gate_runtime_paths):
     """A7 fault side: a /api/fs/batch body above filesystem.MAX_BATCH_REQUESTS must be refused 400 invalid_request AND recorded at error.
@@ -906,6 +928,8 @@ def test_a7_fault_batch_above_the_server_bound_stays_an_operator_error(monkeypat
         runtime.server._fixture_server_log_boundary = current
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_a8_editor_recovers_from_ten_atomic_inode_swaps_and_reports_real_delete(gate_browser_runtime, tmp_path):
     """A8 editor: ten varying sub-second os.replace inode swaps must converge without reload/reopen, clear both body and tab missing state, and a real deletion must still render the missing state."""

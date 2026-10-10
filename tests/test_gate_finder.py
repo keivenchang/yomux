@@ -1129,6 +1129,8 @@ def _assert_quiet_fs_changed_volume(metrics: dict[str, object]) -> None:
     assert metrics["delivered_events"] == 0 and metrics["delivered_bytes"] == 0, metrics
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_b5_unchanged_readable_tree_emits_zero_fs_changed_events_and_bytes(
     monkeypatch, tmp_path, gate_runtime_paths, make_tmux_webterm_app
@@ -1138,6 +1140,8 @@ def test_b5_unchanged_readable_tree_emits_zero_fs_changed_events_and_bytes(
     _assert_quiet_fs_changed_volume(metrics)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.browser
 def test_b5_unreadable_descendant_keeps_quiet_fs_changed_volume_at_zero(
     monkeypatch, tmp_path, gate_runtime_paths, make_tmux_webterm_app
