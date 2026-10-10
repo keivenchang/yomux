@@ -9,6 +9,9 @@ from yomux_lib import statusd
 from yomux_lib import statusd_client
 from yomux_lib import web
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def test_activity_summary_app_boundaries_fail_closed_before_statusd_or_assembly():
     webapp = object.__new__(app_module.TmuxWebtermApp)

@@ -65,6 +65,7 @@ func New(backendBuild string) *Catalog {
 		"pane.stats.v1",
 		"pane.chat.v1",
 		"pane.agent.v1",
+		"yolo.auto-approve.v1",
 	} {
 		entries[name] = unavailable()
 	}
@@ -222,7 +223,12 @@ var routePolicies = []RoutePolicy{
 	{"*", "/api/transcripts", "readonly", "core.bootstrap.v1", false},
 	{"*", "/api/activity", "readonly", "pane.tabber.v1", false},
 	{"*", "/api/activity-summary", "readonly", "pane.tabber.v1", false},
-	{"*", "/api/auto-approve", "readonly", "terminal.status.v1", false},
+	{"POST", "/api/attention-ack", "admin", "terminal.status.v1", false},
+	{"GET", "/api/auto-approve", "readonly", "yolo.auto-approve.v1", false},
+	{"POST", "/api/auto-approve", "admin", "yolo.auto-approve.v1", false},
+	{"GET", "/api/yolo-rules", "readonly", "yolo.auto-approve.v1", false},
+	{"POST", "/api/yolo-rules/open", "admin", "yolo.auto-approve.v1", false},
+	{"POST", "/api/yolo-rules/reload", "admin", "yolo.auto-approve.v1", false},
 	{"*", "/api/transcript", "readonly", "terminal.status.v1", false},
 	{"*", "/api/context", "readonly", "terminal.status.v1", false},
 	{"*", "/api/context-items", "readonly", "terminal.status.v1", false},

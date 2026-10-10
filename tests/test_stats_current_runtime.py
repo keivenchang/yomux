@@ -11,6 +11,9 @@ from yomux_lib.local_services.rpc import LOCAL_RPC_MAX_METADATA_BYTES
 from yomux_lib.stats_current import client as client_module
 from yomux_lib.stats_current import collectors, runtime, scheduler, storage
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 class FakeClient:
     def __init__(self):

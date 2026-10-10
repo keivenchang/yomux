@@ -27,6 +27,11 @@ from tools.mockers.transcript import codex_meta
 from tools.mockers.transcript import codex_usage
 from tools.mockers.transcript import write_records
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def test_client_and_service_resolve_one_socket_path(gate_runtime_paths):
     """One parent. These were two separate copies of the same expression."""

@@ -16,6 +16,9 @@ from yomux_lib.infra import host_partition as host_partition_module
 from yomux_lib.infra.host_identity import HostIdentity
 from tests.helpers.local_service_records import FixtureHostIdentityBuilder
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def _host_identity(stable_host_id: str, display_hostname: str) -> HostIdentity:
     return FixtureHostIdentityBuilder(

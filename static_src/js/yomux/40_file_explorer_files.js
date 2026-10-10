@@ -5234,7 +5234,7 @@ function sharedTreeSelectionApi(controller, state, options = {}) {
       const currentId = controller.currentId(panel);
       if (currentId && typeof options.syncCurrentSelection === 'function') options.syncCurrentSelection(currentId);
       controller.setLeadId(currentId || controller.leadId(panel), panel);
-      controller.applyState(panel, {scrollCurrent: syncOptions.scrollIntoView === true});
+      if (syncOptions.modelOnly !== true) controller.applyState(panel, {scrollCurrent: syncOptions.scrollIntoView === true});
       return Boolean(currentId);
     },
   };
@@ -5421,10 +5421,30 @@ function fileExplorerIndexBadgeTitle(path) {
   if (!fileExplorerDirectoryIsIndexed(path)) return '';
   const normalized = normalizeStoredFileExplorerIndexedDir(path);
   const status = fileExplorerIndexStatus.get(normalized);
-  if (status === 'too_large') return t('finder.index.partial');
+  if (status === 'too_large') {
+    const payload = fileExplorerIndexStatusPayload.get(normalized) || {};
+    return [t('finder.index.partial'), fileExplorerIndexPartialDetails(payload)].join('\n');
+  }
   if (status === 'error') return t('common.errorDetail', {error: ''});
   if (status === 'stale') return t('finder.index.staleTitle');
   return t(status === 'building' ? 'finder.index.indexing' : 'finder.index.indexed');
+}
+
+function fileExplorerIndexPartialDetails(payload = {}) {
+  const progressiveCount = Number(fileIndexProgressiveCoverage(payload)?.entry_count);
+  const count = Math.max(0, Number.isFinite(progressiveCount) && progressiveCount > 0 ? progressiveCount : (Number(payload.count) || 0));
+  const configuredFileLimit = Number(payload.max_files) || Number(initialSetting('file_explorer.index_max_files')) || 0;
+  const limit = Math.max(0, configuredFileLimit || count);
+  const reason = String(payload.coverage_reason || payload.error || '');
+  const reasonLower = reason.toLowerCase();
+  const hitFileLimit = reasonLower.includes('file limit') || (!reason && limit > 0 && count >= limit);
+  const storageLimitMb = Math.floor((Number(payload.max_bytes) / (1024 * 1024)) || Number(initialSetting('file_explorer.index_persist_max_mb')) || 0);
+  let summary;
+  if (hitFileLimit) summary = `Hit the per-root limit of ${limit.toLocaleString()} files after indexing ${count.toLocaleString()}.`;
+  else if ((reasonLower.includes('storage') || reasonLower.includes('budget')) && storageLimitMb > 0) {
+    summary = `Hit the ${storageLimitMb.toLocaleString()} MiB snapshot storage budget after indexing ${count.toLocaleString()} files.`;
+  } else summary = `Stopped after indexing ${count.toLocaleString()} files; the per-root limit is ${limit.toLocaleString()}.`;
+  return `${summary}\nDetails: ${reason || 'eligible paths could not be traversed'}.`;
 }
 
 // The ONE file-index freshness derivation for every surface. `/api/fs/search` and
@@ -5434,13 +5454,21 @@ function fileExplorerIndexBadgeTitle(path) {
 // whose producer was dead degraded to "building" and the user was told nothing at all.
 const FILE_INDEX_STALE_FRESHNESS_STATES = ['stale', 'orphaned'];
 
+function fileIndexSearchIsWarming(payload) {
+  return payload?.index_state !== 'error'
+    && (payload?.index_state === 'warming' || payload?.index_coverage === 'pending');
+}
+
 function fileIndexFreshnessFromPayload(payload) {
   const source = payload && typeof payload === 'object' ? payload : {};
   const state = String(source.freshness || '');
   const rawAge = Number(source.snapshot_age_seconds);
   return {
     state,
-    reason: String(source.freshness_reason || ''),
+    partial: source.index_coverage === 'partial',
+    failed: source.index_state === 'error',
+    missing: source.indexed === false || source.generation === 0,
+    reason: String(source.freshness_reason || source.coverage_reason || ''),
     producerState: String(source.producer_state || ''),
     ageSeconds: Number.isFinite(rawAge) && rawAge >= 0 ? rawAge : null,
     // `stale`, `freshness`, `index_state` and `index_coverage` are four projections of ONE backend
@@ -5449,6 +5477,7 @@ function fileIndexFreshnessFromPayload(payload) {
     stale: source.stale === true
       || FILE_INDEX_STALE_FRESHNESS_STATES.includes(state)
       || String(source.index_state || '') === 'stale'
+      || String(source.index_state || '') === 'error'
       || String(source.index_coverage || '') === 'unverified',
     refreshing: source.refreshing === true,
   };
@@ -5457,10 +5486,13 @@ function fileIndexFreshnessFromPayload(payload) {
 // Words a non-engineer can act on, never a raw field dump. Rendered (not derived) so a locale change
 // re-renders the same record in the new language.
 function fileIndexFreshnessMessage(freshness) {
-  if (!freshness || freshness.stale !== true) return '';
+  if (!freshness) return '';
+  if (freshness.stale !== true) return freshness.partial === true ? t('finder.index.partialCoverage') : '';
+  if (freshness.failed && freshness.missing) return t('common.searchFailed');
   const lines = [freshness.ageSeconds === null
     ? t('finder.index.staleResultsUnknownAge')
     : t('finder.index.staleResults', {age: relativeTimeFormat(freshness.ageSeconds)})];
+  if (freshness.failed) lines.unshift(t('common.searchFailed'));
   if (freshness.producerState === 'not_running') lines.push(t('finder.index.staleProducerNotRunning'));
   else if (freshness.producerState === 'unrecorded') lines.push(t('finder.index.staleProducerUnrecorded'));
   else if (freshness.reason === 'producer_vouch_expired') lines.push(t('finder.index.staleProducerBehind'));
@@ -5495,15 +5527,16 @@ function fileIndexPublishedGeneration(payload) {
 // user-visible terminal state instead of silently presenting a capped index as complete.
 function fileIndexStatusFromPayload(payload) {
   if (!payload || typeof payload !== 'object') return 'building';
-  const state = String(payload.state || '');
+  const state = String(payload.state || payload.index_state || '');
   const freshness = fileIndexFreshnessFromPayload(payload);
   // A live progressive crawl that has not been truncated and has not reached full coverage is still
   // building: it is not the terminal capped state, even if an older persisted snapshot for this root
   // was truncated. This must be read before the too_large/partial derivation below so an in-progress
   // BFS is never mislabelled "file limit reached".
   if (fileIndexProgressiveStillBuilding(payload)) return 'building';
-  if (payload.too_large === true || payload.coverage === 'partial' || state === 'too_large') return 'too_large';
-  if (state === 'error' || payload.error) return 'error';
+  if (state === 'error') return 'error';
+  if (payload.too_large === true || payload.coverage === 'partial' || payload.index_coverage === 'partial' || state === 'too_large') return 'too_large';
+  if (payload.error && !payload.index_coverage) return 'error';
   // A served-but-unvouched snapshot is neither ready nor building: it answers, and it says so.
   if (freshness.stale) return 'stale';
   if (payload.ready === true || state === 'ready') return 'ready';
@@ -5527,16 +5560,11 @@ function showFileIndexPartialCoverageWarning(root, payload = {}) {
   const normalized = normalizeStoredFileExplorerIndexedDir(root);
   if (!normalized || fileIndexPartialWarningRoots.has(normalized)) return false;
   fileIndexPartialWarningRoots.add(normalized);
-  // Report the live indexed count, not a stale 0 from a superseded snapshot: prefer the progressive
-  // crawl's entry_count when present, then the top-level count.
-  const progressiveCount = Number(fileIndexProgressiveCoverage(payload)?.entry_count);
-  const count = Math.max(0, Number.isFinite(progressiveCount) && progressiveCount > 0 ? progressiveCount : (Number(payload.count) || 0));
-  const limit = Math.max(0, Number(payload.max_files) || count);
   emitNotification('indexCoverage', {
     key: normalized,
     coalesceKey: `indexCoverage:${normalized}`,
     title: t('finder.index.partial'),
-    lines: [t('finder.index.partialBody', {path: normalized, count, limit})],
+    lines: [`${normalized}\n${fileExplorerIndexPartialDetails(payload)}`],
     onClick: openFileIndexCoveragePreferences,
   });
   return true;
@@ -5545,6 +5573,20 @@ function showFileIndexPartialCoverageWarning(root, payload = {}) {
 function applyFileIndexStatusPayload(root, payload) {
   const normalized = normalizeStoredFileExplorerIndexedDir(root);
   if (!normalized || !fileExplorerIndexedDirs.has(normalized)) return false;
+  const workerIncarnation = String(payload?.worker_incarnation || '');
+  const acceptedIncarnation = String(fileExplorerIndexWorkerIncarnation.get(normalized) || '');
+  const retiredIncarnations = fileExplorerIndexRetiredWorkerIncarnations.get(normalized) || new Set();
+  if (workerIncarnation && acceptedIncarnation && fileSearchWorkerIncarnationIsOlder(workerIncarnation, acceptedIncarnation)) return false;
+  if (workerIncarnation && workerIncarnation !== acceptedIncarnation && retiredIncarnations.has(workerIncarnation)) return false;
+  if (workerIncarnation && acceptedIncarnation && workerIncarnation !== acceptedIncarnation) {
+    retiredIncarnations.add(acceptedIncarnation);
+    if (retiredIncarnations.size > 8) retiredIncarnations.delete(retiredIncarnations.values().next().value);
+    fileExplorerIndexRetiredWorkerIncarnations.set(normalized, retiredIncarnations);
+    fileExplorerIndexGeneration.delete(normalized);
+    fileExplorerIndexPublishedGeneration.delete(normalized);
+    fileIndexPartialWarningRoots.delete(normalized);
+  }
+  if (workerIncarnation) fileExplorerIndexWorkerIncarnation.set(normalized, workerIncarnation);
   const generation = Number(payload?.generation || payload?.completed_generation || 0);
   const accepted = Number(fileExplorerIndexGeneration.get(normalized) || 0);
   if (Number.isSafeInteger(generation) && generation > 0 && generation < accepted) return false;
@@ -5552,6 +5594,7 @@ function applyFileIndexStatusPayload(root, payload) {
   const status = fileIndexStatusFromPayload(payload);
   const previous = fileExplorerIndexStatus.get(normalized);
   fileExplorerIndexStatus.set(normalized, status);
+  fileExplorerIndexStatusPayload.set(normalized, payload);
   if (status === 'too_large') showFileIndexPartialCoverageWarning(normalized, payload);
   // Any non-capped status clears a prior "file limit reached" warning: a superseded truncated
   // generation must not keep a stale banner (with its stale count) on screen once the live crawl is
@@ -5586,13 +5629,13 @@ async function refreshFileIndexStatus(root) {
   applyFileIndexStatusPayload(normalized, payload);
 }
 
-function refreshBuildingFileIndexStatuses() {
+async function refreshBuildingFileIndexStatuses() {
   for (const root of Array.from(fileIndexStatusPollRoots)) {
     if (!fileExplorerIndexedDirs.has(root)) {
       fileIndexStatusPollRoots.delete(root);
       continue;
     }
-    refreshFileIndexStatus(root);
+    await refreshFileIndexStatus(root);
   }
   syncFileIndexStatusPollInterval();
 }
@@ -5605,13 +5648,14 @@ function syncFileIndexStatusPollInterval() {
     // wakes up and returns null on every tick while SSE is already authoritative.
     resetRuntimeInterval('file-index-refresh', refreshAllIndexedDirsStatus, fileExplorerIndexRefreshSeconds * 1000);
   }
-  if (!fileIndexStatusPollRoots.size || clientEventTransportState.connected === true) {
+  if (!fileIndexStatusPollRoots.size) {
     clearRuntimeInterval('file-index-building');
     return;
   }
-  const proactiveMs = Math.max(1, fileExplorerIndexRefreshSeconds * 1000);
+  const statusIntervalMs = fileExplorerIndexRefreshSeconds > 0 ? fileExplorerIndexRefreshSeconds * 1000 : 1501;
+  // Push events advance Quick Open cursors, but only this targeted status read can settle a directory badge.
   // Backend-facing poll intervals stay odd-numbered to avoid synchronized timer collisions.
-  resetRuntimeInterval('file-index-building', refreshBuildingFileIndexStatuses, Math.min(1501, proactiveMs));
+  resetRuntimeInterval('file-index-building', refreshBuildingFileIndexStatuses, Math.min(1501, statusIntervalMs));
 }
 
 // Lazily warm/poll an indexed root's status, without re-fetching once it is known ready or while a
@@ -5629,7 +5673,11 @@ function clearFileIndexStatus(root) {
   const normalized = normalizeStoredFileExplorerIndexedDir(root);
   if (!normalized) return;
   fileExplorerIndexStatus.delete(normalized);
+  fileExplorerIndexStatusPayload.delete(normalized);
   fileExplorerIndexGeneration.delete(normalized);
+  fileExplorerIndexWorkerIncarnation.delete(normalized);
+  fileExplorerIndexRetiredWorkerIncarnations.delete(normalized);
+  fileExplorerIndexPublishedGeneration.delete(normalized);
   fileIndexStatusPollRoots.delete(normalized);
   fileIndexPartialWarningRoots.delete(normalized);
   syncFileIndexStatusPollInterval();
@@ -5889,6 +5937,8 @@ function fileExplorerIndexedSearchRoots(defaultRoot = fileQuickOpenRootForSearch
 let tabberRefreshDeferredTimer = null;
 let tabberLayoutStateSignature = '';
 let tabberLayoutStateFrame = 0;
+let tabberLayoutStateScrollIntoView = false;
+let tabberLayoutStateRefreshTree = false;
 
 function tabberPad(value) {
   return String(value).padStart(5, '0');
@@ -6843,10 +6893,14 @@ function openTabberSession(session, options = {}) {
   const target = String(session || '').trim();
   if (!target) return false;
   const sessionPath = tabberSessionPath(target);
-  if (sessionPath && expandTabberPath(sessionPath)) {
-    if (options.refresh !== false) refreshTabberPanels();
-  }
+  const expanded = sessionPath && expandTabberPath(sessionPath);
   selectSession(target, {userInitiated: true});
+  if (expanded && options.refresh !== false) {
+    // Opening a session must focus xterm before rebuilding the unrelated Tabber tree.
+    scheduleTabSwitchPhaseTwo(tabSwitchHighlightGeneration, () => {
+      if (itemIsActivePaneTab(target)) refreshTabberPanels();
+    });
+  }
   return true;
 }
 
@@ -6910,7 +6964,7 @@ const tabberTreeInteractionController = createSharedTreeInteractionController({
   },
   activateRow(row, event) {
     handleTabberRowActivate(row, event);
-    syncTabberTreeActiveSelection(document, {scrollIntoView: true});
+    scheduleTabberTreeLayoutStateSync({scrollIntoView: true});
   },
 });
 
@@ -6920,13 +6974,13 @@ function syncTabberTreeActiveSelection(panel = document, options = {}) {
   // it owns that focus; otherwise the focus refresh would erase the cursor before ArrowUp/Down
   // can advance it. A normal focus move into Tabber still clears stale selection as before.
   if (!currentPath && fileExplorerHasAutoFocusedKeyboardOwnership() && tabberTreeSelectedPaths.size) {
-    tabberTreeInteractionController.applyState(panel, options);
+    if (options.modelOnly !== true) tabberTreeInteractionController.applyState(panel, options);
     return true;
   }
   if (!currentPath) {
     tabberTreeSelectedPaths.clear();
     tabberTreeSelectionLead = '';
-    tabberTreeInteractionController.applyState(panel, options);
+    if (options.modelOnly !== true) tabberTreeInteractionController.applyState(panel, options);
     return false;
   }
   return tabberTreeInteractionController.syncCurrent(panel, options);
@@ -6940,7 +6994,10 @@ function syncTabberTreeLayoutState(panel = document, options = {}) {
   const visibleItems = new Set(activePaneItems());
   const focusedItem = visualActivePaneItem();
   const signature = `${Array.from(visibleItems).sort().join('\u001f')}\u001e${focusedItem || ''}\u001e${currentPath}`;
-  if (options.force !== true && tabberLayoutStateSignature === signature) return false;
+  if (options.force !== true && tabberLayoutStateSignature === signature) {
+    // Selection can change without changing layout; its deferred DOM update still belongs here.
+    return syncTabberTreeActiveSelection(panel, options);
+  }
   tabberLayoutStateSignature = signature;
   const perf = clientPerfStart('tabberLayoutSync');
   for (const row of rows) {
@@ -6960,15 +7017,24 @@ function syncTabberTreeLayoutState(panel = document, options = {}) {
   return synced;
 }
 
-function scheduleTabberTreeLayoutStateSync() {
+function scheduleTabberTreeLayoutStateSync(options = {}) {
   if (!itemInLayout(tabberItemId)) return false;
   // Keep keyboard selection synchronous while folding all DOM state changes from one Dockview
-  // transaction into the next paint.
-  syncTabberTreeActiveSelection();
+  // transaction after the terminal's first paint.
+  syncTabberTreeActiveSelection(document, {modelOnly: true});
+  tabberLayoutStateScrollIntoView ||= options.scrollIntoView === true;
+  tabberLayoutStateRefreshTree ||= options.refreshTree === true;
   if (tabberLayoutStateFrame) return false;
   tabberLayoutStateFrame = requestAnimationFrame(() => {
-    tabberLayoutStateFrame = 0;
-    syncTabberTreeLayoutState();
+    tabberLayoutStateFrame = requestAnimationFrame(() => {
+      tabberLayoutStateFrame = 0;
+      const scrollIntoView = tabberLayoutStateScrollIntoView;
+      const refreshTree = tabberLayoutStateRefreshTree;
+      tabberLayoutStateScrollIntoView = false;
+      tabberLayoutStateRefreshTree = false;
+      if (refreshTree && itemInLayout(tabberItemId)) refreshTabberPanels();
+      syncTabberTreeLayoutState(document, {scrollIntoView});
+    });
   });
   return true;
 }

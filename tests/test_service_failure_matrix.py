@@ -1,3 +1,4 @@
+import pytest
 import os
 import threading
 import time
@@ -170,6 +171,8 @@ def test_registry_refuses_incompatible_socket_owner_without_sidecar_record(tmp_p
     assert spawned == []
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_batchd_failure_rows_keep_status_and_do_not_fallback_to_main_work(tmp_path, monkeypatch):
     service = batchd.PersistentJobBroker(tmp_path / "batchd.sock", workers=1)
     stale = service._queue_record("text_facts", {"text": "old"}, "maintenance", 1, "same")
@@ -230,6 +233,8 @@ def test_batchd_failure_rows_keep_status_and_do_not_fallback_to_main_work(tmp_pa
     service._on_shutdown()
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_approvald_live_socket_status_and_shutdown_do_not_replay_actions(tmp_path, monkeypatch):
     FakeWorker.created = []
     monkeypatch.setattr(approvald, "AutoApproveWorker", FakeWorker)

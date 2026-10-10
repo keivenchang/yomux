@@ -19,6 +19,9 @@ from yomux_lib.pricing_catalog import safe_source_url
 from yomux_lib.pricing_catalog import validate_catalog
 from yomux_lib import pricing_catalog
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def test_fresh_catalog_imports_packaged_seed_offline(tmp_path):
     catalog = PricingCatalog(tmp_path / "cache")

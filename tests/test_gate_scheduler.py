@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import pytest
+
 import threading
 import time
 
 from yomux_lib import batchd
 from yomux_lib.local_services import rpc
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
 
 
 def _batchd_request(socket_path, action, **payload):

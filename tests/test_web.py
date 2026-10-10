@@ -6,6 +6,7 @@ session names) embedded in the page must not be able to break out of the bootstr
 <html> lang/dir attributes must be escaped.
 """
 
+import pytest
 import json
 import os
 from pathlib import Path
@@ -60,6 +61,8 @@ def test_html_page_declares_inline_favicon_before_browser_can_request_default():
     assert page.index(favicons[0]) < page.index('/static/yomux.css')
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_html_page_bootstraps_the_server_owned_stats_writer_fence():
     bootstrap = json.loads(_bootstrap_json(web.html_page([])))
 

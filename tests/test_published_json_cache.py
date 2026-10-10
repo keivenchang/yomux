@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import pytest
 import hashlib
 import json
 from pathlib import Path
@@ -11,6 +12,9 @@ from pathlib import Path
 from yomux_lib.infra.published_json_cache import DeterministicJsonCodec
 from yomux_lib.infra.published_json_cache import PublishedJsonCache
 from yomux_lib.infra.published_json_cache import PublishedJsonFreshness
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
 
 
 def payload_signature(payload):

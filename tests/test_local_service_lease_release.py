@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
+import pytest
 import threading
 import time
 
@@ -91,6 +92,8 @@ def test_registry_lease_release_protocol_failure_stops_without_retry(tmp_path, m
     assert emitted[0][1]["delivery"] == "terminal"
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_status_generation_release_timeout_retries_until_statusd_acknowledges(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1"])
     record = webapp.client_watch_service.event_watcher_record
@@ -127,6 +130,8 @@ def test_status_generation_release_timeout_retries_until_statusd_acknowledges(mo
     assert record.status_generation_worker is None
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_batchd_interaction_release_timeout_retries_until_the_broker_unpins(tmp_path, monkeypatch):
     """A timed-out interaction-lease release retries until the broker is actually unpinned.
 

@@ -8,6 +8,11 @@ from yomux_lib import approvald
 from yomux_lib.local_services import rpc
 from yomux_lib.local_services import runtime as local_service_runtime
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 class FakeEventLog:
     def __init__(self):

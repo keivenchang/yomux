@@ -8,8 +8,10 @@ The Git tags are the source for exact release contents and historical gate resul
 - [Backend architecture](specs/BACKEND_ARCHITECTURE.md)
 - [Go capabilities and migration gaps](../GO_MIGRATION.md)
 
+`GO_MIGRATION.md` also defines the Python-removal gate: supported Python-only behavior and Python runtime/tooling dependencies must be ported or replaced before removal.
+
 ## Release families
 
 - **0.7.x:** added filesystem/Git views, indexing, YO!stats, OpenCode support, and later Markdown editing; see tags `v0.7.0`–`v0.7.35` (there is no `v0.7.27`).
 - **0.8.x:** focused on Markdown editing, Finder/Differ responsiveness, terminal behavior, and refresh cost; tags run from `v0.8.1` through `v0.8.10` with gaps.
-- **0.9.x:** began the Go migration. `v0.9.1` is the first tag containing the Go backend; `v0.9.4` includes Git-history/cache, editor, and release-renderer fixes. Go is now the default for managed server launches. The deprecated Python server is a temporary explicit fallback planned for removal around late October 2026.
+- **0.9.x:** began the Go migration. `v0.9.1` is the first tag containing the Go backend; `v0.9.4` includes Git-history/cache, editor, and release-renderer fixes. Go is now the default for managed server launches. The deprecated Python server is a temporary explicit fallback; its late-October 2026 removal target is conditional on the Go migration inventory and Python dependency removal gate in [`GO_MIGRATION.md`](../GO_MIGRATION.md).

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """Failure ownership regressions for the batchd control plane."""
 
+import pytest
 import os
 import threading
 
@@ -10,6 +11,8 @@ from yomux_lib.local_services.registry import LocalServiceRegistry
 from yomux_lib.local_services.registry import LocalServiceSpec
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_state_lock_contention_returns_typed_busy_without_entering_the_handler(tmp_path):
     broker = batchd.PersistentJobBroker(tmp_path / "batchd.sock", workers=1)
     acquire_calls = []
@@ -35,6 +38,8 @@ def test_state_lock_contention_returns_typed_busy_without_entering_the_handler(t
     assert body == b""
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_state_lock_contention_records_a_pending_shutdown_request(tmp_path):
     broker = batchd.PersistentJobBroker(tmp_path / "batchd.sock", workers=1)
 
@@ -58,6 +63,8 @@ def test_state_lock_contention_records_a_pending_shutdown_request(tmp_path):
     assert broker.stop_event.is_set() is False
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_contended_shutdown_reports_draining_when_cached_status_predates_accepted_work(tmp_path):
     broker = batchd.PersistentJobBroker(tmp_path / "batchd.sock", workers=1)
     submitted, submitted_body = broker.handle({
@@ -115,6 +122,8 @@ def test_contended_shutdown_reports_draining_when_cached_status_predates_accepte
     assert holder.is_alive() is False
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_shutdown_that_wins_admission_refuses_the_overlapping_submit(tmp_path, monkeypatch):
     broker = batchd.PersistentJobBroker(tmp_path / "batchd.sock", workers=1)
     validation_entered = threading.Event()
@@ -168,6 +177,8 @@ def test_shutdown_that_wins_admission_refuses_the_overlapping_submit(tmp_path, m
     assert broker.stop_event.is_set() is True
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_submit_that_wins_admission_drains_before_overlapping_shutdown_stops(tmp_path, monkeypatch):
     broker = batchd.PersistentJobBroker(tmp_path / "batchd.sock", workers=1)
     acceptance_completed = threading.Event()
@@ -219,6 +230,8 @@ def test_submit_that_wins_admission_drains_before_overlapping_shutdown_stops(tmp
     assert broker.stop_event.is_set() is True
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_first_contended_status_is_complete_and_contention_is_counted(tmp_path):
     broker = batchd.PersistentJobBroker(tmp_path / "batchd.sock", workers=1)
     lock_held = threading.Event()
@@ -272,6 +285,8 @@ def test_first_contended_status_is_complete_and_contention_is_counted(tmp_path):
     assert current["contention_counters"] == {"status": 1, "ping": 1, "result": 1}
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_real_state_lock_contention_keeps_registry_control_plane_healthy(tmp_path, monkeypatch):
     broker = batchd.PersistentJobBroker(tmp_path / "batchd.sock", workers=1)
     baseline_status, baseline_body = broker.handle({"action": "status", "protocol_version": batchd.BATCHD_PROTOCOL_VERSION})

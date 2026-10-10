@@ -26,6 +26,9 @@ from yomux_lib.stats_current.storage import UnavailableSpan
 from yomux_lib.stats_current.storage import UsageAtom
 from yomux_lib.stats_current.storage import UsageAtomTombstone
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 RESOLUTION = 60
 RANGE_SECONDS = 3_600
 

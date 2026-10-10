@@ -696,9 +696,10 @@ def exec_go_backend(args: argparse.Namespace) -> int:
         command.append("--dangerously-yolo")
     leases = (root_lease, port_lease)
     try:
-        for lease in leases:
-            for descriptor in (lease.fd, *lease.extra_fds):
-                os.set_inheritable(descriptor, True)
+        descriptors = [descriptor for lease in leases for descriptor in (lease.fd, *lease.extra_fds)]
+        command.extend(("--launch-lease-fds", ",".join(str(descriptor) for descriptor in descriptors)))
+        for descriptor in descriptors:
+            os.set_inheritable(descriptor, True)
         os.execv(str(binary), command)
     except OSError as error:
         print(f"ERROR: could not launch Go backend: {error}", file=sys.stderr)

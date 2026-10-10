@@ -38,6 +38,10 @@ from yomux_lib.statusd_protocol import StatusSnapshotMetadata
 from yomux_lib.statusd_protocol import stamped_request
 from yomux_lib.tmux_utils import PRODUCT_TMUX_SOCKET_ENV
 
+# Go has its own in-process agent-status implementation and does not use Python statusd.
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 class FakeStatusApp:
     builds = 0
@@ -715,8 +719,16 @@ def test_real_tmux_agent_window_status_tabber_and_stats_share_lifecycle_identity
         return app
 
     def snapshot():
+        try:
             response, body = wait_for_client_snapshot(client, [session])
-            return response, json.loads(body.decode("utf-8"))
+        except AssertionError as error:
+            worker = service.refresh_worker
+            raise AssertionError(
+                f"{error}; statusd={service.status()!r}; "
+                f"refresh_worker_alive={worker.is_alive() if worker is not None else False}; "
+                f"refresh_build_sessions={service.refresh_build_sessions!r}"
+            ) from error
+        return response, json.loads(body.decode("utf-8"))
 
     def identity_rows(payload):
         return {

@@ -72,6 +72,8 @@ def _load_browser_error_gate(browser, runtime) -> None:
     assert lifecycle["watchDiffRequests"] == 0, lifecycle
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.parametrize("clear_boundary_marker", (False, True), ids=("marked", "marker-cleared"))
 def test_stateful_journey_stop_rejects_browser_outside_fixture_origin(
     browser, stateful_journey, clear_boundary_marker
@@ -91,6 +93,8 @@ def test_stateful_journey_stop_rejects_browser_outside_fixture_origin(
         SERVER_LOGS.clear()
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_browser_journey_error_gate_rejects_real_error_and_rejection(browser, stateful_journey):
     runtime = stateful_journey.start()
     _load_browser_error_gate(browser, runtime)
@@ -259,6 +263,8 @@ def test_browser_journey_error_gate_rejects_real_error_and_rejection(browser, st
     assert clean_after_red["jsDebugErrors"] == [] and clean_after_red["severeBrowserLogEntries"] == []
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_real_client_error_upload_is_always_on_and_durable(browser, stateful_journey):
     runtime = stateful_journey.start()
     _load_browser_error_gate(browser, runtime)
@@ -358,6 +364,8 @@ def test_real_client_error_upload_is_always_on_and_durable(browser, stateful_jou
     assert clean["browserLocalFailures"] == [] and clean["browserLogFailures"] == []
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_browser_journey_error_gate_rejects_unconsumed_server_failures(browser, stateful_journey):
     runtime = stateful_journey.start()
     _load_browser_error_gate(browser, runtime)
@@ -406,6 +414,8 @@ def test_browser_journey_error_gate_rejects_unconsumed_server_failures(browser, 
         assert clean["browserLocalFailures"] == [] and clean["serverLogErrors"] == []
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_browser_journey_error_gate_rejects_reused_id_after_server_log_reset(browser, stateful_journey):
     runtime = stateful_journey.start()
     _load_browser_error_gate(browser, runtime)
@@ -476,6 +486,8 @@ def test_browser_journey_error_gate_rejects_reused_id_after_server_log_reset(bro
         browser._yomux_server_log_boundary = stateful_journey.server_log_boundary
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_browser_journey_error_gate_initializes_absent_consumption_state(browser, stateful_journey):
     runtime = stateful_journey.start()
     _load_browser_error_gate(browser, runtime)
@@ -498,6 +510,8 @@ def test_browser_journey_error_gate_initializes_absent_consumption_state(browser
     ) is True
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_browser_journey_error_gate_rejects_malformed_existing_consumption_state(browser, stateful_journey):
     runtime = stateful_journey.start()
     _load_browser_error_gate(browser, runtime)
@@ -601,6 +615,8 @@ def test_browser_journey_error_gate_observes_fifteen_second_late_error(browser):
     assert clean["observationSamples"] > 1
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_browser_journey_error_gate_fails_when_bounded_ring_drops_entries(browser, stateful_journey):
     runtime = stateful_journey.start()
     _load_browser_error_gate(browser, runtime)
@@ -615,6 +631,8 @@ def test_browser_journey_error_gate_fails_when_bounded_ring_drops_entries(browse
     assert clean["browserLocalFailures"] == [] and clean["serverLogErrors"] == []
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_browser_journey_error_gate_rejects_unvisited_claimed_surface(browser, stateful_journey):
     runtime = stateful_journey.start()
     _load_browser_error_gate(browser, runtime)
@@ -630,6 +648,8 @@ def test_browser_journey_error_gate_rejects_unvisited_claimed_surface(browser, s
     assert clean["claimedCleanSurfaces"] == clean["visitedSurfaces"] == ["stats"]
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.parametrize(
     ("mode", "failure"),
     (
@@ -692,6 +712,8 @@ def test_browser_journey_error_gate_fails_closed_on_unreadable_log_ring(
     assert clean["browserLocalFailures"] == [] and clean["serverLogErrors"] == []
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_aged_server_restart_preserves_selected_state_and_private_identity(aged_state_root, stateful_journey):
     caches = aged_state_root.apply("coexisting_transcript_caches", shared_count=4, host_count=3)
     events = aged_state_root.apply("event_history", counts={"state_changed": 5, "stale_cache_refresh": 2})
@@ -709,6 +731,8 @@ def test_aged_server_restart_preserves_selected_state_and_private_identity(aged_
     assert events.paths[0].read_text(encoding="utf-8").splitlines()[: len(before_event_lines)] == before_event_lines
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_nested_finder_journey_retains_each_phase_without_duplicate_work(browser, aged_state_root, stateful_journey):
     finder = aged_state_root.apply("finder_resource_history", top_level_entries=99, nested_entries=8)
     aged_state_root.apply("coexisting_transcript_caches", shared_count=12, host_count=8)

@@ -280,6 +280,8 @@ def _summary(values: list[float]) -> dict[str, float]:
     }
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.skipif(
     not os.environ.get(MEASURE_ENV),
     reason=f"latency probe runs only when {MEASURE_ENV} names the run (for example 'before' or 'after')",
@@ -462,6 +464,8 @@ def _record(request_id: str, ready_ms: float, *, status: str = "200", compute_ms
     }
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_unique_capture_marker_is_accepted_by_the_real_server_validator() -> None:
     marker = unique_capture_marker()
     # The server's own validator must accept the marker this probe mints, and the server's own join

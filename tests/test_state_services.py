@@ -7,6 +7,11 @@ import threading
 from yomux_lib import app as app_module
 from yomux_lib.infra.state_services import BatchedOperationService, SessionFilesService
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def test_session_files_service_owns_worker_until_target_returns_and_stop_joins_it():
     class App:

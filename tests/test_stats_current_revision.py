@@ -7,6 +7,11 @@ from pathlib import Path
 
 from yomux_lib.stats_current import revision
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def test_daemon_revision_covers_every_module_loaded_by_the_writer_process():
     assert revision._CURRENT_MODULES == (

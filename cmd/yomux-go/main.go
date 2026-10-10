@@ -69,40 +69,52 @@ type server struct {
 	children             map[*exec.Cmd]struct{}
 	events               *eventBroker
 
-	eventLogPath           string
-	background             *goBackgroundOwner
-	finder                 *finder.Service
-	finderJobs             *work.Scheduler
-	finderBulkJobs         *work.Scheduler
-	finderStreamJobs       *work.Scheduler
-	capabilities           *capabilities.Catalog
-	statsPath              string
-	statsNow               func() time.Time
-	statsHeartbeat         time.Duration
-	refillMu               sync.Mutex
-	refillRoot             string
-	refillContext          context.Context
-	refillRun              func(context.Context, time.Time, func(string)) (stats.AgentHistoryRefillResult, error)
-	statsWriter            *stats.Writer
-	statsService           *stats.StatsService
-	statsLifecycle         *stats.Lifecycle
-	statsRuntimeRecorder   *statsRuntimeRecorder
-	syntheticHostInputs    bool
-	statsMigration         map[string]any
-	statsProcessSourceOnce sync.Once
-	statsProcessSource     string
-	statsDeltaMu           sync.Mutex
-	statsDeltaRevisions    map[statsDeltaKey]map[int64]int64
-	statsDeltaNextRevision map[statsDeltaKey]int64
-	statsDemand            atomic.Int64
-	hostCollector          *stats.HostCollector
-	agentStatusCollector   *stats.AgentStatusCollector
-	tokenCollector         *stats.AgentTokenCollector
-	pricing                *stats.PricingCatalog
-	pricingRefreshMu       sync.Mutex
-	pricingRefreshing      bool
-	pricingRefreshState    map[string]any
-	pricingRefreshEpoch    uint64
+	eventLogPath                        string
+	background                          *goBackgroundOwner
+	finder                              *finder.Service
+	searchIndex                         *finder.SearchIndexWorkerClient
+	indexSettingsMu                     sync.RWMutex
+	indexSettingsUpdateMu               sync.Mutex
+	indexSettings                       finderIndexSettings
+	indexSettingsFencePending           bool
+	indexSettingsFencePreserveSnapshots bool
+	indexSettingsFenceRoots             []string
+	indexMonitorMu                      sync.Mutex
+	indexMonitors                       map[string]*finderIndexMonitor
+	finderJobs                          *work.Scheduler
+	finderBulkJobs                      *work.Scheduler
+	finderStreamJobs                    *work.Scheduler
+	capabilities                        *capabilities.Catalog
+	statsPath                           string
+	statsNow                            func() time.Time
+	attentionAckInitMu                  sync.Mutex
+	attentionAcks                       *attentionAckState
+	statsHeartbeat                      time.Duration
+	refillMu                            sync.Mutex
+	refillRoot                          string
+	refillContext                       context.Context
+	refillRun                           func(context.Context, time.Time, func(string)) (stats.AgentHistoryRefillResult, error)
+	statsWriter                         *stats.Writer
+	statsService                        *stats.StatsService
+	statsLifecycle                      *stats.Lifecycle
+	statsRuntimeRecorder                *statsRuntimeRecorder
+	syntheticHostInputs                 bool
+	statsMigration                      map[string]any
+	statsProcessSourceOnce              sync.Once
+	statsProcessSource                  string
+	statsDeltaMu                        sync.Mutex
+	statsDeltaRevisions                 map[statsDeltaKey]map[int64]int64
+	statsDeltaNextRevision              map[statsDeltaKey]int64
+	statsDemand                         atomic.Int64
+	hostCollector                       *stats.HostCollector
+	agentStatusCollector                *stats.AgentStatusCollector
+	tokenCollector                      *stats.AgentTokenCollector
+	pricing                             *stats.PricingCatalog
+	pricingRefreshMu                    sync.Mutex
+	pricingRefreshing                   bool
+	pricingRefreshState                 map[string]any
+	pricingRefreshEpoch                 uint64
+	yolo                                *goYoloStore
 
 	gitMetadataSnapshotFn func(string) (goGitSnapshot, bool)
 	ignoreSizeMu          sync.Mutex
@@ -112,6 +124,7 @@ type server struct {
 	logRing               *goLogRing
 	rootLease             *os.File
 	shutdownOnce          sync.Once
+	shutdownClean         bool
 	startedAt             time.Time
 	healthLedgerMu        sync.Mutex
 	healthLedger          *goHealthLedger
@@ -125,6 +138,7 @@ type server struct {
 	sessionFilesCache       sessionFilesCacheState
 
 	tmuxWindowActivityFn             func() (map[string]float64, error)
+	tmuxCommandContextFn             func(context.Context, ...string) *exec.Cmd
 	processEntriesFn                 func() ([]procEntry, error)
 	processEntriesCacheMu            sync.Mutex
 	processEntriesCacheAt            time.Time
@@ -136,6 +150,9 @@ type server struct {
 	processEntriesCacheDurationTotal time.Duration
 	childProcessEntriesFn            func(int) ([]procEntry, error)
 	agentStatusClassifier            func(context.Context, stats.AgentStatusRequest) stats.AgentStatusResult
+	agentProcessSnapshot             func(context.Context, int) (stats.AgentStatusProcess, error)
+	goYoloMetadataRefreshFn          func(string) error
+	goYoloPaneOwnsProcessFn          func(context.Context, string, int) (bool, error)
 	processMetricsFn                 func(time.Time) goProcessMetrics
 	childProcessMetricsFn            func(time.Time) []goChildProcessMetric
 	goroutineCountFn                 func() int
@@ -168,6 +185,10 @@ type server struct {
 	pythonHTMLState
 	tmuxMetadataState
 	operationState
+}
+
+type finderIndexMonitor struct {
+	cancel context.CancelFunc
 }
 
 const goPerformanceRecordLimit = 4096
@@ -352,10 +373,24 @@ type wsConn struct {
 type winsize struct{ rows, cols, x, y uint16 }
 
 type ptyPair struct {
+	rows, cols     int
 	master         *os.File
 	slave          *os.File
 	tty            string
 	requestControl func(cols, rows, txn int)
+}
+
+// Ownership renewal must reconcile tmux even when the local PTY size is stable.
+// Keep the dimensions here so both platform ioctl implementations share that rule.
+func (p *ptyPair) resize(rows, cols int) error {
+	if p.rows == rows && p.cols == cols {
+		return nil
+	}
+	if err := p.resizeDimensions(rows, cols); err != nil {
+		return err
+	}
+	p.rows, p.cols = rows, cols
+	return nil
 }
 
 func clampDimension(value, minimum, maximum, fallback int) int {
@@ -458,6 +493,7 @@ func main() {
 	useMachineTmuxForOperatorLaunch()
 	port := flag.Int("port", 7221, "HTTP port")
 	listenFD := flag.Int("listen-fd", -1, "use an already-bound TCP listener file descriptor")
+	launchLeaseFDs := flag.String("launch-lease-fds", "", "managed launcher lease descriptors")
 	host := flag.String("host", "127.0.0.1", "bind address")
 	root := flag.String("root", ".", "YOmux checkout root")
 	configDir := flag.String("config", productenv.Value("CONFIG_DIR"), "YOmux config directory")
@@ -466,9 +502,25 @@ func main() {
 	certPath := flag.String("cert", "", "TLS certificate PEM path")
 	keyPath := flag.String("key", "", "TLS private key PEM path")
 	dangerouslyYolo := flag.Bool("dangerously-yolo", false, "allow new Claude/Codex sessions to use dangerous bypass flags")
+	searchIndexWorker := flag.Bool("search-index-worker", false, "run the private Finder index worker")
+	searchIndexDB := flag.String("index-db", "", "private Finder index database path")
 	flag.BoolVar(dangerouslyYolo, "dang", false, "alias for --dangerously-yolo")
 	showVersion := flag.Bool("version", false, "print version")
 	flag.Parse()
+	if err := acceptLaunchDescriptors(*launchLeaseFDs, *listenFD); err != nil {
+		fatal("invalid managed launch leases: " + err.Error())
+	}
+	if *searchIndexWorker {
+		if *searchIndexDB == "" {
+			fatal("search index worker requires --index-db")
+		}
+		runtime.GOMAXPROCS(1)
+		lowerSearchIndexWorkerPriority()
+		if err := finder.RunSearchIndexWorker(os.Stdin, os.Stdout, *searchIndexDB); err != nil {
+			fatal("search index worker failed: " + err.Error())
+		}
+		return
+	}
 	if *showVersion {
 		fmt.Printf("yomux-go %s\n", version)
 		return
@@ -531,6 +583,12 @@ func main() {
 	} else {
 		s.healthLifecycle = lifecycle
 	}
+	shutdownSignalName := ""
+	shutdownExitStatus := 0
+	shutdownClean := false
+	defer func() {
+		s.markGoHealthShutdown(shutdownSignalName, shutdownExitStatus, shutdownClean, time.Now())
+	}()
 	// Stats routes are implemented as soon as the server starts. Materialization readiness is a
 	// separate runtime state: capability discovery and the typed pending response must reach the
 	// stats handlers while the first ring build is still in flight, or the browser cannot ever learn
@@ -557,12 +615,24 @@ func main() {
 		fatal("Finder initialization failed: " + finderErr.Error())
 	}
 	s.finder = finderService
+	s.searchIndex = finder.NewSearchIndexWorkerClient(stateDir)
+	s.finder.SetSearchIndexWorker(s.searchIndex)
+	if err := s.loadFinderIndexSettings(); err != nil {
+		slog.Warn("Finder index settings unavailable; indexed search is disabled until settings load", "error", err)
+	}
 	s.syncFinderWatchCapability()
 	s.background = newGoBackgroundOwner(*configDir, rootPath, *port)
 	s.background.setEventPublisher(func(kind string, payload map[string]any) error {
 		_, err := s.events.publish(kind, payload)
 		return err
 	})
+	s.yolo, err = newGoYoloStore(*configDir)
+	if err != nil {
+		s.shutdown()
+		fatal("YO auto-approval state setup failed: " + err.Error())
+	}
+	s.capabilities.Set("yolo.auto-approve.v1", capabilities.Entry{Available: true})
+	s.restoreGoYoloWorkers(context.Background())
 	s.operations = loadOperationJournal(s.operationsJournal, loadOperations(s.operationsPath))
 	s.operationsMu.Lock()
 	s.pruneOperationsLocked()
@@ -599,6 +669,11 @@ func main() {
 	// does not turn a boot identity probe into the generic unsupported response.
 	mux.Handle("/api/session-metadata", s.protected(http.HandlerFunc(s.sessionMetadata)))
 	mux.Handle("/api/activity", s.protected(http.HandlerFunc(s.activity)))
+	mux.Handle("/api/auto-approve", s.protected(http.HandlerFunc(s.autoApprove)))
+	mux.Handle("/api/yolo-rules", s.protected(http.HandlerFunc(s.yoloRules)))
+	mux.Handle("/api/yolo-rules/open", s.protected(http.HandlerFunc(s.yoloRulesOpen)))
+	mux.Handle("/api/yolo-rules/reload", s.protected(http.HandlerFunc(s.yoloRulesReload)))
+	s.registerAttentionAckRoute(mux)
 	mux.Handle("/api/background/claim", s.protected(http.HandlerFunc(s.backgroundClaim)))
 	mux.Handle("/api/operations/accept", s.protected(http.HandlerFunc(s.operationAccept)))
 	mux.Handle("/api/operations/terminalize", s.protected(http.HandlerFunc(s.operationTerminalize)))
@@ -670,8 +745,12 @@ func main() {
 		}
 		listener = tls.NewListener(listener, config)
 	}
+	shutdownSignal := make(chan os.Signal, 1)
+	signal.Notify(shutdownSignal, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(shutdownSignal)
 	shutdownContext, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
+	go s.reconcileFinderIndexes(shutdownContext)
 	if err := os.MkdirAll(*configDir, 0o700); err != nil {
 		_ = listener.Close()
 		s.shutdown()
@@ -683,7 +762,12 @@ func main() {
 		s.shutdown()
 		fatal("stats setup failed: " + err.Error())
 	}
-	defer statsWriter.Close()
+	defer func() {
+		if err := statsWriter.Close(); err != nil {
+			shutdownClean = false
+			slog.Warn("stats writer did not close cleanly", "error", err)
+		}
+	}()
 	if migrationStatus, migrationErr := statsWriter.MigrationStatus(shutdownContext); migrationErr != nil {
 		_ = listener.Close()
 		s.shutdown()
@@ -778,6 +862,7 @@ func main() {
 	if productenv.Value("STATS_SYNTHETIC_INVENTORY") == "1" {
 		statusSources = stats.SyntheticAgentStatusSources(opencodeDatabase)
 	}
+	s.agentProcessSnapshot = stats.CurrentPlatformAgentStatusProcess
 	s.agentStatusClassifier = func(ctx context.Context, request stats.AgentStatusRequest) stats.AgentStatusResult {
 		return stats.ClassifyAgentStatus(ctx, request, statusSources)
 	}
@@ -807,7 +892,22 @@ func main() {
 			EpochID: fmt.Sprintf("agent-status-%d", time.Now().UnixNano()), EpochStartedAt: float64(time.Now().UnixNano()) / 1e9,
 			OwnerGeneration: uint64(os.Getpid()), SourceID: "host",
 			SnapshotRevision: func() uint64 { return uint64(time.Now().UnixNano()) },
+			AttentionAcknowledged: func(key string) (bool, error) {
+				_, acknowledged, err := s.attentionAckStore().acknowledged(key, s.attentionAckNow())
+				return acknowledged, err
+			},
+			AttentionCommitted: s.attentionSettlementsCommitted,
 		})
+		if _, statErr := os.Stat(s.statsPath); statErr == nil {
+			lifecycles, restoreErr := stats.ReadRecentAgentStatusLifecycles(shutdownContext, s.statsPath, time.Now())
+			if restoreErr != nil {
+				slog.Warn("could not restore recent agent status lifecycles", "error", restoreErr)
+			} else {
+				statusCollector.RestoreRecentLifecycles(lifecycles)
+			}
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			slog.Warn("could not inspect persisted agent status transitions", "error", statErr)
+		}
 		if err := statusCollector.Start(shutdownContext); err != nil {
 			_ = listener.Close()
 			s.shutdown()
@@ -865,21 +965,32 @@ func main() {
 			fatal("stats runtime recorder setup failed: " + err.Error())
 		}
 		s.statsRuntimeRecorder = recorder
-		defer recorder.Stop()
+		defer func() {
+			if err := recorder.Stop(); err != nil {
+				shutdownClean = false
+			}
+		}()
 	}
 	scheme := "https"
 	if *httpMode {
 		scheme = "http"
 	}
 	slog.Info("YOmux Go backend", "version", version, "backend", "go", "addr", addr, "scheme", scheme)
-	defer s.markGoHealthCleanShutdown()
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- httpServer.Serve(listener) }()
 	select {
 	case <-shutdownContext.Done():
+		select {
+		case received := <-shutdownSignal:
+			shutdownSignalName = received.String()
+		default:
+		}
 		s.shutdown()
+		shutdownClean = s.shutdownCompletedCleanly() && shutdownSignalName != ""
 		gracefulContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := httpServer.Shutdown(gracefulContext); err != nil {
+		shutdownErr := httpServer.Shutdown(gracefulContext)
+		if shutdownErr != nil {
+			shutdownClean = false
 			_ = httpServer.Close()
 		}
 		cancel()
@@ -888,6 +999,7 @@ func main() {
 			s.shutdown()
 			fatal(err.Error())
 		}
+		shutdownClean = false
 		s.shutdown()
 	}
 }
@@ -1593,7 +1705,141 @@ func (s *server) fsWatchDiff(w http.ResponseWriter, r *http.Request) {
 		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, finderErr)
 		return
 	}
+	s.queueFinderIndexRepairs(product.data)
 	finderHTTPJSON(w, finderRequestIDForHTTP(), product.data, nil)
+}
+
+func (s *server) monitorFinderIndex(root string) {
+	if s.finder == nil || s.events == nil || !s.finderSearchOptions(root, "", false).Indexed {
+		return
+	}
+	s.indexMonitorMu.Lock()
+	if s.indexMonitors == nil {
+		s.indexMonitors = make(map[string]*finderIndexMonitor)
+	}
+	if _, running := s.indexMonitors[root]; running {
+		s.indexMonitorMu.Unlock()
+		return
+	}
+	monitorContext, cancel := context.WithCancel(context.Background())
+	monitor := &finderIndexMonitor{cancel: cancel}
+	s.indexMonitors[root] = monitor
+	s.indexMonitorMu.Unlock()
+	go func() {
+		defer func() {
+			s.indexMonitorMu.Lock()
+			if s.indexMonitors[root] == monitor {
+				delete(s.indexMonitors, root)
+			}
+			s.indexMonitorMu.Unlock()
+		}()
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-monitorContext.Done():
+				return
+			case <-ticker.C:
+				if !s.finderSearchOptions(root, "", false).Indexed {
+					return
+				}
+				status, finderErr := s.finder.IndexStatus(context.Background(), root)
+				if finderErr != nil {
+					return
+				}
+				if status["building"] == true || (status["indexed"] != true && status["index_state"] != "error") {
+					continue
+				}
+				generation := status["generation"]
+				workerIncarnation := status["worker_incarnation"]
+				scopeDigest := sha256.Sum256([]byte(root))
+				_, _ = s.events.publish("search_progress", map[string]any{
+					"scope_id": hex.EncodeToString(scopeDigest[:])[:16], "generation": generation, "worker_incarnation": workerIncarnation,
+					"revision": generation, "coverage": status["progressive_coverage"],
+					"index_state": status["index_state"], "stale": status["stale"],
+				})
+				return
+			}
+		}
+	}()
+}
+
+func (s *server) stopFinderIndexMonitor(root string) {
+	s.indexMonitorMu.Lock()
+	defer s.indexMonitorMu.Unlock()
+	if monitor := s.indexMonitors[root]; monitor != nil {
+		delete(s.indexMonitors, root)
+		monitor.cancel()
+	}
+}
+
+func (s *server) reconcileFinderIndexes(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		s.indexSettingsMu.RLock()
+		roots := append([]string(nil), s.indexSettings.roots...)
+		s.indexSettingsMu.RUnlock()
+		for _, root := range roots {
+			options := s.finderSearchOptions(root, "", false)
+			if !options.Indexed || options.RefreshSec <= 0 {
+				continue
+			}
+			requestContext, cancel := context.WithTimeout(ctx, 5*time.Second)
+			_, finderErr := s.ensureFinderIndex(requestContext, root, options)
+			cancel()
+			if finderErr != nil && ctx.Err() == nil {
+				slog.Warn("Finder index safety refresh could not be scheduled", "root", root, "error", finderErr.Message)
+			}
+		}
+	}
+}
+
+func (s *server) queueFinderIndexRepairs(payload map[string]any) {
+	if s.finder == nil || s.searchIndex == nil || payload["mode"] == "full" {
+		return
+	}
+	paths := make([]string, 0)
+	for _, field := range []string{"directories", "files"} {
+		items, _ := payload[field].([]any)
+		for _, item := range items {
+			row, _ := item.(map[string]any)
+			if path, ok := row["path"].(string); ok && path != "" {
+				paths = append(paths, path)
+			}
+		}
+	}
+	removed, _ := payload["removed_paths"].([]any)
+	for _, item := range removed {
+		if path, ok := item.(string); ok && path != "" {
+			paths = append(paths, path)
+		}
+	}
+	if len(paths) == 0 {
+		return
+	}
+	s.indexSettingsMu.RLock()
+	roots := append([]string(nil), s.indexSettings.roots...)
+	s.indexSettingsMu.RUnlock()
+	for _, root := range roots {
+		options := s.finderSearchOptions(root, "", false)
+		if !options.Indexed {
+			continue
+		}
+		for _, path := range paths {
+			relative, relativeErr := filepath.Rel(root, path)
+			ancestor, ancestorErr := filepath.Rel(path, root)
+			if relativeErr == nil && (relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)))) || ancestorErr == nil && (ancestor == "." || (ancestor != ".." && !strings.HasPrefix(ancestor, ".."+string(filepath.Separator)))) {
+				s.finder.QueueIndexRepair(root, options, func() { s.monitorFinderIndex(root) })
+				break
+			}
+		}
+	}
 }
 
 func (s *server) fsSearch(w http.ResponseWriter, r *http.Request) {
@@ -1627,7 +1873,7 @@ func (s *server) fsSearch(w http.ResponseWriter, r *http.Request) {
 	batchSearch := r.URL.Path == "/api/batch/search"
 	indexedOnly := batchSearch || queryTrue(r.URL.Query().Get("indexed_only"))
 	cursor := r.URL.Query().Get("cursor")
-	searchOptions := finder.SearchOptions{Cursor: cursor, IndexedOnly: indexedOnly}
+	searchOptions := s.finderSearchOptions(root, cursor, indexedOnly)
 	if r.URL.Path == "/api/fs/search-stream" {
 		stream, ok := newJSONSSEWriter(w)
 		if !ok {
@@ -1639,38 +1885,46 @@ func (s *server) fsSearch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		product, finderErr := s.runFinderStreamProduct(r.Context(), func(ctx context.Context) (finderProduct, *finder.Error) {
-			payload, err := s.finder.SearchStream(ctx, root, r.URL.Query().Get("query"), limit, recursive, queryTrue(r.URL.Query().Get("direct_only")), queryTrue(r.URL.Query().Get("minimal")), func(files []map[string]any, coverage map[string]any) error {
+			payload, err := s.finder.SearchStreamWithOptions(ctx, root, r.URL.Query().Get("query"), limit, recursive, queryTrue(r.URL.Query().Get("direct_only")), queryTrue(r.URL.Query().Get("minimal")), searchOptions, func(files []map[string]any, coverage map[string]any) error {
 				return writeFinderSSE("chunk", map[string]any{"files": files, "coverage": coverage})
 			})
+			s.maybeMonitorFinderIndex(root, payload)
 			return finderProduct{data: payload}, err
 		})
 		if finderErr != nil {
 			_ = writeFinderSSE("error", finderErr.Payload())
 			return
 		}
-		_ = writeFinderSSE("done", map[string]any{"files": product.data["count"], "coverage": product.data["progressive_coverage"]})
+		_ = writeFinderSSE("done", map[string]any{"files": product.data["count"], "coverage": product.data["progressive_coverage"], "summary": product.data, "terminal": true})
 		return
 	}
 	if recursive && !directOnly && cursor == "" && !indexedOnly {
 		s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "search", root, func(ctx context.Context) (map[string]any, *finder.Error) {
-			return s.finder.SearchWithOptions(ctx, root, r.URL.Query().Get("query"), limit, recursive, false, queryTrue(r.URL.Query().Get("minimal")), searchOptions)
+			payload, err := s.finder.SearchWithOptions(ctx, root, r.URL.Query().Get("query"), limit, recursive, false, queryTrue(r.URL.Query().Get("minimal")), searchOptions)
+			s.maybeMonitorFinderIndex(root, payload)
+			return payload, err
 		})
 		return
 	}
 	if batchSearch {
 		s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "search", root, func(ctx context.Context) (map[string]any, *finder.Error) {
-			return s.finder.SearchWithOptions(ctx, root, r.URL.Query().Get("query"), limit, true, false, queryTrue(r.URL.Query().Get("minimal")), finder.SearchOptions{Cursor: cursor})
+			payload, err := s.finder.SearchWithOptions(ctx, root, r.URL.Query().Get("query"), limit, recursive, directOnly, queryTrue(r.URL.Query().Get("minimal")), searchOptions)
+			s.maybeMonitorFinderIndex(root, payload)
+			return payload, err
 		})
 		return
 	}
 	if cursor != "" {
 		s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "search", root, func(ctx context.Context) (map[string]any, *finder.Error) {
-			return s.finder.SearchWithOptions(ctx, root, r.URL.Query().Get("query"), limit, recursive, directOnly, queryTrue(r.URL.Query().Get("minimal")), searchOptions)
+			payload, err := s.finder.SearchWithOptions(ctx, root, r.URL.Query().Get("query"), limit, recursive, directOnly, queryTrue(r.URL.Query().Get("minimal")), searchOptions)
+			s.maybeMonitorFinderIndex(root, payload)
+			return payload, err
 		})
 		return
 	}
 	product, finderErr := s.runFinderProduct(r.Context(), func(ctx context.Context) (finderProduct, *finder.Error) {
 		payload, err := s.finder.SearchWithOptions(ctx, root, r.URL.Query().Get("query"), limit, recursive, directOnly, queryTrue(r.URL.Query().Get("minimal")), searchOptions)
+		s.maybeMonitorFinderIndex(root, payload)
 		return finderProduct{data: payload}, err
 	})
 	if finderErr != nil {
@@ -1678,6 +1932,20 @@ func (s *server) fsSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	finderHTTPJSON(w, finderRequestIDForHTTP(), product.data, nil)
+}
+
+func (s *server) maybeMonitorFinderIndex(root string, payload map[string]any) {
+	if payload != nil && (payload["index_state"] == "warming" || payload["building"] == true) {
+		s.monitorFinderIndex(root)
+	}
+}
+
+func (s *server) ensureFinderIndex(ctx context.Context, root string, options finder.SearchOptions) (map[string]any, *finder.Error) {
+	payload, finderErr := s.finder.EnsureIndex(ctx, root, options)
+	if finderErr == nil {
+		s.maybeMonitorFinderIndex(root, payload)
+	}
+	return payload, finderErr
 }
 
 func (s *server) fsIndexStatus(w http.ResponseWriter, r *http.Request) {
@@ -1699,6 +1967,13 @@ func (s *server) fsIndexStatus(w http.ResponseWriter, r *http.Request) {
 	if finderErr != nil {
 		finderHTTPJSON(w, finderRequestIDForHTTP(), nil, finderErr)
 		return
+	}
+	if payload := product.data; payload != nil {
+		options := s.finderSearchOptions(root, "", false)
+		if options.Indexed {
+			payload["max_files"] = options.MaxFiles
+			payload["max_bytes"] = options.MaxBytes
+		}
 	}
 	finderHTTPJSON(w, finderRequestIDForHTTP(), product.data, nil)
 }
@@ -1783,6 +2058,7 @@ func (s *server) fsUnindex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.enqueueFinderJSON(w, r.Context(), r.URL.Path, "unindex", path, func(ctx context.Context) (map[string]any, *finder.Error) {
+		s.stopFinderIndexMonitor(path)
 		return s.finder.Unindex(ctx, path)
 	})
 }
@@ -4030,7 +4306,7 @@ func (s *server) activity(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	sessions := topology.sessions
-	published, publishedGeneration, stale, metadataObservedAt := s.metadataSnapshotWithBuiltAt()
+	published, publishedGeneration, stale, _ := s.metadataSnapshotWithBuiltAt()
 	metadataSessions := metadataSessionsForTopology(published, publishedGeneration, topology)
 	metadataStale := published == nil || stale || metadataPayloadTopologyGeneration(published) != topology.generation
 	if metadataStale {
@@ -4038,15 +4314,13 @@ func (s *server) activity(w http.ResponseWriter, r *http.Request) {
 	}
 	activity := make(map[string]any)
 	activityErrors := make([]string, 0)
-	activityAgentStates := map[string]string(nil)
-	activityAgentObservedAt := map[string]time.Time(nil)
-	if s.statsService != nil {
-		statusSnapshot, statusErr := s.statsService.AgentStatus(r.Context())
-		if statusErr != nil {
-			activityErrors = append(activityErrors, statusErr.Error())
-		} else {
-			activityAgentStates, activityAgentObservedAt = activityAgentStatusOverrides(statusSnapshot)
-		}
+	agentStatusSnapshot, statusErr := s.currentAgentStatusSnapshot(r.Context())
+	if statusErr != nil {
+		activityErrors = append(activityErrors, statusErr.Error())
+	}
+	projection, projectionErr := s.projectAgentWindows(metadataSessions, topology.generation, metadataStale, agentStatusSnapshot)
+	if err := projectionErr; err != nil {
+		activityErrors = append(activityErrors, err.Error())
 	}
 	if rosterErr != nil {
 		activityErrors = append(activityErrors, rosterErr.Error())
@@ -4086,38 +4360,8 @@ func (s *server) activity(w http.ResponseWriter, r *http.Request) {
 	} else {
 		activityErrors = append(activityErrors, err.Error())
 	}
-	agents := make([]any, 0)
-	agentWindows := make(map[string]any)
-	for _, session := range sessions {
-		info := metadataSessions[session].(map[string]any)
-		rows, _ := info["agents"].([]map[string]any)
-		windowRows := make([]any, 0, len(rows))
-		for _, agent := range rows {
-			window, _ := agent["window_index"].(int)
-			state := stringValue(agent["status"])
-			statusObservedAt := metadataObservedAt
-			if observedAt, ok := agent["status_observed_at"].(float64); ok && observedAt > 0 {
-				statusObservedAt = time.Unix(0, int64(observedAt*1e9))
-			}
-			key := activityAgentStatusKey(session, stringValue(agent["pane_target"]), stringValue(agent["kind"]))
-			currentObservedAt := activityAgentObservedAt[key]
-			if currentState, ok := activityAgentStates[key]; ok && (currentObservedAt.IsZero() || currentObservedAt.After(statusObservedAt)) {
-				state = currentState
-			}
-			windowRow := map[string]any{
-				"session": session, "window": strconv.Itoa(window), "window_index": window,
-				"pane_target": agent["pane_target"], "kind": agent["kind"], "agent_kind": agent["kind"], "state": state,
-				"current": agent["current"], "window_active": agent["window_active"],
-			}
-			windowRows = append(windowRows, windowRow)
-			agents = append(agents, windowRow)
-		}
-		if len(windowRows) > 0 {
-			agentWindows[session] = windowRows
-		}
-	}
 	jsonResponse(w, http.StatusOK, map[string]any{
-		"activity": activity, "agents": agents, "agent_windows": agentWindows,
+		"activity": activity, "agents": projection.agents, "agent_windows": projection.windows,
 		// The activity response is also a topology repair path. Python's cached
 		// activity product normally follows session-metadata, but a Go-only boot
 		// can receive activity first; carrying the same pane shape lets the client
@@ -4125,7 +4369,9 @@ func (s *server) activity(w http.ResponseWriter, r *http.Request) {
 		"sessions": metadataSessions,
 		"errors":   activityErrors, "session_order": sessions, "session_scope": scope,
 		"topology_generation": topology.generation, "renames": topology.renames,
-		"session_file_hours": hours,
+		"agent_window_snapshot_revision": projection.revision,
+		"agent_window_status_fresh":      projection.fresh,
+		"session_file_hours":             hours,
 		"cache": map[string]any{
 			"hit": published != nil, "stale": metadataStale,
 			"generation": publishedGeneration, "refreshing": s.metadataRefreshInFlight(),
@@ -4211,7 +4457,11 @@ func (s *server) createSession(w http.ResponseWriter, r *http.Request) {
 		name = r.FormValue("session")
 	}
 	hasRequestedName := name != ""
-	roster, err := s.tmuxSessionRosterSnapshot(true)
+	// The reservation, mutation, and confirming roster share the same owner as
+	// rename. A pre-create read must not remain a fresh post-create cache hit.
+	s.tmuxRosterFetchMu.Lock()
+	defer s.tmuxRosterFetchMu.Unlock()
+	roster, err := s.tmuxSessionRosterSnapshotLocked(true)
 	if err != nil {
 		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "tmux session roster is unavailable"})
 		return
@@ -4267,9 +4517,11 @@ func (s *server) createSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.configureTmuxSession(name)
+	topology := s.refreshTmuxMetadataAfterMutationLocked()
 	jsonResponse(w, http.StatusOK, map[string]any{
-		"ok": true, "created": true, "session": name, "sessions": s.sessionNames(), "agent": agent,
-		"terminal": terminal, "cwd": cwd, "command": command, "dangerously_yolo": launchDangerously,
+		"ok": true, "created": true, "session": name, "sessions": topology.sessions, "agent": agent,
+		"topology_generation": topology.generation,
+		"terminal":            terminal, "cwd": cwd, "command": command, "dangerously_yolo": launchDangerously,
 		"generation": generation,
 	})
 }
@@ -4371,6 +4623,10 @@ func (s *server) settings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if r.Method == http.MethodPost {
+		s.indexSettingsUpdateMu.Lock()
+		defer s.indexSettingsUpdateMu.Unlock()
+	}
 	var body string
 	if r.Method == http.MethodPost {
 		user, _ := r.Context().Value(authContextKey{}).(authUser)
@@ -4430,6 +4686,36 @@ print(json.dumps(result, separators=(",", ":"), ensure_ascii=False), end="")`
 			},
 		})
 		return
+	}
+	previousIndexRoots, indexSettingsChanged, indexSettingsErr := s.updateFinderIndexSettings(payload)
+	if indexSettingsErr != nil {
+		slog.Error("Finder index settings update failed", "error", indexSettingsErr)
+		jsonResponse(w, http.StatusServiceUnavailable, typedError("Finder index settings unavailable", "common.requestFailed", true))
+		return
+	}
+	s.indexSettingsMu.RLock()
+	indexSettingsFencePending := s.indexSettingsFencePending
+	indexSettingsFencePreserveSnapshots := s.indexSettingsFencePreserveSnapshots
+	indexSettings := s.indexSettings
+	s.indexSettingsMu.RUnlock()
+	if r.Method == http.MethodPost && (indexSettingsChanged || indexSettingsFencePending) && s.searchIndex != nil {
+		s.indexSettingsMu.RLock()
+		roots := append(append([]string(nil), s.indexSettingsFenceRoots...), previousIndexRoots...)
+		roots = append(roots, indexSettings.roots...)
+		s.indexSettingsMu.RUnlock()
+		uniqueRoots := uniqueFinderIndexRoots(roots)
+		for _, root := range uniqueRoots {
+			s.stopFinderIndexMonitor(root)
+		}
+		if err := s.searchIndex.FenceSettings(r.Context(), uniqueRoots, indexSettings.revision, indexSettingsFencePreserveSnapshots); err != nil {
+			jsonResponse(w, http.StatusServiceUnavailable, typedError("Finder index settings are still being fenced", "common.requestFailed", true))
+			return
+		}
+		s.indexSettingsMu.Lock()
+		s.indexSettingsFencePending = false
+		s.indexSettingsFencePreserveSnapshots = false
+		s.indexSettingsFenceRoots = nil
+		s.indexSettingsMu.Unlock()
 	}
 	if r.Method == http.MethodPost && s.finder != nil {
 		s.finder.SetUploadLimits(finder.UploadLimits{
@@ -4496,12 +4782,15 @@ func (s *server) killSession(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		name = r.FormValue("session")
 	}
+	s.tmuxRosterFetchMu.Lock()
+	defer s.tmuxRosterFetchMu.Unlock()
 	err := s.tmuxCommand("kill-session", "-t", name).Run()
 	if err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "session": name})
+	topology := s.refreshTmuxMetadataAfterMutationLocked()
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "session": name, "sessions": topology.sessions, "topology_generation": topology.generation})
 }
 
 func (s *server) renameSession(w http.ResponseWriter, r *http.Request) {
@@ -4590,8 +4879,7 @@ func (s *server) renameSession(w http.ResponseWriter, r *http.Request) {
 		writeRenameError(http.StatusInternalServerError, "status.sessionRenameFailed", "session rename failed: "+message, map[string]any{"error": message})
 		return
 	}
-	roster, refreshErr := s.tmuxSessionRosterSnapshotLocked(true)
-	topology, refreshErr = s.tmuxTopologyFromRoster(roster, refreshErr)
+	topology, refreshErr := s.confirmTmuxTopologyAfterMutationLocked()
 	if refreshErr != nil {
 		slog.Warn("tmux topology refresh failed after session rename", "session", newName, "error", refreshErr)
 		cached := s.cachedTmuxSessionRosterSnapshot()
@@ -4605,6 +4893,7 @@ func (s *server) renameSession(w http.ResponseWriter, r *http.Request) {
 		writeRenameError(http.StatusConflict, "status.sessionRenameFailed", "session changed during rename; refresh and try again", map[string]any{"error": "renamed session is no longer present"})
 		return
 	}
+	s.queueMetadataRefresh(false, topology.sessions, topology.identities, refreshErr, topology.generation)
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"session": session, "new_session": currentName, "renamed": true, "sessions": topology.sessions,
 		"topology_generation": topology.generation, "ok": true,
@@ -4734,6 +5023,9 @@ func (s *server) tmuxCommand(args ...string) *exec.Cmd {
 }
 
 func (s *server) tmuxCommandContext(ctx context.Context, args ...string) *exec.Cmd {
+	if s.tmuxCommandContextFn != nil {
+		return s.tmuxCommandContextFn(ctx, args...)
+	}
 	return tmuxcmd.Command(ctx, tmuxcmd.Args(args...)[1:]...)
 }
 
@@ -5070,8 +5362,9 @@ func (s *server) handleMessage(stdin io.Writer, pty *ptyPair, process *exec.Cmd,
 		if msg.Rows > 0 && msg.Cols > 0 {
 			rows := clampDimension(msg.Rows, 2, 300, 36)
 			cols := clampDimension(msg.Cols, 20, 500, 120)
+			changed := pty.rows != rows || pty.cols != cols
 			if pty.resize(rows, cols) == nil {
-				if process.Process != nil {
+				if changed && process.Process != nil {
 					_ = process.Process.Signal(syscall.SIGWINCH)
 				}
 				if msg.Activate || (msg.Foreground != nil && *msg.Foreground) {

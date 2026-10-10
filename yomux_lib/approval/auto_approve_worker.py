@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import random
-import re
 import subprocess
 import threading
 import time
@@ -17,6 +16,7 @@ from typing import Any
 from typing import Callable
 
 from tools import auto_approve_tmux
+from tools.product_environment import product_env
 
 from ..tmux.agent_tui import AgentPaneState
 from ..tmux.agent_tui import classify_agent_pane
@@ -45,9 +45,9 @@ EXPECTED_EVENT_CALLBACK_ERRORS = (OSError,)
 
 
 def auto_approve_lock_path(target: str) -> Path:
-    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", target).strip("._-")[:60] or "session"
-    digest = hashlib.sha256(target.encode("utf-8")).hexdigest()[:12]
-    return AUTO_APPROVE_LOCK_DIR / f"auto-approve-{safe}-{digest}.lock"
+	socket = product_env("TMUX_SOCKET", "", environ=os.environ).strip() or "default-tmux-server"
+	digest = hashlib.sha256(f"{socket}\0{target}".encode("utf-8")).hexdigest()[:32]
+	return AUTO_APPROVE_LOCK_DIR / f"auto-approve-{digest}.lock"
 
 
 def auto_approve_lock_message(owner: dict[str, Any] | None) -> str:

@@ -1,3 +1,4 @@
+import pytest
 import json
 import os
 from pathlib import Path
@@ -558,6 +559,8 @@ def test_language_setting_accepts_names_and_endonyms():
     assert sanitize_settings({"general": {"language": "日本語"}})["general"]["language"] == "ja"
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_yoagent_deterministic_preference_alias_write_fixtures():
     payload = {"settings": default_settings(), "defaults": default_settings(), "catalog": settings_catalog(default_settings())}
     cases = [
@@ -583,6 +586,8 @@ def test_yoagent_deterministic_preference_alias_write_fixtures():
         assert intent["value"] == value, question
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_yoagent_deterministic_routing_alias_fixtures():
     wait = parse_yoagent_action_intent("wait for session 4, send it date, and tell me what it says", [], ["4"])
     direct = parse_yoagent_action_intent("send date to session 6 and tell me what it says", [], ["6"])
@@ -735,6 +740,8 @@ def test_login_locale_picker_writes_general_language():
         save_login_locale("system")  # reset so the shared test config dir isn't left in Chinese
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_deterministic_yoagent_reply_localizes_framing():
     # The no-agent fallback resolves both framing and per-session facts through the active locale.
     en_reply = deterministic_yoagent_reply("status?", {}, {}, "en")
@@ -816,7 +823,7 @@ def test_stale_saved_poll_defaults_migrate_to_current_defaults():
     rounded_directory_legacy = sanitize_settings({"performance": {"server_directory_event_poll_ms": 5000}})
     assert rounded_directory_legacy["performance"]["server_directory_event_poll_ms"] == defaults["performance"]["server_directory_event_poll_ms"]
     stale_index_refresh = sanitize_settings({"file_explorer": {"index_refresh_seconds": 120}})
-    assert stale_index_refresh["file_explorer"]["index_refresh_seconds"] == 300
+    assert stale_index_refresh["file_explorer"]["index_refresh_seconds"] == 60
 
     custom = sanitize_settings({
         "performance": {

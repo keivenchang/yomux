@@ -1222,23 +1222,36 @@ function syncFileExplorerAfterTerminalActivation(session) {
   return true;
 }
 
-function scheduleTerminalActivationFollowup(session, generation) {
+function scheduleTerminalActivationFollowup(session, generation, gesture = null) {
+  if (!gesture?.resizeAuthorityScheduled) {
+    if (gesture) gesture.resizeAuthorityScheduled = true;
+    scheduleVisibleTerminalResizeAuthority();
+  }
   scheduleTabSwitchPhaseTwo(generation, () => {
-    claimVisibleTerminalResizeAuthority('terminal-tab', {force: true});
     syncFileExplorerAfterTerminalActivation(session);
   });
 }
 
-function commitUserTerminalTabActivation(session, focusOptions = {}, generation = nextTabSwitchHighlightGeneration()) {
+function acknowledgeUserTerminalTabActivation(session, options = {}, gesture = null) {
+  if (!gesture?.attentionAttempted) {
+    if (gesture) gesture.attentionAttempted = true;
+    acknowledgeTerminalAttentionFromUserAction(session, null, options);
+  }
+  return {...options, acknowledgeAgentWindow: false, acknowledgePromptAttention: false};
+}
+
+function commitUserTerminalTabActivation(session, focusOptions = {}, generation = nextTabSwitchHighlightGeneration(), gesture = null) {
   dockviewBeginTabActivationPerf(session);
   activateTab(session, 'terminal', {...focusOptions, userInitiated: true, syncFinder: false});
   rememberFileExplorerExplicitSyncSession(session);
   dockviewFinishTabActivationPerf(session);
-  scheduleTerminalActivationFollowup(session, generation);
+  scheduleTerminalActivationFollowup(session, generation, gesture);
 }
 
 function activatePaneTab(side, session, options = {}) {
   if (!layoutSlotKeys().includes(side) || !itemInLayout(session)) return;
+  if (options.userInitiated === true && isTmuxSession(session)
+      && typeof dockviewActivateUserTerminalTab === 'function' && dockviewActivateUserTerminalTab(session, options)) return;
   const focusOptions = {...options};
   if (options.userInitiated === true) {
     dismissSessionToasts(session);
@@ -1247,9 +1260,7 @@ function activatePaneTab(side, session, options = {}) {
       // Capture the red/yellow generation at the actual tab click. Waiting for the deferred
       // terminal focus can leave a visibly opened pane unacknowledged, or acknowledge a newer
       // child after tmux/status state advances.
-      acknowledgeTerminalAttentionFromUserAction(session, null, options);
-      focusOptions.acknowledgeAgentWindow = false;
-      focusOptions.acknowledgePromptAttention = false;
+      Object.assign(focusOptions, acknowledgeUserTerminalTabActivation(session, options));
     }
   }
   if (options.userInitiated === true && isTmuxSession(session)) {
@@ -2745,6 +2756,19 @@ function terminalCanPublishRemoteSize() {
 
 let lastTerminalResizeAuthoritySignature = '';
 let terminalResizeAuthorityHandlersInstalled = false;
+let terminalResizeAuthorityFrame = 0;
+
+function scheduleVisibleTerminalResizeAuthority() {
+  if (terminalResizeAuthorityFrame) return;
+  // Pointer, pane focus, and Dockview activation converge after the first paint.
+  // Finder generations must never cancel tmux ownership recovery on a body click.
+  terminalResizeAuthorityFrame = requestAnimationFrame(() => {
+    terminalResizeAuthorityFrame = requestAnimationFrame(() => {
+      terminalResizeAuthorityFrame = 0;
+      claimVisibleTerminalResizeAuthority('interaction', {force: true});
+    });
+  });
+}
 
 function visibleTerminalResizeAuthorityEntries() {
   if (!terminalCanPublishRemoteSize()) return [];
@@ -2774,15 +2798,18 @@ function claimVisibleTerminalResizeAuthority(reason = '', options = {}) {
 function installTerminalResizeAuthorityHandlers() {
   if (terminalResizeAuthorityHandlersInstalled) return;
   terminalResizeAuthorityHandlersInstalled = true;
-  window.addEventListener('focus', () => claimVisibleTerminalResizeAuthority('window-focus', {force: true}));
+  window.addEventListener('focus', () => scheduleVisibleTerminalResizeAuthority());
   // Another YOmux server can change tmux's shared ignore-size flags without changing this
   // browser's local dimensions. Every foreground pointer transition must therefore cross the
   // socket instead of trusting lastTerminalResizeAuthoritySignature.
-  window.addEventListener('pointerdown', () => {
-    scheduleTabSwitchPhaseTwo(tabSwitchHighlightGeneration, () => claimVisibleTerminalResizeAuthority('pointerdown', {force: true}));
+  window.addEventListener('pointerdown', event => {
+    // Tab release commits activation through the same owner; renewing while the tab is held
+    // would claim the previous pane and renew the destination twice across a slow click.
+    if (event.target?.closest?.('[data-pane-tab], [data-tabber-session]')) return;
+    scheduleVisibleTerminalResizeAuthority();
   }, {capture: true});
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') claimVisibleTerminalResizeAuthority('visible', {force: true});
+    if (document.visibilityState === 'visible') scheduleVisibleTerminalResizeAuthority();
   });
 }
 
@@ -2793,13 +2820,14 @@ function fitTerminal(session, options = {}) {
   const size = estimateTerminalSize(item.container, item.term);
   const signature = terminalFitSignature(size);
   const claim = options.claim === true;
-  if (options.force !== true && !claim && terminalFitIsUnchanged(item, size)) return;
+  const unchanged = terminalFitIsUnchanged(item, size);
+  if (options.force !== true && !claim && unchanged) return;
   item.lastFitSignature = signature;
   const changed = item.term.cols !== size.cols || item.term.rows !== size.rows;
   if (changed) item.term.resize(size.cols, size.rows);
   if (claim) sendRemoteResize(session, {activate: true});
   else if (changed) scheduleRemoteResize(session);
-  refreshTerminal(session);
+  if (!unchanged || options.force === true) refreshTerminal(session);
 }
 
 function sendRemoteResize(session, options = {}) {
@@ -2809,6 +2837,11 @@ function sendRemoteResize(session, options = {}) {
   const message = {type: 'resize', cols: item.term.cols, rows: item.term.rows, foreground: true};
   if (options.activate === true) message.activate = true;
   if (browserClientId) message.client = browserClientId;
+  if (item.resizeTimer) {
+    clearTimeout(item.resizeTimer);
+    tmuxSessionLifecycleReleaseTimer(item.sessionLifecycleToken, item.resizeTimer);
+    item.resizeTimer = null;
+  }
   item.socket.send(JSON.stringify(message));
   item.remoteResizePending = false;
   return true;
@@ -2836,28 +2869,52 @@ function scheduleRemoteResize(session, delay = remoteResizeDelayMs, options = {}
   tmuxSessionLifecycleOwnTimer(lifecycleToken, item.resizeTimer);
 }
 
-function forceRemoteResize(session) {
-  const item = terminals.get(session);
-  if (!item) return false;
-  if (item.resizeTimer) {
-    clearTimeout(item.resizeTimer);
-    item.resizeTimer = null;
-  }
-  return sendRemoteResize(session);
-}
 
-function refreshTerminal(session) {
+function refreshTerminal(session, options = {}) {
   const item = terminals.get(session);
   if (!item?.term) return;
-  requestAnimationFrame(() => {
-    try { item.term.refresh(0, Math.max(0, item.term.rows - 1)); } catch (_) {}
+  if (item.refreshPending) {
+    item.refreshVisibleOnly = item.refreshVisibleOnly && options.visibleOnly === true;
+    if (options.afterParse) item.refreshAfterParse.push(options.afterParse);
+    else return;
+  } else {
+    item.refreshPending = true;
+    item.refreshVisibleOnly = options.visibleOnly === true;
+    item.refreshAfterParse = options.afterParse ? [options.afterParse] : [];
+  }
+  // Activation must fence output queued since an earlier fit requested a refresh.
+  // Superseding that fence keeps all subscribers on one final viewport repaint.
+  const generation = item.refreshParseGeneration = (item.refreshParseGeneration || 0) + 1;
+  const parsed = () => {
+    if (terminals.get(session) !== item || item.refreshParseGeneration !== generation) return;
+    const callbacks = item.refreshAfterParse;
+    item.refreshAfterParse = [];
+    // A request after this fence needs a new fence for any newly queued output.
+    // Keeping the parsing owner alive until paint strands late subscribers.
+    item.refreshPending = false;
+    if (item.refreshVisibleOnly && !terminalIsVisible(session, item.container, {measure: false})) {
+      return;
+    }
+    for (const callback of callbacks) callback();
+    // xterm already owns an animation-frame renderer; another frame here delays activation.
+    item.term.refresh(0, Math.max(0, item.term.rows - 1));
+    scheduleTerminalReferenceUnderlineRepaint(session);
     syncTerminalAttentionHighlight(session);
-  });
+  };
+  // One parse fence and viewport refresh serve fit, activation, and paint completion.
+  if (typeof item.term.write === 'function') item.term.write('', parsed);
+  else parsed();
 }
 
-function terminalIsVisible(session, container) {
+function terminalIsVisible(session, container, options = {}) {
   if (!container) return false;
   const pane = document.getElementById(`terminal-pane-${session}`);
+  // Refresh does not need dimensions: xterm owns rendering and fit/recovery own
+  // physical geometry. A parse callback may run inside the activation handler.
+  if (options.measure === false) {
+    return Boolean(pane?.classList.contains(CLS.active)
+      && container.isConnected !== false && itemIsActivePaneTab(session));
+  }
   return Boolean(
     pane?.classList.contains(CLS.active)
     && container.clientWidth > 40
@@ -3422,18 +3479,20 @@ function scheduleTerminalBlankScreenRefresh(session, options = {}) {
 function scheduleFit(session) {
   const item = terminals.get(session);
   if (item) {
-    if (item.fitFrame) cancelAnimationFrame(item.fitFrame);
+    if (item.fitFrame) return;
     if (item.fitTimer) clearTimeout(item.fitTimer);
     // C12 F3: one rAF fit for the common fast case + a SINGLE trailing fit to catch a late layout settle
     // (was rAF + 80ms + 250ms = three fits per resize). fitTerminal already skips the remote resize when
     // cols/rows are unchanged, so the trailing fit is a cheap no-op when nothing actually moved.
     item.fitFrame = requestAnimationFrame(() => {
       item.fitFrame = 0;
+      if (terminals.get(session) !== item) return;
       fitTerminal(session);
       scheduleTerminalBlankScreenRefresh(session, {reason: 'fit'});
     });
     item.fitTimer = setTimeout(() => {
       item.fitTimer = 0;
+      if (terminals.get(session) !== item) return;
       fitTerminal(session);
       scheduleTerminalBlankScreenRefresh(session, {reason: 'fit'});
     }, 250);
@@ -3853,6 +3912,8 @@ function closeTerminalItem(session, item) {
   item.fileUnderlineController?.dispose?.();
   item.containerBindingDispose?.();
   item.fitFrame = 0;
+  item.refreshPending = false;
+  item.refreshAfterParse = [];
   item.fitTimer = 0;
   item.blankScreenRefreshTimer = 0;
   item.attentionHighlightFrame = 0;

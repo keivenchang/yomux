@@ -18,6 +18,9 @@ from yomux_lib.stats_current import storage
 from yomux_lib.stats_current.storage import Observation
 from yomux_lib.stats_current.storage import UsageAtom
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 CAPACITIES = storage.stats_resolution.RING_CAPACITIES
 

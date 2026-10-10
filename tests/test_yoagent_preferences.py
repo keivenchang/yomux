@@ -13,7 +13,8 @@ from yomux_lib.yoagent.preferences import product_capability_locale_key
 from yomux_lib.yoagent.preferences import yoagent_operator_response
 
 
-pytestmark = pytest.mark.usefixtures("isolated_yoagent_conversation_state")
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = [pytest.mark.usefixtures("isolated_yoagent_conversation_state"), pytest.mark.deprecated_python_server]
 
 
 @pytest.fixture(autouse=True)

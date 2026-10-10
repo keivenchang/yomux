@@ -10,6 +10,9 @@ import pytest
 from yomux_lib import app as app_module
 from yomux_lib.infra.background_scheduler import BACKGROUND_ROLE_SESSION_FILES, BackgroundScheduler
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def test_app_constructs_exactly_one_local_scheduler(monkeypatch):
     created: list[BackgroundScheduler] = []

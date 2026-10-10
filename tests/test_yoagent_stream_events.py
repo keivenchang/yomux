@@ -13,6 +13,11 @@ from yomux_lib.yoagent.stream_events import normalize_codex_app_server_message
 from yomux_lib.yoagent.stream_events import yoagent_stream_event_auxiliary_item
 from yomux_lib.yoagent.stream_events import yoagent_stream_event_auxiliary_line
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def test_codex_app_server_stream_events_cover_answer_reasoning_tool_and_approval():
     messages = [

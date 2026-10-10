@@ -32,7 +32,9 @@ go_library(
         "//internal/stats:stats_lib",
         "//internal/tmuxcmd:tmuxcmd_lib",
         "//internal/work:work_lib",
+        "//internal/yolo:yolo_lib",
         SQLITE,
+        "@in_gopkg_yaml_v3//:go_default_library",
         "@org_golang_x_sys//unix",
     ],
 )
@@ -49,7 +51,10 @@ alias(
 
 go_test_pair(
     name = "yomux_go",
-    srcs = glob(["*_test.go"]),
+    srcs = glob(
+        ["*_test.go"],
+        exclude = ["agent_window_browser_test.go"],
+    ),
     data = ["//:go_cmd_test_support"],
     embed = [":yomux_go_lib"],
     race_shard_count = 4,
@@ -66,4 +71,23 @@ go_binary(
     name = "yomux_go_race",
     embed = [":yomux_go_lib"],
     race = "on",
+)
+
+go_test(
+    name = "agent_window_browser_test",
+    size = "medium",
+    timeout = "moderate",
+    srcs = ["agent_window_browser_test.go"],
+    data = ["//:go_browser_runtime"],
+    embed = [":yomux_go_lib"],
+    env = {"YOMUX_REPO_ROOT_RUNFILE": "yomux/go_browser_runtime"},
+    tags = [
+        "cpu:8",
+        "requires_chrome",
+    ],
+    deps = [
+        "//internal/capabilities:capabilities_lib",
+        "//internal/stats:stats_lib",
+        "//internal/testsupport:testsupport_lib",
+    ],
 )

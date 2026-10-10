@@ -127,6 +127,8 @@ def _consume_deliberate_browser_http_error(harness: Any, *, path: str, status: i
     )
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_api_journey_gate_fires_on_injected_nonexistent_route(api_sweep_browser: Any) -> None:
     """Forced red: one real 404 carries method, route, status, and body into the gate failure."""
 
@@ -182,6 +184,8 @@ def test_api_journey_gate_fires_on_injected_nonexistent_route(api_sweep_browser:
     assert "GET /api/ping" in clean["observedRoutes"], clean
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_authenticated_normal_session_journey_has_no_unowned_non_2xx(
     api_sweep_browser: Any,
     api_sweep_workspace: dict[str, Path],

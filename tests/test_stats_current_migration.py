@@ -26,6 +26,9 @@ from yomux_lib.stats_current.storage import Store
 from yomux_lib.stats_current.storage import SchemaTooNewError
 from yomux_lib.stats_current.storage import UsageAtom
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def _component(event_id: str, quantity: int, *, timestamp: float = 100) -> dict[str, object]:
     return {

@@ -326,6 +326,8 @@ func TestPricingCatalogInfersOnlyPythonReviewedModelSuffixes(t *testing.T) {
 }
 
 func TestPricingCatalogPackagedMergeMatchesPythonForEveryModelAndRate(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	scriptPath := filepath.Join(t.TempDir(), "pricing-catalog-oracle.py")
 	const oracle = `import json
 from yomux_lib.observability.pricing_catalog import load_packaged_seed
@@ -425,6 +427,8 @@ func TestPricingResolverMatchesPythonRoutedAndSubscriptionCases(t *testing.T) {
 }
 
 func TestPricingResolverProjectionMatchesPythonOnOneSharedFixture(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	root := t.TempDir()
 	fixturePath := filepath.Join(root, "pricing-fixture.json")
 	scriptPath := filepath.Join(root, "pricing-oracle.py")

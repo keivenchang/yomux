@@ -26,6 +26,9 @@ from yomux_lib import filesystem
 from yomux_lib.filesystem import paths
 from yomux_lib.infra import batchd
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 BLOCKED_SENTINEL = "BLOCKED_SENTINEL_DO_NOT_EXPOSE"
 
 

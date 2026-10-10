@@ -77,6 +77,7 @@ def test_lifecycle_scope_cancels_native_animation_frames_without_illegal_receive
         browser.switch_to.window(original_handle)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_shared_tree_columns_preserve_unchanged_native_text_nodes(browser, monkeypatch, tmp_path):
     runtime = start_isolated_browser_app(monkeypatch, tmp_path)
@@ -154,6 +155,7 @@ def saved_layout_search(session, finder_root):
     })
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_full_bundle_boot_smoke_matrix_never_renders_a_blank_page(browser, monkeypatch, tmp_path):
     finder_root = tmp_path / "finder-root"
@@ -215,6 +217,7 @@ def test_full_bundle_boot_smoke_matrix_never_renders_a_blank_page(browser, monke
         stop_browser_fixture(successor_server, successor_thread, successor_runtime, browser=browser)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_hard_loaded_yoagent_keeps_activity_summary_disabled_without_requests_or_spinner(browser, monkeypatch, tmp_path):
     runtime = start_isolated_browser_app(monkeypatch, tmp_path)
@@ -270,6 +273,7 @@ def test_hard_loaded_yoagent_keeps_activity_summary_disabled_without_requests_or
         stop_browser_fixture(server, thread, runtime, browser=browser)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_real_xterm_trusted_touch_long_press_selects_extends_and_offers_copy(browser, monkeypatch, tmp_path):
     """CDP touch input must traverse the bridge, actual xterm selection, and copy menu."""
@@ -386,6 +390,7 @@ def test_real_xterm_trusted_touch_long_press_selects_extends_and_offers_copy(bro
         ),
     ],
 )
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_real_xterm_mobile_input_survives_pan_preview_pane_accessory_keyboard_and_rotation(browser, monkeypatch, tmp_path, mobile_viewports):
     preview_path = tmp_path / "mobile-preview.md"
@@ -1125,6 +1130,7 @@ def test_real_xterm_mobile_input_survives_pan_preview_pane_accessory_keyboard_an
         stop_browser_fixture(server, thread, runtime, browser=browser)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_real_xterm_terminal_reference_scan_stays_bounded_under_latency(browser, monkeypatch, tmp_path):
     """A long xterm scrollback must not stall discovery, repaint, or concurrent health latency."""
@@ -1210,6 +1216,7 @@ def test_real_xterm_terminal_reference_scan_stays_bounded_under_latency(browser,
         stop_browser_fixture(server, thread, runtime, browser=browser)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_real_xterm_renders_tmux_output_and_survives_pane_resize(browser, monkeypatch, tmp_path):
     """One isolated HTTP/WS smoke covers the real xterm path that fixture FakeTerminal cannot."""
@@ -1409,6 +1416,7 @@ def test_real_xterm_renders_tmux_output_and_survives_pane_resize(browser, monkey
         stop_browser_fixture(server, thread, runtime, browser=browser)
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 @pytest.mark.deprecated_python_server
 def test_real_xterm_opencode_touch_scroll_matches_wheel_and_does_not_move_outer_page(browser, monkeypatch, tmp_path):
     """The OpenCode touch route must move xterm's local buffer, not an outer scrollport."""

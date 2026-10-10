@@ -9,6 +9,11 @@ from yomux_lib.infra.host_identity import HostIdentity
 from yomux_lib.workspace import session_files
 from yomux_lib.yoagent import conversation
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def _host(stable_host_id: str) -> HostIdentity:
     return HostIdentity(

@@ -42,18 +42,38 @@ type goHealthLedgerSnapshot struct {
 	latencyMax        time.Duration
 }
 
-const goHealthHistorySchemaVersion = 1
+const goHealthHistorySchemaVersion = 2
+
+const goHealthLifecycleEventLimit = 128
+
+type goHealthLifecycleEvent struct {
+	Kind                       string `json:"kind"`
+	Epoch                      string `json:"epoch"`
+	PID                        int    `json:"pid"`
+	AtUnixNano                 int64  `json:"at_unix_nano"`
+	StartReason                string `json:"start_reason,omitempty"`
+	PreviousEpoch              string `json:"previous_epoch,omitempty"`
+	PreviousPID                int    `json:"previous_pid,omitempty"`
+	PreviousShutdownObserved   bool   `json:"previous_shutdown_observed"`
+	PreviousShutdownClean      bool   `json:"previous_shutdown_clean"`
+	PreviousShutdownSignal     string `json:"previous_shutdown_signal,omitempty"`
+	PreviousShutdownExitStatus *int   `json:"previous_shutdown_exit_status,omitempty"`
+	TerminationSignal          string `json:"termination_signal,omitempty"`
+	ExitStatus                 *int   `json:"exit_status,omitempty"`
+	Clean                      bool   `json:"clean"`
+}
 
 type goHealthHistoryDocument struct {
-	SchemaVersion          int    `json:"schema_version"`
-	ProcessStartCount      uint64 `json:"process_start_count"`
-	RestartCount           uint64 `json:"restart_count"`
-	DemandStartCount       uint64 `json:"demand_start_count"`
-	UnexpectedRestartCount uint64 `json:"unexpected_restart_count"`
-	LastEpoch              string `json:"last_epoch"`
-	LastPID                int    `json:"last_pid"`
-	LastStartedAt          int64  `json:"last_started_at"`
-	LastCleanShutdown      bool   `json:"last_clean_shutdown"`
+	SchemaVersion          int                      `json:"schema_version"`
+	ProcessStartCount      uint64                   `json:"process_start_count"`
+	RestartCount           uint64                   `json:"restart_count"`
+	DemandStartCount       uint64                   `json:"demand_start_count"`
+	UnexpectedRestartCount uint64                   `json:"unexpected_restart_count"`
+	LastEpoch              string                   `json:"last_epoch"`
+	LastPID                int                      `json:"last_pid"`
+	LastStartedAt          int64                    `json:"last_started_at"`
+	LastCleanShutdown      bool                     `json:"last_clean_shutdown"`
+	Events                 []goHealthLifecycleEvent `json:"events,omitempty"`
 }
 
 type goHealthLifecycleSnapshot struct {
@@ -139,6 +159,27 @@ func newGoHealthLifecycle(path, epoch string, pid int, startedAt time.Time, star
 			snapshot.Available = false
 		}
 	}
+	startEvent := goHealthLifecycleEvent{
+		Kind:        "start",
+		Epoch:       epoch,
+		PID:         pid,
+		AtUnixNano:  startedAt.UnixNano(),
+		StartReason: startReason,
+	}
+	if priorOK {
+		startEvent.PreviousEpoch = prior.LastEpoch
+		startEvent.PreviousPID = prior.LastPID
+		startEvent.PreviousShutdownClean = prior.LastCleanShutdown
+		if len(prior.Events) > 0 {
+			lastEvent := prior.Events[len(prior.Events)-1]
+			if lastEvent.Kind == "shutdown" && lastEvent.Epoch == prior.LastEpoch {
+				startEvent.PreviousShutdownObserved = true
+				startEvent.PreviousShutdownSignal = lastEvent.TerminationSignal
+				startEvent.PreviousShutdownExitStatus = lastEvent.ExitStatus
+			}
+		}
+	}
+	current.Events = appendGoHealthLifecycleEvent(current.Events, startEvent)
 	current.LastEpoch = epoch
 	current.LastPID = pid
 	current.LastStartedAt = startedAt.Unix()
@@ -169,10 +210,20 @@ func readGoHealthHistory(path string) (goHealthHistoryDocument, bool, string) {
 		return goHealthHistoryDocument{}, false, "history_read_failed"
 	}
 	var document goHealthHistoryDocument
-	if json.Unmarshal(data, &document) != nil || document.SchemaVersion != goHealthHistorySchemaVersion || document.ProcessStartCount == 0 || document.LastEpoch == "" || document.LastPID <= 0 || document.LastStartedAt <= 0 || document.DemandStartCount+document.UnexpectedRestartCount > document.RestartCount {
+	if json.Unmarshal(data, &document) != nil || (document.SchemaVersion != 1 && document.SchemaVersion != goHealthHistorySchemaVersion) || document.ProcessStartCount == 0 || document.LastEpoch == "" || document.LastPID <= 0 || document.LastStartedAt <= 0 || document.DemandStartCount+document.UnexpectedRestartCount > document.RestartCount {
 		return goHealthHistoryDocument{}, false, "history_corrupt"
 	}
+	if len(document.Events) > goHealthLifecycleEventLimit {
+		document.Events = append([]goHealthLifecycleEvent(nil), document.Events[len(document.Events)-goHealthLifecycleEventLimit:]...)
+	}
 	return document, true, ""
+}
+
+func appendGoHealthLifecycleEvent(events []goHealthLifecycleEvent, event goHealthLifecycleEvent) []goHealthLifecycleEvent {
+	if len(events) >= goHealthLifecycleEventLimit {
+		events = append([]goHealthLifecycleEvent(nil), events[len(events)-goHealthLifecycleEventLimit+1:]...)
+	}
+	return append(events, event)
 }
 
 func (l *goHealthLifecycle) persistLocked() error {
@@ -186,13 +237,23 @@ func (l *goHealthLifecycle) persistLocked() error {
 	return atomicfile.Write(l.path, data)
 }
 
-func (l *goHealthLifecycle) markCleanShutdown() {
+func (l *goHealthLifecycle) markShutdown(signal string, exitStatus int, clean bool, at time.Time) {
 	if l == nil {
 		return
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.current.LastCleanShutdown = true
+	status := exitStatus
+	l.current.Events = appendGoHealthLifecycleEvent(l.current.Events, goHealthLifecycleEvent{
+		Kind:              "shutdown",
+		Epoch:             l.current.LastEpoch,
+		PID:               l.current.LastPID,
+		AtUnixNano:        at.UnixNano(),
+		TerminationSignal: signal,
+		ExitStatus:        &status,
+		Clean:             clean,
+	})
+	l.current.LastCleanShutdown = clean
 	if err := l.persistLocked(); err != nil {
 		l.snapshot.PersistenceState = "degraded"
 		l.snapshot.PersistenceReasonCode = "shutdown_history_write_failed"
@@ -328,9 +389,9 @@ func (s *server) goHealthLifecycleSnapshot() goHealthLifecycleSnapshot {
 	return s.healthLifecycle.snapshotNow()
 }
 
-func (s *server) markGoHealthCleanShutdown() {
+func (s *server) markGoHealthShutdown(signal string, exitStatus int, clean bool, at time.Time) {
 	if s != nil {
-		s.healthLifecycle.markCleanShutdown()
+		s.healthLifecycle.markShutdown(signal, exitStatus, clean, at)
 	}
 }
 

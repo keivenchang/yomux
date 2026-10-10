@@ -5,6 +5,11 @@ import threading
 
 from yomux_lib import events
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def use_temp_state(monkeypatch, tmp_path):
     monkeypatch.setattr(events, "CONFIG_DIR", tmp_path)

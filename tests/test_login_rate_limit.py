@@ -13,6 +13,9 @@ from yomux_lib import login_rate_limit as lrl
 from yomux_lib.login_rate_limit import LoginRatePolicy
 from yomux_lib.login_rate_limit import LoginRateLimiter
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 class FakeClock:
     def __init__(self, start: float = 1_000_000.0):

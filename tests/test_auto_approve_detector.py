@@ -648,6 +648,8 @@ def test_auto_approve_tmux_reexports_detector_helpers():
     assert auto_approve_tmux.model_capacity_notice_visible is prompt_detector.model_capacity_notice_visible
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_approval_detection_pipeline_has_one_shared_owner():
     # The read-path (app.py), the act-path worker (via the auto_approve_tmux module seam), and the CLI
     # must all run the SAME detection functions — no parallel re-implementation. Detection lives in
@@ -1215,6 +1217,8 @@ def test_mock_codex_3_option_approve_targets_option_1_yes():
     assert prompt_detector.action_for_bash_prompt(MOCK_CODEX_YESNO_PROMPT) == "option1"
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_mock_codex_3_option_worker_walks_to_option_1():
     # Y8 act-path: the worker derives the target option from the approve action and walks the highlight
     # to `1. Yes` (not `2`, not `3. No`), re-verifies it landed on 1, then confirms. Drives the worker's

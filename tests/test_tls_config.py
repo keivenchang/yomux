@@ -20,6 +20,9 @@ from yomux_lib.server import https_redirect_response
 from yomux_lib.infra.root_paths import YomuxRoots
 from yomux_lib.server_lease import acquire_instance_and_port_leases
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def cli_args(**overrides):
     values = {
@@ -244,6 +247,7 @@ def test_exec_go_backend_forwards_dangerous_yolo_to_binary(monkeypatch, tmp_path
         str(binary), "--host", "0.0.0.0", "--port", "7221", "--root",
         str(repo_root), "--config", str(cli._YOMUX_ROOTS.config_dir),
         "--dangerously-yolo",
+        "--launch-lease-fds", ",".join(str(fd) for fd in lease_descriptors),
     ]
     assert captured["lease_inheritable"] == [True, True]
     assert sorted(released) == sorted(lease_descriptors)

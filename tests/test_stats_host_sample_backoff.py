@@ -13,6 +13,11 @@ from __future__ import annotations
 from yomux_lib.stats_current import host_collectors
 from yomux_lib.stats_current import service as service_module
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 class _Store:
     """Minimal publisher: the sampler only appends, and these tests read the deadline."""

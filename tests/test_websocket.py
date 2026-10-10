@@ -4,7 +4,12 @@ import socket
 import ssl
 import struct
 
+import pytest
+
 from yomux_lib import websocket
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
 
 
 def masked_client_frame(payload: bytes, opcode: int = 1, mask: bytes = b"\x01\x02\x03\x04", fin: bool = True) -> bytes:

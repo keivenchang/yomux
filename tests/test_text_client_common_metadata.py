@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
+import pytest
 import ast
 import json
 import re
@@ -514,6 +515,8 @@ def test_text_client_normalized_events_match_shared_agent_comms(capsys):
     capsys.readouterr()
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_yoagent_response_detail_rows_report_codex_transport_timing():
     details = yoagent_response_detail_rows({
         "backend_used": "codex",

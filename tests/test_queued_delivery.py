@@ -15,6 +15,9 @@ from yomux_lib.observability.queued_delivery import QueuedDeliveryLedger
 from yomux_lib.observability.queued_delivery import compact_queued_delivery_journal
 from yomux_lib.infra.state_services import BatchedOperationFlight
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def accept_queued_operation(ledger, suffix, **overrides):
     options = {

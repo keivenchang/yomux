@@ -8,6 +8,11 @@ from yomux_lib.stats_current import materializer, storage
 from yomux_lib.stats_current import pricing
 from yomux_lib.stats_current import service as service_module
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 class CountingTuple(tuple):
     def __new__(cls, values):

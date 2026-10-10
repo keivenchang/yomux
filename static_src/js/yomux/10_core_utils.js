@@ -2331,9 +2331,11 @@ function normalizeAppViewport(value, fallback = null) {
   return {width, height, w: width, h: height};
 }
 
-function nativeViewport() {
+function nativeViewport({widthOnly = false} = {}) {
   const doc = document.documentElement || {};
   const width = Math.max(1, Math.round(Number(window.innerWidth) || Number(doc.clientWidth) || 1)); // static-build-allow-window-viewport
+  // Width-only layout policy must not flush dirty panes through visual height reads.
+  if (widthOnly) return {width, w: width};
   const layoutHeight = Math.max(1, Math.round(Number(window.innerHeight) || Number(doc.clientHeight) || 1)); // static-build-allow-window-viewport
   const visualViewport = window.visualViewport;
   const visualHeight = Math.max(0, Math.round(Number(visualViewport?.height) || 0));
@@ -4147,7 +4149,7 @@ function acknowledgeTerminalAttentionFromUserAction(session, windowIndex = null,
       delayMs: acknowledgeDelayMs,
     }) || acknowledged;
   }
-  if (options.acknowledgePromptAttention !== false && typeof clearPromptAttentionForSession === 'function') {
+  if (!acknowledged && !explicitWindowIndex && options.acknowledgePromptAttention !== false && typeof clearPromptAttentionForSession === 'function') {
     acknowledged = clearPromptAttentionForSession(sessionKey, {...options, delayMs: acknowledgeDelayMs}) || acknowledged;
   }
   return acknowledged;
@@ -4358,7 +4360,7 @@ function updatePanelInactiveOverlays() {
     panel.classList.toggle('active-pane', item === activeItem);
   }
   // Re-color the active terminal's cursor yellow (and revert the rest) whenever focus moves.
-  if (typeof refreshActiveTerminalCursor === 'function') refreshActiveTerminalCursor();
+  if (typeof refreshActiveTerminalCursor === 'function') refreshActiveTerminalCursor({defer: true});
   const focusedSlot = focusedPanelItem ? slotForItem(focusedPanelItem) : '';
   const focusMatchesActiveLayout = !focusedSlot || activeItemForSide(focusedSlot) === focusedPanelItem;
   if (focusMatchesActiveLayout && typeof scheduleTabberTreeLayoutStateSync === 'function') scheduleTabberTreeLayoutStateSync();
@@ -6931,6 +6933,10 @@ function rootCssLengthPx(name) {
   if (!document.body || typeof window.getComputedStyle !== 'function') return 0;
   const value = window.getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   if (!value) return 0;
+  // Absolute pixel tokens already have their used length. A probe would force
+  // layout of every dirty pane merely to read an unchanged split minimum.
+  const pixels = value.match(/^([+-]?(?:\d*\.?\d+)(?:e[+-]?\d+)?)px$/i);
+  if (pixels && Number.isFinite(Number(pixels[1]))) return Math.max(0, Number(pixels[1]));
   const probe = document.createElement('div');
   probe.style.position = 'fixed';
   probe.style.visibility = 'hidden';

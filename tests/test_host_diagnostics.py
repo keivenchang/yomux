@@ -1,3 +1,4 @@
+import pytest
 from pathlib import Path
 
 from yomux_lib.infra.filesystem_preflight import FilesystemClassification
@@ -200,6 +201,8 @@ def test_synthetic_host_diagnostics_never_reads_machine_state(monkeypatch):
     assert payload["network_filesystem_escape_hatch"] is False
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_current_database_partitions_reports_host_partitioned_stats_path(tmp_path):
     roots = RootLayout(config=tmp_path / "config", state=tmp_path / "state", cache=tmp_path / "cache", runtime=tmp_path / "run")
     stats_path = roots.state / "hosts" / "machine-123" / DATABASE_FILENAME
@@ -219,6 +222,8 @@ def test_current_database_partitions_reports_host_partitioned_stats_path(tmp_pat
     }
 
 
+# Shared tooling/fixture safety contract; this does not validate Python backend product behavior.
+@pytest.mark.shared_tooling
 def test_current_database_partitions_reports_a_host_key_for_all_five_stores(tmp_path):
     roots = RootLayout(config=tmp_path / "config", state=tmp_path / "state", cache=tmp_path / "cache", runtime=tmp_path / "run")
     host_root = roots.state / "hosts" / "machine-123"

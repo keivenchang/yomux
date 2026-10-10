@@ -689,6 +689,7 @@ def _e2e_browser_context(request, browser, runtime: GateLiveServer):
 
 
 @pytest.fixture
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 def e2e_browser(request, browser, gate_live_server: GateLiveServer) -> E2EBrowserHarness:
     """Provide the real app in Chrome on isolated 7900s resources."""
 
@@ -697,6 +698,7 @@ def e2e_browser(request, browser, gate_live_server: GateLiveServer) -> E2EBrowse
 
 
 @pytest.fixture
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
 def authenticated_e2e_browser(
     request,
     browser,

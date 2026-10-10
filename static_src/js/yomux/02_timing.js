@@ -5,7 +5,6 @@ const uiDelayMs = Object.freeze({
   tmuxWindowReadback: 120,
   tmuxWindowReadbackRetry: 80,
   tmuxWindowSwitchReveal: 4000,
-  terminalRefreshAfterTabSelect: 120,
   fileQuickOpenDebounce: 160,
   commandPaletteMissingPathRetry: 1001,
   clientEventDemandDebounce: 30,
@@ -35,7 +34,6 @@ const yomuxTiming = Object.freeze({
   // After confirmation, reveal on the next painted frame — or after this short cap when
   // the repaint already landed and no further frame is coming. Display cadence (round).
   tmuxWindowSwitchPaintCapMs: 250,
-  terminalRefreshAfterTabSelectMs: uiDelayMs.terminalRefreshAfterTabSelect,
   fileQuickOpenDebounceMs: uiDelayMs.fileQuickOpenDebounce,
   commandPaletteMissingPathRetryMs: uiDelayMs.commandPaletteMissingPathRetry,
   clientEventDemandDebounceMs: uiDelayMs.clientEventDemandDebounce,
@@ -55,7 +53,6 @@ const {
   tmuxWindowReadbackRetryMs,
   tmuxWindowSwitchRevealTimeoutMs,
   tmuxWindowSwitchPaintCapMs,
-  terminalRefreshAfterTabSelectMs,
   fileQuickOpenDebounceMs,
   commandPaletteMissingPathRetryMs,
   clientEventDemandDebounceMs,

@@ -23,6 +23,8 @@ import (
 // store. The helper is deliberately temporary so this test never touches user
 // state, transcripts, or the configured OpenCode database.
 func TestPythonInterop(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	python := pythonExecutable(t)
 	root := t.TempDir()
 	statsPath := filepath.Join(root, "yostats.sqlite3")
@@ -95,6 +97,8 @@ func TestPythonInterop(t *testing.T) {
 }
 
 func TestPythonGoCutoverRollbackPreservesFactsAndGeneration(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	python := pythonExecutable(t)
 	root := t.TempDir()
 	statsPath := filepath.Join(root, "stats-v9.sqlite3")
@@ -201,6 +205,8 @@ else:
 }
 
 func TestPythonAndGoSchema9TopologyIsBidirectionallyCompatible(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	python := pythonExecutable(t)
 	root := t.TempDir()
 	script := filepath.Join(root, "schema-topology.py")
@@ -247,6 +253,8 @@ func TestPythonAndGoSchema9TopologyIsBidirectionallyCompatible(t *testing.T) {
 }
 
 func TestPythonAndGoCompressedRingPayloadsAreBidirectionallyCompatible(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	python := pythonExecutable(t)
 	root := t.TempDir()
 	payload := `{"start":1000,"duration":10,"series":{"metric":"` + strings.Repeat("stable-value,", 2000) + `"},"source":{"count":1,"first_timestamp":1001,"last_timestamp":1001},"open":false}`
@@ -344,6 +352,8 @@ store.close()
 }
 
 func TestPythonAndGoInvalidationLedgersMatchForSparseMutations(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	python := pythonExecutable(t)
 	root := t.TempDir()
 	pythonPath := filepath.Join(root, "python", "stats-v9.sqlite3")
@@ -665,10 +675,16 @@ func TestFakeClientUsagePersistsAndProjectsTokens(t *testing.T) {
 	if got := (bucket.Input + bucket.Cache + bucket.Output) * 6; got != 120 {
 		t.Fatalf("fake client tokens/minute = %g", got)
 	}
-	_ = runPython(t, pythonExecutable(t), script, "check-fake-stats", path)
+	t.Run("deprecated_python_readback", func(t *testing.T) {
+		// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+		testsupport.RequireDeprecatedPythonBackend(t)
+		_ = runPython(t, pythonExecutable(t), script, "check-fake-stats", path)
+	})
 }
 
 func TestSystemMemoryCollectorPayloadMatchesPythonTopFiveTieContract(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	python := pythonExecutable(t)
 	root := t.TempDir()
 	inputPath := filepath.Join(root, "memory-input.json")
@@ -949,6 +965,8 @@ store.close()
 }
 
 func TestPythonAndGoTranscriptScannersMatchSyntheticAtoms(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	type parityAtom struct {
 		EventID         string  `json:"event_id"`
 		Provider        string  `json:"provider"`
@@ -1293,6 +1311,8 @@ json.dump(payload, sys.stdout, sort_keys=True, separators=(",", ":"))
 }
 
 func TestPythonAndGoTranscriptSchedulersMatchSyntheticLiveHistoryOrder(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	const pythonScanScript = `import json, sys
 from yomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
 
@@ -1425,6 +1445,8 @@ json.dump(selected, sys.stdout, separators=(",", ":"))
 }
 
 func TestPythonAndGoTranscriptContextNormalizationMatchSyntheticUnicode(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	root := t.TempDir()
 	scriptPath := filepath.Join(root, "normalize_transcript_context.py")
 	const script = `import json
@@ -1449,6 +1471,8 @@ print(json.dumps([transcript_effort(value), transcript_pricing_context(value)], 
 }
 
 func TestPythonAndGoTranscriptSchedulersPrioritizeRecentClaudeHistory(t *testing.T) {
+	// Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+	testsupport.RequireDeprecatedPythonBackend(t)
 	root := t.TempDir()
 	oldPath := filepath.Join(root, "aaa-old.jsonl")
 	newPath := filepath.Join(root, "zzz-new.jsonl")

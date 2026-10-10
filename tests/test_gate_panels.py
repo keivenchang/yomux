@@ -123,34 +123,8 @@ DEFAULT_ROSTER_STATES = ["running", "running", "running", "unavailable", "idle",
 ISSUE_ROSTER_STATES = ["running", "running", "issue", "unavailable", "idle", "running"]
 
 
-@pytest.mark.browser
-@pytest.mark.xfail(strict=True, reason="NOT-APPLICABLE on v0.6.10; waits for F9 SubsystemSpec subsystem rows")
-def test_h1_every_subsystem_cell_has_an_honest_rendered_value(browser, tmp_path):
-    """Every subsystem row has a visible value, and a healthy running row has no stale reason."""
-    load_live_runtime_boot_fixture(browser, tmp_path)
-    rows = browser.execute_script(
-        """
-        return Array.from(document.querySelectorAll('[data-subsystem-row]')).map(row => ({
-          state: row.dataset.subsystemState || '',
-          value: row.querySelector('[data-subsystem-value]')?.textContent?.trim() || '',
-          reason: row.querySelector('[data-subsystem-reason]')?.textContent?.trim() || '',
-          reasonVisible: Boolean(row.querySelector('[data-subsystem-reason]')
-            && getComputedStyle(row.querySelector('[data-subsystem-reason]')).display !== 'none'),
-        }));
-        """,
-    )
-    assert len(rows) == 11, rows
-    for row in rows:
-        assert row["value"] and row["value"] != "[object Object]", row
-        if row["state"] == "running":
-            assert row["reason"] == "" and not row["reasonVisible"], row
-        elif row["state"] == "unknown":
-            assert row["reason"] and row["reasonVisible"], row
-        else:
-            assert row["state"] == "paused", row
-            assert row["reason"] and row["reasonVisible"], row
-
-
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.no_browser
 def test_h2_system_status_metrics_are_not_null(monkeypatch, gate_runtime_paths):
     """The System API reports five real services and qualifies every unavailable metric."""
@@ -1423,77 +1397,6 @@ def test_the_summary_strip_is_the_one_pinned_layer_and_it_really_pins(browser, t
     # The strip really does change height across these widths, so this exercises the wrap that
     # made a single hardcoded offset wrong rather than measuring one geometry five times.
     assert len({m["summaryHeight"] for m in measurements}) > 1, measurements
-
-
-@pytest.mark.browser
-@pytest.mark.xfail(strict=True, reason="NOT-APPLICABLE on v0.6.10; waits for F9 SubsystemSpec Preferences controls")
-def test_h5_preferences_toggle_changes_its_subsystem_row_without_reload(browser, tmp_path):
-    """Toggling a Preferences subsystem updates that row in place without a navigation reload."""
-    load_live_runtime_boot_fixture(browser, tmp_path)
-    result = browser.execute_async_script(
-        """
-        const done = arguments[arguments.length - 1];
-        const row = document.querySelector('[data-subsystem-row][data-subsystem-state="running"]');
-        const toggle = row?.querySelector('[data-subsystem-toggle]');
-        const navigationCount = performance.getEntriesByType('navigation').length;
-        if (!row || !toggle) return done({error: 'missing running subsystem toggle'});
-        const observer = new MutationObserver(() => {
-          if (row.dataset.subsystemState === 'paused') {
-            observer.disconnect();
-            done({state: row.dataset.subsystemState, navigationCount, afterNavigationCount: performance.getEntriesByType('navigation').length});
-          }
-        });
-        observer.observe(row, {attributes: true, attributeFilter: ['data-subsystem-state']});
-        toggle.click();
-        setTimeout(() => { observer.disconnect(); done({state: row.dataset.subsystemState, navigationCount, afterNavigationCount: performance.getEntriesByType('navigation').length, timedOut: true}); }, 750);
-        """,
-    )
-    assert result["state"] == "paused" and not result.get("timedOut"), result
-    assert result["afterNavigationCount"] == result["navigationCount"], result
-
-
-@pytest.mark.browser
-@pytest.mark.xfail(strict=True, reason="NOT-APPLICABLE on v0.6.10; waits for F9 SubsystemSpec subsystem recovery")
-def test_h7_paused_subsystem_recovers_from_its_rendered_ui_control(browser, tmp_path):
-    """A paused subsystem resumes from its row control and changes state without YAML edits."""
-    load_live_runtime_boot_fixture(browser, tmp_path)
-    result = browser.execute_async_script(
-        """
-        const done = arguments[arguments.length - 1];
-        const row = document.querySelector('[data-subsystem-row][data-subsystem-state="paused"]');
-        const resume = row?.querySelector('[data-subsystem-resume]');
-        if (!row || !resume) return done({error: 'missing paused subsystem recovery control'});
-        const observer = new MutationObserver(() => {
-          if (row.dataset.subsystemState === 'running') {
-            observer.disconnect();
-            done({state: row.dataset.subsystemState});
-          }
-        });
-        observer.observe(row, {attributes: true, attributeFilter: ['data-subsystem-state']});
-        resume.click();
-        setTimeout(() => { observer.disconnect(); done({state: row.dataset.subsystemState, timedOut: true}); }, 750);
-        """,
-    )
-    assert result["state"] == "running" and not result.get("timedOut"), result
-
-
-@pytest.mark.browser
-@pytest.mark.xfail(strict=True, reason="NOT-APPLICABLE on v0.6.10; waits for F9 SubsystemSpec feature ordering")
-def test_h8_preferences_and_tabs_dropdown_share_feature_order(browser, tmp_path):
-    """Preferences and the Tabs dropdown render the identical SubsystemSpec feature order."""
-    load_live_runtime_boot_fixture(browser, tmp_path)
-    order = browser.execute_script(
-        """
-        const values = selector => Array.from(document.querySelectorAll(selector))
-          .map(node => node.dataset.subsystemFeature || '')
-          .filter(Boolean);
-        return {
-          preferences: values('[data-preferences-subsystem-feature]'),
-          tabs: values('[data-tabs-subsystem-feature]'),
-        };
-        """,
-    )
-    assert order["preferences"] and order["tabs"] and order["preferences"] == order["tabs"], order
 
 
 @pytest.mark.browser

@@ -5,6 +5,11 @@ import time
 from yomux_lib import control
 from yomux_lib.local_services import rpc
 
+import pytest
+
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 class FakeConnection:
     def __init__(self, incoming: bytes):

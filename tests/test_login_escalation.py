@@ -15,6 +15,9 @@ from yomux_lib.login_rate_limit import SCOPE_EXACT
 from yomux_lib.login_rate_limit import SCOPE_GLOBAL
 from yomux_lib.login_rate_limit import SCOPE_USERNAME
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 class FakeClock:
     def __init__(self, start=1_000_000.0):

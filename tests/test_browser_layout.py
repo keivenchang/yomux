@@ -816,12 +816,14 @@ def install_subwindow_gray_harness(browser, cases):
         ]);
         const agentFor = (item, tone = item.tone) => {
           const acknowledgementKey = acknowledgementKeyFor(item, tone);
+          const stoppedAt = now - (item.pulsing ? item.window_index : 61);
           return tone === 'attention'
             ? {kind: 'codex', state: 'approval', window_index: item.window_index, window_label: `${item.window_index}:codex`, attention_key: acknowledgementKey, attention_acknowledged: false, screen_text: 'Approval required', observed_ts: now}
-            : {kind: 'codex', state: 'idle', window_index: item.window_index, window_label: `${item.window_index}:codex`, working_stopped_ts: now - item.window_index, idle_since: now - item.window_index, cooldown_attention_key: acknowledgementKey, cooldown_acknowledged: false, observed_ts: now};
+            : {kind: 'codex', state: 'idle', window_index: item.window_index, window_label: `${item.window_index}:codex`, working_stopped_ts: stoppedAt, idle_since: stoppedAt, cooldown_attention_key: acknowledgementKey, cooldown_acknowledged: false, observed_ts: now};
         };
         const payloadFor = agentWindows => ({
           session_order: ['1'],
+          topology_generation: tmuxTopologyGeneration,
           sessions: {'1': {target: '1', enabled: false, screen: {key: 'idle'}, agent_windows: agentWindows}},
           rules: {path: '/home/test/.config/yolomux/yolo-rules.yaml', source: 'default', rules: [], errors: []},
         });
@@ -914,7 +916,6 @@ def install_subwindow_gray_harness(browser, cases):
 
 def click_subwindow_gray_button(browser, window_index):
     """Click one sub-window button and assert the product handled it synchronously."""
-
     click_visible_selector(browser, f'[data-window-session="1"][data-window-index="{window_index}"]')
     handled = browser.execute_script("return window.__subwindowGrayHarness.handled;")
     assert handled and handled[-1] == window_index, handled
@@ -1001,7 +1002,15 @@ def assert_subwindow_gray_acknowledgement_sequence(case, samples, expected_gray)
 def test_subwindow_attention_turns_gray_across_tmux_readback_before_removal(browser, tmp_path):
     cases = subwindow_gray_cases(2, 3, 4, 5)
     window_indexes = [case["window_index"] for case in cases]
-    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        sessions=["1"],
+        transcript_sessions={"1": {"panes": [
+            {"target": f"1:{index}.0", "window": str(index), "pane": "0", "window_name": "codex", "window_active": index == window_indexes[0], "active": index == window_indexes[0], "process_label": "codex", "command": "codex"}
+            for index in window_indexes
+        ]}},
+    )
     install_subwindow_gray_harness(browser, cases)
     for window_index in window_indexes:
         click_subwindow_gray_button(browser, window_index)
@@ -1032,7 +1041,16 @@ def test_subwindow_attention_gray_sequence_detects_missing_gray_and_missing_remo
 
     cases = subwindow_gray_cases(2, 4)
     missing_gray_case, missing_removal_case = cases
-    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    window_indexes = [case["window_index"] for case in cases]
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        sessions=["1"],
+        transcript_sessions={"1": {"panes": [
+            {"target": f"1:{index}.0", "window": str(index), "pane": "0", "window_name": "codex", "window_active": index == window_indexes[0], "active": index == window_indexes[0], "process_label": "codex", "command": "codex"}
+            for index in window_indexes
+        ]}},
+    )
     install_subwindow_gray_harness(browser, cases)
     browser.execute_script("window.__subwindowGrayHarness.suppressAcknowledgementVisual();")
     click_subwindow_gray_button(browser, missing_gray_case["window_index"])
@@ -3112,6 +3130,8 @@ def test_current_stats_api_sse_log_preserves_reader_scroll_in_place_and_on_rebui
     assert result["bottomDistance"] <= 1, result
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(browser, tmp_path, monkeypatch):
     journey = JourneySentinel(STATS_LOGS_PHASES)
     journey.enter("shared-runtime-setup")
@@ -7598,6 +7618,8 @@ def test_event_rows_follow_pane_width_with_scaled_localized_metadata(browser, tm
     assert metrics["wideDark"]["background"] != metrics["wideLight"]["background"], metrics
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser, monkeypatch, tmp_path):
     paths = isolate_browser_runtime_paths(monkeypatch, tmp_path)
     specs = {
@@ -8769,6 +8791,8 @@ def test_narrow_server_update_banner_stacks_message_and_actions(browser, tmp_pat
     assert metrics["banner"]["height"] <= metrics["message"]["height"] + metrics["actions"]["height"] + 48, metrics
 
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+@pytest.mark.deprecated_python_server
 @pytest.mark.e2e
 def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeypatch, tmp_path):
     if os.environ.get("YOLOMUX_REAL_AGENT_SMOKE") != "1":
@@ -10864,7 +10888,7 @@ def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_pa
     assert metrics["errors"] == []
     assert metrics["rejections"] == []
     assert "GET /api/notify" not in metrics["fetchPaths"]
-    assert "GET /api/auto-approve" not in metrics["fetchPaths"]
+    assert "GET /api/auto-approve" in metrics["fetchPaths"]
     assert "GET /api/activity" in metrics["fetchPaths"]
     assert metrics["fetchPaths"].count("POST /api/ensure-session") <= 1
     assert "GET /api/session-metadata" in metrics["fetchPaths"]
@@ -13285,8 +13309,10 @@ def test_client_events_ready_refetches_yolo_marker_after_reconnect(browser, tmp_
           const source = (window.__eventSources || []).find(item => item.url.startsWith('/api/client-events?channels='));
           if (!markerBefore || !source) return {error: 'missing marker or client-events source'};
           const beforeWorking = markerBefore.classList.contains('working');
+          const autoApproveFetchesBefore = window.__bootFetches.filter(item => item.path === '/api/auto-approve').length;
           window.__fixtureAutoApprovePayload = {
             session_order: ['1'],
+            topology_generation: tmuxTopologyGeneration,
             sessions: {'1': {target: '1', enabled: false, last_action: 'off', agent_windows: [{window_index: 0, kind: 'codex', state: 'working'}]}},
             rules: {path: '/home/test/.config/yolomux/yolo-rules.yaml', source: 'default', rules: [], errors: []},
           };
@@ -13301,6 +13327,8 @@ def test_client_events_ready_refetches_yolo_marker_after_reconnect(browser, tmp_
             ready,
             connected: clientEventTransportState.connected,
             className: markerAfter?.className || '',
+            autoApproveFetchesBefore,
+            autoApproveFetchesAfter: window.__bootFetches.filter(item => item.path === '/api/auto-approve').length,
             activityFetches: window.__bootFetches.filter(item => item.path === '/api/activity').length,
             errors: jsDebugFailureEvents('error'),
             rejections: jsDebugFailureEvents('rejection'),
@@ -13312,7 +13340,8 @@ def test_client_events_ready_refetches_yolo_marker_after_reconnect(browser, tmp_
     assert result["beforeWorking"] is False, result
     assert result["ready"] is True, result
     assert result["connected"] is True, result
-    assert result["activityFetches"] >= 2, result
+    assert result["autoApproveFetchesAfter"] > result["autoApproveFetchesBefore"], result
+    assert result["activityFetches"] >= 1, result
     assert result["errors"] == []
     assert result["rejections"] == []
 
@@ -13427,6 +13456,7 @@ def test_auto_approve_refresh_rebuilds_pane_tab_to_show_restored_yolo(browser, t
         const before = !!tab()?.querySelector('.session-yolo-marker');
         applyAutoApprovePayload({
           session_order: ['1'],
+          topology_generation: tmuxTopologyGeneration,
           sessions: {
             '1': {
               target: '1', enabled: true, last_action: 'enabled', screen: {key: 'working'},

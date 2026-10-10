@@ -12,6 +12,9 @@ from yomux_lib.auto_approve_policy import auto_approve_poll_is_quiet
 from yomux_lib.auto_approve_policy import auto_approve_quiet_poll_interval
 from yomux_lib.stats_current import families as stats_families
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 @pytest.fixture(autouse=True)
 def _no_real_sleep(monkeypatch):

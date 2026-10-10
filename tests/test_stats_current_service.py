@@ -27,6 +27,9 @@ from yomux_lib.stats_current import collectors, host_collectors, materializer, m
 from yomux_lib.stats_current import resolution as stats_resolution
 from yomux_lib.stats_current import service as service_module
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 FENCE = {
     "protocol_version": storage.MIN_WRITER_PROTOCOL,
     "schema_generation": storage.SCHEMA_VERSION,

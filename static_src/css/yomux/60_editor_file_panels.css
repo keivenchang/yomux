@@ -513,6 +513,10 @@ body.editor-theme-light .file-editor-image-panel {
   font: var(--ui-font-size-sm)/1.35 var(--ui-font);
   white-space: pre-wrap;
 }
+.file-editor-dialog-body.danger {
+  color: var(--danger-text-soft);
+  font-weight: 700;
+}
 .file-editor-dialog-body.custom {
   white-space: normal;
 }

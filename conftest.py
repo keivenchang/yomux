@@ -41,14 +41,8 @@ from tools import docker_image
 from tools.tool_guard import hold_host_tool_flock
 from tools.tool_guard import parent_owns_tool_lock
 from tools.tool_guard import run_reaped_container_command
+pytest_plugins = ("tools.pytest_catalog_plugin",)
 
-
-@pytest.hookimpl(tryfirst=True)
-def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool | None:
-    """Skip document coordination directories before pytest stats their protected paths."""
-    if ".agent-edit.lock" in collection_path.name:
-        return True
-    return None
 
 
 def host_local_cache_dir() -> Path:
@@ -149,7 +143,7 @@ def _container_working_directory(repo_root: Path) -> str:
 
 
 def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool | None:
-    """Keep cross-agent document lock directories out of xdist collection."""
+    """Do not import wholly deprecated backend modules during default collection."""
 
     if any(part.endswith(".agent-edit.lock") for part in collection_path.parts):
         return True

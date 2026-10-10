@@ -54,6 +54,94 @@ func TestNormalizeYomuxEnvironmentMirrorsCanonicalValuesToLegacyReaders(t *testi
 	}
 }
 
+func TestManagedLaunchLeasesStayWithServerAndNeverReachChildren(t *testing.T) {
+	lease, err := os.CreateTemp(t.TempDir(), "instance.lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	if _, err := fmt.Fprintf(lease, "{\"pid\":%d}\n", os.Getpid()); err != nil {
+		t.Fatal(err)
+	}
+	fd := int(lease.Fd())
+	if err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_SETFD, 0); errno != 0 {
+		t.Fatal(errno)
+	}
+	manifest := strconv.Itoa(fd)
+	if err := acceptLaunchDescriptors(manifest+","+manifest, -1); err == nil {
+		t.Fatal("duplicate descriptors accepted")
+	}
+	if err := acceptLaunchDescriptors("0", -1); err == nil {
+		t.Fatal("stdin accepted as lease")
+	}
+	if err := acceptLaunchDescriptors(manifest, -1); err != nil {
+		t.Fatal(err)
+	}
+	flags, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_GETFD, 0)
+	if errno != 0 || flags&syscall.FD_CLOEXEC == 0 {
+		t.Fatalf("lease still inheritable: %d %v", flags, errno)
+	}
+	child := exec.Command("python3", "-c", "import os,sys\ntry: os.fstat(int(sys.argv[1]))\nexcept OSError: sys.exit(0)\nsys.exit(1)", manifest)
+	if output, err := child.CombinedOutput(); err != nil {
+		t.Fatalf("child retained lease: %v %s", err, output)
+	}
+	competitor, err := os.OpenFile(lease.Name(), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer competitor.Close()
+	if err := syscall.Flock(int(competitor.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+		t.Fatal("server lost lease")
+	}
+}
+
+func TestLaunchListenerCannotBeRetainedByWorkerAfterServerCloses(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	address := listener.Addr().String()
+	file, err := listener.(*net.TCPListener).File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	fd := int(file.Fd())
+	if _, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_SETFD, 0); errno != 0 {
+		t.Fatal(errno)
+	}
+	if err := acceptLaunchDescriptors("", fd); err != nil {
+		t.Fatal(err)
+	}
+	worker := exec.Command("python3", "-c", "print('ready', flush=True); input()")
+	input, err := worker.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := worker.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { input.Close(); worker.Wait() }()
+	if line, err := bufio.NewReader(output).ReadString('\n'); err != nil || line != "ready\n" {
+		t.Fatalf("worker readiness: %q %v", line, err)
+	}
+	file.Close()
+	listener.Close()
+	replacement, err := net.Listen("tcp4", address)
+	if err != nil {
+		t.Fatalf("worker retained server listener: %v", err)
+	}
+	replacement.Close()
+}
+
 func TestNormalizeYomuxEnvironmentDoesNotWarnForCanonicalOnlyValues(t *testing.T) {
 	testsupport.PreserveProductEnvironment(t)
 	for _, entry := range os.Environ() {
@@ -864,6 +952,90 @@ func TestNextNumberedSessionNameMatchesLegacyBackendRules(t *testing.T) {
 	}
 }
 
+func TestGoSessionMutationsPublishCompleteRosterBeforeReturning(t *testing.T) {
+	socket := filepath.Join(testsupport.ShortTempDir(t), "tmux.sock")
+	t.Setenv("YOLOMUX_TMUX_SOCKET", socket)
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
+	if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", "keeper").CombinedOutput(); err != nil {
+		t.Fatalf("private tmux: %v (%s)", err, output)
+	}
+	s := &server{root: t.TempDir(), tmuxWindowActivityFn: func() (map[string]float64, error) { return map[string]float64{}, nil }, tmuxMetadataState: tmuxMetadataState{
+		metadataEnrichmentFn: func(names []string) (map[string]map[string]any, error) {
+			return map[string]map[string]any{}, nil
+		},
+		tmuxSessionActivityFn: func() (map[string]float64, error) { return map[string]float64{}, nil },
+	}}
+	initial, err := s.tmuxTopologySnapshot(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.metadataPayload = s.buildMetadataPayload(1, initial.sessions, initial.identities, nil, initial.generation)
+	s.metadataGeneration, s.metadataNextGeneration, s.metadataBuiltAt = 1, 1, time.Now()
+	want := []string{"keeper"}
+	for index := 1; index <= 5; index++ {
+		response := httptest.NewRecorder()
+		s.createSession(response, httptest.NewRequest(http.MethodPost, "/api/create-session?agent=term&terminal=bash", nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("create: %d %s", response.Code, response.Body.String())
+		}
+		want = append(want, strconv.Itoa(index))
+		want = normalizeTmuxSessionRoster(want)
+		got := s.cachedTmuxSessionRosterSnapshot()
+		if !slices.Equal(got.sessions, want) {
+			t.Fatalf("create %d returned with stale cached roster: got %v, want %v", index, got.sessions, want)
+		}
+	}
+	assertRoutes := func(want []string) {
+		t.Helper()
+		s.metadataMu.Lock()
+		generation := s.metadataNextGeneration
+		s.metadataMu.Unlock()
+		waitForMetadataGeneration(t, s, generation)
+		for _, route := range []struct {
+			path    string
+			handler http.HandlerFunc
+		}{
+			{"/api/activity", s.activity}, {"/api/session-metadata", s.sessionMetadata},
+		} {
+			response := httptest.NewRecorder()
+			route.handler(response, httptest.NewRequest(http.MethodGet, route.path, nil))
+			var payload struct {
+				SessionOrder []string `json:"session_order"`
+				Cache        struct {
+					Stale bool `json:"stale"`
+				} `json:"cache"`
+				Sessions map[string]struct {
+					Graph struct {
+						Version int `json:"version"`
+					} `json:"work_graph"`
+				} `json:"sessions"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(payload.SessionOrder, want) || payload.Cache.Stale {
+				t.Fatalf("%s incomplete/stale: %s", route.path, response.Body.String())
+			}
+			for _, name := range want {
+				if payload.Sessions[name].Graph.Version != 1 {
+					t.Fatalf("%s missing work graph for %s", route.path, name)
+				}
+			}
+		}
+	}
+	assertRoutes(want)
+	response := httptest.NewRecorder()
+	s.killSession(response, httptest.NewRequest(http.MethodPost, "/api/kill-session?session=5", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("kill: %d %s", response.Code, response.Body.String())
+	}
+	want = slices.DeleteFunc(want, func(name string) bool { return name == "5" })
+	if got := s.cachedTmuxSessionRosterSnapshot(); !slices.Equal(got.sessions, want) {
+		t.Fatalf("kill returned with stale cached roster: %v, want %v", got.sessions, want)
+	}
+	assertRoutes(want)
+}
+
 func TestGoCreateSessionDefaultsToFirstAvailableNumberedName(t *testing.T) {
 	tmuxDir := testsupport.ShortTempDir(t)
 	tmuxSocket := filepath.Join(tmuxDir, "tmux.sock")
@@ -1367,13 +1539,23 @@ func TestGoHealthLifecyclePersistsDemandAndUnexpectedRestarts(t *testing.T) {
 	if snapshot := first.snapshotNow(); !snapshot.Available || snapshot.RestartCount != 0 || snapshot.DemandStartCount != 0 || snapshot.UnexpectedRestartCount != 0 {
 		t.Fatalf("initial lifecycle = %+v", snapshot)
 	}
-	first.markCleanShutdown()
+	first.markShutdown("terminated", 0, true, firstStarted.Add(20*time.Second))
 	second, err := newGoHealthLifecycle(path, "pid:101:start:2", 101, firstStarted.Add(time.Minute), "demand")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if snapshot := second.snapshotNow(); !snapshot.Available || snapshot.RestartCount != 1 || snapshot.DemandStartCount != 1 || snapshot.UnexpectedRestartCount != 0 {
 		t.Fatalf("demand restart lifecycle = %+v", snapshot)
+	}
+	secondHistory, secondAvailable, secondResetReason := readGoHealthHistory(path)
+	if !secondAvailable || secondResetReason != "" {
+		t.Fatalf("read second lifecycle history: available=%t reason=%q", secondAvailable, secondResetReason)
+	}
+	if len(secondHistory.Events) != 3 || secondHistory.Events[1].Kind != "shutdown" || secondHistory.Events[1].TerminationSignal != "terminated" || secondHistory.Events[1].ExitStatus == nil || *secondHistory.Events[1].ExitStatus != 0 || !secondHistory.Events[1].Clean {
+		t.Fatalf("recorded shutdown event = %+v", secondHistory.Events)
+	}
+	if start := secondHistory.Events[2]; start.Kind != "start" || !start.PreviousShutdownObserved || !start.PreviousShutdownClean || start.PreviousShutdownSignal != "terminated" || start.PreviousShutdownExitStatus == nil || *start.PreviousShutdownExitStatus != 0 {
+		t.Fatalf("recorded next-start attribution = %+v", start)
 	}
 	// Leave the second epoch unclean to model a crash before the next launch.
 	third, err := newGoHealthLifecycle(path, "pid:102:start:3", 102, firstStarted.Add(2*time.Minute), "demand")
@@ -1384,6 +1566,14 @@ func TestGoHealthLifecyclePersistsDemandAndUnexpectedRestarts(t *testing.T) {
 	if !snapshot.Available || snapshot.RestartCount != 2 || snapshot.DemandStartCount != 1 || snapshot.UnexpectedRestartCount != 1 {
 		t.Fatalf("unexpected restart lifecycle = %+v", snapshot)
 	}
+	thirdHistory, thirdAvailable, thirdResetReason := readGoHealthHistory(path)
+	if !thirdAvailable || thirdResetReason != "" || len(thirdHistory.Events) != 4 {
+		t.Fatalf("third lifecycle history: available=%t reason=%q events=%+v", thirdAvailable, thirdResetReason, thirdHistory.Events)
+	}
+	lastStart := thirdHistory.Events[3]
+	if lastStart.Kind != "start" || lastStart.PreviousShutdownObserved || lastStart.PreviousShutdownClean || lastStart.PreviousEpoch != "pid:101:start:2" {
+		t.Fatalf("unclean prior lifecycle attribution = %+v", lastStart)
+	}
 	server := &server{port: 7222, healthLifecycle: third, startedAt: firstStarted.Add(2 * time.Minute), healthLedger: newGoHealthLedger(firstStarted.Add(2 * time.Minute))}
 	payload := server.goLocalServicesPayloadFromMetrics(firstStarted.Add(2*time.Minute+time.Second), goProcessMetrics{PID: 102, StartedAt: firstStarted.Add(2 * time.Minute)})
 	service := payload["services"].([]any)[0].(map[string]any)
@@ -1393,6 +1583,63 @@ func TestGoHealthLifecyclePersistsDemandAndUnexpectedRestarts(t *testing.T) {
 		if metric["state"] != "measured" || metric["value"] != want {
 			t.Fatalf("%s = %#v", name, metric)
 		}
+	}
+}
+
+func TestGoHealthLifecycleMigratesLegacyHistoryAndBoundsEvents(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "go-backend-health", "7222.json")
+	legacy := `{"schema_version":1,"process_start_count":4,"restart_count":3,"demand_start_count":2,"unexpected_restart_count":1,"last_epoch":"pid:99:start:9","last_pid":99,"last_started_at":1700001000,"last_clean_shutdown":true}`
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Unix(1_700_002_000, 0)
+	lifecycle, err := newGoHealthLifecycle(path, "pid:100:start:10", 100, started, "demand")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot := lifecycle.snapshotNow(); snapshot.RestartCount != 4 || snapshot.DemandStartCount != 3 || snapshot.UnexpectedRestartCount != 1 {
+		t.Fatalf("migrated lifecycle counters = %+v", snapshot)
+	}
+	migrated, ok, reason := readGoHealthHistory(path)
+	if !ok || reason != "" || migrated.SchemaVersion != goHealthHistorySchemaVersion || len(migrated.Events) != 1 || migrated.Events[0].PreviousEpoch != "pid:99:start:9" || migrated.Events[0].PreviousShutdownObserved {
+		t.Fatalf("migrated lifecycle history = %+v, available=%t reason=%q", migrated, ok, reason)
+	}
+	events := make([]goHealthLifecycleEvent, goHealthLifecycleEventLimit)
+	for index := range events {
+		events[index] = goHealthLifecycleEvent{Kind: "start", Epoch: fmt.Sprintf("epoch-%d", index)}
+	}
+	bounded := appendGoHealthLifecycleEvent(events, goHealthLifecycleEvent{Kind: "shutdown", Epoch: "latest"})
+	if len(bounded) != goHealthLifecycleEventLimit || bounded[0].Epoch != "epoch-1" || bounded[len(bounded)-1].Epoch != "latest" {
+		t.Fatalf("bounded lifecycle events = len %d, first=%+v last=%+v", len(bounded), bounded[0], bounded[len(bounded)-1])
+	}
+}
+
+func TestGoHealthLifecycleUnknownStartReasonRetainsRestartTotal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "go-backend-health", "7222.json")
+	started := time.Unix(1_700_003_000, 0)
+	first, err := newGoHealthLifecycle(path, "pid:200:start:1", 200, started, "demand")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.markShutdown("terminated", 0, true, started.Add(20*time.Second))
+	second, err := newGoHealthLifecycle(path, "pid:201:start:2", 201, started.Add(time.Minute), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := second.snapshotNow()
+	if !snapshot.Available || !snapshot.RestartAvailable || snapshot.RestartCount != 1 || snapshot.DemandAvailable || snapshot.UnexpectedAvailable || snapshot.HistoryCoverage != "partial" || snapshot.HistoryResetReason != "start_reason_unknown" {
+		t.Fatalf("unknown launch classification = %+v", snapshot)
+	}
+	history, available, reason := readGoHealthHistory(path)
+	if !available || reason != "" || len(history.Events) != 3 {
+		t.Fatalf("unknown launch history: available=%t reason=%q events=%+v", available, reason, history.Events)
+	}
+	start := history.Events[2]
+	if start.StartReason != "unknown" || start.PreviousShutdownSignal != "terminated" || start.PreviousShutdownExitStatus == nil || *start.PreviousShutdownExitStatus != 0 {
+		t.Fatalf("unknown launch event attribution = %+v", start)
 	}
 }
 
@@ -2050,7 +2297,7 @@ func TestProtectedCapabilityGatesEveryKnownUnimplementedApplicationRoute(t *test
 	cases := map[string]string{
 		"/api/update-status":  "core.integrations.v1",
 		"/api/watched-prs":    "core.integrations.v1",
-		"/api/auto-approve":   "terminal.status.v1",
+		"/api/auto-approve":   "yolo.auto-approve.v1",
 		"/api/chat/bootstrap": "pane.chat.v1",
 	}
 	for path, wantCapability := range cases {
@@ -2070,6 +2317,134 @@ func TestProtectedCapabilityGatesEveryKnownUnimplementedApplicationRoute(t *test
 				t.Fatalf("unimplemented route envelope = %#v, want capability %q", body, wantCapability)
 			}
 		})
+	}
+}
+
+func TestAttentionAcknowledgementIsAuthenticatedPublishedAndPersistent(t *testing.T) {
+	config, state := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(config, "auth.yaml"), []byte("users:\n  - username: admin\n    password: secret\n    role: admin\n  - username: reader\n    password: secret\n    role: readonly\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(2000, 0)
+	s := &server{config: config, state: state, capabilities: capabilities.New("go-test"), events: newEventBroker(), statsNow: func() time.Time { return now }}
+	events, unsubscribe := s.events.subscribe()
+	defer unsubscribe()
+	mux := http.NewServeMux()
+	s.registerAttentionAckRoute(mux)
+	var handler http.Handler = mux
+	unauthenticated := httptest.NewRecorder()
+	handler.ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodPost, "/api/attention-ack", strings.NewReader(`{"key":"go:cooldown:one"}`)))
+	if unauthenticated.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated ack status = %d body=%s", unauthenticated.Code, unauthenticated.Body.String())
+	}
+	readOnly := httptest.NewRequest(http.MethodPost, "/api/attention-ack", strings.NewReader(`{"key":"go:cooldown:one"}`))
+	readOnly.SetBasicAuth("reader", "secret")
+	readOnlyRecord := httptest.NewRecorder()
+	handler.ServeHTTP(readOnlyRecord, readOnly)
+	if readOnlyRecord.Code != http.StatusForbidden {
+		t.Fatalf("read-only ack status = %d body=%s", readOnlyRecord.Code, readOnlyRecord.Body.String())
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/attention-ack", strings.NewReader(`{"keys":["go:cooldown:one","go:cooldown:one"]}`))
+	request.SetBasicAuth("admin", "secret")
+	record := httptest.NewRecorder()
+	handler.ServeHTTP(record, request)
+	if record.Code != http.StatusOK {
+		t.Fatalf("ack status = %d body=%s", record.Code, record.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(record.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	acknowledged, _ := response["acknowledged"].([]any)
+	if len(acknowledged) != 1 || acknowledged[0] != "go:cooldown:one" || response["changed"] != true {
+		t.Fatalf("ack response = %#v", response)
+	}
+	select {
+	case event := <-events:
+		if event.Type != "attention_acks_changed" {
+			t.Fatalf("ack event type = %q", event.Type)
+		}
+		acknowledged, _ := event.Payload["acknowledged"].([]string)
+		acknowledgedAt, _ := event.Payload["acknowledged_at"].(map[string]float64)
+		if len(acknowledged) != 1 || acknowledged[0] != "go:cooldown:one" || acknowledgedAt["go:cooldown:one"] != float64(now.UnixNano())/1e9 {
+			t.Fatalf("ack event payload = %#v", event.Payload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("acknowledgement update was not published")
+	}
+	restarted := &server{state: state, statsNow: func() time.Time { return now }}
+	if _, ok, err := restarted.attentionAckStore().acknowledged("go:cooldown:one", now); err != nil || !ok {
+		t.Fatalf("second-client acknowledgement state = ok:%t err:%v", ok, err)
+	}
+	invalid := httptest.NewRequest(http.MethodPost, "/api/attention-ack", strings.NewReader(`{"keys":[" "]}`))
+	invalid.SetBasicAuth("admin", "secret")
+	invalidRecord := httptest.NewRecorder()
+	handler.ServeHTTP(invalidRecord, invalid)
+	if invalidRecord.Code != http.StatusBadRequest {
+		t.Fatalf("invalid ack status = %d body=%s", invalidRecord.Code, invalidRecord.Body.String())
+	}
+}
+
+func TestAttentionAcknowledgementLoadRetriesAfterInitialReadFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "go-attention-acks.json")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store := &attentionAckState{path: path, keys: map[string]float64{}}
+	now := time.Unix(3000, 0)
+	if _, acknowledged, err := store.acknowledged("go:cooldown:prior", now); err == nil || acknowledged {
+		t.Fatalf("initial directory read = acknowledged:%t err:%v, want read error", acknowledged, err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"keys":{"go:cooldown:prior":2999}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, acknowledged, err := store.acknowledged("go:cooldown:prior", now); err != nil || !acknowledged {
+		t.Fatalf("retried acknowledgement load = acknowledged:%t err:%v", acknowledged, err)
+	}
+}
+
+func TestAgentStatusLifecycleEnrichesIdlePayloadAndPreservesRedMetadata(t *testing.T) {
+	now := time.Unix(3000, 0)
+	key := activityAgentStatusKey("session", "%7", "codex")
+	completion := goAgentStatusOverride{
+		state: "cooldown", observedAt: now.Add(-time.Second),
+		workingStoppedTS: float64(now.Add(-2*time.Second).UnixNano()) / 1e9,
+		transitionID:     "session|3|%7|codex:2998000000000", cooldownAttentionKey: "go:cooldown:fixture",
+	}
+	s := &server{state: t.TempDir(), statsNow: func() time.Time { return now }}
+	sessions := map[string]any{"session": map[string]any{"agents": []map[string]any{{
+		"kind": "codex", "window_index": 3, "pane_target": "%7", "status": "idle",
+		"status_observed_at": float64(now.UnixNano()) / 1e9,
+	}}}}
+	if err := s.applyAgentStatusLifecycle(sessions, map[string]goAgentStatusOverride{key: completion}); err != nil {
+		t.Fatal(err)
+	}
+	agent := sessions["session"].(map[string]any)["agents"].([]map[string]any)[0]
+	if agent["status"] != "cooldown" || agent["working_stopped_ts"] != completion.workingStoppedTS || agent["transition_id"] != completion.transitionID || agent["cooldown_attention_key"] != completion.cooldownAttentionKey || agent["cooldown_acknowledged"] != false {
+		t.Fatalf("completion lifecycle row = %#v", agent)
+	}
+	ack := httptest.NewRequest(http.MethodPost, "/api/attention-ack", strings.NewReader(`{"keys":["go:cooldown:fixture"]}`))
+	ackRecord := httptest.NewRecorder()
+	s.acknowledgeAttention(ackRecord, ack)
+	if ackRecord.Code != http.StatusOK {
+		t.Fatalf("ack status = %d body=%s", ackRecord.Code, ackRecord.Body.String())
+	}
+	if err := s.applyAgentStatusLifecycle(sessions, map[string]goAgentStatusOverride{key: completion}); err != nil {
+		t.Fatal(err)
+	}
+	if agent["status"] != "cooldown" || agent["cooldown_acknowledged"] != true {
+		t.Fatalf("acknowledged completion row = %#v, want cooldown retained and acknowledged", agent)
+	}
+	agent["status"] = "blocked"
+	agent["status_observed_at"] = float64(now.Add(time.Second).UnixNano()) / 1e9
+	if err := s.applyAgentStatusLifecycle(sessions, map[string]goAgentStatusOverride{key: completion}); err != nil {
+		t.Fatal(err)
+	}
+	if agent["status"] != "blocked" {
+		t.Fatalf("red status was replaced by completion lifecycle: %#v", agent)
 	}
 }
 
@@ -2378,14 +2753,17 @@ func TestLiveSessionMetadataSharesProcessInventoryAcrossSessions(t *testing.T) {
 	}
 }
 
-func TestActivityPublishesCodexWorkingFooterAsWorkingWindowState(t *testing.T) {
+func TestActivityPublishesQueuedCodexQuestionWithoutReplacingWorkingState(t *testing.T) {
 	visibleText := `
 ● Ran gh pr view 332 --repo ai-dynamo/frontend-crates --json headRefOid,mergeable,mergeStateSt...
 └ Description updated with all three PNG tags preserved
   + Show details
 
 ◦ Working (16m 26s • esc to interrupt)
-  └ Tip: Use /export to save your conversation as Markdown.
+
+• Queued follow-up inputs
+  ? 1 question
+    shift+← to answer
 
 › Ask Codex to do anything
 `
@@ -2425,6 +2803,10 @@ func TestActivityPublishesCodexWorkingFooterAsWorkingWindowState(t *testing.T) {
 			tmuxSessionActivityFn:      func() (map[string]float64, error) { return map[string]float64{}, nil }},
 	}
 	metadata := s.liveSessionMetadataFromOutput("codex-live", []byte("codex-live\t0\tmain\t0\t%42\t/tmp/synthetic\tcodex\tCodex\t42\t1\t1\n"), nil)
+	metadataAgents := metadata["agents"].([]map[string]any)
+	if len(metadataAgents) != 1 || metadataAgents[0]["status"] != "working" || metadataAgents[0]["queued_followup_question"] != true {
+		t.Fatalf("Go metadata for queued Codex question = %#v, want working plus queued_followup_question", metadataAgents)
+	}
 	metadata["session_identity"] = goTmuxSessionIdentity("codex-live", "codex-live")
 	s.metadataPayload = map[string]any{
 		"sessions":            map[string]any{"codex-live": metadata},
@@ -4647,6 +5029,52 @@ func TestActivityWarmReadUsesPublishedMetadata(t *testing.T) {
 	}
 }
 
+func TestActivityStaleMetadataDoesNotPublishAgentWindowStatus(t *testing.T) {
+	s := &server{
+		tmuxWindowActivityFn: func() (map[string]float64, error) { return map[string]float64{}, nil },
+		tmuxMetadataState: tmuxMetadataState{
+			metadataGeneration: 7, metadataTopologyGeneration: 7,
+			metadataTopologySignature: tmuxTopologySignature([]string{"cached"}, map[string]string{"cached": "cached"}),
+			tmuxSessionRosterFn:       func() ([]string, error) { return []string{"cached"}, nil },
+			tmuxSessionActivityFn:     func() (map[string]float64, error) { return map[string]float64{}, nil },
+			metadataPayload: map[string]any{
+				"sessions": map[string]any{"cached": map[string]any{
+					"session_identity": goTmuxSessionIdentity("cached", "cached"),
+					"agents":           []map[string]any{{"window_index": 3, "pane_target": "%7", "kind": "codex", "status": "working"}},
+				}},
+				"topology_generation": uint64(7),
+			},
+			metadataBuiltAt:                    time.Now().Add(-3 * goMetadataCacheTTL),
+			metadataBuilding:                   true,
+			metadataBuildingGeneration:         8,
+			metadataBuildingTopologyGeneration: 7,
+		},
+	}
+	record := httptest.NewRecorder()
+	s.activity(record, httptest.NewRequest(http.MethodGet, "/api/activity", nil))
+	if record.Code != http.StatusOK {
+		t.Fatalf("activity status = %d, body=%s", record.Code, record.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(record.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	cache := payload["cache"].(map[string]any)
+	if cache["stale"] != true {
+		t.Fatalf("activity did not mark stale metadata: %#v", cache)
+	}
+	if rows := payload["agents"].([]any); len(rows) != 0 {
+		t.Fatalf("stale activity rows became canonical status: %#v", rows)
+	}
+	if rows := payload["agent_windows"].(map[string]any); len(rows) != 0 {
+		t.Fatalf("stale per-session activity rows became canonical status: %#v", rows)
+	}
+	info := payload["sessions"].(map[string]any)["cached"].(map[string]any)
+	if rows := info["agents"].([]any); len(rows) != 0 {
+		t.Fatalf("stale session metadata retained agent statuses: %#v", rows)
+	}
+}
+
 func TestActivityUsesFreshPublishedAgentStatusInsteadOfMetadataCache(t *testing.T) {
 	ctx := context.Background()
 	writer, err := stats.OpenWriter(ctx, filepath.Join(t.TempDir(), "stats.sqlite3"))
@@ -4658,9 +5086,14 @@ func TestActivityUsesFreshPublishedAgentStatusInsteadOfMetadataCache(t *testing.
 	service := stats.NewStatsService(writer, stats.StatsServiceConfig{
 		AgentStatus: func(context.Context) (stats.AgentStatusSnapshot, error) {
 			return stats.AgentStatusSnapshot{
-				Available: true,
+				Available: true, SourceGeneration: 23,
 				Freshness: &stats.AgentStatusFreshness{ObservedAt: float64(observedAt.UnixNano()) / 1e9},
-				Agents:    []any{map[string]any{"kind": "codex", "state": "ask", "session": "cached", "pane": "%7", "observed_at": float64(observedAt.UnixNano()) / 1e9}},
+				Agents: []any{map[string]any{
+					"kind": "codex", "state": "transition", "session": "cached", "pane": "%7",
+					"observed_at":        float64(observedAt.UnixNano()) / 1e9,
+					"working_stopped_ts": float64(observedAt.Add(-time.Second).UnixNano()) / 1e9,
+					"transition_id":      "go:transition:api-fixture", "cooldown_attention_key": "go:cooldown:api-fixture",
+				}},
 			}, nil
 		},
 	})
@@ -4696,9 +5129,36 @@ func TestActivityUsesFreshPublishedAgentStatusInsteadOfMetadataCache(t *testing.
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
+	if payload["agent_window_snapshot_revision"] != float64(23) {
+		t.Fatalf("activity status snapshot revision = %#v, want 23", payload["agent_window_snapshot_revision"])
+	}
 	agents := payload["agents"].([]any)
-	if len(agents) != 1 || agents[0].(map[string]any)["state"] != "needs-input" {
-		t.Fatalf("activity used stale working metadata instead of newer stats publication: %#v", agents)
+	if len(agents) != 1 {
+		t.Fatalf("activity agent rows = %#v", agents)
+	}
+	agent := agents[0].(map[string]any)
+	if agent["state"] != "cooldown" || agent["working_stopped_ts"] != float64(observedAt.Add(-time.Second).UnixNano())/1e9 || agent["transition_id"] != "go:transition:api-fixture" || agent["cooldown_attention_key"] != "go:cooldown:api-fixture" || agent["cooldown_acknowledged"] != false {
+		t.Fatalf("activity lifecycle response = %#v", agent)
+	}
+	mux := http.NewServeMux()
+	s.registerAttentionAckRoute(mux)
+	ackRequest := httptest.NewRequest(http.MethodPost, "/api/attention-ack", strings.NewReader(`{"key":"go:cooldown:api-fixture"}`))
+	ackRecord := httptest.NewRecorder()
+	s.acknowledgeAttention(ackRecord, ackRequest)
+	if ackRecord.Code != http.StatusOK {
+		t.Fatalf("ack status = %d body=%s", ackRecord.Code, ackRecord.Body.String())
+	}
+	response = httptest.NewRecorder()
+	s.activity(response, httptest.NewRequest(http.MethodGet, "/api/activity", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("acknowledged activity status = %d body=%s", response.Code, response.Body.String())
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	agent = payload["agents"].([]any)[0].(map[string]any)
+	if agent["state"] != "cooldown" || agent["cooldown_acknowledged"] != true {
+		t.Fatalf("acknowledged activity lifecycle = %#v", agent)
 	}
 }
 
@@ -5693,8 +6153,20 @@ func TestPhase45FinderBatchSearchStreamAndWatchDiffHTTPRoutes(t *testing.T) {
 
 	batchSearch := httptest.NewRecorder()
 	s.fsSearch(batchSearch, httptest.NewRequest(http.MethodGet, "/api/batch/search?root="+url.QueryEscape(root)+"&query=search&limit=10", nil))
-	if batchSearch.Code != http.StatusOK || !bytes.Contains(batchSearch.Body.Bytes(), []byte("search-me-deep.go")) || bytes.Contains(batchSearch.Body.Bytes(), []byte(`"index_state":"warming"`)) {
+	if batchSearch.Code != http.StatusOK || bytes.Contains(batchSearch.Body.Bytes(), []byte("search-me-deep.go")) || !bytes.Contains(batchSearch.Body.Bytes(), []byte(`"indexed":false`)) {
 		t.Fatalf("batch search route = %d %s", batchSearch.Code, batchSearch.Body.String())
+	}
+	for _, route := range []string{"/api/fs/search", "/api/fs/search-stream"} {
+		direct := httptest.NewRecorder()
+		s.fsSearch(direct, httptest.NewRequest(http.MethodGet, route+"?root="+url.QueryEscape(root)+"&query=search&limit=10&recursive=true&direct_only=true&minimal=true", nil))
+		if direct.Code != http.StatusOK || !bytes.Contains(direct.Body.Bytes(), []byte("search-me.go")) || bytes.Contains(direct.Body.Bytes(), []byte("search-me-deep.go")) {
+			t.Fatalf("direct-only search %s = %d %s", route, direct.Code, direct.Body.String())
+		}
+	}
+	batchDirect := httptest.NewRecorder()
+	s.fsSearch(batchDirect, httptest.NewRequest(http.MethodGet, "/api/batch/search?root="+url.QueryEscape(root)+"&query=search&limit=10&recursive=true&direct_only=true", nil))
+	if batchDirect.Code != http.StatusOK || !bytes.Contains(batchDirect.Body.Bytes(), []byte(`"indexed":false`)) || bytes.Contains(batchDirect.Body.Bytes(), []byte("search-me.go")) {
+		t.Fatalf("batch direct-only search = %d %s", batchDirect.Code, batchDirect.Body.String())
 	}
 
 	watch := httptest.NewRecorder()
@@ -5889,11 +6361,14 @@ func TestPhase45FinderUnindexAndHTMLPreviewRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer service.Close()
-	s := &server{root: root, finder: service}
+	s := &server{root: root, finder: service, indexSettings: finderIndexSettings{
+		roots: []string{root}, maxFiles: finder.DefaultIndexedFiles,
+		persistFiles: finder.DefaultIndexedFiles, maxBytes: finder.DefaultIndexBytes,
+	}}
 
 	indexStatus := httptest.NewRecorder()
 	s.fsIndexStatus(indexStatus, httptest.NewRequest(http.MethodGet, "/api/fs/index-status?root="+url.QueryEscape(root), nil))
-	if indexStatus.Code != http.StatusOK || !bytes.Contains(indexStatus.Body.Bytes(), []byte(`"index_state":"not_indexed"`)) || !bytes.Contains(indexStatus.Body.Bytes(), []byte(`"indexed":false`)) || !bytes.Contains(indexStatus.Body.Bytes(), []byte(`"ready":false`)) {
+	if indexStatus.Code != http.StatusOK || !bytes.Contains(indexStatus.Body.Bytes(), []byte(`"index_state":"not_indexed"`)) || !bytes.Contains(indexStatus.Body.Bytes(), []byte(`"indexed":false`)) || !bytes.Contains(indexStatus.Body.Bytes(), []byte(`"ready":false`)) || !bytes.Contains(indexStatus.Body.Bytes(), []byte(`"max_files":1000000`)) || !bytes.Contains(indexStatus.Body.Bytes(), []byte(`"max_bytes":536870912`)) {
 		t.Fatalf("index status = %d %s", indexStatus.Code, indexStatus.Body.String())
 	}
 
@@ -7868,4 +8343,121 @@ func TestLoginShowsSetupPageWhenAuthSetupIsRequired(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAttentionProtectedAcknowledgementsSurvivePruningUntilSettlement(t *testing.T) {
+	now := time.Unix(20000, 0)
+	store := &attentionAckState{loaded: true, keys: map[string]float64{"go:attention:active": float64(now.Add(-8 * 24 * time.Hour).Unix())}, protected: map[string]bool{"go:attention:active": true}}
+	for index := 0; index < attentionAckMaxKeys+10; index++ {
+		store.keys[fmt.Sprintf("old:%d", index)] = float64(now.Unix())
+	}
+	store.pruneLocked(now)
+	if _, ok := store.keys["go:attention:active"]; !ok {
+		t.Fatal("protected ACK pruned before lifecycle commit")
+	}
+	path := filepath.Join(t.TempDir(), "acks.json")
+	store.path = path
+	srv := &server{attentionAcks: store}
+	if err := srv.attentionSettlementsCommitted([]string{"go:attention:active"}); err != nil {
+		t.Fatal(err)
+	}
+	if !store.protected["go:attention:active"] {
+		t.Fatal("pending event lost protection")
+	}
+	if err := srv.attentionSettlementsCommitted(nil); err != nil {
+		t.Fatal(err)
+	}
+	store.pruneLocked(now)
+	if _, ok := store.keys["go:attention:active"]; ok {
+		t.Fatal("settled ACK still pinned")
+	}
+}
+
+func TestAttentionFailedWriteDoesNotSettleInMemory(t *testing.T) {
+	state := t.TempDir()
+	srv := &server{state: state}
+	store := srv.attentionAckStore()
+	if err := store.loadLocked(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(store.path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	srv.acknowledgeAttention(response, httptest.NewRequest(http.MethodPost, "/api/attention-ack", strings.NewReader(`{"keys":["go:attention:failure"]}`)))
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("response=%d", response.Code)
+	}
+	if _, ok, err := store.acknowledged("go:attention:failure", time.Now()); err != nil || ok {
+		t.Fatalf("failed ACK is visible: ok=%t err=%v", ok, err)
+	}
+}
+
+func TestMetadataLifecycleRequestsOwnAgentRows(t *testing.T) {
+	agent := map[string]any{"kind": "codex", "status": "working", "pane_target": "%1", "attention_pending": true, "queued_followup_question": true}
+	topology := goTmuxTopology{sessions: []string{"session"}, identities: map[string]string{"session": "first"}}
+	published := map[string]any{"sessions": map[string]any{"session": map[string]any{"session_identity": goTmuxSessionIdentity("session", "first"), "agents": []map[string]any{agent}}}}
+	srv := &server{}
+	var workers sync.WaitGroup
+	for range 32 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			request := metadataSessionsForTopology(published, 1, topology)
+			if err := srv.applyAgentStatusLifecycle(request, nil); err != nil {
+				t.Error(err)
+			}
+			if _, err := json.Marshal(published); err != nil {
+				t.Error(err)
+			}
+			if _, err := json.Marshal(request); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	workers.Wait()
+	if agent["queued_followup_question"] != true {
+		t.Fatal("request lifecycle mutation escaped into published agent rows")
+	}
+}
+
+func TestFreshMetadataAttentionWaitsForCanonicalEventIdentity(t *testing.T) {
+	srv := &server{state: t.TempDir()}
+	agent := map[string]any{"kind": "codex", "pane_target": "%1", "status": "working", "attention_signature": "current-question", "attention_pending": true, "queued_followup_question": true, "process_instance_id": "old-process"}
+	sessions := map[string]any{"session": map[string]any{"agents": []map[string]any{agent}}}
+	if err := srv.applyAgentStatusLifecycle(sessions, nil); err != nil {
+		t.Fatal(err)
+	}
+	if agent["status"] != "working" || agent["queued_followup_question"] != false || agent["attention_key"] != nil {
+		t.Fatalf("unowned attention exposed: %#v", agent)
+	}
+	agent["status"], agent["queued_followup_question"] = "working", true
+	key := activityAgentStatusKey("session", "%1", "codex")
+	override := goAgentStatusOverride{state: "working", attentionSignature: "current-question", attentionKey: "go:attention:current", processInstanceID: "old-process"}
+	if err := srv.applyAgentStatusLifecycle(sessions, map[string]goAgentStatusOverride{key: override}); err != nil {
+		t.Fatal(err)
+	}
+	if agent["status"] != "working" || agent["attention_key"] != "go:attention:current" {
+		t.Fatalf("canonical attention missing: %#v", agent)
+	}
+	agent["process_instance_id"] = "new-process"
+	delete(agent, "attention_key")
+	if err := srv.applyAgentStatusLifecycle(sessions, map[string]goAgentStatusOverride{key: override}); err != nil {
+		t.Fatal(err)
+	}
+	if agent["status"] != "working" || agent["attention_key"] != nil {
+		t.Fatalf("replacement inherited old event: %#v", agent)
+	}
+
+	agent["status"], agent["attention_pending"] = "idle", false
+	override.processInstanceID = "old-process"
+	override.state = "cooldown"
+	override.workingStoppedTS = float64(time.Now().Add(-time.Minute).Unix())
+	if err := srv.applyAgentStatusLifecycle(sessions, map[string]goAgentStatusOverride{key: override}); err != nil {
+		t.Fatal(err)
+	}
+	if agent["status"] != "idle" || agent["cooldown_attention_key"] != nil {
+		t.Fatalf("replacement inherited old completion: %#v", agent)
+	}
+
 }

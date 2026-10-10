@@ -12,6 +12,9 @@ import pytest
 from yomux_lib.stats_current import families
 from yomux_lib.stats_current.scheduler import COLLECTED_FAMILIES
 
+# Deprecated Python backend test. Disabled by default. Retained only for explicit maintenance until the Python backend is removed.
+pytestmark = pytest.mark.deprecated_python_server
+
 
 def test_manifest_owns_every_current_family_cadence_and_fold():
     expected = {
